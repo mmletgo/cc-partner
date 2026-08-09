@@ -35,10 +35,11 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention } from '@/hooks/useAttention';
 import {
-  ArrowRightIcon, BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
+  ArrowRightIcon, BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
   RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
 } from '@/lib/icons';
 import styles from './Workbench.module.css';
+import { WorkbenchPromptTools } from './WorkbenchPromptTools';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
 import {
   canListenToTauriEvents,
@@ -920,20 +921,14 @@ export function Workbench() {
                     onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
                     onRefresh={() => void projectCtrl.refreshAgentLedger()} />
                   {!terminalFullscreen ? (
-                    <Button
-                      className={styles.terminalActionButton}
-                      variant="secondary"
-                      size="sm"
-                      icon={<EditIcon />}
-                      title={t('workbench:promptOptimizer.open')}
-                      aria-label={t('workbench:promptOptimizer.open')}
-                      data-workbench-responsive-action="true"
-                      data-active={promptPanelOpen || undefined}
-                      disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
-                      onClick={togglePromptOptimizerPanel}
-                    >
-                      <span data-workbench-responsive-label="true">{t('workbench:promptOptimizer.open')}</span>
-                    </Button>
+                    <WorkbenchPromptTools
+                      hasActiveSession={!!activeSession}
+                      remoteWriteDisabled={remoteWriteDisabled}
+                      promptPanelOpen={promptPanelOpen}
+                      onTogglePromptOptimizer={togglePromptOptimizerPanel}
+                      favoriteOpen={favoriteQuickInput.open}
+                      onToggleFavorite={favoriteQuickInput.onToggle}
+                    />
                   ) : null}
                   <Button
                     className={styles.terminalActionButton}
@@ -1058,7 +1053,6 @@ export function Workbench() {
               handleSelectPaneAt={handleSelectPaneAt}
               focusSession={focusSession}
               favoriteQuickInput={favoriteQuickInput}
-              activeSessionId={activeSessionId}
             />
           </div>
 

@@ -124,7 +124,7 @@
   },
   "promptOptimizerSettings": {
     "title": "Workbench Prompt 优化",
-    "subtitle": "设置工作台终端里的 Prompt 优化浮层快捷键，以及优化完成后一键填入终端时使用的语言。",
+    "subtitle": "设置优化完成后一键填入终端时使用的语言。快捷键已移至「常规 → 快捷键」。",
     "hotkey": {
       "label": "唤起快捷键",
       "helper": "默认轻按 Control。只有单独按下并松开 Control 才触发，Control+C 等终端组合键不会触发。"

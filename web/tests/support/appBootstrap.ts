@@ -19,6 +19,7 @@ export type TestAppConfig = {
   receiveDir: string;
   screenshotHotkey: string;
   promptOptimizerHotkey: string;
+  promptQuickInputHotkey: string;
   promptOptimizerFillLanguage: 'zh' | 'en';
   httpPort: number;
 };
@@ -37,6 +38,7 @@ export function makeAppConfig(partial: Partial<TestAppConfig> = {}): TestAppConf
     receiveDir: '/tmp/cc-partner-files',
     screenshotHotkey: 'CommandOrControl+Shift+S',
     promptOptimizerHotkey: 'Control',
+    promptQuickInputHotkey: '<ctrl>+/',
     promptOptimizerFillLanguage: 'zh',
     httpPort: 62116,
     ...partial,

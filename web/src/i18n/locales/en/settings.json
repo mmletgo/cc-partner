@@ -124,7 +124,7 @@
   },
   "promptOptimizerSettings": {
     "title": "Workbench Prompt optimizer",
-    "subtitle": "Configure the floating Prompt optimizer shortcut in Workbench terminals and the language used when filling optimized text into the terminal.",
+    "subtitle": "Configure the language used when filling optimized text into the terminal. The shortcut has moved to General → Shortcuts.",
     "hotkey": {
       "label": "Open shortcut",
       "helper": "Defaults to tapping Control. It triggers only when Control is pressed and released by itself, so terminal chords such as Control+C still pass through."

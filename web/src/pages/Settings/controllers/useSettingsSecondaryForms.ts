@@ -37,17 +37,13 @@ import {
   PENDING_GITHUB_TRENDING_FORM,
   PENDING_HEALTH_FORM,
   PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM,
-  PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM,
   promptOptimizerSettingsConfigToForm,
   promptOptimizerSettingsFormToUpdate,
-  promptQuickInputSettingsConfigToForm,
-  promptQuickInputSettingsFormToUpdate,
 } from '../settingsState';
 import type {
   GithubTrendingForm,
   HealthForm,
   PromptOptimizerSettingsForm,
-  PromptQuickInputSettingsForm,
 } from '../settingsState';
 import type {
   ClaudeCliTestResult,
@@ -56,11 +52,6 @@ import type {
 } from '@/lib/types';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 import type { ApplyGroupOptions } from '../settingsControllerShared';
-import { formatShortcutForDisplay } from '../shortcutRecorder';
-import {
-  PROMPT_OPTIMIZER_SHORTCUT_ID,
-  PROMPT_QUICK_INPUT_SHORTCUT_ID,
-} from '../settingsControllerShared';
 
 /**
  * 次级表单 hook 返回值
@@ -90,19 +81,6 @@ export interface UseSettingsSecondaryFormsResult {
   patchPromptOptimizerForm: (partial: Partial<PromptOptimizerSettingsForm>) => void;
   handleResetPromptOptimizerSettingsDefaults: () => void;
   handleApplyPromptOptimizerSettings: () => Promise<void>;
-  promptOptimizerShortcutId: typeof PROMPT_OPTIMIZER_SHORTCUT_ID;
-  formatShortcutForDisplay: typeof formatShortcutForDisplay;
-  handlePromptOptimizerShortcutChange: (value: string) => void;
-
-  promptQuickInputForm: PromptQuickInputSettingsForm;
-  promptQuickInputConfig: PromptQuickInputSettingsForm | null;
-  applyingPromptQuickInput: boolean;
-  promptQuickInputSettingsError: string | null;
-  patchPromptQuickInputForm: (partial: Partial<PromptQuickInputSettingsForm>) => void;
-  handleResetPromptQuickInputDefaults: () => void;
-  handleApplyPromptQuickInputSettings: () => Promise<void>;
-  promptQuickInputShortcutId: typeof PROMPT_QUICK_INPUT_SHORTCUT_ID;
-  handlePromptQuickInputShortcutChange: (value: string) => void;
 
   healthForm: HealthForm;
   healthConfig: HealthConfig | null;
@@ -137,8 +115,6 @@ export interface UseSettingsSecondaryFormsResult {
   ) => void;
   applyCorePromptOptimizer: (config: import('@/lib/types').AppConfig, rewriteForm: boolean) => void;
   applyDefaultsPromptOptimizer: (config: import('@/lib/types').AppConfig) => void;
-  applyCorePromptQuickInput: (config: import('@/lib/types').AppConfig, rewriteForm: boolean) => void;
-  applyDefaultsPromptQuickInput: (config: import('@/lib/types').AppConfig) => void;
 }
 
 /**
@@ -183,20 +159,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     null,
   );
 
-  const [promptQuickInputForm, setPromptQuickInputForm] = useState<PromptQuickInputSettingsForm>({
-    ...PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM,
-  });
-  const [defaultPromptQuickInputForm, setDefaultPromptQuickInputForm] =
-    useState<PromptQuickInputSettingsForm>({
-      ...PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM,
-    });
-  const [promptQuickInputConfig, setPromptQuickInputConfig] =
-    useState<PromptQuickInputSettingsForm | null>(null);
-  const [applyingPromptQuickInput, setApplyingPromptQuickInput] = useState(false);
-  const [promptQuickInputSettingsError, setPromptQuickInputSettingsError] = useState<
-    string | null
-  >(null);
-
   const [healthForm, setHealthForm] = useState<HealthForm>({ ...PENDING_HEALTH_FORM });
   const [defaultHealthForm, setDefaultHealthForm] = useState<HealthForm>({ ...PENDING_HEALTH_FORM });
   const [healthConfig, setHealthConfig] = useState<HealthConfig | null>(null);
@@ -220,8 +182,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   const githubTrendingRequestSeqRef = useRef(0);
   const promptOptimizerEditVersionRef = useRef(0);
   const promptOptimizerRequestSeqRef = useRef(0);
-  const promptQuickInputEditVersionRef = useRef(0);
-  const promptQuickInputRequestSeqRef = useRef(0);
   const healthEditVersionRef = useRef(0);
   const healthRequestSeqRef = useRef(0);
   const automationEditVersionRef = useRef(0);
@@ -231,8 +191,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   const githubTrendingConfigRef = useRef(githubTrendingConfig);
   const promptOptimizerFormRef = useRef(promptOptimizerForm);
   const promptOptimizerConfigRef = useRef(promptOptimizerConfig);
-  const promptQuickInputFormRef = useRef(promptQuickInputForm);
-  const promptQuickInputConfigRef = useRef(promptQuickInputConfig);
   const healthFormRef = useRef(healthForm);
   const healthConfigRef = useRef(healthConfig);
   const automationFormRef = useRef(automationForm);
@@ -242,8 +200,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     githubTrendingConfigRef.current = githubTrendingConfig;
     promptOptimizerFormRef.current = promptOptimizerForm;
     promptOptimizerConfigRef.current = promptOptimizerConfig;
-    promptQuickInputFormRef.current = promptQuickInputForm;
-    promptQuickInputConfigRef.current = promptQuickInputConfig;
     healthFormRef.current = healthForm;
     healthConfigRef.current = healthConfig;
     automationFormRef.current = automationForm;
@@ -263,15 +219,10 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
       const config = results.core.value;
       setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
       setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
-      setPromptQuickInputConfig(promptQuickInputSettingsConfigToForm(config));
-      setPromptQuickInputForm(promptQuickInputSettingsConfigToForm(config));
     }
     if (isResourceReady(results.defaults)) {
       setDefaultPromptOptimizerForm(
         promptOptimizerSettingsConfigToForm(results.defaults.value),
-      );
-      setDefaultPromptQuickInputForm(
-        promptQuickInputSettingsConfigToForm(results.defaults.value),
       );
     }
     if (isResourceReady(results.githubTrending.current)) {
@@ -324,29 +275,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   const applyDefaultsPromptOptimizer = useCallback((config: import('@/lib/types').AppConfig) => {
     setDefaultPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
   }, []);
-
-  /**
-   * core 重试时同步收藏快捷输入（按 rewrite 决定是否写 form）
-   */
-  const applyCorePromptQuickInput = useCallback(
-    (config: import('@/lib/types').AppConfig, rewriteForm: boolean) => {
-      if (rewriteForm) {
-        setPromptQuickInputForm(promptQuickInputSettingsConfigToForm(config));
-      }
-      setPromptQuickInputConfig(promptQuickInputSettingsConfigToForm(config));
-    },
-    [],
-  );
-
-  /**
-   * defaults 重试时同步收藏快捷输入默认快照
-   */
-  const applyDefaultsPromptQuickInput = useCallback(
-    (config: import('@/lib/types').AppConfig) => {
-      setDefaultPromptQuickInputForm(promptQuickInputSettingsConfigToForm(config));
-    },
-    [],
-  );
 
   /**
    * github 组重试水合
@@ -519,16 +447,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     setPromptOptimizerSettingsError(null);
   }, []);
 
-  const handlePromptOptimizerShortcutChange = useCallback((value: string) => {
-    setPromptOptimizerForm((prev) => {
-      const next = { ...prev, hotkey: value };
-      promptOptimizerFormRef.current = next;
-      return next;
-    });
-    promptOptimizerEditVersionRef.current += 1;
-    setPromptOptimizerSettingsError(null);
-  }, []);
-
   const handleResetPromptOptimizerSettingsDefaults = useCallback(() => {
     promptOptimizerFormRef.current = defaultPromptOptimizerForm;
     promptOptimizerEditVersionRef.current += 1;
@@ -578,82 +496,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     } finally {
       if (attempt.requestSeq === promptOptimizerRequestSeqRef.current) {
         setApplyingPromptOptimizer(false);
-      }
-    }
-  };
-
-  const patchPromptQuickInputForm = useCallback(
-    (partial: Partial<PromptQuickInputSettingsForm>) => {
-      setPromptQuickInputForm((prev) => {
-        const next = { ...prev, ...partial };
-        promptQuickInputFormRef.current = next;
-        return next;
-      });
-      promptQuickInputEditVersionRef.current += 1;
-      setPromptQuickInputSettingsError(null);
-    },
-    [],
-  );
-
-  const handlePromptQuickInputShortcutChange = useCallback((value: string) => {
-    setPromptQuickInputForm((prev) => {
-      const next = { ...prev, hotkey: value };
-      promptQuickInputFormRef.current = next;
-      return next;
-    });
-    promptQuickInputEditVersionRef.current += 1;
-    setPromptQuickInputSettingsError(null);
-  }, []);
-
-  const handleResetPromptQuickInputDefaults = useCallback(() => {
-    promptQuickInputFormRef.current = defaultPromptQuickInputForm;
-    promptQuickInputEditVersionRef.current += 1;
-    setPromptQuickInputForm(defaultPromptQuickInputForm);
-    setPromptQuickInputSettingsError(null);
-  }, [defaultPromptQuickInputForm]);
-
-  const handleApplyPromptQuickInputSettings = async () => {
-    const snapshot: PromptQuickInputSettingsForm = { ...promptQuickInputFormRef.current };
-    const attempt = createSaveAttempt(
-      ++promptQuickInputRequestSeqRef.current,
-      snapshot,
-      promptQuickInputEditVersionRef.current,
-    );
-    setApplyingPromptQuickInput(true);
-    setPromptQuickInputSettingsError(null);
-    try {
-      const updated = await configApi.update(
-        promptQuickInputSettingsFormToUpdate(attempt.submittedSnapshot),
-      );
-      const serverForm = promptQuickInputSettingsConfigToForm(updated);
-      const baselineForm = promptQuickInputConfigRef.current ?? attempt.submittedSnapshot;
-      const resolution = resolveSaveSuccess({
-        attempt,
-        currentRequestSeq: promptQuickInputRequestSeqRef.current,
-        currentDraft: promptQuickInputFormRef.current,
-        currentEditVersion: promptQuickInputEditVersionRef.current,
-        serverValue: serverForm,
-        currentBaseline: baselineForm,
-      });
-      if (!resolution.applied) return;
-      promptQuickInputConfigRef.current = resolution.baseline;
-      promptQuickInputFormRef.current = resolution.draft;
-      setPromptQuickInputConfig(resolution.baseline);
-      setPromptQuickInputForm(resolution.draft);
-    } catch (err) {
-      const failure = resolveSaveFailure({
-        attempt,
-        currentRequestSeq: promptQuickInputRequestSeqRef.current,
-        currentDraft: promptQuickInputFormRef.current,
-        currentBaseline: promptQuickInputConfigRef.current ?? attempt.submittedSnapshot,
-      });
-      if (!failure.applied) return;
-      setPromptQuickInputSettingsError(
-        err instanceof Error ? err.message : t('settings:promptQuickInputSettings.applyFailed'),
-      );
-    } finally {
-      if (attempt.requestSeq === promptQuickInputRequestSeqRef.current) {
-        setApplyingPromptQuickInput(false);
       }
     }
   };
@@ -801,18 +643,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     patchPromptOptimizerForm,
     handleResetPromptOptimizerSettingsDefaults,
     handleApplyPromptOptimizerSettings,
-    promptOptimizerShortcutId: PROMPT_OPTIMIZER_SHORTCUT_ID,
-    formatShortcutForDisplay,
-    handlePromptOptimizerShortcutChange,
-    promptQuickInputForm,
-    promptQuickInputConfig,
-    applyingPromptQuickInput,
-    promptQuickInputSettingsError,
-    patchPromptQuickInputForm,
-    handleResetPromptQuickInputDefaults,
-    handleApplyPromptQuickInputSettings,
-    promptQuickInputShortcutId: PROMPT_QUICK_INPUT_SHORTCUT_ID,
-    handlePromptQuickInputShortcutChange,
     healthForm,
     healthConfig,
     applyingHealth,
@@ -835,7 +665,5 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     applyAutomationGroup,
     applyCorePromptOptimizer,
     applyDefaultsPromptOptimizer,
-    applyCorePromptQuickInput,
-    applyDefaultsPromptQuickInput,
   };
 }

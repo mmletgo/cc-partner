@@ -9,11 +9,41 @@ import type {
 } from '../../lib/types';
 import { getDefaultShortcutValue } from './shortcutRecorder';
 
-/** 单个快捷键字段定义（label/helper 在渲染时按 i18n 解析，这里只存可本地化的 id） */
+/** 快捷键字段 id（与 shortcut 录制控件 / buildConfigUpdate 映射一一对应）。 */
+export type ShortcutId = 'screenshot' | 'promptOptimizer' | 'promptQuickInput';
+
+/**
+ * 三个快捷键 label 的完整 i18n 子路径（不含 `settings:` 前缀）。
+ *
+ * Business Logic（为什么用字面量联合）:
+ *   渲染层用 `t(\`settings:${labelKey}\`)` 拼接；字面量联合让 TS 展开模板为已知 key 联合，
+ *   既保留 i18next 强类型校验，又支持三个分属不同命名空间的 label。
+ */
+export type ShortcutLabelKey =
+  | 'shortcut.screenshot.label'
+  | 'promptOptimizerSettings.hotkey.label'
+  | 'promptQuickInputSettings.hotkey.label';
+
+/** 三个快捷键 helper 的完整 i18n 子路径（不含 `settings:` 前缀），同 ShortcutLabelKey 思路。 */
+export type ShortcutHelperKey =
+  | 'shortcut.screenshot.helper'
+  | 'promptOptimizerSettings.hotkey.helper'
+  | 'promptQuickInputSettings.hotkey.helper';
+
+/**
+ * 单个快捷键字段定义。
+ *
+ * Business Logic（为什么 labelKey/helperKey 存完整 i18n 子路径）:
+ *   screenshot 走 `shortcut.*` 命名空间，prompt 两个 hotkey 沿用各自设置块的既有文案
+ *   （`promptOptimizerSettings.hotkey.*` / `promptQuickInputSettings.hotkey.*`），三者不同构，
+ *   不能再用单一前缀拼接；存完整子路径让渲染层直接 `t('settings:' + key)`。
+ */
 export interface ShortcutField {
-  id: string;
-  /** label/helper 的 i18n 子键，对应 shortcut.<key>.{label,helper} */
-  labelKey: 'screenshot';
+  id: ShortcutId;
+  /** label 的完整 i18n 子路径（不含 `settings:` 前缀），如 `shortcut.screenshot.label`。 */
+  labelKey: ShortcutLabelKey;
+  /** helper 的完整 i18n 子路径（不含 `settings:` 前缀），如 `shortcut.screenshot.helper`。 */
+  helperKey: ShortcutHelperKey;
   value: string;
 }
 
@@ -41,15 +71,15 @@ export interface GithubTrendingForm {
   cacheTtlHours: number;
 }
 
-/** Workbench Prompt 优化小组件设置表单。 */
+/**
+ * Workbench Prompt 优化小组件设置表单。
+ *
+ * Business Logic（为什么只剩 fillLanguage）:
+ *   Prompt 优化快捷键已迁到常规 tab 的 shortcuts 数组（随常规保存持久化），
+ *   AI tab 的 secondary 表单只负责「填入语言」这一非快捷键偏好。
+ */
 export interface PromptOptimizerSettingsForm {
-  hotkey: string;
   fillLanguage: PromptOptimizerFillLanguage;
-}
-
-/** Workbench「收藏快捷输入」浮层快捷键设置表单。 */
-export interface PromptQuickInputSettingsForm {
-  hotkey: string;
 }
 
 /** 健康提醒 tab 的受控表单值;与 HealthConfig 同构,直接整体提交给 update_health_config。 */
@@ -113,8 +143,24 @@ export function parseSettingsTabFromSearch(
 }
 
 
-/** 可提交到 update_config 的 Settings 字段。 */
-export type SettingsConfigUpdate = Partial<Pick<AppConfig, 'deviceName' | 'receiveDir' | 'screenshotHotkey'>>;
+/**
+ * 可提交到 update_config 的 Settings 字段。
+ *
+ * Business Logic（为什么扩展 prompt hotkey）:
+ *   Prompt 优化 / 收藏快捷输入的两个快捷键已并入常规 tab 的 shortcuts 数组，
+ *   常规「保存」必须能把它们写到后端 `prompt_optimizer_hotkey` / `prompt_quick_input_hotkey`，
+ *   避免双数据源或只有 AI tab 独立 apply 才生效的回归。
+ */
+export type SettingsConfigUpdate = Partial<
+  Pick<
+    AppConfig,
+    | 'deviceName'
+    | 'receiveDir'
+    | 'screenshotHotkey'
+    | 'promptOptimizerHotkey'
+    | 'promptQuickInputHotkey'
+  >
+>;
 
 /** 云端同步表单提交 payload；空 repoUrl/branch 用空字符串表示“清空”。 */
 export interface CloudSyncFormUpdate {
@@ -125,15 +171,9 @@ export interface CloudSyncFormUpdate {
   branch: string;
 }
 
-/** Workbench Prompt 优化设置提交 payload。 */
+/** Workbench Prompt 优化设置提交 payload（只含填入语言；快捷键由常规 shortcuts 持久化）。 */
 export interface PromptOptimizerSettingsUpdate {
-  promptOptimizerHotkey: string;
   promptOptimizerFillLanguage: PromptOptimizerFillLanguage;
-}
-
-/** Workbench「收藏快捷输入」快捷键设置提交 payload。 */
-export interface PromptQuickInputSettingsUpdate {
-  promptQuickInputHotkey: string;
 }
 
 /** 云端同步表单加载前占位值；真实默认值由后端 get_default_cloud_sync_config 覆盖。 */
@@ -155,13 +195,7 @@ export const PENDING_GITHUB_TRENDING_FORM: GithubTrendingForm = {
 
 /** Prompt 优化设置加载前占位值；真实默认值由后端 get_default_config 覆盖。 */
 export const PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM: PromptOptimizerSettingsForm = {
-  hotkey: '<ctrl>',
   fillLanguage: 'zh',
-};
-
-/** 收藏快捷输入设置加载前占位值；真实默认值由后端 get_default_config 覆盖（默认 "<ctrl>+/"）。 */
-export const PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM: PromptQuickInputSettingsForm = {
-  hotkey: '<ctrl>+/',
 };
 
 /** 健康表单加载前占位值;真实值由后端 get_health_config / get_default_health_config 覆盖。 */
@@ -179,25 +213,72 @@ export const PENDING_HEALTH_FORM: HealthForm = {
   reminderFullscreen: true,
 };
 
-/** 快捷键字段定义（值由运行平台或后端配置决定，文案走 t） */
-const SHORTCUT_FIELDS: Pick<ShortcutField, 'id' | 'labelKey'>[] = [
-  { id: 'screenshot', labelKey: 'screenshot' },
+/**
+ * 快捷键字段定义（值由运行平台或后端配置决定，文案走 t）。
+ *
+ * Business Logic（为什么 labelKey/helperKey 是完整子路径）:
+ *   三个快捷键分属不同 i18n 命名空间（shortcut.* / promptOptimizerSettings.hotkey.* /
+ *   promptQuickInputSettings.hotkey.*），存完整子路径让渲染层用 `t('settings:' + key)` 统一解析。
+ */
+const SHORTCUT_FIELDS: Pick<ShortcutField, 'id' | 'labelKey' | 'helperKey'>[] = [
+  {
+    id: 'screenshot',
+    labelKey: 'shortcut.screenshot.label',
+    helperKey: 'shortcut.screenshot.helper',
+  },
+  {
+    id: 'promptOptimizer',
+    labelKey: 'promptOptimizerSettings.hotkey.label',
+    helperKey: 'promptOptimizerSettings.hotkey.helper',
+  },
+  {
+    id: 'promptQuickInput',
+    labelKey: 'promptQuickInputSettings.hotkey.label',
+    helperKey: 'promptQuickInputSettings.hotkey.helper',
+  },
 ];
+
+/** shortcut id → 后端 AppConfig 字段名映射，供 buildConfigUpdate 输出。 */
+const SHORTCUT_CONFIG_KEY: Record<ShortcutId, keyof SettingsConfigUpdate> = {
+  screenshot: 'screenshotHotkey',
+  promptOptimizer: 'promptOptimizerHotkey',
+  promptQuickInput: 'promptQuickInputHotkey',
+};
+
+/** Prompt 优化快捷键的前端兜底默认值（后端默认值相同）。 */
+const DEFAULT_PROMPT_OPTIMIZER_HOTKEY = '<ctrl>';
+
+/** 收藏快捷输入快捷键的前端兜底默认值（后端默认值相同）。 */
+const DEFAULT_PROMPT_QUICK_INPUT_HOTKEY = '<ctrl>+/';
 
 /**
  * 生成快捷键字段
  *
  * Business Logic（为什么需要）:
  *   设置页加载、恢复默认和初始占位都需要生成新快捷键对象，避免复用数组对象导致状态污染。
+ *   Prompt 优化 / 收藏快捷输入的快捷键已从 AI tab 的 secondary 表单迁入常规 shortcuts 数组，
+ *   这里统一从 AppConfig 的三个 hotkey 字段生成。
  *
  * Code Logic（做什么）:
- *   接收可选截图快捷键；未提供时按当前平台生成前端兜底默认值，返回 SettingsState 可直接使用的字段数组。
+ *   接收三个可选 hotkey；screenshot 未提供时按平台兜底，prompt 两个未提供时各自默认
+ *   `<ctrl>` / `<ctrl>+/`；返回 SettingsState 可直接使用的字段数组。
  */
-function createShortcutFields(screenshotHotkey?: string): ShortcutField[] {
-  return SHORTCUT_FIELDS.map((s) => ({
-    ...s,
-    value: s.id === 'screenshot' ? (screenshotHotkey || getDefaultShortcutValue()) : '',
-  }));
+function createShortcutFields(opts: {
+  screenshotHotkey?: string;
+  promptOptimizerHotkey?: string;
+  promptQuickInputHotkey?: string;
+}): ShortcutField[] {
+  return SHORTCUT_FIELDS.map((s) => {
+    let value: string;
+    if (s.id === 'screenshot') {
+      value = opts.screenshotHotkey || getDefaultShortcutValue();
+    } else if (s.id === 'promptOptimizer') {
+      value = opts.promptOptimizerHotkey || DEFAULT_PROMPT_OPTIMIZER_HOTKEY;
+    } else {
+      value = opts.promptQuickInputHotkey || DEFAULT_PROMPT_QUICK_INPUT_HOTKEY;
+    }
+    return { ...s, value };
+  });
 }
 
 /**
@@ -208,13 +289,13 @@ function createShortcutFields(screenshotHotkey?: string): ShortcutField[] {
  *   不能作为“恢复默认”的真实默认值。
  *
  * Code Logic（做什么）:
- *   基础字段保持空字符串，快捷键用平台兜底默认值，保证 React 输入始终受控。
+ *   基础字段保持空字符串，快捷键用平台/各自兜底默认值，保证 React 输入始终受控。
  */
 export function createPendingSettingsState(): SettingsState {
   return {
     deviceName: '',
     receiveDir: '',
-    shortcuts: createShortcutFields(),
+    shortcuts: createShortcutFields({}),
   };
 }
 
@@ -222,16 +303,21 @@ export function createPendingSettingsState(): SettingsState {
  * 将后端 AppConfig 映射为 Settings 表单状态
  *
  * Business Logic（为什么需要）:
- *   后端配置是设备名、接收目录和截图快捷键的权威来源；前端保存快捷键时必须保留已加载的基础设置。
+ *   后端配置是设备名、接收目录和三个快捷键（截图 / Prompt 优化 / 收藏快捷输入）的权威来源；
+ *   前端保存快捷键时必须保留已加载的基础设置。
  *
  * Code Logic（做什么）:
- *   拷贝 deviceName/receiveDir，并把 screenshotHotkey 映射到快捷键字段；快捷键缺失时使用平台兜底值。
+ *   拷贝 deviceName/receiveDir，并把三个 hotkey 字段映射到 shortcuts 数组；缺失时各自走兜底默认值。
  */
 export function settingsStateFromConfig(config: AppConfig): SettingsState {
   return {
     deviceName: config.deviceName,
     receiveDir: config.receiveDir,
-    shortcuts: createShortcutFields(config.screenshotHotkey),
+    shortcuts: createShortcutFields({
+      screenshotHotkey: config.screenshotHotkey,
+      promptOptimizerHotkey: config.promptOptimizerHotkey,
+      promptQuickInputHotkey: config.promptQuickInputHotkey,
+    }),
   };
 }
 
@@ -298,17 +384,16 @@ export function githubTrendingConfigToForm(config: GithubTrendingConfig | null):
  * 将后端 AppConfig 映射为 Workbench Prompt 优化设置表单。
  *
  * Business Logic（为什么需要）:
- *   Prompt 优化小组件的快捷键和填入语言由应用配置持久化，设置页 AI tab 需要独立编辑它们。
+ *   AI tab 仍独立编辑「填入语言」；快捷键已迁到常规 tab，不再进入此表单。
  *
  * Code Logic（做什么）:
- *   从 AppConfig 读取 promptOptimizerHotkey/promptOptimizerFillLanguage，缺失或异常时回退默认值。
+ *   从 AppConfig 读取 promptOptimizerFillLanguage，缺失或异常时回退 'zh'。
  */
 export function promptOptimizerSettingsConfigToForm(
   config: AppConfig | null,
 ): PromptOptimizerSettingsForm {
   if (!config) return { ...PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM };
   return {
-    hotkey: config.promptOptimizerHotkey || '<ctrl>',
     fillLanguage: config.promptOptimizerFillLanguage === 'en' ? 'en' : 'zh',
   };
 }
@@ -317,53 +402,16 @@ export function promptOptimizerSettingsConfigToForm(
  * 将 Prompt 优化设置表单映射为 update_config payload。
  *
  * Business Logic（为什么需要）:
- *   设置页保存 Workbench Prompt 优化偏好时，只应提交后端认识的两个配置字段。
+ *   AI tab 保存 Prompt 优化偏好时，只应提交「填入语言」；快捷键随常规 shortcuts 持久化。
  *
  * Code Logic（做什么）:
- *   hotkey trim 后保留空字符串（表示禁用快捷键）；语言只允许 zh/en。
+ *   语言只允许 zh/en。
  */
 export function promptOptimizerSettingsFormToUpdate(
   form: PromptOptimizerSettingsForm,
 ): PromptOptimizerSettingsUpdate {
   return {
-    promptOptimizerHotkey: form.hotkey.trim(),
     promptOptimizerFillLanguage: form.fillLanguage === 'en' ? 'en' : 'zh',
-  };
-}
-
-/**
- * 将后端 AppConfig 映射为「收藏快捷输入」快捷键设置表单。
- *
- * Business Logic（为什么需要这个函数）:
- *   工作台收藏快捷输入浮层的触发快捷键由应用配置持久化，设置页 AI tab 需要独立编辑它，
- *   与 Prompt 优化快捷键并列在同一 Card。
- *
- * Code Logic（这个函数做什么）:
- *   从 AppConfig 读取 promptQuickInputHotkey，缺失或异常时回退默认 "<ctrl>+/"。
- */
-export function promptQuickInputSettingsConfigToForm(
-  config: AppConfig | null,
-): PromptQuickInputSettingsForm {
-  if (!config) return { ...PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM };
-  return {
-    hotkey: config.promptQuickInputHotkey || '<ctrl>+/',
-  };
-}
-
-/**
- * 将「收藏快捷输入」设置表单映射为 update_config payload。
- *
- * Business Logic（为什么需要这个函数）:
- *   设置页保存收藏快捷输入偏好时，只应提交后端认识的一个配置字段。
- *
- * Code Logic（这个函数做什么）:
- *   hotkey trim 后保留空字符串（表示禁用快捷键）。
- */
-export function promptQuickInputSettingsFormToUpdate(
-  form: PromptQuickInputSettingsForm,
-): PromptQuickInputSettingsUpdate {
-  return {
-    promptQuickInputHotkey: form.hotkey.trim(),
   };
 }
 
@@ -400,16 +448,16 @@ export function isSettingsStateDirty(current: SettingsState, baseline: SettingsS
 }
 
 /**
- * 读取截图快捷键值
+ * 读取指定快捷键值
  *
  * Business Logic（为什么需要）:
- *   保存时只需要提交后端认识的 screenshotHotkey 字段，页面内部则以 shortcuts 数组渲染。
+ *   buildConfigUpdate 需要按 shortcut id 比较 current/baseline 的值，决定是否写入对应后端字段。
  *
  * Code Logic（做什么）:
- *   从 shortcuts 数组查找 screenshot 项，找不到时返回 undefined，让调用方按 patch 语义跳过。
+ *   从 shortcuts 数组查找对应 id 项，找不到时返回 undefined，让调用方按 patch 语义跳过。
  */
-function screenshotHotkeyFromState(state: SettingsState): string | undefined {
-  return state.shortcuts.find((s) => s.id === 'screenshot')?.value;
+function shortcutValueFromState(state: SettingsState, id: ShortcutId): string | undefined {
+  return state.shortcuts.find((s) => s.id === id)?.value;
 }
 
 /**
@@ -417,9 +465,11 @@ function screenshotHotkeyFromState(state: SettingsState): string | undefined {
  *
  * Business Logic（为什么需要）:
  *   用户只修改快捷键时，保存不应夹带未改变的 deviceName/receiveDir，避免把异常空占位值写入基础设置。
+ *   Prompt 优化 / 收藏快捷输入的快捷键已并入常规 shortcuts，必须随常规保存持久化到后端。
  *
  * Code Logic（做什么）:
- *   对比当前状态与最近已保存快照，仅把实际变化的字段放入 payload；快捷键按后端字段名 screenshotHotkey 输出。
+ *   对比当前状态与最近已保存快照，仅把实际变化的字段放入 payload；三个快捷键按后端字段名
+ *   screenshotHotkey / promptOptimizerHotkey / promptQuickInputHotkey 输出。
  */
 export function buildConfigUpdate(
   current: SettingsState,
@@ -433,10 +483,13 @@ export function buildConfigUpdate(
     update.receiveDir = current.receiveDir;
   }
 
-  const currentHotkey = screenshotHotkeyFromState(current);
-  const baselineHotkey = screenshotHotkeyFromState(baseline);
-  if (currentHotkey !== baselineHotkey && currentHotkey !== undefined) {
-    update.screenshotHotkey = currentHotkey;
+  for (const field of SHORTCUT_FIELDS) {
+    const currentHotkey = shortcutValueFromState(current, field.id);
+    const baselineHotkey = shortcutValueFromState(baseline, field.id);
+    if (currentHotkey !== baselineHotkey && currentHotkey !== undefined) {
+      const configKey = SHORTCUT_CONFIG_KEY[field.id];
+      update[configKey] = currentHotkey;
+    }
   }
   return update;
 }

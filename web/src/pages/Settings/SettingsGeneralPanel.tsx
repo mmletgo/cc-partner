@@ -177,7 +177,7 @@ export function SettingsGeneralPanel({
     <div className={styles.shortcutList}>
       {state.shortcuts.map((s) => {
         const isRecording = recordingShortcutId === s.id;
-        const label = t(`settings:shortcut.${s.labelKey}.label`);
+        const label = t(`settings:${s.labelKey}`);
         return (
           <div key={s.id} className={styles.shortcutRow}>
             <div className={styles.shortcutText}>
@@ -185,7 +185,7 @@ export function SettingsGeneralPanel({
               <span className={styles.shortcutHelper}>
                 {isRecording
                   ? t('settings:shortcut.recordingHelper')
-                  : t(`settings:shortcut.${s.labelKey}.helper`)}
+                  : t(`settings:${s.helperKey}`)}
               </span>
             </div>
             <div className={styles.shortcutInput}>

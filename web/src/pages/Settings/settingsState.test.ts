@@ -65,8 +65,21 @@ describe('settingsState', () => {
       shortcuts: [
         {
           id: 'screenshot',
-          labelKey: 'screenshot',
+          labelKey: 'shortcut.screenshot.label',
+          helperKey: 'shortcut.screenshot.helper',
           value: '<cmd>+<shift>+s',
+        },
+        {
+          id: 'promptOptimizer',
+          labelKey: 'promptOptimizerSettings.hotkey.label',
+          helperKey: 'promptOptimizerSettings.hotkey.helper',
+          value: '<ctrl>',
+        },
+        {
+          id: 'promptQuickInput',
+          labelKey: 'promptQuickInputSettings.hotkey.label',
+          helperKey: 'promptQuickInputSettings.hotkey.helper',
+          value: '<ctrl>+/',
         },
       ],
     });
@@ -91,6 +104,38 @@ describe('settingsState', () => {
     assertDeepEqual(defaults.deviceName, 'cc-partner');
     assertDeepEqual(defaults.receiveDir, '/Users/hans/cc-partner-files');
     assertDeepEqual(isSettingsStateDirty(defaults, changedShortcut), true);
+
+    // 迁移正确性：改 promptOptimizer / promptQuickInput 的快捷键值时，常规 buildConfigUpdate
+    // 必须把对应后端字段写入 patch——证明这两个快捷键已随常规「保存」持久化，而非只靠 AI tab。
+    const changedPromptHotkeys: typeof loaded = {
+      ...loaded,
+      shortcuts: loaded.shortcuts.map((s) =>
+        s.id === 'promptOptimizer'
+          ? { ...s, value: '<cmd>+e' }
+          : s.id === 'promptQuickInput'
+            ? { ...s, value: '<cmd>+p' }
+            : s,
+      ),
+    };
+    assertDeepEqual(buildConfigUpdate(changedPromptHotkeys, loaded), {
+      promptOptimizerHotkey: '<cmd>+e',
+      promptQuickInputHotkey: '<cmd>+p',
+    });
+
+    // 同时改三个快捷键时 patch 应包含全部三个字段
+    const changedAll: typeof loaded = {
+      ...loaded,
+      shortcuts: loaded.shortcuts.map((s) => {
+        if (s.id === 'screenshot') return { ...s, value: '<cmd>+<shift>+4' };
+        if (s.id === 'promptOptimizer') return { ...s, value: '<cmd>+e' };
+        return { ...s, value: '<cmd>+p' };
+      }),
+    };
+    assertDeepEqual(buildConfigUpdate(changedAll, loaded), {
+      screenshotHotkey: '<cmd>+<shift>+4',
+      promptOptimizerHotkey: '<cmd>+e',
+      promptQuickInputHotkey: '<cmd>+p',
+    });
 
     assertDeepEqual(
       cloudSyncConfigToForm({
@@ -125,17 +170,14 @@ describe('settingsState', () => {
     );
 
     assertDeepEqual(promptOptimizerSettingsConfigToForm(configFixture()), {
-      hotkey: '<ctrl>',
       fillLanguage: 'zh',
     });
 
     assertDeepEqual(
       promptOptimizerSettingsFormToUpdate({
-        hotkey: '<ctrl>',
         fillLanguage: 'en',
       }),
       {
-        promptOptimizerHotkey: '<ctrl>',
         promptOptimizerFillLanguage: 'en',
       },
     );

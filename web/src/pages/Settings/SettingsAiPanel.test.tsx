@@ -41,7 +41,6 @@ function buildProps(overrides: Partial<SettingsAiPanelProps> = {}): SettingsAiPa
     cacheTtlHours: 24,
   };
   const promptOptimizerForm: PromptOptimizerSettingsForm = {
-    hotkey: '<ctrl>',
     fillLanguage: 'zh',
   };
 
@@ -68,16 +67,6 @@ function buildProps(overrides: Partial<SettingsAiPanelProps> = {}): SettingsAiPa
     onPatchPromptOptimizer: vi.fn(),
     onResetPromptOptimizerDefaults: vi.fn(),
     onApplyPromptOptimizer: vi.fn(),
-    promptQuickInputForm: { hotkey: '<ctrl>+/' },
-    applyingPromptQuickInput: false,
-    promptQuickInputSettingsError: null,
-    canResetPromptQuickInputDefaults: true,
-    onResetPromptQuickInputDefaults: vi.fn(),
-    onApplyPromptQuickInput: vi.fn(),
-    recordingShortcutId: null,
-    onShortcutFocus: vi.fn(),
-    onShortcutBlur: vi.fn(),
-    onShortcutKeyDown: vi.fn(),
     ...overrides,
   };
 }

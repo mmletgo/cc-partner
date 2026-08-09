@@ -2,28 +2,22 @@
  * Settings AI 设置面板
  *
  * Business Logic（为什么需要这个组件）:
- *   用户在 AI tab 配置 GitHub Trending Claude CLI 与 Workbench Prompt 优化快捷键/语种；
+ *   用户在 AI tab 配置 GitHub Trending Claude CLI 与 Workbench Prompt 优化填入语种；
  *   状态与 API 调用由 controller 持有，本组件只渲染受控表单。
  *
  * Code Logic（这个组件做什么）:
  *   渲染 githubTrending Card 与 promptOptimizer Card；无 @/api 导入，无业务副作用状态。
  */
-import type { KeyboardEvent, ReactElement } from 'react';
+import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
-import { CheckIcon, XIcon, KeyboardIcon, InfoIcon } from '@/lib/icons';
+import { CheckIcon, XIcon, InfoIcon } from '@/lib/icons';
 import type { ClaudeCliTestResult, GithubTrendingConfig } from '@/lib/types';
 import { InternalClaudeProviderCard } from '@/components/domain/InternalClaudeProviderCard';
-import { formatShortcutForDisplay } from './shortcutRecorder';
 import type {
   GithubTrendingForm,
   PromptOptimizerSettingsForm,
-  PromptQuickInputSettingsForm,
 } from './settingsState';
-import {
-  PROMPT_OPTIMIZER_SHORTCUT_ID,
-  PROMPT_QUICK_INPUT_SHORTCUT_ID,
-} from './useSettingsController';
 import styles from './Settings.module.css';
 
 /**
@@ -33,7 +27,7 @@ import styles from './Settings.module.css';
  *   Settings 壳层把 controller 的 AI 相关状态透传给 pure panel，避免 panel 直接读 hook。
  *
  * Code Logic（这个接口做什么）:
- *   声明 githubTrending / promptOptimizer 受控值、loading/error 与 patch/reset/apply/test/retry/shortcut 回调。
+ *   声明 githubTrending / promptOptimizer 受控值、loading/error 与 patch/reset/apply/test/retry 回调。
  */
 export interface SettingsAiPanelProps {
   githubTrendingForm: GithubTrendingForm;
@@ -59,18 +53,6 @@ export interface SettingsAiPanelProps {
   onPatchPromptOptimizer: (partial: Partial<PromptOptimizerSettingsForm>) => void;
   onResetPromptOptimizerDefaults: () => void;
   onApplyPromptOptimizer: () => void;
-
-  promptQuickInputForm: PromptQuickInputSettingsForm;
-  applyingPromptQuickInput: boolean;
-  promptQuickInputSettingsError: string | null;
-  canResetPromptQuickInputDefaults: boolean;
-  onResetPromptQuickInputDefaults: () => void;
-  onApplyPromptQuickInput: () => void;
-
-  recordingShortcutId: string | null;
-  onShortcutFocus: (id: string) => void;
-  onShortcutBlur: (id: string) => void;
-  onShortcutKeyDown: (e: KeyboardEvent<HTMLInputElement>, id: string) => void;
 }
 
 /**
@@ -108,16 +90,6 @@ export function SettingsAiPanel({
   onPatchPromptOptimizer,
   onResetPromptOptimizerDefaults,
   onApplyPromptOptimizer,
-  promptQuickInputForm,
-  applyingPromptQuickInput,
-  promptQuickInputSettingsError,
-  canResetPromptQuickInputDefaults,
-  onResetPromptQuickInputDefaults,
-  onApplyPromptQuickInput,
-  recordingShortcutId,
-  onShortcutFocus,
-  onShortcutBlur,
-  onShortcutKeyDown,
 }: SettingsAiPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
 
@@ -324,118 +296,6 @@ export function SettingsAiPanel({
         <Card.Body padding="md">
           <p className={styles.helper}>{t('settings:promptOptimizerSettings.subtitle')}</p>
 
-          <div className={styles.shortcutList}>
-            <div className={styles.shortcutRow}>
-              <div className={styles.shortcutText}>
-                <span className={styles.shortcutLabel}>
-                  {t('settings:promptOptimizerSettings.hotkey.label')}
-                </span>
-                <span className={styles.shortcutHelper}>
-                  {recordingShortcutId === PROMPT_OPTIMIZER_SHORTCUT_ID
-                    ? t('settings:shortcut.recordingHelper')
-                    : t('settings:promptOptimizerSettings.hotkey.helper')}
-                </span>
-              </div>
-              <div className={styles.shortcutInput}>
-                <Input
-                  id="settings-prompt-optimizer-hotkey"
-                  type="text"
-                  value={
-                    recordingShortcutId === PROMPT_OPTIMIZER_SHORTCUT_ID
-                      ? t('settings:shortcut.recording')
-                      : formatShortcutForDisplay(promptOptimizerForm.hotkey)
-                  }
-                  placeholder={t('settings:shortcut.placeholder')}
-                  onChange={() => undefined}
-                  onFocus={() => onShortcutFocus(PROMPT_OPTIMIZER_SHORTCUT_ID)}
-                  onClick={() => onShortcutFocus(PROMPT_OPTIMIZER_SHORTCUT_ID)}
-                  onBlur={() => onShortcutBlur(PROMPT_OPTIMIZER_SHORTCUT_ID)}
-                  onKeyDown={(e) => onShortcutKeyDown(e, PROMPT_OPTIMIZER_SHORTCUT_ID)}
-                  icon={<KeyboardIcon />}
-                  className={
-                    recordingShortcutId === PROMPT_OPTIMIZER_SHORTCUT_ID
-                      ? styles.shortcutRecorderActive
-                      : undefined
-                  }
-                  aria-label={t('settings:promptOptimizerSettings.hotkey.label')}
-                  readOnly
-                  mono
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className={styles.shortcutList}>
-            <div className={styles.shortcutRow}>
-              <div className={styles.shortcutText}>
-                <span className={styles.shortcutLabel}>
-                  {t('settings:promptQuickInputSettings.hotkey.label')}
-                </span>
-                <span className={styles.shortcutHelper}>
-                  {recordingShortcutId === PROMPT_QUICK_INPUT_SHORTCUT_ID
-                    ? t('settings:shortcut.recordingHelper')
-                    : t('settings:promptQuickInputSettings.hotkey.helper')}
-                </span>
-              </div>
-              <div className={styles.shortcutInput}>
-                <Input
-                  id="settings-prompt-quick-input-hotkey"
-                  type="text"
-                  value={
-                    recordingShortcutId === PROMPT_QUICK_INPUT_SHORTCUT_ID
-                      ? t('settings:shortcut.recording')
-                      : formatShortcutForDisplay(promptQuickInputForm.hotkey)
-                  }
-                  placeholder={t('settings:shortcut.placeholder')}
-                  onChange={() => undefined}
-                  onFocus={() => onShortcutFocus(PROMPT_QUICK_INPUT_SHORTCUT_ID)}
-                  onClick={() => onShortcutFocus(PROMPT_QUICK_INPUT_SHORTCUT_ID)}
-                  onBlur={() => onShortcutBlur(PROMPT_QUICK_INPUT_SHORTCUT_ID)}
-                  onKeyDown={(e) => onShortcutKeyDown(e, PROMPT_QUICK_INPUT_SHORTCUT_ID)}
-                  icon={<KeyboardIcon />}
-                  className={
-                    recordingShortcutId === PROMPT_QUICK_INPUT_SHORTCUT_ID
-                      ? styles.shortcutRecorderActive
-                      : undefined
-                  }
-                  aria-label={t('settings:promptQuickInputSettings.hotkey.label')}
-                  readOnly
-                  mono
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className={styles.aboutActions}>
-            <Button
-              variant="ghost"
-              size="md"
-              onClick={onResetPromptQuickInputDefaults}
-              disabled={!canResetPromptQuickInputDefaults}
-              title={
-                canResetPromptQuickInputDefaults
-                  ? undefined
-                  : t('settings:resource.defaultsUnavailable')
-              }
-            >
-              {t('settings:action.resetDefault')}
-            </Button>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={onApplyPromptQuickInput}
-              disabled={applyingPromptQuickInput}
-            >
-              {applyingPromptQuickInput
-                ? t('settings:promptQuickInputSettings.applying')
-                : t('settings:promptQuickInputSettings.apply')}
-            </Button>
-          </div>
-
-          {promptQuickInputSettingsError ? (
-            <span className={styles.updateError}>{promptQuickInputSettingsError}</span>
-          ) : null}
-
           <div className={styles.toggleList}>
             <button
               type="button"
@@ -503,8 +363,6 @@ export function SettingsAiPanel({
                 {t('settings:promptOptimizerSettings.appliedConfig')}
               </span>
               <span className={styles.metaValue}>
-                {formatShortcutForDisplay(promptOptimizerConfig.hotkey)}
-                {' · '}
                 {promptOptimizerConfig.fillLanguage === 'en'
                   ? t('settings:promptOptimizerSettings.fillLanguage.en')
                   : t('settings:promptOptimizerSettings.fillLanguage.zh')}

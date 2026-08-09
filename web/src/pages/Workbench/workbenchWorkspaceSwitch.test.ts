@@ -71,6 +71,7 @@ function assertSubstringOrder(source: string, before: string, after: string, mes
 describe('workbenchWorkspaceSwitch', () => {
   test('locks terminal/files nav reuse, ordering, file path tab labels and shared nav styles', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
+  const promptToolsSource = readFileSync(new URL('./WorkbenchPromptTools.tsx', import.meta.url), 'utf8');
   const fileWorkspaceSource = readFileSync(
     new URL('../../components/domain/WorkbenchFileWorkspace/WorkbenchFileWorkspace.tsx', import.meta.url),
     'utf8',
@@ -183,8 +184,14 @@ describe('workbenchWorkspaceSwitch', () => {
   assertOccurrenceCount(
     workbenchSource,
     'data-workbench-responsive-action="true"',
-    10,
-    'terminal toolbar actions stay responsive after session tabs extraction',
+    9,
+    'terminal toolbar actions stay responsive; prompt tools extracted to WorkbenchPromptTools',
+  );
+  assertOccurrenceCount(
+    promptToolsSource,
+    'data-workbench-responsive-action="true"',
+    2,
+    'WorkbenchPromptTools renders Prompt optimizer + favorite quick input actions side by side',
   );
   assertContains(
     workbenchSource,
