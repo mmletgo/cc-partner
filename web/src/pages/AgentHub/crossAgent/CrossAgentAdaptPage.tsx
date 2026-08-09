@@ -118,7 +118,11 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
             <p className={styles.hint} data-testid="cross-agent-adapt-full-hint">
               {t('agentHub:crossAgent.fullModeHint')}
             </p>
-          ) : null}
+          ) : (
+            <p className={styles.hint} data-testid="cross-agent-adapt-selective-hint">
+              {t('agentHub:crossAgent.selectiveThreeSlotHint')}
+            </p>
+          )}
         </Card.Body>
       </Card>
 

@@ -268,9 +268,9 @@
     "hook": "Hook"
   },
   "policy": {
-    "shared": "Shared",
-    "adapted": "Adapted",
-    "targetOnly": "Target only"
+    "shared": "Common (multi-agent)",
+    "adapted": "Adapted (variants)",
+    "targetOnly": "Exclusive (single agent)"
   },
   "presence": {
     "present": "Present",
@@ -382,26 +382,28 @@
     "keepExternal": "Keep external"
   },
   "blocks": {
-    "title": "Instruction blocks",
+    "title": "Instruction slots",
     "noAsset": "Select an instruction asset.",
-    "empty": "No blocks on this asset.",
+    "empty": "This asset has no common / adapted / exclusive slots yet.",
     "emptyTargetFile": "(empty on this target)",
     "needsAdaptation": "Needs adaptation",
-    "promoteShared": "Promote to shared",
-    "pairAdapted": "Pair selected as adapted",
-    "revertTargetOnly": "Revert to targetOnly",
-    "saveBlock": "Save block",
-    "diffPreview": "Affected target diffs",
-    "diffHint": "Diff preview always reflects current block modes before confirm.",
+    "threeSlotsTitle": "Fixed three slots",
+    "threeSlotHint": "Only common, adapted, and exclusive slots. Same-mode blocks are merged on open. Choose an Agent below when editing adapted/exclusive.",
+    "promoteShared": "Promote to common",
+    "pairAdapted": "Pair as adapted (deprecated — edit the adapted slot)",
+    "revertTargetOnly": "Revert to exclusive",
+    "saveBlock": "Save slot",
+    "diffPreview": "Composed target diffs",
+    "diffHint": "Preview each target as common + adapted + exclusive.",
     "mode": {
-      "shared": "shared",
-      "adapted": "adapted",
-      "targetOnly": "targetOnly"
+      "shared": "Common",
+      "adapted": "Adapted",
+      "targetOnly": "Exclusive"
     }
   },
   "documentEditor": {
     "title": "Full document",
-    "hint": "Edit the full instruction document. Saving rewrites every block and target projection.",
+    "hint": "Edit the full instruction document. Saving rewrites the three slots and target projections.",
     "ariaLabel": "Instruction document editor",
     "save": "Save document",
     "unsaved": "Unsaved changes"
@@ -725,14 +727,15 @@
   "crossAgent": {
     "openButton": "Sync to other agents",
     "title": "Manual same-machine cross-agent sync",
-    "description": "Pick a source agent and destinations, preview adaptation (shared / adapted / targetOnly / residual), then confirm a one-shot write. No background cross-agent file writes.",
+    "description": "Pick a source agent and destinations, preview adaptation (common / adapted / exclusive / residual), then confirm a one-shot write. No background cross-agent file writes.",
     "pageTitle": "Adapt to other agents",
-    "pageDescription": "Same-machine adapt: selective multi-target instructions, or full-volume single-target inventory (instructions + skill / command / mcp / plugin). Preview is always required before apply.",
+    "pageDescription": "Same-machine adapt: selective multi-target instruction three slots, or full-volume single-target inventory (instructions + skill / command / mcp / plugin). Preview is always required before apply.",
     "back": "Back to workspace",
     "modeSection": "Adapt mode",
     "modeLabel": "Mode",
-    "modeSelective": "Selective (instructions, multi-target)",
+    "modeSelective": "Selective (instruction three slots, multi-target)",
     "modeFull": "Full volume (one destination, five kinds)",
+    "selectiveThreeSlotHint": "Selective adapt projects common / adapted / exclusive slots: common goes to all destinations, adapted uses per-agent variants, exclusive stays source-only.",
     "fullModeHint": "Full mode builds a plan for the entire source scope. Portable skill/command/mcp/plugin items may be residual/skip until copy is ready; instruction apply reuses the selective path.",
     "fullDestinationLabel": "Destination agent (single)",
     "fullPreviewAria": "Full-volume adaptation plan",
@@ -765,12 +768,12 @@
     "preview": "Preview adaptation",
     "apply": "Apply to {{count}} targets",
     "applyFull": "Apply {{count}} writable items",
-    "needsAdaptation": "Content has CLI-specific terms; some targets may stay targetOnly or need manual edits.",
+    "needsAdaptation": "Content has CLI-specific terms; some destinations may stay exclusive (source-only) or need manual edits in the three slots.",
     "cannotApply": "This target cannot be written safely automatically.",
     "modes": {
-      "shared": "Shared",
-      "adapted": "Adapted",
-      "targetOnly": "Source only",
+      "shared": "Common (all agents)",
+      "adapted": "Adapted (per-agent variants)",
+      "targetOnly": "Exclusive (source only)",
       "residual": "Non-portable residual"
     },
     "errors": {

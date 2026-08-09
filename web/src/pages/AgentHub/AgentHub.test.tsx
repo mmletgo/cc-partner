@@ -410,9 +410,10 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('agent-hub-conflict-drawer')).toBeTruthy();
     expect(screen.getByTestId('instruction-blocks-drawer')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-upgrade-required')).toBeTruthy();
-    expect(screen.getByTestId('block-item-b1')).toBeTruthy();
-    expect(screen.getByTestId('block-item-b2')).toBeTruthy();
-    expect(screen.getByTestId('block-item-b3')).toBeTruthy();
+    // 固定三槽：公共 / 适配 / 独有（旧多块归并后展示）
+    expect(screen.getByTestId('block-slot-common')).toBeTruthy();
+    expect(screen.getByTestId('block-slot-adapted')).toBeTruthy();
+    expect(screen.getByTestId('block-slot-exclusive')).toBeTruthy();
     expect(screen.getByTestId('blocks-diff-preview')).toBeTruthy();
     expect(screen.getByTestId('conflict-c1')).toBeTruthy();
   });

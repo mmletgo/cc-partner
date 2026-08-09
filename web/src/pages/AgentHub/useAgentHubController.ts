@@ -1638,9 +1638,18 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     if (portableFiltersBootRef.current) return;
     portableFiltersBootRef.current = true;
     const patch = parsePortableFiltersFromSearchParams(searchParams);
-    if (Object.keys(patch).length > 0) {
-      portableInventoryBase.setFilters(patch);
+    // 现代 URL 用 agent/tab，无 legacy target/kind 时用壳层上下文灌 filters
+    if (!patch.target) {
+      patch.target = hubContext.agent;
     }
+    if (!patch.kind && isAssetKindTab(hubContext.tab)) {
+      patch.kind = hubContext.tab as PortableInventoryFilters['kind'];
+    }
+    if (!patch.scope && (hubContext.scope === 'user' || hubContext.scope === 'project')) {
+      // 壳层 scope 是 user|project；portable 也支持 all，默认跟壳层
+      patch.scope = hubContext.scope;
+    }
+    portableInventoryBase.setFilters(patch);
     if (deepLinkInventoryItemId) {
       portableInventoryBase.selectItem(deepLinkInventoryItemId);
     }

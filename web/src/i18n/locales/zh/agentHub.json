@@ -268,9 +268,9 @@
     "hook": "Hook"
   },
   "policy": {
-    "shared": "共享",
-    "adapted": "适配",
-    "targetOnly": "仅目标"
+    "shared": "公共（多 Agent）",
+    "adapted": "适配（变体）",
+    "targetOnly": "独有（单 Agent）"
   },
   "presence": {
     "present": "应存在",
@@ -382,26 +382,28 @@
     "keepExternal": "保留外部"
   },
   "blocks": {
-    "title": "指令块",
+    "title": "指令三槽",
     "noAsset": "请先选择指令资产。",
-    "empty": "该资产没有指令块。",
+    "empty": "该资产尚未配置公共 / 适配 / 独有槽。",
     "emptyTargetFile": "（该目标为空）",
     "needsAdaptation": "需人工适配",
-    "promoteShared": "提升为 shared",
-    "pairAdapted": "将所选配对为 adapted",
-    "revertTargetOnly": "退回 targetOnly",
-    "saveBlock": "保存块",
-    "diffPreview": "受影响目标差异",
-    "diffHint": "确认前始终按当前 mode 预览各目标文件。",
+    "threeSlotsTitle": "固定三槽",
+    "threeSlotHint": "仅公共、适配、独有三槽；同 mode 多块打开时自动归并。编辑适配/独有时请先选下方 Agent。",
+    "promoteShared": "提升为公共",
+    "pairAdapted": "配对为适配（已弃用，请直接编辑适配槽）",
+    "revertTargetOnly": "退回独有",
+    "saveBlock": "保存槽",
+    "diffPreview": "三 Agent 合成差异",
+    "diffHint": "按公共 + 适配 + 独有合成各目标文件预览。",
     "mode": {
-      "shared": "shared",
-      "adapted": "adapted",
-      "targetOnly": "targetOnly"
+      "shared": "公共",
+      "adapted": "适配",
+      "targetOnly": "独有"
     }
   },
   "documentEditor": {
     "title": "完整正文",
-    "hint": "编辑整篇指令文档。保存后会重写所有块与目标投影。",
+    "hint": "编辑整篇指令文档。保存后会重写三槽与目标投影。",
     "ariaLabel": "指令正文编辑器",
     "save": "保存正文",
     "unsaved": "未保存"
@@ -725,14 +727,15 @@
   "crossAgent": {
     "openButton": "同步到其他 Agent",
     "title": "同机跨 Agent 手动同步",
-    "description": "选择源 Agent 与目标 Agent，预览适配（shared / adapted / targetOnly / residual）后确认一次性写入。不会后台自动跨 Agent 写盘。",
+    "description": "选择源 Agent 与目标 Agent，预览适配（公共 / 适配 / 独有 / residual）后确认一次性写入。不会后台自动跨 Agent 写盘。",
     "pageTitle": "适配到其他 Agent",
-    "pageDescription": "同机适配：选择性多目标指令，或全量单目标清单（指令 + skill / command / mcp / plugin）。必须先预览再写入。",
+    "pageDescription": "同机适配：选择性多目标指令三槽，或全量单目标清单（指令 + skill / command / mcp / plugin）。必须先预览再写入。",
     "back": "返回工作台",
     "modeSection": "适配模式",
     "modeLabel": "模式",
-    "modeSelective": "选择性（指令 · 多目标）",
+    "modeSelective": "选择性（指令三槽 · 多目标）",
     "modeFull": "全量（单目标 · 五类清单）",
+    "selectiveThreeSlotHint": "选择性适配按公共 / 适配 / 独有三槽投影：公共写入所有目标，适配取各 Agent 变体，独有仅来源。",
     "fullModeHint": "全量模式为源 scope 整包生成 plan。skill/command/mcp/plugin 在 stub 中可能 residual/skip；指令写入复用选择性路径。",
     "fullDestinationLabel": "目标 Agent（单选）",
     "fullPreviewAria": "全量适配方案",
@@ -765,12 +768,12 @@
     "preview": "生成适配预览",
     "apply": "确认写入 {{count}} 个目标",
     "applyFull": "确认写入 {{count}} 项可写内容",
-    "needsAdaptation": "内容含 CLI 专属术语，部分目标可能仅 targetOnly 或需人工改写。",
+    "needsAdaptation": "内容含 CLI 专属术语，部分目标可能保持独有（仅来源）或需在三槽中人工改写。",
     "cannotApply": "此目标当前不可安全自动写入。",
     "modes": {
-      "shared": "可共享",
-      "adapted": "需适配",
-      "targetOnly": "仅来源专属",
+      "shared": "公共（三 Agent 共用）",
+      "adapted": "适配（各 Agent 变体）",
+      "targetOnly": "独有（仅来源）",
       "residual": "不可移植残留"
     },
     "errors": {

@@ -1,11 +1,12 @@
 /**
- * InstructionBlocksDrawer — 指令块编辑侧栏。
+ * InstructionBlocksDrawer — 指令资产固定三槽编辑侧栏。
  *
- * Business Logic（为什么需要这个组件）:
- *   用户需要查看/调整 shared|adapted|targetOnly 块，并在确认前预览受影响 target 差异。
+ * Business Logic（为什么需要）:
+ *   Legacy matrix 打开指令资产时，编辑面与主路径一致：公共 / 适配 / 独有，每 mode 最多一块。
+ *   仍可编辑整篇正文；块侧只展示三槽，不再 promote/pair 多块操作。
  *
- * Code Logic（这个组件做什么）:
- *   pure props 视图：展示 blocks、mode 操作与 diff preview；不 import @/api/*。
+ * Code Logic（做什么）:
+ *   pure view；normalizeInstructionBlocks 后按三槽展示；保存整篇或单槽经 props 回调。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -14,12 +15,30 @@ import { Button, Drawer, Pill, StatusMessage } from '@/components/primitives';
 import type {
   AgentHubAssetDetail,
   AgentTarget,
-  InstructionBlockDto,
   InstructionBlockMode,
 } from '@/lib/types/agentHub';
+import {
+  draftToDto,
+  dtoToDraft,
+  ensureModeBlock,
+  findBlockByMode,
+  joinBlocksForTarget,
+  normalizeInstructionBlocks,
+  updateBlock,
+  type InstructionBlockDraft,
+  type InstructionThreePaneState,
+} from './instructions/instructionThreePane';
 import styles from './AgentHub.module.css';
 
 const TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const SLOTS: Array<{
+  mode: InstructionBlockMode;
+  lane: 'common' | 'adapted' | 'exclusive';
+}> = [
+  { mode: 'shared', lane: 'common' },
+  { mode: 'adapted', lane: 'adapted' },
+  { mode: 'targetOnly', lane: 'exclusive' },
+];
 
 export interface InstructionBlocksDrawerProps {
   open: boolean;
@@ -29,9 +48,6 @@ export interface InstructionBlocksDrawerProps {
   error?: string | null;
   onClose: () => void;
   onSaveDocument: (contentMarkdown: string) => void;
-  onPromoteShared: (blockId: string, commonMarkdown: string) => void;
-  onPairAdapted: (blockIds: string[], commonMarkdown?: string) => void;
-  onRevertTargetOnly: (blockId: string, sourceTarget: AgentTarget, markdown: string) => void;
   onUpdateBlock: (
     blockId: string,
     patch: {
@@ -40,13 +56,22 @@ export interface InstructionBlocksDrawerProps {
       variants?: Partial<Record<AgentTarget, string>> | null;
     },
   ) => void;
+  /**
+   * 兼容旧 props（promote/pair/revert）；三槽 UI 不再暴露这些动作，保留可选避免调用方断裂。
+   */
+  onPromoteShared?: (blockId: string, commonMarkdown: string) => void;
+  onPairAdapted?: (blockIds: string[], commonMarkdown?: string) => void;
+  onRevertTargetOnly?: (blockId: string, sourceTarget: AgentTarget, markdown: string) => void;
 }
 
 /**
  * Business Logic: 预览某块在各 target 的最终文本差异。
  * Code Logic: shared 用 common；adapted 优先 variant；targetOnly 仅 source。
  */
-function resolveBlockText(block: InstructionBlockDto, target: AgentTarget): string | null {
+function resolveDtoBlockText(
+  block: ReturnType<typeof draftToDto>,
+  target: AgentTarget,
+): string | null {
   if (block.mode === 'shared') {
     return block.commonMarkdown;
   }
@@ -61,7 +86,7 @@ function resolveBlockText(block: InstructionBlockDto, target: AgentTarget): stri
 }
 
 /**
- * 指令块 Drawer 视图。
+ * 指令块 Drawer 视图（固定三槽）。
  */
 export function InstructionBlocksDrawer({
   open,
@@ -71,30 +96,32 @@ export function InstructionBlocksDrawer({
   error = null,
   onClose,
   onSaveDocument,
-  onPromoteShared,
-  onPairAdapted,
-  onRevertTargetOnly,
   onUpdateBlock,
 }: InstructionBlocksDrawerProps) {
   const { t } = useTranslation(['agentHub', 'common']);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [confirmPreview, setConfirmPreview] = useState(false);
   const [documentDraft, setDocumentDraft] = useState('');
+  const [activeTarget, setActiveTarget] = useState<AgentTarget>('claude');
+  const [slotDrafts, setSlotDrafts] = useState<InstructionBlockDraft[]>([]);
   // Safe-save 合同：用户每次编辑递增 version，submit 捕获快照；
   // success 后仅在 version 未变时回填 baseline，busy 时阻止重入。
   const documentEditVersionRef = useRef(0);
   const documentSubmittedSnapshotRef = useRef<string | null>(null);
-  // 资产切换或后端返回新 markdown 时，把 draft 同步到最新 baseline，
-  // 覆盖未提交编辑（用户已点保存即触发 onSaveDocument，prop 变更意味着后端已接受）。
+
   useEffect(() => {
-    // Sync draft to latest baseline when asset identity/content changes (user already saved).
+    // Sync draft to latest baseline when asset identity/content changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- prop→draft resync contract
     setDocumentDraft(asset?.contentMarkdown ?? '');
     documentSubmittedSnapshotRef.current = null;
-  }, [asset?.assetId, asset?.contentMarkdown]);
+    const drafts = normalizeInstructionBlocks((asset?.blocks ?? []).map(dtoToDraft));
+    setSlotDrafts(drafts);
+    setConfirmPreview(false);
+  }, [asset?.assetId, asset?.contentMarkdown, asset?.blocks]);
+
   const documentBaseline = asset?.contentMarkdown ?? '';
   const documentDirty = documentDraft !== documentBaseline;
   const documentSaveDisabled = busy || writeBlocked || !documentDirty;
+
   function handleDocumentSave() {
     if (documentSaveDisabled) return;
     documentEditVersionRef.current += 1;
@@ -102,15 +129,56 @@ export function InstructionBlocksDrawer({
     onSaveDocument(documentDraft);
   }
 
-  const blocks = asset?.blocks ?? [];
+  /**
+   * Business Logic: 编辑某一槽正文并即时写回该 mode 块。
+   * Code Logic: ensure mode → updateBlock 本地 → onUpdateBlock 持久化。
+   */
+  function handleSlotEdit(mode: InstructionBlockMode, text: string) {
+    let nextState: InstructionThreePaneState = {
+      originalPath: null,
+      originalText: '',
+      blocks: slotDrafts,
+      previewText: '',
+      blocksDirty: false,
+      originalDirty: false,
+      externalDrift: false,
+    };
+    nextState = ensureModeBlock(nextState, mode, activeTarget);
+    const block = findBlockByMode(nextState.blocks, mode);
+    if (!block) return;
+    if (mode === 'shared') {
+      nextState = updateBlock(nextState, block.id, { commonMarkdown: text }, activeTarget);
+    } else {
+      nextState = updateBlock(
+        nextState,
+        block.id,
+        {
+          variants: { ...block.variants, [activeTarget]: text },
+          sourceTarget: mode === 'targetOnly' ? (block.sourceTarget ?? activeTarget) : null,
+        },
+        activeTarget,
+      );
+    }
+    const nextBlocks = normalizeInstructionBlocks(nextState.blocks);
+    setSlotDrafts(nextBlocks);
+    const updated = findBlockByMode(nextBlocks, mode);
+    if (!updated) return;
+    onUpdateBlock(updated.id, {
+      mode: updated.mode,
+      commonMarkdown: updated.commonMarkdown,
+      variants: Object.keys(updated.variants).length > 0 ? updated.variants : null,
+    });
+    setConfirmPreview(true);
+  }
 
   const diffPreview = useMemo(() => {
+    const dtoBlocks = slotDrafts.map(draftToDto);
     return TARGETS.map((target) => {
-      const parts = blocks
+      const parts = dtoBlocks
         .map((block) => {
-          const text = resolveBlockText(block, target);
-          if (text == null) return null;
-          return `### ${block.id} (${block.mode})\n${text}`;
+          const text = resolveDtoBlockText(block, target);
+          if (text == null || text.trim().length === 0) return null;
+          return `### ${block.mode}\n${text}`;
         })
         .filter(Boolean);
       return {
@@ -118,17 +186,12 @@ export function InstructionBlocksDrawer({
         content: parts.join('\n\n') || t('agentHub:blocks.emptyTargetFile'),
       };
     });
-  }, [blocks, t]);
+  }, [slotDrafts, t]);
 
-  /**
-   * Business Logic: 切换块勾选供 pair adapted。
-   * Code Logic: toggle id in selectedIds。
-   */
-  function toggleSelected(blockId: string) {
-    setSelectedIds((prev) =>
-      prev.includes(blockId) ? prev.filter((id) => id !== blockId) : [...prev, blockId],
-    );
-  }
+  const composedForActive = useMemo(
+    () => joinBlocksForTarget(slotDrafts, activeTarget),
+    [slotDrafts, activeTarget],
+  );
 
   return (
     <Drawer
@@ -148,6 +211,7 @@ export function InstructionBlocksDrawer({
           <p className={styles.drawerSubtitle}>
             {asset ? asset.displayName : t('agentHub:blocks.noAsset')}
           </p>
+          <p className={styles.hint}>{t('agentHub:blocks.threeSlotHint')}</p>
         </header>
 
         {error ? (
@@ -193,117 +257,84 @@ export function InstructionBlocksDrawer({
           </div>
         </section>
 
-        {blocks.length === 0 ? (
-          <p className={styles.emptyInline} data-testid="blocks-empty">
-            {t('agentHub:blocks.empty')}
-          </p>
-        ) : (
-          <ul className={styles.blockList}>
-            {blocks.map((block) => (
-              <li key={block.id} className={styles.blockItem} data-testid={`block-item-${block.id}`}>
-                <div className={styles.blockTitleRow}>
-                  <label className={styles.blockCheck}>
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(block.id)}
-                      onChange={() => toggleSelected(block.id)}
-                      disabled={busy || writeBlocked}
-                    />
-                    <span className={styles.blockId}>{block.id}</span>
-                  </label>
-                  <Pill tone="accent">{t(`agentHub:blocks.mode.${block.mode}`)}</Pill>
-                  {block.needsAdaptation ? (
-                    <Pill tone="warn">{t('agentHub:blocks.needsAdaptation')}</Pill>
-                  ) : null}
-                </div>
-                {block.headingPath && block.headingPath.length > 0 ? (
-                  <div className={styles.blockPath}>{block.headingPath.join(' / ')}</div>
-                ) : null}
-                <pre className={styles.blockBody}>{block.commonMarkdown || '—'}</pre>
-                {block.mode === 'adapted' || block.mode === 'targetOnly' ? (
-                  <div className={styles.variantGrid}>
-                    {TARGETS.map((target) => {
-                      const text = block.variants?.[target];
-                      if (!text && block.mode === 'targetOnly' && block.sourceTarget !== target) {
-                        return null;
-                      }
-                      return (
-                        <div key={target} className={styles.variantCell}>
-                          <div className={styles.variantLabel}>{t(`agentHub:targets.${target}`)}</div>
-                          <pre className={styles.blockBody}>{text || block.commonMarkdown || '—'}</pre>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
-                <div className={styles.blockActions}>
-                  {block.mode === 'targetOnly' ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={busy || writeBlocked}
-                      onClick={() => {
-                        setConfirmPreview(true);
-                        onPromoteShared(block.id, block.commonMarkdown);
-                      }}
-                      data-testid={`block-promote-${block.id}`}
-                    >
-                      {t('agentHub:blocks.promoteShared')}
-                    </Button>
-                  ) : null}
-                  {block.mode !== 'targetOnly' ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy || writeBlocked || !block.sourceTarget}
-                      onClick={() => {
-                        const source = block.sourceTarget ?? 'claude';
-                        setConfirmPreview(true);
-                        onRevertTargetOnly(
-                          block.id,
-                          source,
-                          block.variants?.[source] ?? block.commonMarkdown,
-                        );
-                      }}
-                      data-testid={`block-revert-${block.id}`}
-                    >
-                      {t('agentHub:blocks.revertTargetOnly')}
-                    </Button>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy || writeBlocked}
-                    onClick={() =>
-                      onUpdateBlock(block.id, {
-                        mode: block.mode,
-                        commonMarkdown: block.commonMarkdown,
-                      })
-                    }
-                    data-testid={`block-save-${block.id}`}
-                  >
-                    {t('agentHub:blocks.saveBlock')}
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+        <section className={styles.documentSection} data-testid="instruction-three-slots">
+          <header className={styles.documentHeader}>
+            <h3 className={styles.sectionTitle}>{t('agentHub:blocks.threeSlotsTitle')}</h3>
+            <div
+              className={styles.segment}
+              role="tablist"
+              aria-label={t('agentHub:shell.agentAria')}
+              data-testid="blocks-drawer-agent-switcher"
+            >
+              {TARGETS.map((target) => (
+                <Button
+                  key={target}
+                  size="sm"
+                  variant={activeTarget === target ? 'secondary' : 'ghost'}
+                  role="tab"
+                  aria-selected={activeTarget === target}
+                  onClick={() => setActiveTarget(target)}
+                  data-testid={`blocks-drawer-agent-${target}`}
+                >
+                  {t(`agentHub:targets.${target}`)}
+                </Button>
+              ))}
+            </div>
+          </header>
 
-        <div className={styles.pairRow}>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={busy || writeBlocked || selectedIds.length < 2}
-            onClick={() => {
-              setConfirmPreview(true);
-              onPairAdapted(selectedIds);
-            }}
-            data-testid="blocks-pair-adapted"
-          >
-            {t('agentHub:blocks.pairAdapted')}
-          </Button>
-        </div>
+          <ul className={styles.blockList}>
+            {SLOTS.map(({ mode, lane }) => {
+              const block = findBlockByMode(slotDrafts, mode);
+              let text = '';
+              if (mode === 'shared') {
+                text = block?.commonMarkdown ?? '';
+              } else if (mode === 'adapted') {
+                text = block?.variants[activeTarget] ?? block?.commonMarkdown ?? '';
+              } else {
+                text = block?.variants[activeTarget] ?? '';
+              }
+              return (
+                <li
+                  key={mode}
+                  className={styles.blockItem}
+                  data-testid={`block-slot-${lane}`}
+                >
+                  <div className={styles.blockTitleRow}>
+                    <span className={styles.blockId}>{t(`agentHub:shell.lanes.${lane}`)}</span>
+                    <Pill tone="accent">{t(`agentHub:blocks.mode.${mode}`)}</Pill>
+                  </div>
+                  <p className={styles.hint}>
+                    {lane === 'common'
+                      ? t('agentHub:instructions.threePane.slotCommonHint')
+                      : lane === 'adapted'
+                        ? t('agentHub:instructions.threePane.slotAdaptedHint')
+                        : t('agentHub:instructions.threePane.slotExclusiveHint')}
+                  </p>
+                  <textarea
+                    className={styles.documentTextarea}
+                    data-testid={`block-slot-text-${lane}`}
+                    value={text}
+                    rows={6}
+                    disabled={busy || writeBlocked}
+                    onChange={(event) => handleSlotEdit(mode, event.currentTarget.value)}
+                    aria-label={t(`agentHub:shell.lanes.${lane}`)}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className={styles.documentSection} data-testid="blocks-composed-preview">
+            <h3 className={styles.sectionTitle}>
+              {t('agentHub:instructions.threePane.previewTitle')} · {t(`agentHub:targets.${activeTarget}`)}
+            </h3>
+            <pre className={styles.blockBody}>
+              {composedForActive.trim().length > 0
+                ? composedForActive
+                : t('agentHub:instructions.threePane.emptyPreview')}
+            </pre>
+          </div>
+        </section>
 
         <section className={styles.diffSection} data-testid="blocks-diff-preview">
           <h3 className={styles.sectionTitle}>{t('agentHub:blocks.diffPreview')}</h3>

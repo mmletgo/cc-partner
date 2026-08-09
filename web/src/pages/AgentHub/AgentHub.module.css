@@ -212,6 +212,17 @@
   font-size: var(--text-sm);
 }
 
+.segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
 .blockList,
 .conflictList {
   list-style: none;
