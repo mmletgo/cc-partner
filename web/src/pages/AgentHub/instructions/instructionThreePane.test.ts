@@ -13,6 +13,7 @@ import {
   draftToDto,
   initialThreePaneFromDisk,
   joinBlocksForTarget,
+  normalizeInstructionBlocks,
   parseBlocksFromOriginal,
   recomputePreview,
   resolveBlockText,
@@ -24,7 +25,7 @@ import {
 
 const AGENT: AgentTarget = 'claude';
 
-/** 带 ## 标题的样例原文，解析后应得到两块。 */
+/** 带 ## 标题的样例原文；三槽模型下整篇应成为单个 shared。 */
 const SAMPLE_ORIGINAL = `## Shared rules
 
 Always use TypeScript.
@@ -142,14 +143,15 @@ describe('initialThreePaneFromDisk', () => {
 });
 
 describe('parseBlocksFromOriginal (fallback)', () => {
-  test('splits ## headings into shared blocks; preview follows agent', () => {
+  test('imports whole document as a single shared block; no ## splitting', () => {
     const opened = initialThreePaneFromDisk('/p.md', SAMPLE_ORIGINAL, null, AGENT);
     expect(opened.blocks).toHaveLength(0);
 
     const parsed = parseBlocksFromOriginal(opened, AGENT);
-    expect(parsed.blocks.length).toBe(2);
-    expect(parsed.blocks.map((b) => b.headingPath)).toEqual([['Shared rules'], ['Target notes']]);
+    expect(parsed.blocks.length).toBe(1);
+    expect(parsed.blocks[0]?.mode).toBe('shared');
     expect(parsed.blocks[0]?.commonMarkdown).toContain('Always use TypeScript');
+    expect(parsed.blocks[0]?.commonMarkdown).toContain('Target notes');
     expect(parsed.previewText).toContain('Always use TypeScript');
     // 解析来自原文，块侧不应标脏
     expect(parsed.blocksDirty).toBe(false);
@@ -159,6 +161,65 @@ describe('parseBlocksFromOriginal (fallback)', () => {
   test('empty original yields empty blocks', () => {
     const state = initialThreePaneFromDisk('/e.md', '   \n  ', null, AGENT);
     expect(parseBlocksFromOriginal(state, AGENT).blocks).toEqual([]);
+  });
+});
+
+describe('normalizeInstructionBlocks', () => {
+  test('merges multiple same-mode blocks into three slots max', () => {
+    const input = [
+      makeBlock({ id: 's1', mode: 'shared', commonMarkdown: 'A' }),
+      makeBlock({ id: 's2', mode: 'shared', commonMarkdown: 'B' }),
+      makeBlock({
+        id: 'a1',
+        mode: 'adapted',
+        commonMarkdown: 'base',
+        variants: { claude: 'c1' },
+      }),
+      makeBlock({
+        id: 'a2',
+        mode: 'adapted',
+        commonMarkdown: '',
+        variants: { claude: 'c2', codex: 'x' },
+      }),
+      makeBlock({
+        id: 't1',
+        mode: 'targetOnly',
+        variants: { claude: 'only-c' },
+        sourceTarget: 'claude',
+      }),
+      makeBlock({
+        id: 't2',
+        mode: 'targetOnly',
+        variants: { codex: 'only-x' },
+        sourceTarget: 'codex',
+      }),
+    ];
+    const out = normalizeInstructionBlocks(input);
+    expect(out.map((b) => b.mode)).toEqual(['shared', 'adapted', 'targetOnly']);
+    expect(out[0]?.commonMarkdown).toBe('A\n\nB');
+    expect(out[1]?.variants.claude).toBe('c1\n\nc2');
+    expect(out[1]?.variants.codex).toBe('x');
+    expect(out[2]?.variants.claude).toBe('only-c');
+    expect(out[2]?.variants.codex).toBe('only-x');
+  });
+
+  test('joinBlocksForTarget respects shared → adapted → targetOnly order', () => {
+    const blocks = [
+      makeBlock({
+        id: 't',
+        mode: 'targetOnly',
+        variants: { claude: 'exclusive' },
+        sourceTarget: 'claude',
+      }),
+      makeBlock({ id: 's', mode: 'shared', commonMarkdown: 'common' }),
+      makeBlock({
+        id: 'a',
+        mode: 'adapted',
+        commonMarkdown: 'adapt-common',
+        variants: { claude: 'adapt-c' },
+      }),
+    ];
+    expect(joinBlocksForTarget(blocks, 'claude')).toBe('common\n\nadapt-c\n\nexclusive');
   });
 });
 

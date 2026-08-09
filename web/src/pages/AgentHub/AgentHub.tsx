@@ -212,24 +212,17 @@ export function AgentHubView(props: AgentHubViewProps) {
       loading: t('agentHub:instructions.threePane.loading'),
       retry: t('common:action.retry'),
       previewReadOnly: t('agentHub:instructions.threePane.previewReadOnly'),
-      addBlock: t('agentHub:instructions.threePane.addBlock'),
+      slotCommonHint: t('agentHub:instructions.threePane.slotCommonHint'),
+      slotAdaptedHint: t('agentHub:instructions.threePane.slotAdaptedHint'),
+      slotExclusiveHint: t('agentHub:instructions.threePane.slotExclusiveHint'),
       dualDirtyTitle: t('agentHub:instructions.threePane.dualDirtyTitle'),
       dualDirtyDescription: t('agentHub:instructions.threePane.dualDirtyDescription'),
       useBlocksBaseline: t('agentHub:instructions.threePane.useBlocksBaseline'),
       useOriginalBaseline: t('agentHub:instructions.threePane.useOriginalBaseline'),
       cancel: t('common:action.cancel'),
-      blockTitlePlaceholder: t('agentHub:instructions.threePane.blockTitlePlaceholder'),
       blockBodyPlaceholder: t('agentHub:instructions.threePane.blockBodyPlaceholder'),
       refresh: t('agentHub:instructions.threePane.refresh'),
-      blockMode: t('agentHub:instructions.threePane.blockMode'),
-      blockModeShared: t('agentHub:instructions.threePane.blockModeShared'),
-      blockModeAdapted: t('agentHub:instructions.threePane.blockModeAdapted'),
-      blockModeTargetOnly: t('agentHub:instructions.threePane.blockModeTargetOnly'),
       commonMarkdown: t('agentHub:instructions.threePane.commonMarkdown'),
-      variantsTitle: t('agentHub:instructions.threePane.variantsTitle'),
-      variantClaude: t('agentHub:targets.claude'),
-      variantCodex: t('agentHub:targets.codex'),
-      variantOpencode: t('agentHub:targets.opencode'),
       saveBlocks: t('agentHub:instructions.threePane.saveBlocks'),
     }),
     [t],
@@ -568,6 +561,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             labels={instructionThreePaneLabels}
             state={instructionThreePane.state}
             agent={hubContext.agent}
+            instructionLane={hubContext.instructionLane}
             loading={instructionThreePane.loading}
             error={instructionThreePane.error}
             actionError={instructionThreePane.actionError}
@@ -589,8 +583,7 @@ export function AgentHubView(props: AgentHubViewProps) {
               void instructionThreePane.refresh();
             }}
             onOriginalChange={instructionThreePane.updateOriginal}
-            onBlockChange={instructionThreePane.changeBlock}
-            onAddBlock={instructionThreePane.appendBlock}
+            onSlotTextChange={instructionThreePane.editCurrentSlot}
             onChooseBaseline={instructionThreePane.chooseBaseline}
             onCancelDualDirty={instructionThreePane.cancelDualDirty}
           />

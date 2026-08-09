@@ -1,14 +1,14 @@
 /**
- * Agent Hub 壳层 chrome（Agent × scope × device/project × tabs）。
+ * Agent Hub 壳层 chrome（tab × scope × lane × agent）。
  *
  * Business Logic（为什么需要）:
- *   新 IA 以 Agent 优先工作台导航；用户在壳层切换上下文后，内容区跟随
- *   agent/scope/device|project/tab，工具栏提供拉取/推送/跨 Agent 适配入口。
+ *   新 IA 以能力类型优先：先选 Tab，再选用户/项目范围，提示词再选三槽，最后选 Agent。
+ *   工具栏提供拉取/推送/跨 Agent 适配入口。
  *
  * Code Logic（做什么）:
  *   pure 受控视图：仅渲染 props 并调用 onContextChange / actions；无 @/api。
  *   scope=user 显示设备选择；scope=project 显示项目选择并隐藏设备；
- *   deviceId≠null 时禁用 Adapt（同机 only）。
+ *   instructionLane 仅 tab=instructions 时渲染；deviceId≠null 时禁用 Adapt。
  */
 
 import type { ReactElement, ReactNode } from 'react';
@@ -19,12 +19,14 @@ import type {
   AgentHubContext,
   AgentHubScope,
   AgentHubTab,
+  InstructionLane,
 } from '../context/agentHubContext';
 import styles from './AgentHubShell.module.css';
 
 const AGENTS: AgentTarget[] = ['claude', 'codex', 'opencode'];
 const SCOPES: AgentHubScope[] = ['user', 'project'];
 const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'];
+const LANES: InstructionLane[] = ['common', 'adapted', 'exclusive'];
 
 /** 壳层 peer 摘要（本机由 deviceId=null 表示）。 */
 export interface AgentHubShellPeer {
@@ -63,7 +65,7 @@ export interface AgentHubShellProps {
 
 /**
  * Business Logic: 渲染 Agent Hub 顶栏导航与内容 slot。
- * Code Logic: 全受控；切换 scope 时清空互斥字段；Adapt 在 peer 设备上下文禁用。
+ * Code Logic: 全受控；层级 tab → scope → (lane) → agent；Adapt 在 peer 设备上下文禁用。
  */
 export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const { context, onContextChange, peers, projects, actions, children } = props;
@@ -105,32 +107,41 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
     onContextChange({ projectKey });
   }
 
+  /**
+   * Business Logic: 切换 Tab；离开提示词时清 lane 为默认。
+   */
+  function handleTabChange(tab: AgentHubTab) {
+    if (tab === 'instructions') {
+      onContextChange({ tab });
+      return;
+    }
+    onContextChange({ tab, instructionLane: 'common' });
+  }
+
   return (
     <div className={styles.shell} data-testid="agent-hub-shell">
       <div className={styles.chrome}>
+        {/* L1: Tab + toolbar */}
         <div className={styles.rowBetween}>
-          <div className={styles.cluster}>
-            <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
-            <div
-              className={styles.segment}
-              role="tablist"
-              aria-label={t('agentHub:shell.agentAria')}
-              data-testid="agent-hub-agent-switcher"
-            >
-              {AGENTS.map((agent) => (
-                <Button
-                  key={agent}
-                  variant={context.agent === agent ? 'secondary' : 'ghost'}
-                  size="sm"
-                  role="tab"
-                  aria-selected={context.agent === agent}
-                  onClick={() => onContextChange({ agent })}
-                  data-testid={`agent-hub-agent-${agent}`}
-                >
-                  {t(`agentHub:targets.${agent}`)}
-                </Button>
-              ))}
-            </div>
+          <div
+            className={styles.segment}
+            role="tablist"
+            aria-label={t('agentHub:shell.tabsAria')}
+            data-testid="agent-hub-tablist"
+          >
+            {TABS.map((tab) => (
+              <Button
+                key={tab}
+                variant={context.tab === tab ? 'secondary' : 'ghost'}
+                size="sm"
+                role="tab"
+                aria-selected={context.tab === tab}
+                onClick={() => handleTabChange(tab)}
+                data-testid={`agent-hub-tab-${tab}`}
+              >
+                {t(`agentHub:shell.tabs.${tab}`)}
+              </Button>
+            ))}
           </div>
 
           <div
@@ -177,6 +188,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </p>
         ) : null}
 
+        {/* L2: Scope + device/project */}
         <div className={styles.row}>
           <span className={styles.label}>{t('agentHub:shell.scopeLabel')}</span>
           <div
@@ -256,25 +268,56 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           )}
         </div>
 
-        <div
-          className={styles.segment}
-          role="tablist"
-          aria-label={t('agentHub:shell.tabsAria')}
-          data-testid="agent-hub-tablist"
-        >
-          {TABS.map((tab) => (
-            <Button
-              key={tab}
-              variant={context.tab === tab ? 'secondary' : 'ghost'}
-              size="sm"
-              role="tab"
-              aria-selected={context.tab === tab}
-              onClick={() => onContextChange({ tab })}
-              data-testid={`agent-hub-tab-${tab}`}
+        {/* L3: instruction lane — only on instructions tab */}
+        {context.tab === 'instructions' ? (
+          <div className={styles.row}>
+            <span className={styles.label}>{t('agentHub:shell.laneLabel')}</span>
+            <div
+              className={styles.segment}
+              role="tablist"
+              aria-label={t('agentHub:shell.laneAria')}
+              data-testid="agent-hub-lane-switcher"
             >
-              {t(`agentHub:shell.tabs.${tab}`)}
-            </Button>
-          ))}
+              {LANES.map((lane) => (
+                <Button
+                  key={lane}
+                  variant={context.instructionLane === lane ? 'secondary' : 'ghost'}
+                  size="sm"
+                  role="tab"
+                  aria-selected={context.instructionLane === lane}
+                  onClick={() => onContextChange({ instructionLane: lane })}
+                  data-testid={`agent-hub-lane-${lane}`}
+                >
+                  {t(`agentHub:shell.lanes.${lane}`)}
+                </Button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {/* L4: Agent */}
+        <div className={styles.row}>
+          <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
+          <div
+            className={styles.segment}
+            role="tablist"
+            aria-label={t('agentHub:shell.agentAria')}
+            data-testid="agent-hub-agent-switcher"
+          >
+            {AGENTS.map((agent) => (
+              <Button
+                key={agent}
+                variant={context.agent === agent ? 'secondary' : 'ghost'}
+                size="sm"
+                role="tab"
+                aria-selected={context.agent === agent}
+                onClick={() => onContextChange({ agent })}
+                data-testid={`agent-hub-agent-${agent}`}
+              >
+                {t(`agentHub:targets.${agent}`)}
+              </Button>
+            ))}
+          </div>
         </div>
       </div>
 

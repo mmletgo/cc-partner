@@ -201,6 +201,7 @@ const baseContext: AgentHubContext = {
   deviceId: null,
   projectKey: null,
   tab: 'instructions',
+  instructionLane: 'common',
   adaptView: false,
 };
 
@@ -367,8 +368,8 @@ describe('useInstructionThreePaneController', () => {
       result.current.reparseFromOriginal();
     });
 
-    expect(result.current.state.blocks.length).toBe(2);
-    expect(result.current.state.blocks[0]?.headingPath[0]).toBe('Shared rules');
+    expect(result.current.state.blocks.length).toBe(1);
+    expect(result.current.state.blocks[0]?.mode).toBe('shared');
     expect(result.current.state.previewText).toContain('Always use TypeScript');
     expect(result.current.state.blocksDirty).toBe(false);
   });
@@ -457,8 +458,8 @@ describe('useInstructionThreePaneController', () => {
       await result.current.applyPlan();
     });
 
-    await waitFor(() => expect(result.current.state.blocks.length).toBe(2));
-    expect(result.current.state.blocks[0]?.headingPath[0]).toBe('Shared rules');
+    await waitFor(() => expect(result.current.state.blocks.length).toBe(1));
+    expect(result.current.state.blocks[0]?.mode).toBe('shared');
   });
 
   test('changing deviceId retriggers inspect with peer context', async () => {

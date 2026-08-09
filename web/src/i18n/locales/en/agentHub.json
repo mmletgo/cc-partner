@@ -36,6 +36,13 @@
       "mcp": "MCP",
       "plugin": "Plugin"
     },
+    "laneLabel": "Instruction slot",
+    "laneAria": "Common, adapted, exclusive",
+    "lanes": {
+      "common": "Common",
+      "adapted": "Adapted",
+      "exclusive": "Exclusive"
+    },
     "pull": "Pull…",
     "push": "Push…",
     "adapt": "Adapt to other agents…",
@@ -43,25 +50,28 @@
   },
   "instructions": {
     "threePane": {
-      "blocksTitle": "Blocks",
+      "blocksTitle": "Current slot",
       "previewTitle": "Composed preview",
       "originalTitle": "Original file",
-      "reparseFromOriginal": "Reparse blocks from original",
+      "reparseFromOriginal": "Import original as common",
       "syncToNative": "Sync to native file…",
-      "emptyBlocks": "No blocks yet. Reparse from the original column or add a block.",
-      "emptyPreview": "Preview stays empty until you reparse or fill blocks.",
+      "emptyBlocks": "This slot is empty. Import from original as common, or type here.",
+      "emptyPreview": "Preview stays empty until you fill common/adapted/exclusive slots.",
       "emptyOriginal": "No original content found for this agent. You can draft here and sync.",
       "pathLabel": "Path",
       "noPath": "No path resolved",
       "loading": "Loading instructions…",
-      "previewReadOnly": "Read-only",
+      "previewReadOnly": "Read-only (common + this agent’s adapted + exclusive)",
+      "slotCommonHint": "Shared by all agents. Switching agent does not change this slot.",
+      "slotAdaptedHint": "Adapted variant for the current agent; falls back to common draft when empty.",
+      "slotExclusiveHint": "Exclusive content written only for the current agent.",
       "addBlock": "Add block",
       "dualDirtyTitle": "Choose a sync baseline",
-      "dualDirtyDescription": "Both the blocks and the original file have unsaved edits with different content. Pick which content to write.",
-      "useBlocksBaseline": "Use composed blocks",
+      "dualDirtyDescription": "Both the slots and the original file have unsaved edits with different content. Pick which content to write.",
+      "useBlocksBaseline": "Use composed slots",
       "useOriginalBaseline": "Use original file",
       "blockTitlePlaceholder": "Block title",
-      "blockBodyPlaceholder": "Block body",
+      "blockBodyPlaceholder": "Edit the current slot body",
       "refresh": "Rescan",
       "blockMode": "Block mode",
       "blockModeShared": "Shared (all agents)",
@@ -69,10 +79,10 @@
       "blockModeTargetOnly": "Target only",
       "commonMarkdown": "Common body",
       "variantsTitle": "Per-agent variants",
-      "saveBlocks": "Save blocks",
+      "saveBlocks": "Save slots",
       "writeBlocked": "Writes are blocked for this agent. You can still edit the draft, but sync is disabled.",
       "errors": {
-        "emptySync": "Nothing to sync. Add original content or blocks first."
+        "emptySync": "Nothing to sync. Add original content or fill the three slots first."
       }
     }
   },

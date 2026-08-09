@@ -82,6 +82,7 @@ function buildProps(
       deviceId: null,
       projectKey: null,
       tab: 'skill',
+      instructionLane: 'common',
       adaptView: false,
     },
     onContextChange: vi.fn(),
@@ -559,6 +560,7 @@ describe('AgentHub page characterization', () => {
         deviceId: null,
         projectKey: null,
         tab: 'instructions',
+        instructionLane: 'common',
         adaptView: false,
       },
     });
@@ -571,7 +573,10 @@ describe('AgentHub page characterization', () => {
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
     expect(openLanPushDialog).toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
-    expect(onContextChange).toHaveBeenCalledWith({ tab: 'skill' });
+    expect(onContextChange).toHaveBeenCalledWith({
+      tab: 'skill',
+      instructionLane: 'common',
+    });
     // dual-path: legacy section buttons still present for deep-link tests
     expect(screen.getByTestId('agent-hub-section-assets')).toBeTruthy();
   });

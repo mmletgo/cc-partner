@@ -2,7 +2,7 @@
  * Agent Hub URL 上下文纯模型。
  *
  * Business Logic（为什么需要）:
- *   新 IA 以 agent × scope × device|project × tab 恢复工作台；
+ *   IA 以 tab × scope × device|project × (instructions:lane) × agent 恢复工作台；
  *   深链与书签必须能往返，旧 section/target/kind 不得整页断链。
  *
  * Code Logic（做什么）:
@@ -19,10 +19,18 @@ export type AgentHubTab = 'instructions' | 'skill' | 'command' | 'mcp' | 'plugin
 export type AgentHubScope = 'user' | 'project';
 
 /**
+ * 提示词三槽 lane（仅 tab=instructions 有意义）。
+ *
+ * Business Logic: 公共 / 适配 / 独有 固定槽，禁止再按标题切碎。
+ * Code Logic: URL 键 `lane`；默认 common。
+ */
+export type InstructionLane = 'common' | 'adapted' | 'exclusive';
+
+/**
  * Agent Hub 可深链恢复的导航上下文。
  *
  * Business Logic: 用户级带 deviceId（null=本机）；项目级带 projectKey；adapt 独立全页。
- * Code Logic: 与 query 键 agent/scope/deviceId/project/tab/view 对齐。
+ * Code Logic: 与 query 键 agent/scope/deviceId/project/tab/lane/view 对齐。
  */
 export interface AgentHubContext {
   agent: AgentTarget;
@@ -32,6 +40,10 @@ export interface AgentHubContext {
   /** project scope identity; null when scope=user */
   projectKey: string | null;
   tab: AgentHubTab;
+  /**
+   * 提示词三槽；仅 tab=instructions 时有效，其它 tab 恒为默认 common。
+   */
+  instructionLane: InstructionLane;
   /** true when view=adapt cross-agent page */
   adaptView: boolean;
 }
@@ -39,6 +51,7 @@ export interface AgentHubContext {
 const AGENT_TARGETS = new Set<AgentTarget>(['claude', 'codex', 'opencode']);
 const SCOPES = new Set<AgentHubScope>(['user', 'project']);
 const TABS = new Set<AgentHubTab>(['instructions', 'skill', 'command', 'mcp', 'plugin']);
+const LANES = new Set<InstructionLane>(['common', 'adapted', 'exclusive']);
 /** 旧 portable kind 可直接映射为 tab（不含 instructions）。 */
 const ASSET_KIND_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
 
@@ -49,6 +62,7 @@ export const DEFAULT_AGENT_HUB_CONTEXT: AgentHubContext = {
   deviceId: null,
   projectKey: null,
   tab: 'instructions',
+  instructionLane: 'common',
   adaptView: false,
 };
 
@@ -78,8 +92,8 @@ export function mapLegacySection(section: string | null): Partial<AgentHubContex
 
 /**
  * Business Logic: 从 search params 恢复导航上下文（新键优先，legacy 兜底）。
- * Code Logic: defaults ← mapLegacySection ← legacy target/kind ← 显式 agent/scope/tab/…；
- *   再按 scope 清空互斥的 deviceId/projectKey。
+ * Code Logic: defaults ← mapLegacySection ← legacy target/kind ← 显式 agent/scope/tab/lane/…；
+ *   再按 scope 清空互斥的 deviceId/projectKey；非 instructions 时 lane 回默认。
  */
 export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
   const ctx: AgentHubContext = { ...DEFAULT_AGENT_HUB_CONTEXT };
@@ -111,6 +125,11 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
     ctx.tab = tab;
   }
 
+  const lane = params.get('lane');
+  if (lane && isInstructionLane(lane)) {
+    ctx.instructionLane = lane;
+  }
+
   const deviceRaw = params.get('deviceId')?.trim() ?? '';
   ctx.deviceId = deviceRaw.length > 0 ? deviceRaw : null;
 
@@ -128,12 +147,17 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
     ctx.deviceId = null;
   }
 
+  // 5) lane 仅 instructions 有意义
+  if (ctx.tab !== 'instructions') {
+    ctx.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
+  }
+
   return ctx;
 }
 
 /**
  * Business Logic: 把上下文写回 URL，保留无关 deep link；默认值删 key 降噪。
- * Code Logic: 写 agent/scope/deviceId/project/tab/view；剥离会干扰 re-parse 的 legacy section/target/kind。
+ * Code Logic: 写 agent/scope/deviceId/project/tab/lane/view；剥离会干扰 re-parse 的 legacy section/target/kind。
  */
 export function writeAgentHubContext(
   params: URLSearchParams,
@@ -157,6 +181,16 @@ export function writeAgentHubContext(
 
   if (ctx.tab === DEFAULT_AGENT_HUB_CONTEXT.tab) next.delete('tab');
   else next.set('tab', ctx.tab);
+
+  // lane：仅 instructions 且非 default 时写出
+  if (
+    ctx.tab === 'instructions' &&
+    ctx.instructionLane !== DEFAULT_AGENT_HUB_CONTEXT.instructionLane
+  ) {
+    next.set('lane', ctx.instructionLane);
+  } else {
+    next.delete('lane');
+  }
 
   if (ctx.adaptView) next.set('view', 'adapt');
   else next.delete('view');
@@ -191,4 +225,12 @@ export function isAgentHubTab(value: string): value is AgentHubTab {
  */
 export function isAssetKindTab(value: string): value is AgentHubTab {
   return ASSET_KIND_TABS.has(value as AgentHubTab);
+}
+
+/**
+ * Business Logic: 校验提示词三槽 lane。
+ * Code Logic: 对照 LANES 集合。
+ */
+export function isInstructionLane(value: string): value is InstructionLane {
+  return LANES.has(value as InstructionLane);
 }

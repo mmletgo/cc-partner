@@ -570,13 +570,14 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction three-pane empty blocks
     await expect(page.getByTestId('instruction-pane-preview')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-original')).toBeVisible();
 
-    // Spec: open must not auto-parse blocks
+    // Spec: open must not auto-parse slots
     await expect(page.getByTestId('instruction-blocks-empty')).toBeVisible();
     await expect(page.getByTestId('instruction-block-list')).toHaveCount(0);
     await expect(page.getByTestId('instruction-reparse-from-original')).toBeVisible();
     await expect(
       page.getByTestId('instruction-pane-original').getByTestId('instruction-reparse-from-original'),
     ).toBeVisible();
+    await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
 
     await expect(page.getByTestId('instruction-original-textarea')).toHaveValue(
       /Always run tests before commit/,
@@ -585,7 +586,7 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction three-pane empty blocks
     await page.getByTestId('instruction-reparse-from-original').click();
     await expect(page.getByTestId('instruction-blocks-empty')).toHaveCount(0);
     await expect(page.getByTestId('instruction-block-list')).toBeVisible();
-    // preview 由块按 agent 合成（commonMarkdown），不再含 `## 标题`（标题在 headingPath）
+    // 整篇导入为公共 shared，预览含原文
     await expect(page.getByTestId('instruction-preview-body')).toContainText(
       'Always run tests before commit',
     );

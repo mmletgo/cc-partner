@@ -1545,6 +1545,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         } else {
           next.deviceId = null;
         }
+        // lane 仅 instructions 有意义
+        if (next.tab !== 'instructions') {
+          next.instructionLane = 'common';
+        }
         return writeAgentHubContext(prev, next);
       }, { replace: true });
 
@@ -1556,6 +1560,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         merged.projectKey = null;
       } else {
         merged.deviceId = null;
+      }
+      if (merged.tab !== 'instructions') {
+        merged.instructionLane = 'common';
       }
 
       // dual path: keep legacy section content in sync with shell

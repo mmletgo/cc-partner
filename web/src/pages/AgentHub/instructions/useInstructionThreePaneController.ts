@@ -22,12 +22,16 @@ import type {
   UserInstructionWorkspaceDto,
 } from '@/lib/types/agentHub';
 import type { AgentHubContext } from '../context/agentHubContext';
+import type { InstructionLane } from '../context/agentHubContext';
 import {
   addBlock,
   dtoToDraft,
   draftToDto,
+  ensureModeBlock,
+  findBlockByMode,
   initialThreePaneFromDisk,
   joinBlocksForTarget,
+  normalizeInstructionBlocks,
   parseBlocksFromOriginal,
   resolveSyncContent,
   updateBlock,
@@ -75,9 +79,22 @@ export interface UseInstructionThreePaneControllerResult {
   updateOriginal: (text: string) => void;
   changeBlock: (id: string, patch: Partial<Omit<InstructionBlockDraft, 'id'>>) => void;
   appendBlock: () => void;
+  /** 按当前 instructionLane 编辑对应三槽正文。 */
+  editCurrentSlot: (text: string) => void;
   chooseBaseline: (baseline: SyncBaseline) => void;
   cancelDualDirty: () => void;
   dismissApplyResult: () => void;
+}
+
+function laneToMode(lane: InstructionLane): InstructionBlockDraft['mode'] {
+  switch (lane) {
+    case 'common':
+      return 'shared';
+    case 'adapted':
+      return 'adapted';
+    case 'exclusive':
+      return 'targetOnly';
+  }
 }
 
 /**
@@ -357,7 +374,7 @@ export function useInstructionThreePaneController(
         current,
         {
           id: `block-${Date.now()}`,
-          // 新块默认只属于当前 agent（per-agent 独立）
+          // 兼容路径：新块默认只属于当前 agent
           mode: 'targetOnly',
           commonMarkdown: '',
           variants: { [agent]: '' },
@@ -370,6 +387,35 @@ export function useInstructionThreePaneController(
     );
     setActionError(null);
   }, [agent]);
+
+  /**
+   * Business Logic: 壳层 lane 驱动的三槽编辑。
+   * Code Logic: ensure mode 块 → 公共写 common；适配/独有写 variant[agent]。
+   */
+  const editCurrentSlot = useCallback(
+    (text: string) => {
+      const mode = laneToMode(context.instructionLane);
+      setState((current) => {
+        let next = ensureModeBlock(current, mode, agent);
+        const block = findBlockByMode(next.blocks, mode);
+        if (!block) return next;
+        if (mode === 'shared') {
+          return updateBlock(next, block.id, { commonMarkdown: text }, agent);
+        }
+        return updateBlock(
+          next,
+          block.id,
+          {
+            variants: { ...block.variants, [agent]: text },
+            sourceTarget: mode === 'targetOnly' ? (block.sourceTarget ?? agent) : null,
+          },
+          agent,
+        );
+      });
+      setActionError(null);
+    },
+    [agent, context.instructionLane],
+  );
 
   /**
    * Business Logic: 用已保存的最新 head 生成单 agent 投影 plan（写盘受门禁）。
@@ -435,8 +481,9 @@ export function useInstructionThreePaneController(
     setActionBusy(true);
     setActionError(null);
     try {
+      const normalized = normalizeInstructionBlocks(state.blocks);
       await agentHubApi.saveUserInstructionBlocks({
-        blocks: state.blocks.map(draftToDto),
+        blocks: normalized.map(draftToDto),
         baseRevisionId: workspace.canonical?.headRevisionId ?? null,
         inventorySnapshotHash: workspace.inventorySnapshotHash,
         ...requestContext,
@@ -608,6 +655,7 @@ export function useInstructionThreePaneController(
     updateOriginal,
     changeBlock,
     appendBlock,
+    editCurrentSlot,
     chooseBaseline,
     cancelDualDirty,
     dismissApplyResult,

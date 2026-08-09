@@ -1,7 +1,7 @@
 /**
  * Agent Hub URL 上下文 pure 模型测试。
  *
- * Business Logic: 锁定 agent/scope/device/project/tab/adapt 深链往返与 legacy section 映射。
+ * Business Logic: 锁定 agent/scope/device/project/tab/lane/adapt 深链往返与 legacy section 映射。
  * Code Logic: URLSearchParams 构造 + parse/write/mapLegacy 断言。
  */
 
@@ -20,11 +20,12 @@ const DEFAULT_CONTEXT: AgentHubContext = {
   deviceId: null,
   projectKey: null,
   tab: 'instructions',
+  instructionLane: 'common',
   adaptView: false,
 };
 
 describe('parseAgentHubContext', () => {
-  test('empty params yield defaults (claude / user / local / instructions)', () => {
+  test('empty params yield defaults (claude / user / local / instructions / common)', () => {
     const ctx = parseAgentHubContext(new URLSearchParams());
     expect(ctx).toEqual(DEFAULT_CONTEXT);
   });
@@ -35,6 +36,7 @@ describe('parseAgentHubContext', () => {
     expect(ctx.agent).toBe('claude');
     expect(ctx.scope).toBe('user');
     expect(ctx.tab).toBe('instructions');
+    expect(ctx.instructionLane).toBe('common');
     expect(ctx.deviceId).toBeNull();
     expect(ctx.projectKey).toBeNull();
   });
@@ -49,8 +51,21 @@ describe('parseAgentHubContext', () => {
       deviceId: null,
       projectKey: 'wb:proj-1',
       tab: 'mcp',
+      instructionLane: 'common',
       adaptView: true,
     });
+  });
+
+  test('lane=adapted on instructions is preserved', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('lane=adapted'));
+    expect(ctx.tab).toBe('instructions');
+    expect(ctx.instructionLane).toBe('adapted');
+  });
+
+  test('lane on non-instructions tab is forced back to common', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('tab=skill&lane=exclusive'));
+    expect(ctx.tab).toBe('skill');
+    expect(ctx.instructionLane).toBe('common');
   });
 
   test('user scope keeps deviceId and clears projectKey', () => {
@@ -75,7 +90,7 @@ describe('parseAgentHubContext', () => {
 
   test('invalid enum tokens fall back to defaults', () => {
     const params = new URLSearchParams(
-      'agent=gpt&scope=everywhere&tab=settings&view=wizard',
+      'agent=gpt&scope=everywhere&tab=settings&view=wizard&lane=nope',
     );
     expect(parseAgentHubContext(params)).toEqual(DEFAULT_CONTEXT);
   });
@@ -88,6 +103,7 @@ describe('parseAgentHubContext', () => {
     // assets 默认用户级库存
     expect(ctx.scope).toBe('user');
     expect(ctx.adaptView).toBe(false);
+    expect(ctx.instructionLane).toBe('common');
   });
 
   test('legacy section via mapLegacySection then merge still works with parse', () => {
@@ -148,12 +164,35 @@ describe('writeAgentHubContext', () => {
       deviceId: 'peer-42',
       projectKey: null,
       tab: 'command',
+      instructionLane: 'common',
       adaptView: true,
     };
     const written = writeAgentHubContext(new URLSearchParams('conflictId=c1'), original);
     // 保留无关 deep link
     expect(written.get('conflictId')).toBe('c1');
     expect(parseAgentHubContext(written)).toEqual(original);
+  });
+
+  test('lane=exclusive on instructions is written and round-trips', () => {
+    const original: AgentHubContext = {
+      ...DEFAULT_CONTEXT,
+      instructionLane: 'exclusive',
+    };
+    const written = writeAgentHubContext(new URLSearchParams(), original);
+    expect(written.get('lane')).toBe('exclusive');
+    expect(parseAgentHubContext(written)).toEqual(original);
+  });
+
+  test('lane is stripped when tab is not instructions', () => {
+    const original: AgentHubContext = {
+      ...DEFAULT_CONTEXT,
+      tab: 'skill',
+      instructionLane: 'common',
+    };
+    const withStaleLane = new URLSearchParams('lane=adapted&tab=skill');
+    const written = writeAgentHubContext(withStaleLane, original);
+    expect(written.get('lane')).toBeNull();
+    expect(parseAgentHubContext(written).instructionLane).toBe('common');
   });
 
   test('project scope round-trip', () => {
@@ -163,6 +202,7 @@ describe('writeAgentHubContext', () => {
       deviceId: null,
       projectKey: 'local:proj-x',
       tab: 'instructions',
+      instructionLane: 'common',
       adaptView: false,
     };
     const written = writeAgentHubContext(new URLSearchParams(), original);

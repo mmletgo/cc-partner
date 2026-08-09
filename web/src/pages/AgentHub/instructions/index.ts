@@ -4,12 +4,19 @@
 
 export {
   addBlock,
+  ensureModeBlock,
+  findBlockByMode,
   initialThreePaneFromDisk,
+  joinBlocksForTarget,
+  normalizeInstructionBlocks,
   parseBlocksFromOriginal,
   recomputePreview,
+  resolveBlockText,
   resolveSyncContent,
   updateBlock,
   updateOriginalText,
+  dtoToDraft,
+  draftToDto,
 } from './instructionThreePane';
 export type {
   InstructionBlockDraft,

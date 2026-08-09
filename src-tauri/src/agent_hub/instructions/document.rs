@@ -293,6 +293,113 @@ impl InstructionDocument {
         }
         join_owned_block_texts(&parts)
     }
+
+    /// 归并为固定三槽：每 mode 至多 1 块，顺序 shared → adapted → targetOnly。
+    ///
+    /// Business Logic: 用户级提示词编辑面只认公共/适配/独有；旧 N 块打开或保存时直接迁移。
+    /// Code Logic: 按 mode 分组；common 与各 target variant 用 `\n\n` 拼接；保留首个 id。
+    pub fn normalize_to_three_slots(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        let mut shared: Vec<InstructionBlock> = Vec::new();
+        let mut adapted: Vec<InstructionBlock> = Vec::new();
+        let mut target_only: Vec<InstructionBlock> = Vec::new();
+        for block in self.blocks.drain(..) {
+            match block.mode {
+                InstructionBlockMode::Shared => shared.push(block),
+                InstructionBlockMode::Adapted => adapted.push(block),
+                InstructionBlockMode::TargetOnly => target_only.push(block),
+            }
+        }
+        let mut next = Vec::with_capacity(3);
+        if let Some(block) = merge_mode_group(InstructionBlockMode::Shared, shared) {
+            next.push(block);
+        }
+        if let Some(block) = merge_mode_group(InstructionBlockMode::Adapted, adapted) {
+            next.push(block);
+        }
+        if let Some(block) = merge_mode_group(InstructionBlockMode::TargetOnly, target_only) {
+            next.push(block);
+        }
+        self.blocks = next;
+    }
+}
+
+/// 合并同 mode 多块为单个块。
+fn merge_mode_group(
+    mode: InstructionBlockMode,
+    group: Vec<InstructionBlock>,
+) -> Option<InstructionBlock> {
+    if group.is_empty() {
+        return None;
+    }
+    let first = &group[0];
+    let id = first.id.clone();
+    let heading_path = first.heading_path.clone();
+    let needs_adaptation = group.iter().any(|b| b.needs_adaptation);
+    let source_target = group.iter().find_map(|b| b.source_target);
+
+    let commons: Vec<&str> = group
+        .iter()
+        .filter_map(|b| b.common_markdown.as_deref())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let common_joined = join_block_texts(&commons);
+
+    let mut variants: BTreeMap<AgentTarget, String> = BTreeMap::new();
+    for target in [AgentTarget::Claude, AgentTarget::Codex, AgentTarget::OpenCode] {
+        let parts: Vec<&str> = group
+            .iter()
+            .filter_map(|b| b.variants.get(&target).map(String::as_str))
+            .filter(|s| !s.is_empty())
+            .collect();
+        let joined = join_block_texts(&parts);
+        if !joined.is_empty() {
+            variants.insert(target, joined);
+        }
+    }
+
+    match mode {
+        InstructionBlockMode::Shared => Some(InstructionBlock {
+            id,
+            mode: InstructionBlockMode::Shared,
+            common_markdown: if common_joined.is_empty() {
+                None
+            } else {
+                Some(common_joined)
+            },
+            structured_intent: None,
+            variants: BTreeMap::new(),
+            heading_path,
+            source_target: None,
+            needs_adaptation: false,
+        }),
+        InstructionBlockMode::Adapted => Some(InstructionBlock {
+            id,
+            mode: InstructionBlockMode::Adapted,
+            common_markdown: if common_joined.is_empty() {
+                None
+            } else {
+                Some(common_joined)
+            },
+            structured_intent: None,
+            variants,
+            heading_path,
+            source_target: None,
+            needs_adaptation: false,
+        }),
+        InstructionBlockMode::TargetOnly => Some(InstructionBlock {
+            id,
+            mode: InstructionBlockMode::TargetOnly,
+            common_markdown: None,
+            structured_intent: None,
+            variants,
+            heading_path,
+            source_target,
+            needs_adaptation,
+        }),
+    }
 }
 
 /// 渲染结果中的块字节区间。
@@ -430,4 +537,62 @@ fn join_block_texts(parts: &[&str]) -> String {
 fn join_owned_block_texts(parts: &[String]) -> String {
     let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
     join_block_texts(&refs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_to_three_slots_merges_same_mode_blocks() {
+        let mut doc = InstructionDocument {
+            relative_key: String::new(),
+            blocks: vec![
+                InstructionBlock::shared("s1", "A", vec![]),
+                InstructionBlock::shared("s2", "B", vec![]),
+                InstructionBlock::adapted(
+                    "a1",
+                    Some("base".into()),
+                    None,
+                    BTreeMap::from([(AgentTarget::Claude, "c1".into())]),
+                    vec![],
+                ),
+                InstructionBlock::target_only(
+                    "t1",
+                    AgentTarget::Claude,
+                    "only-c",
+                    vec![],
+                    false,
+                ),
+                InstructionBlock::target_only(
+                    "t2",
+                    AgentTarget::Codex,
+                    "only-x",
+                    vec![],
+                    false,
+                ),
+            ],
+        };
+        doc.normalize_to_three_slots();
+        assert_eq!(doc.blocks.len(), 3);
+        assert_eq!(doc.blocks[0].mode, InstructionBlockMode::Shared);
+        assert_eq!(
+            doc.blocks[0].common_markdown.as_deref(),
+            Some("A\n\nB")
+        );
+        assert_eq!(doc.blocks[1].mode, InstructionBlockMode::Adapted);
+        assert_eq!(
+            doc.blocks[1].variants.get(&AgentTarget::Claude).map(String::as_str),
+            Some("c1")
+        );
+        assert_eq!(doc.blocks[2].mode, InstructionBlockMode::TargetOnly);
+        assert_eq!(
+            doc.blocks[2].variants.get(&AgentTarget::Claude).map(String::as_str),
+            Some("only-c")
+        );
+        assert_eq!(
+            doc.blocks[2].variants.get(&AgentTarget::Codex).map(String::as_str),
+            Some("only-x")
+        );
+    }
 }

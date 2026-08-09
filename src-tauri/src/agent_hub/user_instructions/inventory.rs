@@ -481,7 +481,9 @@ async fn load_canonical(
     let Some(asset) = asset else {
         return Ok(None);
     };
-    let (document, _) = load_instruction_document_for_user_v2(asset, state).await?;
+    let (mut document, _) = load_instruction_document_for_user_v2(asset, state).await?;
+    // 用户级提示词固定三槽：旧 N 块在 inspect 时视图归并（写盘仍经 save）。
+    document.normalize_to_three_slots();
     let (mut common_content, mut target_extensions) = split_document_content(&document);
     // 块模型随 canonical 暴露给三栏 hydrate；与 common/extensions 同源，不单独裁剪。
     let blocks = document.blocks.iter().map(block_to_dto).collect::<Vec<_>>();

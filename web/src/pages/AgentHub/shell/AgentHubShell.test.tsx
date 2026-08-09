@@ -83,6 +83,32 @@ describe('AgentHubShell', () => {
     expect(onContextChange).toHaveBeenCalledWith({ agent: 'codex' });
   });
 
+  test('instructions tab shows lane switcher; skill tab hides it', () => {
+    const onContextChange = vi.fn();
+    const { rerender, props } = renderShell({ onContextChange });
+    expect(screen.getByTestId('agent-hub-lane-switcher')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-hub-lane-adapted'));
+    expect(onContextChange).toHaveBeenCalledWith({ instructionLane: 'adapted' });
+
+    fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
+    expect(onContextChange).toHaveBeenCalledWith({
+      tab: 'skill',
+      instructionLane: 'common',
+    });
+
+    const skillContext: AgentHubContext = {
+      ...DEFAULT_AGENT_HUB_CONTEXT,
+      tab: 'skill',
+      instructionLane: 'common',
+    };
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <AgentHubShell {...props} context={skillContext} onContextChange={onContextChange} />
+      </I18nextProvider>,
+    );
+    expect(screen.queryByTestId('agent-hub-lane-switcher')).toBeNull();
+  });
+
   test('user → project hides device selector and shows project selector', () => {
     const onContextChange = vi.fn();
     const { rerender, props } = renderShell({ onContextChange });
@@ -157,7 +183,10 @@ describe('AgentHubShell', () => {
     renderShell({ onContextChange });
 
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
-    expect(onContextChange).toHaveBeenCalledWith({ tab: 'skill' });
+    expect(onContextChange).toHaveBeenCalledWith({
+      tab: 'skill',
+      instructionLane: 'common',
+    });
 
     fireEvent.click(screen.getByTestId('agent-hub-tab-instructions'));
     expect(onContextChange).toHaveBeenCalledWith({ tab: 'instructions' });

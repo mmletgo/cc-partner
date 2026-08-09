@@ -39,6 +39,7 @@ function localContext(overrides: Partial<AgentHubContext> = {}): AgentHubContext
     deviceId: null,
     projectKey: null,
     tab: 'instructions',
+    instructionLane: 'common',
     adaptView: true,
     ...overrides,
   };

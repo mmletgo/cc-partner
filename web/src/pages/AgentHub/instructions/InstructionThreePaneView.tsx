@@ -2,8 +2,8 @@
  * 提示词三栏 pure view。
  *
  * Business Logic（为什么需要）:
- *   桌面默认同时展示 ① 块 ② 合成预览 ③ 原始文件；
- *   「从原始重新解析块」仅在原始栏，同步为写盘主入口。
+ *   桌面默认同时展示 ① 当前三槽 ② 合成预览 ③ 原始文件；
+ *   槽由壳层 instructionLane 选择；「从原始导入为公共」仅在原始栏。
  *
  * Code Logic（做什么）:
  *   只消费 labels/state/callbacks；禁止 @/api；hooks 不在本视图。
@@ -12,9 +12,9 @@
 import type { JSX } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
 import type { AgentTarget } from '@/lib/types/agentHub';
+import type { InstructionLane } from '../context/agentHubContext';
 import {
-  resolveBlockText,
-  type InstructionBlockDraft,
+  findBlockByMode,
   type InstructionThreePaneState,
 } from './instructionThreePane';
 import styles from './InstructionThreePaneView.module.css';
@@ -34,32 +34,27 @@ export interface InstructionThreePaneViewLabels {
   loading: string;
   retry: string;
   previewReadOnly: string;
-  addBlock: string;
+  slotCommonHint: string;
+  slotAdaptedHint: string;
+  slotExclusiveHint: string;
   dualDirtyTitle: string;
   dualDirtyDescription: string;
   useBlocksBaseline: string;
   useOriginalBaseline: string;
   cancel: string;
-  blockTitlePlaceholder: string;
   blockBodyPlaceholder: string;
   refresh: string;
-  blockMode: string;
-  blockModeShared: string;
-  blockModeAdapted: string;
-  blockModeTargetOnly: string;
   commonMarkdown: string;
-  variantsTitle: string;
-  variantClaude: string;
-  variantCodex: string;
-  variantOpencode: string;
   saveBlocks: string;
 }
 
 export interface InstructionThreePaneViewProps {
   labels: InstructionThreePaneViewLabels;
   state: InstructionThreePaneState;
-  /** 当前 agent 视角:①块栏按此过滤+投影，编辑映射回 common/variant[agent]。 */
+  /** 当前 agent：适配/独有槽与预览跟随此 agent。 */
   agent: AgentTarget;
+  /** 壳层选择的三槽 lane。 */
+  instructionLane: InstructionLane;
   loading: boolean;
   error: string | null;
   actionError: string | null;
@@ -73,21 +68,49 @@ export interface InstructionThreePaneViewProps {
   onRetry: () => void;
   onRefresh: () => void;
   onOriginalChange: (text: string) => void;
-  onBlockChange: (id: string, patch: Partial<Omit<InstructionBlockDraft, 'id'>>) => void;
-  onAddBlock: () => void;
+  /** 编辑当前 lane 对应槽的正文。 */
+  onSlotTextChange: (text: string) => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
   onCancelDualDirty: () => void;
 }
 
+function laneToMode(
+  lane: InstructionLane,
+): 'shared' | 'adapted' | 'targetOnly' {
+  switch (lane) {
+    case 'common':
+      return 'shared';
+    case 'adapted':
+      return 'adapted';
+    case 'exclusive':
+      return 'targetOnly';
+  }
+}
+
+function slotHint(
+  labels: InstructionThreePaneViewLabels,
+  lane: InstructionLane,
+): string {
+  switch (lane) {
+    case 'common':
+      return labels.slotCommonHint;
+    case 'adapted':
+      return labels.slotAdaptedHint;
+    case 'exclusive':
+      return labels.slotExclusiveHint;
+  }
+}
+
 /**
  * Business Logic: 渲染三栏编辑器；loading/error 守卫在视图内展示，不阻断父层 hooks。
- * Code Logic: 纯 props 渲染；reparse 仅绑在原始栏。
+ * Code Logic: 纯 props 渲染；左栏单槽编辑，reparse 仅绑在原始栏。
  */
 export function InstructionThreePaneView(props: InstructionThreePaneViewProps): JSX.Element {
   const {
     labels,
     state,
     agent,
+    instructionLane,
     loading,
     error,
     actionError,
@@ -101,8 +124,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     onRetry,
     onRefresh,
     onOriginalChange,
-    onBlockChange,
-    onAddBlock,
+    onSlotTextChange,
     onChooseBaseline,
     onCancelDualDirty,
   } = props;
@@ -130,6 +152,19 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
       </StatusMessage>
     );
   }
+
+  const mode = laneToMode(instructionLane);
+  const block = findBlockByMode(state.blocks, mode);
+  let slotText = '';
+  if (mode === 'shared') {
+    slotText = block?.commonMarkdown ?? '';
+  } else if (mode === 'adapted') {
+    // 无 variant 时展示 common 作底稿
+    slotText = block?.variants[agent] ?? block?.commonMarkdown ?? '';
+  } else {
+    slotText = block?.variants[agent] ?? '';
+  }
+  const slotEmpty = slotText.trim().length === 0 && !block;
 
   return (
     <div className={styles.root} data-testid="instruction-three-pane">
@@ -220,78 +255,47 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
       ) : null}
 
       <div className={styles.panes} role="group" aria-label={labels.blocksTitle}>
-        {/* ① 块 */}
+        {/* ① 当前三槽 */}
         <section className={styles.pane} data-testid="instruction-pane-blocks">
           <header className={styles.paneHeader}>
             <h2 className={styles.paneTitle}>{labels.blocksTitle}</h2>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onAddBlock}
-              data-testid="instruction-add-block"
-            >
-              {labels.addBlock}
-            </Button>
           </header>
           <div className={styles.paneBody}>
-            {state.blocks.filter((block) => resolveBlockText(block, agent) !== null)
-              .length === 0 ? (
+            <p className={styles.paneHint} data-testid="instruction-slot-hint">
+              {slotHint(labels, instructionLane)}
+            </p>
+            {slotEmpty ? (
               <p className={styles.empty} data-testid="instruction-blocks-empty">
                 {labels.emptyBlocks}
               </p>
             ) : (
               <div className={styles.blockList} data-testid="instruction-block-list">
-                {state.blocks
-                  .filter((block) => resolveBlockText(block, agent) !== null)
-                  .map((block) => {
-                    const blockText = resolveBlockText(block, agent) ?? '';
-                    return (
-                      <article
-                        key={block.id}
-                        className={styles.blockCard}
-                        data-testid={`instruction-block-${block.id}`}
-                      >
-                        <select
-                          className={styles.blockModeSelect}
-                          value={block.mode}
-                          aria-label={labels.blockMode}
-                          data-testid={`instruction-block-mode-${block.id}`}
-                          onChange={(event) => {
-                            const mode = event.currentTarget
-                              .value as InstructionBlockDraft['mode'];
-                            onBlockChange(block.id, {
-                              mode,
-                              sourceTarget: mode === 'targetOnly' ? agent : null,
-                            });
-                          }}
-                        >
-                          <option value="shared">{labels.blockModeShared}</option>
-                          <option value="adapted">{labels.blockModeAdapted}</option>
-                          <option value="targetOnly">{labels.blockModeTargetOnly}</option>
-                        </select>
-                        <textarea
-                          className={styles.blockBodyInput}
-                          value={blockText}
-                          placeholder={labels.blockBodyPlaceholder}
-                          aria-label={labels.commonMarkdown}
-                          data-testid={`instruction-block-text-${block.id}`}
-                          onChange={(event) => {
-                            const text = event.currentTarget.value;
-                            const variants = { ...block.variants, [agent]: text };
-                            // per-agent 独立：编辑只写 variant[agent]，不改 common → 不影响其他 agent。
-                            // shared 块编辑自动转 adapted（common 保留作其他 agent fallback）。
-                            if (block.mode === 'shared') {
-                              onBlockChange(block.id, { mode: 'adapted', variants });
-                            } else {
-                              onBlockChange(block.id, { variants });
-                            }
-                          }}
-                        />
-                      </article>
-                    );
-                  })}
+                <article
+                  className={styles.blockCard}
+                  data-testid={`instruction-block-slot-${instructionLane}`}
+                >
+                  <textarea
+                    className={styles.blockBodyInput}
+                    value={slotText}
+                    placeholder={labels.blockBodyPlaceholder}
+                    aria-label={labels.commonMarkdown}
+                    data-testid="instruction-slot-textarea"
+                    onChange={(event) => onSlotTextChange(event.currentTarget.value)}
+                  />
+                </article>
               </div>
             )}
+            {/* 空槽也保留可编辑入口，避免只能靠 reparse 才能输入 */}
+            {slotEmpty ? (
+              <textarea
+                className={styles.blockBodyInput}
+                value={slotText}
+                placeholder={labels.blockBodyPlaceholder}
+                aria-label={labels.commonMarkdown}
+                data-testid="instruction-slot-textarea"
+                onChange={(event) => onSlotTextChange(event.currentTarget.value)}
+              />
+            ) : null}
           </div>
         </section>
 

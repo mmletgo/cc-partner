@@ -2314,8 +2314,8 @@ pub(crate) fn block_from_dto(dto: &InstructionBlockDto) -> Result<InstructionBlo
 
 /// 块 DTO 列表 → InstructionDocument。
 ///
-/// Business Logic: 「保存块文档」把整份块模型序列化为权威 canonical 文档。
-/// Code Logic: 逐块 reverse；空 id 补 UUIDv7；relative_key 留空（用户级指令不使用）。
+/// Business Logic: 「保存块文档」把整份块模型序列化为权威 canonical 文档，并归并为固定三槽。
+/// Code Logic: 逐块 reverse；空 id 补 UUIDv7；normalize_to_three_slots；relative_key 留空。
 pub(crate) fn instruction_document_from_block_dtos(
     dtos: &[InstructionBlockDto],
 ) -> Result<InstructionDocument, AppError> {
@@ -2327,10 +2327,12 @@ pub(crate) fn instruction_document_from_block_dtos(
         }
         blocks.push(block);
     }
-    Ok(InstructionDocument {
+    let mut document = InstructionDocument {
         relative_key: String::new(),
         blocks,
-    })
+    };
+    document.normalize_to_three_slots();
+    Ok(document)
 }
 
 /// 块 → DTO。

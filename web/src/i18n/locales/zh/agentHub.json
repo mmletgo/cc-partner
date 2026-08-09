@@ -36,6 +36,13 @@
       "mcp": "MCP",
       "plugin": "Plugin"
     },
+    "laneLabel": "提示词槽",
+    "laneAria": "公共、适配、独有",
+    "lanes": {
+      "common": "公共",
+      "adapted": "适配",
+      "exclusive": "独有"
+    },
     "pull": "拉取…",
     "push": "推送…",
     "adapt": "适配到其他 Agent…",
@@ -43,25 +50,28 @@
   },
   "instructions": {
     "threePane": {
-      "blocksTitle": "块",
+      "blocksTitle": "当前槽",
       "previewTitle": "合成预览",
       "originalTitle": "原始文件",
-      "reparseFromOriginal": "从原始重新解析块",
+      "reparseFromOriginal": "从原始导入为公共",
       "syncToNative": "同步到原生文件…",
-      "emptyBlocks": "尚无块。请在原始栏重新解析，或手动添加块。",
-      "emptyPreview": "在重新解析或填写块之前，预览保持为空。",
+      "emptyBlocks": "当前槽为空。可在原始栏导入为公共，或直接在此编辑。",
+      "emptyPreview": "在填写公共/适配/独有槽之前，预览保持为空。",
       "emptyOriginal": "未找到该 Agent 的原始内容。可在此起草并同步。",
       "pathLabel": "路径",
       "noPath": "未解析到路径",
       "loading": "正在加载提示词…",
-      "previewReadOnly": "只读",
+      "previewReadOnly": "只读（公共 + 当前 Agent 适配 + 独有）",
+      "slotCommonHint": "所有 Agent 共用正文；切换 Agent 不影响本栏。",
+      "slotAdaptedHint": "当前 Agent 的适配变体；无变体时显示公共底稿。",
+      "slotExclusiveHint": "仅当前 Agent 写入的独有内容。",
       "addBlock": "添加块",
       "dualDirtyTitle": "选择同步基线",
-      "dualDirtyDescription": "块与原始文件均已修改且内容不一致。请选择写入哪一侧。",
-      "useBlocksBaseline": "以块合成为准",
+      "dualDirtyDescription": "槽与原始文件均已修改且内容不一致。请选择写入哪一侧。",
+      "useBlocksBaseline": "以槽合成为准",
       "useOriginalBaseline": "以原始文件为准",
       "blockTitlePlaceholder": "块标题",
-      "blockBodyPlaceholder": "块正文",
+      "blockBodyPlaceholder": "在此编辑当前槽正文",
       "refresh": "重新扫描",
       "blockMode": "块模式",
       "blockModeShared": "公共（三 Agent 共用）",
@@ -69,10 +79,10 @@
       "blockModeTargetOnly": "仅目标 Agent",
       "commonMarkdown": "公共正文",
       "variantsTitle": "各 Agent 变体",
-      "saveBlocks": "保存块",
+      "saveBlocks": "保存三槽",
       "writeBlocked": "当前 Agent 禁止写入。仍可编辑草稿，但同步已禁用。",
       "errors": {
-        "emptySync": "没有可同步的内容。请先填写原文或块。"
+        "emptySync": "没有可同步的内容。请先填写原文或三槽。"
       }
     }
   },
