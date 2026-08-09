@@ -62,6 +62,7 @@ import {
   type SoftKeyboardFocusTarget,
 } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
+import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
@@ -996,15 +997,15 @@ export function MobileTerminalPanel({
   ) : !visibleSession ? (
     <div className={styles.mobileTerminalEmpty}>
       <span>{t('workbench:mobile.terminalPanel.noSession')}</span>
-      <button
+      <PointerPrimaryButton
         type="button"
         className={styles.mobileTerminalPrimaryButton}
         disabled={isActionDisabled}
-        onClick={() => void handleCreateSession()}
+        onPrimary={() => void handleCreateSession()}
       >
         <PlusIcon size={16} aria-hidden="true" />
         <span>{t('workbench:mobile.terminalPanel.newWindow')}</span>
-      </button>
+      </PointerPrimaryButton>
     </div>
   ) : null;
 
@@ -1049,12 +1050,12 @@ export function MobileTerminalPanel({
                   className={styles.mobileSessionTab}
                   data-active={isActive || undefined}
                 >
-                  <button
+                  <PointerPrimaryButton
                     type="button"
                     role="tab"
                     aria-selected={isActive}
                     className={styles.mobileSessionSelectButton}
-                    onClick={() => handleSelectSession(session)}
+                    onPrimary={() => handleSelectSession(session)}
                   >
                     <span className={styles.mobileSessionDot} data-status={session.status} />
                     <span className={styles.mobileSessionName}>{session.name}</span>
@@ -1064,8 +1065,9 @@ export function MobileTerminalPanel({
                         role="status"
                         aria-label={agentAria ?? phaseLabel}
                         title={agentAria ?? phaseLabel}
-                        onClick={(event) => {
-                          // 点击 Agent 状态只导航到该 terminal，永不发送输入。
+                        // 点击 Agent 状态只导航到该 terminal，永不发送输入；pointerDown 即触发，避免 IME 吞 click。
+                        onPointerDown={(event) => {
+                          event.preventDefault();
                           event.stopPropagation();
                           handleSelectSession(session);
                         }}
@@ -1079,31 +1081,31 @@ export function MobileTerminalPanel({
                         count: session.paneCount,
                       })}
                     </span>
-                  </button>
-                  <button
+                  </PointerPrimaryButton>
+                  <PointerPrimaryButton
                     type="button"
                     className={styles.mobileTerminalTabClose}
                     aria-label={t('workbench:mobile.terminalPanel.closeWindow')}
                     disabled={isActionDisabled}
-                    onClick={(event) => {
+                    onPrimary={(event) => {
                       event.stopPropagation();
                       void handleCloseSession(session);
                     }}
                   >
                     <XIcon size={14} aria-hidden="true" />
-                  </button>
+                  </PointerPrimaryButton>
                 </div>
               );
             })}
-            <button
+            <PointerPrimaryButton
               type="button"
               className={styles.mobileTerminalPrimaryButton}
               disabled={!project || isActionDisabled}
-              onClick={() => void handleCreateSession()}
+              onPrimary={() => void handleCreateSession()}
             >
               <PlusIcon size={16} aria-hidden="true" />
               <span>{t('workbench:mobile.terminalPanel.newWindow')}</span>
-            </button>
+            </PointerPrimaryButton>
           </div>
         ) : null}
 
@@ -1112,54 +1114,54 @@ export function MobileTerminalPanel({
             className={styles.mobileTerminalActions}
             aria-label={t('workbench:mobile.terminalPanel.actionsAriaLabel')}
           >
-            <button
+            <PointerPrimaryButton
               type="button"
               className={styles.mobileTerminalActionButton}
               disabled={!canUsePaneActions}
               aria-label={t('workbench:mobile.terminalPanel.addPane')}
               title={t('workbench:mobile.terminalPanel.addPane')}
-              onClick={() => void handleCreatePane()}
+              onPrimary={() => void handleCreatePane()}
             >
               <PlusIcon size={16} aria-hidden="true" />
               <span>{t('workbench:mobile.terminalPanel.addPane')}</span>
-            </button>
-            <button
+            </PointerPrimaryButton>
+            <PointerPrimaryButton
               type="button"
               className={styles.mobileTerminalActionButton}
               disabled={!canSwitchPane}
               aria-label={t('workbench:mobile.terminalPanel.switchPane')}
               title={t('workbench:mobile.terminalPanel.switchPane')}
-              onClick={() => void handleSwitchPane()}
+              onPrimary={() => void handleSwitchPane()}
             >
               <ArrowRightIcon size={16} aria-hidden="true" />
               <span>{t('workbench:mobile.terminalPanel.switchPane')}</span>
-            </button>
-            <button
+            </PointerPrimaryButton>
+            <PointerPrimaryButton
               type="button"
               className={styles.mobileTerminalActionButton}
               disabled={!canUsePaneActions}
               aria-label={t('workbench:mobile.terminalPanel.closePane')}
               title={t('workbench:mobile.terminalPanel.closePane')}
-              onClick={() => void handleClosePane()}
+              onPrimary={() => void handleClosePane()}
             >
               <XIcon size={16} aria-hidden="true" />
               <span>{t('workbench:mobile.terminalPanel.closePane')}</span>
-            </button>
-            <button
+            </PointerPrimaryButton>
+            <PointerPrimaryButton
               type="button"
               className={styles.mobileTerminalActionButton}
               disabled={!terminalChrome.exitFullscreen && !visibleSession}
               aria-label={terminalFullscreenLabel}
               title={terminalFullscreenLabel}
-              onClick={
+              onPrimary={() =>
                 terminalChrome.exitFullscreen
-                  ? handleExitTerminalFullscreen
-                  : handleEnterTerminalFullscreen
+                  ? handleExitTerminalFullscreen()
+                  : handleEnterTerminalFullscreen()
               }
             >
               <TerminalFullscreenIcon size={16} aria-hidden="true" />
               <span>{terminalFullscreenLabel}</span>
-            </button>
+            </PointerPrimaryButton>
           </div>
         ) : null}
       </div>

@@ -11,6 +11,7 @@ import {
   type SoftKeyboardFocusTarget,
 } from '../mobileTerminalExtraKeys';
 import styles from '../MobileWorkbench.module.css';
+import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 export interface MobileTerminalExtraKeysProps {
   disabled: boolean;
@@ -117,7 +118,7 @@ export function MobileTerminalExtraKeys({
           key.kind === 'modifier' && key.modifier != null && key.modifier === stickyModifier;
         const ariaLabel = extraKeyAriaLabel(t, key);
         return (
-          <button
+          <PointerPrimaryButton
             key={key.id}
             type="button"
             className={styles.mobileTerminalExtraKey}
@@ -128,27 +129,17 @@ export function MobileTerminalExtraKeys({
             aria-pressed={key.kind === 'modifier' ? pressed : undefined}
             title={ariaLabel}
             disabled={disabled}
-            onPointerDown={(event) => {
-              // 离开打字态：readonly + inputmode=none + blur，比单纯 blur 更能压住 iOS/Android 软键盘。
+            onPrimary={() => onKeyPress(key)}
+            // 离开打字态：readonly + inputmode=none + blur，比单纯 blur 更能压住 iOS/Android 软键盘。
+            beforePointerDown={() =>
               leaveMobileTerminalTypingMode(
                 findMobileTerminalHelperTextarea(document),
                 document.activeElement as SoftKeyboardFocusTarget | null,
-              );
-              // 阻止 button 获焦；焦点不得回到 xterm textarea。
-              event.preventDefault();
-            }}
-            onClick={() => {
-              if (disabled) return;
-              // click 路径再 leave 一次，覆盖 pointer 事件被吞掉的浏览器。
-              leaveMobileTerminalTypingMode(
-                findMobileTerminalHelperTextarea(document),
-                document.activeElement as SoftKeyboardFocusTarget | null,
-              );
-              onKeyPress(key);
-            }}
+              )
+            }
           >
             <span aria-hidden="true">{key.label}</span>
-          </button>
+          </PointerPrimaryButton>
         );
       })}
     </div>
