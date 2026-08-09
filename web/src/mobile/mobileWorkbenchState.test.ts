@@ -207,7 +207,7 @@ describe('mobileWorkbenchState', () => {
       'prompt',
     ]);
     assertArrayEqual(groups[3]?.panels ?? [], ['automation']);
-    assertArrayEqual(groups[4]?.panels ?? [], ['settings']);
+    assertArrayEqual(groups[4]?.panels ?? [], ['settings', 'provider']);
 
     const flat = getMobileWorkbenchPanelOrder();
     assertArrayEqual(flat, [
@@ -221,11 +221,13 @@ describe('mobileWorkbenchState', () => {
       'prompt',
       'automation',
       'settings',
+      'provider',
     ]);
     assertEqual(new Set(flat).size, flat.length);
     assertEqual(getMobileNavGroupIdForPanel('worktrees'), 'projects');
     assertEqual(getMobileNavGroupIdForPanel('git'), 'work');
     assertEqual(getMobileNavGroupIdForPanel('settings'), 'more');
+    assertEqual(getMobileNavGroupIdForPanel('provider'), 'more');
     assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
   });
 

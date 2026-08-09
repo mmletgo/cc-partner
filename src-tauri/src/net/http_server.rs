@@ -23,8 +23,8 @@ use crate::net::mobile_dev_proxy;
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
-    health, mobile, orchestrator, scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
-    workbench_project_order_sync,
+    health, mobile, orchestrator, provider_manager, scratchpad_sync, ssh_target_sync, sync,
+    transfer, workbench, workbench_project_order_sync,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
@@ -970,6 +970,16 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/claude-code/assets/bundle",
             post(claude_code_assets::assets_bundle),
+        )
+        // Provider Manager：移动端/对端经 HTTP 切换 cc-switch provider（复用无状态业务逻辑）
+        .route(
+            "/api/provider-manager/summary",
+            get(provider_manager::summary),
+        )
+        .route("/api/provider-manager/list", get(provider_manager::list))
+        .route(
+            "/api/provider-manager/switch",
+            post(provider_manager::switch),
         )
         // Workbench 远端目录选择与项目打开：远端设备执行本机 helper，调用方后续再建立 remote shortcut
         .route("/api/workbench/fs/roots", get(workbench::remote_roots))

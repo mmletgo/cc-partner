@@ -209,7 +209,9 @@
       "extraKeys": {
         "toolbarAriaLabel": "终端快捷键",
         "esc": "Esc 退出键",
+        "enter": "Enter 回车键",
         "tab": "Tab 制表键",
+        "shiftTab": "Shift+Tab 反向制表",
         "ctrl": "Ctrl 修饰键",
         "alt": "Alt 修饰键",
         "slash": "斜杠 /",
@@ -451,7 +453,8 @@
       "worktrees": "Worktrees",
       "prompt": "Prompt",
       "automation": "自动化",
-      "settings": "设置"
+      "settings": "设置",
+      "provider": "Provider"
     },
     "navGroups": {
       "projects": "项目",
@@ -496,6 +499,11 @@
       "settings": {
         "title": "设置",
         "label": "移动端"
+      },
+      "provider": {
+        "title": "Provider 管理",
+        "label": "切换各 agent 的当前 provider",
+        "unsupported": "当前设备后端版本不支持 provider 管理，请升级 cc-partner。"
       }
     },
     "theme": {

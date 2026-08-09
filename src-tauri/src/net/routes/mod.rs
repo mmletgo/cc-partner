@@ -20,6 +20,7 @@ pub mod claude_md_sync;
 pub mod health;
 pub mod mobile;
 pub mod orchestrator;
+pub mod provider_manager;
 pub mod scratchpad_sync;
 pub mod ssh_target_sync;
 pub mod sync;

@@ -212,7 +212,9 @@
       "extraKeys": {
         "toolbarAriaLabel": "Terminal extra keys",
         "esc": "Escape",
+        "enter": "Enter",
         "tab": "Tab",
+        "shiftTab": "Shift+Tab",
         "ctrl": "Control modifier",
         "alt": "Alt modifier",
         "slash": "Slash",
@@ -456,7 +458,8 @@
       "prompt": "Prompt",
       "automation": "Automation",
       "settings": "Settings",
-      "attention": "Attention"
+      "attention": "Attention",
+      "provider": "Provider"
     },
     "navGroups": {
       "projects": "Projects",
@@ -501,6 +504,11 @@
       "settings": {
         "title": "Settings",
         "label": "Mobile"
+      },
+      "provider": {
+        "title": "Provider Manager",
+        "label": "Switch the current provider per agent",
+        "unsupported": "This device's backend version does not support provider management. Please upgrade cc-partner."
       }
     },
     "theme": {

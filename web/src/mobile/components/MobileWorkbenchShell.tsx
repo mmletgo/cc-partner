@@ -13,6 +13,7 @@ import {
   HistoryIcon,
   MenuIcon,
   OrchestratorIcon,
+  ProviderManagerIcon,
   PromptsIcon,
   SettingsIcon,
   TerminalIcon,
@@ -47,6 +48,7 @@ const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
   prompt: PromptsIcon,
   automation: OrchestratorIcon,
   settings: SettingsIcon,
+  provider: ProviderManagerIcon,
 };
 
 const MOBILE_NAV_GROUP_TITLE_IDS: Record<MobileWorkbenchNavGroupId, string> = {
@@ -107,6 +109,7 @@ function MobilePanelNav({
     prompt: t('workbench:mobile.nav.prompt'),
     automation: t('workbench:mobile.nav.automation'),
     settings: t('workbench:mobile.nav.settings'),
+    provider: t('workbench:mobile.nav.provider'),
   };
   const groupLabels: Record<MobileWorkbenchNavGroupId, string> = {
     projects: t('workbench:mobile.navGroups.projects'),

@@ -267,6 +267,17 @@ pub const CAPABILITY_AGENT_HUB_V1: &str = "agent-hub.v1";
 ///     `agent-hub.portable-pull.v1`，与三条 portable 路由同 build 宣告（字典序）。
 pub const CAPABILITY_PORTABLE_PULL_V1: &str = "agent-hub.portable-pull.v1";
 
+/// 能力 token：移动端/对端切换 cc-switch provider（`/api/provider-manager/*`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     移动端 `/mobile` 浏览器经 HTTP 切换 provider 前，需确认后端已挂载 provider-manager
+///     路由；旧后端缺失时移动端面板显示 unsupported，不调业务路由。本 token 与三路由原子上线。
+///     路由对合法 loopback/LAN peer 无身份校验，token 仅协议协商，**不是**鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量 `provider-manager.v1`，列入 `server_protocol_info()`（字典序）。
+pub const CAPABILITY_PROVIDER_MANAGER_V1: &str = "provider-manager.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -331,6 +342,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
+            CAPABILITY_PROVIDER_MANAGER_V1.to_string(),
             CAPABILITY_SYNC_MANIFEST_V2.to_string(),
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
@@ -474,8 +486,8 @@ mod tests {
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
     ///     且包含 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
     ///     `orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、
-    ///     `transfer.complete.v1`、`transfer.resume.v1` 与 `workbench.mutation-outcome.v1`
-    ///     （分别与对应路由/ledger/契约原子上线；A0 后不再宣告已撤销的人工 review diff 能力）。
+    ///     `transfer.complete.v1`、`transfer.resume.v1`、`workbench.mutation-outcome.v1`
+    ///     与 `provider-manager.v1`（分别与对应路由/ledger/契约原子上线；A0 后不再宣告已撤销的人工 review diff 能力）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
@@ -498,6 +510,7 @@ mod tests {
                 "orchestrator.experiments.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
                 "orchestrator.workflow-document.v1".to_string(),
+                "provider-manager.v1".to_string(),
                 "sync.manifest.v2".to_string(),
                 "transfer.complete.v1".to_string(),
                 "transfer.resume.v1".to_string(),

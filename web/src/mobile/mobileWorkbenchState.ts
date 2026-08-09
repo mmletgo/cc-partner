@@ -14,7 +14,8 @@ export type MobileWorkbenchPanel =
   | 'worktrees'
   | 'prompt'
   | 'automation'
-  | 'settings';
+  | 'settings'
+  | 'provider';
 
 /**
  * 移动端主导航任务分组 id。
@@ -68,7 +69,7 @@ const MOBILE_WORKBENCH_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
   { id: 'attention', panels: ['attention'] },
   { id: 'work', panels: ['terminal', 'browser', 'files', 'git', 'prompt'] },
   { id: 'automation', panels: ['automation'] },
-  { id: 'more', panels: ['settings'] },
+  { id: 'more', panels: ['settings', 'provider'] },
 ];
 
 /** 由分组扁平化得到的 panel 顺序，保证与分组合同一致。 */

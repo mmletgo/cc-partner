@@ -109,6 +109,11 @@ const MobileSettingsPanel = lazy(() =>
     default: module.MobileSettingsPanel,
   })),
 );
+const MobileProviderPanel = lazy(() =>
+  import('./components/MobileProviderPanel').then((module) => ({
+    default: module.MobileProviderPanel,
+  })),
+);
 const MobileTerminalPanel = lazy(() =>
   import('./components/MobileTerminalPanel').then((module) => ({
     default: module.MobileTerminalPanel,
@@ -323,6 +328,10 @@ export function MobileWorkbench(): ReactElement {
     settings: {
       title: t('workbench:mobile.placeholders.settings.title'),
       label: t('workbench:mobile.placeholders.settings.label'),
+    },
+    provider: {
+      title: t('workbench:mobile.placeholders.provider.title'),
+      label: t('workbench:mobile.placeholders.provider.label'),
     },
   };
   const placeholder = panelPlaceholders[panel];
@@ -1190,7 +1199,12 @@ export function MobileWorkbench(): ReactElement {
       void loadProjects();
       return;
     }
-    if (currentPanel === 'projects' || currentPanel === 'settings') return;
+    if (
+      currentPanel === 'projects' ||
+      currentPanel === 'settings' ||
+      currentPanel === 'provider'
+    )
+      return;
     void refreshWorktrees({ expectedProjectId: projectId });
     if (currentPanel === 'terminal') {
       void refreshSessions();
@@ -1289,6 +1303,10 @@ export function MobileWorkbench(): ReactElement {
     ) : panel === 'settings' ? (
       <Suspense fallback={heavyPanelFallback}>
         <MobileSettingsPanel />
+      </Suspense>
+    ) : panel === 'provider' ? (
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileProviderPanel />
       </Suspense>
     ) : panel === 'browser' ? (
       <Suspense fallback={heavyPanelFallback}>
