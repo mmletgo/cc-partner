@@ -213,6 +213,50 @@ describe('Dialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  test('ghost click after pointer-open does not close (same-gesture synthetic click)', async () => {
+    // 复现移动端 FAB：pointerdown 打开 sheet 后，同一次手势的合成 click 落到刚挂载的 backdrop。
+    const onClose = vi.fn();
+    function PointerOpenHost(): ReactElement {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button
+            type="button"
+            data-testid="pointer-open"
+            onPointerDown={() => setOpen(true)}
+          >
+            Open
+          </button>
+          <Dialog
+            open={open}
+            titleId="ghost-dialog-title"
+            onClose={() => {
+              onClose();
+              setOpen(false);
+            }}
+          >
+            <h2 id="ghost-dialog-title">Ghost dialog</h2>
+            <button type="button">Inside</button>
+          </Dialog>
+        </>
+      );
+    }
+
+    render(<PointerOpenHost />);
+    const trigger = screen.getByTestId('pointer-open');
+    trigger.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1 }),
+    );
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
+    const backdrop = screen
+      .getByRole('dialog')
+      .parentElement!.querySelector('[data-dialog-backdrop]') as HTMLElement;
+    // 仅 click、无先于本手势的 backdrop pointerdown → 不得关闭
+    backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
   test('restores trigger focus after close', async () => {
     const user = userEvent.setup();
     render(<DialogHost />);

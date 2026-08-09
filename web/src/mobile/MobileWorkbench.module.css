@@ -1002,9 +1002,14 @@
 }
 
 .mobileTerminalPanel[data-fullscreen='true'] {
-  /* 全屏同样钉在 visualViewport，避免 100dvh 伸到系统键盘下面 */
+  /*
+   * 全屏是 fixed overlay，脱离文档流后不再跟随 shell 的 transform/top。
+   * 必须与 shell 使用同一 keyboard 上移合同：height 保持 layout 全屏、
+   * top = -keyboardInset，把 pane 工具条/终端/extra keys 一起平移到键盘上方。
+   * 禁止再用 --mobile-shell-offset-top（vv.offsetTop 在多数键盘场景为 0，无法让出键盘）。
+   */
   position: fixed;
-  top: var(--mobile-shell-offset-top, 0px);
+  top: calc(0px - var(--mobile-keyboard-inset, 0px));
   left: 0;
   right: 0;
   bottom: auto;

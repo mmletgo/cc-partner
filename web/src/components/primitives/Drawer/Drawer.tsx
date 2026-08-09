@@ -12,7 +12,13 @@
  *   side 控制左/右侧滑；useModalLayer 管理焦点与层栈；默认 closeOnEscape/closeOnBackdrop=true。
  */
 
-import { useCallback, useRef, type MouseEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useRef,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useModalLayer } from '../Dialog/useModalLayer';
 import type { DialogProps } from '../Dialog/Dialog';
@@ -30,6 +36,8 @@ export interface DrawerProps extends DialogProps {
  *
  * Code Logic（这个函数做什么）:
  *   hooks 全在 early return 前；open 时 portal；surface 标记 data-side 与 ARIA。
+ *   backdrop 关闭与 Dialog 一致：仅接受在遮罩上起手的完整主指针手势，防止打开触发器的
+ *   同一次 tap 把刚挂载的 drawer 立刻关掉。
  */
 export function Drawer(props: DrawerProps): ReactNode {
   const {
@@ -45,6 +53,8 @@ export function Drawer(props: DrawerProps): ReactNode {
   } = props;
 
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  /** 当前主指针是否在 backdrop 上按下；click 关闭必须匹配，防止 ghost click。 */
+  const backdropPointerDownRef = useRef(false);
 
   useModalLayer({
     open,
@@ -55,19 +65,45 @@ export function Drawer(props: DrawerProps): ReactNode {
   });
 
   /**
-   * backdrop 点击按策略关闭
+   * 记录 backdrop 主指针按下，供后续 click 判定是否为本手势。
    *
    * Business Logic（为什么需要这个函数）:
-   *   用户点击遮罩关闭抽屉（可配置）。
+   *   与 Dialog 相同：pointerdown 打开后合成 click 落到遮罩时不得误关。
    *
    * Code Logic（这个函数做什么）:
-   *   closeOnBackdrop 为 true 时调用 onClose。
+   *   仅主按钮且目标为 backdrop 自身时置位。
    */
-  const handleBackdropClick = useCallback(() => {
-    if (closeOnBackdrop) {
+  const handleBackdropPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        backdropPointerDownRef.current = false;
+        return;
+      }
+      backdropPointerDownRef.current = event.target === event.currentTarget;
+    },
+    [],
+  );
+
+  /**
+   * backdrop 点击：仅当 closeOnBackdrop 且本手势在遮罩上起手时关闭。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户点击遮罩关闭抽屉（可配置），但不能吃掉打开按钮的同一次 tap。
+   *
+   * Code Logic（这个函数做什么）:
+   *   要求 pointerdown 已在 backdrop 上记录，且 click 目标仍是 backdrop 自身。
+   */
+  const handleBackdropClick = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      const startedOnBackdrop = backdropPointerDownRef.current;
+      backdropPointerDownRef.current = false;
+      if (!closeOnBackdrop) return;
+      if (!startedOnBackdrop) return;
+      if (event.target !== event.currentTarget) return;
       onClose();
-    }
-  }, [closeOnBackdrop, onClose]);
+    },
+    [closeOnBackdrop, onClose],
+  );
 
   /**
    * 阻止 surface 点击冒泡
@@ -103,6 +139,7 @@ export function Drawer(props: DrawerProps): ReactNode {
       <div
         className={styles.backdrop}
         data-drawer-backdrop
+        onPointerDown={handleBackdropPointerDown}
         onClick={handleBackdropClick}
         aria-hidden="true"
       />

@@ -10,6 +10,8 @@
  *   surface 默认提供内容内边距（padding: var(--space-5)），直接塞标题/表单不再贴边；
  *   嵌套 Card 或 header/body 自管 padding 时，调用方 className 须 padding:0 覆盖；
  *   通过 useModalLayer 管理层栈、焦点陷阱、inert、滚动锁与触发焦点恢复；
+ *   backdrop 关闭只接受「在遮罩上起手」的完整主指针手势，避免打开触发器的同一次 tap
+ *   （pointerdown 打开 → 合成 click 落到刚挂载的遮罩）把弹层立刻关掉；
  *   无业务导入；closeOnEscape/closeOnBackdrop 默认 true。
  */
 
@@ -17,6 +19,7 @@ import {
   useCallback,
   useRef,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
 } from 'react';
@@ -43,6 +46,7 @@ export interface DialogProps {
  *
  * Code Logic（这个函数做什么）:
  *   hooks 全在 early return 前；open 时 createPortal 挂到 body；surface 带 ARIA 与 tabIndex=-1。
+ *   backdrop 关闭只接受「在遮罩上起手」的完整主指针手势。
  */
 export function Dialog(props: DialogProps): ReactNode {
   const {
@@ -57,6 +61,8 @@ export function Dialog(props: DialogProps): ReactNode {
   } = props;
 
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  /** 当前主指针是否在 backdrop 上按下；click 关闭必须匹配，防止 ghost click。 */
+  const backdropPointerDownRef = useRef(false);
 
   useModalLayer({
     open,
@@ -67,19 +73,46 @@ export function Dialog(props: DialogProps): ReactNode {
   });
 
   /**
-   * backdrop 点击：按策略关闭；忽略非主按钮
+   * 记录 backdrop 主指针按下，供后续 click 判定是否为本手势。
    *
    * Business Logic（为什么需要这个函数）:
-   *   用户点击遮罩期望关闭弹层（可配置关闭）。
+   *   移动端用 pointerdown 打开 sheet 时，同一次手势的合成 click 常落在刚挂载的遮罩上；
+   *   若只监听 click，会把「打开」误判为「点遮罩关闭」，弹层一闪即灭。
    *
    * Code Logic（这个函数做什么）:
-   *   closeOnBackdrop 为 true 时调用 onClose。
+   *   仅主按钮（button===0，含触摸）且目标为 backdrop 自身时置位；忽略冒泡自 surface 的事件。
    */
-  const handleBackdropClick = useCallback(() => {
-    if (closeOnBackdrop) {
+  const handleBackdropPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        backdropPointerDownRef.current = false;
+        return;
+      }
+      backdropPointerDownRef.current = event.target === event.currentTarget;
+    },
+    [],
+  );
+
+  /**
+   * backdrop 点击：仅当 closeOnBackdrop 且本手势在遮罩上起手时关闭。
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   用户点击遮罩期望关闭弹层（可配置关闭），但不能吃掉打开按钮的同一次 tap。
+   *
+   * Code Logic（这个函数做什么）:
+   *   要求 pointerdown 已在 backdrop 上记录，且 click 目标仍是 backdrop 自身；消费后清标记。
+   */
+  const handleBackdropClick = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      const startedOnBackdrop = backdropPointerDownRef.current;
+      backdropPointerDownRef.current = false;
+      if (!closeOnBackdrop) return;
+      if (!startedOnBackdrop) return;
+      if (event.target !== event.currentTarget) return;
       onClose();
-    }
-  }, [closeOnBackdrop, onClose]);
+    },
+    [closeOnBackdrop, onClose],
+  );
 
   /**
    * 阻止 surface 内点击冒泡到 root（若未来 root 也绑 click）
@@ -109,6 +142,7 @@ export function Dialog(props: DialogProps): ReactNode {
       <div
         className={styles.backdrop}
         data-dialog-backdrop
+        onPointerDown={handleBackdropPointerDown}
         onClick={handleBackdropClick}
         aria-hidden="true"
       />

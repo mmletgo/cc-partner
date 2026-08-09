@@ -261,10 +261,12 @@ export function MobileWorkbenchShell({
 
   /**
    * Business Logic（为什么需要这个 effect）:
-   *   软键盘弹出时 layout viewport 不变但 visualViewport 变矮，shell 必须压缩并保留顶部菜单可见。
+   *   软键盘弹出时 layout viewport 通常不变但 visualViewport 变矮；shell 与终端全屏 overlay
+   *   都依赖同一套 CSS 变量整体上移，避免输入区被键盘遮挡。
    *
    * Code Logic（这个 effect 做什么）:
-   *   监听 visualViewport resize/scroll 与 window resize，写入 --mobile-shell-height 等 CSS 变量。
+   *   监听 visualViewport resize/scroll 与 window resize，写入 --mobile-shell-height /
+   *   --mobile-keyboard-inset / --mobile-terminal-min-height 与 data-keyboard-open。
    */
   useEffect(() => {
     const root = shellRef.current;
@@ -272,7 +274,7 @@ export function MobileWorkbenchShell({
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   viewport 变化后需要同步 shell 高度与终端优先高度 token。
+     *   viewport 变化后需要同步 shell 高度、键盘上移量与终端优先高度 token。
      *
      * Code Logic（这个函数做什么）:
      *   读取 visualViewport/inner*，调用 computeMobileViewportLayoutHints 并写 CSS 变量。
@@ -286,10 +288,9 @@ export function MobileWorkbenchShell({
         vv?.height ?? null,
         offsetTop,
       );
-      // 钉在 visualViewport：键盘弹出时 top/height 同步上移与压缩，内容留在键盘上方。
-      root.style.setProperty('--mobile-shell-offset-top', `${Math.max(0, Math.round(offsetTop))}px`);
+      // shell 与全屏 terminal overlay 共用：height 保持 layout 全屏，top 取负 inset 整体上移。
       root.style.setProperty('--mobile-shell-height', `${hints.shellHeight}px`);
-      // inset 仅驱动 data-keyboard-open；CSS 不得再把它叠到 padding-bottom。
+      // inset 驱动 shell/fullscreen top；CSS 不得再把它叠到 padding-bottom。
       root.style.setProperty('--mobile-keyboard-inset', `${hints.keyboardInset}px`);
       root.style.setProperty('--mobile-terminal-min-height', `${hints.terminalMinHeight}px`);
       root.dataset.landscape = hints.landscape ? 'true' : 'false';
@@ -316,7 +317,6 @@ export function MobileWorkbenchShell({
       style={
         {
           // 初始 SSR/首帧回退：真实值由 visualViewport effect 覆盖
-          ['--mobile-shell-offset-top' as string]: '0px',
           ['--mobile-shell-height' as string]: '100dvh',
           ['--mobile-keyboard-inset' as string]: '0px',
           ['--mobile-terminal-min-height' as string]: '48dvh',

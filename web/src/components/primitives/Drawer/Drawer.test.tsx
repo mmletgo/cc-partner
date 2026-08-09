@@ -147,6 +147,48 @@ describe('Drawer', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  test('ghost click after pointer-open does not close (same-gesture synthetic click)', async () => {
+    const onClose = vi.fn();
+    function PointerOpenHost(): ReactElement {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button
+            type="button"
+            data-testid="pointer-open-drawer"
+            onPointerDown={() => setOpen(true)}
+          >
+            Open
+          </button>
+          <Drawer
+            open={open}
+            titleId="ghost-drawer-title"
+            onClose={() => {
+              onClose();
+              setOpen(false);
+            }}
+          >
+            <h2 id="ghost-drawer-title">Ghost drawer</h2>
+            <button type="button">Inside</button>
+          </Drawer>
+        </>
+      );
+    }
+
+    render(<PointerOpenHost />);
+    const trigger = screen.getByTestId('pointer-open-drawer');
+    trigger.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1 }),
+    );
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
+    const backdrop = screen
+      .getByRole('dialog')
+      .parentElement!.querySelector('[data-drawer-backdrop]') as HTMLElement;
+    backdrop.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
   test('restores trigger focus on close', async () => {
     const user = userEvent.setup();
     render(<DrawerHost />);
