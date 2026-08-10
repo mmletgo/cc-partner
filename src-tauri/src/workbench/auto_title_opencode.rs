@@ -7,7 +7,7 @@
 //!     轮询只读打开 opencode.db，读近期 session 行；按 native_session_id 或 directory≈cwd 绑定后 rename。
 
 use crate::state::AppState;
-use crate::workbench::auto_title::try_auto_rename_by_native_session;
+use crate::workbench::auto_title::{is_substantive_auto_title, try_auto_rename_by_native_session};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -58,6 +58,9 @@ pub struct OpenCodeSessionTitleRow {
 /// Code Logic（这个函数做什么）:
 ///     匹配 `*-branch` 或过短无空格英文 token 时返回 false。
 pub fn is_useful_opencode_title(title: &str) -> bool {
+    if !is_substantive_auto_title(title) {
+        return false;
+    }
     let t = title.trim();
     if t.is_empty() {
         return false;

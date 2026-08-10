@@ -9,6 +9,7 @@
 
 pub mod agent_ledger;
 pub mod agent_runtime;
+pub mod agent_session_search;
 pub mod auto_title;
 pub mod auto_title_codex;
 pub mod auto_title_opencode;

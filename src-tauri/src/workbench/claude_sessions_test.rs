@@ -109,6 +109,23 @@ fn parse_prefers_ai_title_over_last_prompt_and_user() {
     );
     let index = build_session_index(&path).expect("应解析成功");
     assert_eq!(index.title, "最终自动标题");
+    assert!(index.has_ai_title, "ai-title 行应设置 has_ai_title");
+}
+
+#[test]
+fn parse_last_prompt_only_is_not_ai_title() {
+    let tmp = unique_temp_dir("parse_last_prompt_only_is_not_ai_title");
+    let path = write_jsonl(
+        &tmp,
+        "sess-lp-only",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"only user"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            r#"{"type":"last-prompt","lastPrompt":"draft prompt not a theme"}"#,
+        ],
+    );
+    let index = build_session_index(&path).expect("应解析成功");
+    assert_eq!(index.title, "draft prompt not a theme");
+    assert!(!index.has_ai_title, "仅 last-prompt 不得标记 has_ai_title");
 }
 
 /// Business Logic（为什么需要这个测试）:

@@ -68,7 +68,30 @@ pub fn should_apply_auto_title(
     let Some(next) = sanitize_auto_title(candidate) else {
         return false;
     };
+    // 过短/无信息标题（如单字、纯符号）不值得刷 tab。
+    if next.chars().count() < 3 {
+        return false;
+    }
     next != current_name.trim()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     自动命名必须来自 agent 生成的真实对话主题，不能是用户输入草稿或占位符。
+///
+/// Code Logic（这个函数做什么）:
+///     清洗后长度≥3 且不等于常见空占位；供 Claude/Codex/OpenCode 源侧过滤复用。
+pub fn is_substantive_auto_title(raw: &str) -> bool {
+    let Some(t) = sanitize_auto_title(raw) else {
+        return false;
+    };
+    if t.chars().count() < 3 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    !matches!(
+        lower.as_str(),
+        "new chat" | "new conversation" | "untitled" | "新对话" | "未命名"
+    )
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -172,6 +195,38 @@ pub fn pick_terminal_for_claude_session(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     历史 Claude session 常共享同一 cwd；多终端同 cwd 时若仍猜最新会互相抢名闪烁。
+///
+/// Code Logic（这个函数做什么）:
+///     规范化 cwd 后过滤 live rows；仅当恰好 1 条匹配时返回其 id，0 或多条均返回 None。
+pub fn pick_unique_terminal_for_cwd(
+    candidates: &[WorkbenchSessionRow],
+    claude_cwd: Option<&str>,
+) -> Option<String> {
+    let Some(cwd) = claude_cwd.map(str::trim).filter(|s| !s.is_empty()) else {
+        return None;
+    };
+    let key = normalize_path_key(cwd);
+    if key.is_empty() {
+        return None;
+    }
+    let mut matched_id: Option<String> = None;
+    for row in candidates {
+        if row.cwd.trim().is_empty() {
+            continue;
+        }
+        if normalize_path_key(&row.cwd) != key {
+            continue;
+        }
+        if matched_id.is_some() {
+            return None;
+        }
+        matched_id = Some(row.id.clone());
+    }
+    matched_id
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     Claude / Codex / OpenCode 共用：绑定 terminal 后做 first-pane 门禁与 auto rename。
 ///
 /// Code Logic（这个函数做什么）:
@@ -193,13 +248,21 @@ pub fn try_auto_rename_bound_title(
         return false;
     }
 
+    // 绑定策略：
+    // 1) native_session_id → agent runtime terminal（强绑定，首选）
+    // 2) 无 native 时仅当 cwd 唯一匹配一个 live terminal 才兜底
+    //    （多终端同 cwd 禁止猜，避免历史 session 互相抢名闪烁）
     let terminal_id = native_session_id
         .and_then(|n| find_terminal_by_native_session(state, n))
-        .or_else(|| pick_terminal_for_claude_session(&live, cwd));
+        .or_else(|| pick_unique_terminal_for_cwd(&live, cwd));
 
     let Some(terminal_id) = terminal_id else {
         return false;
     };
+
+    if !is_substantive_auto_title(&title) {
+        return false;
+    }
 
     // seed title-owner；多 pane 时仅 owner pane 上的 agent 可改名。
     let owner = registry.ensure_title_owner_pane(&terminal_id);
@@ -264,6 +327,12 @@ pub fn try_auto_rename_bound_title(
 /// Code Logic（这个函数做什么）:
 ///     委托 `try_auto_rename_bound_title`（native_session_id + cwd）。
 pub fn try_auto_rename_from_claude_index(state: &AppState, index: &ClaudeSessionIndex) {
+    if !index.has_ai_title {
+        return;
+    }
+    if !is_substantive_auto_title(&index.title) {
+        return;
+    }
     let _ = try_auto_rename_bound_title(
         state,
         &index.title,
@@ -440,6 +509,33 @@ mod tests {
             SessionNameSource::Auto,
             "new title"
         ));
+        assert!(!should_apply_auto_title(
+            "old",
+            SessionNameSource::Default,
+            "ab"
+        ));
+    }
+
+    #[test]
+    fn substantive_title_rejects_placeholders() {
+        assert!(is_substantive_auto_title("修复滚动问题"));
+        assert!(!is_substantive_auto_title("  a  "));
+        assert!(!is_substantive_auto_title("New Chat"));
+        assert!(!is_substantive_auto_title("未命名"));
+    }
+
+    #[test]
+    fn pick_unique_cwd_requires_exactly_one_match() {
+        let one = vec![row("only", "/tmp/proj", "2026-06-01T00:00:00Z")];
+        assert_eq!(
+            pick_unique_terminal_for_cwd(&one, Some("/tmp/proj")).as_deref(),
+            Some("only")
+        );
+        let two = vec![
+            row("a", "/tmp/proj", "2026-01-01T00:00:00Z"),
+            row("b", "/tmp/proj", "2026-06-01T00:00:00Z"),
+        ];
+        assert_eq!(pick_unique_terminal_for_cwd(&two, Some("/tmp/proj")), None);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::commands::workbench::{
     close_workbench_session_for_state, commit_workbench_worktree_for_state,
     create_workbench_browser_preview_for_state, create_workbench_session_for_state,
     create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
-    focus_workbench_session_for_state, get_claude_session_preview_for_state,
+    focus_workbench_session_for_state, get_agent_session_preview_for_state,
     get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
     list_workbench_dir_for_state, list_workbench_git_commits_for_state,
     list_workbench_sessions_for_state, list_workbench_worktrees_for_state,
@@ -35,8 +35,8 @@ use crate::commands::workbench::{
     owner_local_preflight_for_state, owner_local_safe_attach_for_state,
     push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
-    resume_claude_session_for_state, save_workbench_text_file_for_state,
-    search_claude_sessions_for_state, split_workbench_pane_for_state,
+    resume_agent_session_for_state, save_workbench_text_file_for_state,
+    search_agent_sessions_for_state, split_workbench_pane_for_state,
     switch_workbench_pane_for_state, zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
@@ -2217,15 +2217,14 @@ pub async fn mobile_stream_prompt_optimizer_to_session(
     Ok(Json(value))
 }
 
-/// 搜索远端设备本机 worktree 内的 Claude Code 历史 session。
+/// 搜索远端设备本机 worktree 内的 agent 历史 session（Claude / Codex / OpenCode）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     对端设备在 remote shortcut 上搜索历史 Claude 会话时，transcript 索引扫描必须在项目所在设备完成。
+///     remote shortcut 上的搜索必须在项目所在设备完成 transcript/DB 扫描。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收远端 local projectId/worktreeId/query，确认 projectId 是本机 local 后委托命令层
-///     search_claude_sessions_for_state（local 分支），返回 `SessionSearchResult` DTO
-///     （items + truncated + diagnostics；sessionId 为 Claude transcript UUID，无需包装）。
+///     确认 projectId 是本机 local；解析可选 source（缺省 claude）；委托
+///     `search_agent_sessions_for_state` 返回 `SessionSearchResult`。
 pub async fn search_claude_sessions(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -2234,25 +2233,35 @@ pub async fn search_claude_sessions(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
-    let result = search_claude_sessions_for_state(
+    let source = crate::workbench::agent_session_search::AgentSessionSource::parse(
+        req.source.as_deref().unwrap_or("claude"),
+    )
+    .ok_or_else(|| {
+        P2pError::from_app_error(
+            AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
+            &ctx,
+            "workbench.claude_sessions.search",
+        )
+    })?;
+    let result = search_agent_sessions_for_state(
         &state,
         &req.project_id,
         req.worktree_id.as_deref(),
         &req.query,
+        source,
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
     Ok(Json(result))
 }
 
-/// 读取远端单个 Claude session 的 preview 详情。
+/// 读取远端单个 agent session 的 preview 详情。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     对端设备的 preview 面板需要展示远端会话最近消息、cwd 等，只能由项目所在设备解析 transcript。
+///     preview 只能由项目所在设备解析对应 agent 数据源。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收远端 local projectId/worktreeId/sessionId，确认 projectId 是本机 local 后委托命令层
-///     get_claude_session_preview_for_state（local 分支）返回 SessionPreview。
+///     确认 local project；解析 source；委托 `get_agent_session_preview_for_state`。
 pub async fn get_claude_session_preview(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -2261,26 +2270,36 @@ pub async fn get_claude_session_preview(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
-    let preview = get_claude_session_preview_for_state(
+    let source = crate::workbench::agent_session_search::AgentSessionSource::parse(
+        req.source.as_deref().unwrap_or("claude"),
+    )
+    .ok_or_else(|| {
+        P2pError::from_app_error(
+            AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
+            &ctx,
+            "workbench.claude_sessions.preview",
+        )
+    })?;
+    let preview = get_agent_session_preview_for_state(
         &state,
         &req.project_id,
         req.worktree_id.as_deref(),
         &req.session_id,
+        source,
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.preview"))?;
     Ok(Json(preview))
 }
 
-/// 在远端设备 resume 一个历史 Claude session。
+/// 在远端设备 resume 一个历史 agent session。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     对端设备选中历史会话后，真实 terminal + `claude --resume` 必须在项目所在设备启动。
+///     真实 terminal + agent resume 命令必须在项目所在设备启动。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收远端 local projectId/worktreeId/sessionId，确认 projectId 是本机 local 后委托命令层
-///     resume_claude_session_for_state（local 分支）；返回的 sessionId 是本机新建 terminal 的 inner id，
-///     **不**包装 remote: 前缀（由发起方命令层包装）。
+///     确认 local project；解析 source；委托 `resume_agent_session_for_state`；
+///     返回 inner sessionId（不包装 remote: 前缀）。
 pub async fn resume_claude_session(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -2289,11 +2308,22 @@ pub async fn resume_claude_session(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;
-    let result = resume_claude_session_for_state(
+    let source = crate::workbench::agent_session_search::AgentSessionSource::parse(
+        req.source.as_deref().unwrap_or("claude"),
+    )
+    .ok_or_else(|| {
+        P2pError::from_app_error(
+            AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
+            &ctx,
+            "workbench.claude_sessions.resume",
+        )
+    })?;
+    let result = resume_agent_session_for_state(
         &state,
         &req.project_id,
         req.worktree_id.as_deref(),
         &req.session_id,
+        source,
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.resume"))?;

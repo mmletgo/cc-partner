@@ -563,7 +563,8 @@ export const workbenchApi = {
   claudeSessions: {
     /**
      * Business Logic（为什么需要这个函数）:
-     *   Command Palette 需要有界 session 搜索结果，并感知索引截断诊断。
+     *   Command Palette 需要有界 session 搜索结果，并感知索引截断诊断；
+     *   source 选择 Claude / Codex / OpenCode。
      *
      * Code Logic（这个函数做什么）:
      *   invokeDecoded search_claude_sessions → SessionSearchResult（items/truncated/diagnostics）。
@@ -572,6 +573,7 @@ export const workbenchApi = {
       projectId: string,
       worktreeId: string | null,
       query: string,
+      source: 'claude' | 'codex' | 'opencode' = 'claude',
     ): Promise<SessionSearchResult> =>
       invokeDecoded(
         'search_claude_sessions',
@@ -579,24 +581,37 @@ export const workbenchApi = {
           projectId,
           worktreeId,
           query,
+          source,
         },
         sessionSearchResultDecoder,
       ),
 
-    /** 取某 Claude session 的最近 20 条对话 + 元信息，用于 preview 面板。 */
-    preview: (projectId: string, worktreeId: string | null, sessionId: string) =>
+    /** 取某 agent session 的最近 20 条对话 + 元信息，用于 preview 面板。 */
+    preview: (
+      projectId: string,
+      worktreeId: string | null,
+      sessionId: string,
+      source: 'claude' | 'codex' | 'opencode' = 'claude',
+    ) =>
       invoke<SessionPreview>('get_claude_session_preview', {
         projectId,
         worktreeId,
         sessionId,
+        source,
       }),
 
-    /** 新建 terminal window 并注入 `claude --resume <sessionId>` 命令，返回新建 window 的 sessionId。 */
-    resume: (projectId: string, worktreeId: string | null, sessionId: string) =>
+    /** 新建 terminal window 并注入对应 agent resume 命令，返回新建 window 的 sessionId。 */
+    resume: (
+      projectId: string,
+      worktreeId: string | null,
+      sessionId: string,
+      source: 'claude' | 'codex' | 'opencode' = 'claude',
+    ) =>
       invoke<ResumeClaudeSessionResult>('resume_claude_session', {
         projectId,
         worktreeId,
         sessionId,
+        source,
       }),
   },
 

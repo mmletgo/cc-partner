@@ -318,9 +318,9 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/sessions/close-pane` | `routes/workbench.rs` | `tmux kill-pane`/`kill-window` + row delete | no-transport-retry | destructive |
 | POST | `/api/workbench/sessions/close` | `routes/workbench.rs` | `tmux kill-window`/`kill-session` + row delete | no-transport-retry | destructive |
 | POST | `/api/workbench/sessions/rename` | `routes/workbench.rs` | persists name + `tmux rename-window` | naturally-idempotent | same name replayed is a no-op on both SQLite and tmux |
-| POST | `/api/workbench/claude-sessions/search` | `routes/workbench.rs` | none; scans jsonl index | read-only | — |
-| POST | `/api/workbench/claude-sessions/preview` | `routes/workbench.rs` | none | read-only | — |
-| POST | `/api/workbench/claude-sessions/resume` | `routes/workbench.rs` | creates a new window + writes `claude --resume` command | requires-idempotency-key | creates a session then writes to it; no dedupe key yet, clients MUST NOT auto-retry |
+| POST | `/api/workbench/claude-sessions/search` | `routes/workbench.rs` | none; scans agent sessions (Claude jsonl / Codex rollout / OpenCode db) by optional `source` | read-only | body may include `source=claude\|codex\|opencode` (default claude) |
+| POST | `/api/workbench/claude-sessions/preview` | `routes/workbench.rs` | none | read-only | body may include `source` (default claude) |
+| POST | `/api/workbench/claude-sessions/resume` | `routes/workbench.rs` | creates a new window + writes agent resume command | requires-idempotency-key | creates a session then writes to it; no dedupe key yet, clients MUST NOT auto-retry; body may include `source` |
 | POST | `/api/workbench/prompt-optimizer/stream-to-session` | `routes/workbench.rs` | spawns Claude CLI and streams text into a terminal | no-transport-retry | paid, nondeterministic LLM call whose output is appended to the pane; replay duplicates tokens |
 | POST | `/api/workbench/browser/discover` | `routes/workbench.rs` | none; scans loopback dev servers | read-only | — |
 | POST | `/api/workbench/browser/preview` | `routes/workbench.rs` | registers a previewId (local relay or remote relay) | requires-idempotency-key | each call mints a new UUID previewId; replay registers a second stale entry |

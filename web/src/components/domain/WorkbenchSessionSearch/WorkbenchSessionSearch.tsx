@@ -2,20 +2,13 @@
  * WorkbenchSessionSearch 业务组件 - v3 中央 Command Palette
  *
  * Business Logic（为什么需要这个组件）:
- *   用户在 Workbench 终端里经常在多个 Claude Code 会话之间工作，但磁盘上的 session
- *   是无意义的 jsonl 文件名，无法快速找回之前某段对话继续。本组件提供一个类似
- *   Spotlight/VS Code Command Palette 的浮层，让用户在当前 worktree 范围内按标题
- *   或对话内容搜索 Claude session，预览最近对话后一键新建 window 执行 resume。
- *   搜索结果为有界 DTO；索引因预算截断时展示非阻塞诊断横幅，不把 truncated 当硬错误。
+ *   用户在 Workbench 终端里常在 Claude Code / Codex / OpenCode 会话间切换；磁盘上的
+ *   session 难以按内容找回。本组件提供 Command Palette：在当前 worktree 按标题/对话
+ *   搜索，并通过 agent tab 切换数据源，预览后一键新窗口 resume。
  *
  * Code Logic（这个组件做什么）:
- *   受控浮层（open/onClose）经共享 Dialog 提供 portal/backdrop/focus trap/列表 Esc 关闭；
- *   内部维护 query/hits/truncated/diagnostics/activeIndex/preview 等 state；useEffect 监听
- *   query+scope 做 300ms debounce 搜索；消费 SessionSearchResult.items 渲染列表，
- *   在列表上方按 diagnostics.status 展示 truncated/unavailable 横幅；input 的 onKeyDown
- *   处理 ↑↓ 导航 / ⏎ 进入 preview；preview 内 Esc 返回列表（closeOnEscape={!previewHit}）；
- *   选中后切到 preview 视图渲染最近 20 条对话，底部 resume 按钮回调父组件刷新 sessions
- *   并 focus 新 window。hooks 全部声明在任何条件渲染之前（AGENTS.md 第 20 条）。
+ *   受控浮层（open/onClose）经共享 Dialog；维护 query/source/hits/preview 等 state；
+ *   source 变化与 query debounce 触发 search；hooks 均在 early return 前。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -31,6 +24,11 @@ import type {
   SessionSearchHit,
 } from '@/lib/types';
 import styles from './WorkbenchSessionSearch.module.css';
+
+/** Session Search 支持的 agent 源（与后端 wire token 对齐）。 */
+export type SessionSearchSource = 'claude' | 'codex' | 'opencode';
+
+const SESSION_SEARCH_SOURCES: SessionSearchSource[] = ['claude', 'codex', 'opencode'];
 
 export interface WorkbenchSessionSearchProps {
   /** 是否展开浮层 */
@@ -184,6 +182,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   const { open, onClose, projectId, worktreeId, offline, worktreeName, onResumed } = props;
 
   const [query, setQuery] = useState('');
+  /** 当前搜索/agent 源：Claude / Codex / OpenCode */
+  const [source, setSource] = useState<SessionSearchSource>('claude');
   const [hits, setHits] = useState<SessionSearchHit[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [diagnostics, setDiagnostics] = useState<SessionSearchDiagnostics | null>(null);
@@ -216,7 +216,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     setLoading(true);
     setError(null);
     workbenchApi.claudeSessions
-      .search(projectId, worktreeId, query)
+      .search(projectId, worktreeId, query, source)
       .then((result) => {
         if (searchSeqRef.current !== seq) return;
         setHits(result.items);
@@ -236,7 +236,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
         if (searchSeqRef.current !== seq) return;
         setLoading(false);
       });
-  }, [projectId, worktreeId, query, open, t]);
+  }, [projectId, worktreeId, query, source, open, t]);
 
   /**
    * debounce 搜索：query / scope / open 变化时延迟 300ms 触发。
@@ -265,15 +265,27 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     return () => clearTimeout(focusTimer);
   }, [open]);
 
-  /** 关闭浮层时重置 query/诊断（下次打开从空搜索开始） */
+  /** 关闭浮层时重置 query/source/诊断（下次打开从空搜索与 Claude tab 开始） */
   useEffect(() => {
     if (open) return;
     setQuery('');
+    setSource('claude');
     setHits([]);
     setError(null);
     setTruncated(false);
     setDiagnostics(null);
   }, [open]);
+
+  /** 切换 agent 源时退出 preview 并清空结果，避免跨源误 resume */
+  useEffect(() => {
+    if (!open) return;
+    setPreviewHit(null);
+    setPreviewData(null);
+    setPreviewError(null);
+    setHits([]);
+    setActiveIndex(0);
+    setError(null);
+  }, [source, open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
@@ -291,7 +303,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
       setPreviewError(null);
       setPreviewLoading(true);
       workbenchApi.claudeSessions
-        .preview(projectId, worktreeId, hit.sessionId)
+        .preview(projectId, worktreeId, hit.sessionId, source)
         .then((result) => {
           if (previewSeqRef.current !== seq) return;
           setPreviewData(result);
@@ -306,7 +318,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
           setPreviewLoading(false);
         });
     },
-    [projectId, worktreeId, t],
+    [projectId, worktreeId, source, t],
   );
 
   /**
@@ -320,11 +332,12 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     if (!projectId || !previewHit || resuming) return;
     setResuming(true);
     workbenchApi.claudeSessions
-      .resume(projectId, worktreeId, previewHit.sessionId)
+      .resume(projectId, worktreeId, previewHit.sessionId, source)
       .then((result) => {
         if (result?.ok && result.sessionId) {
           // 清理自身状态，避免下次打开残留
           setQuery('');
+          setSource('claude');
           setHits([]);
           setTruncated(false);
           setDiagnostics(null);
@@ -343,7 +356,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
         setPreviewError(message || t('workbench:sessionSearch.resumeFailed'));
       })
       .finally(() => setResuming(false));
-  }, [projectId, worktreeId, previewHit, resuming, onResumed, t]);
+  }, [projectId, worktreeId, previewHit, source, resuming, onResumed, t]);
 
   /**
    * 列表视图键盘导航。
@@ -421,6 +434,14 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     [hits.length, t],
   );
 
+  /** 当前 agent 显示名（i18n；用分支保证 typed key） */
+  const agentLabel =
+    source === 'codex'
+      ? t('workbench:sessionSearch.agents.codex')
+      : source === 'opencode'
+        ? t('workbench:sessionSearch.agents.opencode')
+        : t('workbench:sessionSearch.agents.claude');
+
   /**
    * 截断/不可用诊断横幅（非阻塞，不替代结果列表）。
    * Business Logic：预算截断或对端缺诊断时提示结果可能不完整；unavailable 优先于 truncated。
@@ -466,7 +487,9 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     if (loading && hits.length === 0) {
       return (
         <div className={styles.stateBox}>
-          <div className={styles.stateTitle}>{t('workbench:sessionSearch.loadingScan')}</div>
+          <div className={styles.stateTitle}>
+            {t('workbench:sessionSearch.loadingScan', { agent: agentLabel })}
+          </div>
         </div>
       );
     }
@@ -486,8 +509,12 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
         <>
           {diagnosticsNotice}
           <div className={styles.stateBox}>
-            <div className={styles.stateTitle}>{t('workbench:sessionSearch.empty')}</div>
-            <div className={styles.stateHint}>{t('workbench:sessionSearch.emptyHint')}</div>
+            <div className={styles.stateTitle}>
+              {t('workbench:sessionSearch.empty', { agent: agentLabel })}
+            </div>
+            <div className={styles.stateHint}>
+              {t('workbench:sessionSearch.emptyHint', { agent: agentLabel })}
+            </div>
           </div>
         </>
       );
@@ -601,7 +628,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
                   <span className={styles.roleLabel} data-role={msg.role}>
                     {msg.role === 'user'
                       ? t('workbench:sessionSearch.roleUser')
-                      : t('workbench:sessionSearch.roleAssistant')}
+                      : t('workbench:sessionSearch.roleAssistant', { agent: agentLabel })}
                   </span>
                   <span className={styles.messageTime}>{formatRelativeTime(msg.timestamp, locale)}</span>
                 </div>
@@ -675,22 +702,51 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
           {renderPreviewBody()}
         </div>
       ) : (
-        <div className={styles.header}>
-          <SearchIcon size={20} className={styles.searchIcon} />
-          <input
-            ref={inputRef}
-            className={styles.input}
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleListKeyDown}
-            placeholder={t('workbench:sessionSearch.placeholder')}
-            spellCheck={false}
-            autoComplete="off"
-            disabled={offline}
-          />
-          <span className={styles.scopeBadge}>{t('workbench:sessionSearch.scopeWorktree')}</span>
-        </div>
+        <>
+          <div
+            className={styles.sourceTabs}
+            role="tablist"
+            aria-label={t('workbench:sessionSearch.sourceTabsAria')}
+          >
+            {SESSION_SEARCH_SOURCES.map((item) => {
+              const label =
+                item === 'codex'
+                  ? t('workbench:sessionSearch.agents.codex')
+                  : item === 'opencode'
+                    ? t('workbench:sessionSearch.agents.opencode')
+                    : t('workbench:sessionSearch.agents.claude');
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  role="tab"
+                  aria-selected={source === item}
+                  className={styles.sourceTab}
+                  data-active={source === item || undefined}
+                  onClick={() => setSource(item)}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <div className={styles.header}>
+            <SearchIcon size={20} className={styles.searchIcon} />
+            <input
+              ref={inputRef}
+              className={styles.input}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleListKeyDown}
+              placeholder={t('workbench:sessionSearch.placeholder', { agent: agentLabel })}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={offline}
+            />
+            <span className={styles.scopeBadge}>{t('workbench:sessionSearch.scopeWorktree')}</span>
+          </div>
+        </>
       )}
 
       {!previewHit && renderBody()}

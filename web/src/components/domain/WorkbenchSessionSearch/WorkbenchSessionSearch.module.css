@@ -33,6 +33,38 @@
   }
 }
 
+/* ── Agent 源 Tab（Claude / Codex / OpenCode） ── */
+.sourceTabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-4) 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sourceTab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.sourceTab:hover {
+  color: var(--fg);
+  background: var(--surface-warm);
+}
+
+.sourceTab[data-active] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
 /* ── Header（搜索视图） ── */
 .header {
   display: flex;

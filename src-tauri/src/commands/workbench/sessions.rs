@@ -9,6 +9,10 @@
 use crate::claude_cli;
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::workbench::agent_session_search::{
+    build_resume_command, check_agent_cli_available, preview_codex_session, preview_opencode_session,
+    search_codex_sessions, search_opencode_sessions, AgentSessionSource,
+};
 use crate::workbench::claude_sessions::{
     ensure_worktree_session_index_scanned, search_sessions_result, to_session_preview,
     ClaudeSessionIndex, SessionPreview, SessionSearchResult,
@@ -1734,13 +1738,20 @@ pub async fn delete_workbench_path(
 ///     remote shortcut 则把搜索请求转发到项目所在设备解析 transcript，避免本机读取不到远端文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 project row；local 分支 await ensure（singleflight+spawn_blocking）后读锁 search_sessions_result；
-///     remote 分支委托 remote_client（双形态解码为 SessionSearchResult）。
-pub(crate) async fn search_claude_sessions_for_state(
+/// 按 agent 源搜索 worktree 历史 session（Claude / Codex / OpenCode）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Session Search 浮层切换 tab 后需扫对应 agent 的磁盘历史；Claude 仍走既有索引，
+///     Codex/OpenCode 走按需扫描；remote shortcut 把 source 代理到 owning device 本机扫描。
+///
+/// Code Logic（这个函数做什么）:
+///     remote → RemoteSearchClaudeSessionsReq{source}；local 按 source 分支索引/扫描。
+pub(crate) async fn search_agent_sessions_for_state(
     state: &AppState,
     project_id: &str,
     worktree_id: Option<&str>,
     query: &str,
+    source: AgentSessionSource,
 ) -> Result<SessionSearchResult, AppError> {
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
@@ -1752,18 +1763,35 @@ pub(crate) async fn search_claude_sessions_for_state(
             project_id: context.inner_project_id.clone(),
             worktree_id: inner_worktree_id,
             query: query.to_string(),
+            source: Some(source.as_str().to_string()),
         };
         return RemoteWorkbenchClient::new()
             .with_expected_device_id(&context.device_id)
             .search_claude_sessions(&context.base_url, req)
             .await;
     }
-    // local 分支
     let worktree = resolve_worktree(state, &project, worktree_id).await?;
-    let shared =
-        ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path)).await;
-    let index = shared.read().expect("session index 读锁中毒");
-    Ok(search_sessions_result(&index, query, 50))
+    match source {
+        AgentSessionSource::Claude => {
+            let shared = ensure_worktree_session_index_scanned(
+                state,
+                std::path::Path::new(&worktree.path),
+            )
+            .await;
+            let index = shared.read().expect("session index 读锁中毒");
+            Ok(search_sessions_result(&index, query, 50))
+        }
+        AgentSessionSource::Codex => {
+            let path = worktree.path.clone();
+            let q = query.to_string();
+            tokio::task::spawn_blocking(move || search_codex_sessions(&path, &q, 50))
+                .await
+                .map_err(|e| AppError::generic(format!("Codex session 扫描 join 失败: {e}")))
+        }
+        AgentSessionSource::OpenCode => {
+            search_opencode_sessions(&worktree.path, query, 50).await
+        }
+    }
 }
 
 /// 搜索 worktree 范围内的 Claude Code 历史 session。
@@ -1779,12 +1807,34 @@ pub async fn search_claude_sessions(
     project_id: String,
     worktree_id: Option<String>,
     query: String,
+    source: Option<String>,
 ) -> Result<SessionSearchResult, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.search", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "query": query.clone() })).await? {
+    let source_token = source.clone().unwrap_or_else(|| "claude".to_string());
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "claude.search",
+        serde_json::json!({
+            "projectId": project_id.clone(),
+            "worktreeId": worktree_id.clone(),
+            "query": query.clone(),
+            "source": source_token,
+        }),
+    )
+    .await?
+    {
         return Ok(v);
     }
-    search_claude_sessions_for_state(state.inner(), &project_id, worktree_id.as_deref(), &query)
-        .await
+    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(
+        || AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
+    )?;
+    search_agent_sessions_for_state(
+        state.inner(),
+        &project_id,
+        worktree_id.as_deref(),
+        &query,
+        agent,
+    )
+    .await
 }
 
 /// 读取单个 Claude session 的 preview 详情。
@@ -1794,13 +1844,19 @@ pub async fn search_claude_sessions(
 ///     本机从内存索引取，remote shortcut 转发到项目所在设备解析 transcript。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 project row；local 分支取索引读锁后从 sessions.get(session_id) 拿 ClaudeSessionIndex 并 to_session_preview，
-///     不存在返回 not_found；remote 分支解析 inner worktreeId 后委托 remote_client。
-pub(crate) async fn get_claude_session_preview_for_state(
+/// 按 agent 源读取 session preview。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview 面板在 Claude/Codex/OpenCode tab 下展示最近对话；remote 代理到 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     remote 携带 source；local 按 source 分支索引/扫描。
+pub(crate) async fn get_agent_session_preview_for_state(
     state: &AppState,
     project_id: &str,
     worktree_id: Option<&str>,
     session_id: &str,
+    source: AgentSessionSource,
 ) -> Result<SessionPreview, AppError> {
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
@@ -1812,22 +1868,39 @@ pub(crate) async fn get_claude_session_preview_for_state(
             project_id: context.inner_project_id.clone(),
             worktree_id: inner_worktree_id,
             session_id: session_id.to_string(),
+            source: Some(source.as_str().to_string()),
         };
         return RemoteWorkbenchClient::new()
             .with_expected_device_id(&context.device_id)
             .get_claude_session_preview(&context.base_url, req)
             .await;
     }
-    // local 分支
     let worktree = resolve_worktree(state, &project, worktree_id).await?;
-    let shared =
-        ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path)).await;
-    let index = shared.read().expect("session index 读锁中毒");
-    let claude_index: &ClaudeSessionIndex = index
-        .sessions
-        .get(session_id)
-        .ok_or_else(|| AppError::not_found("Claude session 不存在"))?;
-    Ok(to_session_preview(claude_index))
+    match source {
+        AgentSessionSource::Claude => {
+            let shared = ensure_worktree_session_index_scanned(
+                state,
+                std::path::Path::new(&worktree.path),
+            )
+            .await;
+            let index = shared.read().expect("session index 读锁中毒");
+            let claude_index: &ClaudeSessionIndex = index
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| AppError::not_found("Claude session 不存在"))?;
+            Ok(to_session_preview(claude_index))
+        }
+        AgentSessionSource::Codex => {
+            let path = worktree.path.clone();
+            let sid = session_id.to_string();
+            tokio::task::spawn_blocking(move || preview_codex_session(&path, &sid))
+                .await
+                .map_err(|e| AppError::generic(format!("Codex preview join 失败: {e}")))?
+        }
+        AgentSessionSource::OpenCode => {
+            preview_opencode_session(&worktree.path, session_id).await
+        }
+    }
 }
 
 /// 读取单个 Claude session 的 preview 详情。
@@ -1836,22 +1909,39 @@ pub(crate) async fn get_claude_session_preview_for_state(
 ///     桌面端 preview 面板需要按 sessionId 展示本机或远端会话详情。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包 State 后委托 for_state helper。
+///     Tauri command 解包 State 后委托 for_state helper；可选 source 选择 agent。
 #[tauri::command]
 pub async fn get_claude_session_preview(
     state: State<'_, AppState>,
     project_id: String,
     worktree_id: Option<String>,
     session_id: String,
+    source: Option<String>,
 ) -> Result<SessionPreview, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.preview", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "sessionId": session_id.clone() })).await? {
+    let source_token = source.clone().unwrap_or_else(|| "claude".to_string());
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "claude.preview",
+        serde_json::json!({
+            "projectId": project_id.clone(),
+            "worktreeId": worktree_id.clone(),
+            "sessionId": session_id.clone(),
+            "source": source_token,
+        }),
+    )
+    .await?
+    {
         return Ok(v);
     }
-    get_claude_session_preview_for_state(
+    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(
+        || AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
+    )?;
+    get_agent_session_preview_for_state(
         state.inner(),
         &project_id,
         worktree_id.as_deref(),
         &session_id,
+        agent,
     )
     .await
 }
@@ -1865,16 +1955,19 @@ pub async fn get_claude_session_preview(
 ///     并把远端新建的 inner sessionId 包装成本机统一 remote sessionId。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 分支：读 config.github_trending.claude_cli_path → check_claude_cli_available（失败转中文业务错误）
-///     → resolve_worktree → local_create_workbench_session（默认 120x32）→ local_write_workbench_session_input 注入 resume 命令
-///     → 返回 ResumeClaudeSessionResult（sessionId 为本机新建 terminal id）。
-///     remote 分支（R42 H3）：先 project lease → re-get project → resume RPC → revalidate；
-///     失败补偿 close 远端 session；成功 ensure_session_watch_for_project 并返回 wrapped id。
-pub(crate) async fn resume_claude_session_for_state(
+/// 按 agent 源 resume 历史 session：新建终端并注入对应 CLI 命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Claude/Codex/OpenCode 的 resume 命令不同；remote shortcut 携带 source 代理到 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     remote 保持 R42 lease + close 补偿，请求带 source；本机检测 CLI 后 create + write。
+pub(crate) async fn resume_agent_session_for_state(
     state: &AppState,
     project_id: &str,
     worktree_id: Option<&str>,
     session_id: &str,
+    source: AgentSessionSource,
 ) -> Result<ResumeClaudeSessionResult, AppError> {
     // R42 H3：remote resume 实际会创建 terminal；与 create 一样先 lease 再读项目。
     let project_lease = state
@@ -1891,6 +1984,7 @@ pub(crate) async fn resume_claude_session_for_state(
             project_id: context.inner_project_id.clone(),
             worktree_id: inner_worktree_id,
             session_id: session_id.to_string(),
+            source: Some(source.as_str().to_string()),
         };
         let remote_result = RemoteWorkbenchClient::new()
             .with_expected_device_id(&context.device_id)
@@ -1934,20 +2028,33 @@ pub(crate) async fn resume_claude_session_for_state(
         });
     }
     drop(project_lease);
-    // local 分支：先检测 Claude CLI 可用，失败给清晰中文错误
-    let cli_path = state
-        .config
-        .read()
-        .expect("config 读锁中毒")
-        .github_trending
-        .claude_cli_path
-        .clone();
-    claude_cli::check_claude_cli_available(&cli_path)
-        .await
-        .map_err(|err| AppError::generic(format!("Claude CLI 不可用：{err}")))?;
-    // 解析 worktree（同时校验项目存在性），仅用于确保 worktree_path 有效
+
+    // local：检测 CLI 并注入 resume 命令
+    let command = match source {
+        AgentSessionSource::Claude => {
+            let cli_path = state
+                .config
+                .read()
+                .expect("config 读锁中毒")
+                .github_trending
+                .claude_cli_path
+                .clone();
+            claude_cli::check_claude_cli_available(&cli_path)
+                .await
+                .map_err(|err| AppError::generic(format!("Claude CLI 不可用：{err}")))?;
+            format!(
+                "{} --dangerously-skip-permissions --resume {}\n",
+                claude_cli::normalize_cli_path(&cli_path),
+                session_id.trim()
+            )
+        }
+        AgentSessionSource::Codex | AgentSessionSource::OpenCode => {
+            check_agent_cli_available(source).await?;
+            build_resume_command(source, session_id)
+        }
+    };
+
     let _worktree = resolve_worktree(state, &project, worktree_id).await?;
-    // 在该 worktree 新建一个 workbench terminal
     let new_session = local_create_workbench_session(
         state,
         project_id.to_string(),
@@ -1956,12 +2063,6 @@ pub(crate) async fn resume_claude_session_for_state(
         Some(32),
     )
     .await?;
-    // 注入 resume 命令并回车
-    let command = format!(
-        "{} --dangerously-skip-permissions --resume {}\n",
-        claude_cli::normalize_cli_path(&cli_path),
-        session_id
-    );
     local_write_workbench_session_input(state, new_session.id.clone(), command).await?;
     Ok(ResumeClaudeSessionResult {
         ok: true,
@@ -1975,22 +2076,39 @@ pub(crate) async fn resume_claude_session_for_state(
 ///     桌面端选中搜索结果后需要一键 resume 本机或远端历史会话。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 解包 State 后委托 for_state helper。
+///     Tauri command 解包 State 后委托 for_state helper；可选 source 选择 agent。
 #[tauri::command]
 pub async fn resume_claude_session(
     state: State<'_, AppState>,
     project_id: String,
     worktree_id: Option<String>,
     session_id: String,
+    source: Option<String>,
 ) -> Result<ResumeClaudeSessionResult, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.resume", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "sessionId": session_id.clone() })).await? {
+    let source_token = source.clone().unwrap_or_else(|| "claude".to_string());
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "claude.resume",
+        serde_json::json!({
+            "projectId": project_id.clone(),
+            "worktreeId": worktree_id.clone(),
+            "sessionId": session_id.clone(),
+            "source": source_token,
+        }),
+    )
+    .await?
+    {
         return Ok(v);
     }
-    resume_claude_session_for_state(
+    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(
+        || AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
+    )?;
+    resume_agent_session_for_state(
         state.inner(),
         &project_id,
         worktree_id.as_deref(),
         &session_id,
+        agent,
     )
     .await
 }

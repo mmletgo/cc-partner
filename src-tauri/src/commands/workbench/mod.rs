@@ -211,7 +211,7 @@ pub(crate) use projects::{
 pub(crate) use sessions::{
     close_workbench_pane_for_state, close_workbench_session_for_state,
     create_workbench_session_for_state, deactivate_workbench_terminal_stream_for_state,
-    focus_workbench_session_for_state, get_claude_session_preview_for_state,
+    focus_workbench_session_for_state, get_agent_session_preview_for_state,
     get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
     list_workbench_dir_for_state, local_close_workbench_pane, local_close_workbench_session,
     local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
@@ -221,7 +221,7 @@ pub(crate) use sessions::{
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
     local_write_workbench_session_input, local_zoom_workbench_pane,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
-    resume_claude_session_for_state, search_claude_sessions_for_state,
+    resume_agent_session_for_state, search_agent_sessions_for_state,
     select_workbench_pane_at_for_state, split_workbench_pane_for_state,
     switch_workbench_pane_for_state, write_workbench_session_input_for_state,
     zoom_workbench_pane_for_state,

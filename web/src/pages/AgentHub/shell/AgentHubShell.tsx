@@ -132,7 +132,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             {TABS.map((tab) => (
               <Button
                 key={tab}
-                variant={context.tab === tab ? 'secondary' : 'ghost'}
+                variant={context.tab === tab ? 'primary' : 'ghost'}
                 size="sm"
                 role="tab"
                 aria-selected={context.tab === tab}
@@ -200,7 +200,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             {SCOPES.map((scope) => (
               <Button
                 key={scope}
-                variant={context.scope === scope ? 'secondary' : 'ghost'}
+                variant={context.scope === scope ? 'primary' : 'ghost'}
                 size="sm"
                 role="tab"
                 aria-selected={context.scope === scope}
@@ -281,7 +281,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
               {LANES.map((lane) => (
                 <Button
                   key={lane}
-                  variant={context.instructionLane === lane ? 'secondary' : 'ghost'}
+                  variant={context.instructionLane === lane ? 'primary' : 'ghost'}
                   size="sm"
                   role="tab"
                   aria-selected={context.instructionLane === lane}
@@ -307,7 +307,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             {AGENTS.map((agent) => (
               <Button
                 key={agent}
-                variant={context.agent === agent ? 'secondary' : 'ghost'}
+                variant={context.agent === agent ? 'primary' : 'ghost'}
                 size="sm"
                 role="tab"
                 aria-selected={context.agent === agent}

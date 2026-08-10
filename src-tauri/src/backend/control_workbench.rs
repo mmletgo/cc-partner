@@ -709,16 +709,22 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(item)?)
         }
 
-        // ---- claude sessions ----
+        // ---- claude / multi-agent sessions ----
         "claude.search" => {
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");
             let query = optional_string(&payload, "query").unwrap_or_default();
-            let items = workbench::search_claude_sessions_for_state(
+            let source = optional_string(&payload, "source").unwrap_or_else(|| "claude".into());
+            let agent = crate::workbench::agent_session_search::AgentSessionSource::parse(&source)
+                .ok_or_else(|| {
+                    AppError::validation("未知 session 搜索源，支持 claude|codex|opencode")
+                })?;
+            let items = workbench::search_agent_sessions_for_state(
                 state,
                 &project_id,
                 worktree_id.as_deref(),
                 &query,
+                agent,
             )
             .await?;
             Ok(serde_json::to_value(items)?)
@@ -727,11 +733,17 @@ async fn dispatch_workbench_op(
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");
             let session_id = required_string(&payload, "sessionId")?;
-            let item = workbench::get_claude_session_preview_for_state(
+            let source = optional_string(&payload, "source").unwrap_or_else(|| "claude".into());
+            let agent = crate::workbench::agent_session_search::AgentSessionSource::parse(&source)
+                .ok_or_else(|| {
+                    AppError::validation("未知 session 搜索源，支持 claude|codex|opencode")
+                })?;
+            let item = workbench::get_agent_session_preview_for_state(
                 state,
                 &project_id,
                 worktree_id.as_deref(),
                 &session_id,
+                agent,
             )
             .await?;
             Ok(serde_json::to_value(item)?)
@@ -740,11 +752,17 @@ async fn dispatch_workbench_op(
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");
             let session_id = required_string(&payload, "sessionId")?;
-            let item = workbench::resume_claude_session_for_state(
+            let source = optional_string(&payload, "source").unwrap_or_else(|| "claude".into());
+            let agent = crate::workbench::agent_session_search::AgentSessionSource::parse(&source)
+                .ok_or_else(|| {
+                    AppError::validation("未知 session 搜索源，支持 claude|codex|opencode")
+                })?;
+            let item = workbench::resume_agent_session_for_state(
                 state,
                 &project_id,
                 worktree_id.as_deref(),
                 &session_id,
+                agent,
             )
             .await?;
             Ok(serde_json::to_value(item)?)

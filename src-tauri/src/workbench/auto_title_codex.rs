@@ -8,7 +8,7 @@
 //!     绑定 native_session_id 或 rollout session_meta.cwd；调用 auto_title rename。
 
 use crate::state::AppState;
-use crate::workbench::auto_title::try_auto_rename_by_native_session;
+use crate::workbench::auto_title::{is_substantive_auto_title, try_auto_rename_by_native_session};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -256,6 +256,9 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
             else {
+                continue;
+            };
+            if !is_substantive_auto_title(&title) {
                 continue;
             };
             if last_titles.get(&id).map(String::as_str) == Some(title.as_str()) {

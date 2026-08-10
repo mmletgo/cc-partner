@@ -415,6 +415,9 @@ pub struct RecentMessage {
 pub struct ClaudeSessionIndex {
     pub session_id: String,
     pub title: String,
+    /// 标题是否来自 Claude `type=ai-title`（仅此类可驱动 workbench window 自动命名）。
+    #[serde(default)]
+    pub has_ai_title: bool,
     pub transcript_path: PathBuf,
     pub first_activity_at: String,
     pub last_activity_at: String,
@@ -755,6 +758,11 @@ pub fn build_session_index_with_budget(
     }
 
     // 标题优先级：ai-title（Claude 自动生成）> last-prompt > 首条 user 文本。
+    // has_ai_title 标记真实对话主题，供 workbench auto-rename 门禁（避免 last-prompt 闪烁抢名）。
+    let has_ai_title = ai_title
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
     let title = ai_title
         .or(last_prompt)
         .or(first_user_text)
@@ -781,6 +789,7 @@ pub fn build_session_index_with_budget(
         ClaudeSessionIndex {
             session_id,
             title,
+            has_ai_title,
             transcript_path: path.to_path_buf(),
             first_activity_at,
             last_activity_at,
@@ -1838,11 +1847,19 @@ async fn scan_test_hooks_wait_before_scan() {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     索引刷新后应把 Claude ai-title 同步到绑定终端 window 名（best-effort）。
+///     索引刷新后应把 Claude **真实 ai-title** 同步到绑定终端 window 名（best-effort）。
+///     不得用 last-prompt/首条 user 抢名，否则尚未对话或历史 session 会让 tab 疯狂闪烁。
 ///
 /// Code Logic（这个函数做什么）:
-///     读共享索引全部 session，对非空 title 调用 `try_auto_rename_from_claude_index`。
+///     仅 has_ai_title 的 session；同 cwd 只取 last_activity_at 最新一条；
+///     按 session_id 去重「标题未变」后调用 `try_auto_rename_from_claude_index`。
 fn maybe_auto_title_from_index(state: &AppState, shared: &SharedWorktreeSessionIndex) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static LAST_APPLIED: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let last_applied = LAST_APPLIED.get_or_init(|| Mutex::new(HashMap::new()));
+
     let sessions: Vec<ClaudeSessionIndex> = match shared.read() {
         Ok(guard) => guard.sessions.values().cloned().collect(),
         Err(err) => {
@@ -1850,9 +1867,52 @@ fn maybe_auto_title_from_index(state: &AppState, shared: &SharedWorktreeSessionI
             return;
         }
     };
-    for index in sessions {
-        if index.title.trim().is_empty() {
-            continue;
+
+    // 仅真实 ai-title；空标题跳过。
+    let mut with_ai: Vec<ClaudeSessionIndex> = sessions
+        .into_iter()
+        .filter(|s| s.has_ai_title && !s.title.trim().is_empty())
+        .collect();
+    if with_ai.is_empty() {
+        return;
+    }
+
+    // 同 cwd 只保留最近活动的一条，避免多历史 session 抢同一个终端。
+    with_ai.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+    let mut best_by_cwd: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+    let mut no_cwd: Vec<ClaudeSessionIndex> = Vec::new();
+    for index in with_ai {
+        let key = index
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        match key {
+            Some(cwd) => {
+                best_by_cwd.entry(cwd).or_insert(index);
+            }
+            None => no_cwd.push(index),
+        }
+    }
+
+    let mut candidates: Vec<ClaudeSessionIndex> = best_by_cwd.into_values().collect();
+    candidates.extend(no_cwd);
+
+    for index in candidates {
+        let title = index.title.trim().to_string();
+        {
+            let mut map = match last_applied.lock() {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::debug!("auto-title last_applied 锁失败: {err}");
+                    return;
+                }
+            };
+            if map.get(&index.session_id).map(String::as_str) == Some(title.as_str()) {
+                continue;
+            }
+            map.insert(index.session_id.clone(), title);
         }
         crate::workbench::auto_title::try_auto_rename_from_claude_index(state, &index);
     }

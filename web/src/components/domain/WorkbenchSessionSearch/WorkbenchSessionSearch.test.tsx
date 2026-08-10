@@ -136,7 +136,7 @@ describe('WorkbenchSessionSearch', () => {
       },
       { timeout: 2000 },
     );
-    expect(searchMock).toHaveBeenCalledWith('p1', 'wt1', '');
+    expect(searchMock).toHaveBeenCalledWith('p1', 'wt1', '', 'claude');
   });
 
   test('shows truncated diagnostics when truncated=true', async () => {

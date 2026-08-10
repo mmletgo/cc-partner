@@ -465,43 +465,49 @@ pub struct RemotePromptOptimizerReq {
     pub session_id: String,
 }
 
-/// 远端搜索 Claude session 请求体。
+/// 远端搜索 agent session 请求体（Claude / Codex / OpenCode）。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     本机在 remote shortcut 的 workbench 里搜索历史 Claude Code 会话时，
-///     真实 transcript 解析必须发生在项目所在设备，故搜索请求需带上远端 local projectId、
-///     可选 worktreeId（限定 worktree 范围）和 query 关键词。
+///     本机在 remote shortcut 的 workbench 里搜索历史 agent 会话时，
+///     真实 transcript/DB 解析必须发生在项目所在设备，故搜索请求需带上远端 local projectId、
+///     可选 worktreeId（限定 worktree 范围）、query 关键词，以及 agent 源。
 ///
 /// Code Logic（这个结构体做什么）:
-///     使用 camelCase 序列化 `{projectId, worktreeId?, query}`，供 client 发送和 axum 路由接收复用。
+///     camelCase `{projectId, worktreeId?, query, source?}`；`source` 缺省按 claude（兼容旧对端）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteSearchClaudeSessionsReq {
     pub project_id: String,
     pub worktree_id: Option<String>,
     pub query: String,
+    /// `claude` | `codex` | `opencode`；缺省/未知由服务端按 claude 或 validation 处理。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
-/// 远端读取单个 Claude session preview 请求体。
+/// 远端读取单个 agent session preview 请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     用户在搜索结果中选中某条远端 session 后，preview 面板需要拿到该 session 的最近消息、
-///     标题、cwd 等详情；这些数据只能由项目所在设备从 jsonl transcript 解析得到。
+///     标题、cwd 等详情；这些数据只能由项目所在设备从对应 agent 数据源解析得到。
 ///
 /// Code Logic（这个结构体做什么）:
-///     使用 camelCase 序列化 `{projectId, worktreeId?, sessionId}`，供 client 与 axum route 共用。
+///     camelCase `{projectId, worktreeId?, sessionId, source?}`；`source` 缺省 claude。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteClaudeSessionReq {
     pub project_id: String,
     pub worktree_id: Option<String>,
     pub session_id: String,
+    /// `claude` | `codex` | `opencode`；缺省兼容旧客户端。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
-/// 远端 resume Claude session 结果体。
+/// 远端 resume agent session 结果体。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     resume 会在远端设备新建一个 workbench terminal 并注入 `claude --resume` 命令，
+///     resume 会在远端设备新建一个 workbench terminal 并注入对应 agent 的 resume 命令，
 ///     发起方需要拿到远端新建的 inner sessionId 以包装成本机统一 remote sessionId。
 ///
 /// Code Logic（这个结构体做什么）:
