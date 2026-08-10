@@ -270,6 +270,31 @@ export function writePortableFiltersToSearchParams(
   return next;
 }
 
+/** portable 库存筛选 URL 键（离开 assets 时必须清掉，否则 parse 会把 kind 当 tab）。 */
+const PORTABLE_FILTER_URL_KEYS = [
+  'kind',
+  'target',
+  'state',
+  'management',
+  'inventoryItemId',
+] as const;
+
+/**
+ * Business Logic: 离开 portable 资产区时清掉会干扰壳层 tab 的 filter query。
+ * Code Logic: 删 kind/target/state/management/inventoryItemId；仅当 section=assets 时删 section
+ *   （保留 diagnostics/syncImport 等非资产 section 深链）。
+ */
+export function clearPortableFilterSearchParams(params: URLSearchParams): URLSearchParams {
+  const next = new URLSearchParams(params);
+  for (const key of PORTABLE_FILTER_URL_KEYS) {
+    next.delete(key);
+  }
+  if (next.get('section') === 'assets') {
+    next.delete('section');
+  }
+  return next;
+}
+
 /**
  * Controller 返回值。
  *
@@ -810,18 +835,20 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     void loadAssetDetail(deepLinkAssetId);
   }, [deepLinkAssetId, deepLinkConflictId, loadAssetDetail, loadLegacyAssets]);
 
-  // hubContext.tab 与 activeSection 持续同步（含冷 ?tab=skill 后 setSearchParams）
+  // hubContext.tab → activeSection（仅 URL/context 变化时同步）
+  // 注意：不得把 activeSection 放进 deps——onContextChange 会乐观 setActiveSection，
+  // 若此时 searchParams 尚未刷成新 tab，effect 会用旧 hubContext 把 section 盖回 assets，
+  // 随后 filters→URL 再写 kind/section，表现为 skill/command/mcp/plugin 后无法切回提示词。
   useEffect(() => {
     if (hubContext.adaptView) return;
+    if (deepLinkSection) return; // legacy section= 由下方 effect 权威处理
     const mapped = mapContextToSection(hubContext);
-    if (mapped !== activeSection && !deepLinkSection) {
-      // 现代 URL 以 tab 为准；legacy section= 仍由下方 effect 处理
-      if (isAssetKindTab(hubContext.tab) || hubContext.tab === 'instructions') {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- tab→section dual-path
-        setActiveSectionState(mapped);
-      }
+    if (isAssetKindTab(hubContext.tab) || hubContext.tab === 'instructions') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- tab→section dual-path
+      setActiveSectionState(mapped);
     }
-  }, [hubContext, activeSection, deepLinkSection]);
+    // 仅跟随 hubContext / deepLinkSection；勿读 activeSection 以免乐观更新被 stale URL 回滚
+  }, [hubContext, deepLinkSection]);
 
   // diagnostics section 懒加载 status
   useEffect(() => {
@@ -1533,7 +1560,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   /**
    * Business Logic: 壳层 patch 写回 URL，并同步旧 activeSection 双路径内容。
-   * Code Logic: merge + scope 互斥 → writeAgentHubContext；资产 tab 顺带粗同步 kind/target filter。
+   * Code Logic: merge + scope 互斥 → writeAgentHubContext；离开资产 tab 时清 portable filter keys，
+   *   防止 filters→URL 残留 kind/section 经 parse 把 tab 拉回 skill/command；资产 tab 粗同步 filters。
    */
   const onContextChange = useCallback(
     (patch: Partial<AgentHubContext>) => {
@@ -1549,7 +1577,12 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (next.tab !== 'instructions') {
           next.instructionLane = 'common';
         }
-        return writeAgentHubContext(prev, next);
+        let written = writeAgentHubContext(prev, next);
+        // 离开 portable 资产 tab 时必须清掉 kind/section=assets 等，否则 re-parse 会盖回资产 tab
+        if (!isAssetKindTab(next.tab)) {
+          written = clearPortableFilterSearchParams(written);
+        }
+        return written;
       }, { replace: true });
 
       const merged: AgentHubContext = {
@@ -1573,14 +1606,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       }
 
       // 粗映射：资产 tab → portable kind/target 筛选
-      if (
-        merged.tab === 'skill' ||
-        merged.tab === 'command' ||
-        merged.tab === 'mcp' ||
-        merged.tab === 'plugin'
-      ) {
+      if (isAssetKindTab(merged.tab)) {
         portableInventoryBase.setFilters({
-          kind: merged.tab,
+          kind: merged.tab as PortableInventoryFilters['kind'],
           target: merged.agent,
           scope: merged.scope,
         });
@@ -1674,21 +1702,23 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot URL bootstrap
   }, []);
 
-  // section deep link later changes
+  // section deep link later changes（仅 URL section 变化时同步，勿把 activeSection 放 deps
+  // 否则乐观 setActiveSection 会被残留 section=assets 盖回 assets）
   useEffect(() => {
     if (!deepLinkSection) return;
-    const next = normalizeAgentHubSection(deepLinkSection, activeSection);
-    if (next !== activeSection) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-      setActiveSectionState(next);
-    }
-  }, [deepLinkSection, activeSection]);
+    const next = normalizeAgentHubSection(deepLinkSection);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+    setActiveSectionState(next);
+  }, [deepLinkSection]);
 
-  // filters/selection → URL while on assets
+  // filters/selection → URL while on portable asset tabs only
   useEffect(() => {
     if (portableUrlSyncSkipRef.current) return;
-    if (activeSection !== 'assets') return;
+    // 双路径：section 与壳层 tab 都必须在资产区，避免切回提示词后 stale filters 回写 kind/section
+    if (activeSection !== 'assets' || !isAssetKindTab(hubContext.tab)) return;
     setSearchParams((prev) => {
+      // 若现代 tab 已离开资产（竞态帧），禁止写回 legacy 导航键
+      if (!isAssetKindTab(parseAgentHubContext(prev).tab)) return prev;
       const desired = writePortableFiltersToSearchParams(
         prev,
         portableInventoryBase.filters,
@@ -1700,6 +1730,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     }, { replace: true });
   }, [
     activeSection,
+    hubContext.tab,
     portableInventoryBase.filters,
     portableInventoryBase.selectedItemId,
     setSearchParams,

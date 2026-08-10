@@ -394,6 +394,86 @@ describe('useAgentHubController', () => {
     expect(listAssets).not.toHaveBeenCalled();
   });
 
+  test('switching command → instructions is not stuck by portable filter URL sync', async () => {
+    // 真实 RR：setSearchParams 后 searchParams 同步更新，触发 re-parse。
+    setSearchParamsMock.mockImplementation((updater: unknown) => {
+      if (typeof updater === 'function') {
+        searchParamsMock.current = (updater as (prev: URLSearchParams) => URLSearchParams)(
+          searchParamsMock.current,
+        );
+      } else if (updater instanceof URLSearchParams) {
+        searchParamsMock.current = new URLSearchParams(updater);
+      }
+    });
+    // 非默认 kind：filters→URL 会写 kind=command + section=assets（skill 默认会删 kind）
+    searchParamsMock.current = new URLSearchParams('tab=command');
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem({ kind: 'command' })]));
+    const { result, rerender } = renderHook(() => useAgentHubController());
+
+    await waitFor(() => expect(result.current.activeSection).toBe('assets'));
+    await waitFor(() =>
+      expect(result.current.portableInventory.filters.kind).toBe('command'),
+    );
+    // assets 在场时 filters→URL 会写入 section/kind；这是触发回归的前置条件
+    await waitFor(() => {
+      expect(searchParamsMock.current.get('section')).toBe('assets');
+      expect(searchParamsMock.current.get('kind')).toBe('command');
+    });
+
+    act(() => {
+      result.current.onContextChange({ tab: 'instructions' });
+    });
+    // 模拟 useSearchParams 订阅到新 URL 后的 re-render
+    rerender();
+
+    expect(result.current.hubContext.tab).toBe('instructions');
+    expect(result.current.activeSection).toBe('userInstructions');
+    expect(result.current.instructionsLaneActive).toBe(true);
+    // 切回提示词后不得再残留会把 tab 解析成资产的 legacy 导航键
+    expect(searchParamsMock.current.get('tab')).toBeNull();
+    expect(searchParamsMock.current.get('section')).toBeNull();
+    expect(searchParamsMock.current.get('kind')).toBeNull();
+    expect(searchParamsMock.current.get('target')).toBeNull();
+
+    // 竞态回归：离开资产区后 filters 再变，也不得写回 kind/section 把 tab 拉回资产
+    act(() => {
+      result.current.portableInventory.setFilters({ kind: 'mcp' });
+    });
+    rerender();
+    expect(result.current.hubContext.tab).toBe('instructions');
+    expect(searchParamsMock.current.get('kind')).toBeNull();
+    expect(searchParamsMock.current.get('section')).toBeNull();
+    expect(result.current.activeSection).toBe('userInstructions');
+  });
+
+  test('optimistic instructions switch survives delayed URL while section=assets remains', async () => {
+    // 复现根因：setSearchParams 尚未把 tab 从 command 刷掉时，乐观 setActiveSection
+    // 不得被 hubContext/deepLinkSection effect 盖回 assets。
+    setSearchParamsMock.mockImplementation(() => {
+      /* 故意不更新 searchParamsMock —— 模拟 URL 滞后 */
+    });
+    searchParamsMock.current = new URLSearchParams('tab=command&section=assets&kind=command');
+    portableApiMocks.inspect.mockResolvedValue(
+      portableSnapshot([makePortableItem({ kind: 'command' })]),
+    );
+    const { result, rerender } = renderHook(() => useAgentHubController());
+
+    await waitFor(() => expect(result.current.activeSection).toBe('assets'));
+    expect(result.current.hubContext.tab).toBe('command');
+
+    act(() => {
+      result.current.onContextChange({ tab: 'instructions' });
+    });
+    // URL 仍旧：tab=command&section=assets —— 但乐观 activeSection 必须已是提示词
+    rerender();
+    expect(result.current.hubContext.tab).toBe('command'); // URL 滞后
+    expect(result.current.activeSection).toBe('userInstructions');
+
+    // 再渲染一帧仍不得被 effect 回滚
+    rerender();
+    expect(result.current.activeSection).toBe('userInstructions');
+  });
+
   test('cold default instructions skips listAssets and status (T1)', async () => {
     searchParamsMock.current = new URLSearchParams();
     const { result } = renderHook(() => useAgentHubController());
@@ -909,11 +989,13 @@ describe('useAgentHubController', () => {
 });
 
 import {
+  clearPortableFilterSearchParams,
   normalizeAgentHubSection,
   parsePortableFiltersFromSearchParams,
   writePortableFiltersToSearchParams,
 } from './useAgentHubController';
 import { DEFAULT_PORTABLE_INVENTORY_FILTERS } from './portableAssets';
+import { parseAgentHubContext, writeAgentHubContext } from './context/agentHubContext';
 
 describe('Agent Hub URL helpers', () => {
   test('normalizeAgentHubSection maps legacy portableAssets to assets', () => {
@@ -955,5 +1037,56 @@ describe('Agent Hub URL helpers', () => {
     expect(written.get('management')).toBe('hubManaged');
     expect(written.get('inventoryItemId')).toBe('item-1');
     expect(written.get('conflictId')).toBe('c9');
+  });
+
+  test('clearPortableFilterSearchParams drops assets section and filter keys only', () => {
+    const polluted = new URLSearchParams(
+      'section=assets&kind=command&target=claude&state=enabled&management=hubManaged&inventoryItemId=i1&bridge=/tmp&scope=user',
+    );
+    const cleared = clearPortableFilterSearchParams(polluted);
+    expect(cleared.get('section')).toBeNull();
+    expect(cleared.get('kind')).toBeNull();
+    expect(cleared.get('target')).toBeNull();
+    expect(cleared.get('state')).toBeNull();
+    expect(cleared.get('management')).toBeNull();
+    expect(cleared.get('inventoryItemId')).toBeNull();
+    expect(cleared.get('bridge')).toBe('/tmp');
+    // scope 可能是壳层键，clear 不删；诊断 section 保留
+    expect(cleared.get('scope')).toBe('user');
+
+    const diagnostics = clearPortableFilterSearchParams(
+      new URLSearchParams('section=diagnostics&kind=mcp'),
+    );
+    expect(diagnostics.get('section')).toBe('diagnostics');
+    expect(diagnostics.get('kind')).toBeNull();
+  });
+
+  test('write instructions then clear prevents legacy kind from re-parsing to asset tab', () => {
+    // 模拟：filters 曾写入 section/kind，再切回 instructions
+    const polluted = writePortableFiltersToSearchParams(
+      new URLSearchParams('tab=command'),
+      {
+        ...DEFAULT_PORTABLE_INVENTORY_FILTERS,
+        kind: 'command',
+        target: 'claude',
+      },
+      null,
+    );
+    expect(parseAgentHubContext(polluted).tab).toBe('command');
+
+    const toInstructions = writeAgentHubContext(polluted, {
+      agent: 'claude',
+      scope: 'user',
+      deviceId: null,
+      projectKey: null,
+      tab: 'instructions',
+      instructionLane: 'common',
+      adaptView: false,
+    });
+    // writeAgentHubContext 已剥 legacy；再 clear 是防御双写
+    const cleaned = clearPortableFilterSearchParams(toInstructions);
+    expect(parseAgentHubContext(cleaned).tab).toBe('instructions');
+    expect(cleaned.get('kind')).toBeNull();
+    expect(cleaned.get('section')).toBeNull();
   });
 });
