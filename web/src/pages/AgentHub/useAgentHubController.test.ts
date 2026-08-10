@@ -1007,7 +1007,7 @@ describe('Agent Hub URL helpers', () => {
   test('parse and write portable filter query contract', () => {
     const parsed = parsePortableFiltersFromSearchParams(
       new URLSearchParams(
-        'target=claude&kind=mcp&scope=project&state=problem&management=drifted',
+        'target=claude&kind=mcp&inventoryScope=project&state=problem&management=drifted',
       ),
     );
     expect(parsed).toEqual({
@@ -1018,7 +1018,7 @@ describe('Agent Hub URL helpers', () => {
       management: 'drifted',
     });
     const written = writePortableFiltersToSearchParams(
-      new URLSearchParams('conflictId=c9'),
+      new URLSearchParams('conflictId=c9&scope=project'),
       {
         ...DEFAULT_PORTABLE_INVENTORY_FILTERS,
         target: 'claude',
@@ -1032,7 +1032,9 @@ describe('Agent Hub URL helpers', () => {
     expect(written.get('section')).toBe('assets');
     expect(written.get('target')).toBe('claude');
     expect(written.get('kind')).toBe('command');
-    expect(written.get('scope')).toBe('user');
+    expect(written.get('inventoryScope')).toBe('user');
+    // inventory scope is a portable filter; shell context scope remains intact.
+    expect(written.get('scope')).toBe('project');
     expect(written.get('state')).toBe('enabled');
     expect(written.get('management')).toBe('hubManaged');
     expect(written.get('inventoryItemId')).toBe('item-1');
@@ -1041,7 +1043,7 @@ describe('Agent Hub URL helpers', () => {
 
   test('clearPortableFilterSearchParams drops assets section and filter keys only', () => {
     const polluted = new URLSearchParams(
-      'section=assets&kind=command&target=claude&state=enabled&management=hubManaged&inventoryItemId=i1&bridge=/tmp&scope=user',
+      'section=assets&kind=command&target=claude&state=enabled&management=hubManaged&inventoryItemId=i1&bridge=/tmp&inventoryScope=user&scope=project',
     );
     const cleared = clearPortableFilterSearchParams(polluted);
     expect(cleared.get('section')).toBeNull();
@@ -1051,8 +1053,9 @@ describe('Agent Hub URL helpers', () => {
     expect(cleared.get('management')).toBeNull();
     expect(cleared.get('inventoryItemId')).toBeNull();
     expect(cleared.get('bridge')).toBe('/tmp');
-    // scope 可能是壳层键，clear 不删；诊断 section 保留
-    expect(cleared.get('scope')).toBe('user');
+    expect(cleared.get('inventoryScope')).toBeNull();
+    // scope 是壳层键，clear 不删；诊断 section 保留
+    expect(cleared.get('scope')).toBe('project');
 
     const diagnostics = clearPortableFilterSearchParams(
       new URLSearchParams('section=diagnostics&kind=mcp'),

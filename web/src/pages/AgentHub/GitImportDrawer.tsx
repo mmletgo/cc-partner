@@ -32,6 +32,10 @@ export interface GitImportDrawerProps {
   selectedLaneDeviceId: string | null;
   preview: AgentHubGitImportPreview | null;
   selectedAssetIds: string[];
+  /**
+   * 是否已经把隐式“全选”物化为显式集合；显式集合可以合法为空，但此时禁止确认。
+   */
+  hasExplicitAssetSelection?: boolean;
   mappingDrafts: Record<string, string>;
   confirmOutcome: AgentHubConfirmGitImportOutcome | null;
   lastMapping: AgentHubResolvedProjectMapping | null;
@@ -59,6 +63,7 @@ export function GitImportDrawer(props: GitImportDrawerProps) {
     selectedLaneDeviceId,
     preview,
     selectedAssetIds,
+    hasExplicitAssetSelection = false,
     mappingDrafts,
     confirmOutcome,
     lastMapping,
@@ -72,7 +77,7 @@ export function GitImportDrawer(props: GitImportDrawerProps) {
     onClose,
   } = props;
 
-  const selectedAssets = selectedAssetIds ?? [];
+  const selectedAssets = selectedAssetIds;
   const drafts = mappingDrafts ?? {};
   const selectedAssetSet = useMemo(() => new Set(selectedAssets), [selectedAssets]);
 
@@ -169,7 +174,7 @@ export function GitImportDrawer(props: GitImportDrawerProps) {
                       <input
                         type="checkbox"
                         checked={
-                          selectedAssets.length === 0 || selectedAssetSet.has(asset.assetId)
+                          !hasExplicitAssetSelection || selectedAssetSet.has(asset.assetId)
                         }
                         disabled={busy}
                         onChange={() => onToggleAsset(asset.assetId)}
@@ -239,7 +244,11 @@ export function GitImportDrawer(props: GitImportDrawerProps) {
           <Button
             type="button"
             onClick={onConfirmImport}
-            disabled={busy || !preview}
+            disabled={
+              busy ||
+              !preview ||
+              (hasExplicitAssetSelection && selectedAssets.length === 0)
+            }
             loading={busy}
             data-testid="git-import-confirm-btn"
           >

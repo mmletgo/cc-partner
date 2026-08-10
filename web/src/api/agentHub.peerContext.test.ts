@@ -32,6 +32,7 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 
 import {
   AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
+  AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
   agentHubApi,
   requiresPeerAgentHubPath,
 } from './agentHub';
@@ -71,6 +72,22 @@ describe('agentHubApi peer context', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
     expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  test('inspectUserInstructionWorkspace local project scope fails closed without user fallback', async () => {
+    let thrown: unknown;
+    try {
+      await agentHubApi.inspectUserInstructionWorkspace({
+        deviceId: null,
+        projectRef: 'workbench-local-project',
+      });
+    } catch (reason) {
+      thrown = reason;
+    }
+    expect((thrown as Error & { code?: string }).code).toBe(
+      AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
+    );
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 

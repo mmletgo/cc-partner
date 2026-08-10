@@ -188,6 +188,20 @@ export function parseBlocksFromOriginal(
 
 /**
  * Business Logic（为什么需要）:
+ *   「原始文件」是整篇正文，不能按 Markdown heading 拆成多个 canonical 块；
+ *   选择 original 作为同步基线时，canonical 必须先收到唯一 shared 槽。
+ *
+ * Code Logic（做什么）:
+ *   用给定正文创建单一 shared 草稿；空正文返回空列表，换行与尾部空白按原文解析规则归一。
+ */
+export function blocksFromOriginalContent(
+  content: string,
+): InstructionBlockDraft[] {
+  return parseWholeDocumentAsShared(content);
+}
+
+/**
+ * Business Logic（为什么需要）:
  *   预览栏只读，始终由块按当前 agent 合成；块编辑后即时跟随。
  *
  * Code Logic（做什么）:

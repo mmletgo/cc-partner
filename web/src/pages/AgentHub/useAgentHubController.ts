@@ -229,7 +229,9 @@ export function parsePortableFiltersFromSearchParams(
   if (kind && ASSET_KINDS.has(kind)) {
     patch.kind = kind as PortableInventoryFilters['kind'];
   }
-  const scope = params.get('scope');
+  // `scope` belongs to the shell context (user|project); portable's local
+  // inventory filter must use its own key so filter changes never move the shell.
+  const scope = params.get('inventoryScope');
   if (scope === 'all' || (scope && SCOPES.has(scope))) {
     patch.scope = scope as PortableInventoryFilters['scope'];
   }
@@ -259,8 +261,8 @@ export function writePortableFiltersToSearchParams(
   else next.set('target', filters.target);
   if (filters.kind === DEFAULT_PORTABLE_INVENTORY_FILTERS.kind) next.delete('kind');
   else next.set('kind', filters.kind);
-  if (filters.scope === 'all') next.delete('scope');
-  else next.set('scope', filters.scope);
+  if (filters.scope === 'all') next.delete('inventoryScope');
+  else next.set('inventoryScope', filters.scope);
   if (filters.actualState === 'all') next.delete('state');
   else next.set('state', filters.actualState);
   if (filters.management === 'all') next.delete('management');
@@ -277,6 +279,7 @@ const PORTABLE_FILTER_URL_KEYS = [
   'state',
   'management',
   'inventoryItemId',
+  'inventoryScope',
 ] as const;
 
 /**
@@ -386,6 +389,8 @@ export interface UseAgentHubControllerResult {
   closeBlocksDrawer: () => void;
   pluginDrawerOpen: boolean;
   pluginReport: import('@/lib/types/agentHub').PluginPackageReport | null;
+  /** 当前插件 report 对应的 canonical/legacy asset id，避免跨资产复用旧矩阵。 */
+  pluginReportAssetId?: string | null;
   openPluginDrawer: (assetId?: string) => void;
   closePluginDrawer: () => void;
   loadPluginReport: (assetId: string) => Promise<void>;
@@ -446,6 +451,8 @@ export interface UseAgentHubControllerResult {
   selectGitLane: (laneDeviceId: string) => void;
   gitPreview: AgentHubGitImportPreview | null;
   gitSelectedAssetIds: string[];
+  /** true 表示用户已显式编辑资产集合；空数组因此代表显式空集而非“全部”。 */
+  gitAssetSelectionExplicit: boolean;
   toggleGitAsset: (assetId: string) => void;
   gitMappingDrafts: Record<string, string>;
   setGitMappingDraft: (hubProjectId: string, localProjectId: string) => void;
@@ -467,6 +474,14 @@ function toErrorMessage(reason: unknown): string {
   if (reason instanceof Error && reason.message) return reason.message;
   if (typeof reason === 'string') return reason;
   return String(reason);
+}
+
+/**
+ * Business Logic: preview 只对生成它的精确请求有效。
+ * Code Logic: Agent Hub request DTO 已固定字段顺序，JSON 作为本地指纹即可防输入漂移。
+ */
+function requestFingerprint(value: unknown): string {
+  return JSON.stringify(value);
 }
 
 /**
@@ -590,11 +605,12 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   // Gate C LAN push / Git import UI state
   const [lanPushOpen, setLanPushOpen] = useState(false);
   const [lanPeers, setLanPeers] = useState<LanPushPeerOption[]>([]);
-  const [lanSelectedPeerIds, setLanSelectedPeerIds] = useState<string[]>([]);
-  const [lanMode, setLanMode] = useState<AgentHubPushSelectionMode>('fullHub');
-  const [lanAssetIdsText, setLanAssetIdsText] = useState('');
-  const [lanHubProjectIdsText, setLanHubProjectIdsText] = useState('');
+  const [lanSelectedPeerIds, setLanSelectedPeerIdsState] = useState<string[]>([]);
+  const [lanMode, setLanModeState] = useState<AgentHubPushSelectionMode>('fullHub');
+  const [lanAssetIdsText, setLanAssetIdsTextState] = useState('');
+  const [lanHubProjectIdsText, setLanHubProjectIdsTextState] = useState('');
   const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
+  const [lanPreviewFingerprint, setLanPreviewFingerprint] = useState<string | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
   /** 壳层设备列表（真实 devicesApi；独立于 LAN Push dialog 的 lanPeers）。 */
   const [shellPeers, setShellPeers] = useState<
@@ -609,6 +625,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
   const [gitPreview, setGitPreview] = useState<AgentHubGitImportPreview | null>(null);
   const [gitSelectedAssetIds, setGitSelectedAssetIds] = useState<string[]>([]);
+  const [gitAssetSelectionExplicit, setGitAssetSelectionExplicit] = useState(false);
   const [gitMappingDrafts, setGitMappingDrafts] = useState<Record<string, string>>({});
   const [gitConfirmOutcome, setGitConfirmOutcome] = useState<AgentHubConfirmGitImportOutcome | null>(null);
   const [gitLastMapping, setGitLastMapping] = useState<AgentHubResolvedProjectMapping | null>(null);
@@ -623,11 +640,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [previewOpen, setPreviewOpen] = useState(
     deepLinkPreview === '1' || deepLinkPreview === 'true',
   );
-  const [previewProjectId, setPreviewProjectId] = useState(deepLinkProjectId?.trim() ?? '');
+  const [previewProjectId, setPreviewProjectIdState] = useState(deepLinkProjectId?.trim() ?? '');
+  const [projectPreviewFingerprint, setProjectPreviewFingerprint] = useState<string | null>(null);
   const [conflictDrawerOpen, setConflictDrawerOpen] = useState(Boolean(deepLinkConflictId));
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
   const [pluginDrawerOpen, setPluginDrawerOpen] = useState(false);
   const [pluginReport, setPluginReport] = useState<PluginPackageReport | null>(null);
+  const [pluginReportAssetId, setPluginReportAssetId] = useState<string | null>(null);
   const [adoptionOpen, setAdoptionOpen] = useState(false);
   const [adoptionPreview, setAdoptionPreview] = useState<AgentHubAdoptionPreview | null>(null);
   const [deleteEverywhereOpen, setDeleteEverywhereOpen] = useState(false);
@@ -636,16 +655,44 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const refreshSeqRef = useRef(0);
   const detailSeqRef = useRef(0);
   const scopeCursorRef = useRef(0);
+  const lanInputVersionRef = useRef(0);
+  const lanPreviewInputVersionRef = useRef<number | null>(null);
+  const projectInputVersionRef = useRef(0);
+  const projectPreviewInputVersionRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
   const filtersBootstrappedRef = useRef(false);
   const appliedDeepLinkRef = useRef<string | null>(null);
   const appliedPreviewDeepLinkRef = useRef<string | null>(null);
+  const hubContextKeyRef = useRef(
+    `${hubContext.scope}\0${hubContext.deviceId ?? ''}\0${hubContext.projectKey ?? ''}\0${hubContext.agent}`,
+  );
   const scopeFilterRef = useRef(scopeFilter);
   const kindFilterRef = useRef(kindFilter);
   useEffect(() => {
     scopeFilterRef.current = scopeFilter;
     kindFilterRef.current = kindFilter;
   }, [scopeFilter, kindFilter]);
+
+  useEffect(() => {
+    const nextKey =
+      `${hubContext.scope}\0${hubContext.deviceId ?? ''}\0${hubContext.projectKey ?? ''}\0${hubContext.agent}`;
+    if (hubContextKeyRef.current === nextKey) return;
+    hubContextKeyRef.current = nextKey;
+    lanInputVersionRef.current += 1;
+    lanPreviewInputVersionRef.current = null;
+    projectInputVersionRef.current += 1;
+    projectPreviewInputVersionRef.current = null;
+    // Preview/apply actions are scoped to the previous shell context.
+    setLanPreview(null);
+    setLanPreviewFingerprint(null);
+    setLanReport(null);
+    setActionBusy(false);
+    setPreview(null);
+    setProjectPreviewFingerprint(null);
+    setGitPreview(null);
+    setGitSelectedAssetIds([]);
+    setGitAssetSelectionExplicit(false);
+  }, [hubContext]);
 
   /**
    * Business Logic: 仅 diagnostics / 显式需要时拉 status。
@@ -870,8 +917,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
      
     setPreviewOpen(true);
     if (deepLinkProjectId?.trim()) {
+      projectInputVersionRef.current += 1;
+      projectPreviewInputVersionRef.current = null;
       // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-      setPreviewProjectId(deepLinkProjectId.trim());
+      setPreviewProjectIdState(deepLinkProjectId.trim());
+      setPreview(null);
+      setProjectPreviewFingerprint(null);
+      setActionBusy(false);
     }
   }, [deepLinkBridge, deepLinkPreview, deepLinkProjectId]);
 
@@ -902,6 +954,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setActionError(null);
   }, []);
 
+  const setPreviewProjectId = useCallback((value: string) => {
+    projectInputVersionRef.current += 1;
+    projectPreviewInputVersionRef.current = null;
+    setPreviewProjectIdState(value);
+    setPreview(null);
+    setProjectPreviewFingerprint(null);
+    setActionBusy(false);
+  }, []);
+
   const closePreviewDialog = useCallback(() => {
     if (actionBusy) return;
     setPreviewOpen(false);
@@ -913,17 +974,23 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setActionError(t('agentHub:errors.projectIdRequired'));
       return;
     }
+    const inputVersion = projectInputVersionRef.current;
+    const fingerprint = requestFingerprint({ projectId });
     setActionBusy(true);
     setActionError(null);
     try {
       const next = await agentHubApi.previewProject(projectId);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || inputVersion !== projectInputVersionRef.current) return;
       setPreview(next);
+      setProjectPreviewFingerprint(fingerprint);
+      projectPreviewInputVersionRef.current = inputVersion;
     } catch (reason) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || inputVersion !== projectInputVersionRef.current) return;
       setActionError(toErrorMessage(reason));
     } finally {
-      if (mountedRef.current) setActionBusy(false);
+      if (mountedRef.current && inputVersion === projectInputVersionRef.current) {
+        setActionBusy(false);
+      }
     }
   }, [previewProjectId, t]);
 
@@ -931,6 +998,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     const projectId = previewProjectId.trim();
     if (!projectId) {
       setActionError(t('agentHub:errors.projectIdRequired'));
+      return;
+    }
+    if (
+      !preview ||
+      projectPreviewFingerprint !== requestFingerprint({ projectId }) ||
+      projectPreviewInputVersionRef.current !== projectInputVersionRef.current
+    ) {
+      setActionError(t('agentHub:errors.previewRequired'));
       return;
     }
     setActionBusy(true);
@@ -946,7 +1021,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [invalidateLegacyLanes, previewProjectId, t]);
+  }, [invalidateLegacyLanes, preview, previewProjectId, projectPreviewFingerprint, t]);
 
   const openConflictDrawer = useCallback(() => setConflictDrawerOpen(true), []);
   const closeConflictDrawer = useCallback(() => {
@@ -1003,10 +1078,12 @@ export function useAgentHubController(): UseAgentHubControllerResult {
           throw new Error(t('agentHub:plugin.loadFailed'));
         }
         setPluginReport(base);
+        setPluginReportAssetId(assetId);
       } catch (reason) {
         if (!mountedRef.current) return;
         setActionError(toErrorMessage(reason));
         setPluginReport(null);
+        setPluginReportAssetId(null);
       } finally {
         if (mountedRef.current) setActionBusy(false);
       }
@@ -1018,6 +1095,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     (assetId?: string) => {
       const id = assetId ?? selectedAssetId;
       setPluginDrawerOpen(true);
+      setPluginReport(null);
+      setPluginReportAssetId(null);
       if (id) {
         void loadPluginReport(id);
       }
@@ -1347,19 +1426,24 @@ export function useAgentHubController(): UseAgentHubControllerResult {
    * Code Logic: project scope → mode=project + hub project id；user → userScope。
    */
   const openLanPushDialog = useCallback(() => {
+    // A reopened dialog is a new request context; invalidate an earlier preview.
+    lanInputVersionRef.current += 1;
+    lanPreviewInputVersionRef.current = null;
     setLanPushOpen(true);
     setActionError(null);
+    setActionBusy(false);
     setLanPreview(null);
+    setLanPreviewFingerprint(null);
     setLanReport(null);
-    setLanSelectedPeerIds([]);
+    setLanSelectedPeerIdsState([]);
     if (hubContext.scope === 'project') {
-      setLanMode('project');
-      setLanHubProjectIdsText(hubContext.projectKey ?? '');
-      setLanAssetIdsText('');
+      setLanModeState('project');
+      setLanHubProjectIdsTextState(hubContext.projectKey ?? '');
+      setLanAssetIdsTextState('');
     } else {
-      setLanMode('userScope');
-      setLanHubProjectIdsText('');
-      setLanAssetIdsText('');
+      setLanModeState('userScope');
+      setLanHubProjectIdsTextState('');
+      setLanAssetIdsTextState('');
     }
     void devicesApi.list().then((list) => {
       if (!mountedRef.current) return;
@@ -1382,9 +1466,45 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [actionBusy]);
 
   const toggleLanPeer = useCallback((deviceId: string) => {
-    setLanSelectedPeerIds((prev) =>
+    lanInputVersionRef.current += 1;
+    lanPreviewInputVersionRef.current = null;
+    setLanSelectedPeerIdsState((prev) =>
       prev.includes(deviceId) ? prev.filter((id) => id !== deviceId) : [...prev, deviceId],
     );
+    setLanPreview(null);
+    setLanPreviewFingerprint(null);
+    setLanReport(null);
+    setActionBusy(false);
+  }, []);
+
+  const setLanMode = useCallback((mode: AgentHubPushSelectionMode) => {
+    lanInputVersionRef.current += 1;
+    lanPreviewInputVersionRef.current = null;
+    setLanModeState(mode);
+    setLanPreview(null);
+    setLanPreviewFingerprint(null);
+    setLanReport(null);
+    setActionBusy(false);
+  }, []);
+
+  const setLanAssetIdsText = useCallback((value: string) => {
+    lanInputVersionRef.current += 1;
+    lanPreviewInputVersionRef.current = null;
+    setLanAssetIdsTextState(value);
+    setLanPreview(null);
+    setLanPreviewFingerprint(null);
+    setLanReport(null);
+    setActionBusy(false);
+  }, []);
+
+  const setLanHubProjectIdsText = useCallback((value: string) => {
+    lanInputVersionRef.current += 1;
+    lanPreviewInputVersionRef.current = null;
+    setLanHubProjectIdsTextState(value);
+    setLanPreview(null);
+    setLanPreviewFingerprint(null);
+    setLanReport(null);
+    setActionBusy(false);
   }, []);
 
   const buildLanRequest = useCallback(() => {
@@ -1407,25 +1527,42 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [lanAssetIdsText, lanHubProjectIdsText, lanMode, lanSelectedPeerIds]);
 
   const runLanPreview = useCallback(async () => {
+    const request = buildLanRequest();
+    const fingerprint = requestFingerprint(request);
+    const inputVersion = lanInputVersionRef.current;
     setActionBusy(true);
     setActionError(null);
     try {
-      const previewResult = await agentHubApi.previewLanPush(buildLanRequest());
-      if (!mountedRef.current) return;
+      const previewResult = await agentHubApi.previewLanPush(request);
+      if (!mountedRef.current || inputVersion !== lanInputVersionRef.current) return;
       setLanPreview(previewResult);
+      setLanPreviewFingerprint(fingerprint);
+      lanPreviewInputVersionRef.current = inputVersion;
     } catch (reason) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || inputVersion !== lanInputVersionRef.current) return;
       setActionError(toErrorMessage(reason));
     } finally {
-      if (mountedRef.current) setActionBusy(false);
+      if (mountedRef.current && inputVersion === lanInputVersionRef.current) {
+        setActionBusy(false);
+      }
     }
   }, [buildLanRequest]);
 
   const runLanStart = useCallback(async () => {
+    const request = buildLanRequest();
+    const fingerprint = requestFingerprint(request);
+    if (
+      !lanPreview ||
+      lanPreviewFingerprint !== fingerprint ||
+      lanPreviewInputVersionRef.current !== lanInputVersionRef.current
+    ) {
+      setActionError(t('agentHub:errors.previewRequired'));
+      return;
+    }
     setActionBusy(true);
     setActionError(null);
     try {
-      const report = await agentHubApi.startLanPush(buildLanRequest());
+      const report = await agentHubApi.startLanPush(request);
       if (!mountedRef.current) return;
       setLanReport(report);
     } catch (reason) {
@@ -1434,7 +1571,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [buildLanRequest]);
+  }, [buildLanRequest, lanPreview, lanPreviewFingerprint, t]);
 
   const openGitImportDrawer = useCallback(() => {
     setGitImportOpen(true);
@@ -1443,6 +1580,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setGitSelectedLaneDeviceId(null);
     setGitPreview(null);
     setGitSelectedAssetIds([]);
+    setGitAssetSelectionExplicit(false);
     setGitMappingDrafts({});
     setGitConfirmOutcome(null);
     setGitLastMapping(null);
@@ -1457,6 +1595,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setGitSelectedLaneDeviceId(laneDeviceId);
     setGitPreview(null);
     setGitSelectedAssetIds([]);
+    setGitAssetSelectionExplicit(false);
     setGitConfirmOutcome(null);
   }, []);
 
@@ -1484,6 +1623,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       if (!mountedRef.current) return;
       setGitPreview(previewResult);
       setGitSelectedAssetIds([]);
+      setGitAssetSelectionExplicit(false);
     } catch (reason) {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
@@ -1494,14 +1634,16 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   const toggleGitAsset = useCallback((assetId: string) => {
     setGitSelectedAssetIds((prev) => {
-      // empty means "all"; first toggle materializes all then removes/adds
-      if (prev.length === 0 && gitPreview) {
+      // First toggle materializes the implicit all-set; subsequent toggles can
+      // intentionally reach an empty explicit set (which disables confirm).
+      if (!gitAssetSelectionExplicit && gitPreview) {
+        setGitAssetSelectionExplicit(true);
         const all = gitPreview.assets.map((a) => a.assetId);
         return all.filter((id) => id !== assetId);
       }
       return prev.includes(assetId) ? prev.filter((id) => id !== assetId) : [...prev, assetId];
     });
-  }, [gitPreview]);
+  }, [gitAssetSelectionExplicit, gitPreview]);
 
   const setGitMappingDraft = useCallback((hubProjectId: string, localProjectId: string) => {
     setGitMappingDrafts((prev) => ({ ...prev, [hubProjectId]: localProjectId }));
@@ -1530,6 +1672,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   const runGitConfirmImport = useCallback(async () => {
     if (!gitPreview) return;
+    if (gitAssetSelectionExplicit && gitSelectedAssetIds.length === 0) {
+      setActionError(t('agentHub:errors.selectionRequired'));
+      return;
+    }
     setActionBusy(true);
     setActionError(null);
     try {
@@ -1543,7 +1689,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       const outcome = await agentHubApi.confirmGitImport({
         laneDeviceId: gitPreview.laneDeviceId,
         snapshotHash: gitPreview.snapshotHash,
-        selectedAssetIds: gitSelectedAssetIds,
+        selectedAssetIds: gitAssetSelectionExplicit ? gitSelectedAssetIds : undefined,
         projectMappings,
         importUnmappedProjects: true,
       });
@@ -1556,7 +1702,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, invalidateLegacyLanes]);
+  }, [
+    gitAssetSelectionExplicit,
+    gitMappingDrafts,
+    gitPreview,
+    gitSelectedAssetIds,
+    invalidateLegacyLanes,
+    t,
+  ]);
 
   /**
    * Business Logic: 壳层 patch 写回 URL，并同步旧 activeSection 双路径内容。
@@ -1960,6 +2113,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     openPluginDrawer,
     closePluginDrawer,
     loadPluginReport,
+    pluginReportAssetId,
     adoptionOpen,
     adoptionPreview,
     openAdoptionPreview,
@@ -2005,6 +2159,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     selectGitLane,
     gitPreview,
     gitSelectedAssetIds,
+    gitAssetSelectionExplicit,
     toggleGitAsset,
     gitMappingDrafts,
     setGitMappingDraft,

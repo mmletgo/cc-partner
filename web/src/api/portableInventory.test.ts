@@ -44,6 +44,7 @@ vi.mock('./client', () => ({
 
 import {
   AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
+  AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
   PORTABLE_INVENTORY_COMMANDS,
   portableAssetApi,
   portablePullApi,
@@ -202,13 +203,13 @@ describe('portable inventory API', () => {
     );
   });
 
-  test('inspect with local projectRef stays on local path (no peer throw)', async () => {
-    mockInvoke.mockResolvedValueOnce(validInventorySnapshot);
-    await portableAssetApi.inspect({ deviceId: null, projectRef: 'wb-local-1' });
-    expect(mockInvoke).toHaveBeenCalledWith(
-      'agent_hub_inspect_portable_inventory',
-      undefined,
-    );
+  test('inspect with local projectRef fails closed until project route exists', async () => {
+    await expect(
+      Promise.resolve().then(() =>
+        portableAssetApi.inspect({ deviceId: null, projectRef: 'wb-local-1' }),
+      ),
+    ).rejects.toMatchObject({ code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE });
+    expect(mockInvoke).not.toHaveBeenCalled();
   });
 
   test('inspect with peer deviceId fails closed without invoke', async () => {
@@ -264,28 +265,22 @@ describe('portable inventory API', () => {
     expect(result.planToken).toBe('plan-token-1');
   });
 
-  test('previewAction strips optional context fields before invoke', async () => {
-    mockInvoke.mockResolvedValueOnce(validActionPlan);
-    await portableAssetApi.previewAction({
-      inventorySnapshotHash: 'snap-hash-3x4',
-      inventoryItemIds: ['claude-skill-skill-a'],
-      action: 'enable',
-      keepData: false,
-      conflictPolicy: 'skipExisting',
-      expectedCanonicalRevisionId: null,
-      deviceId: null,
-      projectRef: 'wb-local',
-    });
-    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_preview_portable_asset_action', {
-      request: {
-        inventorySnapshotHash: 'snap-hash-3x4',
-        inventoryItemIds: ['claude-skill-skill-a'],
-        action: 'enable',
-        keepData: false,
-        conflictPolicy: 'skipExisting',
-        expectedCanonicalRevisionId: null,
-      },
-    });
+  test('previewAction with local projectRef fails closed before write path', async () => {
+    await expect(
+      Promise.resolve().then(() =>
+        portableAssetApi.previewAction({
+          inventorySnapshotHash: 'snap-hash-3x4',
+          inventoryItemIds: ['claude-skill-skill-a'],
+          action: 'enable',
+          keepData: false,
+          conflictPolicy: 'skipExisting',
+          expectedCanonicalRevisionId: null,
+          deviceId: null,
+          projectRef: 'wb-local',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE });
+    expect(mockInvoke).not.toHaveBeenCalled();
   });
 
   test('previewAction with peer deviceId fails closed without invoke', async () => {

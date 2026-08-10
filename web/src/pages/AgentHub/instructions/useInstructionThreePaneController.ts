@@ -25,6 +25,7 @@ import type { AgentHubContext } from '../context/agentHubContext';
 import type { InstructionLane } from '../context/agentHubContext';
 import {
   addBlock,
+  blocksFromOriginalContent,
   dtoToDraft,
   draftToDto,
   ensureModeBlock,
@@ -43,6 +44,8 @@ import {
 
 /** peer 上下文稳定错误码（与 api 层常量同字面量；不 import 避免 mock 缺导出）。 */
 const PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE';
+/** 本机 project scope 尚无三栏 V2 后端路径，必须 fail-closed。 */
+const PROJECT_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE';
 
 export interface UseInstructionThreePaneControllerArgs {
   context: AgentHubContext;
@@ -63,6 +66,8 @@ export interface UseInstructionThreePaneControllerResult {
   error: string | null;
   actionError: string | null;
   actionBusy: boolean;
+  /** 当前三栏是否存在未持久化草稿；用于上下文切换保护。 */
+  dirty: boolean;
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
@@ -94,6 +99,8 @@ export interface UseInstructionThreePaneControllerResult {
   chooseBaseline: (baseline: SyncBaseline) => void;
   cancelDualDirty: () => void;
   dismissApplyResult: () => void;
+  /** 上下文切换前经用户确认后放弃当前草稿。 */
+  discardDraftForContextChange: () => void;
 }
 
 function laneToMode(lane: InstructionLane): InstructionBlockDraft['mode'] {
@@ -168,6 +175,11 @@ function errorCode(reason: unknown): string | null {
   if (!reason || typeof reason !== 'object') return null;
   const code = (reason as { code?: unknown }).code;
   return typeof code === 'string' ? code : null;
+}
+
+/** 比较原始正文与 canonical 投影时忽略换行格式与尾随空白差异。 */
+function normalizeInstructionContentForComparison(text: string): string {
+  return text.replace(/\r\n/g, '\n').trimEnd();
 }
 
 function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> {
@@ -248,9 +260,16 @@ export function useInstructionThreePaneController(
 
   const mountedRef = useRef(true);
   const loadSeqRef = useRef(0);
+  /** context generation invalidates every inspect/save/preview/apply response. */
+  const contextGenerationRef = useRef(0);
+  const contextKeyRef = useRef(
+    `${context.scope}\0${context.deviceId ?? ''}\0${context.projectKey ?? ''}\0${agent}`,
+  );
+  const stateRef = useRef(state);
   const planRequestIdRef = useRef<{ planToken: string; clientRequestId: string } | null>(
     null,
   );
+  const planGenerationRef = useRef<number | null>(null);
   /** 最近一次成功 resolve 的同步基线，用于 apply 后 auto re-parse。 */
   const lastSyncBaselineRef = useRef<SyncBaseline | null>(null);
   /** apply 成功后若 baseline=original，rescan 后自动 parse 一次。 */
@@ -263,19 +282,61 @@ export function useInstructionThreePaneController(
     };
   }, []);
 
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const dirty = state.blocksDirty || state.originalDirty;
+
+  /**
+   * Business Logic: 用户确认放弃当前草稿后才能切换 scope/agent/project context。
+   * Code Logic: 清空旧 workspace/state 并作废所有旧响应；新 context effect 随后重新 inspect。
+   */
+  const discardDraftForContextChange = useCallback(() => {
+    const empty = initialThreePaneFromDisk(null, '');
+    // Invalidate in-flight responses immediately; the context effect will advance once more
+    // after the shell URL commits the new key.
+    contextGenerationRef.current += 1;
+    loadSeqRef.current += 1;
+    planRequestIdRef.current = null;
+    planGenerationRef.current = null;
+    autoReparseAfterLoadRef.current = false;
+    setActionBusy(false);
+    stateRef.current = empty;
+    setState(empty);
+    setWorkspace(null);
+    setPlan(null);
+    setPreviewOpen(false);
+    setApplyResult(null);
+    setDualDirtyOpen(false);
+    setActionError(null);
+    setError(null);
+  }, []);
+
   /**
    * Business Logic: 从 inspect 填充 ③，块/预览保持空（除非 apply 后 auto re-parse）。
    * Code Logic: generation 防竞态；autoReparse 仅一次；peer 错误保留稳定 code。
    */
   const loadWorkspace = useCallback(
-    async (isRefresh: boolean) => {
+    async (
+      isRefresh: boolean,
+      options: { preserveDirty?: boolean; generation?: number } = {},
+    ) => {
       const seq = ++loadSeqRef.current;
+      const generation = options.generation ?? contextGenerationRef.current;
+      const preserveDirty = options.preserveDirty ?? isRefresh;
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
       setError(null);
       try {
         const next = await agentHubApi.inspectUserInstructionWorkspace(requestContext);
-        if (!mountedRef.current || seq !== loadSeqRef.current) return;
+        if (
+          !mountedRef.current ||
+          seq !== loadSeqRef.current ||
+          generation !== contextGenerationRef.current
+        ) {
+          return;
+        }
         setWorkspace(next);
         const { path, text } = originalFromWorkspace(next, agent);
         const hydrated = next.canonical?.blocks?.map(dtoToDraft) ?? null;
@@ -284,14 +345,24 @@ export function useInstructionThreePaneController(
           autoReparseAfterLoadRef.current = false;
           nextState = parseBlocksFromOriginal(nextState, agent);
         }
-        setState(nextState);
+        if (!preserveDirty || !stateRef.current.blocksDirty && !stateRef.current.originalDirty) {
+          setState(nextState);
+        }
         setDualDirtyOpen(false);
       } catch (reason) {
-        if (!mountedRef.current || seq !== loadSeqRef.current) return;
+        if (
+          !mountedRef.current ||
+          seq !== loadSeqRef.current ||
+          generation !== contextGenerationRef.current
+        ) {
+          return;
+        }
         const code = errorCode(reason);
-        // 切换到 peer 时清空本机 workspace，避免 UI 冒充对端内容
-        setWorkspace(null);
-        setState(initialThreePaneFromDisk(null, ''));
+        // 同 context 刷新失败时保留 dirty 草稿；context 切换由显式确认先清理。
+        if (!preserveDirty || (!stateRef.current.blocksDirty && !stateRef.current.originalDirty)) {
+          setWorkspace(null);
+          setState(initialThreePaneFromDisk(null, ''));
+        }
         setError(
           code === PEER_CONTEXT_UNAVAILABLE
             ? PEER_CONTEXT_UNAVAILABLE
@@ -300,7 +371,11 @@ export function useInstructionThreePaneController(
               : String(reason),
         );
       } finally {
-        if (mountedRef.current && seq === loadSeqRef.current) {
+        if (
+          mountedRef.current &&
+          seq === loadSeqRef.current &&
+          generation === contextGenerationRef.current
+        ) {
           setLoading(false);
           setRefreshing(false);
         }
@@ -310,6 +385,33 @@ export function useInstructionThreePaneController(
   );
 
   useEffect(() => {
+    const nextContextKey =
+      `${context.scope}\0${context.deviceId ?? ''}\0${context.projectKey ?? ''}\0${agent}`;
+    const contextChanged = contextKeyRef.current !== nextContextKey;
+    if (contextChanged) {
+      contextKeyRef.current = nextContextKey;
+      contextGenerationRef.current += 1;
+      // Invalidate an in-flight request before any new work is scheduled.
+      loadSeqRef.current += 1;
+      planRequestIdRef.current = null;
+      planGenerationRef.current = null;
+      autoReparseAfterLoadRef.current = false;
+      setActionBusy(false);
+      setPlan(null);
+      setPreviewOpen(false);
+      setApplyResult(null);
+      setDualDirtyOpen(false);
+      if (stateRef.current.blocksDirty || stateRef.current.originalDirty) {
+        // Real shell context changes are guarded by AgentHub; direct callers must resolve
+        // this explicit stop before a new context can replace the draft.
+        setError('AGENT_HUB_CONTEXT_CHANGE_HAS_UNSAVED_DRAFT');
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
+      setWorkspace(null);
+      setState(initialThreePaneFromDisk(null, ''));
+    }
     if (!enabled) {
       // 资产 tab：禁止 instruction inspect；不清草稿，loading=false
       // eslint-disable-next-line react-hooks/set-state-in-effect -- disable lane
@@ -317,8 +419,9 @@ export function useInstructionThreePaneController(
       setRefreshing(false);
       return;
     }
+    const generation = contextGenerationRef.current;
     const timeoutId = window.setTimeout(() => {
-      void loadWorkspace(false);
+      void loadWorkspace(false, { preserveDirty: true, generation });
     }, 0);
     return () => {
       window.clearTimeout(timeoutId);
@@ -329,7 +432,7 @@ export function useInstructionThreePaneController(
     context.scope,
     context.deviceId,
     context.projectKey,
-    context.agent,
+    agent,
   ]);
 
   const currentTarget = useMemo(
@@ -337,20 +440,27 @@ export function useInstructionThreePaneController(
     [workspace, agent],
   );
 
+  /** 当前后端没有本机 projectRef 的三栏写入路径，禁止回落用户级命令。 */
+  const projectScopeUnsupported = context.scope === 'project';
+
   const sourceContentTruncated = useMemo(() => {
     if (!workspace) return false;
     return originalFromWorkspace(workspace, agent).contentTruncated;
   }, [workspace, agent]);
 
   const writeBlocked = useMemo(() => {
+    if (projectScopeUnsupported) return true;
     if (!workspace) return true;
     if (workspace.canonical?.contentTruncated || sourceContentTruncated) return true;
     if (!currentTarget) return true;
     return currentTarget.capability.write !== 'supported';
-  }, [workspace, currentTarget, sourceContentTruncated]);
+  }, [workspace, currentTarget, sourceContentTruncated, projectScopeUnsupported]);
 
   const writeBlockedReason = useMemo(() => {
     if (!writeBlocked) return null;
+    if (projectScopeUnsupported) {
+      return t('agentHub:instructions.threePane.projectScopeUnsupported');
+    }
     if (workspace?.canonical?.contentTruncated || sourceContentTruncated) {
       return t('agentHub:userInstructions.errors.contentTruncated');
     }
@@ -358,7 +468,14 @@ export function useInstructionThreePaneController(
       return t('agentHub:instructions.threePane.writeBlocked');
     }
     return t('agentHub:instructions.threePane.writeBlocked');
-  }, [writeBlocked, workspace, currentTarget, sourceContentTruncated, t]);
+  }, [
+    writeBlocked,
+    workspace,
+    currentTarget,
+    sourceContentTruncated,
+    projectScopeUnsupported,
+    t,
+  ]);
 
   const reparseFromOriginal = useCallback(() => {
     setState((current) => parseBlocksFromOriginal(current, agent));
@@ -407,7 +524,7 @@ export function useInstructionThreePaneController(
     (text: string) => {
       const mode = laneToMode(context.instructionLane);
       setState((current) => {
-        let next = ensureModeBlock(current, mode, agent);
+        const next = ensureModeBlock(current, mode, agent);
         const block = findBlockByMode(next.blocks, mode);
         if (!block) return next;
         if (mode === 'shared' || mode === 'adapted') {
@@ -436,7 +553,7 @@ export function useInstructionThreePaneController(
   const editAdaptedCommon = useCallback(
     (text: string) => {
       setState((current) => {
-        let next = ensureModeBlock(current, 'adapted', agent);
+        const next = ensureModeBlock(current, 'adapted', agent);
         const block = findBlockByMode(next.blocks, 'adapted');
         if (!block) return next;
         return updateBlock(next, block.id, { commonMarkdown: text }, agent);
@@ -453,7 +570,7 @@ export function useInstructionThreePaneController(
   const editAdaptedVariant = useCallback(
     (text: string) => {
       setState((current) => {
-        let next = ensureModeBlock(current, 'adapted', agent);
+        const next = ensureModeBlock(current, 'adapted', agent);
         const block = findBlockByMode(next.blocks, 'adapted');
         if (!block) return next;
         return updateBlock(
@@ -480,6 +597,7 @@ export function useInstructionThreePaneController(
         setActionError(writeBlockedReason);
         return;
       }
+      const generation = contextGenerationRef.current;
       setActionBusy(true);
       setActionError(null);
       setApplyResult(null);
@@ -497,8 +615,14 @@ export function useInstructionThreePaneController(
           ws.setupState === 'configured' || targetManaged
             ? await agentHubApi.previewUserInstructionUpdate(request)
             : await agentHubApi.previewUserInstructionSetup(request);
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          generation !== contextGenerationRef.current
+        ) {
+          return;
+        }
         setPlan(nextPlan);
+        planGenerationRef.current = generation;
         planRequestIdRef.current = {
           planToken: nextPlan.planToken,
           clientRequestId: createClientRequestId(),
@@ -506,19 +630,23 @@ export function useInstructionThreePaneController(
         setPreviewOpen(true);
         setDualDirtyOpen(false);
       } catch (reason) {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || generation !== contextGenerationRef.current) return;
         const code = errorCode(reason);
         setActionError(
           code === PEER_CONTEXT_UNAVAILABLE
             ? PEER_CONTEXT_UNAVAILABLE
-            : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
-              ? t('agentHub:userInstructions.errors.backendUnavailable')
-              : reason instanceof Error
-                ? reason.message
-                : String(reason),
+            : code === PROJECT_CONTEXT_UNAVAILABLE
+              ? PROJECT_CONTEXT_UNAVAILABLE
+              : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
+                ? t('agentHub:userInstructions.errors.backendUnavailable')
+                : reason instanceof Error
+                  ? reason.message
+                  : String(reason),
         );
       } finally {
-        if (mountedRef.current) setActionBusy(false);
+        if (mountedRef.current && generation === contextGenerationRef.current) {
+          setActionBusy(false);
+        }
       }
     },
     [agent, requestContext, t, writeBlocked, writeBlockedReason],
@@ -529,45 +657,69 @@ export function useInstructionThreePaneController(
    * Code Logic: saveUserInstructionBlocks(baseRevisionId CAS) → rescan 拿新 head/snapshot + hydrate；
    *   返回新 workspace 供后续 preview/apply 复用最新基线。
    */
-  const saveBlocks = useCallback(async (): Promise<UserInstructionWorkspaceDto | null> => {
-    if (!workspace) return null;
-    setActionBusy(true);
-    setActionError(null);
-    try {
-      const normalized = normalizeInstructionBlocks(state.blocks);
-      await agentHubApi.saveUserInstructionBlocks({
-        blocks: normalized.map(draftToDto),
-        baseRevisionId: workspace.canonical?.headRevisionId ?? null,
-        inventorySnapshotHash: workspace.inventorySnapshotHash,
-        ...requestContext,
-      });
-      if (!mountedRef.current) return null;
-      const refreshed = await agentHubApi.inspectUserInstructionWorkspace(requestContext);
-      if (!mountedRef.current) return null;
-      setWorkspace(refreshed);
-      const { path, text } = originalFromWorkspace(refreshed, agent);
-      const hydrated = refreshed.canonical?.blocks?.map(dtoToDraft) ?? null;
-      setState(initialThreePaneFromDisk(path, text, hydrated, agent));
-      return refreshed;
-    } catch (reason) {
-      if (!mountedRef.current) return null;
-      const code = errorCode(reason);
-      setActionError(
-        code === PEER_CONTEXT_UNAVAILABLE
-          ? PEER_CONTEXT_UNAVAILABLE
-          : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
-            ? t('agentHub:userInstructions.errors.backendUnavailable')
-            : reason instanceof Error
-              ? reason.message
-              : String(reason),
-      );
-      return null;
-    } finally {
-      if (mountedRef.current) setActionBusy(false);
-    }
-  }, [agent, requestContext, state.blocks, t, workspace]);
+  const saveBlocks = useCallback(
+    async (blocksOverride?: InstructionBlockDraft[]): Promise<UserInstructionWorkspaceDto | null> => {
+      if (projectScopeUnsupported) {
+        setActionError(PROJECT_CONTEXT_UNAVAILABLE);
+        return null;
+      }
+      if (!workspace) return null;
+      // A refresh or sync with no edits must not advance an empty canonical head.
+      if (!blocksOverride && !state.blocksDirty && !state.originalDirty) {
+        return workspace;
+      }
+      const generation = contextGenerationRef.current;
+      setActionBusy(true);
+      setActionError(null);
+      try {
+        const normalized = normalizeInstructionBlocks(blocksOverride ?? state.blocks);
+        await agentHubApi.saveUserInstructionBlocks({
+          blocks: normalized.map(draftToDto),
+          baseRevisionId: workspace.canonical?.headRevisionId ?? null,
+          inventorySnapshotHash: workspace.inventorySnapshotHash,
+          ...requestContext,
+        });
+        if (!mountedRef.current || generation !== contextGenerationRef.current) {
+          return null;
+        }
+        const refreshed = await agentHubApi.inspectUserInstructionWorkspace(requestContext);
+        if (!mountedRef.current || generation !== contextGenerationRef.current) {
+          return null;
+        }
+        setWorkspace(refreshed);
+        const { path, text } = originalFromWorkspace(refreshed, agent);
+        const hydrated = refreshed.canonical?.blocks?.map(dtoToDraft) ?? null;
+        setState(initialThreePaneFromDisk(path, text, hydrated, agent));
+        return refreshed;
+      } catch (reason) {
+        if (!mountedRef.current || generation !== contextGenerationRef.current) return null;
+        const code = errorCode(reason);
+        setActionError(
+          code === PEER_CONTEXT_UNAVAILABLE
+            ? PEER_CONTEXT_UNAVAILABLE
+            : code === PROJECT_CONTEXT_UNAVAILABLE
+              ? PROJECT_CONTEXT_UNAVAILABLE
+              : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
+                ? t('agentHub:userInstructions.errors.backendUnavailable')
+                : reason instanceof Error
+                  ? reason.message
+                  : String(reason),
+        );
+        return null;
+      } finally {
+        if (mountedRef.current && generation === contextGenerationRef.current) {
+          setActionBusy(false);
+        }
+      }
+    },
+    [agent, projectScopeUnsupported, requestContext, state, t, workspace],
+  );
 
   const requestSync = useCallback(async () => {
+    if (projectScopeUnsupported) {
+      setActionError(PROJECT_CONTEXT_UNAVAILABLE);
+      return;
+    }
     const resolved = resolveSyncContent(state, agent);
     if (!resolved.ok) {
       if (resolved.reason === 'dual_dirty_conflict') {
@@ -578,11 +730,23 @@ export function useInstructionThreePaneController(
       setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
       return;
     }
-    // 先保存块到 canonical head（投影数据源），再用新 head preview/apply
-    const refreshed = await saveBlocks();
+    // original 基线必须整篇变成唯一 shared canonical block；不能只把正文留在 preview。
+    const canonicalContent = joinBlocksForTarget(state.blocks, agent);
+    const originalNeedsCanonicalSave =
+      resolved.baseline === 'original' &&
+      (state.originalDirty ||
+        state.blocks.length === 0 ||
+        normalizeInstructionContentForComparison(canonicalContent) !==
+          normalizeInstructionContentForComparison(resolved.content));
+    const originalBlocks = originalNeedsCanonicalSave
+      ? blocksFromOriginalContent(resolved.content)
+      : undefined;
+    // 先保存块到 canonical head（投影数据源），再用新 head preview/apply。
+    // 已有 canonical blocks 且无 dirty 时直接复用 head，避免无条件推进空 head。
+    const refreshed = await saveBlocks(originalBlocks);
     if (!refreshed) return;
     await runPreviewWithBaseline(resolved.baseline, refreshed);
-  }, [agent, runPreviewWithBaseline, saveBlocks, state, t]);
+  }, [agent, projectScopeUnsupported, runPreviewWithBaseline, saveBlocks, state, t]);
 
   const chooseBaseline = useCallback(
     (baseline: SyncBaseline) => {
@@ -595,8 +759,10 @@ export function useInstructionThreePaneController(
         setDualDirtyOpen(false);
         return;
       }
+      const originalBlocks =
+        baseline === 'original' ? blocksFromOriginalContent(content) : undefined;
       // dual-dirty 选基线后，同样先 saveBlocks 再 preview
-      void saveBlocks().then((refreshed) => {
+      void saveBlocks(originalBlocks).then((refreshed) => {
         if (refreshed) void runPreviewWithBaseline(baseline, refreshed);
       });
     },
@@ -613,7 +779,18 @@ export function useInstructionThreePaneController(
   }, [actionBusy]);
 
   const applyPlan = useCallback(async () => {
+    if (projectScopeUnsupported) {
+      setActionError(PROJECT_CONTEXT_UNAVAILABLE);
+      return;
+    }
     if (!plan) return;
+    const generation = contextGenerationRef.current;
+    if (planGenerationRef.current !== null && planGenerationRef.current !== generation) {
+      setPlan(null);
+      setPreviewOpen(false);
+      setActionError(t('agentHub:userInstructions.errors.previewStale'));
+      return;
+    }
     const existing = planRequestIdRef.current;
     const base =
       existing?.planToken === plan.planToken
@@ -625,7 +802,7 @@ export function useInstructionThreePaneController(
     setActionError(null);
     try {
       const result = await agentHubApi.applyUserInstructionPlan(request);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || generation !== contextGenerationRef.current) return;
       setApplyResult(result);
       setPreviewOpen(false);
       const hasIncomplete = result.targets.some((target) =>
@@ -643,12 +820,12 @@ export function useInstructionThreePaneController(
         // 若 baseline=blocks 则在 load 后不 auto parse，用户需再解析或我们保留块。
         // 简化：blocks baseline → 不 auto re-parse（load 会清空块）；
         // 为保留块模型，blocks baseline 时跳过 state 重置中的块清空——在 loadWorkspace 处理。
-        await loadWorkspace(true);
+        await loadWorkspace(true, { preserveDirty: false, generation });
         // load 已 hydrate 持久化 canonical 块（完整 variants）；baseline=blocks 时保留 hydrate，
         // 不再从原文 reparse（避免 adapted 块退化为 shared）。
       }
     } catch (reason) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || generation !== contextGenerationRef.current) return;
       const code = errorCode(reason);
       if (
         code === 'USER_INSTRUCTION_PREVIEW_STALE' ||
@@ -657,11 +834,14 @@ export function useInstructionThreePaneController(
       ) {
         setPreviewOpen(false);
         setPlan(null);
+        planGenerationRef.current = null;
         setActionError(t('agentHub:userInstructions.errors.previewStale'));
       } else {
         setActionError(
           code === PEER_CONTEXT_UNAVAILABLE
             ? PEER_CONTEXT_UNAVAILABLE
+            : code === PROJECT_CONTEXT_UNAVAILABLE
+              ? PROJECT_CONTEXT_UNAVAILABLE
             : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
               ? t('agentHub:userInstructions.errors.backendUnavailable')
               : reason instanceof Error
@@ -670,9 +850,11 @@ export function useInstructionThreePaneController(
         );
       }
     } finally {
-      if (mountedRef.current) setActionBusy(false);
+      if (mountedRef.current && generation === contextGenerationRef.current) {
+        setActionBusy(false);
+      }
     }
-  }, [loadWorkspace, plan, requestContext, t]);
+  }, [loadWorkspace, plan, projectScopeUnsupported, requestContext, t]);
 
   const refresh = useCallback(async () => {
     autoReparseAfterLoadRef.current = false;
@@ -691,6 +873,7 @@ export function useInstructionThreePaneController(
     error,
     actionError,
     actionBusy: actionBusy || refreshing,
+    dirty,
     writeBlocked,
     writeBlockedReason,
     dualDirtyOpen,
@@ -714,5 +897,6 @@ export function useInstructionThreePaneController(
     chooseBaseline,
     cancelDualDirty,
     dismissApplyResult,
+    discardDraftForContextChange,
   };
 }

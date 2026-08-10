@@ -374,6 +374,73 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.state.blocksDirty).toBe(false);
   });
 
+  test('original baseline saves the edited document as one shared canonical block', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue({
+      ...workspaceFixture().canonical,
+      headRevisionId: 'rev-2',
+      blocks: [],
+    });
+    apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const edited = '# Edited whole document\n\nKeep every section together.\n';
+    act(() => {
+      result.current.updateOriginal(edited);
+    });
+    await act(async () => {
+      await result.current.requestSync();
+    });
+
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledTimes(1);
+    const request = apiMocks.saveUserInstructionBlocks.mock.calls[0]?.[0] as {
+      blocks: Array<{ mode: string; commonMarkdown: string; variants: unknown }>;
+    };
+    expect(request.blocks).toHaveLength(1);
+    expect(request.blocks[0]).toMatchObject({
+      mode: 'shared',
+      commonMarkdown: edited.trimEnd(),
+      variants: null,
+    });
+    expect(apiMocks.previewUserInstructionUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test('clean hydrated canonical blocks reuse the current head without an empty save', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(
+      workspaceFixture({
+        canonical: {
+          ...workspaceFixture().canonical!,
+          blocks: [
+            {
+              id: 'shared-1',
+              mode: 'shared',
+              commonMarkdown: SAMPLE_MARKDOWN,
+              variants: null,
+              headingPath: null,
+              sourceTarget: null,
+              needsAdaptation: false,
+            },
+          ],
+        },
+      }),
+    );
+    apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.requestSync();
+    });
+
+    expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
+    expect(apiMocks.previewUserInstructionUpdate).toHaveBeenCalledTimes(1);
+  });
+
   test('write blocked when target write is not supported', async () => {
     apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(
       workspaceFixture({
@@ -533,6 +600,12 @@ describe('useInstructionThreePaneController', () => {
       deviceId: null,
       projectRef: 'wb-local',
     });
+    expect(result.current.writeBlocked).toBe(true);
+    await act(async () => {
+      await result.current.requestSync();
+    });
+    expect(result.current.actionError).toBe('AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE');
+    expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
 
     rerender({
       context: {
