@@ -35,8 +35,8 @@ use crate::agent_hub::replication::pull::{
     PortablePullResultDto, PreviewPortablePullRequest, RemotePortableInventoryDto,
 };
 use crate::agent_hub::replication::sender::{
-    get_push_report_for_state, push_selection_for_state, MultiTargetPushReport,
-    PushAgentHubSelectionRequest,
+    compute_push_preview_token, get_push_report_for_state, push_selection_for_state,
+    MultiTargetPushReport, PushAgentHubSelectionRequest,
 };
 use crate::agent_hub::service::{
     AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubService, AgentHubStatusDto,
@@ -782,10 +782,16 @@ async fn preview_lan_push_for_state(
         .iter()
         .filter(|a| matches!(a.kind, crate::agent_hub::models::AssetKind::Mcp))
         .count() as u64;
+    let preview_token = compute_push_preview_token(
+        &request,
+        &built.selection_hash,
+        &built.envelope.snapshot_hash,
+    )?;
     Ok(serde_json::json!({
         "snapshotHash": built.envelope.snapshot_hash,
         "snapshotId": built.envelope.snapshot_id,
         "selectionHash": built.selection_hash,
+        "previewToken": preview_token,
         "assetCount": built.envelope.assets.len() as u64,
         "revisionCount": built.envelope.revisions.len() as u64,
         "credentialBearingAssetCount": credential_bearing,

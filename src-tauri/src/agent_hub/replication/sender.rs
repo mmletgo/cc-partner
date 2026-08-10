@@ -107,6 +107,9 @@ pub struct PushAgentHubSelectionRequest {
     /// 可选：整次 push 的 request id（缺省生成 UUID）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// 必须来自同一 selection + peer 集合的 preview；push 时重建 snapshot 后校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_token: Option<String>,
 }
 
 fn default_include_history() -> bool {
@@ -302,6 +305,21 @@ impl AgentHubPushSender {
             },
         )
         .await?;
+
+        let supplied_preview_token = request
+            .preview_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| AppError::validation("AGENT_HUB_LAN_PREVIEW_REQUIRED"))?;
+        let current_preview_token = compute_push_preview_token(
+            &request,
+            &built.selection_hash,
+            &built.envelope.snapshot_hash,
+        )?;
+        if supplied_preview_token != current_preview_token {
+            return Err(AppError::conflict("AGENT_HUB_LAN_PREVIEW_TOKEN_MISMATCH"));
+        }
 
         let request_id = request
             .request_id
@@ -1261,6 +1279,28 @@ fn selection_mode_str(mode: SnapshotSelectionMode) -> &'static str {
     }
 }
 
+/// 计算 LAN push preview/apply 绑定 token。
+///
+/// Business Logic: preview 后任一 peer、selection 或 snapshot 变化都必须重新预览。
+/// Code Logic: 规范化 peer 列表，将 mode/history/hash 一并序列化后 SHA-256。
+pub fn compute_push_preview_token(
+    request: &PushAgentHubSelectionRequest,
+    selection_hash: &str,
+    snapshot_hash: &str,
+) -> Result<String, AppError> {
+    let peers = normalize_peer_ids(&request.peer_device_ids)?;
+    validate_selection_mode(request)?;
+    let binding = serde_json::to_vec(&serde_json::json!({
+        "peerDeviceIds": peers,
+        "mode": selection_mode_str(request.mode),
+        "includeHistory": request.include_history,
+        "selectionHash": selection_hash,
+        "snapshotHash": snapshot_hash,
+    }))
+    .map_err(|error| AppError::generic(format!("agent_hub_push_preview_serialize:{error}")))?;
+    Ok(sha256_hex(&binding))
+}
+
 /// AppState 便捷入口。
 ///
 /// Business Logic: commands/control 共用。
@@ -1344,8 +1384,39 @@ mod tests {
             hub_project_ids: vec![],
             include_history: true,
             request_id: None,
+            preview_token: None,
         };
         assert!(validate_selection_mode(&req).is_err());
+    }
+
+    #[test]
+    fn preview_token_binds_normalized_peers_and_snapshot() {
+        let request = PushAgentHubSelectionRequest {
+            peer_device_ids: vec![" peer-b ".into(), "peer-a".into()],
+            mode: SnapshotSelectionMode::FullHub,
+            scope_ids: vec![],
+            asset_ids: vec![],
+            hub_project_ids: vec![],
+            include_history: true,
+            request_id: None,
+            preview_token: None,
+        };
+        let token = compute_push_preview_token(&request, "selection", "snapshot").unwrap();
+        let mut reordered = request.clone();
+        reordered.peer_device_ids = vec!["peer-a".into(), "peer-b".into()];
+        assert_eq!(
+            token,
+            compute_push_preview_token(&reordered, "selection", "snapshot").unwrap()
+        );
+        reordered.peer_device_ids.push("peer-c".into());
+        assert_ne!(
+            token,
+            compute_push_preview_token(&reordered, "selection", "snapshot").unwrap()
+        );
+        assert_ne!(
+            token,
+            compute_push_preview_token(&request, "selection", "snapshot-2").unwrap()
+        );
     }
 
     /// Business Logic: Unsupported capability 为 terminal。

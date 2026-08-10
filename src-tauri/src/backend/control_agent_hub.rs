@@ -27,7 +27,8 @@ use crate::agent_hub::portable_actions::{
 };
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::replication::sender::{
-    get_push_report_for_state, push_selection_for_state, PushAgentHubSelectionRequest,
+    compute_push_preview_token, get_push_report_for_state, push_selection_for_state,
+    PushAgentHubSelectionRequest,
 };
 use crate::agent_hub::service::{
     AgentHubService, DeleteAssetEverywhereRequest, ListAssetsRequest,
@@ -302,10 +303,16 @@ async fn dispatch_agent_hub_op(
                 .iter()
                 .filter(|a| matches!(a.kind, crate::agent_hub::models::AssetKind::Mcp))
                 .count() as u64;
+            let preview_token = compute_push_preview_token(
+                &req,
+                &built.selection_hash,
+                &built.envelope.snapshot_hash,
+            )?;
             Ok(serde_json::json!({
                 "snapshotHash": built.envelope.snapshot_hash,
                 "snapshotId": built.envelope.snapshot_id,
                 "selectionHash": built.selection_hash,
+                "previewToken": preview_token,
                 "assetCount": built.envelope.assets.len() as u64,
                 "revisionCount": built.envelope.revisions.len() as u64,
                 "credentialBearingAssetCount": credential_bearing,
