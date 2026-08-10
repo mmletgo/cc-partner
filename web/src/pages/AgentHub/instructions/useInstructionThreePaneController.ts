@@ -79,8 +79,18 @@ export interface UseInstructionThreePaneControllerResult {
   updateOriginal: (text: string) => void;
   changeBlock: (id: string, patch: Partial<Omit<InstructionBlockDraft, 'id'>>) => void;
   appendBlock: () => void;
-  /** 按当前 instructionLane 编辑对应三槽正文。 */
+  /** 按当前 instructionLane 编辑对应三槽正文（公共/独有；适配请用专用 API）。 */
   editCurrentSlot: (text: string) => void;
+  /**
+   * 适配槽：编辑 Claude 公共底稿（adapted.commonMarkdown）。
+   * 与 agent 选择无关；权威为 Claude Code。
+   */
+  editAdaptedCommon: (text: string) => void;
+  /**
+   * 适配槽：编辑当前 agent 变体（adapted.variants[agent]）。
+   * agent=claude 时不应调用（视图隐藏变体列）。
+   */
+  editAdaptedVariant: (text: string) => void;
   chooseBaseline: (baseline: SyncBaseline) => void;
   cancelDualDirty: () => void;
   dismissApplyResult: () => void;
@@ -389,8 +399,9 @@ export function useInstructionThreePaneController(
   }, [agent]);
 
   /**
-   * Business Logic: 壳层 lane 驱动的三槽编辑。
-   * Code Logic: ensure mode 块 → 公共写 common；适配/独有写 variant[agent]。
+   * Business Logic: 壳层 lane 驱动的三槽编辑（公共 / 独有主路径）。
+   * Code Logic: ensure mode 块 → 公共写 common；独有写 variant[agent]；
+   *   适配 lane 兼容路径写 common（Claude 底稿），完整双列编辑见 editAdapted*。
    */
   const editCurrentSlot = useCallback(
     (text: string) => {
@@ -399,7 +410,8 @@ export function useInstructionThreePaneController(
         let next = ensureModeBlock(current, mode, agent);
         const block = findBlockByMode(next.blocks, mode);
         if (!block) return next;
-        if (mode === 'shared') {
+        if (mode === 'shared' || mode === 'adapted') {
+          // 适配兼容路径：写 commonMarkdown（Claude 公共底稿）
           return updateBlock(next, block.id, { commonMarkdown: text }, agent);
         }
         return updateBlock(
@@ -407,7 +419,7 @@ export function useInstructionThreePaneController(
           block.id,
           {
             variants: { ...block.variants, [agent]: text },
-            sourceTarget: mode === 'targetOnly' ? (block.sourceTarget ?? agent) : null,
+            sourceTarget: block.sourceTarget ?? agent,
           },
           agent,
         );
@@ -415,6 +427,47 @@ export function useInstructionThreePaneController(
       setActionError(null);
     },
     [agent, context.instructionLane],
+  );
+
+  /**
+   * Business Logic: 适配槽公共底稿以 Claude Code 为权威。
+   * Code Logic: ensure adapted 块 → 写 commonMarkdown；preview 仍按当前 agent 合成。
+   */
+  const editAdaptedCommon = useCallback(
+    (text: string) => {
+      setState((current) => {
+        let next = ensureModeBlock(current, 'adapted', agent);
+        const block = findBlockByMode(next.blocks, 'adapted');
+        if (!block) return next;
+        return updateBlock(next, block.id, { commonMarkdown: text }, agent);
+      });
+      setActionError(null);
+    },
+    [agent],
+  );
+
+  /**
+   * Business Logic: 适配槽为非 Claude agent 写入变体。
+   * Code Logic: ensure adapted → variants[agent]=text；空串保留键表示「显式空变体」。
+   */
+  const editAdaptedVariant = useCallback(
+    (text: string) => {
+      setState((current) => {
+        let next = ensureModeBlock(current, 'adapted', agent);
+        const block = findBlockByMode(next.blocks, 'adapted');
+        if (!block) return next;
+        return updateBlock(
+          next,
+          block.id,
+          {
+            variants: { ...block.variants, [agent]: text },
+          },
+          agent,
+        );
+      });
+      setActionError(null);
+    },
+    [agent],
   );
 
   /**
@@ -656,6 +709,8 @@ export function useInstructionThreePaneController(
     changeBlock,
     appendBlock,
     editCurrentSlot,
+    editAdaptedCommon,
+    editAdaptedVariant,
     chooseBaseline,
     cancelDualDirty,
     dismissApplyResult,

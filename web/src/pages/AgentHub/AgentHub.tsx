@@ -215,6 +215,10 @@ export function AgentHubView(props: AgentHubViewProps) {
       slotCommonHint: t('agentHub:instructions.threePane.slotCommonHint'),
       slotAdaptedHint: t('agentHub:instructions.threePane.slotAdaptedHint'),
       slotExclusiveHint: t('agentHub:instructions.threePane.slotExclusiveHint'),
+      adaptedCommonTitle: t('agentHub:instructions.threePane.adaptedCommonTitle'),
+      adaptedVariantTitle: t('agentHub:instructions.threePane.adaptedVariantTitle'),
+      adaptedCommonHint: t('agentHub:instructions.threePane.adaptedCommonHint'),
+      adaptedVariantHint: t('agentHub:instructions.threePane.adaptedVariantHint'),
       dualDirtyTitle: t('agentHub:instructions.threePane.dualDirtyTitle'),
       dualDirtyDescription: t('agentHub:instructions.threePane.dualDirtyDescription'),
       useBlocksBaseline: t('agentHub:instructions.threePane.useBlocksBaseline'),
@@ -584,6 +588,8 @@ export function AgentHubView(props: AgentHubViewProps) {
             }}
             onOriginalChange={instructionThreePane.updateOriginal}
             onSlotTextChange={instructionThreePane.editCurrentSlot}
+            onAdaptedCommonChange={instructionThreePane.editAdaptedCommon}
+            onAdaptedVariantChange={instructionThreePane.editAdaptedVariant}
             onChooseBaseline={instructionThreePane.chooseBaseline}
             onCancelDualDirty={instructionThreePane.cancelDualDirty}
           />

@@ -525,12 +525,19 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell agent/scope/tabs', () => 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-shell')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    // 默认公共槽：隐藏 agent 导航
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-tablist')).toBeVisible();
     await expect(page.getByTestId('agent-hub-toolbar')).toBeVisible();
     await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();
     await expect(page.getByTestId('agent-hub-project-select')).toHaveCount(0);
+
+    // 切到独有槽后出现 agent 导航
+    await page.getByTestId('agent-hub-lane-exclusive').click();
+    await expect(page).toHaveURL(/lane=exclusive/);
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
 
     await page.getByTestId('agent-hub-agent-codex').click();
     await expect(page).toHaveURL(/agent=codex/);
@@ -546,6 +553,8 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell agent/scope/tabs', () => 
       'true',
     );
     await expect(page).toHaveURL(/section=assets|tab=skill|kind=skill/);
+    // 非 instructions tab 始终显示 agent 导航
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
 
     await page.getByTestId('agent-hub-scope-project').click();
     await expect(page).toHaveURL(/scope=project/);
@@ -555,8 +564,8 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell agent/scope/tabs', () => 
   });
 });
 
-test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction three-pane empty blocks', () => {
-  test('three panes present; blocks empty until reparse from original', async ({
+test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
+  test('common single / adapted dual / exclusive three-pane with reparse', async ({
     page,
     backendHarness,
   }) => {
@@ -566,29 +575,52 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction three-pane empty blocks
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('instruction-three-pane')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
+
+    // 公共槽：仅单列公共编辑，无预览/原始，无 agent 导航
+    await expect(page.getByTestId('instruction-panes-common')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
+    await expect(page.getByTestId('instruction-slot-textarea')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-preview')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-pane-original')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+
+    // 适配槽 + Claude：仅公共底稿单列
+    await page.getByTestId('agent-hub-lane-adapted').click();
+    await expect(page).toHaveURL(/lane=adapted/);
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    await expect(page.getByTestId('instruction-panes-adapted')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-adapted-common')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-adapted-variant')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-pane-preview')).toHaveCount(0);
+
+    // 适配槽 + Codex：双列（底稿 + 变体）
+    await page.getByTestId('agent-hub-agent-codex').click();
+    await expect(page).toHaveURL(/agent=codex/);
+    await expect(page.getByTestId('instruction-pane-adapted-common')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-adapted-variant')).toBeVisible();
+
+    // 独有槽：三列 + 原始栏 reparse
+    await page.getByTestId('agent-hub-lane-exclusive').click();
+    await expect(page).toHaveURL(/lane=exclusive/);
+    await expect(page.getByTestId('instruction-panes-exclusive')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-preview')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-original')).toBeVisible();
-
-    // Spec: open must not auto-parse slots
-    await expect(page.getByTestId('instruction-blocks-empty')).toBeVisible();
-    await expect(page.getByTestId('instruction-block-list')).toHaveCount(0);
     await expect(page.getByTestId('instruction-reparse-from-original')).toBeVisible();
     await expect(
       page.getByTestId('instruction-pane-original').getByTestId('instruction-reparse-from-original'),
     ).toBeVisible();
-    await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
 
     await expect(page.getByTestId('instruction-original-textarea')).toHaveValue(
       /Always run tests before commit/,
     );
 
+    // 从原始导入为公共 → 回到公共槽可见导入结果
     await page.getByTestId('instruction-reparse-from-original').click();
-    await expect(page.getByTestId('instruction-blocks-empty')).toHaveCount(0);
-    await expect(page.getByTestId('instruction-block-list')).toBeVisible();
-    // 整篇导入为公共 shared，预览含原文
-    await expect(page.getByTestId('instruction-preview-body')).toContainText(
-      'Always run tests before commit',
+    await page.getByTestId('agent-hub-lane-common').click();
+    await expect(page.getByTestId('instruction-slot-textarea')).toHaveValue(
+      /Always run tests before commit/,
     );
   });
 });

@@ -78,9 +78,42 @@ describe('AgentHubShell', () => {
 
   test('click Codex emits onContextChange({ agent: "codex" })', () => {
     const onContextChange = vi.fn();
-    renderShell({ onContextChange });
+    // 公共槽隐藏 agent 导航；用独有槽验证切换
+    renderShell({
+      onContextChange,
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'exclusive' },
+    });
     fireEvent.click(screen.getByTestId('agent-hub-agent-codex'));
     expect(onContextChange).toHaveBeenCalledWith({ agent: 'codex' });
+  });
+
+  test('common lane hides agent switcher; adapted/exclusive show it', () => {
+    const onContextChange = vi.fn();
+    const { rerender, props } = renderShell({ onContextChange });
+    // default instructionLane=common → no agent switcher
+    expect(screen.queryByTestId('agent-hub-agent-switcher')).toBeNull();
+
+    const adaptedContext: AgentHubContext = {
+      ...DEFAULT_AGENT_HUB_CONTEXT,
+      instructionLane: 'adapted',
+    };
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <AgentHubShell {...props} context={adaptedContext} onContextChange={onContextChange} />
+      </I18nextProvider>,
+    );
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+
+    const exclusiveContext: AgentHubContext = {
+      ...DEFAULT_AGENT_HUB_CONTEXT,
+      instructionLane: 'exclusive',
+    };
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <AgentHubShell {...props} context={exclusiveContext} onContextChange={onContextChange} />
+      </I18nextProvider>,
+    );
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
   });
 
   test('instructions tab shows lane switcher; skill tab hides it', () => {
@@ -107,6 +140,8 @@ describe('AgentHubShell', () => {
       </I18nextProvider>,
     );
     expect(screen.queryByTestId('agent-hub-lane-switcher')).toBeNull();
+    // 非 instructions tab 仍显示 agent 导航
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
   });
 
   test('user → project hides device selector and shows project selector', () => {

@@ -295,30 +295,32 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </div>
         ) : null}
 
-        {/* L4: Agent */}
-        <div className={styles.row}>
-          <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
-          <div
-            className={styles.segment}
-            role="tablist"
-            aria-label={t('agentHub:shell.agentAria')}
-            data-testid="agent-hub-agent-switcher"
-          >
-            {AGENTS.map((agent) => (
-              <Button
-                key={agent}
-                variant={context.agent === agent ? 'primary' : 'ghost'}
-                size="sm"
-                role="tab"
-                aria-selected={context.agent === agent}
-                onClick={() => onContextChange({ agent })}
-                data-testid={`agent-hub-agent-${agent}`}
-              >
-                {t(`agentHub:targets.${agent}`)}
-              </Button>
-            ))}
+        {/* L4: Agent — 公共槽与 Agent 无关，隐藏导航 */}
+        {context.tab === 'instructions' && context.instructionLane === 'common' ? null : (
+          <div className={styles.row}>
+            <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
+            <div
+              className={styles.segment}
+              role="tablist"
+              aria-label={t('agentHub:shell.agentAria')}
+              data-testid="agent-hub-agent-switcher"
+            >
+              {AGENTS.map((agent) => (
+                <Button
+                  key={agent}
+                  variant={context.agent === agent ? 'primary' : 'ghost'}
+                  size="sm"
+                  role="tab"
+                  aria-selected={context.agent === agent}
+                  onClick={() => onContextChange({ agent })}
+                  data-testid={`agent-hub-agent-${agent}`}
+                >
+                  {t(`agentHub:targets.${agent}`)}
+                </Button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <div className={styles.body} data-testid="agent-hub-shell-body">

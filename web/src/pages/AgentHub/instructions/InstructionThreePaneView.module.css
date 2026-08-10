@@ -69,6 +69,22 @@
   overflow-x: auto;
 }
 
+/* 公共槽 / 适配选 Claude：单列铺满 */
+.panesSingle {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 适配槽选非 Claude：公共底稿 + 当前变体 */
+.panesDual {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.laneBanner {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg-muted-readable);
+}
+
 .pane {
   display: flex;
   flex-direction: column;
@@ -297,5 +313,13 @@
 @media (max-width: 900px) {
   .panes {
     grid-template-columns: minmax(14rem, 1fr) minmax(14rem, 1fr) minmax(14rem, 1fr);
+  }
+
+  .panesSingle {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panesDual {
+    grid-template-columns: minmax(14rem, 1fr) minmax(14rem, 1fr);
   }
 }
