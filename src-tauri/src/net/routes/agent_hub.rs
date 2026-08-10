@@ -8,21 +8,32 @@
 //!     POST prepare / PUT objects / POST commit；body limit 与 P2pError 信封；
 //!     业务委托 `agent_hub::replication::receiver`。
 
+use crate::agent_hub::models::ScopeKind;
 use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::portable_actions::{
+    ApplyPortableAssetActionRequest, PreviewPortableAssetActionRequest,
+};
+use crate::agent_hub::portable_inventory::{
+    inspect_portable_inventory_query, PortableInventoryQuery,
+};
+use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::replication::ledger::ReplicationLedger;
 use crate::agent_hub::replication::pull::{
     build_remote_inventory_for_target, source_prepare_selection, source_read_object_chunk,
-    source_release_transfer, RemoteInventoryQuery, RemoteSelectionQuery,
-    PORTABLE_PULL_MAX_CHUNK_BYTES,
+    source_release_transfer, RemoteInventoryQuery, RemoteProjectPortableInventoryQuery,
+    RemoteSelectionQuery, PORTABLE_PULL_MAX_CHUNK_BYTES,
 };
 use crate::agent_hub::replication::receiver::{
     commit_push, prepare_push, put_object_chunk, CommitPushRequest, CommitPushResponse,
     PreparePushRequest, PreparePushResponse, PutObjectResponse, AGENT_HUB_MAX_CHUNK_BYTES,
 };
+use crate::agent_hub::service::AgentHubService;
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions
 #[cfg(test)]
-use crate::net::protocol::{CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PULL_V1};
+use crate::net::protocol::{
+    CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PROJECT_V1, CAPABILITY_PORTABLE_PULL_V1,
+};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
 use axum::body::Bytes;
@@ -170,9 +181,10 @@ pub async fn agent_hub_portable_inventory(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(body): Json<RemoteInventoryQuery>,
 ) -> P2pResult<Json<crate::agent_hub::replication::pull::RemotePortableInventoryDto>> {
-    let dto = build_remote_inventory_for_target(&state, body.source_target)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.inventory"))?;
+    let dto =
+        build_remote_inventory_for_target(&state, body.source_target, body.source_local_project_id)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.inventory"))?;
     Ok(Json(dto))
 }
 
@@ -185,9 +197,14 @@ pub async fn agent_hub_portable_selection(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(body): Json<RemoteSelectionQuery>,
 ) -> P2pResult<Json<crate::agent_hub::replication::pull::RemotePortableSelectionResponse>> {
-    let dto = source_prepare_selection(&state, body.source_target, body.inventory_item_ids)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.selection"))?;
+    let dto = source_prepare_selection(
+        &state,
+        body.source_target,
+        body.source_local_project_id,
+        body.inventory_item_ids,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.selection"))?;
     Ok(Json(dto))
 }
 
@@ -232,6 +249,112 @@ pub async fn agent_hub_portable_transfer_release(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// POST /api/agent-hub/portable/project/inventory
+///
+/// Business Logic: owning peer 按真实本地 project id 返回精确项目库存；LAN 通道不做身份鉴权。
+pub async fn agent_hub_portable_project_inventory(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<RemoteProjectPortableInventoryQuery>,
+) -> P2pResult<Json<crate::agent_hub::portable_inventory::PortableInventorySnapshotDto>> {
+    let dto = inspect_portable_inventory_query(
+        &state,
+        PortableInventoryQuery {
+            target: Some(body.target),
+            kind: body.kind,
+            scope_kind: Some(ScopeKind::Project),
+            local_project_id: Some(body.local_project_id),
+        },
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.project.inventory"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/project/preview
+pub async fn agent_hub_portable_project_preview(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::project_scope::AgentHubProjectPreview>> {
+    let project_id = body
+        .get("localProjectId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| P2pError::validation("localProjectId required", &ctx))?;
+    let dto = AgentHubService::preview_project(&state, project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.project.preview"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/project/enable
+pub async fn agent_hub_portable_project_enable(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::project_scope::AgentHubProjectStatus>> {
+    let project_id = body
+        .get("localProjectId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| P2pError::validation("localProjectId required", &ctx))?;
+    let dto = AgentHubService::enable_project(&state, project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.project.enable"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/project/action/preview
+pub async fn agent_hub_portable_project_action_preview(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<PreviewPortableAssetActionRequest>,
+) -> P2pResult<Json<crate::agent_hub::portable_actions::PortableAssetActionPlanDto>> {
+    if body.inventory_query.scope_kind != Some(ScopeKind::Project)
+        || body.inventory_query.local_project_id.is_none()
+    {
+        return Err(P2pError::validation(
+            "project-scoped inventoryQuery required",
+            &ctx,
+        ));
+    }
+    let dto = PortableService::preview_portable_asset_action(&state, body)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "agent_hub.portable.project.action.preview")
+        })?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/project/action/apply
+pub async fn agent_hub_portable_project_action_apply(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<ApplyPortableAssetActionRequest>,
+) -> P2pResult<Json<crate::agent_hub::portable_actions::PortableAssetActionResultDto>> {
+    let dto = PortableService::apply_portable_asset_action(&state, body)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "agent_hub.portable.project.action.apply")
+        })?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/project/action/get
+pub async fn agent_hub_portable_project_action_get(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::portable_actions::PortableAssetActionResultDto>> {
+    let client_request_id = body
+        .get("clientRequestId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| P2pError::validation("clientRequestId required", &ctx))?;
+    let dto = PortableService::get_portable_asset_action(&state, client_request_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.project.action.get"))?;
+    Ok(Json(dto))
+}
+
 /// 路由/能力原子性：push 三路由 + portable-pull 三路由同 build 宣告。
 ///
 /// 注意：expected-device / Host / Origin 守卫是协议完整性约束，**不是**身份认证。
@@ -266,6 +389,7 @@ mod tests {
             "server_protocol_info 必须宣告 agent-hub.portable-pull.v1，实际: {:?}",
             info.capabilities
         );
+        assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
         // 引用 handler，防止 capability 宣告而路由未接线被优化掉
         let _ = (
             agent_hub_push_prepare as *const (),
@@ -275,9 +399,19 @@ mod tests {
             agent_hub_portable_selection as *const (),
             agent_hub_portable_object as *const (),
             agent_hub_portable_transfer_release as *const (),
+            agent_hub_portable_project_preview as *const (),
+            agent_hub_portable_project_enable as *const (),
+            agent_hub_portable_project_inventory as *const (),
+            agent_hub_portable_project_action_preview as *const (),
+            agent_hub_portable_project_action_apply as *const (),
+            agent_hub_portable_project_action_get as *const (),
         );
         assert_eq!(CAPABILITY_AGENT_HUB_V1, "agent-hub.v1");
         assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");
+        assert_eq!(
+            CAPABILITY_PORTABLE_PROJECT_V1,
+            "agent-hub.portable-project.v1"
+        );
         // 能力列表字典序应包含 token
         assert!(info.capabilities.windows(2).all(|w| w[0] <= w[1]));
     }

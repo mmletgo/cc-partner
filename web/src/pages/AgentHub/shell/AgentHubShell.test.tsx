@@ -43,6 +43,8 @@ function buildProps(overrides: Partial<AgentHubShellProps> = {}): AgentHubShellP
       onAdapt: vi.fn(),
       adaptDisabledReason: null,
     },
+    peers: [],
+    projects: [],
     children: <div data-testid="shell-slot">content</div>,
     ...overrides,
   };
@@ -119,15 +121,15 @@ describe('AgentHubShell', () => {
     expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
   });
 
-  test('scope is fixed local-user and no project/device selector is rendered', () => {
+  test('scope and device selectors are visible and project selection is reachable', () => {
     renderShell();
-    expect(screen.getByTestId('agent-hub-fixed-scope')).toBeTruthy();
-    expect(screen.queryByTestId('agent-hub-device-select')).toBeNull();
+    expect(screen.getByTestId('agent-hub-scope-switcher')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-device-select')).toBeTruthy();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
-    expect(screen.queryByTestId('agent-hub-scope-project')).toBeNull();
+    expect(screen.getByTestId('agent-hub-scope-project')).toBeTruthy();
   });
 
-  test('peer context is Pull-only and shows visible reasons for blocked actions', () => {
+  test('peer context keeps Pull and Push while Adapt is visibly blocked', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
     const onAdapt = vi.fn();
@@ -145,20 +147,20 @@ describe('AgentHubShell', () => {
     });
 
     expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
     const adapt = screen.getByTestId('agent-hub-action-adapt') as HTMLButtonElement;
     expect(adapt.disabled).toBe(true);
-    expect(screen.getByTestId('agent-hub-push-reason').textContent).toMatch(/Pull-only|只允许 Pull/i);
-    expect(screen.getByTestId('agent-hub-adapt-reason').textContent).toMatch(/Pull-only|只允许 Pull/i);
+    expect(screen.queryByTestId('agent-hub-push-reason')).toBeNull();
+    expect(screen.getByTestId('agent-hub-adapt-reason').textContent).toMatch(/this device|本机/i);
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
     fireEvent.click(adapt);
     expect(onPull).toHaveBeenCalledOnce();
-    expect(onPush).not.toHaveBeenCalled();
+    expect(onPush).toHaveBeenCalledOnce();
     expect(onAdapt).not.toHaveBeenCalled();
   });
 
-  test('project context disables every toolbar action and explains recovery', () => {
+  test('project context keeps management actions and blocks only Adapt by default', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
     const onAdapt = vi.fn();
@@ -171,16 +173,12 @@ describe('AgentHubShell', () => {
       actions: { onPull, onPush, onAdapt },
     });
 
-    for (const action of ['pull', 'push', 'adapt']) {
-      expect(
-        (screen.getByTestId(`agent-hub-action-${action}`) as HTMLButtonElement).disabled,
-      ).toBe(true);
-    }
-    expect(screen.getByTestId('agent-hub-pull-reason').textContent).toMatch(
-      /unavailable|暂不可用/i,
-    );
+    expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('agent-hub-action-adapt') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-hub-project-select')).toBeTruthy();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
-    expect(onPull).not.toHaveBeenCalled();
+    expect(onPull).toHaveBeenCalledOnce();
   });
 
   test('five tabs emit tab patch; skill selects skill', () => {
@@ -195,6 +193,23 @@ describe('AgentHubShell', () => {
 
     fireEvent.click(screen.getByTestId('agent-hub-tab-instructions'));
     expect(onContextChange).toHaveBeenCalledWith({ tab: 'instructions' });
+  });
+
+  test('selected navigation keeps the orange primary variant while unselected items stay ghost', () => {
+    renderShell();
+
+    expect(screen.getByTestId('agent-hub-tab-instructions').getAttribute('data-variant'))
+      .toBe('primary');
+    expect(screen.getByTestId('agent-hub-tab-skill').getAttribute('data-variant'))
+      .toBe('ghost');
+    expect(screen.getByTestId('agent-hub-lane-common').getAttribute('data-variant'))
+      .toBe('primary');
+    expect(screen.getByTestId('agent-hub-lane-adapted').getAttribute('data-variant'))
+      .toBe('ghost');
+    expect(screen.getByTestId('agent-hub-agent-claude').getAttribute('data-variant'))
+      .toBe('primary');
+    expect(screen.getByTestId('agent-hub-agent-codex').getAttribute('data-variant'))
+      .toBe('ghost');
   });
 
   test('asset tabs show migrated kindCounts from tabCounts prop', () => {

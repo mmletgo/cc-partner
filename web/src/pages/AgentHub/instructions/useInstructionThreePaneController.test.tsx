@@ -913,7 +913,7 @@ describe('useInstructionThreePaneController', () => {
     });
 
     await waitFor(() => {
-      expect(result.current.error).toBe('AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE');
+      expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
     });
     expect(apiMocks.inspectUserInstructionWorkspace).not.toHaveBeenCalled();
   });

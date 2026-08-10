@@ -71,7 +71,8 @@ impl PortableService {
         state: &AppState,
         request: PreviewPortableAssetActionRequest,
     ) -> Result<PortableAssetActionPlanDto, AppError> {
-        let snapshot = inspect_portable_inventory_query(state, request.inventory_query).await?;
+        let snapshot =
+            inspect_portable_inventory_query(state, request.inventory_query.clone()).await?;
         let owner_fp = portable_owner_fingerprint(state, &snapshot);
         preview_portable_asset_action_with_inventory(
             &state.agent_hub_repo,

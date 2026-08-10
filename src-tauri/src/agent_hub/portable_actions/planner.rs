@@ -101,23 +101,6 @@ pub async fn preview_portable_asset_action_with_inventory(
         let target_dto = snapshot.targets.iter().find(|t| t.target == item.target);
         if let Some(t) = target_dto {
             fingerprints.insert(target_fingerprint(t));
-            if t.mutation_capability == PortableInventoryMutationCapability::Blocked {
-                plan_blocking.push(format!(
-                    "PORTABLE_ASSET_ACTION_TARGET_MUTATION_BLOCKED:{}",
-                    item.target.as_str()
-                ));
-            }
-            if !t.installed {
-                plan_blocking.push(format!(
-                    "PORTABLE_ASSET_ACTION_CLI_MISSING:{}",
-                    item.target.as_str()
-                ));
-            }
-        } else {
-            plan_blocking.push(format!(
-                "PORTABLE_ASSET_ACTION_TARGET_MISSING:{}",
-                item.target.as_str()
-            ));
         }
 
         let (change, mut reasons) = build_change(item, target_dto, &request).await?;

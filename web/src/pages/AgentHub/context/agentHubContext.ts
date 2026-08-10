@@ -2,8 +2,8 @@
  * Agent Hub URL 上下文纯模型。
  *
  * Business Logic（为什么需要）:
- *   当前发布以 tab × (instructions:lane) × agent 恢复本机用户级工作台；
- *   深链与书签必须能往返，旧 section/target/kind 不得整页断链。
+ *   当前发布以 tab × scope × owner × (instructions:lane) × agent 恢复工作台；
+ *   本机、远端设备和项目上下文都必须可深链往返，不能因某个写动作暂不可用而丢失导航身份。
  *
  * Code Logic（做什么）:
  *   parse/write URLSearchParams；mapLegacySection 把五段分区映射为 Partial context。
@@ -51,11 +51,12 @@ export interface AgentHubContext {
 /**
  * Agent Hub 当前上下文可兑现的能力级别。
  *
- * Business Logic: 本轮只开放本机用户级直读；远端用户级只允许进入显式 Pull 任务，
- *   项目级因缺少精确 project identity 绑定必须保持关闭。
- * Code Logic: 任意互斥字段混用都 fail-closed 为 unsupported。
+ * Business Logic: Shell 导航能力与某个 mutation 是否认证是两回事；远端和项目上下文
+ *   必须继续可管理，具体动作再由 inventory/preview/apply 的能力证据决定。
+ * Code Logic: local-user=direct；peer 或 remote project=remote；local project=project；
+ *   互斥字段混用才 fail-closed 为 unsupported。
  */
-export type AgentHubContextCapability = 'direct' | 'pullOnly' | 'unsupported';
+export type AgentHubContextCapability = 'direct' | 'remote' | 'project' | 'unsupported';
 
 /** 草稿所属身份；lane 不在其中，因为同一 Agent 的三槽共享一个 Canonical 文档。 */
 export interface AgentHubDraftIdentity {
@@ -98,15 +99,18 @@ export function getAgentHubDraftIdentity(
 }
 
 /**
- * Business Logic: 所有调用方共享同一 fail-closed 能力矩阵，防止页面与 API 各自猜测。
- * Code Logic: local-user=direct；peer-user=pullOnly；project/互斥字段混用=unsupported。
+ * Business Logic: 所有调用方共享同一 owner 分类，防止页面与 API 各自猜测。
+ * Code Logic: 只有字段互斥关系非法时 unsupported；合法远端/项目上下文不得被降级成本机。
  */
 export function getAgentHubContextCapability(
   context: AgentHubContext,
 ): AgentHubContextCapability {
-  if (context.scope === 'project') return 'unsupported';
-  if (context.projectKey !== null) return 'unsupported';
-  return context.deviceId === null ? 'direct' : 'pullOnly';
+  if (context.scope === 'user') {
+    if (context.projectKey !== null) return 'unsupported';
+    return context.deviceId === null ? 'direct' : 'remote';
+  }
+  if (context.deviceId !== null) return 'unsupported';
+  return context.projectKey?.startsWith('remote:') ? 'remote' : 'project';
 }
 
 /**
@@ -159,8 +163,11 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
   if (agent && isAgentTarget(agent)) {
     ctx.agent = agent;
   }
-  // project / peer 壳层尚无与当前 project/device 精确绑定的安全 API。本次入口
-  // 一律规范化为 local-user；旧参数只用于一次迁移说明，不进入业务 context。
+  const scope = params.get('scope');
+  if (scope === 'user' || scope === 'project') {
+    ctx.scope = scope;
+  }
+
   const tab = params.get('tab');
   if (tab && isAgentHubTab(tab)) {
     ctx.tab = tab;
@@ -171,9 +178,15 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
     ctx.instructionLane = lane;
   }
 
-  ctx.scope = 'user';
-  ctx.deviceId = null;
-  ctx.projectKey = null;
+  if (ctx.scope === 'project') {
+    const projectKey = params.get('project') ?? params.get('projectKey');
+    ctx.projectKey = projectKey?.trim() ? projectKey.trim() : null;
+    ctx.deviceId = null;
+  } else {
+    const deviceId = params.get('deviceId');
+    ctx.deviceId = deviceId?.trim() ? deviceId.trim() : null;
+    ctx.projectKey = null;
+  }
 
   ctx.adaptView = params.get('view') === 'adapt';
 
@@ -198,9 +211,17 @@ export function writeAgentHubContext(
   if (ctx.agent === DEFAULT_AGENT_HUB_CONTEXT.agent) next.delete('agent');
   else next.set('agent', ctx.agent);
 
-  next.delete('scope');
-  next.delete('deviceId');
-  next.delete('project');
+  if (ctx.scope === 'project') {
+    next.set('scope', 'project');
+    next.delete('deviceId');
+    if (ctx.projectKey) next.set('project', ctx.projectKey);
+    else next.delete('project');
+  } else {
+    next.delete('scope');
+    next.delete('project');
+    if (ctx.deviceId) next.set('deviceId', ctx.deviceId);
+    else next.delete('deviceId');
+  }
   next.delete('projectKey');
 
   if (ctx.tab === DEFAULT_AGENT_HUB_CONTEXT.tab) next.delete('tab');

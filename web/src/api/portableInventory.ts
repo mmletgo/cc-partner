@@ -40,7 +40,7 @@ import { invokeDecoded } from './client';
  * 可选设备 / 项目上下文（T7）。
  *
  * Business Logic: 用户级 deviceId=null 本机；项目级 projectRef 为本机或 remote:… 身份。
- * Code Logic: 仅非空字段参与 peer 判定；本机 projectRef 还需等待项目级 inventory 路由。
+ * Code Logic: 仅非空字段参与 peer 判定；本机 projectRef 由 localProjectId 精确解析。
  */
 export interface AgentHubRequestContext {
   deviceId?: string | null;
@@ -54,7 +54,7 @@ export interface AgentHubRequestContext {
  * Code Logic: Error.message 与 Error.code 同为该常量。
  */
 export const AGENT_HUB_PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE' as const;
-/** 本机 projectRef 当前没有 portable inventory V2 路由。 */
+/** 本机 projectRef 无法解析为唯一 Hub project 时的稳定错误码。 */
 export const AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE =
   'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE' as const;
 
@@ -84,12 +84,6 @@ export function requiresPeerAgentHubPath(
  * Code Logic: 抛带稳定 code 的 Error。
  */
 export function assertLocalAgentHubContext(context?: AgentHubRequestContext | null): void {
-  const projectRef = context?.projectRef?.trim() ?? '';
-  if (projectRef.length > 0 && !isRemoteProjectRef(projectRef)) {
-    throw Object.assign(new Error(AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE), {
-      code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
-    });
-  }
   if (!requiresPeerAgentHubPath(context)) return;
   throw Object.assign(new Error(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE), {
     code: AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
@@ -97,23 +91,23 @@ export function assertLocalAgentHubContext(context?: AgentHubRequestContext | nu
 }
 
 /**
- * Business Logic: 本机调用保持无参兼容旧 sidecar；项目上下文当前不允许静默透传。
- * Code Logic: peer/本机 project 已由 assert 拦截；仅用户级本机调用返回 undefined。
+ * Business Logic: 用户级保持无参兼容；项目级携带本机 Workbench id，由 Rust 精确解析。
+ * Code Logic: peer 已由 assert 拦截；projectRef 不直接充当 Hub identity。
  */
 function localInspectInvokeArgs(
   context?: PortableInventoryRequestContext | null,
 ): Record<string, unknown> | undefined {
   const projectRef = context?.projectRef?.trim() ?? '';
-  if (projectRef.length === 0 || isRemoteProjectRef(projectRef)) {
-    const request = {
-      ...(context?.target ? { target: context.target } : {}),
-      ...(context?.kind ? { kind: context.kind } : {}),
-      ...(context?.scopeKind ? { scopeKind: context.scopeKind } : {}),
-    };
-    return Object.keys(request).length > 0 ? { request } : undefined;
-  }
-  // 保留 helper 便于项目路由接通时扩展；当前 assert 会在本机 project 到达此处前阻断。
-  return undefined;
+  const request = {
+    ...(context?.target ? { target: context.target } : {}),
+    ...(context?.kind ? { kind: context.kind } : {}),
+    ...(context?.scopeKind ? { scopeKind: context.scopeKind } : {}),
+    ...(context?.localProjectId ? { localProjectId: context.localProjectId } : {}),
+    ...(projectRef && !isRemoteProjectRef(projectRef)
+      ? { localProjectId: projectRef }
+      : {}),
+  };
+  return Object.keys(request).length > 0 ? { request } : undefined;
 }
 
 /**
@@ -127,6 +121,10 @@ export const PORTABLE_INVENTORY_COMMANDS = {
   previewAction: 'agent_hub_preview_portable_asset_action',
   applyAction: 'agent_hub_apply_portable_asset_action',
   getAction: 'agent_hub_get_portable_asset_action',
+  inspectRemoteProject: 'agent_hub_inspect_remote_project_portable_inventory',
+  previewRemoteProjectAction: 'agent_hub_preview_remote_project_portable_action',
+  applyRemoteProjectAction: 'agent_hub_apply_remote_project_portable_action',
+  getRemoteProjectAction: 'agent_hub_get_remote_project_portable_action',
   listRemoteInventory: 'agent_hub_list_remote_portable_inventory',
   previewPull: 'agent_hub_preview_portable_pull',
   applyPull: 'agent_hub_apply_portable_pull',
@@ -145,6 +143,25 @@ export const portableAssetApi: PortableAssetApi = {
    * Code Logic: assertLocal → agent_hub_inspect_portable_inventory（可选精确过滤）。
    */
   inspect(context?: PortableInventoryRequestContext): Promise<PortableInventorySnapshotDto> {
+    const projectRef = context?.projectRef?.trim() ?? '';
+    if (isRemoteProjectRef(projectRef)) {
+      if (!context?.target) {
+        throw Object.assign(new Error(AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE), {
+          code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
+        });
+      }
+      return invokeDecoded(
+        PORTABLE_INVENTORY_COMMANDS.inspectRemoteProject,
+        {
+          request: {
+            projectRef,
+            target: context.target,
+            ...(context.kind ? { kind: context.kind } : {}),
+          },
+        },
+        portableInventorySnapshotDecoder,
+      );
+    }
     assertLocalAgentHubContext(context);
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.inspect,
@@ -160,13 +177,36 @@ export const portableAssetApi: PortableAssetApi = {
   previewAction(
     request: PreviewPortableAssetActionRequest,
   ): Promise<PortableAssetActionPlanDto> {
+    const projectRef = request.projectRef?.trim() ?? '';
+    if (isRemoteProjectRef(projectRef)) {
+      const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+      void _deviceId;
+      void _projectRef;
+      return invokeDecoded(
+        PORTABLE_INVENTORY_COMMANDS.previewRemoteProjectAction,
+        { request: { projectRef, request: body } },
+        portableAssetActionPlanDecoder,
+      );
+    }
     assertLocalAgentHubContext(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.previewAction,
-      { request: body },
+      {
+        request: {
+          ...body,
+          ...(_projectRef && !isRemoteProjectRef(_projectRef)
+            ? {
+                inventoryQuery: {
+                  ...body.inventoryQuery,
+                  localProjectId: _projectRef,
+                },
+              }
+            : {}),
+        },
+      },
       portableAssetActionPlanDecoder,
     );
   },
@@ -176,6 +216,17 @@ export const portableAssetApi: PortableAssetApi = {
    * Code Logic: assertLocal → strip context → agent_hub_apply_portable_asset_action。
    */
   applyAction(request: ApplyPortableAssetActionRequest): Promise<PortableAssetActionResultDto> {
+    const projectRef = request.projectRef?.trim() ?? '';
+    if (isRemoteProjectRef(projectRef)) {
+      const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+      void _deviceId;
+      void _projectRef;
+      return invokeDecoded(
+        PORTABLE_INVENTORY_COMMANDS.applyRemoteProjectAction,
+        { request: { projectRef, request: body } },
+        portableAssetActionResultDecoder,
+      );
+    }
     assertLocalAgentHubContext(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
@@ -191,7 +242,18 @@ export const portableAssetApi: PortableAssetApi = {
    * Business Logic: 对账 apply 结果（含 outcomeUnknown）；保留稳定 backend code。
    * Code Logic: agent_hub_get_portable_asset_action。
    */
-  getAction(clientRequestId: string): Promise<PortableAssetActionResultDto> {
+  getAction(
+    clientRequestId: string,
+    context?: PortableInventoryRequestContext,
+  ): Promise<PortableAssetActionResultDto> {
+    const projectRef = context?.projectRef?.trim() ?? '';
+    if (isRemoteProjectRef(projectRef)) {
+      return invokeDecoded(
+        PORTABLE_INVENTORY_COMMANDS.getRemoteProjectAction,
+        { request: { projectRef, clientRequestId } },
+        portableAssetActionResultDecoder,
+      );
+    }
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.getAction,
       { clientRequestId },

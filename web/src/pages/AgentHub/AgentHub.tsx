@@ -51,6 +51,8 @@ export function AgentHubView(props: AgentHubViewProps) {
     hubContext,
     contextMigrationNotice,
     onContextChange,
+    shellPeers,
+    shellProjects,
     portableInventory,
     portableDetailsOpen,
     portableSelectedItem,
@@ -71,6 +73,10 @@ export function AgentHubView(props: AgentHubViewProps) {
     openPortablePull,
     closePortablePull,
     portablePull,
+    preview,
+    previewProjectId,
+    runPreviewProject,
+    runEnableProject,
     actionError,
     actionBusy,
     setInstructionRefresh,
@@ -218,16 +224,33 @@ export function AgentHubView(props: AgentHubViewProps) {
    * Code Logic: peer 设备上下文时禁用 Adapt（同机 only）。
    */
   const shellActions = useMemo(
-    () => ({
-      onPull: openPortablePull,
-      onPush: openLanPushDialog,
-      onAdapt: () => {
-        onContextChange({ adaptView: true });
-      },
-      adaptDisabledReason:
-        hubContext.deviceId !== null ? t('agentHub:shell.adaptLocalOnly') : null,
-    }),
-    [hubContext.deviceId, onContextChange, openLanPushDialog, openPortablePull, t],
+    () => {
+      const remoteProject =
+        hubContext.scope === 'project' && hubContext.projectKey?.startsWith('remote:');
+      const localProject =
+        hubContext.scope === 'project' && hubContext.projectKey && !remoteProject;
+      return {
+        onPull: openPortablePull,
+        onPush: openLanPushDialog,
+        onAdapt: () => {
+          onContextChange({ adaptView: true });
+        },
+        pullDisabledReason: null,
+        pushDisabledReason: remoteProject
+          ? t('agentHub:shell.remoteProjectTaskUnavailable')
+          : localProject &&
+              (!preview?.hubProjectId ||
+                previewProjectId !== hubContext.projectKey ||
+                preview.optedIn !== true)
+            ? t('agentHub:shell.projectPushRequiresPreview')
+            : null,
+        adaptDisabledReason:
+          hubContext.scope !== 'user' || hubContext.deviceId !== null
+            ? t('agentHub:shell.adaptLocalOnly')
+            : null,
+      };
+    },
+    [hubContext, onContextChange, openLanPushDialog, openPortablePull, preview?.hubProjectId, t],
   );
 
   /**
@@ -243,6 +266,14 @@ export function AgentHubView(props: AgentHubViewProps) {
   }, [instructionThreePane?.state]);
 
   const isAssetTab = isAssetKindTab(hubContext.tab);
+  const isRemoteContext =
+    hubContext.deviceId !== null || hubContext.projectKey?.startsWith('remote:') === true;
+  const isRemoteProject = hubContext.projectKey?.startsWith('remote:') === true;
+  const isLocalProject =
+    hubContext.scope === 'project' &&
+    hubContext.projectKey !== null &&
+    !hubContext.projectKey.startsWith('remote:');
+  const isProject = hubContext.scope === 'project' && hubContext.projectKey !== null;
 
   /**
    * Business Logic: 把三栏 refresh 注入 hub controller，供 header reload 分发。
@@ -315,9 +346,11 @@ export function AgentHubView(props: AgentHubViewProps) {
           context={hubContext}
           onContextChange={onContextChange}
           actions={shellActions}
+          peers={shellPeers}
+          projects={shellProjects}
           tabCounts={portableInventory.kindCounts}
         >
-        {hubContext.tab === 'instructions' && instructionThreePane ? (
+        {hubContext.tab === 'instructions' && !isRemoteContext && !isLocalProject && instructionThreePane ? (
           <InstructionThreePaneView
             labels={instructionThreePaneLabels}
             state={instructionThreePane.state}
@@ -358,6 +391,61 @@ export function AgentHubView(props: AgentHubViewProps) {
           />
         ) : null}
 
+        {hubContext.tab === 'instructions' && isProject ? (
+          <section className={styles.previewResult} data-testid="agent-hub-project-management">
+            <StatusMessage tone={preview?.optedIn ? 'success' : 'info'}>
+              {preview?.optedIn
+                ? t('agentHub:preview.projectEnabled')
+                : t('agentHub:preview.projectManageDescription')}
+            </StatusMessage>
+            <div className={styles.dialogActions}>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={actionBusy}
+                onClick={() => void runPreviewProject()}
+              >
+                {t('agentHub:preview.run')}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={
+                  !preview ||
+                  previewProjectId !== hubContext.projectKey ||
+                  preview.optedIn === true
+                }
+                loading={actionBusy}
+                onClick={() => void runEnableProject()}
+              >
+                {t('agentHub:preview.enable')}
+              </Button>
+            </div>
+            {preview ? (
+              <div className={styles.metaBlock}>
+                <span>
+                  {t('agentHub:preview.hubProjectId')}: {preview.hubProjectId ?? '—'}
+                </span>
+                <span>
+                  {t('agentHub:preview.checkouts')}: {preview.checkouts?.length ?? 0}
+                </span>
+                <span>
+                  {t('agentHub:preview.plannedActions')}: {preview.plannedActions?.length ?? 0}
+                </span>
+                <span>{preview.noCommitNotice ?? t('agentHub:preview.noCommitDefault')}</span>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {hubContext.tab === 'instructions' && isRemoteContext ? (
+          <StatusMessage tone="info" data-testid="agent-hub-remote-management">
+            {hubContext.scope === 'user'
+              ? t('agentHub:shell.remoteDeviceManageHint')
+              : t('agentHub:shell.remoteProjectManageHint')}
+          </StatusMessage>
+        ) : null}
+
         {isAssetTab && (upgradeRequired || writeBlocked) ? (
           <StatusMessage tone="warn" data-testid="agent-hub-upgrade-required">
             {t('agentHub:upgradeRequired')}
@@ -370,7 +458,15 @@ export function AgentHubView(props: AgentHubViewProps) {
           </StatusMessage>
         ) : null}
 
-        {isAssetTab ? (
+        {isAssetTab && isRemoteContext && !isRemoteProject ? (
+          <StatusMessage tone="info" data-testid="agent-hub-remote-management">
+            {hubContext.scope === 'user'
+              ? t('agentHub:shell.remoteDeviceManageHint')
+              : t('agentHub:shell.remoteProjectManageHint')}
+          </StatusMessage>
+        ) : null}
+
+        {isAssetTab && (!isRemoteContext || isRemoteProject) ? (
           <div data-testid="agent-hub-assets-section">
             <PortableInventoryView
               controller={portableInventory}
@@ -506,7 +602,10 @@ export function AgentHub() {
   const instructionThreePane = useInstructionThreePaneController({
     context: committedHubContext,
     t,
-    enabled: committedHubContext.tab === 'instructions' || committedHubContext.adaptView,
+    enabled:
+      (committedHubContext.tab === 'instructions' || committedHubContext.adaptView) &&
+      committedHubContext.scope === 'user' &&
+      committedHubContext.deviceId === null,
   });
 
   const committedFingerprint = JSON.stringify(committedHubContext);
@@ -542,10 +641,9 @@ export function AgentHub() {
       const next = {
         ...committedHubContext,
         ...patch,
-        scope: 'user' as const,
-        deviceId: null,
-        projectKey: null,
       };
+      if (next.scope === 'user') next.projectKey = null;
+      else next.deviceId = null;
       if (JSON.stringify(next) === committedFingerprint) return;
       if (instructionThreePane.dirty) {
         setPendingHubContext(next);

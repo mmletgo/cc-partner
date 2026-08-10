@@ -120,8 +120,11 @@ export function usePortableInventoryController(
       ...(filters.target === 'all' ? {} : { target: filters.target }),
       kind: filters.kind,
       ...(filters.scope === 'all' ? {} : { scopeKind: filters.scope }),
+      ...(projectRef && !projectRef.startsWith('remote:')
+        ? { localProjectId: projectRef }
+        : {}),
     }),
-    [filters.kind, filters.scope, filters.target],
+    [filters.kind, filters.scope, filters.target, projectRef],
   );
   const inspectRequest = useMemo(
     (): PortableInventoryRequestContext => ({ ...requestContext, ...inventoryQuery }),
@@ -135,6 +138,7 @@ export function usePortableInventoryController(
         inventoryQuery.target ?? '',
         inventoryQuery.kind ?? '',
         inventoryQuery.scopeKind ?? '',
+        inventoryQuery.localProjectId ?? '',
       ].join('\0'),
     [deviceId, inventoryQuery, projectRef],
   );
@@ -269,11 +273,9 @@ export function usePortableInventoryController(
 
   const snapshotMatchesQuery = snapshotRequestKey === requestKey;
   const stale = !snapshotMatchesQuery || Boolean(snapshot?.stale) || staleFlag;
-  // 当前后端没有本机 projectRef 的 portable mutation 路径；保留 inspect 的
-  // 只读可能性，但永远不给项目上下文暴露写动作。
-  const projectContextUnsupported =
-    Boolean(projectRef && projectRef.trim().length > 0 && !projectRef.trim().startsWith('remote:'));
-  const mutationBlocked = stale || !snapshot || projectContextUnsupported;
+  // projectRef 已包含在 inventoryQuery，并由后端解析为唯一 Hub project；
+  // 未选择项目时父 controller 不启用扫描，不能回退成“全部项目”。
+  const mutationBlocked = stale || !snapshot;
 
   const visibleItems = useMemo(
     () => filterPortableInventoryItems(snapshotMatchesQuery ? snapshot?.items ?? [] : [], filters),

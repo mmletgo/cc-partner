@@ -264,7 +264,7 @@ export function useInstructionThreePaneController(
   const agent = context.agent;
   const contextCapability = getAgentHubContextCapability(context);
   const contextUnavailableCode =
-    contextCapability === 'pullOnly'
+    contextCapability === 'remote'
       ? PEER_CONTEXT_UNAVAILABLE
       : PROJECT_CONTEXT_UNAVAILABLE;
   /** 用户级 deviceId；项目级 projectKey 作为 projectRef。 */

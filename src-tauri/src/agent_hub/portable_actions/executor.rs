@@ -158,7 +158,7 @@ pub async fn apply_portable_asset_action_with(
                 &stored.public,
             );
             if let Ok(post) =
-                resolve_post_inventory(state, deps, stored.request.inventory_query).await
+                resolve_post_inventory(state, deps, stored.request.inventory_query.clone()).await
             {
                 let by_id: BTreeMap<_, _> = post
                     .items
@@ -236,14 +236,15 @@ async fn revalidate_claimed_plan(
     }
 
     // 重新 inspect inventory 并比对 snapshot hash + target fingerprints
-    let live = match resolve_force_inventory(state, deps, stored.request.inventory_query).await {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(format!(
-                "PORTABLE_ASSET_ACTION_INVENTORY_REVALIDATE_FAILED:{e}"
-            ))
-        }
-    };
+    let live =
+        match resolve_force_inventory(state, deps, stored.request.inventory_query.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!(
+                    "PORTABLE_ASSET_ACTION_INVENTORY_REVALIDATE_FAILED:{e}"
+                ))
+            }
+        };
     if live.inventory_snapshot_hash != plan.inventory_snapshot_hash {
         return Err("PORTABLE_ASSET_ACTION_INVENTORY_HASH_MISMATCH".into());
     }
@@ -297,12 +298,10 @@ async fn execute_claimed_plan(
     let plan = &stored.public;
     // 项级 blocking 走 change.blocking_reasons，允许 partial results。
     // 计划级全局阻断仅覆盖 inventory/target 指纹类原因。
-    let global_block = plan.blocking_reasons.iter().any(|r| {
-        r.starts_with("PORTABLE_ASSET_ACTION_INVENTORY_")
-            || r.starts_with("PORTABLE_ASSET_ACTION_TARGET_MUTATION_BLOCKED")
-            || r.starts_with("PORTABLE_ASSET_ACTION_CLI_MISSING")
-            || r.starts_with("PORTABLE_ASSET_ACTION_TARGET_MISSING")
-    });
+    let global_block = plan
+        .blocking_reasons
+        .iter()
+        .any(|r| r.starts_with("PORTABLE_ASSET_ACTION_INVENTORY_"));
     if global_block {
         let items = plan
             .changes
@@ -326,7 +325,8 @@ async fn execute_claimed_plan(
         });
     }
 
-    let pre_snapshot = resolve_pre_inventory(state, deps, stored.request.inventory_query).await?;
+    let pre_snapshot =
+        resolve_pre_inventory(state, deps, stored.request.inventory_query.clone()).await?;
     let pre_by_id: BTreeMap<String, PortableInventoryItemDto> = pre_snapshot
         .items
         .iter()
@@ -400,7 +400,7 @@ async fn execute_claimed_plan(
         if let Some(outcome) = revalidate_target_mutation_before_write(
             state,
             deps,
-            stored.request.inventory_query,
+            stored.request.inventory_query.clone(),
             plan.action,
             change,
         )
@@ -434,7 +434,7 @@ async fn execute_claimed_plan(
     }
 
     // rescan
-    let post = resolve_post_inventory(state, deps, stored.request.inventory_query).await?;
+    let post = resolve_post_inventory(state, deps, stored.request.inventory_query.clone()).await?;
     let post_by_id: BTreeMap<String, &PortableInventoryItemDto> = post
         .items
         .iter()

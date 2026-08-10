@@ -25,6 +25,7 @@ import {
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
+import { workbenchApi } from '@/api/workbench';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
@@ -312,6 +313,15 @@ export interface UseAgentHubControllerResult {
   contextMigrationNotice: string | null;
   /** 壳层 patch → URL write + 双路径 activeSection 同步。 */
   onContextChange: (patch: Partial<AgentHubContext>) => void;
+  /** 壳层可选择的局域网设备。 */
+  shellPeers: Array<{ deviceId: string; name: string; online: boolean }>;
+  /** 壳层可选择的本机/远端 Workbench 项目。 */
+  shellProjects: Array<{
+    key: string;
+    label: string;
+    remote: boolean;
+    deviceId: string | null;
+  }>;
   userInstructions: UseUserInstructionManagerResult;
   /** F2 inventory controller（URL 同步后的包装）。 */
   portableInventory: UsePortableInventoryControllerResult;
@@ -481,6 +491,17 @@ function requestFingerprint(value: unknown): string {
 }
 
 /**
+ * Business Logic: remote Workbench shortcut 使用 `remote:<deviceId>:<hash>`，Pull/Push 需恢复 owner。
+ * Code Logic: 只解析已规范化前缀；损坏/本机 project ref 返回 null。
+ */
+export function remoteProjectDeviceId(projectRef: string | null): string | null {
+  const value = projectRef?.trim() ?? '';
+  if (!value.startsWith('remote:')) return null;
+  const [, deviceId] = value.split(':', 3);
+  return deviceId?.trim() || null;
+}
+
+/**
  * Business Logic: 页面挂载即持有全部 Agent Hub 编排状态。
  * Code Logic: hooks 全在 early return 前；refreshSeq 丢弃过期响应。
  */
@@ -542,13 +563,16 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   );
   const portableInventoryBase = usePortableInventoryController({
     ...inventoryRequestContext,
-    enabled: portableLaneActive,
+    enabled:
+      portableLaneActive &&
+      hubContext.deviceId === null &&
+      (hubContext.scope !== 'project' || hubContext.projectKey !== null),
     initialFilters: {
       target: hubContext.agent,
       kind: isAssetKindTab(hubContext.tab)
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
-      scope: 'user',
+      scope: hubContext.scope,
     },
   });
   const clearPortablePendingAction = portableInventoryBase.clearPendingAction;
@@ -558,8 +582,19 @@ export function useAgentHubController(): UseAgentHubControllerResult {
    */
   const portablePull = usePortablePullController({
     open: portablePullOpen,
-    initialSourceDeviceId: hubContext.deviceId,
+    initialSourceDeviceId:
+      hubContext.deviceId ?? remoteProjectDeviceId(hubContext.projectKey),
     initialSourceTarget: hubContext.agent,
+    sourceProjectRef:
+      hubContext.scope === 'project' && hubContext.projectKey?.startsWith('remote:')
+        ? hubContext.projectKey
+        : null,
+    destinationLocalProjectId:
+      hubContext.scope === 'project' &&
+      hubContext.projectKey &&
+      !hubContext.projectKey.startsWith('remote:')
+        ? hubContext.projectKey
+        : null,
   });
   const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() =>
     resolveInitialSection(
@@ -606,6 +641,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     portableInventoryBase.inventoryQuery.target ?? '',
     portableInventoryBase.inventoryQuery.kind ?? '',
     portableInventoryBase.inventoryQuery.scopeKind ?? '',
+    portableInventoryBase.inventoryQuery.localProjectId ?? '',
     portableInventoryBase.pendingAction?.itemId ?? '',
     portableInventoryBase.pendingAction?.action ?? '',
   ].join('\0');
@@ -651,6 +687,12 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
   const [lanPreviewFingerprint, setLanPreviewFingerprint] = useState<string | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
+  const [shellPeers, setShellPeers] = useState<
+    Array<{ deviceId: string; name: string; online: boolean }>
+  >([]);
+  const [shellProjects, setShellProjects] = useState<
+    Array<{ key: string; label: string; remote: boolean; deviceId: string | null }>
+  >([]);
   const [gitImportOpen, setGitImportOpen] = useState(false);
   const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
@@ -670,7 +712,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [selectedAsset, setSelectedAsset] = useState<AgentHubAssetDetail | null>(null);
   const [preview, setPreview] = useState<AgentHubProjectPreview | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewProjectId, setPreviewProjectIdState] = useState('');
+  const [previewProjectId, setPreviewProjectIdState] = useState(() =>
+    hubContext.scope === 'project' && hubContext.projectKey
+      ? hubContext.projectKey
+      : '',
+  );
   const [projectPreviewFingerprint, setProjectPreviewFingerprint] = useState<string | null>(null);
   const [conflictDrawerOpen, setConflictDrawerOpen] = useState(false);
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
@@ -729,6 +775,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setPortableActionClientRequestId(null);
     setPortableActionError(null);
     setPortableActionBusy(false);
+    const selectedProjectId =
+      hubContext.scope === 'project' && hubContext.projectKey
+        ? hubContext.projectKey
+        : '';
+    setPreviewProjectIdState(selectedProjectId);
   }, [clearPortablePendingAction, hubContext]);
 
   /**
@@ -829,6 +880,40 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     mountedRef.current = true;
+    void devicesApi
+      .list()
+      .then((devices) => {
+        if (!mountedRef.current) return;
+        setShellPeers(
+          devices.map((device) => ({
+            deviceId: device.id,
+            name: device.name,
+            online: device.status === 'online',
+          })),
+        );
+      })
+      .catch(() => {
+        // 设备发现为 best-effort；失败不阻断本机 Agent Hub。
+      });
+    void workbenchApi.projects
+      .list()
+      .then((projects) => {
+        if (!mountedRef.current) return;
+        setShellProjects(
+          projects.map((project) => ({
+            key: project.id,
+            label:
+              project.kind === 'remote' && project.deviceName
+                ? `${project.name} · ${project.deviceName}`
+                : project.name,
+            remote: project.kind === 'remote',
+            deviceId: project.kind === 'remote' ? project.deviceId : null,
+          })),
+        );
+      })
+      .catch(() => {
+        // 项目列表为 best-effort；URL 中已选择的 identity 仍保留。
+      });
     return () => {
       mountedRef.current = false;
     };
@@ -836,14 +921,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     const legacySection = searchParams.get('section');
-    const unsupportedOwner =
-      searchParams.has('scope') ||
-      searchParams.has('deviceId') ||
-      searchParams.has('project') ||
-      searchParams.has('projectKey') ||
-      searchParams.has('inventoryScope');
+    const unsupportedOwner = searchParams.has('inventoryScope');
     const retiredView =
-      legacySection === 'projectInstructions' ||
       legacySection === 'syncImport' ||
       legacySection === 'diagnostics' ||
       searchParams.has('preview') ||
@@ -987,8 +1066,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setActionBusy(true);
     setActionError(null);
     try {
-      await agentHubApi.enableProject(projectId);
+      const enabled = await agentHubApi.enableProject(projectId);
       if (!mountedRef.current) return;
+      setPreview((current) => ({
+        ...current,
+        ...enabled,
+        projectId,
+        optedIn: true,
+      }));
       setPreviewOpen(false);
       await invalidateLegacyLanes();
     } catch (reason) {
@@ -1411,10 +1496,16 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setLanPreview(null);
     setLanPreviewFingerprint(null);
     setLanReport(null);
-    setLanSelectedPeerIdsState([]);
+    const selectedPeerId =
+      hubContext.deviceId ?? remoteProjectDeviceId(hubContext.projectKey);
+    setLanSelectedPeerIdsState(selectedPeerId ? [selectedPeerId] : []);
     if (hubContext.scope === 'project') {
       setLanModeState('project');
-      setLanHubProjectIdsTextState(hubContext.projectKey ?? '');
+      const enabledHubProjectId =
+        previewProjectId === hubContext.projectKey && preview?.optedIn === true
+          ? preview.hubProjectId
+          : null;
+      setLanHubProjectIdsTextState(enabledHubProjectId ?? '');
       setLanAssetIdsTextState('');
     } else {
       setLanModeState('userScope');
@@ -1423,18 +1514,22 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     }
     void devicesApi.list().then((list) => {
       if (!mountedRef.current) return;
-      // 仅展示在线对端；排除当前正在查看的 peer（源侧不推自己）
-      const currentDeviceId = hubContext.deviceId;
       setLanPeers(
         list
-          .filter((d) => d.status === 'online' && d.id !== currentDeviceId)
+          .filter((d) => d.status === 'online')
           .map((d) => ({ deviceId: d.id, name: d.name })),
       );
     }).catch((reason) => {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
     });
-  }, [hubContext.scope, hubContext.projectKey, hubContext.deviceId]);
+  }, [
+    hubContext.scope,
+    hubContext.projectKey,
+    hubContext.deviceId,
+    preview,
+    previewProjectId,
+  ]);
 
   const closeLanPushDialog = useCallback(() => {
     if (actionBusy) return;
@@ -1739,11 +1834,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
       // 粗映射：资产 tab → portable kind/target 筛选
       if (isAssetKindTab(merged.tab)) {
-        portableInventoryBase.setFilters({
-          kind: merged.tab as PortableInventoryFilters['kind'],
-          target: merged.agent,
-          scope: 'user',
-        });
+      portableInventoryBase.setFilters({
+        kind: merged.tab as PortableInventoryFilters['kind'],
+        target: merged.agent,
+        scope: merged.scope,
+      });
       }
     },
     [portableInventoryBase, searchParams, setSearchParams],
@@ -1823,7 +1918,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       kind: isAssetKindTab(hubContext.tab)
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
-      scope: 'user',
+      scope: hubContext.scope,
       actualState: parsed.actualState ?? 'all',
       management: parsed.management ?? 'all',
     };
@@ -1873,6 +1968,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     deepLinkInventoryItemId,
     deepLinkSection,
     hubContext.agent,
+    hubContext.scope,
     hubContext.tab,
     portableInventoryBase,
     searchParams,
@@ -2177,7 +2273,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setPortableActionBusy(true);
       setPortableActionError(null);
       try {
-        const result = await portableAssetApi.getAction(clientRequestId);
+        const result = await portableAssetApi.getAction(
+          clientRequestId,
+          portableInventoryBase.requestContext,
+        );
         if (
           !mountedRef.current ||
           actionSeq !== portableActionSeqRef.current ||
@@ -2240,6 +2339,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     hubContext,
     contextMigrationNotice,
     onContextChange,
+    shellPeers,
+    shellProjects,
     userInstructions,
     portableInventory,
     portableDetailsOpen: Boolean(portableInventoryBase.selectedItemId),

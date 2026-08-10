@@ -168,6 +168,8 @@ export interface PortableInventoryQuery {
   target?: AgentTarget;
   kind?: PortableAssetKind;
   scopeKind?: PortableScopeKind;
+  /** 本机 Workbench 项目 id；后端必须先解析为唯一 Hub project id。 */
+  localProjectId?: string;
 }
 
 /** Preview 本机动作请求。 */
@@ -274,6 +276,10 @@ export interface RemotePortableInventoryDto {
 export interface ListRemotePortableInventoryRequest {
   sourceDeviceId: string;
   sourceTarget: AgentTarget;
+  /** owning peer 的本地 Workbench 项目 id；缺省为 user scope。 */
+  sourceLocalProjectId?: string;
+  /** 本机保存的 remote shortcut id；后端解析为 owning peer local project id。 */
+  sourceProjectRef?: string;
 }
 
 /** Pull preview 请求。 */
@@ -281,6 +287,9 @@ export interface PreviewPortablePullRequest {
   sourceDeviceId: string;
   sourceTarget: AgentTarget;
   destinationTarget: AgentTarget;
+  sourceLocalProjectId?: string;
+  sourceProjectRef?: string;
+  destinationLocalProjectId?: string;
   remoteInventorySnapshotHash: string;
   inventoryItemIds: string[];
   conflictPolicy: PortableAssetConflictPolicy;
@@ -307,6 +316,9 @@ export interface PortablePullPlanDto {
   sourceDeviceId: string;
   sourceTarget: AgentTarget;
   destinationTarget: AgentTarget;
+  sourceLocalProjectId?: string;
+  sourceProjectRef?: string;
+  destinationLocalProjectId?: string;
   remoteInventorySnapshotHash: string;
   localInventorySnapshotHash: string;
   conflictPolicy: PortableAssetConflictPolicy;
@@ -350,6 +362,8 @@ export interface PortableInventoryRequestContext {
   target?: AgentTarget;
   kind?: PortableAssetKind;
   scopeKind?: PortableScopeKind;
+  /** 本机 Workbench 项目 id；仅 project scope 使用。 */
+  localProjectId?: string;
 }
 
 /** 本机 portable 资产 API 形状（controller 消费）。 */
@@ -357,7 +371,10 @@ export interface PortableAssetApi {
   inspect(context?: PortableInventoryRequestContext): Promise<PortableInventorySnapshotDto>;
   previewAction(request: PreviewPortableAssetActionRequest): Promise<PortableAssetActionPlanDto>;
   applyAction(request: ApplyPortableAssetActionRequest): Promise<PortableAssetActionResultDto>;
-  getAction(clientRequestId: string): Promise<PortableAssetActionResultDto>;
+  getAction(
+    clientRequestId: string,
+    context?: PortableInventoryRequestContext,
+  ): Promise<PortableAssetActionResultDto>;
 }
 
 /** 同类远端 Pull API 形状。 */

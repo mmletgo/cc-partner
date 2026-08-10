@@ -47,13 +47,20 @@
     "push": "推送…",
     "adapt": "适配到其他 Agent…",
     "adaptLocalOnly": "跨 Agent 适配仅可在本机上下文中使用",
+    "adaptProjectUnavailable": "项目级跨 Agent 适配尚未接通；项目库存、Pull、Push 与启用管理仍可使用。",
+    "projectRequired": "请先选择一个项目。",
+    "projectPullUnavailable": "请先选择并启用一个明确项目；项目级 Pull 不会回退到用户级或全部项目。",
+    "projectPushRequiresPreview": "请先在“指令”页预览并启用该项目，取得唯一 Hub 项目 ID 后再 Push。",
+    "remoteProjectTaskUnavailable": "远端项目 Push 仍需在来源设备上发起；可使用当前项目的直接管理或 Pull。",
+    "remoteDeviceManageHint": "正在管理远端设备。使用 Pull 从该设备拉取资产，或使用 Push 向该设备发送本机 Hub 资产。",
+    "remoteProjectManageHint": "已选择远端项目；库存、项目启用与资产动作会直接在来源设备上执行，Pull 可把该项目资产拉到本机。",
     "peerPullOnly": "远端用户级上下文只允许 Pull；Push 与跨 Agent 适配保持关闭。",
     "contextUnsupported": "该上下文无法精确绑定到单一项目或 owner，暂不可用。请返回本机用户级。",
     "unsupportedContextMigrated": "这个旧项目级、远端或诊断链接已不再提供写入；Agent Hub 已返回等价的本机用户级工作区。",
     "legacyUrlMigrated": "旧 Agent Hub 链接已迁移到当前 Agent 与工作区标签。",
     "legacyAssetMigrated": "旧资产链接已匹配到观测库存；执行任何动作前请重新核对当前详情。",
     "legacyAssetUnavailable": "旧资产或冲突链接无法安全映射。系统未打开 legacy writer，请改从观测库存浏览。",
-    "localUserOnlyHint": "当前主工作区仅开放本机用户级读取与 Hub 草稿；项目和远端上下文保持关闭。"
+    "localUserOnlyHint": "本机、远端设备和项目范围都可从这里管理；具体写动作按当前能力证据开放。"
   },
   "instructions": {
     "threePane": {
@@ -395,6 +402,9 @@
     "enable": "启用项目",
     "checkouts": "检出列表",
     "plannedActions": "计划动作",
+    "hubProjectId": "Hub 项目 ID",
+    "projectEnabled": "该项目已纳入 Agent Hub 管理；项目库存将按唯一映射读取。",
+    "projectManageDescription": "先做零写入预览，确认 checkout 映射后再显式启用项目。",
     "noCommitDefault": "cc-partner 不会 commit/push 项目仓库。",
     "bridgeNotice": "OpenCode runtime bridge 预览：{{path}}。在你确认启用之前不会写入。"
   },

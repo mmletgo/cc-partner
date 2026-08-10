@@ -877,6 +877,31 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/agent-hub/portable/transfers/:transferId/release",
             post(agent_hub::agent_hub_portable_transfer_release),
         )
+        // Agent Hub 精确项目 inventory/action；LAN 不做身份鉴权，project id 只用于路由正确性。
+        .route(
+            "/api/agent-hub/portable/project/inventory",
+            post(agent_hub::agent_hub_portable_project_inventory),
+        )
+        .route(
+            "/api/agent-hub/portable/project/preview",
+            post(agent_hub::agent_hub_portable_project_preview),
+        )
+        .route(
+            "/api/agent-hub/portable/project/enable",
+            post(agent_hub::agent_hub_portable_project_enable),
+        )
+        .route(
+            "/api/agent-hub/portable/project/action/preview",
+            post(agent_hub::agent_hub_portable_project_action_preview),
+        )
+        .route(
+            "/api/agent-hub/portable/project/action/apply",
+            post(agent_hub::agent_hub_portable_project_action_apply),
+        )
+        .route(
+            "/api/agent-hub/portable/project/action/get",
+            post(agent_hub::agent_hub_portable_project_action_get),
+        )
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
         .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))

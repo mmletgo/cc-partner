@@ -47,13 +47,20 @@
     "push": "Push…",
     "adapt": "Adapt to other agents…",
     "adaptLocalOnly": "Cross-agent adapt is only available on this device",
+    "adaptProjectUnavailable": "Project-level cross-agent adapt is not connected yet; project inventory, Pull, Push, and enablement management remain available.",
+    "projectRequired": "Select a project first.",
+    "projectPullUnavailable": "Select and enable one exact project first. Project Pull never falls back to user scope or all projects.",
+    "projectPushRequiresPreview": "Preview and enable this project from Instructions first so Push can use its unique Hub project ID.",
+    "remoteProjectTaskUnavailable": "Remote-project Push must still be initiated on the source device. Direct management and Pull are available here.",
+    "remoteDeviceManageHint": "You are managing a remote device. Pull assets from it or Push local Hub assets to it.",
+    "remoteProjectManageHint": "A remote project is selected. Inventory, project enablement, and asset actions run on the owning device; Pull can copy this project's assets locally.",
     "peerPullOnly": "Remote user-level context is Pull-only. Push and Adapt stay unavailable.",
     "contextUnsupported": "This context is unavailable because it cannot be bound to one exact project or owner. Return to this device at user scope.",
     "unsupportedContextMigrated": "This old project, remote, or diagnostics link is no longer writable. Agent Hub returned to the equivalent local user-level workspace.",
     "legacyUrlMigrated": "This legacy Agent Hub link was migrated to the current Agent and workspace tabs.",
     "legacyAssetMigrated": "The legacy asset link was matched to the observed inventory. Review the current item details before taking any action.",
     "legacyAssetUnavailable": "The legacy asset or conflict link could not be mapped safely. No legacy writer was opened; browse the observed inventory instead.",
-    "localUserOnlyHint": "The primary workspace currently supports local user-level reads and Hub drafts only; project and remote contexts remain closed."
+    "localUserOnlyHint": "Manage this device, remote devices, and project scopes here; each write action follows its current capability evidence."
   },
   "instructions": {
     "threePane": {
@@ -395,6 +402,9 @@
     "enable": "Enable project",
     "checkouts": "Checkouts",
     "plannedActions": "Planned actions",
+    "hubProjectId": "Hub project ID",
+    "projectEnabled": "This project is managed by Agent Hub; project inventory is read through its unique mapping.",
+    "projectManageDescription": "Run the zero-write preview first, then explicitly enable the checkout mapping.",
     "noCommitDefault": "cc-partner will not commit or push the project repository.",
     "bridgeNotice": "OpenCode runtime bridge preview for {{path}}. Nothing is written until you confirm enable."
   },

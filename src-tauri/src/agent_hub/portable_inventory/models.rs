@@ -42,9 +42,7 @@ pub enum PortableAssetKind {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     三个可选精确过滤字段；全空表示完整权威扫描，供 mutation/Pull 继续使用。
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct PortableInventoryQuery {
     /// 仅扫描一个 Agent target。
@@ -53,6 +51,9 @@ pub struct PortableInventoryQuery {
     pub kind: Option<PortableAssetKind>,
     /// 仅扫描一种 scope；None 为 user + 已映射 project。
     pub scope_kind: Option<ScopeKind>,
+    /// 本机 Workbench project id；仅与 project scope 合用并在 scanner 边界解析。
+    #[serde(rename = "localProjectId", skip_serializing_if = "Option::is_none")]
+    pub local_project_id: Option<String>,
 }
 
 impl PortableAssetKind {

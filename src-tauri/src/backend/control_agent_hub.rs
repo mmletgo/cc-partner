@@ -27,6 +27,14 @@ use crate::agent_hub::portable_actions::{
 };
 use crate::agent_hub::portable_inventory::PortableInventoryQuery;
 use crate::agent_hub::portable_service::PortableService;
+use crate::agent_hub::replication::pull::{
+    apply_remote_project_portable_action, enable_remote_project,
+    get_remote_project_portable_action, inspect_remote_project_portable_inventory,
+    preview_remote_project, preview_remote_project_portable_action,
+    ApplyRemoteProjectPortableActionRequest, GetRemoteProjectPortableActionRequest,
+    InspectRemoteProjectPortableInventoryRequest, PreviewRemoteProjectPortableActionRequest,
+    RemoteProjectRefRequest,
+};
 use crate::agent_hub::replication::sender::{
     compute_push_preview_token, get_push_report_for_state, push_selection_for_state,
     PushAgentHubSelectionRequest,
@@ -358,6 +366,21 @@ async fn dispatch_agent_hub_op(
             let mapping = confirm_project_mapping_for_state(state, req).await?;
             Ok(serde_json::to_value(mapping)?)
         }
+        "agent_hub.preview_remote_project" => {
+            let req: RemoteProjectRefRequest = serde_json::from_value(payload).map_err(|e| {
+                AppError::validation(format!("preview remote project payload: {e}"))
+            })?;
+            Ok(serde_json::to_value(
+                preview_remote_project(state, req).await?,
+            )?)
+        }
+        "agent_hub.enable_remote_project" => {
+            let req: RemoteProjectRefRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("enable remote project payload: {e}")))?;
+            Ok(serde_json::to_value(
+                enable_remote_project(state, req).await?,
+            )?)
+        }
         "agent_hub.inspect_portable_inventory" => {
             let query: PortableInventoryQuery = serde_json::from_value(payload).map_err(|e| {
                 AppError::validation(format!("inspect_portable_inventory payload: {e}"))
@@ -385,6 +408,42 @@ async fn dispatch_agent_hub_op(
             let client_request_id = required_string(&payload, "clientRequestId")?;
             let dto = PortableService::get_portable_asset_action(state, &client_request_id).await?;
             Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.inspect_remote_project_portable_inventory" => {
+            let req: InspectRemoteProjectPortableInventoryRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("inspect remote project inventory payload: {e}"))
+                })?;
+            Ok(serde_json::to_value(
+                inspect_remote_project_portable_inventory(state, req).await?,
+            )?)
+        }
+        "agent_hub.preview_remote_project_portable_action" => {
+            let req: PreviewRemoteProjectPortableActionRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("preview remote project action payload: {e}"))
+                })?;
+            Ok(serde_json::to_value(
+                preview_remote_project_portable_action(state, req).await?,
+            )?)
+        }
+        "agent_hub.apply_remote_project_portable_action" => {
+            let req: ApplyRemoteProjectPortableActionRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("apply remote project action payload: {e}"))
+                })?;
+            Ok(serde_json::to_value(
+                apply_remote_project_portable_action(state, req).await?,
+            )?)
+        }
+        "agent_hub.get_remote_project_portable_action" => {
+            let req: GetRemoteProjectPortableActionRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("get remote project action payload: {e}"))
+                })?;
+            Ok(serde_json::to_value(
+                get_remote_project_portable_action(state, req).await?,
+            )?)
         }
         "agent_hub.list_remote_portable_inventory" => {
             let req: crate::agent_hub::replication::pull::ListRemotePortableInventoryRequest =
@@ -484,8 +543,11 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.start_lan_push"
             | "agent_hub.confirm_git_import"
             | "agent_hub.confirm_project_mapping"
+            | "agent_hub.enable_remote_project"
             | "agent_hub.preview_portable_asset_action"
             | "agent_hub.apply_portable_asset_action"
+            | "agent_hub.preview_remote_project_portable_action"
+            | "agent_hub.apply_remote_project_portable_action"
             | "agent_hub.preview_portable_pull"
             | "agent_hub.apply_portable_pull"
             | "agent_hub.preview_cross_agent_instruction"

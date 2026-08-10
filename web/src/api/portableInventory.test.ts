@@ -44,7 +44,6 @@ vi.mock('./client', () => ({
 
 import {
   AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
-  AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
   PORTABLE_INVENTORY_COMMANDS,
   portableAssetApi,
   portablePullApi,
@@ -176,6 +175,10 @@ describe('portable inventory API', () => {
       previewAction: 'agent_hub_preview_portable_asset_action',
       applyAction: 'agent_hub_apply_portable_asset_action',
       getAction: 'agent_hub_get_portable_asset_action',
+      inspectRemoteProject: 'agent_hub_inspect_remote_project_portable_inventory',
+      previewRemoteProjectAction: 'agent_hub_preview_remote_project_portable_action',
+      applyRemoteProjectAction: 'agent_hub_apply_remote_project_portable_action',
+      getRemoteProjectAction: 'agent_hub_get_remote_project_portable_action',
       listRemoteInventory: 'agent_hub_list_remote_portable_inventory',
       previewPull: 'agent_hub_preview_portable_pull',
       applyPull: 'agent_hub_apply_portable_pull',
@@ -217,13 +220,12 @@ describe('portable inventory API', () => {
     });
   });
 
-  test('inspect with local projectRef fails closed until project route exists', async () => {
-    await expect(
-      Promise.resolve().then(() =>
-        portableAssetApi.inspect({ deviceId: null, projectRef: 'wb-local-1' }),
-      ),
-    ).rejects.toMatchObject({ code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE });
-    expect(mockInvoke).not.toHaveBeenCalled();
+  test('inspect resolves local project through an explicit localProjectId query', async () => {
+    mockInvoke.mockResolvedValueOnce(validInventorySnapshot);
+    await portableAssetApi.inspect({ deviceId: null, projectRef: 'wb-local-1' });
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_inspect_portable_inventory', {
+      request: { localProjectId: 'wb-local-1' },
+    });
   });
 
   test('inspect with peer deviceId fails closed without invoke', async () => {
@@ -239,18 +241,24 @@ describe('portable inventory API', () => {
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
-  test('inspect with remote projectRef fails closed without invoke', async () => {
-    let thrown: unknown;
-    try {
-      await portableAssetApi.inspect({
-        deviceId: null,
-        projectRef: 'remote:dev-a:/path/to/repo',
-      });
-    } catch (reason) {
-      thrown = reason;
-    }
-    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    expect(mockInvoke).not.toHaveBeenCalled();
+  test('inspect with remote projectRef invokes exact remote project command', async () => {
+    mockInvoke.mockResolvedValueOnce(validInventorySnapshot);
+    await portableAssetApi.inspect({
+      deviceId: null,
+      projectRef: 'remote:dev-a:shortcut',
+      target: 'claude',
+      kind: 'skill',
+    });
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'agent_hub_inspect_remote_project_portable_inventory',
+      {
+        request: {
+          projectRef: 'remote:dev-a:shortcut',
+          target: 'claude',
+          kind: 'skill',
+        },
+      },
+    );
   });
 
   test('requiresPeerAgentHubPath classifies local vs peer context', () => {
@@ -279,10 +287,9 @@ describe('portable inventory API', () => {
     expect(result.planToken).toBe('plan-token-1');
   });
 
-  test('previewAction with local projectRef fails closed before write path', async () => {
-    await expect(
-      Promise.resolve().then(() =>
-        portableAssetApi.previewAction({
+  test('previewAction binds local project identity into the stored inventory query', async () => {
+    mockInvoke.mockResolvedValueOnce(validActionPlan);
+    await portableAssetApi.previewAction({
           inventorySnapshotHash: 'snap-hash-3x4',
           inventoryItemIds: ['claude-skill-skill-a'],
           action: 'enable',
@@ -291,10 +298,12 @@ describe('portable inventory API', () => {
           expectedCanonicalRevisionId: null,
           deviceId: null,
           projectRef: 'wb-local',
-        }),
-      ),
-    ).rejects.toMatchObject({ code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE });
-    expect(mockInvoke).not.toHaveBeenCalled();
+    });
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_preview_portable_asset_action', {
+      request: expect.objectContaining({
+        inventoryQuery: { localProjectId: 'wb-local' },
+      }),
+    });
   });
 
   test('previewAction with peer deviceId fails closed without invoke', async () => {
@@ -314,6 +323,45 @@ describe('portable inventory API', () => {
     }
     expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
     expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  test('remote project action preview/apply/get stay on owning peer commands', async () => {
+    mockInvoke.mockResolvedValueOnce(validActionPlan);
+    await portableAssetApi.previewAction({
+      inventorySnapshotHash: 'snap-hash-3x4',
+      inventoryItemIds: ['claude-skill-skill-a'],
+      action: 'enable',
+      keepData: false,
+      conflictPolicy: 'skipExisting',
+      expectedCanonicalRevisionId: null,
+      projectRef: 'remote:peer-a:shortcut',
+    });
+    expect(mockInvoke).toHaveBeenLastCalledWith(
+      'agent_hub_preview_remote_project_portable_action',
+      expect.objectContaining({
+        request: expect.objectContaining({ projectRef: 'remote:peer-a:shortcut' }),
+      }),
+    );
+
+    mockInvoke.mockResolvedValueOnce(validActionResult);
+    await portableAssetApi.applyAction({
+      planToken: 'plan-token-1',
+      clientRequestId: 'req-1',
+      projectRef: 'remote:peer-a:shortcut',
+    });
+    expect(mockInvoke).toHaveBeenLastCalledWith(
+      'agent_hub_apply_remote_project_portable_action',
+      expect.any(Object),
+    );
+
+    mockInvoke.mockResolvedValueOnce(validActionResult);
+    await portableAssetApi.getAction('req-1', {
+      projectRef: 'remote:peer-a:shortcut',
+    });
+    expect(mockInvoke).toHaveBeenLastCalledWith(
+      'agent_hub_get_remote_project_portable_action',
+      expect.any(Object),
+    );
   });
 
   test('applyAction and getAction use planToken/clientRequestId shapes', async () => {

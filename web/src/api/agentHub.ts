@@ -77,6 +77,8 @@ export const AGENT_HUB_COMMANDS = {
   pairInstructionVariants: 'agent_hub_pair_instruction_variants',
   previewProject: 'agent_hub_preview_project',
   enableProject: 'agent_hub_enable_project',
+  previewRemoteProject: 'agent_hub_preview_remote_project',
+  enableRemoteProject: 'agent_hub_enable_remote_project',
   resolveConflict: 'agent_hub_resolve_conflict',
   setTargetBinding: 'agent_hub_set_target_binding',
   setTargetPresence: 'agent_hub_set_target_presence',
@@ -539,8 +541,10 @@ export const agentHubApi = {
    */
   previewProject: (projectId: string): Promise<AgentHubProjectPreview> =>
     invokeDecoded(
-      AGENT_HUB_COMMANDS.previewProject,
-      { projectId },
+      isRemoteProjectRef(projectId)
+        ? AGENT_HUB_COMMANDS.previewRemoteProject
+        : AGENT_HUB_COMMANDS.previewProject,
+      isRemoteProjectRef(projectId) ? { projectRef: projectId } : { projectId },
       agentHubProjectPreviewDecoder,
     ),
 
@@ -550,8 +554,10 @@ export const agentHubApi = {
    */
   enableProject: (projectId: string): Promise<AgentHubProjectStatus> =>
     invokeDecoded(
-      AGENT_HUB_COMMANDS.enableProject,
-      { projectId },
+      isRemoteProjectRef(projectId)
+        ? AGENT_HUB_COMMANDS.enableRemoteProject
+        : AGENT_HUB_COMMANDS.enableProject,
+      isRemoteProjectRef(projectId) ? { projectRef: projectId } : { projectId },
       agentHubProjectStatusDecoder,
     ),
 

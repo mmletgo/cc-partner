@@ -267,6 +267,16 @@ pub const CAPABILITY_AGENT_HUB_V1: &str = "agent-hub.v1";
 ///     `agent-hub.portable-pull.v1`，与三条 portable 路由同 build 宣告（字典序）。
 pub const CAPABILITY_PORTABLE_PULL_V1: &str = "agent-hub.portable-pull.v1";
 
+/// 能力 token：Agent Hub 精确项目 inventory / action / project Pull。
+///
+/// Business Logic（为什么需要这个 token）:
+///     项目请求比 v1 多携带 owning device 的 local project id；若发给旧 peer，未知字段可能被忽略并
+///     退回 user scope，因此客户端必须先确认新能力。该 token 仅是协议协商，不是 LAN 鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     与 project inventory/action 路由及 project-aware Pull body 原子发布。
+pub const CAPABILITY_PORTABLE_PROJECT_V1: &str = "agent-hub.portable-project.v1";
+
 /// 能力 token：移动端/对端切换 cc-switch provider（`/api/provider-manager/*`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -330,7 +340,8 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
-            // 字典序：agent-hub.portable-pull.v1 < agent-hub.v1
+            // 字典序：agent-hub.portable-project.v1 < agent-hub.portable-pull.v1 < agent-hub.v1
+            CAPABILITY_PORTABLE_PROJECT_V1.to_string(),
             CAPABILITY_PORTABLE_PULL_V1.to_string(),
             CAPABILITY_AGENT_HUB_V1.to_string(),
             CAPABILITY_ATTENTION_V1.to_string(),
@@ -499,6 +510,7 @@ mod tests {
         assert_eq!(
             info.capabilities,
             vec![
+                "agent-hub.portable-project.v1".to_string(),
                 "agent-hub.portable-pull.v1".to_string(),
                 "agent-hub.v1".to_string(),
                 "attention.v1".to_string(),
@@ -526,6 +538,7 @@ mod tests {
         );
         assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PULL_V1));
+        assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1));

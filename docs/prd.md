@@ -117,14 +117,14 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在固定的**本机·用户级**上下文中查看 Claude / Codex / OpenCode 的 Agent 指令与可移植资产。Hub Canonical 指令块可按 revision CAS 保存，但本机原始 CLI 文件始终只读。旧 `/claude-md`、`/claude-code`、`section`、project/peer、`assetId/conflictId` 深链仅做一次性 URL 规范化；不得恢复 legacy matrix、项目写入或远端就地管理。Gate B–D 已实现的领域库与协议继续保留，但未获真实 CLI L3 认证的原生 mutation 全部 scan-only；跨 Agent 仅开放本机用户级 bounded selective preview。
+**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode 指令和可移植资产。用户级远端设备复用 same-agent Pull 与 Snapshot Push；本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存，本机原始 CLI 文件始终只读。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的原生 mutation 保持 scan-only，跨 Agent 仅开放本机用户级 bounded selective preview。
 
 **2026-08-10 安全纠正（当前权威行为）**：
 - Shell 是 Agent、范围和主 Tab 的唯一上下文真源；主界面只有 Agent 指令、Skill、命令、MCP、Plugin，observed inventory 是资产唯一真源。
 - 三栏草稿按 `agent + lane + scope` 隔离；draft lease 的 Canonical base 只在首次 hydrate、明确放弃或成功保存后迁移。刷新只更新观测 head/snapshot，`canonicalDrift` 阻止保存，`sourceDrift` 不阻止 Hub CAS，但在重新载入确认前阻止原生 preview/apply。
 - Hub Save 只消费 `blocksDirty`；Original-only Save 是零 API 的诚实 no-op。显式从原始文件解析后形成 dirty Hub 草稿，保存成功不得清另一栏草稿或保存期间的新编辑。
 - Agent/lane/Tab/history/deep-link 共用 committed/pending context 与 dirty Dialog；确认前 URL、标签、正文和 CAS lease 都保持旧上下文。
-- project/peer 直接 inspect/write、legacy writer、portable 原生 apply、projection create/update/delete、cross-agent apply/full 均 fail-closed。`AGENT_HUB_API_VERSION=4` 阻止新旧 GUI/sidecar 混跑绕过该策略。
+- 远端/项目导航与管理入口不得因写能力未认证而消失；每个动作按 owner、project identity、snapshot/plan 与 capability evidence 独立门禁。缺少精确远端项目身份的 direct inspect/write、legacy writer、未认证 portable 原生 apply、projection create/update/delete、cross-agent apply/full 均 fail-closed。`AGENT_HUB_API_VERSION=4` 阻止新旧 GUI/sidecar 混跑绕过该策略。
 - Same-agent Pull 与 LAN Snapshot 任务保留；远端刷新失败会把旧 inventory 标 stale、清 plan 并禁用 Apply，危险冲突策略每次会话恢复为 `skipExisting`。任何原生安装仍受当前 Blocked capability 门禁。
 - Portable Action/Pull 的 plan 与异步响应绑定当前 Agent、scope、query/snapshot、item/action、选择与策略；history 或任一输入变化会立即作废旧响应。写动作按 operation 检查精确 capability，不能用 Activate/Render 的认证旁路 disable/uninstall/remove。
 - 具体交互、异常与验收合同见 `docs/superpowers/specs/2026-08-10-agent-hub-correction-design.md`。下列 Gate A–D 条目描述保留的数据模型/库路径，不构成当前生产 UI 写入承诺。

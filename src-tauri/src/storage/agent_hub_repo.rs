@@ -6421,9 +6421,10 @@ async fn resolve_selected_assets_on_tx(
         SnapshotIdentityMode::Project => {
             let mut scope_ids = request.scope_ids.clone();
             for hub in &request.hub_project_ids {
-                if let Some(sid) = resolve_project_scope_id_on_tx(tx, hub).await? {
-                    scope_ids.push(sid);
-                }
+                let sid = resolve_project_scope_id_on_tx(tx, hub)
+                    .await?
+                    .ok_or_else(|| AppError::validation("AGENT_HUB_PROJECT_NOT_OPTED_IN"))?;
+                scope_ids.push(sid);
             }
             scope_ids.sort();
             scope_ids.dedup();
@@ -7254,9 +7255,10 @@ async fn resolve_project_scope_id_on_tx(
     hub_project_id: &str,
 ) -> Result<Option<String>, AppError> {
     let row = sqlx::query(
-        "SELECT id, kind, hub_project_id, relative_path, created_at
-         FROM agent_hub_scopes
-         WHERE kind = 'project' AND hub_project_id = ?
+        "SELECT s.id, s.kind, s.hub_project_id, s.relative_path, s.created_at
+         FROM agent_hub_scopes s
+         JOIN agent_hub_project_mappings m ON m.hub_project_id = s.hub_project_id
+         WHERE s.kind = 'project' AND s.hub_project_id = ? AND m.opted_in = 1
          LIMIT 1",
     )
     .bind(hub_project_id)

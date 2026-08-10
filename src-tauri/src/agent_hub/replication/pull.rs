@@ -13,17 +13,22 @@ use crate::agent_hub::assets::{from_canonical_bytes, PortableAssetPayload};
 use crate::agent_hub::config_patch::{
     apply_config_patch_atomically, value_content_hash, JsoncConfigPatcher, ManagedConfigPatch,
 };
+use crate::agent_hub::models::ScopeKind;
 use crate::agent_hub::models::{AgentTarget, PortablePullClaim, PortablePullPlanRecord};
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore, TreeEntryType};
-use crate::agent_hub::portable_actions::PortableAssetConflictPolicy;
+use crate::agent_hub::portable_actions::{
+    ApplyPortableAssetActionRequest, PortableAssetActionPlanDto, PortableAssetActionResultDto,
+    PortableAssetConflictPolicy, PreviewPortableAssetActionRequest,
+};
 use crate::agent_hub::portable_inventory::{
-    evaluate_current_portable_target_support, inspect_portable_inventory,
-    inspect_portable_inventory_force, PortableAssetKind, PortableInventoryItemDto,
-    PortableInventoryManagementState, PortableInventoryMutationCapability,
+    evaluate_current_portable_target_support, inspect_portable_inventory_force_query,
+    inspect_portable_inventory_query, PortableAssetKind, PortableInventoryItemDto,
+    PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
     PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
 };
+use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::replication::receiver::AGENT_HUB_MAX_CHUNK_BYTES;
-use crate::agent_hub::snapshot::envelope::SnapshotEnvelopeV1;
+use crate::agent_hub::snapshot::envelope::{compute_snapshot_hash, SnapshotEnvelopeV1};
 use crate::agent_hub::snapshot::importer::{
     ConfirmedImportSelection, SnapshotImporter, ValidatedSnapshot,
 };
@@ -39,7 +44,7 @@ use crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::PeerCallError;
 use crate::net::peer_timeout::PeerTimeoutClass;
-use crate::net::protocol::CAPABILITY_PORTABLE_PULL_V1;
+use crate::net::protocol::{CAPABILITY_PORTABLE_PROJECT_V1, CAPABILITY_PORTABLE_PULL_V1};
 use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
 use crate::storage::agent_hub_repo::AgentHubRepo;
@@ -50,6 +55,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+use crate::orchestrator::outbox::open_remote_project_for_shortcut;
 
 /// CAS 分块上限（与 receiver 一致）。
 pub const PORTABLE_PULL_MAX_CHUNK_BYTES: usize = AGENT_HUB_MAX_CHUNK_BYTES;
@@ -107,6 +114,12 @@ pub struct RemotePortableInventoryItemDto {
 pub struct ListRemotePortableInventoryRequest {
     pub source_device_id: String,
     pub source_target: AgentTarget,
+    /// 对端 Workbench 的本地项目 id；None 表示 user scope。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_local_project_id: Option<String>,
+    /// 本机保存的 remote shortcut id；存在时由 owner 解析为对端 local project id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_project_ref: Option<String>,
 }
 
 /// Pull preview 请求。
@@ -116,6 +129,14 @@ pub struct PreviewPortablePullRequest {
     pub source_device_id: String,
     pub source_target: AgentTarget,
     pub destination_target: AgentTarget,
+    /// 对端 Workbench 的本地项目 id；None 表示从对端 user scope 拉取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_local_project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_project_ref: Option<String>,
+    /// 本机 Workbench 的本地项目 id；None 表示写入本机 user scope。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_local_project_id: Option<String>,
     pub remote_inventory_snapshot_hash: String,
     pub inventory_item_ids: Vec<String>,
     #[serde(default)]
@@ -131,6 +152,12 @@ pub struct PortablePullPlanDto {
     pub source_device_id: String,
     pub source_target: AgentTarget,
     pub destination_target: AgentTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_local_project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_project_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_local_project_id: Option<String>,
     pub remote_inventory_snapshot_hash: String,
     pub local_inventory_snapshot_hash: String,
     pub conflict_policy: PortableAssetConflictPolicy,
@@ -253,6 +280,8 @@ pub struct RemotePortableSelectionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInventoryQuery {
     pub source_target: AgentTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_local_project_id: Option<String>,
 }
 
 /// 源端 selection 查询 body。
@@ -260,7 +289,61 @@ pub struct RemoteInventoryQuery {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteSelectionQuery {
     pub source_target: AgentTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_local_project_id: Option<String>,
     pub inventory_item_ids: Vec<String>,
+}
+
+/// 本机 GUI 使用的远端项目 inventory 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InspectRemoteProjectPortableInventoryRequest {
+    /// 本机保存的 Workbench remote shortcut id。
+    pub project_ref: String,
+    pub target: AgentTarget,
+    #[serde(default)]
+    pub kind: Option<PortableAssetKind>,
+}
+
+/// Peer project inventory wire body；local_project_id 属于 owning peer。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteProjectPortableInventoryQuery {
+    pub local_project_id: String,
+    pub target: AgentTarget,
+    #[serde(default)]
+    pub kind: Option<PortableAssetKind>,
+}
+
+/// 本机 GUI 使用的远端项目 action preview 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewRemoteProjectPortableActionRequest {
+    pub project_ref: String,
+    pub request: PreviewPortableAssetActionRequest,
+}
+
+/// 本机 GUI 使用的远端项目 action apply 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyRemoteProjectPortableActionRequest {
+    pub project_ref: String,
+    pub request: ApplyPortableAssetActionRequest,
+}
+
+/// 本机 GUI 使用的远端项目 action 对账请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetRemoteProjectPortableActionRequest {
+    pub project_ref: String,
+    pub client_request_id: String,
+}
+
+/// 本机 GUI 使用的远端项目 opt-in 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteProjectRefRequest {
+    pub project_ref: String,
 }
 
 /// 内部持久化 plan（JSON 存 SQLite）。
@@ -425,6 +508,52 @@ fn path_is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 为 Pull 的 user/project 端构造精确 inventory 查询。
+///
+/// Business Logic: 项目级 Pull 必须始终绑定一个明确的 Workbench project，不能退回全项目扫描。
+/// Code Logic: 有 local project id 时固定 project scope；否则固定 user scope，并同时绑定 target。
+fn portable_pull_inventory_query(
+    target: AgentTarget,
+    local_project_id: Option<String>,
+) -> PortableInventoryQuery {
+    PortableInventoryQuery {
+        target: Some(target),
+        kind: None,
+        scope_kind: Some(if local_project_id.is_some() {
+            ScopeKind::Project
+        } else {
+            ScopeKind::User
+        }),
+        local_project_id,
+    }
+}
+
+/// 解析 Pull 目标 scope id。
+///
+/// Business Logic: 远端项目的 Hub id 不能直接复用于本机目标项目；导入/冲突判断必须使用目标机映射。
+/// Code Logic: user 返回 `user`；project 通过本机 Workbench id 精确查 mapping，并要求已 opt-in。
+async fn resolve_destination_scope_id(
+    state: &AppState,
+    local_project_id: Option<&str>,
+) -> Result<String, AppError> {
+    let Some(local_project_id) = local_project_id else {
+        return Ok("user".to_string());
+    };
+    let mapping = state
+        .agent_hub_repo
+        .get_project_mapping_by_local_workbench_id(local_project_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found("PORTABLE_PULL_DESTINATION_PROJECT_MAPPING_NOT_FOUND")
+        })?;
+    if !mapping.opted_in {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_DESTINATION_PROJECT_NOT_OPTED_IN",
+        ));
+    }
+    Ok(format!("project:{}", mapping.hub_project_id))
+}
+
 /// target 汇总状态 + 实际安装动作 capability 是否共同允许 InstallToTarget。
 ///
 /// 普通 portable 资产写原生文件只认 RenderPortableAssets；Plugin Pull 同时物化并进入
@@ -470,23 +599,6 @@ fn destination_mutation_capability(
 /// Business Logic: user vs project same nativeId are distinct assets.
 /// Code Logic: prefer non-empty scope_id; else project:<id> / user.
 fn resolve_inventory_scope_id(item: &PortableInventoryItemDto) -> String {
-    let trimmed = item.scope_id.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    if let Some(pid) = item
-        .project_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return format!("project:{pid}");
-    }
-    "user".to_string()
-}
-
-/// Resolve conflict/rescan scope identity for a remote inventory item.
-fn resolve_remote_scope_id(item: &RemotePortableInventoryItemDto) -> String {
     let trimmed = item.scope_id.trim();
     if !trimmed.is_empty() {
         return trimmed.to_string();
@@ -663,11 +775,11 @@ async fn resolve_install_root(
     item: &PortableSelectionItem,
     change: &PortablePullChangeDto,
 ) -> Result<PathBuf, AppError> {
-    let _ = change;
     let env_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    // selection.scope_id 形如 `user` 或 `project:<hub_id>`
-    if item.scope_id.starts_with("project:") {
-        let hub_id = item.scope_id.trim_start_matches("project:");
+    // change.scope_id 是 preview 时解析出的目标 scope；来源 selection.scope_id 属于另一台设备，
+    // 项目级 Pull 不能拿来源 Hub id 在目标机查 mapping。
+    if change.scope_id.starts_with("project:") {
+        let hub_id = change.scope_id.trim_start_matches("project:");
         let mapping = state
             .agent_hub_repo
             .get_project_mapping_by_hub_project_id(hub_id)
@@ -792,8 +904,13 @@ fn fold_pending_pull_observations(
 pub async fn build_remote_inventory_for_target(
     state: &AppState,
     source_target: AgentTarget,
+    source_local_project_id: Option<String>,
 ) -> Result<RemotePortableInventoryDto, AppError> {
-    let snap = inspect_portable_inventory(state).await?;
+    let snap = inspect_portable_inventory_query(
+        state,
+        portable_pull_inventory_query(source_target, source_local_project_id),
+    )
+    .await?;
     Ok(snapshot_to_remote(
         state.device_id.as_str(),
         source_target,
@@ -866,9 +983,12 @@ pub fn remote_inventory_is_metadata_only(dto: &RemotePortableInventoryDto) -> bo
 pub async fn source_prepare_selection(
     state: &AppState,
     source_target: AgentTarget,
+    source_local_project_id: Option<String>,
     item_ids: Vec<String>,
 ) -> Result<RemotePortableSelectionResponse, AppError> {
-    let built = build_source_selection_for_items(state, source_target, &item_ids).await?;
+    let built =
+        build_source_selection_for_items(state, source_target, source_local_project_id, &item_ids)
+            .await?;
     let transfer_id = format!("ppull-src-{}", Uuid::now_v7());
     let missing: Vec<String> = built
         .envelope
@@ -931,9 +1051,14 @@ pub fn source_release_transfer(transfer_id: &str) {
 async fn build_source_selection_for_items(
     state: &AppState,
     source_target: AgentTarget,
+    source_local_project_id: Option<String>,
     item_ids: &[String],
 ) -> Result<BuiltPortableSelection, AppError> {
-    let snap = inspect_portable_inventory(state).await?;
+    let snap = inspect_portable_inventory_query(
+        state,
+        portable_pull_inventory_query(source_target, source_local_project_id),
+    )
+    .await?;
     let wanted: BTreeSet<&str> = item_ids.iter().map(String::as_str).collect();
     let selected: Vec<_> = snap
         .items
@@ -953,22 +1078,178 @@ async fn build_source_selection_for_items(
 
 // ───────────────────────── 本机 list / preview / apply / get ─────────────────────────
 
+/// 解析 remote shortcut 并确认对端支持精确项目协议。
+async fn resolve_remote_portable_project(
+    state: &AppState,
+    project_ref: &str,
+) -> Result<crate::orchestrator::outbox::RemoteOrchestratorProjectContext, AppError> {
+    let shortcut = state
+        .workbench_project_repo
+        .get(project_ref)
+        .await?
+        .ok_or_else(|| AppError::not_found("AGENT_HUB_REMOTE_PROJECT_NOT_FOUND"))?;
+    let context = open_remote_project_for_shortcut(state, &shortcut, None).await?;
+    PeerClient::new()
+        .require_capability(&context.base_url, CAPABILITY_PORTABLE_PROJECT_V1)
+        .await
+        .map_err(peer_err)?;
+    Ok(context)
+}
+
+/// 预览 owning peer 上的项目 opt-in。
+pub async fn preview_remote_project(
+    state: &AppState,
+    request: RemoteProjectRefRequest,
+) -> Result<AgentHubProjectPreview, AppError> {
+    let context = resolve_remote_portable_project(state, &request.project_ref).await?;
+    post_json_bound(
+        &PeerClient::new(),
+        &context.base_url,
+        "/api/agent-hub/portable/project/preview",
+        &serde_json::json!({ "localProjectId": context.remote_project_id }),
+        &context.device_id,
+        PeerTimeoutClass::Metadata,
+    )
+    .await
+    .map_err(peer_err)
+}
+
+/// 在 owning peer 显式启用项目 Agent Hub scope。
+pub async fn enable_remote_project(
+    state: &AppState,
+    request: RemoteProjectRefRequest,
+) -> Result<AgentHubProjectStatus, AppError> {
+    let context = resolve_remote_portable_project(state, &request.project_ref).await?;
+    post_json_bound(
+        &PeerClient::new(),
+        &context.base_url,
+        "/api/agent-hub/portable/project/enable",
+        &serde_json::json!({ "localProjectId": context.remote_project_id }),
+        &context.device_id,
+        PeerTimeoutClass::Mutation,
+    )
+    .await
+    .map_err(peer_err)
+}
+
+/// 读取远端项目的完整 portable inventory。
+pub async fn inspect_remote_project_portable_inventory(
+    state: &AppState,
+    request: InspectRemoteProjectPortableInventoryRequest,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    let context = resolve_remote_portable_project(state, &request.project_ref).await?;
+    post_json_bound(
+        &PeerClient::new(),
+        &context.base_url,
+        "/api/agent-hub/portable/project/inventory",
+        &RemoteProjectPortableInventoryQuery {
+            local_project_id: context.remote_project_id,
+            target: request.target,
+            kind: request.kind,
+        },
+        &context.device_id,
+        PeerTimeoutClass::Metadata,
+    )
+    .await
+    .map_err(peer_err)
+}
+
+/// 在 owning peer 生成项目资产 action plan。
+pub async fn preview_remote_project_portable_action(
+    state: &AppState,
+    mut request: PreviewRemoteProjectPortableActionRequest,
+) -> Result<PortableAssetActionPlanDto, AppError> {
+    let context = resolve_remote_portable_project(state, &request.project_ref).await?;
+    request.request.inventory_query.local_project_id = Some(context.remote_project_id);
+    request.request.inventory_query.scope_kind = Some(ScopeKind::Project);
+    post_json_bound(
+        &PeerClient::new(),
+        &context.base_url,
+        "/api/agent-hub/portable/project/action/preview",
+        &request.request,
+        &context.device_id,
+        PeerTimeoutClass::Mutation,
+    )
+    .await
+    .map_err(peer_err)
+}
+
+/// 在 owning peer claim/apply 项目资产 action plan。
+pub async fn apply_remote_project_portable_action(
+    state: &AppState,
+    request: ApplyRemoteProjectPortableActionRequest,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    let context = resolve_remote_portable_project(state, &request.project_ref).await?;
+    post_json_bound(
+        &PeerClient::new(),
+        &context.base_url,
+        "/api/agent-hub/portable/project/action/apply",
+        &request.request,
+        &context.device_id,
+        PeerTimeoutClass::Mutation,
+    )
+    .await
+    .map_err(peer_err)
+}
+
+/// 在 owning peer 查询远端项目 action 结果。
+pub async fn get_remote_project_portable_action(
+    state: &AppState,
+    request: GetRemoteProjectPortableActionRequest,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    let context = resolve_remote_portable_project(state, &request.project_ref).await?;
+    post_json_bound(
+        &PeerClient::new(),
+        &context.base_url,
+        "/api/agent-hub/portable/project/action/get",
+        &serde_json::json!({ "clientRequestId": request.client_request_id }),
+        &context.device_id,
+        PeerTimeoutClass::Metadata,
+    )
+    .await
+    .map_err(peer_err)
+}
+
 /// 列出远端 inventory（本机作为客户端）。
 pub async fn list_remote_portable_inventory(
     state: &AppState,
     request: ListRemotePortableInventoryRequest,
 ) -> Result<RemotePortableInventoryDto, AppError> {
-    let device = resolve_device(state, &request.source_device_id)?;
-    let base_url = device.base_url();
+    let project_context = if let Some(project_ref) = request.source_project_ref.as_deref() {
+        Some(resolve_remote_portable_project(state, project_ref).await?)
+    } else {
+        None
+    };
+    let (base_url, expected_device_id, source_local_project_id) =
+        if let Some(context) = project_context {
+            (
+                context.base_url,
+                context.device_id,
+                Some(context.remote_project_id),
+            )
+        } else {
+            let device = resolve_device(state, &request.source_device_id)?;
+            (
+                device.base_url(),
+                request.source_device_id.clone(),
+                request.source_local_project_id.clone(),
+            )
+        };
     let peer = PeerClient::new();
-    peer.require_capability(&base_url, CAPABILITY_PORTABLE_PULL_V1)
+    let required_capability = if source_local_project_id.is_some() {
+        CAPABILITY_PORTABLE_PROJECT_V1
+    } else {
+        CAPABILITY_PORTABLE_PULL_V1
+    };
+    peer.require_capability(&base_url, required_capability)
         .await
         .map_err(peer_err)?;
     fetch_remote_inventory(
         &peer,
         &base_url,
-        &request.source_device_id,
+        &expected_device_id,
         request.source_target,
+        source_local_project_id,
     )
     .await
 }
@@ -989,18 +1270,42 @@ pub async fn preview_portable_pull(
         ));
     }
 
-    let device = resolve_device(state, &request.source_device_id)?;
-    let base_url = device.base_url();
+    let project_context = if let Some(project_ref) = request.source_project_ref.as_deref() {
+        Some(resolve_remote_portable_project(state, project_ref).await?)
+    } else {
+        None
+    };
+    let (base_url, expected_device_id, source_local_project_id) =
+        if let Some(context) = project_context {
+            (
+                context.base_url,
+                context.device_id,
+                Some(context.remote_project_id),
+            )
+        } else {
+            let device = resolve_device(state, &request.source_device_id)?;
+            (
+                device.base_url(),
+                request.source_device_id.clone(),
+                request.source_local_project_id.clone(),
+            )
+        };
     let peer = PeerClient::new();
-    peer.require_capability(&base_url, CAPABILITY_PORTABLE_PULL_V1)
+    let required_capability = if source_local_project_id.is_some() {
+        CAPABILITY_PORTABLE_PROJECT_V1
+    } else {
+        CAPABILITY_PORTABLE_PULL_V1
+    };
+    peer.require_capability(&base_url, required_capability)
         .await
         .map_err(peer_err)?;
 
     let remote = fetch_remote_inventory(
         &peer,
         &base_url,
-        &request.source_device_id,
+        &expected_device_id,
         request.source_target,
+        source_local_project_id.clone(),
     )
     .await?;
 
@@ -1035,7 +1340,14 @@ pub async fn preview_portable_pull(
         }
     }
 
-    let local = inspect_portable_inventory(state).await?;
+    let local_query = portable_pull_inventory_query(
+        request.destination_target,
+        request.destination_local_project_id.clone(),
+    );
+    let local = inspect_portable_inventory_query(state, local_query).await?;
+    let destination_scope_id =
+        resolve_destination_scope_id(state, request.destination_local_project_id.as_deref())
+            .await?;
     // Conflict identity includes resolved scope — user + project same nativeId are distinct.
     let local_by_identity: BTreeMap<
         (AgentTarget, PortableAssetKind, String, String),
@@ -1072,7 +1384,7 @@ pub async fn preview_portable_pull(
         );
         let mut item_blocking = Vec::new();
         let mut warnings = rem.warnings.clone();
-        let rem_scope = resolve_remote_scope_id(rem);
+        let rem_scope = destination_scope_id.clone();
         let existing = local_by_identity.get(&(
             rem.target,
             rem.kind,
@@ -1086,7 +1398,10 @@ pub async fn preview_portable_pull(
                 .iter()
                 .any(|i| i.project_id.as_deref() == Some(pid.as_str()) && i.project_opted_in)
         });
-        let mapping_missing = rem.project_id.is_some()
+        // 显式目标项目已由 resolve_destination_scope_id 校验并重映射；不能再拿来源设备的
+        // hubProjectId 去本机查同名 mapping（不同设备的 Hub id 本就可以不同）。
+        let mapping_missing = request.destination_local_project_id.is_none()
+            && rem.project_id.is_some()
             && local_project_opted != Some(true)
             && rem.scope_id.starts_with("project:");
 
@@ -1182,9 +1497,12 @@ pub async fn preview_portable_pull(
     let public = PortablePullPlanDto {
         plan_token: plan_token.clone(),
         expires_at: expires_at.clone(),
-        source_device_id: request.source_device_id.clone(),
+        source_device_id: expected_device_id,
         source_target: request.source_target,
         destination_target: request.destination_target,
+        source_local_project_id,
+        source_project_ref: request.source_project_ref.clone(),
+        destination_local_project_id: request.destination_local_project_id.clone(),
         remote_inventory_snapshot_hash: remote.inventory_snapshot_hash.clone(),
         local_inventory_snapshot_hash: local.inventory_snapshot_hash.clone(),
         conflict_policy: request.conflict_policy,
@@ -1247,7 +1565,11 @@ pub async fn apply_portable_pull(
                 &request.client_request_id,
                 &stored.public,
             );
-            if let Ok(post) = inspect_portable_inventory_force(state).await {
+            let query = portable_pull_inventory_query(
+                stored.public.destination_target,
+                stored.public.destination_local_project_id.clone(),
+            );
+            if let Ok(post) = inspect_portable_inventory_force_query(state, query).await {
                 fold_pending_pull_observations(&mut result, &stored.public, &post);
             }
             Ok(result)
@@ -1313,17 +1635,49 @@ async fn execute_claimed_pull(
     if stored.public.expires_at.as_str() < Utc::now().to_rfc3339().as_str() {
         return Err(AppError::conflict("PORTABLE_PULL_PLAN_EXPIRED".to_string()));
     }
-    let local_now = inspect_portable_inventory_force(state).await?;
+    let local_query = portable_pull_inventory_query(
+        stored.public.destination_target,
+        stored.public.destination_local_project_id.clone(),
+    );
+    let local_now = inspect_portable_inventory_force_query(state, local_query.clone()).await?;
     if local_now.inventory_snapshot_hash != stored.public.local_inventory_snapshot_hash {
         return Err(AppError::conflict(
             "PORTABLE_PULL_LOCAL_INVENTORY_STALE".to_string(),
         ));
     }
 
-    let device = resolve_device(state, &stored.public.source_device_id)?;
-    let base_url = device.base_url();
+    let project_context = if let Some(project_ref) = stored.public.source_project_ref.as_deref() {
+        Some(resolve_remote_portable_project(state, project_ref).await?)
+    } else {
+        None
+    };
+    let (base_url, expected_device_id, source_local_project_id) =
+        if let Some(context) = project_context {
+            if context.device_id != stored.public.source_device_id {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_SOURCE_PROJECT_OWNER_CHANGED",
+                ));
+            }
+            (
+                context.base_url,
+                context.device_id,
+                Some(context.remote_project_id),
+            )
+        } else {
+            let device = resolve_device(state, &stored.public.source_device_id)?;
+            (
+                device.base_url(),
+                stored.public.source_device_id.clone(),
+                stored.public.source_local_project_id.clone(),
+            )
+        };
     let peer = PeerClient::new();
-    peer.require_capability(&base_url, CAPABILITY_PORTABLE_PULL_V1)
+    let required_capability = if source_local_project_id.is_some() {
+        CAPABILITY_PORTABLE_PROJECT_V1
+    } else {
+        CAPABILITY_PORTABLE_PULL_V1
+    };
+    peer.require_capability(&base_url, required_capability)
         .await
         .map_err(peer_err)?;
 
@@ -1331,8 +1685,9 @@ async fn execute_claimed_pull(
     let remote_now = fetch_remote_inventory(
         &peer,
         &base_url,
-        &stored.public.source_device_id,
+        &expected_device_id,
         stored.public.source_target,
+        source_local_project_id.clone(),
     )
     .await?;
     if remote_now.inventory_snapshot_hash != stored.public.remote_inventory_snapshot_hash {
@@ -1388,8 +1743,9 @@ async fn execute_claimed_pull(
     let selection = fetch_remote_selection(
         &peer,
         &base_url,
-        &stored.public.source_device_id,
+        &expected_device_id,
         stored.public.source_target,
+        source_local_project_id,
         &stored.remote_item_ids,
     )
     .await?;
@@ -1436,7 +1792,7 @@ async fn execute_claimed_pull(
             let chunk = fetch_object_chunk(
                 &peer,
                 &base_url,
-                &stored.public.source_device_id,
+                &expected_device_id,
                 &selection.transfer_id,
                 &obj.hash,
                 offset,
@@ -1510,12 +1866,20 @@ async fn execute_claimed_pull(
     let _ = release_remote_transfer(
         &peer,
         &base_url,
-        &stored.public.source_device_id,
+        &expected_device_id,
         &selection.transfer_id,
     )
     .await;
 
-    let import_ok = import_selection_canonical(state, &store, &data_dir, &selection).await;
+    let destination_scope_id = stored
+        .public
+        .changes
+        .first()
+        .map(|change| change.scope_id.as_str())
+        .unwrap_or("user");
+    let import_ok =
+        import_selection_canonical(state, &store, &data_dir, &selection, destination_scope_id)
+            .await;
     let local_before = local_now;
     // apply 路径 re-check mutation：不得仅信 preview 计划（inventory 可能已变）
     let dest_mutation_now =
@@ -1606,9 +1970,11 @@ async fn execute_claimed_pull(
                     });
                     continue;
                 }
-                match install_change(state, &store, &selection, change).await {
+                match install_change(state, &store, &selection, change, &local_query).await {
                     Ok(()) => {
-                        let post = inspect_portable_inventory_force(state).await?;
+                        let post =
+                            inspect_portable_inventory_force_query(state, local_query.clone())
+                                .await?;
                         let observed = inventory_has_scoped_item(
                             &post,
                             stored.public.destination_target,
@@ -1717,10 +2083,11 @@ async fn execute_claimed_pull(
             continue;
         }
 
-        match install_change(state, &store, &selection, change).await {
+        match install_change(state, &store, &selection, change, &local_query).await {
             Ok(()) => {
                 // post-install rescan gate — same scope identity as conflict map
-                let post = inspect_portable_inventory_force(state).await?;
+                let post =
+                    inspect_portable_inventory_force_query(state, local_query.clone()).await?;
                 let observed = inventory_has_scoped_item(
                     &post,
                     stored.public.destination_target,
@@ -1776,11 +2143,12 @@ async fn install_change(
     store: &ObjectStore,
     selection: &RemotePortableSelectionResponse,
     change: &PortablePullChangeDto,
+    local_query: &PortableInventoryQuery,
 ) -> Result<(), AppError> {
     // 写盘前强制再验 mutation：preview 之后 support 可能回落 Blocked/PreviewOnly。
     // 这里不能复用带缓存的 inventory，避免 scan-only manifest 在缓存窗口内被旧
     // capability 误放行；direct-local allowlist 也只能由 scanner 的 manifest gate 产生。
-    let live = inspect_portable_inventory_force(state).await?;
+    let live = inspect_portable_inventory_force_query(state, local_query.clone()).await?;
     let selected_item = selection
         .items
         .iter()
@@ -1910,7 +2278,11 @@ pub async fn get_portable_pull(
     let stored = parse_stored_pull_plan(&row.plan_json)?;
     let mut result =
         outcome_unknown_pull_result(&row.plan_token, client_request_id, &stored.public);
-    if let Ok(post) = inspect_portable_inventory_force(state).await {
+    let local_query = portable_pull_inventory_query(
+        stored.public.destination_target,
+        stored.public.destination_local_project_id.clone(),
+    );
+    if let Ok(post) = inspect_portable_inventory_force_query(state, local_query).await {
         fold_pending_pull_observations(&mut result, &stored.public, &post);
     }
     Ok(result)
@@ -2011,12 +2383,16 @@ async fn fetch_remote_inventory(
     base_url: &str,
     expected_device_id: &str,
     source_target: AgentTarget,
+    source_local_project_id: Option<String>,
 ) -> Result<RemotePortableInventoryDto, AppError> {
     post_json_bound(
         peer,
         base_url,
         "/api/agent-hub/portable/inventory",
-        &RemoteInventoryQuery { source_target },
+        &RemoteInventoryQuery {
+            source_target,
+            source_local_project_id,
+        },
         expected_device_id,
         PeerTimeoutClass::Metadata,
     )
@@ -2029,6 +2405,7 @@ async fn fetch_remote_selection(
     base_url: &str,
     expected_device_id: &str,
     source_target: AgentTarget,
+    source_local_project_id: Option<String>,
     item_ids: &[String],
 ) -> Result<RemotePortableSelectionResponse, AppError> {
     post_json_bound(
@@ -2037,6 +2414,7 @@ async fn fetch_remote_selection(
         "/api/agent-hub/portable/selection",
         &RemoteSelectionQuery {
             source_target,
+            source_local_project_id,
             inventory_item_ids: item_ids.to_vec(),
         },
         expected_device_id,
@@ -2189,6 +2567,7 @@ async fn import_selection_canonical(
     store: &ObjectStore,
     data_dir: &std::path::Path,
     selection: &RemotePortableSelectionResponse,
+    destination_scope_id: &str,
 ) -> Result<(), AppError> {
     if selection.envelope.assets.is_empty() {
         return Ok(());
@@ -2199,7 +2578,15 @@ async fn import_selection_canonical(
             object_bytes.insert(obj.hash.clone(), b);
         }
     }
-    let validated = ValidatedSnapshot::from_parts(selection.envelope.clone(), object_bytes, None)?;
+    let mut envelope = selection.envelope.clone();
+    // 项目级 Pull 是复制到目标 scope，不是把来源设备的 Hub project id 原样导入本机。
+    envelope.selection.scope_ids = vec![destination_scope_id.to_string()];
+    for asset in &mut envelope.assets {
+        asset.scope_id = destination_scope_id.to_string();
+    }
+    envelope.snapshot_hash = compute_snapshot_hash(&envelope)
+        .map_err(|error| AppError::validation(format!("PORTABLE_PULL_SCOPE_REMAP:{error}")))?;
+    let validated = ValidatedSnapshot::from_parts(envelope, object_bytes, None)?;
     let importer = SnapshotImporter::new(
         AgentHubRepo::new(state.agent_hub_repo.pool().clone()),
         store.clone(),
@@ -2567,12 +2954,32 @@ mod tests {
         assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");
     }
 
+    /// Business Logic: 项目级 Pull 的源/目标扫描不得退回 user/all-project。
+    #[test]
+    fn project_pull_query_is_exact_project_scope() {
+        let query =
+            portable_pull_inventory_query(AgentTarget::Claude, Some("workbench-project-1".into()));
+        assert_eq!(query.target, Some(AgentTarget::Claude));
+        assert_eq!(query.scope_kind, Some(ScopeKind::Project));
+        assert_eq!(
+            query.local_project_id.as_deref(),
+            Some("workbench-project-1")
+        );
+
+        let user = portable_pull_inventory_query(AgentTarget::Claude, None);
+        assert_eq!(user.scope_kind, Some(ScopeKind::User));
+        assert!(user.local_project_id.is_none());
+    }
+
     #[test]
     fn preview_rejects_cross_target_at_request_shape() {
         let req = PreviewPortablePullRequest {
             source_device_id: "d".into(),
             source_target: AgentTarget::Claude,
             destination_target: AgentTarget::Codex,
+            source_local_project_id: None,
+            source_project_ref: None,
+            destination_local_project_id: None,
             remote_inventory_snapshot_hash: "h".into(),
             inventory_item_ids: vec!["a".into()],
             conflict_policy: PortableAssetConflictPolicy::SkipExisting,
@@ -2601,6 +3008,9 @@ mod tests {
                 source_device_id: "d".into(),
                 source_target: AgentTarget::Claude,
                 destination_target: AgentTarget::Claude,
+                source_local_project_id: None,
+                source_project_ref: None,
+                destination_local_project_id: None,
                 remote_inventory_snapshot_hash: "r".into(),
                 local_inventory_snapshot_hash: "l".into(),
                 conflict_policy: PortableAssetConflictPolicy::SkipExisting,
@@ -3124,6 +3534,9 @@ mod tests {
             source_device_id: "d".into(),
             source_target: AgentTarget::Claude,
             destination_target: AgentTarget::Claude,
+            source_local_project_id: None,
+            source_project_ref: None,
+            destination_local_project_id: None,
             remote_inventory_snapshot_hash: "r".into(),
             local_inventory_snapshot_hash: "l".into(),
             conflict_policy: PortableAssetConflictPolicy::SkipExisting,

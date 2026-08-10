@@ -210,7 +210,7 @@ describe('usePortablePullController', () => {
     expect(result.current.sourceTarget).toBe('codex');
   });
 
-  test('falls back to first online peer when initialSourceDeviceId is unset or offline', async () => {
+  test('fails closed when the explicitly selected source peer is offline', async () => {
     const pullApi = createPullApi();
     const listDevices = vi.fn(async () => devices);
     const { result } = renderHook(() =>
@@ -224,7 +224,8 @@ describe('usePortablePullController', () => {
     );
 
     await waitFor(() => expect(result.current.devices).toHaveLength(2));
-    expect(result.current.selectedDeviceId).toBe('device-a');
+    expect(result.current.selectedDeviceId).toBe('');
+    expect(result.current.error).toBe('AGENT_HUB_SELECTED_PEER_OFFLINE');
   });
 
   test('loads devices and remote inventory for selected device/target with destination fixed to source', async () => {
@@ -270,6 +271,40 @@ describe('usePortablePullController', () => {
       conflictPolicy: 'replaceAfterPreview',
     });
     expect(result.current.plan?.destinationTarget).toBe('claude');
+  });
+
+  test('project pull binds remote shortcut and exact local destination project', async () => {
+    const pullApi = createPullApi();
+    const listDevices = vi.fn(async () => devices);
+    const { result } = renderHook(() =>
+      usePortablePullController({
+        open: true,
+        pullApi,
+        listDevices,
+        initialSourceDeviceId: 'device-a',
+        sourceProjectRef: 'remote:device-a:shortcut',
+        destinationLocalProjectId: 'workbench-local-1',
+      }),
+    );
+    await waitFor(() => expect(result.current.selectedDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.loadInventory();
+      result.current.toggleItem('remote-skill-1');
+    });
+    await act(async () => {
+      await result.current.preview();
+    });
+    expect(pullApi.listRemote).toHaveBeenCalledWith({
+      sourceDeviceId: 'device-a',
+      sourceTarget: 'claude',
+      sourceProjectRef: 'remote:device-a:shortcut',
+    });
+    expect(pullApi.preview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceProjectRef: 'remote:device-a:shortcut',
+        destinationLocalProjectId: 'workbench-local-1',
+      }),
+    );
   });
 
   test('device or target change cancels stale inventory and clears invalid selection', async () => {

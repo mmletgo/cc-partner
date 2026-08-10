@@ -144,7 +144,7 @@ pub fn begin_scan(query: PortableInventoryQuery) -> CacheLookup {
         notify: Arc::new(tokio::sync::Notify::new()),
         completed: AtomicBool::new(false),
     });
-    guard.in_flight.insert(query, scan.clone());
+    guard.in_flight.insert(query.clone(), scan.clone());
     CacheLookup::Leader(CacheScanGuard { query, scan })
 }
 
@@ -165,7 +165,7 @@ pub fn complete_scan(guard: CacheScanGuard, snapshot: Option<PortableInventorySn
             if state.generation == guard.scan.generation {
                 if let Some(snapshot) = snapshot {
                     state.entries.insert(
-                        guard.query,
+                        guard.query.clone(),
                         CacheEntry {
                             snapshot,
                             fetched_at: Instant::now(),
@@ -221,9 +221,9 @@ mod tests {
     fn invalidate_clears_hit() {
         invalidate_portable_inventory_cache();
         let query = PortableInventoryQuery::default();
-        store_cached_portable_inventory(query, empty_snap("a"));
+        store_cached_portable_inventory(query.clone(), empty_snap("a"));
         assert_eq!(
-            get_cached_portable_inventory(query)
+            get_cached_portable_inventory(query.clone())
                 .map(|s| s.inventory_snapshot_hash)
                 .as_deref(),
             Some("a")
@@ -236,7 +236,7 @@ mod tests {
     fn generation_invalidates_in_flight_result() {
         invalidate_portable_inventory_cache();
         let query = PortableInventoryQuery::default();
-        let CacheLookup::Leader(leader) = begin_scan(query) else {
+        let CacheLookup::Leader(leader) = begin_scan(query.clone()) else {
             panic!("expected scan leader");
         };
         invalidate_portable_inventory_cache();
@@ -248,10 +248,10 @@ mod tests {
     async fn concurrent_miss_shares_single_scan_and_wakes_waiter() {
         invalidate_portable_inventory_cache();
         let query = PortableInventoryQuery::default();
-        let CacheLookup::Leader(leader) = begin_scan(query) else {
+        let CacheLookup::Leader(leader) = begin_scan(query.clone()) else {
             panic!("expected scan leader");
         };
-        let CacheLookup::Wait(waiter) = begin_scan(query) else {
+        let CacheLookup::Wait(waiter) = begin_scan(query.clone()) else {
             panic!("second miss must wait for the leader");
         };
         complete_scan(leader, Some(empty_snap("shared")));
@@ -272,8 +272,8 @@ mod tests {
             kind: Some(crate::agent_hub::portable_inventory::PortableAssetKind::Plugin),
             ..PortableInventoryQuery::default()
         };
-        store_cached_portable_inventory(skill, empty_snap("skill"));
-        store_cached_portable_inventory(plugin, empty_snap("plugin"));
+        store_cached_portable_inventory(skill.clone(), empty_snap("skill"));
+        store_cached_portable_inventory(plugin.clone(), empty_snap("plugin"));
         assert_eq!(
             get_cached_portable_inventory(skill).map(|s| s.inventory_snapshot_hash),
             Some("skill".into())
@@ -281,6 +281,31 @@ mod tests {
         assert_eq!(
             get_cached_portable_inventory(plugin).map(|s| s.inventory_snapshot_hash),
             Some("plugin".into())
+        );
+    }
+
+    #[test]
+    fn local_project_queries_keep_distinct_cache_entries() {
+        invalidate_portable_inventory_cache();
+        let first = PortableInventoryQuery {
+            scope_kind: Some(crate::agent_hub::models::ScopeKind::Project),
+            local_project_id: Some("workbench-a".into()),
+            ..PortableInventoryQuery::default()
+        };
+        let second = PortableInventoryQuery {
+            scope_kind: Some(crate::agent_hub::models::ScopeKind::Project),
+            local_project_id: Some("workbench-b".into()),
+            ..PortableInventoryQuery::default()
+        };
+        store_cached_portable_inventory(first.clone(), empty_snap("a"));
+        store_cached_portable_inventory(second.clone(), empty_snap("b"));
+        assert_eq!(
+            get_cached_portable_inventory(first).map(|snapshot| snapshot.inventory_snapshot_hash),
+            Some("a".into())
+        );
+        assert_eq!(
+            get_cached_portable_inventory(second).map(|snapshot| snapshot.inventory_snapshot_hash),
+            Some("b".into())
         );
     }
 }

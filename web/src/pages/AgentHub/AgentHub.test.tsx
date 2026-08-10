@@ -87,6 +87,8 @@ function buildProps(
     },
     contextMigrationNotice: null,
     onContextChange: vi.fn(),
+    shellPeers: [],
+    shellProjects: [],
     userInstructions: {} as UseAgentHubControllerResult['userInstructions'],
     loading: false,
     refreshing: false,
@@ -419,6 +421,48 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('agent-hub-assets-section')).toBeNull();
     expect(screen.queryByTestId('agent-hub-lan-push-notice')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-opt-in-guard')).toBeNull();
+  });
+
+  test('local project instructions expose preview and explicit enable management', () => {
+    const runPreviewProject = vi.fn(async () => undefined);
+    const runEnableProject = vi.fn(async () => undefined);
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        scope: 'project',
+        projectKey: 'wb-project-1',
+        tab: 'instructions',
+      },
+      previewProjectId: 'wb-project-1',
+      preview: {
+        projectId: 'wb-project-1',
+        hubProjectId: 'hub-project-1',
+        optedIn: false,
+        checkouts: [],
+        plannedActions: [],
+      },
+      runPreviewProject,
+      runEnableProject,
+    });
+
+    expect(screen.getByTestId('agent-hub-project-management')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Run preview' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Enable project' }));
+    expect(runPreviewProject).toHaveBeenCalledOnce();
+    expect(runEnableProject).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
+  });
+
+  test('remote device keeps management task callout without rendering local inventory', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        deviceId: 'peer-a',
+        tab: 'skill',
+      },
+    });
+    expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
+    expect(screen.queryByTestId('portable-inventory-workspace')).toBeNull();
   });
 
   test('URL migration notice is visible without exposing a legacy action', () => {

@@ -87,7 +87,7 @@ pub async fn inspect_portable_inventory_query(
     query: PortableInventoryQuery,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     loop {
-        match crate::agent_hub::portable_inventory::cache::begin_scan(query) {
+        match crate::agent_hub::portable_inventory::cache::begin_scan(query.clone()) {
             crate::agent_hub::portable_inventory::cache::CacheLookup::Hit(snapshot) => {
                 return Ok(snapshot)
             }
@@ -187,10 +187,16 @@ pub async fn inspect_portable_inventory_with_env_query(
     env: &TargetEnvironment,
     query: PortableInventoryQuery,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
-    let scopes = collect_scan_scopes(state, env).await?;
+    let scopes = collect_scan_scopes(state, env, &query).await?;
+    let scan_query = PortableInventoryQuery {
+        target: query.target,
+        kind: query.kind,
+        scope_kind: query.scope_kind,
+        local_project_id: None,
+    };
     let scan_env = env.clone();
     let (targets, mut discovered) = tokio::task::spawn_blocking(move || {
-        scan_portable_inventory_facts_query(&scan_env, &scopes, query)
+        scan_portable_inventory_facts_query(&scan_env, &scopes, scan_query)
     })
     .await
     .map_err(|error| AppError::generic(format!("portable inventory scan task: {error}")))??;
@@ -259,6 +265,11 @@ pub fn scan_portable_inventory_facts_query(
     ),
     AppError,
 > {
+    if query.local_project_id.is_some() {
+        return Err(AppError::validation(
+            "PORTABLE_INVENTORY_LOCAL_PROJECT_ID_UNRESOLVED",
+        ));
+    }
     let adapters: Vec<Box<dyn AssetAdapter>> = vec![
         Box::new(ClaudeInstructionAdapter),
         Box::new(CodexInstructionAdapter),
@@ -391,7 +402,64 @@ pub fn scan_portable_inventory_facts_query(
 async fn collect_scan_scopes(
     state: &AppState,
     env: &TargetEnvironment,
+    query: &PortableInventoryQuery,
 ) -> Result<Vec<PortableScanScope>, AppError> {
+    if let Some(raw_local_project_id) = query.local_project_id.as_deref() {
+        let local_project_id = raw_local_project_id.trim();
+        if local_project_id.is_empty() {
+            return Err(AppError::validation(
+                "PORTABLE_INVENTORY_LOCAL_PROJECT_ID_REQUIRED",
+            ));
+        }
+        if local_project_id.starts_with("remote:") {
+            return Err(AppError::validation(
+                "PORTABLE_INVENTORY_REMOTE_PROJECT_UNSUPPORTED",
+            ));
+        }
+        if query.scope_kind != Some(ScopeKind::Project) {
+            return Err(AppError::validation(
+                "PORTABLE_INVENTORY_PROJECT_SCOPE_REQUIRED",
+            ));
+        }
+        let project = state
+            .workbench_project_repo
+            .get(local_project_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("PORTABLE_INVENTORY_LOCAL_PROJECT_NOT_FOUND"))?;
+        if project.kind != "local" {
+            return Err(AppError::validation(
+                "PORTABLE_INVENTORY_REMOTE_PROJECT_UNSUPPORTED",
+            ));
+        }
+        let mapping = state
+            .agent_hub_repo
+            .get_project_mapping_by_local_workbench_id(local_project_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("PORTABLE_INVENTORY_PROJECT_MAPPING_NOT_FOUND"))?;
+        if mapping.local_workbench_project_id.as_deref() != Some(local_project_id) {
+            return Err(AppError::validation(
+                "PORTABLE_INVENTORY_PROJECT_MAPPING_MISMATCH",
+            ));
+        }
+        if mapping.hub_project_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "PORTABLE_INVENTORY_PROJECT_MAPPING_INVALID",
+            ));
+        }
+        let absolute_path = mapping
+            .local_absolute_path
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from(&project.path));
+        return Ok(vec![PortableScanScope {
+            scope_id: format!("project:{}", mapping.hub_project_id),
+            scope_kind: ScopeKind::Project,
+            project_id: Some(mapping.hub_project_id),
+            project_opted_in: mapping.opted_in,
+            absolute_path,
+        }]);
+    }
     let mut scopes = vec![PortableScanScope {
         scope_id: "user".into(),
         scope_kind: ScopeKind::User,
@@ -1936,6 +2004,7 @@ enabled = false
             target: Some(AgentTarget::Claude),
             kind: Some(PortableAssetKind::Skill),
             scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
         };
         let (targets, items) = scan_portable_inventory_facts_query(&env, &scopes, query).unwrap();
 
@@ -1966,6 +2035,7 @@ enabled = false
             target: Some(AgentTarget::Claude),
             kind: Some(PortableAssetKind::Plugin),
             scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
         };
         let (_targets, items) = scan_portable_inventory_facts_query(&env, &scopes, query).unwrap();
         assert!(!items.is_empty());
@@ -1974,6 +2044,22 @@ enabled = false
                 && item.content_hash.is_some()
                 && item.tree_hash.is_none()
         }));
+    }
+
+    #[test]
+    fn unresolved_local_project_query_fails_closed_before_scan() {
+        let (_tmp, env) = seed_all_targets_fixture();
+        let scopes = user_and_projects(&env.home);
+        let query = PortableInventoryQuery {
+            scope_kind: Some(ScopeKind::Project),
+            local_project_id: Some("workbench-project".into()),
+            ..PortableInventoryQuery::default()
+        };
+        let error = scan_portable_inventory_facts_query(&env, &scopes, query)
+            .expect_err("pure scanner must not accept an unresolved local project id");
+        assert!(error
+            .to_string()
+            .contains("PORTABLE_INVENTORY_LOCAL_PROJECT_ID_UNRESOLVED"));
     }
 
     #[test]

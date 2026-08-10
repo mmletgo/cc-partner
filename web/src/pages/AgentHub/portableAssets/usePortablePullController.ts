@@ -43,6 +43,10 @@ export interface UsePortablePullControllerOptions {
   initialSourceDeviceId?: string | null;
   /** Shell hubContext.agent — same-agent pull 默认源/目标 Agent。 */
   initialSourceTarget?: AgentTarget;
+  /** 可选 remote project shortcut；存在时只读取该远端项目。 */
+  sourceProjectRef?: string | null;
+  /** 可选本机 Workbench project id；存在时 Pull 写入该项目。 */
+  destinationLocalProjectId?: string | null;
 }
 
 export interface UsePortablePullControllerResult {
@@ -137,6 +141,8 @@ export function usePortablePullController(
     listDevices = devicesApi.list,
     initialSourceDeviceId = null,
     initialSourceTarget = 'claude',
+    sourceProjectRef = null,
+    destinationLocalProjectId = null,
   } = options;
 
   const [devices, setDevices] = useState<Device[]>([]);
@@ -223,14 +229,21 @@ export function usePortablePullController(
       try {
         const list = await listDevices();
         if (cancelled || !mountedRef.current) return;
-        const peers = list.filter((d) => d.status === 'online');
+        const onlinePeers = list.filter((d) => d.status === 'online');
+        const peers = sourceProjectRef && initialSourceDeviceId
+          ? onlinePeers.filter((d) => d.id === initialSourceDeviceId)
+          : onlinePeers;
         setDevices(peers);
-        const preferred =
-          initialSourceDeviceId && peers.some((d) => d.id === initialSourceDeviceId)
-            ? initialSourceDeviceId
-            : (peers[0]?.id ?? '');
+        const preferred = initialSourceDeviceId
+          ? (peers.some((d) => d.id === initialSourceDeviceId)
+              ? initialSourceDeviceId
+              : '')
+          : (peers[0]?.id ?? '');
         setSelectedDeviceId(preferred);
         selectedDeviceIdRef.current = preferred;
+        if (initialSourceDeviceId && preferred.length === 0) {
+          setError('AGENT_HUB_SELECTED_PEER_OFFLINE');
+        }
       } catch (reason) {
         if (cancelled || !mountedRef.current) return;
         setError(formatError(reason));
@@ -239,7 +252,14 @@ export function usePortablePullController(
     return () => {
       cancelled = true;
     };
-  }, [open, listDevices, initialSourceDeviceId, initialSourceTarget]);
+  }, [
+    open,
+    listDevices,
+    initialSourceDeviceId,
+    initialSourceTarget,
+    sourceProjectRef,
+    destinationLocalProjectId,
+  ]);
 
   const visibleItems = useMemo(
     () => filterRemotePortableItems(remoteInventory?.items ?? [], filters),
@@ -282,10 +302,12 @@ export function usePortablePullController(
 
   const selectDevice = useCallback(
     (deviceId: string) => {
+      // 远端项目 shortcut 已绑定 owning device，不能在抽屉里改成另一台 peer。
+      if (sourceProjectRef) return;
       setSelectedDeviceId(deviceId);
       resetPullWorkspaceForContextChange();
     },
-    [resetPullWorkspaceForContextChange],
+    [resetPullWorkspaceForContextChange, sourceProjectRef],
   );
 
   const selectSourceTarget = useCallback(
@@ -363,6 +385,7 @@ export function usePortablePullController(
       const snapshot = await pullApi.listRemote({
         sourceDeviceId: deviceId,
         sourceTarget: target,
+        ...(sourceProjectRef ? { sourceProjectRef } : {}),
       });
       if (!mountedRef.current || seq !== inventorySeqRef.current) return;
       // 丢弃与当前选择不匹配的响应
@@ -399,7 +422,7 @@ export function usePortablePullController(
         setBusy(false);
       }
     }
-  }, [invalidatePreview, pullApi]);
+  }, [invalidatePreview, pullApi, sourceProjectRef]);
 
   const preview = useCallback(async () => {
     const inventory = remoteInventory;
@@ -425,6 +448,8 @@ export function usePortablePullController(
         sourceDeviceId: deviceId,
         sourceTarget: target,
         destinationTarget: target,
+        ...(sourceProjectRef ? { sourceProjectRef } : {}),
+        ...(destinationLocalProjectId ? { destinationLocalProjectId } : {}),
         remoteInventorySnapshotHash: inventory.inventorySnapshotHash,
         inventoryItemIds: [...selectedItemIds],
         conflictPolicy,
@@ -444,7 +469,14 @@ export function usePortablePullController(
         setBusy(false);
       }
     }
-  }, [pullApi, remoteInventory, selectedItemIds, conflictPolicy]);
+  }, [
+    pullApi,
+    remoteInventory,
+    selectedItemIds,
+    conflictPolicy,
+    sourceProjectRef,
+    destinationLocalProjectId,
+  ]);
 
   const apply = useCallback(async () => {
     if (!plan) {

@@ -1,12 +1,12 @@
 /**
- * Agent Hub 单一壳层（本机用户级）。
+ * Agent Hub 单一壳层（本机 / 远端 / 项目）。
  *
  * Business Logic（为什么需要这个组件）:
- *   当前 project/peer 浏览上下文没有与单一项目或远端 owner 精确绑定的安全 API，因此 Shell
- *   只承诺本机用户级。Agent、指令 lane 与内容 Tab 是唯一可切换上下文；LAN 通过显式任务进入。
+ *   Agent Hub 是跨设备、跨项目管理入口；上下文选择不能因为某个写动作尚未认证而消失。
+ *   Shell 负责选择 owner，内容区和动作层再按能力证据决定只读、预览或写入。
  *
  * Code Logic（这个组件做什么）:
- *   渲染受控 tablist 与两个 radiogroup；复用共享 roving 索引合同实现方向键/Home/End，
+ *   渲染受控 tablist、三个 radiogroup 与设备/项目选择器；复用共享 roving 索引合同，
  *   并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
 
@@ -23,6 +23,7 @@ import { getRovingTabIndex, isRovingTabKey } from '@/lib/rovingTablist';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type {
   AgentHubContext,
+  AgentHubScope,
   AgentHubTab,
   InstructionLane,
 } from '../context/agentHubContext';
@@ -30,6 +31,7 @@ import { getAgentHubContextCapability } from '../context/agentHubContext';
 import styles from './AgentHubShell.module.css';
 
 const AGENTS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const SCOPES: AgentHubScope[] = ['user', 'project'];
 const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'];
 const ASSET_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
 const LANES: InstructionLane[] = ['common', 'adapted', 'exclusive'];
@@ -48,10 +50,27 @@ export interface AgentHubShellActions {
   adaptDisabledReason?: string | null;
 }
 
+/** 壳层远端设备摘要。 */
+export interface AgentHubShellPeer {
+  deviceId: string;
+  name: string;
+  online: boolean;
+}
+
+/** 壳层项目摘要；remote 项目仍保留其 Workbench shortcut id。 */
+export interface AgentHubShellProject {
+  key: string;
+  label: string;
+  remote: boolean;
+  deviceId?: string | null;
+}
+
 export interface AgentHubShellProps {
   context: AgentHubContext;
   onContextChange: (patch: Partial<AgentHubContext>) => void;
   actions: AgentHubShellActions;
+  peers: AgentHubShellPeer[];
+  projects: AgentHubShellProject[];
   tabCounts?: AgentHubShellTabCounts | null;
   children: ReactNode;
 }
@@ -81,35 +100,47 @@ function moveRovingSelection<T>(
 
 /** 渲染 Agent Hub 顶栏、可访问选择器与活动 tabpanel。 */
 export function AgentHubShell(props: AgentHubShellProps): ReactElement {
-  const { context, onContextChange, actions, tabCounts, children } = props;
+  const { context, onContextChange, actions, peers, projects, tabCounts, children } = props;
   const { t } = useTranslation(['agentHub', 'common']);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const scopeRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const laneRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const agentRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeTabIndex = Math.max(0, TABS.indexOf(context.tab));
+  const activeScopeIndex = Math.max(0, SCOPES.indexOf(context.scope));
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
   const activeAgentIndex = Math.max(0, AGENTS.indexOf(context.agent));
   const activeTabId = `agent-hub-tab-${context.tab}`;
   const capability = getAgentHubContextCapability(context);
-  const contextDisabledReason =
-    capability === 'pullOnly'
-      ? t('agentHub:shell.peerPullOnly')
-      : capability === 'unsupported'
-        ? t('agentHub:shell.contextUnsupported')
-        : null;
+  const projectMissing = context.scope === 'project' && context.projectKey === null;
+  const contextDisabledReason = capability === 'unsupported'
+    ? t('agentHub:shell.contextUnsupported')
+    : projectMissing
+      ? t('agentHub:shell.projectRequired')
+      : null;
   const pullDisabledReason =
-    actions.pullDisabledReason ??
-    (capability === 'unsupported' ? contextDisabledReason : null);
+    actions.pullDisabledReason ?? contextDisabledReason;
   const pushDisabledReason =
-    actions.pushDisabledReason ??
-    (capability !== 'direct' ? contextDisabledReason : null);
+    actions.pushDisabledReason ?? contextDisabledReason;
   const adaptDisabledReason =
     actions.adaptDisabledReason ??
-    (capability !== 'direct' ? contextDisabledReason : null);
+    (capability === 'remote'
+      ? t('agentHub:shell.adaptLocalOnly')
+      : capability === 'project'
+        ? t('agentHub:shell.adaptProjectUnavailable')
+        : contextDisabledReason);
 
   function handleTabChange(tab: AgentHubTab): void {
     onContextChange(
       tab === 'instructions' ? { tab } : { tab, instructionLane: 'common' },
+    );
+  }
+
+  function handleScopeChange(scope: AgentHubScope): void {
+    onContextChange(
+      scope === 'user'
+        ? { scope, projectKey: null }
+        : { scope, deviceId: null },
     );
   }
 
@@ -137,7 +168,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
                     tabRefs.current[index] = node;
                   }}
                   id={`agent-hub-tab-${tab}`}
-                  variant={selected ? 'secondary' : 'ghost'}
+                  variant={selected ? 'primary' : 'ghost'}
                   size="sm"
                   role="tab"
                   tabIndex={selected ? 0 : -1}
@@ -210,10 +241,82 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
 
         <div className={styles.row}>
           <span className={styles.label}>{t('agentHub:shell.scopeLabel')}</span>
-          <span className={styles.scopeValue} data-testid="agent-hub-fixed-scope">
-            {t('agentHub:shell.localDevice')} · {t('agentHub:shell.scopeUser')}
-          </span>
-          <span className={styles.scopeHint}>{t('agentHub:shell.localUserOnlyHint')}</span>
+          <div
+            className={styles.segment}
+            role="radiogroup"
+            aria-label={t('agentHub:shell.scopeAria')}
+            data-testid="agent-hub-scope-switcher"
+          >
+            {SCOPES.map((scope, index) => {
+              const selected = context.scope === scope;
+              return (
+                <Button
+                  key={scope}
+                  ref={(node) => {
+                    scopeRefs.current[index] = node;
+                  }}
+                  variant={selected ? 'primary' : 'ghost'}
+                  size="sm"
+                  role="radio"
+                  tabIndex={selected ? 0 : -1}
+                  aria-checked={selected}
+                  onClick={() => handleScopeChange(scope)}
+                  onKeyDown={(event) =>
+                    moveRovingSelection(event, index, SCOPES, scopeRefs, handleScopeChange)
+                  }
+                  data-testid={`agent-hub-scope-${scope}`}
+                >
+                  {t(`agentHub:shell.scope${scope === 'user' ? 'User' : 'Project'}`)}
+                </Button>
+              );
+            })}
+          </div>
+
+          {context.scope === 'user' ? (
+            <label className={styles.cluster}>
+              <span className={styles.label}>{t('agentHub:shell.deviceLabel')}</span>
+              <select
+                className={styles.select}
+                aria-label={t('agentHub:shell.deviceAria')}
+                value={context.deviceId ?? ''}
+                onChange={(event) =>
+                  onContextChange({ deviceId: event.currentTarget.value || null })
+                }
+                data-testid="agent-hub-device-select"
+              >
+                <option value="">{t('agentHub:shell.localDevice')}</option>
+                {peers.map((peer) => (
+                  <option key={peer.deviceId} value={peer.deviceId} disabled={!peer.online}>
+                    {peer.online
+                      ? peer.name
+                      : `${peer.name} (${t('agentHub:shell.offline')})`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <label className={styles.cluster}>
+              <span className={styles.label}>{t('agentHub:shell.projectLabel')}</span>
+              <select
+                className={styles.select}
+                aria-label={t('agentHub:shell.projectAria')}
+                value={context.projectKey ?? ''}
+                onChange={(event) =>
+                  onContextChange({ projectKey: event.currentTarget.value || null })
+                }
+                data-testid="agent-hub-project-select"
+              >
+                <option value="">{t('agentHub:shell.projectPlaceholder')}</option>
+                {projects.map((project) => (
+                  <option key={project.key} value={project.key}>
+                    {project.remote
+                      ? `${project.label} (${t('agentHub:shell.projectRemote')})`
+                      : project.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         {context.tab === 'instructions' ? (
@@ -233,7 +336,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
                     ref={(node) => {
                       laneRefs.current[index] = node;
                     }}
-                    variant={selected ? 'secondary' : 'ghost'}
+                    variant={selected ? 'primary' : 'ghost'}
                     size="sm"
                     role="radio"
                     tabIndex={selected ? 0 : -1}
@@ -270,7 +373,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
                   ref={(node) => {
                     agentRefs.current[index] = node;
                   }}
-                  variant={selected ? 'secondary' : 'ghost'}
+                  variant={selected ? 'primary' : 'ghost'}
                   size="sm"
                   role="radio"
                   tabIndex={selected ? 0 : -1}
@@ -298,6 +401,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
         tabIndex={0}
         aria-labelledby={activeTabId}
         data-active-tab-index={activeTabIndex}
+        data-active-scope-index={activeScopeIndex}
         data-active-lane-index={activeLaneIndex}
         data-active-agent-index={activeAgentIndex}
         data-testid="agent-hub-shell-body"

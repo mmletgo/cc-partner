@@ -31,8 +31,13 @@ use crate::agent_hub::portable_inventory::{PortableInventoryQuery, PortableInven
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::replication::pull::{
-    ApplyPortablePullRequest, ListRemotePortableInventoryRequest, PortablePullPlanDto,
-    PortablePullResultDto, PreviewPortablePullRequest, RemotePortableInventoryDto,
+    apply_remote_project_portable_action, enable_remote_project,
+    get_remote_project_portable_action, inspect_remote_project_portable_inventory,
+    preview_remote_project, preview_remote_project_portable_action, ApplyPortablePullRequest,
+    ApplyRemoteProjectPortableActionRequest, GetRemoteProjectPortableActionRequest,
+    InspectRemoteProjectPortableInventoryRequest, ListRemotePortableInventoryRequest,
+    PortablePullPlanDto, PortablePullResultDto, PreviewPortablePullRequest,
+    PreviewRemoteProjectPortableActionRequest, RemotePortableInventoryDto, RemoteProjectRefRequest,
 };
 use crate::agent_hub::replication::sender::{
     compute_push_preview_token, get_push_report_for_state, push_selection_for_state,
@@ -280,6 +285,34 @@ pub async fn agent_hub_enable_project(
             .agent_hub_enable_project(&project_id, true));
     }
     AgentHubService::enable_project(state.inner(), &project_id).await
+}
+
+/// Business Logic: 预览 remote shortcut owning peer 上的项目 opt-in。
+#[tauri::command]
+pub async fn agent_hub_preview_remote_project(
+    state: State<'_, AppState>,
+    project_ref: String,
+) -> Result<AgentHubProjectPreview, AppError> {
+    let request = RemoteProjectRefRequest { project_ref };
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_remote_project(request));
+    }
+    preview_remote_project(state.inner(), request).await
+}
+
+/// Business Logic: 在 remote shortcut owning peer 显式启用项目 Agent Hub。
+#[tauri::command]
+pub async fn agent_hub_enable_remote_project(
+    state: State<'_, AppState>,
+    project_ref: String,
+) -> Result<AgentHubProjectStatus, AppError> {
+    let request = RemoteProjectRefRequest { project_ref };
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_enable_remote_project(request));
+    }
+    enable_remote_project(state.inner(), request).await
 }
 
 /// Business Logic: 解决冲突。
@@ -589,6 +622,58 @@ pub async fn agent_hub_get_portable_asset_action(
             .agent_hub_get_portable_asset_action(&client_request_id));
     }
     PortableService::get_portable_asset_action(state.inner(), &client_request_id).await
+}
+
+/// Business Logic: 读取 remote shortcut owning peer 的精确项目库存。
+#[tauri::command]
+pub async fn agent_hub_inspect_remote_project_portable_inventory(
+    state: State<'_, AppState>,
+    request: InspectRemoteProjectPortableInventoryRequest,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_inspect_remote_project_portable_inventory(request));
+    }
+    inspect_remote_project_portable_inventory(state.inner(), request).await
+}
+
+/// Business Logic: 在 remote shortcut owning peer 生成精确项目动作计划。
+#[tauri::command]
+pub async fn agent_hub_preview_remote_project_portable_action(
+    state: State<'_, AppState>,
+    request: PreviewRemoteProjectPortableActionRequest,
+) -> Result<PortableAssetActionPlanDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_remote_project_portable_action(request));
+    }
+    preview_remote_project_portable_action(state.inner(), request).await
+}
+
+/// Business Logic: 在 remote shortcut owning peer apply 精确项目动作计划。
+#[tauri::command]
+pub async fn agent_hub_apply_remote_project_portable_action(
+    state: State<'_, AppState>,
+    request: ApplyRemoteProjectPortableActionRequest,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_apply_remote_project_portable_action(request));
+    }
+    apply_remote_project_portable_action(state.inner(), request).await
+}
+
+/// Business Logic: 对账 remote shortcut owning peer 的项目动作结果。
+#[tauri::command]
+pub async fn agent_hub_get_remote_project_portable_action(
+    state: State<'_, AppState>,
+    request: GetRemoteProjectPortableActionRequest,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_get_remote_project_portable_action(request));
+    }
+    get_remote_project_portable_action(state.inner(), request).await
 }
 
 /// Business Logic: 远端 portable inventory 仅 metadata（无 secret）。

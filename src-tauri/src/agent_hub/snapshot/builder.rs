@@ -783,6 +783,15 @@ mod tests {
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let proj = seed_project_scope(&repo, "hub-p2").await;
+        repo.upsert_project_mapping(UpsertAgentHubProjectMapping {
+            hub_project_id: "hub-p2".to_string(),
+            local_workbench_project_id: Some("wb-p2".to_string()),
+            git_remote_fingerprint: None,
+            local_absolute_path: Some("/tmp/project-p2".to_string()),
+            opted_in: true,
+        })
+        .await
+        .unwrap();
 
         let u_asset = repo
             .insert_asset(NewLogicalAsset {
@@ -877,6 +886,34 @@ mod tests {
         .unwrap();
         assert_eq!(proj_only.envelope.assets.len(), 1);
         assert_eq!(proj_only.envelope.assets[0].id, p_asset.id);
+
+        repo.upsert_project_mapping(UpsertAgentHubProjectMapping {
+            hub_project_id: "hub-p2".to_string(),
+            local_workbench_project_id: Some("wb-p2".to_string()),
+            git_remote_fingerprint: None,
+            local_absolute_path: Some("/tmp/project-p2".to_string()),
+            opted_in: false,
+        })
+        .await
+        .unwrap();
+        let blocked = build_snapshot(
+            &repo,
+            &store,
+            SnapshotSelectionRequest {
+                mode: SnapshotSelectionMode::Project,
+                scope_ids: vec![],
+                asset_ids: vec![],
+                hub_project_ids: vec!["hub-p2".to_string()],
+                include_history: true,
+                source_replica_id: "01900000-0000-7000-8000-0000000000b1".to_string(),
+                limits: None,
+            },
+        )
+        .await
+        .expect_err("unopted project must never enter a push snapshot");
+        assert!(blocked
+            .to_string()
+            .contains("AGENT_HUB_PROJECT_NOT_OPTED_IN"));
     }
 
     /// Business Logic: 相同 selection state 复用 snapshotId/hash。

@@ -1436,6 +1436,25 @@ impl BackendControlClient {
             .await
     }
 
+    /// Business Logic: GuiClient 通过 owner 预览 remote shortcut 项目。
+    pub async fn agent_hub_preview_remote_project(
+        &self,
+        req: crate::agent_hub::replication::pull::RemoteProjectRefRequest,
+    ) -> Result<crate::agent_hub::project_scope::AgentHubProjectPreview, AppError> {
+        self.agent_hub_op("agent_hub.preview_remote_project", req)
+            .await
+    }
+
+    /// Business Logic: GuiClient 通过 owner 在 owning peer 启用 remote shortcut 项目。
+    pub async fn agent_hub_enable_remote_project(
+        &self,
+        req: crate::agent_hub::replication::pull::RemoteProjectRefRequest,
+    ) -> Result<crate::agent_hub::project_scope::AgentHubProjectStatus, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.enable_remote_project", req)
+            .await
+    }
+
     /// Business Logic: GuiClient 读取 sidecar owner 的本机 portable inventory（只读）。
     /// Code Logic: agent_hub.inspect_portable_inventory；PORTABLE_INVENTORY_TIMEOUT。
     pub async fn agent_hub_inspect_portable_inventory(
@@ -1486,6 +1505,56 @@ impl BackendControlClient {
             "agent_hub.get_portable_asset_action",
             serde_json::json!({ "clientRequestId": client_request_id }),
             portable_control_read_timeout("agent_hub.get_portable_asset_action"),
+        )
+        .await
+    }
+
+    /// Business Logic: GuiClient 通过 owner 解析 remote shortcut 并读取对端项目库存。
+    pub async fn agent_hub_inspect_remote_project_portable_inventory(
+        &self,
+        req: crate::agent_hub::replication::pull::InspectRemoteProjectPortableInventoryRequest,
+    ) -> Result<crate::agent_hub::PortableInventorySnapshotDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.inspect_remote_project_portable_inventory",
+            req,
+            portable_control_read_timeout("agent_hub.inspect_remote_project_portable_inventory"),
+        )
+        .await
+    }
+
+    /// Business Logic: GuiClient 在 owning peer 生成远端项目动作计划。
+    pub async fn agent_hub_preview_remote_project_portable_action(
+        &self,
+        req: crate::agent_hub::replication::pull::PreviewRemoteProjectPortableActionRequest,
+    ) -> Result<crate::agent_hub::PortableAssetActionPlanDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_remote_project_portable_action", req)
+            .await
+    }
+
+    /// Business Logic: GuiClient 在 owning peer 执行远端项目动作计划。
+    pub async fn agent_hub_apply_remote_project_portable_action(
+        &self,
+        req: crate::agent_hub::replication::pull::ApplyRemoteProjectPortableActionRequest,
+    ) -> Result<crate::agent_hub::PortableAssetActionResultDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op_with_timeout(
+            "agent_hub.apply_remote_project_portable_action",
+            req,
+            Duration::from_secs(360),
+        )
+        .await
+    }
+
+    /// Business Logic: GuiClient 对账远端项目动作结果。
+    pub async fn agent_hub_get_remote_project_portable_action(
+        &self,
+        req: crate::agent_hub::replication::pull::GetRemoteProjectPortableActionRequest,
+    ) -> Result<crate::agent_hub::PortableAssetActionResultDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.get_remote_project_portable_action",
+            req,
+            portable_control_read_timeout("agent_hub.get_remote_project_portable_action"),
         )
         .await
     }

@@ -377,41 +377,36 @@ describe('useAgentHubController', () => {
     });
   });
 
-  test('cold shell does not scan peers or projects before an explicit LAN task', async () => {
+  test('cold shell loads lightweight peer and project selectors without scanning assets', async () => {
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(devicesListMock).not.toHaveBeenCalled();
-    expect(workbenchProjectsListMock).not.toHaveBeenCalled();
+    expect(devicesListMock).toHaveBeenCalledOnce();
+    expect(workbenchProjectsListMock).toHaveBeenCalledOnce();
+    expect(portableApiMocks.inspect).not.toHaveBeenCalled();
   });
 
-  test('legacy peer context is normalized to local user before any inspect (T2)', async () => {
+  test('peer context is preserved and never falls back to local inspect (T2)', async () => {
     searchParamsMock.current = new URLSearchParams('deviceId=peer-online');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.hubContext.deviceId).toBeNull();
+    expect(result.current.hubContext.deviceId).toBe('peer-online');
     expect(result.current.hubContext.scope).toBe('user');
-    expect(result.current.portableInventory.requestContext.deviceId).toBeNull();
+    expect(result.current.portableInventory.requestContext.deviceId).toBe('peer-online');
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
     expect(listAssets).not.toHaveBeenCalled();
     expect(getStatus).not.toHaveBeenCalled();
   });
 
-  test('tab=skill strips peer ownership and inspects only local user inventory (T3)', async () => {
+  test('tab=skill preserves peer ownership and does not inspect local inventory (T3)', async () => {
     searchParamsMock.current = new URLSearchParams('tab=skill&deviceId=peer-online');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
     expect(result.current.activeSection).toBe('assets');
     expect(result.current.portableLaneActive).toBe(true);
-    await waitFor(() =>
-      expect(portableApiMocks.inspect).toHaveBeenCalledWith({
-        deviceId: null,
-        projectRef: null,
-        target: 'claude',
-        kind: 'skill',
-        scopeKind: 'user',
-      }),
-    );
+    await waitFor(() => expect(result.current.shellPeers.length).toBeGreaterThan(0));
+    expect(result.current.hubContext.deviceId).toBe('peer-online');
+    expect(portableApiMocks.inspect).not.toHaveBeenCalled();
     expect(listAssets).not.toHaveBeenCalled();
   });
 
@@ -575,7 +570,7 @@ describe('useAgentHubController', () => {
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
   });
 
-  test('openPortablePull ignores a legacy peer URL and keeps same-agent source (toolbar pull)', async () => {
+  test('openPortablePull uses the selected peer and same-agent source (toolbar pull)', async () => {
     searchParamsMock.current = new URLSearchParams('deviceId=peer-1&agent=codex');
     devicesListMock.mockResolvedValue([
       { id: 'other-peer', name: 'Other Peer', status: 'online' as const },
@@ -585,7 +580,7 @@ describe('useAgentHubController', () => {
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.hubContext.deviceId).toBeNull();
+    expect(result.current.hubContext.deviceId).toBe('peer-1');
     expect(result.current.hubContext.agent).toBe('codex');
 
     act(() => {
@@ -593,12 +588,12 @@ describe('useAgentHubController', () => {
     });
     expect(result.current.portablePullOpen).toBe(true);
     await waitFor(() =>
-      expect(result.current.portablePull.selectedDeviceId).toBe('other-peer'),
+      expect(result.current.portablePull.selectedDeviceId).toBe('peer-1'),
     );
     expect(result.current.portablePull.sourceTarget).toBe('codex');
   });
 
-  test('openLanPushDialog does not inherit an unsupported project URL', async () => {
+  test('openLanPushDialog keeps project mode but never treats Workbench id as Hub id', async () => {
     searchParamsMock.current = new URLSearchParams('scope=project&project=local-1&agent=claude');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
@@ -608,9 +603,9 @@ describe('useAgentHubController', () => {
       result.current.openLanPushDialog();
     });
     expect(result.current.lanPushOpen).toBe(true);
-    expect(result.current.hubContext.scope).toBe('user');
-    expect(result.current.hubContext.projectKey).toBeNull();
-    expect(result.current.lanMode).toBe('userScope');
+    expect(result.current.hubContext.scope).toBe('project');
+    expect(result.current.hubContext.projectKey).toBe('local-1');
+    expect(result.current.lanMode).toBe('project');
     expect(result.current.lanHubProjectIdsText).toBe('');
   });
 
