@@ -1801,6 +1801,19 @@ impl AgentHubRepo {
         rows.iter().map(row_to_target_binding).collect()
     }
 
+    /// 一次列出全部 target binding，供资产列表批量组装，避免每资产一次查询。
+    pub async fn list_target_bindings(&self) -> Result<Vec<TargetBinding>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, local_scope_mapping_id, checkout_binding_id,
+                    desired_presence, desired_enabled, created_at, updated_at
+             FROM agent_hub_target_bindings
+             ORDER BY asset_id ASC, target ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_target_binding).collect()
+    }
+
     /// 按本地 Workbench project id 读取 Hub 项目映射。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -2905,6 +2918,21 @@ impl AgentHubRepo {
              WHERE asset_id = ? ORDER BY target ASC",
         )
         .bind(asset_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_user_instruction_ownership).collect()
+    }
+
+    /// 一次列出全部用户级指令 ownership，供列表摘要批量关联。
+    pub async fn list_user_instruction_ownerships_all(
+        &self,
+    ) -> Result<Vec<UserInstructionOwnershipRecord>, AppError> {
+        let rows = sqlx::query(
+            "SELECT asset_id, target, resolved_path, adopted_hash, adopted_revision_id,
+                    adoption_operation, confirmed_plan_token, created_at, updated_at
+             FROM agent_hub_user_instruction_ownership
+             ORDER BY asset_id ASC, target ASC",
+        )
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_user_instruction_ownership).collect()

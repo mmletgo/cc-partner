@@ -18,8 +18,9 @@ use crate::agent_hub::projection::atomic_writer::{
 };
 use crate::error::AppError;
 use crate::storage::AgentHubRepo;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -410,34 +411,44 @@ impl ProjectionScheduler {
     ///     owner tick 驱动投影；取消令牌可中断领取。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     list prepared → 按资产锁 + 全局 semaphore 执行。
+    ///     list prepared → 同资产保持领取顺序串行、不同资产并发；底层 semaphore 限制全局 4。
     pub async fn run_ready_jobs(
         &self,
         cancel: &CancellationToken,
     ) -> Result<ProjectionRunStats, AppError> {
-        let mut stats = ProjectionRunStats::default();
         if cancel.is_cancelled() {
-            return Ok(stats);
+            return Ok(ProjectionRunStats::default());
         }
         let jobs = self.repo.list_prepared_projection_jobs(32).await?;
+        let mut jobs_by_asset: BTreeMap<String, Vec<ProjectionJob>> = BTreeMap::new();
         for job in jobs {
+            jobs_by_asset
+                .entry(job.asset_id.clone())
+                .or_default()
+                .push(job);
+        }
+
+        let mut groups = FuturesUnordered::new();
+        for jobs in jobs_by_asset.into_values() {
+            groups.push(async move {
+                let mut group_stats = ProjectionRunStats::default();
+                for job in jobs {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    group_stats.attempted += 1;
+                    record_job_result(&mut group_stats, self.execute_job(job).await);
+                }
+                group_stats
+            });
+        }
+
+        let mut stats = ProjectionRunStats::default();
+        while let Some(group_stats) = groups.next().await {
+            merge_run_stats(&mut stats, &group_stats);
             if cancel.is_cancelled() {
-                break;
-            }
-            stats.attempted += 1;
-            match self.execute_job(job).await {
-                Ok(JobExecResult::Committed) => stats.committed += 1,
-                Ok(JobExecResult::AlreadySynced) => {
-                    stats.already_synced += 1;
-                    stats.committed += 1;
-                }
-                Ok(JobExecResult::Drifted) => stats.drifted += 1,
-                Ok(JobExecResult::Skipped) => stats.skipped += 1,
-                Ok(JobExecResult::Failed) => stats.failed += 1,
-                Err(err) => {
-                    tracing::warn!(error = %err, "projection job execute error");
-                    stats.failed += 1;
-                }
+                // 已启动的 group 会在下一条 job 前观察 cancel；继续 drain 保证 future 正常收尾。
+                continue;
             }
         }
         Ok(stats)
@@ -1166,6 +1177,35 @@ impl ProjectionScheduler {
         }
         AtomicProjectionWriter::new()
     }
+}
+
+/// 把单 job 结果累加到本轮统计，集中保持 AlreadySynced 的双计数语义。
+fn record_job_result(stats: &mut ProjectionRunStats, result: Result<JobExecResult, AppError>) {
+    match result {
+        Ok(JobExecResult::Committed) => stats.committed += 1,
+        Ok(JobExecResult::AlreadySynced) => {
+            stats.already_synced += 1;
+            stats.committed += 1;
+        }
+        Ok(JobExecResult::Drifted) => stats.drifted += 1,
+        Ok(JobExecResult::Skipped) => stats.skipped += 1,
+        Ok(JobExecResult::Failed) => stats.failed += 1,
+        Err(err) => {
+            tracing::warn!(error = %err, "projection job execute error");
+            stats.failed += 1;
+        }
+    }
+}
+
+/// 合并不同资产执行组的统计。
+fn merge_run_stats(total: &mut ProjectionRunStats, part: &ProjectionRunStats) {
+    total.attempted += part.attempted;
+    total.committed += part.committed;
+    total.already_synced += part.already_synced;
+    total.drifted += part.drifted;
+    total.skipped += part.skipped;
+    total.failed += part.failed;
+    total.recovered += part.recovered;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
