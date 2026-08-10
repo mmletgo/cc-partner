@@ -30,8 +30,9 @@ pub use reconcile::{
     reconcile_portable_inventory, reconcile_portable_inventory_with_facts, PortableCanonicalFact,
 };
 pub use scanner::{
-    hash_plugin_root, inspect_portable_inventory, inspect_portable_inventory_with_env,
-    scan_portable_inventory_facts, PortableScanScope,
+    hash_directory_tree, hash_plugin_root, inspect_portable_inventory,
+    inspect_portable_inventory_force, inspect_portable_inventory_force_with_env,
+    inspect_portable_inventory_with_env, scan_portable_inventory_facts, PortableScanScope,
 };
 
 #[cfg(test)]

@@ -243,7 +243,22 @@ async fn ensure_one_item(
             )
         };
 
-    // 已是 hub 管理且路径/hash/status 无变化 → 仍计 ensured（幂等对齐）
+    // 已是 hub 管理且路径/hash/status 无变化时不重复 UPDATE；inspect 仍是只读事实
+    // 对账，避免短 TTL 内多次刷新制造无意义的 SQLite 写放大。
+    let unchanged = existing_mat.as_ref().is_some_and(|mat| {
+        mat.asset_id == asset.id
+            && mat.target == item.target
+            && mat.target_binding_id == binding.id
+            && mat.native_path == native_path
+            && mat.last_projected_revision_id == last_projected_revision_id
+            && mat.rendered_hash == rendered_hash
+            && mat.observed_external_hash == observed
+            && mat.status == status
+            && mat.last_error == last_error
+    });
+    if unchanged {
+        return Ok(EnsureOneOutcome::Skipped);
+    }
     let _ = repo
         .upsert_materialization(NewMaterialization {
             asset_id: asset.id,

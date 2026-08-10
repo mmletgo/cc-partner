@@ -21,9 +21,12 @@ use super::targets::{
 use crate::agent_hub::models::PortableActionClaim;
 use crate::agent_hub::packages::activator::ProcessRunner;
 use crate::agent_hub::portable_inventory::{
-    inspect_portable_inventory_with_env, PortableInventoryItemDto, PortableInventorySnapshotDto,
+    hash_directory_tree, hash_plugin_root, inspect_portable_inventory_force,
+    inspect_portable_inventory_force_with_env, inspect_portable_inventory_with_env,
+    PortableInventoryItemDto, PortableInventorySnapshotDto,
 };
 use crate::agent_hub::targets::paths::TargetEnvironment;
+use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::storage::agent_hub_repo::AgentHubRepo;
@@ -230,7 +233,7 @@ async fn revalidate_claimed_plan(
     }
 
     // 重新 inspect inventory 并比对 snapshot hash + target fingerprints
-    let live = match resolve_pre_inventory(state, deps).await {
+    let live = match resolve_force_inventory(state, deps).await {
         Ok(s) => s,
         Err(e) => {
             return Err(format!(
@@ -369,6 +372,15 @@ async fn execute_claimed_plan(
                 pre,
             ));
             continue;
+        }
+
+        // 生产 apply 必须在任何 target mutation 前重算确定性递归 tree hash。
+        // 注入式旧单测使用虚构路径/快照，仍由 target adapter 的既有 hash seam 覆盖。
+        if state.is_some() || deps.env.is_some() {
+            if let Some(outcome) = verify_expected_tree_hash(change) {
+                raw_results.push((change.inventory_item_id.clone(), outcome, pre));
+                continue;
+            }
         }
 
         // Plugin shared preserve：canonical_effect TombstoneComponents 时不删除 shared components
@@ -566,19 +578,87 @@ async fn resolve_pre_inventory(
     crate::agent_hub::portable_inventory::inspect_portable_inventory(state).await
 }
 
+async fn resolve_force_inventory(
+    state: Option<&AppState>,
+    deps: &PortableActionExecutorDeps,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    if let Some(snap) = &deps.pre_inventory {
+        return Ok(snap.clone());
+    }
+    let state = state
+        .ok_or_else(|| AppError::validation("PORTABLE_ASSET_ACTION_STATE_REQUIRED_FOR_INSPECT"))?;
+    if let Some(env) = &deps.env {
+        return inspect_portable_inventory_force_with_env(state, env).await;
+    }
+    inspect_portable_inventory_force(state).await
+}
+
 async fn resolve_post_inventory(
     state: Option<&AppState>,
     deps: &PortableActionExecutorDeps,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    // 无论是否存在测试 override，post-mutation 入口都先失效旧缓存。
+    crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
     if let Some(snap) = &deps.rescan_override {
         return Ok(snap.clone());
     }
     let state = state
         .ok_or_else(|| AppError::validation("PORTABLE_ASSET_ACTION_STATE_REQUIRED_FOR_INSPECT"))?;
     if let Some(env) = &deps.env {
-        return inspect_portable_inventory_with_env(state, env).await;
+        return inspect_portable_inventory_force_with_env(state, env).await;
     }
-    crate::agent_hub::portable_inventory::inspect_portable_inventory(state).await
+    inspect_portable_inventory_force(state).await
+}
+
+/// 按 inventory 行的 tree hash 域重算源树，并在 mutation 前 fail-closed。
+fn verify_expected_tree_hash(
+    change: &super::models::PortableAssetActionChangeDto,
+) -> Option<TargetActionRawOutcome> {
+    let expected = change.expected_tree_hash.as_deref()?;
+    let Some(path) = change.path.as_deref() else {
+        return Some(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_TREE_HASH_UNAVAILABLE".into(),
+            message: "source path unavailable for tree hash recheck".into(),
+        });
+    };
+    let path = std::path::Path::new(path);
+    let actual = match change.kind {
+        crate::agent_hub::portable_inventory::PortableAssetKind::Skill => {
+            let dir = if path.is_dir() {
+                path.to_path_buf()
+            } else {
+                path.parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| path.to_path_buf())
+            };
+            hash_skill_directory(&dir).map(|(_, tree, _, _)| tree)
+        }
+        crate::agent_hub::portable_inventory::PortableAssetKind::Plugin => {
+            let dir = if path.is_dir() {
+                path.to_path_buf()
+            } else {
+                path.parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| path.to_path_buf())
+            };
+            hash_plugin_root(&dir).map(|(_, tree)| tree)
+        }
+        _ if path.is_dir() => hash_directory_tree(path),
+        _ => Err(AppError::validation(
+            "PORTABLE_ASSET_ACTION_TREE_HASH_UNSUPPORTED",
+        )),
+    };
+    match actual {
+        Ok(actual) if actual == expected => None,
+        Ok(_) => Some(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_TREE_HASH_CHANGED".into(),
+            message: "source tree changed since preview".into(),
+        }),
+        Err(_) => Some(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_TREE_HASH_UNAVAILABLE".into(),
+            message: "source tree hash unavailable for recheck".into(),
+        }),
+    }
 }
 
 /// 测试辅助：空 Fake runner 依赖。

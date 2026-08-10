@@ -40,6 +40,7 @@ use crate::agent_hub::targets::{
 };
 use crate::error::AppError;
 use crate::state::AppState;
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,14 +77,53 @@ pub struct PortableScanScope {
 pub async fn inspect_portable_inventory(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
-    if let Some(hit) = crate::agent_hub::portable_inventory::cache::get_cached_portable_inventory()
-    {
-        return Ok(hit);
+    loop {
+        match crate::agent_hub::portable_inventory::cache::begin_scan() {
+            crate::agent_hub::portable_inventory::cache::CacheLookup::Hit(snapshot) => {
+                return Ok(snapshot)
+            }
+            crate::agent_hub::portable_inventory::cache::CacheLookup::Wait(notify) => {
+                notify.wait().await;
+            }
+            crate::agent_hub::portable_inventory::cache::CacheLookup::Leader(guard) => {
+                let env = current_target_environment();
+                let result = inspect_portable_inventory_with_env(state, &env).await;
+                crate::agent_hub::portable_inventory::cache::complete_scan(
+                    guard,
+                    result.as_ref().ok().cloned(),
+                );
+                return result;
+            }
+        }
     }
-    let env = current_target_environment();
-    let snapshot = inspect_portable_inventory_with_env(state, &env).await?;
-    crate::agent_hub::portable_inventory::cache::store_cached_portable_inventory(snapshot.clone());
-    Ok(snapshot)
+}
+
+/// 强制执行一次未缓存的本机 inventory 扫描。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mutation / pull install 后必须观察磁盘最新事实，不能命中 mutation 前的 2 秒缓存。
+///
+/// Code Logic（这个函数做什么）:
+///     先递增缓存 generation 使进行中的旧扫描不可回填，再走 single-flight 扫描；
+///     成功结果进入新缓存，供后续普通 inspect 复用。
+pub async fn inspect_portable_inventory_force(
+    state: &AppState,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    crate::agent_hub::portable_inventory::cache::invalidate_portable_inventory_cache();
+    inspect_portable_inventory(state).await
+}
+
+/// 在注入环境下强制扫描（测试与隔离运行时使用）。
+///
+/// Business Logic: 与生产 force rescan 使用同一失效语义，避免测试只覆盖 override。
+/// Code Logic: 失效全局缓存后直接扫描注入环境；注入环境不写入全局缓存，
+/// 避免隔离测试/远端 fixture 与当前进程环境互相污染。
+pub async fn inspect_portable_inventory_force_with_env(
+    state: &AppState,
+    env: &TargetEnvironment,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    crate::agent_hub::portable_inventory::cache::invalidate_portable_inventory_cache();
+    inspect_portable_inventory_with_env(state, env).await
 }
 
 /// 使用注入环境刷新 portable inventory（可测）。
@@ -485,12 +525,106 @@ fn plugin_roots_for(
     roots
 }
 
+/// 目录树单一确定性 hash（相对路径/类型/内容；不跟随 symlink）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     planner 在 mutation 前需要能够发现嵌套文件、空目录或 symlink 目标变化，
+///     仅比较根目录名会把 stale plan 错当成当前事实。
+///
+/// Code Logic（这个函数做什么）:
+///     递归枚举目录，按规范化 `/` 相对路径排序；记录 directory/file/symlink 类型、
+///     内容 SHA-256 与平台 executable 位，再对确定性 JSON 求 SHA-256。
+pub fn hash_directory_tree(root: &Path) -> Result<String, AppError> {
+    if !root.is_dir() {
+        return Err(AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"));
+    }
+    let mut entries = Vec::new();
+    collect_deterministic_tree_entries(root, root, &mut entries)?;
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let bytes = serde_json::to_vec(&entries)
+        .map_err(|e| AppError::generic(format!("portable tree hash serialize: {e}")))?;
+    Ok(sha256_hex(&bytes))
+}
+
+#[derive(Debug, Serialize)]
+struct DeterministicTreeEntry {
+    path: String,
+    entry_type: &'static str,
+    content_hash: String,
+    executable: bool,
+}
+
+fn collect_deterministic_tree_entries(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<DeterministicTreeEntry>,
+) -> Result<(), AppError> {
+    let mut children: Vec<_> = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.file_name().to_string_lossy().into_owned());
+    for entry in children {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let relative = deterministic_relative_posix(root, &path);
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            let target = fs::read_link(&path)?;
+            let target_text = target.to_string_lossy().replace('\\', "/");
+            entries.push(DeterministicTreeEntry {
+                path: relative,
+                entry_type: "symlink",
+                content_hash: sha256_hex(target_text.as_bytes()),
+                executable: false,
+            });
+        } else if file_type.is_dir() {
+            entries.push(DeterministicTreeEntry {
+                path: relative.clone(),
+                entry_type: "directory",
+                content_hash: sha256_hex(&[]),
+                executable: false,
+            });
+            collect_deterministic_tree_entries(root, &path, entries)?;
+        } else if file_type.is_file() {
+            let bytes = fs::read(&path)?;
+            entries.push(DeterministicTreeEntry {
+                path: relative,
+                entry_type: "file",
+                content_hash: sha256_hex(&bytes),
+                executable: deterministic_is_executable(&metadata),
+            });
+        } else {
+            return Err(AppError::validation(format!(
+                "PORTABLE_ASSET_ACTION_UNSUPPORTED_TREE_ENTRY:{relative}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn deterministic_relative_posix(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn deterministic_is_executable(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 /// Plugin 根目录 content_hash + tree_hash（与 inventory 行同源）。
 ///
 /// Business Logic: planner `expected_source_hash` 与 apply recheck 必须共享同一 material 域，
 /// 禁止路径字符串 sha 与 manifest 字节 hash 混用导致生产 plugin 永远 SOURCE_HASH_CHANGED。
 /// Code Logic: 优先 manifest 文件字节；无 manifest 才回落 path display（与历史 inventory 一致）；
-/// tree_hash 为根下一层名排序拼接。
+/// tree_hash 为递归相对路径/类型/内容 hash。
 pub fn hash_plugin_root(root: &Path) -> Result<(String, String), AppError> {
     // 优先 manifest 字节 + 目录 tree（不写 CAS）
     let mut hasher_material = Vec::new();
@@ -511,15 +645,7 @@ pub fn hash_plugin_root(root: &Path) -> Result<(String, String), AppError> {
     } else {
         sha256_hex(&hasher_material)
     };
-    // 轻量 tree：子路径名排序拼接
-    let mut names = Vec::new();
-    if let Ok(read) = fs::read_dir(root) {
-        for e in read.flatten() {
-            names.push(e.file_name().to_string_lossy().into_owned());
-        }
-    }
-    names.sort();
-    let tree_hash = sha256_hex(names.join("\n").as_bytes());
+    let tree_hash = hash_directory_tree(root)?;
     Ok((content_hash, tree_hash))
 }
 
@@ -1264,6 +1390,27 @@ enabled = false
         assert!(caps.can_disable);
         assert!(caps.can_uninstall);
         assert!(!caps.can_adopt);
+    }
+
+    #[test]
+    fn recursive_plugin_tree_hash_detects_nested_content_and_empty_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("plugin");
+        fs::create_dir_all(root.join("nested/empty")).unwrap();
+        fs::write(root.join("plugin.json"), "{\"name\":\"demo\"}").unwrap();
+        fs::write(root.join("nested/body.txt"), "v1").unwrap();
+        let first = hash_plugin_root(&root).unwrap().1;
+
+        fs::write(root.join("nested/body.txt"), "v2").unwrap();
+        let changed = hash_plugin_root(&root).unwrap().1;
+        assert_ne!(first, changed, "nested file content must be tree-bound");
+
+        fs::remove_dir(root.join("nested/empty")).unwrap();
+        let without_empty_dir = hash_plugin_root(&root).unwrap().1;
+        assert_ne!(
+            changed, without_empty_dir,
+            "empty directory type/path is tree-bound"
+        );
     }
 
     #[test]
