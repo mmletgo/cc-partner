@@ -2,15 +2,15 @@
  * Portable inventory pure view（列表 + 筛选，无详情 Drawer）。
  *
  * Business Logic（为什么需要这个组件）:
- *   四类等权 tab + target/scope/actual/management/search 筛选 + observed 列表。
+ *   kind 由 AgentHubShell 顶层 tab 选择；本视图只做 target/scope/actual/management/search + 列表。
  *
  * Code Logic（这个组件做什么）:
  *   只消费 controller result 与 labels；禁止 @/api；hooks 不在本视图。
+ *   不再渲染 skill/command/plugin/mcp 子导航（避免与壳层 tab 重复）。
  */
 
 import type { JSX } from 'react';
 import { Button, Input, StatusMessage } from '@/components/primitives';
-import type { PortableAssetKind } from '@/lib/types/portableInventory';
 import type { UsePortableInventoryControllerResult } from './usePortableInventoryController';
 import {
   PortableInventoryRow,
@@ -18,7 +18,6 @@ import {
 } from './PortableInventoryRow';
 import styles from '../AgentHub.module.css';
 
-const KIND_TABS: PortableAssetKind[] = ['skill', 'command', 'plugin', 'mcp'];
 const TARGET_OPTIONS = ['all', 'claude', 'codex', 'opencode'] as const;
 const SCOPE_OPTIONS = ['all', 'user', 'project'] as const;
 const ACTUAL_OPTIONS = ['all', 'enabled', 'disabled', 'problem'] as const;
@@ -45,7 +44,6 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   filterScope: string;
   filterActual: string;
   filterManagement: string;
-  kindCounts: Record<PortableAssetKind, string>;
   targetFilter: Record<(typeof TARGET_OPTIONS)[number], string>;
   scopeFilter: Record<(typeof SCOPE_OPTIONS)[number], string>;
   actualFilter: Record<(typeof ACTUAL_OPTIONS)[number], string>;
@@ -68,7 +66,6 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     error,
     snapshot,
     visibleItems,
-    kindCounts,
     filters,
     setFilters,
     stale,
@@ -148,22 +145,6 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
           {error}
         </StatusMessage>
       ) : null}
-
-      <div className={styles.hubSectionNav} role="tablist" aria-label={labels.title}>
-        {KIND_TABS.map((kind) => (
-          <Button
-            key={kind}
-            size="sm"
-            variant={filters.kind === kind ? 'primary' : 'secondary'}
-            aria-selected={filters.kind === kind}
-            role="tab"
-            data-testid={`portable-kind-tab-${kind}`}
-            onClick={() => setFilters({ kind })}
-          >
-            {labels.kindCounts[kind]} ({kindCounts[kind]})
-          </Button>
-        ))}
-      </div>
 
       <div className={styles.filters} data-testid="portable-inventory-filters">
         <div className={styles.filterField}>

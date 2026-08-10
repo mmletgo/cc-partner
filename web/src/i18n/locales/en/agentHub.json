@@ -527,12 +527,6 @@
       "filterActual": "Actual state",
       "filterManagement": "Consistency",
       "unmanagedRefreshHint": "Not managed yet — refresh inventory to bring this asset under Hub management.",
-      "kindCounts": {
-        "skill": "Skills",
-        "command": "Commands",
-        "plugin": "Plugins",
-        "mcp": "MCP"
-      },
       "targetFilter": {
         "all": "All targets",
         "claude": "Claude",

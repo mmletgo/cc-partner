@@ -227,6 +227,25 @@ describe('AgentHubShell', () => {
     expect(onContextChange).toHaveBeenCalledWith({ tab: 'instructions' });
   });
 
+  test('asset tabs show migrated kindCounts from tabCounts prop', () => {
+    renderShell({
+      tabCounts: { skill: 3, command: 1, mcp: 0, plugin: 2 },
+    });
+
+    const skill = screen.getByTestId('agent-hub-tab-skill');
+    expect(skill.getAttribute('data-count')).toBe('3');
+    expect(skill.textContent).toMatch(/\(3\)/);
+
+    const plugin = screen.getByTestId('agent-hub-tab-plugin');
+    expect(plugin.getAttribute('data-count')).toBe('2');
+    expect(plugin.textContent).toMatch(/\(2\)/);
+
+    // instructions 不展示数量
+    const instructions = screen.getByTestId('agent-hub-tab-instructions');
+    expect(instructions.getAttribute('data-count')).toBeNull();
+    expect(instructions.textContent).not.toMatch(/\(\d+\)/);
+  });
+
   test('toolbar pull/push invoke action callbacks', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();

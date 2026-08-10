@@ -1982,9 +1982,9 @@ test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () =
     });
     await expect(page.getByTestId('portable-filter-target')).toHaveValue('claude');
 
-    // --- 3×4 kind tabs ---
+    // --- shell asset kind tabs (counts migrated from nested nav) ---
     for (const kind of PORTABLE_KINDS) {
-      await expect(page.getByTestId(`portable-kind-tab-${kind}`)).toBeVisible();
+      await expect(page.getByTestId(`agent-hub-tab-${kind}`)).toBeVisible();
     }
     await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-a')).toBeVisible();
     await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-off')).toBeVisible();
@@ -2009,10 +2009,10 @@ test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () =
     await expect(page.getByTestId('portable-inventory-row-codex-skill-skill-problem')).toBeVisible();
     await page.getByTestId('portable-filter-actual').selectOption('all');
     await page.getByTestId('portable-filter-management').selectOption('hubManaged');
-    await page.getByTestId('portable-kind-tab-plugin').click();
+    await page.getByTestId('agent-hub-tab-plugin').click();
     await expect(page.getByTestId('portable-inventory-row-claude-plugin-plugin-a')).toBeVisible();
     await page.getByTestId('portable-filter-management').selectOption('all');
-    await page.getByTestId('portable-kind-tab-skill').click();
+    await page.getByTestId('agent-hub-tab-skill').click();
     await page.getByTestId('portable-filter-target').selectOption('claude');
 
     // --- four details: skill / command / plugin / mcp；MCP 无明文 secret ---
@@ -2021,17 +2021,17 @@ test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () =
     await expect(page.getByTestId('portable-skill-details')).toBeVisible();
     await page.getByTestId('portable-asset-details-close').click();
 
-    await page.getByTestId('portable-kind-tab-command').click();
+    await page.getByTestId('agent-hub-tab-command').click();
     await page.getByTestId('portable-inventory-row-claude-command-command-a').click();
     await expect(page.getByTestId('portable-command-details')).toBeVisible();
     await page.getByTestId('portable-asset-details-close').click();
 
-    await page.getByTestId('portable-kind-tab-plugin').click();
+    await page.getByTestId('agent-hub-tab-plugin').click();
     await page.getByTestId('portable-inventory-row-claude-plugin-plugin-a').click();
     await expect(page.getByTestId('portable-plugin-details')).toBeVisible();
     await page.getByTestId('portable-asset-details-close').click();
 
-    await page.getByTestId('portable-kind-tab-mcp').click();
+    await page.getByTestId('agent-hub-tab-mcp').click();
     await page.getByTestId('portable-inventory-row-claude-mcp-mcp-a').click();
     await expect(page.getByTestId('portable-mcp-details')).toBeVisible();
     await expect(page.getByTestId('portable-mcp-credential-present')).toHaveAttribute(
@@ -2045,7 +2045,7 @@ test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () =
     await page.getByTestId('portable-asset-details-close').click();
 
     // --- enable/disable preview + apply + rescan ---
-    await page.getByTestId('portable-kind-tab-skill').click();
+    await page.getByTestId('agent-hub-tab-skill').click();
     await page.getByTestId('portable-filter-target').selectOption('claude');
     await page.getByTestId('portable-inventory-row-claude-skill-skill-a').click();
     await page.getByTestId('portable-action-disable').click();
@@ -2105,7 +2105,7 @@ test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () =
     await expect(page.getByTestId('portable-asset-details-close')).toHaveCount(0);
 
     // Plugin uninstall confirm (ownership effects in plan warnings)
-    await page.getByTestId('portable-kind-tab-plugin').click();
+    await page.getByTestId('agent-hub-tab-plugin').click();
     await page.getByTestId('portable-inventory-row-claude-plugin-plugin-a').click();
     await expect(page.getByTestId('portable-asset-details-drawer')).toBeVisible();
     await page.getByTestId('portable-action-uninstall').click();
@@ -2180,7 +2180,7 @@ test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () =
     });
     await page.getByTestId('portable-inventory-refresh').click();
     await expect(page.getByTestId('portable-inventory-stale')).toBeVisible({ timeout: 10_000 });
-    await page.getByTestId('portable-kind-tab-skill').click();
+    await page.getByTestId('agent-hub-tab-skill').click();
     await page.getByTestId('portable-filter-target').selectOption('claude');
     await page.getByTestId('portable-inventory-row-claude-skill-skill-a').click();
     // Details may still render action buttons; controller openAction must no-op while stale.

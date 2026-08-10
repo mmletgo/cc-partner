@@ -2,8 +2,8 @@
 /**
  * PortableInventoryView pure view 测试。
  *
- * Business Logic: view 只消费 controller props，切换 kind/filter 委托 setFilters。
- * Code Logic: 渲染 kind tabs、stale banner、列表行；无 @/api import。
+ * Business Logic: view 只消费 controller props；kind 由壳层 tab 驱动，本视图委托其它 filter。
+ * Code Logic: 渲染 filters、stale banner、列表行；无 @/api import。
  */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -30,12 +30,6 @@ const labels: PortableInventoryViewLabels = {
   filterScope: 'Scope',
   filterActual: 'State',
   filterManagement: 'Management',
-  kindCounts: {
-    skill: 'Skill',
-    command: 'Command',
-    plugin: 'Plugin',
-    mcp: 'MCP',
-  },
   targetFilter: {
     all: 'All targets',
     claude: 'Claude',
@@ -166,19 +160,21 @@ function controller(
 }
 
 describe('PortableInventoryView', () => {
-  test('renders kind tabs, filters and rows; kind click patches filters', () => {
+  test('renders filters and rows without nested kind tabs; target filter patches filters', () => {
     const ctl = controller();
     render(<PortableInventoryView controller={ctl} labels={labels} />);
 
     expect(screen.getByTestId('portable-inventory-workspace')).toBeTruthy();
-    expect(screen.getByTestId('portable-kind-tab-skill')).toBeTruthy();
-    expect(screen.getByTestId('portable-kind-tab-command')).toBeTruthy();
-    expect(screen.getByTestId('portable-kind-tab-plugin')).toBeTruthy();
-    expect(screen.getByTestId('portable-kind-tab-mcp')).toBeTruthy();
+    expect(screen.queryByTestId('portable-kind-tab-skill')).toBeNull();
+    expect(screen.queryByTestId('portable-kind-tab-command')).toBeNull();
+    expect(screen.queryByTestId('portable-kind-tab-plugin')).toBeNull();
+    expect(screen.queryByTestId('portable-kind-tab-mcp')).toBeNull();
     expect(screen.getByTestId('portable-inventory-row-claude-skill-alpha')).toBeTruthy();
 
-    fireEvent.click(screen.getByTestId('portable-kind-tab-plugin'));
-    expect(ctl.setFilters).toHaveBeenCalledWith({ kind: 'plugin' });
+    fireEvent.change(screen.getByTestId('portable-filter-target'), {
+      target: { value: 'codex' },
+    });
+    expect(ctl.setFilters).toHaveBeenCalledWith({ target: 'codex' });
   });
 
   test('shows stale banner and empty state', () => {

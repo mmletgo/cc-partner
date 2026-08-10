@@ -26,7 +26,13 @@ import styles from './AgentHubShell.module.css';
 const AGENTS: AgentTarget[] = ['claude', 'codex', 'opencode'];
 const SCOPES: AgentHubScope[] = ['user', 'project'];
 const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'];
+const ASSET_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
 const LANES: InstructionLane[] = ['common', 'adapted', 'exclusive'];
+
+/** portable 四类资产 tab 的数量（由 inventory kindCounts 上移）。 */
+export type AgentHubShellTabCounts = Partial<
+  Record<'skill' | 'command' | 'mcp' | 'plugin', number>
+>;
 
 /** 壳层 peer 摘要（本机由 deviceId=null 表示）。 */
 export interface AgentHubShellPeer {
@@ -60,6 +66,11 @@ export interface AgentHubShellProps {
   peers: AgentHubShellPeer[];
   projects: AgentHubShellProject[];
   actions: AgentHubShellActions;
+  /**
+   * skill/command/mcp/plugin tab 旁数量（原 portable 子导航 kindCounts）。
+   * 未加载时可为 0；instructions 不展示。
+   */
+  tabCounts?: AgentHubShellTabCounts | null;
   children: ReactNode;
 }
 
@@ -68,7 +79,7 @@ export interface AgentHubShellProps {
  * Code Logic: 全受控；层级 tab → scope → (lane) → agent；Adapt 在 peer 设备上下文禁用。
  */
 export function AgentHubShell(props: AgentHubShellProps): ReactElement {
-  const { context, onContextChange, peers, projects, actions, children } = props;
+  const { context, onContextChange, peers, projects, actions, tabCounts, children } = props;
   const { t } = useTranslation(['agentHub', 'common']);
 
   const adaptDisabled =
@@ -129,19 +140,27 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             aria-label={t('agentHub:shell.tabsAria')}
             data-testid="agent-hub-tablist"
           >
-            {TABS.map((tab) => (
-              <Button
-                key={tab}
-                variant={context.tab === tab ? 'primary' : 'ghost'}
-                size="sm"
-                role="tab"
-                aria-selected={context.tab === tab}
-                onClick={() => handleTabChange(tab)}
-                data-testid={`agent-hub-tab-${tab}`}
-              >
-                {t(`agentHub:shell.tabs.${tab}`)}
-              </Button>
-            ))}
+            {TABS.map((tab) => {
+              const count =
+                ASSET_TABS.has(tab) && tabCounts
+                  ? tabCounts[tab as keyof AgentHubShellTabCounts]
+                  : undefined;
+              const label = t(`agentHub:shell.tabs.${tab}`);
+              return (
+                <Button
+                  key={tab}
+                  variant={context.tab === tab ? 'primary' : 'ghost'}
+                  size="sm"
+                  role="tab"
+                  aria-selected={context.tab === tab}
+                  onClick={() => handleTabChange(tab)}
+                  data-testid={`agent-hub-tab-${tab}`}
+                  data-count={typeof count === 'number' ? String(count) : undefined}
+                >
+                  {typeof count === 'number' ? `${label} (${count})` : label}
+                </Button>
+              );
+            })}
           </div>
 
           <div

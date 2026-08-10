@@ -527,12 +527,6 @@
       "filterActual": "实际状态",
       "filterManagement": "一致性",
       "unmanagedRefreshHint": "尚未纳入管理 — 请刷新库存，由 Hub 自动建立管理记录。",
-      "kindCounts": {
-        "skill": "Skill",
-        "command": "Command",
-        "plugin": "Plugin",
-        "mcp": "MCP"
-      },
       "targetFilter": {
         "all": "全部目标",
         "claude": "Claude",

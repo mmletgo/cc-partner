@@ -303,12 +303,6 @@ export function AgentHubView(props: AgentHubViewProps) {
       filterScope: t('agentHub:portable.inventory.filterScope'),
       filterActual: t('agentHub:portable.inventory.filterActual'),
       filterManagement: t('agentHub:portable.inventory.filterManagement'),
-      kindCounts: {
-        skill: t('agentHub:portable.inventory.kindCounts.skill'),
-        command: t('agentHub:portable.inventory.kindCounts.command'),
-        plugin: t('agentHub:portable.inventory.kindCounts.plugin'),
-        mcp: t('agentHub:portable.inventory.kindCounts.mcp'),
-      },
       targetFilter: {
         all: t('agentHub:portable.inventory.targetFilter.all'),
         claude: t('agentHub:portable.inventory.targetFilter.claude'),
@@ -536,6 +530,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           peers={shellPeers}
           projects={shellProjects}
           actions={shellActions}
+          tabCounts={portableInventory.kindCounts}
         >
         {/* 双路径：壳层 tab/scope 驱动 activeSection；legacy section 深链仍可落到 diagnostics/syncImport */}
         {/* 隐藏旧五段 nav，保留 setActiveSection 供 characterization / deep link */}
