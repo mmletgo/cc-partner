@@ -27,7 +27,7 @@ use crate::agent_hub::portable_actions::{
     ApplyPortableAssetActionRequest, PortableAssetActionPlanDto, PortableAssetActionResultDto,
     PreviewPortableAssetActionRequest,
 };
-use crate::agent_hub::portable_inventory::PortableInventorySnapshotDto;
+use crate::agent_hub::portable_inventory::{PortableInventoryQuery, PortableInventorySnapshotDto};
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::replication::pull::{
@@ -539,12 +539,14 @@ pub async fn agent_hub_confirm_project_mapping(
 #[tauri::command]
 pub async fn agent_hub_inspect_portable_inventory(
     state: State<'_, AppState>,
+    request: Option<PortableInventoryQuery>,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    let query = request.unwrap_or_default();
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_inspect_portable_inventory());
+            .agent_hub_inspect_portable_inventory(query));
     }
-    PortableService::inspect_portable_inventory(state.inner()).await
+    PortableService::inspect_portable_inventory_query(state.inner(), query).await
 }
 
 /// Business Logic: apply 前必须生成绑定 inventory hash 的短期 plan。

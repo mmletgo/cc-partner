@@ -14,8 +14,8 @@ use super::paths::{
 };
 use super::portable::{
     merge_discoveries, parse_codex_agents_toml, parse_codex_mcp_toml, render_portable_payload,
-    scan_skill_dirs, AssetRenderContext, DiscoveredPortableAsset, PortableOriginKind,
-    TargetAssetProjection,
+    scan_skill_dirs, scan_skill_dirs_manifest_only, AssetRenderContext, DiscoveredPortableAsset,
+    PortableOriginKind, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -23,7 +23,7 @@ use super::{
     TargetEnvironment, TargetProbe,
 };
 use crate::agent_hub::assets::PortableAssetPayload;
-use crate::agent_hub::models::{AgentTarget, ScopeKind};
+use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 
@@ -172,6 +172,89 @@ impl AssetAdapter for CodexInstructionAdapter {
             )?);
         }
 
+        Ok(merge_discoveries(parts))
+    }
+
+    /// Inventory 精确 kind 扫描；避免 Skill 页解析 MCP/Agent 配置和无关组件树。
+    fn scan_portable_assets_filtered(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+        kind: Option<AssetKind>,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        let Some(kind) = kind else {
+            return self.scan_portable_assets(scope, env);
+        };
+        let homes = TargetPathResolver::resolve_all(env);
+        let mut parts = Vec::new();
+        if scope.scope_kind == ScopeKind::User {
+            if matches!(kind, AssetKind::Mcp | AssetKind::Agent) {
+                let config_path = homes.codex.config_root.join("config.toml");
+                if config_path.is_file() {
+                    let text = std::fs::read_to_string(&config_path)?;
+                    if kind == AssetKind::Mcp {
+                        parts.push(parse_codex_mcp_toml(
+                            AgentTarget::Codex,
+                            scope.scope_kind,
+                            &text,
+                            &config_path,
+                        )?);
+                    } else {
+                        parts.push(parse_codex_agents_toml(
+                            AgentTarget::Codex,
+                            scope.scope_kind,
+                            &text,
+                            &config_path,
+                        )?);
+                    }
+                }
+            }
+            if kind == AssetKind::Skill {
+                if let Some(compat) = &homes.codex.skill_compat_root {
+                    let skills_root = if compat.ends_with("skills") {
+                        compat.clone()
+                    } else {
+                        compat.join("skills")
+                    };
+                    parts.push(scan_skill_dirs_manifest_only(
+                        AgentTarget::Codex,
+                        scope.scope_kind,
+                        &skills_root,
+                        PortableOriginKind::LegacyStandalone,
+                    )?);
+                }
+            }
+        } else {
+            if matches!(kind, AssetKind::Mcp | AssetKind::Agent) {
+                let config_path = scope.absolute_path.join(".codex/config.toml");
+                if config_path.is_file() {
+                    let text = std::fs::read_to_string(&config_path)?;
+                    if kind == AssetKind::Mcp {
+                        parts.push(parse_codex_mcp_toml(
+                            AgentTarget::Codex,
+                            scope.scope_kind,
+                            &text,
+                            &config_path,
+                        )?);
+                    } else {
+                        parts.push(parse_codex_agents_toml(
+                            AgentTarget::Codex,
+                            scope.scope_kind,
+                            &text,
+                            &config_path,
+                        )?);
+                    }
+                }
+            }
+            if kind == AssetKind::Skill {
+                parts.push(scan_skill_dirs_manifest_only(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &scope.absolute_path.join(".agents/skills"),
+                    PortableOriginKind::LegacyStandalone,
+                )?);
+            }
+        }
         Ok(merge_discoveries(parts))
     }
 

@@ -25,6 +25,7 @@ import type {
   PortableAssetActionPlanDto,
   PortableAssetActionResultDto,
   PortableAssetApi,
+  PortableInventoryRequestContext,
   PortableInventorySnapshotDto,
   PortablePullApi,
   PortablePullPlanDto,
@@ -100,11 +101,16 @@ export function assertLocalAgentHubContext(context?: AgentHubRequestContext | nu
  * Code Logic: peer/本机 project 已由 assert 拦截；仅用户级本机调用返回 undefined。
  */
 function localInspectInvokeArgs(
-  context?: AgentHubRequestContext | null,
+  context?: PortableInventoryRequestContext | null,
 ): Record<string, unknown> | undefined {
   const projectRef = context?.projectRef?.trim() ?? '';
   if (projectRef.length === 0 || isRemoteProjectRef(projectRef)) {
-    return undefined;
+    const request = {
+      ...(context?.target ? { target: context.target } : {}),
+      ...(context?.kind ? { kind: context.kind } : {}),
+      ...(context?.scopeKind ? { scopeKind: context.scopeKind } : {}),
+    };
+    return Object.keys(request).length > 0 ? { request } : undefined;
   }
   // 保留 helper 便于项目路由接通时扩展；当前 assert 会在本机 project 到达此处前阻断。
   return undefined;
@@ -136,9 +142,9 @@ export const PORTABLE_INVENTORY_COMMANDS = {
 export const portableAssetApi: PortableAssetApi = {
   /**
    * Business Logic: 本机 inventory 是 actual 状态真源（只读）；peer 上下文 fail-closed。
-   * Code Logic: assertLocal → agent_hub_inspect_portable_inventory（本机无参）。
+   * Code Logic: assertLocal → agent_hub_inspect_portable_inventory（可选精确过滤）。
    */
-  inspect(context?: AgentHubRequestContext): Promise<PortableInventorySnapshotDto> {
+  inspect(context?: PortableInventoryRequestContext): Promise<PortableInventorySnapshotDto> {
     assertLocalAgentHubContext(context);
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.inspect,

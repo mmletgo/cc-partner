@@ -13,15 +13,15 @@ use super::paths::{probe_cli_version, read_utf8_file, resolve_executable, Target
 use super::portable::{
     claude_user_mcp_config_path, merge_discoveries, parse_json_or_jsonc,
     parse_mcp_servers_json_map, render_portable_payload, scan_agent_markdown_dir,
-    scan_command_markdown_dir, scan_skill_dirs, AssetRenderContext, DiscoveredPortableAsset,
-    PortableOriginKind, TargetAssetProjection,
+    scan_command_markdown_dir, scan_skill_dirs, scan_skill_dirs_manifest_only, AssetRenderContext,
+    DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
 };
 use super::{
     build_probe, AssetAdapter, InstructionDocument, InstructionRenderContext, InstructionSource,
     InstructionSourceRole, LocalScopeMapping, RenderedInstruction, TargetEnvironment, TargetProbe,
 };
 use crate::agent_hub::assets::PortableAssetPayload;
-use crate::agent_hub::models::{AgentTarget, ScopeKind};
+use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::error::AppError;
 use std::path::PathBuf;
 
@@ -240,6 +240,110 @@ impl AssetAdapter for ClaudeInstructionAdapter {
                     )?);
                 }
             }
+        }
+        Ok(merge_discoveries(parts))
+    }
+
+    /// Inventory 精确 kind 扫描；Plugin component 由 inventory 的权威安装根扫描器补充。
+    fn scan_portable_assets_filtered(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+        kind: Option<AssetKind>,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        let Some(kind) = kind else {
+            return self.scan_portable_assets(scope, env);
+        };
+        use super::portable::{
+            scan_disabled_command_markdown_dir, scan_disabled_skill_dirs_manifest_only,
+        };
+        let homes = TargetPathResolver::resolve_all(env);
+        let base = match scope.scope_kind {
+            ScopeKind::User => homes.claude.config_root.clone(),
+            ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".claude"),
+        };
+        let mut parts = Vec::new();
+        match kind {
+            AssetKind::Skill => {
+                parts.push(scan_skill_dirs_manifest_only(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &base.join("skills"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.push(scan_disabled_skill_dirs_manifest_only(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &base.join("disabled/skills"),
+                    PortableOriginKind::Native,
+                )?);
+                if scope.scope_kind == ScopeKind::User {
+                    if let Ok(data) = crate::config::data_dir() {
+                        parts.push(scan_disabled_skill_dirs_manifest_only(
+                            AgentTarget::Claude,
+                            scope.scope_kind,
+                            &data.join("claude-assets/disabled/skills"),
+                            PortableOriginKind::Native,
+                        )?);
+                    }
+                }
+            }
+            AssetKind::Command => {
+                parts.push(scan_command_markdown_dir(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &base.join("commands"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.push(scan_disabled_command_markdown_dir(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &base.join("disabled/commands"),
+                    PortableOriginKind::Native,
+                )?);
+                if scope.scope_kind == ScopeKind::User {
+                    if let Ok(data) = crate::config::data_dir() {
+                        parts.push(scan_disabled_command_markdown_dir(
+                            AgentTarget::Claude,
+                            scope.scope_kind,
+                            &data.join("claude-assets/disabled/commands"),
+                            PortableOriginKind::Native,
+                        )?);
+                    }
+                }
+            }
+            AssetKind::Agent => parts.push(scan_agent_markdown_dir(
+                AgentTarget::Claude,
+                scope.scope_kind,
+                &base.join("agents"),
+                PortableOriginKind::Native,
+            )?),
+            AssetKind::Mcp => {
+                if scope.scope_kind == ScopeKind::User {
+                    parts.push(scan_claude_user_mcp(scope.scope_kind, env)?);
+                    if let Ok(data) = crate::config::data_dir() {
+                        parts.push(scan_hub_disabled_mcp_snapshots(
+                            scope.scope_kind,
+                            &data.join("claude-assets/disabled/mcp"),
+                        )?);
+                    }
+                } else {
+                    for candidate in [
+                        scope.absolute_path.join(".mcp.json"),
+                        scope.absolute_path.join(".claude/settings.local.json"),
+                    ] {
+                        if candidate.is_file() {
+                            parts.push(scan_mcp_json_file(
+                                AgentTarget::Claude,
+                                scope.scope_kind,
+                                &candidate,
+                                PortableOriginKind::Native,
+                            )?);
+                        }
+                    }
+                }
+            }
+            AssetKind::Instruction | AssetKind::Plugin | AssetKind::Hook => {}
         }
         Ok(merge_discoveries(parts))
     }
@@ -513,5 +617,53 @@ mod tests {
             .path
             .to_string_lossy()
             .contains("claude-assets/disabled/skills/was-active"));
+    }
+
+    #[test]
+    fn filtered_skill_scan_does_not_parse_unrequested_mcp_config() {
+        let _guard = DATA_DIR_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = tmp.path().join("data");
+        let claude = home.join(".claude");
+        fs::create_dir_all(claude.join("skills/review")).unwrap();
+        fs::write(
+            claude.join("skills/review/SKILL.md"),
+            "---\nname: review\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(claude.join(".claude.json"), "{ invalid json").unwrap();
+        let previous = std::env::var_os("CC_PARTNER_DATA_DIR");
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars: std::collections::BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".into(),
+                claude.to_string_lossy().into_owned(),
+            )]),
+            path_entries: vec![],
+        };
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: home,
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let result = ClaudeInstructionAdapter.scan_portable_assets_filtered(
+            &scope,
+            &env,
+            Some(AssetKind::Skill),
+        );
+        if let Some(value) = previous {
+            std::env::set_var("CC_PARTNER_DATA_DIR", value);
+        } else {
+            std::env::remove_var("CC_PARTNER_DATA_DIR");
+        }
+        let found = result.expect("skill-only scan must ignore invalid MCP config");
+        assert!(found
+            .iter()
+            .any(|asset| asset.kind == AssetKind::Skill && asset.semantic_name == "review"));
+        assert!(found.iter().all(|asset| asset.kind == AssetKind::Skill));
     }
 }

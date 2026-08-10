@@ -35,6 +35,26 @@ pub enum PortableAssetKind {
     Mcp,
 }
 
+/// Portable inventory 扫描过滤条件。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     资产页只应等待当前 Agent/类型/scope 的事实，不能因查看 Skill 而阻塞于所有 Plugin。
+///
+/// Code Logic（这个结构体做什么）:
+///     三个可选精确过滤字段；全空表示完整权威扫描，供 mutation/Pull 继续使用。
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+pub struct PortableInventoryQuery {
+    /// 仅扫描一个 Agent target。
+    pub target: Option<AgentTarget>,
+    /// 仅扫描一种 portable 资产。
+    pub kind: Option<PortableAssetKind>,
+    /// 仅扫描一种 scope；None 为 user + 已映射 project。
+    pub scope_kind: Option<ScopeKind>,
+}
+
 impl PortableAssetKind {
     /// 稳定 wire 字符串。
     pub fn as_str(self) -> &'static str {

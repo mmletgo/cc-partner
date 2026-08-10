@@ -159,7 +159,7 @@ pub use portable_inventory::{
     reconcile_portable_inventory, reconcile_portable_inventory_with_facts,
     scan_portable_inventory_facts, EnsureManagedFailure, EnsureManagedReport, PortableAssetKind,
     PortableCanonicalFact, PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
-    PortableInventoryManagementState, PortableInventoryMutationCapability,
+    PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableScanScope,
 };

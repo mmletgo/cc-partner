@@ -195,6 +195,9 @@ impl PortableAssetConflictPolicy {
 pub struct PreviewPortableAssetActionRequest {
     /// 当前 inventory 快照 hash
     pub inventory_snapshot_hash: String,
+    /// 生成该快照时使用的扫描过滤条件；apply 必须按同一条件重新校验。
+    #[serde(default)]
+    pub inventory_query: crate::agent_hub::portable_inventory::PortableInventoryQuery,
     /// 参与动作的 inventory item id
     pub inventory_item_ids: Vec<String>,
     /// 动作类型

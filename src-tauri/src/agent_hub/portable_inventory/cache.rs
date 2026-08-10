@@ -5,10 +5,13 @@
 //!     （skill↔plugin 回切、mutation 前 refresh）应命中缓存。
 //!
 //! Code Logic（这个模块做什么）:
-//!     全局 Mutex 单槽缓存（本机 inventory）；TTL 到期或显式 invalidate 后 miss。
+//!     全局 Mutex 按 query 分槽缓存（本机 inventory）；TTL 到期或显式 invalidate 后 miss。
 //!     不缓存 peer 路径（当前 inspect 仅本机）。
 
-use crate::agent_hub::portable_inventory::models::PortableInventorySnapshotDto;
+use crate::agent_hub::portable_inventory::models::{
+    PortableInventoryQuery, PortableInventorySnapshotDto,
+};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,11 +26,11 @@ struct CacheEntry {
 }
 
 struct CacheState {
-    entry: Option<CacheEntry>,
+    entries: BTreeMap<PortableInventoryQuery, CacheEntry>,
     /// 失效代数。扫描开始时捕获，只有代数未改变才能回填缓存。
     generation: u64,
     /// 当前正在执行的扫描。并发 miss 共享同一个通知，避免重复扫盘。
-    in_flight: Option<Arc<InFlightScan>>,
+    in_flight: BTreeMap<PortableInventoryQuery, Arc<InFlightScan>>,
 }
 
 struct InFlightScan {
@@ -37,9 +40,9 @@ struct InFlightScan {
 }
 
 static CACHE: Mutex<CacheState> = Mutex::new(CacheState {
-    entry: None,
+    entries: BTreeMap::new(),
     generation: 0,
-    in_flight: None,
+    in_flight: BTreeMap::new(),
 });
 
 /// 缓存查找结果：命中、等待现有扫描或成为当前扫描 owner。
@@ -72,6 +75,7 @@ impl CacheWait {
 
 /// 当前扫描的代数与通知句柄。
 pub struct CacheScanGuard {
+    query: PortableInventoryQuery,
     scan: Arc<InFlightScan>,
 }
 
@@ -84,11 +88,11 @@ impl CacheScanGuard {
 
 /**
  * Business Logic: mutation / 强制 refresh 后丢弃缓存，避免脏列表。
- * Code Logic: 清空 Mutex 槽。
+ * Code Logic: 清空全部 query 缓存槽并抬高 generation。
  */
 pub fn invalidate_portable_inventory_cache() {
     if let Ok(mut guard) = CACHE.lock() {
-        guard.entry = None;
+        guard.entries.clear();
         guard.generation = guard.generation.wrapping_add(1);
     }
 }
@@ -97,9 +101,11 @@ pub fn invalidate_portable_inventory_cache() {
  * Business Logic: 返回未过期的本机 inventory snapshot。
  * Code Logic: 检查 TTL；锁毒化时视为 miss。
  */
-pub fn get_cached_portable_inventory() -> Option<PortableInventorySnapshotDto> {
+pub fn get_cached_portable_inventory(
+    query: PortableInventoryQuery,
+) -> Option<PortableInventorySnapshotDto> {
     let guard = CACHE.lock().ok()?;
-    let entry = guard.entry.as_ref()?;
+    let entry = guard.entries.get(&query)?;
     if entry.fetched_at.elapsed() > PORTABLE_INVENTORY_CACHE_TTL {
         return None;
     }
@@ -113,7 +119,7 @@ pub fn get_cached_portable_inventory() -> Option<PortableInventorySnapshotDto> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     在 Mutex 内检查 TTL、登记 leader 或返回同一通知；锁毒化时按 miss 处理。
-pub fn begin_scan() -> CacheLookup {
+pub fn begin_scan(query: PortableInventoryQuery) -> CacheLookup {
     let Ok(mut guard) = CACHE.lock() else {
         // 锁毒化无法安全共享状态，退化为独立扫描 owner。
         let scan = Arc::new(InFlightScan {
@@ -121,14 +127,14 @@ pub fn begin_scan() -> CacheLookup {
             notify: Arc::new(tokio::sync::Notify::new()),
             completed: AtomicBool::new(false),
         });
-        return CacheLookup::Leader(CacheScanGuard { scan });
+        return CacheLookup::Leader(CacheScanGuard { query, scan });
     };
-    if let Some(entry) = guard.entry.as_ref() {
+    if let Some(entry) = guard.entries.get(&query) {
         if entry.fetched_at.elapsed() <= PORTABLE_INVENTORY_CACHE_TTL {
             return CacheLookup::Hit(entry.snapshot.clone());
         }
     }
-    if let Some(in_flight) = guard.in_flight.as_ref() {
+    if let Some(in_flight) = guard.in_flight.get(&query) {
         return CacheLookup::Wait(CacheWait {
             scan: in_flight.clone(),
         });
@@ -138,8 +144,8 @@ pub fn begin_scan() -> CacheLookup {
         notify: Arc::new(tokio::sync::Notify::new()),
         completed: AtomicBool::new(false),
     });
-    guard.in_flight = Some(scan.clone());
-    CacheLookup::Leader(CacheScanGuard { scan })
+    guard.in_flight.insert(query, scan.clone());
+    CacheLookup::Leader(CacheScanGuard { query, scan })
 }
 
 /// 完成 single-flight 扫描并按 generation 条件回填。
@@ -153,18 +159,21 @@ pub fn complete_scan(guard: CacheScanGuard, snapshot: Option<PortableInventorySn
     if let Ok(mut state) = CACHE.lock() {
         let is_owner = state
             .in_flight
-            .as_ref()
+            .get(&guard.query)
             .is_some_and(|current| Arc::ptr_eq(current, &guard.scan));
         if is_owner {
             if state.generation == guard.scan.generation {
                 if let Some(snapshot) = snapshot {
-                    state.entry = Some(CacheEntry {
-                        snapshot,
-                        fetched_at: Instant::now(),
-                    });
+                    state.entries.insert(
+                        guard.query,
+                        CacheEntry {
+                            snapshot,
+                            fetched_at: Instant::now(),
+                        },
+                    );
                 }
             }
-            state.in_flight = None;
+            state.in_flight.remove(&guard.query);
         }
         guard.scan.completed.store(true, Ordering::Release);
         guard.scan.notify.notify_waiters();
@@ -176,14 +185,20 @@ pub fn complete_scan(guard: CacheScanGuard, snapshot: Option<PortableInventorySn
 
 /**
  * Business Logic: 成功 inspect 后写入缓存。
- * Code Logic: 覆盖单槽；锁失败静默。
+ * Code Logic: 覆盖对应 query 槽；锁失败静默。
  */
-pub fn store_cached_portable_inventory(snapshot: PortableInventorySnapshotDto) {
+pub fn store_cached_portable_inventory(
+    query: PortableInventoryQuery,
+    snapshot: PortableInventorySnapshotDto,
+) {
     if let Ok(mut guard) = CACHE.lock() {
-        guard.entry = Some(CacheEntry {
-            snapshot,
-            fetched_at: Instant::now(),
-        });
+        guard.entries.insert(
+            query,
+            CacheEntry {
+                snapshot,
+                fetched_at: Instant::now(),
+            },
+        );
     }
 }
 
@@ -205,41 +220,67 @@ mod tests {
     #[test]
     fn invalidate_clears_hit() {
         invalidate_portable_inventory_cache();
-        store_cached_portable_inventory(empty_snap("a"));
+        let query = PortableInventoryQuery::default();
+        store_cached_portable_inventory(query, empty_snap("a"));
         assert_eq!(
-            get_cached_portable_inventory()
+            get_cached_portable_inventory(query)
                 .map(|s| s.inventory_snapshot_hash)
                 .as_deref(),
             Some("a")
         );
         invalidate_portable_inventory_cache();
-        assert!(get_cached_portable_inventory().is_none());
+        assert!(get_cached_portable_inventory(query).is_none());
     }
 
     #[test]
     fn generation_invalidates_in_flight_result() {
         invalidate_portable_inventory_cache();
-        let CacheLookup::Leader(leader) = begin_scan() else {
+        let query = PortableInventoryQuery::default();
+        let CacheLookup::Leader(leader) = begin_scan(query) else {
             panic!("expected scan leader");
         };
         invalidate_portable_inventory_cache();
         complete_scan(leader, Some(empty_snap("stale")));
-        assert!(get_cached_portable_inventory().is_none());
+        assert!(get_cached_portable_inventory(query).is_none());
     }
 
     #[tokio::test]
     async fn concurrent_miss_shares_single_scan_and_wakes_waiter() {
         invalidate_portable_inventory_cache();
-        let CacheLookup::Leader(leader) = begin_scan() else {
+        let query = PortableInventoryQuery::default();
+        let CacheLookup::Leader(leader) = begin_scan(query) else {
             panic!("expected scan leader");
         };
-        let CacheLookup::Wait(waiter) = begin_scan() else {
+        let CacheLookup::Wait(waiter) = begin_scan(query) else {
             panic!("second miss must wait for the leader");
         };
         complete_scan(leader, Some(empty_snap("shared")));
         waiter.wait().await;
         assert!(
-            matches!(begin_scan(), CacheLookup::Hit(snapshot) if snapshot.inventory_snapshot_hash == "shared")
+            matches!(begin_scan(query), CacheLookup::Hit(snapshot) if snapshot.inventory_snapshot_hash == "shared")
+        );
+    }
+
+    #[test]
+    fn distinct_queries_keep_distinct_cache_entries() {
+        invalidate_portable_inventory_cache();
+        let skill = PortableInventoryQuery {
+            kind: Some(crate::agent_hub::portable_inventory::PortableAssetKind::Skill),
+            ..PortableInventoryQuery::default()
+        };
+        let plugin = PortableInventoryQuery {
+            kind: Some(crate::agent_hub::portable_inventory::PortableAssetKind::Plugin),
+            ..PortableInventoryQuery::default()
+        };
+        store_cached_portable_inventory(skill, empty_snap("skill"));
+        store_cached_portable_inventory(plugin, empty_snap("plugin"));
+        assert_eq!(
+            get_cached_portable_inventory(skill).map(|s| s.inventory_snapshot_hash),
+            Some("skill".into())
+        );
+        assert_eq!(
+            get_cached_portable_inventory(plugin).map(|s| s.inventory_snapshot_hash),
+            Some("plugin".into())
         );
     }
 }

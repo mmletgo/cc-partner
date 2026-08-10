@@ -163,9 +163,18 @@ export interface PortableInventorySnapshotDto {
   items: PortableInventoryItemDto[];
 }
 
+/** Inventory 扫描过滤条件；全空表示完整扫描。 */
+export interface PortableInventoryQuery {
+  target?: AgentTarget;
+  kind?: PortableAssetKind;
+  scopeKind?: PortableScopeKind;
+}
+
 /** Preview 本机动作请求。 */
 export interface PreviewPortableAssetActionRequest {
   inventorySnapshotHash: string;
+  /** 必须与生成 inventorySnapshotHash 的扫描条件一致。 */
+  inventoryQuery?: PortableInventoryQuery;
   inventoryItemIds: string[];
   action: PortableAssetActionKind;
   keepData: boolean;
@@ -338,6 +347,9 @@ export interface PortablePullResultDto {
 export interface PortableInventoryRequestContext {
   deviceId?: string | null;
   projectRef?: string | null;
+  target?: AgentTarget;
+  kind?: PortableAssetKind;
+  scopeKind?: PortableScopeKind;
 }
 
 /** 本机 portable 资产 API 形状（controller 消费）。 */

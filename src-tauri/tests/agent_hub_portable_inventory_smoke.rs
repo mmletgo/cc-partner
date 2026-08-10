@@ -466,6 +466,7 @@ async fn preview_action(
         repo,
         PreviewPortableAssetActionRequest {
             inventory_snapshot_hash: snap.inventory_snapshot_hash.clone(),
+            inventory_query: Default::default(),
             inventory_item_ids: ids,
             action,
             keep_data,

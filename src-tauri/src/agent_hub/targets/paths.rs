@@ -14,8 +14,9 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const MAX_INSTRUCTION_SCAN_BYTES: u64 = 1024 * 1024;
 
@@ -291,11 +292,87 @@ fn fs_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 ///     同步 `Command` 调 `--version`（无 shell）；成功时取 stdout 首行非空文本；
 ///     超时/非零/空输出返回 None。不修改 process env。
 pub fn probe_cli_version(executable: &Path) -> Option<String> {
+    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedCliProbe>>> = OnceLock::new();
+    let key = executable
+        .canonicalize()
+        .unwrap_or_else(|_| executable.to_path_buf());
+    let metadata_fingerprint = executable_metadata_fingerprint(&key);
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .filter(|entry| {
+            entry.metadata_fingerprint == metadata_fingerprint
+                && entry.cached_at.elapsed()
+                    < if entry.version.is_some() {
+                        Duration::from_secs(300)
+                    } else {
+                        Duration::from_secs(30)
+                    }
+        })
+        .cloned()
+    {
+        return hit.version;
+    }
+    let version = probe_cli_version_uncached(&key);
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= 64 && !guard.contains_key(&key) {
+        guard.clear();
+    }
+    guard.insert(
+        key,
+        CachedCliProbe {
+            metadata_fingerprint,
+            version: version.clone(),
+            cached_at: Instant::now(),
+        },
+    );
+    version
+}
+
+#[derive(Clone)]
+struct CachedCliProbe {
+    metadata_fingerprint: String,
+    version: Option<String>,
+    cached_at: Instant,
+}
+
+fn executable_metadata_fingerprint(executable: &Path) -> String {
+    let Ok(metadata) = std::fs::metadata(executable) else {
+        return "missing".into();
+    };
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    #[cfg(unix)]
+    let platform = {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        )
+    };
+    #[cfg(not(unix))]
+    let platform = String::new();
+    format!("{}:{modified_ns}:{platform}", metadata.len())
+}
+
+fn probe_cli_version_uncached(executable: &Path) -> Option<String> {
     let mut cmd = Command::new(executable);
     cmd.arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // 不继承测试注入之外的 PATH 语义：直接用绝对 executable。
     let output = match run_command_with_timeout(cmd, Duration::from_secs(5)) {
         Ok(out) => out,
@@ -317,17 +394,30 @@ pub fn probe_cli_version(executable: &Path) -> Option<String> {
     }
 }
 
-/// 带超时执行命令（Unix 用 wait_timeout 近似；否则直接 output）。
+/// 带超时执行命令并在截止时终止子进程。
 ///
 /// Business Logic: probe 不得挂死 sidecar。
-/// Code Logic: 优先 `output()`；失败映射为 io::Error。
+/// Code Logic: spawn 后轮询 try_wait；超时 kill+wait，杜绝 `--version` 挂死 owner。
 fn run_command_with_timeout(
     mut cmd: Command,
-    _timeout: Duration,
+    timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
-    // 单测 fixture CLI 立即返回；生产 5s 级 CLI --version 通常足够。
-    // 完整 kill-on-timeout 留给后续 runtime；此处避免引入额外 crate。
-    cmd.output()
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "CLI version probe timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// 计算 probe fingerprint（exe/version/config_root 任一变化即失效）。
@@ -498,6 +588,50 @@ mod tests {
         fs::set_permissions(&bin, perms).unwrap();
         let version = probe_cli_version(&bin).expect("version");
         assert!(version.contains("9.8.7"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_version_probe_reuses_unchanged_executable_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("cached-cli");
+        let counter = dir.path().join("calls.txt");
+        fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho called >> '{}'\necho 'cli 1.2.3'\n",
+                counter.display()
+            ),
+        )
+        .expect("write");
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+
+        assert_eq!(probe_cli_version(&bin).as_deref(), Some("cli 1.2.3"));
+        assert_eq!(probe_cli_version(&bin).as_deref(), Some("cli 1.2.3"));
+        assert_eq!(fs::read_to_string(counter).unwrap().lines().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_kills_hung_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("hung-cli");
+        fs::write(&bin, b"#!/bin/sh\nexec sleep 10\n").expect("write");
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+        let mut cmd = Command::new(&bin);
+        cmd.arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let started = Instant::now();
+        let error =
+            run_command_with_timeout(cmd, Duration::from_millis(50)).expect_err("timeout expected");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

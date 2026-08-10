@@ -203,6 +203,20 @@ describe('portable inventory API', () => {
     );
   });
 
+  test('inspect forwards target kind and scope as a typed request', async () => {
+    mockInvoke.mockResolvedValueOnce(validInventorySnapshot);
+    await portableAssetApi.inspect({
+      deviceId: null,
+      projectRef: null,
+      target: 'codex',
+      kind: 'plugin',
+      scopeKind: 'user',
+    });
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_inspect_portable_inventory', {
+      request: { target: 'codex', kind: 'plugin', scopeKind: 'user' },
+    });
+  });
+
   test('inspect with local projectRef fails closed until project route exists', async () => {
     await expect(
       Promise.resolve().then(() =>

@@ -12,6 +12,7 @@ pub mod codex;
 pub mod opencode;
 pub mod paths;
 pub mod portable;
+pub(crate) mod tree_metadata;
 
 use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
@@ -326,6 +327,20 @@ pub trait AssetAdapter: Send + Sync {
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError>;
+
+    /// 按 kind 在目录遍历前裁剪扫描；默认实现仅为第三方 adapter 兼容。
+    fn scan_portable_assets_filtered(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+        kind: Option<crate::agent_hub::models::AssetKind>,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        let mut assets = self.scan_portable_assets(scope, env)?;
+        if let Some(kind) = kind {
+            assets.retain(|asset| asset.kind == kind);
+        }
+        Ok(assets)
+    }
 
     /// 渲染可移植资产为目标投影计划（不写盘）。
     ///

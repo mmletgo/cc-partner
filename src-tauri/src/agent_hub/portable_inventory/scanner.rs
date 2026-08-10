@@ -22,7 +22,7 @@ use crate::agent_hub::portable_inventory::ensure_managed::ensure_discovered_port
 use crate::agent_hub::portable_inventory::models::{
     inventory_item_id, PortableAssetKind, PortableInventoryItemCapabilitiesDto,
     PortableInventoryItemDto, PortableInventoryManagementState,
-    PortableInventoryMutationCapability, PortableInventoryScanCapability,
+    PortableInventoryMutationCapability, PortableInventoryQuery, PortableInventoryScanCapability,
     PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableInventoryTargetDto,
     PortableMcpCredentialFactDto,
 };
@@ -44,6 +44,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// 扫描用 scope 输入（显式注入路径与 opt-in；不猜测）。
 ///
@@ -77,8 +78,16 @@ pub struct PortableScanScope {
 pub async fn inspect_portable_inventory(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    inspect_portable_inventory_query(state, PortableInventoryQuery::default()).await
+}
+
+/// 按当前 UI target/kind/scope 过滤扫描；空 query 等价完整权威扫描。
+pub async fn inspect_portable_inventory_query(
+    state: &AppState,
+    query: PortableInventoryQuery,
+) -> Result<PortableInventorySnapshotDto, AppError> {
     loop {
-        match crate::agent_hub::portable_inventory::cache::begin_scan() {
+        match crate::agent_hub::portable_inventory::cache::begin_scan(query) {
             crate::agent_hub::portable_inventory::cache::CacheLookup::Hit(snapshot) => {
                 return Ok(snapshot)
             }
@@ -87,7 +96,7 @@ pub async fn inspect_portable_inventory(
             }
             crate::agent_hub::portable_inventory::cache::CacheLookup::Leader(guard) => {
                 let env = current_target_environment();
-                let result = inspect_portable_inventory_with_env(state, &env).await;
+                let result = inspect_portable_inventory_with_env_query(state, &env, query).await;
                 crate::agent_hub::portable_inventory::cache::complete_scan(
                     guard,
                     result.as_ref().ok().cloned(),
@@ -109,8 +118,16 @@ pub async fn inspect_portable_inventory(
 pub async fn inspect_portable_inventory_force(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    inspect_portable_inventory_force_query(state, PortableInventoryQuery::default()).await
+}
+
+/// 强制执行一次指定过滤条件的未缓存扫描。
+pub async fn inspect_portable_inventory_force_query(
+    state: &AppState,
+    query: PortableInventoryQuery,
+) -> Result<PortableInventorySnapshotDto, AppError> {
     crate::agent_hub::portable_inventory::cache::invalidate_portable_inventory_cache();
-    inspect_portable_inventory(state).await
+    inspect_portable_inventory_query(state, query).await
 }
 
 /// 在注入环境下强制扫描（测试与隔离运行时使用）。
@@ -122,8 +139,18 @@ pub async fn inspect_portable_inventory_force_with_env(
     state: &AppState,
     env: &TargetEnvironment,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    inspect_portable_inventory_force_with_env_query(state, env, PortableInventoryQuery::default())
+        .await
+}
+
+/// 在注入环境下强制执行指定过滤条件的扫描。
+pub async fn inspect_portable_inventory_force_with_env_query(
+    state: &AppState,
+    env: &TargetEnvironment,
+    query: PortableInventoryQuery,
+) -> Result<PortableInventorySnapshotDto, AppError> {
     crate::agent_hub::portable_inventory::cache::invalidate_portable_inventory_cache();
-    inspect_portable_inventory_with_env(state, env).await
+    inspect_portable_inventory_with_env_query(state, env, query).await
 }
 
 /// 使用注入环境刷新 portable inventory（可测）。
@@ -134,8 +161,22 @@ pub async fn inspect_portable_inventory_with_env(
     state: &AppState,
     env: &TargetEnvironment,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    inspect_portable_inventory_with_env_query(state, env, PortableInventoryQuery::default()).await
+}
+
+/// 注入环境下的过滤扫描，供 UI 与定向测试共享。
+pub async fn inspect_portable_inventory_with_env_query(
+    state: &AppState,
+    env: &TargetEnvironment,
+    query: PortableInventoryQuery,
+) -> Result<PortableInventorySnapshotDto, AppError> {
     let scopes = collect_scan_scopes(state, env).await?;
-    let (targets, mut discovered) = scan_portable_inventory_facts(env, &scopes)?;
+    let scan_env = env.clone();
+    let (targets, mut discovered) = tokio::task::spawn_blocking(move || {
+        scan_portable_inventory_facts_query(&scan_env, &scopes, query)
+    })
+    .await
+    .map_err(|error| AppError::generic(format!("portable inventory scan task: {error}")))??;
     let ensure_report =
         ensure_discovered_portable_items_managed(&state.agent_hub_repo, &mut discovered).await;
     if !ensure_report.failures.is_empty() {
@@ -186,6 +227,21 @@ pub fn scan_portable_inventory_facts(
     ),
     AppError,
 > {
+    scan_portable_inventory_facts_query(env, scopes, PortableInventoryQuery::default())
+}
+
+/// 按 target/kind/scope 缩小真实扫描面；过滤在目录遍历前生效。
+pub fn scan_portable_inventory_facts_query(
+    env: &TargetEnvironment,
+    scopes: &[PortableScanScope],
+    query: PortableInventoryQuery,
+) -> Result<
+    (
+        Vec<PortableInventoryTargetDto>,
+        Vec<PortableInventoryItemDto>,
+    ),
+    AppError,
+> {
     let adapters: Vec<Box<dyn AssetAdapter>> = vec![
         Box::new(ClaudeInstructionAdapter),
         Box::new(CodexInstructionAdapter),
@@ -195,14 +251,50 @@ pub fn scan_portable_inventory_facts(
     let mut target_dtos = Vec::with_capacity(adapters.len());
     let mut items: Vec<PortableInventoryItemDto> = Vec::new();
     let mut seen_ids = BTreeSet::new();
+    let mut probes = BTreeMap::new();
+    std::thread::scope(|scope| -> Result<(), AppError> {
+        let handles = adapters
+            .iter()
+            .filter(|adapter| {
+                !query
+                    .target
+                    .is_some_and(|selected| selected != adapter.target())
+            })
+            .map(|adapter| {
+                let target = adapter.target();
+                (target, scope.spawn(move || adapter.probe(env)))
+            })
+            .collect::<Vec<_>>();
+        for (target, handle) in handles {
+            let probe = handle.join().map_err(|_| {
+                AppError::generic(format!(
+                    "portable target probe thread panicked:{}",
+                    target.as_str()
+                ))
+            })??;
+            probes.insert(target, probe);
+        }
+        Ok(())
+    })?;
 
     for adapter in &adapters {
         let target = adapter.target();
-        let probe = adapter.probe(env)?;
+        if query.target.is_some_and(|selected| selected != target) {
+            continue;
+        }
+        let probe = probes
+            .remove(&target)
+            .ok_or_else(|| AppError::generic("portable target probe result missing"))?;
         let target_dto = target_dto_from_probe(target, &probe, env)?;
         target_dtos.push(target_dto.clone());
 
         for scope in scopes {
+            if query
+                .scope_kind
+                .is_some_and(|selected| selected != scope.scope_kind)
+            {
+                continue;
+            }
             let mapping = LocalScopeMapping {
                 scope_kind: scope.scope_kind,
                 absolute_path: scope.absolute_path.clone(),
@@ -213,29 +305,49 @@ pub fn scan_portable_inventory_facts(
                 relative_root: None,
                 codex_fallback_filenames: vec![],
             };
-            let discoveries = match adapter.scan_portable_assets(&mapping, env) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        target = "agent_hub.portable_inventory",
-                        error = %e,
-                        agent = target.as_str(),
-                        scope = %scope.scope_id,
-                        "portable scan failed; continue other scopes"
-                    );
-                    Vec::new()
+            let discoveries = if query.kind == Some(PortableAssetKind::Plugin) {
+                Vec::new()
+            } else {
+                match adapter.scan_portable_assets_filtered(
+                    &mapping,
+                    env,
+                    query.kind.map(PortableAssetKind::to_asset_kind),
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            target = "agent_hub.portable_inventory",
+                            error = %e,
+                            agent = target.as_str(),
+                            scope = %scope.scope_id,
+                            "portable scan failed; continue other scopes"
+                        );
+                        Vec::new()
+                    }
                 }
             };
-            // Plugin package roots（package 本体 + 组件 parent 关联）
-            let plugin_packages =
-                scan_plugin_packages(target, scope, env, &homes, &target_dto, &mut seen_ids)?;
-            items.extend(plugin_packages);
+            // Plugin package roots（package 本体 + 组件 parent 关联）。MCP 不从这些目录发现。
+            if query.kind != Some(PortableAssetKind::Mcp) {
+                let plugin_items = scan_plugin_packages(
+                    target,
+                    scope,
+                    env,
+                    &homes,
+                    &target_dto,
+                    &mut seen_ids,
+                    query.kind,
+                )?;
+                items.extend(plugin_items);
+            }
 
             for disc in discoveries {
                 // Instruction/Agent/Hook 不进 portable 四类库存
                 let Ok(kind) = PortableAssetKind::try_from_asset_kind(disc.kind) else {
                     continue;
                 };
+                if query.kind.is_some_and(|selected| selected != kind) {
+                    continue;
+                }
                 if let Some(item) =
                     discovered_to_item(kind, &disc, scope, &target_dto, &mut seen_ids)
                 {
@@ -398,6 +510,7 @@ fn scan_plugin_packages(
     homes: &crate::agent_hub::targets::paths::TargetHomes,
     target_dto: &PortableInventoryTargetDto,
     seen: &mut BTreeSet<String>,
+    selected_kind: Option<PortableAssetKind>,
 ) -> Result<Vec<PortableInventoryItemDto>, AppError> {
     let roots = plugin_roots_for(target, scope, env, homes);
     let mut out = Vec::new();
@@ -417,61 +530,98 @@ fn scan_plugin_packages(
         let source_identity = root.display().to_string();
         let inv_id =
             inventory_item_id(target, &scope.scope_id, &source_identity, &source.plugin_id);
-        if !seen.insert(inv_id.clone()) {
+        if (selected_kind.is_none() || selected_kind == Some(PortableAssetKind::Plugin))
+            && seen.insert(inv_id.clone())
+        {
+            let (content_hash, tree_hash) = if selected_kind == Some(PortableAssetKind::Plugin) {
+                // 列表首屏只需 manifest 身份；递归 tree hash 在选中项 preview 时精确计算，
+                // apply 前仍会再次未缓存校验，避免为十个大包读取数百 MB。
+                (hash_plugin_manifest(&root)?, None)
+            } else {
+                let (content_hash, tree_hash) = hash_plugin_root_cached(&root)?;
+                (content_hash, Some(tree_hash))
+            };
+            let mut warnings = Vec::new();
+            // 组件同名 skill 路径存在时不合并——仅作 package 行
+            let component_skill = root.join("skills");
+            if component_skill.is_dir() {
+                warnings.push("plugin_has_components".into());
+            }
+            let can_mutate = scope.project_opted_in
+                && scope.scope_kind != ScopeKind::Directory
+                && target_dto.mutation_capability != PortableInventoryMutationCapability::Blocked;
+            let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
+                Some("project_not_opted_in".into())
+            } else if target_dto.mutation_capability == PortableInventoryMutationCapability::Blocked
+            {
+                target_dto.reason_code.clone()
+            } else {
+                None
+            };
+            out.push(PortableInventoryItemDto {
+                inventory_item_id: inv_id.clone(),
+                target,
+                kind: PortableAssetKind::Plugin,
+                native_id: source.plugin_id.clone(),
+                display_name: source.name.clone(),
+                description: source.description.clone(),
+                version: source.version.clone(),
+                scope_id: scope.scope_id.clone(),
+                scope_kind: scope.scope_kind,
+                project_id: scope.project_id.clone(),
+                project_opted_in: scope.project_opted_in,
+                source_path: Some(source_identity),
+                source_origin: PortableInventorySourceOrigin::Standalone,
+                parent_plugin_inventory_item_id: None,
+                actual_enabled: Some(true),
+                content_hash: Some(content_hash),
+                tree_hash,
+                canonical_asset_id: None,
+                canonical_revision_id: None,
+                management_state: PortableInventoryManagementState::Unmanaged,
+                desired_presence: None,
+                desired_enabled: None,
+                materialization_status: None,
+                capabilities: item_capabilities(
+                    target,
+                    PortableAssetKind::Plugin,
+                    Some(true),
+                    can_mutate,
+                    true,
+                    reason,
+                ),
+                warnings,
+                mcp_credential: None,
+            });
+        }
+
+        // Installed plugin roots may live below cache/<marketplace>/<id>/<version> rather than
+        // directly below config_root/plugins. Scan components from the same authoritative roots
+        // so nested installed plugins are visible without treating cache infrastructure as a
+        // package of its own.
+        if selected_kind == Some(PortableAssetKind::Plugin) {
             continue;
         }
-        let (content_hash, tree_hash) = hash_plugin_root(&root)?;
-        let mut warnings = Vec::new();
-        // 组件同名 skill 路径存在时不合并——仅作 package 行
-        let component_skill = root.join("skills");
-        if component_skill.is_dir() {
-            warnings.push("plugin_has_components".into());
-        }
-        let can_mutate = scope.project_opted_in
-            && scope.scope_kind != ScopeKind::Directory
-            && target_dto.mutation_capability != PortableInventoryMutationCapability::Blocked;
-        let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
-            Some("project_not_opted_in".into())
-        } else if target_dto.mutation_capability == PortableInventoryMutationCapability::Blocked {
-            target_dto.reason_code.clone()
-        } else {
-            None
-        };
-        out.push(PortableInventoryItemDto {
-            inventory_item_id: inv_id,
-            target,
-            kind: PortableAssetKind::Plugin,
-            native_id: source.plugin_id.clone(),
-            display_name: source.name,
-            description: source.description,
-            version: source.version,
-            scope_id: scope.scope_id.clone(),
-            scope_kind: scope.scope_kind,
-            project_id: scope.project_id.clone(),
-            project_opted_in: scope.project_opted_in,
-            source_path: Some(source_identity),
-            source_origin: PortableInventorySourceOrigin::Standalone,
-            parent_plugin_inventory_item_id: None,
-            actual_enabled: Some(true),
-            content_hash: Some(content_hash),
-            tree_hash: Some(tree_hash),
-            canonical_asset_id: None,
-            canonical_revision_id: None,
-            management_state: PortableInventoryManagementState::Unmanaged,
-            desired_presence: None,
-            desired_enabled: None,
-            materialization_status: None,
-            capabilities: item_capabilities(
+        for discovery in
+            crate::agent_hub::targets::portable::scan_plugin_components_readonly_filtered(
                 target,
-                PortableAssetKind::Plugin,
-                Some(true),
-                can_mutate,
-                true,
-                reason,
-            ),
-            warnings,
-            mcp_credential: None,
-        });
+                scope.scope_kind,
+                &root,
+                &source.plugin_id,
+                selected_kind.map(PortableAssetKind::to_asset_kind),
+            )?
+        {
+            let Ok(kind) = PortableAssetKind::try_from_asset_kind(discovery.kind) else {
+                continue;
+            };
+            if selected_kind.is_some_and(|selected| selected != kind) {
+                continue;
+            }
+            if let Some(mut item) = discovered_to_item(kind, &discovery, scope, target_dto, seen) {
+                item.parent_plugin_inventory_item_id = Some(inv_id.clone());
+                out.push(item);
+            }
+        }
     }
     Ok(out)
 }
@@ -482,47 +632,122 @@ fn plugin_roots_for(
     env: &TargetEnvironment,
     homes: &crate::agent_hub::targets::paths::TargetHomes,
 ) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let candidates = match (target, scope.scope_kind) {
+    let mut roots = match (target, scope.scope_kind) {
         (AgentTarget::Claude, ScopeKind::User) => {
-            vec![homes.claude.config_root.join("plugins")]
+            claude_user_plugin_roots(&homes.claude.config_root)
         }
-        (AgentTarget::Claude, _) => {
-            vec![scope.absolute_path.join(".claude").join("plugins")]
-        }
-        (AgentTarget::Codex, ScopeKind::User) => {
-            vec![homes.codex.config_root.join("plugins")]
-        }
-        (AgentTarget::Codex, _) => {
-            vec![scope.absolute_path.join(".codex").join("plugins")]
-        }
-        (AgentTarget::OpenCode, ScopeKind::User) => {
-            vec![
-                homes.opencode.config_root.join("plugins"),
-                env.home.join(".opencode").join("plugins"),
-            ]
-        }
-        (AgentTarget::OpenCode, _) => {
-            vec![
-                scope.absolute_path.join(".opencode").join("plugins"),
-                scope.absolute_path.join("plugins"),
-            ]
-        }
+        (AgentTarget::Codex, ScopeKind::User) => codex_user_plugin_roots(&homes.codex.config_root),
+        (AgentTarget::OpenCode, ScopeKind::User) => [
+            homes.opencode.config_root.join("plugins"),
+            env.home.join(".opencode").join("plugins"),
+        ]
+        .into_iter()
+        .flat_map(|base| direct_manifest_plugin_roots(&base, target))
+        .collect(),
+        (AgentTarget::Claude, _) => direct_manifest_plugin_roots(
+            &scope.absolute_path.join(".claude").join("plugins"),
+            target,
+        ),
+        (AgentTarget::Codex, _) => direct_manifest_plugin_roots(
+            &scope.absolute_path.join(".codex").join("plugins"),
+            target,
+        ),
+        (AgentTarget::OpenCode, _) => [
+            scope.absolute_path.join(".opencode").join("plugins"),
+            scope.absolute_path.join("plugins"),
+        ]
+        .into_iter()
+        .flat_map(|base| direct_manifest_plugin_roots(&base, target))
+        .collect(),
     };
-    for base in candidates {
-        if !base.is_dir() {
-            continue;
-        }
-        if let Ok(read) = fs::read_dir(&base) {
-            for entry in read.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    roots.push(p);
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Claude 的 installed_plugins.json 是安装状态权威；cache/marketplaces/data 本身不是插件。
+fn claude_user_plugin_roots(config_root: &Path) -> Vec<PathBuf> {
+    let plugins_root = config_root.join("plugins");
+    let cache_root = plugins_root.join("cache");
+    let mut roots = Vec::new();
+    if let Ok(raw) = fs::read_to_string(plugins_root.join("installed_plugins.json")) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(plugins) = value.get("plugins").and_then(|v| v.as_object()) {
+                for installs in plugins.values().filter_map(|v| v.as_array()) {
+                    for install in installs {
+                        if install
+                            .get("scope")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|scope| scope != "user")
+                        {
+                            continue;
+                        }
+                        let Some(path) = install.get("installPath").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let path = PathBuf::from(path);
+                        if path.is_dir() && path.starts_with(&cache_root) {
+                            roots.push(path);
+                        }
+                    }
                 }
             }
         }
     }
+    // Development/direct installs remain supported, but only with a target manifest.
+    roots.extend(direct_manifest_plugin_roots(
+        &plugins_root,
+        AgentTarget::Claude,
+    ));
     roots
+}
+
+/// Codex 当前没有稳定 registry 文件；只认 cache 中精确 `.codex-plugin/plugin.json` 根。
+fn codex_user_plugin_roots(config_root: &Path) -> Vec<PathBuf> {
+    let plugins_root = config_root.join("plugins");
+    let cache_root = plugins_root.join("cache");
+    let mut roots = direct_manifest_plugin_roots(&plugins_root, AgentTarget::Codex);
+    if cache_root.is_dir() {
+        for entry in walkdir::WalkDir::new(&cache_root)
+            .follow_links(false)
+            .max_depth(5)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() || entry.file_name() != "plugin.json" {
+                continue;
+            }
+            let Some(manifest_dir) = entry.path().parent() else {
+                continue;
+            };
+            if manifest_dir.file_name().and_then(|v| v.to_str()) != Some(".codex-plugin") {
+                continue;
+            }
+            let Some(root) = manifest_dir.parent() else {
+                continue;
+            };
+            if root.starts_with(&cache_root) {
+                roots.push(root.to_path_buf());
+            }
+        }
+    }
+    roots
+}
+
+/// 只返回含目标 manifest 的一级插件目录，拒绝 cache/data/staging 等基础设施目录。
+fn direct_manifest_plugin_roots(base: &Path, target: AgentTarget) -> Vec<PathBuf> {
+    let manifest = match target {
+        AgentTarget::Claude => ".claude-plugin/plugin.json",
+        AgentTarget::Codex => ".codex-plugin/plugin.json",
+        AgentTarget::OpenCode => "package.json",
+    };
+    let Ok(read) = fs::read_dir(base) else {
+        return Vec::new();
+    };
+    read.filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join(manifest).is_file())
+        .collect()
 }
 
 /// 目录树单一确定性 hash（相对路径/类型/内容；不跟随 symlink）。
@@ -626,7 +851,13 @@ fn deterministic_is_executable(metadata: &fs::Metadata) -> bool {
 /// Code Logic: 优先 manifest 文件字节；无 manifest 才回落 path display（与历史 inventory 一致）；
 /// tree_hash 为递归相对路径/类型/内容 hash。
 pub fn hash_plugin_root(root: &Path) -> Result<(String, String), AppError> {
-    // 优先 manifest 字节 + 目录 tree（不写 CAS）
+    let content_hash = hash_plugin_manifest(root)?;
+    let tree_hash = hash_directory_tree(root)?;
+    Ok((content_hash, tree_hash))
+}
+
+/// Plugin manifest 身份 hash；列表扫描使用，完整 tree 延迟到动作 preview。
+fn hash_plugin_manifest(root: &Path) -> Result<String, AppError> {
     let mut hasher_material = Vec::new();
     for rel in [
         ".claude-plugin/plugin.json",
@@ -640,13 +871,50 @@ pub fn hash_plugin_root(root: &Path) -> Result<(String, String), AppError> {
             break;
         }
     }
-    let content_hash = if hasher_material.is_empty() {
+    Ok(if hasher_material.is_empty() {
         sha256_hex(root.display().to_string().as_bytes())
     } else {
         sha256_hex(&hasher_material)
-    };
-    let tree_hash = hash_directory_tree(root)?;
-    Ok((content_hash, tree_hash))
+    })
+}
+
+#[derive(Clone)]
+struct CachedPluginHash {
+    metadata_fingerprint: String,
+    hashes: (String, String),
+}
+
+/// 只读 inventory 专用增量 hash；mutation 校验继续调用未缓存的 `hash_plugin_root`。
+fn hash_plugin_root_cached(root: &Path) -> Result<(String, String), AppError> {
+    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedPluginHash>>> = OnceLock::new();
+    let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let metadata_fingerprint =
+        crate::agent_hub::targets::tree_metadata::tree_metadata_fingerprint(root)?;
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .filter(|entry| entry.metadata_fingerprint == metadata_fingerprint)
+        .cloned()
+    {
+        return Ok(hit.hashes);
+    }
+    let hashes = hash_plugin_root(root)?;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= 512 && !guard.contains_key(&key) {
+        guard.clear();
+    }
+    guard.insert(
+        key,
+        CachedPluginHash {
+            metadata_fingerprint,
+            hashes: hashes.clone(),
+        },
+    );
+    Ok(hashes)
 }
 
 fn discovered_to_item(
@@ -1337,6 +1605,54 @@ enabled = false
     }
 
     #[test]
+    fn filtered_scan_limits_target_kind_and_scope_before_inventory_result() {
+        let (_tmp, env) = seed_all_targets_fixture();
+        let scopes = user_and_projects(&env.home);
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Skill),
+            scope_kind: Some(ScopeKind::User),
+        };
+        let (targets, items) = scan_portable_inventory_facts_query(&env, &scopes, query).unwrap();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, AgentTarget::Claude);
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|item| {
+            item.target == AgentTarget::Claude
+                && item.kind == PortableAssetKind::Skill
+                && item.scope_kind == ScopeKind::User
+                && item.content_hash.is_some()
+                && item.tree_hash.is_none()
+        }));
+        assert!(items.iter().any(|item| {
+            item.native_id == "shared-name"
+                && item.source_origin == PortableInventorySourceOrigin::PluginComponent
+        }));
+        assert!(!items
+            .iter()
+            .any(|item| item.kind == PortableAssetKind::Plugin));
+    }
+
+    #[test]
+    fn filtered_plugin_list_defers_recursive_tree_hash() {
+        let (_tmp, env) = seed_all_targets_fixture();
+        let scopes = user_and_projects(&env.home);
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+        };
+        let (_targets, items) = scan_portable_inventory_facts_query(&env, &scopes, query).unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|item| {
+            item.kind == PortableAssetKind::Plugin
+                && item.content_hash.is_some()
+                && item.tree_hash.is_none()
+        }));
+    }
+
+    #[test]
     fn unopted_project_is_read_only_and_opted_project_scanned() {
         let (_tmp, env) = seed_all_targets_fixture();
         let scopes = user_and_projects(&env.home);
@@ -1411,6 +1727,50 @@ enabled = false
             changed, without_empty_dir,
             "empty directory type/path is tree-bound"
         );
+    }
+
+    #[test]
+    fn plugin_root_discovery_uses_installs_and_rejects_infrastructure_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_root = dir.path().join(".claude");
+        let installed = claude_root.join("plugins/cache/market/demo/1.0.0");
+        fs::create_dir_all(&installed).unwrap();
+        fs::create_dir_all(claude_root.join("plugins/cache/not-a-plugin/nested")).unwrap();
+        fs::create_dir_all(claude_root.join("plugins/marketplaces/huge-tree")).unwrap();
+        fs::create_dir_all(claude_root.join("plugins/data/session-state")).unwrap();
+        write(
+            &claude_root.join("plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "demo@market": [{
+                        "scope": "user",
+                        "installPath": installed.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        let roots = claude_user_plugin_roots(&claude_root);
+        assert_eq!(roots, vec![installed]);
+        assert!(!roots.iter().any(|path| {
+            ["cache", "data", "marketplaces"]
+                .iter()
+                .any(|name| path.ends_with(name))
+        }));
+
+        let codex_root = dir.path().join(".codex");
+        let codex_plugin = codex_root.join("plugins/cache/market/demo/2.0.0");
+        write(
+            &codex_plugin.join(".codex-plugin/plugin.json"),
+            r#"{"name":"demo"}"#,
+        );
+        fs::create_dir_all(codex_root.join("plugins/.plugin-appserver")).unwrap();
+        fs::create_dir_all(codex_root.join("plugins/data")).unwrap();
+
+        let roots = codex_user_plugin_roots(&codex_root);
+        assert_eq!(roots, vec![codex_plugin]);
     }
 
     #[test]

@@ -413,6 +413,9 @@ describe('useAgentHubController', () => {
       expect(portableApiMocks.inspect).toHaveBeenCalledWith({
         deviceId: 'peer-online',
         projectRef: null,
+        target: 'claude',
+        kind: 'skill',
+        scopeKind: 'user',
       }),
     );
     expect(listAssets).not.toHaveBeenCalled();

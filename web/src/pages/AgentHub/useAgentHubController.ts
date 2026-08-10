@@ -547,6 +547,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const portableInventoryBase = usePortableInventoryController({
     ...inventoryRequestContext,
     enabled: portableLaneActive,
+    initialFilters: {
+      target: hubContext.agent,
+      kind: isAssetKindTab(hubContext.tab)
+        ? (hubContext.tab as PortableInventoryFilters['kind'])
+        : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
+      scope: hubContext.scope,
+    },
   });
   /**
    * Business Logic: 壳层工具栏 Pull 预填当前 peer（deviceId）与当前 Agent（same-agent）。
@@ -1942,6 +1949,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         // 透传壳层 device/project，peer 路径 API fail-closed 不静默本机写
         const plan = await portableAssetApi.previewAction({
           ...request,
+          inventoryQuery: portableInventoryBase.inventoryQuery,
           ...portableInventoryBase.requestContext,
         });
         if (!mountedRef.current) return;
@@ -1958,6 +1966,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     [
       mintClientRequestId,
       portableInventoryBase.mutationBlocked,
+      portableInventoryBase.inventoryQuery,
       portableInventoryBase.requestContext,
       portableInventoryBase.stale,
       t,

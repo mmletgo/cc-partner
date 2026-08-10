@@ -22,6 +22,7 @@ use crate::error::AppError;
 use crate::storage::AgentHubRepo;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 预取的 canonical 对账事实（只读；非持久写模型）。
 ///
@@ -136,9 +137,43 @@ pub async fn reconcile_portable_inventory(
 /// Business Logic: 仅 SELECT；失败上抛，不部分写回。
 /// Code Logic: assets × bindings × materializations × committed adoptions。
 async fn load_canonical_facts(repo: &AgentHubRepo) -> Result<Vec<PortableCanonicalFact>, AppError> {
-    let assets = repo.list_assets(None, None).await?;
-    let materializations = repo.list_materializations().await?;
-    let adoptions = repo.list_adoptions().await?;
+    let (assets, bindings, materializations, adoptions) = tokio::try_join!(
+        repo.list_assets(None, None),
+        repo.list_target_bindings(),
+        repo.list_materializations(),
+        repo.list_adoptions(),
+    )?;
+    let mut bindings_by_asset = BTreeMap::<String, Vec<_>>::new();
+    for binding in &bindings {
+        bindings_by_asset
+            .entry(binding.asset_id.clone())
+            .or_default()
+            .push(binding);
+    }
+    let materialization_by_binding = materializations
+        .iter()
+        .map(|mat| (mat.target_binding_id.as_str(), mat))
+        .collect::<BTreeMap<_, _>>();
+    let committed_adoptions = adoptions
+        .iter()
+        .filter(|adoption| adoption.state == AdoptionState::Committed)
+        .filter_map(|adoption| {
+            adoption
+                .asset_id
+                .as_ref()
+                .map(|asset_id| (asset_id.clone(), adoption.target))
+        })
+        .collect::<BTreeSet<_>>();
+    let collision_adoptions = adoptions
+        .iter()
+        .filter(|adoption| adoption.state == AdoptionState::ExternalCollision)
+        .filter_map(|adoption| {
+            adoption
+                .asset_id
+                .as_ref()
+                .map(|asset_id| (asset_id.clone(), adoption.target))
+        })
+        .collect::<BTreeSet<_>>();
 
     let mut facts = Vec::new();
     for asset in assets {
@@ -146,7 +181,10 @@ async fn load_canonical_facts(repo: &AgentHubRepo) -> Result<Vec<PortableCanonic
             Ok(k) => k,
             Err(_) => continue, // 跳过 Instruction/Agent/Hook
         };
-        let bindings = repo.list_target_bindings_for_asset(&asset.id).await?;
+        let bindings = bindings_by_asset
+            .get(&asset.id)
+            .cloned()
+            .unwrap_or_default();
         // 无 binding 时仍可按 asset 身份匹配（hub_owned=false → unmanaged/无 desired）
         if bindings.is_empty() {
             for target in [
@@ -179,14 +217,12 @@ async fn load_canonical_facts(repo: &AgentHubRepo) -> Result<Vec<PortableCanonic
             continue;
         }
         for binding in bindings {
-            let mat = materializations
-                .iter()
-                .find(|m| m.target_binding_id == binding.id && m.asset_id == asset.id);
-            let committed_adoption = adoptions.iter().any(|a| {
-                a.asset_id.as_deref() == Some(asset.id.as_str())
-                    && a.target == binding.target
-                    && a.state == AdoptionState::Committed
-            });
+            let mat = materialization_by_binding
+                .get(binding.id.as_str())
+                .copied()
+                .filter(|mat| mat.asset_id == asset.id);
+            let committed_adoption =
+                committed_adoptions.contains(&(asset.id.clone(), binding.target));
             let hub_owned = mat.is_some() || committed_adoption;
             let materialization_status = mat.map(|m| m.status);
             let unsupported = matches!(
@@ -196,11 +232,8 @@ async fn load_canonical_facts(repo: &AgentHubRepo) -> Result<Vec<PortableCanonic
             let external_collision = matches!(
                 materialization_status,
                 Some(MaterializationStatus::ExternalCollision)
-            ) || adoptions.iter().any(|a| {
-                a.asset_id.as_deref() == Some(asset.id.as_str())
-                    && a.target == binding.target
-                    && a.state == AdoptionState::ExternalCollision
-            });
+            ) || collision_adoptions
+                .contains(&(asset.id.clone(), binding.target));
             facts.push(PortableCanonicalFact {
                 asset_id: asset.id.clone(),
                 scope_id: asset.scope_id.clone(),

@@ -120,7 +120,7 @@ pub async fn preview_portable_asset_action_with_inventory(
             ));
         }
 
-        let (change, mut reasons) = build_change(item, target_dto, &request)?;
+        let (change, mut reasons) = build_change(item, target_dto, &request).await?;
         plan_blocking.append(&mut reasons);
         changes.push(change);
     }
@@ -197,7 +197,7 @@ fn blocked_missing_change(
     }
 }
 
-fn build_change(
+async fn build_change(
     item: &PortableInventoryItemDto,
     target_dto: Option<&crate::agent_hub::portable_inventory::PortableInventoryTargetDto>,
     request: &PreviewPortableAssetActionRequest,
@@ -360,11 +360,42 @@ fn build_change(
 
     // MCP expected_source_hash 必须与 config_patch leaf value_content_hash 同域。
     // Skill/Command content_hash 已是 inventory 语义（Skill=SKILL.md-only）。
-    let expected_source_hash = match item.kind {
-        PortableAssetKind::Mcp => {
-            mcp_expected_leaf_hash(item).or_else(|| item.content_hash.clone())
+    let (expected_source_hash, expected_tree_hash) = match item.kind {
+        PortableAssetKind::Mcp => (
+            mcp_expected_leaf_hash(item).or_else(|| item.content_hash.clone()),
+            item.tree_hash.clone(),
+        ),
+        PortableAssetKind::Plugin if item.tree_hash.is_none() => {
+            let root: std::path::PathBuf = item
+                .source_path
+                .as_deref()
+                .ok_or_else(|| AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"))?
+                .into();
+            let (content_hash, tree_hash) = tokio::task::spawn_blocking(move || {
+                crate::agent_hub::portable_inventory::hash_plugin_root(&root)
+            })
+            .await
+            .map_err(|error| {
+                AppError::generic(format!("portable plugin preview hash: {error}"))
+            })??;
+            (Some(content_hash), Some(tree_hash))
         }
-        _ => item.content_hash.clone(),
+        PortableAssetKind::Skill if item.tree_hash.is_none() => {
+            let root: std::path::PathBuf = item
+                .source_path
+                .as_deref()
+                .ok_or_else(|| AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"))?
+                .into();
+            let (content_hash, tree_hash, _, _) = tokio::task::spawn_blocking(move || {
+                crate::agent_hub::targets::portable::hash_skill_directory(&root)
+            })
+            .await
+            .map_err(|error| {
+                AppError::generic(format!("portable skill preview hash: {error}"))
+            })??;
+            (Some(content_hash), Some(tree_hash))
+        }
+        _ => (item.content_hash.clone(), item.tree_hash.clone()),
     };
 
     let change = PortableAssetActionChangeDto {
@@ -374,7 +405,7 @@ fn build_change(
         path: item.source_path.clone(),
         operation,
         expected_source_hash,
-        expected_tree_hash: item.tree_hash.clone(),
+        expected_tree_hash,
         expected_canonical_revision_id: request
             .expected_canonical_revision_id
             .clone()

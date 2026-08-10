@@ -11,8 +11,9 @@
 //!     幂等可重复调用；失败项标 `unsupported` + reason。
 
 use crate::agent_hub::models::{
-    AssetPolicy, DesiredPresence, MaterializationStatus, NewLogicalAsset, NewMaterialization,
-    NewScopeNode, NewTargetBinding, ScopeKind,
+    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, Materialization,
+    MaterializationStatus, NewLogicalAsset, NewMaterialization, NewScopeNode, NewTargetBinding,
+    ScopeKind, ScopeNode, TargetBinding,
 };
 use crate::agent_hub::portable_inventory::models::{
     PortableInventoryItemDto, PortableInventoryManagementState, PortableInventorySourceOrigin,
@@ -20,6 +21,7 @@ use crate::agent_hub::portable_inventory::models::{
 use crate::error::AppError;
 use crate::storage::AgentHubRepo;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// ensure-managed 汇总报告（日志/测试用；不进 UI 主路径）。
 ///
@@ -61,12 +63,27 @@ pub async fn ensure_discovered_portable_items_managed(
     items: &mut [PortableInventoryItemDto],
 ) -> EnsureManagedReport {
     let mut report = EnsureManagedReport::default();
+    let mut facts = match EnsureManagedFacts::load(repo).await {
+        Ok(facts) => facts,
+        Err(err) => {
+            let reason = ensure_failure_reason(&err);
+            for item in items.iter_mut().filter(|item| is_ensure_candidate(item)) {
+                mark_item_ensure_failed(item, &reason);
+                report.failures.push(EnsureManagedFailure {
+                    inventory_item_id: item.inventory_item_id.clone(),
+                    reason: reason.clone(),
+                });
+            }
+            report.skipped = items.len().saturating_sub(report.failures.len());
+            return report;
+        }
+    };
     for item in items.iter_mut() {
         if !is_ensure_candidate(item) {
             report.skipped += 1;
             continue;
         }
-        match ensure_one_item(repo, item).await {
+        match ensure_one_item(repo, &mut facts, item).await {
             Ok(EnsureOneOutcome::Ensured) => report.ensured += 1,
             Ok(EnsureOneOutcome::Skipped) => report.skipped += 1,
             Err(err) => {
@@ -92,6 +109,57 @@ pub async fn ensure_discovered_portable_items_managed(
 enum EnsureOneOutcome {
     Ensured,
     Skipped,
+}
+
+/// 一次 inspect 预取的账本索引，消除每条资产 4 次 SELECT 的 N+1。
+struct EnsureManagedFacts {
+    scopes: BTreeMap<String, ScopeNode>,
+    assets: BTreeMap<(String, AssetKind, String, String), LogicalAsset>,
+    bindings: BTreeMap<(String, AgentTarget), TargetBinding>,
+    materializations: BTreeMap<String, Materialization>,
+}
+
+impl EnsureManagedFacts {
+    async fn load(repo: &AgentHubRepo) -> Result<Self, AppError> {
+        let (scopes, assets, bindings, materializations) = tokio::try_join!(
+            repo.list_scopes(),
+            repo.list_assets(None, None),
+            repo.list_target_bindings(),
+            repo.list_materializations(),
+        )?;
+        let scopes = scopes
+            .into_iter()
+            .map(|scope| (scope.id.clone(), scope))
+            .collect();
+        let assets = assets
+            .into_iter()
+            .map(|asset| {
+                (
+                    (
+                        asset.scope_id.clone(),
+                        asset.kind,
+                        asset.origin_namespace.clone(),
+                        asset.logical_key.clone(),
+                    ),
+                    asset,
+                )
+            })
+            .collect();
+        let bindings = bindings
+            .into_iter()
+            .map(|binding| ((binding.asset_id.clone(), binding.target), binding))
+            .collect();
+        let materializations = materializations
+            .into_iter()
+            .map(|mat| (mat.target_binding_id.clone(), mat))
+            .collect();
+        Ok(Self {
+            scopes,
+            assets,
+            bindings,
+            materializations,
+        })
+    }
 }
 
 /// 是否应进入 ensure（已 blocked/unsupported 不碰；无 identity 跳过）。
@@ -127,18 +195,22 @@ fn is_ensure_candidate(item: &PortableInventoryItemDto) -> bool {
 ///     ensure_scope → find/insert asset → get/create binding → get/update materialization。
 async fn ensure_one_item(
     repo: &AgentHubRepo,
+    facts: &mut EnsureManagedFacts,
     item: &PortableInventoryItemDto,
 ) -> Result<EnsureOneOutcome, AppError> {
-    let scope_id = ensure_scope_for_item(repo, item).await?;
+    let scope_id = ensure_scope_for_item(repo, facts, item).await?;
     let origin_namespace = origin_namespace_for_item(item);
     let logical_key = item.native_id.clone();
     let asset_kind = item.kind.to_asset_kind();
+    let asset_key = (
+        scope_id.clone(),
+        asset_kind,
+        origin_namespace.clone(),
+        logical_key.clone(),
+    );
 
-    let asset = match repo
-        .find_asset_by_key(&scope_id, asset_kind, &origin_namespace, &logical_key)
-        .await?
-    {
-        Some(a) => a,
+    let asset = match facts.assets.get(&asset_key).cloned() {
+        Some(asset) => asset,
         None => match repo
             .insert_asset(NewLogicalAsset {
                 scope_id: scope_id.clone(),
@@ -155,7 +227,10 @@ async fn ensure_one_item(
             })
             .await
         {
-            Ok(a) => a,
+            Ok(asset) => {
+                facts.assets.insert(asset_key.clone(), asset.clone());
+                asset
+            }
             Err(e) if is_unique_conflict(&e) => repo
                 .find_asset_by_key(&scope_id, asset_kind, &origin_namespace, &logical_key)
                 .await?
@@ -165,25 +240,32 @@ async fn ensure_one_item(
             Err(e) => return Err(e),
         },
     };
+    facts
+        .assets
+        .entry(asset_key)
+        .or_insert_with(|| asset.clone());
 
-    let bindings = repo.list_target_bindings_for_asset(&asset.id).await?;
-    let binding = if let Some(existing) = bindings.iter().find(|b| b.target == item.target) {
+    let binding_key = (asset.id.clone(), item.target);
+    let binding = if let Some(existing) = facts.bindings.get(&binding_key) {
         // 保留用户/卸载路径写下的 desired；不因 rediscovery 强行 Present
         existing.clone()
     } else {
         let desired_enabled = item.actual_enabled.unwrap_or(true);
-        repo.upsert_target_binding(NewTargetBinding {
-            asset_id: asset.id.clone(),
-            target: item.target,
-            local_scope_mapping_id: None,
-            checkout_binding_id: None,
-            desired_presence: DesiredPresence::Present,
-            desired_enabled,
-        })
-        .await?
+        let binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: item.target,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled,
+            })
+            .await?;
+        facts.bindings.insert(binding_key, binding.clone());
+        binding
     };
 
-    let existing_mat = repo.get_materialization_by_binding(&binding.id).await?;
+    let existing_mat = facts.materializations.get(&binding.id).cloned();
     if let Some(mat) = existing_mat.as_ref() {
         if matches!(
             mat.status,
@@ -259,11 +341,11 @@ async fn ensure_one_item(
     if unchanged {
         return Ok(EnsureOneOutcome::Skipped);
     }
-    let _ = repo
+    let materialization = repo
         .upsert_materialization(NewMaterialization {
             asset_id: asset.id,
             target: item.target,
-            target_binding_id: binding.id,
+            target_binding_id: binding.id.clone(),
             native_path,
             last_projected_revision_id,
             rendered_hash,
@@ -272,6 +354,7 @@ async fn ensure_one_item(
             last_error,
         })
         .await?;
+    facts.materializations.insert(binding.id, materialization);
 
     Ok(EnsureOneOutcome::Ensured)
 }
@@ -279,11 +362,12 @@ async fn ensure_one_item(
 /// ensure scope 节点（user / project:…）；已存在则复用。
 async fn ensure_scope_for_item(
     repo: &AgentHubRepo,
+    facts: &mut EnsureManagedFacts,
     item: &PortableInventoryItemDto,
 ) -> Result<String, AppError> {
     let scope_id = item.scope_id.as_str();
-    if let Some(s) = repo.get_scope(scope_id).await? {
-        return Ok(s.id);
+    if let Some(s) = facts.scopes.get(scope_id) {
+        return Ok(s.id.clone());
     }
     let hub_project_id = item.project_id.clone().or_else(|| {
         scope_id
@@ -300,11 +384,17 @@ async fn ensure_scope_for_item(
         })
         .await
     {
-        Ok(s) => Ok(s.id),
+        Ok(scope) => {
+            let id = scope.id.clone();
+            facts.scopes.insert(id.clone(), scope);
+            Ok(id)
+        }
         Err(_) => {
             // 并发 insert：再读
             if let Some(s) = repo.get_scope(scope_id).await? {
-                Ok(s.id)
+                let id = s.id.clone();
+                facts.scopes.insert(id.clone(), s);
+                Ok(id)
             } else {
                 Err(AppError::generic(
                     "agent_hub_ensure_managed_scope_unavailable",

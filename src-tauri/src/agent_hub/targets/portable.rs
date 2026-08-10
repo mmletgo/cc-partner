@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// 发现来源分类。
 ///
@@ -326,6 +327,46 @@ pub fn hash_skill_directory(
     Ok((skill_hash, tree_hash, manifest, diagnostics))
 }
 
+type SkillHashResult = (String, String, TreeManifest, Vec<PortabilityDiagnostic>);
+
+#[derive(Clone)]
+struct CachedSkillHash {
+    metadata_fingerprint: String,
+    result: SkillHashResult,
+}
+
+/// 只读 discovery 专用增量 hash；adoption/action 仍调用未缓存函数重新验证内容。
+fn hash_skill_directory_cached(dir: &Path) -> Result<SkillHashResult, AppError> {
+    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedSkillHash>>> = OnceLock::new();
+    let key = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let metadata_fingerprint = super::tree_metadata::tree_metadata_fingerprint(dir)?;
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .filter(|entry| entry.metadata_fingerprint == metadata_fingerprint)
+        .cloned()
+    {
+        return Ok(hit.result);
+    }
+    let result = hash_skill_directory(dir)?;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= 2_048 && !guard.contains_key(&key) {
+        guard.clear();
+    }
+    guard.insert(
+        key,
+        CachedSkillHash {
+            metadata_fingerprint,
+            result: result.clone(),
+        },
+    );
+    Ok(result)
+}
+
 fn walk_files(
     root: &Path,
     current: &Path,
@@ -416,6 +457,26 @@ pub fn scan_skill_dirs(
     root: &Path,
     origin_kind: PortableOriginKind,
 ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    scan_skill_dirs_with_mode(target, scope_kind, root, origin_kind, false)
+}
+
+/// Inventory 列表专用 Skill 扫描：读取 SKILL.md 身份，目录树延迟到动作 preview。
+pub fn scan_skill_dirs_manifest_only(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    root: &Path,
+    origin_kind: PortableOriginKind,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    scan_skill_dirs_with_mode(target, scope_kind, root, origin_kind, true)
+}
+
+fn scan_skill_dirs_with_mode(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    root: &Path,
+    origin_kind: PortableOriginKind,
+    defer_tree_hash: bool,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
     if !root.is_dir() {
         return Ok(vec![]);
     }
@@ -431,7 +492,19 @@ pub fn scan_skill_dirs(
         if !skill_md.is_file() {
             continue;
         }
-        let text = fs::read_to_string(&skill_md).unwrap_or_default();
+        let skill_bytes = match fs::read(&skill_md) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::debug!(
+                    target = "agent_hub.portable",
+                    %error,
+                    path = %skill_md.display(),
+                    "skip unreadable skill manifest"
+                );
+                continue;
+            }
+        };
+        let text = String::from_utf8(skill_bytes.clone()).unwrap_or_default();
         let (fields, _order, _body) = parse_simple_frontmatter(&text);
         let dir_name = path
             .file_name()
@@ -444,16 +517,28 @@ pub fn scan_skill_dirs(
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| dir_name.clone());
         let description = fields.get("description").cloned().unwrap_or_default();
-        let (skill_hash, tree_hash, _manifest, mut diags) = match hash_skill_directory(&path) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(
-                    target = "agent_hub.portable",
-                    error = %e,
-                    "skip skill dir without valid tree"
-                );
-                continue;
-            }
+        let (skill_hash, tree_hash, payload_tree_hash, mut diags) = if defer_tree_hash {
+            let skill_hash = sha256_hex(&skill_bytes);
+            (
+                skill_hash.clone(),
+                None,
+                format!("deferred:{skill_hash}"),
+                Vec::new(),
+            )
+        } else {
+            let (skill_hash, tree_hash, _manifest, diagnostics) =
+                match hash_skill_directory_cached(&path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(
+                            target = "agent_hub.portable",
+                            error = %e,
+                            "skip skill dir without valid tree"
+                        );
+                        continue;
+                    }
+                };
+            (skill_hash, Some(tree_hash.clone()), tree_hash, diagnostics)
         };
         let (extensions, field_diags) =
             unknown_fields_extension(target, &fields, KNOWN_SKILL_KEYS, "/frontmatter");
@@ -462,7 +547,7 @@ pub fn scan_skill_dirs(
             name: name.clone(),
             description,
             skill_markdown_hash: skill_hash.clone(),
-            tree_manifest_hash: tree_hash.clone(),
+            tree_manifest_hash: payload_tree_hash,
             target_extensions: extensions,
         });
         out.push(DiscoveredPortableAsset {
@@ -476,7 +561,7 @@ pub fn scan_skill_dirs(
                 origin_kind,
                 native_id: dir_name,
                 content_hash: skill_hash,
-                tree_hash: Some(tree_hash),
+                tree_hash,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
                 parent_plugin_id: None,
@@ -1309,6 +1394,20 @@ pub fn scan_disabled_skill_dirs(
     Ok(found)
 }
 
+/// Inventory 列表专用 disabled Skill 扫描；延迟目录 tree hash。
+pub fn scan_disabled_skill_dirs_manifest_only(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    root: &Path,
+    origin_kind: PortableOriginKind,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let mut found = scan_skill_dirs_manifest_only(target, scope_kind, root, origin_kind)?;
+    for discovery in &mut found {
+        discovery.origin.status = PortableDiscoveryStatus::Disabled;
+    }
+    Ok(found)
+}
+
 /// 扫描 disabled 目录下的 commands。
 ///
 /// Business Logic: disabled command 路径映射 actualEnabled=false。
@@ -1347,23 +1446,47 @@ pub fn scan_plugin_components_readonly(
     plugin_root: &Path,
     plugin_id: &str,
 ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    scan_plugin_components_readonly_filtered(target, scope_kind, plugin_root, plugin_id, None)
+}
+
+/// 按组件 kind 扫描 plugin，避免 Command 页读取全部 Skill 树。
+pub fn scan_plugin_components_readonly_filtered(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    plugin_root: &Path,
+    plugin_id: &str,
+    kind: Option<AssetKind>,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
     let mut parts = Vec::new();
-    let mut skills = scan_skill_dirs(
-        target,
-        scope_kind,
-        &plugin_root.join("skills"),
-        PortableOriginKind::Plugin,
-    )?;
-    stamp_parent_plugin(&mut skills, plugin_id);
-    parts.push(skills);
-    let mut commands = scan_command_markdown_dir(
-        target,
-        scope_kind,
-        &plugin_root.join("commands"),
-        PortableOriginKind::Plugin,
-    )?;
-    stamp_parent_plugin(&mut commands, plugin_id);
-    parts.push(commands);
+    if kind.is_none() || kind == Some(AssetKind::Skill) {
+        let mut skills = if kind == Some(AssetKind::Skill) {
+            scan_skill_dirs_manifest_only(
+                target,
+                scope_kind,
+                &plugin_root.join("skills"),
+                PortableOriginKind::Plugin,
+            )?
+        } else {
+            scan_skill_dirs(
+                target,
+                scope_kind,
+                &plugin_root.join("skills"),
+                PortableOriginKind::Plugin,
+            )?
+        };
+        stamp_parent_plugin(&mut skills, plugin_id);
+        parts.push(skills);
+    }
+    if kind.is_none() || kind == Some(AssetKind::Command) {
+        let mut commands = scan_command_markdown_dir(
+            target,
+            scope_kind,
+            &plugin_root.join("commands"),
+            PortableOriginKind::Plugin,
+        )?;
+        stamp_parent_plugin(&mut commands, plugin_id);
+        parts.push(commands);
+    }
     Ok(merge_discoveries(parts))
 }
 
@@ -1498,6 +1621,41 @@ config_file = "agents/reviewer.md"
             relative_root: None,
             codex_fallback_filenames: vec![],
         }
+    }
+
+    #[test]
+    fn incremental_skill_hash_cache_invalidates_when_tree_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("skills");
+        let skill = root.join("review");
+        write(&skill.join("SKILL.md"), "---\nname: review\n---\nfirst\n");
+        write(&skill.join("notes.txt"), "one\n");
+
+        let first = scan_skill_dirs(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &root,
+            PortableOriginKind::Native,
+        )
+        .expect("first scan");
+        let second = scan_skill_dirs(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &root,
+            PortableOriginKind::Native,
+        )
+        .expect("cached scan");
+        assert_eq!(first[0].origin.tree_hash, second[0].origin.tree_hash);
+
+        write(&skill.join("notes.txt"), "two changed\n");
+        let changed = scan_skill_dirs(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &root,
+            PortableOriginKind::Native,
+        )
+        .expect("changed scan");
+        assert_ne!(first[0].origin.tree_hash, changed[0].origin.tree_hash);
     }
 
     #[test]

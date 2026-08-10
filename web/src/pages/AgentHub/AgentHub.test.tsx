@@ -288,6 +288,7 @@ function buildProps(
       getPrimaryAction: vi.fn(() => null),
       refresh: vi.fn(async () => undefined),
       requestContext: { deviceId: null, projectRef: null },
+      inventoryQuery: { kind: 'skill' },
     } as UseAgentHubControllerResult['portableInventory'],
     portableDetailsOpen: false,
     portableSelectedItem: null,

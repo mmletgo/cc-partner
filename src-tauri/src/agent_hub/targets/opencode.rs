@@ -15,8 +15,9 @@ use super::paths::{
 };
 use super::portable::{
     merge_discoveries, parse_json_or_jsonc, parse_mcp_servers_json_map, render_portable_payload,
-    scan_agent_markdown_dir, scan_command_markdown_dir, scan_skill_dirs, AssetRenderContext,
-    DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
+    scan_agent_markdown_dir, scan_command_markdown_dir, scan_skill_dirs,
+    scan_skill_dirs_manifest_only, AssetRenderContext, DiscoveredPortableAsset, PortableOriginKind,
+    TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -24,7 +25,7 @@ use super::{
     TargetEnvironment, TargetProbe,
 };
 use crate::agent_hub::assets::PortableAssetPayload;
-use crate::agent_hub::models::{AgentTarget, ScopeKind};
+use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 
@@ -210,6 +211,81 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
             }
         }
 
+        Ok(merge_discoveries(parts))
+    }
+
+    /// Inventory 精确 kind 扫描；Plugin component 由 inventory 权威安装根扫描器补充。
+    fn scan_portable_assets_filtered(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+        kind: Option<AssetKind>,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        let Some(kind) = kind else {
+            return self.scan_portable_assets(scope, env);
+        };
+        use super::portable::scan_disabled_skill_dirs_manifest_only;
+        let homes = TargetPathResolver::resolve_all(env);
+        let native_root = match scope.scope_kind {
+            ScopeKind::User => homes.opencode.config_root.clone(),
+            ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".opencode"),
+        };
+        let mut parts = Vec::new();
+        match kind {
+            AssetKind::Skill => {
+                parts.push(scan_skill_dirs_manifest_only(
+                    AgentTarget::OpenCode,
+                    scope.scope_kind,
+                    &native_root.join("skills"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.push(scan_disabled_skill_dirs_manifest_only(
+                    AgentTarget::OpenCode,
+                    scope.scope_kind,
+                    &native_root.join("disabled/skills"),
+                    PortableOriginKind::Native,
+                )?);
+                let compatibility_base = if scope.scope_kind == ScopeKind::User {
+                    env.home.clone()
+                } else {
+                    scope.absolute_path.clone()
+                };
+                for relative in [".claude/skills", ".agents/skills"] {
+                    parts.push(scan_skill_dirs_manifest_only(
+                        AgentTarget::OpenCode,
+                        scope.scope_kind,
+                        &compatibility_base.join(relative),
+                        PortableOriginKind::Compatibility,
+                    )?);
+                }
+            }
+            AssetKind::Command => parts.push(scan_command_markdown_dir(
+                AgentTarget::OpenCode,
+                scope.scope_kind,
+                &native_root.join("commands"),
+                PortableOriginKind::Native,
+            )?),
+            AssetKind::Agent => parts.push(scan_agent_markdown_dir(
+                AgentTarget::OpenCode,
+                scope.scope_kind,
+                &native_root.join("agents"),
+                PortableOriginKind::Native,
+            )?),
+            AssetKind::Mcp => {
+                if scope.scope_kind == ScopeKind::User {
+                    parts.push(scan_opencode_mcp_config(scope.scope_kind, env, &homes)?);
+                } else {
+                    for name in ["opencode.json", "opencode.jsonc"] {
+                        let path = scope.absolute_path.join(name);
+                        if path.is_file() {
+                            parts.push(scan_mcp_file(scope.scope_kind, &path)?);
+                            break;
+                        }
+                    }
+                }
+            }
+            AssetKind::Instruction | AssetKind::Plugin | AssetKind::Hook => {}
+        }
         Ok(merge_discoveries(parts))
     }
 

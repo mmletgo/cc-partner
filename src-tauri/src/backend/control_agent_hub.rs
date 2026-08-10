@@ -25,6 +25,7 @@ use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::portable_actions::{
     ApplyPortableAssetActionRequest, PreviewPortableAssetActionRequest,
 };
+use crate::agent_hub::portable_inventory::PortableInventoryQuery;
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::replication::sender::{
     compute_push_preview_token, get_push_report_for_state, push_selection_for_state,
@@ -358,7 +359,10 @@ async fn dispatch_agent_hub_op(
             Ok(serde_json::to_value(mapping)?)
         }
         "agent_hub.inspect_portable_inventory" => {
-            let dto = PortableService::inspect_portable_inventory(state).await?;
+            let query: PortableInventoryQuery = serde_json::from_value(payload).map_err(|e| {
+                AppError::validation(format!("inspect_portable_inventory payload: {e}"))
+            })?;
+            let dto = PortableService::inspect_portable_inventory_query(state, query).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.preview_portable_asset_action" => {

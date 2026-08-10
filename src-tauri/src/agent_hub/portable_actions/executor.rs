@@ -21,9 +21,10 @@ use super::targets::{
 use crate::agent_hub::models::PortableActionClaim;
 use crate::agent_hub::packages::activator::ProcessRunner;
 use crate::agent_hub::portable_inventory::{
-    hash_directory_tree, hash_plugin_root, inspect_portable_inventory_force,
-    inspect_portable_inventory_force_with_env, inspect_portable_inventory_with_env,
-    PortableInventoryItemDto, PortableInventorySnapshotDto,
+    hash_directory_tree, hash_plugin_root, inspect_portable_inventory_force_query,
+    inspect_portable_inventory_force_with_env_query, inspect_portable_inventory_query,
+    inspect_portable_inventory_with_env_query, PortableInventoryItemDto, PortableInventoryQuery,
+    PortableInventorySnapshotDto,
 };
 use crate::agent_hub::targets::paths::TargetEnvironment;
 use crate::agent_hub::targets::portable::hash_skill_directory;
@@ -156,7 +157,9 @@ pub async fn apply_portable_asset_action_with(
                 &request.client_request_id,
                 &stored.public,
             );
-            if let Ok(post) = resolve_post_inventory(state, deps).await {
+            if let Ok(post) =
+                resolve_post_inventory(state, deps, stored.request.inventory_query).await
+            {
                 let by_id: BTreeMap<_, _> = post
                     .items
                     .iter()
@@ -233,7 +236,7 @@ async fn revalidate_claimed_plan(
     }
 
     // 重新 inspect inventory 并比对 snapshot hash + target fingerprints
-    let live = match resolve_force_inventory(state, deps).await {
+    let live = match resolve_force_inventory(state, deps, stored.request.inventory_query).await {
         Ok(s) => s,
         Err(e) => {
             return Err(format!(
@@ -323,7 +326,7 @@ async fn execute_claimed_plan(
         });
     }
 
-    let pre_snapshot = resolve_pre_inventory(state, deps).await?;
+    let pre_snapshot = resolve_pre_inventory(state, deps, stored.request.inventory_query).await?;
     let pre_by_id: BTreeMap<String, PortableInventoryItemDto> = pre_snapshot
         .items
         .iter()
@@ -407,7 +410,7 @@ async fn execute_claimed_plan(
     }
 
     // rescan
-    let post = resolve_post_inventory(state, deps).await?;
+    let post = resolve_post_inventory(state, deps, stored.request.inventory_query).await?;
     let post_by_id: BTreeMap<String, &PortableInventoryItemDto> = post
         .items
         .iter()
@@ -566,6 +569,7 @@ fn reconcile_item(
 async fn resolve_pre_inventory(
     state: Option<&AppState>,
     deps: &PortableActionExecutorDeps,
+    query: PortableInventoryQuery,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     if let Some(snap) = &deps.pre_inventory {
         return Ok(snap.clone());
@@ -573,14 +577,15 @@ async fn resolve_pre_inventory(
     let state = state
         .ok_or_else(|| AppError::validation("PORTABLE_ASSET_ACTION_STATE_REQUIRED_FOR_INSPECT"))?;
     if let Some(env) = &deps.env {
-        return inspect_portable_inventory_with_env(state, env).await;
+        return inspect_portable_inventory_with_env_query(state, env, query).await;
     }
-    crate::agent_hub::portable_inventory::inspect_portable_inventory(state).await
+    inspect_portable_inventory_query(state, query).await
 }
 
 async fn resolve_force_inventory(
     state: Option<&AppState>,
     deps: &PortableActionExecutorDeps,
+    query: PortableInventoryQuery,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     if let Some(snap) = &deps.pre_inventory {
         return Ok(snap.clone());
@@ -588,14 +593,15 @@ async fn resolve_force_inventory(
     let state = state
         .ok_or_else(|| AppError::validation("PORTABLE_ASSET_ACTION_STATE_REQUIRED_FOR_INSPECT"))?;
     if let Some(env) = &deps.env {
-        return inspect_portable_inventory_force_with_env(state, env).await;
+        return inspect_portable_inventory_force_with_env_query(state, env, query).await;
     }
-    inspect_portable_inventory_force(state).await
+    inspect_portable_inventory_force_query(state, query).await
 }
 
 async fn resolve_post_inventory(
     state: Option<&AppState>,
     deps: &PortableActionExecutorDeps,
+    query: PortableInventoryQuery,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     // 无论是否存在测试 override，post-mutation 入口都先失效旧缓存。
     crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
@@ -605,9 +611,9 @@ async fn resolve_post_inventory(
     let state = state
         .ok_or_else(|| AppError::validation("PORTABLE_ASSET_ACTION_STATE_REQUIRED_FOR_INSPECT"))?;
     if let Some(env) = &deps.env {
-        return inspect_portable_inventory_force_with_env(state, env).await;
+        return inspect_portable_inventory_force_with_env_query(state, env, query).await;
     }
-    inspect_portable_inventory_force(state).await
+    inspect_portable_inventory_force_query(state, query).await
 }
 
 /// 按 inventory 行的 tree hash 域重算源树，并在 mutation 前 fail-closed。
@@ -797,6 +803,7 @@ mod tests {
             repo,
             PreviewPortableAssetActionRequest {
                 inventory_snapshot_hash: snap.inventory_snapshot_hash.clone(),
+                inventory_query: Default::default(),
                 inventory_item_ids: ids,
                 action,
                 keep_data,

@@ -1440,10 +1440,11 @@ impl BackendControlClient {
     /// Code Logic: agent_hub.inspect_portable_inventory；PORTABLE_INVENTORY_TIMEOUT。
     pub async fn agent_hub_inspect_portable_inventory(
         &self,
+        query: crate::agent_hub::PortableInventoryQuery,
     ) -> Result<crate::agent_hub::PortableInventorySnapshotDto, AppError> {
         self.agent_hub_op_with_timeout(
             "agent_hub.inspect_portable_inventory",
-            serde_json::json!({}),
+            query,
             portable_control_read_timeout("agent_hub.inspect_portable_inventory"),
         )
         .await

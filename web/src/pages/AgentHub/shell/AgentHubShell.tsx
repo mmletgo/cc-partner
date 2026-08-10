@@ -68,7 +68,7 @@ export interface AgentHubShellProps {
   actions: AgentHubShellActions;
   /**
    * skill/command/mcp/plugin tab 旁数量（原 portable 子导航 kindCounts）。
-   * 未加载时可为 0；instructions 不展示。
+   * 未加载 kind 缺省且不展示数字；instructions 不展示。
    */
   tabCounts?: AgentHubShellTabCounts | null;
   children: ReactNode;

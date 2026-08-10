@@ -156,6 +156,7 @@ function controller(
     refresh: vi.fn(async () => undefined),
     requestContext: { deviceId: null, projectRef: null },
     ...patch,
+    inventoryQuery: patch.inventoryQuery ?? { target: 'claude', kind: 'skill' },
   };
 }
 

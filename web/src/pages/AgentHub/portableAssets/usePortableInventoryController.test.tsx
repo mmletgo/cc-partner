@@ -233,7 +233,7 @@ describe('usePortableInventoryController', () => {
     expect(result.current.pendingAction).toBeNull();
   });
 
-  test('selectItem and filter patch update visible list without API calls', async () => {
+  test('kind filter change requests a narrowed inventory snapshot', async () => {
     const command = makeItem({
       inventoryItemId: 'claude-command-gamma',
       kind: 'command',
@@ -255,12 +255,27 @@ describe('usePortableInventoryController', () => {
       result.current.selectItem('claude-command-gamma');
     });
 
-    expect(apiMocks.inspect).toHaveBeenCalledTimes(callsAfterLoad);
+    await waitFor(() => expect(apiMocks.inspect).toHaveBeenCalledTimes(callsAfterLoad + 1));
+    expect(apiMocks.inspect).toHaveBeenLastCalledWith({
+      deviceId: null,
+      projectRef: null,
+      target: 'claude',
+      kind: 'command',
+    });
     expect(result.current.filters.kind).toBe('command');
-    expect(result.current.selectedItemId).toBe('claude-command-gamma');
+    // 查询域变化会清掉旧快照选择，避免把上一快照 item 交给新 hash 执行。
+    expect(result.current.selectedItemId).toBeNull();
     expect(result.current.visibleItems.map((item) => item.inventoryItemId)).toEqual([
       'claude-command-gamma',
     ]);
+
+    act(() => result.current.setFilters({ kind: 'skill' }));
+    await waitFor(() =>
+      expect(result.current.visibleItems.map((item) => item.inventoryItemId)).toEqual([
+        'claude-skill-alpha',
+      ]),
+    );
+    expect(apiMocks.inspect).toHaveBeenCalledTimes(callsAfterLoad + 1);
   });
 
   test('openAction records pending action only when mutation is allowed', async () => {
@@ -299,7 +314,12 @@ describe('usePortableInventoryController', () => {
     );
 
     await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-local'));
-    expect(apiMocks.inspect).toHaveBeenCalledWith({ deviceId: null, projectRef: null });
+    expect(apiMocks.inspect).toHaveBeenCalledWith({
+      deviceId: null,
+      projectRef: null,
+      target: 'claude',
+      kind: 'skill',
+    });
     const callsAfterLocal = apiMocks.inspect.mock.calls.length;
 
     rerender({ deviceId: 'peer-1' });
@@ -310,7 +330,12 @@ describe('usePortableInventoryController', () => {
     await waitFor(() => {
       expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
     });
-    expect(apiMocks.inspect).toHaveBeenCalledWith({ deviceId: 'peer-1', projectRef: null });
+    expect(apiMocks.inspect).toHaveBeenCalledWith({
+      deviceId: 'peer-1',
+      projectRef: null,
+      target: 'claude',
+      kind: 'skill',
+    });
     // peer 切换不得保留本机 snapshot 冒充对端
     expect(result.current.snapshot).toBeNull();
     expect(result.current.mutationBlocked).toBe(true);
@@ -333,6 +358,8 @@ describe('usePortableInventoryController', () => {
     expect(apiMocks.inspect).toHaveBeenCalledWith({
       deviceId: null,
       projectRef: 'wb-local-2',
+      target: 'claude',
+      kind: 'skill',
     });
     expect(result.current.requestContext.projectRef).toBe('wb-local-2');
   });

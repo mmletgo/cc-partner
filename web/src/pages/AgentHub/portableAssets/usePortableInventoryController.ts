@@ -20,6 +20,8 @@ const PROJECT_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE';
 import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
+  PortableInventoryQuery,
+  PortableInventoryRequestContext,
   PortableInventorySnapshotDto,
 } from '@/lib/types/portableInventory';
 import {
@@ -49,6 +51,8 @@ export interface PortableInventoryPendingAction {
 export type UsePortableInventoryControllerArgs = AgentHubRequestContext & {
   /** 为 true 时才 inspect；false 时 retain 同 key snapshot。 */
   enabled?: boolean;
+  /** 首次 render 的 URL/壳层筛选，避免 mount 后再改筛选触发两次扫描。 */
+  initialFilters?: Partial<PortableInventoryFilters>;
 };
 
 /** usePortableInventoryController 对 pure view 的返回合同。 */
@@ -74,6 +78,8 @@ export interface UsePortableInventoryControllerResult {
   refresh: () => Promise<void>;
   /** 当前 inspect 使用的上下文（便于页面层 mutation 透传）。 */
   requestContext: AgentHubRequestContext;
+  /** 当前快照的后端扫描过滤条件；preview/apply 重校验必须复用。 */
+  inventoryQuery: PortableInventoryQuery;
 }
 
 /**
@@ -93,9 +99,11 @@ export function usePortableInventoryController(
   );
 
   const [snapshot, setSnapshot] = useState<PortableInventorySnapshotDto | null>(null);
-  const [filters, setFiltersState] = useState<PortableInventoryFilters>(
-    DEFAULT_PORTABLE_INVENTORY_FILTERS,
-  );
+  const [snapshotRequestKey, setSnapshotRequestKey] = useState<string | null>(null);
+  const [filters, setFiltersState] = useState<PortableInventoryFilters>(() => ({
+    ...DEFAULT_PORTABLE_INVENTORY_FILTERS,
+    ...context.initialFilters,
+  }));
   // enabled 默认 false：初值 loading 必须 false，禁止停在 true
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -107,11 +115,39 @@ export function usePortableInventoryController(
     null,
   );
 
+  const inventoryQuery = useMemo(
+    (): PortableInventoryQuery => ({
+      ...(filters.target === 'all' ? {} : { target: filters.target }),
+      kind: filters.kind,
+      ...(filters.scope === 'all' ? {} : { scopeKind: filters.scope }),
+    }),
+    [filters.kind, filters.scope, filters.target],
+  );
+  const inspectRequest = useMemo(
+    (): PortableInventoryRequestContext => ({ ...requestContext, ...inventoryQuery }),
+    [inventoryQuery, requestContext],
+  );
+  const requestKey = useMemo(
+    () =>
+      [
+        deviceId ?? '',
+        projectRef ?? '',
+        inventoryQuery.target ?? '',
+        inventoryQuery.kind ?? '',
+        inventoryQuery.scopeKind ?? '',
+      ].join('\0'),
+    [deviceId, inventoryQuery, projectRef],
+  );
+
   const mountedRef = useRef(true);
   const refreshSeqRef = useRef(0);
   const hasSnapshotRef = useRef(false);
-  const contextKeyRef = useRef(`${deviceId ?? ''}\0${projectRef ?? ''}`);
+  const requestKeyRef = useRef(requestKey);
+  const snapshotKeyRef = useRef<string | null>(null);
   const snapshotFetchedAtRef = useRef(0);
+  const snapshotCacheRef = useRef(
+    new Map<string, { snapshot: PortableInventorySnapshotDto; fetchedAt: number }>(),
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -132,10 +168,16 @@ export function usePortableInventoryController(
       setLoading(true);
     }
     try {
-      const next = await portableAssetApi.inspect(requestContext);
+      const next = await portableAssetApi.inspect(inspectRequest);
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
       hasSnapshotRef.current = true;
       snapshotFetchedAtRef.current = Date.now();
+      snapshotKeyRef.current = requestKey;
+      setSnapshotRequestKey(requestKey);
+      snapshotCacheRef.current.set(requestKey, {
+        snapshot: next,
+        fetchedAt: snapshotFetchedAtRef.current,
+      });
       setSnapshot(next);
       setStaleFlag(Boolean(next.stale));
       setError(null);
@@ -162,21 +204,21 @@ export function usePortableInventoryController(
         setRefreshing(false);
       }
     }
-  }, [requestContext]);
+  }, [inspectRequest, requestKey]);
 
   useEffect(() => {
-    const nextKey = `${deviceId ?? ''}\0${projectRef ?? ''}`;
-    const contextChanged = contextKeyRef.current !== nextKey;
-    contextKeyRef.current = nextKey;
-    if (contextChanged) {
+    const requestChanged = requestKeyRef.current !== requestKey;
+    requestKeyRef.current = requestKey;
+    if (requestChanged) {
       // A disabled lane may not start a replacement request; still advance the
       // generation so an in-flight response from the previous context cannot land.
       refreshSeqRef.current += 1;
-      // 切换设备/项目：丢弃旧 snapshot，禁止用本机数据冒充 peer
-      hasSnapshotRef.current = false;
-      snapshotFetchedAtRef.current = 0;
-       
-      setSnapshot(null);
+      const cached = snapshotCacheRef.current.get(requestKey);
+      hasSnapshotRef.current = Boolean(cached);
+      snapshotFetchedAtRef.current = cached?.fetchedAt ?? 0;
+      snapshotKeyRef.current = cached ? requestKey : null;
+      setSnapshotRequestKey(cached ? requestKey : null);
+      setSnapshot(cached?.snapshot ?? null);
       setSelectedItemId(null);
       setPendingAction(null);
       setStaleFlag(false);
@@ -187,7 +229,6 @@ export function usePortableInventoryController(
 
     if (!enabled) {
       // R1: 不 inspect；retain 同 key snapshot；loading 保持 false
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- disable lane flags
       setLoading(false);
       setRefreshing(false);
       return;
@@ -197,7 +238,7 @@ export function usePortableInventoryController(
     const age = Date.now() - snapshotFetchedAtRef.current;
     const softFresh =
       hasSnapshotRef.current &&
-      !contextChanged &&
+      snapshotKeyRef.current === requestKey &&
       age >= 0 &&
       age < PORTABLE_INVENTORY_SOFT_TTL_MS;
     if (softFresh) {
@@ -206,7 +247,7 @@ export function usePortableInventoryController(
     }
      
     void refresh();
-  }, [deviceId, projectRef, enabled, refresh]);
+  }, [enabled, refresh, requestKey]);
 
   const setFilters = useCallback((patch: Partial<PortableInventoryFilters>) => {
     setFiltersState((prev) => ({ ...prev, ...patch }));
@@ -225,7 +266,8 @@ export function usePortableInventoryController(
     });
   }, []);
 
-  const stale = Boolean(snapshot?.stale) || staleFlag;
+  const snapshotMatchesQuery = snapshotRequestKey === requestKey;
+  const stale = !snapshotMatchesQuery || Boolean(snapshot?.stale) || staleFlag;
   // 当前后端没有本机 projectRef 的 portable mutation 路径；保留 inspect 的
   // 只读可能性，但永远不给项目上下文暴露写动作。
   const projectContextUnsupported =
@@ -233,13 +275,17 @@ export function usePortableInventoryController(
   const mutationBlocked = stale || !snapshot || projectContextUnsupported;
 
   const visibleItems = useMemo(
-    () => filterPortableInventoryItems(snapshot?.items ?? [], filters),
-    [snapshot, filters],
+    () => filterPortableInventoryItems(snapshotMatchesQuery ? snapshot?.items ?? [] : [], filters),
+    [snapshot, snapshotMatchesQuery, filters],
   );
 
   const kindCounts = useMemo(
-    () => countPortableItemsByKind(snapshot?.items ?? []),
-    [snapshot],
+    (): PortableKindCounts => {
+      if (!snapshotMatchesQuery) return {};
+      const counts = countPortableItemsByKind(snapshot?.items ?? []);
+      return { [filters.kind]: counts[filters.kind] };
+    },
+    [filters.kind, snapshot, snapshotMatchesQuery],
   );
 
   const getPrimaryAction = useCallback(
@@ -305,6 +351,7 @@ export function usePortableInventoryController(
     getPrimaryAction,
     refresh,
     requestContext,
+    inventoryQuery,
   };
 }
 

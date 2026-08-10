@@ -22,7 +22,7 @@ pub use ensure_managed::{
 pub use models::{
     inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
     PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
-    PortableInventoryManagementState, PortableInventoryMutationCapability,
+    PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableMcpCredentialFactDto,
 };
@@ -31,8 +31,11 @@ pub use reconcile::{
 };
 pub use scanner::{
     hash_directory_tree, hash_plugin_root, inspect_portable_inventory,
-    inspect_portable_inventory_force, inspect_portable_inventory_force_with_env,
-    inspect_portable_inventory_with_env, scan_portable_inventory_facts, PortableScanScope,
+    inspect_portable_inventory_force, inspect_portable_inventory_force_query,
+    inspect_portable_inventory_force_with_env, inspect_portable_inventory_force_with_env_query,
+    inspect_portable_inventory_query, inspect_portable_inventory_with_env,
+    inspect_portable_inventory_with_env_query, scan_portable_inventory_facts,
+    scan_portable_inventory_facts_query, PortableScanScope,
 };
 
 #[cfg(test)]

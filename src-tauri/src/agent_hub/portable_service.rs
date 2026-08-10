@@ -15,7 +15,8 @@ use crate::agent_hub::portable_actions::{
     PortableAssetActionPlanDto, PortableAssetActionResultDto, PreviewPortableAssetActionRequest,
 };
 use crate::agent_hub::portable_inventory::{
-    inspect_portable_inventory, PortableInventorySnapshotDto,
+    inspect_portable_inventory, inspect_portable_inventory_query, PortableInventoryQuery,
+    PortableInventorySnapshotDto,
 };
 use crate::agent_hub::replication::pull::{
     apply_portable_pull as apply_portable_pull_impl, get_portable_pull as get_portable_pull_impl,
@@ -51,6 +52,14 @@ impl PortableService {
         inspect_portable_inventory(state).await
     }
 
+    /// 按页面当前 target/kind/scope 扫描，避免无关目录阻塞首屏。
+    pub async fn inspect_portable_inventory_query(
+        state: &AppState,
+        query: PortableInventoryQuery,
+    ) -> Result<PortableInventorySnapshotDto, AppError> {
+        inspect_portable_inventory_query(state, query).await
+    }
+
     /// 基于当前 inventory 生成短期 action plan（写路径合同，零目标文件写入）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -62,7 +71,7 @@ impl PortableService {
         state: &AppState,
         request: PreviewPortableAssetActionRequest,
     ) -> Result<PortableAssetActionPlanDto, AppError> {
-        let snapshot = inspect_portable_inventory(state).await?;
+        let snapshot = inspect_portable_inventory_query(state, request.inventory_query).await?;
         let owner_fp = portable_owner_fingerprint(state, &snapshot);
         preview_portable_asset_action_with_inventory(
             &state.agent_hub_repo,

@@ -64,7 +64,7 @@ impl AgentTarget {
 ///
 /// Code Logic（这个枚举做什么）:
 ///     camelCase 序列化；as_str 与 wire 一致。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AssetKind {
     /// 指令文件（CLAUDE.md / AGENTS.md 等）
@@ -374,7 +374,7 @@ impl MaterializationStatus {
 ///
 /// Code Logic（这个枚举做什么）:
 ///     camelCase scope kind tokens。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScopeKind {
     /// 当前 OS 用户级

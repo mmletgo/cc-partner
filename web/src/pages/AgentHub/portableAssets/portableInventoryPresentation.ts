@@ -38,7 +38,7 @@ export interface PortablePrimaryActionContext {
 }
 
 /** kind tab 计数（排除 pluginComponent）。 */
-export type PortableKindCounts = Record<PortableAssetKind, number>;
+export type PortableKindCounts = Partial<Record<PortableAssetKind, number>>;
 
 /**
  * 默认筛选：Skill tab + 当前工作台默认 Agent（claude）。
@@ -197,7 +197,7 @@ export function countPortableItemsByKind(
   };
   for (const item of items) {
     if (isPortablePluginComponent(item)) continue;
-    counts[item.kind] += 1;
+    counts[item.kind] = (counts[item.kind] ?? 0) + 1;
   }
   return counts;
 }

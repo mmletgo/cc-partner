@@ -45,6 +45,7 @@ mod tests {
     use crate::storage::agent_hub_repo::AgentHubRepo;
     use chrono::{Duration, Utc};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::fs;
     use std::str::FromStr;
 
     async fn test_repo() -> AgentHubRepo {
@@ -148,6 +149,7 @@ mod tests {
     ) -> PreviewPortableAssetActionRequest {
         PreviewPortableAssetActionRequest {
             inventory_snapshot_hash: snapshot.inventory_snapshot_hash.clone(),
+            inventory_query: Default::default(),
             inventory_item_ids: ids,
             action,
             keep_data: false,
@@ -199,6 +201,94 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn lazy_plugin_inventory_hash_is_expanded_for_preview() {
+        let repo = test_repo().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("demo");
+        fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        fs::write(
+            root.join(".claude-plugin/plugin.json"),
+            r#"{"name":"demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/data.txt"), "payload").unwrap();
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            "demo",
+            &root.to_string_lossy(),
+            PortableInventoryManagementState::HubManaged,
+            true,
+        );
+        item.kind = PortableAssetKind::Plugin;
+        item.tree_hash = None;
+        let expected = crate::agent_hub::portable_inventory::hash_plugin_root(&root).unwrap();
+        let snapshot = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snapshot,
+                PortableAssetActionKind::Disable,
+                vec![item.inventory_item_id],
+            ),
+            &snapshot,
+            "owner-fp",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            Some(expected.0.as_str())
+        );
+        assert_eq!(
+            plan.changes[0].expected_tree_hash.as_deref(),
+            Some(expected.1.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_skill_inventory_hash_is_expanded_for_preview() {
+        let repo = test_repo().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("review");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("SKILL.md"), "---\nname: review\n---\nbody\n").unwrap();
+        fs::write(root.join("nested/data.txt"), "payload").unwrap();
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            "review",
+            &root.to_string_lossy(),
+            PortableInventoryManagementState::HubManaged,
+            true,
+        );
+        item.tree_hash = None;
+        let expected = crate::agent_hub::targets::portable::hash_skill_directory(&root).unwrap();
+        let snapshot = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snapshot,
+                PortableAssetActionKind::Disable,
+                vec![item.inventory_item_id],
+            ),
+            &snapshot,
+            "owner-fp",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            Some(expected.0.as_str())
+        );
+        assert_eq!(
+            plan.changes[0].expected_tree_hash.as_deref(),
+            Some(expected.1.as_str())
+        );
     }
 
     /// Business Logic: 过期 inventory hash / CLI 能力阻断必须进入 blocking_reasons。
