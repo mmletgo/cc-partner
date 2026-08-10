@@ -692,8 +692,14 @@ pub async fn agent_hub_get_portable_pull(
 /// Code Logic: 构造 TargetEnvironment → preview_cross_agent_instruction。
 #[tauri::command]
 pub async fn agent_hub_preview_cross_agent_instruction(
+    state: State<'_, AppState>,
     request: PreviewCrossAgentInstructionRequest,
 ) -> Result<CrossAgentPreviewReport, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_preview_cross_agent_instruction(request)
+            .await;
+    }
     let env = TargetEnvironment::from_process();
     preview_cross_agent_instruction(&request, &env)
 }
@@ -706,9 +712,9 @@ pub async fn agent_hub_apply_cross_agent_instruction(
     request: ApplyCrossAgentInstructionRequest,
 ) -> Result<Vec<CrossAgentApplyTargetResult>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        // GuiClient 仍走本机 apply（同机跨 Agent 只写本机文件，不经 LAN）。
+        return BackendControlClient::from_control_file()?
+            .agent_hub_apply_cross_agent_instruction(request)
+            .await;
     }
     let env = TargetEnvironment::from_process();
     apply_cross_agent_instruction(&request, &env)
@@ -718,8 +724,14 @@ pub async fn agent_hub_apply_cross_agent_instruction(
 /// Code Logic: stub FullAdaptRunner.propose；无 skip-preview 直写路径。
 #[tauri::command]
 pub async fn agent_hub_preview_cross_agent_full(
+    state: State<'_, AppState>,
     request: PreviewCrossAgentFullRequest,
 ) -> Result<CrossAgentFullPlan, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_preview_cross_agent_full(request)
+            .await;
+    }
     let env = TargetEnvironment::from_process();
     preview_cross_agent_full_default(&request, &env)
 }
@@ -732,9 +744,9 @@ pub async fn agent_hub_apply_cross_agent_full(
     request: ApplyCrossAgentFullRequest,
 ) -> Result<Vec<CrossAgentFullApplyItemResult>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        // 同机 only：不经 LAN peer。
+        return BackendControlClient::from_control_file()?
+            .agent_hub_apply_cross_agent_full(request)
+            .await;
     }
     let env = TargetEnvironment::from_process();
     apply_cross_agent_full_default(&request, &env)

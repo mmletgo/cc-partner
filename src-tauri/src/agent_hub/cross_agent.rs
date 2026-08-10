@@ -18,8 +18,15 @@ use crate::agent_hub::projection::{AtomicProjectionWriter, AtomicWriteOutcome, F
 use crate::agent_hub::targets::{InstructionRenderContext, TargetEnvironment, TargetPathResolver};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+
+const USER_SCOPE: &str = "user";
+
+fn default_cross_agent_scope() -> String {
+    USER_SCOPE.to_string()
+}
 
 /// 跨 Agent 资产类型（阶段三最小集）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -50,6 +57,8 @@ pub struct CrossAgentTargetPreview {
     pub mode: CrossAgentAdaptMode,
     pub path: String,
     pub rendered_hash: Option<String>,
+    /// 预览时目标文件的精确 hash；None 表示文件当时不存在。
+    pub observed_hash: Option<String>,
     pub unified_diff: Option<String>,
     pub partial_blockers: Vec<String>,
     pub can_apply: bool,
@@ -63,6 +72,8 @@ pub struct CrossAgentPreviewReport {
     pub kind: CrossAgentKind,
     pub destinations: Vec<CrossAgentTargetPreview>,
     pub needs_adaptation: bool,
+    /// 绑定 source、scope、目标路径、渲染内容与预览时目标 hash。
+    pub plan_hash: String,
 }
 
 /// 指令跨 Agent preview 请求。
@@ -72,9 +83,12 @@ pub struct PreviewCrossAgentInstructionRequest {
     pub source: AgentTarget,
     pub destinations: Vec<AgentTarget>,
     pub source_markdown: String,
+    /// 当前只实现用户级路径；项目级必须显式失败，不能回退到用户目录。
+    #[serde(default = "default_cross_agent_scope")]
+    pub scope: String,
     /// 用户级路径由 adapter 解析；可选显式覆盖（缺省空 map → 用 default path resolver）
     #[serde(default)]
-    pub destination_paths: std::collections::BTreeMap<AgentTarget, String>,
+    pub destination_paths: BTreeMap<AgentTarget, String>,
 }
 
 /// Apply 指令跨 Agent 请求（one-shot）。
@@ -84,9 +98,14 @@ pub struct ApplyCrossAgentInstructionRequest {
     pub source: AgentTarget,
     pub destinations: Vec<AgentTarget>,
     pub source_markdown: String,
+    #[serde(default = "default_cross_agent_scope")]
+    pub scope: String,
     /// 可选路径覆盖；IPC 可省略，缺省走 adapter 默认用户级路径
     #[serde(default)]
-    pub destination_paths: std::collections::BTreeMap<AgentTarget, String>,
+    pub destination_paths: BTreeMap<AgentTarget, String>,
+    /// 必须来自 preview；apply 会按当前磁盘状态重建计划并精确比对。
+    #[serde(default)]
+    pub plan_hash: String,
     pub client_request_id: String,
 }
 
@@ -108,6 +127,7 @@ pub fn preview_cross_agent_instruction(
     request: &PreviewCrossAgentInstructionRequest,
     env: &TargetEnvironment,
 ) -> Result<CrossAgentPreviewReport, AppError> {
+    ensure_user_scope(&request.scope)?;
     if request.destinations.is_empty() {
         return Err(AppError::validation("CROSS_AGENT_DESTINATIONS_REQUIRED"));
     }
@@ -153,7 +173,7 @@ pub fn preview_cross_agent_instruction(
             CrossAgentAdaptMode::Shared
         };
         // Plugin residual 语义：指令无 residual；skill/plugin 在其它入口
-        let before = fs::read_to_string(&path).unwrap_or_default();
+        let (before, observed_hash) = read_preview_target(&path)?;
         let after = body.to_string();
         let rendered_hash = if after.is_empty() {
             None
@@ -166,16 +186,19 @@ pub fn preview_cross_agent_instruction(
             mode,
             path,
             rendered_hash,
+            observed_hash,
             unified_diff: Some(format_simple_diff(&before, &after)),
             partial_blockers,
             can_apply,
         });
     }
+    let plan_hash = compute_instruction_plan_hash(request, &destinations);
     Ok(CrossAgentPreviewReport {
         source: request.source,
         kind: CrossAgentKind::Instruction,
         destinations,
         needs_adaptation,
+        plan_hash,
     })
 }
 
@@ -189,15 +212,23 @@ pub fn apply_cross_agent_instruction(
             "CROSS_AGENT_CLIENT_REQUEST_ID_REQUIRED",
         ));
     }
+    if request.plan_hash.trim().is_empty() {
+        return Err(AppError::validation("CROSS_AGENT_PREVIEW_REQUIRED"));
+    }
+    ensure_user_scope(&request.scope)?;
     let preview = preview_cross_agent_instruction(
         &PreviewCrossAgentInstructionRequest {
             source: request.source,
             destinations: request.destinations.clone(),
             source_markdown: request.source_markdown.clone(),
+            scope: request.scope.clone(),
             destination_paths: request.destination_paths.clone(),
         },
         env,
     )?;
+    if preview.plan_hash != request.plan_hash {
+        return Err(AppError::conflict("CROSS_AGENT_PLAN_HASH_MISMATCH"));
+    }
     let writer = AtomicProjectionWriter::default();
     let mut results = Vec::new();
     for row in preview.destinations {
@@ -231,16 +262,11 @@ pub fn apply_cross_agent_instruction(
         };
         let rendered_hash = sha256_hex(&bytes);
         let path = PathBuf::from(&row.path);
-        let expected = if path.exists() {
-            Some(sha256_hex(&fs::read(&path)?))
-        } else {
-            None
-        };
         match writer.write_file(FileWriteRequest {
             target: &path,
             rendered_bytes: &bytes,
             rendered_hash: &rendered_hash,
-            expected_external_hash: expected.as_deref(),
+            expected_external_hash: row.observed_hash.as_deref(),
         }) {
             Ok(
                 AtomicWriteOutcome::Replaced { .. } | AtomicWriteOutcome::AlreadyRendered { .. },
@@ -291,6 +317,7 @@ pub fn preview_cross_agent_plugin_residual(
         mode: CrossAgentAdaptMode::Residual,
         path: String::new(),
         rendered_hash: None,
+        observed_hash: None,
         unified_diff: None,
         partial_blockers: vec![
             format!(
@@ -327,6 +354,64 @@ fn format_simple_diff(before: &str, after: &str) -> String {
         return String::new();
     }
     format!("--- before\n+++ after\n-{}+{}", before.len(), after.len())
+}
+
+/// 读取预览目标，保留“存在但为空”与“不存在”的区别。
+fn read_preview_target(path: &str) -> Result<(String, Option<String>), AppError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok((
+            String::from_utf8_lossy(&bytes).into_owned(),
+            Some(sha256_hex(&bytes)),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), None)),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 当前阶段只允许用户级跨 Agent 写入，避免项目 scope 静默落到用户目录。
+fn ensure_user_scope(scope: &str) -> Result<(), AppError> {
+    if scope.trim() == USER_SCOPE {
+        Ok(())
+    } else {
+        Err(AppError::validation(
+            "CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE",
+        ))
+    }
+}
+
+/// 计算 selective preview 的确定性绑定 hash。
+fn compute_instruction_plan_hash(
+    request: &PreviewCrossAgentInstructionRequest,
+    destinations: &[CrossAgentTargetPreview],
+) -> String {
+    let mut lines = vec![format!(
+        "source={}|scope={}|sourceHash={}",
+        request.source.as_str(),
+        request.scope.trim(),
+        sha256_hex(request.source_markdown.as_bytes())
+    )];
+    for row in destinations {
+        lines.push(format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            row.destination.as_str(),
+            adapt_mode_wire(row.mode),
+            row.path,
+            row.observed_hash.as_deref().unwrap_or("<missing>"),
+            row.rendered_hash.as_deref().unwrap_or("<empty>"),
+            row.can_apply,
+            row.partial_blockers.join("\u{1f}"),
+        ));
+    }
+    sha256_hex(lines.join("\n").as_bytes())
+}
+
+fn adapt_mode_wire(mode: CrossAgentAdaptMode) -> &'static str {
+    match mode {
+        CrossAgentAdaptMode::Shared => "shared",
+        CrossAgentAdaptMode::Adapted => "adapted",
+        CrossAgentAdaptMode::TargetOnly => "targetOnly",
+        CrossAgentAdaptMode::Residual => "residual",
+    }
 }
 
 /// 负向合同：external enqueue 过滤器不得包含其它 target。
@@ -396,6 +481,7 @@ mod tests {
                 source: AgentTarget::Claude,
                 destinations: vec![AgentTarget::Codex],
                 source_markdown: "Always run tests before commit.\n".into(),
+                scope: "user".into(),
                 destination_paths: BTreeMap::new(),
             },
             &env,
@@ -413,7 +499,9 @@ mod tests {
                 source: AgentTarget::Claude,
                 destinations: vec![AgentTarget::Codex],
                 source_markdown: "Always run tests before commit.\n".into(),
+                scope: "user".into(),
                 destination_paths: BTreeMap::new(),
+                plan_hash: preview.plan_hash.clone(),
                 client_request_id: "req-1".into(),
             },
             &env,
@@ -429,6 +517,7 @@ mod tests {
                 source: AgentTarget::Claude,
                 destinations: vec![AgentTarget::Codex],
                 source_markdown: "Read CLAUDE.md and use PreToolUse hooks under .claude/\n".into(),
+                scope: "user".into(),
                 destination_paths: BTreeMap::new(),
             },
             &env,
@@ -464,6 +553,7 @@ mod tests {
         let preview: PreviewCrossAgentInstructionRequest =
             serde_json::from_str(preview_json).expect("preview without destinationPaths");
         assert!(preview.destination_paths.is_empty());
+        assert_eq!(preview.scope, "user");
         assert_eq!(preview.source, AgentTarget::Claude);
         assert_eq!(preview.destinations, vec![AgentTarget::Codex]);
 
@@ -476,6 +566,60 @@ mod tests {
         let apply: ApplyCrossAgentInstructionRequest =
             serde_json::from_str(apply_json).expect("apply without destinationPaths");
         assert!(apply.destination_paths.is_empty());
+        assert_eq!(apply.scope, "user");
+        assert!(apply.plan_hash.is_empty());
         assert_eq!(apply.client_request_id, "req-1");
+    }
+
+    #[test]
+    fn apply_rejects_target_changed_after_preview() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+        fs::create_dir_all(tmp.path().join(".codex")).unwrap();
+        let env = temp_env(tmp.path());
+        let preview_request = PreviewCrossAgentInstructionRequest {
+            source: AgentTarget::Claude,
+            destinations: vec![AgentTarget::Codex],
+            source_markdown: "Always run tests.\n".into(),
+            scope: "user".into(),
+            destination_paths: BTreeMap::new(),
+        };
+        let preview = preview_cross_agent_instruction(&preview_request, &env).unwrap();
+        let target = PathBuf::from(&preview.destinations[0].path);
+        fs::write(&target, "external edit\n").unwrap();
+
+        let error = apply_cross_agent_instruction(
+            &ApplyCrossAgentInstructionRequest {
+                source: preview_request.source,
+                destinations: preview_request.destinations,
+                source_markdown: preview_request.source_markdown,
+                scope: preview_request.scope,
+                destination_paths: preview_request.destination_paths,
+                plan_hash: preview.plan_hash,
+                client_request_id: "req-stale".into(),
+            },
+            &env,
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_PLAN_HASH_MISMATCH"));
+        assert_eq!(fs::read_to_string(target).unwrap(), "external edit\n");
+    }
+
+    #[test]
+    fn project_scope_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = temp_env(tmp.path());
+        let error = preview_cross_agent_instruction(
+            &PreviewCrossAgentInstructionRequest {
+                source: AgentTarget::Claude,
+                destinations: vec![AgentTarget::Codex],
+                source_markdown: "Always run tests.\n".into(),
+                scope: "project:demo".into(),
+                destination_paths: BTreeMap::new(),
+            },
+            &env,
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE"));
     }
 }
