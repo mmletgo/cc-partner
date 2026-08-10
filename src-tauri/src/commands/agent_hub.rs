@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     HeadlessOwner → AgentHubService；GuiClient → BackendControlClient agent_hub_*；
-//!     mutation 前 client 调用 require_agent_hub_write_compatibility。
+//!     AppState runtime 复用 control client，失败失效缓存；mutation 由 typed client/control 双重校验版本。
 
 use crate::agent_hub::cross_agent::{
     apply_cross_agent_instruction, preview_cross_agent_instruction,
@@ -54,13 +54,26 @@ use crate::agent_hub::user_instructions::{
     UserInstructionPlanDto, UserInstructionWorkspaceDto,
 };
 use crate::backend::authority::RuntimeRole;
+#[cfg(test)]
 use crate::backend::control::AGENT_HUB_API_VERSION;
-use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::state::AppState;
 use std::collections::BTreeMap;
 use tauri::State;
 use tokio_util::sync::CancellationToken;
+
+/// 复用 AppState 中的 control client，并在失败后失效 descriptor，供下一次调用刷新。
+macro_rules! proxy_agent_hub {
+    ($state:expr, |$client:ident| $call:expr) => {{
+        let runtime = &$state.backend_control_client_runtime;
+        let $client = runtime.client()?;
+        let result = ($call).await;
+        if result.is_err() {
+            runtime.invalidate_if_current(&$client);
+        }
+        result
+    }};
+}
 
 /// Business Logic: 首屏 status。
 /// Code Logic: owner service / GuiClient control query。
@@ -69,9 +82,7 @@ pub async fn agent_hub_get_status(
     state: State<'_, AppState>,
 ) -> Result<AgentHubStatusDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_get_status()
-            .await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_get_status());
     }
     AgentHubService::get_status(state.inner()).await
 }
@@ -86,9 +97,7 @@ pub async fn agent_hub_list_assets(
 ) -> Result<Vec<AgentHubAssetSummaryDto>, AppError> {
     let req = ListAssetsRequest { scope_id, kind };
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_list_assets(req)
-            .await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_list_assets(req));
     }
     AgentHubService::list_assets(state.inner(), req).await
 }
@@ -101,9 +110,7 @@ pub async fn agent_hub_get_asset(
     asset_id: String,
 ) -> Result<AgentHubAssetDetailDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_get_asset(&asset_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_get_asset(&asset_id));
     }
     AgentHubService::get_asset(state.inner(), &asset_id).await
 }
@@ -115,9 +122,8 @@ pub async fn agent_hub_inspect_user_instruction_workspace(
     state: State<'_, AppState>,
 ) -> Result<UserInstructionWorkspaceDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_inspect_user_instruction_workspace()
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_inspect_user_instruction_workspace());
     }
     AgentHubService::inspect_user_instruction_workspace(state.inner()).await
 }
@@ -130,11 +136,8 @@ pub async fn agent_hub_preview_user_instruction_setup(
     request: PreviewUserInstructionRequest,
 ) -> Result<UserInstructionPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client
-            .agent_hub_preview_user_instruction_setup(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_user_instruction_setup(request));
     }
     AgentHubService::preview_user_instruction_setup(state.inner(), request).await
 }
@@ -147,11 +150,8 @@ pub async fn agent_hub_preview_user_instruction_update(
     request: PreviewUserInstructionRequest,
 ) -> Result<UserInstructionPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client
-            .agent_hub_preview_user_instruction_update(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_user_instruction_update(request));
     }
     AgentHubService::preview_user_instruction_update(state.inner(), request).await
 }
@@ -164,9 +164,8 @@ pub async fn agent_hub_apply_user_instruction_plan(
     request: ApplyUserInstructionPlanRequest,
 ) -> Result<ApplyUserInstructionPlanResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_apply_user_instruction_plan(request).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_apply_user_instruction_plan(request));
     }
     AgentHubService::apply_user_instruction_plan(state.inner(), request).await
 }
@@ -179,9 +178,8 @@ pub async fn agent_hub_save_user_instruction_blocks(
     request: SaveUserInstructionBlocksRequest,
 ) -> Result<UserInstructionCanonicalDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_save_user_instruction_blocks(request).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_save_user_instruction_blocks(request));
     }
     AgentHubService::save_user_instruction_blocks(state.inner(), request).await
 }
@@ -201,9 +199,7 @@ pub async fn agent_hub_update_instruction(
         expected_revision_id,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_update_instruction(req).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_update_instruction(req));
     }
     AgentHubService::update_instruction(state.inner(), req).await
 }
@@ -229,9 +225,8 @@ pub async fn agent_hub_update_instruction_block(
         expected_revision_id,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_update_instruction_block(req).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_update_instruction_block(req));
     }
     AgentHubService::update_instruction_block(state.inner(), req).await
 }
@@ -253,9 +248,8 @@ pub async fn agent_hub_pair_instruction_variants(
         expected_revision_id,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_pair_instruction_variants(req).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_pair_instruction_variants(req));
     }
     AgentHubService::pair_instruction_variants(state.inner(), req).await
 }
@@ -268,9 +262,8 @@ pub async fn agent_hub_preview_project(
     project_id: String,
 ) -> Result<AgentHubProjectPreview, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_preview_project(&project_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_project(&project_id));
     }
     AgentHubService::preview_project(state.inner(), &project_id).await
 }
@@ -283,9 +276,8 @@ pub async fn agent_hub_enable_project(
     project_id: String,
 ) -> Result<AgentHubProjectStatus, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_enable_project(&project_id, true).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_enable_project(&project_id, true));
     }
     AgentHubService::enable_project(state.inner(), &project_id).await
 }
@@ -307,9 +299,7 @@ pub async fn agent_hub_resolve_conflict(
         content_markdown,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_resolve_conflict(req).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_resolve_conflict(req));
     }
     AgentHubService::resolve_conflict(state.inner(), req).await
 }
@@ -336,9 +326,7 @@ pub async fn agent_hub_set_target_binding(
         desired_enabled,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_set_target_binding(req).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_set_target_binding(req));
     }
     AgentHubService::set_target_binding(state.inner(), req).await
 }
@@ -363,9 +351,7 @@ pub async fn agent_hub_set_target_presence(
         desired_presence,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_set_target_presence(req).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_set_target_presence(req));
     }
     AgentHubService::set_target_presence(state.inner(), req).await
 }
@@ -388,9 +374,7 @@ pub async fn agent_hub_set_target_enabled(
         desired_enabled,
     };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_set_target_enabled(req).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_set_target_enabled(req));
     }
     AgentHubService::set_target_enabled(state.inner(), req).await
 }
@@ -408,9 +392,8 @@ pub async fn agent_hub_restore_detached_target(
         .ok_or_else(|| AppError::validation(format!("未知 target: {target}")))?;
     let req = RestoreDetachedTargetRequest { asset_id, target };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_restore_detached_target(req).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_restore_detached_target(req));
     }
     AgentHubService::restore_detached_target(state.inner(), req).await
 }
@@ -424,9 +407,8 @@ pub async fn agent_hub_delete_asset_everywhere(
 ) -> Result<AgentHubAssetSummaryDto, AppError> {
     let req = DeleteAssetEverywhereRequest { asset_id };
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_delete_asset_everywhere(req).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_delete_asset_everywhere(req));
     }
     AgentHubService::delete_asset_everywhere(state.inner(), req).await
 }
@@ -439,9 +421,7 @@ pub async fn agent_hub_push_selection(
     request: PushAgentHubSelectionRequest,
 ) -> Result<MultiTargetPushReport, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_push_selection(request).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_push_selection(request));
     }
     let cancel = CancellationToken::new();
     push_selection_for_state(state.inner(), request, &cancel).await
@@ -455,9 +435,8 @@ pub async fn agent_hub_get_push_report(
     request_id: String,
 ) -> Result<Option<MultiTargetPushReport>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_get_push_report(&request_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_get_push_report(&request_id));
     }
     get_push_report_for_state(state.inner(), &request_id).await
 }
@@ -470,9 +449,7 @@ pub async fn agent_hub_preview_lan_push(
     request: PushAgentHubSelectionRequest,
 ) -> Result<serde_json::Value, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_preview_lan_push(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_preview_lan_push(request));
     }
     preview_lan_push_for_state(state.inner(), request).await
 }
@@ -485,9 +462,7 @@ pub async fn agent_hub_start_lan_push(
     request: PushAgentHubSelectionRequest,
 ) -> Result<MultiTargetPushReport, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_start_lan_push(request).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_start_lan_push(request));
     }
     let cancel = CancellationToken::new();
     push_selection_for_state(state.inner(), request, &cancel).await
@@ -501,9 +476,7 @@ pub async fn agent_hub_get_lan_push(
     request_id: String,
 ) -> Result<Option<MultiTargetPushReport>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_get_lan_push(&request_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_get_lan_push(&request_id));
     }
     get_push_report_for_state(state.inner(), &request_id).await
 }
@@ -515,9 +488,7 @@ pub async fn agent_hub_inspect_git_lanes(
     state: State<'_, AppState>,
 ) -> Result<GitLaneInspectReport, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_inspect_git_lanes()
-            .await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_inspect_git_lanes());
     }
     inspect_git_lanes_for_state(state.inner()).await
 }
@@ -530,9 +501,8 @@ pub async fn agent_hub_preview_git_import(
     lane_device_id: String,
 ) -> Result<GitImportPreview, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_preview_git_import(&lane_device_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_git_import(&lane_device_id));
     }
     preview_git_import_for_state(state.inner(), &lane_device_id).await
 }
@@ -545,9 +515,7 @@ pub async fn agent_hub_confirm_git_import(
     request: ConfirmGitImportRequest,
 ) -> Result<ConfirmGitImportOutcome, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_confirm_git_import(request).await;
+        return proxy_agent_hub!(state, |client| client.agent_hub_confirm_git_import(request));
     }
     confirm_git_import_for_state(state.inner(), request).await
 }
@@ -560,9 +528,8 @@ pub async fn agent_hub_confirm_project_mapping(
     request: ConfirmProjectMappingRequest,
 ) -> Result<ResolvedProjectMapping, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_confirm_project_mapping(request).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_confirm_project_mapping(request));
     }
     confirm_project_mapping_for_state(state.inner(), request).await
 }
@@ -574,9 +541,8 @@ pub async fn agent_hub_inspect_portable_inventory(
     state: State<'_, AppState>,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_inspect_portable_inventory()
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_inspect_portable_inventory());
     }
     PortableService::inspect_portable_inventory(state.inner()).await
 }
@@ -589,11 +555,8 @@ pub async fn agent_hub_preview_portable_asset_action(
     request: PreviewPortableAssetActionRequest,
 ) -> Result<PortableAssetActionPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client
-            .agent_hub_preview_portable_asset_action(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_portable_asset_action(request));
     }
     PortableService::preview_portable_asset_action(state.inner(), request).await
 }
@@ -606,9 +569,8 @@ pub async fn agent_hub_apply_portable_asset_action(
     request: ApplyPortableAssetActionRequest,
 ) -> Result<PortableAssetActionResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_apply_portable_asset_action(request).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_apply_portable_asset_action(request));
     }
     PortableService::apply_portable_asset_action(state.inner(), request).await
 }
@@ -621,9 +583,8 @@ pub async fn agent_hub_get_portable_asset_action(
     client_request_id: String,
 ) -> Result<PortableAssetActionResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_get_portable_asset_action(&client_request_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_get_portable_asset_action(&client_request_id));
     }
     PortableService::get_portable_asset_action(state.inner(), &client_request_id).await
 }
@@ -636,9 +597,8 @@ pub async fn agent_hub_list_remote_portable_inventory(
     request: ListRemotePortableInventoryRequest,
 ) -> Result<RemotePortableInventoryDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_list_remote_portable_inventory(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_list_remote_portable_inventory(request));
     }
     PortableService::list_remote_portable_inventory(state.inner(), request).await
 }
@@ -651,9 +611,8 @@ pub async fn agent_hub_preview_portable_pull(
     request: PreviewPortablePullRequest,
 ) -> Result<PortablePullPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_preview_portable_pull(request).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_portable_pull(request));
     }
     PortableService::preview_portable_pull(state.inner(), request).await
 }
@@ -666,9 +625,8 @@ pub async fn agent_hub_apply_portable_pull(
     request: ApplyPortablePullRequest,
 ) -> Result<PortablePullResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        let client = BackendControlClient::from_control_file()?;
-        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
-        return client.agent_hub_apply_portable_pull(request).await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_apply_portable_pull(request));
     }
     PortableService::apply_portable_pull(state.inner(), request).await
 }
@@ -681,9 +639,8 @@ pub async fn agent_hub_get_portable_pull(
     client_request_id: String,
 ) -> Result<PortablePullResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_get_portable_pull(&client_request_id)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_get_portable_pull(&client_request_id));
     }
     PortableService::get_portable_pull(state.inner(), &client_request_id).await
 }
@@ -696,9 +653,8 @@ pub async fn agent_hub_preview_cross_agent_instruction(
     request: PreviewCrossAgentInstructionRequest,
 ) -> Result<CrossAgentPreviewReport, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_preview_cross_agent_instruction(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_cross_agent_instruction(request));
     }
     let env = TargetEnvironment::from_process();
     preview_cross_agent_instruction(&request, &env)
@@ -712,9 +668,8 @@ pub async fn agent_hub_apply_cross_agent_instruction(
     request: ApplyCrossAgentInstructionRequest,
 ) -> Result<Vec<CrossAgentApplyTargetResult>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_apply_cross_agent_instruction(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_apply_cross_agent_instruction(request));
     }
     let env = TargetEnvironment::from_process();
     apply_cross_agent_instruction(&request, &env)
@@ -728,9 +683,8 @@ pub async fn agent_hub_preview_cross_agent_full(
     request: PreviewCrossAgentFullRequest,
 ) -> Result<CrossAgentFullPlan, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_preview_cross_agent_full(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_cross_agent_full(request));
     }
     let env = TargetEnvironment::from_process();
     preview_cross_agent_full_default(&request, &env)
@@ -744,9 +698,8 @@ pub async fn agent_hub_apply_cross_agent_full(
     request: ApplyCrossAgentFullRequest,
 ) -> Result<Vec<CrossAgentFullApplyItemResult>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
-        return BackendControlClient::from_control_file()?
-            .agent_hub_apply_cross_agent_full(request)
-            .await;
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_apply_cross_agent_full(request));
     }
     let env = TargetEnvironment::from_process();
     apply_cross_agent_full_default(&request, &env)
@@ -850,6 +803,9 @@ mod tests {
         assert!(src.contains("RuntimeRole::GuiClient"));
         assert!(src.contains("BackendControlClient"));
         assert!(src.contains("require_agent_hub_write_compatibility"));
+        assert!(src.contains("proxy_agent_hub!"));
+        let direct_reload = concat!("BackendControlClient", "::from_control_file()");
+        assert!(!src.contains(direct_reload));
         assert!(src.contains("PortableService"));
     }
 
