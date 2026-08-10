@@ -23,13 +23,16 @@ use app_lib::agent_hub::portable_actions::{
     PreviewPortableAssetActionRequest,
 };
 use app_lib::agent_hub::portable_inventory::{
-    inventory_item_id, inventory_snapshot_hash, scan_portable_inventory_facts, PortableAssetKind,
+    inspect_portable_inventory, inspect_portable_inventory_force, inventory_item_id,
+    inventory_snapshot_hash, scan_portable_inventory_facts, PortableAssetKind,
     PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
     PortableInventoryManagementState, PortableInventoryMutationCapability,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableScanScope,
 };
 use app_lib::agent_hub::targets::paths::TargetEnvironment;
+use app_lib::backend::runtime::build_app_state;
+use app_lib::backend::ui::HeadlessBackendUi;
 use app_lib::{AgentHubRepo, AgentTarget, ScopeKind};
 use chrono::Utc;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -47,6 +50,100 @@ struct PortableParityEnv {
     data_dir: PathBuf,
     home: PathBuf,
     db_path: PathBuf,
+}
+
+/// 生产 inspect cache 合同：普通 inspect 可命中短 TTL，但 mutation/force rescan
+/// 必须看到嵌套文件的新 tree hash；不注入 `rescan_override`。
+#[tokio::test]
+async fn production_force_rescan_bypasses_recent_inventory_cache() {
+    let env = setup_isolated_env("force-rescan");
+    let target_env = seed_3x4_fixtures(&env.home);
+    std::env::set_var("HOME", &env.home);
+    for (key, value) in &target_env.vars {
+        std::env::set_var(key, value);
+    }
+    std::env::set_var(
+        "PATH",
+        target_env
+            .path_entries
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(if cfg!(windows) { ";" } else { ":" }),
+    );
+    write(
+        &env.data_dir.join("config.json"),
+        &format!(
+            r#"{{
+  "device_id": "force-rescan-device",
+  "device_name": "force-rescan-device",
+  "http_port": 0,
+  "receive_dir": "{}",
+  "db_path": "{}",
+  "screenshot_hotkey": "<cmd>+s",
+  "prompt_optimizer_hotkey": "<ctrl>",
+  "prompt_optimizer_fill_language": "zh"
+}}"#,
+            env.data_dir.join("received").display(),
+            env.db_path.display(),
+        ),
+    );
+    let state = build_app_state(Arc::new(HeadlessBackendUi::new(env.data_dir.clone())))
+        .await
+        .expect("production app state");
+
+    let before = inspect_portable_inventory_force(&state)
+        .await
+        .expect("initial force inspect");
+    let before_tree = before
+        .items
+        .iter()
+        .find(|item| {
+            item.target == AgentTarget::Claude
+                && item.kind == PortableAssetKind::Skill
+                && item.native_id == "review"
+        })
+        .and_then(|item| item.tree_hash.clone())
+        .expect("review tree hash");
+
+    write(
+        &env.home.join(".claude/skills/review/nested/changed.txt"),
+        "mutation-after-cache",
+    );
+    let cached = inspect_portable_inventory(&state)
+        .await
+        .expect("cached inspect");
+    assert_eq!(
+        cached
+            .items
+            .iter()
+            .find(|item| {
+                item.target == AgentTarget::Claude
+                    && item.kind == PortableAssetKind::Skill
+                    && item.native_id == "review"
+            })
+            .and_then(|item| item.tree_hash.clone()),
+        Some(before_tree.clone()),
+        "normal inspect intentionally remains within its short cache window"
+    );
+
+    let fresh = inspect_portable_inventory_force(&state)
+        .await
+        .expect("force inspect");
+    let fresh_tree = fresh
+        .items
+        .iter()
+        .find(|item| {
+            item.target == AgentTarget::Claude
+                && item.kind == PortableAssetKind::Skill
+                && item.native_id == "review"
+        })
+        .and_then(|item| item.tree_hash.clone())
+        .expect("fresh review tree hash");
+    assert_ne!(
+        fresh_tree, before_tree,
+        "force rescan must observe nested mutation"
+    );
 }
 
 fn setup_isolated_env(name: &str) -> PortableParityEnv {

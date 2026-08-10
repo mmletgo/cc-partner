@@ -17,9 +17,10 @@ use crate::agent_hub::models::{AgentTarget, PortablePullClaim, PortablePullPlanR
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore, TreeEntryType};
 use crate::agent_hub::portable_actions::PortableAssetConflictPolicy;
 use crate::agent_hub::portable_inventory::{
-    inspect_portable_inventory, PortableAssetKind, PortableInventoryItemDto,
-    PortableInventoryManagementState, PortableInventoryMutationCapability,
-    PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
+    inspect_portable_inventory, inspect_portable_inventory_force, PortableAssetKind,
+    PortableInventoryItemDto, PortableInventoryManagementState,
+    PortableInventoryMutationCapability, PortableInventorySnapshotDto,
+    PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
 };
 use crate::agent_hub::replication::receiver::AGENT_HUB_MAX_CHUNK_BYTES;
 use crate::agent_hub::snapshot::envelope::SnapshotEnvelopeV1;
@@ -885,15 +886,9 @@ pub fn source_read_object_chunk(
         if bytes.is_empty() {
             staged.fully_read_hashes.insert(object_hash.to_string());
         }
-        let all_done = staged
-            .built
-            .object_bytes
-            .keys()
-            .all(|h| staged.fully_read_hashes.contains(h));
-        drop(g);
-        if all_done {
-            staging_remove(transfer_id);
-        }
+        // 即使最后一个 chunk 已经读完，也不能在返回 HTTP 响应前释放 staging：
+        // 客户端可能只收到 response body 前的连接断开，需要按同一 offset 重试。
+        // 显式 release 或 TTL GC 才回收 transfer。
         return Ok(Vec::new());
     }
     let end = (offset as usize + PORTABLE_PULL_MAX_CHUNK_BYTES).min(bytes.len());
@@ -902,15 +897,7 @@ pub fn source_read_object_chunk(
     if end >= bytes.len() {
         staged.fully_read_hashes.insert(object_hash.to_string());
     }
-    let all_done = staged
-        .built
-        .object_bytes
-        .keys()
-        .all(|h| staged.fully_read_hashes.contains(h));
     drop(g);
-    if all_done {
-        staging_remove(transfer_id);
-    }
     Ok(chunk)
 }
 
@@ -1232,7 +1219,7 @@ pub async fn apply_portable_pull(
                 &request.client_request_id,
                 &stored.public,
             );
-            if let Ok(post) = inspect_portable_inventory(state).await {
+            if let Ok(post) = inspect_portable_inventory_force(state).await {
                 fold_pending_pull_observations(&mut result, &stored.public, &post);
             }
             Ok(result)
@@ -1298,7 +1285,7 @@ async fn execute_claimed_pull(
     if stored.public.expires_at.as_str() < Utc::now().to_rfc3339().as_str() {
         return Err(AppError::conflict("PORTABLE_PULL_PLAN_EXPIRED".to_string()));
     }
-    let local_now = inspect_portable_inventory(state).await?;
+    let local_now = inspect_portable_inventory_force(state).await?;
     if local_now.inventory_snapshot_hash != stored.public.local_inventory_snapshot_hash {
         return Err(AppError::conflict(
             "PORTABLE_PULL_LOCAL_INVENTORY_STALE".to_string(),
@@ -1587,7 +1574,7 @@ async fn execute_claimed_pull(
                 }
                 match install_change(state, &store, &selection, change).await {
                     Ok(()) => {
-                        let post = inspect_portable_inventory(state).await?;
+                        let post = inspect_portable_inventory_force(state).await?;
                         let observed = inventory_has_scoped_item(
                             &post,
                             stored.public.destination_target,
@@ -1699,7 +1686,7 @@ async fn execute_claimed_pull(
         match install_change(state, &store, &selection, change).await {
             Ok(()) => {
                 // post-install rescan gate — same scope identity as conflict map
-                let post = inspect_portable_inventory(state).await?;
+                let post = inspect_portable_inventory_force(state).await?;
                 let observed = inventory_has_scoped_item(
                     &post,
                     stored.public.destination_target,
@@ -1892,7 +1879,7 @@ pub async fn get_portable_pull(
     let stored = parse_stored_pull_plan(&row.plan_json)?;
     let mut result =
         outcome_unknown_pull_result(&row.plan_token, client_request_id, &stored.public);
-    if let Ok(post) = inspect_portable_inventory(state).await {
+    if let Ok(post) = inspect_portable_inventory_force(state).await {
         fold_pending_pull_observations(&mut result, &stored.public, &post);
     }
     Ok(result)
@@ -2713,11 +2700,16 @@ mod tests {
         staging_insert("tid-resume".into(), built).unwrap();
         let c1 = source_read_object_chunk("tid-resume", &hash, 0).unwrap();
         assert_eq!(c1, payload);
-        // full read of single object cleans staging
+        // 最后 chunk 返回后 staging 仍保留，允许丢失最终响应时按 offset 重试；
+        // 只有显式 release 才释放。
         assert!(
-            staging().lock().unwrap().get("tid-resume").is_none(),
-            "staging must drop transfer after full object transfer"
+            staging().lock().unwrap().contains_key("tid-resume"),
+            "staging must remain until explicit release/TTL"
         );
+        // 模拟客户端未收到最终响应后的重试：同 offset 仍返回同一 chunk。
+        let retry = source_read_object_chunk("tid-resume", &hash, 0).unwrap();
+        assert_eq!(retry, payload);
+        source_release_transfer("tid-resume");
         // re-stage for offset resume check
         let mut built2 = BuiltPortableSelection {
             envelope: SnapshotEnvelopeV1 {
@@ -2761,9 +2753,10 @@ mod tests {
         let c3 = source_read_object_chunk("tid-multi", &h2, 0).unwrap();
         assert_eq!(c3, p2);
         assert!(
-            staging().lock().unwrap().get("tid-multi").is_none(),
-            "staging must drop after all object hashes fully transferred"
+            staging().lock().unwrap().contains_key("tid-multi"),
+            "staging must remain after all objects until explicit release"
         );
+        source_release_transfer("tid-multi");
         // explicit release path still works for partial consumption
         let mut built3 = BuiltPortableSelection {
             envelope: SnapshotEnvelopeV1 {
