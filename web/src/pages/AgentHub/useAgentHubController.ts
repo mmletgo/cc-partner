@@ -1562,7 +1562,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setActionBusy(true);
     setActionError(null);
     try {
-      const report = await agentHubApi.startLanPush(request);
+      const report = await agentHubApi.startLanPush({
+        ...request,
+        previewToken: lanPreview.previewToken,
+      });
       if (!mountedRef.current) return;
       setLanReport(report);
     } catch (reason) {

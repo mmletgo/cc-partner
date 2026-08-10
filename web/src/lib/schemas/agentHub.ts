@@ -588,6 +588,7 @@ export const agentHubProjectStatusDecoder: Decoder<AgentHubProjectStatus> = {
 export const agentHubLanPushPreviewDecoder: Decoder<AgentHubLanPushPreview> = objectDecoder(
   'AgentHubLanPushPreview',
   {
+    previewToken: stringDecoder,
     snapshotHash: stringDecoder,
     snapshotId: stringDecoder,
     selectionHash: stringDecoder,

@@ -265,6 +265,7 @@ export function useInstructionThreePaneController(
   const contextKeyRef = useRef(
     `${context.scope}\0${context.deviceId ?? ''}\0${context.projectKey ?? ''}\0${agent}`,
   );
+  const blockedContextKeyRef = useRef<string | null>(null);
   const stateRef = useRef(state);
   const planRequestIdRef = useRef<{ planToken: string; clientRequestId: string } | null>(
     null,
@@ -301,6 +302,7 @@ export function useInstructionThreePaneController(
     planRequestIdRef.current = null;
     planGenerationRef.current = null;
     autoReparseAfterLoadRef.current = false;
+    blockedContextKeyRef.current = null;
     setActionBusy(false);
     stateRef.current = empty;
     setState(empty);
@@ -388,6 +390,15 @@ export function useInstructionThreePaneController(
     const nextContextKey =
       `${context.scope}\0${context.deviceId ?? ''}\0${context.projectKey ?? ''}\0${agent}`;
     const contextChanged = contextKeyRef.current !== nextContextKey;
+    if (
+      blockedContextKeyRef.current === nextContextKey &&
+      (stateRef.current.blocksDirty || stateRef.current.originalDirty)
+    ) {
+      setError('AGENT_HUB_CONTEXT_CHANGE_HAS_UNSAVED_DRAFT');
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
     if (contextChanged) {
       contextKeyRef.current = nextContextKey;
       contextGenerationRef.current += 1;
@@ -404,11 +415,13 @@ export function useInstructionThreePaneController(
       if (stateRef.current.blocksDirty || stateRef.current.originalDirty) {
         // Real shell context changes are guarded by AgentHub; direct callers must resolve
         // this explicit stop before a new context can replace the draft.
+        blockedContextKeyRef.current = nextContextKey;
         setError('AGENT_HUB_CONTEXT_CHANGE_HAS_UNSAVED_DRAFT');
         setLoading(false);
         setRefreshing(false);
         return;
       }
+      blockedContextKeyRef.current = null;
       setWorkspace(null);
       setState(initialThreePaneFromDisk(null, ''));
     }

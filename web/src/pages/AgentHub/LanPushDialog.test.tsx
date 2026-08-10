@@ -35,6 +35,7 @@ describe('LanPushDialog', () => {
         hubProjectIdsText=""
         onHubProjectIdsTextChange={vi.fn()}
         preview={{
+          previewToken: 'preview-token',
           snapshotHash: 'abc',
           snapshotId: 'sid',
           selectionHash: 'sel',

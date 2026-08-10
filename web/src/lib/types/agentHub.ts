@@ -519,6 +519,7 @@ export type AgentHubPushSelectionMode = 'fullHub' | 'userScope' | 'project' | 'e
  * LAN push preview (zero transfer).
  */
 export interface AgentHubLanPushPreview {
+  previewToken: string;
   snapshotHash: string;
   snapshotId: string;
   selectionHash: string;
@@ -731,6 +732,7 @@ export interface AgentHubPushSelectionRequest {
   assetIds?: string[];
   hubProjectIds?: string[];
   includeHistory?: boolean;
+  previewToken?: string | null;
   requestId?: string | null;
 }
 

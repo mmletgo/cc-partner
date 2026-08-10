@@ -27,6 +27,8 @@ const restoreDetachedTarget = vi.fn();
 const deleteAssetEverywhere = vi.fn();
 const getPluginPackageReport = vi.fn();
 const previewPluginDelete = vi.fn();
+const previewLanPush = vi.fn();
+const startLanPush = vi.fn();
 const searchParamsMock = vi.hoisted(() => ({ current: new URLSearchParams() }));
 
 vi.mock('@/api/agentHub', () => ({
@@ -47,6 +49,8 @@ vi.mock('@/api/agentHub', () => ({
     deleteAssetEverywhere: (...args: unknown[]) => deleteAssetEverywhere(...args),
     getPluginPackageReport: (...args: unknown[]) => getPluginPackageReport(...args),
     previewPluginDelete: (...args: unknown[]) => previewPluginDelete(...args),
+    previewLanPush: (...args: unknown[]) => previewLanPush(...args),
+    startLanPush: (...args: unknown[]) => startLanPush(...args),
   },
 }));
 
@@ -325,6 +329,26 @@ describe('useAgentHubController', () => {
     setTargetPresence.mockResolvedValue(assetSummary);
     restoreDetachedTarget.mockResolvedValue(assetSummary);
     deleteAssetEverywhere.mockResolvedValue(assetSummary);
+    previewLanPush.mockResolvedValue({
+      previewToken: 'lan-preview-token',
+      snapshotHash: 'snapshot-hash',
+      snapshotId: 'snapshot-id',
+      selectionHash: 'selection-hash',
+      assetCount: 1,
+      revisionCount: 1,
+      credentialBearingAssetCount: 0,
+      peerDeviceIds: ['peer-online'],
+      mode: 'userScope',
+      plaintextBackupDisclosure: 'disclosure',
+      hasCredentialBearingAssets: false,
+    });
+    startLanPush.mockResolvedValue({
+      requestId: 'push-request',
+      selectionHash: 'selection-hash',
+      snapshotHash: 'snapshot-hash',
+      status: 'completed',
+      targets: [],
+    });
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     portableApiMocks.previewAction.mockResolvedValue(portablePlanFixture());
     portableApiMocks.applyAction.mockResolvedValue({
@@ -521,6 +545,34 @@ describe('useAgentHubController', () => {
     expect(result.current.lanPushOpen).toBe(true);
     expect(result.current.lanMode).toBe('project');
     expect(result.current.lanHubProjectIdsText).toBe('local-1');
+  });
+
+  test('LAN push forwards the token returned by the matching preview', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.shellPeers.length).toBe(2));
+
+    act(() => {
+      result.current.openLanPushDialog();
+      result.current.toggleLanPeer('peer-online');
+    });
+    await act(async () => {
+      await result.current.runLanPreview();
+    });
+    await waitFor(() => expect(result.current.lanPreview?.previewToken).toBe('lan-preview-token'));
+
+    await act(async () => {
+      await result.current.runLanStart();
+    });
+
+    expect(startLanPush).toHaveBeenCalledWith({
+      peerDeviceIds: ['peer-online'],
+      mode: 'userScope',
+      scopeIds: [],
+      assetIds: [],
+      hubProjectIds: [],
+      includeHistory: true,
+      previewToken: 'lan-preview-token',
+    });
   });
 
   test('deep links select the advanced workspace that owns the requested surface', () => {
