@@ -9,13 +9,13 @@
 //!     AppState runtime 复用 control client，失败失效缓存；mutation 由 typed client/control 双重校验版本。
 
 use crate::agent_hub::cross_agent::{
-    apply_cross_agent_instruction, preview_cross_agent_instruction,
+    enforce_cross_agent_preview_only, preview_cross_agent_instruction,
     ApplyCrossAgentInstructionRequest, CrossAgentApplyTargetResult, CrossAgentPreviewReport,
     PreviewCrossAgentInstructionRequest,
 };
 use crate::agent_hub::cross_agent_full::{
-    apply_cross_agent_full_default, preview_cross_agent_full_default, ApplyCrossAgentFullRequest,
-    CrossAgentFullApplyItemResult, CrossAgentFullPlan, PreviewCrossAgentFullRequest,
+    ApplyCrossAgentFullRequest, CrossAgentFullApplyItemResult, CrossAgentFullPlan,
+    PreviewCrossAgentFullRequest,
 };
 use crate::agent_hub::git::preview::{
     confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
@@ -654,57 +654,45 @@ pub async fn agent_hub_preview_cross_agent_instruction(
     state: State<'_, AppState>,
     request: PreviewCrossAgentInstructionRequest,
 ) -> Result<CrossAgentPreviewReport, AppError> {
-    if state.runtime_role == RuntimeRole::GuiClient {
-        return proxy_agent_hub!(state, |client| client
-            .agent_hub_preview_cross_agent_instruction(request));
-    }
-    let env = TargetEnvironment::from_process();
-    preview_cross_agent_instruction(&request, &env)
+    let mut report = if state.runtime_role == RuntimeRole::GuiClient {
+        proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_cross_agent_instruction(request))?
+    } else {
+        let env = TargetEnvironment::from_process();
+        preview_cross_agent_instruction(&request, &env)?
+    };
+    enforce_cross_agent_preview_only(&mut report);
+    Ok(report)
 }
 
-/// Business Logic: 一次性把源指令投影到选定目标 Agent 文件。
-/// Code Logic: apply_cross_agent_instruction；不触发其它 target 后台投影。
+/// Business Logic: 真实 CLI 写入未通过 L3 认证时，旧客户端也不得绕过预览边界。
+/// Code Logic: 在 GuiClient proxy 之前固定 fail-closed，防止新 GUI 把 mutation 转发给旧 sidecar。
 #[tauri::command]
 pub async fn agent_hub_apply_cross_agent_instruction(
-    state: State<'_, AppState>,
-    request: ApplyCrossAgentInstructionRequest,
+    _state: State<'_, AppState>,
+    _request: ApplyCrossAgentInstructionRequest,
 ) -> Result<Vec<CrossAgentApplyTargetResult>, AppError> {
-    if state.runtime_role == RuntimeRole::GuiClient {
-        return proxy_agent_hub!(state, |client| client
-            .agent_hub_apply_cross_agent_instruction(request));
-    }
-    let env = TargetEnvironment::from_process();
-    apply_cross_agent_instruction(&request, &env)
+    Err(AppError::validation("CROSS_AGENT_APPLY_NOT_CERTIFIED"))
 }
 
-/// Business Logic: 全量跨 Agent 适配预览（指令 + skill/command/mcp/plugin 五类清单）。
-/// Code Logic: stub FullAdaptRunner.propose；无 skip-preview 直写路径。
+/// Business Logic: full runner 仍是 stub，不对用户暴露伪可执行 plan。
+/// Code Logic: 在 GuiClient proxy 之前稳定拒绝，避免混合版本回退到旧 sidecar。
 #[tauri::command]
 pub async fn agent_hub_preview_cross_agent_full(
-    state: State<'_, AppState>,
-    request: PreviewCrossAgentFullRequest,
+    _state: State<'_, AppState>,
+    _request: PreviewCrossAgentFullRequest,
 ) -> Result<CrossAgentFullPlan, AppError> {
-    if state.runtime_role == RuntimeRole::GuiClient {
-        return proxy_agent_hub!(state, |client| client
-            .agent_hub_preview_cross_agent_full(request));
-    }
-    let env = TargetEnvironment::from_process();
-    preview_cross_agent_full_default(&request, &env)
+    Err(AppError::validation("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"))
 }
 
-/// Business Logic: 按 preview plan_hash 逐项 apply；hash 不匹配必须失败。
-/// Code Logic: re-propose stub plan → 校验 hash → 指令复用 selective apply。
+/// Business Logic: full apply 在功能未完成且未认证时必须 fail-closed。
+/// Code Logic: 在任何 proxy、扫描或 writer 之前返回与 preview 相同的稳定 unavailable code。
 #[tauri::command]
 pub async fn agent_hub_apply_cross_agent_full(
-    state: State<'_, AppState>,
-    request: ApplyCrossAgentFullRequest,
+    _state: State<'_, AppState>,
+    _request: ApplyCrossAgentFullRequest,
 ) -> Result<Vec<CrossAgentFullApplyItemResult>, AppError> {
-    if state.runtime_role == RuntimeRole::GuiClient {
-        return proxy_agent_hub!(state, |client| client
-            .agent_hub_apply_cross_agent_full(request));
-    }
-    let env = TargetEnvironment::from_process();
-    apply_cross_agent_full_default(&request, &env)
+    Err(AppError::validation("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"))
 }
 
 /// LAN push 预览：build selection 但不传输。
@@ -937,7 +925,7 @@ mod tests {
     /// Business Logic: Agent Hub API major 必须升到 v3 才承载 portable mutation。
     /// Code Logic: 常量 == 3。
     #[test]
-    fn agent_hub_api_version_is_v3_for_portable() {
-        assert_eq!(AGENT_HUB_API_VERSION, 3);
+    fn agent_hub_api_version_is_v4_for_scan_only_write_policy() {
+        assert_eq!(AGENT_HUB_API_VERSION, 4);
     }
 }

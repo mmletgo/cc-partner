@@ -17,7 +17,8 @@ use crate::agent_hub::models::{
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::{ProjectionRequest, ProjectionScheduler};
 use crate::agent_hub::support::{
-    builtin_support_manifest, evaluate_target_support, RuntimeProbeSnapshot, TargetCapability,
+    builtin_support_manifest, evaluate_target_support, CapabilitySupport, EvaluatedTargetSupport,
+    RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, InstructionRenderContext,
@@ -116,53 +117,14 @@ pub async fn schedule_package_deactivation(
             .get_materialization_by_binding(&b.id)
             .await?;
         let strategy = crate::agent_hub::models::TargetDisableStrategy::for_target(b.target);
-        let error_token = if is_absent {
-            format!(
-                "disable_strategy:{}:absent_removal_scheduled",
-                strategy.as_str()
-            )
-        } else {
-            format!(
-                "disable_strategy:{}:deactivation_scheduled",
-                strategy.as_str()
-            )
-        };
-        // Absent：capability 门闸后只记 durable deactivation job 意图；
-        // 真实 uninstall 由 durable 路径执行，禁止直接 remove_dir_all 绕过 support。
-        if is_absent {
-            if let Some(reason) = package_deactivate_block_reason(b.target).await {
-                tracing::warn!(
-                    asset_id = %asset.id,
-                    target = %b.target.as_str(),
-                    reason = %reason,
-                    "agent_hub package Absent blocked by support; no destructive delete"
-                );
-                state
-                    .agent_hub_repo
-                    .upsert_materialization(crate::agent_hub::models::NewMaterialization {
-                        asset_id: asset.id.clone(),
-                        target: b.target,
-                        target_binding_id: b.id.clone(),
-                        native_path: mat.as_ref().and_then(|m| m.native_path.clone()),
-                        last_projected_revision_id: mat
-                            .as_ref()
-                            .and_then(|m| m.last_projected_revision_id.clone()),
-                        rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
-                        observed_external_hash: mat
-                            .as_ref()
-                            .and_then(|m| m.observed_external_hash.clone()),
-                        status: crate::agent_hub::models::MaterializationStatus::Blocked,
-                        last_error: Some(format!("support_blocked:{reason}")),
-                    })
-                    .await?;
-                n = n.saturating_add(1);
-                continue;
-            }
-            // durable deactivation intent：标记 Pending + deactivate token；
-            // 不立即 remove_dir_all——由 activator/runtime 执行 uninstall 后清理。
-            let error_token = format!(
-                "disable_strategy:{}:absent_deactivation_job_scheduled",
-                strategy.as_str()
+        // package disable/remove 与 Absent 都是 DeactivatePackage 写操作；
+        // capability 未精确达到 Supported 时只记 Blocked，禁止 durable 路径继续执行。
+        if let Some(reason) = package_deactivate_block_reason(b.target).await {
+            tracing::warn!(
+                asset_id = %asset.id,
+                target = %b.target.as_str(),
+                reason = %reason,
+                "agent_hub package deactivation blocked by support; no destructive delete"
             );
             state
                 .agent_hub_repo
@@ -178,13 +140,26 @@ pub async fn schedule_package_deactivation(
                     observed_external_hash: mat
                         .as_ref()
                         .and_then(|m| m.observed_external_hash.clone()),
-                    status: crate::agent_hub::models::MaterializationStatus::Pending,
-                    last_error: Some(error_token),
+                    status: crate::agent_hub::models::MaterializationStatus::Blocked,
+                    last_error: Some(format!("support_blocked:{reason}")),
                 })
                 .await?;
             n = n.saturating_add(1);
             continue;
         }
+        // durable deactivation intent：标记 Pending + deactivate token；
+        // 不立即 remove_dir_all——由 activator/runtime 执行 uninstall 后清理。
+        let error_token = if is_absent {
+            format!(
+                "disable_strategy:{}:absent_deactivation_job_scheduled",
+                strategy.as_str()
+            )
+        } else {
+            format!(
+                "disable_strategy:{}:deactivation_scheduled",
+                strategy.as_str()
+            )
+        };
         state
             .agent_hub_repo
             .upsert_materialization(crate::agent_hub::models::NewMaterialization {
@@ -420,7 +395,7 @@ pub async fn schedule_project_projections(
 ///
 /// Code Logic（这个函数做什么）:
 ///     Present: checkout blocked / RenderInstruction blocked → TerminalBlocked；
-///     Absent: DeactivatePackage/RenderInstruction 写能力 blocked → TerminalBlocked；
+///     Absent: instruction 只检查 RenderInstruction 写能力 → TerminalBlocked；
 ///     否则 compile/empty → enqueue → Enqueued。
 #[allow(clippy::too_many_arguments)]
 async fn schedule_one_binding(
@@ -468,8 +443,9 @@ async fn schedule_one_binding(
             }
         }
         DesiredPresence::Absent => {
-            // Absent 破坏性写同样要求写能力（RenderInstruction 或 DeactivatePackage 族）
-            if let Some(reason) = absent_write_block_reason(binding.target, env).await {
+            // instruction Absent 仍是 RenderInstruction 写操作；不能以 package
+            // DeactivatePackage 或其它能力的 OR 结果兜底。
+            if let Some(reason) = render_instruction_block_reason(binding.target, env).await {
                 tracing::warn!(
                     asset_id = %asset.id,
                     target = %binding.target.as_str(),
@@ -771,23 +747,6 @@ async fn render_instruction_block_reason(
     write_capability_block_reason(target, env, TargetCapability::RenderInstruction).await
 }
 
-/// 评估 Absent 破坏性写是否被 support 阻断。
-///
-/// Business Logic（为什么需要这个函数）:
-///     Present 与 Absent 都必须强制写能力；blocked 时只持久化 Blocked，不得删文件。
-///
-/// Code Logic（这个函数做什么）:
-///     DeactivatePackage 或 RenderInstruction 任一允许写 → 放行；否则返回阻断原因。
-async fn absent_write_block_reason(target: AgentTarget, env: &TargetEnvironment) -> Option<String> {
-    // Deactivate 允许写则放行；否则看 RenderInstruction（任一允许 → None）。
-    match write_capability_block_reason(target, env, TargetCapability::DeactivatePackage).await {
-        None => None,
-        Some(_) => {
-            write_capability_block_reason(target, env, TargetCapability::RenderInstruction).await
-        }
-    }
-}
-
 /// 通用写 capability 阻断原因。
 ///
 /// Business Logic: capability 不允许写 → Some(reason)。
@@ -812,7 +771,7 @@ async fn write_capability_block_reason(
             return Some("support_manifest_unavailable".into());
         }
     };
-    if eval.allows_write_capability(cap) {
+    if capability_allows_projection_write(&eval, cap) {
         return None;
     }
     Some(
@@ -821,6 +780,25 @@ async fn write_capability_block_reason(
             .cloned()
             .unwrap_or_else(|| format!("{}_blocked", cap.as_str())),
     )
+}
+
+/// projection operation 的精确 capability 判断。
+///
+/// package deactivation 不能被其它 write capability 的汇总状态抬升；instruction render
+/// 仍按 RenderInstruction 自身的 supported family 判断。
+fn capability_allows_projection_write(
+    eval: &EvaluatedTargetSupport,
+    capability: TargetCapability,
+) -> bool {
+    if capability == TargetCapability::DeactivatePackage {
+        eval.capability(capability) == CapabilitySupport::Supported
+            && eval.allows_write_capability(capability)
+    } else {
+        matches!(
+            eval.capability(capability),
+            CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart
+        ) && eval.allows_write_capability(capability)
+    }
 }
 
 fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> TargetProbe {
@@ -906,6 +884,60 @@ mod tests {
             reason.is_some(),
             "expected blocked/read-only for uncertified renderInstruction"
         );
+    }
+
+    #[test]
+    fn partial_manifest_does_not_promote_package_deactivation() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Claude,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities: BTreeMap::from([
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: true,
+            reasons: vec![],
+        };
+        assert!(capability_allows_projection_write(
+            &evaluated,
+            TargetCapability::RenderPortableAssets
+        ));
+        assert!(capability_allows_projection_write(
+            &evaluated,
+            TargetCapability::ActivatePackage
+        ));
+        assert!(!capability_allows_projection_write(
+            &evaluated,
+            TargetCapability::DeactivatePackage
+        ));
+    }
+
+    #[test]
+    fn activation_required_never_enqueues_instruction_write() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Claude,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities: BTreeMap::from([(
+                TargetCapability::RenderInstruction,
+                CapabilitySupport::ActivationRequired,
+            )]),
+            write_allowed: true,
+            reasons: vec![],
+        };
+        assert!(!capability_allows_projection_write(
+            &evaluated,
+            TargetCapability::RenderInstruction
+        ));
     }
 
     /// Business Logic: Absent binding 必须进入 deactivation 调度，不得因非 Present 被跳过。

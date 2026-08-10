@@ -8,38 +8,22 @@
  *   controller 持有数据/动作；AgentHubView 为 pure 视图（禁止 @/api/*）。
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { AgentAssetRow } from '@/components/domain/AgentAssetRow';
-import { Button, Card, Dialog, Drawer, Input, Pill, StatusMessage } from '@/components/primitives';
-import type {
-  AgentHubAssetDetail,
-  AgentHubAssetSummary,
-  AgentHubProbe,
-  AgentHubProjectPreview,
-  AgentHubStatus,
-  AgentTarget,
-} from '@/lib/types/agentHub';
-import { AssetAdoptionDialog } from './AssetAdoptionDialog';
-import { GitImportDrawer } from './GitImportDrawer';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Dialog, StatusMessage } from '@/components/primitives';
 import { LanPushDialog } from './LanPushDialog';
-import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
 import {
   InstructionThreePaneView,
   useInstructionThreePaneController,
   type InstructionThreePaneViewLabels,
   type UseInstructionThreePaneControllerResult,
 } from './instructions';
-import { PluginComponentsDrawer } from './PluginComponentsDrawer';
-import { UserInstructionPreviewDialog } from './userInstructions/UserInstructionPreviewDialog';
 import {
   PortableAssetActionDialog,
   PortableAssetDetailsDrawer,
   PortableInventoryView,
   PortablePullDrawer,
   type PortableInventoryViewLabels,
-  type PortablePluginDetailsSummary,
 } from './portableAssets';
-import { summarizeDeletePreview } from './pluginPackagePresentation';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
 import {
@@ -58,29 +42,15 @@ export type AgentHubViewProps = UseAgentHubControllerResult & {
 };
 
 /**
- * Business Logic: probe.support 映射 tone。
- * Code Logic: supported/full → success；scanOnly/partial → warn；否则 danger。
- */
-function supportTone(support: string): 'success' | 'warn' | 'danger' | 'neutral' {
-  if (support === 'supported' || support === 'full') return 'success';
-  if (support === 'scanOnly' || support === 'partial') return 'warn';
-  if (support === 'unsupported') return 'danger';
-  return 'neutral';
-}
-
-/**
  * Business Logic: 可测试的 pure 页面视图。
  * Code Logic: 只渲染 props；hooks 仅 useTranslation/useMemo/useRef。
  */
 export function AgentHubView(props: AgentHubViewProps) {
   const {
     t,
-    activeSection,
-    setActiveSection,
     hubContext,
+    contextMigrationNotice,
     onContextChange,
-    shellPeers,
-    shellProjects,
     portableInventory,
     portableDetailsOpen,
     portableSelectedItem,
@@ -101,34 +71,9 @@ export function AgentHubView(props: AgentHubViewProps) {
     openPortablePull,
     closePortablePull,
     portablePull,
-    loading,
-    refreshing,
-    stale,
-    error,
     actionError,
     actionBusy,
-    status,
-    statusLoading,
-    legacyLoadedOnce,
-    legacyMatrixExpanded,
-    expandLegacyMatrix,
-    filteredAssets,
     setInstructionRefresh,
-    scopeFilter,
-    kindFilter,
-    setScopeFilter,
-    setKindFilter,
-    selectedAssetId,
-    selectedAsset,
-    selectAsset,
-    preview,
-    previewOpen,
-    previewProjectId,
-    setPreviewProjectId,
-    openPreviewDialog,
-    closePreviewDialog,
-    runPreviewProject,
-    runEnableProject,
     openLanPushDialog,
     closeLanPushDialog,
     lanPushOpen,
@@ -145,59 +90,11 @@ export function AgentHubView(props: AgentHubViewProps) {
     lanReport,
     runLanPreview,
     runLanStart,
-    openGitImportDrawer,
-    closeGitImportDrawer,
-    gitImportOpen,
-    gitInspectReport,
-    gitSelectedLaneDeviceId,
-    selectGitLane,
-    gitPreview,
-    gitSelectedAssetIds,
-    gitAssetSelectionExplicit,
-    toggleGitAsset,
-    gitMappingDrafts,
-    setGitMappingDraft,
-    gitConfirmOutcome,
-    gitLastMapping,
-    runGitInspect,
-    runGitPreview,
-    runGitConfirmMapping,
-    runGitConfirmImport,
-    conflictDrawerOpen,
-    openConflictDrawer,
-    closeConflictDrawer,
-    blocksDrawerOpen,
-    openBlocksDrawer,
-    closeBlocksDrawer,
-    pluginDrawerOpen,
-    pluginReport,
-    pluginReportAssetId,
-    openPluginDrawer,
-    closePluginDrawer,
-    adoptionOpen,
-    adoptionPreview,
-    openAdoptionPreview,
-    closeAdoptionDialog,
-    deleteEverywhereOpen,
-    closeDeleteEverywhere,
-    confirmDeleteEverywhere,
-    deepLinkConflictId,
-    deepLinkBridgePath,
     reload,
-    resolveConflict,
-    updateInstructionBlock,
-    updateInstruction,
-    pairInstructionVariants,
-    setTargetEnabled,
-    restoreDetachedTarget,
-    removeTarget,
-    openDeleteEverywhere,
     writeBlocked,
     upgradeRequired,
     instructionThreePane,
   } = props;
-
-  const previewFocusRef = useRef<HTMLInputElement | null>(null);
 
   const instructionThreePaneLabels: InstructionThreePaneViewLabels = useMemo(
     () => ({
@@ -230,66 +127,19 @@ export function AgentHubView(props: AgentHubViewProps) {
       refresh: t('agentHub:instructions.threePane.refresh'),
       commonMarkdown: t('agentHub:instructions.threePane.commonMarkdown'),
       saveBlocks: t('agentHub:instructions.threePane.saveBlocks'),
+      unsavedDraft: t('agentHub:instructions.threePane.unsavedDraft'),
+      canonicalDrift: t('agentHub:instructions.threePane.canonicalDrift'),
+      sourceDrift: t('agentHub:instructions.threePane.sourceDrift'),
+      originalReadOnly: t('agentHub:instructions.threePane.originalReadOnly'),
+      discardAndReload: t('agentHub:instructions.threePane.discardAndReload'),
+      reparseConfirmTitle: t('agentHub:instructions.threePane.reparseConfirmTitle'),
+      reparseConfirmDescription: t(
+        'agentHub:instructions.threePane.reparseConfirmDescription',
+      ),
+      reparseConfirm: t('agentHub:instructions.threePane.reparseConfirm'),
     }),
     [t],
   );
-
-  const probes: AgentHubProbe[] = status?.probes ?? [];
-
-  const selectedConflicts = selectedAsset?.conflicts ?? [];
-
-  /**
-   * Business Logic: 行选中后打开块抽屉。
-   * Code Logic: select + openBlocksDrawer。
-   */
-  function handleOpenBlocks(asset: AgentHubAssetSummary) {
-    selectAsset(asset.assetId);
-    openBlocksDrawer();
-  }
-
-  /**
-   * Business Logic: Plugin 资产打开组件矩阵 Drawer。
-   * Code Logic: select + openPluginDrawer。
-   */
-  function handleOpenPlugin(asset: AgentHubAssetSummary) {
-    selectAsset(asset.assetId);
-    openPluginDrawer(asset.assetId);
-  }
-
-  /**
-   * Business Logic: 行冲突入口。
-   * Code Logic: select + openConflictDrawer。
-   */
-  function handleOpenConflicts(asset: AgentHubAssetSummary) {
-    selectAsset(asset.assetId);
-    openConflictDrawer();
-  }
-
-  /**
-   * Business Logic: 切换 target enabled（target-local）。
-   * Code Logic: setTargetEnabled。
-   */
-  function handleToggleTarget(
-    asset: AgentHubAssetSummary,
-    target: AgentTarget,
-    nextEnabled: boolean,
-  ) {
-    void setTargetEnabled({
-      assetId: asset.assetId,
-      target,
-      desiredEnabled: nextEnabled,
-    });
-  }
-
-  const previewCheckouts = useMemo(() => {
-    const list = preview?.checkouts;
-    return Array.isArray(list) ? list : [];
-  }, [preview]);
-
-  const previewActions = useMemo(() => {
-    const list = preview?.plannedActions;
-    return Array.isArray(list) ? list : [];
-  }, [preview]);
 
   const portableInventoryLabels: PortableInventoryViewLabels = useMemo(
     () => ({
@@ -301,21 +151,8 @@ export function AgentHubView(props: AgentHubViewProps) {
       retry: t('agentHub:portable.inventory.retry'),
       staleBanner: t('agentHub:portable.inventory.staleBanner'),
       searchPlaceholder: t('agentHub:portable.inventory.searchPlaceholder'),
-      filterTarget: t('agentHub:portable.inventory.filterTarget'),
-      filterScope: t('agentHub:portable.inventory.filterScope'),
       filterActual: t('agentHub:portable.inventory.filterActual'),
       filterManagement: t('agentHub:portable.inventory.filterManagement'),
-      targetFilter: {
-        all: t('agentHub:portable.inventory.targetFilter.all'),
-        claude: t('agentHub:portable.inventory.targetFilter.claude'),
-        codex: t('agentHub:portable.inventory.targetFilter.codex'),
-        opencode: t('agentHub:portable.inventory.targetFilter.opencode'),
-      },
-      scopeFilter: {
-        all: t('agentHub:portable.inventory.scopeFilter.all'),
-        user: t('agentHub:portable.inventory.scopeFilter.user'),
-        project: t('agentHub:portable.inventory.scopeFilter.project'),
-      },
       actualFilter: {
         all: t('agentHub:portable.inventory.actualFilter.all'),
         enabled: t('agentHub:portable.inventory.actualFilter.enabled'),
@@ -375,32 +212,6 @@ export function AgentHubView(props: AgentHubViewProps) {
     }),
     [t],
   );
-
-  const portablePluginSummary: PortablePluginDetailsSummary | null = useMemo(() => {
-    if (!portableSelectedItem || portableSelectedItem.kind !== 'plugin' || !pluginReport) {
-      return null;
-    }
-    const portableAssetIds = new Set(
-      [
-        portableSelectedItem.canonicalAssetId,
-        portableSelectedItem.inventoryItemId,
-        portableSelectedItem.nativeId,
-      ].filter((value): value is string => Boolean(value)),
-    );
-    if (pluginReportAssetId && !portableAssetIds.has(pluginReportAssetId)) {
-      return null;
-    }
-    const deleteSummary = summarizeDeletePreview(pluginReport.deletePreview ?? null);
-    return {
-      packageDisplayName: pluginReport.packageDisplayName || portableSelectedItem.displayName,
-      activationState: pluginReport.activationState,
-      aggregateStatus: pluginReport.aggregateStatus,
-      componentCount: pluginReport.components.length,
-      residualCount: pluginReport.residuals.length,
-      deleteTombstoneCount: deleteSummary.tombstoneCount,
-      deletePreserveCount: deleteSummary.preserveCount,
-    };
-  }, [pluginReport, pluginReportAssetId, portableSelectedItem]);
 
   /**
    * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉；Adapt 写 adaptView URL。
@@ -484,89 +295,28 @@ export function AgentHubView(props: AgentHubViewProps) {
               loading={
                 hubContext.tab === 'instructions'
                   ? Boolean(instructionThreePane?.refreshing)
-                  : isAssetTab
-                    ? portableInventory.refreshing || refreshing
-                    : activeSection === 'diagnostics'
-                      ? statusLoading
-                      : refreshing
+                  : portableInventory.refreshing
               }
               onClick={() => void reload()}
               data-testid="agent-hub-reload"
             >
               {t('common:action.refresh')}
             </Button>
-            {activeSection === 'projectInstructions' ? (
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={openPreviewDialog}
-                data-testid="agent-hub-open-preview"
-              >
-                {t('agentHub:actions.previewProject')}
-              </Button>
-            ) : null}
-            {activeSection === 'syncImport' ? (
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={openLanPushDialog}
-                  data-testid="agent-hub-open-lan-push"
-                >
-                  {t('agentHub:lanPush.open')}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={openGitImportDrawer}
-                  data-testid="agent-hub-open-git-import"
-                >
-                  {t('agentHub:gitImport.open')}
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={openPortablePull}
-                  data-testid="agent-hub-open-portable-pull"
-                >
-                  {t('agentHub:portablePull.title')}
-                </Button>
-              </>
-            ) : null}
           </div>
         </header>
+
+        {contextMigrationNotice ? (
+          <StatusMessage tone="info" data-testid="agent-hub-context-migration-notice">
+            {contextMigrationNotice}
+          </StatusMessage>
+        ) : null}
 
         <AgentHubShell
           context={hubContext}
           onContextChange={onContextChange}
-          peers={shellPeers}
-          projects={shellProjects}
           actions={shellActions}
           tabCounts={portableInventory.kindCounts}
         >
-        {/* 双路径：壳层 tab/scope 驱动 activeSection；legacy section 深链仍可落到 diagnostics/syncImport */}
-        {/* 隐藏旧五段 nav，保留 setActiveSection 供 characterization / deep link */}
-        <nav
-          className={styles.legacySectionNav}
-          aria-label={t('agentHub:sections.aria')}
-          data-testid="agent-hub-legacy-section-nav"
-          hidden
-        >
-          {(['userInstructions', 'projectInstructions', 'assets', 'syncImport', 'diagnostics'] as const).map((section) => (
-            <Button
-              key={section}
-              variant={activeSection === section ? 'secondary' : 'ghost'}
-              size="sm"
-              role="tab"
-              aria-selected={activeSection === section}
-              onClick={() => setActiveSection(section)}
-              data-testid={`agent-hub-section-${section}`}
-            >
-              {t(`agentHub:sections.${section}`)}
-            </Button>
-          ))}
-        </nav>
-
         {hubContext.tab === 'instructions' && instructionThreePane ? (
           <InstructionThreePaneView
             labels={instructionThreePaneLabels}
@@ -580,6 +330,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             writeBlocked={instructionThreePane.writeBlocked}
             writeBlockedReason={instructionThreePane.writeBlockedReason}
             dualDirtyOpen={instructionThreePane.dualDirtyOpen}
+            reparseConfirmOpen={instructionThreePane.reparseConfirmOpen}
             onReparse={instructionThreePane.reparseFromOriginal}
             onSync={() => {
               void instructionThreePane.requestSync();
@@ -593,516 +344,42 @@ export function AgentHubView(props: AgentHubViewProps) {
             onRefresh={() => {
               void instructionThreePane.refresh();
             }}
+            onDiscardAndReload={() => {
+              void instructionThreePane.discardAndReload();
+            }}
             onOriginalChange={instructionThreePane.updateOriginal}
             onSlotTextChange={instructionThreePane.editCurrentSlot}
             onAdaptedCommonChange={instructionThreePane.editAdaptedCommon}
             onAdaptedVariantChange={instructionThreePane.editAdaptedVariant}
             onChooseBaseline={instructionThreePane.chooseBaseline}
             onCancelDualDirty={instructionThreePane.cancelDualDirty}
+            onConfirmReparse={instructionThreePane.confirmReparseFromOriginal}
+            onCancelReparse={instructionThreePane.cancelReparseFromOriginal}
           />
         ) : null}
 
-        {activeSection === 'syncImport' ? (
-          <StatusMessage tone="info" live="off" data-testid="agent-hub-lan-push-notice">
-            {t('agentHub:lanPushGateC')}
-          </StatusMessage>
-        ) : null}
-
-        {activeSection !== 'userInstructions' && (upgradeRequired || writeBlocked) ? (
+        {isAssetTab && (upgradeRequired || writeBlocked) ? (
           <StatusMessage tone="warn" data-testid="agent-hub-upgrade-required">
             {t('agentHub:upgradeRequired')}
           </StatusMessage>
         ) : null}
 
-        {activeSection !== 'userInstructions' && stale ? (
-          <StatusMessage tone="warn" data-testid="agent-hub-stale">
-            {t('agentHub:stale')}
-          </StatusMessage>
-        ) : null}
-
-        {activeSection !== 'userInstructions' && actionError ? (
+        {isAssetTab && actionError ? (
           <StatusMessage tone="danger" data-testid="agent-hub-action-error">
             {actionError}
           </StatusMessage>
         ) : null}
 
-        {activeSection === 'diagnostics' && statusLoading && !status ? (
-          <StatusMessage tone="info" data-testid="agent-hub-status-loading">
-            {t('agentHub:loading')}
-          </StatusMessage>
-        ) : null}
-
-        {activeSection !== 'userInstructions' && error && legacyMatrixExpanded ? (
-          <StatusMessage
-            tone="danger"
-            data-testid="agent-hub-legacy-error"
-            action={
-              <Button size="sm" onClick={() => void expandLegacyMatrix()}>
-                {t('common:action.retry')}
-              </Button>
-            }
-          >
-            {error}
-          </StatusMessage>
-        ) : null}
-
-        {activeSection === 'diagnostics' && status ? (
-          <Card variant="outlined" padding="md" data-testid="agent-hub-status-card">
-            <Card.Header>
-              <div className={styles.statusHeader}>
-                <span className={styles.sectionTitle}>{t('agentHub:probes.title')}</span>
-                <div className={styles.statusPills}>
-                  <Pill tone={status.enabled ? 'success' : 'neutral'} dot>
-                    {status.enabled ? t('agentHub:status.enabled') : t('agentHub:status.disabled')}
-                  </Pill>
-                  <Pill tone={status.writeCompatible ? 'success' : 'danger'}>
-                    {status.writeCompatible
-                      ? t('agentHub:status.writeOk')
-                      : t('agentHub:status.writeBlocked')}
-                  </Pill>
-                  <Pill tone={status.conflictCount > 0 ? 'danger' : 'neutral'}>
-                    {t('agentHub:status.conflicts', { count: status.conflictCount })}
-                  </Pill>
-                  <Pill tone={status.blockedMaterializationCount > 0 ? 'warn' : 'neutral'}>
-                    {t('agentHub:status.blocked', {
-                      count: status.blockedMaterializationCount,
-                    })}
-                  </Pill>
-                </div>
-              </div>
-            </Card.Header>
-            <Card.Body>
-              <div className={styles.probeGrid}>
-                {probes.length === 0 ? (
-                  <p className={styles.emptyInline}>{t('agentHub:probes.empty')}</p>
-                ) : (
-                  probes.map((probe) => (
-                    <div
-                      key={probe.target}
-                      className={styles.probeCell}
-                      data-testid={`probe-${probe.target}`}
-                    >
-                      <div className={styles.probeName}>{t(`agentHub:targets.${probe.target}`)}</div>
-                      <Pill tone={supportTone(probe.support)}>
-                        {t(`agentHub:probes.support.${probe.support}`, {
-                          defaultValue: probe.support,
-                        })}
-                      </Pill>
-                      <div className={styles.probeMeta}>
-                        <span>{probe.version || t('agentHub:probes.unknownVersion')}</span>
-                        <span>{probe.executable || t('agentHub:probes.unknownExecutable')}</span>
-                      </div>
-                      {probe.support === 'unsupported' ? (
-                        <StatusMessage tone="warn" live="off">
-                          {t('agentHub:probes.unsupportedHint')}
-                        </StatusMessage>
-                      ) : null}
-                    </div>
-                  ))
-                )}
-              </div>
-            </Card.Body>
-          </Card>
-        ) : null}
-
-        {activeSection === 'assets' ? (
+        {isAssetTab ? (
           <div data-testid="agent-hub-assets-section">
             <PortableInventoryView
               controller={portableInventory}
               labels={portableInventoryLabels}
             />
-            {/* Legacy canonical matrix：默认折叠，避免冷路径 N+1 listAssets。 */}
-            {!legacyMatrixExpanded && !legacyLoadedOnce ? (
-              <section className={styles.legacyMatrix} data-testid="agent-hub-legacy-matrix-collapsed">
-                <p className={styles.hint}>{t('agentHub:sections.assets')}</p>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => expandLegacyMatrix()}
-                  data-testid="agent-hub-expand-legacy-matrix"
-                >
-                  {t('common:action.refresh')}
-                </Button>
-              </section>
-            ) : (
-              <section className={styles.legacyMatrix} data-testid="agent-hub-legacy-matrix">
-                {loading && !legacyLoadedOnce ? (
-                  <StatusMessage tone="info" data-testid="agent-hub-legacy-loading">
-                    {t('agentHub:loading')}
-                  </StatusMessage>
-                ) : null}
-                <div className={styles.filters} data-testid="agent-hub-filters">
-                  <label className={styles.filterField}>
-                    <span>{t('agentHub:filters.scope')}</span>
-                    <Input
-                      value={scopeFilter}
-                      onChange={(event) => setScopeFilter(event.currentTarget.value)}
-                      placeholder={t('agentHub:filters.scopePlaceholder')}
-                      data-testid="agent-hub-filter-scope"
-                    />
-                  </label>
-                  <label className={styles.filterField}>
-                    <span>{t('agentHub:filters.kind')}</span>
-                    <Input
-                      value={kindFilter}
-                      onChange={(event) => setKindFilter(event.currentTarget.value)}
-                      placeholder={t('agentHub:filters.kindPlaceholder')}
-                      data-testid="agent-hub-filter-kind"
-                    />
-                  </label>
-                </div>
-                <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
-                  {legacyLoadedOnce && filteredAssets.length === 0 ? (
-                    <p className={styles.empty} data-testid="agent-hub-empty">
-                      {t('agentHub:empty')}
-                    </p>
-                  ) : (
-                    filteredAssets.map((asset) => (
-                      <AgentAssetRow
-                        key={asset.assetId}
-                        asset={asset}
-                        selected={selectedAssetId === asset.assetId}
-                        busy={actionBusy}
-                        writeBlocked={writeBlocked}
-                        onSelect={(item) => selectAsset(item.assetId)}
-                        onOpenBlocks={handleOpenBlocks}
-                        onOpenPlugin={handleOpenPlugin}
-                        onOpenConflicts={handleOpenConflicts}
-                        onToggleTarget={handleToggleTarget}
-                        onRemoveTarget={(item, target) => {
-                          void removeTarget({ assetId: item.assetId, target });
-                        }}
-                        onRestoreTarget={(item, target) => {
-                          void restoreDetachedTarget({ assetId: item.assetId, target });
-                        }}
-                        onOpenCollision={(item, target) => openAdoptionPreview(item, target)}
-                        onDeleteEverywhere={(item) => openDeleteEverywhere(item.assetId)}
-                      />
-                    ))
-                  )}
-                </section>
-              </section>
-            )}
           </div>
-        ) : null}
-
-        {hubContext.tab !== 'instructions' && activeSection === 'projectInstructions' ? (
-          <Card variant="outlined" padding="md">
-            <Card.Header>
-              <span className={styles.sectionTitle}>{t('agentHub:sections.projectInstructions')}</span>
-            </Card.Header>
-            <Card.Body>
-              <p className={styles.hint}>{t('agentHub:sections.projectInstructionsHint')}</p>
-              <p className={styles.hint} data-testid="agent-hub-project-opt-in-guard">
-                {writeBlocked
-                  ? t('agentHub:status.writeBlocked')
-                  : t('agentHub:preview.desc')}
-              </p>
-              <label className={styles.filterField}>
-                <span>{t('agentHub:preview.projectId')}</span>
-                <Input
-                  value={previewProjectId}
-                  onChange={(event) => setPreviewProjectId(event.currentTarget.value)}
-                  placeholder={t('agentHub:preview.projectIdPlaceholder')}
-                  data-testid="agent-hub-project-section-project-id"
-                />
-              </label>
-              <div className={styles.dialogActions}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={actionBusy}
-                  onClick={() => void runPreviewProject()}
-                  data-testid="agent-hub-project-section-preview"
-                >
-                  {t('agentHub:preview.run')}
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  loading={actionBusy}
-                  disabled={writeBlocked}
-                  onClick={() => void runEnableProject()}
-                  data-testid="agent-hub-project-section-enable"
-                >
-                  {t('agentHub:preview.enable')}
-                </Button>
-              </div>
-              {preview ? (
-                <div
-                  className={styles.previewResult}
-                  data-testid="agent-hub-project-section-result"
-                >
-                  <p className={styles.hint}>
-                    {(preview.noCommitNotice as string) || t('agentHub:preview.noCommitDefault')}
-                  </p>
-                  {Array.isArray(preview.warnings) && preview.warnings.length > 0 ? (
-                    <ul className={styles.warningList}>
-                      {(preview.warnings as string[]).map((warning) => (
-                        <li key={warning}>{warning}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  <pre className={styles.blockBody} data-testid="agent-hub-project-preview-json">
-                    {JSON.stringify(
-                      {
-                        checkouts: previewCheckouts,
-                        plannedActions: previewActions,
-                        optedIn: preview.optedIn,
-                      },
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </div>
-              ) : null}
-            </Card.Body>
-          </Card>
         ) : null}
         </AgentHubShell>
       </div>
-
-      <Dialog
-        open={previewOpen}
-        titleId="agent-hub-preview-title"
-        onClose={closePreviewDialog}
-        closeOnEscape={!actionBusy}
-        closeOnBackdrop={!actionBusy}
-        initialFocusRef={previewFocusRef}
-        className={styles.dialogSurface}
-      >
-        <div className={styles.dialogBody} data-testid="agent-hub-preview-dialog">
-          <h2 id="agent-hub-preview-title" className={styles.drawerTitle}>
-            {t('agentHub:preview.title')}
-          </h2>
-          <p className={styles.drawerSubtitle}>{t('agentHub:preview.desc')}</p>
-          {deepLinkBridgePath ? (
-            <p className={styles.hint} data-testid="agent-hub-preview-bridge-notice">
-              {t('agentHub:preview.bridgeNotice', { path: deepLinkBridgePath })}
-            </p>
-          ) : null}
-          <label className={styles.filterField}>
-            <span>{t('agentHub:preview.projectId')}</span>
-            <Input
-              ref={previewFocusRef}
-              value={previewProjectId}
-              onChange={(event) => setPreviewProjectId(event.currentTarget.value)}
-              placeholder={t('agentHub:preview.projectIdPlaceholder')}
-              data-testid="agent-hub-preview-project-id"
-            />
-          </label>
-          <div className={styles.dialogActions}>
-            <Button
-              variant="secondary"
-              size="sm"
-              loading={actionBusy}
-              onClick={() => void runPreviewProject()}
-              data-testid="agent-hub-run-preview"
-            >
-              {t('agentHub:preview.run')}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              loading={actionBusy}
-              disabled={writeBlocked}
-              onClick={() => void runEnableProject()}
-              data-testid="agent-hub-run-enable"
-            >
-              {t('agentHub:preview.enable')}
-            </Button>
-          </div>
-          {preview ? (
-            <div className={styles.previewResult} data-testid="agent-hub-preview-result">
-              <p className={styles.hint}>
-                {(preview.noCommitNotice as string) || t('agentHub:preview.noCommitDefault')}
-              </p>
-              {Array.isArray(preview.warnings) && preview.warnings.length > 0 ? (
-                <ul className={styles.warningList}>
-                  {(preview.warnings as string[]).map((warning) => (
-                    <li key={warning}>{warning}</li>
-                  ))}
-                </ul>
-              ) : null}
-              <div className={styles.previewColumns}>
-                <div>
-                  <h3 className={styles.sectionTitle}>{t('agentHub:preview.checkouts')}</h3>
-                  <pre className={styles.blockBody}>{JSON.stringify(previewCheckouts, null, 2)}</pre>
-                </div>
-                <div>
-                  <h3 className={styles.sectionTitle}>{t('agentHub:preview.plannedActions')}</h3>
-                  <pre className={styles.blockBody}>{JSON.stringify(previewActions, null, 2)}</pre>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      </Dialog>
-
-      <Dialog
-        open={deleteEverywhereOpen}
-        titleId="agent-hub-delete-everywhere-title"
-        onClose={closeDeleteEverywhere}
-        closeOnEscape={!actionBusy}
-        closeOnBackdrop={!actionBusy}
-        className={styles.dialogSurface}
-      >
-        <div className={styles.dialogBody} data-testid="agent-hub-delete-everywhere-dialog">
-          <h2 id="agent-hub-delete-everywhere-title" className={styles.drawerTitle}>
-            {t('agentHub:deleteEverywhere.title')}
-          </h2>
-          <p className={styles.drawerSubtitle}>{t('agentHub:deleteEverywhere.desc')}</p>
-          <div className={styles.dialogActions}>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={actionBusy}
-              onClick={closeDeleteEverywhere}
-              data-testid="agent-hub-delete-everywhere-cancel"
-            >
-              {t('common:action.cancel')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              loading={actionBusy}
-              disabled={writeBlocked}
-              onClick={() => void confirmDeleteEverywhere()}
-              data-testid="agent-hub-delete-everywhere-confirm"
-            >
-              {t('agentHub:deleteEverywhere.confirm')}
-            </Button>
-          </div>
-        </div>
-      </Dialog>
-
-      <AssetAdoptionDialog
-        open={adoptionOpen}
-        preview={adoptionPreview}
-        busy={actionBusy}
-        onClose={closeAdoptionDialog}
-      />
-
-      <Drawer
-        open={conflictDrawerOpen}
-        titleId="agent-hub-conflict-title"
-        onClose={closeConflictDrawer}
-        side="right"
-        closeOnEscape={!actionBusy}
-        closeOnBackdrop={!actionBusy}
-        className={styles.drawerSurface}
-      >
-        <div className={styles.drawerBody} data-testid="agent-hub-conflict-drawer">
-          <header className={styles.drawerHeader}>
-            <h2 id="agent-hub-conflict-title" className={styles.drawerTitle}>
-              {t('agentHub:conflict.title')}
-            </h2>
-            <p className={styles.drawerSubtitle}>
-              {selectedAsset?.displayName || t('agentHub:conflict.noAsset')}
-            </p>
-          </header>
-          {deepLinkConflictId ? (
-            <p className={styles.hint}>
-              {t('agentHub:conflict.deepLink', { id: deepLinkConflictId })}
-            </p>
-          ) : null}
-          {selectedConflicts.length === 0 ? (
-            <p className={styles.emptyInline} data-testid="conflicts-empty">
-              {t('agentHub:conflict.empty')}
-            </p>
-          ) : (
-            <ul className={styles.conflictList}>
-              {selectedConflicts.map((conflict) => (
-                <li key={conflict.id} className={styles.conflictItem} data-testid={`conflict-${conflict.id}`}>
-                  <div className={styles.blockTitleRow}>
-                    <span className={styles.blockId}>{conflict.id}</span>
-                    {conflict.target ? (
-                      <Pill tone="warn">{t(`agentHub:targets.${conflict.target}`)}</Pill>
-                    ) : null}
-                  </div>
-                  <pre className={styles.blockBody}>{conflict.detailJson || '—'}</pre>
-                  <div className={styles.blockActions}>
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      disabled={actionBusy || writeBlocked}
-                      onClick={() =>
-                        void resolveConflict({
-                          conflictId: conflict.id,
-                          resolution: 'keepHub',
-                        })
-                      }
-                      data-testid={`conflict-keep-hub-${conflict.id}`}
-                    >
-                      {t('agentHub:conflict.keepHub')}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={actionBusy || writeBlocked}
-                      onClick={() =>
-                        void resolveConflict({
-                          conflictId: conflict.id,
-                          resolution: 'keepExternal',
-                        })
-                      }
-                      data-testid={`conflict-keep-external-${conflict.id}`}
-                    >
-                      {t('agentHub:conflict.keepExternal')}
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </Drawer>
-
-      <PluginComponentsDrawer
-        open={pluginDrawerOpen}
-        report={pluginReport}
-        busy={actionBusy}
-        error={actionError}
-        onClose={closePluginDrawer}
-      />
-
-      <InstructionBlocksDrawer
-        open={blocksDrawerOpen}
-        asset={selectedAsset}
-        busy={actionBusy}
-        writeBlocked={writeBlocked}
-        error={actionError}
-        onClose={closeBlocksDrawer}
-        onSaveDocument={(contentMarkdown) => {
-          void updateInstruction({ contentMarkdown });
-        }}
-        onPromoteShared={(blockId, commonMarkdown) => {
-          void updateInstructionBlock({
-            blockId,
-            mode: 'shared',
-            commonMarkdown,
-          });
-        }}
-        onPairAdapted={(blockIds, commonMarkdown) => {
-          void pairInstructionVariants({ blockIds, commonMarkdown });
-        }}
-        onRevertTargetOnly={(blockId, sourceTarget, markdown) => {
-          void updateInstructionBlock({
-            blockId,
-            mode: 'targetOnly',
-            commonMarkdown: markdown,
-            variants: { [sourceTarget]: markdown },
-          });
-        }}
-        onUpdateBlock={(blockId, patch) => {
-          void updateInstructionBlock({
-            blockId,
-            mode: patch.mode,
-            commonMarkdown: patch.commonMarkdown,
-            variants: patch.variants,
-          });
-        }}
-      />
 
       <LanPushDialog
         open={lanPushOpen}
@@ -1124,32 +401,10 @@ export function AgentHubView(props: AgentHubViewProps) {
         onClose={closeLanPushDialog}
       />
 
-      <GitImportDrawer
-        open={gitImportOpen}
-        busy={actionBusy}
-        error={actionError}
-        inspectReport={gitInspectReport}
-        selectedLaneDeviceId={gitSelectedLaneDeviceId}
-        preview={gitPreview}
-        selectedAssetIds={gitSelectedAssetIds}
-        hasExplicitAssetSelection={gitAssetSelectionExplicit}
-        mappingDrafts={gitMappingDrafts}
-        confirmOutcome={gitConfirmOutcome}
-        lastMapping={gitLastMapping}
-        onInspect={() => void runGitInspect()}
-        onSelectLane={selectGitLane}
-        onPreview={() => void runGitPreview()}
-        onToggleAsset={toggleGitAsset}
-        onMappingDraftChange={setGitMappingDraft}
-        onConfirmMapping={(hub) => void runGitConfirmMapping(hub)}
-        onConfirmImport={() => void runGitConfirmImport()}
-        onClose={closeGitImportDrawer}
-      />
-
       <PortableAssetDetailsDrawer
         open={portableDetailsOpen}
         item={portableSelectedItem}
-        pluginReport={portablePluginSummary}
+        pluginReport={null}
         busy={portableActionBusy}
         error={portableActionError}
         mutationBlocked={portableInventory.mutationBlocked}
@@ -1229,20 +484,6 @@ export function AgentHubView(props: AgentHubViewProps) {
         onClose={closePortablePull}
       />
 
-      {instructionThreePane ? (
-        <UserInstructionPreviewDialog
-          t={t}
-          open={instructionThreePane.previewOpen}
-          busy={instructionThreePane.actionBusy}
-          plan={instructionThreePane.plan}
-          error={instructionThreePane.actionError}
-          onClose={instructionThreePane.closePreview}
-          onApply={() => {
-            void instructionThreePane.applyPlan();
-          }}
-        />
-      ) : null}
-
     </div>
   );
 }
@@ -1252,37 +493,154 @@ export function AgentHubView(props: AgentHubViewProps) {
  */
 export function AgentHub() {
   const controller = useAgentHubController();
+  const {
+    hubContext: requestedHubContext,
+    onContextChange: navigateContext,
+    t,
+  } = controller;
+  const [committedHubContext, setCommittedHubContext] = useState(requestedHubContext);
+  const [pendingHubContext, setPendingHubContext] = useState<
+    UseAgentHubControllerResult['hubContext'] | null
+  >(null);
+  const contextStayRef = useRef<HTMLButtonElement | null>(null);
   const instructionThreePane = useInstructionThreePaneController({
-    context: controller.hubContext,
-    t: controller.t,
-    enabled: controller.instructionsLaneActive,
+    context: committedHubContext,
+    t,
+    enabled: committedHubContext.tab === 'instructions' || committedHubContext.adaptView,
   });
+
+  const committedFingerprint = JSON.stringify(committedHubContext);
+  const requestedFingerprint = JSON.stringify(requestedHubContext);
+
+  /**
+   * Business Logic: browser back/forward 与直接 deep link 也必须经过同一脏稿守卫。
+   * Code Logic: dirty 时立即把 URL 恢复到 committed context，并暂存 requested context；
+   *   clean 时才提交。正文和 Shell 始终只消费 committed context。
+   */
+  useEffect(() => {
+    if (requestedFingerprint === committedFingerprint) return;
+    const timeoutId = window.setTimeout(() => {
+      if (instructionThreePane.dirty) {
+        navigateContext(committedHubContext);
+        setPendingHubContext(requestedHubContext);
+        return;
+      }
+      setCommittedHubContext(requestedHubContext);
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    committedFingerprint,
+    committedHubContext,
+    instructionThreePane.dirty,
+    navigateContext,
+    requestedHubContext,
+    requestedFingerprint,
+  ]);
+
   const onContextChange = useCallback(
     (patch: Partial<UseAgentHubControllerResult['hubContext']>) => {
-      const current = controller.hubContext;
-      const contextChanging = (['scope', 'projectKey', 'deviceId', 'agent'] as const).some(
-        (key) => patch[key] !== undefined && patch[key] !== current[key],
-      );
-      if (contextChanging && instructionThreePane.dirty) {
-        const confirmed =
-          typeof window === 'undefined' || typeof window.confirm !== 'function'
-            ? false
-            : window.confirm(controller.t('agentHub:instructions.threePane.contextSwitchWarning'));
-        if (!confirmed) return;
-        instructionThreePane.discardDraftForContextChange();
+      const next = {
+        ...committedHubContext,
+        ...patch,
+        scope: 'user' as const,
+        deviceId: null,
+        projectKey: null,
+      };
+      if (JSON.stringify(next) === committedFingerprint) return;
+      if (instructionThreePane.dirty) {
+        setPendingHubContext(next);
+        return;
       }
-      controller.onContextChange(patch);
+      setCommittedHubContext(next);
+      navigateContext(next);
     },
-    [controller, instructionThreePane],
+    [
+      committedFingerprint,
+      committedHubContext,
+      instructionThreePane.dirty,
+      navigateContext,
+    ],
   );
+
+  const stayInCommittedContext = useCallback(() => {
+    setPendingHubContext(null);
+    navigateContext(committedHubContext);
+  }, [committedHubContext, navigateContext]);
+
+  const commitPendingContext = useCallback(() => {
+    if (!pendingHubContext) return;
+    instructionThreePane.discardDraftForContextChange();
+    setCommittedHubContext(pendingHubContext);
+    navigateContext(pendingHubContext);
+    setPendingHubContext(null);
+  }, [instructionThreePane, navigateContext, pendingHubContext]);
+
+  const saveAndCommitPendingContext = useCallback(async () => {
+    if (!pendingHubContext) return;
+    const saved = await instructionThreePane.saveBlocks();
+    if (!saved) return;
+    setCommittedHubContext(pendingHubContext);
+    navigateContext(pendingHubContext);
+    setPendingHubContext(null);
+  }, [instructionThreePane, navigateContext, pendingHubContext]);
+
   return (
-    <AgentHubView
-      {...controller}
-      onContextChange={onContextChange}
-      instructionThreePane={instructionThreePane}
-    />
+    <>
+      <AgentHubView
+        {...controller}
+        hubContext={committedHubContext}
+        onContextChange={onContextChange}
+        instructionThreePane={instructionThreePane}
+      />
+      <Dialog
+        open={pendingHubContext !== null}
+        titleId="agent-hub-context-change-title"
+        onClose={stayInCommittedContext}
+        initialFocusRef={contextStayRef}
+      >
+        <div className={styles.dialogBody} data-testid="agent-hub-context-change-dialog">
+          <h2 id="agent-hub-context-change-title" className={styles.drawerTitle}>
+            {t('agentHub:instructions.threePane.contextSwitchTitle')}
+          </h2>
+          <p className={styles.drawerSubtitle}>
+            {t('agentHub:instructions.threePane.contextSwitchWarning')}
+          </p>
+          <div className={styles.dialogActions}>
+            <Button
+              ref={contextStayRef}
+              variant="primary"
+              size="sm"
+              onClick={stayInCommittedContext}
+              data-testid="agent-hub-context-stay"
+            >
+              {t('agentHub:instructions.threePane.contextStay')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={
+                instructionThreePane.actionBusy ||
+                !instructionThreePane.state.blocksDirty ||
+                instructionThreePane.state.externalDrift
+              }
+              loading={instructionThreePane.actionBusy}
+              onClick={() => void saveAndCommitPendingContext()}
+              data-testid="agent-hub-context-save"
+            >
+              {t('agentHub:instructions.threePane.contextSave')}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={instructionThreePane.actionBusy}
+              onClick={commitPendingContext}
+              data-testid="agent-hub-context-discard"
+            >
+              {t('agentHub:instructions.threePane.contextDiscard')}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+    </>
   );
 }
-
-// 避免未使用类型告警（导出供测试）
-export type { AgentHubAssetDetail, AgentHubStatus, AgentHubProjectPreview };

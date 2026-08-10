@@ -23,8 +23,8 @@ use crate::agent_hub::packages::activator::ProcessRunner;
 use crate::agent_hub::portable_inventory::{
     hash_directory_tree, hash_plugin_root, inspect_portable_inventory_force_query,
     inspect_portable_inventory_force_with_env_query, inspect_portable_inventory_query,
-    inspect_portable_inventory_with_env_query, PortableInventoryItemDto, PortableInventoryQuery,
-    PortableInventorySnapshotDto,
+    inspect_portable_inventory_with_env_query, PortableInventoryItemDto,
+    PortableInventoryMutationCapability, PortableInventoryQuery, PortableInventorySnapshotDto,
 };
 use crate::agent_hub::targets::paths::TargetEnvironment;
 use crate::agent_hub::targets::portable::hash_skill_directory;
@@ -377,6 +377,13 @@ async fn execute_claimed_plan(
             continue;
         }
 
+        // 旧 plan 可能来自 capability 尚未按动作拆分的版本；即使 target 汇总能力
+        // 仍为 Supported，也必须先按当前 item 的 enable/disable/uninstall affordance 阻断。
+        if let Some(outcome) = item_action_capability_block(change, plan.action, pre.as_ref()) {
+            raw_results.push((change.inventory_item_id.clone(), outcome, pre));
+            continue;
+        }
+
         // 生产 apply 必须在任何 target mutation 前重算确定性递归 tree hash。
         // 注入式旧单测使用虚构路径/快照，仍由 target adapter 的既有 hash seam 覆盖。
         if state.is_some() || deps.env.is_some() {
@@ -384,6 +391,23 @@ async fn execute_claimed_plan(
                 raw_results.push((change.inventory_item_id.clone(), outcome, pre));
                 continue;
             }
+        }
+
+        // 写入 target 前最后一次读取当前 manifest/CLI capability。
+        // revalidate_claimed_plan 早先的 force inspect 只绑定 inventory hash；在
+        // preview/claim 后 manifest 变为 scan-only 时，旧 plan 仍可能带着 direct-local
+        // allowlist 生成的空 blocking_reasons，因此必须在真正调用 adapter 前再 gate 一次。
+        if let Some(outcome) = revalidate_target_mutation_before_write(
+            state,
+            deps,
+            stored.request.inventory_query,
+            plan.action,
+            change,
+        )
+        .await
+        {
+            raw_results.push((change.inventory_item_id.clone(), outcome, pre));
+            continue;
         }
 
         // Plugin shared preserve：canonical_effect TombstoneComponents 时不删除 shared components
@@ -596,6 +620,105 @@ async fn resolve_force_inventory(
         return inspect_portable_inventory_force_with_env_query(state, env, query).await;
     }
     inspect_portable_inventory_force_query(state, query).await
+}
+
+/// 在 portable action adapter 写入前忽略旧快照，直接重新读取本机 mutation capability。
+///
+/// Business Logic（为什么需要这个函数）:
+///     support manifest/CLI 版本可能在 preview 后变化；任何 direct-local executor 都必须
+///     服从当前 scan-only 结果，不能由旧 plan 或 allowlist 恢复写能力。
+///
+/// Code Logic（这个函数做什么）:
+///     生产状态下绕过 pre_inventory，执行 force inspect；目标不存在、扫描失败或能力非
+///     Supported 都返回 Blocked raw outcome。注入式无 state 测试保持既有 fake snapshot seam。
+async fn revalidate_target_mutation_before_write(
+    state: Option<&AppState>,
+    deps: &PortableActionExecutorDeps,
+    query: PortableInventoryQuery,
+    action: PortableAssetActionKind,
+    change: &super::models::PortableAssetActionChangeDto,
+) -> Option<TargetActionRawOutcome> {
+    let state = state?;
+    let live = if let Some(env) = &deps.env {
+        inspect_portable_inventory_force_with_env_query(state, env, query).await
+    } else {
+        inspect_portable_inventory_force_query(state, query).await
+    };
+    let live = match live {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return Some(TargetActionRawOutcome::Blocked {
+                code: "PORTABLE_ASSET_ACTION_TARGET_MUTATION_REVALIDATE_FAILED".into(),
+                message: error.to_string(),
+            })
+        }
+    };
+    let capability = live
+        .targets
+        .iter()
+        .find(|candidate| candidate.target == change.target)
+        .map(|candidate| candidate.mutation_capability)
+        .unwrap_or(PortableInventoryMutationCapability::Blocked);
+    if capability != PortableInventoryMutationCapability::Supported {
+        return Some(TargetActionRawOutcome::Blocked {
+            code: "PORTABLE_ASSET_ACTION_TARGET_MUTATION_NOT_SUPPORTED".into(),
+            message: format!(
+                "target {} mutation capability is {:?}",
+                change.target.as_str(),
+                capability
+            ),
+        });
+    }
+    let live_item = live
+        .items
+        .iter()
+        .find(|candidate| candidate.inventory_item_id == change.inventory_item_id);
+    item_action_capability_block(change, action, live_item)
+}
+
+/// 根据 inventory item 的逐动作 affordance 阻断旧 plan 的 capability 旁路。
+fn item_action_capability_block(
+    change: &super::models::PortableAssetActionChangeDto,
+    action: PortableAssetActionKind,
+    item: Option<&PortableInventoryItemDto>,
+) -> Option<TargetActionRawOutcome> {
+    let Some(item) = item else {
+        return Some(TargetActionRawOutcome::Blocked {
+            code: "PORTABLE_ASSET_ACTION_ITEM_NOT_FOUND".into(),
+            message: "live inventory item missing before mutation".into(),
+        });
+    };
+    let allowed = match action {
+        PortableAssetActionKind::Enable => item.capabilities.can_enable,
+        PortableAssetActionKind::Disable => item.capabilities.can_disable,
+        PortableAssetActionKind::Uninstall => item.capabilities.can_uninstall,
+        PortableAssetActionKind::Adopt => item.capabilities.can_adopt,
+        PortableAssetActionKind::InstallToSourceTarget => {
+            item.capabilities.can_install_to_source_target
+        }
+    };
+    if allowed {
+        return None;
+    }
+    let code = if change.kind == crate::agent_hub::portable_inventory::PortableAssetKind::Plugin
+        && matches!(
+            action,
+            PortableAssetActionKind::Disable | PortableAssetActionKind::Uninstall
+        )
+        && item.capabilities.reason_code.as_deref() == Some("deactivate_package_not_supported")
+    {
+        "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"
+    } else {
+        "PORTABLE_ASSET_ACTION_ITEM_CAPABILITY_BLOCKED"
+    };
+    Some(TargetActionRawOutcome::Blocked {
+        code: code.into(),
+        message: item
+            .capabilities
+            .reason_code
+            .clone()
+            .unwrap_or_else(|| "item action capability is not supported".into()),
+    })
 }
 
 async fn resolve_post_inventory(
@@ -1151,6 +1274,19 @@ mod tests {
         assert!(runner.calls().is_empty());
     }
 
+    /// 生产执行顺序合同：target mutation capability 必须在 adapter 前最后复验。
+    #[test]
+    fn mutation_revalidation_precedes_target_executor() {
+        let src = include_str!("executor.rs");
+        let gate = src
+            .find("if let Some(outcome) = revalidate_target_mutation_before_write(")
+            .expect("write gate call");
+        let adapter = src
+            .find("let outcome = match exec.execute_change(")
+            .expect("target adapter call");
+        assert!(gate < adapter, "mutation gate must precede adapter write");
+    }
+
     /// Business Logic: source hash 变化 fail-closed，不执行 CLI。
     #[tokio::test]
     async fn changed_source_fail_closed() {
@@ -1484,5 +1620,85 @@ mod tests {
         assert!(args.iter().any(|a| a == "uninstall"));
         assert!(args.iter().any(|a| a == "--scope"));
         assert!(args.iter().any(|a| a == "--keep-data"));
+    }
+
+    /// Business Logic: partial manifest 仅放行 Activate/Render 时，Plugin deactivation
+    /// 既不能进入 adapter，也不能产生任何 CLI 调用。
+    #[tokio::test]
+    async fn partial_deactivate_capability_never_calls_plugin_remove() {
+        let repo = test_repo().await;
+        let runner = Arc::new(FakeProcessRunner::new());
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            "blocked@cc",
+            "/plugins/blocked",
+            Some(true),
+        );
+        item.capabilities.can_disable = false;
+        item.capabilities.can_uninstall = false;
+        item.capabilities.reason_code = Some("deactivate_package_not_supported".into());
+        let snapshot = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let plan = preview_action(
+            &repo,
+            &snapshot,
+            vec![item.inventory_item_id.clone()],
+            PortableAssetActionKind::Uninstall,
+            false,
+        )
+        .await;
+        assert!(plan.changes[0]
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason == "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"));
+        let item_gate = item_action_capability_block(
+            &plan.changes[0],
+            PortableAssetActionKind::Uninstall,
+            Some(&item),
+        )
+        .expect("deactivation gate");
+        assert!(matches!(
+            item_gate,
+            TargetActionRawOutcome::Blocked { ref code, .. }
+                if code == "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"
+        ));
+        let mut unavailable = item.clone();
+        unavailable.capabilities.reason_code = Some("portable_direct_action_unavailable".into());
+        let unavailable_gate = item_action_capability_block(
+            &plan.changes[0],
+            PortableAssetActionKind::Uninstall,
+            Some(&unavailable),
+        )
+        .expect("direct action gate");
+        assert!(matches!(
+            unavailable_gate,
+            TargetActionRawOutcome::Blocked { ref code, .. }
+                if code == "PORTABLE_ASSET_ACTION_ITEM_CAPABILITY_BLOCKED"
+        ));
+
+        let deps = PortableActionExecutorDeps {
+            repo,
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snapshot.clone()),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(snapshot),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token,
+                client_request_id: "req-deactivate-blocked".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(result.items[0].state, PortableAssetActionItemState::Blocked);
+        assert!(
+            runner.calls().is_empty(),
+            "blocked uninstall must not spawn CLI"
+        );
     }
 }

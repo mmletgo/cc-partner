@@ -29,6 +29,7 @@ pub use models::{
 pub use reconcile::{
     reconcile_portable_inventory, reconcile_portable_inventory_with_facts, PortableCanonicalFact,
 };
+pub(crate) use scanner::evaluate_current_portable_target_support;
 pub use scanner::{
     hash_directory_tree, hash_plugin_root, inspect_portable_inventory,
     inspect_portable_inventory_force, inspect_portable_inventory_force_query,

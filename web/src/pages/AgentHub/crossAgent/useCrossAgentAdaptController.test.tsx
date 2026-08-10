@@ -1,16 +1,17 @@
 // @vitest-environment jsdom
 /**
- * useCrossAgentAdaptController tests.
+ * useCrossAgentAdaptController preview-only tests.
  *
  * Business Logic（为什么需要）:
- *   不能把源选为目标；peer 上下文 blocked；必须 preview 后才能 apply。
+ *   只允许本机用户级 selective preview；所有 apply/full 为零调用，旧响应不得串入新输入。
  *
  * Code Logic（做什么）:
- *   mock agentHubApi；renderHook + act/waitFor 验证闸门与 API 调用。
+ *   mock API，以 renderHook + deferred promise 验证 gate、严格响应匹配和 generation 失效。
  */
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+import type { AgentTarget } from '@/lib/types/agentHub';
 import type { AgentHubContext } from '../context/agentHubContext';
 import { useCrossAgentAdaptController } from './useCrossAgentAdaptController';
 
@@ -45,6 +46,36 @@ function localContext(overrides: Partial<AgentHubContext> = {}): AgentHubContext
   };
 }
 
+function previewResponse(source: AgentTarget, destinations: AgentTarget[]) {
+  return {
+    source,
+    kind: 'instruction',
+    needsAdaptation: false,
+    planHash: `plan-${source}`,
+    destinations: destinations.map((destination) => ({
+      destination,
+      mode: 'shared',
+      path: `/tmp/${destination}/AGENTS.md`,
+      renderedHash: 'rendered',
+      observedHash: 'observed',
+      unifiedDiff: '--- before\n+++ after',
+      partialBlockers: ['CROSS_AGENT_PREVIEW_ONLY'],
+      canApply: false,
+    })),
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('useCrossAgentAdaptController', () => {
   beforeEach(() => {
     previewMock.mockReset();
@@ -70,81 +101,36 @@ describe('useCrossAgentAdaptController', () => {
     await waitFor(() => {
       expect(result.current.destinationOptions).toEqual(['codex', 'opencode']);
     });
-
-    act(() => {
-      result.current.toggleDestination('claude');
-    });
+    act(() => result.current.toggleDestination('claude'));
     expect(result.current.destinations).not.toContain('claude');
-
-    act(() => {
-      result.current.toggleDestination('codex');
-    });
-    // default already includes codex; toggle off
-    expect(result.current.destinations).not.toContain('codex');
-    expect(result.current.destinations).toContain('opencode');
+    act(() => result.current.toggleDestination('codex'));
+    expect(result.current.destinations).toEqual(['opencode']);
   });
 
-  test('peer context is blocked for preview and apply', async () => {
-    const { result } = renderHook(() =>
-      useCrossAgentAdaptController({
-        context: localContext({ deviceId: 'peer-1' }),
-        t,
-        initialSourceMarkdown: 'Always run tests.',
-      }),
+  test('peer and project contexts are preview-blocked', async () => {
+    const { result, rerender } = renderHook(
+      ({ context }) =>
+        useCrossAgentAdaptController({
+          context,
+          t,
+          initialSourceMarkdown: 'Always run tests.',
+        }),
+      { initialProps: { context: localContext({ deviceId: 'peer-1' }) } },
     );
 
-    await waitFor(() => {
-      expect(result.current.peerBlocked).toBe(true);
-    });
-    expect(result.current.canPreview).toBe(false);
-    expect(result.current.canApply).toBe(false);
-
-    await act(async () => {
-      await result.current.runPreview();
-    });
-    expect(previewMock).not.toHaveBeenCalled();
+    expect(result.current.peerBlocked).toBe(true);
+    await act(async () => result.current.runPreview());
     expect(result.current.error).toBe('agentHub:crossAgent.errors.peerBlocked');
 
-    await act(async () => {
-      await result.current.runApply();
-    });
-    expect(applyMock).not.toHaveBeenCalled();
+    rerender({ context: localContext({ scope: 'project', projectKey: 'project-a' }) });
+    await waitFor(() => expect(result.current.peerBlocked).toBe(false));
+    await act(async () => result.current.runPreview());
+    expect(result.current.error).toBe('agentHub:crossAgent.errors.projectBlocked');
+    expect(previewMock).not.toHaveBeenCalled();
   });
 
-  test('preview required before apply; then applies only canApply destinations', async () => {
-    previewMock.mockResolvedValue({
-      source: 'claude',
-      kind: 'instruction',
-      needsAdaptation: false,
-      planHash: 'plan-1',
-      destinations: [
-        {
-          destination: 'codex',
-          mode: 'shared',
-          path: '/tmp/.codex/AGENTS.md',
-          renderedHash: 'abc',
-          unifiedDiff: 'diff',
-          partialBlockers: [],
-          canApply: true,
-        },
-        {
-          destination: 'opencode',
-          mode: 'residual',
-          path: '/tmp/.config/opencode/AGENTS.md',
-          partialBlockers: ['residual'],
-          canApply: false,
-        },
-      ],
-    });
-    applyMock.mockResolvedValue([
-      {
-        destination: 'codex',
-        status: 'applied',
-        path: '/tmp/.codex/AGENTS.md',
-        errorCode: null,
-      },
-    ]);
-
+  test('valid selective preview remains read-only', async () => {
+    previewMock.mockResolvedValue(previewResponse('claude', ['codex', 'opencode']));
     const { result } = renderHook(() =>
       useCrossAgentAdaptController({
         context: localContext(),
@@ -153,57 +139,102 @@ describe('useCrossAgentAdaptController', () => {
       }),
     );
 
-    // scope not confirmed → cannot preview
-    expect(result.current.canPreview).toBe(false);
-    await act(async () => {
-      await result.current.runApply();
-    });
+    act(() => result.current.setScopeConfirmed(true));
+    await act(async () => result.current.runPreview());
+
+    expect(previewMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'claude',
+        destinations: ['codex', 'opencode'],
+        sourceMarkdown: 'Always run tests before commit.',
+        scope: 'user',
+      }),
+    );
+    expect(result.current.preview?.planHash).toBe('plan-claude');
+    expect(result.current.applicableCount).toBe(0);
+    expect(result.current.canApply).toBe(false);
+
+    await act(async () => result.current.runApply());
+    expect(result.current.error).toBe('agentHub:crossAgent.errors.applyUnavailable');
     expect(applyMock).not.toHaveBeenCalled();
-    expect(result.current.error).toBe('agentHub:crossAgent.errors.previewRequired');
+    expect(previewFullMock).not.toHaveBeenCalled();
+    expect(applyFullMock).not.toHaveBeenCalled();
+  });
 
+  test('rejects a preview whose source or destination set does not match request', async () => {
+    previewMock.mockResolvedValue(previewResponse('codex', ['opencode']));
+    const { result } = renderHook(() =>
+      useCrossAgentAdaptController({
+        context: localContext(),
+        t,
+        initialSourceMarkdown: 'Body',
+      }),
+    );
+    act(() => result.current.setScopeConfirmed(true));
+    await act(async () => result.current.runPreview());
+    expect(result.current.preview).toBeNull();
+    expect(result.current.error).toBe('agentHub:crossAgent.errors.invalidPreview');
+  });
+
+  test('body and context changes discard deferred old preview responses', async () => {
+    const first = deferred<unknown>();
+    previewMock.mockReturnValueOnce(first.promise);
+    const { result, rerender } = renderHook(
+      ({ context, initialSourceMarkdown }) =>
+        useCrossAgentAdaptController({ context, t, initialSourceMarkdown }),
+      {
+        initialProps: {
+          context: localContext(),
+          initialSourceMarkdown: 'Old body',
+        },
+      },
+    );
+    act(() => result.current.setScopeConfirmed(true));
+    let firstOperation!: Promise<void>;
     act(() => {
-      result.current.setScopeConfirmed(true);
+      firstOperation = result.current.runPreview();
     });
-    expect(result.current.canPreview).toBe(true);
+    await waitFor(() => expect(previewMock).toHaveBeenCalledTimes(1));
+    act(() => result.current.setSourceMarkdown('New body'));
+    first.resolve(previewResponse('claude', ['codex', 'opencode']));
+    await act(async () => firstOperation);
+    expect(result.current.preview).toBeNull();
 
-    await act(async () => {
-      await result.current.runPreview();
+    const second = deferred<unknown>();
+    previewMock.mockReturnValueOnce(second.promise);
+    act(() => result.current.setScopeConfirmed(true));
+    let secondOperation!: Promise<void>;
+    act(() => {
+      secondOperation = result.current.runPreview();
     });
+    await waitFor(() => expect(previewMock).toHaveBeenCalledTimes(2));
+    rerender({
+      context: localContext({ agent: 'codex' }),
+      initialSourceMarkdown: 'Codex body',
+    });
+    second.resolve(previewResponse('claude', ['codex', 'opencode']));
+    await act(async () => secondOperation);
+    expect(result.current.source).toBe('codex');
+    expect(result.current.preview).toBeNull();
+  });
 
+  test('loads markdown from inspect when initial source is empty', async () => {
+    const { result } = renderHook(() =>
+      useCrossAgentAdaptController({
+        context: localContext(),
+        t,
+        initialSourceMarkdown: '',
+      }),
+    );
     await waitFor(() => {
-      expect(previewMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          source: 'claude',
-          destinations: ['codex', 'opencode'],
-          sourceMarkdown: 'Always run tests before commit.',
-          scope: 'user',
-        }),
-      );
-      expect(result.current.preview).not.toBeNull();
-    });
-
-    expect(result.current.applicableCount).toBe(1);
-    expect(result.current.canApply).toBe(true);
-
-    await act(async () => {
-      await result.current.runApply();
-    });
-
-    await waitFor(() => {
-      expect(applyMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          source: 'claude',
-          destinations: ['codex'],
-          sourceMarkdown: 'Always run tests before commit.',
-          scope: 'user',
-          planHash: 'plan-1',
-        }),
-      );
-      expect(result.current.applyResults?.[0]?.status).toBe('applied');
+      expect(inspectMock).toHaveBeenCalled();
+      expect(result.current.sourceMarkdown).toContain('From inspect body');
     });
   });
 
-  test('loads markdown from inspect when initialSourceMarkdown empty', async () => {
+  test('destination changes do not strand an in-flight source reload', async () => {
+    const sourceLoad = deferred<unknown>();
+    inspectMock.mockReturnValueOnce(sourceLoad.promise);
     const { result } = renderHook(() =>
       useCrossAgentAdaptController({
         context: localContext(),
@@ -213,131 +244,63 @@ describe('useCrossAgentAdaptController', () => {
     );
 
     await waitFor(() => {
-      expect(inspectMock).toHaveBeenCalled();
-      expect(result.current.sourceMarkdown).toContain('From inspect body');
+      expect(inspectMock).toHaveBeenCalledTimes(1);
+      expect(result.current.contentLoading).toBe(true);
+    });
+    act(() => result.current.toggleDestination('codex'));
+    expect(result.current.contentLoading).toBe(true);
+    expect(result.current.canPreview).toBe(false);
+
+    sourceLoad.resolve({
+      targets: [],
+      canonical: { commonContent: 'Fresh source body.', targetExtensions: {} },
+    });
+    await waitFor(() => {
+      expect(result.current.contentLoading).toBe(false);
+      expect(result.current.sourceMarkdown).toContain('Fresh source body');
     });
   });
 
-  test('full mode: preview required then apply with planHash and include toggles', async () => {
-    previewFullMock.mockResolvedValue({
-      source: 'claude',
-      destination: 'codex',
-      scope: 'user',
-      planHash: 'hash-full-1',
-      generator: 'stub',
-      items: [
-        {
-          kind: 'instruction',
-          logicalKey: 'instruction:user',
-          action: 'create',
-          path: '/tmp/.codex/AGENTS.md',
-          content: 'Always run tests.',
-          residualReason: null,
-          included: true,
-        },
-        {
-          kind: 'skill',
-          logicalKey: 'skill:demo',
-          action: 'skip',
-          path: '/tmp/skill',
-          residualReason: 'stub:skill_copy_not_ready',
-          included: true,
-        },
-        {
-          kind: 'command',
-          logicalKey: 'inventory:empty:command',
-          action: 'skip',
-          path: '',
-          residualReason: 'no_command_on_source',
-          included: false,
-        },
-        {
-          kind: 'mcp',
-          logicalKey: 'inventory:empty:mcp',
-          action: 'skip',
-          path: '',
-          residualReason: 'no_mcp_on_source',
-          included: false,
-        },
-        {
-          kind: 'plugin',
-          logicalKey: 'inventory:empty:plugin',
-          action: 'skip',
-          path: '',
-          residualReason: 'no_plugin_on_source',
-          included: false,
-        },
-      ],
+  test('lane changes reset confirmation and reject old preview even when Agent is unchanged', async () => {
+    const pending = deferred<unknown>();
+    previewMock.mockReturnValueOnce(pending.promise);
+    const { result, rerender } = renderHook(
+      ({ context }) =>
+        useCrossAgentAdaptController({
+          context,
+          t,
+          initialSourceMarkdown: 'Common body',
+        }),
+      { initialProps: { context: localContext() } },
+    );
+    act(() => result.current.setScopeConfirmed(true));
+    let operation!: Promise<void>;
+    act(() => {
+      operation = result.current.runPreview();
     });
-    applyFullMock.mockResolvedValue([
-      {
-        kind: 'instruction',
-        logicalKey: 'instruction:user',
-        status: 'applied',
-        path: '/tmp/.codex/AGENTS.md',
-        errorCode: null,
-      },
-    ]);
+    await waitFor(() => expect(previewMock).toHaveBeenCalledTimes(1));
 
+    rerender({ context: localContext({ instructionLane: 'adapted' }) });
+    await waitFor(() => expect(result.current.scopeConfirmed).toBe(false));
+    pending.resolve(previewResponse('claude', ['codex', 'opencode']));
+    await act(async () => operation);
+    expect(result.current.preview).toBeNull();
+  });
+
+  test('full mode and every apply path remain unavailable', async () => {
     const { result } = renderHook(() =>
       useCrossAgentAdaptController({
         context: localContext(),
         t,
-        initialSourceMarkdown: 'Always run tests before commit.',
+        initialSourceMarkdown: 'Body',
       }),
     );
-
-    act(() => {
-      result.current.setMode('full');
-      result.current.setScopeConfirmed(true);
-    });
-
-    expect(result.current.mode).toBe('full');
-    expect(result.current.fullDestination).toBe('codex');
-    expect(result.current.canApply).toBe(false);
-
-    await act(async () => {
-      await result.current.runPreview();
-    });
-
-    await waitFor(() => {
-      expect(previewFullMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          source: 'claude',
-          destination: 'codex',
-          scope: 'user',
-          sourceMarkdown: 'Always run tests before commit.',
-        }),
-      );
-      expect(result.current.fullPlan?.planHash).toBe('hash-full-1');
-    });
-
-    expect(result.current.canApply).toBe(true);
-
-    act(() => {
-      result.current.toggleFullItemIncluded('skill:demo');
-    });
-    expect(
-      result.current.fullPlan?.items.find((i) => i.logicalKey === 'skill:demo')?.included,
-    ).toBe(false);
-
-    await act(async () => {
-      await result.current.runApply();
-    });
-
-    await waitFor(() => {
-      expect(applyFullMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          planHash: 'hash-full-1',
-          destination: 'codex',
-          items: expect.arrayContaining([
-            expect.objectContaining({ logicalKey: 'instruction:user', included: true }),
-            expect.objectContaining({ logicalKey: 'skill:demo', included: false }),
-          ]),
-        }),
-      );
-      expect(result.current.fullApplyResults?.[0]?.status).toBe('applied');
-    });
+    act(() => result.current.setMode('full'));
+    expect(result.current.mode).toBe('selective');
+    expect(result.current.error).toBe('agentHub:crossAgent.errors.fullUnavailable');
+    await act(async () => result.current.runApply());
     expect(applyMock).not.toHaveBeenCalled();
+    expect(previewFullMock).not.toHaveBeenCalled();
+    expect(applyFullMock).not.toHaveBeenCalled();
   });
 });

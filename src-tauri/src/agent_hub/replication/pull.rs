@@ -17,10 +17,10 @@ use crate::agent_hub::models::{AgentTarget, PortablePullClaim, PortablePullPlanR
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore, TreeEntryType};
 use crate::agent_hub::portable_actions::PortableAssetConflictPolicy;
 use crate::agent_hub::portable_inventory::{
-    inspect_portable_inventory, inspect_portable_inventory_force, PortableAssetKind,
-    PortableInventoryItemDto, PortableInventoryManagementState,
-    PortableInventoryMutationCapability, PortableInventorySnapshotDto,
-    PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
+    evaluate_current_portable_target_support, inspect_portable_inventory,
+    inspect_portable_inventory_force, PortableAssetKind, PortableInventoryItemDto,
+    PortableInventoryManagementState, PortableInventoryMutationCapability,
+    PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
 };
 use crate::agent_hub::replication::receiver::AGENT_HUB_MAX_CHUNK_BYTES;
 use crate::agent_hub::snapshot::envelope::SnapshotEnvelopeV1;
@@ -31,6 +31,7 @@ use crate::agent_hub::snapshot::portable_builder::{
     build_portable_selection_envelope, bytes_are_legacy_lossy, BuiltPortableSelection,
     PortableSelectionItem,
 };
+use crate::agent_hub::support::{CapabilitySupport, EvaluatedTargetSupport, TargetCapability};
 use crate::agent_hub::targets::portable::render_mcp_projection;
 use crate::error::AppError;
 use crate::models::device::Device;
@@ -424,9 +425,30 @@ fn path_is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 目标 mutation_capability 是否允许 InstallToTarget（仅 Supported 放行；缺证据 fail-closed）。
-fn mutation_allows_install_to_target(cap: PortableInventoryMutationCapability) -> bool {
-    matches!(cap, PortableInventoryMutationCapability::Supported)
+/// target 汇总状态 + 实际安装动作 capability 是否共同允许 InstallToTarget。
+///
+/// 普通 portable 资产写原生文件只认 RenderPortableAssets；Plugin Pull 同时物化并进入
+/// 原生 package 目录，因此还必须具备 ActivatePackage。ActivationRequired 不视为可执行。
+fn mutation_allows_install_to_target(
+    aggregate: PortableInventoryMutationCapability,
+    evaluated: Option<&EvaluatedTargetSupport>,
+    kind: PortableAssetKind,
+) -> bool {
+    if aggregate != PortableInventoryMutationCapability::Supported {
+        return false;
+    }
+    let Some(evaluated) = evaluated else {
+        return false;
+    };
+    let capability_ready = |capability| {
+        matches!(
+            evaluated.capability(capability),
+            CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart
+        ) && evaluated.allows_write_capability(capability)
+    };
+    capability_ready(TargetCapability::RenderPortableAssets)
+        && (kind != PortableAssetKind::Plugin
+            || capability_ready(TargetCapability::ActivatePackage))
 }
 
 /// 从本地 inventory 快照读取 destination target 的 mutation_capability。
@@ -1039,9 +1061,15 @@ pub async fn preview_portable_pull(
     let mut credential_bearing = 0u64;
     // destination mutation gate：无 L3 写证据时 fail-closed 为 canonical-only
     let dest_mutation = destination_mutation_capability(&local, request.destination_target);
-    let mutation_install_ok = mutation_allows_install_to_target(dest_mutation);
+    let destination_support =
+        evaluate_current_portable_target_support(request.destination_target).ok();
 
     for rem in &remote_selected {
+        let mutation_install_ok = mutation_allows_install_to_target(
+            dest_mutation,
+            destination_support.as_ref(),
+            rem.kind,
+        );
         let mut item_blocking = Vec::new();
         let mut warnings = rem.warnings.clone();
         let rem_scope = resolve_remote_scope_id(rem);
@@ -1492,11 +1520,17 @@ async fn execute_claimed_pull(
     // apply 路径 re-check mutation：不得仅信 preview 计划（inventory 可能已变）
     let dest_mutation_now =
         destination_mutation_capability(&local_before, stored.public.destination_target);
-    let mutation_install_ok_now = mutation_allows_install_to_target(dest_mutation_now);
+    let destination_support_now =
+        evaluate_current_portable_target_support(stored.public.destination_target).ok();
 
     let mut items = Vec::new();
     let mut any_fail = false;
     for change in &stored.public.changes {
+        let mutation_install_ok_now = mutation_allows_install_to_target(
+            dest_mutation_now,
+            destination_support_now.as_ref(),
+            change.kind,
+        );
         if change.legacy_lossy || change.install_mode == PortablePullInstallMode::Blocked {
             items.push(PortablePullItemResultDto {
                 inventory_item_id: change.inventory_item_id.clone(),
@@ -1743,26 +1777,23 @@ async fn install_change(
     selection: &RemotePortableSelectionResponse,
     change: &PortablePullChangeDto,
 ) -> Result<(), AppError> {
-    // 写盘前再验 mutation：preview 之后 support 可能回落 Blocked/PreviewOnly
-    let live = inspect_portable_inventory(state).await?;
-    let dest_target = selection
-        .items
-        .iter()
-        .find(|s| s.inventory_item_id == change.inventory_item_id)
-        .map(|s| s.target)
-        .unwrap_or(AgentTarget::Claude);
-    let cap = destination_mutation_capability(&live, dest_target);
-    if !mutation_allows_install_to_target(cap) {
-        return Err(AppError::validation(
-            "PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED".to_string(),
-        ));
-    }
-    let sel = selection
+    // 写盘前强制再验 mutation：preview 之后 support 可能回落 Blocked/PreviewOnly。
+    // 这里不能复用带缓存的 inventory，避免 scan-only manifest 在缓存窗口内被旧
+    // capability 误放行；direct-local allowlist 也只能由 scanner 的 manifest gate 产生。
+    let live = inspect_portable_inventory_force(state).await?;
+    let selected_item = selection
         .items
         .iter()
         .find(|s| s.inventory_item_id == change.inventory_item_id)
         .ok_or_else(|| AppError::generic("selection item missing after transfer"))?;
-    install_payload_to_target(state, store, sel, change).await
+    let aggregate = destination_mutation_capability(&live, selected_item.target);
+    let evaluated = evaluate_current_portable_target_support(selected_item.target).ok();
+    if !mutation_allows_install_to_target(aggregate, evaluated.as_ref(), selected_item.kind) {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED".to_string(),
+        ));
+    }
+    install_payload_to_target(state, store, selected_item, change).await
 }
 
 /// selection 响应必须绑定 revalidated inventory 的 content/tree hash（同 id 内容漂移 → fail），
@@ -2838,21 +2869,76 @@ mod tests {
 
     #[test]
     fn mutation_gate_forces_canonical_only_when_not_supported() {
-        // R2-P1-1：previewOnly/blocked 不得计划 InstallToTarget
+        let evaluated = |capabilities| EvaluatedTargetSupport {
+            target: AgentTarget::Claude,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities,
+            write_allowed: true,
+            reasons: vec![],
+        };
+        let deactivate_only = evaluated(BTreeMap::from([(
+            TargetCapability::DeactivatePackage,
+            CapabilitySupport::Supported,
+        )]));
+        let render_only = evaluated(BTreeMap::from([
+            (
+                TargetCapability::RenderPortableAssets,
+                CapabilitySupport::Supported,
+            ),
+            (
+                TargetCapability::ActivatePackage,
+                CapabilitySupport::Blocked,
+            ),
+        ]));
+        let render_and_activate = evaluated(BTreeMap::from([
+            (
+                TargetCapability::RenderPortableAssets,
+                CapabilitySupport::Supported,
+            ),
+            (
+                TargetCapability::ActivatePackage,
+                CapabilitySupport::Supported,
+            ),
+        ]));
+
+        // R2-P1-1：previewOnly/blocked 与无关的 Deactivate capability 都不得安装。
         assert!(!mutation_allows_install_to_target(
-            PortableInventoryMutationCapability::PreviewOnly
+            PortableInventoryMutationCapability::PreviewOnly,
+            Some(&render_and_activate),
+            PortableAssetKind::Command,
         ));
         assert!(!mutation_allows_install_to_target(
-            PortableInventoryMutationCapability::Blocked
+            PortableInventoryMutationCapability::Blocked,
+            Some(&render_and_activate),
+            PortableAssetKind::Command,
+        ));
+        assert!(!mutation_allows_install_to_target(
+            PortableInventoryMutationCapability::Supported,
+            Some(&deactivate_only),
+            PortableAssetKind::Command,
         ));
         assert!(mutation_allows_install_to_target(
-            PortableInventoryMutationCapability::Supported
+            PortableInventoryMutationCapability::Supported,
+            Some(&render_only),
+            PortableAssetKind::Command,
+        ));
+        assert!(!mutation_allows_install_to_target(
+            PortableInventoryMutationCapability::Supported,
+            Some(&render_only),
+            PortableAssetKind::Plugin,
+        ));
+        assert!(mutation_allows_install_to_target(
+            PortableInventoryMutationCapability::Supported,
+            Some(&render_and_activate),
+            PortableAssetKind::Plugin,
         ));
         // plan helper: when mutation blocked, install_mode path yields ImportedCanonicalOnly
         let src = include_str!("pull.rs");
         assert!(src.contains("PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED"));
         assert!(src.contains("mutation_allows_install_to_target"));
         assert!(src.contains("destination_mutation_capability"));
+        // install_change must bypass the cached inventory immediately before the adapter write.
+        assert!(src.contains("let live = inspect_portable_inventory_force(state).await?;"));
     }
 
     #[test]

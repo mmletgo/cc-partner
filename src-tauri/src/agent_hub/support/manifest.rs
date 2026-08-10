@@ -217,6 +217,9 @@ pub struct TargetSupportRecord {
     /// quality-matrix evidence IDs
     #[serde(default)]
     pub evidence_ids: Vec<String>,
+    /// 写 capability 对应的 L3 认证 evidence IDs；缺失时 runtime 必须阻止该写能力。
+    #[serde(default)]
+    pub capability_evidence_ids: BTreeMap<TargetCapability, Vec<String>>,
 }
 
 /// support-manifest 中的 Hook 跨 target 映射原始行（字符串 intent/trust，避免 support→plugins 循环依赖）。
@@ -512,6 +515,40 @@ pub fn evaluate_target_support(
         reasons.push("evidence_ids_empty".into());
     }
 
+    // 每个声明为 Supported* 的写 capability 都必须有独立 evidence 绑定。runtime
+    // 无法读取仓库 quality-matrix 的执行状态，但至少拒绝没有 capability 级绑定的发布物；
+    // CI checker 继续校验这些 ID 必须是未过期、元数据完整的 L3 PASS/VERIFIED。
+    for (capability, support) in &record.capabilities {
+        if !capability.is_write_side() || !support.is_supported_family() {
+            continue;
+        }
+        let evidence = record
+            .capability_evidence_ids
+            .get(capability)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if evidence.is_empty() || evidence.iter().all(|id| id.trim().is_empty()) {
+            reasons.push(format!(
+                "write_capability_evidence_missing:{}",
+                capability.as_str()
+            ));
+            continue;
+        }
+        if evidence.iter().any(|id| {
+            let trimmed = id.trim();
+            trimmed.is_empty()
+                || !record
+                    .evidence_ids
+                    .iter()
+                    .any(|known| known.trim() == trimmed)
+        }) {
+            reasons.push(format!(
+                "write_capability_evidence_not_declared:{}",
+                capability.as_str()
+            ));
+        }
+    }
+
     // 解析 min/current
     let prefix = record.executable_probe.version_prefix.as_deref();
     let suffix = record.executable_probe.version_suffix.as_deref();
@@ -739,6 +776,12 @@ mod tests {
         "liveReload": "blocked"
         {caps_extra}
       }},
+      "capabilityEvidenceIds": {{
+        "renderInstruction": ["E1"],
+        "renderPortableAssets": ["E1"],
+        "activatePackage": ["E1"],
+        "deactivatePackage": ["E1"]
+      }},
       "evidenceIds": [{evidence_json}]
     }},
     {{
@@ -950,6 +993,31 @@ mod tests {
         assert!(eval.allows_write_capability(TargetCapability::RenderPortableAssets));
     }
 
+    /// Business Logic: 仅在 target 级列出 evidence 不能开放具体写能力。
+    #[test]
+    fn supported_write_without_capability_evidence_forces_scan_only() {
+        let json = fixture_manifest_json(Some("1.0.0"), Some("1.2.0"), &["E1"], None, "").replace(
+            r#""capabilityEvidenceIds": {
+        "renderInstruction": ["E1"],
+        "renderPortableAssets": ["E1"],
+        "activatePackage": ["E1"],
+        "deactivatePackage": ["E1"]
+      }"#,
+            r#""capabilityEvidenceIds": {}"#,
+        );
+        let manifest = load_support_manifest_from_str(&json).unwrap();
+        let evaluated = evaluate_target_support(&manifest, &probe_at(Some("1.1.0"), None));
+        assert!(matches!(
+            evaluated.mode,
+            EvaluatedSupportMode::ScanOnly { .. }
+        ));
+        assert!(evaluated
+            .reasons
+            .iter()
+            .any(|reason| reason == "write_capability_evidence_missing:renderInstruction"));
+        assert!(!evaluated.write_allowed);
+    }
+
     /// Business Logic: 未知 capability JSON key 必须解析失败（fail-closed）。
     #[test]
     fn unknown_capability_key_rejected_at_parse() {
@@ -1010,45 +1078,29 @@ mod tests {
         assert!(!id.contains("Bearer"));
     }
 
-    /// Business Logic: 编译期 JSON 与 runtime 解析一致；phase-1 pin 与 OpenCode fail-closed 合同。
+    /// Business Logic: 编译期 JSON 与 runtime 解析一致；所有 target 均保持 scan-only。
     #[test]
     fn include_str_bytes_are_stable() {
         assert!(SUPPORT_MANIFEST_JSON.contains("\"schemaVersion\""));
         assert!(SUPPORT_MANIFEST_JSON.contains("\"claude\""));
-        assert!(SUPPORT_MANIFEST_JSON.contains("\"2.1.207\""));
-        assert!(SUPPORT_MANIFEST_JSON.contains("\"0.145.0\""));
         let m = builtin_support_manifest().unwrap();
         for t in &m.targets {
-            match t.target {
-                crate::agent_hub::models::AgentTarget::OpenCode => {
-                    for (cap, support) in &t.capabilities {
-                        if cap.is_write_side() {
-                            assert_eq!(
-                                *support,
-                                CapabilitySupport::Blocked,
-                                "opencode write cap must stay blocked until certified"
-                            );
-                        }
-                    }
-                }
-                crate::agent_hub::models::AgentTarget::Claude
-                | crate::agent_hub::models::AgentTarget::Codex => {
-                    assert!(t.min_tested_version.is_some());
-                    assert!(t.current_tested_version.is_some());
-                    for (cap, support) in &t.capabilities {
-                        if *cap == TargetCapability::LiveReload {
-                            assert_eq!(*support, CapabilitySupport::Blocked);
-                            continue;
-                        }
-                        if cap.is_write_side() {
-                            assert!(
-                                support.is_supported_family(),
-                                "{} {:?} should be Supported* after phase-1 pin",
-                                t.target.as_str(),
-                                cap
-                            );
-                        }
-                    }
+            assert_eq!(t.min_tested_version, None);
+            assert_eq!(t.current_tested_version, None);
+            for (cap, support) in &t.capabilities {
+                if cap.is_write_side() {
+                    assert_eq!(
+                        *support,
+                        CapabilitySupport::Blocked,
+                        "{} {:?} must stay blocked until current L3 evidence is verified",
+                        t.target.as_str(),
+                        cap
+                    );
+                } else if matches!(
+                    cap,
+                    TargetCapability::ScanInstruction | TargetCapability::ScanPortableAssets
+                ) {
+                    assert_eq!(*support, CapabilitySupport::ReadOnly);
                 }
             }
         }

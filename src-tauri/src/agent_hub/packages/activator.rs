@@ -267,8 +267,11 @@ fn eval_support(probe: &TargetProbe) -> EvaluatedTargetSupport {
     }
 }
 
-fn support_blocks_activation(eval: &EvaluatedTargetSupport) -> (bool, bool, Option<String>) {
-    let cap = eval.capability(TargetCapability::ActivatePackage);
+fn support_blocks_capability(
+    eval: &EvaluatedTargetSupport,
+    capability: TargetCapability,
+) -> (bool, bool, Option<String>) {
+    let cap = eval.capability(capability);
     match cap {
         CapabilitySupport::Blocked => (
             true,
@@ -277,19 +280,66 @@ fn support_blocks_activation(eval: &EvaluatedTargetSupport) -> (bool, bool, Opti
                 eval.reasons
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "activate_package_blocked".into()),
+                    .unwrap_or_else(|| format!("{}_blocked", capability.as_str())),
             ),
         ),
         CapabilitySupport::ActivationRequired => (false, true, Some("activation_required".into())),
-        CapabilitySupport::ReadOnly => (true, false, Some("activate_package_read_only".into())),
+        CapabilitySupport::ReadOnly => (
+            true,
+            false,
+            Some(format!("{}_read_only", capability.as_str())),
+        ),
         CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart => {
-            if !eval.write_allowed {
+            if !eval.allows_write_capability(capability) {
                 (true, false, Some("write_not_allowed".into()))
             } else {
                 (false, false, None)
             }
         }
     }
+}
+
+/// package desired state 对应的唯一 support capability。
+///
+/// Business Logic: enable 只能依赖 ActivatePackage；disable/remove/Absent 只能依赖
+/// DeactivatePackage，不能由其它写能力的 OR 结果兜底。
+fn package_operation_capability(binding: &TargetBinding) -> TargetCapability {
+    if binding.desired_presence == DesiredPresence::Absent || !binding.desired_enabled {
+        TargetCapability::DeactivatePackage
+    } else {
+        TargetCapability::ActivatePackage
+    }
+}
+
+/// package deactivation 必须是精确 `Supported`，不能把 after-restart/其它 capability
+/// 当成已具备 remove 能力。
+fn support_blocks_package_operation(
+    eval: &EvaluatedTargetSupport,
+    capability: TargetCapability,
+) -> (bool, bool, Option<String>) {
+    if capability == TargetCapability::DeactivatePackage
+        && eval.capability(capability) != CapabilitySupport::Supported
+    {
+        return (true, false, Some("deactivate_package_not_supported".into()));
+    }
+    support_blocks_capability(eval, capability)
+}
+
+/// OpenCode package enable 同时依赖 ActivatePackage 与原生路径 RenderPortableAssets。
+fn support_blocks_opencode_package_operation(
+    eval: &EvaluatedTargetSupport,
+    capability: TargetCapability,
+) -> (bool, bool, Option<String>) {
+    let operation = support_blocks_package_operation(eval, capability);
+    if capability != TargetCapability::ActivatePackage {
+        return operation;
+    }
+    let render = support_blocks_capability(eval, TargetCapability::RenderPortableAssets);
+    (
+        operation.0 || render.0,
+        operation.1 || render.1,
+        operation.2.or(render.2),
+    )
 }
 
 fn exe_or_err(probe: &TargetProbe) -> Result<PathBuf, AppError> {
@@ -321,7 +371,9 @@ impl ManagedPackageActivator for ClaudePackageActivator {
         probe: &TargetProbe,
     ) -> Result<ActivationPlan, AppError> {
         let eval = eval_support(probe);
-        let (blocked, activation_required, reason) = support_blocks_activation(&eval);
+        let capability = package_operation_capability(binding);
+        let (blocked, activation_required, reason) =
+            support_blocks_package_operation(&eval, capability);
         let mut plan = ActivationPlan {
             target: crate::agent_hub::models::AgentTarget::Claude,
             package_root: package.package_root.clone(),
@@ -502,7 +554,9 @@ impl ManagedPackageActivator for CodexPackageActivator {
         probe: &TargetProbe,
     ) -> Result<ActivationPlan, AppError> {
         let eval = eval_support(probe);
-        let (blocked, activation_required, reason) = support_blocks_activation(&eval);
+        let capability = package_operation_capability(binding);
+        let (blocked, activation_required, reason) =
+            support_blocks_package_operation(&eval, capability);
         let mut plan = ActivationPlan {
             target: crate::agent_hub::models::AgentTarget::Codex,
             package_root: package.package_root.clone(),
@@ -616,14 +670,9 @@ impl ManagedPackageActivator for OpenCodePackageActivator {
         probe: &TargetProbe,
     ) -> Result<ActivationPlan, AppError> {
         let eval = eval_support(probe);
-        let (blocked, activation_required, reason) = support_blocks_activation(&eval);
-        // OpenCode 激活 = 原生路径已写入；render 写能力也需检查
-        let render_blocked = !eval.allows_write_capability(TargetCapability::RenderPortableAssets)
-            && matches!(
-                eval.capability(TargetCapability::RenderPortableAssets),
-                CapabilitySupport::Blocked | CapabilitySupport::ReadOnly
-            );
-        let blocked = blocked || render_blocked;
+        let capability = package_operation_capability(binding);
+        let (blocked, activation_required, reason) =
+            support_blocks_opencode_package_operation(&eval, capability);
         let mut plan = ActivationPlan {
             target: crate::agent_hub::models::AgentTarget::OpenCode,
             package_root: package.package_root.clone(),
@@ -634,11 +683,7 @@ impl ManagedPackageActivator for OpenCodePackageActivator {
             commands: vec![],
             steps: vec![ActivationStep::NativeVerify],
             blocked,
-            blocked_reason: if blocked {
-                reason.or_else(|| Some("opencode_write_blocked".into()))
-            } else {
-                None
-            },
+            blocked_reason: reason,
             activation_required,
             target_binding_id: binding.id.clone(),
         };
@@ -774,6 +819,79 @@ mod tests {
             agents: vec![],
         };
         materialize_package(&input).unwrap()
+    }
+
+    #[test]
+    fn partial_manifest_deactivate_blocked_never_plans_remove() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Claude,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities: std::collections::BTreeMap::from([
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: true,
+            reasons: vec![],
+        };
+        let disabled = sample_binding(false);
+        assert_eq!(
+            package_operation_capability(&disabled),
+            TargetCapability::DeactivatePackage
+        );
+        let (blocked, activation_required, reason) =
+            support_blocks_package_operation(&evaluated, package_operation_capability(&disabled));
+        assert!(blocked);
+        assert!(!activation_required);
+        assert_eq!(reason.as_deref(), Some("deactivate_package_not_supported"));
+
+        let enabled = sample_binding(true);
+        let (blocked, activation_required, reason) =
+            support_blocks_package_operation(&evaluated, package_operation_capability(&enabled));
+        assert!(!blocked);
+        assert!(!activation_required);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn opencode_render_activation_required_never_plans_committed_activation() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::OpenCode,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities: std::collections::BTreeMap::from([
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::ActivationRequired,
+                ),
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: true,
+            reasons: vec![],
+        };
+
+        let (blocked, activation_required, reason) = support_blocks_opencode_package_operation(
+            &evaluated,
+            TargetCapability::ActivatePackage,
+        );
+        assert!(!blocked);
+        assert!(activation_required);
+        assert_eq!(reason.as_deref(), Some("activation_required"));
     }
 
     #[test]

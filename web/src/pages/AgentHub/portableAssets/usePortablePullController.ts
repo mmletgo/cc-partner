@@ -193,17 +193,24 @@ export function usePortablePullController(
   useEffect(() => {
     if (!open) {
       inventorySeqRef.current += 1;
+      previewSeqRef.current += 1;
+      applySeqRef.current += 1;
+      planRequestIdRef.current = null;
       return;
     }
 
     // same-agent 默认：destination 随 sourceTarget；来自 hubContext.agent
+    /* eslint-disable react-hooks/set-state-in-effect -- open-session hydration is the effect's contract. */
     setSourceTarget(initialSourceTarget);
     sourceTargetRef.current = initialSourceTarget;
+    setConflictPolicyState('skipExisting');
+    /* eslint-enable react-hooks/set-state-in-effect */
     // 新开抽屉以 shell 上下文为准，丢掉上一次 session 的 selection/plan
     inventorySeqRef.current += 1;
     previewSeqRef.current += 1;
     applySeqRef.current += 1;
     planRequestIdRef.current = null;
+    remoteInventoryRef.current = null;
     setRemoteInventory(null);
     setSelectedItemIds(new Set());
     setPlan(null);
@@ -248,18 +255,30 @@ export function usePortablePullController(
   }).ok;
   const canReconcile = needsPullReconcile(result);
 
-  const resetPullWorkspaceForContextChange = useCallback(() => {
-    inventorySeqRef.current += 1;
+  /**
+   * Business Logic: 选择或冲突策略一变，旧 Pull preview 不再代表当前意图。
+   * Code Logic: 推进 preview sequence 并清 plan/result/幂等键；旧 Promise 不得回写。
+   */
+  const invalidatePreview = useCallback(() => {
     previewSeqRef.current += 1;
-    applySeqRef.current += 1;
     planRequestIdRef.current = null;
-    setRemoteInventory(null);
-    setSelectedItemIds(new Set());
     setPlan(null);
     setResult(null);
     setClientRequestId(null);
-    setError(null);
+    // 直接 controller 调用可以在 preview pending 时改变选择；旧 finally 已因 seq
+    // 失效，因此此处负责释放旧 preview 的 busy。
+    setBusy(false);
   }, []);
+
+  const resetPullWorkspaceForContextChange = useCallback(() => {
+    inventorySeqRef.current += 1;
+    invalidatePreview();
+    applySeqRef.current += 1;
+    remoteInventoryRef.current = null;
+    setRemoteInventory(null);
+    setSelectedItemIds(new Set());
+    setError(null);
+  }, [invalidatePreview]);
 
   const selectDevice = useCallback(
     (deviceId: string) => {
@@ -284,12 +303,8 @@ export function usePortablePullController(
 
   const setConflictPolicy = useCallback((policy: PortableAssetConflictPolicy) => {
     setConflictPolicyState(policy);
-    // policy 变化使旧 plan 失效
-    planRequestIdRef.current = null;
-    setPlan(null);
-    setResult(null);
-    setClientRequestId(null);
-  }, []);
+    invalidatePreview();
+  }, [invalidatePreview]);
 
   const toggleItem = useCallback((inventoryItemId: string) => {
     setSelectedItemIds((prev) => {
@@ -298,11 +313,8 @@ export function usePortablePullController(
       else next.add(inventoryItemId);
       return next;
     });
-    planRequestIdRef.current = null;
-    setPlan(null);
-    setResult(null);
-    setClientRequestId(null);
-  }, []);
+    invalidatePreview();
+  }, [invalidatePreview]);
 
   const selectVisible = useCallback(() => {
     // 从最新 inventory + filters 重算，避免与 setFilters 同批 act 时闭包过期
@@ -311,30 +323,42 @@ export function usePortablePullController(
       filtersRef.current,
     );
     setSelectedItemIds(selectVisibleRemoteItemIds(visible));
-    planRequestIdRef.current = null;
-    setPlan(null);
-    setResult(null);
-    setClientRequestId(null);
-  }, []);
+    invalidatePreview();
+  }, [invalidatePreview]);
 
   const clearSelection = useCallback(() => {
     setSelectedItemIds(new Set());
-    planRequestIdRef.current = null;
-    setPlan(null);
-    setResult(null);
-    setClientRequestId(null);
-  }, []);
+    invalidatePreview();
+  }, [invalidatePreview]);
 
   const loadInventory = useCallback(async () => {
     const deviceId = selectedDeviceIdRef.current;
     const target = sourceTargetRef.current;
+
+    // A refresh invalidates every preview/apply generation immediately. This
+    // prevents an in-flight mutation response from reviving the old plan while
+    // the inventory snapshot is being revalidated.
+    const seq = ++inventorySeqRef.current;
+    invalidatePreview();
+    applySeqRef.current += 1;
+    setError(null);
+
     if (!deviceId) {
+      setBusy(false);
       setError('missing_device');
       return;
     }
-    const seq = ++inventorySeqRef.current;
+
+    // Treat the retained snapshot as stale for the whole refresh window. A
+    // failed refresh can therefore safely keep rendering the old inventory
+    // without leaving any mutation path enabled.
+    const previousInventory = remoteInventoryRef.current;
+    if (previousInventory) {
+      const staleInventory = { ...previousInventory, stale: true };
+      remoteInventoryRef.current = staleInventory;
+      setRemoteInventory(staleInventory);
+    }
     setBusy(true);
-    setError(null);
     try {
       const snapshot = await pullApi.listRemote({
         sourceDeviceId: deviceId,
@@ -348,6 +372,7 @@ export function usePortablePullController(
       ) {
         return;
       }
+      remoteInventoryRef.current = snapshot;
       setRemoteInventory(snapshot);
       setSelectedItemIds((prev) => {
         if (prev.size === 0) return prev;
@@ -362,13 +387,19 @@ export function usePortablePullController(
       setClientRequestId(null);
     } catch (reason) {
       if (!mountedRef.current || seq !== inventorySeqRef.current) return;
+      const retainedInventory = remoteInventoryRef.current;
+      if (retainedInventory) {
+        const staleInventory = { ...retainedInventory, stale: true };
+        remoteInventoryRef.current = staleInventory;
+        setRemoteInventory(staleInventory);
+      }
       setError(formatError(reason));
     } finally {
       if (mountedRef.current && seq === inventorySeqRef.current) {
         setBusy(false);
       }
     }
-  }, [pullApi]);
+  }, [invalidatePreview, pullApi]);
 
   const preview = useCallback(async () => {
     const inventory = remoteInventory;

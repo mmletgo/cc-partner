@@ -1,27 +1,19 @@
-//! agent_hub/cross_agent_full — 同机 Claude 全量跨 Agent 适配（强制预览）
+//! agent_hub/cross_agent_full — 全量跨 Agent 适配兼容边界
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     用户选择源 Agent 当前 scope 的整包配置（指令 + skill/command/mcp/plugin）→
-//!     单一目标 Agent，经 plan 预览（可逐项勾选）后一次性 apply。禁止 skip-preview
-//!     直写；同机 only，拒绝 peer 上下文。
+//!     当前 full runner 仍是 stub，不能向用户提供可能被误解为可执行方案的预览，
+//!     更不能写入真实 CLI 配置。保留类型与入口仅用于混合版本兼容。
 //!
 //! Code Logic（这个模块做什么）:
-//!     构造 snapshot → FullAdaptRunner::propose → plan_hash；apply 必须 plan_hash 匹配
-//!     后再逐项写入。指令项复用 `cross_agent::apply_cross_agent_instruction`；
-//!     portable 项在 stub runner 中可 residual/skip（清单仍覆盖五类）。
+//!     生产 preview/apply 入口固定 fail-closed；内部 runner 仅保留确定性单测与未来实现脚手架。
 
 use crate::agent_hub::cross_agent::{
-    apply_cross_agent_instruction, preview_cross_agent_instruction,
-    preview_cross_agent_plugin_residual, ApplyCrossAgentInstructionRequest, CrossAgentKind,
+    preview_cross_agent_instruction, preview_cross_agent_plugin_residual, CrossAgentKind,
     PreviewCrossAgentInstructionRequest,
 };
-use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
+use crate::agent_hub::models::AgentTarget;
 use crate::agent_hub::object_store::sha256_hex;
-use crate::agent_hub::targets::portable::DiscoveredPortableAsset;
-use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, LocalScopeMapping,
-    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver,
-};
+use crate::agent_hub::targets::TargetEnvironment;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -308,153 +300,24 @@ impl FullAdaptRunner for StubFullAdaptRunner {
 /// Business Logic: 无 skip-preview；peer 拒绝。
 /// Code Logic: 校验 → 收集 portable → runner.propose。
 pub fn preview_cross_agent_full(
-    request: &PreviewCrossAgentFullRequest,
-    env: &TargetEnvironment,
-    runner: &dyn FullAdaptRunner,
+    _request: &PreviewCrossAgentFullRequest,
+    _env: &TargetEnvironment,
+    _runner: &dyn FullAdaptRunner,
 ) -> Result<CrossAgentFullPlan, AppError> {
-    reject_peer_context(request.device_id.as_deref())?;
-    validate_source_destination(request.source, request.destination)?;
-    if request.scope.trim().is_empty() {
-        return Err(AppError::validation("CROSS_AGENT_FULL_SCOPE_REQUIRED"));
-    }
-    if request.source_markdown.trim().is_empty() {
-        return Err(AppError::validation("CROSS_AGENT_FULL_MARKDOWN_REQUIRED"));
-    }
-    ensure_user_scope(&request.scope)?;
-
-    let portable_assets = if request.portable_assets.is_empty() {
-        collect_source_portable_refs(request.source, &request.scope, env)?
-    } else {
-        request.portable_assets.clone()
-    };
-
-    let snapshot = CrossAgentFullSnapshot {
-        source: request.source,
-        destination: request.destination,
-        scope: request.scope.clone(),
-        source_markdown: request.source_markdown.clone(),
-        portable_assets,
-    };
-    runner.propose(&snapshot, env)
+    Err(AppError::validation("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"))
 }
 
-/// Apply 全量 plan（必须 plan_hash 匹配 re-propose）。
+/// 全量 apply 兼容入口（生产生成器与真实写盘认证前固定阻止）。
 ///
-/// Business Logic: 无 preview / hash 不匹配 → 失败；逐项结果，指令复用 selective apply。
-/// Code Logic: re-propose → hash 校验 → 按 selection 写入 instruction。
+/// Business Logic: 当前 full runner 是 stub，且真实 CLI 写盘未认证；旧调用方即使持有历史
+///     plan hash 也不能把 stub 预览升级为文件 mutation。
+/// Code Logic: 保留签名用于 N/N+1 兼容，在任何扫描、re-propose 或 writer 前返回稳定错误码。
 pub fn apply_cross_agent_full(
-    request: &ApplyCrossAgentFullRequest,
-    env: &TargetEnvironment,
-    runner: &dyn FullAdaptRunner,
+    _request: &ApplyCrossAgentFullRequest,
+    _env: &TargetEnvironment,
+    _runner: &dyn FullAdaptRunner,
 ) -> Result<Vec<CrossAgentFullApplyItemResult>, AppError> {
-    reject_peer_context(request.device_id.as_deref())?;
-    validate_source_destination(request.source, request.destination)?;
-    if request.client_request_id.trim().is_empty() {
-        return Err(AppError::validation(
-            "CROSS_AGENT_FULL_CLIENT_REQUEST_ID_REQUIRED",
-        ));
-    }
-    if request.plan_hash.trim().is_empty() {
-        return Err(AppError::validation("CROSS_AGENT_FULL_PREVIEW_REQUIRED"));
-    }
-    if request.scope.trim().is_empty() {
-        return Err(AppError::validation("CROSS_AGENT_FULL_SCOPE_REQUIRED"));
-    }
-    ensure_user_scope(&request.scope)?;
-
-    let portable_assets = if request.portable_assets.is_empty() {
-        collect_source_portable_refs(request.source, &request.scope, env)?
-    } else {
-        request.portable_assets.clone()
-    };
-
-    let snapshot = CrossAgentFullSnapshot {
-        source: request.source,
-        destination: request.destination,
-        scope: request.scope.clone(),
-        source_markdown: request.source_markdown.clone(),
-        portable_assets,
-    };
-    let plan = runner.propose(&snapshot, env)?;
-    if plan.plan_hash != request.plan_hash {
-        return Err(AppError::validation("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH"));
-    }
-
-    let mut included_map: BTreeMap<String, bool> = BTreeMap::new();
-    for sel in &request.items {
-        included_map.insert(sel.logical_key.clone(), sel.included);
-    }
-
-    let mut results = Vec::new();
-    for item in &plan.items {
-        let included = included_map
-            .get(&item.logical_key)
-            .copied()
-            .unwrap_or(false);
-        if !included {
-            results.push(CrossAgentFullApplyItemResult {
-                kind: item.kind,
-                logical_key: item.logical_key.clone(),
-                status: "skipped".into(),
-                path: item.path.clone(),
-                error_code: Some("CROSS_AGENT_FULL_NOT_INCLUDED".into()),
-            });
-            continue;
-        }
-        if item.action == "skip" || item.residual_reason.is_some() {
-            results.push(CrossAgentFullApplyItemResult {
-                kind: item.kind,
-                logical_key: item.logical_key.clone(),
-                status: "skipped".into(),
-                path: item.path.clone(),
-                error_code: item.residual_reason.clone(),
-            });
-            continue;
-        }
-        match item.kind {
-            CrossAgentKind::Instruction => {
-                let selective_plan_hash = item.preview_hash.clone().ok_or_else(|| {
-                    AppError::validation("CROSS_AGENT_FULL_INSTRUCTION_PREVIEW_HASH_MISSING")
-                })?;
-                let apply_rows = apply_cross_agent_instruction(
-                    &ApplyCrossAgentInstructionRequest {
-                        source: request.source,
-                        destinations: vec![request.destination],
-                        source_markdown: request.source_markdown.clone(),
-                        scope: request.scope.clone(),
-                        destination_paths: BTreeMap::new(),
-                        plan_hash: selective_plan_hash,
-                        client_request_id: format!(
-                            "{}:{}",
-                            request.client_request_id, item.logical_key
-                        ),
-                    },
-                    env,
-                )?;
-                let row = apply_rows.into_iter().next().ok_or_else(|| {
-                    AppError::validation("CROSS_AGENT_FULL_INSTRUCTION_APPLY_EMPTY")
-                })?;
-                results.push(CrossAgentFullApplyItemResult {
-                    kind: CrossAgentKind::Instruction,
-                    logical_key: item.logical_key.clone(),
-                    status: row.status,
-                    path: row.path,
-                    error_code: row.error_code,
-                });
-            }
-            other => {
-                // Stub: portable copy not ready even if action was create
-                results.push(CrossAgentFullApplyItemResult {
-                    kind: other,
-                    logical_key: item.logical_key.clone(),
-                    status: "blocked".into(),
-                    path: item.path.clone(),
-                    error_code: Some("CROSS_AGENT_FULL_PORTABLE_NOT_IMPLEMENTED".into()),
-                });
-            }
-        }
-    }
-    Ok(results)
+    Err(AppError::validation("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"))
 }
 
 /// 使用默认 stub runner 的 preview 便捷入口（Tauri command）。
@@ -475,15 +338,6 @@ pub fn apply_cross_agent_full_default(
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-fn reject_peer_context(device_id: Option<&str>) -> Result<(), AppError> {
-    if let Some(id) = device_id {
-        if !id.trim().is_empty() {
-            return Err(AppError::validation("CROSS_AGENT_FULL_PEER_BLOCKED"));
-        }
-    }
-    Ok(())
-}
-
 fn validate_source_destination(
     source: AgentTarget,
     destination: AgentTarget,
@@ -492,16 +346,6 @@ fn validate_source_destination(
         return Err(AppError::validation("CROSS_AGENT_FULL_DEST_EQUALS_SOURCE"));
     }
     Ok(())
-}
-
-fn ensure_user_scope(scope: &str) -> Result<(), AppError> {
-    if scope.trim() == "user" {
-        Ok(())
-    } else {
-        Err(AppError::validation(
-            "CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE",
-        ))
-    }
 }
 
 fn kind_wire(kind: CrossAgentKind) -> &'static str {
@@ -552,85 +396,6 @@ fn compute_plan_hash(
         ));
     }
     sha256_hex(lines.join("\n").as_bytes())
-}
-
-fn adapter_for(target: AgentTarget) -> Box<dyn AssetAdapter> {
-    match target {
-        AgentTarget::Claude => Box::new(ClaudeInstructionAdapter),
-        AgentTarget::Codex => Box::new(CodexInstructionAdapter),
-        AgentTarget::OpenCode => Box::new(OpenCodeInstructionAdapter),
-    }
-}
-
-fn asset_kind_to_cross(kind: AssetKind) -> Option<CrossAgentKind> {
-    match kind {
-        AssetKind::Skill => Some(CrossAgentKind::Skill),
-        AssetKind::Command => Some(CrossAgentKind::Command),
-        AssetKind::Mcp => Some(CrossAgentKind::Mcp),
-        AssetKind::Plugin => Some(CrossAgentKind::Plugin),
-        AssetKind::Instruction | AssetKind::Agent | AssetKind::Hook => None,
-    }
-}
-
-/// 扫描源 target 用户级 portable 资产（失败时返回空列表，不阻断指令 plan）。
-fn collect_source_portable_refs(
-    source: AgentTarget,
-    scope: &str,
-    env: &TargetEnvironment,
-) -> Result<Vec<CrossAgentFullPortableRef>, AppError> {
-    ensure_user_scope(scope)?;
-    let homes = TargetPathResolver::resolve_all(env);
-    let absolute_path = env.home.clone();
-    let _ = homes;
-    let mapping = LocalScopeMapping {
-        scope_kind: ScopeKind::User,
-        absolute_path,
-        project_root: if scope == "user" {
-            None
-        } else {
-            Some(env.home.clone())
-        },
-        relative_root: None,
-        codex_fallback_filenames: vec![],
-    };
-    let adapter = adapter_for(source);
-    let discoveries = match adapter.scan_portable_assets(&mapping, env) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                target = "agent_hub.cross_agent_full",
-                error = %e,
-                "portable scan failed; continuing with empty inventory"
-            );
-            Vec::new()
-        }
-    };
-    Ok(discoveries_to_refs(&discoveries))
-}
-
-fn discoveries_to_refs(discoveries: &[DiscoveredPortableAsset]) -> Vec<CrossAgentFullPortableRef> {
-    let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
-    for d in discoveries {
-        let Some(kind) = asset_kind_to_cross(d.kind) else {
-            continue;
-        };
-        let logical_key = format!("{}:{}", kind_wire(kind), d.semantic_name);
-        if !seen.insert(logical_key.clone()) {
-            continue;
-        }
-        out.push(CrossAgentFullPortableRef {
-            kind,
-            logical_key,
-            path: d.origin.path.to_string_lossy().into_owned(),
-        });
-    }
-    out.sort_by(|a, b| {
-        kind_ord(a.kind)
-            .cmp(&kind_ord(b.kind))
-            .then_with(|| a.logical_key.cmp(&b.logical_key))
-    });
-    out
 }
 
 #[cfg(test)]
@@ -708,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_without_plan_hash_fails() {
+    fn apply_is_unavailable_even_without_plan_hash() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         fs::create_dir_all(tmp.path().join(".codex")).unwrap();
@@ -730,15 +495,11 @@ mod tests {
             &StubFullAdaptRunner,
         )
         .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("CROSS_AGENT_FULL_PREVIEW_REQUIRED")
-                || format!("{err:?}").contains("CROSS_AGENT_FULL_PREVIEW_REQUIRED")
-        );
+        assert!(format!("{err:?}").contains("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"));
     }
 
     #[test]
-    fn apply_with_mismatched_plan_hash_fails() {
+    fn apply_is_unavailable_even_with_historical_plan_hash() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         fs::create_dir_all(tmp.path().join(".codex")).unwrap();
@@ -760,72 +521,30 @@ mod tests {
             &StubFullAdaptRunner,
         )
         .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH")
-                || format!("{err:?}").contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH")
-        );
+        assert!(format!("{err:?}").contains("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"));
     }
 
     #[test]
-    fn preview_then_apply_instruction_item() {
+    fn production_preview_is_unavailable() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         fs::create_dir_all(tmp.path().join(".codex")).unwrap();
         let env = temp_env(tmp.path());
 
-        let portable = vec![CrossAgentFullPortableRef {
-            kind: CrossAgentKind::Skill,
-            logical_key: "skill:demo".into(),
-            path: "/tmp/demo".into(),
-        }];
-        let plan = preview_cross_agent_full(
+        let error = preview_cross_agent_full(
             &PreviewCrossAgentFullRequest {
                 source: AgentTarget::Claude,
                 destination: AgentTarget::Codex,
                 scope: "user".into(),
                 source_markdown: "Always run tests before commit.\n".into(),
-                portable_assets: portable.clone(),
+                portable_assets: vec![],
                 device_id: None,
             },
             &env,
             &StubFullAdaptRunner,
         )
-        .unwrap();
-
-        let selections: Vec<_> = plan
-            .items
-            .iter()
-            .map(|i| CrossAgentFullApplySelection {
-                logical_key: i.logical_key.clone(),
-                included: i.kind == CrossAgentKind::Instruction,
-            })
-            .collect();
-
-        let results = apply_cross_agent_full(
-            &ApplyCrossAgentFullRequest {
-                source: AgentTarget::Claude,
-                destination: AgentTarget::Codex,
-                scope: "user".into(),
-                source_markdown: "Always run tests before commit.\n".into(),
-                plan_hash: plan.plan_hash.clone(),
-                client_request_id: "req-full-1".into(),
-                items: selections,
-                portable_assets: portable,
-                device_id: None,
-            },
-            &env,
-            &StubFullAdaptRunner,
-        )
-        .unwrap();
-
-        let instr = results
-            .iter()
-            .find(|r| r.kind == CrossAgentKind::Instruction)
-            .unwrap();
-        assert_eq!(instr.status, "applied");
-        let written = fs::read_to_string(&instr.path).unwrap();
-        assert!(written.contains("Always run tests"));
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"));
     }
 
     #[test]
@@ -842,7 +561,18 @@ mod tests {
             portable_assets: vec![],
             device_id: None,
         };
-        let plan = preview_cross_agent_full(&preview_request, &env, &StubFullAdaptRunner).unwrap();
+        let plan = StubFullAdaptRunner
+            .propose(
+                &CrossAgentFullSnapshot {
+                    source: preview_request.source,
+                    destination: preview_request.destination,
+                    scope: preview_request.scope.clone(),
+                    source_markdown: preview_request.source_markdown.clone(),
+                    portable_assets: vec![],
+                },
+                &env,
+            )
+            .unwrap();
         let instruction = plan
             .items
             .iter()
@@ -871,7 +601,7 @@ mod tests {
             &StubFullAdaptRunner,
         )
         .unwrap_err();
-        assert!(format!("{error:?}").contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH"));
+        assert!(format!("{error:?}").contains("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"));
         assert_eq!(
             fs::read_to_string(instruction_path).unwrap(),
             "external edit\n"
@@ -895,7 +625,7 @@ mod tests {
             &StubFullAdaptRunner,
         )
         .unwrap_err();
-        assert!(format!("{error:?}").contains("CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE"));
+        assert!(format!("{error:?}").contains("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"));
     }
 
     #[test]
@@ -915,10 +645,7 @@ mod tests {
             &StubFullAdaptRunner,
         )
         .unwrap_err();
-        assert!(
-            err.to_string().contains("CROSS_AGENT_FULL_PEER_BLOCKED")
-                || format!("{err:?}").contains("CROSS_AGENT_FULL_PEER_BLOCKED")
-        );
+        assert!(format!("{err:?}").contains("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"));
     }
 
     #[test]

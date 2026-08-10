@@ -48,6 +48,21 @@
   text-transform: uppercase;
 }
 
+.scopeValue {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.scopeHint {
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+}
+
 .segment {
   display: inline-flex;
   flex-wrap: wrap;

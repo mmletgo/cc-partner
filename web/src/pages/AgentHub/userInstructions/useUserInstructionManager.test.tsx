@@ -93,6 +93,17 @@ function planFixture(): UserInstructionPlanDto {
   };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 afterEach(() => {
   vi.clearAllMocks();
 });
@@ -150,5 +161,33 @@ describe('useUserInstructionManager', () => {
     expect(result.current.actionError).toBe(
       'agentHub:userInstructions.errors.previewStale',
     );
+  });
+
+  test('editing while preview is pending prevents the old plan from landing', async () => {
+    const previewDeferred = deferred<UserInstructionPlanDto>();
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    apiMocks.previewUserInstructionSetup.mockReturnValue(previewDeferred.promise);
+    const { result } = renderHook(() => useUserInstructionManager(t));
+    await act(async () => {
+      await result.current.refresh();
+    });
+    act(() => {
+      result.current.updateDraftContent('common', 'draft A');
+      result.current.setTargetSelection('claude', 'managed');
+    });
+
+    let previewPromise!: Promise<void>;
+    act(() => {
+      previewPromise = result.current.previewDraft();
+    });
+    await waitFor(() => expect(apiMocks.previewUserInstructionSetup).toHaveBeenCalledOnce());
+    act(() => result.current.updateDraftContent('common', 'draft B'));
+    previewDeferred.resolve(planFixture());
+    await act(async () => previewPromise);
+
+    expect(result.current.draft.commonContent).toBe('draft B');
+    expect(result.current.plan).toBeNull();
+    expect(result.current.previewOpen).toBe(false);
+    expect(result.current.actionBusy).toBe(false);
   });
 });

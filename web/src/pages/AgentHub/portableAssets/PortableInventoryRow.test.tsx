@@ -107,13 +107,45 @@ describe('PortableInventoryRow', () => {
     expect(screen.getByText('Consistent')).toBeTruthy();
     expect(screen.getByText('/tmp/alpha')).toBeTruthy();
 
-    fireEvent.click(screen.getByTestId('portable-inventory-row-claude-skill-alpha'));
+    fireEvent.click(screen.getByTestId('portable-inventory-select-claude-skill-alpha'));
     expect(onSelect).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
     expect(onPrimaryAction).toHaveBeenCalledWith(expect.objectContaining({
       inventoryItemId: 'claude-skill-alpha',
     }), 'disable');
+  });
+
+  test('uses a native selection button beside the primary action without nested button semantics', () => {
+    const onSelect = vi.fn();
+    const onPrimaryAction = vi.fn();
+    render(
+      <PortableInventoryRow
+        item={item()}
+        selected
+        primaryAction="disable"
+        labels={labels}
+        onSelect={onSelect}
+        onPrimaryAction={onPrimaryAction}
+      />,
+    );
+
+    const row = screen.getByTestId('portable-inventory-row-claude-skill-alpha');
+    expect(row.getAttribute('role')).toBeNull();
+    const selectionButton = screen.getByTestId(
+      'portable-inventory-select-claude-skill-alpha',
+    ) as HTMLButtonElement;
+    expect(selectionButton.tagName).toBe('BUTTON');
+    expect(selectionButton.getAttribute('aria-pressed')).toBe('true');
+    expect(row.querySelectorAll('button')).toHaveLength(2);
+
+    fireEvent.keyDown(selectionButton, { key: 'Enter' });
+    fireEvent.click(selectionButton);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
+    expect(onPrimaryAction).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
   test('hides primary action button when null', () => {

@@ -27,3 +27,4 @@ pub use plan::{
     UserInstructionPlanOperation, UserInstructionTargetApplyResultDto,
     UserInstructionTargetApplyState, UserInstructionTargetSelectionDto,
 };
+pub(crate) use plan::{read_text_bounded, render_bounded_diff};

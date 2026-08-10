@@ -27,7 +27,7 @@ describe('CrossAgentSyncDialog', () => {
     applyMock.mockReset();
   });
 
-  it('previews then applies one-shot cross-agent write via shipped API', async () => {
+  it('shows a strict read-only preview and never exposes apply', async () => {
     previewMock.mockResolvedValue({
       source: 'claude',
       kind: 'instruction',
@@ -41,19 +41,11 @@ describe('CrossAgentSyncDialog', () => {
           renderedHash: 'abc',
           unifiedDiff: 'diff',
           partialBlockers: [],
-          canApply: true,
+          observedHash: 'before',
+          canApply: false,
         },
       ],
     });
-    applyMock.mockResolvedValue([
-      {
-        destination: 'codex',
-        status: 'applied',
-        path: '/tmp/.codex/AGENTS.md',
-        errorCode: null,
-      },
-    ]);
-
     render(
       <CrossAgentSyncDialog
         t={t}
@@ -64,6 +56,7 @@ describe('CrossAgentSyncDialog', () => {
     );
 
     expect(screen.getByTestId('cross-agent-sync-dialog')).toBeTruthy();
+    expect(screen.getByTestId('cross-agent-preview-only')).toBeTruthy();
     fireEvent.click(screen.getByTestId('cross-agent-preview'));
 
     await waitFor(() => {
@@ -82,23 +75,7 @@ describe('CrossAgentSyncDialog', () => {
       expect(screen.getByTestId('cross-agent-preview-codex')).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByTestId('cross-agent-apply'));
-
-    await waitFor(() => {
-      expect(applyMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          source: 'claude',
-          destinations: ['codex'],
-          sourceMarkdown: 'Always run tests before commit.',
-          scope: 'user',
-          destinationPaths: {},
-          planHash: 'plan-1',
-        }),
-      );
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId('cross-agent-apply-result').textContent).toMatch(/applied/);
-    });
+    expect(screen.queryByTestId('cross-agent-apply')).toBeNull();
+    expect(applyMock).not.toHaveBeenCalled();
   });
 });

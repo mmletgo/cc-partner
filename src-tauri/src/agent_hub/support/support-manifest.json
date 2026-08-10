@@ -4,8 +4,8 @@
     {
       "target": "claude",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": "2.1.0",
-      "currentTestedVersion": "2.1.207",
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
       "guardedMajor": 2,
       "executableProbe": {
         "commandNames": [
@@ -20,14 +20,15 @@
       },
       "activationCommandFingerprints": {},
       "capabilities": {
-        "scanInstruction": "supported",
-        "renderInstruction": "supportedAfterRestart",
-        "scanPortableAssets": "supported",
-        "renderPortableAssets": "supported",
-        "activatePackage": "supported",
-        "deactivatePackage": "supported",
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
         "liveReload": "blocked"
       },
+      "capabilityEvidenceIds": {},
       "evidenceIds": [
         "L3-AGENT-HUB-CLAUDE-001",
         "L3-AGENT-HUB-B-CLI-001",
@@ -39,8 +40,8 @@
     {
       "target": "codex",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": "0.145.0",
-      "currentTestedVersion": "0.145.0",
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
       "guardedMajor": 1,
       "executableProbe": {
         "commandNames": [
@@ -55,14 +56,15 @@
       },
       "activationCommandFingerprints": {},
       "capabilities": {
-        "scanInstruction": "supported",
-        "renderInstruction": "supportedAfterRestart",
-        "scanPortableAssets": "supported",
-        "renderPortableAssets": "supported",
-        "activatePackage": "supported",
-        "deactivatePackage": "supported",
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
         "liveReload": "blocked"
       },
+      "capabilityEvidenceIds": {},
       "evidenceIds": [
         "L3-AGENT-HUB-CODEX-001",
         "L3-AGENT-HUB-B-CLI-001",
@@ -98,6 +100,7 @@
         "deactivatePackage": "blocked",
         "liveReload": "blocked"
       },
+      "capabilityEvidenceIds": {},
       "evidenceIds": [
         "L3-AGENT-HUB-OPENCODE-001",
         "L3-AGENT-HUB-B-CLI-001",

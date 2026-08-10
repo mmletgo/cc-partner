@@ -9,7 +9,7 @@
  *   pure props：回调由 controller 持有 planToken/clientRequestId；views 不 import @/api/*。
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog, Pill, StatusMessage } from '@/components/primitives';
 import type {
@@ -96,6 +96,16 @@ export function PortableAssetActionDialog({
   const [conflictPolicy, setConflictPolicy] = useState<'skipExisting' | 'replaceAfterPreview'>(
     'skipExisting',
   );
+
+  useEffect(() => {
+    if (!open) return;
+    // Each open + item + action tuple is a new mutation session. Never carry
+    // destructive options from a previous asset/action into this session.
+    /* eslint-disable react-hooks/set-state-in-effect -- session reset is the effect's contract. */
+    setKeepData(false);
+    setConflictPolicy('skipExisting');
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [open, item?.inventoryItemId, action]);
 
   const outcome = useMemo(() => classifyActionOutcome(result), [result]);
   // Global Constraints: stale 禁止 mutation —— preview 后 inventory 变 stale 也不得 confirm。

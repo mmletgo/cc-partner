@@ -500,9 +500,9 @@ impl ProjectionScheduler {
             let current =
                 current_target_hash(&target, job.payload_kind, job.managed_paths_json.as_deref())?;
             if current.is_none() {
-                // 已满足 absent：补 materialization
-                self.commit_absent_job_db(&job).await?;
-                return Ok(JobExecResult::AlreadySynced);
+                // 即使磁盘已经为空，也统一回到 execute_job 的 support gate；否则
+                // recovery 会绕开执行时门禁，留下旧 manifest 物化的成功状态。
+                return self.execute_job_by_id(&job.id).await;
             }
             if absent_hash_is_managed(&job, current.as_deref()) {
                 self.repo
@@ -647,37 +647,6 @@ impl ProjectionScheduler {
                     .await?;
                 return Ok(JobExecResult::Skipped);
             }
-            // 写盘前再次 fail-closed 校验 support manifest（入队后环境可能变化）
-            if let Some(reason) = self.support_render_block_reason(job.target).await {
-                self.repo
-                    .update_projection_job_state(
-                        &job.id,
-                        ProjectionJobState::Blocked,
-                        job.attempt,
-                        Some(&reason),
-                        None,
-                        None,
-                    )
-                    .await?;
-                self.repo
-                    .upsert_materialization(NewMaterialization {
-                        asset_id: job.asset_id.clone(),
-                        target: job.target,
-                        target_binding_id: job.target_binding_id.clone(),
-                        native_path: Some(job.target_path.clone()),
-                        last_projected_revision_id: None,
-                        rendered_hash: Some(job.rendered_hash.clone()),
-                        observed_external_hash: current_target_hash(
-                            Path::new(&job.target_path),
-                            job.payload_kind,
-                            job.managed_paths_json.as_deref(),
-                        )?,
-                        status: MaterializationStatus::Blocked,
-                        last_error: Some(reason),
-                    })
-                    .await?;
-                return Ok(JobExecResult::Skipped);
-            }
         }
 
         // 外部整文件/目录删除 → detached：Present 不得自动重建；需 restore_detached_target。
@@ -717,6 +686,12 @@ impl ProjectionScheduler {
             }
         }
 
+        // Present 与 Absent 共用同一处执行时 support gate。这里位于所有
+        // detached/分支决策之后，任何后续路径只允许进入统一写盘处理。
+        if let Some(reason) = self.support_render_block_reason(job.target).await {
+            return self.block_job_for_support(&job, reason).await;
+        }
+
         if job.desired_presence == DesiredPresence::Absent {
             return self.handle_absent_job(job).await;
         }
@@ -729,6 +704,11 @@ impl ProjectionScheduler {
             .acquire_owned()
             .await
             .map_err(|_| AppError::generic("projection semaphore closed"))?;
+
+        // 锁/槽等待期间 manifest 也可能变化；写入前再做一次最终 gate。
+        if let Some(reason) = self.support_render_block_reason(job.target).await {
+            return self.block_job_for_support(&job, reason).await;
+        }
 
         let attempt = job.attempt.saturating_add(1);
         self.repo
@@ -919,6 +899,11 @@ impl ProjectionScheduler {
             .await
             .map_err(|_| AppError::generic("projection semaphore closed"))?;
 
+        // 删除同样属于 mutation；锁/槽等待期间 capability 回落时不得继续 remove。
+        if let Some(reason) = self.support_render_block_reason(job.target).await {
+            return self.block_job_for_support(&job, reason).await;
+        }
+
         let attempt = job.attempt.saturating_add(1);
         self.repo
             .update_projection_job_state(
@@ -1051,6 +1036,50 @@ impl ProjectionScheduler {
             })
             .await?;
         Ok(())
+    }
+
+    /// 将 support gate 的阻断结果持久化为 job/materialization 状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Present/Absent 的所有执行阶段必须共享相同的 fail-closed 结果，避免某个
+    ///     分支只返回内存错误而让 Attention 看不到阻断原因。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     更新 job=Blocked、记录当前外部 hash，并写入 materialization=Blocked；调用方
+    ///     在任何 adapter/删除操作前返回 Skipped。
+    async fn block_job_for_support(
+        &self,
+        job: &ProjectionJob,
+        reason: String,
+    ) -> Result<JobExecResult, AppError> {
+        self.repo
+            .update_projection_job_state(
+                &job.id,
+                ProjectionJobState::Blocked,
+                job.attempt,
+                Some(&reason),
+                None,
+                None,
+            )
+            .await?;
+        self.repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: job.asset_id.clone(),
+                target: job.target,
+                target_binding_id: job.target_binding_id.clone(),
+                native_path: Some(job.target_path.clone()),
+                last_projected_revision_id: None,
+                rendered_hash: Some(job.rendered_hash.clone()),
+                observed_external_hash: current_target_hash(
+                    Path::new(&job.target_path),
+                    job.payload_kind,
+                    job.managed_paths_json.as_deref(),
+                )?,
+                status: MaterializationStatus::Blocked,
+                last_error: Some(reason),
+            })
+            .await?;
+        Ok(JobExecResult::Skipped)
     }
 
     /// 若 target binding 关联 checkout 且 status=blocked，返回阻塞原因。
@@ -1655,6 +1684,78 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mat.status, MaterializationStatus::Synced);
+    }
+
+    /// scan-only target：Present 最终 gate 必须阻断旧 allowlist，且不得写文件。
+    #[tokio::test]
+    async fn scan_only_support_gate_blocks_present_without_write() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("scan-only-present.md");
+        std::fs::write(&target, b"old").unwrap();
+        let old_hash = sha256_hex(b"old");
+        let mut req = file_req(
+            &asset,
+            &binding,
+            &target,
+            b"must-not-write",
+            Some(&old_hash),
+        );
+        // OpenCode builtin manifest is scan-only in the unsupported/unknown-version case.
+        req.target = AgentTarget::OpenCode;
+        sched.inject_support_bypass(false).await;
+
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let stats = sched
+            .run_ready_jobs(&CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(stats.skipped, 1, "stats={stats:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Blocked);
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Blocked);
+    }
+
+    /// scan-only target：Absent 也必须经过 execute_job 最终 gate，不能绕过而删除。
+    #[tokio::test]
+    async fn scan_only_support_gate_blocks_absent_without_delete() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("scan-only-absent.md");
+        let managed = b"managed";
+        std::fs::write(&target, managed).unwrap();
+        let managed_hash = sha256_hex(managed);
+        let mut req = file_req(&asset, &binding, &target, b"", Some(&managed_hash));
+        req.target = AgentTarget::OpenCode;
+        req.desired_presence = DesiredPresence::Absent;
+        req.rendered_hash = sha256_hex(b"");
+        req.base_hash = Some(managed_hash.clone());
+        req.expected_external_hash = Some(managed_hash);
+        sched.inject_support_bypass(false).await;
+
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let stats = sched
+            .run_ready_jobs(&CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(stats.skipped, 1, "stats={stats:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), managed);
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Blocked);
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Blocked);
     }
 
     /// checkout status=blocked 时 Present 写 AGENTS.md 路径必须 Blocked，不得覆盖预存文件。

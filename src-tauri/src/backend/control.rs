@@ -26,7 +26,7 @@ static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLoc
 ///
 /// Code Logic（这个常量做什么）:
 ///     新建控制文件时填入；缺失/0 视为旧 backend，突变需 `upgradeRequired`。
-pub const AGENT_HUB_API_VERSION: u32 = 3;
+pub const AGENT_HUB_API_VERSION: u32 = 4;
 
 /// `/api/health` 响应中后端状态检查需要的字段。
 ///
@@ -716,7 +716,7 @@ mod tests {
         let value = serde_json::to_value(&file).unwrap();
         assert_eq!(value["controlSchemaVersion"], 2);
         assert_eq!(value["ownerInstanceId"], "owner-a");
-        assert_eq!(value["agentHubApiVersion"], 1);
+        assert_eq!(value["agentHubApiVersion"], AGENT_HUB_API_VERSION);
     }
 
     /// 验证 legacy 控制文件可反序列化但被分类为 needs_restart，不可作权威。

@@ -37,7 +37,10 @@ export interface InstructionThreePaneState {
   previewText: string;
   blocksDirty: boolean;
   originalDirty: boolean;
+  /** Canonical head / inventory snapshot 在当前草稿 lease 期间变化；会阻止 Hub Save。 */
   externalDrift: boolean;
+  /** 本机原始来源在当前草稿期间变化；只标 stale，不替换草稿或抬高 CAS base。 */
+  sourceDrift: boolean;
 }
 
 /** 同步写入选用的内容基线。 */
@@ -161,6 +164,7 @@ export function initialThreePaneFromDisk(
     blocksDirty: false,
     originalDirty: false,
     externalDrift: false,
+    sourceDrift: false,
   };
 }
 
@@ -175,12 +179,34 @@ export function parseBlocksFromOriginal(
   state: InstructionThreePaneState,
   agent: AgentTarget,
 ): InstructionThreePaneState {
+  return replaceBlocksFromOriginal(state, agent, true);
+}
+
+/**
+ * Business Logic（为什么需要）:
+ *   成功持久化后重新 hydrate 原始来源只是建立已保存视图，不能伪造一次用户编辑。
+ *
+ * Code Logic（做什么）:
+ *   与显式 parse 使用同一解析规则，但返回 blocksDirty=false。
+ */
+export function hydrateBlocksFromOriginal(
+  state: InstructionThreePaneState,
+  agent: AgentTarget,
+): InstructionThreePaneState {
+  return replaceBlocksFromOriginal(state, agent, false);
+}
+
+function replaceBlocksFromOriginal(
+  state: InstructionThreePaneState,
+  agent: AgentTarget,
+  blocksDirty: boolean,
+): InstructionThreePaneState {
   const blocks = parseWholeDocumentAsShared(state.originalText);
   return recomputePreview(
     {
       ...state,
       blocks,
-      blocksDirty: false,
+      blocksDirty,
     },
     agent,
   );

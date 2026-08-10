@@ -1,13 +1,12 @@
 /**
  * E2E-AGENT-HUB-SHELL-001 / E2E-AGENT-HUB-INSTR-3PANE-001 /
- * E2E-AGENT-HUB-DISCOVER-MANAGED-001 / E2E-AGENT-HUB-ADAPT-FULL-001 —
- * Agent Hub 交互重设计 L1 mock journeys（壳层 / 三栏 / 发现即管理 / 全量适配预览门闩）。
+ * E2E-AGENT-HUB-DISCOVER-MANAGED-001 / E2E-AGENT-HUB-ADAPT-PREVIEW-001 —
+ * Agent Hub 安全纠正 L1 mock journeys（壳层 / 三栏 / 发现即管理 / 选择性预览）。
  *
  * Business Logic（为什么需要这个套件）:
  *   交互重设计交付 Agent→范围→五 Tab 壳层、提示词三栏（初始空块）、portable
- *   发现即管理（无 Adopt 主动作）、跨 Agent 全量适配强制 preview。本 L1 用
- *   backendHarness 锁定 UI 旅程，不宣称真实 CLI 写盘、多机 mDNS 或 full adapt
- *   非 stub 生成器。
+ *   发现即管理（无 Adopt 主动作）、跨 Agent 本机用户级 preview-only。本 L1 用
+ *   backendHarness 锁定 UI 旅程，不宣称真实 CLI 写盘、多机 mDNS 或 full adapt。
  *
  * Code Logic（这个套件做什么）:
  *   复用 appBootstrap + agent_hub_* / list_devices / portable inventory mock；
@@ -32,7 +31,7 @@ function makeStatus(overrides: Record<string, unknown> = {}) {
   return {
     enabled: true,
     backgroundEnabled: false,
-    agentHubApiVersion: 1,
+    agentHubApiVersion: 4,
     ownerInstanceId: 'owner-e2e-interaction-1',
     writeCompatible: true,
     probes: [
@@ -488,15 +487,20 @@ function registerInteractionBase(
   harness.command('agent_hub_preview_cross_agent_instruction', {
     kind: 'resolve',
     value: {
+      source: 'claude',
+      kind: 'instruction',
       needsAdaptation: false,
+      planHash: 'selective-preview-e2e',
       destinations: [
         {
           destination: 'codex',
           path: '/tmp/.codex/AGENTS.override.md',
           mode: 'shared',
+          renderedHash: 'rendered-e2e',
+          observedHash: 'observed-e2e',
           unifiedDiff: '+ Always run tests',
-          canApply: true,
-          partialBlockers: [],
+          canApply: false,
+          partialBlockers: ['CROSS_AGENT_PREVIEW_ONLY'],
         },
       ],
     },
@@ -514,8 +518,8 @@ function registerInteractionBase(
   });
 }
 
-test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell agent/scope/tabs', () => {
-  test('shell shows agent switcher, scope, tabs; context clicks update URL', async ({
+test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', () => {
+  test('local-user shell owns agent/lane/tabs and roving keyboard state', async ({
     page,
     backendHarness,
   }) => {
@@ -525,42 +529,81 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell agent/scope/tabs', () => 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-shell')).toBeVisible();
-    // 默认公共槽：隐藏 agent 导航
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-fixed-scope')).toBeVisible();
     await expect(page.getByTestId('agent-hub-tablist')).toBeVisible();
     await expect(page.getByTestId('agent-hub-toolbar')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-device-select')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-project-select')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-lane-common')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(page.getByTestId('agent-hub-lane-common')).toHaveAttribute('tabindex', '0');
 
-    // 切到独有槽后出现 agent 导航
-    await page.getByTestId('agent-hub-lane-exclusive').click();
-    await expect(page).toHaveURL(/lane=exclusive/);
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    // lane radiogroup：方向键移动焦点并同步选择。
+    await page.getByTestId('agent-hub-lane-common').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(page.getByTestId('agent-hub-lane-adapted')).toBeFocused();
+    await expect(page.getByTestId('agent-hub-lane-adapted')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(page).toHaveURL(/lane=adapted/);
 
+    // Agent radiogroup 同样只保留一个 tab stop。
+    await page.getByTestId('agent-hub-agent-claude').focus();
+    await page.keyboard.press('End');
+    await expect(page.getByTestId('agent-hub-agent-opencode')).toBeFocused();
+    await expect(page.getByTestId('agent-hub-agent-opencode')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
     await page.getByTestId('agent-hub-agent-codex').click();
     await expect(page).toHaveURL(/agent=codex/);
     await expect(page.getByTestId('agent-hub-agent-codex')).toHaveAttribute(
-      'aria-selected',
+      'aria-checked',
       'true',
     );
 
-    await page.getByTestId('agent-hub-tab-skill').click();
-    // dual-path portable URL may rewrite tab=skill → section=assets&kind/target
-    await expect(page.getByTestId('agent-hub-tab-skill')).toHaveAttribute(
+    // workspace tablist：End/ Home 维护 roving tabindex 与 tabpanel 关联。
+    await page.getByTestId('agent-hub-tab-instructions').focus();
+    await page.keyboard.press('End');
+    await expect(page.getByTestId('agent-hub-tab-plugin')).toBeFocused();
+    await expect(page.getByTestId('agent-hub-tab-plugin')).toHaveAttribute(
       'aria-selected',
       'true',
     );
-    await expect(page).toHaveURL(/section=assets|tab=skill|kind=skill/);
-    // 非 instructions tab 始终显示 agent 导航
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-shell-body')).toHaveAttribute(
+      'aria-labelledby',
+      'agent-hub-tab-plugin',
+    );
+    await expect(page).toHaveURL(/tab=plugin/);
+    await expect(page).not.toHaveURL(/section=|target=|kind=|scope=project|deviceId=/);
+  });
 
-    await page.getByTestId('agent-hub-scope-project').click();
-    await expect(page).toHaveURL(/scope=project/);
+  test('project/peer legacy deep link normalizes to local-user without direct controls', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerInteractionBase(backendHarness);
+
+    await page.goto(
+      '/agent-hub?scope=project&projectKey=local-1&deviceId=peer-ok&section=assets&target=claude&kind=skill',
+    );
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-context-migration-notice')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-fixed-scope')).toBeVisible();
     await expect(page.getByTestId('agent-hub-device-select')).toHaveCount(0);
-    await expect(page.getByTestId('agent-hub-project-select')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-project-option-local-1')).toBeAttached();
+    await expect(page.getByTestId('agent-hub-project-select')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-agent-claude')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(page).toHaveURL(/tab=skill/);
+    await expect(page).not.toHaveURL(/scope=project|projectKey=|deviceId=|section=|target=|kind=/);
   });
 });
 
@@ -577,13 +620,13 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
     await expect(page.getByTestId('instruction-three-pane')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
 
-    // 公共槽：仅单列公共编辑，无预览/原始，无 agent 导航
+    // 公共槽：仅单列公共编辑；Agent context 仍持续可见。
     await expect(page.getByTestId('instruction-panes-common')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
     await expect(page.getByTestId('instruction-slot-textarea')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-preview')).toHaveCount(0);
     await expect(page.getByTestId('instruction-pane-original')).toHaveCount(0);
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
 
     // 适配槽 + Claude：仅公共底稿单列
     await page.getByTestId('agent-hub-lane-adapted').click();
@@ -616,12 +659,72 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
       /Always run tests before commit/,
     );
 
-    // 从原始导入为公共 → 回到公共槽可见导入结果
+    // 从原始解析后必须形成未保存草稿；切 lane 先进入统一 dirty Dialog。
     await page.getByTestId('instruction-reparse-from-original').click();
+    await expect(page.getByTestId('instruction-unsaved-draft')).toBeVisible();
+    await expect(page.getByTestId('instruction-save-blocks')).toBeEnabled();
     await page.getByTestId('agent-hub-lane-common').click();
-    await expect(page.getByTestId('instruction-slot-textarea')).toHaveValue(
-      /Always run tests before commit/,
+    await expect(page.getByTestId('agent-hub-context-change-dialog')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-context-stay')).toBeFocused();
+    await page.getByTestId('agent-hub-context-stay').click();
+    await expect(page.getByTestId('instruction-panes-exclusive')).toBeVisible();
+    await expect(page.getByTestId('instruction-preview-body')).toContainText(
+      'Always run tests before commit',
     );
+  });
+});
+
+test.describe('E2E-AGENT-HUB-DIRTY-HISTORY-001 committed context guard', () => {
+  test('history change restores old shell until Stay or Discard resolves the draft', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerInteractionBase(backendHarness);
+
+    await page.goto('/agent-hub?agent=claude&tab=instructions&lane=common');
+    await expect(page.getByTestId('instruction-slot-textarea')).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByTestId('instruction-slot-textarea').fill('Unsaved history guard draft');
+    await expect(page.getByTestId('instruction-unsaved-draft')).toBeVisible();
+
+    await page.evaluate(() => {
+      window.history.pushState({}, '', '/agent-hub?agent=codex&tab=skill');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(page.getByTestId('agent-hub-context-change-dialog')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-agent-claude')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(page.getByTestId('agent-hub-tab-instructions')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(page).not.toHaveURL(/agent=codex|tab=skill/);
+
+    await page.getByTestId('agent-hub-context-stay').click();
+    await expect(page.getByTestId('agent-hub-context-change-dialog')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-slot-textarea')).toHaveValue(
+      'Unsaved history guard draft',
+    );
+
+    await page.evaluate(() => {
+      window.history.pushState({}, '', '/agent-hub?agent=codex&tab=skill');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(page.getByTestId('agent-hub-context-change-dialog')).toBeVisible();
+    await page.getByTestId('agent-hub-context-discard').click();
+    await expect(page.getByTestId('portable-inventory-workspace')).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('agent-hub-agent-codex')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await expect(page).toHaveURL(/agent=codex/);
+    await expect(page).toHaveURL(/tab=skill/);
   });
 });
 
@@ -662,8 +765,8 @@ test.describe('E2E-AGENT-HUB-DISCOVER-MANAGED-001 no primary Adopt in portable i
   });
 });
 
-test.describe('E2E-AGENT-HUB-ADAPT-FULL-001 full adapt preview gate', () => {
-  test('adapt full mode requires preview before apply; plan items appear after preview', async ({
+test.describe('E2E-AGENT-HUB-ADAPT-PREVIEW-001 selective preview-only', () => {
+  test('local-user selective preview shows bounded diff and exposes no apply/full control', async ({
     page,
     backendHarness,
   }) => {
@@ -673,18 +776,13 @@ test.describe('E2E-AGENT-HUB-ADAPT-FULL-001 full adapt preview gate', () => {
     await page.goto('/agent-hub?view=adapt');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('cross-agent-adapt-page')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('cross-agent-adapt-mode')).toBeVisible();
-
-    await page.getByTestId('cross-agent-adapt-mode-full').check();
-    await expect(page.getByTestId('cross-agent-adapt-full-hint')).toBeVisible();
-    await expect(page.getByTestId('cross-agent-adapt-full-destination')).toBeVisible();
-    await expect(page.getByTestId('cross-agent-adapt-full-dest-codex')).toBeChecked();
-
-    // 无 plan 时 apply 关闭
-    await expect(page.getByTestId('cross-agent-adapt-apply')).toBeDisabled();
+    await expect(page.getByTestId('cross-agent-preview-only')).toBeVisible();
+    await expect(page.getByTestId('cross-agent-adapt-mode')).toHaveCount(0);
+    await expect(page.getByTestId('cross-agent-adapt-apply')).toHaveCount(0);
     await expect(page.getByTestId('cross-agent-adapt-full-plan')).toHaveCount(0);
 
-    // scope confirm + 源正文（填入确保 preview gate 不依赖 inspect 时序）
+    await expect(page.getByTestId('cross-agent-adapt-dest-codex')).toBeChecked();
+    await page.getByTestId('cross-agent-adapt-dest-opencode').uncheck();
     await page.getByTestId('cross-agent-adapt-scope-confirm').check();
     await page
       .getByTestId('cross-agent-adapt-markdown')
@@ -692,26 +790,21 @@ test.describe('E2E-AGENT-HUB-ADAPT-FULL-001 full adapt preview gate', () => {
     await expect(page.getByTestId('cross-agent-adapt-markdown')).not.toHaveValue('');
 
     await page.getByTestId('cross-agent-adapt-preview').click();
-    await expect(page.getByTestId('cross-agent-adapt-full-plan')).toBeVisible({
+    await expect(page.getByTestId('cross-agent-adapt-preview-result')).toBeVisible({
       timeout: 10_000,
     });
-    // UI truncates planHash to 12 chars + ellipsis
-    await expect(page.getByTestId('cross-agent-adapt-full-plan-hash')).toContainText(
-      'full-plan-ha',
+    await expect(page.getByTestId('cross-agent-adapt-preview-codex')).toBeVisible();
+    await expect(page.getByTestId('cross-agent-adapt-diff-codex')).toContainText(
+      'Always run tests',
     );
-    await expect(page.getByTestId('cross-agent-adapt-full-plan-hash')).toContainText('stub');
-    await expect(
-      page.getByTestId('cross-agent-adapt-full-item-instruction:user'),
-    ).toBeVisible();
 
-    // preview 之后 apply 才可点
-    await expect(page.getByTestId('cross-agent-adapt-apply')).toBeEnabled();
-
-    await page.getByTestId('cross-agent-adapt-apply').click();
-    await expect(page.getByTestId('cross-agent-adapt-full-apply-result')).toBeVisible({
-      timeout: 10_000,
-    });
-
+    const selectivePreviewCalls = backendHarness
+      .calls()
+      .filter(
+        (call) =>
+          call.type === 'invoke' &&
+          call.command === 'agent_hub_preview_cross_agent_instruction',
+      );
     const fullPreviewCalls = backendHarness
       .calls()
       .filter(
@@ -724,7 +817,16 @@ test.describe('E2E-AGENT-HUB-ADAPT-FULL-001 full adapt preview gate', () => {
         (call) =>
           call.type === 'invoke' && call.command === 'agent_hub_apply_cross_agent_full',
       );
-    expect(fullPreviewCalls.length).toBeGreaterThanOrEqual(1);
-    expect(fullApplyCalls.length).toBeGreaterThanOrEqual(1);
+    const selectiveApplyCalls = backendHarness
+      .calls()
+      .filter(
+        (call) =>
+          call.type === 'invoke' &&
+          call.command === 'agent_hub_apply_cross_agent_instruction',
+      );
+    expect(selectivePreviewCalls.length).toBeGreaterThanOrEqual(1);
+    expect(fullPreviewCalls).toHaveLength(0);
+    expect(fullApplyCalls).toHaveLength(0);
+    expect(selectiveApplyCalls).toHaveLength(0);
   });
 });

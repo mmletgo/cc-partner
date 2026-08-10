@@ -2,7 +2,7 @@
  * Agent Hub URL 上下文纯模型。
  *
  * Business Logic（为什么需要）:
- *   IA 以 tab × scope × device|project × (instructions:lane) × agent 恢复工作台；
+ *   当前发布以 tab × (instructions:lane) × agent 恢复本机用户级工作台；
  *   深链与书签必须能往返，旧 section/target/kind 不得整页断链。
  *
  * Code Logic（做什么）:
@@ -48,8 +48,24 @@ export interface AgentHubContext {
   adaptView: boolean;
 }
 
+/**
+ * Agent Hub 当前上下文可兑现的能力级别。
+ *
+ * Business Logic: 本轮只开放本机用户级直读；远端用户级只允许进入显式 Pull 任务，
+ *   项目级因缺少精确 project identity 绑定必须保持关闭。
+ * Code Logic: 任意互斥字段混用都 fail-closed 为 unsupported。
+ */
+export type AgentHubContextCapability = 'direct' | 'pullOnly' | 'unsupported';
+
+/** 草稿所属身份；lane 不在其中，因为同一 Agent 的三槽共享一个 Canonical 文档。 */
+export interface AgentHubDraftIdentity {
+  scope: AgentHubScope;
+  deviceId: string | null;
+  projectKey: string | null;
+  agent: AgentTarget;
+}
+
 const AGENT_TARGETS = new Set<AgentTarget>(['claude', 'codex', 'opencode']);
-const SCOPES = new Set<AgentHubScope>(['user', 'project']);
 const TABS = new Set<AgentHubTab>(['instructions', 'skill', 'command', 'mcp', 'plugin']);
 const LANES = new Set<InstructionLane>(['common', 'adapted', 'exclusive']);
 /** 旧 portable kind 可直接映射为 tab（不含 instructions）。 */
@@ -65,6 +81,33 @@ export const DEFAULT_AGENT_HUB_CONTEXT: AgentHubContext = {
   instructionLane: 'common',
   adaptView: false,
 };
+
+/**
+ * Business Logic: 草稿 lease 必须绑定真实 owner，不能只按当前可见 Tab 或标题判断。
+ * Code Logic: 只复制稳定 identity 字段，避免调用方持有可变 context 对象。
+ */
+export function getAgentHubDraftIdentity(
+  context: AgentHubContext,
+): AgentHubDraftIdentity {
+  return {
+    scope: context.scope,
+    deviceId: context.deviceId,
+    projectKey: context.projectKey,
+    agent: context.agent,
+  };
+}
+
+/**
+ * Business Logic: 所有调用方共享同一 fail-closed 能力矩阵，防止页面与 API 各自猜测。
+ * Code Logic: local-user=direct；peer-user=pullOnly；project/互斥字段混用=unsupported。
+ */
+export function getAgentHubContextCapability(
+  context: AgentHubContext,
+): AgentHubContextCapability {
+  if (context.scope === 'project') return 'unsupported';
+  if (context.projectKey !== null) return 'unsupported';
+  return context.deviceId === null ? 'direct' : 'pullOnly';
+}
 
 /**
  * Business Logic: 旧五段 section 书签映射到新 IA 默认字段，避免深链全断。
@@ -116,10 +159,8 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
   if (agent && isAgentTarget(agent)) {
     ctx.agent = agent;
   }
-  const scope = params.get('scope');
-  if (scope && isAgentHubScope(scope)) {
-    ctx.scope = scope;
-  }
+  // project / peer 壳层尚无与当前 project/device 精确绑定的安全 API。本次入口
+  // 一律规范化为 local-user；旧参数只用于一次迁移说明，不进入业务 context。
   const tab = params.get('tab');
   if (tab && isAgentHubTab(tab)) {
     ctx.tab = tab;
@@ -130,24 +171,13 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
     ctx.instructionLane = lane;
   }
 
-  const deviceRaw = params.get('deviceId')?.trim() ?? '';
-  ctx.deviceId = deviceRaw.length > 0 ? deviceRaw : null;
-
-  // project 身份：优先 `project`，兼容 `projectKey`
-  const projectRaw =
-    params.get('project')?.trim() || params.get('projectKey')?.trim() || '';
-  ctx.projectKey = projectRaw.length > 0 ? projectRaw : null;
+  ctx.scope = 'user';
+  ctx.deviceId = null;
+  ctx.projectKey = null;
 
   ctx.adaptView = params.get('view') === 'adapt';
 
-  // 4) scope 互斥字段
-  if (ctx.scope === 'user') {
-    ctx.projectKey = null;
-  } else {
-    ctx.deviceId = null;
-  }
-
-  // 5) lane 仅 instructions 有意义
+  // 4) lane 仅 instructions 有意义
   if (ctx.tab !== 'instructions') {
     ctx.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
   }
@@ -168,15 +198,9 @@ export function writeAgentHubContext(
   if (ctx.agent === DEFAULT_AGENT_HUB_CONTEXT.agent) next.delete('agent');
   else next.set('agent', ctx.agent);
 
-  if (ctx.scope === DEFAULT_AGENT_HUB_CONTEXT.scope) next.delete('scope');
-  else next.set('scope', ctx.scope);
-
-  if (ctx.scope === 'user' && ctx.deviceId) next.set('deviceId', ctx.deviceId);
-  else next.delete('deviceId');
-
-  if (ctx.scope === 'project' && ctx.projectKey) next.set('project', ctx.projectKey);
-  else next.delete('project');
-  // 统一只用 project，去掉兼容键噪声
+  next.delete('scope');
+  next.delete('deviceId');
+  next.delete('project');
   next.delete('projectKey');
 
   if (ctx.tab === DEFAULT_AGENT_HUB_CONTEXT.tab) next.delete('tab');
@@ -205,10 +229,6 @@ export function writeAgentHubContext(
 
 function isAgentTarget(value: string): value is AgentTarget {
   return AGENT_TARGETS.has(value as AgentTarget);
-}
-
-function isAgentHubScope(value: string): value is AgentHubScope {
-  return SCOPES.has(value as AgentHubScope);
 }
 
 /**

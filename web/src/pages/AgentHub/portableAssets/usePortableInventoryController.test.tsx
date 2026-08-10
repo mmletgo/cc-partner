@@ -255,7 +255,12 @@ describe('usePortableInventoryController', () => {
       result.current.selectItem('claude-command-gamma');
     });
 
-    await waitFor(() => expect(apiMocks.inspect).toHaveBeenCalledTimes(callsAfterLoad + 1));
+    await waitFor(() => {
+      expect(apiMocks.inspect).toHaveBeenCalledTimes(callsAfterLoad + 1);
+      expect(result.current.visibleItems.map((item) => item.inventoryItemId)).toEqual([
+        'claude-command-gamma',
+      ]);
+    });
     expect(apiMocks.inspect).toHaveBeenLastCalledWith({
       deviceId: null,
       projectRef: null,
@@ -265,9 +270,6 @@ describe('usePortableInventoryController', () => {
     expect(result.current.filters.kind).toBe('command');
     // 查询域变化会清掉旧快照选择，避免把上一快照 item 交给新 hash 执行。
     expect(result.current.selectedItemId).toBeNull();
-    expect(result.current.visibleItems.map((item) => item.inventoryItemId)).toEqual([
-      'claude-command-gamma',
-    ]);
 
     act(() => result.current.setFilters({ kind: 'skill' }));
     await waitFor(() =>

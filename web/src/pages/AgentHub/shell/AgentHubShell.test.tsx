@@ -2,7 +2,7 @@
 /**
  * AgentHubShell pure view 测试。
  *
- * Business Logic: 锁定 agent 切换、user→project 隐藏设备、离线 peer 不可选、Adapt 本机约束。
+ * Business Logic: 锁定本机用户级壳层、能力门禁与三组 roving 键盘合同。
  * Code Logic: 注入 props；无 @/api；I18nextProvider 仅渲染标签。
  */
 
@@ -31,20 +31,12 @@ afterEach(() => {
 
 /**
  * Business Logic: 构造可交互的 shell 快照。
- * Code Logic: 默认 local/user/claude + 两个 peer（一在线一离线）。
+ * Code Logic: 默认 local/user/claude；外部上下文仅用于验证 fail-closed。
  */
 function buildProps(overrides: Partial<AgentHubShellProps> = {}): AgentHubShellProps {
   return {
     context: { ...DEFAULT_AGENT_HUB_CONTEXT },
     onContextChange: vi.fn(),
-    peers: [
-      { deviceId: 'peer-online', name: 'Peer Online', online: true },
-      { deviceId: 'peer-offline', name: 'Peer Offline', online: false },
-    ],
-    projects: [
-      { key: 'local:proj-a', label: 'Project A', remote: false },
-      { key: 'remote:peer-1/path', label: 'Remote Project', remote: true },
-    ],
     actions: {
       onPull: vi.fn(),
       onPush: vi.fn(),
@@ -78,42 +70,25 @@ describe('AgentHubShell', () => {
 
   test('click Codex emits onContextChange({ agent: "codex" })', () => {
     const onContextChange = vi.fn();
-    // 公共槽隐藏 agent 导航；用独有槽验证切换
-    renderShell({
-      onContextChange,
-      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'exclusive' },
-    });
+    renderShell({ onContextChange });
     fireEvent.click(screen.getByTestId('agent-hub-agent-codex'));
     expect(onContextChange).toHaveBeenCalledWith({ agent: 'codex' });
   });
 
-  test('common lane hides agent switcher; adapted/exclusive show it', () => {
-    const onContextChange = vi.fn();
-    const { rerender, props } = renderShell({ onContextChange });
-    // default instructionLane=common → no agent switcher
-    expect(screen.queryByTestId('agent-hub-agent-switcher')).toBeNull();
-
-    const adaptedContext: AgentHubContext = {
-      ...DEFAULT_AGENT_HUB_CONTEXT,
-      instructionLane: 'adapted',
-    };
-    rerender(
-      <I18nextProvider i18n={i18n}>
-        <AgentHubShell {...props} context={adaptedContext} onContextChange={onContextChange} />
-      </I18nextProvider>,
-    );
+  test('agent switcher remains visible in every instruction lane', () => {
+    const { rerender, props } = renderShell();
     expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
-
-    const exclusiveContext: AgentHubContext = {
-      ...DEFAULT_AGENT_HUB_CONTEXT,
-      instructionLane: 'exclusive',
-    };
-    rerender(
-      <I18nextProvider i18n={i18n}>
-        <AgentHubShell {...props} context={exclusiveContext} onContextChange={onContextChange} />
-      </I18nextProvider>,
-    );
-    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+    for (const instructionLane of ['adapted', 'exclusive'] as const) {
+      rerender(
+        <I18nextProvider i18n={i18n}>
+          <AgentHubShell
+            {...props}
+            context={{ ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane }}
+          />
+        </I18nextProvider>,
+      );
+      expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+    }
   });
 
   test('instructions tab shows lane switcher; skill tab hides it', () => {
@@ -144,52 +119,17 @@ describe('AgentHubShell', () => {
     expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
   });
 
-  test('user → project hides device selector and shows project selector', () => {
-    const onContextChange = vi.fn();
-    const { rerender, props } = renderShell({ onContextChange });
-
-    expect(screen.getByTestId('agent-hub-device-select')).toBeTruthy();
-    expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
-
-    fireEvent.click(screen.getByTestId('agent-hub-scope-project'));
-    expect(onContextChange).toHaveBeenCalledWith(
-      expect.objectContaining({ scope: 'project' }),
-    );
-
-    const projectContext: AgentHubContext = {
-      ...DEFAULT_AGENT_HUB_CONTEXT,
-      scope: 'project',
-      deviceId: null,
-      projectKey: null,
-    };
-    rerender(
-      <I18nextProvider i18n={i18n}>
-        <AgentHubShell {...props} context={projectContext} onContextChange={onContextChange} />
-      </I18nextProvider>,
-    );
-
+  test('scope is fixed local-user and no project/device selector is rendered', () => {
+    renderShell();
+    expect(screen.getByTestId('agent-hub-fixed-scope')).toBeTruthy();
     expect(screen.queryByTestId('agent-hub-device-select')).toBeNull();
-    expect(screen.getByTestId('agent-hub-project-select')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-scope-project')).toBeNull();
   });
 
-  test('offline peer option is not selectable', () => {
-    const onContextChange = vi.fn();
-    renderShell({ onContextChange });
-
-    const offline = screen.getByTestId('agent-hub-device-option-peer-offline') as HTMLOptionElement;
-    expect(offline.disabled).toBe(true);
-
-    const online = screen.getByTestId('agent-hub-device-option-peer-online') as HTMLOptionElement;
-    expect(online.disabled).toBe(false);
-
-    // Selecting online peer works
-    fireEvent.change(screen.getByTestId('agent-hub-device-select'), {
-      target: { value: 'peer-online' },
-    });
-    expect(onContextChange).toHaveBeenCalledWith({ deviceId: 'peer-online' });
-  });
-
-  test('deviceId !== null disables Adapt with local-only reason', () => {
+  test('peer context is Pull-only and shows visible reasons for blocked actions', () => {
+    const onPull = vi.fn();
+    const onPush = vi.fn();
     const onAdapt = vi.fn();
     renderShell({
       context: {
@@ -197,20 +137,50 @@ describe('AgentHubShell', () => {
         deviceId: 'peer-online',
       },
       actions: {
-        onPull: vi.fn(),
-        onPush: vi.fn(),
+        onPull,
+        onPush,
         onAdapt,
         adaptDisabledReason: null,
       },
     });
 
+    expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(true);
     const adapt = screen.getByTestId('agent-hub-action-adapt') as HTMLButtonElement;
     expect(adapt.disabled).toBe(true);
-    expect(adapt.getAttribute('title') || adapt.textContent || '').toMatch(
-      /this device|local|本机|same device|同机/i,
-    );
+    expect(screen.getByTestId('agent-hub-push-reason').textContent).toMatch(/Pull-only|只允许 Pull/i);
+    expect(screen.getByTestId('agent-hub-adapt-reason').textContent).toMatch(/Pull-only|只允许 Pull/i);
+    fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
+    fireEvent.click(screen.getByTestId('agent-hub-action-push'));
     fireEvent.click(adapt);
+    expect(onPull).toHaveBeenCalledOnce();
+    expect(onPush).not.toHaveBeenCalled();
     expect(onAdapt).not.toHaveBeenCalled();
+  });
+
+  test('project context disables every toolbar action and explains recovery', () => {
+    const onPull = vi.fn();
+    const onPush = vi.fn();
+    const onAdapt = vi.fn();
+    renderShell({
+      context: {
+        ...DEFAULT_AGENT_HUB_CONTEXT,
+        scope: 'project',
+        projectKey: 'local:p1',
+      },
+      actions: { onPull, onPush, onAdapt },
+    });
+
+    for (const action of ['pull', 'push', 'adapt']) {
+      expect(
+        (screen.getByTestId(`agent-hub-action-${action}`) as HTMLButtonElement).disabled,
+      ).toBe(true);
+    }
+    expect(screen.getByTestId('agent-hub-pull-reason').textContent).toMatch(
+      /unavailable|暂不可用/i,
+    );
+    fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
+    expect(onPull).not.toHaveBeenCalled();
   });
 
   test('five tabs emit tab patch; skill selects skill', () => {
@@ -260,6 +230,41 @@ describe('AgentHubShell', () => {
     expect(onPull).toHaveBeenCalled();
     expect(onPush).toHaveBeenCalled();
     expect(onAdapt).toHaveBeenCalled();
+  });
+
+  test('each group has one tab stop and keyboard navigation wraps with focus + callback', () => {
+    const onContextChange = vi.fn();
+    renderShell({ onContextChange });
+
+    const tabs = screen.getAllByRole('tab') as HTMLButtonElement[];
+    const laneRadios = screen.getByTestId('agent-hub-lane-switcher').querySelectorAll('[role="radio"]');
+    const agentRadios = screen.getByTestId('agent-hub-agent-switcher').querySelectorAll('[role="radio"]');
+    expect(tabs.filter((node) => node.tabIndex === 0)).toHaveLength(1);
+    expect(Array.from(laneRadios).filter((node) => (node as HTMLElement).tabIndex === 0)).toHaveLength(1);
+    expect(Array.from(agentRadios).filter((node) => (node as HTMLElement).tabIndex === 0)).toHaveLength(1);
+
+    fireEvent.keyDown(screen.getByTestId('agent-hub-tab-instructions'), { key: 'ArrowLeft' });
+    expect(onContextChange).toHaveBeenLastCalledWith({
+      tab: 'plugin',
+      instructionLane: 'common',
+    });
+    expect(document.activeElement).toBe(screen.getByTestId('agent-hub-tab-plugin'));
+
+    fireEvent.keyDown(screen.getByTestId('agent-hub-lane-common'), { key: 'End' });
+    expect(onContextChange).toHaveBeenLastCalledWith({ instructionLane: 'exclusive' });
+    expect(document.activeElement).toBe(screen.getByTestId('agent-hub-lane-exclusive'));
+
+    fireEvent.keyDown(screen.getByTestId('agent-hub-agent-claude'), { key: 'ArrowLeft' });
+    expect(onContextChange).toHaveBeenLastCalledWith({ agent: 'opencode' });
+    expect(document.activeElement).toBe(screen.getByTestId('agent-hub-agent-opencode'));
+  });
+
+  test('active tab controls the labelled tabpanel', () => {
+    renderShell();
+    const tab = screen.getByTestId('agent-hub-tab-instructions');
+    const panel = screen.getByRole('tabpanel');
+    expect(tab.getAttribute('aria-controls')).toBe(panel.id);
+    expect(panel.getAttribute('aria-labelledby')).toBe(tab.id);
   });
 
   test('renders children slot', () => {

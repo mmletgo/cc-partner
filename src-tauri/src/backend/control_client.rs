@@ -3712,6 +3712,6 @@ mod tests {
                 && src.contains("Duration::from_secs(360)"),
             "apply pull should use long-mutation timeout"
         );
-        assert_eq!(crate::backend::control::AGENT_HUB_API_VERSION, 3);
+        assert_eq!(crate::backend::control::AGENT_HUB_API_VERSION, 4);
     }
 }

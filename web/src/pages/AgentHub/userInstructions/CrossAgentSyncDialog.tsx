@@ -1,8 +1,13 @@
-import { useCallback, useMemo, useState, type JSX } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { Button, Dialog, Pill, StatusMessage } from '@/components/primitives';
 import { agentHubApi } from '@/api/agentHub';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { TFunction } from 'i18next';
+import {
+  adaptModeTone,
+  parseCrossAgentPreview,
+  type CrossAgentPreviewReport,
+} from '../crossAgent/crossAgentPresentation';
 import styles from '../AgentHub.module.css';
 
 export interface CrossAgentSyncDialogProps {
@@ -12,92 +17,29 @@ export interface CrossAgentSyncDialogProps {
   onClose: () => void;
 }
 
-interface CrossAgentTargetPreviewRow {
-  destination: AgentTarget;
-  mode: string;
-  path: string;
-  renderedHash?: string | null;
-  unifiedDiff?: string | null;
-  partialBlockers: string[];
-  canApply: boolean;
-}
-
-interface CrossAgentPreviewReport {
-  source: AgentTarget;
-  kind: string;
-  destinations: CrossAgentTargetPreviewRow[];
-  needsAdaptation: boolean;
-  planHash: string;
-}
-
-interface CrossAgentApplyResult {
-  destination: AgentTarget;
-  status: string;
-  path: string;
-  errorCode?: string | null;
-}
-
 const ALL_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
 
-function isAgentTarget(value: unknown): value is AgentTarget {
-  return value === 'claude' || value === 'codex' || value === 'opencode';
-}
-
-function parsePreview(raw: unknown): CrossAgentPreviewReport | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const obj = raw as Record<string, unknown>;
-  if (!isAgentTarget(obj.source) || !Array.isArray(obj.destinations)) return null;
-  const destinations: CrossAgentTargetPreviewRow[] = [];
-  for (const row of obj.destinations) {
-    if (!row || typeof row !== 'object') continue;
-    const r = row as Record<string, unknown>;
-    if (!isAgentTarget(r.destination) || typeof r.path !== 'string') continue;
-    destinations.push({
-      destination: r.destination,
-      mode: typeof r.mode === 'string' ? r.mode : 'residual',
-      path: r.path,
-      renderedHash: typeof r.renderedHash === 'string' ? r.renderedHash : null,
-      unifiedDiff: typeof r.unifiedDiff === 'string' ? r.unifiedDiff : null,
-      partialBlockers: Array.isArray(r.partialBlockers)
-        ? r.partialBlockers.filter((b): b is string => typeof b === 'string')
-        : [],
-      canApply: Boolean(r.canApply),
-    });
+/** 响应必须与本次源和目标集合完全一致，且永远不可 Apply。 */
+function previewMatchesRequest(
+  preview: CrossAgentPreviewReport,
+  source: AgentTarget,
+  destinations: AgentTarget[],
+): boolean {
+  if (preview.source !== source || preview.destinations.length !== destinations.length) {
+    return false;
   }
-  if (typeof obj.planHash !== 'string' || obj.planHash.trim().length === 0) return null;
-  return {
-    source: obj.source,
-    kind: typeof obj.kind === 'string' ? obj.kind : 'instruction',
-    destinations,
-    needsAdaptation: Boolean(obj.needsAdaptation),
-    planHash: obj.planHash,
-  };
-}
-
-function parseApplyResults(raw: unknown): CrossAgentApplyResult[] {
-  if (!Array.isArray(raw)) return [];
-  const out: CrossAgentApplyResult[] = [];
-  for (const row of raw) {
-    if (!row || typeof row !== 'object') continue;
-    const r = row as Record<string, unknown>;
-    if (!isAgentTarget(r.destination) || typeof r.path !== 'string') continue;
-    out.push({
-      destination: r.destination,
-      status: typeof r.status === 'string' ? r.status : 'failed',
-      path: r.path,
-      errorCode: typeof r.errorCode === 'string' ? r.errorCode : null,
-    });
-  }
-  return out;
+  const expected = new Set(destinations);
+  return preview.destinations.every(
+    (row) => expected.has(row.destination) && row.destination !== source && !row.canApply,
+  );
 }
 
 /**
  * Business Logic（为什么需要）:
- *   阶段三要求用户在同机手动选择源/目标 Agent，预览适配后确认一次性写入，禁止后台跨 target。
+ *   旧入口仍可能被复用，因此也必须遵守“本机用户级选择性预览、零写入”的当前能力边界。
  *
  * Code Logic（做什么）:
- *   选择 source + destinations → previewCrossAgentInstruction → 展示 mode/blockers →
- *   applyCrossAgentInstruction；views 不承载 transport 细节。
+ *   复用共享严格 decoder；输入变化递增 sequence 丢弃旧响应；生产 DOM 不渲染 Apply。
  */
 export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Element {
   const { t, open, sourceMarkdown, onClose } = props;
@@ -106,84 +48,77 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<CrossAgentPreviewReport | null>(null);
-  const [applyResults, setApplyResults] = useState<CrossAgentApplyResult[] | null>(null);
+  const requestSeqRef = useRef(0);
 
   const markdown = useMemo(() => sourceMarkdown.trim(), [sourceMarkdown]);
-  const canPreview = markdown.length > 0 && destinations.length > 0 && !destinations.includes(source);
+  const canPreview =
+    markdown.length > 0 && destinations.length > 0 && !destinations.includes(source);
+
+  useEffect(() => {
+    requestSeqRef.current += 1;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a reopened preview session must atomically discard prior async UI.
+    setBusy(false);
+    setError(null);
+    setPreview(null);
+  }, [open, sourceMarkdown]);
+
+  const invalidatePreview = useCallback(() => {
+    requestSeqRef.current += 1;
+    setBusy(false);
+    setPreview(null);
+    setError(null);
+  }, []);
 
   const toggleDestination = useCallback(
     (target: AgentTarget) => {
       if (target === source) return;
-      setDestinations((prev) =>
-        prev.includes(target) ? prev.filter((d) => d !== target) : [...prev, target],
+      invalidatePreview();
+      setDestinations((current) =>
+        current.includes(target)
+          ? current.filter((destination) => destination !== target)
+          : [...current, target],
       );
-      setPreview(null);
-      setApplyResults(null);
     },
-    [source],
+    [invalidatePreview, source],
   );
 
   const runPreview = useCallback(async () => {
     if (!canPreview) return;
+    const requestedSource = source;
+    const requestedDestinations = [...destinations];
+    const requestedMarkdown = markdown;
+    const seq = ++requestSeqRef.current;
     setBusy(true);
     setError(null);
-    setApplyResults(null);
+    setPreview(null);
     try {
       const raw = await agentHubApi.previewCrossAgentInstruction({
-        source,
-        destinations,
-        sourceMarkdown: markdown,
+        source: requestedSource,
+        destinations: requestedDestinations,
+        sourceMarkdown: requestedMarkdown,
         scope: 'user',
         destinationPaths: {},
       });
-      const parsed = parsePreview(raw);
-      if (!parsed) {
+      if (seq !== requestSeqRef.current) return;
+      const parsed = parseCrossAgentPreview(raw);
+      if (!parsed || !previewMatchesRequest(parsed, requestedSource, requestedDestinations)) {
         setError(t('agentHub:crossAgent.errors.invalidPreview'));
-        setPreview(null);
         return;
       }
       setPreview(parsed);
     } catch (reason) {
+      if (seq !== requestSeqRef.current) return;
       setError(reason instanceof Error ? reason.message : String(reason));
-      setPreview(null);
     } finally {
-      setBusy(false);
+      if (seq === requestSeqRef.current) setBusy(false);
     }
   }, [canPreview, destinations, markdown, source, t]);
 
-  const runApply = useCallback(async () => {
-    if (!preview) return;
-    const applicable = preview.destinations.filter((d) => d.canApply).map((d) => d.destination);
-    if (applicable.length === 0) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const raw = await agentHubApi.applyCrossAgentInstruction({
-        source,
-        destinations: applicable,
-        sourceMarkdown: markdown,
-        scope: 'user',
-        destinationPaths: {},
-        planHash: preview.planHash,
-        clientRequestId: `cross-agent-${Date.now()}`,
-      });
-      setApplyResults(parseApplyResults(raw));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  }, [markdown, preview, source]);
-
   const handleClose = useCallback(() => {
     if (busy) return;
-    setError(null);
-    setPreview(null);
-    setApplyResults(null);
+    invalidatePreview();
     onClose();
-  }, [busy, onClose]);
-
-  const applicableCount = preview?.destinations.filter((d) => d.canApply).length ?? 0;
+  }, [busy, invalidatePreview, onClose]);
 
   return (
     <Dialog
@@ -199,8 +134,14 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
           <h2 id="cross-agent-sync-title" className={styles.userDialogTitle}>
             {t('agentHub:crossAgent.title')}
           </h2>
-          <p className={styles.userSectionDescription}>{t('agentHub:crossAgent.description')}</p>
+          <p className={styles.userSectionDescription}>
+            {t('agentHub:crossAgent.description')}
+          </p>
         </header>
+
+        <StatusMessage tone="info" live="off" data-testid="cross-agent-preview-only">
+          {t('agentHub:crossAgent.previewOnly')}
+        </StatusMessage>
 
         {error ? (
           <StatusMessage tone="danger" data-testid="cross-agent-error">
@@ -217,10 +158,9 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
               data-testid="cross-agent-source"
               onChange={(event) => {
                 const next = event.currentTarget.value as AgentTarget;
+                invalidatePreview();
                 setSource(next);
-                setDestinations((prev) => prev.filter((d) => d !== next));
-                setPreview(null);
-                setApplyResults(null);
+                setDestinations((current) => current.filter((target) => target !== next));
               }}
             >
               {ALL_TARGETS.map((target) => (
@@ -258,11 +198,6 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
             data-testid="cross-agent-preview-result"
             aria-label={t('agentHub:crossAgent.previewAria')}
           >
-            {preview.needsAdaptation ? (
-              <StatusMessage tone="warn" live="off">
-                {t('agentHub:crossAgent.needsAdaptation')}
-              </StatusMessage>
-            ) : null}
             {preview.destinations.map((row) => (
               <article
                 key={row.destination}
@@ -274,7 +209,7 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
                     <h3>{t(`agentHub:targets.${row.destination}`)}</h3>
                     <code className={styles.userPath}>{row.path || '—'}</code>
                   </div>
-                  <Pill tone={row.canApply ? 'success' : 'warn'}>
+                  <Pill tone={adaptModeTone(row.mode)}>
                     {t(`agentHub:crossAgent.modes.${row.mode}`, {
                       defaultValue: row.mode,
                     })}
@@ -287,30 +222,20 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
                     ))}
                   </ul>
                 ) : null}
-                {!row.canApply ? (
+                {row.unifiedDiff == null ? (
                   <StatusMessage tone="warn" live="off">
-                    {t('agentHub:crossAgent.cannotApply')}
+                    {t('agentHub:crossAgent.diffUnavailable')}
                   </StatusMessage>
-                ) : null}
+                ) : row.unifiedDiff.length === 0 ? (
+                  <StatusMessage tone="success" live="off">
+                    {t('agentHub:crossAgent.noChanges')}
+                  </StatusMessage>
+                ) : (
+                  <pre className={styles.blockBody}>{row.unifiedDiff}</pre>
+                )}
               </article>
             ))}
           </section>
-        ) : null}
-
-        {applyResults ? (
-          <StatusMessage
-            tone={applyResults.some((r) => r.status !== 'applied') ? 'warn' : 'success'}
-            data-testid="cross-agent-apply-result"
-          >
-            <ul className={styles.userResultList}>
-              {applyResults.map((row) => (
-                <li key={`${row.destination}-${row.path}`}>
-                  {t(`agentHub:targets.${row.destination}`)} · {row.status} · {row.path}
-                  {row.errorCode ? ` (${row.errorCode})` : ''}
-                </li>
-              ))}
-            </ul>
-          </StatusMessage>
         ) : null}
 
         <footer className={styles.dialogActions}>
@@ -324,7 +249,7 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
             {t('common:action.cancel')}
           </Button>
           <Button
-            variant="secondary"
+            variant="primary"
             size="sm"
             loading={busy}
             disabled={!canPreview || busy}
@@ -332,16 +257,6 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
             data-testid="cross-agent-preview"
           >
             {t('agentHub:crossAgent.preview')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            loading={busy}
-            disabled={!preview || applicableCount === 0 || busy}
-            onClick={() => void runApply()}
-            data-testid="cross-agent-apply"
-          >
-            {t('agentHub:crossAgent.apply', { count: applicableCount })}
           </Button>
         </footer>
       </div>

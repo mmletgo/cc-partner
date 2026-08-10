@@ -2,7 +2,7 @@
  * Portable inventory pure view（列表 + 筛选，无详情 Drawer）。
  *
  * Business Logic（为什么需要这个组件）:
- *   kind 由 AgentHubShell 顶层 tab 选择；本视图只做 target/scope/actual/management/search + 列表。
+ *   Agent 与 kind 由 AgentHubShell 顶层选择；本视图只做状态/管理态/搜索 + 列表。
  *
  * Code Logic（这个组件做什么）:
  *   只消费 controller result 与 labels；禁止 @/api；hooks 不在本视图。
@@ -18,8 +18,6 @@ import {
 } from './PortableInventoryRow';
 import styles from '../AgentHub.module.css';
 
-const TARGET_OPTIONS = ['all', 'claude', 'codex', 'opencode'] as const;
-const SCOPE_OPTIONS = ['all', 'user', 'project'] as const;
 const ACTUAL_OPTIONS = ['all', 'enabled', 'disabled', 'problem'] as const;
 /** 管理态筛选：主心智 = 一致/漂移/冲突/不支持；unmanaged 置末作历史兜底。 */
 const MANAGEMENT_OPTIONS = [
@@ -40,12 +38,8 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   retry: string;
   staleBanner: string;
   searchPlaceholder: string;
-  filterTarget: string;
-  filterScope: string;
   filterActual: string;
   filterManagement: string;
-  targetFilter: Record<(typeof TARGET_OPTIONS)[number], string>;
-  scopeFilter: Record<(typeof SCOPE_OPTIONS)[number], string>;
   actualFilter: Record<(typeof ACTUAL_OPTIONS)[number], string>;
   managementFilter: Record<(typeof MANAGEMENT_OPTIONS)[number], string>;
 }
@@ -156,42 +150,6 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
             data-testid="portable-inventory-search"
           />
         </div>
-        <label className={styles.filterField}>
-          <span className={styles.metaLabel}>{labels.filterTarget}</span>
-          <select
-            value={filters.target}
-            onChange={(event) =>
-              setFilters({
-                target: event.currentTarget.value as typeof filters.target,
-              })
-            }
-            data-testid="portable-filter-target"
-          >
-            {TARGET_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {labels.targetFilter[option]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className={styles.filterField}>
-          <span className={styles.metaLabel}>{labels.filterScope}</span>
-          <select
-            value={filters.scope}
-            onChange={(event) =>
-              setFilters({
-                scope: event.currentTarget.value as typeof filters.scope,
-              })
-            }
-            data-testid="portable-filter-scope"
-          >
-            {SCOPE_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {labels.scopeFilter[option]}
-              </option>
-            ))}
-          </select>
-        </label>
         <label className={styles.filterField}>
           <span className={styles.metaLabel}>{labels.filterActual}</span>
           <select

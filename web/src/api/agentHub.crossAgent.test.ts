@@ -1,6 +1,4 @@
-/**
- * @vitest-environment node
- */
+/** @vitest-environment node */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const invokeMock = vi.fn(async () => ({}));
@@ -10,22 +8,33 @@ vi.mock('./client', () => ({
   invokeDecoded: vi.fn(),
 }));
 
-import { agentHubApi, AGENT_HUB_COMMANDS } from './agentHub';
+import {
+  agentHubApi,
+  AGENT_HUB_COMMANDS,
+  CROSS_AGENT_APPLY_NOT_CERTIFIED,
+  CROSS_AGENT_DEST_EQUALS_SOURCE,
+  CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE,
+  CROSS_AGENT_DESTINATIONS_DUPLICATE,
+  CROSS_AGENT_DESTINATIONS_REQUIRED,
+  CROSS_AGENT_FULL_ADAPT_UNAVAILABLE,
+  CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE,
+  CROSS_AGENT_SOURCE_MARKDOWN_REQUIRED,
+  CROSS_AGENT_TARGET_INVALID,
+} from './agentHub';
 
-describe('agentHubApi cross-agent IPC envelope', () => {
+describe('agentHubApi cross-agent fail-closed envelope', () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue({});
   });
 
-  it('always sends destinationPaths on preview even when caller omits it', async () => {
+  it('invokes only valid local-user selective preview with fixed empty paths', async () => {
     await agentHubApi.previewCrossAgentInstruction({
       source: 'claude',
       destinations: ['codex'],
       sourceMarkdown: 'Always run tests.',
       scope: 'user',
     });
-
     expect(invokeMock).toHaveBeenCalledWith(
       AGENT_HUB_COMMANDS.previewCrossAgentInstruction,
       {
@@ -40,75 +49,87 @@ describe('agentHubApi cross-agent IPC envelope', () => {
     );
   });
 
-  it('always sends destinationPaths on apply even when caller omits it', async () => {
-    await agentHubApi.applyCrossAgentInstruction({
-      source: 'claude',
-      destinations: ['codex'],
-      sourceMarkdown: 'Always run tests.',
-      scope: 'user',
-      planHash: 'plan-1',
-      clientRequestId: 'req-1',
-    });
-
-    expect(invokeMock).toHaveBeenCalledWith(
-      AGENT_HUB_COMMANDS.applyCrossAgentInstruction,
+  it.each([
+    [
+      CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE,
+      { source: 'claude', destinations: ['codex'], sourceMarkdown: 'Body', scope: 'project' },
+    ],
+    [
+      CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE,
       {
-        request: {
-          source: 'claude',
-          destinations: ['codex'],
-          sourceMarkdown: 'Always run tests.',
-          scope: 'user',
-          destinationPaths: {},
-          planHash: 'plan-1',
-          clientRequestId: 'req-1',
-        },
+        source: 'claude',
+        destinations: ['codex'],
+        sourceMarkdown: 'Body',
+        scope: 'user',
+        destinationPaths: { codex: '/tmp/override' },
       },
-    );
+    ],
+    [
+      CROSS_AGENT_TARGET_INVALID,
+      { source: 'unknown', destinations: ['codex'], sourceMarkdown: 'Body', scope: 'user' },
+    ],
+    [
+      CROSS_AGENT_DESTINATIONS_REQUIRED,
+      { source: 'claude', destinations: [], sourceMarkdown: 'Body', scope: 'user' },
+    ],
+    [
+      CROSS_AGENT_DESTINATIONS_DUPLICATE,
+      {
+        source: 'claude',
+        destinations: ['codex', 'codex'],
+        sourceMarkdown: 'Body',
+        scope: 'user',
+      },
+    ],
+    [
+      CROSS_AGENT_DEST_EQUALS_SOURCE,
+      { source: 'claude', destinations: ['claude'], sourceMarkdown: 'Body', scope: 'user' },
+    ],
+    [
+      CROSS_AGENT_SOURCE_MARKDOWN_REQUIRED,
+      { source: 'claude', destinations: ['codex'], sourceMarkdown: '  ', scope: 'user' },
+    ],
+  ])('rejects %s before invoke', async (code, request) => {
+    await expect(agentHubApi.previewCrossAgentInstruction(request)).rejects.toMatchObject({
+      code,
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('previewCrossAgentFull always sends portableAssets and deviceId defaults', async () => {
-    await agentHubApi.previewCrossAgentFull({
-      source: 'claude',
-      destination: 'codex',
-      scope: 'user',
-      sourceMarkdown: 'Always run tests.',
-    });
+  it('rejects selective apply before invoke', async () => {
+    await expect(
+      agentHubApi.applyCrossAgentInstruction({
+        source: 'claude',
+        destinations: ['codex'],
+        sourceMarkdown: 'Body',
+        scope: 'user',
+        planHash: 'plan-1',
+        clientRequestId: 'request-1',
+      }),
+    ).rejects.toMatchObject({ code: CROSS_AGENT_APPLY_NOT_CERTIFIED });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 
-    expect(invokeMock).toHaveBeenCalledWith(AGENT_HUB_COMMANDS.previewCrossAgentFull, {
-      request: {
+  it('rejects full preview and full apply before invoke', async () => {
+    await expect(
+      agentHubApi.previewCrossAgentFull({
         source: 'claude',
         destination: 'codex',
         scope: 'user',
-        sourceMarkdown: 'Always run tests.',
-        portableAssets: [],
-        deviceId: null,
-      },
-    });
-  });
-
-  it('applyCrossAgentFull sends planHash and item selections', async () => {
-    await agentHubApi.applyCrossAgentFull({
-      source: 'claude',
-      destination: 'codex',
-      scope: 'user',
-      sourceMarkdown: 'Always run tests.',
-      planHash: 'abc123',
-      clientRequestId: 'req-full-1',
-      items: [{ logicalKey: 'instruction:user', included: true }],
-    });
-
-    expect(invokeMock).toHaveBeenCalledWith(AGENT_HUB_COMMANDS.applyCrossAgentFull, {
-      request: {
+        sourceMarkdown: 'Body',
+      }),
+    ).rejects.toMatchObject({ code: CROSS_AGENT_FULL_ADAPT_UNAVAILABLE });
+    await expect(
+      agentHubApi.applyCrossAgentFull({
         source: 'claude',
         destination: 'codex',
         scope: 'user',
-        sourceMarkdown: 'Always run tests.',
-        planHash: 'abc123',
-        clientRequestId: 'req-full-1',
-        items: [{ logicalKey: 'instruction:user', included: true }],
-        portableAssets: [],
-        deviceId: null,
-      },
-    });
+        sourceMarkdown: 'Body',
+        planHash: 'plan-1',
+        clientRequestId: 'request-1',
+        items: [],
+      }),
+    ).rejects.toMatchObject({ code: CROSS_AGENT_FULL_ADAPT_UNAVAILABLE });
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

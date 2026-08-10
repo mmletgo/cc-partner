@@ -64,6 +64,14 @@ const labels: InstructionThreePaneViewLabels = {
   refresh: 'Rescan',
   commonMarkdown: 'Common body',
   saveBlocks: 'Save slots',
+  unsavedDraft: 'Unsaved slot draft',
+  canonicalDrift: 'Canonical changed',
+  sourceDrift: 'Native source changed',
+  originalReadOnly: 'Read-only source',
+  discardAndReload: 'Discard and reload',
+  reparseConfirmTitle: 'Replace slot draft?',
+  reparseConfirmDescription: 'This replaces unsaved slot content.',
+  reparseConfirm: 'Replace draft',
 };
 
 const SAMPLE = `## Shared
@@ -98,17 +106,21 @@ function buildProps(
     writeBlocked: false,
     writeBlockedReason: null,
     dualDirtyOpen: false,
+    reparseConfirmOpen: false,
     onReparse: vi.fn(),
     onSync: vi.fn(),
     onSaveBlocks: vi.fn(),
     onRetry: vi.fn(),
     onRefresh: vi.fn(),
+    onDiscardAndReload: vi.fn(),
     onOriginalChange: vi.fn(),
     onSlotTextChange: vi.fn(),
     onAdaptedCommonChange: vi.fn(),
     onAdaptedVariantChange: vi.fn(),
     onChooseBaseline: vi.fn(),
     onCancelDualDirty: vi.fn(),
+    onConfirmReparse: vi.fn(),
+    onCancelReparse: vi.fn(),
     ...overrides,
   };
 }
@@ -162,7 +174,7 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-blocks')).toBeTruthy();
     expect(screen.queryByTestId('instruction-pane-preview')).toBeNull();
     expect(screen.queryByTestId('instruction-pane-original')).toBeNull();
-    expect(screen.getByTestId('instruction-sync-to-native')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
     expect(screen.queryByTestId('instruction-original-path')).toBeNull();
   });
 
@@ -240,7 +252,7 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-blocks')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-preview')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-original')).toBeTruthy();
-    expect(screen.getByTestId('instruction-sync-to-native')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
   });
 
   test('reparse button exists only in exclusive original column', () => {
@@ -256,18 +268,18 @@ describe('InstructionThreePaneView', () => {
     expect(screen.queryAllByTestId('instruction-reparse-from-original')).toHaveLength(1);
   });
 
-  test('exclusive sync button triggers onSync callback', () => {
+  test('native sync action is not exposed before write certification', () => {
     const onSync = vi.fn();
     render(
       <InstructionThreePaneView
         {...buildProps({ instructionLane: 'exclusive', onSync, state: stateWithSlots() })}
       />,
     );
-    fireEvent.click(screen.getByTestId('instruction-sync-to-native'));
-    expect(onSync).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
+    expect(onSync).not.toHaveBeenCalled();
   });
 
-  test('write blocked disables exclusive sync button and shows reason', () => {
+  test('write blocked reason stays visible while native action remains absent', () => {
     render(
       <InstructionThreePaneView
         {...buildProps({
@@ -278,11 +290,44 @@ describe('InstructionThreePaneView', () => {
         })}
       />,
     );
-    const sync = screen.getByTestId('instruction-sync-to-native') as HTMLButtonElement;
-    expect(sync.disabled).toBe(true);
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
     expect(screen.getByTestId('instruction-write-blocked').textContent).toContain(
       'Writes are blocked for this agent',
     );
+  });
+
+  test('original source is read-only and save is gated by blocks dirty/drift', () => {
+    const clean = stateWithSlots();
+    clean.blocksDirty = false;
+    const { rerender } = render(
+      <InstructionThreePaneView
+        {...buildProps({ instructionLane: 'exclusive', state: clean })}
+      />,
+    );
+    expect((screen.getByTestId('instruction-original-textarea') as HTMLTextAreaElement).readOnly).toBe(
+      true,
+    );
+    expect((screen.getByTestId('instruction-save-blocks') as HTMLButtonElement).disabled).toBe(true);
+
+    const dirty = { ...clean, blocksDirty: true };
+    rerender(
+      <InstructionThreePaneView
+        {...buildProps({ instructionLane: 'exclusive', state: dirty })}
+      />,
+    );
+    expect((screen.getByTestId('instruction-save-blocks') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId('instruction-unsaved-draft')).toBeTruthy();
+
+    rerender(
+      <InstructionThreePaneView
+        {...buildProps({
+          instructionLane: 'exclusive',
+          state: { ...dirty, externalDrift: true },
+        })}
+      />,
+    );
+    expect((screen.getByTestId('instruction-save-blocks') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('instruction-canonical-drift')).toBeTruthy();
   });
 
   test('exclusive preview pane is read-only (no textarea for preview body)', () => {

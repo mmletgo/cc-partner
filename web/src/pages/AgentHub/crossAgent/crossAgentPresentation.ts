@@ -67,6 +67,7 @@ export interface CrossAgentPreviewGate {
   reason:
     | 'ok'
     | 'peerBlocked'
+    | 'projectBlocked'
     | 'busy'
     | 'emptyMarkdown'
     | 'emptyDestinations'
@@ -85,7 +86,7 @@ export interface CrossAgentApplyGateInput {
 /** Apply 闸门结果。 */
 export interface CrossAgentApplyGate {
   ok: boolean;
-  reason: 'ok' | 'peerBlocked' | 'busy' | 'missingPreview' | 'noApplicable';
+  reason: 'applyUnavailable';
   applicableDestinations: AgentTarget[];
 }
 
@@ -111,6 +112,19 @@ export function normalizeAdaptMode(value: unknown): CrossAgentAdaptMode {
     return value;
   }
   return 'residual';
+}
+
+/**
+ * Business Logic: IPC 中未知 mode 不得被伪装成可理解的 residual 结果。
+ * Code Logic: 严格识别后端枚举。
+ */
+function isCrossAgentAdaptMode(value: unknown): value is CrossAgentAdaptMode {
+  return (
+    value === 'shared' ||
+    value === 'adapted' ||
+    value === 'targetOnly' ||
+    value === 'residual'
+  );
 }
 
 /**
@@ -157,36 +171,57 @@ export function isPeerContextBlocked(deviceId: string | null | undefined): boole
 
 /**
  * Business Logic: 解析 preview IPC 未知载荷。
- * Code Logic: 结构守卫；destinations 行级容错。
+ * Code Logic: 严格校验完整报告；任一畸形/可写行均使整个响应失效。
  */
 export function parseCrossAgentPreview(raw: unknown): CrossAgentPreviewReport | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
-  if (!isAgentTarget(obj.source) || !Array.isArray(obj.destinations)) return null;
+  if (
+    !isAgentTarget(obj.source) ||
+    obj.kind !== 'instruction' ||
+    !Array.isArray(obj.destinations) ||
+    typeof obj.needsAdaptation !== 'boolean' ||
+    typeof obj.planHash !== 'string' ||
+    obj.planHash.trim().length === 0
+  ) {
+    return null;
+  }
   const destinations: CrossAgentTargetPreviewRow[] = [];
+  const seen = new Set<AgentTarget>();
   for (const row of obj.destinations) {
-    if (!row || typeof row !== 'object') continue;
+    if (!row || typeof row !== 'object') return null;
     const r = row as Record<string, unknown>;
-    if (!isAgentTarget(r.destination) || typeof r.path !== 'string') continue;
+    if (
+      !isAgentTarget(r.destination) ||
+      seen.has(r.destination) ||
+      !isCrossAgentAdaptMode(r.mode) ||
+      typeof r.path !== 'string' ||
+      !Array.isArray(r.partialBlockers) ||
+      !r.partialBlockers.every((blocker) => typeof blocker === 'string') ||
+      r.canApply !== false ||
+      (r.renderedHash != null && typeof r.renderedHash !== 'string') ||
+      (r.observedHash != null && typeof r.observedHash !== 'string') ||
+      (r.unifiedDiff != null && typeof r.unifiedDiff !== 'string')
+    ) {
+      return null;
+    }
+    seen.add(r.destination);
     destinations.push({
       destination: r.destination,
-      mode: normalizeAdaptMode(r.mode),
+      mode: r.mode,
       path: r.path,
       renderedHash: typeof r.renderedHash === 'string' ? r.renderedHash : null,
       observedHash: typeof r.observedHash === 'string' ? r.observedHash : null,
       unifiedDiff: typeof r.unifiedDiff === 'string' ? r.unifiedDiff : null,
-      partialBlockers: Array.isArray(r.partialBlockers)
-        ? r.partialBlockers.filter((b): b is string => typeof b === 'string')
-        : [],
-      canApply: Boolean(r.canApply),
+      partialBlockers: r.partialBlockers as string[],
+      canApply: false,
     });
   }
-  if (typeof obj.planHash !== 'string' || obj.planHash.trim().length === 0) return null;
   return {
     source: obj.source,
-    kind: typeof obj.kind === 'string' ? obj.kind : 'instruction',
+    kind: 'instruction',
     destinations,
-    needsAdaptation: Boolean(obj.needsAdaptation),
+    needsAdaptation: obj.needsAdaptation,
     planHash: obj.planHash,
   };
 }
@@ -252,6 +287,9 @@ export function canRunCrossAgentPreview(input: CrossAgentPreviewGateInput): Cros
   if (isPeerContextBlocked(input.deviceId)) {
     return { ok: false, reason: 'peerBlocked' };
   }
+  if (input.scope !== 'user') {
+    return { ok: false, reason: 'projectBlocked' };
+  }
   if (input.busy) {
     return { ok: false, reason: 'busy' };
   }
@@ -267,9 +305,6 @@ export function canRunCrossAgentPreview(input: CrossAgentPreviewGateInput): Cros
   if (!input.scopeConfirmed) {
     return { ok: false, reason: 'scopeUnconfirmed' };
   }
-  if (input.scope === 'project' && !(input.projectKey && input.projectKey.trim().length > 0)) {
-    return { ok: false, reason: 'projectKeyRequired' };
-  }
   return { ok: true, reason: 'ok' };
 }
 
@@ -278,22 +313,8 @@ export function canRunCrossAgentPreview(input: CrossAgentPreviewGateInput): Cros
  * Code Logic: 短路 + 收集 applicable destinations。
  */
 export function canRunCrossAgentApply(input: CrossAgentApplyGateInput): CrossAgentApplyGate {
-  if (isPeerContextBlocked(input.deviceId)) {
-    return { ok: false, reason: 'peerBlocked', applicableDestinations: [] };
-  }
-  if (input.busy) {
-    return { ok: false, reason: 'busy', applicableDestinations: [] };
-  }
-  if (!input.preview) {
-    return { ok: false, reason: 'missingPreview', applicableDestinations: [] };
-  }
-  const applicableDestinations = input.preview.destinations
-    .filter((row) => row.canApply)
-    .map((row) => row.destination);
-  if (applicableDestinations.length === 0) {
-    return { ok: false, reason: 'noApplicable', applicableDestinations: [] };
-  }
-  return { ok: true, reason: 'ok', applicableDestinations };
+  void input;
+  return { ok: false, reason: 'applyUnavailable', applicableDestinations: [] };
 }
 
 /**
@@ -380,15 +401,7 @@ export interface CrossAgentFullPreviewGateInput {
 /** 全量预览闸门结果。 */
 export interface CrossAgentFullPreviewGate {
   ok: boolean;
-  reason:
-    | 'ok'
-    | 'peerBlocked'
-    | 'busy'
-    | 'emptyMarkdown'
-    | 'emptyDestination'
-    | 'sourceEqualsDestination'
-    | 'scopeUnconfirmed'
-    | 'projectKeyRequired';
+  reason: 'fullUnavailable';
 }
 
 /** 全量 apply 闸门输入。 */
@@ -401,7 +414,7 @@ export interface CrossAgentFullApplyGateInput {
 /** 全量 apply 闸门结果。 */
 export interface CrossAgentFullApplyGate {
   ok: boolean;
-  reason: 'ok' | 'peerBlocked' | 'busy' | 'missingPreview' | 'noApplicable' | 'emptyPlanHash';
+  reason: 'fullUnavailable';
   includedCount: number;
 }
 
@@ -508,28 +521,8 @@ export function countApplicableFullItems(plan: CrossAgentFullPlan | null | undef
 export function canRunCrossAgentFullPreview(
   input: CrossAgentFullPreviewGateInput,
 ): CrossAgentFullPreviewGate {
-  if (isPeerContextBlocked(input.deviceId)) {
-    return { ok: false, reason: 'peerBlocked' };
-  }
-  if (input.busy) {
-    return { ok: false, reason: 'busy' };
-  }
-  if (input.sourceMarkdown.trim().length === 0) {
-    return { ok: false, reason: 'emptyMarkdown' };
-  }
-  if (!input.destination) {
-    return { ok: false, reason: 'emptyDestination' };
-  }
-  if (input.destination === input.source) {
-    return { ok: false, reason: 'sourceEqualsDestination' };
-  }
-  if (!input.scopeConfirmed) {
-    return { ok: false, reason: 'scopeUnconfirmed' };
-  }
-  if (input.scope === 'project' && !(input.projectKey && input.projectKey.trim().length > 0)) {
-    return { ok: false, reason: 'projectKeyRequired' };
-  }
-  return { ok: true, reason: 'ok' };
+  void input;
+  return { ok: false, reason: 'fullUnavailable' };
 }
 
 /**
@@ -539,25 +532,8 @@ export function canRunCrossAgentFullPreview(
 export function canRunCrossAgentFullApply(
   input: CrossAgentFullApplyGateInput,
 ): CrossAgentFullApplyGate {
-  if (isPeerContextBlocked(input.deviceId)) {
-    return { ok: false, reason: 'peerBlocked', includedCount: 0 };
-  }
-  if (input.busy) {
-    return { ok: false, reason: 'busy', includedCount: 0 };
-  }
-  if (!input.plan) {
-    return { ok: false, reason: 'missingPreview', includedCount: 0 };
-  }
-  if (!input.plan.planHash.trim()) {
-    return { ok: false, reason: 'emptyPlanHash', includedCount: 0 };
-  }
-  const includedCount = countApplicableFullItems(input.plan);
-  // 允许仅勾选 residual 项时也点 apply（结果全 skipped）；至少要有一项 included=true
-  const anyIncluded = input.plan.items.some((i) => i.included);
-  if (!anyIncluded) {
-    return { ok: false, reason: 'noApplicable', includedCount: 0 };
-  }
-  return { ok: true, reason: 'ok', includedCount };
+  void input;
+  return { ok: false, reason: 'fullUnavailable', includedCount: 0 };
 }
 
 /**

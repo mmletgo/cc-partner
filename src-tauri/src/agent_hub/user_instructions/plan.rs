@@ -387,6 +387,11 @@ pub async fn apply_user_instruction_plan(
             )
         } else if let Some(code) = plan_blocking_code_for_target(&stored.public, change.target) {
             (UserInstructionTargetApplyState::Blocked, Some(code))
+        } else if workspace_blocks_current_mutation(&workspace, change) {
+            (
+                UserInstructionTargetApplyState::Blocked,
+                Some("USER_INSTRUCTION_TARGET_SCAN_ONLY".to_string()),
+            )
         } else {
             match apply_user_instruction_change_to_disk(change, &document) {
                 Ok(state) => (state, None),
@@ -426,6 +431,40 @@ pub async fn apply_user_instruction_plan(
         )
         .await?;
     Ok(result)
+}
+
+/// apply 写盘前基于刚刷新的 workspace 再验当前 target capability。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview 后 support manifest、CLI 版本或证据可能回落；旧 plan 即使没有 blocker，
+///     也不能在当前 scan-only 状态继续创建、覆盖或删除原生指令文件。
+///
+/// Code Logic（这个函数做什么）:
+///     Leave 永不写；Create/Update 要求 write=Supported；Delete 要求 remove=Supported；
+///     target 缺失时 fail-closed。
+fn workspace_blocks_current_mutation(
+    workspace: &UserInstructionWorkspaceDto,
+    change: &UserInstructionPlanChangeDto,
+) -> bool {
+    if change.operation == UserInstructionPlanOperation::Leave {
+        return false;
+    }
+    let Some(target) = workspace
+        .targets
+        .iter()
+        .find(|target| target.target == change.target)
+    else {
+        return true;
+    };
+    match change.operation {
+        UserInstructionPlanOperation::Create | UserInstructionPlanOperation::Update => {
+            target.capability.write != UserInstructionCapabilityLevel::Supported
+        }
+        UserInstructionPlanOperation::Delete => {
+            target.capability.remove != UserInstructionCapabilityLevel::Supported
+        }
+        UserInstructionPlanOperation::Leave => false,
+    }
 }
 
 /// 从 plan 级 blockingReasons 提取该 target 的错误码（若有）。
@@ -809,7 +848,7 @@ fn selected_path(
 }
 
 /// 读取 diff 所需的有界 UTF-8 正文。
-fn read_text_bounded(path: &str) -> Result<Option<String>, AppError> {
+pub(crate) fn read_text_bounded(path: &str) -> Result<Option<String>, AppError> {
     let path = Path::new(path);
     if !path.exists() {
         return Ok(None);
@@ -825,7 +864,7 @@ fn read_text_bounded(path: &str) -> Result<Option<String>, AppError> {
 }
 
 /// 生成有界 unified-like diff，截断时带稳定 marker。
-fn render_bounded_diff(before: &str, after: &str) -> (String, bool) {
+pub(crate) fn render_bounded_diff(before: &str, after: &str) -> (String, bool) {
     let mut diff = String::from("--- before\n+++ after\n@@\n");
     for line in before.lines() {
         diff.push('-');
@@ -998,6 +1037,19 @@ mod tests {
         assert!(value.get("clientRequestId").is_none());
         assert!(value.get("complete").is_none());
         assert!(value["targets"][0].get("state").is_none());
+    }
+
+    /// Business Logic: apply 必须在原生 writer 前重新读取并检查当前 capability。
+    #[test]
+    fn live_workspace_capability_gate_precedes_instruction_writer() {
+        let src = include_str!("plan.rs");
+        let gate = src
+            .find("else if workspace_blocks_current_mutation(&workspace, change)")
+            .expect("live capability gate");
+        let writer = src
+            .find("match apply_user_instruction_change_to_disk(change, &document)")
+            .expect("native instruction writer");
+        assert!(gate < writer);
     }
 
     /// Business Logic: certified target create/update 必须真实落盘并与 rescan hash 一致。

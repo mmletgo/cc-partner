@@ -5,7 +5,8 @@
 //! Business Logic（为什么需要这个测试文件）:
 //!     support manifest 的写能力只能绑定真实 Claude/Codex/OpenCode CLI 的 exact 版本
 //!     与发现/激活合同；单元测试不能替代 L3。本 harness 在隔离 HOME 下探测可执行
-//!     realpath/`--version`，并与 manifest `currentTestedVersion` 比对。
+//!     realpath/`--version`，并与显式 `CC_PARTNER_L3_EXPECTED_VERSION` 比对。manifest 在完整
+//!     多平台写盘证据完成前保持 scan-only，单次 probe 不会自动解锁写能力。
 //!
 //! Code Logic（这个文件做什么）:
 //!     - 非 ignored 编译烟测：内置 manifest 可解析、三 target 存在
@@ -58,74 +59,27 @@ fn support_manifest_compiles_and_lists_three_targets() {
     assert_eq!(names, vec!["claude", "codex", "opencode"]);
 }
 
-/// 编译期烟测：写能力合同 — 已 pin 的 target 必须带版本+证据；未认证 target 写侧 blocked。
+/// 编译期烟测：所有 target 在真实写盘认证完成前保持 scan-only。
 ///
-/// Business Logic: 2026-08-08 三阶段重构阶段一解锁 Claude/Codex 写能力（本机 probe pin）；
-///     OpenCode 本机未安装时保持 fail-closed。liveReload 全 target 诚实 blocked。
-/// Code Logic: Claude/Codex 写侧 Supported*（除 liveReload）+ 非空 min/current；OpenCode 写侧 Blocked。
+/// Business Logic: 本机版本 probe 不是 create/update/activate/restore 的多平台 L3 证据；三 target
+///     都必须保持写 blocked，版本 pin 与 capability evidence 为空。
+/// Code Logic: 验证 min/current=null、所有写 capability blocked、capability evidence map 为空。
 #[test]
-fn write_capability_contract_matches_phase1_pins() {
+fn uncertified_targets_are_scan_only() {
     let manifest = builtin_support_manifest().unwrap();
     for record in &manifest.targets {
-        match record.target {
-            AgentTarget::Claude | AgentTarget::Codex => {
-                assert!(
-                    record
-                        .min_tested_version
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .is_some(),
-                    "{} missing minTestedVersion",
-                    record.target.as_str()
+        assert!(record.min_tested_version.is_none());
+        assert!(record.current_tested_version.is_none());
+        assert!(record.capability_evidence_ids.is_empty());
+        for (capability, support) in &record.capabilities {
+            if capability.is_write_side() {
+                assert_eq!(
+                    *support,
+                    CapabilitySupport::Blocked,
+                    "{} {:?} must stay blocked until certified",
+                    record.target.as_str(),
+                    capability
                 );
-                assert!(
-                    record
-                        .current_tested_version
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .is_some(),
-                    "{} missing currentTestedVersion",
-                    record.target.as_str()
-                );
-                assert!(
-                    !record.evidence_ids.is_empty(),
-                    "{} needs evidenceIds",
-                    record.target.as_str()
-                );
-                for (cap, support) in &record.capabilities {
-                    if *cap == TargetCapability::LiveReload {
-                        assert_eq!(
-                            *support,
-                            CapabilitySupport::Blocked,
-                            "{} liveReload must stay blocked",
-                            record.target.as_str()
-                        );
-                        continue;
-                    }
-                    if cap.is_write_side() {
-                        assert!(
-                            support.is_supported_family(),
-                            "{} {:?} should be Supported* after phase-1 pin, got {:?}",
-                            record.target.as_str(),
-                            cap,
-                            support
-                        );
-                    }
-                }
-            }
-            AgentTarget::OpenCode => {
-                for (cap, support) in &record.capabilities {
-                    if cap.is_write_side() {
-                        assert_eq!(
-                            *support,
-                            CapabilitySupport::Blocked,
-                            "opencode {:?} should stay blocked until installed+certified",
-                            cap
-                        );
-                    }
-                }
             }
         }
     }
@@ -202,8 +156,9 @@ fn command_name(target: AgentTarget) -> &'static str {
 
 /// L3：对选定 target 跑真实 CLI 合同。
 ///
-/// Business Logic: 比对 normalized version 与 currentTestedVersion；不匹配只打印指纹/版本。
-/// Code Logic: ignored + 环境变量选择 target；隔离 home；probe + evaluate。
+/// Business Logic: 比对 normalized version 与调用方显式 expected version；单次 probe 只收集
+///     证据输入，不改写或解锁 manifest。
+/// Code Logic: ignored + 环境变量选择 target/expected；隔离 home；probe + scan-only evaluate。
 #[test]
 #[ignore = "L3 real CLI contract; set CC_PARTNER_L3_TARGET=claude|codex|opencode"]
 fn l3_cli_contract_for_selected_target() {
@@ -290,17 +245,9 @@ fn l3_cli_contract_for_selected_target() {
 
     let manifest = builtin_support_manifest().expect("manifest");
     let record = find_target_record(&manifest, target).expect("manifest record");
-    let expected_current = record
-        .current_tested_version
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            panic!(
-                "manifest currentTestedVersion missing for {} — cannot certify",
-                target.as_str()
-            )
-        });
+    let expected_current = env::var("CC_PARTNER_L3_EXPECTED_VERSION").unwrap_or_else(|_| {
+        panic!("set CC_PARTNER_L3_EXPECTED_VERSION to the exact CLI version under test")
+    });
 
     let prefix = record.executable_probe.version_prefix.as_deref();
     let suffix = record.executable_probe.version_suffix.as_deref();
@@ -312,7 +259,7 @@ fn l3_cli_contract_for_selected_target() {
             format_probe_identity(&snapshot)
         )
     });
-    let expected_core = parse_semver_core(expected_current, prefix, suffix).unwrap_or_else(|| {
+    let expected_core = parse_semver_core(&expected_current, prefix, suffix).unwrap_or_else(|| {
         panic!(
             "cannot parse manifest currentTestedVersion for {} raw={:?}",
             target.as_str(),
@@ -358,13 +305,10 @@ fn l3_cli_contract_for_selected_target() {
         eval.reasons
     );
 
-    // 版本匹配后若 write 仍 blocked，属于 manifest 尚未写入 Supported* 证据——允许并提示
-    if !eval.write_allowed {
-        eprintln!(
-            "NOTE: version matched currentTestedVersion but writes remain blocked (baseline/evidence). target={}",
-            target.as_str()
-        );
-    }
+    assert!(
+        !eval.write_allowed,
+        "single-host probe must not unlock writes"
+    );
 
     // scan 侧至少不应 Blocked 成不可 inventory（scanOnly 时 ReadOnly）
     let scan = eval.capability(TargetCapability::ScanPortableAssets);

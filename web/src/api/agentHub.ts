@@ -131,6 +131,41 @@ export const AGENT_HUB_PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAI
 export const AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE =
   'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE' as const;
 
+/** 跨 Agent 仅开放本机用户级选择性预览，其余路径稳定 fail-closed。 */
+export const CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE =
+  'CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE' as const;
+export const CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE =
+  'CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE' as const;
+export const CROSS_AGENT_TARGET_INVALID = 'CROSS_AGENT_TARGET_INVALID' as const;
+export const CROSS_AGENT_DESTINATIONS_REQUIRED =
+  'CROSS_AGENT_DESTINATIONS_REQUIRED' as const;
+export const CROSS_AGENT_DESTINATIONS_DUPLICATE =
+  'CROSS_AGENT_DESTINATIONS_DUPLICATE' as const;
+export const CROSS_AGENT_DEST_EQUALS_SOURCE =
+  'CROSS_AGENT_DEST_EQUALS_SOURCE' as const;
+export const CROSS_AGENT_SOURCE_MARKDOWN_REQUIRED =
+  'CROSS_AGENT_SOURCE_MARKDOWN_REQUIRED' as const;
+export const CROSS_AGENT_APPLY_NOT_CERTIFIED =
+  'CROSS_AGENT_APPLY_NOT_CERTIFIED' as const;
+export const CROSS_AGENT_FULL_ADAPT_UNAVAILABLE =
+  'CROSS_AGENT_FULL_ADAPT_UNAVAILABLE' as const;
+
+/**
+ * Business Logic（为什么需要）:
+ *   未认证能力必须在调用旧 sidecar 前失败，避免新前端绕过当前后端门闩。
+ *
+ * Code Logic（做什么）:
+ *   生成 message/code 一致的稳定错误，供 UI、测试与兼容层识别。
+ */
+function createAgentHubBlockedError(code: string): Error {
+  return Object.assign(new Error(code), { code });
+}
+
+/** 严格识别 Agent wire token，未知值不得进入 IPC。 */
+function isAgentTargetToken(value: unknown): value is AgentTarget {
+  return value === 'claude' || value === 'codex' || value === 'opencode';
+}
+
 /**
  * Business Logic: workbench 远端项目 id 形如 `remote:<deviceId>:<inner>`。
  * Code Logic: 前缀匹配。
@@ -923,16 +958,42 @@ export const agentHubApi = {
 
   /**
    * Business Logic: 同机跨 Agent 指令适配预览（手动，非后台）。
-   * Code Logic: agent_hub_preview_cross_agent_instruction；始终发送 destinationPaths（可空）避免 IPC 缺字段。
+   * Code Logic: 仅允许本机 user scope 且禁止 caller-controlled path；其余在 invoke 前拒绝。
    */
-  previewCrossAgentInstruction: (request: {
+  previewCrossAgentInstruction: async (request: {
     source: string;
     destinations: string[];
     sourceMarkdown: string;
     scope: string;
     destinationPaths?: Record<string, string>;
-  }): Promise<unknown> =>
-    invoke(AGENT_HUB_COMMANDS.previewCrossAgentInstruction, {
+  }): Promise<unknown> => {
+    if (request.scope !== 'user') {
+      throw createAgentHubBlockedError(CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE);
+    }
+    if (
+      !isAgentTargetToken(request.source) ||
+      !request.destinations.every(isAgentTargetToken)
+    ) {
+      throw createAgentHubBlockedError(CROSS_AGENT_TARGET_INVALID);
+    }
+    if (request.destinations.length === 0) {
+      throw createAgentHubBlockedError(CROSS_AGENT_DESTINATIONS_REQUIRED);
+    }
+    if (new Set(request.destinations).size !== request.destinations.length) {
+      throw createAgentHubBlockedError(CROSS_AGENT_DESTINATIONS_DUPLICATE);
+    }
+    if (request.destinations.includes(request.source)) {
+      throw createAgentHubBlockedError(CROSS_AGENT_DEST_EQUALS_SOURCE);
+    }
+    if (request.sourceMarkdown.trim().length === 0) {
+      throw createAgentHubBlockedError(CROSS_AGENT_SOURCE_MARKDOWN_REQUIRED);
+    }
+    if (Object.keys(request.destinationPaths ?? {}).length > 0) {
+      throw createAgentHubBlockedError(
+        CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE,
+      );
+    }
+    return invoke(AGENT_HUB_COMMANDS.previewCrossAgentInstruction, {
       request: {
         source: request.source,
         destinations: request.destinations,
@@ -940,13 +1001,14 @@ export const agentHubApi = {
         scope: request.scope,
         destinationPaths: request.destinationPaths ?? {},
       },
-    }),
+    });
+  },
 
   /**
    * Business Logic: 一次性写入目标 Agent 指令文件。
    * Code Logic: agent_hub_apply_cross_agent_instruction；始终发送 destinationPaths（可空）。
    */
-  applyCrossAgentInstruction: (request: {
+  applyCrossAgentInstruction: async (_request: {
     source: string;
     destinations: string[];
     sourceMarkdown: string;
@@ -954,47 +1016,32 @@ export const agentHubApi = {
     destinationPaths?: Record<string, string>;
     planHash: string;
     clientRequestId: string;
-  }): Promise<unknown> =>
-    invoke(AGENT_HUB_COMMANDS.applyCrossAgentInstruction, {
-      request: {
-        source: request.source,
-        destinations: request.destinations,
-        sourceMarkdown: request.sourceMarkdown,
-        scope: request.scope,
-        destinationPaths: request.destinationPaths ?? {},
-        planHash: request.planHash,
-        clientRequestId: request.clientRequestId,
-      },
-    }),
+  }): Promise<unknown> => {
+    void _request;
+    throw createAgentHubBlockedError(CROSS_AGENT_APPLY_NOT_CERTIFIED);
+  },
 
   /**
    * Business Logic: 全量跨 Agent 适配预览（五类清单 + plan_hash）。
    * Code Logic: agent_hub_preview_cross_agent_full；始终发送 portableAssets / deviceId 默认。
    */
-  previewCrossAgentFull: (request: {
+  previewCrossAgentFull: async (_request: {
     source: string;
     destination: string;
     scope: string;
     sourceMarkdown: string;
     portableAssets?: Array<{ kind: string; logicalKey: string; path: string }>;
     deviceId?: string | null;
-  }): Promise<unknown> =>
-    invoke(AGENT_HUB_COMMANDS.previewCrossAgentFull, {
-      request: {
-        source: request.source,
-        destination: request.destination,
-        scope: request.scope,
-        sourceMarkdown: request.sourceMarkdown,
-        portableAssets: request.portableAssets ?? [],
-        deviceId: request.deviceId ?? null,
-      },
-    }),
+  }): Promise<unknown> => {
+    void _request;
+    throw createAgentHubBlockedError(CROSS_AGENT_FULL_ADAPT_UNAVAILABLE);
+  },
 
   /**
    * Business Logic: 按 plan_hash 逐项 apply；无 preview 或 hash 不匹配失败。
    * Code Logic: agent_hub_apply_cross_agent_full。
    */
-  applyCrossAgentFull: (request: {
+  applyCrossAgentFull: async (_request: {
     source: string;
     destination: string;
     scope: string;
@@ -1004,18 +1051,8 @@ export const agentHubApi = {
     items: Array<{ logicalKey: string; included: boolean }>;
     portableAssets?: Array<{ kind: string; logicalKey: string; path: string }>;
     deviceId?: string | null;
-  }): Promise<unknown> =>
-    invoke(AGENT_HUB_COMMANDS.applyCrossAgentFull, {
-      request: {
-        source: request.source,
-        destination: request.destination,
-        scope: request.scope,
-        sourceMarkdown: request.sourceMarkdown,
-        planHash: request.planHash,
-        clientRequestId: request.clientRequestId,
-        items: request.items,
-        portableAssets: request.portableAssets ?? [],
-        deviceId: request.deviceId ?? null,
-      },
-    }),
+  }): Promise<unknown> => {
+    void _request;
+    throw createAgentHubBlockedError(CROSS_AGENT_FULL_ADAPT_UNAVAILABLE);
+  },
 };

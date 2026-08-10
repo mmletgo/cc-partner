@@ -377,33 +377,27 @@ describe('useAgentHubController', () => {
     });
   });
 
-  test('shell peers and projects load from devices and workbench APIs', async () => {
+  test('cold shell does not scan peers or projects before an explicit LAN task', async () => {
     const { result } = renderHook(() => useAgentHubController());
-    await waitFor(() => expect(result.current.shellPeers.length).toBe(2));
-    expect(result.current.shellPeers).toEqual([
-      { deviceId: 'peer-online', name: 'Peer Online', online: true },
-      { deviceId: 'peer-offline', name: 'Peer Offline', online: false },
-    ]);
-    await waitFor(() => expect(result.current.shellProjects.length).toBe(2));
-    expect(result.current.shellProjects).toEqual([
-      { key: 'local-1', label: 'Local Repo', remote: false },
-      { key: 'remote:dev-hk:inner', label: 'Remote Repo · HK Peer', remote: true },
-    ]);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(devicesListMock).not.toHaveBeenCalled();
+    expect(workbenchProjectsListMock).not.toHaveBeenCalled();
   });
 
-  test('deviceId alone on instructions does not portable inspect (T2)', async () => {
+  test('legacy peer context is normalized to local user before any inspect (T2)', async () => {
     searchParamsMock.current = new URLSearchParams('deviceId=peer-online');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.hubContext.deviceId).toBe('peer-online');
-    expect(result.current.portableInventory.requestContext.deviceId).toBe('peer-online');
+    expect(result.current.hubContext.deviceId).toBeNull();
+    expect(result.current.hubContext.scope).toBe('user');
+    expect(result.current.portableInventory.requestContext.deviceId).toBeNull();
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
     expect(listAssets).not.toHaveBeenCalled();
     expect(getStatus).not.toHaveBeenCalled();
   });
 
-  test('tab=skill activates portable inspect with peer context (T3)', async () => {
+  test('tab=skill strips peer ownership and inspects only local user inventory (T3)', async () => {
     searchParamsMock.current = new URLSearchParams('tab=skill&deviceId=peer-online');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
@@ -411,7 +405,7 @@ describe('useAgentHubController', () => {
     expect(result.current.portableLaneActive).toBe(true);
     await waitFor(() =>
       expect(portableApiMocks.inspect).toHaveBeenCalledWith({
-        deviceId: 'peer-online',
+        deviceId: null,
         projectRef: null,
         target: 'claude',
         kind: 'skill',
@@ -432,7 +426,7 @@ describe('useAgentHubController', () => {
         searchParamsMock.current = new URLSearchParams(updater);
       }
     });
-    // 非默认 kind：filters→URL 会写 kind=command + section=assets（skill 默认会删 kind）
+    // 现代 URL 的 tab 是唯一导航来源；portable filter 不再写 section/kind。
     searchParamsMock.current = new URLSearchParams('tab=command');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem({ kind: 'command' })]));
     const { result, rerender } = renderHook(() => useAgentHubController());
@@ -441,10 +435,11 @@ describe('useAgentHubController', () => {
     await waitFor(() =>
       expect(result.current.portableInventory.filters.kind).toBe('command'),
     );
-    // assets 在场时 filters→URL 会写入 section/kind；这是触发回归的前置条件
+    // 资产页只保留现代 tab；legacy 导航键始终被清除。
     await waitFor(() => {
-      expect(searchParamsMock.current.get('section')).toBe('assets');
-      expect(searchParamsMock.current.get('kind')).toBe('command');
+      expect(searchParamsMock.current.get('tab')).toBe('command');
+      expect(searchParamsMock.current.get('section')).toBeNull();
+      expect(searchParamsMock.current.get('kind')).toBeNull();
     });
 
     act(() => {
@@ -471,6 +466,74 @@ describe('useAgentHubController', () => {
     expect(searchParamsMock.current.get('kind')).toBeNull();
     expect(searchParamsMock.current.get('section')).toBeNull();
     expect(result.current.activeSection).toBe('userInstructions');
+  });
+
+  test('history changes rehydrate shell-owned inventory filters and selection without legacy echo', async () => {
+    setSearchParamsMock.mockImplementation((updater: unknown) => {
+      if (typeof updater === 'function') {
+        searchParamsMock.current = (updater as (prev: URLSearchParams) => URLSearchParams)(
+          searchParamsMock.current,
+        );
+      } else if (updater instanceof URLSearchParams) {
+        searchParamsMock.current = new URLSearchParams(updater);
+      }
+    });
+    portableApiMocks.inspect.mockResolvedValue(
+      portableSnapshot([
+        makePortableItem({ inventoryItemId: 'i1' }),
+        makePortableItem({
+          inventoryItemId: 'i2',
+          target: 'codex',
+          kind: 'mcp',
+          nativeId: 'mcp-two',
+        }),
+      ]),
+    );
+    searchParamsMock.current = new URLSearchParams(
+      'agent=claude&tab=skill&state=enabled&inventoryItemId=i1',
+    );
+    const { result, rerender } = renderHook(() => useAgentHubController());
+
+    await waitFor(() => expect(result.current.portableInventory.selectedItemId).toBe('i1'));
+    expect(result.current.portableInventory.filters).toEqual(
+      expect.objectContaining({
+        target: 'claude',
+        kind: 'skill',
+        scope: 'user',
+        actualState: 'enabled',
+        management: 'all',
+      }),
+    );
+
+    searchParamsMock.current = new URLSearchParams(
+      'agent=codex&tab=mcp&state=problem&management=drifted&inventoryItemId=i2',
+    );
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.hubContext.agent).toBe('codex');
+      expect(result.current.hubContext.tab).toBe('mcp');
+      expect(result.current.portableInventory.filters).toEqual(
+        expect.objectContaining({
+          target: 'codex',
+          kind: 'mcp',
+          scope: 'user',
+          actualState: 'problem',
+          management: 'drifted',
+        }),
+      );
+      expect(result.current.portableInventory.selectedItemId).toBe('i2');
+    });
+    expect(searchParamsMock.current.get('section')).toBeNull();
+    expect(searchParamsMock.current.get('target')).toBeNull();
+    expect(searchParamsMock.current.get('kind')).toBeNull();
+
+    searchParamsMock.current = new URLSearchParams('agent=codex');
+    rerender();
+    await waitFor(() => expect(result.current.hubContext.tab).toBe('instructions'));
+    expect(result.current.activeSection).toBe('userInstructions');
+    expect(searchParamsMock.current.get('state')).toBeNull();
+    expect(searchParamsMock.current.get('inventoryItemId')).toBeNull();
   });
 
   test('optimistic instructions switch survives delayed URL while section=assets remains', async () => {
@@ -504,7 +567,7 @@ describe('useAgentHubController', () => {
   test('cold default instructions skips listAssets and status (T1)', async () => {
     searchParamsMock.current = new URLSearchParams();
     const { result } = renderHook(() => useAgentHubController());
-    await waitFor(() => expect(result.current.shellPeers.length).toBeGreaterThan(0));
+    await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.loading).toBe(false);
     expect(result.current.legacyLoadedOnce).toBe(false);
     expect(listAssets).not.toHaveBeenCalled();
@@ -512,8 +575,7 @@ describe('useAgentHubController', () => {
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
   });
 
-  test('openPortablePull prefills source device and agent from hubContext (toolbar pull)', async () => {
-    // T8: shell Pull with context device=peer-1 → sourceDeviceId=peer-1
+  test('openPortablePull ignores a legacy peer URL and keeps same-agent source (toolbar pull)', async () => {
     searchParamsMock.current = new URLSearchParams('deviceId=peer-1&agent=codex');
     devicesListMock.mockResolvedValue([
       { id: 'other-peer', name: 'Other Peer', status: 'online' as const },
@@ -523,7 +585,7 @@ describe('useAgentHubController', () => {
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.hubContext.deviceId).toBe('peer-1');
+    expect(result.current.hubContext.deviceId).toBeNull();
     expect(result.current.hubContext.agent).toBe('codex');
 
     act(() => {
@@ -531,12 +593,12 @@ describe('useAgentHubController', () => {
     });
     expect(result.current.portablePullOpen).toBe(true);
     await waitFor(() =>
-      expect(result.current.portablePull.selectedDeviceId).toBe('peer-1'),
+      expect(result.current.portablePull.selectedDeviceId).toBe('other-peer'),
     );
     expect(result.current.portablePull.sourceTarget).toBe('codex');
   });
 
-  test('openLanPushDialog prefills selection mode from hub scope context', async () => {
+  test('openLanPushDialog does not inherit an unsupported project URL', async () => {
     searchParamsMock.current = new URLSearchParams('scope=project&project=local-1&agent=claude');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
@@ -546,16 +608,21 @@ describe('useAgentHubController', () => {
       result.current.openLanPushDialog();
     });
     expect(result.current.lanPushOpen).toBe(true);
-    expect(result.current.lanMode).toBe('project');
-    expect(result.current.lanHubProjectIdsText).toBe('local-1');
+    expect(result.current.hubContext.scope).toBe('user');
+    expect(result.current.hubContext.projectKey).toBeNull();
+    expect(result.current.lanMode).toBe('userScope');
+    expect(result.current.lanHubProjectIdsText).toBe('');
   });
 
   test('LAN push forwards the token returned by the matching preview', async () => {
     const { result } = renderHook(() => useAgentHubController());
-    await waitFor(() => expect(result.current.shellPeers.length).toBe(2));
-
     act(() => {
       result.current.openLanPushDialog();
+    });
+    await waitFor(() =>
+      expect(result.current.lanPeers.some((peer) => peer.deviceId === 'peer-online')).toBe(true),
+    );
+    act(() => {
       result.current.toggleLanPeer('peer-online');
     });
     await act(async () => {
@@ -578,15 +645,21 @@ describe('useAgentHubController', () => {
     });
   });
 
-  test('deep links select the advanced workspace that owns the requested surface', () => {
+  test('legacy deep links only migrate to modern workspaces and never load old writers', async () => {
     searchParamsMock.current = new URLSearchParams('assetId=asset-1&conflictId=c1');
     const assetLink = renderHook(() => useAgentHubController());
     expect(assetLink.result.current.activeSection).toBe('assets');
+    await waitFor(() => expect(portableApiMocks.inspect).toHaveBeenCalled());
+    expect(listAssets).not.toHaveBeenCalled();
+    expect(getAsset).not.toHaveBeenCalled();
+    expect(assetLink.result.current.conflictDrawerOpen).toBe(false);
     assetLink.unmount();
 
     searchParamsMock.current = new URLSearchParams('preview=1&projectId=project-1');
     const projectLink = renderHook(() => useAgentHubController());
-    expect(projectLink.result.current.activeSection).toBe('projectInstructions');
+    expect(projectLink.result.current.activeSection).toBe('userInstructions');
+    expect(projectLink.result.current.previewOpen).toBe(false);
+    expect(previewProject).not.toHaveBeenCalled();
     projectLink.unmount();
   });
 
@@ -605,7 +678,7 @@ describe('useAgentHubController', () => {
     alias.unmount();
   });
 
-  test('setActiveSection writes section query without dropping unrelated params', async () => {
+  test('setActiveSection writes modern tab and removes retired mutation params', async () => {
     searchParamsMock.current = new URLSearchParams('conflictId=c1&bridge=/tmp/bridge');
     setSearchParamsMock.mockImplementation((updater: unknown) => {
       if (typeof updater === 'function') {
@@ -621,13 +694,47 @@ describe('useAgentHubController', () => {
       result.current.setActiveSection('assets');
     });
     expect(setSearchParamsMock).toHaveBeenCalled();
-    const last = setSearchParamsMock.mock.calls.at(-1)?.[0];
-    if (typeof last === 'function') {
-      const next = last(new URLSearchParams('conflictId=c1&bridge=/tmp/bridge'));
-      expect(next.get('section')).toBe('assets');
-      expect(next.get('conflictId')).toBe('c1');
-      expect(next.get('bridge')).toBe('/tmp/bridge');
-    }
+    // 其他同步 effect 也可能随后写 URL；断言真实 router mock 的最终状态，
+    // 不依赖“最后一次 setter callback 恰好来自 setActiveSection”的脆弱顺序。
+    expect(searchParamsMock.current.get('tab')).toBe('skill');
+    expect(searchParamsMock.current.get('section')).toBeNull();
+    expect(searchParamsMock.current.get('conflictId')).toBeNull();
+    expect(searchParamsMock.current.get('bridge')).toBeNull();
+  });
+
+  test('legacy asset identity survives a transient first scan and migrates after Retry', async () => {
+    const item = makePortableItem({
+      inventoryItemId: 'portable-alpha',
+      canonicalAssetId: 'canon-alpha',
+    });
+    searchParamsMock.current = new URLSearchParams('tab=skill&assetId=canon-alpha');
+    setSearchParamsMock.mockImplementation((updater: unknown) => {
+      if (typeof updater === 'function') {
+        searchParamsMock.current = (updater as (prev: URLSearchParams) => URLSearchParams)(
+          searchParamsMock.current,
+        );
+      } else if (updater instanceof URLSearchParams) {
+        searchParamsMock.current = new URLSearchParams(updater);
+      }
+    });
+    portableApiMocks.inspect
+      .mockRejectedValueOnce(new Error('transient inventory failure'))
+      .mockResolvedValue(portableSnapshot([item]));
+
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() =>
+      expect(result.current.portableInventory.error).toContain('transient inventory failure'),
+    );
+    expect(searchParamsMock.current.get('assetId')).toBe('canon-alpha');
+    expect(searchParamsMock.current.get('inventoryItemId')).toBeNull();
+
+    await act(async () => {
+      await result.current.portableInventory.refresh();
+    });
+    await waitFor(() => {
+      expect(searchParamsMock.current.get('assetId')).toBeNull();
+      expect(searchParamsMock.current.get('inventoryItemId')).toBe('portable-alpha');
+    });
   });
 
   test('first-load error surfaces error without assets', async () => {
@@ -969,6 +1076,46 @@ describe('useAgentHubController', () => {
     expect(result.current.portableActionBusy).toBe(false);
   });
 
+  test('history context change discards a pending portable action preview response', async () => {
+    const item = makePortableItem();
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    let resolvePreview!: (value: PortableAssetActionPlanDto) => void;
+    portableApiMocks.previewAction.mockReturnValueOnce(
+      new Promise<PortableAssetActionPlanDto>((resolve) => {
+        resolvePreview = resolve;
+      }),
+    );
+    searchParamsMock.current = new URLSearchParams('agent=claude&tab=skill');
+    const { result, rerender } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
+    act(() => result.current.requestPortableAction(item.inventoryItemId, 'disable'));
+
+    let previewPromise!: Promise<void>;
+    act(() => {
+      previewPromise = result.current.previewPortableAction({
+        inventorySnapshotHash: 'snap-ok',
+        inventoryItemIds: [item.inventoryItemId],
+        action: 'disable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: item.canonicalRevisionId,
+      });
+    });
+    await waitFor(() => expect(portableApiMocks.previewAction).toHaveBeenCalledOnce());
+
+    searchParamsMock.current = new URLSearchParams('agent=codex&tab=skill');
+    rerender();
+    await waitFor(() => expect(result.current.hubContext.agent).toBe('codex'));
+    resolvePreview(portablePlanFixture());
+    await act(async () => previewPromise);
+
+    expect(result.current.portableActionOpen).toBe(false);
+    expect(result.current.portableActionPlan).toBeNull();
+    expect(result.current.portableActionClientRequestId).toBeNull();
+    expect(result.current.portableActionBusy).toBe(false);
+    expect(portableApiMocks.applyAction).not.toHaveBeenCalled();
+  });
+
   test('M1: confirm refuses entry when already busy', async () => {
     const item = makePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
@@ -1084,10 +1231,10 @@ describe('Agent Hub URL helpers', () => {
       },
       'item-1',
     );
-    expect(written.get('section')).toBe('assets');
-    expect(written.get('target')).toBe('claude');
-    expect(written.get('kind')).toBe('command');
-    expect(written.get('inventoryScope')).toBe('user');
+    expect(written.get('section')).toBeNull();
+    expect(written.get('target')).toBeNull();
+    expect(written.get('kind')).toBeNull();
+    expect(written.get('inventoryScope')).toBeNull();
     // inventory scope is a portable filter; shell context scope remains intact.
     expect(written.get('scope')).toBe('project');
     expect(written.get('state')).toBe('enabled');

@@ -29,7 +29,7 @@ use crate::agent_hub::portable_inventory::models::{
 use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
 use crate::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
-    RuntimeProbeSnapshot, TargetCapability,
+    EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::portable::{
     DiscoveredPortableAsset, PortableDiscoveryStatus, PortableOriginKind,
@@ -119,6 +119,23 @@ pub async fn inspect_portable_inventory_force(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     inspect_portable_inventory_force_query(state, PortableInventoryQuery::default()).await
+}
+
+/// 以当前进程环境重新探测单个 target 的 support manifest 结果。
+///
+/// Business Logic: Pull 等跨模块写入口需要逐动作 capability，不能只消费 inventory 的
+/// target 汇总 mutation 状态。
+/// Code Logic: fresh target probe → 与 inventory scanner 相同的 manifest evaluator。
+pub(crate) fn evaluate_current_portable_target_support(
+    target: AgentTarget,
+) -> Result<EvaluatedTargetSupport, AppError> {
+    let env = current_target_environment();
+    let probe = match target {
+        AgentTarget::Claude => ClaudeInstructionAdapter.probe(&env),
+        AgentTarget::Codex => CodexInstructionAdapter.probe(&env),
+        AgentTarget::OpenCode => OpenCodeInstructionAdapter.probe(&env),
+    }?;
+    evaluate_probe_support(target, &probe)
 }
 
 /// 强制执行一次指定过滤条件的未缓存扫描。
@@ -286,6 +303,7 @@ pub fn scan_portable_inventory_facts_query(
             .remove(&target)
             .ok_or_else(|| AppError::generic("portable target probe result missing"))?;
         let target_dto = target_dto_from_probe(target, &probe, env)?;
+        let evaluated = evaluate_probe_support(target, &probe)?;
         target_dtos.push(target_dto.clone());
 
         for scope in scopes {
@@ -329,11 +347,11 @@ pub fn scan_portable_inventory_facts_query(
             // Plugin package roots（package 本体 + 组件 parent 关联）。MCP 不从这些目录发现。
             if query.kind != Some(PortableAssetKind::Mcp) {
                 let plugin_items = scan_plugin_packages(
-                    target,
                     scope,
                     env,
                     &homes,
                     &target_dto,
+                    &evaluated,
                     &mut seen_ids,
                     query.kind,
                 )?;
@@ -349,7 +367,7 @@ pub fn scan_portable_inventory_facts_query(
                     continue;
                 }
                 if let Some(item) =
-                    discovered_to_item(kind, &disc, scope, &target_dto, &mut seen_ids)
+                    discovered_to_item(kind, &disc, scope, &target_dto, &evaluated, &mut seen_ids)
                 {
                     items.push(item);
                 }
@@ -416,6 +434,23 @@ async fn collect_scan_scopes(
     Ok(scopes)
 }
 
+/// 按当前 probe 求值 support manifest，供 target 汇总状态与逐动作能力共用。
+fn evaluate_probe_support(
+    target: AgentTarget,
+    probe: &TargetProbe,
+) -> Result<EvaluatedTargetSupport, AppError> {
+    let manifest = builtin_support_manifest()?;
+    let snapshot = RuntimeProbeSnapshot {
+        target,
+        executable: probe.executable.clone(),
+        version: probe.version.clone(),
+        config_root: probe.config_root.clone(),
+        fingerprint: probe.fingerprint.clone(),
+        help_fingerprint: None,
+    };
+    Ok(evaluate_target_support(&manifest, &snapshot))
+}
+
 fn target_dto_from_probe(
     target: AgentTarget,
     probe: &TargetProbe,
@@ -429,15 +464,7 @@ fn target_dto_from_probe(
     };
     let installed = probe.executable.is_some();
     let manifest = builtin_support_manifest()?;
-    let snapshot = RuntimeProbeSnapshot {
-        target,
-        executable: probe.executable.clone(),
-        version: probe.version.clone(),
-        config_root: probe.config_root.clone(),
-        fingerprint: probe.fingerprint.clone(),
-        help_fingerprint: None,
-    };
-    let evaluated = evaluate_target_support(&manifest, &snapshot);
+    let evaluated = evaluate_probe_support(target, probe)?;
     let scan_cap = match evaluated.capability(TargetCapability::ScanPortableAssets) {
         CapabilitySupport::Supported
         | CapabilitySupport::SupportedAfterRestart
@@ -453,15 +480,26 @@ fn target_dto_from_probe(
         }
     };
     let direct_local_management = installed && has_direct_local_actions(target);
-    let mutation_cap = if direct_local_management
-        || (evaluated.allows_write_capability(TargetCapability::RenderPortableAssets)
-            && evaluated.allows_write_capability(TargetCapability::ActivatePackage))
+    // 直管执行器只是实现能力的 allowlist，不能绕过 support manifest 的认证门。
+    // scan-only manifest 下即使 CLI 已安装且 Claude/Codex 具备旧版本机动作，
+    // 也必须保持 Blocked，避免 inventory 把旧执行器重新提升成可写。
+    let mutation_cap = if [
+        TargetCapability::RenderPortableAssets,
+        TargetCapability::ActivatePackage,
+        TargetCapability::DeactivatePackage,
+    ]
+    .into_iter()
+    .any(|capability| action_support_is_ready(&evaluated, capability))
     {
         PortableInventoryMutationCapability::Supported
-    } else if matches!(
-        evaluated.capability(TargetCapability::RenderPortableAssets),
-        CapabilitySupport::ReadOnly | CapabilitySupport::Supported
-    ) {
+    } else if [
+        TargetCapability::RenderPortableAssets,
+        TargetCapability::ActivatePackage,
+        TargetCapability::DeactivatePackage,
+    ]
+    .into_iter()
+    .any(|capability| !matches!(evaluated.capability(capability), CapabilitySupport::Blocked))
+    {
         PortableInventoryMutationCapability::PreviewOnly
     } else {
         PortableInventoryMutationCapability::Blocked
@@ -470,6 +508,8 @@ fn target_dto_from_probe(
         Some("cli_version_unknown".into())
     } else if !installed {
         Some("cli_not_installed".into())
+    } else if mutation_cap == PortableInventoryMutationCapability::PreviewOnly {
+        Some("portable_mutation_preview_only".into())
     } else if mutation_cap == PortableInventoryMutationCapability::Blocked {
         Some("portable_mutation_blocked".into())
     } else {
@@ -504,14 +544,15 @@ fn target_dto_from_probe(
 
 /// 只读发现 Plugin 包本体（不写 CAS）。
 fn scan_plugin_packages(
-    target: AgentTarget,
     scope: &PortableScanScope,
     env: &TargetEnvironment,
     homes: &crate::agent_hub::targets::paths::TargetHomes,
     target_dto: &PortableInventoryTargetDto,
+    evaluated: &EvaluatedTargetSupport,
     seen: &mut BTreeSet<String>,
     selected_kind: Option<PortableAssetKind>,
 ) -> Result<Vec<PortableInventoryItemDto>, AppError> {
+    let target = target_dto.target;
     let roots = plugin_roots_for(target, scope, env, homes);
     let mut out = Vec::new();
     for root in roots {
@@ -547,16 +588,26 @@ fn scan_plugin_packages(
             if component_skill.is_dir() {
                 warnings.push("plugin_has_components".into());
             }
-            let can_mutate = scope.project_opted_in
-                && scope.scope_kind != ScopeKind::Directory
-                && target_dto.mutation_capability != PortableInventoryMutationCapability::Blocked;
+            let can_mutate_scope =
+                scope.project_opted_in && scope.scope_kind != ScopeKind::Directory;
+            let can_enable = can_mutate_scope
+                && action_capability_supported(
+                    evaluated,
+                    target,
+                    PortableAssetKind::Plugin,
+                    PortableAssetActionKind::Enable,
+                );
+            let can_deactivate = can_mutate_scope
+                && action_capability_supported(
+                    evaluated,
+                    target,
+                    PortableAssetKind::Plugin,
+                    PortableAssetActionKind::Disable,
+                );
             let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
                 Some("project_not_opted_in".into())
-            } else if target_dto.mutation_capability == PortableInventoryMutationCapability::Blocked
-            {
-                target_dto.reason_code.clone()
             } else {
-                None
+                action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
             };
             out.push(PortableInventoryItemDto {
                 inventory_item_id: inv_id.clone(),
@@ -586,7 +637,8 @@ fn scan_plugin_packages(
                     target,
                     PortableAssetKind::Plugin,
                     Some(true),
-                    can_mutate,
+                    can_enable,
+                    can_deactivate,
                     true,
                     reason,
                 ),
@@ -617,7 +669,9 @@ fn scan_plugin_packages(
             if selected_kind.is_some_and(|selected| selected != kind) {
                 continue;
             }
-            if let Some(mut item) = discovered_to_item(kind, &discovery, scope, target_dto, seen) {
+            if let Some(mut item) =
+                discovered_to_item(kind, &discovery, scope, target_dto, evaluated, seen)
+            {
                 item.parent_plugin_inventory_item_id = Some(inv_id.clone());
                 out.push(item);
             }
@@ -922,6 +976,7 @@ fn discovered_to_item(
     disc: &DiscoveredPortableAsset,
     scope: &PortableScanScope,
     target_dto: &PortableInventoryTargetDto,
+    evaluated: &EvaluatedTargetSupport,
     seen: &mut BTreeSet<String>,
 ) -> Option<PortableInventoryItemDto> {
     let source_path = disc.origin.path.display().to_string();
@@ -981,13 +1036,25 @@ fn discovered_to_item(
     };
 
     let can_mutate_scope = scope.project_opted_in;
-    let mutation_target_ok =
-        target_dto.mutation_capability != PortableInventoryMutationCapability::Blocked;
+    let can_enable = can_mutate_scope
+        && action_capability_supported(
+            evaluated,
+            disc.origin.target,
+            kind,
+            PortableAssetActionKind::Enable,
+        );
+    let can_deactivate = can_mutate_scope
+        && action_capability_supported(
+            evaluated,
+            disc.origin.target,
+            kind,
+            PortableAssetActionKind::Disable,
+        );
     let enable_semantics = enable_semantics_supported(kind, disc.origin.target);
     let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
         Some("project_not_opted_in".into())
-    } else if !mutation_target_ok {
-        target_dto.reason_code.clone()
+    } else if !can_enable || !can_deactivate {
+        action_capability_reason(target_dto, evaluated, disc.origin.target, kind)
     } else if !enable_semantics {
         Some("enable_semantics_unsupported".into())
     } else if matches!(disc.origin.status, PortableDiscoveryStatus::Blocked) {
@@ -1041,7 +1108,8 @@ fn discovered_to_item(
             disc.origin.target,
             kind,
             actual_enabled,
-            can_mutate_scope && mutation_target_ok,
+            can_enable,
+            can_deactivate,
             enable_semantics,
             reason,
         ),
@@ -1091,25 +1159,126 @@ fn enable_semantics_supported(kind: PortableAssetKind, target: AgentTarget) -> b
     }
 }
 
+/// 为 item capability 提供稳定的 target mutation 限制原因。
+fn mutation_capability_reason(target: &PortableInventoryTargetDto) -> Option<String> {
+    match target.mutation_capability {
+        PortableInventoryMutationCapability::Supported => None,
+        PortableInventoryMutationCapability::PreviewOnly => target
+            .reason_code
+            .clone()
+            .or_else(|| Some("portable_mutation_preview_only".into())),
+        PortableInventoryMutationCapability::Blocked => target.reason_code.clone(),
+    }
+}
+
+/// 返回 portable action 对应的唯一 support capability。
+fn action_required_capability(
+    kind: PortableAssetKind,
+    action: PortableAssetActionKind,
+) -> Option<TargetCapability> {
+    match action {
+        PortableAssetActionKind::Enable => Some(if kind == PortableAssetKind::Plugin {
+            TargetCapability::ActivatePackage
+        } else {
+            TargetCapability::RenderPortableAssets
+        }),
+        PortableAssetActionKind::Disable | PortableAssetActionKind::Uninstall => {
+            Some(if kind == PortableAssetKind::Plugin {
+                TargetCapability::DeactivatePackage
+            } else {
+                TargetCapability::RenderPortableAssets
+            })
+        }
+        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => None,
+    }
+}
+
+/// 判断已求值的单项写能力能否立即执行。
+fn action_support_is_ready(
+    evaluated: &EvaluatedTargetSupport,
+    capability: TargetCapability,
+) -> bool {
+    let support = evaluated.capability(capability);
+    let support_ready = if capability == TargetCapability::DeactivatePackage {
+        support == CapabilitySupport::Supported
+    } else {
+        matches!(
+            support,
+            CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart
+        )
+    };
+    support_ready && evaluated.allows_write_capability(capability)
+}
+
+/// 精确检查某个 target × kind × action 是否具备写能力。
+fn action_capability_supported(
+    evaluated: &EvaluatedTargetSupport,
+    target: AgentTarget,
+    kind: PortableAssetKind,
+    action: PortableAssetActionKind,
+) -> bool {
+    supports_direct_local_action(target, kind, action)
+        && action_required_capability(kind, action)
+            .is_some_and(|capability| action_support_is_ready(evaluated, capability))
+}
+
+/// 为逐动作 capability 返回稳定限制原因。
+fn action_capability_reason(
+    target_dto: &PortableInventoryTargetDto,
+    evaluated: &EvaluatedTargetSupport,
+    target: AgentTarget,
+    kind: PortableAssetKind,
+) -> Option<String> {
+    if target_dto.mutation_capability != PortableInventoryMutationCapability::Supported {
+        if let Some(reason) = mutation_capability_reason(target_dto) {
+            return Some(reason);
+        }
+    }
+    if !supports_direct_local_action(target, kind, PortableAssetActionKind::Enable)
+        || !supports_direct_local_action(target, kind, PortableAssetActionKind::Uninstall)
+    {
+        return Some("portable_direct_action_unavailable".into());
+    }
+    if action_required_capability(kind, PortableAssetActionKind::Uninstall)
+        == Some(TargetCapability::DeactivatePackage)
+        && !action_capability_supported(evaluated, target, kind, PortableAssetActionKind::Uninstall)
+    {
+        return Some("deactivate_package_not_supported".into());
+    }
+    mutation_capability_reason(target_dto).or_else(|| {
+        action_required_capability(kind, PortableAssetActionKind::Enable).and_then(|capability| {
+            if action_capability_supported(evaluated, target, kind, PortableAssetActionKind::Enable)
+            {
+                None
+            } else {
+                Some(format!("{}_not_supported", capability.as_str()))
+            }
+        })
+    })
+}
+
 fn item_capabilities(
     target: AgentTarget,
     kind: PortableAssetKind,
     actual_enabled: Option<bool>,
-    can_mutate: bool,
+    can_enable_mutation: bool,
+    can_deactivate_mutation: bool,
     enable_semantics: bool,
     reason: Option<String>,
 ) -> PortableInventoryItemCapabilitiesDto {
-    let can_toggle = can_mutate && enable_semantics && actual_enabled.is_some();
-    let can_enable = can_toggle
+    let can_toggle_enable = can_enable_mutation && enable_semantics && actual_enabled.is_some();
+    let can_toggle_deactivate =
+        can_deactivate_mutation && enable_semantics && actual_enabled.is_some();
+    let can_enable = can_toggle_enable
         && actual_enabled == Some(false)
         && supports_direct_local_action(target, kind, PortableAssetActionKind::Enable);
-    let can_disable = can_toggle
+    let can_disable = can_toggle_deactivate
         && actual_enabled == Some(true)
         && supports_direct_local_action(target, kind, PortableAssetActionKind::Disable);
     PortableInventoryItemCapabilitiesDto {
         can_enable,
         can_disable,
-        can_uninstall: can_mutate
+        can_uninstall: can_deactivate_mutation
             && supports_direct_local_action(target, kind, PortableAssetActionKind::Uninstall),
         // Adopt ownership write is not wired (PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED).
         // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
@@ -1423,12 +1592,14 @@ enabled = false
     }
 
     #[test]
-    fn claude_direct_management_is_not_blocked_by_projection_manifest() {
+    fn scan_only_manifest_cannot_be_promoted_by_direct_local_allowlist() {
         let (_tmp, env) = seed_all_targets_fixture();
         let probe = TargetProbe {
             target: AgentTarget::Claude,
             executable: Some(env.home.join("bin/claude")),
-            version: Some("2.1.207 (Claude Code)".into()),
+            // 缺失 runtime version 会使 manifest 求值进入 scan-only；旧直管 allowlist
+            // 仍然存在，但不得因此把 mutation capability 提升为 Supported。
+            version: None,
             config_root: env.home.join(".claude"),
             support: AdapterSupportLevel::Supported,
             fingerprint: "fixture-fingerprint".into(),
@@ -1438,13 +1609,166 @@ enabled = false
 
         assert_eq!(
             target.mutation_capability,
+            PortableInventoryMutationCapability::Blocked
+        );
+        assert_eq!(target.reason_code.as_deref(), Some("cli_version_unknown"));
+    }
+
+    #[test]
+    fn preview_only_target_exposes_zero_mutation_affordances_and_reason() {
+        let target = PortableInventoryTargetDto {
+            target: AgentTarget::Claude,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/claude".into()),
+            config_root: "/cfg/claude".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::PreviewOnly,
+            reason_code: None,
+            evidence_ids: vec![],
+        };
+
+        assert_ne!(
+            target.mutation_capability,
             PortableInventoryMutationCapability::Supported
         );
-        assert_eq!(target.reason_code, None);
-        assert!(target
-            .evidence_ids
-            .iter()
-            .any(|id| id == "L2-AGENT-HUB-PORTABLE-PARITY-001"));
+        let capabilities = item_capabilities(
+            target.target,
+            PortableAssetKind::Skill,
+            Some(true),
+            false,
+            false,
+            true,
+            mutation_capability_reason(&target),
+        );
+        assert!(!capabilities.can_enable);
+        assert!(!capabilities.can_disable);
+        assert!(!capabilities.can_uninstall);
+        assert_eq!(
+            capabilities.reason_code.as_deref(),
+            Some("portable_mutation_preview_only")
+        );
+    }
+
+    #[test]
+    fn partial_manifest_plugin_deactivation_has_zero_remove_affordances() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Claude,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities: BTreeMap::from([
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: true,
+            reasons: vec![],
+        };
+        let target = PortableInventoryTargetDto {
+            target: AgentTarget::Claude,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/claude".into()),
+            config_root: "/cfg/claude".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Supported,
+            reason_code: None,
+            evidence_ids: vec![],
+        };
+        let capabilities = item_capabilities(
+            target.target,
+            PortableAssetKind::Plugin,
+            Some(false),
+            action_capability_supported(
+                &evaluated,
+                target.target,
+                PortableAssetKind::Plugin,
+                PortableAssetActionKind::Enable,
+            ),
+            action_capability_supported(
+                &evaluated,
+                target.target,
+                PortableAssetKind::Plugin,
+                PortableAssetActionKind::Disable,
+            ),
+            true,
+            action_capability_reason(
+                &target,
+                &evaluated,
+                target.target,
+                PortableAssetKind::Plugin,
+            ),
+        );
+
+        assert!(capabilities.can_enable);
+        assert!(!capabilities.can_disable);
+        assert!(!capabilities.can_uninstall);
+        assert_eq!(
+            capabilities.reason_code.as_deref(),
+            Some("deactivate_package_not_supported")
+        );
+    }
+
+    #[test]
+    fn partial_manifest_render_only_keeps_non_plugin_actions_available() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Claude,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::Certified,
+            capabilities: BTreeMap::from([
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::Supported,
+                ),
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: true,
+            reasons: vec![],
+        };
+        let target = PortableInventoryTargetDto {
+            target: AgentTarget::Claude,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/claude".into()),
+            config_root: "/cfg/claude".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Supported,
+            reason_code: None,
+            evidence_ids: vec![],
+        };
+        let can_render = action_capability_supported(
+            &evaluated,
+            target.target,
+            PortableAssetKind::Skill,
+            PortableAssetActionKind::Disable,
+        );
+        let capabilities = item_capabilities(
+            target.target,
+            PortableAssetKind::Skill,
+            Some(true),
+            can_render,
+            can_render,
+            true,
+            action_capability_reason(&target, &evaluated, target.target, PortableAssetKind::Skill),
+        );
+
+        assert!(capabilities.can_disable);
+        assert!(capabilities.can_uninstall);
+        assert!(capabilities.reason_code.is_none());
     }
 
     #[test]
@@ -1468,12 +1792,12 @@ enabled = false
     }
 
     #[test]
-    fn codex_mutation_unlocked_when_runtime_meets_pin() {
+    fn codex_known_version_stays_blocked_without_current_certification() {
         let (_tmp, env) = seed_all_targets_fixture();
         let probe = TargetProbe {
             target: AgentTarget::Codex,
             executable: Some(env.home.join("bin/codex")),
-            // 与 support-manifest currentTestedVersion 同 core
+            // 即使曾经被测试过的版本仍在本机，当前 manifest 没有有效写入认证。
             version: Some("codex-cli 0.145.0-alpha.4".into()),
             config_root: env.home.join(".codex"),
             support: AdapterSupportLevel::Supported,
@@ -1483,8 +1807,8 @@ enabled = false
         let target_dto = target_dto_from_probe(AgentTarget::Codex, &probe, &env).unwrap();
         assert_eq!(
             target_dto.mutation_capability,
-            PortableInventoryMutationCapability::Supported,
-            "codex pin should unlock portable mutation capability at inventory layer"
+            PortableInventoryMutationCapability::Blocked,
+            "a historical runtime version must not unlock scan-only mutation"
         );
     }
 
@@ -1699,6 +2023,7 @@ enabled = false
             AgentTarget::Claude,
             PortableAssetKind::Skill,
             Some(true),
+            true,
             true,
             true,
             None,

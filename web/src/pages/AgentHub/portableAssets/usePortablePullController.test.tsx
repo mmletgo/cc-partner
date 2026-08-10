@@ -149,12 +149,48 @@ function createPullApi(overrides: Partial<PortablePullApi> = {}): PortablePullAp
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 afterEach(() => {
   vi.clearAllMocks();
   vi.useRealTimers();
 });
 
 describe('usePortablePullController', () => {
+  test('resets conflict policy and mutation session when Pull is reopened', async () => {
+    const pullApi = createPullApi();
+    const listDevices = vi.fn(async () => devices);
+    let open = true;
+    const { result, rerender } = renderHook(() =>
+      usePortablePullController({
+        open,
+        pullApi,
+        listDevices,
+      }),
+    );
+
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+    await act(async () => {
+      result.current.setConflictPolicy('replaceAfterPreview');
+    });
+    expect(result.current.conflictPolicy).toBe('replaceAfterPreview');
+
+    open = false;
+    rerender();
+    open = true;
+    rerender();
+    await waitFor(() => expect(result.current.conflictPolicy).toBe('skipExisting'));
+    expect(result.current.plan).toBeNull();
+    expect(result.current.result).toBeNull();
+    expect(result.current.clientRequestId).toBeNull();
+  });
+
   test('prefers initialSourceDeviceId and initialSourceTarget from hub shell context when opening', async () => {
     const pullApi = createPullApi();
     const listDevices = vi.fn(async () => devices);
@@ -350,6 +386,91 @@ describe('usePortablePullController', () => {
     expect(result.current.error).toBeTruthy();
   });
 
+  test('selection changes invalidate a pending preview response', async () => {
+    const pending = deferred<PortablePullPlanDto>();
+    const preview = vi.fn(() => pending.promise);
+    const pullApi = createPullApi({ preview });
+    const listDevices = vi.fn(async () => devices);
+    const { result } = renderHook(() =>
+      usePortablePullController({
+        open: true,
+        pullApi,
+        listDevices,
+      }),
+    );
+
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+    await act(async () => {
+      await result.current.loadInventory();
+      result.current.toggleItem('remote-skill-1');
+    });
+
+    let previewPromise!: Promise<void>;
+    act(() => {
+      previewPromise = result.current.preview();
+    });
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.clearSelection();
+      result.current.toggleItem('remote-cmd-1');
+    });
+    expect([...result.current.selectedItemIds]).toEqual(['remote-cmd-1']);
+    expect(result.current.plan).toBeNull();
+    expect(result.current.canApply).toBe(false);
+
+    await act(async () => {
+      pending.resolve(planFixture());
+      await previewPromise;
+    });
+
+    expect(result.current.plan).toBeNull();
+    expect(result.current.canApply).toBe(false);
+    expect(result.current.busy).toBe(false);
+  });
+
+  test('conflict policy changes invalidate a pending preview response', async () => {
+    const pending = deferred<PortablePullPlanDto>();
+    const preview = vi.fn(() => pending.promise);
+    const pullApi = createPullApi({ preview });
+    const listDevices = vi.fn(async () => devices);
+    const { result } = renderHook(() =>
+      usePortablePullController({
+        open: true,
+        pullApi,
+        listDevices,
+      }),
+    );
+
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+    await act(async () => {
+      await result.current.loadInventory();
+      result.current.toggleItem('remote-skill-1');
+    });
+
+    let previewPromise!: Promise<void>;
+    act(() => {
+      previewPromise = result.current.preview();
+    });
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.setConflictPolicy('replaceAfterPreview');
+    });
+    expect(result.current.conflictPolicy).toBe('replaceAfterPreview');
+    expect(result.current.plan).toBeNull();
+    expect(result.current.canApply).toBe(false);
+
+    await act(async () => {
+      pending.resolve(planFixture());
+      await previewPromise;
+    });
+
+    expect(result.current.plan).toBeNull();
+    expect(result.current.canApply).toBe(false);
+    expect(result.current.busy).toBe(false);
+  });
+
   test('partial and outcomeUnknown expose reconcile; repeated apply reuses clientRequestId', async () => {
     const apply = vi.fn(async (request: { planToken: string; clientRequestId: string }) =>
       resultFixture({
@@ -457,6 +578,70 @@ describe('usePortablePullController', () => {
     // stale inventory must not produce a usable confirm path
     expect(result.current.canApply).toBe(false);
     expect(pullApi.preview).not.toHaveBeenCalled();
+  });
+
+  test('refresh invalidates old plan immediately and keeps the old inventory stale on failure', async () => {
+    let rejectRefresh: ((reason?: unknown) => void) | null = null;
+    const initialSnapshot = remoteInventory();
+    const pullApi = createPullApi({
+      listRemote: vi
+        .fn()
+        .mockResolvedValueOnce(initialSnapshot)
+        .mockImplementationOnce(
+          () =>
+            new Promise<RemotePortableInventoryDto>((_resolve, reject) => {
+              rejectRefresh = reject;
+            }),
+        ),
+    });
+    const listDevices = vi.fn(async () => devices);
+    const { result } = renderHook(() =>
+      usePortablePullController({
+        open: true,
+        pullApi,
+        listDevices,
+      }),
+    );
+
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+    await act(async () => {
+      await result.current.loadInventory();
+    });
+    await act(async () => {
+      result.current.toggleItem('remote-skill-1');
+      result.current.setConflictPolicy('replaceAfterPreview');
+    });
+    await act(async () => {
+      await result.current.preview();
+    });
+    await act(async () => {
+      await result.current.apply();
+    });
+    expect(result.current.plan).not.toBeNull();
+    expect(result.current.result).not.toBeNull();
+    expect(result.current.clientRequestId).toBeTruthy();
+
+    let refreshPromise: Promise<void> | null = null;
+    act(() => {
+      refreshPromise = result.current.loadInventory();
+    });
+    expect(result.current.plan).toBeNull();
+    expect(result.current.result).toBeNull();
+    expect(result.current.clientRequestId).toBeNull();
+
+    await act(async () => {
+      rejectRefresh?.(Object.assign(new Error('refresh failed'), { code: 'REFRESH_FAILED' }));
+      await refreshPromise;
+    });
+
+    expect(result.current.remoteInventory?.items).toEqual(initialSnapshot.items);
+    expect(result.current.remoteInventory?.stale).toBe(true);
+    expect(result.current.mutationBlocked).toBe(true);
+    expect(result.current.canApply).toBe(false);
+    expect(result.current.plan).toBeNull();
+    expect(result.current.result).toBeNull();
+    expect(result.current.clientRequestId).toBeNull();
+    expect(result.current.error).toContain('REFRESH_FAILED');
   });
 
   test('selectVisible and filters only affect current inventory selection helpers', async () => {

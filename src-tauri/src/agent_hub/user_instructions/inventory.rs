@@ -871,18 +871,11 @@ fn evaluate_capability(
     let write_support = evaluated.capability(TargetCapability::RenderInstruction);
     let write = capability_level(write_support, false);
     let remove = write;
-    let activate = if write == UserInstructionCapabilityLevel::Blocked {
-        UserInstructionActivationSupport::Blocked
-    } else if write_support == CapabilitySupport::SupportedAfterRestart {
-        UserInstructionActivationSupport::Restart
-    } else if evaluated
-        .capability(TargetCapability::LiveReload)
-        .is_supported_family()
-    {
-        UserInstructionActivationSupport::Immediate
-    } else {
-        UserInstructionActivationSupport::NewSession
-    };
+    let activate = activation_support(
+        write_support,
+        write,
+        evaluated.capability(TargetCapability::LiveReload),
+    );
     Ok((
         UserInstructionCliDto {
             installed: probe.executable.is_some(),
@@ -902,6 +895,28 @@ fn evaluate_capability(
     ))
 }
 
+/// 将 render/liveReload capability 组合为诚实的生效方式。
+fn activation_support(
+    write_support: CapabilitySupport,
+    write: UserInstructionCapabilityLevel,
+    live_reload: CapabilitySupport,
+) -> UserInstructionActivationSupport {
+    if write == UserInstructionCapabilityLevel::Blocked {
+        UserInstructionActivationSupport::Blocked
+    } else if write_support == CapabilitySupport::SupportedAfterRestart {
+        UserInstructionActivationSupport::Restart
+    } else {
+        match live_reload {
+            CapabilitySupport::Supported => UserInstructionActivationSupport::Immediate,
+            CapabilitySupport::SupportedAfterRestart => UserInstructionActivationSupport::Restart,
+            CapabilitySupport::ActivationRequired => UserInstructionActivationSupport::Unknown,
+            CapabilitySupport::Blocked | CapabilitySupport::ReadOnly => {
+                UserInstructionActivationSupport::NewSession
+            }
+        }
+    }
+}
+
 /// 将 support manifest 能力映射为 V2 级别，显式保留 ReadOnly。
 fn capability_level(
     support: CapabilitySupport,
@@ -909,12 +924,12 @@ fn capability_level(
 ) -> UserInstructionCapabilityLevel {
     match support {
         CapabilitySupport::ReadOnly if scan_capability => UserInstructionCapabilityLevel::ReadOnly,
-        CapabilitySupport::Supported
-        | CapabilitySupport::SupportedAfterRestart
-        | CapabilitySupport::ActivationRequired => UserInstructionCapabilityLevel::Supported,
-        CapabilitySupport::Blocked | CapabilitySupport::ReadOnly => {
-            UserInstructionCapabilityLevel::Blocked
+        CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart => {
+            UserInstructionCapabilityLevel::Supported
         }
+        CapabilitySupport::Blocked
+        | CapabilitySupport::ReadOnly
+        | CapabilitySupport::ActivationRequired => UserInstructionCapabilityLevel::Blocked,
     }
 }
 
@@ -1172,6 +1187,23 @@ mod tests {
         assert_eq!(
             capability_level(CapabilitySupport::ReadOnly, false),
             UserInstructionCapabilityLevel::Blocked
+        );
+    }
+
+    /// Business Logic: ActivationRequired 只表示需人工激活，不能被 preview/apply 当成写认证。
+    #[test]
+    fn activation_required_capability_never_maps_to_writable() {
+        assert_eq!(
+            capability_level(CapabilitySupport::ActivationRequired, false),
+            UserInstructionCapabilityLevel::Blocked
+        );
+        assert_eq!(
+            activation_support(
+                CapabilitySupport::Supported,
+                UserInstructionCapabilityLevel::Supported,
+                CapabilitySupport::ActivationRequired,
+            ),
+            UserInstructionActivationSupport::Unknown
         );
     }
 

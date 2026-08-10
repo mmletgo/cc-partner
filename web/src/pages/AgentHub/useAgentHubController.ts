@@ -10,7 +10,7 @@
  *   暴露 preview/enable/resolve/update/pair/binding/presence/restore/everywhere 动作。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -25,7 +25,6 @@ import {
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
-import { workbenchApi } from '@/api/workbench';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
@@ -123,8 +122,8 @@ export function resolveInitialSection(
   hubContext: AgentHubContext,
 ): AgentHubSection {
   if (params.assetId || params.conflictId || params.inventoryItemId) return 'assets';
-  if (params.preview || params.projectId || params.bridge) return 'projectInstructions';
-  if (params.section) return normalizeAgentHubSection(params.section);
+  if (params.section === 'assets' || params.section === 'portableAssets') return 'assets';
+  // 旧 project/preview/diagnostics/syncImport 入口只做 URL 迁移，不再恢复 writer UI。
   return mapContextToSection(hubContext);
 }
 
@@ -247,8 +246,8 @@ export function parsePortableFiltersFromSearchParams(
 }
 
 /**
- * Business Logic: 把 assets 筛选写回 URL，保留无关 deep link 参数。
- * Code Logic: 默认值删除 query key，避免噪声。
+ * Business Logic: 把资产页次级筛选写回 URL；Agent/kind/scope 由 Shell 独占。
+ * Code Logic: 只写 state/management/selection，并清除 legacy 导航与范围键。
  */
 export function writePortableFiltersToSearchParams(
   params: URLSearchParams,
@@ -256,13 +255,12 @@ export function writePortableFiltersToSearchParams(
   inventoryItemId: string | null,
 ): URLSearchParams {
   const next = new URLSearchParams(params);
-  next.set('section', 'assets');
-  if (filters.target === 'all') next.delete('target');
-  else next.set('target', filters.target);
-  if (filters.kind === DEFAULT_PORTABLE_INVENTORY_FILTERS.kind) next.delete('kind');
-  else next.set('kind', filters.kind);
-  if (filters.scope === 'all') next.delete('inventoryScope');
-  else next.set('inventoryScope', filters.scope);
+  if (next.get('section') === 'assets' || next.get('section') === 'portableAssets') {
+    next.delete('section');
+  }
+  next.delete('target');
+  next.delete('kind');
+  next.delete('inventoryScope');
   if (filters.actualState === 'all') next.delete('state');
   else next.set('state', filters.actualState);
   if (filters.management === 'all') next.delete('management');
@@ -310,12 +308,10 @@ export interface UseAgentHubControllerResult {
   setActiveSection: (section: AgentHubSection) => void;
   /** 新 IA 壳层上下文（URL 权威）。 */
   hubContext: AgentHubContext;
+  /** 旧/不支持上下文被规范化后的单次可见说明。 */
+  contextMigrationNotice: string | null;
   /** 壳层 patch → URL write + 双路径 activeSection 同步。 */
   onContextChange: (patch: Partial<AgentHubContext>) => void;
-  /** 壳层 peer 列表（devicesApi；online 来自 mDNS status）。 */
-  shellPeers: Array<{ deviceId: string; name: string; online: boolean }>;
-  /** 壳层项目列表（workbench 本机 + remote shortcut）。 */
-  shellProjects: Array<{ key: string; label: string; remote: boolean }>;
   userInstructions: UseUserInstructionManagerResult;
   /** F2 inventory controller（URL 同步后的包装）。 */
   portableInventory: UsePortableInventoryControllerResult;
@@ -552,9 +548,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       kind: isAssetKindTab(hubContext.tab)
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
-      scope: hubContext.scope,
+      scope: 'user',
     },
   });
+  const clearPortablePendingAction = portableInventoryBase.clearPendingAction;
   /**
    * Business Logic: 壳层工具栏 Pull 预填当前 peer（deviceId）与当前 Agent（same-agent）。
    * Code Logic: hubContext 变化在抽屉 open 时由 pull controller 应用。
@@ -590,17 +587,52 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   );
   /** 同步 busy 门闩：防止 re-render 前双击启动两次 preview/apply。 */
   const portableActionBusyRef = useRef(false);
-  const portableFiltersBootRef = useRef(false);
-  const portableUrlSyncSkipRef = useRef(true);
+  /** 任一 action session/context 变化都会使旧 preview/apply/reconcile 响应失效。 */
+  const portableActionSeqRef = useRef(0);
+  /** plan 只可在生成它的 item/action/shell context 内确认。 */
+  const portableActionPlanContextRef = useRef<{
+    planToken: string;
+    clientRequestId: string;
+    fingerprint: string;
+  } | null>(null);
+  const portableActionContextFingerprint = [
+    hubContext.scope,
+    hubContext.deviceId ?? '',
+    hubContext.projectKey ?? '',
+    hubContext.agent,
+    hubContext.tab,
+    portableInventoryBase.requestContext.deviceId ?? '',
+    portableInventoryBase.requestContext.projectRef ?? '',
+    portableInventoryBase.inventoryQuery.target ?? '',
+    portableInventoryBase.inventoryQuery.kind ?? '',
+    portableInventoryBase.inventoryQuery.scopeKind ?? '',
+    portableInventoryBase.pendingAction?.itemId ?? '',
+    portableInventoryBase.pendingAction?.action ?? '',
+  ].join('\0');
+  /** layout commit 时同步最新值，使 history 切换后的旧 Promise 无法提交。 */
+  const portableActionContextFingerprintRef = useRef(portableActionContextFingerprint);
+  useLayoutEffect(() => {
+    if (portableActionContextFingerprintRef.current === portableActionContextFingerprint) return;
+    portableActionContextFingerprintRef.current = portableActionContextFingerprint;
+    portableActionSeqRef.current += 1;
+  }, [portableActionContextFingerprint]);
+  /** 最近一次已 hydrate 的资产 URL 状态；history/back 可再次应用旧指纹。 */
+  const portableUrlHydrationFingerprintRef = useRef<string | null>(null);
+  /** URL→state 正在提交的目标；阻止同一 commit 中的旧 state 反向覆盖 history URL。 */
+  const portableUrlHydrationTargetRef = useRef<{
+    filters: Partial<PortableInventoryFilters>;
+    selectedItemId: string | null;
+    awaitingRequestReset: boolean;
+  } | null>(null);
+  const legacyAssetMigrationRef = useRef<string | null>(null);
 
   // 按需加载：legacy/status 初值 false；不再 mount 全量 loadCore
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [statusLoading, setStatusLoading] = useState(false);
   const [legacyLoadedOnce, setLegacyLoadedOnce] = useState(false);
-  const [legacyMatrixExpanded, setLegacyMatrixExpanded] = useState(
-    () => Boolean(deepLinkAssetId || deepLinkConflictId),
-  );
+  const [legacyMatrixExpanded, setLegacyMatrixExpanded] = useState(false);
+  const [contextMigrationNotice, setContextMigrationNotice] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -619,14 +651,6 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
   const [lanPreviewFingerprint, setLanPreviewFingerprint] = useState<string | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
-  /** 壳层设备列表（真实 devicesApi；独立于 LAN Push dialog 的 lanPeers）。 */
-  const [shellPeers, setShellPeers] = useState<
-    Array<{ deviceId: string; name: string; online: boolean }>
-  >([]);
-  /** 壳层项目列表（workbench local + remote shortcuts）。 */
-  const [shellProjects, setShellProjects] = useState<
-    Array<{ key: string; label: string; remote: boolean }>
-  >([]);
   const [gitImportOpen, setGitImportOpen] = useState(false);
   const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
@@ -641,15 +665,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [scopeFilter, setScopeFilter] = useState('');
   const [kindFilter, setKindFilter] = useState('');
   // deep link 初值在 useState 中完成，避免 effect 同步 setState 级联渲染
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(deepLinkAssetId);
+  // legacy asset/project deep links are translation inputs only; never hydrate retired writers.
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<AgentHubAssetDetail | null>(null);
   const [preview, setPreview] = useState<AgentHubProjectPreview | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(
-    deepLinkPreview === '1' || deepLinkPreview === 'true',
-  );
-  const [previewProjectId, setPreviewProjectIdState] = useState(deepLinkProjectId?.trim() ?? '');
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewProjectId, setPreviewProjectIdState] = useState('');
   const [projectPreviewFingerprint, setProjectPreviewFingerprint] = useState<string | null>(null);
-  const [conflictDrawerOpen, setConflictDrawerOpen] = useState(Boolean(deepLinkConflictId));
+  const [conflictDrawerOpen, setConflictDrawerOpen] = useState(false);
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
   const [pluginDrawerOpen, setPluginDrawerOpen] = useState(false);
   const [pluginReport, setPluginReport] = useState<PluginPackageReport | null>(null);
@@ -668,10 +691,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const projectPreviewInputVersionRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
   const filtersBootstrappedRef = useRef(false);
-  const appliedDeepLinkRef = useRef<string | null>(null);
-  const appliedPreviewDeepLinkRef = useRef<string | null>(null);
   const hubContextKeyRef = useRef(
-    `${hubContext.scope}\0${hubContext.deviceId ?? ''}\0${hubContext.projectKey ?? ''}\0${hubContext.agent}`,
+    `${hubContext.scope}\0${hubContext.deviceId ?? ''}\0${hubContext.projectKey ?? ''}\0${hubContext.agent}\0${hubContext.tab}`,
   );
   const scopeFilterRef = useRef(scopeFilter);
   const kindFilterRef = useRef(kindFilter);
@@ -682,7 +703,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     const nextKey =
-      `${hubContext.scope}\0${hubContext.deviceId ?? ''}\0${hubContext.projectKey ?? ''}\0${hubContext.agent}`;
+      `${hubContext.scope}\0${hubContext.deviceId ?? ''}\0${hubContext.projectKey ?? ''}\0${hubContext.agent}\0${hubContext.tab}`;
     if (hubContextKeyRef.current === nextKey) return;
     hubContextKeyRef.current = nextKey;
     lanInputVersionRef.current += 1;
@@ -699,7 +720,16 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setGitPreview(null);
     setGitSelectedAssetIds([]);
     setGitAssetSelectionExplicit(false);
-  }, [hubContext]);
+    portableActionSeqRef.current += 1;
+    portableActionPlanContextRef.current = null;
+    portableActionBusyRef.current = false;
+    clearPortablePendingAction();
+    setPortableActionPlan(null);
+    setPortableActionResult(null);
+    setPortableActionClientRequestId(null);
+    setPortableActionError(null);
+    setPortableActionBusy(false);
+  }, [clearPortablePendingAction, hubContext]);
 
   /**
    * Business Logic: 仅 diagnostics / 显式需要时拉 status。
@@ -799,59 +829,45 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     mountedRef.current = true;
-    // 按需：mount 仅 shell；禁止默认 loadCore / getStatus / listAssets
-    // deep link asset → 展开 legacy + 详情；diagnostics → status only
-    if (deepLinkAssetId || deepLinkConflictId) {
-      appliedDeepLinkRef.current = `${deepLinkAssetId ?? ''}|${deepLinkConflictId ?? ''}`;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link legacy bootstrap
-      setLegacyMatrixExpanded(true);
-      void loadLegacyAssets(false);
-      if (deepLinkAssetId) void loadAssetDetail(deepLinkAssetId);
-    }
-    if (normalizeAgentHubSection(deepLinkSection) === 'diagnostics') {
-      void loadStatus(false);
-    }
-    // 壳层 peers：真实局域网设备列表（mDNS）；失败时保持空列表不阻断 Hub
-    void devicesApi
-      .list()
-      .then((list) => {
-        if (!mountedRef.current) return;
-        setShellPeers(
-          list.map((device) => ({
-            deviceId: device.id,
-            name: device.name,
-            online: device.status === 'online',
-          })),
-        );
-      })
-      .catch(() => {
-        /* shell peers best-effort */
-      });
-    // 壳层项目：workbench 本机 + remote shortcut
-    void workbenchApi.projects
-      .list()
-      .then((projects) => {
-        if (!mountedRef.current) return;
-        setShellProjects(
-          projects.map((project) => {
-            const remote = project.kind === 'remote';
-            const label =
-              remote && project.deviceName
-                ? `${project.name} · ${project.deviceName}`
-                : project.name;
-            return { key: project.id, label, remote };
-          }),
-        );
-      })
-      .catch(() => {
-        /* shell projects best-effort */
-      });
     return () => {
       mountedRef.current = false;
     };
-    // 仅挂载首载；过滤变化与后续 deep link 走下方 effect
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const legacySection = searchParams.get('section');
+    const unsupportedOwner =
+      searchParams.has('scope') ||
+      searchParams.has('deviceId') ||
+      searchParams.has('project') ||
+      searchParams.has('projectKey') ||
+      searchParams.has('inventoryScope');
+    const retiredView =
+      legacySection === 'projectInstructions' ||
+      legacySection === 'syncImport' ||
+      legacySection === 'diagnostics' ||
+      searchParams.has('preview') ||
+      searchParams.has('projectId') ||
+      searchParams.has('bridge');
+    const legacyNavigation =
+      legacySection !== null || searchParams.has('target') || searchParams.has('kind');
+
+    const next = writeAgentHubContext(searchParams, hubContext);
+    next.delete('inventoryScope');
+    next.delete('preview');
+    next.delete('projectId');
+    next.delete('bridge');
+
+    if (unsupportedOwner || retiredView) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- URL migration exposes one visible, non-blocking notice.
+      setContextMigrationNotice(t('agentHub:shell.unsupportedContextMigrated'));
+    } else if (legacyNavigation) {
+      setContextMigrationNotice(t('agentHub:shell.legacyUrlMigrated'));
+    }
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [hubContext, searchParams, setSearchParams, t]);
 
   useEffect(() => {
     // 跳过 mount 首轮；仅 legacy 已加载时 filter 变化才 listAssets
@@ -865,44 +881,19 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeFilter, kindFilter]);
 
-  useEffect(() => {
-    // URL deep link 后续变化：异步拉详情；仅当 key 变化时同步 selected
-    if (!deepLinkAssetId && !deepLinkConflictId) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-    setActiveSectionState('assets');
-     
-    setLegacyMatrixExpanded(true);
-    if (!deepLinkAssetId) {
-      void loadLegacyAssets(true);
-      return;
-    }
-    const key = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
-    if (appliedDeepLinkRef.current === key) return;
-    appliedDeepLinkRef.current = key;
-     
-    setSelectedAssetId(deepLinkAssetId);
-    if (deepLinkConflictId) {
-       
-      setConflictDrawerOpen(true);
-    }
-    void loadLegacyAssets(true);
-    void loadAssetDetail(deepLinkAssetId);
-  }, [deepLinkAssetId, deepLinkConflictId, loadAssetDetail, loadLegacyAssets]);
-
   // hubContext.tab → activeSection（仅 URL/context 变化时同步）
   // 注意：不得把 activeSection 放进 deps——onContextChange 会乐观 setActiveSection，
   // 若此时 searchParams 尚未刷成新 tab，effect 会用旧 hubContext 把 section 盖回 assets，
   // 随后 filters→URL 再写 kind/section，表现为 skill/command/mcp/plugin 后无法切回提示词。
   useEffect(() => {
     if (hubContext.adaptView) return;
-    if (deepLinkSection) return; // legacy section= 由下方 effect 权威处理
     const mapped = mapContextToSection(hubContext);
     if (isAssetKindTab(hubContext.tab) || hubContext.tab === 'instructions') {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- tab→section dual-path
       setActiveSectionState(mapped);
     }
     // 仅跟随 hubContext / deepLinkSection；勿读 activeSection 以免乐观更新被 stale URL 回滚
-  }, [hubContext, deepLinkSection]);
+  }, [hubContext]);
 
   // diagnostics section 懒加载 status
   useEffect(() => {
@@ -911,28 +902,6 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- diagnostics lane
     void loadStatus(false);
   }, [activeSection, status, statusLoading, loadStatus]);
-
-  useEffect(() => {
-    // OpenCode bridge / project preview deep link：打开既有 preview dialog，不 enable。
-    const wantsPreview = deepLinkPreview === '1' || deepLinkPreview === 'true';
-    if (!wantsPreview && !deepLinkBridge) return;
-    const key = `preview|${deepLinkPreview ?? ''}|${deepLinkProjectId ?? ''}|${deepLinkBridge ?? ''}`;
-    if (appliedPreviewDeepLinkRef.current === key) return;
-    appliedPreviewDeepLinkRef.current = key;
-     
-    setActiveSectionState('projectInstructions');
-     
-    setPreviewOpen(true);
-    if (deepLinkProjectId?.trim()) {
-      projectInputVersionRef.current += 1;
-      projectPreviewInputVersionRef.current = null;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-      setPreviewProjectIdState(deepLinkProjectId.trim());
-      setPreview(null);
-      setProjectPreviewFingerprint(null);
-      setActionBusy(false);
-    }
-  }, [deepLinkBridge, deepLinkPreview, deepLinkProjectId]);
 
   const filteredAssets = useMemo(() => {
     const scope = scopeFilter.trim().toLowerCase();
@@ -1773,7 +1742,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         portableInventoryBase.setFilters({
           kind: merged.tab as PortableInventoryFilters['kind'],
           target: merged.agent,
-          scope: merged.scope,
+          scope: 'user',
         });
       }
     },
@@ -1781,109 +1750,212 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   );
 
   /**
-   * Business Logic: 一级 section 切换写 URL，离开 assets 时清库存 deep-link 参数。
-   * Code Logic: replace 避免堆 history；保留 conflictId/assetId 等无关参数；
-   *   同时 patch 新 IA context 键，避免壳层与 section 分叉。
+   * Business Logic: 兼容调用方只能落到现代 Instructions 或 Assets；退役 section 不复活旧 writer。
+   * Code Logic: 直接写 agent/tab context，清 legacy/deep-link mutation keys，全程 replace。
    */
   const setActiveSection = useCallback(
     (section: AgentHubSection) => {
-      setActiveSectionState(section);
+      const nextSection: AgentHubSection = section === 'assets' ? 'assets' : 'userInstructions';
+      setActiveSectionState(nextSection);
+      if (section !== 'assets' && section !== 'userInstructions') {
+        setContextMigrationNotice(t('agentHub:shell.unsupportedContextMigrated'));
+      }
       setSearchParams((prev) => {
-        const next = new URLSearchParams(prev);
-        if (section === 'userInstructions') {
-          next.delete('section');
-        } else {
-          next.set('section', section);
-        }
-        if (section !== 'assets') {
-          next.delete('kind');
-          next.delete('target');
-          next.delete('state');
-          next.delete('management');
-          next.delete('inventoryItemId');
-        }
-        // 双路径：section → context keys；write 会剥离 legacy section，再写回以保 deep link 测试契约
-        const patch = mapSectionToContextPatch(section);
-        if (Object.keys(patch).length > 0) {
-          const ctx = { ...parseAgentHubContext(next), ...patch };
-          if (ctx.scope === 'user') ctx.projectKey = null;
-          else ctx.deviceId = null;
-          const written = writeAgentHubContext(next, ctx);
-          if (section === 'userInstructions') {
-            written.delete('section');
-          } else {
-            written.set('section', section);
-          }
-          return written;
+        const current = parseAgentHubContext(prev);
+        const ctx: AgentHubContext = {
+          ...current,
+          scope: 'user',
+          deviceId: null,
+          projectKey: null,
+          tab:
+            nextSection === 'assets'
+              ? isAssetKindTab(current.tab)
+                ? current.tab
+                : 'skill'
+              : 'instructions',
+          instructionLane:
+            nextSection === 'assets' ? 'common' : current.instructionLane,
+          adaptView: false,
+        };
+        let next = writeAgentHubContext(prev, ctx);
+        next.delete('assetId');
+        next.delete('conflictId');
+        next.delete('preview');
+        next.delete('projectId');
+        next.delete('bridge');
+        if (nextSection !== 'assets') {
+          next = clearPortableFilterSearchParams(next);
         }
         return next;
       }, { replace: true });
     },
-    [setSearchParams],
+    [setSearchParams, t],
   );
 
   const portableInventory: UsePortableInventoryControllerResult = portableInventoryBase;
 
-  // URL → initial filters/selection once
+  // URL → filters/selection。指纹既允许 history/back 重放，也吸收自身 replace 回声。
   useEffect(() => {
-    if (portableFiltersBootRef.current) return;
-    portableFiltersBootRef.current = true;
-    const patch = parsePortableFiltersFromSearchParams(searchParams);
-    // 现代 URL 用 agent/tab，无 legacy target/kind 时用壳层上下文灌 filters
-    if (!patch.target) {
-      patch.target = hubContext.agent;
+    const portableUrlActive =
+      deepLinkSection === 'assets' ||
+      deepLinkSection === 'portableAssets' ||
+      Boolean(deepLinkInventoryItemId || deepLinkAssetId || deepLinkConflictId) ||
+      isAssetKindTab(hubContext.tab);
+    if (!portableUrlActive) return;
+
+    const parsed = parsePortableFiltersFromSearchParams(searchParams);
+    const fingerprint = JSON.stringify({
+      agent: hubContext.agent,
+      tab: hubContext.tab,
+      section: deepLinkSection,
+      actualState: parsed.actualState ?? 'all',
+      management: parsed.management ?? 'all',
+      inventoryItemId: deepLinkInventoryItemId,
+      assetId: deepLinkAssetId,
+      conflictId: deepLinkConflictId,
+    });
+    const sameFingerprint = portableUrlHydrationFingerprintRef.current === fingerprint;
+    if (sameFingerprint && portableUrlHydrationTargetRef.current === null) return;
+    portableUrlHydrationFingerprintRef.current = fingerprint;
+
+    const desired: Partial<PortableInventoryFilters> = {
+      target: hubContext.agent,
+      kind: isAssetKindTab(hubContext.tab)
+        ? (hubContext.tab as PortableInventoryFilters['kind'])
+        : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
+      scope: 'user',
+      actualState: parsed.actualState ?? 'all',
+      management: parsed.management ?? 'all',
+    };
+    const current = portableInventoryBase.filters;
+    const filtersNeedUpdate =
+      current.target !== desired.target ||
+      current.kind !== desired.kind ||
+      current.scope !== desired.scope ||
+      current.actualState !== desired.actualState ||
+      current.management !== desired.management;
+    if (!sameFingerprint) {
+      portableUrlHydrationTargetRef.current = {
+        filters: desired,
+        selectedItemId: deepLinkInventoryItemId,
+        // requestKey 变化会在 portable controller effect 中清 selection；先等该
+        // reset 发生，再恢复 URL selection，避免它被同一轮请求启动覆盖。
+        awaitingRequestReset: filtersNeedUpdate,
+      };
     }
-    if (!patch.kind && isAssetKindTab(hubContext.tab)) {
-      patch.kind = hubContext.tab as PortableInventoryFilters['kind'];
+    if (filtersNeedUpdate) {
+      portableInventoryBase.setFilters(desired);
     }
-    if (!patch.scope && (hubContext.scope === 'user' || hubContext.scope === 'project')) {
-      // 壳层 scope 是 user|project；portable 也支持 all，默认跟壳层
-      patch.scope = hubContext.scope;
+    const hydrationTarget = portableUrlHydrationTargetRef.current;
+    if (hydrationTarget?.awaitingRequestReset && !filtersNeedUpdate) {
+      hydrationTarget.awaitingRequestReset = false;
     }
-    portableInventoryBase.setFilters(patch);
-    if (deepLinkInventoryItemId) {
+    if (
+      !hydrationTarget?.awaitingRequestReset &&
+      portableInventoryBase.selectedItemId !== deepLinkInventoryItemId
+    ) {
       portableInventoryBase.selectItem(deepLinkInventoryItemId);
     }
-    const bootSection = resolveInitialSection(
-      {
-        assetId: deepLinkAssetId,
-        conflictId: deepLinkConflictId,
-        preview: deepLinkPreview,
-        projectId: deepLinkProjectId,
-        bridge: deepLinkBridge,
-        section: deepLinkSection,
-        inventoryItemId: deepLinkInventoryItemId,
-      },
-      parseAgentHubContext(searchParams),
-    );
-    if (bootSection === 'assets' || deepLinkInventoryItemId || isAssetKindTab(hubContext.tab)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot deep-link bootstrap
-      setActiveSectionState('assets');
+    if (
+      !filtersNeedUpdate &&
+      hydrationTarget &&
+      !hydrationTarget.awaitingRequestReset &&
+      portableInventoryBase.selectedItemId === deepLinkInventoryItemId
+    ) {
+      // URL 目标已完整落入 state 后立刻释放 echo guard；多留一个 render 会把
+      // 列表首次可见后的用户选择误当作旧 state，再清回 URL 的 null selection。
+      portableUrlHydrationTargetRef.current = null;
     }
-    // 首帧后允许 filters → URL 同步
-    portableUrlSyncSkipRef.current = false;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot URL bootstrap
-  }, []);
+    setActiveSectionState('assets');
+  }, [
+    deepLinkAssetId,
+    deepLinkConflictId,
+    deepLinkInventoryItemId,
+    deepLinkSection,
+    hubContext.agent,
+    hubContext.tab,
+    portableInventoryBase,
+    searchParams,
+  ]);
 
-  // section deep link later changes（仅 URL section 变化时同步，勿把 activeSection 放 deps
-  // 否则乐观 setActiveSection 会被残留 section=assets 盖回 assets）
+  // legacy asset/conflict 只翻译到 portable inventory；绝不调用旧 list/get/writer。
   useEffect(() => {
-    if (!deepLinkSection) return;
-    const next = normalizeAgentHubSection(deepLinkSection);
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-    setActiveSectionState(next);
-  }, [deepLinkSection]);
+    if (!deepLinkAssetId && !deepLinkConflictId) return;
+    if (portableInventoryBase.loading || portableInventoryBase.refreshing) return;
+    // 首次扫描失败时保留 legacy identity，让 Retry 仍有机会在成功库存中完成翻译。
+    // 只有拿到一次可信 snapshot 后，才能把“未匹配”判定为真正 unavailable。
+    if (!portableInventoryBase.snapshot) return;
+    const migrationKey = `${deepLinkAssetId ?? ''}\0${deepLinkConflictId ?? ''}`;
+    if (legacyAssetMigrationRef.current === migrationKey) return;
+    legacyAssetMigrationRef.current = migrationKey;
+
+    const matched = deepLinkAssetId
+      ? portableInventoryBase.snapshot?.items.find(
+          (item) =>
+            item.inventoryItemId === deepLinkAssetId ||
+            item.canonicalAssetId === deepLinkAssetId ||
+            item.nativeId === deepLinkAssetId,
+        ) ?? null
+      : null;
+    setSearchParams((prev) => {
+      const nextContext: AgentHubContext = matched
+        ? {
+            ...parseAgentHubContext(prev),
+            agent: matched.target,
+            tab: matched.kind,
+            scope: 'user',
+            deviceId: null,
+            projectKey: null,
+            instructionLane: 'common',
+            adaptView: false,
+          }
+        : {
+            ...parseAgentHubContext(prev),
+            tab: isAssetKindTab(parseAgentHubContext(prev).tab)
+              ? parseAgentHubContext(prev).tab
+              : 'skill',
+            scope: 'user',
+            deviceId: null,
+            projectKey: null,
+            instructionLane: 'common',
+            adaptView: false,
+          };
+      const next = writeAgentHubContext(prev, nextContext);
+      next.delete('assetId');
+      next.delete('conflictId');
+      if (matched) next.set('inventoryItemId', matched.inventoryItemId);
+      else next.delete('inventoryItemId');
+      return next;
+    }, { replace: true });
+    setContextMigrationNotice(
+      t(
+        matched
+          ? 'agentHub:shell.legacyAssetMigrated'
+          : 'agentHub:shell.legacyAssetUnavailable',
+      ),
+    );
+  }, [
+    deepLinkAssetId,
+    deepLinkConflictId,
+    portableInventoryBase.error,
+    portableInventoryBase.loading,
+    portableInventoryBase.refreshing,
+    portableInventoryBase.snapshot,
+    setSearchParams,
+    t,
+  ]);
 
   // filters/selection → URL while on portable asset tabs only
   useEffect(() => {
-    if (portableUrlSyncSkipRef.current) return;
     // 双路径：section 与壳层 tab 都必须在资产区，避免切回提示词后 stale filters 回写 kind/section
     if (activeSection !== 'assets' || !isAssetKindTab(hubContext.tab)) return;
+    if (portableUrlHydrationTargetRef.current) return;
     setSearchParams((prev) => {
       // 若现代 tab 已离开资产（竞态帧），禁止写回 legacy 导航键
       if (!isAssetKindTab(parseAgentHubContext(prev).tab)) return prev;
+      const modernContext = writeAgentHubContext(prev, hubContext);
       const desired = writePortableFiltersToSearchParams(
-        prev,
+        modernContext,
         portableInventoryBase.filters,
         portableInventoryBase.selectedItemId,
       );
@@ -1893,7 +1965,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     }, { replace: true });
   }, [
     activeSection,
-    hubContext.tab,
+    hubContext,
     portableInventoryBase.filters,
     portableInventoryBase.selectedItemId,
     setSearchParams,
@@ -1913,6 +1985,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   const requestPortableAction = useCallback(
     (itemId: string, action: PortableAssetActionKind) => {
+      portableActionSeqRef.current += 1;
+      portableActionPlanContextRef.current = null;
+      portableActionBusyRef.current = false;
+      setPortableActionBusy(false);
       setPortableActionPlan(null);
       setPortableActionResult(null);
       setPortableActionError(null);
@@ -1941,7 +2017,21 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setPortableActionError(t('agentHub:portable.actionDialog.mutationBlocked'));
         return;
       }
+      const pendingAction = portableInventoryBase.pendingAction;
+      if (
+        !pendingAction ||
+        request.inventoryItemIds.length !== 1 ||
+        request.inventoryItemIds[0] !== pendingAction.itemId ||
+        request.action !== pendingAction.action ||
+        request.inventorySnapshotHash !==
+          portableInventoryBase.snapshot?.inventorySnapshotHash
+      ) {
+        setPortableActionError(t('agentHub:portable.actionDialog.contextChanged'));
+        return;
+      }
       portableActionBusyRef.current = true;
+      const actionSeq = ++portableActionSeqRef.current;
+      const contextFingerprint = portableActionContextFingerprintRef.current;
       setPortableActionBusy(true);
       setPortableActionError(null);
       setPortableActionResult(null);
@@ -1952,22 +2042,48 @@ export function useAgentHubController(): UseAgentHubControllerResult {
           inventoryQuery: portableInventoryBase.inventoryQuery,
           ...portableInventoryBase.requestContext,
         });
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
+        const clientRequestId = mintClientRequestId();
         setPortableActionPlan(plan);
-        setPortableActionClientRequestId(mintClientRequestId());
+        portableActionPlanContextRef.current = {
+          planToken: plan.planToken,
+          clientRequestId,
+          fingerprint: contextFingerprint,
+        };
+        setPortableActionClientRequestId(clientRequestId);
       } catch (reason) {
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
         setPortableActionError(toErrorMessage(reason));
       } finally {
-        portableActionBusyRef.current = false;
-        if (mountedRef.current) setPortableActionBusy(false);
+        if (
+          mountedRef.current &&
+          actionSeq === portableActionSeqRef.current &&
+          contextFingerprint === portableActionContextFingerprintRef.current
+        ) {
+          portableActionBusyRef.current = false;
+          setPortableActionBusy(false);
+        }
       }
     },
     [
       mintClientRequestId,
       portableInventoryBase.mutationBlocked,
       portableInventoryBase.inventoryQuery,
+      portableInventoryBase.pendingAction,
       portableInventoryBase.requestContext,
+      portableInventoryBase.snapshot?.inventorySnapshotHash,
       portableInventoryBase.stale,
       t,
     ],
@@ -1982,8 +2098,22 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setPortableActionError(t('agentHub:portable.actionDialog.mutationBlocked'));
         return;
       }
+      const contextFingerprint = portableActionContextFingerprintRef.current;
+      const planContext = portableActionPlanContextRef.current;
+      if (
+        portableActionPlan?.planToken !== planToken ||
+        planContext?.planToken !== planToken ||
+        planContext.clientRequestId !== clientRequestId ||
+        planContext.fingerprint !== contextFingerprint ||
+        portableActionPlan.inventorySnapshotHash !==
+          portableInventoryBase.snapshot?.inventorySnapshotHash
+      ) {
+        setPortableActionError(t('agentHub:portable.actionDialog.contextChanged'));
+        return;
+      }
       const itemId = portableInventoryBase.pendingAction?.itemId;
       portableActionBusyRef.current = true;
+      const actionSeq = ++portableActionSeqRef.current;
       setPortableActionBusy(true);
       setPortableActionError(null);
       if (itemId) portableInventoryBase.setItemLocked(itemId, true);
@@ -1994,47 +2124,96 @@ export function useAgentHubController(): UseAgentHubControllerResult {
           ...portableInventoryBase.requestContext,
         };
         const result = await portableAssetApi.applyAction(applyRequest);
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
         setPortableActionResult(result);
         setPortableActionClientRequestId(clientRequestId);
         await portableInventoryBase.refresh();
       } catch (reason) {
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
         setPortableActionError(toErrorMessage(reason));
       } finally {
-        if (itemId) portableInventoryBase.setItemLocked(itemId, false);
-        portableActionBusyRef.current = false;
-        if (mountedRef.current) setPortableActionBusy(false);
+        if (
+          mountedRef.current &&
+          actionSeq === portableActionSeqRef.current &&
+          contextFingerprint === portableActionContextFingerprintRef.current
+        ) {
+          if (itemId) portableInventoryBase.setItemLocked(itemId, false);
+          portableActionBusyRef.current = false;
+          setPortableActionBusy(false);
+        }
       }
     },
-    [portableInventoryBase, t],
+    [portableActionPlan, portableInventoryBase, t],
   );
 
   const reconcilePortableAction = useCallback(
     async (clientRequestId: string) => {
       // reconcile 是 getAction 对账（非 apply mutation），但 busy 仍需同步门闩。
       if (portableActionBusyRef.current) return;
+      const planContext = portableActionPlanContextRef.current;
+      if (
+        !planContext ||
+        planContext.clientRequestId !== clientRequestId ||
+        planContext.fingerprint !== portableActionContextFingerprintRef.current
+      ) {
+        setPortableActionError(t('agentHub:portable.actionDialog.contextChanged'));
+        return;
+      }
       portableActionBusyRef.current = true;
+      const actionSeq = ++portableActionSeqRef.current;
+      const contextFingerprint = portableActionContextFingerprintRef.current;
       setPortableActionBusy(true);
       setPortableActionError(null);
       try {
         const result = await portableAssetApi.getAction(clientRequestId);
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
         setPortableActionResult(result);
         await portableInventoryBase.refresh();
       } catch (reason) {
-        if (!mountedRef.current) return;
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
         setPortableActionError(toErrorMessage(reason));
       } finally {
-        portableActionBusyRef.current = false;
-        if (mountedRef.current) setPortableActionBusy(false);
+        if (
+          mountedRef.current &&
+          actionSeq === portableActionSeqRef.current &&
+          contextFingerprint === portableActionContextFingerprintRef.current
+        ) {
+          portableActionBusyRef.current = false;
+          setPortableActionBusy(false);
+        }
       }
     },
-    [portableInventoryBase],
+    [portableInventoryBase, t],
   );
 
   const closePortableAction = useCallback(() => {
     if (portableActionBusy || portableActionBusyRef.current) return;
+    portableActionSeqRef.current += 1;
+    portableActionPlanContextRef.current = null;
     portableInventoryBase.clearPendingAction();
     setPortableActionPlan(null);
     setPortableActionResult(null);
@@ -2059,9 +2238,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     activeSection,
     setActiveSection,
     hubContext,
+    contextMigrationNotice,
     onContextChange,
-    shellPeers,
-    shellProjects,
     userInstructions,
     portableInventory,
     portableDetailsOpen: Boolean(portableInventoryBase.selectedItemId),

@@ -56,16 +56,13 @@ function actualTone(
 function managementTone(
   state: PortableInventoryItemDto['managementState'],
 ): 'success' | 'neutral' | 'warn' | 'danger' {
-  // hubManaged → 一致；drifted/collision → 问题；unsupported → 告警；unmanaged 中性兜底
   if (state === 'hubManaged') return 'success';
   if (state === 'drifted' || state === 'externalCollision') return 'danger';
   if (state === 'unsupported') return 'warn';
   return 'neutral';
 }
 
-/**
- * 渲染单条 portable inventory 行。
- */
+/** 渲染单条 portable inventory 行。 */
 export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Element {
   const {
     item,
@@ -91,59 +88,63 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
       data-kind={item.kind}
       data-target={item.target}
       data-management={item.managementState}
-      onClick={() => onSelect?.(item)}
     >
-      <div className={styles.main}>
-        <div className={styles.titleLine}>
-          <div className={styles.titleMeta}>
-            <span className={styles.name}>{item.displayName}</span>
-            <Pill tone="neutral">{labels.kinds[item.kind]}</Pill>
-            <Pill tone="neutral">{labels.targets[item.target]}</Pill>
-            <Pill tone={actualTone(actual)} dot>
-              {labels.actual[actual]}
-            </Pill>
-            <Pill tone={managementTone(item.managementState)}>
-              {labels.management[item.managementState]}
-            </Pill>
+      <button
+        type="button"
+        className={styles.selectButton}
+        aria-label={item.displayName}
+        aria-pressed={selected}
+        data-testid={`portable-inventory-select-${item.inventoryItemId}`}
+        onClick={() => onSelect?.(item)}
+      >
+        <div className={styles.main}>
+          <div className={styles.titleLine}>
+            <div className={styles.titleMeta}>
+              <span className={styles.name}>{item.displayName}</span>
+              <Pill tone="neutral">{labels.kinds[item.kind]}</Pill>
+              <Pill tone="neutral">{labels.targets[item.target]}</Pill>
+              <Pill tone={actualTone(actual)} dot>
+                {labels.actual[actual]}
+              </Pill>
+              <Pill tone={managementTone(item.managementState)}>
+                {labels.management[item.managementState]}
+              </Pill>
+            </div>
           </div>
-          {primaryAction ? (
-            <div className={styles.actions}>
-              <Button
-                variant={primaryAction === 'uninstall' ? 'danger' : 'secondary'}
-                size="sm"
-                loading={busy}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onPrimaryAction?.(item, primaryAction);
-                }}
-              >
-                {labels.actions[primaryAction]}
-              </Button>
+          {item.description ? <p className={styles.description}>{item.description}</p> : null}
+          <div className={styles.metaLine}>
+            <span>{labels.scope[item.scopeKind]}</span>
+            <span>{labels.sourceOrigin[item.sourceOrigin]}</span>
+            {item.version ? <span>{item.version}</span> : null}
+          </div>
+          {item.sourcePath ? <div className={styles.path}>{item.sourcePath}</div> : null}
+          {showRefreshHint ? (
+            <p className={styles.refreshHint} data-testid="portable-row-unmanaged-refresh-hint">
+              {labels.unmanagedRefreshHint}
+            </p>
+          ) : null}
+          {problemWarnings.length > 0 ? (
+            <div className={styles.warnings}>
+              {problemWarnings.map((warning) => (
+                <span key={warning} className={styles.warning}>
+                  {warning}
+                </span>
+              ))}
             </div>
           ) : null}
         </div>
-        {item.description ? <p className={styles.description}>{item.description}</p> : null}
-        <div className={styles.metaLine}>
-          <span>{labels.scope[item.scopeKind]}</span>
-          <span>{labels.sourceOrigin[item.sourceOrigin]}</span>
-          {item.version ? <span>{item.version}</span> : null}
-        </div>
-        {item.sourcePath ? <div className={styles.path}>{item.sourcePath}</div> : null}
-        {showRefreshHint ? (
-          <p className={styles.refreshHint} data-testid="portable-row-unmanaged-refresh-hint">
-            {labels.unmanagedRefreshHint}
-          </p>
-        ) : null}
-        {problemWarnings.length > 0 ? (
-          <div className={styles.warnings}>
-            {problemWarnings.map((warning) => (
-              <span key={warning} className={styles.warning}>
-                {warning}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
+      </button>
+      {primaryAction ? (
+        <Button
+          className={styles.primaryAction}
+          variant={primaryAction === 'uninstall' ? 'danger' : 'secondary'}
+          size="sm"
+          loading={busy}
+          onClick={() => onPrimaryAction?.(item, primaryAction)}
+        >
+          {labels.actions[primaryAction]}
+        </Button>
+      ) : null}
     </article>
   );
 }

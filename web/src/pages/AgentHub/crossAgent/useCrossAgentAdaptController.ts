@@ -1,13 +1,13 @@
 /**
- * Cross-agent adapt page controller (selective + full-volume).
+ * Cross-agent selective preview controller.
  *
  * Business Logic（为什么需要）:
- *   独立全页编排：源=当前 agent；selective 多选目标指令适配；full 单目标五类清单
- *   强制 preview 后 apply；peer 设备上下文整页 blocked（同机 only）。
+ *   当前认证边界只允许“本机 + 用户级 + 指令选择性预览”。切换源、上下文、正文或目标后，
+ *   旧异步响应不得落入新上下文；Apply 与 full-volume 始终不可用。
  *
  * Code Logic（做什么）:
- *   mode 切换清理 plan/preview；selective 走 preview/applyCrossAgentInstruction；
- *   full 走 preview/applyCrossAgentFull + 项 include 勾选。
+ *   用 context generation + request fingerprint 约束 content/preview 提交；严格核对响应源和目标；
+ *   保留旧 controller 形状供调用方渐进迁移，但所有写入/full 方法稳定 fail-closed。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -17,23 +17,13 @@ import type { AgentTarget } from '@/lib/types/agentHub';
 import type { AgentHubContext } from '../context/agentHubContext';
 import { originalFromWorkspace } from '../instructions';
 import {
-  canRunCrossAgentApply,
-  canRunCrossAgentFullApply,
-  canRunCrossAgentFullPreview,
   canRunCrossAgentPreview,
-  countApplicableDestinations,
-  countApplicableFullItems,
   defaultDestinationsForSource,
   defaultFullDestination,
   destinationCandidates,
   isPeerContextBlocked,
-  parseCrossAgentApplyResults,
-  parseCrossAgentFullApplyResults,
-  parseCrossAgentFullPlan,
   parseCrossAgentPreview,
-  sanitizeDestinations,
   toggleDestinationSelection,
-  toggleFullPlanItemIncluded,
   type CrossAgentAdaptVolumeMode,
   type CrossAgentApplyResult,
   type CrossAgentFullApplyItemResult,
@@ -44,10 +34,7 @@ import {
 export interface UseCrossAgentAdaptControllerArgs {
   context: AgentHubContext;
   t: TFunction<['agentHub', 'common']>;
-  /**
-   * 可选：三栏 original/preview 正文；缺省时 inspect workspace 加载。
-   * 非空时优先使用（用户在进入页面前已编辑的内容）。
-   */
+  /** 当前三栏已加载的原始正文；上下文变化后按新 generation 注入。 */
   initialSourceMarkdown?: string | null;
 }
 
@@ -57,7 +44,6 @@ export interface UseCrossAgentAdaptControllerResult {
   source: AgentTarget;
   destinations: AgentTarget[];
   destinationOptions: AgentTarget[];
-  /** full 模式单目标 */
   fullDestination: AgentTarget | null;
   setFullDestination: (target: AgentTarget) => void;
   scope: AgentHubContext['scope'];
@@ -80,7 +66,6 @@ export interface UseCrossAgentAdaptControllerResult {
   canApply: boolean;
   previewBlockedReason: string | null;
   applyBlockedReason: string | null;
-  /** project scope 但未选项目时提示启用/选择。 */
   projectOptInNeeded: boolean;
   toggleDestination: (target: AgentTarget) => void;
   toggleFullItemIncluded: (logicalKey: string) => void;
@@ -90,32 +75,58 @@ export interface UseCrossAgentAdaptControllerResult {
   clearPreview: () => void;
 }
 
-/**
- * Business Logic: apply 幂等键；同一 preview 会话内复用直至新 preview。
- * Code Logic: crypto.randomUUID 优先。
- */
-function createClientRequestId(): string {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
-  return `cross-agent-adapt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
+/** 把未知错误变成用户可诊断的稳定文本。 */
 function formatError(reason: unknown): string {
   if (!reason) return 'unknown_error';
   if (reason instanceof Error) {
-    const code = (reason as { code?: unknown }).code;
+    const code = (reason as Error & { code?: unknown }).code;
     if (typeof code === 'string' && code.length > 0) {
-      return `${code}: ${reason.message}`;
+      return code === reason.message ? code : `${code}: ${reason.message}`;
     }
     return reason.message || 'unknown_error';
   }
   return String(reason);
 }
 
+/** 请求正文和目标的稳定 fingerprint。 */
+function previewFingerprint(
+  contextFingerprint: string,
+  source: AgentTarget,
+  destinations: AgentTarget[],
+  sourceMarkdown: string,
+  scopeConfirmed: boolean,
+): string {
+  return JSON.stringify({
+    contextFingerprint,
+    source,
+    destinations: [...destinations].sort(),
+    sourceMarkdown,
+    scope: 'user',
+    scopeConfirmed,
+  });
+}
+
+/** 响应必须精确覆盖本次请求目标，不接受缺项、多项或重复项。 */
+function responseMatchesRequest(
+  preview: CrossAgentPreviewReport,
+  source: AgentTarget,
+  destinations: AgentTarget[],
+): boolean {
+  if (preview.source !== source || preview.destinations.length !== destinations.length) {
+    return false;
+  }
+  const expected = new Set(destinations);
+  return preview.destinations.every(
+    (row) => expected.has(row.destination) && row.destination !== source && !row.canApply,
+  );
+}
+
 /**
- * Business Logic: 为 Agent Hub 适配全页提供 selective + full 编排状态机。
- * Code Logic: source 跟随 context.agent；peer blocked 时禁止 preview/apply。
+ * Business Logic（为什么需要）:
+ *   用户必须只看到当前 Agent/上下文/正文对应的真实预览。
+ *
+ * Code Logic（做什么）:
+ *   每个影响输入的动作都会递增 generation 并使旧请求失效；full/apply 不调用 API。
  */
 export function useCrossAgentAdaptController(
   args: UseCrossAgentAdaptControllerArgs,
@@ -123,192 +134,176 @@ export function useCrossAgentAdaptController(
   const { context, t, initialSourceMarkdown } = args;
   const source = context.agent;
   const peerBlocked = isPeerContextBlocked(context.deviceId);
+  const contextFingerprint = JSON.stringify({
+    source,
+    scope: context.scope,
+    deviceId: context.deviceId ?? null,
+    projectKey: context.projectKey ?? null,
+    tab: context.tab,
+    instructionLane: context.instructionLane,
+    adaptView: context.adaptView,
+  });
 
-  const [mode, setModeState] = useState<CrossAgentAdaptVolumeMode>('selective');
   const [destinations, setDestinations] = useState<AgentTarget[]>(() =>
     defaultDestinationsForSource(source),
   );
-  const [fullDestination, setFullDestinationState] = useState<AgentTarget | null>(() =>
-    defaultFullDestination(source),
-  );
   const [scopeConfirmed, setScopeConfirmedState] = useState(false);
-  const [sourceMarkdown, setSourceMarkdownState] = useState(() =>
-    (initialSourceMarkdown ?? '').trim().length > 0
-      ? String(initialSourceMarkdown)
-      : '',
-  );
+  const [sourceMarkdown, setSourceMarkdownState] = useState(initialSourceMarkdown ?? '');
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<CrossAgentPreviewReport | null>(null);
-  const [applyResults, setApplyResults] = useState<CrossAgentApplyResult[] | null>(null);
-  const [fullPlan, setFullPlan] = useState<CrossAgentFullPlan | null>(null);
-  const [fullApplyResults, setFullApplyResults] = useState<
-    CrossAgentFullApplyItemResult[] | null
-  >(null);
+  const currentPreviewFingerprint = useMemo(
+    () =>
+      previewFingerprint(
+        contextFingerprint,
+        source,
+        destinations,
+        sourceMarkdown.trim(),
+        scopeConfirmed,
+      ),
+    [contextFingerprint, destinations, scopeConfirmed, source, sourceMarkdown],
+  );
 
   const mountedRef = useRef(true);
+  const generationRef = useRef(0);
   const contentSeqRef = useRef(0);
   const previewSeqRef = useRef(0);
-  const applySeqRef = useRef(0);
-  const clientRequestIdRef = useRef<string | null>(null);
-  const initialMarkdownAppliedRef = useRef(false);
+  const activePreviewFingerprintRef = useRef<string | null>(null);
+  const latestPreviewFingerprintRef = useRef('');
+  const latestContextFingerprintRef = useRef(contextFingerprint);
+
+  useEffect(() => {
+    latestContextFingerprintRef.current = contextFingerprint;
+    latestPreviewFingerprintRef.current = currentPreviewFingerprint;
+  }, [contextFingerprint, currentPreviewFingerprint]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      generationRef.current += 1;
+      contentSeqRef.current += 1;
+      previewSeqRef.current += 1;
+      activePreviewFingerprintRef.current = null;
     };
   }, []);
 
-  // 源 agent 变化：剔除非法 destination 并作废 preview
-  useEffect(() => {
-    setDestinations((prev) => sanitizeDestinations(source, prev));
-    setFullDestinationState(defaultFullDestination(source));
+  /** 只使预览失效；目标/确认变化不得取消独立的 source inspect。 */
+  const invalidatePreview = useCallback(() => {
+    previewSeqRef.current += 1;
+    activePreviewFingerprintRef.current = null;
     setPreview(null);
-    setApplyResults(null);
-    setFullPlan(null);
-    setFullApplyResults(null);
-    clientRequestIdRef.current = null;
-  }, [source]);
+    setBusy(false);
+  }, []);
 
-  // initialSourceMarkdown 仅在首次有值时注入（避免父组件重渲覆盖用户编辑）
-  useEffect(() => {
-    if (initialMarkdownAppliedRef.current) return;
-    const initial = (initialSourceMarkdown ?? '').trim();
-    if (initial.length === 0) return;
-    initialMarkdownAppliedRef.current = true;
-    setSourceMarkdownState(initialSourceMarkdown ?? '');
-  }, [initialSourceMarkdown]);
-
-  /**
-   * Business Logic: 无父级正文时从 inspect workspace 拉当前 agent 指令 markdown。
-   * Code Logic: sequence guard；peer 时不调用本机 inspect。
-   */
+  /** 从当前本机 Agent 读取原始指令；响应提交受 generation + context 约束。 */
   const refreshSourceContent = useCallback(async () => {
-    if (peerBlocked) {
-      setContentError(t('agentHub:crossAgent.errors.peerBlocked'));
+    if (peerBlocked || context.scope !== 'user') {
+      setContentError(
+        peerBlocked
+          ? t('agentHub:crossAgent.errors.peerBlocked')
+          : t('agentHub:crossAgent.errors.projectBlocked'),
+      );
       return;
     }
+
+    const generation = generationRef.current;
     const seq = ++contentSeqRef.current;
+    const requestedContextFingerprint = contextFingerprint;
+    invalidatePreview();
     setContentLoading(true);
     setContentError(null);
+    setPreview(null);
+    setBusy(false);
     try {
       const workspace = await agentHubApi.inspectUserInstructionWorkspace();
-      if (!mountedRef.current || seq !== contentSeqRef.current) return;
+      if (
+        !mountedRef.current ||
+        generation !== generationRef.current ||
+        seq !== contentSeqRef.current ||
+        latestContextFingerprintRef.current !== requestedContextFingerprint
+      ) {
+        return;
+      }
       const { text } = originalFromWorkspace(workspace, source);
       setSourceMarkdownState(text);
-      setPreview(null);
-      setApplyResults(null);
-      setFullPlan(null);
-      setFullApplyResults(null);
-      clientRequestIdRef.current = null;
     } catch (reason) {
-      if (!mountedRef.current || seq !== contentSeqRef.current) return;
+      if (
+        !mountedRef.current ||
+        generation !== generationRef.current ||
+        seq !== contentSeqRef.current ||
+        latestContextFingerprintRef.current !== requestedContextFingerprint
+      ) {
+        return;
+      }
       setContentError(formatError(reason));
     } finally {
-      if (mountedRef.current && seq === contentSeqRef.current) {
+      if (
+        mountedRef.current &&
+        generation === generationRef.current &&
+        seq === contentSeqRef.current &&
+        latestContextFingerprintRef.current === requestedContextFingerprint
+      ) {
         setContentLoading(false);
       }
     }
-  }, [peerBlocked, source, t]);
+  }, [context.scope, contextFingerprint, invalidatePreview, peerBlocked, source, t]);
 
-  // 进入页：无 initial 正文则自动 inspect
+  // Agent/scope/device/project 或父级 source 变化时，原子开启新 generation。
   useEffect(() => {
-    if (peerBlocked) return;
-    if ((initialSourceMarkdown ?? '').trim().length > 0) return;
-    if (sourceMarkdown.trim().length > 0) return;
-    const timeoutId = window.setTimeout(() => {
-      void refreshSourceContent();
-    }, 0);
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-    // 仅挂载/源切换时尝试加载；不把 sourceMarkdown 放 deps 避免循环
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount/source load
-  }, [peerBlocked, source, refreshSourceContent]);
-
-  const invalidatePlans = useCallback(() => {
-    setPreview(null);
-    setApplyResults(null);
-    setFullPlan(null);
-    setFullApplyResults(null);
-    clientRequestIdRef.current = null;
-  }, []);
-
-  const setMode = useCallback(
-    (next: CrossAgentAdaptVolumeMode) => {
-      setModeState(next);
-      invalidatePlans();
-      setError(null);
-    },
-    [invalidatePlans],
-  );
-
-  const setScopeConfirmed = useCallback(
-    (value: boolean) => {
-      setScopeConfirmedState(value);
-      invalidatePlans();
-    },
-    [invalidatePlans],
-  );
-
-  const setSourceMarkdown = useCallback(
-    (value: string) => {
-      setSourceMarkdownState(value);
-      invalidatePlans();
-    },
-    [invalidatePlans],
-  );
-
-  const setFullDestination = useCallback(
-    (target: AgentTarget) => {
-      if (target === source) return;
-      setFullDestinationState(target);
-      invalidatePlans();
-    },
-    [invalidatePlans, source],
-  );
-
-  const toggleDestination = useCallback(
-    (target: AgentTarget) => {
-      if (target === source) return;
-      setDestinations((prev) => toggleDestinationSelection(source, prev, target));
-      invalidatePlans();
-    },
-    [invalidatePlans, source],
-  );
-
-  const toggleFullItemIncluded = useCallback((logicalKey: string) => {
-    setFullPlan((prev) => (prev ? toggleFullPlanItemIncluded(prev, logicalKey) : prev));
-    setFullApplyResults(null);
-  }, []);
-
-  const clearPreview = useCallback(() => {
-    invalidatePlans();
+    generationRef.current += 1;
+    contentSeqRef.current += 1;
+    previewSeqRef.current += 1;
+    activePreviewFingerprintRef.current = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- context generation changes must atomically clear prior UI state.
+    setDestinations(defaultDestinationsForSource(source));
+    setScopeConfirmedState(false);
+    setSourceMarkdownState(initialSourceMarkdown ?? '');
+    setContentLoading(false);
+    setContentError(null);
+    setBusy(false);
     setError(null);
-  }, [invalidatePlans]);
+    setPreview(null);
 
-  const scopeWire =
-    context.scope === 'project' && context.projectKey
-      ? context.projectKey
-      : 'user';
+    if (
+      !peerBlocked &&
+      context.scope === 'user' &&
+      (initialSourceMarkdown ?? '').trim().length === 0
+    ) {
+      const timeoutId = window.setTimeout(() => {
+        void refreshSourceContent();
+      }, 0);
+      return () => {
+        window.clearTimeout(timeoutId);
+      };
+    }
+    return undefined;
+  }, [
+    context.scope,
+    contextFingerprint,
+    initialSourceMarkdown,
+    peerBlocked,
+    refreshSourceContent,
+    source,
+  ]);
 
-  const selectivePreviewGate = useMemo(
+  const previewGate = useMemo(
     () =>
       canRunCrossAgentPreview({
         deviceId: context.deviceId,
         source,
         destinations,
         sourceMarkdown,
-        busy,
+        busy: busy || contentLoading,
         scope: context.scope,
         projectKey: context.projectKey,
         scopeConfirmed,
       }),
     [
       busy,
+      contentLoading,
       context.deviceId,
       context.projectKey,
       context.scope,
@@ -319,258 +314,162 @@ export function useCrossAgentAdaptController(
     ],
   );
 
-  const fullPreviewGate = useMemo(
-    () =>
-      canRunCrossAgentFullPreview({
-        deviceId: context.deviceId,
-        source,
-        destination: fullDestination,
-        sourceMarkdown,
-        busy,
-        scope: context.scope,
-        projectKey: context.projectKey,
-        scopeConfirmed,
-      }),
-    [
-      busy,
-      context.deviceId,
-      context.projectKey,
-      context.scope,
-      fullDestination,
-      scopeConfirmed,
-      source,
-      sourceMarkdown,
-    ],
-  );
-
-  const selectiveApplyGate = useMemo(
-    () =>
-      canRunCrossAgentApply({
-        deviceId: context.deviceId,
-        preview,
-        busy,
-      }),
-    [busy, context.deviceId, preview],
-  );
-
-  const fullApplyGate = useMemo(
-    () =>
-      canRunCrossAgentFullApply({
-        deviceId: context.deviceId,
-        plan: fullPlan,
-        busy,
-      }),
-    [busy, context.deviceId, fullPlan],
-  );
-
-  const previewGate = mode === 'full' ? fullPreviewGate : selectivePreviewGate;
-  const applyGate = mode === 'full' ? fullApplyGate : selectiveApplyGate;
-
   const previewBlockedReason = useMemo(() => {
     if (previewGate.ok) return null;
     switch (previewGate.reason) {
       case 'peerBlocked':
         return t('agentHub:crossAgent.errors.peerBlocked');
+      case 'projectBlocked':
+        return t('agentHub:crossAgent.errors.projectBlocked');
       case 'emptyMarkdown':
         return t('agentHub:crossAgent.errors.emptyMarkdown');
       case 'emptyDestinations':
-      case 'emptyDestination':
         return t('agentHub:crossAgent.errors.emptyDestinations');
       case 'sourceInDestinations':
-      case 'sourceEqualsDestination':
         return t('agentHub:crossAgent.errors.sourceInDestinations');
       case 'scopeUnconfirmed':
         return t('agentHub:crossAgent.errors.scopeUnconfirmed');
       case 'projectKeyRequired':
         return t('agentHub:crossAgent.errors.projectKeyRequired');
       case 'busy':
-        return null;
+      case 'ok':
       default:
         return null;
     }
   }, [previewGate, t]);
 
-  const applyBlockedReason = useMemo(() => {
-    if (applyGate.ok) return null;
-    switch (applyGate.reason) {
-      case 'peerBlocked':
-        return t('agentHub:crossAgent.errors.peerBlocked');
-      case 'missingPreview':
-      case 'emptyPlanHash':
-        return t('agentHub:crossAgent.errors.previewRequired');
-      case 'noApplicable':
-        return t('agentHub:crossAgent.errors.noApplicable');
-      case 'busy':
-        return null;
-      default:
-        return null;
-    }
-  }, [applyGate, t]);
+  const setMode = useCallback(
+    (nextMode: CrossAgentAdaptVolumeMode) => {
+      invalidatePreview();
+      setError(
+        nextMode === 'full'
+          ? t('agentHub:crossAgent.errors.fullUnavailable')
+          : null,
+      );
+    },
+    [invalidatePreview, t],
+  );
+
+  const setScopeConfirmed = useCallback(
+    (value: boolean) => {
+      invalidatePreview();
+      setScopeConfirmedState(value);
+      setError(null);
+    },
+    [invalidatePreview],
+  );
+
+  const setSourceMarkdown = useCallback(
+    (value: string) => {
+      invalidatePreview();
+      contentSeqRef.current += 1;
+      setContentLoading(false);
+      setSourceMarkdownState(value);
+      setError(null);
+    },
+    [invalidatePreview],
+  );
+
+  const toggleDestination = useCallback(
+    (target: AgentTarget) => {
+      invalidatePreview();
+      setDestinations((current) => toggleDestinationSelection(source, current, target));
+      setError(null);
+    },
+    [invalidatePreview, source],
+  );
+
+  const clearPreview = useCallback(() => {
+    invalidatePreview();
+    setError(null);
+  }, [invalidatePreview]);
 
   const runPreview = useCallback(async () => {
     if (!previewGate.ok) {
       setError(previewBlockedReason);
       return;
     }
+
+    const markdown = sourceMarkdown.trim();
+    const requestedDestinations = [...destinations];
+    const requestFingerprint = currentPreviewFingerprint;
+    const generation = generationRef.current;
     const seq = ++previewSeqRef.current;
+    activePreviewFingerprintRef.current = requestFingerprint;
     setBusy(true);
     setError(null);
-    setApplyResults(null);
-    setFullApplyResults(null);
+    setPreview(null);
     try {
-      if (mode === 'full') {
-        if (!fullDestination) {
-          setError(t('agentHub:crossAgent.errors.emptyDestinations'));
-          return;
-        }
-        const raw = await agentHubApi.previewCrossAgentFull({
-          source,
-          destination: fullDestination,
-          scope: scopeWire,
-          sourceMarkdown: sourceMarkdown.trim(),
-          deviceId: context.deviceId,
-        });
-        if (!mountedRef.current || seq !== previewSeqRef.current) return;
-        const parsed = parseCrossAgentFullPlan(raw);
-        if (!parsed) {
-          setError(t('agentHub:crossAgent.errors.invalidPreview'));
-          setFullPlan(null);
-          return;
-        }
-        setFullPlan(parsed);
-        setPreview(null);
-        clientRequestIdRef.current = createClientRequestId();
-      } else {
-        const raw = await agentHubApi.previewCrossAgentInstruction({
-          source,
-          destinations,
-          sourceMarkdown: sourceMarkdown.trim(),
-          scope: scopeWire,
-          destinationPaths: {},
-        });
-        if (!mountedRef.current || seq !== previewSeqRef.current) return;
-        const parsed = parseCrossAgentPreview(raw);
-        if (!parsed) {
-          setError(t('agentHub:crossAgent.errors.invalidPreview'));
-          setPreview(null);
-          return;
-        }
-        setPreview(parsed);
-        setFullPlan(null);
-        clientRequestIdRef.current = createClientRequestId();
+      const raw = await agentHubApi.previewCrossAgentInstruction({
+        source,
+        destinations: requestedDestinations,
+        sourceMarkdown: markdown,
+        scope: 'user',
+      });
+      if (
+        !mountedRef.current ||
+        generation !== generationRef.current ||
+        seq !== previewSeqRef.current ||
+        activePreviewFingerprintRef.current !== requestFingerprint ||
+        latestPreviewFingerprintRef.current !== requestFingerprint
+      ) {
+        return;
       }
+      const parsed = parseCrossAgentPreview(raw);
+      if (!parsed || !responseMatchesRequest(parsed, source, requestedDestinations)) {
+        setError(t('agentHub:crossAgent.errors.invalidPreview'));
+        return;
+      }
+      setPreview(parsed);
     } catch (reason) {
-      if (!mountedRef.current || seq !== previewSeqRef.current) return;
+      if (
+        !mountedRef.current ||
+        generation !== generationRef.current ||
+        seq !== previewSeqRef.current ||
+        latestPreviewFingerprintRef.current !== requestFingerprint
+      ) {
+        return;
+      }
       setError(formatError(reason));
-      setPreview(null);
-      setFullPlan(null);
     } finally {
-      if (mountedRef.current && seq === previewSeqRef.current) {
+      if (
+        mountedRef.current &&
+        generation === generationRef.current &&
+        seq === previewSeqRef.current
+      ) {
         setBusy(false);
       }
     }
   }, [
-    context.deviceId,
+    currentPreviewFingerprint,
     destinations,
-    fullDestination,
-    mode,
     previewBlockedReason,
     previewGate.ok,
-    scopeWire,
     source,
     sourceMarkdown,
     t,
   ]);
 
   const runApply = useCallback(async () => {
-    if (!applyGate.ok) {
-      setError(applyBlockedReason ?? t('agentHub:crossAgent.errors.previewRequired'));
-      return;
-    }
-    const seq = ++applySeqRef.current;
-    setBusy(true);
-    setError(null);
-    try {
-      const clientRequestId =
-        clientRequestIdRef.current ?? createClientRequestId();
-      clientRequestIdRef.current = clientRequestId;
+    setError(t('agentHub:crossAgent.errors.applyUnavailable'));
+  }, [t]);
 
-      if (mode === 'full') {
-        if (!fullPlan || !fullDestination) {
-          setError(t('agentHub:crossAgent.errors.previewRequired'));
-          return;
-        }
-        const raw = await agentHubApi.applyCrossAgentFull({
-          source,
-          destination: fullDestination,
-          scope: scopeWire,
-          sourceMarkdown: sourceMarkdown.trim(),
-          planHash: fullPlan.planHash,
-          clientRequestId,
-          items: fullPlan.items.map((item) => ({
-            logicalKey: item.logicalKey,
-            included: item.included,
-          })),
-          deviceId: context.deviceId,
-        });
-        if (!mountedRef.current || seq !== applySeqRef.current) return;
-        setFullApplyResults(parseCrossAgentFullApplyResults(raw));
-        setApplyResults(null);
-      } else {
-        const applicable =
-          'applicableDestinations' in applyGate
-            ? applyGate.applicableDestinations
-            : [];
-        const raw = await agentHubApi.applyCrossAgentInstruction({
-          source,
-          destinations: applicable,
-          sourceMarkdown: sourceMarkdown.trim(),
-          scope: scopeWire,
-          destinationPaths: {},
-          planHash: preview?.planHash ?? '',
-          clientRequestId,
-        });
-        if (!mountedRef.current || seq !== applySeqRef.current) return;
-        setApplyResults(parseCrossAgentApplyResults(raw));
-        setFullApplyResults(null);
-      }
-    } catch (reason) {
-      if (!mountedRef.current || seq !== applySeqRef.current) return;
-      setError(formatError(reason));
-    } finally {
-      if (mountedRef.current && seq === applySeqRef.current) {
-        setBusy(false);
-      }
-    }
-  }, [
-    applyBlockedReason,
-    applyGate,
-    context.deviceId,
-    fullDestination,
-    fullPlan,
-    mode,
-    scopeWire,
-    source,
-    sourceMarkdown,
-    t,
-  ]);
+  const setFullDestination = useCallback(() => {
+    invalidatePreview();
+    setError(t('agentHub:crossAgent.errors.fullUnavailable'));
+  }, [invalidatePreview, t]);
 
-  const projectOptInNeeded =
-    context.scope === 'project' &&
-    !(context.projectKey && context.projectKey.trim().length > 0);
-
-  const applicableCount =
-    mode === 'full'
-      ? countApplicableFullItems(fullPlan)
-      : countApplicableDestinations(preview);
+  const toggleFullItemIncluded = useCallback(() => {
+    setError(t('agentHub:crossAgent.errors.fullUnavailable'));
+  }, [t]);
 
   return {
-    mode,
+    mode: 'selective',
     setMode,
     source,
     destinations,
     destinationOptions: destinationCandidates(source),
-    fullDestination,
+    fullDestination: defaultFullDestination(source),
     setFullDestination,
     scope: context.scope,
     projectKey: context.projectKey,
@@ -584,15 +483,15 @@ export function useCrossAgentAdaptController(
     busy,
     error,
     preview,
-    applyResults,
-    fullPlan,
-    fullApplyResults,
-    applicableCount,
+    applyResults: null,
+    fullPlan: null,
+    fullApplyResults: null,
+    applicableCount: 0,
     canPreview: previewGate.ok && !busy,
-    canApply: applyGate.ok && !busy,
+    canApply: false,
     previewBlockedReason,
-    applyBlockedReason,
-    projectOptInNeeded,
+    applyBlockedReason: t('agentHub:crossAgent.errors.applyUnavailable'),
+    projectOptInNeeded: context.scope !== 'user',
     toggleDestination,
     toggleFullItemIncluded,
     runPreview,

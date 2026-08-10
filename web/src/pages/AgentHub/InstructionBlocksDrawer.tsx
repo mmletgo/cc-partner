@@ -142,6 +142,7 @@ export function InstructionBlocksDrawer({
       blocksDirty: false,
       originalDirty: false,
       externalDrift: false,
+      sourceDrift: false,
     };
     nextState = ensureModeBlock(nextState, mode, activeTarget);
     const block = findBlockByMode(nextState.blocks, mode);
@@ -285,14 +286,12 @@ export function InstructionBlocksDrawer({
           <ul className={styles.blockList}>
             {SLOTS.map(({ mode, lane }) => {
               const block = findBlockByMode(slotDrafts, mode);
-              let text = '';
-              if (mode === 'shared') {
-                text = block?.commonMarkdown ?? '';
-              } else if (mode === 'adapted') {
-                text = block?.variants[activeTarget] ?? block?.commonMarkdown ?? '';
-              } else {
-                text = block?.variants[activeTarget] ?? '';
-              }
+              const text =
+                mode === 'shared'
+                  ? (block?.commonMarkdown ?? '')
+                  : mode === 'adapted'
+                    ? (block?.variants[activeTarget] ?? block?.commonMarkdown ?? '')
+                    : (block?.variants[activeTarget] ?? '');
               return (
                 <li
                   key={mode}

@@ -117,24 +117,33 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` 重定向 `/agent-hub`，旧 `/claude-code` 精确重定向 `/agent-hub?section=assets&target=claude`。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。Gate C 交付 **SnapshotEnvelope v1**、**LAN source-only push**（capability `agent-hub.v1`）与 **Git device-lane 确认式导入**（从不自动 import）。Gate D 交付 **Plugin 分解投影** 与 **OpenCode runtime bridge 合同**（库路径 + L2/E2E；非真实 TUI）。**Portable asset management parity（UI F1–F6 + backend L2）** 在 Agent Hub 交付三 target × 四 kind observed inventory、本机 preview/apply/rescan 与 same-agent Pull；旧 ClaudeCodeAssets 前端/API/components/helper/types/i18n 已删除，Rust/P2P 旧 `/api/claude-code/assets/*` facade 保留 N/N+1。
+**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在固定的**本机·用户级**上下文中查看 Claude / Codex / OpenCode 的 Agent 指令与可移植资产。Hub Canonical 指令块可按 revision CAS 保存，但本机原始 CLI 文件始终只读。旧 `/claude-md`、`/claude-code`、`section`、project/peer、`assetId/conflictId` 深链仅做一次性 URL 规范化；不得恢复 legacy matrix、项目写入或远端就地管理。Gate B–D 已实现的领域库与协议继续保留，但未获真实 CLI L3 认证的原生 mutation 全部 scan-only；跨 Agent 仅开放本机用户级 bounded selective preview。
 
-**已交付（Gate A）**：
-- Hub 首屏展示 CLI probe 状态、write 兼容性、冲突/阻塞计数
-- instruction 资产列表与 Claude / Codex / OpenCode **target matrix**（desired presence / materialization 单元格）
-- 项目 opt-in：**preview 零写入** → 用户确认 **enable** 后才绑定 checkout 与投影意图
-- 迁移进 Hub 的用户 CLAUDE.md 记为 Claude **targetOnly** 指令；生成 Codex/OpenCode 差异仅供预览/确认，**投影绑定默认 `desiredPresence=absent`，须用户确认后才 present**
-- 冲突 deep link（`/agent-hub?assetId=…&conflictId=…`）打开冲突抽屉；Attention 只导航不执行写动作
-- N/N+1 期间：已接受的用户 Claude 投影 **仅 dual-write legacy summary**（旧 `claude_md` 行摘要）；**legacy 向量时钟不裁决 Hub 冲突**
+**2026-08-10 安全纠正（当前权威行为）**：
+- Shell 是 Agent、范围和主 Tab 的唯一上下文真源；主界面只有 Agent 指令、Skill、命令、MCP、Plugin，observed inventory 是资产唯一真源。
+- 三栏草稿按 `agent + lane + scope` 隔离；draft lease 的 Canonical base 只在首次 hydrate、明确放弃或成功保存后迁移。刷新只更新观测 head/snapshot，`canonicalDrift` 阻止保存，`sourceDrift` 不阻止 Hub CAS，但在重新载入确认前阻止原生 preview/apply。
+- Hub Save 只消费 `blocksDirty`；Original-only Save 是零 API 的诚实 no-op。显式从原始文件解析后形成 dirty Hub 草稿，保存成功不得清另一栏草稿或保存期间的新编辑。
+- Agent/lane/Tab/history/deep-link 共用 committed/pending context 与 dirty Dialog；确认前 URL、标签、正文和 CAS lease 都保持旧上下文。
+- project/peer 直接 inspect/write、legacy writer、portable 原生 apply、projection create/update/delete、cross-agent apply/full 均 fail-closed。`AGENT_HUB_API_VERSION=4` 阻止新旧 GUI/sidecar 混跑绕过该策略。
+- Same-agent Pull 与 LAN Snapshot 任务保留；远端刷新失败会把旧 inventory 标 stale、清 plan 并禁用 Apply，危险冲突策略每次会话恢复为 `skipExisting`。任何原生安装仍受当前 Blocked capability 门禁。
+- Portable Action/Pull 的 plan 与异步响应绑定当前 Agent、scope、query/snapshot、item/action、选择与策略；history 或任一输入变化会立即作废旧响应。写动作按 operation 检查精确 capability，不能用 Activate/Render 的认证旁路 disable/uninstall/remove。
+- 具体交互、异常与验收合同见 `docs/superpowers/specs/2026-08-10-agent-hub-correction-design.md`。下列 Gate A–D 条目描述保留的数据模型/库路径，不构成当前生产 UI 写入承诺。
 
-**已交付（Gate B 可移植资产）**：
+**保留的 Gate A 领域能力（非生产 legacy UI）**：
+- Hub 可读取 CLI probe、write compatibility 与冲突/阻塞数据；技术诊断按需展示。
+- Canonical instruction、Revision DAG、target projection intent 与项目 mapping 数据模型继续保留，但 target matrix、项目 opt-in、legacy conflict drawer 不进入生产 DOM。
+- 迁移进 Hub 的用户 CLAUDE.md 记为 Claude **targetOnly** 指令；生成 Codex/OpenCode 差异仅供 preview，原生投影保持 blocked。
+- Attention 的 legacy `assetId/conflictId` 目标只允许导航到规范化库存上下文，不直接执行动作。
+- N/N+1 的 legacy summary 数据仍可兼容读取；legacy 向量时钟不裁决 Hub 冲突，也不得触发 writer fallback。
+
+**保留的 Gate B 可移植资产库路径（生产写入 scan-only）**：
 - Skill / Command / Agent / MCP 的 **canonical Hub 载荷**（common 字段 + `target_extensions`；MCP 凭据原文进 CAS，诊断/日志脱敏）
 - 三端 **只读 portable 扫描**（native / compatibility / legacyStandalone / plugin origin；扫描不写盘）
-- **managed package 物化**到 `<data_dir>/agent-hub/materialized-packages/<target>/<scope>/<package-id>/`：Claude/Codex 生成隔离 Plugin（`plugin@cc-partner`），OpenCode 写原生 `skills/commands/agents` 树；**禁止**把 managed 输出写进 `.claude/skills` / `.agents/skills`
+- managed package renderer、activator 与 ownership-aware patch 仍用于预览、测试与未来认证；当前 support manifest 三 target 的原生写 capability 均为 Blocked，任何 writer 前必须 force-inspect，因此生产不会物化/启停/卸载 CLI 资产
 - **shared** 资产对三端可见；**targetOnly** 严格隔离（OpenCode 不接收 Claude/Codex targetOnly）
 - ownership-aware **TOML/JSONC** 语义 patch：managed 字段 enable/disable/update/remove 后，unmanaged 键与注释仍存活
-- **legacy adoption**：激活-before-removal；失败/崩溃恢复后恰好一份 discoverable source；destination 非空 unmanaged → externalCollision 预览
-- 前端矩阵：scope/kind 过滤、canonical 与 invocation alias 分离、aggregateStatus、target 本地 enable/detach restore/remove、delete everywhere、adoption 预览；LAN push / Git import 入口
+- legacy adoption 的 planner/恢复合同保留，但 production legacy matrix 与 writer 不可达；旧 URL 只翻译到 canonical inventory，不能 fallback 到旧 `listAssets/getAsset` 或 mutation drawer
+- 前端仅保留搜索、资产状态、管理状态、详情与刷新；Agent/kind/scope 来自 Shell。Blocked/stale 时 mutation 动作不可见，并展示稳定原因
 
 **已交付（Gate C Snapshot / LAN source-push / Git device-lane）**：
 - SnapshotEnvelope v1：`format=cc-partner-agent-hub`、`formatVersion=1`、`canonicalization=RFC8785-JSON`；硬上限 selection 100k / 未压缩 2GiB / 单 blob 512MiB / manifest 32MiB / LAN chunk ≤8MiB
@@ -172,12 +181,13 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 前端 `npm run lint` 与默认 strict `check:bundle` 在本轮 **未**宣称通过（lint 债务集中于 Agent Hub hooks/React Compiler；bundle 仅 final-only 硬顶可通过）
 - 命令矩阵与完整 NOT VERIFIED 清单：`.superpowers/sdd/reports/program-task-5-report.md`
 
-**已交付（Portable asset management parity；UI F1–F6 + backend L2）**：
-- Agent Hub `section=assets` 以 observed inventory 为真源，固定四 kind 分栏（Skill/Command/Plugin/MCP）与 target/scope/actual/management 筛选
-- 本机动作统一 preview → confirm → apply → rescan；stale / blocked / partial / outcomeUnknown 诚实展示；Plugin 删除确认 ownership 影响
+**Portable inventory 与 same-agent Pull（当前生产边界）**：
+- Agent Hub 以 observed inventory 为唯一真源，固定四 kind 主 Tab（Skill/命令/Plugin/MCP）；库存自身只保留 search/state/management，target/kind/scope 不再形成第二套 URL 状态
+- 本机原生动作在当前 scan-only manifest 下不可 Apply；stale / blocked / partial / outcomeUnknown 诚实展示，详情动作隐藏时同步展示原因
+- mutation 必须按实际动作精确匹配 capability：原生普通 portable 资产写入只认 `RenderPortableAssets`，原生 Plugin 启用只认 `ActivatePackage`，停用/卸载只认精确 `DeactivatePackage=Supported`；Pull 安装 Plugin 同时要求 Render + Activate；Hub managed package（无论内部组件 kind）停用/Absent 只认 Deactivate。target 汇总能力、旧 plan 或其它已认证写能力都不得替代该检查
 - MCP 详情与 Pull 仅展示 credential present/hash（及 boolean 披露），不渲染 secret 明文
 - same-agent Pull：远端 metadata inventory、选择、冲突/replace preview、progress、canonical-only mapping、per-item report；不提供跨 Agent destination picker
-- `/claude-code` deep-link → `/agent-hub?section=assets&target=claude`；旧 ClaudeCodeAssets 前端已删除
+- `/claude-code` 与旧 `section/target/kind/assetId/conflictId` deep-link 进入后规范化为 `/agent-hub?agent=…&tab=…` 或可映射的 `inventoryItemId`；旧 ClaudeCodeAssets/legacy matrix 前端不可达
 - L1 证据：`E2E-AGENT-HUB-PORTABLE-001`（`web/tests/agent-hub.spec.ts` backendHarness mock）；后端 L2：`L2-AGENT-HUB-PORTABLE-PARITY-001` / `L2-AGENT-HUB-PORTABLE-PULL-001`
 - 真实多机/全平台 CLI 写盘与 dual-host mDNS 仍 **NOT VERIFIED**（L3）
 

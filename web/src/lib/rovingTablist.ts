@@ -23,6 +23,17 @@ export type RovingTabKey = 'ArrowLeft' | 'ArrowRight' | 'Home' | 'End';
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   DOM KeyboardEvent.key 是任意 string；共享 roving 算法只接受四个合同按键。
+ *
+ * Code Logic（这个函数做什么）:
+ *   精确匹配 ArrowLeft / ArrowRight / Home / End，并向 TypeScript 收窄类型。
+ */
+export function isRovingTabKey(key: string): key is RovingTabKey {
+  return key === 'ArrowLeft' || key === 'ArrowRight' || key === 'Home' || key === 'End';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   键盘用户在 tablist 内用方向键/Home/End 切换时，需要确定性的下一索引；
  *   多处 tablist 共用同一 wrap 语义，避免左边界/右边界处理不一致。
  *

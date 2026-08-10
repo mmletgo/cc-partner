@@ -26,21 +26,8 @@ const labels: PortableInventoryViewLabels = {
   retry: 'Retry',
   staleBanner: 'Inventory is stale',
   searchPlaceholder: 'Search assets',
-  filterTarget: 'Target',
-  filterScope: 'Scope',
   filterActual: 'State',
   filterManagement: 'Management',
-  targetFilter: {
-    all: 'All targets',
-    claude: 'Claude',
-    codex: 'Codex',
-    opencode: 'OpenCode',
-  },
-  scopeFilter: {
-    all: 'All scopes',
-    user: 'User',
-    project: 'Project',
-  },
   actualFilter: {
     all: 'All states',
     enabled: 'Enabled',
@@ -161,7 +148,7 @@ function controller(
 }
 
 describe('PortableInventoryView', () => {
-  test('renders filters and rows without nested kind tabs; target filter patches filters', () => {
+  test('renders only search/state/management filters; Agent, kind and scope stay shell-owned', () => {
     const ctl = controller();
     render(<PortableInventoryView controller={ctl} labels={labels} />);
 
@@ -172,10 +159,12 @@ describe('PortableInventoryView', () => {
     expect(screen.queryByTestId('portable-kind-tab-mcp')).toBeNull();
     expect(screen.getByTestId('portable-inventory-row-claude-skill-alpha')).toBeTruthy();
 
-    fireEvent.change(screen.getByTestId('portable-filter-target'), {
-      target: { value: 'codex' },
+    expect(screen.queryByTestId('portable-filter-target')).toBeNull();
+    expect(screen.queryByTestId('portable-filter-scope')).toBeNull();
+    fireEvent.change(screen.getByTestId('portable-filter-actual'), {
+      target: { value: 'problem' },
     });
-    expect(ctl.setFilters).toHaveBeenCalledWith({ target: 'codex' });
+    expect(ctl.setFilters).toHaveBeenCalledWith({ actualState: 'problem' });
   });
 
   test('shows stale banner and empty state', () => {

@@ -234,6 +234,21 @@ export function useUserInstructionManager(
     dirtyRef.current = dirty;
   }, [dirty]);
 
+  /**
+   * Business Logic: 任何草稿语义变化都必须立即撤销旧 preview 的有效性。
+   * Code Logic: 推进 preview sequence、清 plan/幂等键与结果；旧 Promise 的 commit/finally 均失效。
+   */
+  const invalidateDraftPreview = useCallback(() => {
+    previewSeqRef.current += 1;
+    planRequestIdRef.current = null;
+    setPlan(null);
+    setPreviewOpen(false);
+    setApplyResult(null);
+    // 直接 controller 调用可在 preview pending 时编辑；旧 finally 已被 seq 拦截，
+    // 因此这里负责释放该旧 preview 的 busy。
+    setActionBusy(false);
+  }, []);
+
   /** 加载 inventory，用户已有草稿时只刷新事实，不覆盖草稿。 */
   const loadWorkspace = useCallback(async (isRefresh: boolean) => {
     const seq = ++loadSeqRef.current;
@@ -270,6 +285,7 @@ export function useUserInstructionManager(
 
   /** 更新公共或专属正文，只修改本地草稿。 */
   const updateDraftContent = useCallback((pane: UserInstructionEditorPane, value: string) => {
+    invalidateDraftPreview();
     setDraft((current) => {
       if (pane === 'common') return { ...current, commonContent: value };
       return {
@@ -279,17 +295,19 @@ export function useUserInstructionManager(
     });
     setDirty(true);
     setActionError(null);
-  }, []);
+  }, [invalidateDraftPreview]);
 
   /** 放弃本地修改并恢复最后一次成功 inventory 的 canonical 草稿。 */
   const resetDraft = useCallback(() => {
+    invalidateDraftPreview();
     setDraft(baselineDraftRef.current);
     setDirty(false);
     setActionError(null);
-  }, []);
+  }, [invalidateDraftPreview]);
 
   /** 打开首次设置；从 target 卡进入时只预选该 target，不触发 mutation。 */
   const openSetup = useCallback((target?: AgentTarget) => {
+    invalidateDraftPreview();
     if (target) {
       setDraft((current) => ({
         ...current,
@@ -299,7 +317,7 @@ export function useUserInstructionManager(
     }
     setSetupOpen(true);
     setActionError(null);
-  }, []);
+  }, [invalidateDraftPreview]);
 
   /** 关闭向导但保留草稿。 */
   const closeSetup = useCallback(() => {
@@ -310,6 +328,7 @@ export function useUserInstructionManager(
   /** 修改 target 选择，只更新本地草稿。 */
   const setTargetSelection = useCallback(
     (target: AgentTarget, selection: UserInstructionTargetSelection) => {
+      invalidateDraftPreview();
       setDraft((current) => ({
         ...current,
         targetSelections: { ...current.targetSelections, [target]: selection },
@@ -317,11 +336,12 @@ export function useUserInstructionManager(
       setDirty(true);
       setActionError(null);
     },
-    [],
+    [invalidateDraftPreview],
   );
 
   /** 把单一来源专属草稿显式提升为公共规则，不做语义改写。 */
   const promoteTargetExtensionToCommon = useCallback((target: AgentTarget) => {
+    invalidateDraftPreview();
     setDraft((current) => {
       const source = current.targetExtensions[target] ?? '';
       if (!source.trim()) return current;
@@ -334,7 +354,7 @@ export function useUserInstructionManager(
     setDirty(true);
     setActivePane('common');
     setActionError(null);
-  }, []);
+  }, [invalidateDraftPreview]);
 
   /** 关闭预览但保留草稿和 setup 选择。 */
   const closePreview = useCallback(() => {

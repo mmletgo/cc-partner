@@ -11,7 +11,7 @@
  */
 
 import type { JSX } from 'react';
-import { Button, StatusMessage } from '@/components/primitives';
+import { Button, Dialog, StatusMessage } from '@/components/primitives';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { InstructionLane } from '../context/agentHubContext';
 import {
@@ -54,6 +54,14 @@ export interface InstructionThreePaneViewLabels {
   refresh: string;
   commonMarkdown: string;
   saveBlocks: string;
+  unsavedDraft: string;
+  canonicalDrift: string;
+  sourceDrift: string;
+  originalReadOnly: string;
+  discardAndReload: string;
+  reparseConfirmTitle: string;
+  reparseConfirmDescription: string;
+  reparseConfirm: string;
 }
 
 export interface InstructionThreePaneViewProps {
@@ -70,11 +78,13 @@ export interface InstructionThreePaneViewProps {
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
+  reparseConfirmOpen: boolean;
   onReparse: () => void;
   onSync: () => void;
   onSaveBlocks: () => void;
   onRetry: () => void;
   onRefresh: () => void;
+  onDiscardAndReload: () => void;
   onOriginalChange: (text: string) => void;
   /**
    * 编辑当前 lane 对应槽。
@@ -94,6 +104,8 @@ export interface InstructionThreePaneViewProps {
   onAdaptedVariantChange?: (text: string) => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
   onCancelDualDirty: () => void;
+  onConfirmReparse: () => void;
+  onCancelReparse: () => void;
 }
 
 function slotHint(
@@ -121,10 +133,13 @@ function InstructionChrome(props: {
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   actionError: string | null;
+  refreshError: string | null;
   dualDirtyOpen: boolean;
   showPath: boolean;
   showSync: boolean;
   onRefresh: () => void;
+  onRetry: () => void;
+  onDiscardAndReload: () => void;
   onSaveBlocks: () => void;
   onSync: () => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
@@ -137,10 +152,13 @@ function InstructionChrome(props: {
     writeBlocked,
     writeBlockedReason,
     actionError,
+    refreshError,
     dualDirtyOpen,
     showPath,
     showSync,
     onRefresh,
+    onRetry,
+    onDiscardAndReload,
     onSaveBlocks,
     onSync,
     onChooseBaseline,
@@ -166,6 +184,7 @@ function InstructionChrome(props: {
             size="sm"
             loading={actionBusy}
             onClick={onRefresh}
+            disabled={actionBusy}
             data-testid="instruction-rescan"
           >
             {labels.refresh}
@@ -174,6 +193,7 @@ function InstructionChrome(props: {
             variant="primary"
             size="sm"
             loading={actionBusy}
+            disabled={actionBusy || !state.blocksDirty || state.externalDrift}
             onClick={onSaveBlocks}
             data-testid="instruction-save-blocks"
           >
@@ -197,6 +217,57 @@ function InstructionChrome(props: {
       {writeBlocked && writeBlockedReason ? (
         <StatusMessage tone="warn" data-testid="instruction-write-blocked">
           {writeBlockedReason}
+        </StatusMessage>
+      ) : null}
+
+      {state.blocksDirty || state.originalDirty ? (
+        <StatusMessage tone="info" live="off" data-testid="instruction-unsaved-draft">
+          {labels.unsavedDraft}
+        </StatusMessage>
+      ) : null}
+
+      {state.externalDrift ? (
+        <StatusMessage
+          tone="warn"
+          data-testid="instruction-canonical-drift"
+          action={(
+            <Button variant="danger" size="sm" onClick={onDiscardAndReload}>
+              {labels.discardAndReload}
+            </Button>
+          )}
+        >
+          {labels.canonicalDrift}
+        </StatusMessage>
+      ) : null}
+
+      {state.sourceDrift ? (
+        <StatusMessage
+          tone="warn"
+          live="off"
+          data-testid="instruction-source-drift"
+          action={
+            state.externalDrift ? undefined : (
+              <Button variant="danger" size="sm" onClick={onDiscardAndReload}>
+                {labels.discardAndReload}
+              </Button>
+            )
+          }
+        >
+          {labels.sourceDrift}
+        </StatusMessage>
+      ) : null}
+
+      {refreshError ? (
+        <StatusMessage
+          tone="warn"
+          data-testid="instruction-refresh-error"
+          action={(
+            <Button variant="secondary" size="sm" onClick={onRetry}>
+              {labels.retry}
+            </Button>
+          )}
+        >
+          {refreshError}
         </StatusMessage>
       ) : null}
 
@@ -367,10 +438,10 @@ function ExclusiveLanePanes(props: {
   state: InstructionThreePaneState;
   slotText: string;
   onSlotTextChange: (text: string) => void;
-  onOriginalChange: (text: string) => void;
   onReparse: () => void;
+  reparseDisabled: boolean;
 }): JSX.Element {
-  const { labels, state, slotText, onSlotTextChange, onOriginalChange, onReparse } = props;
+  const { labels, state, slotText, onSlotTextChange, onReparse, reparseDisabled } = props;
 
   return (
     <div
@@ -423,6 +494,7 @@ function ExclusiveLanePanes(props: {
             variant="secondary"
             size="sm"
             onClick={onReparse}
+            disabled={reparseDisabled}
             data-testid="instruction-reparse-from-original"
           >
             {labels.reparseFromOriginal}
@@ -439,8 +511,9 @@ function ExclusiveLanePanes(props: {
             value={state.originalText}
             aria-label={labels.originalTitle}
             data-testid="instruction-original-textarea"
-            onChange={(event) => onOriginalChange(event.currentTarget.value)}
+            readOnly
           />
+          <p className={styles.paneHint}>{labels.originalReadOnly}</p>
         </div>
       </section>
     </div>
@@ -464,17 +537,20 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     writeBlocked,
     writeBlockedReason,
     dualDirtyOpen,
+    reparseConfirmOpen,
     onReparse,
     onSync,
     onSaveBlocks,
     onRetry,
     onRefresh,
-    onOriginalChange,
+    onDiscardAndReload,
     onSlotTextChange,
     onAdaptedCommonChange,
     onAdaptedVariantChange,
     onChooseBaseline,
     onCancelDualDirty,
+    onConfirmReparse,
+    onCancelReparse,
   } = props;
 
   if (loading && !state.originalText && state.blocks.length === 0 && !error) {
@@ -517,7 +593,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
 
   // 路径仅在独有槽（展示原始文件）有意义；同步写盘各 lane 均可用
   const showPath = instructionLane === 'exclusive';
-  const showSync = true;
+  const showSync = false;
 
   return (
     <div className={styles.root} data-testid="instruction-three-pane">
@@ -528,10 +604,13 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         writeBlocked={writeBlocked}
         writeBlockedReason={writeBlockedReason}
         actionError={actionError}
+        refreshError={error}
         dualDirtyOpen={dualDirtyOpen}
         showPath={showPath}
         showSync={showSync}
         onRefresh={onRefresh}
+        onRetry={onRetry}
+        onDiscardAndReload={onDiscardAndReload}
         onSaveBlocks={onSaveBlocks}
         onSync={onSync}
         onChooseBaseline={onChooseBaseline}
@@ -570,10 +649,31 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           state={state}
           slotText={exclusiveSlotText}
           onSlotTextChange={onSlotTextChange}
-          onOriginalChange={onOriginalChange}
           onReparse={onReparse}
+          reparseDisabled={actionBusy || state.sourceDrift || state.externalDrift}
         />
       ) : null}
+
+      <Dialog
+        open={reparseConfirmOpen}
+        titleId="instruction-reparse-confirm-title"
+        onClose={onCancelReparse}
+      >
+        <div className={styles.dualDirty} data-testid="instruction-reparse-confirm">
+          <h2 id="instruction-reparse-confirm-title" className={styles.dualDirtyTitle}>
+            {labels.reparseConfirmTitle}
+          </h2>
+          <p className={styles.dualDirtyDesc}>{labels.reparseConfirmDescription}</p>
+          <div className={styles.dualDirtyActions}>
+            <Button variant="secondary" size="sm" onClick={onCancelReparse}>
+              {labels.cancel}
+            </Button>
+            <Button variant="danger" size="sm" onClick={onConfirmReparse}>
+              {labels.reparseConfirm}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

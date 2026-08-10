@@ -77,7 +77,7 @@ export function LanPushDialog(props: LanPushDialogProps) {
   } = props;
 
   const peerList = peers ?? [];
-  const selectedPeers = selectedPeerIds ?? [];
+  const selectedPeers = useMemo(() => selectedPeerIds ?? [], [selectedPeerIds]);
   const selectedSet = useMemo(() => new Set(selectedPeers), [selectedPeers]);
   const canStart = selectedPeers.length > 0 && !busy;
 

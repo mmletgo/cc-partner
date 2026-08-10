@@ -7,6 +7,8 @@
 
 import { describe, expect, test } from 'vitest';
 import {
+  getAgentHubContextCapability,
+  getAgentHubDraftIdentity,
   mapLegacySection,
   parseAgentHubContext,
   writeAgentHubContext,
@@ -41,15 +43,15 @@ describe('parseAgentHubContext', () => {
     expect(ctx.projectKey).toBeNull();
   });
 
-  test('explicit new params override defaults', () => {
+  test('explicit navigation params win while unsupported scope is normalized local-user', () => {
     const params = new URLSearchParams(
       'agent=opencode&scope=project&project=wb:proj-1&tab=mcp&view=adapt',
     );
     expect(parseAgentHubContext(params)).toEqual({
       agent: 'opencode',
-      scope: 'project',
+      scope: 'user',
       deviceId: null,
-      projectKey: 'wb:proj-1',
+      projectKey: null,
       tab: 'mcp',
       instructionLane: 'common',
       adaptView: true,
@@ -68,23 +70,23 @@ describe('parseAgentHubContext', () => {
     expect(ctx.instructionLane).toBe('common');
   });
 
-  test('user scope keeps deviceId and clears projectKey', () => {
+  test('peer user URL is normalized to local user', () => {
     const params = new URLSearchParams(
       'scope=user&deviceId=peer-abc&project=should-ignore',
     );
     const ctx = parseAgentHubContext(params);
     expect(ctx.scope).toBe('user');
-    expect(ctx.deviceId).toBe('peer-abc');
+    expect(ctx.deviceId).toBeNull();
     expect(ctx.projectKey).toBeNull();
   });
 
-  test('project scope keeps projectKey and clears deviceId', () => {
+  test('project URL is normalized to local user', () => {
     const params = new URLSearchParams(
       'scope=project&project=remote:dev1:/path&deviceId=should-ignore',
     );
     const ctx = parseAgentHubContext(params);
-    expect(ctx.scope).toBe('project');
-    expect(ctx.projectKey).toBe('remote:dev1:/path');
+    expect(ctx.scope).toBe('user');
+    expect(ctx.projectKey).toBeNull();
     expect(ctx.deviceId).toBeNull();
   });
 
@@ -157,7 +159,7 @@ describe('writeAgentHubContext', () => {
     expect(next.toString()).toBe('');
   });
 
-  test('round-trip write/parse preserves non-default context', () => {
+  test('write strips unsupported owner fields while preserving safe navigation', () => {
     const original: AgentHubContext = {
       agent: 'codex',
       scope: 'user',
@@ -170,7 +172,11 @@ describe('writeAgentHubContext', () => {
     const written = writeAgentHubContext(new URLSearchParams('conflictId=c1'), original);
     // 保留无关 deep link
     expect(written.get('conflictId')).toBe('c1');
-    expect(parseAgentHubContext(written)).toEqual(original);
+    expect(written.get('deviceId')).toBeNull();
+    expect(parseAgentHubContext(written)).toEqual({
+      ...original,
+      deviceId: null,
+    });
   });
 
   test('lane=exclusive on instructions is written and round-trips', () => {
@@ -195,7 +201,7 @@ describe('writeAgentHubContext', () => {
     expect(parseAgentHubContext(written).instructionLane).toBe('common');
   });
 
-  test('project scope round-trip', () => {
+  test('project scope is stripped instead of round-tripping into an unsafe context', () => {
     const original: AgentHubContext = {
       agent: 'claude',
       scope: 'project',
@@ -206,10 +212,14 @@ describe('writeAgentHubContext', () => {
       adaptView: false,
     };
     const written = writeAgentHubContext(new URLSearchParams(), original);
-    expect(written.get('scope')).toBe('project');
-    expect(written.get('project')).toBe('local:proj-x');
+    expect(written.get('scope')).toBeNull();
+    expect(written.get('project')).toBeNull();
     expect(written.get('deviceId')).toBeNull();
-    expect(parseAgentHubContext(written)).toEqual(original);
+    expect(parseAgentHubContext(written)).toEqual({
+      ...original,
+      scope: 'user',
+      projectKey: null,
+    });
   });
 
   test('writing modern context strips legacy section/target/kind so parse stays stable', () => {
@@ -220,5 +230,42 @@ describe('writeAgentHubContext', () => {
     expect(written.get('kind')).toBeNull();
     expect(written.get('bridge')).toBe('/tmp');
     expect(parseAgentHubContext(written)).toEqual(DEFAULT_CONTEXT);
+  });
+});
+
+describe('Agent Hub context capability', () => {
+  test('local user is direct, peer user is pull-only, and project/mixed contexts fail closed', () => {
+    expect(getAgentHubContextCapability(DEFAULT_CONTEXT)).toBe('direct');
+    expect(
+      getAgentHubContextCapability({ ...DEFAULT_CONTEXT, deviceId: 'peer-a' }),
+    ).toBe('pullOnly');
+    expect(
+      getAgentHubContextCapability({
+        ...DEFAULT_CONTEXT,
+        scope: 'project',
+        projectKey: 'local:p1',
+      }),
+    ).toBe('unsupported');
+    expect(
+      getAgentHubContextCapability({ ...DEFAULT_CONTEXT, projectKey: 'mixed' }),
+    ).toBe('unsupported');
+  });
+
+  test('draft identity includes owner and agent but excludes transient tab/lane/view', () => {
+    expect(
+      getAgentHubDraftIdentity({
+        ...DEFAULT_CONTEXT,
+        agent: 'codex',
+        deviceId: 'peer-a',
+        tab: 'plugin',
+        instructionLane: 'exclusive',
+        adaptView: true,
+      }),
+    ).toEqual({
+      scope: 'user',
+      deviceId: 'peer-a',
+      projectKey: null,
+      agent: 'codex',
+    });
   });
 });

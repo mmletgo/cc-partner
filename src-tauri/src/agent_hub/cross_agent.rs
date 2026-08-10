@@ -1,12 +1,12 @@
 //! agent_hub/cross_agent — 同机跨 Agent 手动同步与适配（阶段三）
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     用户选择源 Agent 资产/指令 → 预览 shared/adapted/targetOnly/residual → 确认后
-//!     一次性写入目标 Agent。禁止 sidecar 因外部编辑自动跨 target 写盘。
+//!     用户选择源 Agent 资产/指令 → 预览 shared/adapted/targetOnly/residual。
+//!     真实 CLI 写盘证据未完成前，apply 固定 fail-closed；禁止 sidecar 因外部编辑自动跨 target 写盘。
 //!
 //! Code Logic（这个模块做什么）:
-//!     指令：classify_import / block_needs_target_isolation / compile_render + AtomicProjectionWriter；
-//!     skill：目录拷贝到目标 skills 根；plugin 返回 partial residuals 不得宣称 full。
+//!     指令：classify_import / block_needs_target_isolation / compile_render + 有界内容 diff；
+//!     plugin 返回 partial residuals，不得宣称 full。
 
 use crate::agent_hub::instructions::{
     block_needs_target_isolation, classify_import, compile_render, ImportScopeContext,
@@ -14,12 +14,12 @@ use crate::agent_hub::instructions::{
 };
 use crate::agent_hub::models::AgentTarget;
 use crate::agent_hub::object_store::sha256_hex;
-use crate::agent_hub::projection::{AtomicProjectionWriter, AtomicWriteOutcome, FileWriteRequest};
 use crate::agent_hub::targets::{InstructionRenderContext, TargetEnvironment, TargetPathResolver};
+use crate::agent_hub::user_instructions::{read_text_bounded, render_bounded_diff};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
+#[cfg(test)]
 use std::path::PathBuf;
 
 const USER_SCOPE: &str = "user";
@@ -128,6 +128,11 @@ pub fn preview_cross_agent_instruction(
     env: &TargetEnvironment,
 ) -> Result<CrossAgentPreviewReport, AppError> {
     ensure_user_scope(&request.scope)?;
+    if !request.destination_paths.is_empty() {
+        return Err(AppError::validation(
+            "CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE",
+        ));
+    }
     if request.destinations.is_empty() {
         return Err(AppError::validation("CROSS_AGENT_DESTINATIONS_REQUIRED"));
     }
@@ -152,11 +157,7 @@ pub fn preview_cross_agent_instruction(
     let homes = TargetPathResolver::resolve_all(env);
     let mut destinations = Vec::new();
     for dest in &request.destinations {
-        let path = request
-            .destination_paths
-            .get(dest)
-            .cloned()
-            .unwrap_or_else(|| default_user_instruction_path(*dest, &homes));
+        let path = default_user_instruction_path(*dest, &homes);
         let compiled = compile_render(
             &classified.document,
             *dest,
@@ -180,16 +181,20 @@ pub fn preview_cross_agent_instruction(
         } else {
             Some(sha256_hex(after.as_bytes()))
         };
-        let can_apply = !after.is_empty() && !partial_blockers.iter().any(|b| b.contains("empty"));
+        let (unified_diff, diff_truncated) = format_simple_diff(&before, &after);
+        if diff_truncated {
+            partial_blockers.push("CROSS_AGENT_PREVIEW_DIFF_TRUNCATED".into());
+        }
+        partial_blockers.push("CROSS_AGENT_PREVIEW_ONLY".into());
         destinations.push(CrossAgentTargetPreview {
             destination: *dest,
             mode,
             path,
             rendered_hash,
             observed_hash,
-            unified_diff: Some(format_simple_diff(&before, &after)),
+            unified_diff: Some(unified_diff),
             partial_blockers,
-            can_apply,
+            can_apply: false,
         });
     }
     let plan_hash = compute_instruction_plan_hash(request, &destinations);
@@ -202,109 +207,82 @@ pub fn preview_cross_agent_instruction(
     })
 }
 
-/// 一次性写入目标指令文件（不修改源、不入队其它 target 后台投影）。
+/// 跨 Agent apply 兼容入口（真实 CLI 写盘认证前固定阻止）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧前端或混合版本后端仍可能调用 apply command；在 ownership、备份/回滚、durable
+///     ledger 与真实 CLI L3 证据闭环前，任何请求都不得触碰目标文件。
+///
+/// Code Logic（这个函数做什么）:
+///     保留请求/环境签名用于 N/N+1 兼容，但在任何 preview 重建或 writer 调用前返回稳定错误码。
 pub fn apply_cross_agent_instruction(
-    request: &ApplyCrossAgentInstructionRequest,
-    env: &TargetEnvironment,
+    _request: &ApplyCrossAgentInstructionRequest,
+    _env: &TargetEnvironment,
 ) -> Result<Vec<CrossAgentApplyTargetResult>, AppError> {
-    if request.client_request_id.trim().is_empty() {
-        return Err(AppError::validation(
-            "CROSS_AGENT_CLIENT_REQUEST_ID_REQUIRED",
-        ));
-    }
-    if request.plan_hash.trim().is_empty() {
-        return Err(AppError::validation("CROSS_AGENT_PREVIEW_REQUIRED"));
-    }
-    ensure_user_scope(&request.scope)?;
-    let preview = preview_cross_agent_instruction(
-        &PreviewCrossAgentInstructionRequest {
-            source: request.source,
-            destinations: request.destinations.clone(),
-            source_markdown: request.source_markdown.clone(),
-            scope: request.scope.clone(),
-            destination_paths: request.destination_paths.clone(),
-        },
-        env,
-    )?;
-    if preview.plan_hash != request.plan_hash {
-        return Err(AppError::conflict("CROSS_AGENT_PLAN_HASH_MISMATCH"));
-    }
-    let writer = AtomicProjectionWriter::default();
-    let mut results = Vec::new();
-    for row in preview.destinations {
-        if !row.can_apply {
-            results.push(CrossAgentApplyTargetResult {
-                destination: row.destination,
-                status: "blocked".into(),
-                path: row.path,
-                error_code: Some(
-                    row.partial_blockers
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "CROSS_AGENT_BLOCKED".into()),
-                ),
-            });
-            continue;
+    Err(AppError::validation("CROSS_AGENT_APPLY_NOT_CERTIFIED"))
+}
+
+/// 把任意版本 sidecar 返回的 selective report 收紧为当前 preview-only 合同。
+///
+/// Business Logic（为什么需要这个函数）:
+///     新 GUI 可能连接旧 sidecar；旧响应曾宣称 canApply=true，并把字符长度伪装成 diff。
+///     GUI command 必须在跨版本边界再次降级，不能信任旧 owner 的 mutation 提示。
+///
+/// Code Logic（这个函数做什么）:
+///     所有 destination 强制 canApply=false、补稳定 blocker；识别旧长度占位格式后丢弃
+///     unifiedDiff 并补 diff-unavailable blocker。真实有界 diff 保留。
+pub fn enforce_cross_agent_preview_only(report: &mut CrossAgentPreviewReport) {
+    for destination in &mut report.destinations {
+        destination.can_apply = false;
+        if !destination
+            .partial_blockers
+            .iter()
+            .any(|code| code == "CROSS_AGENT_PREVIEW_ONLY")
+        {
+            destination
+                .partial_blockers
+                .push("CROSS_AGENT_PREVIEW_ONLY".into());
         }
-        let bytes = {
-            let sources = [TargetMarkdownSource {
-                target: request.source,
-                markdown: request.source_markdown.clone(),
-            }];
-            let classified =
-                classify_import("", ImportScopeContext::project_subdirectory(), &sources);
-            compile_render(
-                &classified.document,
-                row.destination,
-                &InstructionRenderContext::default(),
-            )
-            .bytes
-        };
-        let rendered_hash = sha256_hex(&bytes);
-        let path = PathBuf::from(&row.path);
-        match writer.write_file(FileWriteRequest {
-            target: &path,
-            rendered_bytes: &bytes,
-            rendered_hash: &rendered_hash,
-            expected_external_hash: row.observed_hash.as_deref(),
-        }) {
-            Ok(
-                AtomicWriteOutcome::Replaced { .. } | AtomicWriteOutcome::AlreadyRendered { .. },
-            ) => {
-                results.push(CrossAgentApplyTargetResult {
-                    destination: row.destination,
-                    status: "applied".into(),
-                    path: row.path,
-                    error_code: None,
-                });
-            }
-            Ok(AtomicWriteOutcome::Drift { .. }) => {
-                results.push(CrossAgentApplyTargetResult {
-                    destination: row.destination,
-                    status: "stalePreview".into(),
-                    path: row.path,
-                    error_code: Some("CROSS_AGENT_SOURCE_CHANGED".into()),
-                });
-            }
-            Ok(AtomicWriteOutcome::DirectoryUnknownFiles { .. }) => {
-                results.push(CrossAgentApplyTargetResult {
-                    destination: row.destination,
-                    status: "failed".into(),
-                    path: row.path,
-                    error_code: Some("CROSS_AGENT_UNEXPECTED_OUTCOME".into()),
-                });
-            }
-            Err(e) => {
-                results.push(CrossAgentApplyTargetResult {
-                    destination: row.destination,
-                    status: "failed".into(),
-                    path: row.path,
-                    error_code: Some(format!("CROSS_AGENT_WRITE_FAILED:{e}")),
-                });
+        if destination
+            .unified_diff
+            .as_deref()
+            .is_some_and(is_legacy_length_placeholder_diff)
+        {
+            destination.unified_diff = None;
+            if !destination
+                .partial_blockers
+                .iter()
+                .any(|code| code == "CROSS_AGENT_PREVIEW_DIFF_UNAVAILABLE")
+            {
+                destination
+                    .partial_blockers
+                    .push("CROSS_AGENT_PREVIEW_DIFF_UNAVAILABLE".into());
             }
         }
     }
-    Ok(results)
+}
+
+fn is_legacy_length_placeholder_diff(diff: &str) -> bool {
+    let mut lines = diff.lines();
+    if lines.next() != Some("--- before") || lines.next() != Some("+++ after") {
+        return false;
+    }
+    let Some(counts) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+    let Some(rest) = counts.strip_prefix('-') else {
+        return false;
+    };
+    let Some((before, after)) = rest.split_once('+') else {
+        return false;
+    };
+    !before.is_empty()
+        && !after.is_empty()
+        && before.chars().all(|c| c.is_ascii_digit())
+        && after.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Plugin 跨 Agent 永远 partial（阶段三诚实降级）。
@@ -349,23 +327,20 @@ fn default_user_instruction_path(
     .into_owned()
 }
 
-fn format_simple_diff(before: &str, after: &str) -> String {
+fn format_simple_diff(before: &str, after: &str) -> (String, bool) {
     if before == after {
-        return String::new();
+        return (String::new(), false);
     }
-    format!("--- before\n+++ after\n-{}+{}", before.len(), after.len())
+    render_bounded_diff(before, after)
 }
 
 /// 读取预览目标，保留“存在但为空”与“不存在”的区别。
 fn read_preview_target(path: &str) -> Result<(String, Option<String>), AppError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok((
-            String::from_utf8_lossy(&bytes).into_owned(),
-            Some(sha256_hex(&bytes)),
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), None)),
-        Err(error) => Err(error.into()),
-    }
+    let Some(text) = read_text_bounded(path)? else {
+        return Ok((String::new(), None));
+    };
+    let hash = sha256_hex(text.as_bytes());
+    Ok((text, Some(hash)))
 }
 
 /// 当前阶段只允许用户级跨 Agent 写入，避免项目 scope 静默落到用户目录。
@@ -429,6 +404,7 @@ pub fn should_enqueue_cross_target_on_external_edit(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::Path;
 
     fn temp_env(home: &Path) -> TargetEnvironment {
@@ -469,13 +445,13 @@ mod tests {
     }
 
     #[test]
-    fn shared_instruction_can_apply_to_other_target_and_cli_term_stays_target_only() {
+    fn shared_instruction_preview_is_read_only_and_cli_term_stays_target_only() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         fs::create_dir_all(tmp.path().join(".codex")).unwrap();
         let env = temp_env(tmp.path());
 
-        // Shared plain text → can apply to Codex
+        // Shared plain text → can preview真实 diff，但不能 apply 到 Codex。
         let preview = preview_cross_agent_instruction(
             &PreviewCrossAgentInstructionRequest {
                 source: AgentTarget::Claude,
@@ -488,13 +464,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(preview.destinations.len(), 1);
-        assert!(preview.destinations[0].can_apply);
+        assert!(!preview.destinations[0].can_apply);
+        assert!(preview.destinations[0]
+            .partial_blockers
+            .iter()
+            .any(|code| code == "CROSS_AGENT_PREVIEW_ONLY"));
+        assert!(preview.destinations[0]
+            .unified_diff
+            .as_deref()
+            .is_some_and(|diff| diff.contains("+Always run tests before commit.")));
         assert!(!matches!(
             preview.destinations[0].mode,
             CrossAgentAdaptMode::Residual
         ));
 
-        let apply = apply_cross_agent_instruction(
+        let error = apply_cross_agent_instruction(
             &ApplyCrossAgentInstructionRequest {
                 source: AgentTarget::Claude,
                 destinations: vec![AgentTarget::Codex],
@@ -506,10 +490,9 @@ mod tests {
             },
             &env,
         )
-        .unwrap();
-        assert_eq!(apply[0].status, "applied");
-        let written = fs::read_to_string(&apply[0].path).unwrap();
-        assert!(written.contains("Always run tests"));
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_APPLY_NOT_CERTIFIED"));
+        assert!(!PathBuf::from(&preview.destinations[0].path).exists());
 
         // CLI term → targetOnly empty or needs adaptation; must not dirty-write wrong full claim
         let cli_preview = preview_cross_agent_instruction(
@@ -572,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_target_changed_after_preview() {
+    fn apply_is_blocked_and_preserves_external_target() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         fs::create_dir_all(tmp.path().join(".codex")).unwrap();
@@ -601,8 +584,63 @@ mod tests {
             &env,
         )
         .unwrap_err();
-        assert!(format!("{error:?}").contains("CROSS_AGENT_PLAN_HASH_MISMATCH"));
+        assert!(format!("{error:?}").contains("CROSS_AGENT_APPLY_NOT_CERTIFIED"));
         assert_eq!(fs::read_to_string(target).unwrap(), "external edit\n");
+    }
+
+    #[test]
+    fn caller_controlled_destination_path_is_rejected_before_read() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = temp_env(tmp.path());
+        let sensitive = tmp.path().join("not-an-agent-file");
+        fs::write(&sensitive, "private\n").unwrap();
+        let error = preview_cross_agent_instruction(
+            &PreviewCrossAgentInstructionRequest {
+                source: AgentTarget::Claude,
+                destinations: vec![AgentTarget::Codex],
+                source_markdown: "Always run tests.\n".into(),
+                scope: "user".into(),
+                destination_paths: BTreeMap::from([(
+                    AgentTarget::Codex,
+                    sensitive.to_string_lossy().into_owned(),
+                )]),
+            },
+            &env,
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_DESTINATION_PATH_OVERRIDE_UNAVAILABLE"));
+    }
+
+    #[test]
+    fn mixed_version_preview_is_scrubbed_before_ui() {
+        let mut report = CrossAgentPreviewReport {
+            source: AgentTarget::Claude,
+            kind: CrossAgentKind::Instruction,
+            destinations: vec![CrossAgentTargetPreview {
+                destination: AgentTarget::Codex,
+                mode: CrossAgentAdaptMode::Shared,
+                path: "/tmp/target".into(),
+                rendered_hash: Some("hash".into()),
+                observed_hash: None,
+                unified_diff: Some("--- before\n+++ after\n-12+34".into()),
+                partial_blockers: vec![],
+                can_apply: true,
+            }],
+            needs_adaptation: false,
+            plan_hash: "legacy".into(),
+        };
+        enforce_cross_agent_preview_only(&mut report);
+        let row = &report.destinations[0];
+        assert!(!row.can_apply);
+        assert!(row.unified_diff.is_none());
+        assert!(row
+            .partial_blockers
+            .iter()
+            .any(|code| code == "CROSS_AGENT_PREVIEW_ONLY"));
+        assert!(row
+            .partial_blockers
+            .iter()
+            .any(|code| code == "CROSS_AGENT_PREVIEW_DIFF_UNAVAILABLE"));
     }
 
     #[test]

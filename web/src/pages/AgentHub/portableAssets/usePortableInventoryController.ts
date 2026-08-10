@@ -221,6 +221,7 @@ export function usePortableInventoryController(
       setSnapshot(cached?.snapshot ?? null);
       setSelectedItemId(null);
       setPendingAction(null);
+      setLockedItemIds(new Set());
       setStaleFlag(false);
       setError(null);
       setLoading(false);

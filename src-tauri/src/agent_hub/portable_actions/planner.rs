@@ -280,9 +280,21 @@ async fn build_change(
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_ENABLE".into());
         }
         PortableAssetActionKind::Disable if !item.capabilities.can_disable => {
+            if item.kind == PortableAssetKind::Plugin
+                && item.capabilities.reason_code.as_deref()
+                    == Some("deactivate_package_not_supported")
+            {
+                blocking.push("PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED".into());
+            }
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_DISABLE".into());
         }
         PortableAssetActionKind::Uninstall if !item.capabilities.can_uninstall => {
+            if item.kind == PortableAssetKind::Plugin
+                && item.capabilities.reason_code.as_deref()
+                    == Some("deactivate_package_not_supported")
+            {
+                blocking.push("PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED".into());
+            }
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_UNINSTALL".into());
         }
         PortableAssetActionKind::Adopt if !item.capabilities.can_adopt => {
@@ -437,5 +449,103 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
         Some(value_content_hash(&owned.value))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_hub::models::{AgentTarget, ScopeKind};
+    use crate::agent_hub::portable_actions::models::PortableAssetConflictPolicy;
+    use crate::agent_hub::portable_inventory::{
+        inventory_item_id, PortableInventoryItemCapabilitiesDto,
+        PortableInventoryMutationCapability, PortableInventoryScanCapability,
+        PortableInventorySourceOrigin, PortableInventoryTargetDto,
+    };
+
+    #[tokio::test]
+    async fn partial_deactivate_capability_blocks_plugin_uninstall_plan() {
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Claude,
+                "user",
+                "/plugins/demo",
+                "demo@local",
+            ),
+            target: AgentTarget::Claude,
+            kind: PortableAssetKind::Plugin,
+            native_id: "demo@local".into(),
+            display_name: "demo".into(),
+            description: None,
+            version: Some("1.0.0".into()),
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some("/plugins/demo".into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("content".into()),
+            tree_hash: Some("tree".into()),
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: true,
+                can_disable: false,
+                can_uninstall: false,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                reason_code: Some("deactivate_package_not_supported".into()),
+                evidence_ids: vec![],
+            },
+            warnings: vec![],
+            mcp_credential: None,
+        };
+        let target = PortableInventoryTargetDto {
+            target: AgentTarget::Claude,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/claude".into()),
+            config_root: "/cfg/claude".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Supported,
+            reason_code: None,
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::Uninstall,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+
+        let (change, reasons) = build_change(&item, Some(&target), &request)
+            .await
+            .expect("build change");
+        assert_eq!(change.operation, PortableAssetPlanOperation::Uninstall);
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"));
+        assert!(change
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason == "PORTABLE_ASSET_ACTION_CANNOT_UNINSTALL"));
+
+        let mut unavailable = item;
+        unavailable.capabilities.reason_code = Some("portable_direct_action_unavailable".into());
+        let (_, reasons) = build_change(&unavailable, Some(&target), &request)
+            .await
+            .expect("build unavailable change");
+        assert!(!reasons
+            .iter()
+            .any(|reason| reason == "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"));
     }
 }

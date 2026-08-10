@@ -9,10 +9,11 @@
  *
  * Code Logic（这个脚本做什么）:
  *   - 读取 `src-tauri/src/agent_hub/support/support-manifest.json`
- *   - 读取 `docs/development/quality-matrix.json` 收集 evidence ID
+ *   - 读取 `docs/development/quality-matrix.json` 收集 evidence 记录与执行状态
  *   - 可选比对 `src-tauri/tests/support/agent_hub_l3_snapshots/*.json` 激活命令指纹
  *   - `--gate-b`：fail-closed 合同——允许 null 版本当且仅当全部写能力 blocked 且非 certified；
- *     拒绝写能力 Supported* 却无 L3 版本证据、无序版本、缺失 target、未知 evidence
+ *     拒绝写能力 Supported* 却无 capability 级、未过期、元数据完整的 L3 PASS/VERIFIED 证据，
+ *     以及无序版本、缺失 target、未知 evidence
  *   - `--gate-d`：在 gate-b 基础上校验 `hookMappings`（可为空）；非空项须有 intent/双端/schema/trust/evidence
  *   - `--self-test`：内存 fixture 覆盖主要失败分支
  *   - 仅 Node 内置模块
@@ -123,19 +124,67 @@ function loadJson(absPath) {
  * @returns {Set<string>}
  */
 export function loadMatrixEvidenceIds(repoRoot) {
+  return new Set(loadMatrixEvidence(repoRoot).keys());
+}
+
+/**
+ * 加载 quality-matrix evidence 记录。
+ * @param {string} repoRoot
+ * @returns {Map<string, Record<string, unknown>>}
+ */
+export function loadMatrixEvidence(repoRoot) {
   const matrixPath = join(repoRoot, MATRIX_REL);
   if (!existsSync(matrixPath)) {
     throw new Error(`missing quality-matrix: ${MATRIX_REL}`);
   }
   const matrix = loadJson(matrixPath);
-  const ids = new Set();
+  const records = new Map();
   const entries = Array.isArray(matrix?.entries) ? matrix.entries : [];
   for (const entry of entries) {
     if (entry && typeof entry.id === 'string' && entry.id.trim()) {
-      ids.add(entry.id.trim());
+      records.set(entry.id.trim(), entry);
     }
   }
-  return ids;
+  return records;
+}
+
+/**
+ * 校验一条 evidence 能否认证真实 CLI 写 capability。
+ * @param {Record<string, unknown>|undefined} entry
+ * @param {number} nowMs
+ * @returns {string[]}
+ */
+export function certifiedWriteEvidenceErrors(entry, nowMs = Date.now()) {
+  if (!entry) return ['missing'];
+  const errors = [];
+  if (String(entry.level ?? '') !== 'L3') errors.push('level_not_l3');
+  if (!['PASS', 'VERIFIED'].includes(String(entry.status ?? ''))) {
+    errors.push('status_not_verified');
+  }
+  for (const field of ['commit', 'version', 'date', 'expiresAt', 'osBuild']) {
+    if (typeof entry[field] !== 'string' || !entry[field].trim()) {
+      errors.push(`${field}_missing`);
+    }
+  }
+  const evidence = entry.evidence;
+  const evidencePresent =
+    (typeof evidence === 'string' && evidence.trim().length > 0) ||
+    (Array.isArray(evidence) && evidence.length > 0) ||
+    (evidence != null && typeof evidence === 'object' && Object.keys(evidence).length > 0);
+  if (!evidencePresent) errors.push('artifact_evidence_missing');
+  if (!Array.isArray(entry.platforms) || entry.platforms.length === 0) {
+    errors.push('platforms_missing');
+  }
+  const date = typeof entry.date === 'string' ? Date.parse(entry.date) : Number.NaN;
+  if (!Number.isFinite(date)) errors.push('date_invalid');
+  const expiresAt =
+    typeof entry.expiresAt === 'string' ? Date.parse(entry.expiresAt) : Number.NaN;
+  if (!Number.isFinite(expiresAt)) {
+    errors.push('expires_at_invalid');
+  } else if (expiresAt < nowMs) {
+    errors.push('expired');
+  }
+  return [...new Set(errors)];
 }
 
 /**
@@ -167,13 +216,15 @@ export function loadActivationSnapshots(repoRoot) {
  * Business Logic: --gate-b 拒绝开发态 null 版本；--gate-d 额外校验 hookMappings。
  *
  * @param {any} manifest
- * @param {{ gateB?: boolean, gateD?: boolean, evidenceIds?: Set<string>, snapshots?: Record<string, Record<string, string>>, rawText?: string }} options
+ * @param {{ gateB?: boolean, gateD?: boolean, evidenceIds?: Set<string>, evidenceRecords?: Map<string, Record<string, unknown>>, snapshots?: Record<string, Record<string, string>>, rawText?: string, nowMs?: number }} options
  * @returns {string[]} errors
  */
 export function validateSupportManifest(manifest, options = {}) {
   const gateB = Boolean(options.gateB);
   const gateD = Boolean(options.gateD);
   const evidenceIds = options.evidenceIds ?? new Set();
+  const evidenceRecords = options.evidenceRecords ?? new Map();
+  const nowMs = options.nowMs ?? Date.now();
   const snapshots = options.snapshots ?? {};
   const rawText = options.rawText ?? JSON.stringify(manifest);
   /** @type {string[]} */
@@ -250,6 +301,36 @@ export function validateSupportManifest(manifest, options = {}) {
           }
           if ((gateB || gateD) && WRITE_CAPS.has(cap) && evidence.length === 0) {
             errors.push(`${target}:${cap}:write_supported_without_evidence`);
+          }
+          if ((gateB || gateD) && WRITE_CAPS.has(cap)) {
+            const capabilityEvidence = record.capabilityEvidenceIds;
+            const ids =
+              capabilityEvidence &&
+              typeof capabilityEvidence === 'object' &&
+              Array.isArray(capabilityEvidence[cap])
+                ? capabilityEvidence[cap]
+                    .map((value) => String(value).trim())
+                    .filter(Boolean)
+                : [];
+            if (ids.length === 0) {
+              errors.push(`${target}:${cap}:capability_evidence_missing`);
+            }
+            for (const id of ids) {
+              if (!evidence.includes(id)) {
+                errors.push(`${target}:${cap}:capability_evidence_not_declared:${id}`);
+              }
+              if (!evidenceIds.has(id)) {
+                errors.push(`${target}:${cap}:capability_evidence_not_in_matrix:${id}`);
+                continue;
+              }
+              const certificationErrors = certifiedWriteEvidenceErrors(
+                evidenceRecords.get(id),
+                nowMs,
+              );
+              for (const reason of certificationErrors) {
+                errors.push(`${target}:${cap}:capability_evidence_not_certified:${id}:${reason}`);
+              }
+            }
           }
         }
       }
@@ -347,17 +428,19 @@ export function checkRepo(repoRoot, options = {}) {
   } catch (err) {
     return { ok: false, errors: [`manifest_json_parse:${String(err)}`] };
   }
-  let evidenceIds = new Set();
+  let evidenceRecords = new Map();
   try {
-    evidenceIds = loadMatrixEvidenceIds(repoRoot);
+    evidenceRecords = loadMatrixEvidence(repoRoot);
   } catch (err) {
     return { ok: false, errors: [String(err)] };
   }
+  const evidenceIds = new Set(evidenceRecords.keys());
   const snapshots = loadActivationSnapshots(repoRoot);
   const errors = validateSupportManifest(manifest, {
     gateB: options.gateB,
     gateD: options.gateD,
     evidenceIds,
+    evidenceRecords,
     snapshots,
     rawText,
   });
@@ -389,6 +472,7 @@ export function runSelfTest() {
       deactivatePackage: 'blocked',
       liveReload: 'blocked',
     },
+    capabilityEvidenceIds: {},
     evidenceIds: [`L3-AGENT-HUB-${target.toUpperCase()}-001`],
     ...overrides,
   });
@@ -406,6 +490,21 @@ export function runSelfTest() {
     'L3-AGENT-HUB-CODEX-001',
     'L3-AGENT-HUB-OPENCODE-001',
   ]);
+  const certifiedEvidence = (id) => ({
+    id,
+    level: 'L3',
+    status: 'VERIFIED',
+    commit: '0123456789abcdef',
+    version: '1.0.0',
+    date: '2026-08-01',
+    expiresAt: '2999-01-01',
+    evidence: 'artifact://fixture',
+    osBuild: 'fixture-os',
+    platforms: ['fixture'],
+  });
+  const evidenceRecords = new Map(
+    [...evidence].map((id) => [id, certifiedEvidence(id)]),
+  );
   let errs = validateSupportManifest(good, { gateB: true, evidenceIds: evidence });
   if (errs.length !== 0) failures.push(`good_should_pass:${errs.join(',')}`);
 
@@ -488,6 +587,51 @@ export function runSelfTest() {
   });
   if (!errs.some((e) => e.includes('supported_without_evidence'))) {
     failures.push('supported_without_evidence_not_detected');
+  }
+
+  // capability-specific L3 仍是 NOT VERIFIED → rejected
+  const unverifiedCapabilityEvidence = {
+    schemaVersion: 1,
+    targets: [
+      baseTarget('claude', {
+        capabilities: {
+          scanInstruction: 'readOnly',
+          renderInstruction: 'supported',
+          scanPortableAssets: 'readOnly',
+          renderPortableAssets: 'blocked',
+          activatePackage: 'blocked',
+          deactivatePackage: 'blocked',
+          liveReload: 'blocked',
+        },
+        capabilityEvidenceIds: { renderInstruction: ['L3-AGENT-HUB-CLAUDE-001'] },
+      }),
+      baseTarget('codex'),
+      baseTarget('opencode'),
+    ],
+  };
+  const notVerifiedRecords = new Map(evidenceRecords);
+  notVerifiedRecords.set('L3-AGENT-HUB-CLAUDE-001', {
+    ...certifiedEvidence('L3-AGENT-HUB-CLAUDE-001'),
+    status: 'NOT VERIFIED',
+  });
+  errs = validateSupportManifest(unverifiedCapabilityEvidence, {
+    gateB: true,
+    evidenceIds: evidence,
+    evidenceRecords: notVerifiedRecords,
+  });
+  if (!errs.some((e) => e.includes('status_not_verified'))) {
+    failures.push('unverified_capability_evidence_not_detected');
+  }
+
+  // capability-specific, metadata-complete, unexpired L3 VERIFIED → accepted
+  errs = validateSupportManifest(unverifiedCapabilityEvidence, {
+    gateB: true,
+    evidenceIds: evidence,
+    evidenceRecords,
+    nowMs: Date.parse('2026-08-10'),
+  });
+  if (errs.length !== 0) {
+    failures.push(`certified_capability_evidence_should_pass:${errs.join(',')}`);
   }
 
   // credential pattern

@@ -50,7 +50,7 @@ function previewFixture(
         renderedHash: 'abc',
         unifiedDiff: 'diff',
         partialBlockers: [],
-        canApply: true,
+        canApply: false,
       },
     ],
     ...overrides,
@@ -130,42 +130,25 @@ describe('peer and gates', () => {
         scope: 'project',
         projectKey: null,
       }).reason,
-    ).toBe('projectKeyRequired');
+    ).toBe('projectBlocked');
   });
 
-  test('apply gate requires preview and applicable rows; blocks peer', () => {
+  test('apply gate is always unavailable', () => {
     const preview = previewFixture();
     expect(
-      canRunCrossAgentApply({ deviceId: null, preview, busy: false }).ok,
-    ).toBe(true);
+      canRunCrossAgentApply({ deviceId: null, preview, busy: false }).reason,
+    ).toBe('applyUnavailable');
     expect(
       canRunCrossAgentApply({ deviceId: null, preview: null, busy: false }).reason,
-    ).toBe('missingPreview');
-    expect(
-      canRunCrossAgentApply({
-        deviceId: null,
-        preview: previewFixture({
-          destinations: [
-            {
-              destination: 'codex',
-              mode: 'residual',
-              path: '/x',
-              partialBlockers: ['residual'],
-              canApply: false,
-            },
-          ],
-        }),
-        busy: false,
-      }).reason,
-    ).toBe('noApplicable');
+    ).toBe('applyUnavailable');
     expect(
       canRunCrossAgentApply({ deviceId: 'peer', preview, busy: false }).reason,
-    ).toBe('peerBlocked');
+    ).toBe('applyUnavailable');
   });
 });
 
 describe('parse preview/apply', () => {
-  test('parses preview report and normalizes unknown mode to residual', () => {
+  test('parses strict preview-only report and rejects unknown/writable rows', () => {
     const parsed = parseCrossAgentPreview({
       source: 'claude',
       kind: 'instruction',
@@ -176,20 +159,55 @@ describe('parse preview/apply', () => {
           destination: 'codex',
           mode: 'shared',
           path: '/a',
-          canApply: true,
+          canApply: false,
           partialBlockers: ['x'],
         },
         {
           destination: 'opencode',
-          mode: 'weird',
+          mode: 'residual',
           path: '/b',
           canApply: false,
+          partialBlockers: ['CROSS_AGENT_PREVIEW_ONLY'],
         },
       ],
     });
     expect(parsed?.needsAdaptation).toBe(true);
     expect(parsed?.destinations[0]?.mode).toBe('shared');
     expect(parsed?.destinations[1]?.mode).toBe('residual');
+    expect(
+      parseCrossAgentPreview({
+        source: 'claude',
+        kind: 'instruction',
+        needsAdaptation: false,
+        planHash: 'plan-2',
+        destinations: [
+          {
+            destination: 'codex',
+            mode: 'weird',
+            path: '/a',
+            canApply: false,
+            partialBlockers: [],
+          },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      parseCrossAgentPreview({
+        source: 'claude',
+        kind: 'instruction',
+        needsAdaptation: false,
+        planHash: 'plan-3',
+        destinations: [
+          {
+            destination: 'codex',
+            mode: 'shared',
+            path: '/a',
+            canApply: true,
+            partialBlockers: [],
+          },
+        ],
+      }),
+    ).toBeNull();
     expect(normalizeAdaptMode('adapted')).toBe('adapted');
   });
 
@@ -212,7 +230,7 @@ describe('parse preview/apply', () => {
           mode: 'shared',
           path: '/a',
           partialBlockers: [],
-          canApply: true,
+          canApply: false,
         },
         {
           destination: 'opencode',
@@ -223,7 +241,7 @@ describe('parse preview/apply', () => {
         },
       ],
     });
-    expect(countApplicableDestinations(preview)).toBe(1);
+    expect(countApplicableDestinations(preview)).toBe(0);
     expect(adaptModeTone('shared')).toBe('success');
     expect(adaptModeTone('residual')).toBe('danger');
   });
@@ -241,7 +259,7 @@ describe('parse preview/apply', () => {
         projectKey: null,
         scopeConfirmed: true,
       }).ok,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       canRunCrossAgentFullPreview({
         deviceId: null,
@@ -253,7 +271,7 @@ describe('parse preview/apply', () => {
         projectKey: null,
         scopeConfirmed: true,
       }).reason,
-    ).toBe('emptyDestination');
+    ).toBe('fullUnavailable');
     expect(
       canRunCrossAgentFullPreview({
         deviceId: 'peer',
@@ -265,7 +283,7 @@ describe('parse preview/apply', () => {
         projectKey: null,
         scopeConfirmed: true,
       }).reason,
-    ).toBe('peerBlocked');
+    ).toBe('fullUnavailable');
 
     const plan = parseCrossAgentFullPlan({
       source: 'claude',
@@ -317,15 +335,15 @@ describe('parse preview/apply', () => {
     }) as CrossAgentFullPlan;
     expect(fullPlanHasAllKinds(plan)).toBe(true);
     expect(countApplicableFullItems(plan)).toBe(1);
-    expect(canRunCrossAgentFullApply({ deviceId: null, plan, busy: false }).ok).toBe(true);
+    expect(canRunCrossAgentFullApply({ deviceId: null, plan, busy: false }).ok).toBe(false);
     expect(
       canRunCrossAgentFullApply({ deviceId: null, plan: null, busy: false }).reason,
-    ).toBe('missingPreview');
+    ).toBe('fullUnavailable');
 
     const toggled = toggleFullPlanItemIncluded(plan, 'instruction:user');
     expect(toggled.items[0]?.included).toBe(false);
     expect(
       canRunCrossAgentFullApply({ deviceId: null, plan: toggled, busy: false }).reason,
-    ).toBe('ok'); // skill still included (even if residual)
+    ).toBe('fullUnavailable');
   });
 });

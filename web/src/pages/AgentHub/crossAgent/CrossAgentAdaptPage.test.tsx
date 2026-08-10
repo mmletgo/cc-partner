@@ -50,7 +50,7 @@ afterEach(() => {
 });
 
 describe('CrossAgentAdaptPage', () => {
-  test('renders selective adapt sections and blocks apply without preview', async () => {
+  test('renders a selective preview-only flow with no apply control', async () => {
     const onExit = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
@@ -67,8 +67,8 @@ describe('CrossAgentAdaptPage', () => {
     expect(screen.getByTestId('cross-agent-adapt-dest-codex')).toBeTruthy();
     expect(screen.queryByTestId('cross-agent-adapt-dest-claude')).toBeNull();
 
-    const applyBtn = screen.getByTestId('cross-agent-adapt-apply') as HTMLButtonElement;
-    expect(applyBtn.disabled).toBe(true);
+    expect(screen.getByTestId('cross-agent-preview-only')).toBeTruthy();
+    expect(screen.queryByTestId('cross-agent-adapt-apply')).toBeNull();
 
     fireEvent.click(screen.getByTestId('cross-agent-adapt-scope-confirm'));
     const previewBtn = screen.getByTestId('cross-agent-adapt-preview') as HTMLButtonElement;
@@ -80,7 +80,7 @@ describe('CrossAgentAdaptPage', () => {
     expect(onExit).toHaveBeenCalled();
   });
 
-  test('peer context shows blocked banner and disables actions', () => {
+  test('peer context shows one visible recovery callout and no preview action', () => {
     render(
       <I18nextProvider i18n={i18n}>
         <CrossAgentAdaptPage
@@ -95,29 +95,32 @@ describe('CrossAgentAdaptPage', () => {
       </I18nextProvider>,
     );
 
-    expect(screen.getByTestId('cross-agent-adapt-peer-blocked')).toBeTruthy();
-    expect((screen.getByTestId('cross-agent-adapt-preview') as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    expect(screen.getByTestId('cross-agent-adapt-context-blocked')).toBeTruthy();
+    expect(screen.queryByTestId('cross-agent-adapt-preview')).toBeNull();
+    expect(screen.getByRole('button', { name: /local user scope/i })).toBeTruthy();
   });
 
-  test('mode toggle switches to full single-destination UI', async () => {
+  test('project context is blocked instead of exposing the retired full-mode UI', () => {
     render(
       <I18nextProvider i18n={i18n}>
         <CrossAgentAdaptPage
-          context={{ ...DEFAULT_AGENT_HUB_CONTEXT, adaptView: true }}
+          context={{
+            ...DEFAULT_AGENT_HUB_CONTEXT,
+            adaptView: true,
+            scope: 'project',
+            projectKey: 'project-a',
+          }}
           initialSourceMarkdown="Always run tests."
           onExit={() => undefined}
         />
       </I18nextProvider>,
     );
 
-    expect(screen.getByTestId('cross-agent-adapt-mode-selective')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('cross-agent-adapt-mode-full'));
-    await waitFor(() => {
-      expect(screen.getByTestId('cross-agent-adapt-full-destination')).toBeTruthy();
-      expect(screen.getByTestId('cross-agent-adapt-full-dest-codex')).toBeTruthy();
-    });
-    expect(screen.queryByTestId('cross-agent-adapt-destinations')).toBeNull();
+    expect(screen.getByTestId('cross-agent-adapt-context-blocked').textContent).toMatch(
+      /user-level|user scope/i,
+    );
+    expect(screen.queryByTestId('cross-agent-adapt-mode-selective')).toBeNull();
+    expect(screen.queryByTestId('cross-agent-adapt-mode-full')).toBeNull();
+    expect(screen.queryByTestId('cross-agent-adapt-preview')).toBeNull();
   });
 });

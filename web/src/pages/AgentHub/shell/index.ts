@@ -5,7 +5,5 @@ export {
   AgentHubShell,
   type AgentHubShellProps,
   type AgentHubShellActions,
-  type AgentHubShellPeer,
-  type AgentHubShellProject,
   type AgentHubShellTabCounts,
 } from './AgentHubShell';

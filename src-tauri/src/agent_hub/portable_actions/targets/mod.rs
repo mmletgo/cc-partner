@@ -100,11 +100,12 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
 ///
 /// Business Logic（为什么需要）:
 ///     本机库存启停/卸载与 canonical package 投影是两套能力；不能因为后者尚未完成
-///     L3 认证，就把旧版已经具备真实执行器和隔离 smoke 的 Claude 本机管理一并禁用。
+///     就把实现存在误当成运行时已认证；allowlist 只描述 adapter 覆盖面，最终写入仍须
+///     通过 support manifest 的逐动作 capability 门禁。
 ///
 /// Code Logic（做什么）:
 ///     以 target × kind × action 的显式 allowlist 对齐实际 executor；
-///     Claude 与 Codex（phase-1 pin）四类 enable/disable/uninstall 已实现；
+///     Claude 与 Codex 四类 enable/disable/uninstall adapter 已实现；
 ///     OpenCode、Adopt、InstallToSourceTarget 仍 fail-closed。
 pub fn supports_direct_local_action(
     target: AgentTarget,

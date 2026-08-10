@@ -195,6 +195,42 @@ function applyFixture(): UserInstructionApplyResultDto {
   };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function workspaceWithSource(
+  text: string,
+  overrides: Partial<UserInstructionWorkspaceDto> = {},
+): UserInstructionWorkspaceDto {
+  const base = workspaceFixture(overrides);
+  return {
+    ...base,
+    targets: base.targets.map((target) =>
+      target.target === 'claude'
+        ? {
+            ...target,
+            sources: target.sources.map((source) => ({
+              ...source,
+              content: text,
+              contentTruncated: false,
+            })),
+          }
+        : target,
+    ),
+  };
+}
+
 const baseContext: AgentHubContext = {
   agent: 'claude',
   scope: 'user',
@@ -371,7 +407,7 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.state.blocks.length).toBe(1);
     expect(result.current.state.blocks[0]?.mode).toBe('shared');
     expect(result.current.state.previewText).toContain('Always use TypeScript');
-    expect(result.current.state.blocksDirty).toBe(false);
+    expect(result.current.state.blocksDirty).toBe(true);
   });
 
   test('original baseline saves the edited document as one shared canonical block', async () => {
@@ -529,7 +565,272 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.state.blocks[0]?.mode).toBe('shared');
   });
 
-  test('changing deviceId retriggers inspect with peer context', async () => {
+  test('source-only refresh keeps canonical save available and uses latest observed snapshot', async () => {
+    const initial = workspaceWithSource('## Disk\n\nold\n');
+    const sourceChanged = workspaceWithSource('## Disk\n\nchanged elsewhere\n', {
+      inventorySnapshotHash: 'inventory-2',
+    });
+    const afterSave = workspaceWithSource('## Disk\n\nchanged elsewhere\n', {
+      inventorySnapshotHash: 'inventory-3',
+      canonical: {
+        ...workspaceFixture().canonical!,
+        headRevisionId: 'rev-2',
+      },
+    });
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(sourceChanged)
+      .mockResolvedValueOnce(afterSave);
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue(afterSave.canonical);
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+
+    await act(async () => result.current.refresh());
+    expect(result.current.state.externalDrift).toBe(false);
+    expect(result.current.state.sourceDrift).toBe(true);
+
+    let saved = false;
+    await act(async () => {
+      saved = await result.current.saveBlocks();
+    });
+    expect(saved).toBe(true);
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseRevisionId: 'rev-1',
+        inventorySnapshotHash: 'inventory-2',
+      }),
+    );
+    expect(result.current.state.originalText).toBe('## Disk\n\nold\n');
+    expect(result.current.state.sourceDrift).toBe(true);
+    expect(result.current.state.blocksDirty).toBe(false);
+  });
+
+  test('canonical refresh latches drift and never attempts a stale save', async () => {
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(workspaceFixture())
+      .mockResolvedValueOnce(
+        workspaceFixture({
+          inventorySnapshotHash: 'inventory-2',
+          canonical: { ...workspaceFixture().canonical!, headRevisionId: 'rev-2' },
+        }),
+      );
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+    await act(async () => result.current.refresh());
+    expect(result.current.state.externalDrift).toBe(true);
+    await act(async () => {
+      expect(await result.current.saveBlocks()).toBe(false);
+    });
+    expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
+  });
+
+  test('Original-only Save is an honest no-op and preserves the draft', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.updateOriginal('## Local-only edit\n'));
+    await act(async () => {
+      expect(await result.current.saveBlocks()).toBe(false);
+    });
+    expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
+    expect(result.current.state.originalText).toBe('## Local-only edit\n');
+    expect(result.current.state.originalDirty).toBe(true);
+  });
+
+  test('edit during Save remains dirty after the older save response completes', async () => {
+    const saveDeferred = deferred<unknown>();
+    const afterSave = workspaceFixture({
+      inventorySnapshotHash: 'inventory-2',
+      canonical: { ...workspaceFixture().canonical!, headRevisionId: 'rev-2' },
+    });
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(workspaceFixture())
+      .mockResolvedValueOnce(afterSave);
+    apiMocks.saveUserInstructionBlocks.mockReturnValue(saveDeferred.promise);
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+
+    let savePromise!: Promise<boolean>;
+    act(() => {
+      savePromise = result.current.saveBlocks();
+    });
+    await waitFor(() => expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledOnce());
+    act(() => result.current.editCurrentSlot('newer unsaved text'));
+    saveDeferred.resolve(afterSave.canonical);
+    await act(async () => {
+      await savePromise;
+    });
+
+    expect(result.current.state.previewText).toContain('newer unsaved text');
+    expect(result.current.state.blocksDirty).toBe(true);
+  });
+
+  test('edit during the Save stage of Sync prevents previewing the older saved blocks', async () => {
+    const saveDeferred = deferred<unknown>();
+    const afterSave = workspaceFixture({
+      inventorySnapshotHash: 'inventory-2',
+      canonical: { ...workspaceFixture().canonical!, headRevisionId: 'rev-2' },
+    });
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(workspaceFixture())
+      .mockResolvedValueOnce(afterSave);
+    apiMocks.saveUserInstructionBlocks.mockReturnValue(saveDeferred.promise);
+    apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+
+    let syncPromise!: Promise<void>;
+    act(() => {
+      syncPromise = result.current.requestSync();
+    });
+    await waitFor(() => expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledOnce());
+    act(() => result.current.editCurrentSlot('newer draft while save is pending'));
+    saveDeferred.resolve(afterSave.canonical);
+    await act(async () => syncPromise);
+
+    expect(apiMocks.previewUserInstructionUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.previewUserInstructionSetup).not.toHaveBeenCalled();
+    expect(result.current.previewOpen).toBe(false);
+    expect(result.current.plan).toBeNull();
+    expect(result.current.state.previewText).toContain('newer draft while save is pending');
+    expect(result.current.state.blocksDirty).toBe(true);
+  });
+
+  test('native source changing during Sync latches drift and blocks the old-source preview', async () => {
+    const initial = workspaceWithSource('## Disk\n\nold source\n');
+    const afterSave = workspaceWithSource('## Disk\n\nexternal change during save\n', {
+      inventorySnapshotHash: 'inventory-2',
+      canonical: { ...workspaceFixture().canonical!, headRevisionId: 'rev-2' },
+    });
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(afterSave);
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue(afterSave.canonical);
+    apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+
+    await act(async () => result.current.requestSync());
+
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledOnce();
+    expect(apiMocks.previewUserInstructionUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.previewUserInstructionSetup).not.toHaveBeenCalled();
+    expect(result.current.state.originalText).toBe('## Disk\n\nold source\n');
+    expect(result.current.state.sourceDrift).toBe(true);
+    expect(result.current.state.externalDrift).toBe(false);
+    expect(result.current.state.blocksDirty).toBe(false);
+  });
+
+  test('revision conflict latches canonical drift and blocks repeated Save attempts', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    apiMocks.saveUserInstructionBlocks.mockRejectedValue(
+      Object.assign(new Error('revision changed'), {
+        code: 'USER_INSTRUCTION_REVISION_CHANGED',
+      }),
+    );
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+    await act(async () => {
+      expect(await result.current.saveBlocks()).toBe(false);
+    });
+    expect(result.current.state.externalDrift).toBe(true);
+    await act(async () => {
+      expect(await result.current.saveBlocks()).toBe(false);
+    });
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledOnce();
+  });
+
+  test('blocked context change keeps the old lease and can still save after returning', async () => {
+    const afterSave = workspaceFixture({
+      inventorySnapshotHash: 'inventory-2',
+      canonical: { ...workspaceFixture().canonical!, headRevisionId: 'rev-2' },
+    });
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(workspaceFixture())
+      .mockResolvedValueOnce(workspaceFixture())
+      .mockResolvedValueOnce(afterSave);
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue(afterSave.canonical);
+    const { result, rerender } = renderHook(
+      (props: { context: AgentHubContext }) =>
+        useInstructionThreePaneController({ context: props.context, t }),
+      { initialProps: { context: baseContext } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.reparseFromOriginal());
+    rerender({ context: { ...baseContext, agent: 'codex' } });
+    expect(result.current.error).toBe('AGENT_HUB_CONTEXT_CHANGE_HAS_UNSAVED_DRAFT');
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledOnce();
+
+    rerender({ context: baseContext });
+    await waitFor(() =>
+      expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledTimes(2),
+    );
+    await act(async () => {
+      expect(await result.current.saveBlocks()).toBe(true);
+    });
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledWith(
+      expect.objectContaining({ baseRevisionId: 'rev-1' }),
+    );
+  });
+
+  test('editing while preview is pending prevents the old plan from opening', async () => {
+    const previewDeferred = deferred<UserInstructionPlanDto>();
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(
+      workspaceFixture({
+        canonical: {
+          ...workspaceFixture().canonical!,
+          blocks: [
+            {
+              id: 'shared-1',
+              mode: 'shared',
+              commonMarkdown: SAMPLE_MARKDOWN,
+              variants: null,
+              headingPath: null,
+              sourceTarget: null,
+              needsAdaptation: false,
+            },
+          ],
+        },
+      }),
+    );
+    apiMocks.previewUserInstructionUpdate.mockReturnValue(previewDeferred.promise);
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    let previewPromise!: Promise<void>;
+    act(() => {
+      previewPromise = result.current.requestSync();
+    });
+    await waitFor(() => expect(apiMocks.previewUserInstructionUpdate).toHaveBeenCalledOnce());
+    act(() => result.current.editCurrentSlot('changed while previewing'));
+    previewDeferred.resolve(planFixture());
+    await act(async () => previewPromise);
+    expect(result.current.previewOpen).toBe(false);
+    expect(result.current.plan).toBeNull();
+  });
+
+  test('changing deviceId blocks direct inspect and exposes Pull-only error', async () => {
     apiMocks.inspectUserInstructionWorkspace.mockImplementation(
       async (ctx?: { deviceId?: string | null }) => {
         if (ctx?.deviceId === 'peer-9') {
@@ -561,14 +862,11 @@ describe('useInstructionThreePaneController', () => {
     await waitFor(() => {
       expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
     });
-    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledWith({
-      deviceId: 'peer-9',
-      projectRef: null,
-    });
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledTimes(1);
     expect(result.current.workspace).toBeNull();
   });
 
-  test('local inspect passes null device context and remote project fails closed', async () => {
+  test('local and remote project contexts both fail closed before inspect', async () => {
     apiMocks.inspectUserInstructionWorkspace.mockImplementation(
       async (ctx?: { projectRef?: string | null }) => {
         if (ctx?.projectRef?.startsWith('remote:')) {
@@ -596,10 +894,8 @@ describe('useInstructionThreePaneController', () => {
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledWith({
-      deviceId: null,
-      projectRef: 'wb-local',
-    });
+    expect(apiMocks.inspectUserInstructionWorkspace).not.toHaveBeenCalled();
+    expect(result.current.error).toBe('AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE');
     expect(result.current.writeBlocked).toBe(true);
     await act(async () => {
       await result.current.requestSync();
@@ -617,7 +913,8 @@ describe('useInstructionThreePaneController', () => {
     });
 
     await waitFor(() => {
-      expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
+      expect(result.current.error).toBe('AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE');
     });
+    expect(apiMocks.inspectUserInstructionWorkspace).not.toHaveBeenCalled();
   });
 });

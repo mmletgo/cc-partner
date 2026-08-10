@@ -153,8 +153,8 @@ describe('parseBlocksFromOriginal (fallback)', () => {
     expect(parsed.blocks[0]?.commonMarkdown).toContain('Always use TypeScript');
     expect(parsed.blocks[0]?.commonMarkdown).toContain('Target notes');
     expect(parsed.previewText).toContain('Always use TypeScript');
-    // 解析来自原文，块侧不应标脏
-    expect(parsed.blocksDirty).toBe(false);
+    // 用户显式导入会生成待保存的 Hub 草稿。
+    expect(parsed.blocksDirty).toBe(true);
     expect(parsed.originalDirty).toBe(false);
   });
 
@@ -292,6 +292,7 @@ describe('resolveSyncContent', () => {
   test('original-only dirty → baseline original', () => {
     let state = initialThreePaneFromDisk('/p.md', '## From disk\n\nold\n', null, AGENT);
     state = parseBlocksFromOriginal(state, AGENT);
+    state = { ...state, blocksDirty: false };
     state = updateOriginalText(state, '## From disk\n\nonly original dirty\n');
 
     expect(resolveSyncContent(state, AGENT)).toEqual({

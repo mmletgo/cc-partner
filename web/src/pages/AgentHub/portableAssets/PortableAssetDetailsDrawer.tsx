@@ -243,6 +243,16 @@ export function PortableAssetDetailsDrawer({
             {item.kind === 'mcp' ? <McpDetails item={item} labels={mcpLabels} /> : null}
             {item.kind === 'plugin' ? (
               <section className={styles.drawerSection} data-testid="portable-plugin-details">
+                {!pluginReport ? (
+                  <StatusMessage
+                    tone={error ? 'danger' : 'warn'}
+                    data-testid="portable-plugin-report-status"
+                  >
+                    {error
+                      ? t('agentHub:plugin.loadFailed')
+                      : t('agentHub:plugin.noReport')}
+                  </StatusMessage>
+                ) : null}
                 <div className={styles.metaBlock}>
                   <div>
                     <span className={styles.metaLabel}>
@@ -265,7 +275,7 @@ export function PortableAssetDetailsDrawer({
                       {t('agentHub:portable.details.components')}
                     </span>
                     <span data-testid="portable-plugin-components">
-                      {pluginReport?.componentCount ?? 0}
+                      {pluginReport?.componentCount ?? t('agentHub:portable.details.missing')}
                     </span>
                   </div>
                   <div>
@@ -273,7 +283,7 @@ export function PortableAssetDetailsDrawer({
                       {t('agentHub:portable.details.residuals')}
                     </span>
                     <span data-testid="portable-plugin-residuals">
-                      {pluginReport?.residualCount ?? 0}
+                      {pluginReport?.residualCount ?? t('agentHub:portable.details.missing')}
                     </span>
                   </div>
                   <div>
@@ -281,10 +291,12 @@ export function PortableAssetDetailsDrawer({
                       {t('agentHub:portable.details.deleteGroups')}
                     </span>
                     <span data-testid="portable-plugin-delete-groups">
-                      {t('agentHub:portable.details.deleteGroupSummary', {
-                        tombstone: pluginReport?.deleteTombstoneCount ?? 0,
-                        preserve: pluginReport?.deletePreserveCount ?? 0,
-                      })}
+                      {pluginReport
+                        ? t('agentHub:portable.details.deleteGroupSummary', {
+                            tombstone: pluginReport.deleteTombstoneCount,
+                            preserve: pluginReport.deletePreserveCount,
+                          })
+                        : t('agentHub:portable.details.missing')}
                     </span>
                   </div>
                 </div>
@@ -296,6 +308,11 @@ export function PortableAssetDetailsDrawer({
               aria-label={t('agentHub:portable.details.actionsAria')}
               data-testid="portable-asset-actions"
             >
+              {inventoryBlocked ? (
+                <StatusMessage tone="warn" data-testid="portable-asset-mutation-blocked">
+                  {t('agentHub:portable.actionDialog.mutationBlocked')}
+                </StatusMessage>
+              ) : null}
               {needsRefresh ? (
                 <StatusMessage
                   tone="info"
