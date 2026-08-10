@@ -39,7 +39,7 @@ import { invokeDecoded } from './client';
  * 可选设备 / 项目上下文（T7）。
  *
  * Business Logic: 用户级 deviceId=null 本机；项目级 projectRef 为本机或 remote:… 身份。
- * Code Logic: 仅非空字段参与 peer 判定；与 agentHub API 同形。
+ * Code Logic: 仅非空字段参与 peer 判定；本机 projectRef 还需等待项目级 inventory 路由。
  */
 export interface AgentHubRequestContext {
   deviceId?: string | null;
@@ -53,6 +53,9 @@ export interface AgentHubRequestContext {
  * Code Logic: Error.message 与 Error.code 同为该常量。
  */
 export const AGENT_HUB_PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE' as const;
+/** 本机 projectRef 当前没有 portable inventory V2 路由。 */
+export const AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE =
+  'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE' as const;
 
 /**
  * Business Logic: workbench 远端项目 id 形如 `remote:<deviceId>:<inner>`。
@@ -64,7 +67,7 @@ export function isRemoteProjectRef(projectRef: string | null | undefined): boole
 }
 
 /**
- * Business Logic: peer 设备或远端项目需要 peer 路径；本机 deviceId=null + 本机 project 仍 local。
+ * Business Logic: peer 设备或远端项目需要 peer 路径；本机 projectRef 由断言单独阻断。
  * Code Logic: 非空 deviceId，或 projectRef 以 remote: 开头。
  */
 export function requiresPeerAgentHubPath(
@@ -80,6 +83,12 @@ export function requiresPeerAgentHubPath(
  * Code Logic: 抛带稳定 code 的 Error。
  */
 export function assertLocalAgentHubContext(context?: AgentHubRequestContext | null): void {
+  const projectRef = context?.projectRef?.trim() ?? '';
+  if (projectRef.length > 0 && !isRemoteProjectRef(projectRef)) {
+    throw Object.assign(new Error(AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE), {
+      code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
+    });
+  }
   if (!requiresPeerAgentHubPath(context)) return;
   throw Object.assign(new Error(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE), {
     code: AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
@@ -87,8 +96,8 @@ export function assertLocalAgentHubContext(context?: AgentHubRequestContext | nu
 }
 
 /**
- * Business Logic: 本机调用保持无参兼容旧 sidecar；有本机 projectRef 时可选透传（忽略未知字段风险由调用方控制）。
- * Code Logic: peer 已在 assert 拦截；仅 local 非空 projectRef 时带 request 信封，否则 undefined。
+ * Business Logic: 本机调用保持无参兼容旧 sidecar；项目上下文当前不允许静默透传。
+ * Code Logic: peer/本机 project 已由 assert 拦截；仅用户级本机调用返回 undefined。
  */
 function localInspectInvokeArgs(
   context?: AgentHubRequestContext | null,
@@ -97,8 +106,7 @@ function localInspectInvokeArgs(
   if (projectRef.length === 0 || isRemoteProjectRef(projectRef)) {
     return undefined;
   }
-  // 本机 project 身份：可选透传；后端若忽略未知字段则仍成功，未知则由上层测覆盖。
-  // T7 前端优先：实际仍走无参 inspect，避免破坏未声明 request 的旧命令签名。
+  // 保留 helper 便于项目路由接通时扩展；当前 assert 会在本机 project 到达此处前阻断。
   return undefined;
 }
 

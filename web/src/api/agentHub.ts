@@ -127,6 +127,9 @@ export interface AgentHubRequestContext {
  * Code Logic: message 与 code 同为该常量。
  */
 export const AGENT_HUB_PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE' as const;
+/** 本机 projectRef 当前没有 Agent Hub V2 后端路由。 */
+export const AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE =
+  'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE' as const;
 
 /**
  * Business Logic: workbench 远端项目 id 形如 `remote:<deviceId>:<inner>`。
@@ -139,7 +142,8 @@ export function isRemoteProjectRef(projectRef: string | null | undefined): boole
 
 /**
  * Business Logic: 非空 deviceId 或 remote projectRef 需要 peer 路径。
- * Code Logic: trim 后判定。
+ * Code Logic: trim 后判定；本机 projectRef 另由 assertLocalAgentHubContext 以项目路由
+ *   尚未接通为由 fail-closed。
  */
 export function requiresPeerAgentHubPath(
   context?: AgentHubRequestContext | null,
@@ -154,6 +158,12 @@ export function requiresPeerAgentHubPath(
  * Code Logic: 抛带稳定 code 的 Error。
  */
 export function assertLocalAgentHubContext(context?: AgentHubRequestContext | null): void {
+  const projectRef = context?.projectRef?.trim() ?? '';
+  if (projectRef.length > 0 && !isRemoteProjectRef(projectRef)) {
+    throw Object.assign(new Error(AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE), {
+      code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
+    });
+  }
   if (!requiresPeerAgentHubPath(context)) return;
   throw Object.assign(new Error(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE), {
     code: AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,

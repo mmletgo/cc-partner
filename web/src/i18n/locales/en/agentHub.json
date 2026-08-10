@@ -84,6 +84,8 @@
       "commonMarkdown": "Common body",
       "variantsTitle": "Per-agent variants",
       "saveBlocks": "Save slots",
+      "contextSwitchWarning": "You have unsaved instruction edits. Switch context and discard this draft?",
+      "projectScopeUnsupported": "Project-scoped instruction writes are not available on this backend yet; no user-scoped write will be attempted.",
       "writeBlocked": "Writes are blocked for this agent. You can still edit the draft, but sync is disabled.",
       "errors": {
         "emptySync": "Nothing to sync. Add original content or fill the three slots first."
@@ -414,7 +416,9 @@
   },
   "errors": {
     "projectIdRequired": "Project id is required.",
-    "assetRequired": "Select an asset first."
+    "assetRequired": "Select an asset first.",
+    "previewRequired": "Run the preview before confirming this write.",
+    "selectionRequired": "Select at least one asset before confirming this import."
   },
   "replication": {
     "plaintextDisclosure": "Hub snapshots may store credential-bearing assets as plaintext bytes. Secret values are never shown here.",

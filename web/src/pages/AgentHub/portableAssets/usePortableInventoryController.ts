@@ -16,6 +16,7 @@ import { portableAssetApi, type AgentHubRequestContext } from '@/api/portableInv
 
 /** peer 上下文稳定错误码（与 api 层常量同字面量；不 import 避免 mock 缺导出）。 */
 const PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE';
+const PROJECT_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE';
 import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
@@ -144,10 +145,12 @@ export function usePortableInventoryController(
         reason && typeof reason === 'object' && 'code' in reason
           ? String((reason as { code?: unknown }).code ?? '')
           : '';
-      const message =
-        code === PEER_CONTEXT_UNAVAILABLE
-          ? PEER_CONTEXT_UNAVAILABLE
-          : reason instanceof Error && reason.message
+        const message =
+          code === PEER_CONTEXT_UNAVAILABLE
+            ? PEER_CONTEXT_UNAVAILABLE
+            : code === PROJECT_CONTEXT_UNAVAILABLE
+              ? PROJECT_CONTEXT_UNAVAILABLE
+            : reason instanceof Error && reason.message
             ? reason.message
             : 'portable inventory refresh failed';
       setError(message);
@@ -166,6 +169,9 @@ export function usePortableInventoryController(
     const contextChanged = contextKeyRef.current !== nextKey;
     contextKeyRef.current = nextKey;
     if (contextChanged) {
+      // A disabled lane may not start a replacement request; still advance the
+      // generation so an in-flight response from the previous context cannot land.
+      refreshSeqRef.current += 1;
       // 切换设备/项目：丢弃旧 snapshot，禁止用本机数据冒充 peer
       hasSnapshotRef.current = false;
       snapshotFetchedAtRef.current = 0;
@@ -220,7 +226,11 @@ export function usePortableInventoryController(
   }, []);
 
   const stale = Boolean(snapshot?.stale) || staleFlag;
-  const mutationBlocked = stale || !snapshot;
+  // 当前后端没有本机 projectRef 的 portable mutation 路径；保留 inspect 的
+  // 只读可能性，但永远不给项目上下文暴露写动作。
+  const projectContextUnsupported =
+    Boolean(projectRef && projectRef.trim().length > 0 && !projectRef.trim().startsWith('remote:'));
+  const mutationBlocked = stale || !snapshot || projectContextUnsupported;
 
   const visibleItems = useMemo(
     () => filterPortableInventoryItems(snapshot?.items ?? [], filters),

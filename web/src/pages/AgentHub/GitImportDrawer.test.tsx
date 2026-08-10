@@ -1,8 +1,8 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { GitImportDrawer } from './GitImportDrawer';
 
 vi.mock('react-i18next', () => ({
@@ -11,6 +11,8 @@ vi.mock('react-i18next', () => ({
       opts ? `${key}:${JSON.stringify(opts)}` : key,
   }),
 }));
+
+afterEach(() => cleanup());
 
 describe('GitImportDrawer', () => {
   it('separates inspect, preview and confirm; requires explicit mapping for unmapped projects', () => {
@@ -129,5 +131,66 @@ describe('GitImportDrawer', () => {
     expect(onConfirmImport).toHaveBeenCalled();
     // no pull UI
     expect(screen.queryByText(/pull/i)).toBeNull();
+  });
+
+  it('treats an explicit empty asset set as no-op and disables confirm', () => {
+    render(
+      <GitImportDrawer
+        open
+        busy={false}
+        error={null}
+        inspectReport={null}
+        selectedLaneDeviceId="device-b"
+        preview={{
+          laneDeviceId: 'device-b',
+          snapshotId: 's1',
+          snapshotHash: 'hashhashhash',
+          sourceReplicaId: 'device-b',
+          assetCount: 1,
+          revisionCount: 1,
+          changeCounts: {
+            added: 1,
+            modified: 0,
+            deleted: 0,
+            conflict: 0,
+            unchanged: 0,
+            credentialBearing: 0,
+          },
+          assets: [
+            {
+              assetId: 'a1',
+              kind: 'mcp',
+              logicalKey: 'm',
+              displayName: 'MCP',
+              changeKind: 'added',
+              hasCredential: false,
+              remoteDeleted: false,
+            },
+          ],
+          projectCandidates: [],
+          resolvedMappings: [],
+          plaintextBackupDisclosure: 'plain-git',
+          hasCredentialBearingAssets: false,
+        }}
+        selectedAssetIds={[]}
+        hasExplicitAssetSelection
+        mappingDrafts={{}}
+        confirmOutcome={null}
+        lastMapping={null}
+        onInspect={vi.fn()}
+        onSelectLane={vi.fn()}
+        onPreview={vi.fn()}
+        onToggleAsset={vi.fn()}
+        onMappingDraftChange={vi.fn()}
+        onConfirmMapping={vi.fn()}
+        onConfirmImport={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByTestId('git-import-confirm-btn') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByTestId('git-import-asset-a1') as HTMLInputElement).checked).toBe(false);
   });
 });

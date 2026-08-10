@@ -8,7 +8,7 @@
  *   controller 持有数据/动作；AgentHubView 为 pure 视图（禁止 @/api/*）。
  */
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { AgentAssetRow } from '@/components/domain/AgentAssetRow';
 import { Button, Card, Dialog, Drawer, Input, Pill, StatusMessage } from '@/components/primitives';
 import type {
@@ -153,6 +153,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     selectGitLane,
     gitPreview,
     gitSelectedAssetIds,
+    gitAssetSelectionExplicit,
     toggleGitAsset,
     gitMappingDrafts,
     setGitMappingDraft,
@@ -170,6 +171,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     closeBlocksDrawer,
     pluginDrawerOpen,
     pluginReport,
+    pluginReportAssetId,
     openPluginDrawer,
     closePluginDrawer,
     adoptionOpen,
@@ -378,6 +380,16 @@ export function AgentHubView(props: AgentHubViewProps) {
     if (!portableSelectedItem || portableSelectedItem.kind !== 'plugin' || !pluginReport) {
       return null;
     }
+    const portableAssetIds = new Set(
+      [
+        portableSelectedItem.canonicalAssetId,
+        portableSelectedItem.inventoryItemId,
+        portableSelectedItem.nativeId,
+      ].filter((value): value is string => Boolean(value)),
+    );
+    if (pluginReportAssetId && !portableAssetIds.has(pluginReportAssetId)) {
+      return null;
+    }
     const deleteSummary = summarizeDeletePreview(pluginReport.deletePreview ?? null);
     return {
       packageDisplayName: pluginReport.packageDisplayName || portableSelectedItem.displayName,
@@ -388,7 +400,7 @@ export function AgentHubView(props: AgentHubViewProps) {
       deleteTombstoneCount: deleteSummary.tombstoneCount,
       deletePreserveCount: deleteSummary.preserveCount,
     };
-  }, [portableSelectedItem, pluginReport]);
+  }, [pluginReport, pluginReportAssetId, portableSelectedItem]);
 
   /**
    * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉；Adapt 写 adaptView URL。
@@ -1120,6 +1132,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         selectedLaneDeviceId={gitSelectedLaneDeviceId}
         preview={gitPreview}
         selectedAssetIds={gitSelectedAssetIds}
+        hasExplicitAssetSelection={gitAssetSelectionExplicit}
         mappingDrafts={gitMappingDrafts}
         confirmOutcome={gitConfirmOutcome}
         lastMapping={gitLastMapping}
@@ -1244,7 +1257,31 @@ export function AgentHub() {
     t: controller.t,
     enabled: controller.instructionsLaneActive,
   });
-  return <AgentHubView {...controller} instructionThreePane={instructionThreePane} />;
+  const onContextChange = useCallback(
+    (patch: Partial<UseAgentHubControllerResult['hubContext']>) => {
+      const current = controller.hubContext;
+      const contextChanging = (['scope', 'projectKey', 'deviceId', 'agent'] as const).some(
+        (key) => patch[key] !== undefined && patch[key] !== current[key],
+      );
+      if (contextChanging && instructionThreePane.dirty) {
+        const confirmed =
+          typeof window === 'undefined' || typeof window.confirm !== 'function'
+            ? false
+            : window.confirm(controller.t('agentHub:instructions.threePane.contextSwitchWarning'));
+        if (!confirmed) return;
+        instructionThreePane.discardDraftForContextChange();
+      }
+      controller.onContextChange(patch);
+    },
+    [controller, instructionThreePane],
+  );
+  return (
+    <AgentHubView
+      {...controller}
+      onContextChange={onContextChange}
+      instructionThreePane={instructionThreePane}
+    />
+  );
 }
 
 // 避免未使用类型告警（导出供测试）

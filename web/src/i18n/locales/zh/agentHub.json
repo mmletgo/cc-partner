@@ -84,6 +84,8 @@
       "commonMarkdown": "公共正文",
       "variantsTitle": "各 Agent 变体",
       "saveBlocks": "保存三槽",
+      "contextSwitchWarning": "当前有未保存的指令编辑。切换上下文并放弃这份草稿吗？",
+      "projectScopeUnsupported": "当前后端尚不支持项目级指令写入；不会改写用户级指令。",
       "writeBlocked": "当前 Agent 禁止写入。仍可编辑草稿，但同步已禁用。",
       "errors": {
         "emptySync": "没有可同步的内容。请先填写原文或三槽。"
@@ -414,7 +416,9 @@
   },
   "errors": {
     "projectIdRequired": "请填写项目 id。",
-    "assetRequired": "请先选择资产。"
+    "assetRequired": "请先选择资产。",
+    "previewRequired": "请先生成预览，再确认这次写入。",
+    "selectionRequired": "确认导入前至少选择一项资产。"
   },
   "replication": {
     "plaintextDisclosure": "Hub 快照可能以明文字节保存含凭据资产。此处永不显示 secret 值。",
