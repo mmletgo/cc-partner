@@ -60,6 +60,12 @@ pub struct CrossAgentFullPlanItem {
     pub action: String,
     pub path: String,
     pub content: Option<String>,
+    /// 指令项保存 selective preview hash，阻止 full apply 在重建后接受新的磁盘状态。
+    #[serde(default)]
+    pub preview_hash: Option<String>,
+    /// 预览时目标内容 hash；用于 full plan 对外部编辑做 CAS 绑定。
+    #[serde(default)]
+    pub observed_hash: Option<String>,
     pub residual_reason: Option<String>,
     /// 用户可在预览中关闭
     pub included: bool,
@@ -165,6 +171,7 @@ impl FullAdaptRunner for StubFullAdaptRunner {
                 source: snapshot.source,
                 destinations: vec![snapshot.destination],
                 source_markdown: snapshot.source_markdown.clone(),
+                scope: snapshot.scope.clone(),
                 destination_paths: BTreeMap::new(),
             },
             env,
@@ -206,6 +213,8 @@ impl FullAdaptRunner for StubFullAdaptRunner {
             },
             path: dest_path,
             content,
+            preview_hash: Some(instr_preview.plan_hash.clone()),
+            observed_hash: dest_row.observed_hash.clone(),
             residual_reason: residual,
             included: true,
         });
@@ -238,6 +247,8 @@ impl FullAdaptRunner for StubFullAdaptRunner {
                 action: "skip".into(),
                 path: asset.path.clone(),
                 content: None,
+                preview_hash: None,
+                observed_hash: None,
                 residual_reason: Some(residual_reason),
                 included: true,
             });
@@ -259,6 +270,8 @@ impl FullAdaptRunner for StubFullAdaptRunner {
                 action: "skip".into(),
                 path: String::new(),
                 content: None,
+                preview_hash: None,
+                observed_hash: None,
                 residual_reason: Some(format!("no_{}_on_source", kind_wire(kind))),
                 included: false,
             });
@@ -307,6 +320,7 @@ pub fn preview_cross_agent_full(
     if request.source_markdown.trim().is_empty() {
         return Err(AppError::validation("CROSS_AGENT_FULL_MARKDOWN_REQUIRED"));
     }
+    ensure_user_scope(&request.scope)?;
 
     let portable_assets = if request.portable_assets.is_empty() {
         collect_source_portable_refs(request.source, &request.scope, env)?
@@ -346,6 +360,7 @@ pub fn apply_cross_agent_full(
     if request.scope.trim().is_empty() {
         return Err(AppError::validation("CROSS_AGENT_FULL_SCOPE_REQUIRED"));
     }
+    ensure_user_scope(&request.scope)?;
 
     let portable_assets = if request.portable_assets.is_empty() {
         collect_source_portable_refs(request.source, &request.scope, env)?
@@ -398,12 +413,17 @@ pub fn apply_cross_agent_full(
         }
         match item.kind {
             CrossAgentKind::Instruction => {
+                let selective_plan_hash = item.preview_hash.clone().ok_or_else(|| {
+                    AppError::validation("CROSS_AGENT_FULL_INSTRUCTION_PREVIEW_HASH_MISSING")
+                })?;
                 let apply_rows = apply_cross_agent_instruction(
                     &ApplyCrossAgentInstructionRequest {
                         source: request.source,
                         destinations: vec![request.destination],
                         source_markdown: request.source_markdown.clone(),
+                        scope: request.scope.clone(),
                         destination_paths: BTreeMap::new(),
+                        plan_hash: selective_plan_hash,
                         client_request_id: format!(
                             "{}:{}",
                             request.client_request_id, item.logical_key
@@ -474,6 +494,16 @@ fn validate_source_destination(
     Ok(())
 }
 
+fn ensure_user_scope(scope: &str) -> Result<(), AppError> {
+    if scope.trim() == "user" {
+        Ok(())
+    } else {
+        Err(AppError::validation(
+            "CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE",
+        ))
+    }
+}
+
 fn kind_wire(kind: CrossAgentKind) -> &'static str {
     match kind {
         CrossAgentKind::Instruction => "instruction",
@@ -510,12 +540,14 @@ fn compute_plan_hash(
     ));
     for item in items {
         lines.push(format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}",
             kind_wire(item.kind),
             item.logical_key,
             item.action,
             item.path,
             item.content.as_deref().unwrap_or(""),
+            item.preview_hash.as_deref().unwrap_or(""),
+            item.observed_hash.as_deref().unwrap_or("<missing>"),
             item.residual_reason.as_deref().unwrap_or(""),
         ));
     }
@@ -546,20 +578,12 @@ fn collect_source_portable_refs(
     scope: &str,
     env: &TargetEnvironment,
 ) -> Result<Vec<CrossAgentFullPortableRef>, AppError> {
+    ensure_user_scope(scope)?;
     let homes = TargetPathResolver::resolve_all(env);
-    let absolute_path = if scope == "user" {
-        env.home.clone()
-    } else {
-        // project key：无 mapping 时仍用 home 用户级扫描（全量首版不解析 project path）
-        env.home.clone()
-    };
+    let absolute_path = env.home.clone();
     let _ = homes;
     let mapping = LocalScopeMapping {
-        scope_kind: if scope == "user" {
-            ScopeKind::User
-        } else {
-            ScopeKind::Project
-        },
+        scope_kind: ScopeKind::User,
         absolute_path,
         project_root: if scope == "user" {
             None
@@ -802,6 +826,76 @@ mod tests {
         assert_eq!(instr.status, "applied");
         let written = fs::read_to_string(&instr.path).unwrap();
         assert!(written.contains("Always run tests"));
+    }
+
+    #[test]
+    fn full_apply_rejects_target_changed_after_preview() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+        fs::create_dir_all(tmp.path().join(".codex")).unwrap();
+        let env = temp_env(tmp.path());
+        let preview_request = PreviewCrossAgentFullRequest {
+            source: AgentTarget::Claude,
+            destination: AgentTarget::Codex,
+            scope: "user".into(),
+            source_markdown: "Always run tests.\n".into(),
+            portable_assets: vec![],
+            device_id: None,
+        };
+        let plan = preview_cross_agent_full(&preview_request, &env, &StubFullAdaptRunner).unwrap();
+        let instruction = plan
+            .items
+            .iter()
+            .find(|item| item.kind == CrossAgentKind::Instruction)
+            .unwrap();
+        let instruction_path = instruction.path.clone();
+        let instruction_key = instruction.logical_key.clone();
+        fs::write(&instruction_path, "external edit\n").unwrap();
+
+        let error = apply_cross_agent_full(
+            &ApplyCrossAgentFullRequest {
+                source: preview_request.source,
+                destination: preview_request.destination,
+                scope: preview_request.scope,
+                source_markdown: preview_request.source_markdown,
+                plan_hash: plan.plan_hash,
+                client_request_id: "req-full-stale".into(),
+                items: vec![CrossAgentFullApplySelection {
+                    logical_key: instruction_key,
+                    included: true,
+                }],
+                portable_assets: vec![],
+                device_id: None,
+            },
+            &env,
+            &StubFullAdaptRunner,
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH"));
+        assert_eq!(
+            fs::read_to_string(instruction_path).unwrap(),
+            "external edit\n"
+        );
+    }
+
+    #[test]
+    fn full_project_scope_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = temp_env(tmp.path());
+        let error = preview_cross_agent_full(
+            &PreviewCrossAgentFullRequest {
+                source: AgentTarget::Claude,
+                destination: AgentTarget::Codex,
+                scope: "project:demo".into(),
+                source_markdown: "Always run tests.\n".into(),
+                portable_assets: vec![],
+                device_id: None,
+            },
+            &env,
+            &StubFullAdaptRunner,
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("CROSS_AGENT_PROJECT_SCOPE_UNAVAILABLE"));
     }
 
     #[test]

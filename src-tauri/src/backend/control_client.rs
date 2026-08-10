@@ -13,6 +13,14 @@
 //!     mutation 含 deliver-reviewed / workflow-document validate|save；
 //!     截图快捷键走两阶段补偿（CAS 预检 → OS replace → owner durable commit → 响应丢失对账）。
 
+use crate::agent_hub::cross_agent::{
+    ApplyCrossAgentInstructionRequest, CrossAgentApplyTargetResult, CrossAgentPreviewReport,
+    PreviewCrossAgentInstructionRequest,
+};
+use crate::agent_hub::cross_agent_full::{
+    ApplyCrossAgentFullRequest, CrossAgentFullApplyItemResult, CrossAgentFullPlan,
+    PreviewCrossAgentFullRequest,
+};
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::service::{
     AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubStatusDto, InstructionBlockDto,
@@ -1533,6 +1541,50 @@ impl BackendControlClient {
             portable_control_read_timeout("agent_hub.get_portable_pull"),
         )
         .await
+    }
+
+    /// Business Logic: selective 跨 Agent 预览也必须由唯一 owner 读取目标文件。
+    /// Code Logic: 版本门闩后代理 preview control op。
+    pub async fn agent_hub_preview_cross_agent_instruction(
+        &self,
+        req: PreviewCrossAgentInstructionRequest,
+    ) -> Result<CrossAgentPreviewReport, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_cross_agent_instruction", req)
+            .await
+    }
+
+    /// Business Logic: selective apply 只能由 sidecar owner 执行 CAS 写入。
+    /// Code Logic: 版本门闩后单次发送 apply control op。
+    pub async fn agent_hub_apply_cross_agent_instruction(
+        &self,
+        req: ApplyCrossAgentInstructionRequest,
+    ) -> Result<Vec<CrossAgentApplyTargetResult>, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.apply_cross_agent_instruction", req)
+            .await
+    }
+
+    /// Business Logic: full preview 与 apply 必须由同一 owner 观察本机目标状态。
+    /// Code Logic: 版本门闩后代理 full preview。
+    pub async fn agent_hub_preview_cross_agent_full(
+        &self,
+        req: PreviewCrossAgentFullRequest,
+    ) -> Result<CrossAgentFullPlan, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_cross_agent_full", req)
+            .await
+    }
+
+    /// Business Logic: full apply 只允许 owner 按 preview hash 写入。
+    /// Code Logic: 版本门闩后单次发送 full apply。
+    pub async fn agent_hub_apply_cross_agent_full(
+        &self,
+        req: ApplyCrossAgentFullRequest,
+    ) -> Result<Vec<CrossAgentFullApplyItemResult>, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.apply_cross_agent_full", req)
+            .await
     }
 
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。

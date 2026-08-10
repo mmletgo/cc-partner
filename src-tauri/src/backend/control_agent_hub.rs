@@ -9,6 +9,14 @@
 //!     按 `op` 分发到 `AgentHubService`；mutation 额外校验 agentHubApiVersion；
 //!     响应 ≤1 MiB；永不记录 instruction content。
 
+use crate::agent_hub::cross_agent::{
+    apply_cross_agent_instruction, preview_cross_agent_instruction,
+    ApplyCrossAgentInstructionRequest, PreviewCrossAgentInstructionRequest,
+};
+use crate::agent_hub::cross_agent_full::{
+    apply_cross_agent_full_default, preview_cross_agent_full_default, ApplyCrossAgentFullRequest,
+    PreviewCrossAgentFullRequest,
+};
 use crate::agent_hub::git::preview::{
     confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
     preview_git_import_for_state, ConfirmGitImportRequest, ConfirmProjectMappingRequest,
@@ -28,6 +36,7 @@ use crate::agent_hub::service::{
     UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
+use crate::agent_hub::targets::TargetEnvironment;
 use crate::agent_hub::user_instructions::{
     ApplyUserInstructionPlanRequest, PreviewUserInstructionRequest,
     SaveUserInstructionBlocksRequest,
@@ -395,6 +404,41 @@ async fn dispatch_agent_hub_op(
             let dto = PortableService::get_portable_pull(state, &client_request_id).await?;
             Ok(serde_json::to_value(dto)?)
         }
+        "agent_hub.preview_cross_agent_instruction" => {
+            let req: PreviewCrossAgentInstructionRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("preview_cross_agent_instruction payload: {e}"))
+                })?;
+            let env = TargetEnvironment::from_process();
+            let dto = preview_cross_agent_instruction(&req, &env)?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.apply_cross_agent_instruction" => {
+            let req: ApplyCrossAgentInstructionRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("apply_cross_agent_instruction payload: {e}"))
+                })?;
+            let env = TargetEnvironment::from_process();
+            let dto = apply_cross_agent_instruction(&req, &env)?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.preview_cross_agent_full" => {
+            let req: PreviewCrossAgentFullRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("preview_cross_agent_full payload: {e}"))
+                })?;
+            let env = TargetEnvironment::from_process();
+            let dto = preview_cross_agent_full_default(&req, &env)?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.apply_cross_agent_full" => {
+            let req: ApplyCrossAgentFullRequest = serde_json::from_value(payload).map_err(|e| {
+                AppError::validation(format!("apply_cross_agent_full payload: {e}"))
+            })?;
+            let env = TargetEnvironment::from_process();
+            let dto = apply_cross_agent_full_default(&req, &env)?;
+            Ok(serde_json::to_value(dto)?)
+        }
         other => Err(AppError::validation(format!(
             "未知 agent hub control op: {other}"
         ))),
@@ -433,6 +477,10 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.apply_portable_asset_action"
             | "agent_hub.preview_portable_pull"
             | "agent_hub.apply_portable_pull"
+            | "agent_hub.preview_cross_agent_instruction"
+            | "agent_hub.apply_cross_agent_instruction"
+            | "agent_hub.preview_cross_agent_full"
+            | "agent_hub.apply_cross_agent_full"
     )
 }
 
@@ -617,6 +665,10 @@ mod tests {
             "agent_hub.preview_portable_pull",
             "agent_hub.apply_portable_pull",
             "agent_hub.get_portable_pull",
+            "agent_hub.preview_cross_agent_instruction",
+            "agent_hub.apply_cross_agent_instruction",
+            "agent_hub.preview_cross_agent_full",
+            "agent_hub.apply_cross_agent_full",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
@@ -644,6 +696,10 @@ mod tests {
         assert!(is_mutation_op("agent_hub.apply_portable_asset_action"));
         assert!(is_mutation_op("agent_hub.preview_portable_pull"));
         assert!(is_mutation_op("agent_hub.apply_portable_pull"));
+        assert!(is_mutation_op("agent_hub.preview_cross_agent_instruction"));
+        assert!(is_mutation_op("agent_hub.apply_cross_agent_instruction"));
+        assert!(is_mutation_op("agent_hub.preview_cross_agent_full"));
+        assert!(is_mutation_op("agent_hub.apply_cross_agent_full"));
         assert!(!is_mutation_op("agent_hub.get_status"));
         assert!(!is_mutation_op(
             "agent_hub.inspect_user_instruction_workspace"
