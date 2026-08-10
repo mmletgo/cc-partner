@@ -173,6 +173,13 @@ function restoreInert(el: Element): void {
  *   顶层 portal root 保持可交互；其余 body 子节点强制 inert；对差分集合 force/restore。
  */
 function syncBackgroundInert(): void {
+  if (typeof document === 'undefined' || !document.body) {
+    for (const el of Array.from(managedInert)) {
+      restoreInert(el);
+      managedInert.delete(el);
+    }
+    return;
+  }
   const topSurface = openLayers[openLayers.length - 1];
   const topRoot = topSurface ? getPortalRoot(topSurface) : null;
 
@@ -212,11 +219,16 @@ function syncBackgroundInert(): void {
  *   若已启动则 no-op。
  */
 function startBodySiblingObserver(): void {
-  if (bodySiblingObserver || typeof MutationObserver === 'undefined') {
+  if (
+    bodySiblingObserver ||
+    typeof MutationObserver === 'undefined' ||
+    typeof document === 'undefined' ||
+    !document.body
+  ) {
     return;
   }
   bodySiblingObserver = new MutationObserver(() => {
-    if (openLayers.length === 0) {
+    if (openLayers.length === 0 || typeof document === 'undefined' || !document.body) {
       return;
     }
     syncBackgroundInert();
@@ -238,6 +250,7 @@ function stopBodySiblingObserver(): void {
     return;
   }
   bodySiblingObserver.disconnect();
+  bodySiblingObserver.takeRecords();
   bodySiblingObserver = null;
 }
 
