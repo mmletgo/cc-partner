@@ -116,6 +116,7 @@ describe('useCrossAgentAdaptController', () => {
       source: 'claude',
       kind: 'instruction',
       needsAdaptation: false,
+      planHash: 'plan-1',
       destinations: [
         {
           destination: 'codex',
@@ -175,6 +176,7 @@ describe('useCrossAgentAdaptController', () => {
           source: 'claude',
           destinations: ['codex', 'opencode'],
           sourceMarkdown: 'Always run tests before commit.',
+          scope: 'user',
         }),
       );
       expect(result.current.preview).not.toBeNull();
@@ -193,6 +195,8 @@ describe('useCrossAgentAdaptController', () => {
           source: 'claude',
           destinations: ['codex'],
           sourceMarkdown: 'Always run tests before commit.',
+          scope: 'user',
+          planHash: 'plan-1',
         }),
       );
       expect(result.current.applyResults?.[0]?.status).toBe('applied');

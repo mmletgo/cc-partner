@@ -919,6 +919,7 @@ export const agentHubApi = {
     source: string;
     destinations: string[];
     sourceMarkdown: string;
+    scope: string;
     destinationPaths?: Record<string, string>;
   }): Promise<unknown> =>
     invoke(AGENT_HUB_COMMANDS.previewCrossAgentInstruction, {
@@ -926,6 +927,7 @@ export const agentHubApi = {
         source: request.source,
         destinations: request.destinations,
         sourceMarkdown: request.sourceMarkdown,
+        scope: request.scope,
         destinationPaths: request.destinationPaths ?? {},
       },
     }),
@@ -938,7 +940,9 @@ export const agentHubApi = {
     source: string;
     destinations: string[];
     sourceMarkdown: string;
+    scope: string;
     destinationPaths?: Record<string, string>;
+    planHash: string;
     clientRequestId: string;
   }): Promise<unknown> =>
     invoke(AGENT_HUB_COMMANDS.applyCrossAgentInstruction, {
@@ -946,7 +950,9 @@ export const agentHubApi = {
         source: request.source,
         destinations: request.destinations,
         sourceMarkdown: request.sourceMarkdown,
+        scope: request.scope,
         destinationPaths: request.destinationPaths ?? {},
+        planHash: request.planHash,
         clientRequestId: request.clientRequestId,
       },
     }),

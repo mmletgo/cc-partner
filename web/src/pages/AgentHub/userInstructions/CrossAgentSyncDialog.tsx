@@ -27,6 +27,7 @@ interface CrossAgentPreviewReport {
   kind: string;
   destinations: CrossAgentTargetPreviewRow[];
   needsAdaptation: boolean;
+  planHash: string;
 }
 
 interface CrossAgentApplyResult {
@@ -63,11 +64,13 @@ function parsePreview(raw: unknown): CrossAgentPreviewReport | null {
       canApply: Boolean(r.canApply),
     });
   }
+  if (typeof obj.planHash !== 'string' || obj.planHash.trim().length === 0) return null;
   return {
     source: obj.source,
     kind: typeof obj.kind === 'string' ? obj.kind : 'instruction',
     destinations,
     needsAdaptation: Boolean(obj.needsAdaptation),
+    planHash: obj.planHash,
   };
 }
 
@@ -130,6 +133,7 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
         source,
         destinations,
         sourceMarkdown: markdown,
+        scope: 'user',
         destinationPaths: {},
       });
       const parsed = parsePreview(raw);
@@ -158,7 +162,9 @@ export function CrossAgentSyncDialog(props: CrossAgentSyncDialogProps): JSX.Elem
         source,
         destinations: applicable,
         sourceMarkdown: markdown,
+        scope: 'user',
         destinationPaths: {},
+        planHash: preview.planHash,
         clientRequestId: `cross-agent-${Date.now()}`,
       });
       setApplyResults(parseApplyResults(raw));

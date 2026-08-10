@@ -445,6 +445,7 @@ export function useCrossAgentAdaptController(
           source,
           destinations,
           sourceMarkdown: sourceMarkdown.trim(),
+          scope: scopeWire,
           destinationPaths: {},
         });
         if (!mountedRef.current || seq !== previewSeqRef.current) return;
@@ -524,7 +525,9 @@ export function useCrossAgentAdaptController(
           source,
           destinations: applicable,
           sourceMarkdown: sourceMarkdown.trim(),
+          scope: scopeWire,
           destinationPaths: {},
+          planHash: preview?.planHash ?? '',
           clientRequestId,
         });
         if (!mountedRef.current || seq !== applySeqRef.current) return;

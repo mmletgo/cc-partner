@@ -24,6 +24,7 @@ export interface CrossAgentTargetPreviewRow {
   mode: CrossAgentAdaptMode;
   path: string;
   renderedHash?: string | null;
+  observedHash?: string | null;
   unifiedDiff?: string | null;
   partialBlockers: string[];
   canApply: boolean;
@@ -35,6 +36,7 @@ export interface CrossAgentPreviewReport {
   kind: string;
   destinations: CrossAgentTargetPreviewRow[];
   needsAdaptation: boolean;
+  planHash: string;
 }
 
 /** 单目标 apply 结果。 */
@@ -171,6 +173,7 @@ export function parseCrossAgentPreview(raw: unknown): CrossAgentPreviewReport | 
       mode: normalizeAdaptMode(r.mode),
       path: r.path,
       renderedHash: typeof r.renderedHash === 'string' ? r.renderedHash : null,
+      observedHash: typeof r.observedHash === 'string' ? r.observedHash : null,
       unifiedDiff: typeof r.unifiedDiff === 'string' ? r.unifiedDiff : null,
       partialBlockers: Array.isArray(r.partialBlockers)
         ? r.partialBlockers.filter((b): b is string => typeof b === 'string')
@@ -178,11 +181,13 @@ export function parseCrossAgentPreview(raw: unknown): CrossAgentPreviewReport | 
       canApply: Boolean(r.canApply),
     });
   }
+  if (typeof obj.planHash !== 'string' || obj.planHash.trim().length === 0) return null;
   return {
     source: obj.source,
     kind: typeof obj.kind === 'string' ? obj.kind : 'instruction',
     destinations,
     needsAdaptation: Boolean(obj.needsAdaptation),
+    planHash: obj.planHash,
   };
 }
 

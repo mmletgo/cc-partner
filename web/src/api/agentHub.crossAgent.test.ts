@@ -23,6 +23,7 @@ describe('agentHubApi cross-agent IPC envelope', () => {
       source: 'claude',
       destinations: ['codex'],
       sourceMarkdown: 'Always run tests.',
+      scope: 'user',
     });
 
     expect(invokeMock).toHaveBeenCalledWith(
@@ -32,6 +33,7 @@ describe('agentHubApi cross-agent IPC envelope', () => {
           source: 'claude',
           destinations: ['codex'],
           sourceMarkdown: 'Always run tests.',
+          scope: 'user',
           destinationPaths: {},
         },
       },
@@ -43,6 +45,8 @@ describe('agentHubApi cross-agent IPC envelope', () => {
       source: 'claude',
       destinations: ['codex'],
       sourceMarkdown: 'Always run tests.',
+      scope: 'user',
+      planHash: 'plan-1',
       clientRequestId: 'req-1',
     });
 
@@ -53,7 +57,9 @@ describe('agentHubApi cross-agent IPC envelope', () => {
           source: 'claude',
           destinations: ['codex'],
           sourceMarkdown: 'Always run tests.',
+          scope: 'user',
           destinationPaths: {},
+          planHash: 'plan-1',
           clientRequestId: 'req-1',
         },
       },

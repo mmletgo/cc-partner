@@ -32,6 +32,7 @@ describe('CrossAgentSyncDialog', () => {
       source: 'claude',
       kind: 'instruction',
       needsAdaptation: false,
+      planHash: 'plan-1',
       destinations: [
         {
           destination: 'codex',
@@ -71,6 +72,7 @@ describe('CrossAgentSyncDialog', () => {
           source: 'claude',
           destinations: ['codex'],
           sourceMarkdown: 'Always run tests before commit.',
+          scope: 'user',
           destinationPaths: {},
         }),
       );
@@ -88,7 +90,9 @@ describe('CrossAgentSyncDialog', () => {
           source: 'claude',
           destinations: ['codex'],
           sourceMarkdown: 'Always run tests before commit.',
+          scope: 'user',
           destinationPaths: {},
+          planHash: 'plan-1',
         }),
       );
     });

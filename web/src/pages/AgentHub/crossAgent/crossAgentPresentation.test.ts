@@ -41,6 +41,7 @@ function previewFixture(
     source: 'claude',
     kind: 'instruction',
     needsAdaptation: false,
+    planHash: 'plan-1',
     destinations: [
       {
         destination: 'codex',
@@ -169,6 +170,7 @@ describe('parse preview/apply', () => {
       source: 'claude',
       kind: 'instruction',
       needsAdaptation: true,
+      planHash: 'plan-1',
       destinations: [
         {
           destination: 'codex',
