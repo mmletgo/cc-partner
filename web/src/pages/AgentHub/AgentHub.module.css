@@ -107,16 +107,49 @@
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 搜索占主列，两个状态下拉并排；避免 2 列网格把第 3 项挤到半宽第二行 */
+  grid-template-columns: minmax(0, 2fr) minmax(10rem, 1fr) minmax(10rem, 1fr);
   gap: var(--space-4);
+  align-items: end;
 }
 
 .filterField {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  min-width: 0;
   font-size: var(--text-sm);
   color: var(--fg-2);
+}
+
+/* Portable 库存筛选原生 select：与壳层 device/project 选择器同主题，避免暗色下系统白底 */
+.filterSelect {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.filterSelect:hover {
+  border-color: var(--border-soft);
+}
+
+.filterSelect:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.filterSelect:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .list {
@@ -382,6 +415,17 @@
 
   .header {
     flex-direction: column;
+  }
+}
+
+/* 中等宽度：搜索独占一行，两个状态下拉并排，避免挤成三窄列 */
+@media (max-width: 1100px) and (min-width: 901px) {
+  .filters {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .filters > :first-child {
+    grid-column: 1 / -1;
   }
 }
 

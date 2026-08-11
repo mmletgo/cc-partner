@@ -153,6 +153,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
         <label className={styles.filterField}>
           <span className={styles.metaLabel}>{labels.filterActual}</span>
           <select
+            className={styles.filterSelect}
             value={filters.actualState}
             onChange={(event) =>
               setFilters({
@@ -171,6 +172,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
         <label className={styles.filterField}>
           <span className={styles.metaLabel}>{labels.filterManagement}</span>
           <select
+            className={styles.filterSelect}
             value={filters.management}
             onChange={(event) =>
               setFilters({

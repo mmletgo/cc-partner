@@ -161,6 +161,11 @@ describe('PortableInventoryView', () => {
 
     expect(screen.queryByTestId('portable-filter-target')).toBeNull();
     expect(screen.queryByTestId('portable-filter-scope')).toBeNull();
+    // 筛选 select 必须挂主题 class，避免暗色主题下回落系统白底
+    expect(screen.getByTestId('portable-filter-actual').className).toMatch(/filterSelect/);
+    expect(screen.getByTestId('portable-filter-management').className).toMatch(
+      /filterSelect/,
+    );
     fireEvent.change(screen.getByTestId('portable-filter-actual'), {
       target: { value: 'problem' },
     });
