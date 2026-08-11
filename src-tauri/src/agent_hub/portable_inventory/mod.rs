@@ -12,6 +12,7 @@
 pub mod cache;
 pub mod ensure_managed;
 pub mod models;
+pub mod plugin_paths;
 pub mod reconcile;
 pub mod scanner;
 
@@ -25,6 +26,10 @@ pub use models::{
     PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableMcpCredentialFactDto,
+};
+pub use plugin_paths::{
+    infer_plugin_package_root, is_plugin_infrastructure_name, is_plugin_infrastructure_path,
+    plugin_id_from_path,
 };
 pub use reconcile::{
     reconcile_portable_inventory, reconcile_portable_inventory_with_facts, PortableCanonicalFact,

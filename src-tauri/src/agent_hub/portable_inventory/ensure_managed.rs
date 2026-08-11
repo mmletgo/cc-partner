@@ -102,6 +102,14 @@ pub async fn ensure_discovered_portable_items_managed(
             }
         }
     }
+    // 历史误纳管的 plugins 基础设施目录：标记 Detached，避免列表长期假 package
+    if let Err(err) = prune_infrastructure_plugin_materializations(repo).await {
+        tracing::warn!(
+            target = "agent_hub.portable_inventory.ensure_managed",
+            error = %err,
+            "prune infrastructure plugin mats failed"
+        );
+    }
     report
 }
 
@@ -174,6 +182,20 @@ fn is_ensure_candidate(item: &PortableInventoryItemDto) -> bool {
     if item.native_id.trim().is_empty() {
         return false;
     }
+    // 基础设施目录名不得 ensure 为 package
+    if item.kind == crate::agent_hub::portable_inventory::models::PortableAssetKind::Plugin
+        && (crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(
+            &item.native_id,
+        ) || item
+            .source_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .is_some_and(
+                crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path,
+            ))
+    {
+        return false;
+    }
     // source blocked / 显式 unsupported 原因
     if item
         .capabilities
@@ -184,6 +206,61 @@ fn is_ensure_candidate(item: &PortableInventoryItemDto) -> bool {
         return false;
     }
     true
+}
+
+/// 将历史误纳管的 plugins 基础设施 materialization 标为 Detached。
+///
+/// Business Logic: cache/data/staging 等不是 plugin package，Synced 会污染 Plugin 页。
+/// Code Logic: 扫 plugin assets × mats；路径末段或 logical_key 命中基础设施 → Detached。
+async fn prune_infrastructure_plugin_materializations(
+    repo: &AgentHubRepo,
+) -> Result<(), AppError> {
+    let assets = repo
+        .list_assets(None, Some(AssetKind::Plugin))
+        .await?;
+    let mats = repo.list_materializations().await?;
+    let plugin_ids: std::collections::BTreeSet<String> = assets
+        .iter()
+        .filter(|a| {
+            crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(
+                &a.logical_key,
+            )
+        })
+        .map(|a| a.id.clone())
+        .collect();
+    for mat in mats {
+        let path_is_infra = mat
+            .native_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .is_some_and(
+                crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path,
+            );
+        if !plugin_ids.contains(&mat.asset_id) && !path_is_infra {
+            continue;
+        }
+        if mat.status == MaterializationStatus::Detached
+            && mat
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e == "portable_infrastructure_not_plugin")
+        {
+            continue;
+        }
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: mat.asset_id,
+            target: mat.target,
+            target_binding_id: mat.target_binding_id,
+            native_path: mat.native_path,
+            last_projected_revision_id: mat.last_projected_revision_id,
+            rendered_hash: mat.rendered_hash,
+            observed_external_hash: None,
+            status: MaterializationStatus::Detached,
+            last_error: Some("portable_infrastructure_not_plugin".into()),
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 /// 幂等 ensure 单条 discovered item 的 scope/asset/binding/materialization。
@@ -300,31 +377,46 @@ async fn ensure_one_item(
                     mat.last_projected_revision_id.clone(),
                     mat.last_error.clone(),
                 )
+            } else if mat.status == MaterializationStatus::Detached {
+                // 再次发现（含版本路径滚动）：重新纳入管理，用当前 observed 重基准。
+                // 不得拿陈旧 rendered 与新 path hash 比出假 Drift。
+                (
+                    MaterializationStatus::Synced,
+                    observed.clone(),
+                    mat.last_projected_revision_id.clone(),
+                    None,
+                )
             } else {
                 let rendered = mat.rendered_hash.clone().or_else(|| observed.clone());
-                let status = match (rendered.as_deref(), observed.as_deref()) {
-                    (Some(r), Some(o)) if r != o => MaterializationStatus::Drift,
+                let (status, last_error) = match (rendered.as_deref(), observed.as_deref()) {
+                    (Some(r), Some(o)) if r != o => {
+                        (MaterializationStatus::Drift, mat.last_error.clone())
+                    }
+                    // hash 已对齐：不得钉死历史 Drift（假漂移自清）
                     _ => match mat.status {
-                        // Detached 后再次发现：重新纳入管理（产品不提供停止管理）
-                        MaterializationStatus::Detached
-                        | MaterializationStatus::Pending
+                        MaterializationStatus::Pending
                         | MaterializationStatus::Synced
-                        | MaterializationStatus::ActivationRequired => {
-                            MaterializationStatus::Synced
+                        | MaterializationStatus::ActivationRequired
+                        | MaterializationStatus::Drift => (MaterializationStatus::Synced, None),
+                        MaterializationStatus::Conflict => {
+                            (MaterializationStatus::Conflict, mat.last_error.clone())
                         }
-                        MaterializationStatus::Drift => MaterializationStatus::Drift,
-                        MaterializationStatus::Conflict => MaterializationStatus::Conflict,
-                        MaterializationStatus::Unsupported => MaterializationStatus::Unsupported,
-                        // ExternalCollision 已在上方 skip；Blocked 已单独分支
+                        MaterializationStatus::Unsupported => {
+                            (MaterializationStatus::Unsupported, mat.last_error.clone())
+                        }
+                        // ExternalCollision 已在上方 skip；Blocked/Detached 已单独分支
                         MaterializationStatus::ExternalCollision
-                        | MaterializationStatus::Blocked => mat.status,
+                        | MaterializationStatus::Blocked
+                        | MaterializationStatus::Detached => {
+                            (mat.status, mat.last_error.clone())
+                        }
                     },
                 };
                 (
                     status,
                     rendered,
                     mat.last_projected_revision_id.clone(),
-                    mat.last_error.clone(),
+                    last_error,
                 )
             }
         } else {
@@ -429,21 +521,9 @@ fn origin_namespace_for_item(item: &PortableInventoryItemDto) -> String {
     }
 }
 
-/// 从 `.../plugins/<id>/...` 路径提取 plugin id。
+/// 从 plugin 路径提取稳定 plugin id（cache 布局取 id 段，非 `cache`）。
 fn extract_plugin_id_from_path(path: Option<&str>) -> Option<String> {
-    let path = path?;
-    let normalized = path.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
-    for i in 0..parts.len() {
-        if parts[i] == "plugins" {
-            if let Some(id) = parts.get(i + 1) {
-                if !id.is_empty() && *id != "." && *id != ".." {
-                    return Some((*id).to_string());
-                }
-            }
-        }
-    }
-    None
+    crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(path)
 }
 
 fn is_unique_conflict(err: &AppError) -> bool {
@@ -851,6 +931,19 @@ mod tests {
             extract_plugin_id_from_path(Some("/home/.claude/skills/review")),
             None
         );
+        // cache 布局：取 plugin id，绝不是 cache
+        assert_eq!(
+            extract_plugin_id_from_path(Some(
+                "/Users/h/.claude/plugins/cache/ecc/ecc/2.0.0/skills/deep-research"
+            )),
+            Some("ecc".into())
+        );
+        assert_eq!(
+            extract_plugin_id_from_path(Some(
+                "/Users/h/.codex/plugins/cache/openai-bundled/browser/26.803.61601"
+            )),
+            Some("browser".into())
+        );
     }
 
     #[test]
@@ -861,5 +954,149 @@ mod tests {
         item.source_origin = PortableInventorySourceOrigin::PluginComponent;
         item.source_path = Some("/x/plugins/myplug/skills/a".into());
         assert_eq!(origin_namespace_for_item(&item), "plugin:myplug");
+        item.source_path = Some(
+            "/Users/h/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/x"
+                .into(),
+        );
+        assert_eq!(
+            origin_namespace_for_item(&item),
+            "plugin:superpowers"
+        );
+    }
+
+    /// 生产故障：hash 已一致仍 status=drift 时，ensure 不得钉死 Drift。
+    #[tokio::test]
+    async fn ensure_managed_clears_false_drift_when_hashes_align() {
+        use crate::agent_hub::models::NewMaterialization;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        write_skill(&home.join(".claude/skills"), "review", "Review carefully.");
+        let repo = open_repo(&root.path().join("data.db")).await;
+
+        let mut items = vec![sample_item(&home, "review", "hash-aligned")];
+        let report = ensure_discovered_portable_items_managed(&repo, &mut items).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats
+            .iter()
+            .find(|m| m.status == MaterializationStatus::Synced)
+            .expect("synced mat");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: mat.asset_id.clone(),
+            target: mat.target,
+            target_binding_id: mat.target_binding_id.clone(),
+            native_path: mat.native_path.clone(),
+            last_projected_revision_id: mat.last_projected_revision_id.clone(),
+            rendered_hash: Some("hash-aligned".into()),
+            observed_external_hash: Some("hash-aligned".into()),
+            status: MaterializationStatus::Drift,
+            last_error: Some("precondition_or_external_drift".into()),
+        })
+        .await
+        .unwrap();
+
+        let mut items2 = vec![sample_item(&home, "review", "hash-aligned")];
+        let report2 = ensure_discovered_portable_items_managed(&repo, &mut items2).await;
+        assert!(report2.failures.is_empty(), "{:?}", report2.failures);
+        assert!(report2.ensured >= 1, "false drift must be rewritten; {report2:?}");
+
+        let mats2 = repo.list_materializations().await.unwrap();
+        let mat2 = mats2
+            .iter()
+            .find(|m| m.target_binding_id == mat.target_binding_id)
+            .expect("mat after clear");
+        assert_eq!(
+            mat2.status,
+            MaterializationStatus::Synced,
+            "aligned hash must clear Drift"
+        );
+        assert_eq!(mat2.last_error, None);
+        assert_eq!(mat2.rendered_hash.as_deref(), Some("hash-aligned"));
+        assert_eq!(mat2.observed_external_hash.as_deref(), Some("hash-aligned"));
+
+        let snap = reconcile_portable_inventory(&repo, vec![sample_target()], items2)
+            .await
+            .expect("reconcile");
+        assert_eq!(
+            snap.items[0].management_state,
+            PortableInventoryManagementState::HubManaged
+        );
+    }
+
+    /// 版本滚动：同 logical key 新 installPath 应更新 native_path 并清除 Detached。
+    #[tokio::test]
+    async fn ensure_managed_updates_native_path_and_clears_detached_on_rediscover() {
+        use crate::agent_hub::models::NewMaterialization;
+        use crate::agent_hub::portable_inventory::models::PortableAssetKind;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        let old_path = home
+            .join(".codex/plugins/cache/openai-bundled/browser/26.803.41515");
+        let new_path = home
+            .join(".codex/plugins/cache/openai-bundled/browser/26.803.61601");
+        fs::create_dir_all(&new_path).unwrap();
+        let repo = open_repo(&root.path().join("data.db")).await;
+
+        let mut first = sample_item(&home, "browser", "hash-v1");
+        first.target = AgentTarget::Codex;
+        first.kind = PortableAssetKind::Plugin;
+        first.native_id = "browser".into();
+        first.display_name = "browser".into();
+        first.source_path = Some(old_path.display().to_string());
+        first.inventory_item_id = inventory_item_id(
+            AgentTarget::Codex,
+            "user",
+            first.source_path.as_deref().unwrap(),
+            "browser",
+        );
+        let report = ensure_discovered_portable_items_managed(&repo, &mut [first]).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats.first().expect("mat");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: mat.asset_id.clone(),
+            target: mat.target,
+            target_binding_id: mat.target_binding_id.clone(),
+            native_path: Some(old_path.display().to_string()),
+            last_projected_revision_id: mat.last_projected_revision_id.clone(),
+            rendered_hash: Some("hash-v1".into()),
+            observed_external_hash: None,
+            status: MaterializationStatus::Detached,
+            last_error: Some("portable_source_missing".into()),
+        })
+        .await
+        .unwrap();
+
+        let mut second = sample_item(&home, "browser", "hash-v2");
+        second.target = AgentTarget::Codex;
+        second.kind = PortableAssetKind::Plugin;
+        second.native_id = "browser".into();
+        second.display_name = "browser".into();
+        second.source_path = Some(new_path.display().to_string());
+        second.inventory_item_id = inventory_item_id(
+            AgentTarget::Codex,
+            "user",
+            second.source_path.as_deref().unwrap(),
+            "browser",
+        );
+        let report2 = ensure_discovered_portable_items_managed(&repo, &mut [second]).await;
+        assert!(report2.failures.is_empty(), "{:?}", report2.failures);
+
+        let mats2 = repo.list_materializations().await.unwrap();
+        let mat2 = mats2
+            .iter()
+            .find(|m| m.target_binding_id == mat.target_binding_id)
+            .expect("updated mat");
+        assert_eq!(mat2.status, MaterializationStatus::Synced);
+        assert_eq!(mat2.last_error, None);
+        assert_eq!(
+            mat2.native_path.as_deref(),
+            Some(new_path.display().to_string().as_str())
+        );
+        assert_eq!(mat2.observed_external_hash.as_deref(), Some("hash-v2"));
     }
 }

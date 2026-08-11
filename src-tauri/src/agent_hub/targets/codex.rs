@@ -127,11 +127,11 @@ impl AssetAdapter for CodexInstructionAdapter {
                     &config_path,
                 )?);
             }
-            // Plugin-provided skills under config_root/plugins/** 若存在则 native/plugin
-            let plugins = homes.codex.config_root.join("plugins");
-            if plugins.is_dir() {
-                parts.push(scan_codex_plugin_skills(scope.scope_kind, &plugins)?);
-            }
+            // Plugin-provided skills：权威 package 根（非 plugins 一级目录）
+            parts.push(scan_codex_plugin_skills(
+                scope.scope_kind,
+                &homes.codex.config_root,
+            )?);
             if let Some(compat) = &homes.codex.skill_compat_root {
                 // skill_compat_root 指向 ~/.agents，skills 在 .agents/skills
                 let skills_root = if compat.ends_with("skills") {
@@ -272,34 +272,39 @@ impl AssetAdapter for CodexInstructionAdapter {
     }
 }
 
-/// 扫描 Codex plugins 目录下的 skills/commands（若存在），并 stamp parent plugin id。
+/// 扫描 Codex 权威 package 根下的 skills/commands，并 stamp parent plugin id。
 fn scan_codex_plugin_skills(
     scope_kind: ScopeKind,
-    plugins_root: &Path,
+    config_root: &Path,
 ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
     use super::portable::scan_plugin_components_readonly;
     use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
 
     let mut out = Vec::new();
-    let read = match std::fs::read_dir(plugins_root) {
-        Ok(r) => r,
-        Err(_) => return Ok(vec![]),
-    };
-    for entry in read {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
+    for path in crate::agent_hub::portable_inventory::scanner::user_plugin_package_root_paths(
+        AgentTarget::Codex,
+        config_root,
+    ) {
         let plugin_id =
             discover_plugin_source_for_target(AgentTarget::Codex, &path, "scan", scope_kind)
                 .map(|s| s.plugin_id)
-                .unwrap_or_else(|_| {
+                .ok()
+                .or_else(|| {
+                    crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+                        &path.display().to_string(),
+                    ))
+                })
+                .unwrap_or_else(|| {
                     path.file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("plugin")
                         .to_string()
                 });
+        if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(
+            &plugin_id,
+        ) {
+            continue;
+        }
         out.extend(scan_plugin_components_readonly(
             AgentTarget::Codex,
             scope_kind,

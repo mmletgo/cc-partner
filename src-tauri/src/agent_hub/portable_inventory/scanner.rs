@@ -623,11 +623,17 @@ fn scan_plugin_packages(
     let target = target_dto.target;
     let roots = plugin_roots_for(target, scope, env, homes);
     let mut out = Vec::new();
-    for root in roots {
+    for candidate in roots {
+        let root = candidate.path;
         if !root.is_dir() {
             continue;
         }
-        let source = match discover_plugin_source_for_target(
+        // 基础设施目录永不作为 package
+        if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path(&root)
+        {
+            continue;
+        }
+        let mut source = match discover_plugin_source_for_target(
             target,
             &root,
             scope.scope_id.clone(),
@@ -636,6 +642,37 @@ fn scan_plugin_packages(
             Ok(s) => s,
             Err(_) => continue,
         };
+        // 稳定身份：registry key > 路径布局 id > manifest/目录名
+        if let Some(reg) = candidate.registry_plugin_id.as_ref() {
+            if !reg.trim().is_empty() {
+                source.plugin_id = reg.clone();
+                // 无 manifest 时目录名常是版本号；展示名也用 registry id
+                if source.name == root.file_name().and_then(|s| s.to_str()).unwrap_or("") {
+                    source.name = reg.clone();
+                }
+            }
+        } else if let Some(path_id) =
+            crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+                &root.display().to_string(),
+            ))
+        {
+            // cache 布局下目录名/manifest 可能是版本号；以路径 id 为准
+            let dir_name = root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if source.plugin_id == dir_name || source.plugin_id.is_empty() {
+                source.plugin_id = path_id.clone();
+                if source.name == dir_name {
+                    source.name = path_id;
+                }
+            }
+        }
+        if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(
+            &source.plugin_id,
+        ) {
+            continue;
+        }
         let source_identity = root.display().to_string();
         let inv_id =
             inventory_item_id(target, &scope.scope_id, &source_identity, &source.plugin_id);
@@ -748,12 +785,33 @@ fn scan_plugin_packages(
     Ok(out)
 }
 
+/// 可扫描的 plugin package 根（含可选 registry 身份）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginRootCandidate {
+    path: PathBuf,
+    /// installed_plugins.json 的 key 前缀（`pyright-lsp@market` → `pyright-lsp`）
+    registry_plugin_id: Option<String>,
+}
+
+impl PluginRootCandidate {
+    fn path_only(path: PathBuf) -> Self {
+        Self {
+            path,
+            registry_plugin_id: None,
+        }
+    }
+}
+
+/// 当前 scope 下应扫描的 plugin package 根（权威入口）。
+///
+/// Business Logic: adapters 与 inventory 必须共享同一根集合，禁止一级 read_dir(plugins)。
+/// Code Logic: user 走 registry/cache manifest；project 只认直装 manifest。
 fn plugin_roots_for(
     target: AgentTarget,
     scope: &PortableScanScope,
     env: &TargetEnvironment,
     homes: &crate::agent_hub::targets::paths::TargetHomes,
-) -> Vec<PathBuf> {
+) -> Vec<PluginRootCandidate> {
     let mut roots = match (target, scope.scope_kind) {
         (AgentTarget::Claude, ScopeKind::User) => {
             claude_user_plugin_roots(&homes.claude.config_root)
@@ -765,37 +823,76 @@ fn plugin_roots_for(
         ]
         .into_iter()
         .flat_map(|base| direct_manifest_plugin_roots(&base, target))
+        .map(PluginRootCandidate::path_only)
         .collect(),
         (AgentTarget::Claude, _) => direct_manifest_plugin_roots(
             &scope.absolute_path.join(".claude").join("plugins"),
             target,
-        ),
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
         (AgentTarget::Codex, _) => direct_manifest_plugin_roots(
             &scope.absolute_path.join(".codex").join("plugins"),
             target,
-        ),
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
         (AgentTarget::OpenCode, _) => [
             scope.absolute_path.join(".opencode").join("plugins"),
             scope.absolute_path.join("plugins"),
         ]
         .into_iter()
         .flat_map(|base| direct_manifest_plugin_roots(&base, target))
+        .map(PluginRootCandidate::path_only)
         .collect(),
     };
-    roots.sort();
-    roots.dedup();
+    roots.sort_by(|a, b| a.path.cmp(&b.path));
+    roots.dedup_by(|a, b| a.path == b.path);
     roots
 }
 
+/// 供 target adapter 复用的 user-scope package 根路径。
+///
+/// Business Logic: 禁止 adapters 自行 `read_dir(plugins)` 把 cache/data 当 package。
+/// Code Logic: 仅返回 path 列表。
+pub(crate) fn user_plugin_package_root_paths(
+    target: AgentTarget,
+    config_root: &Path,
+) -> Vec<PathBuf> {
+    let candidates = match target {
+        AgentTarget::Claude => claude_user_plugin_roots(config_root),
+        AgentTarget::Codex => codex_user_plugin_roots(config_root),
+        AgentTarget::OpenCode => direct_manifest_plugin_roots(
+            &config_root.join("plugins"),
+            AgentTarget::OpenCode,
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
+    };
+    candidates.into_iter().map(|c| c.path).collect()
+}
+
 /// Claude 的 installed_plugins.json 是安装状态权威；cache/marketplaces/data 本身不是插件。
-fn claude_user_plugin_roots(config_root: &Path) -> Vec<PathBuf> {
+fn claude_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
     let plugins_root = config_root.join("plugins");
     let cache_root = plugins_root.join("cache");
     let mut roots = Vec::new();
     if let Ok(raw) = fs::read_to_string(plugins_root.join("installed_plugins.json")) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(plugins) = value.get("plugins").and_then(|v| v.as_object()) {
-                for installs in plugins.values().filter_map(|v| v.as_array()) {
+                for (registry_key, installs) in plugins {
+                    let registry_plugin_id = registry_key
+                        .split('@')
+                        .next()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    let Some(installs) = installs.as_array() else {
+                        continue;
+                    };
                     for install in installs {
                         if install
                             .get("scope")
@@ -808,27 +905,41 @@ fn claude_user_plugin_roots(config_root: &Path) -> Vec<PathBuf> {
                             continue;
                         };
                         let path = PathBuf::from(path);
-                        if path.is_dir() && path.starts_with(&cache_root) {
-                            roots.push(path);
+                        if !path.is_dir() || !path.starts_with(&cache_root) {
+                            continue;
                         }
+                        if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path(
+                            &path,
+                        ) {
+                            continue;
+                        }
+                        roots.push(PluginRootCandidate {
+                            path,
+                            registry_plugin_id: registry_plugin_id.clone(),
+                        });
                     }
                 }
             }
         }
     }
     // Development/direct installs remain supported, but only with a target manifest.
-    roots.extend(direct_manifest_plugin_roots(
-        &plugins_root,
-        AgentTarget::Claude,
-    ));
+    roots.extend(
+        direct_manifest_plugin_roots(&plugins_root, AgentTarget::Claude)
+            .into_iter()
+            .map(PluginRootCandidate::path_only),
+    );
     roots
 }
 
 /// Codex 当前没有稳定 registry 文件；只认 cache 中精确 `.codex-plugin/plugin.json` 根。
-fn codex_user_plugin_roots(config_root: &Path) -> Vec<PathBuf> {
+fn codex_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
     let plugins_root = config_root.join("plugins");
     let cache_root = plugins_root.join("cache");
-    let mut roots = direct_manifest_plugin_roots(&plugins_root, AgentTarget::Codex);
+    let mut roots: Vec<PluginRootCandidate> =
+        direct_manifest_plugin_roots(&plugins_root, AgentTarget::Codex)
+            .into_iter()
+            .map(PluginRootCandidate::path_only)
+            .collect();
     if cache_root.is_dir() {
         for entry in walkdir::WalkDir::new(&cache_root)
             .follow_links(false)
@@ -848,8 +959,12 @@ fn codex_user_plugin_roots(config_root: &Path) -> Vec<PathBuf> {
             let Some(root) = manifest_dir.parent() else {
                 continue;
             };
-            if root.starts_with(&cache_root) {
-                roots.push(root.to_path_buf());
+            if root.starts_with(&cache_root)
+                && !crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path(
+                    root,
+                )
+            {
+                roots.push(PluginRootCandidate::path_only(root.to_path_buf()));
             }
         }
     }
@@ -868,7 +983,13 @@ fn direct_manifest_plugin_roots(base: &Path, target: AgentTarget) -> Vec<PathBuf
     };
     read.filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join(manifest).is_file())
+        .filter(|path| {
+            path.is_dir()
+                && path.join(manifest).is_file()
+                && !crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path(
+                    path,
+                )
+        })
         .collect()
 }
 
@@ -1399,17 +1520,7 @@ fn mcp_credential_fact(disc: &DiscoveredPortableAsset) -> PortableMcpCredentialF
 }
 
 fn infer_plugin_root(path: &Path) -> Option<PathBuf> {
-    let mut cur = path.to_path_buf();
-    // climb until parent name is "plugins" or hit root
-    for _ in 0..8 {
-        let parent = cur.parent()?.to_path_buf();
-        let name = parent.file_name()?.to_string_lossy();
-        if name == "plugins" {
-            return Some(cur);
-        }
-        cur = parent;
-    }
-    None
+    crate::agent_hub::portable_inventory::plugin_paths::infer_plugin_package_root(path)
 }
 
 fn infer_parent_plugin_from_path(
@@ -1418,7 +1529,18 @@ fn infer_parent_plugin_from_path(
     path: &Path,
 ) -> Option<String> {
     let root = infer_plugin_root(path)?;
-    let plugin_id = root.file_name()?.to_string_lossy().into_owned();
+    let plugin_id = crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+        &path.to_string_lossy(),
+    ))
+    .or_else(|| {
+        root.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    })?;
+    if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(&plugin_id)
+    {
+        return None;
+    }
     Some(inventory_item_id(
         target,
         scope_id,
@@ -2164,11 +2286,13 @@ enabled = false
         );
 
         let roots = claude_user_plugin_roots(&claude_root);
-        assert_eq!(roots, vec![installed]);
-        assert!(!roots.iter().any(|path| {
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(roots[0].path, installed);
+        assert_eq!(roots[0].registry_plugin_id.as_deref(), Some("demo"));
+        assert!(!roots.iter().any(|c| {
             ["cache", "data", "marketplaces"]
                 .iter()
-                .any(|name| path.ends_with(name))
+                .any(|name| c.path.ends_with(name))
         }));
 
         let codex_root = dir.path().join(".codex");
@@ -2181,7 +2305,34 @@ enabled = false
         fs::create_dir_all(codex_root.join("plugins/data")).unwrap();
 
         let roots = codex_user_plugin_roots(&codex_root);
-        assert_eq!(roots, vec![codex_plugin]);
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        assert_eq!(roots[0].path, codex_plugin);
+    }
+
+    #[test]
+    fn claude_registry_identity_used_when_install_lacks_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_root = dir.path().join(".claude");
+        let installed = claude_root.join("plugins/cache/claude-plugins-official/pyright-lsp/1.0.0");
+        fs::create_dir_all(&installed).unwrap();
+        // no .claude-plugin/plugin.json — only LICENSE-like content
+        write(&installed.join("README.md"), "x");
+        write(
+            &claude_root.join("plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "pyright-lsp@claude-plugins-official": [{
+                        "scope": "user",
+                        "installPath": installed.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        let roots = claude_user_plugin_roots(&claude_root);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].registry_plugin_id.as_deref(), Some("pyright-lsp"));
     }
 
     #[test]

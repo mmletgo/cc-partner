@@ -905,8 +905,14 @@ impl ProductionScanner {
                     .or_else(|| mat.observed_external_hash.clone())
             };
             let rendered = mat.rendered_hash.clone().or_else(|| observed.clone());
+            let hashes_align = match (rendered.as_deref(), observed.as_deref()) {
+                (Some(r), Some(o)) => r == o,
+                _ => false,
+            };
             let clear_false_detached = mat.status == MaterializationStatus::Detached;
-            let status = if clear_false_detached {
+            let clear_false_drift =
+                mat.status == MaterializationStatus::Drift && hashes_align;
+            let status = if clear_false_detached || clear_false_drift {
                 MaterializationStatus::Synced
             } else {
                 match (rendered.as_deref(), observed.as_deref()) {
@@ -914,7 +920,7 @@ impl ProductionScanner {
                     _ => mat.status,
                 }
             };
-            let last_error = if clear_false_detached {
+            let last_error = if clear_false_detached || clear_false_drift {
                 None
             } else {
                 mat.last_error.clone()

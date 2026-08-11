@@ -210,13 +210,54 @@ impl AssetAdapter for ClaudeInstructionAdapter {
         }
         parts.push(mcp);
 
-        // Plugin packages under config_root/plugins/<id>
-        let plugins_root = base.join("plugins");
-        if plugins_root.is_dir() {
-            if let Ok(read) = std::fs::read_dir(&plugins_root) {
-                for entry in read.flatten() {
+        // Plugin components：user scope 复用 inventory 权威 package 根；project 仅直装 manifest
+        if scope.scope_kind == ScopeKind::User {
+            for path in crate::agent_hub::portable_inventory::scanner::user_plugin_package_root_paths(
+                AgentTarget::Claude,
+                &base,
+            ) {
+                let plugin_id = discover_plugin_source_for_target(
+                    AgentTarget::Claude,
+                    &path,
+                    "scan",
+                    scope.scope_kind,
+                )
+                .map(|s| s.plugin_id)
+                .ok()
+                .or_else(|| {
+                    crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+                        &path.display().to_string(),
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("plugin")
+                        .to_string()
+                });
+                if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(
+                    &plugin_id,
+                ) {
+                    continue;
+                }
+                parts.push(scan_plugin_components_readonly(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &path,
+                    &plugin_id,
+                )?);
+            }
+        } else {
+            let plugins_root = base.join("plugins");
+            if plugins_root.is_dir() {
+                for entry in std::fs::read_dir(&plugins_root).into_iter().flatten().flatten() {
                     let path = entry.path();
-                    if !path.is_dir() {
+                    if !path.is_dir()
+                        || !path.join(".claude-plugin/plugin.json").is_file()
+                        || crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path(
+                            &path,
+                        )
+                    {
                         continue;
                     }
                     let plugin_id = discover_plugin_source_for_target(
