@@ -15,8 +15,9 @@ use crate::agent_hub::instructions::{
     InstructionReconcileOutcome, ReconcileInput,
 };
 use crate::agent_hub::models::{
-    AgentTarget, DesiredPresence, Materialization, MaterializationStatus, NewMaterialization,
-    NewRevision, ProjectionPayloadKind, RevisionId, RevisionOperation, RevisionOriginKind,
+    AgentTarget, AssetKind, DesiredPresence, Materialization, MaterializationStatus,
+    NewMaterialization, NewRevision, ProjectionPayloadKind, RevisionId, RevisionOperation,
+    RevisionOriginKind,
 };
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::{ProjectionRequest, ProjectionScheduler};
@@ -627,6 +628,27 @@ impl ProductionScanner {
             if !path_in_scope(&path, scope) {
                 continue;
             }
+            // instruction reconcile 只适用于指令 Markdown；portable 根常为目录，
+            // 若对 skill/plugin 误跑 Missing→Detached 会把整页标成「指令文件被整文件删除」。
+            let asset_kind = match self.repo.get_asset(&mat.asset_id).await? {
+                Some(a) => a.kind,
+                None => continue,
+            };
+            if asset_kind != AssetKind::Instruction {
+                match self.heal_portable_materialization_observation(&mat, &path).await {
+                    Ok(true) => stats.external_revisions += 1,
+                    Ok(false) => stats.hash_skips += 1,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            asset_id = %mat.asset_id,
+                            kind = %asset_kind.as_str(),
+                            "agent hub portable materialization heal failed"
+                        );
+                    }
+                }
+                continue;
+            }
             match classify_materialization_file(&mat, &path) {
                 FileClass::Missing => {
                     match self
@@ -714,6 +736,10 @@ impl ProductionScanner {
             Some(a) => a,
             None => return Ok(false),
         };
+        if asset.kind != AssetKind::Instruction {
+            // portable 资产不得走指令三方对账（目录根会被 Missing→假 Detached）
+            return Ok(false);
+        }
         let hub_doc = self.load_document_for_asset(&asset).await?;
         let base_doc = if let Some(base_rev) = mat.last_projected_revision_id.as_ref() {
             self.load_document_for_revision(&asset, base_rev).await?
@@ -844,6 +870,102 @@ impl ProductionScanner {
                 Ok(true)
             }
         }
+    }
+
+    /// portable materialization 的外部观测修复（非指令 Markdown）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     skill/plugin 等根路径常为目录。旧逻辑把 `fs::read` 目录失败当成 Missing，
+    ///     再经 instruction reconcile 写成「指令文件被整文件删除」Detached，inventory 全员漂移。
+    ///     路径仍在时应清掉误标并恢复可管理态；真缺失才标 portable Detached。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     路径存在：Detached/无 observed 时 rebaseline 为 Synced（rendered≈observed）；
+    ///     路径不存在：写 Detached + `portable_source_missing`（不用指令文案）。
+    ///     返回是否更新了 materialization 行。
+    async fn heal_portable_materialization_observation(
+        &self,
+        mat: &Materialization,
+        path: &Path,
+    ) -> Result<bool, AppError> {
+        if path.exists() {
+            // 目录或文件存在：不得保留指令语义的假 Detached
+            let observed = if path.is_file() {
+                match std::fs::read(path) {
+                    Ok(bytes) => Some(sha256_hex(&bytes)),
+                    Err(_) => mat
+                        .rendered_hash
+                        .clone()
+                        .or_else(|| mat.observed_external_hash.clone()),
+                }
+            } else {
+                // 目录：discover-as-managed 的 rendered 即 identity；对齐 observed 消除假 drift
+                mat.rendered_hash
+                    .clone()
+                    .or_else(|| mat.observed_external_hash.clone())
+            };
+            let rendered = mat.rendered_hash.clone().or_else(|| observed.clone());
+            let clear_false_detached = mat.status == MaterializationStatus::Detached;
+            let status = if clear_false_detached {
+                MaterializationStatus::Synced
+            } else {
+                match (rendered.as_deref(), observed.as_deref()) {
+                    (Some(r), Some(o)) if r != o => MaterializationStatus::Drift,
+                    _ => mat.status,
+                }
+            };
+            let last_error = if clear_false_detached {
+                None
+            } else {
+                mat.last_error.clone()
+            };
+            let unchanged = mat.rendered_hash == rendered
+                && mat.observed_external_hash == observed
+                && mat.status == status
+                && mat.last_error == last_error;
+            if unchanged {
+                return Ok(false);
+            }
+            self.repo
+                .upsert_materialization(NewMaterialization {
+                    asset_id: mat.asset_id.clone(),
+                    target: mat.target,
+                    target_binding_id: mat.target_binding_id.clone(),
+                    native_path: mat.native_path.clone(),
+                    last_projected_revision_id: mat.last_projected_revision_id.clone(),
+                    rendered_hash: rendered,
+                    observed_external_hash: observed,
+                    status,
+                    last_error,
+                })
+                .await?;
+            return Ok(true);
+        }
+
+        // 真缺失
+        if mat.status == MaterializationStatus::Detached
+            && mat.observed_external_hash.is_none()
+            && mat
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e == "portable_source_missing")
+        {
+            return Ok(false);
+        }
+        self.repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: mat.asset_id.clone(),
+                target: mat.target,
+                target_binding_id: mat.target_binding_id.clone(),
+                native_path: mat.native_path.clone(),
+                last_projected_revision_id: mat.last_projected_revision_id.clone(),
+                rendered_hash: mat.rendered_hash.clone(),
+                observed_external_hash: None,
+                status: MaterializationStatus::Detached,
+                last_error: Some("portable_source_missing".into()),
+            })
+            .await?;
+        Ok(true)
     }
 
     /// 加载资产 head 文档。
@@ -992,10 +1114,15 @@ enum FileClass {
 /// 分类目标文件相对 materialization 的关系。
 ///
 /// Business Logic: 先比 hash，再决定是否当作外部编辑。
-/// Code Logic: 读文件算 sha256；与 rendered/observed 比较。
+/// Code Logic: 仅用于**指令文件**（普通文件）。目录存在时不得当 Missing；
+///     portable 目录路径由 `heal_portable_materialization_observation` 处理。
 fn classify_materialization_file(mat: &Materialization, path: &Path) -> FileClass {
     if !path.exists() {
         return FileClass::Missing;
+    }
+    if path.is_dir() {
+        // 指令资产不应是目录；保守：存在则视为 observed 未变，避免假 Missing
+        return FileClass::UnchangedObserved;
     }
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -1367,6 +1494,199 @@ mod tests {
         start_once(&slot, &starts);
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert!(slot.lock().unwrap().is_some());
+    }
+
+    /// plugin/skill 目录 materialization 不得被 instruction Missing 路径标成 Detached。
+    ///
+    /// Business Logic: 用户 plugin 仍在磁盘时，full scan 不得整页假「指令文件被整文件删除」。
+    /// Code Logic: 写入 Skill 目录 mat=Detached + 指令文案 → ProductionScanner::scan Full →
+    ///     status 恢复 Synced，last_error 清空。
+    #[tokio::test]
+    async fn portable_directory_materialization_is_not_detached_as_instruction_missing() {
+        use crate::agent_hub::models::{
+            AssetKind, DesiredPresence, NewLogicalAsset, NewMaterialization, NewScopeNode,
+            NewTargetBinding, ScopeKind,
+        };
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let skill_root = tmp.path().join("skills").join("demo-skill");
+        std::fs::create_dir_all(&skill_root).unwrap();
+        std::fs::write(skill_root.join("SKILL.md"), "---\nname: demo\n---\nbody\n").unwrap();
+
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        let repo = AgentHubRepo::new(pool);
+        let scope = repo
+            .insert_scope(NewScopeNode {
+                id: Some("user".into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id,
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "demo-skill".into(),
+                display_name: "demo-skill".into(),
+                policy: crate::agent_hub::models::AssetPolicy::TargetOnly,
+            })
+            .await
+            .unwrap();
+        let binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: binding.id,
+            native_path: Some(skill_root.display().to_string()),
+            last_projected_revision_id: None,
+            rendered_hash: Some("hash-skill-1".into()),
+            observed_external_hash: None,
+            status: MaterializationStatus::Detached,
+            last_error: Some("target claude 指令文件被整文件删除".into()),
+        })
+        .await
+        .unwrap();
+
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let scanner = ProductionScanner::new(repo.clone(), store);
+        let cancel = CancellationToken::new();
+        let _ = scanner
+            .scan(&ScanScope::Full, &cancel)
+            .await
+            .expect("scan");
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats
+            .iter()
+            .find(|m| m.asset_id == asset.id)
+            .expect("mat");
+        assert_eq!(
+            mat.status,
+            MaterializationStatus::Synced,
+            "existing portable directory must not stay Detached after scan"
+        );
+        assert!(
+            mat.last_error.is_none(),
+            "instruction deletion error must be cleared: {:?}",
+            mat.last_error
+        );
+        assert_eq!(mat.rendered_hash.as_deref(), Some("hash-skill-1"));
+        assert_eq!(mat.observed_external_hash.as_deref(), Some("hash-skill-1"));
+    }
+
+    /// 指令 Markdown 真删除仍应 Detached（回归：portable 分流不得破坏指令语义）。
+    #[tokio::test]
+    async fn instruction_missing_file_still_marks_detached() {
+        use crate::agent_hub::models::{
+            AssetKind, DesiredPresence, NewLogicalAsset, NewMaterialization, NewScopeNode,
+            NewTargetBinding, ScopeKind,
+        };
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let missing = tmp.path().join("gone").join("CLAUDE.md");
+        // 不创建文件
+
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        let repo = AgentHubRepo::new(pool);
+        let scope = repo
+            .insert_scope(NewScopeNode {
+                id: Some("user".into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id,
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "CLAUDE.md".into(),
+                display_name: "CLAUDE.md".into(),
+                policy: crate::agent_hub::models::AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: binding.id,
+            native_path: Some(missing.display().to_string()),
+            last_projected_revision_id: None,
+            rendered_hash: Some("hash-inst".into()),
+            observed_external_hash: Some("hash-inst".into()),
+            status: MaterializationStatus::Synced,
+            last_error: None,
+        })
+        .await
+        .unwrap();
+
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let scanner = ProductionScanner::new(repo.clone(), store);
+        let cancel = CancellationToken::new();
+        let _ = scanner
+            .scan(&ScanScope::Full, &cancel)
+            .await
+            .expect("scan");
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats
+            .iter()
+            .find(|m| m.asset_id == asset.id)
+            .expect("mat");
+        assert_eq!(mat.status, MaterializationStatus::Detached);
+        assert!(
+            mat.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("指令文件被整文件删除")),
+            "expected instruction detached detail, got {:?}",
+            mat.last_error
+        );
     }
 
     /// owner runtime 打开 CAS 的根必须等于 ObjectStore::open(data_dir).root()。
