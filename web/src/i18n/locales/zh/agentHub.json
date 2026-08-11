@@ -93,6 +93,7 @@
       "variantsTitle": "各 Agent 变体",
       "saveBlocks": "保存三槽",
       "adaptToOtherAgents": "适配到其他 Agent",
+      "syncToNative": "写入原始文件",
       "unsavedDraft": "三槽有未保存更改。保存只会更新 Agent Hub Canonical，不会写入 Agent 原始文件。",
       "canonicalDrift": "Canonical 在编辑期间已变化。为避免覆盖并发修改，当前草稿不能保存。",
       "sourceDrift": "Agent 原始来源在编辑期间已变化。当前只读内容可能过期；三槽草稿仍被保留。",

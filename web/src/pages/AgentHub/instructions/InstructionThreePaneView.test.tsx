@@ -59,6 +59,7 @@ const labels: InstructionThreePaneViewLabels = {
   commonMarkdown: 'Common body',
   saveBlocks: 'Save slots',
   adaptToOtherAgents: 'Adapt to other agents',
+  syncToNative: 'Write to native file',
   unsavedDraft: 'Unsaved slot draft',
   canonicalDrift: 'Canonical changed',
   sourceDrift: 'Native source changed',
@@ -105,6 +106,7 @@ function buildProps(
     onAnalyzeDecompose: vi.fn(),
     onAdaptToOtherAgents: vi.fn(),
     onSaveBlocks: vi.fn(),
+    onRequestSync: vi.fn(),
     onRetry: vi.fn(),
     onDiscardAndReload: vi.fn(),
     onSlotTextChange: vi.fn(),
@@ -215,14 +217,16 @@ describe('InstructionThreePaneView', () => {
     expect(onAdaptToOtherAgents).toHaveBeenCalledOnce();
   });
 
-  test('exclusive lane keeps three panes and analyze-decompose on original column', () => {
+  test('exclusive lane keeps three panes, write-to-native, and analyze-decompose on original column', () => {
     const onAnalyzeDecompose = vi.fn();
+    const onRequestSync = vi.fn();
     render(
       <InstructionThreePaneView
         {...buildProps({
           instructionLane: 'exclusive',
           state: stateWithSlots(),
           onAnalyzeDecompose,
+          onRequestSync,
         })}
       />,
     );
@@ -232,14 +236,38 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-preview')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-original')).toBeTruthy();
     expect(screen.queryByTestId('instruction-rescan')).toBeNull();
-    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
     expect(screen.queryByTestId('instruction-reparse-from-original')).toBeNull();
+
+    const sync = screen.getByTestId('instruction-sync-to-native');
+    expect(sync.textContent).toContain('Write to native file');
+    expect((sync as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(sync);
+    expect(onRequestSync).toHaveBeenCalledOnce();
 
     const analyze = screen.getByTestId('instruction-analyze-decompose');
     expect(analyze.textContent).toContain('Analyze & split');
     expect(screen.getByTestId('instruction-pane-original').contains(analyze)).toBe(true);
     fireEvent.click(analyze);
     expect(onAnalyzeDecompose).toHaveBeenCalledOnce();
+  });
+
+  test('exclusive write-to-native is disabled and explained when write is blocked', () => {
+    render(
+      <InstructionThreePaneView
+        {...buildProps({
+          instructionLane: 'exclusive',
+          state: stateWithSlots(),
+          writeBlocked: true,
+          writeBlockedReason: 'write blocked reason',
+        })}
+      />,
+    );
+    expect((screen.getByTestId('instruction-sync-to-native') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.getByTestId('instruction-write-blocked').textContent).toContain(
+      'write blocked reason',
+    );
   });
 
   test('original source is read-only and save is gated by blocks dirty/drift', () => {

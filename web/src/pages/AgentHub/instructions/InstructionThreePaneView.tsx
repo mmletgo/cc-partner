@@ -49,6 +49,11 @@ export interface InstructionThreePaneViewLabels {
   saveBlocks: string;
   /** 适配页：把当前 agent 适配内容改写到其他 agent。 */
   adaptToOtherAgents: string;
+  /**
+   * 独有页：把合成预览（或 dual-dirty 选定基线）写入当前 Agent 原始文件。
+   * Business Logic: 保存三槽只更新 Canonical；本按钮走 preview→apply 真正写盘。
+   */
+  syncToNative: string;
   unsavedDraft: string;
   canonicalDrift: string;
   sourceDrift: string;
@@ -77,6 +82,11 @@ export interface InstructionThreePaneViewProps {
   onAnalyzeDecompose: () => void;
   onAdaptToOtherAgents: () => void;
   onSaveBlocks: () => void;
+  /**
+   * 独有页：合成预览 → 写入当前 Agent 原始文件（内部 save + preview + apply）。
+   * 双脏分歧时由 controller 打开基线选择，不直接写盘。
+   */
+  onRequestSync: () => void;
   onRetry: () => void;
   onDiscardAndReload: () => void;
   /**
@@ -106,7 +116,8 @@ function slotHint(
 
 /**
  * Business Logic: 渲染 toolbar / dual-dirty / 状态消息。
- * Code Logic: 各 lane 共用 chrome；公共/适配不展示路径、重新扫描与写入原始。
+ * Code Logic: 各 lane 共用 chrome；公共/适配不展示路径与重新扫描；
+ *   写入原始仅在独有 lane（showWriteToNative）露出。
  */
 function InstructionChrome(props: {
   labels: InstructionThreePaneViewLabels;
@@ -119,10 +130,12 @@ function InstructionChrome(props: {
   dualDirtyOpen: boolean;
   showPath: boolean;
   showAdaptToOthers: boolean;
+  showWriteToNative: boolean;
   onRetry: () => void;
   onDiscardAndReload: () => void;
   onSaveBlocks: () => void;
   onAdaptToOtherAgents: () => void;
+  onRequestSync: () => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
   onCancelDualDirty: () => void;
 }): JSX.Element {
@@ -137,10 +150,12 @@ function InstructionChrome(props: {
     dualDirtyOpen,
     showPath,
     showAdaptToOthers,
+    showWriteToNative,
     onRetry,
     onDiscardAndReload,
     onSaveBlocks,
     onAdaptToOtherAgents,
+    onRequestSync,
     onChooseBaseline,
     onCancelDualDirty,
   } = props;
@@ -169,6 +184,18 @@ function InstructionChrome(props: {
           >
             {labels.saveBlocks}
           </Button>
+          {showWriteToNative ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={actionBusy}
+              disabled={actionBusy || writeBlocked}
+              onClick={onRequestSync}
+              data-testid="instruction-sync-to-native"
+            >
+              {labels.syncToNative}
+            </Button>
+          ) : null}
           {showAdaptToOthers ? (
             <Button
               variant="secondary"
@@ -184,7 +211,7 @@ function InstructionChrome(props: {
         </div>
       </div>
 
-      {showAdaptToOthers && writeBlocked && writeBlockedReason ? (
+      {(showAdaptToOthers || showWriteToNative) && writeBlocked && writeBlockedReason ? (
         <StatusMessage tone="warn" data-testid="instruction-write-blocked">
           {writeBlockedReason}
         </StatusMessage>
@@ -363,7 +390,7 @@ function AdaptedLanePanes(props: {
 
 /**
  * Business Logic: 独有槽保持三列 — 当前槽 / 合成预览 / 原始文件。
- * Code Logic: 原始栏提供「分析拆解」，不再提供「从原始导入为公共」。
+ * Code Logic: 原始栏「分析拆解」；工具栏「写入原始」由 chrome 承接。
  */
 function ExclusiveLanePanes(props: {
   labels: InstructionThreePaneViewLabels;
@@ -480,6 +507,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     onAnalyzeDecompose,
     onAdaptToOtherAgents,
     onSaveBlocks,
+    onRequestSync,
     onRetry,
     onDiscardAndReload,
     onSlotTextChange,
@@ -523,6 +551,8 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
 
   const showPath = instructionLane === 'exclusive';
   const showAdaptToOthers = instructionLane === 'adapted';
+  /** 合成预览 → 写原始仅在独有三列上下文有意义。 */
+  const showWriteToNative = instructionLane === 'exclusive';
 
   return (
     <div className={styles.root} data-testid="instruction-three-pane">
@@ -537,10 +567,12 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         dualDirtyOpen={dualDirtyOpen}
         showPath={showPath}
         showAdaptToOthers={showAdaptToOthers}
+        showWriteToNative={showWriteToNative}
         onRetry={onRetry}
         onDiscardAndReload={onDiscardAndReload}
         onSaveBlocks={onSaveBlocks}
         onAdaptToOtherAgents={onAdaptToOtherAgents}
+        onRequestSync={onRequestSync}
         onChooseBaseline={onChooseBaseline}
         onCancelDualDirty={onCancelDualDirty}
       />

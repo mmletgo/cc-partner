@@ -134,6 +134,7 @@ export function AgentHubView(props: AgentHubViewProps) {
       commonMarkdown: t('agentHub:instructions.threePane.commonMarkdown'),
       saveBlocks: t('agentHub:instructions.threePane.saveBlocks'),
       adaptToOtherAgents: t('agentHub:instructions.threePane.adaptToOtherAgents'),
+      syncToNative: t('agentHub:instructions.threePane.syncToNative'),
       unsavedDraft: t('agentHub:instructions.threePane.unsavedDraft'),
       canonicalDrift: t('agentHub:instructions.threePane.canonicalDrift'),
       sourceDrift: t('agentHub:instructions.threePane.sourceDrift'),
@@ -364,6 +365,9 @@ export function AgentHubView(props: AgentHubViewProps) {
             }}
             onSaveBlocks={() => {
               void instructionThreePane.saveBlocks();
+            }}
+            onRequestSync={() => {
+              void instructionThreePane.requestSync();
             }}
             onRetry={() => {
               void instructionThreePane.refresh();
