@@ -46,6 +46,15 @@ export interface InstructionThreePaneState {
 /** 同步写入选用的内容基线。 */
 export type SyncBaseline = 'blocks' | 'original';
 
+/**
+ * 三栏动作 busy 种类。
+ *
+ * Business Logic: 不同按钮不得共用同一 spinner——分析拆解时转圈必须在「分析拆解」上，
+ *   不能误挂到「保存三槽」。
+ * Code Logic: null = 空闲；actionBusy 由 busyAction!=null 派生，供互斥禁用。
+ */
+export type InstructionBusyAction = 'save' | 'analyze' | 'adapt' | 'sync';
+
 const MODE_ORDER: InstructionBlockDraft['mode'][] = ['shared', 'adapted', 'targetOnly'];
 const AGENT_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
 

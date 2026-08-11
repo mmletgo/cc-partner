@@ -45,9 +45,12 @@ import {
   updateBlock,
   updateOriginalText,
   type InstructionBlockDraft,
+  type InstructionBusyAction,
   type InstructionThreePaneState,
   type SyncBaseline,
 } from './instructionThreePane';
+
+export type { InstructionBusyAction } from './instructionThreePane';
 
 /** peer 上下文稳定错误码（与 api 层常量同字面量；不 import 避免 mock 缺导出）。 */
 const PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE';
@@ -87,7 +90,16 @@ export interface UseInstructionThreePaneControllerResult {
   refreshing: boolean;
   error: string | null;
   actionError: string | null;
+  /**
+   * 任一动作或 refresh 进行中（互斥禁用）。
+   * Business Logic: 禁止并发 save/analyze/sync；不等于某个具体按钮应转圈。
+   */
   actionBusy: boolean;
+  /**
+   * 当前进行中的具体动作；view 用它把 spinner 挂到正确按钮。
+   * Code Logic: refresh 不算具体动作（null），仅 actionBusy=true 禁用。
+   */
+  busyAction: InstructionBusyAction | null;
   /** 当前三栏是否存在未持久化草稿；用于上下文切换保护。 */
   dirty: boolean;
   writeBlocked: boolean;
@@ -286,7 +298,7 @@ export function useInstructionThreePaneController(
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [actionBusy, setActionBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<InstructionBusyAction | null>(null);
   const [dualDirtyOpen, setDualDirtyOpen] = useState(false);
   const [analyzeConfirmOpen, setAnalyzeConfirmOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -348,7 +360,7 @@ export function useInstructionThreePaneController(
     planGenerationRef.current = null;
     autoReparseAfterLoadRef.current = false;
     blockedContextKeyRef.current = null;
-    setActionBusy(false);
+    setBusyAction(null);
     stateRef.current = empty;
     setState(empty);
     setWorkspace(null);
@@ -482,7 +494,7 @@ export function useInstructionThreePaneController(
       planRequestIdRef.current = null;
       planGenerationRef.current = null;
       autoReparseAfterLoadRef.current = false;
-      setActionBusy(false);
+      setBusyAction(null);
       setPlan(null);
       setPreviewOpen(false);
       setApplyResult(null);
@@ -635,10 +647,10 @@ export function useInstructionThreePaneController(
       setActionError(t('agentHub:instructions.threePane.errors.emptyOriginalAnalyze'));
       return;
     }
-    if (actionBusy) return;
+    if (busyAction !== null) return;
     const generation = contextGenerationRef.current;
     const actionSeq = ++actionSeqRef.current;
-    setActionBusy(true);
+    setBusyAction('analyze');
     setActionError(null);
     setAnalyzeConfirmOpen(false);
     try {
@@ -666,10 +678,10 @@ export function useInstructionThreePaneController(
       setActionError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       if (mountedRef.current && actionSeq === actionSeqRef.current) {
-        setActionBusy(false);
+        setBusyAction(null);
       }
     }
-  }, [actionBusy, agent, requestContext, t, updateDraft]);
+  }, [busyAction, agent, requestContext, t, updateDraft]);
 
   const analyzeDecompose = useCallback(() => {
     if (stateRef.current.blocksDirty) {
@@ -699,10 +711,10 @@ export function useInstructionThreePaneController(
       setActionError(t('agentHub:instructions.threePane.errors.emptyAdaptedAdapt'));
       return;
     }
-    if (actionBusy) return;
+    if (busyAction !== null) return;
     const generation = contextGenerationRef.current;
     const actionSeq = ++actionSeqRef.current;
-    setActionBusy(true);
+    setBusyAction('adapt');
     setActionError(null);
     try {
       const result = await agentHubApi.adaptInstructionToOtherAgents({
@@ -729,10 +741,10 @@ export function useInstructionThreePaneController(
       setActionError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       if (mountedRef.current && actionSeq === actionSeqRef.current) {
-        setActionBusy(false);
+        setBusyAction(null);
       }
     }
-  }, [actionBusy, agent, requestContext, t, updateDraft]);
+  }, [busyAction, agent, requestContext, t, updateDraft]);
 
   const updateOriginal = useCallback((text: string) => {
     updateDraft((current) => updateOriginalText(current, text));
@@ -814,7 +826,7 @@ export function useInstructionThreePaneController(
       const generation = contextGenerationRef.current;
       const actionSeq = ++actionSeqRef.current;
       const editVersion = editVersionRef.current;
-      setActionBusy(true);
+      setBusyAction('sync');
       setActionError(null);
       setApplyResult(null);
       lastSyncBaselineRef.current = baseline;
@@ -876,7 +888,7 @@ export function useInstructionThreePaneController(
           generation === contextGenerationRef.current &&
           actionSeq === actionSeqRef.current
         ) {
-          setActionBusy(false);
+          setBusyAction(null);
         }
       }
     },
@@ -912,7 +924,7 @@ export function useInstructionThreePaneController(
       const generation = contextGenerationRef.current;
       const actionSeq = ++actionSeqRef.current;
       const editVersionAtStart = editVersionRef.current;
-      setActionBusy(true);
+      setBusyAction('save');
       setActionError(null);
       try {
         const normalized = normalizeInstructionBlocks(blocksOverride ?? currentState.blocks);
@@ -1009,7 +1021,7 @@ export function useInstructionThreePaneController(
           generation === contextGenerationRef.current &&
           actionSeq === actionSeqRef.current
         ) {
-          setActionBusy(false);
+          setBusyAction(null);
         }
       }
     },
@@ -1028,9 +1040,9 @@ export function useInstructionThreePaneController(
   }, []);
 
   const closePreview = useCallback(() => {
-    if (actionBusy) return;
+    if (busyAction !== null) return;
     setPreviewOpen(false);
-  }, [actionBusy]);
+  }, [busyAction]);
 
   const applyPlan = useCallback(async (preparedPlan?: UserInstructionPlanDto) => {
     if (directContextUnsupported) {
@@ -1063,7 +1075,7 @@ export function useInstructionThreePaneController(
         : { planToken: selectedPlan.planToken, clientRequestId: createClientRequestId() };
     planRequestIdRef.current = base;
     const request = { ...base, ...requestContext };
-    setActionBusy(true);
+    setBusyAction('sync');
     setActionError(null);
     try {
       const result = await agentHubApi.applyUserInstructionPlan(request);
@@ -1134,7 +1146,7 @@ export function useInstructionThreePaneController(
         generation === contextGenerationRef.current &&
         actionSeq === actionSeqRef.current
       ) {
-        setActionBusy(false);
+        setBusyAction(null);
       }
     }
   }, [
@@ -1220,7 +1232,7 @@ export function useInstructionThreePaneController(
     actionSeqRef.current += 1;
     planRequestIdRef.current = null;
     planGenerationRef.current = null;
-    setActionBusy(false);
+    setBusyAction(null);
     setPlan(null);
     setPreviewOpen(false);
     setApplyResult(null);
@@ -1232,7 +1244,7 @@ export function useInstructionThreePaneController(
     actionSeqRef.current += 1;
     planRequestIdRef.current = null;
     planGenerationRef.current = null;
-    setActionBusy(false);
+    setBusyAction(null);
     setPlan(null);
     setPreviewOpen(false);
     setApplyResult(null);
@@ -1253,7 +1265,8 @@ export function useInstructionThreePaneController(
     refreshing,
     error,
     actionError,
-    actionBusy: actionBusy || refreshing,
+    actionBusy: busyAction !== null || refreshing,
+    busyAction,
     dirty,
     writeBlocked,
     writeBlockedReason,

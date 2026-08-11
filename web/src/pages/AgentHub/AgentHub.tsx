@@ -355,6 +355,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             error={instructionThreePane.error}
             actionError={instructionThreePane.actionError}
             actionBusy={instructionThreePane.actionBusy}
+            busyAction={instructionThreePane.busyAction}
             writeBlocked={instructionThreePane.writeBlocked}
             writeBlockedReason={instructionThreePane.writeBlockedReason}
             dualDirtyOpen={instructionThreePane.dualDirtyOpen}
@@ -743,7 +744,7 @@ export function AgentHub() {
                 !instructionThreePane.state.blocksDirty ||
                 instructionThreePane.state.externalDrift
               }
-              loading={instructionThreePane.actionBusy}
+              loading={instructionThreePane.busyAction === 'save'}
               onClick={() => void saveAndCommitPendingContext()}
               data-testid="agent-hub-context-save"
             >

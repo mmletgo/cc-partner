@@ -20,6 +20,7 @@ export {
 } from './instructionThreePane';
 export type {
   InstructionBlockDraft,
+  InstructionBusyAction,
   InstructionThreePaneState,
   SyncBaseline,
 } from './instructionThreePane';

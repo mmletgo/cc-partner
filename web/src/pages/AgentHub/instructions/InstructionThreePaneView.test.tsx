@@ -99,6 +99,7 @@ function buildProps(
     error: null,
     actionError: null,
     actionBusy: false,
+    busyAction: null,
     writeBlocked: false,
     writeBlockedReason: null,
     dualDirtyOpen: false,
@@ -249,6 +250,49 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-original').contains(analyze)).toBe(true);
     fireEvent.click(analyze);
     expect(onAnalyzeDecompose).toHaveBeenCalledOnce();
+  });
+
+  test('analyze busy shows spinner on analyze button only, not save slots', () => {
+    render(
+      <InstructionThreePaneView
+        {...buildProps({
+          instructionLane: 'exclusive',
+          state: { ...stateWithSlots(), blocksDirty: true },
+          actionBusy: true,
+          busyAction: 'analyze',
+        })}
+      />,
+    );
+
+    const analyze = screen.getByTestId('instruction-analyze-decompose') as HTMLButtonElement;
+    const save = screen.getByTestId('instruction-save-blocks') as HTMLButtonElement;
+    const sync = screen.getByTestId('instruction-sync-to-native') as HTMLButtonElement;
+
+    expect(analyze.getAttribute('data-loading')).toBe('true');
+    expect(analyze.disabled).toBe(true);
+    expect(save.getAttribute('data-loading')).toBeNull();
+    expect(save.disabled).toBe(true);
+    expect(sync.getAttribute('data-loading')).toBeNull();
+    expect(sync.disabled).toBe(true);
+  });
+
+  test('save busy shows spinner on save slots only', () => {
+    render(
+      <InstructionThreePaneView
+        {...buildProps({
+          instructionLane: 'exclusive',
+          state: { ...stateWithSlots(), blocksDirty: true },
+          actionBusy: true,
+          busyAction: 'save',
+        })}
+      />,
+    );
+
+    const analyze = screen.getByTestId('instruction-analyze-decompose') as HTMLButtonElement;
+    const save = screen.getByTestId('instruction-save-blocks') as HTMLButtonElement;
+
+    expect(save.getAttribute('data-loading')).toBe('true');
+    expect(analyze.getAttribute('data-loading')).toBeNull();
   });
 
   test('exclusive write-to-native is disabled and explained when write is blocked', () => {

@@ -17,6 +17,7 @@ import type { InstructionLane } from '../context/agentHubContext';
 import {
   findBlockByMode,
   resolveAdaptedSlotText,
+  type InstructionBusyAction,
   type InstructionThreePaneState,
 } from './instructionThreePane';
 import styles from './InstructionThreePaneView.module.css';
@@ -74,7 +75,13 @@ export interface InstructionThreePaneViewProps {
   loading: boolean;
   error: string | null;
   actionError: string | null;
+  /** 任一动作互斥禁用（含 refresh）。 */
   actionBusy: boolean;
+  /**
+   * 当前具体动作；spinner 只挂在对应按钮上。
+   * Code Logic: null 时任何按钮都不转圈（即使 actionBusy 因 refresh 为 true）。
+   */
+  busyAction: InstructionBusyAction | null;
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
@@ -123,6 +130,7 @@ function InstructionChrome(props: {
   labels: InstructionThreePaneViewLabels;
   state: InstructionThreePaneState;
   actionBusy: boolean;
+  busyAction: InstructionBusyAction | null;
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   actionError: string | null;
@@ -143,6 +151,7 @@ function InstructionChrome(props: {
     labels,
     state,
     actionBusy,
+    busyAction,
     writeBlocked,
     writeBlockedReason,
     actionError,
@@ -177,7 +186,7 @@ function InstructionChrome(props: {
           <Button
             variant="primary"
             size="sm"
-            loading={actionBusy}
+            loading={busyAction === 'save'}
             disabled={actionBusy || !state.blocksDirty || state.externalDrift}
             onClick={onSaveBlocks}
             data-testid="instruction-save-blocks"
@@ -188,7 +197,7 @@ function InstructionChrome(props: {
             <Button
               variant="secondary"
               size="sm"
-              loading={actionBusy}
+              loading={busyAction === 'sync'}
               disabled={actionBusy || writeBlocked}
               onClick={onRequestSync}
               data-testid="instruction-sync-to-native"
@@ -200,7 +209,7 @@ function InstructionChrome(props: {
             <Button
               variant="secondary"
               size="sm"
-              loading={actionBusy}
+              loading={busyAction === 'adapt'}
               disabled={actionBusy || writeBlocked}
               onClick={onAdaptToOtherAgents}
               data-testid="instruction-adapt-to-other-agents"
@@ -399,6 +408,7 @@ function ExclusiveLanePanes(props: {
   onSlotTextChange: (text: string) => void;
   onAnalyzeDecompose: () => void;
   analyzeDisabled: boolean;
+  analyzeLoading: boolean;
 }): JSX.Element {
   const {
     labels,
@@ -407,6 +417,7 @@ function ExclusiveLanePanes(props: {
     onSlotTextChange,
     onAnalyzeDecompose,
     analyzeDisabled,
+    analyzeLoading,
   } = props;
 
   return (
@@ -460,6 +471,7 @@ function ExclusiveLanePanes(props: {
             variant="secondary"
             size="sm"
             onClick={onAnalyzeDecompose}
+            loading={analyzeLoading}
             disabled={analyzeDisabled}
             data-testid="instruction-analyze-decompose"
           >
@@ -500,6 +512,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     error,
     actionError,
     actionBusy,
+    busyAction,
     writeBlocked,
     writeBlockedReason,
     dualDirtyOpen,
@@ -560,6 +573,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         labels={labels}
         state={state}
         actionBusy={actionBusy}
+        busyAction={busyAction}
         writeBlocked={writeBlocked}
         writeBlockedReason={writeBlockedReason}
         actionError={actionError}
@@ -606,6 +620,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           slotText={exclusiveSlotText}
           onSlotTextChange={onSlotTextChange}
           onAnalyzeDecompose={onAnalyzeDecompose}
+          analyzeLoading={busyAction === 'analyze'}
           analyzeDisabled={
             actionBusy ||
             state.sourceDrift ||
