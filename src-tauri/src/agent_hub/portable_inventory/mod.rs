@@ -334,6 +334,49 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_blocked_support_gate_with_stale_rendered_hash_is_hub_managed_not_drifted() {
+        // support 门禁 Blocked（如 min_tested_version_missing）可能留下与当前
+        // scan content_hash 不一致的 rendered_hash；不得因此把整页 MCP 标成 drifted。
+        let mut discovered = base_discovered();
+        discovered.kind = PortableAssetKind::Mcp;
+        discovered.content_hash = Some("leaf-hash-current".into());
+        discovered.tree_hash = None;
+        let facts = [PortableCanonicalFact {
+            asset_id: "asset-mcp".into(),
+            scope_id: "user".into(),
+            kind: PortableAssetKind::Mcp,
+            origin_namespace: "standalone".into(),
+            logical_key: "tool".into(),
+            target: AgentTarget::Claude,
+            hub_owned: true,
+            desired_presence: Some(DesiredPresence::Present),
+            desired_enabled: Some(true),
+            materialization_status: Some(MaterializationStatus::Blocked),
+            rendered_hash: Some("stale-shared-hash".into()),
+            observed_external_hash: Some("stale-shared-hash".into()),
+            last_projected_revision_id: Some("rev-1".into()),
+            native_path: Some("/Users/x/.claude.json".into()),
+            unsupported: false,
+            external_collision: false,
+        }];
+        let snap = reconcile_portable_inventory_with_facts(
+            vec![sample_target(AgentTarget::Claude, "1.0.0")],
+            vec![discovered],
+            &facts,
+        )
+        .expect("reconcile");
+        assert_eq!(
+            snap.items[0].management_state,
+            PortableInventoryManagementState::HubManaged,
+            "Blocked support-gate ledger must not surface as content drift"
+        );
+        assert_eq!(
+            snap.items[0].materialization_status.as_deref(),
+            Some("blocked")
+        );
+    }
+
+    #[test]
     fn reconcile_marks_external_collision_for_incompatible_external_source() {
         let discovered = base_discovered();
         let facts = [PortableCanonicalFact {

@@ -13,6 +13,7 @@ use crate::agent_hub::assets::{
     CommandArgument, McpTransport, PortabilityDiagnostic, PortableAgent, PortableAssetPayload,
     PortableCommand, PortableMcpServer, PortableSkill, CODE_UNKNOWN_SOURCE_FIELD,
 };
+use crate::agent_hub::config_patch::value_content_hash;
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::agent_hub::object_store::{sha256_hex, TreeEntry, TreeEntryType, TreeManifest};
 use crate::error::AppError;
@@ -795,11 +796,8 @@ pub fn parse_mcp_servers_json_map(
     for (key, value) in map {
         match mcp_from_json_value(target, key, value, enabled_default) {
             Ok((server, diags)) => {
-                let bytes = match serde_json::to_vec(value) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let content_hash = sha256_hex(&bytes);
+                // 与 portable action CAS（value_content_hash）同域，避免键序/规范差异假漂移
+                let content_hash = value_content_hash(value);
                 let enabled = server.enabled;
                 out.push(DiscoveredPortableAsset {
                     kind: AssetKind::Mcp,
@@ -1007,7 +1005,6 @@ pub fn parse_codex_mcp_toml(
         }
         let value = Value::Object(json);
         if let Ok((server, diags)) = mcp_from_json_value(target, key, &value, true) {
-            let bytes = serde_json::to_vec(&value).unwrap_or_default();
             let enabled = server.enabled;
             out.push(DiscoveredPortableAsset {
                 kind: AssetKind::Mcp,
@@ -1019,7 +1016,7 @@ pub fn parse_codex_mcp_toml(
                     path: config_path.to_path_buf(),
                     origin_kind: PortableOriginKind::Native,
                     native_id: key.to_string(),
-                    content_hash: sha256_hex(&bytes),
+                    content_hash: value_content_hash(&value),
                     tree_hash: None,
                     status: if enabled {
                         PortableDiscoveryStatus::Active
@@ -1703,6 +1700,57 @@ config_file = "agents/reviewer.md"
             .diagnostics
             .iter()
             .any(|d| d.code == CODE_UNKNOWN_SOURCE_FIELD));
+    }
+
+    #[test]
+    fn mcp_content_hash_is_key_order_independent_like_value_content_hash() {
+        // inventory content_hash 必须与 action CAS 的 value_content_hash 同域，
+        // 否则 ensure/reconcile 会因键序把健康 MCP 标成 drift。
+        use crate::agent_hub::config_patch::value_content_hash;
+        use serde_json::json;
+
+        let a = json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "ctx"],
+        });
+        let b = json!({
+            "args": ["-y", "ctx"],
+            "command": "npx",
+            "type": "stdio",
+        });
+        let mut map_a = serde_json::Map::new();
+        map_a.insert("ctx".into(), a);
+        let mut map_b = serde_json::Map::new();
+        map_b.insert("ctx".into(), b);
+        let path = PathBuf::from("/tmp/mcp-hash-order.json");
+        let disc_a = parse_mcp_servers_json_map(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &map_a,
+            &path,
+            PortableOriginKind::Native,
+            true,
+        );
+        let disc_b = parse_mcp_servers_json_map(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &map_b,
+            &path,
+            PortableOriginKind::Native,
+            true,
+        );
+        assert_eq!(disc_a.len(), 1);
+        assert_eq!(disc_b.len(), 1);
+        assert_eq!(
+            disc_a[0].origin.content_hash, disc_b[0].origin.content_hash,
+            "reordered mcp leaf keys must share content_hash"
+        );
+        let expected = value_content_hash(map_a.get("ctx").unwrap());
+        assert_eq!(
+            disc_a[0].origin.content_hash, expected,
+            "content_hash must equal value_content_hash(leaf)"
+        );
     }
 
     #[test]

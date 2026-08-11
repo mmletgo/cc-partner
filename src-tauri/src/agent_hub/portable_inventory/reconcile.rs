@@ -374,20 +374,32 @@ fn apply_reconcile_state(
         .as_deref()
         .or(fact.observed_external_hash.as_deref());
 
-    let hash_consistent = match (observed, expected) {
-        (Some(o), Some(e)) => o == e,
-        // 无 hash 可比较时，若 materialization 明确 Drift 则 drifted，否则保守 hubManaged
-        _ => !matches!(
-            fact.materialization_status,
-            Some(MaterializationStatus::Drift)
-        ),
-    };
-
+    // 明确 Drift 观测优先
     if matches!(
         fact.materialization_status,
         Some(MaterializationStatus::Drift)
-    ) || !hash_consistent
-    {
+    ) {
+        item.management_state = PortableInventoryManagementState::Drifted;
+        return;
+    }
+
+    // support 门禁 Blocked（如 min_tested_version_missing）可能留下陈旧 rendered_hash；
+    // 那是能力/版本问题，不是外部内容漂移——不得升 management=drifted。
+    if matches!(
+        fact.materialization_status,
+        Some(MaterializationStatus::Blocked)
+    ) {
+        item.management_state = PortableInventoryManagementState::HubManaged;
+        return;
+    }
+
+    let hash_consistent = match (observed, expected) {
+        (Some(o), Some(e)) => o == e,
+        // 无 hash 可比较时保守 hubManaged（Drift 已在上方处理）
+        _ => true,
+    };
+
+    if !hash_consistent {
         item.management_state = PortableInventoryManagementState::Drifted;
         return;
     }

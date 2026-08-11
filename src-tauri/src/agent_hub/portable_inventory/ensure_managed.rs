@@ -189,7 +189,8 @@ fn is_ensure_candidate(item: &PortableInventoryItemDto) -> bool {
 /// 幂等 ensure 单条 discovered item 的 scope/asset/binding/materialization。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     仅账本对齐；保留已有 desired；不把 collision/blocked 静默改成 synced。
+///     仅账本对齐；保留已有 desired；不把 collision 静默改成 synced。
+///     Blocked 保留 status/last_error，但会把 hash 对齐到当前 observed，避免假漂移。
 ///
 /// Code Logic（这个函数做什么）:
 ///     ensure_scope → find/insert asset → get/create binding → get/update materialization。
@@ -267,11 +268,8 @@ async fn ensure_one_item(
 
     let existing_mat = facts.materializations.get(&binding.id).cloned();
     if let Some(mat) = existing_mat.as_ref() {
-        if matches!(
-            mat.status,
-            MaterializationStatus::ExternalCollision | MaterializationStatus::Blocked
-        ) {
-            // 不得静默覆盖 collision/blocked
+        if matches!(mat.status, MaterializationStatus::ExternalCollision) {
+            // 不得静默覆盖 external collision
             return Ok(EnsureOneOutcome::Skipped);
         }
     }
@@ -292,30 +290,43 @@ async fn ensure_one_item(
 
     let (status, rendered_hash, last_projected_revision_id, last_error) =
         if let Some(mat) = existing_mat.as_ref() {
-            let rendered = mat.rendered_hash.clone().or_else(|| observed.clone());
-            let status = match (rendered.as_deref(), observed.as_deref()) {
-                (Some(r), Some(o)) if r != o => MaterializationStatus::Drift,
-                _ => match mat.status {
-                    // Detached 后再次发现：重新纳入管理（产品不提供停止管理）
-                    MaterializationStatus::Detached
-                    | MaterializationStatus::Pending
-                    | MaterializationStatus::Synced
-                    | MaterializationStatus::ActivationRequired => MaterializationStatus::Synced,
-                    MaterializationStatus::Drift => MaterializationStatus::Drift,
-                    MaterializationStatus::Conflict => MaterializationStatus::Conflict,
-                    MaterializationStatus::Unsupported => MaterializationStatus::Unsupported,
-                    // 已在上方跳过
-                    MaterializationStatus::ExternalCollision | MaterializationStatus::Blocked => {
-                        mat.status
-                    }
-                },
-            };
-            (
-                status,
-                rendered,
-                mat.last_projected_revision_id.clone(),
-                mat.last_error.clone(),
-            )
+            if mat.status == MaterializationStatus::Blocked {
+                // support 门禁 Blocked：保留 status/last_error，但必须把 hash 对齐到当前
+                // observed，否则陈旧/共享 rendered_hash 会在 reconcile 里假漂移整页 MCP。
+                // discover-as-managed 的 rendered 本就等于 observed（无独立投影字节）。
+                (
+                    MaterializationStatus::Blocked,
+                    observed.clone(),
+                    mat.last_projected_revision_id.clone(),
+                    mat.last_error.clone(),
+                )
+            } else {
+                let rendered = mat.rendered_hash.clone().or_else(|| observed.clone());
+                let status = match (rendered.as_deref(), observed.as_deref()) {
+                    (Some(r), Some(o)) if r != o => MaterializationStatus::Drift,
+                    _ => match mat.status {
+                        // Detached 后再次发现：重新纳入管理（产品不提供停止管理）
+                        MaterializationStatus::Detached
+                        | MaterializationStatus::Pending
+                        | MaterializationStatus::Synced
+                        | MaterializationStatus::ActivationRequired => {
+                            MaterializationStatus::Synced
+                        }
+                        MaterializationStatus::Drift => MaterializationStatus::Drift,
+                        MaterializationStatus::Conflict => MaterializationStatus::Conflict,
+                        MaterializationStatus::Unsupported => MaterializationStatus::Unsupported,
+                        // ExternalCollision 已在上方 skip；Blocked 已单独分支
+                        MaterializationStatus::ExternalCollision
+                        | MaterializationStatus::Blocked => mat.status,
+                    },
+                };
+                (
+                    status,
+                    rendered,
+                    mat.last_projected_revision_id.clone(),
+                    mat.last_error.clone(),
+                )
+            }
         } else {
             (
                 MaterializationStatus::Synced,
@@ -576,6 +587,80 @@ mod tests {
     }
 
     /// RED→GREEN 核心合同：fixture skill → ensure → reconcile 为 hubManaged，且无二次 adopt。
+    #[tokio::test]
+    async fn ensure_managed_rebaselines_blocked_materialization_hash_without_clearing_block() {
+        // 生产故障：Blocked（min_tested_version_missing）materialization 持有陈旧/共享
+        // rendered_hash，ensure 直接 skip → reconcile 永久 Drifted。
+        // 期望：刷新 observed/rendered 到当前 content_hash，保留 Blocked + last_error。
+        use crate::agent_hub::models::NewMaterialization;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        write_skill(&home.join(".claude/skills"), "review", "Review carefully.");
+        let repo = open_repo(&root.path().join("data.db")).await;
+
+        let mut items = vec![sample_item(&home, "review", "hash-current-leaf")];
+        let report = ensure_discovered_portable_items_managed(&repo, &mut items).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(report.ensured >= 1);
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats
+            .iter()
+            .find(|m| m.status == MaterializationStatus::Synced)
+            .expect("synced mat after first ensure");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: mat.asset_id.clone(),
+            target: mat.target,
+            target_binding_id: mat.target_binding_id.clone(),
+            native_path: mat.native_path.clone(),
+            last_projected_revision_id: mat.last_projected_revision_id.clone(),
+            rendered_hash: Some("stale-shared-hash".into()),
+            observed_external_hash: Some("stale-shared-hash".into()),
+            status: MaterializationStatus::Blocked,
+            last_error: Some("min_tested_version_missing".into()),
+        })
+        .await
+        .unwrap();
+
+        let mut items2 = vec![sample_item(&home, "review", "hash-current-leaf")];
+        let report2 = ensure_discovered_portable_items_managed(&repo, &mut items2).await;
+        assert!(report2.failures.is_empty(), "{:?}", report2.failures);
+        assert!(
+            report2.ensured >= 1,
+            "blocked mat with stale hash must be rebaselined, not skipped forever; report={report2:?}"
+        );
+
+        let mats2 = repo.list_materializations().await.unwrap();
+        let mat2 = mats2
+            .iter()
+            .find(|m| m.target_binding_id == mat.target_binding_id)
+            .expect("mat after rebaseline");
+        assert_eq!(mat2.status, MaterializationStatus::Blocked);
+        assert_eq!(
+            mat2.last_error.as_deref(),
+            Some("min_tested_version_missing")
+        );
+        assert_eq!(
+            mat2.rendered_hash.as_deref(),
+            Some("hash-current-leaf"),
+            "rendered_hash must track current observed content"
+        );
+        assert_eq!(
+            mat2.observed_external_hash.as_deref(),
+            Some("hash-current-leaf")
+        );
+
+        let snap = reconcile_portable_inventory(&repo, vec![sample_target()], items2)
+            .await
+            .expect("reconcile");
+        assert_eq!(
+            snap.items[0].management_state,
+            PortableInventoryManagementState::HubManaged,
+            "after rebaseline, inventory must not show drifted"
+        );
+    }
+
     #[tokio::test]
     async fn ensure_managed_promotes_discovered_skill_without_adopt() {
         let root = tempfile::TempDir::new().unwrap();
