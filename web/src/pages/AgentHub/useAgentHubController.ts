@@ -2046,19 +2046,24 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     // 双路径：section 与壳层 tab 都必须在资产区，避免切回提示词后 stale filters 回写 kind/section
     if (activeSection !== 'assets' || !isAssetKindTab(hubContext.tab)) return;
     if (portableUrlHydrationTargetRef.current) return;
-    setSearchParams((prev) => {
-      // 若现代 tab 已离开资产（竞态帧），禁止写回 legacy 导航键
-      if (!isAssetKindTab(parseAgentHubContext(prev).tab)) return prev;
-      const modernContext = writeAgentHubContext(prev, hubContext);
-      const desired = writePortableFiltersToSearchParams(
-        modernContext,
-        portableInventoryBase.filters,
-        portableInventoryBase.selectedItemId,
-      );
-      // 避免无变化 set 触发环
-      if (desired.toString() === prev.toString()) return prev;
-      return desired;
-    }, { replace: true });
+    // setSearchParams 的 functional updater 返回 prev 时，prev 是 router 的 React state，
+    // 在 setSearchParams 触发的 history.replaceState 之后、router state commit 之前的
+    // 渲染里仍是旧值；return prev（旧 tab）会让 router 把刚写入的新 tab 回退为旧 tab
+    // （表现为 skill/command/mcp/plugin 之间切换只有第一个能选中变橙）。
+    // 改为以 window.location.search（DOM 最新 URL，replaceState 后立即可见）为基准：
+    // desired 的 tab 始终与 DOM 一致，只叠加 filters/selection，无变化则不写。
+    const live = new URLSearchParams(window.location.search);
+    const liveCtx = parseAgentHubContext(live);
+    if (!isAssetKindTab(liveCtx.tab)) return;
+    const modernContext = writeAgentHubContext(live, liveCtx);
+    const desired = writePortableFiltersToSearchParams(
+      modernContext,
+      portableInventoryBase.filters,
+      portableInventoryBase.selectedItemId,
+    );
+    // 避免无变化 set 触发环
+    if (desired.toString() === live.toString()) return;
+    setSearchParams(desired, { replace: true });
   }, [
     activeSection,
     hubContext,

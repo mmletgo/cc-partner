@@ -907,3 +907,27 @@ test.describe('E2E-AGENT-HUB-ADAPT-PREVIEW-001 selective preview-only', () => {
     expect(selectiveApplyCalls).toHaveLength(0);
   });
 });
+
+test.describe('asset tab selection regression', () => {
+  test('skill/command/mcp/plugin each become selected when clicked in sequence', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerInteractionBase(backendHarness);
+    await page.goto('/agent-hub');
+    await expect(page.getByTestId('agent-hub-shell')).toBeVisible({ timeout: 15_000 });
+
+    // 回归：资产 tab 之间互相切换时，每次点击都必须把对应 tab 写入 URL 并显示为
+    // primary（橙色）。曾因 filters→URL effect 用 router 尚未 commit 的 stale prev
+    // 回写 URL，导致只有第一个资产 tab（skill）能选中，command/mcp/plugin 点击后
+    // URL 与选中态都停留在 skill。
+    for (const tab of ['skill', 'command', 'mcp', 'plugin', 'skill', 'command', 'plugin']) {
+      await page.getByTestId(`agent-hub-tab-${tab}`).click();
+      await expect(page).toHaveURL(new RegExp(`tab=${tab}`));
+      const el = page.getByTestId(`agent-hub-tab-${tab}`);
+      await expect(el).toHaveAttribute('aria-selected', 'true');
+      await expect(el).toHaveAttribute('data-variant', 'primary');
+    }
+  });
+});
