@@ -851,14 +851,49 @@ pub async fn agent_hub_analyze_instruction_original(
             "exclusive": { "type": "string" }
         }
     });
+    // Business Logic: 拆解优先把「可同构改写」的 agent 表面差放进 adapted；
+    //   语义与表面混写时整段落 adapted（不硬拆 common）；真独占才 exclusive。
+    // Code Logic: 固定三槽分类规则 + 模型/subagent 语义提示注入 Claude structured JSON。
     let prompt = format!(
         "You split an agent instruction document into three markdown parts for Agent Hub.\n\
          Target agent: {agent}\n\
+         Agents in this product: claude, codex, opencode (same subagent roles/tiers; different surfaces).\n\
          Return ONLY JSON with keys common, adapted, exclusive.\n\
-         - common: rules/style/process that apply to every agent (Claude/Codex/OpenCode).\n\
-         - adapted: content that is agent-specific for the target agent but should be rewritten for other agents later.\n\
-         - exclusive: content that only makes sense for the target agent and must not be shared.\n\
-         Keep the original language. Do not invent facts. Empty string is allowed for a part.\n\
+         \n\
+         Slot definitions:\n\
+         - common: pure cross-agent semantic rules only — process, style, review gates, acceptance criteria,\n\
+           and subagent role boundaries (explore / implement / review / verify) when written WITHOUT any\n\
+           agent-specific model ids, CLI names, config paths, tool names, or instruction-file names.\n\
+         - adapted: content that is isomorphic across agents but currently written in the target agent's\n\
+           surface (CLI names, config roots, instruction files, tool terms, concrete model ids, routing tables).\n\
+           Later rewrite will map surface for other agents while keeping the same intent.\n\
+         - exclusive: content that has no safe isomorphic mapping for other agents (true capability-only\n\
+           details, unique hooks/plugins/permissions with no counterpart). Prefer common/adapted over exclusive.\n\
+         \n\
+         Critical mixed-content rule (must follow):\n\
+         - Real documents usually interleave semantic intent with surface wording in the SAME paragraph/list/table.\n\
+         - When a passage mixes semantic layer AND surface layer, put the ENTIRE passage into adapted.\n\
+           Do NOT split one mixed passage into common+adapted. Do NOT strip model names and leave a hollow common stub.\n\
+         - Only put text in common when it is fully free of agent-specific surface terms.\n\
+         \n\
+         Subagent / model routing rules:\n\
+         - Subagent duties and tier ranks are the SAME across agents (e.g. explore vs implement vs review;\n\
+           high/mid/low effort). Different concrete model ids (opus/sonnet/haiku, Codex models, OpenCode models)\n\
+           are surface differences, NOT exclusive ownership and NOT different duties.\n\
+         - A mixed model-routing table (duty + concrete model name) → whole table/list to adapted.\n\
+         - Pure duty text with no model/CLI surface → common.\n\
+         \n\
+         Surface examples that belong in adapted (not exclusive) when isomorphic:\n\
+         - Instruction files: CLAUDE.md ↔ AGENTS.md / AGENTS.override.md\n\
+         - Config roots: ~/.claude, ~/.codex, ~/.config/opencode, CLAUDE_CONFIG_DIR, CODEX_HOME, OPENCODE_CONFIG_DIR\n\
+         - Tool/CLI product names and invocation wording for the same role\n\
+         - Concrete model ids that encode a tier/duty mapping\n\
+         \n\
+         Exclusive only when there is no counterpart (examples): Claude-only permission/TCC flows with no peer,\n\
+         product features unique to one CLI with no rewrite path.\n\
+         \n\
+         Keep the original language. Do not invent facts. Preserve headings/lists where possible.\n\
+         Empty string is allowed for a part. Prefer moving borderline content to adapted over exclusive.\n\
          Original document:\n---\n{original}\n---"
     );
     let result = crate::claude_cli::run_structured_json_with_cwd::<AnalyzeInstructionOriginalResult>(
@@ -923,13 +958,33 @@ pub async fn agent_hub_adapt_instruction_to_other_agents(
         "properties": properties
     });
     let dest_list = destinations.join(", ");
+    // Business Logic: 适配正文通常是「语义+表面混写」整段落；改写只换表面，职责/分级不变。
+    // Code Logic: 按 destination 输出 markdown 变体；无法安全映射的表面用语保留语义或留空，不编造模型 id。
     let prompt = format!(
         "You rewrite one agent's adapted instruction body for other coding agents.\n\
          Source agent: {source}\n\
          Destination agents: {dest_list}\n\
          Return ONLY JSON whose keys are exactly the destination agents.\n\
-         Each value is markdown rewritten for that agent (CLI names, config paths, tool terms).\n\
-         Keep intent and language. Empty string is allowed if nothing applies.\n\
+         \n\
+         Context:\n\
+         - Source text is usually MIXED: semantic intent (roles, tiers, process) woven with surface terms\n\
+           (CLI names, paths, tool names, concrete model ids). Keep each mixed passage as ONE unit.\n\
+         - Do NOT drop the semantic half when rewriting surface. Do NOT invent a separate pure-semantic rewrite.\n\
+         \n\
+         Rewrite rules:\n\
+         1) Preserve intent, structure, language, headings, and list/table shape.\n\
+         2) Subagent duties and tier ranks stay the SAME across agents; only rewrite surface wording.\n\
+            Example: \"complex planning uses highest tier / routine uses mid / explore uses low\" stays;\n\
+            replace concrete model ids with the destination agent's equivalent if known, otherwise keep the\n\
+            tier/duty wording and avoid inventing fake model product names.\n\
+         3) Map isomorphic surfaces when clear:\n\
+            - Instruction files: CLAUDE.md ↔ AGENTS.md / AGENTS.override.md\n\
+            - Config roots: ~/.claude ↔ ~/.codex ↔ ~/.config/opencode (and related env vars)\n\
+            - Product/CLI/tool names for the same role\n\
+         4) If a term has no safe mapping for a destination, keep the surrounding semantic rule and omit or\n\
+            neutralize only the unmappable surface phrase — do not fabricate capabilities or model ids.\n\
+         5) Empty string is allowed for a destination when nothing applies after rewrite.\n\
+         \n\
          Source adapted markdown:\n---\n{body}\n---"
     );
     let raw = crate::claude_cli::run_structured_json_with_cwd::<BTreeMap<String, String>>(
