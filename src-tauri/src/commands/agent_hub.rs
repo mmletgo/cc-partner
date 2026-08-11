@@ -815,6 +815,198 @@ pub struct AdaptInstructionToOtherAgentsResult {
 const INSTRUCTION_LLM_TIMEOUT_SECS: u64 = 180;
 const MAX_INSTRUCTION_LLM_CHARS: usize = 80_000;
 
+/// 表面层关键词：命中则整段视为混写，只能进 adapted（不得进 common）。
+const INSTRUCTION_SURFACE_MARKERS: &[&str] = &[
+    "claude.md",
+    "agents.md",
+    "agents.override.md",
+    "~/.claude",
+    "~/.codex",
+    "~/.config/opencode",
+    "claude_config_dir",
+    "codex_home",
+    "opencode_config",
+    "claude code",
+    "anthropic",
+    "sonnet",
+    "opus",
+    "haiku",
+    "gpt-5",
+    "o3-",
+    "o4-",
+    "cc-partner",
+    ".claude/",
+    ".codex/",
+    "opencode",
+    "codex cli",
+    "claude cli",
+];
+
+/// Business Logic: 产品层强制「语义+表面混写只进适配」；模型偶发把同一段同时放进
+///   common/adapted 时，后处理去重，避免公共/适配几乎相同。
+/// Code Logic: 按空行分段；表面词 → 整段并入 adapted；与 adapted 覆盖/高重叠 → 从 common 删除；
+///   exclusive 若被 adapted 覆盖则丢弃（优先 adapted）。
+pub(crate) fn normalize_instruction_analyze_parts(
+    common: &str,
+    adapted: &str,
+    exclusive: &str,
+) -> AnalyzeInstructionOriginalResult {
+    let mut adapted_blocks = split_instruction_blocks(adapted);
+    let exclusive_blocks = split_instruction_blocks(exclusive);
+    let common_blocks = split_instruction_blocks(common);
+
+    let mut kept_common: Vec<String> = Vec::new();
+    for block in common_blocks {
+        if block_has_surface_markers(&block) {
+            // 混写整段进适配，不保留 hollow common stub。
+            push_unique_block(&mut adapted_blocks, block);
+            continue;
+        }
+        if block_covered_by_adapted(&block, &adapted_blocks, adapted) {
+            continue;
+        }
+        kept_common.push(block);
+    }
+
+    let mut kept_exclusive: Vec<String> = Vec::new();
+    for block in exclusive_blocks {
+        if block_covered_by_adapted(&block, &adapted_blocks, adapted)
+            || block_covered_by_adapted(&block, &adapted_blocks, &join_instruction_blocks(&adapted_blocks))
+        {
+            // 真独占才保留；与适配高度重叠的段落归适配侧。
+            continue;
+        }
+        // 表面可同构映射的不应进 exclusive：有表面词且能被 adapted 语义覆盖时已在上面 drop。
+        kept_exclusive.push(block);
+    }
+
+    AnalyzeInstructionOriginalResult {
+        common: join_instruction_blocks(&kept_common),
+        adapted: join_instruction_blocks(&adapted_blocks),
+        exclusive: join_instruction_blocks(&kept_exclusive),
+    }
+}
+
+fn split_instruction_blocks(text: &str) -> Vec<String> {
+    text.replace("\r\n", "\n")
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn join_instruction_blocks(blocks: &[String]) -> String {
+    blocks
+        .iter()
+        .map(|b| b.trim_end())
+        .filter(|b| !b.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn normalize_instruction_ws(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn block_has_surface_markers(block: &str) -> bool {
+    let lower = block.to_ascii_lowercase();
+    INSTRUCTION_SURFACE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn instruction_word_set(text: &str) -> std::collections::HashSet<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn jaccard_similarity(
+    a: &std::collections::HashSet<String>,
+    b: &std::collections::HashSet<String>,
+) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let inter = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+fn block_covered_by_adapted(
+    common_block: &str,
+    adapted_blocks: &[String],
+    adapted_full: &str,
+) -> bool {
+    let cn = normalize_instruction_ws(common_block);
+    if cn.is_empty() {
+        return true;
+    }
+    let an = normalize_instruction_ws(adapted_full);
+    if !an.is_empty() && an.contains(&cn) {
+        return true;
+    }
+    let cset = instruction_word_set(common_block);
+    for ab in adapted_blocks {
+        let abn = normalize_instruction_ws(ab);
+        if abn == cn {
+            return true;
+        }
+        let aset = instruction_word_set(ab);
+        let j = jaccard_similarity(&cset, &aset);
+        // 清洗版 common 与带表面词的 adapted 高重叠：只保留 adapted。
+        if j >= 0.82 {
+            let cl = cn.chars().count();
+            let al = abn.chars().count();
+            if cl <= al.saturating_mul(12) / 10 + 48 {
+                return true;
+            }
+        }
+        if !cset.is_empty() {
+            let covered = cset.intersection(&aset).count() as f64 / cset.len() as f64;
+            if covered >= 0.9 && cset.len() >= 4 {
+                return true;
+            }
+        }
+    }
+    let aset_all = instruction_word_set(adapted_full);
+    if !cset.is_empty() && !aset_all.is_empty() {
+        let covered = cset.intersection(&aset_all).count() as f64 / cset.len() as f64;
+        if covered >= 0.92 && cset.len() >= 6 {
+            return true;
+        }
+    }
+    false
+}
+
+fn push_unique_block(blocks: &mut Vec<String>, block: String) {
+    let bn = normalize_instruction_ws(&block);
+    if bn.is_empty() {
+        return;
+    }
+    if blocks
+        .iter()
+        .any(|existing| normalize_instruction_ws(existing) == bn)
+    {
+        return;
+    }
+    blocks.push(block);
+}
+
 /// Business Logic: 独有页把原始文件拆成公共/适配/独有三部分（仅草稿，不写盘）。
 /// Code Logic: 本机 Claude CLI structured JSON；GuiClient 可直跑（只读 CLI，不改 sidecar 状态）。
 #[tauri::command]
@@ -872,8 +1064,10 @@ pub async fn agent_hub_analyze_instruction_original(
          \n\
          Critical mixed-content rule (must follow):\n\
          - Real documents usually interleave semantic intent with surface wording in the SAME paragraph/list/table.\n\
-         - When a passage mixes semantic layer AND surface layer, put the ENTIRE passage into adapted.\n\
+         - When a passage mixes semantic layer AND surface layer, put the ENTIRE passage into adapted ONLY.\n\
            Do NOT split one mixed passage into common+adapted. Do NOT strip model names and leave a hollow common stub.\n\
+         - NEVER put the same passage (or a cleaned paraphrase of the same passage) into both common and adapted.\n\
+           Overlap is a hard error: choose adapted for mixed/surface-bearing text; common only for pure semantics.\n\
          - Only put text in common when it is fully free of agent-specific surface terms.\n\
          \n\
          Subagent / model routing rules:\n\
@@ -907,11 +1101,12 @@ pub async fn agent_hub_analyze_instruction_original(
         "分析拆解提示词",
     )
     .await?;
-    Ok(AnalyzeInstructionOriginalResult {
-        common: result.common.trim().to_string(),
-        adapted: result.adapted.trim().to_string(),
-        exclusive: result.exclusive.trim().to_string(),
-    })
+    // 产品层后处理：混写/重叠段落强制只留在 adapted，避免公共与适配双写。
+    Ok(normalize_instruction_analyze_parts(
+        &result.common,
+        &result.adapted,
+        &result.exclusive,
+    ))
 }
 
 /// Business Logic: 适配页把当前 agent 适配正文改写为其他 agent 变体（仅草稿）。
@@ -1071,6 +1266,44 @@ async fn preview_lan_push_for_state(
 mod tests {
     use super::*;
     use crate::backend::control_client::BackendControlClient;
+
+    /// Business Logic: 混写段落只能进适配；清洗版 common 不得与 adapted 双写。
+    /// Code Logic: normalize_instruction_analyze_parts 删除被 adapted 覆盖的 common。
+    #[test]
+    fn normalize_drops_common_overlap_with_adapted() {
+        let common = "Always use TypeScript for new modules.";
+        let adapted = "Always use TypeScript for new modules.\nPrefer Claude Code with Sonnet.";
+        let out = normalize_instruction_analyze_parts(common, adapted, "");
+        assert!(out.common.is_empty(), "common={}", out.common);
+        assert!(out.adapted.contains("TypeScript"));
+        assert!(out.adapted.contains("Sonnet"));
+    }
+
+    /// Business Logic: 含表面词的段落整段进适配，不留 hollow common。
+    #[test]
+    fn normalize_moves_surface_bearing_common_into_adapted() {
+        let common = "Put project rules in CLAUDE.md and load ~/.claude settings.";
+        let adapted = "Use Sonnet for implementation.";
+        let out = normalize_instruction_analyze_parts(common, adapted, "");
+        assert!(out.common.is_empty(), "common={}", out.common);
+        assert!(out.adapted.contains("CLAUDE.md") || out.adapted.contains("claude.md") || out.adapted.to_ascii_lowercase().contains("claude.md") || out.adapted.contains("CLAUDE.md"));
+        // 原 common 并入 adapted
+        assert!(
+            out.adapted.to_ascii_lowercase().contains("claude.md")
+                || out.adapted.contains("CLAUDE.md")
+        );
+        assert!(out.adapted.contains("Sonnet") || out.adapted.contains("sonnet") || out.adapted.contains("implementation"));
+    }
+
+    /// Business Logic: 纯语义公共段落在适配无重叠时应保留。
+    #[test]
+    fn normalize_keeps_pure_common_when_not_overlapping() {
+        let common = "All pull requests need two reviewers.";
+        let adapted = "Map Claude model Sonnet to implementation work.";
+        let out = normalize_instruction_analyze_parts(common, adapted, "");
+        assert!(out.common.contains("two reviewers"));
+        assert!(out.adapted.contains("Sonnet") || out.adapted.contains("implementation"));
+    }
 
     /// Business Logic: Gate A + Gate B presence 命令是前端 AGENT_HUB_COMMANDS 合同。
     /// Code Logic: 源文件含全部 snake_case 命令与 GuiClient 代理符号。

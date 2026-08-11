@@ -441,15 +441,173 @@ export interface InstructionAnalyzeParts {
   exclusive: string;
 }
 
+/** 表面层关键词：命中则整段视为混写，只能进 adapted。 */
+const SURFACE_MARKERS = [
+  'claude.md',
+  'agents.md',
+  'agents.override.md',
+  '~/.claude',
+  '~/.codex',
+  '~/.config/opencode',
+  'claude_config_dir',
+  'codex_home',
+  'opencode_config',
+  'claude code',
+  'anthropic',
+  'sonnet',
+  'opus',
+  'haiku',
+  'gpt-5',
+  'o3-',
+  'o4-',
+  'cc-partner',
+  '.claude/',
+  '.codex/',
+  'opencode',
+  'codex cli',
+  'claude cli',
+] as const;
+
+/**
+ * Business Logic: 产品层强制「语义+表面混写只进适配」；模型偶发把同一段同时放进
+ *   common/adapted 时，前端追加前再去重（与后端 normalize_instruction_analyze_parts 对齐）。
+ * Code Logic: 按空行分段；表面词 → 并入 adapted；被 adapted 覆盖/高重叠 → 从 common 删除。
+ */
+export function normalizeAnalyzeParts(parts: InstructionAnalyzeParts): InstructionAnalyzeParts {
+  const adaptedBlocks = splitInstructionBlocks(parts.adapted);
+  const exclusiveBlocks = splitInstructionBlocks(parts.exclusive);
+  const commonBlocks = splitInstructionBlocks(parts.common);
+  const adaptedFull = parts.adapted;
+
+  const keptCommon: string[] = [];
+  for (const block of commonBlocks) {
+    if (blockHasSurfaceMarkers(block)) {
+      pushUniqueInstructionBlock(adaptedBlocks, block);
+      continue;
+    }
+    if (blockCoveredByAdapted(block, adaptedBlocks, adaptedFull)) {
+      continue;
+    }
+    keptCommon.push(block);
+  }
+
+  const keptExclusive: string[] = [];
+  const joinedAdapted = joinInstructionBlocks(adaptedBlocks);
+  for (const block of exclusiveBlocks) {
+    if (
+      blockCoveredByAdapted(block, adaptedBlocks, adaptedFull) ||
+      blockCoveredByAdapted(block, adaptedBlocks, joinedAdapted)
+    ) {
+      continue;
+    }
+    keptExclusive.push(block);
+  }
+
+  return {
+    common: joinInstructionBlocks(keptCommon),
+    adapted: joinInstructionBlocks(adaptedBlocks),
+    exclusive: joinInstructionBlocks(keptExclusive),
+  };
+}
+
+function splitInstructionBlocks(text: string): string[] {
+  return text
+    .replace(/\r\n/g, '\n')
+    .split(/\n\n+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function joinInstructionBlocks(blocks: string[]): string {
+  return blocks
+    .map((block) => block.trimEnd())
+    .filter((block) => block.length > 0)
+    .join('\n\n');
+}
+
+function normalizeInstructionWs(text: string): string {
+  return text.split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+}
+
+function blockHasSurfaceMarkers(block: string): boolean {
+  const lower = block.toLowerCase();
+  return SURFACE_MARKERS.some((marker) => lower.includes(marker));
+}
+
+function instructionWordSet(text: string): Set<string> {
+  const words = text
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase())
+    .filter((word) => word.length > 0);
+  return new Set(words);
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  let inter = 0;
+  for (const word of a) {
+    if (b.has(word)) inter += 1;
+  }
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+function blockCoveredByAdapted(
+  commonBlock: string,
+  adaptedBlocks: string[],
+  adaptedFull: string,
+): boolean {
+  const cn = normalizeInstructionWs(commonBlock);
+  if (!cn) return true;
+  const an = normalizeInstructionWs(adaptedFull);
+  if (an && an.includes(cn)) return true;
+  const cset = instructionWordSet(commonBlock);
+  for (const ab of adaptedBlocks) {
+    const abn = normalizeInstructionWs(ab);
+    if (abn === cn) return true;
+    const aset = instructionWordSet(ab);
+    const j = jaccardSimilarity(cset, aset);
+    if (j >= 0.82) {
+      const cl = cn.length;
+      const al = abn.length;
+      if (cl <= Math.floor((al * 12) / 10) + 48) return true;
+    }
+    if (cset.size > 0) {
+      let covered = 0;
+      for (const word of cset) {
+        if (aset.has(word)) covered += 1;
+      }
+      if (covered / cset.size >= 0.9 && cset.size >= 4) return true;
+    }
+  }
+  const asetAll = instructionWordSet(adaptedFull);
+  if (cset.size > 0 && asetAll.size > 0) {
+    let covered = 0;
+    for (const word of cset) {
+      if (asetAll.has(word)) covered += 1;
+    }
+    if (covered / cset.size >= 0.92 && cset.size >= 6) return true;
+  }
+  return false;
+}
+
+function pushUniqueInstructionBlock(blocks: string[], block: string): void {
+  const bn = normalizeInstructionWs(block);
+  if (!bn) return;
+  if (blocks.some((existing) => normalizeInstructionWs(existing) === bn)) return;
+  blocks.push(block);
+}
+
 /**
  * Business Logic: 把分析拆解结果追加到现有三槽尾部，禁止替换既有内容。
- * Code Logic: ensure 三 mode → joinNonEmpty 追加；适配/独有写入 variants[agent]。
+ * Code Logic: 先 normalize 混写/重叠 → ensure 三 mode → joinNonEmpty 追加；适配/独有写 variants[agent]。
  */
 export function appendAnalyzedParts(
   state: InstructionThreePaneState,
   parts: InstructionAnalyzeParts,
   agent: AgentTarget,
 ): InstructionThreePaneState {
+  const normalized = normalizeAnalyzeParts(parts);
   let next = ensureModeBlock(state, 'shared', agent);
   next = ensureModeBlock(next, 'adapted', agent);
   next = ensureModeBlock(next, 'targetOnly', agent);
@@ -461,9 +619,9 @@ export function appendAnalyzedParts(
     return next;
   }
 
-  const commonAppend = parts.common.trim();
-  const adaptedAppend = parts.adapted.trim();
-  const exclusiveAppend = parts.exclusive.trim();
+  const commonAppend = normalized.common.trim();
+  const adaptedAppend = normalized.adapted.trim();
+  const exclusiveAppend = normalized.exclusive.trim();
   if (!commonAppend && !adaptedAppend && !exclusiveAppend) {
     return next;
   }

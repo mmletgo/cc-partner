@@ -17,6 +17,7 @@ import {
   findBlockByMode,
   initialThreePaneFromDisk,
   joinBlocksForTarget,
+  normalizeAnalyzeParts,
   normalizeInstructionBlocks,
   parseBlocksFromOriginal,
   recomputePreview,
@@ -147,6 +148,48 @@ describe('initialThreePaneFromDisk', () => {
 });
 
 describe('appendAnalyzedParts / appendAdaptedVariants', () => {
+  test('normalizeAnalyzeParts drops common that overlaps adapted (mixed-content rule)', () => {
+    const out = normalizeAnalyzeParts({
+      common: 'Always use TypeScript for new modules.',
+      adapted: 'Always use TypeScript for new modules.\nPrefer Claude Code with Sonnet.',
+      exclusive: '',
+    });
+    expect(out.common).toBe('');
+    expect(out.adapted).toContain('TypeScript');
+    expect(out.adapted).toContain('Sonnet');
+  });
+
+  test('normalizeAnalyzeParts moves surface-bearing common into adapted', () => {
+    const out = normalizeAnalyzeParts({
+      common: 'Put project rules in CLAUDE.md and load ~/.claude settings.',
+      adapted: 'Use Sonnet for implementation.',
+      exclusive: '',
+    });
+    expect(out.common).toBe('');
+    expect(out.adapted.toLowerCase()).toContain('claude.md');
+    expect(out.adapted).toMatch(/Sonnet|implementation/i);
+  });
+
+  test('appendAnalyzedParts applies normalize before append (no dual common+adapted copy)', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'shared', AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    state = ensureModeBlock(state, 'targetOnly', AGENT);
+
+    const next = appendAnalyzedParts(
+      state,
+      {
+        common: 'Always use TypeScript for new modules.',
+        adapted: 'Always use TypeScript for new modules.\nPrefer Sonnet.',
+        exclusive: '',
+      },
+      AGENT,
+    );
+    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown ?? '').toBe('');
+    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude ?? '').toContain('TypeScript');
+    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude ?? '').toContain('Sonnet');
+  });
+
   test('appendAnalyzedParts appends without replacing existing slot text', () => {
     let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
     state = ensureModeBlock(state, 'shared', AGENT);
