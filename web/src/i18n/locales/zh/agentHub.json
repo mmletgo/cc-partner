@@ -112,7 +112,7 @@
       "writeBlocked": "当前 Agent 暂不能写入原生文件。仍可编辑并保存 Hub 草稿。",
       "writeBlockedTargets": "至少一个目标 Agent 暂不能写入原生文件。公共槽仍可编辑并保存 Hub 草稿。",
       "errors": {
-        "emptySync": "没有可同步的内容。请先填写原文或三槽。",
+        "emptySync": "合成预览为空。请先填写并保存公共/适配/独有三槽，再写入原始文件。",
         "emptyOriginalAnalyze": "原始文件为空，无法分析拆解。",
         "emptyAdaptedAdapt": "当前 Agent 的适配槽为空，无法适配到其他 Agent。"
       }

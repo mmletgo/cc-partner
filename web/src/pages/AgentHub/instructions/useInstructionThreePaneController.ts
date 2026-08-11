@@ -3,12 +3,12 @@
  *
  * Business Logic（为什么需要）:
  *   按当前 agent×scope×device/project 加载原始文件到 ③，块/预览初始为空；
- *   显式 reparse / 同步 preview→apply 只写当前 agent。
+ *   「写入原始文件」= 三槽合成预览 → Agent 原生文件（CLAUDE.md / AGENTS.md 等）。
  *
  * Code Logic（做什么）:
  *   inspect workspace → initialThreePaneFromDisk；reparse/parseBlocksFromOriginal；
- *   resolveSyncContent → preview/apply user instruction plan（单 destination）；
- *   成功后 rescan；original baseline 自动 re-parse 一次。hooks 全在 early return 前。
+ *   requestSync 固定 blocks 基线：saveBlocks（若脏）→ preview plan → apply 写盘；
+ *   dual-dirty 对话框的 original 基线仅 chooseBaseline 使用。hooks 全在 early return 前。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,7 +41,6 @@ import {
   joinBlocksForTarget,
   normalizeInstructionBlocks,
   resolveAdaptedSlotText,
-  resolveSyncContent,
   updateBlock,
   updateOriginalText,
   type InstructionBlockDraft,
@@ -211,11 +210,6 @@ function errorCode(reason: unknown): string | null {
   if (!reason || typeof reason !== 'object') return null;
   const code = (reason as { code?: unknown }).code;
   return typeof code === 'string' ? code : null;
-}
-
-/** 比较原始正文与 canonical 投影时忽略换行格式与尾随空白差异。 */
-function normalizeInstructionContentForComparison(text: string): string {
-  return text.replace(/\r\n/g, '\n').trimEnd();
 }
 
 function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> {
@@ -1158,37 +1152,31 @@ export function useInstructionThreePaneController(
     t,
   ]);
 
+  /**
+   * Business Logic: 把「合成预览」写入当前 Agent 原生文件（如 CLAUDE.md / AGENTS.md）。
+   * Code Logic: 固定 blocks 基线——禁止 original 基线反写 Canonical；
+   *   有未保存三槽先 saveBlocks 推进 head，再 preview+apply 投影到原生路径。
+   *   本地三槽与 preview 皆空时拒绝（避免误把磁盘原文当写入源）。
+   */
   const requestSync = useCallback(async () => {
     if (directContextUnsupported) {
       setActionError(contextUnavailableCode);
       return;
     }
-    const resolved = resolveSyncContent(state, agent);
-    if (!resolved.ok) {
-      if (resolved.reason === 'dual_dirty_conflict') {
-        setDualDirtyOpen(true);
-        setActionError(null);
-        return;
-      }
+    const composed =
+      state.previewText.trim().length > 0
+        ? state.previewText
+        : joinBlocksForTarget(state.blocks, agent);
+    if (composed.trim().length === 0 && state.blocks.length === 0) {
       setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
       return;
     }
-    // original 基线必须整篇变成唯一 shared canonical block；不能只把正文留在写盘请求。
-    const canonicalContent = joinBlocksForTarget(state.blocks, agent);
-    const originalNeedsCanonicalSave =
-      resolved.baseline === 'original' &&
-      (state.originalDirty ||
-        state.blocks.length === 0 ||
-        normalizeInstructionContentForComparison(canonicalContent) !==
-          normalizeInstructionContentForComparison(resolved.content));
-    const originalBlocks = originalNeedsCanonicalSave
-      ? blocksFromOriginalContent(resolved.content)
-      : undefined;
-    // 先保存 canonical head，再生成绑定 hash/revision 的一次性 plan 并立即原子应用。
+    // 先保存 canonical head（若已 clean 则 no-op 复用当前 workspace），
+    // 再生成绑定 hash/revision 的一次性 plan 并立即原子应用（投影 head → 原生文件）。
     const editVersionBeforeSave = editVersionRef.current;
-    const refreshed = await saveBlocks(originalBlocks);
+    const refreshed = await saveBlocks();
     if (!refreshed || editVersionBeforeSave !== editVersionRef.current) return;
-    const preparedPlan = await runPreviewWithBaseline(resolved.baseline, refreshed);
+    const preparedPlan = await runPreviewWithBaseline('blocks', refreshed);
     if (!preparedPlan || editVersionBeforeSave !== editVersionRef.current) return;
     await applyPlan(preparedPlan);
   }, [
@@ -1198,7 +1186,8 @@ export function useInstructionThreePaneController(
     directContextUnsupported,
     runPreviewWithBaseline,
     saveBlocks,
-    state,
+    state.blocks,
+    state.previewText,
     t,
   ]);
 

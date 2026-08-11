@@ -112,7 +112,7 @@
       "writeBlocked": "The current agent cannot write its native file yet. You can still edit and save the Hub draft.",
       "writeBlockedTargets": "At least one target agent cannot write its native file yet. You can still edit and save the shared Hub draft.",
       "errors": {
-        "emptySync": "Nothing to sync. Add original content or fill the three slots first.",
+        "emptySync": "Composed preview is empty. Fill the common/adapted/exclusive slots first, then write to the native file.",
         "emptyOriginalAnalyze": "The original file is empty, so analyze & split cannot run.",
         "emptyAdaptedAdapt": "The current agent’s adapted slot is empty, so adapt-to-others cannot run."
       }

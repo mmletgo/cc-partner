@@ -411,20 +411,36 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.state.blocksDirty).toBe(true);
   });
 
-  test('original baseline saves the edited document as one shared canonical block', async () => {
-    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
-    apiMocks.saveUserInstructionBlocks.mockResolvedValue({
-      ...workspaceFixture().canonical,
-      headRevisionId: 'rev-2',
-      blocks: [],
-    });
+  test('original-only edits do not reverse-write native text into canonical via requestSync', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(
+      workspaceFixture({
+        canonical: {
+          ...workspaceFixture().canonical!,
+          blocks: [
+            {
+              id: 'shared-1',
+              mode: 'shared',
+              commonMarkdown: '## Canonical body\n\nfrom hub\n',
+              variants: null,
+              headingPath: null,
+              sourceTarget: null,
+              needsAdaptation: false,
+            },
+          ],
+        },
+      }),
+    );
     apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
+    apiMocks.applyUserInstructionPlan.mockResolvedValue(applyFixture());
     const { result } = renderHook(() =>
-      useInstructionThreePaneController({ context: baseContext, t }),
+      useInstructionThreePaneController({
+        context: { ...baseContext, instructionLane: 'exclusive' },
+        t,
+      }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    const edited = '# Edited whole document\n\nKeep every section together.\n';
+    const edited = '# Edited native document\n\nshould not become canonical.\n';
     act(() => {
       result.current.updateOriginal(edited);
     });
@@ -432,17 +448,10 @@ describe('useInstructionThreePaneController', () => {
       await result.current.requestSync();
     });
 
-    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledTimes(1);
-    const request = apiMocks.saveUserInstructionBlocks.mock.calls[0]?.[0] as {
-      blocks: Array<{ mode: string; commonMarkdown: string; variants: unknown }>;
-    };
-    expect(request.blocks).toHaveLength(1);
-    expect(request.blocks[0]).toMatchObject({
-      mode: 'shared',
-      commonMarkdown: edited.trimEnd(),
-      variants: null,
-    });
+    // requestSync 固定 blocks 基线：不把原始栏正文 save 成 shared block。
+    expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
     expect(apiMocks.previewUserInstructionUpdate).toHaveBeenCalledTimes(1);
+    expect(apiMocks.applyUserInstructionPlan).toHaveBeenCalledTimes(1);
   });
 
   test('clean hydrated canonical blocks reuse the current head without an empty save', async () => {
@@ -465,6 +474,7 @@ describe('useInstructionThreePaneController', () => {
       }),
     );
     apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
+    apiMocks.applyUserInstructionPlan.mockResolvedValue(applyFixture());
     const { result } = renderHook(() =>
       useInstructionThreePaneController({ context: baseContext, t }),
     );
@@ -476,6 +486,31 @@ describe('useInstructionThreePaneController', () => {
 
     expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
     expect(apiMocks.previewUserInstructionUpdate).toHaveBeenCalledTimes(1);
+    expect(apiMocks.applyUserInstructionPlan).toHaveBeenCalledTimes(1);
+  });
+
+  test('requestSync rejects when composed preview is empty', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({
+        context: { ...baseContext, instructionLane: 'exclusive' },
+        t,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // 初始块空、preview 空；即使 original 有内容也不能当写入源。
+    expect(result.current.state.blocks).toEqual([]);
+    expect(result.current.state.previewText).toBe('');
+
+    await act(async () => {
+      await result.current.requestSync();
+    });
+
+    expect(result.current.actionError).toBe(
+      'agentHub:instructions.threePane.errors.emptySync',
+    );
+    expect(apiMocks.previewUserInstructionUpdate).not.toHaveBeenCalled();
+    expect(apiMocks.applyUserInstructionPlan).not.toHaveBeenCalled();
   });
 
   test('write blocked when target write is not supported', async () => {
@@ -503,7 +538,25 @@ describe('useInstructionThreePaneController', () => {
   });
 
   test('common lane prepares all destinations and writes them without a duplicate preview dialog', async () => {
-    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    // requestSync 固定 blocks 基线：需要可合成的三槽 head，不能只靠原始文件正文。
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(
+      workspaceFixture({
+        canonical: {
+          ...workspaceFixture().canonical!,
+          blocks: [
+            {
+              id: 'shared-1',
+              mode: 'shared',
+              commonMarkdown: SAMPLE_MARKDOWN,
+              variants: null,
+              headingPath: null,
+              sourceTarget: null,
+              needsAdaptation: false,
+            },
+          ],
+        },
+      }),
+    );
     apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
     apiMocks.applyUserInstructionPlan.mockResolvedValue(applyFixture());
 
@@ -529,36 +582,55 @@ describe('useInstructionThreePaneController', () => {
     expect(apiMocks.inspectUserInstructionWorkspace.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  test('successful sync with original baseline auto re-parses blocks once', async () => {
-    const afterWrite = workspaceFixture({
+  test('successful blocks-baseline sync keeps hydrated slots without original reverse-parse', async () => {
+    const hydrated = workspaceFixture({
       canonical: {
-        assetId: 'asset-user-instruction',
-        displayName: 'User instructions',
-        headRevisionId: 'rev-2',
-        commonContent: SAMPLE_MARKDOWN,
-        targetExtensions: {},
-        deleted: false,
-        contentTruncated: false,
+        ...workspaceFixture().canonical!,
+        blocks: [
+          {
+            id: 'shared-1',
+            mode: 'shared',
+            commonMarkdown: SAMPLE_MARKDOWN,
+            variants: null,
+            headingPath: null,
+            sourceTarget: null,
+            needsAdaptation: false,
+          },
+        ],
       },
     });
+    const afterWrite = {
+      ...hydrated,
+      inventorySnapshotHash: 'inventory-2',
+      canonical: {
+        ...hydrated.canonical!,
+        headRevisionId: 'rev-2',
+      },
+    };
     apiMocks.inspectUserInstructionWorkspace
-      .mockResolvedValueOnce(workspaceFixture())
+      .mockResolvedValueOnce(hydrated)
       .mockResolvedValue(afterWrite);
     apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
     apiMocks.applyUserInstructionPlan.mockResolvedValue(applyFixture());
 
     const { result } = renderHook(() =>
-      useInstructionThreePaneController({ context: baseContext, t }),
+      useInstructionThreePaneController({
+        context: { ...baseContext, instructionLane: 'exclusive' },
+        t,
+      }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    // 初始块空
-    expect(result.current.state.blocks).toEqual([]);
+    expect(result.current.state.blocks).toHaveLength(1);
 
     await act(async () => {
       await result.current.requestSync();
     });
 
-    await waitFor(() => expect(result.current.state.blocks.length).toBe(1));
+    await waitFor(() =>
+      expect(apiMocks.applyUserInstructionPlan).toHaveBeenCalledTimes(1),
+    );
+    // blocks 基线写盘后 rescan hydrate canonical 块，不再从原文 auto re-parse。
+    expect(result.current.state.blocks).toHaveLength(1);
     expect(result.current.state.blocks[0]?.mode).toBe('shared');
   });
 
