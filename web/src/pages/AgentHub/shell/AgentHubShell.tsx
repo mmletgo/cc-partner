@@ -34,7 +34,8 @@ const AGENTS: AgentTarget[] = ['claude', 'codex', 'opencode'];
 const SCOPES: AgentHubScope[] = ['user', 'project'];
 const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'];
 const ASSET_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
-const LANES: InstructionLane[] = ['common', 'adapted', 'exclusive'];
+/** 提示词槽顺序：独有 → 适配 → 公共。 */
+const LANES: InstructionLane[] = ['exclusive', 'adapted', 'common'];
 const PANEL_ID = 'agent-hub-active-panel';
 
 export type AgentHubShellTabCounts = Partial<
@@ -44,10 +45,8 @@ export type AgentHubShellTabCounts = Partial<
 export interface AgentHubShellActions {
   onPull: () => void;
   onPush: () => void;
-  onAdapt: () => void;
   pullDisabledReason?: string | null;
   pushDisabledReason?: string | null;
-  adaptDisabledReason?: string | null;
 }
 
 /** 壳层远端设备摘要。 */
@@ -124,13 +123,6 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
     actions.pullDisabledReason ?? contextDisabledReason;
   const pushDisabledReason =
     actions.pushDisabledReason ?? contextDisabledReason;
-  const adaptDisabledReason =
-    actions.adaptDisabledReason ??
-    (capability === 'remote'
-      ? t('agentHub:shell.adaptLocalOnly')
-      : capability === 'project'
-        ? t('agentHub:shell.adaptProjectUnavailable')
-        : contextDisabledReason);
 
   function handleTabChange(tab: AgentHubTab): void {
     onContextChange(
@@ -213,15 +205,6 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             >
               {t('agentHub:shell.push')}
             </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={Boolean(adaptDisabledReason)}
-              onClick={actions.onAdapt}
-              data-testid="agent-hub-action-adapt"
-            >
-              {t('agentHub:shell.adapt')}
-            </Button>
           </div>
         </div>
 
@@ -233,11 +216,6 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
         {pushDisabledReason ? (
           <p className={styles.adaptHint} data-testid="agent-hub-push-reason">
             {pushDisabledReason}
-          </p>
-        ) : null}
-        {adaptDisabledReason ? (
-          <p className={styles.adaptHint} data-testid="agent-hub-adapt-reason">
-            {adaptDisabledReason}
           </p>
         ) : null}
 

@@ -113,8 +113,7 @@ export function AgentHubView(props: AgentHubViewProps) {
       blocksTitle: t('agentHub:instructions.threePane.blocksTitle'),
       previewTitle: t('agentHub:instructions.threePane.previewTitle'),
       originalTitle: t('agentHub:instructions.threePane.originalTitle'),
-      reparseFromOriginal: t('agentHub:instructions.threePane.reparseFromOriginal'),
-      syncToNative: t('agentHub:instructions.threePane.syncToNative'),
+      analyzeDecompose: t('agentHub:instructions.threePane.analyzeDecompose'),
       emptyBlocks: t('agentHub:instructions.threePane.emptyBlocks'),
       emptyPreview: t('agentHub:instructions.threePane.emptyPreview'),
       emptyOriginal: t('agentHub:instructions.threePane.emptyOriginal'),
@@ -126,29 +125,25 @@ export function AgentHubView(props: AgentHubViewProps) {
       slotCommonHint: t('agentHub:instructions.threePane.slotCommonHint'),
       slotAdaptedHint: t('agentHub:instructions.threePane.slotAdaptedHint'),
       slotExclusiveHint: t('agentHub:instructions.threePane.slotExclusiveHint'),
-      adaptedCommonTitle: t('agentHub:instructions.threePane.adaptedCommonTitle'),
-      adaptedVariantTitle: t('agentHub:instructions.threePane.adaptedVariantTitle'),
-      adaptedCommonHint: t('agentHub:instructions.threePane.adaptedCommonHint'),
-      adaptedVariantHint: t('agentHub:instructions.threePane.adaptedVariantHint'),
       dualDirtyTitle: t('agentHub:instructions.threePane.dualDirtyTitle'),
       dualDirtyDescription: t('agentHub:instructions.threePane.dualDirtyDescription'),
       useBlocksBaseline: t('agentHub:instructions.threePane.useBlocksBaseline'),
       useOriginalBaseline: t('agentHub:instructions.threePane.useOriginalBaseline'),
       cancel: t('common:action.cancel'),
       blockBodyPlaceholder: t('agentHub:instructions.threePane.blockBodyPlaceholder'),
-      refresh: t('agentHub:instructions.threePane.refresh'),
       commonMarkdown: t('agentHub:instructions.threePane.commonMarkdown'),
       saveBlocks: t('agentHub:instructions.threePane.saveBlocks'),
+      adaptToOtherAgents: t('agentHub:instructions.threePane.adaptToOtherAgents'),
       unsavedDraft: t('agentHub:instructions.threePane.unsavedDraft'),
       canonicalDrift: t('agentHub:instructions.threePane.canonicalDrift'),
       sourceDrift: t('agentHub:instructions.threePane.sourceDrift'),
       originalReadOnly: t('agentHub:instructions.threePane.originalReadOnly'),
       discardAndReload: t('agentHub:instructions.threePane.discardAndReload'),
-      reparseConfirmTitle: t('agentHub:instructions.threePane.reparseConfirmTitle'),
-      reparseConfirmDescription: t(
-        'agentHub:instructions.threePane.reparseConfirmDescription',
+      analyzeConfirmTitle: t('agentHub:instructions.threePane.analyzeConfirmTitle'),
+      analyzeConfirmDescription: t(
+        'agentHub:instructions.threePane.analyzeConfirmDescription',
       ),
-      reparseConfirm: t('agentHub:instructions.threePane.reparseConfirm'),
+      analyzeConfirm: t('agentHub:instructions.threePane.analyzeConfirm'),
     }),
     [t],
   );
@@ -226,8 +221,8 @@ export function AgentHubView(props: AgentHubViewProps) {
   );
 
   /**
-   * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉；Adapt 写 adaptView URL。
-   * Code Logic: peer 设备上下文时禁用 Adapt（同机 only）。
+   * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉。
+   * Code Logic: 跨 Agent 适配入口改到适配页保存旁按钮，壳层不再提供。
    */
   const shellActions = useMemo(
     () => {
@@ -238,9 +233,6 @@ export function AgentHubView(props: AgentHubViewProps) {
       return {
         onPull: openPortablePull,
         onPush: openLanPushDialog,
-        onAdapt: () => {
-          onContextChange({ adaptView: true });
-        },
         pullDisabledReason: null,
         pushDisabledReason: remoteProject
           ? t('agentHub:shell.remoteProjectTaskUnavailable')
@@ -250,13 +242,9 @@ export function AgentHubView(props: AgentHubViewProps) {
                 preview.optedIn !== true)
             ? t('agentHub:shell.projectPushRequiresPreview')
             : null,
-        adaptDisabledReason:
-          hubContext.scope !== 'user' || hubContext.deviceId !== null
-            ? t('agentHub:shell.adaptLocalOnly')
-            : null,
       };
     },
-    [hubContext, onContextChange, openLanPushDialog, openPortablePull, preview?.hubProjectId, t],
+    [hubContext, openLanPushDialog, openPortablePull, preview?.hubProjectId, preview?.optedIn, previewProjectId, t],
   );
 
   /**
@@ -369,10 +357,10 @@ export function AgentHubView(props: AgentHubViewProps) {
             writeBlocked={instructionThreePane.writeBlocked}
             writeBlockedReason={instructionThreePane.writeBlockedReason}
             dualDirtyOpen={instructionThreePane.dualDirtyOpen}
-            reparseConfirmOpen={instructionThreePane.reparseConfirmOpen}
-            onReparse={instructionThreePane.reparseFromOriginal}
-            onSync={() => {
-              void instructionThreePane.requestSync();
+            analyzeConfirmOpen={instructionThreePane.analyzeConfirmOpen}
+            onAnalyzeDecompose={instructionThreePane.analyzeDecompose}
+            onAdaptToOtherAgents={() => {
+              void instructionThreePane.adaptToOtherAgents();
             }}
             onSaveBlocks={() => {
               void instructionThreePane.saveBlocks();
@@ -380,20 +368,14 @@ export function AgentHubView(props: AgentHubViewProps) {
             onRetry={() => {
               void instructionThreePane.refresh();
             }}
-            onRefresh={() => {
-              void instructionThreePane.refresh();
-            }}
             onDiscardAndReload={() => {
               void instructionThreePane.discardAndReload();
             }}
-            onOriginalChange={instructionThreePane.updateOriginal}
             onSlotTextChange={instructionThreePane.editCurrentSlot}
-            onAdaptedCommonChange={instructionThreePane.editAdaptedCommon}
-            onAdaptedVariantChange={instructionThreePane.editAdaptedVariant}
             onChooseBaseline={instructionThreePane.chooseBaseline}
             onCancelDualDirty={instructionThreePane.cancelDualDirty}
-            onConfirmReparse={instructionThreePane.confirmReparseFromOriginal}
-            onCancelReparse={instructionThreePane.cancelReparseFromOriginal}
+            onConfirmAnalyze={instructionThreePane.confirmAnalyzeDecompose}
+            onCancelAnalyze={instructionThreePane.cancelAnalyzeDecompose}
           />
         ) : null}
 

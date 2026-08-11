@@ -394,7 +394,7 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.state.originalDirty).toBe(true);
   });
 
-  test('reparse fills blocks from original', async () => {
+  test('editCurrentSlot fills shared slot from typed content', async () => {
     apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
     const { result } = renderHook(() =>
       useInstructionThreePaneController({ context: baseContext, t }),
@@ -402,7 +402,7 @@ describe('useInstructionThreePaneController', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     act(() => {
-      result.current.reparseFromOriginal();
+      result.current.editCurrentSlot('Always use TypeScript');
     });
 
     expect(result.current.state.blocks.length).toBe(1);
@@ -584,7 +584,7 @@ describe('useInstructionThreePaneController', () => {
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledTimes(1);
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
 
     await act(async () => result.current.refresh());
     expect(result.current.state.externalDrift).toBe(false);
@@ -619,7 +619,7 @@ describe('useInstructionThreePaneController', () => {
       useInstructionThreePaneController({ context: baseContext, t }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
     await act(async () => result.current.refresh());
     expect(result.current.state.externalDrift).toBe(true);
     await act(async () => {
@@ -657,7 +657,7 @@ describe('useInstructionThreePaneController', () => {
       useInstructionThreePaneController({ context: baseContext, t }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
 
     let savePromise!: Promise<boolean>;
     act(() => {
@@ -689,7 +689,7 @@ describe('useInstructionThreePaneController', () => {
       useInstructionThreePaneController({ context: baseContext, t }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
 
     let syncPromise!: Promise<void>;
     act(() => {
@@ -723,7 +723,7 @@ describe('useInstructionThreePaneController', () => {
       useInstructionThreePaneController({ context: baseContext, t }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
 
     await act(async () => result.current.requestSync());
 
@@ -747,7 +747,7 @@ describe('useInstructionThreePaneController', () => {
       useInstructionThreePaneController({ context: baseContext, t }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
     await act(async () => {
       expect(await result.current.saveBlocks()).toBe(false);
     });
@@ -774,7 +774,7 @@ describe('useInstructionThreePaneController', () => {
       { initialProps: { context: baseContext } },
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    act(() => result.current.reparseFromOriginal());
+    act(() => result.current.editCurrentSlot('seed draft'));
     rerender({ context: { ...baseContext, agent: 'codex' } });
     expect(result.current.error).toBe('AGENT_HUB_CONTEXT_CHANGE_HAS_UNSAVED_DRAFT');
     expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledOnce();

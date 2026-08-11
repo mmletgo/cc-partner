@@ -29,6 +29,8 @@ import {
 } from '../context/agentHubContext';
 import {
   addBlock,
+  appendAdaptedVariants,
+  appendAnalyzedParts,
   blocksFromOriginalContent,
   dtoToDraft,
   draftToDto,
@@ -38,7 +40,7 @@ import {
   initialThreePaneFromDisk,
   joinBlocksForTarget,
   normalizeInstructionBlocks,
-  parseBlocksFromOriginal,
+  resolveAdaptedSlotText,
   resolveSyncContent,
   updateBlock,
   updateOriginalText,
@@ -91,14 +93,17 @@ export interface UseInstructionThreePaneControllerResult {
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
-  /** 重新解析将替换现有三槽草稿时的显式确认。 */
-  reparseConfirmOpen: boolean;
+  /** 分析拆解将追加到现有三槽时的显式确认（可选）。 */
+  analyzeConfirmOpen: boolean;
   previewOpen: boolean;
   plan: UserInstructionPlanDto | null;
   applyResult: UserInstructionApplyResultDto | null;
-  reparseFromOriginal: () => void;
-  confirmReparseFromOriginal: () => void;
-  cancelReparseFromOriginal: () => void;
+  /** 独有页：调用 Claude 把原始文件拆解并追加到三槽。 */
+  analyzeDecompose: () => void;
+  confirmAnalyzeDecompose: () => void;
+  cancelAnalyzeDecompose: () => void;
+  /** 适配页：把当前 agent 适配正文改写并追加到其他 agent 适配槽。 */
+  adaptToOtherAgents: () => Promise<void>;
   requestSync: () => Promise<void>;
   applyPlan: () => Promise<void>;
   /** 保存块文档到 canonical head（独立于 CLI 写入门禁）。 */
@@ -110,18 +115,11 @@ export interface UseInstructionThreePaneControllerResult {
   updateOriginal: (text: string) => void;
   changeBlock: (id: string, patch: Partial<Omit<InstructionBlockDraft, 'id'>>) => void;
   appendBlock: () => void;
-  /** 按当前 instructionLane 编辑对应三槽正文（公共/独有；适配请用专用 API）。 */
+  /**
+   * 按当前 instructionLane 编辑对应三槽正文。
+   * 公共写 shared.common；适配写 adapted.variants[agent]；独有写 targetOnly.variants[agent]。
+   */
   editCurrentSlot: (text: string) => void;
-  /**
-   * 适配槽：编辑 Claude 公共底稿（adapted.commonMarkdown）。
-   * 与 agent 选择无关；权威为 Claude Code。
-   */
-  editAdaptedCommon: (text: string) => void;
-  /**
-   * 适配槽：编辑当前 agent 变体（adapted.variants[agent]）。
-   * agent=claude 时不应调用（视图隐藏变体列）。
-   */
-  editAdaptedVariant: (text: string) => void;
   chooseBaseline: (baseline: SyncBaseline) => void;
   cancelDualDirty: () => void;
   dismissApplyResult: () => void;
@@ -290,7 +288,7 @@ export function useInstructionThreePaneController(
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [dualDirtyOpen, setDualDirtyOpen] = useState(false);
-  const [reparseConfirmOpen, setReparseConfirmOpen] = useState(false);
+  const [analyzeConfirmOpen, setAnalyzeConfirmOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [plan, setPlan] = useState<UserInstructionPlanDto | null>(null);
   const [applyResult, setApplyResult] = useState<UserInstructionApplyResultDto | null>(null);
@@ -358,7 +356,7 @@ export function useInstructionThreePaneController(
     setPreviewOpen(false);
     setApplyResult(null);
     setDualDirtyOpen(false);
-    setReparseConfirmOpen(false);
+    setAnalyzeConfirmOpen(false);
     setActionError(null);
     setError(null);
   }, []);
@@ -489,7 +487,7 @@ export function useInstructionThreePaneController(
       setPreviewOpen(false);
       setApplyResult(null);
       setDualDirtyOpen(false);
-      setReparseConfirmOpen(false);
+      setAnalyzeConfirmOpen(false);
       blockedContextKeyRef.current = null;
       const empty = initialThreePaneFromDisk(null, '');
       stateRef.current = empty;
@@ -626,24 +624,115 @@ export function useInstructionThreePaneController(
     [],
   );
 
-  const reparseFromOriginal = useCallback(() => {
-    if (stateRef.current.blocksDirty) {
-      setReparseConfirmOpen(true);
+  /**
+   * Business Logic: 独有页分析拆解 — 有未保存三槽时先确认，再调 Claude 拆解并追加。
+   * Code Logic: 空原文拒绝；busy 时 short-circuit。
+   */
+  const runAnalyzeDecompose = useCallback(async () => {
+    const current = stateRef.current;
+    const original = current.originalText.trim();
+    if (!original) {
+      setActionError(t('agentHub:instructions.threePane.errors.emptyOriginalAnalyze'));
       return;
     }
-    updateDraft((current) => parseBlocksFromOriginal(current, agent));
+    if (actionBusy) return;
+    const generation = contextGenerationRef.current;
+    const actionSeq = ++actionSeqRef.current;
+    setActionBusy(true);
     setActionError(null);
-  }, [agent, updateDraft]);
+    setAnalyzeConfirmOpen(false);
+    try {
+      const parts = await agentHubApi.analyzeInstructionOriginal({
+        originalMarkdown: current.originalText,
+        agent,
+        ...requestContext,
+      });
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current ||
+        actionSeq !== actionSeqRef.current
+      ) {
+        return;
+      }
+      updateDraft((draft) => appendAnalyzedParts(draft, parts, agent));
+    } catch (reason) {
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current ||
+        actionSeq !== actionSeqRef.current
+      ) {
+        return;
+      }
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (mountedRef.current && actionSeq === actionSeqRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }, [actionBusy, agent, requestContext, t, updateDraft]);
 
-  const confirmReparseFromOriginal = useCallback(() => {
-    updateDraft((current) => parseBlocksFromOriginal(current, agent));
-    setReparseConfirmOpen(false);
-    setActionError(null);
-  }, [agent, updateDraft]);
+  const analyzeDecompose = useCallback(() => {
+    if (stateRef.current.blocksDirty) {
+      setAnalyzeConfirmOpen(true);
+      return;
+    }
+    void runAnalyzeDecompose();
+  }, [runAnalyzeDecompose]);
 
-  const cancelReparseFromOriginal = useCallback(() => {
-    setReparseConfirmOpen(false);
+  const confirmAnalyzeDecompose = useCallback(() => {
+    void runAnalyzeDecompose();
+  }, [runAnalyzeDecompose]);
+
+  const cancelAnalyzeDecompose = useCallback(() => {
+    setAnalyzeConfirmOpen(false);
   }, []);
+
+  /**
+   * Business Logic: 适配页 — 把当前 agent 适配正文改写并追加到所有其他 agent 适配槽。
+   * Code Logic: 读当前 adapted 槽 → Claude adapt → appendAdaptedVariants。
+   */
+  const adaptToOtherAgents = useCallback(async () => {
+    const current = stateRef.current;
+    const adaptedBlock = findBlockByMode(current.blocks, 'adapted');
+    const sourceText = resolveAdaptedSlotText(adaptedBlock, agent).trim();
+    if (!sourceText) {
+      setActionError(t('agentHub:instructions.threePane.errors.emptyAdaptedAdapt'));
+      return;
+    }
+    if (actionBusy) return;
+    const generation = contextGenerationRef.current;
+    const actionSeq = ++actionSeqRef.current;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const result = await agentHubApi.adaptInstructionToOtherAgents({
+        sourceAgent: agent,
+        adaptedMarkdown: sourceText,
+        ...requestContext,
+      });
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current ||
+        actionSeq !== actionSeqRef.current
+      ) {
+        return;
+      }
+      updateDraft((draft) => appendAdaptedVariants(draft, result.variants, agent));
+    } catch (reason) {
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current ||
+        actionSeq !== actionSeqRef.current
+      ) {
+        return;
+      }
+      setActionError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (mountedRef.current && actionSeq === actionSeqRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }, [actionBusy, agent, requestContext, t, updateDraft]);
 
   const updateOriginal = useCallback((text: string) => {
     updateDraft((current) => updateOriginalText(current, text));
@@ -679,9 +768,8 @@ export function useInstructionThreePaneController(
   }, [agent, updateDraft]);
 
   /**
-   * Business Logic: 壳层 lane 驱动的三槽编辑（公共 / 独有主路径）。
-   * Code Logic: ensure mode 块 → 公共写 common；独有写 variant[agent]；
-   *   适配 lane 兼容路径写 common（Claude 底稿），完整双列编辑见 editAdapted*。
+   * Business Logic: 壳层 lane 驱动的三槽编辑。
+   * Code Logic: ensure mode → 公共写 common；适配/独有写 variants[agent]。
    */
   const editCurrentSlot = useCallback(
     (text: string) => {
@@ -690,8 +778,7 @@ export function useInstructionThreePaneController(
         const next = ensureModeBlock(current, mode, agent);
         const block = findBlockByMode(next.blocks, mode);
         if (!block) return next;
-        if (mode === 'shared' || mode === 'adapted') {
-          // 适配兼容路径：写 commonMarkdown（Claude 公共底稿）
+        if (mode === 'shared') {
           return updateBlock(next, block.id, { commonMarkdown: text }, agent);
         }
         return updateBlock(
@@ -699,7 +786,7 @@ export function useInstructionThreePaneController(
           block.id,
           {
             variants: { ...block.variants, [agent]: text },
-            sourceTarget: block.sourceTarget ?? agent,
+            sourceTarget: mode === 'targetOnly' ? (block.sourceTarget ?? agent) : block.sourceTarget,
           },
           agent,
         );
@@ -707,47 +794,6 @@ export function useInstructionThreePaneController(
       setActionError(null);
     },
     [agent, context.instructionLane, updateDraft],
-  );
-
-  /**
-   * Business Logic: 适配槽公共底稿以 Claude Code 为权威。
-   * Code Logic: ensure adapted 块 → 写 commonMarkdown；preview 仍按当前 agent 合成。
-   */
-  const editAdaptedCommon = useCallback(
-    (text: string) => {
-      updateDraft((current) => {
-        const next = ensureModeBlock(current, 'adapted', agent);
-        const block = findBlockByMode(next.blocks, 'adapted');
-        if (!block) return next;
-        return updateBlock(next, block.id, { commonMarkdown: text }, agent);
-      });
-      setActionError(null);
-    },
-    [agent, updateDraft],
-  );
-
-  /**
-   * Business Logic: 适配槽为非 Claude agent 写入变体。
-   * Code Logic: ensure adapted → variants[agent]=text；空串保留键表示「显式空变体」。
-   */
-  const editAdaptedVariant = useCallback(
-    (text: string) => {
-      updateDraft((current) => {
-        const next = ensureModeBlock(current, 'adapted', agent);
-        const block = findBlockByMode(next.blocks, 'adapted');
-        if (!block) return next;
-        return updateBlock(
-          next,
-          block.id,
-          {
-            variants: { ...block.variants, [agent]: text },
-          },
-          agent,
-        );
-      });
-      setActionError(null);
-    },
-    [agent, updateDraft],
   );
 
   /**
@@ -1191,7 +1237,7 @@ export function useInstructionThreePaneController(
     setPreviewOpen(false);
     setApplyResult(null);
     setDualDirtyOpen(false);
-    setReparseConfirmOpen(false);
+    setAnalyzeConfirmOpen(false);
     // preserveDirty=false 只在成功读取后替换；loadWorkspace 的失败分支保留旧草稿。
     await loadWorkspace(true, { preserveDirty: false });
   }, [loadWorkspace]);
@@ -1212,13 +1258,14 @@ export function useInstructionThreePaneController(
     writeBlocked,
     writeBlockedReason,
     dualDirtyOpen,
-    reparseConfirmOpen,
+    analyzeConfirmOpen,
     previewOpen,
     plan,
     applyResult,
-    reparseFromOriginal,
-    confirmReparseFromOriginal,
-    cancelReparseFromOriginal,
+    analyzeDecompose,
+    confirmAnalyzeDecompose,
+    cancelAnalyzeDecompose,
+    adaptToOtherAgents,
     requestSync,
     applyPlan,
     saveBlocks: async () => {
@@ -1232,8 +1279,6 @@ export function useInstructionThreePaneController(
     changeBlock,
     appendBlock,
     editCurrentSlot,
-    editAdaptedCommon,
-    editAdaptedVariant,
     chooseBaseline,
     cancelDualDirty,
     dismissApplyResult,

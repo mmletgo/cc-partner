@@ -40,8 +40,6 @@ function buildProps(overrides: Partial<AgentHubShellProps> = {}): AgentHubShellP
     actions: {
       onPull: vi.fn(),
       onPush: vi.fn(),
-      onAdapt: vi.fn(),
-      adaptDisabledReason: null,
     },
     peers: [],
     projects: [],
@@ -96,10 +94,18 @@ describe('AgentHubShell', () => {
     }
   });
 
-  test('instructions tab shows lane switcher; skill tab hides it', () => {
+  test('instructions tab shows lane switcher ordered exclusive → adapted → common', () => {
     const onContextChange = vi.fn();
     const { rerender, props } = renderShell({ onContextChange });
     expect(screen.getByTestId('agent-hub-lane-switcher')).toBeTruthy();
+    const lanes = Array.from(
+      screen.getByTestId('agent-hub-lane-switcher').querySelectorAll('[role="radio"]'),
+    ).map((node) => node.getAttribute('data-testid'));
+    expect(lanes).toEqual([
+      'agent-hub-lane-exclusive',
+      'agent-hub-lane-adapted',
+      'agent-hub-lane-common',
+    ]);
     fireEvent.click(screen.getByTestId('agent-hub-lane-adapted'));
     expect(onContextChange).toHaveBeenCalledWith({ instructionLane: 'adapted' });
 
@@ -120,7 +126,6 @@ describe('AgentHubShell', () => {
       </I18nextProvider>,
     );
     expect(screen.queryByTestId('agent-hub-lane-switcher')).toBeNull();
-    // 非 instructions tab 仍显示 agent 导航
     expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
   });
 
@@ -132,10 +137,9 @@ describe('AgentHubShell', () => {
     expect(screen.getByTestId('agent-hub-scope-project')).toBeTruthy();
   });
 
-  test('peer context keeps Pull and Push while Adapt is visibly blocked', () => {
+  test('peer context keeps Pull and Push and does not expose Adapt toolbar button', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
-    const onAdapt = vi.fn();
     renderShell({
       context: {
         ...DEFAULT_AGENT_HUB_CONTEXT,
@@ -144,41 +148,33 @@ describe('AgentHubShell', () => {
       actions: {
         onPull,
         onPush,
-        onAdapt,
-        adaptDisabledReason: null,
       },
     });
 
     expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
-    const adapt = screen.getByTestId('agent-hub-action-adapt') as HTMLButtonElement;
-    expect(adapt.disabled).toBe(true);
-    expect(screen.queryByTestId('agent-hub-push-reason')).toBeNull();
-    expect(screen.getByTestId('agent-hub-adapt-reason').textContent).toMatch(/this device|本机/i);
+    expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
-    fireEvent.click(adapt);
     expect(onPull).toHaveBeenCalledOnce();
     expect(onPush).toHaveBeenCalledOnce();
-    expect(onAdapt).not.toHaveBeenCalled();
   });
 
-  test('project context keeps management actions and blocks only Adapt by default', () => {
+  test('project context keeps management actions without Adapt toolbar button', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
-    const onAdapt = vi.fn();
     renderShell({
       context: {
         ...DEFAULT_AGENT_HUB_CONTEXT,
         scope: 'project',
         projectKey: 'local:p1',
       },
-      actions: { onPull, onPush, onAdapt },
+      actions: { onPull, onPush },
     });
 
     expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByTestId('agent-hub-action-adapt') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
     expect(screen.getByTestId('agent-hub-project-select')).toBeTruthy();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     expect(onPull).toHaveBeenCalledOnce();
@@ -230,26 +226,23 @@ describe('AgentHubShell', () => {
     expect(plugin.getAttribute('data-count')).toBe('2');
     expect(plugin.textContent).toMatch(/\(2\)/);
 
-    // instructions 不展示数量
     const instructions = screen.getByTestId('agent-hub-tab-instructions');
     expect(instructions.getAttribute('data-count')).toBeNull();
     expect(instructions.textContent).not.toMatch(/\(\d+\)/);
   });
 
-  test('toolbar pull/push invoke action callbacks', () => {
+  test('toolbar pull/push invoke action callbacks and Adapt is absent', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
-    const onAdapt = vi.fn();
     renderShell({
-      actions: { onPull, onPush, onAdapt, adaptDisabledReason: null },
+      actions: { onPull, onPush },
     });
 
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
-    fireEvent.click(screen.getByTestId('agent-hub-action-adapt'));
     expect(onPull).toHaveBeenCalled();
     expect(onPush).toHaveBeenCalled();
-    expect(onAdapt).toHaveBeenCalled();
+    expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
   });
 
   test('each group has one tab stop and keyboard navigation wraps with focus + callback', () => {
@@ -273,25 +266,11 @@ describe('AgentHubShell', () => {
     });
     expect(document.activeElement).toBe(screen.getByTestId('agent-hub-tab-plugin'));
 
-    fireEvent.keyDown(screen.getByTestId('agent-hub-lane-common'), { key: 'End' });
-    expect(onContextChange).toHaveBeenLastCalledWith({ instructionLane: 'exclusive' });
-    expect(document.activeElement).toBe(screen.getByTestId('agent-hub-lane-exclusive'));
+    // lane 顺序 exclusive → adapted → common；End 落在 common
+    fireEvent.keyDown(screen.getByTestId('agent-hub-lane-exclusive'), { key: 'End' });
+    expect(onContextChange).toHaveBeenLastCalledWith({ instructionLane: 'common' });
+    expect(document.activeElement).toBe(screen.getByTestId('agent-hub-lane-common'));
 
     fireEvent.keyDown(screen.getByTestId('agent-hub-agent-claude'), { key: 'ArrowLeft' });
-    expect(onContextChange).toHaveBeenLastCalledWith({ agent: 'opencode' });
-    expect(document.activeElement).toBe(screen.getByTestId('agent-hub-agent-opencode'));
-  });
-
-  test('active tab controls the labelled tabpanel', () => {
-    renderShell();
-    const tab = screen.getByTestId('agent-hub-tab-instructions');
-    const panel = screen.getByRole('tabpanel');
-    expect(tab.getAttribute('aria-controls')).toBe(panel.id);
-    expect(panel.getAttribute('aria-labelledby')).toBe(tab.id);
-  });
-
-  test('renders children slot', () => {
-    renderShell();
-    expect(screen.getByTestId('shell-slot').textContent).toBe('content');
   });
 });

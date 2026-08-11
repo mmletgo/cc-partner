@@ -681,7 +681,7 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
 });
 
 test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
-  test('common single / adapted dual / exclusive three-pane with reparse', async ({
+  test('common single / adapted single / exclusive three-pane with analyze', async ({
     page,
     backendHarness,
   }) => {
@@ -693,63 +693,57 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
     await expect(page.getByTestId('instruction-three-pane')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
 
-    // 公共槽：仅单列公共编辑；公共内容与 Agent 无关，因此隐藏 Agent context。
+    // lane 顺序：独有 → 适配 → 公共
+    const laneOrder = await page
+      .getByTestId('agent-hub-lane-switcher')
+      .locator('[role="radio"]')
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-testid')));
+    expect(laneOrder).toEqual([
+      'agent-hub-lane-exclusive',
+      'agent-hub-lane-adapted',
+      'agent-hub-lane-common',
+    ]);
+
+    // 默认公共槽：单列；隐藏 Agent 与 rescan/sync。
     await expect(page.getByTestId('instruction-panes-common')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
     await expect(page.getByTestId('instruction-slot-textarea')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-preview')).toHaveCount(0);
     await expect(page.getByTestId('instruction-pane-original')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-save-blocks')).toBeVisible();
+    await expect(page.getByTestId('instruction-sync-to-native')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-rescan')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-action-adapt')).toHaveCount(0);
 
-    // 公共槽直接覆盖所有当前可写 Agent：页面已完成内容核对，点击后直接原子写入。
-    await expect(page.getByTestId('instruction-sync-to-native')).toBeEnabled();
-    await expect(page.getByTestId('instruction-sync-to-native')).toHaveText('写入原始文件');
-    await page.getByTestId('instruction-sync-to-native').click();
-    await expect(page.getByTestId('user-instruction-preview-dialog')).toHaveCount(0);
-    await expect(page.getByTestId('instruction-three-pane-apply-result')).toBeVisible();
-
-    // 适配槽 + Claude：仅公共底稿单列
+    // 适配槽：当前 agent 单列 + 适配到其他 agent 按钮
     await page.getByTestId('agent-hub-lane-adapted').click();
     await expect(page).toHaveURL(/lane=adapted/);
     await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
     await expect(page.getByTestId('instruction-panes-adapted')).toBeVisible();
-    await expect(page.getByTestId('instruction-pane-adapted-common')).toBeVisible();
-    await expect(page.getByTestId('instruction-pane-adapted-variant')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-adapted-textarea')).toBeVisible();
+    await expect(page.getByTestId('instruction-adapt-to-other-agents')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-adapted-common')).toHaveCount(0);
     await expect(page.getByTestId('instruction-pane-preview')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-sync-to-native')).toHaveCount(0);
 
-    // 适配槽 + Codex：双列（底稿 + 变体）
     await page.getByTestId('agent-hub-agent-codex').click();
     await expect(page).toHaveURL(/agent=codex/);
-    await expect(page.getByTestId('instruction-pane-adapted-common')).toBeVisible();
-    await expect(page.getByTestId('instruction-pane-adapted-variant')).toBeVisible();
+    await expect(page.getByTestId('instruction-adapted-textarea')).toBeVisible();
 
-    // 独有槽：三列 + 原始栏 reparse
+    // 独有槽：三列 + 分析拆解
     await page.getByTestId('agent-hub-lane-exclusive').click();
     await expect(page).toHaveURL(/lane=exclusive/);
     await expect(page.getByTestId('instruction-panes-exclusive')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-preview')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-original')).toBeVisible();
-    await expect(page.getByTestId('instruction-reparse-from-original')).toBeVisible();
+    await expect(page.getByTestId('instruction-analyze-decompose')).toBeVisible();
     await expect(
-      page.getByTestId('instruction-pane-original').getByTestId('instruction-reparse-from-original'),
+      page.getByTestId('instruction-pane-original').getByTestId('instruction-analyze-decompose'),
     ).toBeVisible();
-
     await expect(page.getByTestId('instruction-original-textarea')).toHaveValue(
       /Always run tests before commit/,
-    );
-
-    // 从原始解析后必须形成未保存草稿；切 lane 先进入统一 dirty Dialog。
-    await page.getByTestId('instruction-reparse-from-original').click();
-    await expect(page.getByTestId('instruction-unsaved-draft')).toBeVisible();
-    await expect(page.getByTestId('instruction-save-blocks')).toBeEnabled();
-    await page.getByTestId('agent-hub-lane-common').click();
-    await expect(page.getByTestId('agent-hub-context-change-dialog')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-context-stay')).toBeFocused();
-    await page.getByTestId('agent-hub-context-stay').click();
-    await expect(page.getByTestId('instruction-panes-exclusive')).toBeVisible();
-    await expect(page.getByTestId('instruction-preview-body')).toContainText(
-      'Always run tests before commit',
     );
   });
 });

@@ -109,6 +109,8 @@ export const AGENT_HUB_COMMANDS = {
   applyCrossAgentInstruction: 'agent_hub_apply_cross_agent_instruction',
   previewCrossAgentFull: 'agent_hub_preview_cross_agent_full',
   applyCrossAgentFull: 'agent_hub_apply_cross_agent_full',
+  analyzeInstructionOriginal: 'agent_hub_analyze_instruction_original',
+  adaptInstructionToOtherAgents: 'agent_hub_adapt_instruction_to_other_agents',
 } as const;
 
 /**
@@ -1060,5 +1062,47 @@ export const agentHubApi = {
   }): Promise<unknown> => {
     void _request;
     throw createAgentHubBlockedError(CROSS_AGENT_FULL_ADAPT_UNAVAILABLE);
+  },
+
+  /**
+   * Business Logic: 独有页分析拆解 — Claude 把原始文件拆成公共/适配/独有三部分。
+   * Code Logic: agent_hub_analyze_instruction_original；仅本机用户级。
+   */
+  analyzeInstructionOriginal: async (request: {
+    originalMarkdown: string;
+    agent: string;
+    deviceId?: string | null;
+    projectRef?: string | null;
+  }): Promise<{ common: string; adapted: string; exclusive: string }> => {
+    if (request.deviceId || request.projectRef) {
+      throw createAgentHubBlockedError(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    }
+    return invoke(AGENT_HUB_COMMANDS.analyzeInstructionOriginal, {
+      request: {
+        originalMarkdown: request.originalMarkdown,
+        agent: request.agent,
+      },
+    });
+  },
+
+  /**
+   * Business Logic: 适配页 — 把当前 agent 适配正文改写为其他 agent 变体。
+   * Code Logic: agent_hub_adapt_instruction_to_other_agents；仅本机用户级。
+   */
+  adaptInstructionToOtherAgents: async (request: {
+    sourceAgent: string;
+    adaptedMarkdown: string;
+    deviceId?: string | null;
+    projectRef?: string | null;
+  }): Promise<{ variants: Partial<Record<string, string>> }> => {
+    if (request.deviceId || request.projectRef) {
+      throw createAgentHubBlockedError(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    }
+    return invoke(AGENT_HUB_COMMANDS.adaptInstructionToOtherAgents, {
+      request: {
+        sourceAgent: request.sourceAgent,
+        adaptedMarkdown: request.adaptedMarkdown,
+      },
+    });
   },
 };

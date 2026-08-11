@@ -780,6 +780,188 @@ pub async fn agent_hub_apply_cross_agent_full(
     Err(AppError::validation("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"))
 }
 
+/// 分析拆解请求（camelCase IPC）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeInstructionOriginalRequest {
+    pub original_markdown: String,
+    pub agent: String,
+}
+
+/// 分析拆解结果：公共 / 当前 agent 适配 / 当前 agent 独有。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeInstructionOriginalResult {
+    pub common: String,
+    pub adapted: String,
+    pub exclusive: String,
+}
+
+/// 适配到其他 agent 请求。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptInstructionToOtherAgentsRequest {
+    pub source_agent: String,
+    pub adapted_markdown: String,
+}
+
+/// 适配到其他 agent 结果：destination → rewritten body。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptInstructionToOtherAgentsResult {
+    pub variants: BTreeMap<String, String>,
+}
+
+const INSTRUCTION_LLM_TIMEOUT_SECS: u64 = 180;
+const MAX_INSTRUCTION_LLM_CHARS: usize = 80_000;
+
+/// Business Logic: 独有页把原始文件拆成公共/适配/独有三部分（仅草稿，不写盘）。
+/// Code Logic: 本机 Claude CLI structured JSON；GuiClient 可直跑（只读 CLI，不改 sidecar 状态）。
+#[tauri::command]
+pub async fn agent_hub_analyze_instruction_original(
+    state: State<'_, AppState>,
+    request: AnalyzeInstructionOriginalRequest,
+) -> Result<AnalyzeInstructionOriginalResult, AppError> {
+    let original = request.original_markdown.trim();
+    if original.is_empty() {
+        return Err(AppError::validation("INSTRUCTION_ANALYZE_EMPTY_ORIGINAL"));
+    }
+    if original.chars().count() > MAX_INSTRUCTION_LLM_CHARS {
+        return Err(AppError::validation("INSTRUCTION_ANALYZE_ORIGINAL_TOO_LARGE"));
+    }
+    let agent = normalize_agent_target_token(&request.agent)?;
+    let (cli_path, model, provider_id) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.github_trending.claude_cli_path.clone(),
+            cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
+        )
+    };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
+    let schema = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["common", "adapted", "exclusive"],
+        "properties": {
+            "common": { "type": "string" },
+            "adapted": { "type": "string" },
+            "exclusive": { "type": "string" }
+        }
+    });
+    let prompt = format!(
+        "You split an agent instruction document into three markdown parts for Agent Hub.\n\
+         Target agent: {agent}\n\
+         Return ONLY JSON with keys common, adapted, exclusive.\n\
+         - common: rules/style/process that apply to every agent (Claude/Codex/OpenCode).\n\
+         - adapted: content that is agent-specific for the target agent but should be rewritten for other agents later.\n\
+         - exclusive: content that only makes sense for the target agent and must not be shared.\n\
+         Keep the original language. Do not invent facts. Empty string is allowed for a part.\n\
+         Original document:\n---\n{original}\n---"
+    );
+    let result = crate::claude_cli::run_structured_json_with_cwd::<AnalyzeInstructionOriginalResult>(
+        &cli_path,
+        &model,
+        provider_dir.as_deref(),
+        &schema.to_string(),
+        &prompt,
+        None,
+        INSTRUCTION_LLM_TIMEOUT_SECS,
+        "分析拆解提示词",
+    )
+    .await?;
+    Ok(AnalyzeInstructionOriginalResult {
+        common: result.common.trim().to_string(),
+        adapted: result.adapted.trim().to_string(),
+        exclusive: result.exclusive.trim().to_string(),
+    })
+}
+
+/// Business Logic: 适配页把当前 agent 适配正文改写为其他 agent 变体（仅草稿）。
+/// Code Logic: Claude CLI structured JSON → variants map（不含 source）。
+#[tauri::command]
+pub async fn agent_hub_adapt_instruction_to_other_agents(
+    state: State<'_, AppState>,
+    request: AdaptInstructionToOtherAgentsRequest,
+) -> Result<AdaptInstructionToOtherAgentsResult, AppError> {
+    let source = normalize_agent_target_token(&request.source_agent)?;
+    let body = request.adapted_markdown.trim();
+    if body.is_empty() {
+        return Err(AppError::validation("INSTRUCTION_ADAPT_EMPTY_SOURCE"));
+    }
+    if body.chars().count() > MAX_INSTRUCTION_LLM_CHARS {
+        return Err(AppError::validation("INSTRUCTION_ADAPT_SOURCE_TOO_LARGE"));
+    }
+    let destinations: Vec<&'static str> = ["claude", "codex", "opencode"]
+        .into_iter()
+        .filter(|target| *target != source.as_str())
+        .collect();
+    let (cli_path, model, provider_id) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.github_trending.claude_cli_path.clone(),
+            cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
+        )
+    };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
+    let mut properties = serde_json::Map::new();
+    for dest in &destinations {
+        properties.insert(
+            (*dest).to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
+    }
+    let schema = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": destinations,
+        "properties": properties
+    });
+    let dest_list = destinations.join(", ");
+    let prompt = format!(
+        "You rewrite one agent's adapted instruction body for other coding agents.\n\
+         Source agent: {source}\n\
+         Destination agents: {dest_list}\n\
+         Return ONLY JSON whose keys are exactly the destination agents.\n\
+         Each value is markdown rewritten for that agent (CLI names, config paths, tool terms).\n\
+         Keep intent and language. Empty string is allowed if nothing applies.\n\
+         Source adapted markdown:\n---\n{body}\n---"
+    );
+    let raw = crate::claude_cli::run_structured_json_with_cwd::<BTreeMap<String, String>>(
+        &cli_path,
+        &model,
+        provider_dir.as_deref(),
+        &schema.to_string(),
+        &prompt,
+        None,
+        INSTRUCTION_LLM_TIMEOUT_SECS,
+        "适配提示词到其他 Agent",
+    )
+    .await?;
+    let mut variants = BTreeMap::new();
+    for dest in destinations {
+        if let Some(text) = raw.get(dest) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                variants.insert(dest.to_string(), trimmed.to_string());
+            }
+        }
+    }
+    Ok(AdaptInstructionToOtherAgentsResult { variants })
+}
+
+fn normalize_agent_target_token(value: &str) -> Result<String, AppError> {
+    match value.trim() {
+        "claude" | "codex" | "opencode" => Ok(value.trim().to_string()),
+        _ => Err(AppError::validation("CROSS_AGENT_TARGET_INVALID")),
+    }
+}
+
 /// LAN push 预览：build selection 但不传输。
 ///
 /// Business Logic: 用户确认 peers/mode 前看到 asset/revision 计数与 snapshotHash。

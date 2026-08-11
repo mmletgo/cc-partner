@@ -9,8 +9,12 @@ import { describe, expect, test } from 'vitest';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import {
   addBlock,
+  appendAdaptedVariants,
+  appendAnalyzedParts,
   dtoToDraft,
   draftToDto,
+  ensureModeBlock,
+  findBlockByMode,
   initialThreePaneFromDisk,
   joinBlocksForTarget,
   normalizeInstructionBlocks,
@@ -139,6 +143,72 @@ describe('initialThreePaneFromDisk', () => {
     expect(state.blocks).toHaveLength(1);
     expect(state.blocks[0]?.commonMarkdown).toBe('hydrated');
     expect(state.previewText).toBe('hydrated');
+  });
+});
+
+describe('appendAnalyzedParts / appendAdaptedVariants', () => {
+  test('appendAnalyzedParts appends without replacing existing slot text', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'shared', AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    state = ensureModeBlock(state, 'targetOnly', AGENT);
+    const shared = findBlockByMode(state.blocks, 'shared')!;
+    const adapted = findBlockByMode(state.blocks, 'adapted')!;
+    const exclusive = findBlockByMode(state.blocks, 'targetOnly')!;
+    state = updateBlock(state, shared.id, { commonMarkdown: 'existing common' }, AGENT);
+    state = updateBlock(
+      state,
+      adapted.id,
+      { variants: { claude: 'existing adapted' } },
+      AGENT,
+    );
+    state = updateBlock(
+      state,
+      exclusive.id,
+      { variants: { claude: 'existing exclusive' }, sourceTarget: 'claude' },
+      AGENT,
+    );
+
+    const next = appendAnalyzedParts(
+      state,
+      {
+        common: 'new common',
+        adapted: 'new adapted',
+        exclusive: 'new exclusive',
+      },
+      AGENT,
+    );
+    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown).toBe(
+      'existing common\n\nnew common',
+    );
+    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude).toBe(
+      'existing adapted\n\nnew adapted',
+    );
+    expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe(
+      'existing exclusive\n\nnew exclusive',
+    );
+    expect(next.blocksDirty).toBe(true);
+  });
+
+  test('appendAdaptedVariants only appends destination agent variants', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    const adapted = findBlockByMode(state.blocks, 'adapted')!;
+    state = updateBlock(
+      state,
+      adapted.id,
+      { variants: { claude: 'src adapted', codex: 'old codex' } },
+      AGENT,
+    );
+    const next = appendAdaptedVariants(
+      state,
+      { codex: 'new codex', opencode: 'new opencode' },
+      AGENT,
+    );
+    const block = findBlockByMode(next.blocks, 'adapted')!;
+    expect(block.variants.claude).toBe('src adapted');
+    expect(block.variants.codex).toBe('old codex\n\nnew codex');
+    expect(block.variants.opencode).toBe('new opencode');
   });
 });
 

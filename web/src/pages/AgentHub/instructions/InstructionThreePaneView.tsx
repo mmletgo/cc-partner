@@ -3,8 +3,8 @@
  *
  * Business Logic（为什么需要）:
  *   公共槽只编辑 shared 正文，不展示预览/原始、不依赖 Agent；
- *   适配槽以 Claude Code 为公共底稿，选中非 Claude 时双列编辑变体；
- *   独有槽保留 当前槽 / 合成预览 / 原始文件 三列。
+ *   适配槽按当前 Agent 编辑自身适配变体，并提供「适配到其他 Agent」；
+ *   独有槽保留 当前槽 / 合成预览 / 原始文件 三列，原始栏提供「分析拆解」。
  *
  * Code Logic（做什么）:
  *   只消费 labels/state/callbacks；禁止 @/api；hooks 不在本视图。
@@ -16,20 +16,18 @@ import type { AgentTarget } from '@/lib/types/agentHub';
 import type { InstructionLane } from '../context/agentHubContext';
 import {
   findBlockByMode,
+  resolveAdaptedSlotText,
   type InstructionThreePaneState,
 } from './instructionThreePane';
 import styles from './InstructionThreePaneView.module.css';
-
-/** Claude Code 固定为适配槽公共底稿的权威 agent。 */
-const ADAPTED_COMMON_AGENT: AgentTarget = 'claude';
 
 /** 三栏视图文案。 */
 export interface InstructionThreePaneViewLabels {
   blocksTitle: string;
   previewTitle: string;
   originalTitle: string;
-  reparseFromOriginal: string;
-  syncToNative: string;
+  /** 独有页「分析拆解」按钮。 */
+  analyzeDecompose: string;
   emptyBlocks: string;
   emptyPreview: string;
   emptyOriginal: string;
@@ -41,33 +39,30 @@ export interface InstructionThreePaneViewLabels {
   slotCommonHint: string;
   slotAdaptedHint: string;
   slotExclusiveHint: string;
-  adaptedCommonTitle: string;
-  adaptedVariantTitle: string;
-  adaptedCommonHint: string;
-  adaptedVariantHint: string;
   dualDirtyTitle: string;
   dualDirtyDescription: string;
   useBlocksBaseline: string;
   useOriginalBaseline: string;
   cancel: string;
   blockBodyPlaceholder: string;
-  refresh: string;
   commonMarkdown: string;
   saveBlocks: string;
+  /** 适配页：把当前 agent 适配内容改写到其他 agent。 */
+  adaptToOtherAgents: string;
   unsavedDraft: string;
   canonicalDrift: string;
   sourceDrift: string;
   originalReadOnly: string;
   discardAndReload: string;
-  reparseConfirmTitle: string;
-  reparseConfirmDescription: string;
-  reparseConfirm: string;
+  analyzeConfirmTitle: string;
+  analyzeConfirmDescription: string;
+  analyzeConfirm: string;
 }
 
 export interface InstructionThreePaneViewProps {
   labels: InstructionThreePaneViewLabels;
   state: InstructionThreePaneState;
-  /** 当前 agent：适配变体 / 独有槽与预览跟随此 agent。 */
+  /** 当前 agent：适配 / 独有槽与预览跟随此 agent。 */
   agent: AgentTarget;
   /** 壳层选择的三槽 lane。 */
   instructionLane: InstructionLane;
@@ -78,34 +73,21 @@ export interface InstructionThreePaneViewProps {
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
-  reparseConfirmOpen: boolean;
-  onReparse: () => void;
-  onSync: () => void;
+  analyzeConfirmOpen: boolean;
+  onAnalyzeDecompose: () => void;
+  onAdaptToOtherAgents: () => void;
   onSaveBlocks: () => void;
   onRetry: () => void;
-  onRefresh: () => void;
   onDiscardAndReload: () => void;
-  onOriginalChange: (text: string) => void;
   /**
    * 编辑当前 lane 对应槽。
-   * 公共写 shared.common；适配写 adapted.common（Claude）或 adapted.variants[agent]；
-   * 独有写 targetOnly.variants[agent]。
+   * 公共写 shared.common；适配写 adapted.variants[agent]；独有写 targetOnly.variants[agent]。
    */
   onSlotTextChange: (text: string) => void;
-  /**
-   * 适配槽专用：编辑 Claude 公共底稿（adapted.commonMarkdown）。
-   * 仅 instructionLane=adapted 时使用。
-   */
-  onAdaptedCommonChange?: (text: string) => void;
-  /**
-   * 适配槽专用：编辑当前 agent 变体（adapted.variants[agent]）。
-   * agent=claude 时不展示变体列。
-   */
-  onAdaptedVariantChange?: (text: string) => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
   onCancelDualDirty: () => void;
-  onConfirmReparse: () => void;
-  onCancelReparse: () => void;
+  onConfirmAnalyze: () => void;
+  onCancelAnalyze: () => void;
 }
 
 function slotHint(
@@ -124,7 +106,7 @@ function slotHint(
 
 /**
  * Business Logic: 渲染 toolbar / dual-dirty / 状态消息。
- * Code Logic: 各 lane 共用 chrome，不改变布局分支。
+ * Code Logic: 各 lane 共用 chrome；公共/适配不展示路径、重新扫描与写入原始。
  */
 function InstructionChrome(props: {
   labels: InstructionThreePaneViewLabels;
@@ -136,12 +118,11 @@ function InstructionChrome(props: {
   refreshError: string | null;
   dualDirtyOpen: boolean;
   showPath: boolean;
-  showSync: boolean;
-  onRefresh: () => void;
+  showAdaptToOthers: boolean;
   onRetry: () => void;
   onDiscardAndReload: () => void;
   onSaveBlocks: () => void;
-  onSync: () => void;
+  onAdaptToOtherAgents: () => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
   onCancelDualDirty: () => void;
 }): JSX.Element {
@@ -155,12 +136,11 @@ function InstructionChrome(props: {
     refreshError,
     dualDirtyOpen,
     showPath,
-    showSync,
-    onRefresh,
+    showAdaptToOthers,
     onRetry,
     onDiscardAndReload,
     onSaveBlocks,
-    onSync,
+    onAdaptToOtherAgents,
     onChooseBaseline,
     onCancelDualDirty,
   } = props;
@@ -180,16 +160,6 @@ function InstructionChrome(props: {
         </div>
         <div className={styles.toolbarActions}>
           <Button
-            variant="secondary"
-            size="sm"
-            loading={actionBusy}
-            onClick={onRefresh}
-            disabled={actionBusy}
-            data-testid="instruction-rescan"
-          >
-            {labels.refresh}
-          </Button>
-          <Button
             variant="primary"
             size="sm"
             loading={actionBusy}
@@ -199,22 +169,22 @@ function InstructionChrome(props: {
           >
             {labels.saveBlocks}
           </Button>
-          {showSync ? (
+          {showAdaptToOthers ? (
             <Button
               variant="secondary"
               size="sm"
               loading={actionBusy}
-              disabled={writeBlocked}
-              onClick={onSync}
-              data-testid="instruction-sync-to-native"
+              disabled={actionBusy || writeBlocked}
+              onClick={onAdaptToOtherAgents}
+              data-testid="instruction-adapt-to-other-agents"
             >
-              {labels.syncToNative}
+              {labels.adaptToOtherAgents}
             </Button>
           ) : null}
         </div>
       </div>
 
-      {showSync && writeBlocked && writeBlockedReason ? (
+      {showAdaptToOthers && writeBlocked && writeBlockedReason ? (
         <StatusMessage tone="warn" data-testid="instruction-write-blocked">
           {writeBlockedReason}
         </StatusMessage>
@@ -353,95 +323,64 @@ function CommonLanePanes(props: {
 }
 
 /**
- * Business Logic: 适配槽 — Claude 仅公共底稿；其他 agent 双列（底稿 + 变体）。
- * Code Logic: agent===claude 单列；否则 common 只读展示 + 可编辑 variant。
+ * Business Logic: 适配槽 — 当前 agent 单列编辑自身适配正文。
+ * Code Logic: 不再以 Claude 为公共底稿双列。
  */
 function AdaptedLanePanes(props: {
   labels: InstructionThreePaneViewLabels;
-  agent: AgentTarget;
-  commonText: string;
-  variantText: string;
-  onAdaptedCommonChange: (text: string) => void;
-  onAdaptedVariantChange: (text: string) => void;
+  slotText: string;
+  onSlotTextChange: (text: string) => void;
 }): JSX.Element {
-  const {
-    labels,
-    agent,
-    commonText,
-    variantText,
-    onAdaptedCommonChange,
-    onAdaptedVariantChange,
-  } = props;
-  const isClaude = agent === ADAPTED_COMMON_AGENT;
-
+  const { labels, slotText, onSlotTextChange } = props;
   return (
     <div
-      className={`${styles.panes} ${isClaude ? styles.panesSingle : styles.panesDual}`}
+      className={`${styles.panes} ${styles.panesSingle}`}
       role="group"
       aria-label={labels.blocksTitle}
       data-testid="instruction-panes-adapted"
     >
-      <section className={styles.pane} data-testid="instruction-pane-adapted-common">
+      <section className={styles.pane} data-testid="instruction-pane-adapted">
         <header className={styles.paneHeader}>
-          <h2 className={styles.paneTitle}>{labels.adaptedCommonTitle}</h2>
+          <h2 className={styles.paneTitle}>{labels.blocksTitle}</h2>
         </header>
         <div className={styles.paneBody}>
-          <p className={styles.paneHint} data-testid="instruction-adapted-common-hint">
-            {labels.adaptedCommonHint}
+          <p className={styles.paneHint} data-testid="instruction-slot-hint">
+            {labels.slotAdaptedHint}
           </p>
           <textarea
             className={styles.blockBodyInput}
-            value={commonText}
+            value={slotText}
             placeholder={labels.blockBodyPlaceholder}
-            aria-label={labels.adaptedCommonTitle}
-            data-testid="instruction-adapted-common-textarea"
-            // 仅 Claude 可编辑公共底稿；其它 agent 只读查看
-            readOnly={!isClaude}
-            onChange={(event) => {
-              if (!isClaude) return;
-              onAdaptedCommonChange(event.currentTarget.value);
-            }}
+            aria-label={labels.blocksTitle}
+            data-testid="instruction-adapted-textarea"
+            onChange={(event) => onSlotTextChange(event.currentTarget.value)}
           />
         </div>
       </section>
-
-      {!isClaude ? (
-        <section className={styles.pane} data-testid="instruction-pane-adapted-variant">
-          <header className={styles.paneHeader}>
-            <h2 className={styles.paneTitle}>{labels.adaptedVariantTitle}</h2>
-          </header>
-          <div className={styles.paneBody}>
-            <p className={styles.paneHint} data-testid="instruction-adapted-variant-hint">
-              {labels.adaptedVariantHint}
-            </p>
-            <textarea
-              className={styles.blockBodyInput}
-              value={variantText}
-              placeholder={labels.blockBodyPlaceholder}
-              aria-label={labels.adaptedVariantTitle}
-              data-testid="instruction-adapted-variant-textarea"
-              onChange={(event) => onAdaptedVariantChange(event.currentTarget.value)}
-            />
-          </div>
-        </section>
-      ) : null}
     </div>
   );
 }
 
 /**
  * Business Logic: 独有槽保持三列 — 当前槽 / 合成预览 / 原始文件。
- * Code Logic: 与历史三栏布局一致。
+ * Code Logic: 原始栏提供「分析拆解」，不再提供「从原始导入为公共」。
  */
 function ExclusiveLanePanes(props: {
   labels: InstructionThreePaneViewLabels;
   state: InstructionThreePaneState;
   slotText: string;
   onSlotTextChange: (text: string) => void;
-  onReparse: () => void;
-  reparseDisabled: boolean;
+  onAnalyzeDecompose: () => void;
+  analyzeDisabled: boolean;
 }): JSX.Element {
-  const { labels, state, slotText, onSlotTextChange, onReparse, reparseDisabled } = props;
+  const {
+    labels,
+    state,
+    slotText,
+    onSlotTextChange,
+    onAnalyzeDecompose,
+    analyzeDisabled,
+  } = props;
 
   return (
     <div
@@ -493,11 +432,11 @@ function ExclusiveLanePanes(props: {
           <Button
             variant="secondary"
             size="sm"
-            onClick={onReparse}
-            disabled={reparseDisabled}
-            data-testid="instruction-reparse-from-original"
+            onClick={onAnalyzeDecompose}
+            disabled={analyzeDisabled}
+            data-testid="instruction-analyze-decompose"
           >
-            {labels.reparseFromOriginal}
+            {labels.analyzeDecompose}
           </Button>
         </header>
         <div className={styles.paneBody}>
@@ -537,20 +476,17 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     writeBlocked,
     writeBlockedReason,
     dualDirtyOpen,
-    reparseConfirmOpen,
-    onReparse,
-    onSync,
+    analyzeConfirmOpen,
+    onAnalyzeDecompose,
+    onAdaptToOtherAgents,
     onSaveBlocks,
     onRetry,
-    onRefresh,
     onDiscardAndReload,
     onSlotTextChange,
-    onAdaptedCommonChange,
-    onAdaptedVariantChange,
     onChooseBaseline,
     onCancelDualDirty,
-    onConfirmReparse,
-    onCancelReparse,
+    onConfirmAnalyze,
+    onCancelAnalyze,
   } = props;
 
   if (loading && !state.originalText && state.blocks.length === 0 && !error) {
@@ -582,19 +518,11 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
   const exclusiveBlock = findBlockByMode(state.blocks, 'targetOnly');
 
   const commonSlotText = sharedBlock?.commonMarkdown ?? '';
-  // 适配公共底稿：优先 adapted.commonMarkdown；空时不自动回落 shared，保持槽隔离
-  const adaptedCommonText = adaptedBlock?.commonMarkdown ?? '';
-  // 变体仅取 variants[agent]，空字符串表示「无变体，投影时回落 common」
-  const adaptedVariantText =
-    agent === ADAPTED_COMMON_AGENT
-      ? ''
-      : (adaptedBlock?.variants[agent] ?? '');
+  const adaptedSlotText = resolveAdaptedSlotText(adaptedBlock, agent);
   const exclusiveSlotText = exclusiveBlock?.variants[agent] ?? '';
 
-  // 路径仅在独有槽（展示原始文件）有意义；同步写盘各 lane 均可用
   const showPath = instructionLane === 'exclusive';
-  // 本机指令写入采用“先预览、后确认应用”；能力或漂移门禁只决定按钮是否可用。
-  const showSync = true;
+  const showAdaptToOthers = instructionLane === 'adapted';
 
   return (
     <div className={styles.root} data-testid="instruction-three-pane">
@@ -608,17 +536,15 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         refreshError={error}
         dualDirtyOpen={dualDirtyOpen}
         showPath={showPath}
-        showSync={showSync}
-        onRefresh={onRefresh}
+        showAdaptToOthers={showAdaptToOthers}
         onRetry={onRetry}
         onDiscardAndReload={onDiscardAndReload}
         onSaveBlocks={onSaveBlocks}
-        onSync={onSync}
+        onAdaptToOtherAgents={onAdaptToOtherAgents}
         onChooseBaseline={onChooseBaseline}
         onCancelDualDirty={onCancelDualDirty}
       />
 
-      {/* 顶部 lane 提示：适配/公共保留简述 */}
       {instructionLane !== 'exclusive' ? (
         <p className={styles.laneBanner} data-testid="instruction-slot-hint">
           {slotHint(labels, instructionLane)}
@@ -636,11 +562,8 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
       {instructionLane === 'adapted' ? (
         <AdaptedLanePanes
           labels={labels}
-          agent={agent}
-          commonText={adaptedCommonText}
-          variantText={adaptedVariantText}
-          onAdaptedCommonChange={onAdaptedCommonChange ?? onSlotTextChange}
-          onAdaptedVariantChange={onAdaptedVariantChange ?? onSlotTextChange}
+          slotText={adaptedSlotText}
+          onSlotTextChange={onSlotTextChange}
         />
       ) : null}
 
@@ -650,27 +573,32 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           state={state}
           slotText={exclusiveSlotText}
           onSlotTextChange={onSlotTextChange}
-          onReparse={onReparse}
-          reparseDisabled={actionBusy || state.sourceDrift || state.externalDrift}
+          onAnalyzeDecompose={onAnalyzeDecompose}
+          analyzeDisabled={
+            actionBusy ||
+            state.sourceDrift ||
+            state.externalDrift ||
+            state.originalText.trim().length === 0
+          }
         />
       ) : null}
 
       <Dialog
-        open={reparseConfirmOpen}
-        titleId="instruction-reparse-confirm-title"
-        onClose={onCancelReparse}
+        open={analyzeConfirmOpen}
+        titleId="instruction-analyze-confirm-title"
+        onClose={onCancelAnalyze}
       >
-        <div className={styles.dualDirty} data-testid="instruction-reparse-confirm">
-          <h2 id="instruction-reparse-confirm-title" className={styles.dualDirtyTitle}>
-            {labels.reparseConfirmTitle}
+        <div className={styles.dualDirty} data-testid="instruction-analyze-confirm">
+          <h2 id="instruction-analyze-confirm-title" className={styles.dualDirtyTitle}>
+            {labels.analyzeConfirmTitle}
           </h2>
-          <p className={styles.dualDirtyDesc}>{labels.reparseConfirmDescription}</p>
+          <p className={styles.dualDirtyDesc}>{labels.analyzeConfirmDescription}</p>
           <div className={styles.dualDirtyActions}>
-            <Button variant="secondary" size="sm" onClick={onCancelReparse}>
+            <Button variant="secondary" size="sm" onClick={onCancelAnalyze}>
               {labels.cancel}
             </Button>
-            <Button variant="danger" size="sm" onClick={onConfirmReparse}>
-              {labels.reparseConfirm}
+            <Button variant="primary" size="sm" onClick={onConfirmAnalyze}>
+              {labels.analyzeConfirm}
             </Button>
           </div>
         </div>

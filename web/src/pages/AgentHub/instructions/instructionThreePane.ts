@@ -421,6 +421,137 @@ export function findBlockByMode(
   return blocks.find((block) => block.mode === mode) ?? null;
 }
 
+/**
+ * 分析拆解产物：公共 / 当前 agent 适配 / 当前 agent 独有。
+ *
+ * Business Logic: Claude 把原始文件拆成三部分后，分别追加到对应槽尾，不替换既有正文。
+ */
+export interface InstructionAnalyzeParts {
+  common: string;
+  adapted: string;
+  exclusive: string;
+}
+
+/**
+ * Business Logic: 把分析拆解结果追加到现有三槽尾部，禁止替换既有内容。
+ * Code Logic: ensure 三 mode → joinNonEmpty 追加；适配/独有写入 variants[agent]。
+ */
+export function appendAnalyzedParts(
+  state: InstructionThreePaneState,
+  parts: InstructionAnalyzeParts,
+  agent: AgentTarget,
+): InstructionThreePaneState {
+  let next = ensureModeBlock(state, 'shared', agent);
+  next = ensureModeBlock(next, 'adapted', agent);
+  next = ensureModeBlock(next, 'targetOnly', agent);
+
+  const shared = findBlockByMode(next.blocks, 'shared');
+  const adapted = findBlockByMode(next.blocks, 'adapted');
+  const exclusive = findBlockByMode(next.blocks, 'targetOnly');
+  if (!shared || !adapted || !exclusive) {
+    return next;
+  }
+
+  const commonAppend = parts.common.trim();
+  const adaptedAppend = parts.adapted.trim();
+  const exclusiveAppend = parts.exclusive.trim();
+  if (!commonAppend && !adaptedAppend && !exclusiveAppend) {
+    return next;
+  }
+
+  let working = next;
+  if (commonAppend) {
+    working = updateBlock(
+      working,
+      shared.id,
+      { commonMarkdown: joinNonEmpty([shared.commonMarkdown, commonAppend]) },
+      agent,
+    );
+  }
+  if (adaptedAppend) {
+    const adaptedNow = findBlockByMode(working.blocks, 'adapted') ?? adapted;
+    const existingAdapted =
+      typeof adaptedNow.variants[agent] === 'string'
+        ? adaptedNow.variants[agent]!
+        : adaptedNow.commonMarkdown;
+    working = updateBlock(
+      working,
+      adaptedNow.id,
+      {
+        variants: {
+          ...adaptedNow.variants,
+          [agent]: joinNonEmpty([existingAdapted, adaptedAppend]),
+        },
+      },
+      agent,
+    );
+  }
+  if (exclusiveAppend) {
+    const exclusiveNow = findBlockByMode(working.blocks, 'targetOnly') ?? exclusive;
+    const existingExclusive = exclusiveNow.variants[agent] ?? '';
+    working = updateBlock(
+      working,
+      exclusiveNow.id,
+      {
+        variants: {
+          ...exclusiveNow.variants,
+          [agent]: joinNonEmpty([existingExclusive, exclusiveAppend]),
+        },
+        sourceTarget: exclusiveNow.sourceTarget ?? agent,
+      },
+      agent,
+    );
+  }
+  return working;
+}
+
+/**
+ * Business Logic: 把当前 agent 的适配正文跨 agent 改写后，追加到其它 agent 的适配变体尾。
+ * Code Logic: ensure adapted → 对每个 destination 用 joinNonEmpty 追加 variants[dest]。
+ */
+export function appendAdaptedVariants(
+  state: InstructionThreePaneState,
+  variants: Partial<Record<AgentTarget, string>>,
+  previewAgent: AgentTarget,
+): InstructionThreePaneState {
+  let next = ensureModeBlock(state, 'adapted', previewAgent);
+  const adapted = findBlockByMode(next.blocks, 'adapted');
+  if (!adapted) return next;
+
+  let nextVariants = { ...adapted.variants };
+  let changed = false;
+  for (const target of AGENT_TARGETS) {
+    const append = (variants[target] ?? '').trim();
+    if (!append) continue;
+    const existing =
+      typeof nextVariants[target] === 'string'
+        ? nextVariants[target]!
+        : target === previewAgent
+          ? adapted.commonMarkdown
+          : '';
+    nextVariants = {
+      ...nextVariants,
+      [target]: joinNonEmpty([existing, append]),
+    };
+    changed = true;
+  }
+  if (!changed) return next;
+  return updateBlock(next, adapted.id, { variants: nextVariants }, previewAgent);
+}
+
+/**
+ * Business Logic: 适配槽按当前 agent 读取可编辑正文（变体优先，回落 commonMarkdown 兼容旧 Claude 底稿）。
+ */
+export function resolveAdaptedSlotText(
+  block: InstructionBlockDraft | null | undefined,
+  agent: AgentTarget,
+): string {
+  if (!block) return '';
+  const variant = block.variants[agent];
+  if (typeof variant === 'string') return variant;
+  return block.commonMarkdown;
+}
+
 // ── internal helpers ──────────────────────────────────────────────
 
 function sortBlocksByMode(blocks: InstructionBlockDraft[]): InstructionBlockDraft[] {

@@ -2,7 +2,7 @@
 /**
  * 提示词三栏 pure view 测试（按 lane 布局）。
  *
- * Business Logic: 锁定公共单列、适配双列（Claude 单列）、独有三列与无 @/api 依赖。
+ * Business Logic: 锁定公共单列、适配单列、独有三列与无 @/api 依赖。
  * Code Logic: 注入 labels + state + callbacks；静态扫描源文件。
  */
 
@@ -38,8 +38,7 @@ const labels: InstructionThreePaneViewLabels = {
   blocksTitle: 'Current slot',
   previewTitle: 'Preview',
   originalTitle: 'Original file',
-  reparseFromOriginal: 'Import original as common',
-  syncToNative: 'Write original files',
+  analyzeDecompose: 'Analyze & split',
   emptyBlocks: 'No blocks yet',
   emptyPreview: 'Preview is empty until you reparse or fill blocks',
   emptyOriginal: 'No original content',
@@ -51,27 +50,23 @@ const labels: InstructionThreePaneViewLabels = {
   slotCommonHint: 'Shared by all agents',
   slotAdaptedHint: 'Adapted for current agent',
   slotExclusiveHint: 'Exclusive to current agent',
-  adaptedCommonTitle: 'Common draft (Claude Code)',
-  adaptedVariantTitle: 'Current agent variant',
-  adaptedCommonHint: 'Claude is the common draft authority',
-  adaptedVariantHint: 'Variant for the selected agent',
   dualDirtyTitle: 'Choose sync baseline',
   dualDirtyDescription: 'Blocks and original both changed.',
   useBlocksBaseline: 'Use composed blocks',
   useOriginalBaseline: 'Use original file',
   cancel: 'Cancel',
   blockBodyPlaceholder: 'Body',
-  refresh: 'Rescan',
   commonMarkdown: 'Common body',
   saveBlocks: 'Save slots',
+  adaptToOtherAgents: 'Adapt to other agents',
   unsavedDraft: 'Unsaved slot draft',
   canonicalDrift: 'Canonical changed',
   sourceDrift: 'Native source changed',
   originalReadOnly: 'Read-only source',
   discardAndReload: 'Discard and reload',
-  reparseConfirmTitle: 'Replace slot draft?',
-  reparseConfirmDescription: 'This replaces unsaved slot content.',
-  reparseConfirm: 'Replace draft',
+  analyzeConfirmTitle: 'Analyze and append?',
+  analyzeConfirmDescription: 'Append split parts to existing slots.',
+  analyzeConfirm: 'Start analyze',
 };
 
 const SAMPLE = `## Shared
@@ -106,21 +101,17 @@ function buildProps(
     writeBlocked: false,
     writeBlockedReason: null,
     dualDirtyOpen: false,
-    reparseConfirmOpen: false,
-    onReparse: vi.fn(),
-    onSync: vi.fn(),
+    analyzeConfirmOpen: false,
+    onAnalyzeDecompose: vi.fn(),
+    onAdaptToOtherAgents: vi.fn(),
     onSaveBlocks: vi.fn(),
     onRetry: vi.fn(),
-    onRefresh: vi.fn(),
     onDiscardAndReload: vi.fn(),
-    onOriginalChange: vi.fn(),
     onSlotTextChange: vi.fn(),
-    onAdaptedCommonChange: vi.fn(),
-    onAdaptedVariantChange: vi.fn(),
     onChooseBaseline: vi.fn(),
     onCancelDualDirty: vi.fn(),
-    onConfirmReparse: vi.fn(),
-    onCancelReparse: vi.fn(),
+    onConfirmAnalyze: vi.fn(),
+    onCancelAnalyze: vi.fn(),
     ...overrides,
   };
 }
@@ -139,8 +130,7 @@ function stateWithSlots(): InstructionThreePaneState {
       state,
       adapted.id,
       {
-        commonMarkdown: 'adapted common draft',
-        variants: { codex: 'codex variant' },
+        variants: { claude: 'claude adapted', codex: 'codex variant' },
       },
       AGENT,
     );
@@ -166,7 +156,7 @@ describe('InstructionThreePaneView', () => {
     expect(source).not.toMatch(/from\s+['"]@\/api\//);
   });
 
-  test('common lane shows only the common slot (no preview/original)', () => {
+  test('common lane shows only the common slot without rescan/sync/original', () => {
     render(<InstructionThreePaneView {...buildProps({ instructionLane: 'common' })} />);
 
     expect(screen.getByTestId('instruction-three-pane')).toBeTruthy();
@@ -174,8 +164,10 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-blocks')).toBeTruthy();
     expect(screen.queryByTestId('instruction-pane-preview')).toBeNull();
     expect(screen.queryByTestId('instruction-pane-original')).toBeNull();
-    expect(screen.getByTestId('instruction-sync-to-native')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-rescan')).toBeNull();
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
     expect(screen.queryByTestId('instruction-original-path')).toBeNull();
+    expect(screen.queryByTestId('instruction-adapt-to-other-agents')).toBeNull();
   });
 
   test('common slot textarea edits call onSlotTextChange', () => {
@@ -193,57 +185,44 @@ describe('InstructionThreePaneView', () => {
     expect(onSlotTextChange).toHaveBeenCalledWith('new common');
   });
 
-  test('adapted lane with Claude shows only common draft column', () => {
-    render(
-      <InstructionThreePaneView
-        {...buildProps({
-          instructionLane: 'adapted',
-          agent: 'claude',
-          state: stateWithSlots(),
-        })}
-      />,
-    );
-    expect(screen.getByTestId('instruction-panes-adapted')).toBeTruthy();
-    expect(screen.getByTestId('instruction-pane-adapted-common')).toBeTruthy();
-    expect(screen.queryByTestId('instruction-pane-adapted-variant')).toBeNull();
-    expect(screen.queryByTestId('instruction-pane-preview')).toBeNull();
-    expect(screen.queryByTestId('instruction-pane-original')).toBeNull();
-  });
-
-  test('adapted lane with Codex shows common draft + variant columns', () => {
-    const onAdaptedCommonChange = vi.fn();
-    const onAdaptedVariantChange = vi.fn();
+  test('adapted lane is a single editable column with adapt-to-others next to save', () => {
+    const onSlotTextChange = vi.fn();
+    const onAdaptToOtherAgents = vi.fn();
     render(
       <InstructionThreePaneView
         {...buildProps({
           instructionLane: 'adapted',
           agent: 'codex',
           state: stateWithSlots(),
-          onAdaptedCommonChange,
-          onAdaptedVariantChange,
+          onSlotTextChange,
+          onAdaptToOtherAgents,
         })}
       />,
     );
-    expect(screen.getByTestId('instruction-pane-adapted-common')).toBeTruthy();
-    expect(screen.getByTestId('instruction-pane-adapted-variant')).toBeTruthy();
-    // 非 Claude 时公共底稿只读
-    const commonInput = screen.getByTestId(
-      'instruction-adapted-common-textarea',
-    ) as HTMLTextAreaElement;
-    expect(commonInput.readOnly).toBe(true);
+    expect(screen.getByTestId('instruction-panes-adapted')).toBeTruthy();
+    expect(screen.getByTestId('instruction-adapted-textarea')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-pane-adapted-common')).toBeNull();
+    expect(screen.queryByTestId('instruction-pane-preview')).toBeNull();
+    expect(screen.queryByTestId('instruction-rescan')).toBeNull();
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
+    expect(screen.getByTestId('instruction-adapt-to-other-agents')).toBeTruthy();
 
-    fireEvent.change(screen.getByTestId('instruction-adapted-variant-textarea'), {
+    fireEvent.change(screen.getByTestId('instruction-adapted-textarea'), {
       target: { value: 'codex next' },
     });
-    expect(onAdaptedVariantChange).toHaveBeenCalledWith('codex next');
+    expect(onSlotTextChange).toHaveBeenCalledWith('codex next');
+    fireEvent.click(screen.getByTestId('instruction-adapt-to-other-agents'));
+    expect(onAdaptToOtherAgents).toHaveBeenCalledOnce();
   });
 
-  test('exclusive lane keeps three panes: blocks, preview, original', () => {
+  test('exclusive lane keeps three panes and analyze-decompose on original column', () => {
+    const onAnalyzeDecompose = vi.fn();
     render(
       <InstructionThreePaneView
         {...buildProps({
           instructionLane: 'exclusive',
           state: stateWithSlots(),
+          onAnalyzeDecompose,
         })}
       />,
     );
@@ -252,50 +231,15 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-blocks')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-preview')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-original')).toBeTruthy();
-    expect(screen.getByTestId('instruction-sync-to-native')).toBeTruthy();
-  });
+    expect(screen.queryByTestId('instruction-rescan')).toBeNull();
+    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
+    expect(screen.queryByTestId('instruction-reparse-from-original')).toBeNull();
 
-  test('reparse button exists only in exclusive original column', () => {
-    render(
-      <InstructionThreePaneView
-        {...buildProps({ instructionLane: 'exclusive', state: stateWithSlots() })}
-      />,
-    );
-
-    const reparse = screen.getByTestId('instruction-reparse-from-original');
-    expect(reparse.textContent).toContain('Import original as common');
-    expect(screen.getByTestId('instruction-pane-original').contains(reparse)).toBe(true);
-    expect(screen.queryAllByTestId('instruction-reparse-from-original')).toHaveLength(1);
-  });
-
-  test('native sync action opens preview when the target is writable', () => {
-    const onSync = vi.fn();
-    render(
-      <InstructionThreePaneView
-        {...buildProps({ instructionLane: 'exclusive', onSync, state: stateWithSlots() })}
-      />,
-    );
-    fireEvent.click(screen.getByTestId('instruction-sync-to-native'));
-    expect(onSync).toHaveBeenCalledOnce();
-  });
-
-  test('write blocked reason disables preview-and-sync without blocking Hub draft save', () => {
-    render(
-      <InstructionThreePaneView
-        {...buildProps({
-          instructionLane: 'exclusive',
-          writeBlocked: true,
-          writeBlockedReason: 'Writes are blocked for this agent',
-          state: stateWithSlots(),
-        })}
-      />,
-    );
-    expect((screen.getByTestId('instruction-sync-to-native') as HTMLButtonElement).disabled).toBe(
-      true,
-    );
-    expect(screen.getByTestId('instruction-write-blocked').textContent).toContain(
-      'Writes are blocked for this agent',
-    );
+    const analyze = screen.getByTestId('instruction-analyze-decompose');
+    expect(analyze.textContent).toContain('Analyze & split');
+    expect(screen.getByTestId('instruction-pane-original').contains(analyze)).toBe(true);
+    fireEvent.click(analyze);
+    expect(onAnalyzeDecompose).toHaveBeenCalledOnce();
   });
 
   test('original source is read-only and save is gated by blocks dirty/drift', () => {
@@ -338,9 +282,9 @@ describe('InstructionThreePaneView', () => {
         {...buildProps({ instructionLane: 'exclusive', state: stateWithSlots() })}
       />,
     );
-
-    const preview = screen.getByTestId('instruction-pane-preview');
-    expect(preview.querySelector('textarea')).toBeNull();
-    expect(screen.getByTestId('instruction-preview-body')).toBeTruthy();
+    expect(screen.getByTestId('instruction-preview-body').tagName.toLowerCase()).toBe('pre');
+    expect(
+      screen.getByTestId('instruction-pane-preview').querySelector('textarea'),
+    ).toBeNull();
   });
 });
