@@ -68,7 +68,7 @@
       "previewTitle": "Composed preview",
       "originalTitle": "Original file",
       "reparseFromOriginal": "Import original as common",
-      "syncToNative": "Sync to native file…",
+      "syncToNative": "Write original files",
       "emptyBlocks": "This slot is empty. Type here to fill it.",
       "emptyPreview": "Preview stays empty until you fill common/adapted/exclusive slots.",
       "emptyOriginal": "No original content was found for this agent. The native source remains read-only.",
@@ -113,7 +113,8 @@
       "contextDiscard": "Discard draft and switch",
       "projectScopeUnsupported": "Project-scoped instruction writes are not available on this backend yet; no user-scoped write will be attempted.",
       "directContextUnsupported": "Direct instruction access is limited to this device at user scope. Use Pull for a remote device; project scope remains unavailable.",
-      "writeBlocked": "Writes are blocked for this agent. You can still edit the draft, but sync is disabled.",
+      "writeBlocked": "The current agent cannot write its native file yet. You can still edit and save the Hub draft.",
+      "writeBlockedTargets": "At least one target agent cannot write its native file yet. You can still edit and save the shared Hub draft.",
       "errors": {
         "emptySync": "Nothing to sync. Add original content or fill the three slots first."
       }

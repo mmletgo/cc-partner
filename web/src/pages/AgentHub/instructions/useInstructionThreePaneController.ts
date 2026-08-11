@@ -77,7 +77,7 @@ export interface UseInstructionThreePaneControllerArgs {
   enabled?: boolean;
 }
 
-/** Controller 对 pure view / 预览 Dialog 的返回合同。 */
+/** Controller 对 pure view 的返回合同。 */
 export interface UseInstructionThreePaneControllerResult {
   state: InstructionThreePaneState;
   workspace: UserInstructionWorkspaceDto | null;
@@ -212,34 +212,38 @@ function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> 
   return { claude: 'unmanaged', codex: 'unmanaged', opencode: 'unmanaged' };
 }
 
+const ALL_INSTRUCTION_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+
 /**
- * Business Logic: 单 agent 同步 — 只把 context.agent 标为 managed；
+ * Business Logic: 按当前槽决定同步目标；公共槽同步全部 Agent，适配/独有槽同步当前 Agent；
  *   本机 external/unknown 源写回时必须 adoptExisting，否则 apply 被 OWNERSHIP_REQUIRED 挡住。
- * Code Logic: 其它 target 一律 unmanaged，commonContent = 同步正文。
+ * Code Logic: 目标逐个标为 managed，其它 target 保持 unmanaged。
  */
-function buildSingleAgentPreviewRequest(
+function buildInstructionPreviewRequest(
   workspace: UserInstructionWorkspaceDto,
-  agent: AgentTarget,
+  targets: AgentTarget[],
 ) {
   const selections = emptySelections();
-  const target = workspace.targets.find((item) => item.target === agent) ?? null;
-  const effective =
-    (target?.effectiveSourceId
-      ? target.sources.find((source) => source.sourceId === target.effectiveSourceId)
-      : null) ??
-    target?.sources.find((source) => source.active) ??
-    null;
-  const needsAdopt =
-    effective != null &&
-    effective.exists &&
-    (effective.ownership === 'external' || effective.ownership === 'unknown');
-  selections[agent] = needsAdopt
-    ? {
-        managementMode: 'managedActive',
-        adoptExisting: true,
-        manageOverride: false,
-      }
-    : 'managed';
+  for (const agent of targets) {
+    const target = workspace.targets.find((item) => item.target === agent) ?? null;
+    const effective =
+      (target?.effectiveSourceId
+        ? target.sources.find((source) => source.sourceId === target.effectiveSourceId)
+        : null) ??
+      target?.sources.find((source) => source.active) ??
+      null;
+    const needsAdopt =
+      effective != null &&
+      effective.exists &&
+      (effective.ownership === 'external' || effective.ownership === 'unknown');
+    selections[agent] = needsAdopt
+      ? {
+          managementMode: 'managedActive',
+          adoptExisting: true,
+          manageOverride: false,
+        }
+      : 'managed';
+  }
   return {
     // backend preview/apply 基于持久化 head InstructionDocument 投影（含 per-agent variants）；
     // 前端先 saveBlocks 推进 head，commonContent/targetExtensions 不再驱动投影。
@@ -262,6 +266,7 @@ export function useInstructionThreePaneController(
   /** 默认 true 兼容单测；页面入口必须显式传 instructionsLaneActive。 */
   const enabled = args.enabled !== false;
   const agent = context.agent;
+  const instructionLane = context.instructionLane;
   const contextCapability = getAgentHubContextCapability(context);
   const contextUnavailableCode =
     contextCapability === 'remote'
@@ -527,6 +532,18 @@ export function useInstructionThreePaneController(
   /** 三栏直读/保存只允许本机 user；peer 必须经 Pull，project 仍未安全绑定。 */
   const directContextUnsupported = contextCapability !== 'direct';
 
+  const syncAgents = useMemo(
+    () => instructionLane === 'common'
+      ? ALL_INSTRUCTION_TARGETS.filter((targetAgent) =>
+          workspace?.targets.some(
+            (target) =>
+              target.target === targetAgent && target.capability.write === 'supported',
+          ),
+        )
+      : [agent],
+    [agent, instructionLane, workspace],
+  );
+
   const sourceContentTruncated = useMemo(() => {
     if (!workspace) return false;
     return originalFromWorkspace(workspace, agent).contentTruncated;
@@ -537,11 +554,13 @@ export function useInstructionThreePaneController(
     if (!workspace) return true;
     if (state.externalDrift || state.sourceDrift) return true;
     if (workspace.canonical?.contentTruncated || sourceContentTruncated) return true;
-    if (!currentTarget) return true;
-    return currentTarget.capability.write !== 'supported';
+    if (instructionLane === 'common') return syncAgents.length === 0;
+    return !currentTarget || currentTarget.capability.write !== 'supported';
   }, [
     workspace,
     currentTarget,
+    syncAgents,
+    instructionLane,
     sourceContentTruncated,
     directContextUnsupported,
     state.externalDrift,
@@ -563,9 +582,17 @@ export function useInstructionThreePaneController(
       return t('agentHub:userInstructions.errors.contentTruncated');
     }
     if (currentTarget?.capability.write !== 'supported') {
-      return t('agentHub:instructions.threePane.writeBlocked');
+      return t(
+        instructionLane === 'common'
+          ? 'agentHub:instructions.threePane.writeBlockedTargets'
+          : 'agentHub:instructions.threePane.writeBlocked',
+      );
     }
-    return t('agentHub:instructions.threePane.writeBlocked');
+    return t(
+      instructionLane === 'common'
+        ? 'agentHub:instructions.threePane.writeBlockedTargets'
+        : 'agentHub:instructions.threePane.writeBlocked',
+    );
   }, [
     writeBlocked,
     workspace,
@@ -574,6 +601,7 @@ export function useInstructionThreePaneController(
     directContextUnsupported,
     state.externalDrift,
     state.sourceDrift,
+    instructionLane,
     t,
   ]);
 
@@ -723,8 +751,9 @@ export function useInstructionThreePaneController(
   );
 
   /**
-   * Business Logic: 用已保存的最新 head 生成单 agent 投影 plan（写盘受门禁）。
-   * Code Logic: 调用方先 saveBlocks 推进 head，传入 refreshed workspace；preview setup/update。
+   * Business Logic: 用已保存的最新 head 生成一次性写入 plan（写盘受门禁）。
+   * Code Logic: 调用方先 saveBlocks 推进 head，传入 refreshed workspace；preview setup/update
+   *   仅作为 expected-hash/CAS 的内部准备步骤，不再打开重复预览 Dialog。
    */
   const runPreviewWithBaseline = useCallback(
     async (baseline: SyncBaseline, ws: UserInstructionWorkspaceDto) => {
@@ -745,7 +774,7 @@ export function useInstructionThreePaneController(
       lastSyncBaselineRef.current = baseline;
       try {
         const request = {
-          ...buildSingleAgentPreviewRequest(ws, agent),
+          ...buildInstructionPreviewRequest(ws, syncAgents),
           ...requestContext,
         };
         const target = ws.targets.find((item) => item.target === agent) ?? null;
@@ -770,8 +799,9 @@ export function useInstructionThreePaneController(
           planToken: nextPlan.planToken,
           clientRequestId: createClientRequestId(),
         };
-        setPreviewOpen(true);
+        setPreviewOpen(false);
         setDualDirtyOpen(false);
+        return nextPlan;
       } catch (reason) {
         if (
           !mountedRef.current ||
@@ -793,6 +823,7 @@ export function useInstructionThreePaneController(
                   ? reason.message
                   : String(reason),
         );
+        return null;
       } finally {
         if (
           mountedRef.current &&
@@ -803,7 +834,7 @@ export function useInstructionThreePaneController(
         }
       }
     },
-    [agent, requestContext, t, writeBlocked, writeBlockedReason],
+    [agent, requestContext, syncAgents, t, writeBlocked, writeBlockedReason],
   );
 
   /**
@@ -946,73 +977,6 @@ export function useInstructionThreePaneController(
     ],
   );
 
-  const requestSync = useCallback(async () => {
-    if (directContextUnsupported) {
-      setActionError(contextUnavailableCode);
-      return;
-    }
-    const resolved = resolveSyncContent(state, agent);
-    if (!resolved.ok) {
-      if (resolved.reason === 'dual_dirty_conflict') {
-        setDualDirtyOpen(true);
-        setActionError(null);
-        return;
-      }
-      setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
-      return;
-    }
-    // original 基线必须整篇变成唯一 shared canonical block；不能只把正文留在 preview。
-    const canonicalContent = joinBlocksForTarget(state.blocks, agent);
-    const originalNeedsCanonicalSave =
-      resolved.baseline === 'original' &&
-      (state.originalDirty ||
-        state.blocks.length === 0 ||
-        normalizeInstructionContentForComparison(canonicalContent) !==
-          normalizeInstructionContentForComparison(resolved.content));
-    const originalBlocks = originalNeedsCanonicalSave
-      ? blocksFromOriginalContent(resolved.content)
-      : undefined;
-    // 先保存块到 canonical head（投影数据源），再用新 head preview/apply。
-    // 已有 canonical blocks 且无 dirty 时直接复用 head，避免无条件推进空 head。
-    const editVersionBeforeSave = editVersionRef.current;
-    const refreshed = await saveBlocks(originalBlocks);
-    if (!refreshed || editVersionBeforeSave !== editVersionRef.current) return;
-    await runPreviewWithBaseline(resolved.baseline, refreshed);
-  }, [
-    agent,
-    contextUnavailableCode,
-    directContextUnsupported,
-    runPreviewWithBaseline,
-    saveBlocks,
-    state,
-    t,
-  ]);
-
-  const chooseBaseline = useCallback(
-    (baseline: SyncBaseline) => {
-      const content =
-        baseline === 'blocks'
-          ? state.previewText || joinBlocksForTarget(state.blocks, agent)
-          : state.originalText;
-      if (!content.trim()) {
-        setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
-        setDualDirtyOpen(false);
-        return;
-      }
-      const originalBlocks =
-        baseline === 'original' ? blocksFromOriginalContent(content) : undefined;
-      // dual-dirty 选基线后，同样先 saveBlocks 再 preview
-      const editVersionBeforeSave = editVersionRef.current;
-      setDualDirtyOpen(false);
-      void saveBlocks(originalBlocks).then((refreshed) => {
-        if (refreshed && editVersionBeforeSave === editVersionRef.current) {
-          void runPreviewWithBaseline(baseline, refreshed);
-        }
-      });
-    },
-    [agent, runPreviewWithBaseline, saveBlocks, state, t],
-  );
-
   const cancelDualDirty = useCallback(() => {
     setDualDirtyOpen(false);
   }, []);
@@ -1022,12 +986,13 @@ export function useInstructionThreePaneController(
     setPreviewOpen(false);
   }, [actionBusy]);
 
-  const applyPlan = useCallback(async () => {
+  const applyPlan = useCallback(async (preparedPlan?: UserInstructionPlanDto) => {
     if (directContextUnsupported) {
       setActionError(contextUnavailableCode);
       return;
     }
-    if (!plan) return;
+    const selectedPlan = preparedPlan ?? plan;
+    if (!selectedPlan) return;
     if (stateRef.current.externalDrift || stateRef.current.sourceDrift) {
       setPlan(null);
       setPreviewOpen(false);
@@ -1047,9 +1012,9 @@ export function useInstructionThreePaneController(
     }
     const existing = planRequestIdRef.current;
     const base =
-      existing?.planToken === plan.planToken
+      existing?.planToken === selectedPlan.planToken
         ? existing
-        : { planToken: plan.planToken, clientRequestId: createClientRequestId() };
+        : { planToken: selectedPlan.planToken, clientRequestId: createClientRequestId() };
     planRequestIdRef.current = base;
     const request = { ...base, ...requestContext };
     setActionBusy(true);
@@ -1134,6 +1099,75 @@ export function useInstructionThreePaneController(
     requestContext,
     t,
   ]);
+
+  const requestSync = useCallback(async () => {
+    if (directContextUnsupported) {
+      setActionError(contextUnavailableCode);
+      return;
+    }
+    const resolved = resolveSyncContent(state, agent);
+    if (!resolved.ok) {
+      if (resolved.reason === 'dual_dirty_conflict') {
+        setDualDirtyOpen(true);
+        setActionError(null);
+        return;
+      }
+      setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
+      return;
+    }
+    // original 基线必须整篇变成唯一 shared canonical block；不能只把正文留在写盘请求。
+    const canonicalContent = joinBlocksForTarget(state.blocks, agent);
+    const originalNeedsCanonicalSave =
+      resolved.baseline === 'original' &&
+      (state.originalDirty ||
+        state.blocks.length === 0 ||
+        normalizeInstructionContentForComparison(canonicalContent) !==
+          normalizeInstructionContentForComparison(resolved.content));
+    const originalBlocks = originalNeedsCanonicalSave
+      ? blocksFromOriginalContent(resolved.content)
+      : undefined;
+    // 先保存 canonical head，再生成绑定 hash/revision 的一次性 plan 并立即原子应用。
+    const editVersionBeforeSave = editVersionRef.current;
+    const refreshed = await saveBlocks(originalBlocks);
+    if (!refreshed || editVersionBeforeSave !== editVersionRef.current) return;
+    const preparedPlan = await runPreviewWithBaseline(resolved.baseline, refreshed);
+    if (!preparedPlan || editVersionBeforeSave !== editVersionRef.current) return;
+    await applyPlan(preparedPlan);
+  }, [
+    agent,
+    applyPlan,
+    contextUnavailableCode,
+    directContextUnsupported,
+    runPreviewWithBaseline,
+    saveBlocks,
+    state,
+    t,
+  ]);
+
+  const chooseBaseline = useCallback(
+    (baseline: SyncBaseline) => {
+      const content =
+        baseline === 'blocks'
+          ? state.previewText || joinBlocksForTarget(state.blocks, agent)
+          : state.originalText;
+      if (!content.trim()) {
+        setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
+        setDualDirtyOpen(false);
+        return;
+      }
+      const originalBlocks =
+        baseline === 'original' ? blocksFromOriginalContent(content) : undefined;
+      const editVersionBeforeSave = editVersionRef.current;
+      setDualDirtyOpen(false);
+      void saveBlocks(originalBlocks).then(async (refreshed) => {
+        if (!refreshed || editVersionBeforeSave !== editVersionRef.current) return;
+        const preparedPlan = await runPreviewWithBaseline(baseline, refreshed);
+        if (!preparedPlan || editVersionBeforeSave !== editVersionRef.current) return;
+        await applyPlan(preparedPlan);
+      });
+    },
+    [agent, applyPlan, runPreviewWithBaseline, saveBlocks, state, t],
+  );
 
   const refresh = useCallback(async () => {
     autoReparseAfterLoadRef.current = false;

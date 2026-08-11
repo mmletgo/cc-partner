@@ -107,10 +107,10 @@ function makeInstructionWorkspace(overrides: Record<string, unknown> = {}) {
         managementMode: 'unmanaged',
         capability: {
           scan: 'readOnly',
-          write: 'blocked',
+          write: 'supported',
           remove: 'blocked',
-          activate: 'blocked',
-          reasonCode: 'USER_INSTRUCTION_WRITE_EVIDENCE_MISSING',
+          activate: 'newSession',
+          reasonCode: null,
           evidenceIds: ['L1-AGENT-HUB-INSTR-3PANE-001'],
         },
         projection: {
@@ -143,10 +143,10 @@ function makeInstructionWorkspace(overrides: Record<string, unknown> = {}) {
         managementMode: 'unmanaged',
         capability: {
           scan: 'readOnly',
-          write: 'blocked',
+          write: 'supported',
           remove: 'blocked',
-          activate: 'blocked',
-          reasonCode: 'USER_INSTRUCTION_WRITE_EVIDENCE_MISSING',
+          activate: 'newSession',
+          reasonCode: null,
           evidenceIds: ['L1-AGENT-HUB-INSTR-3PANE-001'],
         },
         projection: {
@@ -309,6 +309,76 @@ function registerInteractionBase(
   harness.command('agent_hub_inspect_user_instruction_workspace', {
     kind: 'resolve',
     value: workspace,
+  });
+  harness.command('agent_hub_save_user_instruction_blocks', {
+    kind: 'resolve',
+    value: workspace.canonical,
+  });
+  harness.command('agent_hub_preview_user_instruction_update', {
+    kind: 'resolve',
+    value: {
+      planToken: 'instruction-plan-e2e',
+      expiresAt: '2027-08-10T12:05:00.000Z',
+      baseRevisionId: 'rev-e2e-1',
+      inventorySnapshotHash: workspace.inventorySnapshotHash,
+      blockingReasons: [],
+      changes: [
+        {
+          target: 'claude',
+          path: '/Users/e2e/.claude/CLAUDE.md',
+          operation: 'update',
+          currentHash: 'claude-source-hash',
+          expectedHash: 'claude-source-hash',
+          renderedHash: 'claude-rendered-hash',
+          unifiedDiff: '-old\n+shared',
+          ownershipRequired: false,
+          willShadowSourcePath: null,
+          willReplaceFallbackSourcePath: null,
+          emptyDueToTargetOnly: false,
+          activation: 'newSession',
+          warnings: [],
+        },
+        {
+          target: 'codex',
+          path: '/Users/e2e/.codex/AGENTS.md',
+          operation: 'update',
+          currentHash: 'codex-source-hash',
+          expectedHash: 'codex-source-hash',
+          renderedHash: 'codex-rendered-hash',
+          unifiedDiff: '-old\n+shared',
+          ownershipRequired: false,
+          willShadowSourcePath: null,
+          willReplaceFallbackSourcePath: null,
+          emptyDueToTargetOnly: false,
+          activation: 'newSession',
+          warnings: [],
+        },
+      ],
+    },
+  });
+  harness.command('agent_hub_apply_user_instruction_plan', {
+    kind: 'resolve',
+    value: {
+      planToken: 'instruction-plan-e2e',
+      setupState: 'configured',
+      healthState: 'healthy',
+      targets: [
+        {
+          target: 'claude',
+          status: 'applied',
+          path: '/Users/e2e/.claude/CLAUDE.md',
+          errorCode: null,
+          activation: 'newSession',
+        },
+        {
+          target: 'codex',
+          status: 'applied',
+          path: '/Users/e2e/.codex/AGENTS.md',
+          errorCode: null,
+          activation: 'newSession',
+        },
+      ],
+    },
   });
   harness.command('agent_hub_inspect_portable_inventory', {
     kind: 'resolve',
@@ -529,12 +599,12 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-shell')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-fixed-scope')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-tablist')).toBeVisible();
     await expect(page.getByTestId('agent-hub-toolbar')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-device-select')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();
     await expect(page.getByTestId('agent-hub-project-select')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-lane-common')).toHaveAttribute(
       'aria-checked',
@@ -552,7 +622,8 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     );
     await expect(page).toHaveURL(/lane=adapted/);
 
-    // Agent radiogroup 同样只保留一个 tab stop。
+    // 适配槽恢复 Agent radiogroup，并同样只保留一个 tab stop。
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
     await page.getByTestId('agent-hub-agent-claude').focus();
     await page.keyboard.press('End');
     await expect(page.getByTestId('agent-hub-agent-opencode')).toBeFocused();
@@ -583,7 +654,7 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await expect(page).not.toHaveURL(/section=|target=|kind=|scope=project|deviceId=/);
   });
 
-  test('project/peer legacy deep link normalizes to local-user without direct controls', async ({
+  test('legacy asset deep link canonicalizes while preserving its explicit project context', async ({
     page,
     backendHarness,
   }) => {
@@ -595,15 +666,17 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     );
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-context-migration-notice')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-fixed-scope')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-device-select')).toHaveCount(0);
-    await expect(page.getByTestId('agent-hub-project-select')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-project-select')).toBeVisible();
     await expect(page.getByTestId('agent-hub-agent-claude')).toHaveAttribute(
       'aria-checked',
       'true',
     );
     await expect(page).toHaveURL(/tab=skill/);
-    await expect(page).not.toHaveURL(/scope=project|projectKey=|deviceId=|section=|target=|kind=/);
+    await expect(page).toHaveURL(/scope=project/);
+    await expect(page).toHaveURL(/project=local-1/);
+    await expect(page).not.toHaveURL(/deviceId=|section=|target=|kind=/);
   });
 });
 
@@ -620,13 +693,20 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
     await expect(page.getByTestId('instruction-three-pane')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
 
-    // 公共槽：仅单列公共编辑；Agent context 仍持续可见。
+    // 公共槽：仅单列公共编辑；公共内容与 Agent 无关，因此隐藏 Agent context。
     await expect(page.getByTestId('instruction-panes-common')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
     await expect(page.getByTestId('instruction-slot-textarea')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-preview')).toHaveCount(0);
     await expect(page.getByTestId('instruction-pane-original')).toHaveCount(0);
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+
+    // 公共槽直接覆盖所有当前可写 Agent：页面已完成内容核对，点击后直接原子写入。
+    await expect(page.getByTestId('instruction-sync-to-native')).toBeEnabled();
+    await expect(page.getByTestId('instruction-sync-to-native')).toHaveText('写入原始文件');
+    await page.getByTestId('instruction-sync-to-native').click();
+    await expect(page.getByTestId('user-instruction-preview-dialog')).toHaveCount(0);
+    await expect(page.getByTestId('instruction-three-pane-apply-result')).toBeVisible();
 
     // 适配槽 + Claude：仅公共底稿单列
     await page.getByTestId('agent-hub-lane-adapted').click();
@@ -694,10 +774,7 @@ test.describe('E2E-AGENT-HUB-DIRTY-HISTORY-001 committed context guard', () => {
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
     await expect(page.getByTestId('agent-hub-context-change-dialog')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-agent-claude')).toHaveAttribute(
-      'aria-checked',
-      'true',
-    );
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-tab-instructions')).toHaveAttribute(
       'aria-selected',
       'true',

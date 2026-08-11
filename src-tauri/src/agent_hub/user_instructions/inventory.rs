@@ -99,7 +99,7 @@ pub enum UserInstructionOwnership {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UserInstructionCapabilityLevel {
-    /// 已认证支持
+    /// 当前操作路径支持；用户级写入指已生成逐文件 diff、并由用户确认的原子写入。
     Supported,
     /// 可读但不可写
     ReadOnly,
@@ -869,8 +869,11 @@ fn evaluate_capability(
         true,
     );
     let write_support = evaluated.capability(TargetCapability::RenderInstruction);
-    let write = capability_level(write_support, false);
-    let remove = write;
+    // 用户级提示词不是后台自动投影：它先生成绑定具体路径与 expected hash 的预览，
+    // 再由用户显式确认，最终走 AtomicProjectionWriter。只要当前 adapter 能读取目标，
+    // 即可开放这条人工确认写入链；support manifest 仍继续约束自动投影与删除。
+    let write = user_confirmed_write_capability(scan);
+    let remove = capability_level(write_support, false);
     let activate = activation_support(
         write_support,
         write,
@@ -887,7 +890,11 @@ fn evaluate_capability(
             write,
             remove,
             activate,
-            reason_code: evaluated.reasons.first().cloned(),
+            reason_code: if write == UserInstructionCapabilityLevel::Blocked {
+                evaluated.reasons.first().cloned()
+            } else {
+                None
+            },
             evidence_ids: record
                 .map(|record| record.evidence_ids.clone())
                 .unwrap_or_default(),
@@ -930,6 +937,20 @@ fn capability_level(
         CapabilitySupport::Blocked
         | CapabilitySupport::ReadOnly
         | CapabilitySupport::ActivationRequired => UserInstructionCapabilityLevel::Blocked,
+    }
+}
+
+/// 将可读的用户级目标提升为“预览后人工确认写入”。
+///
+/// 自动投影、portable mutation 与删除仍由 support manifest 单独门禁；这里不会扩大它们。
+fn user_confirmed_write_capability(
+    scan: UserInstructionCapabilityLevel,
+) -> UserInstructionCapabilityLevel {
+    match scan {
+        UserInstructionCapabilityLevel::Supported | UserInstructionCapabilityLevel::ReadOnly => {
+            UserInstructionCapabilityLevel::Supported
+        }
+        UserInstructionCapabilityLevel::Blocked => UserInstructionCapabilityLevel::Blocked,
     }
 }
 
@@ -1204,6 +1225,19 @@ mod tests {
                 CapabilitySupport::ActivationRequired,
             ),
             UserInstructionActivationSupport::Unknown
+        );
+    }
+
+    /// Business Logic: 可读提示词必须允许用户在核对 diff 后显式写入，不能被自动投影认证门禁误伤。
+    #[test]
+    fn readable_instruction_target_allows_user_confirmed_preview_apply() {
+        assert_eq!(
+            user_confirmed_write_capability(UserInstructionCapabilityLevel::ReadOnly),
+            UserInstructionCapabilityLevel::Supported
+        );
+        assert_eq!(
+            user_confirmed_write_capability(UserInstructionCapabilityLevel::Blocked),
+            UserInstructionCapabilityLevel::Blocked
         );
     }
 

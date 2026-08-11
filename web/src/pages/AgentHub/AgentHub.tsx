@@ -102,6 +102,12 @@ export function AgentHubView(props: AgentHubViewProps) {
     instructionThreePane,
   } = props;
 
+  const instructionApplyHasFailure = Boolean(
+    instructionThreePane?.applyResult?.targets.some((target) =>
+      ['stalePreview', 'blocked', 'conflict', 'failed'].includes(target.status),
+    ),
+  );
+
   const instructionThreePaneLabels: InstructionThreePaneViewLabels = useMemo(
     () => ({
       blocksTitle: t('agentHub:instructions.threePane.blocksTitle'),
@@ -389,6 +395,36 @@ export function AgentHubView(props: AgentHubViewProps) {
             onConfirmReparse={instructionThreePane.confirmReparseFromOriginal}
             onCancelReparse={instructionThreePane.cancelReparseFromOriginal}
           />
+        ) : null}
+
+        {hubContext.tab === 'instructions' && instructionThreePane?.applyResult ? (
+          <StatusMessage
+            tone={instructionApplyHasFailure ? 'warn' : 'success'}
+            action={(
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={instructionThreePane.dismissApplyResult}
+              >
+                {t('common:action.confirm')}
+              </Button>
+            )}
+            data-testid="instruction-three-pane-apply-result"
+          >
+            <span>
+              {instructionApplyHasFailure
+                ? t('agentHub:userInstructions.result.partial')
+                : t('agentHub:userInstructions.result.success')}
+            </span>
+            <ul className={styles.userResultList}>
+              {instructionThreePane.applyResult.targets.map((target) => (
+                <li key={`${target.target}-${target.path}`}>
+                  {t(`agentHub:targets.${target.target}`)} ·{' '}
+                  {t(`agentHub:userInstructions.result.status.${target.status}`)} · {target.path}
+                </li>
+              ))}
+            </ul>
+          </StatusMessage>
         ) : null}
 
         {hubContext.tab === 'instructions' && isProject ? (

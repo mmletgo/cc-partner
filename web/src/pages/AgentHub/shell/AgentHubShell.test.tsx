@@ -70,16 +70,19 @@ describe('AgentHubShell', () => {
     expect(source).not.toMatch(/from\s+['"]@\/api\//);
   });
 
-  test('click Codex emits onContextChange({ agent: "codex" })', () => {
+  test('click Codex emits onContextChange({ agent: "codex" }) in an agent-specific lane', () => {
     const onContextChange = vi.fn();
-    renderShell({ onContextChange });
+    renderShell({
+      onContextChange,
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'adapted' },
+    });
     fireEvent.click(screen.getByTestId('agent-hub-agent-codex'));
     expect(onContextChange).toHaveBeenCalledWith({ agent: 'codex' });
   });
 
-  test('agent switcher remains visible in every instruction lane', () => {
+  test('common instruction lane hides agent switcher while agent-specific lanes show it', () => {
     const { rerender, props } = renderShell();
-    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-agent-switcher')).toBeNull();
     for (const instructionLane of ['adapted', 'exclusive'] as const) {
       rerender(
         <I18nextProvider i18n={i18n}>
@@ -196,16 +199,18 @@ describe('AgentHubShell', () => {
   });
 
   test('selected navigation keeps the orange primary variant while unselected items stay ghost', () => {
-    renderShell();
+    renderShell({
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'adapted' },
+    });
 
     expect(screen.getByTestId('agent-hub-tab-instructions').getAttribute('data-variant'))
       .toBe('primary');
     expect(screen.getByTestId('agent-hub-tab-skill').getAttribute('data-variant'))
       .toBe('ghost');
     expect(screen.getByTestId('agent-hub-lane-common').getAttribute('data-variant'))
-      .toBe('primary');
-    expect(screen.getByTestId('agent-hub-lane-adapted').getAttribute('data-variant'))
       .toBe('ghost');
+    expect(screen.getByTestId('agent-hub-lane-adapted').getAttribute('data-variant'))
+      .toBe('primary');
     expect(screen.getByTestId('agent-hub-agent-claude').getAttribute('data-variant'))
       .toBe('primary');
     expect(screen.getByTestId('agent-hub-agent-codex').getAttribute('data-variant'))
@@ -249,7 +254,10 @@ describe('AgentHubShell', () => {
 
   test('each group has one tab stop and keyboard navigation wraps with focus + callback', () => {
     const onContextChange = vi.fn();
-    renderShell({ onContextChange });
+    renderShell({
+      onContextChange,
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'adapted' },
+    });
 
     const tabs = screen.getAllByRole('tab') as HTMLButtonElement[];
     const laneRadios = screen.getByTestId('agent-hub-lane-switcher').querySelectorAll('[role="radio"]');

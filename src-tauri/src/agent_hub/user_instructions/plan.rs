@@ -436,11 +436,11 @@ pub async fn apply_user_instruction_plan(
 /// apply 写盘前基于刚刷新的 workspace 再验当前 target capability。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     preview 后 support manifest、CLI 版本或证据可能回落；旧 plan 即使没有 blocker，
-///     也不能在当前 scan-only 状态继续创建、覆盖或删除原生指令文件。
+///     preview 后目标可能变为不可读、路径漂移或删除能力回落；旧 plan 即使没有 blocker，
+///     也不能继续创建、覆盖或删除原生指令文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     Leave 永不写；Create/Update 要求 write=Supported；Delete 要求 remove=Supported；
+///     Leave 永不写；Create/Update 要求用户确认写链 write=Supported；Delete 仍要求 remove=Supported；
 ///     target 缺失时 fail-closed。
 fn workspace_blocks_current_mutation(
     workspace: &UserInstructionWorkspaceDto,

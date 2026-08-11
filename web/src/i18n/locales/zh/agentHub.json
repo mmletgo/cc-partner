@@ -68,7 +68,7 @@
       "previewTitle": "合成预览",
       "originalTitle": "原始文件",
       "reparseFromOriginal": "从原始导入为公共",
-      "syncToNative": "同步到原生文件…",
+      "syncToNative": "写入原始文件",
       "emptyBlocks": "当前槽为空。可直接在此编辑。",
       "emptyPreview": "在填写公共/适配/独有槽之前，预览保持为空。",
       "emptyOriginal": "未找到该 Agent 的原始内容。原始来源保持只读。",
@@ -113,7 +113,8 @@
       "contextDiscard": "放弃草稿并切换",
       "projectScopeUnsupported": "当前后端尚不支持项目级指令写入；不会改写用户级指令。",
       "directContextUnsupported": "指令直读仅支持本机用户级。远端设备请使用 Pull；项目级仍保持关闭。",
-      "writeBlocked": "当前 Agent 禁止写入。仍可编辑草稿，但同步已禁用。",
+      "writeBlocked": "当前 Agent 暂不能写入原生文件。仍可编辑并保存 Hub 草稿。",
+      "writeBlockedTargets": "至少一个目标 Agent 暂不能写入原生文件。公共槽仍可编辑并保存 Hub 草稿。",
       "errors": {
         "emptySync": "没有可同步的内容。请先填写原文或三槽。"
       }

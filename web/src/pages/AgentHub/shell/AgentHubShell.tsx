@@ -110,6 +110,8 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const activeScopeIndex = Math.max(0, SCOPES.indexOf(context.scope));
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
   const activeAgentIndex = Math.max(0, AGENTS.indexOf(context.agent));
+  const showAgentSwitcher =
+    context.tab !== 'instructions' || context.instructionLane !== 'common';
   const activeTabId = `agent-hub-tab-${context.tab}`;
   const capability = getAgentHubContextCapability(context);
   const projectMissing = context.scope === 'project' && context.projectKey === null;
@@ -357,41 +359,43 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </div>
         ) : null}
 
-        <div className={styles.row}>
-          <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
-          <div
-            className={styles.segment}
-            role="radiogroup"
-            aria-label={t('agentHub:shell.agentAria')}
-            data-testid="agent-hub-agent-switcher"
-          >
-            {AGENTS.map((agent, index) => {
-              const selected = context.agent === agent;
-              return (
-                <Button
-                  key={agent}
-                  ref={(node) => {
-                    agentRefs.current[index] = node;
-                  }}
-                  variant={selected ? 'primary' : 'ghost'}
-                  size="sm"
-                  role="radio"
-                  tabIndex={selected ? 0 : -1}
-                  aria-checked={selected}
-                  onClick={() => onContextChange({ agent })}
-                  onKeyDown={(event) =>
-                    moveRovingSelection(event, index, AGENTS, agentRefs, (next) =>
-                      onContextChange({ agent: next }),
-                    )
-                  }
-                  data-testid={`agent-hub-agent-${agent}`}
-                >
-                  {t(`agentHub:targets.${agent}`)}
-                </Button>
-              );
-            })}
+        {showAgentSwitcher ? (
+          <div className={styles.row}>
+            <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
+            <div
+              className={styles.segment}
+              role="radiogroup"
+              aria-label={t('agentHub:shell.agentAria')}
+              data-testid="agent-hub-agent-switcher"
+            >
+              {AGENTS.map((agent, index) => {
+                const selected = context.agent === agent;
+                return (
+                  <Button
+                    key={agent}
+                    ref={(node) => {
+                      agentRefs.current[index] = node;
+                    }}
+                    variant={selected ? 'primary' : 'ghost'}
+                    size="sm"
+                    role="radio"
+                    tabIndex={selected ? 0 : -1}
+                    aria-checked={selected}
+                    onClick={() => onContextChange({ agent })}
+                    onKeyDown={(event) =>
+                      moveRovingSelection(event, index, AGENTS, agentRefs, (next) =>
+                        onContextChange({ agent: next }),
+                      )
+                    }
+                    data-testid={`agent-hub-agent-${agent}`}
+                  >
+                    {t(`agentHub:targets.${agent}`)}
+                  </Button>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
 
       <div

@@ -214,7 +214,7 @@ function InstructionChrome(props: {
         </div>
       </div>
 
-      {writeBlocked && writeBlockedReason ? (
+      {showSync && writeBlocked && writeBlockedReason ? (
         <StatusMessage tone="warn" data-testid="instruction-write-blocked">
           {writeBlockedReason}
         </StatusMessage>
@@ -593,7 +593,8 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
 
   // 路径仅在独有槽（展示原始文件）有意义；同步写盘各 lane 均可用
   const showPath = instructionLane === 'exclusive';
-  const showSync = false;
+  // 本机指令写入采用“先预览、后确认应用”；能力或漂移门禁只决定按钮是否可用。
+  const showSync = true;
 
   return (
     <div className={styles.root} data-testid="instruction-three-pane">

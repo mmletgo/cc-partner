@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     `ensure_schema` 建 Agent Hub 表与索引（含 Gate D plugin 边表），并对
-//!     project_mappings/checkout_bindings/projection_jobs 做 PRAGMA 列升级；
+//!     project_mappings/checkout_bindings/projection_jobs/preview plans 做 PRAGMA 列升级；
 //!     `insert_scope/insert_asset/append_revision/upsert_target_binding`、
 //!     mapping/binding/materialization/projection_job 写路径走 `with_shared_write_lease`；
 //!     revision 多行更新同事务；package revision 与 component/residual refs 同事务。
@@ -5796,10 +5796,10 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
      ON agent_hub_component_standalone_refs(standalone_asset_id)",
 ];
 
-/// 升级旧库：为 mappings/bindings 补列与唯一索引。
+/// 升级旧库：为 mappings/bindings/jobs/preview plans 补列与唯一索引。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     已有 Gate A Task1 库缺少 opt-in/status/绝对路径列时，必须幂等 ALTER，不能重建丢行。
+///     已有库缺少 opt-in/status/绝对路径或 plan claim 列时，必须幂等 ALTER，不能重建丢行。
 ///
 /// Code Logic（这个函数做什么）:
 ///     PRAGMA table_info 检测缺失列后 ALTER ADD COLUMN；再建 unique index。
@@ -5932,6 +5932,22 @@ async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
         sqlx::query("ALTER TABLE agent_hub_push_requests ADD COLUMN staging_cleaned_at TEXT")
             .execute(pool)
             .await?;
+    }
+
+    // Preview/apply 的原子 claim 在早期 schema 之后加入。CREATE TABLE IF NOT EXISTS
+    // 不会升级旧表，因此必须为已安装用户幂等补列，否则预览阶段 INSERT 就会失败。
+    for table in [
+        "agent_hub_user_instruction_plans",
+        "agent_hub_portable_asset_action_plans",
+        "agent_hub_portable_pull_plans",
+    ] {
+        let plan_cols = table_column_names(pool, table).await?;
+        if !plan_cols.iter().any(|c| c == "claimed_at") {
+            // table 名来自上面的静态白名单，不包含用户输入。
+            sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN claimed_at TEXT"))
+                .execute(pool)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -7421,6 +7437,70 @@ mod tests {
         let again = repo.get_asset(&asset.id).await.unwrap().unwrap();
         assert_eq!(again.id, asset.id);
         assert_eq!(again.logical_key, "src-tauri");
+    }
+
+    /// Business Logic: 升级安装可能已有不含 claimed_at 的 preview plan 表；启动迁移必须原地补列，
+    ///     让用户点击“预览并同步”后可以正常保存并 claim plan，且不得要求删除数据库。
+    /// Code Logic: 手工创建旧版 user-instruction plan 表，执行两次 ensure_schema，随后走真实
+    ///     insert + claim 仓储路径验证幂等迁移与原子 claim。
+    #[tokio::test]
+    async fn ensure_schema_adds_claimed_at_to_legacy_user_instruction_plans() {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE agent_hub_user_instruction_plans (
+                plan_token TEXT PRIMARY KEY,
+                owner_fingerprint TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                base_revision_id TEXT,
+                inventory_snapshot_hash TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                client_request_id TEXT,
+                consumed_at TEXT,
+                result_json TEXT,
+                created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        let columns = table_column_names(&pool, "agent_hub_user_instruction_plans")
+            .await
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "claimed_at"));
+
+        let repo = AgentHubRepo::new(pool);
+        let now = chrono::Utc::now();
+        repo.insert_user_instruction_plan(UserInstructionPlanRecord {
+            plan_token: "legacy-plan".into(),
+            owner_fingerprint: "owner".into(),
+            expires_at: (now + chrono::Duration::minutes(10)).to_rfc3339(),
+            base_revision_id: None,
+            inventory_snapshot_hash: "snapshot".into(),
+            plan_json: "{}".into(),
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: now.to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.claim_user_instruction_plan("legacy-plan", "request-a")
+                .await
+                .unwrap(),
+            UserInstructionPlanClaim::Claimed(_)
+        ));
     }
 
     #[tokio::test]

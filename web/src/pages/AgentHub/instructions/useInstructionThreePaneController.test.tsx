@@ -2,11 +2,11 @@
 /**
  * 提示词三栏 controller 测试。
  *
- * Business Logic: inspect 加载原文且块为空；显式 reparse 才填块；同步单 destination。
+ * Business Logic: inspect 加载原文且块为空；显式 reparse 才填块；公共槽同步全部可写目标。
  * Code Logic: mock agentHubApi；renderHook + waitFor。
  */
 
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import type { TFunction } from 'i18next';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type {
@@ -242,7 +242,8 @@ const baseContext: AgentHubContext = {
 };
 
 afterEach(() => {
-  vi.clearAllMocks();
+  cleanup();
+  vi.resetAllMocks();
 });
 
 describe('originalFromWorkspace', () => {
@@ -491,14 +492,17 @@ describe('useInstructionThreePaneController', () => {
       }),
     );
     const { result } = renderHook(() =>
-      useInstructionThreePaneController({ context: baseContext, t }),
+      useInstructionThreePaneController({
+        context: { ...baseContext, instructionLane: 'exclusive' },
+        t,
+      }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.writeBlocked).toBe(true);
     expect(result.current.writeBlockedReason).toBeTruthy();
   });
 
-  test('sync previews single destination = context.agent then apply reloads', async () => {
+  test('common lane prepares all destinations and writes them without a duplicate preview dialog', async () => {
     apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
     apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
     apiMocks.applyUserInstructionPlan.mockResolvedValue(applyFixture());
@@ -515,16 +519,12 @@ describe('useInstructionThreePaneController', () => {
     const previewArg = apiMocks.previewUserInstructionUpdate.mock.calls[0]?.[0];
     expect(previewArg?.targetSelections).toEqual({
       claude: 'managed',
-      codex: 'unmanaged',
+      codex: 'managed',
       opencode: 'unmanaged',
     });
     // backend preview 基于持久化 head 投影；前端只传 targetSelections/base/snapshot
     expect(previewArg?.commonContent).toBe('');
-    expect(result.current.previewOpen).toBe(true);
-
-    await act(async () => {
-      await result.current.applyPlan();
-    });
+    expect(result.current.previewOpen).toBe(false);
     expect(apiMocks.applyUserInstructionPlan).toHaveBeenCalledTimes(1);
     expect(apiMocks.inspectUserInstructionWorkspace.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
@@ -557,9 +557,6 @@ describe('useInstructionThreePaneController', () => {
     await act(async () => {
       await result.current.requestSync();
     });
-    await act(async () => {
-      await result.current.applyPlan();
-    });
 
     await waitFor(() => expect(result.current.state.blocks.length).toBe(1));
     expect(result.current.state.blocks[0]?.mode).toBe('shared');
@@ -586,6 +583,7 @@ describe('useInstructionThreePaneController', () => {
       useInstructionThreePaneController({ context: baseContext, t }),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledTimes(1);
     act(() => result.current.reparseFromOriginal());
 
     await act(async () => result.current.refresh());

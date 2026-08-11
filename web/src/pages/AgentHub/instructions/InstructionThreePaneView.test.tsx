@@ -39,7 +39,7 @@ const labels: InstructionThreePaneViewLabels = {
   previewTitle: 'Preview',
   originalTitle: 'Original file',
   reparseFromOriginal: 'Import original as common',
-  syncToNative: 'Sync to native file…',
+  syncToNative: 'Write original files',
   emptyBlocks: 'No blocks yet',
   emptyPreview: 'Preview is empty until you reparse or fill blocks',
   emptyOriginal: 'No original content',
@@ -174,7 +174,7 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-blocks')).toBeTruthy();
     expect(screen.queryByTestId('instruction-pane-preview')).toBeNull();
     expect(screen.queryByTestId('instruction-pane-original')).toBeNull();
-    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
+    expect(screen.getByTestId('instruction-sync-to-native')).toBeTruthy();
     expect(screen.queryByTestId('instruction-original-path')).toBeNull();
   });
 
@@ -252,7 +252,7 @@ describe('InstructionThreePaneView', () => {
     expect(screen.getByTestId('instruction-pane-blocks')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-preview')).toBeTruthy();
     expect(screen.getByTestId('instruction-pane-original')).toBeTruthy();
-    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
+    expect(screen.getByTestId('instruction-sync-to-native')).toBeTruthy();
   });
 
   test('reparse button exists only in exclusive original column', () => {
@@ -268,18 +268,18 @@ describe('InstructionThreePaneView', () => {
     expect(screen.queryAllByTestId('instruction-reparse-from-original')).toHaveLength(1);
   });
 
-  test('native sync action is not exposed before write certification', () => {
+  test('native sync action opens preview when the target is writable', () => {
     const onSync = vi.fn();
     render(
       <InstructionThreePaneView
         {...buildProps({ instructionLane: 'exclusive', onSync, state: stateWithSlots() })}
       />,
     );
-    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
-    expect(onSync).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('instruction-sync-to-native'));
+    expect(onSync).toHaveBeenCalledOnce();
   });
 
-  test('write blocked reason stays visible while native action remains absent', () => {
+  test('write blocked reason disables preview-and-sync without blocking Hub draft save', () => {
     render(
       <InstructionThreePaneView
         {...buildProps({
@@ -290,7 +290,9 @@ describe('InstructionThreePaneView', () => {
         })}
       />,
     );
-    expect(screen.queryByTestId('instruction-sync-to-native')).toBeNull();
+    expect((screen.getByTestId('instruction-sync-to-native') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     expect(screen.getByTestId('instruction-write-blocked').textContent).toContain(
       'Writes are blocked for this agent',
     );

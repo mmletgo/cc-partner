@@ -117,7 +117,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode 指令和可移植资产。用户级远端设备复用 same-agent Pull 与 Snapshot Push；本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存，本机原始 CLI 文件始终只读。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的原生 mutation 保持 scan-only，跨 Agent 仅开放本机用户级 bounded selective preview。
+**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode 指令和可移植资产。用户级远端设备复用 same-agent Pull 与 Snapshot Push；本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存；提示词页面已经展示将写入的合成内容与原始文件，用户点击“写入原始文件”后，后端内部生成 expected-hash 一次性 plan 并直接原子写入，不再重复弹出预览确认。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的后台自动投影与 portable mutation 保持 scan-only，跨 Agent 仅开放本机用户级 bounded selective preview。
 
 **2026-08-10 安全纠正（当前权威行为）**：
 - Shell 是 Agent、范围和主 Tab 的唯一上下文真源；主界面只有 Agent 指令、Skill、命令、MCP、Plugin，observed inventory 是资产唯一真源。
@@ -191,14 +191,14 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - L1 证据：`E2E-AGENT-HUB-PORTABLE-001`（`web/tests/agent-hub.spec.ts` backendHarness mock）；后端 L2：`L2-AGENT-HUB-PORTABLE-PARITY-001` / `L2-AGENT-HUB-PORTABLE-PULL-001`
 - 真实多机/全平台 CLI 写盘与 dual-host mDNS 仍 **NOT VERIFIED**（L3）
 
-**用户级指令管理 V2（scan-only 基线已实施，安全写入待 L3）**：
-- 已交付专用默认工作区、三 Agent inventory/source chain、`unconfigured` 聚合态、公共/专属本地草稿、严格 DTO 解码、旧后端只读降级，以及不调用 preview/apply 的 scan-only L1 旅程；portable assets、同步与诊断保留为独立次级入口
-- 已接通 owner/control/Tauri 的 inspect、setup/update preview 与 apply 合同，并落地短期 plan、CAS snapshot、独立 ownership/幂等存储；当前 apply 对文件 mutation 固定返回 `USER_INSTRUCTION_TARGET_SCAN_ONLY`，不得表述为已写入
+**用户级指令管理 V2（页面核对后人工写入）**：
+- 已交付专用三槽工作区、三 Agent inventory/source chain、`unconfigured` 聚合态、公共/适配/独有 Canonical 草稿、严格 DTO 解码，以及逐目标 preview/apply；portable assets、同步与诊断保留为独立次级入口
+- owner/control/Tauri 的 inspect、setup/update preview 与 apply 合同使用短期 plan、CAS snapshot、expected hash、独立 ownership、原子 sibling rename 与幂等存储。可读的本机用户级目标允许用户在提示词页面核对合成内容与原始文件后点击“写入原始文件”；后端内部生成短期 plan 并立即应用，不额外展示预览 Dialog；后台自动投影、portable mutation 与删除仍受 support manifest/L3 门禁
 - 用户级 instruction 入口已从通用 asset target matrix 改为专用管理工作区，优先展示三个 Agent 的实际生效来源、文件路径、Hub ownership、写入能力与下一步；旧页面的“应不存在 / 无状态 / 已验证 / 不支持 / partial”组合不是 V2 合法用户状态
 - 首次管理必须遵循“只读 inventory → 选择公共/专属内容与目标 Agent → 路径、优先级影响和精确 diff → 用户确认 → 逐 target 安全投影”；确认前不写 CLI 文件，不把发现等同于纳管
 - Codex 默认持久文件使用 adapter 解析的 `AGENTS.md`，不得静默创建会遮蔽 base 的 `AGENTS.override.md`；OpenCode 必须识别原生 `AGENTS.md`、Claude fallback 及兼容禁用环境变量
 - instruction UI 不直接暴露 `desiredPresence × desiredEnabled`；停止管理并保留文件、暂停使用、单 target 移除与 canonical tombstone 是四个不同操作，覆盖/删除必须校验 ownership 与 expected hash
-- LAN/Git 导入只表示 canonical 已进入 Hub，不自动应用到本机 Agent；真实 CLI 写盘 L3 evidence 未完成前继续 scan-only / fail-closed
+- LAN/Git 导入只表示 canonical 已进入 Hub，不自动应用到本机 Agent；用户仍需在提示词页面点击“写入原始文件”。公共槽不显示 Agent 选择，写入时覆盖所有当前可写目标；适配/独有槽只写当前 Agent
 - 权威合同：[`docs/superpowers/specs/2026-08-04-agent-hub-user-instruction-management-v2-design.md`](superpowers/specs/2026-08-04-agent-hub-user-instruction-management-v2-design.md)
 
 ### 2.6 设备自动发现与互联
