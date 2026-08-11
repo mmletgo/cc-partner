@@ -30,7 +30,7 @@ import {
 import {
   addBlock,
   appendAdaptedVariants,
-  appendAnalyzedParts,
+  replaceAnalyzedParts,
   blocksFromOriginalContent,
   dtoToDraft,
   draftToDto,
@@ -104,12 +104,12 @@ export interface UseInstructionThreePaneControllerResult {
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
-  /** 分析拆解将追加到现有三槽时的显式确认（可选）。 */
+  /** 分析拆解将覆盖现有三槽时的显式确认（可选）。 */
   analyzeConfirmOpen: boolean;
   previewOpen: boolean;
   plan: UserInstructionPlanDto | null;
   applyResult: UserInstructionApplyResultDto | null;
-  /** 独有页：调用 Claude 把原始文件拆解并追加到三槽。 */
+  /** 独有页：调用 Claude 把原始文件拆解并覆盖三槽。 */
   analyzeDecompose: () => void;
   confirmAnalyzeDecompose: () => void;
   cancelAnalyzeDecompose: () => void;
@@ -631,7 +631,7 @@ export function useInstructionThreePaneController(
   );
 
   /**
-   * Business Logic: 独有页分析拆解 — 有未保存三槽时先确认，再调 Claude 拆解并追加。
+   * Business Logic: 独有页分析拆解 — 有未保存三槽时先确认，再调 Claude 拆解并覆盖三槽。
    * Code Logic: 空原文拒绝；busy 时 short-circuit。
    */
   const runAnalyzeDecompose = useCallback(async () => {
@@ -660,7 +660,7 @@ export function useInstructionThreePaneController(
       ) {
         return;
       }
-      updateDraft((draft) => appendAnalyzedParts(draft, parts, agent));
+      updateDraft((draft) => replaceAnalyzedParts(draft, parts, agent));
     } catch (reason) {
       if (
         !mountedRef.current ||

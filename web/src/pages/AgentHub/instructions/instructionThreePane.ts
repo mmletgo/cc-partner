@@ -433,7 +433,7 @@ export function findBlockByMode(
 /**
  * 分析拆解产物：公共 / 当前 agent 适配 / 当前 agent 独有。
  *
- * Business Logic: Claude 把原始文件拆成三部分后，分别追加到对应槽尾，不替换既有正文。
+ * Business Logic: Claude 把原始文件拆成三部分后，直接覆盖对应三槽（非追加）。
  */
 export interface InstructionAnalyzeParts {
   common: string;
@@ -470,7 +470,7 @@ const SURFACE_MARKERS = [
 
 /**
  * Business Logic: 产品层强制「语义+表面混写只进适配」；模型偶发把同一段同时放进
- *   common/adapted 时，前端追加前再去重（与后端 normalize_instruction_analyze_parts 对齐）。
+ *   common/adapted 时，前端写入前再去重（与后端 normalize_instruction_analyze_parts 对齐）。
  * Code Logic: 按空行分段；表面词 → 并入 adapted；被 adapted 覆盖/高重叠 → 从 common 删除。
  */
 export function normalizeAnalyzeParts(parts: InstructionAnalyzeParts): InstructionAnalyzeParts {
@@ -599,10 +599,11 @@ function pushUniqueInstructionBlock(blocks: string[], block: string): void {
 }
 
 /**
- * Business Logic: 把分析拆解结果追加到现有三槽尾部，禁止替换既有内容。
- * Code Logic: 先 normalize 混写/重叠 → ensure 三 mode → joinNonEmpty 追加；适配/独有写 variants[agent]。
+ * Business Logic: 把分析拆解结果直接覆盖现有三槽正文（公共/适配/独有），不追加。
+ * Code Logic: 先 normalize 混写/重叠 → ensure 三 mode → 各槽写新值；适配/独有写 variants[agent]。
+ *   拆解结果全空时保留现状（避免 LLM 空响应误清空）。
  */
-export function appendAnalyzedParts(
+export function replaceAnalyzedParts(
   state: InstructionThreePaneState,
   parts: InstructionAnalyzeParts,
   agent: AgentTarget,
@@ -619,56 +620,49 @@ export function appendAnalyzedParts(
     return next;
   }
 
-  const commonAppend = normalized.common.trim();
-  const adaptedAppend = normalized.adapted.trim();
-  const exclusiveAppend = normalized.exclusive.trim();
-  if (!commonAppend && !adaptedAppend && !exclusiveAppend) {
+  const commonNext = normalized.common.trim();
+  const adaptedNext = normalized.adapted.trim();
+  const exclusiveNext = normalized.exclusive.trim();
+  if (!commonNext && !adaptedNext && !exclusiveNext) {
     return next;
   }
 
   let working = next;
-  if (commonAppend) {
-    working = updateBlock(
-      working,
-      shared.id,
-      { commonMarkdown: joinNonEmpty([shared.commonMarkdown, commonAppend]) },
-      agent,
-    );
-  }
-  if (adaptedAppend) {
-    const adaptedNow = findBlockByMode(working.blocks, 'adapted') ?? adapted;
-    const existingAdapted =
-      typeof adaptedNow.variants[agent] === 'string'
-        ? adaptedNow.variants[agent]!
-        : adaptedNow.commonMarkdown;
-    working = updateBlock(
-      working,
-      adaptedNow.id,
-      {
-        variants: {
-          ...adaptedNow.variants,
-          [agent]: joinNonEmpty([existingAdapted, adaptedAppend]),
-        },
+  working = updateBlock(
+    working,
+    shared.id,
+    { commonMarkdown: commonNext },
+    agent,
+  );
+
+  const adaptedNow = findBlockByMode(working.blocks, 'adapted') ?? adapted;
+  working = updateBlock(
+    working,
+    adaptedNow.id,
+    {
+      variants: {
+        ...adaptedNow.variants,
+        [agent]: adaptedNext,
       },
-      agent,
-    );
-  }
-  if (exclusiveAppend) {
-    const exclusiveNow = findBlockByMode(working.blocks, 'targetOnly') ?? exclusive;
-    const existingExclusive = exclusiveNow.variants[agent] ?? '';
-    working = updateBlock(
-      working,
-      exclusiveNow.id,
-      {
-        variants: {
-          ...exclusiveNow.variants,
-          [agent]: joinNonEmpty([existingExclusive, exclusiveAppend]),
-        },
-        sourceTarget: exclusiveNow.sourceTarget ?? agent,
+    },
+    agent,
+  );
+
+  const exclusiveNow = findBlockByMode(working.blocks, 'targetOnly') ?? exclusive;
+  working = updateBlock(
+    working,
+    exclusiveNow.id,
+    {
+      variants: {
+        ...exclusiveNow.variants,
+        [agent]: exclusiveNext,
       },
-      agent,
-    );
-  }
+      sourceTarget: exclusiveNext
+        ? (exclusiveNow.sourceTarget ?? agent)
+        : exclusiveNow.sourceTarget,
+    },
+    agent,
+  );
   return working;
 }
 

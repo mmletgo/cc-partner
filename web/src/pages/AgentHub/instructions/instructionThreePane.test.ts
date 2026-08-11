@@ -10,7 +10,7 @@ import type { AgentTarget } from '@/lib/types/agentHub';
 import {
   addBlock,
   appendAdaptedVariants,
-  appendAnalyzedParts,
+  replaceAnalyzedParts,
   dtoToDraft,
   draftToDto,
   ensureModeBlock,
@@ -147,7 +147,7 @@ describe('initialThreePaneFromDisk', () => {
   });
 });
 
-describe('appendAnalyzedParts / appendAdaptedVariants', () => {
+describe('replaceAnalyzedParts / appendAdaptedVariants', () => {
   test('normalizeAnalyzeParts drops common that overlaps adapted (mixed-content rule)', () => {
     const out = normalizeAnalyzeParts({
       common: 'Always use TypeScript for new modules.',
@@ -170,13 +170,13 @@ describe('appendAnalyzedParts / appendAdaptedVariants', () => {
     expect(out.adapted).toMatch(/Sonnet|implementation/i);
   });
 
-  test('appendAnalyzedParts applies normalize before append (no dual common+adapted copy)', () => {
+  test('replaceAnalyzedParts applies normalize before replace (no dual common+adapted copy)', () => {
     let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
     state = ensureModeBlock(state, 'shared', AGENT);
     state = ensureModeBlock(state, 'adapted', AGENT);
     state = ensureModeBlock(state, 'targetOnly', AGENT);
 
-    const next = appendAnalyzedParts(
+    const next = replaceAnalyzedParts(
       state,
       {
         common: 'Always use TypeScript for new modules.',
@@ -190,7 +190,7 @@ describe('appendAnalyzedParts / appendAdaptedVariants', () => {
     expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude ?? '').toContain('Sonnet');
   });
 
-  test('appendAnalyzedParts appends without replacing existing slot text', () => {
+  test('replaceAnalyzedParts overwrites existing slot text instead of appending', () => {
     let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
     state = ensureModeBlock(state, 'shared', AGENT);
     state = ensureModeBlock(state, 'adapted', AGENT);
@@ -212,7 +212,7 @@ describe('appendAnalyzedParts / appendAdaptedVariants', () => {
       AGENT,
     );
 
-    const next = appendAnalyzedParts(
+    const next = replaceAnalyzedParts(
       state,
       {
         common: 'new common',
@@ -221,16 +221,29 @@ describe('appendAnalyzedParts / appendAdaptedVariants', () => {
       },
       AGENT,
     );
-    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown).toBe(
-      'existing common\n\nnew common',
-    );
-    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude).toBe(
-      'existing adapted\n\nnew adapted',
-    );
-    expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe(
-      'existing exclusive\n\nnew exclusive',
-    );
+    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown).toBe('new common');
+    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude).toBe('new adapted');
+    expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe('new exclusive');
     expect(next.blocksDirty).toBe(true);
+  });
+
+  test('replaceAnalyzedParts does not clear slots when analyze result is empty', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'shared', AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    state = ensureModeBlock(state, 'targetOnly', AGENT);
+    const shared = findBlockByMode(state.blocks, 'shared')!;
+    const adapted = findBlockByMode(state.blocks, 'adapted')!;
+    state = updateBlock(state, shared.id, { commonMarkdown: 'keep me' }, AGENT);
+    state = updateBlock(state, adapted.id, { variants: { claude: 'keep adapted' } }, AGENT);
+
+    const next = replaceAnalyzedParts(
+      state,
+      { common: '   ', adapted: '', exclusive: '\n' },
+      AGENT,
+    );
+    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown).toBe('keep me');
+    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude).toBe('keep adapted');
   });
 
   test('appendAdaptedVariants only appends destination agent variants', () => {

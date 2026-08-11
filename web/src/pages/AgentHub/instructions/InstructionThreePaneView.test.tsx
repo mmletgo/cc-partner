@@ -65,8 +65,8 @@ const labels: InstructionThreePaneViewLabels = {
   sourceDrift: 'Native source changed',
   originalReadOnly: 'Read-only source',
   discardAndReload: 'Discard and reload',
-  analyzeConfirmTitle: 'Analyze and append?',
-  analyzeConfirmDescription: 'Append split parts to existing slots.',
+  analyzeConfirmTitle: 'Analyze and overwrite?',
+  analyzeConfirmDescription: 'Overwrite slots with split parts.',
   analyzeConfirm: 'Start analyze',
 };
 
