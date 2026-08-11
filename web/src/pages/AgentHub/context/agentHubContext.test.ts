@@ -22,12 +22,12 @@ const DEFAULT_CONTEXT: AgentHubContext = {
   deviceId: null,
   projectKey: null,
   tab: 'instructions',
-  instructionLane: 'common',
+  instructionLane: 'exclusive',
   adaptView: false,
 };
 
 describe('parseAgentHubContext', () => {
-  test('empty params yield defaults (claude / user / local / instructions / common)', () => {
+  test('empty params yield defaults (claude / user / local / instructions / exclusive)', () => {
     const ctx = parseAgentHubContext(new URLSearchParams());
     expect(ctx).toEqual(DEFAULT_CONTEXT);
   });
@@ -38,7 +38,7 @@ describe('parseAgentHubContext', () => {
     expect(ctx.agent).toBe('claude');
     expect(ctx.scope).toBe('user');
     expect(ctx.tab).toBe('instructions');
-    expect(ctx.instructionLane).toBe('common');
+    expect(ctx.instructionLane).toBe('exclusive');
     expect(ctx.deviceId).toBeNull();
     expect(ctx.projectKey).toBeNull();
   });
@@ -53,7 +53,7 @@ describe('parseAgentHubContext', () => {
       deviceId: null,
       projectKey: 'wb:proj-1',
       tab: 'mcp',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
       adaptView: true,
     });
   });
@@ -64,10 +64,10 @@ describe('parseAgentHubContext', () => {
     expect(ctx.instructionLane).toBe('adapted');
   });
 
-  test('lane on non-instructions tab is forced back to common', () => {
-    const ctx = parseAgentHubContext(new URLSearchParams('tab=skill&lane=exclusive'));
+  test('lane on non-instructions tab is forced back to default exclusive', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('tab=skill&lane=common'));
     expect(ctx.tab).toBe('skill');
-    expect(ctx.instructionLane).toBe('common');
+    expect(ctx.instructionLane).toBe('exclusive');
   });
 
   test('peer user URL keeps the peer and ignores the project field', () => {
@@ -105,7 +105,7 @@ describe('parseAgentHubContext', () => {
     // assets 默认用户级库存
     expect(ctx.scope).toBe('user');
     expect(ctx.adaptView).toBe(false);
-    expect(ctx.instructionLane).toBe('common');
+    expect(ctx.instructionLane).toBe('exclusive');
   });
 
   test('legacy section via mapLegacySection then merge still works with parse', () => {
@@ -166,7 +166,7 @@ describe('writeAgentHubContext', () => {
       deviceId: 'peer-42',
       projectKey: null,
       tab: 'command',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
       adaptView: true,
     };
     const written = writeAgentHubContext(new URLSearchParams('conflictId=c1'), original);
@@ -176,26 +176,32 @@ describe('writeAgentHubContext', () => {
     expect(parseAgentHubContext(written)).toEqual(original);
   });
 
-  test('lane=exclusive on instructions is written and round-trips', () => {
+  test('lane=common on instructions is written and round-trips', () => {
     const original: AgentHubContext = {
       ...DEFAULT_CONTEXT,
-      instructionLane: 'exclusive',
+      instructionLane: 'common',
     };
     const written = writeAgentHubContext(new URLSearchParams(), original);
-    expect(written.get('lane')).toBe('exclusive');
+    expect(written.get('lane')).toBe('common');
     expect(parseAgentHubContext(written)).toEqual(original);
+  });
+
+  test('default exclusive lane is omitted from empty params', () => {
+    const written = writeAgentHubContext(new URLSearchParams(), DEFAULT_CONTEXT);
+    expect(written.get('lane')).toBeNull();
+    expect(parseAgentHubContext(written).instructionLane).toBe('exclusive');
   });
 
   test('lane is stripped when tab is not instructions', () => {
     const original: AgentHubContext = {
       ...DEFAULT_CONTEXT,
       tab: 'skill',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
     };
     const withStaleLane = new URLSearchParams('lane=adapted&tab=skill');
     const written = writeAgentHubContext(withStaleLane, original);
     expect(written.get('lane')).toBeNull();
-    expect(parseAgentHubContext(written).instructionLane).toBe('common');
+    expect(parseAgentHubContext(written).instructionLane).toBe('exclusive');
   });
 
   test('project scope round-trips with its project identity', () => {
@@ -205,7 +211,7 @@ describe('writeAgentHubContext', () => {
       deviceId: null,
       projectKey: 'local:proj-x',
       tab: 'instructions',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
       adaptView: false,
     };
     const written = writeAgentHubContext(new URLSearchParams(), original);

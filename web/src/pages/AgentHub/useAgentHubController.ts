@@ -1802,7 +1802,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         }
         // lane 仅 instructions 有意义
         if (next.tab !== 'instructions') {
-          next.instructionLane = 'common';
+          next.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
         }
         let written = writeAgentHubContext(prev, next);
         // 离开 portable 资产 tab 时必须清掉 kind/section=assets 等，否则 re-parse 会盖回资产 tab
@@ -1822,7 +1822,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         merged.deviceId = null;
       }
       if (merged.tab !== 'instructions') {
-        merged.instructionLane = 'common';
+        merged.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
       }
 
       // dual path: keep legacy section content in sync with shell
@@ -1869,7 +1869,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
                 : 'skill'
               : 'instructions',
           instructionLane:
-            nextSection === 'assets' ? 'common' : current.instructionLane,
+            nextSection === 'assets'
+              ? DEFAULT_AGENT_HUB_CONTEXT.instructionLane
+              : current.instructionLane,
           adaptView: false,
         };
         let next = writeAgentHubContext(prev, ctx);
@@ -2002,7 +2004,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
             scope: 'user',
             deviceId: null,
             projectKey: null,
-            instructionLane: 'common',
+            instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
             adaptView: false,
           }
         : {
@@ -2013,7 +2015,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
             scope: 'user',
             deviceId: null,
             projectKey: null,
-            instructionLane: 'common',
+            instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
             adaptView: false,
           };
       const next = writeAgentHubContext(prev, nextContext);

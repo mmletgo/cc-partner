@@ -27,7 +27,10 @@ import type {
   AgentHubTab,
   InstructionLane,
 } from '../context/agentHubContext';
-import { getAgentHubContextCapability } from '../context/agentHubContext';
+import {
+  DEFAULT_AGENT_HUB_CONTEXT,
+  getAgentHubContextCapability,
+} from '../context/agentHubContext';
 import styles from './AgentHubShell.module.css';
 
 const AGENTS: AgentTarget[] = ['claude', 'codex', 'opencode'];
@@ -126,7 +129,9 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
 
   function handleTabChange(tab: AgentHubTab): void {
     onContextChange(
-      tab === 'instructions' ? { tab } : { tab, instructionLane: 'common' },
+      tab === 'instructions'
+        ? { tab }
+        : { tab, instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane },
     );
   }
 

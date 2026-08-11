@@ -22,7 +22,7 @@ export type AgentHubScope = 'user' | 'project';
  * 提示词三槽 lane（仅 tab=instructions 有意义）。
  *
  * Business Logic: 公共 / 适配 / 独有 固定槽，禁止再按标题切碎。
- * Code Logic: URL 键 `lane`；默认 common。
+ * Code Logic: URL 键 `lane`；默认 exclusive（打开提示词页优先落独有槽）。
  */
 export type InstructionLane = 'common' | 'adapted' | 'exclusive';
 
@@ -41,7 +41,7 @@ export interface AgentHubContext {
   projectKey: string | null;
   tab: AgentHubTab;
   /**
-   * 提示词三槽；仅 tab=instructions 时有效，其它 tab 恒为默认 common。
+   * 提示词三槽；仅 tab=instructions 时有效，其它 tab 恒为默认 exclusive。
    */
   instructionLane: InstructionLane;
   /** true when view=adapt cross-agent page */
@@ -79,7 +79,7 @@ export const DEFAULT_AGENT_HUB_CONTEXT: AgentHubContext = {
   deviceId: null,
   projectKey: null,
   tab: 'instructions',
-  instructionLane: 'common',
+  instructionLane: 'exclusive',
   adaptView: false,
 };
 

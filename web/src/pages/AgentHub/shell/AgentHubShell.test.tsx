@@ -79,7 +79,9 @@ describe('AgentHubShell', () => {
   });
 
   test('common instruction lane hides agent switcher while agent-specific lanes show it', () => {
-    const { rerender, props } = renderShell();
+    const { rerender, props } = renderShell({
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'common' },
+    });
     expect(screen.queryByTestId('agent-hub-agent-switcher')).toBeNull();
     for (const instructionLane of ['adapted', 'exclusive'] as const) {
       rerender(
@@ -112,13 +114,13 @@ describe('AgentHubShell', () => {
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
     expect(onContextChange).toHaveBeenCalledWith({
       tab: 'skill',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
     });
 
     const skillContext: AgentHubContext = {
       ...DEFAULT_AGENT_HUB_CONTEXT,
       tab: 'skill',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
     };
     rerender(
       <I18nextProvider i18n={i18n}>
@@ -187,7 +189,7 @@ describe('AgentHubShell', () => {
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
     expect(onContextChange).toHaveBeenCalledWith({
       tab: 'skill',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
     });
 
     fireEvent.click(screen.getByTestId('agent-hub-tab-instructions'));
@@ -262,7 +264,7 @@ describe('AgentHubShell', () => {
     fireEvent.keyDown(screen.getByTestId('agent-hub-tab-instructions'), { key: 'ArrowLeft' });
     expect(onContextChange).toHaveBeenLastCalledWith({
       tab: 'plugin',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
     });
     expect(document.activeElement).toBe(screen.getByTestId('agent-hub-tab-plugin'));
 
