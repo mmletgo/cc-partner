@@ -622,6 +622,14 @@ fn scan_plugin_packages(
 ) -> Result<Vec<PortableInventoryItemDto>, AppError> {
     let target = target_dto.target;
     let roots = plugin_roots_for(target, scope, env, homes);
+    // Codex：config.toml [plugins] 启用表；Claude/OpenCode 不用。
+    let codex_enablement = if target == AgentTarget::Codex && scope.scope_kind == ScopeKind::User {
+        load_codex_plugin_enablement(&homes.codex.config_root)
+    } else if target == AgentTarget::Codex {
+        load_codex_plugin_enablement(&scope.absolute_path.join(".codex"))
+    } else {
+        BTreeMap::new()
+    };
     let mut out = Vec::new();
     for candidate in roots {
         let root = candidate.path;
@@ -693,6 +701,17 @@ fn scan_plugin_packages(
             if component_skill.is_dir() {
                 warnings.push("plugin_has_components".into());
             }
+            let actual_enabled = if target == AgentTarget::Codex {
+                let (enabled, warn) =
+                    codex_plugin_actual_enabled(&source.plugin_id, &codex_enablement);
+                if let Some(w) = warn {
+                    warnings.push(w);
+                }
+                Some(enabled)
+            } else {
+                // Claude/OpenCode：目录存在即 installed；无统一 disabled 语义时 true
+                Some(true)
+            };
             let can_mutate_scope =
                 scope.project_opted_in && scope.scope_kind != ScopeKind::Directory;
             let can_enable = can_mutate_scope
@@ -729,7 +748,7 @@ fn scan_plugin_packages(
                 source_path: Some(source_identity),
                 source_origin: PortableInventorySourceOrigin::Standalone,
                 parent_plugin_inventory_item_id: None,
-                actual_enabled: Some(true),
+                actual_enabled,
                 content_hash: Some(content_hash),
                 tree_hash,
                 canonical_asset_id: None,
@@ -741,7 +760,7 @@ fn scan_plugin_packages(
                 capabilities: item_capabilities(
                     target,
                     PortableAssetKind::Plugin,
-                    Some(true),
+                    actual_enabled,
                     can_enable,
                     can_deactivate,
                     true,
@@ -932,6 +951,9 @@ fn claude_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
 }
 
 /// Codex 当前没有稳定 registry 文件；只认 cache 中精确 `.codex-plugin/plugin.json` 根。
+///
+/// Business Logic: 启用权威在 `config.toml` 的 `[plugins."id@market"]`；本函数只列 package 根。
+/// Code Logic: walk cache 找 `.codex-plugin/plugin.json`；registry_plugin_id 填 path id。
 fn codex_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
     let plugins_root = config_root.join("plugins");
     let cache_root = plugins_root.join("cache");
@@ -964,11 +986,85 @@ fn codex_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
                     root,
                 )
             {
-                roots.push(PluginRootCandidate::path_only(root.to_path_buf()));
+                let registry_plugin_id =
+                    crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+                        &root.display().to_string(),
+                    ));
+                roots.push(PluginRootCandidate {
+                    path: root.to_path_buf(),
+                    registry_plugin_id,
+                });
             }
         }
     }
     roots
+}
+
+/// 解析 Codex `config.toml` 中 `[plugins."id@market"] enabled` 映射。
+///
+/// Business Logic: 表存在即安装；`enabled` 缺省 true；`enabled=false` 为禁用。
+/// Code Logic: toml_edit 扫描 `plugins` 表；key 保留完整 `id@market` 字符串。
+pub(crate) fn parse_codex_plugin_enablement_from_toml(text: &str) -> BTreeMap<String, bool> {
+    let mut out = BTreeMap::new();
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return out;
+    };
+    let Some(plugins) = doc.get("plugins").and_then(|i| i.as_table()) else {
+        return out;
+    };
+    for (key, item) in plugins.iter() {
+        let Some(table) = item.as_table() else {
+            continue;
+        };
+        let enabled = table
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        out.insert(key.to_string(), enabled);
+    }
+    out
+}
+
+/// 从 CODEX_HOME/config.toml 加载 plugin 启用表。
+fn load_codex_plugin_enablement(config_root: &Path) -> BTreeMap<String, bool> {
+    let path = config_root.join("config.toml");
+    match fs::read_to_string(&path) {
+        Ok(text) => parse_codex_plugin_enablement_from_toml(&text),
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+/// 解析 package 在 Codex config 中的启用态。
+///
+/// Business Logic: 优先精确 `id@market`；否则任意同 short id 的 key；
+/// cache 残留且 config 无记录 → false（不得硬编码 true）。
+/// Code Logic: BTreeMap 查找 + short-id 前缀匹配。
+fn codex_plugin_actual_enabled(
+    plugin_id: &str,
+    enablement: &BTreeMap<String, bool>,
+) -> (bool, Option<String>) {
+    if enablement.is_empty() {
+        // 无 config 表时保持 installed=true 兼容旧 fixture（无 plugins 段）
+        return (true, None);
+    }
+    if let Some(v) = enablement.get(plugin_id) {
+        return (*v, None);
+    }
+    // short id `browser` 匹配 `browser@openai-bundled`
+    let prefix = format!("{plugin_id}@");
+    let mut matched: Option<bool> = None;
+    for (key, enabled) in enablement {
+        if key == plugin_id || key.starts_with(&prefix) {
+            matched = Some(matched.map(|m| m || *enabled).unwrap_or(*enabled));
+        }
+    }
+    match matched {
+        Some(v) => (v, None),
+        None => (
+            false,
+            Some("codex_plugin_not_in_config".into()),
+        ),
+    }
 }
 
 /// 只返回含目标 manifest 的一级插件目录，拒绝 cache/data/staging 等基础设施目录。
@@ -2307,6 +2403,105 @@ enabled = false
         let roots = codex_user_plugin_roots(&codex_root);
         assert_eq!(roots.len(), 1, "{roots:?}");
         assert_eq!(roots[0].path, codex_plugin);
+    }
+
+    /// Codex config.toml `[plugins."id@market"] enabled` 是启用权威。
+    #[test]
+    fn parse_codex_plugin_enablement_reads_enabled_flags() {
+        let text = r#"
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[plugins."legacy@openai-bundled"]
+enabled = false
+
+[plugins."no-flag@openai-curated"]
+"#;
+        let map = parse_codex_plugin_enablement_from_toml(text);
+        assert_eq!(map.get("browser@openai-bundled"), Some(&true));
+        assert_eq!(map.get("legacy@openai-bundled"), Some(&false));
+        // 缺 enabled 字段时默认 true（与 Codex 表存在即安装一致）
+        assert_eq!(map.get("no-flag@openai-curated"), Some(&true));
+        assert!(!map.contains_key("missing@x"));
+    }
+
+    #[test]
+    fn codex_plugin_package_actual_enabled_follows_config_not_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let codex = home.join(".codex");
+        let browser = codex
+            .join("plugins/cache/openai-bundled/browser/26.803.61601");
+        write(
+            &browser.join(".codex-plugin/plugin.json"),
+            r#"{"name":"browser","version":"1"}"#,
+        );
+        let latex = codex.join("plugins/cache/openai-bundled/latex/0.2.2");
+        write(
+            &latex.join(".codex-plugin/plugin.json"),
+            r#"{"name":"latex","version":"1"}"#,
+        );
+        write(
+            &codex.join("config.toml"),
+            r#"
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = false
+"#,
+        );
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "CODEX_HOME".into(),
+            codex.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scopes = [PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Codex),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (_targets, items) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+        let browser_item = items
+            .iter()
+            .find(|i| i.native_id == "browser" || i.native_id.starts_with("browser@"))
+            .expect("browser package");
+        assert_eq!(
+            browser_item.actual_enabled,
+            Some(true),
+            "config enabled=true"
+        );
+        let latex_item = items
+            .iter()
+            .find(|i| i.native_id == "latex" || i.native_id.starts_with("latex@"))
+            .expect("latex residual package");
+        assert_eq!(
+            latex_item.actual_enabled,
+            Some(false),
+            "cache-only package not listed enabled in config must not report always-true"
+        );
+        assert!(
+            latex_item
+                .warnings
+                .iter()
+                .any(|w| w.contains("codex_plugin_not_in_config")),
+            "residual should warn: {:?}",
+            latex_item.warnings
+        );
     }
 
     #[test]

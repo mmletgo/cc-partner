@@ -954,69 +954,61 @@ fn string_list_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<
 /// 从 TOML 文本解析 Codex `mcp_servers` 表。
 ///
 /// Business Logic: Codex 使用 `mcp_servers.<key>` TOML；只读扫描。
-/// Code Logic: `toml_edit::DocumentMut` 读表；转 PortableMcpServer。
+/// Code Logic: 枚举 server key 后经 `TomlConfigPatcher::inspect` 取完整 leaf JSON
+/// （含 int/float/array/table），content_hash 与 apply CAS 同域；再映射 PortableMcpServer。
 pub fn parse_codex_mcp_toml(
     target: AgentTarget,
     scope_kind: ScopeKind,
     text: &str,
     config_path: &Path,
 ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    use crate::agent_hub::config_patch::{SemanticConfigPatcher, TomlConfigPatcher};
+
     let doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| AppError::validation(format!("codex_config_toml_invalid:{e}")))?;
     let Some(servers) = doc.get("mcp_servers").and_then(|i| i.as_table()) else {
         return Ok(vec![]);
     };
+    let keys: Vec<String> = servers
+        .iter()
+        .filter(|(_, item)| item.as_table().is_some())
+        .map(|(key, _)| key.to_string())
+        .collect();
+    let patcher = TomlConfigPatcher;
+    let bytes = text.as_bytes();
     let mut out = Vec::new();
-    for (key, item) in servers.iter() {
-        let Some(table) = item.as_table() else {
-            continue;
-        };
-        let mut json = serde_json::Map::new();
-        for (k, v) in table.iter() {
-            if let Some(s) = v.as_str() {
-                json.insert(k.to_string(), Value::String(s.to_string()));
-            } else if let Some(a) = v.as_array() {
-                let arr: Vec<Value> = a
-                    .iter()
-                    .filter_map(|x| x.as_str().map(|s| Value::String(s.to_string())))
-                    .collect();
-                json.insert(k.to_string(), Value::Array(arr));
-            } else if let Some(b) = v.as_bool() {
-                json.insert(k.to_string(), Value::Bool(b));
-            } else if let Some(inner) = v.as_table() {
-                let mut m = serde_json::Map::new();
-                for (ik, iv) in inner.iter() {
-                    if let Some(s) = iv.as_str() {
-                        m.insert(ik.to_string(), Value::String(s.to_string()));
-                    }
-                }
-                json.insert(k.to_string(), Value::Object(m));
-            } else if let Some(inner) = v.as_inline_table() {
-                // env = { KEY = "val" } / headers inline
-                let mut m = serde_json::Map::new();
-                for (ik, iv) in inner.iter() {
-                    if let Some(s) = iv.as_str() {
-                        m.insert(ik.to_string(), Value::String(s.to_string()));
-                    }
-                }
-                json.insert(k.to_string(), Value::Object(m));
+    for key in keys {
+        let owned = match patcher.inspect(bytes, &["mcp_servers".into(), key.clone()]) {
+            Ok(v) if v.present => v,
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!(
+                    target = "agent_hub.portable",
+                    key = %key,
+                    error = %e,
+                    "skip codex mcp leaf inspect"
+                );
+                continue;
             }
-        }
-        let value = Value::Object(json);
-        if let Ok((server, diags)) = mcp_from_json_value(target, key, &value, true) {
+        };
+        let value = owned.value;
+        let content_hash = owned
+            .value_hash
+            .unwrap_or_else(|| value_content_hash(&value));
+        if let Ok((server, diags)) = mcp_from_json_value(target, &key, &value, true) {
             let enabled = server.enabled;
             out.push(DiscoveredPortableAsset {
                 kind: AssetKind::Mcp,
-                semantic_name: key.to_string(),
+                semantic_name: key.clone(),
                 scope_kind,
                 payload: PortableAssetPayload::Mcp(server),
                 origin: PortableAssetOrigin {
                     target,
                     path: config_path.to_path_buf(),
                     origin_kind: PortableOriginKind::Native,
-                    native_id: key.to_string(),
-                    content_hash: value_content_hash(&value),
+                    native_id: key,
+                    content_hash,
                     tree_hash: None,
                     status: if enabled {
                         PortableDiscoveryStatus::Active
@@ -1700,6 +1692,43 @@ config_file = "agents/reviewer.md"
             .diagnostics
             .iter()
             .any(|d| d.code == CODE_UNKNOWN_SOURCE_FIELD));
+    }
+
+    /// Codex MCP content_hash 必须等于 TomlConfigPatcher leaf inspect（含 int 字段）。
+    #[test]
+    fn parse_codex_mcp_content_hash_matches_toml_leaf_with_integers() {
+        use crate::agent_hub::config_patch::{SemanticConfigPatcher, TomlConfigPatcher};
+
+        let text = r#"
+[mcp_servers.node_repl]
+command = "node"
+startup_timeout_sec = 120
+args = ["mcp"]
+enabled = true
+"#;
+        let path = PathBuf::from("/tmp/codex-config.toml");
+        let found = parse_codex_mcp_toml(AgentTarget::Codex, ScopeKind::User, text, &path)
+            .expect("parse");
+        assert_eq!(found.len(), 1);
+        let owned = TomlConfigPatcher
+            .inspect(text.as_bytes(), &["mcp_servers".into(), "node_repl".into()])
+            .expect("inspect");
+        assert!(owned.present);
+        assert_eq!(
+            found[0].origin.content_hash,
+            owned.value_hash.expect("hash"),
+            "scan content_hash must share CAS domain with apply Toml leaf"
+        );
+        // 不完整 string-only 重建不得冒充 content_hash
+        let incomplete = serde_json::json!({
+            "command": "node",
+            "args": ["mcp"],
+            "enabled": true,
+        });
+        assert_ne!(
+            found[0].origin.content_hash,
+            crate::agent_hub::config_patch::value_content_hash(&incomplete)
+        );
     }
 
     #[test]

@@ -417,17 +417,23 @@ async fn build_change(
 /// 读取 MCP leaf 的 value_content_hash（与 apply CAS 对齐）。
 ///
 /// Business Logic: planner 必须绑定语义 leaf，而非整文件 raw sha。
-/// Code Logic: 读 source_path JSONC/JSON 的 mcpServers[id] → value_content_hash。
+/// Code Logic: Claude/OpenCode → JSONC `mcpServers`；Codex → TOML `mcp_servers`
+/// （与 target executor 的 patcher/path 同域，含 int 等完整字段）。
 fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
     use crate::agent_hub::config_patch::{
-        value_content_hash, JsoncConfigPatcher, SemanticConfigPatcher,
+        value_content_hash, JsoncConfigPatcher, SemanticConfigPatcher, TomlConfigPatcher,
     };
+    use crate::agent_hub::models::AgentTarget;
     let path = item.source_path.as_deref()?;
     let bytes = std::fs::read(path).ok()?;
-    let patcher = JsoncConfigPatcher;
-    let owned = patcher
-        .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
-        .ok()?;
+    let owned = match item.target {
+        AgentTarget::Codex => TomlConfigPatcher
+            .inspect(&bytes, &["mcp_servers".into(), item.native_id.clone()])
+            .ok()?,
+        AgentTarget::Claude | AgentTarget::OpenCode => JsoncConfigPatcher
+            .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
+            .ok()?,
+    };
     if owned.present {
         Some(value_content_hash(&owned.value))
     } else {
@@ -438,6 +444,7 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_hub::config_patch::{value_content_hash, SemanticConfigPatcher, TomlConfigPatcher};
     use crate::agent_hub::models::{AgentTarget, ScopeKind};
     use crate::agent_hub::portable_actions::models::PortableAssetConflictPolicy;
     use crate::agent_hub::portable_inventory::{
@@ -445,6 +452,118 @@ mod tests {
         PortableInventoryMutationCapability, PortableInventoryScanCapability,
         PortableInventorySourceOrigin, PortableInventoryTargetDto,
     };
+    use std::fs;
+
+    /// Codex MCP expected hash 必须与 apply 侧 Toml leaf inspect 同域（含 int 字段）。
+    #[test]
+    fn codex_mcp_expected_leaf_hash_matches_toml_inspect_with_int_fields() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"
+[mcp_servers.node_repl]
+command = "node"
+startup_timeout_sec = 120
+args = ["mcp"]
+"#,
+        )
+        .unwrap();
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Codex,
+                "user",
+                &config.display().to_string(),
+                "node_repl",
+            ),
+            target: AgentTarget::Codex,
+            kind: PortableAssetKind::Mcp,
+            native_id: "node_repl".into(),
+            display_name: "node_repl".into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some(config.display().to_string()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            // 故意放一个与 TOML 真值不同的扫描 hash，验证 planner 不得回落到它
+            content_hash: Some("stale-scan-hash-without-int".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::HubManaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto::default(),
+            warnings: vec![],
+            mcp_credential: None,
+        };
+        let got = mcp_expected_leaf_hash(&item).expect("codex mcp leaf hash");
+        let bytes = fs::read(&config).unwrap();
+        let owned = TomlConfigPatcher
+            .inspect(&bytes, &["mcp_servers".into(), "node_repl".into()])
+            .expect("toml inspect");
+        assert!(owned.present);
+        assert_eq!(got, owned.value_hash.expect("value hash"));
+        assert_eq!(got, value_content_hash(&owned.value));
+        assert_ne!(got, "stale-scan-hash-without-int");
+    }
+
+    /// Claude MCP 仍走 JSONC `mcpServers` 路径。
+    #[test]
+    fn claude_mcp_expected_leaf_hash_uses_jsonc_mcp_servers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = tmp.path().join("settings.json");
+        fs::write(
+            &config,
+            r#"{"mcpServers":{"ctx":{"type":"stdio","command":"npx","args":["-y","x"]}}}"#,
+        )
+        .unwrap();
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Claude,
+                "user",
+                &config.display().to_string(),
+                "ctx",
+            ),
+            target: AgentTarget::Claude,
+            kind: PortableAssetKind::Mcp,
+            native_id: "ctx".into(),
+            display_name: "ctx".into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some(config.display().to_string()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: None,
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::HubManaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto::default(),
+            warnings: vec![],
+            mcp_credential: None,
+        };
+        let got = mcp_expected_leaf_hash(&item).expect("claude mcp leaf hash");
+        let bytes = fs::read(&config).unwrap();
+        let owned = crate::agent_hub::config_patch::JsoncConfigPatcher
+            .inspect(&bytes, &["mcpServers".into(), "ctx".into()])
+            .expect("jsonc inspect");
+        assert_eq!(got, owned.value_hash.expect("value hash"));
+    }
 
     #[tokio::test]
     async fn partial_deactivate_capability_blocks_plugin_uninstall_plan() {
