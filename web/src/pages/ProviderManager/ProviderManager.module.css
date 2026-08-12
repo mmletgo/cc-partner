@@ -83,14 +83,21 @@
 
 .providerGrid {
   display: grid;
+  /* auto-fill + minmax 让卡片宽度自适应；同一行内网格会强制拉伸到等高，
+     配合卡片内 footer 贴底实现"切换/当前"按钮的视觉对齐 */
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  align-items: stretch;
   gap: var(--space-3);
 }
 
 .providerCard {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  /* 卡片本身已是 flex column（Card 组件根），这里确保高度撑满网格单元格 */
+  height: 100%;
+}
+
+.providerBody {
+  /* Body 区占据剩余空间，把 footer 顶到卡片底部 */
+  flex: 1 1 auto;
 }
 
 .providerHead {
@@ -103,6 +110,13 @@
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--fg);
+  /* 限制最多两行：长 provider 名（如带配置路径前缀的）折成两行后省略，
+     避免与同网格行内短名称卡片高度差距过大 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   word-break: break-word;
 }
 
@@ -111,8 +125,8 @@
   color: var(--fg-muted-readable);
 }
 
-.providerAction {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
+.providerFooter {
+  /* footer 覆盖 Card 默认的右对齐（justify-content: flex-end），
+     改为左对齐：让"切换/当前"动作落在卡片左下，与 provider 名称起始对齐 */
+  justify-content: flex-start;
 }

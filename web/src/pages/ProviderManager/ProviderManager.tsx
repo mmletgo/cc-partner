@@ -21,7 +21,9 @@ import styles from './ProviderManager.module.css';
 
 export type ProviderManagerViewProps = UseProviderManagerControllerResult;
 
-/** 单个 provider 卡片（pure）。 */
+/** 单个 provider 卡片（pure）。
+ *  使用 Card.Header / Card.Body / Card.Footer 复合子组件，
+ *  让 Card 的 padding 机制真正生效，并保证网格内卡片高度对齐、按钮统一贴底。 */
 function ProviderCard(props: {
   provider: ProviderEntry;
   switching: boolean;
@@ -31,13 +33,15 @@ function ProviderCard(props: {
   const { t } = useTranslation(['providerManager', 'common']);
   return (
     <Card variant="outlined" padding="sm" className={styles.providerCard}>
-      <div className={styles.providerHead}>
-        <span className={styles.providerName}>{provider.name}</span>
-        {provider.category ? (
-          <span className={styles.providerCategory}>{provider.category}</span>
-        ) : null}
-      </div>
-      <div className={styles.providerAction}>
+      <Card.Body className={styles.providerBody}>
+        <div className={styles.providerHead}>
+          <span className={styles.providerName} title={provider.name}>{provider.name}</span>
+          {provider.category ? (
+            <span className={styles.providerCategory}>{provider.category}</span>
+          ) : null}
+        </div>
+      </Card.Body>
+      <Card.Footer className={styles.providerFooter}>
         {provider.isCurrent ? (
           <Pill tone="success" dot>
             {t('providerManager:status.current')}
@@ -53,7 +57,7 @@ function ProviderCard(props: {
             {t('providerManager:actions.switch')}
           </Button>
         )}
-      </div>
+      </Card.Footer>
     </Card>
   );
 }
