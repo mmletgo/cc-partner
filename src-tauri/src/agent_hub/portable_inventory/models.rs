@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     camelCase DTO；仅 skill/command/plugin/mcp；MCP 凭据仅 present/hash；
-//!     `inventory_item_id` 由 target|scope|sourceIdentity|nativeId 派生；
+//!     `inventory_item_id` 由 target|scope|originNamespace（路径无关）|nativeId 派生；
 //!     `inventory_snapshot_hash` 对排序后的 material 做 RFC8785 兼容 canonical JSON + sha256。
 
 use crate::agent_hub::models::{AgentTarget, AssetKind, DesiredPresence, ScopeKind};
@@ -375,10 +375,13 @@ pub struct PortableInventorySnapshotDto {
     pub items: Vec<PortableInventoryItemDto>,
 }
 
-/// 由 target、scope、规范化 source identity 与 native ID 派生稳定库存身份。
+/// 由 target、scope、origin namespace（路径无关的逻辑源）与 native ID 派生稳定库存身份。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     库存身份不得使用展示名；target/scope/源路径/nativeId 任一变化都必须产生新 id。
+///     库存身份不得使用展示名；target/scope/逻辑源/nativeId 任一变化都必须产生新 id。
+///     **路径无关**：source_identity 用 origin_namespace（"standalone" / "plugin:{id}"）而非绝对路径，
+///     这样同一逻辑资产在 active 路径和 disabled 路径下拥有同一个 id，enable/disable 移动文件
+///     不会让 id 漂移。绝对路径仍保留在 PortableInventoryItemDto.source_path 字段供 UI 显示。
 ///
 /// Code Logic（这个函数做什么）:
 ///     `sha256_hex(target|scope|sourceIdentity|nativeId)` 小写 hex。

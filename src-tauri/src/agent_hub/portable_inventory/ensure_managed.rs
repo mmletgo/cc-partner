@@ -507,18 +507,40 @@ async fn ensure_scope_for_item(
     }
 }
 
-/// 由 inventory source origin 派生 origin_namespace（与 reconcile 匹配规则对齐）。
-fn origin_namespace_for_item(item: &PortableInventoryItemDto) -> String {
-    match item.source_origin {
+/// 由 inventory source origin 与 source_path 派生路径无关的 origin_namespace。
+///
+/// Business Logic（为什么需要这个函数）:
+///     canonical 资产跟踪与 inventory 身份都需要稳定的逻辑源标识。
+///     绝对路径会随 enable/disable 物理移动而变化，不能作为身份材料；
+///     所以这里把 source_origin 映射为 namespace：standalone / plugin:{id}。
+///
+/// Code Logic（这个函数做什么）:
+///     Standalone / NativeConfig 统一为 `"standalone"`；PluginComponent 从 path
+///     提取 plugin_id 拼 `plugin:{id}`，提取失败时退化为 `"plugin"`。
+pub(crate) fn origin_namespace_from_parts(
+    source_origin: PortableInventorySourceOrigin,
+    source_path: Option<&str>,
+) -> String {
+    match source_origin {
         PortableInventorySourceOrigin::Standalone | PortableInventorySourceOrigin::NativeConfig => {
             "standalone".into()
         }
-        PortableInventorySourceOrigin::PluginComponent => {
-            extract_plugin_id_from_path(item.source_path.as_deref())
-                .map(|id| format!("plugin:{id}"))
-                .unwrap_or_else(|| "plugin".into())
-        }
+        PortableInventorySourceOrigin::PluginComponent => extract_plugin_id_from_path(source_path)
+            .map(|id| format!("plugin:{id}"))
+            .unwrap_or_else(|| "plugin".into()),
     }
+}
+
+/// 由 inventory item 派生 origin_namespace（与 reconcile 匹配规则对齐）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     给定一个 PortableInventoryItemDto，需要算出它的 origin_namespace 用于
+///     canonical 跟踪；语义必须与 inventory_item_id 的 source_identity 一致。
+///
+/// Code Logic（这个函数做什么）:
+///     委托给 `origin_namespace_from_parts`，传入 item 的 source_origin 与 source_path。
+fn origin_namespace_for_item(item: &PortableInventoryItemDto) -> String {
+    origin_namespace_from_parts(item.source_origin, item.source_path.as_deref())
 }
 
 /// 从 plugin 路径提取稳定 plugin id（cache 布局取 id 段，非 `cache`）。

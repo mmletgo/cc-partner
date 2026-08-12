@@ -50,28 +50,52 @@ mod tests {
     use crate::agent_hub::models::{AgentTarget, DesiredPresence, MaterializationStatus};
 
     #[test]
-    fn inventory_identity_separates_target_scope_origin_and_native_id() {
-        let a = inventory_item_id(AgentTarget::Claude, "user", "/x/a", "tool");
-        assert_ne!(
-            a,
-            inventory_item_id(AgentTarget::Codex, "user", "/x/a", "tool")
+    fn inventory_identity_is_path_independent_and_distinguishes_logical_origin() {
+        // 路径无关契约：source_identity 用 origin_namespace（"standalone"）而非绝对路径，
+        // 所以同一逻辑资产在 active 路径与 disabled 路径下产出相同 id。
+        // 这是 enable/disable 物理移动文件后 rescan 对账不误报 MISSING 的核心契约。
+        let active_id = inventory_item_id(AgentTarget::Claude, "user", "standalone", "tool");
+        let disabled_id = inventory_item_id(AgentTarget::Claude, "user", "standalone", "tool");
+        assert_eq!(
+            active_id, disabled_id,
+            "path-independent source_identity must yield same id for the same logical asset"
         );
+        // 对照：若把绝对路径塞进 source_identity（旧设计），id 会随路径变化——这正是本次重构消除的漂移。
+        let legacy_active = inventory_item_id(AgentTarget::Claude, "user", "/x/active", "tool");
+        let legacy_disabled = inventory_item_id(AgentTarget::Claude, "user", "/x/disabled", "tool");
         assert_ne!(
-            a,
-            inventory_item_id(AgentTarget::Claude, "project:p1", "/x/a", "tool")
+            legacy_active, legacy_disabled,
+            "legacy path-sensitive source_identity must produce drifting ids (sanity check)"
         );
+
+        // 不同 source_origin（standalone vs plugin:foo）→ 不同 id
         assert_ne!(
-            a,
-            inventory_item_id(AgentTarget::Claude, "user", "/x/b", "tool")
+            active_id,
+            inventory_item_id(AgentTarget::Claude, "user", "plugin:foo", "tool")
         );
+
+        // 不同 native_id → 不同 id
         assert_ne!(
-            a,
-            inventory_item_id(AgentTarget::Claude, "user", "/x/a", "other")
+            active_id,
+            inventory_item_id(AgentTarget::Claude, "user", "standalone", "other")
         );
+
+        // 不同 target → 不同 id
+        assert_ne!(
+            active_id,
+            inventory_item_id(AgentTarget::Codex, "user", "standalone", "tool")
+        );
+
+        // 不同 scope_id → 不同 id
+        assert_ne!(
+            active_id,
+            inventory_item_id(AgentTarget::Claude, "project:p1", "standalone", "tool")
+        );
+
         // 相同输入必须稳定
         assert_eq!(
-            a,
-            inventory_item_id(AgentTarget::Claude, "user", "/x/a", "tool")
+            active_id,
+            inventory_item_id(AgentTarget::Claude, "user", "standalone", "tool")
         );
     }
 
