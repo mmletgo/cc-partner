@@ -41,7 +41,7 @@ use crate::agent_hub::targets::{
 use crate::error::AppError;
 use crate::state::AppState;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -278,7 +278,7 @@ pub fn scan_portable_inventory_facts_query(
     let homes = TargetPathResolver::resolve_all(env);
     let mut target_dtos = Vec::with_capacity(adapters.len());
     let mut items: Vec<PortableInventoryItemDto> = Vec::new();
-    let mut seen_ids = BTreeSet::new();
+    let mut seen_ids: BTreeMap<String, usize> = BTreeMap::new();
     let mut probes = BTreeMap::new();
     std::thread::scope(|scope| -> Result<(), AppError> {
         let handles = adapters
@@ -357,16 +357,16 @@ pub fn scan_portable_inventory_facts_query(
             };
             // Plugin package roots（package 本体 + 组件 parent 关联）。MCP 不从这些目录发现。
             if query.kind != Some(PortableAssetKind::Mcp) {
-                let plugin_items = scan_plugin_packages(
+                scan_plugin_packages(
                     scope,
                     env,
                     &homes,
                     &target_dto,
                     &evaluated,
                     &mut seen_ids,
+                    &mut items,
                     query.kind,
                 )?;
-                items.extend(plugin_items);
             }
 
             for disc in discoveries {
@@ -377,11 +377,15 @@ pub fn scan_portable_inventory_facts_query(
                 if query.kind.is_some_and(|selected| selected != kind) {
                     continue;
                 }
-                if let Some(item) =
-                    discovered_to_item(kind, &disc, scope, &target_dto, &evaluated, &mut seen_ids)
-                {
-                    items.push(item);
-                }
+                discovered_to_item(
+                    kind,
+                    &disc,
+                    scope,
+                    &target_dto,
+                    &evaluated,
+                    &mut seen_ids,
+                    &mut items,
+                );
             }
         }
     }
@@ -611,15 +615,26 @@ fn target_dto_from_probe(
 }
 
 /// 只读发现 Plugin 包本体（不写 CAS）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Plugin package 是顶层 Standalone 资产，需要单独发现并生成 inventory 行；
+///     同时遍历包内组件（skills/commands/...）的 discovery 并复用 discovered_to_item。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历 plugin roots，对每个 package 算 inv_id（source_identity = "standalone"），
+///     按 seen 去重后写入共享 items；组件 discovery 经 discovered_to_item 写入同一 items，
+///     并把 parent_plugin_inventory_item_id 指向当前 package 的 inv_id。
+#[allow(clippy::too_many_arguments)] // 内部 helper：scope/env/homes/target/evaluated/seen/items/kind 8 段语义独立
 fn scan_plugin_packages(
     scope: &PortableScanScope,
     env: &TargetEnvironment,
     homes: &crate::agent_hub::targets::paths::TargetHomes,
     target_dto: &PortableInventoryTargetDto,
     evaluated: &EvaluatedTargetSupport,
-    seen: &mut BTreeSet<String>,
+    seen: &mut BTreeMap<String, usize>,
+    items: &mut Vec<PortableInventoryItemDto>,
     selected_kind: Option<PortableAssetKind>,
-) -> Result<Vec<PortableInventoryItemDto>, AppError> {
+) -> Result<(), AppError> {
     let target = target_dto.target;
     let roots = plugin_roots_for(target, scope, env, homes);
     // Codex：config.toml [plugins] 启用表；Claude/OpenCode 不用。
@@ -630,7 +645,6 @@ fn scan_plugin_packages(
     } else {
         BTreeMap::new()
     };
-    let mut out = Vec::new();
     for candidate in roots {
         let root = candidate.path;
         if !root.is_dir() {
@@ -681,12 +695,11 @@ fn scan_plugin_packages(
         ) {
             continue;
         }
-        let source_identity = root.display().to_string();
-        let inv_id =
-            inventory_item_id(target, &scope.scope_id, &source_identity, &source.plugin_id);
-        if (selected_kind.is_none() || selected_kind == Some(PortableAssetKind::Plugin))
-            && seen.insert(inv_id.clone())
-        {
+        // plugin package 是顶层 Standalone 资产：source_identity = "standalone"，native_id = plugin_id。
+        // 绝对路径只保留在 source_path 字段供 UI 显示与 executor 物理移动。
+        let source_path = root.display().to_string();
+        let inv_id = inventory_item_id(target, &scope.scope_id, "standalone", &source.plugin_id);
+        if selected_kind.is_none() || selected_kind == Some(PortableAssetKind::Plugin) {
             let (content_hash, tree_hash) = if selected_kind == Some(PortableAssetKind::Plugin) {
                 // 列表首屏只需 manifest 身份；递归 tree hash 在选中项 preview 时精确计算，
                 // apply 前仍会再次未缓存校验，避免为十个大包读取数百 MB。
@@ -733,7 +746,7 @@ fn scan_plugin_packages(
             } else {
                 action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
             };
-            out.push(PortableInventoryItemDto {
+            let item = PortableInventoryItemDto {
                 inventory_item_id: inv_id.clone(),
                 target,
                 kind: PortableAssetKind::Plugin,
@@ -745,7 +758,7 @@ fn scan_plugin_packages(
                 scope_kind: scope.scope_kind,
                 project_id: scope.project_id.clone(),
                 project_opted_in: scope.project_opted_in,
-                source_path: Some(source_identity),
+                source_path: Some(source_path.clone()),
                 source_origin: PortableInventorySourceOrigin::Standalone,
                 parent_plugin_inventory_item_id: None,
                 actual_enabled,
@@ -768,7 +781,20 @@ fn scan_plugin_packages(
                 ),
                 warnings,
                 mcp_credential: None,
-            });
+            };
+            // seen 去重：与 discovered_to_item 同一套 disabled-wins 合并策略。
+            match seen.get(&inv_id).copied() {
+                None => {
+                    seen.insert(inv_id.clone(), items.len());
+                    items.push(item);
+                }
+                Some(idx) => {
+                    if should_replace_with(&item, &items[idx]) {
+                        items[idx] = item;
+                    }
+                    // 否则丢弃（保留已存在的）
+                }
+            }
         }
 
         // Installed plugin roots may live below cache/<marketplace>/<id>/<version> rather than
@@ -793,15 +819,18 @@ fn scan_plugin_packages(
             if selected_kind.is_some_and(|selected| selected != kind) {
                 continue;
             }
-            if let Some(mut item) =
-                discovered_to_item(kind, &discovery, scope, target_dto, evaluated, seen)
-            {
-                item.parent_plugin_inventory_item_id = Some(inv_id.clone());
-                out.push(item);
+            // 记录写入前 items 长度，判断 discovered_to_item 是否实际新增了一条；
+            // 若新增，再回填 parent_plugin_inventory_item_id。
+            let before = items.len();
+            discovered_to_item(kind, &discovery, scope, target_dto, evaluated, seen, items);
+            if items.len() > before {
+                if let Some(last) = items.last_mut() {
+                    last.parent_plugin_inventory_item_id = Some(inv_id.clone());
+                }
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// 可扫描的 plugin package 根（含可选 registry 身份）。
@@ -1256,41 +1285,56 @@ fn hash_plugin_root_cached(root: &Path) -> Result<(String, String), AppError> {
     Ok(hashes)
 }
 
+#[allow(clippy::too_many_arguments)] // 内部 helper：kind/disc/scope/target/evaluated/seen/items 7 段语义独立
 fn discovered_to_item(
     kind: PortableAssetKind,
     disc: &DiscoveredPortableAsset,
     scope: &PortableScanScope,
     target_dto: &PortableInventoryTargetDto,
     evaluated: &EvaluatedTargetSupport,
-    seen: &mut BTreeSet<String>,
-) -> Option<PortableInventoryItemDto> {
+    seen: &mut BTreeMap<String, usize>,
+    items: &mut Vec<PortableInventoryItemDto>,
+) {
     let source_path = disc.origin.path.display().to_string();
-    let source_identity = source_path.clone();
+    let source_origin = origin_to_inventory_origin(disc.origin.origin_kind, kind);
+
+    // 路径无关的 source_identity：与 ensure_managed canonical 跟踪同一套 origin_namespace
+    // 语义。Plugin origin 走 plugin_id（优先用 adapter 已填的 parent_plugin_id，
+    // 否则用路径启发式）；其余映射为 "standalone"。
+    let source_identity = match source_origin {
+        PortableInventorySourceOrigin::PluginComponent => {
+            let plugin_id = disc
+                .origin
+                .parent_plugin_id
+                .clone()
+                .or_else(|| {
+                    crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+                        &disc.origin.path.to_string_lossy(),
+                    ))
+                })
+                .unwrap_or_else(|| "plugin".into());
+            format!("plugin:{plugin_id}")
+        }
+        PortableInventorySourceOrigin::Standalone | PortableInventorySourceOrigin::NativeConfig => {
+            "standalone".into()
+        }
+    };
+
     let inv_id = inventory_item_id(
         disc.origin.target,
         &scope.scope_id,
         &source_identity,
         &disc.origin.native_id,
     );
-    if !seen.insert(inv_id.clone()) {
-        return None;
-    }
 
-    let source_origin = origin_to_inventory_origin(disc.origin.origin_kind, kind);
+    // parent plugin package 的 inventory_item_id 也走路径无关语义：
+    // plugin 包本体 source_identity = "standalone"（plugin package 是顶层 Standalone 资产）。
     let parent_plugin_inventory_item_id = disc
         .origin
         .parent_plugin_id
         .as_ref()
         .map(|plugin_id| {
-            // parent package identity uses package root (parent of skills/commands/...)
-            let parent_root =
-                infer_plugin_root(&disc.origin.path).unwrap_or_else(|| disc.origin.path.clone());
-            inventory_item_id(
-                disc.origin.target,
-                &scope.scope_id,
-                &parent_root.display().to_string(),
-                plugin_id,
-            )
+            inventory_item_id(disc.origin.target, &scope.scope_id, "standalone", plugin_id)
         })
         .or_else(|| {
             // 路径启发式：.../plugins/<id>/skills|commands|...
@@ -1361,8 +1405,8 @@ fn discovered_to_item(
         PortableAssetPayload::Agent(a) => a.description.clone(),
     };
 
-    Some(PortableInventoryItemDto {
-        inventory_item_id: inv_id,
+    let item = PortableInventoryItemDto {
+        inventory_item_id: inv_id.clone(),
         target: disc.origin.target,
         kind,
         native_id: disc.origin.native_id.clone(),
@@ -1400,7 +1444,49 @@ fn discovered_to_item(
         ),
         warnings,
         mcp_credential,
-    })
+    };
+
+    // seen 去重：按 inv_id 索引已存在 item。
+    // 同一逻辑资产在 active/disabled 路径下产出相同 id（路径无关 source_identity）；
+    // claude.rs adapter 是 active 先扫、disabled 后扫，若用"先到先得"会让 disabled 版本
+    // 被丢弃、UI 永远显示 enabled——这是严重 bug。所以这里用"disabled 赢"合并策略：
+    // 当新 item 是 disabled（actual_enabled == Some(false)）而已存在不是时，替换为新 item。
+    match seen.get(&inv_id).copied() {
+        None => {
+            seen.insert(inv_id, items.len());
+            items.push(item);
+        }
+        Some(idx) => {
+            if should_replace_with(&item, &items[idx]) {
+                items[idx] = item;
+                // seen 不变：index 仍指向同一槽位
+            }
+            // 否则丢弃（保留已存在的）
+        }
+    }
+}
+
+/// 判断同一 inv_id 的新 discovery 是否应替换已存在的 inventory item。
+///
+/// Business Logic（为什么需要这个函数）:
+///     inventory_item_id 现在路径无关，同一逻辑资产在 active 与 disabled 路径下产出
+///     相同 id；claude.rs adapter 先扫 active 后扫 disabled，"先到先得"会让 disabled
+///     版本被丢弃，UI 永远显示 enabled。本函数实现"disabled 赢"策略：disabled 表示
+///     用户最近主动操作过，是更可信的当前意图；active+disabled 共存本身是异常态
+///     （正常 disable 流程会清空 active），此时保留 disabled 即反映"用户已禁用"。
+///
+/// Code Logic（这个函数做什么）:
+///     若新 item actual_enabled == Some(false) 且已存在 item 不是 disabled → true（替换）。
+///     若已存在 item 是 disabled 而新 item 不是 → false（保留已存在的 disabled）。
+///     其他情况（都是 active/都是 disabled/一方 None）→ false（保留已存在，避免抖动）。
+fn should_replace_with(
+    new_item: &PortableInventoryItemDto,
+    existing: &PortableInventoryItemDto,
+) -> bool {
+    if new_item.actual_enabled == Some(false) && existing.actual_enabled != Some(false) {
+        return true;
+    }
+    false
 }
 
 fn origin_to_inventory_origin(
@@ -1640,7 +1726,7 @@ fn infer_parent_plugin_from_path(
     Some(inventory_item_id(
         target,
         scope_id,
-        &root.display().to_string(),
+        "standalone",
         &plugin_id,
     ))
 }
@@ -2583,6 +2669,77 @@ enabled = false
         }));
         assert!(!snap.inventory_snapshot_hash.is_empty());
         assert!(!snap.refreshed_at.is_empty());
+    }
+
+    /// Business Logic: inventory_item_id 路径无关后，同一逻辑资产在 active 与 disabled 路径下
+    /// 产出相同 id；claude.rs adapter 先扫 active 后扫 disabled，"先到先得"会让 disabled 版本
+    /// 被丢弃、UI 永远显示 enabled。scanner 必须用"disabled 赢"合并策略：active+disabled 共存时
+    /// （这是异常态，正常 disable 流程会清空 active），保留 disabled 反映用户最近的禁用意图。
+    /// Code Logic: 构造同名 skill 同时存在于 active 路径（.claude/skills/dup-name）与 disabled
+    /// 路径（.claude/disabled/skills/dup-name），跑 scan，断言只剩一条记录且 actual_enabled==Some(false)。
+    #[test]
+    fn scan_merges_active_and_disabled_with_same_logical_identity_keeps_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        // 同名 skill 同时在 active 与 disabled 目录
+        write(
+            &home.join(".claude/skills/dup-name/SKILL.md"),
+            "---\nname: dup-name\ndescription: Active copy\n---\n# Active\n",
+        );
+        write(
+            &home.join(".claude/disabled/skills/dup-name/SKILL.md"),
+            "---\nname: dup-name\ndescription: Disabled copy\n---\n# Disabled\n",
+        );
+        let mut vars = Map::new();
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            home.join(".claude").to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scopes = vec![PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+        let (_targets, items) = scan_portable_inventory_facts(&env, &scopes).expect("scan");
+
+        let dup: Vec<_> = items
+            .iter()
+            .filter(|i| {
+                i.target == AgentTarget::Claude
+                    && i.kind == PortableAssetKind::Skill
+                    && i.native_id == "dup-name"
+                    && i.source_origin == PortableInventorySourceOrigin::Standalone
+            })
+            .collect();
+        // 必须合并成一条（同逻辑身份），不是两条
+        assert_eq!(
+            dup.len(),
+            1,
+            "active+disabled same logical identity must merge to one item, got: {dup:?}"
+        );
+        // disabled 赢：actual_enabled == Some(false)
+        assert_eq!(
+            dup[0].actual_enabled,
+            Some(false),
+            "merged item must reflect disabled (disabled wins)"
+        );
+        // source_path 应指向 disabled 路径（替换生效）
+        assert!(
+            dup[0]
+                .source_path
+                .as_deref()
+                .unwrap_or_default()
+                .contains("disabled/skills/dup-name"),
+            "merged item source_path must point to disabled copy: {:?}",
+            dup[0].source_path
+        );
     }
 
     fn walk_snapshot(root: &Path) -> Vec<(String, u64)> {

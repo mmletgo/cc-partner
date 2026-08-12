@@ -442,12 +442,10 @@ async fn execute_claimed_plan(
         .collect();
 
     // Fallback 索引：按逻辑身份 (target, scope_id, native_id) 索引 post inventory。
-    // 设计债背景：`inventory_item_id` 把 source_identity（绝对路径）算进 hash，
-    // 而 enable/disable 会把 skill/plugin 在 active 路径与 disabled 路径之间物理移动，
-    // 导致同一逻辑物品在 pre/post 拥有不同的 inventory_item_id。仅靠 post_by_id 精确
-    // 匹配会让这些物品的 post 投影变成 None，从而误报 PORTABLE_ASSET_ACTION_RESCAN_MISSING。
-    // 这里额外按逻辑身份建索引，作为精确匹配失败后的兜底，仅在 enable/disable 路径
-    // 触发；reconcile_item 自身仍按 action 判断 expected，uninstall 的 None 语义不受影响。
+    // 防御性 fallback：inventory_item_id 现在已经路径无关（source_identity 用 origin_namespace，
+    // 即 "standalone" / "plugin:{id}"），enable/disable 移动文件不再让 id 漂移；
+    // 这段 fallback 主要兜底 scope_id 因 hub_project_id 重映射而变化、或未来其他让 id
+    // 漂移的边界场景。保留比删除安全。
     // 同一逻辑键若出现多个 post item（理论不应发生），优先取 actual_enabled 与 action
     // 期望一致的；都一致则取最后一个（保持与既有覆盖式 collect 语义一致）。
     let mut post_by_logical_key: BTreeMap<(AgentTarget, String, String), &PortableInventoryItemDto> =
@@ -510,14 +508,13 @@ async fn execute_claimed_plan(
 /// 在 rescan 后按需为 enable/disable 找回 post inventory item 的兜底投影。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户禁用/启用 skill 时，adapter 会把物品在 `<config>/skills/{id}` 与
-///     `<data_dir>/claude-assets/disabled/skills/{id}` 之间物理移动；由于 inventory_item_id
-///     把绝对路径作为 source_identity 算进 hash，pre 快照里的旧 id 与 rescan 出的新 id 不一致，
-///     直接精确匹配会让 post 投影变 None，从而把成功的 disable 误判为
-///     PORTABLE_ASSET_ACTION_RESCAN_MISSING。本函数为这种路径敏感场景提供逻辑身份兜底。
+///     inventory_item_id 现在已经路径无关（source_identity 用 origin_namespace，
+///     即 "standalone" / "plugin:{id}"），enable/disable 移动文件不再让 id 漂移，
+///     精确匹配就能命中 post 投影。本函数作为防御性兜底，主要覆盖 scope_id 因
+///     hub_project_id 重映射而变化、或未来其他让 id 漂移的边界场景。
 ///
 /// Code Logic（这个函数做什么）:
-///     1. 先按 inventory_item_id 精确匹配——覆盖 uninstall 与未触动物品的正常路径。
+///     1. 先按 inventory_item_id 精确匹配——覆盖 uninstall、enable/disable 与未触动物品的正常路径。
 ///     2. 命中失败时用 pre item 的逻辑身份 (target, scope_id, native_id) 在
 ///        post_by_logical_key 中查找同一物品移动后的新投影。
 ///     仅决定"是否找到 post 投影"；成功/失败的最终判定仍由 reconcile_item 按 action 与
@@ -528,13 +525,12 @@ fn resolve_post_item<'a>(
     post_by_id: &BTreeMap<String, &'a PortableInventoryItemDto>,
     post_by_logical_key: &BTreeMap<(AgentTarget, String, String), &'a PortableInventoryItemDto>,
 ) -> Option<&'a PortableInventoryItemDto> {
-    // 1. 精确匹配（uninstall/未触动物品的正常路径）
+    // 1. 精确匹配（uninstall/enable/disable/未触动物品的正常路径——id 已路径无关）
     if let Some(item) = post_by_id.get(item_id) {
         return Some(*item);
     }
-    // 2. fallback：disable/enable 把物品在 active/disabled 路径间移动，
-    //    inventory_item_id 随 source_identity 绝对路径变化；用 pre 的逻辑身份
-    //    (target, scope_id, native_id) 在 post 里匹配同一物品的新 id。
+    // 2. fallback：兜底 scope_id 因 hub_project_id 重映射等场景导致的 id 漂移；
+    //    用 pre 的逻辑身份 (target, scope_id, native_id) 在 post 里匹配同一物品。
     let pre = pre?;
     post_by_logical_key
         .get(&(pre.target, pre.scope_id.clone(), pre.native_id.clone()))
@@ -933,8 +929,10 @@ mod tests {
         path: &str,
         enabled: Option<bool>,
     ) -> PortableInventoryItemDto {
+        // source_identity 路径无关：与生产 scanner 语义一致（standalone 资产用 "standalone"），
+        // 同一逻辑资产在 active/disabled 路径下产出相同 id。path 仅落到 source_path 字段。
         PortableInventoryItemDto {
-            inventory_item_id: inventory_item_id(target, "user", path, native_id),
+            inventory_item_id: inventory_item_id(target, "user", "standalone", native_id),
             target,
             kind,
             native_id: native_id.into(),
@@ -1218,31 +1216,36 @@ mod tests {
         assert!(runner.calls().is_empty());
     }
 
-    /// Business Logic: 真实 scanner 会在 disable 后按 disabled 路径重算 inventory_item_id，
-    /// 此时 pre id 与 post id 不同；仅靠精确匹配会误报 PORTABLE_ASSET_ACTION_RESCAN_MISSING。
-    /// resolve_post_item 必须用逻辑身份 (target, scope_id, native_id) 找回 post 投影。
-    /// Code Logic: 构造 pre/post 两份 item（同逻辑身份、不同 source_path → 不同 id），
-    /// 直接调用 resolve_post_item 断言返回 disabled 后的 post 投影。
+    /// Business Logic: inventory_item_id 已路径无关——disable 把 skill 从 active 路径物理移动到
+    /// disabled 路径后，pre 和 post 拥有相同的 inventory_item_id（因为 source_identity 是
+    /// origin_namespace "standalone" 而非绝对路径）。所以精确匹配即可命中 post 投影，无需 fallback。
+    /// Code Logic: 构造 pre（active 路径）与 post（disabled 路径）两份 item，断言两者 id 相同，
+    /// resolve_post_item 通过精确匹配（不走 fallback）命中 post_item，actual_enabled == Some(false)。
     #[test]
-    fn reconcile_disable_falls_back_to_logical_identity_when_path_moves() {
+    fn reconcile_disable_matches_by_stable_id_when_path_moves() {
         let target = AgentTarget::Claude;
         let pre_path = "/home/user/.claude/skills/hyperframes";
         let post_path = "/data/cc-partner/claude-assets/disabled/skills/hyperframes";
         let native_id = "hyperframes";
         let scope_id = "user";
 
-        let pre_id = inventory_item_id(target, scope_id, pre_path, native_id);
-        let post_id = inventory_item_id(target, scope_id, post_path, native_id);
-        assert_ne!(pre_id, post_id, "fixture must produce distinct ids");
+        // 路径无关契约：source_identity = "standalone"（与生产 scanner 一致），
+        // 不同路径产出相同 id。
+        let stable_id = inventory_item_id(target, scope_id, "standalone", native_id);
 
         let pre_item = sample_item(target, PortableAssetKind::Skill, native_id, pre_path, Some(true));
-        assert_eq!(pre_item.inventory_item_id, pre_id);
+        assert_eq!(
+            pre_item.inventory_item_id, stable_id,
+            "pre item id must be the path-independent stable id"
+        );
 
-        // post item 用新路径独立构造，模拟 scanner 重新扫描得到的真实 inventory_item_id。
+        // post item 用 disabled 路径独立构造，模拟 scanner 重新扫描得到的真实 inventory。
         let mut post_item =
             sample_item(target, PortableAssetKind::Skill, native_id, post_path, Some(false));
-        assert_eq!(post_item.inventory_item_id, post_id);
-        // 确保逻辑身份键对齐 pre（sample_item 默认 scope_id="user"、native_id 透传）。
+        assert_eq!(
+            post_item.inventory_item_id, stable_id,
+            "post item id must equal pre id (path-independent)"
+        );
         post_item.scope_id = scope_id.into();
 
         let post_by_id: BTreeMap<String, &PortableInventoryItemDto> =
@@ -1257,29 +1260,24 @@ mod tests {
             .into_iter()
             .collect();
 
-        // pre id 在 post_by_id 中不存在 → 触发 fallback。
-        let resolved = resolve_post_item(&pre_id, Some(&pre_item), &post_by_id, &post_by_logical_key)
-            .expect("fallback must locate moved post item");
-        assert_eq!(resolved.inventory_item_id, post_id);
+        // 精确匹配命中 post（路径无关 → pre id == post id，不需要 fallback）。
+        let resolved = resolve_post_item(&stable_id, Some(&pre_item), &post_by_id, &post_by_logical_key)
+            .expect("exact match must hit post item");
+        assert_eq!(resolved.inventory_item_id, stable_id);
         assert_eq!(resolved.actual_enabled, Some(false));
-
-        // 对照：精确命中时不走 fallback（uninstall 路径）。
-        let exact = resolve_post_item(&post_id, Some(&pre_item), &post_by_id, &post_by_logical_key)
-            .expect("exact match must hit");
-        assert_eq!(exact.inventory_item_id, post_id);
 
         // 对照：pre 缺失且 id 不匹配 → None（不假命中）。
         let none = resolve_post_item("nonexistent-id", None, &post_by_id, &post_by_logical_key);
         assert!(none.is_none());
     }
 
-    /// Business Logic: disable 后 rescan 给出"路径已变 + id 已变 + actualEnabled=false"的 post
-    /// 快照时，apply 必须报 Succeeded，而不是误报 PORTABLE_ASSET_ACTION_RESCAN_MISSING。
-    /// Code Logic: 用 sample_item 分别构造 pre（active 路径）与 post（disabled 路径），
-    /// post_item 的 inventory_item_id 由 disabled 路径重新派生，与 pre 不同；
-    /// 通过 rescan_override 注入该 post 快照验证端到端 fallback 生效。
+    /// Business Logic: inventory_item_id 路径无关后，disable 把 skill 从 active 物理移动到 disabled
+    /// 路径，pre 与 post 的 id 保持相同；apply 通过精确匹配直接命中 post，报 Succeeded，
+    /// 不走也不需要 logical fallback。
+    /// Code Logic: 用 sample_item 构造 pre（active 路径）与 post（disabled 路径），断言 id 相同；
+    /// 通过 rescan_override 注入 post 快照验证端到端精确匹配生效。
     #[tokio::test]
-    async fn skill_disable_with_recomputed_post_id_succeeds_via_logical_fallback() {
+    async fn skill_disable_with_path_move_succeeds_via_exact_id_match() {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join("claude");
         let data = dir.path().join("data");
@@ -1309,7 +1307,8 @@ mod tests {
         )
         .await;
 
-        // 模拟 scanner rescan：disabled 路径 + actual_enabled=false，inventory_item_id 重算。
+        // 模拟 scanner rescan：disabled 路径 + actual_enabled=false。
+        // 路径无关契约：post id 与 pre id 相同。
         let disabled_path = data.join("claude-assets/disabled/skills/hyperframes");
         let post_item = sample_item(
             AgentTarget::Claude,
@@ -1318,10 +1317,10 @@ mod tests {
             disabled_path.to_str().unwrap(),
             Some(false),
         );
-        assert_ne!(
+        assert_eq!(
             post_item.inventory_item_id,
             pre_item.inventory_item_id,
-            "fixture must produce a post id different from pre"
+            "path-independent id must be equal across active/disabled paths"
         );
         let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
 
@@ -1339,7 +1338,7 @@ mod tests {
             &deps,
             ApplyPortableAssetActionRequest {
                 plan_token: plan.plan_token,
-                client_request_id: "req-skill-rescan-fallback".into(),
+                client_request_id: "req-skill-exact-match".into(),
             },
         )
         .await
@@ -1347,7 +1346,7 @@ mod tests {
         assert_eq!(
             result.items[0].state,
             PortableAssetActionItemState::Succeeded,
-            "disable with recomputed post id must not report RESCAN_MISSING: {:?} / {:?}",
+            "disable with path move must succeed via exact id match: {:?} / {:?}",
             result.items[0].error_code,
             result.items[0].message
         );
