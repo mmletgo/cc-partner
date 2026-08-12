@@ -140,6 +140,7 @@ function controller(
     openAction: vi.fn(),
     clearPendingAction: vi.fn(),
     getPrimaryAction: () => 'disable',
+    getRowActions: () => ['disable', 'uninstall'],
     refresh: vi.fn(async () => undefined),
     requestContext: { deviceId: null, projectRef: null },
     ...patch,

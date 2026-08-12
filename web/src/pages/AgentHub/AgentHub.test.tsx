@@ -287,6 +287,7 @@ function buildProps(
       openAction: vi.fn(),
       clearPendingAction: vi.fn(),
       getPrimaryAction: vi.fn(() => null),
+      getRowActions: vi.fn(() => []),
       refresh: vi.fn(async () => undefined),
       requestContext: { deviceId: null, projectRef: null },
       inventoryQuery: { kind: 'skill' },

@@ -87,17 +87,17 @@ function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInvent
 }
 
 describe('PortableInventoryRow', () => {
-  test('renders observed facts and fires select/primary action callbacks', () => {
+  test('renders observed facts and fires select/action callbacks', () => {
     const onSelect = vi.fn();
-    const onPrimaryAction = vi.fn();
+    const onAction = vi.fn();
     render(
       <PortableInventoryRow
         item={item()}
         selected
-        primaryAction="disable"
+        actions={['disable']}
         labels={labels}
         onSelect={onSelect}
-        onPrimaryAction={onPrimaryAction}
+        onAction={onAction}
       />,
     );
 
@@ -110,23 +110,23 @@ describe('PortableInventoryRow', () => {
     fireEvent.click(screen.getByTestId('portable-inventory-select-claude-skill-alpha'));
     expect(onSelect).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
-    expect(onPrimaryAction).toHaveBeenCalledWith(expect.objectContaining({
+    fireEvent.click(screen.getByTestId('portable-row-action-disable-claude-skill-alpha'));
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
       inventoryItemId: 'claude-skill-alpha',
     }), 'disable');
   });
 
-  test('uses a native selection button beside the primary action without nested button semantics', () => {
+  test('uses a native selection button beside row actions without nested button semantics', () => {
     const onSelect = vi.fn();
-    const onPrimaryAction = vi.fn();
+    const onAction = vi.fn();
     render(
       <PortableInventoryRow
         item={item()}
         selected
-        primaryAction="disable"
+        actions={['disable']}
         labels={labels}
         onSelect={onSelect}
-        onPrimaryAction={onPrimaryAction}
+        onAction={onAction}
       />,
     );
 
@@ -143,24 +143,24 @@ describe('PortableInventoryRow', () => {
     fireEvent.click(selectionButton);
     expect(onSelect).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Disable' }));
-    expect(onPrimaryAction).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('portable-row-action-disable-claude-skill-alpha'));
+    expect(onAction).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
-  test('hides primary action button when null', () => {
+  test('hides action buttons when actions array is empty', () => {
     render(
       <PortableInventoryRow
         item={item({ actualEnabled: null })}
-        primaryAction={null}
+        actions={[]}
         labels={labels}
       />,
     );
-    expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Enable' })).toBeNull();
+    expect(screen.queryByTestId('portable-row-action-disable-claude-skill-alpha')).toBeNull();
+    expect(screen.queryByTestId('portable-row-action-enable-claude-skill-alpha')).toBeNull();
   });
 
-  test('historical unmanaged without toggle shows refresh hint, never Adopt primary', () => {
+  test('historical unmanaged without toggle shows refresh hint, never exposes action buttons', () => {
     render(
       <PortableInventoryRow
         item={item({
@@ -178,7 +178,7 @@ describe('PortableInventoryRow', () => {
             evidenceIds: [],
           },
         })}
-        primaryAction={null}
+        actions={[]}
         labels={labels}
       />,
     );
@@ -194,7 +194,7 @@ describe('PortableInventoryRow', () => {
     render(
       <PortableInventoryRow
         item={item({ warnings: ['targetExecutable', 'unknownSourceField', 'absolutePath'] })}
-        primaryAction="disable"
+        actions={['disable']}
         labels={labels}
       />,
     );
@@ -204,5 +204,35 @@ describe('PortableInventoryRow', () => {
     expect(screen.queryByText('targetExecutable')).toBeNull();
     expect(screen.queryByText('unknownSourceField')).toBeNull();
     expect(screen.queryByText('absolutePath')).toBeNull();
+  });
+
+  test('renders multiple action buttons (disable + uninstall) and each fires onAction', () => {
+    const onAction = vi.fn();
+    render(
+      <PortableInventoryRow
+        item={item()}
+        actions={['disable', 'uninstall']}
+        labels={labels}
+        onAction={onAction}
+      />,
+    );
+
+    const disableBtn = screen.getByTestId('portable-row-action-disable-claude-skill-alpha');
+    const uninstallBtn = screen.getByTestId('portable-row-action-uninstall-claude-skill-alpha');
+    expect(disableBtn).toBeTruthy();
+    expect(uninstallBtn).toBeTruthy();
+    // uninstall 用 danger variant
+    expect(uninstallBtn.className).toMatch(/danger/);
+
+    fireEvent.click(disableBtn);
+    expect(onAction).toHaveBeenLastCalledWith(expect.objectContaining({
+      inventoryItemId: 'claude-skill-alpha',
+    }), 'disable');
+
+    fireEvent.click(uninstallBtn);
+    expect(onAction).toHaveBeenLastCalledWith(expect.objectContaining({
+      inventoryItemId: 'claude-skill-alpha',
+    }), 'uninstall');
+    expect(onAction).toHaveBeenCalledTimes(2);
   });
 });

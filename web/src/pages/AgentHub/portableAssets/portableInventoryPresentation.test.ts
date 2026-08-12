@@ -25,6 +25,7 @@ import {
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
   resolvePortablePrimaryAction,
+  resolvePortableRowActions,
   type PortableInventoryFilters,
   type PortablePrimaryActionContext,
 } from './portableInventoryPresentation';
@@ -449,5 +450,123 @@ describe('portableInventoryPresentation primary action', () => {
     expect(resolvePortablePrimaryAction(item, healthyCtx)).toBe(
       'installToSourceTarget' satisfies PortableAssetActionKind,
     );
+  });
+});
+
+describe('portableInventoryPresentation row actions', () => {
+  const healthyCtx: PortablePrimaryActionContext = {
+    stale: false,
+    mutationBlocked: false,
+    lockedItemIds: new Set(),
+  };
+
+  test('enabled item with canDisable+canUninstall exposes disable then uninstall', () => {
+    const enabled = makeItem({
+      inventoryItemId: 'claude-skill-on',
+      kind: 'skill',
+      nativeId: 'on',
+      actualEnabled: true,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+      },
+    });
+    expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable', 'uninstall']);
+  });
+
+  test('disabled item with canEnable+canUninstall exposes enable then uninstall', () => {
+    const disabled = makeItem({
+      inventoryItemId: 'claude-skill-off',
+      kind: 'skill',
+      nativeId: 'off',
+      actualEnabled: false,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+      },
+    });
+    expect(resolvePortableRowActions(disabled, healthyCtx)).toEqual(['enable', 'uninstall']);
+  });
+
+  test('actualEnabled=null with canInstallToSourceTarget+canUninstall exposes install then uninstall', () => {
+    const nullState = makeItem({
+      inventoryItemId: 'claude-skill-null',
+      kind: 'skill',
+      nativeId: 'null',
+      actualEnabled: null,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: true,
+        canInstallToSourceTarget: true,
+      },
+    });
+    expect(resolvePortableRowActions(nullState, healthyCtx)).toEqual([
+      'installToSourceTarget',
+      'uninstall',
+    ]);
+  });
+
+  test('stale context returns empty array', () => {
+    const enabled = makeItem({
+      inventoryItemId: 'claude-skill-stale',
+      kind: 'skill',
+      nativeId: 'stale',
+      actualEnabled: true,
+    });
+    expect(resolvePortableRowActions(enabled, { ...healthyCtx, stale: true })).toEqual([]);
+  });
+
+  test('locked item returns empty array', () => {
+    const enabled = makeItem({
+      inventoryItemId: 'claude-skill-locked',
+      kind: 'skill',
+      nativeId: 'locked',
+      actualEnabled: true,
+    });
+    expect(
+      resolvePortableRowActions(enabled, {
+        ...healthyCtx,
+        lockedItemIds: new Set(['claude-skill-locked']),
+      }),
+    ).toEqual([]);
+  });
+
+  test('unsupported management state returns empty array', () => {
+    const unsupported = makeItem({
+      inventoryItemId: 'claude-skill-unsup',
+      kind: 'skill',
+      nativeId: 'unsup',
+      actualEnabled: false,
+      managementState: 'unsupported',
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+      },
+    });
+    expect(resolvePortableRowActions(unsupported, healthyCtx)).toEqual([]);
+  });
+
+  test('canUninstall=false omits uninstall from the action list', () => {
+    const enabled = makeItem({
+      inventoryItemId: 'claude-skill-nouninstall',
+      kind: 'skill',
+      nativeId: 'nouninstall',
+      actualEnabled: true,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: false,
+      },
+    });
+    expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable']);
   });
 });

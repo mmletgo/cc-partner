@@ -29,6 +29,7 @@ import {
   countPortableItemsByKind,
   filterPortableInventoryItems,
   resolvePortablePrimaryAction,
+  resolvePortableRowActions,
   type PortableInventoryFilters,
   type PortableKindCounts,
 } from './portableInventoryPresentation';
@@ -75,6 +76,8 @@ export interface UsePortableInventoryControllerResult {
   openAction: (itemId: string, action: PortableAssetActionKind) => void;
   clearPendingAction: () => void;
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
+  /** 行内多动作（与 getPrimaryAction 共享同一组门闩，含 uninstall）。 */
+  getRowActions: (item: PortableInventoryItemDto) => PortableAssetActionKind[];
   refresh: () => Promise<void>;
   /** 当前 inspect 使用的上下文（便于页面层 mutation 透传）。 */
   requestContext: AgentHubRequestContext;
@@ -301,6 +304,20 @@ export function usePortableInventoryController(
     [stale, mutationBlocked, lockedItemIds],
   );
 
+  /**
+   * Business Logic: 列表行内同时暴露启停/卸载，复用 getPrimaryAction 的安全门闩。
+   * Code Logic: 调 resolvePortableRowActions 输出有序动作数组（enable/disable → install → uninstall）。
+   */
+  const getRowActions = useCallback(
+    (item: PortableInventoryItemDto) =>
+      resolvePortableRowActions(item, {
+        stale,
+        mutationBlocked,
+        lockedItemIds,
+      }),
+    [stale, mutationBlocked, lockedItemIds],
+  );
+
   const openAction = useCallback(
     (itemId: string, action: PortableAssetActionKind) => {
       if (mutationBlocked || stale || lockedItemIds.has(itemId)) {
@@ -352,6 +369,7 @@ export function usePortableInventoryController(
     openAction,
     clearPendingAction,
     getPrimaryAction,
+    getRowActions,
     refresh,
     requestContext,
     inventoryQuery,

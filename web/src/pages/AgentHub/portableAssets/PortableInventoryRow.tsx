@@ -2,10 +2,12 @@
  * Portable inventory 列表行（page-local，不修改 canonical AgentAssetRow）。
  *
  * Business Logic（为什么需要这个组件）:
- *   列表展示 observed 事实：名称、target、scope、实际状态、管理态与单一主动作。
+ *   列表展示 observed 事实：名称、target、scope、实际状态、管理态与行内动作集合。
+ *   行内直接暴露启用/禁用/卸载等多个动作，用户无需打开详情 Drawer 即可管理。
  *
  * Code Logic（这个组件做什么）:
  *   pure props 视图；无 @/api；action 文案由父层经 labels 注入。
+ *   actions 优先于 primaryAction；二者均缺时行内不渲染动作区。
  */
 
 import type { JSX } from 'react';
@@ -38,7 +40,15 @@ export interface PortableInventoryRowProps {
   item: PortableInventoryItemDto;
   selected?: boolean;
   busy?: boolean;
-  primaryAction: PortableAssetActionKind | null;
+  /** 行内多动作（启用/禁用/卸载等）；提供时优先于 primaryAction。 */
+  actions?: PortableAssetActionKind[];
+  /**
+   * 行内动作点击回调（与 onPrimaryAction 并存，优先使用）。
+   * 缺省时回退到 onPrimaryAction，以兼容仅传 primaryAction 的旧调用方。
+   */
+  onAction?: (item: PortableInventoryItemDto, action: PortableAssetActionKind) => void;
+  /** 旧的单主动作（向后兼容；actions 优先）。 */
+  primaryAction?: PortableAssetActionKind | null;
   labels: PortableInventoryRowLabels;
   onSelect?: (item: PortableInventoryItemDto) => void;
   onPrimaryAction?: (item: PortableInventoryItemDto, action: PortableAssetActionKind) => void;
@@ -68,6 +78,8 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     item,
     selected = false,
     busy = false,
+    actions,
+    onAction,
     primaryAction,
     labels,
     onSelect,
@@ -78,6 +90,9 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
   const disabledVisual = actual === 'disabled';
   const showRefreshHint =
     needsPortableEnsureManagedRefresh(item) && Boolean(labels.unmanagedRefreshHint);
+  // actions 优先；未提供时回退到旧的单 primaryAction（向后兼容）。
+  const rowActions = actions ?? (primaryAction ? [primaryAction] : []);
+  const handleAction = onAction ?? onPrimaryAction;
 
   return (
     <article
@@ -134,16 +149,22 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           ) : null}
         </div>
       </button>
-      {primaryAction ? (
-        <Button
-          className={styles.primaryAction}
-          variant={primaryAction === 'uninstall' ? 'danger' : 'secondary'}
-          size="sm"
-          loading={busy}
-          onClick={() => onPrimaryAction?.(item, primaryAction)}
-        >
-          {labels.actions[primaryAction]}
-        </Button>
+      {rowActions.length > 0 && handleAction ? (
+        <div className={styles.rowActions}>
+          {rowActions.map((action) => (
+            <Button
+              key={action}
+              variant={action === 'uninstall' ? 'danger' : 'secondary'}
+              size="sm"
+              loading={busy}
+              disabled={busy}
+              data-testid={`portable-row-action-${action}-${item.inventoryItemId}`}
+              onClick={() => handleAction(item, action)}
+            >
+              {labels.actions[action]}
+            </Button>
+          ))}
+        </div>
       ) : null}
     </article>
   );

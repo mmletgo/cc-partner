@@ -65,7 +65,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     stale,
     selectedItemId,
     selectItem,
-    getPrimaryAction,
+    getRowActions,
     openAction,
     lockedItemIds,
     refresh,
@@ -202,12 +202,10 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
               item={item}
               selected={selectedItemId === item.inventoryItemId}
               busy={lockedItemIds.has(item.inventoryItemId)}
-              primaryAction={getPrimaryAction(item)}
+              actions={getRowActions(item)}
               labels={labels}
               onSelect={(selected) => selectItem(selected.inventoryItemId)}
-              onPrimaryAction={(selected, action) =>
-                openAction(selected.inventoryItemId, action)
-              }
+              onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
             />
           ))
         )}

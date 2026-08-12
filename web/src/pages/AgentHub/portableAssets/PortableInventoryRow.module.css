@@ -139,12 +139,23 @@
   align-self: start;
 }
 
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-self: start;
+}
+
 @media (max-width: 760px) {
   .row {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .primaryAction {
+    justify-self: start;
+  }
+
+  .rowActions {
     justify-self: start;
   }
 }

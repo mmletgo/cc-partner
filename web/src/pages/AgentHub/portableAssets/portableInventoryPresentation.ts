@@ -245,3 +245,44 @@ export function resolvePortablePrimaryAction(
   }
   return null;
 }
+
+/**
+ * Business Logic: 列表行同时暴露启用/禁用与卸载动作，让用户无需打开详情 Drawer 即可管理。
+ *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
+ *
+ * Code Logic: 复用 stale/mutationBlocked/locked/readOnly/unsupported/unmanaged 判定，
+ *   按 capabilities 累加有序数组：enable/disable（互斥）→ installToSourceTarget → uninstall。
+ *   返回的数组可能为空（无任何 mutation 资格）或含多项；调用方按顺序渲染按钮。
+ */
+export function resolvePortableRowActions(
+  item: PortableInventoryItemDto,
+  context: PortablePrimaryActionContext,
+): PortableAssetActionKind[] {
+  if (context.stale || context.mutationBlocked) return [];
+  if (context.lockedItemIds.has(item.inventoryItemId)) return [];
+  if (isPortableItemReadOnly(item)) return [];
+  if (item.managementState === 'unsupported') return [];
+  if (needsPortableEnsureManagedRefresh(item)) return [];
+
+  const caps = item.capabilities;
+  const actions: PortableAssetActionKind[] = [];
+  // enable 与 disable 基于 actualEnabled 互斥；与详情 drawer 的展示一致。
+  if (item.actualEnabled !== true && caps.canEnable) {
+    actions.push('enable');
+  }
+  if (item.actualEnabled !== false && caps.canDisable) {
+    actions.push('disable');
+  }
+  // installToSourceTarget 仅在无原生 enable 语义（actualEnabled 为 null/undefined）时出现。
+  if (
+    (item.actualEnabled === null || item.actualEnabled === undefined) &&
+    caps.canInstallToSourceTarget
+  ) {
+    actions.push('installToSourceTarget');
+  }
+  // uninstall 始终在末尾，仅看 canUninstall。
+  if (caps.canUninstall) {
+    actions.push('uninstall');
+  }
+  return actions;
+}
