@@ -1078,29 +1078,86 @@ mod tests {
         assert!(!id.contains("Bearer"));
     }
 
-    /// Business Logic: 编译期 JSON 与 runtime 解析一致；所有 target 均保持 scan-only。
+    /// Business Logic: 编译期 JSON 与 runtime 解析一致；claude/codex 在 macOS phase-1 pin
+    ///     认证后 portable 写能力（renderPortableAssets/activatePackage/deactivatePackage）已
+    ///     打开；opencode 仍 scan-only（无 executor）。
+    /// Code Logic: claude/codex 必须有 min/current tested version 与对应 capability evidence；
+    ///     opencode 保持 min/current=null 且写能力 Blocked。
     #[test]
     fn include_str_bytes_are_stable() {
         assert!(SUPPORT_MANIFEST_JSON.contains("\"schemaVersion\""));
         assert!(SUPPORT_MANIFEST_JSON.contains("\"claude\""));
         let m = builtin_support_manifest().unwrap();
         for t in &m.targets {
-            assert_eq!(t.min_tested_version, None);
-            assert_eq!(t.current_tested_version, None);
-            for (cap, support) in &t.capabilities {
-                if cap.is_write_side() {
-                    assert_eq!(
-                        *support,
-                        CapabilitySupport::Blocked,
-                        "{} {:?} must stay blocked until current L3 evidence is verified",
-                        t.target.as_str(),
-                        cap
+            match t.target.as_str() {
+                "claude" | "codex" => {
+                    assert!(
+                        t.min_tested_version.is_some(),
+                        "{} must pin minTestedVersion after phase-1 certification",
+                        t.target.as_str()
                     );
-                } else if matches!(
-                    cap,
-                    TargetCapability::ScanInstruction | TargetCapability::ScanPortableAssets
-                ) {
-                    assert_eq!(*support, CapabilitySupport::ReadOnly);
+                    assert!(
+                        t.current_tested_version.is_some(),
+                        "{} must pin currentTestedVersion after phase-1 certification",
+                        t.target.as_str()
+                    );
+                    for (cap, support) in &t.capabilities {
+                        if matches!(
+                            cap,
+                            TargetCapability::RenderPortableAssets
+                                | TargetCapability::ActivatePackage
+                                | TargetCapability::DeactivatePackage
+                        ) {
+                            assert!(
+                                matches!(*support, CapabilitySupport::Supported),
+                                "{} {:?} must be Supported after phase-1 certification",
+                                t.target.as_str(),
+                                cap
+                            );
+                            assert!(
+                                t.capability_evidence_ids.contains_key(cap),
+                                "{} {:?} must bind capability evidence",
+                                t.target.as_str(),
+                                cap
+                            );
+                        } else if cap.is_write_side() {
+                            assert_eq!(
+                                *support,
+                                CapabilitySupport::Blocked,
+                                "{} {:?} must stay blocked",
+                                t.target.as_str(),
+                                cap
+                            );
+                        } else if matches!(
+                            cap,
+                            TargetCapability::ScanInstruction
+                                | TargetCapability::ScanPortableAssets
+                        ) {
+                            assert_eq!(*support, CapabilitySupport::ReadOnly);
+                        }
+                    }
+                }
+                _ => {
+                    // opencode 等未认证 target 保持 scan-only。
+                    assert_eq!(t.min_tested_version, None);
+                    assert_eq!(t.current_tested_version, None);
+                    for (cap, support) in &t.capabilities {
+                        if cap.is_write_side() {
+                            assert_eq!(
+                                *support,
+                                CapabilitySupport::Blocked,
+                                "{} {:?} must stay blocked until certified",
+                                t.target.as_str(),
+                                cap
+                            );
+                        } else if matches!(
+                            cap,
+                            TargetCapability::ScanInstruction
+                                | TargetCapability::ScanPortableAssets
+                        ) {
+                            assert_eq!(*support, CapabilitySupport::ReadOnly);
+                        }
+                    }
                 }
             }
         }
