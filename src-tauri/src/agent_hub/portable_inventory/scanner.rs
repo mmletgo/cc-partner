@@ -2078,12 +2078,12 @@ enabled = false
     }
 
     #[test]
-    fn codex_known_version_stays_blocked_without_current_certification() {
+    fn codex_known_version_unlocks_portable_mutation_after_phase1_certification() {
         let (_tmp, env) = seed_all_targets_fixture();
         let probe = TargetProbe {
             target: AgentTarget::Codex,
             executable: Some(env.home.join("bin/codex")),
-            // 即使曾经被测试过的版本仍在本机，当前 manifest 没有有效写入认证。
+            // phase-1 认证后 manifest 已 pin codex 0.145.0-alpha.4；匹配版本应解锁 mutation。
             version: Some("codex-cli 0.145.0-alpha.4".into()),
             config_root: env.home.join(".codex"),
             support: AdapterSupportLevel::Supported,
@@ -2093,8 +2093,8 @@ enabled = false
         let target_dto = target_dto_from_probe(AgentTarget::Codex, &probe, &env).unwrap();
         assert_eq!(
             target_dto.mutation_capability,
-            PortableInventoryMutationCapability::Blocked,
-            "a historical runtime version must not unlock scan-only mutation"
+            PortableInventoryMutationCapability::Supported,
+            "phase-1 certified codex runtime must unlock portable write mutation"
         );
     }
 

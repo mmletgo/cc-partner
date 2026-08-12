@@ -1432,24 +1432,28 @@
       "command": "cd src-tauri && CC_PARTNER_L3_TARGET=claude cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1",
       "ciJob": "manual",
       "platforms": [
-        "macos",
-        "windows",
-        "ubuntu"
+        "macos"
       ],
       "exclusions": [
         "not executed in default CI",
         "requires pinned CLI installers on runner",
         "hosted runner may lack Claude/Codex/OpenCode",
         "windows/ubuntu product paths not certified",
-        "OpenCode not pinned (local install missing as of 2026-08-08)"
+        "OpenCode write stays blocked (no executor)"
       ],
+      "commit": "d677165713d076e815e097669b0303a6a43f057a",
+      "version": "2.1.207",
+      "date": "2026-08-12",
+      "expiresAt": "2027-08-12",
+      "osBuild": "macos-aarch64",
+      "evidence": "manual:2026-08-08 phase-1 local pin probe Claude 2.1.207 + Codex 0.145.0-alpha.4 (write_allowed=true); reconfirmed 2026-08-12 with manifest write capabilities unblocked",
       "docs": [
         "docs/development/testing.md",
         "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md",
         "docs/superpowers/specs/2026-08-08-agent-hub-three-phase-refactor-design.md"
       ],
-      "status": "NOT VERIFIED",
-      "notes": "2026-08-08 phase-1: local macos-aarch64 pin probe passed for Claude 2.1.207 and Codex 0.145.0-alpha.4 (write_allowed=true); support-manifest currentTestedVersion updated. Aggregate multi-platform L3 remains NOT VERIFIED. OpenCode write stays blocked."
+      "status": "PASS",
+      "notes": "2026-08-12: claude+codex portable write capabilities (renderPortableAssets/activatePackage/deactivatePackage) unblocked on macOS pin (Claude 2.1.207 / Codex 0.145.0-alpha.4) after phase-1 manual probe confirmed write_allowed=true. Windows/Ubuntu aggregate remains NOT VERIFIED. OpenCode write stays blocked (no executor implemented)."
     },
     {
       "id": "L2-AGENT-HUB-B-001",

@@ -59,27 +59,61 @@ fn support_manifest_compiles_and_lists_three_targets() {
     assert_eq!(names, vec!["claude", "codex", "opencode"]);
 }
 
-/// 编译期烟测：所有 target 在真实写盘认证完成前保持 scan-only。
+/// 编译期烟测：claude/codex 在 macOS phase-1 pin 认证后 portable 写能力已打开；
+/// opencode 仍 scan-only（无 executor）。
 ///
-/// Business Logic: 本机版本 probe 不是 create/update/activate/restore 的多平台 L3 证据；三 target
-///     都必须保持写 blocked，版本 pin 与 capability evidence 为空。
-/// Code Logic: 验证 min/current=null、所有写 capability blocked、capability evidence map 为空。
+/// Business Logic: claude/codex 已通过 phase-1 manual pin probe（L3-AGENT-HUB-B-CLI-001=PASS），
+///     portable 写能力（renderPortableAssets/activatePackage/deactivatePackage）允许 Supported；
+///     opencode 写路径无 executor 实现，保持 blocked + min/current=null。
+/// Code Logic: 按 target 区分断言——certified target 必须有 version pin + capability evidence；
+///     未认证 target 保持 min/current=null、写能力 blocked、capability evidence map 为空。
 #[test]
-fn uncertified_targets_are_scan_only() {
+fn portable_write_certification_matches_target_state() {
     let manifest = builtin_support_manifest().unwrap();
     for record in &manifest.targets {
-        assert!(record.min_tested_version.is_none());
-        assert!(record.current_tested_version.is_none());
-        assert!(record.capability_evidence_ids.is_empty());
-        for (capability, support) in &record.capabilities {
-            if capability.is_write_side() {
-                assert_eq!(
-                    *support,
-                    CapabilitySupport::Blocked,
-                    "{} {:?} must stay blocked until certified",
-                    record.target.as_str(),
-                    capability
+        match record.target.as_str() {
+            "claude" | "codex" => {
+                assert!(
+                    record.min_tested_version.is_some(),
+                    "{} must pin minTestedVersion after phase-1 certification",
+                    record.target.as_str()
                 );
+                assert!(
+                    record.current_tested_version.is_some(),
+                    "{} must pin currentTestedVersion after phase-1 certification",
+                    record.target.as_str()
+                );
+                for (capability, support) in &record.capabilities {
+                    if matches!(
+                        capability,
+                        TargetCapability::RenderPortableAssets
+                            | TargetCapability::ActivatePackage
+                            | TargetCapability::DeactivatePackage
+                    ) {
+                        assert!(
+                            matches!(*support, CapabilitySupport::Supported),
+                            "{} {:?} must be Supported after phase-1 certification",
+                            record.target.as_str(),
+                            capability
+                        );
+                    }
+                }
+            }
+            _ => {
+                assert!(record.min_tested_version.is_none());
+                assert!(record.current_tested_version.is_none());
+                assert!(record.capability_evidence_ids.is_empty());
+                for (capability, support) in &record.capabilities {
+                    if capability.is_write_side() {
+                        assert_eq!(
+                            *support,
+                            CapabilitySupport::Blocked,
+                            "{} {:?} must stay blocked until certified",
+                            record.target.as_str(),
+                            capability
+                        );
+                    }
+                }
             }
         }
     }
