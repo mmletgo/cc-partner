@@ -214,6 +214,24 @@ describe('usePortableInventoryController', () => {
     expect(result.current.getPrimaryAction(beta)).toBe('enable');
   });
 
+  test('getRowActions exposes enable/disable + uninstall per capability matrix', async () => {
+    // alpha: enabled + canDisable + canUninstall → disable + uninstall
+    // betaOff:  disabled + canEnable + canUninstall → enable + uninstall
+    const betaOff = makeItem({
+      inventoryItemId: 'claude-skill-beta-off',
+      kind: 'skill',
+      nativeId: 'beta-off',
+      actualEnabled: false,
+      capabilities: { ...baseCapabilities, canEnable: true, canDisable: false },
+    });
+    apiMocks.inspect.mockResolvedValue(snapshot('snap-rowactions', [alpha, betaOff]));
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    expect(result.current.getRowActions(alpha)).toEqual(['disable', 'uninstall']);
+    expect(result.current.getRowActions(betaOff)).toEqual(['enable', 'uninstall']);
+  });
+
   test('unopted/unsupported/stale items never expose mutation action', async () => {
     apiMocks.inspect.mockResolvedValue(
       snapshot('snap-readonly', [alpha, projectItem, unsupported], true),
