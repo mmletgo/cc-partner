@@ -18,7 +18,7 @@ use super::models::{
 use super::targets::{
     executor_for, expected_enabled_after, TargetActionContext, TargetActionRawOutcome,
 };
-use crate::agent_hub::models::PortableActionClaim;
+use crate::agent_hub::models::{AgentTarget, PortableActionClaim};
 use crate::agent_hub::packages::activator::ProcessRunner;
 use crate::agent_hub::portable_inventory::{
     hash_directory_tree, hash_plugin_root, inspect_portable_inventory_force_query,
@@ -441,6 +441,37 @@ async fn execute_claimed_plan(
         .map(|i| (i.inventory_item_id.clone(), i))
         .collect();
 
+    // Fallback 索引：按逻辑身份 (target, scope_id, native_id) 索引 post inventory。
+    // 设计债背景：`inventory_item_id` 把 source_identity（绝对路径）算进 hash，
+    // 而 enable/disable 会把 skill/plugin 在 active 路径与 disabled 路径之间物理移动，
+    // 导致同一逻辑物品在 pre/post 拥有不同的 inventory_item_id。仅靠 post_by_id 精确
+    // 匹配会让这些物品的 post 投影变成 None，从而误报 PORTABLE_ASSET_ACTION_RESCAN_MISSING。
+    // 这里额外按逻辑身份建索引，作为精确匹配失败后的兜底，仅在 enable/disable 路径
+    // 触发；reconcile_item 自身仍按 action 判断 expected，uninstall 的 None 语义不受影响。
+    // 同一逻辑键若出现多个 post item（理论不应发生），优先取 actual_enabled 与 action
+    // 期望一致的；都一致则取最后一个（保持与既有覆盖式 collect 语义一致）。
+    let mut post_by_logical_key: BTreeMap<(AgentTarget, String, String), &PortableInventoryItemDto> =
+        BTreeMap::new();
+    for item in post.items.iter() {
+        let key = (item.target, item.scope_id.clone(), item.native_id.clone());
+        match post_by_logical_key.get(&key) {
+            Some(existing) => {
+                // 优先保留与 action 期望 actual_enabled 一致的项；否则保持稳定，跳过覆盖。
+                let desired = match plan.action {
+                    PortableAssetActionKind::Enable => Some(true),
+                    PortableAssetActionKind::Disable => Some(false),
+                    _ => existing.actual_enabled,
+                };
+                if desired.is_some() && item.actual_enabled == desired {
+                    post_by_logical_key.insert(key, item);
+                }
+            }
+            None => {
+                post_by_logical_key.insert(key, item);
+            }
+        }
+    }
+
     let mut items = Vec::with_capacity(raw_results.len());
     for (item_id, raw, pre) in raw_results {
         let change = plan
@@ -454,7 +485,12 @@ async fn execute_claimed_plan(
             change.kind,
             &raw,
             pre.as_ref(),
-            post_by_id.get(&item_id).copied(),
+            resolve_post_item(
+                &item_id,
+                pre.as_ref(),
+                &post_by_id,
+                &post_by_logical_key,
+            ),
         );
         items.push(PortableAssetActionItemResultDto {
             inventory_item_id: item_id,
@@ -469,6 +505,40 @@ async fn execute_claimed_plan(
         client_request_id: request.client_request_id.clone(),
         items,
     })
+}
+
+/// 在 rescan 后按需为 enable/disable 找回 post inventory item 的兜底投影。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户禁用/启用 skill 时，adapter 会把物品在 `<config>/skills/{id}` 与
+///     `<data_dir>/claude-assets/disabled/skills/{id}` 之间物理移动；由于 inventory_item_id
+///     把绝对路径作为 source_identity 算进 hash，pre 快照里的旧 id 与 rescan 出的新 id 不一致，
+///     直接精确匹配会让 post 投影变 None，从而把成功的 disable 误判为
+///     PORTABLE_ASSET_ACTION_RESCAN_MISSING。本函数为这种路径敏感场景提供逻辑身份兜底。
+///
+/// Code Logic（这个函数做什么）:
+///     1. 先按 inventory_item_id 精确匹配——覆盖 uninstall 与未触动物品的正常路径。
+///     2. 命中失败时用 pre item 的逻辑身份 (target, scope_id, native_id) 在
+///        post_by_logical_key 中查找同一物品移动后的新投影。
+///     仅决定"是否找到 post 投影"；成功/失败的最终判定仍由 reconcile_item 按 action 与
+///     actual_enabled 自行计算，因此 uninstall 期望 None 的语义不受影响。
+fn resolve_post_item<'a>(
+    item_id: &str,
+    pre: Option<&PortableInventoryItemDto>,
+    post_by_id: &BTreeMap<String, &'a PortableInventoryItemDto>,
+    post_by_logical_key: &BTreeMap<(AgentTarget, String, String), &'a PortableInventoryItemDto>,
+) -> Option<&'a PortableInventoryItemDto> {
+    // 1. 精确匹配（uninstall/未触动物品的正常路径）
+    if let Some(item) = post_by_id.get(item_id) {
+        return Some(*item);
+    }
+    // 2. fallback：disable/enable 把物品在 active/disabled 路径间移动，
+    //    inventory_item_id 随 source_identity 绝对路径变化；用 pre 的逻辑身份
+    //    (target, scope_id, native_id) 在 post 里匹配同一物品的新 id。
+    let pre = pre?;
+    post_by_logical_key
+        .get(&(pre.target, pre.scope_id.clone(), pre.native_id.clone()))
+        .copied()
 }
 
 fn reconcile_item(
@@ -1145,6 +1215,148 @@ mod tests {
         );
         assert!(!skill_path.exists());
         assert!(data.join("claude-assets/disabled/skills/my-skill").exists());
+        assert!(runner.calls().is_empty());
+    }
+
+    /// Business Logic: 真实 scanner 会在 disable 后按 disabled 路径重算 inventory_item_id，
+    /// 此时 pre id 与 post id 不同；仅靠精确匹配会误报 PORTABLE_ASSET_ACTION_RESCAN_MISSING。
+    /// resolve_post_item 必须用逻辑身份 (target, scope_id, native_id) 找回 post 投影。
+    /// Code Logic: 构造 pre/post 两份 item（同逻辑身份、不同 source_path → 不同 id），
+    /// 直接调用 resolve_post_item 断言返回 disabled 后的 post 投影。
+    #[test]
+    fn reconcile_disable_falls_back_to_logical_identity_when_path_moves() {
+        let target = AgentTarget::Claude;
+        let pre_path = "/home/user/.claude/skills/hyperframes";
+        let post_path = "/data/cc-partner/claude-assets/disabled/skills/hyperframes";
+        let native_id = "hyperframes";
+        let scope_id = "user";
+
+        let pre_id = inventory_item_id(target, scope_id, pre_path, native_id);
+        let post_id = inventory_item_id(target, scope_id, post_path, native_id);
+        assert_ne!(pre_id, post_id, "fixture must produce distinct ids");
+
+        let pre_item = sample_item(target, PortableAssetKind::Skill, native_id, pre_path, Some(true));
+        assert_eq!(pre_item.inventory_item_id, pre_id);
+
+        // post item 用新路径独立构造，模拟 scanner 重新扫描得到的真实 inventory_item_id。
+        let mut post_item =
+            sample_item(target, PortableAssetKind::Skill, native_id, post_path, Some(false));
+        assert_eq!(post_item.inventory_item_id, post_id);
+        // 确保逻辑身份键对齐 pre（sample_item 默认 scope_id="user"、native_id 透传）。
+        post_item.scope_id = scope_id.into();
+
+        let post_by_id: BTreeMap<String, &PortableInventoryItemDto> =
+            [(post_item.inventory_item_id.clone(), &post_item)]
+                .into_iter()
+                .collect();
+        let post_by_logical_key: BTreeMap<(AgentTarget, String, String), &PortableInventoryItemDto> =
+            [(
+                (post_item.target, post_item.scope_id.clone(), post_item.native_id.clone()),
+                &post_item,
+            )]
+            .into_iter()
+            .collect();
+
+        // pre id 在 post_by_id 中不存在 → 触发 fallback。
+        let resolved = resolve_post_item(&pre_id, Some(&pre_item), &post_by_id, &post_by_logical_key)
+            .expect("fallback must locate moved post item");
+        assert_eq!(resolved.inventory_item_id, post_id);
+        assert_eq!(resolved.actual_enabled, Some(false));
+
+        // 对照：精确命中时不走 fallback（uninstall 路径）。
+        let exact = resolve_post_item(&post_id, Some(&pre_item), &post_by_id, &post_by_logical_key)
+            .expect("exact match must hit");
+        assert_eq!(exact.inventory_item_id, post_id);
+
+        // 对照：pre 缺失且 id 不匹配 → None（不假命中）。
+        let none = resolve_post_item("nonexistent-id", None, &post_by_id, &post_by_logical_key);
+        assert!(none.is_none());
+    }
+
+    /// Business Logic: disable 后 rescan 给出"路径已变 + id 已变 + actualEnabled=false"的 post
+    /// 快照时，apply 必须报 Succeeded，而不是误报 PORTABLE_ASSET_ACTION_RESCAN_MISSING。
+    /// Code Logic: 用 sample_item 分别构造 pre（active 路径）与 post（disabled 路径），
+    /// post_item 的 inventory_item_id 由 disabled 路径重新派生，与 pre 不同；
+    /// 通过 rescan_override 注入该 post 快照验证端到端 fallback 生效。
+    #[tokio::test]
+    async fn skill_disable_with_recomputed_post_id_succeeds_via_logical_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(claude.join("skills/hyperframes")).unwrap();
+        std::fs::write(claude.join("skills/hyperframes/SKILL.md"), "# skill\n").unwrap();
+        let skill_path = claude.join("skills/hyperframes");
+        let (hash, _, _, _) = hash_skill_directory(&skill_path).unwrap();
+
+        let repo = test_repo().await;
+        let runner = Arc::new(FakeProcessRunner::new());
+        let mut pre_item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "hyperframes",
+            skill_path.to_str().unwrap(),
+            Some(true),
+        );
+        pre_item.content_hash = Some(hash);
+        let snap =
+            snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![pre_item.clone()]);
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![pre_item.inventory_item_id.clone()],
+            PortableAssetActionKind::Disable,
+            false,
+        )
+        .await;
+
+        // 模拟 scanner rescan：disabled 路径 + actual_enabled=false，inventory_item_id 重算。
+        let disabled_path = data.join("claude-assets/disabled/skills/hyperframes");
+        let post_item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "hyperframes",
+            disabled_path.to_str().unwrap(),
+            Some(false),
+        );
+        assert_ne!(
+            post_item.inventory_item_id,
+            pre_item.inventory_item_id,
+            "fixture must produce a post id different from pre"
+        );
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
+
+        let deps = PortableActionExecutorDeps {
+            repo,
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snap),
+            claude_config_dir: Some(claude.clone()),
+            data_dir: Some(data.clone()),
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token,
+                client_request_id: "req-skill-rescan-fallback".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded,
+            "disable with recomputed post id must not report RESCAN_MISSING: {:?} / {:?}",
+            result.items[0].error_code,
+            result.items[0].message
+        );
+        assert_ne!(
+            result.items[0].error_code.as_deref(),
+            Some("PORTABLE_ASSET_ACTION_RESCAN_MISSING")
+        );
+        assert!(!skill_path.exists());
+        assert!(disabled_path.exists());
         assert!(runner.calls().is_empty());
     }
 
