@@ -5,7 +5,8 @@
   "windows": [
     "main",
     "screenshot-overlay-*",
-    "health-overlay-*"
+    "health-overlay-*",
+    "workbench-*"
   ],
   "permissions": [
     "core:default",

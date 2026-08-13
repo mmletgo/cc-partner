@@ -206,6 +206,7 @@ pub fn run() {
 
             // 注入共享状态供命令层使用
             app.manage(state);
+            app.manage(crate::workbench::window_registry::WorkbenchWindowRegistry::default());
             permissions::clear_legacy_input_monitoring_markers();
 
             // 装配启动协调器（ensure/start 闭包在 manage 之后捕获 AppHandle）
@@ -591,6 +592,11 @@ pub fn run() {
             workbench_cmd::remove_workbench_project,
             workbench_cmd::reorder_workbench_projects,
             workbench_cmd::touch_workbench_project,
+            workbench_cmd::open_workbench_window,
+            workbench_cmd::focus_workbench_window,
+            workbench_cmd::claim_workbench_window_project,
+            workbench_cmd::list_workbench_window_occupancy,
+            workbench_cmd::apply_workbench_window_deeplink,
             workbench_cmd::discover_workbench_browser_targets,
             workbench_cmd::create_workbench_browser_preview,
             workbench_cmd::start_workbench_browser_verification,
@@ -662,11 +668,20 @@ pub fn run() {
         })
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // 用 RunEvent::Exit 兜底，确保无论退出路径都走共享后端运行时清理。
-            if let tauri::RunEvent::Exit = event {
-                let state: tauri::State<'_, AppState> = app_handle.state();
-                shutdown_backend_runtime(&state);
-                tracing::info!("应用已退出，共享后端运行时已清理");
+            match event {
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    workbench_cmd::release_destroyed_workbench_window(app_handle, &label);
+                }
+                tauri::RunEvent::Exit => {
+                    let state: tauri::State<'_, AppState> = app_handle.state();
+                    shutdown_backend_runtime(&state);
+                    tracing::info!("应用已退出，共享后端运行时已清理");
+                }
+                _ => {}
             }
         });
 }

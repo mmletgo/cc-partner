@@ -13,8 +13,9 @@
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::workbench::workspace_layout::{
-    ensure_known_schema_version, validate_and_normalize_draft, InspectorTab, WorkspaceLayout,
-    WorkspaceLayoutDraft, WorkspaceLayoutKind, WorkspaceView, WORKSPACE_LAYOUT_SCHEMA_VERSION,
+    desktop_auto_slot_key, ensure_known_schema_version, is_window_auto_slot_key,
+    validate_and_normalize_draft, InspectorTab, WorkspaceLayout, WorkspaceLayoutDraft,
+    WorkspaceLayoutKind, WorkspaceView, WORKSPACE_LAYOUT_SCHEMA_VERSION,
 };
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -290,6 +291,27 @@ impl WorkbenchWorkspaceLayoutRepo {
         })
         .await
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     关卫星窗后不得留下该 slot 的旧现场，避免下次回收同 label 时串项目。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅删除 `desktop:auto:window:workbench-[1-4]`；主窗 `desktop:auto` 与 named 拒绝。
+    pub async fn delete_window_auto_slot(&self, slot_key: &str) -> Result<(), AppError> {
+        if !is_window_auto_slot_key(slot_key) || slot_key == desktop_auto_slot_key() {
+            return Err(AppError::validation(
+                "workspace_layout_delete_window_auto_only".to_string(),
+            ));
+        }
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM workbench_workspace_layouts WHERE slot_key = ? AND kind = 'auto'")
+                .bind(slot_key)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -430,6 +452,30 @@ mod tests {
 
         repo.delete_named(&saved.id).await.unwrap();
         assert!(repo.list_named().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_window_auto_slot_only_removes_satellite_auto() {
+        let repo = layout_repo().await;
+        let mut satellite = auto_draft("p-sat");
+        satellite.slot_key = "desktop:auto:window:workbench-1".to_string();
+        repo.save_cas(satellite, None).await.unwrap();
+        let auto = repo.save_cas(auto_draft("p1"), None).await.unwrap();
+
+        repo.delete_window_auto_slot("desktop:auto:window:workbench-1")
+            .await
+            .unwrap();
+        assert!(repo
+            .get_by_slot("desktop:auto:window:workbench-1")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo.get_by_slot("desktop:auto").await.unwrap().is_some());
+
+        let err = repo.delete_window_auto_slot("desktop:auto").await.unwrap_err();
+        assert_eq!(err.code(), "workspace_layout_delete_window_auto_only");
+        let named_err = repo.delete_window_auto_slot(&auto.slot_key).await.unwrap_err();
+        assert_eq!(named_err.code(), "workspace_layout_delete_window_auto_only");
     }
 
     #[tokio::test]

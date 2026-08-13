@@ -17,6 +17,7 @@ mod git;
 mod layout;
 mod projects;
 mod sessions;
+mod windows;
 
 #[cfg(test)]
 mod tests;
@@ -157,6 +158,16 @@ pub use layout::{
     __tauri_command_name_save_workspace_layout, apply_workspace_restore_cmd,
     delete_named_workspace_layout, get_workspace_layout, list_named_workspace_layouts,
     preflight_workspace_restore_cmd, save_workspace_layout,
+};
+
+pub use windows::{
+    __cmd__apply_workbench_window_deeplink, __cmd__claim_workbench_window_project,
+    __cmd__focus_workbench_window, __cmd__list_workbench_window_occupancy,
+    __cmd__open_workbench_window, __tauri_command_name_apply_workbench_window_deeplink,
+    __tauri_command_name_claim_workbench_window_project, __tauri_command_name_focus_workbench_window,
+    __tauri_command_name_list_workbench_window_occupancy, __tauri_command_name_open_workbench_window,
+    apply_workbench_window_deeplink, claim_workbench_window_project, focus_workbench_window,
+    list_workbench_window_occupancy, open_workbench_window, release_destroyed_workbench_window,
 };
 
 // ---- crate 内 helper / DTO（pub(crate)）----
