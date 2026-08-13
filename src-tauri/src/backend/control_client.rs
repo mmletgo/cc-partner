@@ -181,7 +181,8 @@ fn workbench_control_path(op: &str) -> &'static str {
         | "browser.discover"
         | "browser.create_preview"
         | "sessions.replay"
-        | "sessions.write" => "workbench/data",
+        | "sessions.write"
+        | "notes.save" => "workbench/data",
         _ => "workbench",
     }
 }
@@ -3391,6 +3392,8 @@ mod tests {
             "workbench/data"
         );
         assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
+        assert_eq!(workbench_control_path("notes.save"), "workbench/data");
+        assert_eq!(workbench_control_path("notes.get"), "workbench");
     }
 
     /// 验证 NDJSON decoder 可跨 chunk 重组 UTF-8 与多行消息。

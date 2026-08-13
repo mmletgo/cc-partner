@@ -467,6 +467,9 @@ mod tests {
             workbench_workspace_layout_repo: Arc::new(
                 crate::storage::WorkbenchWorkspaceLayoutRepo::new(pool.clone()),
             ),
+            workbench_project_note_repo: Arc::new(
+                crate::storage::WorkbenchProjectNoteRepo::new(pool.clone()),
+            ),
             workbench_browser_previews: Arc::new(
                 crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
             ),

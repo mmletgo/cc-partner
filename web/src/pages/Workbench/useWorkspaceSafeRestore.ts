@@ -73,10 +73,10 @@ export interface UseWorkspaceSafeRestoreResult {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   UI inspector 仅 files|history，layout 模型含 git|automation，持久化不得折叠丢枚举。
+ *   UI inspector 现为 files|history|notes，layout 模型另含 git|automation，持久化不得折叠丢枚举。
  *
  * Code Logic（这个函数做什么）:
- *   WorkbenchInspectorTab → 完整 InspectorTab（1:1 映射 files/history）。
+ *   WorkbenchInspectorTab → 完整 InspectorTab（1:1 映射 files/history/notes）。
  */
 function toLayoutInspectorTab(tab: WorkbenchInspectorTab): InspectorTab {
   return tab;
@@ -87,9 +87,10 @@ function toLayoutInspectorTab(tab: WorkbenchInspectorTab): InspectorTab {
  *   恢复 layout 中的完整 inspector 枚举到当前 UI 能力。
  *
  * Code Logic（这个函数做什么）:
- *   history|git → history；files|automation → files。
+ *   notes → notes；history|git → history；其余 → files。
  */
 function fromLayoutInspectorTab(tab: InspectorTab): WorkbenchInspectorTab {
+  if (tab === 'notes') return 'notes';
   if (tab === 'history' || tab === 'git') return 'history';
   return 'files';
 }

@@ -7,6 +7,11 @@
   min-height: 0;
 }
 
+.markdownShell[data-compact='true'] {
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+}
+
 .modeBar {
   display: inline-grid;
   grid-auto-flow: column;

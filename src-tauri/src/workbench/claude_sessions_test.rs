@@ -1594,6 +1594,9 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         workbench_workspace_layout_repo: Arc::new(
             crate::storage::WorkbenchWorkspaceLayoutRepo::new(pool.clone()),
         ),
+        workbench_project_note_repo: Arc::new(
+            crate::storage::WorkbenchProjectNoteRepo::new(pool.clone()),
+        ),
         workbench_browser_previews: Arc::new(
             crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
         ),

@@ -603,6 +603,8 @@ pub fn run() {
             workbench_cmd::delete_named_workspace_layout,
             workbench_cmd::preflight_workspace_restore_cmd,
             workbench_cmd::apply_workspace_restore_cmd,
+            workbench_cmd::get_workbench_project_note,
+            workbench_cmd::save_workbench_project_note,
             workbench_cmd::list_workbench_worktrees,
             workbench_cmd::create_workbench_worktree,
             workbench_cmd::commit_workbench_worktree,

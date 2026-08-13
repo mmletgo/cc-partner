@@ -3,7 +3,7 @@
  *
  * Business Logic（为什么需要这个页面）:
  *   用户需要指定一个项目文件夹，并在 cc-partner 内为该项目同时管理多个项目终端；
- *   右侧检查器展示当前会话状态，并可在项目文件夹与 Git 提交历史之间切换。
+ *   右侧检查器展示当前会话状态，并可在项目文件夹、Git 提交历史与项目笔记之间切换。
  *
  * Code Logic（这个页面做什么）:
  *   - 拉取/添加/移除工作台项目，并按当前项目加载会话与根目录文件树
@@ -67,6 +67,7 @@ import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
+import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
 import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
@@ -470,6 +471,11 @@ export function Workbench() {
     setWorkspaceView,
     setInspectorTab,
     setBrowserTargetUrl,
+  });
+
+  const notes = useWorkbenchProjectNotes({
+    activeProjectId, inspectorTab, desktopUnavailableMessage,
+    loadFailedFallback: t('workbench:notesLoadFailed'),
   });
 
   useEffect(() => {
@@ -1176,6 +1182,7 @@ export function Workbench() {
             mergeStages, loadGitHistory,
             handleCommitWorktree, handlePushWorktree, handleMergeWorktree,
           }}
+          notesInspector={{ activeProjectId, ...notes }}
         />
       </aside>
       <WorkbenchSessionSearch

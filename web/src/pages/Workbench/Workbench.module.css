@@ -82,7 +82,7 @@
 
 .inspectorTabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-1);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
@@ -100,6 +100,9 @@
   cursor: pointer;
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
@@ -120,6 +123,15 @@
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
+}
+
+.notesInspector {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 .fileActions,

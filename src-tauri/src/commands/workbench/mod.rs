@@ -15,6 +15,7 @@ mod files;
 mod fleet;
 mod git;
 mod layout;
+mod notes;
 mod projects;
 mod sessions;
 
@@ -159,6 +160,13 @@ pub use layout::{
     preflight_workspace_restore_cmd, save_workspace_layout,
 };
 
+pub use notes::{
+    __cmd__get_workbench_project_note, __cmd__save_workbench_project_note,
+    __tauri_command_name_get_workbench_project_note,
+    __tauri_command_name_save_workbench_project_note, get_workbench_project_note,
+    save_workbench_project_note,
+};
+
 // ---- crate 内 helper / DTO（pub(crate)）----
 
 pub(crate) use browser::create_workbench_browser_preview_for_state;
@@ -173,6 +181,10 @@ pub(crate) use layout::{
     get_workspace_layout_for_state, list_named_workspace_layouts_for_state,
     owner_local_preflight_for_state, owner_local_safe_attach_for_state,
     preflight_workspace_restore_for_state, save_workspace_layout_for_state,
+};
+
+pub(crate) use notes::{
+    get_workbench_project_note_for_state, save_workbench_project_note_for_state,
 };
 
 // control_workbench 与其它 crate 内 owner 路径需要 common 中的远程映射/设备 helper。

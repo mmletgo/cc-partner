@@ -156,7 +156,7 @@ export interface UseWorkbenchWorktreeGitControllerParams {
   /** 页面持有的 activeWorktreeId setter；controller 在 loadWorktrees / create / remove 后调用它切换。 */
   setActiveWorktreeId: (next: string | null) => void;
   remoteWriteDisabled: boolean;
-  inspectorTab: 'files' | 'history';
+  inspectorTab: 'files' | 'history' | 'notes';
   isCurrentProject: (projectId: string) => boolean;
   markRequestFailure: (projectId: string, error: unknown) => void;
   markRequestSuccess: (projectId: string) => void;

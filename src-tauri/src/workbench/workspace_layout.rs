@@ -132,6 +132,8 @@ pub enum InspectorTab {
     Git,
     /// Git 历史。
     History,
+    /// 项目笔记。
+    Notes,
     /// 自动化面板。
     Automation,
 }
@@ -147,6 +149,7 @@ impl InspectorTab {
             Self::Files => "files",
             Self::Git => "git",
             Self::History => "history",
+            Self::Notes => "notes",
             Self::Automation => "automation",
         }
     }
@@ -161,6 +164,7 @@ impl InspectorTab {
             "files" => Ok(Self::Files),
             "git" => Ok(Self::Git),
             "history" => Ok(Self::History),
+            "notes" => Ok(Self::Notes),
             "automation" => Ok(Self::Automation),
             _ => Err(AppError::validation(format!(
                 "workspace_layout_invalid_inspector:{raw}"
@@ -430,6 +434,8 @@ mod tests {
     #[test]
     fn unknown_enums_fail_closed() {
         assert!(WorkspaceView::parse("unknown").is_err());
+        assert_eq!(InspectorTab::parse("notes").unwrap(), InspectorTab::Notes);
+        assert_eq!(InspectorTab::Notes.as_str(), "notes");
         assert!(InspectorTab::parse("mystery").is_err());
         assert!(WorkspaceLayoutKind::parse("legacy").is_err());
         assert!(ensure_known_schema_version(2).is_err());

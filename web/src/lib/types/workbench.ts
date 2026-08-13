@@ -83,6 +83,21 @@ export interface WorkbenchProject {
 }
 
 /**
+ * 工作台项目笔记 DTO（对齐 Rust WorkbenchProjectNoteDto，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   右侧「项目笔记」按项目 ID 读写本机 SQLite，前端需要正文与最近保存时间。
+ *
+ * Code Logic（字段说明）:
+ *   updatedAt 从未保存时为空串。
+ */
+export interface WorkbenchProjectNote {
+  projectId: string;
+  content: string;
+  updatedAt: string;
+}
+
+/**
  * 工作台 Git 状态摘要。
  *
  * Business Logic（为什么需要这个类型）:

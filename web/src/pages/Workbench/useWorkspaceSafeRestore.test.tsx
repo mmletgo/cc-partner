@@ -58,7 +58,7 @@ vi.mock('@/api/workbench', () => ({
  *
  * `workspaceView` 字段是 plan 内部 layout 枚举 ('terminal'|'files'|'browser'|'automation')，
  * 用于驱动 bridge.setWorkspaceView。InspectorTab 是完整布局枚举
- * ('files'|'git'|'history'|'automation')；hook 通过 fromLayoutInspectorTab 折叠到 UI 枚举。
+ * ('files'|'git'|'history'|'notes'|'automation')；hook 通过 fromLayoutInspectorTab 折叠到 UI 枚举。
  * ------------------------------------------------------------------------- */
 
 function buildPlan(overrides: {
@@ -270,6 +270,57 @@ describe('useWorkspaceSafeRestore — initial restore force terminal', () => {
     expect(calls.setWorkspaceView).not.toContain('files');
     // inspectorTab should be preserved from plan (per product decision).
     expect(calls.setInspectorTab).toContain('history');
+  });
+
+  test('initial restore maps layout inspectorTab notes to UI notes', async () => {
+    vi.useFakeTimers();
+    layoutApi.preflight.mockResolvedValue(
+      buildPlan({ workspaceView: 'terminal', inspectorTab: 'notes' }),
+    );
+
+    const { calls } = makeHarness({
+      projectsLoading: false,
+      projectsLength: 1,
+      activeProjectId: 'p1',
+      activeWorktreeId: null,
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+    });
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(calls.setInspectorTab).toContain('notes');
+  });
+
+  test('initial restore maps layout inspectorTab git to UI history', async () => {
+    vi.useFakeTimers();
+    layoutApi.preflight.mockResolvedValue(
+      buildPlan({ workspaceView: 'terminal', inspectorTab: 'git' }),
+    );
+
+    const { calls } = makeHarness({
+      projectsLoading: false,
+      projectsLength: 1,
+      activeProjectId: 'p1',
+      activeWorktreeId: null,
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+    });
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(calls.setInspectorTab).toContain('history');
+    expect(calls.setInspectorTab).not.toContain('git');
   });
 
   test('initial restore writes terminal even when plan says browser', async () => {
