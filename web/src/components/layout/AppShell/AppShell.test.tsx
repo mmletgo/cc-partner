@@ -51,6 +51,30 @@ vi.mock('@/components/domain/MobileAccessCard', () => ({
   MobileAccessCard: () => null,
 }));
 
+const windowRoleMock = vi.hoisted(() => ({ role: 'main' as 'main' | 'satellite' | 'overlay' }));
+
+vi.mock('@/hooks/useWorkbenchWindowRole', () => ({
+  useWorkbenchWindowRole: () => ({
+    role: windowRoleMock.role,
+    label: windowRoleMock.role === 'satellite' ? 'workbench-1' : 'main',
+    layoutSlotKey:
+      windowRoleMock.role === 'satellite' ? 'desktop:auto:window:workbench-1' : 'desktop:auto',
+  }),
+}));
+
+vi.mock('@/hooks/workbenchProjectsContext', () => ({
+  useWorkbenchProjects: () => ({
+    activeProject: { name: 'demo-app' },
+  }),
+}));
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    setTitle: async () => undefined,
+  }),
+}));
+
+
 import { AppShell } from './AppShell';
 
 beforeAll(async () => {
@@ -166,6 +190,16 @@ describe('AppShell grouped navigation', () => {
     expect(workSection).toBeTruthy();
     expect(within(workSection as HTMLElement).getByTestId('project-rail')).toBeTruthy();
     expect(within(workSection as HTMLElement).queryByRole('link', { name: /工作台/ })).toBeNull();
+  });
+
+  test('satellite chrome hides Explore/System/Settings and keeps project rail', () => {
+    windowRoleMock.role = 'satellite';
+    renderShell();
+    expect(screen.getByTestId('workbench-satellite-shell')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Github热门' })).toBeNull();
+    expect(screen.queryByRole('link', { name: '设置' })).toBeNull();
+    expect(screen.getByTestId('project-rail')).toBeTruthy();
+    windowRoleMock.role = 'main';
   });
 
   test('sidebar content scroll contract uses min-height 0 and overflow-y auto', () => {
