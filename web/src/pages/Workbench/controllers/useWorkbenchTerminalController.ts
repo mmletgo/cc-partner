@@ -349,6 +349,7 @@ export function useWorkbenchTerminalController(
       'workbench:terminal-input-state',
       (event) => {
         const payload = event.payload;
+        if (!knownSessionIdsRef.current.has(payload.sessionId)) return;
         terminalInputPumpRef.current?.blockSession(payload.sessionId);
         reportWriteErrorRef.current(payload.sessionId, new Error(payload.message));
       },

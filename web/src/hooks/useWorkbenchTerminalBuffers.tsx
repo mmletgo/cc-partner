@@ -37,6 +37,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { workbenchApi } from '@/api/workbench';
+import { parseWorkbenchWindowRole } from '@/lib/workbenchWindow';
+import { parseWorkbenchDeepLink } from '@/pages/Workbench/workbenchDeepLink';
+import { readCurrentWindowLabel } from './useWorkbenchWindowRole';
 import type { WorkbenchTerminalOutputEvent } from '@/lib/types';
 import {
   applyTerminalBaselineCutover,
@@ -919,7 +922,18 @@ export function WorkbenchTerminalBuffersProvider({
         }
         startupListInFlightRef.current = true;
         try {
-          const sessions = await workbenchApi.sessions.list();
+          const isSatellite =
+            parseWorkbenchWindowRole(readCurrentWindowLabel()) === 'satellite';
+          const urlProjectId = isSatellite
+            ? parseWorkbenchDeepLink(window.location.search).projectId
+            : null;
+          if (isSatellite && !urlProjectId) {
+            if (!cancelled) baselineSettled = true;
+            return;
+          }
+          const sessions = urlProjectId
+            ? await workbenchApi.sessions.list(urlProjectId)
+            : await workbenchApi.sessions.list();
           if (cancelled) return;
           setStartupBaselineFailure(null);
           for (const session of sessions) {
