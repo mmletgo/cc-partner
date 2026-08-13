@@ -268,6 +268,44 @@ pub(crate) fn worktree_storage_path(state: &AppState, project_id: &str, branch: 
         .join(workbench_git::branch_slug(branch))
 }
 
+/// Workbench 内部 integration worktree 的存放根目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     一键 merge 的内部隔离目录必须位于应用数据目录，且与用户可见 worktree 根明确分离，
+///     以便发现/对账流程稳定排除它。
+///
+/// Code Logic（这个函数做什么）:
+///     基于 SQLite db_path 父目录返回固定 `merge-integrations` 根目录。
+pub(crate) fn merge_integration_storage_root(state: &AppState) -> PathBuf {
+    let config = state.config.read().expect("config 读锁中毒");
+    let db_parent = Path::new(&config.db_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    db_parent.join("merge-integrations")
+}
+
+/// 为一次 merge operation 生成确定性的隔离 worktree 路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     owner 在发布短窗口重启后必须能按同一 clientOperationId 定位并清理残留隔离目录，
+///     同时不能把未经处理的 operation id 直接拼进文件系统路径。
+///
+/// Code Logic（这个函数做什么）:
+///     对 project_id 与 operation_id 做 SHA256，使用完整十六进制摘要作为根目录下唯一子目录名。
+pub(crate) fn merge_integration_storage_path(
+    state: &AppState,
+    project_id: &str,
+    operation_id: &str,
+) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(operation_id.as_bytes());
+    let digest = hasher.finalize();
+    merge_integration_storage_root(state).join(format!("{digest:x}"))
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Workbench 顶部 worktree strip 即使在非 Git 项目中也需要稳定展示主工作区。
 ///
@@ -430,8 +468,20 @@ pub(crate) async fn sync_git_worktrees(
         }
     }
 
+    let integration_root = merge_integration_storage_root(state);
+    let normalized_integration_root = integration_root
+        .canonicalize()
+        .unwrap_or_else(|_| integration_root.clone());
     for item in parsed.into_iter().filter(|item| !item.is_main) {
         let item_path = normalize_worktree_path(&item.path);
+        // merge integration worktree 是内部 detached 临时目录，永不写入 SQLite 或显示给用户。
+        let item_path_buf = PathBuf::from(&item_path);
+        let normalized_item_path = item_path_buf
+            .canonicalize()
+            .unwrap_or_else(|_| item_path_buf.clone());
+        if normalized_item_path.starts_with(&normalized_integration_root) {
+            continue;
+        }
         // rm -rf 后 Git 元数据残留，porcelain 可能仍列出该 worktree；磁盘不存在则跳过 upsert。
         if !path_exists_nofollow(Path::new(&item_path))? {
             continue;
@@ -1587,6 +1637,7 @@ pub(super) mod restore_holder_fail_closed_tests {
         sqlx::query(
             "CREATE TABLE workbench_sessions (\
              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL, \
+             name_source TEXT NOT NULL DEFAULT 'default', \
              command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL, \
              rows INTEGER NOT NULL, started_at TEXT NOT NULL, exited_at TEXT, exit_code INTEGER, \
              backend TEXT NOT NULL, backend_id TEXT, backend_window_id TEXT, \
@@ -2072,6 +2123,159 @@ mod sync_git_worktrees_external_delete_tests {
             })
             .await
             .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     隔离 merge 可能运行数分钟；此时普通 Workbench 刷新不能把内部 detached worktree
+    ///     自动发现并写入 SQLite，否则用户会看到临时工作区并可能误操作。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 fixture 的 app data 根创建真实 detached integration worktree，执行 sync_git_worktrees，
+    ///     断言项目下不存在指向该路径的非主 row，随后移除临时 worktree。
+    #[tokio::test]
+    async fn integration_worktree_is_never_discovered_into_sqlite() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let main = temp.path().join("main");
+        std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+        git(&main, &["init"]);
+        git(&main, &["checkout", "-b", "main"]);
+        git(&main, &["config", "user.name", "Test"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-m", "init"]);
+
+        let state = build_restore_fail_state().await;
+        let project = project_row_for(&main);
+        let data_root = temp.path().join("app-data");
+        std::fs::create_dir_all(&data_root).expect("create app data");
+        state.config.write().expect("config write").db_path =
+            data_root.join("data.db").to_string_lossy().into_owned();
+        let integration = merge_integration_storage_path(&state, "p1", "operation-1");
+        std::fs::create_dir_all(integration.parent().expect("integration parent"))
+            .expect("create integration root");
+        let head = workbench_git::head_hash(&main)
+            .expect("head")
+            .expect("some head");
+        workbench_git::create_detached_integration_worktree(&main, &integration, &head)
+            .expect("create detached integration");
+
+        sync_git_worktrees(&state, &project)
+            .await
+            .expect("对账不应失败");
+        let rows = state
+            .workbench_worktree_repo
+            .list_by_project("p1")
+            .await
+            .expect("list rows");
+        let integration_canonical = integration.canonicalize().expect("integration canonical");
+        assert!(rows.iter().all(|row| {
+            Path::new(&row.path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&row.path))
+                != integration_canonical
+        }));
+
+        workbench_git::remove_integration_worktree(&main, &integration)
+            .expect("cleanup integration");
+        assert!(!integration.exists());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 可能在 `git worktree remove` 已成功、SQLite worktree/session row 尚未删除时崩溃；
+    ///     发布后恢复必须继续收敛 metadata，不能把缺失路径误判为源漂移并留下幽灵工作区。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建并合并真实 source worktree，在 SQLite 登记 row/session；直接用 Git 删除 source 模拟 crash 点，
+    ///     再调用发布后幂等 cleanup，断言不重复 remove、source branch/session/worktree row 均被清理。
+    #[tokio::test]
+    async fn published_cleanup_resumes_after_git_worktree_was_already_removed() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let main = temp.path().join("main");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+        git(&main, &["init"]);
+        git(&main, &["checkout", "-b", "main"]);
+        git(&main, &["config", "user.name", "Test"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-m", "init"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                source.to_string_lossy().as_ref(),
+            ],
+        );
+        std::fs::write(source.join("feature.txt"), "feature\n").expect("feature");
+        git(&source, &["add", "feature.txt"]);
+        git(&source, &["commit", "-m", "feature"]);
+        let source_oid = workbench_git::head_hash(&source)
+            .expect("source head")
+            .expect("some source head");
+        let main_before = workbench_git::head_hash(&main)
+            .expect("main head")
+            .expect("some main head");
+        git(&main, &["merge", "--no-ff", "feature"]);
+
+        let state = build_restore_fail_state().await;
+        let project = project_row_for(&main);
+        seed_feature_worktree_row(&state, "wt-crash", source.to_string_lossy().as_ref()).await;
+        seed_session_for_worktree(&state, "sess-crash", "wt-crash").await;
+        let row = state
+            .workbench_worktree_repo
+            .get("wt-crash")
+            .await
+            .expect("get row")
+            .expect("source row");
+
+        // crash 点：Git worktree 已移除，但 branch 与 SQLite metadata 尚在。
+        git(
+            &main,
+            &["worktree", "remove", source.to_string_lossy().as_ref()],
+        );
+        assert!(!source.exists());
+        assert!(state
+            .workbench_worktree_repo
+            .get("wt-crash")
+            .await
+            .expect("row before recovery")
+            .is_some());
+
+        let frozen = workbench_git::FrozenWorkbenchMerge {
+            main_branch: "main".to_string(),
+            main_oid: main_before,
+            source_oid,
+        };
+        let cleaned = crate::commands::workbench::git::cleanup_published_source_if_unchanged(
+            &state, &project, &row, &frozen,
+        )
+        .await
+        .expect("resume cleanup");
+
+        assert!(cleaned);
+        assert!(state
+            .workbench_worktree_repo
+            .get("wt-crash")
+            .await
+            .expect("row after recovery")
+            .is_none());
+        assert!(state
+            .workbench_session_repo
+            .get("sess-crash")
+            .await
+            .expect("session after recovery")
+            .is_none());
+        let branch = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/feature"])
+            .current_dir(&main)
+            .status()
+            .expect("query branch");
+        assert!(!branch.success(), "已合并 source branch 应被幂等清理");
     }
 
     /// Business Logic（为什么需要这个测试）:

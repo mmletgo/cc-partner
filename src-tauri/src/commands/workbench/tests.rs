@@ -6,7 +6,8 @@ use super::common::*;
 use super::git::{
     build_commit_message_instruction, build_merge_conflict_resolution_instruction,
     content_has_conflict_markers, map_remote_merge_result_value, merge_conflict_resolution_schema,
-    safe_merge_resolution_path, validate_merge_resolution_path, workbench_commit_message_schema,
+    merge_ledger_state_needs_published_recovery, safe_merge_resolution_path,
+    validate_merge_resolution_path, workbench_commit_message_schema,
 };
 use super::sessions::should_attempt_session_zoom;
 use super::*;
@@ -16,6 +17,7 @@ use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitStatusDto, WorkbenchProjectDto, WorkbenchProjectRow,
     WorkbenchSessionDto, WorkbenchSessionRow, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
+use crate::workbench::operation_ledger::MutationState;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::Path;
@@ -47,6 +49,27 @@ fn device_base_url_from_devices_returns_url_and_offline_error() {
 
     assert_eq!(url, "http://192.168.1.9:14210");
     assert_eq!(missing.to_string(), "远端设备不在线");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     merge 已发布后 owner 可能留下 running 或 failed ledger；同 id 重试必须先精确恢复，而非永久 unknown/failed。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 claimed/running/failed 都进入 published recovery，只有 succeeded 直接回放既有 outcome。
+#[test]
+fn pending_or_failed_merge_ledger_requires_published_recovery() {
+    assert!(merge_ledger_state_needs_published_recovery(
+        MutationState::Claimed
+    ));
+    assert!(merge_ledger_state_needs_published_recovery(
+        MutationState::Running
+    ));
+    assert!(merge_ledger_state_needs_published_recovery(
+        MutationState::Failed
+    ));
+    assert!(!merge_ledger_state_needs_published_recovery(
+        MutationState::Succeeded
+    ));
 }
 
 /// Business Logic（为什么需要这个测试）:

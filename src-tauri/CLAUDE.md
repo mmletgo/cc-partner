@@ -84,7 +84,7 @@ src/
 ├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency + **agent_hub_source**（conflict/blocked/source-push-failed 投影，v1+v2，稳定 ID `agent-hub:conflict:<id>` / `agent-hub:blocked:<matId>` / `agent-hub:push-failed:<requestId>:<peerId>`）+ agent_runtime source（v2）+ **experiment_source**（NeedsDecision 组级投影，稳定 ID `experiment:decision:<id>`）；Tauri `list_attention_items`/`list_attention_items_v2` 与 Mobile `GET /api/mobile/attention`/`/v2`；能力 token `attention.v1`+`attention.v2` [已实现 Gate A Task9]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
-├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
+├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥；一键 merge 冻结 main/source OID 后在 `<data_dir>/merge-integrations/<operation-hash>` detached worktree 内执行 `--no-ff` 与 Claude 冲突解决（临时 worktree 不入 SQLite/用户列表），严格校验双父 `[main_oid, source_oid]`，真实 main 分支/HEAD/clean 未漂移才 `--ff-only` 发布；发布后 owner 重启按 ledger intent 精确对账并幂等 cleanup，禁止重复 Claude/merge [已实现]
 ├── permissions/       — macOS 权限 FFI（屏幕录制/AX/通知 + IOHID 输入监控四态；固定/ad-hoc 签名共用 Request 与手动添加路径） [M7 已实现]
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]

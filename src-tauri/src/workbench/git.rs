@@ -72,6 +72,21 @@ pub enum MergeBranchOutcome {
     Conflicted,
 }
 
+/// Workbench 隔离合并冻结快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     一键 merge 可能经历 Claude Code 长耗时冲突解决；期间不能再按可漂移分支名解析源提交，
+///     也不能允许真实主分支在发布前悄然变化。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 merge 开始时真实主 worktree 的分支、主 HEAD OID，以及源 worktree 的实际 HEAD OID。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenWorkbenchMerge {
+    pub main_branch: String,
+    pub main_oid: String,
+    pub source_oid: String,
+}
+
 /// 冻结的 push 目标（remote + remote ref），禁止在 merge 后再读可变分支解析。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -855,6 +870,348 @@ pub(crate) fn verify_merge_oid_binding(
     Ok(())
 }
 
+/// 冻结 Workbench 一键 merge 的主分支与两端 OID。
+///
+/// Business Logic（为什么需要这个函数）:
+///     源分支名和主分支 tip 都可能在 Claude 运行期间漂移，隔离合并必须只消费开始时看到的提交。
+///
+/// Code Logic（这个函数做什么）:
+///     从真实主 worktree 读取当前分支与 HEAD，并从源 worktree 直接读取 HEAD；任一为空即失败。
+pub fn freeze_workbench_merge(
+    main_path: &Path,
+    source_path: &Path,
+) -> Result<FrozenWorkbenchMerge, AppError> {
+    let main_branch = current_branch(main_path)
+        .ok_or_else(|| AppError::generic("主工作区没有可合并的当前分支"))?;
+    let main_oid = head_hash(main_path)?
+        .ok_or_else(|| AppError::generic("主工作区没有可合并的 HEAD 历史（empty/unborn）"))?;
+    let source_oid = head_hash(source_path)?
+        .ok_or_else(|| AppError::generic("源 worktree 没有可合并的 HEAD"))?;
+    Ok(FrozenWorkbenchMerge {
+        main_branch,
+        main_oid,
+        source_oid,
+    })
+}
+
+/// 校验执行阶段重新读取的 merge 快照仍与 ledger 冻结 intent 一致。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ledger intent 会先于关闭终端与创建 integration worktree 落盘；这段窗口内 HEAD 漂移时，
+///     实际 merge 不能改用新 OID，否则 owner 重启将无法按持久 intent 精确对账。
+///
+/// Code Logic（这个函数做什么）:
+///     要求 main branch、main OID、source OID 三字段逐一相等；任一漂移返回 conflict。
+pub fn ensure_frozen_merge_unchanged(
+    expected: &FrozenWorkbenchMerge,
+    actual: &FrozenWorkbenchMerge,
+) -> Result<(), AppError> {
+    if actual.main_branch != expected.main_branch {
+        return Err(AppError::conflict(
+            "ledger claim 后主工作区分支已变化，拒绝继续 merge".to_string(),
+        ));
+    }
+    if actual.main_oid != expected.main_oid {
+        return Err(AppError::conflict(
+            "ledger claim 后主工作区 HEAD 已变化，拒绝继续 merge".to_string(),
+        ));
+    }
+    if actual.source_oid != expected.source_oid {
+        return Err(AppError::conflict(
+            "ledger claim 后源 worktree HEAD 已变化，拒绝继续 merge".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 创建未绑定业务分支的隔离 integration worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     merge 冲突文件不能出现在真实主 worktree，否则开发 watcher 会重启后端并杀死 Claude headless。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git worktree add --detach <path> <main_oid>`，使隔离目录从冻结主提交开始且不占用分支。
+#[cfg(test)]
+pub fn create_detached_integration_worktree(
+    repo_path: &Path,
+    integration_path: &Path,
+    main_oid: &str,
+) -> Result<(), AppError> {
+    create_detached_integration_worktree_outside(
+        repo_path,
+        integration_path,
+        main_oid,
+        &[repo_path],
+    )
+}
+
+/// 创建隔离 worktree，并拒绝落入任一被 watcher 监控的 checkout 根。
+///
+/// Business Logic（为什么需要这个函数）:
+///     自定义 db_path 可能位于 main 或 source linked worktree 内；只排除 owning repository toplevel
+///     仍会让该 checkout 的 watcher 因冲突文件重启 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     先解析 integration 的真实落点，并与 caller 提供的 main/source forbidden roots 做 canonical containment；
+///     通过后才创建目录并调用 detached `git worktree add`。
+pub fn create_detached_integration_worktree_outside(
+    repo_path: &Path,
+    integration_path: &Path,
+    main_oid: &str,
+    forbidden_roots: &[&Path],
+) -> Result<(), AppError> {
+    if main_oid.trim().is_empty() {
+        return Err(AppError::generic(
+            "integration worktree 的 main oid 不能为空",
+        ));
+    }
+    if integration_path.exists() {
+        return Err(AppError::conflict(
+            "integration worktree 路径已存在，请先完成残留清理".to_string(),
+        ));
+    }
+    let owning_repo = PathBuf::from(repo_root(repo_path)?)
+        .canonicalize()
+        .map_err(AppError::from)?;
+    let resolved_integration = resolve_path_through_existing_ancestor(integration_path)?;
+    let mut monitored_roots = vec![owning_repo];
+    for root in forbidden_roots {
+        let canonical = root.canonicalize().map_err(AppError::from)?;
+        if !monitored_roots.contains(&canonical) {
+            monitored_roots.push(canonical);
+        }
+    }
+    if monitored_roots
+        .iter()
+        .any(|root| resolved_integration.starts_with(root))
+    {
+        return Err(AppError::validation(
+            "integration worktree 必须位于 main/source checkout 之外，避免触发项目 watcher"
+                .to_string(),
+        ));
+    }
+    if let Some(parent) = integration_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let target = integration_path.to_string_lossy().to_string();
+    run_git(
+        repo_path,
+        &["worktree", "add", "--detach", &target, main_oid.trim()],
+    )?;
+    Ok(())
+}
+
+/// 解析尚不存在路径的真实父链位置。
+///
+/// Business Logic（为什么需要这个函数）:
+///     integration 目录尚未创建时仍需识别其是否经 symlink/`..` 落入 owning repository，
+///     且必须在创建任何目录项前完成拒绝，避免 watcher 已被触发。
+///
+/// Code Logic（这个函数做什么）:
+///     从目标向上寻找首个可 canonicalize 的既存祖先，记录被剥离的路径段，再按正序拼回；
+///     无既存祖先或缺少普通路径段时返回校验错误。
+fn resolve_path_through_existing_ancestor(path: &Path) -> Result<PathBuf, AppError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut cursor = absolute.as_path();
+    let mut suffix = Vec::new();
+    loop {
+        match cursor.canonicalize() {
+            Ok(mut resolved) => {
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = cursor.file_name().ok_or_else(|| {
+                    AppError::validation("无法解析 integration worktree 路径".to_string())
+                })?;
+                suffix.push(name.to_os_string());
+                cursor = cursor.parent().ok_or_else(|| {
+                    AppError::validation("无法解析 integration worktree 父目录".to_string())
+                })?;
+            }
+            Err(error) => return Err(AppError::from(error)),
+        }
+    }
+}
+
+/// 严格校验隔离产物是本次冻结输入形成的双父 merge commit。
+///
+/// Business Logic（为什么需要这个函数）:
+///     发布到主分支前必须阻止 Claude、钩子或并发 Git 操作把额外提交伪装成本次 merge 产物。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 commit parents，要求数量恰为 2 且顺序精确等于 `[main_oid, source_oid]`。
+pub fn verify_strict_merge_commit(
+    repo_path: &Path,
+    merge_oid: &str,
+    main_oid: &str,
+    source_oid: &str,
+) -> Result<(), AppError> {
+    let parents = commit_parent_oids(repo_path, merge_oid)?;
+    if parents.len() != 2 {
+        return Err(AppError::generic(format!(
+            "隔离 merge 产物必须恰有两个 parent，实际为 {} 个",
+            parents.len()
+        )));
+    }
+    if parents[0] != main_oid.trim() {
+        return Err(AppError::generic(
+            "隔离 merge 产物的 first parent 与冻结主 HEAD 不一致".to_string(),
+        ));
+    }
+    if parents[1] != source_oid.trim() {
+        return Err(AppError::generic(
+            "隔离 merge 产物的 second parent 与冻结源 HEAD 不一致".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 把已验证的隔离 merge commit 安全发布到真实主 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Claude 处理期间真实主分支可能被用户或其它工具推进；发布不得覆盖并发提交或切错分支。
+///
+/// Code Logic（这个函数做什么）:
+///     先校验隔离 commit 双父，再确认主 worktree 分支、HEAD、clean 状态仍与冻结快照一致，
+///     最后执行 `git merge --ff-only <merge_oid>`，并复查 HEAD、分支与 clean 状态。
+pub fn publish_integration_merge(
+    main_path: &Path,
+    frozen: &FrozenWorkbenchMerge,
+    merge_oid: &str,
+) -> Result<(), AppError> {
+    verify_strict_merge_commit(main_path, merge_oid, &frozen.main_oid, &frozen.source_oid)?;
+    let branch = current_branch(main_path).ok_or_else(|| {
+        AppError::conflict("主工作区已不在任何分支，拒绝发布隔离 merge".to_string())
+    })?;
+    if branch != frozen.main_branch {
+        return Err(AppError::conflict(format!(
+            "主工作区分支已变化（冻结={}，当前={}），拒绝发布隔离 merge",
+            frozen.main_branch, branch
+        )));
+    }
+    let head = head_hash(main_path)?.ok_or_else(|| {
+        AppError::conflict("主工作区 HEAD 已不存在，拒绝发布隔离 merge".to_string())
+    })?;
+    if head != frozen.main_oid {
+        return Err(AppError::conflict(
+            "主工作区 HEAD 已变化，拒绝覆盖并发提交".to_string(),
+        ));
+    }
+    if !status(main_path)?.clean {
+        return Err(AppError::conflict(
+            "主工作区在隔离 merge 期间产生了未提交改动，拒绝发布".to_string(),
+        ));
+    }
+    run_git(main_path, &["merge", "--ff-only", merge_oid.trim()])?;
+    let published_head = head_hash(main_path)?
+        .ok_or_else(|| AppError::generic("发布隔离 merge 后主工作区 HEAD 为空"))?;
+    if published_head != merge_oid.trim()
+        || current_branch(main_path).as_deref() != Some(frozen.main_branch.as_str())
+        || !status(main_path)?.clean
+    {
+        return Err(AppError::generic(
+            "隔离 merge 发布后的主工作区校验失败，请检查 Git 状态".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 发布前确认源 worktree 仍精确停在冻结输入。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Claude 长任务期间源 worktree 可能被外部工具推进或改脏；若仍发布并 cleanup，会删除用户新提交或改动。
+///
+/// Code Logic（这个函数做什么）:
+///     重新读取 source HEAD、branch 与 status，要求 HEAD==frozen.source_oid、branch==expected_branch 且 clean；
+///     任一不符返回 conflict，调用方只清 integration 并保留源 worktree。
+pub fn verify_source_unchanged_for_publish(
+    source_path: &Path,
+    frozen: &FrozenWorkbenchMerge,
+    expected_branch: &str,
+) -> Result<(), AppError> {
+    let source_head = head_hash(source_path)?
+        .ok_or_else(|| AppError::conflict("源 worktree HEAD 已不存在，拒绝发布".to_string()))?;
+    if source_head != frozen.source_oid {
+        return Err(AppError::conflict(
+            "源 worktree HEAD 在隔离 merge 期间已变化，拒绝发布并保留源工作区".to_string(),
+        ));
+    }
+    let source_branch = current_branch(source_path)
+        .ok_or_else(|| AppError::conflict("源 worktree 已不在任何分支，拒绝发布".to_string()))?;
+    if source_branch != expected_branch.trim() {
+        return Err(AppError::conflict(
+            "源 worktree 分支在隔离 merge 期间已变化，拒绝发布并保留源工作区".to_string(),
+        ));
+    }
+    if !status(source_path)?.clean {
+        return Err(AppError::conflict(
+            "源 worktree 在隔离 merge 期间产生未提交改动，拒绝发布并保留源工作区".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 清理隔离 integration worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     成功、冲突解决失败或主分支漂移都不能留下被 Git 注册的内部临时 worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     对存在或仍被登记的路径执行 `git worktree remove --force`，随后 prune 残留管理项；
+///     路径和登记均已不存在时保持幂等成功。
+pub fn remove_integration_worktree(
+    repo_path: &Path,
+    integration_path: &Path,
+) -> Result<(), AppError> {
+    let target = integration_path.to_string_lossy().to_string();
+    let listed = list_worktrees(repo_path, &repo_root(repo_path)?)?
+        .into_iter()
+        .any(|item| Path::new(&item.path) == integration_path);
+    if integration_path.exists() || listed {
+        run_git(repo_path, &["worktree", "remove", "--force", &target])?;
+    }
+    run_git(repo_path, &["worktree", "prune"])?;
+    Ok(())
+}
+
+/// 查找从冻结主 HEAD 到当前 tip 之间精确绑定两父的 merge commit。
+///
+/// Business Logic（为什么需要这个函数）:
+///     后端可能在短发布窗口被 watcher 重启；ledger 仍为 running 时需要确认 merge 是否其实已经发布，
+///     但不能仅凭 source 是祖先就误认其它合并为本次操作。
+///
+/// Code Logic（这个函数做什么）:
+///     若当前 tip 包含冻结主/源提交，则遍历 `main_oid..tip` 可达提交，返回 parents 精确为
+///     `[main_oid, source_oid]` 的 commit OID；没有精确匹配返回 None。
+pub fn find_published_merge_commit(
+    repo_path: &Path,
+    main_oid: &str,
+    source_oid: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(tip) = head_hash(repo_path)? else {
+        return Ok(None);
+    };
+    if !is_ancestor(repo_path, main_oid, &tip)? || !is_ancestor(repo_path, source_oid, &tip)? {
+        return Ok(None);
+    }
+    let range = format!("{}..{}", main_oid.trim(), tip);
+    let commits = run_git(repo_path, &["rev-list", "--topo-order", &range])?;
+    for oid in commits.lines().map(str::trim).filter(|oid| !oid.is_empty()) {
+        let parents = commit_parent_oids(repo_path, oid)?;
+        if parents == [main_oid.trim(), source_oid.trim()] {
+            return Ok(Some(oid.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     用户输入分支名后，Workbench 需要在本机创建对应 Git worktree 和新分支。
 ///
@@ -1541,6 +1898,7 @@ fn list_remotes(path: &Path) -> Result<Vec<String>, AppError> {
 /// Code Logic（这个函数做什么）:
 ///     在主工作区路径执行 `git merge --no-ff <branch>`；成功返回 Merged，非零退出后若检测到
 ///     unmerged path 则返回 Conflicted，否则返回普通 Git 错误。
+#[cfg(test)]
 pub fn merge_branch(main_path: &Path, branch: &str) -> Result<MergeBranchOutcome, AppError> {
     if branch.trim().is_empty() {
         return Err(AppError::generic("当前 worktree 没有可合并的分支"));
@@ -1647,6 +2005,82 @@ pub fn remove_worktree(
         run_git(repo_path, &["worktree", "remove", "--force", &target])?;
     } else {
         run_git(repo_path, &["worktree", "remove", &target])?;
+    }
+    Ok(())
+}
+
+/// 判断指定路径是否仍登记为 owning repository 的 Git worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     owner 可能在 `git worktree remove` 成功、SQLite row 删除前崩溃；恢复时必须区分
+///     “物理/Git 登记已清理”与“源 worktree 仍存在但发生漂移”，避免遗留幽灵 row。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `git worktree list --porcelain`，对目标与每个登记路径做 canonical-or-absolute 比较；
+///     目标不存在时仍可按规范化绝对路径识别 prunable 登记。
+pub fn is_worktree_registered(repo_path: &Path, worktree_path: &Path) -> Result<bool, AppError> {
+    let target = comparable_worktree_path(worktree_path)?;
+    let main = repo_root(repo_path)?;
+    let items = list_worktrees(repo_path, &main)?;
+    for item in items {
+        if comparable_worktree_path(Path::new(&item.path))? == target {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 生成 worktree 路径的稳定比较形式。
+///
+/// Business Logic（为什么需要这个函数）:
+///     crash recovery 要比较可能已经不存在的路径，不能强依赖 canonicalize 成功。
+///
+/// Code Logic（这个函数做什么）:
+///     路径存在时 canonicalize；不存在时转为绝对路径，并机械消解 `.`/`..` 组件。
+fn comparable_worktree_path(path: &Path) -> Result<PathBuf, AppError> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Ok(canonical);
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+/// 清理已不存在 worktree 的残留 Git 登记。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对不存在路径再次执行 `git worktree remove` 会失败并阻断 SQLite cleanup；应只 prune 残留登记。
+///
+/// Code Logic（这个函数做什么）:
+///     要求磁盘路径不存在，执行 `git worktree prune`，再确认路径已不在 porcelain 列表；
+///     若路径重新出现或登记仍残留则返回 conflict。
+pub fn prune_missing_worktree_registration(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<(), AppError> {
+    if worktree_path.exists() {
+        return Err(AppError::conflict(
+            "源 worktree 路径仍存在，不能按缺失路径恢复清理".to_string(),
+        ));
+    }
+    run_git(repo_path, &["worktree", "prune"])?;
+    if is_worktree_registered(repo_path, worktree_path)? {
+        return Err(AppError::conflict(
+            "源 worktree 路径已不存在，但 Git 登记仍未清理".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2833,6 +3267,249 @@ UU web/src/App.tsx
         assert!(!merge_in_progress(&repo));
         assert_eq!(parent_count, 2);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冲突解决的长耗时阶段必须完全隔离，真实 main 的文件与 HEAD 在发布前都不能变化。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 main/source 同文件冲突；冻结两端 OID 后在 detached integration worktree merge，
+    ///     断言冲突期间真实 main 内容/HEAD 不变；模拟解决并提交，再安全发布并校验精确双父及临时目录清理。
+    #[test]
+    fn isolated_conflict_keeps_real_main_unchanged_until_strict_publish() {
+        let root = temp_git_dir("workbench-isolated-conflict");
+        let main = root.join("main");
+        let source = root.join("source");
+        let integration = root.join("internal").join("merge");
+        fs::create_dir_all(&main).expect("create main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        fs::write(main.join("README.md"), "base\n").expect("base");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "base"]);
+        git_test_command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/conflict",
+                source.to_str().unwrap(),
+            ],
+        );
+        fs::write(source.join("README.md"), "source\n").expect("source");
+        git_test_command(&source, &["commit", "-am", "source"]);
+        fs::write(main.join("README.md"), "main\n").expect("main");
+        git_test_command(&main, &["commit", "-am", "main"]);
+        let frozen = freeze_workbench_merge(&main, &source).expect("freeze");
+
+        create_detached_integration_worktree(&main, &integration, &frozen.main_oid)
+            .expect("integration");
+        assert_eq!(
+            merge_commit_oid(&integration, &frozen.source_oid).expect("merge"),
+            MergeBranchOutcome::Conflicted
+        );
+        assert_eq!(head_hash(&main).unwrap().unwrap(), frozen.main_oid);
+        assert_eq!(
+            fs::read_to_string(main.join("README.md")).unwrap(),
+            "main\n"
+        );
+
+        fs::write(integration.join("README.md"), "main\nsource\n").expect("resolved");
+        stage_all_merge_resolution(&integration).expect("stage");
+        commit_merge_no_edit(&integration).expect("commit merge");
+        let merge_oid = head_hash(&integration).unwrap().unwrap();
+        verify_strict_merge_commit(
+            &integration,
+            &merge_oid,
+            &frozen.main_oid,
+            &frozen.source_oid,
+        )
+        .expect("strict parents");
+        publish_integration_merge(&main, &frozen, &merge_oid).expect("publish");
+        assert_eq!(head_hash(&main).unwrap().unwrap(), merge_oid);
+        assert_eq!(
+            commit_parent_oids(&main, &merge_oid).unwrap(),
+            vec![frozen.main_oid, frozen.source_oid]
+        );
+        remove_integration_worktree(&main, &integration).expect("cleanup");
+        assert!(!integration.exists());
+        assert!(!list_worktrees(&main, &repo_root(&main).unwrap())
+            .unwrap()
+            .iter()
+            .any(|item| Path::new(&item.path) == integration));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     隔离合并期间若真实 main 被并发推进，发布必须拒绝且不能覆盖并发提交。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     生成合法隔离 merge commit 后推进真实 main，再调用 publish；断言 conflict、main 保留并发 tip，
+    ///     最后确认 integration worktree 可完整清理。
+    #[test]
+    fn publish_rejects_main_drift_without_overwriting_concurrent_commit() {
+        let root = temp_git_dir("workbench-publish-drift");
+        let main = root.join("main");
+        let source = root.join("source");
+        let integration = root.join("internal").join("merge");
+        fs::create_dir_all(&main).expect("create main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        fs::write(main.join("README.md"), "base\n").expect("base");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "base"]);
+        git_test_command(
+            &main,
+            &["worktree", "add", "-b", "feature", source.to_str().unwrap()],
+        );
+        fs::write(source.join("source.txt"), "source\n").expect("source");
+        git_test_command(&source, &["add", "source.txt"]);
+        git_test_command(&source, &["commit", "-m", "source"]);
+        let frozen = freeze_workbench_merge(&main, &source).expect("freeze");
+        create_detached_integration_worktree(&main, &integration, &frozen.main_oid)
+            .expect("integration");
+        assert_eq!(
+            merge_commit_oid(&integration, &frozen.source_oid).expect("merge"),
+            MergeBranchOutcome::Merged
+        );
+        let merge_oid = head_hash(&integration).unwrap().unwrap();
+
+        fs::write(main.join("concurrent.txt"), "concurrent\n").expect("concurrent");
+        git_test_command(&main, &["add", "concurrent.txt"]);
+        git_test_command(&main, &["commit", "-m", "concurrent"]);
+        let concurrent_oid = head_hash(&main).unwrap().unwrap();
+        let error = publish_integration_merge(&main, &frozen, &merge_oid)
+            .expect_err("drift must reject publish");
+        assert!(error.to_string().contains("HEAD 已变化"));
+        assert_eq!(head_hash(&main).unwrap().unwrap(), concurrent_oid);
+        assert!(main.join("concurrent.txt").exists());
+        assert!(!main.join("source.txt").exists());
+        remove_integration_worktree(&main, &integration).expect("cleanup");
+        assert!(!integration.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Claude 运行期间源 worktree 的新提交属于用户并发工作，不能被发布旧快照后的 cleanup 删除。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     冻结并生成合法 integration merge 后推进 source；发布前 source gate 必须拒绝，main 保持原 OID，
+    ///     source 新提交与文件继续存在，integration 可独立清理。
+    #[test]
+    fn source_advance_rejects_publish_and_preserves_new_source_commit() {
+        let root = temp_git_dir("workbench-source-drift");
+        let main = root.join("main");
+        let source = root.join("source");
+        let integration = root.join("internal").join("merge");
+        fs::create_dir_all(&main).expect("create main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        fs::write(main.join("README.md"), "base\n").expect("base");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "base"]);
+        git_test_command(
+            &main,
+            &["worktree", "add", "-b", "feature", source.to_str().unwrap()],
+        );
+        fs::write(source.join("source.txt"), "source\n").expect("source");
+        git_test_command(&source, &["add", "source.txt"]);
+        git_test_command(&source, &["commit", "-m", "source frozen"]);
+        let frozen = freeze_workbench_merge(&main, &source).expect("freeze");
+        create_detached_integration_worktree(&main, &integration, &frozen.main_oid)
+            .expect("integration");
+        assert_eq!(
+            merge_commit_oid(&integration, &frozen.source_oid).expect("merge"),
+            MergeBranchOutcome::Merged
+        );
+
+        fs::write(source.join("after-freeze.txt"), "preserve me\n").expect("new source");
+        git_test_command(&source, &["add", "after-freeze.txt"]);
+        git_test_command(&source, &["commit", "-m", "source after freeze"]);
+        let source_new_oid = head_hash(&source).unwrap().unwrap();
+        let error = verify_source_unchanged_for_publish(&source, &frozen, "feature")
+            .expect_err("source drift must reject");
+        assert!(error.to_string().contains("源 worktree HEAD"));
+        assert_eq!(head_hash(&main).unwrap().unwrap(), frozen.main_oid);
+        assert_eq!(head_hash(&source).unwrap().unwrap(), source_new_oid);
+        assert!(source.join("after-freeze.txt").exists());
+        remove_integration_worktree(&main, &integration).expect("cleanup integration");
+        assert!(!integration.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     ledger claim 后任一冻结 OID 漂移都必须 fail-closed，禁止执行阶段悄然改用新 tip。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 expected 快照并分别修改 main/source OID，断言 helper 返回对应 HEAD 漂移冲突。
+    #[test]
+    fn frozen_merge_gate_rejects_main_or_source_head_drift() {
+        let expected = FrozenWorkbenchMerge {
+            main_branch: "main".to_string(),
+            main_oid: "main-old".to_string(),
+            source_oid: "source-old".to_string(),
+        };
+        let mut actual = expected.clone();
+        actual.main_oid = "main-new".to_string();
+        assert!(ensure_frozen_merge_unchanged(&expected, &actual)
+            .expect_err("main drift")
+            .to_string()
+            .contains("主工作区 HEAD 已变化"));
+        actual = expected.clone();
+        actual.source_oid = "source-new".to_string();
+        assert!(ensure_frozen_merge_unchanged(&expected, &actual)
+            .expect_err("source drift")
+            .to_string()
+            .contains("源 worktree HEAD 已变化"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     integration worktree 不得放在 main 或 source checkout 内，否则任一 watcher 都可能重启 owner。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     建 main/source linked worktree，分别选择其子目录作为 integration 目标；断言创建前即拒绝，
+    ///     且目标目录和 Git worktree 登记均未出现。
+    #[test]
+    fn integration_path_inside_main_or_source_checkout_is_rejected() {
+        let root = temp_git_dir("workbench-integration-watcher-root");
+        let main = root.join("main");
+        let source = root.join("source");
+        fs::create_dir_all(&main).expect("create main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        fs::write(main.join("README.md"), "base\n").expect("base");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "base"]);
+        git_test_command(
+            &main,
+            &["worktree", "add", "-b", "feature", source.to_str().unwrap()],
+        );
+        let head = head_hash(&main).unwrap().unwrap();
+        let inside_main = main.join("app-data/merge-integrations/op-main");
+        let inside_source = source.join("app-data/merge-integrations/op-source");
+        for target in [&inside_main, &inside_source] {
+            let error = create_detached_integration_worktree_outside(
+                &main,
+                target,
+                &head,
+                &[&main, &source],
+            )
+            .expect_err("watcher root must reject");
+            assert!(error.to_string().contains("main/source checkout 之外"));
+            assert!(!target.exists());
+        }
+        let listed = list_worktrees(&main, &repo_root(&main).unwrap()).unwrap();
+        assert_eq!(listed.len(), 2, "拒绝路径不得新增 Git worktree 登记");
         let _ = fs::remove_dir_all(root);
     }
 
