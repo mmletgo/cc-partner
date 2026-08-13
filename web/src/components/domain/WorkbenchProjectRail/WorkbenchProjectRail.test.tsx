@@ -25,6 +25,23 @@ import {
   type WorkbenchProjectsContextValue,
 } from '@/hooks/workbenchProjectsContext';
 import { WorkbenchProjectRail } from './WorkbenchProjectRail';
+import { WorkbenchAgentHintsContext } from '@/hooks/workbenchAgentHintsContext';
+import { EMPTY_HINT_COUNTS, type AgentHintCounts } from '@/lib/workbenchAgentHints';
+import type { WorkbenchAgentHintsContextValue } from '@/hooks/workbenchAgentHintsContext';
+
+const hintCountsByProject: Record<string, AgentHintCounts> = {};
+
+function hintContextValue(): WorkbenchAgentHintsContextValue {
+  return {
+    phase: 'live',
+    error: null,
+    hintsForProject: (projectId) => hintCountsByProject[projectId] ?? EMPTY_HINT_COUNTS,
+    hintsForWorktree: () => EMPTY_HINT_COUNTS,
+    hintsForTerminal: () => EMPTY_HINT_COUNTS,
+    ackCompletedForTerminal: () => undefined,
+    refresh: async () => undefined,
+  };
+}
 
 const fleetMockState = {
   projectSummaries: {} as Record<
@@ -84,6 +101,9 @@ beforeAll(async () => {
 
 afterEach(() => {
   cleanup();
+  for (const key of Object.keys(hintCountsByProject)) {
+    delete hintCountsByProject[key];
+  }
   try {
     window.localStorage.removeItem('cp-workbench-project-device-filter');
   } catch {
@@ -143,7 +163,9 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     <I18nextProvider i18n={i18n}>
       <MemoryRouter>
         <WorkbenchProjectsContext.Provider value={value}>
-          <WorkbenchProjectRail />
+          <WorkbenchAgentHintsContext.Provider value={hintContextValue()}>
+            <WorkbenchProjectRail />
+          </WorkbenchAgentHintsContext.Provider>
         </WorkbenchProjectsContext.Provider>
       </MemoryRouter>
     </I18nextProvider>,
@@ -186,6 +208,23 @@ describe('WorkbenchProjectRail discovery IA', () => {
     expect(screen.getByRole('button', { name: /idle-repo/ })).toBeTruthy();
     expect(screen.getByText('当前')).toBeTruthy();
     expect(screen.getByText('未选中')).toBeTruthy();
+  });
+
+  test('enlarges project status dot with waiting count', () => {
+    const active = buildProject({ id: 'active', name: 'active-repo' });
+    hintCountsByProject.active = {
+      waitingCount: 2,
+      completedCount: 0,
+      count: 2,
+      tone: 'wait',
+    };
+    renderRail({
+      projects: [active],
+      activeProjectId: active.id,
+      activeProject: active,
+    });
+    expect(screen.getByLabelText('2 个窗口等待输入').textContent).toBe('2');
+    expect(document.querySelector('[data-hint-tone="wait"]')).toBeTruthy();
   });
 
   test('does not badge normal working agents but badges needs-input', () => {

@@ -1,0 +1,28 @@
+/* 有 hint 时放大原点并写入数字；颜色走 wait/complete token。 */
+
+.hinted {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 16px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: var(--radius-full);
+  color: var(--accent-on);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  text-align: center;
+}
+
+.hinted[data-hint-tone='wait'] {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--warn) 14%, transparent);
+}
+
+.hinted[data-hint-tone='complete'] {
+  background: var(--success);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--success) 14%, transparent);
+}

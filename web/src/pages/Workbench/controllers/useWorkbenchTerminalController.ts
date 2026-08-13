@@ -35,6 +35,22 @@ import { canRefreshTerminalSize } from '../terminalSizing';
 import type { TerminalLayoutMode } from '../terminalSizing';
 import { sessionsForWorktree } from '../workbenchWorktrees';
 import { isLatestRequest } from '../workbenchFiles';
+import {
+  ackCompletedForTerminal,
+  getWorkbenchAgentHintStore,
+  type AgentHintSessionIndexEntry,
+} from '@/hooks/workbenchAgentHintStore';
+function indexSessionsForHints(sessions: WorkbenchSession[]): void {
+  const store = getWorkbenchAgentHintStore();
+  for (const session of sessions) {
+    const entry: AgentHintSessionIndexEntry = {
+      sessionId: session.id,
+      projectId: session.projectId,
+      worktreeId: session.worktreeId,
+    };
+    store.upsertSessionIndex(entry);
+  }
+}
 
 interface WorkbenchTerminalInputStateEvent {
   sessionId: string;
@@ -645,6 +661,7 @@ export function useWorkbenchTerminalController(
     // 标记本地 focus pending：在后端 focus IPC 确认成功前，禁止轮询用后端 tmux current 覆盖本地选择。
     localFocusPendingRef.current = sessionId;
     setActiveSessionId(sessionId);
+    ackCompletedForTerminal(sessionId);
     return true;
   }, []);
 
@@ -707,7 +724,11 @@ export function useWorkbenchTerminalController(
         .then(({ sessionId }) => {
           if (cancelled || !sessionId) return;
           if (!currentScoped.some((session) => session.id === sessionId)) return;
-          setActiveSessionId((current) => (current === sessionId ? current : sessionId));
+          setActiveSessionId((current) => {
+            if (current === sessionId) return current;
+            ackCompletedForTerminal(sessionId);
+            return sessionId;
+          });
         })
         .catch(() => {
           // tmux focus sync 是辅助状态同步；失败不应打断终端输入和显示。
@@ -774,6 +795,7 @@ export function useWorkbenchTerminalController(
         // exited/disconnected 仍在列表中保持 blocked；recoverSession 只开新 generation，
         // 绝不自动重放失败批次。sessionError 已在 try 开头清空。
         recoverAllWriteBlockedSessions(list);
+        indexSessionsForHints(list);
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);

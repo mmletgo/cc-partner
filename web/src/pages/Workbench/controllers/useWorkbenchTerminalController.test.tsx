@@ -66,6 +66,16 @@ const eventListeners = vi.hoisted<
   Map<string, Set<(event: { event: string; payload: unknown }) => void>>
 >(() => new Map());
 
+const ackCompletedSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('@/hooks/workbenchAgentHintStore', () => ({
+  ackCompletedForTerminal: (...args: unknown[]) => ackCompletedSpy(...args),
+  getWorkbenchAgentHintStore: () => ({
+    upsertSessionIndex: vi.fn(),
+    ackCompletedForTerminal: (...args: unknown[]) => ackCompletedSpy(...args),
+  }),
+}));
+
 vi.mock('@/api/workbench', () => ({
   workbenchApi: {
     sessions: fakeSessionsApi,
@@ -418,6 +428,7 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     // focus effect 触发后端 focus_workbench_session 一次。
     expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s2');
     expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s1', false);
+    expect(ackCompletedSpy).toHaveBeenCalledWith('s2');
 
     unmount();
     await act(async () => {

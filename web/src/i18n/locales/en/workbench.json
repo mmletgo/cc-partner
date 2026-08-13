@@ -27,6 +27,11 @@
     "deviceFilterEmpty": "No projects on this device",
     "deviceFilterShowAll": "Show all"
   },
+  "agentHints": {
+    "dotAriaWaiting": "{{count}} windows waiting for input",
+    "dotAriaCompleted": "{{count}} windows completed",
+    "dotAriaBoth": "{{waiting}} windows waiting for input, {{completed}} windows completed"
+  },
   "fleet": {
     "title": "LAN Agent Fleet",
     "subtitle": "Read-only aggregate of Agent, Attention, Git and automation for saved projects. No auto placement or migration.",

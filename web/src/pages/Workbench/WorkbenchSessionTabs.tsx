@@ -13,7 +13,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Pill } from '@/components/primitives';
+import { Button, HintStatusDot, Pill } from '@/components/primitives';
+import { useOptionalWorkbenchAgentHints } from '@/hooks/workbenchAgentHintsContext';
+import { EMPTY_HINT_COUNTS } from '@/lib/workbenchAgentHints';
+import { agentHintAriaSpec } from './workbenchAgentHintPresentation';
+import type { AgentHintCounts } from '@/lib/workbenchAgentHints';
 import { PlusIcon, XIcon } from '@/lib/icons';
 import { getRovingTabIndex, type RovingTabKey } from '@/lib/rovingTablist';
 import type { WorkbenchSession } from '@/lib/types';
@@ -86,6 +90,10 @@ export interface WorkbenchSessionTabsProps {
    * 由页面 useAgentRuntime.latestAgentForTerminal 注入；点击仅 onFocusSession。
    */
   resolveAgent?: (sessionId: string) => AgentSessionProjection | null;
+  /**
+   * 按 terminal 解析等待/完成数字。页面可注入；缺省读全局 hint Context。
+   */
+  resolveHint?: (sessionId: string) => AgentHintCounts;
 }
 
 /**
@@ -107,8 +115,11 @@ export function WorkbenchSessionTabs({
   onRenameSession,
   canRename,
   resolveAgent,
+  resolveHint,
 }: WorkbenchSessionTabsProps): ReactElement {
   const { t } = useTranslation(['workbench']);
+  const hintContext = useOptionalWorkbenchAgentHints();
+  const resolveHintCounts = resolveHint ?? hintContext?.hintsForTerminal;
 
   // Business Logic: 双击 tab 名进入行内重命名；draft 仅活在本地，避免与 inspector 的
   // sessionNameDraft 耦合。pendingActionRef 记录本轮编辑如何结束（commit/cancel），让随后由
@@ -239,6 +250,8 @@ export function WorkbenchSessionTabs({
     <div className={styles.sessionTabs} role="tablist" aria-label={t('workbench:terminalTabs')}>
       {sessions.map((session) => {
         const selected = session.id === activeSessionId;
+        const hint = resolveHintCounts?.(session.id) ?? EMPTY_HINT_COUNTS;
+        const hintAria = agentHintAriaSpec(hint);
         const agent = resolveAgent?.(session.id) ?? null;
         const phaseLabel = agent
           ? t(`workbench:${agentPhaseI18nKey(agent.phase)}`)
@@ -255,7 +268,13 @@ export function WorkbenchSessionTabs({
           >
             {editingSessionId === session.id ? (
               <>
-                <span className={styles.sessionDot} data-status={session.status} />
+                <HintStatusDot
+                  className={styles.sessionDot}
+                  data-status={session.status}
+                  count={hint.count}
+                  tone={hint.tone}
+                  aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+                />
                 <input
                   ref={renameInputRef}
                   className={styles.sessionNameInput}
@@ -288,7 +307,13 @@ export function WorkbenchSessionTabs({
               onClick={() => onFocusSession(session.id)}
               onKeyDown={(event) => handleSessionTabKeyDown(event, session.id)}
             >
-              <span className={styles.sessionDot} data-status={session.status} />
+              <HintStatusDot
+                className={styles.sessionDot}
+                data-status={session.status}
+                count={hint.count}
+                tone={hint.tone}
+                aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+              />
               <span
                 className={styles.sessionName}
                 title={canRename ? t('workbench:renameSessionHint') : undefined}
