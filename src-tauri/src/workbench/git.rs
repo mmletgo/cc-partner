@@ -566,7 +566,8 @@ pub fn status(path: &Path) -> Result<WorkbenchGitStatusDto, AppError> {
 ///     Workbench 右侧 Git 历史 tab 需要读取当前 active worktree 的最近提交。
 ///
 /// Code Logic（这个函数做什么）:
-///     先确认目录是 Git 工作区；空仓库没有 HEAD 时返回空列表，否则执行 `git log` 并解析为 DTO。
+///     先确认目录是 Git 工作区；空仓库没有 HEAD 时返回空列表，否则从该 worktree 的 `HEAD`
+///     读取可达提交并解析为 DTO，避免同仓库其他未合并分支污染当前工作区历史。
 pub fn list_commits(path: &Path, limit: usize) -> Result<Vec<WorkbenchGitCommitDto>, AppError> {
     run_git(path, &["rev-parse", "--is-inside-work-tree"])?;
     let head = Command::new("git")
@@ -581,7 +582,6 @@ pub fn list_commits(path: &Path, limit: usize) -> Result<Vec<WorkbenchGitCommitD
         path,
         &[
             "log",
-            "--all",
             "--topo-order",
             "--decorate=full",
             "--date=iso-strict",
@@ -2953,6 +2953,71 @@ UU web/src/App.tsx
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].summary, "fix: second");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户切换 Workbench worktree 时，只应看到该 worktree 当前 HEAD 可达的提交历史，
+    ///     不能把同仓库其他未合并分支的提交混入并显示成全项目唯一历史树。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     从共同基线创建 linked worktree，让主分支与功能分支分别产生独占提交；分别读取两处历史，
+    ///     断言各自包含自己的独占提交，并排除另一个 worktree 尚不可达的提交。
+    #[test]
+    fn list_commits_scopes_history_to_current_worktree() {
+        let root = temp_git_dir("workbench-git-worktree-history");
+        let repo = root.join("repo");
+        let feature_worktree = root.join("feature-worktree");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "chore: shared base"]);
+
+        let feature_worktree_path = feature_worktree.to_string_lossy().to_string();
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/worktree-history",
+                &feature_worktree_path,
+                "HEAD",
+            ],
+        );
+
+        fs::write(repo.join("main-only.txt"), "main\n").expect("write main-only file");
+        git_test_command(&repo, &["add", "main-only.txt"]);
+        git_test_command(&repo, &["commit", "-m", "feat: main worktree only"]);
+
+        fs::write(feature_worktree.join("feature-only.txt"), "feature\n")
+            .expect("write feature-only file");
+        git_test_command(&feature_worktree, &["add", "feature-only.txt"]);
+        git_test_command(
+            &feature_worktree,
+            &["commit", "-m", "feat: feature worktree only"],
+        );
+
+        let main_commits = list_commits(&repo, 30).expect("list main worktree commits");
+        let feature_commits =
+            list_commits(&feature_worktree, 30).expect("list feature worktree commits");
+        let main_summaries = main_commits
+            .iter()
+            .map(|commit| commit.summary.as_str())
+            .collect::<Vec<_>>();
+        let feature_summaries = feature_commits
+            .iter()
+            .map(|commit| commit.summary.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(main_summaries.contains(&"feat: main worktree only"));
+        assert!(!main_summaries.contains(&"feat: feature worktree only"));
+        assert!(feature_summaries.contains(&"feat: feature worktree only"));
+        assert!(!feature_summaries.contains(&"feat: main worktree only"));
 
         let _ = fs::remove_dir_all(root);
     }

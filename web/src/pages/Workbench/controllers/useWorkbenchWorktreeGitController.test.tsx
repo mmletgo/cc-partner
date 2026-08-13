@@ -1722,6 +1722,66 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
     expect(result.current.gitCommits).toEqual([]);
   });
 
+  test('worktree switch loads the selected worktree history and drops the previous response', async () => {
+    const project = buildLocalProject();
+    const main = buildWorktree({ id: 'wt-main', branch: 'main', isMain: true });
+    const feature = buildWorktree({
+      id: 'wt-feature',
+      branch: 'feature/history',
+      isMain: false,
+    });
+    const mainCommits = [buildCommit({ hash: 'main-old', summary: 'main only' })];
+    const featureCommits = [buildCommit({ hash: 'feature-new', summary: 'feature only' })];
+    fakeWorktreesApi.list.mockResolvedValue([main, feature]);
+
+    let resolveMainHistory: (value: WorkbenchGitCommit[]) => void = () => undefined;
+    fakeGitApi.listCommits
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveMainHistory = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(featureCommits);
+
+    const { result, rerender } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    let mainLoad: Promise<void> | undefined;
+    act(() => {
+      mainLoad = result.current.loadGitHistory();
+    });
+    await act(async () => {
+      await flushMicrotasks(2);
+    });
+
+    rerender(
+      baseControllerProps({
+        activeProjectId: project.id,
+        activeWorktreeId: 'wt-feature',
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+      await result.current.loadGitHistory();
+      await flushMicrotasks();
+    });
+
+    expect(fakeGitApi.listCommits).toHaveBeenNthCalledWith(1, project.id, 'wt-main', 30);
+    expect(fakeGitApi.listCommits).toHaveBeenNthCalledWith(2, project.id, 'wt-feature', 30);
+    expect(result.current.gitCommits).toEqual(featureCommits);
+
+    await act(async () => {
+      resolveMainHistory(mainCommits);
+      await mainLoad;
+      await flushMicrotasks();
+    });
+
+    expect(result.current.gitCommits).toEqual(featureCommits);
+  });
+
   test('slow initial loadGitHistory does not overwrite later refresh for same worktree', async () => {
     const project = buildLocalProject();
     const oldCommits = [buildCommit({ hash: 'old' })];
