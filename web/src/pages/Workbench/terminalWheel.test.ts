@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
+  clampTranscriptWheelCell,
   consumeWorkbenchTerminalWheelLines,
-  encodeTerminalPageScrollKeys,
   encodeTerminalSgrWheelReports,
   resolveWorkbenchTerminalWheelAction,
 } from './terminalWheel';
@@ -24,26 +24,30 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     ).toBe('scrollback');
   });
 
-  test('lets xterm emit SGR when the TUI already enabled mouse tracking', () => {
-    expect(
-      resolveWorkbenchTerminalWheelAction({
-        bufferType: 'alternate',
-        baseY: 0,
-        mouseTrackingMode: 'vt200',
-      }),
-    ).toBe('protocol');
-  });
-
-  test('falls back to PageUp/PageDown when Claude is on the alt screen without mouse tracking', () => {
-    // Claude 在 tmux mouse off 时官方提示用 PgUp/PgDn 滚 transcript。
-    // SGR 64/65 会走 mouse dispatch 打到输入框，看起来像“滚轮没反应”。
+  test('always injects transcript-targeted SGR on the alternate screen', () => {
+    // Claude 输入框聚焦时 PageUp 不在 Chat 上下文；SGR 按落点命中。
+    // 指针在底部输入区时必须自己发打在 transcript 的 SGR，不能交给 xterm 原坐标。
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'alternate',
         baseY: 0,
         mouseTrackingMode: 'none',
       }),
-    ).toBe('pageFallback');
+    ).toBe('sgrFallback');
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'alternate',
+        baseY: 0,
+        mouseTrackingMode: 'vt200',
+      }),
+    ).toBe('sgrFallback');
+  });
+});
+
+describe('clampTranscriptWheelCell', () => {
+  test('keeps a mid-screen hit and lifts a bottom-input hit into the transcript', () => {
+    expect(clampTranscriptWheelCell(10, 8, 80, 32)).toEqual({ col: 10, row: 8 });
+    expect(clampTranscriptWheelCell(40, 31, 80, 32)).toEqual({ col: 40, row: 24 });
   });
 });
 
@@ -57,20 +61,11 @@ describe('consumeWorkbenchTerminalWheelLines', () => {
 });
 
 describe('encodeTerminalSgrWheelReports', () => {
-  test('maps wheel-up to SGR 64 and wheel-down to SGR 65, never arrow keys', () => {
+  test('maps wheel-up to SGR 64 and wheel-down to SGR 65, never arrow keys or PageUp', () => {
     expect(encodeTerminalSgrWheelReports(-1, 10, 5)).toBe('\x1b[<64;10;5M');
     expect(encodeTerminalSgrWheelReports(2, 3, 7)).toBe('\x1b[<65;3;7M\x1b[<65;3;7M');
     const payload = encodeTerminalSgrWheelReports(-3, 1, 1);
     expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
-  });
-});
-
-describe('encodeTerminalPageScrollKeys', () => {
-  test('maps wheel-up to PageUp and wheel-down to PageDown, never arrows or SGR', () => {
-    expect(encodeTerminalPageScrollKeys(-1)).toBe('\x1b[5~');
-    expect(encodeTerminalPageScrollKeys(2)).toBe('\x1b[6~');
-    const payload = encodeTerminalPageScrollKeys(-3);
-    expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
-    expect(payload.includes('\x1b[<64')).toBe(false);
+    expect(payload.includes('\x1b[5~')).toBe(false);
   });
 });

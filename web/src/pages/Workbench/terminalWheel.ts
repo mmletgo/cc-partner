@@ -9,16 +9,19 @@
  *   于是 xterm 永远走方向键回退。桌面必须自己按 buffer/mouse 模式分流。
  *
  * Code Logic（这个模块做什么）:
- *   - resolveWorkbenchTerminalWheelAction：scrollback / protocol / pageFallback；
- *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65；
- *   - encodeTerminalPageScrollKeys：tmux mouse off 时 Claude 认的 PageUp/PageDown。
+ *   - resolveWorkbenchTerminalWheelAction：scrollback / sgrFallback；
+ *   - clampTranscriptWheelCell：把底部输入区落点抬到 transcript；
+ *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65。
  */
 
 export type WorkbenchTerminalBufferType = 'normal' | 'alternate';
 
 export type WorkbenchTerminalMouseTrackingMode = 'none' | 'x10' | 'vt200' | 'drag' | 'any';
 
-export type WorkbenchTerminalWheelAction = 'scrollback' | 'protocol' | 'pageFallback';
+export type WorkbenchTerminalWheelAction = 'scrollback' | 'sgrFallback';
+
+/** Claude 输入栏大约占底部若干行；滚轮落在这里必须抬到 transcript。 */
+export const WORKBENCH_TERMINAL_TRANSCRIPT_BOTTOM_MARGIN_ROWS = 8;
 
 export interface WorkbenchTerminalWheelInput {
   bufferType: WorkbenchTerminalBufferType;
@@ -31,23 +34,48 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   桌面滚轮有三条互斥路径：本地 scrollback、xterm 已协商的 mouse protocol、
- *   以及「TUI 已在 alt screen 但 xterm 没看到 DECSET」时的 PageUp/PageDown 回退。
- *   Claude 在 tmux mouse off 时官方提示用 PgUp/PgDn 滚 transcript；
- *   裸 SGR 64/65 会当 mouse 打到输入框，看起来像滚轮没反应。
- *   回退绝不能发方向键，否则 Claude 输入框会翻历史 prompt。
+ *   桌面滚轮只有两条路径：普通 buffer 交给 xterm 本地 scrollback；
+ *   alternate screen 一律自己发打在 transcript 的 SGR 64/65。
+ *   不能交给 xterm protocol：指针常在底部输入框，SGR 会按原坐标命中输入区。
+ *   也不能发 PageUp：Chat 上下文没有 pageup 绑定，输入框聚焦时整页不动。
  *
  * Code Logic（这个函数做什么）:
- *   mouse tracking ≠ none → protocol（交给 xterm 发报告）；
- *   normal buffer → scrollback（即使 baseY=0 也交给 xterm，禁止把控制序列打进 shell）；
- *   alternate + none → pageFallback。
+ *   normal → scrollback；alternate → sgrFallback。mouseTrackingMode 不参与分流。
  */
 export function resolveWorkbenchTerminalWheelAction(
   input: WorkbenchTerminalWheelInput,
 ): WorkbenchTerminalWheelAction {
-  if (input.mouseTrackingMode !== 'none') return 'protocol';
   if (input.bufferType === 'normal') return 'scrollback';
-  return 'pageFallback';
+  return 'sgrFallback';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Claude 把 SGR 滚轮按 col/row 命中 UI。落在底部输入栏时 transcript 不滚。
+ *
+ * Code Logic（这个函数做什么）:
+ *   1-based 坐标 clamp 到网格内；row 再抬到 `rows - margin`，保证落在 transcript。
+ */
+export function clampTranscriptWheelCell(
+  col: number,
+  row: number,
+  cols: number,
+  rows: number,
+  bottomMarginRows: number = WORKBENCH_TERMINAL_TRANSCRIPT_BOTTOM_MARGIN_ROWS,
+): { col: number; row: number } {
+  const safeCols = Number.isFinite(cols) && cols >= 1 ? Math.floor(cols) : 1;
+  const safeRows = Number.isFinite(rows) && rows >= 1 ? Math.floor(rows) : 1;
+  const margin =
+    Number.isFinite(bottomMarginRows) && bottomMarginRows >= 0
+      ? Math.floor(bottomMarginRows)
+      : WORKBENCH_TERMINAL_TRANSCRIPT_BOTTOM_MARGIN_ROWS;
+  const maxTranscriptRow = Math.max(1, safeRows - margin);
+  const safeCol = Number.isFinite(col) ? Math.floor(col) : 1;
+  const safeRow = Number.isFinite(row) ? Math.floor(row) : 1;
+  return {
+    col: Math.min(safeCols, Math.max(1, safeCol)),
+    row: Math.min(maxTranscriptRow, Math.max(1, safeRow)),
+  };
 }
 
 /**
@@ -98,18 +126,4 @@ export function encodeTerminalSgrWheelReports(
   const safeRow = Number.isFinite(row) && row >= 1 ? Math.floor(row) : 1;
   const button = lines > 0 ? 65 : 64;
   return `\x1b[<${button};${safeCol};${safeRow}M`.repeat(count);
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Claude 在 tmux `mouse off` 时把 SGR 滚轮当 mouse 打到焦点输入框，transcript 不滚。
- *   它自己的提示是 PageUp/PageDown（`scroll:pageUp` / `scroll:pageDown`），不是方向键。
- *
- * Code Logic（这个函数做什么）:
- *   一次累计滚动只发一个 CSI：负向 `\x1b[5~`（PageUp），正向 `\x1b[6~`（PageDown）。
- *   不按 |lines| 重复，避免触控板一次轻扫翻很多页。
- */
-export function encodeTerminalPageScrollKeys(lines: number): string {
-  if (!Number.isFinite(lines) || lines === 0) return '';
-  return lines < 0 ? '\x1b[5~' : '\x1b[6~';
 }

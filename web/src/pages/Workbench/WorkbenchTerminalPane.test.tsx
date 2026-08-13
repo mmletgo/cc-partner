@@ -870,19 +870,35 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
-  test('alt-screen without mouse tracking injects PageUp instead of arrows or SGR', () => {
+  test('alt-screen injects transcript-targeted SGR even when the pointer is over the input row', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();
     render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
     const terminal = latestTerminal();
+    terminal.cols = 80;
+    terminal.rows = 32;
     terminal.buffer.active.type = 'alternate';
     terminal.buffer.active.baseY = 0;
-    terminal.modes.mouseTrackingMode = 'none';
+    terminal.modes.mouseTrackingMode = 'vt200';
+    const viewport = screen.getByTestId('terminal-pane').firstElementChild as HTMLDivElement;
+    vi.spyOn(viewport, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 800,
+      height: 512,
+      right: 800,
+      bottom: 512,
+      x: 0,
+      y: 0,
+      toJSON() {
+        return {};
+      },
+    });
 
     const proceed = terminal.invokeWheel({
       deltaY: -20,
       clientX: 8,
-      clientY: 8,
+      clientY: 500,
       preventDefault: vi.fn(),
       stopPropagation: vi.fn(),
     });
@@ -890,35 +906,17 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     expect(proceed).toBe(false);
     expect(onInput).toHaveBeenCalledTimes(1);
     const payload = String(onInput.mock.calls[0]?.[1] ?? '');
-    expect(payload).toBe('\x1b[5~');
+    expect(payload).toMatch(/^\x1b\[<64;\d+;24M$/);
     expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
-    expect(payload.includes('\x1b[<64')).toBe(false);
+    expect(payload.includes('\x1b[5~')).toBe(false);
   });
 
-  test('lets xterm keep the wheel when mouse tracking is already negotiated', () => {
-    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
-    const onInput = vi.fn();
-    render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
-    const terminal = latestTerminal();
-    terminal.buffer.active.type = 'alternate';
-    terminal.modes.mouseTrackingMode = 'vt200';
-
-    const proceed = terminal.invokeWheel({
-      deltaY: -20,
-      clientX: 8,
-      clientY: 8,
-      preventDefault: vi.fn(),
-      stopPropagation: vi.fn(),
-    });
-
-    expect(proceed).toBe(true);
-    expect(onInput).not.toHaveBeenCalled();
-  });
-
-  test('source contract keeps custom wheel handler and never encodes arrow keys', () => {
+  test('source contract keeps custom wheel handler and never encodes arrow keys or PageUp', () => {
     const paneSource = readFileSync(resolve(__dirname, './WorkbenchTerminalPane.tsx'), 'utf8');
     expect(paneSource).toContain('attachCustomWheelEventHandler');
-    expect(paneSource).toContain('encodeTerminalPageScrollKeys');
+    expect(paneSource).toContain('clampTranscriptWheelCell');
+    expect(paneSource).toContain('encodeTerminalSgrWheelReports');
+    expect(paneSource).not.toContain('encodeTerminalPageScrollKeys');
     expect(paneSource).not.toContain("\\x1b[' +");
   });
 });

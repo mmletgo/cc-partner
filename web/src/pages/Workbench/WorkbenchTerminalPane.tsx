@@ -31,8 +31,9 @@ import {
 } from './terminalReplay';
 import { installWorkbenchTerminalSelectionOverrides } from './terminalSelectionOverrides';
 import {
+  clampTranscriptWheelCell,
   consumeWorkbenchTerminalWheelLines,
-  encodeTerminalPageScrollKeys,
+  encodeTerminalSgrWheelReports,
   resolveWorkbenchTerminalWheelAction,
   type WorkbenchTerminalBufferType,
   type WorkbenchTerminalMouseTrackingMode,
@@ -174,7 +175,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const selectPaneDecideTimerRef = useRef<number | null>(null);
   // Business Logic: resize/theme 后 cell 尺寸会变；缓存 metrics，避免每个 onCursorMove 强制布局。
   const cursorMetricsRef = useRef<TerminalCursorMetrics | null>(null);
-  // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发一次 PageUp/PageDown。
+  // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发打在 transcript 的 SGR。
   const wheelRemainderRef = useRef(0);
   const sessionId = session?.id ?? null;
   const store = useWorkbenchTerminalBufferStore();
@@ -208,12 +209,12 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     wheelRemainderRef.current = 0;
     /**
      * Business Logic（为什么需要这个函数）:
-     *   Claude resume 后停在 alternate screen。tmux 未宣告 xterm*:mouse 时 DECSET 到不了 xterm，
-     *   xterm 6 会把滚轮译成 ↑/↓，Claude 输入框当成历史 prompt。
-     *   Claude 在 tmux mouse off 时官方提示用 PgUp/PgDn 滚 transcript；SGR 64/65 会打到输入框无反应。
+     *   Claude resume 后停在 alternate screen。xterm 默认把滚轮译成 ↑/↓，输入框翻历史。
+     *   已协商 mouse 时 xterm 会按指针坐标发 SGR；指针常在底部输入栏，Claude 命中输入区就不滚。
+     *   PageUp 只在 Scroll 上下文生效，Chat 输入聚焦时整页不动。
      *
      * Code Logic（这个函数做什么）:
-     *   已协商 mouse / 有本地 scrollback 时交给 xterm；否则拦截并注入 PageUp/PageDown，绝不发方向键或裸 SGR。
+     *   普通 buffer 交给 xterm；alternate 一律拦截，把落点抬到 transcript 后发 SGR 64/65。
      */
     terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
       const active = terminal.buffer.active;
@@ -226,7 +227,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         baseY: active.baseY,
         mouseTrackingMode,
       });
-      if (action !== 'pageFallback') return true;
+      if (action !== 'sgrFallback') return true;
       if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) {
         return false;
       }
@@ -241,7 +242,16 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       );
       wheelRemainderRef.current = consumed.remainder;
       if (consumed.lines === 0) return false;
-      const payload = encodeTerminalPageScrollKeys(consumed.lines);
+      const rawCol =
+        metrics.cellWidth > 0 && Number.isFinite(event.clientX)
+          ? Math.floor((event.clientX - metrics.left) / metrics.cellWidth) + 1
+          : 1;
+      const rawRow =
+        metrics.cellHeight > 0 && Number.isFinite(event.clientY)
+          ? Math.floor((event.clientY - metrics.top) / metrics.cellHeight) + 1
+          : 1;
+      const cell = clampTranscriptWheelCell(rawCol, rawRow, terminal.cols, terminal.rows);
+      const payload = encodeTerminalSgrWheelReports(consumed.lines, cell.col, cell.row);
       if (payload) onInput(sessionId, payload);
       return false;
     });
