@@ -946,16 +946,22 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   mobile Git merge 会删除源 worktree，必须先确认用户合并意图；只有合并 active worktree 时才需要处理 Files dirty 草稿切换。
+   *   mobile Git merge 会删除功能 worktree，或把主工作区可收集分支合入 home；必须先确认用户意图。
    *
    * Code Logic（这个函数做什么）:
-   *   先执行 merge confirm，再用 destructive merge helper 串联可选 dirty guard、HTTP merge、成功后移除源列表并按计划刷新 worktree。
+   *   主工作区用 collect-merge 确认文案；再串联可选 dirty guard、HTTP merge、按 merge plan 刷新列表。
    */
   const handleMergeWorktree = useCallback(
     async (sourceWorktree: WorkbenchWorktree): Promise<boolean> => {
       if (worktreeOperationBusyRef.current || projectDetailsLoading) return false;
       const shouldMerge = window.confirm(
-        t('workbench:worktrees.mergeConfirm', { name: sourceWorktree.name }),
+        sourceWorktree.isMain
+          ? t('workbench:worktrees.mergeCollectConfirm', {
+              home: sourceWorktree.homeBranch ?? 'main',
+              names: sourceWorktree.collectibleBranches.join(', '),
+              count: sourceWorktree.collectibleBranches.length,
+            })
+          : t('workbench:worktrees.mergeConfirm', { name: sourceWorktree.name }),
       );
       if (!shouldMerge) return false;
 
@@ -987,7 +993,10 @@ export function MobileWorkbench(): ReactElement {
               if (ledger?.state === 'failed') {
                 throw new Error(t('workbench:errors.mergeWorktree'));
               }
-              if (intent?.kind === 'merge' && operationProjectId) {
+              if (
+                (intent?.kind === 'merge' || intent?.kind === 'collectMerge')
+                && operationProjectId
+              ) {
                 try {
                   const latest = await httpWorkbenchTransport.worktrees.list(operationProjectId);
                   let mainCommitHashes: string[] | undefined;

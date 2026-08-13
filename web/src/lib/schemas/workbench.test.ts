@@ -5,6 +5,7 @@
 import { describe, expect, test } from 'vitest';
 import { ContractDecodeError } from '../runtimeSchema';
 import {
+  mutationIntentDecoder,
   workbenchFileNodeDecoder,
   workbenchFileNodesDecoder,
   workbenchOpenFileDecoder,
@@ -166,6 +167,63 @@ describe('workbench schemas', () => {
     expect(decoded.canCollectMerge).toBe(true);
     expect(decoded.homeBranch).toBe('main');
     expect(decoded.collectibleBranches).toEqual(['feature/a', 'fix/b']);
+  });
+
+  test('mutationIntentDecoder decodes collectMerge', () => {
+    expect(
+      mutationIntentDecoder.decode({
+        kind: 'collectMerge',
+        projectId: 'p1',
+        worktreeId: 'wt-main',
+        homeBranch: 'main',
+        homeOid: 'home1',
+        sources: [
+          { name: 'agent/demo', oid: 'abc123' },
+          { name: 'fix/other', oid: 'def456' },
+        ],
+      }),
+    ).toEqual({
+      kind: 'collectMerge',
+      projectId: 'p1',
+      worktreeId: 'wt-main',
+      homeBranch: 'main',
+      homeOid: 'home1',
+      sources: [
+        { name: 'agent/demo', oid: 'abc123' },
+        { name: 'fix/other', oid: 'def456' },
+      ],
+    });
+  });
+
+  test('mutationIntentDecoder still decodes feature merge', () => {
+    expect(
+      mutationIntentDecoder.decode({
+        kind: 'merge',
+        projectId: 'p1',
+        sourceWorktreeId: 'wt-feat',
+        sourceHead: 'ccc',
+        mainHead: 'ddd',
+      }),
+    ).toEqual({
+      kind: 'merge',
+      projectId: 'p1',
+      sourceWorktreeId: 'wt-feat',
+      sourceHead: 'ccc',
+      mainHead: 'ddd',
+    });
+  });
+
+  test('malformed collectMerge sources fail closed', () => {
+    expect(() =>
+      mutationIntentDecoder.decode({
+        kind: 'collectMerge',
+        projectId: 'p1',
+        worktreeId: 'wt-main',
+        homeBranch: 'main',
+        homeOid: 'home1',
+        sources: [{ name: 'agent/demo' }],
+      }),
+    ).toThrow(ContractDecodeError);
   });
 
   test('malformed canPush fails', () => {

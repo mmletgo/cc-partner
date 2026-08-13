@@ -567,6 +567,7 @@
     "suffixPlaceholder": "my-task",
     "commitPrompt": "Enter commit message",
     "mergeConfirm": "Merge “{{name}}” into the main worktree?",
+    "mergeCollectConfirm": "Merge {{count}} branch(es) ({{names}}) into “{{home}}” and check out that branch?",
     "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed.",
     "hookRepair": {
       "title": "Git hook blocked {{action}}",

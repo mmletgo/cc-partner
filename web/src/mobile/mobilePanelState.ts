@@ -158,15 +158,40 @@ export async function runMobileWorktreeRemovalFlow(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   merge 成功会删除源 worktree；只有源 worktree 正是当前 active 时，移动端才需要在后端 merge 前保护 active Files 草稿。
+ *   功能 worktree merge 会删除源；主工作区 collect-merge 只合入分支，必须保留主 worktree 与当前 active。
  *
  * Code Logic（这个函数做什么）:
- *   用真实 active worktree id 复用删除计划；仅 active 源合并执行确认，后端成功后才执行成功应用回调。
+ *   主工作区返回原列表、当前 active、无需 preflight；否则复用删除计划。
+ */
+export function getMobileWorktreeMergePlan(
+  worktrees: WorkbenchWorktree[],
+  activeWorktreeId: string | null,
+  sourceWorktree: WorkbenchWorktree,
+): MobileWorktreeRemovalPlan {
+  if (sourceWorktree.isMain) {
+    const nextActive =
+      worktrees.find((worktree) => worktree.id === activeWorktreeId) ?? null;
+    return {
+      nextWorktrees: worktrees,
+      nextActive,
+      requiresActivePreflight: false,
+    };
+  }
+  return getMobileWorktreeRemovalPlan(worktrees, activeWorktreeId, sourceWorktree);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   功能 worktree merge 成功会删除源；只有源正是当前 active 时才需要在后端 merge 前保护 Files 草稿。
+ *   主工作区 collect-merge 不删除 worktree，不得走删除计划。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用 getMobileWorktreeMergePlan 计算计划；仅需要 preflight 时确认，后端成功后才应用。
  */
 export async function runMobileWorktreeMergeFlow(
   options: MobileWorktreeMergeFlowOptions,
 ): Promise<MobileWorktreeDestructiveFlowResult> {
-  const plan = getMobileWorktreeRemovalPlan(
+  const plan = getMobileWorktreeMergePlan(
     options.worktrees,
     options.activeWorktreeId,
     options.sourceWorktree,

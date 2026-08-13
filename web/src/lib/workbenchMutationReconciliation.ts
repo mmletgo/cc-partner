@@ -33,6 +33,7 @@ export type WorkbenchMutationReconcileResult =
  *      - commit: headTree==expectedTree 且 ((headParent==beforeHead && head!=beforeHead) 或 head==beforeHead)
  *      - push: remoteRefHead == localHead
  *      - merge: mainContainsSourceHead===true && sourceWorktreePresent===false
+ *      - collectMerge: mainContainsSourceHead===true（主工作区留下，不要求源消失）
  *      - remove: worktreeIdentityPresent===false
  */
 export function reconcileWorkbenchMutation(
@@ -85,6 +86,12 @@ export function reconcileWorkbenchMutation(
       }
       return 'unknown';
     }
+    case 'collectMerge': {
+      if (authorityAfter.mainContainsSourceHead === true) {
+        return 'confirmedSucceeded';
+      }
+      return 'unknown';
+    }
     case 'remove': {
       if (authorityAfter.worktreeIdentityPresent === false) {
         return 'confirmedSucceeded';
@@ -106,6 +113,8 @@ export function reconcileWorkbenchMutation(
  * Code Logic（这个函数做什么）:
  *   - merge: sourceWorktreePresent 来自列表；mainContainsSourceHead 在提供 mainCommitHashes 时
  *     判断是否包含 intent.sourceHead（找不到则为 false，不猜 true）。
+ *   - collectMerge: 全部 sources[].oid 都出现在 mainCommitHashes 时 mainContainsSourceHead=true；
+ *     不填 sourceWorktreePresent（主工作区不会被删）。
  *   - remove: worktreeIdentityPresent 来自列表。
  *   - 其它 intent 返回空快照。
  */
@@ -132,6 +141,21 @@ export function buildMergeRemoveAuthority(
       sourceWorktreePresent,
       mainContainsSourceHead,
     };
+  }
+  if (intent.kind === 'collectMerge') {
+    const hashes = options?.mainCommitHashes;
+    const mainContainsSourceHead =
+      hashes === undefined
+        ? undefined
+        : intent.sources.every((source) =>
+            hashes.some(
+              (hash) =>
+                hash === source.oid
+                || source.oid.startsWith(hash)
+                || hash.startsWith(source.oid),
+            ),
+          );
+    return { mainContainsSourceHead };
   }
   if (intent.kind === 'remove') {
     return {

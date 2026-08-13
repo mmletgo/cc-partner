@@ -307,7 +307,7 @@ function renderController(
           key: WorkbenchWorktreeGitErrorKey,
         ) => string,
         translateWorktreeMessage: currentProps.translateWorktreeMessage as (
-          key: 'mergeConfirm' | 'removeConfirm' | 'checkSourceMessage',
+          key: 'mergeConfirm' | 'mergeCollectConfirm' | 'removeConfirm' | 'checkSourceMessage',
           vars?: Record<string, unknown>,
         ) => string,
         confirmAction: currentProps.confirmAction,
@@ -1598,6 +1598,55 @@ describe('useWorkbenchWorktreeGitController — merge', () => {
       await flushMicrotasks();
     });
     expect(fakeWorktreesApi.merge).not.toHaveBeenCalled();
+  });
+
+  test('handleMergeWorktree collect-merges main when canCollectMerge', async () => {
+    const mainWt = buildWorktree({
+      id: 'wt-main',
+      isMain: true,
+      canCollectMerge: true,
+      homeBranch: 'main',
+      collectibleBranches: ['agent/demo'],
+    });
+    fakeWorktreesApi.list.mockResolvedValue([mainWt]);
+    fakeWorktreesApi.merge.mockResolvedValueOnce(
+      succeededEnvelope({
+        ok: true,
+        worktreeId: 'wt-main',
+        stages: [{ id: 'checkSource', status: 'completed', message: 'ok' }],
+      }),
+    );
+    const confirmAction = vi.fn(() => true);
+    const translateWorktreeMessage = vi.fn((key: string, vars?: Record<string, unknown>) =>
+      vars ? `${key}:${JSON.stringify(vars)}` : key,
+    );
+
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-main',
+      confirmAction,
+      translateWorktreeMessage,
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees('project-1');
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      await result.current.handleMergeWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(translateWorktreeMessage).toHaveBeenCalledWith('mergeCollectConfirm', {
+      home: 'main',
+      names: 'agent/demo',
+      count: 1,
+    });
+    expect(confirmAction).toHaveBeenCalledWith(
+      expect.stringContaining('mergeCollectConfirm'),
+    );
+    expect(fakeWorktreesApi.merge).toHaveBeenCalledWith('wt-main', expect.any(String));
   });
 
   test('handleMergeWorktree marks running stage as failed on error and still reloads worktrees + sessions', async () => {

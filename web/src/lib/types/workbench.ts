@@ -247,6 +247,14 @@ export type MutationIntent =
       mainHead: string;
     }
   | {
+      kind: 'collectMerge';
+      projectId: string;
+      worktreeId: string;
+      homeBranch: string;
+      homeOid: string;
+      sources: Array<{ name: string; oid: string }>;
+    }
+  | {
       kind: 'remove';
       projectId: string;
       worktreeId: string;
