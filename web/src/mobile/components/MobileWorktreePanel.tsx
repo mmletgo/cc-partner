@@ -281,7 +281,7 @@ export function MobileWorktreePanel({
         const latest = await httpWorkbenchTransport.worktrees.list(worktree.projectId);
         if (!isWorktreeMutationSettlementCurrent(settled)) return 'unknown';
         let mainCommitHashes: string[] | undefined;
-        if (intent.kind === 'merge' || intent.kind === 'collectMerge') {
+        if (intent.kind === 'merge') {
           const main = latest.find((item) => item.isMain) ?? null;
           if (main) {
             try {
