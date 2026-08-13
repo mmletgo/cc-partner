@@ -3,11 +3,13 @@
  * useTheme / bootstrapTheme 合同测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   移动端独立入口依赖 bootstrapTheme 在 React 挂载前写入 data-theme；
- *   useTheme 切换必须持久化 localStorage 并派发 cp-theme-change。
+ *   桌面主窗/卫星窗与移动端入口依赖 bootstrapTheme 在 React 挂载前写入 data-theme；
+ *   useTheme 切换必须持久化 localStorage 并派发 cp-theme-change；
+ *   卫星窗没有 ThemeToggle，必须靠 storage 事件跟上主窗。
  *
  * Code Logic（这个测试做什么）:
- *   覆盖 bootstrap 读 storage/系统偏好，以及 setTheme 同步 document + storage + 事件。
+ *   覆盖 bootstrap 读 storage/系统偏好，setTheme 同步 document + storage + 事件，
+ *   以及跨窗 storage 事件回写 data-theme。
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -84,5 +86,24 @@ describe('useTheme', () => {
     expect(events).toEqual(['dark']);
 
     window.removeEventListener(THEME_CHANGE_EVENT, handler);
+  });
+
+  test('follows storage event so satellite windows pick up main theme', () => {
+    window.localStorage.setItem(THEME_STORAGE_KEY, 'light');
+    const { result } = renderHook(() => useTheme());
+    expect(result.current.theme).toBe('light');
+
+    act(() => {
+      window.localStorage.setItem(THEME_STORAGE_KEY, 'dark');
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: THEME_STORAGE_KEY,
+          newValue: 'dark',
+        }),
+      );
+    });
+
+    expect(result.current.theme).toBe('dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
   });
 });

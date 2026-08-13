@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
+import { useTheme } from '@/hooks/useTheme';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { syncWorkbenchWindowTitle } from '@/lib/workbenchWindowTitle';
 import { NavLink, Outlet } from 'react-router-dom';
@@ -116,6 +117,8 @@ export function AppShell({ children }: AppShellProps) {
   const appName = t('common:app.name');
   const { role } = useWorkbenchWindowRole();
   const { activeProject } = useWorkbenchProjects();
+  // 卫星窗不渲染 ThemeToggle，但仍须挂载 useTheme 才能写 data-theme 并跨窗同步。
+  useTheme();
   const isSatellite = role === 'satellite';
 
   useEffect(() => {

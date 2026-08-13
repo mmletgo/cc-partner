@@ -202,6 +202,19 @@ describe('AppShell grouped navigation', () => {
     windowRoleMock.role = 'main';
   });
 
+  test('satellite shell applies stored theme without ThemeToggle', () => {
+    window.localStorage.setItem('cp-theme', 'dark');
+    document.documentElement.removeAttribute('data-theme');
+    windowRoleMock.role = 'satellite';
+    renderShell();
+    expect(screen.getByTestId('workbench-satellite-shell')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /theme/i })).toBeNull();
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    windowRoleMock.role = 'main';
+    window.localStorage.removeItem('cp-theme');
+    document.documentElement.removeAttribute('data-theme');
+  });
+
   test('sidebar content scroll contract uses min-height 0 and overflow-y auto', () => {
     const sidebarCss = readFileSync(
       resolve(process.cwd(), 'src/components/layout/Sidebar/Sidebar.module.css'),
