@@ -12,7 +12,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 一键区域截图并粘贴到 Claude Code
 - 集中管理常用 Prompt，跨设备同步
 - 浏览、搜索、复用和跨设备同步 Claude Code 历史 Prompt
-- 在应用内编辑 user 级 `~/.claude/CLAUDE.md`，并主动推送到局域网设备和 GitHub 云端
+- 通过 Agent Hub 用户级指令（Claude targetOnly）管理本机 user 级 `~/.claude/CLAUDE.md`；旧「CLAUDE.md」编辑/推送页面已下线，后端 `claude_md` 推送路由与云同步域保留
 - 使用多页面速记本记录临时文本，并在局域网与 GitHub 间同步
 - 在项目文件夹维度管理 Git worktree、多个普通终端 window/pane，并直接操作当前工作区文件树
 - 通过局域网 `/mobile` 入口在手机浏览器操作 Workbench 项目、worktree、终端、文件、Git 和项目级自动化任务（无访问 token）
@@ -234,7 +234,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 混合版本：v2 客户端对未宣告能力的对端使用 typed legacy pull/push（失败仍 typed）；legacy 客户端继续使用仍挂载的 legacy 路由；不得因 404/空 body 伪造成功空集
 - Claude Code 历史在两端均支持分页能力时按有界分页协议交换；任一端缺少该能力时自动回退完整 pull/push，混合版本仍可完成合并（独立于 `sync.manifest.v2`）
 - 全局同步不传输普通文件，不同步 Workbench 工作区文件副本；文件传输和 Workbench 远端代理走独立通道
-- `CLAUDE.md` 不进入普通全局自动同步，只通过 `CLAUDE.md` 页面主动推送
+- `CLAUDE.md` 不进入普通全局自动同步，仅支持主动推送；旧「CLAUDE.md」页面推送 UI 已下线，后端 `claude_md` 推送路由保留
 
 ### 2.8 GitHub 私有仓库云端同步
 
@@ -247,7 +247,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 同步导入时按各业务对象的向量时钟和 LWW 规则与本机 SQLite 合并
 - 同步导出时把当前本机数据快照写成 JSON 文件并提交到配置分支
 - 软删除记录也写入云端快照，用于跨设备传播删除语义
-- `CLAUDE.md` 不参与普通云端自动同步导入/导出，仅由 `CLAUDE.md` 页面主动推送本机版本到云端
+- `CLAUDE.md` 不参与普通云端自动同步导入/导出，仅主动推送本机版本到云端；旧「CLAUDE.md」页面推送 UI 已下线，后端推送路由保留
 - 云端同步不管理 Git 认证，复用用户本机 git 凭证、SSH key 或 credential helper
 
 ### 2.9 速记本
@@ -635,7 +635,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - Settings / 桌面 Orchestrator / Mobile Automation 按 controller + pure views 拆分：views 无 API/transport，controllers 无 board/modal JSX
 - Workbench 仅七个域 controller，页面组合层 ≤1200 行；终端 window tabs 使用 roving tablist（Arrow/Home/End）
 - Attention 列表每行仅一个 tab stop（单 button，动作文案为 span）
-- 侧栏按 Explore/Work/Knowledge/Connect/System 分组；`/` 仍是 GitHub Trending；Workbench 在 Work 组；短窗口侧栏 content 可滚、footer 不覆盖
+- 侧栏按 Explore/Work/Knowledge/System 分组；`/` 仍是 GitHub Trending；Workbench 在 Work 组；短窗口侧栏 content 可滚、footer 不覆盖
 - GUI 首次启动 LAN listener 前必须完成风险披露确认（首选 TCP 62116 / 端口递增 / mDNS UDP 5353 / 无身份校验）；确认写入 `gui-bootstrap.json`，不是可切换 LAN 模式
 - Workbench 无项目时仅聚焦空态 CTA（添加本机/连接远端/检查 tmux）；有项目未选中时展示“继续工作”启动页；Mobile 导航双模式：global=Projects/Inbox/Tools/System，project=Workbench 工具 + Shortcuts（Prompt 全局，项目绑定入口仅 project 模式）
 - 侧栏 `WorkbenchProjectRail` 为项目导航权威入口；添加来源/远端选择走共享 Dialog

@@ -9,9 +9,10 @@
 1. **Workbench** — 本机/局域网远端项目、worktree、终端、文件、Git、自动化
 2. **Mobile Workbench** — 局域网 `/mobile` 浏览器远程操作（无调用者身份校验；可达网络任意设备可读写执行）
 3. **Orchestrator** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付
-4. **独立后端 CLI** — `cc-partner-backend start|status|doctor|stop`（远端可无 GUI）
-5. **全局 Inbox（Attention）** — 实时阻塞投影；只导航到权威界面
-6. **辅助工具** — 文件传输、区域截图、Prompt/速记本同步、CLAUDE.md 推送、SSH 配置、GitHub 周热门、自动更新
+4. **Agent Hub** — `/agent-hub` 统一管理 Claude/Codex/OpenCode 用户级与项目级指令（公共/适配/独有三槽 + AI 辅助修订）与可移植资产
+5. **独立后端 CLI** — `cc-partner-backend start|status|doctor|stop|supervise`（远端可无 GUI）
+6. **全局 Inbox（Attention）** — 实时阻塞投影；只导航到权威界面
+7. **辅助工具** — 文件传输、区域截图、Prompt/速记本/SSH 目标同步、GitHub 周热门、自动更新
 
 ## 技术栈
 

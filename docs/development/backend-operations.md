@@ -25,7 +25,7 @@ Chinese product wording (must stay equivalent): 同一可达网络中的任何�
 Usage:
 
 ```text
-cc-partner-backend <start|serve|stop|status|doctor [--json]>
+cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]|version|--version|-V>
 ```
 
 | Subcommand | Role | Success exit | Failure exit |
@@ -34,11 +34,13 @@ cc-partner-backend <start|serve|stop|status|doctor [--json]>
 | `serve` | Foreground runtime (internal; used by `start`) — advertise + browse | 0 | 1 |
 | `stop` | Local control stop + wait for process exit | 0 | 1 |
 | `status` | Machine-readable JSON `{kind, control?:{pid,port}, error?}` — **no control token** | 0 | 1 |
+| `supervise` | Login-autostart supervisor: spawn `serve` from the current executable (no shell), restart on abnormal exit with 1→60s exponential backoff (backoff resets after 10min healthy); `stop` (exit 0) ends supervision | 0 | 1 |
 | `doctor` | Human-readable health report on stdout | 0 / 1 / 2 | 2 on parse/collect failure |
 | `doctor --json` | **stdout pure single-line** `DoctorSnapshot` JSON; tracing/errors on stderr | 0 / 1 / 2 | 2 on parse/collect failure |
+| `version` / `--version` / `-V` | Print package version | 0 | — |
 | unknown / bad args | Usage on stderr | — | **2** |
 
-Lifecycle commands (`start` / `serve` / `stop` / `status`) stay **0/1**. Only `doctor` uses the **0/1/2** overall map.
+Lifecycle commands (`start` / `serve` / `stop` / `status` / `supervise`) stay **0/1**. Only `doctor` uses the **0/1/2** overall map.
 
 ### Packaged / PATH
 
@@ -48,6 +50,7 @@ cc-partner-backend status
 cc-partner-backend doctor
 cc-partner-backend doctor --json
 cc-partner-backend stop
+cc-partner-backend supervise
 ```
 
 ### Development (cargo)
@@ -58,9 +61,10 @@ cargo run --locked --bin cc-partner-backend -- status
 cargo run --locked --bin cc-partner-backend -- doctor
 cargo run --locked --bin cc-partner-backend -- doctor --json
 cargo run --locked --bin cc-partner-backend -- stop
+cargo run --locked --bin cc-partner-backend -- supervise
 ```
 
-`serve` is not a normal operator entry; prefer `start` / `stop`.
+`serve` is not a normal operator entry; prefer `start` / `stop`. `supervise` is the login-autostart entry (see `src-tauri/src/backend/supervisor.rs`); it forwards `CC_PARTNER_DATA_DIR` and never prints the control token.
 
 ## Agent-first control CLI (`cc-partner`)
 

@@ -29,8 +29,8 @@ cc-partner 前端是**桌面端内嵌 Web 应用**：
 | `web/src/lib/icons.tsx` | 25+ inline SVG icon |
 | `web/src/components/primitives/` | 原子组件（Button/Card/Input/...） |
 | `web/src/components/layout/` | 布局组件（AppShell/TitleBar/Sidebar/...） |
-| `web/src/components/domain/` | 业务组件（PromptCard/DeviceCard/...） |
-| `web/src/pages/` | 路由页面（Home/Prompts/CcHistory/Scratchpad/PromptOptimizer/Transfer/Devices/Settings/Health 等）+ DesignSystem 预览 |
+| `web/src/components/domain/` | 业务组件（PromptCard/TransferItem/MobileAccessCard/...） |
+| `web/src/pages/` | 路由页面（Home/Prompts/CcHistory/Scratchpad/PromptOptimizer/Transfer/Workbench/AgentHub/Settings/Health 等）+ DesignSystem 预览 |
 | `web/src/api/` | invoke 封装（prompts/promptOptimizer/scratchpad/devices/transfer/health 等，调 Rust 命令） |
 | `AGENTS.md` | ⭐ 必读：组件复用规范 |
 
@@ -105,5 +105,5 @@ mkdir web/src/pages/MyPage
 | 页面空白 | F12 打开控制台看 invoke / Rust 错误 |
 | invoke 报错 | 检查 `src-tauri/src/commands/` 是否注册该命令 + `lib.rs` invoke_handler |
 | 主题没切换 | 检查 `useTheme` 是否在组件树顶层 |
-| TypeScript 错误 | `cd web && npx tsc --noEmit` |
+| TypeScript 错误 | `cd web && npm run build`（含 `tsc -b` 类型检查；勿用浮动 `npx tsc`） |
 | 组件样式没生效 | 确认 import 了 `tokens.css` + `reset.css` |

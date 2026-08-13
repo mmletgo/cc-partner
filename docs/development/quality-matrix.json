@@ -1866,7 +1866,7 @@
         "docs/development/testing.md",
         "docs/superpowers/specs/2026-08-08-agent-hub-interaction-redesign-design.md"
       ],
-      "notes": "L1 mock: InstructionThreePaneView blocks empty until reparse-from-original; three panes present; original loads inspect body. Sync/apply write path remains scan-only fail-closed when capability blocked."
+      "notes": "L1 mock: instruction lane layouts (common single / adapted single / exclusive three-pane) with analyze-original split; common lane AI revise invokes agent_hub_revise_instruction_slot once with the user direction then persists via agent_hub_save_user_instruction_blocks. Sync/apply write path remains scan-only fail-closed when capability blocked."
     },
     {
       "id": "E2E-AGENT-HUB-DISCOVER-MANAGED-001",

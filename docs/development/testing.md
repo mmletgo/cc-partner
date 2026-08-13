@@ -38,7 +38,7 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-AGENT-HUB-C-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate C: LAN source-push selection/progress / unsupported peer / Git inspect+confirm / credential disclosure / stale preview / mapping / Attention deep link (mock only) |
 | `E2E-AGENT-HUB-D-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate D: Plugin drawer matrix / ownership delete preview / residual statuses / OpenCode catalog fail-closed + effectively-available runner selection / bridge preview deep link / Attention agentHubProjectionBlocked navigation (mock only) |
 | `E2E-AGENT-HUB-SHELL-001` | `web/tests/agent-hub-interaction.spec.ts` | Interaction redesign: Agent/scope/tabs shell + context URL (mock only) |
-| `E2E-AGENT-HUB-INSTR-3PANE-001` | `web/tests/agent-hub-interaction.spec.ts` | Instruction three-pane: empty blocks until reparse (mock only) |
+| `E2E-AGENT-HUB-INSTR-3PANE-001` | `web/tests/agent-hub-interaction.spec.ts` | Instruction three-pane lane layouts (common/adapted/exclusive) + analyze original + AI revise calls Claude then saves canonical (mock only) |
 | `E2E-AGENT-HUB-DISCOVER-MANAGED-001` | `web/tests/agent-hub-interaction.spec.ts` | Portable inventory: no primary Adopt CTA (mock only) |
 | `E2E-AGENT-HUB-ADAPT-FULL-001` | `web/tests/agent-hub-interaction.spec.ts` | Cross-agent full mode forced preview gate (stub generator; mock only) |
 | `L2-AGENT-HUB-B-001` | `src-tauri/tests/agent_hub_gate_b_smoke.rs` | Portable discovery / targetOnly isolation / unmanaged config / adoption recovery / credential redaction |

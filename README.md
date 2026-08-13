@@ -6,7 +6,7 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 **固定局域网语义（无调用者身份校验）**：业务 API 不对 peer 做账号/配对/token 鉴权；合法 loopback/LAN 地址范围内的任何可达设备均可读取、写入和执行。系统不验证调用者身份。产品只有这一种局域网行为，不提供可切换的暴露/只读模式或逐设备权限。
 
-**核心体验入口**：`/` 仍是 GitHub Trending（探索）；“继续工作”进 `/workbench`。GUI 首次启动 LAN listener 前会展示本机地址候选、首选端口 62116（占用递增）、mDNS UDP 5353 与无身份校验风险并要求确认。侧栏按 Explore/Work/Knowledge/Connect/System 分组；普通小字对比度 ≥4.5:1（`--fg-muted-readable`）。
+**核心体验入口**：`/` 仍是 GitHub Trending（探索）；“继续工作”进 `/workbench`。GUI 首次启动 LAN listener 前会展示本机地址候选、首选端口 62116（占用递增）、mDNS UDP 5353 与无身份校验风险并要求确认。侧栏按 Explore/Work/Knowledge/System 分组；普通小字对比度 ≥4.5:1（`--fg-muted-readable`）。
 
 ## 功能一览
 
@@ -21,7 +21,7 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 - 桌面/后端 HTTP 服务提供 `/mobile` 浏览器入口（合法 LAN peer 无访问 token；同一可达网络任意设备可读写执行）
 - 全局侧栏手机按钮展示可复制访问链接与二维码，并固定展示无身份校验风险提示
-- 导航按 Projects / Attention / Work / Automation / More 分组；可进入 worktree、terminal、files、git、prompt 与自动化面板；远端项目经本机代理到 owning device
+- 导航双模式：全局按 Projects / Inbox / Tools / System 分组，进入项目后切换为 Workbench 工具 + Shortcuts；可进入 worktree、terminal、browser、files、git、prompt 与自动化面板；远端项目经本机代理到 owning device
 
 ### 3. Orchestrator 自动编排与可见执行
 
@@ -29,7 +29,13 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 - 全局 Inbox（Attention）实时投影当前阻塞项：Human Review、Blocked、failed remote outbox、tmux 依赖问题
 - Inbox 只负责导航到权威界面；具体动作（如 failed outbox 的 Retry/Discard、依赖安装）在对应面板完成
 
-### 4. Headless 后端 CLI
+### 4. Agent Hub 多 CLI 指令与资产
+
+- `/agent-hub` 统一管理本机用户级、局域网远端设备与项目级 Claude / Codex / OpenCode 指令和可移植资产
+- 提示词固定公共 / 适配 / 独有三槽；「AI 辅助提示词修改」按改写方向调用本机 Claude 只改当前槽并保存 Canonical，不自动写入 Agent 原始文件
+- Skill / Command / Agent / MCP 可移植资产扫描与管理；跨 Agent 适配、same-agent LAN Pull 与 Snapshot Push、Git device-lane 备份
+
+### 5. Headless 后端 CLI
 
 远端或不想开桌面窗口时，独立二进制 `cc-partner-backend` 提供同一局域网服务与健康检查：
 
@@ -39,6 +45,7 @@ cc-partner-backend status
 cc-partner-backend doctor
 cc-partner-backend doctor --json
 cc-partner-backend stop
+cc-partner-backend supervise
 ```
 
 开发态可用：
@@ -49,9 +56,11 @@ cargo run --locked --bin cc-partner-backend -- status
 cargo run --locked --bin cc-partner-backend -- doctor
 cargo run --locked --bin cc-partner-backend -- doctor --json
 cargo run --locked --bin cc-partner-backend -- stop
+cargo run --locked --bin cc-partner-backend -- supervise
 ```
 
 - `start` / `stop` / `status`：生命周期。`status` 输出本机运行态 JSON（不含控制 token）
+- `supervise`：登录自启动监督入口——spawn `serve` 并在异常退出后按 1→60s 指数退避重启，正常 `stop`（exit 0）后不再拉起
 - `doctor`：人类可读健康检查（状态、依赖、路径、日志位置）
 - `doctor --json`：stdout **仅**单行机器可读 JSON 快照（`schemaVersion=1`）；tracing/错误说明写 stderr
 - **doctor 退出码**：`healthy → 0`，`degraded → 1`，`unhealthy` 或检查无法完成 → `2`
@@ -59,7 +68,7 @@ cargo run --locked --bin cc-partner-backend -- stop
 - 可选依赖缺失（如未装 tmux）通常是 degraded/1
 - 诊断日志本地落盘：`~/.cc-partner/logs/backend.log`（及最多 3 个历史文件），**不上传**、无 telemetry
 
-### 5. Agent-first 控制 CLI（`cc-partner`）
+### 6. Agent-first 控制 CLI（`cc-partner`）
 
 独立二进制 **`cc-partner`**（**不是** Tauri `externalBin`，不替代 `cc-partner-backend`）面向 Agent/脚本：
 
@@ -83,14 +92,14 @@ printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner-cli -- ses
 
 细节见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md) 与设计 `docs/superpowers/specs/2026-07-15-agent-first-cli-design.md`。
 
-### 6. 配套工具：文件传输 · 截图 · Prompt · 草稿
+### 7. 配套工具：文件传输 · 截图 · Prompt · 草稿
 
 - **局域网文件传输**：分块传输、断点续传、SHA256 校验、拖拽发送
 - **区域截图**：全局快捷键框选，复制到剪贴板，可粘贴到 Claude Code
 - **Prompt 管理与同步**：标签/搜索/复制；向量时钟跨设备合并
 - **草稿本与其它本地工具**：围绕工作台的文本与协作辅助（见应用内面板）
 
-另含：设备 mDNS 发现、应用内自动更新、CLAUDE.md 编辑与推送、SSH 配置管理、GitHub 周热门首页等。完整产品行为以 [`docs/prd.md`](docs/prd.md) 为准。
+另含：设备 mDNS 发现、应用内自动更新、GitHub 周热门首页等。完整产品行为以 [`docs/prd.md`](docs/prd.md) 为准。
 
 ## 下载安装
 
