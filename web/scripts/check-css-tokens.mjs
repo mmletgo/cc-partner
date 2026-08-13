@@ -61,6 +61,8 @@ const THEME_DEPENDENT_EXACT = new Set([
   'warn',
   'danger',
   'danger-soft',
+  'overlay-scrim',
+  'overlay-on',
 ]);
 
 const THEME_DEPENDENT_PREFIXES = [
