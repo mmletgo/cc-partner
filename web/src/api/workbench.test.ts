@@ -43,6 +43,9 @@ const sampleWorktree: WorkbenchWorktree = {
   baseBranch: null,
   path: '/tmp/proj',
   isMain: true,
+  canCollectMerge: false,
+  homeBranch: null,
+  collectibleBranches: [],
   status: {
     branch: 'main',
     changed: 0,

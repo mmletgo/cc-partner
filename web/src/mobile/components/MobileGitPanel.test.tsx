@@ -83,6 +83,9 @@ function createWorktree(): WorkbenchWorktree {
     baseBranch: 'main',
     path: '/tmp/demo-feature',
     isMain: false,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
     status: {
       branch: 'feature/x',
       changed: 1,

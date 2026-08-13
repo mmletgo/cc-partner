@@ -27,6 +27,9 @@ const worktree: WorkbenchWorktree = {
   branch: 'feature/wait',
   baseBranch: 'main',
   isMain: false,
+  canCollectMerge: false,
+  homeBranch: null,
+  collectibleBranches: [],
   createdAt: '2026-08-13T00:00:00.000Z',
   updatedAt: '2026-08-13T00:00:00.000Z',
   status: {

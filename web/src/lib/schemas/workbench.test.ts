@@ -149,6 +149,25 @@ describe('workbench schemas', () => {
     ).toThrow(ContractDecodeError);
   });
 
+  test('worktree missing collect-merge fields still decodes with defaults', () => {
+    const decoded = workbenchWorktreeDecoder.decode(worktree);
+    expect(decoded.canCollectMerge).toBe(false);
+    expect(decoded.homeBranch).toBeNull();
+    expect(decoded.collectibleBranches).toEqual([]);
+  });
+
+  test('worktree decodes collect-merge fields when present', () => {
+    const decoded = workbenchWorktreeDecoder.decode({
+      ...worktree,
+      canCollectMerge: true,
+      homeBranch: 'main',
+      collectibleBranches: ['feature/a', 'fix/b'],
+    });
+    expect(decoded.canCollectMerge).toBe(true);
+    expect(decoded.homeBranch).toBe('main');
+    expect(decoded.collectibleBranches).toEqual(['feature/a', 'fix/b']);
+  });
+
   test('malformed canPush fails', () => {
     expect(() =>
       workbenchWorktreeDecoder.decode({

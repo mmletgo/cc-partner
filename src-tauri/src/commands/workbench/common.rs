@@ -477,6 +477,40 @@ pub(crate) fn worktree_to_dto(row: &WorkbenchWorktreeRow) -> WorkbenchWorktreeDt
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     主工作区 Merge 按钮要在存在可收集本地分支时点亮；资格需要 sibling worktree
+///     占用信息，不能塞进 git status 解析。
+///
+/// Code Logic（这个函数做什么）:
+///     对每个 `is_main` DTO 探测 home、占用分支和可收集分支；成功则写入
+///     `can_collect_merge` / `home_branch` / `collectible_branches`。
+///     任一探测失败保留默认值，不让整个 list/get 失败。功能 worktree 保持默认。
+pub(crate) fn apply_collect_merge_eligibility(dtos: &mut [WorkbenchWorktreeDto]) {
+    for dto in dtos.iter_mut() {
+        if !dto.is_main {
+            continue;
+        }
+        let path = Path::new(&dto.path);
+        let Ok(home) = workbench_git::detect_home_branch(path) else {
+            continue;
+        };
+        let Ok(repo_root) = workbench_git::repo_root(path) else {
+            continue;
+        };
+        let Ok(occupied) = workbench_git::occupied_worktree_branches(Path::new(&repo_root), path)
+        else {
+            continue;
+        };
+        let Ok(collectible) = workbench_git::list_collectible_branches(path, &home, &occupied)
+        else {
+            continue;
+        };
+        dto.home_branch = Some(home);
+        dto.collectible_branches = collectible.into_iter().map(|item| item.name).collect();
+        dto.can_collect_merge = !dto.collectible_branches.is_empty();
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     会话和文件树命令需要把可选 worktree_id 解析成真实磁盘根路径。
 ///
 /// Code Logic（这个函数做什么）:

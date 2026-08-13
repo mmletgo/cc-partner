@@ -124,6 +124,8 @@ export interface WorkbenchGitStatus {
  *
  * Code Logic（字段说明）:
  *   path 是该 worktree 的绝对路径；status 是运行期 Git 状态，不代表落库字段。
+ *   canCollectMerge / homeBranch / collectibleBranches 由 list/get 命令层注入：
+ *   仅主工作区在存在可收集本地分支时为 true；旧后端缺字段时 decoder 回落默认值。
  */
 export interface WorkbenchWorktree {
   id: string;
@@ -133,6 +135,9 @@ export interface WorkbenchWorktree {
   baseBranch: string | null;
   path: string;
   isMain: boolean;
+  canCollectMerge: boolean;
+  homeBranch: string | null;
+  collectibleBranches: string[];
   status: WorkbenchGitStatus;
   createdAt: string;
   updatedAt: string;

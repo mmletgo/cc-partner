@@ -89,6 +89,9 @@ function createWorktree(id: string, isMain: boolean): WorkbenchWorktree {
     baseBranch: isMain ? null : 'main',
     path: `/repo/${id}`,
     isMain,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
     status: {
       branch: isMain ? 'main' : id,
       changed: 0,

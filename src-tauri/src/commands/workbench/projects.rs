@@ -467,7 +467,8 @@ pub async fn touch_workbench_project(
 ///     Workbench 顶部需要用 worktree 管理层替代项目路径说明，让用户在主工作区和功能 worktree 间切换。
 ///
 /// Code Logic（这个函数做什么）:
-///     确保主 worktree 存在，同步 Git 已有 worktree 到 SQLite，再注入实时 Git 状态 DTO。
+///     确保主 worktree 存在，同步 Git 已有 worktree 到 SQLite，再注入实时 Git 状态
+///     与主工作区 collect-merge 资格。
 pub(crate) async fn local_list_workbench_worktrees(
     state: &AppState,
     project_id: String,
@@ -490,7 +491,9 @@ pub(crate) async fn local_list_workbench_worktrees(
             "agent_hub refresh_checkout_bindings after list worktrees failed"
         );
     }
-    Ok(rows.iter().map(worktree_to_dto).collect())
+    let mut dtos: Vec<WorkbenchWorktreeDto> = rows.iter().map(worktree_to_dto).collect();
+    apply_collect_merge_eligibility(&mut dtos);
+    Ok(dtos)
 }
 
 /// 获取单个本机 Git worktree。
@@ -499,7 +502,8 @@ pub(crate) async fn local_list_workbench_worktrees(
 ///     远端 HTTP 网关需要通过 worktreeId 读取本机 worktree 所属 projectId，供调用方恢复 remote shortcut 映射。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 worktree repo 读取 row，缺失返回 NotFound；存在则注入实时 Git 状态并转为 DTO。
+///     从 worktree repo 读取 row，缺失返回 NotFound；存在则注入实时 Git 状态与
+///     collect-merge 资格并转为 DTO。
 pub(crate) async fn local_get_workbench_worktree(
     state: &AppState,
     worktree_id: String,
@@ -510,7 +514,12 @@ pub(crate) async fn local_get_workbench_worktree(
         .get(&worktree_id)
         .await?
         .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
-    Ok(worktree_to_dto(&row))
+    let mut dtos = [worktree_to_dto(&row)];
+    apply_collect_merge_eligibility(&mut dtos);
+    Ok(dtos
+        .into_iter()
+        .next()
+        .expect("1-element collect-merge slice"))
 }
 
 /// 列出项目下的 Git worktree。

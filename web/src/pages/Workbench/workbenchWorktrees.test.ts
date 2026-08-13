@@ -48,6 +48,9 @@ const mainWorktree: WorkbenchWorktree = {
   baseBranch: null,
   path: '/repo',
   isMain: true,
+  canCollectMerge: false,
+  homeBranch: null,
+  collectibleBranches: [],
   status: {
     branch: 'main',
     changed: 0,
@@ -164,7 +167,13 @@ function testGitHistoryActionAvailability(): void {
     throw new Error('expected non-main worktree to allow merge');
   }
   if (canMergeWorktree(mainWorktree, null)) {
-    throw new Error('expected main worktree to block merge');
+    throw new Error('expected main worktree without collectible branches to block merge');
+  }
+  if (!canMergeWorktree({ ...mainWorktree, canCollectMerge: true }, null)) {
+    throw new Error('expected main worktree with collectible branches to allow collect-merge');
+  }
+  if (canMergeWorktree({ ...mainWorktree, canCollectMerge: true }, 'merge')) {
+    throw new Error('expected busy main worktree to block collect-merge');
   }
   if (!canMergeWorktree({ ...feature, status: { ...feature.status, changed: 1, clean: false } }, null)) {
     throw new Error('expected dirty snapshot to still allow merge click for backend validation');

@@ -144,6 +144,9 @@ function buildWorktree(overrides: Partial<WorkbenchWorktree> = {}): WorkbenchWor
     baseBranch: null,
     path: '/Users/demo/project',
     isMain: true,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
     status: {
       branch: 'main',
       changed: 0,
