@@ -1039,14 +1039,39 @@ describe('useInstructionThreePaneController', () => {
   });
 
   test('confirmAiRevise on adapted lane sends all variants and replaces them', async () => {
-    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    const initialWorkspace = workspaceFixture();
+    const revisedWorkspace = workspaceFixture({
+      inventorySnapshotHash: 'inventory-2',
+      canonical: {
+        ...initialWorkspace.canonical!,
+        headRevisionId: 'rev-2',
+        blocks: [
+          {
+            id: 'slot-adapted',
+            mode: 'adapted',
+            commonMarkdown: '',
+            variants: { claude: 'c2', codex: 'x2', opencode: 'o2' },
+            headingPath: null,
+            sourceTarget: null,
+            needsAdaptation: false,
+          },
+        ],
+      },
+    });
+    apiMocks.inspectUserInstructionWorkspace
+      .mockResolvedValueOnce(initialWorkspace)
+      .mockResolvedValueOnce(revisedWorkspace);
     apiMocks.reviseInstructionSlot.mockResolvedValue({
       variants: { claude: 'c2', codex: 'x2', opencode: 'o2' },
     });
-    apiMocks.saveUserInstructionBlocks.mockResolvedValue(workspaceFixture().canonical);
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue(revisedWorkspace.canonical);
+    const adaptedContext: AgentHubContext = {
+      ...baseContext,
+      instructionLane: 'adapted',
+    };
     const { result } = renderHook(() =>
       useInstructionThreePaneController({
-        context: { ...baseContext, instructionLane: 'adapted' },
+        context: adaptedContext,
         t,
       }),
     );
@@ -1066,5 +1091,17 @@ describe('useInstructionThreePaneController', () => {
       }),
     );
     expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledTimes(1);
+    expect(
+      result.current.state.blocks.find((block) => block.mode === 'adapted')?.variants,
+    ).toEqual({ claude: 'c2', codex: 'x2', opencode: 'o2' });
+    expect(result.current.actionError).toBeNull();
+    await waitFor(() => {
+      expect(result.current.aiReviseFeedback).toEqual({
+        currentSlotChanged: true,
+        otherAdaptedSlotsChanged: true,
+        selection: { start: 0, end: 2 },
+      });
+    });
+    expect(result.current.state.blocksDirty).toBe(false);
   });
 });

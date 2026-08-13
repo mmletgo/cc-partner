@@ -145,6 +145,13 @@ export function AgentHubView(props: AgentHubViewProps) {
         'agentHub:instructions.threePane.aiReviseDirectionPlaceholder',
       ),
       aiReviseConfirm: t('agentHub:instructions.threePane.aiReviseConfirm'),
+      aiReviseSavedAndLocated: t(
+        'agentHub:instructions.threePane.aiReviseSavedAndLocated',
+      ),
+      aiReviseSavedOtherAgents: t(
+        'agentHub:instructions.threePane.aiReviseSavedOtherAgents',
+      ),
+      aiReviseSavedNoChange: t('agentHub:instructions.threePane.aiReviseSavedNoChange'),
       adaptToOtherAgents: t('agentHub:instructions.threePane.adaptToOtherAgents'),
       syncToNative: t('agentHub:instructions.threePane.syncToNative'),
       unsavedDraft: t('agentHub:instructions.threePane.unsavedDraft'),
@@ -375,6 +382,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             aiReviseOpen={instructionThreePane.aiReviseOpen}
             aiReviseDirection={instructionThreePane.aiReviseDirection}
             aiReviseError={instructionThreePane.aiReviseError}
+            aiReviseFeedback={instructionThreePane.aiReviseFeedback}
             aiReviseDisabled={instructionThreePane.aiReviseDisabled}
             onAnalyzeDecompose={instructionThreePane.analyzeDecompose}
             onAdaptToOtherAgents={() => {

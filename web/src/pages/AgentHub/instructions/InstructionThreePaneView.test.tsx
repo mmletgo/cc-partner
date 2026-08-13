@@ -66,6 +66,9 @@ const labels: InstructionThreePaneViewLabels = {
   aiReviseDirectionLabel: 'Direction',
   aiReviseDirectionPlaceholder: 'Type a direction',
   aiReviseConfirm: 'Revise and save',
+  aiReviseSavedAndLocated: 'Saved and located the first change',
+  aiReviseSavedOtherAgents: 'Saved changes for other agents',
+  aiReviseSavedNoChange: 'Saved with no content change',
   adaptToOtherAgents: 'Adapt to other agents',
   syncToNative: 'Write to native file',
   unsavedDraft: 'Unsaved slot draft',
@@ -115,6 +118,7 @@ function buildProps(
     aiReviseOpen: false,
     aiReviseDirection: '',
     aiReviseError: null,
+    aiReviseFeedback: null,
     aiReviseDisabled: false,
     onAnalyzeDecompose: vi.fn(),
     onAdaptToOtherAgents: vi.fn(),
@@ -240,6 +244,55 @@ describe('InstructionThreePaneView', () => {
     expect(onSlotTextChange).toHaveBeenCalledWith('codex next');
     fireEvent.click(screen.getByTestId('instruction-adapt-to-other-agents'));
     expect(onAdaptToOtherAgents).toHaveBeenCalledOnce();
+  });
+
+  test('AI revise success focuses and selects the current adapted-slot change', () => {
+    render(
+      <InstructionThreePaneView
+        {...buildProps({
+          instructionLane: 'adapted',
+          state: stateWithSlots(),
+          aiReviseFeedback: {
+            currentSlotChanged: true,
+            otherAdaptedSlotsChanged: true,
+            selection: { start: 7, end: 14 },
+          },
+        })}
+      />,
+    );
+
+    const textarea = screen.getByTestId(
+      'instruction-adapted-textarea',
+    ) as HTMLTextAreaElement;
+    expect(screen.getByTestId('instruction-ai-revise-success').textContent).toContain(
+      'Saved and located the first change',
+    );
+    expect(document.activeElement).toBe(textarea);
+    expect(textarea.selectionStart).toBe(7);
+    expect(textarea.selectionEnd).toBe(14);
+  });
+
+  test('AI revise success explains other-agent-only changes without stealing focus', () => {
+    render(
+      <InstructionThreePaneView
+        {...buildProps({
+          instructionLane: 'adapted',
+          state: stateWithSlots(),
+          aiReviseFeedback: {
+            currentSlotChanged: false,
+            otherAdaptedSlotsChanged: true,
+            selection: null,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId('instruction-ai-revise-success').textContent).toContain(
+      'Saved changes for other agents',
+    );
+    expect(document.activeElement).not.toBe(
+      screen.getByTestId('instruction-adapted-textarea'),
+    );
   });
 
   test('exclusive lane keeps three panes, write-to-native, and analyze-decompose on original column', () => {

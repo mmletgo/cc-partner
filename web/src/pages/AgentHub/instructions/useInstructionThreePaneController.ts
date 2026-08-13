@@ -36,15 +36,18 @@ import {
   dtoToDraft,
   draftToDto,
   ensureModeBlock,
+  findInstructionTextChangeRange,
   findBlockByMode,
   hydrateBlocksFromOriginal,
   initialThreePaneFromDisk,
   joinBlocksForTarget,
   normalizeInstructionBlocks,
+  resolveInstructionSlotText,
   resolveAdaptedSlotText,
   updateBlock,
   updateOriginalText,
   type InstructionBlockDraft,
+  type InstructionAiReviseFeedback,
   type InstructionBusyAction,
   type InstructionThreePaneState,
   type SyncBaseline,
@@ -110,6 +113,7 @@ export interface UseInstructionThreePaneControllerResult {
   aiReviseOpen: boolean;
   aiReviseDirection: string;
   aiReviseError: string | null;
+  aiReviseFeedback: InstructionAiReviseFeedback | null;
   aiReviseDisabled: boolean;
   openAiRevise: () => void;
   setAiReviseDirection: (value: string) => void;
@@ -307,6 +311,8 @@ export function useInstructionThreePaneController(
   const [aiReviseOpen, setAiReviseOpen] = useState(false);
   const [aiReviseDirection, setAiReviseDirection] = useState('');
   const [aiReviseError, setAiReviseError] = useState<string | null>(null);
+  const [aiReviseFeedback, setAiReviseFeedback] =
+    useState<InstructionAiReviseFeedback | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [plan, setPlan] = useState<UserInstructionPlanDto | null>(null);
   const [applyResult, setApplyResult] = useState<UserInstructionApplyResultDto | null>(null);
@@ -378,6 +384,7 @@ export function useInstructionThreePaneController(
     setAiReviseOpen(false);
     setAiReviseDirection('');
     setAiReviseError(null);
+    setAiReviseFeedback(null);
     setActionError(null);
     setError(null);
   }, []);
@@ -512,6 +519,7 @@ export function useInstructionThreePaneController(
       setAiReviseOpen(false);
       setAiReviseDirection('');
       setAiReviseError(null);
+      setAiReviseFeedback(null);
       blockedContextKeyRef.current = null;
       const empty = initialThreePaneFromDisk(null, '');
       stateRef.current = empty;
@@ -653,6 +661,7 @@ export function useInstructionThreePaneController(
       setPlan(null);
       setPreviewOpen(false);
       setApplyResult(null);
+      setAiReviseFeedback(null);
       setState((current) => {
         const next = updater(current);
         stateRef.current = next;
@@ -1064,6 +1073,7 @@ export function useInstructionThreePaneController(
   const openAiRevise = useCallback(() => {
     if (busyAction !== null || aiReviseDisabled) return;
     setAiReviseError(null);
+    setAiReviseFeedback(null);
     setAiReviseDirection('');
     setAiReviseOpen(true);
   }, [aiReviseDisabled, busyAction]);
@@ -1087,6 +1097,7 @@ export function useInstructionThreePaneController(
     if (busyAction !== null || aiReviseDisabled) return;
     const current = stateRef.current;
     const lane = instructionLane;
+    const previousSlotText = resolveInstructionSlotText(current, lane, agent);
     const generation = contextGenerationRef.current;
     const actionSeq = ++actionSeqRef.current;
     setBusyAction('revise');
@@ -1117,6 +1128,16 @@ export function useInstructionThreePaneController(
         return;
       }
       const next = applyInstructionReviseResult(stateRef.current, lane, agent, result);
+      const nextSlotText = resolveInstructionSlotText(next, lane, agent);
+      const selection = findInstructionTextChangeRange(previousSlotText, nextSlotText);
+      const otherAdaptedSlotsChanged =
+        lane === 'adapted' &&
+        ALL_INSTRUCTION_TARGETS.some(
+          (target) =>
+            target !== agent &&
+            resolveInstructionSlotText(current, lane, target) !==
+              resolveInstructionSlotText(next, lane, target),
+        );
       updateDraft(() => next);
       setAiReviseOpen(false);
       setAiReviseDirection('');
@@ -1129,6 +1150,12 @@ export function useInstructionThreePaneController(
       }
       if (!saved) {
         setActionError(t('agentHub:instructions.threePane.errors.reviseSaveFailed'));
+      } else {
+        setAiReviseFeedback({
+          currentSlotChanged: selection !== null,
+          otherAdaptedSlotsChanged,
+          selection,
+        });
       }
     } catch (reason) {
       if (
@@ -1394,6 +1421,7 @@ export function useInstructionThreePaneController(
     aiReviseOpen,
     aiReviseDirection,
     aiReviseError,
+    aiReviseFeedback,
     aiReviseDisabled,
     openAiRevise,
     setAiReviseDirection,

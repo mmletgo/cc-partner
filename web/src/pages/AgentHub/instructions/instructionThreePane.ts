@@ -43,6 +43,19 @@ export interface InstructionThreePaneState {
   sourceDrift: boolean;
 }
 
+/** AI 改写后用于聚焦 textarea 的 UTF-16 选区（与 DOM selection API 同口径）。 */
+export interface InstructionTextChangeRange {
+  start: number;
+  end: number;
+}
+
+/** AI 改写成功后的可见反馈与当前槽定位请求。 */
+export interface InstructionAiReviseFeedback {
+  currentSlotChanged: boolean;
+  otherAdaptedSlotsChanged: boolean;
+  selection: InstructionTextChangeRange | null;
+}
+
 /** 同步写入选用的内容基线。 */
 export type SyncBaseline = 'blocks' | 'original';
 
@@ -675,7 +688,7 @@ export function appendAdaptedVariants(
   variants: Partial<Record<AgentTarget, string>>,
   previewAgent: AgentTarget,
 ): InstructionThreePaneState {
-  let next = ensureModeBlock(state, 'adapted', previewAgent);
+  const next = ensureModeBlock(state, 'adapted', previewAgent);
   const adapted = findBlockByMode(next.blocks, 'adapted');
   if (!adapted) return next;
 
@@ -710,7 +723,7 @@ export function replaceAdaptedVariants(
   variants: Partial<Record<AgentTarget, string>>,
   previewAgent: AgentTarget,
 ): InstructionThreePaneState {
-  let next = ensureModeBlock(state, 'adapted', previewAgent);
+  const next = ensureModeBlock(state, 'adapted', previewAgent);
   const adapted = findBlockByMode(next.blocks, 'adapted');
   if (!adapted) return next;
 
@@ -772,6 +785,63 @@ export function applyInstructionReviseResult(
     },
     agent,
   );
+}
+
+/**
+ * Business Logic: AI 保存完成后，页面需要定位当前可见槽的首处变化，避免长正文看起来没有更新。
+ * Code Logic: 按 lane 读取 shared common、当前 Agent adapted variant 或 targetOnly variant。
+ */
+export function resolveInstructionSlotText(
+  state: InstructionThreePaneState,
+  lane: 'common' | 'adapted' | 'exclusive',
+  agent: AgentTarget,
+): string {
+  if (lane === 'common') {
+    return findBlockByMode(state.blocks, 'shared')?.commonMarkdown ?? '';
+  }
+  if (lane === 'adapted') {
+    return resolveAdaptedSlotText(findBlockByMode(state.blocks, 'adapted'), agent);
+  }
+  return findBlockByMode(state.blocks, 'targetOnly')?.variants[agent] ?? '';
+}
+
+/**
+ * Business Logic: AI 改写可能只改长提示词中段；成功后应选中最小变化区间供用户立即核对。
+ * Code Logic: 去掉共同前缀与不重叠的共同后缀，返回新正文中的 UTF-16 选区；
+ *   纯删除返回删除点的折叠选区，完全相同返回 null。
+ */
+export function findInstructionTextChangeRange(
+  previous: string,
+  next: string,
+): InstructionTextChangeRange | null {
+  if (previous === next) return null;
+
+  const previousPoints = Array.from(previous);
+  const nextPoints = Array.from(next);
+  let prefixPoints = 0;
+  const sharedLength = Math.min(previousPoints.length, nextPoints.length);
+  while (
+    prefixPoints < sharedLength &&
+    previousPoints[prefixPoints] === nextPoints[prefixPoints]
+  ) {
+    prefixPoints += 1;
+  }
+
+  let previousEnd = previousPoints.length;
+  let nextEnd = nextPoints.length;
+  while (
+    previousEnd > prefixPoints &&
+    nextEnd > prefixPoints &&
+    previousPoints[previousEnd - 1] === nextPoints[nextEnd - 1]
+  ) {
+    previousEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  return {
+    start: nextPoints.slice(0, prefixPoints).join('').length,
+    end: nextPoints.slice(0, nextEnd).join('').length,
+  };
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   addBlock,
   appendAdaptedVariants,
   applyInstructionReviseResult,
+  findInstructionTextChangeRange,
   replaceAdaptedVariants,
   replaceAnalyzedParts,
   dtoToDraft,
@@ -365,13 +366,34 @@ describe('applyInstructionReviseResult', () => {
   });
 
   test('exclusive lane only writes the current agent variant', () => {
-    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    const state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
     const next = applyInstructionReviseResult(state, 'exclusive', AGENT, {
       exclusive: 'revised exclusive',
       common: 'should ignore',
     });
     expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe('revised exclusive');
     expect(findBlockByMode(next.blocks, 'shared')).toBeNull();
+  });
+});
+
+describe('findInstructionTextChangeRange', () => {
+  test('selects the minimal changed range in the revised text', () => {
+    expect(findInstructionTextChangeRange('before OLD after', 'before NEW after')).toEqual({
+      start: 7,
+      end: 10,
+    });
+  });
+
+  test('returns a collapsed selection for deletion and null for equal text', () => {
+    expect(findInstructionTextChangeRange('before remove after', 'before  after')).toEqual({
+      start: 7,
+      end: 7,
+    });
+    expect(findInstructionTextChangeRange('same', 'same')).toBeNull();
+  });
+
+  test('keeps DOM UTF-16 selection boundaries around complete emoji code points', () => {
+    expect(findInstructionTextChangeRange('A😀Z', 'A😎Z')).toEqual({ start: 1, end: 3 });
   });
 });
 

@@ -10,7 +10,7 @@
  *   只消费 labels/state/callbacks；禁止 @/api；hooks 不在本视图。
  */
 
-import type { JSX } from 'react';
+import { useEffect, useRef, type JSX, type RefObject } from 'react';
 import { Button, Dialog, StatusMessage } from '@/components/primitives';
 import { SparkleIcon } from '@/lib/icons';
 import type { AgentTarget } from '@/lib/types/agentHub';
@@ -19,6 +19,7 @@ import { AiReviseInstructionDialog } from './AiReviseInstructionDialog';
 import {
   findBlockByMode,
   resolveAdaptedSlotText,
+  type InstructionAiReviseFeedback,
   type InstructionBusyAction,
   type InstructionThreePaneState,
 } from './instructionThreePane';
@@ -59,6 +60,9 @@ export interface InstructionThreePaneViewLabels {
   aiReviseDirectionLabel: string;
   aiReviseDirectionPlaceholder: string;
   aiReviseConfirm: string;
+  aiReviseSavedAndLocated: string;
+  aiReviseSavedOtherAgents: string;
+  aiReviseSavedNoChange: string;
   /** 适配页：把当前 agent 适配内容改写到其他 agent。 */
   adaptToOtherAgents: string;
   /**
@@ -100,6 +104,7 @@ export interface InstructionThreePaneViewProps {
   aiReviseOpen: boolean;
   aiReviseDirection: string;
   aiReviseError: string | null;
+  aiReviseFeedback: InstructionAiReviseFeedback | null;
   /** Canonical 漂移/截断/非本机时禁用，不看原生写入门禁。 */
   aiReviseDisabled: boolean;
   onAnalyzeDecompose: () => void;
@@ -154,6 +159,7 @@ function InstructionChrome(props: {
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   actionError: string | null;
+  aiReviseFeedback: InstructionAiReviseFeedback | null;
   refreshError: string | null;
   dualDirtyOpen: boolean;
   showPath: boolean;
@@ -177,6 +183,7 @@ function InstructionChrome(props: {
     writeBlocked,
     writeBlockedReason,
     actionError,
+    aiReviseFeedback,
     refreshError,
     dualDirtyOpen,
     showPath,
@@ -318,6 +325,16 @@ function InstructionChrome(props: {
         </StatusMessage>
       ) : null}
 
+      {aiReviseFeedback ? (
+        <StatusMessage tone="success" data-testid="instruction-ai-revise-success">
+          {aiReviseFeedback.currentSlotChanged
+            ? labels.aiReviseSavedAndLocated
+            : aiReviseFeedback.otherAdaptedSlotsChanged
+              ? labels.aiReviseSavedOtherAgents
+              : labels.aiReviseSavedNoChange}
+        </StatusMessage>
+      ) : null}
+
       {dualDirtyOpen ? (
         <div className={styles.dualDirty} data-testid="instruction-dual-dirty">
           <h3 className={styles.dualDirtyTitle}>{labels.dualDirtyTitle}</h3>
@@ -361,9 +378,10 @@ function InstructionChrome(props: {
 function CommonLanePanes(props: {
   labels: InstructionThreePaneViewLabels;
   slotText: string;
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
   onSlotTextChange: (text: string) => void;
 }): JSX.Element {
-  const { labels, slotText, onSlotTextChange } = props;
+  const { labels, slotText, textareaRef, onSlotTextChange } = props;
   return (
     <div
       className={`${styles.panes} ${styles.panesSingle}`}
@@ -380,6 +398,7 @@ function CommonLanePanes(props: {
             {labels.slotCommonHint}
           </p>
           <textarea
+            ref={textareaRef}
             className={styles.blockBodyInput}
             value={slotText}
             placeholder={labels.blockBodyPlaceholder}
@@ -400,9 +419,10 @@ function CommonLanePanes(props: {
 function AdaptedLanePanes(props: {
   labels: InstructionThreePaneViewLabels;
   slotText: string;
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
   onSlotTextChange: (text: string) => void;
 }): JSX.Element {
-  const { labels, slotText, onSlotTextChange } = props;
+  const { labels, slotText, textareaRef, onSlotTextChange } = props;
   return (
     <div
       className={`${styles.panes} ${styles.panesSingle}`}
@@ -419,6 +439,7 @@ function AdaptedLanePanes(props: {
             {labels.slotAdaptedHint}
           </p>
           <textarea
+            ref={textareaRef}
             className={styles.blockBodyInput}
             value={slotText}
             placeholder={labels.blockBodyPlaceholder}
@@ -440,6 +461,7 @@ function ExclusiveLanePanes(props: {
   labels: InstructionThreePaneViewLabels;
   state: InstructionThreePaneState;
   slotText: string;
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
   onSlotTextChange: (text: string) => void;
   onAnalyzeDecompose: () => void;
   analyzeDisabled: boolean;
@@ -449,6 +471,7 @@ function ExclusiveLanePanes(props: {
     labels,
     state,
     slotText,
+    textareaRef,
     onSlotTextChange,
     onAnalyzeDecompose,
     analyzeDisabled,
@@ -471,6 +494,7 @@ function ExclusiveLanePanes(props: {
             {labels.slotExclusiveHint}
           </p>
           <textarea
+            ref={textareaRef}
             className={styles.blockBodyInput}
             value={slotText}
             placeholder={labels.blockBodyPlaceholder}
@@ -555,6 +579,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     aiReviseOpen,
     aiReviseDirection,
     aiReviseError,
+    aiReviseFeedback,
     aiReviseDisabled,
     onAnalyzeDecompose,
     onAdaptToOtherAgents,
@@ -572,6 +597,19 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     onConfirmAnalyze,
     onCancelAnalyze,
   } = props;
+  const slotTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  /**
+   * Business Logic: AI 保存成功后直接把用户带到当前可见槽的首处变化，长提示词无需人工寻找。
+   * Code Logic: controller 提供 DOM UTF-16 选区；聚焦 textarea 后设置选区，浏览器负责滚动到光标。
+   */
+  useEffect(() => {
+    const selection = aiReviseFeedback?.selection;
+    const textarea = slotTextareaRef.current;
+    if (!selection || !textarea) return;
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(selection.start, selection.end, 'forward');
+  }, [aiReviseFeedback]);
 
   if (loading && !state.originalText && state.blocks.length === 0 && !error) {
     return (
@@ -620,6 +658,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         writeBlocked={writeBlocked}
         writeBlockedReason={writeBlockedReason}
         actionError={actionError}
+        aiReviseFeedback={aiReviseFeedback}
         refreshError={error}
         dualDirtyOpen={dualDirtyOpen}
         showPath={showPath}
@@ -646,6 +685,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         <CommonLanePanes
           labels={labels}
           slotText={commonSlotText}
+          textareaRef={slotTextareaRef}
           onSlotTextChange={onSlotTextChange}
         />
       ) : null}
@@ -654,6 +694,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         <AdaptedLanePanes
           labels={labels}
           slotText={adaptedSlotText}
+          textareaRef={slotTextareaRef}
           onSlotTextChange={onSlotTextChange}
         />
       ) : null}
@@ -663,6 +704,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           labels={labels}
           state={state}
           slotText={exclusiveSlotText}
+          textareaRef={slotTextareaRef}
           onSlotTextChange={onSlotTextChange}
           onAnalyzeDecompose={onAnalyzeDecompose}
           analyzeLoading={busyAction === 'analyze'}
