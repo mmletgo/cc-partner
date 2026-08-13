@@ -17,6 +17,7 @@ import {
   promptOptimizerSettingsFormToUpdate,
   mergeActivityStatsSlice,
   mergeHealthReminderSlice,
+  resetHealthReminderDefaults,
   resolveSettingsTabId,
   settingsStateFromConfig,
   shouldPollUpdateStatus,
@@ -261,14 +262,18 @@ function testHealthConfigToFormConfig(): void {
     waterEnabled: false,
     waterIntervalSeconds: 1800,
     reminderFullscreen: false,
+    reminders: [],
   };
   const form = healthConfigToForm(cfg);
-  assertDeepEqual(form, {
-    ...cfg,
-    waterEnabled: true,
-    reminderFullscreen: true,
-  });
+  if (form.reminders.length !== 3) {
+    throw new Error(`expected seeded 3 reminders, got ${form.reminders.length}`);
+  }
+  assertDeepEqual(form.waterEnabled, true);
+  assertDeepEqual(form.reminderFullscreen, true);
+  assertDeepEqual(form.workWindowSeconds, 120);
+  assertDeepEqual(form.waterIntervalSeconds, 1800);
   assertNotSameRef(form, cfg);
+  assertNotSameRef(form.reminders, PENDING_HEALTH_FORM.reminders);
 }
 
 
@@ -313,6 +318,7 @@ describe('settings tab deep link helpers', () => {
       waterEnabled: true,
       waterIntervalSeconds: 60 * 60,
       reminderFullscreen: true,
+      reminders: PENDING_HEALTH_FORM.reminders,
     };
     const reminderDraft: HealthForm = {
       ...applied,
@@ -335,6 +341,26 @@ describe('settings tab deep link helpers', () => {
     assertDeepEqual(activityPayload.recordWindowTitle, false);
     assertDeepEqual(activityPayload.retainDays, 14);
     assertDeepEqual(activityPayload.workWindowSeconds, 45 * 60);
+    assertDeepEqual(activityPayload.reminders.length, applied.reminders.length);
+  });
+
+  test('resetHealthReminderDefaults restores builtins and keeps custom templates', () => {
+    const custom = {
+      ...PENDING_HEALTH_FORM.reminders[0],
+      id: 'custom-1',
+      builtin: false,
+      name: '伸展',
+    };
+    const draft: HealthForm = {
+      ...PENDING_HEALTH_FORM,
+      reminders: PENDING_HEALTH_FORM.reminders.map((item) =>
+        item.id === 'water' ? { ...item, intervalSeconds: 1800 } : item,
+      ).concat(custom),
+    };
+    const reset = resetHealthReminderDefaults(PENDING_HEALTH_FORM, draft, PENDING_HEALTH_FORM);
+    assertDeepEqual(reset.reminders.find((item) => item.id === 'water')?.intervalSeconds, 3600);
+    assertDeepEqual(reset.reminders.find((item) => item.id === 'custom-1')?.name, '伸展');
+    assertDeepEqual(reset.reminders.length, 4);
   });
 });
 

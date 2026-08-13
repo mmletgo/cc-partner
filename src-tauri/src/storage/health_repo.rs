@@ -412,6 +412,153 @@ impl HealthRepo {
         .await
     }
 
+    /// 写入一条模板习惯事件（triggered / completed）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     自定义与内置模板都要按 template_id 聚合次数/时长，不能再只写死饮水/休息两张表。
+    /// Code Logic（这个函数做什么）:
+    ///     INSERT habit_records 返回自增 id。
+    pub async fn insert_habit_record(
+        &self,
+        template_id: &str,
+        ts: i64,
+        kind: &str,
+        duration_seconds: i64,
+    ) -> Result<i64, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let row: (i64,) = sqlx::query_as(
+                "INSERT INTO habit_records (template_id, ts, kind, duration_seconds) \
+                 VALUES (?, ?, ?, ?) RETURNING id",
+            )
+            .bind(template_id)
+            .bind(ts)
+            .bind(kind)
+            .bind(duration_seconds)
+            .fetch_one(&self.db)
+            .await?;
+            Ok(row.0)
+        })
+        .await
+    }
+
+    /// 统计某模板自 since 起某 kind 的次数。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     习惯卡按模板展示今日完成/触发次数。
+    /// Code Logic（这个函数做什么）:
+    ///     COUNT habit_records WHERE template_id+kind+ts>=since。
+    pub async fn count_habit_since(
+        &self,
+        template_id: &str,
+        since_ts: i64,
+        kind: &str,
+    ) -> Result<i64, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM habit_records WHERE template_id = ? AND ts >= ? AND kind = ?",
+        )
+        .bind(template_id)
+        .bind(since_ts)
+        .bind(kind)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// 累加某模板自 since 起 completed 时长。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     session 模板需要展示今日累计倒计时秒数。
+    /// Code Logic（这个函数做什么）:
+    ///     SUM duration_seconds WHERE completed。
+    pub async fn sum_habit_duration_since(
+        &self,
+        template_id: &str,
+        since_ts: i64,
+    ) -> Result<i64, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(duration_seconds), 0) FROM habit_records \
+             WHERE template_id = ? AND ts >= ? AND kind = 'completed'",
+        )
+        .bind(template_id)
+        .bind(since_ts)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// 近 N 日某模板 completed 次数分桶。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     sparkline 按模板画近 7 日完成次数。
+    /// Code Logic（这个函数做什么）:
+    ///     取 ts 后按 (ts-since)/86400 分桶，长度恒为 days。
+    pub async fn get_daily_habit_counts(
+        &self,
+        template_id: &str,
+        since_ts: i64,
+        days: usize,
+        kind: &str,
+    ) -> Result<Vec<i64>, AppError> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT ts FROM habit_records WHERE template_id = ? AND ts >= ? AND kind = ? ORDER BY ts ASC",
+        )
+        .bind(template_id)
+        .bind(since_ts)
+        .bind(kind)
+        .fetch_all(&self.db)
+        .await?;
+        let mut buckets = vec![0i64; days];
+        let span = (days as i64) * 86400;
+        for (ts,) in rows {
+            if ts < since_ts || ts >= since_ts + span {
+                continue;
+            }
+            let idx = ((ts - since_ts) / 86400) as usize;
+            if idx < days {
+                buckets[idx] += 1;
+            }
+        }
+        Ok(buckets)
+    }
+
+    /// 最近一次某模板 completed 时间戳。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     interval 模板要算距下次还差多久。
+    /// Code Logic（这个函数做什么）:
+    ///     MAX(ts) WHERE completed。
+    pub async fn get_last_habit_ts(
+        &self,
+        template_id: &str,
+        kind: &str,
+    ) -> Result<Option<i64>, AppError> {
+        let row: (Option<i64>,) = sqlx::query_as(
+            "SELECT MAX(ts) FROM habit_records WHERE template_id = ? AND kind = ?",
+        )
+        .bind(template_id)
+        .bind(kind)
+        .fetch_one(&self.db)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// 清理过期习惯事件。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     与活动/饮水/休息共用 retainDays，避免新表无限增长。
+    /// Code Logic（这个函数做什么）:
+    ///     DELETE habit_records WHERE ts < cutoff。
+    pub async fn cleanup_habit_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query("DELETE FROM habit_records WHERE ts < ?")
+                .bind(cutoff_ts)
+                .execute(&self.db)
+                .await?;
+            Ok(result.rows_affected())
+        })
+        .await
+    }
+
     /// Business Logic: 保留 N 天数据,定期清理过期休息记录。
     /// Code Logic: 持 shared write lease 后 DELETE FROM rest_records WHERE ts < cutoff_ts，返回删除行数。
     pub async fn cleanup_rest_older_than(&self, cutoff_ts: i64) -> Result<u64, AppError> {
@@ -447,6 +594,10 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS rest_records (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS habit_records (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool)
             .await
             .unwrap();
@@ -797,5 +948,34 @@ mod tests {
         assert!(app_usage.contains(&("Finder".into(), 2)));
         assert_eq!(app_usage[2], ("Safari".into(), 1));
         assert!(app_usage[0].1 >= app_usage[1].1);
+    }
+
+    #[tokio::test]
+    async fn test_habit_records_count_daily_and_cleanup() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        repo.insert_habit_record("kegel", 100, "triggered", 0)
+            .await
+            .unwrap();
+        repo.insert_habit_record("kegel", 200, "completed", 30)
+            .await
+            .unwrap();
+        repo.insert_habit_record("water", 200, "completed", 0)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_habit_since("kegel", 0, "completed").await.unwrap(), 1);
+        assert_eq!(repo.sum_habit_duration_since("kegel", 0).await.unwrap(), 30);
+        assert_eq!(
+            repo.get_last_habit_ts("kegel", "completed").await.unwrap(),
+            Some(200)
+        );
+        let daily = repo
+            .get_daily_habit_counts("kegel", 0, 7, "completed")
+            .await
+            .unwrap();
+        assert_eq!(daily.len(), 7);
+        assert_eq!(daily[0], 1);
+        assert_eq!(repo.cleanup_habit_older_than(150).await.unwrap(), 1);
+        assert_eq!(repo.count_habit_since("kegel", 0, "triggered").await.unwrap(), 0);
     }
 }

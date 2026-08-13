@@ -10,6 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createDefaultHealthReminders } from '@/lib/healthReminders';
 import type { AppConfig, CloudSyncConfig, GithubTrendingConfig, HealthConfig, VersionInfo } from '@/lib/types';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
 import {
@@ -81,6 +82,7 @@ const health = (partial: Partial<HealthConfig> = {}): HealthConfig => ({
   waterIntervalSeconds: 3600,
   reminderFullscreen: true,
   ...partial,
+  reminders: partial.reminders ?? createDefaultHealthReminders(),
 });
 
 const automation = (

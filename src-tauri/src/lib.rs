@@ -582,6 +582,9 @@ pub fn run() {
             health_cmd::delete_water_record,
             health_cmd::record_rest_completed,
             health_cmd::get_habit_stats,
+            health_cmd::acknowledge_health_reminder,
+            health_cmd::start_health_session,
+            health_cmd::add_habit_manual,
             // 工作台（本机项目 + Claude Code PTY 终端 + 项目文件树）
             workbench_cmd::list_workbench_projects,
             workbench_cmd::get_workbench_launch_summary,

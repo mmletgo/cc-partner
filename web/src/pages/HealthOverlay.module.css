@@ -1,0 +1,51 @@
+.root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--fg) 55%, transparent);
+  color: var(--surface);
+  font-family: var(--font-body);
+}
+
+.card {
+  text-align: center;
+  max-width: 560px;
+  padding: 0 var(--space-6);
+}
+
+.title {
+  margin: 0 0 var(--space-4);
+  font-family: var(--font-display);
+  font-size: var(--text-4xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.body {
+  margin: 0 0 var(--space-8);
+  font-size: var(--text-xl);
+  line-height: var(--leading-relaxed);
+  color: color-mix(in oklab, var(--surface) 92%, transparent);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-4);
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.timer {
+  margin: 0 0 var(--space-6);
+  font-size: var(--text-5xl);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--text-md);
+  color: color-mix(in oklab, var(--surface) 75%, transparent);
+}

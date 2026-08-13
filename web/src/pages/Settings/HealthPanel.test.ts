@@ -9,8 +9,8 @@
  * Code Logic（做什么）:
  *   先注册 css-stub loader(HealthPanel.tsx 经 @/components/primitives 间接 import *.module.css,
  *   tsx 无 CSS loader,需 stub 成空对象);再动态 import HealthPanel 取 timePartsToConfig /
- *   HEALTH_RANGE / isAllDayDnd,验证空值/null 映射、三个 section、四个 select、
- *   00-23 小时选项、健康网格 CSS 覆盖顺序、数字输入 min/max 属性与全天免打扰文案。
+ *   HEALTH_RANGE / isAllDayDnd,验证空值/null 映射、四个 section、免打扰四个 select、
+ *   出厂三项模板、00-23 小时选项、健康网格 CSS 覆盖顺序、数字输入 min/max 属性与全天免打扰文案。
  *   健康监测开启后久坐/喝水/全屏遮罩始终启用,因此不应再渲染喝水启用或全屏遮罩开关。
  */
 
@@ -96,24 +96,36 @@ describe('HealthPanel', () => {
     );
 
     const sectionCount = rendered.match(/<section/g)?.length ?? 0;
-    if (sectionCount !== 3) {
-      throw new Error(`HealthPanel expected 3 settings sections, got ${sectionCount}`);
+    if (sectionCount !== 4) {
+      throw new Error(`HealthPanel expected 4 settings sections, got ${sectionCount}`);
     }
 
-    for (const title of ['健康提醒', '免打扰', '通知与隐私']) {
+    for (const title of ['健康提醒', '提醒模板', '免打扰', '通知与隐私']) {
       if (!rendered.includes(title)) {
         throw new Error(`HealthPanel missing section title: ${title}`);
       }
+    }
+
+    for (const name of ['饮水', '休息', '提肛']) {
+      if (!rendered.includes(name)) {
+        throw new Error(`HealthPanel missing factory reminder: ${name}`);
+      }
+    }
+    if (!rendered.includes('data-testid="health-add-reminder"')) {
+      throw new Error('HealthPanel missing add-reminder button');
     }
 
     if (rendered.includes('提醒方向')) {
       throw new Error('HealthPanel must not render a separate reminder style section');
     }
 
-    const waterIntervalIndex = rendered.indexOf('喝水提醒间隔(分钟)');
+    const templatesIndex = rendered.indexOf('settings-health-templates-title');
     const quietHoursIndex = rendered.indexOf('settings-health-quiet-hours-title');
-    if (waterIntervalIndex === -1 || quietHoursIndex === -1 || waterIntervalIndex > quietHoursIndex) {
-      throw new Error('HealthPanel should render water interval inside the first health reminder section');
+    if (templatesIndex === -1 || quietHoursIndex === -1 || templatesIndex > quietHoursIndex) {
+      throw new Error('HealthPanel should render reminder templates before quiet hours');
+    }
+    if (rendered.includes('喝水提醒间隔(分钟)')) {
+      throw new Error('HealthPanel must not render the legacy top-level water interval field');
     }
 
     if (rendered.includes('全屏遮罩提醒') || rendered.includes('按间隔显示应用内喝水提醒。')) {
@@ -124,15 +136,12 @@ describe('HealthPanel', () => {
       throw new Error('HealthPanel must not render activity-stats privacy fields');
     }
 
-    const selectCount = rendered.match(/<select/g)?.length ?? 0;
-    if (selectCount !== 4) {
-      throw new Error(`HealthPanel expected 4 time picker selects, got ${selectCount}`);
-    }
-
-    const hourSelectCount = rendered.match(/data-part="hour"/g)?.length ?? 0;
-    const minuteSelectCount = rendered.match(/data-part="minute"/g)?.length ?? 0;
-    if (hourSelectCount !== 2 || minuteSelectCount !== 2) {
-      throw new Error(`HealthPanel expected 2 hour selects and 2 minute selects, got ${hourSelectCount}/${minuteSelectCount}`);
+    const hourSelectCountCollapsed = rendered.match(/data-part="hour"/g)?.length ?? 0;
+    const minuteSelectCountCollapsed = rendered.match(/data-part="minute"/g)?.length ?? 0;
+    if (hourSelectCountCollapsed !== 2 || minuteSelectCountCollapsed !== 2) {
+      throw new Error(
+        `HealthPanel expected 2 hour selects and 2 minute selects, got ${hourSelectCountCollapsed}/${minuteSelectCountCollapsed}`,
+      );
     }
 
     if (!rendered.includes('<option value="23">23</option>')) {
@@ -143,10 +152,13 @@ describe('HealthPanel', () => {
       throw new Error('HealthPanel 24-hour picker must not render AM/PM labels');
     }
 
-    for (const attr of ['min="1"', 'max="480"', 'max="120"', 'min="5"', 'max="1440"']) {
+    for (const attr of ['min="1"', 'max="120"']) {
       if (!rendered.includes(attr)) {
         throw new Error(`HealthPanel number inputs missing attribute ${attr}`);
       }
+    }
+    if (rendered.includes('max="480"') || rendered.includes('max="1440"')) {
+      throw new Error('collapsed HealthPanel must not render template interval/threshold inputs');
     }
     if (rendered.includes('max="3650"')) {
       throw new Error('HealthPanel must not render retain-days input after activity split');

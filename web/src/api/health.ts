@@ -2,22 +2,27 @@
  * Health API - 通过 Tauri invoke 调用 Rust 后端健康提醒命令
  *
  * Business Logic（为什么需要这个模块）:
- *   久坐监测 / 工作休息状态机 / 系统通知 + toast + 全屏提醒 / 喝水提醒 /
- *   活动统计图表需要前端读写：开关监测、手动暂停/贪睡/跳过、读取当前状态与
- *   今日活跃统计 + app 排行/小时分布明细、记录喝水、整体配置回写、
- *   近 N 天习惯统计(饮水 + 休息)、手动加计饮水 / 删除饮水记录 / 记录休息完成。
- *   本模块封装这 18 个 invoke 调用，供 Health 页 / toast / 全屏遮罩消费。
+ *   健康监测 / 可配置提醒模板 / 系统通知 / 全屏遮罩 / 活动统计需要前端读写：
+ *   开关监测、按模板确认/跳过/贪睡/开始会话、读取状态与今日统计、整体配置回写、
+ *   近 N 天习惯统计、手动 +1 / 删除饮水记录。
  *
  * Code Logic（这个模块做什么）:
- *   基于 invoke 封装 18 个命令，返回类型化的 Promise，参数字段 camelCase
+ *   基于 invoke 封装命令，返回类型化 Promise，参数字段 camelCase
  *   对齐 Rust #[tauri::command] 签名。
  */
 
 import { invoke } from './client';
 import type { HealthConfig, HealthStatus, ActivityStats, ActivityDetail, HabitStats } from '@/lib/types';
 
+export type HealthReminderAction = 'completed' | 'skipped' | 'snoozed';
+
+export interface HealthSessionStart {
+  endTs: number;
+  templateId: string;
+}
+
 export const healthApi = {
-  /** 读取当前健康提醒状态（相位 / 暂停 / 贪睡到期 / 配置阈值） */
+  /** 读取当前健康提醒状态（相位 / 暂停 / 贪睡到期 / 遮罩队列 / 配置阈值） */
   getStatus: () => invoke<HealthStatus>('get_health_status'),
 
   /** 读取完整健康配置（全部字段，供设置表单初始化，避免 updateConfig 部分字段清零） */
@@ -34,24 +39,54 @@ export const healthApi = {
   togglePaused: (paused: boolean) =>
     invoke<void>('toggle_health_paused', { paused }),
 
-  /** 贪睡提醒 N 分钟 */
+  /** 贪睡 rest 模板 N 分钟（旧命令包装） */
   snooze: (minutes: number) =>
     invoke<void>('snooze_reminder', { minutes }),
 
-  /** 跳过本次提醒（重置状态机回 Idle + 清贪睡） */
+  /** 跳过 rest 模板本次提醒（只处理 rest，不再重置整机） */
   skip: () => invoke<void>('skip_reminder'),
 
-  /** 记录一次喝水（health:water 提醒 toast 的「已喝水」按钮调用） */
+  /** 记录一次喝水（water/completed 包装） */
   recordWater: () => invoke<void>('record_water'),
 
-  /** 跳过本次喝水提醒（重置喝水计时） */
+  /** 跳过本次喝水提醒 */
   skipWater: () => invoke<void>('skip_water_reminder'),
 
   /** 延迟本次喝水提醒 N 分钟 */
   snoozeWater: (minutes: number) =>
     invoke<void>('snooze_water_reminder', { minutes }),
 
-  /** 整体覆盖 config.health（工作窗口/休息/喝水间隔/通知/记录标题/免打扰/保留天数；固定启用字段由后端归一） */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   遮罩与统计卡都按 templateId 确认/跳过/贪睡，不能再写死饮水/休息两套命令。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke acknowledge_health_reminder；snoozed 时带 minutes。
+   */
+  acknowledge: (templateId: string, action: HealthReminderAction, minutes?: number) =>
+    invoke<void>('acknowledge_health_reminder', { templateId, action, minutes }),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   休息/提肛/自定义 session 共用权威倒计时。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke start_health_session，返回 {endTs, templateId}。
+   */
+  startSession: (templateId: string) =>
+    invoke<HealthSessionStart>('start_health_session', { templateId }),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   instant 模板（饮水/自定义打卡）允许手动 +1。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke add_habit_manual。
+   */
+  addHabitManual: (templateId: string) =>
+    invoke<number>('add_habit_manual', { templateId }),
+
+  /** 整体覆盖 config.health（含 reminders；固定启用字段由后端归一） */
   updateConfig: (config: HealthConfig) =>
     invoke<HealthConfig>('update_health_config', { config }),
 
@@ -63,21 +98,21 @@ export const healthApi = {
   getDetail: (sinceTs: number) =>
     invoke<ActivityDetail>('get_activity_detail', { sinceTs }),
 
-  /** 关闭全部健康提醒全屏遮罩窗口(每屏一个透明置顶窗口) */
+  /** 关闭当前健康提醒全屏遮罩(有队列则弹出下一项) */
   closeOverlay: () => invoke<void>('close_health_overlay'),
 
-  /** 启动「开始休息」全屏遮罩倒计时(后端权威 endTs,多屏同步);返回休息结束时间戳 */
-  startRest: () => invoke<{ endTs: number }>('start_health_rest'),
+  /** 启动 rest 模板全屏倒计时(后端权威 endTs,多屏同步) */
+  startRest: () => invoke<HealthSessionStart>('start_health_rest'),
 
-  /** 读取近 N 天习惯统计(饮水 + 休息),供 HabitStatsCard 渲染 */
+  /** 读取近 N 天习惯统计(按模板聚合 + 饮水/休息兼容字段) */
   getHabitStats: (days?: number) => invoke<HabitStats>('get_habit_stats', { days }),
 
-  /** 手动加计一次饮水(HabitStatsCard「+1 杯」按钮) */
+  /** 手动加计一次饮水(HabitStatsCard 饮水 +1) */
   addWaterManual: () => invoke<number>('add_water_manual'),
 
   /** 删除指定 id 的饮水记录(历史记录删除 UI,P1 增量) */
   deleteWaterRecord: (id: number) => invoke<boolean>('delete_water_record', { id }),
 
-  /** 记录一次休息完成(全屏休息遮罩「已完成」按钮) */
+  /** 记录一次休息完成(兼容旧遮罩「已完成」) */
   recordRestCompleted: () => invoke<void>('record_rest_completed'),
 };

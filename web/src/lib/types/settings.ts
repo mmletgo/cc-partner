@@ -251,6 +251,44 @@ export interface InternalClaudeConfig {
   providerId: string | null;
 }
 
+/** 提醒触发方式：久坐阈值或固定间隔。 */
+export type ReminderTrigger = 'sedentary' | 'interval';
+
+/** 提醒完成方式：即时打卡或倒计时会话。 */
+export type ReminderComplete = 'instant' | 'session';
+
+/**
+ * 一条用户可配置的健康提醒模板（对齐后端 HealthReminderTemplate）。
+ */
+export interface HealthReminderTemplate {
+  /** 内置固定为 water/rest/kegel；自定义为稳定 id */
+  id: string;
+  /** 是否出厂内置（内置不可删） */
+  builtin: boolean;
+  /** 是否启用该条提醒 */
+  enabled: boolean;
+  /** 设置列表显示名 */
+  name: string;
+  /** 触发方式 */
+  trigger: ReminderTrigger;
+  /** interval 触发的间隔秒数 */
+  intervalSeconds?: number | null;
+  /** sedentary 触发的本窗口阈值秒数 */
+  thresholdSeconds?: number | null;
+  /** 完成方式 */
+  complete: ReminderComplete;
+  /** session 完成的倒计时秒数 */
+  sessionSeconds?: number | null;
+  /** 遮罩/通知标题 */
+  title: string;
+  /** 遮罩/通知正文 */
+  body: string;
+  /** 主确认按钮文案 */
+  confirmLabel: string;
+  /** 统计单位（杯/次） */
+  unitLabel: string;
+}
+
 /**
  * 健康提醒配置（与后端 config.rs::HealthConfig 对齐，camelCase）。
  * 整体覆盖式回写（update_health_config 接收完整对象）。
@@ -258,7 +296,7 @@ export interface InternalClaudeConfig {
 export interface HealthConfig {
   /** 是否开启久坐监测 */
   enabled: boolean;
-  /** 连续工作多久触发提醒（秒） */
+  /** 连续工作多久触发提醒（秒）；保存时从 rest 模板镜像 */
   workWindowSeconds: number;
   /** 停歇多久判定为休息、关闭工作窗口（秒） */
   breakSeconds: number;
@@ -274,10 +312,12 @@ export interface HealthConfig {
   dndEnd: string | null;
   /** 喝水提醒历史开关；业务上随健康监测固定启用，不再展示独立设置项 */
   waterEnabled: boolean;
-  /** 喝水提醒间隔（秒） */
+  /** 喝水提醒间隔（秒）；保存时从 water 模板镜像 */
   waterIntervalSeconds: number;
   /** 全屏遮罩历史开关；业务上随健康监测固定启用，不再展示独立设置项 */
   reminderFullscreen: boolean;
+  /** 可配置提醒模板（饮水 / 休息 / 提肛 + 自定义） */
+  reminders: HealthReminderTemplate[];
 }
 
 /** 健康提醒运行时状态相位 */
@@ -304,6 +344,10 @@ export interface HealthStatus {
   snoozeUntil: number | null;
   /** 「开始休息」遮罩倒计时结束时间戳（秒），null 表示未在遮罩休息；多屏共享同一权威值 */
   overlayRestEndTs: number | null;
+  /** 当前遮罩模板 id */
+  overlayTemplateId?: string | null;
+  /** 排队中的模板 id（不含当前） */
+  overlayQueue?: string[];
 }
 
 /**
@@ -340,6 +384,22 @@ export interface ActivityDetail {
   hourly: number[];
 }
 
+/** 单条模板的习惯统计，对应 TemplateHabitStatsDto。 */
+export interface TemplateHabitStats {
+  /** 模板 id。 */
+  id: string;
+  /** 今日完成次数。 */
+  todayCompleted: number;
+  /** 今日触发次数。 */
+  todayFired: number;
+  /** 今日完成累计秒数。 */
+  todayDurationSeconds: number;
+  /** 近 N 日每日完成次数。 */
+  dailyCompleted: number[];
+  /** 最近一次完成时间戳。 */
+  lastCompletedTs?: number | null;
+}
+
 /** 习惯统计(饮水 + 休息)后端返回,对应 HabitStatsDto。 */
 export interface HabitStats {
   /** 今日饮水次数。 */
@@ -356,4 +416,6 @@ export interface HabitStats {
   todayReminderCount: number;
   /** 近 N 天每日完成休息次数。 */
   restDailyCounts: number[];
+  /** 按模板聚合的习惯统计（含内置与自定义）。 */
+  templates?: TemplateHabitStats[];
 }

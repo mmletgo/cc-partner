@@ -10,9 +10,11 @@
 pub mod monitor;
 pub mod reminder;
 pub mod state;
+pub mod templates;
 pub mod validation;
 pub mod water;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -22,13 +24,19 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::{
+    HealthReminderTemplate, ReminderTrigger, HEALTH_REMINDER_REST_ID, HEALTH_REMINDER_WATER_ID,
+};
 use crate::error::AppError;
 use crate::state::AppState;
 
 use self::monitor::{ActivitySample, ActivitySampler, DeviceQuerySampler};
 use self::reminder::is_in_dnd;
 use self::state::{HealthStateMachine, HealthThresholds};
-use self::water::{should_remind_water, WaterState};
+use self::templates::{
+    advance_overlay_queue, clear_sedentary_window_flags, enqueue_overlay,
+    reconcile_template_runtimes, should_fire_template, OverlayQueue, TemplateRuntime,
+};
 
 /// 一次「开始休息」遮罩倒计时会话:多屏共享同一份权威态。
 ///
@@ -40,6 +48,8 @@ use self::water::{should_remind_water, WaterState};
 ///     `select!` 中同时等待 `cancel.cancelled()` 与到点 sleep,任一先触发即决定是否收尾。
 #[derive(Clone)]
 pub struct OverlayRestSession {
+    /// 当前倒计时所属模板。
+    pub template_id: String,
     /// 休息结束时间戳(Unix 秒);所有遮罩窗口据此计算剩余秒数。
     pub end_ts: i64,
     /// 到点收尾 task 的取消令牌;cancel 后 task 不再 record/skip/close。
@@ -48,29 +58,26 @@ pub struct OverlayRestSession {
 
 /// 健康监测运行时共享状态(跨 daemon task 与命令层)。
 pub struct HealthRuntime {
-    /// 工作/休息状态机(每分钟由 daemon 推进一拍;命令层也可读取展示当前相位)。
+    /// 共享活跃时钟(每分钟由 daemon 推进一拍;不再持唯一 should_remind)。
     pub machine: Mutex<HealthStateMachine>,
-    /// 贪睡(手动暂停提醒)到期时间戳(秒);None 或 <= now 表示未贪睡。
-    pub snooze_until: Mutex<Option<i64>>,
     /// 是否整体暂停监测(paused 状态由命令层置位,daemon 采样时据此跳过提醒)。
     pub paused: AtomicBool,
-    /// 喝水提醒计时状态(上次喝水时间戳 + 是否有待响应提醒);daemon 采样时据此判定是否
-    /// emit `health:water`,命令层 `record_water` 更新 last_drink_ts 并清 pending。
-    pub water: Mutex<WaterState>,
-    /// 当前「开始休息」遮罩倒计时会话(None=未在遮罩休息);多屏共享同一权威态,
-    /// 由 `start_overlay_rest` 写入、到点 task 收尾或 `cancel_overlay_rest`(关窗/ESC)清除。
+    /// 每条模板独立 pending / 间隔原点 / 本窗口已触发 / 贪睡。
+    pub templates: Mutex<HashMap<String, TemplateRuntime>>,
+    /// 全屏遮罩 FIFO（同 id 去重）。
+    pub overlay_queue: Mutex<OverlayQueue>,
+    /// 当前 session 倒计时权威态(None=未在倒计时);多屏共享同一 end_ts。
     pub overlay_rest: Mutex<Option<OverlayRestSession>>,
 }
 impl HealthRuntime {
-    /// Business Logic: daemon 与命令层(前端「暂停/贪睡」按钮)需要共享同一份
-    ///                  状态机/贪睡/暂停/喝水计时标记,该构造产出初始全空闲的运行时。
-    /// Code Logic: 新建 Idle 初态状态机,贪睡置 None,暂停置 false,喝水状态以当前时间初始化。
+    /// Business Logic: daemon 与命令层需要共享时钟、模板态和遮罩队列。
+    /// Code Logic: Idle 时钟 + 空模板 map + 空队列 + 未暂停。
     pub fn new() -> Self {
         Self {
             machine: Mutex::new(HealthStateMachine::new()),
-            snooze_until: Mutex::new(None),
             paused: AtomicBool::new(false),
-            water: Mutex::new(WaterState::new(Utc::now().timestamp())),
+            templates: Mutex::new(HashMap::new()),
+            overlay_queue: Mutex::new(OverlayQueue::default()),
             overlay_rest: Mutex::new(None),
         }
     }
@@ -185,67 +192,46 @@ async fn handle_sample(
         }
     };
 
-    // 推进状态机(持锁区间内不 await,advance 是纯 CPU 计算)
+    // 共享时钟只负责相位/有效休息关窗；每条模板独立判定是否弹窗。
     let thresholds = HealthThresholds {
         work_window_seconds: cfg.work_window_seconds,
         break_seconds: cfg.break_seconds,
     };
-    let should_remind = {
+    let closed_window = {
         let mut m = state.health.machine.lock().unwrap();
-        m.advance(sample.is_active, now, &thresholds).should_remind
+        m.advance(sample.is_active, now, &thresholds)
+            .reminder_closed_window
+            .is_some()
     };
 
-    if should_remind {
-        // 记录 reminder 触发事件(用于习惯统计),无论是否被静默都算一次触发。
-        if let Err(e) = state
-            .health_repo
-            .insert_rest_record(now, "reminder", 0)
-            .await
-        {
-            tracing::warn!("写入 reminder 统计记录失败: {e}");
+    let fired = collect_fired_templates(&state.health, &cfg.reminders, closed_window, now);
+    let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
+    for fired_id in fired {
+        let Some(tmpl) = cfg.reminders.iter().find(|t| t.id == fired_id) else {
+            continue;
+        };
+        if let Err(e) = persist_habit_event(&state.health_repo, tmpl, now, "triggered", 0).await {
+            tracing::warn!("写入习惯触发记录失败: {e}");
         }
-        // 贪睡未到期则静默;免打扰时段静默;notify_enabled 仅控制系统通知事件,全屏遮罩固定启用。
-        let snoozed = state
-            .health
-            .snooze_until
-            .lock()
-            .unwrap()
-            .is_some_and(|t| t > now);
-        let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
-        if !snoozed && !dnd {
-            if cfg.notify_enabled {
-                // emit 事件载荷;前端 HealthReminderListener 监听后弹 i18n 系统通知(统一通知出口)。
-                let _ = app.emit(
-                    "health:reminder",
-                    serde_json::json!({ "workWindowSeconds": cfg.work_window_seconds }),
-                );
-            }
-            // 全屏遮罩随健康监测固定启用,不再受独立配置项控制。
-            if let Err(e) = open_health_overlay(app, "reminder") {
-                tracing::warn!("打开全屏健康遮罩失败: {e}");
-            }
+        if dnd {
+            continue;
         }
-    }
-
-    // 喝水提醒:健康监测启用 + 超过间隔 + 无未响应提醒时,置 pending 并(非 DND)提醒。
-    if should_remind_water(
-        &state.health.water.lock().unwrap(),
-        now,
-        cfg.water_interval_seconds,
-    ) {
-        {
-            let mut w = state.health.water.lock().unwrap();
-            w.pending_remind = true;
+        if cfg.notify_enabled {
+            let _ = app.emit(
+                "health:reminder",
+                serde_json::json!({
+                    "templateId": tmpl.id,
+                    "title": tmpl.title,
+                    "body": tmpl.body,
+                }),
+            );
         }
-        let dnd = is_in_dnd(now, cfg.dnd_start.as_deref(), cfg.dnd_end.as_deref());
-        if !dnd {
-            if cfg.notify_enabled {
-                // emit 喝水事件;前端 HealthReminderListener 监听后弹 i18n 系统通知(统一通知出口)。
-                // 后端不再发系统通知(避免双通知)。
-                let _ = app.emit("health:water", serde_json::json!({}));
-            }
-            // 全屏遮罩随健康监测固定启用,喝水提醒同样打开 type=water 遮罩。
-            if let Err(e) = open_health_overlay(app, "water") {
+        let should_open = {
+            let mut q = state.health.overlay_queue.lock().unwrap();
+            enqueue_overlay(&mut q, &tmpl.id)
+        };
+        if should_open {
+            if let Err(e) = open_health_overlay(app, &tmpl.id) {
                 tracing::warn!("打开全屏健康遮罩失败: {e}");
             }
         }
@@ -268,7 +254,97 @@ async fn handle_sample(
     if let Err(e) = state.health_repo.cleanup_rest_older_than(cutoff).await {
         tracing::warn!("清理过期休息记录失败: {e}");
     }
+    if let Err(e) = state.health_repo.cleanup_habit_older_than(cutoff).await {
+        tracing::warn!("清理过期习惯记录失败: {e}");
+    }
     Ok(())
+}
+
+/// 同步模板 runtime 并收集本拍应触发的模板 id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     多条模板共用时钟，必须独立 pending/阈值，关窗只清久坐已触发标记。
+/// Code Logic（这个函数做什么）:
+///     reconcile → 可选清 sedentary flags → 对 enabled 模板 should_fire，命中则置 pending
+///     与 reminded_this_window。
+fn collect_fired_templates(
+    runtime: &HealthRuntime,
+    templates: &[HealthReminderTemplate],
+    closed_window: bool,
+    now: i64,
+) -> Vec<String> {
+    let machine_state = runtime.machine.lock().unwrap().state.clone();
+    let mut map = runtime.templates.lock().unwrap();
+    reconcile_template_runtimes(&mut map, templates, now);
+    if closed_window {
+        clear_sedentary_window_flags(&mut map, templates);
+    }
+    let mut fired = Vec::new();
+    for tmpl in templates {
+        if !tmpl.enabled {
+            continue;
+        }
+        let Some(rt) = map.get_mut(&tmpl.id) else {
+            continue;
+        };
+        if should_fire_template(tmpl, rt, &machine_state, now) {
+            rt.pending = true;
+            if tmpl.trigger == ReminderTrigger::Sedentary {
+                rt.reminded_this_window = true;
+            }
+            fired.push(tmpl.id.clone());
+        }
+    }
+    fired
+}
+
+/// 双写 habit_records 以及 water/rest 旧表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     新统计读 habit_records；回滚旧二进制仍能从 water/rest 表恢复饮水与休息。
+/// Code Logic（这个函数做什么）:
+///     先 insert_habit_record；water completed 再 insert_water；rest triggered/completed
+///     再 insert_rest_record。
+async fn persist_habit_event(
+    repo: &crate::storage::health_repo::HealthRepo,
+    template: &HealthReminderTemplate,
+    now: i64,
+    kind: &str,
+    duration_seconds: i64,
+) -> Result<i64, AppError> {
+    persist_habit_event_by_id(repo, &template.id, now, kind, duration_seconds).await
+}
+
+/// 仅凭 template_id 双写（旧命令包装无完整模板对象时用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     record_water / record_rest 等旧入口仍要写入新表。
+/// Code Logic（这个函数做什么）:
+///     与 persist_habit_event 相同的双写规则。
+pub(crate) async fn persist_habit_event_by_id(
+    repo: &crate::storage::health_repo::HealthRepo,
+    template_id: &str,
+    now: i64,
+    kind: &str,
+    duration_seconds: i64,
+) -> Result<i64, AppError> {
+    let id = repo
+        .insert_habit_record(template_id, now, kind, duration_seconds)
+        .await?;
+    if template_id == HEALTH_REMINDER_WATER_ID && kind == "completed" {
+        let _ = repo.insert_water(now).await?;
+    }
+    if template_id == HEALTH_REMINDER_REST_ID {
+        let rest_kind = if kind == "triggered" {
+            "reminder"
+        } else {
+            "rest"
+        };
+        if kind == "triggered" || kind == "completed" {
+            let _ = repo.insert_rest_record(now, rest_kind, duration_seconds).await?;
+        }
+    }
+    Ok(id)
 }
 
 /// 打开全屏健康提醒遮罩窗口(每屏一个,复用截图透明窗口构建模式)。
@@ -279,11 +355,9 @@ async fn handle_sample(
 /// Code Logic: 枚举 `xcap::Monitor::all()`,每个显示器用 `WebviewWindowBuilder` 建
 ///     decorations(false)/transparent(true)/always_on_top(true)/focused(true)/
 ///     skip_taskbar(true)/resizable(false) 的窗口,label = `health-overlay-{i}`,
-///     url = `/health-overlay?display={i}&type={overlay_type}`(`overlay_type` 取值 "reminder"
-///     或 "water",前端遮罩页据此渲染对应文案与按钮)。窗口几何直接用 xcap 的 x()/y()/width()
-///     /height()(均为逻辑点,不除 scale,与截图 overlay 一致)。已存在同名窗口则跳过(去重)。
-///     透明窗口前置条件 `app.macOSPrivateApi: true` 已在 tauri.conf.json 开启。
-pub fn open_health_overlay(app: &AppHandle, overlay_type: &str) -> Result<(), AppError> {
+///     url = `/health-overlay?display={i}&template={template_id}`。
+///     窗口几何直接用 xcap 的 x()/y()/width()/height()(逻辑点)。已存在同名窗口则跳过。
+pub fn open_health_overlay(app: &AppHandle, template_id: &str) -> Result<(), AppError> {
     let monitors =
         xcap::Monitor::all().map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
 
@@ -311,7 +385,9 @@ pub fn open_health_overlay(app: &AppHandle, overlay_type: &str) -> Result<(), Ap
         WebviewWindowBuilder::new(
             app,
             &label,
-            WebviewUrl::App(format!("/health-overlay?display={i}&type={overlay_type}").into()),
+            WebviewUrl::App(
+                format!("/health-overlay?display={i}&template={template_id}").into(),
+            ),
         )
         .title("健康提醒")
         .decorations(false)
@@ -349,16 +425,18 @@ pub fn close_all_health_overlay_windows(app: &AppHandle) {
 ///     (极端竞态),先 cancel 其到点 task 再开新会话,保证同一时刻只有一份休息态。
 fn begin_overlay_rest(
     runtime: &HealthRuntime,
+    template_id: &str,
     now: i64,
-    break_seconds: i64,
+    session_seconds: i64,
 ) -> (i64, CancellationToken) {
-    let end_ts = now + break_seconds;
+    let end_ts = now + session_seconds;
     let mut guard = runtime.overlay_rest.lock().unwrap();
     if let Some(old) = guard.take() {
         old.cancel.cancel();
     }
     let cancel = CancellationToken::new();
     *guard = Some(OverlayRestSession {
+        template_id: template_id.to_string(),
         end_ts,
         cancel: cancel.clone(),
     });
@@ -386,13 +464,13 @@ pub(crate) fn cancel_overlay_rest(runtime: &HealthRuntime) -> bool {
 ///
 /// Business Logic: 到点 task 在 record/skip 之后清掉权威态,使 `get_health_status` 不再
 ///     报告进行中的休息,并让后续 `cancel_overlay_rest` 成为 no-op(避免重复处理已收尾的会话)。
-fn take_overlay_rest_for_finalize(runtime: &HealthRuntime) -> Option<i64> {
+fn take_overlay_rest_for_finalize(runtime: &HealthRuntime) -> Option<(String, i64)> {
     runtime
         .overlay_rest
         .lock()
         .unwrap()
         .take()
-        .map(|s| s.end_ts)
+        .map(|s| (s.template_id, s.end_ts))
 }
 
 /// 开始一次「开始休息」遮罩倒计时:写入权威 end_ts → 广播 `health:rest-started` 给所有遮罩
@@ -401,47 +479,132 @@ fn take_overlay_rest_for_finalize(runtime: &HealthRuntime) -> Option<i64> {
 /// Business Logic: 多屏遮罩需同步进入同一次休息倒计时。后端作为权威源持 end_ts,广播事件
 ///     让每块屏基于同一 end_ts 显示;到点后后端统一 record + skip + 关闭全部窗口,即使某屏
 ///     窗口中途崩溃也不影响收尾与统计。
-/// Code Logic: `begin_overlay_rest` 设会话 → `app.emit("health:rest-started", {endTs})` →
-///     `tauri::async_runtime::spawn` 一个 task:`select!{ cancel | sleep(剩余秒) }`,醒来后
-///     二次确认未取消,再 `insert_rest_record`(record)+ 重置状态机/清贪睡(skip 语义)+
-///     `take_overlay_rest_for_finalize`(清会话)+ `close_all_health_overlay_windows`(关窗)。
+/// Code Logic: `begin_overlay_rest` 设会话 → emit `health:rest-started`（含 templateId）→
+///     spawn 到点 task：只 complete 该模板，不重置共享时钟；关窗后弹出队列下一项。
 pub fn start_overlay_rest(app: &AppHandle, state: &AppState, now: i64, break_seconds: i64) -> i64 {
-    let (end_ts, cancel) = begin_overlay_rest(&state.health, now, break_seconds);
-    // 广播给所有 health-overlay 遮罩窗口(主窗口未监听本事件,收到也无害)。
+    start_overlay_session(app, state, HEALTH_REMINDER_REST_ID, now, break_seconds)
+}
+
+/// 启动任意模板的 session 倒计时。
+///
+/// Business Logic（为什么需要这个函数）:
+///     休息 5 分钟与提肛 30 秒共用同一套权威 end_ts / 到点收尾，只是模板不同。
+/// Code Logic（这个函数做什么）:
+///     写入 overlay_rest → emit health:rest-started → 到点 persist completed、清 pending、
+///     advance 队列；有下一项则改 URL，否则关窗。
+pub fn start_overlay_session(
+    app: &AppHandle,
+    state: &AppState,
+    template_id: &str,
+    now: i64,
+    session_seconds: i64,
+) -> i64 {
+    let (end_ts, cancel) = begin_overlay_rest(&state.health, template_id, now, session_seconds);
     let _ = app.emit(
         "health:rest-started",
-        serde_json::json!({ "endTs": end_ts }),
+        serde_json::json!({ "templateId": template_id, "endTs": end_ts }),
     );
 
     let health = state.health.clone();
     let health_repo = state.health_repo.clone();
+    let owned_id = template_id.to_string();
     let app_h = app.clone();
     tauri::async_runtime::spawn(async move {
-        // task 实际开始后再计算剩余秒数,减少 spawn 调度延迟带来的偏差。
         let now0 = Utc::now().timestamp();
         let remaining_secs = u64::try_from((end_ts - now0).max(0)).unwrap_or(0);
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_secs(remaining_secs)) => {}
         }
-        // 双重检查:select 通过后确认未被并发取消(ESC/关窗在 sleep 醒来瞬间触发)。
         if cancel.is_cancelled() {
             return;
         }
-        // 收尾:记录一次完整休息 + 重置状态机/清贪睡(skip 语义)+ 清会话 + 关闭所有遮罩。
         let fin_now = Utc::now().timestamp();
-        if let Err(e) = health_repo
-            .insert_rest_record(fin_now, "rest", break_seconds)
-            .await
+        if let Err(e) =
+            persist_habit_event_by_id(&health_repo, &owned_id, fin_now, "completed", session_seconds)
+                .await
         {
-            tracing::warn!("休息结束记录失败: {e}");
+            tracing::warn!("模板会话结束记录失败: {e}");
         }
-        *health.machine.lock().unwrap() = HealthStateMachine::new();
-        *health.snooze_until.lock().unwrap() = None;
+        acknowledge_template_runtime(&health, &owned_id, fin_now, false);
         take_overlay_rest_for_finalize(&health);
-        close_all_health_overlay_windows(&app_h);
+        let next = {
+            let mut q = health.overlay_queue.lock().unwrap();
+            advance_overlay_queue(&mut q)
+        };
+        if let Some(next_id) = next {
+            if let Err(e) = open_health_overlay(&app_h, &next_id) {
+                tracing::warn!("打开排队遮罩失败: {e}");
+            }
+        } else {
+            close_all_health_overlay_windows(&app_h);
+        }
     });
     end_ts
+}
+
+/// 完成/跳过/贪睡后只改该模板 runtime，不重置共享时钟。
+///
+/// Business Logic（为什么需要这个函数）:
+///     完成一条久坐不得清其它久坐的本窗口计时。
+/// Code Logic（这个函数做什么）:
+///     清 pending；推进 last_completed；可选写入 snooze_until。
+pub(crate) fn acknowledge_template_runtime(
+    runtime: &HealthRuntime,
+    template_id: &str,
+    now: i64,
+    keep_pending: bool,
+) {
+    let mut map = runtime.templates.lock().unwrap();
+    let entry = map
+        .entry(template_id.to_string())
+        .or_insert_with(|| TemplateRuntime::new(now));
+    if !keep_pending {
+        entry.pending = false;
+    }
+    entry.last_completed_ts = now;
+    entry.snooze_until = None;
+}
+
+/// 只给该模板写入贪睡，不改共享时钟。
+///
+/// Business Logic（为什么需要这个函数）:
+///     「稍后提醒」只推迟当前这条。
+/// Code Logic（这个函数做什么）:
+///     pending=false，snooze_until=until，last_completed 保持或按调用方已写好的值。
+pub(crate) fn snooze_template_runtime(
+    runtime: &HealthRuntime,
+    template_id: &str,
+    now: i64,
+    until: i64,
+) {
+    let mut map = runtime.templates.lock().unwrap();
+    let entry = map
+        .entry(template_id.to_string())
+        .or_insert_with(|| TemplateRuntime::new(now));
+    entry.pending = false;
+    entry.snooze_until = Some(until);
+}
+
+/// 关闭当前遮罩并弹出队列下一项；无下一项才关全部窗。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跳过/完成即时模板后不能把还在排队的提醒一起关掉。
+/// Code Logic（这个函数做什么）:
+///     cancel 当前 session → advance queue → 有 next 则 open，否则 close all。
+pub fn dismiss_current_overlay(app: &AppHandle, runtime: &HealthRuntime) {
+    cancel_overlay_rest(runtime);
+    let next = {
+        let mut q = runtime.overlay_queue.lock().unwrap();
+        advance_overlay_queue(&mut q)
+    };
+    if let Some(next_id) = next {
+        if let Err(e) = open_health_overlay(app, &next_id) {
+            tracing::warn!("打开排队遮罩失败: {e}");
+        }
+    } else {
+        close_all_health_overlay_windows(app);
+    }
 }
 
 #[cfg(test)]
@@ -451,21 +614,20 @@ mod overlay_rest_tests {
     #[test]
     fn begin_sets_end_ts_and_session() {
         let rt = HealthRuntime::new();
-        let (end_ts, _cancel) = begin_overlay_rest(&rt, 1000, 300);
+        let (end_ts, _cancel) = begin_overlay_rest(&rt, "rest", 1000, 300);
         assert_eq!(end_ts, 1300);
-        assert_eq!(
-            rt.overlay_rest.lock().unwrap().as_ref().unwrap().end_ts,
-            1300
-        );
+        let session = rt.overlay_rest.lock().unwrap();
+        assert_eq!(session.as_ref().unwrap().end_ts, 1300);
+        assert_eq!(session.as_ref().unwrap().template_id, "rest");
     }
 
     #[test]
     fn begin_cancels_previous_session() {
         let rt = HealthRuntime::new();
-        let (_, old_cancel) = begin_overlay_rest(&rt, 1000, 300);
+        let (_, old_cancel) = begin_overlay_rest(&rt, "rest", 1000, 300);
         assert!(!old_cancel.is_cancelled());
         // 再次开始休息应取消上一次会话的到点 task,保证同时刻只有一份休息态。
-        let _ = begin_overlay_rest(&rt, 2000, 300);
+        let _ = begin_overlay_rest(&rt, "kegel", 2000, 30);
         assert!(
             old_cancel.is_cancelled(),
             "二次开始休息必须取消上一次的到点 task"
@@ -475,7 +637,7 @@ mod overlay_rest_tests {
     #[test]
     fn cancel_clears_session_and_signals_token() {
         let rt = HealthRuntime::new();
-        let (_, cancel) = begin_overlay_rest(&rt, 1000, 300);
+        let (_, cancel) = begin_overlay_rest(&rt, "rest", 1000, 300);
         assert!(!cancel.is_cancelled());
         assert!(cancel_overlay_rest(&rt), "曾有会话应返回 true");
         assert!(cancel.is_cancelled(), "cancel 应触发到点 task 的令牌");
@@ -489,8 +651,11 @@ mod overlay_rest_tests {
     #[test]
     fn take_for_finalize_clears_session() {
         let rt = HealthRuntime::new();
-        begin_overlay_rest(&rt, 1000, 300);
-        assert_eq!(take_overlay_rest_for_finalize(&rt), Some(1300));
+        begin_overlay_rest(&rt, "rest", 1000, 300);
+        assert_eq!(
+            take_overlay_rest_for_finalize(&rt),
+            Some(("rest".into(), 1300))
+        );
         assert!(
             rt.overlay_rest.lock().unwrap().is_none(),
             "收尾取出后会话应为 None"
