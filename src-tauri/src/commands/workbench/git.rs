@@ -18,11 +18,12 @@ use crate::workbench::models::{
     WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
 use crate::workbench::operation_ledger::{
-    canonical_commit_payload, canonical_merge_payload, canonical_push_payload,
-    canonical_remove_payload, hash_canonical_payload, normalize_client_operation_id,
-    run_claimed_mutation, run_claimed_mutation_with_hook, ClaimOutcome, MutationIntent,
-    MutationKind, MutationState, MutationTransportClass, WorkbenchHookFailureDto,
-    WorkbenchMutationEnvelopeDto, WorkbenchMutationLedger, WorkbenchMutationOperationDto,
+    canonical_collect_merge_payload, canonical_commit_payload, canonical_merge_payload,
+    canonical_push_payload, canonical_remove_payload, hash_canonical_payload,
+    normalize_client_operation_id, run_claimed_mutation, run_claimed_mutation_with_hook,
+    ClaimOutcome, CollectMergeSource, MutationIntent, MutationKind, MutationState,
+    MutationTransportClass, WorkbenchHookFailureDto, WorkbenchMutationEnvelopeDto,
+    WorkbenchMutationLedger, WorkbenchMutationOperationDto,
 };
 use crate::workbench::sessions::kill_persisted_backend;
 use crate::workbench::{
@@ -1513,9 +1514,11 @@ pub(crate) async fn merge_workbench_worktree_for_state(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     merge 前捕获 source/main HEAD，timeout 后验证 main 是否包含 source 且 source 已清理。
+///     主工作区走 collect-merge，把未占用的本地分支收进 home，而不是拒绝。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 source/main head → claim → 调用既有 local_merge → envelope。
+///     已有 CollectMerge intent 或主 worktree → collect-merge 路径；
+///     否则读取 source/main head → claim → 调用既有 feature-worktree merge → envelope。
 pub(crate) async fn local_merge_workbench_worktree_with_ledger(
     state: &AppState,
     worktree_id: String,
@@ -1523,11 +1526,14 @@ pub(crate) async fn local_merge_workbench_worktree_with_ledger(
 ) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
     state.runtime_role.require_owner()?;
     let op_id = normalize_client_operation_id(&client_operation_id)?;
-    let payload = canonical_merge_payload(&worktree_id);
-    let payload_hash = hash_canonical_payload(&payload)?;
     let ledger = WorkbenchMutationLedger::new(state.db.clone());
     ledger.ensure_schema().await?;
     if let Some(existing) = ledger.get(&op_id).await? {
+        if matches!(existing.intent, MutationIntent::CollectMerge { .. }) {
+            return local_collect_merge_main_worktree_with_ledger(state, worktree_id, op_id).await;
+        }
+        let payload = canonical_merge_payload(&worktree_id);
+        let payload_hash = hash_canonical_payload(&payload)?;
         if existing.payload_hash != payload_hash {
             return Err(AppError::conflict(format!(
                 "clientOperationId 已绑定不同 payload（existingHash={}）",
@@ -1561,7 +1567,7 @@ pub(crate) async fn local_merge_workbench_worktree_with_ledger(
         .await?
         .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
     if row.is_main {
-        return Err(AppError::validation("不能合并主工作区".to_string()));
+        return local_collect_merge_main_worktree_with_ledger(state, worktree_id, op_id).await;
     }
     let source_head = workbench_git::head_hash(Path::new(&row.path))?
         .ok_or_else(|| AppError::generic("源 worktree 没有 HEAD".to_string()))?;
@@ -1582,6 +1588,8 @@ pub(crate) async fn local_merge_workbench_worktree_with_ledger(
         source_head: source_head.clone(),
         main_head: main_head.clone(),
     };
+    let payload = canonical_merge_payload(&worktree_id);
+    let payload_hash = hash_canonical_payload(&payload)?;
     let claim = ledger
         .claim(&op_id, MutationKind::Merge, &payload_hash, &intent)
         .await?;
@@ -1605,6 +1613,560 @@ pub(crate) async fn local_merge_workbench_worktree_with_ledger(
     .await
 }
 
+/// 主工作区 collect-merge 冻结快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     claim 时必须钉死 home 与源分支 tip，执行期不能再读可能漂移的 live HEAD。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 home 短名、home OID，以及按名称排序的源 name+oid。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrozenCollectMerge {
+    home_branch: String,
+    home_oid: String,
+    sources: Vec<CollectMergeSource>,
+}
+
+/// 带 ledger 的主工作区 collect-merge。
+///
+/// Business Logic（为什么需要这个函数）:
+///     主工作区 Merge 要把未占用的本地 agent 分支收进 home；同一 clientOperationId
+///     换源必须 conflict，发布后崩溃则按冻结 intent 对账，不得重放 Claude。
+///
+/// Code Logic（这个函数做什么）:
+///     已有行走 recovery/replay；fresh 则冻结 home/sources → claim CollectMerge →
+///     隔离顺序 merge → 发布 home → 删除未占用源分支。
+async fn local_collect_merge_main_worktree_with_ledger(
+    state: &AppState,
+    worktree_id: String,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    state.runtime_role.require_owner()?;
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    ledger.ensure_schema().await?;
+    if let Some(existing) = ledger.get(&op_id).await? {
+        match &existing.intent {
+            MutationIntent::CollectMerge {
+                worktree_id: stored_worktree_id,
+                home_branch,
+                home_oid,
+                sources,
+                ..
+            } => {
+                if stored_worktree_id != &worktree_id {
+                    return Err(AppError::conflict(
+                        "clientOperationId 的 worktree 与请求不一致".to_string(),
+                    ));
+                }
+                if merge_ledger_state_needs_published_recovery(existing.state) {
+                    let recovered = recover_pending_merge_after_publish(
+                        state,
+                        &ledger,
+                        &op_id,
+                        &worktree_id,
+                        &existing.intent,
+                    )
+                    .await;
+                    if !matches!(recovered, Ok(WorkbenchMutationEnvelopeDto::Unknown { .. })) {
+                        return recovered;
+                    }
+                }
+                if existing.state.is_pending() {
+                    if let Ok(row) = state.workbench_worktree_repo.get(&worktree_id).await {
+                        if let Some(row) = row {
+                            if let Ok(current) = freeze_collect_merge_sources(Path::new(&row.path))
+                            {
+                                let current_hash =
+                                    hash_canonical_payload(&canonical_collect_merge_payload(
+                                        &worktree_id,
+                                        &current.home_branch,
+                                        &current.home_oid,
+                                        &current.sources,
+                                    ))?;
+                                let stored_hash =
+                                    hash_canonical_payload(&canonical_collect_merge_payload(
+                                        stored_worktree_id,
+                                        home_branch,
+                                        home_oid,
+                                        sources,
+                                    ))?;
+                                if current_hash != stored_hash
+                                    || current_hash != existing.payload_hash
+                                {
+                                    return Err(AppError::conflict(format!(
+                                        "clientOperationId 已绑定不同 payload（existingHash={}）",
+                                        existing.payload_hash
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(WorkbenchMutationEnvelopeDto::unknown(op_id, None));
+                }
+                return run_claimed_mutation(
+                    &ledger,
+                    &op_id,
+                    ClaimOutcome::Replay(existing),
+                    || async {
+                        Err(AppError::generic("终态 collect-merge ledger 不应重新执行"))
+                    },
+                )
+                .await;
+            }
+            _ => {
+                return Err(AppError::conflict(
+                    "clientOperationId 已绑定非 collect-merge intent".to_string(),
+                ));
+            }
+        }
+    }
+
+    let row = state
+        .workbench_worktree_repo
+        .get(&worktree_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+    if !row.is_main {
+        return Err(AppError::generic(
+            "collect-merge 只能在主工作区执行".to_string(),
+        ));
+    }
+    let frozen = freeze_collect_merge_sources(Path::new(&row.path))?;
+    let payload = canonical_collect_merge_payload(
+        &worktree_id,
+        &frozen.home_branch,
+        &frozen.home_oid,
+        &frozen.sources,
+    );
+    let payload_hash = hash_canonical_payload(&payload)?;
+    let intent = MutationIntent::CollectMerge {
+        project_id: row.project_id.clone(),
+        worktree_id: worktree_id.clone(),
+        home_branch: frozen.home_branch.clone(),
+        home_oid: frozen.home_oid.clone(),
+        sources: frozen.sources.clone(),
+    };
+    let claim = ledger
+        .claim(&op_id, MutationKind::Merge, &payload_hash, &intent)
+        .await?;
+    let state_for_exec = state.clone();
+    let row_for_exec = row;
+    let op_for_exec = op_id.clone();
+    run_claimed_mutation(&ledger, &op_id, claim, move || async move {
+        local_collect_merge_main_worktree(&state_for_exec, &row_for_exec, &op_for_exec, &frozen)
+            .await
+    })
+    .await
+}
+
+/// 冻结主工作区 collect-merge 的 home 与可收集源。
+///
+/// Business Logic（为什么需要这个函数）:
+///     claim 与 checkSource 必须使用同一套规则：home 引用 tip、未占用且未合入的本地分支、
+///     live 工作区干净；不能把离 home 的 live HEAD 当成 home_oid。
+///
+/// Code Logic（这个函数做什么）:
+///     detect_home_branch + rev_parse_ref(refs/heads/home) + occupied + list_collectible；
+///     源为空或 live dirty 时失败。
+fn freeze_collect_merge_sources(live_path: &Path) -> Result<FrozenCollectMerge, AppError> {
+    let live_status = workbench_git::status(live_path)?;
+    if !live_status.clean {
+        return Err(AppError::generic(
+            "主工作区有未提交改动，请先提交或清理后再收集合并".to_string(),
+        ));
+    }
+    let home_branch = workbench_git::detect_home_branch(live_path)?;
+    let home_oid =
+        workbench_git::rev_parse_ref(live_path, &format!("refs/heads/{home_branch}"))?
+            .ok_or_else(|| AppError::generic(format!("无法读取 home 分支 {home_branch} 的提交")))?;
+    let occupied = workbench_git::occupied_worktree_branches(live_path, live_path)?;
+    let collectible = workbench_git::list_collectible_branches(live_path, &home_branch, &occupied)?;
+    if collectible.is_empty() {
+        return Err(AppError::validation(
+            "没有可收集到主分支的本地分支".to_string(),
+        ));
+    }
+    Ok(FrozenCollectMerge {
+        home_branch,
+        home_oid,
+        sources: collectible
+            .into_iter()
+            .map(|branch| CollectMergeSource {
+                name: branch.name,
+                oid: branch.oid,
+            })
+            .collect(),
+    })
+}
+
+/// 执行主工作区 collect-merge 五阶段。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在主工作区点 Merge 时，要把本机残留 agent 分支隔离合并进 home，
+///     不能关闭主工作区终端，也不能删除主 worktree 行。
+///
+/// Code Logic（这个函数做什么）:
+///     checkSource 校验冻结输入；closeSessions 跳过；在隔离 worktree 按源顺序
+///     merge --no-ff 并校验双父；冲突才调 Claude；cleanup 发布 home 并删除未占用源分支；
+///     成败都 best-effort 回收 isolation 目录。
+async fn local_collect_merge_main_worktree(
+    state: &AppState,
+    row: &WorkbenchWorktreeRow,
+    operation_id: &str,
+    expected: &FrozenCollectMerge,
+) -> Result<WorkbenchMergeResultDto, AppError> {
+    let mut stages = initial_merge_stages();
+    let project_id = row.project_id.clone();
+    let worktree_id = row.id.clone();
+    let live_path = PathBuf::from(&row.path);
+
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+        "running",
+        "正在检查主工作区与可收集分支",
+    );
+    if !row.is_main {
+        return Err(fail_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CHECK_SOURCE,
+            AppError::generic("collect-merge 只能在主工作区执行"),
+        ));
+    }
+    let frozen = stage_result(
+        freeze_collect_merge_sources(&live_path),
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+    )?;
+    if frozen != *expected {
+        return Err(fail_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CHECK_SOURCE,
+            AppError::conflict("collect-merge 冻结的 home/源分支已变化".to_string()),
+        ));
+    }
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CHECK_SOURCE,
+        "completed",
+        format!(
+            "已冻结 home {} 与 {} 个可收集分支",
+            frozen.home_branch,
+            frozen.sources.len()
+        ),
+    );
+
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLOSE_SESSIONS,
+        "skipped",
+        "主工作区收集合并不关闭终端",
+    );
+
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_MERGE_MAIN,
+        "running",
+        "正在隔离 integration worktree 顺序合并冻结源提交",
+    );
+    let repo_root = stage_result(
+        workbench_git::repo_root(&live_path).map(PathBuf::from),
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_MERGE_MAIN,
+    )?;
+    let integration_path = merge_integration_storage_path(state, &project_id, operation_id);
+    if let Err(error) = workbench_git::create_detached_integration_worktree_outside(
+        &repo_root,
+        &integration_path,
+        &frozen.home_oid,
+        &[&live_path],
+    ) {
+        let _ = cleanup_merge_integration_best_effort(
+            &repo_root,
+            &integration_path,
+            &project_id,
+            &worktree_id,
+        );
+        return Err(fail_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_MERGE_MAIN,
+            error,
+        ));
+    }
+
+    let mut prev_oid = frozen.home_oid.clone();
+    let mut had_conflict = false;
+    for source in &frozen.sources {
+        let merge_outcome = match workbench_git::merge_commit_oid(&integration_path, &source.oid) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = cleanup_merge_integration_best_effort(
+                    &repo_root,
+                    &integration_path,
+                    &project_id,
+                    &worktree_id,
+                );
+                return Err(fail_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_MERGE_MAIN,
+                    error,
+                ));
+            }
+        };
+        match merge_outcome {
+            workbench_git::MergeBranchOutcome::Merged => {
+                match verify_collect_merge_head(&integration_path, &prev_oid, &source.oid) {
+                    Ok(new_head) => prev_oid = new_head,
+                    Err(error) => {
+                        let _ = cleanup_merge_integration_best_effort(
+                            &repo_root,
+                            &integration_path,
+                            &project_id,
+                            &worktree_id,
+                        );
+                        return Err(fail_merge_stage(
+                            state,
+                            &project_id,
+                            &worktree_id,
+                            &mut stages,
+                            MERGE_STAGE_MERGE_MAIN,
+                            error,
+                        ));
+                    }
+                }
+            }
+            workbench_git::MergeBranchOutcome::Conflicted => {
+                had_conflict = true;
+                set_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_MERGE_MAIN,
+                    "completed",
+                    format!("隔离合并 {} 出现冲突，进入自动解决阶段", source.name),
+                );
+                set_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_RESOLVE_CONFLICTS,
+                    "running",
+                    "正在调用 Claude Code 尝试解决 collect-merge 冲突",
+                );
+                match resolve_merge_conflicts_with_claude(state, &integration_path).await {
+                    Ok(_) => {
+                        match verify_collect_merge_head(&integration_path, &prev_oid, &source.oid) {
+                            Ok(new_head) => {
+                                prev_oid = new_head;
+                                set_merge_stage(
+                                    state,
+                                    &project_id,
+                                    &worktree_id,
+                                    &mut stages,
+                                    MERGE_STAGE_RESOLVE_CONFLICTS,
+                                    "completed",
+                                    "Claude Code 已在隔离目录解决冲突并完成 merge commit",
+                                );
+                            }
+                            Err(error) => {
+                                let _ = workbench_git::abort_merge(&integration_path);
+                                let _ = cleanup_merge_integration_best_effort(
+                                    &repo_root,
+                                    &integration_path,
+                                    &project_id,
+                                    &worktree_id,
+                                );
+                                return Err(fail_merge_stage(
+                                    state,
+                                    &project_id,
+                                    &worktree_id,
+                                    &mut stages,
+                                    MERGE_STAGE_RESOLVE_CONFLICTS,
+                                    error,
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = workbench_git::abort_merge(&integration_path);
+                        let _ = cleanup_merge_integration_best_effort(
+                            &repo_root,
+                            &integration_path,
+                            &project_id,
+                            &worktree_id,
+                        );
+                        return Err(fail_merge_stage(
+                            state,
+                            &project_id,
+                            &worktree_id,
+                            &mut stages,
+                            MERGE_STAGE_RESOLVE_CONFLICTS,
+                            error,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_MERGE_MAIN,
+        "completed",
+        "隔离 collect-merge 已生成候选提交",
+    );
+    if !had_conflict {
+        set_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_RESOLVE_CONFLICTS,
+            "skipped",
+            "merge 未产生冲突，跳过自动冲突解决",
+        );
+    }
+
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLEANUP,
+        "running",
+        "正在把 collect-merge 发布到 home 并清理源分支",
+    );
+    if let Err(error) = workbench_git::publish_collect_merge_to_home(
+        &live_path,
+        &frozen.home_branch,
+        &frozen.home_oid,
+        &prev_oid,
+    ) {
+        let _ = cleanup_merge_integration_best_effort(
+            &repo_root,
+            &integration_path,
+            &project_id,
+            &worktree_id,
+        );
+        return Err(fail_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CLEANUP,
+            error,
+        ));
+    }
+    let source_names = frozen
+        .sources
+        .iter()
+        .map(|source| source.name.clone())
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        workbench_git::delete_local_branches_if_unoccupied(&live_path, &source_names)
+    {
+        let _ = cleanup_merge_integration_best_effort(
+            &repo_root,
+            &integration_path,
+            &project_id,
+            &worktree_id,
+        );
+        return Err(fail_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CLEANUP,
+            error,
+        ));
+    }
+    if let Err(error) = cleanup_merge_integration_best_effort(
+        &repo_root,
+        &integration_path,
+        &project_id,
+        &worktree_id,
+    ) {
+        return Err(fail_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_CLEANUP,
+            error,
+        ));
+    }
+    set_merge_stage(
+        state,
+        &project_id,
+        &worktree_id,
+        &mut stages,
+        MERGE_STAGE_CLEANUP,
+        "completed",
+        "已发布到 home 并删除未占用的源分支",
+    );
+
+    Ok(WorkbenchMergeResultDto {
+        ok: true,
+        worktree_id,
+        stages,
+    })
+}
+
+/// 校验隔离 collect-merge 刚产生的双父提交。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每个源合入后都必须证明 new HEAD 的 parent 恰好是上一轮 tip 与该源 oid，
+///     否则不能继续下一源或发布。
+///
+/// Code Logic（这个函数做什么）:
+///     读 integration HEAD，调用 verify_strict_merge_commit 后返回新 HEAD。
+fn verify_collect_merge_head(
+    integration_path: &Path,
+    prev_oid: &str,
+    source_oid: &str,
+) -> Result<String, AppError> {
+    let new_head = workbench_git::head_hash(integration_path)?
+        .ok_or_else(|| AppError::generic("隔离 collect-merge 未生成 HEAD"))?;
+    workbench_git::verify_strict_merge_commit(integration_path, &new_head, prev_oid, source_oid)?;
+    Ok(new_head)
+}
+
 /// 判断已有 merge ledger 是否需优先做“已发布”精确恢复。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1624,9 +2186,11 @@ pub(crate) fn merge_ledger_state_needs_published_recovery(state: MutationState) 
 ///     同一 clientOperationId 不能永久返回 unknown，也不能重新生成第二个 merge commit。
 ///
 /// Code Logic（这个函数做什么）:
-///     从持久 intent 读取冻结 main/source OID；在当前 main 历史中查找精确双父 merge commit；未发布则
-///     保持 unknown 且不重放 Claude；已发布则幂等清理确定性 integration 路径和残留源 worktree，
+///     Merge：从持久 intent 读取冻结 main/source OID；在当前 main 历史中查找精确双父 merge commit；
+///     未发布则保持 unknown 且不重放 Claude；已发布则幂等清理确定性 integration 路径和残留源 worktree，
 ///     构造兼容五阶段结果并 mark_succeeded。
+///     CollectMerge：home tip 已是冻结 home 的后代且包含全部 source oid 则视为已发布，checkout home、
+///     删除未占用源分支并 mark_succeeded，不重放 Claude。
 pub(crate) async fn recover_pending_merge_after_publish(
     state: &AppState,
     ledger: &WorkbenchMutationLedger,
@@ -1634,6 +2198,16 @@ pub(crate) async fn recover_pending_merge_after_publish(
     requested_worktree_id: &str,
     intent: &MutationIntent,
 ) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    if let MutationIntent::CollectMerge { .. } = intent {
+        return recover_pending_collect_merge_after_publish(
+            state,
+            ledger,
+            operation_id,
+            requested_worktree_id,
+            intent,
+        )
+        .await;
+    }
     let MutationIntent::Merge {
         project_id,
         source_worktree_id,
@@ -1723,6 +2297,133 @@ pub(crate) async fn recover_pending_merge_after_publish(
         result,
         operation_id,
     ))
+}
+
+/// owner 重启后收敛已发布但 ledger 仍 pending 的 collect-merge。
+///
+/// Business Logic（为什么需要这个函数）:
+///     发布到 home 后、删源分支或 mark_succeeded 前可能崩溃；同一 clientOperationId
+///     不能重放 Claude，只能按冻结 home/sources 判断是否已经发布。
+///
+/// Code Logic（这个函数做什么）:
+///     读 live home ref；home tip 是冻结 home_oid 的后代且每个 source oid 都是 home tip
+///     的祖先则视为已发布；必要时 checkout home，删除未占用源分支，清理 isolation，
+///     mark_succeeded。未发布返回 unknown。
+async fn recover_pending_collect_merge_after_publish(
+    state: &AppState,
+    ledger: &WorkbenchMutationLedger,
+    operation_id: &str,
+    requested_worktree_id: &str,
+    intent: &MutationIntent,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchMergeResultDto>, AppError> {
+    let MutationIntent::CollectMerge {
+        project_id,
+        worktree_id,
+        home_branch,
+        home_oid,
+        sources,
+    } = intent
+    else {
+        return Err(AppError::conflict(
+            "clientOperationId 已绑定非 collect-merge intent".to_string(),
+        ));
+    };
+    if worktree_id != requested_worktree_id {
+        return Err(AppError::conflict(
+            "clientOperationId 的 worktree 与请求不一致".to_string(),
+        ));
+    }
+    let project = get_project(state, project_id).await?;
+    let main = ensure_main_worktree(state, &project).await?;
+    let live_path = Path::new(&main.path);
+    let home_ref = format!("refs/heads/{home_branch}");
+    let Some(home_tip) = workbench_git::rev_parse_ref(live_path, &home_ref)? else {
+        return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
+    };
+    if !workbench_git::is_ancestor(live_path, home_oid, &home_tip)? {
+        return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
+    }
+    for source in sources {
+        if !workbench_git::is_ancestor(live_path, &source.oid, &home_tip)? {
+            return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
+        }
+    }
+
+    if workbench_git::current_branch(live_path).as_deref() != Some(home_branch.as_str()) {
+        checkout_local_branch(live_path, home_branch)?;
+    }
+    let source_names = sources
+        .iter()
+        .map(|source| source.name.clone())
+        .collect::<Vec<_>>();
+    workbench_git::delete_local_branches_if_unoccupied(live_path, &source_names)?;
+
+    let repo_root = PathBuf::from(workbench_git::repo_root(live_path)?);
+    let integration_path = merge_integration_storage_path(state, project_id, operation_id);
+    let _ = cleanup_merge_integration_best_effort(
+        &repo_root,
+        &integration_path,
+        project_id,
+        worktree_id,
+    );
+
+    let mut stages = initial_merge_stages();
+    for stage in &mut stages {
+        stage.status = "completed".to_string();
+        stage.message = "owner 重启后已确认并收敛已发布 collect-merge".to_string();
+    }
+    if let Some(stage) = stages
+        .iter_mut()
+        .find(|stage| stage.id == MERGE_STAGE_CLOSE_SESSIONS)
+    {
+        stage.status = "skipped".to_string();
+        stage.message = "主工作区收集合并不关闭终端".to_string();
+    }
+    if let Some(stage) = stages
+        .iter_mut()
+        .find(|stage| stage.id == MERGE_STAGE_RESOLVE_CONFLICTS)
+    {
+        stage.status = "skipped".to_string();
+        stage.message = "恢复路径复用已发布 collect-merge，不重复调用 Claude Code".to_string();
+    }
+    let result = WorkbenchMergeResultDto {
+        ok: true,
+        worktree_id: worktree_id.clone(),
+        stages,
+    };
+    ledger.mark_succeeded(operation_id, &result).await?;
+    tracing::info!(
+        project_id = %project_id,
+        worktree_id = %worktree_id,
+        stage = "collect_publish_recovery_cleanup",
+        "workbench collect-merge pending ledger recovered after publish"
+    );
+    Ok(WorkbenchMutationEnvelopeDto::succeeded(
+        result,
+        operation_id,
+    ))
+}
+
+/// 把主工作区切回指定本地分支。
+///
+/// Business Logic（为什么需要这个函数）:
+///     collect-merge 发布后 live 可能仍停在 agent 分支；恢复路径只需 checkout，
+///     不能再用冻结 home_oid 做 CAS 发布。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git checkout <branch>`，失败返回包含 stderr 的 generic 错误。
+fn checkout_local_branch(path: &Path, branch: &str) -> Result<(), AppError> {
+    let output = std::process::Command::new("git")
+        .args(["checkout", branch])
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(AppError::generic(format!(
+        "切换到 {branch} 失败: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 /// 合并当前 worktree 到主工作区。
@@ -2692,4 +3393,443 @@ pub(crate) async fn open_workbench_file_for_state(
             .await;
     }
     local_open_workbench_file(state, project_id, worktree_id, path).await
+}
+
+#[cfg(test)]
+mod collect_merge_tests {
+    use super::*;
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::event_bus::RuntimeEventBus;
+    use crate::backend::runtime_metrics::RuntimeMetrics;
+    use crate::backend::ui::HeadlessBackendUi;
+    use crate::cloud_sync::CloudSyncRuntime;
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
+    use crate::config_runtime::ConfigRuntime;
+    use crate::config_store::MemoryConfigStore;
+    use crate::net::peer_client::PeerClient;
+    use crate::orchestrator::repo::OrchestratorRepo;
+    use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+    use crate::storage::{
+        ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
+        SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
+        WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
+        WorkbenchWorktreeRepo,
+    };
+    use crate::transfer::registry::TransferRegistry;
+    use crate::updater::UpdateRuntime;
+    use crate::workbench::models::WorkbenchProjectRow;
+    use crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::str::FromStr;
+    use std::sync::atomic::AtomicU16;
+    use std::sync::{Arc, Mutex, RwLock};
+
+    const COLLECT_PROJECT_ID: &str = "p-collect";
+
+    struct CollectMergeRepo {
+        root: PathBuf,
+        repo: PathBuf,
+        agent_a_oid: String,
+        agent_b_oid: String,
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     collect-merge 命令测试需要真实 Git 仓库：main + 两个无冲突 agent 分支，live 停在 agent/a。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 root 下 init 仓库，提交 base / agent/a / agent/b，最后 checkout agent/a。
+    fn setup_collect_merge_repo(root: &Path) -> CollectMergeRepo {
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_cmd(&repo, &["init", "-b", "main"]);
+        git_cmd(&repo, &["config", "user.email", "test@example.com"]);
+        git_cmd(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_cmd(&repo, &["add", "README.md"]);
+        git_cmd(&repo, &["commit", "-m", "initial"]);
+
+        git_cmd(&repo, &["checkout", "-b", "agent/a"]);
+        fs::write(repo.join("agent-a.txt"), "a\n").expect("write agent a");
+        git_cmd(&repo, &["add", "agent-a.txt"]);
+        git_cmd(&repo, &["commit", "-m", "agent a work"]);
+        let agent_a_oid = git_cmd(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        git_cmd(&repo, &["checkout", "main"]);
+        git_cmd(&repo, &["checkout", "-b", "agent/b"]);
+        fs::write(repo.join("agent-b.txt"), "b\n").expect("write agent b");
+        git_cmd(&repo, &["add", "agent-b.txt"]);
+        git_cmd(&repo, &["commit", "-m", "agent b work"]);
+        let agent_b_oid = git_cmd(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        git_cmd(&repo, &["checkout", "agent/a"]);
+
+        CollectMergeRepo {
+            root: root.to_path_buf(),
+            repo,
+            agent_a_oid,
+            agent_b_oid,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     无源分支场景必须在 checkSource 失败，而不是走进隔离 merge。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     只创建 main 上的一次提交。
+    fn setup_main_only_repo(root: &Path) -> PathBuf {
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_cmd(&repo, &["init", "-b", "main"]);
+        git_cmd(&repo, &["config", "user.email", "test@example.com"]);
+        git_cmd(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_cmd(&repo, &["add", "README.md"]);
+        git_cmd(&repo, &["commit", "-m", "initial"]);
+        repo
+    }
+
+    fn git_cmd(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        if output.status.success() {
+            return String::from_utf8_lossy(&output.stdout).to_string();
+        }
+        panic!(
+            "git {:?} failed in {}:\nstdout:\n{}\nstderr:\n{}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     collect-merge 集成测试必须把 db_path 放到临时目录下，避免 merge-integrations 落到仓库 cwd。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     复制 restore-fail AppState 最小字段，db_path=temp/data.db，并 upsert 真实 git 路径的主 worktree。
+    async fn build_collect_merge_state(temp_dir: &Path, project_path: &Path) -> AppState {
+        let db_path = temp_dir.join("data.db");
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE workbench_worktrees (\
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, branch TEXT, \
+             base_branch TEXT, path TEXT NOT NULL, is_main INTEGER NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE workbench_sessions (\
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL, \
+             name_source TEXT NOT NULL DEFAULT 'default', \
+             command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL, \
+             rows INTEGER NOT NULL, started_at TEXT NOT NULL, exited_at TEXT, exit_code INTEGER, \
+             backend TEXT NOT NULL, backend_id TEXT, backend_window_id TEXT, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let project_repo = WorkbenchProjectRepo::new(pool.clone());
+        let worktree_repo = WorkbenchWorktreeRepo::new(pool.clone());
+        let session_repo = WorkbenchSessionRepo::new(pool.clone());
+        let layout_repo = WorkbenchWorkspaceLayoutRepo::new(pool.clone());
+        layout_repo.ensure_schema().await.unwrap();
+
+        let project_path = project_path.to_string_lossy().to_string();
+        project_repo
+            .upsert(&WorkbenchProjectRow {
+                id: COLLECT_PROJECT_ID.to_string(),
+                name: "collect".to_string(),
+                kind: "local".to_string(),
+                device_id: "d1".to_string(),
+                device_name: "local".to_string(),
+                path: project_path.clone(),
+                last_opened_at: "t".to_string(),
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+        worktree_repo
+            .upsert(&WorkbenchWorktreeRow {
+                id: main_worktree_id(COLLECT_PROJECT_ID),
+                project_id: COLLECT_PROJECT_ID.to_string(),
+                name: "main".to_string(),
+                branch: Some("main".to_string()),
+                base_branch: None,
+                path: project_path,
+                is_main: true,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let config = AppConfig {
+            device_id: "d1".to_string(),
+            device_name: "test".to_string(),
+            http_port: 0,
+            receive_dir: "/tmp".to_string(),
+            db_path: db_path.to_string_lossy().to_string(),
+            screenshot_hotkey: "<cmd>+s".to_string(),
+            prompt_optimizer_hotkey: "<ctrl>".to_string(),
+            prompt_optimizer_fill_language: "zh".to_string(),
+            prompt_quick_input_hotkey: "<ctrl>+/".to_string(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+            internal_claude: crate::config::InternalClaudeConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
+            manual_peers: Vec::new(),
+        };
+        let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
+        let config_runtime = Arc::new(ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
+        let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let event_bus = Arc::new(RuntimeEventBus::new(owner));
+
+        AppState {
+            config,
+            config_runtime,
+            db: pool.clone(),
+            maintenance_gate: maintenance_gate.clone(),
+            prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+            transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+            claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+            scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),
+            ssh_target_repo: Arc::new(SshTargetRepo::new(pool.clone())),
+            device_id: Arc::new("d1".to_string()),
+            devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            actual_http_port: Arc::new(AtomicU16::new(0)),
+            discovery: Arc::new(Mutex::new(None)),
+            overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            manual_peer_cancel: Arc::new(Mutex::new(None)),
+            peer_client: Arc::new(PeerClient::new()),
+            transfers: Arc::new(TransferRegistry::new()),
+            ui: Arc::new(HeadlessBackendUi::new(std::path::PathBuf::from("/tmp"))),
+            update_runtime: Arc::new(UpdateRuntime::new()),
+            cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+            workbench_project_repo: Arc::new(project_repo),
+            workbench_session_repo: Arc::new(session_repo),
+            workbench_worktree_repo: Arc::new(worktree_repo),
+            workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+            workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
+            agent_hub_repo: Arc::new(crate::storage::AgentHubRepo::new(pool.clone())),
+            workbench_workspace_layout_repo: Arc::new(layout_repo),
+            workbench_project_note_repo: Arc::new(crate::storage::WorkbenchProjectNoteRepo::new(
+                pool.clone(),
+            )),
+            browser_verification: Arc::new(
+                crate::workbench::browser_verification::BrowserVerificationService::new(
+                    Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                    temp_dir.join("browser-verification-collect"),
+                    "test-owner".into(),
+                )
+                .expect("browser verification fixture"),
+            ),
+            workbench_browser_previews: Arc::new(
+                crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+            ),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
+            workbench_remote_events: std::sync::Arc::new(
+                crate::workbench::remote_events::WorkbenchRemoteEventBus::new("test-owner"),
+            ),
+            workbench_remote_event_bridges: Arc::new(
+                crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+            ),
+            workbench_dependency: Arc::new(
+                crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+            ),
+            cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(CloudSyncRuntime::new()),
+            cloud_sync_cancel: Arc::new(Mutex::new(None)),
+            health: Arc::new(crate::health::HealthRuntime::new()),
+            health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+            health_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_repo: Arc::new(OrchestratorRepo::new(pool.clone())),
+            orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::default(),
+            orchestrator_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_git_runtime: Arc::new(crate::agent_hub::git::AgentHubGitRuntime::new()),
+            agent_hub_git_cancel: Arc::new(Mutex::new(None)),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            runtime_metrics: Arc::new(RuntimeMetrics::new()),
+            runtime_role: RuntimeRole::HeadlessOwner,
+            event_bus,
+            backend_control_client_runtime: Arc::new(
+                crate::backend::control_client::BackendControlClientRuntime::new(),
+            ),
+            gui_event_relay_cancel: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     主工作区 Merge 应把 agent/a、agent/b 收进 home，回到 main，并保留主 worktree 行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     live 停在 agent/a 时调用 ledger merge；断言 envelope 成功、HEAD 含两源、源分支删除、
+    ///     closeSessions=skipped。
+    #[tokio::test]
+    async fn collect_merge_happy_path_merges_local_branches_into_home() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fixture = setup_collect_merge_repo(temp.path());
+        let state = build_collect_merge_state(temp.path(), &fixture.repo).await;
+        let main_id = main_worktree_id(COLLECT_PROJECT_ID);
+        let op_id = uuid::Uuid::new_v4().to_string();
+
+        let envelope = local_merge_workbench_worktree_with_ledger(&state, main_id.clone(), op_id)
+            .await
+            .expect("collect-merge should succeed");
+        let WorkbenchMutationEnvelopeDto::Succeeded { value, .. } = envelope else {
+            panic!("expected succeeded envelope, got {envelope:?}");
+        };
+        assert!(value.ok);
+        let close = value
+            .stages
+            .iter()
+            .find(|stage| stage.id == MERGE_STAGE_CLOSE_SESSIONS)
+            .expect("closeSessions stage");
+        assert_eq!(close.status, "skipped");
+        assert!(close.message.contains("主工作区收集合并不关闭终端"));
+
+        assert_eq!(
+            workbench_git::current_branch(&fixture.repo).as_deref(),
+            Some("main")
+        );
+        let head = workbench_git::head_hash(&fixture.repo)
+            .unwrap()
+            .expect("head after collect-merge");
+        assert!(
+            workbench_git::is_ancestor(&fixture.repo, &fixture.agent_a_oid, &head).unwrap(),
+            "main should contain agent/a"
+        );
+        assert!(
+            workbench_git::is_ancestor(&fixture.repo, &fixture.agent_b_oid, &head).unwrap(),
+            "main should contain agent/b"
+        );
+        assert!(
+            git_cmd(&fixture.repo, &["branch", "--list", "agent/a"])
+                .trim()
+                .is_empty(),
+            "agent/a should be deleted"
+        );
+        assert!(
+            git_cmd(&fixture.repo, &["branch", "--list", "agent/b"])
+                .trim()
+                .is_empty(),
+            "agent/b should be deleted"
+        );
+        let main_row = state
+            .workbench_worktree_repo
+            .get(&main_id)
+            .await
+            .unwrap()
+            .expect("main worktree row must remain");
+        assert!(main_row.is_main);
+        let _ = fixture.root;
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     live 主工作区有未提交改动时绝不能开始收集合并，否则会弄丢用户工作。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入未跟踪文件后调用 ledger merge，断言 checkSource 失败。
+    #[tokio::test]
+    async fn collect_merge_dirty_live_fails_check_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fixture = setup_collect_merge_repo(temp.path());
+        fs::write(fixture.repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+        let state = build_collect_merge_state(temp.path(), &fixture.repo).await;
+        let error = local_merge_workbench_worktree_with_ledger(
+            &state,
+            main_worktree_id(COLLECT_PROJECT_ID),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect_err("dirty live must fail collect-merge");
+        let message = error.to_string();
+        assert!(
+            message.contains("未提交改动"),
+            "expected dirty checkSource error, got {message}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     只有 home、没有可收集分支时不能凭空跑 isolation merge。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     仅 main 分支的仓库调用 ledger merge，断言 validation/generic 错误。
+    #[tokio::test]
+    async fn collect_merge_without_collectible_branches_fails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = setup_main_only_repo(temp.path());
+        let state = build_collect_merge_state(temp.path(), &repo).await;
+        let error = local_merge_workbench_worktree_with_ledger(
+            &state,
+            main_worktree_id(COLLECT_PROJECT_ID),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect_err("empty collectible set must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("没有可收集") || message.contains("可收集"),
+            "expected no-collectible error, got {message}"
+        );
+    }
 }

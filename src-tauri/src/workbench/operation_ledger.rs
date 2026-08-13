@@ -332,6 +332,17 @@ pub enum MutationIntent {
         #[serde(rename = "mainHead")]
         main_head: String,
     },
+    CollectMerge {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "worktreeId")]
+        worktree_id: String,
+        #[serde(rename = "homeBranch")]
+        home_branch: String,
+        #[serde(rename = "homeOid")]
+        home_oid: String,
+        sources: Vec<CollectMergeSource>,
+    },
     Remove {
         #[serde(rename = "projectId")]
         project_id: String,
@@ -342,6 +353,20 @@ pub enum MutationIntent {
     },
 }
 
+/// 主工作区 collect-merge 冻结的一条源分支。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     collect-merge 必须按冻结 name+oid 对账，不能在执行期再解析可能漂移的分支 tip。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{name, oid}`，供 intent / canonical payload / confirm 共用。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectMergeSource {
+    pub name: String,
+    pub oid: String,
+}
+
 impl MutationIntent {
     /// Business Logic: 查询 DTO 需要带上 kind。
     /// Code Logic: 从 intent variant 映射 MutationKind。
@@ -349,7 +374,7 @@ impl MutationIntent {
         match self {
             Self::Commit { .. } => MutationKind::Commit,
             Self::Push { .. } => MutationKind::Push,
-            Self::Merge { .. } => MutationKind::Merge,
+            Self::Merge { .. } | Self::CollectMerge { .. } => MutationKind::Merge,
             Self::Remove { .. } => MutationKind::Remove,
         }
     }
@@ -361,16 +386,18 @@ impl MutationIntent {
             Self::Commit { project_id, .. }
             | Self::Push { project_id, .. }
             | Self::Merge { project_id, .. }
+            | Self::CollectMerge { project_id, .. }
             | Self::Remove { project_id, .. } => project_id,
         }
     }
 
-    /// Business Logic: 列表/过滤需要 worktree_id（merge 用 source）。
+    /// Business Logic: 列表/过滤需要 worktree_id（feature merge 用 source，collect-merge 用主工作区）。
     /// Code Logic: 提取 worktree 身份。
     pub fn worktree_id(&self) -> &str {
         match self {
             Self::Commit { worktree_id, .. }
             | Self::Push { worktree_id, .. }
+            | Self::CollectMerge { worktree_id, .. }
             | Self::Remove { worktree_id, .. } => worktree_id,
             Self::Merge {
                 source_worktree_id, ..
@@ -753,6 +780,25 @@ pub fn canonical_merge_payload(worktree_id: &str) -> Value {
     })
 }
 
+/// Business Logic: collect-merge payload 必须绑定 home 与源集合，换源不能 silently 复用同一 id。
+/// Code Logic: kind+worktreeId+homeBranch+homeOid+按 name/oid 排序的 sources。
+pub fn canonical_collect_merge_payload(
+    worktree_id: &str,
+    home_branch: &str,
+    home_oid: &str,
+    sources: &[CollectMergeSource],
+) -> Value {
+    let mut sources = sources.to_vec();
+    sources.sort_by(|left, right| left.name.cmp(&right.name).then(left.oid.cmp(&right.oid)));
+    serde_json::json!({
+        "homeBranch": home_branch,
+        "homeOid": home_oid,
+        "kind": "collectMerge",
+        "sources": sources,
+        "worktreeId": worktree_id,
+    })
+}
+
 /// Business Logic: remove payload 含 force 开关。
 /// Code Logic: kind+worktreeId+force。
 pub fn canonical_remove_payload(worktree_id: &str, force: bool) -> Value {
@@ -812,6 +858,13 @@ pub fn confirm_mutation(
                 authority.source_worktree_present,
             ) {
                 (Some(true), Some(false)) => MutationConfirmResult::ConfirmedSucceeded,
+                _ => MutationConfirmResult::Unknown,
+            }
+        }
+        MutationIntent::CollectMerge { .. } => {
+            // home 已包含全部冻结 source oid 即成功；主 worktree 会留下，不得套用 Merge 的“源消失”规则。
+            match authority.main_contains_source_head {
+                Some(true) => MutationConfirmResult::ConfirmedSucceeded,
                 _ => MutationConfirmResult::Unknown,
             }
         }
@@ -1336,6 +1389,77 @@ mod tests {
         assert_ne!(
             hash_canonical_payload(&a).unwrap(),
             hash_canonical_payload(&c).unwrap()
+        );
+    }
+
+    #[test]
+    fn collect_merge_intent_kind_and_confirm_does_not_require_source_absent() {
+        let collect = MutationIntent::CollectMerge {
+            project_id: "p".into(),
+            worktree_id: "p:main".into(),
+            home_branch: "main".into(),
+            home_oid: "home1".into(),
+            sources: vec![
+                CollectMergeSource {
+                    name: "agent/a".into(),
+                    oid: "aaa".into(),
+                },
+                CollectMergeSource {
+                    name: "agent/b".into(),
+                    oid: "bbb".into(),
+                },
+            ],
+        };
+        assert_eq!(collect.kind(), MutationKind::Merge);
+        assert_eq!(collect.project_id(), "p");
+        assert_eq!(collect.worktree_id(), "p:main");
+        assert_eq!(
+            serde_json::to_value(&collect).unwrap()["kind"],
+            "collectMerge"
+        );
+        assert_eq!(
+            confirm_mutation(
+                &collect,
+                &MutationAuthoritySnapshot {
+                    main_contains_source_head: Some(true),
+                    source_worktree_present: Some(true),
+                    ..Default::default()
+                }
+            ),
+            MutationConfirmResult::ConfirmedSucceeded
+        );
+        assert_eq!(
+            confirm_mutation(&collect, &MutationAuthoritySnapshot::default()),
+            MutationConfirmResult::Unknown
+        );
+    }
+
+    #[test]
+    fn collect_merge_payload_hash_differs_by_source_set() {
+        let sources_ab = vec![
+            CollectMergeSource {
+                name: "agent/a".into(),
+                oid: "aaa".into(),
+            },
+            CollectMergeSource {
+                name: "agent/b".into(),
+                oid: "bbb".into(),
+            },
+        ];
+        let collect_a = canonical_collect_merge_payload("p:main", "main", "home1", &sources_ab);
+        let collect_b = canonical_collect_merge_payload("p:main", "main", "home1", &sources_ab);
+        assert_eq!(
+            hash_canonical_payload(&collect_a).unwrap(),
+            hash_canonical_payload(&collect_b).unwrap()
+        );
+        let sources_only_a = vec![CollectMergeSource {
+            name: "agent/a".into(),
+            oid: "aaa".into(),
+        }];
+        let collect_c = canonical_collect_merge_payload("p:main", "main", "home1", &sources_only_a);
+        assert_ne!(
+            hash_canonical_payload(&collect_a).unwrap(),
+            hash_canonical_payload(&collect_c).unwrap()
         );
     }
 
