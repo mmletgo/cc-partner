@@ -244,3 +244,21 @@ describe('applyWorkspaceRestorePlan', () => {
     expect(summary?.restoredCount).toBe(4);
   });
 });
+
+describe('classifyLayoutApplyError', () => {
+  it('maps revision conflict and not-found to stable reason codes', () => {
+    expect(
+      classifyLayoutApplyError({
+        code: 'conflict',
+        message: 'workspace_layout_revision_changed',
+      }),
+    ).toBe('layoutRevisionChanged');
+    expect(
+      classifyLayoutApplyError({
+        code: 'not_found',
+        message: 'workspace_layout_not_found',
+      }),
+    ).toBe('layoutMissing');
+    expect(classifyLayoutApplyError(new Error('apply boom'))).toBe('applyFailed');
+  });
+});

@@ -537,4 +537,67 @@ describe('useWorkspaceSafeRestore — apply failure rolls back previous view', (
     expect(hook.current.restoreSummary?.status).toBe('partial');
     expect(hook.current.restoreSummary?.reasons).toContain('applyFailed');
   });
+
+  test('server apply revision conflict surfaces layoutRevisionChanged', async () => {
+    layoutApi.preflight.mockResolvedValue(
+      buildPlan({ workspaceView: 'files', inspectorTab: 'history' }),
+    );
+    layoutApi.apply.mockRejectedValue(
+      Object.assign(new Error('workspace_layout_revision_changed'), {
+        code: 'conflict',
+      }),
+    );
+
+    const { hook } = makeHarness({
+      projectsLoading: false,
+      projectsLength: 1,
+      activeProjectId: 'old-p',
+      activeWorktreeId: 'old-w',
+      activeSessionId: null,
+      workspaceView: 'browser',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    });
+
+    expect(hook.current.restoreSummary?.reasons).toEqual(['layoutRevisionChanged']);
+  });
+
+  test('autosave does not persist incomplete selection while restore preflight is in flight', async () => {
+    vi.useFakeTimers();
+    let resolvePreflight: ((plan: WorkspaceRestorePlan) => void) | undefined;
+    layoutApi.preflight.mockImplementation(
+      () =>
+        new Promise<WorkspaceRestorePlan>((resolve) => {
+          resolvePreflight = resolve;
+        }),
+    );
+
+    makeHarness({
+      projectsLoading: false,
+      projectsLength: 1,
+      activeProjectId: 'p1',
+      activeWorktreeId: null,
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(layoutApi.save).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePreflight?.(buildPlan({ workspaceView: 'files' }));
+      await vi.runAllTimersAsync();
+    });
+    expect(layoutApi.apply).toHaveBeenCalledTimes(1);
+  });
 });

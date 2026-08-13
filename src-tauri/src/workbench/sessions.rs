@@ -1184,8 +1184,17 @@ fn tmux_force_redraw_bump_rows(rows: u16) -> u16 {
 /// Code Logic（这个函数做什么）:
 ///     生成一组浅色/深色都安全的 tmux status option 命令；保留 session/window 标签结构，但不保留全局 tmux 主题里的硬编码颜色。
 ///     强制 `status-position bottom`，避免用户全局 `status-position top` 或错位状态在重启后残留。
+///     强制 session-local `mouse off`：用户全局 `mouse on` 时滚轮会进 copy-mode（浏览模式），
+///     键盘被 tmux 吞掉，必须 Ctrl+C 才能恢复输入。工作台复制走 xterm 选区，不依赖 tmux 鼠标。
 fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
     vec![
+        vec![
+            "set-option".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+            "mouse".to_string(),
+            "off".to_string(),
+        ],
         vec![
             "set-option".to_string(),
             "-t".to_string(),
@@ -7950,9 +7959,10 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     工作台浅色/深色主题切换时，tmux 底部 status bar 不应继承用户 tmux 配置里的深色背景、彩色右侧时间或 underline。
+    ///     用户全局 `mouse on` 时滚轮会进 copy-mode（浏览模式），键盘被 tmux 吃掉，必须 session-local 强制 mouse off。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 Workbench 使用无内嵌颜色的 status/window format，强制 status-position=bottom，并保留 session/window 标签结构。
+    ///     断言 Workbench 使用无内嵌颜色的 status/window format，强制 status-position=bottom 与 mouse=off，并保留 session/window 标签结构。
     #[test]
     fn tmux_status_theme_commands_use_light_safe_label_style() {
         let commands = tmux_status_theme_commands("cc-partner-project-project1234abcd");
@@ -7960,6 +7970,13 @@ mod tests {
         assert_eq!(
             commands,
             vec![
+                vec![
+                    "set-option",
+                    "-t",
+                    "cc-partner-project-project1234abcd",
+                    "mouse",
+                    "off",
+                ],
                 vec![
                     "set-option",
                     "-t",

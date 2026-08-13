@@ -130,4 +130,27 @@ describe('WorkspaceLayoutAutosaveCoordinator', () => {
     expect(saved.at(-1)?.projectId).toBe('p2');
     expect(revision).toBe(3);
   });
+
+  it('pause cancels a pending debounce and blocks flush until resume', async () => {
+    vi.useFakeTimers();
+    const save = vi.fn(async (draft: WorkspaceLayoutDraft, expected: number | null) =>
+      layoutFromDraft(draft, (expected ?? 0) + 1),
+    );
+    const fixture = new WorkspaceLayoutAutosaveCoordinator({
+      save,
+      get: async () => null,
+      select: () => baseSelection(),
+    });
+    fixture.notifySelectionChanged();
+    fixture.pause();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(save).not.toHaveBeenCalled();
+    await fixture.flush();
+    expect(save).not.toHaveBeenCalled();
+    fixture.resume();
+    fixture.notifySelectionChanged();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(save).toHaveBeenCalledTimes(1);
+    fixture.dispose();
+  });
 });

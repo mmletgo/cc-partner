@@ -153,6 +153,8 @@ export class WorkspaceLayoutAutosaveCoordinator {
   private readonly clearSchedule: (id: ReturnType<typeof setTimeout>) => void;
   private readonly savedDrafts: WorkspaceLayoutDraft[] = [];
   private saving = false;
+  /** restore / named snapshot apply 期间禁止写 layout，避免冲掉 preflight revision。 */
+  private paused = false;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -200,11 +202,32 @@ export class WorkspaceLayoutAutosaveCoordinator {
    * Code Logic（这个函数做什么）:
    *   重置 500ms timer；无 project 时不写不删。
    */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   启动 restore / 命名 snapshot apply 不得被 500ms autosave 抢写 revision。
+   *
+   * Code Logic（这个函数做什么）:
+   *   置 paused 并取消未触发的 debounce。
+   */
+  pause(): void {
+    this.paused = true;
+    this.clearPendingTimer();
+  }
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   restore 结束后恢复正常 autosave。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清 paused；不自动 flush，由调用方 notify。
+   */
+  resume(): void {
+    this.paused = false;
+  }
+
   notifySelectionChanged(): void {
-    if (this.timer != null) {
-      this.clearSchedule(this.timer);
-      this.timer = null;
-    }
+    this.clearPendingTimer();
+    if (this.paused) return;
     this.timer = this.schedule(() => {
       this.timer = null;
       void this.flush();
@@ -230,7 +253,7 @@ export class WorkspaceLayoutAutosaveCoordinator {
    *   build draft → save_cas；conflict 则 reread 并从当前 select 重算。
    */
   async flush(): Promise<void> {
-    if (this.saving) return;
+    if (this.paused || this.saving) return;
     const draft = buildWorkspaceLayoutDraft(this.select());
     if (!draft) {
       // 无 project：不写空 layout，不删除旧 layout
@@ -285,10 +308,20 @@ export class WorkspaceLayoutAutosaveCoordinator {
    *   clearTimeout。
    */
   dispose(): void {
-    if (this.timer != null) {
-      this.clearSchedule(this.timer);
-      this.timer = null;
-    }
+    this.clearPendingTimer();
+  }
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   pause / notify / dispose 共用取消 debounce。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清 timer。
+   */
+  private clearPendingTimer(): void {
+    if (this.timer == null) return;
+    this.clearSchedule(this.timer);
+    this.timer = null;
   }
 }
 

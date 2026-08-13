@@ -26,6 +26,7 @@ import {
 } from './workspaceLayout';
 import {
   applyWorkspaceRestorePlan,
+  classifyLayoutApplyError,
   type WorkspaceRestorePlan,
   type WorkspaceRestoreSummary,
 } from './workspaceRestore';
@@ -296,6 +297,7 @@ export function useWorkspaceSafeRestore(
       forceTerminalWorkspaceView?: boolean;
     }): Promise<WorkspaceRestoreSummary | null> => {
       suppressContextResetRef.current = true;
+      layoutAutosaveRef.current?.pause();
       const bridgeOptions = { forceTerminalWorkspaceView: options.forceTerminalWorkspaceView };
       try {
         const plan = await options.loadPlan();
@@ -303,7 +305,7 @@ export function useWorkspaceSafeRestore(
         try {
           const applied = await workbenchApi.layout.apply(plan);
           appliedPlan = mergeAppliedPlan(plan, applied);
-        } catch {
+        } catch (error) {
           // apply 失败：不得继续 UI selection 触发 list-restore 误路径；回滚 previous
           await buildBridge(bridgeOptions).applySelectionSnapshot(options.previous);
           return {
@@ -311,7 +313,7 @@ export function useWorkspaceSafeRestore(
             status: 'partial',
             restoredCount: 0,
             skippedCount: plan.actions.length,
-            reasons: ['applyFailed'],
+            reasons: [classifyLayoutApplyError(error)],
             silent: false,
             dirtyEditorPreserved: options.previous.dirtyEditor,
           };
@@ -326,6 +328,8 @@ export function useWorkspaceSafeRestore(
         await new Promise<void>((resolve) => {
           window.setTimeout(() => {
             suppressContextResetRef.current = false;
+            layoutAutosaveRef.current?.resume();
+            layoutAutosaveRef.current?.notifySelectionChanged();
             resolve();
           }, 50);
         });
@@ -352,12 +356,21 @@ export function useWorkspaceSafeRestore(
       },
     });
     layoutAutosaveRef.current = coordinator;
+    // 首次 restore 完成前保持 pause：项目列表若晚于 500ms 才就绪，
+    // 否则会把 localStorage 里的半成品 selection 写脏 revision。
+    coordinator.pause();
     void coordinator.hydrateRevision();
     return () => {
       coordinator.dispose();
       layoutAutosaveRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!projectsLoading && projectsLength === 0) {
+      layoutAutosaveRef.current?.resume();
+    }
+  }, [projectsLoading, projectsLength]);
 
   useEffect(() => {
     layoutAutosaveRef.current?.notifySelectionChanged();
@@ -373,6 +386,8 @@ export function useWorkspaceSafeRestore(
   useEffect(() => {
     if (restoreRanRef.current || projectsLoading || projectsLength === 0) return;
     restoreRanRef.current = true;
+    // 必须同步 pause：500ms autosave 可能在 preflight 完成前把空 selection 写脏 revision。
+    layoutAutosaveRef.current?.pause();
     const previous = {
       projectId: selectionRef.current.activeProjectId,
       worktreeId: selectionRef.current.activeWorktreeId,

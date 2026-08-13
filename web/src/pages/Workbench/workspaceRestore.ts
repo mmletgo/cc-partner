@@ -221,6 +221,46 @@ export function formatRestoreNotice(summary: WorkspaceRestoreSummary): string {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   apply 整单失败时 notice 必须露出稳定 code，不能只写 applyFailed。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 Error.code / message 映射有界 reason。
+ */
+export function classifyLayoutApplyError(error: unknown): string {
+  const code = extractApplyErrorField(error, 'code');
+  const message = extractApplyErrorField(error, 'message');
+  const haystack = `${code} ${message}`;
+  if (haystack.includes('workspace_layout_revision_changed')) {
+    return 'layoutRevisionChanged';
+  }
+  if (haystack.includes('workspace_layout_not_found')) {
+    return 'layoutMissing';
+  }
+  return 'applyFailed';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   invoke reject 可能是 Error 或 {code,message} 对象。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读指定字符串字段。
+ */
+function extractApplyErrorField(error: unknown, key: 'code' | 'message'): string {
+  if (error instanceof Error) {
+    if (key === 'message') return error.message;
+    const record = error as Error & { code?: unknown };
+    return typeof record.code === 'string' ? record.code : '';
+  }
+  if (error && typeof error === 'object') {
+    const value = (error as Record<string, unknown>)[key];
+    return typeof value === 'string' ? value : '';
+  }
+  return '';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   保证动作应用顺序与后端 preflight 一致。
  *
  * Code Logic（这个函数做什么）:
