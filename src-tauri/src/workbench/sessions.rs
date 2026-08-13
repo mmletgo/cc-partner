@@ -31,6 +31,12 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+/// Workbench 需要向 tmux 声明的外层终端鼠标能力。
+const WORKBENCH_TMUX_MOUSE_FEATURE: &str = "xterm*:mouse";
+
+/// 同一后端进程内串行化 server-level terminal-features 对账，避免并发 session 同时追加。
+static TMUX_TERMINAL_FEATURE_RECONCILE_LOCK: Mutex<()> = Mutex::new(());
+
 /// 预分配 agent session id 暂存（create → spawn_row 窗口内）。
 ///
 /// Business Logic（为什么需要这个 map）:
@@ -1186,9 +1192,9 @@ fn tmux_force_redraw_bump_rows(rows: u16) -> u16 {
 ///     强制 `status-position bottom`，避免用户全局 `status-position top` 或错位状态在重启后残留。
 ///     强制 session-local `mouse off`：用户全局 `mouse on` 时滚轮会进 copy-mode（浏览模式），
 ///     键盘被 tmux 吞掉，必须 Ctrl+C 才能恢复输入。工作台复制走 xterm 选区，不依赖 tmux 鼠标。
-///     同时 `-sa terminal-features xterm*:mouse`：默认 features 不含 mouse 时，Claude 的 DECSET
+///     同时幂等确保 `terminal-features` 含 `xterm*:mouse`：默认 features 不含 mouse 时，Claude 的 DECSET
 ///     1000/1006 到不了外层 xterm，滚轮会被译成 ↑/↓ 并被输入框当成历史 prompt。mouse 能力
-///     只让应用鼠标序列透传，不会打开 tmux 自己的 mouse/copy-mode。
+///     只让应用鼠标序列透传，不会打开 tmux 自己的 mouse/copy-mode；重复项由独立对账步骤清理。
 fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
     vec![
         vec![
@@ -1197,12 +1203,6 @@ fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
             session_name.to_string(),
             "mouse".to_string(),
             "off".to_string(),
-        ],
-        vec![
-            "set-option".to_string(),
-            "-sa".to_string(),
-            "terminal-features".to_string(),
-            "xterm*:mouse".to_string(),
         ],
         vec![
             "set-option".to_string(),
@@ -1285,6 +1285,84 @@ fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Workbench 会在创建、恢复、聚焦和调整多个 tmux window 时重复套用终端主题。若每次都用
+///     `set-option -sa terminal-features xterm*:mouse`，server array 会无限增长；同时不能为了清理
+///     Workbench 自己的重复项而覆盖用户配置的其他 terminal feature。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 `show-options -s terminal-features`：已有精确 Workbench 项时保留最小下标并按倒序删除
+///     其余精确重复项；已有等价 `xterm*:...:mouse` 时不追加；完全缺失时仅追加一次。
+fn tmux_terminal_mouse_feature_reconcile_commands(output: &str) -> Vec<Vec<String>> {
+    let mut exact_indices = Vec::new();
+    let mut equivalent_feature_exists = false;
+
+    for line in output.lines() {
+        let Some((name, raw_value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Some(index) = name
+            .strip_prefix("terminal-features[")
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let value = raw_value.trim();
+        if value == WORKBENCH_TMUX_MOUSE_FEATURE {
+            exact_indices.push(index);
+            equivalent_feature_exists = true;
+            continue;
+        }
+        let mut parts = value.split(':');
+        if parts.next() == Some("xterm*") && parts.any(|feature| feature == "mouse") {
+            equivalent_feature_exists = true;
+        }
+    }
+
+    exact_indices.sort_unstable();
+    let mut commands = exact_indices
+        .into_iter()
+        .skip(1)
+        .rev()
+        .map(|index| {
+            vec![
+                "set-option".to_string(),
+                "-su".to_string(),
+                format!("terminal-features[{index}]"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    if !equivalent_feature_exists {
+        commands.push(vec![
+            "set-option".to_string(),
+            "-sa".to_string(),
+            "terminal-features".to_string(),
+            WORKBENCH_TMUX_MOUSE_FEATURE.to_string(),
+        ]);
+    }
+    commands
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 必须让 Claude 等 TUI 的 mouse DECSET 穿过 tmux，同时长期运行不能持续污染
+///     tmux server array，已有用户 terminal-features 也必须原样保留。
+///
+/// Code Logic（这个函数做什么）:
+///     在进程级锁内读取 server array，执行纯函数规划出的最小 unset/append 命令，最终精确
+///     `xterm*:mouse` 至多一项；任一 tmux 命令失败则返回错误，由既有调用方降级记录。
+fn reconcile_workbench_tmux_terminal_mouse_feature(tmux: &TmuxCommand) -> Result<(), AppError> {
+    let _guard = TMUX_TERMINAL_FEATURE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let output = run_tmux_command(tmux, &["show-options", "-s", "terminal-features"])?;
+    for args in tmux_terminal_mouse_feature_reconcile_commands(&output) {
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        run_tmux_command(tmux, &arg_refs)?;
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户切换应用浅色/深色主题后，tmux status bar 应随 xterm 默认色变化，而不是停留在用户 tmux 主题色。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1293,6 +1371,7 @@ fn apply_workbench_tmux_status_theme(
     tmux: &TmuxCommand,
     session_name: &str,
 ) -> Result<(), AppError> {
+    reconcile_workbench_tmux_terminal_mouse_feature(tmux)?;
     for args in tmux_status_theme_commands(session_name) {
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         run_tmux_command(tmux, &arg_refs)?;
@@ -7963,11 +8042,11 @@ mod tests {
     /// Business Logic（为什么需要这个测试）:
     ///     工作台浅色/深色主题切换时，tmux 底部 status bar 不应继承用户 tmux 配置里的深色背景、彩色右侧时间或 underline。
     ///     用户全局 `mouse on` 时滚轮会进 copy-mode（浏览模式），键盘被 tmux 吃掉，必须 session-local 强制 mouse off。
-    ///     同时必须宣告 `xterm*:mouse`，否则 Claude DECSET 到不了 xterm，滚轮会变成方向键。
+    ///     同时必须宣告 `xterm*:mouse`，但配置必须幂等，否则每次套用主题都会污染 server array。
     ///
     /// Code Logic（这个测试做什么）:
     ///     断言 Workbench 使用无内嵌颜色的 status/window format，强制 status-position=bottom、mouse=off
-    ///     与 terminal-features xterm*:mouse，并保留 session/window 标签结构。
+    ///     主题命令不得无条件追加 terminal-features；mouse capability 由独立幂等步骤维护。
     #[test]
     fn tmux_status_theme_commands_use_light_safe_label_style() {
         let commands = tmux_status_theme_commands("cc-partner-project-project1234abcd");
@@ -7982,7 +8061,6 @@ mod tests {
                     "mouse",
                     "off",
                 ],
-                vec!["set-option", "-sa", "terminal-features", "xterm*:mouse",],
                 vec![
                     "set-option",
                     "-t",
@@ -8099,6 +8177,51 @@ mod tests {
             tmux_force_redraw_bump_rows(MIN_TERMINAL_ROWS),
             MIN_TERMINAL_ROWS + 1
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     长时间使用 Workbench 不得让 tmux server 的 terminal-features 随每次主题套用无限增长，
+    ///     清理时也不能破坏用户已有的 screen/RGB/clipboard 等能力。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖缺失时单次追加、精确重复时保留首项并倒序删除、复合 xterm mouse 已存在时 no-op。
+    #[test]
+    fn tmux_terminal_mouse_feature_reconcile_is_idempotent_and_preserves_other_entries() {
+        let defaults = concat!(
+            "terminal-features[0] xterm*:clipboard:ccolour:cstyle:focus:title\n",
+            "terminal-features[1] screen*:title\n",
+            "terminal-features[2] *:RGB\n",
+        );
+        assert_eq!(
+            tmux_terminal_mouse_feature_reconcile_commands(defaults),
+            vec![vec![
+                "set-option",
+                "-sa",
+                "terminal-features",
+                "xterm*:mouse",
+            ]]
+        );
+
+        let duplicated = concat!(
+            "terminal-features[0] xterm*:clipboard:ccolour:cstyle:focus:title\n",
+            "terminal-features[4] xterm*:mouse\n",
+            "terminal-features[5] screen*:mouse\n",
+            "terminal-features[7] xterm*:mouse\n",
+            "terminal-features[9] xterm*:mouse\n",
+        );
+        assert_eq!(
+            tmux_terminal_mouse_feature_reconcile_commands(duplicated),
+            vec![
+                vec!["set-option", "-su", "terminal-features[9]"],
+                vec!["set-option", "-su", "terminal-features[7]"],
+            ]
+        );
+
+        let equivalent = concat!(
+            "terminal-features[0] xterm*:clipboard:mouse:title\n",
+            "terminal-features[1] screen*:title\n",
+        );
+        assert!(tmux_terminal_mouse_feature_reconcile_commands(equivalent).is_empty());
     }
 
     /// Business Logic（为什么需要这个测试）:

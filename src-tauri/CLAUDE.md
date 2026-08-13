@@ -635,6 +635,7 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 
 ## 关键约定
 
+- **Workbench tmux mouse capability 幂等**：`workbench/sessions.rs` 套用 status theme 前必须对账 server array `terminal-features[]`；精确 `xterm*:mouse` 缺失时追加一次，重复时保留首项并仅删除其余精确重复项，复合 `xterm*:...:mouse` 视为已满足；不得用 `set-option -sa` 在每个 session/theme 调用中无条件追加，也不得覆盖用户其他 terminal feature。
 - **主窗口启动形态**：`tauri.conf.json` 的主窗口用 `maximized: true`（启动即最大化占满屏幕工作区，但**不**进入 macOS 原生全屏 Space，菜单栏/Dock 仍可见、可切其他窗口）。**禁止**改回 `fullscreen: true`：macOS 原生全屏模式下 WKWebView 的弹性滚动（rubber-band）会吞掉鼠标滚轮事件，导致工作台 xterm 终端无法上下滚动（CSS `overscroll-behavior` 无法可靠修复，业界只能 native 层 `webView.scrollView.bounces=false`，wry 未暴露该开关）。也不要在 `lib.rs` setup 或前端启动流程里再写一套运行时全屏/最大化逻辑，避免与 Tauri 静态窗口配置互相覆盖。
 - **数据兼容**：直接读写 `~/.cc-partner/data.db`。两阶段迁移——(1) 首次启动目录级 `config_dir()` 用 `fs::rename` 把 `~/.claude-partner` 整目录搬到 `~/.cc-partner`（**只动目录、不动文件内容**）；(2) 之后 `AppConfig::load()` 检测到 config.json 里残留的旧绝对路径（`db_path` 字段仍指向 `~/.claude-partner/data.db`），按 home 目录做字段级前缀替换并 save——否则 `init_db` 找不到文件会 SQLITE_CANTOPEN panic。迁移 SQL 全用 `CREATE TABLE IF NOT EXISTS`，保用户数据。`tags`/`vector_clock` 仍是标准 JSON TEXT（与 Python `json.dumps` 互通）；`datetime` 需兼容有无时区偏移两种格式。
 - **版本号单一来源**：`tauri.conf.json` 的 `version`；Rust 用 `env!("CARGO_PKG_VERSION")`；前端 `useAppVersion` 经 invoke 获取，禁止硬编码。发版时统一用 `scripts/bump-version.mjs` 同步源码清单与锁文件版本，详见 M9 节。
