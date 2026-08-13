@@ -282,7 +282,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells；legacy matrix 兼容） |
-| WorkbenchProjectRail | - | 侧栏设置项下方的项目文件夹入口 |
+| WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口） |
 | WorkbenchRemoteProjectPicker | onProjectOpened, onCancel, openProject | Workbench 局域网远端项目目录选择器 |
 | WorkbenchDependencyCard | compact, className | Workbench tmux 依赖状态与安装引导卡片 |
 | WorkbenchCodeEditor | value, language, readOnly, onChange | Workbench 代码/源码文件的 CodeMirror 编辑器 |

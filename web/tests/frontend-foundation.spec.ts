@@ -759,13 +759,14 @@ test.describe('frontend foundation smoke', () => {
       const nav = page.getByRole('navigation', { name: '主导航' });
       await expect(nav).toBeVisible({ timeout: 15_000 });
 
-      // 主导航与「继续工作」入口可键盘到达
-      await expect(nav.locator('a[href="/workbench"]').first()).toBeVisible();
-      const workbenchTabIndex = await nav
-        .locator('a[href="/workbench"]')
-        .first()
-        .evaluate((el) => (el as HTMLElement).tabIndex);
-      expect(workbenchTabIndex).toBeGreaterThanOrEqual(0);
+      // Workbench 入口是项目列表，不再占独立主导航项
+      await expect(nav.locator('a[href="/workbench"]')).toHaveCount(0);
+      const projectRail = page.getByRole('region', { name: '工作台项目' });
+      await expect(projectRail).toBeVisible();
+      const addProject = projectRail.getByRole('button', { name: '添加项目' });
+      await expect(addProject).toBeVisible();
+      const addProjectTabIndex = await addProject.evaluate((el) => (el as HTMLElement).tabIndex);
+      expect(addProjectTabIndex).toBeGreaterThanOrEqual(0);
 
       const metrics = await page.evaluate(() => {
         const doc = document.documentElement;

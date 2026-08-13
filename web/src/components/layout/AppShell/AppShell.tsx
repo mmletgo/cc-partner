@@ -7,13 +7,14 @@
  *   窗口标题栏由 PyQt6 原生提供，无需 Web 端自绘。
  *   侧边栏 footer 区域集中展示版本号、语言/主题/设置与移动端访问入口；
  *   设置固定在 footer，避免小屏滚动才能看到。
- *   主导航按 Explore/Work/Knowledge/Connect/System 分组，短窗口下可滚动。
+ *   主导航按 Explore/Work/Knowledge/System 分组，短窗口下可滚动；
+ *   Workbench 入口是 Work 组内项目列表，不占独立主导航项。
  *
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
  *   - Sidebar 内包含 Logo、分组导航（section + 非聚焦 group label）、
  *     Work 组内 ProjectRail、footer（版本号 + 语言/主题/设置齿轮 + 手机访问按钮）
- *   - 设置入口为 footer NavLink(`/settings`)，System 组仅保留健康提醒
+ *   - 设置入口为 footer NavLink(`/settings`)，System 组保留健康提醒与 Provider 管理
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
@@ -37,7 +38,6 @@ import {
   AlertIcon,
   SmartphoneIcon,
   XIcon,
-  FolderIcon,
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
 import { useAttention } from '../../../hooks/useAttention';
@@ -183,7 +183,6 @@ export function AppShell({ children }: AppShellProps) {
             <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
           </NavGroup>
           <NavGroup id={NAV_GROUP_IDS.work} label={t('nav:groups.work')}>
-            <NavItem to="/workbench" label={t('nav:workbench')} icon={<FolderIcon />} />
             <NavItem
               to="/attention"
               label={t('nav:attention')}

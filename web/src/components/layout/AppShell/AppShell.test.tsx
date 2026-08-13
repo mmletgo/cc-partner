@@ -2,10 +2,11 @@
  * AppShell 导航分组与侧栏滚动合同测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   侧栏主导航按 Explore/Work/Knowledge/Connect/System 分组，
+ *   侧栏主导航按 Explore/Work/Knowledge/System 分组，
  *   短窗口下 content 独立滚动且 footer 不被覆盖；分组标签不可聚焦，
  *   Trending 仍是 Home `/`，不得出现 Discover 重复入口；
- *   设置入口固定在 footer，不在主导航 System 组。
+ *   设置入口固定在 footer，不在主导航 System 组；
+ *   Workbench 入口是 Work 组内 ProjectRail，不再占独立「工作台」主导航项。
  *
  * Code Logic（这个测试做什么）:
  *   mock 版本/Attention/ProjectRail/权限徽章与 MobileAccessCard；
@@ -98,7 +99,7 @@ function collectNavHrefs(nav: HTMLElement): string[] {
 }
 
 describe('AppShell grouped navigation', () => {
-  test('renders Work/Knowledge/Connect/System group labels as non-focusable section titles', () => {
+  test('renders Explore/Work/Knowledge/System group labels as non-focusable section titles', () => {
     renderShell();
 
     const expected = [
@@ -125,7 +126,6 @@ describe('AppShell grouped navigation', () => {
 
     expect(hrefs).toEqual([
       '/',
-      '/workbench',
       '/attention',
       '/transfer',
       '/prompts',
@@ -137,6 +137,7 @@ describe('AppShell grouped navigation', () => {
       '/provider-manager',
     ]);
     expect(hrefs.filter((href) => href === '/discover')).toHaveLength(0);
+    expect(hrefs.filter((href) => href === '/workbench')).toHaveLength(0);
     expect(hrefs.filter((href) => href === '/')).toHaveLength(1);
     expect(hrefs.filter((href) => href === '/settings')).toHaveLength(0);
   });
@@ -154,7 +155,7 @@ describe('AppShell grouped navigation', () => {
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
     const links = within(nav).getAllByRole('link');
-    expect(links).toHaveLength(11);
+    expect(links).toHaveLength(10);
 
     for (const link of links) {
       const tabIndex = link.getAttribute('tabindex');
@@ -164,7 +165,7 @@ describe('AppShell grouped navigation', () => {
     const workSection = document.getElementById('nav-group-work')?.closest('section');
     expect(workSection).toBeTruthy();
     expect(within(workSection as HTMLElement).getByTestId('project-rail')).toBeTruthy();
-    expect(within(workSection as HTMLElement).getByRole('link', { name: /工作台/ })).toBeTruthy();
+    expect(within(workSection as HTMLElement).queryByRole('link', { name: /工作台/ })).toBeNull();
   });
 
   test('sidebar content scroll contract uses min-height 0 and overflow-y auto', () => {
