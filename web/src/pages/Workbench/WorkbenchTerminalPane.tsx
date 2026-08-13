@@ -32,7 +32,7 @@ import {
 import { installWorkbenchTerminalSelectionOverrides } from './terminalSelectionOverrides';
 import {
   consumeWorkbenchTerminalWheelLines,
-  encodeTerminalSgrWheelReports,
+  encodeTerminalPageScrollKeys,
   resolveWorkbenchTerminalWheelAction,
   type WorkbenchTerminalBufferType,
   type WorkbenchTerminalMouseTrackingMode,
@@ -174,7 +174,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const selectPaneDecideTimerRef = useRef<number | null>(null);
   // Business Logic: resize/theme 后 cell 尺寸会变；缓存 metrics，避免每个 onCursorMove 强制布局。
   const cursorMetricsRef = useRef<TerminalCursorMetrics | null>(null);
-  // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发 SGR 64/65。
+  // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发一次 PageUp/PageDown。
   const wheelRemainderRef = useRef(0);
   const sessionId = session?.id ?? null;
   const store = useWorkbenchTerminalBufferStore();
@@ -209,10 +209,11 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     /**
      * Business Logic（为什么需要这个函数）:
      *   Claude resume 后停在 alternate screen。tmux 未宣告 xterm*:mouse 时 DECSET 到不了 xterm，
-     *   xterm 6 会把滚轮译成 ↑/↓，Claude 输入框当成历史 prompt。TUI 需要 SGR 64/65。
+     *   xterm 6 会把滚轮译成 ↑/↓，Claude 输入框当成历史 prompt。
+     *   Claude 在 tmux mouse off 时官方提示用 PgUp/PgDn 滚 transcript；SGR 64/65 会打到输入框无反应。
      *
      * Code Logic（这个函数做什么）:
-     *   已协商 mouse / 有本地 scrollback 时交给 xterm；否则拦截并注入 SGR，绝不发方向键。
+     *   已协商 mouse / 有本地 scrollback 时交给 xterm；否则拦截并注入 PageUp/PageDown，绝不发方向键或裸 SGR。
      */
     terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
       const active = terminal.buffer.active;
@@ -225,7 +226,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         baseY: active.baseY,
         mouseTrackingMode,
       });
-      if (action !== 'sgrFallback') return true;
+      if (action !== 'pageFallback') return true;
       if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) {
         return false;
       }
@@ -240,21 +241,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       );
       wheelRemainderRef.current = consumed.remainder;
       if (consumed.lines === 0) return false;
-      const cellWidth = metrics.cellWidth > 0 ? metrics.cellWidth : 1;
-      const cellHeight = metrics.cellHeight > 0 ? metrics.cellHeight : 1;
-      const col = Number.isFinite(event.clientX)
-        ? Math.min(
-            terminal.cols,
-            Math.max(1, Math.floor((event.clientX - metrics.left) / cellWidth) + 1),
-          )
-        : 1;
-      const row = Number.isFinite(event.clientY)
-        ? Math.min(
-            terminal.rows,
-            Math.max(1, Math.floor((event.clientY - metrics.top) / cellHeight) + 1),
-          )
-        : 1;
-      const payload = encodeTerminalSgrWheelReports(consumed.lines, col, row);
+      const payload = encodeTerminalPageScrollKeys(consumed.lines);
       if (payload) onInput(sessionId, payload);
       return false;
     });

@@ -870,7 +870,7 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
-  test('alt-screen without mouse tracking injects SGR 64 instead of letting xterm emit Up', () => {
+  test('alt-screen without mouse tracking injects PageUp instead of arrows or SGR', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();
     render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
@@ -890,8 +890,9 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     expect(proceed).toBe(false);
     expect(onInput).toHaveBeenCalledTimes(1);
     const payload = String(onInput.mock.calls[0]?.[1] ?? '');
-    expect(payload).toContain('\x1b[<64;');
+    expect(payload).toBe('\x1b[5~');
     expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
+    expect(payload.includes('\x1b[<64')).toBe(false);
   });
 
   test('lets xterm keep the wheel when mouse tracking is already negotiated', () => {
@@ -917,7 +918,7 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
   test('source contract keeps custom wheel handler and never encodes arrow keys', () => {
     const paneSource = readFileSync(resolve(__dirname, './WorkbenchTerminalPane.tsx'), 'utf8');
     expect(paneSource).toContain('attachCustomWheelEventHandler');
-    expect(paneSource).toContain('encodeTerminalSgrWheelReports');
+    expect(paneSource).toContain('encodeTerminalPageScrollKeys');
     expect(paneSource).not.toContain("\\x1b[' +");
   });
 });

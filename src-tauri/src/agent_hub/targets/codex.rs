@@ -14,8 +14,9 @@ use super::paths::{
 };
 use super::portable::{
     merge_discoveries, parse_codex_agents_toml, parse_codex_mcp_toml, render_portable_payload,
-    scan_skill_dirs, scan_skill_dirs_manifest_only, AssetRenderContext, DiscoveredPortableAsset,
-    PortableOriginKind, TargetAssetProjection,
+    scan_command_markdown_dir, scan_disabled_command_markdown_dir, scan_disabled_skill_dirs,
+    scan_disabled_skill_dirs_manifest_only, scan_skill_dirs, scan_skill_dirs_manifest_only,
+    AssetRenderContext, DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -132,6 +133,20 @@ impl AssetAdapter for CodexInstructionAdapter {
                 scope.scope_kind,
                 &homes.codex.config_root,
             )?);
+            // CODEX_HOME native skills/commands：enable 从 hub disabled 移回这里；
+            // 不扫则 Enable 后 rescan 同样会 RESCAN_MISSING。
+            parts.push(scan_skill_dirs(
+                AgentTarget::Codex,
+                scope.scope_kind,
+                &homes.codex.config_root.join("skills"),
+                PortableOriginKind::Native,
+            )?);
+            parts.push(scan_command_markdown_dir(
+                AgentTarget::Codex,
+                scope.scope_kind,
+                &homes.codex.config_root.join("commands"),
+                PortableOriginKind::Native,
+            )?);
             if let Some(compat) = &homes.codex.skill_compat_root {
                 // skill_compat_root 指向 ~/.agents，skills 在 .agents/skills
                 let skills_root = if compat.ends_with("skills") {
@@ -146,6 +161,10 @@ impl AssetAdapter for CodexInstructionAdapter {
                     PortableOriginKind::LegacyStandalone,
                 )?);
             }
+            // Hub portable executor disables user skills/commands under
+            // <data_dir>/codex-assets/disabled/{skills,commands} — inventory must
+            // observe those paths or rescan after Disable reports RESCAN_MISSING.
+            parts.extend(scan_hub_disabled_codex_assets(scope.scope_kind, None)?);
         } else {
             // 项目级：可选 .codex/config.toml 与项目 .agents/skills
             let project_config = scope.absolute_path.join(".codex").join("config.toml");
@@ -168,6 +187,32 @@ impl AssetAdapter for CodexInstructionAdapter {
                 AgentTarget::Codex,
                 scope.scope_kind,
                 &scope.absolute_path.join(".agents").join("skills"),
+                PortableOriginKind::LegacyStandalone,
+            )?);
+            parts.push(scan_command_markdown_dir(
+                AgentTarget::Codex,
+                scope.scope_kind,
+                &scope.absolute_path.join(".codex").join("commands"),
+                PortableOriginKind::Native,
+            )?);
+            parts.push(scan_disabled_skill_dirs(
+                AgentTarget::Codex,
+                scope.scope_kind,
+                &scope
+                    .absolute_path
+                    .join(".codex")
+                    .join("disabled")
+                    .join("skills"),
+                PortableOriginKind::LegacyStandalone,
+            )?);
+            parts.push(scan_disabled_command_markdown_dir(
+                AgentTarget::Codex,
+                scope.scope_kind,
+                &scope
+                    .absolute_path
+                    .join(".codex")
+                    .join("disabled")
+                    .join("commands"),
                 PortableOriginKind::LegacyStandalone,
             )?);
         }
@@ -210,6 +255,12 @@ impl AssetAdapter for CodexInstructionAdapter {
                 }
             }
             if kind == AssetKind::Skill {
+                parts.push(scan_skill_dirs_manifest_only(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &homes.codex.config_root.join("skills"),
+                    PortableOriginKind::Native,
+                )?);
                 if let Some(compat) = &homes.codex.skill_compat_root {
                     let skills_root = if compat.ends_with("skills") {
                         compat.clone()
@@ -223,6 +274,22 @@ impl AssetAdapter for CodexInstructionAdapter {
                         PortableOriginKind::LegacyStandalone,
                     )?);
                 }
+                parts.extend(scan_hub_disabled_codex_assets(
+                    scope.scope_kind,
+                    Some(AssetKind::Skill),
+                )?);
+            }
+            if kind == AssetKind::Command {
+                parts.push(scan_command_markdown_dir(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &homes.codex.config_root.join("commands"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.extend(scan_hub_disabled_codex_assets(
+                    scope.scope_kind,
+                    Some(AssetKind::Command),
+                )?);
             }
         } else {
             if matches!(kind, AssetKind::Mcp | AssetKind::Agent) {
@@ -253,6 +320,26 @@ impl AssetAdapter for CodexInstructionAdapter {
                     &scope.absolute_path.join(".agents/skills"),
                     PortableOriginKind::LegacyStandalone,
                 )?);
+                parts.push(scan_disabled_skill_dirs_manifest_only(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &scope.absolute_path.join(".codex/disabled/skills"),
+                    PortableOriginKind::LegacyStandalone,
+                )?);
+            }
+            if kind == AssetKind::Command {
+                parts.push(scan_command_markdown_dir(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &scope.absolute_path.join(".codex/commands"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.push(scan_disabled_command_markdown_dir(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &scope.absolute_path.join(".codex/disabled/commands"),
+                    PortableOriginKind::LegacyStandalone,
+                )?);
             }
         }
         Ok(merge_discoveries(parts))
@@ -270,6 +357,54 @@ impl AssetAdapter for CodexInstructionAdapter {
     ) -> Result<TargetAssetProjection, AppError> {
         render_portable_payload(AgentTarget::Codex, asset)
     }
+}
+
+/// 扫描 Hub 禁用区中的 Codex user skills/commands。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Disable 把 skill/command 从 `~/.agents/skills` / `~/.codex/commands` 移到
+///     `<data_dir>/codex-assets/disabled/{skills,commands}`；不扫该目录则 apply 后
+///     rescan 会报 `PORTABLE_ASSET_ACTION_RESCAN_MISSING`。
+///
+/// Code Logic（这个函数做什么）:
+///     读 `config::data_dir()`；`kind=None` 同时扫 skill+command；filtered 扫描按 kind 取子集。
+fn scan_hub_disabled_codex_assets(
+    scope_kind: ScopeKind,
+    kind: Option<AssetKind>,
+) -> Result<Vec<Vec<DiscoveredPortableAsset>>, AppError> {
+    let Ok(data) = crate::config::data_dir() else {
+        return Ok(Vec::new());
+    };
+    let hub_disabled = data.join("codex-assets").join("disabled");
+    let mut parts = Vec::new();
+    if kind.is_none() || kind == Some(AssetKind::Skill) {
+        let root = hub_disabled.join("skills");
+        let found = if kind == Some(AssetKind::Skill) {
+            scan_disabled_skill_dirs_manifest_only(
+                AgentTarget::Codex,
+                scope_kind,
+                &root,
+                PortableOriginKind::LegacyStandalone,
+            )?
+        } else {
+            scan_disabled_skill_dirs(
+                AgentTarget::Codex,
+                scope_kind,
+                &root,
+                PortableOriginKind::LegacyStandalone,
+            )?
+        };
+        parts.push(found);
+    }
+    if kind.is_none() || kind == Some(AssetKind::Command) {
+        parts.push(scan_disabled_command_markdown_dir(
+            AgentTarget::Codex,
+            scope_kind,
+            &hub_disabled.join("commands"),
+            PortableOriginKind::LegacyStandalone,
+        )?);
+    }
+    Ok(parts)
 }
 
 /// 扫描 Codex 权威 package 根下的 skills/commands，并 stamp parent plugin id。
@@ -434,4 +569,181 @@ pub fn discover_codex_plugin_source(
 /// Code Logic: 返回稳定策略 token。
 pub fn codex_disable_strategy() -> &'static str {
     "remove_with_binding_retained"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_hub::targets::portable::{PortableDiscoveryStatus, DATA_DIR_ENV_LOCK};
+    use std::fs;
+
+    #[test]
+    fn hub_disabled_skill_is_discovered_under_data_dir() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = tmp.path().join("data");
+        let agents_skills = home.join(".agents").join("skills");
+        fs::create_dir_all(&agents_skills).unwrap();
+        let disabled = data.join("codex-assets/disabled/skills/gpt-image-2");
+        fs::create_dir_all(&disabled).unwrap();
+        fs::write(
+            disabled.join("SKILL.md"),
+            "---\nname: gpt-image-2\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let disabled_cmd = data.join("codex-assets/disabled/commands");
+        fs::create_dir_all(&disabled_cmd).unwrap();
+        fs::write(
+            disabled_cmd.join("review.md"),
+            "---\nname: review\n---\nbody\n",
+        )
+        .unwrap();
+        let prev = std::env::var_os("CC_PARTNER_DATA_DIR");
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars: std::collections::BTreeMap::new(),
+            path_entries: vec![],
+        };
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: home.clone(),
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let found = CodexInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .expect("scan");
+        let filtered = CodexInstructionAdapter
+            .scan_portable_assets_filtered(&scope, &env, Some(AssetKind::Skill))
+            .expect("filtered scan");
+        let filtered_cmd = CodexInstructionAdapter
+            .scan_portable_assets_filtered(&scope, &env, Some(AssetKind::Command))
+            .expect("filtered command scan");
+        if let Some(v) = prev {
+            std::env::set_var("CC_PARTNER_DATA_DIR", v);
+        } else {
+            std::env::remove_var("CC_PARTNER_DATA_DIR");
+        }
+        let skill = found
+            .iter()
+            .find(|d| {
+                matches!(
+                    d.payload,
+                    crate::agent_hub::assets::PortableAssetPayload::Skill(_)
+                ) && d.origin.native_id == "gpt-image-2"
+            })
+            .expect("hub disabled Codex skill must be inventoried");
+        assert_eq!(skill.origin.status, PortableDiscoveryStatus::Disabled);
+        assert!(skill
+            .origin
+            .path
+            .to_string_lossy()
+            .contains("codex-assets/disabled/skills/gpt-image-2"));
+        assert!(
+            filtered.iter().any(|d| d.origin.native_id == "gpt-image-2"
+                && d.origin.status == PortableDiscoveryStatus::Disabled),
+            "filtered skill scan must also observe hub disabled Codex skills"
+        );
+        let command = found
+            .iter()
+            .find(|d| d.origin.native_id == "review" && d.kind == AssetKind::Command)
+            .expect("hub disabled Codex command must be inventoried");
+        assert_eq!(command.origin.status, PortableDiscoveryStatus::Disabled);
+        assert!(filtered_cmd.iter().any(|d| d.origin.native_id == "review"
+            && d.origin.status == PortableDiscoveryStatus::Disabled));
+    }
+
+    #[test]
+    fn user_codex_home_skills_and_commands_are_inventoried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let codex = home.join(".codex");
+        fs::create_dir_all(codex.join("skills/home-skill")).unwrap();
+        fs::write(
+            codex.join("skills/home-skill/SKILL.md"),
+            "---\nname: home-skill\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        fs::create_dir_all(codex.join("commands")).unwrap();
+        fs::write(
+            codex.join("commands/home-cmd.md"),
+            "---\nname: home-cmd\n---\nbody\n",
+        )
+        .unwrap();
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("CODEX_HOME".into(), codex.to_string_lossy().into_owned());
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: home,
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let found = CodexInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .expect("scan");
+        assert!(
+            found.iter().any(|d| d.origin.native_id == "home-skill"
+                && d.origin.status == PortableDiscoveryStatus::Active),
+            "CODEX_HOME/skills must be inventoried so enable-after-disable can rescan"
+        );
+        assert!(
+            found.iter().any(|d| d.origin.native_id == "home-cmd"
+                && d.kind == AssetKind::Command
+                && d.origin.status == PortableDiscoveryStatus::Active),
+            "CODEX_HOME/commands must be inventoried so enable-after-disable can rescan"
+        );
+    }
+
+    #[test]
+    fn project_disabled_skill_is_discovered_under_codex_disabled_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(project.join(".agents/skills")).unwrap();
+        let disabled = project.join(".codex/disabled/skills/review");
+        fs::create_dir_all(&disabled).unwrap();
+        fs::write(
+            disabled.join("SKILL.md"),
+            "---\nname: review\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let env = TargetEnvironment {
+            home: tmp.path().join("home"),
+            vars: std::collections::BTreeMap::new(),
+            path_entries: vec![],
+        };
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::Project,
+            absolute_path: project.clone(),
+            project_root: Some(project.clone()),
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let found = CodexInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .expect("scan");
+        let filtered = CodexInstructionAdapter
+            .scan_portable_assets_filtered(&scope, &env, Some(AssetKind::Skill))
+            .expect("filtered scan");
+        let skill = found
+            .iter()
+            .find(|d| d.origin.native_id == "review")
+            .expect("project disabled Codex skill must be inventoried");
+        assert_eq!(skill.origin.status, PortableDiscoveryStatus::Disabled);
+        assert!(skill
+            .origin
+            .path
+            .to_string_lossy()
+            .contains(".codex/disabled/skills/review"));
+        assert!(filtered.iter().any(|d| d.origin.native_id == "review"
+            && d.origin.status == PortableDiscoveryStatus::Disabled));
+    }
 }

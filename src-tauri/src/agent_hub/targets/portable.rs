@@ -24,6 +24,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+/// 单测串行化 `CC_PARTNER_DATA_DIR` 覆盖，避免跨 adapter 并行污染。
+#[cfg(test)]
+pub(crate) static DATA_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// 发现来源分类。
 ///
 /// Business Logic（为什么需要这个枚举）:

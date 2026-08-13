@@ -9,15 +9,16 @@
  *   于是 xterm 永远走方向键回退。桌面必须自己按 buffer/mouse 模式分流。
  *
  * Code Logic（这个模块做什么）:
- *   - resolveWorkbenchTerminalWheelAction：scrollback / protocol / sgrFallback；
- *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65。
+ *   - resolveWorkbenchTerminalWheelAction：scrollback / protocol / pageFallback；
+ *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65；
+ *   - encodeTerminalPageScrollKeys：tmux mouse off 时 Claude 认的 PageUp/PageDown。
  */
 
 export type WorkbenchTerminalBufferType = 'normal' | 'alternate';
 
 export type WorkbenchTerminalMouseTrackingMode = 'none' | 'x10' | 'vt200' | 'drag' | 'any';
 
-export type WorkbenchTerminalWheelAction = 'scrollback' | 'protocol' | 'sgrFallback';
+export type WorkbenchTerminalWheelAction = 'scrollback' | 'protocol' | 'pageFallback';
 
 export interface WorkbenchTerminalWheelInput {
   bufferType: WorkbenchTerminalBufferType;
@@ -31,20 +32,22 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
 /**
  * Business Logic（为什么需要这个函数）:
  *   桌面滚轮有三条互斥路径：本地 scrollback、xterm 已协商的 mouse protocol、
- *   以及「TUI 已在 alt screen 但 xterm 没看到 DECSET」时的 SGR 回退。
+ *   以及「TUI 已在 alt screen 但 xterm 没看到 DECSET」时的 PageUp/PageDown 回退。
+ *   Claude 在 tmux mouse off 时官方提示用 PgUp/PgDn 滚 transcript；
+ *   裸 SGR 64/65 会当 mouse 打到输入框，看起来像滚轮没反应。
  *   回退绝不能发方向键，否则 Claude 输入框会翻历史 prompt。
  *
  * Code Logic（这个函数做什么）:
  *   mouse tracking ≠ none → protocol（交给 xterm 发报告）；
- *   normal buffer → scrollback（即使 baseY=0 也交给 xterm，禁止把 SGR 打进 shell）；
- *   alternate + none → sgrFallback。
+ *   normal buffer → scrollback（即使 baseY=0 也交给 xterm，禁止把控制序列打进 shell）；
+ *   alternate + none → pageFallback。
  */
 export function resolveWorkbenchTerminalWheelAction(
   input: WorkbenchTerminalWheelInput,
 ): WorkbenchTerminalWheelAction {
   if (input.mouseTrackingMode !== 'none') return 'protocol';
   if (input.bufferType === 'normal') return 'scrollback';
-  return 'sgrFallback';
+  return 'pageFallback';
 }
 
 /**
@@ -95,4 +98,18 @@ export function encodeTerminalSgrWheelReports(
   const safeRow = Number.isFinite(row) && row >= 1 ? Math.floor(row) : 1;
   const button = lines > 0 ? 65 : 64;
   return `\x1b[<${button};${safeCol};${safeRow}M`.repeat(count);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Claude 在 tmux `mouse off` 时把 SGR 滚轮当 mouse 打到焦点输入框，transcript 不滚。
+ *   它自己的提示是 PageUp/PageDown（`scroll:pageUp` / `scroll:pageDown`），不是方向键。
+ *
+ * Code Logic（这个函数做什么）:
+ *   一次累计滚动只发一个 CSI：负向 `\x1b[5~`（PageUp），正向 `\x1b[6~`（PageDown）。
+ *   不按 |lines| 重复，避免触控板一次轻扫翻很多页。
+ */
+export function encodeTerminalPageScrollKeys(lines: number): string {
+  if (!Number.isFinite(lines) || lines === 0) return '';
+  return lines < 0 ? '\x1b[5~' : '\x1b[6~';
 }

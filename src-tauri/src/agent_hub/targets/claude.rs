@@ -600,16 +600,12 @@ pub fn discover_claude_plugin_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::targets::portable::PortableDiscoveryStatus;
+    use crate::agent_hub::targets::portable::{PortableDiscoveryStatus, DATA_DIR_ENV_LOCK};
     use std::fs;
-    use std::sync::Mutex;
-
-    // Serialize env mutation across tests in this process.
-    static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn hub_disabled_skill_is_discovered_under_data_dir() {
-        let _guard = DATA_DIR_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let data = tmp.path().join("data");
@@ -668,7 +664,7 @@ mod tests {
 
     #[test]
     fn filtered_skill_scan_does_not_parse_unrequested_mcp_config() {
-        let _guard = DATA_DIR_LOCK.lock().unwrap();
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let data = tmp.path().join("data");

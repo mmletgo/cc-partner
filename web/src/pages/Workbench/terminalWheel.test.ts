@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   consumeWorkbenchTerminalWheelLines,
+  encodeTerminalPageScrollKeys,
   encodeTerminalSgrWheelReports,
   resolveWorkbenchTerminalWheelAction,
 } from './terminalWheel';
@@ -33,16 +34,16 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     ).toBe('protocol');
   });
 
-  test('falls back to SGR reports when Claude is on the alt screen but xterm never saw DECSET', () => {
-    // Workbench 强制 tmux mouse off + 默认 terminal-features 不含 xterm*:mouse 时，
-    // Claude 已开 mouse，但 xterm 仍认为 mouseTrackingMode=none，会把滚轮译成 ↑。
+  test('falls back to PageUp/PageDown when Claude is on the alt screen without mouse tracking', () => {
+    // Claude 在 tmux mouse off 时官方提示用 PgUp/PgDn 滚 transcript。
+    // SGR 64/65 会走 mouse dispatch 打到输入框，看起来像“滚轮没反应”。
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'alternate',
         baseY: 0,
         mouseTrackingMode: 'none',
       }),
-    ).toBe('sgrFallback');
+    ).toBe('pageFallback');
   });
 });
 
@@ -61,5 +62,15 @@ describe('encodeTerminalSgrWheelReports', () => {
     expect(encodeTerminalSgrWheelReports(2, 3, 7)).toBe('\x1b[<65;3;7M\x1b[<65;3;7M');
     const payload = encodeTerminalSgrWheelReports(-3, 1, 1);
     expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
+  });
+});
+
+describe('encodeTerminalPageScrollKeys', () => {
+  test('maps wheel-up to PageUp and wheel-down to PageDown, never arrows or SGR', () => {
+    expect(encodeTerminalPageScrollKeys(-1)).toBe('\x1b[5~');
+    expect(encodeTerminalPageScrollKeys(2)).toBe('\x1b[6~');
+    const payload = encodeTerminalPageScrollKeys(-3);
+    expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
+    expect(payload.includes('\x1b[<64')).toBe(false);
   });
 });
