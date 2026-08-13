@@ -23,6 +23,16 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     ).toBe('scrollback');
   });
 
+  test('routes a mouse-tracked normal buffer to Claude instead of replaying local redraw frames', () => {
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'normal',
+        baseY: 120,
+        mouseTrackingMode: 'vt200',
+      }),
+    ).toBe('sgrFallback');
+  });
+
   test('always injects transcript-targeted SGR on the alternate screen', () => {
     // Claude 输入框聚焦时 PageUp 不在 Chat 上下文；SGR 按落点命中。
     // 指针在底部输入区时必须自己发打在 transcript 的 SGR，不能交给 xterm 原坐标。

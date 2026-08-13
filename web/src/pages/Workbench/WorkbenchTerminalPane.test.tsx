@@ -50,6 +50,7 @@ interface MockTerminal {
   clearSelection: () => void;
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
+  scrollToBottom: () => void;
   dispose: () => void;
   attachCustomWheelEventHandler: (handler: (event: WheelEvent) => boolean) => void;
   invokeWheel: (event: Partial<WheelEvent>) => boolean | undefined;
@@ -171,6 +172,7 @@ vi.mock('@xterm/xterm', () => {
     getSelection() {
       return this.selectionText;
     }
+    scrollToBottom = vi.fn();
     setSelection(text: string) {
       this.selectionText = text;
     }
@@ -870,6 +872,26 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
+  test('mouse-tracked main screen forwards wheel to Claude instead of xterm redraw history', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const onInput = vi.fn();
+    render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
+    const terminal = latestTerminal();
+    terminal.buffer.active.type = 'normal';
+    terminal.buffer.active.baseY = 120;
+    terminal.modes.mouseTrackingMode = 'vt200';
+
+    const proceed = terminal.invokeWheel({
+      deltaY: -20,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+
+    expect(proceed).toBe(false);
+    expect(terminal.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(onInput).toHaveBeenCalledWith('s1', '\x1b[<64;1;1M');
+  });
+
   test('alt-screen pins SGR to transcript origin even when the pointer is over a tall input area', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();

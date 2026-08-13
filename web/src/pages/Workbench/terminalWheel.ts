@@ -2,11 +2,11 @@
  * Workbench 桌面终端滚轮判定与 SGR 编码。
  *
  * Business Logic（为什么需要这个模块）:
- *   Claude Code 在 alternate screen 里用滚轮回看 transcript。xterm 只有在
+ *   Claude Code 会在 main/alternate screen 上用自己的虚拟 transcript。xterm 只有在
  *   DECSET mouse tracking 真正落地时才会发 SGR 64/65；否则把滚轮译成 ↑/↓，
  *   被 Claude 输入框当成历史 prompt。Workbench 强制 tmux `mouse off` 后，
  *   默认 `terminal-features` 又不宣告 `xterm*:mouse`，DECSET 会被 tmux 吞掉，
- *   于是 xterm 永远走方向键回退。桌面必须自己按 buffer/mouse 模式分流。
+ *   于是 xterm 永远走方向键回退。桌面必须自己按 mouse/buffer 模式分流。
  *
  * Code Logic（这个模块做什么）:
  *   - resolveWorkbenchTerminalWheelAction：scrollback / sgrFallback；
@@ -30,18 +30,20 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   桌面滚轮只有两条路径：普通 buffer 交给 xterm 本地 scrollback；
- *   alternate screen 一律自己发固定打在 transcript 左上角的 SGR 64/65。
+ *   桌面滚轮只有两条路径：应用启用 mouse tracking 时优先送给应用；
+ *   只有未启用 mouse tracking 的普通 buffer 才交给 xterm 本地 scrollback。
+ *   alternate screen 则始终自己发固定打在 transcript 左上角的 SGR 64/65。
  *   不能交给 xterm protocol：指针常在底部输入框，SGR 会按原坐标命中输入区。
  *   也不能按固定行数把指针上抬：resume 后输入区高度会随内容变化，估算仍可能命中输入区。
  *   也不能发 PageUp：Chat 上下文没有 pageup 绑定，输入框聚焦时整页不动。
  *
  * Code Logic（这个函数做什么）:
- *   normal → scrollback；alternate → sgrFallback。mouseTrackingMode 不参与分流。
+ *   mouseTrackingMode !== none → sgrFallback；否则 normal → scrollback、alternate → sgrFallback。
  */
 export function resolveWorkbenchTerminalWheelAction(
   input: WorkbenchTerminalWheelInput,
 ): WorkbenchTerminalWheelAction {
+  if (input.mouseTrackingMode !== 'none') return 'sgrFallback';
   if (input.bufferType === 'normal') return 'scrollback';
   return 'sgrFallback';
 }
