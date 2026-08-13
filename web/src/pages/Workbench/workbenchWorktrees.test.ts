@@ -418,8 +418,17 @@ function testBuildGitGraphRowsForMergeHistory(): void {
   if (rows[0]?.lane !== 0 || rows[0]?.parentLanes.join(',') !== '0,1') {
     throw new Error(`expected merge parents on lanes 0,1, got ${JSON.stringify(rows[0])}`);
   }
+  if (rows[0]?.outputLanes.map((lane) => lane.hash).join(',') !== 'b,c') {
+    throw new Error(`expected merge output lanes b,c, got ${JSON.stringify(rows[0]?.outputLanes)}`);
+  }
+  if (rows[0]?.activeLanes.length !== 0) {
+    throw new Error(`expected top commit to have no incoming lane, got ${JSON.stringify(rows[0]?.activeLanes)}`);
+  }
   if (rows[2]?.lane !== 1 || rows[2]?.parentLanes.join(',') !== '0') {
     throw new Error(`expected side branch to merge back to lane 0, got ${JSON.stringify(rows[2])}`);
+  }
+  if (rows[2]?.outputLanes.map((lane) => lane.hash).join(',') !== 'd') {
+    throw new Error(`expected side branch to collapse into d, got ${JSON.stringify(rows[2]?.outputLanes)}`);
   }
 }
 

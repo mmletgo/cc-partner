@@ -122,6 +122,74 @@ function makeSession(partial: {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   Workbench E2E 需要一段包含 HEAD、merge、本地分支和远端分支的真实形态历史，避免 Git 图回退成普通列表。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回四个按拓扑顺序排列的提交 DTO，形成 merge commit → main/feature → base 的双泳道历史。
+ */
+function makeGitHistory() {
+  return [
+    {
+      hash: 'merge-commit',
+      shortHash: 'a1b2c3d',
+      parentHashes: ['main-parent', 'feature-parent'],
+      authorName: 'Alice',
+      authorEmail: 'alice@example.com',
+      authoredAt: TS,
+      summary: 'Merge feature workspace',
+      refs: [
+        {
+          name: 'main-remote',
+          fullName: 'refs/heads/main-remote',
+          kind: 'local',
+          remote: null,
+          isHead: true,
+        },
+      ],
+    },
+    {
+      hash: 'main-parent',
+      shortHash: 'b2c3d4e',
+      parentHashes: ['base-commit'],
+      authorName: 'Alice',
+      authorEmail: 'alice@example.com',
+      authoredAt: TS,
+      summary: 'Polish workbench history',
+      refs: [],
+    },
+    {
+      hash: 'feature-parent',
+      shortHash: 'c3d4e5f',
+      parentHashes: ['base-commit'],
+      authorName: 'Bob',
+      authorEmail: 'bob@example.com',
+      authoredAt: TS,
+      summary: 'Add compact graph lanes',
+      refs: [
+        {
+          name: 'origin/feature',
+          fullName: 'refs/remotes/origin/feature',
+          kind: 'remote',
+          remote: 'origin',
+          isHead: false,
+        },
+      ],
+    },
+    {
+      hash: 'base-commit',
+      shortHash: 'd4e5f6a',
+      parentHashes: [],
+      authorName: 'Alice',
+      authorEmail: 'alice@example.com',
+      authoredAt: TS,
+      summary: 'Base commit',
+      refs: [],
+    },
+  ];
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   打开文本文件需要完整 open payload。
  *
  * Code Logic（这个函数做什么）:
@@ -389,7 +457,8 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
       )
       .toBeGreaterThan(0);
 
-    // 文件 open/save：检查器默认 files tab
+    // 文件 open/save：产品默认停在 Git 历史，显式切到项目文件夹，避免依赖默认 tab。
+    await page.getByRole('tab', { name: '项目文件夹' }).click();
     const readmeNode = page.getByRole('button', { name: 'README.md' });
     await expect(readmeNode).toBeVisible({ timeout: 10_000 });
     await readmeNode.click();
@@ -474,7 +543,7 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
     });
     backendHarness.command('list_workbench_git_commits', {
       kind: 'resolve',
-      value: [],
+      value: makeGitHistory(),
     });
     backendHarness.command('get_focused_workbench_session', {
       kind: 'resolve',
@@ -486,6 +555,17 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
     await expect(page.getByRole('button', { name: '新建 worktree' })).toBeEnabled({
       timeout: 10_000,
     });
+    await expect(page.getByTestId('git-history-row')).toHaveCount(4);
+    await expect(page.getByTestId('git-history-row').first()).toHaveAttribute(
+      'data-head',
+      'true',
+    );
+    await expect(page.getByTestId('git-history-row').first()).toHaveAttribute(
+      'data-merge',
+      'true',
+    );
+    await expect(page.getByTitle('refs/heads/main-remote')).toBeVisible();
+    await expect(page.getByTitle('refs/remotes/origin/feature')).toBeVisible();
 
     // listener 基线：离开 workbench 后 terminal-status / merge-progress 应收敛
     const listenBeforeNav = {

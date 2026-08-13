@@ -1121,11 +1121,12 @@
 }
 
 .historyPanel {
+  flex: 1 1 auto;
   min-height: 220px;
-  max-height: 54vh;
+  max-height: none;
   overflow: auto;
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
@@ -1137,11 +1138,21 @@
 
 .commitItem {
   min-width: 0;
-  height: 58px;
+  height: var(--space-10);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--space-2);
-  padding: 0 var(--space-3);
+  gap: 0;
+  padding: 0 var(--space-2) 0 0;
+  background: var(--surface);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.commitItem:hover {
+  background: color-mix(in oklab, var(--accent) 7%, var(--surface));
+}
+
+.commitItem[data-head='true'] .commitSummary {
+  font-weight: var(--weight-semibold);
 }
 
 .commitGraph {
@@ -1151,7 +1162,7 @@
 
 .commitGraphSvg {
   width: 100%;
-  height: 58px;
+  height: var(--space-10);
   display: block;
   overflow: visible;
 }
@@ -1161,13 +1172,34 @@
   stroke: var(--git-graph-color);
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 1.6;
+  stroke-width: 1.25;
 }
 
 .graphDot {
   fill: var(--git-graph-color);
   stroke: var(--surface);
   stroke-width: 2;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.graphNodeRing {
+  fill: var(--surface);
+  stroke: var(--git-graph-color);
+  stroke-width: 2;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.graphNodeCore {
+  fill: var(--git-graph-color);
+  stroke: none;
+}
+
+.commitItem:hover .graphDot {
+  stroke: color-mix(in oklab, var(--accent) 7%, var(--surface));
+}
+
+.commitItem:hover .graphNodeRing {
+  fill: color-mix(in oklab, var(--accent) 7%, var(--surface));
 }
 
 .commitContent {
@@ -1175,19 +1207,19 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
+  gap: 0;
   overflow: hidden;
 }
 
-.commitHeader {
+.commitPrimary {
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--space-1);
 }
 
 .commitHash {
-  min-width: 0;
+  flex: 0 0 auto;
   color: var(--fg-muted-readable);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -1202,16 +1234,19 @@
 
 .commitSummary {
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   color: var(--fg);
   font-size: var(--text-sm);
-  line-height: var(--leading-normal);
+  line-height: var(--leading-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .refList {
   min-width: 0;
+  max-width: 48%;
+  flex: 0 1 auto;
   display: flex;
   flex-wrap: nowrap;
   gap: var(--space-1);
@@ -1219,39 +1254,38 @@
 }
 
 .refBadge {
-  max-width: 100%;
+  max-width: 96px;
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   overflow: hidden;
-  border: 1px solid var(--border-soft);
+  border: 0;
   border-radius: var(--radius-full);
-  padding: 1px var(--space-2);
+  padding: 0 var(--space-1);
+  background: color-mix(in oklab, var(--meta) 12%, transparent);
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  line-height: var(--leading-tight);
+  line-height: var(--text-lg);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .refBadge[data-kind='local'],
-.refBadge[data-kind='head'] {
-  border-color: color-mix(in oklab, var(--git-ref-local) 35%, var(--border-soft));
-  background: color-mix(in oklab, var(--git-ref-local) 10%, transparent);
+.refBadge[data-kind='head'],
+.refBadge[data-head='true'] {
+  background: color-mix(in oklab, var(--git-ref-local) 16%, transparent);
   color: var(--git-ref-local);
 }
 
 .refBadge[data-kind='remote'] {
-  border-color: color-mix(in oklab, var(--git-ref-remote) 35%, var(--border-soft));
-  background: color-mix(in oklab, var(--git-ref-remote) 12%, transparent);
+  background: color-mix(in oklab, var(--git-ref-remote) 16%, transparent);
   color: var(--git-ref-remote);
 }
 
 .refBadge[data-kind='tag'] {
-  border-color: color-mix(in oklab, var(--git-ref-tag) 45%, var(--border-soft));
-  background: color-mix(in oklab, var(--git-ref-tag) 12%, transparent);
+  background: color-mix(in oklab, var(--git-ref-tag) 16%, transparent);
   color: var(--git-ref-tag);
 }
 
@@ -1259,10 +1293,21 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.commitAuthor {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.commitTime {
+  flex: 0 0 auto;
 }
 
 .treeList {

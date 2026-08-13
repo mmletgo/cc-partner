@@ -7,6 +7,7 @@
  *
  * Code Logic（这个组件做什么）:
  *   - 内部封装 gitGraphColorStyle / gitGraphWidth / gitGraphX 与 GIT_GRAPH_* 常量（随 Git 检查器一起从页面迁出）；
+ *   - 参考 VS Code Source Control Graph 的紧凑泳道语法，渲染连续 lane、HEAD/merge 节点和内联 ref badge；
  *   - 渲染刷新/commit/push/merge 按钮、merge stage panel 和带 lane 颜色的 commit graph SVG；
  *   - 暴露 WorkbenchGitInspectorProps 类型，所有数据均来自 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享。
  */
@@ -40,10 +41,12 @@ import type {
   WorktreeUnknownMutationLock,
 } from './controllers/useWorkbenchWorktreeGitController';
 
-const GIT_GRAPH_LANE_WIDTH = 14;
-const GIT_GRAPH_ROW_HEIGHT = 58;
-const GIT_GRAPH_DOT_Y = 22;
+const GIT_GRAPH_LANE_WIDTH = 12;
+const GIT_GRAPH_ROW_HEIGHT = 40;
+const GIT_GRAPH_NODE_Y = GIT_GRAPH_ROW_HEIGHT / 2;
 const GIT_GRAPH_DOT_RADIUS = 4;
+const GIT_GRAPH_HEAD_RADIUS = 6;
+const GIT_GRAPH_MERGE_RADIUS = 5;
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -66,7 +69,7 @@ function gitGraphColorStyle(colorIndex: number): CSSProperties {
  *   根据 laneCount 计算紧凑 graph 宽度。
  */
 function gitGraphWidth(laneCount: number): number {
-  return Math.max(24, laneCount * GIT_GRAPH_LANE_WIDTH + 10);
+  return GIT_GRAPH_LANE_WIDTH * (Math.max(laneCount, 1) + 1);
 }
 
 /**
@@ -77,7 +80,39 @@ function gitGraphWidth(laneCount: number): number {
  *   将 lane index 映射到 SVG 内部横坐标。
  */
 function gitGraphX(lane: number): number {
-  return 5 + lane * GIT_GRAPH_LANE_WIDTH;
+  return GIT_GRAPH_LANE_WIDTH * (lane + 1);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   泳道在分支收束后会横向移动；若直接画斜线，紧凑行高下会出现尖锐折角，难以追踪。
+ *
+ * Code Logic（这个函数做什么）:
+ *   生成从本行顶部泳道到下方泳道的平滑三次贝塞尔路径；同 lane 时退化为竖线。
+ */
+function gitGraphLanePath(fromLane: number, toLane: number): string {
+  const fromX = gitGraphX(fromLane);
+  const toX = gitGraphX(toLane);
+  if (fromLane === toLane) {
+    return `M ${fromX} 0 V ${GIT_GRAPH_ROW_HEIGHT}`;
+  }
+  return `M ${fromX} 0 C ${fromX} ${GIT_GRAPH_NODE_Y} ${toX} ${GIT_GRAPH_NODE_Y} ${toX} ${GIT_GRAPH_ROW_HEIGHT}`;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   merge commit 的多个 parent 需要从提交节点清晰分叉到各自的输出泳道。
+ *
+ * Code Logic（这个函数做什么）:
+ *   生成从提交节点到目标 parent lane 底部的平滑路径；同 lane 时保持竖直。
+ */
+function gitGraphParentPath(fromLane: number, toLane: number): string {
+  const fromX = gitGraphX(fromLane);
+  const toX = gitGraphX(toLane);
+  if (fromLane === toLane) {
+    return `M ${fromX} ${GIT_GRAPH_NODE_Y} V ${GIT_GRAPH_ROW_HEIGHT}`;
+  }
+  return `M ${fromX} ${GIT_GRAPH_NODE_Y} C ${fromX} ${GIT_GRAPH_NODE_Y + 6} ${toX} ${GIT_GRAPH_NODE_Y + 6} ${toX} ${GIT_GRAPH_ROW_HEIGHT}`;
 }
 
 /**
@@ -403,81 +438,116 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
           <div className={styles.commitList}>
             {gitGraphRows.map((row) => {
               const graphWidth = gitGraphWidth(row.laneCount);
+              const author = row.commit.authorName || row.commit.authorEmail || emptyValue;
+              const relativeTime = formatCommitRelativeTime(row.commit.authoredAt, emptyValue);
+              const isHead = row.commit.refs.some(
+                (ref) => ref.isHead || ref.kind === 'head',
+              );
+              const isMerge = row.commit.parentHashes.length > 1;
               return (
-                <article key={row.commit.hash} className={styles.commitItem}>
+                <article
+                  key={row.commit.hash}
+                  className={styles.commitItem}
+                  data-head={isHead ? 'true' : undefined}
+                  data-merge={isMerge ? 'true' : undefined}
+                  data-testid="git-history-row"
+                  aria-label={`${row.commit.summary || emptyValue}, ${author}, ${row.commit.shortHash}, ${relativeTime}`}
+                  title={`${row.commit.summary || emptyValue}\n${author} · ${row.commit.shortHash} · ${relativeTime}`}
+                >
                   <div className={styles.commitGraph} style={{ width: graphWidth }}>
                     <svg
                       className={styles.commitGraphSvg}
                       viewBox={`0 0 ${graphWidth} ${GIT_GRAPH_ROW_HEIGHT}`}
                       aria-hidden="true"
                     >
-                      {row.activeLanes.map((lane, laneIndex) => {
-                        const x = gitGraphX(laneIndex);
-                        const isCommitLane = laneIndex === row.lane;
-                        const continues = row.parentLanes.includes(laneIndex);
-                        const y2 = isCommitLane && !continues ? GIT_GRAPH_DOT_Y : GIT_GRAPH_ROW_HEIGHT;
+                      {row.activeLanes.map((lane, inputLane) => {
+                        if (inputLane === row.lane) return null;
+                        const outputLane = row.outputLanes.findIndex(
+                          (candidate) => candidate.hash === lane.hash,
+                        );
+                        if (outputLane < 0) return null;
                         return (
-                          <line
-                            key={`${row.commit.hash}-${lane.hash}-${laneIndex}`}
+                          <path
+                            key={`${row.commit.hash}-${lane.hash}-${inputLane}`}
                             className={styles.graphLine}
                             style={gitGraphColorStyle(lane.colorIndex)}
-                            x1={x}
-                            y1={0}
-                            x2={x}
-                            y2={y2}
+                            d={gitGraphLanePath(inputLane, outputLane)}
                           />
                         );
                       })}
-                      {row.parentLanes
-                        .filter((parentLane) => parentLane !== row.lane)
-                        .map((parentLane) => {
-                          const fromX = gitGraphX(row.lane);
-                          const toX = gitGraphX(parentLane);
-                          return (
-                            <path
-                              key={`${row.commit.hash}-${parentLane}`}
-                              className={styles.graphLine}
-                              style={gitGraphColorStyle(row.colorIndex)}
-                              d={`M ${fromX} ${GIT_GRAPH_DOT_Y} C ${fromX} 32 ${toX} 32 ${toX} ${GIT_GRAPH_ROW_HEIGHT}`}
-                            />
-                          );
-                        })}
-                      <circle
-                        className={styles.graphDot}
-                        style={gitGraphColorStyle(row.colorIndex)}
-                        cx={gitGraphX(row.lane)}
-                        cy={GIT_GRAPH_DOT_Y}
-                        r={GIT_GRAPH_DOT_RADIUS}
-                      />
+                      {row.activeLanes[row.lane] ? (
+                        <path
+                          className={styles.graphLine}
+                          style={gitGraphColorStyle(row.colorIndex)}
+                          d={`M ${gitGraphX(row.lane)} 0 V ${GIT_GRAPH_NODE_Y}`}
+                        />
+                      ) : null}
+                      {row.parentLanes.map((parentLane, parentIndex) => {
+                        const parentColor = row.outputLanes[parentLane]?.colorIndex
+                          ?? row.colorIndex;
+                        return (
+                          <path
+                            key={`${row.commit.hash}-${parentLane}-${parentIndex}`}
+                            className={styles.graphLine}
+                            style={gitGraphColorStyle(parentColor)}
+                            d={gitGraphParentPath(row.lane, parentLane)}
+                          />
+                        );
+                      })}
+                      {isHead || isMerge ? (
+                        <>
+                          <circle
+                            className={styles.graphNodeRing}
+                            style={gitGraphColorStyle(row.colorIndex)}
+                            cx={gitGraphX(row.lane)}
+                            cy={GIT_GRAPH_NODE_Y}
+                            r={isHead ? GIT_GRAPH_HEAD_RADIUS : GIT_GRAPH_MERGE_RADIUS}
+                          />
+                          <circle
+                            className={styles.graphNodeCore}
+                            style={gitGraphColorStyle(row.colorIndex)}
+                            cx={gitGraphX(row.lane)}
+                            cy={GIT_GRAPH_NODE_Y}
+                            r={isHead ? 2.25 : 1.75}
+                          />
+                        </>
+                      ) : (
+                        <circle
+                          className={styles.graphDot}
+                          style={gitGraphColorStyle(row.colorIndex)}
+                          cx={gitGraphX(row.lane)}
+                          cy={GIT_GRAPH_NODE_Y}
+                          r={GIT_GRAPH_DOT_RADIUS}
+                        />
+                      )}
                     </svg>
                   </div>
                   <div className={styles.commitContent}>
-                    <div className={styles.commitHeader}>
+                    <div className={styles.commitPrimary}>
                       <span className={styles.commitSummary}>
                         {row.commit.summary || emptyValue}
                       </span>
-                      <span className={styles.commitTime}>
-                        {formatCommitRelativeTime(row.commit.authoredAt, emptyValue)}
-                      </span>
+                      {row.commit.refs.length > 0 ? (
+                        <div className={styles.refList}>
+                          {row.commit.refs.map((ref) => (
+                            <span
+                              key={`${row.commit.hash}-${ref.fullName}`}
+                              className={styles.refBadge}
+                              data-kind={ref.kind}
+                              data-head={ref.isHead ? 'true' : undefined}
+                              title={ref.fullName}
+                            >
+                              {ref.kind === 'remote' ? <UploadIcon size={11} /> : null}
+                              {ref.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
-                    {row.commit.refs.length > 0 ? (
-                      <div className={styles.refList}>
-                        {row.commit.refs.map((ref) => (
-                          <span
-                            key={`${row.commit.hash}-${ref.fullName}`}
-                            className={styles.refBadge}
-                            data-kind={ref.kind}
-                            title={ref.fullName}
-                          >
-                            {ref.kind === 'remote' ? <UploadIcon size={12} /> : null}
-                            {ref.name}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
                     <div className={styles.commitMeta}>
+                      <span className={styles.commitAuthor}>{author}</span>
                       <span className={styles.commitHash}>{row.commit.shortHash}</span>
-                      <span>{row.commit.authorName || row.commit.authorEmail || emptyValue}</span>
+                      <span className={styles.commitTime}>{relativeTime}</span>
                     </div>
                   </div>
                 </article>

@@ -24,7 +24,10 @@ export interface WorkbenchGitGraphRow {
   commit: WorkbenchGitCommit;
   lane: number;
   laneCount: number;
+  /** 当前提交上方进入本行的泳道。 */
   activeLanes: WorkbenchGitGraphLane[];
+  /** 当前提交处理完成后，从本行下方离开的泳道。 */
+  outputLanes: WorkbenchGitGraphLane[];
   parentLanes: number[];
   colorIndex: number;
 }
@@ -340,6 +343,7 @@ export function buildGitGraphRows(commits: WorkbenchGitCommit[]): WorkbenchGitGr
 
   for (const commit of commits) {
     let lane = lanes.findIndex((entry) => entry.hash === commit.hash);
+    const activeLanes = lanes.map((entry) => ({ ...entry }));
     if (lane < 0) {
       lane = lanes.length;
       lanes = [
@@ -352,7 +356,6 @@ export function buildGitGraphRows(commits: WorkbenchGitCommit[]): WorkbenchGitGr
       nextColorIndex += 1;
     }
 
-    const activeLanes = lanes.map((entry) => ({ ...entry }));
     const colorIndex = lanes[lane]?.colorIndex ?? 0;
     const nextLanes = lanes.map((entry) => ({ ...entry }));
     const [firstParent, ...extraParents] = commit.parentHashes;
@@ -391,6 +394,7 @@ export function buildGitGraphRows(commits: WorkbenchGitCommit[]): WorkbenchGitGr
       lane,
       laneCount,
       activeLanes,
+      outputLanes: nextLanes.map((entry) => ({ ...entry })),
       parentLanes,
       colorIndex,
     });
