@@ -22,6 +22,12 @@
   gap: var(--space-5);
 }
 
+.rowWide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+}
+
 .block {
   display: flex;
   flex-direction: column;
@@ -179,7 +185,8 @@
 }
 
 @media (max-width: 880px) {
-  .row {
+  .row,
+  .rowWide {
     grid-template-columns: 1fr;
   }
 }

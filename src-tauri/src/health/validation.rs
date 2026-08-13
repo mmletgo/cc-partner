@@ -3,7 +3,10 @@
 //! 将磁盘/DTO 边界与 daemon 共用同一套范围/DND/溢出规则：非法输入返回 Validation，
 //! 且调用方须在校验通过前禁止改 config/runtime/DB。
 
-use crate::config::HealthConfig;
+use crate::config::{
+    HealthConfig, HealthReminderTemplate, ReminderComplete, ReminderTrigger,
+    HEALTH_REMINDER_KEGEL_ID, HEALTH_REMINDER_REST_ID, HEALTH_REMINDER_WATER_ID,
+};
 use crate::error::AppError;
 
 /// 工作窗口下限（秒）：1 分钟。
@@ -30,6 +33,20 @@ pub const SNOOZE_MINUTES_MAX: i64 = 1440;
 pub const SECONDS_PER_DAY: i64 = 86400;
 /// 一分钟秒数。
 pub const SECONDS_PER_MINUTE: i64 = 60;
+/// 模板会话倒计时下限（秒）。
+pub const SESSION_SECONDS_MIN: i64 = 10;
+/// 模板会话倒计时上限（秒）：2 小时。
+pub const SESSION_SECONDS_MAX: i64 = 7200;
+/// 提醒模板上限（含三条内置）。
+pub const HEALTH_REMINDER_MAX_COUNT: usize = 12;
+/// 模板显示名上限。
+pub const REMINDER_NAME_MAX_CHARS: usize = 40;
+/// 模板标题上限。
+pub const REMINDER_TITLE_MAX_CHARS: usize = 40;
+/// 模板正文上限。
+pub const REMINDER_BODY_MAX_CHARS: usize = 200;
+/// 按钮/单位文案上限。
+pub const REMINDER_LABEL_MAX_CHARS: usize = 20;
 
 /// 校验失败时的稳定字段码 + 中文消息（内部用，供 daemon 日志与 AppError 映射）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +112,8 @@ pub fn validate_health_config_fields(health: &HealthConfig) -> Result<(), AppErr
 /// Business Logic（为什么需要这个函数）:
 ///     命令层、daemon、AppConfig 三处必须共享同一规则，避免边界不一致。
 /// Code Logic（这个函数做什么）:
-///     逐字段检查闭区间；校验 DND 对；clone 后强制 water/fullscreen 为 true。
+///     逐字段检查闭区间；校验 DND 对；空 reminders 从旧标量 seed；校验模板后镜像回写
+///     work/water 标量；clone 后强制 water/fullscreen 为 true。
 fn validate_health_config_inner(input: &HealthConfig) -> Result<HealthConfig, HealthFieldError> {
     if !(WORK_WINDOW_SECONDS_MIN..=WORK_WINDOW_SECONDS_MAX).contains(&input.work_window_seconds) {
         return Err(HealthFieldError::new(
@@ -126,9 +144,179 @@ fn validate_health_config_inner(input: &HealthConfig) -> Result<HealthConfig, He
     validate_dnd_pair_inner(input.dnd_start.as_deref(), input.dnd_end.as_deref())?;
 
     let mut out = input.clone();
+    if out.reminders.is_empty() {
+        out.ensure_reminders();
+    }
+    validate_and_mirror_reminders(&mut out)?;
     out.water_enabled = true;
     out.reminder_fullscreen = true;
     Ok(out)
+}
+
+/// 校验模板列表并回写 rest/water 兼容镜像。
+///
+/// Business Logic（为什么需要这个函数）:
+///     内置三项不可删、条数/范围/文案必须统一拒绝，且旧标量要跟模板一致以便回滚。
+/// Code Logic（这个函数做什么）:
+///     检查上限、id、内置存在与 builtin 标记、触发/完成秒数与文案长度；
+///     再把 rest 阈值、water 间隔写回 work_window_seconds / water_interval_seconds。
+fn validate_and_mirror_reminders(cfg: &mut HealthConfig) -> Result<(), HealthFieldError> {
+    if cfg.reminders.len() > HEALTH_REMINDER_MAX_COUNT {
+        return Err(HealthFieldError::new(
+            "health.reminders",
+            format!("最多 {HEALTH_REMINDER_MAX_COUNT} 条"),
+        ));
+    }
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (idx, template) in cfg.reminders.iter().enumerate() {
+        validate_reminder_template(idx, template)?;
+        if !seen.insert(template.id.clone()) {
+            return Err(HealthFieldError::new(
+                "health.reminders",
+                format!("id 重复: {}", template.id),
+            ));
+        }
+    }
+
+    for required in [
+        HEALTH_REMINDER_WATER_ID,
+        HEALTH_REMINDER_REST_ID,
+        HEALTH_REMINDER_KEGEL_ID,
+    ] {
+        match cfg.reminders.iter().find(|t| t.id == required) {
+            None => {
+                return Err(HealthFieldError::new(
+                    "health.reminders",
+                    format!("缺少内置模板 {required}"),
+                ));
+            }
+            Some(t) if !t.builtin => {
+                return Err(HealthFieldError::new(
+                    "health.reminders",
+                    format!("内置模板 {required} 的 builtin 不能改为 false"),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let rest_threshold = cfg
+        .reminders
+        .iter()
+        .find(|t| t.id == HEALTH_REMINDER_REST_ID)
+        .and_then(|t| t.threshold_seconds)
+        .unwrap_or(cfg.work_window_seconds);
+    let water_interval = cfg
+        .reminders
+        .iter()
+        .find(|t| t.id == HEALTH_REMINDER_WATER_ID)
+        .and_then(|t| t.interval_seconds)
+        .unwrap_or(cfg.water_interval_seconds);
+    cfg.work_window_seconds = rest_threshold;
+    cfg.water_interval_seconds = water_interval;
+    Ok(())
+}
+
+/// 校验单条模板的 id、触发/完成参数与文案长度。
+///
+/// Business Logic（为什么需要这个函数）:
+///     非法秒数或空白 id 会让调度永不触发或每 tick 重复弹窗。
+/// Code Logic（这个函数做什么）:
+///     id 去空白后必须非空且无空白字符；interval/threshold/session 按触发/完成方式取范围；
+///     name/title/body/label 按字符数上限拒绝。
+fn validate_reminder_template(
+    idx: usize,
+    template: &HealthReminderTemplate,
+) -> Result<(), HealthFieldError> {
+    let id = template.id.trim();
+    if id.is_empty() || id.chars().any(|c| c.is_whitespace()) {
+        return Err(HealthFieldError::new(
+            "health.reminders",
+            format!("[{idx}] id 不能为空或含空白"),
+        ));
+    }
+    if template.id != id {
+        return Err(HealthFieldError::new(
+            "health.reminders",
+            format!("[{idx}] id 不能含首尾空白"),
+        ));
+    }
+
+    match template.trigger {
+        ReminderTrigger::Interval => {
+            let secs = template.interval_seconds.ok_or_else(|| {
+                HealthFieldError::new("health.reminders", format!("[{idx}] interval 必须提供间隔秒数"))
+            })?;
+            if !(WATER_INTERVAL_SECONDS_MIN..=WATER_INTERVAL_SECONDS_MAX).contains(&secs) {
+                return Err(HealthFieldError::new(
+                    "health.reminders",
+                    format!(
+                        "[{idx}] intervalSeconds 必须在 {WATER_INTERVAL_SECONDS_MIN}..={WATER_INTERVAL_SECONDS_MAX}"
+                    ),
+                ));
+            }
+        }
+        ReminderTrigger::Sedentary => {
+            let secs = template.threshold_seconds.ok_or_else(|| {
+                HealthFieldError::new(
+                    "health.reminders",
+                    format!("[{idx}] sedentary 必须提供阈值秒数"),
+                )
+            })?;
+            if !(WORK_WINDOW_SECONDS_MIN..=WORK_WINDOW_SECONDS_MAX).contains(&secs) {
+                return Err(HealthFieldError::new(
+                    "health.reminders",
+                    format!(
+                        "[{idx}] thresholdSeconds 必须在 {WORK_WINDOW_SECONDS_MIN}..={WORK_WINDOW_SECONDS_MAX}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    match template.complete {
+        ReminderComplete::Instant => {}
+        ReminderComplete::Session => {
+            let secs = template.session_seconds.ok_or_else(|| {
+                HealthFieldError::new(
+                    "health.reminders",
+                    format!("[{idx}] session 必须提供倒计时秒数"),
+                )
+            })?;
+            if !(SESSION_SECONDS_MIN..=SESSION_SECONDS_MAX).contains(&secs) {
+                return Err(HealthFieldError::new(
+                    "health.reminders",
+                    format!(
+                        "[{idx}] sessionSeconds 必须在 {SESSION_SECONDS_MIN}..={SESSION_SECONDS_MAX}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    reject_too_long("name", &template.name, REMINDER_NAME_MAX_CHARS)?;
+    reject_too_long("title", &template.title, REMINDER_TITLE_MAX_CHARS)?;
+    reject_too_long("body", &template.body, REMINDER_BODY_MAX_CHARS)?;
+    reject_too_long("confirmLabel", &template.confirm_label, REMINDER_LABEL_MAX_CHARS)?;
+    reject_too_long("unitLabel", &template.unit_label, REMINDER_LABEL_MAX_CHARS)?;
+    Ok(())
+}
+
+/// 按 Unicode 标量计数字符长度上限。
+///
+/// Business Logic（为什么需要这个函数）:
+///     设置页文案过长会撑破遮罩与通知，必须在落盘前拒绝。
+/// Code Logic（这个函数做什么）:
+///     `chars().count()` 超过 max 则返回 `health.reminders` 校验错误。
+fn reject_too_long(field: &str, value: &str, max_chars: usize) -> Result<(), HealthFieldError> {
+    if value.chars().count() > max_chars {
+        return Err(HealthFieldError::new(
+            "health.reminders",
+            format!("{field} 最多 {max_chars} 个字符"),
+        ));
+    }
+    Ok(())
 }
 
 /// 校验免打扰起止时间对。
@@ -422,5 +610,219 @@ mod tests {
         let ok = base_cfg();
         let cutoff = checked_retain_cutoff(1_700_000_000, ok.retain_days).unwrap();
         assert!(cutoff < 1_700_000_000);
+    }
+
+    fn template_by_id<'a>(
+        cfg: &'a crate::config::HealthConfig,
+        id: &str,
+    ) -> &'a crate::config::HealthReminderTemplate {
+        cfg.reminders
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("missing template {id}"))
+    }
+
+    #[test]
+    fn default_health_config_seeds_three_builtin_templates() {
+        let cfg = HealthConfig::default();
+        let ids: Vec<&str> = cfg.reminders.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["water", "rest", "kegel"]);
+
+        let water = template_by_id(&cfg, "water");
+        assert!(water.builtin && water.enabled);
+        assert_eq!(water.trigger, crate::config::ReminderTrigger::Interval);
+        assert_eq!(water.complete, crate::config::ReminderComplete::Instant);
+        assert_eq!(water.interval_seconds, Some(3600));
+        assert_eq!(water.name, "饮水");
+        assert_eq!(water.confirm_label, "已喝水");
+        assert_eq!(water.unit_label, "杯");
+
+        let rest = template_by_id(&cfg, "rest");
+        assert!(rest.builtin && rest.enabled);
+        assert_eq!(rest.trigger, crate::config::ReminderTrigger::Sedentary);
+        assert_eq!(rest.complete, crate::config::ReminderComplete::Session);
+        assert_eq!(rest.threshold_seconds, Some(2700));
+        assert_eq!(rest.session_seconds, Some(300));
+        assert_eq!(rest.confirm_label, "开始休息");
+
+        let kegel = template_by_id(&cfg, "kegel");
+        assert!(kegel.builtin && kegel.enabled);
+        assert_eq!(kegel.trigger, crate::config::ReminderTrigger::Interval);
+        assert_eq!(kegel.complete, crate::config::ReminderComplete::Session);
+        assert_eq!(kegel.interval_seconds, Some(7200));
+        assert_eq!(kegel.session_seconds, Some(30));
+        assert_eq!(kegel.title, "该活动一下了");
+        assert_eq!(kegel.confirm_label, "开始");
+        assert_eq!(kegel.unit_label, "次");
+        assert!(
+            !kegel.body.contains("提肛") && !kegel.name.contains("凯格尔"),
+            "出厂文案不得写医学/解剖细节"
+        );
+    }
+
+    #[test]
+    fn missing_reminders_seed_from_legacy_fields() {
+        let cfg: HealthConfig = serde_json::from_str(
+            r#"{
+                "enabled": true,
+                "work_window_seconds": 1800,
+                "break_seconds": 300,
+                "record_window_title": true,
+                "retain_days": 90,
+                "notify_enabled": true,
+                "water_enabled": true,
+                "water_interval_seconds": 1800,
+                "reminder_fullscreen": true
+            }"#,
+        )
+        .expect("legacy health json");
+        assert!(
+            cfg.reminders.is_empty(),
+            "缺 reminders 字段应反序列化为空数组，再由校验 seed"
+        );
+
+        let out = validate_health_config(&cfg).expect("legacy config should seed");
+        assert_eq!(out.reminders.len(), 3);
+        assert_eq!(
+            template_by_id(&out, "rest").threshold_seconds,
+            Some(1800),
+            "rest 阈值应从旧 work_window_seconds 迁移"
+        );
+        assert_eq!(
+            template_by_id(&out, "water").interval_seconds,
+            Some(1800),
+            "water 间隔应从旧 water_interval_seconds 迁移"
+        );
+        assert_eq!(template_by_id(&out, "kegel").interval_seconds, Some(7200));
+        assert_eq!(template_by_id(&out, "kegel").session_seconds, Some(30));
+    }
+
+    #[test]
+    fn validate_mirrors_legacy_fields_from_builtin_templates() {
+        let mut cfg = base_cfg();
+        for t in &mut cfg.reminders {
+            if t.id == "rest" {
+                t.threshold_seconds = Some(1200);
+            }
+            if t.id == "water" {
+                t.interval_seconds = Some(900);
+            }
+        }
+        let out = validate_health_config(&cfg).expect("valid templates");
+        assert_eq!(out.work_window_seconds, 1200);
+        assert_eq!(out.water_interval_seconds, 900);
+    }
+
+    #[test]
+    fn rejects_deleting_or_unmarking_builtin_templates() {
+        let mut missing_kegel = base_cfg();
+        missing_kegel.reminders.retain(|t| t.id != "kegel");
+        let err = validate_health_config(&missing_kegel).unwrap_err().to_string();
+        assert!(
+            err.contains("health.reminders") && err.contains("kegel"),
+            "msg={err}"
+        );
+
+        let mut not_builtin = base_cfg();
+        template_by_id_mut(&mut not_builtin, "water").builtin = false;
+        let err = validate_health_config(&not_builtin).unwrap_err().to_string();
+        assert!(err.contains("health.reminders"), "msg={err}");
+    }
+
+    fn template_by_id_mut<'a>(
+        cfg: &'a mut HealthConfig,
+        id: &str,
+    ) -> &'a mut crate::config::HealthReminderTemplate {
+        cfg.reminders
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("missing template {id}"))
+    }
+
+    #[test]
+    fn rejects_more_than_twelve_templates() {
+        let mut cfg = base_cfg();
+        for i in 0..10 {
+            cfg.reminders.push(custom_interval_instant(&format!("c{i}")));
+        }
+        assert_eq!(cfg.reminders.len(), 13);
+        let err = validate_health_config(&cfg).unwrap_err().to_string();
+        assert!(err.contains("health.reminders"), "msg={err}");
+    }
+
+    fn custom_interval_instant(id: &str) -> crate::config::HealthReminderTemplate {
+        crate::config::HealthReminderTemplate {
+            id: id.into(),
+            builtin: false,
+            enabled: true,
+            name: "自定义".into(),
+            trigger: crate::config::ReminderTrigger::Interval,
+            interval_seconds: Some(3600),
+            threshold_seconds: None,
+            complete: crate::config::ReminderComplete::Instant,
+            session_seconds: None,
+            title: "该活动一下了".into(),
+            body: "活动一下再继续。".into(),
+            confirm_label: "完成".into(),
+            unit_label: "次".into(),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_or_blank_ids() {
+        let mut dup = base_cfg();
+        dup.reminders.push(custom_interval_instant("water"));
+        let err = validate_health_config(&dup).unwrap_err().to_string();
+        assert!(err.contains("health.reminders"), "msg={err}");
+
+        let mut blank = base_cfg();
+        blank.reminders.push(custom_interval_instant("  "));
+        let err = validate_health_config(&blank).unwrap_err().to_string();
+        assert!(err.contains("health.reminders"), "msg={err}");
+    }
+
+    #[test]
+    fn rejects_out_of_range_template_seconds_and_copy() {
+        let mut interval = base_cfg();
+        template_by_id_mut(&mut interval, "water").interval_seconds = Some(299);
+        assert!(validate_health_config(&interval).is_err());
+
+        let mut threshold = base_cfg();
+        template_by_id_mut(&mut threshold, "rest").threshold_seconds = Some(59);
+        assert!(validate_health_config(&threshold).is_err());
+
+        let mut session = base_cfg();
+        template_by_id_mut(&mut session, "kegel").session_seconds = Some(9);
+        assert!(validate_health_config(&session).is_err());
+
+        let mut name = base_cfg();
+        template_by_id_mut(&mut name, "water").name = "x".repeat(41);
+        let err = validate_health_config(&name).unwrap_err().to_string();
+        assert!(err.contains("health.reminders"), "msg={err}");
+    }
+
+    #[test]
+    fn health_runtime_patch_accepts_reminders_allowlist() {
+        let json = r#"{
+            "reminders": [{
+                "id": "water",
+                "builtin": true,
+                "enabled": true,
+                "name": "饮水",
+                "trigger": "interval",
+                "intervalSeconds": 3600,
+                "complete": "instant",
+                "title": "该喝水啦",
+                "body": "记得补充水分。",
+                "confirmLabel": "已喝水",
+                "unitLabel": "杯"
+            }]
+        }"#;
+        let patch: crate::config_runtime::HealthRuntimePatch =
+            serde_json::from_str(json).expect("patch should accept reminders");
+        assert!(
+            patch.reminders.is_some(),
+            "HealthRuntimePatch 必须允许 reminders"
+        );
     }
 }

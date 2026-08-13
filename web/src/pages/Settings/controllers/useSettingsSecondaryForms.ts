@@ -36,6 +36,7 @@ import {
   healthConfigToForm,
   mergeActivityStatsSlice,
   mergeHealthReminderSlice,
+  resetHealthReminderDefaults,
   PENDING_GITHUB_TRENDING_FORM,
   PENDING_HEALTH_FORM,
   PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM,
@@ -525,7 +526,11 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   }, []);
 
   const handleResetHealthDefaults = useCallback(() => {
-    const next = mergeHealthReminderSlice(healthFormRef.current, defaultHealthForm);
+    const next = resetHealthReminderDefaults(
+      healthConfigRef.current,
+      healthFormRef.current,
+      defaultHealthForm,
+    );
     healthFormRef.current = next;
     healthEditVersionRef.current += 1;
     setHealthForm(next);

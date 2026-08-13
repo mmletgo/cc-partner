@@ -609,23 +609,99 @@ pub struct InternalClaudeConfig {
     pub provider_id: Option<String>,
 }
 
-/// 健康提醒配置(久坐监测 + 喝水提醒)。
+/// 提醒触发方式：久坐阈值或固定间隔。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     每条健康模板自选触发，不能再写死「只有休息是久坐、只有喝水是间隔」。
+/// Code Logic（这个枚举做什么）:
+///     camelCase 落盘/传输；`sedentary` 读共享工作窗口，`interval` 读上次完成原点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReminderTrigger {
+    /// 共享工作窗口达到该模板自己的阈值。
+    Sedentary,
+    /// 距上次完成/跳过/贪睡达到固定间隔。
+    Interval,
+}
+
+/// 提醒完成方式：即时打卡或倒计时会话。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     饮水是点一下记一次，休息/提肛需要开始后倒计时，自定义模板也要能二选一。
+/// Code Logic（这个枚举做什么）:
+///     camelCase 落盘/传输；`session` 必须带会话秒数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReminderComplete {
+    /// 确认即记一次完成。
+    Instant,
+    /// 开始后由后端权威倒计时，到点记完成。
+    Session,
+}
+
+/// 内置饮水模板 id。
+pub const HEALTH_REMINDER_WATER_ID: &str = "water";
+/// 内置休息模板 id。
+pub const HEALTH_REMINDER_REST_ID: &str = "rest";
+/// 内置提肛模板 id。
+pub const HEALTH_REMINDER_KEGEL_ID: &str = "kegel";
+
+/// 一条用户可配置的健康提醒模板。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     M10 健康提醒功能需要可配置的久坐监测参数(工作窗口、有效休息时长、喝水间隔、明细保留天数)、
-///     系统通知开关与免打扰时段。喝水提醒与全屏遮罩随健康监测固定启用,不再给用户独立开关。
-///     这些偏好需跨多次运行持久化,且旧用户升级时其 config.json
-///     尚无 health 字段,故每个字段均用 `#[serde(default = "...")]` 回退默认值,保证向后兼容。
+///     设置页要把饮水/休息/提肛和自定义提醒当成同一套模板编辑，而不是两套硬编码产品线。
+/// Code Logic（这个结构做什么）:
+///     camelCase 序列化，嵌在 snake_case 的 `HealthConfig` 里；缺秒数字段为 None。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthReminderTemplate {
+    /// 内置固定为 water/rest/kegel；自定义为稳定 id。
+    pub id: String,
+    /// 是否出厂内置（内置不可删、不可改成 false）。
+    pub builtin: bool,
+    /// 是否启用该条提醒。
+    pub enabled: bool,
+    /// 设置列表显示名。
+    pub name: String,
+    /// 触发方式。
+    pub trigger: ReminderTrigger,
+    /// interval 触发的间隔秒数。
+    #[serde(default)]
+    pub interval_seconds: Option<i64>,
+    /// sedentary 触发的本窗口阈值秒数。
+    #[serde(default)]
+    pub threshold_seconds: Option<i64>,
+    /// 完成方式。
+    pub complete: ReminderComplete,
+    /// session 完成的倒计时秒数。
+    #[serde(default)]
+    pub session_seconds: Option<i64>,
+    /// 遮罩/通知标题。
+    pub title: String,
+    /// 遮罩/通知正文。
+    pub body: String,
+    /// 主确认按钮文案。
+    pub confirm_label: String,
+    /// 统计单位（杯/次）。
+    pub unit_label: String,
+}
+
+/// 健康提醒配置(久坐监测 + 可配置提醒模板)。
+///
+/// Business Logic（为什么需要这个结构）:
+///     健康监测需要全局开关、共享有效休息、DND/通知，以及一组可配置提醒模板。
+///     旧标量 `work_window_seconds`/`water_interval_seconds` 保留为 rest/water 的兼容镜像。
+///     喝水提醒与全屏遮罩随健康监测固定启用,不再给用户独立开关。
 ///
 /// Code Logic（这个结构做什么）:
-///     纯数据载体(serde Serialize/Deserialize),字段 snake_case 落盘。`Default` 提供全套默认;
-///     各 `default_*` 函数供 serde 在单字段缺失时回退(与 Default 字面值一致)。
+///     纯数据载体(serde Serialize/Deserialize),顶层字段 snake_case 落盘。`Default` 提供
+///     全套默认含三条内置模板；各 `default_*` 函数供 serde 单字段缺失回退。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthConfig {
     /// 久坐监测总开关,默认开启(用户决策:装好即生效)
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 工作窗口长度(秒),默认 45 分钟
+    /// 工作窗口长度(秒),默认 45 分钟；保存时从 rest 模板阈值回写。
     #[serde(default = "default_work_window")]
     pub work_window_seconds: i64,
     /// 有效休息判定时长(秒),默认 5 分钟(连续无操作达此值才算休息)
@@ -649,20 +725,23 @@ pub struct HealthConfig {
     /// 喝水提醒历史开关,运行时固定按健康监测总开关启用;保留字段用于读取旧配置。
     #[serde(default = "default_true")]
     pub water_enabled: bool,
-    /// 喝水提醒间隔(秒),默认 1 小时(3600 秒)
+    /// 喝水提醒间隔(秒),默认 1 小时；保存时从 water 模板间隔回写。
     #[serde(default = "default_water_interval")]
     pub water_interval_seconds: i64,
     /// 全屏遮罩提醒历史开关,运行时固定启用;保留字段用于读取旧配置和 DTO 兼容。
     /// 缺字段时回退 true,确保升级后默认启动全屏遮罩提醒。
     #[serde(default = "default_true")]
     pub reminder_fullscreen: bool,
+    /// 可配置提醒模板。缺字段反序列化为空数组，由 load/validate 从旧标量 seed。
+    #[serde(default)]
+    pub reminders: Vec<HealthReminderTemplate>,
 }
 
 impl Default for HealthConfig {
     /// 提供健康提醒配置全套默认值。
     ///
     /// Business Logic: 久坐监测默认开启,45 分钟工作窗口 + 5 分钟有效休息,
-    ///                  喝水提醒与全屏遮罩随健康监测启用,记录窗口标题,
+    ///                  出厂三条模板(饮水/休息/提肛),记录窗口标题,
     ///                  明细保留 90 天,通知开启,无免打扰。
     /// Code Logic: 返回各字段默认值常量,与 serde 单字段缺失时的 default_* 回退值一致。
     fn default() -> Self {
@@ -678,8 +757,95 @@ impl Default for HealthConfig {
             water_enabled: true,
             water_interval_seconds: 60 * 60,
             reminder_fullscreen: true,
+            reminders: default_health_reminders(),
         }
     }
+}
+
+impl HealthConfig {
+    /// 旧配置缺模板数组时，用当前镜像标量补齐三条内置模板。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     升级用户的 config.json 没有 reminders，不能丢掉他们改过的工作窗口/喝水间隔。
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 `reminders` 为空时写入 seed；已有数组不改。
+    pub fn ensure_reminders(&mut self) {
+        if self.reminders.is_empty() {
+            self.reminders = seed_health_reminders_from_legacy(
+                self.work_window_seconds,
+                self.water_interval_seconds,
+            );
+        }
+    }
+}
+
+/// 出厂三条内置提醒模板。
+///
+/// Business Logic（为什么需要这个函数）:
+///     新安装与「恢复默认」需要同一套饮水/休息/提肛预置。
+/// Code Logic（这个函数做什么）:
+///     返回 water(interval+instant 1h)、rest(sedentary+session 45m/5m)、kegel(interval+session 2h/30s)。
+pub fn default_health_reminders() -> Vec<HealthReminderTemplate> {
+    seed_health_reminders_from_legacy(default_work_window(), default_water_interval())
+}
+
+/// 用旧标量合成三条内置模板。
+///
+/// Business Logic（为什么需要这个函数）:
+///     缺 reminders 的旧配置必须把用户已改的工作窗口/喝水间隔迁进 rest/water。
+/// Code Logic（这个函数做什么）:
+///     rest 阈值取 `work_window_seconds`，water 间隔取 `water_interval_seconds`，kegel 固定 7200/30。
+pub fn seed_health_reminders_from_legacy(
+    work_window_seconds: i64,
+    water_interval_seconds: i64,
+) -> Vec<HealthReminderTemplate> {
+    vec![
+        HealthReminderTemplate {
+            id: HEALTH_REMINDER_WATER_ID.into(),
+            builtin: true,
+            enabled: true,
+            name: "饮水".into(),
+            trigger: ReminderTrigger::Interval,
+            interval_seconds: Some(water_interval_seconds),
+            threshold_seconds: None,
+            complete: ReminderComplete::Instant,
+            session_seconds: None,
+            title: "该喝水啦".into(),
+            body: "记得补充水分,喝口水再继续。".into(),
+            confirm_label: "已喝水".into(),
+            unit_label: "杯".into(),
+        },
+        HealthReminderTemplate {
+            id: HEALTH_REMINDER_REST_ID.into(),
+            builtin: true,
+            enabled: true,
+            name: "休息".into(),
+            trigger: ReminderTrigger::Sedentary,
+            interval_seconds: None,
+            threshold_seconds: Some(work_window_seconds),
+            complete: ReminderComplete::Session,
+            session_seconds: Some(5 * 60),
+            title: "该起来活动一下啦".into(),
+            body: "连续工作已久,站起来走走、伸展一下吧。".into(),
+            confirm_label: "开始休息".into(),
+            unit_label: "次".into(),
+        },
+        HealthReminderTemplate {
+            id: HEALTH_REMINDER_KEGEL_ID.into(),
+            builtin: true,
+            enabled: true,
+            name: "提肛".into(),
+            trigger: ReminderTrigger::Interval,
+            interval_seconds: Some(2 * 60 * 60),
+            threshold_seconds: None,
+            complete: ReminderComplete::Session,
+            session_seconds: Some(30),
+            title: "该活动一下了".into(),
+            body: "坐下太久，做一组短动作再继续。".into(),
+            confirm_label: "开始".into(),
+            unit_label: "次".into(),
+        },
+    ]
 }
 
 /// serde 单字段缺失回退:布尔默认 true。
@@ -947,6 +1113,10 @@ impl AppConfig {
             let text = fs::read_to_string(&path)?;
             let mut cfg: AppConfig = serde_json::from_str(&text)?;
             let mut dirty = false;
+            if cfg.health.reminders.is_empty() {
+                cfg.health.ensure_reminders();
+                dirty = true;
+            }
             // macOS 迁移：旧配置中 <ctrl> 快捷键自动替换为 <cmd>（对照 config.py）
             if cfg!(target_os = "macos") && cfg.screenshot_hotkey.contains("<ctrl>") {
                 cfg.screenshot_hotkey = cfg.screenshot_hotkey.replace("<ctrl>", "<cmd>");
@@ -1381,6 +1551,10 @@ mod tests {
         assert!(h.dnd_start.is_none());
         assert!(h.water_enabled);
         assert!(h.reminder_fullscreen);
+        assert_eq!(h.reminders.len(), 3);
+        assert_eq!(h.reminders[0].id, "water");
+        assert_eq!(h.reminders[1].id, "rest");
+        assert_eq!(h.reminders[2].id, "kegel");
     }
 
     #[test]
@@ -1434,6 +1608,7 @@ mod tests {
                 water_enabled: true,
                 water_interval_seconds: 1800,
                 reminder_fullscreen: true,
+                reminders: default_health_reminders(),
             },
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),

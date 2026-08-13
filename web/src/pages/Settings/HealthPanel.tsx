@@ -13,12 +13,21 @@
  *   - 免打扰时间用 24 小时制小时/分钟下拉框选择,空小时回传 null
  *   - hooks 全部在 early return 之前(项目规则 20)
  */
-import type { ChangeEvent, ReactNode } from 'react';
+import { useState, type ChangeEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon } from '@/lib/icons';
+import {
+  HEALTH_REMINDER_MAX_COUNT,
+  createCustomHealthReminder,
+} from '@/lib/healthReminders';
 import type { HealthForm } from './settingsState';
-import type { HealthConfig } from '@/lib/types';
+import type {
+  HealthConfig,
+  HealthReminderTemplate,
+  ReminderComplete,
+  ReminderTrigger,
+} from '@/lib/types';
 import styles from './Settings.module.css';
 
 /** 24 小时制小时选项 */
@@ -41,6 +50,7 @@ export const HEALTH_RANGE = {
   workWindowMinutes: { min: 1, max: 480 },
   breakMinutes: { min: 1, max: 120 },
   waterIntervalMinutes: { min: 5, max: 1440 },
+  sessionSeconds: { min: 10, max: 7200 },
   retainDays: { min: 1, max: 3650 },
 } as const;
 
@@ -296,14 +306,13 @@ export function HealthSection({ id, title, lead, children }: HealthSectionProps)
  * 健康提醒设置面板组件
  *
  * Business Logic（为什么需要这个组件）:
- *   设置页健康 tab 的纯渲染入口,聚合健康提醒/免打扰/系统通知三组受控字段,
- *   底部提供「恢复默认」「应用配置」按钮 + 已应用配置快照 + 错误提示。
+ *   设置页健康 tab 的纯渲染入口：总开关、有效休息、提醒模板列表、免打扰与系统通知。
  *
  * Code Logic（这个组件做什么）:
- *   useTranslation 在顶部(无 early return,项目规则 20);
- *   渲染三个 section Card,字段 onChange 经 onPatch 浅合并回传父组件。
+ *   useTranslation / 展开态在顶部(无 early return,项目规则 20);
+ *   模板编辑只改 reminders 数组，经 onPatch 回传父组件。
  *
- * @returns 健康提醒/免打扰/系统通知 三组受控字段 + 恢复默认/应用配置按钮
+ * @returns 健康提醒/模板/免打扰/系统通知 受控字段 + 恢复默认/应用配置按钮
  */
 export function HealthPanel({
   form,
@@ -316,8 +325,54 @@ export function HealthPanel({
   canResetDefaults = true,
 }: HealthPanelProps) {
   const { t } = useTranslation(['settings', 'health', 'common']);
+  const [expandedIds, setExpandedIds] = useState<string[]>([]);
   // 全天免打扰：起止均非空且相等（后端合法语义）；派生值须在任何 early return 之前
   const allDayDnd = isAllDayDnd(form.dndStart, form.dndEnd);
+  const reminders = form.reminders ?? [];
+  const canAddReminder = reminders.length < HEALTH_REMINDER_MAX_COUNT;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   模板列表按 id 局部更新，避免整表替换时丢掉其它条。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 id 浅合并后 onPatch reminders。
+   */
+  const patchReminder = (id: string, patch: Partial<HealthReminderTemplate>) => {
+    onPatch({
+      reminders: reminders.map((item) => (item.id === id ? { ...item, ...patch } : item)),
+    });
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户要点「添加提醒」立刻得到一条可编辑草稿。
+   *
+   * Code Logic（这个函数做什么）:
+   *   生成 custom id，默认 interval+instant，并展开新卡。
+   */
+  const handleAddReminder = () => {
+    if (!canAddReminder) return;
+    const id =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `custom-${crypto.randomUUID()}`
+        : `custom-${Date.now()}`;
+    const next = createCustomHealthReminder(id, t('health:unnamedReminder'));
+    onPatch({ reminders: [...reminders, next] });
+    setExpandedIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   自定义模板可删；内置只能关。
+   *
+   * Code Logic（这个函数做什么）:
+   *   过滤掉指定 id，并清展开态。
+   */
+  const handleDeleteReminder = (id: string) => {
+    onPatch({ reminders: reminders.filter((item) => item.id !== id) });
+    setExpandedIds((prev) => prev.filter((item) => item !== id));
+  };
 
   return (
     <>
@@ -336,14 +391,6 @@ export function HealthPanel({
         </div>
         <div className={styles.healthFieldGrid}>
           <NumberRow
-            label={t('health:workWindowMinutes')}
-            helper={t('health:workWindowDescription')}
-            min={HEALTH_RANGE.workWindowMinutes.min}
-            max={HEALTH_RANGE.workWindowMinutes.max}
-            value={Math.round(form.workWindowSeconds / 60)}
-            onChange={(v) => onPatch({ workWindowSeconds: v * 60 })}
-          />
-          <NumberRow
             label={t('health:breakMinutes')}
             helper={t('health:breakDescription')}
             min={HEALTH_RANGE.breakMinutes.min}
@@ -351,14 +398,247 @@ export function HealthPanel({
             value={Math.round(form.breakSeconds / 60)}
             onChange={(v) => onPatch({ breakSeconds: v * 60 })}
           />
-          <NumberRow
-            label={t('health:waterIntervalMinutes')}
-            helper={t('health:waterIntervalDescription')}
-            min={HEALTH_RANGE.waterIntervalMinutes.min}
-            max={HEALTH_RANGE.waterIntervalMinutes.max}
-            value={Math.round(form.waterIntervalSeconds / 60)}
-            onChange={(v) => onPatch({ waterIntervalSeconds: v * 60 })}
-          />
+        </div>
+      </HealthSection>
+
+      <HealthSection
+        id="settings-health-templates"
+        title={t('health:templatesGroup')}
+        lead={t('health:templatesLead')}
+      >
+        <div className={styles.reminderList} data-testid="health-reminder-list">
+          {reminders.map((reminder) => {
+            const expanded = expandedIds.includes(reminder.id);
+            const triggerMinutes =
+              reminder.trigger === 'interval'
+                ? Math.round((reminder.intervalSeconds ?? 3600) / 60)
+                : Math.round((reminder.thresholdSeconds ?? 2700) / 60);
+            return (
+              <article
+                key={reminder.id}
+                className={styles.reminderCard}
+                data-testid={`health-reminder-${reminder.id}`}
+              >
+                <div className={styles.reminderCardHead}>
+                  <div className={styles.reminderCardTitle}>
+                    <strong>{reminder.name || t('health:unnamedReminder')}</strong>
+                    <span className={styles.reminderMeta}>
+                      {t(`health:trigger.${reminder.trigger}`)}
+                      {' · '}
+                      {t(`health:complete.${reminder.complete}`)}
+                    </span>
+                  </div>
+                  <div className={styles.reminderCardActions}>
+                    <button
+                      type="button"
+                      className={styles.toggleRow}
+                      onClick={() => patchReminder(reminder.id, { enabled: !reminder.enabled })}
+                      role="switch"
+                      aria-checked={reminder.enabled}
+                      aria-label={t('health:templateEnabled', { name: reminder.name })}
+                    >
+                      <span className={styles.toggleState}>
+                        {reminder.enabled ? (
+                          <Pill tone="success" dot>
+                            <CheckIcon size={12} />
+                          </Pill>
+                        ) : (
+                          <Pill tone="neutral" dot>
+                            <XIcon size={12} />
+                          </Pill>
+                        )}
+                      </span>
+                    </button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setExpandedIds((prev) =>
+                          prev.includes(reminder.id)
+                            ? prev.filter((item) => item !== reminder.id)
+                            : [...prev, reminder.id],
+                        )
+                      }
+                    >
+                      {expanded ? t('health:collapseTemplate') : t('health:editTemplate')}
+                    </Button>
+                    {reminder.builtin ? null : (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={() => handleDeleteReminder(reminder.id)}
+                      >
+                        {t('common:action.delete')}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                {expanded ? (
+                  <div className={styles.reminderEditor}>
+                    <div className={styles.field}>
+                      <label className={styles.label} htmlFor={`reminder-name-${reminder.id}`}>
+                        {t('health:templateName')}
+                      </label>
+                      <Input
+                        id={`reminder-name-${reminder.id}`}
+                        value={reminder.name}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          patchReminder(reminder.id, { name: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className={styles.healthFieldGrid}>
+                      <div className={styles.field}>
+                        <label className={styles.label}>{t('health:triggerLabel')}</label>
+                        <select
+                          className={styles.timeSelect}
+                          value={reminder.trigger}
+                          aria-label={t('health:triggerLabel')}
+                          onChange={(e: ChangeEvent<HTMLSelectElement>) => {
+                            const trigger = e.target.value as ReminderTrigger;
+                            patchReminder(reminder.id, {
+                              trigger,
+                              intervalSeconds:
+                                trigger === 'interval' ? (reminder.intervalSeconds ?? 3600) : null,
+                              thresholdSeconds:
+                                trigger === 'sedentary' ? (reminder.thresholdSeconds ?? 2700) : null,
+                            });
+                          }}
+                        >
+                          <option value="interval">{t('health:trigger.interval')}</option>
+                          <option value="sedentary">{t('health:trigger.sedentary')}</option>
+                        </select>
+                      </div>
+                      <NumberRow
+                        label={
+                          reminder.trigger === 'interval'
+                            ? t('health:intervalMinutes')
+                            : t('health:thresholdMinutes')
+                        }
+                        helper={
+                          reminder.trigger === 'interval'
+                            ? t('health:intervalDescription')
+                            : t('health:thresholdDescription')
+                        }
+                        min={
+                          reminder.trigger === 'interval'
+                            ? HEALTH_RANGE.waterIntervalMinutes.min
+                            : HEALTH_RANGE.workWindowMinutes.min
+                        }
+                        max={
+                          reminder.trigger === 'interval'
+                            ? HEALTH_RANGE.waterIntervalMinutes.max
+                            : HEALTH_RANGE.workWindowMinutes.max
+                        }
+                        value={triggerMinutes}
+                        onChange={(v) =>
+                          patchReminder(
+                            reminder.id,
+                            reminder.trigger === 'interval'
+                              ? { intervalSeconds: v * 60 }
+                              : { thresholdSeconds: v * 60 },
+                          )
+                        }
+                      />
+                      <div className={styles.field}>
+                        <label className={styles.label}>{t('health:completeLabel')}</label>
+                        <select
+                          className={styles.timeSelect}
+                          value={reminder.complete}
+                          aria-label={t('health:completeLabel')}
+                          onChange={(e: ChangeEvent<HTMLSelectElement>) => {
+                            const complete = e.target.value as ReminderComplete;
+                            patchReminder(reminder.id, {
+                              complete,
+                              sessionSeconds:
+                                complete === 'session' ? (reminder.sessionSeconds ?? 300) : null,
+                            });
+                          }}
+                        >
+                          <option value="instant">{t('health:complete.instant')}</option>
+                          <option value="session">{t('health:complete.session')}</option>
+                        </select>
+                      </div>
+                      {reminder.complete === 'session' ? (
+                        <NumberRow
+                          label={t('health:sessionSeconds')}
+                          helper={t('health:sessionDescription')}
+                          min={HEALTH_RANGE.sessionSeconds.min}
+                          max={HEALTH_RANGE.sessionSeconds.max}
+                          value={reminder.sessionSeconds ?? 300}
+                          onChange={(v) => patchReminder(reminder.id, { sessionSeconds: v })}
+                        />
+                      ) : null}
+                    </div>
+                    <div className={styles.field}>
+                      <label className={styles.label} htmlFor={`reminder-title-${reminder.id}`}>
+                        {t('health:templateTitle')}
+                      </label>
+                      <Input
+                        id={`reminder-title-${reminder.id}`}
+                        value={reminder.title}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          patchReminder(reminder.id, { title: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className={styles.field}>
+                      <label className={styles.label} htmlFor={`reminder-body-${reminder.id}`}>
+                        {t('health:templateBody')}
+                      </label>
+                      <textarea
+                        id={`reminder-body-${reminder.id}`}
+                        className={styles.reminderTextarea}
+                        rows={3}
+                        maxLength={200}
+                        value={reminder.body}
+                        onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                          patchReminder(reminder.id, { body: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className={styles.healthFieldGrid}>
+                      <div className={styles.field}>
+                        <label className={styles.label} htmlFor={`reminder-confirm-${reminder.id}`}>
+                          {t('health:confirmLabel')}
+                        </label>
+                        <Input
+                          id={`reminder-confirm-${reminder.id}`}
+                          value={reminder.confirmLabel}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                            patchReminder(reminder.id, { confirmLabel: e.target.value })
+                          }
+                        />
+                      </div>
+                      <div className={styles.field}>
+                        <label className={styles.label} htmlFor={`reminder-unit-${reminder.id}`}>
+                          {t('health:unitLabel')}
+                        </label>
+                        <Input
+                          id={`reminder-unit-${reminder.id}`}
+                          value={reminder.unitLabel}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                            patchReminder(reminder.id, { unitLabel: e.target.value })
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+        <div className={styles.aboutActions}>
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={handleAddReminder}
+            disabled={!canAddReminder}
+            data-testid="health-add-reminder"
+          >
+            {t('health:addReminder')}
+          </Button>
         </div>
       </HealthSection>
 

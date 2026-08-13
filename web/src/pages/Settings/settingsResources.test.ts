@@ -10,6 +10,7 @@
  *   canResetFromPair、retry 单组调用次数与状态保留。
  */
 import { describe, expect, test, vi } from 'vitest';
+import { createDefaultHealthReminders } from '../../lib/healthReminders';
 import type {
   AppConfig,
   CloudSyncConfig,
@@ -105,6 +106,7 @@ function health(partial: Partial<HealthConfig> = {}): HealthConfig {
     waterIntervalSeconds: 3600,
     reminderFullscreen: true,
     ...partial,
+    reminders: partial.reminders ?? createDefaultHealthReminders(),
   };
 }
 

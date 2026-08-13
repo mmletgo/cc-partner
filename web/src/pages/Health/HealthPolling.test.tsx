@@ -104,6 +104,8 @@ function buildStatus(overrides: Partial<HealthStatus> = {}): HealthStatus {
     breakSeconds: 300,
     snoozeUntil: null,
     overlayRestEndTs: null,
+    overlayTemplateId: null,
+    overlayQueue: [],
     ...overrides,
   };
 }
@@ -157,6 +159,7 @@ beforeEach(() => {
     waterEnabled: true,
     waterIntervalSeconds: 3600,
     reminderFullscreen: true,
+    reminders: [],
   });
   getHabitStatsMock.mockResolvedValue({
     todayWaterCount: 0,
@@ -166,6 +169,7 @@ beforeEach(() => {
     todayRestTotalSeconds: 0,
     todayReminderCount: 0,
     restDailyCounts: [0, 0, 0, 0, 0, 0, 0],
+    templates: [],
   });
 });
 

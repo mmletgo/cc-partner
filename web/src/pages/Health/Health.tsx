@@ -20,6 +20,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
 import type { PillTone } from '@/components/primitives';
 import { healthApi } from '@/api/health';
+import { createDefaultHealthReminders } from '@/lib/healthReminders';
 import type { ActivityStats, HealthStatus, HealthPhase, HabitStats, HealthConfig } from '@/lib/types';
 import { HealthIcon, PauseIcon, PlayIcon } from '@/lib/icons';
 import styles from './Health.module.css';
@@ -394,11 +395,10 @@ export function Health() {
 
         <HabitStatsCard
           stats={habitStats}
-          waterEnabled={config?.waterEnabled ?? true}
-          waterIntervalSeconds={config?.waterIntervalSeconds ?? 3600}
+          reminders={config?.reminders?.length ? config.reminders : createDefaultHealthReminders()}
           retainDays={config?.retainDays ?? 90}
           nowTs={nowTs}
-          onWaterAdded={refresh}
+          onHabitAdded={refresh}
         />
       </div>
     </div>

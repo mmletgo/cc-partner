@@ -284,20 +284,14 @@ function PermissionNeededListener() {
 }
 
 /**
- * HealthReminderListener - 健康提醒系统通知监听(久坐 + 喝水)
+ * HealthReminderListener - 健康提醒系统通知监听
  *
  * Business Logic（为什么需要这个组件）:
- *   后端 health daemon 在久坐达阈值(且未贪睡/不在免打扰/notify_enabled)时 emit
- *   `health:reminder`,在喝水提醒时点 emit `health:water`。app 最小化/在后台时应用内
- *   toast 看不见,需要原生系统通知触达用户。应用内 toast 已停用,系统通知成为久坐/
- *   喝水的主提醒方式(久坐另有全屏遮罩 HealthOverlay 互补)。挂在 App 顶层(与
- *   PermissionNeededListener 同层),任意路由下都生效。
+ *   后端按模板 emit `health:reminder`（载荷含 title/body）。app 最小化时应用内
+ *   toast 看不见,需要原生系统通知。应用内 toast 已停用；遮罩走 HealthOverlay。
  *
  * Code Logic（这个组件做什么）:
- *   - listen `health:reminder` → 系统通知(reminderTitle/reminderBody)
- *   - listen `health:water` → 系统通知(waterTitle/waterBody)
- *   - notify helper:checkNotificationGranted(复用 lib/notification)授权才发,失败静默
- *   - 标题/正文走 i18n health ns,随当前语言切换;hooks 在 early return 之前(项目规则 20)
+ *   listen `health:reminder` → 用载荷 title/body 发系统通知；缺字段回落 i18n。
  */
 function HealthReminderListener() {
   const { t } = useTranslation(['health']);
@@ -305,7 +299,6 @@ function HealthReminderListener() {
   useEffect(() => {
     if (!shouldMountGlobalWindowListeners(label)) return undefined;
     if (!canListenToTauriEvents()) return undefined;
-    // 发系统通知:授权才发,失败静默(系统通知是久坐/喝水的主提醒通道)
     const notify = async (title: string, body: string) => {
       try {
         if (!(await checkNotificationGranted())) return;
@@ -314,15 +307,16 @@ function HealthReminderListener() {
         // 未授权通知权限或发送失败时静默
       }
     };
-    const reminderUnlisten = listen('health:reminder', () =>
-      void notify(t('health:reminderTitle'), t('health:reminderBody')),
-    );
-    const waterUnlisten = listen('health:water', () =>
-      void notify(t('health:waterTitle'), t('health:waterBody')),
+    const reminderUnlisten = listen<{ templateId?: string; title?: string; body?: string }>(
+      'health:reminder',
+      (event) =>
+        void notify(
+          event.payload.title || t('health:reminderTitle'),
+          event.payload.body || t('health:reminderBody'),
+        ),
     );
     return () => {
       void reminderUnlisten.then((fn) => fn());
-      void waterUnlisten.then((fn) => fn());
     };
   }, [label, t]);
   return null;

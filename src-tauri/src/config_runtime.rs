@@ -736,6 +736,9 @@ pub struct HealthRuntimePatch {
     pub dnd_end: Option<Option<String>>,
     #[serde(default)]
     pub water_interval_seconds: Option<i64>,
+    /// 可配置提醒模板整表覆盖。
+    #[serde(default)]
+    pub reminders: Option<Vec<crate::config::HealthReminderTemplate>>,
 }
 
 impl HealthRuntimePatch {
@@ -773,6 +776,9 @@ impl HealthRuntimePatch {
         }
         if let Some(v) = self.water_interval_seconds {
             health.water_interval_seconds = v;
+        }
+        if let Some(ref v) = self.reminders {
+            health.reminders = v.clone();
         }
     }
 }

@@ -225,6 +225,17 @@ const REST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rest_records (
     duration_seconds INTEGER NOT NULL DEFAULT 0
 )";
 
+/// 通用习惯事件表：全部模板写此表；water/rest 另双写旧表以便回滚。
+const HABIT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS habit_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    duration_seconds INTEGER NOT NULL DEFAULT 0
+)";
+const HABIT_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_habit_records_template_ts ON habit_records(template_id, ts)";
+
 /// GitHub Trending 首页缓存表（榜单 + Claude CLI 中英文解说）。
 const GITHUB_TRENDING_CACHE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS github_trending_cache (
     key TEXT PRIMARY KEY,
@@ -379,6 +390,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
 
     sqlx::query(WATER_SCHEMA).execute(&pool).await?;
     sqlx::query(REST_SCHEMA).execute(&pool).await?;
+    sqlx::query(HABIT_SCHEMA).execute(&pool).await?;
+    sqlx::query(HABIT_INDEX).execute(&pool).await?;
     sqlx::query(GITHUB_TRENDING_CACHE_SCHEMA)
         .execute(&pool)
         .await?;

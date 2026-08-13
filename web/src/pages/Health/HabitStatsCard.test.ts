@@ -3,6 +3,7 @@ import { register } from 'node:module';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { HabitStats } from '../../lib/types';
+import { createDefaultHealthReminders } from '../../lib/healthReminders';
 
 register('./css-stub.mjs', import.meta.url);
 
@@ -21,35 +22,58 @@ describe('HabitStatsCard', () => {
       todayRestTotalSeconds: 720,
       todayReminderCount: 4,
       restDailyCounts: [2, 3, 1, 4, 5, 2, 3],
+      templates: [
+        {
+          id: 'water',
+          todayCompleted: 5,
+          todayFired: 5,
+          todayDurationSeconds: 0,
+          dailyCompleted: [3, 6, 2, 5, 8, 4, 5],
+          lastCompletedTs: Math.floor(Date.now() / 1000) - 600,
+        },
+        {
+          id: 'rest',
+          todayCompleted: 3,
+          todayFired: 4,
+          todayDurationSeconds: 720,
+          dailyCompleted: [2, 3, 1, 4, 5, 2, 3],
+          lastCompletedTs: null,
+        },
+        {
+          id: 'kegel',
+          todayCompleted: 1,
+          todayFired: 1,
+          todayDurationSeconds: 30,
+          dailyCompleted: [0, 0, 0, 0, 0, 0, 1],
+          lastCompletedTs: null,
+        },
+      ],
     };
 
     const rendered = renderToStaticMarkup(
       createElement(HabitStatsCard, {
         stats: sampleStats,
-        waterEnabled: true,
-        waterIntervalSeconds: 3600,
+        reminders: createDefaultHealthReminders(),
         retainDays: 90,
         nowTs: Math.floor(Date.now() / 1000),
-        onWaterAdded: () => undefined,
+        onHabitAdded: () => undefined,
       }),
     );
 
-    // 断言 1: 标题渲染(需要 i18n 已有 habitStatsTitle key,Task 10 才会加;
-    // 在 Task 10 之前测试会渲染 key 本身如 "habitStatsTitle",这正常。
-    // 这里先断言组件渲染不抛错 + 数字渲染)
     if (!rendered.includes('>5<')) {
       throw new Error('HabitStatsCard missing today water count');
     }
 
-    // 断言 2: 7 柱 sparkline 渲染(饮水 7 柱 + 休息 7 柱 = 至少 14 个 bar class)
     const barMatches = rendered.match(/class="[^"]*bar[^"]*"/g) ?? [];
-    if (barMatches.length < 14) {
-      throw new Error(`HabitStatsCard expected >=14 bar elements, got ${barMatches.length}`);
+    if (barMatches.length < 21) {
+      throw new Error(`HabitStatsCard expected >=21 bar elements, got ${barMatches.length}`);
     }
 
-    // 断言 3: 休息次数渲染
     if (!rendered.includes('>3<')) {
       throw new Error('HabitStatsCard missing today rest count');
+    }
+    if (!rendered.includes('data-testid="habit-block-kegel"')) {
+      throw new Error('HabitStatsCard missing kegel column');
     }
   });
 });

@@ -7,6 +7,11 @@ import type {
   UpdateDownloadStatus,
   UpdateDownloadStatusValue,
 } from '../../lib/types';
+import {
+  cloneHealthReminders,
+  createDefaultHealthReminders,
+  resetBuiltinHealthReminders,
+} from '../../lib/healthReminders';
 import { getDefaultShortcutValue } from './shortcutRecorder';
 
 /** 快捷键字段 id（与 shortcut 录制控件 / buildConfigUpdate 映射一一对应）。 */
@@ -213,6 +218,7 @@ export const PENDING_HEALTH_FORM: HealthForm = {
   waterEnabled: true,
   waterIntervalSeconds: 60 * 60,
   reminderFullscreen: true,
+  reminders: createDefaultHealthReminders(),
 };
 
 /**
@@ -426,11 +432,19 @@ export function promptOptimizerSettingsFormToUpdate(
  *
  * Code Logic（做什么）:
  *   null 返回占位默认的新拷贝;非 null 返回字段拷贝,并把 waterEnabled/reminderFullscreen 归一为 true。
+ *   空 reminders 按旧 work/water 标量 seed 三条出厂模板。
  */
 export function healthConfigToForm(config: HealthConfig | null): HealthForm {
   const source = config ?? PENDING_HEALTH_FORM;
+  const reminders = source.reminders?.length
+    ? cloneHealthReminders(source.reminders)
+    : createDefaultHealthReminders({
+        workWindowSeconds: source.workWindowSeconds,
+        waterIntervalSeconds: source.waterIntervalSeconds,
+      });
   return {
     ...source,
+    reminders,
     waterEnabled: true,
     reminderFullscreen: true,
   };
@@ -453,6 +467,7 @@ export function mergeHealthReminderSlice(
   const activitySource = applied ?? draft;
   return {
     ...draft,
+    reminders: cloneHealthReminders(draft.reminders),
     recordWindowTitle: activitySource.recordWindowTitle,
     retainDays: activitySource.retainDays,
     waterEnabled: true,
@@ -476,11 +491,30 @@ export function mergeActivityStatsSlice(
   const reminderSource = applied ?? draft;
   return {
     ...reminderSource,
+    reminders: cloneHealthReminders(reminderSource.reminders),
     recordWindowTitle: draft.recordWindowTitle,
     retainDays: draft.retainDays,
     waterEnabled: true,
     reminderFullscreen: true,
   };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   「恢复默认」只重置三条内置，不能把用户加过的自定义提醒清掉。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用出厂 reminders 替换内置三项，再按切片规则保留活动统计字段。
+ */
+export function resetHealthReminderDefaults(
+  applied: HealthForm | null,
+  draft: HealthForm,
+  factory: HealthForm,
+): HealthForm {
+  return mergeHealthReminderSlice(applied, {
+    ...factory,
+    reminders: resetBuiltinHealthReminders(draft.reminders, factory.reminders),
+  });
 }
 
 /**
