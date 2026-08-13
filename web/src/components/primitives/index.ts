@@ -34,6 +34,9 @@ export type { PillProps, PillTone } from './Pill';
 export { StatusDot } from './StatusDot';
 export type { StatusDotProps, StatusDotStatus, StatusDotSize } from './StatusDot';
 
+export { HintStatusDot } from './HintStatusDot';
+export type { HintStatusDotProps } from './HintStatusDot';
+
 export { StatusMessage } from './StatusMessage';
 export type {
   StatusMessageProps,

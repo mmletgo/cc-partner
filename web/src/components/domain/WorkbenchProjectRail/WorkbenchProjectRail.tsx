@@ -15,10 +15,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Button, Dialog } from '@/components/primitives';
+import { Button, Dialog, HintStatusDot } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, XIcon } from '@/lib/icons';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
+import { useOptionalWorkbenchAgentHints } from '@/hooks/workbenchAgentHintsContext';
+import { EMPTY_HINT_COUNTS } from '@/lib/workbenchAgentHints';
+import { agentHintAriaSpec } from '@/pages/Workbench/workbenchAgentHintPresentation';
 import { EMPTY_PROJECT_SESSION_STATS } from '@/lib/workbenchProjectStats';
 import { fleetExceptionCount } from '@/lib/types/lanFleet';
 import type { LanFleetDeviceSummary, LanFleetProjectSummary } from '@/lib/types/lanFleet';
@@ -80,6 +83,8 @@ export function WorkbenchProjectRail() {
   } = useWorkbenchProjects();
 
   const { projectSummaries, snapshot: fleetSnapshot } = useLanAgentFleet({ enabled: true });
+  const agentHints = useOptionalWorkbenchAgentHints();
+  const hintsForProject = agentHints?.hintsForProject;
 
   /**
    * Business Logic（为什么需要这个映射）:
@@ -533,6 +538,8 @@ export function WorkbenchProjectRail() {
             agentHintParts.push(t('workbench:projectRail.deviceUnsupported'));
           }
           const agentHint = agentHintParts.join(' · ');
+          const hint = hintsForProject?.(project.id) ?? EMPTY_HINT_COUNTS;
+          const hintAria = agentHintAriaSpec(hint);
           return (
             <div
               key={project.id}
@@ -619,10 +626,12 @@ export function WorkbenchProjectRail() {
                   <span className={styles.projectStatusText}>{statusLabel}</span>
                 </span>
               </button>
-              <span
+              <HintStatusDot
                 className={styles.projectStatusDot}
                 data-active={isActive || undefined}
-                aria-hidden="true"
+                count={hint.count}
+                tone={hint.tone}
+                aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
               />
               {exceptionCount > 0 ? (
                 <Link

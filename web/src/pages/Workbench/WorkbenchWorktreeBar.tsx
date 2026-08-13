@@ -13,7 +13,10 @@
  *   - 暴露 WorkbenchWorktreeBarProps 类型，所有数据均来自 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享。
  */
 import { useTranslation } from 'react-i18next';
-import { Button, Input } from '@/components/primitives';
+import { Button, HintStatusDot, Input } from '@/components/primitives';
+import { useOptionalWorkbenchAgentHints } from '@/hooks/workbenchAgentHintsContext';
+import { EMPTY_HINT_COUNTS } from '@/lib/workbenchAgentHints';
+import { agentHintAriaSpec } from './workbenchAgentHintPresentation';
 import { PlusIcon, TrashIcon } from '@/lib/icons';
 import type { WorkbenchWorktree } from '@/lib/types';
 import styles from './Workbench.module.css';
@@ -71,6 +74,7 @@ export interface WorkbenchWorktreeBarProps {
  */
 export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
   const { t } = useTranslation(['workbench', 'common']);
+  const hintContext = useOptionalWorkbenchAgentHints();
   const {
     worktrees,
     activeWorktree,
@@ -105,6 +109,11 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
           worktrees.map((worktree) => {
             const tone = worktreeStatusTone(worktree);
             const label = worktree.branch ?? worktree.name;
+            const hint =
+              activeProjectId && hintContext
+                ? hintContext.hintsForWorktree(activeProjectId, worktree.id)
+                : EMPTY_HINT_COUNTS;
+            const hintAria = agentHintAriaSpec(hint);
             return (
               <button
                 key={worktree.id}
@@ -114,7 +123,13 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
                 data-tone={tone}
                 onClick={() => onSelectWorktree(worktree.id)}
               >
-                <span className={styles.worktreeDot} data-tone={tone} />
+                <HintStatusDot
+                  className={styles.worktreeDot}
+                  data-tone={tone}
+                  count={hint.count}
+                  tone={hint.tone}
+                  aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+                />
                 <span className={styles.worktreeName}>{label}</span>
                 <span className={styles.worktreeMeta}>
                   {worktree.isMain

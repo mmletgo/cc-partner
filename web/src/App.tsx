@@ -14,6 +14,7 @@ import {
   type AppFlavor,
 } from './hooks/usePermissions';
 import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
+import { WorkbenchAgentHintsProvider } from './hooks/WorkbenchAgentHintsProvider';
 import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
 import { AttentionProvider } from './hooks/useAttention';
@@ -523,15 +524,17 @@ export default function App() {
             element={
               <WorkbenchDependencyProvider>
                 <WorkbenchProjectsProvider>
-                  <WorkbenchTerminalBuffersProvider>
-                    <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
-                      <ScratchpadAutosaveProvider>
-                        {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
-                        <OperationalNotificationCoordinator />
-                        <AppShell />
-                      </ScratchpadAutosaveProvider>
-                    </AttentionProvider>
-                  </WorkbenchTerminalBuffersProvider>
+                  <WorkbenchAgentHintsProvider>
+                    <WorkbenchTerminalBuffersProvider>
+                      <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
+                        <ScratchpadAutosaveProvider>
+                          {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
+                          <OperationalNotificationCoordinator />
+                          <AppShell />
+                        </ScratchpadAutosaveProvider>
+                      </AttentionProvider>
+                    </WorkbenchTerminalBuffersProvider>
+                  </WorkbenchAgentHintsProvider>
                 </WorkbenchProjectsProvider>
               </WorkbenchDependencyProvider>
             }

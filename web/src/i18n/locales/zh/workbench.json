@@ -27,6 +27,11 @@
     "deviceFilterEmpty": "该设备下暂无项目",
     "deviceFilterShowAll": "显示全部"
   },
+  "agentHints": {
+    "dotAriaWaiting": "{{count}} 个窗口等待输入",
+    "dotAriaCompleted": "{{count}} 个窗口已完成",
+    "dotAriaBoth": "{{waiting}} 个窗口等待输入，{{completed}} 个窗口已完成"
+  },
   "fleet": {
     "title": "局域网 Agent Fleet",
     "subtitle": "只读聚合已保存项目的 Agent、Attention、Git 与自动化摘要；不自动调度或迁移。",
