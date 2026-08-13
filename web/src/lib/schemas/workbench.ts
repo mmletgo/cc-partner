@@ -31,6 +31,7 @@ import type {
   WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
+  WorkbenchProjectNote,
   WorkbenchSaveTextResult,
   WorkbenchSession,
   WorkbenchSessionReplay,
@@ -86,6 +87,22 @@ export const workbenchProjectDecoder: Decoder<WorkbenchProject> = objectDecoder(
 /** 项目列表 decoder。 */
 export const workbenchProjectsDecoder: Decoder<WorkbenchProject[]> =
   arrayDecoder(workbenchProjectDecoder);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   项目笔记 get/save 损坏不得把半截正文写进编辑器或覆盖已保存内容。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 camelCase `{ projectId, content, updatedAt }`。
+ */
+export const workbenchProjectNoteDecoder: Decoder<WorkbenchProjectNote> = objectDecoder(
+  'WorkbenchProjectNote',
+  {
+    projectId: stringDecoder,
+    content: stringDecoder,
+    updatedAt: stringDecoder,
+  },
+);
 
 /**
  * Business Logic（为什么需要这个 decoder）:

@@ -30,8 +30,8 @@ use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
     AgentHubRepo, AgentLedgerRepo, ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate,
     PromptRepo, ScratchpadRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
-    WorkbenchWorktreeRepo,
+    WorkbenchProjectNoteRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+    WorkbenchWorkspaceLayoutRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
@@ -114,6 +114,8 @@ pub struct AppState {
     pub workbench_browser_repo: Arc<WorkbenchBrowserRepo>,
     /// Workbench 工作现场 layout 仓库（自动 slot + 命名 snapshot，revision CAS）
     pub workbench_workspace_layout_repo: Arc<WorkbenchWorkspaceLayoutRepo>,
+    /// Workbench 项目笔记仓库（按 project_id 一份 Markdown，本机 SQLite）
+    pub workbench_project_note_repo: Arc<WorkbenchProjectNoteRepo>,
     /// Workbench 浏览器预览会话注册表（previewId 到本机 target 或远端 relay 的短期映射）
     pub workbench_browser_previews:
         Arc<crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry>,

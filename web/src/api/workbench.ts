@@ -21,6 +21,7 @@ import {
   workbenchOpenFileDecoder,
   workbenchPathInfoDecoder,
   workbenchProjectDecoder,
+  workbenchProjectNoteDecoder,
   workbenchProjectsDecoder,
   workbenchRemoveResultDecoder,
   workbenchRepairHookFailureDecoder,
@@ -851,5 +852,28 @@ export const workbenchApi = {
      */
     clear: (): Promise<number> =>
       invokeDecoded('clear_agent_ledger', undefined, clearAgentLedgerResultDecoder),
+  },
+
+  /**
+   * 项目笔记（本机 SQLite，按 projectId 一份）。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   右侧检查器「项目笔记」需要 get/save，不写仓库、不代理远端磁盘。
+   *
+   * Code Logic（这个分组做什么）:
+   *   invoke get_workbench_project_note / save_workbench_project_note。
+   */
+  notes: {
+    /** 读取项目笔记；无行返回空正文。 */
+    get: (projectId: string) =>
+      invokeDecoded('get_workbench_project_note', { projectId }, workbenchProjectNoteDecoder),
+
+    /** 覆盖保存项目笔记。 */
+    save: (projectId: string, content: string) =>
+      invokeDecoded(
+        'save_workbench_project_note',
+        { projectId, content },
+        workbenchProjectNoteDecoder,
+      ),
   },
 };

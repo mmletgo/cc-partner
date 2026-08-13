@@ -20,7 +20,7 @@ export const WORKSPACE_LAYOUT_SCHEMA_VERSION = 1 as const;
 export type WorkspaceView = 'terminal' | 'files' | 'browser' | 'automation';
 
 /** inspector tab。 */
-export type InspectorTab = 'files' | 'git' | 'history' | 'automation';
+export type InspectorTab = 'files' | 'git' | 'history' | 'notes' | 'automation';
 
 /** layout 种类。 */
 export type WorkspaceLayoutKind = 'auto' | 'named';

@@ -33,6 +33,8 @@ export interface WorkbenchMarkdownEditorProps {
   mode: WorkbenchMarkdownMode;
   /** 只读态：保留浏览和模式切换，但禁止修改 Markdown 内容 */
   readOnly?: boolean;
+  /** 是否展示 source/preview/split 模式栏；窄栏笔记默认关闭 */
+  showModeBar?: boolean;
   loadAsset?: WorkbenchHtmlAssetLoader;
   onModeChange: (mode: WorkbenchMarkdownMode) => void;
   onChange: (value: string) => void;
@@ -107,6 +109,7 @@ export function WorkbenchMarkdownEditor({
   documentPath,
   mode,
   readOnly = false,
+  showModeBar = true,
   loadAsset,
   onModeChange,
   onChange,
@@ -247,7 +250,8 @@ export function WorkbenchMarkdownEditor({
   const showSourcePane = mode === 'source' || mode === 'split';
 
   return (
-    <section className={styles.markdownShell}>
+    <section className={styles.markdownShell} data-compact={!showModeBar || undefined}>
+      {showModeBar ? (
       <div
         className={styles.modeBar}
         role="group"
@@ -281,6 +285,7 @@ export function WorkbenchMarkdownEditor({
           {t('workbench:markdownEditor.modes.split')}
         </button>
       </div>
+      ) : null}
 
       <div className={styles.contentStack}>
         {syncError ? (

@@ -25,6 +25,11 @@ vi.mock('./WorkbenchGitInspector', () => ({
   WorkbenchGitInspector: () => <div data-testid="history-panel-body">history body</div>,
 }));
 
+vi.mock('./WorkbenchNotesInspector', () => ({
+  WorkbenchNotesInspector: () => <div data-testid="notes-panel-body">notes body</div>,
+}));
+
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
@@ -47,6 +52,15 @@ function renderInspector(initial: WorkbenchInspectorTab = 'files') {
   });
   const fileInspector = {} as never;
   const gitInspector = {} as never;
+  const notesInspector = {
+    activeProjectId: 'p1',
+    content: '',
+    loading: false,
+    saving: false,
+    error: null,
+    onChange: vi.fn(),
+    onRetry: vi.fn(),
+  };
 
   const view = render(
     <I18nextProvider i18n={i18n}>
@@ -55,6 +69,7 @@ function renderInspector(initial: WorkbenchInspectorTab = 'files') {
         setInspectorTab={setInspectorTab}
         fileInspector={fileInspector}
         gitInspector={gitInspector}
+        notesInspector={notesInspector}
       />
     </I18nextProvider>,
   );
@@ -74,6 +89,7 @@ function renderInspector(initial: WorkbenchInspectorTab = 'files') {
           setInspectorTab={setInspectorTab}
           fileInspector={fileInspector}
           gitInspector={gitInspector}
+          notesInspector={notesInspector}
         />
       </I18nextProvider>,
     );
@@ -87,10 +103,13 @@ describe('WorkbenchInspector keyboard semantics', () => {
     renderInspector('files');
     const filesTab = screen.getByRole('tab', { name: '项目文件夹' });
     const historyTab = screen.getByRole('tab', { name: 'Git 历史' });
+    const notesTab = screen.getByRole('tab', { name: '项目笔记' });
     expect(filesTab.getAttribute('tabindex')).toBe('0');
     expect(historyTab.getAttribute('tabindex')).toBe('-1');
+    expect(notesTab.getAttribute('tabindex')).toBe('-1');
     expect(filesTab.getAttribute('aria-controls')).toBe('workbench-inspector-panel-files');
     expect(historyTab.getAttribute('aria-controls')).toBe('workbench-inspector-panel-history');
+    expect(notesTab.getAttribute('aria-controls')).toBe('workbench-inspector-panel-notes');
     const panel = screen.getByRole('tabpanel');
     expect(panel.id).toBe('workbench-inspector-panel-files');
     expect(panel.getAttribute('aria-labelledby')).toBe('workbench-inspector-tab-files');
@@ -115,7 +134,7 @@ describe('WorkbenchInspector keyboard semantics', () => {
     fireEvent.keyDown(screen.getByRole('tab', { name: 'Git 历史' }), { key: 'Home' });
     expect(setInspectorTab).toHaveBeenCalledWith('files');
     fireEvent.keyDown(screen.getByRole('tab', { name: 'Git 历史' }), { key: 'End' });
-    expect(setInspectorTab).toHaveBeenCalledWith('history');
+    expect(setInspectorTab).toHaveBeenCalledWith('notes');
   });
 
   /**

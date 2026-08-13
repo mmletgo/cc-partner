@@ -768,6 +768,24 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(item)?)
         }
 
+        // ---- project notes（本机 SQLite，不代理远端磁盘）----
+        "notes.get" => {
+            let project_id = required_string(&payload, "projectId")?;
+            let item = workbench::get_workbench_project_note_for_state(state, project_id).await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "notes.save" => {
+            let project_id = required_string(&payload, "projectId")?;
+            let content = payload
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AppError::validation("content required".to_string()))?
+                .to_string();
+            let item =
+                workbench::save_workbench_project_note_for_state(state, project_id, content).await?;
+            Ok(serde_json::to_value(item)?)
+        }
+
         other => Err(AppError::validation(format!(
             "未知 workbench control op: {other}"
         ))),

@@ -1466,6 +1466,7 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
             .workbench_worktree_repo
             .delete_by_project(project_id)
             .await?;
+        state.workbench_project_note_repo.delete(project_id).await?;
         state.workbench_project_repo.delete(project_id).await?;
         Ok::<(), AppError>(())
     }
@@ -1679,6 +1680,9 @@ pub(super) mod restore_holder_fail_closed_tests {
             ),
             agent_hub_repo: Arc::new(crate::storage::AgentHubRepo::new(pool.clone())),
             workbench_workspace_layout_repo: Arc::new(layout_repo),
+            workbench_project_note_repo: Arc::new(
+                crate::storage::WorkbenchProjectNoteRepo::new(pool.clone()),
+            ),
             browser_verification: Arc::new(
                 crate::workbench::browser_verification::BrowserVerificationService::new(
                     Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),

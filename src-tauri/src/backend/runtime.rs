@@ -20,8 +20,8 @@ use crate::state::AppState;
 use crate::storage::{
     AgentLedgerRepo, ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo,
     ScratchpadRepo, SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
-    WorkbenchWorktreeRepo,
+    WorkbenchProjectNoteRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+    WorkbenchWorkspaceLayoutRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use crate::workbench::agent_ledger::AgentLedgerService;
@@ -417,6 +417,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     WorkbenchWorkspaceLayoutRepo::new(pool.clone())
         .ensure_schema()
         .await?;
+    WorkbenchProjectNoteRepo::new(pool.clone())
+        .ensure_schema()
+        .await?;
     OrchestratorRepo::init_schema(&pool).await?;
     Ok(pool)
 }
@@ -529,6 +532,10 @@ pub async fn build_app_state_with_role(
         pool.clone(),
         maintenance_gate.clone(),
     ));
+    let workbench_project_note_repo = Arc::new(WorkbenchProjectNoteRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_browser_previews =
         Arc::new(crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new());
     let browser_verification = Arc::new(
@@ -597,6 +604,7 @@ pub async fn build_app_state_with_role(
         workbench_worktree_repo,
         workbench_browser_repo,
         workbench_workspace_layout_repo,
+        workbench_project_note_repo,
         workbench_browser_previews,
         browser_verification,
         workbench_sessions,

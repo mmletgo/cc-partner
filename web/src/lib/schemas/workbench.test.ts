@@ -10,6 +10,7 @@ import {
   workbenchOpenFileDecoder,
   workbenchPathInfoDecoder,
   workbenchProjectDecoder,
+  workbenchProjectNoteDecoder,
   workbenchSaveTextResultDecoder,
   workbenchSessionDecoder,
   workbenchWorktreeDecoder,
@@ -129,6 +130,23 @@ describe('workbench schemas', () => {
     expect(workbenchFileNodeDecoder.decode(fileNode).children?.[0]?.name).toBe('a.ts');
     expect(workbenchFileNodesDecoder.decode([fileNode])).toHaveLength(1);
     expect(workbenchOpenFileDecoder.decode(openFile).text?.baseHash).toBe('h1');
+    expect(
+      workbenchProjectNoteDecoder.decode({
+        projectId: 'p1',
+        content: '# hello',
+        updatedAt: '2026-07-13T00:00:00.000Z',
+      }).content,
+    ).toBe('# hello');
+  });
+
+  test('malformed project note fails closed', () => {
+    expect(() =>
+      workbenchProjectNoteDecoder.decode({
+        projectId: 'p1',
+        content: 12,
+        updatedAt: 't',
+      }),
+    ).toThrow(ContractDecodeError);
   });
 
   test('malformed canPush fails', () => {

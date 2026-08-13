@@ -188,7 +188,7 @@ interface ControllerProps {
   activeProjectId: string | null;
   activeWorktreeId: string | null;
   remoteWriteDisabled: boolean;
-  inspectorTab: 'files' | 'history';
+  inspectorTab: 'files' | 'history' | 'notes';
   isCurrentProject: (projectId: string) => boolean;
   markRequestFailure: (projectId: string, error: unknown) => void;
   markRequestSuccess: (projectId: string) => void;

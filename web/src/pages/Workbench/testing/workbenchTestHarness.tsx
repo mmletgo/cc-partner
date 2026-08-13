@@ -755,7 +755,7 @@ export function workbenchEventListenerCount(event: string): number {
  * Code Logic（这个函数做什么）:
  *   按 WorkbenchInspector 暴露的稳定 button id（workbench-inspector-tab-<tab>）点击对应 tab。
  */
-export async function selectInspectorTab(tab: 'files' | 'history'): Promise<void> {
+export async function selectInspectorTab(tab: 'files' | 'history' | 'notes'): Promise<void> {
   await act(async () => {
     const el = document.getElementById(`workbench-inspector-tab-${tab}`);
     if (!el) {

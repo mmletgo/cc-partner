@@ -2689,6 +2689,9 @@ mod tests {
             ),
             agent_hub_repo: Arc::new(agent_hub),
             workbench_workspace_layout_repo: Arc::new(layout_repo),
+            workbench_project_note_repo: Arc::new(
+                crate::storage::WorkbenchProjectNoteRepo::new(pool.clone()),
+            ),
             browser_verification: Arc::new(
                 crate::workbench::browser_verification::BrowserVerificationService::new(
                     Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
