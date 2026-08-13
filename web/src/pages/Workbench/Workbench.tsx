@@ -67,6 +67,7 @@ import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
+import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
 import { WorkspaceSnapshotDialog } from './views/WorkspaceSnapshotDialog';
@@ -93,6 +94,8 @@ export function Workbench() {
     refreshProjectSessionStats,
     chooseAndAddProject,
   } = useWorkbenchProjects();
+  const { layoutSlotKey } = useWorkbenchWindowRole();
+  const restoreSlotKey = layoutSlotKey ?? 'desktop:auto';
   const {
     resetBuffer: resetTerminalBuffer,
     removeBuffer: removeTerminalBuffer,
@@ -469,6 +472,8 @@ export function Workbench() {
     setWorkspaceView,
     setInspectorTab,
     setBrowserTargetUrl,
+    layoutSlotKey: restoreSlotKey,
+    urlProjectId: workbenchDeepLink.projectId,
   });
 
   useEffect(() => {

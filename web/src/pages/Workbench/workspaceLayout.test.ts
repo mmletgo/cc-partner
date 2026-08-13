@@ -21,6 +21,7 @@ function baseSelection(
     workspaceView: 'terminal',
     inspectorTab: 'files',
     browserTargetUrl: null,
+    slotKey: DESKTOP_AUTO_SLOT_KEY,
     ...overrides,
   };
 }
@@ -44,6 +45,14 @@ describe('buildWorkspaceLayoutDraft', () => {
     expect(JSON.stringify(draft)).not.toContain('secret');
     expect(draft).not.toHaveProperty('command');
     expect(draft).not.toHaveProperty('prompt');
+  });
+
+  it('writes satellite window auto slot instead of desktop:auto', () => {
+    const draft = buildWorkspaceLayoutDraft(
+      baseSelection({ slotKey: 'desktop:auto:window:workbench-2' }),
+    )!;
+    expect(draft.slotKey).toBe('desktop:auto:window:workbench-2');
+    expect(draft.kind).toBe('auto');
   });
 });
 
