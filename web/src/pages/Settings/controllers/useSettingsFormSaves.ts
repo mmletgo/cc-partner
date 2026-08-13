@@ -99,6 +99,10 @@ export interface UseSettingsFormSavesResult {
   patchHealthForm: (partial: Partial<HealthForm>) => void;
   handleResetHealthDefaults: () => void;
   handleApplyHealth: () => Promise<void>;
+  applyingActivity: boolean;
+  activityError: string | null;
+  handleResetActivityDefaults: () => void;
+  handleApplyActivity: () => Promise<void>;
 
   cloudSyncForm: CloudSyncForm;
   cloudSync: CloudSyncConfig | null;
@@ -492,6 +496,10 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
     patchHealthForm: secondary.patchHealthForm,
     handleResetHealthDefaults: secondary.handleResetHealthDefaults,
     handleApplyHealth: secondary.handleApplyHealth,
+    applyingActivity: secondary.applyingActivity,
+    activityError: secondary.activityError,
+    handleResetActivityDefaults: secondary.handleResetActivityDefaults,
+    handleApplyActivity: secondary.handleApplyActivity,
 
     cloudSyncForm: syncBackup.cloudSyncForm,
     cloudSync: syncBackup.cloudSync,

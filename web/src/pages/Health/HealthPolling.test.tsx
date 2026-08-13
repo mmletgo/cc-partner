@@ -264,7 +264,7 @@ describe('Health visibility polling', () => {
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
   });
 
-  test('renders window title ranking from activity detail', async () => {
+  test('does not render activity charts that now live on the activity stats page', async () => {
     getDetailMock.mockResolvedValue({
       appUsage: [{ name: 'Code', minutes: 12 }],
       windowUsage: [{ name: 'main.rs — cc-partner', minutes: 8 }],
@@ -274,7 +274,8 @@ describe('Health visibility polling', () => {
     renderHealth();
     await flushMicrotasks(20);
 
-    expect(screen.getByText('窗口使用时长(前 8)')).toBeTruthy();
-    expect(document.body.textContent).toMatch(/main\.rs — cc-partner/);
+    expect(screen.queryByText('窗口使用时长(前 8)')).toBeNull();
+    expect(screen.queryByText('活动统计')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/main\.rs — cc-partner/);
   });
 });

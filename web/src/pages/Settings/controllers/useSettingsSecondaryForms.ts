@@ -34,6 +34,8 @@ import type { AutomationSettingsForm } from '../automationSettingsState';
 import {
   githubTrendingConfigToForm,
   healthConfigToForm,
+  mergeActivityStatsSlice,
+  mergeHealthReminderSlice,
   PENDING_GITHUB_TRENDING_FORM,
   PENDING_HEALTH_FORM,
   PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM,
@@ -89,6 +91,10 @@ export interface UseSettingsSecondaryFormsResult {
   patchHealthForm: (partial: Partial<HealthForm>) => void;
   handleResetHealthDefaults: () => void;
   handleApplyHealth: () => Promise<void>;
+  applyingActivity: boolean;
+  activityError: string | null;
+  handleResetActivityDefaults: () => void;
+  handleApplyActivity: () => Promise<void>;
 
   automationForm: AutomationSettingsForm;
   defaultAutomationForm: AutomationSettingsForm;
@@ -164,6 +170,8 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   const [healthConfig, setHealthConfig] = useState<HealthConfig | null>(null);
   const [applyingHealth, setApplyingHealth] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [applyingActivity, setApplyingActivity] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
 
   const [automationForm, setAutomationForm] = useState<AutomationSettingsForm>({
     ...PENDING_AUTOMATION_SETTINGS_FORM,
@@ -184,6 +192,8 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   const promptOptimizerRequestSeqRef = useRef(0);
   const healthEditVersionRef = useRef(0);
   const healthRequestSeqRef = useRef(0);
+  const activityEditVersionRef = useRef(0);
+  const activityRequestSeqRef = useRef(0);
   const automationEditVersionRef = useRef(0);
   const automationRequestSeqRef = useRef(0);
 
@@ -241,6 +251,7 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
       setHealthConfig(loaded);
       setHealthForm(healthConfigToForm(loaded));
       setHealthError(null);
+      setActivityError(null);
     }
     if (isResourceReady(results.health.defaults)) {
       setDefaultHealthForm(healthConfigToForm(results.health.defaults.value));
@@ -317,6 +328,7 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
           setHealthForm(serverForm);
         }
         setHealthError(null);
+        setActivityError(null);
       }
       if (isResourceReady(pair.defaults)) {
         setDefaultHealthForm(healthConfigToForm(pair.defaults.value));
@@ -507,18 +519,32 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
       return next;
     });
     healthEditVersionRef.current += 1;
+    activityEditVersionRef.current += 1;
     setHealthError(null);
+    setActivityError(null);
   }, []);
 
   const handleResetHealthDefaults = useCallback(() => {
-    healthFormRef.current = defaultHealthForm;
+    const next = mergeHealthReminderSlice(healthFormRef.current, defaultHealthForm);
+    healthFormRef.current = next;
     healthEditVersionRef.current += 1;
-    setHealthForm(defaultHealthForm);
+    setHealthForm(next);
     setHealthError(null);
   }, [defaultHealthForm]);
 
+  const handleResetActivityDefaults = useCallback(() => {
+    const next = mergeActivityStatsSlice(healthFormRef.current, defaultHealthForm);
+    healthFormRef.current = next;
+    activityEditVersionRef.current += 1;
+    setHealthForm(next);
+    setActivityError(null);
+  }, [defaultHealthForm]);
+
   const handleApplyHealth = async () => {
-    const snapshot: HealthForm = { ...healthFormRef.current };
+    const snapshot = mergeHealthReminderSlice(
+      healthConfigRef.current,
+      healthFormRef.current,
+    );
     const attempt = createSaveAttempt(
       ++healthRequestSeqRef.current,
       snapshot,
@@ -560,6 +586,56 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     } finally {
       if (attempt.requestSeq === healthRequestSeqRef.current) {
         setApplyingHealth(false);
+      }
+    }
+  };
+
+  const handleApplyActivity = async () => {
+    const snapshot = mergeActivityStatsSlice(
+      healthConfigRef.current,
+      healthFormRef.current,
+    );
+    const attempt = createSaveAttempt(
+      ++activityRequestSeqRef.current,
+      snapshot,
+      activityEditVersionRef.current,
+    );
+    setApplyingActivity(true);
+    setActivityError(null);
+    try {
+      const updated = await healthApi.updateConfig(attempt.submittedSnapshot);
+      const serverForm = healthConfigToForm(updated);
+      const baselineForm = healthConfigRef.current
+        ? healthConfigToForm(healthConfigRef.current)
+        : attempt.submittedSnapshot;
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: activityRequestSeqRef.current,
+        currentDraft: healthFormRef.current,
+        currentEditVersion: activityEditVersionRef.current,
+        serverValue: serverForm,
+        currentBaseline: baselineForm,
+      });
+      if (!resolution.applied) return;
+      healthConfigRef.current = updated;
+      healthFormRef.current = resolution.draft;
+      setHealthConfig(updated);
+      setHealthForm(resolution.draft);
+    } catch (err) {
+      const baselineForm = healthConfigRef.current
+        ? healthConfigToForm(healthConfigRef.current)
+        : attempt.submittedSnapshot;
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: activityRequestSeqRef.current,
+        currentDraft: healthFormRef.current,
+        currentBaseline: baselineForm,
+      });
+      if (!failure.applied) return;
+      setActivityError(err instanceof Error ? err.message : t('settings:activity.applyFailed'));
+    } finally {
+      if (attempt.requestSeq === activityRequestSeqRef.current) {
+        setApplyingActivity(false);
       }
     }
   };
@@ -650,6 +726,10 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     patchHealthForm,
     handleResetHealthDefaults,
     handleApplyHealth,
+    applyingActivity,
+    activityError,
+    handleResetActivityDefaults,
+    handleApplyActivity,
     automationForm,
     defaultAutomationForm,
     automationDirty,

@@ -62,9 +62,7 @@ export function WorkbenchNotesInspector(props: WorkbenchNotesInspectorProps) {
    * Code Logic（这个函数做什么）:
    *   no-op，满足编辑器必填 onModeChange。
    */
-  const handleModeChange = (_mode: WorkbenchMarkdownMode) => {
-    return;
-  };
+  const handleModeChange: (mode: WorkbenchMarkdownMode) => void = () => undefined;
 
   return (
     <div className={styles.notesInspector} data-testid="workbench-notes-inspector">

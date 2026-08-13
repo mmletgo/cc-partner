@@ -252,7 +252,7 @@ describe('workbenchAgentHints', () => {
     expect(parsed.seenCompleted.length).toBeLessThanOrEqual(SEEN_COMPLETED_CAP);
     expect(parsed.seenCompleted.some((edge: SeenCompletedEdge) => edge.agentSessionId === 'old')).toBe(false);
 
-    let state = restoreSeenCompleted(emptyAgentHintState(), parsed.seenCompleted, now);
+    const state = restoreSeenCompleted(emptyAgentHintState(), parsed.seenCompleted, now);
     expect(hintsForTerminal(state, 't-fresh').completedCount).toBe(1);
     expect(hintsForTerminal(state, 't-old').count).toBe(0);
   });
@@ -294,7 +294,7 @@ describe('workbenchAgentHints', () => {
   });
 
   test('worktreeId 缺失时可由 session 索引补齐', () => {
-    let state = applyAgentHintSession(
+    const state = applyAgentHintSession(
       emptyAgentHintState(),
       session({ phase: 'needsInput', worktreeId: null }),
       { sessionWorktreeByTerminal: { 'term-1': 'wt-fallback' } },

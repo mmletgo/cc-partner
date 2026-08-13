@@ -2,7 +2,7 @@
  * Settings 页面控制器 hook（composer）
  *
  * Business Logic（为什么需要这个 hook）:
- *   Settings 同时持有 7 个 tab 的表单/资源加载/保存/重试状态；把编排从 JSX 中拆出，
+ *   Settings 同时持有多个 tab 的表单/资源加载/保存/重试状态；把编排从 JSX 中拆出，
  *   让 Settings.tsx 只做 tab/layout 组合，panel 保持纯 props 渲染。
  *
  * Code Logic（这个 hook 做什么）:
@@ -150,6 +150,10 @@ export interface UseSettingsControllerResult {
   patchHealthForm: (partial: Partial<HealthForm>) => void;
   handleResetHealthDefaults: () => void;
   handleApplyHealth: () => Promise<void>;
+  applyingActivity: boolean;
+  activityError: string | null;
+  handleResetActivityDefaults: () => void;
+  handleApplyActivity: () => Promise<void>;
 
   // cloud sync
   cloudSyncForm: CloudSyncForm;
@@ -531,6 +535,10 @@ export function useSettingsController(): UseSettingsControllerResult {
     patchHealthForm: form.patchHealthForm,
     handleResetHealthDefaults: form.handleResetHealthDefaults,
     handleApplyHealth: form.handleApplyHealth,
+    applyingActivity: form.applyingActivity,
+    activityError: form.activityError,
+    handleResetActivityDefaults: form.handleResetActivityDefaults,
+    handleApplyActivity: form.handleApplyActivity,
 
     cloudSyncForm: form.cloudSyncForm,
     cloudSync: form.cloudSync,

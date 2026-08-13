@@ -94,20 +94,19 @@ export function WorkbenchBanner(): ReactElement {
   const previewRef = useRef<HTMLDivElement | null>(null);
   const measureRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const draftRef = useRef('');
-  const savedRef = useRef('');
   const ignoreBlurRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
   const [markdown, setMarkdown] = useState(() => readWorkbenchBanner());
   const [draft, setDraft] = useState(markdown);
   const [editing, setEditing] = useState(false);
   const [fontPx, setFontPx] = useState(BANNER_MIN_FONT_PX);
-
-  draftRef.current = draft;
-  savedRef.current = markdown;
+  const draftRef = useRef(markdown);
+  const savedRef = useRef(markdown);
 
   const persist = useCallback((next: string) => {
     const record = writeWorkbenchBanner(next);
+    savedRef.current = record.markdown;
+    draftRef.current = record.markdown;
     setMarkdown(record.markdown);
     setDraft(record.markdown);
   }, []);
@@ -139,6 +138,8 @@ export function WorkbenchBanner(): ReactElement {
      */
     const applyExternal = (next: string): void => {
       if (editing) return;
+      savedRef.current = next;
+      draftRef.current = next;
       setMarkdown(next);
       setDraft(next);
     };
@@ -211,7 +212,9 @@ export function WorkbenchBanner(): ReactElement {
   }, [editing]);
 
   const beginEdit = useCallback(() => {
-    setDraft(savedRef.current);
+    const saved = savedRef.current;
+    draftRef.current = saved;
+    setDraft(saved);
     setEditing(true);
   }, []);
 
@@ -230,7 +233,9 @@ export function WorkbenchBanner(): ReactElement {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
-    setDraft(savedRef.current);
+    const saved = savedRef.current;
+    draftRef.current = saved;
+    setDraft(saved);
     setEditing(false);
   }, []);
 
@@ -273,6 +278,7 @@ export function WorkbenchBanner(): ReactElement {
   const handleDraftChange = useCallback(
     (value: string) => {
       const next = value.length > BANNER_MAX_CHARS ? value.slice(0, BANNER_MAX_CHARS) : value;
+      draftRef.current = next;
       setDraft(next);
       schedulePersist(next);
     },

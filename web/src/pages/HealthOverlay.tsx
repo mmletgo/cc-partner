@@ -20,6 +20,7 @@ import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
 import { healthApi } from '@/api/health';
+import { computeRestLeft } from './healthOverlayCountdown';
 
 type OverlayType = 'reminder' | 'water';
 type Mode = 'actions' | 'resting';
@@ -30,13 +31,6 @@ function formatMmSs(total: number): string {
   const m = Math.floor(s / 60);
   const sec = s % 60;
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
-}
-
-/** 计算休息剩余秒数（基于后端权威结束时间戳；纯函数，便于单测）。
- *  nowSec 缺省取当前 Unix 秒；多屏各窗口传入同一 endTs 即可得到视觉一致的倒计时。 */
-export function computeRestLeft(endTs: number, nowSec?: number): number {
-  const now = nowSec ?? Math.floor(Date.now() / 1000);
-  return Math.max(0, endTs - now);
 }
 
 export default function HealthOverlay() {

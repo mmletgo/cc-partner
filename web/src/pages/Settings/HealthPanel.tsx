@@ -3,13 +3,13 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   健康提醒配置从 Health 监控页迁移到设置页;用户在此表单编辑健康监测参数
- *   (工作/休息阈值、喝水间隔、免打扰、通知与隐私),通过「恢复默认」「应用配置」提交,
+ *   (工作/休息阈值、喝水间隔、免打扰、系统通知),通过「恢复默认」「应用配置」提交,
  *   与同步/AI tab 的表单编辑 + 手动应用模式一致。本组件只负责渲染,状态由 Settings.tsx 顶层持有。
  *
  * Code Logic（这个组件做什么）:
  *   - 复用设置页通用样式(field/label/helper/toggleList/toggleRow/Pill/Input)保证视觉统一
  *   - 每个健康配置栏目独立渲染为 section + Card,与设置页常规 tab 的多 Card 节奏一致
- *   - ToggleRow/NumberRow/TimeRow 为私有受控小组件,onChange 只回传 patch,不落盘
+ *   - ToggleRow/NumberRow/TimeRow 为受控小组件,onChange 只回传 patch,不落盘；活动统计 tab 复用前两者
  *   - 免打扰时间用 24 小时制小时/分钟下拉框选择,空小时回传 null
  *   - hooks 全部在 early return 之前(项目规则 20)
  */
@@ -161,7 +161,7 @@ interface HealthSectionProps {
  * Code Logic（这个组件做什么）:
  *   受控 button(role=switch),点击 onToggle 取反;checked 用 success/neutral Pill + 图标表达状态。
  */
-function ToggleRow({ label, helper, checked, onToggle }: ToggleRowProps) {
+export function ToggleRow({ label, helper, checked, onToggle }: ToggleRowProps) {
   return (
     <button
       type="button"
@@ -199,7 +199,7 @@ function ToggleRow({ label, helper, checked, onToggle }: ToggleRowProps) {
  * Code Logic（这个组件做什么）:
  *   受控 number Input,onChange 把字符串转 Number 回传;min/max 约束输入范围。
  */
-function NumberRow({ label, helper, value, min, max, onChange }: NumberRowProps) {
+export function NumberRow({ label, helper, value, min, max, onChange }: NumberRowProps) {
   return (
     <div className={styles.field}>
       <label className={styles.label}>{label}</label>
@@ -274,7 +274,7 @@ function TimeRow({ label, value, onChange }: TimeRowProps) {
  * Code Logic（这个组件做什么）:
  *   渲染语义化 section,内部复用 Card.Header/Card.Body;标题 id 与 aria-labelledby 关联。
  */
-function HealthSection({ id, title, lead, children }: HealthSectionProps) {
+export function HealthSection({ id, title, lead, children }: HealthSectionProps) {
   const titleId = `${id}-title`;
 
   return (
@@ -296,14 +296,14 @@ function HealthSection({ id, title, lead, children }: HealthSectionProps) {
  * 健康提醒设置面板组件
  *
  * Business Logic（为什么需要这个组件）:
- *   设置页健康 tab 的纯渲染入口,聚合健康提醒/免打扰/通知与隐私三组受控字段,
+ *   设置页健康 tab 的纯渲染入口,聚合健康提醒/免打扰/系统通知三组受控字段,
  *   底部提供「恢复默认」「应用配置」按钮 + 已应用配置快照 + 错误提示。
  *
  * Code Logic（这个组件做什么）:
  *   useTranslation 在顶部(无 early return,项目规则 20);
  *   渲染三个 section Card,字段 onChange 经 onPatch 浅合并回传父组件。
  *
- * @returns 健康提醒/免打扰/通知与隐私 三组受控字段 + 恢复默认/应用配置按钮
+ * @returns 健康提醒/免打扰/系统通知 三组受控字段 + 恢复默认/应用配置按钮
  */
 export function HealthPanel({
   form,
@@ -390,21 +390,7 @@ export function HealthPanel({
             checked={form.notifyEnabled}
             onToggle={(v) => onPatch({ notifyEnabled: v })}
           />
-          <ToggleRow
-            label={t('health:recordWindowTitle')}
-            helper={t('health:recordWindowTitleDescription')}
-            checked={form.recordWindowTitle}
-            onToggle={(v) => onPatch({ recordWindowTitle: v })}
-          />
         </div>
-        <NumberRow
-          label={t('health:retainDays')}
-          helper={t('health:retainDaysDescription')}
-          min={HEALTH_RANGE.retainDays.min}
-          max={HEALTH_RANGE.retainDays.max}
-          value={form.retainDays}
-          onChange={(v) => onPatch({ retainDays: v })}
-        />
 
         {/* 已应用配置快照 */}
         {applied ? (

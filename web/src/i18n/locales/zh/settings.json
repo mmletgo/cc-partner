@@ -9,6 +9,7 @@
     "general": "常规",
     "dependencies": "依赖环境",
     "health": "健康提醒",
+    "activity": "活动统计",
     "sync": "同步",
     "ai": "AI",
     "automation": "自动化",
@@ -206,9 +207,15 @@
   },
   "health": {
     "title": "健康提醒",
-    "subtitle": "调整健康监测的工作/休息阈值、喝水间隔、免打扰时段与通知隐私设置。",
+    "subtitle": "调整健康监测的工作/休息阈值、喝水间隔、免打扰时段与系统通知。",
     "appliedConfig": "已应用配置",
     "applyFailed": "应用健康提醒配置失败"
+  },
+  "activity": {
+    "title": "活动统计",
+    "subtitle": "调整窗口标题记录与活动明细保留天数。这些设置只影响统计，不影响提醒节奏。",
+    "appliedConfig": "已应用配置",
+    "applyFailed": "应用活动统计配置失败"
   },
   "mobileAccess": {
     "title": "移动端 Workbench",

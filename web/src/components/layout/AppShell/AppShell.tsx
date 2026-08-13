@@ -14,7 +14,7 @@
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
  *   - Sidebar 内包含 Logo、分组导航（section + 非聚焦 group label）、
  *     Work 组内 ProjectRail、footer（版本号 + 语言/主题/设置齿轮 + 手机访问按钮）
- *   - 设置入口为 footer NavLink(`/settings`)，System 组保留健康提醒与 Provider 管理
+ *   - 设置入口为 footer NavLink(`/settings`)，System 组保留健康提醒、活动统计与 Provider 管理
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
@@ -39,6 +39,7 @@ import {
   ClaudeMdIcon,
   SettingsIcon,
   HealthIcon,
+  ActivityIcon,
   ProviderManagerIcon,
   AlertIcon,
   SmartphoneIcon,
@@ -231,6 +232,7 @@ export function AppShell({ children }: AppShellProps) {
               </NavGroup>
               <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
                 <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
+                <NavItem to="/activity" label={t('nav:activity')} icon={<ActivityIcon />} />
                 <NavItem
                   to="/provider-manager"
                   label={t('nav:providerManager')}

@@ -90,4 +90,17 @@ describe('WorkbenchBanner', () => {
     );
     expect(screen.getByRole('status').textContent).toContain('280');
   });
+
+  it('persists the latest draft when unmounted before debounce fires', () => {
+    vi.useFakeTimers();
+    const { unmount } = render(wrap(<WorkbenchBanner />));
+    fireEvent.click(screen.getByTestId('workbench-banner-preview'));
+    fireEvent.change(screen.getByTestId('workbench-banner-editor'), {
+      target: { value: 'latest draft' },
+    });
+
+    unmount();
+
+    expect(readWorkbenchBanner()).toBe('latest draft');
+  });
 });

@@ -83,7 +83,9 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain("activeTab === 'sync'");
     expect(controller).not.toContain("activeTab === 'dependencies'");
     expect(controller).not.toContain("activeTab === 'health'");
+    expect(controller).not.toContain("activeTab === 'activity'");
     expect(controller).not.toContain("activeTab === 'ai'");
+    expect(controller).not.toContain('<ActivityStatsPanel');
     expect(controller).not.toContain("activeTab === 'automation'");
     expect(controller).not.toContain("activeTab === 'fleet'");
     expect(controller).not.toContain("activeTab === 'about'");
@@ -129,6 +131,8 @@ describe('Settings shell composition', () => {
     expect(settingsShell).toContain('SettingsAiPanel');
     expect(settingsShell).toContain('SettingsFleetPanel');
     expect(settingsShell).toContain('SettingsAboutPanel');
+    expect(settingsShell).toContain('ActivityStatsPanel');
+    expect(settingsShell).toContain("activeTab === 'activity'");
   });
 
   test('Settings.tsx does not directly import production transport modules for core orchestration', () => {

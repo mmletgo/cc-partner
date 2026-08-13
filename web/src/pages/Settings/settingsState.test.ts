@@ -1,5 +1,6 @@
 import { describe, test } from 'vitest';
 import type { AppConfig, HealthConfig, UpdateDownloadStatus } from '../../lib/types';
+import type { HealthForm } from './settingsState';
 import {
   PENDING_HEALTH_FORM,
   buildConfigUpdate,
@@ -14,6 +15,8 @@ import {
   parseSettingsTabFromSearch,
   promptOptimizerSettingsConfigToForm,
   promptOptimizerSettingsFormToUpdate,
+  mergeActivityStatsSlice,
+  mergeHealthReminderSlice,
   resolveSettingsTabId,
   settingsStateFromConfig,
   shouldPollUpdateStatus,
@@ -289,9 +292,49 @@ describe('settings tab deep link helpers', () => {
     if (parseSettingsTabFromSearch('?tab=fleet') !== 'fleet') {
       throw new Error('expected fleet from search');
     }
+    if (parseSettingsTabFromSearch('?tab=activity') !== 'activity') {
+      throw new Error('expected activity from search');
+    }
     if (parseSettingsTabFromSearch('?tab=unknown') !== 'general') {
       throw new Error('expected unknown to fall back');
     }
+  });
+
+  test('reminder apply keeps last saved activity fields; activity apply keeps reminder fields', () => {
+    const applied: HealthConfig = {
+      enabled: true,
+      workWindowSeconds: 45 * 60,
+      breakSeconds: 5 * 60,
+      recordWindowTitle: true,
+      retainDays: 90,
+      notifyEnabled: true,
+      dndStart: null,
+      dndEnd: null,
+      waterEnabled: true,
+      waterIntervalSeconds: 60 * 60,
+      reminderFullscreen: true,
+    };
+    const reminderDraft: HealthForm = {
+      ...applied,
+      workWindowSeconds: 20 * 60,
+      recordWindowTitle: false,
+      retainDays: 7,
+    };
+    const reminderPayload = mergeHealthReminderSlice(applied, reminderDraft);
+    assertDeepEqual(reminderPayload.workWindowSeconds, 20 * 60);
+    assertDeepEqual(reminderPayload.recordWindowTitle, true);
+    assertDeepEqual(reminderPayload.retainDays, 90);
+
+    const activityDraft: HealthForm = {
+      ...applied,
+      workWindowSeconds: 10 * 60,
+      recordWindowTitle: false,
+      retainDays: 14,
+    };
+    const activityPayload = mergeActivityStatsSlice(applied, activityDraft);
+    assertDeepEqual(activityPayload.recordWindowTitle, false);
+    assertDeepEqual(activityPayload.retainDays, 14);
+    assertDeepEqual(activityPayload.workWindowSeconds, 45 * 60);
   });
 });
 

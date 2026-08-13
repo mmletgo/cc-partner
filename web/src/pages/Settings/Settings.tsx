@@ -8,8 +8,8 @@
  *
  * Code Logic（这个页面做什么）:
  *   - 调用 useSettingsController 获取全部编排状态/handler
- *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 同步 / AI / 自动化 / Fleet / 关于
- *   - 组合 pure panels（General/Dependencies/Sync/Health/Automation/Fleet/AI/About）
+ *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 活动统计 / 同步 / AI / 自动化 / Fleet / 关于
+ *   - 组合 pure panels（General/Dependencies/Sync/Health/Activity/Automation/Fleet/AI/About）
  *   - loading / core loadError early return 保留在壳层（hooks 已在 controller 无条件执行）
  *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
@@ -19,6 +19,7 @@ import { Button } from '@/components/primitives';
 import { openCodeBridgePreviewHref } from '@/lib/agentAdapterPresentation';
 import { AutomationSettingsPanel } from './AutomationSettingsPanel';
 import { HealthPanel } from './HealthPanel';
+import { ActivityStatsPanel } from './ActivityStatsPanel';
 import { SettingsGeneralPanel } from './SettingsGeneralPanel';
 import { SettingsSyncPanel } from './SettingsSyncPanel';
 import { SettingsDependenciesPanel } from './SettingsDependenciesPanel';
@@ -302,6 +303,44 @@ export function Settings(): ReactElement {
                 onApply={() => void ctrl.handleApplyHealth()}
                 applying={ctrl.applyingHealth}
                 error={ctrl.healthError}
+                canResetDefaults={ctrl.canResetHealthDefaults}
+              />
+            )}
+          </div>
+        ) : null}
+
+        {ctrl.activeTab === 'activity' ? (
+          <div
+            id="settings-panel-activity"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-activity"
+          >
+            {ctrl.healthLoadError ? (
+              <div className={styles.resourceError} role="alert">
+                <span className={styles.updateError}>
+                  {t('settings:resource.loadFailed', { error: ctrl.healthLoadError.message })}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void ctrl.handleRetryResourceGroup('health')}
+                  disabled={ctrl.retryingGroup === 'health'}
+                >
+                  {ctrl.retryingGroup === 'health'
+                    ? t('settings:resource.retrying')
+                    : t('settings:resource.retry')}
+                </Button>
+              </div>
+            ) : (
+              <ActivityStatsPanel
+                form={ctrl.healthForm}
+                applied={ctrl.healthConfig}
+                onPatch={ctrl.patchHealthForm}
+                onResetDefaults={ctrl.handleResetActivityDefaults}
+                onApply={() => void ctrl.handleApplyActivity()}
+                applying={ctrl.applyingActivity}
+                error={ctrl.activityError}
                 canResetDefaults={ctrl.canResetHealthDefaults}
               />
             )}

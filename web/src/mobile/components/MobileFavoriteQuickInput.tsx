@@ -38,6 +38,15 @@ export interface MobileFavoriteQuickInputProps {
   onSelectPrompt: (prompt: Prompt) => void;
 }
 
+interface MobileFavoriteQuickInputDialogProps {
+  onClose: () => void;
+  onSelectPrompt: (prompt: Prompt) => void;
+  selectedTag: string;
+  query: string;
+  onSelectedTagChange: (tag: string) => void;
+  onQueryChange: (query: string) => void;
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   HTTP/transport 错误形态多样（Error / OrchestratorRuntimeTransportError / 字符串），UI 需要稳定可读文案。
@@ -62,33 +71,68 @@ function promptTagsOf(prompt: Prompt): string[] {
   return prompt.tags ?? [];
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   收藏面板关闭后需要保留用户的标签与搜索条件，但下一次打开必须重新加载最新收藏。
+ *
+ * Code Logic（这个函数做什么）:
+ *   外层持有筛选条件；open=false 时卸载请求内层，使内层每次打开都以 loading 初态重新拉取。
+ */
 export function MobileFavoriteQuickInput({
   open,
   onClose,
   onSelectPrompt,
 }: MobileFavoriteQuickInputProps): ReactElement | null {
+  const [selectedTag, setSelectedTag] = useState<string>(FAVORITE_ALL_TAG);
+  const [query, setQuery] = useState<string>('');
+
+  if (!open) return null;
+
+  return (
+    <MobileFavoriteQuickInputDialog
+      onClose={onClose}
+      onSelectPrompt={onSelectPrompt}
+      selectedTag={selectedTag}
+      query={query}
+      onSelectedTagChange={setSelectedTag}
+      onQueryChange={setQuery}
+    />
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   每次打开面板都应显示加载态并读取最新收藏，关闭时应取消当前请求对 UI 的回写。
+ *
+ * Code Logic（这个函数做什么）:
+ *   loading 初态直接描述“已挂载即加载”；effect 只发起请求，所有状态提交都发生在 Promise 回调。
+ */
+function MobileFavoriteQuickInputDialog({
+  onClose,
+  onSelectPrompt,
+  selectedTag,
+  query,
+  onSelectedTagChange,
+  onQueryChange,
+}: MobileFavoriteQuickInputDialogProps): ReactElement {
   const { t } = useTranslation(['workbench', 'common']);
   const titleId = useId();
 
   const [favoritePrompts, setFavoritePrompts] = useState<Prompt[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState<number>(0);
-  const [selectedTag, setSelectedTag] = useState<string>(FAVORITE_ALL_TAG);
-  const [query, setQuery] = useState<string>('');
 
-  // 请求序列守卫：open 切换或重试时丢弃上一个 in-flight 响应，避免慢响应覆盖新选择。
+  // 请求序列守卫：重试时丢弃上一个 in-flight 响应，避免慢响应覆盖新结果。
   const requestSeqRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!open) return;
     let active = true;
     const seq = ++requestSeqRef.current;
-    setLoading(true);
-    setLoadError(null);
+    const request =
+      httpWorkbenchTransport.prompts?.list({ favorite: true }) ?? Promise.resolve([]);
 
-    httpWorkbenchTransport.prompts
-      ?.list({ favorite: true })
+    request
       .then((list) => {
         if (!active || seq !== requestSeqRef.current) return;
         setFavoritePrompts(list);
@@ -106,7 +150,7 @@ export function MobileFavoriteQuickInput({
     return () => {
       active = false;
     };
-  }, [open, reloadKey]);
+  }, [reloadKey]);
 
   const tags = useMemo(() => deriveTagsFromPrompts(favoritePrompts), [favoritePrompts]);
 
@@ -132,6 +176,8 @@ export function MobileFavoriteQuickInput({
    *   抬高 reloadKey 触发数据 effect 重新跑一次。
    */
   const handleRetry = useCallback((): void => {
+    setLoading(true);
+    setLoadError(null);
     setReloadKey((value) => value + 1);
   }, []);
 
@@ -154,7 +200,7 @@ export function MobileFavoriteQuickInput({
 
   return (
     <Dialog
-      open={open}
+      open
       titleId={titleId}
       onClose={onClose}
       className={styles.favoriteSheet}
@@ -192,7 +238,7 @@ export function MobileFavoriteQuickInput({
         <input
           type="search"
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => onQueryChange(event.target.value)}
           placeholder={t('workbench:mobile.favoriteQuickInput.searchPlaceholder')}
           aria-label={t('workbench:mobile.favoriteQuickInput.searchAriaLabel')}
           className={styles.favoriteSearchInput}
@@ -211,7 +257,7 @@ export function MobileFavoriteQuickInput({
               selectedTag === FAVORITE_ALL_TAG ? styles.favoriteChipActive : ''
             }`.trim()}
             aria-pressed={selectedTag === FAVORITE_ALL_TAG}
-            onClick={() => setSelectedTag(FAVORITE_ALL_TAG)}
+            onClick={() => onSelectedTagChange(FAVORITE_ALL_TAG)}
           >
             <span>{t('workbench:mobile.favoriteQuickInput.allTag')}</span>
           </button>
@@ -223,7 +269,7 @@ export function MobileFavoriteQuickInput({
                 selectedTag === tag ? styles.favoriteChipActive : ''
               }`.trim()}
               aria-pressed={selectedTag === tag}
-              onClick={() => setSelectedTag(tag)}
+              onClick={() => onSelectedTagChange(tag)}
             >
               <span>{tag}</span>
             </button>
