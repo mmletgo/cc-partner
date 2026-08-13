@@ -10,9 +10,10 @@
  * Code Logic（这个脚本做什么）:
  *   - 无新 npm 依赖，仅用 Node 内置 fs/path/os/child_process。
  *   - 检查相对文件链接、GitHub 风格标题锚点、三反引号围栏配对。
- *   - 按文件作用域拒绝陈旧表述（README 的 tauri-action/动态端口、web/CLAUDE.md
+ *   - 按文件作用域拒绝陈旧表述（README 的 tauri-action/动态端口、web/AGENTS.md
  *     的 npx --yes tsx、docs 中把 hosted smoke 写成已覆盖 WSL/tmux/GUI/权限/
- *     多机 mDNS 等、src-tauri/CLAUDE.md 对 encode_mdns_capabilities 的 caps= 前缀误写）。
+ *     多机 mDNS 等、src-tauri/AGENTS.md 对 encode_mdns_capabilities 的 caps= 前缀误写）。
+ *     分层指令以 AGENTS.md 为权威正文，同目录 CLAUDE.md 为软链；规则对两者都生效。
  *   - README 代码块中的命令名需命中 package scripts / CLI 分发 / 仓库脚本白名单。
  *   - CLI 子命令白名单只从 `src-tauri/src/backend/cli.rs` 的 `dispatch` match arms
  *     解析，不预置硬编码命令；源缺失或解析失败使检查失败。
@@ -154,9 +155,9 @@ const STALE_RULES = [
   {
     id: 'web-claude-npx-yes-tsx',
     test(relPath, content) {
-      if (!isPath(relPath, 'web/CLAUDE.md')) return null;
+      if (!isLayeredInstruction(relPath, 'web')) return null;
       if (/npx\s+--yes\s+tsx/.test(content)) {
-        return 'web/CLAUDE.md must not recommend `npx --yes tsx` (use npm test / package scripts)';
+        return 'web/AGENTS.md must not recommend `npx --yes tsx` (use npm test / package scripts)';
       }
       return null;
     },
@@ -215,7 +216,7 @@ const STALE_RULES = [
     id: 'mdns-caps-prefix',
     test(relPath, content) {
       // encode_mdns_capabilities 返回裸 token；caps= 由 TXT key 提供，禁止文档写“输出始终带 caps= 前缀”。
-      if (!isPath(relPath, 'src-tauri/CLAUDE.md') && !isPath(relPath, 'CLAUDE.md')) {
+      if (!isLayeredInstruction(relPath, 'src-tauri') && !isLayeredInstruction(relPath, '')) {
         return null;
       }
       if (
@@ -464,6 +465,18 @@ function hasFixedLanRiskStatement(content) {
  */
 function isPath(relPath, expected) {
   return normalizeRel(relPath) === normalizeRel(expected);
+}
+
+/**
+ * 分层开发指令：权威正文是 AGENTS.md，同目录 CLAUDE.md 是软链。
+ * dir='' 表示仓库根。
+ * @param {string} relPath
+ * @param {string} dir
+ */
+function isLayeredInstruction(relPath, dir) {
+  const n = normalizeRel(relPath);
+  const prefix = dir ? `${normalizeRel(dir)}/` : '';
+  return n === `${prefix}AGENTS.md` || n === `${prefix}CLAUDE.md`;
 }
 
 /**
@@ -1348,15 +1361,15 @@ function runSelfTest() {
     },
   );
 
-  // 无效：web/CLAUDE.md npx --yes tsx
+  // 无效：web/AGENTS.md npx --yes tsx（CLAUDE.md 软链同规则）
   caseRun(
     'banned-npx-yes-tsx',
     {
-      'web/CLAUDE.md': '# web\n\nRun `npx --yes tsx src/foo.test.ts`.\n',
+      'web/AGENTS.md': '# web\n\nRun `npx --yes tsx src/foo.test.ts`.\n',
     },
     {
       expectFail: true,
-      mustMatch: [/web\/CLAUDE\.md:\d+:.*npx --yes tsx/],
+      mustMatch: [/web\/AGENTS\.md:\d+:.*npx --yes tsx/],
     },
   );
 
@@ -1388,12 +1401,12 @@ function runSelfTest() {
   caseRun(
     'banned-mdns-caps-prefix',
     {
-      'src-tauri/CLAUDE.md':
+      'src-tauri/AGENTS.md':
         '# backend\n\n`encode_mdns_capabilities` 输出始终以 `caps=` 前缀开头，按 UTF-8 字节计数。\n',
     },
     {
       expectFail: true,
-      mustMatch: [/src-tauri\/CLAUDE\.md:\d+:.*encode_mdns_capabilities|bare comma-separated/],
+      mustMatch: [/src-tauri\/AGENTS\.md:\d+:.*encode_mdns_capabilities|bare comma-separated/],
     },
   );
 

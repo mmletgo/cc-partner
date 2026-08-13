@@ -1,6 +1,6 @@
 # Backend Operations
 
-Operator-facing guide for the headless binary **`cc-partner-backend`**: lifecycle, ports, firewall/mDNS checks, data/control/log paths, and `doctor`. Engineering invariants (locks, probe timeouts, GUI advertise rules) stay in [`src-tauri/CLAUDE.md`](../../src-tauri/CLAUDE.md).
+Operator-facing guide for the headless binary **`cc-partner-backend`**: lifecycle, ports, firewall/mDNS checks, data/control/log paths, and `doctor`. Engineering invariants (locks, probe timeouts, GUI advertise rules) stay in [`src-tauri/AGENTS.md`](../../src-tauri/AGENTS.md).
 
 ## Fixed LAN trust boundary
 
@@ -412,7 +412,7 @@ manual evidence, not claimed by the smoke.
 
 - Product overview & quick CLI: [`README.md`](../../README.md)
 - Quality gates & smoke matrix: [`testing.md`](testing.md)
-- Backend engineering detail: [`src-tauri/CLAUDE.md`](../../src-tauri/CLAUDE.md)
+- Backend engineering detail: [`src-tauri/AGENTS.md`](../../src-tauri/AGENTS.md)
 
 
 ## 配置与事务化运行时

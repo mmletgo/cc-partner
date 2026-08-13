@@ -1,6 +1,8 @@
 # cc-partner — 项目开发指南
 
 > 面向 AI Agent / 新加入开发者的项目说明。修改代码前请先通读本文档。
+>
+> 跨工具单一来源：本文件是权威正文。同目录 `CLAUDE.md` 是指向本文件的软链（Claude Code 入口）。分层：根 `AGENTS.md`（组件/token/验证入口）→ `web/AGENTS.md`（前端）→ `src-tauri/AGENTS.md`（后端/协议/发版/smoke）。
 
 ## 1. 项目概述
 
@@ -15,7 +17,8 @@
 - **Agent Hub** — `/agent-hub` 统一管理 Claude/Codex/OpenCode 用户级与项目级指令（公共/适配/独有三槽 + AI 辅助修订）与 Skill/Command/Agent/MCP 可移植资产
 - **移动端 Workbench** — 局域网内通过 `/mobile` 手机浏览器远程操作 Workbench（无调用者身份校验；同一可达网络任意设备可读写执行）；本机可作为手机到远端设备的二级代理，统一管理远端项目的 worktree、终端、文件、Git、Prompt 优化和项目自动化，桌面端展示访问链接、二维码与固定风险提示
 - **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付，桌面端作为 Workbench 自动化工作区展示
-- **独立后端 CLI** — 远端设备可执行 `cc-partner-backend start` 启动 P2P/Workbench/Orchestrator 远端支持，无需打开 GUI
+- **独立后端 CLI** — 远端设备可执行 `cc-partner-backend start|status|doctor|stop|supervise` 启动或运维 P2P/Workbench/Orchestrator 远端支持，无需打开 GUI
+- **全局 Inbox（Attention）** — 实时阻塞投影；只导航到权威界面，不在 Inbox 内执行业务动作
 - **P2P 自动互联** — 局域网内 mDNS 自动发现
 - **自动更新** — GitHub Releases 检测 / 下载 / 安装
 
@@ -26,6 +29,16 @@
 - **打包/更新**: Tauri CLI · tauri-plugin-updater · tauri-plugin-global-shortcut · tauri-plugin-process · tauri-plugin-dialog
 
 桌面端架构：Tauri 2 主进程用 Rust 实现 GUI 和共享后端能力，前端复用 `web/` 的 React。本地前端通过 `@tauri-apps/api` 的 `invoke()` 调用 Rust `#[tauri::command]`（无本地端口暴露）；跨设备 P2P 由独立后端 sidecar/CLI 负责 axum HTTP server（固定首选端口，端口被占则自动 +1）+ reqwest 客户端 + mdns-sd 发现。局域网能力依赖防火墙放行 UDP **5353**(mDNS) 与实际 P2P HTTP TCP 端口（首选 **62116**，详见 README）。**固定 LAN 边界**：业务 API 无身份鉴权；socket peer 来自 ConnectInfo，再叠加 Host/Origin/Content-Type 与资源上限；不得写可切换 LAN 模式、路由授权矩阵或 LAN 权限 capability token，也不得把 peer 称为“已认证/可信设备/安全设备”。两条通道共享同一份 `AppState`。
+
+**入口与配置**：
+
+- GUI：`src-tauri/src/lib.rs` setup → 构建 AppState/窗口 → **LAN 风险披露已确认**后才 ensure sidecar + browse-only mDNS（bootstrap 按 flavor：`gui-bootstrap.json`（release）/ `gui-bootstrap.dev.json`（dev），仅 version/timestamp；未确认跳过 ensure/start）
+- Headless：`cc-partner-backend serve`（由 `start` detach）advertise+browse；**不读** gui-bootstrap
+- 配置：`~/.cc-partner/config.json`（设备 ID、首选端口、路径、快捷键等）；存储 `~/.cc-partner/data.db`（可 `CC_PARTNER_DATA_DIR` 隔离）
+
+**Prompt 同步**：向量时钟 + 严格领先覆盖 / 并发 LWW；时间戳相等 `device_id` 字典序 tie-break。手动 `trigger_sync` 返回 per-device/domain 真值（仅全成功设备计入 `synced`/`succeeded_devices`）。
+
+**一键启动**：`./start.sh`（dev / build / web / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 固定组装到 `~/Applications/cc-partner (Dev).app`（`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权；无固定签名时可在系统设置中手动添加。
 
 ## 2. 目录结构
 
@@ -86,7 +99,7 @@ cc-partner/
 │   ├── vite.config.ts            # Tauri dev 时由 tauri 自动接管，无 /api proxy
 │   ├── tsconfig.json
 │   └── package.json
-├── src-tauri/                    # Tauri 2 Rust 后端（见 src-tauri/CLAUDE.md）
+├── src-tauri/                    # Tauri 2 Rust 后端（见 src-tauri/AGENTS.md）
 │   ├── src/                      # lib.rs(入口) config/state/error/commands/models/storage/sync/net/transfer/screenshot/workbench/orchestrator/attention/permissions/hotkey/tray
 │   │   ├── backend/              # GUI/headless 共享运行时、独立后端 CLI lifecycle/control 和 UI adapter
 │   │   ├── attention/            # 全局 Inbox 聚合（无持久化表；source/aggregator）
@@ -103,7 +116,7 @@ cc-partner/
 │   ├── prd.md
 │   └── superpowers/specs/        # 设计文档
 ├── AGENTS.md                     # 本文件（根层开发指令）
-├── CLAUDE.md                     # 根层项目概览（与本文件互补）
+├── CLAUDE.md                     # 指向本文件的软链（Claude Code 入口）
 └── web/dist/                     # Vite 构建产物（git ignored）
 ```
 
@@ -111,9 +124,9 @@ cc-partner/
 
 | 场景 | 去哪读 |
 |------|--------|
-| 设计 token / 组件分层 / 复用 / Hooks 顺序 | 本文 §3–§5；前端细则 `web/CLAUDE.md` |
-| 前端命令、Vitest/Playwright、Workbench controllers、Attention、runtime cache | `web/CLAUDE.md` |
-| P2P 协议 v1 / 错误信封 / 幂等 / 端口 / CLI doctor / smoke / 发版 | `src-tauri/CLAUDE.md` |
+| 设计 token / 组件分层 / 复用 / Hooks 顺序 | 本文 §3–§5；前端细则 `web/AGENTS.md` |
+| 前端命令、Vitest/Playwright、Workbench controllers、Attention、runtime cache | `web/AGENTS.md` |
+| P2P 协议 v1 / 错误信封 / 幂等 / 端口 / CLI doctor / smoke / 发版 | `src-tauri/AGENTS.md` |
 | macOS 固定签名 / ad-hoc 手动授权 / 输入监控真机验收 | `docs/development/macos-internal-signing.md` |
 | 用户向启动、防火墙、产品定位 | `README.md` |
 | 持久产品行为 | `docs/prd.md` |
@@ -257,7 +270,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | Dialog | open, titleId, onClose, closeOnEscape?, closeOnBackdrop?, initialFocusRef?, className? | portal 模态；surface `role=dialog aria-modal` + **默认 `padding: var(--space-5)`**；共享 `useModalLayer`（focus trap / Escape / 背景 inert 引用计数 / body scroll lock / 关闭恢复触发焦点）；禁止业务页自建 focus trap。嵌套 Card 或自管分区 padding 时，`className` 必须显式 `padding: 0` 覆盖，避免双边距 |
 | Drawer | Dialog props + side?: left\|right | 侧滑模态抽屉；surface **默认 `padding: var(--space-5)`**；header/body 自管分区或全宽分隔线时 `className` 须 `padding: 0`；复用同一层栈合同 |
 
-> Frontend foundation 合同：`npm run check:css-tokens` / `check:i18n` / `check:bundle`；巨型页 controller/view 所有权见 `web/CLAUDE.md`；E2E 冒烟 `npm run test:e2e -- frontend-foundation.spec.ts`（Dialog 焦点、mobile Drawer Escape、Attention 单 tab stop、终端 arrow、路由崩溃恢复、reduced-motion）。手动 VoiceOver/NVDA 覆盖同类路径。禁止 Redux/Zustand/CSS framework/第三方 modal 库。
+> Frontend foundation 合同：`npm run check:css-tokens` / `check:i18n` / `check:bundle`；巨型页 controller/view 所有权见 `web/AGENTS.md`；E2E 冒烟 `npm run test:e2e -- frontend-foundation.spec.ts`（Dialog 焦点、mobile Drawer Escape、Attention 单 tab stop、终端 arrow、路由崩溃恢复、reduced-motion）。手动 VoiceOver/NVDA 覆盖同类路径。禁止 Redux/Zustand/CSS framework/第三方 modal 库。
 
 **layout（布局）**：
 
@@ -364,7 +377,7 @@ export function ComponentName() { ... }
 
 ### 5.7 API 调用
 
-`web/src/api/` 按业务模块拆分。**桌面端**统一经 `client.ts` 的 `invoke()`（Tauri IPC），**禁止**组件直接 `fetch` 本机后端；**`/mobile` 浏览器**走 `workbenchHttp.ts` / `attentionHttp.ts` 等同源 HTTP helper。事件用 `@tauri-apps/api/event` 的 `listen`（替代旧 SSE）。命令名与 DTO 细节见 `web/CLAUDE.md` 与 `src-tauri/CLAUDE.md`。
+`web/src/api/` 按业务模块拆分。**桌面端**统一经 `client.ts` 的 `invoke()`（Tauri IPC），**禁止**组件直接 `fetch` 本机后端；**`/mobile` 浏览器**走 `workbenchHttp.ts` / `attentionHttp.ts` 等同源 HTTP helper。事件用 `@tauri-apps/api/event` 的 `listen`（替代旧 SSE）。命令名与 DTO 细节见 `web/AGENTS.md` 与 `src-tauri/AGENTS.md`。
 
 ### 5.8 React Hooks 顺序（必读）
 
@@ -427,7 +440,7 @@ cd src-tauri && cargo test --locked --test backend_cli_smoke -- --nocapture --te
 cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 ```
 
-领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/CLAUDE.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/CLAUDE.md`。人类向质量门禁与 L0–L3 分层见 [`docs/development/testing.md`](docs/development/testing.md)；机器可读 evidence 表见 [`docs/development/quality-matrix.json`](docs/development/quality-matrix.json)（稳定 `E2E-`/`L2-`/`L3-` ID，L3 未执行保持 `NOT VERIFIED`）；后端生命周期 / 端口 / doctor 见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)。
+领域测试、Vitest/jsdom 策略、Attention/Workbench 回归命令见 `web/AGENTS.md`；P2P/protocol、doctor/logs、macOS/Windows smoke 范围与 NOT VERIFIED 见 `src-tauri/AGENTS.md`。人类向质量门禁与 L0–L3 分层见 [`docs/development/testing.md`](docs/development/testing.md)；机器可读 evidence 表见 [`docs/development/quality-matrix.json`](docs/development/quality-matrix.json)（稳定 `E2E-`/`L2-`/`L3-` ID，L3 未执行保持 `NOT VERIFIED`）；后端生命周期 / 端口 / doctor 见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md)。
 
 ### 7.2 启动与设计系统预览
 
@@ -458,13 +471,13 @@ git tag v<版本号> && git push origin v<版本号>  # 公开发布 macOS arm64
 - **公开 Release 机制**：`release-tauri.yml` 三段式原生 `tauri build`，发布 macOS arm64 ad-hoc DMG/updater/CLI、Windows 与 Linux；**不是** `tauri-apps/tauri-action`
 - **macOS 固定签名构建**：与统一正式版共用 `com.cc-partner.app`，本地运行 `scripts/build-macos-internal.sh`，CI 手动触发 `internal-macos.yml`；文件名与 Environment 名保留为历史基础设施标识，不代表独立产品版本；详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)
 - **跨目录关键陷阱**：repo secret `TAURI_SIGNING_PRIVATE_KEY` 缺失则无 `.sig` / `latest.json` 不完整，应用内更新失败；`plugins.updater.pubkey` 必须与私钥配对；`bundle.createUpdaterArtifacts: true` 必须开启
-- **实现细节、矩阵平台、sidecar、历史弃用原因**：`src-tauri/CLAUDE.md`「M9」节
+- **实现细节、矩阵平台、sidecar、历史弃用原因**：`src-tauri/AGENTS.md`「M9」节
 
 ### 7.5 端口与防火墙（跨目录摘要）
 
 - P2P HTTP **首选 TCP 62116**；被占用则 **+1 递增**；`config.http_port=0`/非法表示“用首选默认”，**不是** OS `port=0` 临时端口
 - 实际监听端口以 UI 或 `GET /api/health` 的 `http_port` 为准；mDNS 为 UDP **5353**
-- 防火墙示例与 doctor 探测见 `src-tauri/CLAUDE.md` / README / [`docs/development/backend-operations.md`](docs/development/backend-operations.md)，文档不得宣称自动改防火墙
+- 防火墙示例与 doctor 探测见 `src-tauri/AGENTS.md` / README / [`docs/development/backend-operations.md`](docs/development/backend-operations.md)，文档不得宣称自动改防火墙
 
 ## 8. 与 Rust 后端协作
 
@@ -472,21 +485,21 @@ git tag v<版本号> && git push origin v<版本号>  # 公开发布 macOS arm64
 
 - **本地前端 ↔ Rust**：Tauri `invoke('<command>')` IPC（`#[tauri::command]`）。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`，组件层无感知。**无本地 HTTP API 端口给桌面前端。**
 - **跨设备 / mobile P2P**：axum HTTP（首选 **62116**，占用则 +1）+ reqwest peer client + mDNS。`/mobile` SPA 与 P2P 共享实际 HTTP 端口。前端桌面页不直接打 P2P base URL。
-- 协议 v1 health（`protocol_version` + capabilities）、错误信封、request id、幂等清单、local-only runtime-snapshot：**见 `src-tauri/CLAUDE.md`**。
-- 前端 API 模块、Attention、Workbench controllers：**见 `web/CLAUDE.md`**。
+- 协议 v1 health（`protocol_version` + capabilities）、错误信封、request id、幂等清单、local-only runtime-snapshot：**见 `src-tauri/AGENTS.md`**。
+- 前端 API 模块、Attention、Workbench controllers：**见 `web/AGENTS.md`**。
 
 ### 8.2 命令与路由目录（下沉，勿在根复制长表）
 
 | 类型 | 权威位置 |
 |------|----------|
-| Tauri `#[tauri::command]` 注册与领域语义 | `src-tauri/src/commands/*` + `src-tauri/CLAUDE.md` 各领域节 |
-| 前端 invoke / HTTP 封装 | `web/src/api/*` + `web/CLAUDE.md` |
-| P2P `/api/*` 路由、retry class、幂等键 | `docs/p2p-protocol.md` + `node scripts/check-p2p-route-inventory.mjs` + `src-tauri/CLAUDE.md`「P2P 协议…」 |
+| Tauri `#[tauri::command]` 注册与领域语义 | `src-tauri/src/commands/*` + `src-tauri/AGENTS.md` 各领域节 |
+| 前端 invoke / HTTP 封装 | `web/src/api/*` + `web/AGENTS.md` |
+| P2P `/api/*` 路由、retry class、幂等键 | `docs/p2p-protocol.md` + `node scripts/check-p2p-route-inventory.mjs` + `src-tauri/AGENTS.md`「P2P 协议…」 |
 | Health 能力 token | `attention.v1` · `errors.envelope.v1` · `orchestrator.runtime-snapshot.v1`（`server_protocol_info()`） |
 
 ### 8.3 添加新能力
 
-1. **Rust**：`src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，`lib.rs` `invoke_handler!` 注册；P2P 则 `net/routes/` 加路由并按 `src-tauri/CLAUDE.md` 的 7 步清单更新 `docs/p2p-protocol.md` + 能力 token
+1. **Rust**：`src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，`lib.rs` `invoke_handler!` 注册；P2P 则 `net/routes/` 加路由并按 `src-tauri/AGENTS.md` 的 7 步清单更新 `docs/p2p-protocol.md` + 能力 token
 2. **前端**：`web/src/api/<module>.ts` 加 `invoke` 或 mobile HTTP 封装
 3. **类型**：Rust DTO `#[serde(rename_all="camelCase")]`（P2P 部分路由仍 snake_case，见后端约定）对齐 `web/src/lib/types/`（兼容 barrel `web/src/lib/types.ts`）
 
@@ -509,15 +522,18 @@ Rust `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`（�
 11. **Hooks 必须在 early return 之前** — 见 §5.8
 12. **不要把 P2P 首选端口写成 `port=0` 动态分配** — 首选 62116 + 占用递增
 13. **不要推荐 `npx --yes` / 单文件 `npx tsx` runner** — 用 `package.json` 锁定 scripts
-14. **Release 不要写成 tauri-action** — 三段式原生 tauri CLI，细节在 `src-tauri/CLAUDE.md`
+14. **Release 不要写成 tauri-action** — 三段式原生 tauri CLI，细节在 `src-tauri/AGENTS.md`
+15. **数据兼容**：`~/.cc-partner` 与旧 `~/.claude-partner` 迁移；`CREATE TABLE IF NOT EXISTS`
+16. **日志**：`tracing` only，禁止 `tauri-plugin-log`
+17. **macOS 透明窗 / 权限 FFI**：见 `src-tauri/AGENTS.md` M6/M7
 
 ## 10. 关键文件索引
 
 | 文件 | 作用 | 修改频率 |
 |------|------|---------|
-| `AGENTS.md` | 根层开发指南（本文件） | 中 |
-| `web/CLAUDE.md` | 前端分层指令 | 高 |
-| `src-tauri/CLAUDE.md` | 后端分层指令 | 高 |
+| `AGENTS.md` | 根层开发指南（本文件）；`CLAUDE.md` 为指向本文件的软链 | 中 |
+| `web/AGENTS.md` | 前端分层指令；`web/CLAUDE.md` 为软链 | 高 |
+| `src-tauri/AGENTS.md` | 后端分层指令；`src-tauri/CLAUDE.md` 为软链 | 高 |
 | `web/src/styles/tokens.css` | 设计 token 总入口 | 中（新增 token） |
 | `web/src/lib/icons.tsx` | Icon 库 | 低（新增 icon） |
 | `web/src/App.tsx` | 路由根 | 低（新增页面） |
@@ -537,4 +553,4 @@ Rust `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`（�
 
 ---
 
-**在你修改任何代码前，请确保已读懂本文档第 4 节「组件分层与复用规范」，并按 §2.1 进入对应分层 CLAUDE。**
+**在你修改任何代码前，请确保已读懂本文档第 4 节「组件分层与复用规范」，并按 §2.1 进入对应分层 `AGENTS.md`。**

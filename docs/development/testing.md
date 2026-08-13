@@ -1,6 +1,6 @@
 # Testing & Quality Gates
 
-Concise map of **what to run locally**, **which CI job owns it**, and **what is explicitly out of scope**. Domain-level Vitest patterns live in [`web/CLAUDE.md`](../../web/CLAUDE.md); backend unit/smoke harness details live in [`src-tauri/CLAUDE.md`](../../src-tauri/CLAUDE.md).
+Concise map of **what to run locally**, **which CI job owns it**, and **what is explicitly out of scope**. Domain-level Vitest patterns live in [`web/AGENTS.md`](../../web/AGENTS.md); backend unit/smoke harness details live in [`src-tauri/AGENTS.md`](../../src-tauri/AGENTS.md).
 
 **Authoritative machine-readable coverage** lives in [`quality-matrix.json`](quality-matrix.json). Stable evidence IDs (`E2E-*` / `L0-*` / `L2-*` / `L3-*`) map surface → tests → command → CI job → platforms → exclusions. Validate with:
 
