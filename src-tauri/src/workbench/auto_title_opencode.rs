@@ -167,11 +167,11 @@ pub async fn run_opencode_title_poller(state: AppState, cancel: CancellationToke
             }
             // 首次见到已有 title 也尝试一次（可能终端刚创建）；之后仅变更触发
             let first_seen = !last_seen.contains_key(&id);
-            last_seen.insert(id.clone(), row.title.clone());
             if first_seen {
                 // 启动时不批量刷历史：仅 time_updated 很新（5 分钟内）才应用
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 if now_ms.saturating_sub(row.time_updated) > 5 * 60 * 1000 {
+                    last_seen.insert(id, row.title);
                     continue;
                 }
             }
@@ -184,8 +184,8 @@ pub async fn run_opencode_title_poller(state: AppState, cancel: CancellationToke
                 .map(str::to_string);
             let state_clone = state.clone();
             let title = row.title.clone();
-            let native = id;
-            let _ = tauri::async_runtime::spawn_blocking(move || {
+            let native = id.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
                 try_auto_rename_by_native_session(
                     &state_clone,
                     &native,
@@ -194,7 +194,11 @@ pub async fn run_opencode_title_poller(state: AppState, cancel: CancellationToke
                     "opencode.session.title",
                 )
             })
-            .await;
+            .await
+            .ok();
+            if result.is_some_and(|value| value.is_settled()) {
+                last_seen.insert(id, row.title);
+            }
         }
     }
     tracing::debug!("OpenCode 自动标题轮询已停止");

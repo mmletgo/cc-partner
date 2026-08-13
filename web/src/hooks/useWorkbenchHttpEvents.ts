@@ -16,6 +16,7 @@ import { useEffect, useRef } from 'react';
 import type {
   WorkbenchHttpEvent,
   WorkbenchMergeProgressEvent,
+  WorkbenchSession,
   WorkbenchSessionReplay,
   WorkbenchTerminalOutputEvent,
   WorkbenchTerminalResyncHttpPayload,
@@ -23,6 +24,7 @@ import type {
 } from '@/lib/types';
 import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
 import { agentSessionRuntimeDtoDecoder } from '@/lib/schemas/agentRuntime';
+import { workbenchSessionDecoder } from '@/lib/schemas/workbench';
 import {
   httpWorkbenchTransport,
   listActiveBridgeDevicesHttp,
@@ -113,7 +115,7 @@ export type WorkbenchNdjsonFrame =
  *   R42 M2：进一步改为 active mapped local project ids（同设备失效 shortcut 不得挡 resync）。
  *
  * Code Logic（字段说明）:
- *   list 返回至少含 id/status，可选 exitCode（R41 M5 投影 terminalStatus 时用）；
+ *   list 返回至少含 id/status，可选完整 session DTO（Gap 标题恢复）及 exitCode（R41 M5 投影 status）；
  *   replay 返回 buffer/lastSeq/可选 ownerInstanceId；
  *   listProjects 可选：返回至少 id/kind（可选 deviceId），remote 项目再按 projectId list；
  *   listActiveMappedProjects 可选（优先）：一旦提供（含空数组）即按 local project id inventory；
@@ -166,7 +168,7 @@ export interface WorkbenchHttpEventsSessionDeps {
  *   inventory 行是唯一权威来源（live terminalStatus 可能已丢）。
  *
  * Code Logic（字段说明）:
- *   id/status 必填；exitCode 可选，缺省投影为 null。
+ *   id/status 必填；完整 WorkbenchSession 字段可选，齐全时投影 sessionUpdated；exitCode 缺省为 null。
  */
 export interface WorkbenchGapInventorySession {
   id: string;
@@ -181,10 +183,13 @@ export interface WorkbenchGapInventorySession {
  *   running replay 只恢复 buffer；status 迁移须单独投影，避免 Mobile 卡在 running。
  *
  * Code Logic（字段说明）:
- *   onTerminalStatus：inventory 成功后对每个 listed session 调用（含 exited/disconnected）。
+ *   onTerminalStatus：inventory 成功后对每个 listed session 调用（含 exited/disconnected）；
+ *   onSessionUpdated：仅完整 DTO 通过 decoder 后调用，修复 Gap 内丢失的标题事件。
  */
 export interface ResyncWorkbenchSessionsAfterGapOptions {
   onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
+  /** inventory 中的完整 session DTO；Gap 丢失标题事件时用于修复 Mobile 元数据。 */
+  onSessionUpdated?: (payload: WorkbenchSession) => void;
   /** 当前可见 terminal；Gap 只 replay 该窗口，null 时不拉任何正文。 */
   activeSessionId?: string | null;
 }
@@ -194,11 +199,11 @@ export interface ResyncWorkbenchSessionsAfterGapOptions {
  *
  * Business Logic（为什么需要这个接口）:
  *   移动端只应在启用 HTTP transport 时连接 NDJSON，并把输出写入传入的终端 buffer store；
- *   terminalStatus/agentRuntime 由页面 reducer 消费，不写 terminal buffer。
+ *   terminalStatus/sessionUpdated/agentRuntime 由页面 reducer 消费，不写 terminal buffer。
  *
  * Code Logic（字段说明）:
  *   store 接收 terminalOutput；enabled 控制连接生命周期；
- *   onTerminalStatus/onAgentRuntime 可选回调；reconnectDelayMs/watchdogMs/sessions 供测试注入。
+ *   三类元数据回调均可选；reconnectDelayMs/watchdogMs/sessions 供测试注入。
  */
 export interface UseWorkbenchHttpEventsOptions {
   store: WorkbenchTerminalBufferStore;
@@ -209,6 +214,8 @@ export interface UseWorkbenchHttpEventsOptions {
   watchdogMs?: number;
   /** terminalStatus 实时回调（Mobile tab 状态）。 */
   onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
+  /** sessionUpdated 实时/Gap inventory 回调（Mobile session 元数据）。 */
+  onSessionUpdated?: (payload: WorkbenchSession) => void;
   /** agentRuntime 实时回调（Agent phase 投影）。 */
   onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
   /** Gap resync 会话依赖；默认 httpWorkbenchTransport.sessions。 */
@@ -258,6 +265,21 @@ function isTerminalStatusPayload(value: unknown): value is WorkbenchTerminalStat
     (typeof value.exitCode === 'number' || value.exitCode === null) &&
     typeof value.ts === 'number'
   );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   sessionUpdated 会整体替换 Mobile 会话元数据，残缺或错型 DTO 必须 fail-closed。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 Workbench sessions.list 的权威 decoder；成功返回完整 DTO，失败返回 null。
+ */
+function decodeSessionUpdatedPayload(value: unknown): WorkbenchSession | null {
+  try {
+    return workbenchSessionDecoder.decode(value);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -642,7 +664,7 @@ export function isMappedInventoryUnsupportedError(error: unknown): boolean {
  *   - 两者都未提供：兼容 fallback——每个 remote try list，成功 merge、失败 skip。
  *   无 listProjects 时退回 sessions.list()。
  *   仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
- *   inventory + running replay 完成后：projectInventoryTerminalStatuses 对全部 listed 行投影 status。
+ *   inventory + running replay 完成后：投影全部 listed status，并对完整 DTO 投影 sessionUpdated。
  */
 export async function resyncWorkbenchSessionsAfterGap(
   store: WorkbenchTerminalBufferStore,
@@ -770,6 +792,13 @@ export async function resyncWorkbenchSessionsAfterGap(
 
   // R41 M5：成功 inventory 后投影全部 listed session 状态（不只 running）。
   projectInventoryTerminalStatuses(byId.values(), options?.onTerminalStatus);
+  // sessionUpdated 可能在 Gap 内丢失；仅完整 DTO 经权威 decoder 投影，残缺行 fail-closed。
+  if (options?.onSessionUpdated) {
+    for (const session of byId.values()) {
+      const decoded = decodeSessionUpdatedPayload(session);
+      if (decoded) options.onSessionUpdated(decoded);
+    }
+  }
 }
 
 
@@ -837,6 +866,17 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
     return {
       kind: 'event',
       event: { type: value.type, payload: value.payload },
+      ...envelope,
+    };
+  }
+  if (value.type === 'sessionUpdated') {
+    const payload = decodeSessionUpdatedPayload(value.payload);
+    if (!payload) {
+      throw new Error('Workbench HTTP event sessionUpdated payload 非法');
+    }
+    return {
+      kind: 'event',
+      event: { type: value.type, payload },
       ...envelope,
     };
   }
@@ -924,20 +964,21 @@ export function parseWorkbenchNdjsonChunk(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端输出事件可能高频到达，移动端必须写入外部 store；status/agent 走回调。
+ *   终端输出事件可能高频到达，移动端必须写入外部 store；status/session/agent 走回调。
  *   seq/owner 必须传入 append，与桌面 authority/lastSeq 去重对齐。
  *   R37 H2：terminalResync 是 Gap cutover 权威快照，必须 store.reset。
  *
  * Code Logic（这个函数做什么）:
  *   terminalOutput → store.append(sessionId, chunk, seq, owner)；
  *   terminalResync → store.reset(sessionId, buffer, lastSeq, owner)；
- *   terminalStatus/agentRuntime → 可选回调。
+ *   terminalStatus/sessionUpdated/agentRuntime → 可选回调。
  */
 export function consumeWorkbenchHttpEvent(
   store: WorkbenchTerminalBufferStore,
   event: WorkbenchHttpEvent,
   callbacks: {
     onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
+    onSessionUpdated?: (payload: WorkbenchSession) => void;
     onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
   } = {},
   envelopeOwnerInstanceId?: string,
@@ -960,6 +1001,10 @@ export function consumeWorkbenchHttpEvent(
     callbacks.onTerminalStatus?.(event.payload);
     return;
   }
+  if (event.type === 'sessionUpdated') {
+    callbacks.onSessionUpdated?.(event.payload);
+    return;
+  }
   if (event.type === 'agentRuntime') {
     callbacks.onAgentRuntime?.(event.payload);
   }
@@ -969,12 +1014,12 @@ export function consumeWorkbenchHttpEvent(
  * useWorkbenchHttpEvents（移动端 Workbench HTTP 事件订阅）
  *
  * Business Logic（为什么需要这个 hook）:
- *   `/mobile` 页面需要持续接收同源 HTTP NDJSON terminal 输出与 agent 状态；
+ *   `/mobile` 页面需要持续接收同源 HTTP NDJSON terminal 输出与 session/agent 状态；
  *   半开连接需 heartbeat watchdog 后重连；Gap 必须 pause live + 权威 resync + after 游标重连。
  *
  * Code Logic（这个 hook 做什么）:
  *   lifecycle AbortController 覆盖 hook 生命周期；每次 connect 新建 child controller；
- *   业务帧推进 stream cursor；Gap 暂停 live、resync running sessions、投影 listed terminalStatus、
+ *   业务帧推进 stream cursor；Gap 暂停 live、resync running sessions、投影 listed status/session、
  *   按结果推进/保留 cursor 后 abort 重连；
  *   业务帧与 heartbeat 均重置 35s watchdog；watchdog 仅 abort child 并在 lifecycle 仍活跃时重连。
  */
@@ -985,10 +1030,12 @@ export function useWorkbenchHttpEvents({
   reconnectDelayMs = WORKBENCH_HTTP_EVENT_RECONNECT_DELAY_MS,
   watchdogMs = WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   onTerminalStatus,
+  onSessionUpdated,
   onAgentRuntime,
   sessions,
 }: UseWorkbenchHttpEventsOptions): void {
   const onTerminalStatusRef = useRef(onTerminalStatus);
+  const onSessionUpdatedRef = useRef(onSessionUpdated);
   const onAgentRuntimeRef = useRef(onAgentRuntime);
   const sessionsRef = useRef<WorkbenchHttpEventsSessionDeps>(
     sessions ?? {
@@ -1003,8 +1050,9 @@ export function useWorkbenchHttpEvents({
   );
   useEffect(() => {
     onTerminalStatusRef.current = onTerminalStatus;
+    onSessionUpdatedRef.current = onSessionUpdated;
     onAgentRuntimeRef.current = onAgentRuntime;
-  }, [onTerminalStatus, onAgentRuntime]);
+  }, [onTerminalStatus, onSessionUpdated, onAgentRuntime]);
   useEffect(() => {
     if (sessions) {
       sessionsRef.current = sessions;
@@ -1103,10 +1151,10 @@ export function useWorkbenchHttpEvents({
        * Business Logic（为什么需要这个函数）:
        *   Gap 帧意味着 silent loss 风险；必须立刻 pause live 并权威 resync，再以正确 cursor 重连。
        *   新 owner latest=0 的成功 cutover 也必须清 recoveryPending，避免卡在 Gap 循环。
-       *   R41 M5：resync 还须把 inventory 中的 terminalStatus（含 exited）投影给 UI。
+       *   resync 还须把 inventory 中的 terminalStatus（含 exited）及完整 session 元数据投影给 UI。
        *
        * Code Logic（这个函数做什么）:
-       *   冻结 pre-gap cursor → resync running sessions + project listed terminalStatus →
+       *   冻结 pre-gap cursor → resync running sessions + project listed status/session →
        *   resolveCursorAfterGap →
        *   resync 成功且 cursor 已 attach 到 gap owner（含 sequence 0）则清 recoveryPending；
        *   否则保持 recoveryPending → abort child。
@@ -1120,6 +1168,7 @@ export function useWorkbenchHttpEvents({
         try {
           await resyncWorkbenchSessionsAfterGap(store, sessionsRef.current, {
             onTerminalStatus: onTerminalStatusRef.current,
+            onSessionUpdated: onSessionUpdatedRef.current,
             activeSessionId: terminalSessionId,
           });
           resyncSucceeded = true;
@@ -1197,6 +1246,7 @@ export function useWorkbenchHttpEvents({
                 frame.event,
                 {
                   onTerminalStatus: onTerminalStatusRef.current,
+                  onSessionUpdated: onSessionUpdatedRef.current,
                   onAgentRuntime: onAgentRuntimeRef.current,
                 },
                 frame.ownerInstanceId,
@@ -1239,6 +1289,7 @@ export function useWorkbenchHttpEvents({
                   frame.event,
                   {
                     onTerminalStatus: onTerminalStatusRef.current,
+                    onSessionUpdated: onSessionUpdatedRef.current,
                     onAgentRuntime: onAgentRuntimeRef.current,
                   },
                   frame.ownerInstanceId,

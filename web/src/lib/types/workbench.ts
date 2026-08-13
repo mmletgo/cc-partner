@@ -791,11 +791,12 @@ export interface WorkbenchTerminalResyncHttpPayload {
  * Code Logic（类型说明）:
  *   对齐 Rust `#[serde(tag="type", content="payload", rename_all="camelCase")]`；
  *   terminalOutput/status 复用桌面事件 payload，mergeProgress 复用已有阶段进度 payload，
- *   agentRuntime 为 A1 投影，terminalResync 为 Gap 权威 cutover（R37 H2）。
+ *   sessionUpdated 携带完整 session DTO；agentRuntime 为 A1 投影，terminalResync 为 Gap 权威 cutover（R37 H2）。
  */
 export type WorkbenchHttpEvent =
   | { type: 'terminalOutput'; payload: WorkbenchTerminalOutputEvent }
   | { type: 'terminalStatus'; payload: WorkbenchTerminalStatusEvent }
+  | { type: 'sessionUpdated'; payload: WorkbenchSessionUpdatedEvent }
   | { type: 'mergeProgress'; payload: WorkbenchMergeProgressEvent }
   | { type: 'agentRuntime'; payload: WorkbenchAgentRuntimeHttpPayload }
   | { type: 'terminalResync'; payload: WorkbenchTerminalResyncHttpPayload };

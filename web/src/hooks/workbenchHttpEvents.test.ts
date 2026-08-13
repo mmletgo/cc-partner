@@ -17,6 +17,7 @@ import {
   type WorkbenchNdjsonParserState,
 } from './useWorkbenchHttpEvents';
 import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
+import type { WorkbenchSession } from '@/lib/types';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /**
@@ -39,6 +40,34 @@ function assert(condition: unknown, message: string): asserts condition {
  */
 function assertStringEqual(actual: string, expected: string, message: string): void {
   if (actual !== expected) throw new Error(`${message}: expected ${expected}, got ${actual}`);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   sessionUpdated 与 Gap inventory 测试必须使用完整 session DTO，才能验证严格 decoder 不接受残缺元数据。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造一份完整 WorkbenchSession，并允许测试覆盖标题、id 等关注字段。
+ */
+function createWorkbenchSession(overrides: Partial<WorkbenchSession> = {}): WorkbenchSession {
+  return {
+    id: 'session-a',
+    projectId: 'project-a',
+    worktreeId: 'worktree-a',
+    name: '旧标题',
+    nameSource: 'default',
+    command: 'claude',
+    cwd: '/tmp/project-a',
+    status: 'running',
+    cols: 120,
+    rows: 36,
+    startedAt: '2026-08-13T00:00:00Z',
+    exitedAt: null,
+    exitCode: null,
+    supportsPanes: true,
+    paneCount: 1,
+    ...overrides,
+  };
 }
 
 describe('workbenchHttpEvents', () => {
@@ -135,6 +164,44 @@ describe('workbenchHttpEvents', () => {
         '{"type":"agentRuntime","payload":{"agentSession":{"id":"a"}}}\n',
       ),
     ).toThrow(/agentRuntime/);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   agent 自动标题 / 手动 rename 必须通过 HTTP event 立即到达 Mobile；残缺 DTO 不得污染会话列表。
+   *
+   * Code Logic（这个测试做什么）:
+   *   解析完整 sessionUpdated 并交给 consumer 回调；再删除必填字段，断言 parser fail-closed。
+   */
+  test('strictly parses and consumes complete sessionUpdated events', () => {
+    const updated = createWorkbenchSession({ name: '自动标题', nameSource: 'auto' });
+    const frame = parseWorkbenchNdjsonFrame({
+      type: 'sessionUpdated',
+      ownerInstanceId: 'owner-a',
+      sequence: 8,
+      payload: updated,
+    });
+    expect(frame).toEqual({
+      kind: 'event',
+      event: { type: 'sessionUpdated', payload: updated },
+      ownerInstanceId: 'owner-a',
+      sequence: 8,
+    });
+
+    const onSessionUpdated = vi.fn();
+    consumeWorkbenchHttpEvent(
+      {} as WorkbenchTerminalBufferStore,
+      { type: 'sessionUpdated', payload: updated },
+      { onSessionUpdated },
+    );
+    expect(onSessionUpdated).toHaveBeenCalledOnce();
+    expect(onSessionUpdated).toHaveBeenCalledWith(updated);
+
+    const malformed = { ...updated } as Record<string, unknown>;
+    delete malformed.paneCount;
+    expect(() =>
+      parseWorkbenchNdjsonFrame({ type: 'sessionUpdated', payload: malformed }),
+    ).toThrow(/sessionUpdated payload 非法/);
   });
 
   /**
@@ -903,6 +970,56 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
       status: 'running',
       exitCode: 0,
     });
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   sessionUpdated 可能落在 ring Gap 内；仅恢复 terminalStatus 会让标题永久停留在旧值。
+   *
+   * Code Logic（这个测试做什么）:
+   *   Gap inventory 返回完整 session DTO，断言成功 resync 后每行都通过 onSessionUpdated 投影；
+   *   残缺的测试注入行不调用完整 DTO 回调。
+   */
+  test('gap resync projects complete session inventory through onSessionUpdated', async () => {
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    const updated = createWorkbenchSession({ name: 'Gap 后标题', nameSource: 'auto' });
+    const exited = createWorkbenchSession({
+      id: 'session-exited',
+      name: '手动标题',
+      nameSource: 'manual',
+      status: 'exited',
+      exitCode: 0,
+      exitedAt: '2026-08-13T00:05:00Z',
+    });
+    const onSessionUpdated = vi.fn();
+    const sessions = {
+      list: vi.fn(async () => [updated, exited]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: '',
+        truncated: false,
+        lastSeq: 3,
+        ownerInstanceId: 'owner-a',
+      })),
+    };
+
+    await resyncWorkbenchSessionsAfterGap(store, sessions, { onSessionUpdated });
+
+    expect(onSessionUpdated).toHaveBeenCalledTimes(2);
+    expect(onSessionUpdated).toHaveBeenNthCalledWith(1, updated);
+    expect(onSessionUpdated).toHaveBeenNthCalledWith(2, exited);
+
+    const incompleteCallback = vi.fn();
+    await resyncWorkbenchSessionsAfterGap(
+      store,
+      {
+        list: vi.fn(async () => [{ id: 'partial', status: 'exited' }]),
+        replay: vi.fn(),
+      },
+      { onSessionUpdated: incompleteCallback },
+    );
+    expect(incompleteCallback).not.toHaveBeenCalled();
   });
 });
 

@@ -18,6 +18,25 @@ use std::path::{Component, Path};
 /// 自动标题最大字符数（Unicode scalar），超出截断并加省略号。
 pub const AUTO_TITLE_MAX_CHARS: usize = 48;
 
+/// provider 标题与 Workbench window 同步结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoTitleSyncResult {
+    Applied,
+    AlreadySettled,
+    RetryableMiss,
+}
+
+impl AutoTitleSyncResult {
+    /// Business Logic（为什么需要这个函数）:
+    ///     provider 只有在标题已经落地或目标明确不接受自动标题时才能去重；临时绑定失败必须稍后重试。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将同步结果归并为“可安全写入 provider 去重缓存”与“需要保留重试”两类。
+    pub fn is_settled(self) -> bool {
+        matches!(self, Self::Applied | Self::AlreadySettled)
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     窗口名不能含换行/控制符，也不能过长，否则 tab 与 tmux 展示会崩。
 ///
@@ -167,6 +186,7 @@ fn normalize_path_key(path: &str) -> String {
 /// Code Logic（这个函数做什么）:
 ///     在候选 live rows 中：优先 exact id 命中（由调用方预先过滤），否则 cwd 规范化后相等；
 ///     多命中时取 started_at 最新一条；0 命中返回 None。
+#[allow(dead_code)]
 pub fn pick_terminal_for_claude_session(
     candidates: &[WorkbenchSessionRow],
     claude_cwd: Option<&str>,
@@ -231,21 +251,21 @@ pub fn pick_unique_terminal_for_cwd(
 ///
 /// Code Logic（这个函数做什么）:
 ///     清洗 title → 解析 terminal（native 优先，cwd 兜底）→ pane 门禁 → try_auto_rename + 异步 upsert。
-///     返回是否实际改名；失败只 debug。
-pub fn try_auto_rename_bound_title(
+///     返回三态同步结果，让 provider 区分“已经处理”与“临时找不到绑定”。
+fn try_auto_rename_bound_title(
     state: &AppState,
     title_raw: &str,
     native_session_id: Option<&str>,
     cwd: Option<&str>,
     source_label: &str,
-) -> bool {
+) -> AutoTitleSyncResult {
     let Some(title) = sanitize_auto_title(title_raw) else {
-        return false;
+        return AutoTitleSyncResult::AlreadySettled;
     };
     let registry = &state.workbench_sessions;
     let live = registry.list_live_session_rows();
     if live.is_empty() {
-        return false;
+        return AutoTitleSyncResult::RetryableMiss;
     }
 
     // 绑定策略：
@@ -257,11 +277,22 @@ pub fn try_auto_rename_bound_title(
         .or_else(|| pick_unique_terminal_for_cwd(&live, cwd));
 
     let Some(terminal_id) = terminal_id else {
-        return false;
+        return AutoTitleSyncResult::RetryableMiss;
     };
 
     if !is_substantive_auto_title(&title) {
-        return false;
+        return AutoTitleSyncResult::AlreadySettled;
+    }
+
+    let Some(target) = live.iter().find(|row| row.id == terminal_id) else {
+        return AutoTitleSyncResult::RetryableMiss;
+    };
+    if matches!(
+        SessionNameSource::parse(&target.name_source),
+        SessionNameSource::Manual
+    ) || target.name == title
+    {
+        return AutoTitleSyncResult::AlreadySettled;
     }
 
     // seed title-owner；多 pane 时仅 owner pane 上的 agent 可改名。
@@ -284,7 +315,7 @@ pub fn try_auto_rename_bound_title(
             source = source_label,
             "跳过自动标题：agent 不在 title-owner pane"
         );
-        return false;
+        return AutoTitleSyncResult::RetryableMiss;
     }
 
     match registry.try_auto_rename(&terminal_id, &title) {
@@ -303,16 +334,16 @@ pub fn try_auto_rename_bound_title(
                 source = source_label,
                 "已按 agent 自动标题重命名 window"
             );
-            true
+            AutoTitleSyncResult::Applied
         }
-        Ok(None) => false,
+        Ok(None) => AutoTitleSyncResult::AlreadySettled,
         Err(err) => {
             tracing::debug!(
                 terminal_id = %terminal_id,
                 source = source_label,
                 "自动标题 rename 失败: {err}"
             );
-            false
+            AutoTitleSyncResult::RetryableMiss
         }
     }
 }
@@ -322,20 +353,23 @@ pub fn try_auto_rename_bound_title(
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托 `try_auto_rename_bound_title`（native_session_id + cwd）。
-pub fn try_auto_rename_from_claude_index(state: &AppState, index: &ClaudeSessionIndex) {
+pub fn try_auto_rename_from_claude_index(
+    state: &AppState,
+    index: &ClaudeSessionIndex,
+) -> AutoTitleSyncResult {
     if !index.has_ai_title {
-        return;
+        return AutoTitleSyncResult::AlreadySettled;
     }
     if !is_substantive_auto_title(&index.title) {
-        return;
+        return AutoTitleSyncResult::AlreadySettled;
     }
-    let _ = try_auto_rename_bound_title(
+    try_auto_rename_bound_title(
         state,
         &index.title,
         Some(index.session_id.as_str()),
         index.cwd.as_deref(),
         "claude.ai-title",
-    );
+    )
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -349,7 +383,7 @@ pub fn try_auto_rename_by_native_session(
     title: &str,
     cwd: Option<&str>,
     source_label: &str,
-) -> bool {
+) -> AutoTitleSyncResult {
     try_auto_rename_bound_title(state, title, Some(native_session_id), cwd, source_label)
 }
 

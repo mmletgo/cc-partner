@@ -39,6 +39,7 @@ import {
 } from './mobileAttentionTarget';
 import {
   applyMobileAgentRuntimeEvent,
+  applyKnownMobileSessionUpdatedEvent,
   applyMobileTerminalStatusEvent,
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
@@ -203,6 +204,7 @@ export function MobileWorkbench(): ReactElement {
   const projectDetailsAbortRef = useRef<AbortController | null>(null);
   const worktreesRequestIdRef = useRef<number>(0);
   const sessionsRequestIdRef = useRef<number>(0);
+  const sessionsRef = useRef<WorkbenchSession[]>(sessions);
   const activeProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -258,11 +260,32 @@ export function MobileWorkbench(): ReactElement {
     [],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   agent 自动标题或手动 rename 后，Mobile 应立即刷新已加载 session 及当前标题，且不重连事件流。
+   *
+   * Code Logic（这个函数做什么）:
+   *   以 sessionsRef 做已知 id fail-closed；命中后整体替换 DTO、同步 ref/state，
+   *   activeSession 同 id 时切到列表中的新对象。
+   */
+  const handleSessionUpdatedEvent = useCallback((payload: WorkbenchSession): void => {
+    const result = applyKnownMobileSessionUpdatedEvent(sessionsRef.current, null, payload);
+    if (!result.applied) return;
+    sessionsRef.current = result.sessions;
+    setSessions(result.sessions);
+    setActiveSession((current) =>
+      current?.id === payload.id
+        ? result.sessions.find((session) => session.id === payload.id) ?? current
+        : current,
+    );
+  }, []);
+
   useWorkbenchHttpEvents({
     store: terminalBufferStore,
     enabled: true,
     terminalSessionId: activeSession?.status === 'running' ? activeSession.id : null,
     onTerminalStatus: handleTerminalStatusEvent,
+    onSessionUpdated: handleSessionUpdatedEvent,
     onAgentRuntime: handleAgentRuntimeEvent,
   });
   useEffect(() => {
@@ -279,7 +302,6 @@ export function MobileWorkbench(): ReactElement {
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
   const worktreeOperationBusyRef = useRef<boolean>(false);
   const worktreeOperationCountRef = useRef<number>(0);
-  const sessionsRef = useRef<WorkbenchSession[]>([]);
   const projectsRef = useRef<WorkbenchProject[]>([]);
   const panelRef = useRef<MobileWorkbenchPanel>(getInitialMobileWorkbenchPanel());
   const connectionStateRef = useRef<MobileConnectionState | null>(null);

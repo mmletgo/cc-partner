@@ -25,6 +25,7 @@ import {
   markMobileConnectionReconnecting,
   openMobileNav,
   reduceMobileSessionRuntime,
+  applyKnownMobileSessionUpdatedEvent,
   resolveMobileNavMode,
   seedMobileSessionRuntimeFromSessions,
   selectMobileWorktreeWorkspacePanel,
@@ -797,5 +798,44 @@ describe('mobileWorkbenchState', () => {
       status: 'running',
     });
     assertEqual(Object.keys(ignored.sessions).length, 1);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Mobile 收到标题更新后只应修改当前页面已知 session，并同步 activeSession；
+   *   其他项目或尚未加载的未知 session 事件必须 fail-closed。
+   *
+   * Code Logic（这个测试做什么）:
+   *   对已知 active session 应用完整 DTO，断言列表和 active 引用都获得新标题；
+   *   再对未知 id 应用事件，断言状态引用和值完全不变。
+   */
+  test('merges known sessionUpdated into sessions and activeSession but ignores unknown ids', () => {
+    const known = createSession({ id: 's1', name: '旧标题', status: 'running' });
+    const sibling = createSession({ id: 's2', name: '另一个会话', status: 'running' });
+    const updated: WorkbenchSession = {
+      ...known,
+      name: '自动标题',
+      nameSource: 'auto',
+      paneCount: 2,
+    };
+
+    const applied = applyKnownMobileSessionUpdatedEvent([known, sibling], known, updated);
+    assertEqual(applied.applied, true);
+    assertEqual(applied.sessions[0]?.name, '自动标题');
+    assertEqual(applied.sessions[0]?.nameSource, 'auto');
+    assertEqual(applied.sessions[0]?.paneCount, 2);
+    assertEqual(applied.sessions[1], sibling);
+    assertEqual(applied.activeSession, applied.sessions[0] ?? null);
+
+    const missing = createSession({ id: 'missing', name: '不得加入' });
+    const ignored = applyKnownMobileSessionUpdatedEvent(
+      applied.sessions,
+      applied.activeSession,
+      missing,
+    );
+    assertEqual(ignored.applied, false);
+    assertEqual(ignored.sessions, applied.sessions);
+    assertEqual(ignored.activeSession, applied.activeSession);
+    assertEqual(ignored.sessions.length, 2);
   });
 });

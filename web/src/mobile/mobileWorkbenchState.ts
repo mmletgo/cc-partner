@@ -602,6 +602,40 @@ export function selectPreferredMobileSession(
   );
 }
 
+/** 移动端已知 session 元数据更新结果。 */
+export interface MobileKnownSessionUpdateResult {
+  sessions: WorkbenchSession[];
+  activeSession: WorkbenchSession | null;
+  applied: boolean;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   sessionUpdated 是全局低带宽事件，但 Mobile 页面只能接受当前已加载列表中的会话；
+ *   未知 session 不能借事件跨项目插入，同时 activeSession 必须与列表中的完整 DTO 同步。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 id 查找已知 session；未命中返回原引用与 applied=false；命中则替换完整 DTO，
+ *   activeSession 同 id 时指向替换后的同一对象，否则保持原引用。
+ */
+export function applyKnownMobileSessionUpdatedEvent(
+  sessions: WorkbenchSession[],
+  activeSession: WorkbenchSession | null,
+  updated: WorkbenchSession,
+): MobileKnownSessionUpdateResult {
+  const index = sessions.findIndex((session) => session.id === updated.id);
+  if (index < 0) {
+    return { sessions, activeSession, applied: false };
+  }
+  const nextSessions = sessions.slice();
+  nextSessions[index] = updated;
+  return {
+    sessions: nextSessions,
+    activeSession: activeSession?.id === updated.id ? updated : activeSession,
+    applied: true,
+  };
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   手机端不需要暴露左右/上下分屏选择，但新增 pane 仍要映射到真实 tmux split-pane 能力。

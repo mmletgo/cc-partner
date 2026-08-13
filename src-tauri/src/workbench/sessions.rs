@@ -130,6 +130,10 @@ pub fn mark_session_name_manual(_session_id: &str) {
 pub fn emit_session_updated(state: &AppState, row: &WorkbenchSessionRow) {
     let pane_count = pane_count_for_row(row);
     let dto = row.to_dto_with_pane_count(pane_count);
+    publish_workbench_remote_event_from_state(
+        state,
+        WorkbenchRemoteEvent::SessionUpdated(dto.clone()),
+    );
     state.emit_event("workbench:session-updated", dto);
 }
 

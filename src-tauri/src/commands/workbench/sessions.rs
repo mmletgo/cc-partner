@@ -14,8 +14,9 @@ use crate::workbench::agent_session_search::{
     preview_opencode_session, search_codex_sessions, search_opencode_sessions, AgentSessionSource,
 };
 use crate::workbench::claude_sessions::{
-    ensure_worktree_session_index_scanned, search_sessions_result, to_session_preview,
-    ClaudeSessionIndex, SessionPreview, SessionSearchResult,
+    ensure_worktree_session_index_scanned, ensure_worktree_session_index_watcher,
+    search_sessions_result, to_session_preview, ClaudeSessionIndex, SessionPreview,
+    SessionSearchResult,
 };
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchPathInfo, WorkbenchSessionDto, WorkbenchSessionRow,
@@ -146,6 +147,7 @@ pub(crate) async fn local_create_workbench_session(
             "session_spawn_ready_cas_miss".to_string(),
         ));
     }
+    ensure_worktree_session_index_watcher(state, PathBuf::from(&row.cwd));
     // lease drops after Ready commit when function returns.
     Ok(row.to_dto())
 }
@@ -230,6 +232,7 @@ pub(crate) async fn local_create_workbench_session_with_preallocated_ids(
             "session_spawn_ready_cas_miss".to_string(),
         ));
     }
+    ensure_worktree_session_index_watcher(state, PathBuf::from(&row.cwd));
     Ok(row.to_dto())
 }
 

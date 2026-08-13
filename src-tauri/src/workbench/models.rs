@@ -268,7 +268,7 @@ impl WorkbenchWorktreeRow {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     定义 window 列表与状态事件可复用的数据形状，字段使用 camelCase 序列化。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchSessionDto {
     pub id: String,

@@ -32,6 +32,7 @@ use crate::backend::event_bus::BackendRuntimeCursor;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto;
+use crate::workbench::models::WorkbenchSessionDto;
 use crate::workbench::remote_ids::{is_remote_id, parse_remote_entity_id, remote_entity_id};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{Deserialize, Serialize};
@@ -184,8 +185,8 @@ impl WorkbenchTerminalResyncPayload {
 /// Workbench 可跨 HTTP NDJSON 传输的事件。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     远端事件流需要在一条连接中承载 terminal output、terminal status、merge progress、
-///     agent runtime 与 Gap resync 权威 terminalResync。
+///     远端事件流需要在一条连接中承载 terminal output、terminal status、session 元数据、
+///     merge progress、agent runtime 与 Gap resync 权威 terminalResync。
 ///
 /// Code Logic（这个枚举做什么）:
 ///     使用 serde 内部 tag `{type,payload}`，type 按 camelCase 输出为前端和桥接层约定的稳定值。
@@ -196,6 +197,8 @@ impl WorkbenchTerminalResyncPayload {
 pub enum WorkbenchRemoteEvent {
     TerminalOutput(WorkbenchTerminalOutputPayload),
     TerminalStatus(WorkbenchTerminalStatusPayload),
+    /// 完整 session 元数据更新（wire type `sessionUpdated`）。
+    SessionUpdated(WorkbenchSessionDto),
     MergeProgress(WorkbenchMergeProgressPayload),
     /// Agent session runtime 投影（capability workbench.agent-runtime.v1）
     AgentRuntime(WorkbenchAgentRuntimePayload),
@@ -596,7 +599,7 @@ pub fn encode_workbench_remote_relay_ndjson(
 /// 按当前终端窗口过滤高带宽正文并编码 NDJSON。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     远程 Workbench 只应实时下载用户当前查看窗口的正文；状态、merge 与 Agent 事件仍需实时到达。
+///     远程 Workbench 只应实时下载用户当前查看窗口的正文；状态、session 元数据、merge 与 Agent 事件仍需实时到达。
 ///     被过滤事件仍必须推进全局游标，否则重连会重复扫描旧 ring，甚至触发全量 Gap resync。
 ///
 /// Code Logic（这个函数做什么）:
@@ -618,6 +621,7 @@ pub fn encode_workbench_remote_relay_ndjson_filtered(
             WorkbenchRemoteEvent::TerminalOutput(payload) => payload.session_id != target,
             WorkbenchRemoteEvent::TerminalResync(payload) => payload.session_id != target,
             WorkbenchRemoteEvent::TerminalStatus(_)
+            | WorkbenchRemoteEvent::SessionUpdated(_)
             | WorkbenchRemoteEvent::MergeProgress(_)
             | WorkbenchRemoteEvent::AgentRuntime(_) => false,
         },
@@ -655,8 +659,8 @@ pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteStreamMes
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::validation("remote event missing type".to_string()))?;
     match event_type {
-        "terminalOutput" | "terminalStatus" | "mergeProgress" | "agentRuntime"
-        | "terminalResync" => {
+        "terminalOutput" | "terminalStatus" | "sessionUpdated" | "mergeProgress"
+        | "agentRuntime" | "terminalResync" => {
             let event: WorkbenchRemoteEvent = serde_json::from_value(value.clone())
                 .map_err(|e| AppError::validation(format!("invalid remote event payload: {e}")))?;
             let owner_instance_id = value
@@ -2489,12 +2493,17 @@ fn trim_ascii_whitespace_bytes(mut bytes: &[u8]) -> &[u8] {
 ///     若再 map/publish 会形成 A↔B 无限 remap 洪泛。
 ///
 /// Code Logic（这个函数做什么）:
-///     检查 terminal sessionId / merge worktreeId / agent terminal/session ids 是否已是 remote: 实体；
-///     TerminalResync 同理检查 sessionId。
+///     检查 terminal sessionId / session id+projectId+worktreeId / merge worktreeId /
+///     agent terminal/session ids 是否已是 remote: 实体；TerminalResync 同理检查 sessionId。
 fn inbound_event_has_remote_entity_id(event: &WorkbenchRemoteEvent) -> bool {
     match event {
         WorkbenchRemoteEvent::TerminalOutput(payload) => is_remote_id(&payload.session_id),
         WorkbenchRemoteEvent::TerminalStatus(payload) => is_remote_id(&payload.session_id),
+        WorkbenchRemoteEvent::SessionUpdated(payload) => {
+            is_remote_id(&payload.id)
+                || is_remote_id(&payload.project_id)
+                || payload.worktree_id.as_deref().is_some_and(is_remote_id)
+        }
         WorkbenchRemoteEvent::TerminalResync(payload) => is_remote_id(&payload.session_id),
         WorkbenchRemoteEvent::MergeProgress(payload) => {
             is_remote_id(&payload.worktree_id) || is_remote_id(&payload.project_id)
@@ -2521,8 +2530,8 @@ fn inbound_event_has_remote_entity_id(event: &WorkbenchRemoteEvent) -> bool {
 ///
 /// Code Logic（这个函数做什么）:
 ///     直接 clone 后 publish 到本机 bus，再按类型 emit `workbench:*`（事件已是 mapped remote ids）；
-///     TerminalStatus 非 running 时 release session watch（composite remote session id）。
-///     TerminalResync 仅 GUI emit + bus publish，不二次 map。
+///     TerminalStatus 非 running 时 release session watch（composite remote session id）；
+///     SessionUpdated emit `workbench:session-updated`；TerminalResync 仅 GUI emit + bus publish，不二次 map。
 fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
     // R36 H2 / R38 H1：GUI emit + local bus publish 共用同一 mapped 事件。
     // 此处事件已 map 为 remote:*，必须 publish+emit；环路防护只在 process 路径。
@@ -2535,6 +2544,9 @@ fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
             // R37 H3：exited/disconnected 等非 running 状态释放 session watch。
             maybe_release_session_watch_on_status(state, &payload);
             state.emit_event("workbench:terminal-status", payload);
+        }
+        WorkbenchRemoteEvent::SessionUpdated(payload) => {
+            state.emit_event("workbench:session-updated", payload);
         }
         WorkbenchRemoteEvent::MergeProgress(payload) => {
             state.emit_event("workbench:merge-progress", payload);
@@ -2594,7 +2606,7 @@ fn maybe_release_session_watch_on_status(
 ///
 /// Code Logic（这个函数做什么）:
 ///     根据事件类型把 sessionId/projectId/worktreeId 映射为 `remote:<device_id>:<inner_id>`；
-///     TerminalResync 的 sessionId 同样加 remote 前缀（通常由本机 resync 路径直接构造，此处仅防御）。
+///     SessionUpdated 复用完整 DTO 映射，TerminalResync 的 sessionId 同样加 remote 前缀。
 fn map_remote_event_for_device(
     device_id: &str,
     project_ids: &HashMap<String, String>,
@@ -2609,6 +2621,9 @@ fn map_remote_event_for_device(
             payload.session_id = remote_entity_id(device_id, &payload.session_id);
             WorkbenchRemoteEvent::TerminalStatus(payload)
         }
+        WorkbenchRemoteEvent::SessionUpdated(payload) => WorkbenchRemoteEvent::SessionUpdated(
+            map_remote_session_for_device(device_id, project_ids, payload),
+        ),
         WorkbenchRemoteEvent::MergeProgress(mut payload) => {
             payload.project_id = project_ids
                 .get(&payload.project_id)
@@ -2638,6 +2653,29 @@ fn map_remote_event_for_device(
             WorkbenchRemoteEvent::TerminalResync(payload)
         }
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     sessionUpdated 与 Gap inventory 都携带 peer 原生 session DTO，本机 UI 需要一致的 remote ID；
+///     已打开的 remote shortcut projectId 必须优先复用本机映射，才能命中当前页面会话。
+///
+/// Code Logic（这个函数做什么）:
+///     id/worktreeId 加设备 remote 前缀；projectId 优先 project_ids shortcut，缺省再加设备前缀；
+///     其余展示与运行元数据原样保留。
+fn map_remote_session_for_device(
+    device_id: &str,
+    project_ids: &HashMap<String, String>,
+    mut session: WorkbenchSessionDto,
+) -> WorkbenchSessionDto {
+    session.id = remote_entity_id(device_id, &session.id);
+    session.project_id = project_ids
+        .get(&session.project_id)
+        .cloned()
+        .unwrap_or_else(|| remote_entity_id(device_id, &session.project_id));
+    if let Some(worktree_id) = session.worktree_id.as_mut() {
+        *worktree_id = remote_entity_id(device_id, worktree_id);
+    }
+    session
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2734,7 +2772,7 @@ async fn resync_remote_bridge_after_gap(
     let client = crate::workbench::remote_client::RemoteWorkbenchClient::new()
         .with_expected_device_id(device_id);
     let now_ts = chrono::Utc::now().timestamp_millis();
-    for (inner_project_id, local_shortcut_id) in project_map {
+    for (inner_project_id, local_shortcut_id) in &project_map {
         if cancel.is_cancelled() {
             return Err(EventStreamError::Cancelled);
         }
@@ -2756,15 +2794,22 @@ async fn resync_remote_bridge_after_gap(
             if cancel.is_cancelled() {
                 return Err(EventStreamError::Cancelled);
             }
-            let status = session.status.trim();
-            let remote_session_id = remote_entity_id(device_id, &session.id);
+            let status = session.status.trim().to_string();
+            let inner_session_id = session.id.clone();
+            let mapped_session = map_remote_session_for_device(device_id, &project_map, session);
+            let remote_session_id = mapped_session.id.clone();
             listed_ids.insert(remote_session_id.clone());
+            // sessionUpdated 若落在 ring Gap 中，以权威 inventory 修复标题及其他元数据。
+            emit_mapped_remote_event(
+                state,
+                WorkbenchRemoteEvent::SessionUpdated(mapped_session.clone()),
+            );
             let is_running = status.is_empty() || status.eq_ignore_ascii_case("running");
             if !is_running {
                 // R42 M3：投影 listed 非 running 终态，避免 Gap 中 status 事件被越过后 UI 永 running。
                 let status_payload = WorkbenchTerminalStatusPayload {
                     session_id: remote_session_id.clone(),
-                    status: status.to_string(),
+                    status: status.clone(),
                     exit_code: None,
                     ts: now_ts,
                 };
@@ -2776,11 +2821,11 @@ async fn resync_remote_bridge_after_gap(
             }
             running_ids.push(remote_session_id.clone());
             // 生命周期和 watch reconcile 仍覆盖全部 running session；高带宽 replay 仅恢复当前窗口。
-            if !should_replay_terminal_session(terminal_session_filter, &session.id) {
+            if !should_replay_terminal_session(terminal_session_filter, &inner_session_id) {
                 continue;
             }
             let mut replay = client
-                .replay(base_url, &session.id)
+                .replay(base_url, &inner_session_id)
                 .await
                 .map_err(|_| EventStreamError::Network)?;
             replay.session_id = remote_session_id.clone();
@@ -2990,6 +3035,152 @@ mod tests {
         assert!(decode_remote_event(line).unwrap().is_none());
         let heartbeat = r#"{"type":"heartbeat","sentAt":"2026-07-15T00:00:00Z"}"#;
         assert!(decode_remote_event(heartbeat).unwrap().is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     agent 自动标题或用户 rename 后，完整 session 元数据必须作为低带宽事件穿过 NDJSON；
+    ///     即使订阅者只选择了另一个 terminal，也不能把标题更新过滤成 Cursor。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 SessionUpdated relay，以不匹配的 terminal filter 编码并 decode round-trip，
+    ///     断言事件类型、信封游标与完整 session DTO 均保留。
+    #[test]
+    fn session_updated_event_round_trips_without_terminal_filtering() {
+        let session = crate::workbench::models::WorkbenchSessionDto {
+            id: "session-1".into(),
+            project_id: "project-1".into(),
+            worktree_id: Some("worktree-1".into()),
+            name: "自动标题".into(),
+            name_source: "auto".into(),
+            command: "claude".into(),
+            cwd: "/tmp/project".into(),
+            status: "running".into(),
+            cols: 120,
+            rows: 36,
+            started_at: "2026-08-13T00:00:00Z".into(),
+            exited_at: None,
+            exit_code: None,
+            supports_panes: true,
+            pane_count: 2,
+        };
+        let message = WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id: "owner-a".into(),
+            sequence: 9,
+            event: Box::new(WorkbenchRemoteEvent::SessionUpdated(session.clone())),
+        };
+
+        let line = encode_workbench_remote_relay_ndjson_filtered(&message, Some("other-session"))
+            .expect("encode sessionUpdated");
+        assert!(line.contains("\"type\":\"sessionUpdated\""));
+        assert!(!line.contains("\"type\":\"cursor\""));
+        assert_eq!(
+            decode_remote_event(&line).expect("decode sessionUpdated"),
+            Some(WorkbenchRemoteStreamMessage::Event {
+                owner_instance_id: "owner-a".into(),
+                sequence: 9,
+                event: Box::new(WorkbenchRemoteEvent::SessionUpdated(session)),
+            })
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 session 标题事件中的 session/project/worktree id 必须映射成本机可识别的 remote id；
+    ///     已有 shortcut project 映射应优先于通用 remote entity id。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     映射完整 SessionUpdated，断言 session/worktree 加设备前缀、project 使用 project_ids shortcut，
+    ///     且标题和 nameSource 等元数据原样保留。
+    #[test]
+    fn map_remote_session_updated_maps_all_ids_and_prefers_project_shortcut() {
+        let session = crate::workbench::models::WorkbenchSessionDto {
+            id: "inner-session".into(),
+            project_id: "inner-project".into(),
+            worktree_id: Some("inner-worktree".into()),
+            name: "新标题".into(),
+            name_source: "manual".into(),
+            command: "codex".into(),
+            cwd: "/repo".into(),
+            status: "running".into(),
+            cols: 80,
+            rows: 24,
+            started_at: "t0".into(),
+            exited_at: None,
+            exit_code: None,
+            supports_panes: true,
+            pane_count: 1,
+        };
+        let project_ids = HashMap::from([(
+            "inner-project".to_string(),
+            "remote:device-a:shortcut-project".to_string(),
+        )]);
+
+        let mapped = map_remote_event_for_device(
+            "device-a",
+            &project_ids,
+            WorkbenchRemoteEvent::SessionUpdated(session),
+        );
+
+        match mapped {
+            WorkbenchRemoteEvent::SessionUpdated(payload) => {
+                assert_eq!(payload.id, "remote:device-a:inner-session");
+                assert_eq!(payload.project_id, "remote:device-a:shortcut-project");
+                assert_eq!(
+                    payload.worktree_id.as_deref(),
+                    Some("remote:device-a:inner-worktree")
+                );
+                assert_eq!(payload.name, "新标题");
+                assert_eq!(payload.name_source, "manual");
+            }
+            other => panic!("expected SessionUpdated, got {other:?}"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     已被另一台桥接器映射的 sessionUpdated 若再次入站，会造成标题事件在设备间循环洪泛；
+    ///     id/projectId/worktreeId 任一已是 remote entity 都必须在 map 前丢弃。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别构造三种 remote id 位置和全 native DTO，断言防环判断完整覆盖。
+    #[test]
+    fn inbound_session_updated_loop_guard_covers_session_project_and_worktree_ids() {
+        let native = crate::workbench::models::WorkbenchSessionDto {
+            id: "session-1".into(),
+            project_id: "project-1".into(),
+            worktree_id: Some("worktree-1".into()),
+            name: "title".into(),
+            name_source: "auto".into(),
+            command: "claude".into(),
+            cwd: "/repo".into(),
+            status: "running".into(),
+            cols: 80,
+            rows: 24,
+            started_at: "t0".into(),
+            exited_at: None,
+            exit_code: None,
+            supports_panes: true,
+            pane_count: 1,
+        };
+        assert!(!inbound_event_has_remote_entity_id(
+            &WorkbenchRemoteEvent::SessionUpdated(native.clone())
+        ));
+
+        let mut remote_session = native.clone();
+        remote_session.id = "remote:device-a:session-1".into();
+        assert!(inbound_event_has_remote_entity_id(
+            &WorkbenchRemoteEvent::SessionUpdated(remote_session)
+        ));
+
+        let mut remote_project = native.clone();
+        remote_project.project_id = "remote:device-a:project-1".into();
+        assert!(inbound_event_has_remote_entity_id(
+            &WorkbenchRemoteEvent::SessionUpdated(remote_project)
+        ));
+
+        let mut remote_worktree = native;
+        remote_worktree.worktree_id = Some("remote:device-a:worktree-1".into());
+        assert!(inbound_event_has_remote_entity_id(
+            &WorkbenchRemoteEvent::SessionUpdated(remote_worktree)
+        ));
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -8,6 +8,7 @@
 
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::workbench::claude_sessions::ensure_worktree_session_index_watcher;
 use crate::workbench::models::{
     WorkbenchHtmlAssetDto, WorkbenchOpenFileDto, WorkbenchSaveTextResultDto, WorkbenchSessionDto,
     WorkbenchSqlitePreview,
@@ -19,6 +20,7 @@ use crate::workbench::{
     remote_protocol::{RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteSaveTextReq},
     sqlite_preview,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tauri::State;
 
@@ -313,7 +315,16 @@ pub(crate) async fn local_list_workbench_sessions(
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
     state.runtime_role.require_owner()?;
     restore_persisted_sessions(state, project_id.as_deref()).await?;
-    merged_session_dtos(state, project_id.as_deref()).await
+    let sessions = merged_session_dtos(state, project_id.as_deref()).await?;
+    let worktree_paths: HashSet<PathBuf> = sessions
+        .iter()
+        .filter(|session| session.status == "running")
+        .map(|session| PathBuf::from(&session.cwd))
+        .collect();
+    for worktree_path in worktree_paths {
+        ensure_worktree_session_index_watcher(state, worktree_path);
+    }
+    Ok(sessions)
 }
 
 /// 列出工作台终端会话。

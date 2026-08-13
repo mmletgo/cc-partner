@@ -19,6 +19,17 @@ use tokio_util::sync::CancellationToken;
 
 /// 轮询间隔（秒）。
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// 启动时仅回看 index 尾部，避免全量处理历史会话。
+const BOOTSTRAP_TAIL_BYTES: u64 = 256 * 1024;
+/// 启动回看只接受近期更新，避免旧 cwd 标题覆盖新 terminal。
+const BOOTSTRAP_RECENT_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingCodexTitle {
+    title: String,
+    cwd: Option<String>,
+    first_seen: std::time::Instant,
+}
 
 /// Business Logic（为什么需要这个函数）:
 ///     Codex 数据根可被 CODEX_HOME 覆盖。
@@ -101,6 +112,52 @@ pub fn read_session_index_from_offset(
     Ok((len, lines))
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     sidecar/Codex poller 重启后，当前对话标题可能已经写在 index 中且不会再次追加；直接从 EOF 跟踪会永久漏掉。
+///
+/// Code Logic（这个函数做什么）:
+///     从文件尾部有界读取并丢弃可能被截断的首行，只保留 `updated_at` 在近期窗口内的最新 session 行，
+///     返回文件末尾 offset 与按 session id 去重后的候选。
+pub fn read_recent_session_index_tail(
+    path: &Path,
+    max_bytes: u64,
+    now: chrono::DateTime<chrono::Utc>,
+    recent_window: Duration,
+) -> std::io::Result<(u64, Vec<SessionIndexLine>)> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(max_bytes.max(1));
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file);
+    if start > 0 {
+        let mut partial = String::new();
+        let _ = reader.read_line(&mut partial)?;
+    }
+
+    let recent_cutoff = now
+        - chrono::Duration::from_std(recent_window)
+            .unwrap_or_else(|_| chrono::Duration::minutes(10));
+    let mut latest: HashMap<String, SessionIndexLine> = HashMap::new();
+    for line in reader.lines().map_while(Result::ok) {
+        let Some(parsed) = parse_session_index_line(&line) else {
+            continue;
+        };
+        let Some(updated_at) = parsed
+            .updated_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+        else {
+            continue;
+        };
+        if updated_at < recent_cutoff || parsed.id.trim().is_empty() {
+            continue;
+        }
+        latest.insert(parsed.id.trim().to_string(), parsed);
+    }
+    Ok((len, latest.into_values().collect()))
+}
+
 /// 从 rollout jsonl 的首条 session_meta 取 cwd（best-effort）。
 pub fn cwd_from_codex_rollout(path: &Path) -> Option<String> {
     let file = File::open(path).ok()?;
@@ -175,8 +232,10 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
     let mut last_len: u64 = 0;
     let mut last_mtime_ns: Option<u64> = None;
     let mut last_titles: HashMap<String, String> = HashMap::new();
+    let mut pending_titles: HashMap<String, PendingCodexTitle> = HashMap::new();
     let mut offset: u64 = 0;
-    // 首次：若文件已存在，跳到文件末尾，只跟踪增量（避免启动时批量 rename 历史会话）。
+    let mut bootstrap_lines = Vec::new();
+    // 首次有界回看近期标题，再从 EOF 跟踪；既覆盖 poller 重启，又不会批量 rename 历史会话。
     if let Ok(meta) = fs::metadata(&index_path) {
         last_len = meta.len();
         offset = meta.len();
@@ -185,10 +244,23 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as u64);
+        match read_recent_session_index_tail(
+            &index_path,
+            BOOTSTRAP_TAIL_BYTES,
+            chrono::Utc::now(),
+            BOOTSTRAP_RECENT_WINDOW,
+        ) {
+            Ok((new_offset, lines)) => {
+                offset = new_offset;
+                bootstrap_lines = lines;
+            }
+            Err(error) => tracing::debug!("读取 Codex session_index 近期尾部失败: {error}"),
+        }
         tracing::debug!(
             path = %index_path.display(),
             offset,
-            "Codex session_index 自动标题从 EOF 跟踪"
+            bootstrap = bootstrap_lines.len(),
+            "Codex session_index 自动标题有界恢复后从 EOF 跟踪"
         );
     }
 
@@ -213,36 +285,38 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as u64);
         let len = meta.len();
-        if Some(len) == Some(last_len) && mtime_ns == last_mtime_ns {
-            continue;
-        }
-        // 截断则重置
-        if len < last_len {
-            offset = 0;
-            last_titles.clear();
-        }
-        last_len = len;
-        last_mtime_ns = mtime_ns;
+        let changed = Some(len) != Some(last_len) || mtime_ns != last_mtime_ns;
+        let mut lines = std::mem::take(&mut bootstrap_lines);
+        if changed {
+            // 截断则重置增量游标；已成功标题保留，避免轮转后重复 rename。
+            if len < last_len {
+                offset = 0;
+            }
+            last_len = len;
+            last_mtime_ns = mtime_ns;
 
-        let home_clone = home.clone();
-        let path_clone = index_path.clone();
-        let start_offset = offset;
-        let read = tauri::async_runtime::spawn_blocking(move || {
-            read_session_index_from_offset(&path_clone, start_offset)
-        })
-        .await;
-        let (new_offset, lines) = match read {
-            Ok(Ok(v)) => v,
-            Ok(Err(err)) => {
-                tracing::debug!("读取 Codex session_index 失败: {err}");
-                continue;
-            }
-            Err(err) => {
-                tracing::debug!("Codex session_index blocking 任务失败: {err}");
-                continue;
-            }
-        };
-        offset = new_offset;
+            let path_clone = index_path.clone();
+            let start_offset = offset;
+            let read = tauri::async_runtime::spawn_blocking(move || {
+                read_session_index_from_offset(&path_clone, start_offset)
+            })
+            .await;
+            let incremental = match read {
+                Ok(Ok((new_offset, lines))) => {
+                    offset = new_offset;
+                    lines
+                }
+                Ok(Err(err)) => {
+                    tracing::debug!("读取 Codex session_index 失败: {err}");
+                    Vec::new()
+                }
+                Err(err) => {
+                    tracing::debug!("Codex session_index blocking 任务失败: {err}");
+                    Vec::new()
+                }
+            };
+            lines.extend(incremental);
+        }
 
         for line in lines {
             let id = line.id.trim().to_string();
@@ -264,9 +338,8 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
             if last_titles.get(&id).map(String::as_str) == Some(title.as_str()) {
                 continue;
             }
-            last_titles.insert(id.clone(), title.clone());
 
-            let home_for_cwd = home_clone.clone();
+            let home_for_cwd = home.clone();
             let session_id = id.clone();
             let cwd = tauri::async_runtime::spawn_blocking(move || {
                 find_rollout_for_session(&home_for_cwd, &session_id)
@@ -276,19 +349,46 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
             .ok()
             .flatten();
 
+            pending_titles.insert(
+                id,
+                PendingCodexTitle {
+                    title,
+                    cwd,
+                    first_seen: std::time::Instant::now(),
+                },
+            );
+        }
+
+        // 标题行只会在 index 中出现一次；首次绑定未就绪时必须在后续 tick 有界重试，
+        // 不能依赖 provider 再写一遍同名行，也不能无限保留已经失效的历史候选。
+        let pending: Vec<(String, PendingCodexTitle)> = pending_titles
+            .iter()
+            .map(|(id, pending)| (id.clone(), pending.clone()))
+            .collect();
+        for (native, pending) in pending {
+            if pending.first_seen.elapsed() > BOOTSTRAP_RECENT_WINDOW {
+                pending_titles.remove(&native);
+                continue;
+            }
             let state_clone = state.clone();
-            let native = id;
-            let title_for_rename = title;
-            let _ = tauri::async_runtime::spawn_blocking(move || {
+            let native_for_rename = native.clone();
+            let title_for_rename = pending.title.clone();
+            let cwd = pending.cwd.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
                 try_auto_rename_by_native_session(
                     &state_clone,
-                    &native,
+                    &native_for_rename,
                     &title_for_rename,
                     cwd.as_deref(),
                     "codex.thread_name",
                 )
             })
-            .await;
+            .await
+            .ok();
+            if result.is_some_and(|value| value.is_settled()) {
+                last_titles.insert(native.clone(), pending.title);
+                pending_titles.remove(&native);
+            }
         }
     }
     tracing::debug!("Codex 自动标题轮询已停止");
@@ -332,6 +432,42 @@ mod tests {
         let (_off2, lines2) = read_session_index_from_offset(&path, off1).unwrap();
         assert_eq!(lines2.len(), 1);
         assert_eq!(lines2[0].id, "2");
+    }
+
+    #[test]
+    fn bootstrap_tail_keeps_only_recent_latest_sessions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session_index.jsonl");
+        let now = chrono::Utc::now();
+        let recent = now.to_rfc3339();
+        let stale = (now - chrono::Duration::hours(1)).to_rfc3339();
+        {
+            let mut file = File::create(&path).unwrap();
+            writeln!(
+                file,
+                r#"{{"id":"stale","thread_name":"历史标题","updated_at":"{stale}"}}"#
+            )
+            .unwrap();
+            writeln!(
+                file,
+                r#"{{"id":"active","thread_name":"旧名称","updated_at":"{recent}"}}"#
+            )
+            .unwrap();
+            writeln!(
+                file,
+                r#"{{"id":"active","thread_name":"当前名称","updated_at":"{recent}"}}"#
+            )
+            .unwrap();
+        }
+
+        let (offset, lines) =
+            read_recent_session_index_tail(&path, 256 * 1024, now, Duration::from_secs(10 * 60))
+                .unwrap();
+
+        assert_eq!(offset, fs::metadata(&path).unwrap().len());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].id, "active");
+        assert_eq!(lines[0].thread_name.as_deref(), Some("当前名称"));
     }
 
     #[test]

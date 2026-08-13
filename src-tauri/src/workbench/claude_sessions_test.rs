@@ -10,6 +10,7 @@
 //! claude_sessions 单测：覆盖 jsonl 解析、worktree 扫描、搜索语义、文件监听降级。
 
 use super::*;
+use crate::workbench::models::WorkbenchSessionRow;
 use std::fs;
 use std::io::Write;
 
@@ -1646,6 +1647,171 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         ),
         gui_event_relay_cancel: Arc::new(Mutex::new(None)),
     }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Agent 标题可能先于 terminal Ready/native 绑定写入 transcript；首次绑定失败不能把同一标题永久去重，
+///     否则窗口就算随后 Ready，也不会再随当前对话改名。
+///
+/// Code Logic（这个测试做什么）:
+///     先在无 live terminal 时投影同一个 Claude ai-title，再插入 cwd 唯一匹配的 Ready fake terminal 并重试；
+///     断言第二次无需标题文本变化也能完成自动改名。
+#[tokio::test]
+async fn auto_title_retries_same_title_after_terminal_becomes_ready() {
+    let data_dir = unique_temp_dir("auto_title_retry_after_ready");
+    let worktree = data_dir.join("project");
+    fs::create_dir_all(&worktree).unwrap();
+    let state = build_session_index_test_state(&data_dir).await;
+    let session_id = format!(
+        "claude-auto-title-retry-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let title = "修复终端标题竞态";
+    let now = chrono::Utc::now().to_rfc3339();
+    let index = Arc::new(RwLock::new(WorktreeSessionIndex {
+        worktree_path: worktree.clone(),
+        encoded_cwd: encode_claude_project_path(&worktree.to_string_lossy()),
+        sessions: HashMap::from([(
+            session_id.clone(),
+            ClaudeSessionIndex {
+                session_id,
+                title: title.to_string(),
+                has_ai_title: true,
+                transcript_path: worktree.join("current.jsonl"),
+                first_activity_at: now.clone(),
+                last_activity_at: now.clone(),
+                message_count: 2,
+                user_text: "请修复标题".to_string(),
+                assistant_text: "正在处理".to_string(),
+                recent_messages: Vec::new(),
+                cwd: Some(worktree.to_string_lossy().to_string()),
+                git_branch: None,
+                source_size: 1,
+                source_mtime_ns: Some(1),
+            },
+        )]),
+        last_scan_at: now.clone(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }));
+
+    // 第一次标题先到，但 terminal 还没有 Ready；此时不能把标题记成已成功应用。
+    let state_for_first_attempt = state.clone();
+    let index_for_first_attempt = Arc::clone(&index);
+    tokio::task::spawn_blocking(move || {
+        maybe_auto_title_from_index(&state_for_first_attempt, &index_for_first_attempt, false);
+    })
+    .await
+    .unwrap();
+
+    state
+        .workbench_sessions
+        .insert_fake_session_row_for_test(WorkbenchSessionRow {
+            id: "terminal-ready-later".to_string(),
+            project_id: "project-auto-title".to_string(),
+            worktree_id: None,
+            name: "Terminal".to_string(),
+            name_source: "default".to_string(),
+            command: "/bin/sh".to_string(),
+            cwd: worktree.to_string_lossy().to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: now.clone(),
+            exited_at: None,
+            exit_code: None,
+            backend: "pty".to_string(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        });
+
+    let state_for_retry = state.clone();
+    tokio::task::spawn_blocking(move || {
+        maybe_auto_title_from_index(&state_for_retry, &index, false)
+    })
+    .await
+    .unwrap();
+
+    let live = state.workbench_sessions.list_live_session_rows();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].name, title);
+    assert_eq!(live[0].name_source, "auto");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     watcher 注册前的初扫应补当前 terminal 启动后生成的标题，但不能用更早的历史标题污染新窗口。
+///
+/// Code Logic（这个测试做什么）:
+///     构造同 cwd Ready terminal，分别验证活动时间早于/晚于 terminal 启动时的初扫门禁。
+#[tokio::test]
+async fn initial_auto_title_requires_activity_after_terminal_start() {
+    let data_dir = unique_temp_dir("initial_auto_title_time_gate");
+    let worktree = data_dir.join("project");
+    fs::create_dir_all(&worktree).unwrap();
+    let state = build_session_index_test_state(&data_dir).await;
+    let terminal_started = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let now = chrono::Utc::now();
+    state
+        .workbench_sessions
+        .insert_fake_session_row_for_test(WorkbenchSessionRow {
+            id: "terminal-initial-title".to_string(),
+            project_id: "project-auto-title".to_string(),
+            worktree_id: None,
+            name: "Terminal".to_string(),
+            name_source: "default".to_string(),
+            command: "/bin/sh".to_string(),
+            cwd: worktree.to_string_lossy().to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: terminal_started.to_rfc3339(),
+            exited_at: None,
+            exit_code: None,
+            backend: "pty".to_string(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: terminal_started.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+        });
+    let build_index =
+        |session_id: &str, activity: chrono::DateTime<chrono::Utc>| ClaudeSessionIndex {
+            session_id: session_id.to_string(),
+            title: "当前对话标题".to_string(),
+            has_ai_title: true,
+            transcript_path: worktree.join(format!("{session_id}.jsonl")),
+            first_activity_at: activity.to_rfc3339(),
+            last_activity_at: activity.to_rfc3339(),
+            message_count: 2,
+            user_text: String::new(),
+            assistant_text: String::new(),
+            recent_messages: Vec::new(),
+            cwd: Some(worktree.to_string_lossy().to_string()),
+            git_branch: None,
+            source_size: 1,
+            source_mtime_ns: Some(1),
+        };
+
+    let historical = build_index(
+        "historical-title",
+        terminal_started - chrono::Duration::seconds(1),
+    );
+    let current = build_index("current-title", now);
+    let state_for_gate = state.clone();
+    let (historical_matches, current_matches) = tokio::task::spawn_blocking(move || {
+        (
+            initial_auto_title_matches_live_terminal(&state_for_gate, &historical),
+            initial_auto_title_matches_live_terminal(&state_for_gate, &current),
+        )
+    })
+    .await
+    .unwrap();
+    assert!(!historical_matches);
+    assert!(current_matches);
 }
 
 /// Business Logic（为什么需要这个测试）:
