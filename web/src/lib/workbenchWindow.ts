@@ -85,3 +85,14 @@ export function isWindowAutoSlotKey(slotKey: string): boolean {
   if (!slotKey.startsWith(prefix)) return false;
   return parseSatelliteSlot(slotKey.slice(prefix.length)) !== null;
 }
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   健康通知 / 权限引导 / 运营通知是进程级副作用，卫星窗再挂一份会重复弹 OS 通知。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅 `main` 返回 true。
+ */
+export function shouldMountGlobalWindowListeners(label: string): boolean {
+  return parseWorkbenchWindowRole(label) === 'main';
+}

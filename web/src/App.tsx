@@ -19,11 +19,14 @@ import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBu
 import { AttentionProvider } from './hooks/useAttention';
 import { ScratchpadAutosaveProvider } from './hooks/ScratchpadAutosaveProvider';
 import { OperationalNotificationCoordinator } from './hooks/useOperationalNotifications';
+import { useWorkbenchWindowRole } from './hooks/useWorkbenchWindowRole';
 import { attentionApi } from './api/attention';
 import { checkNotificationGranted } from './lib/notification';
 import { backendApi } from './api/backend';
 import { flushPendingWritesThenClose } from './lib/closeFlush';
 import { pendingWrites } from './lib/pendingWrites';
+import { shouldMountGlobalWindowListeners } from './lib/workbenchWindow';
+import { buildWorkbenchDeepLink } from './pages/Workbench/workbenchDeepLink';
 import { LanDisclosureGate } from './LanDisclosureGate';
 import styles from './App.module.css';
 
@@ -264,7 +267,9 @@ function OnboardingGuard() {
  */
 function PermissionNeededListener() {
   const navigate = useNavigate();
+  const { label } = useWorkbenchWindowRole();
   useEffect(() => {
+    if (!shouldMountGlobalWindowListeners(label)) return undefined;
     if (!canListenToTauriEvents()) return undefined;
     const unlisten = listen('screenshot:permission-needed', () => {
       navigate('/welcome', { replace: true });
@@ -272,7 +277,7 @@ function PermissionNeededListener() {
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [navigate]);
+  }, [label, navigate]);
   return null;
 }
 
@@ -294,7 +299,9 @@ function PermissionNeededListener() {
  */
 function HealthReminderListener() {
   const { t } = useTranslation(['health']);
+  const { label } = useWorkbenchWindowRole();
   useEffect(() => {
+    if (!shouldMountGlobalWindowListeners(label)) return undefined;
     if (!canListenToTauriEvents()) return undefined;
     // 发系统通知:授权才发,失败静默(系统通知是久坐/喝水的主提醒通道)
     const notify = async (title: string, body: string) => {
@@ -315,10 +322,50 @@ function HealthReminderListener() {
       void reminderUnlisten.then((fn) => fn());
       void waterUnlisten.then((fn) => fn());
     };
-  }, [t]);
+  }, [label, t]);
   return null;
 }
 
+/**
+ * WorkbenchDeepLinkListener - 接收他窗投递的工作台深链。
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   Inbox / 执行现场可能要落到已占用该项目的卫星窗；该窗必须应用 query 而不能改主窗项目。
+ *
+ * Code Logic（这个组件做什么）:
+ *   listen `workbench:apply-deeplink` 后 navigate 到 build 出的 `/workbench?...`。
+ */
+function WorkbenchDeepLinkListener() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!canListenToTauriEvents()) return undefined;
+    const unlisten = listen('workbench:apply-deeplink', (event) => {
+      const raw = event.payload;
+      if (!raw || typeof raw !== 'object') return;
+      const record = raw as Record<string, unknown>;
+      const read = (key: string): string | null => {
+        const value = record[key];
+        return typeof value === 'string' && value.trim() ? value.trim() : null;
+      };
+      const viewRaw = read('view');
+      navigate(
+        buildWorkbenchDeepLink({
+          projectId: read('projectId'),
+          worktreeId: read('worktreeId'),
+          sessionId: read('sessionId'),
+          view: viewRaw === 'automation' || viewRaw === 'files' ? viewRaw : null,
+          taskId: read('taskId'),
+          outboxId: read('outboxId'),
+          path: read('path'),
+        }),
+      );
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [navigate]);
+  return null;
+}
 
 /**
  * BackendCloseChoiceListener props（测试可注入初始 open）。
@@ -485,11 +532,42 @@ export function BackendCloseChoiceListener({
   );
 }
 
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   卫星窗复用同一 React 树，但权限引导、健康系统通知只能由主窗处理。
+ *
+ * Code Logic（这个组件做什么）:
+ *   仅 main 挂载 PermissionNeededListener 与 HealthReminderListener。
+ */
+function MainWindowOnlyListeners() {
+  const { label } = useWorkbenchWindowRole();
+  if (!shouldMountGlobalWindowListeners(label)) return null;
+  return (
+    <>
+      <PermissionNeededListener />
+      <HealthReminderListener />
+    </>
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   运营通知协调器每窗一份会重复发 OS 通知。
+ *
+ * Code Logic（这个组件做什么）:
+ *   仅 main 渲染 OperationalNotificationCoordinator。
+ */
+function MainWindowOperationalNotifications() {
+  const { label } = useWorkbenchWindowRole();
+  if (!shouldMountGlobalWindowListeners(label)) return null;
+  return <OperationalNotificationCoordinator />;
+}
+
 export default function App() {
   return (
     <LanDisclosureGate>
-      <PermissionNeededListener />
-      <HealthReminderListener />
+      <MainWindowOnlyListeners />
+      <WorkbenchDeepLinkListener />
       <BackendCloseChoiceListener />
       <Routes>
         {/* 区域截图选区页：独立 boundary，主路由错误不得白屏 overlay 窗口 */}
@@ -527,7 +605,7 @@ export default function App() {
                     <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
                       <ScratchpadAutosaveProvider>
                         {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
-                        <OperationalNotificationCoordinator />
+                        <MainWindowOperationalNotifications />
                         <AppShell />
                       </ScratchpadAutosaveProvider>
                     </AttentionProvider>

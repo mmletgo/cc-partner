@@ -20,6 +20,7 @@ import {
   parseSatelliteSlot,
   parseWorkbenchWindowRole,
   satelliteWindowLabel,
+  shouldMountGlobalWindowListeners,
 } from './workbenchWindow';
 
 describe('workbenchWindow identity contract', () => {
@@ -86,5 +87,11 @@ describe('workbenchWindow identity contract', () => {
     expect(isWindowAutoSlotKey('named:11111111-1111-4111-8111-111111111111')).toBe(
       false,
     );
+  });
+
+  test('shouldMountGlobalWindowListeners is main-only', () => {
+    expect(shouldMountGlobalWindowListeners('main')).toBe(true);
+    expect(shouldMountGlobalWindowListeners('workbench-1')).toBe(false);
+    expect(shouldMountGlobalWindowListeners('screenshot-overlay-0')).toBe(false);
   });
 });
