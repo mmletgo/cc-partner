@@ -1045,7 +1045,11 @@ export function MobileWorkbench(): ReactElement {
             const appliedState = getMobileWorktreeMergeAppliedState(plan);
             const sourceBecameActive = activeWorktreeRef.current?.id === sourceWorktree.id;
             setWorktrees(appliedState.nextWorktrees);
-            if (plan.requiresActivePreflight || sourceBecameActive) {
+            // collect-merge 留在主工作区，不能当成“源 worktree 被删”清掉 Files 草稿。
+            if (
+              !sourceWorktree.isMain
+              && (plan.requiresActivePreflight || sourceBecameActive)
+            ) {
               discardConfirmedFileContextSwitch();
               setActiveWorktreeWithSession(appliedState.nextActive);
             }
