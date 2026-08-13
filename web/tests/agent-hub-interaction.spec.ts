@@ -314,6 +314,10 @@ function registerInteractionBase(
     kind: 'resolve',
     value: workspace.canonical,
   });
+  harness.command('agent_hub_revise_instruction_slot', {
+    kind: 'resolve',
+    value: { common: 'Revised common slot from Claude.', exclusive: null, variants: null },
+  });
   harness.command('agent_hub_preview_user_instruction_update', {
     kind: 'resolve',
     value: {
@@ -745,6 +749,45 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
     await expect(page.getByTestId('instruction-original-textarea')).toHaveValue(
       /Always run tests before commit/,
     );
+  });
+
+  test('common lane AI revise calls Claude then saves canonical', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerInteractionBase(backendHarness);
+    backendHarness.command('agent_hub_revise_instruction_slot', {
+      kind: 'resolve',
+      value: {
+        common: 'Revised common slot from Claude.',
+        exclusive: null,
+        variants: null,
+      },
+    });
+
+    await page.goto('/agent-hub?agent=claude&tab=instructions&lane=common');
+    await expect(page.getByTestId('instruction-ai-revise')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('instruction-ai-revise').click();
+    await expect(page.getByTestId('instruction-ai-revise-dialog')).toBeVisible();
+    await page.getByTestId('instruction-ai-revise-direction').fill('写得更短');
+    await page.getByTestId('instruction-ai-revise-confirm').click();
+    await expect(page.getByTestId('instruction-ai-revise-dialog')).toHaveCount(0);
+    const reviseCalls = backendHarness
+      .calls()
+      .filter(
+        (call) =>
+          call.type === 'invoke' && call.command === 'agent_hub_revise_instruction_slot',
+      );
+    const saveCalls = backendHarness
+      .calls()
+      .filter(
+        (call) =>
+          call.type === 'invoke' && call.command === 'agent_hub_save_user_instruction_blocks',
+      );
+    expect(reviseCalls).toHaveLength(1);
+    expect(JSON.stringify(reviseCalls[0]?.args)).toContain('写得更短');
+    expect(saveCalls.length).toBeGreaterThan(0);
   });
 });
 

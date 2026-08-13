@@ -92,6 +92,14 @@
       "commonMarkdown": "公共正文",
       "variantsTitle": "各 Agent 变体",
       "saveBlocks": "保存三槽",
+      "aiRevise": "AI 辅助提示词修改",
+      "aiReviseTitle": "AI 辅助提示词修改",
+      "aiReviseDescriptionCommon": "将按你的方向改写公共槽，并保存到 Agent Hub Canonical；不会写入各 Agent 原始文件。",
+      "aiReviseDescriptionExclusive": "只改当前 Agent 的独有槽，并保存到 Agent Hub Canonical；不会写入原始文件。",
+      "aiReviseDescriptionAdapted": "将按同一方向覆盖 claude / codex / opencode 的全部适配槽（空槽也会生成），然后保存到 Canonical。",
+      "aiReviseDirectionLabel": "修改方向",
+      "aiReviseDirectionPlaceholder": "例如：改得更短、补上验收标准、去掉过时的模型名…",
+      "aiReviseConfirm": "修改并保存",
       "adaptToOtherAgents": "适配到其他 Agent",
       "syncToNative": "写入原始文件",
       "unsavedDraft": "三槽有未保存更改。保存只会更新 Agent Hub Canonical，不会写入 Agent 原始文件。",
@@ -114,7 +122,9 @@
       "errors": {
         "emptySync": "合成预览为空。请先填写并保存公共/适配/独有三槽，再写入原始文件。",
         "emptyOriginalAnalyze": "原始文件为空，无法分析拆解。",
-        "emptyAdaptedAdapt": "当前 Agent 的适配槽为空，无法适配到其他 Agent。"
+        "emptyAdaptedAdapt": "当前 Agent 的适配槽为空，无法适配到其他 Agent。",
+        "emptyReviseDirection": "请先填写修改方向。",
+        "reviseSaveFailed": "AI 已改写当前槽，但保存 Canonical 失败。请再点「保存三槽」。"
       }
     }
   },

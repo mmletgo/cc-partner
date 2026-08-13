@@ -10,6 +10,8 @@ import type { AgentTarget } from '@/lib/types/agentHub';
 import {
   addBlock,
   appendAdaptedVariants,
+  applyInstructionReviseResult,
+  replaceAdaptedVariants,
   replaceAnalyzedParts,
   dtoToDraft,
   draftToDto,
@@ -21,6 +23,7 @@ import {
   normalizeInstructionBlocks,
   parseBlocksFromOriginal,
   recomputePreview,
+  resolveAdaptedSlotText,
   resolveBlockText,
   resolveSyncContent,
   updateBlock,
@@ -265,6 +268,110 @@ describe('replaceAnalyzedParts / appendAdaptedVariants', () => {
     expect(block.variants.claude).toBe('src adapted');
     expect(block.variants.codex).toBe('old codex\n\nnew codex');
     expect(block.variants.opencode).toBe('new opencode');
+  });
+});
+
+describe('replaceAdaptedVariants', () => {
+  test('overwrites all three agent adapted variants including empty slots', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    const adapted = findBlockByMode(state.blocks, 'adapted')!;
+    state = updateBlock(
+      state,
+      adapted.id,
+      { variants: { claude: 'old claude', codex: 'old codex' } },
+      AGENT,
+    );
+
+    const next = replaceAdaptedVariants(
+      state,
+      { claude: 'new claude', codex: 'new codex', opencode: 'new opencode' },
+      AGENT,
+    );
+    const block = findBlockByMode(next.blocks, 'adapted')!;
+    expect(block.variants.claude).toBe('new claude');
+    expect(block.variants.codex).toBe('new codex');
+    expect(block.variants.opencode).toBe('new opencode');
+    expect(next.blocksDirty).toBe(true);
+  });
+
+  test('empty string overwrites an existing adapted variant', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    const adapted = findBlockByMode(state.blocks, 'adapted')!;
+    state = updateBlock(
+      state,
+      adapted.id,
+      { variants: { claude: 'keep? no', codex: 'old codex', opencode: 'old open' } },
+      AGENT,
+    );
+
+    const next = replaceAdaptedVariants(
+      state,
+      { claude: '   ', codex: 'kept codex', opencode: 'kept open' },
+      AGENT,
+    );
+    const block = findBlockByMode(next.blocks, 'adapted')!;
+    expect(resolveAdaptedSlotText(block, 'claude')).toBe('');
+    expect(block.variants.codex).toBe('kept codex');
+    expect(block.variants.opencode).toBe('kept open');
+    expect(block.commonMarkdown).toBe('');
+  });
+
+  test('does not rewrite shared or exclusive slots', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'shared', AGENT);
+    state = ensureModeBlock(state, 'adapted', AGENT);
+    state = ensureModeBlock(state, 'targetOnly', AGENT);
+    const shared = findBlockByMode(state.blocks, 'shared')!;
+    const exclusive = findBlockByMode(state.blocks, 'targetOnly')!;
+    state = updateBlock(state, shared.id, { commonMarkdown: 'keep common' }, AGENT);
+    state = updateBlock(
+      state,
+      exclusive.id,
+      { variants: { claude: 'keep exclusive' }, sourceTarget: 'claude' },
+      AGENT,
+    );
+
+    const next = replaceAdaptedVariants(
+      state,
+      { claude: 'new adapted' },
+      AGENT,
+    );
+    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown).toBe('keep common');
+    expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe('keep exclusive');
+    expect(findBlockByMode(next.blocks, 'adapted')?.variants.claude).toBe('new adapted');
+  });
+});
+
+describe('applyInstructionReviseResult', () => {
+  test('common lane only writes shared markdown', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    state = ensureModeBlock(state, 'shared', AGENT);
+    state = ensureModeBlock(state, 'targetOnly', AGENT);
+    const exclusive = findBlockByMode(state.blocks, 'targetOnly')!;
+    state = updateBlock(
+      state,
+      exclusive.id,
+      { variants: { claude: 'keep exclusive' }, sourceTarget: 'claude' },
+      AGENT,
+    );
+    const next = applyInstructionReviseResult(state, 'common', AGENT, {
+      common: 'revised common',
+      exclusive: 'should ignore',
+    });
+    expect(findBlockByMode(next.blocks, 'shared')?.commonMarkdown).toBe('revised common');
+    expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe('keep exclusive');
+  });
+
+  test('exclusive lane only writes the current agent variant', () => {
+    let state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    const next = applyInstructionReviseResult(state, 'exclusive', AGENT, {
+      exclusive: 'revised exclusive',
+      common: 'should ignore',
+    });
+    expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe('revised exclusive');
+    expect(findBlockByMode(next.blocks, 'shared')).toBeNull();
   });
 });
 

@@ -92,6 +92,14 @@
       "commonMarkdown": "Common body",
       "variantsTitle": "Per-agent variants",
       "saveBlocks": "Save slots",
+      "aiRevise": "AI-assisted prompt edit",
+      "aiReviseTitle": "AI-assisted prompt edit",
+      "aiReviseDescriptionCommon": "Claude will revise the shared slot from your direction and save it to Agent Hub Canonical. Native agent files are not written.",
+      "aiReviseDescriptionExclusive": "Only the current agent’s exclusive slot is revised and saved to Canonical. The native file is not written.",
+      "aiReviseDescriptionAdapted": "The same direction overwrites adapted slots for claude, codex, and opencode (empty slots are generated too), then saves Canonical.",
+      "aiReviseDirectionLabel": "Revision direction",
+      "aiReviseDirectionPlaceholder": "e.g. make it shorter, add acceptance criteria, drop outdated model names…",
+      "aiReviseConfirm": "Revise and save",
       "adaptToOtherAgents": "Adapt to other agents",
       "syncToNative": "Write to native file",
       "unsavedDraft": "The slots have unsaved changes. Saving updates Agent Hub Canonical only; it does not write agent-native files.",
@@ -114,7 +122,9 @@
       "errors": {
         "emptySync": "Composed preview is empty. Fill the common/adapted/exclusive slots first, then write to the native file.",
         "emptyOriginalAnalyze": "The original file is empty, so analyze & split cannot run.",
-        "emptyAdaptedAdapt": "The current agent’s adapted slot is empty, so adapt-to-others cannot run."
+        "emptyAdaptedAdapt": "The current agent’s adapted slot is empty, so adapt-to-others cannot run.",
+        "emptyReviseDirection": "Enter a revision direction first.",
+        "reviseSaveFailed": "Claude revised the slot, but saving Canonical failed. Click “Save slots” to retry."
       }
     }
   },

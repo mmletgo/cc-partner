@@ -30,6 +30,7 @@ import {
 import {
   addBlock,
   appendAdaptedVariants,
+  applyInstructionReviseResult,
   replaceAnalyzedParts,
   blocksFromOriginalContent,
   dtoToDraft,
@@ -106,6 +107,14 @@ export interface UseInstructionThreePaneControllerResult {
   dualDirtyOpen: boolean;
   /** 分析拆解将覆盖现有三槽时的显式确认（可选）。 */
   analyzeConfirmOpen: boolean;
+  aiReviseOpen: boolean;
+  aiReviseDirection: string;
+  aiReviseError: string | null;
+  aiReviseDisabled: boolean;
+  openAiRevise: () => void;
+  setAiReviseDirection: (value: string) => void;
+  cancelAiRevise: () => void;
+  confirmAiRevise: () => Promise<void>;
   previewOpen: boolean;
   plan: UserInstructionPlanDto | null;
   applyResult: UserInstructionApplyResultDto | null;
@@ -295,6 +304,9 @@ export function useInstructionThreePaneController(
   const [busyAction, setBusyAction] = useState<InstructionBusyAction | null>(null);
   const [dualDirtyOpen, setDualDirtyOpen] = useState(false);
   const [analyzeConfirmOpen, setAnalyzeConfirmOpen] = useState(false);
+  const [aiReviseOpen, setAiReviseOpen] = useState(false);
+  const [aiReviseDirection, setAiReviseDirection] = useState('');
+  const [aiReviseError, setAiReviseError] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [plan, setPlan] = useState<UserInstructionPlanDto | null>(null);
   const [applyResult, setApplyResult] = useState<UserInstructionApplyResultDto | null>(null);
@@ -363,6 +375,9 @@ export function useInstructionThreePaneController(
     setApplyResult(null);
     setDualDirtyOpen(false);
     setAnalyzeConfirmOpen(false);
+    setAiReviseOpen(false);
+    setAiReviseDirection('');
+    setAiReviseError(null);
     setActionError(null);
     setError(null);
   }, []);
@@ -494,6 +509,9 @@ export function useInstructionThreePaneController(
       setApplyResult(null);
       setDualDirtyOpen(false);
       setAnalyzeConfirmOpen(false);
+      setAiReviseOpen(false);
+      setAiReviseDirection('');
+      setAiReviseError(null);
       blockedContextKeyRef.current = null;
       const empty = initialThreePaneFromDisk(null, '');
       stateRef.current = empty;
@@ -608,6 +626,20 @@ export function useInstructionThreePaneController(
     instructionLane,
     t,
   ]);
+
+  const aiReviseDisabled = useMemo(
+    () =>
+      directContextUnsupported ||
+      state.externalDrift ||
+      Boolean(workspace?.canonical?.contentTruncated) ||
+      sourceContentTruncated,
+    [
+      directContextUnsupported,
+      sourceContentTruncated,
+      state.externalDrift,
+      workspace?.canonical?.contentTruncated,
+    ],
+  );
 
   /**
    * Business Logic: 任一用户草稿变化都会使既有预览失效，但不能取消已开始的 Canonical Save。
@@ -1029,6 +1061,101 @@ export function useInstructionThreePaneController(
     ],
   );
 
+  const openAiRevise = useCallback(() => {
+    if (busyAction !== null || aiReviseDisabled) return;
+    setAiReviseError(null);
+    setAiReviseDirection('');
+    setAiReviseOpen(true);
+  }, [aiReviseDisabled, busyAction]);
+
+  const cancelAiRevise = useCallback(() => {
+    if (busyAction === 'revise') return;
+    setAiReviseOpen(false);
+    setAiReviseError(null);
+  }, [busyAction]);
+
+  /**
+   * Business Logic: 按当前 lane 调用 Claude 改槽，成功后保存 Canonical。
+   * Code Logic: revise 占用 busy；成功 updateDraft 后让 saveBlocks 接管 actionSeq。
+   */
+  const confirmAiRevise = useCallback(async () => {
+    const direction = aiReviseDirection.trim();
+    if (!direction) {
+      setAiReviseError(t('agentHub:instructions.threePane.errors.emptyReviseDirection'));
+      return;
+    }
+    if (busyAction !== null || aiReviseDisabled) return;
+    const current = stateRef.current;
+    const lane = instructionLane;
+    const generation = contextGenerationRef.current;
+    const actionSeq = ++actionSeqRef.current;
+    setBusyAction('revise');
+    setAiReviseError(null);
+    setActionError(null);
+    try {
+      const shared = findBlockByMode(current.blocks, 'shared');
+      const adapted = findBlockByMode(current.blocks, 'adapted');
+      const exclusive = findBlockByMode(current.blocks, 'targetOnly');
+      const result = await agentHubApi.reviseInstructionSlot({
+        lane,
+        agent,
+        direction,
+        commonMarkdown: shared?.commonMarkdown ?? '',
+        exclusiveMarkdown: exclusive?.variants[agent] ?? '',
+        adaptedVariants: {
+          claude: resolveAdaptedSlotText(adapted, 'claude'),
+          codex: resolveAdaptedSlotText(adapted, 'codex'),
+          opencode: resolveAdaptedSlotText(adapted, 'opencode'),
+        },
+        ...requestContext,
+      });
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current ||
+        actionSeq !== actionSeqRef.current
+      ) {
+        return;
+      }
+      const next = applyInstructionReviseResult(stateRef.current, lane, agent, result);
+      updateDraft(() => next);
+      setAiReviseOpen(false);
+      setAiReviseDirection('');
+      const saved = await saveBlocks(next.blocks);
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current
+      ) {
+        return;
+      }
+      if (!saved) {
+        setActionError(t('agentHub:instructions.threePane.errors.reviseSaveFailed'));
+      }
+    } catch (reason) {
+      if (
+        !mountedRef.current ||
+        generation !== contextGenerationRef.current ||
+        actionSeq !== actionSeqRef.current
+      ) {
+        return;
+      }
+      setAiReviseError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (mountedRef.current && actionSeq === actionSeqRef.current) {
+        setBusyAction(null);
+      }
+    }
+  }, [
+    agent,
+    aiReviseDirection,
+    aiReviseDisabled,
+    busyAction,
+    instructionLane,
+    requestContext,
+    saveBlocks,
+    t,
+    updateDraft,
+  ]);
+
   const cancelDualDirty = useCallback(() => {
     setDualDirtyOpen(false);
   }, []);
@@ -1239,6 +1366,9 @@ export function useInstructionThreePaneController(
     setApplyResult(null);
     setDualDirtyOpen(false);
     setAnalyzeConfirmOpen(false);
+    setAiReviseOpen(false);
+    setAiReviseDirection('');
+    setAiReviseError(null);
     // preserveDirty=false 只在成功读取后替换；loadWorkspace 的失败分支保留旧草稿。
     await loadWorkspace(true, { preserveDirty: false });
   }, [loadWorkspace]);
@@ -1261,6 +1391,14 @@ export function useInstructionThreePaneController(
     writeBlockedReason,
     dualDirtyOpen,
     analyzeConfirmOpen,
+    aiReviseOpen,
+    aiReviseDirection,
+    aiReviseError,
+    aiReviseDisabled,
+    openAiRevise,
+    setAiReviseDirection,
+    cancelAiRevise,
+    confirmAiRevise,
     previewOpen,
     plan,
     applyResult,

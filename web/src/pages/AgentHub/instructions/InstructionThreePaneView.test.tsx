@@ -58,6 +58,14 @@ const labels: InstructionThreePaneViewLabels = {
   blockBodyPlaceholder: 'Body',
   commonMarkdown: 'Common body',
   saveBlocks: 'Save slots',
+  aiRevise: 'AI-assisted prompt edit',
+  aiReviseTitle: 'AI-assisted prompt edit',
+  aiReviseDescriptionCommon: 'Revise the common slot.',
+  aiReviseDescriptionExclusive: 'Revise the exclusive slot.',
+  aiReviseDescriptionAdapted: 'Revise all adapted slots.',
+  aiReviseDirectionLabel: 'Direction',
+  aiReviseDirectionPlaceholder: 'Type a direction',
+  aiReviseConfirm: 'Revise and save',
   adaptToOtherAgents: 'Adapt to other agents',
   syncToNative: 'Write to native file',
   unsavedDraft: 'Unsaved slot draft',
@@ -104,9 +112,17 @@ function buildProps(
     writeBlockedReason: null,
     dualDirtyOpen: false,
     analyzeConfirmOpen: false,
+    aiReviseOpen: false,
+    aiReviseDirection: '',
+    aiReviseError: null,
+    aiReviseDisabled: false,
     onAnalyzeDecompose: vi.fn(),
     onAdaptToOtherAgents: vi.fn(),
     onSaveBlocks: vi.fn(),
+    onOpenAiRevise: vi.fn(),
+    onAiReviseDirectionChange: vi.fn(),
+    onCancelAiRevise: vi.fn(),
+    onConfirmAiRevise: vi.fn(),
     onRequestSync: vi.fn(),
     onRetry: vi.fn(),
     onDiscardAndReload: vi.fn(),
@@ -157,6 +173,14 @@ describe('InstructionThreePaneView', () => {
   test('pure view source does not import @/api/', () => {
     const source = readFileSync(resolve(viewDir, './InstructionThreePaneView.tsx'), 'utf8');
     expect(source).not.toMatch(/from\s+['"]@\/api\//);
+  });
+
+  test('all three lanes expose the AI revise button', () => {
+    for (const lane of ['common', 'adapted', 'exclusive'] as const) {
+      cleanup();
+      render(<InstructionThreePaneView {...buildProps({ instructionLane: lane })} />);
+      expect(screen.getByTestId('instruction-ai-revise')).toBeTruthy();
+    }
   });
 
   test('common lane shows only the common slot without rescan/sync/original', () => {
