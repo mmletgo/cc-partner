@@ -870,7 +870,7 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
-  test('alt-screen injects transcript-targeted SGR even when the pointer is over the input row', () => {
+  test('alt-screen pins SGR to transcript origin even when the pointer is over a tall input area', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();
     render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
@@ -906,7 +906,7 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     expect(proceed).toBe(false);
     expect(onInput).toHaveBeenCalledTimes(1);
     const payload = String(onInput.mock.calls[0]?.[1] ?? '');
-    expect(payload).toMatch(/^\x1b\[<64;\d+;24M$/);
+    expect(payload).toBe('\x1b[<64;1;1M');
     expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
     expect(payload.includes('\x1b[5~')).toBe(false);
   });
@@ -914,8 +914,8 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
   test('source contract keeps custom wheel handler and never encodes arrow keys or PageUp', () => {
     const paneSource = readFileSync(resolve(__dirname, './WorkbenchTerminalPane.tsx'), 'utf8');
     expect(paneSource).toContain('attachCustomWheelEventHandler');
-    expect(paneSource).toContain('clampTranscriptWheelCell');
     expect(paneSource).toContain('encodeTerminalSgrWheelReports');
+    expect(paneSource).not.toContain('clampTranscriptWheelCell');
     expect(paneSource).not.toContain('encodeTerminalPageScrollKeys');
     expect(paneSource).not.toContain("\\x1b[' +");
   });

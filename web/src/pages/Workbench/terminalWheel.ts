@@ -10,7 +10,6 @@
  *
  * Code Logic（这个模块做什么）:
  *   - resolveWorkbenchTerminalWheelAction：scrollback / sgrFallback；
- *   - clampTranscriptWheelCell：把底部输入区落点抬到 transcript；
  *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65。
  */
 
@@ -19,9 +18,6 @@ export type WorkbenchTerminalBufferType = 'normal' | 'alternate';
 export type WorkbenchTerminalMouseTrackingMode = 'none' | 'x10' | 'vt200' | 'drag' | 'any';
 
 export type WorkbenchTerminalWheelAction = 'scrollback' | 'sgrFallback';
-
-/** Claude 输入栏大约占底部若干行；滚轮落在这里必须抬到 transcript。 */
-export const WORKBENCH_TERMINAL_TRANSCRIPT_BOTTOM_MARGIN_ROWS = 8;
 
 export interface WorkbenchTerminalWheelInput {
   bufferType: WorkbenchTerminalBufferType;
@@ -35,8 +31,9 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
 /**
  * Business Logic（为什么需要这个函数）:
  *   桌面滚轮只有两条路径：普通 buffer 交给 xterm 本地 scrollback；
- *   alternate screen 一律自己发打在 transcript 的 SGR 64/65。
+ *   alternate screen 一律自己发固定打在 transcript 左上角的 SGR 64/65。
  *   不能交给 xterm protocol：指针常在底部输入框，SGR 会按原坐标命中输入区。
+ *   也不能按固定行数把指针上抬：resume 后输入区高度会随内容变化，估算仍可能命中输入区。
  *   也不能发 PageUp：Chat 上下文没有 pageup 绑定，输入框聚焦时整页不动。
  *
  * Code Logic（这个函数做什么）:
@@ -47,35 +44,6 @@ export function resolveWorkbenchTerminalWheelAction(
 ): WorkbenchTerminalWheelAction {
   if (input.bufferType === 'normal') return 'scrollback';
   return 'sgrFallback';
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Claude 把 SGR 滚轮按 col/row 命中 UI。落在底部输入栏时 transcript 不滚。
- *
- * Code Logic（这个函数做什么）:
- *   1-based 坐标 clamp 到网格内；row 再抬到 `rows - margin`，保证落在 transcript。
- */
-export function clampTranscriptWheelCell(
-  col: number,
-  row: number,
-  cols: number,
-  rows: number,
-  bottomMarginRows: number = WORKBENCH_TERMINAL_TRANSCRIPT_BOTTOM_MARGIN_ROWS,
-): { col: number; row: number } {
-  const safeCols = Number.isFinite(cols) && cols >= 1 ? Math.floor(cols) : 1;
-  const safeRows = Number.isFinite(rows) && rows >= 1 ? Math.floor(rows) : 1;
-  const margin =
-    Number.isFinite(bottomMarginRows) && bottomMarginRows >= 0
-      ? Math.floor(bottomMarginRows)
-      : WORKBENCH_TERMINAL_TRANSCRIPT_BOTTOM_MARGIN_ROWS;
-  const maxTranscriptRow = Math.max(1, safeRows - margin);
-  const safeCol = Number.isFinite(col) ? Math.floor(col) : 1;
-  const safeRow = Number.isFinite(row) ? Math.floor(row) : 1;
-  return {
-    col: Math.min(safeCols, Math.max(1, safeCol)),
-    row: Math.min(maxTranscriptRow, Math.max(1, safeRow)),
-  };
 }
 
 /**

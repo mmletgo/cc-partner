@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'vitest';
 import {
-  clampTranscriptWheelCell,
   consumeWorkbenchTerminalWheelLines,
   encodeTerminalSgrWheelReports,
   resolveWorkbenchTerminalWheelAction,
@@ -41,13 +40,6 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         mouseTrackingMode: 'vt200',
       }),
     ).toBe('sgrFallback');
-  });
-});
-
-describe('clampTranscriptWheelCell', () => {
-  test('keeps a mid-screen hit and lifts a bottom-input hit into the transcript', () => {
-    expect(clampTranscriptWheelCell(10, 8, 80, 32)).toEqual({ col: 10, row: 8 });
-    expect(clampTranscriptWheelCell(40, 31, 80, 32)).toEqual({ col: 40, row: 24 });
   });
 });
 

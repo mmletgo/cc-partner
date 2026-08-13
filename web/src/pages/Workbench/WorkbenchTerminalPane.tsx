@@ -31,7 +31,6 @@ import {
 } from './terminalReplay';
 import { installWorkbenchTerminalSelectionOverrides } from './terminalSelectionOverrides';
 import {
-  clampTranscriptWheelCell,
   consumeWorkbenchTerminalWheelLines,
   encodeTerminalSgrWheelReports,
   resolveWorkbenchTerminalWheelAction,
@@ -210,11 +209,13 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     /**
      * Business Logic（为什么需要这个函数）:
      *   Claude resume 后停在 alternate screen。xterm 默认把滚轮译成 ↑/↓，输入框翻历史。
-     *   已协商 mouse 时 xterm 会按指针坐标发 SGR；指针常在底部输入栏，Claude 命中输入区就不滚。
+     *   已协商 mouse 时 xterm 会按指针坐标发 SGR；resume 后输入区高度不固定，
+     *   即使把坐标向上估算若干行也可能仍命中输入区，导致事件送达但 transcript 不滚。
      *   PageUp 只在 Scroll 上下文生效，Chat 输入聚焦时整页不动。
      *
      * Code Logic（这个函数做什么）:
-     *   普通 buffer 交给 xterm；alternate 一律拦截，把落点抬到 transcript 后发 SGR 64/65。
+     *   普通 buffer 交给 xterm；alternate 一律拦截，固定向 transcript 左上角发 SGR 64/65，
+     *   不再依赖指针位置或输入区高度估算。
      */
     terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
       const active = terminal.buffer.active;
@@ -242,16 +243,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       );
       wheelRemainderRef.current = consumed.remainder;
       if (consumed.lines === 0) return false;
-      const rawCol =
-        metrics.cellWidth > 0 && Number.isFinite(event.clientX)
-          ? Math.floor((event.clientX - metrics.left) / metrics.cellWidth) + 1
-          : 1;
-      const rawRow =
-        metrics.cellHeight > 0 && Number.isFinite(event.clientY)
-          ? Math.floor((event.clientY - metrics.top) / metrics.cellHeight) + 1
-          : 1;
-      const cell = clampTranscriptWheelCell(rawCol, rawRow, terminal.cols, terminal.rows);
-      const payload = encodeTerminalSgrWheelReports(consumed.lines, cell.col, cell.row);
+      const payload = encodeTerminalSgrWheelReports(consumed.lines, 1, 1);
       if (payload) onInput(sessionId, payload);
       return false;
     });
