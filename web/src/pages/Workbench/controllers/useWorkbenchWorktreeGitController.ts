@@ -19,14 +19,14 @@
  *     createWorktreeBranchPrefix / createWorktreeBranchSuffixDraft / gitCommits / gitHistoryLoading /
  *     gitHistoryError / mergeProgressWorktreeId / mergeStages 单一权威状态；activeWorktreeId 由页面持有
  *     （终端域 controller / 文件 effect / deep link effect 都需要读取），controller 接收为输入并透传 setter。
- *   - 维护 activeProjectIdRef / activeWorktreeIdRef / mergeProgressWorktreeIdRef / mergeStageDismissTimerRef，
- *     让异步回调读取最新值做 stale guard。
+ *   - 维护 activeProjectIdRef / activeWorktreeIdRef / 按项目 merge 快照与 operation ref，
+ *     让普通 mutation 继续做 stale guard，同时不因切换工作区丢弃后台 merge 的阶段与终态。
  *   - 暴露 loadWorktrees / loadGitHistory / handleOpenCreateWorktree / handleCancelCreateWorktree /
  *     handleCreateWorktree / handleCommitWorktree / handlePushWorktree / handleMergeWorktree /
  *     handleRemoveWorktree / clearMergeStagePanel 操作函数。
  *   - loadGitHistory 在拉提交前 best-effort 对账 worktree 列表（复用 list → sync_git_worktrees），
  *     让外部已清理的 worktree 从导航入口消失；对账失败不挡历史刷新。
- *   - 注册 workbench:merge-progress 事件订阅（按当前 project/worktree 过滤）。
+ *   - 注册 workbench:merge-progress 事件订阅（按 payload project/worktree 写入对应快照）。
  *
  * 不复制邻接 controller 状态：project / session / file / application / prompt optimizer 状态仍归
  * Workbench.tsx 各自所有。
@@ -111,6 +111,19 @@ export type WorkbenchHookRepair = {
   clientOperationId: string;
   /** 修复启动返回的新终端 session id（前端聚焦该终端）。 */
   terminalSessionId?: string;
+};
+
+/** 单个项目正在展示的一键合并阶段快照。 */
+type WorkbenchMergeProgressSnapshot = {
+  worktreeId: string;
+  stages: WorkbenchMergeStage[];
+};
+
+/** 不受当前选中 worktree 影响的后台 merge 身份。 */
+type WorkbenchPendingMergeOperation = {
+  projectId: string;
+  worktreeId: string;
+  clientOperationId: string;
 };
 
 /**
@@ -282,16 +295,21 @@ export function useWorkbenchWorktreeGitController(
   const [gitCommits, setGitCommits] = useState<WorkbenchGitCommit[]>([]);
   const [gitHistoryLoading, setGitHistoryLoading] = useState<boolean>(false);
   const [gitHistoryError, setGitHistoryError] = useState<string | null>(null);
-  const [mergeProgressWorktreeId, setMergeProgressWorktreeId] = useState<string | null>(null);
-  const [mergeStages, setMergeStages] = useState<WorkbenchMergeStage[]>([]);
+  // Business Logic: merge 在后端独立运行，切换 project/worktree 不能丢掉其阶段；按项目缓存后只投影
+  // 当前项目，既能在返回时恢复进度，也不会把另一个项目的 Claude 状态串到当前 Inspector。
+  const [mergeProgressByProject, setMergeProgressByProject] = useState<
+    Record<string, WorkbenchMergeProgressSnapshot>
+  >({});
 
   // Business Logic: 异步加载回调返回时，active project / worktree 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const activeWorktreeIdRef = useRef<string | null>(activeWorktreeId);
-  // Business Logic: 用户可能连续发起 merge 或切换项目，旧追踪不能干扰新一轮进度。
-  const mergeProgressWorktreeIdRef = useRef<string | null>(null);
-  // Business Logic: 成功 merge 后阶段条延迟隐藏；用 ref 持有 timer 以便取消。
-  const mergeStageDismissTimerRef = useRef<number | null>(null);
+  // Business Logic: 事件可能在 React commit 前连续到达；同步 ref 让每个项目都以最新阶段做覆盖合并。
+  const mergeProgressByProjectRef = useRef<Record<string, WorkbenchMergeProgressSnapshot>>({});
+  // Business Logic: project A 的 merge 可在用户查看 project B 时继续；每个项目单独持有后台 operation 身份。
+  const pendingMergeOperationsRef = useRef<Record<string, WorkbenchPendingMergeOperation>>({});
+  // Business Logic: 多项目可各自完成 merge；自动隐藏计时器必须按项目隔离，不能互相取消。
+  const mergeStageDismissTimerRef = useRef<Record<string, number>>({});
   // Business Logic: 同一 project 的 worktree list 与同一 project/worktree 的 git history 可能并发；
   // 用单调 request seq 丢弃过期响应，避免 create/remove/merge 后被慢速 list 回写旧状态。
   const worktreeListRequestSeqRef = useRef<Record<string, number>>({});
@@ -308,23 +326,24 @@ export function useWorkbenchWorktreeGitController(
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
 
+  const activeMergeProgress = activeProjectId ? mergeProgressByProject[activeProjectId] : undefined;
+  const mergeProgressWorktreeId = activeMergeProgress?.worktreeId ?? null;
+  const mergeStages = activeMergeProgress?.stages ?? [];
+
   // Business Logic: 用户切换 project/worktree 后，挂起 mutation 的 UI busy/error/unknown 锁不得粘在新上下文。
-  // Code Logic: 递增 sequence 使旧 settlement 过期，并清空 worktreeBusy/worktreeError/unknownMutationLock。
+  // Code Logic: 递增 sequence 使普通 mutation 的旧 settlement 过期，并清空 error/unknown lock；merge 使用独立
+  // operation 身份，因此同项目切换 worktree 时保持 busy，切到其他项目时按目标项目是否有 merge 恢复 busy。
   // hookRepair 同样属于「上一失败上下文」的产物（clientOperationId + 失败 stage 都绑定旧 worktree）；
   // 不清会让「让 AI 修复 / 重试 commit-push」按钮在用户已切到其他工作台项目时仍渲染并指向 stale context。
-  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 busy/error/lock/hookRepair，避免旧 UI 粘到新上下文 */
   useEffect(() => {
     mutationSequenceRef.current = nextOperationSequence(mutationSequenceRef.current);
-    setWorktreeBusy(null);
+    setWorktreeBusy(
+      activeProjectId && pendingMergeOperationsRef.current[activeProjectId] ? 'merge' : null,
+    );
     setWorktreeError(null);
     setUnknownMutationLock(null);
     setHookRepair(null);
   }, [activeProjectId, activeWorktreeId]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  useEffect(() => {
-    mergeProgressWorktreeIdRef.current = mergeProgressWorktreeId;
-  }, [mergeProgressWorktreeId]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -333,11 +352,47 @@ export function useWorkbenchWorktreeGitController(
    * Code Logic（这个函数做什么）:
    *   如果存在 merge 阶段条隐藏计时器，则取消并清空 ref。
    */
-  const clearMergeStageDismissTimer = useCallback(() => {
-    if (mergeStageDismissTimerRef.current === null) return;
-    window.clearTimeout(mergeStageDismissTimerRef.current);
-    mergeStageDismissTimerRef.current = null;
+  const clearMergeStageDismissTimer = useCallback((projectId?: string) => {
+    if (projectId) {
+      const timer = mergeStageDismissTimerRef.current[projectId];
+      if (timer === undefined) return;
+      window.clearTimeout(timer);
+      delete mergeStageDismissTimerRef.current[projectId];
+      return;
+    }
+    for (const timer of Object.values(mergeStageDismissTimerRef.current)) {
+      window.clearTimeout(timer);
+    }
+    mergeStageDismissTimerRef.current = {};
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   merge-progress 可能来自当前项目、后台项目或尚未返回的 command；所有来源必须写同一份项目快照。
+   *
+   * Code Logic（这个函数做什么）:
+   *   同步更新 ref 与 React state，并返回新快照供调用方判断是否进入终态。
+   */
+  const updateProjectMergeProgress = useCallback(
+    (
+      projectId: string,
+      updater: (
+        current: WorkbenchMergeProgressSnapshot | undefined,
+      ) => WorkbenchMergeProgressSnapshot | undefined,
+    ): WorkbenchMergeProgressSnapshot | undefined => {
+      const nextSnapshot = updater(mergeProgressByProjectRef.current[projectId]);
+      const nextByProject = { ...mergeProgressByProjectRef.current };
+      if (nextSnapshot) {
+        nextByProject[projectId] = nextSnapshot;
+      } else {
+        delete nextByProject[projectId];
+      }
+      mergeProgressByProjectRef.current = nextByProject;
+      setMergeProgressByProject(nextByProject);
+      return nextSnapshot;
+    },
+    [],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -347,11 +402,11 @@ export function useWorkbenchWorktreeGitController(
    *   取消隐藏计时器，清空当前追踪 worktree 与阶段列表。
    */
   const clearMergeStagePanel = useCallback(() => {
-    clearMergeStageDismissTimer();
-    mergeProgressWorktreeIdRef.current = null;
-    setMergeProgressWorktreeId(null);
-    setMergeStages([]);
-  }, [clearMergeStageDismissTimer]);
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    clearMergeStageDismissTimer(projectId);
+    updateProjectMergeProgress(projectId, () => undefined);
+  }, [clearMergeStageDismissTimer, updateProjectMergeProgress]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -361,17 +416,16 @@ export function useWorkbenchWorktreeGitController(
    *   为指定 worktree 安排延迟隐藏；触发时若已经开始追踪别的 worktree，则不清理新状态。
    */
   const scheduleMergeStagePanelDismiss = useCallback(
-    (worktreeId: string) => {
-      clearMergeStageDismissTimer();
-      mergeStageDismissTimerRef.current = window.setTimeout(() => {
-        mergeStageDismissTimerRef.current = null;
-        if (mergeProgressWorktreeIdRef.current !== worktreeId) return;
-        mergeProgressWorktreeIdRef.current = null;
-        setMergeProgressWorktreeId(null);
-        setMergeStages([]);
+    (projectId: string, worktreeId: string) => {
+      clearMergeStageDismissTimer(projectId);
+      mergeStageDismissTimerRef.current[projectId] = window.setTimeout(() => {
+        delete mergeStageDismissTimerRef.current[projectId];
+        updateProjectMergeProgress(projectId, (current) =>
+          current?.worktreeId === worktreeId ? undefined : current,
+        );
       }, MERGE_STAGE_AUTO_DISMISS_MS);
     },
-    [clearMergeStageDismissTimer],
+    [clearMergeStageDismissTimer, updateProjectMergeProgress],
   );
 
   // Business Logic: 与原 Workbench.tsx 行为一致——组件卸载时取消尚未触发的隐藏计时器。
@@ -1216,28 +1270,33 @@ export function useWorkbenchWorktreeGitController(
     if (!confirmAction(translateWorktreeMessage('mergeConfirm', { name: current.name }))) {
       return;
     }
-    const settled = beginMutationOperation(projectId, worktreeId);
+    beginMutationOperation(projectId, worktreeId);
     const clientOperationId = resolveClientOperationId(
       'merge',
       projectId,
       worktreeId,
       unknownMutationLock,
     );
+    const pendingMerge: WorkbenchPendingMergeOperation = {
+      projectId,
+      worktreeId,
+      clientOperationId,
+    };
     try {
-      clearMergeStageDismissTimer();
+      clearMergeStageDismissTimer(projectId);
+      pendingMergeOperationsRef.current[projectId] = pendingMerge;
       setWorktreeBusy('merge');
       setWorktreeError(null);
-      setMergeProgressWorktreeId(worktreeId);
-      mergeProgressWorktreeIdRef.current = worktreeId;
-      setMergeStages(
-        formatWorkbenchMergeStages([
+      updateProjectMergeProgress(projectId, () => ({
+        worktreeId,
+        stages: formatWorkbenchMergeStages([
           {
             id: INITIAL_MERGE_STAGE_ID,
             status: 'running',
             message: translateWorktreeMessage('checkSourceMessage'),
           },
         ]),
-      );
+      }));
 
       if (
         unknownMutationLock
@@ -1248,9 +1307,12 @@ export function useWorkbenchWorktreeGitController(
           clientOperationId,
           projectId,
           worktreeId,
-          settled,
+          createOperationKey(
+            activeProjectIdRef.current ?? '',
+            activeWorktreeIdRef.current,
+            mutationSequenceRef.current,
+          ),
         );
-        if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
           clearUnknownMutationLockForKind('merge');
           setWorktreeError(null);
@@ -1274,23 +1336,25 @@ export function useWorkbenchWorktreeGitController(
       }
 
       const envelope = await workbenchApi.worktrees.merge(worktreeId, clientOperationId);
-      if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
         clearUnknownMutationLockForKind('merge');
         const finalStages = formatWorkbenchMergeStages(envelope.value.stages);
-        setMergeStages(finalStages);
+        updateProjectMergeProgress(projectId, () => ({ worktreeId, stages: finalStages }));
         if (shouldAutoDismissMergeStages(finalStages)) {
-          scheduleMergeStagePanelDismiss(worktreeId);
+          scheduleMergeStagePanelDismiss(projectId, worktreeId);
         }
         invalidateWorktreeListRequests(projectId);
         invalidateGitHistoryRequests(projectId, worktreeId);
-        await loadWorktrees(projectId);
-        if (!isSettledCurrent(settled)) return;
-        await terminalBridge.loadSessions(projectId);
-        terminalBridge.clearBuffersForWorktree(worktreeId);
-        void refreshProjectSessionStats(projectId);
-        if (inspectorTab === 'history') await loadGitHistory();
+        if (activeProjectIdRef.current === projectId) {
+          await loadWorktrees(projectId);
+          await terminalBridge.loadSessions(projectId);
+          terminalBridge.clearBuffersForWorktree(worktreeId);
+          void refreshProjectSessionStats(projectId);
+        }
+        if (activeProjectIdRef.current === projectId && inspectorTab === 'history') {
+          await loadGitHistory();
+        }
         return;
       }
 
@@ -1299,9 +1363,12 @@ export function useWorkbenchWorktreeGitController(
           envelope.clientOperationId,
           projectId,
           worktreeId,
-          settled,
+          createOperationKey(
+            activeProjectIdRef.current ?? '',
+            activeWorktreeIdRef.current,
+            mutationSequenceRef.current,
+          ),
         );
-        if (!isSettledCurrent(settled)) return;
         if (confirmed === 'confirmedSucceeded') {
           clearUnknownMutationLockForKind('merge');
           setWorktreeError(null);
@@ -1323,31 +1390,39 @@ export function useWorkbenchWorktreeGitController(
         }
       }
     } catch (error) {
-      if (!isSettledCurrent(settled)) return;
       clearUnknownMutationLockForKind('merge');
-      markRequestFailure(projectId, error);
+      if (activeProjectIdRef.current === projectId) {
+        markRequestFailure(projectId, error);
+      }
       const message = displayErrorMessage(
         error,
         translateError('mergeWorktree'),
         desktopUnavailableMessage,
       );
-      clearMergeStageDismissTimer();
-      setMergeStages((currentStages) => {
-        const formatted = formatWorkbenchMergeStages(currentStages);
-        if (formatted.some((stage) => stage.status === 'failed')) return formatted;
+      clearMergeStageDismissTimer(projectId);
+      updateProjectMergeProgress(projectId, (currentProgress) => {
+        const formatted = formatWorkbenchMergeStages(currentProgress?.stages ?? []);
+        if (formatted.some((stage) => stage.status === 'failed')) {
+          return { worktreeId, stages: formatted };
+        }
         const failedStage = formatted.find((stage) => stage.status === 'running') ?? formatted[0];
-        return formatted.map((stage) =>
-          stage.id === failedStage?.id ? { ...stage, status: 'failed', message } : stage,
-        );
+        return {
+          worktreeId,
+          stages: formatted.map((stage) =>
+            stage.id === failedStage?.id ? { ...stage, status: 'failed', message } : stage,
+          ),
+        };
       });
-      await loadWorktrees(projectId);
-      if (!isSettledCurrent(settled)) return;
-      await terminalBridge.loadSessions(projectId);
-      if (!isSettledCurrent(settled)) return;
-      setWorktreeError(message);
+      if (activeProjectIdRef.current === projectId) {
+        await loadWorktrees(projectId);
+        await terminalBridge.loadSessions(projectId);
+        setWorktreeError(message);
+      }
     } finally {
-      if (isSettledCurrent(settled)) {
-        setWorktreeBusy(null);
+      const currentPending = pendingMergeOperationsRef.current[projectId];
+      if (currentPending?.clientOperationId === clientOperationId) {
+        delete pendingMergeOperationsRef.current[projectId];
+        if (activeProjectIdRef.current === projectId) setWorktreeBusy(null);
       }
     }
   }, [
@@ -1360,7 +1435,6 @@ export function useWorkbenchWorktreeGitController(
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
     isMutationKindAllowedUnderUnknownLock,
-    isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
@@ -1374,6 +1448,7 @@ export function useWorkbenchWorktreeGitController(
     translateError,
     translateWorktreeMessage,
     unknownMutationLock,
+    updateProjectMergeProgress,
     worktrees,
   ]);
 
@@ -1530,8 +1605,8 @@ export function useWorkbenchWorktreeGitController(
     worktrees,
   ]);
 
-  // Business Logic: 与原 Workbench.tsx 行为一致——监听后端 workbench:merge-progress 事件，按当前 project
-  // 过滤；同一时刻只追踪一个 worktree（首个事件吸附 worktreeId，之后不同 worktreeId 的事件忽略）；
+  // Business Logic: merge 在后台运行时用户可切换 project/worktree；事件必须按 payload.projectId 写入缓存，
+  // 不能只接收当前项目，否则切换期间的完成事件会永久丢失。每个项目同一时刻只追踪一个 worktree，
   // 同一 stage.id 的最新状态覆盖旧状态。
   // 非 Tauri 环境（普通浏览器调试）跳过 listen 注册，避免底层 invoke 报错。
   useEffect(() => {
@@ -1540,26 +1615,22 @@ export function useWorkbenchWorktreeGitController(
       'workbench:merge-progress',
       (event) => {
         const payload = event.payload;
-        const currentProjectId = activeProjectIdRef.current;
-        if (!currentProjectId || payload.projectId !== currentProjectId) return;
-        const trackedWorktreeId = mergeProgressWorktreeIdRef.current;
-        if (trackedWorktreeId && trackedWorktreeId !== payload.worktreeId) return;
-        if (!trackedWorktreeId) {
-          mergeProgressWorktreeIdRef.current = payload.worktreeId;
-          setMergeProgressWorktreeId(payload.worktreeId);
-        }
-        setMergeStages((current) =>
-          formatWorkbenchMergeStages([
-            ...current.filter((stage) => stage.id !== payload.stage.id),
-            payload.stage,
-          ]),
-        );
+        updateProjectMergeProgress(payload.projectId, (current) => {
+          if (current && current.worktreeId !== payload.worktreeId) return current;
+          return {
+            worktreeId: payload.worktreeId,
+            stages: formatWorkbenchMergeStages([
+              ...(current?.stages ?? []).filter((stage) => stage.id !== payload.stage.id),
+              payload.stage,
+            ]),
+          };
+        });
       },
     );
     return () => {
       void mergeUnlisten.then((fn) => fn());
     };
-  }, [canListenToTauriEvents]);
+  }, [canListenToTauriEvents, updateProjectMergeProgress]);
 
   return {
     worktrees,

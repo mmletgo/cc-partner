@@ -1482,6 +1482,83 @@ describe('useWorkbenchWorktreeGitController — merge', () => {
     // after successful merge with cleanup completed + no failed/running, auto-dismiss scheduled.
   });
 
+  test('merge completion replaces the running Claude stage after switching active worktree', async () => {
+    const project = buildLocalProject();
+    const mainWt = buildWorktree({ id: 'wt-main', isMain: true });
+    const featWt = buildWorktree({ id: 'wt-feat', isMain: false, name: 'feat' });
+    let resolveMerge: (value: ReturnType<typeof succeededEnvelope<WorkbenchMergeResult>>) => void =
+      () => undefined;
+    fakeWorktreesApi.list.mockResolvedValue([mainWt, featWt]);
+    fakeWorktreesApi.merge.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveMerge = resolve;
+        }),
+    );
+
+    const { result, rerender } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-feat',
+    });
+    await act(async () => {
+      await result.current.loadWorktrees(project.id);
+      await flushMicrotasks();
+    });
+
+    let mergePromise: Promise<void> | undefined;
+    act(() => {
+      mergePromise = result.current.handleMergeWorktree();
+    });
+    await act(async () => {
+      await flushMicrotasks(2);
+    });
+    emitEvent('workbench:merge-progress', {
+      projectId: project.id,
+      worktreeId: featWt.id,
+      stage: {
+        id: 'resolveConflicts',
+        status: 'running',
+        message: '正在调用 Claude Code 尝试解决 merge 冲突',
+      },
+    });
+
+    rerender(
+      baseControllerProps({
+        activeProjectId: project.id,
+        activeWorktreeId: mainWt.id,
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks(2);
+    });
+
+    await act(async () => {
+      resolveMerge(
+        succeededEnvelope({
+          ok: true,
+          worktreeId: featWt.id,
+          stages: [
+            { id: 'checkSource', status: 'completed', message: 'ok' },
+            { id: 'closeSessions', status: 'completed', message: 'closed' },
+            { id: 'mergeMain', status: 'completed', message: 'merged' },
+            { id: 'resolveConflicts', status: 'completed', message: 'resolved' },
+            { id: 'cleanup', status: 'completed', message: 'done' },
+          ],
+        }),
+      );
+      await mergePromise;
+      await flushMicrotasks();
+    });
+
+    expect(
+      result.current.mergeStages.find((stage) => stage.id === 'resolveConflicts'),
+    ).toMatchObject({ status: 'completed', message: 'resolved' });
+    expect(result.current.mergeStages.find((stage) => stage.id === 'cleanup')).toMatchObject({
+      status: 'completed',
+      message: 'done',
+    });
+  });
+
   test('handleMergeWorktree aborts when confirm denied', async () => {
     const featWt = buildWorktree({ id: 'wt-feat', isMain: false });
     fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' }), featWt]);
@@ -1984,6 +2061,48 @@ describe('useWorkbenchWorktreeGitController — merge-progress event filtering',
     const mergeMainStage = result.current.mergeStages.find((s) => s.id === 'mergeMain');
     expect(mergeMainStage?.status).toBe('pending');
     expect(mergeMainStage?.message).toBe('');
+  });
+
+  test('merge progress received while another project is active is restored when switching back', async () => {
+    const { result, rerender } = renderController({
+      activeProjectId: 'project-2',
+      activeWorktreeId: 'wt-project-2',
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: {
+        id: 'resolveConflicts',
+        status: 'running',
+        message: 'resolving in background',
+      },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(result.current.mergeStages).toEqual([]);
+
+    rerender(
+      baseControllerProps({
+        activeProjectId: 'project-1',
+        activeWorktreeId: 'wt-feat',
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.mergeProgressWorktreeId).toBe('wt-feat');
+    expect(result.current.mergeStages.find((stage) => stage.id === 'resolveConflicts')).toMatchObject(
+      {
+        status: 'running',
+        message: 'resolving in background',
+      },
+    );
   });
 
   test('does not register listener when canListenToTauriEvents returns false', async () => {

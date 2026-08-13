@@ -271,7 +271,6 @@ export function Workbench() {
     handleRepairHookFailure,
     handleDismissHookFailure,
     handleRetryAfterRepair,
-    clearMergeStagePanel,
   } = worktreeGitController;
   // 业务逻辑：文件工作区域（目录树 + tab + dirty/save/format + create/rename/delete/copy）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/handler/effect；controller 接收窄 API/回调，不复制邻接域 state。
@@ -496,7 +495,8 @@ export function Workbench() {
 
   useEffect(() => {
     return deferEffect(() => {
-      clearMergeStagePanel();
+      // Business Logic: merge 在后端后台运行；切换项目时保留 controller 的按项目阶段快照，返回后继续展示。
+      // 成功快照由 controller 自动隐藏，失败快照由后续同项目操作覆盖，不能在这里无条件清空。
       // Business Logic: 文件域（含 open/save/format/sqlite/dir stale 守卫）由 fileController.resetForContext 统一重置。
       // Code Logic: resetForContext 忽略入参（仅作语义占位），不依赖当前 activeWorktreeId，因此本 effect 不订阅
       // activeWorktreeId 变化——避免 worktree 切换时重跑 loadSessions 把 terminal-status 事件更新覆盖回 running。
@@ -534,7 +534,7 @@ export function Workbench() {
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, clearMergeStagePanel, loadSessions, loadWorktrees, resetFileForContext, setActiveSessionId, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
+  }, [activeProjectId, loadSessions, loadWorktrees, resetFileForContext, setActiveSessionId, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
 
   useEffect(() => {
     return deferEffect(() => {
