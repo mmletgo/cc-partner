@@ -15,13 +15,19 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/primitives';
+import { workbenchApi } from '@/api/workbench';
 import { useAttention } from '@/hooks/useAttention';
+import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import {
   buildDesktopAttentionTargetUrl,
   getAttentionActionI18nKey,
   groupAttentionItems,
 } from '@/lib/attention';
 import type { AttentionCategory, AttentionItem, AttentionSnapshot } from '@/lib/types';
+import {
+  openWorkbenchDeepLink,
+  parseWorkbenchUrlAsDeepLink,
+} from '@/pages/Workbench/workbenchWindowNavigation';
 import styles from './Attention.module.css';
 
 /**
@@ -260,6 +266,7 @@ export function AttentionView({
 export function Attention() {
   const navigate = useNavigate();
   const { snapshot, loading, refreshing, stale, error, lastSucceededAt, refresh } = useAttention();
+  const { currentWindowLabel, occupancy } = useWorkbenchProjects();
 
   const handleReload = useCallback(() => {
     void refresh();
@@ -267,9 +274,22 @@ export function Attention() {
 
   const handleNavigate = useCallback(
     (url: string) => {
-      navigate(url);
+      const target = parseWorkbenchUrlAsDeepLink(url);
+      if (!target) {
+        navigate(url);
+        return;
+      }
+      void openWorkbenchDeepLink({
+        target,
+        currentLabel: currentWindowLabel,
+        occupancy,
+        navigate,
+        claim: workbenchApi.windows.claim,
+        focus: workbenchApi.windows.focus,
+        applyOnWindow: workbenchApi.windows.applyDeepLink,
+      });
     },
-    [navigate],
+    [currentWindowLabel, navigate, occupancy],
   );
 
   return (

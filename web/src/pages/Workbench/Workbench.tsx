@@ -41,6 +41,8 @@ import {
 import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
+import { routeAutomationWorkbenchOpen } from './workbenchWindowNavigation';
+import { workbenchApi } from '@/api/workbench';
 import {
   canListenToTauriEvents,
   deferEffect,
@@ -93,6 +95,8 @@ export function Workbench() {
     selectProject,
     refreshProjectSessionStats,
     chooseAndAddProject,
+    currentWindowLabel,
+    occupancy,
   } = useWorkbenchProjects();
   const { layoutSlotKey } = useWorkbenchWindowRole();
   const restoreSlotKey = layoutSlotKey ?? 'desktop:auto';
@@ -627,19 +631,22 @@ export function Workbench() {
     setAutomationConsoleOpen(true);
   }, [automationConsoleOpen, closeAutomationConsole, closePromptPanel]);
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户在自动化看板中点击 blocked 任务的现场入口时，需要回到对应 Workbench 项目、worktree 和终端。
-   *
-   * Code Logic（这个函数做什么）:
-   *   委托给 automation controller 的 openTaskWorkbench：navigate 到 deep link、关闭控制台并把中心工作区
-   *   切回 terminal，让 deep link 聚焦结果可见。
-   */
   const handleOpenAutomationTaskWorkbench = useCallback(
     (url: string): void => {
-      void openTaskWorkbench(url);
+      routeAutomationWorkbenchOpen(url, {
+        currentLabel: currentWindowLabel,
+        occupancy,
+        navigate,
+        claim: workbenchApi.windows.claim,
+        focus: workbenchApi.windows.focus,
+        applyOnWindow: workbenchApi.windows.applyDeepLink,
+        fallback: (next) => {
+          void openTaskWorkbench(next);
+        },
+        closeLocalConsole: closeAutomationConsole,
+      });
     },
-    [openTaskWorkbench],
+    [closeAutomationConsole, currentWindowLabel, navigate, occupancy, openTaskWorkbench],
   );
 
   const workspaceLine = activeProject
@@ -650,13 +657,6 @@ export function Workbench() {
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
   } as CSSProperties;
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   零项目空态主 CTA 复用侧栏/rail 同一套「添加本机项目」流程，避免另起一套。
-   *
-   * Code Logic（这个函数做什么）:
-   *   调用 projects context 的 chooseAndAddProject。
-   */
   const handleEmptyAddLocal = useCallback(() => {
     void chooseAndAddProject();
   }, [chooseAndAddProject]);
