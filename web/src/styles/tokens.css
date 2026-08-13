@@ -125,6 +125,10 @@
   --z-overlay: 100;
   --z-modal: 1000;
   --z-toast: 2000;
+
+  /* 全屏健康遮罩：始终深色半透明，不跟 --fg 反转（深色主题 --fg 是米色） */
+  --overlay-scrim: color-mix(in oklab, #141413 55%, transparent);
+  --overlay-on: #faf9f5;
 }
 
 [data-theme="dark"] {
@@ -169,4 +173,7 @@
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
   --shadow-window: 0 18px 56px rgba(0, 0, 0, 0.5);
   --shadow-card-hover: 0 6px 20px rgba(0, 0, 0, 0.28);
+
+  --overlay-scrim: color-mix(in oklab, #141413 62%, transparent);
+  --overlay-on: #faf9f5;
 }

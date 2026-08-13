@@ -1,11 +1,17 @@
+/* 本窗只有遮罩页：覆盖 reset.css 的 body --bg，避免首帧白屏 */
+:global(html),
+:global(body) {
+  background: transparent;
+}
+
 .root {
   width: 100vw;
   height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in oklab, var(--fg) 55%, transparent);
-  color: var(--surface);
+  background: var(--overlay-scrim);
+  color: var(--overlay-on);
   font-family: var(--font-body);
 }
 
@@ -21,13 +27,14 @@
   font-size: var(--text-4xl);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
+  color: var(--overlay-on);
 }
 
 .body {
   margin: 0 0 var(--space-8);
   font-size: var(--text-xl);
   line-height: var(--leading-relaxed);
-  color: color-mix(in oklab, var(--surface) 92%, transparent);
+  color: color-mix(in oklab, var(--overlay-on) 92%, transparent);
 }
 
 .actions {
@@ -42,10 +49,11 @@
   font-size: var(--text-5xl);
   font-weight: var(--weight-bold);
   font-variant-numeric: tabular-nums;
+  color: var(--overlay-on);
 }
 
 .hint {
   margin: 0;
   font-size: var(--text-md);
-  color: color-mix(in oklab, var(--surface) 75%, transparent);
+  color: color-mix(in oklab, var(--overlay-on) 75%, transparent);
 }
