@@ -273,9 +273,10 @@ fn try_auto_rename_bound_title(
     // 1) native_session_id → agent runtime terminal（强绑定，首选）
     // 2) 无 native 时仅当 cwd 唯一匹配一个 live terminal 才兜底
     //    （多终端同 cwd 禁止猜，避免历史 session 互相抢名闪烁）
-    let terminal_id = native_session_id
-        .and_then(|n| find_terminal_by_native_session(state, n))
-        .or_else(|| pick_unique_terminal_for_cwd(&live, cwd));
+    let native_terminal_id =
+        native_session_id.and_then(|n| find_terminal_by_native_session(state, n));
+    let used_cwd_fallback = native_terminal_id.is_none();
+    let terminal_id = native_terminal_id.or_else(|| pick_unique_terminal_for_cwd(&live, cwd));
 
     let Some(terminal_id) = terminal_id else {
         return AutoTitleSyncResult::RetryableMiss;
@@ -288,24 +289,26 @@ fn try_auto_rename_bound_title(
     let Some(target) = live.iter().find(|row| row.id == terminal_id) else {
         return AutoTitleSyncResult::RetryableMiss;
     };
-    let Some(source_updated_at) = source_updated_at else {
-        return AutoTitleSyncResult::RetryableMiss;
-    };
-    let Some(terminal_started_at) = chrono::DateTime::parse_from_rfc3339(&target.started_at)
-        .ok()
-        .map(|value| value.with_timezone(&chrono::Utc))
-    else {
-        return AutoTitleSyncResult::RetryableMiss;
-    };
-    if source_updated_at < terminal_started_at {
-        tracing::debug!(
-            terminal_id = %terminal_id,
-            source = source_label,
-            source_updated_at = %source_updated_at,
-            terminal_started_at = %terminal_started_at,
-            "跳过自动标题：标题早于当前 window 启动时间"
-        );
-        return AutoTitleSyncResult::AlreadySettled;
+    if used_cwd_fallback {
+        let Some(source_updated_at) = source_updated_at else {
+            return AutoTitleSyncResult::RetryableMiss;
+        };
+        let Some(terminal_started_at) = chrono::DateTime::parse_from_rfc3339(&target.started_at)
+            .ok()
+            .map(|value| value.with_timezone(&chrono::Utc))
+        else {
+            return AutoTitleSyncResult::RetryableMiss;
+        };
+        if source_updated_at < terminal_started_at {
+            tracing::debug!(
+                terminal_id = %terminal_id,
+                source = source_label,
+                source_updated_at = %source_updated_at,
+                terminal_started_at = %terminal_started_at,
+                "跳过自动标题：cwd 兜底标题早于当前 window 启动时间"
+            );
+            return AutoTitleSyncResult::AlreadySettled;
+        }
     }
     if matches!(
         SessionNameSource::parse(&target.name_source),
