@@ -288,7 +288,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/worktrees/get` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | when body carries `clientOperationId`: UNIQUE ledger (`workbench_mutation_operations`) same id/same payload replays; different payload → conflict; response is `workbench.mutation-outcome.v1` envelope. when id omitted: legacy raw worktree DTO for old peers (no envelope) |
 | POST | `/api/workbench/worktrees/push` | `routes/workbench.rs` | `git push` of the task branch | requires-idempotency-key | same ledger/envelope contract as commit; remote-ref postcondition for reconcile |
-| POST | `/api/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff`, conflict resolution, branch delete | requires-idempotency-key | same ledger/envelope contract; source/main HEAD intent |
+| POST | `/api/workbench/worktrees/merge` | `routes/workbench.rs` | feature worktree: isolated `--no-ff` + Claude conflicts + delete source; main worktree: collect-merge unused local branches into home | requires-idempotency-key | same ledger/envelope contract; Merge or CollectMerge intent |
 | POST | `/api/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | requires-idempotency-key | same ledger/envelope contract; exact worktree identity intent |
 | POST | `/api/workbench/worktrees/mutation-operation` | `routes/workbench.rs` | none; reads durable ledger by `clientOperationId` | read-only | capability `workbench.mutation-outcome.v1` |
 | POST | `/api/workbench/git/commits` | `routes/workbench.rs` | none; `git log` read | read-only | — |
@@ -344,7 +344,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
 | POST | `/api/mobile/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | mobile shares the same `clientOperationId` ledger/envelope as P2P commit |
 | POST | `/api/mobile/workbench/worktrees/push` | `routes/workbench.rs` | `git push` | requires-idempotency-key | same ledger/envelope |
-| POST | `/api/mobile/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff` + cleanup | requires-idempotency-key | same ledger/envelope |
+| POST | `/api/mobile/workbench/worktrees/merge` | `routes/workbench.rs` | same as `/api/workbench/worktrees/merge` (feature merge or main collect-merge) | requires-idempotency-key | same ledger/envelope |
 | POST | `/api/mobile/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | requires-idempotency-key | same ledger/envelope |
 | POST | `/api/mobile/workbench/worktrees/mutation-operation` | `routes/workbench.rs` | none; reads durable ledger by `clientOperationId` | read-only | mobile ledger query for unknown envelope reconciliation |
 | POST | `/api/mobile/workbench/git/commits` | `routes/workbench.rs` | none; `git log` read | read-only | — |
