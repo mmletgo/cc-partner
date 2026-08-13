@@ -16,7 +16,7 @@
  *   - 所有 hooks 位于 early return 之前；本 hook 不包含 early return。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { configApi } from '@/api/config';
 import { promptsApi } from '@/api/prompts';
@@ -26,9 +26,9 @@ import {
   createFavoriteQuickInputState,
   FAVORITE_QUICK_INPUT_DEFAULT_HOTKEY,
   isFavoriteQuickInputShortcut,
+  openFavoriteQuickInputPanel,
   setFavoriteQuickInputQuery,
   setFavoriteQuickInputTag,
-  toggleFavoriteQuickInputPanel,
 } from '../favoriteQuickInputWidget';
 
 /** 注入终端输入的回调签名（与 useWorkbenchTerminalController.handleInput 一致）。 */
@@ -97,6 +97,8 @@ export function useWorkbenchFavoriteQuickInput(
   const [favoritePrompts, setFavoritePrompts] = useState<Prompt[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const openRef = useRef(false);
+  const loadSeqRef = useRef(0);
 
   // mount 时读配置的快捷键，失败回退默认
   useEffect(() => {
@@ -117,25 +119,37 @@ export function useWorkbenchFavoriteQuickInput(
   }, []);
 
   const loadFavorites = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setLoadError(null);
     try {
       const list = await promptsApi.list();
+      if (seq !== loadSeqRef.current) return;
       const safe = Array.isArray(list) ? list : [];
       setFavoritePrompts(safe.filter((p) => p.favorite));
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       setLoadError(err instanceof Error ? err.message : '');
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
-  // 浮层打开时刷新收藏列表（同步最新 favorite 状态）
-  useEffect(() => {
-    if (state.open) {
+  /** 工具栏与快捷键共用的开关；仅 closed → open 时刷新收藏。 */
+  const togglePanel = useCallback(() => {
+    const nextOpen = !openRef.current;
+    openRef.current = nextOpen;
+    setState((previous) =>
+      nextOpen
+        ? openFavoriteQuickInputPanel(previous)
+        : closeFavoriteQuickInputPanel(previous),
+    );
+    if (nextOpen) {
       void loadFavorites();
     }
-  }, [state.open, loadFavorites]);
+  }, [loadFavorites]);
 
   // window capture keydown：命中快捷键且焦点在终端时 preventDefault + toggle
   useEffect(() => {
@@ -146,15 +160,15 @@ export function useWorkbenchFavoriteQuickInput(
       if (!isFocusInTerminal(terminalPanelRef, document.activeElement)) return;
       // 纯 Tab 等单键配置下必须 preventDefault，避免 Tab 送入 shell；组合键也 preventDefault 保持一致
       event.preventDefault();
-      setState((prev) => toggleFavoriteQuickInputPanel(prev));
+      togglePanel();
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [hotkey, terminalPanelRef]);
+  }, [hotkey, terminalPanelRef, togglePanel]);
 
   const onToggle = useCallback(() => {
-    setState((prev) => toggleFavoriteQuickInputPanel(prev));
-  }, []);
+    togglePanel();
+  }, [togglePanel]);
 
   const onSelectTag = useCallback((tag: string) => {
     setState((prev) => setFavoriteQuickInputTag(prev, tag));
@@ -170,12 +184,14 @@ export function useWorkbenchFavoriteQuickInput(
         // 只插入内容，不拼 \r，让用户在终端输入行继续编辑后自行回车
         handleInput(activeSessionId, prompt.content);
       }
+      openRef.current = false;
       setState((prev) => closeFavoriteQuickInputPanel(prev));
     },
     [activeSessionId, handleInput],
   );
 
   const onClose = useCallback(() => {
+    openRef.current = false;
     setState((prev) => closeFavoriteQuickInputPanel(prev));
   }, []);
 

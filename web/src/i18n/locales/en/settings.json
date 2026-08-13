@@ -9,6 +9,7 @@
     "general": "General",
     "dependencies": "Dependencies",
     "health": "Health",
+    "activity": "Activity",
     "sync": "Sync",
     "ai": "AI",
     "automation": "Automation",
@@ -206,9 +207,15 @@
   },
   "health": {
     "title": "Health reminder",
-    "subtitle": "Tune health monitoring work/break thresholds, water interval, quiet hours, notifications, and privacy.",
+    "subtitle": "Tune health monitoring work/break thresholds, water interval, quiet hours, and system notifications.",
     "appliedConfig": "Applied config",
     "applyFailed": "Failed to apply health config"
+  },
+  "activity": {
+    "title": "Activity stats",
+    "subtitle": "Tune window-title recording and activity detail retention. These settings affect stats only, not reminder timing.",
+    "appliedConfig": "Applied config",
+    "applyFailed": "Failed to apply activity stats config"
   },
   "mobileAccess": {
     "title": "Mobile Workbench",

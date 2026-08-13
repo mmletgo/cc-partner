@@ -2,6 +2,10 @@
   "title": "健康提醒",
   "eyebrow": "健康控制台",
   "lead": "查看久坐监测状态、今日活跃节奏和提醒配置，让休息提醒保持可控。",
+  "activityTitle": "活动统计",
+  "activityEyebrow": "使用统计",
+  "activityLead": "按应用、窗口标题和小时查看今日活跃分布。",
+  "goToActivitySettings": "配置",
   "status": {
     "idle": "空闲",
     "working": "工作中",

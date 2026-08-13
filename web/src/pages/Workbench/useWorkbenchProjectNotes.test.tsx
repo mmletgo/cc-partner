@@ -108,4 +108,27 @@ describe('useWorkbenchProjectNotes', () => {
     });
     expect(notesApi.save).not.toHaveBeenCalledWith('p2', expect.anything());
   });
+
+  test('clears the visible note and reloads when the same project is reselected', async () => {
+    const { result, rerender } = renderHook(
+      (props: { projectId: string | null }) =>
+        useWorkbenchProjectNotes({
+          activeProjectId: props.projectId,
+          inspectorTab: 'notes',
+          desktopUnavailableMessage: 'desktop down',
+          loadFailedFallback: 'load failed',
+        }),
+      { initialProps: { projectId: 'p1' as string | null } },
+    );
+    await waitFor(() => expect(result.current.content).toBe('# hello'));
+
+    rerender({ projectId: null });
+    expect(result.current.content).toBe('');
+    rerender({ projectId: 'p1' });
+    expect(result.current.content).toBe('');
+    expect(result.current.loading).toBe(true);
+
+    await waitFor(() => expect(notesApi.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.content).toBe('# hello'));
+  });
 });

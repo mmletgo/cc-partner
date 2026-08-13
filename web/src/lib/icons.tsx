@@ -389,6 +389,21 @@ export const HealthIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   侧栏活动统计入口需要与健康提醒区分的图表语义。
+ *
+ * Code Logic（做什么）:
+ *   渲染三根柱状图 stroke SVG，复用 baseProps。
+ */
+export const ActivityIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M3 12.5V8" />
+    <path d="M8 12.5V3.5" />
+    <path d="M13 12.5V6.5" />
+  </svg>
+);
+
 export const StarIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <path d="M8 2.2 9.8 5.8l4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6L8 2.2Z" />

@@ -12,6 +12,7 @@
   "orchestrator": "Automation",
   "settings": "Settings",
   "health": "Health",
+  "activity": "Activity",
   "providerManager": "Provider Manager",
   "primaryNav": "Primary",
   "groups": {

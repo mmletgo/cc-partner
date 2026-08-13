@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { computeRestLeft } from './HealthOverlay';
+import { computeRestLeft } from './healthOverlayCountdown';
 
 describe('computeRestLeft', () => {
   it('返回未来结束时间戳的剩余秒数', () => {

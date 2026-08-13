@@ -120,6 +120,10 @@ describe('HealthPanel', () => {
       throw new Error('HealthPanel must not render fullscreen or water reminder enablement toggles');
     }
 
+    if (rendered.includes('记录窗口标题') || rendered.includes('活动明细保留天数')) {
+      throw new Error('HealthPanel must not render activity-stats privacy fields');
+    }
+
     const selectCount = rendered.match(/<select/g)?.length ?? 0;
     if (selectCount !== 4) {
       throw new Error(`HealthPanel expected 4 time picker selects, got ${selectCount}`);
@@ -139,10 +143,13 @@ describe('HealthPanel', () => {
       throw new Error('HealthPanel 24-hour picker must not render AM/PM labels');
     }
 
-    for (const attr of ['min="1"', 'max="480"', 'max="120"', 'min="5"', 'max="1440"', 'max="3650"']) {
+    for (const attr of ['min="1"', 'max="480"', 'max="120"', 'min="5"', 'max="1440"']) {
       if (!rendered.includes(attr)) {
         throw new Error(`HealthPanel number inputs missing attribute ${attr}`);
       }
+    }
+    if (rendered.includes('max="3650"')) {
+      throw new Error('HealthPanel must not render retain-days input after activity split');
     }
 
     // 默认 dnd 均为 null 时不应展示全天免打扰

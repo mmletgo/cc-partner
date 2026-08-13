@@ -8,7 +8,7 @@
  *   今日活跃/休息占比如何,并能直接进入完整配置项。
  *
  * Code Logic（这个组件做什么）:
- *   - refresh:并行取 status + stats + detail(startOfDay 起);每 5s 可见性感知轮询
+ *   - refresh:并行取 status + stats(startOfDay 起);每 5s 可见性感知轮询
  *   - 首屏 status 失败展示可重试错误；刷新失败保留数据 + stale 横幅
  *   - 开关 enabled / 暂停 paused:乐观更新本地 status,后端失败回滚并可见提示
  *   - hooks 全部在 early return 之前(项目规则 20)
@@ -20,10 +20,9 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
 import type { PillTone } from '@/components/primitives';
 import { healthApi } from '@/api/health';
-import type { ActivityStats, ActivityDetail, HealthStatus, HealthPhase, HabitStats, HealthConfig } from '@/lib/types';
+import type { ActivityStats, HealthStatus, HealthPhase, HabitStats, HealthConfig } from '@/lib/types';
 import { HealthIcon, PauseIcon, PlayIcon } from '@/lib/icons';
 import styles from './Health.module.css';
-import { StatsChart } from './StatsChart';
 import { HabitStatsCard } from './HabitStatsCard';
 
 /** 页面网络刷新间隔(ms)；HealthOverlay 本地倒计时不属于本轮询 */
@@ -136,7 +135,6 @@ export function Health() {
   const navigate = useNavigate();
   const [status, setStatus] = useState<HealthStatus | null>(null);
   const [stats, setStats] = useState<ActivityStats | null>(null);
-  const [detail, setDetail] = useState<ActivityDetail | null>(null);
   const [config, setConfig] = useState<HealthConfig | null>(null);
   const [habitStats, setHabitStats] = useState<HabitStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -157,15 +155,14 @@ export function Health() {
    *   用户需要看到健康监测是否正常；首屏全失败必须可重试，刷新失败保留数据并标 stale。
    *
    * Code Logic（这个函数做什么）:
-   *   并行取 status/stats/detail + config/habit；status 成功清 refreshError；
+   *   并行取 status/stats + config/habit；status 成功清 refreshError；
    *   status 失败：有旧 status 则 stale 文案，否则 loadFailed；始终结束 loading。
    */
   const refresh = useCallback(async () => {
     const startOfDay = getLocalStartOfDayTs();
-    const [statusRes, statsRes, detailRes] = await Promise.allSettled([
+    const [statusRes, statsRes] = await Promise.allSettled([
       healthApi.getStatus(),
       healthApi.getStats(startOfDay),
-      healthApi.getDetail(startOfDay),
     ]);
     if (statusRes.status === 'fulfilled') {
       setStatus(statusRes.value);
@@ -180,11 +177,6 @@ export function Health() {
       setStats(statsRes.value);
     } else {
       console.error('加载今日统计失败', statsRes.reason);
-    }
-    if (detailRes.status === 'fulfilled') {
-      setDetail(detailRes.value);
-    } else {
-      console.error('加载活动明细失败', detailRes.reason);
     }
 
     try {
@@ -408,20 +400,6 @@ export function Health() {
           nowTs={nowTs}
           onWaterAdded={refresh}
         />
-
-        {detail && (
-          <Card variant="outlined" padding="md" className={styles.chartCard}>
-            <Card.Header className={styles.cardHeader}>
-              <div className={styles.cardTitleGroup}>
-                <h2 className={styles.sectionTitle}>{t('health:chartsTitle')}</h2>
-                <p className={styles.sectionLead}>{t('health:chartsLead')}</p>
-              </div>
-            </Card.Header>
-            <Card.Body className={styles.chartBody}>
-              <StatsChart detail={detail} />
-            </Card.Body>
-          </Card>
-        )}
       </div>
     </div>
   );

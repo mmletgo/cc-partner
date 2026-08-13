@@ -88,6 +88,8 @@ cc-partner/
 │   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树 + 自动化工作区
 │   │   │   ├── Orchestrator/     # 自动编排器可嵌入面板；旧路由重定向 Workbench
 │   │   │   ├── Settings/         # 05-settings.html
+│   │   │   ├── Health/            # 健康提醒控制台
+│   │   │   ├── ActivityStats/     # 活动统计（应用/窗口排行 + 小时分布）
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
 │   │   ├── api/                  # 桌面 invoke + mobile HTTP 封装（含 attention / workbenchHttp）

@@ -12,6 +12,7 @@
   "orchestrator": "自动化",
   "settings": "设置",
   "health": "健康提醒",
+  "activity": "活动统计",
   "providerManager": "Provider 管理",
   "primaryNav": "主导航",
   "groups": {

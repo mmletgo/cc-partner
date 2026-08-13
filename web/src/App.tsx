@@ -67,6 +67,7 @@ const AgentHub = lazyNamed(() => import('./pages/AgentHub'), 'AgentHub');
 const ProviderManager = lazyNamed(() => import('./pages/ProviderManager'), 'ProviderManager');
 const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
 const Health = lazyNamed(() => import('./pages/Health'), 'Health');
+const ActivityStats = lazyNamed(() => import('./pages/ActivityStats'), 'ActivityStats');
 const Welcome = lazyNamed(() => import('./pages/Welcome'), 'Welcome');
 const Overlay = lazyNamed(() => import('./pages/Screenshot/Overlay'), 'Overlay');
 const HealthOverlay = lazy(() => import('./pages/HealthOverlay'));
@@ -643,6 +644,7 @@ export default function App() {
             <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />
             <Route path="/settings" element={<ShellRoute><Settings /></ShellRoute>} />
             <Route path="/health" element={<ShellRoute><Health /></ShellRoute>} />
+            <Route path="/activity" element={<ShellRoute><ActivityStats /></ShellRoute>} />
             {isDev && DesignSystem ? (
               <Route
                 path="/design-system"

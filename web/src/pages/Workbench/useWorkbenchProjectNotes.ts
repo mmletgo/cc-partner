@@ -51,6 +51,23 @@ export interface UseWorkbenchProjectNotesResult {
   onRetry: () => void;
 }
 
+interface ProjectNotesState {
+  projectId: string | null;
+  phase: 'idle' | 'ready' | 'error';
+  content: string;
+  error: string | null;
+}
+
+/** 按项目创建未加载的笔记视图状态，切项目时旧正文不会短暂泄露。 */
+function createProjectNotesState(projectId: string | null): ProjectNotesState {
+  return {
+    projectId,
+    phase: 'idle',
+    content: '',
+    error: null,
+  };
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   Workbench 组合层需要项目笔记状态，但不能再增第 8 个 controller。
@@ -64,13 +81,16 @@ export function useWorkbenchProjectNotes(
   const { activeProjectId, inspectorTab, desktopUnavailableMessage, loadFailedFallback } = params;
   const notesOpen = inspectorTab === 'notes';
 
-  const [content, setContent] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [loadNonce, setLoadNonce] = useState(0);
+  const [notesState, setNotesState] = useState<ProjectNotesState>(() =>
+    createProjectNotesState(activeProjectId),
+  );
+
+  if (notesState.projectId !== activeProjectId) {
+    setNotesState(createProjectNotesState(activeProjectId));
+  }
 
   const requestSeqRef = useRef(0);
-  const loadedProjectIdRef = useRef<string | null>(null);
+  const previousProjectIdRef = useRef<string | null>(activeProjectId);
 
   const [queue] = useState(() =>
     createScratchpadAutosaveQueue(
@@ -90,72 +110,80 @@ export function useWorkbenchProjectNotes(
   }, [queue]);
 
   useEffect(() => {
-    const previousId = loadedProjectIdRef.current;
+    const previousId = previousProjectIdRef.current;
     if (previousId && previousId !== activeProjectId) {
       void queue.flushPage(previousId);
     }
+    previousProjectIdRef.current = activeProjectId;
   }, [activeProjectId, queue]);
 
   useEffect(() => {
-    if (!notesOpen || !activeProjectId) {
-      if (!activeProjectId) {
-        loadedProjectIdRef.current = null;
-        setContent('');
-        setError(null);
-        setLoading(false);
-      }
-      return undefined;
-    }
-
-    if (loadedProjectIdRef.current === activeProjectId) {
+    if (
+      !notesOpen ||
+      !activeProjectId ||
+      notesState.projectId !== activeProjectId ||
+      notesState.phase !== 'idle'
+    ) {
       return undefined;
     }
 
     const seq = requestSeqRef.current + 1;
     requestSeqRef.current = seq;
     const projectId = activeProjectId;
-    loadedProjectIdRef.current = null;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setContent('');
 
     void workbenchApi.notes
       .get(projectId)
       .then((note) => {
         if (cancelled || requestSeqRef.current !== seq) return;
-        loadedProjectIdRef.current = projectId;
-        setContent(note.content);
-        setError(null);
+        setNotesState({
+          projectId,
+          phase: 'ready',
+          content: note.content,
+          error: null,
+        });
       })
       .catch((reason: unknown) => {
         if (cancelled || requestSeqRef.current !== seq) return;
-        loadedProjectIdRef.current = null;
-        setError(displayErrorMessage(reason, loadFailedFallback, desktopUnavailableMessage));
-      })
-      .finally(() => {
-        if (cancelled || requestSeqRef.current !== seq) return;
-        setLoading(false);
+        setNotesState({
+          projectId,
+          phase: 'error',
+          content: '',
+          error: displayErrorMessage(reason, loadFailedFallback, desktopUnavailableMessage),
+        });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [activeProjectId, desktopUnavailableMessage, loadFailedFallback, loadNonce, notesOpen]);
+  }, [activeProjectId, desktopUnavailableMessage, loadFailedFallback, notesOpen, notesState]);
 
   const onChange = useCallback(
     (next: string) => {
-      if (!activeProjectId || loadedProjectIdRef.current !== activeProjectId) return;
-      setContent(next);
+      if (
+        !activeProjectId ||
+        notesState.projectId !== activeProjectId ||
+        notesState.phase !== 'ready'
+      ) {
+        return;
+      }
+      setNotesState((previous) => ({ ...previous, content: next }));
       queue.schedule(activeProjectId, next);
     },
-    [activeProjectId, queue],
+    [activeProjectId, notesState.phase, notesState.projectId, queue],
   );
 
   const onRetry = useCallback(() => {
-    loadedProjectIdRef.current = null;
-    setLoadNonce((value: number) => value + 1);
-  }, []);
+    if (!activeProjectId) return;
+    setNotesState(createProjectNotesState(activeProjectId));
+  }, [activeProjectId]);
+
+  const stateMatchesProject = notesState.projectId === activeProjectId;
+  const content = stateMatchesProject && notesState.phase === 'ready' ? notesState.content : '';
+  const loading = Boolean(
+    notesOpen && activeProjectId && (!stateMatchesProject || notesState.phase === 'idle'),
+  );
+  const error = stateMatchesProject && notesState.phase === 'error' ? notesState.error : null;
 
   return {
     content,

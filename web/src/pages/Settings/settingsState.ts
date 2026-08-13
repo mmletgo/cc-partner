@@ -82,7 +82,7 @@ export interface PromptOptimizerSettingsForm {
   fillLanguage: PromptOptimizerFillLanguage;
 }
 
-/** 健康提醒 tab 的受控表单值;与 HealthConfig 同构,直接整体提交给 update_health_config。 */
+/** 健康提醒 / 活动统计 tab 的受控表单值;与 HealthConfig 同构,提交前按切片 merge。 */
 export type HealthForm = HealthConfig;
 
 /** Settings 页内子 tab id（与 Settings.tsx SETTINGS_TABS 对齐）。 */
@@ -90,6 +90,7 @@ export type SettingsTabId =
   | 'general'
   | 'dependencies'
   | 'health'
+  | 'activity'
   | 'sync'
   | 'ai'
   | 'automation'
@@ -101,6 +102,7 @@ export const SETTINGS_TAB_IDS: readonly SettingsTabId[] = [
   'general',
   'dependencies',
   'health',
+  'activity',
   'sync',
   'ai',
   'automation',
@@ -429,6 +431,53 @@ export function healthConfigToForm(config: HealthConfig | null): HealthForm {
   const source = config ?? PENDING_HEALTH_FORM;
   return {
     ...source,
+    waterEnabled: true,
+    reminderFullscreen: true,
+  };
+}
+
+/**
+ * 组装健康提醒 tab 提交 payload：只覆盖提醒切片，活动统计字段取已应用值。
+ *
+ * Business Logic（为什么需要）:
+ *   update_health_config 是整包覆盖。健康提醒 tab 保存不得把活动统计 tab 的未保存草稿
+ *   或过期值写进 recordWindowTitle / retainDays。
+ *
+ * Code Logic（做什么）:
+ *   以 draft 为底，把活动统计两字段替换为 applied（无 applied 时回退 draft），并归一固定开关。
+ */
+export function mergeHealthReminderSlice(
+  applied: HealthForm | null,
+  draft: HealthForm,
+): HealthForm {
+  const activitySource = applied ?? draft;
+  return {
+    ...draft,
+    recordWindowTitle: activitySource.recordWindowTitle,
+    retainDays: activitySource.retainDays,
+    waterEnabled: true,
+    reminderFullscreen: true,
+  };
+}
+
+/**
+ * 组装活动统计 tab 提交 payload：只覆盖统计切片，提醒字段取已应用值。
+ *
+ * Business Logic（为什么需要）:
+ *   活动统计 tab 保存不得覆盖工作窗口、免打扰、通知等健康提醒字段。
+ *
+ * Code Logic（做什么）:
+ *   以 applied（无则 draft）为底，只写入 draft 的 recordWindowTitle / retainDays，并归一固定开关。
+ */
+export function mergeActivityStatsSlice(
+  applied: HealthForm | null,
+  draft: HealthForm,
+): HealthForm {
+  const reminderSource = applied ?? draft;
+  return {
+    ...reminderSource,
+    recordWindowTitle: draft.recordWindowTitle,
+    retainDays: draft.retainDays,
     waterEnabled: true,
     reminderFullscreen: true,
   };

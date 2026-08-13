@@ -12,7 +12,7 @@
  *   复用 providerManager 类型/decoder/i18n；hooks 全部在渲染之前（无 early return，条件渲染）。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Pill, StatusMessage } from '@/components/primitives';
@@ -43,10 +43,36 @@ interface HealthResponse {
 
 type ProviderLoadState = 'loading' | 'unsupported' | 'ready' | 'error';
 
+type ProviderSummaryLoadResult =
+  | { kind: 'unsupported' }
+  | { kind: 'ready'; summary: ProviderManagerSummary };
+
 /** 把 unknown reason 规整为可展示字符串。 */
 function getErrorMessage(reason: unknown): string {
   if (reason instanceof Error && reason.message.trim()) return reason.message;
   return String(reason);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   首次加载与用户重试必须执行完全一致的 capability 探测与 summary 读取。
+ *
+ * Code Logic（这个函数做什么）:
+ *   纯异步 transport 编排，不触碰 React state；调用方在 Promise 回调中提交结果。
+ */
+async function fetchProviderSummary(): Promise<ProviderSummaryLoadResult> {
+  const health = await getJson<HealthResponse>(HEALTH_PATH);
+  const capabilities = health.capabilities ?? [];
+  if (
+    (health.protocol_version ?? 0) < 1 ||
+    !capabilities.includes(PROVIDER_MANAGER_CAPABILITY_V1)
+  ) {
+    return { kind: 'unsupported' };
+  }
+  const summary = await getJson<ProviderManagerSummary>(SUMMARY_PATH, {
+    decoder: providerManagerSummaryDecoder,
+  });
+  return { kind: 'ready', summary };
 }
 
 /**
@@ -141,33 +167,53 @@ export function MobileProviderPanel(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [switchingKey, setSwitchingKey] = useState<string | null>(null);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  const loadSeqRef = useRef(0);
 
   const load = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeqRef.current;
     setLoadState('loading');
     setError(null);
     setSwitchError(null);
     try {
-      const health = await getJson<HealthResponse>(HEALTH_PATH);
-      const caps = health.capabilities ?? [];
-      if ((health.protocol_version ?? 0) < 1 || !caps.includes(PROVIDER_MANAGER_CAPABILITY_V1)) {
+      const result = await fetchProviderSummary();
+      if (seq !== loadSeqRef.current) return;
+      if (result.kind === 'unsupported') {
         setSummary(null);
         setLoadState('unsupported');
         return;
       }
-      const next = await getJson<ProviderManagerSummary>(SUMMARY_PATH, {
-        decoder: providerManagerSummaryDecoder,
-      });
-      setSummary(next);
+      setSummary(result.summary);
       setLoadState('ready');
     } catch (reason) {
+      if (seq !== loadSeqRef.current) return;
       setError(getErrorMessage(reason));
       setLoadState('error');
     }
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let active = true;
+    const seq = ++loadSeqRef.current;
+    void fetchProviderSummary()
+      .then((result) => {
+        if (!active || seq !== loadSeqRef.current) return;
+        if (result.kind === 'unsupported') {
+          setSummary(null);
+          setLoadState('unsupported');
+          return;
+        }
+        setSummary(result.summary);
+        setLoadState('ready');
+      })
+      .catch((reason: unknown) => {
+        if (!active || seq !== loadSeqRef.current) return;
+        setError(getErrorMessage(reason));
+        setLoadState('error');
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleSwitch = useCallback(
     async (app: AgentApp, providerId: string): Promise<void> => {

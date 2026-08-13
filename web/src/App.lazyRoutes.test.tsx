@@ -34,6 +34,7 @@ describe('App lazy routes contract', () => {
       /import\s*\{\s*Workbench\s*\}\s*from\s*['"]\.\/pages\/Workbench['"]/,
       /import\s*\{\s*Settings\s*\}\s*from\s*['"]\.\/pages\/Settings['"]/,
       /import\s*\{\s*Health\s*\}\s*from\s*['"]\.\/pages\/Health['"]/,
+      /import\s*\{\s*ActivityStats\s*\}\s*from\s*['"]\.\/pages\/ActivityStats['"]/,
       /import\s*\{\s*Attention\s*\}\s*from\s*['"]\.\/pages\/Attention['"]/,
       /import\s*\{\s*DesignSystem\s*\}\s*from\s*['"]\.\/pages\/DesignSystem['"]/,
     ];
@@ -132,6 +133,21 @@ describe('App lazy routes contract', () => {
     );
     expect(appShellSource).not.toMatch(/to\s*=\s*["']\/discover["']/);
     expect(appShellSource).not.toMatch(/to\s*=\s*["']\/workbench["']\s+label=\{t\(['"]nav:home['"]\)\}/);
+  });
+
+  test('keeps /activity as a separate lazy route from Health', () => {
+    expect(appSource).toMatch(
+      /path\s*=\s*["']\/activity["']\s+element=\{<ShellRoute><ActivityStats\s*\/>\s*<\/ShellRoute>\}/,
+    );
+    expect(appSource).toMatch(
+      /lazyNamed\s*\(\s*\(\)\s*=>\s*import\s*\(\s*['"]\.\/pages\/ActivityStats['"]\s*\)/,
+    );
+    expect(appShellSource).toMatch(
+      /<NavItem\s+to\s*=\s*["']\/activity["']\s+label=\{t\(['"]nav:activity['"]\)\}/,
+    );
+    expect(appShellSource).toMatch(
+      /<NavItem\s+to\s*=\s*["']\/health["']\s+label=\{t\(['"]nav:health['"]\)\}/,
+    );
   });
 
   test('legacy /claude-code deep-links to Agent Hub assets with Claude target', () => {

@@ -2,6 +2,10 @@
   "title": "Health Reminder",
   "eyebrow": "Health Console",
   "lead": "Track sedentary monitoring, today's activity rhythm, and reminder settings in one focused panel.",
+  "activityTitle": "Activity stats",
+  "activityEyebrow": "Usage stats",
+  "activityLead": "Review today's active time by app, window title, and hour.",
+  "goToActivitySettings": "Configure",
   "status": {
     "idle": "Idle",
     "working": "Working",
