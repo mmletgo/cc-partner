@@ -13,7 +13,8 @@ use crate::workbench::window_registry::{
     ClaimResult, WindowOpenDecision, WorkbenchWindowOccupancy, WorkbenchWindowRegistry,
 };
 use crate::workbench::workspace_layout::{
-    window_auto_slot_key, MAIN_WINDOW_LABEL, WORKBENCH_WINDOW_LABEL_PREFIX,
+    parse_satellite_window_slot, window_auto_slot_key, MAIN_WINDOW_LABEL,
+    WORKBENCH_WINDOW_LABEL_PREFIX,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -122,6 +123,28 @@ pub async fn open_workbench_window(
 #[tauri::command]
 pub fn focus_workbench_window(app: AppHandle, label: String) -> Result<(), AppError> {
     focus_existing_window(&app, &label)
+}
+
+/// 关闭卫星工作台窗。
+///
+/// Business Logic（为什么需要这个命令）:
+///     删除被卫星窗占用的项目前，必须先关掉该窗释放 occupancy，避免留下幽灵占用。
+///
+/// Code Logic（这个命令做什么）:
+///     仅允许 `workbench-1..4`；close 后 Destroyed 钩子会 release 并删 slot。
+#[tauri::command]
+pub fn close_workbench_window(app: AppHandle, label: String) -> Result<(), AppError> {
+    if parse_satellite_window_slot(&label).is_none() {
+        return Err(AppError::validation(format!(
+            "workbench_window_close_satellite_only:{label}"
+        )));
+    }
+    let Some(window) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    window
+        .close()
+        .map_err(|error| AppError::generic(format!("关闭工作台窗口失败: {error}")))
 }
 
 /// 本窗登记占用项目。

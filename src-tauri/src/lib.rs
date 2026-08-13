@@ -594,6 +594,7 @@ pub fn run() {
             workbench_cmd::touch_workbench_project,
             workbench_cmd::open_workbench_window,
             workbench_cmd::focus_workbench_window,
+            workbench_cmd::close_workbench_window,
             workbench_cmd::claim_workbench_window_project,
             workbench_cmd::list_workbench_window_occupancy,
             workbench_cmd::apply_workbench_window_deeplink,

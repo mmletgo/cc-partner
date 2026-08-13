@@ -440,6 +440,7 @@ export const workbenchApi = {
         { projectId },
       ),
     focus: (label: string) => invoke<void>('focus_workbench_window', { label }),
+    close: (label: string) => invoke<void>('close_workbench_window', { label }),
     claim: (projectId: string) =>
       invoke<{ action: 'claimed' | 'unchanged' | 'occupied'; label: string; projectId: string }>(
         'claim_workbench_window_project',

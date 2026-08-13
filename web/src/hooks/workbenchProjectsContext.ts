@@ -28,6 +28,12 @@ export interface WorkbenchProjectsContextValue {
   removeProject: (projectId: string) => Promise<void>;
   /** 拖拽重排项目 id 列表；乐观更新后调用后端，失败时回滚。 */
   reorderProjects: (orderedIds: string[]) => Promise<void>;
+  /** 本窗 Tauri label（无宿主时为 main）。 */
+  currentWindowLabel: string;
+  /** 进程内项目占用：projectId → windowLabel。 */
+  occupancy: Array<{ projectId: string; windowLabel: string }>;
+  /** 在新卫星窗打开项目；已占用则聚焦。 */
+  openProjectInNewWindow: (project: WorkbenchProject) => Promise<void>;
 }
 
 export const WorkbenchProjectsContext = createContext<WorkbenchProjectsContextValue | null>(null);
