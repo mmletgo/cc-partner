@@ -12,8 +12,10 @@
 
 import type { JSX } from 'react';
 import { Button, Dialog, StatusMessage } from '@/components/primitives';
+import { SparkleIcon } from '@/lib/icons';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { InstructionLane } from '../context/agentHubContext';
+import { AiReviseInstructionDialog } from './AiReviseInstructionDialog';
 import {
   findBlockByMode,
   resolveAdaptedSlotText,
@@ -48,6 +50,15 @@ export interface InstructionThreePaneViewLabels {
   blockBodyPlaceholder: string;
   commonMarkdown: string;
   saveBlocks: string;
+  /** 三页共用：AI 按方向改当前槽。 */
+  aiRevise: string;
+  aiReviseTitle: string;
+  aiReviseDescriptionCommon: string;
+  aiReviseDescriptionExclusive: string;
+  aiReviseDescriptionAdapted: string;
+  aiReviseDirectionLabel: string;
+  aiReviseDirectionPlaceholder: string;
+  aiReviseConfirm: string;
   /** 适配页：把当前 agent 适配内容改写到其他 agent。 */
   adaptToOtherAgents: string;
   /**
@@ -86,9 +97,18 @@ export interface InstructionThreePaneViewProps {
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
   analyzeConfirmOpen: boolean;
+  aiReviseOpen: boolean;
+  aiReviseDirection: string;
+  aiReviseError: string | null;
+  /** Canonical 漂移/截断/非本机时禁用，不看原生写入门禁。 */
+  aiReviseDisabled: boolean;
   onAnalyzeDecompose: () => void;
   onAdaptToOtherAgents: () => void;
   onSaveBlocks: () => void;
+  onOpenAiRevise: () => void;
+  onAiReviseDirectionChange: (value: string) => void;
+  onCancelAiRevise: () => void;
+  onConfirmAiRevise: () => void;
   /**
    * 独有页：合成预览 → 写入当前 Agent 原始文件（内部 save + preview + apply）。
    * 双脏分歧时由 controller 打开基线选择，不直接写盘。
@@ -139,9 +159,11 @@ function InstructionChrome(props: {
   showPath: boolean;
   showAdaptToOthers: boolean;
   showWriteToNative: boolean;
+  aiReviseDisabled: boolean;
   onRetry: () => void;
   onDiscardAndReload: () => void;
   onSaveBlocks: () => void;
+  onOpenAiRevise: () => void;
   onAdaptToOtherAgents: () => void;
   onRequestSync: () => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
@@ -160,9 +182,11 @@ function InstructionChrome(props: {
     showPath,
     showAdaptToOthers,
     showWriteToNative,
+    aiReviseDisabled,
     onRetry,
     onDiscardAndReload,
     onSaveBlocks,
+    onOpenAiRevise,
     onAdaptToOtherAgents,
     onRequestSync,
     onChooseBaseline,
@@ -192,6 +216,17 @@ function InstructionChrome(props: {
             data-testid="instruction-save-blocks"
           >
             {labels.saveBlocks}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<SparkleIcon />}
+            loading={busyAction === 'revise'}
+            disabled={actionBusy || aiReviseDisabled}
+            onClick={onOpenAiRevise}
+            data-testid="instruction-ai-revise"
+          >
+            {labels.aiRevise}
           </Button>
           {showWriteToNative ? (
             <Button
@@ -517,9 +552,17 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     writeBlockedReason,
     dualDirtyOpen,
     analyzeConfirmOpen,
+    aiReviseOpen,
+    aiReviseDirection,
+    aiReviseError,
+    aiReviseDisabled,
     onAnalyzeDecompose,
     onAdaptToOtherAgents,
     onSaveBlocks,
+    onOpenAiRevise,
+    onAiReviseDirectionChange,
+    onCancelAiRevise,
+    onConfirmAiRevise,
     onRequestSync,
     onRetry,
     onDiscardAndReload,
@@ -582,9 +625,11 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         showPath={showPath}
         showAdaptToOthers={showAdaptToOthers}
         showWriteToNative={showWriteToNative}
+        aiReviseDisabled={aiReviseDisabled}
         onRetry={onRetry}
         onDiscardAndReload={onDiscardAndReload}
         onSaveBlocks={onSaveBlocks}
+        onOpenAiRevise={onOpenAiRevise}
         onAdaptToOtherAgents={onAdaptToOtherAgents}
         onRequestSync={onRequestSync}
         onChooseBaseline={onChooseBaseline}
@@ -629,6 +674,28 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           }
         />
       ) : null}
+
+      <AiReviseInstructionDialog
+        open={aiReviseOpen}
+        title={labels.aiReviseTitle}
+        description={
+          instructionLane === 'common'
+            ? labels.aiReviseDescriptionCommon
+            : instructionLane === 'adapted'
+              ? labels.aiReviseDescriptionAdapted
+              : labels.aiReviseDescriptionExclusive
+        }
+        directionLabel={labels.aiReviseDirectionLabel}
+        directionPlaceholder={labels.aiReviseDirectionPlaceholder}
+        confirmLabel={labels.aiReviseConfirm}
+        cancelLabel={labels.cancel}
+        direction={aiReviseDirection}
+        error={aiReviseError}
+        busy={busyAction === 'revise'}
+        onDirectionChange={onAiReviseDirectionChange}
+        onCancel={onCancelAiRevise}
+        onConfirm={onConfirmAiRevise}
+      />
 
       <Dialog
         open={analyzeConfirmOpen}

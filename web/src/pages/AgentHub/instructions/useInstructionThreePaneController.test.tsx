@@ -22,6 +22,7 @@ const apiMocks = vi.hoisted(() => ({
   previewUserInstructionUpdate: vi.fn(),
   applyUserInstructionPlan: vi.fn(),
   saveUserInstructionBlocks: vi.fn(),
+  reviseInstructionSlot: vi.fn(),
 }));
 
 vi.mock('@/api/agentHub', () => ({ agentHubApi: apiMocks }));
@@ -986,5 +987,84 @@ describe('useInstructionThreePaneController', () => {
       expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
     });
     expect(apiMocks.inspectUserInstructionWorkspace).not.toHaveBeenCalled();
+  });
+
+  test('confirmAiRevise on common lane revises shared slot then saves', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    apiMocks.reviseInstructionSlot.mockResolvedValue({ common: 'revised common' });
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue({
+      ...workspaceFixture().canonical!,
+      headRevisionId: 'rev-2',
+    });
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.openAiRevise();
+      result.current.setAiReviseDirection('make it shorter');
+    });
+    await act(async () => {
+      await result.current.confirmAiRevise();
+    });
+    expect(apiMocks.reviseInstructionSlot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lane: 'common',
+        agent: 'claude',
+        direction: 'make it shorter',
+      }),
+    );
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledTimes(1);
+    expect(result.current.aiReviseOpen).toBe(false);
+    expect(result.current.state.blocksDirty).toBe(false);
+  });
+
+  test('confirmAiRevise keeps the dialog open when Claude fails', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    apiMocks.reviseInstructionSlot.mockRejectedValue(new Error('claude down'));
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.openAiRevise();
+      result.current.setAiReviseDirection('make it shorter');
+    });
+    await act(async () => {
+      await result.current.confirmAiRevise();
+    });
+    expect(apiMocks.saveUserInstructionBlocks).not.toHaveBeenCalled();
+    expect(result.current.aiReviseOpen).toBe(true);
+    expect(result.current.aiReviseError).toBe('claude down');
+  });
+
+  test('confirmAiRevise on adapted lane sends all variants and replaces them', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    apiMocks.reviseInstructionSlot.mockResolvedValue({
+      variants: { claude: 'c2', codex: 'x2', opencode: 'o2' },
+    });
+    apiMocks.saveUserInstructionBlocks.mockResolvedValue(workspaceFixture().canonical);
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({
+        context: { ...baseContext, instructionLane: 'adapted' },
+        t,
+      }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.editCurrentSlot('old adapted');
+      result.current.openAiRevise();
+      result.current.setAiReviseDirection('rewrite for all agents');
+    });
+    await act(async () => {
+      await result.current.confirmAiRevise();
+    });
+    expect(apiMocks.reviseInstructionSlot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lane: 'adapted',
+        adaptedVariants: expect.objectContaining({ claude: 'old adapted' }),
+      }),
+    );
+    expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledTimes(1);
   });
 });

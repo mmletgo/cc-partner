@@ -53,7 +53,7 @@ export type SyncBaseline = 'blocks' | 'original';
  *   不能误挂到「保存三槽」。
  * Code Logic: null = 空闲；actionBusy 由 busyAction!=null 派生，供互斥禁用。
  */
-export type InstructionBusyAction = 'save' | 'analyze' | 'adapt' | 'sync';
+export type InstructionBusyAction = 'save' | 'analyze' | 'adapt' | 'sync' | 'revise';
 
 const MODE_ORDER: InstructionBlockDraft['mode'][] = ['shared', 'adapted', 'targetOnly'];
 const AGENT_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
@@ -698,6 +698,80 @@ export function appendAdaptedVariants(
   }
   if (!changed) return next;
   return updateBlock(next, adapted.id, { variants: nextVariants }, previewAgent);
+}
+
+/**
+ * Business Logic: AI 改写适配槽时一次覆盖全部 Agent 变体（含空串清空），不追加。
+ * Code Logic: ensure adapted → 对传入的每个目标写 trim 后正文；清空 commonMarkdown，
+ *   避免空变体被 normalize 丢掉后回落到旧底稿。
+ */
+export function replaceAdaptedVariants(
+  state: InstructionThreePaneState,
+  variants: Partial<Record<AgentTarget, string>>,
+  previewAgent: AgentTarget,
+): InstructionThreePaneState {
+  let next = ensureModeBlock(state, 'adapted', previewAgent);
+  const adapted = findBlockByMode(next.blocks, 'adapted');
+  if (!adapted) return next;
+
+  const nextVariants: Partial<Record<AgentTarget, string>> = { ...adapted.variants };
+  for (const target of AGENT_TARGETS) {
+    if (!Object.prototype.hasOwnProperty.call(variants, target)) {
+      continue;
+    }
+    nextVariants[target] = (variants[target] ?? '').trim();
+  }
+  return updateBlock(
+    next,
+    adapted.id,
+    { variants: nextVariants, commonMarkdown: '' },
+    previewAgent,
+  );
+}
+
+/**
+ * Business Logic: 把 Claude 改写结果落到对应 lane 槽，供保存前展示。
+ * Code Logic: 公共写 shared.common；独有写当前 agent variants；适配覆盖三端。
+ */
+export function applyInstructionReviseResult(
+  state: InstructionThreePaneState,
+  lane: 'common' | 'adapted' | 'exclusive',
+  agent: AgentTarget,
+  result: {
+    common?: string | null;
+    exclusive?: string | null;
+    variants?: Partial<Record<AgentTarget, string>> | null;
+  },
+): InstructionThreePaneState {
+  if (lane === 'common') {
+    const next = ensureModeBlock(state, 'shared', agent);
+    const block = findBlockByMode(next.blocks, 'shared');
+    if (!block) return next;
+    return updateBlock(next, block.id, { commonMarkdown: result.common ?? '' }, agent);
+  }
+  if (lane === 'exclusive') {
+    const next = ensureModeBlock(state, 'targetOnly', agent);
+    const block = findBlockByMode(next.blocks, 'targetOnly');
+    if (!block) return next;
+    return updateBlock(
+      next,
+      block.id,
+      {
+        variants: { ...block.variants, [agent]: result.exclusive ?? '' },
+        sourceTarget: block.sourceTarget ?? agent,
+      },
+      agent,
+    );
+  }
+  return replaceAdaptedVariants(
+    state,
+    {
+      claude: result.variants?.claude ?? '',
+      codex: result.variants?.codex ?? '',
+      opencode: result.variants?.opencode ?? '',
+    },
+    agent,
+  );
 }
 
 /**

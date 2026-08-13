@@ -455,3 +455,17 @@ export const ProviderManagerIcon = ({ size, ...rest }: IconProps) => (
     <path d="M8.5 8l-2 2.5 2 2.5" />
   </svg>
 );
+
+/**
+ * Business Logic（为什么需要）:
+ *   Agent Hub 提示词「AI 辅助修改」按钮需要统一的火花图标，避免页面内硬编码 SVG。
+ *
+ * Code Logic（做什么）:
+ *   渲染四向火花 16x16 stroke SVG，继承通用 icon 尺寸与描边规范。
+ */
+export const SparkleIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M8 1.5v3.2M8 11.3V14.5M1.5 8h3.2M11.3 8H14.5" />
+    <path d="M3.4 3.4l2.2 2.2M10.4 10.4l2.2 2.2M12.6 3.4l-2.2 2.2M5.6 10.4l-2.2 2.2" />
+  </svg>
+);

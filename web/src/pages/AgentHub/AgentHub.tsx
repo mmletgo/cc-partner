@@ -133,6 +133,18 @@ export function AgentHubView(props: AgentHubViewProps) {
       blockBodyPlaceholder: t('agentHub:instructions.threePane.blockBodyPlaceholder'),
       commonMarkdown: t('agentHub:instructions.threePane.commonMarkdown'),
       saveBlocks: t('agentHub:instructions.threePane.saveBlocks'),
+      aiRevise: t('agentHub:instructions.threePane.aiRevise'),
+      aiReviseTitle: t('agentHub:instructions.threePane.aiReviseTitle'),
+      aiReviseDescriptionCommon: t('agentHub:instructions.threePane.aiReviseDescriptionCommon'),
+      aiReviseDescriptionExclusive: t(
+        'agentHub:instructions.threePane.aiReviseDescriptionExclusive',
+      ),
+      aiReviseDescriptionAdapted: t('agentHub:instructions.threePane.aiReviseDescriptionAdapted'),
+      aiReviseDirectionLabel: t('agentHub:instructions.threePane.aiReviseDirectionLabel'),
+      aiReviseDirectionPlaceholder: t(
+        'agentHub:instructions.threePane.aiReviseDirectionPlaceholder',
+      ),
+      aiReviseConfirm: t('agentHub:instructions.threePane.aiReviseConfirm'),
       adaptToOtherAgents: t('agentHub:instructions.threePane.adaptToOtherAgents'),
       syncToNative: t('agentHub:instructions.threePane.syncToNative'),
       unsavedDraft: t('agentHub:instructions.threePane.unsavedDraft'),
@@ -360,12 +372,22 @@ export function AgentHubView(props: AgentHubViewProps) {
             writeBlockedReason={instructionThreePane.writeBlockedReason}
             dualDirtyOpen={instructionThreePane.dualDirtyOpen}
             analyzeConfirmOpen={instructionThreePane.analyzeConfirmOpen}
+            aiReviseOpen={instructionThreePane.aiReviseOpen}
+            aiReviseDirection={instructionThreePane.aiReviseDirection}
+            aiReviseError={instructionThreePane.aiReviseError}
+            aiReviseDisabled={instructionThreePane.aiReviseDisabled}
             onAnalyzeDecompose={instructionThreePane.analyzeDecompose}
             onAdaptToOtherAgents={() => {
               void instructionThreePane.adaptToOtherAgents();
             }}
             onSaveBlocks={() => {
               void instructionThreePane.saveBlocks();
+            }}
+            onOpenAiRevise={instructionThreePane.openAiRevise}
+            onAiReviseDirectionChange={instructionThreePane.setAiReviseDirection}
+            onCancelAiRevise={instructionThreePane.cancelAiRevise}
+            onConfirmAiRevise={() => {
+              void instructionThreePane.confirmAiRevise();
             }}
             onRequestSync={() => {
               void instructionThreePane.requestSync();

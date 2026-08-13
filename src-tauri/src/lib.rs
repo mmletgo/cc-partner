@@ -436,6 +436,7 @@ pub fn run() {
             agent_hub_cmd::agent_hub_apply_cross_agent_full,
             agent_hub_cmd::agent_hub_analyze_instruction_original,
             agent_hub_cmd::agent_hub_adapt_instruction_to_other_agents,
+            agent_hub_cmd::agent_hub_revise_instruction_slot,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

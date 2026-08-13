@@ -111,6 +111,7 @@ export const AGENT_HUB_COMMANDS = {
   applyCrossAgentFull: 'agent_hub_apply_cross_agent_full',
   analyzeInstructionOriginal: 'agent_hub_analyze_instruction_original',
   adaptInstructionToOtherAgents: 'agent_hub_adapt_instruction_to_other_agents',
+  reviseInstructionSlot: 'agent_hub_revise_instruction_slot',
 } as const;
 
 /**
@@ -1102,6 +1103,39 @@ export const agentHubApi = {
       request: {
         sourceAgent: request.sourceAgent,
         adaptedMarkdown: request.adaptedMarkdown,
+      },
+    });
+  },
+
+  /**
+   * Business Logic: 三槽 AI 辅助改写 — 按方向改当前 lane 并返回新正文（保存由前端 saveBlocks）。
+   * Code Logic: agent_hub_revise_instruction_slot；仅本机用户级。
+   */
+  reviseInstructionSlot: async (request: {
+    lane: 'common' | 'adapted' | 'exclusive';
+    agent: string;
+    direction: string;
+    commonMarkdown?: string | null;
+    exclusiveMarkdown?: string | null;
+    adaptedVariants?: Partial<Record<string, string>> | null;
+    deviceId?: string | null;
+    projectRef?: string | null;
+  }): Promise<{
+    common?: string | null;
+    exclusive?: string | null;
+    variants?: Partial<Record<string, string>> | null;
+  }> => {
+    if (request.deviceId || request.projectRef) {
+      throw createAgentHubBlockedError(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    }
+    return invoke(AGENT_HUB_COMMANDS.reviseInstructionSlot, {
+      request: {
+        lane: request.lane,
+        agent: request.agent,
+        direction: request.direction,
+        commonMarkdown: request.commonMarkdown ?? null,
+        exclusiveMarkdown: request.exclusiveMarkdown ?? null,
+        adaptedVariants: request.adaptedVariants ?? null,
       },
     });
   },

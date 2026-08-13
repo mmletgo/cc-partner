@@ -812,6 +812,95 @@ pub struct AdaptInstructionToOtherAgentsResult {
     pub variants: BTreeMap<String, String>,
 }
 
+/// AI 辅助改写当前提示词槽请求。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviseInstructionSlotRequest {
+    pub lane: String,
+    pub agent: String,
+    pub direction: String,
+    pub common_markdown: Option<String>,
+    pub exclusive_markdown: Option<String>,
+    pub adapted_variants: Option<BTreeMap<String, String>>,
+}
+
+/// AI 辅助改写结果：按 lane 只填对应字段。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviseInstructionSlotResult {
+    pub common: Option<String>,
+    pub exclusive: Option<String>,
+    pub variants: Option<BTreeMap<String, String>>,
+}
+
+/// 已通过校验的改写任务（按 lane 携带当前正文）。
+#[derive(Debug)]
+enum PreparedReviseLane {
+    Common { current: String },
+    Exclusive { current: String },
+    Adapted { variants: BTreeMap<String, String> },
+}
+
+#[derive(Debug)]
+struct PreparedRevise {
+    agent: String,
+    direction: String,
+    lane: PreparedReviseLane,
+}
+
+/// Business Logic: 改写命令在调 Claude 前必须拒绝空方向 / 非法 lane / 超长输入。
+/// Code Logic: trim direction；lane 归一；适配补齐三端；合计字符不超过上限。
+fn prepare_revise_instruction_slot(
+    request: &ReviseInstructionSlotRequest,
+) -> Result<PreparedRevise, AppError> {
+    let direction = request.direction.trim();
+    if direction.is_empty() {
+        return Err(AppError::validation("INSTRUCTION_REVISE_EMPTY_DIRECTION"));
+    }
+    let agent = normalize_agent_target_token(&request.agent)?;
+    let lane = match request.lane.trim() {
+        "common" => PreparedReviseLane::Common {
+            current: request.common_markdown.clone().unwrap_or_default(),
+        },
+        "exclusive" => PreparedReviseLane::Exclusive {
+            current: request.exclusive_markdown.clone().unwrap_or_default(),
+        },
+        "adapted" => {
+            let incoming = request.adapted_variants.clone().unwrap_or_default();
+            let mut variants = BTreeMap::new();
+            for key in ["claude", "codex", "opencode"] {
+                variants.insert(
+                    key.to_string(),
+                    incoming.get(key).cloned().unwrap_or_default(),
+                );
+            }
+            PreparedReviseLane::Adapted { variants }
+        }
+        _ => return Err(AppError::validation("INSTRUCTION_REVISE_LANE_INVALID")),
+    };
+
+    let mut chars = direction.chars().count();
+    match &lane {
+        PreparedReviseLane::Common { current } | PreparedReviseLane::Exclusive { current } => {
+            chars = chars.saturating_add(current.chars().count());
+        }
+        PreparedReviseLane::Adapted { variants } => {
+            for text in variants.values() {
+                chars = chars.saturating_add(text.chars().count());
+            }
+        }
+    }
+    if chars > MAX_INSTRUCTION_LLM_CHARS {
+        return Err(AppError::validation("INSTRUCTION_REVISE_INPUT_TOO_LARGE"));
+    }
+
+    Ok(PreparedRevise {
+        agent,
+        direction: direction.to_string(),
+        lane,
+    })
+}
+
 const INSTRUCTION_LLM_TIMEOUT_SECS: u64 = 180;
 const MAX_INSTRUCTION_LLM_CHARS: usize = 80_000;
 
@@ -1209,6 +1298,164 @@ pub async fn agent_hub_adapt_instruction_to_other_agents(
     Ok(AdaptInstructionToOtherAgentsResult { variants })
 }
 
+/// Business Logic: 按用户方向改写当前 lane 槽（公共/独有单槽，适配覆盖三端）。
+/// Code Logic: 校验 → Claude structured JSON；GuiClient 可直跑（只读 CLI）。
+#[tauri::command]
+pub async fn agent_hub_revise_instruction_slot(
+    state: State<'_, AppState>,
+    request: ReviseInstructionSlotRequest,
+) -> Result<ReviseInstructionSlotResult, AppError> {
+    let prepared = prepare_revise_instruction_slot(&request)?;
+    let (cli_path, model, provider_id) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.github_trending.claude_cli_path.clone(),
+            cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
+        )
+    };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
+    match prepared.lane {
+        PreparedReviseLane::Common { current } => {
+            let schema = serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["text"],
+                "properties": { "text": { "type": "string" } }
+            });
+            let prompt = format!(
+                "You revise the SHARED (cross-agent) instruction slot for Agent Hub.\n\
+                 Current viewing agent: {agent}\n\
+                 Do NOT add agent-specific CLI names, config paths, instruction-file names, or model ids.\n\
+                 Follow the user's revision direction. Keep the original language. Do not invent facts.\n\
+                 Return ONLY JSON with key text.\n\
+                 Empty string is allowed if the direction asks to remove everything.\n\
+                 \n\
+                 Current shared markdown:\n---\n{current}\n---\n\
+                 User revision direction:\n---\n{direction}\n---",
+                agent = prepared.agent,
+                current = current,
+                direction = prepared.direction,
+            );
+            let raw = crate::claude_cli::run_structured_json_with_cwd::<BTreeMap<String, String>>(
+                &cli_path,
+                &model,
+                provider_dir.as_deref(),
+                &schema.to_string(),
+                &prompt,
+                None,
+                INSTRUCTION_LLM_TIMEOUT_SECS,
+                "AI 辅助修改公共提示词",
+            )
+            .await?;
+            Ok(ReviseInstructionSlotResult {
+                common: Some(raw.get("text").cloned().unwrap_or_default()),
+                exclusive: None,
+                variants: None,
+            })
+        }
+        PreparedReviseLane::Exclusive { current } => {
+            let schema = serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["text"],
+                "properties": { "text": { "type": "string" } }
+            });
+            let prompt = format!(
+                "You revise the EXCLUSIVE (target-only) instruction slot for one coding agent.\n\
+                 Target agent: {agent}\n\
+                 Only include content unique to this agent (no isomorphic rewrite for others).\n\
+                 Follow the user's revision direction. Keep the original language. Do not invent facts.\n\
+                 Return ONLY JSON with key text.\n\
+                 Empty string is allowed if the direction asks to remove everything.\n\
+                 \n\
+                 Current exclusive markdown:\n---\n{current}\n---\n\
+                 User revision direction:\n---\n{direction}\n---",
+                agent = prepared.agent,
+                current = current,
+                direction = prepared.direction,
+            );
+            let raw = crate::claude_cli::run_structured_json_with_cwd::<BTreeMap<String, String>>(
+                &cli_path,
+                &model,
+                provider_dir.as_deref(),
+                &schema.to_string(),
+                &prompt,
+                None,
+                INSTRUCTION_LLM_TIMEOUT_SECS,
+                "AI 辅助修改独有提示词",
+            )
+            .await?;
+            Ok(ReviseInstructionSlotResult {
+                common: None,
+                exclusive: Some(raw.get("text").cloned().unwrap_or_default()),
+                variants: None,
+            })
+        }
+        PreparedReviseLane::Adapted { variants } => {
+            let schema = serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["claude", "codex", "opencode"],
+                "properties": {
+                    "claude": { "type": "string" },
+                    "codex": { "type": "string" },
+                    "opencode": { "type": "string" }
+                }
+            });
+            let claude = variants.get("claude").cloned().unwrap_or_default();
+            let codex = variants.get("codex").cloned().unwrap_or_default();
+            let opencode = variants.get("opencode").cloned().unwrap_or_default();
+            let prompt = format!(
+                "You revise ALL agents' ADAPTED instruction variants in one pass.\n\
+                 Agents: claude, codex, opencode\n\
+                 Current viewing agent: {agent}\n\
+                 Follow the user's revision direction for every agent.\n\
+                 Keep isomorphic intent across agents; only swap surface wording\n\
+                 (CLI names, config roots, instruction files, concrete model ids).\n\
+                 Generate a variant even if that agent's current text is empty.\n\
+                 Do not move exclusive-only capabilities into adapted.\n\
+                 Keep the original language. Do not invent facts or fake model product names.\n\
+                 Return ONLY JSON whose keys are exactly claude, codex, opencode.\n\
+                 Empty string is allowed for an agent when nothing remains after revision.\n\
+                 \n\
+                 Current adapted variants:\n\
+                 claude:\n---\n{claude}\n---\n\
+                 codex:\n---\n{codex}\n---\n\
+                 opencode:\n---\n{opencode}\n---\n\
+                 User revision direction:\n---\n{direction}\n---",
+                agent = prepared.agent,
+                claude = claude,
+                codex = codex,
+                opencode = opencode,
+                direction = prepared.direction,
+            );
+            let raw = crate::claude_cli::run_structured_json_with_cwd::<BTreeMap<String, String>>(
+                &cli_path,
+                &model,
+                provider_dir.as_deref(),
+                &schema.to_string(),
+                &prompt,
+                None,
+                INSTRUCTION_LLM_TIMEOUT_SECS,
+                "AI 辅助修改适配提示词",
+            )
+            .await?;
+            let mut out = BTreeMap::new();
+            for key in ["claude", "codex", "opencode"] {
+                out.insert(key.to_string(), raw.get(key).cloned().unwrap_or_default());
+            }
+            Ok(ReviseInstructionSlotResult {
+                common: None,
+                exclusive: None,
+                variants: Some(out),
+            })
+        }
+    }
+}
+
 fn normalize_agent_target_token(value: &str) -> Result<String, AppError> {
     match value.trim() {
         "claude" | "codex" | "opencode" => Ok(value.trim().to_string()),
@@ -1306,6 +1553,59 @@ mod tests {
                 || out.adapted.contains("sonnet")
                 || out.adapted.contains("implementation")
         );
+    }
+
+    fn revise_request(lane: &str, direction: &str, agent: &str) -> ReviseInstructionSlotRequest {
+        ReviseInstructionSlotRequest {
+            lane: lane.to_string(),
+            agent: agent.to_string(),
+            direction: direction.to_string(),
+            common_markdown: None,
+            exclusive_markdown: None,
+            adapted_variants: None,
+        }
+    }
+
+    #[test]
+    fn prepare_revise_rejects_empty_direction() {
+        let err = prepare_revise_instruction_slot(&revise_request("common", "   ", "claude"))
+            .unwrap_err();
+        assert_eq!(err.code(), "INSTRUCTION_REVISE_EMPTY_DIRECTION");
+    }
+
+    #[test]
+    fn prepare_revise_rejects_invalid_lane() {
+        let err = prepare_revise_instruction_slot(&revise_request("preview", "shorter", "claude"))
+            .unwrap_err();
+        assert_eq!(err.code(), "INSTRUCTION_REVISE_LANE_INVALID");
+    }
+
+    #[test]
+    fn prepare_revise_rejects_invalid_agent() {
+        let err = prepare_revise_instruction_slot(&revise_request("common", "shorter", "gemini"))
+            .unwrap_err();
+        assert_eq!(err.code(), "CROSS_AGENT_TARGET_INVALID");
+    }
+
+    #[test]
+    fn prepare_revise_rejects_oversized_input() {
+        let huge = "汉".repeat(MAX_INSTRUCTION_LLM_CHARS);
+        let mut request = revise_request("common", "再改短一点", "claude");
+        request.common_markdown = Some(huge);
+        let err = prepare_revise_instruction_slot(&request).unwrap_err();
+        assert_eq!(err.code(), "INSTRUCTION_REVISE_INPUT_TOO_LARGE");
+    }
+
+    #[test]
+    fn prepare_revise_accepts_empty_common_slot() {
+        let prepared = prepare_revise_instruction_slot(&revise_request(
+            "common",
+            "写成更短的验收标准",
+            "codex",
+        ))
+        .unwrap();
+        assert_eq!(prepared.agent, "codex");
+        assert!(matches!(prepared.lane, PreparedReviseLane::Common { .. }));
     }
 
     /// Business Logic: 纯语义公共段落在适配无重叠时应保留。

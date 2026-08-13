@@ -199,6 +199,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - Codex 默认持久文件使用 adapter 解析的 `AGENTS.md`，不得静默创建会遮蔽 base 的 `AGENTS.override.md`；OpenCode 必须识别原生 `AGENTS.md`、Claude fallback 及兼容禁用环境变量
 - instruction UI 不直接暴露 `desiredPresence × desiredEnabled`；停止管理并保留文件、暂停使用、单 target 移除与 canonical tombstone 是四个不同操作，覆盖/删除必须校验 ownership 与 expected hash
 - LAN/Git 导入只表示 canonical 已进入 Hub，不自动应用到本机 Agent；用户仍需在提示词页面点击“写入原始文件”。公共槽不显示 Agent 选择，写入时覆盖所有当前可写目标；适配/独有槽只写当前 Agent
+- 提示词三槽（公共 / 适配 / 独有）提供「AI 辅助提示词修改」：用户给出改写方向，本机 Claude Code 只改当前 lane 对应槽（适配覆盖全部 Agent 适配变体），并保存到 Canonical；不自动写入 Agent 原始文件
 - 权威合同：[`docs/superpowers/specs/2026-08-04-agent-hub-user-instruction-management-v2-design.md`](superpowers/specs/2026-08-04-agent-hub-user-instruction-management-v2-design.md)
 
 ### 2.6 设备自动发现与互联
