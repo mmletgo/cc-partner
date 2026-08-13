@@ -289,7 +289,7 @@ fn load_codex_titles(home: &Path) -> HashMap<String, String> {
         return HashMap::new();
     };
     let mut map = HashMap::new();
-    for line in BufReader::new(file).lines().flatten() {
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

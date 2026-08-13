@@ -372,7 +372,7 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
         AgentTarget::Codex,
         AgentTarget::OpenCode,
     ] {
-        let inv = build_remote_inventory_for_target(&state_a, target)
+        let inv = build_remote_inventory_for_target(&state_a, target, None)
             .await
             .expect("inventory");
         assert!(
@@ -401,7 +401,7 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
             .collect();
         assert!(!pick.is_empty(), "{target:?} selection");
 
-        let selection = source_prepare_selection(&state_a, target, pick.clone())
+        let selection = source_prepare_selection(&state_a, target, None, pick.clone())
             .await
             .expect("selection");
         assert!(
@@ -449,6 +449,7 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
         .post(format!("{base_url}/api/agent-hub/portable/inventory"))
         .json(&RemoteInventoryQuery {
             source_target: AgentTarget::Claude,
+            source_local_project_id: None,
         })
         .send()
         .await
@@ -474,6 +475,7 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
             .post(format!("{base_url}/api/agent-hub/portable/selection"))
             .json(&RemoteSelectionQuery {
                 source_target: AgentTarget::Claude,
+                source_local_project_id: None,
                 inventory_item_ids: ids,
             })
             .send()
@@ -516,6 +518,9 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
             source_device_id: SOURCE_DEVICE.into(),
             source_target: AgentTarget::Claude,
             destination_target: AgentTarget::Codex,
+            source_local_project_id: None,
+            source_project_ref: None,
+            destination_local_project_id: None,
             remote_inventory_snapshot_hash: claude_inv.inventory_snapshot_hash.clone(),
             inventory_item_ids: vec![some_id],
             conflict_policy: PortableAssetConflictPolicy::SkipExisting,
@@ -571,7 +576,7 @@ async fn l2_agent_hub_portable_pull_001_chunk_interrupt_resume() {
         .await
         .expect("state");
 
-    let inv = build_remote_inventory_for_target(&state_a, AgentTarget::Claude)
+    let inv = build_remote_inventory_for_target(&state_a, AgentTarget::Claude, None)
         .await
         .unwrap();
     let ids: Vec<_> = inv
@@ -582,7 +587,7 @@ async fn l2_agent_hub_portable_pull_001_chunk_interrupt_resume() {
         .map(|i| i.inventory_item_id.clone())
         .collect();
     assert!(!ids.is_empty());
-    let sel = source_prepare_selection(&state_a, AgentTarget::Claude, ids)
+    let sel = source_prepare_selection(&state_a, AgentTarget::Claude, None, ids)
         .await
         .unwrap();
     let obj = sel.envelope.objects.first().expect("object");

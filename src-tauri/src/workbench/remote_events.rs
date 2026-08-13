@@ -2780,7 +2780,7 @@ async fn resync_remote_bridge_after_gap(
         let (list_epoch, previous_ids) = if !local_shortcut_id.trim().is_empty() {
             state
                 .workbench_remote_event_bridges
-                .project_watch_epoch_and_running(device_id, &local_shortcut_id)
+                .project_watch_epoch_and_running(device_id, local_shortcut_id)
         } else {
             (0, HashSet::new())
         };
@@ -2852,7 +2852,7 @@ async fn resync_remote_bridge_after_gap(
                 .workbench_remote_event_bridges
                 .reconcile_session_watches_for_project_if_epoch(
                     device_id,
-                    &local_shortcut_id,
+                    local_shortcut_id,
                     &running_ids,
                     list_epoch,
                 )

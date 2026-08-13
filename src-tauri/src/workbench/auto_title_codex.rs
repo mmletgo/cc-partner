@@ -91,11 +91,9 @@ pub fn read_session_index_from_offset(
         file.seek(SeekFrom::Start(0))?;
         let reader = BufReader::new(file);
         let mut lines = Vec::new();
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                if let Some(parsed) = parse_session_index_line(&l) {
-                    lines.push(parsed);
-                }
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(parsed) = parse_session_index_line(&line) {
+                lines.push(parsed);
             }
         }
         return Ok((len, lines));
@@ -103,11 +101,9 @@ pub fn read_session_index_from_offset(
     file.seek(SeekFrom::Start(offset))?;
     let reader = BufReader::new(file);
     let mut lines = Vec::new();
-    for line in reader.lines() {
-        if let Ok(l) = line {
-            if let Some(parsed) = parse_session_index_line(&l) {
-                lines.push(parsed);
-            }
+    for line in reader.lines().map_while(Result::ok) {
+        if let Some(parsed) = parse_session_index_line(&line) {
+            lines.push(parsed);
         }
     }
     Ok((len, lines))

@@ -139,10 +139,10 @@ pub fn agent_may_auto_title_window(
     if pane_count <= 1 {
         return true;
     }
-    match (title_owner_pane, agent_pane) {
-        (Some(owner), Some(agent)) if !owner.is_empty() && owner == agent => true,
-        _ => false,
-    }
+    matches!(
+        (title_owner_pane, agent_pane),
+        (Some(owner), Some(agent)) if !owner.is_empty() && owner == agent
+    )
 }
 
 /// 规范化路径用于 cwd 比较（失败则返回原字符串 trim）。
@@ -191,9 +191,7 @@ pub fn pick_terminal_for_claude_session(
     candidates: &[WorkbenchSessionRow],
     claude_cwd: Option<&str>,
 ) -> Option<String> {
-    let Some(cwd) = claude_cwd.map(str::trim).filter(|s| !s.is_empty()) else {
-        return None;
-    };
+    let cwd = claude_cwd.map(str::trim).filter(|s| !s.is_empty())?;
     let key = normalize_path_key(cwd);
     if key.is_empty() {
         return None;
@@ -223,9 +221,7 @@ pub fn pick_unique_terminal_for_cwd(
     candidates: &[WorkbenchSessionRow],
     claude_cwd: Option<&str>,
 ) -> Option<String> {
-    let Some(cwd) = claude_cwd.map(str::trim).filter(|s| !s.is_empty()) else {
-        return None;
-    };
+    let cwd = claude_cwd.map(str::trim).filter(|s| !s.is_empty())?;
     let key = normalize_path_key(cwd);
     if key.is_empty() {
         return None;

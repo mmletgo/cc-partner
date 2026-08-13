@@ -5443,21 +5443,19 @@ impl WorkbenchSessionRegistry {
                 run_tmux_command(&tmux, &["kill-pane", "-t", &target])?;
                 // title-owner 若被关掉：交接给剩余第一 pane；最近 auto 标题可重贴。
                 let mut renamed = None;
-                if let Some((_owner, last_title)) =
+                if let Some((_owner, Some(title))) =
                     self.reassign_title_owner_after_pane_close(session_id)
                 {
-                    if let Some(title) = last_title {
-                        let source = {
-                            let handle = self.get_handle(session_id)?;
-                            let handle = handle.lock().expect("workbench session 锁中毒");
-                            SessionNameSource::parse(&handle.row.name_source)
-                        };
-                        if !matches!(source, SessionNameSource::Manual) {
-                            if let Ok(row) =
-                                self.rename_with_source(session_id, &title, SessionNameSource::Auto)
-                            {
-                                renamed = Some(row);
-                            }
+                    let source = {
+                        let handle = self.get_handle(session_id)?;
+                        let handle = handle.lock().expect("workbench session 锁中毒");
+                        SessionNameSource::parse(&handle.row.name_source)
+                    };
+                    if !matches!(source, SessionNameSource::Manual) {
+                        if let Ok(row) =
+                            self.rename_with_source(session_id, &title, SessionNameSource::Auto)
+                        {
+                            renamed = Some(row);
                         }
                     }
                 }
