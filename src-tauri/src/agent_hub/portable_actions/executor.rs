@@ -448,8 +448,10 @@ async fn execute_claimed_plan(
     // 漂移的边界场景。保留比删除安全。
     // 同一逻辑键若出现多个 post item（理论不应发生），优先取 actual_enabled 与 action
     // 期望一致的；都一致则取最后一个（保持与既有覆盖式 collect 语义一致）。
-    let mut post_by_logical_key: BTreeMap<(AgentTarget, String, String), &PortableInventoryItemDto> =
-        BTreeMap::new();
+    let mut post_by_logical_key: BTreeMap<
+        (AgentTarget, String, String),
+        &PortableInventoryItemDto,
+    > = BTreeMap::new();
     for item in post.items.iter() {
         let key = (item.target, item.scope_id.clone(), item.native_id.clone());
         match post_by_logical_key.get(&key) {
@@ -483,12 +485,7 @@ async fn execute_claimed_plan(
             change.kind,
             &raw,
             pre.as_ref(),
-            resolve_post_item(
-                &item_id,
-                pre.as_ref(),
-                &post_by_id,
-                &post_by_logical_key,
-            ),
+            resolve_post_item(&item_id, pre.as_ref(), &post_by_id, &post_by_logical_key),
         );
         items.push(PortableAssetActionItemResultDto {
             inventory_item_id: item_id,
@@ -1233,15 +1230,26 @@ mod tests {
         // 不同路径产出相同 id。
         let stable_id = inventory_item_id(target, scope_id, "standalone", native_id);
 
-        let pre_item = sample_item(target, PortableAssetKind::Skill, native_id, pre_path, Some(true));
+        let pre_item = sample_item(
+            target,
+            PortableAssetKind::Skill,
+            native_id,
+            pre_path,
+            Some(true),
+        );
         assert_eq!(
             pre_item.inventory_item_id, stable_id,
             "pre item id must be the path-independent stable id"
         );
 
         // post item 用 disabled 路径独立构造，模拟 scanner 重新扫描得到的真实 inventory。
-        let mut post_item =
-            sample_item(target, PortableAssetKind::Skill, native_id, post_path, Some(false));
+        let mut post_item = sample_item(
+            target,
+            PortableAssetKind::Skill,
+            native_id,
+            post_path,
+            Some(false),
+        );
         assert_eq!(
             post_item.inventory_item_id, stable_id,
             "post item id must equal pre id (path-independent)"
@@ -1252,17 +1260,28 @@ mod tests {
             [(post_item.inventory_item_id.clone(), &post_item)]
                 .into_iter()
                 .collect();
-        let post_by_logical_key: BTreeMap<(AgentTarget, String, String), &PortableInventoryItemDto> =
-            [(
-                (post_item.target, post_item.scope_id.clone(), post_item.native_id.clone()),
-                &post_item,
-            )]
-            .into_iter()
-            .collect();
+        let post_by_logical_key: BTreeMap<
+            (AgentTarget, String, String),
+            &PortableInventoryItemDto,
+        > = [(
+            (
+                post_item.target,
+                post_item.scope_id.clone(),
+                post_item.native_id.clone(),
+            ),
+            &post_item,
+        )]
+        .into_iter()
+        .collect();
 
         // 精确匹配命中 post（路径无关 → pre id == post id，不需要 fallback）。
-        let resolved = resolve_post_item(&stable_id, Some(&pre_item), &post_by_id, &post_by_logical_key)
-            .expect("exact match must hit post item");
+        let resolved = resolve_post_item(
+            &stable_id,
+            Some(&pre_item),
+            &post_by_id,
+            &post_by_logical_key,
+        )
+        .expect("exact match must hit post item");
         assert_eq!(resolved.inventory_item_id, stable_id);
         assert_eq!(resolved.actual_enabled, Some(false));
 
@@ -1296,8 +1315,10 @@ mod tests {
             Some(true),
         );
         pre_item.content_hash = Some(hash);
-        let snap =
-            snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![pre_item.clone()]);
+        let snap = snapshot_from(
+            vec![sample_target(AgentTarget::Claude)],
+            vec![pre_item.clone()],
+        );
         let plan = preview_action(
             &repo,
             &snap,
@@ -1318,8 +1339,7 @@ mod tests {
             Some(false),
         );
         assert_eq!(
-            post_item.inventory_item_id,
-            pre_item.inventory_item_id,
+            post_item.inventory_item_id, pre_item.inventory_item_id,
             "path-independent id must be equal across active/disabled paths"
         );
         let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);

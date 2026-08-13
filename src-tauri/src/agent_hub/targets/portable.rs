@@ -1707,8 +1707,8 @@ args = ["mcp"]
 enabled = true
 "#;
         let path = PathBuf::from("/tmp/codex-config.toml");
-        let found = parse_codex_mcp_toml(AgentTarget::Codex, ScopeKind::User, text, &path)
-            .expect("parse");
+        let found =
+            parse_codex_mcp_toml(AgentTarget::Codex, ScopeKind::User, text, &path).expect("parse");
         assert_eq!(found.len(), 1);
         let owned = TomlConfigPatcher
             .inspect(text.as_bytes(), &["mcp_servers".into(), "node_repl".into()])

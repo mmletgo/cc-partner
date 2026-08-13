@@ -212,12 +212,8 @@ fn is_ensure_candidate(item: &PortableInventoryItemDto) -> bool {
 ///
 /// Business Logic: cache/data/staging 等不是 plugin package，Synced 会污染 Plugin 页。
 /// Code Logic: 扫 plugin assets × mats；路径末段或 logical_key 命中基础设施 → Detached。
-async fn prune_infrastructure_plugin_materializations(
-    repo: &AgentHubRepo,
-) -> Result<(), AppError> {
-    let assets = repo
-        .list_assets(None, Some(AssetKind::Plugin))
-        .await?;
+async fn prune_infrastructure_plugin_materializations(repo: &AgentHubRepo) -> Result<(), AppError> {
+    let assets = repo.list_assets(None, Some(AssetKind::Plugin)).await?;
     let mats = repo.list_materializations().await?;
     let plugin_ids: std::collections::BTreeSet<String> = assets
         .iter()
@@ -407,9 +403,7 @@ async fn ensure_one_item(
                         // ExternalCollision 已在上方 skip；Blocked/Detached 已单独分支
                         MaterializationStatus::ExternalCollision
                         | MaterializationStatus::Blocked
-                        | MaterializationStatus::Detached => {
-                            (mat.status, mat.last_error.clone())
-                        }
+                        | MaterializationStatus::Detached => (mat.status, mat.last_error.clone()),
                     },
                 };
                 (
@@ -980,10 +974,7 @@ mod tests {
             "/Users/h/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/x"
                 .into(),
         );
-        assert_eq!(
-            origin_namespace_for_item(&item),
-            "plugin:superpowers"
-        );
+        assert_eq!(origin_namespace_for_item(&item), "plugin:superpowers");
     }
 
     /// 生产故障：hash 已一致仍 status=drift 时，ensure 不得钉死 Drift。
@@ -1022,7 +1013,10 @@ mod tests {
         let mut items2 = vec![sample_item(&home, "review", "hash-aligned")];
         let report2 = ensure_discovered_portable_items_managed(&repo, &mut items2).await;
         assert!(report2.failures.is_empty(), "{:?}", report2.failures);
-        assert!(report2.ensured >= 1, "false drift must be rewritten; {report2:?}");
+        assert!(
+            report2.ensured >= 1,
+            "false drift must be rewritten; {report2:?}"
+        );
 
         let mats2 = repo.list_materializations().await.unwrap();
         let mat2 = mats2
@@ -1055,10 +1049,8 @@ mod tests {
 
         let root = tempfile::TempDir::new().unwrap();
         let home = root.path().join("home");
-        let old_path = home
-            .join(".codex/plugins/cache/openai-bundled/browser/26.803.41515");
-        let new_path = home
-            .join(".codex/plugins/cache/openai-bundled/browser/26.803.61601");
+        let old_path = home.join(".codex/plugins/cache/openai-bundled/browser/26.803.41515");
+        let new_path = home.join(".codex/plugins/cache/openai-bundled/browser/26.803.61601");
         fs::create_dir_all(&new_path).unwrap();
         let repo = open_repo(&root.path().join("data.db")).await;
 

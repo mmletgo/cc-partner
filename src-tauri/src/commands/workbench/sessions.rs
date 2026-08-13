@@ -10,8 +10,8 @@ use crate::claude_cli;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::agent_session_search::{
-    build_resume_command, check_agent_cli_available, preview_codex_session, preview_opencode_session,
-    search_codex_sessions, search_opencode_sessions, AgentSessionSource,
+    build_resume_command, check_agent_cli_available, preview_codex_session,
+    preview_opencode_session, search_codex_sessions, search_opencode_sessions, AgentSessionSource,
 };
 use crate::workbench::claude_sessions::{
     ensure_worktree_session_index_scanned, search_sessions_result, to_session_preview,
@@ -1274,9 +1274,7 @@ pub(crate) async fn local_rename_workbench_session(
         Ok(row) => {
             state.workbench_session_repo.upsert(&row).await?;
             crate::workbench::sessions::emit_session_updated(state, &row);
-            Ok(row.to_dto_with_pane_count(
-                crate::workbench::sessions::pane_count_for_row(&row),
-            ))
+            Ok(row.to_dto_with_pane_count(crate::workbench::sessions::pane_count_for_row(&row)))
         }
         Err(AppError::NotFound(_)) => {
             let mut row = state
@@ -1773,11 +1771,9 @@ pub(crate) async fn search_agent_sessions_for_state(
     let worktree = resolve_worktree(state, &project, worktree_id).await?;
     match source {
         AgentSessionSource::Claude => {
-            let shared = ensure_worktree_session_index_scanned(
-                state,
-                std::path::Path::new(&worktree.path),
-            )
-            .await;
+            let shared =
+                ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path))
+                    .await;
             let index = shared.read().expect("session index 读锁中毒");
             Ok(search_sessions_result(&index, query, 50))
         }
@@ -1788,9 +1784,7 @@ pub(crate) async fn search_agent_sessions_for_state(
                 .await
                 .map_err(|e| AppError::generic(format!("Codex session 扫描 join 失败: {e}")))
         }
-        AgentSessionSource::OpenCode => {
-            search_opencode_sessions(&worktree.path, query, 50).await
-        }
+        AgentSessionSource::OpenCode => search_opencode_sessions(&worktree.path, query, 50).await,
     }
 }
 
@@ -1824,9 +1818,8 @@ pub async fn search_claude_sessions(
     {
         return Ok(v);
     }
-    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(
-        || AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
-    )?;
+    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude"))
+        .ok_or_else(|| AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"))?;
     search_agent_sessions_for_state(
         state.inner(),
         &project_id,
@@ -1878,11 +1871,9 @@ pub(crate) async fn get_agent_session_preview_for_state(
     let worktree = resolve_worktree(state, &project, worktree_id).await?;
     match source {
         AgentSessionSource::Claude => {
-            let shared = ensure_worktree_session_index_scanned(
-                state,
-                std::path::Path::new(&worktree.path),
-            )
-            .await;
+            let shared =
+                ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path))
+                    .await;
             let index = shared.read().expect("session index 读锁中毒");
             let claude_index: &ClaudeSessionIndex = index
                 .sessions
@@ -1897,9 +1888,7 @@ pub(crate) async fn get_agent_session_preview_for_state(
                 .await
                 .map_err(|e| AppError::generic(format!("Codex preview join 失败: {e}")))?
         }
-        AgentSessionSource::OpenCode => {
-            preview_opencode_session(&worktree.path, session_id).await
-        }
+        AgentSessionSource::OpenCode => preview_opencode_session(&worktree.path, session_id).await,
     }
 }
 
@@ -1933,9 +1922,8 @@ pub async fn get_claude_session_preview(
     {
         return Ok(v);
     }
-    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(
-        || AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
-    )?;
+    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude"))
+        .ok_or_else(|| AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"))?;
     get_agent_session_preview_for_state(
         state.inner(),
         &project_id,
@@ -2100,9 +2088,8 @@ pub async fn resume_claude_session(
     {
         return Ok(v);
     }
-    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(
-        || AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"),
-    )?;
+    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude"))
+        .ok_or_else(|| AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"))?;
     resume_agent_session_for_state(
         state.inner(),
         &project_id,

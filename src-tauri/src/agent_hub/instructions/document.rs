@@ -348,7 +348,11 @@ fn merge_mode_group(
     let common_joined = join_block_texts(&commons);
 
     let mut variants: BTreeMap<AgentTarget, String> = BTreeMap::new();
-    for target in [AgentTarget::Claude, AgentTarget::Codex, AgentTarget::OpenCode] {
+    for target in [
+        AgentTarget::Claude,
+        AgentTarget::Codex,
+        AgentTarget::OpenCode,
+    ] {
         let parts: Vec<&str> = group
             .iter()
             .filter_map(|b| b.variants.get(&target).map(String::as_str))
@@ -557,41 +561,35 @@ mod tests {
                     BTreeMap::from([(AgentTarget::Claude, "c1".into())]),
                     vec![],
                 ),
-                InstructionBlock::target_only(
-                    "t1",
-                    AgentTarget::Claude,
-                    "only-c",
-                    vec![],
-                    false,
-                ),
-                InstructionBlock::target_only(
-                    "t2",
-                    AgentTarget::Codex,
-                    "only-x",
-                    vec![],
-                    false,
-                ),
+                InstructionBlock::target_only("t1", AgentTarget::Claude, "only-c", vec![], false),
+                InstructionBlock::target_only("t2", AgentTarget::Codex, "only-x", vec![], false),
             ],
         };
         doc.normalize_to_three_slots();
         assert_eq!(doc.blocks.len(), 3);
         assert_eq!(doc.blocks[0].mode, InstructionBlockMode::Shared);
-        assert_eq!(
-            doc.blocks[0].common_markdown.as_deref(),
-            Some("A\n\nB")
-        );
+        assert_eq!(doc.blocks[0].common_markdown.as_deref(), Some("A\n\nB"));
         assert_eq!(doc.blocks[1].mode, InstructionBlockMode::Adapted);
         assert_eq!(
-            doc.blocks[1].variants.get(&AgentTarget::Claude).map(String::as_str),
+            doc.blocks[1]
+                .variants
+                .get(&AgentTarget::Claude)
+                .map(String::as_str),
             Some("c1")
         );
         assert_eq!(doc.blocks[2].mode, InstructionBlockMode::TargetOnly);
         assert_eq!(
-            doc.blocks[2].variants.get(&AgentTarget::Claude).map(String::as_str),
+            doc.blocks[2]
+                .variants
+                .get(&AgentTarget::Claude)
+                .map(String::as_str),
             Some("only-c")
         );
         assert_eq!(
-            doc.blocks[2].variants.get(&AgentTarget::Codex).map(String::as_str),
+            doc.blocks[2]
+                .variants
+                .get(&AgentTarget::Codex)
+                .map(String::as_str),
             Some("only-x")
         );
     }

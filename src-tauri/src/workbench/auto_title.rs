@@ -275,11 +275,7 @@ pub fn try_auto_rename_bound_title(
         }
     }
     let agent_pane = registry.agent_title_pane_for(&terminal_id, native_session_id);
-    if !agent_may_auto_title_window(
-        pane_count,
-        owner.as_deref(),
-        agent_pane.as_deref(),
-    ) {
+    if !agent_may_auto_title_window(pane_count, owner.as_deref(), agent_pane.as_deref()) {
         tracing::debug!(
             terminal_id = %terminal_id,
             pane_count,
@@ -420,10 +416,7 @@ pub fn bind_agent_title_pane_for_state(
 ///
 /// Code Logic（这个函数做什么）:
 ///     spawn 两个子任务：codex session_index 轮询 + opencode sqlite 轮询；监听 cancel。
-pub fn start_provider_title_pollers(
-    state: AppState,
-    cancel: tokio_util::sync::CancellationToken,
-) {
+pub fn start_provider_title_pollers(state: AppState, cancel: tokio_util::sync::CancellationToken) {
     let codex_state = state.clone();
     let codex_cancel = cancel.child_token();
     tauri::async_runtime::spawn(async move {
@@ -493,7 +486,11 @@ mod tests {
 
     #[test]
     fn should_apply_respects_manual_and_same_name() {
-        assert!(!should_apply_auto_title("a", SessionNameSource::Manual, "b"));
+        assert!(!should_apply_auto_title(
+            "a",
+            SessionNameSource::Manual,
+            "b"
+        ));
         assert!(!should_apply_auto_title(
             "same",
             SessionNameSource::Default,

@@ -912,13 +912,12 @@ pub(crate) fn user_plugin_package_root_paths(
     let candidates = match target {
         AgentTarget::Claude => claude_user_plugin_roots(config_root),
         AgentTarget::Codex => codex_user_plugin_roots(config_root),
-        AgentTarget::OpenCode => direct_manifest_plugin_roots(
-            &config_root.join("plugins"),
-            AgentTarget::OpenCode,
-        )
-        .into_iter()
-        .map(PluginRootCandidate::path_only)
-        .collect(),
+        AgentTarget::OpenCode => {
+            direct_manifest_plugin_roots(&config_root.join("plugins"), AgentTarget::OpenCode)
+                .into_iter()
+                .map(PluginRootCandidate::path_only)
+                .collect()
+        }
     };
     candidates.into_iter().map(|c| c.path).collect()
 }
@@ -1089,10 +1088,7 @@ fn codex_plugin_actual_enabled(
     }
     match matched {
         Some(v) => (v, None),
-        None => (
-            false,
-            Some("codex_plugin_not_in_config".into()),
-        ),
+        None => (false, Some("codex_plugin_not_in_config".into())),
     }
 }
 
@@ -2516,8 +2512,7 @@ enabled = false
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().to_path_buf();
         let codex = home.join(".codex");
-        let browser = codex
-            .join("plugins/cache/openai-bundled/browser/26.803.61601");
+        let browser = codex.join("plugins/cache/openai-bundled/browser/26.803.61601");
         write(
             &browser.join(".codex-plugin/plugin.json"),
             r#"{"name":"browser","version":"1"}"#,
@@ -2538,10 +2533,7 @@ enabled = false
 "#,
         );
         let mut vars = BTreeMap::new();
-        vars.insert(
-            "CODEX_HOME".into(),
-            codex.to_string_lossy().into_owned(),
-        );
+        vars.insert("CODEX_HOME".into(), codex.to_string_lossy().into_owned());
         let env = TargetEnvironment {
             home: home.clone(),
             vars,

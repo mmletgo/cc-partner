@@ -89,7 +89,6 @@ impl ClaudeHistoryRepo {
         Ok(())
     }
 
-
     /// 将数据库一行映射为 ClaudeHistoryRow（vector_clock JSON 反序列化、deleted int→bool）。
     fn row_to_claude_history(row: &SqliteRow) -> Result<ClaudeHistoryRow, AppError> {
         let vc_text: String = row.try_get("vector_clock")?;
@@ -1037,7 +1036,10 @@ mod tests {
         .await
         .unwrap();
         // 无搜索：2 条
-        let all = repo.list_by_project("/p", None, "d1", "d1", None).await.unwrap();
+        let all = repo
+            .list_by_project("/p", None, "d1", "d1", None)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 2);
         // 搜索 hello：1 条
         let filtered = repo
@@ -1062,7 +1064,10 @@ mod tests {
         .await
         .unwrap();
 
-        let all = repo.list_by_project(&main, None, "d1", "d1", None).await.unwrap();
+        let all = repo
+            .list_by_project(&main, None, "d1", "d1", None)
+            .await
+            .unwrap();
         let filtered = repo
             .list_by_project(&main, Some("shared"), "d1", "d1", None)
             .await
@@ -1094,7 +1099,10 @@ mod tests {
         let got = repo.get("a").await.unwrap().unwrap();
         assert!(got.deleted);
         assert_eq!(got.vector_clock.get("d1"), Some(&2));
-        let listed = repo.list_by_project("/p", None, "d1", "d1", None).await.unwrap();
+        let listed = repo
+            .list_by_project("/p", None, "d1", "d1", None)
+            .await
+            .unwrap();
         assert!(listed.is_empty());
         // get_all_for_sync 仍含已删除（同步需传播删除）
         let synced = repo.get_all_for_sync().await.unwrap();

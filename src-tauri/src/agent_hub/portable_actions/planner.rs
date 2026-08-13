@@ -444,7 +444,9 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::config_patch::{value_content_hash, SemanticConfigPatcher, TomlConfigPatcher};
+    use crate::agent_hub::config_patch::{
+        value_content_hash, SemanticConfigPatcher, TomlConfigPatcher,
+    };
     use crate::agent_hub::models::{AgentTarget, ScopeKind};
     use crate::agent_hub::portable_actions::models::PortableAssetConflictPolicy;
     use crate::agent_hub::portable_inventory::{

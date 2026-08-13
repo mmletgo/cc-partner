@@ -219,6 +219,32 @@ export function formatRestoreNotice(summary: WorkspaceRestoreSummary): string {
   return `已恢复 ${summary.restoredCount} 项，${summary.skippedCount} 项已跳过`;
 }
 
+/** 与后端 has_skip 白名单同档：未请求，不算真正失败。 */
+const NOT_REQUESTED_SKIP_REASONS = new Set([
+  'browserSkippedForNonBrowserView',
+  'browserNotRequested',
+  'worktreeNotRequested',
+  'sessionNotRequested',
+]);
+
+/** 良性 skip notice 展示后再自动关闭的时长。 */
+export const TRANSIENT_RESTORE_NOTICE_MS = 4000;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   首次打开强制 terminal 时跳过 leftover browser URL 是预期行为，
+ *   提示应弹出后消失，不能钉在顶栏；真实失败必须留下。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅当全部 reason 都是「未请求」白名单时视为 transient。
+ */
+export function isTransientRestoreNotice(summary: WorkspaceRestoreSummary): boolean {
+  if (summary.silent || summary.status === 'complete' || summary.reasons.length === 0) {
+    return false;
+  }
+  return summary.reasons.every((reason) => NOT_REQUESTED_SKIP_REASONS.has(reason));
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   apply 整单失败时 notice 必须露出稳定 code，不能只写 applyFailed。

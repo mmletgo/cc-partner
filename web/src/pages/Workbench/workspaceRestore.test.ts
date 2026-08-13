@@ -6,8 +6,10 @@ import {
   applyWorkspaceRestorePlan,
   classifyLayoutApplyError,
   formatRestoreNotice,
+  isTransientRestoreNotice,
   type WorkspaceRestoreBridge,
   type WorkspaceRestorePlan,
+  type WorkspaceRestoreSummary,
   type WorkspaceSelectionSnapshot,
 } from './workspaceRestore';
 
@@ -242,6 +244,48 @@ describe('applyWorkspaceRestorePlan', () => {
     expect(bridge.calls.some((call) => call.startsWith('browser:'))).toBe(false);
     expect(summary?.silent).toBe(true);
     expect(summary?.restoredCount).toBe(4);
+  });
+});
+
+describe('isTransientRestoreNotice', () => {
+  function summary(
+    overrides: Partial<WorkspaceRestoreSummary> = {},
+  ): WorkspaceRestoreSummary {
+    return {
+      restoreId: 'r1',
+      status: 'partial',
+      restoredCount: 5,
+      skippedCount: 1,
+      reasons: ['browserSkippedForNonBrowserView'],
+      silent: false,
+      dirtyEditorPreserved: true,
+      ...overrides,
+    };
+  }
+
+  it('treats not-requested skips as transient and keeps real failures pinned', () => {
+    expect(isTransientRestoreNotice(summary())).toBe(true);
+    expect(
+      isTransientRestoreNotice(
+        summary({
+          reasons: ['sessionNotRequested', 'browserNotRequested'],
+          skippedCount: 2,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isTransientRestoreNotice(
+        summary({ reasons: ['tmuxTargetMissing'], skippedCount: 1 }),
+      ),
+    ).toBe(false);
+    expect(
+      isTransientRestoreNotice(
+        summary({
+          reasons: ['browserSkippedForNonBrowserView', 'sessionMissing'],
+          skippedCount: 2,
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

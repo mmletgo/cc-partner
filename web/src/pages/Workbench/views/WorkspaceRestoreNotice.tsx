@@ -3,17 +3,23 @@
  *
  * Business Logic（为什么需要）:
  *   无法完整恢复时只显示一次可关闭摘要；完全成功静默。
+ *   仅含「未请求」skip 时弹出后自动消失，不钉在顶栏。
  *
  * Code Logic（做什么）:
  *   role=status；可展开 bounded reason codes；无 terminal 内容/绝对路径。
+ *   transient notice 在 TRANSIENT_RESTORE_NOTICE_MS 后调用 onDismiss。
  */
 
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives/Button';
 import type { WorkspaceRestoreSummary } from '../workspaceRestore';
-import { formatRestoreNotice } from '../workspaceRestore';
+import {
+  TRANSIENT_RESTORE_NOTICE_MS,
+  formatRestoreNotice,
+  isTransientRestoreNotice,
+} from '../workspaceRestore';
 import styles from '../Workbench.module.css';
 
 export interface WorkspaceRestoreNoticeProps {
@@ -27,6 +33,7 @@ export interface WorkspaceRestoreNoticeProps {
  *
  * Code Logic（这个函数做什么）:
  *   silent/null 不渲染；否则 status live region + 可选 reason 列表。
+ *   全部 reason 为未请求白名单时定时 onDismiss。
  */
 export function WorkspaceRestoreNotice(
   props: WorkspaceRestoreNoticeProps,
@@ -35,6 +42,14 @@ export function WorkspaceRestoreNotice(
   const { t } = useTranslation(['workbench']);
   const [expanded, setExpanded] = useState(false);
   const titleId = useId();
+
+  useEffect(() => {
+    if (!summary || !isTransientRestoreNotice(summary)) return;
+    const timer = window.setTimeout(() => {
+      onDismiss();
+    }, TRANSIENT_RESTORE_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [summary, onDismiss]);
 
   if (!summary || summary.silent || summary.status === 'complete') {
     return null;

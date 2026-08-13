@@ -635,7 +635,10 @@ impl ProductionScanner {
                 None => continue,
             };
             if asset_kind != AssetKind::Instruction {
-                match self.heal_portable_materialization_observation(&mat, &path).await {
+                match self
+                    .heal_portable_materialization_observation(&mat, &path)
+                    .await
+                {
                     Ok(true) => stats.external_revisions += 1,
                     Ok(false) => stats.hash_skips += 1,
                     Err(err) => {
@@ -910,8 +913,7 @@ impl ProductionScanner {
                 _ => false,
             };
             let clear_false_detached = mat.status == MaterializationStatus::Detached;
-            let clear_false_drift =
-                mat.status == MaterializationStatus::Drift && hashes_align;
+            let clear_false_drift = mat.status == MaterializationStatus::Drift && hashes_align;
             let status = if clear_false_detached || clear_false_drift {
                 MaterializationStatus::Synced
             } else {
@@ -1579,16 +1581,10 @@ mod tests {
         let store = ObjectStore::open(tmp.path()).unwrap();
         let scanner = ProductionScanner::new(repo.clone(), store);
         let cancel = CancellationToken::new();
-        let _ = scanner
-            .scan(&ScanScope::Full, &cancel)
-            .await
-            .expect("scan");
+        let _ = scanner.scan(&ScanScope::Full, &cancel).await.expect("scan");
 
         let mats = repo.list_materializations().await.unwrap();
-        let mat = mats
-            .iter()
-            .find(|m| m.asset_id == asset.id)
-            .expect("mat");
+        let mat = mats.iter().find(|m| m.asset_id == asset.id).expect("mat");
         assert_eq!(
             mat.status,
             MaterializationStatus::Synced,
@@ -1675,16 +1671,10 @@ mod tests {
         let store = ObjectStore::open(tmp.path()).unwrap();
         let scanner = ProductionScanner::new(repo.clone(), store);
         let cancel = CancellationToken::new();
-        let _ = scanner
-            .scan(&ScanScope::Full, &cancel)
-            .await
-            .expect("scan");
+        let _ = scanner.scan(&ScanScope::Full, &cancel).await.expect("scan");
 
         let mats = repo.list_materializations().await.unwrap();
-        let mat = mats
-            .iter()
-            .find(|m| m.asset_id == asset.id)
-            .expect("mat");
+        let mat = mats.iter().find(|m| m.asset_id == asset.id).expect("mat");
         assert_eq!(mat.status, MaterializationStatus::Detached);
         assert!(
             mat.last_error

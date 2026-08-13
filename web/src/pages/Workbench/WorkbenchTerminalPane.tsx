@@ -30,6 +30,13 @@ import {
   type TerminalReplayGate,
 } from './terminalReplay';
 import { installWorkbenchTerminalSelectionOverrides } from './terminalSelectionOverrides';
+import {
+  consumeWorkbenchTerminalWheelLines,
+  encodeTerminalSgrWheelReports,
+  resolveWorkbenchTerminalWheelAction,
+  type WorkbenchTerminalBufferType,
+  type WorkbenchTerminalMouseTrackingMode,
+} from './terminalWheel';
 
 export interface WorkbenchTerminalPaneProps {
   session: WorkbenchSession | null;
@@ -167,6 +174,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const selectPaneDecideTimerRef = useRef<number | null>(null);
   // Business Logic: resize/theme 后 cell 尺寸会变；缓存 metrics，避免每个 onCursorMove 强制布局。
   const cursorMetricsRef = useRef<TerminalCursorMetrics | null>(null);
+  // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发 SGR 64/65。
+  const wheelRemainderRef = useRef(0);
   const sessionId = session?.id ?? null;
   const store = useWorkbenchTerminalBufferStore();
 
@@ -196,6 +205,59 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     terminal.open(viewport);
     // open 之后 selectionService 才存在；必须优先于 mouse-mode CSI 落地前装上选区保护。
     const restoreSelectionOverrides = installWorkbenchTerminalSelectionOverrides(terminal);
+    wheelRemainderRef.current = 0;
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Claude resume 后停在 alternate screen。tmux 未宣告 xterm*:mouse 时 DECSET 到不了 xterm，
+     *   xterm 6 会把滚轮译成 ↑/↓，Claude 输入框当成历史 prompt。TUI 需要 SGR 64/65。
+     *
+     * Code Logic（这个函数做什么）:
+     *   已协商 mouse / 有本地 scrollback 时交给 xterm；否则拦截并注入 SGR，绝不发方向键。
+     */
+    terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
+      const active = terminal.buffer.active;
+      const bufferType: WorkbenchTerminalBufferType =
+        active.type === 'alternate' ? 'alternate' : 'normal';
+      const mouseTrackingMode: WorkbenchTerminalMouseTrackingMode =
+        terminal.modes.mouseTrackingMode;
+      const action = resolveWorkbenchTerminalWheelAction({
+        bufferType,
+        baseY: active.baseY,
+        mouseTrackingMode,
+      });
+      if (action !== 'sgrFallback') return true;
+      if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) {
+        return false;
+      }
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      const metrics = cursorMetricsRef.current ?? measureTerminalCursorMetrics(viewport, terminal);
+      cursorMetricsRef.current = metrics;
+      const consumed = consumeWorkbenchTerminalWheelLines(
+        event.deltaY,
+        wheelRemainderRef.current,
+        metrics.cellHeight,
+      );
+      wheelRemainderRef.current = consumed.remainder;
+      if (consumed.lines === 0) return false;
+      const cellWidth = metrics.cellWidth > 0 ? metrics.cellWidth : 1;
+      const cellHeight = metrics.cellHeight > 0 ? metrics.cellHeight : 1;
+      const col = Number.isFinite(event.clientX)
+        ? Math.min(
+            terminal.cols,
+            Math.max(1, Math.floor((event.clientX - metrics.left) / cellWidth) + 1),
+          )
+        : 1;
+      const row = Number.isFinite(event.clientY)
+        ? Math.min(
+            terminal.rows,
+            Math.max(1, Math.floor((event.clientY - metrics.top) / cellHeight) + 1),
+          )
+        : 1;
+      const payload = encodeTerminalSgrWheelReports(consumed.lines, col, row);
+      if (payload) onInput(sessionId, payload);
+      return false;
+    });
     // inactive pane 用 display:none 丢弃 WebView 合成层；此时不得按零尺寸 fit。
     if (renderVisibleRef.current) {
       fit.fit();

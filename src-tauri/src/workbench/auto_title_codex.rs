@@ -320,22 +320,14 @@ mod tests {
         let path = dir.path().join("session_index.jsonl");
         {
             let mut f = File::create(&path).unwrap();
-            writeln!(
-                f,
-                r#"{{"id":"1","thread_name":"one","updated_at":"t1"}}"#
-            )
-            .unwrap();
+            writeln!(f, r#"{{"id":"1","thread_name":"one","updated_at":"t1"}}"#).unwrap();
         }
         let (off1, lines1) = read_session_index_from_offset(&path, 0).unwrap();
         assert_eq!(lines1.len(), 1);
         assert_eq!(lines1[0].id, "1");
         {
             let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-            writeln!(
-                f,
-                r#"{{"id":"2","thread_name":"two","updated_at":"t2"}}"#
-            )
-            .unwrap();
+            writeln!(f, r#"{{"id":"2","thread_name":"two","updated_at":"t2"}}"#).unwrap();
         }
         let (_off2, lines2) = read_session_index_from_offset(&path, off1).unwrap();
         assert_eq!(lines2.len(), 1);
@@ -355,10 +347,7 @@ mod tests {
             .unwrap();
             writeln!(f, r#"{{"type":"event_msg","payload":{{}}}}"#).unwrap();
         }
-        assert_eq!(
-            cwd_from_codex_rollout(&path).as_deref(),
-            Some("/tmp/proj")
-        );
+        assert_eq!(cwd_from_codex_rollout(&path).as_deref(), Some("/tmp/proj"));
     }
 
     #[test]

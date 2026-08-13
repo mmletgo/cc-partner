@@ -308,7 +308,10 @@ fn load_codex_titles(home: &Path) -> HashMap<String, String> {
     map
 }
 
-fn parse_codex_rollout(path: &Path, titles: &HashMap<String, String>) -> Option<CodexSessionRecord> {
+fn parse_codex_rollout(
+    path: &Path,
+    titles: &HashMap<String, String>,
+) -> Option<CodexSessionRecord> {
     let md = fs::metadata(path).ok()?;
     if md.len() > MAX_CODEX_FILE_BYTES {
         return None;
@@ -358,10 +361,7 @@ fn parse_codex_rollout(path: &Path, titles: &HashMap<String, String>) -> Option<
         if payload.get("type").and_then(|t| t.as_str()) != Some("message") {
             continue;
         }
-        let role = payload
-            .get("role")
-            .and_then(|r| r.as_str())
-            .unwrap_or("");
+        let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
         let Some(content) = payload.get("content") else {
             continue;
         };
@@ -522,7 +522,11 @@ pub fn search_codex_sessions(
     SessionSearchResult {
         items: hits,
         truncated: false,
-        diagnostics: SessionSearchDiagnostics::ok(files_considered, indexed.min(files_considered), 0),
+        diagnostics: SessionSearchDiagnostics::ok(
+            files_considered,
+            indexed.min(files_considered),
+            0,
+        ),
     }
 }
 
@@ -645,13 +649,12 @@ async fn load_opencode_sessions_for_worktree_async(
                 continue;
             }
 
-            let parts = sqlx::query(
-                "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC",
-            )
-            .bind(&message_id)
-            .fetch_all(&pool)
-            .await
-            .unwrap_or_default();
+            let parts =
+                sqlx::query("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC")
+                    .bind(&message_id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
             let mut texts = Vec::new();
             for p in parts {
                 let raw: String = p.try_get("data").unwrap_or_default();
@@ -784,7 +787,11 @@ pub async fn search_opencode_sessions(
     Ok(SessionSearchResult {
         items: hits,
         truncated: false,
-        diagnostics: SessionSearchDiagnostics::ok(files_considered, indexed.min(files_considered), 0),
+        diagnostics: SessionSearchDiagnostics::ok(
+            files_considered,
+            indexed.min(files_considered),
+            0,
+        ),
     })
 }
 
@@ -878,10 +885,10 @@ mod tests {
 
     #[test]
     fn resume_command_shapes() {
-        assert!(build_resume_command(AgentSessionSource::Codex, "abc")
-            .starts_with("codex resume abc"));
-        assert!(build_resume_command(AgentSessionSource::OpenCode, "s1")
-            .contains("--session s1"));
+        assert!(
+            build_resume_command(AgentSessionSource::Codex, "abc").starts_with("codex resume abc")
+        );
+        assert!(build_resume_command(AgentSessionSource::OpenCode, "s1").contains("--session s1"));
     }
 
     #[test]

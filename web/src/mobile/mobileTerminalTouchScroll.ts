@@ -1,3 +1,5 @@
+import { encodeTerminalSgrWheelReports } from '@/pages/Workbench/terminalWheel';
+
 export interface MobileTerminalTouchScrollState {
   lastClientY: number;
   remainderPx: number;
@@ -103,16 +105,5 @@ export function encodeMobileTerminalWheelReports(
   row = 1,
   maxEvents: number = MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP,
 ): string {
-  if (!Number.isFinite(lines) || lines === 0) return '';
-  const cap =
-    Number.isFinite(maxEvents) && maxEvents > 0
-      ? Math.floor(maxEvents)
-      : MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP;
-  const count = Math.min(Math.abs(Math.trunc(lines)), cap);
-  if (count === 0) return '';
-  const safeCol = Number.isFinite(col) && col >= 1 ? Math.floor(col) : 1;
-  const safeRow = Number.isFinite(row) && row >= 1 ? Math.floor(row) : 1;
-  // 上滑 lines>0 → wheel down 65；下滑 lines<0 → wheel up 64。
-  const button = lines > 0 ? 65 : 64;
-  return `\x1b[<${button};${safeCol};${safeRow}M`.repeat(count);
+  return encodeTerminalSgrWheelReports(lines, col, row, maxEvents);
 }

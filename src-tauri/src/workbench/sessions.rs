@@ -1186,6 +1186,9 @@ fn tmux_force_redraw_bump_rows(rows: u16) -> u16 {
 ///     强制 `status-position bottom`，避免用户全局 `status-position top` 或错位状态在重启后残留。
 ///     强制 session-local `mouse off`：用户全局 `mouse on` 时滚轮会进 copy-mode（浏览模式），
 ///     键盘被 tmux 吞掉，必须 Ctrl+C 才能恢复输入。工作台复制走 xterm 选区，不依赖 tmux 鼠标。
+///     同时 `-sa terminal-features xterm*:mouse`：默认 features 不含 mouse 时，Claude 的 DECSET
+///     1000/1006 到不了外层 xterm，滚轮会被译成 ↑/↓ 并被输入框当成历史 prompt。mouse 能力
+///     只让应用鼠标序列透传，不会打开 tmux 自己的 mouse/copy-mode。
 fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
     vec![
         vec![
@@ -1194,6 +1197,12 @@ fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
             session_name.to_string(),
             "mouse".to_string(),
             "off".to_string(),
+        ],
+        vec![
+            "set-option".to_string(),
+            "-sa".to_string(),
+            "terminal-features".to_string(),
+            "xterm*:mouse".to_string(),
         ],
         vec![
             "set-option".to_string(),
@@ -5361,11 +5370,9 @@ impl WorkbenchSessionRegistry {
                             SessionNameSource::parse(&handle.row.name_source)
                         };
                         if !matches!(source, SessionNameSource::Manual) {
-                            if let Ok(row) = self.rename_with_source(
-                                session_id,
-                                &title,
-                                SessionNameSource::Auto,
-                            ) {
+                            if let Ok(row) =
+                                self.rename_with_source(session_id, &title, SessionNameSource::Auto)
+                            {
                                 renamed = Some(row);
                             }
                         }
@@ -5773,11 +5780,7 @@ impl WorkbenchSessionRegistry {
                 SessionNameSource::parse(&handle.row.name_source),
             )
         };
-        if !crate::workbench::auto_title::should_apply_auto_title(
-            &current.0,
-            current.1,
-            title,
-        ) {
+        if !crate::workbench::auto_title::should_apply_auto_title(&current.0, current.1, title) {
             return Ok(None);
         }
         let Some(clean) = crate::workbench::auto_title::sanitize_auto_title(title) else {
@@ -7960,9 +7963,11 @@ mod tests {
     /// Business Logic（为什么需要这个测试）:
     ///     工作台浅色/深色主题切换时，tmux 底部 status bar 不应继承用户 tmux 配置里的深色背景、彩色右侧时间或 underline。
     ///     用户全局 `mouse on` 时滚轮会进 copy-mode（浏览模式），键盘被 tmux 吃掉，必须 session-local 强制 mouse off。
+    ///     同时必须宣告 `xterm*:mouse`，否则 Claude DECSET 到不了 xterm，滚轮会变成方向键。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 Workbench 使用无内嵌颜色的 status/window format，强制 status-position=bottom 与 mouse=off，并保留 session/window 标签结构。
+    ///     断言 Workbench 使用无内嵌颜色的 status/window format，强制 status-position=bottom、mouse=off
+    ///     与 terminal-features xterm*:mouse，并保留 session/window 标签结构。
     #[test]
     fn tmux_status_theme_commands_use_light_safe_label_style() {
         let commands = tmux_status_theme_commands("cc-partner-project-project1234abcd");
@@ -7977,6 +7982,7 @@ mod tests {
                     "mouse",
                     "off",
                 ],
+                vec!["set-option", "-sa", "terminal-features", "xterm*:mouse",],
                 vec![
                     "set-option",
                     "-t",

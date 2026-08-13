@@ -51,7 +51,18 @@ interface MockTerminal {
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
   dispose: () => void;
-  buffer: { active: { cursorX: number; cursorY: number; viewportY: number; baseY: number } };
+  attachCustomWheelEventHandler: (handler: (event: WheelEvent) => boolean) => void;
+  invokeWheel: (event: Partial<WheelEvent>) => boolean | undefined;
+  modes: { mouseTrackingMode: 'none' | 'x10' | 'vt200' | 'drag' | 'any' };
+  buffer: {
+    active: {
+      type: 'normal' | 'alternate';
+      cursorX: number;
+      cursorY: number;
+      viewportY: number;
+      baseY: number;
+    };
+  };
 }
 
 interface MockFitAddon {
@@ -166,7 +177,17 @@ vi.mock('@xterm/xterm', () => {
     dispose() {
       terminalEvents.disposeCount += 1;
     }
-    buffer = { active: { cursorX: 0, cursorY: 0, viewportY: 0, baseY: 0 } };
+    private wheelHandler: ((event: WheelEvent) => boolean) | null = null;
+    attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean) {
+      this.wheelHandler = handler;
+    }
+    invokeWheel(event: Partial<WheelEvent>) {
+      return this.wheelHandler?.(event as WheelEvent);
+    }
+    modes = { mouseTrackingMode: 'none' as const };
+    buffer = {
+      active: { type: 'normal' as const, cursorX: 0, cursorY: 0, viewportY: 0, baseY: 0 },
+    };
   }
   return { Terminal: TerminalMock };
 });
@@ -845,6 +866,59 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
       latestTerminal().emitCursorMove();
     });
     expect(rect).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkbenchTerminalPane — Claude resume wheel', () => {
+  test('alt-screen without mouse tracking injects SGR 64 instead of letting xterm emit Up', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const onInput = vi.fn();
+    render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
+    const terminal = latestTerminal();
+    terminal.buffer.active.type = 'alternate';
+    terminal.buffer.active.baseY = 0;
+    terminal.modes.mouseTrackingMode = 'none';
+
+    const proceed = terminal.invokeWheel({
+      deltaY: -20,
+      clientX: 8,
+      clientY: 8,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+
+    expect(proceed).toBe(false);
+    expect(onInput).toHaveBeenCalledTimes(1);
+    const payload = String(onInput.mock.calls[0]?.[1] ?? '');
+    expect(payload).toContain('\x1b[<64;');
+    expect(payload.includes('\x1b[A') || payload.includes('\x1bOA')).toBe(false);
+  });
+
+  test('lets xterm keep the wheel when mouse tracking is already negotiated', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const onInput = vi.fn();
+    render(<PaneHost session={buildSession({ id: 's1' })} store={store} onInput={onInput} />);
+    const terminal = latestTerminal();
+    terminal.buffer.active.type = 'alternate';
+    terminal.modes.mouseTrackingMode = 'vt200';
+
+    const proceed = terminal.invokeWheel({
+      deltaY: -20,
+      clientX: 8,
+      clientY: 8,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+
+    expect(proceed).toBe(true);
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  test('source contract keeps custom wheel handler and never encodes arrow keys', () => {
+    const paneSource = readFileSync(resolve(__dirname, './WorkbenchTerminalPane.tsx'), 'utf8');
+    expect(paneSource).toContain('attachCustomWheelEventHandler');
+    expect(paneSource).toContain('encodeTerminalSgrWheelReports');
+    expect(paneSource).not.toContain("\\x1b[' +");
   });
 });
 

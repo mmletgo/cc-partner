@@ -71,7 +71,8 @@ pub fn is_useful_opencode_title(title: &str) -> bool {
     }
     // 单段 slug（无空格/中文）且很短时通常是系统占位
     if !t.contains(char::is_whitespace)
-        && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         && t.chars().count() <= 16
     {
         return false;

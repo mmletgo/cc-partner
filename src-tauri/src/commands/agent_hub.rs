@@ -871,7 +871,11 @@ pub(crate) fn normalize_instruction_analyze_parts(
     let mut kept_exclusive: Vec<String> = Vec::new();
     for block in exclusive_blocks {
         if block_covered_by_adapted(&block, &adapted_blocks, adapted)
-            || block_covered_by_adapted(&block, &adapted_blocks, &join_instruction_blocks(&adapted_blocks))
+            || block_covered_by_adapted(
+                &block,
+                &adapted_blocks,
+                &join_instruction_blocks(&adapted_blocks),
+            )
         {
             // 真独占才保留；与适配高度重叠的段落归适配侧。
             continue;
@@ -1019,7 +1023,9 @@ pub async fn agent_hub_analyze_instruction_original(
         return Err(AppError::validation("INSTRUCTION_ANALYZE_EMPTY_ORIGINAL"));
     }
     if original.chars().count() > MAX_INSTRUCTION_LLM_CHARS {
-        return Err(AppError::validation("INSTRUCTION_ANALYZE_ORIGINAL_TOO_LARGE"));
+        return Err(AppError::validation(
+            "INSTRUCTION_ANALYZE_ORIGINAL_TOO_LARGE",
+        ));
     }
     let agent = normalize_agent_target_token(&request.agent)?;
     let (cli_path, model, provider_id) = {
@@ -1090,17 +1096,18 @@ pub async fn agent_hub_analyze_instruction_original(
          Empty string is allowed for a part. Prefer moving borderline content to adapted over exclusive.\n\
          Original document:\n---\n{original}\n---"
     );
-    let result = crate::claude_cli::run_structured_json_with_cwd::<AnalyzeInstructionOriginalResult>(
-        &cli_path,
-        &model,
-        provider_dir.as_deref(),
-        &schema.to_string(),
-        &prompt,
-        None,
-        INSTRUCTION_LLM_TIMEOUT_SECS,
-        "分析拆解提示词",
-    )
-    .await?;
+    let result =
+        crate::claude_cli::run_structured_json_with_cwd::<AnalyzeInstructionOriginalResult>(
+            &cli_path,
+            &model,
+            provider_dir.as_deref(),
+            &schema.to_string(),
+            &prompt,
+            None,
+            INSTRUCTION_LLM_TIMEOUT_SECS,
+            "分析拆解提示词",
+        )
+        .await?;
     // 产品层后处理：混写/重叠段落强制只留在 adapted，避免公共与适配双写。
     Ok(normalize_instruction_analyze_parts(
         &result.common,
@@ -1141,10 +1148,7 @@ pub async fn agent_hub_adapt_instruction_to_other_agents(
             .await?;
     let mut properties = serde_json::Map::new();
     for dest in &destinations {
-        properties.insert(
-            (*dest).to_string(),
-            serde_json::json!({ "type": "string" }),
-        );
+        properties.insert((*dest).to_string(), serde_json::json!({ "type": "string" }));
     }
     let schema = serde_json::json!({
         "type": "object",
@@ -1286,13 +1290,22 @@ mod tests {
         let adapted = "Use Sonnet for implementation.";
         let out = normalize_instruction_analyze_parts(common, adapted, "");
         assert!(out.common.is_empty(), "common={}", out.common);
-        assert!(out.adapted.contains("CLAUDE.md") || out.adapted.contains("claude.md") || out.adapted.to_ascii_lowercase().contains("claude.md") || out.adapted.contains("CLAUDE.md"));
+        assert!(
+            out.adapted.contains("CLAUDE.md")
+                || out.adapted.contains("claude.md")
+                || out.adapted.to_ascii_lowercase().contains("claude.md")
+                || out.adapted.contains("CLAUDE.md")
+        );
         // 原 common 并入 adapted
         assert!(
             out.adapted.to_ascii_lowercase().contains("claude.md")
                 || out.adapted.contains("CLAUDE.md")
         );
-        assert!(out.adapted.contains("Sonnet") || out.adapted.contains("sonnet") || out.adapted.contains("implementation"));
+        assert!(
+            out.adapted.contains("Sonnet")
+                || out.adapted.contains("sonnet")
+                || out.adapted.contains("implementation")
+        );
     }
 
     /// Business Logic: 纯语义公共段落在适配无重叠时应保留。

@@ -212,10 +212,12 @@ impl AssetAdapter for ClaudeInstructionAdapter {
 
         // Plugin components：user scope 复用 inventory 权威 package 根；project 仅直装 manifest
         if scope.scope_kind == ScopeKind::User {
-            for path in crate::agent_hub::portable_inventory::scanner::user_plugin_package_root_paths(
-                AgentTarget::Claude,
-                &base,
-            ) {
+            for path in
+                crate::agent_hub::portable_inventory::scanner::user_plugin_package_root_paths(
+                    AgentTarget::Claude,
+                    &base,
+                )
+            {
                 let plugin_id = discover_plugin_source_for_target(
                     AgentTarget::Claude,
                     &path,
@@ -250,7 +252,11 @@ impl AssetAdapter for ClaudeInstructionAdapter {
         } else {
             let plugins_root = base.join("plugins");
             if plugins_root.is_dir() {
-                for entry in std::fs::read_dir(&plugins_root).into_iter().flatten().flatten() {
+                for entry in std::fs::read_dir(&plugins_root)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
                     let path = entry.path();
                     if !path.is_dir()
                         || !path.join(".claude-plugin/plugin.json").is_file()

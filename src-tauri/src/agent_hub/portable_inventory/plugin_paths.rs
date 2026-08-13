@@ -232,9 +232,8 @@ mod tests {
 
     #[test]
     fn package_root_stops_at_version_or_direct_id() {
-        let component = PathBuf::from(
-            "/Users/h/.claude/plugins/cache/ecc/ecc/2.0.0/skills/deep-research",
-        );
+        let component =
+            PathBuf::from("/Users/h/.claude/plugins/cache/ecc/ecc/2.0.0/skills/deep-research");
         assert_eq!(
             infer_plugin_package_root(&component).as_deref(),
             Some(Path::new("/Users/h/.claude/plugins/cache/ecc/ecc/2.0.0"))
@@ -244,7 +243,8 @@ mod tests {
             infer_plugin_package_root(&direct).as_deref(),
             Some(Path::new("/home/.claude/plugins/demo"))
         );
-        let root = PathBuf::from("/Users/h/.codex/plugins/cache/openai-bundled/chrome/26.803.61601");
+        let root =
+            PathBuf::from("/Users/h/.codex/plugins/cache/openai-bundled/chrome/26.803.61601");
         assert_eq!(
             infer_plugin_package_root(&root).as_deref(),
             Some(Path::new(

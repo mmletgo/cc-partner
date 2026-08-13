@@ -241,7 +241,10 @@ mod tests {
             r#"{"type":"tool","tool":"x"}"#.to_string(),
             r#"{"type":"text","text":"world"}"#.to_string(),
         ];
-        assert_eq!(user_text_from_parts(&parts).as_deref(), Some("hello\nworld"));
+        assert_eq!(
+            user_text_from_parts(&parts).as_deref(),
+            Some("hello\nworld")
+        );
     }
 
     #[test]
