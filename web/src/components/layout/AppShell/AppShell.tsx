@@ -31,7 +31,6 @@ import {
   HistoryIcon,
   ScratchpadIcon,
   ClaudeMdIcon,
-  DevicesIcon,
   SettingsIcon,
   HealthIcon,
   ProviderManagerIcon,
@@ -70,7 +69,6 @@ const NAV_GROUP_IDS = {
   explore: 'nav-group-explore',
   work: 'nav-group-work',
   knowledge: 'nav-group-knowledge',
-  connect: 'nav-group-connect',
   system: 'nav-group-system',
 } as const;
 
@@ -201,9 +199,6 @@ export function AppShell({ children }: AppShellProps) {
             <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
             <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
             <NavItem to="/agent-hub" label={t('nav:agentHub')} icon={<ClaudeMdIcon />} />
-          </NavGroup>
-          <NavGroup id={NAV_GROUP_IDS.connect} label={t('nav:groups.connect')}>
-            <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
           </NavGroup>
           <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
             <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />

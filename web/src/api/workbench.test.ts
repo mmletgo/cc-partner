@@ -198,7 +198,6 @@ describe('workbenchApi mutation ledger envelope', () => {
       sessions: { kind: 'ready', value: [] },
       tasks: { kind: 'error', message: 'tasks down' },
       transfers: { kind: 'ready', value: [] },
-      devices: { kind: 'ready', value: [] },
       generatedAt: '2026-07-14T12:00:00.000Z',
     };
     mockInvoke.mockResolvedValueOnce(wire);

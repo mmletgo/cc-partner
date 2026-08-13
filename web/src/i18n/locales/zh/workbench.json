@@ -871,24 +871,19 @@
       "projects": "最近项目",
       "sessions": "活跃会话",
       "tasks": "Orchestrator 任务",
-      "transfers": "传输",
-      "devices": "设备"
+      "transfers": "传输"
     },
     "empty": {
       "projects": "还没有最近项目",
       "sessions": "没有活跃终端会话",
       "tasks": "没有进行中的任务",
-      "transfers": "没有活跃或失败的传输",
-      "devices": "暂无在线或最近同步的设备"
+      "transfers": "没有活跃或失败的传输"
     },
     "openTransfer": "打开文件传输",
-    "openDevices": "打开设备",
     "openSettingsDependencies": "打开依赖设置",
     "item": {
       "remote": "远端",
-      "local": "本机",
-      "online": "在线",
-      "offline": "离线"
+      "local": "本机"
     }
   },
   "deepLink": {

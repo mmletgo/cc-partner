@@ -20,14 +20,12 @@ import enHome from './locales/en/home.json';
 import enPrompts from './locales/en/prompts.json';
 import enWorkbench from './locales/en/workbench.json';
 import enTransfer from './locales/en/transfer.json';
-import enDevices from './locales/en/devices.json';
 import enScratchpad from './locales/en/scratchpad.json';
 import enPromptOptimizer from './locales/en/promptOptimizer.json';
 import enClaudeMd from './locales/en/claudeMd.json';
 import enWelcome from './locales/en/welcome.json';
 import enSettings from './locales/en/settings.json';
 import enCcHistory from './locales/en/ccHistory.json';
-import enSsh from './locales/en/ssh.json';
 import enHealth from './locales/en/health.json';
 import enOrchestrator from './locales/en/orchestrator.json';
 import enAttention from './locales/en/attention.json';
@@ -40,14 +38,12 @@ import zhHome from './locales/zh/home.json';
 import zhPrompts from './locales/zh/prompts.json';
 import zhWorkbench from './locales/zh/workbench.json';
 import zhTransfer from './locales/zh/transfer.json';
-import zhDevices from './locales/zh/devices.json';
 import zhScratchpad from './locales/zh/scratchpad.json';
 import zhPromptOptimizer from './locales/zh/promptOptimizer.json';
 import zhClaudeMd from './locales/zh/claudeMd.json';
 import zhWelcome from './locales/zh/welcome.json';
 import zhSettings from './locales/zh/settings.json';
 import zhCcHistory from './locales/zh/ccHistory.json';
-import zhSsh from './locales/zh/ssh.json';
 import zhHealth from './locales/zh/health.json';
 import zhOrchestrator from './locales/zh/orchestrator.json';
 import zhAttention from './locales/zh/attention.json';
@@ -84,14 +80,12 @@ export const resources = {
     prompts: enPrompts,
     workbench: enWorkbench,
     transfer: enTransfer,
-    devices: enDevices,
     scratchpad: enScratchpad,
     promptOptimizer: enPromptOptimizer,
     claudeMd: enClaudeMd,
     welcome: enWelcome,
     settings: enSettings,
     ccHistory: enCcHistory,
-    ssh: enSsh,
     health: enHealth,
     orchestrator: enOrchestrator,
     attention: enAttention,
@@ -105,14 +99,12 @@ export const resources = {
     prompts: zhPrompts,
     workbench: zhWorkbench,
     transfer: zhTransfer,
-    devices: zhDevices,
     scratchpad: zhScratchpad,
     promptOptimizer: zhPromptOptimizer,
     claudeMd: zhClaudeMd,
     welcome: zhWelcome,
     settings: zhSettings,
     ccHistory: zhCcHistory,
-    ssh: zhSsh,
     health: zhHealth,
     orchestrator: zhOrchestrator,
     attention: zhAttention,

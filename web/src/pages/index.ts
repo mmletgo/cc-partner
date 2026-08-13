@@ -6,7 +6,7 @@
  *   - 避免 router / AppShell / 测试用例对 pages/* 子路径细节的硬编码
  *
  * Code Logic（这个入口做什么）:
- *   统一 re-export 当前已实现的 Home、Welcome 页面。后续新增的 Transfer / Prompts / Devices / Settings 页面
+ *   统一 re-export 当前已实现的 Home、Welcome 页面。后续新增的 Transfer / Prompts / Settings 页面
  *   也按相同约定在此补齐即可。
  */
 
@@ -15,9 +15,6 @@ export type { } from './Home';
 
 export { Transfer } from './Transfer';
 export type { } from './Transfer';
-
-export { Devices } from './Devices';
-export type { } from './Devices';
 
 export { Settings } from './Settings';
 export type { } from './Settings';

@@ -141,7 +141,7 @@
 ## i18n 国际化
 
 - **库**: react-i18next + i18next，初始化在 `src/i18n/index.ts`（`declare module` 类型扩展，`t()` 的 key 编译期校验，拼错即 tsc 报错）
-- **命名空间**: `common`（动作/状态枚举/方向，跨页共享）、`nav`、各页面一个（home/attention/prompts/ccHistory/transfer/devices/scratchpad/promptOptimizer/claudeMd/welcome/settings/ssh/health/workbench/orchestrator）
+- **命名空间**: `common`（动作/状态枚举/方向，跨页共享）、`nav`、各页面一个（home/attention/prompts/ccHistory/transfer/scratchpad/promptOptimizer/claudeMd/welcome/settings/health/workbench/orchestrator）
 - **写法约定**（i18next v26 类型硬要求）:
   - 组件内 `const { t } = useTranslation([用到的所有ns数组]);`，所有 `t('ns:key')` **带 ns 前缀**
   - 模块级 helper 接收 `t: TFunction<'ns'>`，内部调用**省略 ns 前缀**

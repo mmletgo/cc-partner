@@ -12,7 +12,6 @@
  */
 
 import type {
-  WorkbenchLaunchDevice,
   WorkbenchLaunchProject,
   WorkbenchLaunchSession,
   WorkbenchLaunchSectionWire,
@@ -22,7 +21,6 @@ import type {
 } from '@/lib/types';
 
 export type {
-  WorkbenchLaunchDevice,
   WorkbenchLaunchProject,
   WorkbenchLaunchSession,
   WorkbenchLaunchSectionWire,
@@ -40,19 +38,18 @@ export type WorkbenchLaunchResource<T> =
   | { kind: 'ready'; value: T; stale: boolean }
   | { kind: 'error'; message: string; cached?: T };
 
-/** 前端持有的五 section + generatedAt 状态。 */
+/** 前端持有的四 section + generatedAt 状态。 */
 export interface WorkbenchLaunchSummaryState {
   projects: WorkbenchLaunchResource<WorkbenchLaunchProject[]>;
   sessions: WorkbenchLaunchResource<WorkbenchLaunchSession[]>;
   tasks: WorkbenchLaunchResource<WorkbenchLaunchTask[]>;
   transfers: WorkbenchLaunchResource<WorkbenchLaunchTransfer[]>;
-  devices: WorkbenchLaunchResource<WorkbenchLaunchDevice[]>;
   generatedAt: string | null;
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   进入「有项目未选中」模式时，五个 section 应同时显示 loading，避免残留上一轮数据。
+ *   进入「有项目未选中」模式时，四个 section 应同时显示 loading，避免残留上一轮数据。
  *
  * Code Logic（这个函数做什么）:
  *   返回全部 section 为 loading、generatedAt 为 null 的初始态。
@@ -63,7 +60,6 @@ export function createInitialLaunchSummaryState(): WorkbenchLaunchSummaryState {
     sessions: { kind: 'loading' },
     tasks: { kind: 'loading' },
     transfers: { kind: 'loading' },
-    devices: { kind: 'loading' },
     generatedAt: null,
   };
 }
@@ -108,7 +104,7 @@ export function mapLaunchSectionWireToResource<T>(
  *   整次 summary 成功返回时，按 section 独立归约；一个 section error 不抹掉其它 ready。
  *
  * Code Logic（这个函数做什么）:
- *   对五个 section 调用 mapLaunchSectionWireToResource，并写入 generatedAt。
+ *   对四个 section 调用 mapLaunchSectionWireToResource，并写入 generatedAt。
  */
 export function reduceWorkbenchLaunchResults(
   previous: WorkbenchLaunchSummaryState,
@@ -119,7 +115,6 @@ export function reduceWorkbenchLaunchResults(
     sessions: mapLaunchSectionWireToResource(wire.sessions, previous.sessions),
     tasks: mapLaunchSectionWireToResource(wire.tasks, previous.tasks),
     transfers: mapLaunchSectionWireToResource(wire.transfers, previous.transfers),
-    devices: mapLaunchSectionWireToResource(wire.devices, previous.devices),
     generatedAt: wire.generatedAt,
   };
 }
@@ -153,7 +148,6 @@ export function markLaunchSummaryStaleOnFailure(
     sessions: mark(state.sessions),
     tasks: mark(state.tasks),
     transfers: mark(state.transfers),
-    devices: mark(state.devices),
     generatedAt: state.generatedAt,
   };
 }

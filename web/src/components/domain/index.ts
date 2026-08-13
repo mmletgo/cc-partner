@@ -14,9 +14,6 @@
 export { PromptCard } from './PromptCard';
 export type { PromptCardProps, PromptCardPrompt } from './PromptCard';
 
-export { DeviceCard } from './DeviceCard';
-export type { DeviceCardProps, DeviceCardDevice, DeviceStatus } from './DeviceCard';
-
 export { TransferItem } from './TransferItem';
 export type {
   TransferItemProps,

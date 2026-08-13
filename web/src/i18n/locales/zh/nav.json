@@ -11,7 +11,6 @@
   "claudeCode": "Claude Plugin",
   "agentHub": "Agent Hub",
   "orchestrator": "自动化",
-  "devices": "设备",
   "settings": "设置",
   "health": "健康提醒",
   "providerManager": "Provider 管理",
@@ -20,7 +19,6 @@
     "explore": "探索",
     "work": "工作",
     "knowledge": "知识",
-    "connect": "连接",
     "system": "系统"
   }
 }

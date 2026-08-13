@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyWorkspaceRestorePlan,
+  classifyLayoutApplyError,
   formatRestoreNotice,
   type WorkspaceRestoreBridge,
   type WorkspaceRestorePlan,

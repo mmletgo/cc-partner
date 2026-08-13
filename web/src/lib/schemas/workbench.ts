@@ -39,7 +39,6 @@ import type {
   WorkbenchWorktree,
 } from '../types/workbench';
 import type {
-  WorkbenchLaunchDevice,
   WorkbenchLaunchProject,
   WorkbenchLaunchSession,
   WorkbenchLaunchSummaryWire,
@@ -630,23 +629,12 @@ const workbenchLaunchTransferItemDecoder: Decoder<WorkbenchLaunchTransfer> = obj
   },
 );
 
-const workbenchLaunchDeviceItemDecoder: Decoder<WorkbenchLaunchDevice> = objectDecoder(
-  'WorkbenchLaunchDevice',
-  {
-    id: stringDecoder,
-    name: stringDecoder,
-    online: booleanDecoder,
-    lastSeen: optionalDecoder(nullableDecoder(stringDecoder)),
-    address: optionalDecoder(nullableDecoder(stringDecoder)),
-  },
-);
-
 /**
  * Business Logic（为什么需要这个 decoder）:
  *   get_workbench_launch_summary 是启动页唯一权威只读源；fail-closed 防止假指标。
  *
  * Code Logic（这个 decoder 做什么）:
- *   解码五 section wire + generatedAt。
+ *   解码四 section wire + generatedAt。
  */
 export const workbenchLaunchSummaryDecoder: Decoder<WorkbenchLaunchSummaryWire> = objectDecoder(
   'WorkbenchLaunchSummary',
@@ -663,10 +651,6 @@ export const workbenchLaunchSummaryDecoder: Decoder<WorkbenchLaunchSummaryWire> 
     transfers: workbenchLaunchSectionDecoder(
       'WorkbenchLaunchTransfers',
       workbenchLaunchTransferItemDecoder,
-    ),
-    devices: workbenchLaunchSectionDecoder(
-      'WorkbenchLaunchDevices',
-      workbenchLaunchDeviceItemDecoder,
     ),
     generatedAt: stringDecoder,
   },

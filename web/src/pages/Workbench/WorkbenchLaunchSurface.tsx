@@ -3,11 +3,11 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   `/workbench` 在无 active project 时不应渲染完整终端 chrome；零项目只展示三个聚焦动作，
- *   有项目未选中时展示「继续工作」五 section 摘要 + Attention 计数，并复用既有 deep link。
+ *   有项目未选中时展示「继续工作」四 section 摘要 + Attention 计数，并复用既有 deep link。
  *   从 Workbench.tsx 抽出以保持页面 ≤1200 行。
  *
  * Code Logic（这个组件做什么）:
- *   mode=empty：本机添加 / 远端连接 / 检查 tmux；mode=continue：Attention 摘要 + 五 Card section，
+ *   mode=empty：本机添加 / 远端连接 / 检查 tmux；mode=continue：Attention 摘要 + 四 Card section，
  *   独立 loading/error/empty/stale 渲染；点击走 selectProject / deep link / 路由跳转。
  */
 
@@ -21,7 +21,6 @@ import { useAttention } from '@/hooks/useAttention';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import type {
-  WorkbenchLaunchDevice,
   WorkbenchLaunchProject,
   WorkbenchLaunchSession,
   WorkbenchLaunchTask,
@@ -490,41 +489,6 @@ export function WorkbenchLaunchSurface({
                 <span className={styles.launchItemTitle}>{item.filename}</span>
                 <span className={styles.launchItemMeta}>
                   {item.direction} · {item.status}
-                </span>
-              </button>
-            )}
-          />
-
-          <LaunchSectionCard<WorkbenchLaunchDevice>
-            title={t('workbench:launch.sections.devices')}
-            resource={launchSummary.devices}
-            emptyLabel={t('workbench:launch.empty.devices')}
-            emptyAction={
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  navigate('/devices');
-                }}
-              >
-                {t('workbench:launch.openDevices')}
-              </Button>
-            }
-            getKey={(item) => item.id}
-            renderItem={(item) => (
-              <button
-                type="button"
-                className={styles.launchItemButton}
-                onClick={() => {
-                  navigate('/devices');
-                }}
-              >
-                <span className={styles.launchItemTitle}>{item.name}</span>
-                <span className={styles.launchItemMeta}>
-                  {item.address ?? '—'} ·{' '}
-                  {item.online
-                    ? t('workbench:launch.item.online')
-                    : t('workbench:launch.item.offline')}
                 </span>
               </button>
             )}

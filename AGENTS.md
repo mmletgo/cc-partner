@@ -60,7 +60,6 @@ cc-partner/
 │   │   │   │   └── ThemeToggle/  # 浅/深色切换
 │   │   │   └── domain/           # 业务组件（组合 primitives + layout）
 │   │   │       ├── PromptCard/
-│   │   │       ├── DeviceCard/
 │   │   │       ├── TransferItem/
 │   │   │       ├── GithubRepoCard/
 │   │   │       ├── MobileAccessCard/
@@ -74,7 +73,6 @@ cc-partner/
 │   │   │   ├── Attention/        # 全局 Inbox（/attention）：实时阻塞投影，只导航不动作
 │   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树 + 自动化工作区
 │   │   │   ├── Orchestrator/     # 自动编排器可嵌入面板；旧路由重定向 Workbench
-│   │   │   ├── Devices/          # 04-devices.html
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
@@ -167,7 +165,7 @@ primitives  →  layout  →  domain  →  page
 | 层级 | 职责 | 例子 |
 |------|------|------|
 | **primitives** | 单一 UI 元素，无业务语义，无数据依赖 | Button, Card, Input, Tag, Pill, StatusDot, StatusMessage, ProgressBar, Dialog, Drawer |
-| **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle, RouteErrorBoundary || **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, DeviceCard, TransferItem, PermissionCard |
+| **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle, RouteErrorBoundary || **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, TransferItem, PermissionCard |
 | **page** | 一个路由对应一个页面，组合 domain 组件 + 数据 hook | Home, Transfer, Prompts, ... |
 
 ### 4.2 ⚠️ 核心开发规范（必读）
@@ -278,7 +276,6 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | 组件 | 关键 Props | 用途 |
 |------|-----------|------|
 | PromptCard | prompt, onEdit, onDelete, onCopy | Prompt 卡片 |
-| DeviceCard | device, onClick | 设备卡片 |
 | TransferItem | task, onCancel?, onPause?, onResume?, onRetry?, onOpen?, cancelling? | 传输项；每个动作仅在对应回调存在时渲染（当前页面只传 pending/transferring 的 onCancel） |
 | PermissionCard | icon, title, description, granted, actionLabel?, requesting?, onRequestAccess | 权限卡片；父层按四态决定动作与文案，requesting 时按钮 busy |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |

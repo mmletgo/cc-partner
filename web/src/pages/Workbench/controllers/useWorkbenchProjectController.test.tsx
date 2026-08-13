@@ -80,7 +80,6 @@ function buildLaunchWire(
     sessions: { kind: 'ready', value: [] },
     tasks: { kind: 'ready', value: [] },
     transfers: { kind: 'error', message: 'transfer offline' },
-    devices: { kind: 'ready', value: [] },
     generatedAt: '2026-07-14T12:00:00.000Z',
     ...overrides,
   };
@@ -499,7 +498,6 @@ describe('useWorkbenchProjectController', () => {
         sessions: { kind: 'error', message: 'sessions failed' },
         tasks: { kind: 'ready', value: [] },
         transfers: { kind: 'error', message: 'transfers failed' },
-        devices: { kind: 'ready', value: [] },
       }),
     );
 
@@ -516,7 +514,6 @@ describe('useWorkbenchProjectController', () => {
     expect(result.current.launchSummary.sessions.kind).toBe('error');
     expect(result.current.launchSummary.tasks.kind).toBe('ready');
     expect(result.current.launchSummary.transfers.kind).toBe('error');
-    expect(result.current.launchSummary.devices.kind).toBe('ready');
   });
 
   test('refresh failure marks ready sections stale and keeps values', async () => {

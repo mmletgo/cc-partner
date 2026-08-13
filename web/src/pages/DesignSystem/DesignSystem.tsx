@@ -6,7 +6,7 @@
  *   开发者/设计师打开 /design-system 即可一眼验证：
  *     1. 颜色 / 字体 / 间距 / 圆角 / 阴影 token 是否符合预期
  *     2. 原子组件 (Button/Card/Input/Tag/Pill/StatusDot/ProgressBar) 视觉与交互
- *     3. 业务组件 (PromptCard/DeviceCard/TransferItem/PermissionCard) 复用效果
+ *     3. 业务组件 (PromptCard/TransferItem/PermissionCard) 复用效果
  *     4. 25+ stroke-based icon 库是否齐备
  *   避免在主应用各页面之间反复跳转查样式，提升开发效率并降低视觉漂移。
  *
@@ -34,7 +34,6 @@ import {
 } from '@/components/primitives';
 import {
   PromptCard,
-  DeviceCard,
   TransferItem,
   PermissionCard,
 } from '@/components/domain';
@@ -70,7 +69,6 @@ import {
 } from '@/lib/icons';
 import type {
   PromptCardPrompt,
-  DeviceCardDevice,
   TransferItemTask,
 } from '@/components/domain';
 import styles from './DesignSystem.module.css';
@@ -275,24 +273,6 @@ const MOCK_PROMPT: PromptCardPrompt = {
     '对每条建议给出文件路径 + 行号 + 改写示例。',
   tag: 'Review',
   updatedAt: '2026-06-09T14:32:00Z',
-};
-
-/** DeviceCard mock */
-const MOCK_DEVICE_ONLINE: DeviceCardDevice = {
-  id: 'dev-1',
-  name: "Hans's MacBook Pro",
-  address: '192.168.1.42',
-  port: 7842,
-  status: 'online',
-  lastSeen: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
-};
-const MOCK_DEVICE_OFFLINE: DeviceCardDevice = {
-  id: 'dev-2',
-  name: 'Home-PC',
-  address: '192.168.1.18',
-  port: 7842,
-  status: 'offline',
-  lastSeen: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
 };
 
 /** TransferItem mock：覆盖 transferring / completed / failed */
@@ -698,17 +678,12 @@ export function DesignSystem() {
             <SectionHeader
               eyebrow="08 · Domain Components"
               title="业务组件"
-              desc="PromptCard / DeviceCard / TransferItem / PermissionCard 四个业务组件的最小可运行示例。"
+              desc="PromptCard / TransferItem / PermissionCard 三个业务组件的最小可运行示例。"
             />
             <div className={styles.domainGrid}>
               <div className={styles.domainCol}>
                 <div className={styles.domainLabel}>PromptCard</div>
                 <PromptCard prompt={MOCK_PROMPT} />
-              </div>
-              <div className={styles.domainCol}>
-                <div className={styles.domainLabel}>DeviceCard · online / offline</div>
-                <DeviceCard device={MOCK_DEVICE_ONLINE} />
-                <DeviceCard device={MOCK_DEVICE_OFFLINE} />
               </div>
               <div className={styles.domainCol}>
                 <div className={styles.domainLabel}>TransferItem · transferring</div>

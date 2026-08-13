@@ -11,7 +11,6 @@
   "claudeCode": "Claude Plugin",
   "agentHub": "Agent Hub",
   "orchestrator": "Automation",
-  "devices": "Devices",
   "settings": "Settings",
   "health": "Health",
   "providerManager": "Provider Manager",
@@ -20,7 +19,6 @@
     "explore": "Explore",
     "work": "Work",
     "knowledge": "Knowledge",
-    "connect": "Connect",
     "system": "System"
   }
 }

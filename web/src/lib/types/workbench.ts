@@ -956,15 +956,6 @@ export interface WorkbenchLaunchTransfer {
   createdAt?: string | null;
 }
 
-/** 启动摘要：设备条目。 */
-export interface WorkbenchLaunchDevice {
-  id: string;
-  name: string;
-  online: boolean;
-  lastSeen?: string | null;
-  address?: string | null;
-}
-
 /**
  * 后端 launch section wire：ready 带 value 数组；error 仅 message。
  * 单 section 失败不拖垮其余 section。
@@ -979,6 +970,5 @@ export interface WorkbenchLaunchSummaryWire {
   sessions: WorkbenchLaunchSectionWire<WorkbenchLaunchSession>;
   tasks: WorkbenchLaunchSectionWire<WorkbenchLaunchTask>;
   transfers: WorkbenchLaunchSectionWire<WorkbenchLaunchTransfer>;
-  devices: WorkbenchLaunchSectionWire<WorkbenchLaunchDevice>;
   generatedAt: string;
 }

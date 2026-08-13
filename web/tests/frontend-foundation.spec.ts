@@ -691,7 +691,7 @@ test.describe('frontend foundation smoke', () => {
     await expect(nav).toBeVisible({ timeout: 15_000 });
 
     // 分组标签可见且不可聚焦
-    for (const label of ['探索', '工作', '知识', '连接', '系统']) {
+    for (const label of ['探索', '工作', '知识', '系统']) {
       await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
     }
 

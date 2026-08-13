@@ -44,7 +44,6 @@ function buildWire(
     sessions: { kind: 'ready', value: [] },
     tasks: { kind: 'ready', value: [] },
     transfers: { kind: 'ready', value: [] },
-    devices: { kind: 'ready', value: [] },
     generatedAt: '2026-07-14T12:00:00.000Z',
     ...overrides,
   };
@@ -73,7 +72,6 @@ describe('workbenchLaunchState', () => {
     }
     expect(state.sessions.kind).toBe('ready');
     expect(state.tasks.kind).toBe('ready');
-    expect(state.devices.kind).toBe('ready');
   });
 
   test('loading reduces to ready and error independently', () => {
@@ -145,11 +143,10 @@ describe('workbenchLaunchState', () => {
         sessions: { kind: 'ready', value: [] },
         tasks: { kind: 'ready', value: [] },
         transfers: { kind: 'ready', value: [] },
-        devices: { kind: 'ready', value: [] },
       }),
     );
 
-    for (const key of ['projects', 'sessions', 'tasks', 'transfers', 'devices'] as const) {
+    for (const key of ['projects', 'sessions', 'tasks', 'transfers'] as const) {
       const section = state[key];
       expect(section.kind).toBe('ready');
       if (section.kind === 'ready') {

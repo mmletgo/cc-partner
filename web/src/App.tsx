@@ -61,7 +61,6 @@ const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'Prom
 // but hidden; only /agent-hub is the new UI entry until N+2 removal evidence lands.
 const AgentHub = lazyNamed(() => import('./pages/AgentHub'), 'AgentHub');
 const ProviderManager = lazyNamed(() => import('./pages/ProviderManager'), 'ProviderManager');
-const Devices = lazyNamed(() => import('./pages/Devices'), 'Devices');
 const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
 const Health = lazyNamed(() => import('./pages/Health'), 'Health');
 const Welcome = lazyNamed(() => import('./pages/Welcome'), 'Welcome');
@@ -561,8 +560,6 @@ export default function App() {
             <Route path="/claude-md" element={<Navigate to="/agent-hub" replace />} />
             <Route path="/claude-code" element={<Navigate to="/agent-hub?section=assets&target=claude" replace />} />
             <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />
-            <Route path="/devices" element={<ShellRoute><Devices /></ShellRoute>} />
-            <Route path="/ssh" element={<Navigate to="/devices" replace />} />
             <Route path="/settings" element={<ShellRoute><Settings /></ShellRoute>} />
             <Route path="/health" element={<ShellRoute><Health /></ShellRoute>} />
             {isDev && DesignSystem ? (

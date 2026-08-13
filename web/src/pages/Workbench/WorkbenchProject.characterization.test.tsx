@@ -57,7 +57,6 @@ describe('Workbench project domain (characterization)', () => {
             sessions: { kind: 'ready', value: [] },
             tasks: { kind: 'ready', value: [] },
             transfers: { kind: 'ready', value: [] },
-            devices: { kind: 'ready', value: [] },
             generatedAt: '2026-07-14T12:00:00.000Z',
           };
         default:

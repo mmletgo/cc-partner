@@ -105,7 +105,6 @@ describe('AppShell grouped navigation', () => {
       { id: 'nav-group-explore', label: '探索' },
       { id: 'nav-group-work', label: '工作' },
       { id: 'nav-group-knowledge', label: '知识' },
-      { id: 'nav-group-connect', label: '连接' },
       { id: 'nav-group-system', label: '系统' },
     ] as const;
 
@@ -134,7 +133,6 @@ describe('AppShell grouped navigation', () => {
       '/scratchpad',
       '/prompt-optimizer',
       '/agent-hub',
-      '/devices',
       '/health',
       '/provider-manager',
     ]);
@@ -156,7 +154,7 @@ describe('AppShell grouped navigation', () => {
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
     const links = within(nav).getAllByRole('link');
-    expect(links).toHaveLength(12);
+    expect(links).toHaveLength(11);
 
     for (const link of links) {
       const tabIndex = link.getAttribute('tabindex');

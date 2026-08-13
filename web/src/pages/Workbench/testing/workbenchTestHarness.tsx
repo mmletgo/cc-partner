@@ -604,7 +604,6 @@ export function buildDefaultInvokeHandler(data: {
           sessions: { kind: 'ready', value: [] },
           tasks: { kind: 'ready', value: [] },
           transfers: { kind: 'ready', value: [] },
-          devices: { kind: 'ready', value: [] },
           generatedAt: '2026-07-14T00:00:00.000Z',
         };
       case 'list_workbench_projects':

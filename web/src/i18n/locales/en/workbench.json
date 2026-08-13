@@ -878,24 +878,19 @@
       "projects": "Recent projects",
       "sessions": "Active sessions",
       "tasks": "Orchestrator tasks",
-      "transfers": "Transfers",
-      "devices": "Devices"
+      "transfers": "Transfers"
     },
     "empty": {
       "projects": "No recent projects",
       "sessions": "No active terminal sessions",
       "tasks": "No in-progress tasks",
-      "transfers": "No active or failed transfers",
-      "devices": "No online or recently synced devices"
+      "transfers": "No active or failed transfers"
     },
     "openTransfer": "Open transfers",
-    "openDevices": "Open devices",
     "openSettingsDependencies": "Open dependency settings",
     "item": {
       "remote": "Remote",
-      "local": "Local",
-      "online": "Online",
-      "offline": "Offline"
+      "local": "Local"
     }
   },
   "deepLink": {
