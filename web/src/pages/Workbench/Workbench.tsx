@@ -2,15 +2,11 @@
  * 工作台页面 - 本机项目、多终端与项目文件夹检查器
  *
  * Business Logic（为什么需要这个页面）:
- *   用户需要指定一个项目文件夹，并在 cc-partner 内为该项目同时管理多个项目终端；
- *   右侧检查器展示当前会话状态，并可在项目文件夹、Git 提交历史与项目笔记之间切换。
+ *   指定项目文件夹后管理多个项目终端；右侧检查器切换文件夹、Git 历史与项目笔记。
  *
  * Code Logic（这个页面做什么）:
- *   - 拉取/添加/移除工作台项目，并按当前项目加载会话与根目录文件树
- *   - 用 xterm 渲染当前 session，监听后端 terminal output/status 事件同步 UI
- *   - 提供文件夹展开、选中、创建、重命名、删除和 Git 提交历史查看等检查器交互
- *   - 在项目层级嵌入 Orchestrator 自动化控制台，任务运行后再 deep link 到具体执行现场
- *   - hooks 全部在 early return 之前，避免 React hooks 调用顺序问题
+ *   拉取项目/会话/文件树，用 xterm 渲染当前 session，并嵌入项目级 Orchestrator 控制台。
+ *   hooks 全部在 early return 之前，避免 React hooks 调用顺序问题。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,6 +37,8 @@ import {
 import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
+import { routeAutomationWorkbenchOpen } from './workbenchWindowNavigation';
+import { workbenchApi } from '@/api/workbench';
 import {
   canListenToTauriEvents,
   deferEffect,
@@ -68,6 +66,7 @@ import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbe
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
 import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
+import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
 import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
@@ -94,7 +93,11 @@ export function Workbench() {
     selectProject,
     refreshProjectSessionStats,
     chooseAndAddProject,
+    currentWindowLabel,
+    occupancy,
   } = useWorkbenchProjects();
+  const { layoutSlotKey } = useWorkbenchWindowRole();
+  const restoreSlotKey = layoutSlotKey ?? 'desktop:auto';
   const {
     resetBuffer: resetTerminalBuffer,
     removeBuffer: removeTerminalBuffer,
@@ -470,6 +473,8 @@ export function Workbench() {
     setWorkspaceView,
     setInspectorTab,
     setBrowserTargetUrl,
+    layoutSlotKey: restoreSlotKey,
+    urlProjectId: workbenchDeepLink.projectId,
   });
 
   const notes = useWorkbenchProjectNotes({
@@ -629,19 +634,22 @@ export function Workbench() {
     setAutomationConsoleOpen(true);
   }, [automationConsoleOpen, closeAutomationConsole, closePromptPanel]);
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户在自动化看板中点击 blocked 任务的现场入口时，需要回到对应 Workbench 项目、worktree 和终端。
-   *
-   * Code Logic（这个函数做什么）:
-   *   委托给 automation controller 的 openTaskWorkbench：navigate 到 deep link、关闭控制台并把中心工作区
-   *   切回 terminal，让 deep link 聚焦结果可见。
-   */
   const handleOpenAutomationTaskWorkbench = useCallback(
     (url: string): void => {
-      void openTaskWorkbench(url);
+      routeAutomationWorkbenchOpen(url, {
+        currentLabel: currentWindowLabel,
+        occupancy,
+        navigate,
+        claim: workbenchApi.windows.claim,
+        focus: workbenchApi.windows.focus,
+        applyOnWindow: workbenchApi.windows.applyDeepLink,
+        fallback: (next) => {
+          void openTaskWorkbench(next);
+        },
+        closeLocalConsole: closeAutomationConsole,
+      });
     },
-    [openTaskWorkbench],
+    [closeAutomationConsole, currentWindowLabel, navigate, occupancy, openTaskWorkbench],
   );
 
   const workspaceLine = activeProject
@@ -652,13 +660,6 @@ export function Workbench() {
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
   } as CSSProperties;
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   零项目空态主 CTA 复用侧栏/rail 同一套「添加本机项目」流程，避免另起一套。
-   *
-   * Code Logic（这个函数做什么）:
-   *   调用 projects context 的 chooseAndAddProject。
-   */
   const handleEmptyAddLocal = useCallback(() => {
     void chooseAndAddProject();
   }, [chooseAndAddProject]);

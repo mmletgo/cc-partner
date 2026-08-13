@@ -18,6 +18,7 @@ mod layout;
 mod notes;
 mod projects;
 mod sessions;
+mod windows;
 
 #[cfg(test)]
 mod tests;
@@ -165,6 +166,19 @@ pub use notes::{
     __tauri_command_name_get_workbench_project_note,
     __tauri_command_name_save_workbench_project_note, get_workbench_project_note,
     save_workbench_project_note,
+};
+
+pub use windows::{
+    __cmd__apply_workbench_window_deeplink, __cmd__claim_workbench_window_project,
+    __cmd__close_workbench_window, __cmd__focus_workbench_window,
+    __cmd__list_workbench_window_occupancy, __cmd__open_workbench_window,
+    __tauri_command_name_apply_workbench_window_deeplink,
+    __tauri_command_name_claim_workbench_window_project,
+    __tauri_command_name_close_workbench_window, __tauri_command_name_focus_workbench_window,
+    __tauri_command_name_list_workbench_window_occupancy, __tauri_command_name_open_workbench_window,
+    apply_workbench_window_deeplink, claim_workbench_window_project, close_workbench_window,
+    focus_workbench_window, list_workbench_window_occupancy, open_workbench_window,
+    release_destroyed_workbench_window,
 };
 
 // ---- crate 内 helper / DTO（pub(crate)）----

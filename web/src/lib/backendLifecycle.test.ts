@@ -69,6 +69,19 @@ describe('backendLifecycle', () => {
     const trayCloseRequestedIndex = backendCloseListenerSource.indexOf("'backend:close-requested'");
     assert(mainWindowGuardIndex >= 0, 'BackendCloseChoiceListener 必须按 window.label 限制为 main 窗口');
     assert(
+      appSource.includes('shouldMountGlobalWindowListeners'),
+      'App.tsx 必须用 shouldMountGlobalWindowListeners 限制健康/权限/运营通知只挂主窗',
+    );
+    assert(
+      appSource.includes('MainWindowOnlyListeners') &&
+        appSource.includes('MainWindowOperationalNotifications'),
+      'App.tsx 必须把健康/权限/运营通知收进 main-only 包装',
+    );
+    assert(
+      appSource.includes('workbench:apply-deeplink'),
+      'App.tsx 必须监听卫星窗深链 workbench:apply-deeplink',
+    );
+    assert(
       mainWindowGuardIndex < closeRequestedIndex && mainWindowGuardIndex < trayCloseRequestedIndex,
       'BackendCloseChoiceListener 必须先判断 main 窗口，再注册窗口关闭和托盘关闭监听',
     );

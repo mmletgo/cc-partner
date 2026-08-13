@@ -52,6 +52,10 @@ export interface UseWorkspaceSafeRestoreParams {
   setWorkspaceView: (view: WorkbenchFileWorkspaceView) => void;
   setInspectorTab: (tab: WorkbenchInspectorTab) => void;
   setBrowserTargetUrl: (url: string | null) => void;
+  /** 本窗 auto slot；缺省 desktop:auto。 */
+  layoutSlotKey?: string;
+  /** URL 指定项目时优先于 slot restore。 */
+  urlProjectId?: string | null;
 }
 
 export interface UseWorkspaceSafeRestoreResult {
@@ -158,6 +162,8 @@ export function useWorkspaceSafeRestore(
     setWorkspaceView,
     setInspectorTab,
     setBrowserTargetUrl,
+    layoutSlotKey = 'desktop:auto',
+    urlProjectId = null,
   } = params;
 
   const [restoreSummary, setRestoreSummary] = useState<WorkspaceRestoreSummary | null>(null);
@@ -350,22 +356,20 @@ export function useWorkspaceSafeRestore(
           activeWorktreeId: s.activeWorktreeId,
           activeSessionId: s.activeSessionId,
           workspaceView: s.workspaceView as WorkspaceView,
-          // 完整 enum：不把非 history 折叠丢字段（UI 当前为 files|history，1:1 写入 layout）
           inspectorTab: toLayoutInspectorTab(s.inspectorTab),
           browserTargetUrl: s.browserTargetUrl,
+          slotKey: layoutSlotKey,
         };
       },
     });
     layoutAutosaveRef.current = coordinator;
-    // 首次 restore 完成前保持 pause：项目列表若晚于 500ms 才就绪，
-    // 否则会把 localStorage 里的半成品 selection 写脏 revision。
     coordinator.pause();
-    void coordinator.hydrateRevision();
+    void coordinator.hydrateRevision(layoutSlotKey);
     return () => {
       coordinator.dispose();
       layoutAutosaveRef.current = null;
     };
-  }, []);
+  }, [layoutSlotKey]);
 
   useEffect(() => {
     if (!projectsLoading && projectsLength === 0) {
@@ -402,10 +406,16 @@ export function useWorkspaceSafeRestore(
       try {
         const summary = await runRestoreWithUi({
           previous,
-          loadPlan: () => workbenchApi.layout.preflight(),
-          // 首次打开本会话的项目强制进 terminal,即使 plan 中保存的是 files / browser。
-          // 该 effect 在 mount 后 projectsLength > 0 时只跑一次 (restoreRanRef),
-          // 因此「只在首次」语义由 restoreRanRef 守门,这里显式传 true 与产品诉求一一对应。
+          loadPlan: async () => {
+            if (urlProjectId) {
+              const existing = await workbenchApi.layout.get(layoutSlotKey);
+              if (existing && existing.projectId !== urlProjectId) {
+                await selectProjectFromDeepLink(urlProjectId);
+                throw new Error('workspace_layout_url_project_overrides_slot');
+              }
+            }
+            return workbenchApi.layout.preflight(layoutSlotKey);
+          },
           forceTerminalWorkspaceView: true,
         });
         if (summary && !summary.silent) setRestoreSummary(summary);
@@ -418,6 +428,9 @@ export function useWorkspaceSafeRestore(
     projectsLength,
     dirtyEditor,
     runRestoreWithUi,
+    layoutSlotKey,
+    urlProjectId,
+    selectProjectFromDeepLink,
   ]);
 
   const dismissRestoreNotice = useCallback(() => setRestoreSummary(null), []);

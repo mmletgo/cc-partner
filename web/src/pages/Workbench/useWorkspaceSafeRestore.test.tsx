@@ -104,6 +104,8 @@ interface HookParams {
   inspectorTab: WorkbenchInspectorTab;
   browserTargetUrl: string | null;
   dirtyEditor: boolean;
+  layoutSlotKey?: string;
+  urlProjectId?: string | null;
 }
 
 interface HarnessReturn {
@@ -186,6 +188,8 @@ function makeHarness(params: HookParams): HarnessReturn {
       setWorkspaceView,
       setInspectorTab,
       setBrowserTargetUrl,
+      layoutSlotKey: params.layoutSlotKey,
+      urlProjectId: params.urlProjectId,
     }),
   );
 
@@ -650,5 +654,47 @@ describe('useWorkspaceSafeRestore — apply failure rolls back previous view', (
       await vi.runAllTimersAsync();
     });
     expect(layoutApi.apply).toHaveBeenCalledTimes(1);
+  });
+
+  test('url project skips slot restore when slot belongs to another project', async () => {
+    vi.useFakeTimers();
+    layoutApi.get.mockResolvedValue({
+      schemaVersion: 1,
+      id: 'slot-old',
+      revision: 3,
+      slotKey: 'desktop:auto:window:workbench-1',
+      kind: 'auto',
+      name: null,
+      projectId: 'old-p',
+      activeWorktreeId: 'w-old',
+      activeSessionId: 's-old',
+      workspaceView: 'files',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    });
+
+    const { calls } = makeHarness({
+      projectsLoading: false,
+      projectsLength: 1,
+      activeProjectId: null,
+      activeWorktreeId: null,
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+      layoutSlotKey: 'desktop:auto:window:workbench-1',
+      urlProjectId: 'url-p',
+    });
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(layoutApi.preflight).not.toHaveBeenCalled();
+    expect(layoutApi.apply).not.toHaveBeenCalled();
+    expect(calls.selectProjectFromDeepLink).toEqual(['url-p']);
   });
 });

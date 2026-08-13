@@ -21,7 +21,11 @@
  *
  *   注意：本组件是 <Outlet /> 容器，children 不直接使用。
  */
-import { useCallback, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
+import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
+import { syncWorkbenchWindowTitle } from '@/lib/workbenchWindowTitle';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -110,6 +114,16 @@ export function AppShell({ children }: AppShellProps) {
   const [mobileAccessOpen, setMobileAccessOpen] = useState<boolean>(false);
   const mobileAccessButtonRef = useRef<HTMLButtonElement | null>(null);
   const appName = t('common:app.name');
+  const { role } = useWorkbenchWindowRole();
+  const { activeProject } = useWorkbenchProjects();
+  const isSatellite = role === 'satellite';
+
+  useEffect(() => {
+    void syncWorkbenchWindowTitle(
+      (title) => getCurrentWindow().setTitle(title),
+      activeProject?.name ?? null,
+    );
+  }, [activeProject?.name]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -134,9 +148,13 @@ export function AppShell({ children }: AppShellProps) {
   }, []);
 
   return (
-    <div className={styles.layout}>
+    <div
+      className={styles.layout}
+      data-testid={isSatellite ? 'workbench-satellite-shell' : undefined}
+    >
       <Sidebar
         footer={
+          isSatellite ? undefined : (
           <div className={styles.footer}>
             <span className={styles.footerVersion}>{`v${version ?? '—'}`}</span>
             <span>{appName}</span>
@@ -172,43 +190,54 @@ export function AppShell({ children }: AppShellProps) {
               </div>
             </div>
           </div>
+          )
         }
       >
         <div className={styles.logo}>
           <img className={styles.logoMark} src={appIconUrl} alt="" aria-hidden="true" />
           <span className={styles.logoText}>{appName}</span>
         </div>
-        <nav className={styles.navList} aria-label={t('nav:primaryNav')}>
-          <NavGroup id={NAV_GROUP_IDS.explore} label={t('nav:groups.explore')}>
-            <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
-          </NavGroup>
-          <NavGroup id={NAV_GROUP_IDS.work} label={t('nav:groups.work')}>
-            <NavItem
-              to="/attention"
-              label={t('nav:attention')}
-              icon={<AlertIcon />}
-              badge={attentionBadge ?? undefined}
-            />
-            <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
-            <WorkbenchProjectRail />
-          </NavGroup>
-          <NavGroup id={NAV_GROUP_IDS.knowledge} label={t('nav:groups.knowledge')}>
-            <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
-            <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
-            <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
-            <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
-            <NavItem to="/agent-hub" label={t('nav:agentHub')} icon={<ClaudeMdIcon />} />
-          </NavGroup>
-          <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
-            <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
-            <NavItem
-              to="/provider-manager"
-              label={t('nav:providerManager')}
-              icon={<ProviderManagerIcon />}
-            />
-          </NavGroup>
-        </nav>
-        <PermissionStatusBadge />
+        {isSatellite ? (
+          <nav className={styles.navList} aria-label={t('nav:primaryNav')}>
+            <NavGroup id={NAV_GROUP_IDS.work} label={t('nav:groups.work')}>
+              <WorkbenchProjectRail />
+            </NavGroup>
+          </nav>
+        ) : (
+          <>
+            <nav className={styles.navList} aria-label={t('nav:primaryNav')}>
+              <NavGroup id={NAV_GROUP_IDS.explore} label={t('nav:groups.explore')}>
+                <NavItem to="/" label={t('nav:home')} icon={<HomeIcon />} />
+              </NavGroup>
+              <NavGroup id={NAV_GROUP_IDS.work} label={t('nav:groups.work')}>
+                <NavItem
+                  to="/attention"
+                  label={t('nav:attention')}
+                  icon={<AlertIcon />}
+                  badge={attentionBadge ?? undefined}
+                />
+                <NavItem to="/transfer" label={t('nav:transfer')} icon={<TransferIcon />} />
+                <WorkbenchProjectRail />
+              </NavGroup>
+              <NavGroup id={NAV_GROUP_IDS.knowledge} label={t('nav:groups.knowledge')}>
+                <NavItem to="/prompts" label={t('nav:prompts')} icon={<PromptsIcon />} />
+                <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
+                <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
+                <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
+                <NavItem to="/agent-hub" label={t('nav:agentHub')} icon={<ClaudeMdIcon />} />
+              </NavGroup>
+              <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
+                <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
+                <NavItem
+                  to="/provider-manager"
+                  label={t('nav:providerManager')}
+                  icon={<ProviderManagerIcon />}
+                />
+              </NavGroup>
+            </nav>
+            <PermissionStatusBadge />
+          </>
+        )}
       </Sidebar>
       <main className={styles.main}>{children ?? <Outlet />}</main>
       <Dialog

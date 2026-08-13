@@ -27,6 +27,7 @@ import { useEffect, type ReactNode } from 'react';
 const listMock = vi.fn();
 const replayMock = vi.fn();
 const listenMock = vi.fn();
+const windowLabelState = vi.hoisted(() => ({ label: 'main' }));
 
 type EventHandler = (event: { payload: unknown }) => void;
 const listenerHandlers = new Map<string, EventHandler>();
@@ -50,6 +51,10 @@ vi.mock('@/api/workbench', async () => {
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (...args: unknown[]) => listenMock(...args),
+}));
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({ label: windowLabelState.label }),
 }));
 
 import {
@@ -1409,5 +1414,67 @@ describe('WorkbenchTerminalBuffersProvider startup list recovery (R13 M1)', () =
       const probe = await findByTestId('startup-baseline-probe');
       expect(probe.textContent).toBe('none');
     });
+  });
+});
+
+describe('WorkbenchTerminalBuffersProvider satellite startup list', () => {
+  const originalUrl = `${window.location.pathname}${window.location.search}`;
+
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    listenMock.mockReset();
+    windowLabelState.label = 'main';
+    vi.useRealTimers();
+
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    windowLabelState.label = 'main';
+    window.history.replaceState({}, '', originalUrl);
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.useRealTimers();
+  });
+
+  test('satellite window lists sessions for the URL projectId', async () => {
+    windowLabelState.label = 'workbench-1';
+    window.history.replaceState({}, '', '/workbench?projectId=sat-project');
+    listMock.mockResolvedValue([]);
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    renderProvider(storeRef);
+
+    await waitFor(() => {
+      expect(listMock).toHaveBeenCalledWith('sat-project');
+    });
+    expect(listMock).not.toHaveBeenCalledWith();
+  });
+
+  test('satellite window without projectId does not list sessions', async () => {
+    windowLabelState.label = 'workbench-2';
+    window.history.replaceState({}, '', '/workbench');
+    listMock.mockResolvedValue([]);
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    renderProvider(storeRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+    expect(listMock).not.toHaveBeenCalled();
   });
 });

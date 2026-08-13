@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-08-08",
+  "updatedAt": "2026-08-13",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -303,6 +303,28 @@
       ],
       "docs": [
         "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-WORKBENCH-WINDOW-001",
+      "surface": "workbench-satellite-window",
+      "level": "L1",
+      "tests": [
+        "web/tests/workbench-window.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- workbench-window.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "packaged multi-monitor GUI",
+        "real WebviewWindowBuilder",
+        "main-window close / exit_gui process semantics"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md"
       ]
     },
     {

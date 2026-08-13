@@ -156,6 +156,9 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     selectProject: vi.fn(async (project) => project),
     removeProject: vi.fn(async () => undefined),
     reorderProjects: vi.fn(async () => undefined),
+    currentWindowLabel: 'main',
+    occupancy: [],
+    openProjectInNewWindow: vi.fn(async () => undefined),
     ...partial,
   };
 
@@ -227,6 +230,21 @@ describe('WorkbenchProjectRail discovery IA', () => {
     expect(document.querySelector('[data-hint-tone="wait"]')).toBeTruthy();
   });
 
+  test('open-in-new-window button calls openProjectInNewWindow and occupied project does not navigate after select', async () => {
+    const occupied = buildProject({ id: 'occupied', name: 'occupied-repo' });
+    const ctx = renderRail({
+      projects: [occupied],
+      occupancy: [{ projectId: occupied.id, windowLabel: 'workbench-1' }],
+    });
+
+    fireEvent.click(screen.getByTestId('project-open-new-window'));
+    expect(ctx.openProjectInNewWindow).toHaveBeenCalledWith(occupied);
+
+    fireEvent.click(screen.getByRole('button', { name: /occupied-repo/ }));
+    expect(ctx.selectProject).toHaveBeenCalledWith(occupied);
+    expect(screen.getByText('已在其他窗口')).toBeTruthy();
+  });
+
   test('does not badge normal working agents but badges needs-input', () => {
     const project = buildProject({ id: 'p1', name: 'agent-repo' });
     fleetMockState.projectSummaries = {
@@ -272,6 +290,9 @@ describe('WorkbenchProjectRail discovery IA', () => {
               setActiveProjectId: vi.fn(),
               addProjectFromPath: vi.fn(async () => null),
               refreshProjectSessionStats: vi.fn(async () => undefined),
+              currentWindowLabel: 'main',
+              occupancy: [],
+              openProjectInNewWindow: vi.fn(async () => undefined),
             } as unknown as WorkbenchProjectsContextValue}
           >
             <WorkbenchProjectRail />
@@ -318,6 +339,9 @@ describe('WorkbenchProjectRail discovery IA', () => {
               setActiveProjectId: vi.fn(),
               addProjectFromPath: vi.fn(async () => null),
               refreshProjectSessionStats: vi.fn(async () => undefined),
+              currentWindowLabel: 'main',
+              occupancy: [],
+              openProjectInNewWindow: vi.fn(async () => undefined),
             } as unknown as WorkbenchProjectsContextValue}
           >
             <WorkbenchProjectRail />

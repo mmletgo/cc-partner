@@ -376,6 +376,18 @@ export function registerAppShellCommands(
   });
   harness.command('list_workbench_projects', { kind: 'resolve', value: [] });
   harness.command('list_workbench_sessions', { kind: 'resolve', value: [] });
+  harness.command('list_workbench_window_occupancy', { kind: 'resolve', value: [] });
+  harness.command('claim_workbench_window_project', {
+    kind: 'resolve',
+    value: { action: 'claimed', label: 'main', projectId: 'proj-placeholder' },
+  });
+  harness.command('open_workbench_window', {
+    kind: 'resolve',
+    value: { action: 'created', label: 'workbench-1', projectId: 'proj-placeholder' },
+  });
+  harness.command('focus_workbench_window', { kind: 'resolve', value: null });
+  harness.command('close_workbench_window', { kind: 'resolve', value: null });
+  harness.command('apply_workbench_window_deeplink', { kind: 'resolve', value: null });
   harness.command('get_workbench_launch_summary', {
     kind: 'resolve',
     value: {

@@ -32,6 +32,20 @@ export const PlusIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   工作台项目「在新窗口打开」需要与删除/添加明显区分的窗口语义。
+ *
+ * Code Logic（做什么）:
+ *   渲染窗口外框与顶栏的 16x16 stroke SVG。
+ */
+export const WindowIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="2.5" y="3" width="11" height="10" rx="1.4" />
+    <path d="M2.5 6h11" />
+  </svg>
+);
+
 export const EditIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <path d="M11.5 2.5 13.5 4.5 5 13H3v-2L11.5 2.5Z" />

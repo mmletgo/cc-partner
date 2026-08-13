@@ -15,6 +15,18 @@ use serde::{Deserialize, Serialize};
 /// auto slot 固定键：桌面端零配置自动保存最后工作现场。
 pub const DESKTOP_AUTO_SLOT_KEY: &str = "desktop:auto";
 
+/// 主窗 Tauri label。
+pub const MAIN_WINDOW_LABEL: &str = "main";
+
+/// 卫星窗 label 前缀；完整 label 为 `workbench-1`..`workbench-4`。
+pub const WORKBENCH_WINDOW_LABEL_PREFIX: &str = "workbench-";
+
+/// 桌面卫星工作台窗口上限。
+pub const MAX_WORKBENCH_SATELLITE_WINDOWS: u8 = 4;
+
+/// 卫星窗 auto slot 前缀：`desktop:auto:window:workbench-N`。
+pub const DESKTOP_WINDOW_AUTO_SLOT_PREFIX: &str = "desktop:auto:window:";
+
 /// layout schema 版本；未知版本 fail-closed。
 pub const WORKSPACE_LAYOUT_SCHEMA_VERSION: u32 = 1;
 
@@ -28,7 +40,7 @@ pub const WORKSPACE_LAYOUT_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceLayoutKind {
-    /// 桌面自动 slot（`desktop:auto`）。
+    /// 桌面自动 slot（`desktop:auto` 或 `desktop:auto:window:workbench-[1-4]`）。
     Auto,
     /// 命名 snapshot（`named:<uuid>`）。
     Named,
@@ -183,7 +195,7 @@ impl InspectorTab {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceLayoutDraft {
-    /// slot 键：`desktop:auto` 或 `named:<uuid>`。
+    /// slot 键：`desktop:auto`、`desktop:auto:window:workbench-[1-4]` 或 `named:<uuid>`。
     pub slot_key: String,
     /// auto / named。
     pub kind: WorkspaceLayoutKind,
@@ -253,6 +265,53 @@ pub fn desktop_auto_slot_key() -> &'static str {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     卫星窗序号必须是稳定的 1..=4，建窗与 layout slot 共用同一上限。
+///
+/// Code Logic（这个函数做什么）:
+///     解析精确 `workbench-1`..`workbench-4`，否则返回 None。
+pub fn parse_satellite_window_slot(label: &str) -> Option<u8> {
+    let rest = label.strip_prefix(WORKBENCH_WINDOW_LABEL_PREFIX)?;
+    let slot = rest.parse::<u8>().ok()?;
+    if rest == slot.to_string() && (1..=MAX_WORKBENCH_SATELLITE_WINDOWS).contains(&slot) {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     主窗与卫星窗各自保存独立工作现场，禁止 overlay 或越界 label 写入 auto slot。
+///
+/// Code Logic（这个函数做什么）:
+///     `main` → `desktop:auto`；`workbench-N`(1..=4) → `desktop:auto:window:workbench-N`；其余 Validation。
+pub fn window_auto_slot_key(label: &str) -> Result<String, AppError> {
+    if label == MAIN_WINDOW_LABEL {
+        return Ok(DESKTOP_AUTO_SLOT_KEY.to_string());
+    }
+    if parse_satellite_window_slot(label).is_some() {
+        return Ok(format!("{DESKTOP_WINDOW_AUTO_SLOT_PREFIX}{label}"));
+    }
+    Err(AppError::validation(format!(
+        "workspace_layout_invalid_window_label:{label}"
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     persist / delete 必须识别窗口 auto slot，不能把 named 或越界窗当成 auto。
+///
+/// Code Logic（这个函数做什么）:
+///     仅 `desktop:auto` 与 `desktop:auto:window:workbench-[1-4]` 为真。
+pub fn is_window_auto_slot_key(slot_key: &str) -> bool {
+    if slot_key == DESKTOP_AUTO_SLOT_KEY {
+        return true;
+    }
+    let Some(label) = slot_key.strip_prefix(DESKTOP_WINDOW_AUTO_SLOT_PREFIX) else {
+        return false;
+    };
+    parse_satellite_window_slot(label).is_some()
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     命名 snapshot 的 slot 必须可预测且唯一。
 ///
 /// Code Logic（这个函数做什么）:
@@ -263,14 +322,14 @@ pub fn new_named_slot_key() -> String {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     校验 slot_key 与 kind 一致：auto 只能是 desktop:auto；named 必须 named:<uuid>。
+///     校验 slot_key 与 kind 一致：auto 只能是主窗或卫星窗 auto slot；named 必须 named:<uuid>。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 UUID 段；不匹配返回 Validation。
+///     Auto 接受 `desktop:auto` 与 `desktop:auto:window:workbench-[1-4]`；named 解析 UUID 段。
 pub fn validate_slot_key(slot_key: &str, kind: WorkspaceLayoutKind) -> Result<(), AppError> {
     match kind {
         WorkspaceLayoutKind::Auto => {
-            if slot_key != DESKTOP_AUTO_SLOT_KEY {
+            if !is_window_auto_slot_key(slot_key) {
                 return Err(AppError::validation(
                     "workspace_layout_invalid_auto_slot".to_string(),
                 ));
@@ -420,6 +479,24 @@ mod tests {
         assert_eq!(desktop_auto_slot_key(), "desktop:auto");
         validate_slot_key(DESKTOP_AUTO_SLOT_KEY, WorkspaceLayoutKind::Auto).unwrap();
         assert!(validate_slot_key("desktop:other", WorkspaceLayoutKind::Auto).is_err());
+    }
+
+    #[test]
+    fn window_auto_slot_accepts_main_and_satellite_labels() {
+        validate_slot_key(DESKTOP_AUTO_SLOT_KEY, WorkspaceLayoutKind::Auto).unwrap();
+        validate_slot_key("desktop:auto:window:workbench-1", WorkspaceLayoutKind::Auto).unwrap();
+        assert!(validate_slot_key("desktop:other", WorkspaceLayoutKind::Auto).is_err());
+        assert!(
+            validate_slot_key("desktop:auto:window:workbench-5", WorkspaceLayoutKind::Auto)
+                .is_err()
+        );
+        assert_eq!(window_auto_slot_key("main").unwrap(), "desktop:auto");
+        assert_eq!(
+            window_auto_slot_key("workbench-2").unwrap(),
+            "desktop:auto:window:workbench-2"
+        );
+        assert!(window_auto_slot_key("workbench-5").is_err());
+        assert!(window_auto_slot_key("screenshot-overlay-0").is_err());
     }
 
     #[test]

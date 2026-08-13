@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { workbenchApi } from '@/api/workbench';
 import { configApi } from '@/api/config';
 import type { WorkbenchProject } from '@/lib/types';
+import { MAIN_WINDOW_LABEL } from '@/lib/workbenchWindow';
 import { upsertWorkbenchProjectInPlace } from '@/lib/workbenchRemoteProjects';
 import {
   projectSessionStats,
@@ -26,6 +27,8 @@ import {
   WorkbenchProjectsContext,
   type WorkbenchProjectsContextValue,
 } from './workbenchProjectsContext';
+import { useVisibilityPolling } from './useVisibilityPolling';
+import { useWorkbenchWindowRole } from './useWorkbenchWindowRole';
 
 const ACTIVE_PROJECT_KEY = 'cp-workbench-active-project-id';
 
@@ -116,9 +119,11 @@ export interface WorkbenchProjectsProviderProps {
  */
 export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProviderProps) {
   const { t } = useTranslation(['workbench']);
+  const { label: currentWindowLabel } = useWorkbenchWindowRole();
+  const persistActiveProject = currentWindowLabel === MAIN_WINDOW_LABEL;
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(() =>
-    readStoredActiveProjectId(),
+    persistActiveProject ? readStoredActiveProjectId() : null,
   );
   const [projectsLoading, setProjectsLoading] = useState<boolean>(true);
   const [projectBusy, setProjectBusy] = useState<boolean>(false);
@@ -126,6 +131,9 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
   const [projectSessionStatsMap, setProjectSessionStatsMap] = useState<
     Record<string, WorkbenchProjectSessionStats>
   >({});
+  const [occupancy, setOccupancy] = useState<Array<{ projectId: string; windowLabel: string }>>(
+    [],
+  );
   const projectAddBusyRef = useRef<boolean>(false);
 
   const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
@@ -134,10 +142,26 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
     [activeProjectId, projects],
   );
 
-  const setActiveProjectId = useCallback((projectId: string | null) => {
-    setActiveProjectIdState(projectId);
-    writeStoredActiveProjectId(projectId);
+  const setActiveProjectId = useCallback(
+    (projectId: string | null) => {
+      setActiveProjectIdState(projectId);
+      if (persistActiveProject) writeStoredActiveProjectId(projectId);
+    },
+    [persistActiveProject],
+  );
+
+  const refreshOccupancy = useCallback(async () => {
+    try {
+      setOccupancy(await workbenchApi.windows.listOccupancy());
+    } catch {
+      // occupancy 只辅助 Rail 标记；失败保留上一帧。
+    }
   }, []);
+
+  const { runNow: refreshOccupancyNow } = useVisibilityPolling(refreshOccupancy, {
+    intervalMs: 15_000,
+    enabled: true,
+  });
 
   const refreshProjectSessionStats = useCallback(async (projectId?: string) => {
     try {
@@ -167,7 +191,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
           current && list.some((project) => project.id === current)
             ? current
             : null;
-        writeStoredActiveProjectId(next);
+        if (persistActiveProject) writeStoredActiveProjectId(next);
         return next;
       });
       void refreshProjectSessionStats();
@@ -182,7 +206,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
     } finally {
       setProjectsLoading(false);
     }
-  }, [desktopUnavailableMessage, refreshProjectSessionStats, t]);
+  }, [desktopUnavailableMessage, persistActiveProject, refreshProjectSessionStats, t]);
 
   const addProjectFromPath = useCallback(
     async (path: string) => {
@@ -263,25 +287,62 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
 
   const selectProject = useCallback(
     async (project: WorkbenchProject) => {
+      try {
+        const claim = await workbenchApi.windows.claim(project.id);
+        if (claim.action === 'occupied') {
+          await workbenchApi.windows.focus(claim.label);
+          void refreshOccupancyNow({ force: true });
+          return project;
+        }
+      } catch {
+        // 无 Tauri / claim 失败时仍允许本窗切换，避免浏览器调试卡死。
+      }
       setActiveProjectId(project.id);
       try {
         const touched = await workbenchApi.projects.touch(project.id);
         setProjects((current) => upsertWorkbenchProjectInPlace(current, touched));
         void refreshProjectSessionStats(touched.id);
+        void refreshOccupancyNow({ force: true });
         return touched;
       } catch {
-        // 最近打开时间更新失败不阻断本地切换，下一次刷新会恢复后端状态。
         void refreshProjectSessionStats(project.id);
         return project;
       }
     },
-    [refreshProjectSessionStats, setActiveProjectId],
+    [refreshOccupancyNow, refreshProjectSessionStats, setActiveProjectId],
+  );
+
+  const openProjectInNewWindow = useCallback(
+    async (project: WorkbenchProject) => {
+      try {
+        await workbenchApi.windows.open(project.id);
+      } catch (error) {
+        setProjectError(
+          displayWorkbenchErrorMessage(
+            error,
+            t('workbench:errors.openInNewWindow'),
+            desktopUnavailableMessage,
+          ),
+        );
+        return;
+      }
+      void refreshOccupancyNow({ force: true });
+    },
+    [desktopUnavailableMessage, refreshOccupancyNow, t],
   );
 
   const removeProject = useCallback(
     async (projectId: string) => {
       try {
         setProjectBusy(true);
+        const occupied = occupancy.find((row) => row.projectId === projectId);
+        if (occupied && occupied.windowLabel !== currentWindowLabel) {
+          try {
+            await workbenchApi.windows.close(occupied.windowLabel);
+          } catch {
+            // 关窗失败仍尝试删除项目记录；后端会拆 session。
+          }
+        }
         await workbenchApi.projects.remove(projectId);
         setProjects((current) => current.filter((project) => project.id !== projectId));
         setProjectSessionStatsMap((current) => {
@@ -290,6 +351,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
           return next;
         });
         if (activeProjectId === projectId) setActiveProjectId(null);
+        void refreshOccupancyNow({ force: true });
       } catch (error) {
         setProjectError(
           displayWorkbenchErrorMessage(
@@ -302,7 +364,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
         setProjectBusy(false);
       }
     },
-    [activeProjectId, desktopUnavailableMessage, setActiveProjectId, t],
+    [activeProjectId, currentWindowLabel, desktopUnavailableMessage, occupancy, refreshOccupancyNow, setActiveProjectId, t],
   );
 
   /**
@@ -368,10 +430,14 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       selectProject,
       removeProject,
       reorderProjects,
+      currentWindowLabel,
+      occupancy,
+      openProjectInNewWindow,
     }),
     [
       activeProject,
       activeProjectId,
+      currentWindowLabel,
       chooseAndAddProject,
       loadProjects,
       openRemoteProject,
@@ -381,6 +447,8 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       projects,
       projectsLoading,
       refreshProjectSessionStats,
+      occupancy,
+      openProjectInNewWindow,
       removeProject,
       reorderProjects,
       selectProject,

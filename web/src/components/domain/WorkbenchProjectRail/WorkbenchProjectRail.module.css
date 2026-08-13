@@ -345,14 +345,24 @@
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--success) 14%, transparent);
 }
 
+.projectOpenWindowButton,
 .projectRemoveButton {
   position: absolute;
-  right: var(--space-1);
   bottom: var(--space-1);
   opacity: 0;
 }
 
+.projectOpenWindowButton {
+  right: calc(var(--space-1) + 28px);
+}
+
+.projectRemoveButton {
+  right: var(--space-1);
+}
+
+.projectItem:hover .projectOpenWindowButton,
 .projectItem:hover .projectRemoveButton,
+.projectOpenWindowButton:focus-visible,
 .projectRemoveButton:focus-visible {
   opacity: 1;
 }

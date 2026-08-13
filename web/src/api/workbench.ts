@@ -425,6 +425,50 @@ export const workbenchApi = {
       }>('apply_workspace_restore_cmd', { plan }),
   },
 
+  /**
+   * 工作台 OS 窗 occupancy。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   多屏卫星窗与主窗互斥占用项目；前端不得自己拼 label 或二次建窗。
+   *
+   * Code Logic（这个分组做什么）:
+   *   invoke open/focus/claim/list/apply-deeplink。
+   */
+  windows: {
+    open: (projectId: string) =>
+      invoke<{ action: 'focused' | 'created'; label: string; projectId: string }>(
+        'open_workbench_window',
+        { projectId },
+      ),
+    focus: (label: string) => invoke<void>('focus_workbench_window', { label }),
+    close: (label: string) => invoke<void>('close_workbench_window', { label }),
+    claim: (projectId: string) =>
+      invoke<{ action: 'claimed' | 'unchanged' | 'occupied'; label: string; projectId: string }>(
+        'claim_workbench_window_project',
+        { projectId },
+      ),
+    listOccupancy: () =>
+      invoke<Array<{ projectId: string; windowLabel: string }>>(
+        'list_workbench_window_occupancy',
+      ),
+    applyDeepLink: (
+      label: string,
+      payload: import('@/pages/Workbench/workbenchDeepLink').WorkbenchDeepLink,
+    ) =>
+      invoke<void>('apply_workbench_window_deeplink', {
+        label,
+        payload: {
+          projectId: payload.projectId,
+          worktreeId: payload.worktreeId,
+          sessionId: payload.sessionId,
+          view: payload.view ?? null,
+          taskId: payload.taskId ?? null,
+          outboxId: payload.outboxId ?? null,
+          path: payload.path ?? null,
+        },
+      }),
+  },
+
   sessions: {
     /**
      * Business Logic（为什么需要这个函数）:

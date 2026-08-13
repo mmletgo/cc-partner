@@ -16,7 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog, HintStatusDot } from '@/components/primitives';
-import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, XIcon } from '@/lib/icons';
+import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, WindowIcon, XIcon } from '@/lib/icons';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
 import { useOptionalWorkbenchAgentHints } from '@/hooks/workbenchAgentHintsContext';
@@ -80,7 +80,15 @@ export function WorkbenchProjectRail() {
     selectProject,
     removeProject,
     reorderProjects,
+    currentWindowLabel,
+    occupancy,
+    openProjectInNewWindow,
   } = useWorkbenchProjects();
+  const occupancyByProject = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of occupancy) map.set(row.projectId, row.windowLabel);
+    return map;
+  }, [occupancy]);
 
   const { projectSummaries, snapshot: fleetSnapshot } = useLanAgentFleet({ enabled: true });
   const agentHints = useOptionalWorkbenchAgentHints();
@@ -513,9 +521,15 @@ export function WorkbenchProjectRail() {
             count: stats.paneCount,
           });
           const isActive = project.id === activeProjectId;
-          const statusLabel = isActive
-            ? t('workbench:projectRail.statusActive')
-            : t('workbench:projectRail.statusInactive');
+          const occupiedLabel = occupancyByProject.get(project.id);
+          const occupiedElsewhere = Boolean(
+            occupiedLabel && occupiedLabel !== currentWindowLabel,
+          );
+          const statusLabel = occupiedElsewhere
+            ? t('workbench:projectRail.statusOccupied')
+            : isActive
+              ? t('workbench:projectRail.statusActive')
+              : t('workbench:projectRail.statusInactive');
           const fleetProject: LanFleetProjectSummary | undefined =
             projectSummaries[project.id];
           const fleetDevice = deviceByProjectId[project.id];
@@ -572,9 +586,15 @@ export function WorkbenchProjectRail() {
               <button
                 type="button"
                 className={styles.projectSelectButton}
-                title={agentHint || undefined}
+                title={
+                  occupiedElsewhere
+                    ? t('workbench:projectRail.statusOccupied')
+                    : agentHint || undefined
+                }
                 onClick={() => {
-                  void selectProject(project).then(() => navigate('/workbench'));
+                  void selectProject(project).then(() => {
+                    if (!occupiedElsewhere) navigate('/workbench');
+                  });
                 }}
               >
                 <span className={styles.projectText}>
@@ -644,6 +664,15 @@ export function WorkbenchProjectRail() {
                   {exceptionCount}
                 </Link>
               ) : null}
+              <Button
+                className={styles.projectOpenWindowButton}
+                variant="icon"
+                icon={<WindowIcon />}
+                title={t('workbench:projectRail.openInNewWindow')}
+                aria-label={t('workbench:projectRail.openInNewWindow')}
+                data-testid="project-open-new-window"
+                onClick={() => void openProjectInNewWindow(project)}
+              />
               <Button
                 className={styles.projectRemoveButton}
                 variant="icon"

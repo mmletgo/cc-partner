@@ -796,6 +796,9 @@ export function buildProjectsContextValue(
     selectProject: vi.fn(async (project: WorkbenchProject) => Promise.resolve(project)),
     removeProject: vi.fn(async () => Promise.resolve()),
     reorderProjects: vi.fn(async () => Promise.resolve()),
+    currentWindowLabel: 'main',
+    occupancy: [],
+    openProjectInNewWindow: vi.fn(async () => Promise.resolve()),
     ...overrides,
   };
 }

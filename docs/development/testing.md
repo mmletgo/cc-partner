@@ -30,6 +30,7 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-PERM-001` | `web/tests/permissions.spec.ts` | Permission check fail/retry |
 | `E2E-SETTINGS-001` | `web/tests/settings.spec.ts` | Settings partial load + save dirty |
 | `E2E-WORKBENCH-001` | `web/tests/workbench.spec.ts` | Workbench stale/offline/files |
+| `E2E-WORKBENCH-WINDOW-001` | `web/tests/workbench-window.spec.ts` | Satellite Rail open/occupancy (mock; not multi-monitor GUI) |
 | `E2E-MOBILE-001` | `web/tests/mobile-workbench.spec.ts` | Mobile 390×844 navigation/HTTP write |
 | `E2E-LAN-001` | `web/tests/lan-boundary.spec.ts` | L1 credential-free + simulated boundary reject |
 | `E2E-AGENT-HUB-A-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate A: status card / preview+enable / target matrix / conflict deep link / `/claude-md` redirect (mock only) |

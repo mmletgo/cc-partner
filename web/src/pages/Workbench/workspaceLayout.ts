@@ -61,6 +61,8 @@ export interface WorkspaceLayoutSelection {
   workspaceView: WorkspaceView;
   inspectorTab: InspectorTab;
   browserTargetUrl: string | null;
+  /** 本窗 auto slot；named snapshot 时被 named.slotKey 覆盖。 */
+  slotKey: string;
   /** named snapshot 时提供 */
   named?: { slotKey: string; name: string };
 }
@@ -80,8 +82,12 @@ export function buildWorkspaceLayoutDraft(
     return null;
   }
   const named = selection.named;
+  const slotKey = named?.slotKey ?? selection.slotKey.trim();
+  if (!slotKey) {
+    return null;
+  }
   return {
-    slotKey: named?.slotKey ?? DESKTOP_AUTO_SLOT_KEY,
+    slotKey,
     kind: named ? 'named' : 'auto',
     name: named ? named.name.trim() : null,
     projectId,

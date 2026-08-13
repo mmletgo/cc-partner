@@ -1460,6 +1460,83 @@ describe('useWorkbenchTerminalController — terminal-status event filtering', (
     expect(result.current.sessions.map((s) => ({ ...s }))).toEqual(before);
     expect(result.current.sessions[0]?.status).toBe('running');
   });
+
+  test('terminal-input-state for another session does not write this window sessionError', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id, status: 'running' });
+    fakeSessionsApi.list.mockResolvedValue([s1]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      emitEvent('workbench:terminal-input-state', {
+        sessionId: 'other-window-session',
+        message: 'write failed elsewhere',
+      });
+      await flushMicrotasks();
+    });
+
+    expect(result.current.sessionError).toBeNull();
+    expect(result.current.isWriteBlocked('s1')).toBe(false);
+  });
+
+  test('terminal-input-state for a known session writes sessionError and blocks write', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id, status: 'running' });
+    fakeSessionsApi.list.mockResolvedValue([s1]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    // reportWriteError 会 kick 只读 status check；拒绝 list 以免 running 条目立刻解锁。
+    fakeSessionsApi.list.mockRejectedValueOnce(new Error('status check offline'));
+
+    await act(async () => {
+      emitEvent('workbench:terminal-input-state', {
+        sessionId: 's1',
+        message: 'write failed on this window',
+      });
+      await flushMicrotasks();
+    });
+
+    expect(result.current.sessionError).toContain('write failed on this window');
+    expect(result.current.isWriteBlocked('s1')).toBe(true);
+  });
 });
 
 describe('useWorkbenchTerminalController — focus polling, input, resize, fullscreen', () => {
