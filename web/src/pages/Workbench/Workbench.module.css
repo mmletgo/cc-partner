@@ -296,6 +296,8 @@
 }
 
 .workspaceTitleGroup {
+  flex: 0 1 240px;
+  max-width: 280px;
   min-width: 0;
   gap: var(--space-3);
 }
@@ -334,10 +336,11 @@
 
 .workspaceHeaderActions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-3);
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .projectAutomationMeta {
@@ -1391,6 +1394,11 @@
     align-items: flex-start;
     flex-direction: column;
     padding: var(--space-6) var(--space-5) var(--space-3);
+  }
+
+  .workspaceTitleGroup {
+    max-width: none;
+    flex: 1 1 auto;
   }
 
   .workspaceHeaderActions {

@@ -68,6 +68,7 @@ import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbe
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
+import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
 import { WorkspaceSnapshotDialog } from './views/WorkspaceSnapshotDialog';
 
@@ -734,6 +735,7 @@ export function Workbench() {
               <p className={styles.workspacePath}>{workspaceLine}</p>
             </div>
           </div>
+          <WorkbenchBanner />
           <div className={styles.workspaceHeaderActions}>
             <Button
               variant="ghost"

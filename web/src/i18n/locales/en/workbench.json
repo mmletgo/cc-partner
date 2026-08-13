@@ -939,6 +939,12 @@
       "unavailable": "Not provided"
     }
   },
+  "banner": {
+    "placeholder": "Write today's banner",
+    "previewAriaLabel": "Workbench banner, click to edit",
+    "editorAriaLabel": "Edit workbench banner",
+    "limitReached": "At most {{max}} characters"
+  },
   "workspaceSnapshot": {
     "title": "Workspace snapshots",
     "openButton": "Workspace snapshot",
