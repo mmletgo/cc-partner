@@ -283,6 +283,40 @@ pub(crate) fn build_project_headless_args(model: &str, schema: &str) -> Vec<Stri
     ]
 }
 
+/// 构造允许 Claude 直接编辑当前隔离 worktree 的 headless 参数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     大型 merge 冲突不能把所有文件全文塞进 prompt 再要求模型完整回传；Claude 应在受后端隔离、
+///     校验和回收的 integration worktree 内直接读取并编辑冲突文件。
+///
+/// Code Logic（这个函数做什么）:
+///     使用 print/non-persistent 项目上下文，只开放 Read/Edit/Write/Grep/Glob；dontAsk 模式下只预批准
+///     integration 项目根内读写与只读搜索，不开放 Bash，精确文件范围由调用方在 CLI 返回后用 Git 验证。
+pub(crate) fn build_project_edit_headless_args(model: &str) -> Vec<String> {
+    vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+        "--no-session-persistence".to_string(),
+        "--strict-mcp-config".to_string(),
+        "--mcp-config".to_string(),
+        "{}".to_string(),
+        "--disable-slash-commands".to_string(),
+        "--no-chrome".to_string(),
+        "--permission-mode".to_string(),
+        "dontAsk".to_string(),
+        "--tools".to_string(),
+        "Read,Edit,Write,Grep,Glob".to_string(),
+        "--allowedTools".to_string(),
+        "Read(/**)".to_string(),
+        "Edit(/**)".to_string(),
+        "Grep".to_string(),
+        "Glob".to_string(),
+        "--model".to_string(),
+        normalize_model(model),
+    ]
+}
+
 /// 构造 Claude Code CLI 流式纯文本输出参数。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -511,6 +545,68 @@ where
     }
 
     parse_structured_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// 在指定项目目录执行允许受限文件编辑的 Claude CLI。
+///
+/// Business Logic（为什么需要这个函数）:
+///     merge 冲突文件可能很大且很多，完整 JSON 回传会同时放大输入与输出并稳定触发超时；
+///     integration worktree 已与真实 main/source 隔离，可让 Claude 在其中直接修改，随后由调用方严格验收。
+///
+/// Code Logic（这个函数做什么）:
+///     以受限项目编辑参数启动 CLI，通过 stdin 写 prompt，等待有界时间；成功只表示 CLI 正常退出，
+///     不信任其文本结果，冲突消除、路径范围、stage 与 commit 均由调用方验证。
+#[allow(clippy::too_many_arguments)] // cli/model/provider/prompt/cwd/timeout/label 语义独立
+pub(crate) async fn run_project_edit_with_cwd(
+    cli_path: &str,
+    model: &str,
+    provider_config_dir: Option<&Path>,
+    prompt: &str,
+    working_directory: &Path,
+    timeout_secs: u64,
+    task_label: &str,
+) -> Result<(), AppError> {
+    let cli = resolve_cli_path(cli_path);
+    let mut cmd = Command::new(&cli);
+    cmd.env("PATH", cli_command_path_env())
+        .args(build_project_edit_headless_args(model))
+        .current_dir(working_directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    apply_provider_config_dir(&mut cmd, provider_config_dir);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::generic(format!("启动 Claude CLI 失败: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|e| AppError::generic(format!("写入 Claude CLI prompt 失败: {e}")))?;
+    }
+
+    let output =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
+            .await
+        {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => return Err(AppError::generic(format!("等待 Claude CLI 输出失败: {e}"))),
+            Err(_) => {
+                return Err(AppError::generic(format!(
+                    "Claude CLI {task_label}超时（{timeout_secs} 秒）"
+                )))
+            }
+        };
+
+    if !output.status.success() {
+        return Err(AppError::generic(format!(
+            "Claude CLI {task_label}失败: {}",
+            failure_detail(&output.stderr, &output.stdout)
+        )));
+    }
+    Ok(())
 }
 
 /// 在可选工作目录中执行 Claude CLI 并流式返回 assistant 文本。
@@ -751,6 +847,10 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--bare"));
         assert!(args.iter().any(|arg| arg == "-p"));
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(args.windows(2).any(|pair| pair == ["--mcp-config", "{}"]));
+        assert!(args.iter().any(|arg| arg == "--disable-slash-commands"));
+        assert!(args.iter().any(|arg| arg == "--no-chrome"));
         assert!(!args.iter().any(|arg| arg == "--max-budget-usd"));
     }
 
@@ -765,6 +865,28 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--model", "sonnet"]));
         assert!(args.iter().any(|arg| arg == "-p"));
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+        assert!(!args.iter().any(|arg| arg == "--bare"));
+    }
+
+    #[test]
+    fn project_edit_args_allow_only_scoped_file_edits_without_bash() {
+        let args = build_project_edit_headless_args(" sonnet ");
+
+        assert!(args.iter().any(|arg| arg == "-p"));
+        assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "dontAsk"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--tools", "Read,Edit,Write,Grep,Glob"]));
+        assert!(args.iter().any(|arg| arg == "Read(/**)"));
+        assert!(args.iter().any(|arg| arg == "Edit(/**)"));
+        assert!(args.iter().any(|arg| arg == "Grep"));
+        assert!(args.iter().any(|arg| arg == "Glob"));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "sonnet"]));
+        assert!(!args.iter().any(|arg| arg == "Bash"));
+        assert!(!args.iter().any(|arg| arg == "--json-schema"));
         assert!(!args.iter().any(|arg| arg == "--bare"));
     }
 

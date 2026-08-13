@@ -166,31 +166,6 @@ pub(crate) struct WorkbenchMergeProgressEvent {
     pub(crate) stage: WorkbenchMergeStageDto,
 }
 
-/// Claude Code merge 冲突解决响应。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     自动冲突解决需要 Claude 返回每个冲突文件的完整解决后内容，后端才能安全写回。
-///
-/// Code Logic（这个结构体做什么）:
-///     对齐 JSON schema 顶层 `files` 数组。
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct WorkbenchMergeResolutionResponse {
-    pub(crate) files: Vec<WorkbenchMergeResolvedFile>,
-}
-
-/// Claude Code 返回的单个已解决文件。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     每个冲突文件都需要独立校验相对路径和内容，防止模型输出越界路径或残留冲突标记。
-///
-/// Code Logic（这个结构体做什么）:
-///     保存相对 path 与完整文件 content。
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct WorkbenchMergeResolvedFile {
-    pub(crate) path: String,
-    pub(crate) content: String,
-}
-
 /// Workbench 结构化内容格式化结果 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -202,19 +177,6 @@ pub(crate) struct WorkbenchMergeResolvedFile {
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchFormatResult {
     pub(crate) formatted: String,
-}
-
-/// 传给 Claude Code 的单个冲突文件输入。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     Claude 解决冲突时必须看到 Git 相对路径和带 conflict marker 的当前文件全文。
-///
-/// Code Logic（这个结构体做什么）:
-///     在构造 prompt 前保存 path/content，便于测试 prompt 内容。
-#[derive(Debug, Clone)]
-pub(crate) struct MergeConflictFileInput {
-    pub(crate) path: String,
-    pub(crate) content: String,
 }
 
 /// Business Logic（为什么需要这个函数）:

@@ -4,9 +4,10 @@
 
 use super::common::*;
 use super::git::{
-    build_commit_message_instruction, build_merge_conflict_resolution_instruction,
-    content_has_conflict_markers, map_remote_merge_result_value, merge_conflict_resolution_schema,
-    merge_ledger_state_needs_published_recovery, safe_merge_resolution_path,
+    build_commit_message_instruction, build_merge_conflict_edit_instruction,
+    content_has_conflict_markers, ensure_only_conflict_files_modified,
+    map_remote_merge_result_value, merge_ledger_state_needs_published_recovery,
+    safe_merge_resolution_path, validate_merge_conflict_files_for_agent,
     validate_merge_resolution_path, workbench_commit_message_schema,
 };
 use super::sessions::should_attempt_session_zoom;
@@ -560,27 +561,6 @@ fn commit_message_schema_requires_message_string() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     Claude Code 自动解决 merge 冲突时，后端需要稳定 JSON 契约来接收完整文件内容。
-///
-/// Code Logic（这个测试做什么）:
-///     读取 schema JSON，断言顶层 required files，且每个 item 必须包含 path/content。
-#[test]
-fn merge_conflict_resolution_schema_requires_files_with_content() {
-    let schema = merge_conflict_resolution_schema();
-
-    assert_eq!(schema["required"][0], "files");
-    assert_eq!(schema["properties"]["files"]["type"], "array");
-    assert_eq!(
-        schema["properties"]["files"]["items"]["required"][0],
-        "path"
-    );
-    assert_eq!(
-        schema["properties"]["files"]["items"]["required"][1],
-        "content"
-    );
-}
-
-/// Business Logic（为什么需要这个测试）:
 ///     前端需要按 projectId 过滤 merge 进度事件，防止其他项目的后台 merge 污染当前 UI。
 ///
 /// Code Logic（这个测试做什么）:
@@ -605,26 +585,42 @@ fn merge_progress_event_serializes_project_id_for_frontend_filtering() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     Claude Code 需要看到每个冲突文件的相对路径和带 conflict marker 的原文，
-///     才能返回可直接写回的解决后完整内容。
+///     大型多文件冲突若把全文塞进 prompt 并要求完整 JSON 回传会稳定超时；新指令只能传路径，
+///     让 Claude 在隔离 worktree 内按需读取和直接编辑。
 ///
 /// Code Logic（这个测试做什么）:
-///     构造冲突文件输入，断言 prompt 包含路径、内容和禁止保留 conflict marker 的约束。
+///     构造冲突路径，断言 prompt 包含 JSON 转义路径、直接编辑/范围/marker 约束，且不存在冲突正文。
 #[test]
-fn merge_conflict_instruction_contains_files_and_output_contract() {
-    let files = vec![MergeConflictFileInput {
-        path: "README.md".to_string(),
-        content: "<<<<<<< HEAD\nmain\n=======\nfeature\n>>>>>>> branch\n".to_string(),
-    }];
-
-    let instruction = build_merge_conflict_resolution_instruction(&files);
+fn merge_conflict_instruction_contains_only_paths_and_edit_contract() {
+    let instruction = build_merge_conflict_edit_instruction(&[
+        "README.md".to_string(),
+        "src/file with space.rs".to_string(),
+    ]);
 
     assert!(instruction.contains("README.md"));
-    assert!(instruction.contains("<<<<<<< HEAD"));
-    assert!(instruction.contains("Return only"));
-    assert!(instruction.contains("files"));
+    assert!(instruction.contains("src/file with space.rs"));
+    assert!(instruction.contains("directly"));
+    assert!(instruction.contains("outside that array"));
     assert!(instruction.contains("Do not leave conflict markers"));
     assert!(instruction.contains("|||||||"));
+    assert!(!instruction.contains("main\n=======\nfeature"));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Claude 工具调用开始前必须拒绝非 UTF-8 或越界目标，避免二进制冲突进入不可靠的文本编辑流程。
+///
+/// Code Logic（这个测试做什么）:
+///     创建普通 UTF-8 文件和非法 UTF-8 文件，断言前者通过、后者 fail closed。
+#[test]
+fn validate_merge_conflict_files_for_agent_requires_utf8_text() {
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::write(root.path().join("ok.txt"), "<<<<<<< HEAD\ntext\n").expect("write text");
+    std::fs::write(root.path().join("binary.bin"), [0xff, 0xfe]).expect("write binary");
+
+    assert!(validate_merge_conflict_files_for_agent(root.path(), &["ok.txt".to_string()]).is_ok());
+    let error = validate_merge_conflict_files_for_agent(root.path(), &["binary.bin".to_string()])
+        .expect_err("binary conflicts must be rejected");
+    assert!(error.to_string().contains("UTF-8"));
 }
 
 /// Business Logic（为什么需要这个测试）:

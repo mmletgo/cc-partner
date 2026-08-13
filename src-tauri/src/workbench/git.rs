@@ -1938,6 +1938,28 @@ pub fn unresolved_conflict_files(path: &Path) -> Result<Vec<String>, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Claude 在隔离 merge worktree 内直接编辑后，commands 层必须验证它没有碰触原冲突清单外的文件，
+///     否则随后的 `git add -A` 会把非授权改动带进 merge commit。
+///
+/// Code Logic（这个函数做什么）:
+///     合并 `git diff --name-only -z --` 的 unstaged 路径与 `git ls-files --others --exclude-standard -z`
+///     的 untracked 路径，排序去重后返回仓库相对路径；已由 merge 自动 stage 的正常变更不在结果中。
+pub fn unstaged_or_untracked_files(path: &Path) -> Result<Vec<String>, AppError> {
+    let unstaged = run_git(path, &["diff", "--name-only", "-z", "--"])?;
+    let untracked = run_git(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let mut files = unstaged
+        .split('\0')
+        .chain(untracked.split('\0'))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     merge 冲突自动解决失败时，后端需要判断是否还能安全执行 `git merge --abort`。
 ///
 /// Code Logic（这个函数做什么）:
@@ -3219,6 +3241,53 @@ UU web/src/App.tsx
         assert_eq!(outcome, MergeBranchOutcome::Conflicted);
         assert_eq!(conflicts, vec!["README.md"]);
         assert!(merge_in_progress(&repo));
+
+        let _ = abort_merge(&repo);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Claude 只允许直接编辑原冲突文件；Git 自动 stage 的正常 merge 变更不能被误报，模型额外创建
+    ///     或改动的文件则必须被 commands 层识别并阻止提交。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个同时含正常 staged merge 变更和 README 冲突的仓库，断言初始只返回冲突文件；
+    ///     再写 untracked 文件，断言结果包含额外路径。
+    #[test]
+    fn unstaged_or_untracked_files_excludes_normal_staged_merge_changes() {
+        let root = temp_git_dir("workbench-merge-agent-scope");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/conflict"]);
+        fs::write(repo.join("README.md"), "feature\n").expect("write feature");
+        fs::write(repo.join("feature.txt"), "feature-only\n").expect("write feature file");
+        git_test_command(&repo, &["add", "README.md", "feature.txt"]);
+        git_test_command(&repo, &["commit", "-m", "feature change"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        fs::write(repo.join("README.md"), "main\n").expect("write main");
+        git_test_command(&repo, &["commit", "-am", "main change"]);
+
+        assert_eq!(
+            merge_branch(&repo, "feature/conflict").expect("merge outcome"),
+            MergeBranchOutcome::Conflicted
+        );
+        assert_eq!(
+            unstaged_or_untracked_files(&repo).expect("dirty paths"),
+            vec!["README.md"]
+        );
+
+        fs::write(repo.join("unexpected.txt"), "unexpected\n").expect("write unexpected");
+        assert_eq!(
+            unstaged_or_untracked_files(&repo).expect("dirty paths"),
+            vec!["README.md", "unexpected.txt"]
+        );
 
         let _ = abort_merge(&repo);
         let _ = fs::remove_dir_all(root);

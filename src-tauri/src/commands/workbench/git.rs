@@ -37,7 +37,6 @@ use crate::workbench::{
     sqlite_preview,
 };
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use tauri::State;
 
@@ -2032,8 +2031,8 @@ pub(crate) async fn cleanup_merged_worktree(
 ///     merge 冲突时，后端需要调用本机 Claude Code CLI 在隔离 integration worktree 项目上下文下尝试生成解决结果。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 Git 未解决冲突文件，调用结构化 Claude CLI，校验并写回结果，确认无 conflict marker 后 stage all，
-///     最后使用 Git 默认 merge message 完成 merge commit。
+///     校验未解决冲突路径，调用只开放文件读写工具的 Claude CLI 直接编辑隔离 worktree，确认所有原冲突文件
+///     不再含 marker 且 Git index 无 unresolved entry 后 stage all，最后使用 Git 默认 merge message 完成 commit。
 pub(crate) async fn resolve_merge_conflicts_with_claude(
     state: &AppState,
     integration_path: &Path,
@@ -2042,7 +2041,7 @@ pub(crate) async fn resolve_merge_conflicts_with_claude(
     if conflict_paths.is_empty() {
         return Ok(0);
     }
-    let conflict_inputs = read_merge_conflict_files(integration_path, &conflict_paths)?;
+    validate_merge_conflict_files_for_agent(integration_path, &conflict_paths)?;
     let (cli_path, model, provider_id) = {
         let cfg = state.config.read().unwrap();
         (
@@ -2054,20 +2053,18 @@ pub(crate) async fn resolve_merge_conflicts_with_claude(
     let provider_dir =
         crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
             .await?;
-    let schema = merge_conflict_resolution_schema();
-    let instruction = build_merge_conflict_resolution_instruction(&conflict_inputs);
-    let response = claude_cli::run_structured_json_with_cwd::<WorkbenchMergeResolutionResponse>(
+    let instruction = build_merge_conflict_edit_instruction(&conflict_paths);
+    claude_cli::run_project_edit_with_cwd(
         &cli_path,
         &model,
         provider_dir.as_deref(),
-        &schema.to_string(),
         &instruction,
-        Some(integration_path),
+        integration_path,
         MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS,
         "解决 merge 冲突",
     )
     .await?;
-    apply_merge_resolution_files(integration_path, &conflict_paths, response.files)?;
+    ensure_only_conflict_files_modified(integration_path, &conflict_paths)?;
     ensure_conflict_markers_removed(integration_path, &conflict_paths)?;
     workbench_git::stage_all_merge_resolution(integration_path)?;
     let remaining = workbench_git::unresolved_conflict_files(integration_path)?;
@@ -2078,76 +2075,51 @@ pub(crate) async fn resolve_merge_conflicts_with_claude(
         )));
     }
     workbench_git::commit_merge_no_edit(integration_path)?;
-    Ok(conflict_inputs.len())
+    Ok(conflict_paths.len())
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Claude Code 解决冲突前必须看到当前冲突文件全文，尤其是 Git conflict marker 两侧内容。
+///     Claude 获得文件写工具前，后端必须确认所有冲突目标都是隔离 worktree 内的普通 UTF-8 文件，
+///     防止 symlink/越界路径被工具跟随，也让二进制冲突明确失败。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 Git 相对路径安全后读取 UTF-8 文本；非文本或读取失败返回可读错误。
-pub(crate) fn read_merge_conflict_files(
+///     对每个 Git 相对路径复用 safe path 校验，并读取为 UTF-8；内容不拼进 prompt，仅用于 fail-closed 验证。
+pub(crate) fn validate_merge_conflict_files_for_agent(
     root: &Path,
     paths: &[String],
-) -> Result<Vec<MergeConflictFileInput>, AppError> {
-    paths
-        .iter()
-        .map(|path| {
-            validate_merge_resolution_path(path)?;
-            let full_path = safe_merge_resolution_path(root, path)?;
-            let content = std::fs::read_to_string(&full_path).map_err(|error| {
-                AppError::generic(format!(
-                    "读取冲突文件 {} 失败（仅支持 UTF-8 文本冲突自动解决）: {error}",
-                    path
-                ))
-            })?;
-            Ok(MergeConflictFileInput {
-                path: path.clone(),
-                content,
-            })
-        })
-        .collect()
+) -> Result<(), AppError> {
+    for path in paths {
+        validate_merge_resolution_path(path)?;
+        let full_path = safe_merge_resolution_path(root, path)?;
+        std::fs::read_to_string(&full_path).map_err(|error| {
+            AppError::generic(format!(
+                "读取冲突文件 {} 失败（仅支持 UTF-8 文本冲突自动解决）: {error}",
+                path
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Claude 输出是模型生成内容，后端写回前必须确认路径属于本次冲突文件，且内容不含残留冲突标记。
+///     受限工具权限是第一道边界；CLI 返回后仍必须用 Git 事实校验，防止模型或本机配置改动了
+///     本次冲突清单以外的文件并被后续 `git add -A` 一并提交。
 ///
 /// Code Logic（这个函数做什么）:
-///     建立允许 path 集合；逐个校验 path/content 后写入主 worktree 文件，并要求所有冲突文件都有返回。
-pub(crate) fn apply_merge_resolution_files(
+///     读取 integration worktree 的 unstaged/untracked 路径，要求每一项都属于原始 conflict_paths。
+pub(crate) fn ensure_only_conflict_files_modified(
     root: &Path,
     conflict_paths: &[String],
-    files: Vec<WorkbenchMergeResolvedFile>,
 ) -> Result<(), AppError> {
-    let allowed = conflict_paths.iter().cloned().collect::<HashSet<_>>();
-    let mut applied = HashSet::new();
-    for file in files {
-        validate_merge_resolution_path(&file.path)?;
-        if !allowed.contains(&file.path) {
-            return Err(AppError::generic(format!(
-                "Claude Code 返回了非本次冲突文件路径: {}",
-                file.path
-            )));
-        }
-        if content_has_conflict_markers(&file.content) {
-            return Err(AppError::generic(format!(
-                "Claude Code 返回的 {} 仍包含 merge 冲突标记",
-                file.path
-            )));
-        }
-        let full_path = safe_merge_resolution_path(root, &file.path)?;
-        std::fs::write(full_path, file.content)?;
-        applied.insert(file.path);
-    }
-    let missing = conflict_paths
-        .iter()
-        .filter(|path| !applied.contains(*path))
-        .cloned()
+    let modified = workbench_git::unstaged_or_untracked_files(root)?;
+    let unexpected = modified
+        .into_iter()
+        .filter(|path| !conflict_paths.contains(path))
         .collect::<Vec<_>>();
-    if !missing.is_empty() {
+    if !unexpected.is_empty() {
         return Err(AppError::generic(format!(
-            "Claude Code 未返回以下冲突文件的解决内容: {}",
-            missing.join(", ")
+            "Claude Code 修改了本次冲突清单外的文件，已拒绝提交: {}",
+            unexpected.join(", ")
         )));
     }
     Ok(())
@@ -2177,66 +2149,24 @@ pub(crate) fn ensure_conflict_markers_removed(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Claude CLI 结构化输出需要固定契约，确保后端拿到可写回的文件路径和完整内容。
+///     Claude Code 需要知道它正在可回收的隔离 worktree 内解决冲突，并只编辑后端授权的原冲突文件；
+///     prompt 不能再内嵌大文件全文，否则输入和完整 JSON 输出会在真实多文件冲突中稳定超时。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回只允许 `{files:[{path,content}]}` 的 JSON schema。
-pub(crate) fn merge_conflict_resolution_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["files"],
-        "properties": {
-            "files": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["path", "content"],
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Repository-relative path for one conflicted file."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The complete resolved file content with all conflict markers removed."
-                        }
-                    }
-                }
-            }
-        }
-    })
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     Claude Code 需要明确知道这是在当前项目上下文中解决 Git merge 冲突，并且只能返回结构化文件内容。
-///
-/// Code Logic（这个函数做什么）:
-///     把每个冲突文件 path/content 组装进英文任务指令，要求返回完整内容且不得保留 conflict marker。
-pub(crate) fn build_merge_conflict_resolution_instruction(
-    files: &[MergeConflictFileInput],
-) -> String {
-    let mut sections = String::new();
-    for file in files {
-        sections.push_str(&format!(
-            "\nFile: {}\n```text\n{}\n```\n",
-            file.path, file.content
-        ));
-    }
+///     只把 JSON 转义后的相对路径数组写入短指令，要求 Claude 用 Read/Edit/Write 直接修改并复查文件。
+pub(crate) fn build_merge_conflict_edit_instruction(paths: &[String]) -> String {
+    let paths = serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "You are resolving Git merge conflicts in the current Claude Code project context.\n\
-         Use the repository instructions and code context available from the current working directory.\n\
+        "Resolve the existing Git merge conflicts directly in the current isolated integration worktree.\n\
+         Use the repository instructions and the Read tool to inspect the listed files and any necessary project context.\n\
          Requirements:\n\
-         - Return only the structured JSON object required by the schema.\n\
-         - The `files` array must include every conflicted file listed below.\n\
-         - Each `content` value must be the complete final file content, not a patch.\n\
+         - Edit every path in the exact JSON array below to produce coherent final source that preserves both sides' intent.\n\
+         - Edit, write, delete, or rename no file outside that array.\n\
+         - Do not invoke Git or shell commands; they are intentionally unavailable.\n\
          - Do not leave conflict markers such as <<<<<<<, |||||||, =======, or >>>>>>>.\n\
-         - Preserve user intent from both sides when possible; when unsure, make the smallest coherent resolution.\n\
-         - Do not include Markdown fences, explanations, or extra properties in JSON.\n\n\
-         Conflicted files:\n{sections}"
+         - For large files, read focused chunks around each marker plus enough surrounding context before editing.\n\
+         - Before finishing, re-read every listed file and confirm all conflict markers are gone.\n\n\
+         Exact conflicted path array:\n{paths}"
     )
 }
 
