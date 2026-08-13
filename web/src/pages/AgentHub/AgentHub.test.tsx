@@ -474,7 +474,7 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('agent-hub-legacy-error')).toBeNull();
   });
 
-  test('shell tabs expose assets workspace and toolbar opens pull/push controls', () => {
+  test('shell tabs expose assets workspace, reset lane, and toolbar opens pull/push controls', () => {
     const onContextChange = vi.fn();
     const openPortablePull = vi.fn();
     const openLanPushDialog = vi.fn();
@@ -504,7 +504,7 @@ describe('AgentHub page characterization', () => {
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
     expect(onContextChange).toHaveBeenCalledWith({
       tab: 'skill',
-      instructionLane: 'common',
+      instructionLane: 'exclusive',
     });
     expect(screen.queryByTestId('agent-hub-section-assets')).toBeNull();
   });

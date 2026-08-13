@@ -264,7 +264,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             : null,
       };
     },
-    [hubContext, openLanPushDialog, openPortablePull, preview?.hubProjectId, preview?.optedIn, previewProjectId, t],
+    [hubContext, openLanPushDialog, openPortablePull, preview, previewProjectId, t],
   );
 
   /**
