@@ -140,7 +140,11 @@ beforeEach(() => {
 
   getStatusMock.mockResolvedValue(buildStatus());
   getStatsMock.mockResolvedValue({ activeMinutes: 10, idleMinutes: 5 });
-  getDetailMock.mockResolvedValue({ appUsage: [], hourly: Array.from({ length: 24 }, () => 0) });
+  getDetailMock.mockResolvedValue({
+    appUsage: [],
+    windowUsage: [],
+    hourly: Array.from({ length: 24 }, () => 0),
+  });
   getConfigMock.mockResolvedValue({
     enabled: true,
     workWindowSeconds: 1800,
@@ -258,5 +262,19 @@ describe('Health visibility polling', () => {
     expect(screen.queryByText('加载中…')).toBeNull();
     expect(screen.getByRole('alert').textContent).toMatch(/加载失败|重试|status unavailable|健康状态/);
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+  });
+
+  test('renders window title ranking from activity detail', async () => {
+    getDetailMock.mockResolvedValue({
+      appUsage: [{ name: 'Code', minutes: 12 }],
+      windowUsage: [{ name: 'main.rs — cc-partner', minutes: 8 }],
+      hourly: Array.from({ length: 24 }, () => 0),
+    });
+
+    renderHealth();
+    await flushMicrotasks(20);
+
+    expect(screen.getByText('窗口使用时长(前 8)')).toBeTruthy();
+    expect(document.body.textContent).toMatch(/main\.rs — cc-partner/);
   });
 });

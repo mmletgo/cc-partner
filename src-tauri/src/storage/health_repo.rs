@@ -18,6 +18,17 @@ use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintena
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 
+/// 按 process_name 聚合活跃分钟。
+const APP_USAGE_SQL: &str = "SELECT process_name AS name, COUNT(*) AS mins FROM activity_records \
+     WHERE ts >= ? AND is_active = 1 AND process_name IS NOT NULL AND process_name <> '' \
+     GROUP BY process_name ORDER BY mins DESC";
+
+/// 按 window_title 聚合活跃分钟。
+const WINDOW_USAGE_SQL: &str =
+    "SELECT window_title AS name, COUNT(*) AS mins FROM activity_records \
+     WHERE ts >= ? AND is_active = 1 AND window_title IS NOT NULL AND window_title <> '' \
+     GROUP BY window_title ORDER BY mins DESC";
+
 /// 单分钟活动采样行。
 #[derive(Debug, Clone)]
 pub struct ActivityRecord {
@@ -139,22 +150,36 @@ impl HealthRepo {
     ///
     /// Business Logic: 统计页需要展示「今天在哪些 app 上花了多少分钟」,帮助用户
     ///     了解屏幕使用时长分布。仅统计活跃(is_active=1)且有 process_name 的行。
-    /// Code Logic: SQL 层 `COUNT(*) ... GROUP BY process_name ORDER BY mins DESC`,
-    ///     process_name 为 NULL/空串的行在 WHERE 过滤掉;逐行还原 (process_name, mins)。
+    /// Code Logic: 委托 `get_grouped_usage` + `APP_USAGE_SQL`。
     pub async fn get_app_usage(&self, since_ts: i64) -> Result<Vec<(String, i64)>, AppError> {
-        let rows = sqlx::query(
-            "SELECT process_name, COUNT(*) AS mins FROM activity_records \
-             WHERE ts >= ? AND is_active = 1 AND process_name IS NOT NULL AND process_name <> '' \
-             GROUP BY process_name ORDER BY mins DESC",
-        )
-        .bind(since_ts)
-        .fetch_all(&self.db)
-        .await?;
+        self.get_grouped_usage(since_ts, APP_USAGE_SQL).await
+    }
+
+    /// 按窗口标题聚合 [since_ts, +∞) 内的活跃分钟数,倒序返回(窗口使用时长排行)。
+    ///
+    /// Business Logic: 统计页需要展示「今天在哪些窗口上花了多少分钟」。同一 app
+    ///     下不同窗口标题(文件、网页、会话)应分开计时;仅统计活跃且有标题的行。
+    /// Code Logic: 委托 `get_grouped_usage` + `WINDOW_USAGE_SQL`。
+    pub async fn get_window_usage(&self, since_ts: i64) -> Result<Vec<(String, i64)>, AppError> {
+        self.get_grouped_usage(since_ts, WINDOW_USAGE_SQL).await
+    }
+
+    /// 按固定列聚合活跃分钟,倒序返回 `(名称, 分钟)`。
+    ///
+    /// Business Logic: app 排行与窗口标题排行口径相同,只是分组列不同;
+    ///     抽成一处避免两套 SQL 漂移。
+    /// Code Logic: 执行调用方传入的静态 SQL(仅 process_name / window_title 两份常量),
+    ///     过滤 is_active=1 且该列非空,GROUP BY 后按 mins DESC;逐行还原 (name, mins)。
+    async fn get_grouped_usage(
+        &self,
+        since_ts: i64,
+        sql: &'static str,
+    ) -> Result<Vec<(String, i64)>, AppError> {
+        let rows = sqlx::query(sql).bind(since_ts).fetch_all(&self.db).await?;
         rows.iter()
             .map(|r| {
                 Ok((
-                    r.try_get::<Option<String>, _>("process_name")?
-                        .unwrap_or_default(),
+                    r.try_get::<Option<String>, _>("name")?.unwrap_or_default(),
                     r.try_get("mins")?,
                 ))
             })
@@ -696,5 +721,81 @@ mod tests {
         repo.insert_water(100).await.unwrap();
         repo.insert_water(200).await.unwrap();
         assert_eq!(repo.get_last_water_ts().await.unwrap(), Some(200));
+    }
+
+    /// 验证按窗口标题聚合只计活跃且非空标题,并按分钟倒序。
+    #[tokio::test]
+    async fn test_get_window_usage_groups_active_titles() {
+        let pool = setup_db().await;
+        let repo = HealthRepo::new(pool);
+        repo.insert_activity(&ActivityRecord {
+            ts: 1000,
+            is_active: true,
+            process_name: Some("Code".into()),
+            window_title: Some("main.rs — cc-partner".into()),
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: 1060,
+            is_active: true,
+            process_name: Some("Code".into()),
+            window_title: Some("main.rs — cc-partner".into()),
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: 1120,
+            is_active: true,
+            process_name: Some("Safari".into()),
+            window_title: Some("GitHub".into()),
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: 1180,
+            is_active: false,
+            process_name: Some("Code".into()),
+            window_title: Some("main.rs — cc-partner".into()),
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: 1240,
+            is_active: true,
+            process_name: Some("Finder".into()),
+            window_title: Some("".into()),
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: 1300,
+            is_active: true,
+            process_name: Some("Finder".into()),
+            window_title: None,
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: 10,
+            is_active: true,
+            process_name: Some("Code".into()),
+            window_title: Some("old".into()),
+        })
+        .await
+        .unwrap();
+
+        let usage = repo.get_window_usage(1000).await.unwrap();
+        assert_eq!(
+            usage,
+            vec![("main.rs — cc-partner".into(), 2), ("GitHub".into(), 1),]
+        );
+
+        let app_usage = repo.get_app_usage(1000).await.unwrap();
+        assert_eq!(app_usage.len(), 3);
+        assert!(app_usage.contains(&("Code".into(), 2)));
+        assert!(app_usage.contains(&("Finder".into(), 2)));
+        assert_eq!(app_usage[2], ("Safari".into(), 1));
+        assert!(app_usage[0].1 >= app_usage[1].1);
     }
 }

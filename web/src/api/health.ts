@@ -59,7 +59,7 @@ export const healthApi = {
   getStats: (sinceTs: number) =>
     invoke<ActivityStats>('get_activity_stats', { sinceTs }),
 
-  /** 读取自 sinceTs 以来的活动明细(app 排行 + 24 小时分布) */
+  /** 读取自 sinceTs 以来的活动明细(app 排行 + 窗口标题排行 + 24 小时分布) */
   getDetail: (sinceTs: number) =>
     invoke<ActivityDetail>('get_activity_detail', { sinceTs }),
 

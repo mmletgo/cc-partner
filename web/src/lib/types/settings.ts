@@ -329,11 +329,13 @@ export interface AppUsageItem {
 
 /**
  * 活动明细统计（get_activity_detail 返回，camelCase）。
- * app 使用时长排行 + 24 小时活跃分布，供 StatsChart 图表渲染。
+ * app 排行 + 窗口标题排行 + 24 小时活跃分布，供 StatsChart 图表渲染。
  */
 export interface ActivityDetail {
   /** 按活跃分钟倒序的 app 使用时长排行 */
   appUsage: AppUsageItem[];
+  /** 按活跃分钟倒序的窗口标题使用时长排行 */
+  windowUsage: AppUsageItem[];
   /** 长度恒为 24 的数组，下标为 UTC 小时（0-23），值为该小时活跃分钟数 */
   hourly: number[];
 }
