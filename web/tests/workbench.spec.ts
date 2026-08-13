@@ -389,7 +389,8 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
       )
       .toBeGreaterThan(0);
 
-    // 文件 open/save：检查器默认 files tab
+    // 文件 open/save：检查器默认 Git 历史，先切到项目文件夹
+    await page.getByRole('tab', { name: '项目文件夹' }).click();
     const readmeNode = page.getByRole('button', { name: 'README.md' });
     await expect(readmeNode).toBeVisible({ timeout: 10_000 });
     await readmeNode.click();

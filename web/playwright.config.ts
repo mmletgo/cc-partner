@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const e2ePort = process.env.E2E_PORT ?? '5173';
+const e2eOrigin = `http://127.0.0.1:${e2ePort}`;
+
 /**
  * Playwright E2E 配置。
  *
@@ -9,6 +12,7 @@ import { defineConfig, devices } from '@playwright/test';
  *
  * Code Logic（这份配置做什么）:
  *   单 project `chromium` + Vite webServer；失败保留 screenshot/trace/video。
+ *   `E2E_PORT` 让 worktree 避开本机已占用的 5173，且不得 reuse 其它仓库的 Vite。
  */
 export default defineConfig({
   testDir: './tests',
@@ -21,12 +25,12 @@ export default defineConfig({
     timeout: 2_000,
   },
   webServer: {
-    command: 'npm run dev -- --host 127.0.0.1',
-    url: 'http://127.0.0.1:5173',
-    reuseExistingServer: !process.env.CI,
+    command: `npm run dev -- --host 127.0.0.1 --port ${e2ePort}`,
+    url: e2eOrigin,
+    reuseExistingServer: !process.env.CI && !process.env.E2E_PORT,
   },
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: e2eOrigin,
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
