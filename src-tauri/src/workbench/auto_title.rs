@@ -257,6 +257,7 @@ fn try_auto_rename_bound_title(
     title_raw: &str,
     native_session_id: Option<&str>,
     cwd: Option<&str>,
+    source_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     source_label: &str,
 ) -> AutoTitleSyncResult {
     let Some(title) = sanitize_auto_title(title_raw) else {
@@ -287,6 +288,25 @@ fn try_auto_rename_bound_title(
     let Some(target) = live.iter().find(|row| row.id == terminal_id) else {
         return AutoTitleSyncResult::RetryableMiss;
     };
+    let Some(source_updated_at) = source_updated_at else {
+        return AutoTitleSyncResult::RetryableMiss;
+    };
+    let Some(terminal_started_at) = chrono::DateTime::parse_from_rfc3339(&target.started_at)
+        .ok()
+        .map(|value| value.with_timezone(&chrono::Utc))
+    else {
+        return AutoTitleSyncResult::RetryableMiss;
+    };
+    if source_updated_at < terminal_started_at {
+        tracing::debug!(
+            terminal_id = %terminal_id,
+            source = source_label,
+            source_updated_at = %source_updated_at,
+            terminal_started_at = %terminal_started_at,
+            "跳过自动标题：标题早于当前 window 启动时间"
+        );
+        return AutoTitleSyncResult::AlreadySettled;
+    }
     if matches!(
         SessionNameSource::parse(&target.name_source),
         SessionNameSource::Manual
@@ -368,6 +388,9 @@ pub fn try_auto_rename_from_claude_index(
         &index.title,
         Some(index.session_id.as_str()),
         index.cwd.as_deref(),
+        chrono::DateTime::parse_from_rfc3339(&index.last_activity_at)
+            .ok()
+            .map(|value| value.with_timezone(&chrono::Utc)),
         "claude.ai-title",
     )
 }
@@ -382,9 +405,17 @@ pub fn try_auto_rename_by_native_session(
     native_session_id: &str,
     title: &str,
     cwd: Option<&str>,
+    source_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     source_label: &str,
 ) -> AutoTitleSyncResult {
-    try_auto_rename_bound_title(state, title, Some(native_session_id), cwd, source_label)
+    try_auto_rename_bound_title(
+        state,
+        title,
+        Some(native_session_id),
+        cwd,
+        source_updated_at,
+        source_label,
+    )
 }
 
 /// 在 agent session 表中按 native_session_id 查 terminal_session_id。

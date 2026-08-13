@@ -781,8 +781,8 @@ async fn dispatch_workbench_op(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| AppError::validation("content required".to_string()))?
                 .to_string();
-            let item =
-                workbench::save_workbench_project_note_for_state(state, project_id, content).await?;
+            let item = workbench::save_workbench_project_note_for_state(state, project_id, content)
+                .await?;
             Ok(serde_json::to_value(item)?)
         }
 

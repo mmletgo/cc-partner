@@ -20,7 +20,8 @@ use std::sync::Arc;
 pub const WORKBENCH_PROJECT_NOTE_MAX_BYTES: usize = 1024 * 1024;
 
 /// 项目笔记表建表 SQL（幂等 CREATE TABLE IF NOT EXISTS）。
-pub const WORKBENCH_PROJECT_NOTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_project_notes (
+pub const WORKBENCH_PROJECT_NOTE_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS workbench_project_notes (
     project_id TEXT PRIMARY KEY NOT NULL,
     content TEXT NOT NULL,
     updated_at TEXT NOT NULL

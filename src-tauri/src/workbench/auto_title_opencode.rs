@@ -191,6 +191,7 @@ pub async fn run_opencode_title_poller(state: AppState, cancel: CancellationToke
                     &native,
                     &title,
                     cwd.as_deref(),
+                    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(row.time_updated),
                     "opencode.session.title",
                 )
             })

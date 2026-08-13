@@ -1850,7 +1850,7 @@ async fn finish_scan_and_insert(
         let state_for_title = state.clone();
         let index_for_title = Arc::clone(&to_return);
         tauri::async_runtime::spawn_blocking(move || {
-            maybe_auto_title_from_index(&state_for_title, &index_for_title, true);
+            maybe_auto_title_from_index(&state_for_title, &index_for_title);
         });
     }
     to_return
@@ -1872,11 +1872,7 @@ async fn scan_test_hooks_wait_before_scan() {
 /// Code Logic（这个函数做什么）:
 ///     仅 has_ai_title 的 session；同 cwd 只取 last_activity_at 最新一条；
 ///     按 session_id 去重「标题未变」后调用 `try_auto_rename_from_claude_index`。
-fn maybe_auto_title_from_index(
-    state: &AppState,
-    shared: &SharedWorktreeSessionIndex,
-    initial_scan: bool,
-) {
+fn maybe_auto_title_from_index(state: &AppState, shared: &SharedWorktreeSessionIndex) {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -1923,9 +1919,6 @@ fn maybe_auto_title_from_index(
     candidates.extend(no_cwd);
 
     for index in candidates {
-        if initial_scan && !initial_auto_title_matches_live_terminal(state, &index) {
-            continue;
-        }
         let title = index.title.trim().to_string();
         {
             let map = match last_applied.lock() {
@@ -1951,46 +1944,6 @@ fn maybe_auto_title_from_index(
             map.insert(index.session_id.clone(), title);
         }
     }
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     watcher 注册前的初扫要补当前对话标题，但不能把同 cwd 的历史 Claude 会话标题套到刚创建的新 terminal。
-///
-/// Code Logic（这个函数做什么）:
-///     只接受最近 10 分钟且活动时间不早于目标 terminal 启动时间的索引；目标仍沿用 native 优先、cwd 唯一的绑定规则。
-fn initial_auto_title_matches_live_terminal(state: &AppState, index: &ClaudeSessionIndex) -> bool {
-    const INITIAL_TITLE_WINDOW_MINUTES: i64 = 10;
-    let Some(activity) = chrono::DateTime::parse_from_rfc3339(&index.last_activity_at)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
-    else {
-        return false;
-    };
-    if Utc::now().signed_duration_since(activity)
-        > chrono::Duration::minutes(INITIAL_TITLE_WINDOW_MINUTES)
-    {
-        return false;
-    }
-
-    let live = state.workbench_sessions.list_live_session_rows();
-    let terminal_id =
-        crate::workbench::auto_title::find_terminal_by_native_session(state, &index.session_id)
-            .or_else(|| {
-                crate::workbench::auto_title::pick_unique_terminal_for_cwd(
-                    &live,
-                    index.cwd.as_deref(),
-                )
-            });
-    let Some(target) = terminal_id.and_then(|id| live.iter().find(|row| row.id == id)) else {
-        return false;
-    };
-    let Some(started_at) = chrono::DateTime::parse_from_rfc3339(&target.started_at)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
-    else {
-        return false;
-    };
-    activity >= started_at
 }
 
 /// 为指定 worktree 启动 notify 文件监听。
@@ -2085,7 +2038,7 @@ fn spawn_session_watcher(
                         return;
                     }
                     apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
-                    maybe_auto_title_from_index(&state_task, &index_for_task, false);
+                    maybe_auto_title_from_index(&state_task, &index_for_task);
                 });
                 if let Ok(mut list) = scans.lock() {
                     // tauri JoinHandle 无 is_finished；dispose 时统一 abort，此处只登记。
@@ -2128,7 +2081,7 @@ fn spawn_session_watcher(
                         return;
                     }
                     apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
-                    maybe_auto_title_from_index(&state_task, &index_for_task, false);
+                    maybe_auto_title_from_index(&state_task, &index_for_task);
                 });
                 if let Ok(mut list) = scans.lock() {
                     list.push(handle);
@@ -2176,7 +2129,7 @@ fn spawn_session_watcher(
                             &dir_clone,
                             trailing_plan,
                         );
-                        maybe_auto_title_from_index(&state_task, &index_clone, false);
+                        maybe_auto_title_from_index(&state_task, &index_clone);
                     });
                     if let Ok(mut list) = scans.lock() {
                         list.push(scan_handle);

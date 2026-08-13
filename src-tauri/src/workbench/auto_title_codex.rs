@@ -28,6 +28,7 @@ const BOOTSTRAP_RECENT_WINDOW: Duration = Duration::from_secs(10 * 60);
 struct PendingCodexTitle {
     title: String,
     cwd: Option<String>,
+    source_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     first_seen: std::time::Instant,
 }
 
@@ -354,6 +355,11 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
                 PendingCodexTitle {
                     title,
                     cwd,
+                    source_updated_at: line
+                        .updated_at
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&chrono::Utc)),
                     first_seen: std::time::Instant::now(),
                 },
             );
@@ -374,12 +380,14 @@ pub async fn run_codex_title_poller(state: AppState, cancel: CancellationToken) 
             let native_for_rename = native.clone();
             let title_for_rename = pending.title.clone();
             let cwd = pending.cwd.clone();
+            let source_updated_at = pending.source_updated_at;
             let result = tauri::async_runtime::spawn_blocking(move || {
                 try_auto_rename_by_native_session(
                     &state_clone,
                     &native_for_rename,
                     &title_for_rename,
                     cwd.as_deref(),
+                    source_updated_at,
                     "codex.thread_name",
                 )
             })
