@@ -64,6 +64,7 @@ import type {
 } from '@/lib/types';
 import {
   DEFAULT_WORKTREE_BRANCH_PREFIX,
+  canMergeWorktree,
   composeWorktreeBranchName,
   formatWorkbenchMergeStages,
   shouldAutoDismissMergeStages,
@@ -179,7 +180,7 @@ export interface UseWorkbenchWorktreeGitControllerParams {
   desktopUnavailableMessage: string;
   translateError: (key: WorkbenchWorktreeGitErrorKey) => string;
   translateWorktreeMessage: (
-    key: 'mergeConfirm' | 'removeConfirm' | 'checkSourceMessage',
+    key: 'mergeConfirm' | 'mergeCollectConfirm' | 'removeConfirm' | 'checkSourceMessage',
     vars?: Record<string, unknown>,
   ) => string;
   confirmAction: (message: string) => boolean;
@@ -750,12 +751,12 @@ export function useWorkbenchWorktreeGitController(
         return reconcileWorkbenchMutation(intent, ledger, {});
       }
 
-      if (intent.kind === 'merge' || intent.kind === 'remove') {
+      if (intent.kind === 'merge' || intent.kind === 'collectMerge' || intent.kind === 'remove') {
         try {
           const latest = await workbenchApi.worktrees.list(projectId);
           if (!isSettledCurrent(settled)) return 'unknown';
           let mainCommitHashes: string[] | undefined;
-          if (intent.kind === 'merge') {
+          if (intent.kind === 'merge' || intent.kind === 'collectMerge') {
             const main = latest.find((item) => item.isMain) ?? null;
             if (main) {
               try {
@@ -1249,10 +1250,10 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户在功能 worktree 上一键合回主工作区；merge 会经过多个后端阶段，UI 需要稳定展示进度。
+   *   功能 worktree 一键合回主工作区，或主工作区把可收集分支合回 home；merge 会经过多个后端阶段。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 校验非主 worktree、remoteWriteDisabled、用户确认；
+   *   1. 用 canMergeWorktree 校验（主工作区需 canCollectMerge）、remoteWriteDisabled、用户确认；
    *   2. mint operation key + clientOperationId；初始化 merge 阶段；
    *   3. envelope succeeded 且 current → 写阶段/刷新 sessions/buffers；
    *   4. unknown 且 current → 对账、不盲重放；catch/finally 均 isSettledCurrent 守卫。
@@ -1264,10 +1265,16 @@ export function useWorkbenchWorktreeGitController(
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     if (!isMutationKindAllowedUnderUnknownLock('merge')) return;
-    // Business Logic: 仅功能 worktree（非 main）允许 merge；主工作区没有合并目标。
     const current = worktrees.find((worktree) => worktree.id === worktreeId);
-    if (!current || current.isMain) return;
-    if (!confirmAction(translateWorktreeMessage('mergeConfirm', { name: current.name }))) {
+    if (!current || !canMergeWorktree(current, worktreeBusy, unknownMutationLock)) return;
+    const confirmed = current.isMain
+      ? translateWorktreeMessage('mergeCollectConfirm', {
+          home: current.homeBranch ?? 'main',
+          names: current.collectibleBranches.join(', '),
+          count: current.collectibleBranches.length,
+        })
+      : translateWorktreeMessage('mergeConfirm', { name: current.name });
+    if (!confirmAction(confirmed)) {
       return;
     }
     beginMutationOperation(projectId, worktreeId);
@@ -1449,6 +1456,7 @@ export function useWorkbenchWorktreeGitController(
     translateWorktreeMessage,
     unknownMutationLock,
     updateProjectMergeProgress,
+    worktreeBusy,
     worktrees,
   ]);
 

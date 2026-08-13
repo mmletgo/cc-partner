@@ -14,6 +14,7 @@ import {
   shouldSkipMobileFileContextConfirmForDiscardToken,
   shouldInvalidateMobileFileOpenOnDirectoryLoad,
   getMobileWorktreeRemovalPlan,
+  getMobileWorktreeMergePlan,
   runMobileWorktreeMergeFlow,
   runMobileWorktreeRefreshFlow,
   runMobileWorktreeRemovalFlow,
@@ -89,6 +90,9 @@ function createWorktree(id: string, isMain: boolean): WorkbenchWorktree {
     baseBranch: isMain ? null : 'main',
     path: `/repo/${id}`,
     isMain,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
     status: {
       branch: isMain ? 'main' : id,
       changed: 0,
@@ -471,6 +475,96 @@ describe('mobilePanelState', () => {
    * Code Logic（这个测试做什么）:
    *   模拟 confirm 返回 false，断言 mergeWorktree 与 applyMergeSuccess 均不执行。
    */
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   主工作区 collect-merge 只合入分支、不删除主 worktree；复用删除计划会把当前主工作区从列表滤掉。
+   *
+   * Code Logic（这个测试做什么）:
+   *   以 main 为 source 计算 merge plan，断言保留全部 worktree、保持当前 active，且不要求 dirty preflight。
+   */
+  test('getMobileWorktreeMergePlan keeps main worktree for collect-merge', () => {
+    const main = createWorktree('main', true);
+    main.canCollectMerge = true;
+    const feature = createWorktree('feature/keep-me', false);
+
+    const plan = getMobileWorktreeMergePlan([main, feature], main.id, main);
+
+    assertEqual(plan.requiresActivePreflight, false, 'collect-merge should skip active preflight');
+    assertEqual(plan.nextActive?.id ?? null, main.id, 'collect-merge should keep current active');
+    assertEqual(plan.nextWorktrees.length, 2, 'collect-merge should keep the full worktree list');
+    assertEqual(
+      plan.nextWorktrees.some((worktree) => worktree.id === main.id),
+      true,
+      'collect-merge must not drop the main worktree',
+    );
+    assertEqual(
+      plan.nextWorktrees.some((worktree) => worktree.id === feature.id),
+      true,
+      'collect-merge must not drop other worktrees',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   功能 worktree 合回仍会删除源 worktree，collect-merge 计划不能改变这条既有路径。
+   *
+   * Code Logic（这个测试做什么）:
+   *   以 feature 为 source 计算 merge plan，断言仍走删除计划（源从列表消失）。
+   */
+  test('getMobileWorktreeMergePlan still removes feature worktree', () => {
+    const main = createWorktree('main', true);
+    const feature = createWorktree('feature/merge-me', false);
+
+    const plan = getMobileWorktreeMergePlan([main, feature], feature.id, feature);
+
+    assertEqual(plan.requiresActivePreflight, true, 'feature merge should preflight when active');
+    assertEqual(plan.nextActive?.id ?? null, main.id, 'feature merge should fall back to main');
+    assertEqual(
+      plan.nextWorktrees.some((worktree) => worktree.id === feature.id),
+      false,
+      'feature merge should drop the source worktree',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   主工作区 collect-merge 成功后必须保留主 worktree；不能因为 source 是 active 就套用删除计划。
+   *
+   * Code Logic（这个测试做什么）:
+   *   以 main 为 source 跑 merge flow，断言不走 dirty guard，且成功计划仍包含 main。
+   */
+  test('runMobileWorktreeMergeFlow collect-merge keeps main worktree', async () => {
+    const main = createWorktree('main', true);
+    main.canCollectMerge = true;
+    const feature = createWorktree('feature/keep-me', false);
+    let confirmCalls = 0;
+    let appliedIds = '';
+    let appliedActiveId: string | null = null;
+    let appliedRequiresActivePreflight: boolean | null = null;
+
+    const result = await runMobileWorktreeMergeFlow({
+      worktrees: [main, feature],
+      activeWorktreeId: main.id,
+      sourceWorktree: main,
+      confirmActiveWorktreeChange: () => {
+        confirmCalls += 1;
+        return true;
+      },
+      mergeWorktree: async () => undefined,
+      applyMergeSuccess: async (plan) => {
+        appliedIds = plan.nextWorktrees.map((worktree) => worktree.id).join(',');
+        appliedActiveId = plan.nextActive?.id ?? null;
+        appliedRequiresActivePreflight = plan.requiresActivePreflight;
+      },
+    });
+
+    assertEqual(result, 'applied', 'collect-merge should report applied transition');
+    assertEqual(confirmCalls, 0, 'collect-merge should skip dirty guard confirm');
+    assertEqual(appliedRequiresActivePreflight, false, 'collect-merge should not require preflight');
+    assertEqual(appliedActiveId, main.id, 'collect-merge should keep main active');
+    assertEqual(appliedIds, `${main.id},${feature.id}`, 'collect-merge should keep all worktrees');
+  });
+
   test('runMobileWorktreeMergeFlow cancelled by dirty guard does not call backend', async () => {
     const main = createWorktree('main', true);
     const feature = createWorktree('feature/merge-me', false);

@@ -562,6 +562,7 @@
     "suffixPlaceholder": "my-task",
     "commitPrompt": "输入 commit message",
     "mergeConfirm": "确定把“{{name}}”合并到主工作区？",
+    "mergeCollectConfirm": "确定把本工作区的 {{count}} 条分支（{{names}}）合并到「{{home}}」，并切回该主分支？",
     "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。",
     "hookRepair": {
       "title": "Git 钩子阻止了{{action}}",

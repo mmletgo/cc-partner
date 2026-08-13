@@ -147,6 +147,9 @@ function createWorktree(projectId = 'p1'): WorkbenchWorktree {
     baseBranch: null,
     path: `/tmp/${projectId}`,
     isMain: true,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
     status: {
       branch: 'main',
       changed: 0,

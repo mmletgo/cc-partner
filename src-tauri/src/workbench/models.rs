@@ -150,9 +150,11 @@ pub struct WorkbenchWorktreeRow {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     前端需要用 worktree strip 切换工作区，并在同一层展示分支状态和路径。
+///     主工作区 Merge 按钮还需要 list/get 注入的 collect-merge 资格，不能靠 git status 解析。
 ///
 /// Code Logic（这个结构体做什么）:
-///     将持久化 row 与运行期 Git 状态合并为 camelCase UI 合同。
+///     将持久化 row 与运行期 Git 状态合并为 camelCase UI 合同；
+///     collect-merge 字段默认 false/None/空，缺字段仍可反序列化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchWorktreeDto {
@@ -166,6 +168,12 @@ pub struct WorkbenchWorktreeDto {
     pub status: WorkbenchGitStatusDto,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub can_collect_merge: bool,
+    #[serde(default)]
+    pub home_branch: Option<String>,
+    #[serde(default)]
+    pub collectible_branches: Vec<String>,
 }
 
 /// Workbench 远端目录选择器根入口 DTO。
@@ -257,6 +265,9 @@ impl WorkbenchWorktreeRow {
             status,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
+            can_collect_merge: false,
+            home_branch: None,
+            collectible_branches: Vec::new(),
         }
     }
 }

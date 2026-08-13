@@ -72,6 +72,20 @@ pub enum MergeBranchOutcome {
     Conflicted,
 }
 
+/// 主工作区 collect-merge 可收集的本地分支。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     主 worktree 上可能残留 agent 就地检出的额外本地分支；Merge 需要知道哪些分支
+///     尚未合入 home、也未被其他 worktree 占用，才能安全收集。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存本地分支短名与当前 tip OID。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectibleBranch {
+    pub name: String,
+    pub oid: String,
+}
+
 /// Workbench 隔离合并冻结快照。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -1938,6 +1952,266 @@ pub fn unresolved_conflict_files(path: &Path) -> Result<Vec<String>, AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     主工作区 collect-merge 必须先确定 home 分支：优先跟随 origin 默认分支，
+///     再回退到本地 main/master，避免把 agent 就地分支误当成收集目标基线。
+///
+/// Code Logic（这个函数做什么）:
+///     依次探测 `refs/remotes/origin/HEAD`（去掉 `refs/remotes/origin/` 或 `origin/` 前缀后
+///     若本地分支存在则采用）、本地 `main`、本地 `master`；都没有则返回可读错误。
+pub fn detect_home_branch(path: &Path) -> Result<String, AppError> {
+    if let Some(from_origin) = origin_head_local_branch(path)? {
+        return Ok(from_origin);
+    }
+    if local_branch_exists(path, "main")? {
+        return Ok("main".to_string());
+    }
+    if local_branch_exists(path, "master")? {
+        return Ok("master".to_string());
+    }
+    Err(AppError::generic("无法确定主工作区主分支"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     collect-merge 只能收集尚未进入 home、且当前没有被其他 worktree 占用的本地分支。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `git for-each-ref` 枚举 `refs/heads`，跳过 home、occupied，以及已是 home 祖先的分支，
+///     按名称排序后返回 name + oid。
+pub fn list_collectible_branches(
+    path: &Path,
+    home: &str,
+    occupied: &[String],
+) -> Result<Vec<CollectibleBranch>, AppError> {
+    let output = run_git(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(objectname)",
+            "refs/heads",
+        ],
+    )?;
+    let mut branches = Vec::new();
+    for line in output.lines() {
+        let mut parts = line.split('\0');
+        let name = parts.next().unwrap_or("").trim();
+        let oid = parts.next().unwrap_or("").trim();
+        if name.is_empty() || oid.is_empty() || name == home {
+            continue;
+        }
+        if occupied.iter().any(|item| item == name) {
+            continue;
+        }
+        if local_branch_merged_into(path, name, home)? {
+            continue;
+        }
+        branches.push(CollectibleBranch {
+            name: name.to_string(),
+            oid: oid.to_string(),
+        });
+    }
+    branches.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(branches)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     其他 worktree 正在检出的分支不能被主工作区收集，否则 Git 会拒绝移动已签出引用。
+///
+/// Code Logic（这个函数做什么）:
+///     通过 `list_worktrees` 读取 porcelain 列表，返回路径（canonicalize + 去掉尾部 `/`）
+///     不等于 self_path 且带有分支名的 worktree 分支；忽略 detached / 无分支工作区。
+pub fn occupied_worktree_branches(
+    repo_root: &Path,
+    self_path: &Path,
+) -> Result<Vec<String>, AppError> {
+    let self_normalized = normalize_worktree_path(self_path)?;
+    let items = list_worktrees(repo_root, &self_normalized)?;
+    let mut names = Vec::new();
+    for item in items {
+        if normalize_worktree_path(Path::new(&item.path))? == self_normalized {
+            continue;
+        }
+        if let Some(branch) = item.branch {
+            if !branch.is_empty() {
+                names.push(branch);
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// 把隔离 collect-merge 产物发布到主工作区 home 分支。
+///
+/// Business Logic（为什么需要这个函数）:
+///     collect-merge 发生在同一主工作区；agent 可能已切到功能分支，旧的
+///     `publish_integration_merge` 会因不在 home 而拒绝。需要在不覆盖并发 home
+///     推进的前提下，把隔离 merge 产物接到 home 并回到该分支。
+///
+/// Code Logic（这个函数做什么）:
+///     工作区脏则 conflict 并保持 home 引用不变。确认 `merge_oid` 是
+///     `frozen_home_oid` 的后代后：若当前就在 home 且 HEAD 等于冻结 OID，则
+///     `git merge --ff-only`；否则 CAS `git update-ref refs/heads/<home>
+///     <merge_oid> <frozen_home_oid>` 再 `git checkout <home>`。home 漂移
+///     （on-home HEAD 不等于冻结，或 CAS old 不匹配）一律 conflict。发布后复查
+///     当前分支、HEAD 与 clean 状态。
+pub fn publish_collect_merge_to_home(
+    live_path: &Path,
+    home_branch: &str,
+    frozen_home_oid: &str,
+    merge_oid: &str,
+) -> Result<(), AppError> {
+    let home_branch = home_branch.trim();
+    let frozen_home_oid = frozen_home_oid.trim();
+    let merge_oid = merge_oid.trim();
+    if home_branch.is_empty() || frozen_home_oid.is_empty() || merge_oid.is_empty() {
+        return Err(AppError::generic(
+            "publish collect-merge 需要非空 home 分支与 commit oid".to_string(),
+        ));
+    }
+    if !status(live_path)?.clean {
+        return Err(AppError::conflict(
+            "主工作区有未提交改动，拒绝发布 collect-merge".to_string(),
+        ));
+    }
+    if !is_ancestor(live_path, frozen_home_oid, merge_oid)? {
+        return Err(AppError::generic(
+            "collect-merge 产物不是冻结 home 提交的后代，拒绝发布".to_string(),
+        ));
+    }
+    let current = current_branch(live_path).ok_or_else(|| {
+        AppError::conflict("主工作区已不在任何分支，拒绝发布 collect-merge".to_string())
+    })?;
+    let head = head_hash(live_path)?.ok_or_else(|| {
+        AppError::conflict("主工作区 HEAD 已不存在，拒绝发布 collect-merge".to_string())
+    })?;
+    if current == home_branch {
+        if head != frozen_home_oid {
+            return Err(AppError::conflict(
+                "主工作区 HEAD 已变化，拒绝覆盖并发提交".to_string(),
+            ));
+        }
+        run_git(live_path, &["merge", "--ff-only", merge_oid])?;
+    } else {
+        let home_ref = format!("refs/heads/{home_branch}");
+        let output = Command::new("git")
+            .args(["update-ref", &home_ref, merge_oid, frozen_home_oid])
+            .current_dir(live_path)
+            .output()?;
+        if !output.status.success() {
+            return Err(AppError::conflict(format!(
+                "home 分支 {home_branch} 在隔离期间已变化，拒绝发布 collect-merge"
+            )));
+        }
+        run_git(live_path, &["checkout", home_branch])?;
+    }
+    let published_head = head_hash(live_path)?
+        .ok_or_else(|| AppError::generic("发布 collect-merge 后主工作区 HEAD 为空"))?;
+    if published_head != merge_oid
+        || current_branch(live_path).as_deref() != Some(home_branch)
+        || !status(live_path)?.clean
+    {
+        return Err(AppError::generic(
+            "collect-merge 发布后的主工作区校验失败，请检查 Git 状态".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 发布后尽量删除已合入且未被占用的源分支。
+///
+/// Business Logic（为什么需要这个函数）:
+///     collect-merge 成功后应回收源分支名，但不能打断其他 worktree 或当前检出，
+///     也不能因为某一条未合并就让整次清理失败。
+///
+/// Code Logic（这个函数做什么）:
+///     跳过空名、当前检出、其他 worktree 占用、不存在、尚未合入当前 HEAD 的分支；
+///     其余执行 `git branch -D`，返回实际删除的名字。
+pub fn delete_local_branches_if_unoccupied(
+    path: &Path,
+    branches: &[String],
+) -> Result<Vec<String>, AppError> {
+    let occupied = occupied_worktree_branches(path, path)?;
+    let current = current_branch(path);
+    let mut deleted = Vec::new();
+    for raw in branches {
+        let branch = raw.trim();
+        if branch.is_empty() {
+            continue;
+        }
+        if current.as_deref() == Some(branch) {
+            continue;
+        }
+        if occupied.iter().any(|item| item == branch) {
+            continue;
+        }
+        if !local_branch_exists(path, branch)? {
+            continue;
+        }
+        if !local_branch_merged_into(path, branch, "HEAD")? {
+            continue;
+        }
+        run_git(path, &["branch", "-D", branch])?;
+        deleted.push(branch.to_string());
+    }
+    Ok(deleted)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     origin/HEAD 是远程默认分支的本地镜像，collect-merge 应优先把它对应的本地分支当作 home。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git symbolic-ref --quiet refs/remotes/origin/HEAD`；成功则去掉 origin 前缀，
+///     仅当对应本地分支存在时返回该名称。缺失 origin/HEAD（退出码 1）视为未配置。
+fn origin_head_local_branch(path: &Path) -> Result<Option<String>, AppError> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let name = strip_origin_head_prefix(raw.trim());
+        if name.is_empty() {
+            return Ok(None);
+        }
+        if local_branch_exists(path, &name)? {
+            return Ok(Some(name));
+        }
+        return Ok(None);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     origin/HEAD 可能写成完整 refs 或短名 `origin/trunk`，解析时必须兼容两种形式。
+///
+/// Code Logic（这个函数做什么）:
+///     依次去掉 `refs/remotes/origin/` 与 `origin/` 前缀，返回本地分支短名。
+fn strip_origin_head_prefix(raw: &str) -> String {
+    raw.strip_prefix("refs/remotes/origin/")
+        .or_else(|| raw.strip_prefix("origin/"))
+        .unwrap_or(raw)
+        .to_string()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Git porcelain 与调用方传入的 worktree 路径可能差尾部斜杠，或在 macOS 上差 `/var` 与
+///     `/private/var`；比较前必须归一，否则会把当前主工作区自己的分支误判为 occupied。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 `comparable_worktree_path` 做 canonicalize / 绝对化，再去掉尾部 `/`。
+fn normalize_worktree_path(path: &Path) -> Result<String, AppError> {
+    Ok(comparable_worktree_path(path)?
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string())
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     Claude 在隔离 merge worktree 内直接编辑后，commands 层必须验证它没有碰触原冲突清单外的文件，
 ///     否则随后的 `git add -A` 会把非授权改动带进 merge commit。
 ///
@@ -3784,6 +4058,375 @@ UU web/src/App.tsx
 
         assert!(commits.is_empty());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     主工作区 collect-merge 必须以 origin/HEAD 指向的本地分支为 home，
+    ///     不能因为仓库里同时存在 main 就误选 fallback。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 trunk 上初始化并推送到 bare origin，设置 origin/HEAD=trunk，同时创建本地 main；
+    ///     断言 detect_home_branch 返回 trunk 而不是 main。
+    #[test]
+    fn detect_home_prefers_origin_head_trunk_over_local_main() {
+        let root = temp_git_dir("workbench-detect-home-origin-trunk");
+        let repo = root.join("repo");
+        let origin = root.join("origin.git");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "trunk"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "trunk\n").expect("write trunk readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&repo, &["branch", "main"]);
+        git_test_command(&repo, &["init", "--bare", origin.to_str().expect("origin path")]);
+        git_test_command(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.to_str().expect("origin path"),
+            ],
+        );
+        git_test_command(&repo, &["push", "-u", "origin", "trunk"]);
+        git_test_command(&repo, &["remote", "set-head", "origin", "trunk"]);
+
+        let home = detect_home_branch(&repo).expect("detect home from origin/HEAD");
+        assert_eq!(home, "trunk");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     没有 origin/HEAD 时，本地 main 是最常见的主工作区 home。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     初始化只有本地 main 的仓库，断言 detect_home_branch 返回 main。
+    #[test]
+    fn detect_home_falls_back_to_local_main_without_origin() {
+        let root = temp_git_dir("workbench-detect-home-main");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "main\n").expect("write main readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+
+        let home = detect_home_branch(&repo).expect("detect home from local main");
+        assert_eq!(home, "main");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧仓库可能只有 master，没有 origin 也没有 main。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     初始化只有本地 master 的仓库（如有残留 main 则删除），断言 home 为 master。
+    #[test]
+    fn detect_home_falls_back_to_local_master_without_origin_or_main() {
+        let root = temp_git_dir("workbench-detect-home-master");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "master"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "master\n").expect("write master readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        let listed_main = git_test_command(&repo, &["branch", "--list", "main"]);
+        if !listed_main.trim().is_empty() {
+            git_test_command(&repo, &["branch", "-D", "main"]);
+        }
+
+        let home = detect_home_branch(&repo).expect("detect home from local master");
+        assert_eq!(home, "master");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     只有功能分支时不能猜测 home，否则 collect-merge 会把工作合进错误基线。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     初始化只有 feature/x 的仓库，断言 detect_home_branch 返回可读错误。
+    #[test]
+    fn detect_home_errors_when_only_feature_branch_exists() {
+        let root = temp_git_dir("workbench-detect-home-feature-only");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/x"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "feature\n").expect("write feature readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        for leftover in ["main", "master"] {
+            let listed = git_test_command(&repo, &["branch", "--list", leftover]);
+            if !listed.trim().is_empty() {
+                git_test_command(&repo, &["branch", "-D", leftover]);
+            }
+        }
+
+        let err = detect_home_branch(&repo).expect_err("feature-only repo has no home");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("无法确定主工作区主分支"),
+            "unexpected err: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     collect-merge 只能收集未被其他 worktree 占用、且尚未完全合入 home 的本地分支。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 main / agent/a / agent/b / already-merged；already-merged 经 --no-ff 合入 main，
+    ///     第二个 worktree 检出 agent/b。断言 occupied 仅为 agent/b，collectible 仅为 agent/a。
+    #[test]
+    fn list_collectible_skips_home_occupied_and_already_merged() {
+        let root = temp_git_dir("workbench-list-collectible");
+        let repo = root.join("repo");
+        let other = root.join("wt-agent-b");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+
+        git_test_command(&repo, &["checkout", "-b", "already-merged"]);
+        fs::write(repo.join("merged.txt"), "merged\n").expect("write merged");
+        git_test_command(&repo, &["add", "merged.txt"]);
+        git_test_command(&repo, &["commit", "-m", "already merged work"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        git_test_command(&repo, &["merge", "--no-ff", "already-merged", "-m", "merge already-merged"]);
+
+        git_test_command(&repo, &["checkout", "-b", "agent/a"]);
+        fs::write(repo.join("agent-a.txt"), "a\n").expect("write agent a");
+        git_test_command(&repo, &["add", "agent-a.txt"]);
+        git_test_command(&repo, &["commit", "-m", "agent a work"]);
+        git_test_command(&repo, &["checkout", "main"]);
+
+        git_test_command(&repo, &["checkout", "-b", "agent/b"]);
+        fs::write(repo.join("agent-b.txt"), "b\n").expect("write agent b");
+        git_test_command(&repo, &["add", "agent-b.txt"]);
+        git_test_command(&repo, &["commit", "-m", "agent b work"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                other.to_str().expect("other worktree path"),
+                "agent/b",
+            ],
+        );
+
+        let occupied =
+            occupied_worktree_branches(&repo, &repo).expect("list occupied worktree branches");
+        assert_eq!(occupied, vec!["agent/b".to_string()]);
+
+        let home = detect_home_branch(&repo).expect("detect home");
+        assert_eq!(home, "main");
+        let collectible =
+            list_collectible_branches(&repo, &home, &occupied).expect("list collectible");
+        let agent_a_oid = git_test_command(&repo, &["rev-parse", "agent/a"])
+            .trim()
+            .to_string();
+        assert_eq!(
+            collectible,
+            vec![CollectibleBranch {
+                name: "agent/a".to_string(),
+                oid: agent_a_oid,
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 构造 collect-merge 发布测试仓库：main 回到冻结 OID，对象库里保留 --no-ff merge 产物。
+    fn setup_publish_collect_isolation(prefix: &str) -> (PathBuf, PathBuf, String, String) {
+        let root = temp_git_dir(prefix);
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(&repo, &["checkout", "-b", "agent/a"]);
+        fs::write(repo.join("agent-a.txt"), "a\n").expect("write agent a");
+        git_test_command(&repo, &["add", "agent-a.txt"]);
+        git_test_command(&repo, &["commit", "-m", "agent a work"]);
+        git_test_command(&repo, &["checkout", "main"]);
+        let frozen_home_oid = git_test_command(&repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        git_test_command(
+            &repo,
+            &["merge", "--no-ff", "agent/a", "-m", "merge agent/a"],
+        );
+        let merge_oid = git_test_command(&repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        git_test_command(&repo, &["reset", "--hard", &frozen_home_oid]);
+        (root, repo, frozen_home_oid, merge_oid)
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     主工作区仍停在冻结 home 时，collect-merge 应 fast-forward 到隔离 merge 产物。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 main 上生成 --no-ff merge 后 reset 回冻结 OID，再 publish；断言仍在 main 且 HEAD 为 merge oid。
+    #[test]
+    fn publish_collect_merge_ff_only_when_live_on_home() {
+        let (root, repo, frozen_home_oid, merge_oid) =
+            setup_publish_collect_isolation("workbench-publish-collect-on-home");
+        assert_eq!(current_branch(&repo).as_deref(), Some("main"));
+        assert_eq!(head_hash(&repo).unwrap().unwrap(), frozen_home_oid);
+
+        publish_collect_merge_to_home(&repo, "main", &frozen_home_oid, &merge_oid)
+            .expect("publish collect-merge while on home");
+
+        assert_eq!(current_branch(&repo).as_deref(), Some("main"));
+        assert_eq!(head_hash(&repo).unwrap().unwrap(), merge_oid);
+        assert!(status(&repo).unwrap().clean);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     agent 已把主工作区切到功能分支时，仍要把 home 引用推进到隔离 merge 并回到 home。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     隔离产物就绪后检出 agent/a，再 publish；断言 CAS 更新 main 后 checkout 到 merge oid。
+    #[test]
+    fn publish_collect_merge_update_ref_and_checkout_when_live_off_home() {
+        let (root, repo, frozen_home_oid, merge_oid) =
+            setup_publish_collect_isolation("workbench-publish-collect-off-home");
+        git_test_command(&repo, &["checkout", "agent/a"]);
+        assert_eq!(current_branch(&repo).as_deref(), Some("agent/a"));
+
+        publish_collect_merge_to_home(&repo, "main", &frozen_home_oid, &merge_oid)
+            .expect("publish collect-merge while off home");
+
+        assert_eq!(current_branch(&repo).as_deref(), Some("main"));
+        assert_eq!(head_hash(&repo).unwrap().unwrap(), merge_oid);
+        assert!(status(&repo).unwrap().clean);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     主工作区有未提交改动时不能切分支或推进 home，否则会丢失用户工作。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     检出 agent/a 后写未跟踪文件再 publish；断言 conflict，main 引用仍停在冻结 OID。
+    #[test]
+    fn publish_collect_merge_refuses_dirty_live_and_leaves_home_unchanged() {
+        let (root, repo, frozen_home_oid, merge_oid) =
+            setup_publish_collect_isolation("workbench-publish-collect-dirty");
+        git_test_command(&repo, &["checkout", "agent/a"]);
+        fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        let error = publish_collect_merge_to_home(&repo, "main", &frozen_home_oid, &merge_oid)
+            .expect_err("dirty live must refuse publish");
+        assert!(
+            matches!(error, AppError::Conflict(_)),
+            "expected conflict, got {error}"
+        );
+        assert_eq!(
+            git_test_command(&repo, &["rev-parse", "refs/heads/main"]).trim(),
+            frozen_home_oid
+        );
+        assert_eq!(current_branch(&repo).as_deref(), Some("agent/a"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     隔离期间若 home 被并发推进，CAS 必须失败，不能用旧冻结 OID 覆盖新提交。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     reset 后在 main 上另做提交并切回 agent/a，再以旧冻结 OID publish；断言 conflict 且 main 仍指向并发 tip。
+    #[test]
+    fn publish_collect_merge_refuses_when_home_advanced_during_isolation() {
+        let (root, repo, frozen_home_oid, merge_oid) =
+            setup_publish_collect_isolation("workbench-publish-collect-cas-drift");
+        fs::write(repo.join("concurrent.txt"), "concurrent\n").expect("write concurrent");
+        git_test_command(&repo, &["add", "concurrent.txt"]);
+        git_test_command(&repo, &["commit", "-m", "concurrent"]);
+        let concurrent_oid = git_test_command(&repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        git_test_command(&repo, &["checkout", "agent/a"]);
+
+        let error = publish_collect_merge_to_home(&repo, "main", &frozen_home_oid, &merge_oid)
+            .expect_err("home drift must refuse publish");
+        assert!(
+            matches!(error, AppError::Conflict(_)),
+            "expected conflict, got {error}"
+        );
+        assert_eq!(
+            git_test_command(&repo, &["rev-parse", "refs/heads/main"]).trim(),
+            concurrent_oid
+        );
+        assert_ne!(concurrent_oid, frozen_home_oid);
+        assert_eq!(current_branch(&repo).as_deref(), Some("agent/a"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     发布成功后只应清理未被占用的源分支，避免删掉其他 worktree 正在检出的分支。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     publish 到 main 后删除 agent/a；另建 held 并在第二个 worktree 检出，断言 held 被跳过。
+    #[test]
+    fn publish_collect_delete_unoccupied_source_skips_checked_out_worktree() {
+        let (root, repo, frozen_home_oid, merge_oid) =
+            setup_publish_collect_isolation("workbench-publish-collect-delete");
+        let held_wt = root.join("wt-held");
+        publish_collect_merge_to_home(&repo, "main", &frozen_home_oid, &merge_oid)
+            .expect("publish before cleanup");
+        git_test_command(&repo, &["branch", "held"]);
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                held_wt.to_str().expect("held worktree path"),
+                "held",
+            ],
+        );
+
+        let deleted = delete_local_branches_if_unoccupied(
+            &repo,
+            &[
+                String::new(),
+                "agent/a".to_string(),
+                "held".to_string(),
+                "ghost".to_string(),
+            ],
+        )
+        .expect("best-effort delete unoccupied branches");
+
+        assert_eq!(deleted, vec!["agent/a".to_string()]);
+        let listed_agent = git_test_command(&repo, &["branch", "--list", "agent/a"]);
+        assert!(listed_agent.trim().is_empty(), "agent/a should be deleted");
+        let listed_held = git_test_command(&repo, &["branch", "--list", "held"]);
+        assert!(listed_held.contains("held"), "occupied held must remain");
         let _ = fs::remove_dir_all(root);
     }
 

@@ -91,6 +91,9 @@ function createWorktree(
     baseBranch: overrides.baseBranch ?? null,
     path: overrides.path ?? `/tmp/cc-partner/${overrides.name}`,
     isMain: overrides.isMain ?? false,
+    canCollectMerge: overrides.canCollectMerge ?? false,
+    homeBranch: overrides.homeBranch ?? null,
+    collectibleBranches: overrides.collectibleBranches ?? [],
     status: overrides.status ?? {
       branch: overrides.branch ?? overrides.name,
       changed: 0,

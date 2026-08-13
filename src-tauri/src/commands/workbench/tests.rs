@@ -181,6 +181,9 @@ fn map_remote_worktree_dtos_prefixes_worktree_id_and_keeps_local_project_id() {
         status: WorkbenchGitStatusDto::default(),
         created_at: "2026-06-26T00:00:00Z".to_string(),
         updated_at: "2026-06-26T00:00:00Z".to_string(),
+        can_collect_merge: false,
+        home_branch: None,
+        collectible_branches: Vec::new(),
     }];
 
     let mapped = map_remote_worktree_dtos("device-a", "remote:device-a:project-hash", items);

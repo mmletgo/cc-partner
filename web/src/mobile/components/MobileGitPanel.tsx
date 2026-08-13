@@ -240,14 +240,14 @@ export function MobileGitPanel({
         return reconcileWorkbenchMutation(intent, ledger, {});
       }
 
-      if (intent.kind === 'merge' || intent.kind === 'remove') {
+      if (intent.kind === 'merge' || intent.kind === 'collectMerge' || intent.kind === 'remove') {
         try {
           const latest = await httpWorkbenchTransport.worktrees.list(actionContext.projectId);
           if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
             return 'unknown';
           }
           let mainCommitHashes: string[] | undefined;
-          if (intent.kind === 'merge') {
+          if (intent.kind === 'merge' || intent.kind === 'collectMerge') {
             const main = latest.find((item) => item.isMain) ?? null;
             if (main) {
               try {
@@ -544,13 +544,14 @@ export function MobileGitPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   功能 worktree 完成后，手机端需要能触发合并回主工作区，沿用后端既有 merge 流程。
+   *   功能 worktree 合回主工作区，或主工作区 collect-merge 可收集分支。
    *
    * Code Logic（这个函数做什么）:
-   *   委托父级执行 dirty guard 与 envelope merge；typed unknown 进入 unknown 相位，不解析本地化文案。
+   *   非主或 canCollectMerge 时委托父级 dirty guard 与 envelope merge；typed unknown 进入 unknown 相位。
    */
   const handleMerge = useCallback(async (): Promise<void> => {
-    if (busy || !project || !worktree || worktree.isMain) return;
+    if (busy || !project || !worktree) return;
+    if (!(!worktree.isMain || worktree.canCollectMerge)) return;
     if (isMobileMutationActionLocked(mutationPhase) && mutationPhase !== 'unknown') return;
     if (mutationPhase === 'unknown' && unknownKindRef.current !== 'merge') return;
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
@@ -729,7 +730,7 @@ export function MobileGitPanel({
           <button
             type="button"
             className={styles.secondaryButton}
-            disabled={actionDisabled || worktree?.isMain}
+            disabled={actionDisabled || !(!worktree?.isMain || worktree.canCollectMerge)}
             aria-busy={actionBusy === 'merge' || undefined}
             aria-label={t('workbench:worktrees.merge')}
             onClick={() => void handleMerge()}

@@ -213,22 +213,21 @@ export function canPushWorktree(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Git 历史工具条的 merge 只适用于功能 worktree 合回主工作区。
+ *   Git 历史工具条的 merge 适用于功能 worktree 合回主工作区，或主工作区 collect-merge。
  *
  * Code Logic（这个函数做什么）:
- *   active worktree 存在、非主、非 busy，且 unknown 锁允许 merge；dirty 交给后端实时判断。
+ *   active worktree 存在、非 busy，且 unknown 锁允许 merge；功能 worktree 始终可点，
+ *   主工作区仅当 canCollectMerge 为 true；dirty 交给后端实时判断。
  */
 export function canMergeWorktree(
   activeWorktree: WorkbenchWorktree | null,
   worktreeBusy: string | null,
   unknownMutationLock: WorktreeUnknownMutationLockLike = null,
 ): boolean {
-  return (
-    activeWorktree !== null
-    && !activeWorktree.isMain
-    && worktreeBusy === null
-    && isWorktreeMutationKindAllowedByUnknownLock('merge', unknownMutationLock)
-  );
+  if (activeWorktree === null || worktreeBusy !== null) return false;
+  if (!isWorktreeMutationKindAllowedByUnknownLock('merge', unknownMutationLock)) return false;
+  if (!activeWorktree.isMain) return true;
+  return activeWorktree.canCollectMerge === true;
 }
 
 /**

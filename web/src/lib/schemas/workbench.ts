@@ -142,10 +142,10 @@ const gitStatusDecoder: Decoder<WorkbenchGitStatus> = objectDecoder('WorkbenchGi
 
 /**
  * Business Logic（为什么需要这个 decoder）:
- *   worktree strip 与 Git 操作依赖 status 摘要。
+ *   worktree strip 与 Git 操作依赖 status 摘要；主工作区 Merge 还依赖 collect-merge 资格。
  *
  * Code Logic（这个 decoder 做什么）:
- *   解码 worktree 元数据 + nested status。
+ *   解码 worktree 元数据 + nested status；旧后端缺 collect-merge 字段时回落 false/null/[]。
  */
 export const workbenchWorktreeDecoder: Decoder<WorkbenchWorktree> = objectDecoder(
   'WorkbenchWorktree',
@@ -157,9 +157,19 @@ export const workbenchWorktreeDecoder: Decoder<WorkbenchWorktree> = objectDecode
     baseBranch: nullableDecoder(stringDecoder),
     path: stringDecoder,
     isMain: booleanDecoder,
+    canCollectMerge: booleanDecoder,
+    homeBranch: nullableDecoder(stringDecoder),
+    collectibleBranches: arrayDecoder(stringDecoder),
     status: gitStatusDecoder,
     createdAt: stringDecoder,
     updatedAt: stringDecoder,
+  },
+  {
+    defaults: {
+      canCollectMerge: false,
+      homeBranch: null,
+      collectibleBranches: [],
+    },
   },
 );
 
@@ -245,7 +255,7 @@ const mutationStateDecoder: Decoder<MutationState> = enumDecoder('MutationState'
  *   ledger intent 是 unknown 后对账唯一来源，kind 错位不得进入矩阵。
  *
  * Code Logic（这个 decoder 做什么）:
- *   tag=kind 联合解码 commit/push/merge/remove intent 字段。
+ *   tag=kind 联合解码 commit/push/merge/collectMerge/remove intent 字段。
  */
 export const mutationIntentDecoder: Decoder<MutationIntent> = unionDecoder<MutationIntent>(
   'MutationIntent',
@@ -271,6 +281,19 @@ export const mutationIntentDecoder: Decoder<MutationIntent> = unionDecoder<Mutat
       sourceWorktreeId: stringDecoder,
       sourceHead: stringDecoder,
       mainHead: stringDecoder,
+    }),
+    objectDecoder('MutationIntentCollectMerge', {
+      kind: literalDecoder('collectMerge'),
+      projectId: stringDecoder,
+      worktreeId: stringDecoder,
+      homeBranch: stringDecoder,
+      homeOid: stringDecoder,
+      sources: arrayDecoder(
+        objectDecoder('MutationIntentCollectMergeSource', {
+          name: stringDecoder,
+          oid: stringDecoder,
+        }),
+      ),
     }),
     objectDecoder('MutationIntentRemove', {
       kind: literalDecoder('remove'),

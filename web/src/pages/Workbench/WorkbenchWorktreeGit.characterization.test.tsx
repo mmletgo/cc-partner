@@ -272,6 +272,88 @@ describe('Workbench worktree / Git domain (characterization)', () => {
     restore();
   });
 
+  test('main worktree collect-merge confirms with branch list and invokes merge', async () => {
+    const originalConfirm = window.confirm;
+    const confirmMessages: string[] = [];
+    window.confirm = (message?: string): boolean => {
+      confirmMessages.push(String(message ?? ''));
+      return true;
+    };
+
+    const project = buildLocalProject();
+    const mainWt = buildWorktree({
+      id: 'wt-main',
+      name: 'main',
+      branch: 'main',
+      isMain: true,
+      canCollectMerge: true,
+      homeBranch: 'main',
+      collectibleBranches: ['agent/demo'],
+    });
+    const featureWt = buildWorktree({
+      id: 'wt-feat',
+      projectId: project.id,
+      name: 'demo',
+      branch: 'agent/demo',
+      isMain: false,
+    });
+
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [mainWt, featureWt];
+        case 'list_workbench_sessions':
+          return [];
+        case 'merge_workbench_worktree':
+          return {
+            kind: 'succeeded',
+            clientOperationId: 'char-collect-merge-1',
+            value: {
+              ok: true,
+              worktreeId: 'wt-main',
+              stages: [
+                { id: 'checkSource', status: 'completed', message: 'ok' },
+                { id: 'mergeMain', status: 'completed', message: 'ok' },
+                { id: 'cleanup', status: 'completed', message: 'ok' },
+              ],
+            },
+          };
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Git 历史' }));
+    await settle();
+
+    fireEvent.click(screen.getByRole('button', { name: '合并' }));
+    await waitForInvoke('merge_workbench_worktree');
+
+    expect(confirmMessages.some((message) =>
+      message.includes('agent/demo') && message.includes('main'),
+    )).toBe(true);
+    expect(confirmMessages.join('\n')).toContain(
+      '确定把本工作区的 1 条分支（agent/demo）合并到「main」，并切回该主分支？',
+    );
+
+    const bar = screen.getByRole('region', { name: 'Worktree 管理' });
+    expect(bar.textContent).toContain('main');
+
+    window.confirm = originalConfirm;
+  });
+
   test('merge-progress event for a different project is ignored', async () => {
     const project = buildLocalProject({ id: 'p1' });
     const mainWt = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main', isMain: true });

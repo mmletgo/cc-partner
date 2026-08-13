@@ -27,7 +27,7 @@ function buildLedger(
   const { intent, ...rest } = overrides;
   return {
     clientOperationId: 'op-1',
-    kind: intent.kind,
+    kind: intent.kind === 'collectMerge' ? 'merge' : intent.kind,
     payloadHash: 'hash',
     state: 'running',
     outcome: null,
@@ -72,6 +72,18 @@ const removeIntent: MutationIntent = {
   worktreeId: 'wt-feat',
   path: '/tmp/wt-feat',
   branch: 'feature/x',
+};
+
+const collectMergeIntent: MutationIntent = {
+  kind: 'collectMerge',
+  projectId: 'proj',
+  worktreeId: 'wt-main',
+  homeBranch: 'main',
+  homeOid: 'home1',
+  sources: [
+    { name: 'agent/a', oid: 'aaa111' },
+    { name: 'agent/b', oid: 'bbb222' },
+  ],
 };
 
 describe('reconcileWorkbenchMutation', () => {
@@ -139,6 +151,24 @@ describe('reconcileWorkbenchMutation', () => {
     {
       name: 'merge: missing mainContainsSourceHead stays unknown',
       intent: mergeIntent,
+      authority: {
+        mainContainsSourceHead: false,
+        sourceWorktreePresent: false,
+      },
+      expected: 'unknown',
+    },
+    {
+      name: 'collectMerge: main contains all sources even if worktree still present',
+      intent: collectMergeIntent,
+      authority: {
+        mainContainsSourceHead: true,
+        sourceWorktreePresent: true,
+      },
+      expected: 'confirmedSucceeded',
+    },
+    {
+      name: 'collectMerge: missing mainContainsSourceHead stays unknown',
+      intent: collectMergeIntent,
       authority: {
         mainContainsSourceHead: false,
         sourceWorktreePresent: false,
@@ -259,6 +289,48 @@ describe('buildMergeRemoveAuthority', () => {
     });
     expect(buildMergeRemoveAuthority(removeIntent, [{ id: 'wt-feat' }])).toEqual({
       worktreeIdentityPresent: true,
+    });
+  });
+
+  test('collectMerge sets mainContainsSourceHead when every source oid is in hashes', () => {
+    expect(
+      buildMergeRemoveAuthority(
+        collectMergeIntent,
+        [{ id: 'wt-main' }, { id: 'wt-feat' }],
+        { mainCommitHashes: ['aaa111', 'bbb222', 'home1'] },
+      ),
+    ).toEqual({
+      mainContainsSourceHead: true,
+    });
+  });
+
+  test('collectMerge matches source oids by the same prefix rules as merge', () => {
+    expect(
+      buildMergeRemoveAuthority(
+        collectMergeIntent,
+        [{ id: 'wt-main' }],
+        { mainCommitHashes: ['aaa', 'bbb222def'] },
+      ),
+    ).toEqual({
+      mainContainsSourceHead: true,
+    });
+  });
+
+  test('collectMerge sets mainContainsSourceHead false when any source oid is missing', () => {
+    expect(
+      buildMergeRemoveAuthority(
+        collectMergeIntent,
+        [{ id: 'wt-main' }],
+        { mainCommitHashes: ['aaa111'] },
+      ),
+    ).toEqual({
+      mainContainsSourceHead: false,
+    });
+  });
+
+  test('collectMerge omits mainContainsSourceHead when hashes not provided', () => {
+    expect(buildMergeRemoveAuthority(collectMergeIntent, [{ id: 'wt-main' }])).toEqual({
+      mainContainsSourceHead: undefined,
     });
   });
 });

@@ -74,7 +74,7 @@ function createProject(): WorkbenchProject {
   };
 }
 
-function createWorktree(): WorkbenchWorktree {
+function createWorktree(overrides: Partial<WorkbenchWorktree> = {}): WorkbenchWorktree {
   return {
     id: 'wt-1',
     projectId: 'project-1',
@@ -83,6 +83,9 @@ function createWorktree(): WorkbenchWorktree {
     baseBranch: 'main',
     path: '/tmp/demo-feature',
     isMain: false,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
     status: {
       branch: 'feature/x',
       changed: 1,
@@ -94,6 +97,7 @@ function createWorktree(): WorkbenchWorktree {
     },
     createdAt: '2026-07-14T00:00:00Z',
     updatedAt: '2026-07-14T00:00:00Z',
+    ...overrides,
   };
 }
 
@@ -303,5 +307,91 @@ describe('MobileGitPanel mutation reconciliation', () => {
       expect(refreshWorktreesMock).toHaveBeenCalled();
     });
     expect(getMutationOperationMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('MobileGitPanel collect-merge', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   主工作区默认不能从 Git 面板合并；没有可收集分支时按钮必须保持禁用。
+   *
+   * Code Logic（这个测试做什么）:
+   *   渲染 isMain 且 canCollectMerge=false 的面板，断言合并按钮 disabled。
+   */
+  test('disables merge on main worktree without canCollectMerge', async () => {
+    const main = createWorktree({
+      id: 'wt-main',
+      name: 'main',
+      branch: 'main',
+      baseBranch: null,
+      isMain: true,
+      canCollectMerge: false,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: false,
+      },
+    });
+    listWorktreesMock.mockResolvedValue([main]);
+    renderPanel(
+      <MobileGitPanel
+        project={createProject()}
+        worktree={main}
+        onMergeWorktree={async () => true}
+        onRefreshWorktrees={refreshWorktreesMock}
+      />,
+    );
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    expect((screen.getByRole('button', { name: '合并' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   主工作区有可收集分支时，Git 面板合并必须可点，且不能因为 isMain 直接 return。
+   *
+   * Code Logic（这个测试做什么）:
+   *   渲染 canCollectMerge=true 的主工作区，点击合并并断言父级 onMergeWorktree 收到该 worktree。
+   */
+  test('enables merge on main worktree when canCollectMerge', async () => {
+    const main = createWorktree({
+      id: 'wt-main',
+      name: 'main',
+      branch: 'main',
+      baseBranch: null,
+      isMain: true,
+      canCollectMerge: true,
+      homeBranch: 'main',
+      collectibleBranches: ['agent/demo'],
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: false,
+      },
+    });
+    const onMergeWorktree = vi.fn(async () => true);
+    listWorktreesMock.mockResolvedValue([main]);
+    renderPanel(
+      <MobileGitPanel
+        project={createProject()}
+        worktree={main}
+        onMergeWorktree={onMergeWorktree}
+        onRefreshWorktrees={refreshWorktreesMock}
+      />,
+    );
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    const mergeButton = screen.getByRole('button', { name: '合并' }) as HTMLButtonElement;
+    expect(mergeButton.disabled).toBe(false);
+    fireEvent.click(mergeButton);
+    await waitFor(() => {
+      expect(onMergeWorktree).toHaveBeenCalledWith(main);
+    });
   });
 });
