@@ -16,7 +16,6 @@
     "openInNewWindow": "在新窗口打开",
     "fleetLink": "Fleet",
     "fleetLinkAria": "打开局域网 Agent Fleet 视图",
-    "agentExceptionBadge": "{{count}} 个 Agent 需要处理",
     "agentWorkingHint": "{{count}} 个 Agent 运行中",
     "deviceOffline": "设备离线",
     "deviceCached": "使用缓存摘要",

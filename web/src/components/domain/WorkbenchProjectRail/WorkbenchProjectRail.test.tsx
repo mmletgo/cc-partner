@@ -247,7 +247,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
     expect(screen.getByText('已在其他窗口')).toBeTruthy();
   });
 
-  test('does not badge normal working agents but badges needs-input', () => {
+  test('does not render agent exception badge even when fleet reports needs-input', () => {
     const project = buildProject({ id: 'p1', name: 'agent-repo' });
     fleetMockState.projectSummaries = {
       p1: {
@@ -304,7 +304,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
     );
 
     expect(screen.queryByLabelText(/需要处理/)).toBeNull();
-    // Fleet 详情入口已迁到 Settings?tab=fleet；Rail 仅保留异常 badge 数据源
+    // Fleet 详情入口已迁到 Settings?tab=fleet；异常数字 badge 已移除（右上角等待/已停止数字点覆盖该信号）
     expect(screen.queryByRole('link', { name: /Fleet|局域网 Agent Fleet/ })).toBeNull();
 
     fleetMockState.projectSummaries = {
@@ -351,7 +351,8 @@ describe('WorkbenchProjectRail discovery IA', () => {
         </MemoryRouter>
       </I18nextProvider>,
     );
-    expect(screen.getByLabelText('1 个 Agent 需要处理')).toBeTruthy();
+    // 异常数字 badge 已移除：即使 fleet 报 needsInput，卡片也不再渲染「N 个 Agent 需要处理」链接
+    expect(screen.queryByLabelText(/需要处理/)).toBeNull();
   });
 
   test('shows device filter when projects span multiple devices and filters list', () => {

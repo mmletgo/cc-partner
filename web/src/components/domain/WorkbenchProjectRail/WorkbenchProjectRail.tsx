@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog, HintStatusDot } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, WindowIcon, XIcon } from '@/lib/icons';
@@ -653,17 +653,6 @@ export function WorkbenchProjectRail() {
                 stoppedCount={hint.stoppedCount}
                 aria-label={t(hintAria.key, hintAria.values)}
               />
-              {exceptionCount > 0 ? (
-                <Link
-                  to={`/attention?projectId=${encodeURIComponent(project.id)}`}
-                  className={styles.exceptionBadge}
-                  aria-label={t('workbench:projectRail.agentExceptionBadge', {
-                    count: exceptionCount,
-                  })}
-                >
-                  {exceptionCount}
-                </Link>
-              ) : null}
               <Button
                 className={styles.projectOpenWindowButton}
                 variant="icon"

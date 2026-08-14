@@ -122,20 +122,6 @@
   background: var(--danger);
 }
 
-.exceptionBadge {
-  flex: 0 0 auto;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-full);
-  background: var(--danger-soft, var(--danger));
-  color: var(--accent-on);
-  font-size: var(--text-xs);
-  line-height: 16px;
-  text-align: center;
-  text-decoration: none;
-}
-
 .offlineText {
   color: var(--fg-muted-readable);
   font-size: var(--text-xs);
@@ -209,8 +195,7 @@
 }
 
 .projectList[data-dragging='true'] .projectSelectButton,
-.projectList[data-dragging='true'] .projectRemoveButton,
-.projectList[data-dragging='true'] .exceptionBadge {
+.projectList[data-dragging='true'] .projectRemoveButton {
   pointer-events: none;
 }
 

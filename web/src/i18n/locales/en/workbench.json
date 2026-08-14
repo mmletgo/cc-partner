@@ -16,7 +16,6 @@
     "openInNewWindow": "Open in new window",
     "fleetLink": "Fleet",
     "fleetLinkAria": "Open LAN Agent Fleet view",
-    "agentExceptionBadge": "{{count}} agents need attention",
     "agentWorkingHint": "{{count}} agents working",
     "deviceOffline": "Device offline",
     "deviceCached": "Showing cached summary",
