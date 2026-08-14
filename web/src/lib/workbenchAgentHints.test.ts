@@ -321,6 +321,59 @@ describe('workbenchAgentHints', () => {
     });
   });
 
+  test('同一 window 的新 Agent 从 version=1 开始时不会被旧 Agent 高版本挡住', () => {
+    let state = applyAgentHintSession(
+      emptyAgentHintState(),
+      session({
+        id: 'agent-old',
+        phase: 'disconnected',
+        version: 8,
+        isActive: false,
+        endedAt: '2026-08-13T00:01:00.000Z',
+      }),
+    );
+    state = applyAgentHintSession(
+      state,
+      session({
+        id: 'agent-new',
+        phase: 'needsInput',
+        version: 1,
+        isActive: true,
+      }),
+    );
+
+    expect(hintsForTerminal(state, 'term-1')).toEqual({
+      waitingCount: 1,
+      stoppedCount: 0,
+      completedCount: 0,
+      count: 1,
+      tone: 'wait',
+    });
+  });
+
+  test('同一 Agent 的相同或更旧 version 不会覆盖新状态', () => {
+    let state = applyAgentHintSession(
+      emptyAgentHintState(),
+      session({ id: 'agent-same', phase: 'needsInput', version: 8 }),
+    );
+    state = applyAgentHintSession(
+      state,
+      session({ id: 'agent-same', phase: 'idle', version: 8 }),
+    );
+    state = applyAgentHintSession(
+      state,
+      session({ id: 'agent-same', phase: 'disconnected', version: 7, isActive: false }),
+    );
+
+    expect(hintsForTerminal(state, 'term-1')).toEqual({
+      waitingCount: 1,
+      stoppedCount: 0,
+      completedCount: 0,
+      count: 1,
+      tone: 'wait',
+    });
+  });
+
   test('hintAriaKind 0/0 也分段为 both，方便始终读出数字', () => {
     expect(hintAriaKind(hintsForTerminal(emptyAgentHintState(), 'x'))).toBe('both');
     expect(

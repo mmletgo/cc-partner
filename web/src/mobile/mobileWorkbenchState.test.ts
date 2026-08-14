@@ -805,6 +805,65 @@ describe('mobileWorkbenchState', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
+   *   同一 terminal 启动新 Agent 时 version 会从 1 重置；旧 Agent 的高版本不能让移动端
+   *   永久停在已停止状态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   先写入 version=8 的旧 Agent，再写入不同 id、version=1 的 needsInput，断言新投影生效。
+   */
+  test('accepts a new agent with reset version on the same mobile terminal', () => {
+    const seeded = seedMobileSessionRuntimeFromSessions(
+      [createSession({ id: 's1', name: 'one', status: 'running' })],
+      emptyMobileSessionRuntimeState(),
+    );
+    const oldAgent = reduceMobileSessionRuntime(seeded, {
+      kind: 'agentRuntime',
+      agentSession: {
+        id: 'agent-old',
+        projectId: 'project-1',
+        worktreeId: null,
+        terminalSessionId: 's1',
+        orchestratorTaskId: null,
+        orchestratorAttempt: null,
+        providerId: 'claudeCodeVisible',
+        phase: 'disconnected',
+        version: 8,
+        startedAt: '2026-07-15T00:00:00.000Z',
+        lastActivityAt: '2026-07-15T00:01:00.000Z',
+        endedAt: '2026-07-15T00:01:00.000Z',
+        outcomeCode: 'provider_session_exited',
+        resumedFromAgentSessionId: null,
+        isActive: false,
+      },
+    });
+    const newAgent = reduceMobileSessionRuntime(oldAgent, {
+      kind: 'agentRuntime',
+      agentSession: {
+        id: 'agent-new',
+        projectId: 'project-1',
+        worktreeId: null,
+        terminalSessionId: 's1',
+        orchestratorTaskId: null,
+        orchestratorAttempt: null,
+        providerId: 'claudeCodeVisible',
+        phase: 'needsInput',
+        version: 1,
+        startedAt: '2026-07-15T00:02:00.000Z',
+        lastActivityAt: '2026-07-15T00:02:01.000Z',
+        endedAt: null,
+        outcomeCode: null,
+        resumedFromAgentSessionId: null,
+        isActive: true,
+      },
+    });
+
+    assertEqual(newAgent.sessions.s1?.agent?.id, 'agent-new');
+    assertEqual(newAgent.sessions.s1?.agent?.phase, 'needsInput');
+    assertEqual(newAgent.sessions.s1?.agent?.version, 1);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
    *   Mobile 收到标题更新后只应修改当前页面已知 session，并同步 activeSession；
    *   其他项目或尚未加载的未知 session 事件必须 fail-closed。
    *

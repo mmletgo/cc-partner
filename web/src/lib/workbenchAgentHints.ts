@@ -34,6 +34,7 @@ export interface AgentHintCounts {
 export interface AgentHintTerminalRow {
   projectId: string;
   worktreeId?: string;
+  lastAgentId?: string;
   lastVersion?: number;
   waitingAgentId?: string;
   completedAgentId?: string;
@@ -175,11 +176,16 @@ export function applyAgentHintSession(
   const nextByTerminal = new Map(state.byTerminal);
   const worktreeId = resolveWorktreeId(dto, options);
   const existing = nextByTerminal.get(terminalId);
-  if (existing?.lastVersion !== undefined && dto.version < existing.lastVersion) {
+  if (
+    existing?.lastAgentId === dto.id &&
+    existing.lastVersion !== undefined &&
+    dto.version <= existing.lastVersion
+  ) {
     return state;
   }
   const current = cloneRow(existing, dto.projectId);
   if (worktreeId) current.worktreeId = worktreeId;
+  current.lastAgentId = dto.id;
   current.lastVersion = dto.version;
 
   if (dto.phase === 'needsInput') {

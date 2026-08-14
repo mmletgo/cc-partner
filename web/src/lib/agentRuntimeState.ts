@@ -74,26 +74,36 @@ export function toAgentSessionProjection(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   从全量 Map 重建 terminal → 最新 agent 索引（同 terminal 取最高 version）。
+ *   从全量 Map 重建 terminal → 当前/最新 agent 索引；version 只在同一个 agent 内单调，
+ *   不能拿旧 Agent 的高 version 压住新 Agent 的 version=1。
  *
  * Code Logic（这个函数做什么）:
- *   遍历 byAgentId，按 terminalSessionId 保留 version 更大者；相等时 id 字典序更大者。
+ *   遍历 byAgentId：active 优先；active 相同时取 lastActivityAt 更新者；再以 id 稳定打破平局。
  */
 function rebuildLatestByTerminal(
   byAgentId: ReadonlyMap<string, AgentSessionProjection>,
 ): Map<string, string> {
   const latest = new Map<string, string>();
-  const versionByTerminal = new Map<string, number>();
   for (const agent of byAgentId.values()) {
     const terminalId = agent.terminalSessionId;
-    const prevVersion = versionByTerminal.get(terminalId);
     const prevId = latest.get(terminalId);
+    const previous = prevId ? byAgentId.get(prevId) : undefined;
+    const agentActivityAt = Date.parse(agent.lastActivityAt);
+    const previousActivityAt = previous ? Date.parse(previous.lastActivityAt) : Number.NaN;
+    const agentActivityOrder = Number.isFinite(agentActivityAt)
+      ? agentActivityAt
+      : Number.NEGATIVE_INFINITY;
+    const previousActivityOrder = Number.isFinite(previousActivityAt)
+      ? previousActivityAt
+      : Number.NEGATIVE_INFINITY;
     if (
-      prevVersion === undefined ||
-      agent.version > prevVersion ||
-      (agent.version === prevVersion && prevId !== undefined && agent.id > prevId)
+      !previous ||
+      (agent.isActive && !previous.isActive) ||
+      (agent.isActive === previous.isActive && agentActivityOrder > previousActivityOrder) ||
+      (agent.isActive === previous.isActive &&
+        agentActivityOrder === previousActivityOrder &&
+        agent.id > previous.id)
     ) {
-      versionByTerminal.set(terminalId, agent.version);
       latest.set(terminalId, agent.id);
     }
   }

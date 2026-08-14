@@ -757,10 +757,11 @@ export function applyMobileTerminalStatusEvent(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   agentRuntime 事件更新已知 session 的 Agent phase；version 乱序拒绝。
+ *   agentRuntime 事件更新已知 session 的 Agent phase；同一 Agent 内的 version 乱序拒绝。
  *
  * Code Logic（这个函数做什么）:
- *   映射 DTO→projection；仅当 version 更大或无 agent 时写入。
+ *   映射 DTO→projection；同 id 时仅接受更大 version，不同 id 代表 terminal 上的新 Agent，
+ *   version 会从 1 重新开始，必须替换旧投影。
  */
 export function applyMobileAgentRuntimeEvent(
   state: MobileSessionRuntimeState,
@@ -771,7 +772,11 @@ export function applyMobileAgentRuntimeEvent(
   const existing = state.sessions[sessionId];
   if (!existing) return state;
   const incoming = toAgentSessionProjection(dto, freshness);
-  if (existing.agent && existing.agent.version >= incoming.version) {
+  if (
+    existing.agent &&
+    existing.agent.id === incoming.id &&
+    existing.agent.version >= incoming.version
+  ) {
     return state;
   }
   return {

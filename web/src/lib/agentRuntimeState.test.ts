@@ -153,18 +153,60 @@ describe('agentRuntimeState reducer', () => {
     expect(latestAgentForTerminal(next, 't')?.phase).toBe('working');
   });
 
-  test('latestAgentForTerminal picks highest version across agents on same terminal', () => {
+  test('latestAgentForTerminal picks the new active agent even when the stopped agent has a higher version', () => {
     let state = emptyAgentRuntimeState();
     state = applyAgentRuntimeEvent(
       state,
-      event({ id: 'a1', terminalSessionId: 't', version: 1, phase: 'working' }),
+      event({
+        id: 'a1',
+        terminalSessionId: 't',
+        version: 8,
+        phase: 'disconnected',
+        isActive: false,
+        lastActivityAt: '2026-08-13T00:01:00.000Z',
+      }),
     );
     state = applyAgentRuntimeEvent(
       state,
-      event({ id: 'a2', terminalSessionId: 't', version: 4, phase: 'needsInput' }),
+      event({
+        id: 'a2',
+        terminalSessionId: 't',
+        version: 1,
+        phase: 'needsInput',
+        isActive: true,
+        lastActivityAt: '2026-08-13T00:02:00.000Z',
+      }),
     );
     expect(latestAgentForTerminal(state, 't')?.id).toBe('a2');
     expect(latestAgentForTerminal(state, 'missing')).toBeNull();
+  });
+
+  test('latestAgentForTerminal compares activity instants rather than RFC3339 text across stopped agents', () => {
+    let state = emptyAgentRuntimeState();
+    state = applyAgentRuntimeEvent(
+      state,
+      event({
+        id: 'stopped-old',
+        terminalSessionId: 't',
+        version: 9,
+        phase: 'disconnected',
+        isActive: false,
+        lastActivityAt: '2026-08-13T10:30:00+08:00',
+      }),
+    );
+    state = applyAgentRuntimeEvent(
+      state,
+      event({
+        id: 'stopped-new',
+        terminalSessionId: 't',
+        version: 1,
+        phase: 'disconnected',
+        isActive: false,
+        lastActivityAt: '2026-08-13T03:00:00Z',
+      }),
+    );
+
+    expect(latestAgentForTerminal(state, 't')?.id).toBe('stopped-new');
   });
 
   test('toAgentSessionProjection maps taskId and omits empty optionals', () => {

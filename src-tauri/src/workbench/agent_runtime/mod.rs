@@ -7,6 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     导出领域模型、OSC 解码与 mutation ingress；reducer/snapshot 由后续任务叠加。
 
+mod claude_status;
 pub mod models;
 pub mod opencode_bridge;
 pub mod osc;
@@ -32,7 +33,9 @@ pub use snapshot::{
 };
 
 use crate::state::AppState;
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -159,6 +162,114 @@ pub fn set_agent_mutation_test_hook(hook: Option<Box<dyn Fn(AgentRuntimeMutation
     *AGENT_MUTATION_TEST_HOOK.lock().expect("hook lock") = hook;
 }
 
+/// 在 owner 上应用并投影一条 Agent runtime mutation。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OSC、Hook 与 provider 结构化状态对账必须经过同一 durable/emit/Ledger/completion 路径，
+///     否则某一来源会只改数据库却不刷新顶部计数，或漏掉终态副作用。
+///
+/// Code Logic（这个函数做什么）:
+///     reducer.apply 后统一回填 native pane 绑定、发 runtime 事件、写终态 Ledger、更新
+///     Orchestrator activity，并在编排 Agent Completed 时推进 Verifying。
+async fn apply_owner_agent_mutation(
+    state: &crate::state::AppState,
+    reducer: &AgentRuntimeReducer,
+    mutation: AgentRuntimeMutation,
+) {
+    let occurred_at = mutation.occurred_at.clone();
+    match reducer.apply(mutation).await {
+        Ok(AgentReduceOutcome::Applied {
+            previous_phase,
+            row,
+        }) => {
+            tracing::debug!(
+                agent_id = %row.id,
+                phase = row.phase.as_str(),
+                version = row.version,
+                "agent runtime mutation applied"
+            );
+            // native_session_id 回填时挂上 title-pane 绑定，供 Codex/Claude 索引按 native 命中 owner pane。
+            if let Some(native) = row.native_session_id.as_deref() {
+                let _ = state
+                    .workbench_sessions
+                    .bind_native_title_pane(&row.terminal_session_id, native);
+                // 若启动时未 bind terminal（极少），用当前 active 再 seed agent/terminal 映射。
+                if state
+                    .workbench_sessions
+                    .agent_title_pane_for(&row.terminal_session_id, Some(native))
+                    .is_none()
+                {
+                    crate::workbench::auto_title::bind_agent_title_pane_for_state(
+                        state,
+                        &row.terminal_session_id,
+                        Some(row.id.as_str()),
+                        Some(native),
+                    );
+                }
+            }
+            emit_agent_runtime_changed(state, &row, Some(previous_phase));
+            // A9：首次终态旁路写 Ledger；失败隔离，不阻断 runtime 完成路径。
+            if row.phase.is_terminal() {
+                let ledger_svc = state.agent_ledger_service.clone();
+                let row_for_ledger = row.clone();
+                let prev = previous_phase;
+                tokio::spawn(async move {
+                    crate::workbench::agent_ledger::service::on_agent_runtime_terminal(
+                        &ledger_svc,
+                        &row_for_ledger,
+                        Some(prev),
+                    )
+                    .await;
+                });
+            }
+            // H1：OSC/Hook/provider 状态路径 dual-write task.last_activity_at，供 stall watchdog 使用。
+            if let (Some(task_id), Some(attempt)) = (
+                row.orchestrator_task_id.as_deref(),
+                row.orchestrator_attempt,
+            ) {
+                let activity_at = if row.last_activity_at.trim().is_empty() {
+                    occurred_at.as_str()
+                } else {
+                    row.last_activity_at.as_str()
+                };
+                if let Err(err) = state
+                    .orchestrator_repo
+                    .touch_task_last_activity(
+                        task_id,
+                        attempt as i64,
+                        &row.terminal_session_id,
+                        activity_at,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        task_id = %task_id,
+                        "touch_task_last_activity after Agent runtime apply failed: {err}"
+                    );
+                }
+            }
+            // HookEvent completion：runtime Completed 时按 attempt 冻结合同推进 Verifying。
+            if row.phase == AgentSessionPhase::Completed && row.orchestrator_task_id.is_some() {
+                if let Err(err) =
+                    crate::orchestrator::completion::maybe_complete_from_agent_runtime_completed(
+                        state, &row,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        agent_id = %row.id,
+                        "HookEvent completion from agent runtime failed: {err}"
+                    );
+                }
+            }
+        }
+        Ok(AgentReduceOutcome::Ignored(reason)) => {
+            tracing::debug!(reason, "agent runtime mutation ignored");
+        }
+        Err(e) => tracing::warn!("agent runtime mutation apply error: {e}"),
+    }
+}
+
 /// 启动 owner Agent runtime worker：安装 ingress、对账 active、串行消费 mutation。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -166,7 +277,8 @@ pub fn set_agent_mutation_test_hook(hook: Option<Box<dyn Fn(AgentRuntimeMutation
 ///     并把 OSC 入站 mutation 串行写入 SQLite。
 ///
 /// Code Logic（这个函数做什么）:
-///     install channel → reconcile（registry + running DB sessions）→ loop recv apply。
+///     install channel → reconcile（registry + running DB sessions）→ select 消费 mutation 与
+///     Claude 结构化状态轮询；所有 mutation 交给统一 apply 路径。
 pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
     let Some(mut rx) = install_agent_mutation_ingress() else {
         tracing::debug!("agent mutation ingress already installed; skip worker");
@@ -205,114 +317,41 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
         }
         Err(e) => tracing::warn!("agent runtime collect alive terminals failed: {e}"),
     }
+    let mut claude_status_tick = tokio::time::interval(Duration::from_secs(1));
+    claude_status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut unavailable_claude_status_counts = HashMap::new();
     loop {
-        // 先冲刷 overflow（channel 曾满时保留的终态），再阻塞读 channel
-        let mutation = if let Some(m) = take_terminal_mutation_overflow() {
-            m
-        } else {
-            match rx.recv().await {
-                Some(m) => m,
-                None => {
-                    // channel 关闭后仍冲刷一次 overflow
-                    if let Some(m) = take_terminal_mutation_overflow() {
-                        m
-                    } else {
-                        break;
+        // 先冲刷 overflow（channel 曾满时保留的终态），避免轮询让高优先级事件饥饿。
+        if let Some(mutation) = take_terminal_mutation_overflow() {
+            apply_owner_agent_mutation(&state, &reducer, mutation).await;
+            continue;
+        }
+        tokio::select! {
+            biased;
+            mutation = rx.recv() => {
+                let Some(mutation) = mutation else {
+                    if let Some(overflow) = take_terminal_mutation_overflow() {
+                        apply_owner_agent_mutation(&state, &reducer, overflow).await;
+                    }
+                    break;
+                };
+                apply_owner_agent_mutation(&state, &reducer, mutation).await;
+            }
+            _ = claude_status_tick.tick() => {
+                match claude_status::collect_claude_status_mutations(
+                    &reducer,
+                    &mut unavailable_claude_status_counts,
+                ).await {
+                    Ok(mutations) => {
+                        for mutation in mutations {
+                            apply_owner_agent_mutation(&state, &reducer, mutation).await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!("Claude session 状态对账失败: {error}");
                     }
                 }
             }
-        };
-        let occurred_at = mutation.occurred_at.clone();
-        match reducer.apply(mutation).await {
-            Ok(AgentReduceOutcome::Applied {
-                previous_phase,
-                row,
-            }) => {
-                tracing::debug!(
-                    agent_id = %row.id,
-                    phase = row.phase.as_str(),
-                    version = row.version,
-                    "agent runtime mutation applied"
-                );
-                // native_session_id 回填时挂上 title-pane 绑定，供 Codex/Claude 索引按 native 命中 owner pane。
-                if let Some(native) = row.native_session_id.as_deref() {
-                    let _ = state
-                        .workbench_sessions
-                        .bind_native_title_pane(&row.terminal_session_id, native);
-                    // 若启动时未 bind terminal（极少），用当前 active 再 seed agent/terminal 映射。
-                    if state
-                        .workbench_sessions
-                        .agent_title_pane_for(&row.terminal_session_id, Some(native))
-                        .is_none()
-                    {
-                        crate::workbench::auto_title::bind_agent_title_pane_for_state(
-                            &state,
-                            &row.terminal_session_id,
-                            Some(row.id.as_str()),
-                            Some(native),
-                        );
-                    }
-                }
-                emit_agent_runtime_changed(&state, &row, Some(previous_phase));
-                // A9：首次终态旁路写 Ledger；失败隔离，不阻断 runtime 完成路径。
-                if row.phase.is_terminal() {
-                    let ledger_svc = state.agent_ledger_service.clone();
-                    let row_for_ledger = row.clone();
-                    let prev = previous_phase;
-                    tokio::spawn(async move {
-                        crate::workbench::agent_ledger::service::on_agent_runtime_terminal(
-                            &ledger_svc,
-                            &row_for_ledger,
-                            Some(prev),
-                        )
-                        .await;
-                    });
-                }
-                // H1：OSC 生产路径 dual-write task.last_activity_at，供 stall watchdog 使用。
-                if let (Some(task_id), Some(attempt)) = (
-                    row.orchestrator_task_id.as_deref(),
-                    row.orchestrator_attempt,
-                ) {
-                    let activity_at = if row.last_activity_at.trim().is_empty() {
-                        occurred_at.as_str()
-                    } else {
-                        row.last_activity_at.as_str()
-                    };
-                    if let Err(err) = state
-                        .orchestrator_repo
-                        .touch_task_last_activity(
-                            task_id,
-                            attempt as i64,
-                            &row.terminal_session_id,
-                            activity_at,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            task_id = %task_id,
-                            "touch_task_last_activity after OSC apply failed: {err}"
-                        );
-                    }
-                }
-                // HookEvent completion：runtime Completed 时按 attempt 冻结合同推进 Verifying。
-                if row.phase == AgentSessionPhase::Completed && row.orchestrator_task_id.is_some() {
-                    if let Err(err) = crate::orchestrator::completion::maybe_complete_from_agent_runtime_completed(
-                        &state,
-                        &row,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            agent_id = %row.id,
-                            "HookEvent completion from agent runtime failed: {err}"
-                        );
-                    }
-                }
-            }
-            Ok(AgentReduceOutcome::Ignored(reason)) => {
-                tracing::debug!(reason, "agent runtime mutation ignored");
-            }
-            Err(e) => tracing::warn!("agent runtime mutation apply error: {e}"),
         }
     }
 }

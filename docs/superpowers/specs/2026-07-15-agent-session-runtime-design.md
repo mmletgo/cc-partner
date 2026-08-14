@@ -99,7 +99,7 @@ owner 创建/attach terminal 时，把下列非敏感 ID 注入 pane/shell 环�
 
 tmux 与 raw PTY 必须得到一致的上下文；不得注入 control token、device token 或 provider credential。
 
-普通 Workbench 用户手开 Claude/Codex/OpenCode 时，owner 在 auto-title 成功绑定（含同名/手改 settled）后经 `ensure_interactive_active` 保证一条 **Idle** active 行，供 snapshot/hint 投影。不得覆盖 Orchestrator terminal；无 title/Hook 不得伪造 `Working`。
+普通 Workbench 用户手开 Claude/Codex/OpenCode 时，owner 在 auto-title 成功绑定（含同名/手改 settled）后经 `ensure_interactive_active` 保证一条 **Idle** active 行，供 snapshot/hint 投影。不得覆盖 Orchestrator terminal；无 title/Hook/结构化 provider 状态不得伪造 `Working`。对普通 Claude Code 交互终端，owner 可读取其 metadata-only `sessions/<pid>.json`（只接受 `kind=interactive`、数字文件名、native session 精确匹配）持续对账：存活 `busy`→`Working`，存活 `idle`→`NeedsInput`，连续两轮完整扫描确认缺失或进程退出→`Disconnected`；目录不可读、半写 JSON、未知 status 均保持原状态。该轮询有文件数、单文件与总字节预算，不读取 transcript/terminal bytes，且不得覆盖 Orchestrator row。
 
 ### 6.2 OSC 合同
 
@@ -175,7 +175,7 @@ pub struct AgentRuntimeSnapshot {
 
 ## 9. 失败、兼容与回滚
 
-- 未安装/未启用 Hook 时 session 可保持 `Launching/Idle`；不得伪造 `Working`。
+- 未安装/未启用 Hook 且 provider 无可靠结构化状态时 session 可保持 `Launching/Idle`；不得伪造 `Working`。普通 Claude metadata 对账只处理精确匹配的 interactive session，扫描不完整时 fail-closed 保持原 phase。
 - generic terminal 没有结构化 completion 时只允许显式 sentinel 或人工结束。
 - 旧 peer 缺少 capability 显示 `unsupported`，不回退为普通 Claude session。
 - 降级前需停止或结束非 Claude active Agent；否则旧版本可能错误恢复为 Claude。
