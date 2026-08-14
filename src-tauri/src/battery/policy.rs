@@ -7,9 +7,13 @@
 //!     给定配置与当日已用次数，计算实际 credit/debit 毫秒。
 
 use crate::config::{BatteryConfig, BatteryCreditSource};
+use chrono::{Local, TimeZone};
 
 /// 一分钟的毫秒数。
 pub const MS_PER_MINUTE: i64 = 60_000;
+
+/// 每日余额重置的本地时刻（早晨 8 点）。
+pub const DAILY_RESET_HOUR: u32 = 8;
 
 /// 计算一次入账应增加的毫秒。
 ///
@@ -52,6 +56,41 @@ pub fn debit_delta_ms(
         return 0;
     }
     elapsed_ms.min(remaining_ms)
+}
+
+/// 计算时区 `tz` 下、`now_ts` 之前最近一个已过去的每日重置时刻。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每日 8 点重置需要「当前属于哪个重置周期」的权威边界；应用可能错过 8 点，
+///     判定必须对任意时刻成立而不是只在整点触发。
+///
+/// Code Logic（这个函数做什么）:
+///     构造本地日期 `DAILY_RESET_HOUR:00`；`now >= 该时刻` 取之，否则取前一日；
+///     本地化失败（极端 DST）返回 None，调用方按未到期处理。
+pub fn daily_reset_boundary_in<Tz: TimeZone>(now_ts: i64, tz: &Tz) -> Option<i64> {
+    let local = tz.timestamp_opt(now_ts, 0).single()?;
+    let today = local.date_naive().and_hms_opt(DAILY_RESET_HOUR, 0, 0)?;
+    let today_ts = tz.from_local_datetime(&today).single()?.timestamp();
+    if now_ts >= today_ts {
+        return Some(today_ts);
+    }
+    let yesterday = today - chrono::Duration::days(1);
+    tz.from_local_datetime(&yesterday)
+        .single()
+        .map(|dt| dt.timestamp())
+}
+
+/// 判定每日重置是否到期；到期时返回应推进到的边界时刻。
+///
+/// Business Logic（为什么需要这个函数）:
+///     重置幂等取决于「上次已重置到哪个边界」；`last_daily_reset_at` 落后于当前
+///     周期边界即应重置一次（含从未重置过的 0），同周期内重复判定不得再触发。
+///
+/// Code Logic（这个函数做什么）:
+///     `last_daily_reset_at < boundary(now)` → `Some(boundary)`；边界解析失败 → None（本轮跳过）。
+pub fn evaluate_daily_reset(last_daily_reset_at: i64, now_ts: i64) -> Option<i64> {
+    let boundary = daily_reset_boundary_in(now_ts, &Local)?;
+    (last_daily_reset_at < boundary).then_some(boundary)
 }
 
 #[cfg(test)]
@@ -136,5 +175,73 @@ mod tests {
     fn two_windows_still_use_one_elapsed() {
         // 调用方把 any_consuming_window=true 一次，不得把 elapsed 乘 2。
         assert_eq!(debit_delta_ms(true, true, 60_000, 1_000), 1_000);
+    }
+
+    /// 用固定 +08:00 偏移做确定性每日重置边界断言，避免测试依赖宿主时区。
+    mod daily_reset {
+        use super::super::*;
+        use chrono::FixedOffset;
+
+        fn cst() -> FixedOffset {
+            FixedOffset::east_opt(8 * 3600).unwrap()
+        }
+
+        fn at(hour: u32, min: u32, sec: u32) -> i64 {
+            cst()
+                .with_ymd_and_hms(2026, 8, 14, hour, min, sec)
+                .unwrap()
+                .timestamp()
+        }
+
+        #[test]
+        fn boundary_at_exactly_eight_is_today() {
+            let boundary = daily_reset_boundary_in(at(8, 0, 0), &cst()).unwrap();
+            assert_eq!(boundary, at(8, 0, 0));
+        }
+
+        #[test]
+        fn boundary_after_eight_is_today() {
+            let boundary = daily_reset_boundary_in(at(15, 30, 0), &cst()).unwrap();
+            assert_eq!(boundary, at(8, 0, 0));
+        }
+
+        #[test]
+        fn boundary_before_eight_is_yesterday() {
+            let boundary = daily_reset_boundary_in(at(0, 30, 0), &cst()).unwrap();
+            let yesterday_eight = cst()
+                .with_ymd_and_hms(2026, 8, 13, 8, 0, 0)
+                .unwrap()
+                .timestamp();
+            assert_eq!(boundary, yesterday_eight);
+        }
+
+        #[test]
+        fn evaluate_due_when_last_reset_behind_boundary() {
+            let boundary = daily_reset_boundary_in(at(15, 0, 0), &cst()).unwrap();
+            assert_eq!(evaluate_daily_reset(0, at(15, 0, 0)), Some(boundary));
+            assert_eq!(
+                evaluate_daily_reset(boundary - 1, at(15, 0, 0)),
+                Some(boundary)
+            );
+        }
+
+        #[test]
+        fn evaluate_not_due_within_same_period() {
+            let boundary = daily_reset_boundary_in(at(15, 0, 0), &cst()).unwrap();
+            // 当天 8 点后已重置过 → 同周期内不再触发。
+            assert_eq!(evaluate_daily_reset(boundary, at(15, 0, 0)), None);
+            assert_eq!(evaluate_daily_reset(boundary + 60, at(15, 1, 0)), None);
+        }
+
+        #[test]
+        fn evaluate_before_eight_uses_yesterday_boundary() {
+            let yesterday_eight = cst()
+                .with_ymd_and_hms(2026, 8, 13, 8, 0, 0)
+                .unwrap()
+                .timestamp();
+            // 昨天已重置 → 今晨 0:30 未到期；从未重置（0）→ 应补昨日边界。
+            assert_eq!(evaluate_daily_reset(yesterday_eight, at(0, 30, 0)), None);
+            assert_eq!(evaluate_daily_reset(0, at(0, 30, 0)), Some(yesterday_eight));
+        }
     }
 }

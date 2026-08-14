@@ -43,6 +43,7 @@ const batteryLedgerKindDecoder: Decoder<BatteryLedgerKind> = enumDecoder('Batter
   'credit_health',
   'credit_wordgame',
   'credit_welcome',
+  'daily_reset',
   'debit_tick',
   'mode_change',
 ] as const);

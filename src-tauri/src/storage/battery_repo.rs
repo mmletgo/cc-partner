@@ -16,7 +16,8 @@ const STATE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS battery_state (
     mode TEXT NOT NULL,
     remaining_ms INTEGER NOT NULL,
     welcome_granted INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    last_daily_reset_at INTEGER NOT NULL DEFAULT 0
 )";
 
 const LEDGER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS battery_ledger (
@@ -43,6 +44,8 @@ pub struct BatteryStateRow {
     pub welcome_granted: bool,
     /// 最近更新 unix 秒。
     pub updated_at: i64,
+    /// 已重置到的每日 8 点边界（unix 秒）；0 = 从未重置。
+    pub last_daily_reset_at: i64,
 }
 
 /// 流水行。
@@ -84,18 +87,33 @@ impl BatteryRepo {
     /// 幂等建表。
     ///
     /// Business Logic: 旧库无充电表时启动必须可升级，禁止 sqlx::migrate!。
-    /// Code Logic: CREATE TABLE IF NOT EXISTS + 部分唯一索引。
+    /// Code Logic: CREATE TABLE IF NOT EXISTS + 部分唯一索引；旧表缺 `last_daily_reset_at` 列时 PRAGMA 检查后 ALTER 补列。
     pub async fn ensure_schema(pool: &SqlitePool) -> Result<(), AppError> {
         sqlx::query(STATE_SCHEMA).execute(pool).await?;
         sqlx::query(LEDGER_SCHEMA).execute(pool).await?;
         sqlx::query(LEDGER_SOURCE_INDEX).execute(pool).await?;
+        let columns = sqlx::query("PRAGMA table_info(battery_state)")
+            .fetch_all(pool)
+            .await?;
+        let has_reset_at = columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .map(|name| name == "last_daily_reset_at")
+                .unwrap_or(false)
+        });
+        if !has_reset_at {
+            sqlx::query(
+                "ALTER TABLE battery_state ADD COLUMN last_daily_reset_at INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await?;
+        }
         Ok(())
     }
 
     /// 读取单行状态；尚未初始化返回 None。
     pub async fn get_state(&self) -> Result<Option<BatteryStateRow>, AppError> {
         let row = sqlx::query(
-            "SELECT mode, remaining_ms, welcome_granted, updated_at FROM battery_state WHERE id = 1",
+            "SELECT mode, remaining_ms, welcome_granted, updated_at, last_daily_reset_at FROM battery_state WHERE id = 1",
         )
         .fetch_optional(&self.db)
         .await?;
@@ -104,6 +122,7 @@ impl BatteryRepo {
             remaining_ms: r.get("remaining_ms"),
             welcome_granted: r.get::<i64, _>("welcome_granted") != 0,
             updated_at: r.get("updated_at"),
+            last_daily_reset_at: r.get("last_daily_reset_at"),
         }))
     }
 
@@ -113,8 +132,8 @@ impl BatteryRepo {
     pub async fn ensure_default_state(&self, now: i64) -> Result<BatteryStateRow, AppError> {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
-                "INSERT OR IGNORE INTO battery_state (id, mode, remaining_ms, welcome_granted, updated_at)
-                 VALUES (1, 'unlimited', 0, 0, ?)",
+                "INSERT OR IGNORE INTO battery_state (id, mode, remaining_ms, welcome_granted, updated_at, last_daily_reset_at)
+                 VALUES (1, 'unlimited', 0, 0, ?, 0)",
             )
             .bind(now)
             .execute(&self.db)
@@ -131,18 +150,20 @@ impl BatteryRepo {
     pub async fn upsert_state(&self, state: &BatteryStateRow) -> Result<(), AppError> {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
-                "INSERT INTO battery_state (id, mode, remaining_ms, welcome_granted, updated_at)
-                 VALUES (1, ?, ?, ?, ?)
+                "INSERT INTO battery_state (id, mode, remaining_ms, welcome_granted, updated_at, last_daily_reset_at)
+                 VALUES (1, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                     mode = excluded.mode,
                     remaining_ms = excluded.remaining_ms,
                     welcome_granted = excluded.welcome_granted,
-                    updated_at = excluded.updated_at",
+                    updated_at = excluded.updated_at,
+                    last_daily_reset_at = excluded.last_daily_reset_at",
             )
             .bind(&state.mode)
             .bind(state.remaining_ms)
             .bind(i64::from(state.welcome_granted))
             .bind(state.updated_at)
+            .bind(state.last_daily_reset_at)
             .execute(&self.db)
             .await?;
             Ok(())
@@ -195,13 +216,13 @@ impl BatteryRepo {
         Ok(row.get("n"))
     }
 
-    /// 当日已充 / 已用毫秒（debit 取绝对值）。
+    /// 当日已充 / 已用毫秒（debit 取绝对值；`daily_reset` 不计入——今日已充只统计主动赚取）。
     pub async fn today_totals(&self, day_start: i64, day_end: i64) -> Result<(i64, i64), AppError> {
         let row = sqlx::query(
             "SELECT
                 COALESCE(SUM(CASE WHEN delta_ms > 0 THEN delta_ms ELSE 0 END), 0) AS earned,
                 COALESCE(SUM(CASE WHEN delta_ms < 0 THEN -delta_ms ELSE 0 END), 0) AS spent
-             FROM battery_ledger WHERE ts >= ? AND ts < ?",
+             FROM battery_ledger WHERE ts >= ? AND ts < ? AND kind <> 'daily_reset'",
         )
         .bind(day_start)
         .bind(day_end)
@@ -260,8 +281,79 @@ mod tests {
         assert_eq!(state.mode, "unlimited");
         assert_eq!(state.remaining_ms, 0);
         assert!(!state.welcome_granted);
+        assert_eq!(state.last_daily_reset_at, 0);
         let again = repo.ensure_default_state(1_700_000_001).await.unwrap();
         assert_eq!(again.updated_at, 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn ensure_schema_adds_last_daily_reset_at_to_legacy_table() {
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        // 先建旧版无 last_daily_reset_at 列的表，模拟升级前旧库。
+        sqlx::query(
+            "CREATE TABLE battery_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                mode TEXT NOT NULL,
+                remaining_ms INTEGER NOT NULL,
+                welcome_granted INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO battery_state (id, mode, remaining_ms, welcome_granted, updated_at)
+             VALUES (1, 'charging', 60000, 1, 100)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        BatteryRepo::ensure_schema(&pool).await.unwrap();
+
+        let repo = BatteryRepo::new(pool);
+        let state = repo.get_state().await.unwrap().unwrap();
+        assert_eq!(state.mode, "charging");
+        assert_eq!(state.remaining_ms, 60_000);
+        assert_eq!(state.last_daily_reset_at, 0);
+    }
+
+    #[tokio::test]
+    async fn today_totals_excludes_daily_reset() {
+        let repo = repo().await;
+        for row in [
+            BatteryLedgerRow {
+                id: 0,
+                ts: 100,
+                kind: "daily_reset".into(),
+                source_id: Some("daily_reset:100".into()),
+                delta_ms: 14_400_000,
+                balance_after_ms: 14_400_000,
+                note: None,
+            },
+            BatteryLedgerRow {
+                id: 0,
+                ts: 101,
+                kind: "credit_health".into(),
+                source_id: Some("habit:1".into()),
+                delta_ms: 480_000,
+                balance_after_ms: 14_880_000,
+                note: None,
+            },
+        ] {
+            repo.insert_ledger(&row).await.unwrap();
+        }
+        let (earned, spent) = repo.today_totals(0, 200).await.unwrap();
+        assert_eq!(earned, 480_000);
+        assert_eq!(spent, 0);
     }
 
     #[tokio::test]

@@ -59,6 +59,7 @@
       "credit_health": "Health credit",
       "credit_wordgame": "Flashcard credit",
       "credit_welcome": "Welcome grant",
+      "daily_reset": "Daily reset",
       "debit_tick": "Workbench drain",
       "mode_change": "Mode change"
     }

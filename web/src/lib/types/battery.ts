@@ -25,6 +25,7 @@ export type BatteryLedgerKind =
   | 'credit_health'
   | 'credit_wordgame'
   | 'credit_welcome'
+  | 'daily_reset'
   | 'debit_tick'
   | 'mode_change';
 

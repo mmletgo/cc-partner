@@ -6,7 +6,7 @@
 //! Code Logic（这个模块做什么）:
 //!     组合 BatteryRepo + BatteryConfig + 进程内消耗窗集合。
 
-use super::policy::{credit_delta_ms, debit_delta_ms, MS_PER_MINUTE};
+use super::policy::{credit_delta_ms, debit_delta_ms, evaluate_daily_reset, MS_PER_MINUTE};
 use crate::config::{BatteryConfig, BatteryCreditSource};
 use crate::error::AppError;
 use crate::storage::battery_repo::{BatteryLedgerRow, BatteryRepo, BatteryStateRow};
@@ -125,6 +125,47 @@ pub fn wordgame_source_id(
     format!("wordgame:{lemma}:{question_type}:{today}:{correct_today}")
 }
 
+/// 每日 8 点惰性重置：余额置为当前满值，与当前模式无关。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户每天早晨应拿到满额工作余额，用不完也不累积；应用可能错过 8 点，
+///     重置必须在其后任意入口调用时补账，且同一周期内不得重复触发。
+///
+/// Code Logic（这个函数做什么）:
+///     `evaluate_daily_reset` 判定到期后把 `remaining_ms` 置为 `max_balance_minutes`
+///     满值、推进 `last_daily_reset_at` 到当前周期边界并 upsert；余额实际变化时记
+///     `daily_reset` 流水（source_id=`daily_reset:<boundary>` 幂等，并发双触发只落一条）。
+async fn apply_daily_reset_if_due(
+    repo: &BatteryRepo,
+    config: &BatteryConfig,
+    mut state: BatteryStateRow,
+    now: i64,
+) -> Result<BatteryStateRow, AppError> {
+    let Some(boundary) = evaluate_daily_reset(state.last_daily_reset_at, now) else {
+        return Ok(state);
+    };
+    let max_ms = config.max_balance_minutes.saturating_mul(MS_PER_MINUTE);
+    let delta = max_ms - state.remaining_ms;
+    state.remaining_ms = max_ms;
+    state.last_daily_reset_at = boundary;
+    state.updated_at = now;
+    repo.upsert_state(&state).await?;
+    if delta != 0 {
+        let _ = repo
+            .insert_ledger(&BatteryLedgerRow {
+                id: 0,
+                ts: now,
+                kind: "daily_reset".into(),
+                source_id: Some(format!("daily_reset:{boundary}")),
+                delta_ms: delta,
+                balance_after_ms: max_ms,
+                note: None,
+            })
+            .await?;
+    }
+    Ok(state)
+}
+
 async fn snapshot_from(
     repo: &BatteryRepo,
     config: &BatteryConfig,
@@ -155,6 +196,7 @@ pub async fn get_snapshot(
     now: i64,
 ) -> Result<BatterySnapshotDto, AppError> {
     let state = repo.ensure_default_state(now).await?;
+    let state = apply_daily_reset_if_due(repo, config, state, now).await?;
     let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
     snapshot_from(repo, config, &state, now, consuming, None, None).await
 }
@@ -171,7 +213,8 @@ pub async fn set_mode(
             "battery.mode 只能是 charging 或 unlimited",
         ));
     }
-    let mut state = repo.ensure_default_state(now).await?;
+    let state = repo.ensure_default_state(now).await?;
+    let mut state = apply_daily_reset_if_due(repo, config, state, now).await?;
     if state.mode == mode {
         let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
         return snapshot_from(repo, config, &state, now, consuming, None, None).await;
@@ -242,7 +285,8 @@ pub async fn credit(
     source_id: &str,
     now: i64,
 ) -> Result<BatterySnapshotDto, AppError> {
-    let mut state = repo.ensure_default_state(now).await?;
+    let state = repo.ensure_default_state(now).await?;
+    let mut state = apply_daily_reset_if_due(repo, config, state, now).await?;
     let (day_start, day_end) = local_day_bounds(now);
     let today_count = repo
         .count_credits_today(
@@ -301,7 +345,8 @@ pub async fn report_focus(
     now_ms: i64,
 ) -> Result<BatterySnapshotDto, AppError> {
     let now_s = now_ms / 1000;
-    let mut state = repo.ensure_default_state(now_s).await?;
+    let state = repo.ensure_default_state(now_s).await?;
+    let mut state = apply_daily_reset_if_due(repo, config, state, now_s).await?;
     let elapsed = {
         let mut rt = drain_runtime();
         let any_before = !rt.consuming.is_empty();
@@ -396,13 +441,12 @@ mod tests {
     }
 
     /// 进程内 DRAIN 是全局单例；并行测试互相 reset 会把 elapsed 算错。
-    /// 锁必须跨 .await 持有到测试结束，用 tokio async Mutex（std guard 跨 await
-    /// 会被 clippy await-holding-lock 拒绝）。
-    static SERVICE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    /// 用 tokio Mutex：guard 需要跨测试内的 await 持有（clippy await_holding_lock）。
+    static SERVICE_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     async fn lock_drain_for_test() -> tokio::sync::MutexGuard<'static, ()> {
-        let lock = SERVICE_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-        let guard = lock.lock().await;
+        let guard = SERVICE_TEST_LOCK.lock().await;
         let mut rt = drain_runtime();
         rt.consuming.clear();
         rt.last_settle_ms = None;
@@ -410,24 +454,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_charging_grants_welcome_once() {
+    async fn first_charging_after_daily_reset_clamps_welcome() {
+        // 每日重置先于 welcome：首次切 charging 余额已满，welcome 钳 0 不入账。
         let _lock = lock_drain_for_test().await;
         let repo = repo().await;
         let cfg = BatteryConfig::default();
+        let full = cfg.max_balance_minutes * MS_PER_MINUTE;
         let snap = set_mode(&repo, &cfg, "charging", 1_700_000_000)
             .await
             .unwrap();
         assert_eq!(snap.mode, "charging");
-        assert_eq!(snap.remaining_ms, 25 * MS_PER_MINUTE);
-        assert_eq!(snap.credit_minutes, Some(25));
+        assert_eq!(snap.remaining_ms, full);
+        assert_eq!(snap.credit_minutes, None);
         let again = set_mode(&repo, &cfg, "unlimited", 1_700_000_010)
             .await
             .unwrap();
-        assert_eq!(again.remaining_ms, 25 * MS_PER_MINUTE);
+        assert_eq!(again.remaining_ms, full);
         let back = set_mode(&repo, &cfg, "charging", 1_700_000_020)
             .await
             .unwrap();
-        assert_eq!(back.remaining_ms, 25 * MS_PER_MINUTE);
+        assert_eq!(back.remaining_ms, full);
         assert_eq!(back.credit_minutes, None);
     }
 
@@ -436,11 +482,18 @@ mod tests {
         let _lock = lock_drain_for_test().await;
         let repo = repo().await;
         let cfg = BatteryConfig::default();
+        let now = 1_700_000_100;
+        // 先把状态置为「当前周期已重置、余额已消耗」，否则入口的每日重置会先置满、credit 被钳 0。
+        let mut seeded = repo.ensure_default_state(now).await.unwrap();
+        seeded.mode = "charging".into();
+        seeded.remaining_ms = 0;
+        seeded.last_daily_reset_at = evaluate_daily_reset(0, now).unwrap();
+        repo.upsert_state(&seeded).await.unwrap();
         let id = habit_source_id("water", 9);
-        let a = credit(&repo, &cfg, BatteryCreditSource::Water, &id, 1_700_000_100)
+        let a = credit(&repo, &cfg, BatteryCreditSource::Water, &id, now)
             .await
             .unwrap();
-        let b = credit(&repo, &cfg, BatteryCreditSource::Water, &id, 1_700_000_101)
+        let b = credit(&repo, &cfg, BatteryCreditSource::Water, &id, now + 1)
             .await
             .unwrap();
         assert_eq!(a.remaining_ms, 8 * MS_PER_MINUTE);
@@ -465,6 +518,67 @@ mod tests {
         let after = report_focus(&repo, &cfg, "main", true, 1_700_010_001_200)
             .await
             .unwrap();
-        assert_eq!(after.remaining_ms, 25 * MS_PER_MINUTE - 1_200);
+        assert_eq!(
+            after.remaining_ms,
+            cfg.max_balance_minutes * MS_PER_MINUTE - 1_200
+        );
+    }
+
+    #[tokio::test]
+    async fn daily_reset_fills_balance_on_first_read() {
+        // 从未重置过（last=0）→ 任意入口首次调用即置满，且与模式无关；流水幂等只落一条。
+        let _lock = lock_drain_for_test().await;
+        let repo = repo().await;
+        let cfg = BatteryConfig::default();
+        let now = 1_700_000_000;
+        let snap = get_snapshot(&repo, &cfg, now).await.unwrap();
+        assert_eq!(snap.mode, "unlimited");
+        assert_eq!(snap.remaining_ms, cfg.max_balance_minutes * MS_PER_MINUTE);
+        // daily_reset 不计入今日已充。
+        assert_eq!(snap.today_earned_ms, 0);
+        let ledger = repo.list_ledger(10).await.unwrap();
+        let daily: Vec<_> = ledger.iter().filter(|r| r.kind == "daily_reset").collect();
+        assert_eq!(daily.len(), 1);
+        // 二次读取不重复置满、不再落流水。
+        let again = get_snapshot(&repo, &cfg, now + 60).await.unwrap();
+        assert_eq!(again.remaining_ms, cfg.max_balance_minutes * MS_PER_MINUTE);
+        let ledger2 = repo.list_ledger(10).await.unwrap();
+        let daily2: Vec<_> = ledger2.iter().filter(|r| r.kind == "daily_reset").collect();
+        assert_eq!(daily2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn daily_reset_skips_within_same_period() {
+        // 同周期内（已重置到当前边界）入口调用不得重置余额。
+        let _lock = lock_drain_for_test().await;
+        let repo = repo().await;
+        let cfg = BatteryConfig::default();
+        let now = 1_700_000_000;
+        let mut seeded = repo.ensure_default_state(now).await.unwrap();
+        seeded.mode = "charging".into();
+        seeded.remaining_ms = 60_000;
+        seeded.last_daily_reset_at = evaluate_daily_reset(0, now).unwrap();
+        repo.upsert_state(&seeded).await.unwrap();
+        let snap = get_snapshot(&repo, &cfg, now + 60).await.unwrap();
+        assert_eq!(snap.remaining_ms, 60_000);
+    }
+
+    #[tokio::test]
+    async fn daily_reset_refills_after_boundary_passes() {
+        // 上一周期已重置且耗尽；跨过下一个 8 点边界后，首次读取补满。
+        let _lock = lock_drain_for_test().await;
+        let repo = repo().await;
+        let cfg = BatteryConfig::default();
+        let now = 1_700_000_000;
+        let boundary = evaluate_daily_reset(0, now).unwrap();
+        let mut seeded = repo.ensure_default_state(now).await.unwrap();
+        seeded.mode = "charging".into();
+        seeded.remaining_ms = 0;
+        seeded.last_daily_reset_at = boundary;
+        repo.upsert_state(&seeded).await.unwrap();
+        // 边界 + 1 天 + 2 小时必然已进入下一周期（含 DST 偏移缓冲）。
+        let next_period = boundary + 86_400 + 7_200;
+        let snap = get_snapshot(&repo, &cfg, next_period).await.unwrap();
+        assert_eq!(snap.remaining_ms, cfg.max_balance_minutes * MS_PER_MINUTE);
     }
 }

@@ -33,6 +33,7 @@ const LEDGER_KIND_KEYS = {
   credit_health: 'settings.kinds.credit_health',
   credit_wordgame: 'settings.kinds.credit_wordgame',
   credit_welcome: 'settings.kinds.credit_welcome',
+  daily_reset: 'settings.kinds.daily_reset',
   debit_tick: 'settings.kinds.debit_tick',
   mode_change: 'settings.kinds.mode_change',
 } as const satisfies Record<BatteryLedgerKind, string>;
