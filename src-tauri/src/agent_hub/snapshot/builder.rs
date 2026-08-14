@@ -543,12 +543,26 @@ fn cache_put(built: BuiltSnapshot) {
     }
 }
 
-/// 测试用：清空 envelope 缓存。
+/// 测试用：清空 envelope 缓存并返回串行 guard（持有至测试结束）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ENVELOPE_CACHE 是进程级全局缓存；并行测试中 A 清空缓存会破坏 B 正在进行的
+///     a/b 复用断言。必须让所有使用该缓存的测试互斥执行。
+///
+/// Code Logic（这个函数做什么）:
+///     获取静态测试互斥锁 → 清空缓存 → 返回 MutexGuard；调用方绑定 `let _g = ...`
+///     持有到测试结束，实现跨测试串行。
 #[cfg(test)]
-pub fn clear_envelope_cache_for_test() {
-    if let Ok(mut guard) = cache_store().lock() {
-        guard.clear();
+pub async fn clear_envelope_cache_for_test() -> tokio::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let guard = TEST_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    if let Ok(mut guard_cache) = cache_store().lock() {
+        guard_cache.clear();
     }
+    guard
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -619,7 +633,7 @@ mod tests {
     /// Business Logic: 单 asset head 闭包含 parents/tombstone/variants/conflicts/objects/alias。
     #[tokio::test]
     async fn selection_closure_explicit_asset_includes_ancestry_and_excludes_unrelated() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let proj = seed_project_scope(&repo, "hub-proj-1").await;
@@ -779,7 +793,7 @@ mod tests {
     /// Business Logic: FullHub / UserScope / Project 选择范围。
     #[tokio::test]
     async fn selection_modes_full_user_project() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let proj = seed_project_scope(&repo, "hub-p2").await;
@@ -919,7 +933,7 @@ mod tests {
     /// Business Logic: 相同 selection state 复用 snapshotId/hash。
     #[tokio::test]
     async fn identical_state_reuses_cached_envelope_ids() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let asset = repo
@@ -970,7 +984,7 @@ mod tests {
     /// Business Logic: 缺失 object 整包失败。
     #[tokio::test]
     async fn missing_object_blocks_whole_snapshot() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let asset = repo
@@ -1026,7 +1040,7 @@ mod tests {
     /// Business Logic: MCP 凭据字节进入 objects 但不出现在错误诊断。
     #[tokio::test]
     async fn mcp_credentials_bytes_preserved_in_objects() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let asset = repo
@@ -1098,7 +1112,7 @@ mod tests {
     /// Code Logic: 直接调用 load_snapshot_identity_bundle 并与 build_snapshot 结果身份集合对齐。
     #[tokio::test]
     async fn build_snapshot_uses_single_read_tx_identity_bundle() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user_scope(&repo).await;
         let asset = repo

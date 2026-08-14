@@ -158,6 +158,7 @@ fn build_preference_patch(
 ///
 /// Code Logic（这个函数做什么）:
 ///     BackendControlClient::apply_patch → refresh_local_from_snapshot → ConfigDto。
+#[allow(clippy::too_many_arguments)]
 async fn update_config_via_owner(
     state: &AppState,
     device_name: Option<String>,
@@ -265,6 +266,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
 ///
 /// Code Logic（这个函数做什么）:
 ///     对传入的 Option 字段写 candidate；语言字段做归一化。
+#[allow(clippy::too_many_arguments)]
 fn apply_config_patch(
     cfg: &mut AppConfig,
     device_name: Option<String>,
@@ -306,6 +308,7 @@ fn apply_config_patch(
 ///
 /// Code Logic（这个函数做什么）:
 ///     调用 `update_config_transactionally` 只改 candidate，返回提交后的 ConfigDto。
+#[allow(clippy::too_many_arguments)]
 pub async fn update_config_for_runtime(
     runtime: &ConfigRuntime,
     device_name: Option<String>,

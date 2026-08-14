@@ -61,6 +61,7 @@ pub mod config;
 pub mod config_runtime;
 pub mod config_store;
 pub mod error;
+mod game_plugin;
 pub mod health;
 mod hotkey;
 mod mobile;
@@ -76,7 +77,6 @@ mod sync;
 mod transfer;
 mod tray;
 pub mod updater;
-mod game_plugin;
 mod wordgame;
 mod workbench;
 /// Gate D Task4/8：OpenCode OSC runtime bridge + OSC decoder（L2 certification smoke）。
@@ -132,10 +132,10 @@ use crate::commands::{
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
     game_plugin as game_plugin_cmd, github_trending as github_trending_cmd,
-    gui_bootstrap as gui_bootstrap_cmd,
-    health as health_cmd, internal_claude as internal_claude_cmd,
-    lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
-    orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
+    gui_bootstrap as gui_bootstrap_cmd, health as health_cmd,
+    internal_claude as internal_claude_cmd, lan_firewall_dependency as lan_firewall_dependency_cmd,
+    mobile as mobile_cmd, orchestrator as orchestrator_cmd,
+    orchestrator_adapters as orchestrator_adapters_cmd,
     orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
     prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd,
     provider_manager as provider_manager_cmd, scratchpad as scratchpad_cmd,

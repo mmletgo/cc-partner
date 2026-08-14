@@ -1698,7 +1698,7 @@ mod tests {
     /// 且 B 的 envelope **不**再列出 local-only head left——loader 必须从 DB/CAS 读 local head。
     #[tokio::test]
     async fn disjoint_blocks_merge_with_both_parents() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo_a, store_a, dir_a) = test_env().await;
         let user = seed_user(&repo_a).await;
         let asset = repo_a
@@ -1886,7 +1886,7 @@ mod tests {
     /// 同块双侧编辑 → 双 head + conflict。
     #[tokio::test]
     async fn same_block_preserves_heads_and_conflict() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo_a, store_a, _dir_a) = test_env().await;
         let user = seed_user(&repo_a).await;
         let asset = repo_a
@@ -2048,7 +2048,7 @@ mod tests {
     /// 相同 revision id 去重。
     #[tokio::test]
     async fn identical_revision_ids_dedupe() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, dir) = test_env().await;
         let user = seed_user(&repo).await;
         let asset = repo
@@ -2109,7 +2109,7 @@ mod tests {
     /// delete-vs-edit → conflict。
     #[tokio::test]
     async fn delete_vs_edit_conflicts() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo_a, store_a, _dir_a) = test_env().await;
         let user = seed_user(&repo_a).await;
         let asset = repo_a
@@ -2256,7 +2256,7 @@ mod tests {
     /// 不同 hubProjectId 映射为 alias 合并到同一 local project scope。
     #[tokio::test]
     async fn distinct_hub_project_ids_map_to_one_local_scope() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo_a, store_a, _dir_a) = test_env().await;
         let scope = repo_a
             .insert_scope(NewScopeNode {
@@ -2382,7 +2382,7 @@ mod tests {
     /// 未映射 project 导入但 projections_scheduled=0。
     #[tokio::test]
     async fn unmapped_project_imports_with_zero_projections() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         // 全局 fault 可能被并行测试污染；先清空
         let (repo_a, store_a, _dir_a) = test_env().await;
         let _ = repo_a.take_import_fault();
@@ -2482,7 +2482,7 @@ mod tests {
     /// 损坏 object hash → 失败。
     #[tokio::test]
     async fn corrupt_object_fails() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, _dir) = test_env().await;
         let user = seed_user(&repo).await;
         let asset = repo
@@ -2539,7 +2539,7 @@ mod tests {
     /// DB fail before head → 无非法 head；CAS 后崩溃对象可残留但不计 imported asset。
     #[tokio::test]
     async fn db_fail_before_head_and_cas_residual() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo_a, store_a, _dir_a) = test_env().await;
         let user = seed_user(&repo_a).await;
         let asset = repo_a
@@ -2640,7 +2640,7 @@ mod tests {
             build_snapshot, SnapshotSelectionMode, SnapshotSelectionRequest,
         };
 
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo_a, store_a, _dir_a) = test_env().await;
         let user = seed_user(&repo_a).await;
 

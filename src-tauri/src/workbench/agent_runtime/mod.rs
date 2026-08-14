@@ -7,6 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     导出领域模型、OSC 解码与 mutation ingress；reducer/snapshot 由后续任务叠加。
 
+mod agent_usage;
 mod claude_status;
 pub mod models;
 pub mod opencode_bridge;
@@ -33,7 +34,7 @@ pub use snapshot::{
 };
 
 use crate::state::AppState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -47,6 +48,75 @@ static AGENT_MUTATION_TX: OnceLock<mpsc::Sender<AgentRuntimeMutation>> = OnceLoc
 
 /// channel 满时保留最近一次高优先级（Completed/Failed/NeedsInput）mutation。
 static TERMINAL_MUTATION_OVERFLOW: Mutex<Option<AgentRuntimeMutation>> = Mutex::new(None);
+
+/// 已执行终态 usage 补记的 agent_session_id 集合（进程内一次性去重）。
+static TERMINAL_USAGE_NOTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// 终态时从 CLI 本地会话文件提取 usage 并补记 Ledger（每 agent 一次）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Agent Ledger 的 tokens 生产中长期为 null（`note_usage()` 无调用者）；各 CLI 终态后
+///     已把可靠 usage 落到本地 session 文件/SQLite，需要在 runtime 终态时提取补记。
+///
+/// Code Logic（这个模块做什么）:
+///     仅 terminal phase + 支持 usage 的三 provider + 非空 native_session_id 才触发；
+///     `TERMINAL_USAGE_NOTED` 按 agent_session_id 一次性去重后 tokio::spawn：
+///     spawn_blocking 提取 → has_any 时 note_usage；Err 仅 debug 日志（不打路径），不阻断。
+async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) {
+    if !row.phase.is_terminal() {
+        return;
+    }
+    if !matches!(
+        row.provider_id.as_str(),
+        "claudeCodeVisible" | "codex" | "opencode"
+    ) {
+        return;
+    }
+    let Some(native) = row
+        .native_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    {
+        let mut guard = TERMINAL_USAGE_NOTED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !guard.insert(row.id.clone()) {
+            return;
+        }
+    }
+    let ledger_svc = state.agent_ledger_service.clone();
+    let agent_id = row.id.clone();
+    let provider = row.provider_id.clone();
+    let native = native.to_string();
+    tokio::spawn(async move {
+        let extracted = tokio::task::spawn_blocking(move || {
+            agent_usage::extract_provider_usage(&provider, &native)
+        })
+        .await;
+        match extracted {
+            Ok(Some(snapshot)) if snapshot.has_any() => {
+                if let Err(err) = ledger_svc.note_usage(&agent_id, snapshot).await {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        "terminal usage note_usage failed: {err}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    "terminal usage extract task failed: {err}"
+                );
+            }
+        }
+    });
+}
 
 /// 测试可替换的 send 钩子（默认走 channel）。
 type AgentMutationTestHook = Option<Box<dyn Fn(AgentRuntimeMutation) + Send>>;
@@ -210,6 +280,8 @@ async fn apply_owner_agent_mutation(
             emit_agent_runtime_changed(state, &row, Some(previous_phase));
             // A9：首次终态旁路写 Ledger；失败隔离，不阻断 runtime 完成路径。
             if row.phase.is_terminal() {
+                // A9b：终态后从 CLI 本地会话文件提取 usage 补记 Ledger（每 agent 一次）。
+                maybe_note_terminal_usage(state, &row).await;
                 let ledger_svc = state.agent_ledger_service.clone();
                 let row_for_ledger = row.clone();
                 let prev = previous_phase;
@@ -298,7 +370,8 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     for row in &disconnected {
                         // reconcile → Disconnected：无异常通知；previous 未知用 None
                         emit_agent_runtime_changed(&state, row, None);
-                        // A9：对账断开也写 Ledger（失败隔离）
+                        // A9：对账断开也写 Ledger（失败隔离）；同时尝试补记 usage。
+                        maybe_note_terminal_usage(&state, row).await;
                         let ledger_svc = state.agent_ledger_service.clone();
                         let row_for_ledger = row.clone();
                         tokio::spawn(async move {

@@ -1976,9 +1976,6 @@ fn claude_assets_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
-/// 恢复可选环境变量（测试隔离）。
-#[cfg(test)]
-
 /// Gate C N/N+1 runtime proof：旧 peer `legacyLossy` placeholder 不得覆盖本机 canonical credential。
 ///
 /// Business Logic: mixed-version harness 与 Gate B 单测共用同一 fail-closed 合同，避免仅靠源码盘点。

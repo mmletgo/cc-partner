@@ -45,11 +45,7 @@ pub fn credit_delta_ms(
 ///
 /// Code Logic（这个函数做什么）:
 ///     minutes.max(0) * 60_000，再钳到 max_balance - remaining。
-pub fn credit_delta_ms_explicit(
-    config: &BatteryConfig,
-    remaining_ms: i64,
-    minutes: i64,
-) -> i64 {
+pub fn credit_delta_ms_explicit(config: &BatteryConfig, remaining_ms: i64, minutes: i64) -> i64 {
     let reward = minutes.max(0).saturating_mul(MS_PER_MINUTE);
     let max_ms = config.max_balance_minutes.saturating_mul(MS_PER_MINUTE);
     let room = (max_ms - remaining_ms.max(0)).max(0);
@@ -181,7 +177,10 @@ mod tests {
         let delta = credit_delta_ms_explicit(&c, 0, 5);
         assert_eq!(delta, 5 * MS_PER_MINUTE);
         let many_today = credit_delta_ms(&c, BatteryCreditSource::GamePlugin, 10_000, 0);
-        assert_eq!(many_today, 0, "GamePlugin 不走 rewards 表，分钟数必须显式传入");
+        assert_eq!(
+            many_today, 0,
+            "GamePlugin 不走 rewards 表，分钟数必须显式传入"
+        );
     }
 
     #[test]

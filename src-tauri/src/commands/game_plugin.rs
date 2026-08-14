@@ -67,10 +67,7 @@ pub async fn credit_game_plugin(
     if game.reward_minutes <= 0 {
         return crate::battery::get_snapshot(&battery_repo, &battery_cfg, now).await;
     }
-    let source_id = crate::battery::game_plugin_source_id(
-        &game.id,
-        input.source_id.as_deref(),
-    );
+    let source_id = crate::battery::game_plugin_source_id(&game.id, input.source_id.as_deref());
     let snapshot = crate::battery::credit_explicit(
         &battery_repo,
         &battery_cfg,

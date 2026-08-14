@@ -1447,7 +1447,7 @@ mod tests {
     /// Business Logic: 导出 device-a 不改 device-b 与 prompts 指纹。
     #[tokio::test]
     async fn export_confines_bytes_to_local_device_lane() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let fx = GitFixture::new();
         let data = tempfile::tempdir().unwrap();
         let (repo, store) = test_repo(data.path()).await;
@@ -1521,7 +1521,7 @@ mod tests {
     /// Business Logic: fetch 到变更的 device-b 不得写入 Hub DB（inventory only）。
     #[tokio::test]
     async fn fetching_changed_device_b_does_not_alter_hub_db() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let data = tempfile::tempdir().unwrap();
         let (repo, store) = test_repo(data.path()).await;
         seed_one_asset(&repo, &store).await;
@@ -1548,7 +1548,7 @@ mod tests {
     /// Business Logic: 相同 snapshotHash 不产生 commit。
     #[tokio::test]
     async fn unchanged_snapshot_hash_skips_commit() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let fx = GitFixture::new();
         let data = tempfile::tempdir().unwrap();
         let (repo, store) = test_repo(data.path()).await;

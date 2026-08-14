@@ -2264,9 +2264,6 @@ mod tests {
         let mut cfg = cfg_with_db_path("/tmp/db.db");
         cfg.game_plugin_dir = "plugins".into();
         let err = cfg.validate().expect_err("相对路径应拒绝");
-        assert!(
-            err.to_string().contains("game_plugin_dir"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("game_plugin_dir"), "{err}");
     }
 }

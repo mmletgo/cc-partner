@@ -77,9 +77,8 @@ pub fn ensure_game_plugin_dir(root: &Path) -> Result<(), AppError> {
         }
         return Ok(());
     }
-    fs::create_dir_all(root).map_err(|e| {
-        AppError::validation(format!("无法创建游戏插件目录 {}: {e}", root.display()))
-    })
+    fs::create_dir_all(root)
+        .map_err(|e| AppError::validation(format!("无法创建游戏插件目录 {}: {e}", root.display())))
 }
 
 /// 扫描一级子目录。无 game.json 的文件夹忽略。
@@ -195,9 +194,9 @@ pub fn resolve_game_asset(root: &Path, id: &str, rel: &str) -> Result<PathBuf, A
     }
     let game_root = root.join(id);
     let candidate = game_root.join(rel);
-    let root_canon = game_root.canonicalize().map_err(|_| {
-        AppError::validation(format!("游戏目录不存在: {}", game_root.display()))
-    })?;
+    let root_canon = game_root
+        .canonicalize()
+        .map_err(|_| AppError::validation(format!("游戏目录不存在: {}", game_root.display())))?;
     let file_canon = candidate
         .canonicalize()
         .map_err(|_| AppError::validation("游戏资源不存在"))?;
@@ -264,7 +263,10 @@ mod tests {
         let games = scan_game_plugins(root.path()).unwrap();
         assert_eq!(games.len(), 1);
         assert!(!games[0].playable);
-        assert!(games[0].reason.as_deref() == Some("invalid_id") || games[0].reason.as_deref() == Some("invalid_entry"));
+        assert!(
+            games[0].reason.as_deref() == Some("invalid_id")
+                || games[0].reason.as_deref() == Some("invalid_entry")
+        );
     }
 
     #[test]

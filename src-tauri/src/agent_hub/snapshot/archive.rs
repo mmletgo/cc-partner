@@ -578,7 +578,7 @@ mod tests {
     /// Business Logic: expand→repack 字节稳定（instruction + skill tree + mcp + 2 heads + tombstone）。
     #[tokio::test]
     async fn readable_archive_round_trip_byte_stable() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, tmp) = test_env().await;
         let user = repo
             .insert_scope(NewScopeNode {
@@ -885,7 +885,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn reject_symlink_in_archive() {
-        clear_envelope_cache_for_test();
+        let _envelope_cache_guard = clear_envelope_cache_for_test().await;
         let (repo, store, tmp) = test_env().await;
         let user = repo
             .insert_scope(NewScopeNode {

@@ -86,7 +86,8 @@ pub fn respond(app: &AppHandle, uri: &Uri) -> Response<Vec<u8>> {
         .status(StatusCode::OK)
         .header(
             header::CONTENT_TYPE,
-            HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("application/octet-stream")),
+            HeaderValue::from_str(mime)
+                .unwrap_or(HeaderValue::from_static("application/octet-stream")),
         )
         .body(bytes)
         .unwrap_or_else(|_| not_found())
