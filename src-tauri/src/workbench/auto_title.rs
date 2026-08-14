@@ -10,6 +10,10 @@
 
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::workbench::agent_runtime::{
+    emit_agent_runtime_changed, AgentRuntimeReducer, AgentSessionPhase, CreateActiveAgentSession,
+    EnsureInteractiveOutcome,
+};
 use crate::workbench::claude_sessions::ClaudeSessionIndex;
 use crate::workbench::models::WorkbenchSessionRow;
 use crate::workbench::sessions::{emit_session_updated, SessionNameSource};
@@ -242,6 +246,125 @@ pub fn pick_unique_terminal_for_cwd(
     matched_id
 }
 
+/// 列出 cwd 匹配的 live terminal，最新启动的在前。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同 cwd 多窗口时不能猜改名，但仍要把交互式 Agent 落到一个空闲 terminal，
+///     否则项目卡永远 0/0。
+///
+/// Code Logic（这个函数做什么）:
+///     规范化 cwd 后收集匹配行，按 started_at 降序返回 id。
+pub fn matching_terminals_for_cwd(
+    candidates: &[WorkbenchSessionRow],
+    claude_cwd: Option<&str>,
+) -> Vec<String> {
+    let Some(cwd) = claude_cwd.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let key = normalize_path_key(cwd);
+    if key.is_empty() {
+        return Vec::new();
+    }
+    let mut matched: Vec<&WorkbenchSessionRow> = candidates
+        .iter()
+        .filter(|row| !row.cwd.trim().is_empty() && normalize_path_key(&row.cwd) == key)
+        .collect();
+    matched.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    matched.into_iter().map(|row| row.id.clone()).collect()
+}
+
+/// 把 auto-title 来源映射到 Agent runtime provider token。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Claude/Codex/OpenCode 标题绑定是普通终端能被感知的可靠信号；未知源不得建行。
+///
+/// Code Logic（这个函数做什么）:
+///     精确匹配三个生产 source_label；其它返回 None。
+pub fn provider_id_from_auto_title_source(source_label: &str) -> Option<&'static str> {
+    match source_label {
+        "claude.ai-title" => Some("claudeCodeVisible"),
+        "codex.thread_name" => Some("codexVisible"),
+        "opencode.session.title" => Some("openCodeVisible"),
+        _ => None,
+    }
+}
+
+/// 在已绑定的交互式 terminal 上保证一条 Idle Agent 行并投影。
+///
+/// Business Logic（为什么需要这个函数）:
+///     auto-title 成功或同名 settled 时窗口已经确认跑着该 Agent；hint snapshot 必须看见它。
+///
+/// Code Logic（这个函数做什么）:
+///     异步 ensure_interactive_active(Idle)；Created/Unchanged 时 emit 并 bind title pane。
+fn schedule_ensure_interactive_agent(
+    state: &AppState,
+    terminal: &WorkbenchSessionRow,
+    native_session_id: &str,
+    provider_id: &str,
+    fallback_terminal_ids: &[String],
+) {
+    let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
+    let state_clone = state.clone();
+    let terminal_id = terminal.id.clone();
+    let project_id = terminal.project_id.clone();
+    let worktree_id = terminal.worktree_id.clone();
+    let native = native_session_id.to_string();
+    let provider = provider_id.to_string();
+    let fallbacks = fallback_terminal_ids.to_vec();
+    tauri::async_runtime::spawn(async move {
+        let now = chrono::Utc::now().to_rfc3339();
+        let outcome = reducer
+            .ensure_interactive_active(
+                CreateActiveAgentSession {
+                    id: None,
+                    project_id,
+                    worktree_id,
+                    terminal_session_id: terminal_id.clone(),
+                    orchestrator_task_id: None,
+                    orchestrator_attempt: None,
+                    provider_id: provider,
+                    native_session_id: Some(native.clone()),
+                    phase: AgentSessionPhase::Idle,
+                    started_at: now,
+                    resumed_from_agent_session_id: None,
+                },
+                &fallbacks,
+            )
+            .await;
+        match outcome {
+            Ok(EnsureInteractiveOutcome::Created { ended, active }) => {
+                if let Some(ended) = ended.as_ref() {
+                    emit_agent_runtime_changed(&state_clone, ended, None);
+                }
+                emit_agent_runtime_changed(&state_clone, &active, None);
+                bind_agent_title_pane_for_state(
+                    &state_clone,
+                    &active.terminal_session_id,
+                    Some(active.id.as_str()),
+                    Some(native.as_str()),
+                );
+            }
+            Ok(EnsureInteractiveOutcome::Unchanged(row)) => {
+                bind_agent_title_pane_for_state(
+                    &state_clone,
+                    &row.terminal_session_id,
+                    Some(row.id.as_str()),
+                    Some(native.as_str()),
+                );
+            }
+            Ok(
+                EnsureInteractiveOutcome::SkippedOrchestrator | EnsureInteractiveOutcome::Unbound,
+            ) => {}
+            Err(err) => {
+                tracing::debug!(
+                    terminal_id = %terminal_id,
+                    "交互式 Agent 感知建行失败: {err}"
+                );
+            }
+        }
+    });
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Claude / Codex / OpenCode 共用：绑定 terminal 后做 first-pane 门禁与 auto rename。
 ///
@@ -275,6 +398,24 @@ fn try_auto_rename_bound_title(
     let terminal_id = native_terminal_id.or_else(|| pick_unique_terminal_for_cwd(&live, cwd));
 
     let Some(terminal_id) = terminal_id else {
+        // 多终端同 cwd：不猜改名，但仍尝试把 Agent 落到一个空闲 window。
+        if let (Some(native), Some(provider_id)) = (
+            native_session_id.map(str::trim).filter(|s| !s.is_empty()),
+            provider_id_from_auto_title_source(source_label),
+        ) {
+            let fallbacks = matching_terminals_for_cwd(&live, cwd);
+            if let Some(first_id) = fallbacks.first() {
+                if let Some(target) = live.iter().find(|row| row.id == *first_id) {
+                    schedule_ensure_interactive_agent(
+                        state,
+                        target,
+                        native,
+                        provider_id,
+                        &fallbacks,
+                    );
+                }
+            }
+        }
         return AutoTitleSyncResult::RetryableMiss;
     };
 
@@ -306,14 +447,6 @@ fn try_auto_rename_bound_title(
             return AutoTitleSyncResult::AlreadySettled;
         }
     }
-    if matches!(
-        SessionNameSource::parse(&target.name_source),
-        SessionNameSource::Manual
-    ) || target.name == title
-    {
-        return AutoTitleSyncResult::AlreadySettled;
-    }
-
     // seed title-owner；多 pane 时仅 owner pane 上的 agent 可改名。
     let owner = registry.ensure_title_owner_pane(&terminal_id);
     let pane_count = registry.pane_count_for_session(&terminal_id).unwrap_or(1);
@@ -335,6 +468,22 @@ fn try_auto_rename_bound_title(
             "跳过自动标题：agent 不在 title-owner pane"
         );
         return AutoTitleSyncResult::RetryableMiss;
+    }
+
+    // 同名/手改也必须感知：否则 snapshot 永远空，hint 停在 0/0。
+    if let (Some(native), Some(provider_id)) = (
+        native_session_id.map(str::trim).filter(|s| !s.is_empty()),
+        provider_id_from_auto_title_source(source_label),
+    ) {
+        schedule_ensure_interactive_agent(state, target, native, provider_id, &[]);
+    }
+
+    if matches!(
+        SessionNameSource::parse(&target.name_source),
+        SessionNameSource::Manual
+    ) || target.name == title
+    {
+        return AutoTitleSyncResult::AlreadySettled;
     }
 
     match registry.try_auto_rename(&terminal_id, &title) {
@@ -578,6 +727,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_id_maps_known_auto_title_sources() {
+        assert_eq!(
+            provider_id_from_auto_title_source("claude.ai-title"),
+            Some("claudeCodeVisible")
+        );
+        assert_eq!(
+            provider_id_from_auto_title_source("codex.thread_name"),
+            Some("codexVisible")
+        );
+        assert_eq!(
+            provider_id_from_auto_title_source("opencode.session.title"),
+            Some("openCodeVisible")
+        );
+        assert_eq!(provider_id_from_auto_title_source("unknown.source"), None);
+    }
+
+    #[test]
     fn substantive_title_rejects_placeholders() {
         assert!(is_substantive_auto_title("修复滚动问题"));
         assert!(!is_substantive_auto_title("  a  "));
@@ -597,6 +763,10 @@ mod tests {
             row("b", "/tmp/proj", "2026-06-01T00:00:00Z"),
         ];
         assert_eq!(pick_unique_terminal_for_cwd(&two, Some("/tmp/proj")), None);
+        assert_eq!(
+            matching_terminals_for_cwd(&two, Some("/tmp/proj")),
+            vec!["b".to_string(), "a".to_string()]
+        );
     }
 
     #[test]

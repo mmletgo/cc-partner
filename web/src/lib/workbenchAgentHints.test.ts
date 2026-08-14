@@ -297,6 +297,30 @@ describe('workbenchAgentHints', () => {
     expect(hintsForTerminal(state, 't-done').completedCount).toBe(1);
   });
 
+  test('握手 snapshot 的交互式 idle 行计为 0/1 已停止', () => {
+    const state = replaceActiveWaitingFromSnapshot(emptyAgentHintState(), [
+      session({
+        phase: 'idle',
+        isActive: true,
+        providerId: 'claudeCodeVisible',
+      }),
+    ]);
+    expect(hintsForTerminal(state, 'term-1')).toEqual({
+      waitingCount: 0,
+      stoppedCount: 1,
+      completedCount: 1,
+      count: 1,
+      tone: 'complete',
+    });
+    expect(hintsForProject(state, 'proj-1')).toEqual({
+      waitingCount: 0,
+      stoppedCount: 1,
+      completedCount: 1,
+      count: 1,
+      tone: 'complete',
+    });
+  });
+
   test('hintAriaKind 0/0 也分段为 both，方便始终读出数字', () => {
     expect(hintAriaKind(hintsForTerminal(emptyAgentHintState(), 'x'))).toBe('both');
     expect(

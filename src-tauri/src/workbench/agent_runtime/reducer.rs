@@ -66,6 +66,33 @@ pub struct StartOrReplaceOutcome {
     pub active: AgentSessionRuntime,
 }
 
+/// 交互式终端感知结果。
+///
+/// Business Logic（为什么需要这个类型）:
+///     普通 Workbench 里用户手打 Claude/Codex/OpenCode 时，hint 数字必须有 active 行；
+///     但不能抢走 Orchestrator terminal，也不能每次 auto-title 都新建。
+///
+/// Code Logic（这个类型做什么）:
+///     Created=新 Idle 行；Unchanged=已有同 native/该 terminal 的 interactive 行；
+///     SkippedOrchestrator=候选全是编排占用；Unbound=没有可写 terminal。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Created 携带完整 runtime 行供 emit；与 unit 变体体量差可接受
+pub enum EnsureInteractiveOutcome {
+    /// 新建了 interactive active（ended 为被替换的非编排旧行，通常为 None）
+    Created {
+        /// 被替换并终结的旧 session（若有）
+        ended: Option<AgentSessionRuntime>,
+        /// 新 active
+        active: AgentSessionRuntime,
+    },
+    /// 已存在可投影的 interactive 行，无需写入
+    Unchanged(AgentSessionRuntime),
+    /// 候选 terminal 均被 Orchestrator 占用
+    SkippedOrchestrator,
+    /// 没有可用 terminal id
+    Unbound,
+}
+
 /// Agent session 运行时 reducer（owner-local）。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -182,6 +209,84 @@ impl AgentRuntimeReducer {
             .await?;
         let active = self.repo.create_active(input).await?;
         Ok(StartOrReplaceOutcome { ended, active })
+    }
+
+    /// 为普通 Workbench 交互式 Agent 保证一条可投影的 active 行。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户手开的 Claude/Codex/OpenCode 没有 hook_repair / Runner 建行路径；
+    ///     snapshot 空则项目卡和 tab 永远 0/0。感知必须幂等，且不得覆盖编排 Agent。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写锁内：同 native 已存在 → Unchanged；按 preferred+fallback 找第一个
+    ///     无 Orchestrator 占用的 terminal；空闲则 create Idle；已有 interactive → Unchanged；
+    ///     全是编排占用 → SkippedOrchestrator。
+    pub async fn ensure_interactive_active(
+        &self,
+        input: CreateActiveAgentSession,
+        fallback_terminal_ids: &[String],
+    ) -> Result<EnsureInteractiveOutcome, AppError> {
+        let _guard = agent_runtime_write_lock().lock().await;
+        if let Some(native) = input
+            .native_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let active = self.repo.list_active(None, 10_000).await?;
+            if let Some(existing) = active
+                .into_iter()
+                .find(|row| row.native_session_id.as_deref() == Some(native))
+            {
+                return Ok(EnsureInteractiveOutcome::Unchanged(existing));
+            }
+        }
+
+        let mut candidates = Vec::new();
+        let preferred = input.terminal_session_id.trim();
+        if !preferred.is_empty() {
+            candidates.push(preferred.to_string());
+        }
+        for id in fallback_terminal_ids {
+            let trimmed = id.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !candidates.iter().any(|existing| existing == trimmed) {
+                candidates.push(trimmed.to_string());
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(EnsureInteractiveOutcome::Unbound);
+        }
+
+        let mut saw_orchestrator = false;
+        for terminal_id in candidates {
+            match self.repo.get_active_for_terminal(&terminal_id).await? {
+                Some(row) if row.orchestrator_task_id.is_some() => {
+                    saw_orchestrator = true;
+                    continue;
+                }
+                Some(row) => return Ok(EnsureInteractiveOutcome::Unchanged(row)),
+                None => {
+                    let mut create = input;
+                    create.terminal_session_id = terminal_id;
+                    if create.phase.is_terminal() {
+                        create.phase = AgentSessionPhase::Idle;
+                    }
+                    let active = self.repo.create_active(create).await?;
+                    return Ok(EnsureInteractiveOutcome::Created {
+                        ended: None,
+                        active,
+                    });
+                }
+            }
+        }
+        if saw_orchestrator {
+            Ok(EnsureInteractiveOutcome::SkippedOrchestrator)
+        } else {
+            Ok(EnsureInteractiveOutcome::Unbound)
+        }
     }
 
     /// 将 Agent 标为 Completed（completion 路径，优先 by id，CAS 失败则 end_active）。
@@ -579,5 +684,94 @@ mod tests {
         assert_eq!(completed.phase, AgentSessionPhase::Completed);
         assert!(!completed.is_active);
         assert!(completed.version >= 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户在普通 Workbench 终端里跑 Claude/Codex 时，hint 数字必须有 active 行可投影。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     无 row 的 terminal + native id → Idle active；同 native 再调用不得新建。
+    #[tokio::test]
+    async fn ensure_interactive_creates_idle_row_for_unbound_terminal() {
+        let reducer = fixture_reducer().await;
+        let mut input = create_input("term-user", "claudeCodeVisible", "2026-08-14T00:00:00Z");
+        input.native_session_id = Some("claude-native-1".to_string());
+        input.phase = AgentSessionPhase::Idle;
+        let first = reducer
+            .ensure_interactive_active(input.clone(), &[])
+            .await
+            .unwrap();
+        let EnsureInteractiveOutcome::Created { ended, active } = first else {
+            panic!("expected Created, got {first:?}");
+        };
+        assert!(ended.is_none());
+        assert!(active.is_active);
+        assert_eq!(active.phase, AgentSessionPhase::Idle);
+        assert_eq!(active.terminal_session_id, "term-user");
+        assert_eq!(active.native_session_id.as_deref(), Some("claude-native-1"));
+        let listed = reducer.repo().list_active(None, 10).await.unwrap();
+        assert_eq!(listed.len(), 1);
+
+        let again = reducer.ensure_interactive_active(input, &[]).await.unwrap();
+        let EnsureInteractiveOutcome::Unchanged(same) = again else {
+            panic!("expected Unchanged, got {again:?}");
+        };
+        assert_eq!(same.id, active.id);
+        assert_eq!(reducer.repo().list_active(None, 10).await.unwrap().len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同 cwd 多终端时不得抢走 Orchestrator/已占用 terminal。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首选空；fallback 第一个有 orchestrator row，第二个空闲 → 建在空闲 terminal。
+    #[tokio::test]
+    async fn ensure_interactive_picks_first_unbound_fallback() {
+        let reducer = fixture_reducer().await;
+        let mut orch = create_input("term-orch", "claudeCodeVisible", "2026-08-14T00:00:00Z");
+        orch.orchestrator_task_id = Some("task-1".to_string());
+        let _ = reducer.start_or_replace_active(orch).await.unwrap();
+
+        let mut input = create_input("", "codexVisible", "2026-08-14T00:01:00Z");
+        input.native_session_id = Some("codex-native-9".to_string());
+        input.phase = AgentSessionPhase::Idle;
+        let outcome = reducer
+            .ensure_interactive_active(input, &["term-orch".to_string(), "term-free".to_string()])
+            .await
+            .unwrap();
+        let EnsureInteractiveOutcome::Created { active, .. } = outcome else {
+            panic!("expected Created, got {outcome:?}");
+        };
+        assert_eq!(active.terminal_session_id, "term-free");
+        assert_eq!(active.provider_id, "codexVisible");
+        assert_eq!(active.native_session_id.as_deref(), Some("codex-native-9"));
+        let orch_still = reducer
+            .active_for_terminal("term-orch")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(orch_still.orchestrator_task_id.as_deref(), Some("task-1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     唯一绑定到 Orchestrator 终端时不得替换编排 Agent。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     preferred 已有 orchestrator_task_id → SkippedOrchestrator。
+    #[tokio::test]
+    async fn ensure_interactive_skips_orchestrator_preferred_terminal() {
+        let reducer = fixture_reducer().await;
+        let mut orch = create_input("term-orch", "claudeCodeVisible", "2026-08-14T00:00:00Z");
+        orch.orchestrator_task_id = Some("task-2".to_string());
+        let _ = reducer.start_or_replace_active(orch).await.unwrap();
+
+        let mut input = create_input("term-orch", "claudeCodeVisible", "2026-08-14T00:02:00Z");
+        input.native_session_id = Some("claude-native-2".to_string());
+        input.phase = AgentSessionPhase::Idle;
+        let outcome = reducer.ensure_interactive_active(input, &[]).await.unwrap();
+        assert_eq!(outcome, EnsureInteractiveOutcome::SkippedOrchestrator);
+        let listed = reducer.repo().list_active(None, 10).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].orchestrator_task_id.as_deref(), Some("task-2"));
     }
 }

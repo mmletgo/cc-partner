@@ -24,7 +24,9 @@ pub use opencode_bridge::{
 pub use osc::encode_agent_osc_frame;
 pub use osc::AgentOscDecoder;
 // encode_agent_osc_frame_full is used by opencode_bridge within the crate; keep module public API narrow.
-pub use reducer::{collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer};
+pub use reducer::{
+    collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer, EnsureInteractiveOutcome,
+};
 pub use snapshot::{
     emit_agent_runtime_changed, get_agent_runtime_snapshot_for_state, AgentRuntimeSnapshot,
 };

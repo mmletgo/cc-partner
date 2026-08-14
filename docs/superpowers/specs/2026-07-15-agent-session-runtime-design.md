@@ -99,6 +99,8 @@ owner 创建/attach terminal 时，把下列非敏感 ID 注入 pane/shell 环�
 
 tmux 与 raw PTY 必须得到一致的上下文；不得注入 control token、device token 或 provider credential。
 
+普通 Workbench 用户手开 Claude/Codex/OpenCode 时，owner 在 auto-title 成功绑定（含同名/手改 settled）后经 `ensure_interactive_active` 保证一条 **Idle** active 行，供 snapshot/hint 投影。不得覆盖 Orchestrator terminal；无 title/Hook 不得伪造 `Working`。
+
 ### 6.2 OSC 合同
 
 Agent adapter hook 将结构化事件编码为 app-private OSC：
