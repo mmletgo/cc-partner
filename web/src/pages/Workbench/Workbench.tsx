@@ -1035,7 +1035,6 @@ export function Workbench() {
                 </>
               }
             />
-
             <WorkbenchTerminalArea
               terminalAreaRef={terminalAreaRef}
               terminalPanelRef={terminalPanelRef}
@@ -1057,6 +1056,7 @@ export function Workbench() {
               terminalResizeRequestKey={terminalResizeRequestKey}
               handleInput={handleInput}
               isWriteBlocked={isWriteBlocked}
+              resolveAgent={agentRuntime.latestAgentForTerminal}
               handleResize={handleResize}
               handleCursorAnchorChange={handleCursorAnchorChange}
               handleSelectPaneAt={handleSelectPaneAt}

@@ -1178,18 +1178,17 @@ pub fn verify_source_unchanged_for_publish(
 ///     成功、冲突解决失败或主分支漂移都不能留下被 Git 注册的内部临时 worktree。
 ///
 /// Code Logic（这个函数做什么）:
-///     对存在或仍被登记的路径执行 `git worktree remove --force`，随后 prune 残留管理项；
+///     对存在或仍被登记的路径走 lock-aware `remove_worktree(..., true)`，随后 prune 残留管理项；
 ///     路径和登记均已不存在时保持幂等成功。
 pub fn remove_integration_worktree(
     repo_path: &Path,
     integration_path: &Path,
 ) -> Result<(), AppError> {
-    let target = integration_path.to_string_lossy().to_string();
     let listed = list_worktrees(repo_path, &repo_root(repo_path)?)?
         .into_iter()
         .any(|item| Path::new(&item.path) == integration_path);
     if integration_path.exists() || listed {
-        run_git(repo_path, &["worktree", "remove", "--force", &target])?;
+        remove_worktree(repo_path, integration_path, true)?;
     }
     run_git(repo_path, &["worktree", "prune"])?;
     Ok(())
@@ -2287,22 +2286,86 @@ pub fn commit_merge_no_edit(path: &Path) -> Result<(), AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     merge / 删除 worktree 时，Git 可能因 Claude session 的 `worktree lock` 拒绝 remove；
+///     必须先识别这类失败，才能 unlock 或按 Git 提示用 `--force --force`。
+///
+/// Code Logic（这个函数做什么）:
+///     匹配 `cannot remove a locked working tree` / `remove -f -f` / `unlock first`。
+fn is_locked_worktree_remove_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cannot remove a locked working tree")
+        || (lower.contains("locked working tree") && lower.contains("unlock first"))
+        || lower.contains("remove -f -f")
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户删除废弃 worktree 时，磁盘上的 Git worktree 也应同步移除。
 ///
 /// Code Logic（这个函数做什么）:
 ///     执行 `git worktree remove <path>`；force 为 true 时添加 `--force`。
+///     若 Git 报告 locked working tree，先 `worktree unlock` 再重试；仍失败则按 Git 提示
+///     `worktree remove --force --force` 覆盖会话锁（不覆盖脏工作区语义：普通 `--force` 仍只在调用方显式 force 时使用）。
 pub fn remove_worktree(
     repo_path: &Path,
     worktree_path: &Path,
     force: bool,
 ) -> Result<(), AppError> {
     let target = worktree_path.to_string_lossy().to_string();
+    match try_remove_worktree(repo_path, &target, force) {
+        Ok(()) => Ok(()),
+        Err(err) if is_locked_worktree_remove_error(&err.to_string()) => {
+            tracing::warn!(
+                worktree = %target,
+                "git worktree remove blocked by session lock; unlocking and retrying"
+            );
+            let _ = run_git(repo_path, &["worktree", "unlock", &target]);
+            match try_remove_worktree(repo_path, &target, force) {
+                Ok(()) => Ok(()),
+                Err(retry_err) if is_locked_worktree_remove_error(&retry_err.to_string()) => {
+                    if !force && worktree_has_local_changes(worktree_path) {
+                        return Err(retry_err);
+                    }
+                    run_git(
+                        repo_path,
+                        &["worktree", "remove", "--force", "--force", &target],
+                    )?;
+                    Ok(())
+                }
+                Err(retry_err) => Err(retry_err),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// 按调用方 force 标志执行一次 `git worktree remove`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     lock 恢复路径需要先做一次普通/单 `--force` remove，再决定是否 unlock 或双 `--force`。
+///
+/// Code Logic（这个函数做什么）:
+///     `force=true` 时 `git worktree remove --force`，否则不带 `--force`。
+fn try_remove_worktree(repo_path: &Path, target: &str, force: bool) -> Result<(), AppError> {
     if force {
-        run_git(repo_path, &["worktree", "remove", "--force", &target])?;
+        run_git(repo_path, &["worktree", "remove", "--force", target])?;
     } else {
-        run_git(repo_path, &["worktree", "remove", &target])?;
+        run_git(repo_path, &["worktree", "remove", target])?;
     }
     Ok(())
+}
+
+/// 判断 worktree 是否仍有未提交改动或未跟踪文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     覆盖 Claude session lock 时不得把脏工作区一并 `--force --force` 清掉。
+///
+/// Code Logic（这个函数做什么）:
+///     读 `git status --porcelain`；无法探测时 fail-closed 视为有本地改动。
+fn worktree_has_local_changes(worktree_path: &Path) -> bool {
+    match run_git(worktree_path, &["status", "--porcelain"]) {
+        Ok(output) => !output.trim().is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// 判断指定路径是否仍登记为 owning repository 的 Git worktree。
@@ -2666,6 +2729,137 @@ branch refs/heads/feature-a
         assert!(parsed[0].is_main);
         assert_eq!(parsed[1].branch.as_deref(), Some("feature-a"));
         assert!(!parsed[1].is_main);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     merge 清理会把 Git 的 locked working tree 原文抛给用户；必须先识别这类失败，
+    ///     才能 unlock / `--force --force`，而不是把 Claude 会话锁当成不可恢复错误。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用本次真实失败文案断言 `is_locked_worktree_remove_error`；脏工作区等其它失败不得误判。
+    #[test]
+    fn locked_worktree_remove_error_matches_git_lock_message() {
+        let message = "\
+fatal: cannot remove a locked working tree, lock reason: claude session battery-daily-reset \
+(pid 64976 start Fri Aug 14 05:51:18 2026) use 'remove -f -f' to override or unlock first";
+        assert!(is_locked_worktree_remove_error(message));
+        assert!(is_locked_worktree_remove_error(
+            "Git 命令失败: fatal: cannot remove a locked working tree, lock reason: session"
+        ));
+        assert!(!is_locked_worktree_remove_error(
+            "Git 命令失败: fatal: working tree contains modified or untracked files"
+        ));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户点合并后，源 worktree 常仍被 Claude session lock；清理必须自动越过锁，
+    ///     否则 merge 成功后会卡在 cleanup，残留幽灵 worktree。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     建 linked worktree、`git worktree lock`，再调 `remove_worktree(..., false)`；
+    ///     断言目录消失且 porcelain 不再登记。
+    #[test]
+    fn remove_worktree_unlocks_claude_session_lock() {
+        let root = temp_git_dir("workbench-remove-locked-wt");
+        let repo = root.join("repo");
+        let worktree = root.join("feature-locked");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/locked",
+                &worktree.to_string_lossy(),
+            ],
+        );
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "claude session feature-locked (pid 64976 start Fri Aug 14 05:51:18 2026)",
+                &worktree.to_string_lossy(),
+            ],
+        );
+
+        remove_worktree(&repo, &worktree, false)
+            .expect("locked worktree should be unlocked then removed");
+
+        assert!(
+            !worktree.exists(),
+            "locked worktree directory must be deleted after merge cleanup"
+        );
+        assert!(
+            !is_worktree_registered(&repo, &worktree).expect("registration check"),
+            "git must no longer list the removed worktree"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     越过 Claude session lock 时不得顺带清掉未提交改动；脏工作区仍须用户显式 force。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     lock + 未跟踪文件后 `remove_worktree(..., false)` 必须失败，目录仍在。
+    #[test]
+    fn remove_worktree_keeps_dirty_tree_after_unlocking() {
+        let root = temp_git_dir("workbench-remove-locked-dirty-wt");
+        let repo = root.join("repo");
+        let worktree = root.join("feature-locked-dirty");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/locked-dirty",
+                &worktree.to_string_lossy(),
+            ],
+        );
+        fs::write(worktree.join("scratch.txt"), "keep me\n").expect("dirty worktree");
+        git_test_command(
+            &repo,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "claude session feature-locked-dirty",
+                &worktree.to_string_lossy(),
+            ],
+        );
+
+        let err = remove_worktree(&repo, &worktree, false)
+            .expect_err("dirty locked worktree must not be force-removed");
+        let message = err.to_string().to_ascii_lowercase();
+        assert!(
+            message.contains("modified")
+                || message.contains("untracked")
+                || message.contains("dirty"),
+            "expected dirty-tree error, got: {err}"
+        );
+        assert!(
+            worktree.exists(),
+            "dirty worktree directory must remain after failed remove"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Business Logic（为什么需要这个测试）:

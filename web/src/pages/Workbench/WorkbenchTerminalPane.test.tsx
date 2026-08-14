@@ -289,6 +289,7 @@ interface PaneHostProps {
   store: ReturnType<typeof createWorkbenchTerminalBufferStore>;
   renderVisible?: boolean;
   inputEnabled?: boolean;
+  agentTranscriptActive?: boolean;
   resizeRequestKey?: number;
   onInput?: (sessionId: string, data: string) => void;
   onResize?: (sessionId: string, cols: number, rows: number) => void;
@@ -308,6 +309,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
     store,
     renderVisible = true,
     inputEnabled = true,
+    agentTranscriptActive = false,
     resizeRequestKey = 0,
     onInput,
     onResize,
@@ -335,6 +337,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
         placeholder={placeholder}
         renderVisible={renderVisible}
         inputEnabled={inputEnabled}
+        agentTranscriptActive={agentTranscriptActive}
         onInput={stableInput}
         onResize={stableResize}
         resizeRequestKey={resizeRequestKey}
@@ -872,6 +875,41 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
+  test('restored active Agent keeps SGR transcript scrolling after tmux loses mouse mode', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const onInput = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const { rerender } = render(
+      <PaneHost
+        session={session}
+        store={store}
+        onInput={onInput}
+        agentTranscriptActive={false}
+      />,
+    );
+    const terminal = latestTerminal();
+    terminal.buffer.active.type = 'normal';
+    terminal.buffer.active.baseY = 120;
+    terminal.modes.mouseTrackingMode = 'none';
+
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(true);
+    expect(onInput).not.toHaveBeenCalled();
+
+    rerender(
+      <PaneHost
+        session={session}
+        store={store}
+        onInput={onInput}
+        agentTranscriptActive={true}
+      />,
+    );
+
+    expect(terminalEvents.constructCount).toBe(1);
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(terminal.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(onInput).toHaveBeenCalledWith('s1', '\x1b[<64;1;1M');
+  });
+
   test('mouse-tracked main screen forwards wheel to Claude instead of xterm redraw history', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();

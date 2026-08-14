@@ -14,6 +14,7 @@
 import type { CSSProperties, RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WorkbenchSession } from '@/lib/types';
+import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
 import styles from './Workbench.module.css';
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
 import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
@@ -59,6 +60,8 @@ export interface WorkbenchTerminalAreaProps {
    *   最终 inputEnabled 还须要求 session.status === 'running'。
    */
   isWriteBlocked: (sessionId: string) => boolean;
+  /** 按 terminal session 查询 Agent Runtime 的最新权威投影。 */
+  resolveAgent: (sessionId: string) => AgentSessionProjection | null;
   handleResize: (sessionId: string, cols: number, rows: number) => void;
   handleCursorAnchorChange: (anchor: TerminalCursorAnchor | null) => void;
   /**
@@ -103,6 +106,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
     terminalResizeRequestKey,
     handleInput,
     isWriteBlocked,
+    resolveAgent,
     handleResize,
     handleCursorAnchorChange,
     handleSelectPaneAt,
@@ -171,6 +175,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
             resizeRequestKey={0}
             renderVisible={terminalSurfaceVisible}
             inputEnabled={false}
+            agentTranscriptActive={false}
             onCursorAnchorChange={cursorAnchorActive}
           />
         ) : null}
@@ -219,6 +224,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
                 session.status === 'running' &&
                 !isWriteBlocked(session.id)
               }
+              agentTranscriptActive={Boolean(resolveAgent(session.id)?.isActive)}
               onCursorAnchorChange={
                 !automationConsoleOpen &&
                 workspaceView === 'terminal' &&

@@ -12,6 +12,7 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         bufferType: 'normal',
         baseY: 0,
         mouseTrackingMode: 'none',
+        agentTranscriptActive: false,
       }),
     ).toBe('scrollback');
     expect(
@@ -19,8 +20,20 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         bufferType: 'normal',
         baseY: 12,
         mouseTrackingMode: 'none',
+        agentTranscriptActive: false,
       }),
     ).toBe('scrollback');
+  });
+
+  test('routes a restored active Agent to SGR when tmux did not replay mouse mode', () => {
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'normal',
+        baseY: 120,
+        mouseTrackingMode: 'none',
+        agentTranscriptActive: true,
+      }),
+    ).toBe('sgrFallback');
   });
 
   test('routes a mouse-tracked normal buffer to Claude instead of replaying local redraw frames', () => {
@@ -29,6 +42,7 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         bufferType: 'normal',
         baseY: 120,
         mouseTrackingMode: 'vt200',
+        agentTranscriptActive: false,
       }),
     ).toBe('sgrFallback');
   });
@@ -41,6 +55,7 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         bufferType: 'alternate',
         baseY: 0,
         mouseTrackingMode: 'none',
+        agentTranscriptActive: false,
       }),
     ).toBe('sgrFallback');
     expect(
@@ -48,6 +63,7 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         bufferType: 'alternate',
         baseY: 0,
         mouseTrackingMode: 'vt200',
+        agentTranscriptActive: false,
       }),
     ).toBe('sgrFallback');
   });

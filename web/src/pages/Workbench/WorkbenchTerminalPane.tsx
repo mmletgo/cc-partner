@@ -44,6 +44,8 @@ export interface WorkbenchTerminalPaneProps {
   /** 当前 pane 是否真正处于用户可见的终端表面，独立于是否允许键盘输入。 */
   renderVisible: boolean;
   inputEnabled: boolean;
+  /** 权威 Agent Runtime 是否确认该 terminal 仍由活跃 Agent 持有虚拟 transcript。 */
+  agentTranscriptActive: boolean;
   onInput: (sessionId: string, data: string) => void;
   onResize: (sessionId: string, cols: number, rows: number) => void;
   resizeRequestKey?: number;
@@ -147,6 +149,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     placeholder,
     renderVisible,
     inputEnabled,
+    agentTranscriptActive,
     onInput,
     onResize,
     resizeRequestKey = 0,
@@ -158,6 +161,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const liveWriterRef = useRef<TerminalLiveWriter | null>(null);
   const replayGateRef = useRef<TerminalReplayGate>({ current: false });
   const inputEnabledRef = useRef<boolean>(inputEnabled);
+  const agentTranscriptActiveRef = useRef<boolean>(agentTranscriptActive);
   const renderVisibleRef = useRef<boolean>(renderVisible);
   const previousRenderVisibleRef = useRef<boolean>(renderVisible);
   const resizeTimerRef = useRef<number | null>(null);
@@ -182,6 +186,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   useEffect(() => {
     inputEnabledRef.current = inputEnabled;
   }, [inputEnabled]);
+
+  useEffect(() => {
+    agentTranscriptActiveRef.current = agentTranscriptActive;
+  }, [agentTranscriptActive]);
 
   useEffect(() => {
     renderVisibleRef.current = renderVisible;
@@ -210,13 +218,16 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
      * Business Logic（为什么需要这个函数）:
      *   Claude 新版会在 main/alternate screen 上维护自己的虚拟 transcript。只按 buffer 类型判断时，
      *   main screen 的全屏重绘会落进 xterm scrollback，向上滚动便会重复最后一屏。
+     *   冷启动 attach 不会重放 Agent 先前发出的 DECSET mouse mode；此时新 xterm 虽报告 none，
+     *   tmux 内仍运行的 Agent 仍期待 SGR。Agent Runtime 的活跃投影用于补回这段丢失状态。
      *   已协商 mouse 时 xterm 会按指针坐标发 SGR；resume 后输入区高度不固定，
      *   即使把坐标向上估算若干行也可能仍命中输入区，导致事件送达但 transcript 不滚。
      *   PageUp 只在 Scroll 上下文生效，Chat 输入聚焦时整页不动。
      *
      * Code Logic（这个函数做什么）:
-     *   mouse tracking 优先于 buffer 类型：启用时拦截并固定向 transcript 左上角发 SGR 64/65；
-     *   仅未启用 tracking 的普通 buffer 交给 xterm。转发前回到底部，退出误入的本地重绘历史。
+     *   mouse tracking / 活跃 Agent 优先于 buffer 类型：命中时拦截并固定向 transcript 左上角
+     *   发 SGR 64/65；仅未启用 tracking 且没有活跃 Agent 的普通 buffer 交给 xterm。
+     *   转发前回到底部，退出误入的本地重绘历史。
      */
     terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
       const active = terminal.buffer.active;
@@ -228,6 +239,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         bufferType,
         baseY: active.baseY,
         mouseTrackingMode,
+        agentTranscriptActive: agentTranscriptActiveRef.current,
       });
       if (action !== 'sgrFallback') return true;
       if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) {
