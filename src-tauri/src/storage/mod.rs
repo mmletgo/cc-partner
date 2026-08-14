@@ -7,8 +7,8 @@
 //!     运行期 `sqlx::query`（非宏）规避编译期 DATABASE_URL 要求。
 
 pub mod agent_hub_repo;
-pub mod battery_repo;
 pub mod agent_ledger_repo;
+pub mod battery_repo;
 pub mod cc_history_repo;
 pub mod claude_md_repo;
 pub mod content_version_repo;
@@ -32,11 +32,11 @@ pub mod workbench_session_repo;
 pub mod workbench_workspace_layout_repo;
 pub mod workbench_worktree_repo;
 
-pub use battery_repo::BatteryRepo;
 pub use agent_hub_repo::{
     AgentHubCheckoutBindingRow, AgentHubImportFault, AgentHubRepo, UpsertAgentHubCheckoutBinding,
     UpsertAgentHubProjectMapping,
 };
+pub use battery_repo::BatteryRepo;
 // AgentHubProjectMappingRow 由调用方按需 `crate::storage::agent_hub_repo::` 全路径引用，避免 unused re-export。
 pub use agent_ledger_repo::AgentLedgerRepo;
 pub use cc_history_repo::ClaudeHistoryRepo;

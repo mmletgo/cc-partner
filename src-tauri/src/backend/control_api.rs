@@ -2112,7 +2112,7 @@ mod tests {
     use crate::backend::authority::CONTROL_SCHEMA_VERSION;
     use crate::backend::control::BackendControlFile;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::config_runtime::ConfigRuntime;
     use crate::config_store::MemoryConfigStore;

@@ -9,8 +9,8 @@
 pub mod agent_hub;
 pub mod attention;
 pub mod backend;
-pub mod battery;
 pub mod backup;
+pub mod battery;
 pub mod cc_history;
 pub mod claude_code_assets;
 pub mod claude_md;

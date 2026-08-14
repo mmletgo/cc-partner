@@ -558,15 +558,14 @@ pub async fn get_activity_detail(
 #[tauri::command]
 pub async fn record_water(state: State<'_, AppState>) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
-    crate::health::acknowledge_template_runtime(&state.health, HEALTH_REMINDER_WATER_ID, now, false);
-    crate::health::persist_habit_event_by_id(
-        &state,
+    crate::health::acknowledge_template_runtime(
+        &state.health,
         HEALTH_REMINDER_WATER_ID,
         now,
-        "completed",
-        0,
-    )
-    .await?;
+        false,
+    );
+    crate::health::persist_habit_event_by_id(&state, HEALTH_REMINDER_WATER_ID, now, "completed", 0)
+        .await?;
     Ok(())
 }
 
@@ -577,7 +576,12 @@ pub async fn record_water(state: State<'_, AppState>) -> Result<(), AppError> {
 #[tauri::command]
 pub async fn skip_water_reminder(state: State<'_, AppState>) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
-    crate::health::acknowledge_template_runtime(&state.health, HEALTH_REMINDER_WATER_ID, now, false);
+    crate::health::acknowledge_template_runtime(
+        &state.health,
+        HEALTH_REMINDER_WATER_ID,
+        now,
+        false,
+    );
     Ok(())
 }
 
@@ -700,14 +704,8 @@ pub async fn add_habit_manual(
         return Err(AppError::validation("只有即时打卡模板支持手动 +1"));
     }
     let now = chrono::Utc::now().timestamp();
-    let id = crate::health::persist_habit_event_by_id(
-        &state,
-        &template_id,
-        now,
-        "completed",
-        0,
-    )
-    .await?;
+    let id =
+        crate::health::persist_habit_event_by_id(&state, &template_id, now, "completed", 0).await?;
     crate::health::acknowledge_template_runtime(&state.health, &template_id, now, false);
     Ok(id)
 }
@@ -730,14 +728,8 @@ pub async fn acknowledge_health_reminder(
     match action.as_str() {
         "completed" => {
             crate::health::acknowledge_template_runtime(&state.health, &template_id, now, false);
-            crate::health::persist_habit_event_by_id(
-                &state,
-                &template_id,
-                now,
-                "completed",
-                0,
-            )
-            .await?;
+            crate::health::persist_habit_event_by_id(&state, &template_id, now, "completed", 0)
+                .await?;
         }
         "skipped" => {
             crate::health::acknowledge_template_runtime(&state.health, &template_id, now, false);

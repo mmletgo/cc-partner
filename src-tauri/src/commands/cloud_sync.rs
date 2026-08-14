@@ -203,7 +203,7 @@ pub async fn test_cloud_sync(state: State<'_, AppState>) -> Result<TestCloudSync
 mod tests {
     use super::*;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::config_store::MemoryConfigStore;
     use std::sync::atomic::{AtomicUsize, Ordering};

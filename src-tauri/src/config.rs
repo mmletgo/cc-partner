@@ -1360,7 +1360,7 @@ impl AppConfig {
                 cloud_sync_interval_secs: default_cloud_sync_interval(),
                 cloud_sync_branch: None,
                 health: HealthConfig::default(),
-            battery: BatteryConfig::default(),
+                battery: BatteryConfig::default(),
                 orchestrator: OrchestratorAutomationConfig::default(),
                 github_trending: GithubTrendingConfig::default(),
                 internal_claude: InternalClaudeConfig::default(),
@@ -1422,18 +1422,24 @@ fn validate_hotkey_field(field: &str, value: &str) -> Result<(), AppError> {
 ///     各来源分钟 0..=180；日次数 0..=99；余额上限 30..=720；欢迎赠送 0..=180。
 fn validate_battery_config_fields(battery: &BatteryConfig) -> Result<(), AppError> {
     let rewards = [
-        ("battery.rewards.waterMinutes", battery.rewards.water_minutes),
+        (
+            "battery.rewards.waterMinutes",
+            battery.rewards.water_minutes,
+        ),
         ("battery.rewards.restMinutes", battery.rewards.rest_minutes),
-        ("battery.rewards.kegelMinutes", battery.rewards.kegel_minutes),
-        ("battery.rewards.customMinutes", battery.rewards.custom_minutes),
+        (
+            "battery.rewards.kegelMinutes",
+            battery.rewards.kegel_minutes,
+        ),
+        (
+            "battery.rewards.customMinutes",
+            battery.rewards.custom_minutes,
+        ),
         (
             "battery.rewards.flashcardMinutes",
             battery.rewards.flashcard_minutes,
         ),
-        (
-            "battery.welcomeGrantMinutes",
-            battery.welcome_grant_minutes,
-        ),
+        ("battery.welcomeGrantMinutes", battery.welcome_grant_minutes),
     ];
     for (field, value) in rewards {
         if !(0..=180).contains(&value) {

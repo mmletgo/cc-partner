@@ -342,7 +342,9 @@ pub(crate) async fn persist_habit_event_by_id(
             "rest"
         };
         if kind == "triggered" || kind == "completed" {
-            let _ = repo.insert_rest_record(now, rest_kind, duration_seconds).await?;
+            let _ = repo
+                .insert_rest_record(now, rest_kind, duration_seconds)
+                .await?;
         }
     }
     if kind == "completed" {
@@ -362,10 +364,8 @@ async fn credit_health_completed(
     now: i64,
 ) {
     let config = state.config.read().unwrap().battery.clone();
-    let repo = crate::storage::BatteryRepo::with_gate(
-        state.db.clone(),
-        state.maintenance_gate.clone(),
-    );
+    let repo =
+        crate::storage::BatteryRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
     let source = crate::config::BatteryCreditSource::from_health_template_id(template_id);
     let source_id = crate::battery::habit_source_id(template_id, habit_id);
     match crate::battery::credit(&repo, &config, source, &source_id, now).await {
@@ -412,9 +412,7 @@ pub fn open_health_overlay(app: &AppHandle, template_id: &str) -> Result<(), App
         WebviewWindowBuilder::new(
             app,
             &label,
-            WebviewUrl::App(
-                format!("/health-overlay?display={i}&template={template_id}").into(),
-            ),
+            WebviewUrl::App(format!("/health-overlay?display={i}&template={template_id}").into()),
         )
         .title("健康提醒")
         .decorations(false)
@@ -547,9 +545,14 @@ pub fn start_overlay_session(
             return;
         }
         let fin_now = Utc::now().timestamp();
-        if let Err(e) =
-            persist_habit_event_by_id(&battery_state, &owned_id, fin_now, "completed", session_seconds)
-                .await
+        if let Err(e) = persist_habit_event_by_id(
+            &battery_state,
+            &owned_id,
+            fin_now,
+            "completed",
+            session_seconds,
+        )
+        .await
         {
             tracing::warn!("模板会话结束记录失败: {e}");
         }

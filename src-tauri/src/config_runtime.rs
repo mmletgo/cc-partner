@@ -985,7 +985,9 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{
+        BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
     use crate::config_store::{
         ConfigIoStage, FaultInjectingConfigIo, FsConfigStore, MemoryConfigStore, StdConfigIo,
     };

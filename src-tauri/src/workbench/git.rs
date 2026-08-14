@@ -4082,7 +4082,10 @@ UU web/src/App.tsx
         git_test_command(&repo, &["add", "README.md"]);
         git_test_command(&repo, &["commit", "-m", "initial"]);
         git_test_command(&repo, &["branch", "main"]);
-        git_test_command(&repo, &["init", "--bare", origin.to_str().expect("origin path")]);
+        git_test_command(
+            &repo,
+            &["init", "--bare", origin.to_str().expect("origin path")],
+        );
         git_test_command(
             &repo,
             &[
@@ -4212,7 +4215,16 @@ UU web/src/App.tsx
         git_test_command(&repo, &["add", "merged.txt"]);
         git_test_command(&repo, &["commit", "-m", "already merged work"]);
         git_test_command(&repo, &["checkout", "main"]);
-        git_test_command(&repo, &["merge", "--no-ff", "already-merged", "-m", "merge already-merged"]);
+        git_test_command(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "already-merged",
+                "-m",
+                "merge already-merged",
+            ],
+        );
 
         git_test_command(&repo, &["checkout", "-b", "agent/a"]);
         fs::write(repo.join("agent-a.txt"), "a\n").expect("write agent a");

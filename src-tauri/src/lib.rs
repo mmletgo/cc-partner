@@ -54,13 +54,13 @@ mod internal_claude;
 // Gate C N/N+1: mixed_version harness cites Gate B fail-closed by stable production function name.
 #[cfg(test)]
 pub use claude_code_assets::prove_legacy_lossy_placeholder_never_overwrites_canonical_credential;
+pub mod battery;
 pub mod cloud_sync;
 mod commands;
 pub mod config;
 pub mod config_runtime;
 pub mod config_store;
 pub mod error;
-pub mod battery;
 pub mod health;
 mod hotkey;
 mod mobile;
@@ -127,11 +127,11 @@ use crate::backend::runtime::{
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
     agent_hub as agent_hub_cmd, attention as attention_cmd, backend as backend_cmd,
-    backup as backup_cmd, cc_history as cc_history_cmd,
+    backup as backup_cmd, battery as battery_cmd, cc_history as cc_history_cmd,
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
     github_trending as github_trending_cmd, gui_bootstrap as gui_bootstrap_cmd,
-    battery as battery_cmd, health as health_cmd, internal_claude as internal_claude_cmd,
+    health as health_cmd, internal_claude as internal_claude_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
     orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
     orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,

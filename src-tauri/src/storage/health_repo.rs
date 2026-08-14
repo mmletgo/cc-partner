@@ -532,13 +532,12 @@ impl HealthRepo {
         template_id: &str,
         kind: &str,
     ) -> Result<Option<i64>, AppError> {
-        let row: (Option<i64>,) = sqlx::query_as(
-            "SELECT MAX(ts) FROM habit_records WHERE template_id = ? AND kind = ?",
-        )
-        .bind(template_id)
-        .bind(kind)
-        .fetch_one(&self.db)
-        .await?;
+        let row: (Option<i64>,) =
+            sqlx::query_as("SELECT MAX(ts) FROM habit_records WHERE template_id = ? AND kind = ?")
+                .bind(template_id)
+                .bind(kind)
+                .fetch_one(&self.db)
+                .await?;
         Ok(row.0)
     }
 
@@ -963,7 +962,12 @@ mod tests {
         repo.insert_habit_record("water", 200, "completed", 0)
             .await
             .unwrap();
-        assert_eq!(repo.count_habit_since("kegel", 0, "completed").await.unwrap(), 1);
+        assert_eq!(
+            repo.count_habit_since("kegel", 0, "completed")
+                .await
+                .unwrap(),
+            1
+        );
         assert_eq!(repo.sum_habit_duration_since("kegel", 0).await.unwrap(), 30);
         assert_eq!(
             repo.get_last_habit_ts("kegel", "completed").await.unwrap(),
@@ -976,6 +980,11 @@ mod tests {
         assert_eq!(daily.len(), 7);
         assert_eq!(daily[0], 1);
         assert_eq!(repo.cleanup_habit_older_than(150).await.unwrap(), 1);
-        assert_eq!(repo.count_habit_since("kegel", 0, "triggered").await.unwrap(), 0);
+        assert_eq!(
+            repo.count_habit_since("kegel", 0, "triggered")
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

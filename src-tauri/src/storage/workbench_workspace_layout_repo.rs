@@ -304,10 +304,12 @@ impl WorkbenchWorkspaceLayoutRepo {
             ));
         }
         with_shared_write_lease(&self.gate, async {
-            sqlx::query("DELETE FROM workbench_workspace_layouts WHERE slot_key = ? AND kind = 'auto'")
-                .bind(slot_key)
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "DELETE FROM workbench_workspace_layouts WHERE slot_key = ? AND kind = 'auto'",
+            )
+            .bind(slot_key)
+            .execute(&self.pool)
+            .await?;
             Ok(())
         })
         .await
@@ -472,9 +474,15 @@ mod tests {
             .is_none());
         assert!(repo.get_by_slot("desktop:auto").await.unwrap().is_some());
 
-        let err = repo.delete_window_auto_slot("desktop:auto").await.unwrap_err();
+        let err = repo
+            .delete_window_auto_slot("desktop:auto")
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), "workspace_layout_delete_window_auto_only");
-        let named_err = repo.delete_window_auto_slot(&auto.slot_key).await.unwrap_err();
+        let named_err = repo
+            .delete_window_auto_slot(&auto.slot_key)
+            .await
+            .unwrap_err();
         assert_eq!(named_err.code(), "workspace_layout_delete_window_auto_only");
     }
 

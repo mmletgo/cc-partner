@@ -938,7 +938,8 @@ mod tests {
     async fn setup_restore_state() -> (AppState, tempfile::TempDir) {
         use crate::backend::ui::HeadlessBackendUi;
         use crate::config::{
-            AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+            AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig,
+            OrchestratorAutomationConfig,
         };
         use crate::net::peer_client::PeerClient;
         use crate::orchestrator::repo::OrchestratorRepo;

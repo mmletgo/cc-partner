@@ -42,7 +42,12 @@ pub fn credit_delta_ms(
 ///
 /// Code Logic（这个函数做什么）:
 ///     charging && consuming && remaining>0 时取 min(elapsed, remaining)，否则 0。
-pub fn debit_delta_ms(charging: bool, any_consuming_window: bool, remaining_ms: i64, elapsed_ms: i64) -> i64 {
+pub fn debit_delta_ms(
+    charging: bool,
+    any_consuming_window: bool,
+    remaining_ms: i64,
+    elapsed_ms: i64,
+) -> i64 {
     if !charging || !any_consuming_window || remaining_ms <= 0 || elapsed_ms <= 0 {
         return 0;
     }

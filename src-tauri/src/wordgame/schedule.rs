@@ -7,7 +7,7 @@
 //!     给定词库快照与「今天」，选出下一题；应用答对/答错后返回新进度。
 
 use super::models::{
-    CORRECT_TO_PASS, CORRECT_TODAY_CAP, FAMILIAR_INTERVAL_DAYS, QuestionType, WordLemma,
+    QuestionType, WordLemma, CORRECT_TODAY_CAP, CORRECT_TO_PASS, FAMILIAR_INTERVAL_DAYS,
 };
 
 /// 某词某题型的进度。

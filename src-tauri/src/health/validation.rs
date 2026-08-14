@@ -246,7 +246,10 @@ fn validate_reminder_template(
     match template.trigger {
         ReminderTrigger::Interval => {
             let secs = template.interval_seconds.ok_or_else(|| {
-                HealthFieldError::new("health.reminders", format!("[{idx}] interval 必须提供间隔秒数"))
+                HealthFieldError::new(
+                    "health.reminders",
+                    format!("[{idx}] interval 必须提供间隔秒数"),
+                )
             })?;
             if !(WATER_INTERVAL_SECONDS_MIN..=WATER_INTERVAL_SECONDS_MAX).contains(&secs) {
                 return Err(HealthFieldError::new(
@@ -298,7 +301,11 @@ fn validate_reminder_template(
     reject_too_long("name", &template.name, REMINDER_NAME_MAX_CHARS)?;
     reject_too_long("title", &template.title, REMINDER_TITLE_MAX_CHARS)?;
     reject_too_long("body", &template.body, REMINDER_BODY_MAX_CHARS)?;
-    reject_too_long("confirmLabel", &template.confirm_label, REMINDER_LABEL_MAX_CHARS)?;
+    reject_too_long(
+        "confirmLabel",
+        &template.confirm_label,
+        REMINDER_LABEL_MAX_CHARS,
+    )?;
     reject_too_long("unitLabel", &template.unit_label, REMINDER_LABEL_MAX_CHARS)?;
     Ok(())
 }
@@ -717,7 +724,9 @@ mod tests {
     fn rejects_deleting_or_unmarking_builtin_templates() {
         let mut missing_kegel = base_cfg();
         missing_kegel.reminders.retain(|t| t.id != "kegel");
-        let err = validate_health_config(&missing_kegel).unwrap_err().to_string();
+        let err = validate_health_config(&missing_kegel)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("health.reminders") && err.contains("kegel"),
             "msg={err}"
@@ -725,7 +734,9 @@ mod tests {
 
         let mut not_builtin = base_cfg();
         template_by_id_mut(&mut not_builtin, "water").builtin = false;
-        let err = validate_health_config(&not_builtin).unwrap_err().to_string();
+        let err = validate_health_config(&not_builtin)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("health.reminders"), "msg={err}");
     }
 
@@ -743,7 +754,8 @@ mod tests {
     fn rejects_more_than_twelve_templates() {
         let mut cfg = base_cfg();
         for i in 0..10 {
-            cfg.reminders.push(custom_interval_instant(&format!("c{i}")));
+            cfg.reminders
+                .push(custom_interval_instant(&format!("c{i}")));
         }
         assert_eq!(cfg.reminders.len(), 13);
         let err = validate_health_config(&cfg).unwrap_err().to_string();

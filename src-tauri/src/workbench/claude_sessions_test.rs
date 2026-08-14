@@ -1506,7 +1506,7 @@ fn normalize_path_inside_root_filters_outsiders() {
 async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppState {
     use crate::backend::ui::HeadlessBackendUi;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::net::peer_client::PeerClient;
     use crate::orchestrator::repo::OrchestratorRepo;
@@ -1548,7 +1548,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         cloud_sync_interval_secs: 600,
         cloud_sync_branch: None,
         health: HealthConfig::default(),
-            battery: BatteryConfig::default(),
+        battery: BatteryConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
         internal_claude: crate::config::InternalClaudeConfig::default(),

@@ -667,7 +667,9 @@ impl ConfigStore for MemoryConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{
+        BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
 
     /// 构造可校验的最小合法配置。
     fn sample_config(device_name: &str) -> AppConfig {

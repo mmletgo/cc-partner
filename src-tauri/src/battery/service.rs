@@ -64,7 +64,10 @@ fn drain_runtime() -> std::sync::MutexGuard<'static, BatteryDrainRuntime> {
 }
 
 fn local_day_bounds(now: i64) -> (i64, i64) {
-    let local = Local.timestamp_opt(now, 0).single().unwrap_or_else(Local::now);
+    let local = Local
+        .timestamp_opt(now, 0)
+        .single()
+        .unwrap_or_else(Local::now);
     let start = local
         .date_naive()
         .and_hms_opt(0, 0, 0)
@@ -113,7 +116,12 @@ pub fn habit_source_id(template_id: &str, habit_row_id: i64) -> String {
 }
 
 /// 闪卡答对的幂等键。
-pub fn wordgame_source_id(lemma: &str, question_type: &str, today: &str, correct_today: i64) -> String {
+pub fn wordgame_source_id(
+    lemma: &str,
+    question_type: &str,
+    today: &str,
+    correct_today: i64,
+) -> String {
     format!("wordgame:{lemma}:{question_type}:{today}:{correct_today}")
 }
 
@@ -159,7 +167,9 @@ pub async fn set_mode(
     now: i64,
 ) -> Result<BatterySnapshotDto, AppError> {
     if mode != "charging" && mode != "unlimited" {
-        return Err(AppError::validation("battery.mode 只能是 charging 或 unlimited"));
+        return Err(AppError::validation(
+            "battery.mode 只能是 charging 或 unlimited",
+        ));
     }
     let mut state = repo.ensure_default_state(now).await?;
     if state.mode == mode {
@@ -235,7 +245,12 @@ pub async fn credit(
     let mut state = repo.ensure_default_state(now).await?;
     let (day_start, day_end) = local_day_bounds(now);
     let today_count = repo
-        .count_credits_today(source_kind(source), source_prefix(source), day_start, day_end)
+        .count_credits_today(
+            source_kind(source),
+            source_prefix(source),
+            day_start,
+            day_end,
+        )
         .await?;
     let delta = credit_delta_ms(config, source, today_count, state.remaining_ms);
     if delta <= 0 {
@@ -351,7 +366,10 @@ pub async fn list_ledger(
             m.insert("kind".into(), serde_json::json!(r.kind));
             m.insert("sourceId".into(), serde_json::json!(r.source_id));
             m.insert("deltaMs".into(), serde_json::json!(r.delta_ms));
-            m.insert("balanceAfterMs".into(), serde_json::json!(r.balance_after_ms));
+            m.insert(
+                "balanceAfterMs".into(),
+                serde_json::json!(r.balance_after_ms),
+            );
             m.insert("note".into(), serde_json::json!(r.note));
             m
         })
@@ -381,9 +399,7 @@ mod tests {
     static SERVICE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_drain_for_test() -> std::sync::MutexGuard<'static, ()> {
-        let guard = SERVICE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = SERVICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut rt = drain_runtime();
         rt.consuming.clear();
         rt.last_settle_ms = None;
@@ -395,13 +411,19 @@ mod tests {
         let _lock = lock_drain_for_test();
         let repo = repo().await;
         let cfg = BatteryConfig::default();
-        let snap = set_mode(&repo, &cfg, "charging", 1_700_000_000).await.unwrap();
+        let snap = set_mode(&repo, &cfg, "charging", 1_700_000_000)
+            .await
+            .unwrap();
         assert_eq!(snap.mode, "charging");
         assert_eq!(snap.remaining_ms, 25 * MS_PER_MINUTE);
         assert_eq!(snap.credit_minutes, Some(25));
-        let again = set_mode(&repo, &cfg, "unlimited", 1_700_000_010).await.unwrap();
+        let again = set_mode(&repo, &cfg, "unlimited", 1_700_000_010)
+            .await
+            .unwrap();
         assert_eq!(again.remaining_ms, 25 * MS_PER_MINUTE);
-        let back = set_mode(&repo, &cfg, "charging", 1_700_000_020).await.unwrap();
+        let back = set_mode(&repo, &cfg, "charging", 1_700_000_020)
+            .await
+            .unwrap();
         assert_eq!(back.remaining_ms, 25 * MS_PER_MINUTE);
         assert_eq!(back.credit_minutes, None);
     }
@@ -428,7 +450,9 @@ mod tests {
         let _lock = lock_drain_for_test();
         let repo = repo().await;
         let cfg = BatteryConfig::default();
-        set_mode(&repo, &cfg, "charging", 1_700_010_000).await.unwrap();
+        set_mode(&repo, &cfg, "charging", 1_700_010_000)
+            .await
+            .unwrap();
         report_focus(&repo, &cfg, "main", true, 1_700_010_000_000)
             .await
             .unwrap();

@@ -978,7 +978,7 @@ mod tests {
 mod config_writer_tests {
     use super::*;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::config_store::MemoryConfigStore;
     use std::sync::Arc;

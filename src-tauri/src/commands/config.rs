@@ -467,7 +467,9 @@ pub async fn choose_dir(app: AppHandle) -> Result<Option<String>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{
+        BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
     use crate::config_store::MemoryConfigStore;
     use crate::hotkey::FakeGlobalShortcutBackend;
     use std::sync::Arc;

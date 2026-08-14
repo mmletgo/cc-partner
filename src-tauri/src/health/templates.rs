@@ -121,8 +121,7 @@ pub fn reconcile_template_runtimes(
     templates: &[HealthReminderTemplate],
     now_ts: i64,
 ) {
-    let keep: std::collections::HashSet<&str> =
-        templates.iter().map(|t| t.id.as_str()).collect();
+    let keep: std::collections::HashSet<&str> = templates.iter().map(|t| t.id.as_str()).collect();
     runtimes.retain(|id, _| keep.contains(id.as_str()));
     for tmpl in templates {
         runtimes
@@ -245,7 +244,12 @@ mod tests {
         assert!(!should_fire_template(&tmpl, &rt, &MachineState::Idle, 3599));
         assert!(should_fire_template(&tmpl, &rt, &MachineState::Idle, 3600));
         rt.pending = true;
-        assert!(!should_fire_template(&tmpl, &rt, &MachineState::Idle, 99999));
+        assert!(!should_fire_template(
+            &tmpl,
+            &rt,
+            &MachineState::Idle,
+            99999
+        ));
     }
 
     #[test]

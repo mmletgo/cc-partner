@@ -177,10 +177,15 @@ fn allocate_satellite_label(inner: &Inner) -> Result<String, AppError> {
 }
 
 fn bind(inner: &mut Inner, label: &str, project_id: &str) {
-    if let Some(previous) = inner.by_label.insert(label.to_string(), project_id.to_string()) {
+    if let Some(previous) = inner
+        .by_label
+        .insert(label.to_string(), project_id.to_string())
+    {
         inner.by_project.remove(&previous);
     }
-    inner.by_project.insert(project_id.to_string(), label.to_string());
+    inner
+        .by_project
+        .insert(project_id.to_string(), label.to_string());
 }
 
 fn unbind_label(inner: &mut Inner, label: &str) {
@@ -247,7 +252,10 @@ mod tests {
     #[test]
     fn claim_detects_other_window_and_main_can_claim() {
         let registry = WorkbenchWindowRegistry::default();
-        assert_eq!(registry.claim("main", "alpha").unwrap(), ClaimResult::Claimed);
+        assert_eq!(
+            registry.claim("main", "alpha").unwrap(),
+            ClaimResult::Claimed
+        );
         assert_eq!(
             registry.claim("main", "alpha").unwrap(),
             ClaimResult::Unchanged
@@ -256,7 +264,10 @@ mod tests {
             ClaimResult::OccupiedByOther { label } => assert_eq!(label, "main"),
             other => panic!("expected occupied, got {other:?}"),
         }
-        assert_eq!(registry.claim("main", "beta").unwrap(), ClaimResult::Claimed);
+        assert_eq!(
+            registry.claim("main", "beta").unwrap(),
+            ClaimResult::Claimed
+        );
         let snap = registry.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].project_id, "beta");

@@ -1678,7 +1678,8 @@ mod tests {
         use crate::backend::ui::HeadlessBackendUi;
         use crate::cloud_sync::runtime::CloudSyncRuntime;
         use crate::config::{
-            AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+            AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig,
+            OrchestratorAutomationConfig,
         };
         use crate::config_runtime::ConfigRuntime;
         use crate::config_store::MemoryConfigStore;

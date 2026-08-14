@@ -3102,7 +3102,8 @@ mod tests {
     #[tokio::test]
     async fn hotkey_os_rolls_back_when_owner_durable_save_fails() {
         use crate::config::{
-            AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
+            AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig,
+            OrchestratorAutomationConfig,
         };
         use crate::config_runtime::ConfigRuntime;
         use crate::config_store::MemoryConfigStore;

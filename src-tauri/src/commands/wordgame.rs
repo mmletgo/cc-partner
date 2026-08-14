@@ -12,7 +12,7 @@ use crate::storage::wordgame_repo::WordGameRepo;
 use crate::wordgame::models::{QuestionKind, QuestionType, QuizItem, REQUIRED_CACHED_NEW_WORDS};
 use crate::wordgame::runtime::retry_preheat;
 use crate::wordgame::schedule::{
-    TypeProgress, answers_match, apply_answer, local_today, pick_next_card,
+    answers_match, apply_answer, local_today, pick_next_card, TypeProgress,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -33,10 +33,8 @@ async fn credit_wordgame_correct(
     correct_today: i64,
 ) {
     let config = state.config.read().unwrap().battery.clone();
-    let battery_repo = crate::storage::BatteryRepo::with_gate(
-        state.db.clone(),
-        state.maintenance_gate.clone(),
-    );
+    let battery_repo =
+        crate::storage::BatteryRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
     let source_id = crate::battery::wordgame_source_id(lemma, question_type, today, correct_today);
     let now = chrono::Utc::now().timestamp();
     match crate::battery::credit(
@@ -164,7 +162,14 @@ pub async fn submit_wordgame_answer(
     repo.upsert_lemma(&outcome.lemma).await?;
     repo.upsert_progress(&outcome.progress).await?;
     if correct {
-        credit_wordgame_correct(&state, &req.lemma, req.question_type.as_str(), &today, outcome.progress.correct_today).await;
+        credit_wordgame_correct(
+            &state,
+            &req.lemma,
+            req.question_type.as_str(),
+            &today,
+            outcome.progress.correct_today,
+        )
+        .await;
     }
     let next = next_card_for_state(&state, Some((req.lemma.as_str(), req.question_type))).await?;
     Ok(WordgameSubmitResultDto {

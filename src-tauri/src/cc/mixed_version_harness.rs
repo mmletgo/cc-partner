@@ -12,7 +12,9 @@ use crate::backend::ui::HeadlessBackendUi;
 use crate::cc::engine::cc_sync_with_peer;
 use crate::cc::merger::merge_cc_history;
 use crate::cc::models::ClaudeHistoryRow;
-use crate::config::{AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
+use crate::config::{
+    AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+};
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
 use crate::net::protocol::{CAPABILITY_CC_HISTORY_PAGED_SYNC_V1, PROTOCOL_VERSION_V1};
@@ -330,7 +332,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         cloud_sync_interval_secs: 600,
         cloud_sync_branch: None,
         health: HealthConfig::default(),
-            battery: BatteryConfig::default(),
+        battery: BatteryConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
         internal_claude: crate::config::InternalClaudeConfig::default(),
