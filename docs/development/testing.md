@@ -331,7 +331,7 @@ Run on the integrated tree after Gate D merge (Program Task 5). Prefer serial pr
 # Rust — prefer --lib for unit filters; serialize smoke/integration
 cd src-tauri
 # Tauri resource glob needs at least one file under resources/browser-runtime/
-# (gitignored; node scripts/prepare-tauri-sidecar.mjs or a local .platform-unavailable placeholder)
+# (gitignored; src-tauri/build.rs writes .platform-unavailable if the dir is missing/empty)
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked --lib agent_hub -- --test-threads=1

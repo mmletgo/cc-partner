@@ -384,7 +384,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 - **bundle 配置（tauri.conf.json）**：
   - `targets: "all"` —— 默认本平台全产物；**CI Windows 显式 `--bundles nsis`**（见下），不打包 MSI。
-  - `resources: ["resources/browser-runtime/**/*"]` —— 打包 managed Chromium；`prepare-tauri-sidecar` 在目标无 lock 资产（如 `aarch64-unknown-linux-gnu`）时必须写入 `.platform-unavailable` 占位，否则 Tauri build.rs 因 glob 未匹配失败。
+  - `resources: ["resources/browser-runtime/**/*"]` —— 打包 managed Chromium。目录 gitignore；`src-tauri/build.rs` 在 `tauri_build` 前会把损坏/自指 symlink 换成真实目录，空目录写入 `.platform-unavailable`。`prepare-tauri-sidecar` 在目标无 lock 资产（如 `aarch64-unknown-linux-gnu`）时同样写该占位；正式包要真实 headless-shell 仍须先跑 prepare。
   - 基础配置的 `macOS.signingIdentity: "-"` 允许本地 ad-hoc 构建；输入监控可由用户在系统设置中手动添加，但重建后 TCC 身份可能漂移。没有 Apple Developer ID 时不得把未公证包作为官方 macOS Release 发布。
   - `tauri.internal.conf.json` 是历史命名的固定签名 overlay，只覆盖 `signingIdentity=cc-partner Internal Code Signing` 并关闭 macOS updater artifact；产品名、Bundle ID 与 updater endpoint 均继承统一正式版。`scripts/build-macos-internal.sh` 产出 `cc-partner.app` 并校验 nested code、canonical Bundle ID、证书 SHA-256 和 designated requirement，任一漂移 fail closed，禁止在固定签名构建中回退 ad-hoc。
   - `windows.wix.language` 仍可配置，但 **stable release CI 不跑 WiX/MSI**（managed Chromium 下 light.exe 失败且无细节日志；历史 v0.6.x 也只发布 nsis）。

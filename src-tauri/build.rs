@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 ///
 /// Code Logic（这个函数做什么）:
 ///     显式声明 tauri 配置和图标文件为 Cargo build script 依赖；debug profile 下生成开发期 sidecar
-///     launcher；最后委托 `tauri_build::build()` 生成 Tauri 所需的编译期上下文。
+///     launcher；确保 `resources/browser-runtime` 可被 Tauri resource glob 匹配；最后委托
+///     `tauri_build::build()` 生成 Tauri 所需的编译期上下文。
 fn main() {
     println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-changed=tauri.internal.conf.json");
@@ -26,8 +27,73 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=TARGET");
     ensure_debug_sidecar_launcher();
+    ensure_browser_runtime_resource();
     compile_macos_notification_auth();
     tauri_build::build()
+}
+
+/// 保证 Tauri `bundle.resources` 的 `resources/browser-runtime/**/*` 至少能匹配一个文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     managed Chromium 目录被 gitignore，干净克隆或误提交的自指/失效 symlink 会让
+///     `tauri_build` 因 glob 未匹配直接失败，阻断 `cargo check` / `tauri dev` / clippy。
+///
+/// Code Logic（这个函数做什么）:
+///     若路径是损坏/自指 symlink 或普通文件则删除后重建目录；目录为空时写入
+///     `.platform-unavailable` 占位。已有真实 runtime 内容则不动。
+fn ensure_browser_runtime_resource() {
+    let runtime_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("browser-runtime");
+    println!("cargo:rerun-if-changed=resources/browser-runtime");
+
+    let usable = browser_runtime_dir_has_entries(&runtime_root);
+    if !usable {
+        replace_unusable_browser_runtime_path(&runtime_root);
+        if let Err(error) = fs::create_dir_all(&runtime_root) {
+            panic!("创建 browser-runtime 资源目录失败: {error}");
+        }
+    }
+
+    if browser_runtime_dir_has_entries(&runtime_root) {
+        return;
+    }
+
+    let placeholder = runtime_root.join(".platform-unavailable");
+    if let Err(error) = fs::write(
+        &placeholder,
+        "managed browser runtime not prepared; run node scripts/prepare-browser-runtime.mjs --platform current\n",
+    ) {
+        panic!("写入 browser-runtime 占位失败: {error}");
+    }
+}
+
+/// 判断 browser-runtime 路径是否已是可读且非空的目录。
+///
+/// Code Logic（这个函数做什么）:
+///     `read_dir` 会跟随 symlink；自指/损坏链接或空目录返回 false。
+fn browser_runtime_dir_has_entries(path: &Path) -> bool {
+    match fs::read_dir(path) {
+        Ok(entries) => entries.filter_map(Result::ok).next().is_some(),
+        Err(_) => false,
+    }
+}
+
+/// 删除无法作为资源根的 browser-runtime 路径（损坏 symlink 或普通文件）。
+///
+/// Code Logic（这个函数做什么）:
+///     只对 symlink / 普通文件 `remove_file`，避免 `remove_dir_all` 误删 symlink 指向的目标。
+fn replace_unusable_browser_runtime_path(path: &Path) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return,
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() || file_type.is_file() {
+        if let Err(error) = fs::remove_file(path) {
+            panic!("移除无效 browser-runtime 路径失败: {error}");
+        }
+    }
 }
 
 /// 编译 macOS 通知权限 ObjC 桥接。

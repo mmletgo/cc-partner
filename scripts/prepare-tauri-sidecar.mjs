@@ -13,8 +13,10 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -103,12 +105,13 @@ function cargoTargetToBrowserPlatform(triple) {
  *   无 managed Chromium 的目标（如 linux aarch64）仍应产出可安装包，仅 verification 不可用。
  *
  * Code Logic（这个函数做什么）:
- *   若 browser-runtime 根目录下没有任何文件，写入 `.platform-unavailable` 占位；
- *   已有真实 runtime 内容则不动。
+ *   损坏/自指 symlink 或普通文件先 unlink 再 mkdir；目录为空时写入
+ *   `.platform-unavailable` 占位。已有真实 runtime 内容则不动。
  *
  * @param {string} reason 写入占位时的说明文本
  */
 function ensureBrowserRuntimeResourcePresent(reason) {
+  replaceUnusableBrowserRuntimeRoot();
   mkdirSync(BROWSER_RUNTIME_ROOT, { recursive: true });
   let hasContent = false;
   try {
@@ -125,6 +128,25 @@ function ensureBrowserRuntimeResourcePresent(reason) {
     'utf8',
   );
   console.log(`已写入 browser-runtime 占位: ${BROWSER_RUNTIME_PLACEHOLDER}`);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   误提交的自指 symlink 会让 mkdir 报 EEXIST，Tauri resource glob 也匹配不到文件。
+ *
+ * Code Logic（这个函数做什么）:
+ *   lstat 到 symlink 或普通文件时 unlink；真实目录保留。read_dir 失败的损坏链接视为不可用。
+ */
+function replaceUnusableBrowserRuntimeRoot() {
+  let stat;
+  try {
+    stat = lstatSync(BROWSER_RUNTIME_ROOT);
+  } catch {
+    return;
+  }
+  if (stat.isSymbolicLink() || stat.isFile()) {
+    unlinkSync(BROWSER_RUNTIME_ROOT);
+  }
 }
 
 /**
