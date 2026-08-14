@@ -484,3 +484,30 @@ export const SparkleIcon = ({ size, ...rest }: IconProps) => (
     <path d="M3.4 3.4l2.2 2.2M10.4 10.4l2.2 2.2M12.6 3.4l-2.2 2.2M5.6 10.4l-2.2 2.2" />
   </svg>
 );
+
+/**
+ * Business Logic（为什么需要）:
+ *   充电模式切换按钮需要电池语义，图标必须集中在本库。
+ *
+ * Code Logic（做什么）:
+ *   渲染电池外框与正极的 16x16 stroke SVG。
+ */
+export const BatteryIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="1.5" y="4.5" width="11.5" height="7" rx="1.4" />
+    <path d="M13.8 6.6v2.8" />
+  </svg>
+);
+
+/**
+ * Business Logic（为什么需要）:
+ *   无限模式目标态需要 ∞ 符号，避免组件内硬编码文字。
+ *
+ * Code Logic（做什么）:
+ *   渲染横 8 字形 16x16 stroke SVG。
+ */
+export const InfinityIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M3.2 8c0-1.7 1.3-3 2.8-3 2.2 0 3.2 3 4 3s1.8-3 4-3c1.5 0 2.8 1.3 2.8 3s-1.3 3-2.8 3c-2.2 0-3.2-3-4-3s-1.8 3-4 3c-1.5 0-2.8-1.3-2.8-3z" />
+  </svg>
+);

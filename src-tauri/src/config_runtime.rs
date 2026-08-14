@@ -14,8 +14,8 @@
 //!     `apply_patch_if_generation` 在同一 update_lock 下校验 owner/generation 后应用 allowlist patch。
 
 use crate::config::{
-    normalize_prompt_optimizer_fill_language, AppConfig, GithubTrendingConfig, HealthConfig,
-    OrchestratorAutomationConfig,
+    normalize_prompt_optimizer_fill_language, AppConfig, BatteryConfig, GithubTrendingConfig,
+    HealthConfig, OrchestratorAutomationConfig,
 };
 use crate::config_store::ConfigStore;
 use crate::error::AppError;
@@ -396,6 +396,7 @@ pub struct ConfigSnapshot {
     pub cloud_sync_interval_secs: u64,
     pub cloud_sync_branch: Option<String>,
     pub health: HealthConfig,
+    pub battery: BatteryConfig,
     pub orchestrator: OrchestratorAutomationConfig,
     pub github_trending: GithubTrendingConfig,
     pub internal_claude: crate::config::InternalClaudeConfig,
@@ -429,6 +430,7 @@ impl ConfigSnapshot {
             cloud_sync_interval_secs: config.cloud_sync_interval_secs,
             cloud_sync_branch: config.cloud_sync_branch.clone(),
             health: config.health.clone(),
+            battery: config.battery.clone(),
             orchestrator: config.orchestrator.clone(),
             github_trending: config.github_trending.clone(),
             internal_claude: config.internal_claude.clone(),
@@ -458,6 +460,7 @@ impl ConfigSnapshot {
         cfg.cloud_sync_interval_secs = self.cloud_sync_interval_secs;
         cfg.cloud_sync_branch = self.cloud_sync_branch.clone();
         cfg.health = self.health.clone();
+        cfg.battery = self.battery.clone();
         cfg.orchestrator = self.orchestrator.clone();
         cfg.github_trending = self.github_trending.clone();
         cfg.internal_claude = self.internal_claude.clone();
@@ -631,6 +634,9 @@ pub struct RuntimeConfigPatch {
     pub cloud_sync_branch: Option<String>,
     #[serde(default)]
     pub health: Option<HealthRuntimePatch>,
+    /// 充电额度数字整表覆盖。
+    #[serde(default)]
+    pub battery: Option<BatteryConfig>,
     #[serde(default)]
     pub orchestrator: Option<OrchestratorRuntimePatch>,
     #[serde(default)]
@@ -694,6 +700,9 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref health) = self.health {
             health.apply_to(&mut cfg.health);
+        }
+        if let Some(ref battery) = self.battery {
+            cfg.battery = battery.clone();
         }
         if let Some(ref orch) = self.orchestrator {
             orch.apply_to(&mut cfg.orchestrator)?;
@@ -961,6 +970,7 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
         "cloud_sync_branch": config.cloud_sync_branch,
         "cloud_sync_repo_configured": config.cloud_sync_repo_url.as_ref().map(|u| !u.trim().is_empty()).unwrap_or(false),
         "health_enabled": config.health.enabled,
+        "battery_max_balance_minutes": config.battery.max_balance_minutes,
         "orchestrator_enabled": config.orchestrator.enabled,
         "orchestrator_max_concurrent_tasks": config.orchestrator.max_concurrent_tasks,
         "github_trending_ai_enabled": config.github_trending.ai_enabled,
@@ -975,7 +985,7 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
     use crate::config_store::{
         ConfigIoStage, FaultInjectingConfigIo, FsConfigStore, MemoryConfigStore, StdConfigIo,
     };
@@ -1000,6 +1010,7 @@ mod tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: HealthConfig::default(),
+            battery: BatteryConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             internal_claude: crate::config::InternalClaudeConfig::default(),

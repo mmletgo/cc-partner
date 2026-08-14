@@ -978,7 +978,7 @@ mod tests {
 mod config_writer_tests {
     use super::*;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::config_store::MemoryConfigStore;
     use std::sync::Arc;
@@ -1000,6 +1000,7 @@ mod config_writer_tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: HealthConfig::default(),
+            battery: BatteryConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig {
                 ai_enabled: false,

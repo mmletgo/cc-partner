@@ -296,6 +296,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 设置页活动统计 tab：独立展示记录窗口标题与数据保留天数；两端保存都走完整 `update_health_config`，但各自只合并自己的字段切片，避免互相覆盖；活动切片不改 `reminders`
 - 完整配置表单：健康监测总开关、有效休息、模板触发/完成参数、通知开关、免打扰起止 24 小时制时间选择器在健康提醒 tab；记录窗口标题、数据保留天数在活动统计 tab；全屏遮罩随监测固定启用，不提供独立开关
 - 数据：全部模板写 `habit_records`；饮水 completed 双写 `water_records`，休息 triggered/completed 双写 `rest_records`，便于回滚；健康数据不进 P2P/云同步
+- 充电入账：模板 `completed`（含手动 +1 / 旧饮水与休息完成入口）向本机充电账本充入可配置分钟；跳过 / 贪睡 / 仅 triggered 不充
 
 ### 2.12 GitHub 周热门项目
 
@@ -339,6 +340,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 同步 tab 局域网卡片展示每设备/领域的 `succeeded` / `partial` / `unreachable` / `protocol` / `resource-limit` 与 pulled/pushed/unchanged；仅全成功设备计入成功计数
 - 同步 tab 提供“导出数据 / 从备份恢复”：经 sidecar owner control 路由生成可校验 ZIP 备份；导出不含项目源码、终端 transcript、SSH 私钥、token、凭据 URL、lifecycle control token；配置仅导出只读 report，恢复时永不写回
 - 恢复前必须 inspect 预览（流式限制：archive ≤2 GiB、条目 ≤100k、单 entry ≤64 MiB、总解压 ≤4 GiB；拒绝 zip-slip / 符号链接 / 未知 formatVersion / 哈希失败）；用户确认后进入 exclusive maintenance gate，先创建恢复前备份（保留 7 天且最多 3 份，仅新备份完整落盘后清理旧份），再单事务 apply；失败整批回滚，并可一键 rollback 到恢复前备份
+- 充电模式 tab（`/settings?tab=battery`，位于健康提醒与活动统计之间）：切换充电/无限、展示剩余时间与今日已充/已用、调整各来源充入分钟与日上限、查看流水。模式与余额以本机 SQLite 为权威，额度数字走 `config.json` 的 `battery` 字段
 
 ### 2.15 工作台
 
@@ -347,6 +349,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **功能点**：
 - 工作现场安全恢复：桌面端自动保存最后工作现场结构 metadata（project/worktree/session/view/inspector/browser target；主窗 slot `desktop:auto`，卫星窗 slot `desktop:auto:window:workbench-[1-4]`，`schemaVersion=1`，稳定 selection 变化 500ms debounce 合并；revision CAS）。卫星窗 URL `projectId` 与 slot 内项目不一致时以 URL 为准，跳过该 slot restore。layout **不得**包含 terminal 字节、Prompt/回复、文件正文、env、token、命令、provider 配置或 preview ID。打开 Workbench 时先 side-effect-free preflight，再应用可安全恢复项；tmux target 存在才允许幂等 safe attach，禁止 `tmux new-session/new-window`、raw PTY fallback、terminal write、创建 worktree/shell、Claude/Codex resume。完全成功静默；partial 仅一条可关闭 inline notice。命名 snapshot 仅结构 metadata，非可执行命令配方。remote layout 留在控制设备；owner 只接收 inner ID 做 preflight/attach，capability `workbench.workspace-safe-restore.v1`；Mobile v1 不自动应用 Desktop layout。不新增第 8 个 Workbench controller。
 - 多屏卫星窗：主窗可「在新窗口打开」项目，外拓最多 4 个 `workbench-1..4` 卫星窗；同一 `projectId` 同时只属于一扇窗，再开则聚焦已有窗。关卫星窗只释放占用并删除对应 window auto slot，不 `exit_gui`、不拆 PTY。关主窗仍走现有 GUI/后端选择并退出整个桌面进程。
+- 充电模式：自我约束开关，侧栏 footer 主题按钮前用 26×26 圆按钮切换充电 / 无限（卫星窗瘦 footer 只保留该按钮与剩余时间）。充电模式下，桌面前台停留在 `/workbench` 或 `/attention` 时按墙钟消耗剩余分钟（主窗与卫星窗同时前台只扣一份）；余额为 0 时仅遮罩工作台 `<main>`，不杀已跑 Agent，不拦 HTTP/CLI/手机 API。健康提醒 completed 与记单词答对一张闪卡向本机账本充入可配置分钟。入账 `+Xm` 动画与电池环不得被工作台遮罩挡住。随时切回无限模式，余额保留
 - 工作台布局：侧栏 Work 组含「工作台」导航与 `WorkbenchProjectRail` 项目列表；`/` 保持 GitHub Trending。主区域依次展示工作台标题、terminal sessions 标识、worktree 管理层、依赖提示槽和中心工作区；中心工作区在当前 worktree 的终端层与文件 tab 工作区之间切换，预览文件时终端可以隐藏但 xterm DOM 必须保持挂载并停止接收输入；终端工具栏按钮与文件工作区工具栏保持一致，均显示图标和文字；桌面端终端全屏按钮位于 pane 操作导航栏，全屏时隐藏 Workbench 外围内容和文件预览入口，但保留 terminal window tabs、pane 操作、退出全屏按钮和当前终端输出，确保全屏中仍可切换 window；文件预览按钮仅在已有打开文件 tab 时启用，点击后回到当前或首个文件 tab，与文件工作区的返回终端按钮对称；右侧检查器承载当前 window 状态，并提供当前 worktree 文件夹 / Git 提交树 / 项目笔记 tab，窄宽下排到首屏终端之后
 - 工作台顶栏标语：桌面端已选中项目后，标题区与「现场快照 / 项目自动化」之间提供本机全局可编辑标语；支持轻量 Markdown（粗体/斜体/删除线/行内代码/http(s) 链接）与 emoji；单击预览进入编辑，失焦或 ⌘/Ctrl+Enter 保存，Esc 取消未提交草稿；正文自动保存到本机 `localStorage`（`cp-workbench-banner`），不进 `config.json`、SQLite、workspace layout、备份可恢复领域或局域网同步；按区域尺寸二分最大字号使全文可见并尽量撑满，不拉字距、不压扁字形；上限 280 个 UTF-16 单位；零项目/继续工作页/终端全屏/移动端 `/mobile` 不展示。不新增第 8 个 Workbench controller。
 - 工作台内置项目预览：可在终端/文件预览旁打开 dev server 浏览器预览，自动发现终端输出和常见框架端口；本机、远端项目 shortcut 与移动端 `/mobile` 均通过 cc-partner 安全代理访问。后端只允许代理 loopback `http(s)` 且显式端口目标，避免成为开放代理；代理请求体上限为 32MB，超限返回 413 且不转发上游；上游响应体必须流式转发，避免超大或持续分块响应在后端整包聚合；远端项目必须在 owning device 上发现和访问目标，当前设备只暴露 relay proxy；前端预览 iframe 必须 sandbox 隔离且不允许 `allow-same-origin`，避免预览项目 JS 同源访问 cc-partner API；候选来源文案由前端按当前语言渲染，不依赖后端 label 字段

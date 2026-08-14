@@ -89,6 +89,7 @@ src/
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
+├── battery/           — 充电模式账本：policy 纯计算 + service（credit/debit/mode/welcome）+ `BatteryRepo`（`battery_state`/`battery_ledger` IF NOT EXISTS）；命令 `get/set/report/list` + `get/update_battery_config`；健康 completed / 闪卡 correct 入账；多窗 1× 扣时 [已实现]
 ├── wordgame/          — 记单词：tokenize/lemma/lexicon/ingest/schedule/generate + GUI ingest/preheat worker（模块级 cancel，不加 AppState 字段）；owner 抽取 `POST /api/workbench/wordgame/extract-delta` + capability `workbench.wordgame-extract.v1`；命令 `get_wordgame_hub_status`/`retry_wordgame_preheat`/`start_wordgame_round`/`submit_wordgame_answer`/`abandon_wordgame_round`；schema `WordGameRepo::ensure_schema` [已实现]
 ├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫；begin_check abort 旧 JoinHandle；finish_install 成功保留 bytes 至 confirm_restart_requested；DTO status 含 checking/installing）[S3 T5/T6 + fix M4/M5/Spec M2]
 └── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install；download Ok 若 cancel token 置位按取消处理；install 成功后 request_restart 再清 bytes）[M8/S3 T6 + fix]
@@ -505,6 +506,13 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **输出契约**：`PromptOptimizeResponseDto` 使用 camelCase 返回 `{optimizedZh, optimizedEn}`。普通双语 schema 禁止额外字段并要求两版 Prompt 都存在；结构化单语 schema 只要求 `{optimizedPrompt}`，命令层再映射到对应 `optimizedZh` 或 `optimizedEn`，未选语种字段为空字符串；Workbench 流式命令不返回 Prompt 文本，只返回 `{ok, sessionId}`，优化文本通过 PTY 写入终端。
 - **业务边界**：Prompt 优化只用于当前页面展示和复制，不入库、不缓存、不跨设备同步，也不记录原始 Prompt 到日志。生成要求面向 Claude Code 编程任务，保留用户原意；输出必须以需求方视角写成可直接粘贴给 Claude Code 的委托式 Prompt，不得生成“请确认/是否需要/请指定”等继续询问用户的澄清句。原始信息不足时只能保留待补充占位或执行假设，不编造外部事实；除非原始 Prompt 明确要求文档或文件输出，否则不得新增 `docs/`、写文件、持久化等确认要求。
 - **复用约束**：后续新增类似“本机 Claude CLI 结构化生成”能力时优先复用 `claude_cli.rs`，不要在命令模块内重新拼接 pure/headless 参数或重复解析 wrapper JSON。
+
+## 充电模式已落地行为约定（src/battery/ + storage/battery_repo.rs + commands/battery.rs）
+
+- **功能定位**：自我约束开关。充电模式用健康 completed / 闪卡答对换工作分钟；无限模式不扣。余额权威在 SQLite，额度数字在 `config.json` `battery`。
+- **扣时**：仅 `charging && remaining>0`；前端每窗 `report_battery_focus({windowLabel,consuming})`，后端对 ≥1 消耗窗按 1× 墙钟结算；余额 0 后冻结。不拦 HTTP/WS/CLI/手机，不杀已跑 Agent。
+- **入账**：`persist_habit_event_by_id` 且 `kind=completed`；`submit_wordgame_answer` 且 `correct`。skip/snooze/答错 = 0。幂等 `source_id`；日上限与余额上限在 credit 内强制。首次切充电且未赠送：`welcome_grant`。
+- **验证**：`cargo test --locked battery --lib`。
 
 ## 健康提醒已落地行为约定（src/health/ + storage/health_repo.rs + commands/health.rs）
 

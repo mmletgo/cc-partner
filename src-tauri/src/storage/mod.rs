@@ -7,6 +7,7 @@
 //!     运行期 `sqlx::query`（非宏）规避编译期 DATABASE_URL 要求。
 
 pub mod agent_hub_repo;
+pub mod battery_repo;
 pub mod agent_ledger_repo;
 pub mod cc_history_repo;
 pub mod claude_md_repo;
@@ -31,6 +32,7 @@ pub mod workbench_session_repo;
 pub mod workbench_workspace_layout_repo;
 pub mod workbench_worktree_repo;
 
+pub use battery_repo::BatteryRepo;
 pub use agent_hub_repo::{
     AgentHubCheckoutBindingRow, AgentHubImportFault, AgentHubRepo, UpsertAgentHubCheckoutBinding,
     UpsertAgentHubProjectMapping,

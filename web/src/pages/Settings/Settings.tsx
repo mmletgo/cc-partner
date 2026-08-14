@@ -8,8 +8,8 @@
  *
  * Code Logic（这个页面做什么）:
  *   - 调用 useSettingsController 获取全部编排状态/handler
- *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 活动统计 / 同步 / AI / 自动化 / Fleet / 关于
- *   - 组合 pure panels（General/Dependencies/Sync/Health/Activity/Automation/Fleet/AI/About）
+ *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 充电模式 / 活动统计 / 同步 / AI / 自动化 / Fleet / 关于
+ *   - 组合 pure panels（General/Dependencies/Sync/Health/Battery/Activity/Automation/Fleet/AI/About）
  *   - loading / core loadError early return 保留在壳层（hooks 已在 controller 无条件执行）
  *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
@@ -26,6 +26,7 @@ import { SettingsDependenciesPanel } from './SettingsDependenciesPanel';
 import { SettingsAiPanel } from './SettingsAiPanel';
 import { SettingsAboutPanel } from './SettingsAboutPanel';
 import { SettingsFleetPanel } from './SettingsFleetPanel';
+import { SettingsBatteryPanel } from './SettingsBatteryPanel';
 import { useSettingsController } from './useSettingsController';
 import styles from './Settings.module.css';
 
@@ -306,6 +307,18 @@ export function Settings(): ReactElement {
                 canResetDefaults={ctrl.canResetHealthDefaults}
               />
             )}
+          </div>
+        ) : null}
+
+        {ctrl.activeTab === 'battery' ? (
+          <div
+            id="settings-panel-battery"
+            className={styles.tabPanel}
+            role="tabpanel"
+            aria-labelledby="settings-tab-battery"
+            data-testid="settings-panel-battery"
+          >
+            <SettingsBatteryPanel />
           </div>
         ) : null}
 

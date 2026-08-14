@@ -11,7 +11,7 @@
 use app_lib::cloud_sync::runtime::{
     run_cloud_sync_exclusive, CloudSyncBusyPolicy, CloudSyncRuntime, CloudSyncTrigger,
 };
-use app_lib::config::{AppConfig, HealthConfig};
+use app_lib::config::{AppConfig, BatteryConfig, HealthConfig};
 use app_lib::config_store::{
     ConfigIoStage, ConfigStore, FaultInjectingConfigIo, FsConfigStore, StdConfigIo,
 };
@@ -63,6 +63,7 @@ fn sample_config(data_dir: &Path) -> AppConfig {
         cloud_sync_interval_secs: 600,
         cloud_sync_branch: None,
         health: HealthConfig::default(),
+        battery: BatteryConfig::default(),
         orchestrator: Default::default(),
         github_trending: Default::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),

@@ -250,6 +250,7 @@ mod tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: Default::default(),
+            battery: Default::default(),
             orchestrator: Default::default(),
             github_trending: Default::default(),
             internal_claude: crate::config::InternalClaudeConfig::default(),

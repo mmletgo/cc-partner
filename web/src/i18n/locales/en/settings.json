@@ -9,6 +9,7 @@
     "general": "General",
     "dependencies": "Dependencies",
     "health": "Health",
+    "battery": "Charging",
     "activity": "Activity",
     "sync": "Sync",
     "ai": "AI",

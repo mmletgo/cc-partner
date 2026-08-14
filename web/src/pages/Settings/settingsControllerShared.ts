@@ -23,6 +23,7 @@ export const SETTINGS_TABS: SettingsTab[] = [
   { id: 'general', labelKey: 'general' },
   { id: 'dependencies', labelKey: 'dependencies' },
   { id: 'health', labelKey: 'health' },
+  { id: 'battery', labelKey: 'battery' },
   { id: 'activity', labelKey: 'activity' },
   { id: 'sync', labelKey: 'sync' },
   { id: 'ai', labelKey: 'ai' },

@@ -11,10 +11,17 @@
 }
 
 .main {
+  position: relative;
   flex: 1 1 0;
   background: var(--bg);
   overflow: auto;
   min-width: 0;
+}
+
+.satelliteRemaining {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+  white-space: nowrap;
 }
 
 .logo {

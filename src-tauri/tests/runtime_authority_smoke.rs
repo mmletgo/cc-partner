@@ -22,7 +22,7 @@ use app_lib::backend::event_bus::{
 };
 use app_lib::backend::ui::{run_gui_owner_event_relay, RecordingBackendUi};
 use app_lib::config::{
-    AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
 };
 use app_lib::config_runtime::{
     ConfigRuntime, ConfigSnapshot, ConfigUpdateResponse, RuntimeConfigPatch, RuntimeOwnerStatus,
@@ -248,6 +248,7 @@ fn sample_config() -> AppConfig {
         cloud_sync_interval_secs: 600,
         cloud_sync_branch: None,
         health: HealthConfig::default(),
+        battery: BatteryConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),

@@ -1,0 +1,35 @@
+/* 贴侧栏底部上方，z 高于 modal，永不被 main 遮罩挡住 */
+
+.toast {
+  position: fixed;
+  left: var(--space-4);
+  bottom: 92px;
+  z-index: var(--z-toast);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  box-shadow: var(--shadow-sm);
+  pointer-events: none;
+  animation: batteryToastIn var(--motion-base) var(--ease-standard);
+}
+
+@keyframes batteryToastIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}

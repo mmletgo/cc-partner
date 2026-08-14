@@ -60,6 +60,7 @@ pub mod config;
 pub mod config_runtime;
 pub mod config_store;
 pub mod error;
+pub mod battery;
 pub mod health;
 mod hotkey;
 mod mobile;
@@ -130,7 +131,7 @@ use crate::commands::{
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
     github_trending as github_trending_cmd, gui_bootstrap as gui_bootstrap_cmd,
-    health as health_cmd, internal_claude as internal_claude_cmd,
+    battery as battery_cmd, health as health_cmd, internal_claude as internal_claude_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
     orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
     orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
@@ -570,6 +571,13 @@ pub fn run() {
             orchestrator_config_cmd::get_default_orchestrator_config,
             orchestrator_config_cmd::update_orchestrator_config,
             // M10 健康提醒（19 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/开始休息/恢复默认 + 习惯统计4）
+            battery_cmd::get_battery_snapshot,
+            battery_cmd::set_battery_mode,
+            battery_cmd::report_battery_focus,
+            battery_cmd::list_battery_ledger,
+            battery_cmd::get_battery_config,
+            battery_cmd::get_default_battery_config,
+            battery_cmd::update_battery_config,
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,
             health_cmd::get_health_status,
