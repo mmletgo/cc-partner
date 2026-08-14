@@ -52,6 +52,7 @@ fn sample_config(data_dir: &Path) -> AppConfig {
         device_name: "smoke".into(),
         http_port: 0,
         receive_dir: data_dir.join("recv").to_string_lossy().to_string(),
+        game_plugin_dir: "/tmp/plugins".into(),
         db_path: data_dir.join("data.db").to_string_lossy().to_string(),
         screenshot_hotkey: "<ctrl>+s".into(),
         prompt_optimizer_hotkey: "<ctrl>".into(),

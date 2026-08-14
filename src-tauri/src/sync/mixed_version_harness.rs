@@ -366,6 +366,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         device_name: "local".into(),
         http_port: 0,
         receive_dir: "/tmp/cc-partner-test-recv".into(),
+        game_plugin_dir: "/tmp/plugins".into(),
         db_path: ":memory:".into(),
         screenshot_hotkey: "<cmd>+s".into(),
         prompt_optimizer_hotkey: "<ctrl>".into(),

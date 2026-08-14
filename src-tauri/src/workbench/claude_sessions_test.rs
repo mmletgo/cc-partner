@@ -1537,6 +1537,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         device_name: "session-index-test".to_string(),
         http_port: 0,
         receive_dir: data_dir.to_string_lossy().to_string(),
+        game_plugin_dir: "/tmp/plugins".into(),
         db_path: data_dir.join("data.db").to_string_lossy().to_string(),
         screenshot_hotkey: "<cmd>+s".to_string(),
         prompt_optimizer_hotkey: "<ctrl>".to_string(),

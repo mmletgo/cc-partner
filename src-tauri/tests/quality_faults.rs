@@ -198,6 +198,7 @@ fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
         device_name: device_name.into(),
         http_port: 0,
         receive_dir: data_dir.join("recv").to_string_lossy().to_string(),
+        game_plugin_dir: "/tmp/plugins".into(),
         db_path: data_dir.join("data.db").to_string_lossy().to_string(),
         screenshot_hotkey: "<ctrl>+<shift>+s".into(),
         prompt_optimizer_hotkey: "<ctrl>".into(),

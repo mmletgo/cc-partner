@@ -237,6 +237,7 @@ fn sample_config() -> AppConfig {
         device_name: "desk-a".into(),
         http_port: 0,
         receive_dir: "/tmp/cc-partner-smoke-recv".into(),
+        game_plugin_dir: "/tmp/plugins".into(),
         db_path: "/tmp/cc-partner-smoke.db".into(),
         screenshot_hotkey: "<ctrl>+s".into(),
         prompt_optimizer_hotkey: "<ctrl>".into(),

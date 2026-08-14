@@ -6,7 +6,9 @@
 //! Code Logic（这个模块做什么）:
 //!     组合 BatteryRepo + BatteryConfig + 进程内消耗窗集合。
 
-use super::policy::{credit_delta_ms, debit_delta_ms, evaluate_daily_reset, MS_PER_MINUTE};
+use super::policy::{
+    credit_delta_ms, credit_delta_ms_explicit, debit_delta_ms, evaluate_daily_reset, MS_PER_MINUTE,
+};
 use crate::config::{BatteryConfig, BatteryCreditSource};
 use crate::error::AppError;
 use crate::storage::battery_repo::{BatteryLedgerRow, BatteryRepo, BatteryStateRow};
@@ -80,6 +82,7 @@ fn local_day_bounds(now: i64) -> (i64, i64) {
 fn source_kind(source: BatteryCreditSource) -> &'static str {
     match source {
         BatteryCreditSource::Flashcard => "credit_wordgame",
+        BatteryCreditSource::GamePlugin => "credit_game_plugin",
         _ => "credit_health",
     }
 }
@@ -91,6 +94,7 @@ fn source_prefix(source: BatteryCreditSource) -> &'static str {
         BatteryCreditSource::Kegel => "habit:kegel:",
         BatteryCreditSource::Custom => "habit:custom:",
         BatteryCreditSource::Flashcard => "wordgame:",
+        BatteryCreditSource::GamePlugin => "game-plugin:",
     }
 }
 
@@ -101,6 +105,7 @@ fn source_token(source: BatteryCreditSource) -> &'static str {
         BatteryCreditSource::Kegel => "kegel",
         BatteryCreditSource::Custom => "custom",
         BatteryCreditSource::Flashcard => "flashcard",
+        BatteryCreditSource::GamePlugin => "game-plugin",
     }
 }
 
@@ -123,6 +128,20 @@ pub fn wordgame_source_id(
     correct_today: i64,
 ) -> String {
     format!("wordgame:{lemma}:{question_type}:{today}:{correct_today}")
+}
+
+/// 插件游戏完成的幂等键。
+///
+/// Business Logic（为什么需要这个函数）:
+///     游戏可选择 sourceId 避免重复入账；不传则每次新 UUID，满足完全信任。
+///
+/// Code Logic（这个函数做什么）:
+///     有非空 client source → `game-plugin:<id>:<source>`；否则带 UUID。
+pub fn game_plugin_source_id(game_id: &str, client_source: Option<&str>) -> String {
+    match client_source {
+        Some(s) if !s.trim().is_empty() => format!("game-plugin:{game_id}:{}", s.trim()),
+        _ => format!("game-plugin:{game_id}:{}", uuid::Uuid::new_v4()),
+    }
 }
 
 /// 每日 8 点惰性重置：余额置为当前满值，与当前模式无关。
@@ -297,6 +316,63 @@ pub async fn credit(
         )
         .await?;
     let delta = credit_delta_ms(config, source, today_count, state.remaining_ms);
+    if delta <= 0 {
+        let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
+        return snapshot_from(repo, config, &state, now, consuming, None, None).await;
+    }
+    let next_remaining = state.remaining_ms.saturating_add(delta);
+    let inserted = repo
+        .insert_ledger(&BatteryLedgerRow {
+            id: 0,
+            ts: now,
+            kind: source_kind(source).into(),
+            source_id: Some(source_id.to_string()),
+            delta_ms: delta,
+            balance_after_ms: next_remaining,
+            note: Some(source_token(source).into()),
+        })
+        .await?;
+    if inserted {
+        state.remaining_ms = next_remaining;
+        state.updated_at = now;
+        repo.upsert_state(&state).await?;
+    } else {
+        state = repo
+            .get_state()
+            .await?
+            .ok_or_else(|| AppError::generic("battery_state 丢失"))?;
+    }
+    let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
+    snapshot_from(
+        repo,
+        config,
+        &state,
+        now,
+        consuming,
+        inserted.then_some(delta / MS_PER_MINUTE),
+        inserted.then(|| source_token(source).into()),
+    )
+    .await
+}
+
+/// 按显式分钟入账（插件游戏）。不查日次数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     插件奖励以清单为准，产品要求无日上限；source_id 已存在则不改余额。
+///
+/// Code Logic（这个函数做什么）:
+///     日重置后用 credit_delta_ms_explicit；其余与 credit 相同。
+pub async fn credit_explicit(
+    repo: &BatteryRepo,
+    config: &BatteryConfig,
+    source: BatteryCreditSource,
+    source_id: &str,
+    minutes: i64,
+    now: i64,
+) -> Result<BatterySnapshotDto, AppError> {
+    let state = repo.ensure_default_state(now).await?;
+    let mut state = apply_daily_reset_if_due(repo, config, state, now).await?;
+    let delta = credit_delta_ms_explicit(config, state.remaining_ms, minutes);
     if delta <= 0 {
         let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
         return snapshot_from(repo, config, &state, now, consuming, None, None).await;

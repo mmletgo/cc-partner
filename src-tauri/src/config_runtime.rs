@@ -384,6 +384,8 @@ pub struct ConfigSnapshot {
     pub config_fingerprint: String,
     pub device_name: String,
     pub receive_dir: String,
+    #[serde(default = "crate::config::default_game_plugin_dir_string")]
+    pub game_plugin_dir: String,
     pub http_port: i64,
     pub screenshot_hotkey: String,
     pub prompt_optimizer_hotkey: String,
@@ -417,6 +419,7 @@ impl ConfigSnapshot {
             config_fingerprint: config_fingerprint(config),
             device_name: config.device_name.clone(),
             receive_dir: config.receive_dir.clone(),
+            game_plugin_dir: config.game_plugin_dir.clone(),
             http_port: config.http_port,
             screenshot_hotkey: config.screenshot_hotkey.clone(),
             prompt_optimizer_hotkey: config.prompt_optimizer_hotkey.clone(),
@@ -448,6 +451,7 @@ impl ConfigSnapshot {
     pub fn apply_to_local_config(&self, cfg: &mut AppConfig) {
         cfg.device_name = self.device_name.clone();
         cfg.receive_dir = self.receive_dir.clone();
+        cfg.game_plugin_dir = self.game_plugin_dir.clone();
         cfg.http_port = self.http_port;
         cfg.screenshot_hotkey = self.screenshot_hotkey.clone();
         cfg.prompt_optimizer_hotkey = self.prompt_optimizer_hotkey.clone();
@@ -612,6 +616,8 @@ pub struct RuntimeConfigPatch {
     #[serde(default)]
     pub receive_dir: Option<String>,
     #[serde(default)]
+    pub game_plugin_dir: Option<String>,
+    #[serde(default)]
     pub http_port: Option<i64>,
     #[serde(default)]
     pub screenshot_hotkey: Option<String>,
@@ -659,6 +665,9 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref dir) = self.receive_dir {
             cfg.receive_dir = dir.clone();
+        }
+        if let Some(ref dir) = self.game_plugin_dir {
+            cfg.game_plugin_dir = dir.clone();
         }
         if let Some(port) = self.http_port {
             cfg.http_port = port;
@@ -959,6 +968,7 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
     let payload = serde_json::json!({
         "device_name": config.device_name,
         "receive_dir": config.receive_dir,
+        "game_plugin_dir": config.game_plugin_dir,
         "http_port": config.http_port,
         "screenshot_hotkey": config.screenshot_hotkey,
         "prompt_optimizer_hotkey": config.prompt_optimizer_hotkey,
@@ -1001,6 +1011,7 @@ mod tests {
             device_name: "runtime-device".into(),
             http_port: 0,
             receive_dir: "/tmp/recv".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/tmp/db.db".into(),
             screenshot_hotkey: "<ctrl>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),

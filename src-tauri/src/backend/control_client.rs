@@ -3142,6 +3142,7 @@ mod tests {
             device_name: "n".into(),
             http_port: 0,
             receive_dir: "/tmp/r".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/tmp/d.db".into(),
             screenshot_hotkey: "<ctrl>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),

@@ -678,6 +678,7 @@ mod tests {
             device_name: device_name.into(),
             http_port: 0,
             receive_dir: "/tmp/cc-partner-files".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/tmp/cc-partner-data.db".into(),
             screenshot_hotkey: "<ctrl>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),

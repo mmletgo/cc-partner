@@ -150,6 +150,7 @@ mod tests {
             device_name: "test-device".to_string(),
             http_port: 0,
             receive_dir: "/tmp".to_string(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/tmp/cc-partner.db".to_string(),
             screenshot_hotkey: "<cmd>+<shift>+s".to_string(),
             prompt_optimizer_hotkey: "<ctrl>".to_string(),
