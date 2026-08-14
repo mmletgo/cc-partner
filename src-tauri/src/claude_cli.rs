@@ -283,6 +283,16 @@ pub(crate) fn build_project_headless_args(model: &str, schema: &str) -> Vec<Stri
     ]
 }
 
+/// Claude CLI `--mcp-config` 的空配置。
+///
+/// Business Logic（为什么需要这个常量）:
+///     merge 冲突解决只开放 Read/Edit/Write/Grep/Glob，必须切断用户/项目 MCP，避免额外工具面。
+///
+/// Code Logic（这个常量做什么）:
+///     CLI schema 要求 `mcpServers` 为 record。裸 `{}` 会把该字段当成 undefined，
+///     启动即失败：`Invalid MCP configuration: mcpServers: expected record, received undefined`。
+const EMPTY_MCP_CONFIG_JSON: &str = r#"{"mcpServers":{}}"#;
+
 /// 构造允许 Claude 直接编辑当前隔离 worktree 的 headless 参数。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -292,6 +302,7 @@ pub(crate) fn build_project_headless_args(model: &str, schema: &str) -> Vec<Stri
 /// Code Logic（这个函数做什么）:
 ///     使用 print/non-persistent 项目上下文，只开放 Read/Edit/Write/Grep/Glob；dontAsk 模式下只预批准
 ///     integration 项目根内读写与只读搜索，不开放 Bash，精确文件范围由调用方在 CLI 返回后用 Git 验证。
+///     `--strict-mcp-config` + 空 `mcpServers` 切断用户/项目 MCP，且满足 CLI record schema。
 pub(crate) fn build_project_edit_headless_args(model: &str) -> Vec<String> {
     vec![
         "-p".to_string(),
@@ -300,7 +311,7 @@ pub(crate) fn build_project_edit_headless_args(model: &str) -> Vec<String> {
         "--no-session-persistence".to_string(),
         "--strict-mcp-config".to_string(),
         "--mcp-config".to_string(),
-        "{}".to_string(),
+        EMPTY_MCP_CONFIG_JSON.to_string(),
         "--disable-slash-commands".to_string(),
         "--no-chrome".to_string(),
         "--permission-mode".to_string(),
@@ -875,7 +886,13 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-p"));
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
         assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
-        assert!(args.windows(2).any(|pair| pair == ["--mcp-config", "{}"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--mcp-config", EMPTY_MCP_CONFIG_JSON]));
+        assert!(
+            !args.windows(2).any(|pair| pair == ["--mcp-config", "{}"]),
+            "裸空对象会被 Claude CLI 校验为 mcpServers=undefined"
+        );
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--permission-mode", "dontAsk"]));
@@ -890,6 +907,19 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "Bash"));
         assert!(!args.iter().any(|arg| arg == "--json-schema"));
         assert!(!args.iter().any(|arg| arg == "--bare"));
+    }
+
+    #[test]
+    fn empty_mcp_config_json_is_record_shaped() {
+        let value: serde_json::Value =
+            serde_json::from_str(EMPTY_MCP_CONFIG_JSON).expect("empty mcp json");
+        assert!(
+            value
+                .get("mcpServers")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|servers| servers.is_empty()),
+            "Claude CLI 要求 mcpServers 为 record，空配置必须带空对象"
+        );
     }
 
     #[test]
