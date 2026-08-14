@@ -12,7 +12,7 @@ cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而�
 
 - **本地前端 ↔ Rust**：Tauri `invoke()` IPC（`#[tauri::command]`）。**无本地 HTTP API 端口给桌面前端**、无 CORS、无启动端口竞态。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`。
 - **跨设备 P2P / mobile**：axum HTTP server + reqwest peer client + mdns-sd。**首选 TCP 端口 `DEFAULT_HTTP_PORT=62116`**（`net/http_server.rs`）；`config.http_port` 为 0/非法时回落 62116（表示“用首选”，**不是** OS `port=0` 临时端口绑定）；合法 1..=65535 作为首选；`bind_preferred_http_listener` 在 `AddrInUse` 时 **端口 +1 递增** 直至成功，写入 `AppState.actual_http_port`。mDNS UDP **5353**。防火墙必须以 **实际** 端口为准。
-- **Health 权威元数据**：`GET /api/health` 返回 snake_case，`http_port` 为**实际**监听端口，并原样填入 `server_protocol_info()` 的 `protocol_version` + `capabilities`（当前字典序含：`agent-hub.portable-pull.v1`、`agent-hub.v1`、`attention.v1`、`attention.v2`、`cc-history.paged-sync.v1`、`device.request-binding.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`、`orchestrator.workflow-document.v1`、`sync.manifest.v2`、`transfer.complete.v1`、`transfer.resume.v1`、`workbench.agent-runtime.v1`、`workbench.lan-fleet.v1`、`workbench.mutation-outcome.v1`、`workbench.session-search-result.v2` 等）。`device.request-binding.v1` 表示对端 **honors** `X-Cc-Partner-Expected-Device-Id` fail-closed（`expected_device_id_guard`）；协议协商 only，**不是**鉴权/信任。
+- **Health 权威元数据**：`GET /api/health` 返回 snake_case，`http_port` 为**实际**监听端口，并原样填入 `server_protocol_info()` 的 `protocol_version` + `capabilities`（当前字典序含：`agent-hub.portable-pull.v1`、`agent-hub.v1`、`attention.v1`、`attention.v2`、`cc-history.paged-sync.v1`、`device.request-binding.v1`、`errors.envelope.v1`、`orchestrator.runtime-snapshot.v1`、`orchestrator.workflow-document.v1`、`sync.manifest.v2`、`transfer.complete.v1`、`transfer.resume.v1`、`workbench.agent-runtime.v1`、`workbench.lan-fleet.v1`、`workbench.mutation-outcome.v1`、`workbench.session-search-result.v2`、`workbench.wordgame-extract.v1` 等）。`device.request-binding.v1` 表示对端 **honors** `X-Cc-Partner-Expected-Device-Id` fail-closed（`expected_device_id_guard`）；协议协商 only，**不是**鉴权/信任。
 - 两条通道共享同一份 `AppState`（`Arc<RwLock<...>>`），由 `app.manage()` 注入命令层、`with_state()` 注入 axum。
 
 ## 目录结构（随 M1–M9 里程碑逐步落地）
@@ -89,6 +89,7 @@ src/
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
+├── wordgame/          — 记单词：tokenize/lemma/lexicon/ingest/schedule/generate + GUI ingest/preheat worker（模块级 cancel，不加 AppState 字段）；owner 抽取 `POST /api/workbench/wordgame/extract-delta` + capability `workbench.wordgame-extract.v1`；命令 `get_wordgame_hub_status`/`retry_wordgame_preheat`/`start_wordgame_round`/`submit_wordgame_answer`/`abandon_wordgame_round`；schema `WordGameRepo::ensure_schema` [已实现]
 ├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫；begin_check abort 旧 JoinHandle；finish_install 成功保留 bytes 至 confirm_restart_requested；DTO status 含 checking/installing）[S3 T5/T6 + fix M4/M5/Spec M2]
 └── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install；download Ok 若 cancel token 置位按取消处理；install 成功后 request_restart 再清 bytes）[M8/S3 T6 + fix]
 migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）

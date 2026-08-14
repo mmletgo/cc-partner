@@ -175,6 +175,23 @@ describe('AppShell grouped navigation', () => {
     expect(settingsLink.closest('[class*="footerIconGroup"]') || settingsLink.parentElement).toBeTruthy();
   });
 
+  test('places a game text button next to the version number and keeps it out of primary nav', () => {
+    renderShell();
+
+    const game = screen.getByRole('button', { name: 'game' });
+    expect(game.closest('[class*="footerVersionRow"]')).toBeTruthy();
+    const nav = screen.getByRole('navigation', { name: '主导航' });
+    expect(within(nav).queryByRole('button', { name: 'game' })).toBeNull();
+    expect(within(nav).queryByRole('link', { name: 'game' })).toBeNull();
+  });
+
+  test('satellite chrome hides the game button with the rest of the footer', () => {
+    windowRoleMock.role = 'satellite';
+    renderShell();
+    expect(screen.queryByRole('button', { name: 'game' })).toBeNull();
+    windowRoleMock.role = 'main';
+  });
+
   test('exposes one focusable tab stop per nav link and puts ProjectRail in Work group', () => {
     renderShell();
 

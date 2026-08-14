@@ -1,0 +1,43 @@
+.play {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.playHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.playTitle {
+  flex: 1;
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.lemma {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  color: var(--fg);
+}
+
+.prompt {
+  margin: 0;
+  font-size: var(--text-base);
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+
+.options {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.inputRow {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}

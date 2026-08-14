@@ -75,6 +75,7 @@ mod sync;
 mod transfer;
 mod tray;
 pub mod updater;
+mod wordgame;
 mod workbench;
 /// Gate D Task4/8：OpenCode OSC runtime bridge + OSC decoder（L2 certification smoke）。
 pub use workbench::agent_runtime::{
@@ -136,8 +137,8 @@ use crate::commands::{
     prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd,
     provider_manager as provider_manager_cmd, scratchpad as scratchpad_cmd,
     screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
-    transfer as transfer_cmd, updater as updater_cmd, workbench as workbench_cmd,
-    workbench_dependencies as workbench_dependency_cmd,
+    transfer as transfer_cmd, updater as updater_cmd, wordgame as wordgame_cmd,
+    workbench as workbench_cmd, workbench_dependencies as workbench_dependency_cmd,
 };
 use crate::gui_startup::{GuiStartupCoordinator, ProductionBackendLifecycle, SetupOutcome};
 use crate::state::AppState;
@@ -306,6 +307,12 @@ pub fn run() {
                     Arc::new(state.inner().clone()),
                 );
                 *state.health_cancel.lock().unwrap() = Some(cancel);
+            }
+
+            // 记单词：本机 ingest + 预热内部 Claude 出题。词库权威在 GUI 进程。
+            {
+                let state: tauri::State<'_, AppState> = app.state();
+                let _cancel = crate::wordgame::start_wordgame_runtime(state.inner().clone());
             }
 
             // M10 健康提醒：按 config.health.enabled 同步开机自启（enabled→注册 LaunchAgent，disabled→移除）。
@@ -666,6 +673,11 @@ pub fn run() {
             workbench_dependency_cmd::cancel_workbench_dependency_install,
             // 局域网互联防火墙依赖（只读检测监听/IP/端口开放状态，返回平台化放行方法，不自动改防火墙）
             lan_firewall_dependency_cmd::check_lan_firewall_dependency,
+            wordgame_cmd::get_wordgame_hub_status,
+            wordgame_cmd::retry_wordgame_preheat,
+            wordgame_cmd::start_wordgame_round,
+            wordgame_cmd::submit_wordgame_answer,
+            wordgame_cmd::abandon_wordgame_round,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
@@ -674,21 +686,19 @@ pub fn run() {
             e
         })
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            match event {
-                tauri::RunEvent::WindowEvent {
-                    label,
-                    event: tauri::WindowEvent::Destroyed,
-                    ..
-                } => {
-                    workbench_cmd::release_destroyed_workbench_window(app_handle, &label);
-                }
-                tauri::RunEvent::Exit => {
-                    let state: tauri::State<'_, AppState> = app_handle.state();
-                    shutdown_backend_runtime(&state);
-                    tracing::info!("应用已退出，共享后端运行时已清理");
-                }
-                _ => {}
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => {
+                workbench_cmd::release_destroyed_workbench_window(app_handle, &label);
             }
+            tauri::RunEvent::Exit => {
+                let state: tauri::State<'_, AppState> = app_handle.state();
+                shutdown_backend_runtime(&state);
+                tracing::info!("应用已退出，共享后端运行时已清理");
+            }
+            _ => {}
         });
 }

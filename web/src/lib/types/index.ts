@@ -19,3 +19,4 @@ export * from './agentHub';
 export * from './portableInventory';
 export * from './lanFleet';
 export * from './providerManager';
+export * from './wordgame';

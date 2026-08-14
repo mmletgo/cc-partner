@@ -1673,32 +1673,28 @@ async fn local_collect_merge_main_worktree_with_ledger(
                     }
                 }
                 if existing.state.is_pending() {
-                    if let Ok(row) = state.workbench_worktree_repo.get(&worktree_id).await {
-                        if let Some(row) = row {
-                            if let Ok(current) = freeze_collect_merge_sources(Path::new(&row.path))
+                    if let Ok(Some(row)) = state.workbench_worktree_repo.get(&worktree_id).await {
+                        if let Ok(current) = freeze_collect_merge_sources(Path::new(&row.path)) {
+                            let current_hash =
+                                hash_canonical_payload(&canonical_collect_merge_payload(
+                                    &worktree_id,
+                                    &current.home_branch,
+                                    &current.home_oid,
+                                    &current.sources,
+                                ))?;
+                            let stored_hash =
+                                hash_canonical_payload(&canonical_collect_merge_payload(
+                                    stored_worktree_id,
+                                    home_branch,
+                                    home_oid,
+                                    sources,
+                                ))?;
+                            if current_hash != stored_hash || current_hash != existing.payload_hash
                             {
-                                let current_hash =
-                                    hash_canonical_payload(&canonical_collect_merge_payload(
-                                        &worktree_id,
-                                        &current.home_branch,
-                                        &current.home_oid,
-                                        &current.sources,
-                                    ))?;
-                                let stored_hash =
-                                    hash_canonical_payload(&canonical_collect_merge_payload(
-                                        stored_worktree_id,
-                                        home_branch,
-                                        home_oid,
-                                        sources,
-                                    ))?;
-                                if current_hash != stored_hash
-                                    || current_hash != existing.payload_hash
-                                {
-                                    return Err(AppError::conflict(format!(
-                                        "clientOperationId 已绑定不同 payload（existingHash={}）",
-                                        existing.payload_hash
-                                    )));
-                                }
+                                return Err(AppError::conflict(format!(
+                                    "clientOperationId 已绑定不同 payload（existingHash={}）",
+                                    existing.payload_hash
+                                )));
                             }
                         }
                     }

@@ -5,7 +5,7 @@
  *   cc-partner 是一个三端（macOS / Windows / Linux）桌面工具，
  *   Web 端需要提供侧边导航 + 主内容区的基本布局骨架，
  *   窗口标题栏由 PyQt6 原生提供，无需 Web 端自绘。
- *   侧边栏 footer 区域集中展示版本号、语言/主题/设置与移动端访问入口；
+ *   侧边栏 footer 区域集中展示版本号、game 大厅按钮、语言/主题/设置与移动端访问入口；
  *   设置固定在 footer，避免小屏滚动才能看到。
  *   主导航按 Explore/Work/Knowledge/System 分组，短窗口下可滚动；
  *   Workbench 入口是 Work 组内项目列表，不占独立主导航项。
@@ -13,7 +13,7 @@
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
  *   - Sidebar 内包含 Logo、分组导航（section + 非聚焦 group label）、
- *     Work 组内 ProjectRail、footer（版本号 + 语言/主题/设置齿轮 + 手机访问按钮）
+ *     Work 组内 ProjectRail、footer（版本号 + game + 语言/主题/设置齿轮 + 手机访问按钮）
  *   - 设置入口为 footer NavLink(`/settings`)，System 组保留健康提醒、活动统计与 Provider 管理
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <outlet /> 出口，由 React Router 注入子页面，
@@ -21,7 +21,7 @@
  *
  *   注意：本组件是 <Outlet /> 容器，children 不直接使用。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
 import { useTheme } from '@/hooks/useTheme';
@@ -56,6 +56,11 @@ import { MobileAccessCard } from '@/components/domain/MobileAccessCard';
 import { PermissionStatusBadge } from '@/components/domain/PermissionStatusBadge';
 import { WorkbenchProjectRail } from '@/components/domain/WorkbenchProjectRail';
 import { Dialog } from '@/components/primitives';
+
+const GameHubDialog = lazy(async () => {
+  const module = await import('@/components/domain/GameHubDialog');
+  return { default: module.GameHubDialog };
+});
 // 应用内健康 toast 已停用（改用系统通知 HealthReminderListener + 全屏遮罩 HealthOverlay），
 // 组件代码保留以便恢复。先测试系统级提醒是否够用。
 // import ReminderToast from '@/pages/Health/ReminderToast';
@@ -112,8 +117,9 @@ export function AppShell({ children }: AppShellProps) {
   const attentionBadge = formatAttentionBadgeCount(attentionSnapshot?.counts.total ?? 0);
   // 传入命名空间数组,让 react-i18next v17 的 t() 类型校验 ns:key 形式
   // (无参时 t() 只接受 defaultNS 即 common 的扁平 key,'nav:*' 会类型报错)
-  const { t } = useTranslation(['common', 'nav', 'settings']);
+  const { t } = useTranslation(['common', 'nav', 'settings', 'wordgame']);
   const [mobileAccessOpen, setMobileAccessOpen] = useState<boolean>(false);
+  const [gameHubOpen, setGameHubOpen] = useState<boolean>(false);
   const mobileAccessButtonRef = useRef<HTMLButtonElement | null>(null);
   const appName = t('common:app.name');
   const { role } = useWorkbenchWindowRole();
@@ -151,6 +157,21 @@ export function AppShell({ children }: AppShellProps) {
     setMobileAccessOpen((open) => !open);
   }, []);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   版本号右侧 game 按钮打开大厅；关闭时回到未打开态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   打开 / 关闭 GameHub Dialog。
+   */
+  const openGameHub = useCallback((): void => {
+    setGameHubOpen(true);
+  }, []);
+
+  const closeGameHub = useCallback((): void => {
+    setGameHubOpen(false);
+  }, []);
+
   return (
     <div
       className={styles.layout}
@@ -160,7 +181,19 @@ export function AppShell({ children }: AppShellProps) {
         footer={
           isSatellite ? undefined : (
           <div className={styles.footer}>
-            <span className={styles.footerVersion}>{`v${version ?? '—'}`}</span>
+            <span className={styles.footerVersionRow}>
+              <span className={styles.footerVersion}>{`v${version ?? '—'}`}</span>
+              <button
+                type="button"
+                className={styles.footerGameButton}
+                onClick={openGameHub}
+                aria-haspopup="dialog"
+                aria-expanded={gameHubOpen}
+                title={t('wordgame:gameButtonTitle')}
+              >
+                {t('wordgame:gameButton')}
+              </button>
+            </span>
             <span>{appName}</span>
             <div className={styles.footerToggle}>
               <LanguageSwitcher />
@@ -267,6 +300,11 @@ export function AppShell({ children }: AppShellProps) {
           <MobileAccessCard compact className={styles.mobileAccessCard} />
         </div>
       </Dialog>
+      {gameHubOpen ? (
+        <Suspense fallback={null}>
+          <GameHubDialog open={gameHubOpen} onClose={closeGameHub} />
+        </Suspense>
+      ) : null}
       {/* 应用内健康 toast 已停用（改用系统通知 + 全屏遮罩），代码保留以便恢复（先测试）：
           <ReminderToast />
           <WaterToast /> */}

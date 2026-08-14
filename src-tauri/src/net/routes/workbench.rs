@@ -2330,6 +2330,24 @@ pub async fn resume_claude_session(
     Ok(Json(result))
 }
 
+/// owner-local 记单词抽取：只回 lemma 计数，不回原文。
+///
+/// Business Logic（为什么需要这个函数）:
+///     玩游戏的机器要把远端 assistant 词频并入本机词库，只能向 owner 要计数。
+///
+/// Code Logic（这个函数做什么）:
+///     按调用方水位扫描本机 Claude/Codex/OpenCode 落盘，返回 `{lemma,count}[]` 和新水位。
+pub async fn extract_wordgame_delta(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::wordgame::runtime::ExtractDeltaReq>,
+) -> P2pResult<Json<crate::wordgame::runtime::ExtractDeltaResp>> {
+    let resp = crate::wordgame::runtime::extract_delta_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.wordgame.extract_delta"))?;
+    Ok(Json(resp))
+}
+
 /// owner-local workspace restore preflight。
 ///
 /// Business Logic（为什么需要这个函数）:

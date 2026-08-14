@@ -31,6 +31,7 @@ import enOrchestrator from './locales/en/orchestrator.json';
 import enAttention from './locales/en/attention.json';
 import enAgentHub from './locales/en/agentHub.json';
 import enProviderManager from './locales/en/providerManager.json';
+import enWordgame from './locales/en/wordgame.json';
 
 import zhCommon from './locales/zh/common.json';
 import zhNav from './locales/zh/nav.json';
@@ -49,6 +50,7 @@ import zhOrchestrator from './locales/zh/orchestrator.json';
 import zhAttention from './locales/zh/attention.json';
 import zhAgentHub from './locales/zh/agentHub.json';
 import zhProviderManager from './locales/zh/providerManager.json';
+import zhWordgame from './locales/zh/wordgame.json';
 
 export type AppLanguage = 'en' | 'zh';
 export const LANGUAGE_STORAGE_KEY = 'cp-lang';
@@ -91,6 +93,7 @@ export const resources = {
     attention: enAttention,
     agentHub: enAgentHub,
     providerManager: enProviderManager,
+    wordgame: enWordgame,
   },
   zh: {
     common: zhCommon,
@@ -110,6 +113,7 @@ export const resources = {
     attention: zhAttention,
     agentHub: zhAgentHub,
     providerManager: zhProviderManager,
+    wordgame: zhWordgame,
   },
 } as const;
 
