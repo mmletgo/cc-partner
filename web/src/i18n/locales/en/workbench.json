@@ -31,8 +31,9 @@
   },
   "agentHints": {
     "dotAriaWaiting": "{{count}} windows waiting for input",
-    "dotAriaCompleted": "{{count}} windows completed",
-    "dotAriaBoth": "{{waiting}} windows waiting for input, {{completed}} windows completed"
+    "dotAriaCompleted": "{{count}} windows stopped",
+    "dotAriaBoth": "{{waiting}} windows waiting for input, {{completed}} windows stopped",
+    "navSummary": "waiting {{waiting}} · stopped {{stopped}}"
   },
   "fleet": {
     "title": "LAN Agent Fleet",

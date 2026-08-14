@@ -59,6 +59,7 @@ describe('workbenchAgentHints', () => {
     let state = applyAgentHintSession(emptyAgentHintState(), session({ phase: 'needsInput' }));
     expect(hintsForTerminal(state, 'term-1')).toEqual({
       waitingCount: 1,
+      stoppedCount: 0,
       completedCount: 0,
       count: 1,
       tone: 'wait',
@@ -75,6 +76,7 @@ describe('workbenchAgentHints', () => {
     );
     expect(hintsForTerminal(state, 'term-1')).toEqual({
       waitingCount: 0,
+      stoppedCount: 1,
       completedCount: 1,
       count: 1,
       tone: 'complete',
@@ -98,13 +100,14 @@ describe('workbenchAgentHints', () => {
     );
     expect(hintsForTerminal(state, 'term-1')).toEqual({
       waitingCount: 1,
+      stoppedCount: 0,
       completedCount: 0,
       count: 1,
       tone: 'wait',
     });
   });
 
-  test('working/idle 清 waiting，不自动清未看 completed', () => {
+  test('idle/failed/disconnected 计入已停止，working 清等待但保留未看完成', () => {
     let state = applyAgentHintSession(
       emptyAgentHintState(),
       session({
@@ -121,6 +124,7 @@ describe('workbenchAgentHints', () => {
     );
     expect(hintsForTerminal(state, 'term-1')).toEqual({
       waitingCount: 0,
+      stoppedCount: 1,
       completedCount: 1,
       count: 1,
       tone: 'complete',
@@ -130,8 +134,19 @@ describe('workbenchAgentHints', () => {
       session({ phase: 'needsInput', version: 1 }),
     );
     state = applyAgentHintSession(state, session({ phase: 'idle', version: 2 }));
-    expect(hintsForTerminal(state, 'term-1').count).toBe(0);
-    expect(hintsForTerminal(state, 'term-1').tone).toBeNull();
+    expect(hintsForTerminal(state, 'term-1')).toEqual({
+      waitingCount: 0,
+      stoppedCount: 1,
+      completedCount: 1,
+      count: 1,
+      tone: 'complete',
+    });
+    state = applyAgentHintSession(
+      emptyAgentHintState(),
+      session({ phase: 'needsInput', version: 1 }),
+    );
+    state = applyAgentHintSession(state, session({ phase: 'failed', version: 2, isActive: false }));
+    expect(hintsForTerminal(state, 'term-1').stoppedCount).toBe(1);
   });
 
   test('ack 只清该 window 的 completed，并把 agentSessionId 记入 acked', () => {
@@ -196,12 +211,14 @@ describe('workbenchAgentHints', () => {
     );
     expect(hintsForProject(state, 'proj-1')).toEqual({
       waitingCount: 1,
+      stoppedCount: 1,
       completedCount: 1,
       count: 2,
       tone: 'wait',
     });
     expect(hintsForWorktree(state, 'proj-1', 'wt-1')).toEqual({
       waitingCount: 1,
+      stoppedCount: 1,
       completedCount: 1,
       count: 2,
       tone: 'wait',
@@ -280,16 +297,34 @@ describe('workbenchAgentHints', () => {
     expect(hintsForTerminal(state, 't-done').completedCount).toBe(1);
   });
 
-  test('hintAriaKind 按等待/完成分段', () => {
-    expect(hintAriaKind(hintsForTerminal(emptyAgentHintState(), 'x'))).toBeNull();
+  test('hintAriaKind 0/0 也分段为 both，方便始终读出数字', () => {
+    expect(hintAriaKind(hintsForTerminal(emptyAgentHintState(), 'x'))).toBe('both');
     expect(
-      hintAriaKind({ waitingCount: 1, completedCount: 0, count: 1, tone: 'wait' }),
+      hintAriaKind({
+        waitingCount: 1,
+        stoppedCount: 0,
+        completedCount: 0,
+        count: 1,
+        tone: 'wait',
+      }),
     ).toBe('waiting');
     expect(
-      hintAriaKind({ waitingCount: 0, completedCount: 2, count: 2, tone: 'complete' }),
+      hintAriaKind({
+        waitingCount: 0,
+        stoppedCount: 2,
+        completedCount: 2,
+        count: 2,
+        tone: 'complete',
+      }),
     ).toBe('completed');
     expect(
-      hintAriaKind({ waitingCount: 1, completedCount: 1, count: 2, tone: 'wait' }),
+      hintAriaKind({
+        waitingCount: 1,
+        stoppedCount: 1,
+        completedCount: 1,
+        count: 2,
+        tone: 'wait',
+      }),
     ).toBe('both');
   });
 

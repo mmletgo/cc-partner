@@ -12,7 +12,8 @@
  *   通过 useModalLayer 管理层栈、焦点陷阱、inert、滚动锁与触发焦点恢复；
  *   backdrop 关闭只接受「在遮罩上起手」的完整主指针手势，避免打开触发器的同一次 tap
  *   （pointerdown 打开 → 合成 click 落到刚挂载的遮罩）把弹层立刻关掉；
- *   无业务导入；closeOnEscape/closeOnBackdrop 默认 true。
+ *   无业务导入；closeOnEscape/closeOnBackdrop 默认 true；
+ *   backdropVariant 默认 frost（半透明+blur），scrim 仅半透明无模糊。
  */
 
 import {
@@ -36,6 +37,11 @@ export interface DialogProps {
   closeOnBackdrop?: boolean;
   onClose: () => void;
   className?: string;
+  /**
+   * frost（默认）：半透明 + 毛玻璃；
+   * scrim：仅半透明遮罩，不加 blur（Game Hub 等需要看清背景时用）。
+   */
+  backdropVariant?: 'frost' | 'scrim';
 }
 
 /**
@@ -46,7 +52,8 @@ export interface DialogProps {
  *
  * Code Logic（这个函数做什么）:
  *   hooks 全在 early return 前；open 时 createPortal 挂到 body；surface 带 ARIA 与 tabIndex=-1。
- *   backdrop 关闭只接受「在遮罩上起手」的完整主指针手势。
+ *   backdrop 关闭只接受「在遮罩上起手」的完整主指针手势；
+ *   backdropVariant=scrim 时去掉 blur，只保留半透明遮罩。
  */
 export function Dialog(props: DialogProps): ReactNode {
   const {
@@ -58,6 +65,7 @@ export function Dialog(props: DialogProps): ReactNode {
     closeOnBackdrop = true,
     onClose,
     className,
+    backdropVariant = 'frost',
   } = props;
 
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -140,8 +148,11 @@ export function Dialog(props: DialogProps): ReactNode {
   return createPortal(
     <div className={styles.root} data-dialog-root>
       <div
-        className={styles.backdrop}
+        className={[styles.backdrop, backdropVariant === 'scrim' ? styles.backdropScrim : '']
+          .filter(Boolean)
+          .join(' ')}
         data-dialog-backdrop
+        data-backdrop-variant={backdropVariant}
         onPointerDown={handleBackdropPointerDown}
         onClick={handleBackdropClick}
         aria-hidden="true"

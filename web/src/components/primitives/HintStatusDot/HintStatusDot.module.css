@@ -28,3 +28,9 @@
   background: var(--success);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--success) 14%, transparent);
 }
+
+.hinted[data-hint-tone='zero'] {
+  background: var(--surface);
+  color: var(--fg-muted-readable);
+  box-shadow: 0 0 0 1px var(--border-soft);
+}

@@ -31,8 +31,9 @@
   },
   "agentHints": {
     "dotAriaWaiting": "{{count}} 个窗口等待输入",
-    "dotAriaCompleted": "{{count}} 个窗口已完成",
-    "dotAriaBoth": "{{waiting}} 个窗口等待输入，{{completed}} 个窗口已完成"
+    "dotAriaCompleted": "{{count}} 个窗口已停止",
+    "dotAriaBoth": "{{waiting}} 个窗口等待输入，{{completed}} 个窗口已停止",
+    "navSummary": "等待 {{waiting}} · 已停止 {{stopped}}"
   },
   "fleet": {
     "title": "局域网 Agent Fleet",

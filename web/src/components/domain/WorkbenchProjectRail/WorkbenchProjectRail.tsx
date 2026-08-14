@@ -649,9 +649,9 @@ export function WorkbenchProjectRail() {
               <HintStatusDot
                 className={styles.projectStatusDot}
                 data-active={isActive || undefined}
-                count={hint.count}
-                tone={hint.tone}
-                aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+                waitingCount={hint.waitingCount}
+                stoppedCount={hint.stoppedCount}
+                aria-label={t(hintAria.key, hintAria.values)}
               />
               {exceptionCount > 0 ? (
                 <Link

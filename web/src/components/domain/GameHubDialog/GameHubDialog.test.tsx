@@ -67,6 +67,10 @@ describe('GameHubDialog', () => {
     });
     expect((screen.getByRole('button', { name: '开始' }) as HTMLButtonElement).disabled).toBe(true);
     expect(startRound).not.toHaveBeenCalled();
+    const backdrop = screen
+      .getByRole('dialog')
+      .parentElement!.querySelector('[data-dialog-backdrop]') as HTMLElement;
+    expect(backdrop.getAttribute('data-backdrop-variant')).toBe('scrim');
   });
 
   test('starts a round when the cache threshold is met', async () => {

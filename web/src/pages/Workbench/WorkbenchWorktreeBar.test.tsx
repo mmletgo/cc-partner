@@ -59,6 +59,7 @@ describe('WorkbenchWorktreeBar hints', () => {
             hintsForProject: () => EMPTY_HINT_COUNTS,
             hintsForWorktree: () => ({
               waitingCount: 1,
+              stoppedCount: 1,
               completedCount: 1,
               count: 2,
               tone: 'wait',
@@ -90,6 +91,6 @@ describe('WorkbenchWorktreeBar hints', () => {
         </WorkbenchAgentHintsContext.Provider>
       </I18nextProvider>,
     );
-    expect(screen.getByLabelText('1 个窗口等待输入，1 个窗口已完成').textContent).toBe('2');
+    expect(screen.getByLabelText('1 个窗口等待输入，1 个窗口已停止').textContent).toBe('1/1');
   });
 });

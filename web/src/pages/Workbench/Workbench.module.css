@@ -545,6 +545,10 @@
   min-width: 0;
 }
 
+.sessionHintSummary {
+  flex: 0 0 auto;
+}
+
 .mainWorkspace {
   position: relative;
   /* 在 centerPane flex 列中占据全部剩余高度；absolute terminalLayer 依赖此盒高度。 */

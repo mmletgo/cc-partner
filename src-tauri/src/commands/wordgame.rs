@@ -12,7 +12,7 @@ use crate::storage::wordgame_repo::WordGameRepo;
 use crate::wordgame::models::{QuestionKind, QuestionType, QuizItem, REQUIRED_CACHED_NEW_WORDS};
 use crate::wordgame::runtime::retry_preheat;
 use crate::wordgame::schedule::{
-    answers_match, apply_answer, local_today, pick_next_card, TypeProgress,
+    TypeProgress, answers_match, apply_answer, local_today, pick_next_card,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -89,7 +89,7 @@ pub async fn start_wordgame_round(state: State<'_, AppState>) -> Result<Wordgame
     if !status.can_enter {
         return Err(AppError::validation("记单词尚未就绪：需要 10 个已缓存生词"));
     }
-    next_card_for_state(&state)
+    next_card_for_state(&state, None)
         .await?
         .ok_or_else(|| AppError::generic("今天暂时没有到期的单词"))
 }
@@ -131,7 +131,7 @@ pub async fn submit_wordgame_answer(
     let outcome = apply_answer(&lemma, &current, &all, &today, correct);
     repo.upsert_lemma(&outcome.lemma).await?;
     repo.upsert_progress(&outcome.progress).await?;
-    let next = next_card_for_state(&state).await?;
+    let next = next_card_for_state(&state, Some((req.lemma.as_str(), req.question_type))).await?;
     Ok(WordgameSubmitResultDto {
         correct: outcome.correct,
         expected: item.answer.clone(),
@@ -174,12 +174,15 @@ async fn hub_status_for_state(state: &AppState) -> Result<WordgameHubStatusDto, 
     })
 }
 
-async fn next_card_for_state(state: &AppState) -> Result<Option<WordgameCardDto>, AppError> {
+async fn next_card_for_state(
+    state: &AppState,
+    exclude: Option<(&str, QuestionType)>,
+) -> Result<Option<WordgameCardDto>, AppError> {
     let repo = repo(state);
     let today = local_today();
     let lemmas = repo.list_lemmas().await?;
     let progresses = repo.list_all_progress().await?;
-    let Some(due) = pick_next_card(&lemmas, &progresses, &today) else {
+    let Some(due) = pick_next_card(&lemmas, &progresses, &today, exclude) else {
         return Ok(None);
     };
     let Some(payload) = repo.get_card(&due.lemma).await? else {

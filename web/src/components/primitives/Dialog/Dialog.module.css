@@ -20,6 +20,12 @@
   -webkit-backdrop-filter: blur(8px);
 }
 
+.backdropScrim {
+  background: var(--overlay-scrim);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .surface {
   position: relative;
   z-index: 1;

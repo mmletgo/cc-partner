@@ -7,7 +7,7 @@
 //!     给定词库快照与「今天」，选出下一题；应用答对/答错后返回新进度。
 
 use super::models::{
-    QuestionType, WordLemma, CORRECT_TODAY_CAP, CORRECT_TO_PASS, FAMILIAR_INTERVAL_DAYS,
+    CORRECT_TO_PASS, CORRECT_TODAY_CAP, FAMILIAR_INTERVAL_DAYS, QuestionType, WordLemma,
 };
 
 /// 某词某题型的进度。
@@ -73,10 +73,12 @@ pub fn is_due(lemma: &WordLemma, today: &str) -> bool {
 ///
 /// Business Logic:
 ///     先到期，再词频高到低，再 lemma，再题型顺序；跳过当天已满 2 次的题型。
+///     连续出题时不得立刻再出刚出过的「同一词同一题型」；只有当天只剩这一张可出卡才允许重复。
 pub fn pick_next_card(
     lemmas: &[WordLemma],
     progresses: &[TypeProgress],
     today: &str,
+    exclude: Option<(&str, QuestionType)>,
 ) -> Option<DueCard> {
     let mut due: Vec<&WordLemma> = lemmas.iter().filter(|w| is_due(w, today)).collect();
     due.sort_by(|a, b| {
@@ -84,6 +86,7 @@ pub fn pick_next_card(
             .cmp(&a.total_count)
             .then_with(|| a.lemma.cmp(&b.lemma))
     });
+    let mut fallback: Option<DueCard> = None;
     for word in due {
         for qt in QuestionType::ALL {
             let progress = progresses
@@ -98,15 +101,22 @@ pub fn pick_next_card(
                     last_correct_date: None,
                 });
             if type_available_today(&progress, today) {
-                return Some(DueCard {
+                let card = DueCard {
                     lemma: word.lemma.clone(),
                     question_type: qt,
                     total_count: word.total_count,
-                });
+                };
+                if exclude == Some((word.lemma.as_str(), qt)) {
+                    if fallback.is_none() {
+                        fallback = Some(card);
+                    }
+                    continue;
+                }
+                return Some(card);
             }
         }
     }
-    None
+    fallback
 }
 
 /// 应用一次答题。
@@ -234,7 +244,7 @@ mod tests {
             word("zeta", 10, "2026-08-14", false),
             word("future", 99, "2026-08-20", false),
         ];
-        let next = pick_next_card(&lemmas, &[], "2026-08-14").expect("card");
+        let next = pick_next_card(&lemmas, &[], "2026-08-14", None).expect("card");
         assert_eq!(next.lemma, "zeta");
         assert_eq!(next.question_type, QuestionType::EnToZh);
     }
@@ -301,7 +311,72 @@ mod tests {
         let mut progresses = vec![empty_progress("feature", QuestionType::EnToZh)];
         progresses[0].correct_today = 2;
         progresses[0].last_correct_date = Some("2026-08-14".into());
-        let next = pick_next_card(&lemmas, &progresses, "2026-08-14").expect("card");
+        let next = pick_next_card(&lemmas, &progresses, "2026-08-14", None).expect("card");
         assert_eq!(next.question_type, QuestionType::ZhToEn);
+    }
+
+    #[test]
+    fn skips_just_shown_lemma_and_type_when_another_card_exists() {
+        let lemmas = vec![word("feature", 5, "2026-08-14", false)];
+        let next = pick_next_card(
+            &lemmas,
+            &[],
+            "2026-08-14",
+            Some(("feature", QuestionType::EnToZh)),
+        )
+        .expect("card");
+        assert_eq!(next.lemma, "feature");
+        assert_eq!(next.question_type, QuestionType::ZhToEn);
+    }
+
+    #[test]
+    fn repeats_only_when_excluded_card_is_the_last_available() {
+        let lemmas = vec![word("feature", 5, "2026-08-14", false)];
+        let progresses: Vec<TypeProgress> = QuestionType::ALL
+            .iter()
+            .filter(|qt| **qt != QuestionType::EnToZh)
+            .map(|qt| {
+                let mut progress = empty_progress("feature", *qt);
+                progress.correct_today = 2;
+                progress.last_correct_date = Some("2026-08-14".into());
+                progress
+            })
+            .collect();
+        let next = pick_next_card(
+            &lemmas,
+            &progresses,
+            "2026-08-14",
+            Some(("feature", QuestionType::EnToZh)),
+        )
+        .expect("card");
+        assert_eq!(next.lemma, "feature");
+        assert_eq!(next.question_type, QuestionType::EnToZh);
+    }
+
+    #[test]
+    fn prefers_another_word_over_repeating_same_card() {
+        let lemmas = vec![
+            word("alpha", 10, "2026-08-14", false),
+            word("beta", 3, "2026-08-14", false),
+        ];
+        let progresses: Vec<TypeProgress> = QuestionType::ALL
+            .iter()
+            .filter(|qt| **qt != QuestionType::EnToZh)
+            .map(|qt| {
+                let mut progress = empty_progress("alpha", *qt);
+                progress.correct_today = 2;
+                progress.last_correct_date = Some("2026-08-14".into());
+                progress
+            })
+            .collect();
+        let next = pick_next_card(
+            &lemmas,
+            &progresses,
+            "2026-08-14",
+            Some(("alpha", QuestionType::EnToZh)),
+        )
+        .expect("card");
+        assert_eq!(next.lemma, "beta");
+        assert_eq!(next.question_type, QuestionType::EnToZh);
     }
 }

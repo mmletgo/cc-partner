@@ -15,9 +15,8 @@ import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, HintStatusDot, Pill } from '@/components/primitives';
 import { useOptionalWorkbenchAgentHints } from '@/hooks/workbenchAgentHintsContext';
-import { EMPTY_HINT_COUNTS } from '@/lib/workbenchAgentHints';
+import { EMPTY_HINT_COUNTS, hintCountsFrom, type AgentHintCounts } from '@/lib/workbenchAgentHints';
 import { agentHintAriaSpec } from './workbenchAgentHintPresentation';
-import type { AgentHintCounts } from '@/lib/workbenchAgentHints';
 import { PlusIcon, XIcon } from '@/lib/icons';
 import { getRovingTabIndex, type RovingTabKey } from '@/lib/rovingTablist';
 import type { WorkbenchSession } from '@/lib/types';
@@ -246,8 +245,31 @@ export function WorkbenchSessionTabs({
     [activeSessionId, onCloseSession, sessions],
   );
 
+  const summary = sessions.reduce(
+    (acc, session) => {
+      const hint = resolveHintCounts?.(session.id) ?? EMPTY_HINT_COUNTS;
+      return hintCountsFrom(
+        acc.waitingCount + hint.waitingCount,
+        acc.stoppedCount + hint.stoppedCount,
+      );
+    },
+    EMPTY_HINT_COUNTS,
+  );
+  const summaryAria = agentHintAriaSpec(summary);
+
   return (
     <div className={styles.sessionTabs} role="tablist" aria-label={t('workbench:terminalTabs')}>
+      <HintStatusDot
+        className={styles.sessionHintSummary}
+        waitingCount={summary.waitingCount}
+        stoppedCount={summary.stoppedCount}
+        aria-label={t('workbench:agentHints.navSummary', {
+          waiting: summary.waitingCount,
+          stopped: summary.stoppedCount,
+        })}
+        data-testid="workbench-session-hint-summary"
+        title={t(summaryAria.key, summaryAria.values)}
+      />
       {sessions.map((session) => {
         const selected = session.id === activeSessionId;
         const hint = resolveHintCounts?.(session.id) ?? EMPTY_HINT_COUNTS;
@@ -271,9 +293,9 @@ export function WorkbenchSessionTabs({
                 <HintStatusDot
                   className={styles.sessionDot}
                   data-status={session.status}
-                  count={hint.count}
-                  tone={hint.tone}
-                  aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+                  waitingCount={hint.waitingCount}
+                  stoppedCount={hint.stoppedCount}
+                  aria-label={t(hintAria.key, hintAria.values)}
                 />
                 <input
                   ref={renameInputRef}
@@ -310,9 +332,9 @@ export function WorkbenchSessionTabs({
               <HintStatusDot
                 className={styles.sessionDot}
                 data-status={session.status}
-                count={hint.count}
-                tone={hint.tone}
-                aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+                waitingCount={hint.waitingCount}
+                stoppedCount={hint.stoppedCount}
+                aria-label={t(hintAria.key, hintAria.values)}
               />
               <span
                 className={styles.sessionName}

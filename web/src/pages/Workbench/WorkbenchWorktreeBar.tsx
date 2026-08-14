@@ -126,9 +126,9 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps) {
                 <HintStatusDot
                   className={styles.worktreeDot}
                   data-tone={tone}
-                  count={hint.count}
-                  tone={hint.tone}
-                  aria-label={hintAria ? t(hintAria.key, hintAria.values) : undefined}
+                  waitingCount={hint.waitingCount}
+                  stoppedCount={hint.stoppedCount}
+                  aria-label={t(hintAria.key, hintAria.values)}
                 />
                 <span className={styles.worktreeName}>{label}</span>
                 <span className={styles.worktreeMeta}>

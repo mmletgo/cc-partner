@@ -44,8 +44,9 @@ const resources = {
       },
       agentHints: {
         dotAriaWaiting: '{{count}} 个窗口等待输入',
-        dotAriaCompleted: '{{count}} 个窗口已完成',
-        dotAriaBoth: '{{waiting}} 个窗口等待输入，{{completed}} 个窗口已完成',
+        dotAriaCompleted: '{{count}} 个窗口已停止',
+        dotAriaBoth: '{{waiting}} 个窗口等待输入，{{completed}} 个窗口已停止',
+        navSummary: '等待 {{waiting}} · 已停止 {{stopped}}',
       },
     },
   },
@@ -129,9 +130,10 @@ function renderSessionTab(options: {
   canRename?: boolean;
   resolveHint?: (sessionId: string) => {
     waitingCount: number;
+    stoppedCount: number;
     completedCount: number;
     count: number;
-    tone: 'wait' | 'complete' | null;
+    tone: 'wait' | 'complete' | 'zero';
   };
 }): void {
   const agent = options.agent ?? null;
@@ -174,15 +176,26 @@ describe('WorkbenchSessionTabs agent projection', () => {
     renderSessionTab({
       resolveHint: () => ({
         waitingCount: 1,
+        stoppedCount: 0,
         completedCount: 0,
         count: 1,
         tone: 'wait',
       }),
     });
+    const summary = screen.getByTestId('workbench-session-hint-summary');
+    expect(summary.textContent).toBe('1/0');
+    expect(screen.getByLabelText('等待 1 · 已停止 0')).toBeTruthy();
     const dots = document.querySelectorAll('[data-hint-tone="wait"]');
-    expect(dots.length).toBeGreaterThan(0);
-    expect(dots[0]?.textContent).toBe('1');
-    expect(screen.getByLabelText('1 个窗口等待输入')).toBeTruthy();
+    expect(dots.length).toBeGreaterThan(1);
+    expect(screen.getByLabelText('1 个窗口等待输入').textContent).toBe('1/0');
+  });
+
+  test('nav summary shows 0/0 when no waiting or stopped agents', () => {
+    renderSessionTab({});
+    const summary = screen.getByTestId('workbench-session-hint-summary');
+    expect(summary.textContent).toBe('0/0');
+    expect(summary.getAttribute('data-hint-tone')).toBe('zero');
+    expect(screen.getByLabelText('等待 0 · 已停止 0')).toBeTruthy();
   });
 
   test('clicking agent status focuses the terminal session only', () => {

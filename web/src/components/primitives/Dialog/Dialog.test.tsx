@@ -10,6 +10,8 @@
  *   用 Testing Library + user-event 渲染 Dialog，断言 DOM 位置、角色属性与键盘/点击行为。
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { useRef, useState, type ReactElement, type RefObject } from 'react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
@@ -37,6 +39,7 @@ function DialogHost(
     closeOnEscape,
     closeOnBackdrop,
     className,
+    backdropVariant,
     initialFocusRef,
     children,
   } = props;
@@ -61,6 +64,7 @@ function DialogHost(
         closeOnEscape={closeOnEscape}
         closeOnBackdrop={closeOnBackdrop}
         className={className}
+        backdropVariant={backdropVariant}
         initialFocusRef={initialFocusRef}
         onClose={() => {
           onClose?.();
@@ -177,6 +181,28 @@ describe('Dialog', () => {
     render(<DialogHost open closeOnEscape={false} onClose={onClose} />);
     await user.keyboard('{Escape}');
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test('default backdrop keeps frost blur; scrim variant is translucent without blur', () => {
+    const { rerender } = render(<DialogHost open />);
+    const defaultBackdrop = screen
+      .getByRole('dialog')
+      .parentElement!.querySelector('[data-dialog-backdrop]') as HTMLElement;
+    expect(defaultBackdrop.getAttribute('data-backdrop-variant')).toBe('frost');
+
+    rerender(<DialogHost open backdropVariant="scrim" />);
+    const scrimBackdrop = screen
+      .getByRole('dialog')
+      .parentElement!.querySelector('[data-dialog-backdrop]') as HTMLElement;
+    expect(scrimBackdrop.getAttribute('data-backdrop-variant')).toBe('scrim');
+
+    const css = readFileSync(
+      join(process.cwd(), 'src/components/primitives/Dialog/Dialog.module.css'),
+      'utf8',
+    );
+    expect(css).toMatch(/\.backdropScrim\s*\{[^}]*backdrop-filter:\s*none/);
+    expect(css).toMatch(/\.backdropScrim\s*\{[^}]*var\(--overlay-scrim\)/);
+    expect(css).not.toMatch(/\.backdropScrim\s*\{[^}]*blur\(/);
   });
 
   test('backdrop click closes when closeOnBackdrop is true (default)', async () => {

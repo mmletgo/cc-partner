@@ -3,9 +3,11 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   用户一次只答一道题；选择即时判、填空提交后由后端比答案。
+ *   中译英不能把 lemma 当标题露出来，否则答案直接写在题面上。
  *
  * Code Logic（这个组件做什么）:
- *   hooks 全在 early return 前；选择点选项即 submit；输入题等用户点提交。
+ *   hooks 全在 early return 前；选择点选项即 submit；输入题等用户点提交；
+ *   zhToEn 不渲染 lemma 标题。
  */
 
 import { useCallback, useState, type ReactNode } from 'react';
@@ -88,6 +90,7 @@ export function WordGame({ initialCard, onBack }: WordGameProps): ReactNode {
 
   const locked = result !== null;
   const done = Boolean(result && (result.done || !result.next));
+  const showLemma = card.questionType !== 'zhToEn';
 
   return (
     <div className={styles.play} data-testid="wordgame-play">
@@ -98,9 +101,11 @@ export function WordGame({ initialCard, onBack }: WordGameProps): ReactNode {
         <h2 className={styles.playTitle}>{t('wordgame:play.title')}</h2>
         <Pill tone="accent">{t(`wordgame:types.${card.questionType}`)}</Pill>
       </header>
-      <p className={styles.lemma} data-testid="wordgame-lemma">
-        {card.lemma}
-      </p>
+      {showLemma ? (
+        <p className={styles.lemma} data-testid="wordgame-lemma">
+          {card.lemma}
+        </p>
+      ) : null}
       <p className={styles.prompt} data-testid="wordgame-prompt">
         {card.prompt}
       </p>

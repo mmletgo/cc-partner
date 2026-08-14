@@ -217,6 +217,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
     const active = buildProject({ id: 'active', name: 'active-repo' });
     hintCountsByProject.active = {
       waitingCount: 2,
+      stoppedCount: 0,
       completedCount: 0,
       count: 2,
       tone: 'wait',
@@ -226,7 +227,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
       activeProjectId: active.id,
       activeProject: active,
     });
-    expect(screen.getByLabelText('2 个窗口等待输入').textContent).toBe('2');
+    expect(screen.getByLabelText('2 个窗口等待输入').textContent).toBe('2/0');
     expect(document.querySelector('[data-hint-tone="wait"]')).toBeTruthy();
   });
 

@@ -1,9 +1,9 @@
 /**
- * 工作台 Agent 等待/完成 hint 纯规则。
+ * 工作台 Agent 等待/已停止 hint 纯规则。
  *
  * Business Logic（为什么需要这个模块）:
- *   项目卡、worktree、窗口 tab 需要按 window 统计「等人」和「未看完成」，
- *   激活窗口只消完成、等待必须跟 phase 走；刷新不得让已看完成复活。
+ *   项目卡、worktree、窗口 tab 需要按 window 统计「等人」和「已停止」，
+ *   激活窗口只消未看 completed，等待必须跟 phase 走；idle/failed/disconnected 计已停止。
  *
  * Code Logic（这个模块做什么）:
  *   维护 per-terminal waiting/completed、acked 集合与 seen-completed 边沿；
@@ -18,13 +18,17 @@ export const ACKED_COMPLETED_CAP = 500;
 export const SEEN_COMPLETED_CAP = 200;
 export const SEEN_COMPLETED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-export type AgentHintTone = 'wait' | 'complete';
+export type AgentHintTone = 'wait' | 'complete' | 'zero';
+export type AgentHintStoppedKind = 'idle' | 'completed' | 'failed' | 'disconnected';
 
 export interface AgentHintCounts {
   waitingCount: number;
+  /** 已停止窗口数（idle / completed / failed / disconnected） */
+  stoppedCount: number;
+  /** 兼容旧 completedCount 读法，等于 stoppedCount */
   completedCount: number;
   count: number;
-  tone: AgentHintTone | null;
+  tone: AgentHintTone;
 }
 
 export interface AgentHintTerminalRow {
@@ -35,6 +39,7 @@ export interface AgentHintTerminalRow {
   completedAgentId?: string;
   completedVersion?: number;
   completedEndedAt?: string;
+  stoppedKind?: AgentHintStoppedKind;
 }
 
 export interface SeenCompletedEdge {
@@ -62,9 +67,10 @@ export interface PersistedHintExtras {
 
 export const EMPTY_HINT_COUNTS: AgentHintCounts = {
   waitingCount: 0,
+  stoppedCount: 0,
   completedCount: 0,
   count: 0,
-  tone: null,
+  tone: 'zero',
 };
 
 const EMPTY_COUNTS = EMPTY_HINT_COUNTS;
@@ -99,19 +105,38 @@ export function emptyAgentHintState(): WorkbenchAgentHintState {
  */
 export function hintAriaKind(
   counts: AgentHintCounts,
-): 'waiting' | 'completed' | 'both' | null {
-  if (counts.waitingCount > 0 && counts.completedCount > 0) return 'both';
-  if (counts.waitingCount > 0) return 'waiting';
-  if (counts.completedCount > 0) return 'completed';
-  return null;
+): 'waiting' | 'completed' | 'both' {
+  if (counts.waitingCount > 0 && counts.stoppedCount > 0) return 'both';
+  if (counts.waitingCount > 0 && counts.stoppedCount === 0) return 'waiting';
+  if (counts.waitingCount === 0 && counts.stoppedCount > 0) return 'completed';
+  return 'both';
 }
 
 export function hintCountsFrom(waitingCount: number, completedCount: number): AgentHintCounts {
   const waiting = Math.max(0, waitingCount);
-  const completed = Math.max(0, completedCount);
-  const count = waiting + completed;
-  const tone: AgentHintTone | null = waiting > 0 ? 'wait' : completed > 0 ? 'complete' : null;
-  return { waitingCount: waiting, completedCount: completed, count, tone };
+  const stopped = Math.max(0, completedCount);
+  const count = waiting + stopped;
+  const tone: AgentHintTone = waiting > 0 ? 'wait' : stopped > 0 ? 'complete' : 'zero';
+  return {
+    waitingCount: waiting,
+    stoppedCount: stopped,
+    completedCount: stopped,
+    count,
+    tone,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   数字标点必须永远能写出 0，不能复用 Attention badge 的「0 隐藏」。
+ *
+ * Code Logic（这个函数做什么）:
+ *   非有限或负数归一为 0；1..99 原样；>=100 为 99+。
+ */
+export function formatHintCount(total: number): string {
+  if (!Number.isFinite(total) || total <= 0) return '0';
+  if (total > 99) return '99+';
+  return String(Math.floor(total));
 }
 
 function resolveWorktreeId(
@@ -162,21 +187,34 @@ export function applyAgentHintSession(
     current.completedAgentId = undefined;
     current.completedVersion = undefined;
     current.completedEndedAt = undefined;
+    current.stoppedKind = undefined;
   } else if (dto.phase === 'completed') {
     current.waitingAgentId = undefined;
     if (!state.ackedCompletedIds.has(dto.id)) {
       current.completedAgentId = dto.id;
       current.completedVersion = dto.version;
       current.completedEndedAt = dto.endedAt ?? dto.lastActivityAt;
+      current.stoppedKind = 'completed';
+    } else {
+      current.completedAgentId = undefined;
+      current.completedVersion = undefined;
+      current.completedEndedAt = undefined;
+      current.stoppedKind = undefined;
     }
-  } else if (
-    dto.phase === 'working' ||
-    dto.phase === 'idle' ||
-    dto.phase === 'launching'
-  ) {
+  } else if (dto.phase === 'idle' || dto.phase === 'failed' || dto.phase === 'disconnected') {
     current.waitingAgentId = undefined;
-  } else if (dto.phase === 'failed' || dto.phase === 'disconnected') {
+    current.completedAgentId = dto.id;
+    current.completedVersion = dto.version;
+    current.completedEndedAt = dto.endedAt ?? dto.lastActivityAt;
+    current.stoppedKind = dto.phase;
+  } else if (dto.phase === 'working' || dto.phase === 'launching') {
     current.waitingAgentId = undefined;
+    if (current.stoppedKind && current.stoppedKind !== 'completed') {
+      current.completedAgentId = undefined;
+      current.completedVersion = undefined;
+      current.completedEndedAt = undefined;
+      current.stoppedKind = undefined;
+    }
   }
 
   const pruned = pruneEmptyRow(current);
@@ -205,11 +243,13 @@ export function ackCompletedForTerminal(
 
   const nextAcked = appendAcked(state.ackedCompletedIds, row.completedAgentId);
   const nextByTerminal = new Map(state.byTerminal);
+  if (row.stoppedKind && row.stoppedKind !== 'completed') return state;
   const nextRow = {
     ...row,
     completedAgentId: undefined,
     completedVersion: undefined,
     completedEndedAt: undefined,
+    stoppedKind: undefined,
   };
   const pruned = pruneEmptyRow(nextRow);
   if (pruned) nextByTerminal.set(terminalSessionId, pruned);

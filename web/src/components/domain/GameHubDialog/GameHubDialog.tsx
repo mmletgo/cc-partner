@@ -6,7 +6,8 @@
  *
  * Code Logic（这个组件做什么）:
  *   单 Dialog 两态；大厅 Escape/遮罩关闭；游戏态 closeOnBackdrop=false，
- *   Escape/返回回大厅。hooks 全在 early return 前。
+ *   Escape/返回回大厅。遮罩用 backdropVariant=scrim（半透明、无 blur）。
+ *   hooks 全在 early return 前。
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
@@ -137,6 +138,7 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
       titleId="game-hub-dialog-title"
       onClose={handleDialogClose}
       closeOnBackdrop={view === 'hub'}
+      backdropVariant="scrim"
       className={styles.dialog}
     >
       <div className={styles.body} data-testid="game-hub-dialog">
