@@ -209,6 +209,7 @@ fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
         cloud_sync_interval_secs: 600,
         cloud_sync_branch: None,
         health: Default::default(),
+        battery: Default::default(),
         orchestrator: Default::default(),
         github_trending: Default::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),

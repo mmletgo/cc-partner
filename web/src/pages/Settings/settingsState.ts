@@ -95,6 +95,7 @@ export type SettingsTabId =
   | 'general'
   | 'dependencies'
   | 'health'
+  | 'battery'
   | 'activity'
   | 'sync'
   | 'ai'
@@ -107,6 +108,7 @@ export const SETTINGS_TAB_IDS: readonly SettingsTabId[] = [
   'general',
   'dependencies',
   'health',
+  'battery',
   'activity',
   'sync',
   'ai',

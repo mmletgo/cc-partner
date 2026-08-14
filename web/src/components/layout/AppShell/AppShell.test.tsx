@@ -74,6 +74,24 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }));
 
+const batterySnapshotMock = vi.hoisted(() => ({
+  snapshot: {
+    mode: 'charging' as const,
+    remainingMs: 23 * 60_000,
+    maxBalanceMs: 240 * 60_000,
+    todayEarnedMs: 0,
+    todaySpentMs: 0,
+    consuming: false,
+  },
+  toast: null,
+  setMode: vi.fn(),
+  dismissToast: vi.fn(),
+}));
+
+vi.mock('@/hooks/useBattery', () => ({
+  useBattery: () => batterySnapshotMock,
+}));
+
 
 import { AppShell } from './AppShell';
 
@@ -175,6 +193,16 @@ describe('AppShell grouped navigation', () => {
     expect(settingsLink.closest('[class*="footerIconGroup"]') || settingsLink.parentElement).toBeTruthy();
   });
 
+  test('places battery toggle before ThemeToggle in the footer icon group', () => {
+    renderShell();
+    const battery = screen.getByTestId('battery-mode-toggle');
+    const group = battery.closest('[class*="footerIconGroup"]');
+    expect(group).toBeTruthy();
+    const buttons = Array.from(group?.querySelectorAll('button, a') ?? []);
+    expect(buttons[0]).toBe(battery);
+    expect(screen.getByRole('button', { name: '切换到无限模式' })).toBe(battery);
+  });
+
   test('places a game text button next to the version number and keeps it out of primary nav', () => {
     renderShell();
 
@@ -217,6 +245,9 @@ describe('AppShell grouped navigation', () => {
     expect(screen.queryByRole('link', { name: 'Github热门' })).toBeNull();
     expect(screen.queryByRole('link', { name: '设置' })).toBeNull();
     expect(screen.getByTestId('project-rail')).toBeTruthy();
+    expect(screen.getByTestId('battery-satellite-footer')).toBeTruthy();
+    expect(screen.getByTestId('battery-mode-toggle')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /theme/i })).toBeNull();
     windowRoleMock.role = 'main';
   });
 

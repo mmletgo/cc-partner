@@ -210,7 +210,7 @@ async fn handle_sample(
         let Some(tmpl) = cfg.reminders.iter().find(|t| t.id == fired_id) else {
             continue;
         };
-        if let Err(e) = persist_habit_event(&state.health_repo, tmpl, now, "triggered", 0).await {
+        if let Err(e) = persist_habit_event(state, tmpl, now, "triggered", 0).await {
             tracing::warn!("写入习惯触发记录失败: {e}");
         }
         if dnd {
@@ -306,13 +306,13 @@ fn collect_fired_templates(
 ///     先 insert_habit_record；water completed 再 insert_water；rest triggered/completed
 ///     再 insert_rest_record。
 async fn persist_habit_event(
-    repo: &crate::storage::health_repo::HealthRepo,
+    state: &crate::state::AppState,
     template: &HealthReminderTemplate,
     now: i64,
     kind: &str,
     duration_seconds: i64,
 ) -> Result<i64, AppError> {
-    persist_habit_event_by_id(repo, &template.id, now, kind, duration_seconds).await
+    persist_habit_event_by_id(state, &template.id, now, kind, duration_seconds).await
 }
 
 /// 仅凭 template_id 双写（旧命令包装无完整模板对象时用）。
@@ -322,12 +322,13 @@ async fn persist_habit_event(
 /// Code Logic（这个函数做什么）:
 ///     与 persist_habit_event 相同的双写规则。
 pub(crate) async fn persist_habit_event_by_id(
-    repo: &crate::storage::health_repo::HealthRepo,
+    state: &crate::state::AppState,
     template_id: &str,
     now: i64,
     kind: &str,
     duration_seconds: i64,
 ) -> Result<i64, AppError> {
+    let repo = &state.health_repo;
     let id = repo
         .insert_habit_record(template_id, now, kind, duration_seconds)
         .await?;
@@ -344,7 +345,33 @@ pub(crate) async fn persist_habit_event_by_id(
             let _ = repo.insert_rest_record(now, rest_kind, duration_seconds).await?;
         }
     }
+    if kind == "completed" {
+        credit_health_completed(state, template_id, id, now).await;
+    }
     Ok(id)
+}
+
+/// 健康 completed 入账；失败只记日志，不回滚习惯记录。
+///
+/// Business Logic: 打卡成功就该充电；账本故障不能让用户以为没完成健康行为。
+/// Code Logic: BatteryRepo 现取；credit 后 emit `battery:changed`。
+async fn credit_health_completed(
+    state: &crate::state::AppState,
+    template_id: &str,
+    habit_id: i64,
+    now: i64,
+) {
+    let config = state.config.read().unwrap().battery.clone();
+    let repo = crate::storage::BatteryRepo::with_gate(
+        state.db.clone(),
+        state.maintenance_gate.clone(),
+    );
+    let source = crate::config::BatteryCreditSource::from_health_template_id(template_id);
+    let source_id = crate::battery::habit_source_id(template_id, habit_id);
+    match crate::battery::credit(&repo, &config, source, &source_id, now).await {
+        Ok(snapshot) => state.emit_event("battery:changed", snapshot),
+        Err(error) => tracing::warn!("充电入账失败: {error}"),
+    }
 }
 
 /// 打开全屏健康提醒遮罩窗口(每屏一个,复用截图透明窗口构建模式)。
@@ -506,9 +533,9 @@ pub fn start_overlay_session(
     );
 
     let health = state.health.clone();
-    let health_repo = state.health_repo.clone();
     let owned_id = template_id.to_string();
     let app_h = app.clone();
+    let battery_state = state.clone();
     tauri::async_runtime::spawn(async move {
         let now0 = Utc::now().timestamp();
         let remaining_secs = u64::try_from((end_ts - now0).max(0)).unwrap_or(0);
@@ -521,7 +548,7 @@ pub fn start_overlay_session(
         }
         let fin_now = Utc::now().timestamp();
         if let Err(e) =
-            persist_habit_event_by_id(&health_repo, &owned_id, fin_now, "completed", session_seconds)
+            persist_habit_event_by_id(&battery_state, &owned_id, fin_now, "completed", session_seconds)
                 .await
         {
             tracing::warn!("模板会话结束记录失败: {e}");

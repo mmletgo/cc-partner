@@ -21,6 +21,38 @@ fn repo(state: &AppState) -> WordGameRepo {
     WordGameRepo::with_gate(state.db.clone(), state.maintenance_gate.clone())
 }
 
+/// 闪卡答对后入账；失败只记日志。
+///
+/// Business Logic: 答对一张就该充电，账本故障不能回滚判题。
+/// Code Logic: 用 lemma+题型+日+当日计数做幂等键，credit 后 emit。
+async fn credit_wordgame_correct(
+    state: &AppState,
+    lemma: &str,
+    question_type: &str,
+    today: &str,
+    correct_today: i64,
+) {
+    let config = state.config.read().unwrap().battery.clone();
+    let battery_repo = crate::storage::BatteryRepo::with_gate(
+        state.db.clone(),
+        state.maintenance_gate.clone(),
+    );
+    let source_id = crate::battery::wordgame_source_id(lemma, question_type, today, correct_today);
+    let now = chrono::Utc::now().timestamp();
+    match crate::battery::credit(
+        &battery_repo,
+        &config,
+        crate::config::BatteryCreditSource::Flashcard,
+        &source_id,
+        now,
+    )
+    .await
+    {
+        Ok(snapshot) => state.emit_event("battery:changed", snapshot),
+        Err(error) => tracing::warn!("闪卡充电入账失败: {error}"),
+    }
+}
+
 /// 大厅状态。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,6 +163,9 @@ pub async fn submit_wordgame_answer(
     let outcome = apply_answer(&lemma, &current, &all, &today, correct);
     repo.upsert_lemma(&outcome.lemma).await?;
     repo.upsert_progress(&outcome.progress).await?;
+    if correct {
+        credit_wordgame_correct(&state, &req.lemma, req.question_type.as_str(), &today, outcome.progress.correct_today).await;
+    }
     let next = next_card_for_state(&state, Some((req.lemma.as_str(), req.question_type))).await?;
     Ok(WordgameSubmitResultDto {
         correct: outcome.correct,

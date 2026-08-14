@@ -1286,7 +1286,7 @@ async fn require_local_project_by_id(state: &AppState, project_id: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
     use crate::orchestrator::models::{
         OrchestratorCreateAction, OrchestratorRunState, OrchestratorTaskRow,
         OrchestratorTaskStatus, OrchestratorWorkflowState,
@@ -1337,6 +1337,7 @@ mod tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: HealthConfig::default(),
+            battery: BatteryConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             internal_claude: crate::config::InternalClaudeConfig::default(),

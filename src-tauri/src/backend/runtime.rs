@@ -435,6 +435,7 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
         .await?;
     OrchestratorRepo::init_schema(&pool).await?;
     crate::storage::WordGameRepo::ensure_schema(&pool).await?;
+    crate::storage::BatteryRepo::ensure_schema(&pool).await?;
     Ok(pool)
 }
 

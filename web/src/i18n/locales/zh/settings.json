@@ -9,6 +9,7 @@
     "general": "常规",
     "dependencies": "依赖环境",
     "health": "健康提醒",
+    "battery": "充电模式",
     "activity": "活动统计",
     "sync": "同步",
     "ai": "AI",

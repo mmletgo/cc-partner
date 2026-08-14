@@ -20,3 +20,4 @@ export * from './portableInventory';
 export * from './lanFleet';
 export * from './providerManager';
 export * from './wordgame';
+export * from './battery';

@@ -467,7 +467,7 @@ pub async fn choose_dir(app: AppHandle) -> Result<Option<String>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
     use crate::config_store::MemoryConfigStore;
     use crate::hotkey::FakeGlobalShortcutBackend;
     use std::sync::Arc;
@@ -489,6 +489,7 @@ mod tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: HealthConfig::default(),
+            battery: BatteryConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             internal_claude: crate::config::InternalClaudeConfig::default(),

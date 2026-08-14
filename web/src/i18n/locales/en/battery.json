@@ -1,0 +1,66 @@
+{
+  "loading": "Loading…",
+  "toggleToUnlimited": "Switch to unlimited mode",
+  "toggleToCharging": "Switch to charging mode",
+  "titleCharging": "Charging mode · {{time}} left",
+  "titleUnlimited": "Unlimited mode · balance {{time}}",
+  "remainingShort": "{{time}}",
+  "creditToast": "+{{minutes}} min",
+  "creditToastSource": "+{{minutes}} min · {{source}}",
+  "sources": {
+    "water": "Water",
+    "rest": "Rest",
+    "kegel": "Kegel",
+    "custom": "Habit",
+    "flashcard": "Flashcard",
+    "welcome": "Welcome grant"
+  },
+  "scrim": {
+    "title": "Workbench needs a charge",
+    "body": "0 minutes left. Complete a health action or pass one flashcard to continue.",
+    "goHealth": "Go to health reminders",
+    "openGame": "Open flashcards"
+  },
+  "time": {
+    "zero": "0 min",
+    "minutes": "{{count}} min",
+    "hoursMinutes": "{{hours}} h {{minutes}} min"
+  },
+  "settings": {
+    "modeLabel": "Workbench mode",
+    "modeCharging": "Charging",
+    "modeUnlimited": "Unlimited",
+    "remaining": "Time remaining",
+    "todayEarned": "Earned today",
+    "todaySpent": "Spent today",
+    "rewardsTitle": "Charge amounts",
+    "capsTitle": "Daily count caps",
+    "maxBalance": "Balance cap (minutes)",
+    "welcomeGrant": "First charging grant (minutes)",
+    "waterMinutes": "Water (minutes)",
+    "restMinutes": "Rest (minutes)",
+    "kegelMinutes": "Kegel (minutes)",
+    "customMinutes": "Custom habit (minutes)",
+    "flashcardMinutes": "Flashcard correct (minutes)",
+    "waterCap": "Water count",
+    "restCap": "Rest count",
+    "kegelCap": "Kegel count",
+    "customCap": "Custom count",
+    "flashcardCap": "Flashcard count",
+    "save": "Save amounts",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "saveError": "Save failed: {{error}}",
+    "resetDefaults": "Restore default amounts",
+    "ledgerTitle": "Ledger",
+    "ledgerEmpty": "No ledger entries yet.",
+    "ledgerLoadError": "Could not load the ledger.",
+    "kinds": {
+      "credit_health": "Health credit",
+      "credit_wordgame": "Flashcard credit",
+      "credit_welcome": "Welcome grant",
+      "debit_tick": "Workbench drain",
+      "mode_change": "Mode change"
+    }
+  }
+}

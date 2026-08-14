@@ -297,6 +297,66 @@ vi.mock('@/api/orchestratorConfig', () => ({
   },
 }));
 
+vi.mock('@/hooks/useBattery', () => ({
+  useBattery: () => ({
+    snapshot: {
+      mode: 'unlimited',
+      remainingMs: 0,
+      maxBalanceMs: 240 * 60_000,
+      todayEarnedMs: 0,
+      todaySpentMs: 0,
+      consuming: false,
+    },
+    toast: null,
+    setMode: vi.fn(),
+    dismissToast: vi.fn(),
+  }),
+}));
+
+vi.mock('@/api/battery', () => ({
+  batteryApi: {
+    getConfig: () =>
+      Promise.resolve({
+        rewards: {
+          waterMinutes: 8,
+          restMinutes: 20,
+          kegelMinutes: 10,
+          customMinutes: 10,
+          flashcardMinutes: 3,
+        },
+        dailyCaps: { water: 6, rest: 8, kegel: 4, custom: 6, flashcard: 30 },
+        maxBalanceMinutes: 240,
+        welcomeGrantMinutes: 25,
+      }),
+    getDefaultConfig: () =>
+      Promise.resolve({
+        rewards: {
+          waterMinutes: 8,
+          restMinutes: 20,
+          kegelMinutes: 10,
+          customMinutes: 10,
+          flashcardMinutes: 3,
+        },
+        dailyCaps: { water: 6, rest: 8, kegel: 4, custom: 6, flashcard: 30 },
+        maxBalanceMinutes: 240,
+        welcomeGrantMinutes: 25,
+      }),
+    updateConfig: (config: unknown) => Promise.resolve(config),
+    listLedger: () => Promise.resolve([]),
+    getSnapshot: () =>
+      Promise.resolve({
+        mode: 'unlimited',
+        remainingMs: 0,
+        maxBalanceMs: 240 * 60_000,
+        todayEarnedMs: 0,
+        todaySpentMs: 0,
+        consuming: false,
+      }),
+    setMode: () => Promise.resolve({ mode: 'unlimited' }),
+    reportFocus: () => Promise.resolve({ mode: 'unlimited' }),
+  },
+}));
+
 vi.mock('@/hooks/usePermissions', () => ({
   usePermissions: () => ({
     status: {

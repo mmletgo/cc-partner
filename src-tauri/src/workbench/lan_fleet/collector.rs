@@ -956,7 +956,7 @@ mod tests {
     use super::*;
     use crate::backend::ui::HeadlessBackendUi;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::net::peer_client::PeerClient;
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
@@ -1128,6 +1128,7 @@ mod tests {
             cloud_sync_interval_secs: 600,
             cloud_sync_branch: None,
             health: HealthConfig::default(),
+            battery: BatteryConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             internal_claude: crate::config::InternalClaudeConfig::default(),

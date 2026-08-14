@@ -560,7 +560,7 @@ pub async fn record_water(state: State<'_, AppState>) -> Result<(), AppError> {
     let now = chrono::Utc::now().timestamp();
     crate::health::acknowledge_template_runtime(&state.health, HEALTH_REMINDER_WATER_ID, now, false);
     crate::health::persist_habit_event_by_id(
-        &state.health_repo,
+        &state,
         HEALTH_REMINDER_WATER_ID,
         now,
         "completed",
@@ -701,7 +701,7 @@ pub async fn add_habit_manual(
     }
     let now = chrono::Utc::now().timestamp();
     let id = crate::health::persist_habit_event_by_id(
-        &state.health_repo,
+        &state,
         &template_id,
         now,
         "completed",
@@ -731,7 +731,7 @@ pub async fn acknowledge_health_reminder(
         "completed" => {
             crate::health::acknowledge_template_runtime(&state.health, &template_id, now, false);
             crate::health::persist_habit_event_by_id(
-                &state.health_repo,
+                &state,
                 &template_id,
                 now,
                 "completed",
@@ -775,7 +775,7 @@ pub async fn record_rest_completed(state: State<'_, AppState>) -> Result<(), App
         .unwrap_or(cfg.break_seconds);
     crate::health::acknowledge_template_runtime(&state.health, HEALTH_REMINDER_REST_ID, now, false);
     crate::health::persist_habit_event_by_id(
-        &state.health_repo,
+        &state,
         HEALTH_REMINDER_REST_ID,
         now,
         "completed",
@@ -924,7 +924,7 @@ mod habit_stats_tests {
 mod config_writer_tests {
     use super::*;
     use crate::config::{
-        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::config_runtime::ConfigRuntime;
     use crate::config_store::MemoryConfigStore;
@@ -950,6 +950,7 @@ mod config_writer_tests {
                 enabled: true,
                 ..HealthConfig::default()
             },
+            battery: BatteryConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             internal_claude: crate::config::InternalClaudeConfig::default(),

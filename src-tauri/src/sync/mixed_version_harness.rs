@@ -10,7 +10,7 @@
 //!     AppState，调用 `trigger_sync` 断言 prompt 路由选择与 device/domain 终态。
 
 use crate::backend::ui::HeadlessBackendUi;
-use crate::config::{AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+use crate::config::{AppConfig, GithubTrendingConfig, BatteryConfig, HealthConfig, OrchestratorAutomationConfig};
 use crate::models::device::Device;
 use crate::models::prompt::PromptRow;
 use crate::net::peer_client::PeerClient;
@@ -375,6 +375,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         cloud_sync_interval_secs: 600,
         cloud_sync_branch: None,
         health: HealthConfig::default(),
+            battery: BatteryConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
         internal_claude: crate::config::InternalClaudeConfig::default(),
