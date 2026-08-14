@@ -396,10 +396,13 @@ mod tests {
     }
 
     /// 进程内 DRAIN 是全局单例；并行测试互相 reset 会把 elapsed 算错。
-    static SERVICE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// 锁必须跨 .await 持有到测试结束，用 tokio async Mutex（std guard 跨 await
+    /// 会被 clippy await-holding-lock 拒绝）。
+    static SERVICE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-    fn lock_drain_for_test() -> std::sync::MutexGuard<'static, ()> {
-        let guard = SERVICE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    async fn lock_drain_for_test() -> tokio::sync::MutexGuard<'static, ()> {
+        let lock = SERVICE_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+        let guard = lock.lock().await;
         let mut rt = drain_runtime();
         rt.consuming.clear();
         rt.last_settle_ms = None;
@@ -408,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_charging_grants_welcome_once() {
-        let _lock = lock_drain_for_test();
+        let _lock = lock_drain_for_test().await;
         let repo = repo().await;
         let cfg = BatteryConfig::default();
         let snap = set_mode(&repo, &cfg, "charging", 1_700_000_000)
@@ -430,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_habit_source_does_not_double_credit() {
-        let _lock = lock_drain_for_test();
+        let _lock = lock_drain_for_test().await;
         let repo = repo().await;
         let cfg = BatteryConfig::default();
         let id = habit_source_id("water", 9);
@@ -447,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_windows_debit_once() {
-        let _lock = lock_drain_for_test();
+        let _lock = lock_drain_for_test().await;
         let repo = repo().await;
         let cfg = BatteryConfig::default();
         set_mode(&repo, &cfg, "charging", 1_700_010_000)
