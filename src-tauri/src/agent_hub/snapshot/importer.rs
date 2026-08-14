@@ -2274,7 +2274,9 @@ mod tests {
                 local_workbench_project_id: Some("wb-1".into()),
                 git_remote_fingerprint: Some("fp-1".into()),
                 local_absolute_path: None,
-                opted_in: false,
+                // 源端导出 Project 模式快照要求映射已 opt-in（resolve_project_scope_id_on_tx）；
+                // 目标端 import 后映射默认非 opt-in 由下方断言覆盖。
+                opted_in: true,
             })
             .await
             .unwrap();
@@ -2394,6 +2396,18 @@ mod tests {
             .await
             .unwrap()
             .id;
+        // 源端导出 Project 模式快照要求映射存在且已 opt-in；"unmapped" 指目标端
+        // commit_import 时不提供 project_mappings，验证投影为 0。
+        repo_a
+            .upsert_project_mapping(UpsertAgentHubProjectMapping {
+                hub_project_id: "hub-x".into(),
+                local_workbench_project_id: Some("wb-x".into()),
+                git_remote_fingerprint: Some("fp-x".into()),
+                local_absolute_path: None,
+                opted_in: true,
+            })
+            .await
+            .unwrap();
         let asset = repo_a
             .insert_asset(NewLogicalAsset {
                 scope_id: scope,

@@ -269,11 +269,13 @@ mod tests {
     fn claude_md_path_respects_claude_config_dir() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let cfg = tmp.path().join("claude-home");
-        // SAFETY: 仅本串行单测内改 env。
-        std::env::set_var("CLAUDE_CONFIG_DIR", &cfg);
+        let env_guard = crate::config::install_env_var(
+            "CLAUDE_CONFIG_DIR",
+            Some(cfg.to_str().expect("utf8 path")),
+        );
         let path = claude_md_path();
         assert_eq!(path, cfg.join("CLAUDE.md"));
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        drop(env_guard);
         let fallback = claude_md_path();
         assert!(fallback.ends_with(std::path::Path::new(".claude").join("CLAUDE.md")));
     }

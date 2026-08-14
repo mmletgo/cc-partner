@@ -309,6 +309,7 @@ mod tests {
     ///     fail_next_save 后 patch enabled=true，断言 Err 且 snapshot 仍 false。
     #[tokio::test]
     async fn save_failure_rolls_back() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         use crate::config_runtime::ConfigRuntime;
         use crate::config_store::MemoryConfigStore;
         use std::sync::Arc;

@@ -1023,6 +1023,7 @@ mod config_writer_tests {
     ///     fail_next_save 后打开 ai_enabled，断言 Err 且 snapshot 仍 false。
     #[tokio::test]
     async fn save_failure_rolls_back() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         store.fail_next_save();

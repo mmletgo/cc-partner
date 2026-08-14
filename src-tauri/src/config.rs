@@ -1527,6 +1527,64 @@ mod data_dir_env_test {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// 通用 env 测试锁（按 key 分锁）：`CLAUDE_CONFIG_DIR` / `HOME` 等无专属锁的
+    /// 变量各自一把，消除跨模块测试裸 set/remove 的窗口竞态；同测试持多个不同
+    /// key 的 guard 时互不阻塞，避免不可重入 Mutex 自死锁。
+    fn generic_env_var_lock(key: &str) -> &'static Mutex<()> {
+        static LOCK_CLAUDE_CONFIG: OnceLock<Mutex<()>> = OnceLock::new();
+        static LOCK_HOME: OnceLock<Mutex<()>> = OnceLock::new();
+        static LOCK_OTHER: OnceLock<Mutex<()>> = OnceLock::new();
+        match key {
+            "CLAUDE_CONFIG_DIR" => LOCK_CLAUDE_CONFIG.get_or_init(|| Mutex::new(())),
+            "HOME" => LOCK_HOME.get_or_init(|| Mutex::new(())),
+            _ => LOCK_OTHER.get_or_init(|| Mutex::new(())),
+        }
+    }
+
+    /// 测试用任意 env 变量守卫。
+    ///
+    /// Business Logic（为什么需要这个结构）:
+    ///     多个模块的测试（claude_code_assets / migration / sync::claude_md 等）
+    ///     需要临时设置 `CLAUDE_CONFIG_DIR`、`HOME` 等进程级变量；裸 set/remove
+    ///     在并行测试间存在窗口竞态，互相读到对方的临时值导致游走型 flake。
+    ///
+    /// Code Logic（这个结构做什么）:
+    ///     持有通用 env 测试锁与原始值；Drop 时按原值恢复或移除变量。
+    ///     包装 struct 使 clippy await-holding-lock 不视为裸锁跨 await。
+    pub struct TestEnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TestEnvVarGuard {
+        /// 恢复测试前的变量值；即使断言失败或 panic 也不泄漏临时值。
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// 持通用锁设置任意 env 变量（`Some` 设置 / `None` 移除），guard 存活期间保持、
+    /// Drop 时恢复原值。同锁用户互斥，消除 set 窗口竞态。
+    pub fn install_env_var(key: &'static str, value: Option<&str>) -> TestEnvVarGuard {
+        let lock = generic_env_var_lock(key)
+            .lock()
+            .expect("通用 env 测试锁中毒");
+        let previous = std::env::var_os(key);
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        TestEnvVarGuard {
+            key,
+            previous,
+            _lock: lock,
+        }
+    }
+
     /// 测试用 `CC_PARTNER_DATA_DIR` 环境隔离守卫。
     ///
     /// Business Logic（为什么需要这个结构）:
@@ -1580,7 +1638,7 @@ mod data_dir_env_test {
 }
 
 #[cfg(test)]
-pub use data_dir_env_test::{install_data_dir_env, DataDirEnvGuard};
+pub use data_dir_env_test::{install_data_dir_env, install_env_var, DataDirEnvGuard};
 
 #[cfg(test)]
 mod tests {

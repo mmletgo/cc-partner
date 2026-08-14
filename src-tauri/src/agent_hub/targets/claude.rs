@@ -619,8 +619,8 @@ mod tests {
         )
         .unwrap();
         // Isolate data_dir via env override used by config::data_dir()
-        let prev = std::env::var_os("CC_PARTNER_DATA_DIR");
-        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
         let mut vars = std::collections::BTreeMap::new();
         // Point Claude config at isolated home so user-level scan does not touch real ~/.claude
         vars.insert(
@@ -642,11 +642,6 @@ mod tests {
         let found = ClaudeInstructionAdapter
             .scan_portable_assets(&scope, &env)
             .expect("scan");
-        if let Some(v) = prev {
-            std::env::set_var("CC_PARTNER_DATA_DIR", v);
-        } else {
-            std::env::remove_var("CC_PARTNER_DATA_DIR");
-        }
         let skill = found.iter().find(|d| {
             matches!(
                 d.payload,
@@ -676,8 +671,8 @@ mod tests {
         )
         .unwrap();
         fs::write(claude.join(".claude.json"), "{ invalid json").unwrap();
-        let previous = std::env::var_os("CC_PARTNER_DATA_DIR");
-        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
         let env = TargetEnvironment {
             home: home.clone(),
             vars: std::collections::BTreeMap::from([(
@@ -698,11 +693,6 @@ mod tests {
             &env,
             Some(AssetKind::Skill),
         );
-        if let Some(value) = previous {
-            std::env::set_var("CC_PARTNER_DATA_DIR", value);
-        } else {
-            std::env::remove_var("CC_PARTNER_DATA_DIR");
-        }
         let found = result.expect("skill-only scan must ignore invalid MCP config");
         assert!(found
             .iter()

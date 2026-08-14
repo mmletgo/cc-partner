@@ -599,8 +599,8 @@ mod tests {
             "---\nname: review\n---\nbody\n",
         )
         .unwrap();
-        let prev = std::env::var_os("CC_PARTNER_DATA_DIR");
-        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
         let env = TargetEnvironment {
             home: home.clone(),
             vars: std::collections::BTreeMap::new(),
@@ -622,11 +622,6 @@ mod tests {
         let filtered_cmd = CodexInstructionAdapter
             .scan_portable_assets_filtered(&scope, &env, Some(AssetKind::Command))
             .expect("filtered command scan");
-        if let Some(v) = prev {
-            std::env::set_var("CC_PARTNER_DATA_DIR", v);
-        } else {
-            std::env::remove_var("CC_PARTNER_DATA_DIR");
-        }
         let skill = found
             .iter()
             .find(|d| {

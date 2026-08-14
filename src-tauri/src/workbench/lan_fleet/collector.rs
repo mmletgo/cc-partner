@@ -1007,7 +1007,7 @@ mod tests {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS workbench_sessions (\
              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL, \
-             command TEXT, cwd TEXT, status TEXT NOT NULL, cols INTEGER, rows INTEGER, \
+             name_source TEXT NOT NULL DEFAULT 'default', command TEXT, cwd TEXT, status TEXT NOT NULL, cols INTEGER, rows INTEGER, \
              started_at TEXT, exited_at TEXT, exit_code INTEGER, backend TEXT, backend_id TEXT, \
              backend_window_id TEXT, created_at TEXT, updated_at TEXT)",
         )

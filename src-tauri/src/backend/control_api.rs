@@ -2328,6 +2328,7 @@ mod tests {
     ///     构造 runtime，成功一次 generation=1，再用 0 调用失败。
     #[tokio::test]
     async fn update_config_cas_path_conflict_on_stale_generation() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = AppConfig {
             device_id: "dev-a".into(),
             device_name: "n".into(),

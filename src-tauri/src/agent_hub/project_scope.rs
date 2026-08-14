@@ -735,7 +735,7 @@ mod tests {
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS workbench_sessions (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL,
-                command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL,
+                name_source TEXT NOT NULL DEFAULT 'default', command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL,
                 rows INTEGER NOT NULL, started_at TEXT NOT NULL, exited_at TEXT, exit_code INTEGER,
                 backend TEXT NOT NULL, backend_id TEXT, backend_window_id TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",

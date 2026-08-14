@@ -1404,7 +1404,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let claude_home = tmp.path().join(".claude");
         fs::create_dir_all(&claude_home).unwrap();
-        std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.to_string_lossy().as_ref());
+        let _claude_env_guard = crate::config::install_env_var(
+            "CLAUDE_CONFIG_DIR",
+            Some(claude_home.to_str().expect("utf8 path")),
+        );
         dual_write_legacy_claude_md_summary_with(&claude_md, "d1", "hello hub")
             .await
             .unwrap();
@@ -1427,7 +1430,6 @@ mod tests {
         let row3 = claude_md.get().await.unwrap().unwrap();
         assert_eq!(row3.content, "hello hub v2");
         assert_eq!(row3.vector_clock.get("d1"), Some(&2));
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     /// 文件空 + DB 有内容时 resolve 用 db。
@@ -1505,7 +1507,10 @@ mod tests {
         fs::create_dir_all(&claude_home).unwrap();
         let file = claude_home.join("CLAUDE.md");
         fs::write(&file, "old A\n").unwrap();
-        std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.to_string_lossy().as_ref());
+        let _claude_env_guard = crate::config::install_env_var(
+            "CLAUDE_CONFIG_DIR",
+            Some(claude_home.to_str().expect("utf8 path")),
+        );
         dual_write_legacy_claude_md_summary_with(&claude_md, "device-test-1", "new B\n")
             .await
             .unwrap();
@@ -1513,7 +1518,6 @@ mod tests {
         assert_eq!(written, "old A\n", "dual-write must not write target file");
         let row = claude_md.get().await.unwrap().unwrap();
         assert_eq!(row.content, "new B\n");
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     // ─── Gate D Task 7 ────────────────────────────────────────────────────

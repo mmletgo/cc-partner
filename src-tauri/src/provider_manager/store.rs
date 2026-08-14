@@ -254,6 +254,38 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
+    /// `CC_SWITCH_CONFIG_DIR` 并行测试锁：裸 set/remove 存在窗口竞态，互相读到
+    /// 对方临时目录导致断言错乱；统一经 `install_cc_switch_env` 持锁 set 并 RAII 恢复。
+    static CC_SWITCH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 持锁的 `CC_SWITCH_CONFIG_DIR` 测试守卫（包装 struct 使 clippy 不视为裸锁跨 await）。
+    struct CcSwitchEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for CcSwitchEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+        }
+    }
+
+    /// 设置 `CC_SWITCH_CONFIG_DIR` 指向 dir；guard 存活期间保持、Drop 时恢复原值。
+    fn install_cc_switch_env(dir: &std::path::Path) -> CcSwitchEnvGuard {
+        let lock = CC_SWITCH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", dir);
+        CcSwitchEnvGuard {
+            _lock: lock,
+            previous,
+        }
+    }
+
     async fn seed_db(dir: &std::path::Path) {
         // 用可写连接建表并插入测试数据；生产读路径用 mode=ro 打开同一文件。
         let url = format!("sqlite://{}", dir.join("cc-switch.db").to_string_lossy());
@@ -294,9 +326,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_db(dir.path()).await;
         // CC_SWITCH_CONFIG_DIR 指向临时目录，避免读到真实 ~/.cc-switch。
-        std::env::set_var("CC_SWITCH_CONFIG_DIR", dir.path());
+        let _cc_env = install_cc_switch_env(dir.path());
         let apps = list_apps().await.unwrap();
-        std::env::remove_var("CC_SWITCH_CONFIG_DIR");
 
         let kinds: Vec<&str> = apps.iter().map(|a| a.app.as_str()).collect();
         assert_eq!(kinds, vec!["claude", "codex"]); // gemini/opencode/hermes/openclaw/claude-desktop 无数据
@@ -312,9 +343,8 @@ mod tests {
             serde_json::json!({"currentProviderClaude": "off"}).to_string(),
         )
         .unwrap();
-        std::env::set_var("CC_SWITCH_CONFIG_DIR", dir.path());
+        let _cc_env = install_cc_switch_env(dir.path());
         let apps = list_apps().await.unwrap();
-        std::env::remove_var("CC_SWITCH_CONFIG_DIR");
 
         let claude = apps.iter().find(|a| a.app == AgentApp::Claude).unwrap();
         assert_eq!(claude.current_provider_id.as_deref(), Some("off"));

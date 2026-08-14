@@ -1718,7 +1718,7 @@ mod tests {
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS workbench_sessions (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL,
-                command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL,
+                name_source TEXT NOT NULL DEFAULT 'default', command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL,
                 rows INTEGER NOT NULL, started_at TEXT NOT NULL, exited_at TEXT, exit_code INTEGER,
                 backend TEXT NOT NULL, backend_id TEXT, backend_window_id TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -2156,13 +2156,20 @@ mod tests {
     /// 跑通 ensure_repo。R6 测试需要一个真实可 clone 的 bare remote。
     async fn mini_git_export_state_with_real_repo(
         device_id: &str,
-    ) -> (tempfile::TempDir, PathBuf, AppState) {
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        AppState,
+        crate::config::DataDirEnvGuard,
+    ) {
         // 1. build AppState first; mini_git_export_state creates its own data dir
         let (data_tempdir, state) = mini_git_export_state(device_id).await;
         // data_tempdir.path() = the AppState's data root; cloud_sync_workdir() = data/cloud-sync
         let data = data_tempdir.path().to_path_buf();
-        // 2. set CC_PARTNER_DATA_DIR so cloud_sync_workdir() resolves to the same dir
-        let _guard = crate::config::install_data_dir_env(Some(data.to_str().unwrap()));
+        // 2. set CC_PARTNER_DATA_DIR so cloud_sync_workdir() resolves to the same dir.
+        // guard 必须返回给调用方持有到测试结束：fixture 内 Drop 会让后续
+        // cloud_sync_workdir() 解析回全局值，并行测试互相 clone 到别人的 workdir。
+        let env_guard = crate::config::install_data_dir_env(Some(data.to_str().unwrap()));
         // 3. create bare remote OUTSIDE the data dir (workdir shouldn't be inside the bare repo)
         let root = tempfile::tempdir().unwrap();
         let remote = root.path().join("remote.git");
@@ -2201,8 +2208,8 @@ mod tests {
             let _ = state.config_runtime.swap_memory(updated);
         }
 
-        // return (data root, workdir path, state)
-        (data_tempdir, workdir, state)
+        // return (data root, workdir path, state, env guard)
+        (data_tempdir, workdir, state, env_guard)
     }
 
     #[allow(dead_code)]
@@ -2230,7 +2237,8 @@ mod tests {
     /// 已成功升过 phase），证明 pre_lane_write 早于 replace_device_lane 持久化。
     #[tokio::test]
     async fn export_persists_pending_intent_before_lane_mutation() {
-        let (_root, _workdir, state) = mini_git_export_state_with_real_repo(DEVICE_A).await;
+        let (_root, _workdir, state, _env_guard) =
+            mini_git_export_state_with_real_repo(DEVICE_A).await;
         let rt = state.agent_hub_git_runtime.clone();
         rt.inject_push_failures(1);
         rt.mark_dirty();
@@ -2266,7 +2274,8 @@ mod tests {
     /// → 断言 dirty=true、last_error 包含 `export_interrupted_at_pre_lane_write`、phase 不变。
     #[tokio::test]
     async fn recover_pending_detects_pre_lane_write_crash_and_does_not_reset() {
-        let (_root, _workdir, state) = mini_git_export_state_with_real_repo(DEVICE_A).await;
+        let (_root, _workdir, state, _env_guard) =
+            mini_git_export_state_with_real_repo(DEVICE_A).await;
         let rt = state.agent_hub_git_runtime.clone();
         let device_id = state.device_id.as_str().to_string();
 

@@ -847,10 +847,10 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--bare"));
         assert!(args.iter().any(|arg| arg == "-p"));
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
-        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
-        assert!(args.windows(2).any(|pair| pair == ["--mcp-config", "{}"]));
-        assert!(args.iter().any(|arg| arg == "--disable-slash-commands"));
-        assert!(args.iter().any(|arg| arg == "--no-chrome"));
+        // pure 模式不带 mcp/slash/chrome 抑制参数——那些只属于
+        // build_project_edit_headless_args（merge 冲突编辑），由其专属测试覆盖。
+        assert!(!args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(!args.iter().any(|arg| arg == "--disable-slash-commands"));
         assert!(!args.iter().any(|arg| arg == "--max-budget-usd"));
     }
 
@@ -874,6 +874,8 @@ mod tests {
 
         assert!(args.iter().any(|arg| arg == "-p"));
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(args.windows(2).any(|pair| pair == ["--mcp-config", "{}"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--permission-mode", "dontAsk"]));

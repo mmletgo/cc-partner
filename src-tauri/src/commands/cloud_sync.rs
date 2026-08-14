@@ -245,6 +245,7 @@ mod tests {
     ///     Barrier 同步后并发改 enabled 与 branch，断言最终两者都生效。
     #[tokio::test]
     async fn concurrent_config_updates_do_not_lose_fields() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = Arc::new(ConfigRuntime::new(initial, store));
@@ -288,6 +289,7 @@ mod tests {
     ///     fail_next_save 后改 enabled，断言 Err 且 snapshot 仍 false。
     #[tokio::test]
     async fn save_failure_rolls_back() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         store.fail_next_save();

@@ -1059,6 +1059,7 @@ mod tests {
     ///     并发两个 expected_generation=0 的 patch，断言恰好一个 Ok，最终 generation=1。
     #[tokio::test]
     async fn concurrent_expected_generation_allows_one_writer() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let runtime = Arc::new(test_config_runtime("owner-a", 0).await);
         let first = runtime.apply_patch_if_generation("owner-a", 0, patch_name("first"));
         let second = runtime.apply_patch_if_generation("owner-a", 0, patch_name("second"));
@@ -1138,6 +1139,7 @@ mod tests {
     ///     update_config_transactionally 成功后 generation 从 0→1。
     #[tokio::test]
     async fn transactional_writer_increments_generation() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = ConfigRuntime::with_owner(initial, store, "owner-a".into());
@@ -1276,6 +1278,7 @@ mod tests {
     /// H1：DirectorySync 故障发生在 rename 之后，内存必须跟随磁盘 NEW，避免后续 lost update。
     #[tokio::test]
     async fn directory_sync_fault_after_rename_still_swaps_memory() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("config.json");
         let mut initial = sample_config();

@@ -503,6 +503,7 @@ mod tests {
     /// 验证 save 失败时命令层 helper 回滚内存与 store。
     #[tokio::test]
     async fn save_failure_rolls_back() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         store.fail_next_save();
@@ -536,6 +537,7 @@ mod tests {
     /// 验证成功 patch 后 DTO 反映提交值。
     #[tokio::test]
     async fn successful_update_returns_committed_dto() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = ConfigRuntime::new(initial, store);
@@ -562,6 +564,7 @@ mod tests {
     /// H2：热键 OS 切换与 config 事务同锁；save 失败时 OS 补偿回旧值。
     #[tokio::test]
     async fn hotkey_os_compensates_when_config_save_fails() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         store.fail_next_save();
@@ -600,6 +603,7 @@ mod tests {
     /// H2：热键变更成功路径 OS 与 config 一致。
     #[tokio::test]
     async fn hotkey_os_and_config_commit_together() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
         let initial = sample_config();
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = ConfigRuntime::new(initial, store);

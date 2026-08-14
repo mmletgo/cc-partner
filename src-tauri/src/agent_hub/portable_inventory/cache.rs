@@ -207,6 +207,21 @@ mod tests {
     use super::*;
     use crate::agent_hub::portable_inventory::models::PortableInventorySnapshotDto;
 
+    /// 并行测试锁：cache 是全局状态（in-flight scan leader、TTL、generation），
+    /// 且 `begin_scan()` 是同步函数默认 caller 是第一个 miss；并行执行时另一
+    /// 个测试可能先抢走 Leader，本测试 `else panic!` 触发。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// 包装 struct 让 clippy await-holding-lock 接受跨 .await 持有锁到测试结束。
+    #[allow(dead_code)]
+    struct CacheTestGuard(std::sync::MutexGuard<'static, ()>);
+    fn cache_test_lock() -> CacheTestGuard {
+        CacheTestGuard(
+            TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
     fn empty_snap(hash: &str) -> PortableInventorySnapshotDto {
         PortableInventorySnapshotDto {
             inventory_snapshot_hash: hash.into(),
@@ -219,6 +234,7 @@ mod tests {
 
     #[test]
     fn invalidate_clears_hit() {
+        let _lock = cache_test_lock();
         invalidate_portable_inventory_cache();
         let query = PortableInventoryQuery::default();
         store_cached_portable_inventory(query.clone(), empty_snap("a"));
@@ -234,6 +250,7 @@ mod tests {
 
     #[test]
     fn generation_invalidates_in_flight_result() {
+        let _lock = cache_test_lock();
         invalidate_portable_inventory_cache();
         let query = PortableInventoryQuery::default();
         let CacheLookup::Leader(leader) = begin_scan(query.clone()) else {
@@ -246,6 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_miss_shares_single_scan_and_wakes_waiter() {
+        let _lock = cache_test_lock();
         invalidate_portable_inventory_cache();
         let query = PortableInventoryQuery::default();
         let CacheLookup::Leader(leader) = begin_scan(query.clone()) else {
@@ -263,6 +281,7 @@ mod tests {
 
     #[test]
     fn distinct_queries_keep_distinct_cache_entries() {
+        let _lock = cache_test_lock();
         invalidate_portable_inventory_cache();
         let skill = PortableInventoryQuery {
             kind: Some(crate::agent_hub::portable_inventory::PortableAssetKind::Skill),
@@ -286,6 +305,7 @@ mod tests {
 
     #[test]
     fn local_project_queries_keep_distinct_cache_entries() {
+        let _lock = cache_test_lock();
         invalidate_portable_inventory_cache();
         let first = PortableInventoryQuery {
             scope_kind: Some(crate::agent_hub::models::ScopeKind::Project),

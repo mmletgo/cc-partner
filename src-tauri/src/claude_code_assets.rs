@@ -1978,12 +1978,6 @@ fn claude_assets_env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// 恢复可选环境变量（测试隔离）。
 #[cfg(test)]
-fn restore_env_var(key: &str, prev: Option<std::ffi::OsString>) {
-    match prev {
-        Some(v) => env::set_var(key, v),
-        None => env::remove_var(key),
-    }
-}
 
 /// Gate C N/N+1 runtime proof：旧 peer `legacyLossy` placeholder 不得覆盖本机 canonical credential。
 ///
@@ -2003,13 +1997,13 @@ pub fn prove_legacy_lossy_placeholder_never_overwrites_canonical_credential() {
     .expect("seed mcp");
     let data = dir.path().join("cc-data");
     fs::create_dir_all(&data).expect("data");
-    let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
-    let prev_home = env::var_os("HOME");
-    let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
     // SAFETY: 串行 env_lock 持有期间修改测试 env。
-    env::set_var("CLAUDE_CONFIG_DIR", &claude);
-    env::set_var("HOME", dir.path());
-    env::set_var("CC_PARTNER_DATA_DIR", &data);
+    let _claude_env_guard =
+        crate::config::install_env_var("CLAUDE_CONFIG_DIR", Some(claude.to_str().expect("utf8")));
+    let _home_env_guard =
+        crate::config::install_env_var("HOME", Some(dir.path().to_str().expect("utf8")));
+    let _data_dir_guard =
+        crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
 
     let lossy = serde_json::json!({
         "env": { "API_TOKEN": REDACTED_PLACEHOLDER },
@@ -2041,10 +2035,6 @@ pub fn prove_legacy_lossy_placeholder_never_overwrites_canonical_credential() {
         "legacyLossy must never overwrite canonical credential"
     );
     assert_ne!(after["env"]["API_TOKEN"], REDACTED_PLACEHOLDER);
-
-    restore_env_var("CLAUDE_CONFIG_DIR", prev_claude);
-    restore_env_var("HOME", prev_home);
-    restore_env_var("CC_PARTNER_DATA_DIR", prev_data);
 }
 
 #[cfg(test)]
@@ -2096,15 +2086,17 @@ mod tests {
         .unwrap();
 
         // 隔离：CLAUDE_CONFIG_DIR + 假 home 避免读真实环境
-        let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
-        let prev_home = env::var_os("HOME");
-        env::set_var("CLAUDE_CONFIG_DIR", &claude);
-        env::set_var("HOME", dir.path());
+        let _claude_env_guard = crate::config::install_env_var(
+            "CLAUDE_CONFIG_DIR",
+            Some(claude.to_str().expect("utf8")),
+        );
+        let _home_env_guard =
+            crate::config::install_env_var("HOME", Some(dir.path().to_str().expect("utf8")));
         // assets_root 走 CC_PARTNER_DATA_DIR
         let data = dir.path().join("cc-data");
         fs::create_dir_all(&data).unwrap();
-        let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
-        env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
 
         let assets = tauri::async_runtime::block_on(list_assets()).expect("list");
         // plugin CLI 可能失败被跳过；skills/commands/mcp 应在
@@ -2122,10 +2114,6 @@ mod tests {
             skill_names.windows(2).all(|w| w[0] <= w[1]),
             "skill names not sorted: {skill_names:?}"
         );
-
-        restore_env("CLAUDE_CONFIG_DIR", prev_claude);
-        restore_env("HOME", prev_home);
-        restore_env("CC_PARTNER_DATA_DIR", prev_data);
     }
 
     #[test]
@@ -2151,12 +2139,14 @@ mod tests {
         .unwrap();
         let data = dir.path().join("cc-data");
         fs::create_dir_all(&data).unwrap();
-        let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
-        let prev_home = env::var_os("HOME");
-        let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
-        env::set_var("CLAUDE_CONFIG_DIR", &claude);
-        env::set_var("HOME", dir.path());
-        env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let _claude_env_guard = crate::config::install_env_var(
+            "CLAUDE_CONFIG_DIR",
+            Some(claude.to_str().expect("utf8")),
+        );
+        let _home_env_guard =
+            crate::config::install_env_var("HOME", Some(dir.path().to_str().expect("utf8")));
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
 
         let bytes = tauri::async_runtime::block_on(build_bundle(vec![ClaudeCodeAssetSelector {
             kind: ClaudeCodeAssetKind::Mcp,
@@ -2185,10 +2175,6 @@ mod tests {
             }
         }
         assert!(found, "mcp.json missing from bundle");
-
-        restore_env("CLAUDE_CONFIG_DIR", prev_claude);
-        restore_env("HOME", prev_home);
-        restore_env("CC_PARTNER_DATA_DIR", prev_data);
     }
 
     #[test]
@@ -2210,12 +2196,5 @@ mod tests {
     fn path_to_zip_name_rejects_parent_components() {
         assert_eq!(path_to_zip_name(Path::new("a/b.txt")).unwrap(), "a/b.txt");
         assert!(path_to_zip_name(Path::new("../b.txt")).is_err());
-    }
-
-    fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {
-        match prev {
-            Some(v) => env::set_var(key, v),
-            None => env::remove_var(key),
-        }
     }
 }
