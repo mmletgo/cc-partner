@@ -1937,6 +1937,52 @@
         "docs/superpowers/plans/2026-08-08-agent-hub-interaction-redesign.md"
       ],
       "notes": "Library-level ensure_managed: scan discovery promotes ledger without adopt side-effect; per-item failure isolation; scan fixture roundtrip. Not real multi-CLI L3."
+    },
+    {
+      "id": "L3-WORDGAME-GENERATE-001",
+      "surface": "wordgame",
+      "level": "L3",
+      "tests": [
+        "src-tauri/src/wordgame/generate.rs",
+        "docs/superpowers/specs/2026-08-14-wordgame-design.md"
+      ],
+      "command": "manual: GUI start with internal Claude provider; confirm 10 unfamiliar lemmas each get a 7-item structured JSON card cache",
+      "ciJob": "manual",
+      "platforms": [
+        "macos"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "requires real Claude CLI + internal provider"
+      ],
+      "docs": [
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-08-14-wordgame-design.md"
+      ],
+      "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L3-WORDGAME-INGEST-001",
+      "surface": "wordgame",
+      "level": "L3",
+      "tests": [
+        "src-tauri/src/wordgame/ingest.rs",
+        "docs/superpowers/specs/2026-08-14-wordgame-design.md"
+      ],
+      "command": "manual: backfill Claude/Codex/OpenCode assistant history into wordgame_lemmas; remote extract-delta returns counts only",
+      "ciJob": "manual",
+      "platforms": [
+        "macos"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "requires real provider transcripts and optional dual-host remote shortcut"
+      ],
+      "docs": [
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-08-14-wordgame-design.md"
+      ],
+      "status": "NOT VERIFIED"
     }
   ]
 }

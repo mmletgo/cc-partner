@@ -1190,6 +1190,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::resume_claude_session),
         )
         .route(
+            "/api/workbench/wordgame/extract-delta",
+            post(workbench::extract_wordgame_delta),
+        )
+        .route(
             "/api/workbench/prompt-optimizer/stream-to-session",
             post(workbench::stream_prompt_optimizer_to_session),
         )

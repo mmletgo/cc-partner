@@ -1,0 +1,43 @@
+{
+  "gameButton": "game",
+  "gameButtonTitle": "打开游戏大厅",
+  "hub": {
+    "title": "游戏大厅",
+    "subtitle": "版本号旁的小厅。第一期只有记单词。",
+    "close": "关闭",
+    "wordgameTitle": "记单词",
+    "wordgameDesc": "从 Workbench 终端里的 agent 输出抽词，一次只出一张闪卡。",
+    "enter": "开始",
+    "notReady": "需要 {{cached}} / {{required}} 个已缓存生词才能进入。",
+    "generating": "正在为「{{lemma}}」生成题目…",
+    "blocked": "「{{lemma}}」出题失败，必须重试成功后才能继续。",
+    "waiting": "还在等 Workbench 对话积累更多生词。",
+    "retry": "重试预热",
+    "loadError": "无法读取游戏状态。"
+  },
+  "play": {
+    "back": "返回",
+    "title": "记单词",
+    "promptLabel": "题目",
+    "answerLabel": "你的答案",
+    "submit": "提交",
+    "next": "下一题",
+    "correct": "答对了",
+    "incorrect": "不对。参考答案：{{expected}}",
+    "familiar": "这个词已标为熟悉。",
+    "done": "今天没有到期的卡了，稍后再来。",
+    "empty": "暂时没有到期的卡。",
+    "startError": "无法开始这一局。",
+    "submitError": "无法判题。"
+  },
+  "types": {
+    "enToZh": "英→中",
+    "zhToEn": "中→英",
+    "chooseGloss": "选义",
+    "cloze": "填空",
+    "synonym": "近义词",
+    "collocation": "搭配",
+    "errorCorrection": "改错"
+  },
+  "remoteHint": "有一台远端未计入词频。"
+}

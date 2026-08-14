@@ -421,6 +421,7 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
         .ensure_schema()
         .await?;
     OrchestratorRepo::init_schema(&pool).await?;
+    crate::storage::WordGameRepo::ensure_schema(&pool).await?;
     Ok(pool)
 }
 
@@ -972,6 +973,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     cancel_runtime_token(&state.agent_hub_git_cancel, "Agent Hub git export");
     cancel_runtime_token(&state.health_cancel, "健康监测 daemon");
     cancel_runtime_token(&state.gui_event_relay_cancel, "GUI owner event relay");
+    crate::wordgame::cancel_wordgame_runtime();
 
     let cleaned = state.workbench_sessions.shutdown_all();
     if cleaned > 0 {

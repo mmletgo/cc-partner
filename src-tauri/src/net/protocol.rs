@@ -231,6 +231,17 @@ pub const CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1: &str =
 ///     字符串常量，列入 `server_protocol_info()`；与 snapshot 路由原子上线。
 pub const CAPABILITY_WORKBENCH_LAN_FLEET_V1: &str = "workbench.lan-fleet.v1";
 
+/// 能力 token：owner-local 记单词 lemma 增量抽取
+/// （`POST /api/workbench/wordgame/extract-delta`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     玩游戏的机器在向远端 owner 拉词频增量前必须确认对端只回 lemma 计数、不回原文；
+///     旧 peer 缺失时视为 unsupported，不得当成空成功。本 token 只做协议协商，不是鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 extract-delta 路由原子上线。
+pub const CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1: &str = "workbench.wordgame-extract.v1";
+
 /// 能力 token：v1 Agent Metadata Ledger owner-local 时间窗聚合
 /// （`POST /api/workbench/agent-ledger/summary`）。
 ///
@@ -364,6 +375,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
             CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1.to_string(),
+            CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1.to_string(),
             CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
         ],
     }
@@ -533,6 +545,7 @@ mod tests {
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
                 "workbench.terminal-input-stream.v1".to_string(),
+                "workbench.wordgame-extract.v1".to_string(),
                 "workbench.workspace-safe-restore.v1".to_string(),
             ]
         );
@@ -553,6 +566,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
         assert!(info.supports(CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1));
     }
 

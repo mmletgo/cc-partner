@@ -1519,6 +1519,26 @@ impl RemoteWorkbenchClient {
         .await
     }
 
+    /// 拉取远端 owner 的记单词 lemma 增量（不含原文）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     玩游戏的机器要把远端终端 assistant 词频并入本机词库，只能向 owner 要计数。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/workbench/wordgame/extract-delta`，Metadata 级 short timeout。
+    pub async fn extract_wordgame_delta(
+        &self,
+        base_url: &str,
+        req: crate::wordgame::runtime::ExtractDeltaReq,
+    ) -> Result<crate::wordgame::runtime::ExtractDeltaResp, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/wordgame/extract-delta"),
+            &req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     远端 Workbench GET 调用都需要统一处理网络错误、HTTP 状态码和 JSON 解析错误。
     ///

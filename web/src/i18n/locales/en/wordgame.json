@@ -1,0 +1,43 @@
+{
+  "gameButton": "game",
+  "gameButtonTitle": "Open game hub",
+  "hub": {
+    "title": "Games",
+    "subtitle": "A small hall next to the version number. First game: Word flashcards.",
+    "close": "Close",
+    "wordgameTitle": "Word flashcards",
+    "wordgameDesc": "Review English lemmas from Workbench agent output, one card at a time.",
+    "enter": "Play",
+    "notReady": "Need {{cached}} / {{required}} cached new words before you can play.",
+    "generating": "Generating cards for “{{lemma}}”…",
+    "blocked": "Card generation is blocked on “{{lemma}}”. Retry until it succeeds.",
+    "waiting": "Waiting for more new words from Workbench chats.",
+    "retry": "Retry preheat",
+    "loadError": "Could not load game status."
+  },
+  "play": {
+    "back": "Back",
+    "title": "Word flashcards",
+    "promptLabel": "Question",
+    "answerLabel": "Your answer",
+    "submit": "Check",
+    "next": "Next",
+    "correct": "Correct",
+    "incorrect": "Not quite. Expected: {{expected}}",
+    "familiar": "This word is now familiar.",
+    "done": "No more due cards today. Come back later.",
+    "empty": "No due cards right now.",
+    "startError": "Could not start a round.",
+    "submitError": "Could not grade that answer."
+  },
+  "types": {
+    "enToZh": "EN → ZH",
+    "zhToEn": "ZH → EN",
+    "chooseGloss": "Choose meaning",
+    "cloze": "Cloze",
+    "synonym": "Synonym",
+    "collocation": "Collocation",
+    "errorCorrection": "Fix the sentence"
+  },
+  "remoteHint": "One remote device was not counted in frequency."
+}

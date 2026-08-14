@@ -527,3 +527,43 @@ CREATE INDEX IF NOT EXISTS idx_agent_session_ledger_provider_ended
     ON agent_session_ledger(provider_id, ended_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_agent_session_ledger_ended
     ON agent_session_ledger(ended_at ASC, id);
+
+-- wordgame_*：记单词词库 / 题型进度 / 题缓存 / ingest 水位 / 预热（文档表）
+-- 实际建表：WordGameRepo::ensure_schema（runtime 幂等；非 sqlx::migrate!）
+CREATE TABLE IF NOT EXISTS wordgame_lemmas (
+    lemma TEXT PRIMARY KEY,
+    total_count INTEGER NOT NULL,
+    familiar INTEGER NOT NULL,
+    interval_step INTEGER NOT NULL,
+    due_date TEXT NOT NULL,
+    last_seen_at TEXT
+);
+CREATE TABLE IF NOT EXISTS wordgame_type_progress (
+    lemma TEXT NOT NULL,
+    question_type TEXT NOT NULL,
+    correct_total INTEGER NOT NULL,
+    correct_today INTEGER NOT NULL,
+    last_correct_date TEXT,
+    PRIMARY KEY (lemma, question_type)
+);
+CREATE TABLE IF NOT EXISTS wordgame_cards (
+    lemma TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wordgame_ingest_cursor (
+    device_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (device_id, provider, session_id)
+);
+CREATE TABLE IF NOT EXISTS wordgame_preheat (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    head_lemma TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    retry_count INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
