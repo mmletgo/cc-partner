@@ -415,17 +415,36 @@ pub(crate) async fn sync_git_worktrees(
     let now = now_iso();
 
     // 对账删除：非主 worktree 的磁盘路径已被外部删除时，row 成为孤儿。先于 upsert 删除，
-    // 避免后续 porcelain 仍列出 prunable worktree 时把孤儿重新登记。session 元数据一并清理，
-    // 与 merge/remove 路径保持一致。main worktree 永不在此删除（项目根丢失应走移除项目）。
+    // 避免后续 porcelain 仍列出 prunable worktree 时把孤儿重新登记。session 必须走
+    // close_sessions_for_worktree 完整级联（registry close + kill backend + 删行），
+    // 与 merge/remove 路径保持一致；只删 SQLite 行会让 registry live overlay 把仍存活的
+    // session 重新暴露为 running，形成计入统计但任何 worktree 视图都不可见的幽灵终端。
+    // main worktree 永不在此删除（项目根丢失应走移除项目）。
     for row in &existing_rows {
         if row.is_main {
             continue;
         }
         if !path_exists_nofollow(Path::new(&row.path))? {
-            let _ = state
-                .workbench_session_repo
-                .delete_by_worktree(&row.project_id, &row.id)
-                .await;
+            if let Err(error) = crate::commands::workbench::git::close_sessions_for_worktree(
+                state,
+                &row.project_id,
+                &row.id,
+            )
+            .await
+            {
+                // 对账是项目加载路径，单个 session 的 runtime close/kill 失败不应阻断
+                // 整个 sync；降级为仅清理元数据（原行为）并留日志，等待下次对账收敛。
+                tracing::warn!(
+                    project_id = %row.project_id,
+                    worktree_id = %row.id,
+                    error = %error,
+                    "外部删除 worktree 对账关闭 session 失败，降级仅清理元数据"
+                );
+                let _ = state
+                    .workbench_session_repo
+                    .delete_by_worktree(&row.project_id, &row.id)
+                    .await;
+            }
             state.workbench_worktree_repo.delete(&row.id).await?;
         }
     }
@@ -2344,6 +2363,94 @@ mod sync_git_worktrees_external_delete_tests {
             session.is_none(),
             "被删 worktree 下的 terminal session 元数据必须一并清理"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     外部删除的 worktree 下可能仍有 running session：registry 里挂着 live handle、
+    ///     tmux backend 仍在运行。对账若只删 SQLite 行而不 close runtime handle，
+    ///     `merged_session_dtos` 的 live overlay 会把该 session 重新暴露为 running，
+    ///     形成"计入项目统计但任何 worktree 视图都不可见"的幽灵终端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     建 main + linked worktree → SQLite 登记 worktree row + session row → registry 插入
+    ///     同 id 的 fake live handle → rm -rf linked → 调 sync_git_worktrees → 断言
+    ///     SQLite session 行已删且 registry handle 已被关闭（再次 close 返回 NotFound）。
+    #[tokio::test]
+    async fn external_rm_rf_closes_live_session_runtime_handles() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let main: PathBuf = temp.path().join("main");
+        let linked: PathBuf = temp.path().join("linked");
+        std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+        git(&main, &["init"]);
+        git(&main, &["config", "user.name", "Test"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-m", "init"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                linked.to_string_lossy().as_ref(),
+            ],
+        );
+
+        let state = build_restore_fail_state().await;
+        let project = project_row_for(&main);
+        seed_feature_worktree_row(&state, "wt-live", linked.to_string_lossy().as_ref()).await;
+        seed_session_for_worktree(&state, "sess-live", "wt-live").await;
+        // registry 中挂一个同 id 的 live handle（Fake process，不依赖 tmux），
+        // 模拟该 worktree 下终端 window 仍在运行的真实场景。
+        state
+            .workbench_sessions
+            .insert_fake_session_row_for_test(WorkbenchSessionRow {
+                id: "sess-live".to_string(),
+                project_id: "p1".to_string(),
+                worktree_id: Some("wt-live".to_string()),
+                name: "term".to_string(),
+                name_source: "default".to_string(),
+                command: "/bin/sh".to_string(),
+                cwd: "/tmp".to_string(),
+                status: "running".to_string(),
+                cols: 80,
+                rows: 24,
+                started_at: "t".to_string(),
+                exited_at: None,
+                exit_code: None,
+                backend: "pty".to_string(),
+                backend_id: None,
+                backend_window_id: None,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            });
+
+        // 模拟 AI 外部删除：rm -rf linked 目录。
+        std::fs::remove_dir_all(&linked).expect("应删除 linked worktree 目录");
+
+        sync_git_worktrees(&state, &project)
+            .await
+            .expect("对账不应失败");
+
+        assert!(
+            state
+                .workbench_session_repo
+                .get("sess-live")
+                .await
+                .expect("session 查询不应失败")
+                .is_none(),
+            "外部删除 worktree 下的 session 元数据必须清理"
+        );
+        match state.workbench_sessions.close("sess-live") {
+            Err(AppError::NotFound(_)) => {}
+            Ok(cleanup) => {
+                cleanup.finish_cleanup();
+                panic!("对账必须关闭外部删除 worktree 下 live session 的 runtime handle，而不是只删 SQLite 行");
+            }
+            Err(other) => panic!("再次 close 应返回 NotFound，实际: {other}"),
+        }
     }
 
     /// Business Logic（为什么需要这个测试）:
