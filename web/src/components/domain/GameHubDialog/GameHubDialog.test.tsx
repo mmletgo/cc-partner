@@ -20,6 +20,7 @@ const getHubStatus = vi.fn();
 const startRound = vi.fn();
 const retryPreheat = vi.fn();
 const abandonRound = vi.fn();
+const listPlugins = vi.fn();
 
 vi.mock('@/api/wordgame', () => ({
   wordgameApi: {
@@ -29,6 +30,28 @@ vi.mock('@/api/wordgame', () => ({
     abandonRound: (...args: unknown[]) => abandonRound(...args),
     submitAnswer: vi.fn(),
   },
+}));
+
+vi.mock('@/api/gamePlugins', () => ({
+  gamePluginsApi: {
+    list: (...args: unknown[]) => listPlugins(...args),
+    credit: vi.fn(),
+  },
+}));
+
+vi.mock('@/hooks/useBattery', () => ({
+  useBattery: () => ({
+    snapshot: { mode: 'charging', remainingMs: 0 },
+    loading: false,
+    error: null,
+    toast: null,
+    setMode: async () => undefined,
+    dismissToast: () => undefined,
+  }),
+}));
+
+vi.mock('@/hooks/useTheme', () => ({
+  useTheme: () => ({ theme: 'dark', setTheme: () => undefined, toggleTheme: () => undefined }),
 }));
 
 afterEach(() => {
@@ -41,6 +64,12 @@ beforeEach(async () => {
   startRound.mockReset();
   retryPreheat.mockReset();
   abandonRound.mockReset();
+  listPlugins.mockReset();
+  listPlugins.mockResolvedValue({ dir: '/tmp/plugins', games: [] });
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  });
 });
 
 describe('GameHubDialog', () => {
@@ -108,5 +137,66 @@ describe('GameHubDialog', () => {
       expect(screen.getByTestId('wordgame-play')).toBeTruthy();
     });
     expect(screen.getByText('feature')).toBeTruthy();
+  });
+
+  test('lists plugin games and copies the spec', async () => {
+    getHubStatus.mockResolvedValue({
+      unfamiliarCount: 12,
+      cachedUnfamiliarCount: 10,
+      canEnter: true,
+      requiredCached: 10,
+      preheatStatus: 'ready',
+      preheatLemma: null,
+      preheatError: null,
+      remoteHint: null,
+    });
+    listPlugins.mockResolvedValue({
+      dir: '/tmp/plugins',
+      games: [
+        {
+          id: 'snake',
+          name: 'Snake',
+          description: 'arcade',
+          entry: 'index.html',
+          rewardMinutes: 5,
+          playable: true,
+          reason: null,
+        },
+        {
+          id: 'tower',
+          name: 'Tower',
+          description: 'td',
+          entry: 'dist/index.html',
+          rewardMinutes: 0,
+          playable: false,
+          reason: 'missing_entry',
+        },
+      ],
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <GameHubDialog open onClose={() => undefined} />
+      </I18nextProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Snake')).toBeTruthy();
+    });
+    expect(screen.getByText('Tower')).toBeTruthy();
+    const buttons = screen.getAllByRole('button', { name: '开始' }) as HTMLButtonElement[];
+    const towerBtn = buttons.find((btn) => btn.closest('article')?.textContent?.includes('Tower'));
+    expect(towerBtn?.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '复制规范' }));
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalled();
+    });
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? '';
+    expect(copied).toContain('game.json');
+    const snakeBtn = buttons.find((btn) => btn.closest('article')?.textContent?.includes('Snake'));
+    fireEvent.click(snakeBtn as HTMLButtonElement);
+    await waitFor(() => {
+      expect(screen.getByTestId('game-plugin-player')).toBeTruthy();
+    });
   });
 });

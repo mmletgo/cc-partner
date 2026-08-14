@@ -35,6 +35,7 @@ pub struct ConfigDto {
     pub device_id: String,
     pub device_name: String,
     pub receive_dir: String,
+    pub game_plugin_dir: String,
     pub screenshot_hotkey: String,
     pub prompt_optimizer_hotkey: String,
     pub prompt_optimizer_fill_language: String,
@@ -56,6 +57,7 @@ fn config_to_dto(cfg: &AppConfig) -> ConfigDto {
         device_id: cfg.device_id.clone(),
         device_name: cfg.device_name.clone(),
         receive_dir: cfg.receive_dir.clone(),
+        game_plugin_dir: cfg.game_plugin_dir.clone(),
         screenshot_hotkey: cfg.screenshot_hotkey.clone(),
         prompt_optimizer_hotkey: cfg.prompt_optimizer_hotkey.clone(),
         prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
@@ -110,6 +112,7 @@ fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
         device_id: device_id.to_string(),
         device_name: snap.device_name.clone(),
         receive_dir: snap.receive_dir.clone(),
+        game_plugin_dir: snap.game_plugin_dir.clone(),
         screenshot_hotkey: snap.screenshot_hotkey.clone(),
         prompt_optimizer_hotkey: snap.prompt_optimizer_hotkey.clone(),
         prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
@@ -130,6 +133,7 @@ fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
 fn build_preference_patch(
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -138,6 +142,7 @@ fn build_preference_patch(
     RuntimeConfigPatch {
         device_name,
         receive_dir,
+        game_plugin_dir,
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
@@ -157,6 +162,7 @@ async fn update_config_via_owner(
     state: &AppState,
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -167,6 +173,7 @@ async fn update_config_via_owner(
         .apply_patch(build_preference_patch(
             device_name,
             receive_dir,
+            game_plugin_dir,
             screenshot_hotkey,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
@@ -193,6 +200,7 @@ async fn update_config_via_owner_with_hotkey(
     backend: &mut dyn GlobalShortcutBackend,
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -205,6 +213,7 @@ async fn update_config_via_owner_with_hotkey(
             build_preference_patch(
                 device_name,
                 receive_dir,
+                game_plugin_dir,
                 screenshot_hotkey,
                 prompt_optimizer_hotkey,
                 prompt_optimizer_fill_language,
@@ -239,6 +248,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
         device_id: cfg.device_id.clone(),
         device_name,
         receive_dir,
+        game_plugin_dir: crate::config::default_game_plugin_dir_string(),
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
@@ -259,6 +269,7 @@ fn apply_config_patch(
     cfg: &mut AppConfig,
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -269,6 +280,9 @@ fn apply_config_patch(
     }
     if let Some(d) = receive_dir {
         cfg.receive_dir = d;
+    }
+    if let Some(d) = game_plugin_dir {
+        cfg.game_plugin_dir = d;
     }
     if let Some(h) = screenshot_hotkey {
         cfg.screenshot_hotkey = h;
@@ -296,6 +310,7 @@ pub async fn update_config_for_runtime(
     runtime: &ConfigRuntime,
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -306,6 +321,7 @@ pub async fn update_config_for_runtime(
             cfg,
             device_name,
             receive_dir,
+            game_plugin_dir,
             screenshot_hotkey,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
@@ -333,6 +349,7 @@ pub async fn update_config_with_hotkey_backend(
     backend: &mut dyn GlobalShortcutBackend,
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -357,6 +374,7 @@ pub async fn update_config_with_hotkey_backend(
         &mut candidate,
         device_name,
         receive_dir,
+        game_plugin_dir,
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
@@ -404,6 +422,7 @@ pub async fn update_config(
     state: State<'_, AppState>,
     device_name: Option<String>,
     receive_dir: Option<String>,
+    game_plugin_dir: Option<String>,
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
@@ -414,6 +433,7 @@ pub async fn update_config(
             state.inner(),
             device_name,
             receive_dir,
+            game_plugin_dir,
             None,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
@@ -428,6 +448,7 @@ pub async fn update_config(
         &mut backend,
         device_name,
         receive_dir,
+        game_plugin_dir,
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
@@ -480,6 +501,7 @@ mod tests {
             device_name: "cfg-device".into(),
             http_port: 0,
             receive_dir: "/tmp/recv".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/tmp/db.db".into(),
             screenshot_hotkey: "<ctrl>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
@@ -512,6 +534,7 @@ mod tests {
         let err = update_config_for_runtime(
             &runtime,
             Some("mutated-name".into()),
+            None,
             None,
             None,
             None,
@@ -550,6 +573,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("update");
@@ -577,6 +601,7 @@ mod tests {
         let err = update_config_with_hotkey_backend(
             &runtime,
             &mut fake,
+            None,
             None,
             None,
             Some("<ctrl>+<shift>+s".into()),
@@ -616,6 +641,7 @@ mod tests {
             &runtime,
             &mut fake,
             Some("after".into()),
+            None,
             None,
             Some("<ctrl>+<shift>+s".into()),
             None,

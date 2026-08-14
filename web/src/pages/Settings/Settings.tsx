@@ -245,11 +245,14 @@ export function Settings(): ReactElement {
               saving={ctrl.saving}
               saveError={ctrl.saveError}
               choosingDir={ctrl.choosingDir}
+              choosingGamePluginDir={ctrl.choosingGamePluginDir}
               canResetCoreDefaults={ctrl.canResetCoreDefaults}
               recordingShortcutId={ctrl.recordingShortcutId}
               onDeviceNameChange={ctrl.handleDeviceNameChange}
               onReceiveDirChange={ctrl.handleReceiveDirChange}
+              onGamePluginDirChange={ctrl.handleGamePluginDirChange}
               onChooseDir={() => void ctrl.handleChooseDir()}
+              onChooseGamePluginDir={() => void ctrl.handleChooseGamePluginDir()}
               onShortcutFocus={ctrl.handleShortcutFocus}
               onShortcutBlur={ctrl.handleShortcutBlur}
               onShortcutKeyDown={ctrl.handleShortcutKeyDown}

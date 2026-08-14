@@ -51,6 +51,7 @@ function buildResults(overrides: Partial<SettingsResourceResults> = {}): Setting
     deviceId: 'd1',
     deviceName: 'Mac',
     receiveDir: '/tmp',
+    gamePluginDir: '/tmp/plugins',
     screenshotHotkey: 'CommandOrControl+Shift+S',
     promptOptimizerHotkey: 'Control',
     promptOptimizerFillLanguage: 'zh' as const,

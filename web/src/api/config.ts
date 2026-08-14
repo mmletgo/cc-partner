@@ -34,6 +34,7 @@ export type ConfigUpdate = Pick<
   AppConfig,
   | 'deviceName'
   | 'receiveDir'
+  | 'gamePluginDir'
   | 'screenshotHotkey'
   | 'promptOptimizerHotkey'
   | 'promptOptimizerFillLanguage'

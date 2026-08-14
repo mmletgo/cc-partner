@@ -91,6 +91,7 @@ cc-partner/
 │   │   │   ├── Settings/         # 05-settings.html
 │   │   │   ├── Health/            # 健康提醒控制台
 │   │   │   ├── WordGame/          # 记单词闪卡（不进路由，由 GameHubDialog 挂载）
+│   │   │   ├── GamePluginPlayer/  # 插件游戏全应用播放器（不进路由，由 GameHubDialog 挂载）
 │   │   │   ├── ActivityStats/     # 活动统计（应用/窗口排行 + 小时分布）
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
@@ -299,7 +300,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | PermissionCard | icon, title, description, granted, actionLabel?, requesting?, onRequestAccess | 权限卡片；父层按四态决定动作与文案，requesting 时按钮 busy |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
-| GameHubDialog | open, onClose | 侧栏 footer `game` 打开的大厅/记单词两态 Dialog；游戏中点遮罩不退出 |
+| GameHubDialog | open, onClose | 侧栏 footer `game` 打开的大厅/记单词/插件三态 Dialog；游戏中点遮罩不退出 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells；legacy matrix 兼容） |
 | WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口） |

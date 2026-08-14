@@ -358,6 +358,30 @@ fn default_receive_dir_with_home(home: Option<&Path>) -> Result<PathBuf, AppErro
     Ok(root.join("received-files"))
 }
 
+/// 默认游戏插件目录：`<data_dir>/plugins`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户 vibe coding 的游戏放在本机数据根下，设置页可改，缺省必须稳定可创建。
+///
+/// Code Logic（这个函数做什么）:
+///     拼 `data_dir()/plugins`；`data_dir` 失败则向上返回。
+pub fn default_game_plugin_dir() -> Result<PathBuf, AppError> {
+    Ok(data_dir()?.join("plugins"))
+}
+
+/// serde / 测试字面量用的默认插件目录字符串。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 config.json 没有该字段时必须能反序列化；测试构造也不应依赖真实 home。
+///
+/// Code Logic（这个函数做什么）:
+///     成功则返回绝对路径；失败回落 `"plugins"`（validate 会拒绝相对路径）。
+pub(crate) fn default_game_plugin_dir_string() -> String {
+    default_game_plugin_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "plugins".into())
+}
+
 /// 云端同步（GitHub 私有仓库）的默认轮询间隔（秒）= 10 分钟。
 ///
 /// Business Logic: 自动同步的合理默认节奏：既不至于过于频繁（无谓 IO/git 操作），
@@ -665,6 +689,8 @@ pub enum BatteryCreditSource {
     Custom,
     /// 记单词答对一张。
     Flashcard,
+    /// 插件游戏自报完成一局。
+    GamePlugin,
 }
 
 impl BatteryCreditSource {
@@ -795,6 +821,7 @@ impl BatteryConfig {
             BatteryCreditSource::Kegel => self.rewards.kegel_minutes,
             BatteryCreditSource::Custom => self.rewards.custom_minutes,
             BatteryCreditSource::Flashcard => self.rewards.flashcard_minutes,
+            BatteryCreditSource::GamePlugin => 0,
         }
     }
 
@@ -806,6 +833,7 @@ impl BatteryConfig {
             BatteryCreditSource::Kegel => self.daily_caps.kegel,
             BatteryCreditSource::Custom => self.daily_caps.custom,
             BatteryCreditSource::Flashcard => self.daily_caps.flashcard,
+            BatteryCreditSource::GamePlugin => i64::MAX,
         }
     }
 }
@@ -1120,6 +1148,9 @@ pub struct AppConfig {
     pub http_port: i64,
     /// 文件接收保存目录
     pub receive_dir: String,
+    /// 游戏插件根目录。每个一级子目录是一个 game。
+    #[serde(default = "default_game_plugin_dir_string")]
+    pub game_plugin_dir: String,
     /// SQLite 数据库路径
     pub db_path: String,
     /// 截图快捷键
@@ -1232,6 +1263,13 @@ impl AppConfig {
         if self.receive_dir.trim().is_empty() {
             return Err(AppError::validation("receive_dir 不能为空"));
         }
+        if self.game_plugin_dir.trim().is_empty() {
+            return Err(AppError::validation("game_plugin_dir 不能为空"));
+        }
+        if !Path::new(self.game_plugin_dir.trim()).is_absolute() {
+            return Err(AppError::validation("game_plugin_dir 必须是绝对路径"));
+        }
+        self.game_plugin_dir = self.game_plugin_dir.trim().to_string();
         if self.db_path.trim().is_empty() {
             return Err(AppError::validation("db_path 不能为空"));
         }
@@ -1349,6 +1387,7 @@ impl AppConfig {
                 device_name: default_device_name(),
                 http_port: 0,
                 receive_dir: default_receive_dir()?.to_string_lossy().to_string(),
+                game_plugin_dir: default_game_plugin_dir()?.to_string_lossy().to_string(),
                 db_path: default_db_path()?.to_string_lossy().to_string(),
                 screenshot_hotkey: default_screenshot_hotkey(),
                 prompt_optimizer_hotkey: default_prompt_optimizer_hotkey(),
@@ -1903,6 +1942,7 @@ mod tests {
             device_name: "n".into(),
             http_port: 0,
             receive_dir: "/r".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/db".into(),
             screenshot_hotkey: "<cmd>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
@@ -1997,6 +2037,7 @@ mod tests {
             device_name: "n".into(),
             http_port: 0,
             receive_dir: "/r".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: db_path.into(),
             screenshot_hotkey: "<cmd>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
@@ -2191,5 +2232,41 @@ mod tests {
         );
         cfg.db_path = root.join("data.db").to_string_lossy().to_string();
         cfg.validate().expect("根内 db 应通过");
+    }
+
+    #[test]
+    fn default_game_plugin_dir_is_data_dir_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = install_data_dir_env(Some(tmp.path().to_str().unwrap()));
+        let dir = default_game_plugin_dir().expect("data_dir 可用时默认插件目录应成功");
+        assert_eq!(dir, data_dir().unwrap().join("plugins"));
+    }
+
+    #[test]
+    fn app_config_deserializes_missing_game_plugin_dir() {
+        let json = r#"{
+            "device_id":"d","device_name":"n","http_port":0,
+            "receive_dir":"/tmp/r","db_path":"/tmp/db.db",
+            "screenshot_hotkey":"<ctrl>+s"
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.game_plugin_dir.is_empty());
+        assert!(
+            cfg.game_plugin_dir.ends_with("plugins"),
+            "缺字段应回落到默认 plugins 目录，实际: {}",
+            cfg.game_plugin_dir
+        );
+    }
+
+    #[test]
+    fn validate_rejects_relative_game_plugin_dir() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/db.db");
+        cfg.game_plugin_dir = "plugins".into();
+        let err = cfg.validate().expect_err("相对路径应拒绝");
+        assert!(
+            err.to_string().contains("game_plugin_dir"),
+            "{err}"
+        );
     }
 }

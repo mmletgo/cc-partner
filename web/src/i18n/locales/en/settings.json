@@ -23,6 +23,8 @@
     "deviceNameHelper": "The name other devices see on the local network.",
     "receiveDir": "Receive directory",
     "receiveDirHelper": "Files received over the local network are saved here.",
+    "gamePluginDir": "Game plugin folder",
+    "gamePluginDirHelper": "Each subfolder is a game. Default is plugins under the cc-partner data root.",
     "selectFolder": "Choose…",
     "selecting": "Choosing…"
   },

@@ -696,6 +696,7 @@ export function buildDefaultInvokeHandler(data: {
         return {
           deviceName: 'device',
           receiveDir: '',
+          gamePluginDir: '',
           screenshotHotkey: '<ctrl>',
           promptOptimizerHotkey: '<ctrl>',
           promptOptimizerFillLanguage: 'zh' satisfies PromptOptimizerFillLanguage,

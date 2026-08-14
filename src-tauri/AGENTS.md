@@ -91,6 +91,7 @@ src/
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
 ├── battery/           — 充电模式账本：policy 纯计算 + service（credit/debit/mode/welcome）+ `BatteryRepo`（`battery_state`/`battery_ledger` IF NOT EXISTS）；命令 `get/set/report/list` + `get/update_battery_config`；健康 completed / 闪卡 correct 入账；多窗 1× 扣时 [已实现]
 ├── wordgame/          — 记单词：tokenize/lemma/lexicon/ingest/schedule/generate + GUI ingest/preheat worker（模块级 cancel，不加 AppState 字段）；owner 抽取 `POST /api/workbench/wordgame/extract-delta` + capability `workbench.wordgame-extract.v1`；命令 `get_wordgame_hub_status`/`retry_wordgame_preheat`/`start_wordgame_round`/`submit_wordgame_answer`/`abandon_wordgame_round`；schema `WordGameRepo::ensure_schema` [已实现]
+├── game_plugin/       — 用户游戏插件：扫描 `game_plugin_dir` 一级子目录 + `game.json`；`gameplugin://` 只读沙箱资源；命令 `list_game_plugins`/`credit_game_plugin`；`BatteryCreditSource::GamePlugin` 按清单分钟入账、无日上限 [已实现]
 ├── updater/           — 自动更新 generation 状态机（单锁 UpdateRuntime：check/download/cancel/install 相位 + generation 守卫；begin_check abort 旧 JoinHandle；finish_install 成功保留 bytes 至 confirm_restart_requested；DTO status 含 checking/installing）[S3 T5/T6 + fix M4/M5/Spec M2]
 └── commands/updater.rs — 自动更新 5 命令（check/download/status/cancel/install；download Ok 若 cancel token 置位按取消处理；install 成功后 request_restart 再清 bytes）[M8/S3 T6 + fix]
 migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，全 CREATE TABLE IF NOT EXISTS 兼容旧库）

@@ -9,8 +9,8 @@
 pub mod policy;
 pub mod service;
 
-pub use policy::{credit_delta_ms, debit_delta_ms, MS_PER_MINUTE};
+pub use policy::{credit_delta_ms, credit_delta_ms_explicit, debit_delta_ms, MS_PER_MINUTE};
 pub use service::{
-    credit, get_snapshot, habit_source_id, list_ledger, report_focus, set_mode, wordgame_source_id,
-    BatterySnapshotDto,
+    credit, credit_explicit, game_plugin_source_id, get_snapshot, habit_source_id, list_ledger,
+    report_focus, set_mode, wordgame_source_id, BatterySnapshotDto,
 };

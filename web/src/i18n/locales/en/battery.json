@@ -13,7 +13,8 @@
     "kegel": "Kegel",
     "custom": "Habit",
     "flashcard": "Flashcard",
-    "welcome": "Welcome grant"
+    "welcome": "Welcome grant",
+    "game-plugin": "Plugin game"
   },
   "scrim": {
     "title": "Workbench needs a charge",
@@ -58,6 +59,7 @@
     "kinds": {
       "credit_health": "Health credit",
       "credit_wordgame": "Flashcard credit",
+      "credit_game_plugin": "Plugin game credit",
       "credit_welcome": "Welcome grant",
       "daily_reset": "Daily reset",
       "debit_tick": "Workbench drain",

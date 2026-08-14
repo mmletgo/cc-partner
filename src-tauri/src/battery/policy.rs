@@ -38,6 +38,24 @@ pub fn credit_delta_ms(
     reward.min(room)
 }
 
+/// 按显式分钟入账（插件游戏）。不看日次数上限。
+///
+/// Business Logic（为什么需要这个函数）:
+///     插件完成奖励写在 game.json，且产品要求完全信任、无日上限；仍钳余额上限。
+///
+/// Code Logic（这个函数做什么）:
+///     minutes.max(0) * 60_000，再钳到 max_balance - remaining。
+pub fn credit_delta_ms_explicit(
+    config: &BatteryConfig,
+    remaining_ms: i64,
+    minutes: i64,
+) -> i64 {
+    let reward = minutes.max(0).saturating_mul(MS_PER_MINUTE);
+    let max_ms = config.max_balance_minutes.saturating_mul(MS_PER_MINUTE);
+    let room = (max_ms - remaining_ms.max(0)).max(0);
+    reward.min(room)
+}
+
 /// 计算一次结算应扣除的毫秒。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -155,6 +173,22 @@ mod tests {
         let c = cfg();
         let full = c.max_balance_minutes * MS_PER_MINUTE;
         assert_eq!(credit_delta_ms(&c, BatteryCreditSource::Water, 0, full), 0);
+    }
+
+    #[test]
+    fn game_plugin_has_no_daily_cap_and_uses_explicit_minutes() {
+        let c = cfg();
+        let delta = credit_delta_ms_explicit(&c, 0, 5);
+        assert_eq!(delta, 5 * MS_PER_MINUTE);
+        let many_today = credit_delta_ms(&c, BatteryCreditSource::GamePlugin, 10_000, 0);
+        assert_eq!(many_today, 0, "GamePlugin 不走 rewards 表，分钟数必须显式传入");
+    }
+
+    #[test]
+    fn game_plugin_clamps_to_max_balance() {
+        let c = cfg();
+        let full = c.max_balance_minutes * MS_PER_MINUTE;
+        assert_eq!(credit_delta_ms_explicit(&c, full, 5), 0);
     }
 
     #[test]

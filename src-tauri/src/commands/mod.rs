@@ -17,6 +17,7 @@ pub mod claude_md;
 pub mod cloud_sync;
 pub mod config;
 pub mod devices;
+pub mod game_plugin;
 pub mod github_trending;
 pub mod gui_bootstrap;
 pub mod health;

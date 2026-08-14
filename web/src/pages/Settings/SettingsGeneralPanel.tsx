@@ -33,11 +33,14 @@ export interface SettingsGeneralPanelProps {
   /** 最近一次保存失败文案；有值时在 footer 展示且不卸表单 */
   saveError: string | null;
   choosingDir: boolean;
+  choosingGamePluginDir: boolean;
   canResetCoreDefaults: boolean;
   recordingShortcutId: string | null;
   onDeviceNameChange: (e: ChangeEvent<HTMLInputElement>) => void;
   onReceiveDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
+  onGamePluginDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
   onChooseDir: () => void;
+  onChooseGamePluginDir: () => void;
   onShortcutFocus: (id: string) => void;
   onShortcutBlur: (id: string) => void;
   onShortcutKeyDown: (e: KeyboardEvent<HTMLInputElement>, id: string) => void;
@@ -95,11 +98,14 @@ export function SettingsGeneralPanel({
   saving,
   saveError,
   choosingDir,
+  choosingGamePluginDir,
   canResetCoreDefaults,
   recordingShortcutId,
   onDeviceNameChange,
   onReceiveDirChange,
+  onGamePluginDirChange,
   onChooseDir,
+  onChooseGamePluginDir,
   onShortcutFocus,
   onShortcutBlur,
   onShortcutKeyDown,
@@ -164,6 +170,30 @@ export function SettingsGeneralPanel({
         </Button>
       </div>
       <p className={styles.helper}>{t('settings:basic.receiveDirHelper')}</p>
+    </div>
+
+    <div className={styles.field}>
+      <label className={styles.label} htmlFor="settings-game-plugin-dir">
+        {t('settings:basic.gamePluginDir')}
+      </label>
+      <div className={styles.inputRow}>
+        <Input
+          id="settings-game-plugin-dir"
+          type="text"
+          value={state.gamePluginDir}
+          onChange={onGamePluginDirChange}
+          icon={<FolderIcon />}
+        />
+        <Button
+          variant="secondary"
+          size="md"
+          onClick={onChooseGamePluginDir}
+          disabled={choosingGamePluginDir}
+        >
+          {choosingGamePluginDir ? t('settings:basic.selecting') : t('settings:basic.selectFolder')}
+        </Button>
+      </div>
+      <p className={styles.helper}>{t('settings:basic.gamePluginDirHelper')}</p>
     </div>
   </Card.Body>
 </Card>

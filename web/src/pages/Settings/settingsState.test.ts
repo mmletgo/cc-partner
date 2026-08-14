@@ -51,6 +51,7 @@ function configFixture(partial: Partial<AppConfig> = {}): AppConfig {
     deviceId: 'device-1',
     deviceName: 'Hans-Mac',
     receiveDir: '/Users/hans/cc-partner-files',
+    gamePluginDir: '/Users/hans/.cc-partner/plugins',
     screenshotHotkey: '<cmd>+<shift>+s',
     promptOptimizerHotkey: '<ctrl>',
     promptOptimizerFillLanguage: 'zh',
@@ -66,6 +67,7 @@ describe('settingsState', () => {
     assertDeepEqual(loaded, {
       deviceName: 'Hans-Mac',
       receiveDir: '/Users/hans/cc-partner-files',
+      gamePluginDir: '/Users/hans/.cc-partner/plugins',
       shortcuts: [
         {
           id: 'screenshot',
@@ -124,6 +126,11 @@ describe('settingsState', () => {
     assertDeepEqual(buildConfigUpdate(changedPromptHotkeys, loaded), {
       promptOptimizerHotkey: '<cmd>+e',
       promptQuickInputHotkey: '<cmd>+p',
+    });
+
+    const changedPluginDir = { ...loaded, gamePluginDir: '/tmp/more-games' };
+    assertDeepEqual(buildConfigUpdate(changedPluginDir, loaded), {
+      gamePluginDir: '/tmp/more-games',
     });
 
     // 同时改三个快捷键时 patch 应包含全部三个字段

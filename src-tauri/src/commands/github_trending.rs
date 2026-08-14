@@ -989,6 +989,7 @@ mod config_writer_tests {
             device_name: "gt-device".into(),
             http_port: 0,
             receive_dir: "/tmp/recv".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: "/tmp/db.db".into(),
             screenshot_hotkey: "<ctrl>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),

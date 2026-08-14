@@ -13,7 +13,8 @@
     "kegel": "提肛",
     "custom": "习惯",
     "flashcard": "闪卡",
-    "welcome": "欢迎赠送"
+    "welcome": "欢迎赠送",
+    "game-plugin": "插件游戏"
   },
   "scrim": {
     "title": "工作台需要充电",
@@ -58,6 +59,7 @@
     "kinds": {
       "credit_health": "健康入账",
       "credit_wordgame": "闪卡入账",
+      "credit_game_plugin": "插件游戏入账",
       "credit_welcome": "欢迎赠送",
       "daily_reset": "每日重置",
       "debit_tick": "工作消耗",

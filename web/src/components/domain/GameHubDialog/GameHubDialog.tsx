@@ -1,12 +1,12 @@
 /**
- * GameHubDialog — 侧栏 footer 打开的游戏大厅 / 记单词两态 Dialog。
+ * GameHubDialog — 侧栏 footer 打开的游戏大厅 / 记单词 / 插件三态 Dialog。
  *
  * Business Logic（为什么需要这个组件）:
- *   用户要点版本号旁的 game 进大厅，再进记单词；游戏中点遮罩不能退出。
+ *   用户要点版本号旁的 game 进大厅，再进记单词或插件游戏；游戏中点遮罩不能退出。
  *
  * Code Logic（这个组件做什么）:
- *   单 Dialog 两态；大厅 Escape/遮罩关闭；游戏态 closeOnBackdrop=false，
- *   Escape/返回回大厅。遮罩用 backdropVariant=scrim（半透明、无 blur）。
+ *   单 Dialog 三态；大厅 Escape/遮罩关闭；游戏态 closeOnBackdrop=false，
+ *   Escape/返回回大厅。插件用全应用半透明 surface。遮罩用 backdropVariant=scrim。
  *   hooks 全在 early return 前。
  */
 
@@ -14,9 +14,15 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button, Dialog, StatusMessage } from '@/components/primitives';
+import { gamePluginsApi } from '@/api/gamePlugins';
 import { wordgameApi } from '@/api/wordgame';
-import { WordGame } from '@/pages/WordGame';
+import { useBattery } from '@/hooks/useBattery';
+import { useTheme } from '@/hooks/useTheme';
+import { gamePluginSpecPrompt } from '@/lib/gamePluginSpecPrompt';
+import type { GamePluginSummary } from '@/lib/types/gamePlugin';
 import type { WordgameCard, WordgameHubStatus } from '@/lib/types/wordgame';
+import { GamePluginPlayer } from '@/pages/GamePluginPlayer';
+import { WordGame } from '@/pages/WordGame';
 import styles from './GameHubDialog.module.css';
 
 export interface GameHubDialogProps {
@@ -24,7 +30,7 @@ export interface GameHubDialogProps {
   onClose: () => void;
 }
 
-type HubView = 'hub' | 'play';
+type HubView = 'hub' | 'play' | 'plugin';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -57,20 +63,32 @@ function describeReadiness(
  * 渲染游戏大厅 Dialog。
  */
 export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode {
-  const { t } = useTranslation('wordgame');
+  const { t, i18n } = useTranslation('wordgame');
+  const { theme } = useTheme();
+  const { snapshot } = useBattery();
   const [view, setView] = useState<HubView>('hub');
   const [status, setStatus] = useState<WordgameHubStatus | null>(null);
   const [card, setCard] = useState<WordgameCard | null>(null);
+  const [plugins, setPlugins] = useState<GamePluginSummary[]>([]);
+  const [pluginDir, setPluginDir] = useState<string>('');
+  const [activePlugin, setActivePlugin] = useState<GamePluginSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const loadStatus = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
-      setStatus(await wordgameApi.getHubStatus());
+      const [hub, list] = await Promise.all([
+        wordgameApi.getHubStatus(),
+        gamePluginsApi.list().catch(() => ({ dir: '', games: [] as GamePluginSummary[] })),
+      ]);
+      setStatus(hub);
+      setPluginDir(list.dir);
+      setPlugins(list.games);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
       setError(message || t('hub.loadError'));
@@ -83,7 +101,9 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
     if (!open) {
       setView('hub');
       setCard(null);
+      setActivePlugin(null);
       setError(null);
+      setCopied(false);
       return;
     }
     void loadStatus();
@@ -95,6 +115,11 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
       setCard(null);
       void wordgameApi.abandonRound().catch(() => undefined);
       void loadStatus();
+      return;
+    }
+    if (view === 'plugin') {
+      setView('hub');
+      setActivePlugin(null);
       return;
     }
     onClose();
@@ -129,8 +154,45 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
     }
   }, [t]);
 
+  const handleCopySpec = useCallback(async (): Promise<void> => {
+    const lang = i18n.language.startsWith('zh') ? 'zh' : 'en';
+    try {
+      await navigator.clipboard.writeText(gamePluginSpecPrompt(lang));
+      setCopied(true);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message || t('hub.specCopyError'));
+    }
+  }, [i18n.language, t]);
+
+  const handleEnterPlugin = useCallback((game: GamePluginSummary): void => {
+    setActivePlugin(game);
+    setView('plugin');
+  }, []);
+
+  const handlePluginCredit = useCallback(
+    async (sourceId?: string): Promise<void> => {
+      if (!activePlugin) return;
+      try {
+        await gamePluginsApi.credit(activePlugin.id, sourceId);
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setError(message || t('hub.pluginLoadError'));
+      }
+    },
+    [activePlugin, t],
+  );
+
+  const pluginReason = (game: GamePluginSummary): string | null => {
+    if (game.playable) return null;
+    if (game.reason === 'missing_entry') return t('hub.pluginMissingEntry');
+    return t('hub.pluginInvalid');
+  };
+
   const readiness = status ? describeReadiness(status, t) : null;
-  const title = view === 'play' ? t('play.title') : t('hub.title');
+  const title =
+    view === 'play' ? t('play.title') : view === 'plugin' ? (activePlugin?.name ?? t('hub.title')) : t('hub.title');
+  const specLang = i18n.language.startsWith('zh') ? 'zh' : 'en';
 
   return (
     <Dialog
@@ -139,7 +201,7 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
       onClose={handleDialogClose}
       closeOnBackdrop={view === 'hub'}
       backdropVariant="scrim"
-      className={styles.dialog}
+      className={view === 'plugin' ? styles.playDialog : styles.dialog}
     >
       <div className={styles.body} data-testid="game-hub-dialog">
         {view === 'hub' ? (
@@ -190,8 +252,54 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
             {status?.preheatError && status.preheatStatus === 'blocked' ? (
               <StatusMessage tone="danger">{status.preheatError}</StatusMessage>
             ) : null}
+            {plugins.map((game) => (
+              <article key={game.id} className={styles.gameRow}>
+                <div>
+                  <h3 className={styles.gameTitle}>{game.name}</h3>
+                  <p className={styles.gameDesc}>{game.description || t('hub.pluginFallbackDesc')}</p>
+                  {pluginReason(game) ? <p className={styles.reason}>{pluginReason(game)}</p> : null}
+                </div>
+                <Button
+                  variant="primary"
+                  disabled={!game.playable || loading}
+                  onClick={() => handleEnterPlugin(game)}
+                >
+                  {t('hub.enter')}
+                </Button>
+              </article>
+            ))}
+            {plugins.length === 0 ? (
+              <p className={styles.reason}>
+                {t('hub.pluginEmpty', { dir: pluginDir || t('hub.pluginDirUnknown') })}
+              </p>
+            ) : null}
+            <section className={styles.spec} data-testid="game-spec-prompt">
+              <div className={styles.specHeader}>
+                <h3 className={styles.gameTitle}>{t('hub.specTitle')}</h3>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    void handleCopySpec();
+                  }}
+                >
+                  {copied ? t('hub.specCopied') : t('hub.specCopy')}
+                </Button>
+              </div>
+              <pre className={styles.specBody}>{gamePluginSpecPrompt(specLang)}</pre>
+            </section>
             {error ? <StatusMessage tone="danger">{error}</StatusMessage> : null}
           </>
+        ) : view === 'plugin' && activePlugin ? (
+          <GamePluginPlayer
+            game={activePlugin}
+            theme={theme}
+            batteryMode={snapshot?.mode === 'unlimited' ? 'unlimited' : 'charging'}
+            remainingMs={snapshot?.remainingMs ?? 0}
+            locale={specLang}
+            onBack={handleDialogClose}
+            onCredit={handlePluginCredit}
+          />
         ) : card ? (
           <WordGame initialCard={card} onBack={handleDialogClose} />
         ) : (

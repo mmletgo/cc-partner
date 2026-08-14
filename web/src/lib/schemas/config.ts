@@ -39,6 +39,7 @@ export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   deviceId: stringDecoder,
   deviceName: stringDecoder,
   receiveDir: stringDecoder,
+  gamePluginDir: stringDecoder,
   screenshotHotkey: stringDecoder,
   promptOptimizerHotkey: stringDecoder,
   promptOptimizerFillLanguage: fillLanguageDecoder,

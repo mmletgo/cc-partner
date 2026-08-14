@@ -408,6 +408,7 @@ mod tests {
             device_name: "test-device".to_string(),
             http_port: 0,
             receive_dir: receive_dir.to_string_lossy().to_string(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: receive_dir.join("data.db").to_string_lossy().to_string(),
             screenshot_hotkey: "<cmd>+s".to_string(),
             prompt_optimizer_hotkey: "<ctrl>".to_string(),

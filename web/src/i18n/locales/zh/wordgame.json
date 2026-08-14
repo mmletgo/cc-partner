@@ -3,7 +3,7 @@
   "gameButtonTitle": "打开游戏大厅",
   "hub": {
     "title": "游戏大厅",
-    "subtitle": "版本号旁的小厅。第一期只有记单词。",
+    "subtitle": "版本号旁的小厅。内置记单词，也可以玩插件目录里的游戏。",
     "close": "关闭",
     "wordgameTitle": "记单词",
     "wordgameDesc": "从 Workbench 终端里的 agent 输出抽词，一次只出一张闪卡。",
@@ -13,7 +13,17 @@
     "blocked": "「{{lemma}}」出题失败，必须重试成功后才能继续。",
     "waiting": "还在等 Workbench 对话积累更多生词。",
     "retry": "重试预热",
-    "loadError": "无法读取游戏状态。"
+    "loadError": "无法读取游戏状态。",
+    "specTitle": "写给 AI 的游戏规范",
+    "specCopy": "复制规范",
+    "specCopied": "已复制",
+    "specCopyError": "无法复制规范。",
+    "pluginEmpty": "插件目录还没有游戏：{{dir}}",
+    "pluginDirUnknown": "设置里的游戏插件目录",
+    "pluginMissingEntry": "缺少入口文件，请先构建。",
+    "pluginInvalid": "清单无效，无法开始。",
+    "pluginFallbackDesc": "用户插件游戏",
+    "pluginLoadError": "无法给这个游戏入账。"
   },
   "play": {
     "back": "返回",

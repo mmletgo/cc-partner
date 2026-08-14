@@ -55,3 +55,43 @@
   color: var(--fg-muted-readable);
   font-size: var(--text-sm);
 }
+
+.playDialog {
+  width: calc(100vw - var(--space-8));
+  height: calc(100vh - var(--space-8));
+  max-height: none;
+  padding: 0;
+  background: var(--surface-translucent);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-window);
+}
+
+.spec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.specHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.specBody {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg-muted-readable);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+}

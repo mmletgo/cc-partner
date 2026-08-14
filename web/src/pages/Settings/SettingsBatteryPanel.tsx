@@ -32,6 +32,7 @@ import styles from './Settings.module.css';
 const LEDGER_KIND_KEYS = {
   credit_health: 'settings.kinds.credit_health',
   credit_wordgame: 'settings.kinds.credit_wordgame',
+  credit_game_plugin: 'settings.kinds.credit_game_plugin',
   credit_welcome: 'settings.kinds.credit_welcome',
   daily_reset: 'settings.kinds.daily_reset',
   debit_tick: 'settings.kinds.debit_tick',

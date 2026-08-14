@@ -56,6 +56,7 @@ export interface ShortcutField {
 export interface SettingsState {
   deviceName: string;
   receiveDir: string;
+  gamePluginDir: string;
   shortcuts: ShortcutField[];
 }
 
@@ -165,6 +166,7 @@ export type SettingsConfigUpdate = Partial<
     AppConfig,
     | 'deviceName'
     | 'receiveDir'
+    | 'gamePluginDir'
     | 'screenshotHotkey'
     | 'promptOptimizerHotkey'
     | 'promptQuickInputHotkey'
@@ -305,6 +307,7 @@ export function createPendingSettingsState(): SettingsState {
   return {
     deviceName: '',
     receiveDir: '',
+    gamePluginDir: '',
     shortcuts: createShortcutFields({}),
   };
 }
@@ -323,6 +326,7 @@ export function settingsStateFromConfig(config: AppConfig): SettingsState {
   return {
     deviceName: config.deviceName,
     receiveDir: config.receiveDir,
+    gamePluginDir: config.gamePluginDir,
     shortcuts: createShortcutFields({
       screenshotHotkey: config.screenshotHotkey,
       promptOptimizerHotkey: config.promptOptimizerHotkey,
@@ -566,6 +570,9 @@ export function buildConfigUpdate(
   }
   if (current.receiveDir !== baseline.receiveDir) {
     update.receiveDir = current.receiveDir;
+  }
+  if (current.gamePluginDir !== baseline.gamePluginDir) {
+    update.gamePluginDir = current.gamePluginDir;
   }
 
   for (const field of SHORTCUT_FIELDS) {

@@ -15,6 +15,7 @@ export interface AppConfig {
   deviceId: string;
   deviceName: string;
   receiveDir: string;
+  gamePluginDir: string;
   screenshotHotkey: string;
   promptOptimizerHotkey: string;
   promptOptimizerFillLanguage: PromptOptimizerFillLanguage;

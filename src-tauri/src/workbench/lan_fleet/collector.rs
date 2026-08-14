@@ -1117,6 +1117,7 @@ mod tests {
             device_name: "fleet-owner".into(),
             http_port: 0,
             receive_dir: "/tmp/cc-partner-fleet-test-recv".into(),
+            game_plugin_dir: "/tmp/plugins".into(),
             db_path: ":memory:".into(),
             screenshot_hotkey: "<cmd>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),

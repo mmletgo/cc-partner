@@ -18,12 +18,14 @@ export type BatteryCreditSource =
   | 'kegel'
   | 'custom'
   | 'flashcard'
-  | 'welcome';
+  | 'welcome'
+  | 'game-plugin';
 
 /** 账本流水 kind。 */
 export type BatteryLedgerKind =
   | 'credit_health'
   | 'credit_wordgame'
+  | 'credit_game_plugin'
   | 'credit_welcome'
   | 'daily_reset'
   | 'debit_tick'

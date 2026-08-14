@@ -14,6 +14,7 @@ const validConfig = {
   deviceId: 'd1',
   deviceName: 'Mac',
   receiveDir: '/tmp/recv',
+  gamePluginDir: '/tmp/plugins',
   screenshotHotkey: '<cmd>+s',
   promptOptimizerHotkey: '<ctrl>',
   promptOptimizerFillLanguage: 'zh',
@@ -24,6 +25,13 @@ const validConfig = {
 describe('config schemas', () => {
   test('decodes app config', () => {
     expect(appConfigDecoder.decode(validConfig).deviceId).toBe('d1');
+    expect(appConfigDecoder.decode(validConfig).gamePluginDir).toBe('/tmp/plugins');
+  });
+
+  test('rejects missing gamePluginDir', () => {
+    const { gamePluginDir: _omitted, ...rest } = validConfig;
+    expect(() => appConfigDecoder.decode(rest)).toThrow(ContractDecodeError);
+    void _omitted;
   });
 
   test('permissions default notification when missing', () => {

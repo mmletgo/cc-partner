@@ -76,6 +76,7 @@ mod sync;
 mod transfer;
 mod tray;
 pub mod updater;
+mod game_plugin;
 mod wordgame;
 mod workbench;
 /// Gate D Task4/8：OpenCode OSC runtime bridge + OSC decoder（L2 certification smoke）。
@@ -130,7 +131,8 @@ use crate::commands::{
     backup as backup_cmd, battery as battery_cmd, cc_history as cc_history_cmd,
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
-    github_trending as github_trending_cmd, gui_bootstrap as gui_bootstrap_cmd,
+    game_plugin as game_plugin_cmd, github_trending as github_trending_cmd,
+    gui_bootstrap as gui_bootstrap_cmd,
     health as health_cmd, internal_claude as internal_claude_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
     orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
@@ -190,6 +192,13 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol("gameplugin", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let response = crate::game_plugin::protocol::respond(&app, request.uri());
+                responder.respond(response);
+            });
+        })
         .setup(|app| {
             // 日志统一由 run() 开头的 tracing_subscriber 接管（tracing 宏 + 经 tracing-log 桥接 log）。
             // 不再注册 tauri-plugin-log：它也会设置全局 log logger，与 tracing_subscriber 冲突，
@@ -681,6 +690,8 @@ pub fn run() {
             workbench_dependency_cmd::cancel_workbench_dependency_install,
             // 局域网互联防火墙依赖（只读检测监听/IP/端口开放状态，返回平台化放行方法，不自动改防火墙）
             lan_firewall_dependency_cmd::check_lan_firewall_dependency,
+            game_plugin_cmd::list_game_plugins,
+            game_plugin_cmd::credit_game_plugin,
             wordgame_cmd::get_wordgame_hub_status,
             wordgame_cmd::retry_wordgame_preheat,
             wordgame_cmd::start_wordgame_round,
