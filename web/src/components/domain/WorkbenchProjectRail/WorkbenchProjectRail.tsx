@@ -527,9 +527,7 @@ export function WorkbenchProjectRail() {
           );
           const statusLabel = occupiedElsewhere
             ? t('workbench:projectRail.statusOccupied')
-            : isActive
-              ? t('workbench:projectRail.statusActive')
-              : t('workbench:projectRail.statusInactive');
+            : null;
           const fleetProject: LanFleetProjectSummary | undefined =
             projectSummaries[project.id];
           const fleetDevice = deviceByProjectId[project.id];
@@ -643,7 +641,9 @@ export function WorkbenchProjectRail() {
                       <span>{paneCountLabel}</span>
                     </span>
                   </span>
-                  <span className={styles.projectStatusText}>{statusLabel}</span>
+                  {statusLabel ? (
+                    <span className={styles.projectStatusText}>{statusLabel}</span>
+                  ) : null}
                 </span>
               </button>
               <HintStatusDot

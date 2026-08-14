@@ -198,7 +198,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
     expect(screen.getByRole('dialog', { name: '打开远端项目' })).toBeTruthy();
   });
 
-  test('exposes project name and text status for keyboard users', () => {
+  test('exposes project name for keyboard users without selected/unselected text', () => {
     const active = buildProject({ id: 'active', name: 'active-repo' });
     const idle = buildProject({ id: 'idle', name: 'idle-repo', path: '/tmp/idle' });
     renderRail({
@@ -209,8 +209,9 @@ describe('WorkbenchProjectRail discovery IA', () => {
 
     expect(screen.getByRole('button', { name: /active-repo/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /idle-repo/ })).toBeTruthy();
-    expect(screen.getByText('当前')).toBeTruthy();
-    expect(screen.getByText('未选中')).toBeTruthy();
+    // 选中态只靠视觉样式区分，不再输出「当前 / 未选中」文本。
+    expect(screen.queryByText('当前')).toBeNull();
+    expect(screen.queryByText('未选中')).toBeNull();
   });
 
   test('enlarges project status dot with waiting count', () => {

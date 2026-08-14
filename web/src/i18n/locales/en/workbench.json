@@ -12,8 +12,6 @@
     "emptyExplanation": "Add a local or LAN project to open the workbench from this rail anytime.",
     "addLocalCta": "Add local project",
     "addRemoteCta": "Choose LAN project",
-    "statusActive": "Active",
-    "statusInactive": "Not selected",
     "statusOccupied": "Open in another window",
     "openInNewWindow": "Open in new window",
     "fleetLink": "Fleet",
