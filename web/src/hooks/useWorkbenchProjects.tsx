@@ -29,6 +29,7 @@ import {
 } from './workbenchProjectsContext';
 import { useVisibilityPolling } from './useVisibilityPolling';
 import { useWorkbenchWindowRole } from './useWorkbenchWindowRole';
+import { getWorkbenchAgentHintStore } from './workbenchAgentHintStore';
 
 const ACTIVE_PROJECT_KEY = 'cp-workbench-active-project-id';
 
@@ -166,6 +167,14 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
   const refreshProjectSessionStats = useCallback(async (projectId?: string) => {
     try {
       const list = await workbenchApi.sessions.list(projectId);
+      getWorkbenchAgentHintStore().reconcileSessionInventory(
+        list.map((session) => ({
+          sessionId: session.id,
+          projectId: session.projectId,
+          worktreeId: session.worktreeId,
+        })),
+        projectId,
+      );
       setProjectSessionStatsMap((current) => {
         if (!projectId) return sessionStatsByProject(list);
         return {

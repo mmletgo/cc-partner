@@ -52,6 +52,36 @@ function indexSessionsForHints(sessions: WorkbenchSession[]): void {
   }
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   sessions.list 是当前项目 terminal 的权威清单；刷新后必须剪掉已经关闭的 Hint，
+ *   否则项目/worktree 数字会继续统计孤儿 terminal。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把当前项目 session 映射为 Hint inventory，并执行 project-scoped reconcile。
+ */
+function reconcileSessionsForHints(projectId: string, sessions: WorkbenchSession[]): void {
+  getWorkbenchAgentHintStore().reconcileSessionInventory(
+    sessions.map((session) => ({
+      sessionId: session.id,
+      projectId: session.projectId,
+      worktreeId: session.worktreeId,
+    })),
+    projectId,
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   terminal 关闭成功后，计数应立即消失，不等待下一轮 sessions.list。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从共享 Hint Store 删除指定 terminal。
+ */
+function removeSessionFromHints(sessionId: string): void {
+  getWorkbenchAgentHintStore().removeTerminal(sessionId);
+}
+
 interface WorkbenchTerminalInputStateEvent {
   sessionId: string;
   status: 'blocked';
@@ -796,7 +826,7 @@ export function useWorkbenchTerminalController(
         // exited/disconnected 仍在列表中保持 blocked；recoverSession 只开新 generation，
         // 绝不自动重放失败批次。sessionError 已在 try 开头清空。
         recoverAllWriteBlockedSessions(list);
-        indexSessionsForHints(list);
+        reconcileSessionsForHints(resolvedProjectId, list);
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);
@@ -862,6 +892,7 @@ export function useWorkbenchTerminalController(
         invalidateSessionListRequests(projectId);
         setSessions((current) => [...current, session]);
         knownSessionIdsRef.current.add(session.id);
+        indexSessionsForHints([session]);
         resetTerminalBuffer(session.id);
         void refreshProjectSessionStats(projectId);
         // Business Logic: 仅当目标 worktree 仍是当前 active worktree 时才 focus。新建 worktree 流程下，
@@ -1020,6 +1051,7 @@ export function useWorkbenchTerminalController(
       const result = await workbenchApi.sessions.closePane(activeSession.id);
       const projectId = activeSession.projectId;
       if (result.closedWindow) {
+        removeSessionFromHints(result.sessionId);
         setSessions((current) => {
           const next = current.filter((session) => session.id !== result.sessionId);
           updateActiveSession(next);
@@ -1069,6 +1101,7 @@ export function useWorkbenchTerminalController(
           // Business Logic: 只作废源项目 list，禁止递增新项目 seq 导致 B 的有效 list 被当 stale 丢弃。
           invalidateSessionListRequests(sourceProjectId);
         }
+        removeSessionFromHints(sessionId);
         if (activeProjectIdRef.current !== sourceProjectId) {
           return;
         }
@@ -1247,14 +1280,16 @@ export function useWorkbenchTerminalController(
   /**
    * Business Logic（为什么需要这个函数）:
    *   merge / remove worktree 等流程完成后需要清理对应 worktree 下所有 session 的终端 buffer；
-   *   controller 通过外部 removeBuffer 回调完成清理，自己不持有字节内容。
+   *   同时必须移除这些 terminal 的 Agent Hint，避免已删除 worktree 继续污染项目计数。
    *
    * Code Logic（这个函数做什么）:
-   *   按 sessionsForWorktree(sessions, worktreeId) 找到该 worktree 下的全部 session id，逐个 removeTerminalBuffer。
+   *   按 sessionsForWorktree(sessions, worktreeId) 找到全部 session id，逐个清理 Hint、buffer、input pump
+   *   与 write-blocked 跟踪；controller 自己不持有终端字节内容。
    */
   const clearBuffersForWorktree = useCallback(
     (worktreeId: string): void => {
       sessionsForWorktree(sessions, worktreeId).forEach((session) => {
+        removeSessionFromHints(session.id);
         removeTerminalBuffer(session.id);
         terminalInputPumpRef.current?.disposeSession(session.id);
         untrackWriteBlocked(session.id);

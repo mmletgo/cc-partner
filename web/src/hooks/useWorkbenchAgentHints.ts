@@ -24,6 +24,7 @@ import type { AgentHintCounts } from '@/lib/workbenchAgentHints';
 import {
   createWorkbenchAgentHintStore,
   getWorkbenchAgentHintStore,
+  type AgentHintSessionIndexEntry,
   type WorkbenchAgentHintStore,
 } from './workbenchAgentHintStore';
 
@@ -82,6 +83,7 @@ export interface UseWorkbenchAgentHintsResult {
  */
 export function useWorkbenchAgentHints(options?: {
   getSnapshot?: (projectId: string | null) => Promise<AgentRuntimeSnapshot>;
+  listSessionInventory?: () => Promise<readonly AgentHintSessionIndexEntry[]>;
   store?: WorkbenchAgentHintStore;
   enabled?: boolean;
 }): UseWorkbenchAgentHintsResult {
@@ -95,6 +97,16 @@ export function useWorkbenchAgentHints(options?: {
         : workbenchApi.agentRuntime.getSnapshot(pid),
     [injectedGetSnapshot],
   );
+  const injectedListSessionInventory = options?.listSessionInventory;
+  const listSessionInventory = useCallback(async (): Promise<readonly AgentHintSessionIndexEntry[]> => {
+    if (injectedListSessionInventory) return injectedListSessionInventory();
+    const sessions = await workbenchApi.sessions.list();
+    return sessions.map((session) => ({
+      sessionId: session.id,
+      projectId: session.projectId,
+      worktreeId: session.worktreeId,
+    }));
+  }, [injectedListSessionInventory]);
 
   const revision = useSyncExternalStore(store.subscribe, store.getRevision, store.getRevision);
 
@@ -106,11 +118,16 @@ export function useWorkbenchAgentHints(options?: {
   const cursorRef = useRef<{ ownerInstanceId: string; sequence: number } | null>(null);
   const handshakeGenerationRef = useRef(0);
   const getSnapshotRef = useRef(getSnapshot);
+  const listSessionInventoryRef = useRef(listSessionInventory);
   const storeRef = useRef(store);
 
   useEffect(() => {
     getSnapshotRef.current = getSnapshot;
   }, [getSnapshot]);
+
+  useEffect(() => {
+    listSessionInventoryRef.current = listSessionInventory;
+  }, [listSessionInventory]);
 
   useEffect(() => {
     storeRef.current = store;
@@ -127,9 +144,14 @@ export function useWorkbenchAgentHints(options?: {
     storeRef.current.hydrateFromStorage();
 
     let snapshot: AgentRuntimeSnapshot;
+    let sessionInventory: readonly AgentHintSessionIndexEntry[];
     try {
-      const raw = await getSnapshotRef.current(null);
+      const [raw, inventory] = await Promise.all([
+        getSnapshotRef.current(null),
+        listSessionInventoryRef.current(),
+      ]);
       snapshot = agentRuntimeSnapshotDecoder.decode(raw);
+      sessionInventory = inventory;
     } catch (err) {
       if (generation !== handshakeGenerationRef.current) return;
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -140,6 +162,7 @@ export function useWorkbenchAgentHints(options?: {
 
     if (generation !== handshakeGenerationRef.current) return;
     storeRef.current.replaceActiveWaiting(snapshot.sessions);
+    storeRef.current.reconcileSessionInventory(sessionInventory);
     setError(null);
     cursorRef.current = {
       ownerInstanceId: snapshot.ownerInstanceId,

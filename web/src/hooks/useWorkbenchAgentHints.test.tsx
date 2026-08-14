@@ -19,6 +19,7 @@ import {
 } from '@/lib/workbenchAgentHints';
 
 const getSnapshotMock = vi.fn();
+const listSessionsMock = vi.fn();
 const listenMock = vi.fn();
 
 type EventHandler = (event: { payload: unknown }) => void;
@@ -32,6 +33,10 @@ vi.mock('@/api/workbench', async () => {
       ...actual.workbenchApi,
       agentRuntime: {
         getSnapshot: (...args: unknown[]) => getSnapshotMock(...args),
+      },
+      sessions: {
+        ...actual.workbenchApi.sessions,
+        list: (...args: unknown[]) => listSessionsMock(...args),
       },
     },
   };
@@ -108,6 +113,10 @@ describe('useWorkbenchAgentHints', () => {
     store = createWorkbenchAgentHintStore({ persist: persistFromLocalStorage() });
     listenerHandlers.clear();
     getSnapshotMock.mockReset();
+    listSessionsMock.mockReset();
+    listSessionsMock.mockResolvedValue([
+      { id: 't1', projectId: 'p1', worktreeId: 'wt-1' },
+    ]);
     listenMock.mockReset();
     window.localStorage.clear();
     (window as unknown as { __TAURI_INTERNALS__?: { transformCallback: unknown } }).__TAURI_INTERNALS__ =
@@ -240,10 +249,42 @@ describe('useWorkbenchAgentHints', () => {
       ]),
     );
     getSnapshotMock.mockResolvedValue(snapshot({ sessions: [] }));
+    listSessionsMock.mockResolvedValue([
+      { id: 't-seen', projectId: 'p1', worktreeId: 'wt-1' },
+    ]);
     const { result } = renderHook(() => useWorkbenchAgentHints({ store }));
     await waitFor(() => {
       expect(result.current.phase).toBe('live');
     });
     expect(result.current.hintsForTerminal('t-seen').completedCount).toBe(1);
+  });
+
+  test('持久化 stopped 指向已删除 terminal 时握手会清理三层计数与本地边沿', async () => {
+    window.localStorage.setItem(ACKED_COMPLETED_STORAGE_KEY, '[]');
+    window.localStorage.setItem(
+      SEEN_COMPLETED_STORAGE_KEY,
+      JSON.stringify([
+        {
+          agentSessionId: 'seen-orphan',
+          terminalSessionId: 't-orphan',
+          projectId: 'p1',
+          worktreeId: 'wt-1',
+          version: 4,
+          endedAt: '2026-08-13T00:04:00.000Z',
+        },
+      ]),
+    );
+    getSnapshotMock.mockResolvedValue(snapshot({ sessions: [] }));
+    listSessionsMock.mockResolvedValue([]);
+
+    const { result } = renderHook(() => useWorkbenchAgentHints({ store }));
+    await waitFor(() => {
+      expect(result.current.phase).toBe('live');
+    });
+
+    expect(result.current.hintsForProject('p1').count).toBe(0);
+    expect(result.current.hintsForWorktree('p1', 'wt-1').count).toBe(0);
+    expect(result.current.hintsForTerminal('t-orphan').count).toBe(0);
+    expect(window.localStorage.getItem(SEEN_COMPLETED_STORAGE_KEY)).toBe('[]');
   });
 });

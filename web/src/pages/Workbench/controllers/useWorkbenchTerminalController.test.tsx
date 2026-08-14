@@ -67,11 +67,16 @@ const eventListeners = vi.hoisted<
 >(() => new Map());
 
 const ackCompletedSpy = vi.hoisted(() => vi.fn());
+const upsertHintSessionSpy = vi.hoisted(() => vi.fn());
+const reconcileHintSessionsSpy = vi.hoisted(() => vi.fn());
+const removeHintTerminalSpy = vi.hoisted(() => vi.fn());
 
 vi.mock('@/hooks/workbenchAgentHintStore', () => ({
   ackCompletedForTerminal: (...args: unknown[]) => ackCompletedSpy(...args),
   getWorkbenchAgentHintStore: () => ({
-    upsertSessionIndex: vi.fn(),
+    upsertSessionIndex: (...args: unknown[]) => upsertHintSessionSpy(...args),
+    reconcileSessionInventory: (...args: unknown[]) => reconcileHintSessionsSpy(...args),
+    removeTerminal: (...args: unknown[]) => removeHintTerminalSpy(...args),
     ackCompletedForTerminal: (...args: unknown[]) => ackCompletedSpy(...args),
   }),
 }));
@@ -276,6 +281,16 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     expect(result.current.scopedSessions).toEqual([session]);
     expect(markSuccess).toHaveBeenCalledWith(project.id);
     expect(refreshStats).toHaveBeenCalledWith(project.id);
+    expect(reconcileHintSessionsSpy).toHaveBeenCalledWith(
+      [
+        {
+          sessionId: session.id,
+          projectId: session.projectId,
+          worktreeId: session.worktreeId,
+        },
+      ],
+      project.id,
+    );
   });
 
   test('loadSessions ignores stale project response after switching projects', async () => {
@@ -1016,6 +1031,7 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
     expect(fakeSessionsApi.close).toHaveBeenCalledWith('s1');
     expect(result.current.sessions.map((s) => s.id)).toEqual(['s2']);
     expect(removeBuffer).toHaveBeenCalledWith('s1');
+    expect(removeHintTerminalSpy).toHaveBeenCalledWith('s1');
     expect(refreshStats).toHaveBeenCalledWith(project.id);
   });
 
@@ -1378,6 +1394,7 @@ describe('useWorkbenchTerminalController — split / switch / zoom / close pane'
 
     expect(fakeSessionsApi.closePane).toHaveBeenCalledWith('s1');
     expect(removeBuffer).toHaveBeenCalledWith('s1');
+    expect(removeHintTerminalSpy).toHaveBeenCalledWith('s1');
     expect(result.current.sessions.map((s) => s.id)).toEqual([]);
   });
 });
@@ -2078,6 +2095,9 @@ describe('useWorkbenchTerminalController — clearBuffersForWorktree bridge', ()
     expect(removeBuffer).toHaveBeenCalledWith('s-feature-1');
     expect(removeBuffer).toHaveBeenCalledWith('s-feature-2');
     expect(removeBuffer).not.toHaveBeenCalledWith('s-main');
+    expect(removeHintTerminalSpy).toHaveBeenCalledWith('s-feature-1');
+    expect(removeHintTerminalSpy).toHaveBeenCalledWith('s-feature-2');
+    expect(removeHintTerminalSpy).not.toHaveBeenCalledWith('s-main');
   });
 });
 

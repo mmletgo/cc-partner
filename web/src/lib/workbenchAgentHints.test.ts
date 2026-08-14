@@ -25,6 +25,8 @@ import {
   hintsForTerminal,
   hintsForWorktree,
   loadPersistedHintExtras,
+  reconcileAgentHintSessionInventory,
+  removeAgentHintTerminal,
   replaceActiveWaitingFromSnapshot,
   restoreSeenCompleted,
   serializeAckedCompleted,
@@ -412,5 +414,74 @@ describe('workbenchAgentHints', () => {
       { sessionWorktreeByTerminal: { 'term-1': 'wt-fallback' } },
     );
     expect(hintsForWorktree(state, 'proj-1', 'wt-fallback').waitingCount).toBe(1);
+  });
+
+  test('权威 terminal 清单会剪掉孤儿 stopped，并回填存活 terminal 的 worktree', () => {
+    let state = applyAgentHintSession(
+      emptyAgentHintState(),
+      session({
+        id: 'agent-ghost',
+        terminalSessionId: 'term-ghost',
+        phase: 'disconnected',
+        isActive: false,
+        endedAt: '2026-08-13T00:01:00.000Z',
+      }),
+    );
+    state = applyAgentHintSession(
+      state,
+      session({
+        id: 'agent-live',
+        terminalSessionId: 'term-live',
+        worktreeId: null,
+        phase: 'needsInput',
+      }),
+    );
+
+    state = reconcileAgentHintSessionInventory(state, [
+      {
+        terminalSessionId: 'term-live',
+        projectId: 'proj-1',
+        worktreeId: 'wt-current',
+      },
+    ]);
+
+    expect(hintsForTerminal(state, 'term-ghost').count).toBe(0);
+    expect(hintsForProject(state, 'proj-1')).toMatchObject({
+      waitingCount: 1,
+      stoppedCount: 0,
+    });
+    expect(hintsForWorktree(state, 'proj-1', 'wt-current').waitingCount).toBe(1);
+  });
+
+  test('单项目清单对账与显式关闭只影响目标 terminal 范围', () => {
+    let state = applyAgentHintSession(
+      emptyAgentHintState(),
+      session({ terminalSessionId: 'term-p1', phase: 'needsInput' }),
+    );
+    state = applyAgentHintSession(
+      state,
+      session({
+        id: 'agent-p2',
+        projectId: 'proj-2',
+        worktreeId: 'wt-2',
+        terminalSessionId: 'term-p2',
+        phase: 'needsInput',
+      }),
+    );
+
+    state = reconcileAgentHintSessionInventory(state, [], 'proj-1');
+    expect(hintsForProject(state, 'proj-1').count).toBe(0);
+    expect(hintsForProject(state, 'proj-2').waitingCount).toBe(1);
+
+    state = reconcileAgentHintSessionInventory(
+      state,
+      [{ terminalSessionId: 'term-p2', projectId: 'proj-current', worktreeId: 'wt-current' }],
+      'proj-current',
+    );
+    expect(hintsForProject(state, 'proj-2').count).toBe(0);
+    expect(hintsForWorktree(state, 'proj-current', 'wt-current').waitingCount).toBe(1);
+
+    state = removeAgentHintTerminal(state, 'term-p2');
+    expect(hintsForProject(state, 'proj-current').count).toBe(0);
   });
 });

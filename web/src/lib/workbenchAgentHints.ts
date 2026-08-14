@@ -61,6 +61,12 @@ export interface ApplyAgentHintOptions {
   sessionWorktreeByTerminal?: Record<string, string | undefined>;
 }
 
+export interface AgentHintSessionInventoryEntry {
+  terminalSessionId: string;
+  projectId: string;
+  worktreeId?: string | null;
+}
+
 export interface PersistedHintExtras {
   ackedCompletedIds: string[];
   seenCompleted: SeenCompletedEdge[];
@@ -334,6 +340,71 @@ export function hintsForWorktree(
       (row) => row.projectId === projectId && row.worktreeId === worktreeId,
     ),
   );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Hint 的 stopped/completed 边会跨刷新保留，但已经关闭的 terminal 不应继续出现在
+ *   项目或 worktree 数字中；权威 sessions.list 必须能剪掉这些孤儿记录。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用 terminal session inventory 替换全局或单项目范围：删除清单中不存在的 row，
+ *   并用清单回填现存 row 的 project/worktree 归属；其它项目在 scoped 对账时保持不变。
+ */
+export function reconcileAgentHintSessionInventory(
+  state: WorkbenchAgentHintState,
+  inventory: readonly AgentHintSessionInventoryEntry[],
+  projectId?: string,
+): WorkbenchAgentHintState {
+  const inventoryByTerminal = new Map(
+    inventory
+      .filter((entry) => !projectId || entry.projectId === projectId)
+      .map((entry) => [entry.terminalSessionId, entry] as const),
+  );
+  const nextByTerminal = new Map<string, AgentHintTerminalRow>();
+
+  for (const [terminalSessionId, row] of state.byTerminal) {
+    const entry = inventoryByTerminal.get(terminalSessionId);
+    if (!entry) {
+      if (projectId && row.projectId !== projectId) {
+        nextByTerminal.set(terminalSessionId, row);
+      }
+      continue;
+    }
+
+    const nextRow: AgentHintTerminalRow = {
+      ...row,
+      projectId: entry.projectId,
+    };
+    if (entry.worktreeId) nextRow.worktreeId = entry.worktreeId;
+    else delete nextRow.worktreeId;
+    nextByTerminal.set(terminalSessionId, nextRow);
+  }
+
+  return {
+    ...state,
+    byTerminal: nextByTerminal,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户明确关闭 terminal 后，项目/worktree 数字应在关闭成功时立即收敛，不能等待下一次清单刷新。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 byTerminal 删除指定 terminal；acked 集合保持不变。
+ */
+export function removeAgentHintTerminal(
+  state: WorkbenchAgentHintState,
+  terminalSessionId: string,
+): WorkbenchAgentHintState {
+  if (!state.byTerminal.has(terminalSessionId)) return state;
+  const nextByTerminal = new Map(state.byTerminal);
+  nextByTerminal.delete(terminalSessionId);
+  return {
+    ...state,
+    byTerminal: nextByTerminal,
+  };
 }
 
 function isFiniteTimestamp(raw: string): number | null {

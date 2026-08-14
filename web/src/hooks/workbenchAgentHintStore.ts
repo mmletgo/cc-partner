@@ -21,6 +21,8 @@ import {
   hintsForTerminal as selectTerminal,
   hintsForWorktree as selectWorktree,
   loadPersistedHintExtras,
+  reconcileAgentHintSessionInventory,
+  removeAgentHintTerminal,
   replaceActiveWaitingFromSnapshot,
   restoreSeenCompleted,
   serializeAckedCompleted,
@@ -46,6 +48,11 @@ export interface WorkbenchAgentHintStore {
   replaceActiveWaiting: (sessions: readonly AgentSessionRuntimeDto[]) => void;
   ackCompletedForTerminal: (terminalSessionId: string) => void;
   upsertSessionIndex: (entry: AgentHintSessionIndexEntry) => void;
+  reconcileSessionInventory: (
+    entries: readonly AgentHintSessionIndexEntry[],
+    projectId?: string,
+  ) => void;
+  removeTerminal: (terminalSessionId: string) => void;
   hintsForProject: (projectId: string) => AgentHintCounts;
   hintsForWorktree: (projectId: string, worktreeId: string) => AgentHintCounts;
   hintsForTerminal: (terminalSessionId: string) => AgentHintCounts;
@@ -100,6 +107,7 @@ export function createWorkbenchAgentHintStore(
   const persist = options.persist ?? browserPersist();
   const listeners = new Set<WorkbenchAgentHintListener>();
   const sessionWorktreeByTerminal: Record<string, string | undefined> = {};
+  const sessionProjectByTerminal: Record<string, string | undefined> = {};
   let state: WorkbenchAgentHintState = emptyAgentHintState();
   let revision = 0;
 
@@ -154,8 +162,53 @@ export function createWorkbenchAgentHintStore(
       setState(ackCompletedInState(state, terminalSessionId));
     },
     upsertSessionIndex: (entry) => {
+      sessionProjectByTerminal[entry.sessionId] = entry.projectId;
       sessionWorktreeByTerminal[entry.sessionId] =
         entry.worktreeId && entry.worktreeId !== '' ? entry.worktreeId : undefined;
+      const existing = state.byTerminal.get(entry.sessionId);
+      if (!existing) return;
+      const nextByTerminal = new Map(state.byTerminal);
+      const nextRow = { ...existing, projectId: entry.projectId };
+      if (entry.worktreeId) nextRow.worktreeId = entry.worktreeId;
+      else delete nextRow.worktreeId;
+      nextByTerminal.set(entry.sessionId, nextRow);
+      setState({ ...state, byTerminal: nextByTerminal });
+    },
+    reconcileSessionInventory: (entries, projectId) => {
+      if (projectId) {
+        for (const terminalSessionId of Object.keys(sessionProjectByTerminal)) {
+          if (sessionProjectByTerminal[terminalSessionId] !== projectId) continue;
+          delete sessionProjectByTerminal[terminalSessionId];
+          delete sessionWorktreeByTerminal[terminalSessionId];
+        }
+      } else {
+        for (const terminalSessionId of Object.keys(sessionProjectByTerminal)) {
+          delete sessionProjectByTerminal[terminalSessionId];
+          delete sessionWorktreeByTerminal[terminalSessionId];
+        }
+      }
+      for (const entry of entries) {
+        if (projectId && entry.projectId !== projectId) continue;
+        sessionProjectByTerminal[entry.sessionId] = entry.projectId;
+        sessionWorktreeByTerminal[entry.sessionId] =
+          entry.worktreeId && entry.worktreeId !== '' ? entry.worktreeId : undefined;
+      }
+      setState(
+        reconcileAgentHintSessionInventory(
+          state,
+          entries.map((entry) => ({
+            terminalSessionId: entry.sessionId,
+            projectId: entry.projectId,
+            worktreeId: entry.worktreeId,
+          })),
+          projectId,
+        ),
+      );
+    },
+    removeTerminal: (terminalSessionId) => {
+      delete sessionProjectByTerminal[terminalSessionId];
+      delete sessionWorktreeByTerminal[terminalSessionId];
+      setState(removeAgentHintTerminal(state, terminalSessionId));
     },
     hintsForProject: (projectId) => selectProject(state, projectId),
     hintsForWorktree: (projectId, worktreeId) => selectWorktree(state, projectId, worktreeId),
