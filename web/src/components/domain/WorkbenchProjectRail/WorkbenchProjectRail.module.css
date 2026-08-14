@@ -333,14 +333,17 @@
   position: absolute;
   top: var(--space-3);
   right: var(--space-3);
-  width: 8px;
-  height: 8px;
   border-radius: var(--radius-full);
   background: var(--warn);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--warn) 14%, transparent);
 }
 
-.projectStatusDot[data-active='true'] {
+.projectStatusDot:not([data-hint-tone]) {
+  width: 8px;
+  height: 8px;
+}
+
+.projectStatusDot[data-active='true']:not([data-hint-tone]) {
   background: var(--success);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--success) 14%, transparent);
 }

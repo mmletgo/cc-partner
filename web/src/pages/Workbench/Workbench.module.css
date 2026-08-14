@@ -472,7 +472,7 @@
   height: 38px;
   max-width: 220px;
   display: inline-grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
   flex: 0 0 auto;
@@ -505,17 +505,20 @@
 }
 
 .worktreeDot {
-  width: 7px;
-  height: 7px;
   border-radius: var(--radius-full);
   background: var(--success);
 }
 
-.worktreeDot[data-tone='warning'] {
+.worktreeDot:not([data-hint-tone]) {
+  width: 7px;
+  height: 7px;
+}
+
+.worktreeDot[data-tone='warning']:not([data-hint-tone]) {
   background: var(--warn);
 }
 
-.worktreeDot[data-tone='danger'] {
+.worktreeDot[data-tone='danger']:not([data-hint-tone]) {
   background: var(--danger);
 }
 
@@ -737,18 +740,21 @@
 }
 
 .sessionDot {
-  width: 7px;
-  height: 7px;
   flex: 0 0 auto;
   border-radius: var(--radius-full);
   background: var(--meta);
 }
 
-.sessionDot[data-status='running'] {
+.sessionDot:not([data-hint-tone]) {
+  width: 7px;
+  height: 7px;
+}
+
+.sessionDot[data-status='running']:not([data-hint-tone]) {
   background: var(--success);
 }
 
-.sessionDot[data-status='disconnected'] {
+.sessionDot[data-status='disconnected']:not([data-hint-tone]) {
   background: var(--danger);
 }
 

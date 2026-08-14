@@ -1,14 +1,16 @@
-/* 有 hint 时放大原点并写入数字；颜色走 wait/complete token。 */
+/* 有 hint 时放大原点并写入数字；颜色走 wait/complete token。
+   几何必须绑 data-hint-tone：原点 .sessionDot/.worktreeDot/.projectStatusDot
+   会后加载并钉死 7–8px，单 class .hinted 赢不了。 */
 
-.hinted {
+.hinted[data-hint-tone] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
   min-width: 16px;
-  width: 16px;
+  width: auto;
   height: 16px;
-  padding: 0;
+  padding: 0 var(--space-1);
   border-radius: var(--radius-full);
   color: var(--accent-on);
   font-size: var(--text-xs);
