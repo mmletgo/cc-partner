@@ -44,6 +44,7 @@ const appConfig = (partial: Partial<AppConfig> = {}): AppConfig => ({
   deviceId: 'device-1',
   deviceName: 'Hans-Mac',
   receiveDir: '/tmp/files',
+  gamePluginDir: '/tmp/plugins',
   screenshotHotkey: '<cmd>+<shift>+s',
   promptOptimizerHotkey: '<ctrl>',
   promptOptimizerFillLanguage: 'zh',

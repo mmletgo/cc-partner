@@ -36,12 +36,13 @@ const batteryModeDecoder: Decoder<BatteryMode> = enumDecoder('BatteryMode', [
 
 const batteryCreditSourceDecoder: Decoder<BatteryCreditSource> = enumDecoder(
   'BatteryCreditSource',
-  ['water', 'rest', 'kegel', 'custom', 'flashcard', 'welcome'] as const,
+  ['water', 'rest', 'kegel', 'custom', 'flashcard', 'welcome', 'game-plugin'] as const,
 );
 
 const batteryLedgerKindDecoder: Decoder<BatteryLedgerKind> = enumDecoder('BatteryLedgerKind', [
   'credit_health',
   'credit_wordgame',
+  'credit_game_plugin',
   'credit_welcome',
   'daily_reset',
   'debit_tick',

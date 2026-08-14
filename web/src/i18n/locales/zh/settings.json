@@ -23,6 +23,8 @@
     "deviceNameHelper": "其他设备在局域网中看到的名字。",
     "receiveDir": "接收目录",
     "receiveDirHelper": "通过局域网接收到的文件会保存到此目录。",
+    "gamePluginDir": "游戏插件目录",
+    "gamePluginDirHelper": "每个子文件夹是一个游戏。默认是本机 cc-partner 数据根下的 plugins。",
     "selectFolder": "选择…",
     "selecting": "选择中…"
   },

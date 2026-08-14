@@ -3,7 +3,7 @@
   "gameButtonTitle": "Open game hub",
   "hub": {
     "title": "Games",
-    "subtitle": "A small hall next to the version number. First game: Word flashcards.",
+    "subtitle": "A small hall next to the version number. Built-in flashcards, plus games in the plugin folder.",
     "close": "Close",
     "wordgameTitle": "Word flashcards",
     "wordgameDesc": "Review English lemmas from Workbench agent output, one card at a time.",
@@ -13,7 +13,17 @@
     "blocked": "Card generation is blocked on “{{lemma}}”. Retry until it succeeds.",
     "waiting": "Waiting for more new words from Workbench chats.",
     "retry": "Retry preheat",
-    "loadError": "Could not load game status."
+    "loadError": "Could not load game status.",
+    "specTitle": "Game spec for AI",
+    "specCopy": "Copy spec",
+    "specCopied": "Copied",
+    "specCopyError": "Could not copy the spec.",
+    "pluginEmpty": "No plugin games yet in {{dir}}",
+    "pluginDirUnknown": "the game plugin folder in Settings",
+    "pluginMissingEntry": "Entry file missing. Build the project first.",
+    "pluginInvalid": "Invalid manifest. Cannot start.",
+    "pluginFallbackDesc": "User plugin game",
+    "pluginLoadError": "Could not credit this game."
   },
   "play": {
     "back": "Back",

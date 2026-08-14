@@ -82,10 +82,13 @@ export interface UseSettingsFormSavesResult {
   saving: boolean;
   saveError: string | null;
   choosingDir: boolean;
+  choosingGamePluginDir: boolean;
   recordingShortcutId: string | null;
   handleDeviceNameChange: (e: ChangeEvent<HTMLInputElement>) => void;
   handleReceiveDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
+  handleGamePluginDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
   handleChooseDir: () => Promise<void>;
+  handleChooseGamePluginDir: () => Promise<void>;
   handleShortcutFocus: (id: string) => void;
   handleShortcutBlur: (id: string) => void;
   handleShortcutKeyDown: (e: KeyboardEvent<HTMLInputElement>, id: string) => void;
@@ -213,6 +216,7 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [choosingDir, setChoosingDir] = useState(false);
+  const [choosingGamePluginDir, setChoosingGamePluginDir] = useState(false);
   const [recordingShortcutId, setRecordingShortcutId] = useState<string | null>(null);
 
   const generalEditVersionRef = useRef(0);
@@ -248,6 +252,10 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
 
   const handleReceiveDirChange = (e: ChangeEvent<HTMLInputElement>) => {
     patchState({ receiveDir: e.target.value });
+  };
+
+  const handleGamePluginDirChange = (e: ChangeEvent<HTMLInputElement>) => {
+    patchState({ gamePluginDir: e.target.value });
   };
 
   /**
@@ -319,6 +327,20 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
       // 目录选择取消或失败时静默处理
     } finally {
       setChoosingDir(false);
+    }
+  };
+
+  const handleChooseGamePluginDir = async () => {
+    setChoosingGamePluginDir(true);
+    try {
+      const result = await configApi.chooseDir();
+      if (result.path) {
+        patchState({ gamePluginDir: result.path });
+      }
+    } catch {
+      // 目录选择取消或失败时静默处理
+    } finally {
+      setChoosingGamePluginDir(false);
     }
   };
 
@@ -479,10 +501,13 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
     saving,
     saveError,
     choosingDir,
+    choosingGamePluginDir,
     recordingShortcutId,
     handleDeviceNameChange,
     handleReceiveDirChange,
+    handleGamePluginDirChange,
     handleChooseDir,
+    handleChooseGamePluginDir,
     handleShortcutFocus,
     handleShortcutBlur,
     handleShortcutKeyDown,

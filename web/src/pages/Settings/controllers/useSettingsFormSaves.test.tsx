@@ -72,6 +72,7 @@ function buildCoreConfig(deviceName: string) {
     deviceId: 'd1',
     deviceName,
     receiveDir: '/tmp/in',
+    gamePluginDir: '/tmp/plugins',
     screenshotHotkey: 'CommandOrControl+Shift+S',
     promptOptimizerHotkey: 'Control',
     promptOptimizerFillLanguage: 'zh' as const,

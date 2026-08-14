@@ -41,6 +41,7 @@ function appConfig(partial: Partial<AppConfig> = {}): AppConfig {
     deviceId: 'device-1',
     deviceName: 'Hans-Mac',
     receiveDir: '/Users/hans/cc-partner-files',
+    gamePluginDir: '/Users/hans/.cc-partner/plugins',
     screenshotHotkey: '<cmd>+<shift>+s',
     promptOptimizerHotkey: '<ctrl>',
     promptOptimizerFillLanguage: 'zh',

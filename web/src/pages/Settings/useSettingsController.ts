@@ -107,11 +107,14 @@ export interface UseSettingsControllerResult {
   /** 常规 tab 保存失败文案；不得写入 loadError，否则整页会卸掉脏表单 */
   saveError: string | null;
   choosingDir: boolean;
+  choosingGamePluginDir: boolean;
   canResetCoreDefaults: boolean;
   recordingShortcutId: string | null;
   handleDeviceNameChange: (e: import('react').ChangeEvent<HTMLInputElement>) => void;
   handleReceiveDirChange: (e: import('react').ChangeEvent<HTMLInputElement>) => void;
+  handleGamePluginDirChange: (e: import('react').ChangeEvent<HTMLInputElement>) => void;
   handleChooseDir: () => Promise<void>;
+  handleChooseGamePluginDir: () => Promise<void>;
   handleShortcutFocus: (id: string) => void;
   handleShortcutBlur: (id: string) => void;
   handleShortcutKeyDown: (e: KeyboardEvent<HTMLInputElement>, id: string) => void;
@@ -494,11 +497,14 @@ export function useSettingsController(): UseSettingsControllerResult {
     saving: form.saving,
     saveError: form.saveError,
     choosingDir: form.choosingDir,
+    choosingGamePluginDir: form.choosingGamePluginDir,
     canResetCoreDefaults: resources.canResetCoreDefaults,
     recordingShortcutId: form.recordingShortcutId,
     handleDeviceNameChange: form.handleDeviceNameChange,
     handleReceiveDirChange: form.handleReceiveDirChange,
+    handleGamePluginDirChange: form.handleGamePluginDirChange,
     handleChooseDir: form.handleChooseDir,
+    handleChooseGamePluginDir: form.handleChooseGamePluginDir,
     handleShortcutFocus: form.handleShortcutFocus,
     handleShortcutBlur: form.handleShortcutBlur,
     handleShortcutKeyDown: form.handleShortcutKeyDown,
