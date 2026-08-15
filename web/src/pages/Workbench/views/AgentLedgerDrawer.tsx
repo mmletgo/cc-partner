@@ -21,7 +21,6 @@ import type {
   AgentLedgerEntry,
   AgentLedgerPage,
   AgentLedgerSummary,
-  LedgerUsageCoverage,
 } from '@/lib/types/agentLedger';
 import styles from './AgentLedgerDrawer.module.css';
 
@@ -80,19 +79,6 @@ function durationLabel(
     segments.push(`${parts.seconds}${unitSecond}`);
   }
   return segments.join(' ');
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   coverage 需要可读标签。
- *
- * Code Logic（这个函数做什么）:
- *   映射 coverage → i18n key。
- */
-function coverageTone(coverage: LedgerUsageCoverage): 'success' | 'warn' | 'neutral' {
-  if (coverage === 'complete') return 'success';
-  if (coverage === 'partial') return 'warn';
-  return 'neutral';
 }
 
 /**
@@ -176,9 +162,6 @@ export function AgentLedgerDrawer({
               <h3 className={styles.sectionTitle}>
                 {t('workbench:agentLedger.summaryTitle')} · {summary.window}
               </h3>
-              <Pill tone={coverageTone(summary.usageCoverage)}>
-                {t(`workbench:agentLedger.coverage.${summary.usageCoverage}`)}
-              </Pill>
             </div>
             <dl className={styles.summaryGrid}>
               <div>

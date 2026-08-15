@@ -113,9 +113,10 @@ describe('AgentLedgerDrawer', () => {
     expect(screen.getAllByTestId('ledger-duration')[2].textContent).toBe('0秒');
   });
 
-  it('shows partial coverage label', () => {
+  it('does not render usage coverage pill in summary header', () => {
     renderDrawer();
-    expect(screen.getByText(/部分/)).toBeTruthy();
+    expect(screen.queryByText('部分')).toBeNull();
+    expect(screen.queryByText('完整')).toBeNull();
   });
 
   it('shows multi-currency without conversion', () => {
