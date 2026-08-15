@@ -37,7 +37,7 @@ import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
 import { routeAutomationWorkbenchOpen } from './workbenchWindowNavigation';
-import { workbenchApi } from '@/api/workbench';
+import { windows } from '@/api/workbench';
 import {
   canListenToTauriEvents,
   deferEffect,
@@ -640,9 +640,9 @@ export function Workbench() {
         currentLabel: currentWindowLabel,
         occupancy,
         navigate,
-        claim: workbenchApi.windows.claim,
-        focus: workbenchApi.windows.focus,
-        applyOnWindow: workbenchApi.windows.applyDeepLink,
+        claim: windows.claim,
+        focus: windows.focus,
+        applyOnWindow: windows.applyDeepLink,
         fallback: (next) => {
           void openTaskWorkbench(next);
         },

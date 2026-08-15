@@ -921,3 +921,9 @@ export const workbenchApi = {
       ),
   },
 };
+
+/**
+ * Workbench 窗口 API 命名导出（Workbench.tsx 等页面只暴露 `windows` 子集，
+ * 避免误调 sessions/files/worktrees/git；与 `workbenchApi.windows` 同源）。
+ */
+export const windows = workbenchApi.windows;
