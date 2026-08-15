@@ -17,6 +17,7 @@ export type TestAppConfig = {
   deviceId: string;
   deviceName: string;
   receiveDir: string;
+  gamePluginDir: string;
   screenshotHotkey: string;
   promptOptimizerHotkey: string;
   promptQuickInputHotkey: string;
@@ -36,6 +37,7 @@ export function makeAppConfig(partial: Partial<TestAppConfig> = {}): TestAppConf
     deviceId: 'self-1',
     deviceName: 'Test Device',
     receiveDir: '/tmp/cc-partner-files',
+    gamePluginDir: '/tmp/cc-partner-game-plugins',
     screenshotHotkey: 'CommandOrControl+Shift+S',
     promptOptimizerHotkey: 'Control',
     promptQuickInputHotkey: '<ctrl>+/',

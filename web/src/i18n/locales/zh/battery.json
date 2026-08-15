@@ -1,7 +1,8 @@
 {
   "loading": "加载中…",
-  "toggleToUnlimited": "切换到无限模式",
-  "toggleToCharging": "切换到充电模式",
+  "groupLabel": "充电/无限模式切换",
+  "modeCharging": "充电模式",
+  "modeUnlimited": "无限模式",
   "titleCharging": "充电模式 · 剩余 {{time}}",
   "titleUnlimited": "无限模式 · 余额 {{time}}",
   "remainingShort": "{{time}}",

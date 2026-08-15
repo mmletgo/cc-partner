@@ -1,18 +1,22 @@
 /**
- * BatteryModeToggle（充电 / 无限切换）
+ * BatteryModeToggle（充电 / 无限两段式切换器）
  *
  * Business Logic（为什么需要这个组件）:
- *   自我约束入口必须放在主题按钮前面，图标表示目标态；充电时画余额环。
+ *   footer 需要一眼分辨当前自我约束模式并一键切换；
+ *   充电模式的剩余余额直接由电池图标的填充比例表达，低电量给出 warn/danger 警示。
  *
  * Code Logic（这个组件做什么）:
- *   charging 显示 ∞（切到无限）；unlimited 显示电池（切到充电）；
- *   环满 = maxBalanceMs；<5 分 warn，0 danger。文案全部 t()。
+ *   胶囊容器内两个 aria-pressed 按钮（范式对齐 LanguageSwitcher）：
+ *   充电档渲染 BatteryLevelIcon（fill = remainingMs/maxBalanceMs，clamp 0..1），
+ *   无限档渲染 ∞；当前模式高亮 accent；
+ *   charging 且剩余 <=0 分 danger、<BATTERY_WARN_MINUTES 分 warn。
+ *   文案全部 t()。
  */
 
 import { useCallback, type ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { BatteryIcon, InfinityIcon } from '@/lib/icons';
+import { BatteryLevelIcon, InfinityIcon } from '@/lib/icons';
 import { formatBatteryTime, remainingMinutesFromMs } from '@/lib/batteryTime';
 import { BATTERY_WARN_MINUTES, type BatterySnapshot } from '@/lib/types/battery';
 import styles from './BatteryModeToggle.module.css';
@@ -23,12 +27,9 @@ export interface BatteryModeToggleProps {
   className?: string;
 }
 
-const RING_R = 9;
-const RING_C = 2 * Math.PI * RING_R;
-
 /**
  * Business Logic（为什么需要这个组件）:
- *   footer 需要一眼看出模式与剩余，并一键切回无限。
+ *   footer 需要一眼看出当前模式与剩余电量，并在充电/无限间一键切换。
  *
  * Code Logic（这个组件做什么）:
  *   见文件头。
@@ -45,55 +46,69 @@ export function BatteryModeToggle({
   const minutes = remainingMinutesFromMs(remainingMs);
   const ratio = Math.max(0, Math.min(1, remainingMs / maxMs));
   const timeLabel = formatBatteryTime(remainingMs, t);
-  const title = charging
-    ? t('titleCharging', { time: timeLabel })
-    : t('titleUnlimited', { time: timeLabel });
-  const aria = charging ? t('toggleToUnlimited') : t('toggleToCharging');
-  const toneClass =
+  // 低电量警示仅对充电档有意义：<=0 danger，<BATTERY_WARN_MINUTES warn
+  const lowTone =
     charging && minutes <= 0
-      ? styles.toggleDanger
+      ? styles.optionDanger
       : charging && minutes < BATTERY_WARN_MINUTES
-        ? styles.toggleWarn
+        ? styles.optionWarn
         : '';
-  const cls = [styles.toggle, toneClass, className].filter(Boolean).join(' ');
+  const cls = [styles.switcher, className].filter(Boolean).join(' ');
+  const chargingOptionCls = [
+    charging ? styles.optionActive : styles.option,
+    lowTone,
+  ].filter(Boolean).join(' ');
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   点一下切到目标态，不抹余额。
+   *   用户点充电档即希望回到充电模式。
    *
    * Code Logic（这个函数做什么）:
-   *   charging → unlimited；unlimited → charging。
+   *   固定回调 onToggle('charging')。
    */
-  const handleClick = useCallback((): void => {
-    onToggle(charging ? 'unlimited' : 'charging');
-  }, [charging, onToggle]);
+  const handleChargingClick = useCallback((): void => {
+    onToggle('charging');
+  }, [onToggle]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点无限档即希望解除自我约束。
+   *
+   * Code Logic（这个函数做什么）:
+   *   固定回调 onToggle('unlimited')。
+   */
+  const handleUnlimitedClick = useCallback((): void => {
+    onToggle('unlimited');
+  }, [onToggle]);
 
   return (
-    <button
-      type="button"
+    <div
+      role="group"
+      aria-label={t('groupLabel')}
       className={cls}
-      onClick={handleClick}
-      aria-label={aria}
-      title={title}
       data-testid="battery-mode-toggle"
       data-mode={charging ? 'charging' : 'unlimited'}
     >
-      {charging ? (
-        <svg className={styles.ring} viewBox="0 0 22 22" aria-hidden="true">
-          <circle className={styles.ringTrack} cx="11" cy="11" r={RING_R} />
-          <circle
-            className={styles.ringValue}
-            cx="11"
-            cy="11"
-            r={RING_R}
-            strokeDasharray={RING_C}
-            strokeDashoffset={RING_C * (1 - ratio)}
-          />
-        </svg>
-      ) : null}
-      <span className={styles.icon}>
-        {charging ? <InfinityIcon size={14} /> : <BatteryIcon size={14} />}
-      </span>
-    </button>
+      <button
+        type="button"
+        className={chargingOptionCls}
+        onClick={handleChargingClick}
+        aria-pressed={charging}
+        aria-label={t('modeCharging')}
+        title={t('titleCharging', { time: timeLabel })}
+      >
+        <BatteryLevelIcon level={ratio} />
+      </button>
+      <button
+        type="button"
+        className={!charging ? styles.optionActive : styles.option}
+        onClick={handleUnlimitedClick}
+        aria-pressed={!charging}
+        aria-label={t('modeUnlimited')}
+        title={t('titleUnlimited', { time: timeLabel })}
+      >
+        <InfinityIcon size={14} />
+      </button>
+    </div>
   );
 }

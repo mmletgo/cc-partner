@@ -17,7 +17,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 import { readFileSync } from 'node:fs';
@@ -198,9 +198,17 @@ describe('AppShell grouped navigation', () => {
     const battery = screen.getByTestId('battery-mode-toggle');
     const group = battery.closest('[class*="footerIconGroup"]');
     expect(group).toBeTruthy();
-    const buttons = Array.from(group?.querySelectorAll('button, a') ?? []);
-    expect(buttons[0]).toBe(battery);
-    expect(screen.getByRole('button', { name: '切换到无限模式' })).toBe(battery);
+    // 两段式切换器容器仍是 footerIconGroup 的第一个元素
+    expect(group?.firstElementChild).toBe(battery);
+    // 容器内两个按钮：充电档（当前充电态 pressed）与无限档
+    const chargingButton = within(battery).getByRole('button', { name: '充电模式' });
+    const unlimitedButton = within(battery).getByRole('button', { name: '无限模式' });
+    expect(chargingButton.getAttribute('aria-pressed')).toBe('true');
+    expect(unlimitedButton.getAttribute('aria-pressed')).toBe('false');
+    // 点无限档触发 set_battery_mode（useBattery mock 的 setMode）
+    batterySnapshotMock.setMode.mockClear();
+    fireEvent.click(unlimitedButton);
+    expect(batterySnapshotMock.setMode).toHaveBeenCalledWith('unlimited');
   });
 
   test('places a game text button next to the version number and keeps it out of primary nav', () => {

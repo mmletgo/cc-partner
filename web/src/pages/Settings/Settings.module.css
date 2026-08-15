@@ -177,19 +177,22 @@
   flex-shrink: 0;
 }
 
+/* 模板编辑展开区：完整边框容器 + --bg 底色，与卡片 --surface 形成层次，边界清晰可见 */
 .reminderEditor {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border-soft);
+  padding: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg);
 }
 
 .reminderTextarea {
   width: 100%;
   min-height: 72px;
   padding: var(--space-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--fg);
@@ -247,17 +250,13 @@
   width: 100%;
   min-height: 32px;
   padding: 0 var(--space-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   transition: all var(--motion-fast) var(--ease-standard);
-}
-
-.timeSelect:hover:not(:disabled) {
-  border-color: var(--border);
 }
 
 .timeSelect:focus-visible {
@@ -308,7 +307,7 @@
   width: 100%;
   min-height: 136px;
   padding: var(--space-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--fg);
@@ -317,10 +316,6 @@
   line-height: var(--leading-relaxed);
   resize: vertical;
   transition: all var(--motion-fast) var(--ease-standard);
-}
-
-.textarea:hover {
-  border-color: var(--border);
 }
 
 .textarea:focus-visible {

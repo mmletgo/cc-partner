@@ -511,3 +511,35 @@ export const InfinityIcon = ({ size, ...rest }: IconProps) => (
     <path d="M3.2 8c0-1.7 1.3-3 2.8-3 2.2 0 3.2 3 4 3s1.8-3 4-3c1.5 0 2.8 1.3 2.8 3s-1.3 3-2.8 3c-2.2 0-3.2-3-4-3s-1.8 3-4 3c-1.5 0-2.8-1.3-2.8-3z" />
   </svg>
 );
+
+/**
+ * Business Logic（为什么需要）:
+ *   充电/无限两段式切换器的充电档需要用电池填充比例直接表达剩余余额，
+ *   让用户不点开设置也能一眼读出电量。
+ *
+ * Code Logic（做什么）:
+ *   渲染 16x16 电池：外框 rect + 正极 stroke currentColor；
+ *   内部填充条 fill=currentColor，宽度 = 8.5 * level（内腔 x 3..11.5），
+ *   level 在组件内部 clamp 到 0..1，level<=0 时不渲染填充条。
+ *   aria-hidden 由使用方按需透传。
+ */
+export const BatteryLevelIcon = ({ size, level, ...rest }: IconProps & { level: number }) => {
+  const clamped = Math.max(0, Math.min(1, level));
+  return (
+    <svg {...baseProps(size)} {...rest}>
+      <rect x="1.5" y="4.5" width="11.5" height="7" rx="1.4" />
+      <path d="M13.8 6.6v2.8" />
+      {clamped > 0 ? (
+        <rect
+          x="3"
+          y="6"
+          width={8.5 * clamped}
+          height="4"
+          rx="0.75"
+          fill="currentColor"
+          stroke="none"
+        />
+      ) : null}
+    </svg>
+  );
+};

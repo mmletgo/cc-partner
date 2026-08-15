@@ -1,7 +1,8 @@
 {
   "loading": "Loading…",
-  "toggleToUnlimited": "Switch to unlimited mode",
-  "toggleToCharging": "Switch to charging mode",
+  "groupLabel": "Charging / unlimited mode switch",
+  "modeCharging": "Charging mode",
+  "modeUnlimited": "Unlimited mode",
   "titleCharging": "Charging mode · {{time}} left",
   "titleUnlimited": "Unlimited mode · balance {{time}}",
   "remainingShort": "{{time}}",

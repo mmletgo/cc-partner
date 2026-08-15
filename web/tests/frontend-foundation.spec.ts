@@ -69,8 +69,10 @@ async function installFoundationMocks(
       deviceId: 'device-1',
       deviceName: 'Hans-Mac',
       receiveDir: '/tmp/files',
+      gamePluginDir: '/tmp/game-plugins',
       screenshotHotkey: '<cmd>+<shift>+s',
       promptOptimizerHotkey: '<ctrl>',
+      promptQuickInputHotkey: '<ctrl>+/',
       promptOptimizerFillLanguage: 'zh',
       httpPort: 0,
     };
@@ -114,6 +116,7 @@ async function installFoundationMocks(
         }
         if (cmd === 'list_workbench_projects') return projects;
         if (cmd === 'list_workbench_sessions') return sessions;
+        if (cmd === 'list_workbench_window_occupancy') return [];
         if (cmd === 'list_workbench_worktrees') {
           return projects.length > 0
             ? [
@@ -385,7 +388,8 @@ test.describe('frontend foundation smoke', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     // mobile 入口走 HTTP：stub 关键 API 避免 404 触发 console.error 守卫
     // 仅拦截同源后端 `/api/*`，避免误伤 Vite `/src/api/*` 模块请求
-    await page.route('http://127.0.0.1:5173/api/**', async (route) => {
+    // 端口用通配匹配 playwright.config 的 E2E_PORT（默认 5173，worktree 场景会换端口）
+    await page.route('http://127.0.0.1:*/api/**', async (route) => {
       const url = route.request().url();
       if (url.includes('/api/health')) {
         await route.fulfill({
@@ -628,6 +632,7 @@ test.describe('frontend foundation smoke', () => {
           if (cmd === 'get_version') return { version: '0.0.0-test', buildDate: '2026-07-14' };
           if (cmd === 'list_workbench_projects') return [];
           if (cmd === 'list_workbench_sessions') return [];
+          if (cmd === 'list_workbench_window_occupancy') return [];
           if (cmd === 'list_attention_items') {
             return {
               generatedAt: '2026-07-14T00:00:00.000Z',
@@ -706,7 +711,8 @@ test.describe('frontend foundation smoke', () => {
       }),
     );
     expect(hrefs[0]).toBe('/');
-    expect(hrefs).toContain('/workbench');
+    // Workbench 入口是 Work 组内项目 rail，不占独立主导航项（AppShell 合同，见 AppShell.test）
+    expect(hrefs.filter((href) => href === '/workbench')).toHaveLength(0);
     expect(hrefs).toContain('/attention');
     // 设置入口固定在侧栏 footer 齿轮 NavLink，不在主导航 System 组（AppShell 合同）。
     expect(hrefs.filter((href) => href === '/settings')).toHaveLength(0);

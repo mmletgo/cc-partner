@@ -18,6 +18,8 @@
   --meta: #87867f;
   --border: #f0eee6;
   --border-soft: #e8e6dc;
+  /* 输入控件/内嵌编辑区等需要清晰可见的边框 */
+  --border-strong: #d9d5c9;
   --accent: #c96442;
   --accent-on: #faf9f5;
   --accent-soft: color-mix(in oklab, var(--accent) 14%, transparent);
@@ -145,6 +147,8 @@
   --meta: #787671;
   --border: #2e2b29;
   --border-soft: #262422;
+  /* 输入控件/内嵌编辑区等需要清晰可见的边框 */
+  --border-strong: #4a453d;
   --accent: #d97757;
   --accent-on: #141413;
   --accent-soft: color-mix(in oklab, var(--accent) 22%, transparent);

@@ -1,6 +1,8 @@
 /* Input 原子组件样式
  * 外层 wrapper 用于承载 icon/iconRight；底层为真实 <input>
  * 颜色/间距/圆角/动效全部使用 design token
+ * 边框策略：默认 --border-strong 保证控件边界清晰可见；hover 不变浅；
+ * 焦点态由 accent 边框 + accent-soft 光环表达
  */
 
 .wrapper {
@@ -9,17 +11,13 @@
   gap: var(--space-2);
   padding: 0 var(--space-3);
   background-color: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   color: var(--fg);
   font-family: var(--font-body);
   transition: all var(--motion-fast) var(--ease-standard);
   width: 100%;
   box-sizing: border-box;
-}
-
-.wrapper:hover:not(.disabled) {
-  border-color: var(--border-soft);
 }
 
 .wrapper.focused {

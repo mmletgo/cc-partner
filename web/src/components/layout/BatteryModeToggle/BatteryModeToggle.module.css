@@ -1,85 +1,75 @@
-/* BatteryModeToggle — footer 26×26 圆按钮 + SVG 环 */
+/* BatteryModeToggle — footer 充电/无限两段式胶囊切换器
+ * 范式对齐 LanguageSwitcher：胶囊容器 + 两个图标按钮，当前模式 accent 高亮；
+ * 充电档图标为动态电量电池（填充宽度 = 余额比例）。
+ */
 
-.toggle {
-  position: relative;
+.switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--surface-warm);
+}
+
+.option,
+.optionActive {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border);
+  border: none;
   background: transparent;
   color: var(--fg-2);
+  padding: 4px 8px;
+  border-radius: var(--radius-full);
   cursor: pointer;
-  padding: 0;
   -webkit-app-region: no-drag;
   transition:
     background var(--motion-fast) var(--ease-standard),
-    color var(--motion-fast) var(--ease-standard),
-    border-color var(--motion-fast) var(--ease-standard);
+    color var(--motion-fast) var(--ease-standard);
 }
 
-.toggle:hover {
-  background: var(--surface-warm);
+.option:hover {
   color: var(--fg);
 }
 
-.toggle:focus-visible {
+.option:focus-visible,
+.optionActive:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.toggleWarn {
+.optionActive {
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+/* 低电量警示：仅作用于非 active 的充电档图标前景（此时处于无限模式，
+ * 电池图标是电量预告）；active 档保持 accent 底 + accent-on 前景的权威视觉，
+ * 警示语义由按钮 title 的剩余时间承载。
+ */
+.optionWarn {
   color: var(--warn);
-  border-color: var(--warn);
 }
 
-.toggleDanger {
+.optionDanger {
   color: var(--danger);
-  border-color: var(--danger);
 }
 
-.icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1;
+.optionActive.optionWarn,
+.optionActive.optionDanger {
+  color: var(--accent-on);
 }
 
-.ring {
-  position: absolute;
-  inset: 1px;
-  width: 22px;
-  height: 22px;
-  pointer-events: none;
-  transform: rotate(-90deg);
-}
-
-.ringTrack {
-  fill: none;
-  stroke: var(--border);
-  stroke-width: 1.6;
-}
-
-.ringValue {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  transition: stroke-dashoffset var(--motion-base) var(--ease-standard);
-}
-
-.toggleWarn .ringValue {
-  stroke: var(--warn);
-}
-
-.toggleDanger .ringValue {
-  stroke: var(--danger);
+/* 电量填充条宽度随余额平滑变化（fill=currentColor，颜色随 color transition 同步） */
+.option svg rect,
+.optionActive svg rect {
+  transition: width var(--motion-base) var(--ease-standard);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ringValue {
+  .option svg rect,
+  .optionActive svg rect {
     transition: none;
   }
 }

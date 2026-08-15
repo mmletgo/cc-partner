@@ -287,7 +287,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | Sidebar | children, footer | 侧边栏 |
 | NavItem | icon, label, to, badge | 路由导航项 |
 | ThemeToggle | - | 主题切换按钮 |
-| BatteryModeToggle | snapshot, onToggle | footer 充电/无限切换（目标态图标 + 余额环）；插在 ThemeToggle 前 |
+| BatteryModeToggle | snapshot, onToggle | footer 充电/无限两段式胶囊切换器（当前模式 accent 高亮；充电档为动态电量电池图标，填充 = 余额比例，低电量 warn/danger）；插在 ThemeToggle 前 |
 | WorkbenchWorkspaceNav | ariaLabel, actionsAriaLabel, tabs, actions | Workbench 终端/文件预览/自动化共享导航栏 |
 | RouteErrorBoundary | resetKey, onRetry?, children | 路由级错误隔离：保留 AppShell/providers，pathname 作 resetKey，生产不展示 stack |
 
