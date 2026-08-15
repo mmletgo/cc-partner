@@ -18,6 +18,7 @@ import type {
   LanFleetSnapshot,
 } from '@/lib/types/lanFleet';
 import { fleetExceptionCount } from '@/lib/types/lanFleet';
+import { formatTokenCount } from '@/lib/tokenFormat';
 import styles from './WorkbenchFleetView.module.css';
 
 export interface WorkbenchFleetViewProps {
@@ -190,8 +191,12 @@ function AgentActivityCell({ project }: { project: LanFleetProjectSummary }): Re
     activity.inputTokens == null && activity.outputTokens == null
       ? t('workbench:agentLedger.unavailable')
       : t('workbench:fleet.agentActivityTokens', {
-          input: activity.inputTokens ?? t('workbench:agentLedger.unavailable'),
-          output: activity.outputTokens ?? t('workbench:agentLedger.unavailable'),
+          input:
+            formatTokenCount(activity.inputTokens) ??
+            t('workbench:agentLedger.unavailable'),
+          output:
+            formatTokenCount(activity.outputTokens) ??
+            t('workbench:agentLedger.unavailable'),
         });
   return (
     <>

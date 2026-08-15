@@ -14,6 +14,7 @@ import { useCallback, type ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, Drawer, Pill } from '@/components/primitives';
+import { formatTokenCount } from '@/lib/tokenFormat';
 import type {
   AgentLedgerEntry,
   AgentLedgerPage,
@@ -38,17 +39,16 @@ export interface AgentLedgerDrawerProps {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   null token 必须显示「未提供」，禁止 0 tokens。
+ *   null token 必须显示「未提供」，禁止 0 tokens；大数需按 k/M 缩写提升可读性。
  *
  * Code Logic（这个函数做什么）:
- *   有限数字 → 文本；否则 i18n 未提供。
+ *   有限数字 → formatTokenCount（>5k 以 k、>=1M 以 M，3 位小数）；否则 i18n 未提供。
  */
 function tokenLabel(
   value: number | null | undefined,
   unavailable: string,
 ): string {
-  if (value == null || !Number.isFinite(value)) return unavailable;
-  return String(value);
+  return formatTokenCount(value) ?? unavailable;
 }
 
 /**

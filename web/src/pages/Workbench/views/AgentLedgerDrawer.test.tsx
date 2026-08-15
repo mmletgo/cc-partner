@@ -84,6 +84,20 @@ describe('AgentLedgerDrawer', () => {
     expect(screen.getByTestId('ledger-input-tokens').textContent).toBe('未提供');
   });
 
+  it('formats large token counts with k/M units and 3 decimals', () => {
+    renderDrawer({
+      summary: {
+        ...summaryPartial,
+        inputTokens: 12345,
+        outputTokens: 2_500_000,
+        cacheReadTokens: 6789,
+      },
+    });
+    expect(screen.getByTestId('ledger-input-tokens').textContent).toBe('12.345k');
+    expect(screen.getByTestId('ledger-output-tokens').textContent).toBe('2.500M');
+    expect(screen.getByTestId('ledger-cache-read-tokens').textContent).toBe('6.789k');
+  });
+
   it('shows partial coverage label', () => {
     renderDrawer();
     expect(screen.getByText(/部分/)).toBeTruthy();
