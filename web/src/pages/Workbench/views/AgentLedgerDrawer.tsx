@@ -287,9 +287,11 @@ export function AgentLedgerDrawer({
  * Business Logic（为什么需要这个组件）:
  *   单行只展示 metadata，无 prompt/path；主标题为工作台终端窗口标题，
  *   无标题时回退 providerId，providerId 退为次要信息保留。
+ *   outcome Pill 仅展示异常结果（failed/cancelled）——disconnected 是普通
+ *   Workbench 终端会话的常见自然结束（用户关掉终端），逐行显示是噪音。
  *
  * Code Logic（这个组件做什么）:
- *   渲染 标题(terminalTitle 回退 providerId)/providerId(有标题时)/outcome/tokens。
+ *   渲染 标题(terminalTitle 回退 providerId)/providerId(有标题时)/异常 outcome Pill/tokens。
  */
 function EntryRow({
   entry,
@@ -300,12 +302,16 @@ function EntryRow({
 }): ReactElement {
   const { t } = useTranslation(['workbench']);
   const title = entry.terminalTitle?.trim() || null;
+  const outcomePill =
+    entry.outcome === 'failed' || entry.outcome === 'cancelled' ? (
+      <Pill tone="neutral">{entry.outcome}</Pill>
+    ) : null;
   return (
     <li className={styles.entryRow}>
       <div className={styles.entryMain}>
         <span className={styles.entryProvider}>{title ?? entry.providerId}</span>
         {title ? <span className={styles.entryProviderFallback}>{entry.providerId}</span> : null}
-        <Pill tone="neutral">{entry.outcome}</Pill>
+        {outcomePill}
       </div>
       <div className={styles.entryMeta}>
         <time dateTime={entry.endedAt}>{formatLocalDateTimeSeconds(entry.endedAt)}</time>

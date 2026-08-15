@@ -157,9 +157,44 @@ describe('AgentLedgerDrawer', () => {
         nextCursor: null,
       },
     });
-    // 主标题为终端窗口标题，providerId 退为次要信息仍可见
+    // 主标题为终端窗口标题，providerId 退为次要信息仍可见；
+    // disconnected 是自然结束，不渲染 outcome Pill
     expect(screen.getByText('修复登录超时')).toBeTruthy();
     expect(screen.getByText('claudeCodeVisible')).toBeTruthy();
+    expect(screen.queryByText('disconnected')).toBeNull();
+    expect(screen.queryByText('completed')).toBeNull();
+  });
+
+  it('keeps outcome pill for abnormal endings (failed/cancelled)', () => {
+    renderDrawer({
+      page: {
+        items: [
+          {
+            id: 'e2',
+            agentSessionId: 'a2',
+            projectId: 'p1',
+            worktreeId: null,
+            providerId: 'codex',
+            modelId: null,
+            startedAt: '2026-07-15T00:00:00Z',
+            endedAt: '2026-07-15T00:01:00Z',
+            durationMs: 1000,
+            outcome: 'failed',
+            inputTokens: null,
+            outputTokens: null,
+            cacheReadTokens: null,
+            cacheWriteTokens: null,
+            terminalTitle: null,
+            costMinorUnits: null,
+            costCurrency: null,
+            createdAt: '2026-07-15T00:01:00Z',
+            updatedAt: '2026-07-15T00:01:00Z',
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+    expect(screen.getByText('failed')).toBeTruthy();
   });
 
   it('does not render forbidden metadata text', () => {
