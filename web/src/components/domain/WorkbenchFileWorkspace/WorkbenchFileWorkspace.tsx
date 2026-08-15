@@ -15,7 +15,7 @@ import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button } from '@/components/primitives';
-import { CheckIcon, RefreshIcon, TerminalIcon, XIcon } from '@/lib/icons';
+import { CheckIcon, RefreshIcon, XIcon } from '@/lib/icons';
 import { getRovingTabIndex, type RovingTabKey } from '@/lib/rovingTablist';
 import type { WorkbenchFileMode, WorkbenchOpenFile } from '@/lib/types';
 import { WorkbenchCsvPreview } from '../WorkbenchCsvPreview';
@@ -63,7 +63,6 @@ export interface WorkbenchFileWorkspaceProps {
   writeDisabled?: boolean;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
-  onReturnToTerminal: () => void;
   onContentChange: (id: string, value: string) => void;
   onModeChange: (id: string, mode: WorkbenchOpenFileTab['mode']) => void;
   loadHtmlAsset?: WorkbenchHtmlAssetLoader;
@@ -221,7 +220,6 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
     writeDisabled = false,
     onActivate,
     onClose,
-    onReturnToTerminal,
     onContentChange,
     onModeChange,
     loadHtmlAsset,
@@ -532,19 +530,6 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
                   </span>
                 </Button>
               ) : null}
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<TerminalIcon aria-hidden="true" />}
-                title={t('workbench:fileWorkspace.returnTerminal')}
-                aria-label={t('workbench:fileWorkspace.returnTerminal')}
-                data-workbench-responsive-action="true"
-                onClick={onReturnToTerminal}
-              >
-                <span data-workbench-responsive-label="true">
-                  {t('workbench:fileWorkspace.returnTerminal')}
-                </span>
-              </Button>
             </div>
           ) : null
         }
@@ -570,14 +555,6 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
       ) : (
         <div className={styles.emptyState}>
           <p>{t('workbench:fileWorkspace.empty')}</p>
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={<TerminalIcon aria-hidden="true" />}
-            onClick={onReturnToTerminal}
-          >
-            {t('workbench:fileWorkspace.returnTerminal')}
-          </Button>
         </div>
       )}
     </section>

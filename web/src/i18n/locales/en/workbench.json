@@ -713,8 +713,7 @@
   "fileWorkspace": {
     "tabs": "Open files",
     "actions": "File actions",
-    "openFiles": "File preview",
-    "returnTerminal": "Return to terminal",
+    "openFiles": "File browsing",
     "save": "Save",
     "format": "Format",
     "dirty": "Unsaved changes",
@@ -728,7 +727,7 @@
   },
   "browserPreview": {
     "title": "Project Preview",
-    "openWorkspace": "Preview",
+    "openWorkspace": "Web browsing",
     "connected": "Connected",
     "refresh": "Rediscover",
     "open": "Open",
@@ -746,7 +745,14 @@
   "projectAutomation": {
     "title": "Project Automation",
     "description": "Project-level task queue; tasks bind to a worktree and execution context only after they run.",
-    "open": "Project Automation"
+    "open": "Project Automation",
+    "scope": "Scope",
+    "scopeValue": "Project: {{project}}",
+    "noProject": "No project selected"
+  },
+  "workspaceSwitch": {
+    "terminal": "Terminal",
+    "ariaLabel": "Workspace switch"
   },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",

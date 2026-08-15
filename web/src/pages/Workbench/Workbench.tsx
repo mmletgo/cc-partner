@@ -19,6 +19,10 @@ import { WorkbenchBrowserWorkspace } from '@/components/domain/WorkbenchBrowserW
 import { WorkbenchDependencyCard } from '@/components/domain/WorkbenchDependencyCard';
 import { WorkbenchFileWorkspace } from '@/components/domain/WorkbenchFileWorkspace';
 import { WorkbenchSessionSearch } from '@/components/domain/WorkbenchSessionSearch';
+import {
+  WorkbenchWorkspaceSwitch,
+  type WorkbenchWorkspaceSwitchValue,
+} from '@/components/domain/WorkbenchWorkspaceSwitch';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button, StatusMessage } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
@@ -30,7 +34,7 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention } from '@/hooks/useAttention';
 import {
-  BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon,
+  BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon, TerminalIcon,
 } from '@/lib/icons';
 import { WorkbenchPaneTools } from '@/components/domain/WorkbenchPaneTools';
 import styles from './Workbench.module.css';
@@ -584,11 +588,8 @@ export function Workbench() {
 
   // Business Logic: 文件域操作函数（toggle/select/open/activate/close/content-change/mode-change/
   // save/format/sqlite/html-asset/create/rename/delete/copy）已迁移到 useWorkbenchFileController；
-  // 页面只保留 handleReturnToTerminal / handleReturnToFiles 两个跨域导航回调（它们同时影响 workspaceView
-  // 与 automationConsoleOpen 共享状态，且 workbenchWorkspaceSwitch 静态测试需要这两个名字留在页面源码里）。
-  const handleReturnToTerminal = useCallback(() => {
-    fileController.handleReturnToTerminal();
-  }, [fileController]);
+  // 页面不再保留 handleReturnToTerminal / handleReturnToFiles 跨域回调——三工作区切换由标题行
+  // <WorkbenchWorkspaceSwitch> 统一承担，文件 / 浏览器工作区不再自带返回按钮。
 
   // Business Logic: worktree chip 切换前先调用 fileController.guardDirtyContextChange（Plan 2 新增保护：原
   //   Workbench.tsx eae5bef chip/其余 context 切换均无 dirty guard；当前已更严格，Finding 1 确认非回归）。用户取消则中止。
@@ -600,19 +601,6 @@ export function Workbench() {
     },
     [fileController, setActiveWorktreeId],
   );
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户从文件预览返回终端后，仍需要从终端工具栏一键回到已打开的文件工作区，形成对称导航。
-   *
-   * Code Logic（这个函数做什么）:
-   *   委托给文件域 controller 的 handleReturnToFiles（恢复 active tab、隐藏自动化控制台并切回 files 视图）。
-   *   保留页面层 useCallback 包装以稳定引用并满足 workbenchWorkspaceSwitch 静态契约。
-   */
-  const handleReturnToFiles = useCallback(() => {
-    setWorkspaceView('files');
-    fileController.handleReturnToFiles();
-  }, [fileController]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -753,37 +741,35 @@ export function Workbench() {
           </div>
           <WorkbenchBanner />
           <div className={styles.workspaceHeaderActions}>
-            {/* 工作区级入口（浏览器预览/文件工作区/Agent Ledger）上移到标题行；终端全屏时隐藏，避免 tab 焦点进入被 fixed overlay 盖住的按钮 */}
-            {!terminalFullscreen ? (
-              <Button
-                className={styles.terminalActionButton}
-                variant="secondary"
-                size="sm"
-                icon={<BrowserIcon />}
-                title={t('workbench:browserPreview.openWorkspace')}
-                aria-label={t('workbench:browserPreview.openWorkspace')}
-                data-workbench-responsive-action="true"
-                disabled={!activeProject || !activeWorktree}
-                onClick={() => setWorkspaceView('browser')}
-              >
-                <span data-workbench-responsive-label="true">{t('workbench:browserPreview.openWorkspace')}</span>
-              </Button>
-            ) : null}
-            {!terminalFullscreen ? (
-              <Button
-                className={styles.terminalActionButton}
-                variant="secondary"
-                size="sm"
-                icon={<FileIcon />}
-                title={t('workbench:fileWorkspace.openFiles')}
-                aria-label={t('workbench:fileWorkspace.openFiles')}
-                data-workbench-responsive-action="true"
-                disabled={fileTabs.length === 0}
-                onClick={handleReturnToFiles}
-              >
-                <span data-workbench-responsive-label="true">{t('workbench:fileWorkspace.openFiles')}</span>
-              </Button>
-            ) : null}
+            {/* 工作区三元切换：终端 / 网页浏览 / 文件浏览；与 workspaceView 单源对应。
+                终端全屏时仍渲染，离开全屏切到浏览器/文件是合法路径；
+                Agent Ledger / 快照 / 项目自动化按钮仍按全屏隐藏避免被 fixed overlay 盖住。 */}
+            <WorkbenchWorkspaceSwitch
+              ariaLabel={t('workbench:workspaceSwitch.ariaLabel')}
+              value={workspaceView}
+              onChange={(next) => {
+                setWorkspaceView(next satisfies WorkbenchWorkspaceSwitchValue);
+              }}
+              options={[
+                {
+                  id: 'terminal',
+                  label: t('workbench:workspaceSwitch.terminal'),
+                  icon: <TerminalIcon />,
+                },
+                {
+                  id: 'browser',
+                  label: t('workbench:browserPreview.openWorkspace'),
+                  icon: <BrowserIcon />,
+                  disabled: !activeProject || !activeWorktree,
+                },
+                {
+                  id: 'files',
+                  label: t('workbench:fileWorkspace.openFiles'),
+                  icon: <FileIcon />,
+                  disabled: fileTabs.length === 0,
+                },
+              ]}
+            />
             {/* Agent Ledger 整块保留原条件：仅隐藏触发按钮，Drawer 保持挂载（原样移动） */}
             <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
               open={projectCtrl.agentLedgerOpen} localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
@@ -792,14 +778,16 @@ export function Workbench() {
               error={projectCtrl.agentLedgerError} onOpen={projectCtrl.openAgentLedger}
               onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
               onRefresh={() => void projectCtrl.refreshAgentLedger()} />
-            <Button
-              variant="ghost"
-              size="sm"
-              type="button"
-              onClick={openSnapshotDialog}
-            >
-              {t('workbench:workspaceSnapshot.openButton')}
-            </Button>
+            {!terminalFullscreen ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                type="button"
+                onClick={openSnapshotDialog}
+              >
+                {t('workbench:workspaceSnapshot.openButton')}
+              </Button>
+            ) : null}
             <Button
               className={styles.projectAutomationButton}
               variant="secondary"
@@ -1039,7 +1027,6 @@ export function Workbench() {
               transport={tauriWorkbenchTransport}
               project={activeProject}
               worktree={activeWorktree}
-              onReturnToTerminal={handleReturnToTerminal}
               onBrowserTargetUrlChange={setBrowserTargetUrl}
             />
           </div>
@@ -1055,7 +1042,6 @@ export function Workbench() {
               writeDisabled={remoteWriteDisabled}
               onActivate={handleActivateFileTab}
               onClose={handleCloseFileTab}
-              onReturnToTerminal={handleReturnToTerminal}
               onContentChange={handleFileContentChange}
               onModeChange={handleFileModeChange}
               loadHtmlAsset={handleLoadHtmlAsset}

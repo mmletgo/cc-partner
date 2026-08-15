@@ -1,0 +1,85 @@
+/**
+ * WorkbenchWorkspaceSwitch 样式
+ *
+ * 三段 segmented control；选中段 accent 背景 + accent-on 文字；非选中段 surface + 次要文字；
+ * 禁用段 cursor not-allowed + 最弱可读对比；窄宽时仅隐藏文字（保留图标 + title）。
+ */
+
+.group {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 2px;
+  background: var(--surface-warm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: all var(--motion-fast) var(--ease-standard);
+  container-type: inline-size;
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  min-height: 28px;
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius-md) - 2px);
+  color: var(--fg-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.2;
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.option:hover:not(.option--disabled):not(.option--active) {
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.option--active {
+  background: var(--accent);
+  color: var(--accent-on);
+  cursor: default;
+}
+
+.option--active:hover {
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.option--disabled {
+  color: var(--fg-muted-readable);
+  cursor: not-allowed;
+}
+
+.option--disabled.option--active {
+  /* active 与 disabled 互斥；但若父级误传，沿用 muted-readable，避免误导 */
+  background: transparent;
+  color: var(--fg-muted-readable);
+}
+
+.optionIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.optionLabel {
+  white-space: nowrap;
+}
+
+@container workbench-workspace-switch (max-width: 640px) {
+  .optionLabel {
+    display: none;
+  }
+}

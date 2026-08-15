@@ -3,10 +3,11 @@ import { readFileSync } from 'node:fs';
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Workbench 终端和文件预览应提供对称入口，避免用户从终端回到已打开文件时只能重新点击右侧文件树。
+ *   Workbench 三工作区切换、共享 nav 复用、文件/浏览器/HTML/Markdown 预览控件都需要在静态层面
+ *   锁住 contract；任何回归必须立刻在 CI 暴露。
  *
  * Code Logic（这个函数做什么）:
- *   读取源码或 locale 文本并断言包含指定片段；缺失时抛出带上下文的错误。
+ *   读取源码或 locale 文本并断言包含 / 不包含指定片段；缺失时抛出带上下文的错误。
  */
 function assertContains(source: string, expected: string, message: string): void {
   if (!source.includes(expected)) {
@@ -60,18 +61,18 @@ function assertSubstringOrder(source: string, before: string, after: string, mes
 
 /**
  * Business Logic（为什么需要这个测试）:
- *   终端和文件预览导航栏需要复用同一个布局组件；工具栏按作用域重新划分后：
- *   浏览器预览/文件工作区/Agent Ledger 入口位于工作区标题行（终端全屏时隐藏），
- *   终端工具栏保留会话搜索/Prompt 工具/适应尺寸/窗格菜单/全屏，
- *   窗格四操作（分屏右/下、切换、关闭）收敛进 WorkbenchPaneTools 菜单。
+ *   Workbench 工作台三工作区（终端 / 网页浏览 / 文件浏览）由标题行的 WorkbenchWorkspaceSwitch 统一
+ *   承担切换；终端/文件/浏览器工作区不再自带"返回终端"按钮。终端工具栏保留会话搜索 / Prompt 工具
+ *   / 适应尺寸 / 窗格菜单 / 全屏，窗格四操作收敛进 WorkbenchPaneTools 菜单。文件工作区、浏览器
+ *   工作区、HTML/Markdown 编辑器仍共享 WorkbenchWorkspaceNav 与既有 toolbar 布局。
  *
  * Code Logic（这个测试做什么）:
- *   静态读取 Workbench 页面、窗格菜单、文件工作区、共享导航组件和 workbench i18n 资源，
- *   检查切换回调、按钮绑定、禁用条件、文案 key、作用域分层顺序、
+ *   静态读取 Workbench 页面、窗格菜单、文件工作区、共享导航组件、WorkbenchWorkspaceSwitch 组件
+ *   和 workbench i18n 资源，检查切换组件渲染、按钮绑定、禁用条件、文案 key、作用域分层顺序、
  *   共享导航样式以及无第二行 toolbar 的布局契约。
  */
 describe('workbenchWorkspaceSwitch', () => {
-  test('locks terminal/files nav reuse, ordering, file path tab labels and shared nav styles', async () => {
+  test('locks workspace switch reuse, file path tab labels and shared nav styles', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
   const promptToolsSource = readFileSync(new URL('./WorkbenchPromptTools.tsx', import.meta.url), 'utf8');
   const paneToolsSource = readFileSync(
@@ -98,48 +99,133 @@ describe('workbenchWorkspaceSwitch', () => {
     new URL('../../components/layout/WorkbenchWorkspaceNav/WorkbenchWorkspaceNav.module.css', import.meta.url),
     'utf8',
   );
+  const workspaceSwitchSource = readFileSync(
+    new URL('../../components/domain/WorkbenchWorkspaceSwitch/WorkbenchWorkspaceSwitch.tsx', import.meta.url),
+    'utf8',
+  );
   const zhLocale = readFileSync(new URL('../../i18n/locales/zh/workbench.json', import.meta.url), 'utf8');
   const enLocale = readFileSync(new URL('../../i18n/locales/en/workbench.json', import.meta.url), 'utf8');
 
-  assertContains(workbenchSource, 'const handleReturnToFiles = useCallback', 'terminal -> files callback exists');
-  assertContains(workbenchSource, "setWorkspaceView('files');", 'callback opens file workspace layer');
-  assertContains(workbenchSource, 'disabled={fileTabs.length === 0}', 'file preview button is disabled with no opened tabs');
-  assertContains(workbenchSource, 'className={styles.terminalActionButton}', 'terminal action buttons use text style class');
-  assertContains(workbenchSource, "t('workbench:fileWorkspace.openFiles')", 'button uses localized file preview label');
-  // 工作区级入口上移到标题行：浏览器预览 → 文件工作区 → Agent Ledger → 快照。
+  // === 三元切换组件 ===
   assertContains(
     workbenchSource,
-    "t('workbench:browserPreview.openWorkspace')",
-    'workspace header exposes browser preview entry',
+    '<WorkbenchWorkspaceSwitch',
+    'workspace header renders WorkbenchWorkspaceSwitch',
   );
-  assertSubstringOrder(
+  assertContains(
+    workbenchSource,
+    "value={workspaceView}",
+    'switch is bound to workspaceView',
+  );
+  assertContains(
+    workbenchSource,
+    "id: 'terminal'",
+    'switch exposes terminal option',
+  );
+  assertContains(
+    workbenchSource,
+    "id: 'browser'",
+    'switch exposes browser option',
+  );
+  assertContains(
+    workbenchSource,
+    "id: 'files'",
+    'switch exposes files option',
+  );
+  assertContains(
+    workbenchSource,
+    "label: t('workbench:workspaceSwitch.terminal')",
+    'switch terminal option uses workspaceSwitch.terminal i18n',
+  );
+  assertContains(
+    workbenchSource,
+    "label: t('workbench:browserPreview.openWorkspace')",
+    'switch browser option uses browserPreview.openWorkspace i18n',
+  );
+  assertContains(
+    workbenchSource,
+    "label: t('workbench:fileWorkspace.openFiles')",
+    'switch files option uses fileWorkspace.openFiles i18n',
+  );
+  assertContains(
+    workbenchSource,
+    'disabled: !activeProject || !activeWorktree',
+    'browser option is disabled when no project/worktree',
+  );
+  assertContains(
+    workbenchSource,
+    'disabled: fileTabs.length === 0',
+    'files option is disabled when no opened file tabs',
+  );
+  // 标题行不再用两个独立 Button 触发工作区切换
+  assertNotContains(
     workbenchSource,
     "title={t('workbench:browserPreview.openWorkspace')}",
-    "title={t('workbench:fileWorkspace.openFiles')}",
-    'browser preview entry precedes file workspace entry in workspace header actions',
-  );
-  assertSubstringOrder(
-    workbenchSource,
-    "title={t('workbench:fileWorkspace.openFiles')}",
-    '<AgentLedgerWorkbenchChrome',
-    'file workspace entry precedes agent ledger in workspace header actions',
-  );
-  assertSubstringOrder(
-    workbenchSource,
-    '<AgentLedgerWorkbenchChrome',
-    "t('workbench:workspaceSnapshot.openButton')",
-    'agent ledger entry precedes workspace snapshot button',
-  );
-  assertContains(
-    workbenchSource,
-    "title={terminalFullscreenLabel}",
-    'terminal fullscreen action renders in pane navigation actions',
+    'browser preview button is no longer a standalone Button',
   );
   assertNotContains(
     workbenchSource,
-    'terminalFullscreen ? null :',
-    'terminal fullscreen must keep terminal window tabs available for switching',
+    "title={t('workbench:fileWorkspace.openFiles')}",
+    'file workspace button is no longer a standalone Button',
   );
+  assertNotContains(
+    workbenchSource,
+    "const handleReturnToFiles = useCallback",
+    'handleReturnToFiles is replaced by the switch',
+  );
+  assertNotContains(
+    workbenchSource,
+    "const handleReturnToTerminal = useCallback",
+    'handleReturnToTerminal is removed (no return-to-terminal button left)',
+  );
+  // === Switch 组件 a11y + 结构 ===
+  assertContains(
+    workspaceSwitchSource,
+    'role="radiogroup"',
+    'switch renders a radiogroup',
+  );
+  assertContains(
+    workspaceSwitchSource,
+    "role=\"radio\"",
+    'switch options render as radio buttons',
+  );
+  assertContains(
+    workspaceSwitchSource,
+    'aria-checked',
+    'switch exposes checked state to assistive tech',
+  );
+  assertContains(
+    workspaceSwitchSource,
+    'aria-disabled',
+    'switch exposes disabled state to assistive tech',
+  );
+  assertContains(
+    workspaceSwitchSource,
+    "data-workbench-responsive-label=\"true\"",
+    'switch options honor the responsive label contract',
+  );
+  assertContains(
+    workspaceSwitchSource,
+    'ArrowLeft',
+    'switch supports keyboard navigation',
+  );
+  // === Locale ===
+  assertContains(zhLocale, '"workspaceSwitch"', 'zh workspaceSwitch section exists');
+  assertContains(zhLocale, '"terminal": "终端"', 'zh workspaceSwitch.terminal = 终端');
+  assertContains(zhLocale, '"ariaLabel": "工作区切换"', 'zh workspaceSwitch.ariaLabel = 工作区切换');
+  assertContains(zhLocale, '"openFiles": "文件浏览"', 'zh fileWorkspace.openFiles = 文件浏览');
+  assertContains(zhLocale, '"openWorkspace": "网页浏览"', 'zh browserPreview.openWorkspace = 网页浏览');
+  assertNotContains(zhLocale, '"returnTerminal"', 'zh fileWorkspace.returnTerminal removed');
+  assertContains(enLocale, '"workspaceSwitch"', 'en workspaceSwitch section exists');
+  assertContains(enLocale, '"terminal": "Terminal"', 'en workspaceSwitch.terminal = Terminal');
+  assertContains(enLocale, '"ariaLabel": "Workspace switch"', 'en workspaceSwitch.ariaLabel = Workspace switch');
+  assertContains(enLocale, '"openFiles": "File browsing"', 'en fileWorkspace.openFiles = File browsing');
+  assertContains(enLocale, '"openWorkspace": "Web browsing"', 'en browserPreview.openWorkspace = Web browsing');
+  assertNotContains(enLocale, '"returnTerminal"', 'en fileWorkspace.returnTerminal removed');
+
+  // === 文件/浏览器/HTML/Markdown 既有 contract（保持不变）===
+  assertContains(workbenchSource, "title={terminalFullscreenLabel}", 'terminal fullscreen action renders in pane navigation actions');
+  assertNotContains(workbenchSource, 'terminalFullscreen ? null :', 'terminal fullscreen must keep terminal window tabs available for switching');
   // 终端工具栏只剩：会话搜索 → Prompt 工具 → 适应尺寸 → 窗格菜单 → 全屏。
   assertSubstringOrder(
     workbenchSource,
@@ -171,11 +257,7 @@ describe('workbenchWorkspaceSwitch', () => {
     'pane split actions live in WorkbenchPaneTools, not the terminal toolbar',
   );
   assertContains(workbenchSource, "actionsAriaLabel={t('workbench:paneActions')}", 'terminal action group keeps aria label');
-  assertContains(
-    workbenchSource,
-    '<WorkbenchSessionTabs',
-    'terminal session tabs are delegated to WorkbenchSessionTabs',
-  );
+  assertContains(workbenchSource, '<WorkbenchSessionTabs', 'terminal session tabs are delegated to WorkbenchSessionTabs');
   assertNotContains(
     workbenchSource,
     '<button\n                      key={session.id}\n                      type="button"\n                      className={styles.sessionTab}',
@@ -229,11 +311,11 @@ describe('workbenchWorkspaceSwitch', () => {
     "[data-workbench-responsive-label='true']",
     'shared nav hides only responsive labels while preserving button icons',
   );
-  assertOccurrenceCount(
-    workbenchSource,
+  // workspace header actions: switch + agent ledger + 快照 + 项目自动化；终端全屏时 agent ledger 触发按钮与快照按钮仍隐藏
+  assertContains(
+    workspaceSwitchSource,
     'data-workbench-responsive-action="true"',
-    5,
-    'terminal toolbar + workspace header actions stay responsive; pane actions moved to WorkbenchPaneTools',
+    'switch honors responsive action contract',
   );
   assertOccurrenceCount(
     promptToolsSource,
@@ -247,11 +329,7 @@ describe('workbenchWorkspaceSwitch', () => {
     1,
     'WorkbenchPaneTools renders a single responsive trigger for the pane menu',
   );
-  assertContains(
-    paneToolsSource,
-    "t('workbench:switchPane')",
-    'pane tools menu exposes switch-pane action',
-  );
+  assertContains(paneToolsSource, "t('workbench:switchPane')", 'pane tools menu exposes switch-pane action');
   assertSubstringOrder(
     paneToolsSource,
     "t('workbench:splitPaneRight')",
@@ -270,11 +348,12 @@ describe('workbenchWorkspaceSwitch', () => {
     "t('workbench:closePane')",
     'switch pane precedes close pane in pane menu',
   );
+  // file workspace: format + save + (return terminal 已移除)
   assertOccurrenceCount(
     fileWorkspaceSource,
     'data-workbench-responsive-action="true"',
-    3,
-    'file workspace marks every toolbar action as responsive',
+    2,
+    'file workspace marks remaining toolbar actions as responsive',
   );
   assertContains(
     fileWorkspaceSource,
@@ -286,96 +365,35 @@ describe('workbenchWorkspaceSwitch', () => {
     '<div className={styles.toolbarActions}>',
     'file actions render in the tab header row',
   );
+  assertNotContains(
+    fileWorkspaceSource,
+    "t('workbench:fileWorkspace.returnTerminal')",
+    'file workspace no longer renders a return-to-terminal button',
+  );
+  assertContains(fileWorkspaceSource, "from '../WorkbenchHtmlPreview';", 'HTML preview component is imported by file workspace');
+  assertContains(fileWorkspaceSource, "case 'html':", 'file workspace dispatches HTML files to the HTML preview component');
+  assertContains(fileWorkspaceSource, '<WorkbenchHtmlPreview', 'file workspace renders the HTML preview component');
+  assertContains(htmlPreviewSource, 'role="group"', 'HTML preview mode switch uses segmented control group semantics');
+  assertContains(htmlPreviewSource, 'aria-pressed={option.mode === mode}', 'HTML preview mode buttons expose pressed state');
+  assertContains(htmlPreviewSource, 'sandbox=""', 'HTML preview iframe stays fully sandboxed');
+  assertContains(htmlPreviewSource, 'srcDoc={iframeSrcDoc}', 'HTML preview iframe renders rewritten HTML source');
+  assertContains(htmlPreviewSource, 'previewResult?.source === value', 'HTML preview ignores stale async asset rewrite results');
+  assertContains(fileWorkspaceSource, 'loadAsset={loadHtmlAsset}', 'file workspace passes HTML asset loader into preview component');
   assertContains(
     fileWorkspaceSource,
-    "from '../WorkbenchHtmlPreview';",
-    'HTML preview component is imported by file workspace',
-  );
-  assertContains(
-    fileWorkspaceSource,
-    "case 'html':",
-    'file workspace dispatches HTML files to the HTML preview component',
-  );
-  assertContains(
-    fileWorkspaceSource,
-    '<WorkbenchHtmlPreview',
-    'file workspace renders the HTML preview component',
-  );
-  assertContains(
-    htmlPreviewSource,
-    'role="group"',
-    'HTML preview mode switch uses segmented control group semantics',
-  );
-  assertContains(
-    htmlPreviewSource,
-    'aria-pressed={option.mode === mode}',
-    'HTML preview mode buttons expose pressed state',
-  );
-  assertContains(
-    htmlPreviewSource,
-    'sandbox=""',
-    'HTML preview iframe stays fully sandboxed',
-  );
-  assertContains(
-    htmlPreviewSource,
-    'srcDoc={iframeSrcDoc}',
-    'HTML preview iframe renders rewritten HTML source',
-  );
-  assertContains(
-    htmlPreviewSource,
-    'previewResult?.source === value',
-    'HTML preview ignores stale async asset rewrite results',
-  );
-  assertContains(
-    fileWorkspaceSource,
-    'loadAsset={loadHtmlAsset}',
-    'file workspace passes HTML asset loader into preview component',
-  );
-  assertContains(
-    fileWorkspaceSource,
-    'documentPath={activeTab.path}\n              mode={coerceMarkdownMode(activeTab.mode)}',
+    "documentPath={activeTab.path}\n              mode={coerceMarkdownMode(activeTab.mode)}",
     'file workspace passes shared asset loader into Markdown editor',
   );
-  assertContains(
-    markdownEditorSource,
-    "from '@tiptap/extension-image'",
-    'Markdown editor registers Tiptap image extension',
-  );
-  assertContains(
-    markdownEditorSource,
-    "src: ''",
-    'Markdown editor prevents raw image src loading before asset rewrite',
-  );
-  assertNotContains(
-    fileWorkspaceSource,
-    '<div className={styles.fileToolbar}>',
-    'file preview does not render a second toolbar row',
-  );
-  assertNotContains(
-    fileWorkspaceSource,
-    'className={styles.fileTitleBlock}',
-    'file preview no longer renders a separate title block below tabs',
-  );
-  assertNotContains(
-    fileWorkspaceSource,
-    'className={styles.filePath}',
-    'file path is no longer duplicated below tabs',
-  );
-  assertNotContains(
-    fileWorkspaceSource,
-    '<dl className={styles.fileMeta}>',
-    'file preview toolbar does not render a separate metadata row',
-  );
-  assertNotContains(
-    fileWorkspaceSource,
-    "t('workbench:fileWorkspace.type')",
-    'file preview toolbar no longer shows detected type',
-  );
+  assertContains(markdownEditorSource, "from '@tiptap/extension-image'", 'Markdown editor registers Tiptap image extension');
+  assertContains(markdownEditorSource, "src: ''", 'Markdown editor prevents raw image src loading before asset rewrite');
+  assertNotContains(fileWorkspaceSource, '<div className={styles.fileToolbar}>', 'file preview does not render a second toolbar row');
+  assertNotContains(fileWorkspaceSource, 'className={styles.fileTitleBlock}', 'file preview no longer renders a separate title block below tabs');
+  assertNotContains(fileWorkspaceSource, 'className={styles.filePath}', 'file path is no longer duplicated below tabs');
+  assertNotContains(fileWorkspaceSource, '<dl className={styles.fileMeta}>', 'file preview toolbar does not render a separate metadata row');
+  assertNotContains(fileWorkspaceSource, "t('workbench:fileWorkspace.type')", 'file preview toolbar no longer shows detected type');
   assertContains(zhLocale, '"actions": "文件操作"', 'zh file actions label exists');
-  assertContains(zhLocale, '"openFiles": "文件预览"', 'zh file preview label exists');
   assertContains(zhLocale, '"htmlPreview"', 'zh HTML preview copy exists');
   assertContains(enLocale, '"actions": "File actions"', 'en file actions label exists');
-  assertContains(enLocale, '"openFiles": "File preview"', 'en file preview label exists');
   assertContains(enLocale, '"htmlPreview"', 'en HTML preview copy exists');
   });
 });
