@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, Drawer, Pill } from '@/components/primitives';
 import { formatTokenCount } from '@/lib/tokenFormat';
+import { formatLocalDateTimeSeconds } from '@/lib/localDateTime';
 import type {
   AgentLedgerEntry,
   AgentLedgerPage,
@@ -267,7 +268,7 @@ function EntryRow({
         <Pill tone="neutral">{entry.outcome}</Pill>
       </div>
       <div className={styles.entryMeta}>
-        <time dateTime={entry.endedAt}>{entry.endedAt}</time>
+        <time dateTime={entry.endedAt}>{formatLocalDateTimeSeconds(entry.endedAt)}</time>
         <span>
           {t('workbench:agentLedger.cacheReadTokens')}:{' '}
           {tokenLabel(entry.cacheReadTokens, unavailable)}
