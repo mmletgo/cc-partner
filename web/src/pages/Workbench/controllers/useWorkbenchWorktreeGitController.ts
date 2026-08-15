@@ -169,7 +169,6 @@ export type WorkbenchWorktreeGitErrorKey =
  *     create 走 terminalBridge.createSessionForWorktree（内部完成终端尺寸估算、session 创建、focus、reset、统计刷新）。
  *   - displayErrorMessage / desktopUnavailableMessage：错误文案构造。
  *   - translateError / translateWorktreeMessage：i18n 文案注入（错误 key / worktree 提示 / merge 阶段消息）。
- *   - confirmAction：merge/remove 前的用户确认（页面注入 window.confirm，便于测试）。
  *   - canListenToTauriEvents：判断是否注册 Tauri event listener（与终端域 controller 行为一致）。
  *   - merge clearBuffers 不再需要 sessions 输入：terminalBridge.clearBuffersForWorktree 内部读取终端域 sessions。
  */
@@ -196,9 +195,10 @@ export interface UseWorkbenchWorktreeGitControllerParams {
   desktopUnavailableMessage: string;
   translateError: (key: WorkbenchWorktreeGitErrorKey) => string;
   translateWorktreeMessage: (
-    key: 'mergeConfirm' | 'mergeCollectConfirm' | 'removeConfirm' | 'checkSourceMessage',
+    key: 'mergeConfirm' | 'mergeCollectConfirm' | 'checkSourceMessage',
     vars?: Record<string, unknown>,
   ) => string;
+  /** merge 前的用户确认；remove 已迁出本 controller 到 UI 层 Dialog。 */
   confirmAction: (message: string) => boolean;
   canListenToTauriEvents: () => boolean;
 }
@@ -243,7 +243,7 @@ export interface WorkbenchWorktreeGitControllerResult {
   handleCommitWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
   handleMergeWorktree: () => Promise<void>;
-  handleRemoveWorktree: () => Promise<void>;
+  handleRemoveWorktree: (worktreeId: string) => Promise<void>;
   /**
    * failedHook 之后用户点「让 AI 修复」时调用：在该 worktree 终端启动 Claude agent 修复钩子根因。
    * 失败/未设置 hookRepair 时 no-op。
@@ -1490,17 +1490,18 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户移除非主 worktree；移除前需用户确认，移除后切到剩余 worktree 并刷新列表。
+   *   用户移除非主 worktree；由调用方在 chip 的 x 按钮触发，按入参 worktreeId 精确删除目标 worktree，
+   *   移除后切到剩余 worktree 并刷新列表。
    *
    * Code Logic（这个函数做什么）:
    *   mint/reuse operation key + clientOperationId；envelope succeeded 且 current 才切 active/刷新；
    *   unknown 对账并保留 same-id 锁；catch/finally 均 isSettledCurrent 守卫。
+   *   用户确认由调用方通过共享 Dialog 原语完成，本函数不再持有同步 confirm 阻塞。
    *
    *   注意：remove 不直接清理 terminal session/buffer；后端会在 remove_workbench_worktree 时关闭关联
    *   session，随后页面通过 terminal-status 事件或下一次 loadSessions 同步状态。
    */
-  const handleRemoveWorktree = useCallback(async (): Promise<void> => {
-    const worktreeId = activeWorktreeIdRef.current;
+  const handleRemoveWorktree = useCallback(async (worktreeId: string): Promise<void> => {
     if (!worktreeId) return;
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
@@ -1508,9 +1509,6 @@ export function useWorkbenchWorktreeGitController(
     if (!isMutationKindAllowedUnderUnknownLock('remove')) return;
     const current = worktrees.find((worktree) => worktree.id === worktreeId);
     if (!current || current.isMain) return;
-    if (!confirmAction(translateWorktreeMessage('removeConfirm', { name: current.name }))) {
-      return;
-    }
     const settled = beginMutationOperation(projectId, worktreeId);
     const clientOperationId = resolveClientOperationId(
       'remove',

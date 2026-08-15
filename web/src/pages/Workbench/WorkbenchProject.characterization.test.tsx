@@ -359,7 +359,7 @@ describe('Workbench project domain (characterization)', () => {
 
     // 远端离线提示（notice 文案含“当前不在线”）出现；写操作（创建 worktree）应被禁用。
     expect(screen.getByText(/当前不在线/)).toBeTruthy();
-    const createButton = screen.getByRole('button', { name: '新建 worktree' });
+    const createButton = screen.getByRole('button', { name: '新 worktree' });
     expect(createButton.hasAttribute('disabled')).toBe(true);
 
     // 恢复在线：让后续请求成功，并触发一次远端读命令（Git 历史 tab → list_workbench_git_commits）。
@@ -372,7 +372,7 @@ describe('Workbench project domain (characterization)', () => {
 
     // 离线提示消失，写操作恢复可用。
     expect(screen.queryByText(/当前不在线/)).toBeNull();
-    const createButtonAfter = screen.getByRole('button', { name: '新建 worktree' });
+    const createButtonAfter = screen.getByRole('button', { name: '新 worktree' });
     expect(createButtonAfter.hasAttribute('disabled')).toBe(false);
   });
 

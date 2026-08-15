@@ -369,6 +369,7 @@
   align-items: center;
   gap: var(--space-2);
   overflow-x: auto;
+  flex: 1 1 auto;
 }
 
 .worktreeActions {
@@ -378,6 +379,88 @@
   gap: var(--space-2);
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.worktreeChipGroup {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg-2);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.worktreeChipGroup[data-tone='danger'] {
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--border-soft));
+}
+
+.worktreeChipGroup[data-tone='warning'] {
+  border-color: color-mix(in oklab, var(--warn) 45%, var(--border-soft));
+}
+
+.worktreeChipGroup[data-active='true'] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  color: var(--fg);
+}
+
+.worktreeChipGroup > .worktreeChip {
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+
+.worktreeChipGroup[data-active='true'] > .worktreeChip {
+  background: transparent;
+}
+
+.worktreeChipClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  flex: 0 0 auto;
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.worktreeChipClose:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 12%, transparent);
+}
+
+.worktreeChipClose:disabled {
+  color: var(--fg-muted-readable);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.worktreeChipClose:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.worktreeCreateSlot {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.worktreeWorkspaceSwitch {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-soft);
 }
 
 .worktreeCreateForm {
@@ -1704,4 +1787,24 @@
 .snapshotItemActions {
   display: flex;
   gap: var(--space-1);
+}
+
+.removeDialogTitle {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+}
+
+.removeDialogBody {
+  margin: 0 0 var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--fg-2);
+  line-height: var(--leading-relaxed);
+}
+
+.removeDialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }

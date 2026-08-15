@@ -86,7 +86,8 @@ describe('WorkbenchWorktreeBar hints', () => {
             handleOpenCreateWorktree={vi.fn()}
             handleCancelCreateWorktree={vi.fn()}
             handleCreateWorktree={async () => undefined}
-            handleRemoveWorktree={async () => undefined}
+            onRequestRemoveWorktree={vi.fn()}
+            workspaceSwitch={null}
           />
         </WorkbenchAgentHintsContext.Provider>
       </I18nextProvider>,
