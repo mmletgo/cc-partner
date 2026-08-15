@@ -119,6 +119,20 @@ function measureTerminalCursorMetrics(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   xterm 6 的相对 `scrollLines` 会先读取内部 ScrollableElement 的像素位置；WKWebView 中该位置
+ *   可能长期停在 0，即使 buffer.viewportY 已位于底部，导致向上滚动被 clamp 成 no-op。
+ *
+ * Code Logic（这个函数做什么）:
+ *   直接根据权威 buffer.viewportY 计算目标行并调用绝对 `scrollToLine`，同时限制在 0..baseY。
+ */
+function scrollTerminalBufferLines(terminal: Terminal, amount: number): void {
+  const active = terminal.buffer.active;
+  const target = Math.max(0, Math.min(active.baseY, active.viewportY + amount));
+  terminal.scrollToLine(target);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   浮层定位消费的是 viewport 像素坐标，而 xterm 只暴露 cell 行列。
  *
  * Code Logic（这个函数做什么）:
@@ -284,7 +298,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       const lines = Math.min(-1, pendingHydratedScrollLines);
       clearScrollbackHydration();
       if (active.baseY > 0) {
-        terminal.scrollLines(lines);
+        scrollTerminalBufferLines(terminal, lines);
       }
     };
     /**
@@ -301,7 +315,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
      *   任意 tmux 终端 mode=none 且当前 xterm 尚未权威 hydration 时触发同步，禁止信任污染 baseY；
      *   该判定不依赖 Agent Runtime，覆盖应用重启后元数据尚未恢复但 Claude/tmux 已 attach 的窗口；
      *   后端返回已渲染的 normal-buffer pane 快照，解析后再执行首次累计滚动；
-     *   已 hydration 的本地历史统一用 terminal.scrollLines，避开 WebKit 原生 viewport 差异；
+     *   已 hydration 的本地历史统一按 buffer.viewportY 调用绝对 scrollToLine，避开 WKWebView 中
+     *   xterm 6 相对 ScrollableElement 像素位置与 buffer 游标不同步的问题；
      *   已协商 mouse tracking 时固定向 transcript 左上角发 SGR 64/65。
      *   转发前回到底部，退出误入的本地重绘历史。
      */
@@ -328,7 +343,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         );
         wheelRemainderRef.current = consumed.remainder;
         if (consumed.lines !== 0) {
-          terminal.scrollLines(consumed.lines);
+          scrollTerminalBufferLines(terminal, consumed.lines);
         }
         return false;
       }
@@ -643,6 +658,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       const terminal = terminalRef.current;
       if (!terminal) return;
       if (terminal.getSelection().length > 0) return;
+      // 用户正在查看 scrollback 时不能 force resize；后端整屏重绘会把视口拉回底部。
+      if (terminal.buffer.active.viewportY !== terminal.buffer.active.baseY) return;
       if (recoveryRaf !== null) {
         window.cancelAnimationFrame(recoveryRaf);
       }
@@ -654,6 +671,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
           if (!currentTerminal || currentTerminal !== terminal) return;
           if (document.visibilityState === 'hidden') return;
           if (currentTerminal.getSelection().length > 0) return;
+          if (
+            currentTerminal.buffer.active.viewportY !==
+            currentTerminal.buffer.active.baseY
+          ) return;
           cursorMetricsRef.current = null;
           forceResizeRef.current?.();
           // xterm 6 DOM renderer 会在 selection 失效时重建全部行；空选区不会改变用户状态。

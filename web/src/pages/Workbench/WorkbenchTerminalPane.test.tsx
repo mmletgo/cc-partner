@@ -51,7 +51,7 @@ interface MockTerminal {
   clearSelection: () => void;
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
-  scrollLines: Mock<(amount: number) => void>;
+  scrollToLine: Mock<(line: number) => void>;
   scrollToBottom: () => void;
   dispose: () => void;
   attachCustomWheelEventHandler: (handler: (event: WheelEvent) => boolean) => void;
@@ -174,7 +174,9 @@ vi.mock('@xterm/xterm', () => {
     getSelection() {
       return this.selectionText;
     }
-    scrollLines = vi.fn();
+    scrollToLine = vi.fn((line: number) => {
+      this.buffer.active.viewportY = line;
+    });
     scrollToBottom = vi.fn();
     setSelection(text: string) {
       this.selectionText = text;
@@ -770,6 +772,25 @@ describe('WorkbenchTerminalPane — workspace view change does not unmount xterm
     expect(onResize).toHaveBeenCalledTimes(resizesAfterFocus);
   });
 
+  test('window focus does not force a redraw while the user is reading scrollback', async () => {
+    const { onResize } = renderPaneWithRevision();
+    const terminal = latestTerminal();
+    terminal.buffer.active.baseY = 120;
+    terminal.buffer.active.viewportY = 60;
+    const resizesBeforeFocus = onResize.mock.calls.length;
+    const invalidationsBeforeFocus = terminalEvents.clearSelectionCalls.length;
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(onResize).toHaveBeenCalledTimes(resizesBeforeFocus);
+    expect(terminalEvents.clearSelectionCalls).toHaveLength(invalidationsBeforeFocus);
+  });
+
   test('visibility recovery preserves an existing text selection', async () => {
     const { onResize, rerenderProps } = renderPaneWithRevision();
     latestTerminal().setSelection('copy-me');
@@ -921,13 +942,14 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     const terminal = latestTerminal();
     terminal.buffer.active.type = 'normal';
     terminal.buffer.active.baseY = 120;
+    terminal.buffer.active.viewportY = 120;
     terminal.modes.mouseTrackingMode = 'none';
 
     // 应用重启后的 Agent metadata 可能尚未恢复；即使 isActive=false 也必须拉 tmux history。
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(refreshScrollback).toHaveBeenCalledWith('s1');
     expect(refreshScrollback).toHaveBeenCalledTimes(1);
-    expect(terminal.scrollLines).not.toHaveBeenCalled();
+    expect(terminal.scrollToLine).not.toHaveBeenCalled();
     expect(onInput).not.toHaveBeenCalled();
 
     rerender(
@@ -951,15 +973,16 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
 
     terminal.buffer.active.type = 'normal';
     terminal.buffer.active.baseY = 80;
+    terminal.buffer.active.viewportY = 80;
     act(() => {
       store.reset('s1', 'hydrated history');
     });
-    expect(terminal.scrollLines).toHaveBeenCalledWith(-2);
+    expect(terminal.scrollToLine).toHaveBeenCalledWith(78);
 
-    terminal.scrollLines.mockClear();
+    terminal.scrollToLine.mockClear();
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(refreshScrollback).toHaveBeenCalledTimes(1);
-    expect(terminal.scrollLines).toHaveBeenCalledWith(-1);
+    expect(terminal.scrollToLine).toHaveBeenCalledWith(77);
   });
 
   test('Agent activation after shell hydration refreshes tmux history once for resume', () => {
@@ -976,6 +999,7 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     );
     const terminal = latestTerminal();
     terminal.buffer.active.baseY = 80;
+    terminal.buffer.active.viewportY = 80;
     terminal.modes.mouseTrackingMode = 'none';
 
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
@@ -992,11 +1016,11 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
         refreshScrollback={refreshScrollback}
       />,
     );
-    terminal.scrollLines.mockClear();
+    terminal.scrollToLine.mockClear();
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(refreshScrollback).toHaveBeenCalledTimes(2);
-    expect(terminal.scrollLines).not.toHaveBeenCalled();
+    expect(terminal.scrollToLine).not.toHaveBeenCalled();
   });
 
   test('hydration does not auto-scroll after Claude enables mouse tracking', () => {
@@ -1021,7 +1045,7 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     });
 
     expect(refreshScrollback).toHaveBeenCalledTimes(1);
-    expect(terminal.scrollLines).not.toHaveBeenCalled();
+    expect(terminal.scrollToLine).not.toHaveBeenCalled();
   });
 
   test('mouse-tracked main screen forwards wheel to Claude instead of xterm redraw history', () => {
