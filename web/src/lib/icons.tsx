@@ -504,11 +504,12 @@ export const BatteryIcon = ({ size, ...rest }: IconProps) => (
  *   无限模式目标态需要 ∞ 符号，避免组件内硬编码文字。
  *
  * Code Logic（做什么）:
- *   渲染横 8 字形 16x16 stroke SVG。
+ *   渲染横 8 字形 16x16 stroke SVG；path 起点固定 M1.2 保证
+ *   曲线 x 范围 1.2..14.8 含 stroke 半宽后仍在 viewBox 内且水平居中。
  */
 export const InfinityIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
-    <path d="M3.2 8c0-1.7 1.3-3 2.8-3 2.2 0 3.2 3 4 3s1.8-3 4-3c1.5 0 2.8 1.3 2.8 3s-1.3 3-2.8 3c-2.2 0-3.2-3-4-3s-1.8 3-4 3c-1.5 0-2.8-1.3-2.8-3z" />
+    <path d="M1.2 8c0-1.7 1.3-3 2.8-3 2.2 0 3.2 3 4 3s1.8-3 4-3c1.5 0 2.8 1.3 2.8 3s-1.3 3-2.8 3c-2.2 0-3.2-3-4-3s-1.8 3-4 3c-1.5 0-2.8-1.3-2.8-3z" />
   </svg>
 );
 

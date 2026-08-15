@@ -97,7 +97,7 @@ export function BatteryModeToggle({
         aria-label={t('modeCharging')}
         title={t('titleCharging', { time: timeLabel })}
       >
-        <BatteryLevelIcon level={ratio} />
+        <BatteryLevelIcon size={14} level={ratio} />
       </button>
       <button
         type="button"
