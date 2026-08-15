@@ -48,6 +48,7 @@ interface MockTerminal {
   open: (el: HTMLElement) => void;
   write: (data: string, cb?: () => void) => void;
   clear: () => void;
+  reset: () => void;
   clearSelection: () => void;
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
@@ -83,6 +84,8 @@ const terminalEvents = vi.hoisted<{
   writeCalls: Array<{ data: string; instanceIndex: number }>;
   /** Records every clear() call across all instances, in order. */
   clearCalls: Array<{ instanceIndex: number }>;
+  /** Records every reset() call across all instances, in order. */
+  resetCalls: Array<{ instanceIndex: number }>;
   /** Records every refresh(start, end) call across all instances, in order. */
   refreshCalls: Array<{ start: number; end: number; instanceIndex: number }>;
   /** Records the empty-selection invalidation used to force the DOM renderer to rebuild rows. */
@@ -96,6 +99,7 @@ const terminalEvents = vi.hoisted<{
   instances: [],
   writeCalls: [],
   clearCalls: [],
+  resetCalls: [],
   refreshCalls: [],
   clearSelectionCalls: [],
 }));
@@ -163,6 +167,12 @@ vi.mock('@xterm/xterm', () => {
     }
     clear() {
       terminalEvents.clearCalls.push({ instanceIndex: this.instanceIndex });
+    }
+    reset() {
+      terminalEvents.resetCalls.push({ instanceIndex: this.instanceIndex });
+      // 测试 seam：模拟 RIS 回到 normal；保留 baseY 代表紧随其后的快照已完成解析。
+      this.buffer.active.type = 'normal';
+      this.modes.mouseTrackingMode = 'none';
     }
     clearSelection() {
       this.selectionText = '';
@@ -461,6 +471,7 @@ beforeEach(() => {
   terminalEvents.instances.length = 0;
   terminalEvents.writeCalls.length = 0;
   terminalEvents.clearCalls.length = 0;
+  terminalEvents.resetCalls.length = 0;
   terminalEvents.refreshCalls.length = 0;
   terminalEvents.clearSelectionCalls.length = 0;
   // jsdom 默认无 ResizeObserver；安装一个调用回调的最小实现，触发 pane 内的 resize 路径。
@@ -983,6 +994,35 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(refreshScrollback).toHaveBeenCalledTimes(1);
     expect(terminal.scrollToLine).toHaveBeenCalledWith(77);
+  });
+
+  test('resume hydration resets an alternate xterm before replaying scrollback', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const refreshScrollback = vi.fn();
+    render(
+      <PaneHost
+        session={buildSession({ id: 's1' })}
+        store={store}
+        agentTranscriptActive
+        refreshScrollback={refreshScrollback}
+      />,
+    );
+    const terminal = latestTerminal();
+    terminal.buffer.active.type = 'alternate';
+    terminal.buffer.active.baseY = 80;
+    terminal.buffer.active.viewportY = 80;
+    terminal.modes.mouseTrackingMode = 'none';
+
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(refreshScrollback).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      store.reset('s1', 'hydrated history');
+    });
+
+    expect(terminalEvents.resetCalls).toEqual([{ instanceIndex: 0 }]);
+    expect(terminal.buffer.active.type).toBe('normal');
+    expect(terminal.scrollToLine).toHaveBeenCalledWith(79);
   });
 
   test('Agent activation after shell hydration refreshes tmux history once for resume', () => {

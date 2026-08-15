@@ -530,6 +530,13 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     const unsubscribeHydrationReset = store.subscribeReset(sessionId, () => {
       if (scrollbackHydrationPending) {
         hydrationSnapshotPendingParse = true;
+        // Business Logic: tmux attach 自身会让外层 xterm 进入 alternate buffer；clear() 只清当前
+        // buffer，不会回到 normal。显式 hydration 返回的是可滚动的完整渲染快照，必须在 live
+        // writer 的 reset listener 读取/写入前先执行本地 RIS，确保快照进入 normal scrollback。
+        // 这里只重置 xterm 模拟器，不会向 tmux/Claude 写入任何控制字符。
+        if (terminal.buffer.active.type === 'alternate') {
+          terminal.reset();
+        }
       }
     });
     const writer = createTerminalLiveWriter({
