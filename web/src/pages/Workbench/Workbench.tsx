@@ -740,15 +740,6 @@ export function Workbench() {
                 <WorkbenchBatteryBadge />
               </div>
               <p className={styles.workspacePath}>{workspaceLine}</p>
-              {/* 自动化 scope 纯展示标签放在左侧路径下方，给右侧工作区级按钮腾空间 */}
-              <div className={styles.projectAutomationMeta}>
-                <span>{t('workbench:projectAutomation.scope')}</span>
-                <strong>
-                  {t('workbench:projectAutomation.scopeValue', {
-                    project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
-                  })}
-                </strong>
-              </div>
             </div>
           </div>
           <WorkbenchBanner />
