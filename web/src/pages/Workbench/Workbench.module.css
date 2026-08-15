@@ -356,6 +356,12 @@
   padding: var(--space-3) var(--space-6);
   border-bottom: 1px solid var(--border-soft);
   background: color-mix(in oklab, var(--surface) 35%, var(--bg));
+  /* 永远不超出 viewport：worktreeBar 内 padding + chip + actions 的总和
+     不允许超过父容器 .centerPane/.mainWorkspace 的内宽。 */
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .worktreeBar[hidden] {
@@ -368,7 +374,7 @@
   align-items: center;
   gap: var(--space-2);
   overflow-x: auto;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   /* 防止整页横向滚动条：strip 自身允许 chip 区滚动，但不应把外部页面撑宽 */
   max-width: 100%;
 }
@@ -379,8 +385,10 @@
   align-items: center;
   gap: var(--space-2);
   flex-wrap: nowrap;
-  /* 固定在 worktreeBar 右侧，不参与 chip 区的横向滚动 */
+  /* 固定在 worktreeBar 右侧，不参与 chip 区的横向滚动；margin-left:auto 把剩余空间让给 strip */
   margin-left: auto;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-soft);
 }
 
 .worktreeChipGroup {
