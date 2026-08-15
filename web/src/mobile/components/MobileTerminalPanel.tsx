@@ -22,12 +22,6 @@ import {
 import { scrollTerminalBufferLines } from '@/pages/Workbench/terminalWheel';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
-  agentFreshnessI18nKey,
-  agentPhaseI18nKey,
-  agentProviderShortLabel,
-  agentStatusAriaLabel,
-} from '@/pages/Workbench/agentPhasePresentation';
-import {
   appendHeldLiveAfterReplay,
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
@@ -1367,16 +1361,6 @@ export function MobileTerminalPanel({
           >
             {scopedSessions.map((session) => {
               const isActive = session.id === visibleSession?.id;
-              const agent = mobileAgentForSession(sessionRuntime, session.id);
-              const phaseLabel = agent
-                ? t(`workbench:${agentPhaseI18nKey(agent.phase)}`)
-                : null;
-              const freshnessKey = agent ? agentFreshnessI18nKey(agent.freshness) : null;
-              const freshnessLabel = freshnessKey
-                ? t(`workbench:${freshnessKey}`)
-                : null;
-              const agentAria =
-                agent && phaseLabel ? agentStatusAriaLabel(agent, phaseLabel) : null;
               return (
                 <div
                   key={session.id}
@@ -1392,23 +1376,6 @@ export function MobileTerminalPanel({
                   >
                     <span className={styles.mobileSessionDot} data-status={session.status} />
                     <span className={styles.mobileSessionName}>{session.name}</span>
-                    {agent && phaseLabel ? (
-                      <span
-                        className={styles.mobileSessionAgent}
-                        role="status"
-                        aria-label={agentAria ?? phaseLabel}
-                        title={agentAria ?? phaseLabel}
-                        // 点击 Agent 状态只导航到该 terminal，永不发送输入；pointerDown 即触发，避免 IME 吞 click。
-                        onPointerDown={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          handleSelectSession(session);
-                        }}
-                      >
-                        {agentProviderShortLabel(agent.providerId)} · {phaseLabel}
-                        {freshnessLabel ? ` · ${freshnessLabel}` : null}
-                      </span>
-                    ) : null}
                     <span className={styles.mobileSessionPaneCount}>
                       {t('workbench:mobile.terminalPanel.paneCount', {
                         count: session.paneCount,
