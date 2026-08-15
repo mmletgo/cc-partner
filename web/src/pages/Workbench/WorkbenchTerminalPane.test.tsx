@@ -875,7 +875,7 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
-  test('restored active Agent keeps SGR transcript scrolling after tmux loses mouse mode', () => {
+  test('restored active Agent prefers captured tmux scrollback and only falls back without history', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();
     const session = buildSession({ id: 's1' });
@@ -905,6 +905,11 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     );
 
     expect(terminalEvents.constructCount).toBe(1);
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(true);
+    expect(terminal.scrollToBottom).not.toHaveBeenCalled();
+    expect(onInput).not.toHaveBeenCalled();
+
+    terminal.buffer.active.baseY = 0;
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(terminal.scrollToBottom).toHaveBeenCalledTimes(1);
     expect(onInput).toHaveBeenCalledWith('s1', '\x1b[<64;1;1M');

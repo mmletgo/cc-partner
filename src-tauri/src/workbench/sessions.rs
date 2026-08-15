@@ -1175,6 +1175,67 @@ fn tmux_resize_window_args(target: &str, cols: u16, rows: u16) -> Vec<String> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     应用重启后新的 xterm 只有 tmux 当前屏幕，原终端模拟器的 scrollback 已丢失；
+///     若只重放 attach 的全屏刷新，用户向上滚动只会看到重复的最后一屏。
+///
+/// Code Logic（这个函数做什么）:
+///     构造只读取目标 pane 历史区（负行号，排除当前可见屏幕）的 `capture-pane` 参数；
+///     `-T` 去掉行尾空单元，避免空白占满有界 replay ring。
+fn tmux_capture_history_args(target: &str) -> Vec<String> {
+    vec![
+        "capture-pane".to_string(),
+        "-p".to_string(),
+        "-T".to_string(),
+        "-S".to_string(),
+        "-".to_string(),
+        "-E".to_string(),
+        "-1".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     tmux capture-pane 以 LF 分隔物理行，而 Workbench xterm 关闭了 convertEol；
+///     直接写 LF 会只下移不回到首列，历史内容会阶梯式错位。
+///
+/// Code Logic（这个函数做什么）:
+///     把裸 LF 规范化为 CRLF，同时保留已有 CRLF，返回可直接写入 xterm 的历史文本。
+fn normalize_tmux_history_for_terminal(history: &str) -> String {
+    let mut normalized = String::with_capacity(history.len());
+    let mut previous_was_cr = false;
+    for ch in history.chars() {
+        if ch == '\n' && !previous_was_cr {
+            normalized.push('\r');
+        }
+        normalized.push(ch);
+        previous_was_cr = ch == '\r';
+    }
+    normalized
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     tmux-backed 会话跨应用重启后仍保有 pane history，恢复 attach 必须把这段真实历史
+///     作为 replay baseline 注入新 xterm，不能只依赖本进程启动后的 PTY ring。
+///
+/// Code Logic（这个函数做什么）:
+///     对 row 的精确 tmux window target 执行 history-only capture-pane，并规范化换行；
+///     raw PTY 或缺少 tmux 时返回空历史，调用方继续原有恢复路径。
+fn capture_tmux_history_for_replay(row: &WorkbenchSessionRow) -> Result<String, AppError> {
+    if row.backend != TMUX_BACKEND {
+        return Ok(String::new());
+    }
+    let Some(tmux) = available_tmux_command() else {
+        return Ok(String::new());
+    };
+    let target = tmux_target_for_row(row)?;
+    let args = tmux_capture_history_args(&target);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let history = run_tmux_command(&tmux, &arg_refs)?;
+    Ok(normalize_tmux_history_for_terminal(&history))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     同尺寸 `resize-window` / PTY resize 常被 tmux/内核忽略，status 停在历史帧中间；
 ///     需要先 bump 一行再回到目标尺寸，强制 SIGWINCH 与 full redraw。
 ///
@@ -4706,6 +4767,7 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     R25 M1：Abort 且 pre-existing Closing barrier → 立即返回，不 wait/不 PTY/不 insert；
     ///     R26：若有 restore_claim_generation / project_id 无效则 reclaim PTY 后返回；
+    ///     restore/safe attach 在启动新 PTY client 前 best-effort 捕获 tmux history-only baseline；
     ///     否则 wait barrier → openpty/spawn → try_insert 再校验 barrier；
     ///     CAS 失败：AlreadyLive 返回既有；BarrierActive 按 policy Retry 或 Abort；
     ///     成功后分配 generation 绑定 reader/exit fence。
@@ -4729,6 +4791,23 @@ impl WorkbenchSessionRegistry {
         if let Some(generation) = restore_claim_generation {
             self.require_restore_claim_active(&session_id, generation)?;
         }
+
+        // 只有恢复/安全 attach（Abort）需要跨进程历史；新建会话（Retry）从空 ring 开始。
+        // capture 失败不阻断 attach，仍保留原有“至少恢复当前屏幕”的降级行为。
+        let restored_scrollback = if matches!(barrier_policy, SpawnBarrierPolicy::Abort) {
+            match capture_tmux_history_for_replay(&row) {
+                Ok(history) => history,
+                Err(error) => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "恢复工作台终端时捕获 tmux 历史失败，降级为当前屏幕: {error}"
+                    );
+                    String::new()
+                }
+            }
+        } else {
+            String::new()
+        };
 
         // R21 H2 / R23 M1 / R24 H2：wait + openpty + insert CAS。
         let (generation, publish, handle, reader) = loop {
@@ -4866,7 +4945,11 @@ impl WorkbenchSessionRegistry {
             }
         };
 
-        self.ensure_replay_buffer_for_generation(&session_id, generation);
+        self.ensure_replay_buffer_for_generation_with_seed(
+            &session_id,
+            generation,
+            &restored_scrollback,
+        );
 
         // R19 M1：不在 Provisional 发 running；commit/mark_ready 后再发。
         spawn_reader_thread(
@@ -6132,13 +6215,30 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     以 generation 覆盖写入新 SessionReplayBuffer（同 id 旧内容丢弃）。
     fn ensure_replay_buffer_for_generation(&self, session_id: &str, generation: u64) {
+        self.ensure_replay_buffer_for_generation_with_seed(session_id, generation, "");
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     冷启动恢复需要让新 PTY 的 live seq 继续接在 tmux 历史 baseline 后；
+    ///     历史本身不是本 owner 产生的 live event，不能虚构 seq 或发 terminal-output。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     新建 generation-scoped ring，把可选 seed 以 seq=0 写入并按同一字符上限裁剪，
+    ///     随后的 reader 从 seq=1 正常 append/publish。
+    fn ensure_replay_buffer_for_generation_with_seed(
+        &self,
+        session_id: &str,
+        generation: u64,
+        seed: &str,
+    ) {
+        let mut buffer = SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS, generation);
+        if !seed.is_empty() {
+            buffer.append(seed, 0);
+        }
         self.replay_buffers
             .lock()
             .expect("workbench replay buffers 锁中毒")
-            .insert(
-                session_id.to_string(),
-                SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS, generation),
-            );
+            .insert(session_id.to_string(), buffer);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -7593,6 +7693,23 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     重启恢复的 tmux history 必须先于新 PTY 输出进入 replay，同时不能占用 live seq。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先以 seq=0 seed 历史，再追加 seq=1 当前屏，断言顺序与 lastSeq cutover 语义。
+    #[test]
+    fn session_replay_buffer_seeds_tmux_history_before_new_live_output() {
+        let mut buffer = SessionReplayBuffer::new(100, 7);
+        buffer.append("early\r\nhistory\r\n", 0);
+        assert!(buffer.append_if_generation("current", 1, 7));
+
+        let snapshot = buffer.snapshot("session-restored");
+        assert_eq!(snapshot.buffer, "early\r\nhistory\r\ncurrent");
+        assert_eq!(snapshot.last_seq, 1);
+        assert!(!snapshot.truncated);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     chunk ring 在裁剪多字节字符时必须保持 Unicode scalar 边界，并继续维护 tail/last_seq 合同。
     ///
     /// Code Logic（这个测试做什么）:
@@ -8038,6 +8155,42 @@ mod tests {
                 "-t",
                 "cc-partner-project-project1234abcd:@7",
             ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冷启动恢复只能导入 tmux 历史区，不能把当前可见屏幕也捕获后再与 attach 重绘重复拼接。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 capture-pane 使用负行号 history-only 范围、精确 window target 与去行尾空白参数。
+    #[test]
+    fn tmux_capture_history_args_exclude_current_screen() {
+        assert_eq!(
+            tmux_capture_history_args("cc-partner-project-project1234abcd:@7"),
+            vec![
+                "capture-pane",
+                "-p",
+                "-T",
+                "-S",
+                "-",
+                "-E",
+                "-1",
+                "-t",
+                "cc-partner-project-project1234abcd:@7",
+            ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     capture-pane 的 LF 必须能在 convertEol=false 的 xterm 中逐行回到首列，同时不能破坏已有 CRLF。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     混合裸 LF/CRLF/无尾换行，断言只为裸 LF 补 CR。
+    #[test]
+    fn tmux_captured_history_normalizes_line_endings_for_xterm() {
+        assert_eq!(
+            normalize_tmux_history_for_terminal("first\nsecond\r\nthird"),
+            "first\r\nsecond\r\nthird"
         );
     }
 

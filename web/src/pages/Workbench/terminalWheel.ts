@@ -32,20 +32,30 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
 /**
  * Business Logic（为什么需要这个函数）:
  *   桌面滚轮只有两条路径：应用启用 mouse tracking 或 Agent Runtime 确认活跃 Agent 时
- *   优先送给应用；只有未启用 mouse tracking 且没有活跃 Agent 的普通 buffer 才交给
- *   xterm 本地 scrollback，让普通 shell 保留原生历史浏览。
+ *   优先送给应用；但冷启动已从 tmux 注入真实历史的 normal buffer 会有 baseY，此时应先
+ *   交给 xterm 本地 scrollback，不能再次把滚轮送进 Agent 或停留在重复末屏。
+ *   未启用 mouse tracking 且没有活跃 Agent 的普通 buffer 同样走本地 scrollback。
  *   alternate screen 则始终自己发固定打在 transcript 左上角的 SGR 64/65。
  *   不能交给 xterm protocol：指针常在底部输入框，SGR 会按原坐标命中输入区。
  *   也不能按固定行数把指针上抬：resume 后输入区高度会随内容变化，估算仍可能命中输入区。
  *   也不能发 PageUp：Chat 上下文没有 pageup 绑定，输入框聚焦时整页不动。
  *
  * Code Logic（这个函数做什么）:
- *   mouseTrackingMode !== none 或 agentTranscriptActive → sgrFallback；
+ *   活跃 Agent + normal + mode=none + baseY>0 → scrollback；
+ *   否则 mouseTrackingMode !== none 或 agentTranscriptActive → sgrFallback；
  *   否则 normal → scrollback、alternate → sgrFallback。
  */
 export function resolveWorkbenchTerminalWheelAction(
   input: WorkbenchTerminalWheelInput,
 ): WorkbenchTerminalWheelAction {
+  if (
+    input.agentTranscriptActive &&
+    input.bufferType === 'normal' &&
+    input.mouseTrackingMode === 'none' &&
+    input.baseY > 0
+  ) {
+    return 'scrollback';
+  }
   if (input.mouseTrackingMode !== 'none') return 'sgrFallback';
   if (input.agentTranscriptActive) return 'sgrFallback';
   if (input.bufferType === 'normal') return 'scrollback';

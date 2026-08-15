@@ -25,11 +25,19 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     ).toBe('scrollback');
   });
 
-  test('routes a restored active Agent to SGR when tmux did not replay mouse mode', () => {
+  test('uses captured tmux scrollback for a restored active Agent before falling back to SGR', () => {
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'normal',
         baseY: 120,
+        mouseTrackingMode: 'none',
+        agentTranscriptActive: true,
+      }),
+    ).toBe('scrollback');
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'normal',
+        baseY: 0,
         mouseTrackingMode: 'none',
         agentTranscriptActive: true,
       }),
