@@ -243,6 +243,7 @@ mod tests {
             ended_at: "2026-07-01T00:01:00Z".into(),
             outcome: AgentLedgerOutcome::Completed,
             usage: None,
+            terminal_title: None,
         })
         .await
         .unwrap();

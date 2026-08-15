@@ -47,6 +47,8 @@ export interface AgentLedgerEntry {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
+  /** 工作台终端窗口标题（终态时采集，经 sanitize；无则 null） */
+  terminalTitle: string | null;
   costMinorUnits: number | null;
   costCurrency: string | null;
   createdAt: string;

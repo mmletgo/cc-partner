@@ -47,6 +47,7 @@ pub const AGENT_SESSION_LEDGER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_
     cache_write_tokens INTEGER,
     cost_minor_units INTEGER,
     cost_currency TEXT,
+    terminal_title TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )";
@@ -95,7 +96,7 @@ const SELECT_COLUMNS: &str =
     "id, agent_session_id, project_id, worktree_id, provider_id, model_id, \
     started_at, ended_at, duration_ms, outcome, input_tokens, output_tokens, \
     cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
-    created_at, updated_at";
+    terminal_title, created_at, updated_at";
 
 /// opaque keyset cursor v1（ended_at DESC, id DESC）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,10 +171,13 @@ impl AgentLedgerRepo {
     /// 幂等创建表与索引。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     旧库无迁移框架；CREATE IF NOT EXISTS 即可升级。
+    ///     旧库无迁移框架；CREATE IF NOT EXISTS 即可升级；
+    ///     数据库相关修改必须兼容旧库——旧版本 agent_session_ledger 没有 terminal_title 列。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     ledger 表 + clear watermark 表 + 三个索引；bootstrap 不经 write lease。
+    ///     ledger 表 + clear watermark 表 + 三个索引；随后 PRAGMA table_info 检查
+    ///     terminal_title 列，缺失时 ALTER TABLE ADD COLUMN（可空，向后兼容）；
+    ///     schema bootstrap 不经 write lease。
     pub async fn ensure_schema(pool: &SqlitePool) -> Result<(), AppError> {
         sqlx::query(AGENT_SESSION_LEDGER_SCHEMA)
             .execute(pool)
@@ -190,6 +194,17 @@ impl AgentLedgerRepo {
         sqlx::query(AGENT_SESSION_LEDGER_ENDED_INDEX)
             .execute(pool)
             .await?;
+        let columns = sqlx::query("PRAGMA table_info(agent_session_ledger)")
+            .fetch_all(pool)
+            .await?;
+        let has_terminal_title = columns
+            .iter()
+            .any(|row| row.try_get::<String, _>("name").ok().as_deref() == Some("terminal_title"));
+        if !has_terminal_title {
+            sqlx::query("ALTER TABLE agent_session_ledger ADD COLUMN terminal_title TEXT")
+                .execute(pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -293,6 +308,7 @@ impl AgentLedgerRepo {
                             ended_at: ended_at.clone(),
                             outcome: input.outcome,
                             usage: Some(usage),
+                            terminal_title: input.terminal_title.clone(),
                         },
                         cost_minor,
                         cost_currency,
@@ -313,8 +329,8 @@ impl AgentLedgerRepo {
                  (id, agent_session_id, project_id, worktree_id, provider_id, model_id, \
                   started_at, ended_at, duration_ms, outcome, input_tokens, output_tokens, \
                   cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
-                  created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  terminal_title, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&agent_session_id)
@@ -332,6 +348,7 @@ impl AgentLedgerRepo {
             .bind(opt_i64(usage.cache_write_tokens)?)
             .bind(opt_i64(cost_minor)?)
             .bind(&cost_currency)
+            .bind(&input.terminal_title)
             .bind(&now)
             .bind(&now)
             .execute(&self.pool)
@@ -363,6 +380,7 @@ impl AgentLedgerRepo {
                                 ended_at,
                                 outcome: input.outcome,
                                 usage: Some(usage),
+                                terminal_title: input.terminal_title,
                             },
                             cost_minor,
                             cost_currency,
@@ -384,7 +402,8 @@ impl AgentLedgerRepo {
     ///     同一 agent_session_id 重放只允许可靠补齐，禁止改 identity。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     校验 project/provider/outcome；合并 usage；later ended_at 重算 duration。
+    ///     校验 project/provider/outcome；合并 usage；later ended_at 重算 duration；
+    ///     terminal_title 已有值不覆盖、null 可补。
     async fn apply_null_fill(
         &self,
         existing: AgentLedgerEntry,
@@ -423,6 +442,20 @@ impl AgentLedgerRepo {
             (Some(a), Some(b)) if a != b => {
                 return Err(AppError::conflict(format!("worktree_id 冲突: {a} vs {b}")));
             }
+            (Some(a), _) => Some(a.to_string()),
+            (None, Some(b)) => Some(b.to_string()),
+            (None, None) => None,
+        };
+
+        // terminal_title：与 worktree 同语义——已有非空不覆盖（含冲突不报错，保留旧值），null 可补
+        let terminal_title = match (
+            existing.terminal_title.as_deref(),
+            input
+                .terminal_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+        ) {
             (Some(a), _) => Some(a.to_string()),
             (None, Some(b)) => Some(b.to_string()),
             (None, None) => None,
@@ -509,7 +542,7 @@ impl AgentLedgerRepo {
             "UPDATE agent_session_ledger SET \
              worktree_id = ?, model_id = ?, ended_at = ?, duration_ms = ?, \
              input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, \
-             cost_minor_units = ?, cost_currency = ?, updated_at = ? \
+             cost_minor_units = ?, cost_currency = ?, terminal_title = ?, updated_at = ? \
              WHERE agent_session_id = ?",
         )
         .bind(&worktree_id)
@@ -522,6 +555,7 @@ impl AgentLedgerRepo {
         .bind(opt_i64(merged.cache_write_tokens)?)
         .bind(opt_i64(new_cost_minor)?)
         .bind(&new_cost_currency)
+        .bind(&terminal_title)
         .bind(&now)
         .bind(&existing.agent_session_id)
         .execute(&self.pool)
@@ -974,6 +1008,7 @@ fn map_row(row: SqliteRow) -> Result<AgentLedgerEntry, AppError> {
             .try_get::<Option<i64>, _>("cost_minor_units")?
             .map(|v| v as u64),
         cost_currency: row.try_get("cost_currency")?,
+        terminal_title: row.try_get("terminal_title")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -1051,6 +1086,7 @@ mod tests {
             ended_at: "2026-07-01T10:05:00Z".into(),
             outcome: AgentLedgerOutcome::Completed,
             usage: u,
+            terminal_title: None,
         }
     }
 
@@ -1106,6 +1142,125 @@ mod tests {
         let repo = AgentLedgerRepo::new(pool);
         repo.finalize(finalize("x", None)).await.unwrap();
         assert_eq!(repo.count_all().await.unwrap(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧版本 agent_session_ledger 无 terminal_title 列；ensure_schema 必须
+    ///     ALTER 兼容旧库且不破坏既有行，升级后可读写标题。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     手工建不含 terminal_title 的旧 schema 表 + 一行数据 → ensure_schema →
+    ///     断言列存在、旧行可读、新 finalize 带标题可落库回读。
+    #[tokio::test]
+    async fn ensure_schema_adds_terminal_title_column_to_legacy_table() {
+        use sqlx::Row;
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        // 旧 schema（无 terminal_title）
+        sqlx::query(
+            "CREATE TABLE agent_session_ledger (\
+             id TEXT PRIMARY KEY, agent_session_id TEXT NOT NULL UNIQUE, \
+             project_id TEXT NOT NULL, worktree_id TEXT, provider_id TEXT NOT NULL, \
+             model_id TEXT, started_at TEXT NOT NULL, ended_at TEXT NOT NULL, \
+             duration_ms INTEGER NOT NULL, outcome TEXT NOT NULL, input_tokens INTEGER, \
+             output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, \
+             cost_minor_units INTEGER, cost_currency TEXT, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_session_ledger (id, agent_session_id, project_id, provider_id, \
+             started_at, ended_at, duration_ms, outcome, created_at, updated_at) \
+             VALUES ('old-id', 'old-a1', 'p1', 'claudeCodeVisible', \
+             '2026-07-01T10:00:00Z', '2026-07-01T10:05:00Z', 300000, 'completed', \
+             '2026-07-01T10:05:00Z', '2026-07-01T10:05:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        AgentLedgerRepo::ensure_schema(&pool).await.unwrap();
+        // 列已补
+        let columns = sqlx::query("PRAGMA table_info(agent_session_ledger)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(columns.iter().any(|r| {
+            r.try_get::<String, _>("name")
+                .map(|n| n == "terminal_title")
+                .unwrap_or(false)
+        }));
+        let repo = AgentLedgerRepo::new(pool);
+        // 旧行可读且标题为 null
+        let legacy = repo
+            .get_by_agent_session_id("old-a1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(legacy.terminal_title.is_none());
+        // 新行带标题可写
+        let mut input = finalize("a1", None);
+        input.terminal_title = Some("fix: 登录崩溃".into());
+        let entry = repo.finalize(input).await.unwrap();
+        assert_eq!(entry.terminal_title.as_deref(), Some("fix: 登录崩溃"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     「最近会话」明细行需要展示终端窗口标题；finalize 写入后 get/get_page 必须一致回读。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 带 terminal_title → get_by_agent_session_id 与 get_page 均返回同值。
+    #[tokio::test]
+    async fn terminal_title_round_trips_through_get_and_page() {
+        let repo = ledger_repo().await;
+        let mut input = finalize("a1", None);
+        input.terminal_title = Some("refactor: 抽取 repo 层".into());
+        let entry = repo.finalize(input).await.unwrap();
+        assert_eq!(
+            entry.terminal_title.as_deref(),
+            Some("refactor: 抽取 repo 层")
+        );
+        let got = repo.get_by_agent_session_id("a1").await.unwrap().unwrap();
+        assert_eq!(
+            got.terminal_title.as_deref(),
+            Some("refactor: 抽取 repo 层")
+        );
+        let page = repo.get_page(default_query()).await.unwrap();
+        assert_eq!(
+            page.items[0].terminal_title.as_deref(),
+            Some("refactor: 抽取 repo 层")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     终态重放（null-fill）不得清掉已落库的终端标题；首次无标题时后续可补。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     行 A：先带 title 再 None 重放 → title 保留；行 B：先 None 再带 title → title 补齐。
+    #[tokio::test]
+    async fn terminal_title_null_fill_keeps_existing_and_fills_missing() {
+        let repo = ledger_repo().await;
+        // 已有 title：后续 finalize None 不清空
+        let mut first = finalize("a1", None);
+        first.terminal_title = Some("keep-me".into());
+        repo.finalize(first).await.unwrap();
+        repo.finalize(finalize("a1", None)).await.unwrap();
+        let kept = repo.get_by_agent_session_id("a1").await.unwrap().unwrap();
+        assert_eq!(kept.terminal_title.as_deref(), Some("keep-me"));
+        // 首次无 title：后续 finalize 可补
+        repo.finalize(finalize("a2", None)).await.unwrap();
+        let mut later = finalize("a2", None);
+        later.terminal_title = Some("fill-me".into());
+        repo.finalize(later).await.unwrap();
+        let filled = repo.get_by_agent_session_id("a2").await.unwrap().unwrap();
+        assert_eq!(filled.terminal_title.as_deref(), Some("fill-me"));
     }
 
     /// Business Logic: 非法 outcome 不得入库（通过类型系统；parse 失败在 map）。

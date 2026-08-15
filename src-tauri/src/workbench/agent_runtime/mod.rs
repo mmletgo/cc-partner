@@ -118,6 +118,40 @@ async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) 
     });
 }
 
+/// 解析 agent 对应终端窗口标题（供 Ledger「最近会话」明细行展示）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Agent Ledger 明细需要展示会话发生时的工作台终端窗口名；标题权威源是
+///     内存 `WorkbenchSessionHandle.row.name`，registry 无命中时回退持久化行。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `list_live_session_rows()` 按 terminal_session_id 过滤取 row.name；
+///     miss 时 `workbench_session_repo.get()`（await DB）取行名；
+///     两种来源都过 `sanitize_auto_title`，清洗后为空则返回 None。
+async fn resolve_terminal_title_for_ledger(
+    state: &AppState,
+    terminal_session_id: &str,
+) -> Option<String> {
+    let live_name = state
+        .workbench_sessions
+        .list_live_session_rows()
+        .into_iter()
+        .find(|row| row.id == terminal_session_id)
+        .map(|row| row.name);
+    let raw = match live_name {
+        Some(name) => Some(name),
+        None => state
+            .workbench_session_repo
+            .get(terminal_session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.name),
+    };
+    raw.as_deref()
+        .and_then(crate::workbench::auto_title::sanitize_auto_title)
+}
+
 /// 测试可替换的 send 钩子（默认走 channel）。
 type AgentMutationTestHook = Option<Box<dyn Fn(AgentRuntimeMutation) + Send>>;
 static AGENT_MUTATION_TEST_HOOK: Mutex<AgentMutationTestHook> = Mutex::new(None);
@@ -282,6 +316,9 @@ async fn apply_owner_agent_mutation(
             if row.phase.is_terminal() {
                 // A9b：终态后从 CLI 本地会话文件提取 usage 补记 Ledger（每 agent 一次）。
                 maybe_note_terminal_usage(state, &row).await;
+                // 终端标题在 state 仍在作用域时同步解析，随 spawn 传入 Ledger。
+                let terminal_title =
+                    resolve_terminal_title_for_ledger(state, &row.terminal_session_id).await;
                 let ledger_svc = state.agent_ledger_service.clone();
                 let row_for_ledger = row.clone();
                 let prev = previous_phase;
@@ -290,6 +327,7 @@ async fn apply_owner_agent_mutation(
                         &ledger_svc,
                         &row_for_ledger,
                         Some(prev),
+                        terminal_title,
                     )
                     .await;
                 });
@@ -372,6 +410,10 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                         emit_agent_runtime_changed(&state, row, None);
                         // A9：对账断开也写 Ledger（失败隔离）；同时尝试补记 usage。
                         maybe_note_terminal_usage(&state, row).await;
+                        // 启动 reconcile：registry 大概率无该终端，走 DB 回退解析标题。
+                        let terminal_title =
+                            resolve_terminal_title_for_ledger(&state, &row.terminal_session_id)
+                                .await;
                         let ledger_svc = state.agent_ledger_service.clone();
                         let row_for_ledger = row.clone();
                         tokio::spawn(async move {
@@ -379,6 +421,7 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                                 &ledger_svc,
                                 &row_for_ledger,
                                 None,
+                                terminal_title,
                             )
                             .await;
                         });

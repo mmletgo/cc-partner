@@ -85,6 +85,7 @@ export const agentLedgerEntryDecoder: Decoder<AgentLedgerEntry> = objectDecoder(
     outputTokens: nullableDecoder(nonNegativeIntDecoder),
     cacheReadTokens: nullableDecoder(nonNegativeIntDecoder),
     cacheWriteTokens: nullableDecoder(nonNegativeIntDecoder),
+    terminalTitle: nullableDecoder(stringDecoder),
     costMinorUnits: nullableDecoder(nonNegativeIntDecoder),
     costCurrency: nullableDecoder(stringDecoder),
     createdAt: stringDecoder,

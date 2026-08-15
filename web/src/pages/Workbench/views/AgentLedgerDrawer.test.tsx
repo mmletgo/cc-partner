@@ -128,6 +128,40 @@ describe('AgentLedgerDrawer', () => {
     expect(screen.getByText(/仅本机/)).toBeTruthy();
   });
 
+  it('uses terminal window title as entry headline and keeps providerId secondary', () => {
+    renderDrawer({
+      page: {
+        items: [
+          {
+            id: 'e1',
+            agentSessionId: 'a1',
+            projectId: 'p1',
+            worktreeId: null,
+            providerId: 'claudeCodeVisible',
+            modelId: null,
+            startedAt: '2026-07-15T00:00:00Z',
+            endedAt: '2026-07-15T00:01:00Z',
+            durationMs: 1000,
+            outcome: 'completed',
+            inputTokens: null,
+            outputTokens: null,
+            cacheReadTokens: null,
+            cacheWriteTokens: null,
+            terminalTitle: '修复登录超时',
+            costMinorUnits: null,
+            costCurrency: null,
+            createdAt: '2026-07-15T00:01:00Z',
+            updatedAt: '2026-07-15T00:01:00Z',
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+    // 主标题为终端窗口标题，providerId 退为次要信息仍可见
+    expect(screen.getByText('修复登录超时')).toBeTruthy();
+    expect(screen.getByText('claudeCodeVisible')).toBeTruthy();
+  });
+
   it('does not render forbidden metadata text', () => {
     renderDrawer({
       page: {
@@ -147,6 +181,7 @@ describe('AgentLedgerDrawer', () => {
             outputTokens: null,
             cacheReadTokens: null,
             cacheWriteTokens: null,
+            terminalTitle: null,
             costMinorUnits: null,
             costCurrency: null,
             createdAt: '2026-07-15T00:01:00Z',

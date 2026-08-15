@@ -150,6 +150,8 @@ pub struct AgentLedgerFinalizeInput {
     pub outcome: AgentLedgerOutcome,
     /// 可选可靠 usage
     pub usage: Option<ReliableUsageSnapshot>,
+    /// 可选工作台终端窗口标题（已清洗；null-fill 语义：已有值不覆盖）
+    pub terminal_title: Option<String>,
 }
 
 /// 持久化后的 ledger 行（metadata-only DTO）。
@@ -194,6 +196,8 @@ pub struct AgentLedgerEntry {
     pub cost_minor_units: Option<u64>,
     /// 可选 ISO 货币
     pub cost_currency: Option<String>,
+    /// 可选工作台终端窗口标题（serde camelCase 自动映射 terminalTitle）
+    pub terminal_title: Option<String>,
     /// 创建时间
     pub created_at: String,
     /// 更新时间
@@ -770,6 +774,7 @@ mod tests {
             cache_write_tokens: None,
             cost_minor_units: None,
             cost_currency: None,
+            terminal_title: None,
             created_at: "2026-01-01T00:01:00Z".into(),
             updated_at: "2026-01-01T00:01:00Z".into(),
         };

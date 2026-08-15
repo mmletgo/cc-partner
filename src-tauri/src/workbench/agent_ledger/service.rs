@@ -162,6 +162,8 @@ impl AgentLedgerService {
                 ended_at: existing.ended_at,
                 outcome: existing.outcome,
                 usage: Some(cached),
+                // null-fill 回读：terminal_title 保持行上现值，不覆盖也不清空
+                terminal_title: existing.terminal_title,
             };
             let _ = self.try_finalize_once(input).await;
         }
@@ -199,14 +201,17 @@ impl AgentLedgerService {
     /// Business Logic（为什么需要这个函数）:
     ///     runtime 真值已落库后旁路写 ledger；失败只记 metric；
     ///     clear 之前结束的 session 不得再写入（隐私水位）；
-    ///     必须与 clear_history 共享 clear_reconcile_lock，避免 clear 与 finalize 交错复活。
+    ///     必须与 clear_history 共享 clear_reconcile_lock，避免 clear 与 finalize 交错复活；
+    ///     「最近会话」明细行需展示终端窗口标题，标题由调用方在 state 仍可用时解析传入。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     持 clear_reconcile_lock → 组 FinalizeInput → 水位检查 → try_finalize + 一次后台重试。
+    ///     持 clear_reconcile_lock → 组 FinalizeInput（含 terminal_title）→ 水位检查 →
+    ///     try_finalize + 一次后台重试。
     pub async fn record_terminal(
         &self,
         session: &AgentSessionRuntime,
         previous_phase: Option<AgentSessionPhase>,
+        terminal_title: Option<String>,
     ) {
         // 仅在首次进入终态时写
         let was_terminal = previous_phase.map(|p| p.is_terminal()).unwrap_or(false);
@@ -252,6 +257,7 @@ impl AgentLedgerService {
             ended_at,
             outcome,
             usage,
+            terminal_title,
         };
         if self.try_finalize_with_retry(input).await.is_err() {
             // 已累计 metric；不向上传播
@@ -396,6 +402,7 @@ impl AgentLedgerService {
                 ended_at: ended,
                 outcome,
                 usage,
+                terminal_title: None,
             };
             if self.try_finalize_with_retry(input).await.is_ok() {
                 written += 1;
@@ -408,16 +415,20 @@ impl AgentLedgerService {
 /// 从 AppState 触发终态 ledger 写入（spawn 友好，吞错误）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     agent runtime worker 在 Applied 终态后旁路调用，不得 await 失败影响完成。
+///     agent runtime worker 在 Applied 终态后旁路调用，不得 await 失败影响完成；
+///     终端窗口标题须在 state 仍在作用域时解析后随调用传入。
 ///
 /// Code Logic（这个函数做什么）:
-///     调 service.record_terminal。
+///     调 service.record_terminal（透传 terminal_title）。
 pub async fn on_agent_runtime_terminal(
     service: &AgentLedgerService,
     session: &AgentSessionRuntime,
     previous_phase: Option<AgentSessionPhase>,
+    terminal_title: Option<String>,
 ) {
-    service.record_terminal(session, previous_phase).await;
+    service
+        .record_terminal(session, previous_phase, terminal_title)
+        .await;
 }
 
 #[cfg(test)]
@@ -493,7 +504,7 @@ mod tests {
 
         svc.set_fail_writes(true);
         let terminal = runtime("a1", AgentSessionPhase::Completed);
-        svc.record_terminal(&terminal, Some(AgentSessionPhase::Working))
+        svc.record_terminal(&terminal, Some(AgentSessionPhase::Working), None)
             .await;
         assert_eq!(svc.ledger_retry_count(), 1);
         assert_eq!(svc.ledger_failure_metric(), 1);
@@ -535,7 +546,7 @@ mod tests {
     async fn nonterminal_event_no_write() {
         let (svc, _) = setup().await;
         let row = runtime("a1", AgentSessionPhase::Working);
-        svc.record_terminal(&row, Some(AgentSessionPhase::Launching))
+        svc.record_terminal(&row, Some(AgentSessionPhase::Launching), None)
             .await;
         assert!(!svc.repo().exists_agent_session("a1").await.unwrap());
     }
@@ -545,9 +556,9 @@ mod tests {
     async fn duplicate_terminal_does_not_duplicate_row() {
         let (svc, _) = setup().await;
         let row = runtime("a1", AgentSessionPhase::Completed);
-        svc.record_terminal(&row, Some(AgentSessionPhase::Working))
+        svc.record_terminal(&row, Some(AgentSessionPhase::Working), None)
             .await;
-        svc.record_terminal(&row, Some(AgentSessionPhase::Completed))
+        svc.record_terminal(&row, Some(AgentSessionPhase::Completed), None)
             .await;
         assert_eq!(svc.repo().count_all().await.unwrap(), 1);
     }
@@ -567,7 +578,7 @@ mod tests {
         .await
         .unwrap();
         let row = runtime("a1", AgentSessionPhase::Completed);
-        svc.record_terminal(&row, Some(AgentSessionPhase::Working))
+        svc.record_terminal(&row, Some(AgentSessionPhase::Working), None)
             .await;
         let entry = svc
             .repo()
@@ -584,7 +595,7 @@ mod tests {
     async fn usage_after_terminal_null_fills() {
         let (svc, _) = setup().await;
         let row = runtime("a1", AgentSessionPhase::Completed);
-        svc.record_terminal(&row, Some(AgentSessionPhase::Working))
+        svc.record_terminal(&row, Some(AgentSessionPhase::Working), None)
             .await;
         svc.note_usage(
             "a1",
@@ -604,12 +615,48 @@ mod tests {
         assert_eq!(entry.input_tokens, Some(99));
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     「最近会话」明细行展示终端窗口标题；record_terminal 携带的 title 必须落库，
+    ///     且终态重放（title None）不得清空已落库标题。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     record_terminal 带 title → 回读一致；再以 None 重放 → 标题保留。
+    #[tokio::test]
+    async fn record_terminal_persists_terminal_title() {
+        let (svc, _) = setup().await;
+        let row = runtime("a1", AgentSessionPhase::Completed);
+        svc.record_terminal(
+            &row,
+            Some(AgentSessionPhase::Working),
+            Some("feat:  终端  标题\n".into()),
+        )
+        .await;
+        let entry = svc
+            .repo()
+            .get_by_agent_session_id("a1")
+            .await
+            .unwrap()
+            .unwrap();
+        // service 层不做清洗（清洗在接线层），按传入原样落库
+        assert_eq!(entry.terminal_title.as_deref(), Some("feat:  终端  标题\n"));
+        // 终态重放 title None 不得清空
+        svc.record_terminal(&row, Some(AgentSessionPhase::Completed), None)
+            .await;
+        let entry2 = svc
+            .repo()
+            .get_by_agent_session_id("a1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry2.terminal_title, entry.terminal_title);
+    }
+
     /// Business Logic: 非结构化空 usage 保持 null。
     #[tokio::test]
     async fn empty_usage_stays_null() {
         let (svc, _) = setup().await;
         let row = runtime("a1", AgentSessionPhase::Completed);
-        svc.record_terminal(&row, Some(AgentSessionPhase::Working))
+        svc.record_terminal(&row, Some(AgentSessionPhase::Working), None)
             .await;
         let entry = svc
             .repo()
@@ -660,6 +707,7 @@ mod tests {
             ended_at: "2026-07-01T10:01:00Z".into(),
             outcome: AgentLedgerOutcome::Completed,
             usage: None,
+            terminal_title: None,
         };
         // FinalizeInput 不 Serialize；用 entry 形状等价检查
         let (svc, _) = setup().await;
@@ -771,7 +819,7 @@ mod tests {
             let s2 = svc.clone();
             let row_c = row.clone();
             let finalize = tokio::spawn(async move {
-                s1.record_terminal(&row_c, Some(AgentSessionPhase::Working))
+                s1.record_terminal(&row_c, Some(AgentSessionPhase::Working), None)
                     .await;
             });
             let clear = tokio::spawn(async move {
@@ -782,7 +830,7 @@ mod tests {
             // 再 clear 一次确保水位已写（若 finalize 先于 clear 写入了行）
             let _ = svc.clear_history().await;
             // 迟到 finalize 不得复活
-            svc.record_terminal(&row, Some(AgentSessionPhase::Working))
+            svc.record_terminal(&row, Some(AgentSessionPhase::Working), None)
                 .await;
             assert_eq!(
                 svc.repo().count_all().await.unwrap(),

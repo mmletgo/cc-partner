@@ -236,6 +236,7 @@ mod tests {
             ended_at: ended_at.to_string(),
             outcome: AgentLedgerOutcome::Completed,
             usage: Some(ReliableUsageSnapshot::default()),
+            terminal_title: None,
         };
         repo.finalize(input).await.unwrap();
     }

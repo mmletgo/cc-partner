@@ -23,6 +23,7 @@ const validEntry = {
   outputTokens: null,
   cacheReadTokens: null,
   cacheWriteTokens: null,
+  terminalTitle: null,
   costMinorUnits: null,
   costCurrency: null,
   createdAt: '2026-07-15T00:01:00Z',

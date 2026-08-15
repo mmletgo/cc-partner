@@ -148,6 +148,7 @@ mod batch_tests {
                 ended_at: ended.into(),
                 outcome: AgentLedgerOutcome::Completed,
                 usage: None,
+                terminal_title: None,
             })
             .await
             .unwrap();
@@ -207,6 +208,7 @@ mod tests {
             ended_at: ended_at.into(),
             outcome: AgentLedgerOutcome::Completed,
             usage,
+            terminal_title: None,
         })
         .await
         .unwrap();
@@ -387,6 +389,7 @@ mod tests {
             ended_at: "2026-07-01T01:00:00Z".into(),
             outcome: AgentLedgerOutcome::Failed,
             usage: None,
+            terminal_title: None,
         })
         .await
         .unwrap();
