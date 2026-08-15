@@ -70,7 +70,6 @@ export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
 
 const PAGE_1_KEYS: MobileTerminalExtraKeyDef[] = [
   { id: 'esc', kind: 'payload', label: 'Esc', ariaKey: 'esc', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.esc },
-  { id: 'enter', kind: 'payload', label: '⏎', ariaKey: 'enter', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter },
   {
     id: 'shift-tab',
     kind: 'payload',
@@ -83,6 +82,7 @@ const PAGE_1_KEYS: MobileTerminalExtraKeyDef[] = [
   { id: 'down', kind: 'payload', label: '↓', ariaKey: 'down', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down },
   { id: 'left', kind: 'payload', label: '←', ariaKey: 'left', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.left },
   { id: 'right', kind: 'payload', label: '→', ariaKey: 'right', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right },
+  { id: 'enter', kind: 'payload', label: '⏎', ariaKey: 'enter', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter },
   { id: 'page-2', kind: 'page', label: '2', ariaKey: 'page2', targetPage: 2 },
 ];
 

@@ -37,7 +37,7 @@ describe('mobileTerminalExtraKeys', () => {
     const page2 = getMobileTerminalExtraKeys(2).map((key) => key.id);
     assertEqual(
       page1.join(','),
-      'esc,enter,shift-tab,slash,up,down,left,right,page-2',
+      'esc,shift-tab,slash,up,down,left,right,enter,page-2',
       'page 1 keys',
     );
     assertEqual(
