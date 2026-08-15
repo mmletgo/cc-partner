@@ -167,8 +167,11 @@ describe('Workbench terminal domain (characterization)', () => {
     // 初始 workspaceView='terminal'，data-hidden 不存在。
     expect(terminalLayer?.getAttribute('data-hidden')).toBeNull();
 
-    // 点击“预览”切到 browser 视图。
-    fireEvent.click(screen.getByRole('button', { name: '预览' }));
+    // 点击”网页浏览”切到 browser 视图（4b3d5685 feat(workbench): unify terminal / web browsing
+    // / file browsing into one switch 引入 WorkbenchWorkspaceSwitch radiogroup；harness 在
+    // renderWorkbench → resetWorkbenchTestState 中强制 cp-lang=zh，所以按钮 aria-label 是
+    // zh 翻译”网页浏览”，role=radio）。
+    fireEvent.click(screen.getByRole('radio', { name: '网页浏览' }));
     await waitFor(() => {
       const layer = document.querySelector('[class*="terminalLayer"]');
       if (layer?.getAttribute('data-hidden') !== 'true') {
