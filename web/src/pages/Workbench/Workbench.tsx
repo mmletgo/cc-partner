@@ -75,7 +75,6 @@ import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
 import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
-import { WorkspaceSnapshotDialog } from './views/WorkspaceSnapshotDialog';
 
 /**
  * Business Logic（为什么需要这个组件）:
@@ -455,16 +454,11 @@ export function Workbench() {
   });
 
   // A8: 必须在 project/worktree effect 之前挂载，以便 suppressContextResetRef 可供那些 effect 读取。
+  // 命名 snapshot Dialog 的 UI 入口已在 2026-08 下线；hook 仍保留命名 snapshot 数据层
+  // （storage / IPC / schema / 单元测试），便于后续按需重新暴露 UI。
   const {
     restoreSummary,
     dismissRestoreNotice,
-    snapshotOpen,
-    setSnapshotOpen,
-    namedSnapshots,
-    openSnapshotDialog,
-    saveNamedSnapshot,
-    applyNamedSnapshot,
-    deleteNamedSnapshot,
     suppressContextResetRef,
   } = useWorkspaceSafeRestore({
     projectsLoading,
@@ -719,14 +713,6 @@ export function Workbench() {
           summary={restoreSummary}
           onDismiss={dismissRestoreNotice}
         />
-        <WorkspaceSnapshotDialog
-          open={snapshotOpen}
-          onClose={() => setSnapshotOpen(false)}
-          snapshots={namedSnapshots}
-          onSaveCurrent={saveNamedSnapshot}
-          onApply={applyNamedSnapshot}
-          onDelete={deleteNamedSnapshot}
-        />
         <section className={styles.workspaceHeader}>
           <div className={styles.workspaceTitleGroup}>
             <div>
@@ -747,16 +733,6 @@ export function Workbench() {
               error={projectCtrl.agentLedgerError} onOpen={projectCtrl.openAgentLedger}
               onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
               onRefresh={() => void projectCtrl.refreshAgentLedger()} />
-            {!terminalFullscreen ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                type="button"
-                onClick={openSnapshotDialog}
-              >
-                {t('workbench:workspaceSnapshot.openButton')}
-              </Button>
-            ) : null}
             <Button
               className={styles.projectAutomationButton}
               variant="secondary"
