@@ -1644,13 +1644,19 @@ export function useWorkbenchWorktreeGitController(
   // 不能只接收当前项目，否则切换期间的完成事件会永久丢失。每个项目同一时刻只追踪一个 worktree，
   // 同一 stage.id 的最新状态覆盖旧状态。
   // 非 Tauri 环境（普通浏览器调试）跳过 listen 注册，避免底层 invoke 报错。
+  //
+  // 后端 `merge_workbench_worktree` 命令的 envelope 走 succeeded 分支时会主动 schedule dismiss；
+  // 但当 envelope 因 timeout/network 走 unknown / reconcile 路径、或 catch 分支时，cleanup 阶段
+  // 的 completed 事件仍可能由后端单独推过来。如果只信任 succeeded 路径，UI 阶段条会永远挂着等用户手动忽略。
+  // 这里在 listener 里追加一次兜底：cleanup 推到 completed 且快照满足自动隐藏条件时也 schedule dismiss；
+  // scheduleMergeStagePanelDismiss 内部 clearMergeStageDismissTimer 重入安全，与 succeeded 路径不冲突。
   useEffect(() => {
     if (!canListenToTauriEvents()) return undefined;
     const mergeUnlisten = listen<WorkbenchMergeProgressEvent>(
       'workbench:merge-progress',
       (event) => {
         const payload = event.payload;
-        updateProjectMergeProgress(payload.projectId, (current) => {
+        const nextSnapshot = updateProjectMergeProgress(payload.projectId, (current) => {
           if (current && current.worktreeId !== payload.worktreeId) return current;
           return {
             worktreeId: payload.worktreeId,
@@ -1660,12 +1666,24 @@ export function useWorkbenchWorktreeGitController(
             ]),
           };
         });
+        if (
+          payload.stage.id === 'cleanup'
+          && payload.stage.status === 'completed'
+          && nextSnapshot
+          && shouldAutoDismissMergeStages(nextSnapshot.stages)
+        ) {
+          scheduleMergeStagePanelDismiss(payload.projectId, payload.worktreeId);
+        }
       },
     );
     return () => {
       void mergeUnlisten.then((fn) => fn());
     };
-  }, [canListenToTauriEvents, updateProjectMergeProgress]);
+  }, [
+    canListenToTauriEvents,
+    scheduleMergeStagePanelDismiss,
+    updateProjectMergeProgress,
+  ]);
 
   return {
     worktrees,

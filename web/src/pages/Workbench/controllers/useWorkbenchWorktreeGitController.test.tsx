@@ -2149,6 +2149,108 @@ describe('useWorkbenchWorktreeGitController — merge-progress event filtering',
     // no listener registered.
     expect(eventListeners.has('workbench:merge-progress')).toBe(false);
   });
+
+  /**
+   * 兜底 dismiss：merge 命令 envelope 走 unknown / catch 分支时，cleanup 阶段 completed 事件
+   * 仍可能由后端单独推过来；listener 应在快照满足自动隐藏条件时 schedule dismiss，
+   * 避免阶段条永远挂着等用户手动忽略。
+   */
+  test('cleanup completed via merge-progress alone triggers auto dismiss after 2500ms', async () => {
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-main',
+      canListenToTauriEvents: () => true,
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    // 复现用户截图：后端只单独推了 cleanup completed，前面阶段从未 emit completed。
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: { id: 'cleanup', status: 'completed', message: '已删除 worktree 元数据' },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(result.current.mergeProgressWorktreeId).toBe('wt-feat');
+    expect(result.current.mergeStages.find((s) => s.id === 'cleanup')?.status).toBe('completed');
+
+    // 推进到 2500ms 边界：listener 注册的 dismiss timer 应触发，阶段条清空。
+    await act(async () => {
+      vi.advanceTimersByTime(2500);
+      await flushMicrotasks();
+    });
+    expect(result.current.mergeProgressWorktreeId).toBeNull();
+    expect(result.current.mergeStages).toEqual([]);
+  });
+
+  test('cleanup failed via merge-progress does not schedule auto dismiss', async () => {
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-main',
+      canListenToTauriEvents: () => true,
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: { id: 'cleanup', status: 'failed', message: 'cleanup 失败' },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(result.current.mergeStages.find((s) => s.id === 'cleanup')?.status).toBe('failed');
+
+    // 远超 2500ms：失败阶段条必须保留给用户排查。
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+      await flushMicrotasks();
+    });
+    expect(result.current.mergeProgressWorktreeId).toBe('wt-feat');
+    expect(result.current.mergeStages.find((s) => s.id === 'cleanup')?.status).toBe('failed');
+  });
+
+  test('cleanup completed while another stage is running does not schedule auto dismiss', async () => {
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-main',
+      canListenToTauriEvents: () => true,
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    // 模拟边缘：resolveConflicts 还在 running，cleanup 已经标 completed（不应 dismiss）。
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: { id: 'resolveConflicts', status: 'running', message: 'resolving' },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: { id: 'cleanup', status: 'completed', message: 'cleanup' },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+      await flushMicrotasks();
+    });
+    expect(result.current.mergeProgressWorktreeId).toBe('wt-feat');
+    expect(result.current.mergeStages.find((s) => s.id === 'resolveConflicts')?.status).toBe('running');
+    expect(result.current.mergeStages.find((s) => s.id === 'cleanup')?.status).toBe('completed');
+  });
 });
 
 /* ---------------------------------------------------------------------------
