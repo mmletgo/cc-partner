@@ -927,7 +927,6 @@ export function Workbench() {
                   }}
                   onRenameSession={renameSessionById}
                   canRename={!remoteWriteDisabled}
-                  resolveAgent={agentRuntime.latestAgentForTerminal}
                 />
               }
               actions={

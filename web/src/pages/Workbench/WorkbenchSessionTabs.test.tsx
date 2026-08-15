@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 /**
- * WorkbenchSessionTabs Agent 投影测试。
+ * WorkbenchSessionTabs 测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   terminal tab 必须用可访问标签展示 phase，且点击只聚焦 session。
+ *   terminal tab 必须正确展示 hint 计数（等待/停止）并支持双击重命名。
  *
  * Code Logic（这个测试做什么）:
- *   渲染含 agent 的 tab，断言 aria-label 与 phase 文案。
+ *   渲染含 hint 的 tab，断言 hint 摘要 aria-label / 文案与重命名交互。
  */
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -15,7 +15,6 @@ import i18n from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { ReactElement } from 'react';
 
-import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
 import type { WorkbenchSession } from '@/lib/types';
 import { WorkbenchSessionTabs } from './WorkbenchSessionTabs';
 
@@ -28,20 +27,6 @@ const resources = {
       renameSession: '重命名会话',
       renameSessionHint: '双击重命名',
       sessionNamePlaceholder: '会话名称',
-      agentPhase: {
-        launching: 'Agent 启动中',
-        working: 'Agent 工作中',
-        needsInput: 'Agent 等待输入',
-        idle: 'Agent 空闲',
-        completed: 'Agent 已完成',
-        failed: 'Agent 运行失败',
-        disconnected: 'Agent 已断开',
-      },
-      agentFreshness: {
-        cached: '缓存',
-        offline: '离线',
-        unsupported: '不支持',
-      },
       agentHints: {
         dotAriaWaiting: '{{count}} 个窗口等待输入',
         dotAriaCompleted: '{{count}} 个窗口已停止',
@@ -96,35 +81,13 @@ function makeSession(id = 's1'): WorkbenchSession {
 }
 
 /**
- * Business Logic（为什么需要这个工厂）:
- *   phase 用例只需改 phase。
- *
- * Code Logic（这个函数做什么）:
- *   构造 AgentSessionProjection。
- */
-function makeAgent(partial: Partial<AgentSessionProjection> = {}): AgentSessionProjection {
-  return {
-    id: 'a1',
-    projectId: 'p1',
-    terminalSessionId: 's1',
-    providerId: 'claudeCodeVisible',
-    phase: 'working',
-    version: 1,
-    lastActivityAt: '2026-07-15T00:00:00.000Z',
-    freshness: 'live',
-    ...partial,
-  };
-}
-
-/**
  * Business Logic（为什么需要这个函数）:
- *   统一渲染 SessionTabs 并注入 agent map。
+ *   统一渲染 SessionTabs 并注入 hint map。
  *
  * Code Logic（这个函数做什么）:
- *   render + resolveAgent。
+ *   render + resolveHint。
  */
 function renderSessionTab(options: {
-  agent?: AgentSessionProjection | null;
   onFocusSession?: (id: string) => void;
   onRenameSession?: (sessionId: string, name: string) => Promise<boolean>;
   canRename?: boolean;
@@ -136,7 +99,6 @@ function renderSessionTab(options: {
     tone: 'wait' | 'complete' | 'zero';
   };
 }): void {
-  const agent = options.agent ?? null;
   render(
     wrap(
       <WorkbenchSessionTabs
@@ -149,27 +111,15 @@ function renderSessionTab(options: {
         onCreateSession={() => undefined}
         onRenameSession={options.onRenameSession ?? vi.fn().mockResolvedValue(true)}
         canRename={options.canRename ?? true}
-        resolveAgent={() => agent}
         resolveHint={options.resolveHint}
       />,
     ),
   );
 }
 
-describe('WorkbenchSessionTabs agent projection', () => {
+describe('WorkbenchSessionTabs hint summary', () => {
   afterEach(() => {
     cleanup();
-  });
-
-  test.each([
-    ['working', 'Agent 工作中'],
-    ['needsInput', 'Agent 等待输入'],
-    ['failed', 'Agent 运行失败'],
-  ] as const)('renders %s with text and aria label', (phase, label) => {
-    renderSessionTab({ agent: makeAgent({ phase }) });
-    const status = screen.getByLabelText(new RegExp(label));
-    expect(status).toBeTruthy();
-    expect(status.textContent).toContain(label);
   });
 
   test('sessionDot shows waiting count when resolveHint has waiting', () => {
@@ -196,14 +146,6 @@ describe('WorkbenchSessionTabs agent projection', () => {
     expect(summary.textContent).toBe('0/0');
     expect(summary.getAttribute('data-hint-tone')).toBe('zero');
     expect(screen.getByLabelText('等待 0 · 已停止 0')).toBeTruthy();
-  });
-
-  test('clicking agent status focuses the terminal session only', () => {
-    const onFocus = vi.fn();
-    renderSessionTab({ agent: makeAgent({ phase: 'needsInput' }), onFocusSession: onFocus });
-    const status = screen.getByLabelText(/Agent 等待输入/);
-    status.click();
-    expect(onFocus).toHaveBeenCalledWith('s1');
   });
 });
 

@@ -20,6 +20,9 @@
   font-weight: 600;
   line-height: 1;
   padding: 4px 8px;
+  height: 22px;
+  min-width: 28px;
+  box-sizing: border-box;
   border-radius: var(--radius-full);
   cursor: pointer;
   -webkit-app-region: no-drag;

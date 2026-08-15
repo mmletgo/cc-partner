@@ -308,8 +308,10 @@
 }
 
 .workspaceTitleGroup {
-  flex: 0 1 240px;
-  max-width: 280px;
+  /* 顶部项目路径需要完整显示：放宽最大宽度并允许与 WorkbenchBanner 共享剩余空间，
+     路径在 .workspacePath 中按 overflow-wrap 任意位置换行，避免单行 ellipsis 截断。 */
+  flex: 1 1 auto;
+  max-width: 600px;
   min-width: 0;
   gap: var(--space-3);
 }
@@ -327,9 +329,8 @@
 
 .workspacePath {
   margin: var(--space-2) 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .workspaceHeaderActions {
@@ -748,31 +749,6 @@
 
 .sessionDot[data-status='disconnected']:not([data-hint-tone]) {
   background: var(--danger);
-}
-
-/* Agent phase 投影：低噪音，无 working 动画 */
-.sessionAgentStatus {
-  display: inline-flex;
-  align-items: center;
-  max-width: 14rem;
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  pointer-events: auto;
-}
-
-.sessionAgentStatus :global(span) {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sessionAgentStatus {
-    transition: none;
-  }
 }
 
 .terminalArea {
