@@ -200,16 +200,6 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     workbenchSource,
-    "t('workbench:projectAutomation.scope')",
-    'Workbench header states the automation scope is project-level',
-  );
-  assertContains(
-    workbenchSource,
-    "t('workbench:projectAutomation.scopeValue'",
-    'automation panel context renders localized project scope value',
-  );
-  assertContains(
-    workbenchSource,
     'hidden={automationConsoleOpen}',
     'project automation console hides the worktree switcher to avoid worktree ownership ambiguity',
   );
@@ -228,10 +218,10 @@ describe('workbenchAutomationView', () => {
     '.automationLayer[data-hidden',
     'automation layer is conditionally mounted, so it should not have a data-hidden CSS path',
   );
-  assertContains(
+  assertNotContains(
     workbenchSource,
     'activeProject?.name',
-    'automation context displays the current project name',
+    'automation console no longer duplicates project name in a scope chip; OrchestratorPanel owns project identity',
   );
   assertContains(
     workbenchSource,

@@ -745,11 +745,8 @@
   },
   "projectAutomation": {
     "title": "Project Automation",
-    "scope": "Scope: Project",
-    "scopeValue": "Project: {{project}}",
     "description": "Project-level task queue; tasks bind to a worktree and execution context only after they run.",
-    "open": "Project Automation",
-    "noProject": "No project selected"
+    "open": "Project Automation"
   },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",

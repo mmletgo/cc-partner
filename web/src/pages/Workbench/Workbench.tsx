@@ -751,14 +751,6 @@ export function Workbench() {
             >
               {t('workbench:workspaceSnapshot.openButton')}
             </Button>
-            <div className={styles.projectAutomationMeta}>
-              <span>{t('workbench:projectAutomation.scope')}</span>
-              <strong>
-                {t('workbench:projectAutomation.scopeValue', {
-                  project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
-                })}
-              </strong>
-            </div>
             <Button
               className={styles.projectAutomationButton}
               variant="secondary"
@@ -1103,16 +1095,8 @@ export function Workbench() {
             <div className={styles.automationLayer}>
               <header className={styles.automationHeader}>
                 <div className={styles.automationHeadingGroup}>
-                  <span className={styles.automationEyebrow}>{t('workbench:projectAutomation.scope')}</span>
                   <h2 className={styles.automationTitle}>{t('workbench:projectAutomation.title')}</h2>
                   <p className={styles.automationDescription}>{t('workbench:projectAutomation.description')}</p>
-                </div>
-                <div className={styles.automationContext}>
-                  <span>
-                    {t('workbench:projectAutomation.scopeValue', {
-                      project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
-                    })}
-                  </span>
                 </div>
               </header>
               <div className={styles.automationBody}>
