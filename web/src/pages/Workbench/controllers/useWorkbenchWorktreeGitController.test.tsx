@@ -1215,7 +1215,7 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
       await flushMicrotasks();
     });
     await act(async () => {
-      await result.current.handleRemoveWorktree();
+      await result.current.handleRemoveWorktree('wt-feat');
       await flushMicrotasks();
     });
 
@@ -1350,11 +1350,10 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     });
 
     await act(async () => {
-      await result.current.handleRemoveWorktree();
+      await result.current.handleRemoveWorktree('wt-feat');
       await flushMicrotasks();
     });
 
-    expect(confirmAction).toHaveBeenCalled();
     expect(fakeWorktreesApi.remove).toHaveBeenCalledWith(
       'wt-feat',
       false,
@@ -1366,32 +1365,6 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     expect(result.current.worktreeBusy).toBeNull();
   });
 
-  test('handleRemoveWorktree aborts when confirm denied', async () => {
-    const project = buildLocalProject();
-    const featWt = buildWorktree({ id: 'wt-feat', isMain: false });
-    fakeWorktreesApi.list.mockResolvedValue([buildWorktree({ id: 'wt-main' }), featWt]);
-    const confirmAction = vi.fn(() => false);
-
-    const { result } = renderController({
-      activeProjectId: project.id,
-      activeWorktreeId: 'wt-feat',
-      confirmAction,
-    });
-
-    await act(async () => {
-      await result.current.loadWorktrees(project.id);
-      await flushMicrotasks();
-    });
-
-    await act(async () => {
-      await result.current.handleRemoveWorktree();
-      await flushMicrotasks();
-    });
-
-    expect(fakeWorktreesApi.remove).not.toHaveBeenCalled();
-    expect(result.current.worktreeBusy).toBeNull();
-  });
-
   test('handleRemoveWorktree is no-op on main worktree', async () => {
     const { result } = renderController({
       activeProjectId: 'project-1',
@@ -1399,7 +1372,7 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     });
 
     await act(async () => {
-      await result.current.handleRemoveWorktree();
+      await result.current.handleRemoveWorktree('wt-main');
       await flushMicrotasks();
     });
     expect(fakeWorktreesApi.remove).not.toHaveBeenCalled();
@@ -1424,7 +1397,7 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     });
 
     await act(async () => {
-      await result.current.handleRemoveWorktree();
+      await result.current.handleRemoveWorktree('wt-feat');
       await flushMicrotasks();
     });
 

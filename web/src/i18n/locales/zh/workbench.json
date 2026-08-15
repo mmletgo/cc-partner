@@ -549,11 +549,12 @@
     "empty": "暂无 worktree",
     "main": "主工作区",
     "linked": "worktree",
-    "create": "新建 worktree",
+    "create": "新 worktree",
     "commit": "Commit",
     "push": "Push",
     "merge": "合并",
     "remove": "移除 worktree",
+    "removeAria": "移除 {{name}}",
     "prefixLabel": "分支前缀",
     "suffixLabel": "分支后缀",
     "suffixPlaceholder": "my-task",
@@ -561,6 +562,12 @@
     "mergeConfirm": "确定把“{{name}}”合并到主工作区？",
     "mergeCollectConfirm": "确定把本工作区的 {{count}} 条分支（{{names}}）合并到「{{home}}」，并切回该主分支？",
     "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。",
+    "removeConfirmDialog": {
+      "title": "移除 worktree",
+      "body": "确定移除 worktree“{{name}}”？该操作会同时关闭其终端窗口，且不可撤销。",
+      "confirm": "移除",
+      "cancel": "取消"
+    },
     "hookRepair": {
       "title": "Git 钩子阻止了{{action}}",
       "titleCommit": "pre-commit 钩子阻止 commit",

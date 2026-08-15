@@ -559,6 +559,7 @@
     "push": "Push",
     "merge": "Merge",
     "remove": "Remove worktree",
+    "removeAria": "Remove {{name}}",
     "prefixLabel": "Branch prefix",
     "suffixLabel": "Branch suffix",
     "suffixPlaceholder": "my-task",
@@ -566,6 +567,12 @@
     "mergeConfirm": "Merge “{{name}}” into the main worktree?",
     "mergeCollectConfirm": "Merge {{count}} branch(es) ({{names}}) into “{{home}}” and check out that branch?",
     "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed.",
+    "removeConfirmDialog": {
+      "title": "Remove worktree",
+      "body": "Remove worktree “{{name}}”? This will also close its terminal windows and cannot be undone.",
+      "confirm": "Remove",
+      "cancel": "Cancel"
+    },
     "hookRepair": {
       "title": "Git hook blocked {{action}}",
       "titleCommit": "pre-commit hook blocked commit",

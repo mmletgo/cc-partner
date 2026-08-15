@@ -24,7 +24,7 @@ import {
   type WorkbenchWorkspaceSwitchValue,
 } from '@/components/domain/WorkbenchWorkspaceSwitch';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
-import { Button, StatusMessage } from '@/components/primitives';
+import { Button, Dialog, StatusMessage } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import {
@@ -141,6 +141,9 @@ export function Workbench() {
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('history');
   // Business Logic: workspace layout autosave 需要真实 browser target；由 BrowserWorkspace 回写。
   const [browserTargetUrl, setBrowserTargetUrl] = useState<string | null>(null);
+  // Business Logic: 非主 worktree chip 的 x 按钮按下后进入 pending，由共享 Dialog 二次确认；
+  // 确认后才走 controller 的 removeWorkbenchWorktree 路径；取消则清空。
+  const [pendingRemovalWorktreeId, setPendingRemovalWorktreeId] = useState<string | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);
   const activeWorktreeIdRef = useRef<string | null>(null);
   const terminalPanelRef = useRef<HTMLElement | null>(null);
@@ -736,35 +739,6 @@ export function Workbench() {
           </div>
           <WorkbenchBanner />
           <div className={styles.workspaceHeaderActions}>
-            {/* 工作区三元切换：终端 / 网页浏览 / 文件浏览；与 workspaceView 单源对应。
-                终端全屏时仍渲染，离开全屏切到浏览器/文件是合法路径；
-                Agent Ledger / 快照 / 项目自动化按钮仍按全屏隐藏避免被 fixed overlay 盖住。 */}
-            <WorkbenchWorkspaceSwitch
-              ariaLabel={t('workbench:workspaceSwitch.ariaLabel')}
-              value={workspaceView}
-              onChange={(next) => {
-                setWorkspaceView(next satisfies WorkbenchWorkspaceSwitchValue);
-              }}
-              options={[
-                {
-                  id: 'terminal',
-                  label: t('workbench:workspaceSwitch.terminal'),
-                  icon: <TerminalIcon />,
-                },
-                {
-                  id: 'browser',
-                  label: t('workbench:browserPreview.openWorkspace'),
-                  icon: <BrowserIcon />,
-                  disabled: !activeProject || !activeWorktree,
-                },
-                {
-                  id: 'files',
-                  label: t('workbench:fileWorkspace.openFiles'),
-                  icon: <FileIcon />,
-                  disabled: fileTabs.length === 0,
-                },
-              ]}
-            />
             {/* Agent Ledger 整块保留原条件：仅隐藏触发按钮，Drawer 保持挂载（原样移动） */}
             <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
               open={projectCtrl.agentLedgerOpen} localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
@@ -824,9 +798,93 @@ export function Workbench() {
             handleOpenCreateWorktree={handleOpenCreateWorktree}
             handleCancelCreateWorktree={handleCancelCreateWorktree}
             handleCreateWorktree={handleCreateWorktree}
-            handleRemoveWorktree={handleRemoveWorktree}
+            onRequestRemoveWorktree={(worktreeId) => {
+              setPendingRemovalWorktreeId(worktreeId);
+            }}
+            workspaceSwitch={
+              <WorkbenchWorkspaceSwitch
+                ariaLabel={t('workbench:workspaceSwitch.ariaLabel')}
+                value={workspaceView}
+                onChange={(next) => {
+                  setWorkspaceView(next satisfies WorkbenchWorkspaceSwitchValue);
+                }}
+                options={[
+                  {
+                    id: 'terminal',
+                    label: t('workbench:workspaceSwitch.terminal'),
+                    icon: <TerminalIcon />,
+                  },
+                  {
+                    id: 'browser',
+                    label: t('workbench:browserPreview.openWorkspace'),
+                    icon: <BrowserIcon />,
+                    disabled: !activeProject || !activeWorktree,
+                  },
+                  {
+                    id: 'files',
+                    label: t('workbench:fileWorkspace.openFiles'),
+                    icon: <FileIcon />,
+                    disabled: fileTabs.length === 0,
+                  },
+                ]}
+              />
+            }
           />
         </section>
+        <Dialog
+          open={pendingRemovalWorktreeId !== null}
+          titleId="workbench-remove-worktree-confirm-title"
+          onClose={() => {
+            setPendingRemovalWorktreeId(null);
+          }}
+        >
+          {(() => {
+            const pendingWorktree = pendingRemovalWorktreeId
+              ? worktrees.find((worktree) => worktree.id === pendingRemovalWorktreeId) ?? null
+              : null;
+            return (
+              <>
+                <h2
+                  id="workbench-remove-worktree-confirm-title"
+                  className={styles.removeDialogTitle}
+                >
+                  {t('workbench:worktrees.removeConfirmDialog.title')}
+                </h2>
+                <p className={styles.removeDialogBody}>
+                  {t('workbench:worktrees.removeConfirmDialog.body', {
+                    name: pendingWorktree?.branch ?? pendingWorktree?.name ?? '',
+                  })}
+                </p>
+                <div className={styles.removeDialogActions}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setPendingRemovalWorktreeId(null);
+                    }}
+                  >
+                    {t('workbench:worktrees.removeConfirmDialog.cancel')}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    loading={worktreeBusy === 'remove'}
+                    disabled={worktreeBusy === 'remove' || !pendingWorktree}
+                    onClick={() => {
+                      const worktreeId = pendingRemovalWorktreeId;
+                      setPendingRemovalWorktreeId(null);
+                      if (worktreeId) {
+                        void handleRemoveWorktree(worktreeId);
+                      }
+                    }}
+                  >
+                    {t('workbench:worktrees.removeConfirmDialog.confirm')}
+                  </Button>
+                </div>
+              </>
+            );
+          })()}
+        </Dialog>
 
         <div className={styles.noticeStack}>
           {remoteProjectOffline ? (

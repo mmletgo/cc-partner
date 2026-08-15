@@ -94,8 +94,8 @@ describe('Workbench worktree / Git domain (characterization)', () => {
     );
     await settle();
 
-    // 点击“新建 worktree”展开表单。
-    fireEvent.click(screen.getByRole('button', { name: '新建 worktree' }));
+    // 点击「新 worktree」展开表单。
+    fireEvent.click(screen.getByRole('button', { name: '新 worktree' }));
     await settle();
     // 填入分支后缀并提交。
     const branchInput = screen.getByLabelText('分支后缀');
@@ -170,16 +170,24 @@ describe('Workbench worktree / Git domain (characterization)', () => {
     await settle();
 
     // 默认 active worktree 是第一个（mainWt）；切到 feature 后再移除。
-    // 点击 feature chip 切 active，等到 active worktree 切换后 remove 按钮才启用。
+    // 点击 feature chip 切 active，等到 active worktree 切换后 chip 上的 x 按钮才启用。
     fireEvent.click(screen.getByText('feature/feat'));
     await waitFor(() => {
-      const removeBtn = screen.getByRole('button', { name: '移除 worktree' });
+      const removeBtn = screen.getByRole('button', { name: '移除 feature/feat' });
       if (removeBtn.hasAttribute('disabled')) {
         throw new Error('remove button still disabled');
       }
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '移除 worktree' }));
+    // chip x 按钮仅触发共享 Dialog；点击 Dialog 里的「移除」才真正调 controller。
+    fireEvent.click(screen.getByRole('button', { name: '移除 feature/feat' }));
+    await waitFor(() => {
+      const confirmBtn = screen.getByRole('button', { name: '移除' });
+      if (confirmBtn.hasAttribute('disabled')) {
+        throw new Error('confirm button still disabled');
+      }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '移除' }));
     await waitForInvoke('remove_workbench_worktree');
     await waitForInvoke('list_workbench_worktrees', 2);
 
