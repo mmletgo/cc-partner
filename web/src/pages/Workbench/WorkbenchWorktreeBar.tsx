@@ -114,156 +114,158 @@ export function WorkbenchWorktreeBar(props: WorkbenchWorktreeBarProps): ReactEle
   );
 
   return (
-    <div className={styles.worktreeStrip}>
-      {worktrees.length === 0 ? (
-        <span className={styles.worktreeEmpty}>{t('workbench:worktrees.empty')}</span>
-      ) : (
-        worktrees.map((worktree) => {
-          const tone = worktreeStatusTone(worktree);
-          const label = worktree.branch ?? worktree.name;
-          const hint =
-            activeProjectId && hintContext
-              ? hintContext.hintsForWorktree(activeProjectId, worktree.id)
-              : EMPTY_HINT_COUNTS;
-          const hintAria = agentHintAriaSpec(hint);
-          const meta = worktree.isMain
-            ? t('workbench:worktrees.main')
-            : t('workbench:worktrees.linked');
-          const isActive = worktree.id === activeWorktree?.id;
-          if (worktree.isMain) {
-            return (
-              <button
-                key={worktree.id}
-                type="button"
-                className={styles.worktreeChip}
-                data-active={isActive || undefined}
-                data-tone={tone}
-                onClick={() => onSelectWorktree(worktree.id)}
-              >
-                <HintStatusDot
-                  className={styles.worktreeDot}
-                  data-tone={tone}
-                  waitingCount={hint.waitingCount}
-                  stoppedCount={hint.stoppedCount}
-                  aria-label={t(hintAria.key, hintAria.values)}
-                />
-                <span className={styles.worktreeName}>{label}</span>
-                <span className={styles.worktreeMeta}>{meta}</span>
-              </button>
-            );
-          }
-          const removable = canRemoveWorktree(worktree, worktreeBusy, unknownMutationLock)
-            && !remoteWriteDisabled;
-          return (
-            <div
-              key={worktree.id}
-              className={styles.worktreeChipGroup}
-              data-active={isActive || undefined}
-              data-tone={tone}
-              data-removable={removable || undefined}
-            >
-              <button
-                type="button"
-                className={styles.worktreeChip}
-                data-active={isActive || undefined}
-                data-tone={tone}
-                onClick={() => onSelectWorktree(worktree.id)}
-              >
-                <HintStatusDot
-                  className={styles.worktreeDot}
-                  data-tone={tone}
-                  waitingCount={hint.waitingCount}
-                  stoppedCount={hint.stoppedCount}
-                  aria-label={t(hintAria.key, hintAria.values)}
-                />
-                <span className={styles.worktreeName}>{label}</span>
-                <span className={styles.worktreeMeta}>{meta}</span>
-              </button>
-              <button
-                type="button"
-                className={styles.worktreeChipClose}
-                aria-label={t('workbench:worktrees.removeAria', { name: label })}
-                title={t('workbench:worktrees.removeAria', { name: label })}
-                disabled={!removable}
-                onClick={() => onRequestRemoveWorktree(worktree.id)}
-              >
-                <XIcon />
-              </button>
-            </div>
-          );
-        })
-      )}
-      <div className={styles.worktreeCreateSlot}>
-        {createWorktreeOpen ? (
-          <form
-            className={styles.worktreeCreateForm}
-            onSubmit={(event) => {
-              event.preventDefault();
-              void handleCreateWorktree();
-            }}
-          >
-            <label className={styles.worktreePrefixField}>
-              <span className={styles.srOnly}>{t('workbench:worktrees.prefixLabel')}</span>
-              <select
-                className={styles.worktreePrefixSelect}
-                value={createWorktreeBranchPrefix}
-                disabled={worktreeBusy === 'create' || remoteWriteDisabled}
-                aria-label={t('workbench:worktrees.prefixLabel')}
-                onChange={(event) =>
-                  setCreateWorktreeBranchPrefix(event.target.value as WorktreeBranchPrefix)
-                }
-              >
-                {WORKTREE_BRANCH_PREFIXES.map((prefix) => (
-                  <option key={prefix} value={prefix}>{prefix}</option>
-                ))}
-              </select>
-            </label>
-            <span className={styles.worktreeBranchSlash}>/</span>
-            <Input
-              ref={worktreeBranchInputRef}
-              size="sm"
-              mono
-              className={styles.worktreeBranchInput}
-              value={createWorktreeBranchSuffixDraft}
-              placeholder={t('workbench:worktrees.suffixPlaceholder')}
-              aria-label={t('workbench:worktrees.suffixLabel')}
-              disabled={worktreeBusy === 'create' || remoteWriteDisabled}
-              onChange={(event) => setCreateWorktreeBranchSuffixDraft(event.target.value)}
-            />
-            <Button
-              type="submit"
-              size="sm"
-              variant="primary"
-              loading={worktreeBusy === 'create'}
-              disabled={!composedWorktreeBranchName || worktreeBusy !== null || remoteWriteDisabled}
-            >
-              {t('common:action.confirm')}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={worktreeBusy === 'create'}
-              onClick={handleCancelCreateWorktree}
-            >
-              {t('common:action.cancel')}
-            </Button>
-          </form>
+    <>
+      <div className={styles.worktreeStrip}>
+        {worktrees.length === 0 ? (
+          <span className={styles.worktreeEmpty}>{t('workbench:worktrees.empty')}</span>
         ) : (
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={<PlusIcon />}
-            loading={worktreeBusy === 'create'}
-            disabled={!activeProjectId || worktreeBusy !== null || remoteWriteDisabled}
-            onClick={handleOpenCreateWorktree}
-          >
-            {t('workbench:worktrees.create')}
-          </Button>
+          worktrees.map((worktree) => {
+            const tone = worktreeStatusTone(worktree);
+            const label = worktree.branch ?? worktree.name;
+            const hint =
+              activeProjectId && hintContext
+                ? hintContext.hintsForWorktree(activeProjectId, worktree.id)
+                : EMPTY_HINT_COUNTS;
+            const hintAria = agentHintAriaSpec(hint);
+            const meta = worktree.isMain
+              ? t('workbench:worktrees.main')
+              : t('workbench:worktrees.linked');
+            const isActive = worktree.id === activeWorktree?.id;
+            if (worktree.isMain) {
+              return (
+                <button
+                  key={worktree.id}
+                  type="button"
+                  className={styles.worktreeChip}
+                  data-active={isActive || undefined}
+                  data-tone={tone}
+                  onClick={() => onSelectWorktree(worktree.id)}
+                >
+                  <HintStatusDot
+                    className={styles.worktreeDot}
+                    data-tone={tone}
+                    waitingCount={hint.waitingCount}
+                    stoppedCount={hint.stoppedCount}
+                    aria-label={t(hintAria.key, hintAria.values)}
+                  />
+                  <span className={styles.worktreeName}>{label}</span>
+                  <span className={styles.worktreeMeta}>{meta}</span>
+                </button>
+              );
+            }
+            const removable = canRemoveWorktree(worktree, worktreeBusy, unknownMutationLock)
+              && !remoteWriteDisabled;
+            return (
+              <div
+                key={worktree.id}
+                className={styles.worktreeChipGroup}
+                data-active={isActive || undefined}
+                data-tone={tone}
+                data-removable={removable || undefined}
+              >
+                <button
+                  type="button"
+                  className={styles.worktreeChip}
+                  data-active={isActive || undefined}
+                  data-tone={tone}
+                  onClick={() => onSelectWorktree(worktree.id)}
+                >
+                  <HintStatusDot
+                    className={styles.worktreeDot}
+                    data-tone={tone}
+                    waitingCount={hint.waitingCount}
+                    stoppedCount={hint.stoppedCount}
+                    aria-label={t(hintAria.key, hintAria.values)}
+                  />
+                  <span className={styles.worktreeName}>{label}</span>
+                  <span className={styles.worktreeMeta}>{meta}</span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.worktreeChipClose}
+                  aria-label={t('workbench:worktrees.removeAria', { name: label })}
+                  title={t('workbench:worktrees.removeAria', { name: label })}
+                  disabled={!removable}
+                  onClick={() => onRequestRemoveWorktree(worktree.id)}
+                >
+                  <XIcon />
+                </button>
+              </div>
+            );
+          })
         )}
+        <div className={styles.worktreeCreateSlot}>
+          {createWorktreeOpen ? (
+            <form
+              className={styles.worktreeCreateForm}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleCreateWorktree();
+              }}
+            >
+              <label className={styles.worktreePrefixField}>
+                <span className={styles.srOnly}>{t('workbench:worktrees.prefixLabel')}</span>
+                <select
+                  className={styles.worktreePrefixSelect}
+                  value={createWorktreeBranchPrefix}
+                  disabled={worktreeBusy === 'create' || remoteWriteDisabled}
+                  aria-label={t('workbench:worktrees.prefixLabel')}
+                  onChange={(event) =>
+                    setCreateWorktreeBranchPrefix(event.target.value as WorktreeBranchPrefix)
+                  }
+                >
+                  {WORKTREE_BRANCH_PREFIXES.map((prefix) => (
+                    <option key={prefix} value={prefix}>{prefix}</option>
+                  ))}
+                </select>
+              </label>
+              <span className={styles.worktreeBranchSlash}>/</span>
+              <Input
+                ref={worktreeBranchInputRef}
+                size="sm"
+                mono
+                className={styles.worktreeBranchInput}
+                value={createWorktreeBranchSuffixDraft}
+                placeholder={t('workbench:worktrees.suffixPlaceholder')}
+                aria-label={t('workbench:worktrees.suffixLabel')}
+                disabled={worktreeBusy === 'create' || remoteWriteDisabled}
+                onChange={(event) => setCreateWorktreeBranchSuffixDraft(event.target.value)}
+              />
+              <Button
+                type="submit"
+                size="sm"
+                variant="primary"
+                loading={worktreeBusy === 'create'}
+                disabled={!composedWorktreeBranchName || worktreeBusy !== null || remoteWriteDisabled}
+              >
+                {t('common:action.confirm')}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={worktreeBusy === 'create'}
+                onClick={handleCancelCreateWorktree}
+              >
+                {t('common:action.cancel')}
+              </Button>
+            </form>
+          ) : (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<PlusIcon />}
+              loading={worktreeBusy === 'create'}
+              disabled={!activeProjectId || worktreeBusy !== null || remoteWriteDisabled}
+              onClick={handleOpenCreateWorktree}
+            >
+              {t('workbench:worktrees.create')}
+            </Button>
+          )}
+        </div>
       </div>
       {workspaceSwitch ? (
-        <div className={styles.worktreeWorkspaceSwitch}>{workspaceSwitch}</div>
+        <div className={styles.worktreeActions}>{workspaceSwitch}</div>
       ) : null}
-    </div>
+    </>
   );
 }
