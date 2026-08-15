@@ -26,6 +26,7 @@ import { useEffect, type ReactNode } from 'react';
 
 const listMock = vi.fn();
 const replayMock = vi.fn();
+const hydrateScrollbackMock = vi.fn();
 const listenMock = vi.fn();
 const windowLabelState = vi.hoisted(() => ({ label: 'main' }));
 
@@ -44,6 +45,7 @@ vi.mock('@/api/workbench', async () => {
         ...actual.workbenchApi.sessions,
         list: (...args: unknown[]) => listMock(...args),
         replay: (...args: unknown[]) => replayMock(...args),
+        hydrateScrollback: (...args: unknown[]) => hydrateScrollbackMock(...args),
       },
     },
   };
@@ -104,11 +106,13 @@ type ReplayDto = {
 function StoreProbe({
   storeRef,
   historySyncRef,
+  refreshScrollbackRef,
 }: {
   storeRef: { current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null };
   historySyncRef?: {
     current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
   };
+  refreshScrollbackRef?: { current: ((sessionId: string) => void) | null };
 }) {
   const ctx = useWorkbenchTerminalBuffers();
   // refs 只能在 effect 中写入，禁止在 render 阶段赋值（react-hooks/refs）。
@@ -116,6 +120,9 @@ function StoreProbe({
     storeRef.current = ctx.store;
     if (historySyncRef) {
       historySyncRef.current = ctx.getHistorySyncFailure;
+    }
+    if (refreshScrollbackRef) {
+      refreshScrollbackRef.current = ctx.refreshScrollback;
     }
   });
   return null;
@@ -135,6 +142,7 @@ function renderProvider(
   historySyncRef?: {
     current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
   },
+  refreshScrollbackRef?: { current: ((sessionId: string) => void) | null },
 ) {
   (window as Window & {
     __TAURI_INTERNALS__?: { transformCallback?: unknown };
@@ -147,7 +155,11 @@ function renderProvider(
   );
 
   return render(
-    <StoreProbe storeRef={storeRef} historySyncRef={historySyncRef} />,
+    <StoreProbe
+      storeRef={storeRef}
+      historySyncRef={historySyncRef}
+      refreshScrollbackRef={refreshScrollbackRef}
+    />,
     { wrapper },
   );
 }
@@ -299,6 +311,121 @@ describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
     });
     expect(storeRef.current?.getBuffer(sessionId)).toBe('B0B1B-LIVE-2B3');
     expect(storeRef.current?.getLastSeq(sessionId)).toBe(3);
+  });
+});
+
+describe('WorkbenchTerminalBuffersProvider explicit scrollback hydration', () => {
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    hydrateScrollbackMock.mockReset();
+    listenMock.mockReset();
+    vi.useRealTimers();
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  test('user refresh uses hydrate API while startup baseline remains a plain replay', async () => {
+    const sessionId = 'session-resume';
+    const authority = 'owner-1';
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
+    replayMock.mockResolvedValue({
+      sessionId,
+      buffer: 'CURRENT',
+      truncated: false,
+      lastSeq: 4,
+      ownerInstanceId: authority,
+    });
+    hydrateScrollbackMock.mockResolvedValue({
+      sessionId,
+      buffer: 'EARLY\r\nCURRENT',
+      truncated: false,
+      lastSeq: 4,
+      ownerInstanceId: authority,
+    });
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const refreshScrollbackRef: { current: ((id: string) => void) | null } = {
+      current: null,
+    };
+
+    renderProvider(storeRef, undefined, refreshScrollbackRef);
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('CURRENT');
+    });
+    expect(replayMock).toHaveBeenCalledWith(sessionId);
+    expect(hydrateScrollbackMock).not.toHaveBeenCalled();
+
+    act(() => {
+      refreshScrollbackRef.current?.(sessionId);
+    });
+
+    await waitFor(() => {
+      expect(hydrateScrollbackMock).toHaveBeenCalledTimes(1);
+      expect(hydrateScrollbackMock).toHaveBeenCalledWith(sessionId);
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('EARLY\r\nCURRENT');
+    });
+    expect(replayMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('refresh queued during an in-flight baseline is not swallowed', async () => {
+    const sessionId = 'session-resume-in-flight';
+    const authority = 'owner-1';
+    const baseline = deferred<ReplayDto>();
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
+    replayMock.mockReturnValue(baseline.promise);
+    hydrateScrollbackMock.mockResolvedValue({
+      sessionId,
+      buffer: 'EARLY\r\nCURRENT',
+      truncated: false,
+      lastSeq: 8,
+      ownerInstanceId: authority,
+    });
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const refreshScrollbackRef: { current: ((id: string) => void) | null } = {
+      current: null,
+    };
+
+    renderProvider(storeRef, undefined, refreshScrollbackRef);
+    await waitFor(() => {
+      expect(replayMock).toHaveBeenCalledWith(sessionId);
+      expect(refreshScrollbackRef.current).not.toBeNull();
+    });
+    act(() => {
+      refreshScrollbackRef.current?.(sessionId);
+    });
+    expect(hydrateScrollbackMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      baseline.resolve({
+        sessionId,
+        buffer: 'CURRENT',
+        truncated: false,
+        lastSeq: 8,
+        ownerInstanceId: authority,
+      });
+      await baseline.promise;
+    });
+
+    await waitFor(() => {
+      expect(hydrateScrollbackMock).toHaveBeenCalledTimes(1);
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('EARLY\r\nCURRENT');
+    });
   });
 });
 

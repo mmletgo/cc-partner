@@ -247,13 +247,45 @@ pub(crate) async fn replay_workbench_session_for_state(
     state: &AppState,
     session_id: String,
 ) -> Result<WorkbenchSessionReplayDto, AppError> {
+    replay_workbench_session_with_options_for_state(state, session_id, false).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Claude resume 的旧消息可能只存在于 tmux history；只有用户明确向上滚动时才应抓取，
+///     普通 baseline、增量读取和 presence probe 不能隐式启动 tmux 子进程。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 replay owner/remote 映射合同，但把 `refresh_history=true` 精确传给真实 session owner。
+pub(crate) async fn hydrate_workbench_session_scrollback_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<WorkbenchSessionReplayDto, AppError> {
+    replay_workbench_session_with_options_for_state(state, session_id, true).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     普通 replay 与用户触发的 tmux history hydration 必须共享 session owner、authority 和
+///     generation 校验，但 capture-pane 只能出现在后者。
+///
+/// Code Logic（这个函数做什么）:
+///     remote session 转发到真实 owner；local session 先要求 Live，再按选项读取内存 ring 或在
+///     blocking 线程串行 capture，并统一 stamp ownerInstanceId。
+async fn replay_workbench_session_with_options_for_state(
+    state: &AppState,
+    session_id: String,
+    refresh_history: bool,
+) -> Result<WorkbenchSessionReplayDto, AppError> {
     if let Some(parsed) = parse_remote_entity_id(&session_id) {
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
-        let mut replay = RemoteWorkbenchClient::new()
-            .with_expected_device_id(&parsed.device_id)
-            .replay(&base_url, &inner_session_id)
-            .await?;
+        let client = RemoteWorkbenchClient::new().with_expected_device_id(&parsed.device_id);
+        let mut replay = if refresh_history {
+            client
+                .hydrate_scrollback(&base_url, &inner_session_id)
+                .await?
+        } else {
+            client.replay(&base_url, &inner_session_id).await?
+        };
         replay.session_id = session_id.clone();
         // remote stream owner 来自 peer replay DTO；与 bridged live 的 producer owner 合成同一 composite。
         // 远端 backend 重启后 remote owner 变化 → authority cutover → lastSeq 重置，避免静默冻结。
@@ -273,7 +305,24 @@ pub(crate) async fn replay_workbench_session_for_state(
     state
         .workbench_sessions
         .require_live_for_replay(&session_id)?;
-    let mut replay = state.workbench_sessions.replay(&session_id);
+    let mut replay = if refresh_history {
+        let registry = state.workbench_sessions.clone();
+        let capture_session_id = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            registry.hydrate_tmux_history_replay(&capture_session_id)
+        })
+        .await
+        .map_err(|error| {
+            tracing::debug!(session_id = %session_id, "tmux history hydration task failed: {error}");
+            AppError::unavailable("tmux_history_hydration_task_failed".to_string())
+        })?
+        .map_err(|error| {
+            tracing::debug!(session_id = %session_id, "tmux history hydration failed: {error}");
+            AppError::unavailable("tmux_history_hydration_failed".to_string())
+        })?
+    } else {
+        state.workbench_sessions.replay(&session_id)
+    };
     // 本机 PTY ring 的 authority 即 sidecar ownerInstanceId。
     replay.owner_instance_id = Some(state.config_runtime.owner_instance_id().to_string());
     Ok(replay)
@@ -291,17 +340,25 @@ pub(crate) async fn replay_workbench_session_for_state(
 pub async fn replay_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
+    refresh_history: bool,
 ) -> Result<WorkbenchSessionReplayDto, AppError> {
     if let Some(v) = proxy_workbench_if_gui(
         state.inner(),
         "sessions.replay",
-        serde_json::json!({ "sessionId": session_id.clone() }),
+        serde_json::json!({
+            "sessionId": session_id.clone(),
+            "refreshHistory": refresh_history,
+        }),
     )
     .await?
     {
         return Ok(v);
     }
-    replay_workbench_session_for_state(state.inner(), session_id).await
+    if refresh_history {
+        hydrate_workbench_session_scrollback_for_state(state.inner(), session_id).await
+    } else {
+        replay_workbench_session_for_state(state.inner(), session_id).await
+    }
 }
 
 /// 在项目目录中创建一个普通 PTY 终端会话。

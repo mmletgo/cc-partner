@@ -633,7 +633,15 @@ async fn dispatch_workbench_op(
         }
         "sessions.replay" => {
             let session_id = required_string(&payload, "sessionId")?;
-            let item = workbench::replay_workbench_session_for_state(state, session_id).await?;
+            let refresh_history = payload
+                .get("refreshHistory")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let item = if refresh_history {
+                workbench::hydrate_workbench_session_scrollback_for_state(state, session_id).await?
+            } else {
+                workbench::replay_workbench_session_for_state(state, session_id).await?
+            };
             Ok(serde_json::to_value(item)?)
         }
         "sessions.write" => {

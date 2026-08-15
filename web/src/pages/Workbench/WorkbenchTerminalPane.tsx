@@ -15,7 +15,7 @@ import { memo, useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { useWorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffersContext';
+import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
 import type { WorkbenchSession } from '@/lib/types';
 import styles from './Workbench.module.css';
 import { createTerminalLiveWriter, type TerminalLiveWriter } from './terminalLiveWriter';
@@ -156,6 +156,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     onCursorAnchorChange,
     onSelectPaneAt,
   } = props;
+  const { store, refreshScrollback } = useWorkbenchTerminalBuffers();
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const liveWriterRef = useRef<TerminalLiveWriter | null>(null);
@@ -166,6 +167,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const previousRenderVisibleRef = useRef<boolean>(renderVisible);
   const resizeTimerRef = useRef<number | null>(null);
   const forceResizeRef = useRef<(() => void) | null>(null);
+  const refreshScrollbackRef = useRef(refreshScrollback);
   const cursorAnchorCallbackRef = useRef<WorkbenchTerminalPaneProps['onCursorAnchorChange']>(
     onCursorAnchorChange,
   );
@@ -191,8 +193,6 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   persistedSizeRef.current = session
     ? { sessionId: session.id, cols: session.cols, rows: session.rows }
     : null;
-  const store = useWorkbenchTerminalBufferStore();
-
   useEffect(() => {
     inputEnabledRef.current = inputEnabled;
   }, [inputEnabled]);
@@ -214,6 +214,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   }, [onSelectPaneAt]);
 
   useEffect(() => {
+    refreshScrollbackRef.current = refreshScrollback;
+  }, [refreshScrollback]);
+
+  useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !sessionId) return undefined;
 
@@ -224,19 +228,73 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     // open 之后 selectionService 才存在；必须优先于 mouse-mode CSI 落地前装上选区保护。
     const restoreSelectionOverrides = installWorkbenchTerminalSelectionOverrides(terminal);
     wheelRemainderRef.current = 0;
+    let scrollbackHydrationPending = false;
+    let hydrationSnapshotPendingParse = false;
+    let pendingHydratedScrollLines = 0;
+    let hydrationTimeout: number | null = null;
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   hydration 失败、超时或终端模式切换后必须释放单飞门闩，否则后续滚轮永远不能重试。
+     *
+     * Code Logic（这个函数做什么）:
+     *   清理 pending 行数与 10 秒兜底 timer；可安全重复调用。
+     */
+    const clearScrollbackHydration = (): void => {
+      scrollbackHydrationPending = false;
+      hydrationSnapshotPendingParse = false;
+      pendingHydratedScrollLines = 0;
+      if (hydrationTimeout !== null) {
+        window.clearTimeout(hydrationTimeout);
+        hydrationTimeout = null;
+      }
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   replay reset 后 xterm 解析大快照是异步的；固定帧数轮询会在繁忙 WebView/长历史下提前放弃。
+     *   必须等 xterm 明确报告 write parsed，才能执行用户原本那次向上滚动。
+     *
+     * Code Logic（这个函数做什么）:
+     *   onWriteParsed 时复核仍为同 session 的活跃 Agent、normal buffer、未启用 mouse tracking；
+     *   baseY 出现后一次应用累计负向行数，否则继续等待下一次 parsed 事件。
+     */
+    const scrollWhenHydrationParsed = (): void => {
+      if (
+        !scrollbackHydrationPending ||
+        !hydrationSnapshotPendingParse ||
+        terminalRef.current !== terminal
+      ) {
+        return;
+      }
+      const active = terminal.buffer.active;
+      if (
+        !agentTranscriptActiveRef.current ||
+        active.type !== 'normal' ||
+        terminal.modes.mouseTrackingMode !== 'none'
+      ) {
+        clearScrollbackHydration();
+        return;
+      }
+      if (active.baseY <= 0) return;
+      const lines = Math.min(-1, pendingHydratedScrollLines);
+      clearScrollbackHydration();
+      terminal.scrollLines(lines);
+    };
     /**
      * Business Logic（为什么需要这个函数）:
      *   Claude 新版会在 main/alternate screen 上维护自己的虚拟 transcript。只按 buffer 类型判断时，
      *   main screen 的全屏重绘会落进 xterm scrollback，向上滚动便会重复最后一屏。
-     *   冷启动 attach 不会重放 Agent 先前发出的 DECSET mouse mode；此时新 xterm 虽报告 none，
-     *   tmux 内仍运行的 Agent 仍期待 SGR。Agent Runtime 的活跃投影用于补回这段丢失状态。
+     *   resume 新会话里 tmux 已有真实 history，但外层 xterm 可能仍是 baseY=0；同时 Claude 并未
+     *   开启 mouse tracking，此时伪造 SGR 不会滚动。该组合必须主动 replay 最新 tmux history。
      *   已协商 mouse 时 xterm 会按指针坐标发 SGR；resume 后输入区高度不固定，
      *   即使把坐标向上估算若干行也可能仍命中输入区，导致事件送达但 transcript 不滚。
      *   PageUp 只在 Scroll 上下文生效，Chat 输入聚焦时整页不动。
      *
      * Code Logic（这个函数做什么）:
-     *   mouse tracking / 活跃 Agent 优先于 buffer 类型：命中时拦截并固定向 transcript 左上角
-     *   发 SGR 64/65；仅未启用 tracking 且没有活跃 Agent 的普通 buffer 交给 xterm。
+     *   活跃 Agent + mode=none 且没有 normal scrollback（含 alternate）时触发 hydration；
+     *   后端返回已渲染的 normal-buffer pane 快照，解析后再执行首次累计滚动；
+     *   已协商 mouse tracking 时固定向 transcript 左上角发 SGR 64/65；已有 baseY 则交给 xterm。
      *   转发前回到底部，退出误入的本地重绘历史。
      */
     terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
@@ -251,7 +309,33 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         mouseTrackingMode,
         agentTranscriptActive: agentTranscriptActiveRef.current,
       });
-      if (action !== 'sgrFallback') return true;
+      if (action === 'scrollback') return true;
+      if (action === 'hydrateScrollback') {
+        // 位于底部时向下滚没有历史语义；交还 xterm no-op，避免无意义 replay。
+        if (event.deltaY >= 0) return true;
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+        const metrics = cursorMetricsRef.current ?? measureTerminalCursorMetrics(viewport, terminal);
+        cursorMetricsRef.current = metrics;
+        const consumed = consumeWorkbenchTerminalWheelLines(
+          event.deltaY,
+          wheelRemainderRef.current,
+          metrics.cellHeight,
+        );
+        wheelRemainderRef.current = consumed.remainder;
+        if (consumed.lines >= 0) return false;
+        pendingHydratedScrollLines = Math.max(
+          -Math.max(1, terminal.rows),
+          pendingHydratedScrollLines + consumed.lines,
+        );
+        if (!scrollbackHydrationPending) {
+          scrollbackHydrationPending = true;
+          hydrationSnapshotPendingParse = false;
+          hydrationTimeout = window.setTimeout(clearScrollbackHydration, 10_000);
+          refreshScrollbackRef.current(sessionId);
+        }
+        return false;
+      }
       if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) {
         return false;
       }
@@ -405,6 +489,13 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       onInput(sessionId, data);
     });
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
+    const writeParsedDisposable = terminal.onWriteParsed(scrollWhenHydrationParsed);
+    // reset 通知必须先于 live writer 注册：先标记 hydration 快照已开始，再让 xterm 排队解析。
+    const unsubscribeHydrationReset = store.subscribeReset(sessionId, () => {
+      if (scrollbackHydrationPending) {
+        hydrationSnapshotPendingParse = true;
+      }
+    });
     const writer = createTerminalLiveWriter({
       terminal,
       source: store,
@@ -479,11 +570,14 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       window.cancelAnimationFrame(layoutRaf);
       liveWriterRef.current?.dispose();
       liveWriterRef.current = null;
+      unsubscribeHydrationReset();
+      clearScrollbackHydration();
       observer.disconnect();
       viewport.removeEventListener('pointerdown', handlePointerDown);
       viewport.removeEventListener('pointerup', handlePointerUp);
       dataDisposable.dispose();
       cursorDisposable.dispose();
+      writeParsedDisposable.dispose();
       pointerDownCellRef.current = null;
       pointerDownPointRef.current = null;
       if (selectPaneDecideTimerRef.current !== null) {

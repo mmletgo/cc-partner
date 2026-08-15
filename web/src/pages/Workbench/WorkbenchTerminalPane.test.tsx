@@ -50,7 +50,9 @@ interface MockTerminal {
   clearSelection: () => void;
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
+  scrollLines: (amount: number) => void;
   scrollToBottom: () => void;
+  emitWriteParsed: () => void;
   dispose: () => void;
   attachCustomWheelEventHandler: (handler: (event: WheelEvent) => boolean) => void;
   invokeWheel: (event: Partial<WheelEvent>) => boolean | undefined;
@@ -105,6 +107,7 @@ vi.mock('@xterm/xterm', () => {
     options: { theme?: unknown } = {};
     private dataCb: ((data: string) => void) | null = null;
     private cursorMoveCb: (() => void) | null = null;
+    private writeParsedCb: (() => void) | null = null;
     private resizeCb: (() => void) | null = null;
     private selectionText = '';
     // Business Logic: 记录自己的 instance index，让 write/clear 日志能溯源到具体实例。
@@ -128,6 +131,18 @@ vi.mock('@xterm/xterm', () => {
     onCursorMove(cb: () => void) {
       this.cursorMoveCb = cb;
       return { dispose: () => { if (this.cursorMoveCb === cb) this.cursorMoveCb = null; } };
+    }
+    onWriteParsed(cb: () => void) {
+      this.writeParsedCb = cb;
+      return {
+        dispose: () => {
+          if (this.writeParsedCb === cb) this.writeParsedCb = null;
+        },
+      };
+    }
+    /** 触发 xterm 完成解析通知，供 hydration 时机测试使用。 */
+    emitWriteParsed() {
+      this.writeParsedCb?.();
     }
     /**
      * Business Logic（为什么需要这个方法）:
@@ -172,6 +187,7 @@ vi.mock('@xterm/xterm', () => {
     getSelection() {
       return this.selectionText;
     }
+    scrollLines = vi.fn();
     scrollToBottom = vi.fn();
     setSelection(text: string) {
       this.selectionText = text;
@@ -219,10 +235,15 @@ interface ControlledBuffer {
 
 interface ControlledProviderProps {
   store: ReturnType<typeof createWorkbenchTerminalBufferStore>;
+  refreshScrollback?: (sessionId: string) => void;
   children: ReactNode;
 }
 
-function ControlledBuffersProvider({ store, children }: ControlledProviderProps): ReactElement {
+function ControlledBuffersProvider({
+  store,
+  refreshScrollback = () => undefined,
+  children,
+}: ControlledProviderProps): ReactElement {
   const value: WorkbenchTerminalBuffersContextValue = {
     store,
     resetBuffer: (sessionId: string) => store.reset(sessionId),
@@ -231,6 +252,7 @@ function ControlledBuffersProvider({ store, children }: ControlledProviderProps)
     subscribeHistorySyncFailures: () => () => undefined,
     getHistorySyncFailuresRevision: () => 0,
     retryHistorySync: () => undefined,
+    refreshScrollback,
     getStartupBaselineFailure: () => null,
     subscribeStartupBaselineFailure: () => () => undefined,
     getStartupBaselineFailureRevision: () => 0,
@@ -294,6 +316,7 @@ interface PaneHostProps {
   onInput?: (sessionId: string, data: string) => void;
   onResize?: (sessionId: string, cols: number, rows: number) => void;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
+  refreshScrollback?: (sessionId: string) => void;
   placeholder?: string;
 }
 
@@ -314,6 +337,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
     onInput,
     onResize,
     onCursorAnchorChange,
+    refreshScrollback,
     placeholder = 'placeholder',
   } = props;
   const stableInput = useCallback(
@@ -331,7 +355,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
   // Business Logic: 生产路径在 inactive pane / 非 terminal 视图会传 undefined；
   // 测试 harness 必须原样透传，不能把 undefined 包装成永远 truthy 的 no-op。
   return (
-    <ControlledBuffersProvider store={store}>
+    <ControlledBuffersProvider store={store} refreshScrollback={refreshScrollback}>
       <WorkbenchTerminalPane
         session={session}
         placeholder={placeholder}
@@ -893,9 +917,10 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 });
 
 describe('WorkbenchTerminalPane — Claude resume wheel', () => {
-  test('restored active Agent prefers captured tmux scrollback and only falls back without history', () => {
+  test('active Agent uses captured history and hydrates resume scrollback instead of injecting unnegotiated SGR', () => {
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
     const onInput = vi.fn();
+    const refreshScrollback = vi.fn();
     const session = buildSession({ id: 's1' });
     const { rerender } = render(
       <PaneHost
@@ -903,6 +928,7 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
         store={store}
         onInput={onInput}
         agentTranscriptActive={false}
+        refreshScrollback={refreshScrollback}
       />,
     );
     const terminal = latestTerminal();
@@ -919,6 +945,7 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
         store={store}
         onInput={onInput}
         agentTranscriptActive={true}
+        refreshScrollback={refreshScrollback}
       />,
     );
 
@@ -927,10 +954,48 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     expect(terminal.scrollToBottom).not.toHaveBeenCalled();
     expect(onInput).not.toHaveBeenCalled();
 
+    terminal.buffer.active.type = 'alternate';
     terminal.buffer.active.baseY = 0;
     expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
-    expect(terminal.scrollToBottom).toHaveBeenCalledTimes(1);
-    expect(onInput).toHaveBeenCalledWith('s1', '\x1b[<64;1;1M');
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(refreshScrollback).toHaveBeenCalledWith('s1');
+    expect(refreshScrollback).toHaveBeenCalledTimes(1);
+    expect(terminal.scrollToBottom).not.toHaveBeenCalled();
+    expect(onInput).not.toHaveBeenCalled();
+
+    terminal.buffer.active.type = 'normal';
+    terminal.buffer.active.baseY = 80;
+    act(() => {
+      store.reset('s1', 'hydrated history');
+      terminal.emitWriteParsed();
+    });
+    expect(terminal.scrollLines).toHaveBeenCalledWith(-2);
+  });
+
+  test('hydration does not auto-scroll after Claude enables mouse tracking', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const refreshScrollback = vi.fn();
+    render(
+      <PaneHost
+        session={buildSession({ id: 's1' })}
+        store={store}
+        agentTranscriptActive
+        refreshScrollback={refreshScrollback}
+      />,
+    );
+    const terminal = latestTerminal();
+    terminal.buffer.active.baseY = 0;
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+
+    terminal.buffer.active.baseY = 80;
+    terminal.modes.mouseTrackingMode = 'vt200';
+    act(() => {
+      store.reset('s1', 'hydrated history');
+      terminal.emitWriteParsed();
+    });
+
+    expect(refreshScrollback).toHaveBeenCalledTimes(1);
+    expect(terminal.scrollLines).not.toHaveBeenCalled();
   });
 
   test('mouse-tracked main screen forwards wheel to Claude instead of xterm redraw history', () => {

@@ -25,7 +25,7 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     ).toBe('scrollback');
   });
 
-  test('uses captured tmux scrollback for a restored active Agent before falling back to SGR', () => {
+  test('uses captured tmux scrollback and hydrates missing resume history before any SGR fallback', () => {
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'normal',
@@ -41,7 +41,15 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
         mouseTrackingMode: 'none',
         agentTranscriptActive: true,
       }),
-    ).toBe('sgrFallback');
+    ).toBe('hydrateScrollback');
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'alternate',
+        baseY: 0,
+        mouseTrackingMode: 'none',
+        agentTranscriptActive: true,
+      }),
+    ).toBe('hydrateScrollback');
   });
 
   test('routes a mouse-tracked normal buffer to Claude instead of replaying local redraw frames', () => {
@@ -55,7 +63,7 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     ).toBe('sgrFallback');
   });
 
-  test('always injects transcript-targeted SGR on the alternate screen', () => {
+  test('non-agent alternate screen keeps the transcript-targeted SGR fallback', () => {
     // Claude 输入框聚焦时 PageUp 不在 Chat 上下文；SGR 按落点命中。
     // 指针在底部输入区时必须自己发打在 transcript 的 SGR，不能交给 xterm 原坐标。
     expect(

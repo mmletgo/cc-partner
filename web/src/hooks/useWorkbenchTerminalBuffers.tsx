@@ -181,6 +181,15 @@ export function WorkbenchTerminalBuffersProvider({
   >(null);
   /**
    * Business Logic（为什么需要这个 ref）:
+   *   普通 baseline/gap/presence replay 必须保持纯内存读取；只有用户向上滚的 session
+   *   才能请求真实 owner capture tmux history。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   保存待 hydration 的 sessionId；单飞请求在真正发起时选择专用 API，成功或永久失败后删除。
+   */
+  const scrollbackHydrationRequestedBySessionRef = useRef<Set<string>>(new Set());
+  /**
+   * Business Logic（为什么需要这个 ref）:
    *   retryStartupBaseline 在 effect 外暴露，但 list+schedule 定义在 effect 内（R13 M1）。
    *
    * Code Logic（这个 ref 做什么）:
@@ -348,6 +357,27 @@ export function WorkbenchTerminalBuffersProvider({
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   Claude resume 可能把历史留在 tmux 内部而不是外层 xterm；首次滚轮需强制 replay，
+   *   与错误重试不同，它在当前无 failure 时也必须合法触发。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清理旧恢复状态，复用 beginStartupBaselineReplay + requestSessionReplay 的单飞 cutover。
+   */
+  const refreshScrollback = useCallback(
+    (sessionId: string): void => {
+      scrollbackHydrationRequestedBySessionRef.current.add(sessionId);
+      clearHistorySyncFailure(sessionId);
+      clearReplayRecovery(sessionId);
+      const current = ensureCutoverState(sessionId);
+      const { state, requestEpoch } = beginStartupBaselineReplay(current);
+      cutoverBySessionRef.current.set(sessionId, state);
+      requestSessionReplayRef.current?.(sessionId, requestEpoch);
+    },
+    [clearHistorySyncFailure, clearReplayRecovery, ensureCutoverState],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   startupBaselineFailure 变更必须让订阅者 re-render（R13 M1）。
    *
    * Code Logic（这个函数做什么）:
@@ -438,6 +468,7 @@ export function WorkbenchTerminalBuffersProvider({
   const removeBuffer = useCallback((sessionId: string) => {
     heldLiveBySessionRef.current.delete(sessionId);
     cutoverBySessionRef.current.delete(sessionId);
+    scrollbackHydrationRequestedBySessionRef.current.delete(sessionId);
     const entry = replayRecoveryBySessionRef.current.get(sessionId);
     if (entry?.timerId != null) {
       globalThis.clearTimeout(entry.timerId);
@@ -452,6 +483,8 @@ export function WorkbenchTerminalBuffersProvider({
     let cancelled = false;
     let unlistenOutput: (() => void) | undefined;
     let unlistenResync: (() => void) | undefined;
+    const scrollbackHydrationRequests =
+      scrollbackHydrationRequestedBySessionRef.current;
 
     /**
      * Business Logic（为什么需要这个函数）:
@@ -631,9 +664,13 @@ export function WorkbenchTerminalBuffersProvider({
         let scheduleRecoverable = false;
         let consecutiveFailures = 0;
         let clearedState: ReturnType<typeof ensureCutoverState> | null = null;
+        const hydrateScrollback =
+          scrollbackHydrationRequestedBySessionRef.current.has(sessionId);
 
         try {
-          const replay = await workbenchApi.sessions.replay(sessionId);
+          const replay = hydrateScrollback
+            ? await workbenchApi.sessions.hydrateScrollback(sessionId)
+            : await workbenchApi.sessions.replay(sessionId);
           if (cancelled) {
             cancelledExit = true;
             return;
@@ -650,6 +687,9 @@ export function WorkbenchTerminalBuffersProvider({
             requestEpoch,
             authorityId,
           );
+          if (applySucceeded && hydrateScrollback) {
+            scrollbackHydrationRequestedBySessionRef.current.delete(sessionId);
+          }
         } catch (reason) {
           applySucceeded = false;
           errorClass = classifyTerminalReplayError(reason);
@@ -717,6 +757,9 @@ export function WorkbenchTerminalBuffersProvider({
           return;
         }
         if (permanentErrorClass != null && clearedState != null) {
+          if (hydrateScrollback) {
+            scrollbackHydrationRequestedBySessionRef.current.delete(sessionId);
+          }
           clearReplayRecovery(sessionId);
           setHistorySyncFailure(
             sessionId,
@@ -1001,6 +1044,7 @@ export function WorkbenchTerminalBuffersProvider({
         }
         replayRecoveryBySessionRef.current.delete(sessionId);
       }
+      scrollbackHydrationRequests.clear();
       if (historySyncFailureBySessionRef.current.size > 0) {
         historySyncFailureBySessionRef.current.clear();
         notifyHistorySyncListeners();
@@ -1030,6 +1074,7 @@ export function WorkbenchTerminalBuffersProvider({
       subscribeHistorySyncFailures,
       getHistorySyncFailuresRevision,
       retryHistorySync,
+      refreshScrollback,
       getStartupBaselineFailure,
       subscribeStartupBaselineFailure,
       getStartupBaselineFailureRevision,
@@ -1041,6 +1086,7 @@ export function WorkbenchTerminalBuffersProvider({
       getStartupBaselineFailure,
       getStartupBaselineFailureRevision,
       removeBuffer,
+      refreshScrollback,
       resetBuffer,
       retryHistorySync,
       retryStartupBaseline,

@@ -8,7 +8,7 @@
  *   的权威活跃状态分流，不能把全屏重绘形成的本地 scrollback 当成真实对话历史。
  *
  * Code Logic（这个模块做什么）:
- *   - resolveWorkbenchTerminalWheelAction：scrollback / sgrFallback；
+ *   - resolveWorkbenchTerminalWheelAction：scrollback / hydrateScrollback / sgrFallback；
  *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65。
  */
 
@@ -16,7 +16,10 @@ export type WorkbenchTerminalBufferType = 'normal' | 'alternate';
 
 export type WorkbenchTerminalMouseTrackingMode = 'none' | 'x10' | 'vt200' | 'drag' | 'any';
 
-export type WorkbenchTerminalWheelAction = 'scrollback' | 'sgrFallback';
+export type WorkbenchTerminalWheelAction =
+  | 'scrollback'
+  | 'hydrateScrollback'
+  | 'sgrFallback';
 
 export interface WorkbenchTerminalWheelInput {
   bufferType: WorkbenchTerminalBufferType;
@@ -41,7 +44,9 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
  *   也不能发 PageUp：Chat 上下文没有 pageup 绑定，输入框聚焦时整页不动。
  *
  * Code Logic（这个函数做什么）:
- *   活跃 Agent + normal + mode=none + baseY>0 → scrollback；
+ *   活跃 Agent + normal + mode=none + baseY>0 → scrollback；同一 Agent 在 mode=none 时若
+ *   normal/baseY=0 或 alternate → hydrateScrollback（tmux 返回已渲染 normal-buffer 快照），
+ *   避免把无效 SGR 注入未开启 mouse tracking 的 Claude；
  *   否则 mouseTrackingMode !== none 或 agentTranscriptActive → sgrFallback；
  *   否则 normal → scrollback、alternate → sgrFallback。
  */
@@ -50,11 +55,11 @@ export function resolveWorkbenchTerminalWheelAction(
 ): WorkbenchTerminalWheelAction {
   if (
     input.agentTranscriptActive &&
-    input.bufferType === 'normal' &&
-    input.mouseTrackingMode === 'none' &&
-    input.baseY > 0
+    input.mouseTrackingMode === 'none'
   ) {
-    return 'scrollback';
+    return input.bufferType === 'normal' && input.baseY > 0
+      ? 'scrollback'
+      : 'hydrateScrollback';
   }
   if (input.mouseTrackingMode !== 'none') return 'sgrFallback';
   if (input.agentTranscriptActive) return 'sgrFallback';

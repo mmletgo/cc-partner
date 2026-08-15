@@ -18,13 +18,13 @@ use crate::commands::workbench::{
     create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
     focus_workbench_session_for_state, get_agent_session_preview_for_state,
     get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
-    list_workbench_dir_for_state, list_workbench_git_commits_for_state,
-    list_workbench_sessions_for_state, list_workbench_worktrees_for_state,
-    local_close_workbench_pane, local_close_workbench_session, local_commit_workbench_worktree,
-    local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
-    local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
-    local_get_workbench_path_info, local_get_workbench_worktree, local_list_workbench_dir,
-    local_list_workbench_git_commits, local_list_workbench_sessions,
+    hydrate_workbench_session_scrollback_for_state, list_workbench_dir_for_state,
+    list_workbench_git_commits_for_state, list_workbench_sessions_for_state,
+    list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
+    local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
+    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
+    local_focus_workbench_session, local_get_workbench_path_info, local_get_workbench_worktree,
+    local_list_workbench_dir, local_list_workbench_git_commits, local_list_workbench_sessions,
     local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
     local_preview_workbench_html_asset, local_preview_workbench_sqlite,
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
@@ -1219,14 +1219,12 @@ pub async fn replay_workbench_session(
     ensure_remote_gateway_local_session_id(&state, &req.session_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.replay"))?;
-    // R15 M1：统一原子 presence；RestoreInProgress → unavailable（retryable）。
-    state
-        .workbench_sessions
-        .require_live_for_replay(&req.session_id)
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.replay"))?;
-    let mut replay = state.workbench_sessions.replay(&req.session_id);
-    // P2P 对端 replay 必须携带本机 owner，便于调用方 cutover 按 authority 绑定。
-    replay.owner_instance_id = Some(state.config_runtime.owner_instance_id().to_string());
+    let replay = if req.refresh_history {
+        hydrate_workbench_session_scrollback_for_state(&state, req.session_id).await
+    } else {
+        replay_workbench_session_for_state(&state, req.session_id).await
+    }
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.replay"))?;
     Ok(Json(replay))
 }
 
@@ -2037,9 +2035,12 @@ pub async fn mobile_replay_workbench_session(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteReplaySessionReq>,
 ) -> P2pResult<Json<WorkbenchSessionReplayDto>> {
-    let replay = replay_workbench_session_for_state(&state, req.session_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.replay"))?;
+    let replay = if req.refresh_history {
+        hydrate_workbench_session_scrollback_for_state(&state, req.session_id).await
+    } else {
+        replay_workbench_session_for_state(&state, req.session_id).await
+    }
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.replay"))?;
     Ok(Json(replay))
 }
 
@@ -2598,6 +2599,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(req.session_id, "session-1");
+        assert!(!req.refresh_history);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     resume scrollback hydration 必须是显式协议位，普通 replay 链路不能隐式 capture tmux。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化 camelCase `refreshHistory=true` 并断言路由可精确选择 hydration helper。
+    #[test]
+    fn remote_replay_session_req_accepts_explicit_history_refresh() {
+        let req: RemoteReplaySessionReq = serde_json::from_value(serde_json::json!({
+            "sessionId": "session-1",
+            "refreshHistory": true
+        }))
+        .unwrap();
+
+        assert!(req.refresh_history);
     }
 
     /// Business Logic（为什么需要这个测试）:

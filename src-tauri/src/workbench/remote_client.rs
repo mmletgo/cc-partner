@@ -1156,6 +1156,28 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/sessions/replay"),
             &RemoteReplaySessionReq {
                 session_id: session_id.to_string(),
+                refresh_history: false,
+            },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户在外层 xterm 首次向上滚时，resume 历史必须由持有真实 tmux window 的远端 owner 捕获。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     向既有 replay 路由发送 `refreshHistory=true`，返回 generation-bound replay 快照。
+    pub async fn hydrate_scrollback(
+        &self,
+        base_url: &str,
+        session_id: &str,
+    ) -> Result<WorkbenchSessionReplayDto, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/sessions/replay"),
+            &RemoteReplaySessionReq {
+                session_id: session_id.to_string(),
+                refresh_history: true,
             },
             RemoteRequestTimeoutKind::Short,
         )
@@ -2579,6 +2601,15 @@ mod tests {
         assert_eq!(replay.last_seq, 42);
         let body = seen_body.lock().unwrap().clone().unwrap();
         assert_eq!(body["sessionId"], "inner-session");
+        assert_eq!(body["refreshHistory"], false);
+
+        client
+            .hydrate_scrollback(&format!("http://{addr}"), "inner-session")
+            .await
+            .unwrap();
+        let hydration_body = seen_body.lock().unwrap().clone().unwrap();
+        assert_eq!(hydration_body["sessionId"], "inner-session");
+        assert_eq!(hydration_body["refreshHistory"], true);
     }
 
     /// Business Logic（为什么需要这个测试）:

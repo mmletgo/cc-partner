@@ -71,6 +71,15 @@ export interface WorkbenchTerminalBuffersContextValue {
   retryHistorySync: (sessionId: string) => void;
   /**
    * Business Logic（为什么需要这个方法）:
+   *   Agent resume 后真实旧消息可能只在 tmux history，外层 xterm `baseY=0`；用户首次向上滚动时
+   *   需要主动重拉 replay，让后端把最新 tmux scrollback 注入受保护前缀。
+   *
+   * Code Logic（这个方法做什么）:
+   *   为 session 抬高 cutover epoch 并复用既有单飞 replay/重试/authority 合同。
+   */
+  refreshScrollback: (sessionId: string) => void;
+  /**
+   * Business Logic（为什么需要这个方法）:
    *   启动 sessions.list 永久失败后 UI 需展示可观察状态（R13 M1）。
    *
    * Code Logic（这个方法做什么）:

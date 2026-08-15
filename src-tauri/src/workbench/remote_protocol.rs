@@ -356,11 +356,14 @@ pub struct RemoteSessionReq {
 ///     移动端首次打开远端终端时，需要在订阅增量事件前按 sessionId 拉取最近输出。
 ///
 /// Code Logic（这个结构体做什么）:
-///     使用 camelCase 序列化 `{sessionId}`，供 client 与 axum route 共用。
+///     使用 camelCase 序列化 `{sessionId, refreshHistory}`；缺省 false 保持普通 replay
+///     只读内存 ring，true 仅用于用户滚轮触发的 tmux history hydration。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteReplaySessionReq {
     pub session_id: String,
+    #[serde(default)]
+    pub refresh_history: bool,
 }
 
 /// 远端当前聚焦会话查询请求体。

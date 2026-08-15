@@ -29,10 +29,19 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Workbench 需要向 tmux 声明的外层终端鼠标能力。
 const WORKBENCH_TMUX_MOUSE_FEATURE: &str = "xterm*:mouse";
+
+/// 同一进程内重复 scrollback hydration 的最小间隔。
+///
+/// Business Logic（为什么需要这个常量）:
+///     显式 hydration 路由处于固定 LAN 边界，连续请求不能无界放大为 tmux 子进程风暴。
+///
+/// Code Logic（这个常量做什么）:
+///     同 generation 在短窗口内复用刚生成的 replay 快照；全局锁同时把 capture-pane 并发压到 1。
+const TMUX_HISTORY_HYDRATION_COOLDOWN: Duration = Duration::from_millis(500);
 
 /// 同一后端进程内串行化 server-level terminal-features 对账，避免并发 session 同时追加。
 static TMUX_TERMINAL_FEATURE_RECONCILE_LOCK: Mutex<()> = Mutex::new(());
@@ -383,7 +392,7 @@ struct SessionReplayBuffer {
     max_chars: usize,
     /// 绑定本 buffer 的 live 实例世代（R19 H1）。
     generation: u64,
-    /// 冷启动从 tmux 捕获的真实 scrollback；必须独立于高频 TUI live ring，避免几秒内被末屏重绘挤掉。
+    /// 冷恢复或运行中 hydration 从 tmux 捕获的真实 scrollback/pane 快照；独立于高频 live ring。
     restored_prefix: String,
     restored_prefix_truncated: bool,
     /// 测试与内部裁剪需要直接观察 deque 长度与字符计数。
@@ -416,7 +425,7 @@ impl SessionReplayBuffer {
 
     /// Business Logic（为什么需要这个函数）:
     ///     活跃 Agent 会持续重绘当前屏，120k live ring 很快裁掉最早注入的 tmux 历史；
-    ///     冷恢复历史必须有独立、固定上限的前缀，用户重启后才始终能向上滚到真实旧消息。
+    ///     冷恢复/hydration 历史必须有独立、固定上限的前缀，才不会被末屏重绘快速挤掉。
     ///
     /// Code Logic（这个函数做什么）:
     ///     按 Unicode scalar 保留历史尾部最多 80k 字符；发生裁剪时优先前进到下一条 CRLF
@@ -442,6 +451,21 @@ impl SessionReplayBuffer {
             .unwrap_or(suffix);
         self.restored_prefix = aligned_suffix.to_string();
         self.restored_prefix_truncated = true;
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     运行中 Agent 的 live ring 可能只包含 alternate-screen 控制流；把 tmux 快照简单前置后，
+    ///     xterm 最终仍切回无 scrollback 的 alternate buffer，历史依旧不可滚，并可能与旧 ring 重叠。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 tmux 已渲染的“历史 + 当前 pane”纯快照替换旧 prefix/live chunks，保留 lastSeq 作为
+    ///     held-live cutover 水位；后续新输出再从空 live ring 接续。
+    fn replace_with_restored_snapshot(&mut self, snapshot: &str) {
+        self.set_restored_prefix(snapshot);
+        self.chunks.clear();
+        self.char_count = 0;
+        self.byte_count = 0;
+        self.truncated = false;
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -520,7 +544,7 @@ impl SessionReplayBuffer {
     ///     HTTP replay route 需要返回当前 session 的一致性快照，避免暴露内部可变 buffer。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先写不会被 live 淘汰的冷恢复前缀，再按 deque 顺序拼接 live chunk，
+    ///     先写不会被 live 淘汰的恢复/hydration 前缀，再按 deque 顺序拼接 live chunk，
     ///     补入 session_id 与 truncated/last_seq 元数据。
     fn snapshot(&self, session_id: &str) -> WorkbenchSessionReplayDto {
         let mut buffer = String::with_capacity(self.restored_prefix.len() + self.byte_count);
@@ -1235,6 +1259,25 @@ fn tmux_capture_history_args(target: &str) -> Vec<String> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Claude resume 可能仍停在 alternate screen 且没有 mouse tracking；history-only 前缀会落入
+///     xterm normal buffer，但旧 live ring 随后的 DECSET 又把 active buffer 切回 alternate，仍不可滚。
+///
+/// Code Logic（这个函数做什么）:
+///     构造从 history 起点到当前 pane 末行的 `capture-pane` 参数；tmux 返回已渲染文本而不是
+///     alternate-screen 切换控制流，使 hydration baseline 最终留在可滚动 normal buffer。
+fn tmux_capture_scrollback_snapshot_args(target: &str) -> Vec<String> {
+    vec![
+        "capture-pane".to_string(),
+        "-p".to_string(),
+        "-e".to_string(),
+        "-S".to_string(),
+        "-".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     tmux capture-pane 以 LF 分隔物理行，而 Workbench xterm 关闭了 convertEol；
 ///     直接写 LF 会只下移不回到首列，历史内容会阶梯式错位。
 ///
@@ -1272,6 +1315,28 @@ fn capture_tmux_history_for_replay(row: &WorkbenchSessionRow) -> Result<String, 
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let history = run_tmux_command(&tmux, &arg_refs)?;
     Ok(normalize_tmux_history_for_terminal(&history))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     运行中 resume hydration 需要一个可直接落入 xterm normal buffer 的完整 pane baseline，
+///     不能把 history-only 文本接到可能再次进入 alternate screen 的旧控制流前面。
+///
+/// Code Logic（这个函数做什么）:
+///     对精确 tmux window/pane 捕获 scrollback + 当前可见 pane，保留文本属性并规范化换行。
+fn capture_tmux_scrollback_snapshot_for_replay(
+    row: &WorkbenchSessionRow,
+) -> Result<String, AppError> {
+    if row.backend != TMUX_BACKEND {
+        return Ok(String::new());
+    }
+    let Some(tmux) = available_tmux_command() else {
+        return Ok(String::new());
+    };
+    let target = tmux_target_for_row(row)?;
+    let args = tmux_capture_scrollback_snapshot_args(&target);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let snapshot = run_tmux_command(&tmux, &arg_refs)?;
+    Ok(normalize_tmux_history_for_terminal(&snapshot))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -3067,6 +3132,8 @@ pub async fn wait_for_shared_restore(
 pub struct WorkbenchSessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
+    /// 最近一次 tmux history hydration；锁持有期间包含 capture-pane，形成全局并发上限 1。
+    tmux_history_hydration: Arc<Mutex<Option<(String, u64, Instant)>>>,
     /// 下一个可分配的 session generation（从 1 起单调递增）。
     next_generation: Arc<AtomicU64>,
     /// 已 close 但 lease 未 drain 的 generation tombstone（R21 H2）。
@@ -3445,6 +3512,7 @@ impl WorkbenchSessionRegistry {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             replay_buffers: Arc::new(Mutex::new(HashMap::new())),
+            tmux_history_hydration: Arc::new(Mutex::new(None)),
             next_generation: Arc::new(AtomicU64::new(1)),
             closing_publish: Arc::new(Mutex::new(HashMap::new())),
             restoring: Arc::new(Mutex::new(HashMap::new())),
@@ -4413,6 +4481,109 @@ impl WorkbenchSessionRegistry {
             },
             |buffer| buffer.snapshot(session_id),
         )
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Claude/Codex 在 tmux window 内 resume 历史会话时，会把旧消息写进 tmux 自己的
+    ///     history，而外层 Workbench xterm 只收到原地重绘，导致 xterm `baseY=0`、滚轮无历史可滚。
+    ///     replay 必须在用户请求历史同步时重新抓取当前 tmux scrollback，不能只在应用冷启动时抓一次。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     全局串行读取 live row + generation，对 tmux 捕获“scrollback + 当前 pane”已渲染快照；
+    ///     完成后在 sessions 锁内再次校验 generation，用快照替换旧 prefix/live ring 并原子生成 DTO。
+    ///     raw PTY 直接返回当前快照；成功空 pane 会清除旧内容，session 换代返回可恢复错误。
+    pub fn hydrate_tmux_history_replay(
+        &self,
+        session_id: &str,
+    ) -> Result<WorkbenchSessionReplayDto, AppError> {
+        let mut hydration = self
+            .tmux_history_hydration
+            .lock()
+            .expect("tmux history hydration 锁中毒");
+        self.require_live_for_replay(session_id)?;
+        let (row, generation) = {
+            let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+            let handle = sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            (handle.row.clone(), handle.generation)
+        };
+        let recently_hydrated = hydration.as_ref().is_some_and(
+            |(hydrated_session_id, hydrated_generation, completed_at)| {
+                hydrated_session_id == session_id
+                    && *hydrated_generation == generation
+                    && completed_at.elapsed() < TMUX_HISTORY_HYDRATION_COOLDOWN
+            },
+        );
+        let capture_base_seq = if row.backend == TMUX_BACKEND && !recently_hydrated {
+            let buffers = self
+                .replay_buffers
+                .lock()
+                .expect("workbench replay buffers 锁中毒");
+            let buffer = buffers
+                .get(session_id)
+                .ok_or_else(|| AppError::unavailable("session_replay_not_ready".to_string()))?;
+            if buffer.generation != generation {
+                return Err(AppError::unavailable(
+                    "session_changed_during_hydration".to_string(),
+                ));
+            }
+            Some(buffer.last_seq)
+        } else {
+            None
+        };
+        let captured_snapshot = if row.backend == TMUX_BACKEND && !recently_hydrated {
+            Some(capture_tmux_scrollback_snapshot_for_replay(&row)?)
+        } else {
+            None
+        };
+
+        // generation 复核与 prefix commit/snapshot 必须在同一 sessions 临界区；close 无法在
+        // 两者之间移除旧代并插入新代，从而不会返回空成功或把旧 capture 写入后继实例。
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        if restoring.contains_key(session_id) {
+            return Err(AppError::unavailable(
+                "session_restore_in_progress".to_string(),
+            ));
+        }
+        let handle = sessions
+            .get(session_id)
+            .ok_or_else(|| AppError::unavailable("session_changed_during_hydration".to_string()))?
+            .lock()
+            .expect("workbench session 锁中毒");
+        if handle.generation != generation || handle.durability != SessionDurability::Ready {
+            return Err(AppError::unavailable(
+                "session_changed_during_hydration".to_string(),
+            ));
+        }
+        let mut buffers = self
+            .replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒");
+        let buffer = buffers
+            .get_mut(session_id)
+            .ok_or_else(|| AppError::unavailable("session_replay_not_ready".to_string()))?;
+        if buffer.generation != generation {
+            return Err(AppError::unavailable(
+                "session_changed_during_hydration".to_string(),
+            ));
+        }
+        if let Some(snapshot) = captured_snapshot.as_deref() {
+            // capture 期间若 reader 已推进 seq，快照与 cutover 水位不再原子；保留旧 ring 并让
+            // Provider 按 recoverable 策略重试，禁止用较新 lastSeq 吞掉前端 held live。
+            if capture_base_seq != Some(buffer.last_seq) {
+                return Err(AppError::unavailable(
+                    "session_output_changed_during_hydration".to_string(),
+                ));
+            }
+            // capture 成功但 pane 为空也必须清掉旧 prefix/live ring，禁止复活陈旧历史。
+            buffer.replace_with_restored_snapshot(snapshot);
+            *hydration = Some((session_id.to_string(), generation, Instant::now()));
+        }
+        Ok(buffer.snapshot(session_id))
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -7759,6 +7930,27 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     运行中 hydration 必须丢弃会把 xterm 切回 alternate screen 的旧 live 控制流，同时保留
+    ///     lastSeq 供并发 live cutover，避免历史可见但新输出重复或丢失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先写含 alternate DECSET 的旧 chunk，再以已渲染 pane 快照替换，断言旧控制流消失、
+    ///     lastSeq 不变且后续 live 能继续追加。
+    #[test]
+    fn hydration_snapshot_replaces_old_live_control_ring_and_keeps_sequence() {
+        let mut buffer = SessionReplayBuffer::new(100, 9);
+        assert!(buffer.append_if_generation("\u{1b}[?1049hCURRENT", 7, 9));
+
+        buffer.replace_with_restored_snapshot("EARLY\r\nCURRENT");
+        assert!(buffer.append_if_generation("NEXT", 8, 9));
+
+        let snapshot = buffer.snapshot("session-hydrated");
+        assert_eq!(snapshot.buffer, "EARLY\r\nCURRENTNEXT");
+        assert_eq!(snapshot.last_seq, 8);
+        assert!(!snapshot.buffer.contains("1049h"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     超长 tmux 历史必须按 UTF-8 与物理行边界裁剪，不能让 replay 从半行或半个中文字符开始。
     ///
     /// Code Logic（这个测试做什么）:
@@ -8245,6 +8437,28 @@ mod tests {
                 "-",
                 "-E",
                 "-1",
+                "-t",
+                "cc-partner-project-project1234abcd:@7",
+            ]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     运行中 resume hydration 要把 history 与当前 pane 一起渲染进 normal buffer，不能只抓
+    ///     history 后再拼接会进入 alternate screen 的旧 live ring。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 hydration capture 从 history 起点到当前屏末尾，不带 `-E -1`。
+    #[test]
+    fn tmux_capture_scrollback_snapshot_args_include_current_screen() {
+        assert_eq!(
+            tmux_capture_scrollback_snapshot_args("cc-partner-project-project1234abcd:@7"),
+            vec![
+                "capture-pane",
+                "-p",
+                "-e",
+                "-S",
+                "-",
                 "-t",
                 "cc-partner-project-project1234abcd:@7",
             ]

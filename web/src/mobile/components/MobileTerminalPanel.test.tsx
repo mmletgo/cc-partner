@@ -161,6 +161,7 @@ function BuffersProvider({
     subscribeHistorySyncFailures: () => () => undefined,
     getHistorySyncFailuresRevision: () => 0,
     retryHistorySync: () => undefined,
+    refreshScrollback: () => undefined,
     getStartupBaselineFailure: () => null,
     subscribeStartupBaselineFailure: () => () => undefined,
     getStartupBaselineFailureRevision: () => 0,

@@ -149,6 +149,17 @@ export function MobileApp(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   桌面 WorkbenchTerminalPane 才使用外层 xterm 的滚轮 hydration；移动端终端有独立 replay 流程。
+   *
+   * Code Logic（这个函数做什么）:
+   *   满足共享 Context 合同，移动端保持 no-op。
+   */
+  const refreshScrollback = useCallback(() => {
+    // mobile terminal panel 不挂载桌面 WorkbenchTerminalPane。
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   AttentionProvider 需要稳定的 loadSnapshot 引用，避免不必要的 effect 重跑。
    *
    * Code Logic（这个函数做什么）:
@@ -168,6 +179,7 @@ export function MobileApp(): ReactElement {
       subscribeHistorySyncFailures,
       getHistorySyncFailuresRevision,
       retryHistorySync,
+      refreshScrollback,
       getStartupBaselineFailure,
       subscribeStartupBaselineFailure,
       getStartupBaselineFailureRevision,
@@ -179,6 +191,7 @@ export function MobileApp(): ReactElement {
       getStartupBaselineFailure,
       getStartupBaselineFailureRevision,
       removeBuffer,
+      refreshScrollback,
       resetBuffer,
       retryHistorySync,
       retryStartupBaseline,

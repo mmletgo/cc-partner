@@ -507,7 +507,22 @@ export const workbenchApi = {
     replay: (sessionId: string) =>
       invokeDecoded(
         'replay_workbench_session',
-        { sessionId },
+        { sessionId, refreshHistory: false },
+        workbenchSessionReplayDecoder,
+      ),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Claude resume 后旧消息可能只在 tmux history；用户首次向上滚时需要由真实 owner
+     *   把这段 history 注入 replay，普通 baseline 不得承担 capture 副作用。
+     *
+     * Code Logic（这个函数做什么）:
+     *   复用 replay Tauri 命令并显式传 `refreshHistory=true`，解码同一 Replay DTO。
+     */
+    hydrateScrollback: (sessionId: string) =>
+      invokeDecoded(
+        'replay_workbench_session',
+        { sessionId, refreshHistory: true },
         workbenchSessionReplayDecoder,
       ),
 
