@@ -315,6 +315,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | WorkbenchSqlitePreview | preview, onSelectTable | Workbench SQLite 只读表/数据预览 |
 | WorkbenchFileWorkspace | tabs, activeTabId, callbacks | Workbench 文件 tab 工作区容器 |
 | WorkbenchSessionSearch | open, onClose, projectId, worktreeId, offline, onResumed | Workbench 终端 Claude session 搜索 Command Palette（⌘K） |
+| WorkbenchPaneTools | canUsePanes, canSwitchPane, remoteWriteDisabled, onSplitPane, onSwitchPane, onClosePane | Workbench 终端窗格操作四合一「窗格」菜单（左右/上下分屏、切换 pane、关闭 pane），触发按钮 + Dialog 弹出四动作 |
 | WorkbenchBrowserWorkspace | surface, transport, project, worktree, onReturnToTerminal | Workbench 桌面/移动端共享浏览器预览工作区，按 surface 选择 iframe proxy URL |
 | WorkbenchBrowserVerificationPanel | previewId, transport | 一键验证当前 live preview：默认 smoke（snapshot/console/screenshot），不提供脚本/selector 输入；复用 Browser Workspace 导航与 tokens |
 

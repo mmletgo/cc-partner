@@ -755,6 +755,9 @@
   "splitPaneDown": "Split down",
   "switchPane": "Switch pane",
   "closePane": "Close current pane",
+  "paneTools": {
+    "open": "Panes"
+  },
   "fitTerminalSize": "Fit size",
   "terminalEnterFullscreen": "Fullscreen",
   "terminalExitFullscreen": "Exit fullscreen",

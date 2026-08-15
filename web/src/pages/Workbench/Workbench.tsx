@@ -30,8 +30,9 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention } from '@/hooks/useAttention';
 import {
-  ArrowRightIcon, BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
+  BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon,
 } from '@/lib/icons';
+import { WorkbenchPaneTools } from '@/components/domain/WorkbenchPaneTools';
 import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
@@ -739,10 +740,58 @@ export function Workbench() {
                 <WorkbenchBatteryBadge />
               </div>
               <p className={styles.workspacePath}>{workspaceLine}</p>
+              {/* 自动化 scope 纯展示标签放在左侧路径下方，给右侧工作区级按钮腾空间 */}
+              <div className={styles.projectAutomationMeta}>
+                <span>{t('workbench:projectAutomation.scope')}</span>
+                <strong>
+                  {t('workbench:projectAutomation.scopeValue', {
+                    project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
+                  })}
+                </strong>
+              </div>
             </div>
           </div>
           <WorkbenchBanner />
           <div className={styles.workspaceHeaderActions}>
+            {/* 工作区级入口（浏览器预览/文件工作区/Agent Ledger）上移到标题行；终端全屏时隐藏，避免 tab 焦点进入被 fixed overlay 盖住的按钮 */}
+            {!terminalFullscreen ? (
+              <Button
+                className={styles.terminalActionButton}
+                variant="secondary"
+                size="sm"
+                icon={<BrowserIcon />}
+                title={t('workbench:browserPreview.openWorkspace')}
+                aria-label={t('workbench:browserPreview.openWorkspace')}
+                data-workbench-responsive-action="true"
+                disabled={!activeProject || !activeWorktree}
+                onClick={() => setWorkspaceView('browser')}
+              >
+                <span data-workbench-responsive-label="true">{t('workbench:browserPreview.openWorkspace')}</span>
+              </Button>
+            ) : null}
+            {!terminalFullscreen ? (
+              <Button
+                className={styles.terminalActionButton}
+                variant="secondary"
+                size="sm"
+                icon={<FileIcon />}
+                title={t('workbench:fileWorkspace.openFiles')}
+                aria-label={t('workbench:fileWorkspace.openFiles')}
+                data-workbench-responsive-action="true"
+                disabled={fileTabs.length === 0}
+                onClick={handleReturnToFiles}
+              >
+                <span data-workbench-responsive-label="true">{t('workbench:fileWorkspace.openFiles')}</span>
+              </Button>
+            ) : null}
+            {/* Agent Ledger 整块保留原条件：仅隐藏触发按钮，Drawer 保持挂载（原样移动） */}
+            <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
+              open={projectCtrl.agentLedgerOpen} localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
+              page={projectCtrl.agentLedgerPage} summary={projectCtrl.agentLedgerSummary}
+              loading={projectCtrl.agentLedgerLoading} loadingMore={projectCtrl.agentLedgerLoadingMore}
+              error={projectCtrl.agentLedgerError} onOpen={projectCtrl.openAgentLedger}
+              onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
+              onRefresh={() => void projectCtrl.refreshAgentLedger()} />
             <Button
               variant="ghost"
               size="sm"
@@ -751,14 +800,6 @@ export function Workbench() {
             >
               {t('workbench:workspaceSnapshot.openButton')}
             </Button>
-            <div className={styles.projectAutomationMeta}>
-              <span>{t('workbench:projectAutomation.scope')}</span>
-              <strong>
-                {t('workbench:projectAutomation.scopeValue', {
-                  project: activeProject?.name ?? t('workbench:projectAutomation.noProject'),
-                })}
-              </strong>
-            </div>
             <Button
               className={styles.projectAutomationButton}
               variant="secondary"
@@ -896,21 +937,6 @@ export function Workbench() {
                       className={styles.terminalActionButton}
                       variant="secondary"
                       size="sm"
-                      icon={<BrowserIcon />}
-                      title={t('workbench:browserPreview.openWorkspace')}
-                      aria-label={t('workbench:browserPreview.openWorkspace')}
-                      data-workbench-responsive-action="true"
-                      disabled={!activeProject || !activeWorktree}
-                      onClick={() => setWorkspaceView('browser')}
-                    >
-                      <span data-workbench-responsive-label="true">{t('workbench:browserPreview.openWorkspace')}</span>
-                    </Button>
-                  ) : null}
-                  {!terminalFullscreen ? (
-                    <Button
-                      className={styles.terminalActionButton}
-                      variant="secondary"
-                      size="sm"
                       icon={<SearchIcon />}
                       title={t('workbench:sessionSearch.open')}
                       aria-label={t('workbench:sessionSearch.open')}
@@ -921,13 +947,6 @@ export function Workbench() {
                       <span data-workbench-responsive-label="true">{t('workbench:sessionSearch.open')}</span>
                     </Button>
                   ) : null}
-                  <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
-                    open={projectCtrl.agentLedgerOpen} localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
-                    page={projectCtrl.agentLedgerPage} summary={projectCtrl.agentLedgerSummary}
-                    loading={projectCtrl.agentLedgerLoading} loadingMore={projectCtrl.agentLedgerLoadingMore}
-                    error={projectCtrl.agentLedgerError} onOpen={projectCtrl.openAgentLedger}
-                    onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
-                    onRefresh={() => void projectCtrl.refreshAgentLedger()} />
                   {!terminalFullscreen ? (
                     <WorkbenchPromptTools
                       hasActiveSession={!!activeSession}
@@ -951,58 +970,21 @@ export function Workbench() {
                   >
                     <span data-workbench-responsive-label="true">{t('workbench:fitTerminalSize')}</span>
                   </Button>
-                  <Button
-                    className={styles.terminalActionButton}
-                    variant="secondary"
-                    size="sm"
-                    icon={<SplitRightIcon />}
-                    title={t('workbench:splitPaneRight')}
-                    aria-label={t('workbench:splitPaneRight')}
-                    data-workbench-responsive-action="true"
-                    disabled={!canUsePanes || remoteWriteDisabled}
-                    onClick={() => void handleSplitPane('right')}
-                  >
-                    <span data-workbench-responsive-label="true">{t('workbench:splitPaneRight')}</span>
-                  </Button>
-                  <Button
-                    className={styles.terminalActionButton}
-                    variant="secondary"
-                    size="sm"
-                    icon={<SplitDownIcon />}
-                    title={t('workbench:splitPaneDown')}
-                    aria-label={t('workbench:splitPaneDown')}
-                    data-workbench-responsive-action="true"
-                    disabled={!canUsePanes || remoteWriteDisabled}
-                    onClick={() => void handleSplitPane('down')}
-                  >
-                    <span data-workbench-responsive-label="true">{t('workbench:splitPaneDown')}</span>
-                  </Button>
-                  <Button
-                    className={styles.terminalActionButton}
-                    variant="secondary"
-                    size="sm"
-                    icon={<ArrowRightIcon />}
-                    title={t('workbench:switchPane')}
-                    aria-label={t('workbench:switchPane')}
-                    data-workbench-responsive-action="true"
-                    disabled={!canSwitchPane || remoteWriteDisabled}
-                    onClick={() => void handleSwitchPane()}
-                  >
-                    <span data-workbench-responsive-label="true">{t('workbench:switchPane')}</span>
-                  </Button>
-                  <Button
-                    className={styles.terminalActionButton}
-                    variant="secondary"
-                    size="sm"
-                    icon={<XIcon />}
-                    title={t('workbench:closePane')}
-                    aria-label={t('workbench:closePane')}
-                    data-workbench-responsive-action="true"
-                    disabled={!canUsePanes || remoteWriteDisabled}
-                    onClick={() => void handleClosePane()}
-                  >
-                    <span data-workbench-responsive-label="true">{t('workbench:closePane')}</span>
-                  </Button>
+                  {/* 窗格四操作（分屏右/下、切换、关闭）收纳进「窗格」菜单；全屏时仍可用 */}
+                  <WorkbenchPaneTools
+                    canUsePanes={canUsePanes}
+                    canSwitchPane={canSwitchPane}
+                    remoteWriteDisabled={remoteWriteDisabled}
+                    onSplitPane={(direction) => {
+                      void handleSplitPane(direction);
+                    }}
+                    onSwitchPane={() => {
+                      void handleSwitchPane();
+                    }}
+                    onClosePane={() => {
+                      void handleClosePane();
+                    }}
+                  />
                   <Button
                     className={styles.terminalActionButton}
                     variant="secondary"
@@ -1016,21 +998,6 @@ export function Workbench() {
                   >
                     <span data-workbench-responsive-label="true">{terminalFullscreenLabel}</span>
                   </Button>
-                  {!terminalFullscreen ? (
-                    <Button
-                      className={styles.terminalActionButton}
-                      variant="secondary"
-                      size="sm"
-                      icon={<FileIcon />}
-                      title={t('workbench:fileWorkspace.openFiles')}
-                      aria-label={t('workbench:fileWorkspace.openFiles')}
-                      data-workbench-responsive-action="true"
-                      disabled={fileTabs.length === 0}
-                      onClick={handleReturnToFiles}
-                    >
-                      <span data-workbench-responsive-label="true">{t('workbench:fileWorkspace.openFiles')}</span>
-                    </Button>
-                  ) : null}
                 </>
               }
             />

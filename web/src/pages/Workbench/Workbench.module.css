@@ -341,15 +341,17 @@
   margin-left: 0;
 }
 
+/* 自动化 scope 标签挂在标题组左侧（路径下方），改为左对齐 */
 .projectAutomationMeta {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  margin-top: var(--space-2);
   color: var(--muted);
   font-size: var(--text-xs);
   line-height: var(--leading-tight);
-  text-align: right;
+  text-align: left;
 }
 
 .projectAutomationMeta strong {
@@ -1458,10 +1460,6 @@
     width: 100%;
     justify-content: space-between;
     margin-left: 0;
-  }
-
-  .projectAutomationMeta {
-    text-align: left;
   }
 
   .automationHeader {

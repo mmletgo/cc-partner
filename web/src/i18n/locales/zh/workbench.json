@@ -748,6 +748,9 @@
   "splitPaneDown": "上下分屏",
   "switchPane": "切换 pane",
   "closePane": "关闭当前 pane",
+  "paneTools": {
+    "open": "窗格"
+  },
   "fitTerminalSize": "适应尺寸",
   "terminalEnterFullscreen": "全屏",
   "terminalExitFullscreen": "退出全屏",

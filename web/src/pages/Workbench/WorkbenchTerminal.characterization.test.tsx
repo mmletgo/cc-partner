@@ -103,8 +103,11 @@ describe('Workbench terminal domain (characterization)', () => {
       buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
       buildDependencyContextValue(),
     );
-    // 等 activeSession 真正建立，split 按钮才会启用。
+    // 等 activeSession 真正建立，窗格菜单触发按钮才会启用。
     await waitForInvoke('focus_workbench_session');
+
+    // 窗格操作已收纳进「窗格」菜单：先打开菜单，再点击菜单内动作。
+    fireEvent.click(screen.getByRole('button', { name: '窗格' }));
 
     // 点击“左右分屏”触发 split_workbench_pane { direction: 'right' }。
     fireEvent.click(screen.getByRole('button', { name: '左右分屏' }));
@@ -116,6 +119,7 @@ describe('Workbench terminal domain (characterization)', () => {
     });
 
     // 点击“上下分屏”触发 split_workbench_pane { direction: 'down' }。
+    fireEvent.click(screen.getByRole('button', { name: '窗格' }));
     fireEvent.click(screen.getByRole('button', { name: '上下分屏' }));
     await waitFor(() => {
       const calls = invokeCallsFor('split_workbench_pane').filter(
@@ -125,6 +129,7 @@ describe('Workbench terminal domain (characterization)', () => {
     });
 
     // 点击“关闭当前 pane”触发 close_workbench_pane。
+    fireEvent.click(screen.getByRole('button', { name: '窗格' }));
     fireEvent.click(screen.getByRole('button', { name: '关闭当前 pane' }));
     await waitForInvoke('close_workbench_pane');
     expect(invokeCallsFor('close_workbench_pane').length).toBe(1);
