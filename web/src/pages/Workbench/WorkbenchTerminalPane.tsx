@@ -181,6 +181,16 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发打在 transcript 的 SGR。
   const wheelRemainderRef = useRef(0);
   const sessionId = session?.id ?? null;
+  // Business Logic: 冷恢复的后端已经按持久化尺寸 attach 并完成一次必要重绘；
+  // 首次挂载只有 FitAddon 算出的可见尺寸不同才需要再次通知后端，避免同尺寸强制重绘末屏。
+  const persistedSizeRef = useRef<{
+    sessionId: string;
+    cols: number;
+    rows: number;
+  } | null>(null);
+  persistedSizeRef.current = session
+    ? { sessionId: session.id, cols: session.cols, rows: session.rows }
+    : null;
   const store = useWorkbenchTerminalBufferStore();
 
   useEffect(() => {
@@ -406,7 +416,14 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     // Business Logic: 仅在真实 cols/rows 变化时回传后端；同尺寸仍 bump 会强制 tmux 整屏重绘，
     // 并可能重新打开 mouse tracking，从而 clearSelection → “选中立刻消失、无法复制”。
     // 用户点「适应尺寸」走 force=true，保留原 bump 语义。
-    let lastReportedSize: { cols: number; rows: number } | null = null;
+    const persistedSize = persistedSizeRef.current;
+    let lastReportedSize: { cols: number; rows: number } | null =
+      persistedSize?.sessionId === sessionId
+        ? {
+            cols: clampU16(persistedSize.cols, MIN_TERMINAL_COLS),
+            rows: clampU16(persistedSize.rows, MIN_TERMINAL_ROWS),
+          }
+        : null;
     const resize = (options?: { force?: boolean }): void => {
       try {
         // 隐藏 window 不参与布局；等重新可见后由 recovery 路径强制 fit/resize。
@@ -416,8 +433,6 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         if (!force && terminal.getSelection().length > 0) {
           return;
         }
-        const prevCols = terminal.cols;
-        const prevRows = terminal.rows;
         fit.fit();
         // fit 后 cell 尺寸变化，失效缓存；仅 callback 存在时由 emitCursorAnchor 重算。
         cursorMetricsRef.current = null;
@@ -426,9 +441,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         const sizeChanged =
           lastReportedSize == null ||
           lastReportedSize.cols !== cols ||
-          lastReportedSize.rows !== rows ||
-          prevCols !== terminal.cols ||
-          prevRows !== terminal.rows;
+          lastReportedSize.rows !== rows;
         if (force || sizeChanged) {
           lastReportedSize = { cols, rows };
           // force 时即使尺寸相同也回传，后端会 bump 一行强制 SIGWINCH/redraw。
@@ -453,7 +466,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     observer.observe(viewport);
     if (host) observer.observe(host);
     forceResizeRef.current = () => resize({ force: true });
-    resize({ force: true });
+    // 后端 restore 已按持久化尺寸完成一次必要 redraw；同尺寸 mount 不再 force bump。
+    resize();
     // 布局可能在首帧后才完成（absolute 层 + grid 1fr）；补两次延迟 fit。
     const layoutRaf = window.requestAnimationFrame(() => {
       resize();

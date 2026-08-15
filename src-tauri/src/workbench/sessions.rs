@@ -1180,12 +1180,12 @@ fn tmux_resize_window_args(target: &str, cols: u16, rows: u16) -> Vec<String> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造只读取目标 pane 历史区（负行号，排除当前可见屏幕）的 `capture-pane` 参数；
-///     `-T` 去掉行尾空单元，避免空白占满有界 replay ring。
+///     `-e` 保留历史行的文本属性；默认输出已忽略行尾空单元，避免空白占满有界 replay ring。
 fn tmux_capture_history_args(target: &str) -> Vec<String> {
     vec![
         "capture-pane".to_string(),
         "-p".to_string(),
-        "-T".to_string(),
+        "-e".to_string(),
         "-S".to_string(),
         "-".to_string(),
         "-E".to_string(),
@@ -8162,7 +8162,7 @@ mod tests {
     ///     冷启动恢复只能导入 tmux 历史区，不能把当前可见屏幕也捕获后再与 attach 重绘重复拼接。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     锁定 capture-pane 使用负行号 history-only 范围、精确 window target 与去行尾空白参数。
+    ///     锁定 capture-pane 使用负行号 history-only 范围、文本属性与精确 window target。
     #[test]
     fn tmux_capture_history_args_exclude_current_screen() {
         assert_eq!(
@@ -8170,7 +8170,7 @@ mod tests {
             vec![
                 "capture-pane",
                 "-p",
-                "-T",
+                "-e",
                 "-S",
                 "-",
                 "-E",

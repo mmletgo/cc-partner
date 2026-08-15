@@ -618,7 +618,7 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
   });
 
   test('ResizeObserver triggers fit and forwards clamped cols/rows to onResize', () => {
-    const session = buildSession({ id: 's1' });
+    const session = buildSession({ id: 's1', cols: 120, rows: 40 });
     const onResize = vi.fn();
     const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
 
@@ -631,7 +631,7 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
       />,
     );
 
-    // pane 在 mount effect 内会立即调用一次 resize()（forceResizeRef.current = resize; resize()）。
+    // 持久化尺寸与当前 FitAddon 结果不同，mount 的普通 resize 会回传真实可见尺寸。
     expect(terminalEvents.fitCount).toBeGreaterThan(0);
     expect(onResize).toHaveBeenCalled();
     // clamp 下限：cols>=20, rows>=6。
@@ -639,6 +639,24 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
     expect(lastCall[0]).toBe('s1');
     expect(lastCall[1]).toBeGreaterThanOrEqual(20);
     expect(lastCall[2]).toBeGreaterThanOrEqual(6);
+  });
+
+  test('cold restore with the same persisted size does not force a duplicate redraw on mount', () => {
+    const session = buildSession({ id: 's1', cols: 80, rows: 24 });
+    const onResize = vi.fn();
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+
+    render(
+      <PaneHost
+        session={session}
+        store={store}
+        inputEnabled={true}
+        onResize={onResize}
+      />,
+    );
+
+    expect(terminalEvents.fitCount).toBeGreaterThan(0);
+    expect(onResize).not.toHaveBeenCalled();
   });
 
   test('resizeRequestKey increment re-invokes forceResize', () => {
