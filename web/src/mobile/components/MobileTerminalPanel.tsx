@@ -205,6 +205,11 @@ export function MobileTerminalPanel({
   const resizeTimerRef = useRef<number | null>(null);
   const replayRequestIdRef = useRef<number>(0);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
+  const persistedSessionSizeRef = useRef<{
+    sessionId: string;
+    cols: number;
+    rows: number;
+  } | null>(null);
   const lastFocusedSessionIdRef = useRef<string | null>(null);
   const touchScrollStateRef = useRef<MobileTerminalTouchScrollState | null>(null);
   const inputStreamRef = useRef<MobileTerminalInputStream | null>(null);
@@ -230,6 +235,8 @@ export function MobileTerminalPanel({
     [activeSession, scopedSessions],
   );
   const sessionId = visibleSession?.id ?? null;
+  const persistedSessionCols = visibleSession?.cols ?? DEFAULT_TERMINAL_SIZE.cols;
+  const persistedSessionRows = visibleSession?.rows ?? DEFAULT_TERMINAL_SIZE.rows;
   const visibleAgent = sessionId ? mobileAgentForSession(sessionRuntime, sessionId) : null;
   const activeAgentIdentity =
     sessionId && visibleAgent?.isActive ? `${sessionId}:${visibleAgent.id}` : null;
@@ -245,6 +252,12 @@ export function MobileTerminalPanel({
   const terminalFullscreenLabel = terminalChrome.exitFullscreen
     ? t('workbench:mobile.terminalPanel.exitFullscreen')
     : t('workbench:mobile.terminalPanel.enterFullscreen');
+
+  useEffect(() => {
+    persistedSessionSizeRef.current = sessionId
+      ? { sessionId, cols: persistedSessionCols, rows: persistedSessionRows }
+      : null;
+  }, [persistedSessionCols, persistedSessionRows, sessionId]);
 
   useEffect(() => {
     inputEnabledRef.current = Boolean(
@@ -521,6 +534,19 @@ export function MobileTerminalPanel({
     terminal.loadAddon(fit);
     terminal.open(viewport);
     terminalRef.current = terminal;
+    // 后端把同尺寸 resize 也视为“强制重绘”，会通过 rows 抖动让 Claude TUI 的末屏再次
+    // 落入 tmux history。以持久化尺寸作为本 xterm 的已上报基线，首次 fit 相同就不回传。
+    const persistedSize = persistedSessionSizeRef.current;
+    if (lastResizeRef.current?.sessionId !== sessionId) {
+      lastResizeRef.current =
+        persistedSize?.sessionId === sessionId
+          ? {
+              sessionId,
+              cols: clampU16(persistedSize.cols, MIN_TERMINAL_COLS),
+              rows: clampU16(persistedSize.rows, MIN_TERMINAL_ROWS),
+            }
+          : null;
+    }
     // 默认离开打字态：系统键盘只在用户明确点击终端输入区后出现。
     leaveMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport), null);
 

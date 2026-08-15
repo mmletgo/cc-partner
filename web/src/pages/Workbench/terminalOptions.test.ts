@@ -104,4 +104,10 @@ describe('terminalOptions', () => {
     expect(options.macOptionClickForcesSelection).toBe(true);
     expect(options.rightClickSelectsWord).toBe(true);
   });
+
+  test('keeps enough scrollback for hydrated tmux history after narrow mobile reflow', () => {
+    // 200k 字符 replay 在最窄 20 列下可能超过 3000 个物理行，容量不足会只剩后段重绘帧。
+    const options = workbenchTerminalOptions(() => 'token');
+    expect(options.scrollback).toBe(20_000);
+  });
 });

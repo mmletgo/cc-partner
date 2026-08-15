@@ -125,7 +125,9 @@ export function workbenchTerminalOptions(readToken: TokenReader = readCssToken):
     // lineHeight 保持 1：>1 时 FitAddon 行高与 canvas 像素可能不一致，
     // tmux status 画在最后一行时会在容器底部上方留白，看起来像“悬空”。
     lineHeight: 1,
-    scrollback: 3000,
+    // hydrated tmux history 会按手机窄列宽重排；3000 行会在长会话中把真正的早期消息
+    // 裁掉，只留下靠后的 TUI 重绘帧。该容量覆盖 200k 字符 buffer 在最窄 20 列下的重排。
+    scrollback: 20_000,
     // TUI mouse mode 会 disable selection；mac 上 Option+拖选强制选字（不发 mouse 到 PTY）。
     macOptionClickForcesSelection: true,
     rightClickSelectsWord: true,

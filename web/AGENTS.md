@@ -134,6 +134,8 @@
 
 > 迁移到 Tauri 后已移除 Vite `dynamicApiProxy` 插件与 `~/.cc-partner/backend.port` 机制——前端走 invoke，无需 HTTP 代理。
 
+- **Workbench 终端历史容量**: 共享 xterm `scrollback` 至少保留 20,000 个物理行，以容纳 200k 字符 replay 在移动端最窄 20 列下的重排；移动端新 xterm 必须先把 session 持久化 cols/rows 设为 resize baseline，首个 FitAddon 结果相同不得回传 resize，避免后端强制重绘继续把 TUI 末屏写入 tmux history。
+
 ## 打包部署
 
 - `npm run build` 输出到 `dist/`，由 Tauri 打包嵌入应用（`tauri.conf.json` 的 `frontendDist=../web/dist`）

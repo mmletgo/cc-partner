@@ -17,7 +17,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
-import type { ReactElement, ReactNode } from 'react';
+import { StrictMode, type ReactElement, type ReactNode } from 'react';
 
 import { MobileTerminalPanel } from './MobileTerminalPanel';
 import { WorkbenchTerminalBuffersContext } from '@/hooks/workbenchTerminalBuffersContext';
@@ -50,6 +50,7 @@ const terminalEvents = vi.hoisted(() => ({
   hydrationResult: null as WorkbenchSessionReplay | null,
   hydrationPromise: null as Promise<WorkbenchSessionReplay | null> | null,
   hydrateCalls: [] as string[],
+  resizeCalls: [] as Array<{ sessionId: string; cols: number; rows: number }>,
   resetCalls: [] as Array<{ instance: number }>,
   scrollToLineCalls: [] as Array<{ instance: number; line: number }>,
   instances: [] as MockTerminalInstance[],
@@ -134,7 +135,10 @@ vi.mock('@/api/workbenchHttp', () => ({
       }),
       focus: vi.fn(() => Promise.resolve()),
       zoomPane: vi.fn(() => Promise.resolve()),
-      resize: vi.fn(() => Promise.resolve()),
+      resize: vi.fn((sessionId: string, cols: number, rows: number) => {
+        terminalEvents.resizeCalls.push({ sessionId, cols, rows });
+        return Promise.resolve();
+      }),
     },
   },
 }));
@@ -267,6 +271,7 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.hydrationResult = null;
     terminalEvents.hydrationPromise = null;
     terminalEvents.hydrateCalls.length = 0;
+    terminalEvents.resizeCalls.length = 0;
     terminalEvents.resetCalls.length = 0;
     terminalEvents.scrollToLineCalls.length = 0;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
@@ -275,6 +280,76 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
       unobserve(): void {}
       disconnect(): void {}
     };
+  });
+
+  test('does not force resize when the fitted viewport matches the persisted session size', async () => {
+    // 同尺寸 resize 会让后端抖动 tmux rows 以强制重绘，把 Claude TUI 末屏再次写入 scrollback。
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = buildSession();
+
+    render(
+      <StrictMode>
+        <BuffersProvider store={store}>
+          <MobileTerminalPanel
+            project={buildProject()}
+            worktree={null}
+            sessions={[session]}
+            activeSession={session}
+            busy={false}
+            onSessionsChange={() => undefined}
+            onActiveSessionChange={() => undefined}
+          />
+        </BuffersProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(terminalEvents.writeCalls.some((call) => call.data.includes('ready'))).toBe(true);
+    });
+    expect(terminalEvents.resizeCalls).toEqual([]);
+  });
+
+  test('resizes when the fitted viewport differs from the persisted session size', async () => {
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = { ...buildSession(), cols: 79, rows: 23 };
+
+    render(
+      <StrictMode>
+        <BuffersProvider store={store}>
+          <MobileTerminalPanel
+            project={buildProject()}
+            worktree={null}
+            sessions={[session]}
+            activeSession={session}
+            busy={false}
+            onSessionsChange={() => undefined}
+            onActiveSessionChange={() => undefined}
+          />
+        </BuffersProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(terminalEvents.resizeCalls).toEqual([
+        { sessionId: 's1', cols: 80, rows: 24 },
+      ]);
+    });
   });
 
   afterEach(() => {
