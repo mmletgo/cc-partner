@@ -224,6 +224,35 @@ describe('AppShell grouped navigation', () => {
     expect(within(nav).queryByRole('link', { name: '打开游戏大厅' })).toBeNull();
   });
 
+  test('moves mobile access button to the version row next to game button', () => {
+    renderShell();
+
+    const mobile = screen.getByRole('button', { name: '打开移动端 Workbench 访问方式' });
+    const game = screen.getByRole('button', { name: '打开游戏大厅' });
+
+    // 移动端按钮现在落在版本行
+    expect(mobile.closest('[class*="footerVersionRow"]')).toBeTruthy();
+    // 与游戏按钮共享同一个 footerIconGroup
+    expect(mobile.closest('[class*="footerIconGroup"]')).toBeTruthy();
+    expect(game.closest('[class*="footerIconGroup"]')).toBeTruthy();
+    expect(mobile.closest('[class*="footerIconGroup"]')).toBe(
+      game.closest('[class*="footerIconGroup"]'),
+    );
+    // DOM 顺序：版本号 → 游戏 → 移动
+    expect(
+      game.compareDocumentPosition(mobile) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // 移动端按钮不再在 toggle 行内
+    expect(mobile.closest('[class*="footerToggle"]')).toBeNull();
+    // toggle 行内仍保留 Battery + Theme + Settings 三个图标按钮
+    const toggle = document.querySelector('[class*="footerToggle"]');
+    expect(toggle).toBeTruthy();
+    const toggleGroup = toggle?.querySelector('[class*="footerIconGroup"]');
+    expect(toggleGroup).toBeTruthy();
+    expect(toggleGroup?.contains(mobile)).toBe(false);
+    expect(toggleGroup?.contains(game)).toBe(false);
+  });
+
   test('satellite chrome hides the game button with the rest of the footer', () => {
     windowRoleMock.role = 'satellite';
     renderShell();
