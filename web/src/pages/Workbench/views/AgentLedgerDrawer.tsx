@@ -169,6 +169,12 @@ export function AgentLedgerDrawer({
                 </dd>
               </div>
               <div>
+                <dt>{t('workbench:agentLedger.cacheReadTokens')}</dt>
+                <dd data-testid="ledger-cache-read-tokens">
+                  {tokenLabel(summary.cacheReadTokens, unavailable)}
+                </dd>
+              </div>
+              <div>
                 <dt>{t('workbench:agentLedger.inputTokens')}</dt>
                 <dd data-testid="ledger-input-tokens">
                   {tokenLabel(summary.inputTokens, unavailable)}
@@ -262,6 +268,10 @@ function EntryRow({
       </div>
       <div className={styles.entryMeta}>
         <time dateTime={entry.endedAt}>{entry.endedAt}</time>
+        <span>
+          {t('workbench:agentLedger.cacheReadTokens')}:{' '}
+          {tokenLabel(entry.cacheReadTokens, unavailable)}
+        </span>
         <span>
           {t('workbench:agentLedger.inputTokens')}:{' '}
           {tokenLabel(entry.inputTokens, unavailable)}

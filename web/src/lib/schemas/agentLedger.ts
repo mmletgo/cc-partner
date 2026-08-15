@@ -110,6 +110,7 @@ export const agentLedgerSummaryDecoder: Decoder<AgentLedgerSummary> = objectDeco
     durationMs: nonNegativeIntDecoder,
     inputTokens: nullableDecoder(nonNegativeIntDecoder),
     outputTokens: nullableDecoder(nonNegativeIntDecoder),
+    cacheReadTokens: nullableDecoder(nonNegativeIntDecoder),
     costByCurrency: arrayDecoder(currencyAmountDecoder),
     usageCoverage: ledgerUsageCoverageDecoder,
   },

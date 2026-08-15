@@ -247,6 +247,52 @@ mod tests {
         assert_eq!(summary.sessions, 2);
     }
 
+    /// Business Logic: summary 需要区分缓存输入（cache read）与新输入 token 合计，
+    /// 供 UI 分开展示；无贡献时保持 null 而非 0。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     两条 entry 各带 cache_read → summary.cache_read_tokens 为求和；
+    ///     一条无 cache_read 的用例断言 null 不被 0 污染。
+    #[tokio::test]
+    async fn aggregate_sums_cache_read_tokens_separately() {
+        let repo = fixture().await;
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let cached = |input: u64, cache_read: u64| ReliableUsageSnapshot {
+            input_tokens: Some(input),
+            cache_read_tokens: Some(cache_read),
+            ..Default::default()
+        };
+        put(
+            &repo,
+            "a1",
+            &(now - ChronoDuration::hours(1)).to_rfc3339(),
+            Some(cached(10, 100)),
+        )
+        .await;
+        put(
+            &repo,
+            "a2",
+            &(now - ChronoDuration::hours(2)).to_rfc3339(),
+            Some(cached(5, 50)),
+        )
+        .await;
+        let summary = summarize_window(&repo, LedgerWindow::Days7, None, now)
+            .await
+            .unwrap();
+        assert_eq!(summary.input_tokens, Some(15));
+        assert_eq!(summary.cache_read_tokens, Some(150));
+        // 无任何 cache_read 贡献的窗口 → null（未提供），不得显示 0
+        let empty = summarize_window(
+            &repo,
+            LedgerWindow::Days30,
+            None,
+            now - ChronoDuration::days(40),
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.cache_read_tokens, None);
+    }
+
     /// Business Logic: 默认 50 / 最大 200。
     #[tokio::test]
     async fn default_limit_fifty_max_two_hundred() {

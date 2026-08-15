@@ -665,6 +665,7 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 ### Agent Metadata Ledger (A9)
 
 - 表 `agent_session_ledger`：metadata-only；`agent_session_id` 唯一；可靠 usage null-fill。
+- **token 展示口径**：UI 分三项 缓存输入（`cache_read_tokens`）/ 新输入（`input_tokens`）/ 输出（`output_tokens`）；summary 聚合同时返回 `AgentLedgerSummary.cache_read_tokens` 合计（无贡献保持 null）；null 显示「未提供」不显示 0。
 - **终态 usage 补记（tokens 数据源）**：`agent_runtime/agent_usage.rs::extract_provider_usage(provider, native_session_id)` 在 runtime 首次终态（`apply_owner_agent_mutation` 与启动 reconcile 断开路径，经 `maybe_note_terminal_usage` 每 agent 一次去重、spawn_blocking）从 CLI 本地会话文件提取可靠 usage 调 `note_usage` null-fill：Claude `~/.claude/projects/*/<sessionId>.jsonl`（**单次请求量，按 message.id 去重求和**，有 stop_reason 优先/output 更大者）；Codex `CODEX_HOME|~/.codex`/sessions rollout jsonl 最后一个 `event_msg/token_count.info.total_token_usage`（会话累计值）；OpenCode opencode.db SQLite message 表 data JSON 求和（复用 `auto_title_opencode` 的 db 路径解析）。仅 `claudeCodeVisible|codex|opencode` 三 provider；失败/未提取到一律保持 null（UI「未提供」），不打日志路径。
 - **clear 隐私水位**：`agent_ledger_clear_watermark` 单行 tombstone（`cleared_before` RFC3339）；`clear_all` **单事务** UPSERT 水位 + DELETE ledger；`reconcile_terminal_sessions` / `record_terminal` 持同一 `clear_reconcile_lock` 且排除 `ended_at ≤ cleared_before`；`finalize` INSERT 前再查水位，防止 clear 与终态写入交错复活历史。
 - 本机命令：`list_agent_ledger` / `summarize_agent_ledger` / `clear_agent_ledger`（control `agent_ledger.*`；clear 走 service 路径）。

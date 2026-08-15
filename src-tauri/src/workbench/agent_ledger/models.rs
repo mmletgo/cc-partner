@@ -392,6 +392,8 @@ pub struct AgentLedgerSummary {
     pub input_tokens: Option<u64>,
     /// 可靠 output tokens 合计
     pub output_tokens: Option<u64>,
+    /// 可靠 cache read tokens 合计（缓存输入；无贡献时 null）
+    pub cache_read_tokens: Option<u64>,
     /// 按货币 cost 桶
     pub cost_by_currency: Vec<CurrencyAmount>,
     /// usage 覆盖度
@@ -804,6 +806,7 @@ mod tests {
                 duration_ms: 1000,
                 input_tokens: Some(10),
                 output_tokens: None,
+                cache_read_tokens: None,
                 cost_by_currency: vec![CurrencyAmount {
                     currency: "USD".into(),
                     minor_units: 3,

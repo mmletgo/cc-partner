@@ -75,6 +75,7 @@ export interface AgentLedgerSummary {
   durationMs: number;
   inputTokens: number | null;
   outputTokens: number | null;
+  cacheReadTokens: number | null;
   costByCurrency: CurrencyAmount[];
   usageCoverage: LedgerUsageCoverage;
 }

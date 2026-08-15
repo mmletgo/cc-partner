@@ -61,11 +61,13 @@ describe('agentLedger schema', () => {
       durationMs: 10,
       inputTokens: 10,
       outputTokens: null,
+      cacheReadTokens: 7,
       costByCurrency: [{ currency: 'USD', minorUnits: 3 }],
       usageCoverage: 'partial',
     });
     expect(summary.usageCoverage).toBe('partial');
     expect(summary.outputTokens).toBeNull();
+    expect(summary.cacheReadTokens).toBe(7);
   });
 
   it('rejects forbidden window tokens', () => {
@@ -80,6 +82,7 @@ describe('agentLedger schema', () => {
         durationMs: 0,
         inputTokens: null,
         outputTokens: null,
+        cacheReadTokens: null,
         costByCurrency: [],
         usageCoverage: 'unavailable',
       }),

@@ -2704,6 +2704,7 @@ mod tests {
                 duration_ms: 1000,
                 input_tokens: Some(10),
                 output_tokens: None,
+                cache_read_tokens: None,
                 cost_by_currency: vec![],
                 usage_coverage: LedgerUsageCoverage::Partial,
             }],

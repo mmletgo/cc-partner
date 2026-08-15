@@ -43,6 +43,7 @@ const summaryPartial: AgentLedgerSummary = {
   durationMs: 1000,
   inputTokens: null,
   outputTokens: null,
+  cacheReadTokens: null,
   costByCurrency: [{ currency: 'USD', minorUnits: 3 }],
   usageCoverage: 'partial',
 };

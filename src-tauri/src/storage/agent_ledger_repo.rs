@@ -823,6 +823,7 @@ impl AgentLedgerRepo {
         let mut duration_ms = 0u64;
         let mut input_sum: Option<u64> = None;
         let mut output_sum: Option<u64> = None;
+        let mut cache_read_sum: Option<u64> = None;
         let mut usage_contributors = 0u64;
         let mut cost_map: BTreeMap<String, u64> = BTreeMap::new();
 
@@ -849,6 +850,9 @@ impl AgentLedgerRepo {
             }
             if let Some(t) = entry.output_tokens {
                 output_sum = Some(output_sum.unwrap_or(0).saturating_add(t));
+            }
+            if let Some(t) = entry.cache_read_tokens {
+                cache_read_sum = Some(cache_read_sum.unwrap_or(0).saturating_add(t));
             }
             if let (Some(m), Some(c)) = (entry.cost_minor_units, entry.cost_currency.as_ref()) {
                 let e = cost_map.entry(c.clone()).or_insert(0);
@@ -886,6 +890,7 @@ impl AgentLedgerRepo {
             duration_ms,
             input_tokens: input_sum,
             output_tokens: output_sum,
+            cache_read_tokens: cache_read_sum,
             cost_by_currency,
             usage_coverage,
         })
