@@ -13,6 +13,7 @@
  *   - 用 @testing-library/react 渲染、rerender、fireEvent 触发各种交互并断言。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement, ReactNode } from 'react';
 import { useCallback } from 'react';
@@ -50,9 +51,8 @@ interface MockTerminal {
   clearSelection: () => void;
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
-  scrollLines: (amount: number) => void;
+  scrollLines: Mock<(amount: number) => void>;
   scrollToBottom: () => void;
-  emitWriteParsed: () => void;
   dispose: () => void;
   attachCustomWheelEventHandler: (handler: (event: WheelEvent) => boolean) => void;
   invokeWheel: (event: Partial<WheelEvent>) => boolean | undefined;
@@ -107,7 +107,6 @@ vi.mock('@xterm/xterm', () => {
     options: { theme?: unknown } = {};
     private dataCb: ((data: string) => void) | null = null;
     private cursorMoveCb: (() => void) | null = null;
-    private writeParsedCb: (() => void) | null = null;
     private resizeCb: (() => void) | null = null;
     private selectionText = '';
     // Business Logic: 记录自己的 instance index，让 write/clear 日志能溯源到具体实例。
@@ -131,18 +130,6 @@ vi.mock('@xterm/xterm', () => {
     onCursorMove(cb: () => void) {
       this.cursorMoveCb = cb;
       return { dispose: () => { if (this.cursorMoveCb === cb) this.cursorMoveCb = null; } };
-    }
-    onWriteParsed(cb: () => void) {
-      this.writeParsedCb = cb;
-      return {
-        dispose: () => {
-          if (this.writeParsedCb === cb) this.writeParsedCb = null;
-        },
-      };
-    }
-    /** 触发 xterm 完成解析通知，供 hydration 时机测试使用。 */
-    emitWriteParsed() {
-      this.writeParsedCb?.();
     }
     /**
      * Business Logic（为什么需要这个方法）:
@@ -936,7 +923,11 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     terminal.buffer.active.baseY = 120;
     terminal.modes.mouseTrackingMode = 'none';
 
-    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(true);
+    // 应用重启后的 Agent metadata 可能尚未恢复；即使 isActive=false 也必须拉 tmux history。
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(refreshScrollback).toHaveBeenCalledWith('s1');
+    expect(refreshScrollback).toHaveBeenCalledTimes(1);
+    expect(terminal.scrollLines).not.toHaveBeenCalled();
     expect(onInput).not.toHaveBeenCalled();
 
     rerender(
@@ -950,15 +941,10 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     );
 
     expect(terminalEvents.constructCount).toBe(1);
-    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(true);
+    // Agent metadata 补齐时不得并发第二次 capture；累计这次向上滚动意图。
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
     expect(terminal.scrollToBottom).not.toHaveBeenCalled();
     expect(onInput).not.toHaveBeenCalled();
-
-    terminal.buffer.active.type = 'alternate';
-    terminal.buffer.active.baseY = 0;
-    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
-    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
-    expect(refreshScrollback).toHaveBeenCalledWith('s1');
     expect(refreshScrollback).toHaveBeenCalledTimes(1);
     expect(terminal.scrollToBottom).not.toHaveBeenCalled();
     expect(onInput).not.toHaveBeenCalled();
@@ -967,9 +953,50 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     terminal.buffer.active.baseY = 80;
     act(() => {
       store.reset('s1', 'hydrated history');
-      terminal.emitWriteParsed();
     });
     expect(terminal.scrollLines).toHaveBeenCalledWith(-2);
+
+    terminal.scrollLines.mockClear();
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(refreshScrollback).toHaveBeenCalledTimes(1);
+    expect(terminal.scrollLines).toHaveBeenCalledWith(-1);
+  });
+
+  test('Agent activation after shell hydration refreshes tmux history once for resume', () => {
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    const refreshScrollback = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const { rerender } = render(
+      <PaneHost
+        session={session}
+        store={store}
+        agentTranscriptActive={false}
+        refreshScrollback={refreshScrollback}
+      />,
+    );
+    const terminal = latestTerminal();
+    terminal.buffer.active.baseY = 80;
+    terminal.modes.mouseTrackingMode = 'none';
+
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    act(() => {
+      store.reset('s1', 'shell history');
+    });
+    expect(refreshScrollback).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <PaneHost
+        session={session}
+        store={store}
+        agentTranscriptActive
+        refreshScrollback={refreshScrollback}
+      />,
+    );
+    terminal.scrollLines.mockClear();
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(terminal.invokeWheel({ deltaY: -20 })).toBe(false);
+    expect(refreshScrollback).toHaveBeenCalledTimes(2);
+    expect(terminal.scrollLines).not.toHaveBeenCalled();
   });
 
   test('hydration does not auto-scroll after Claude enables mouse tracking', () => {
@@ -991,7 +1018,6 @@ describe('WorkbenchTerminalPane — Claude resume wheel', () => {
     terminal.modes.mouseTrackingMode = 'vt200';
     act(() => {
       store.reset('s1', 'hydrated history');
-      terminal.emitWriteParsed();
     });
 
     expect(refreshScrollback).toHaveBeenCalledTimes(1);

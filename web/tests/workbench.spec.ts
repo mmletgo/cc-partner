@@ -526,7 +526,7 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
 
     await page.getByRole('button', { name: /remote-proj/ }).click();
     await expect(page.getByText(/当前不在线/)).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole('button', { name: '新建 worktree' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '新 worktree' })).toBeDisabled();
 
     // 恢复：重绑成功响应并点 Git 历史触发刷新
     backendHarness.command('list_workbench_worktrees', {
@@ -552,7 +552,7 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
 
     await page.getByRole('tab', { name: 'Git 历史' }).click();
     await expect(page.getByText(/当前不在线/)).toHaveCount(0, { timeout: 10_000 });
-    await expect(page.getByRole('button', { name: '新建 worktree' })).toBeEnabled({
+    await expect(page.getByRole('button', { name: '新 worktree' })).toBeEnabled({
       timeout: 10_000,
     });
     await expect(page.getByTestId('git-history-row')).toHaveCount(4);
@@ -660,6 +660,69 @@ test.describe('E2E-WORKBENCH-001 1024x768 inspector discoverability', () => {
     if (inspectorBox) {
       // 入口应进入 768 高视口（允许少量 sticky chrome 偏移）
       expect(inspectorBox.y).toBeLessThan(768);
+    }
+  });
+});
+
+
+test.describe('E2E-WORKBENCH-001 worktree bar workspace switch viewport fit', () => {
+  test.use({ viewport: { width: 960, height: 720 } });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   worktree 行右端的 workspaceSwitch（终端/网页浏览/文件浏览）曾因组件自身
+   *   `container-type: inline-size` 让宽度与内容无关，在 flex 行内塌缩成 padding 宽度，
+   *   按钮整体溢出盒子被 worktreeBar 裁掉（workspaceSwitch 超出可视范围）。
+   *
+   * Code Logic（这个测试做什么）:
+   *   在 960×720 视口打开 Workbench，断言「工作区切换」radiogroup 盒宽恢复为内容宽度
+   *   （≥100px 而非历史塌缩的 6px），且右边缘不超出视口；行宽 ≤640px 的收起标签
+   *   行为由 .worktreeBar 容器查询驱动，此处只守桌面最小窗口（minWidth 900）契约。
+   */
+  test('workspace switch group keeps content width and stays inside viewport', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeProject({ id: 'pBar', name: 'project-bar' });
+    const worktree = makeWorktree({
+      id: 'pBar:main',
+      projectId: 'pBar',
+      name: 'main',
+      branch: 'master',
+    });
+
+    await installAppLocalStorage(page);
+    registerWorkbenchBaseline(backendHarness);
+    backendHarness.command('list_workbench_projects', {
+      kind: 'resolve',
+      value: [project],
+    });
+    backendHarness.command('list_workbench_worktrees', {
+      kind: 'resolve',
+      value: [worktree],
+    });
+    backendHarness.command('list_workbench_sessions', {
+      kind: 'resolve',
+      value: [],
+    });
+    backendHarness.command('touch_workbench_project', {
+      kind: 'resolve',
+      value: project,
+    });
+
+    await page.goto('/workbench?projectId=pBar');
+    const bar = page.getByRole('region', { name: 'Worktree 管理' });
+    await expect(bar).toBeVisible({ timeout: 20_000 });
+
+    const groupBox = await page
+      .getByRole('radiogroup', { name: '工作区切换' })
+      .boundingBox();
+    expect(groupBox).toBeTruthy();
+    if (groupBox) {
+      // 历史塌缩 bug 下盒宽只有 padding+border（6px）；正常应为内容宽度
+      expect(groupBox.width).toBeGreaterThanOrEqual(100);
+      // 右边缘不允许超出视口（被 overflow:hidden 裁掉）
+      expect(groupBox.x + groupBox.width).toBeLessThanOrEqual(960);
     }
   });
 });

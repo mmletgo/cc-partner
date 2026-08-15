@@ -162,7 +162,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const liveWriterRef = useRef<TerminalLiveWriter | null>(null);
   const replayGateRef = useRef<TerminalReplayGate>({ current: false });
   const inputEnabledRef = useRef<boolean>(inputEnabled);
-  const agentTranscriptActiveRef = useRef<boolean>(agentTranscriptActive);
+  const previousAgentTranscriptActiveRef = useRef<boolean>(agentTranscriptActive);
   const renderVisibleRef = useRef<boolean>(renderVisible);
   const previousRenderVisibleRef = useRef<boolean>(renderVisible);
   const resizeTimerRef = useRef<number | null>(null);
@@ -182,6 +182,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const cursorMetricsRef = useRef<TerminalCursorMetrics | null>(null);
   // Business Logic: 触控板小 delta 必须跨事件累计成整行，再发打在 transcript 的 SGR。
   const wheelRemainderRef = useRef(0);
+  // Business Logic: hydration 前的 baseY 可能只是重复整屏重绘，不能作为真实历史的证据。
+  const hydratedScrollbackSessionRef = useRef<string | null>(null);
   const sessionId = session?.id ?? null;
   // Business Logic: 冷恢复的后端已经按持久化尺寸 attach 并完成一次必要重绘；
   // 首次挂载只有 FitAddon 算出的可见尺寸不同才需要再次通知后端，避免同尺寸强制重绘末屏。
@@ -198,7 +200,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   }, [inputEnabled]);
 
   useEffect(() => {
-    agentTranscriptActiveRef.current = agentTranscriptActive;
+    if (previousAgentTranscriptActiveRef.current !== agentTranscriptActive) {
+      hydratedScrollbackSessionRef.current = null;
+    }
+    previousAgentTranscriptActiveRef.current = agentTranscriptActive;
   }, [agentTranscriptActive]);
 
   useEffect(() => {
@@ -253,11 +258,11 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     /**
      * Business Logic（为什么需要这个函数）:
      *   replay reset 后 xterm 解析大快照是异步的；固定帧数轮询会在繁忙 WebView/长历史下提前放弃。
-     *   必须等 xterm 明确报告 write parsed，才能执行用户原本那次向上滚动。
+     *   必须等 live writer 的 xterm write callback，才能执行用户原本那次向上滚动。
      *
      * Code Logic（这个函数做什么）:
-     *   onWriteParsed 时复核仍为同 session 的活跃 Agent、normal buffer、未启用 mouse tracking；
-     *   baseY 出现后一次应用累计负向行数，否则继续等待下一次 parsed 事件。
+     *   live writer 的 snapshot-complete 回调触发时复核仍为同 session、normal buffer、未启用
+     *   mouse tracking；将当前 xterm 实例标记为已 hydration，并应用累计负向行数。
      */
     const scrollWhenHydrationParsed = (): void => {
       if (
@@ -269,17 +274,18 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       }
       const active = terminal.buffer.active;
       if (
-        !agentTranscriptActiveRef.current ||
         active.type !== 'normal' ||
         terminal.modes.mouseTrackingMode !== 'none'
       ) {
         clearScrollbackHydration();
         return;
       }
-      if (active.baseY <= 0) return;
+      hydratedScrollbackSessionRef.current = sessionId;
       const lines = Math.min(-1, pendingHydratedScrollLines);
       clearScrollbackHydration();
-      terminal.scrollLines(lines);
+      if (active.baseY > 0) {
+        terminal.scrollLines(lines);
+      }
     };
     /**
      * Business Logic（为什么需要这个函数）:
@@ -292,9 +298,11 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
      *   PageUp 只在 Scroll 上下文生效，Chat 输入聚焦时整页不动。
      *
      * Code Logic（这个函数做什么）:
-     *   活跃 Agent + mode=none 且没有 normal scrollback（含 alternate）时触发 hydration；
+     *   任意 tmux 终端 mode=none 且当前 xterm 尚未权威 hydration 时触发同步，禁止信任污染 baseY；
+     *   该判定不依赖 Agent Runtime，覆盖应用重启后元数据尚未恢复但 Claude/tmux 已 attach 的窗口；
      *   后端返回已渲染的 normal-buffer pane 快照，解析后再执行首次累计滚动；
-     *   已协商 mouse tracking 时固定向 transcript 左上角发 SGR 64/65；已有 baseY 则交给 xterm。
+     *   已 hydration 的本地历史统一用 terminal.scrollLines，避开 WebKit 原生 viewport 差异；
+     *   已协商 mouse tracking 时固定向 transcript 左上角发 SGR 64/65。
      *   转发前回到底部，退出误入的本地重绘历史。
      */
     terminal.attachCustomWheelEventHandler((event: WheelEvent) => {
@@ -305,11 +313,25 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         terminal.modes.mouseTrackingMode;
       const action = resolveWorkbenchTerminalWheelAction({
         bufferType,
-        baseY: active.baseY,
         mouseTrackingMode,
-        agentTranscriptActive: agentTranscriptActiveRef.current,
+        historyHydrated: hydratedScrollbackSessionRef.current === sessionId,
       });
-      if (action === 'scrollback') return true;
+      if (action === 'scrollback') {
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+        const metrics = cursorMetricsRef.current ?? measureTerminalCursorMetrics(viewport, terminal);
+        cursorMetricsRef.current = metrics;
+        const consumed = consumeWorkbenchTerminalWheelLines(
+          event.deltaY,
+          wheelRemainderRef.current,
+          metrics.cellHeight,
+        );
+        wheelRemainderRef.current = consumed.remainder;
+        if (consumed.lines !== 0) {
+          terminal.scrollLines(consumed.lines);
+        }
+        return false;
+      }
       if (action === 'hydrateScrollback') {
         // 位于底部时向下滚没有历史语义；交还 xterm no-op，避免无意义 replay。
         if (event.deltaY >= 0) return true;
@@ -489,7 +511,6 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       onInput(sessionId, data);
     });
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
-    const writeParsedDisposable = terminal.onWriteParsed(scrollWhenHydrationParsed);
     // reset 通知必须先于 live writer 注册：先标记 hydration 快照已开始，再让 xterm 排队解析。
     const unsubscribeHydrationReset = store.subscribeReset(sessionId, () => {
       if (scrollbackHydrationPending) {
@@ -501,6 +522,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       source: store,
       sessionId,
       gate: replayGateRef.current,
+      onSnapshotComplete: scrollWhenHydrationParsed,
     });
     liveWriterRef.current = writer;
     emitCursorAnchor();
@@ -577,7 +599,6 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       viewport.removeEventListener('pointerup', handlePointerUp);
       dataDisposable.dispose();
       cursorDisposable.dispose();
-      writeParsedDisposable.dispose();
       pointerDownCellRef.current = null;
       pointerDownPointRef.current = null;
       if (selectPaneDecideTimerRef.current !== null) {

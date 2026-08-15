@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type {
   TerminalBufferCursor,
   TerminalBufferDelta,
@@ -158,6 +158,24 @@ class FakeTerminalLiveSource implements TerminalLiveSource {
 }
 
 describe('terminalLiveWriter', () => {
+  test('notifies only after the latest reset snapshot write completes', () => {
+    const terminal = new FakeTerminalWriter();
+    const source = new FakeTerminalLiveSource('old', { generation: 0, appendId: 1 });
+    const onSnapshotComplete = vi.fn();
+    createTerminalLiveWriter({
+      terminal,
+      source,
+      sessionId: 's1',
+      onSnapshotComplete,
+    });
+
+    source.replace('hydrated', { generation: 1, appendId: 0 }, 'snapshotReplace');
+    terminal.completeWrite(0);
+    expect(onSnapshotComplete).not.toHaveBeenCalled();
+    terminal.completeWrite(1);
+    expect(onSnapshotComplete).toHaveBeenCalledTimes(1);
+  });
+
   test('replays snapshot once then drains only newer deltas in exact order', () => {
     const terminal = new FakeTerminalWriter();
     const source = new FakeTerminalLiveSource('history', { generation: 0, appendId: 2 });

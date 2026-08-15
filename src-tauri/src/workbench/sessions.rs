@@ -4490,8 +4490,9 @@ impl WorkbenchSessionRegistry {
     ///
     /// Code Logic（这个函数做什么）:
     ///     全局串行读取 live row + generation，对 tmux 捕获“scrollback + 当前 pane”已渲染快照；
-    ///     完成后在 sessions 锁内再次校验 generation，用快照替换旧 prefix/live ring 并原子生成 DTO。
-    ///     raw PTY 直接返回当前快照；成功空 pane 会清除旧内容，session 换代返回可恢复错误。
+    ///     完成后先复核 live generation，再仅持 replay buffer 锁按 generation fence 提交快照，
+    ///     避免与 reader 的 sessions/handle 锁形成交叉等待。raw PTY 直接返回当前快照；成功空 pane
+    ///     会清除旧内容，session 换代返回可恢复错误。
     pub fn hydrate_tmux_history_replay(
         &self,
         session_id: &str,
@@ -4540,50 +4541,58 @@ impl WorkbenchSessionRegistry {
             None
         };
 
-        // generation 复核与 prefix commit/snapshot 必须在同一 sessions 临界区；close 无法在
-        // 两者之间移除旧代并插入新代，从而不会返回空成功或把旧 capture 写入后继实例。
-        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
-        if restoring.contains_key(session_id) {
-            return Err(AppError::unavailable(
-                "session_restore_in_progress".to_string(),
-            ));
-        }
-        let handle = sessions
-            .get(session_id)
-            .ok_or_else(|| AppError::unavailable("session_changed_during_hydration".to_string()))?
-            .lock()
-            .expect("workbench session 锁中毒");
-        if handle.generation != generation || handle.durability != SessionDurability::Ready {
+        // 不得同时持 sessions/handle 与 replay buffer 锁：reader 会先读取 session 状态再 append
+        // replay，交叉持锁会令 hydration invoke 永久 pending。这里先单独复核 live generation，
+        // 再用 replay buffer 自身的 generation fence 提交；close/reinsert 会移除或替换旧 buffer，
+        // 因而旧 capture 不可能污染后继实例。
+        if self.runtime_presence(session_id) != SessionRuntimePresence::Live
+            || self.session_generation(session_id) != Some(generation)
+        {
             return Err(AppError::unavailable(
                 "session_changed_during_hydration".to_string(),
             ));
         }
-        let mut buffers = self
-            .replay_buffers
-            .lock()
-            .expect("workbench replay buffers 锁中毒");
-        let buffer = buffers
-            .get_mut(session_id)
-            .ok_or_else(|| AppError::unavailable("session_replay_not_ready".to_string()))?;
-        if buffer.generation != generation {
-            return Err(AppError::unavailable(
-                "session_changed_during_hydration".to_string(),
-            ));
-        }
-        if let Some(snapshot) = captured_snapshot.as_deref() {
-            // capture 期间若 reader 已推进 seq，快照与 cutover 水位不再原子；保留旧 ring 并让
-            // Provider 按 recoverable 策略重试，禁止用较新 lastSeq 吞掉前端 held live。
-            if capture_base_seq != Some(buffer.last_seq) {
+
+        let replay = {
+            let mut buffers = self
+                .replay_buffers
+                .lock()
+                .expect("workbench replay buffers 锁中毒");
+            let buffer = buffers
+                .get_mut(session_id)
+                .ok_or_else(|| AppError::unavailable("session_replay_not_ready".to_string()))?;
+            if buffer.generation != generation {
                 return Err(AppError::unavailable(
-                    "session_output_changed_during_hydration".to_string(),
+                    "session_changed_during_hydration".to_string(),
                 ));
             }
-            // capture 成功但 pane 为空也必须清掉旧 prefix/live ring，禁止复活陈旧历史。
-            buffer.replace_with_restored_snapshot(snapshot);
+            if let Some(snapshot) = captured_snapshot.as_deref() {
+                // capture 期间若 reader 已推进 seq，快照与 cutover 水位不再原子；保留旧 ring并让
+                // Provider 按 recoverable 策略重试，禁止用较新 lastSeq 吞掉前端 held live。
+                if capture_base_seq != Some(buffer.last_seq) {
+                    return Err(AppError::unavailable(
+                        "session_output_changed_during_hydration".to_string(),
+                    ));
+                }
+                // capture 成功但 pane 为空也必须清掉旧 prefix/live ring，禁止复活陈旧历史。
+                buffer.replace_with_restored_snapshot(snapshot);
+            }
+            buffer.snapshot(session_id)
+        };
+
+        // commit 后再检查一次 registry。若恰好发生 close/reinsert，旧 buffer 会被移除/替换；
+        // 当前调用返回可恢复错误，绝不把已失效快照交给前端。
+        if self.runtime_presence(session_id) != SessionRuntimePresence::Live
+            || self.session_generation(session_id) != Some(generation)
+        {
+            return Err(AppError::unavailable(
+                "session_changed_during_hydration".to_string(),
+            ));
+        }
+        if captured_snapshot.is_some() {
             *hydration = Some((session_id.to_string(), generation, Instant::now()));
         }
-        Ok(buffer.snapshot(session_id))
+        Ok(replay)
     }
 
     /// Business Logic（为什么需要这个函数）:

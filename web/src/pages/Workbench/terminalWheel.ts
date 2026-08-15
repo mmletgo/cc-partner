@@ -4,11 +4,11 @@
  * Business Logic（为什么需要这个模块）:
  *   Claude Code 会在 main/alternate screen 上用自己的虚拟 transcript。xterm 只有在
  *   DECSET mouse tracking 真正落地时才会发 SGR 64/65。冷启动重新 attach 时，tmux
- *   不会向新 xterm 重放 Agent 先前已经开启的 mouse mode，因此还需结合 Agent Runtime
- *   的权威活跃状态分流，不能把全屏重绘形成的本地 scrollback 当成真实对话历史。
+ *   不会向新 xterm 重放 Agent 先前已经开启的 mouse mode；首次滚动必须先从 owner 端
+ *   hydration，不能把全屏重绘形成的本地 scrollback 当成真实对话历史。
  *
  * Code Logic（这个模块做什么）:
- *   - resolveWorkbenchTerminalWheelAction：scrollback / hydrateScrollback / sgrFallback；
+ *   - resolveWorkbenchTerminalWheelAction：首次权威 hydration / 本地 scrollback / SGR fallback；
  *   - encodeTerminalSgrWheelReports：与 xterm CoreMouseService 相同的 SGR 64/65。
  */
 
@@ -23,10 +23,9 @@ export type WorkbenchTerminalWheelAction =
 
 export interface WorkbenchTerminalWheelInput {
   bufferType: WorkbenchTerminalBufferType;
-  baseY: number;
   mouseTrackingMode: WorkbenchTerminalMouseTrackingMode;
-  /** Agent Runtime 确认当前 terminal 仍由活跃 Agent 持有虚拟 transcript。 */
-  agentTranscriptActive: boolean;
+  /** 当前 xterm 实例是否已经应用过一次 owner 端 tmux history 快照。 */
+  historyHydrated: boolean;
 }
 
 /** 单次桌面滚轮最多向 PTY 注入的 SGR 事件数。 */
@@ -44,26 +43,21 @@ export const WORKBENCH_TERMINAL_SGR_WHEEL_EVENTS_CAP = 8;
  *   也不能发 PageUp：Chat 上下文没有 pageup 绑定，输入框聚焦时整页不动。
  *
  * Code Logic（这个函数做什么）:
- *   活跃 Agent + normal + mode=none + baseY>0 → scrollback；同一 Agent 在 mode=none 时若
- *   normal/baseY=0 或 alternate → hydrateScrollback（tmux 返回已渲染 normal-buffer 快照），
- *   避免把无效 SGR 注入未开启 mouse tracking 的 Claude；
- *   否则 mouseTrackingMode !== none 或 agentTranscriptActive → sgrFallback；
- *   否则 normal → scrollback、alternate → sgrFallback。
+ *   mode=none 且当前 xterm 实例尚未完成权威 history hydration → hydrateScrollback；
+ *   完成后 normal → scrollback；alternate 说明应用又切回独立屏，重新 hydration；
+ *   不能直接相信 hydration 前的 baseY，它可能只是恢复/resize 产生的重复整屏重绘；
+ *   也不能依赖 Agent Runtime isActive：应用刚重启时 Agent 元数据与 tmux attach 存在恢复窗口；
+ *   mouseTrackingMode !== none 时走 sgrFallback。
  */
 export function resolveWorkbenchTerminalWheelAction(
   input: WorkbenchTerminalWheelInput,
 ): WorkbenchTerminalWheelAction {
-  if (
-    input.agentTranscriptActive &&
-    input.mouseTrackingMode === 'none'
-  ) {
-    return input.bufferType === 'normal' && input.baseY > 0
-      ? 'scrollback'
-      : 'hydrateScrollback';
+  if (input.mouseTrackingMode === 'none') {
+    if (!input.historyHydrated || input.bufferType === 'alternate') {
+      return 'hydrateScrollback';
+    }
+    return 'scrollback';
   }
-  if (input.mouseTrackingMode !== 'none') return 'sgrFallback';
-  if (input.agentTranscriptActive) return 'sgrFallback';
-  if (input.bufferType === 'normal') return 'scrollback';
   return 'sgrFallback';
 }
 

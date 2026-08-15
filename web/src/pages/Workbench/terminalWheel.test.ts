@@ -6,48 +6,43 @@ import {
 } from './terminalWheel';
 
 describe('resolveWorkbenchTerminalWheelAction', () => {
-  test('uses local scrollback on the normal buffer even without history', () => {
+  test('hydrates an ordinary tmux shell once before trusting local scrollback', () => {
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'normal',
-        baseY: 0,
         mouseTrackingMode: 'none',
-        agentTranscriptActive: false,
-      }),
-    ).toBe('scrollback');
-    expect(
-      resolveWorkbenchTerminalWheelAction({
-        bufferType: 'normal',
-        baseY: 12,
-        mouseTrackingMode: 'none',
-        agentTranscriptActive: false,
-      }),
-    ).toBe('scrollback');
-  });
-
-  test('uses captured tmux scrollback and hydrates missing resume history before any SGR fallback', () => {
-    expect(
-      resolveWorkbenchTerminalWheelAction({
-        bufferType: 'normal',
-        baseY: 120,
-        mouseTrackingMode: 'none',
-        agentTranscriptActive: true,
-      }),
-    ).toBe('scrollback');
-    expect(
-      resolveWorkbenchTerminalWheelAction({
-        bufferType: 'normal',
-        baseY: 0,
-        mouseTrackingMode: 'none',
-        agentTranscriptActive: true,
+        historyHydrated: false,
       }),
     ).toBe('hydrateScrollback');
     expect(
       resolveWorkbenchTerminalWheelAction({
-        bufferType: 'alternate',
-        baseY: 0,
+        bufferType: 'normal',
         mouseTrackingMode: 'none',
-        agentTranscriptActive: true,
+        historyHydrated: true,
+      }),
+    ).toBe('scrollback');
+  });
+
+  test('does not trust polluted baseY before the active Agent history is hydrated', () => {
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'normal',
+        mouseTrackingMode: 'none',
+        historyHydrated: false,
+      }),
+    ).toBe('hydrateScrollback');
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'normal',
+        mouseTrackingMode: 'none',
+        historyHydrated: true,
+      }),
+    ).toBe('scrollback');
+    expect(
+      resolveWorkbenchTerminalWheelAction({
+        bufferType: 'alternate',
+        mouseTrackingMode: 'none',
+        historyHydrated: false,
       }),
     ).toBe('hydrateScrollback');
   });
@@ -56,30 +51,25 @@ describe('resolveWorkbenchTerminalWheelAction', () => {
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'normal',
-        baseY: 120,
         mouseTrackingMode: 'vt200',
-        agentTranscriptActive: false,
+        historyHydrated: false,
       }),
     ).toBe('sgrFallback');
   });
 
-  test('non-agent alternate screen keeps the transcript-targeted SGR fallback', () => {
-    // Claude 输入框聚焦时 PageUp 不在 Chat 上下文；SGR 按落点命中。
-    // 指针在底部输入区时必须自己发打在 transcript 的 SGR，不能交给 xterm 原坐标。
+  test('non-agent alternate screen hydrates without mouse tracking and uses SGR once negotiated', () => {
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'alternate',
-        baseY: 0,
         mouseTrackingMode: 'none',
-        agentTranscriptActive: false,
+        historyHydrated: false,
       }),
-    ).toBe('sgrFallback');
+    ).toBe('hydrateScrollback');
     expect(
       resolveWorkbenchTerminalWheelAction({
         bufferType: 'alternate',
-        baseY: 0,
         mouseTrackingMode: 'vt200',
-        agentTranscriptActive: false,
+        historyHydrated: false,
       }),
     ).toBe('sgrFallback');
   });

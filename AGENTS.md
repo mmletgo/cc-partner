@@ -318,7 +318,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | WorkbenchPaneTools | canUsePanes, canSwitchPane, remoteWriteDisabled, onSplitPane, onSwitchPane, onClosePane | Workbench 终端窗格操作四合一「窗格」菜单（左右/上下分屏、切换 pane、关闭 pane），触发按钮 + Dialog 弹出四动作 |
 | WorkbenchBrowserWorkspace | surface, transport, project, worktree | Workbench 桌面/移动端共享浏览器预览工作区，按 surface 选择 iframe proxy URL；不再提供 onReturnToTerminal，由标题行 WorkbenchWorkspaceSwitch 统一承担切换 |
 | WorkbenchBrowserVerificationPanel | previewId, transport | 一键验证当前 live preview：默认 smoke（snapshot/console/screenshot），不提供脚本/selector 输入；复用 Browser Workspace 导航与 tokens |
-| WorkbenchWorkspaceSwitch | value, onChange, options, ariaLabel | Workbench 标题行三段 radiogroup 切换控件（终端 / 网页浏览 / 文件浏览），绑定 workspaceView；terminal 全屏时仍渲染，browser/files 按条件 disabled（无 project/worktree 或无 file tabs），键盘 ArrowLeft/Right/Home/End 循环切换 |
+| WorkbenchWorkspaceSwitch | value, onChange, options, ariaLabel | Workbench worktree 行最右三段 radiogroup 切换控件（终端 / 网页浏览 / 文件浏览），绑定 workspaceView；terminal 全屏时仍渲染，browser/files 按条件 disabled（无 project/worktree 或无 file tabs），键盘 ArrowLeft/Right/Home/End 循环切换；组件自身禁止 `container-type: inline-size`（会塌缩自身宽度导致溢出裁切），窄宽收起文字由 `.worktreeBar` 声明的命名容器 `workbench-workspace-switch` 驱动（行宽 ≤640px 只留图标） |
 
 ## 5. 开发规范
 

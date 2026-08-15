@@ -362,6 +362,9 @@
   max-width: 100%;
   box-sizing: border-box;
   overflow: hidden;
+  /* 行内可用宽度驱动 WorkbenchWorkspaceSwitch 的 container query：
+     行宽 ≤640px 时该组件收起文字标签只留图标，避免 actions 撑爆右边缘。 */
+  container: workbench-workspace-switch / inline-size;
 }
 
 .worktreeBar[hidden] {

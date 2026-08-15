@@ -65,6 +65,8 @@ export interface CreateTerminalLiveWriterOptions {
    * preserve 模式只切换 store cursor，后续真实 live delta 仍逐字节追加。
    */
   resetStrategy?: 'replay' | 'preserveScrollback';
+  /** 最新一次完整 snapshot 已由 xterm write callback 确认解析完成。 */
+  onSnapshotComplete?: () => void;
 }
 
 /**
@@ -130,6 +132,7 @@ export function createTerminalLiveWriter(
     gate,
     maxPendingChars = MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
     resetStrategy = 'replay',
+    onSnapshotComplete,
   } = options;
   let disposed = false;
   let writeEpoch = 0;
@@ -224,6 +227,7 @@ export function createTerminalLiveWriter(
         replaySnapshot(clear);
         return;
       }
+      onSnapshotComplete?.();
       dropStalePending();
       drainPending();
     });
