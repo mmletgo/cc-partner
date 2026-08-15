@@ -706,8 +706,7 @@
   "fileWorkspace": {
     "tabs": "已打开文件",
     "actions": "文件操作",
-    "openFiles": "文件预览",
-    "returnTerminal": "返回终端",
+    "openFiles": "文件浏览",
     "save": "保存",
     "format": "格式化",
     "dirty": "有未保存改动",
@@ -721,7 +720,7 @@
   },
   "browserPreview": {
     "title": "项目预览",
-    "openWorkspace": "预览",
+    "openWorkspace": "网页浏览",
     "connected": "已连接",
     "refresh": "重新发现",
     "open": "打开",
@@ -739,7 +738,14 @@
   "projectAutomation": {
     "title": "项目自动化",
     "description": "项目级任务队列；任务运行后才绑定 worktree 和执行现场。",
-    "open": "项目自动化"
+    "open": "项目自动化",
+    "scope": "范围",
+    "scopeValue": "项目：{{project}}",
+    "noProject": "未选择项目"
+  },
+  "workspaceSwitch": {
+    "terminal": "终端",
+    "ariaLabel": "工作区切换"
   },
   "splitPaneRight": "左右分屏",
   "splitPaneDown": "上下分屏",

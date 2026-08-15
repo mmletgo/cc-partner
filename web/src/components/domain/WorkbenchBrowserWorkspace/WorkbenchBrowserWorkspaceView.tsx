@@ -31,7 +31,6 @@ export function WorkbenchBrowserWorkspaceView({
   transport,
   project,
   worktree,
-  onReturnToTerminal,
   onBrowserTargetUrlChange,
 }: WorkbenchBrowserWorkspaceProps): ReactElement {
   const { t } = useTranslation(['workbench']);
@@ -173,11 +172,6 @@ export function WorkbenchBrowserWorkspaceView({
           {preview ? <Pill tone="success">{t('workbench:browserPreview.connected')}</Pill> : null}
         </div>
         <div className={styles.actions}>
-          {onReturnToTerminal ? (
-            <Button variant="secondary" size="sm" onClick={onReturnToTerminal}>
-              {t('workbench:fileWorkspace.returnTerminal')}
-            </Button>
-          ) : null}
           <Button
             variant="secondary"
             size="sm"
