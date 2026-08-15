@@ -188,6 +188,8 @@ const MIN_TERMINAL_COLS: u16 = 20;
 const MIN_TERMINAL_ROWS: u16 = 6;
 const TMUX_SESSION_ID_SUFFIX_LEN: usize = 12;
 const SESSION_REPLAY_MAX_CHARS: usize = 120_000;
+/// 冷恢复历史独立于 120k live ring 保留；两者合计不超过前端 200k buffer 合同。
+const SESSION_REPLAY_RESTORED_PREFIX_MAX_CHARS: usize = 80_000;
 const RAW_PTY_BACKEND: &str = "pty";
 const TMUX_BACKEND: &str = "tmux";
 #[cfg(windows)]
@@ -381,6 +383,9 @@ struct SessionReplayBuffer {
     max_chars: usize,
     /// 绑定本 buffer 的 live 实例世代（R19 H1）。
     generation: u64,
+    /// 冷启动从 tmux 捕获的真实 scrollback；必须独立于高频 TUI live ring，避免几秒内被末屏重绘挤掉。
+    restored_prefix: String,
+    restored_prefix_truncated: bool,
     /// 测试与内部裁剪需要直接观察 deque 长度与字符计数。
     pub(super) chunks: VecDeque<ReplayChunk>,
     pub(super) char_count: usize,
@@ -399,12 +404,44 @@ impl SessionReplayBuffer {
         Self {
             max_chars,
             generation,
+            restored_prefix: String::new(),
+            restored_prefix_truncated: false,
             chunks: VecDeque::new(),
             char_count: 0,
             byte_count: 0,
             truncated: false,
             last_seq: 0,
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     活跃 Agent 会持续重绘当前屏，120k live ring 很快裁掉最早注入的 tmux 历史；
+    ///     冷恢复历史必须有独立、固定上限的前缀，用户重启后才始终能向上滚到真实旧消息。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 Unicode scalar 保留历史尾部最多 80k 字符；发生裁剪时优先前进到下一条 CRLF
+    ///     行边界，避免从半行或 ANSI 属性序列中间开始。该前缀不参与 live ring 淘汰。
+    fn set_restored_prefix(&mut self, prefix: &str) {
+        let char_count = prefix.chars().count();
+        if char_count <= SESSION_REPLAY_RESTORED_PREFIX_MAX_CHARS {
+            self.restored_prefix = prefix.to_string();
+            self.restored_prefix_truncated = false;
+            return;
+        }
+
+        let overflow = char_count - SESSION_REPLAY_RESTORED_PREFIX_MAX_CHARS;
+        let byte_offset = prefix
+            .char_indices()
+            .nth(overflow)
+            .map(|(index, _)| index)
+            .unwrap_or(prefix.len());
+        let suffix = &prefix[byte_offset..];
+        let aligned_suffix = suffix
+            .find("\r\n")
+            .map(|line_end| &suffix[line_end + 2..])
+            .unwrap_or(suffix);
+        self.restored_prefix = aligned_suffix.to_string();
+        self.restored_prefix_truncated = true;
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -483,16 +520,18 @@ impl SessionReplayBuffer {
     ///     HTTP replay route 需要返回当前 session 的一致性快照，避免暴露内部可变 buffer。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     按 deque 顺序拼接全部 chunk，补入 session_id 与 truncated/last_seq 元数据。
+    ///     先写不会被 live 淘汰的冷恢复前缀，再按 deque 顺序拼接 live chunk，
+    ///     补入 session_id 与 truncated/last_seq 元数据。
     fn snapshot(&self, session_id: &str) -> WorkbenchSessionReplayDto {
-        let mut buffer = String::with_capacity(self.byte_count);
+        let mut buffer = String::with_capacity(self.restored_prefix.len() + self.byte_count);
+        buffer.push_str(&self.restored_prefix);
         for chunk in &self.chunks {
             buffer.push_str(&chunk.text);
         }
         WorkbenchSessionReplayDto {
             session_id: session_id.to_string(),
             buffer,
-            truncated: self.truncated,
+            truncated: self.restored_prefix_truncated || self.truncated,
             last_seq: self.last_seq,
             // snapshot 层不知 owner；由命令/route 注入权威 ownerInstanceId。
             owner_instance_id: None,
@@ -4796,7 +4835,15 @@ impl WorkbenchSessionRegistry {
         // capture 失败不阻断 attach，仍保留原有“至少恢复当前屏幕”的降级行为。
         let restored_scrollback = if matches!(barrier_policy, SpawnBarrierPolicy::Abort) {
             match capture_tmux_history_for_replay(&row) {
-                Ok(history) => history,
+                Ok(history) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        captured_history_chars = history.chars().count(),
+                        protected_history_limit = SESSION_REPLAY_RESTORED_PREFIX_MAX_CHARS,
+                        "已捕获并保护工作台 tmux 冷恢复历史"
+                    );
+                    history
+                }
                 Err(error) => {
                     tracing::debug!(
                         session_id = %session_id,
@@ -6223,8 +6270,8 @@ impl WorkbenchSessionRegistry {
     ///     历史本身不是本 owner 产生的 live event，不能虚构 seq 或发 terminal-output。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     新建 generation-scoped ring，把可选 seed 以 seq=0 写入并按同一字符上限裁剪，
-    ///     随后的 reader 从 seq=1 正常 append/publish。
+    ///     新建 generation-scoped ring，把可选 seed 写入不会被 live ring 淘汰的有界恢复前缀，
+    ///     随后的 reader 从 seq=1 正常 append/publish；高频 TUI 重绘只能裁剪 live 尾部。
     fn ensure_replay_buffer_for_generation_with_seed(
         &self,
         session_id: &str,
@@ -6233,7 +6280,7 @@ impl WorkbenchSessionRegistry {
     ) {
         let mut buffer = SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS, generation);
         if !seed.is_empty() {
-            buffer.append(seed, 0);
+            buffer.set_restored_prefix(seed);
         }
         self.replay_buffers
             .lock()
@@ -7696,17 +7743,40 @@ mod tests {
     ///     重启恢复的 tmux history 必须先于新 PTY 输出进入 replay，同时不能占用 live seq。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     先以 seq=0 seed 历史，再追加 seq=1 当前屏，断言顺序与 lastSeq cutover 语义。
+    ///     先设置受保护历史，再追加并裁剪 live 当前屏，断言历史不会被末屏重绘淘汰，
+    ///     同时保持顺序与 lastSeq cutover 语义。
     #[test]
     fn session_replay_buffer_seeds_tmux_history_before_new_live_output() {
-        let mut buffer = SessionReplayBuffer::new(100, 7);
-        buffer.append("early\r\nhistory\r\n", 0);
-        assert!(buffer.append_if_generation("current", 1, 7));
+        let mut buffer = SessionReplayBuffer::new(7, 7);
+        buffer.set_restored_prefix("early\r\nhistory\r\n");
+        assert!(buffer.append_if_generation("old", 1, 7));
+        assert!(buffer.append_if_generation("current", 2, 7));
 
         let snapshot = buffer.snapshot("session-restored");
         assert_eq!(snapshot.buffer, "early\r\nhistory\r\ncurrent");
-        assert_eq!(snapshot.last_seq, 1);
-        assert!(!snapshot.truncated);
+        assert_eq!(snapshot.last_seq, 2);
+        assert!(snapshot.truncated);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超长 tmux 历史必须按 UTF-8 与物理行边界裁剪，不能让 replay 从半行或半个中文字符开始。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造略超 80k 的前缀，使字符上限切点落在首行中间；断言最终从下一条 CRLF 后开始，
+    ///     中文完整且 snapshot 标记 truncated。
+    #[test]
+    fn restored_prefix_trims_at_unicode_line_boundary() {
+        let first_line = "x".repeat(100);
+        let retained = "你".repeat(79_990);
+        let prefix = format!("{first_line}\r\n{retained}");
+        let mut buffer = SessionReplayBuffer::new(10, 1);
+
+        buffer.set_restored_prefix(&prefix);
+
+        let snapshot = buffer.snapshot("restored");
+        assert_eq!(snapshot.buffer.chars().count(), 79_990);
+        assert!(snapshot.buffer.starts_with('你'));
+        assert!(snapshot.truncated);
     }
 
     /// Business Logic（为什么需要这个测试）:
