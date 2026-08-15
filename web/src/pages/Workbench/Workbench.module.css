@@ -325,20 +325,6 @@
   min-width: 0;
 }
 
-.sessionBadge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  border-radius: var(--radius-full);
-  padding: 0 var(--space-3);
-  background: color-mix(in oklab, var(--accent) 12%, var(--surface));
-  color: var(--accent);
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  white-space: nowrap;
-}
-
 .workspacePath {
   margin: var(--space-2) 0 0;
   overflow: hidden;

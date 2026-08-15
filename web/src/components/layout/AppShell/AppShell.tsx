@@ -5,7 +5,7 @@
  *   cc-partner 是一个三端（macOS / Windows / Linux）桌面工具，
  *   Web 端需要提供侧边导航 + 主内容区的基本布局骨架，
  *   窗口标题栏由 PyQt6 原生提供，无需 Web 端自绘。
- *   侧边栏 footer 区域集中展示版本号、game 大厅按钮、语言/主题/设置与移动端访问入口；
+ *   侧边栏 footer 区域集中展示版本号、版本行最右的 game 图标按钮、语言/主题/设置与移动端访问入口；
  *   设置固定在 footer，避免小屏滚动才能看到。
  *   主导航按 Explore/Work/Knowledge/System 分组，短窗口下可滚动；
  *   Workbench 入口是 Work 组内项目列表，不占独立主导航项。
@@ -13,7 +13,7 @@
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
  *   - Sidebar 内包含 Logo、分组导航（section + 非聚焦 group label）、
- *     Work 组内 ProjectRail、footer（版本号 + game + 语言/主题/设置齿轮 + 手机访问按钮）
+ *     Work 组内 ProjectRail、footer（版本号 + 版本行最右的 game 图标按钮 + 语言/主题/设置齿轮 + 手机访问按钮）
  *   - 设置入口为 footer NavLink(`/settings`)，System 组保留健康提醒、活动统计与 Provider 管理
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <outlet /> 出口，由 React Router 注入子页面，
@@ -44,6 +44,7 @@ import {
   AlertIcon,
   SmartphoneIcon,
   XIcon,
+  GameIcon,
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
 import { useAttention } from '../../../hooks/useAttention';
@@ -182,7 +183,7 @@ export function AppShell({ children }: AppShellProps) {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   版本号右侧 game 按钮打开大厅；关闭时回到未打开态。
+   *   版本行最右的 game 图标按钮打开大厅；关闭时回到未打开态。
    *
    * Code Logic（这个函数做什么）:
    *   打开 / 关闭 GameHub Dialog。
@@ -222,16 +223,16 @@ export function AppShell({ children }: AppShellProps) {
               <span className={styles.footerVersion}>{`v${version ?? '—'}`}</span>
               <button
                 type="button"
-                className={styles.footerGameButton}
+                className={styles.footerIconButton}
                 onClick={openGameHub}
                 aria-haspopup="dialog"
                 aria-expanded={gameHubOpen}
+                aria-label={t('wordgame:gameButtonTitle')}
                 title={t('wordgame:gameButtonTitle')}
               >
-                {t('wordgame:gameButton')}
+                <GameIcon size={14} />
               </button>
             </span>
-            <span>{appName}</span>
             <div className={styles.footerToggle}>
               <LanguageSwitcher />
               <div className={styles.footerIconGroup}>

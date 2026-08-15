@@ -94,6 +94,17 @@ impl DeviceQuerySampler {
             state,
         }
     }
+
+    /// 采样器是否处于可用模式（成功构建了 DeviceState）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     提醒活动门控需要区分「用户真实空闲」与「无权限降级恒空闲」——后者必须豁免门控，
+    ///     否则未授权用户的固定间隔提醒会静默失效。
+    /// Code Logic（这个函数做什么）:
+    ///     返回内部 `state` 是否构建成功；false 表示降级模式（采样恒 inactive）。
+    pub fn is_available(&self) -> bool {
+        self.state.is_some()
+    }
 }
 
 impl Default for DeviceQuerySampler {

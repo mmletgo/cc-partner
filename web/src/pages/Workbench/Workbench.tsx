@@ -9,8 +9,7 @@
  *   hooks 全部在 early return 之前，避免 React hooks 调用顺序问题。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import '@xterm/xterm/css/xterm.css';
@@ -31,8 +30,7 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention } from '@/hooks/useAttention';
 import {
-  ArrowRightIcon, BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
-  RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
+  ArrowRightIcon, BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
 } from '@/lib/icons';
 import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
@@ -69,6 +67,7 @@ import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
 import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
 import { WorkbenchBanner } from './views/WorkbenchBanner';
+import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
 import { WorkspaceSnapshotDialog } from './views/WorkspaceSnapshotDialog';
 
@@ -737,7 +736,7 @@ export function Workbench() {
             <div>
               <div className={styles.workspaceTitleRow}>
                 <h1 className={styles.workspaceTitle}>{t('workbench:title')}</h1>
-                <span className={styles.sessionBadge}>{t('workbench:sessionBadge')}</span>
+                <WorkbenchBatteryBadge />
               </div>
               <p className={styles.workspacePath}>{workspaceLine}</p>
             </div>

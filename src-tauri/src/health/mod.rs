@@ -32,7 +32,7 @@ use crate::state::AppState;
 
 use self::monitor::{ActivitySample, ActivitySampler, DeviceQuerySampler};
 use self::reminder::is_in_dnd;
-use self::state::{HealthStateMachine, HealthThresholds};
+use self::state::{HealthStateMachine, HealthThresholds, MachineState};
 use self::templates::{
     advance_overlay_queue, clear_sedentary_window_flags, enqueue_overlay,
     reconcile_template_runtimes, should_fire_template, OverlayQueue, TemplateRuntime,
@@ -60,6 +60,10 @@ pub struct OverlayRestSession {
 pub struct HealthRuntime {
     /// 共享活跃时钟(每分钟由 daemon 推进一拍;不再持唯一 should_remind)。
     pub machine: Mutex<HealthStateMachine>,
+    /// 键鼠采样是否可用：true = 已构建 DeviceState，活动门控生效；
+    /// false = 权限/环境降级（采样恒 inactive），活动门控豁免、维持按时间提醒。
+    /// daemon 采样线程创建 sampler 后置位一次，运行期不变。
+    pub monitoring_available: AtomicBool,
     /// 是否整体暂停监测(paused 状态由命令层置位,daemon 采样时据此跳过提醒)。
     pub paused: AtomicBool,
     /// 每条模板独立 pending / 间隔原点 / 本窗口已触发 / 贪睡。
@@ -75,6 +79,7 @@ impl HealthRuntime {
     pub fn new() -> Self {
         Self {
             machine: Mutex::new(HealthStateMachine::new()),
+            monitoring_available: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             templates: Mutex::new(HashMap::new()),
             overlay_queue: Mutex::new(OverlayQueue::default()),
@@ -104,8 +109,15 @@ pub fn start_health_daemon(app: AppHandle, state: std::sync::Arc<AppState>) -> C
 
     // 采样线程(线程局部持有 sampler,无需 Send)
     let cancel_s = cancel.clone();
+    let state_s = state.clone();
     std::thread::spawn(move || {
         let mut sampler = DeviceQuerySampler::new();
+        // sampler 创建后立刻置位采样可用性,供 collect_fired_templates 的活动门控
+        // 区分「真实空闲」与「无权限降级恒空闲」;运行期不变。
+        state_s
+            .health
+            .monitoring_available
+            .store(sampler.is_available(), Ordering::Relaxed);
         loop {
             if cancel_s.is_cancelled() {
                 break;
@@ -263,10 +275,12 @@ async fn handle_sample(
 /// 同步模板 runtime 并收集本拍应触发的模板 id。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     多条模板共用时钟，必须独立 pending/阈值，关窗只清久坐已触发标记。
+///     多条模板共用时钟，必须独立 pending/阈值，关窗只清久坐已触发标记；
+///     且用户不在场时（非 Working 相位）不应弹任何提醒，采样降级时除外。
 /// Code Logic（这个函数做什么）:
-///     reconcile → 可选清 sedentary flags → 对 enabled 模板 should_fire，命中则置 pending
-///     与 reminded_this_window。
+///     reconcile → 可选清 sedentary flags → 活动门控：非 Working 相位整拍不触发
+///     （含 interval），monitoring_available=false 豁免 → 对 enabled 模板 should_fire，
+///     命中则置 pending 与 reminded_this_window。
 fn collect_fired_templates(
     runtime: &HealthRuntime,
     templates: &[HealthReminderTemplate],
@@ -278,6 +292,14 @@ fn collect_fired_templates(
     reconcile_template_runtimes(&mut map, templates, now);
     if closed_window {
         clear_sedentary_window_flags(&mut map, templates);
+    }
+    // 活动门控：用户不在场（非 Working 相位）时本拍不触发任何模板（含固定间隔），
+    // 到点计时保留、恢复活动后按原判定补触发；采样不可用（无权限降级）时无法判定
+    // 活动，豁免门控维持按时间提醒。
+    let unmonitored = !runtime.monitoring_available.load(Ordering::Relaxed);
+    let user_present = unmonitored || matches!(machine_state, MachineState::Working(_));
+    if !user_present {
+        return Vec::new();
     }
     let mut fired = Vec::new();
     for tmpl in templates {
@@ -694,6 +716,159 @@ mod overlay_rest_tests {
             take_overlay_rest_for_finalize(&rt),
             None,
             "无会话时取出返回 None"
+        );
+    }
+}
+
+/// 活动门控（提醒仅用户在场时触发）的单元测试。
+///
+/// 覆盖三种关键场景：非 Working 相位拦截已到期的 interval 模板、Working 相位正常放行、
+/// 采样不可用（无权限降级）时豁免门控但 sedentary 相位判定不变。
+#[cfg(test)]
+mod activity_gate_tests {
+    use super::*;
+    use crate::config::ReminderComplete;
+    use crate::health::state::WorkingState;
+
+    fn interval_tmpl(id: &str, secs: i64) -> HealthReminderTemplate {
+        HealthReminderTemplate {
+            id: id.into(),
+            builtin: false,
+            enabled: true,
+            name: id.into(),
+            trigger: ReminderTrigger::Interval,
+            interval_seconds: Some(secs),
+            threshold_seconds: None,
+            complete: ReminderComplete::Instant,
+            session_seconds: None,
+            title: "t".into(),
+            body: "b".into(),
+            confirm_label: "ok".into(),
+            unit_label: "次".into(),
+        }
+    }
+
+    fn sit_tmpl(id: &str, threshold: i64) -> HealthReminderTemplate {
+        HealthReminderTemplate {
+            id: id.into(),
+            builtin: false,
+            enabled: true,
+            name: id.into(),
+            trigger: ReminderTrigger::Sedentary,
+            interval_seconds: None,
+            threshold_seconds: Some(threshold),
+            complete: ReminderComplete::Session,
+            session_seconds: Some(30),
+            title: "t".into(),
+            body: "b".into(),
+            confirm_label: "开始".into(),
+            unit_label: "次".into(),
+        }
+    }
+
+    /// 构造测试用 HealthRuntime：置位采样可用性、写入状态机相位，并预置各模板的
+    /// runtime（手工指定 last_completed_ts，绕过首拍 reconcile 用 now 初始化的问题）。
+    fn runtime_with(
+        machine_state: MachineState,
+        monitoring: bool,
+        seeds: &[(&str, i64)],
+    ) -> HealthRuntime {
+        let rt = HealthRuntime::new();
+        rt.monitoring_available.store(monitoring, Ordering::Relaxed);
+        rt.machine.lock().unwrap().state = machine_state;
+        let mut map = rt.templates.lock().unwrap();
+        for (id, last_completed_ts) in seeds {
+            map.insert(
+                (*id).to_string(),
+                TemplateRuntime {
+                    pending: false,
+                    last_completed_ts: *last_completed_ts,
+                    reminded_this_window: false,
+                    snooze_until: None,
+                },
+            );
+        }
+        drop(map);
+        rt
+    }
+
+    /// 门控拦截：Idle/Resting 相位时早已到期的固定间隔模板整拍不触发、不置 pending。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户离开电脑后，到点的喝水等固定间隔提醒不该对着空椅子弹窗；
+    ///     且门控必须在置 pending 之前拦截，否则恢复活动后被旧 pending 卡住永远不触发。
+    /// Code Logic（这个测试做什么）:
+    ///     monitoring_available=true，预置 last_completed_ts=0 的 interval runtime
+    ///     （interval=60，now=10000 早已到期），machine.state 分别为 Idle 与 Resting，
+    ///     断言 collect 返回空且该模板 pending 仍为 false。
+    #[test]
+    fn interval_template_blocked_when_idle_or_resting() {
+        let tmpl = interval_tmpl("water", 60);
+        for machine_state in [
+            MachineState::Idle,
+            MachineState::Resting {
+                rest_start_ts: 9000,
+            },
+        ] {
+            let rt = runtime_with(machine_state.clone(), true, &[("water", 0)]);
+            let fired = collect_fired_templates(&rt, std::slice::from_ref(&tmpl), false, 10_000);
+            assert!(
+                fired.is_empty(),
+                "非 Working 相位整拍不应触发任何模板: {machine_state:?}"
+            );
+            assert!(
+                !rt.templates.lock().unwrap()["water"].pending,
+                "门控拦截时不得置 pending"
+            );
+        }
+    }
+
+    /// 门控放行：Working 相位时到期的固定间隔模板正常触发并置 pending。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     门控只应拦「用户不在场」，用户正在工作时刻到点的提醒必须照常弹出。
+    /// Code Logic（这个测试做什么）:
+    ///     monitoring_available=true，machine.state=Working（window_start_ts=0），
+    ///     interval=60 且 last_completed_ts=0、now=10000 已到期，
+    ///     断言 collect 返回该模板 id 且 pending 被置 true。
+    #[test]
+    fn interval_template_fires_when_working() {
+        let tmpl = interval_tmpl("water", 60);
+        let rt = runtime_with(
+            MachineState::Working(WorkingState {
+                window_start_ts: 0,
+                last_active_ts: 0,
+                reminded: false,
+            }),
+            true,
+            &[("water", 0)],
+        );
+        let fired = collect_fired_templates(&rt, &[tmpl], false, 10_000);
+        assert_eq!(fired, vec!["water".to_string()]);
+        assert!(
+            rt.templates.lock().unwrap()["water"].pending,
+            "Working 相位触发后应置 pending"
+        );
+    }
+
+    /// 采样不可用豁免门控但只作用于活动门控，sedentary 相位判定不变。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     macOS 未授权/Linux 无 X display 时采样恒 inactive，若门控照常生效，
+    ///     未授权用户的固定间隔提醒会静默失效；豁免只放开「在场」判定，
+    ///     sedentary 模板仍须要求 Working 相位（相位判定不受豁免影响）。
+    /// Code Logic（这个测试做什么）:
+    ///     monitoring_available=false，machine.state=Idle，同时放一条已到期 interval
+    ///     模板与一条 threshold 很小的 sedentary 模板，断言 interval 触发、sedentary 不触发。
+    #[test]
+    fn unmonitored_sampler_exempts_gate_but_not_sedentary() {
+        let templates = vec![interval_tmpl("water", 60), sit_tmpl("sit", 1)];
+        let rt = runtime_with(MachineState::Idle, false, &[("water", 0), ("sit", 0)]);
+        let fired = collect_fired_templates(&rt, &templates, false, 10_000);
+        assert_eq!(fired, vec!["water".to_string()]);
+        assert!(
+            !rt.templates.lock().unwrap()["sit"].pending,
+            "豁免门控不得让 sedentary 在非 Working 相位触发"
         );
     }
 }

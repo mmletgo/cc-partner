@@ -284,6 +284,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 提醒模板：每条自选触发（久坐阈值 / 固定间隔）与完成方式（点一下记一次 / 开始后倒计时）；出厂三项为饮水（间隔 1h + 即时）、休息（久坐 45min + 5min 倒计时）、提肛（间隔 2h + 30s 倒计时，文案克制不写医学细节）
 - 自定义模板：设置页可新增，上限 12；内置三项不可删除，只能关闭；恢复默认只重置内置，保留自定义
 - 多条久坐共用一条键鼠活跃时钟、各自独立阈值；完成/跳过/贪睡一条不重置其它久坐计时，也不重置共享时钟
+- 仅活动时提醒：用户不在场（未处于工作窗口相位）时不弹任何提醒，包括固定间隔模板；到点计时保留、pending 不置位，恢复活动后按原判定补触发一次，不对空椅子累积弹窗。键鼠采样不可用（未授权输入监控 / 无图形环境降级）时豁免门控，维持按时间间隔提醒，避免提醒静默失效
 - 多通道提醒：系统通知可同时出（载荷用模板 title/body）；全屏遮罩互斥 FIFO 排队（同 id 去重）；应用内 toast 保持停用
 - 免打扰时段：可配置不弹通知的时间区间（支持跨午夜）；DND 期间仍可入队遮罩，不发系统通知
 - 手动控制：开关监测、暂停/恢复、按模板确认/跳过/贪睡、instant 模板手动 +1
@@ -349,7 +350,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **功能点**：
 - 工作现场安全恢复：桌面端自动保存最后工作现场结构 metadata（project/worktree/session/view/inspector/browser target；主窗 slot `desktop:auto`，卫星窗 slot `desktop:auto:window:workbench-[1-4]`，`schemaVersion=1`，稳定 selection 变化 500ms debounce 合并；revision CAS）。卫星窗 URL `projectId` 与 slot 内项目不一致时以 URL 为准，跳过该 slot restore。layout **不得**包含 terminal 字节、Prompt/回复、文件正文、env、token、命令、provider 配置或 preview ID。打开 Workbench 时先 side-effect-free preflight，再应用可安全恢复项；tmux target 存在才允许幂等 safe attach，禁止 `tmux new-session/new-window`、raw PTY fallback、terminal write、创建 worktree/shell、Claude/Codex resume。完全成功静默；partial 仅一条可关闭 inline notice。命名 snapshot 仅结构 metadata，非可执行命令配方。remote layout 留在控制设备；owner 只接收 inner ID 做 preflight/attach，capability `workbench.workspace-safe-restore.v1`；Mobile v1 不自动应用 Desktop layout。不新增第 8 个 Workbench controller。
 - 多屏卫星窗：主窗可「在新窗口打开」项目，外拓最多 4 个 `workbench-1..4` 卫星窗；同一 `projectId` 同时只属于一扇窗，再开则聚焦已有窗。关卫星窗只释放占用并删除对应 window auto slot，不 `exit_gui`、不拆 PTY。关主窗仍走现有 GUI/后端选择并退出整个桌面进程。
-- 充电模式：自我约束开关，侧栏 footer 主题按钮前用 26×26 圆按钮切换充电 / 无限（卫星窗瘦 footer 只保留该按钮与剩余时间）。充电模式下，桌面前台停留在 `/workbench` 或 `/attention` 时按墙钟消耗剩余分钟（主窗与卫星窗同时前台只扣一份）；余额为 0 时仅遮罩工作台 `<main>`，不杀已跑 Agent，不拦 HTTP/CLI/手机 API。健康提醒 completed 与记单词答对一张闪卡向本机账本充入可配置分钟。入账 `+Xm` 动画与电池环不得被工作台遮罩挡住。随时切回无限模式，余额保留。余额每日本地时间 8:00 重置为满值（与当前模式无关；应用错过 8 点时在下次读取/扣时/入账时补一次重置，同一天不重复），「今日已充」统计不含每日重置
+- 充电模式：自我约束开关，侧栏 footer 主题按钮前用 26×26 圆按钮切换充电 / 无限（卫星窗瘦 footer 只保留该按钮与剩余时间）。充电模式下，桌面前台停留在 `/workbench` 或 `/attention` 时按墙钟消耗剩余分钟（主窗与卫星窗同时前台只扣一份）；余额为 0 时仅遮罩工作台 `<main>`，不杀已跑 Agent，不拦 HTTP/CLI/手机 API。健康提醒 completed 与记单词答对一张闪卡向本机账本充入可配置分钟。入账 `+Xm` 动画与电池环不得被工作台遮罩挡住。随时切回无限模式，余额保留。余额每日本地时间 8:00 重置为满值（与当前模式无关；应用错过 8 点时在下次读取/扣时/入账时补一次重置，同一天不重复），「今日已充」统计不含每日重置；工作台标题旁徽标随模式切换——无限模式显示 ∞ 标识，充电模式显示剩余可用时长进度条与分钟数（剩余 0 danger、低于告警分钟 warn，悬停显示完整剩余时长）
 - 工作台布局：侧栏 Work 组含「工作台」导航与 `WorkbenchProjectRail` 项目列表；`/` 保持 GitHub Trending。主区域依次展示工作台标题、terminal sessions 标识、worktree 管理层、依赖提示槽和中心工作区；中心工作区在当前 worktree 的终端层与文件 tab 工作区之间切换，预览文件时终端可以隐藏但 xterm DOM 必须保持挂载并停止接收输入；终端工具栏按钮与文件工作区工具栏保持一致，均显示图标和文字；桌面端终端全屏按钮位于 pane 操作导航栏，全屏时隐藏 Workbench 外围内容和文件预览入口，但保留 terminal window tabs、pane 操作、退出全屏按钮和当前终端输出，确保全屏中仍可切换 window；文件预览按钮仅在已有打开文件 tab 时启用，点击后回到当前或首个文件 tab，与文件工作区的返回终端按钮对称；右侧检查器承载当前 window 状态，并提供当前 worktree 文件夹 / Git 提交树 / 项目笔记 tab，窄宽下排到首屏终端之后
 - 工作台顶栏标语：桌面端已选中项目后，标题区与「现场快照 / 项目自动化」之间提供本机全局可编辑标语；支持轻量 Markdown（粗体/斜体/删除线/行内代码/http(s) 链接）与 emoji；单击预览进入编辑，失焦或 ⌘/Ctrl+Enter 保存，Esc 取消未提交草稿；正文自动保存到本机 `localStorage`（`cp-workbench-banner`），不进 `config.json`、SQLite、workspace layout、备份可恢复领域或局域网同步；按区域尺寸二分最大字号使全文可见并尽量撑满，不拉字距、不压扁字形；上限 280 个 UTF-16 单位；零项目/继续工作页/终端全屏/移动端 `/mobile` 不展示。不新增第 8 个 Workbench controller。
 - 工作台内置项目预览：可在终端/文件预览旁打开 dev server 浏览器预览，自动发现终端输出和常见框架端口；本机、远端项目 shortcut 与移动端 `/mobile` 均通过 cc-partner 安全代理访问。后端只允许代理 loopback `http(s)` 且显式端口目标，避免成为开放代理；代理请求体上限为 32MB，超限返回 413 且不转发上游；上游响应体必须流式转发，避免超大或持续分块响应在后端整包聚合；远端项目必须在 owning device 上发现和访问目标，当前设备只暴露 relay proxy；前端预览 iframe 必须 sandbox 隔离且不允许 `allow-same-origin`，避免预览项目 JS 同源访问 cc-partner API；候选来源文案由前端按当前语言渲染，不依赖后端 label 字段
@@ -431,7 +432,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **功能点**：
 - 只采集 Workbench 本机与远端终端的 assistant 正文；不读 PTY 碎片；lemma 合并；停用词与代码/路径/标识符不入库
 - 远端 owner 只回传 lemma 计数，写入玩游戏这台机器的 SQLite；第一期词库不参与局域网/云同步
-- 侧栏 footer 版本号右侧文字按钮 `game` 打开共享 Dialog 大厅；列表含内置记单词与插件目录里的游戏；无新路由、不进主导航；卫星窗无入口
+- 侧栏 footer 版本行最右的 game 手柄图标按钮（无可见文字，悬停/无障碍名称为「打开游戏大厅」）打开共享 Dialog 大厅；列表含内置记单词与插件目录里的游戏；无新路由、不进主导航；卫星窗无入口；footer 不再单独显示应用名一行（应用名仅保留在侧栏顶部 logo）
 - 大厅 Escape / 点遮罩关闭；进入记单词或插件游戏后点遮罩不退出，Escape / 返回回大厅
 - 设置常规可配置游戏插件目录，默认 `~/.cc-partner/plugins`；每个一级子目录一份 `game.json` + 入口 HTML（静态或已构建产物）；宿主不执行 npm
 - 大厅提供可一键复制的 AI 游戏规范 prompt；插件在全应用半透明 scrim 沙箱 iframe 中运行

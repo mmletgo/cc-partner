@@ -1,0 +1,51 @@
+/*
+ * WorkbenchBatteryBadge — 标题旁电池模式徽标样式。
+ *
+ * 胶囊视觉对齐原 sessionBadge（accent 淡底胶囊）；
+ * 微型进度条为固定宽度内联元素，独立于 primitives/ProgressBar 的整行合同。
+ * 颜色/间距全部来自 tokens.css，浅/深色主题随 token 自动切换。
+ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  border-radius: var(--radius-full);
+  padding: 0 var(--space-3);
+  background: color-mix(in oklab, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.track {
+  width: 56px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  overflow: hidden;
+  display: block;
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  transition: width var(--motion-base) var(--ease-standard);
+}
+
+/* 低电量 tone 只改填充色，胶囊文字色保持 accent */
+.badge[data-tone='warn'] .fill {
+  background: var(--warn);
+}
+
+.badge[data-tone='danger'] .fill {
+  background: var(--danger);
+}
+
+.time {
+  font-size: var(--text-xs);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}

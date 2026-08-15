@@ -97,16 +97,25 @@ export function GameHubDialog({ open, onClose }: GameHubDialogProps): ReactNode 
     }
   }, [t]);
 
-  useEffect(() => {
+  // 关闭时重置大厅视图状态：用渲染期 prevOpen 调整模式替代 effect 内同步 setState，
+  // 避免 cascading renders；open 变化时先落状态再继续本帧渲染。
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (!open) {
       setView('hub');
       setCard(null);
       setActivePlugin(null);
       setError(null);
       setCopied(false);
-      return;
     }
-    void loadStatus();
+  }
+
+  useEffect(() => {
+    if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 大厅打开时的首屏加载入口（loadStatus 首个 await 前同步 setLoading）
+      void loadStatus();
+    }
   }, [open, loadStatus]);
 
   const handleDialogClose = useCallback((): void => {

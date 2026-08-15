@@ -184,7 +184,6 @@ export function useBattery(): UseBatteryResult {
    */
   useEffect(() => {
     let cancelled = false;
-    let timer: number | undefined;
 
     const compute = (): boolean => {
       const visible = typeof document === 'undefined' ? false : document.visibilityState === 'visible';
@@ -211,7 +210,7 @@ export function useBattery(): UseBatteryResult {
     };
 
     void report(true);
-    timer = window.setInterval(() => {
+    const timer = window.setInterval(() => {
       void report(false);
     }, 1000);
     window.addEventListener('focus', onChange);
@@ -220,7 +219,7 @@ export function useBattery(): UseBatteryResult {
 
     return () => {
       cancelled = true;
-      if (timer !== undefined) window.clearInterval(timer);
+      window.clearInterval(timer);
       window.removeEventListener('focus', onChange);
       window.removeEventListener('blur', onChange);
       document.removeEventListener('visibilitychange', onChange);

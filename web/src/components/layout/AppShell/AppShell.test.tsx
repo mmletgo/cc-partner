@@ -211,20 +211,23 @@ describe('AppShell grouped navigation', () => {
     expect(batterySnapshotMock.setMode).toHaveBeenCalledWith('unlimited');
   });
 
-  test('places a game text button next to the version number and keeps it out of primary nav', () => {
+  test('places a game icon button at the far right of the version row and keeps it out of primary nav', () => {
     renderShell();
 
-    const game = screen.getByRole('button', { name: 'game' });
+    const game = screen.getByRole('button', { name: '打开游戏大厅' });
     expect(game.closest('[class*="footerVersionRow"]')).toBeTruthy();
+    // 图标按钮：内含 svg 且无可见文字
+    expect(game.querySelector('svg')).toBeTruthy();
+    expect(game.textContent).toBe('');
     const nav = screen.getByRole('navigation', { name: '主导航' });
-    expect(within(nav).queryByRole('button', { name: 'game' })).toBeNull();
-    expect(within(nav).queryByRole('link', { name: 'game' })).toBeNull();
+    expect(within(nav).queryByRole('button', { name: '打开游戏大厅' })).toBeNull();
+    expect(within(nav).queryByRole('link', { name: '打开游戏大厅' })).toBeNull();
   });
 
   test('satellite chrome hides the game button with the rest of the footer', () => {
     windowRoleMock.role = 'satellite';
     renderShell();
-    expect(screen.queryByRole('button', { name: 'game' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '打开游戏大厅' })).toBeNull();
     windowRoleMock.role = 'main';
   });
 
