@@ -86,6 +86,26 @@ export function consumeWorkbenchTerminalWheelLines(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   xterm 6 的相对 `scrollLines` 会先读取内部 ScrollableElement 的像素位置；WKWebView/手机浏览器
+ *   中该位置可能与 buffer 游标失步，导致已经存在历史时向上滚动仍被 clamp 成 no-op。
+ *
+ * Code Logic（这个函数做什么）:
+ *   直接根据权威 buffer.viewportY 计算目标行并调用绝对 `scrollToLine`，限制在 0..baseY。
+ */
+export function scrollTerminalBufferLines(
+  terminal: {
+    buffer: { active: { baseY: number; viewportY: number } };
+    scrollToLine: (line: number) => void;
+  },
+  amount: number,
+): void {
+  const active = terminal.buffer.active;
+  const target = Math.max(0, Math.min(active.baseY, active.viewportY + amount));
+  terminal.scrollToLine(target);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Claude Code 等 TUI 靠「鼠标滚轮」滚 transcript，不是方向键（方向键是列表/输入历史）。
  *
  * Code Logic（这个函数做什么）:

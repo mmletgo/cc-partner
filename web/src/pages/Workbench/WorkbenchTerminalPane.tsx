@@ -34,6 +34,7 @@ import {
   consumeWorkbenchTerminalWheelLines,
   encodeTerminalSgrWheelReports,
   resolveWorkbenchTerminalWheelAction,
+  scrollTerminalBufferLines,
   type WorkbenchTerminalBufferType,
   type WorkbenchTerminalMouseTrackingMode,
 } from './terminalWheel';
@@ -115,20 +116,6 @@ function measureTerminalCursorMetrics(
     cellWidth: rect.width / Math.max(terminal.cols, 1),
     cellHeight: rect.height / Math.max(terminal.rows, 1),
   };
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   xterm 6 的相对 `scrollLines` 会先读取内部 ScrollableElement 的像素位置；WKWebView 中该位置
- *   可能长期停在 0，即使 buffer.viewportY 已位于底部，导致向上滚动被 clamp 成 no-op。
- *
- * Code Logic（这个函数做什么）:
- *   直接根据权威 buffer.viewportY 计算目标行并调用绝对 `scrollToLine`，同时限制在 0..baseY。
- */
-function scrollTerminalBufferLines(terminal: Terminal, amount: number): void {
-  const active = terminal.buffer.active;
-  const target = Math.max(0, Math.min(active.baseY, active.viewportY + amount));
-  terminal.scrollToLine(target);
 }
 
 /**

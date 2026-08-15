@@ -685,6 +685,22 @@ describe('workbenchTerminalBuffer store — scrollback-aware reset', () => {
     expect(store.getBuffer('s1')).toBe('');
     expect(store.getSnapshot('s1').cursor.generation).toBe(2);
   });
+
+  test('history hydration forceReplace emits a distinct reset reason', () => {
+    const store = createWorkbenchTerminalBufferStore();
+    const resets: TerminalBufferResetEvent[] = [];
+    store.subscribeReset('s1', (event) => resets.push(event));
+    store.reset('s1', 'last-screen', 5, 'owner-1');
+    resets.length = 0;
+
+    store.reset('s1', 'captured-history', 5, 'owner-1', {
+      forceReplace: true,
+      reason: 'historyHydration',
+    });
+
+    expect(resets).toEqual([{ sessionId: 's1', reason: 'historyHydration' }]);
+    expect(store.getBuffer('s1')).toBe('captured-history');
+  });
 });
 
 describe('applyTerminalBaselineCutover', () => {

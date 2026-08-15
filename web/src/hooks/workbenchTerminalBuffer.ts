@@ -21,7 +21,7 @@ type WorkbenchTerminalResetListener = (event: TerminalBufferResetEvent) => void;
  */
 export interface TerminalBufferResetEvent {
   sessionId: string;
-  reason: 'authorityChange' | 'snapshotReplace' | 'explicitClear';
+  reason: 'authorityChange' | 'snapshotReplace' | 'historyHydration' | 'explicitClear';
 }
 
 /**
@@ -110,6 +110,8 @@ export interface TerminalBufferStoreOptions {
  */
 export interface TerminalBufferResetOptions {
   forceReplace?: boolean;
+  /** 用户显式恢复 tmux history 时区分普通 Gap snapshot，确保 preserve writer 完整重放。 */
+  reason?: 'historyHydration';
 }
 
 /**
@@ -1306,11 +1308,13 @@ export function createWorkbenchTerminalBufferStore(
       // reset 本身不伪造 live delta；只同步通知 reset listeners 再立即 bump revision
       notifyReset(sessionId, {
         sessionId,
-        reason: authorityChanged
-          ? 'authorityChange'
-          : hasAuthorityArg
-            ? 'snapshotReplace'
-            : 'explicitClear',
+        reason:
+          options?.reason ??
+          (authorityChanged
+            ? 'authorityChange'
+            : hasAuthorityArg
+              ? 'snapshotReplace'
+              : 'explicitClear'),
       });
       session.revision += 1;
       notify(sessionId);

@@ -249,6 +249,28 @@ describe('terminalLiveWriter', () => {
     terminal.completeWrite(1);
   });
 
+  test('preserveScrollback fully replays an explicit history hydration snapshot', () => {
+    const terminal = new FakeTerminalWriter();
+    const source = new FakeTerminalLiveSource('last-screen', { generation: 0, appendId: 1 });
+    createTerminalLiveWriter({
+      terminal,
+      source,
+      sessionId: 's1',
+      resetStrategy: 'preserveScrollback',
+    });
+
+    source.replace(
+      'captured-history',
+      { generation: 1, appendId: 0 },
+      'historyHydration',
+    );
+    terminal.completeWrite(0);
+
+    expect(terminal.clearCalls).toBe(1);
+    expect(terminal.writes).toEqual(['last-screen', 'captured-history']);
+    terminal.completeWrite(1);
+  });
+
   test('coalesces high-rate deltas into a single next batch while writing', () => {
     const terminal = new FakeTerminalWriter();
     const source = new FakeTerminalLiveSource('seed', { generation: 0, appendId: 0 });

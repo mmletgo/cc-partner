@@ -396,6 +396,30 @@ describe('workbenchHttp', () => {
         JSON.stringify(capturedBodies[runtimeIdx]) === JSON.stringify({ projectId: 'remote-project-1' }),
         'runtime snapshot should send projectId only',
       );
+
+      await httpWorkbenchTransport.sessions.replay('session-1');
+      const replayIdx = capturedUrls.length - 1;
+      assert(
+        capturedUrls[replayIdx] === '/api/mobile/workbench/sessions/replay',
+        'ordinary mobile replay should use the shared sessions replay route',
+      );
+      assert(
+        JSON.stringify(capturedBodies[replayIdx]) ===
+          JSON.stringify({ sessionId: 'session-1', refreshHistory: false }),
+        'ordinary mobile replay must not capture tmux history',
+      );
+
+      await httpWorkbenchTransport.sessions.hydrateScrollback('session-1');
+      const hydrationIdx = capturedUrls.length - 1;
+      assert(
+        capturedUrls[hydrationIdx] === '/api/mobile/workbench/sessions/replay',
+        'mobile scrollback hydration should reuse the sessions replay route',
+      );
+      assert(
+        JSON.stringify(capturedBodies[hydrationIdx]) ===
+          JSON.stringify({ sessionId: 'session-1', refreshHistory: true }),
+        'mobile scrollback hydration must explicitly capture owner tmux history',
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

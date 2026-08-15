@@ -19,6 +19,7 @@ import {
   createTerminalLiveWriter,
   type TerminalLiveWriter,
 } from '@/pages/Workbench/terminalLiveWriter';
+import { scrollTerminalBufferLines } from '@/pages/Workbench/terminalWheel';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
   agentFreshnessI18nKey,
@@ -74,6 +75,7 @@ import { PointerPrimaryButton } from './PointerPrimaryButton';
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const DEFAULT_TERMINAL_SIZE = { cols: 80, rows: 24 };
+const SCROLLBACK_HYDRATION_TIMEOUT_MS = 10_000;
 
 export interface MobileTerminalPanelProps {
   project: WorkbenchProject | null;
@@ -206,6 +208,8 @@ export function MobileTerminalPanel({
   const lastFocusedSessionIdRef = useRef<string | null>(null);
   const touchScrollStateRef = useRef<MobileTerminalTouchScrollState | null>(null);
   const inputStreamRef = useRef<MobileTerminalInputStream | null>(null);
+  const hydratedScrollbackSessionRef = useRef<string | null>(null);
+  const activeAgentIdentityRef = useRef<string | null>(null);
 
   const scopedSessions = useMemo(
     () =>
@@ -226,6 +230,9 @@ export function MobileTerminalPanel({
     [activeSession, scopedSessions],
   );
   const sessionId = visibleSession?.id ?? null;
+  const visibleAgent = sessionId ? mobileAgentForSession(sessionRuntime, sessionId) : null;
+  const activeAgentIdentity =
+    sessionId && visibleAgent?.isActive ? `${sessionId}:${visibleAgent.id}` : null;
   const isActionDisabled = busy || actionBusy !== null;
   const canUsePaneActions = canRunMobilePaneMutation(visibleSession, isActionDisabled);
   const canSwitchPane = canSwitchMobilePane(visibleSession, isActionDisabled);
@@ -251,6 +258,16 @@ export function MobileTerminalPanel({
   useEffect(() => {
     stickyModifierRef.current = stickyModifier;
   }, [stickyModifier]);
+
+  useEffect(() => {
+    if (
+      activeAgentIdentity &&
+      activeAgentIdentityRef.current !== activeAgentIdentity
+    ) {
+      hydratedScrollbackSessionRef.current = null;
+    }
+    activeAgentIdentityRef.current = activeAgentIdentity;
+  }, [activeAgentIdentity]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -485,14 +502,212 @@ export function MobileTerminalPanel({
     const requestId = replayRequestIdRef.current + 1;
     let disposed = false;
     let liveWriter: TerminalLiveWriter | null = null;
+    let scrollbackHydrationPending = false;
+    let hydrationRequestStarted = false;
+    let hydrationSnapshotPendingParse = false;
+    let hydrationAutoScrollCancelled = false;
+    let pendingHydratedScrollLines = 0;
+    let hydrationAgentIdentity: string | null = null;
+    let hydrationExpectedGeneration: number | null = null;
+    let hydrationRequestToken = 0;
+    let hydrationAbortController: AbortController | null = null;
+    let hydrationTimeout: number | null = null;
     replayRequestIdRef.current = requestId;
     replayReadyRef.current = false;
     replayGateRef.current = false;
+    // hydration 标记只属于上一份 xterm 实例；即使 sessionId 相同（语言切换、running 状态恢复等）
+    // 也必须让新实例在首次回看历史时重新取得 owner 端权威快照，不能信任旧实例的 baseY。
+    hydratedScrollbackSessionRef.current = null;
     terminal.loadAddon(fit);
     terminal.open(viewport);
     terminalRef.current = terminal;
     // 默认离开打字态：系统键盘只在用户明确点击终端输入区后出现。
     leaveMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport), null);
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   hydration 失败、超时、换 session 或解析完成后必须释放单飞门闩，否则后续触摸永远不能重试。
+     *
+     * Code Logic（这个函数做什么）:
+     *   可选中止在途 HTTP；清空累计滚动、Agent 身份、AbortController 与 10 秒 timer。
+     */
+    const clearScrollbackHydration = (abortRequest = false): void => {
+      if (abortRequest) {
+        hydrationRequestToken += 1;
+        hydrationAbortController?.abort();
+      }
+      hydrationAbortController = null;
+      scrollbackHydrationPending = false;
+      hydrationRequestStarted = false;
+      hydrationSnapshotPendingParse = false;
+      hydrationAutoScrollCancelled = false;
+      pendingHydratedScrollLines = 0;
+      hydrationAgentIdentity = null;
+      hydrationExpectedGeneration = null;
+      if (hydrationTimeout !== null) {
+        window.clearTimeout(hydrationTimeout);
+        hydrationTimeout = null;
+      }
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   HTTP 返回不代表长历史已经被 xterm 解析；必须等待 writer 的 write callback 后再执行用户原手势。
+     *
+     * Code Logic（这个函数做什么）:
+     *   复核当前 xterm/session/Agent/mouse mode，标记本实例已 hydration，并用绝对 scrollToLine
+     *   应用累计的向历史方向滚动行数。
+     */
+    const scrollWhenHydrationParsed = (): void => {
+      if (
+        !scrollbackHydrationPending ||
+        !hydrationSnapshotPendingParse ||
+        terminalRef.current !== terminal ||
+        hydrationAgentIdentity !== activeAgentIdentityRef.current ||
+        hydrationExpectedGeneration !== store.getSnapshot(sessionId).cursor.generation
+      ) {
+        if (scrollbackHydrationPending && hydrationSnapshotPendingParse) {
+          clearScrollbackHydration();
+        }
+        return;
+      }
+      const active = terminal.buffer.active;
+      if (active.type !== 'normal' || terminal.modes.mouseTrackingMode !== 'none') {
+        clearScrollbackHydration();
+        return;
+      }
+      const lines = Math.min(-1, pendingHydratedScrollLines);
+      if (active.baseY <= 0) {
+        clearScrollbackHydration();
+        return;
+      }
+      hydratedScrollbackSessionRef.current = sessionId;
+      const shouldAutoScroll = !hydrationAutoScrollCancelled;
+      clearScrollbackHydration();
+      if (shouldAutoScroll) {
+        scrollTerminalBufferLines(terminal, lines);
+      }
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   resume 的旧消息只在 tmux owner 内；移动端首次回看历史必须显式 capture，并在网络往返期间
+     *   保住已经推进事件 cursor 的 exact live delta。
+     *
+     * Code Logic（这个函数做什么）:
+     *   initial replay 就绪后单飞调用 refreshHistory replay；listener-first 暂存同 authority 的 live；
+     *   成功后以 historyHydration 原因 forceReplace store，由既有 writer 完整重放权威快照。
+     */
+    const startHydrationRequest = (): void => {
+      if (
+        disposed ||
+        !scrollbackHydrationPending ||
+        hydrationRequestStarted ||
+        !replayReadyRef.current
+      ) {
+        return;
+      }
+      hydrationRequestStarted = true;
+      const hydrationToken = hydrationRequestToken + 1;
+      hydrationRequestToken = hydrationToken;
+      hydrationAbortController = new AbortController();
+      setPanelError(null);
+
+      const heldLive: TerminalBufferDelta[] = [];
+      let heldLiveChars = 0;
+      let heldLiveOverflow = false;
+      const unsubscribeHydrationHeldLive = store.subscribeLive(sessionId, (delta) => {
+        if (heldLiveOverflow) return;
+        heldLiveChars += delta.chunk.length;
+        if (heldLiveChars > MAX_WORKBENCH_TERMINAL_BUFFER_CHARS) {
+          heldLive.length = 0;
+          heldLiveOverflow = true;
+          return;
+        }
+        heldLive.push(delta);
+      });
+      hydrationTimeout = window.setTimeout(() => {
+        hydrationAbortController?.abort();
+      }, SCROLLBACK_HYDRATION_TIMEOUT_MS);
+
+      void httpWorkbenchTransport.sessions
+        .hydrateScrollback(sessionId, hydrationAbortController.signal)
+        .then((replay) => {
+          if (
+            disposed ||
+            replayRequestIdRef.current !== requestId ||
+            hydrationRequestToken !== hydrationToken ||
+            !scrollbackHydrationPending
+          ) {
+            return;
+          }
+          if (heldLiveOverflow) {
+            throw new Error(t('workbench:errors.sessions'));
+          }
+          if (hydrationTimeout !== null) {
+            window.clearTimeout(hydrationTimeout);
+            hydrationTimeout = null;
+          }
+          hydrationAbortController = null;
+          const hydrated = appendHeldLiveAfterReplay(
+            replay.buffer,
+            replay.lastSeq,
+            replay.ownerInstanceId,
+            heldLive,
+          );
+          hydrationExpectedGeneration =
+            store.getSnapshot(sessionId).cursor.generation + 1;
+          store.reset(
+            sessionId,
+            hydrated.buffer,
+            hydrated.lastSeq,
+            replay.ownerInstanceId,
+            { forceReplace: true, reason: 'historyHydration' },
+          );
+          if (scrollbackHydrationPending) {
+            hydrationExpectedGeneration = store.getSnapshot(sessionId).cursor.generation;
+          }
+        })
+        .catch((reason) => {
+          if (
+            disposed ||
+            replayRequestIdRef.current !== requestId ||
+            hydrationRequestToken !== hydrationToken
+          ) {
+            return;
+          }
+          clearScrollbackHydration();
+          setPanelError(
+            `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
+              reason,
+              t('workbench:errors.sessions'),
+            )}`,
+          );
+        })
+        .finally(() => {
+          unsubscribeHydrationHeldLive();
+        });
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   initial replay 可能仍在网络中；首次触摸应先累计意图，等 writer ready 后再 capture，禁止两份
+     *   baseline 乱序覆盖。后续 touchmove 只能复用同一请求。
+     *
+     * Code Logic（这个函数做什么）:
+     *   首次进入 queued 状态并记录 Agent 身份；随后尝试启动请求，未 ready 时由 snapshot callback 续跑。
+     */
+    const hydrateScrollback = (): void => {
+      if (!scrollbackHydrationPending) {
+        scrollbackHydrationPending = true;
+        hydrationRequestStarted = false;
+        hydrationSnapshotPendingParse = false;
+        hydrationAutoScrollCancelled = false;
+        hydrationAgentIdentity = activeAgentIdentityRef.current;
+        hydrationExpectedGeneration = null;
+      }
+      startHydrationRequest();
+    };
 
     /**
      * Business Logic（为什么需要这个函数）:
@@ -602,17 +817,30 @@ export function MobileTerminalPanel({
       touchScrollStateRef.current = result.state;
       if (result.lines === 0) return;
       touchMoved = true;
-      // PC：有本地 scrollback → scrollLines；TUI alternate 开启 mouse tracking 时滚轮发 SGR 64/65。
-      // 禁止发方向键——Claude Code 会把它当列表导航，而不是 transcript 滚动。
+      // 未权威 hydration 时不能信任 baseY（可能是末屏重绘污染）；mouse mode=none 先抓 tmux history。
+      // 已 hydration 的 normal buffer 用绝对 scrollToLine；已协商 mouse 时才发 SGR 64/65。
       const activeBuffer = terminal.buffer.active;
-      const scrollMode = resolveMobileTerminalScrollMode(activeBuffer.type, activeBuffer.baseY);
+      const mouseTrackingMode = terminal.modes.mouseTrackingMode;
+      const scrollMode = resolveMobileTerminalScrollMode(
+        activeBuffer.type,
+        mouseTrackingMode,
+        hydratedScrollbackSessionRef.current === sessionId,
+      );
       if (scrollMode === 'scrollback') {
-        terminal.scrollLines(result.lines);
+        scrollTerminalBufferLines(terminal, result.lines);
+        return;
+      }
+      if (scrollMode === 'hydrateScrollback') {
+        // 位于底部时只有负数代表查看更旧内容；其余方向不触发昂贵 capture。
+        if (result.lines >= 0) return;
+        pendingHydratedScrollLines = Math.max(
+          -Math.max(1, terminal.rows),
+          pendingHydratedScrollLines + result.lines,
+        );
+        hydrateScrollback();
         return;
       }
       if (!inputEnabledRef.current) return;
-      // 未开启 mouse tracking 时裸 SGR 会被 shell/readline 当普通输入；只有 TUI 明确协商后才注入滚轮。
-      if (terminal.modes.mouseTrackingMode === 'none') return;
       // 触点换算为 1-based 字符格，贴近桌面滚轮落点；失败回落 1,1。
       const rect = viewport.getBoundingClientRect();
       const cellW = rect.width / Math.max(terminal.cols, 1);
@@ -675,6 +903,9 @@ export function MobileTerminalPanel({
       touchScrollStateRef.current = null;
       touchMoved = false;
       suppressClickAfterScroll = true;
+      if (scrollbackHydrationPending) {
+        hydrationAutoScrollCancelled = true;
+      }
     };
     const handleViewportClick = (): void => {
       if (suppressClickAfterScroll) {
@@ -713,6 +944,22 @@ export function MobileTerminalPanel({
     observer.observe(viewport);
     resizeTerminal();
 
+    // 必须先于 live writer 注册：historyHydration reset 先把本地 alternate/RIS 恢复成 normal，
+    // writer 随后才 clear + replay 完整快照；该 reset 不会写入 tmux/Claude。
+    const unsubscribeHydrationReset = store.subscribeReset(sessionId, (event) => {
+      if (!scrollbackHydrationPending) return;
+      if (event.reason === 'historyHydration') {
+        hydrationSnapshotPendingParse = true;
+        if (terminal.buffer.active.type === 'alternate') {
+          terminal.reset();
+        }
+        return;
+      }
+      if (hydrationRequestStarted) {
+        clearScrollbackHydration(true);
+      }
+    });
+
     // listener-first：HTTP replay 网络往返期间到达的 exact live delta 必须暂存；event stream cursor
     // 已推进后后端不会保证再次发送，cutover 时只能按 owner/seq 去重后接到 replay 尾部。
     const heldLive: TerminalBufferDelta[] = [];
@@ -750,9 +997,11 @@ export function MobileTerminalPanel({
           sessionId,
           gate: replayGateRef,
           resetStrategy: 'preserveScrollback',
+          onSnapshotComplete: scrollWhenHydrationParsed,
         });
         unsubscribeHeldLive();
         replayReadyRef.current = true;
+        startHydrationRequest();
       })
       .catch((reason) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
@@ -764,9 +1013,11 @@ export function MobileTerminalPanel({
           sessionId,
           gate: replayGateRef,
           resetStrategy: 'preserveScrollback',
+          onSnapshotComplete: scrollWhenHydrationParsed,
         });
         unsubscribeHeldLive();
         replayReadyRef.current = true;
+        startHydrationRequest();
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
             reason,
@@ -777,6 +1028,7 @@ export function MobileTerminalPanel({
 
     return () => {
       disposed = true;
+      clearScrollbackHydration(true);
       observer.disconnect();
       dataDisposable.dispose();
       viewport.removeEventListener('touchstart', handleTouchStart, touchListenerOptions);
@@ -790,6 +1042,7 @@ export function MobileTerminalPanel({
         resizeTimerRef.current = null;
       }
       unsubscribeHeldLive();
+      unsubscribeHydrationReset();
       liveWriter?.dispose();
       terminal.dispose();
       terminalRef.current = null;

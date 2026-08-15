@@ -77,26 +77,26 @@ describe('mobileTerminalTouchScroll', () => {
     );
   });
 
-  test('resolveMobileTerminalScrollMode matches desktop TUI vs normal buffer branch', () => {
+  test('resolveMobileTerminalScrollMode hydrates before trusting local history', () => {
     assertEqual(
-      resolveMobileTerminalScrollMode('alternate', 0),
-      'tuiWheel',
-      'alternate buffer (Claude Code TUI) must use mouse-wheel reports like PC',
+      resolveMobileTerminalScrollMode('normal', 'none', false),
+      'hydrateScrollback',
+      'normal buffer must hydrate before trusting possibly polluted local history',
     );
     assertEqual(
-      resolveMobileTerminalScrollMode('alternate', 50),
-      'tuiWheel',
-      'alternate buffer never uses local scrollLines',
+      resolveMobileTerminalScrollMode('alternate', 'none', true),
+      'hydrateScrollback',
+      'alternate buffer must re-hydrate even after an earlier normal snapshot',
     );
     assertEqual(
-      resolveMobileTerminalScrollMode('normal', 0),
-      'tuiWheel',
-      'normal buffer without local scrollback falls back to wheel reports',
-    );
-    assertEqual(
-      resolveMobileTerminalScrollMode('normal', 12),
+      resolveMobileTerminalScrollMode('normal', 'none', true),
       'scrollback',
-      'normal buffer with baseY>0 uses local xterm scrollback',
+      'hydrated normal buffer uses local xterm scrollback',
+    );
+    assertEqual(
+      resolveMobileTerminalScrollMode('normal', 'vt200', false),
+      'sgrFallback',
+      'negotiated mouse tracking sends SGR without capture',
     );
   });
 
@@ -165,8 +165,8 @@ describe('mobileTerminalTouchScroll', () => {
     );
     assertContains(
       panelSource,
-      'terminal.scrollLines(result.lines)',
-      'normal buffer with scrollback still uses local scrollLines',
+      'scrollTerminalBufferLines(terminal, result.lines)',
+      'normal buffer with scrollback must use absolute scrollToLine helper',
     );
     assertContains(
       panelSource,
@@ -175,8 +175,8 @@ describe('mobileTerminalTouchScroll', () => {
     );
     assertContains(
       panelSource,
-      "terminal.modes.mouseTrackingMode === 'none'",
-      'panel must not inject raw SGR wheel bytes before the TUI enables mouse tracking',
+      'hydrateScrollback()',
+      'mode none without authoritative history must trigger hydration',
     );
     if (panelSource.includes('encodeMobileTerminalTuiScrollKeys')) {
       throw new Error('must not fall back to arrow-key encoding for TUI scroll');

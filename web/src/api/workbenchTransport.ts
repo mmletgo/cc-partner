@@ -84,7 +84,11 @@ export interface WorkbenchTransport {
       cols: number,
       rows: number,
     ) => Promise<{ ok: boolean; sessionId: string }>;
-    replay: (sessionId: string) => Promise<WorkbenchSessionReplay>;
+    replay: (sessionId: string, signal?: AbortSignal) => Promise<WorkbenchSessionReplay>;
+    hydrateScrollback: (
+      sessionId: string,
+      signal?: AbortSignal,
+    ) => Promise<WorkbenchSessionReplay>;
     focus: (
       sessionId: string,
       streamActive?: boolean,
@@ -283,6 +287,7 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
       workbenchApi.sessions.create(projectId, initialSize, worktreeId),
     resize: (sessionId, cols, rows) => workbenchApi.sessions.resize(sessionId, cols, rows),
     replay: async (sessionId) => createEmptyDesktopReplay(sessionId),
+    hydrateScrollback: (sessionId) => workbenchApi.sessions.hydrateScrollback(sessionId),
     focus: (sessionId, streamActive) => workbenchApi.sessions.focus(sessionId, streamActive),
     focused: (projectId, worktreeId) => workbenchApi.sessions.focused(projectId, worktreeId),
     splitPane: (sessionId, direction) => workbenchApi.sessions.splitPane(sessionId, direction),

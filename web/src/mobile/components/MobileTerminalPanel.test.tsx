@@ -29,6 +29,17 @@ import type { WorkbenchProject, WorkbenchSession, WorkbenchSessionReplay } from 
 interface MockTerminalInstance {
   write: (data: string, cb?: () => void) => void;
   clear: () => void;
+  reset: () => void;
+  scrollToLine: (line: number) => void;
+  buffer: {
+    active: {
+      type: 'normal' | 'alternate';
+      baseY: number;
+      viewportY: number;
+    };
+  };
+  modes: { mouseTrackingMode: 'none' | 'vt200' };
+  openedElement: HTMLElement | null;
 }
 
 const terminalEvents = vi.hoisted(() => ({
@@ -36,6 +47,11 @@ const terminalEvents = vi.hoisted(() => ({
   writeCalls: [] as Array<{ data: string; instance: number }>,
   replayResult: null as WorkbenchSessionReplay | null,
   replayPromise: null as Promise<WorkbenchSessionReplay | null> | null,
+  hydrationResult: null as WorkbenchSessionReplay | null,
+  hydrationPromise: null as Promise<WorkbenchSessionReplay | null> | null,
+  hydrateCalls: [] as string[],
+  resetCalls: [] as Array<{ instance: number }>,
+  scrollToLineCalls: [] as Array<{ instance: number; line: number }>,
   instances: [] as MockTerminalInstance[],
 }));
 
@@ -46,23 +62,53 @@ vi.mock('@xterm/xterm', () => {
       cols = 80;
       rows = 24;
       options: Record<string, unknown> = {};
+      buffer = {
+        active: {
+          type: 'normal' as 'normal' | 'alternate',
+          baseY: 0,
+          viewportY: 0,
+        },
+      };
+      modes = { mouseTrackingMode: 'none' as 'none' | 'vt200' };
+      openedElement: HTMLElement | null = null;
       private readonly instance: number;
       constructor() {
         this.instance = instanceCount++;
+        terminalEvents.instances.push(this);
       }
       loadAddon(): void {}
-      open(): void {}
+      open(element: HTMLElement): void {
+        this.openedElement = element;
+      }
       onData(): { dispose: () => void } {
         return { dispose: () => undefined };
       }
       write(data: string, cb?: () => void): void {
         terminalEvents.writeCalls.push({ data, instance: this.instance });
+        const lineCount = data.split('\n').length - 1;
+        if (lineCount > this.rows) {
+          this.buffer.active.baseY = lineCount - this.rows;
+          this.buffer.active.viewportY = this.buffer.active.baseY;
+        }
         cb?.();
       }
       clear(): void {
         terminalEvents.clearCalls.push({ instance: this.instance });
+        this.buffer.active.baseY = 0;
+        this.buffer.active.viewportY = 0;
       }
       scrollLines(): void {}
+      scrollToLine(line: number): void {
+        this.buffer.active.viewportY = line;
+        terminalEvents.scrollToLineCalls.push({ instance: this.instance, line });
+      }
+      reset(): void {
+        this.buffer.active.type = 'normal';
+        this.buffer.active.baseY = 0;
+        this.buffer.active.viewportY = 0;
+        this.modes.mouseTrackingMode = 'none';
+        terminalEvents.resetCalls.push({ instance: this.instance });
+      }
       dispose(): void {}
       blur(): void {}
       focus(): void {}
@@ -82,6 +128,10 @@ vi.mock('@/api/workbenchHttp', () => ({
       replay: vi.fn(() =>
         terminalEvents.replayPromise ?? Promise.resolve(terminalEvents.replayResult),
       ),
+      hydrateScrollback: vi.fn((sessionId: string) => {
+        terminalEvents.hydrateCalls.push(sessionId);
+        return terminalEvents.hydrationPromise ?? Promise.resolve(terminalEvents.hydrationResult);
+      }),
       focus: vi.fn(() => Promise.resolve()),
       zoomPane: vi.fn(() => Promise.resolve()),
       resize: vi.fn(() => Promise.resolve()),
@@ -89,9 +139,12 @@ vi.mock('@/api/workbenchHttp', () => ({
   },
 }));
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
+vi.mock('react-i18next', () => {
+  const translate = (key: string): string => key;
+  return {
+    useTranslation: () => ({ t: translate }),
+  };
+});
 
 vi.mock('../mobileTerminalInputStream', () => ({
   MobileTerminalInputStream: class {
@@ -174,6 +227,36 @@ function BuffersProvider({
   );
 }
 
+/** 返回最近创建的 mock xterm，供触摸 hydration 行为测试驱动公开状态。 */
+function latestMockTerminal(): MockTerminalInstance {
+  const terminal = terminalEvents.instances.at(-1);
+  if (!terminal) throw new Error('expected a mounted mock terminal');
+  return terminal;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   jsdom 没有完整 TouchEvent 构造器，移动端回归测试仍需按真实 capture listener 驱动单指手势。
+ *
+ * Code Logic（这个函数做什么）:
+ *   创建可取消冒泡 Event，并注入只读 touches 数组后派发到 xterm viewport。
+ */
+function dispatchSingleTouch(
+  element: HTMLElement,
+  type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
+  clientY: number,
+): void {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'touches', {
+    configurable: true,
+    value:
+      type === 'touchend' || type === 'touchcancel'
+        ? []
+        : [{ clientX: 12, clientY }],
+  });
+  element.dispatchEvent(event);
+}
+
 describe('MobileTerminalPanel — refresh scrollback', () => {
   beforeEach(() => {
     terminalEvents.clearCalls.length = 0;
@@ -181,6 +264,11 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.instances.length = 0;
     terminalEvents.replayResult = null;
     terminalEvents.replayPromise = null;
+    terminalEvents.hydrationResult = null;
+    terminalEvents.hydrationPromise = null;
+    terminalEvents.hydrateCalls.length = 0;
+    terminalEvents.resetCalls.length = 0;
+    terminalEvents.scrollToLineCalls.length = 0;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
     global.ResizeObserver = class {
       observe(): void {}
@@ -242,6 +330,147 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
 
     // 关键断言：scrollback（replay 历史）不得被 terminal.clear() 清空。
     expect(terminalEvents.clearCalls.length).toBe(0);
+  });
+
+  test('queues first history swipe until baseline, hydrates once, resets alternate and applies accumulated scroll', async () => {
+    let resolveReplay: ((value: WorkbenchSessionReplay) => void) | null = null;
+    let resolveHydration: ((value: WorkbenchSessionReplay) => void) | null = null;
+    terminalEvents.replayPromise = new Promise<WorkbenchSessionReplay>((resolve) => {
+      resolveReplay = resolve;
+    });
+    terminalEvents.hydrationPromise = new Promise<WorkbenchSessionReplay>((resolve) => {
+      resolveHydration = resolve;
+    });
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = buildSession();
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    const terminal = latestMockTerminal();
+    const viewport = terminal.openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 100);
+      dispatchSingleTouch(viewport, 'touchmove', 140);
+    });
+    expect(terminalEvents.hydrateCalls).toHaveLength(0);
+
+    await act(async () => {
+      resolveReplay?.({
+        sessionId: 's1',
+        buffer: 'current screen\n',
+        truncated: false,
+        lastSeq: 10,
+        ownerInstanceId: 'owner-1',
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(terminalEvents.hydrateCalls).toEqual(['s1']));
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchmove', 180);
+      terminal.buffer.active.type = 'alternate';
+    });
+    expect(terminalEvents.hydrateCalls).toEqual(['s1']);
+
+    await act(async () => {
+      resolveHydration?.({
+        sessionId: 's1',
+        buffer: 'history line\n'.repeat(60),
+        truncated: false,
+        lastSeq: 20,
+        ownerInstanceId: 'owner-1',
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(terminalEvents.scrollToLineCalls).toHaveLength(1));
+    expect(terminalEvents.resetCalls).toHaveLength(1);
+    expect(terminal.buffer.active.type).toBe('normal');
+    expect(terminalEvents.scrollToLineCalls[0]?.line).toBeLessThan(
+      terminal.buffer.active.baseY,
+    );
+  });
+
+  test('unlocks hydration after a request failure so the next history swipe can retry', async () => {
+    let rejectHydration: ((reason: Error) => void) | null = null;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'current screen\n',
+      truncated: false,
+      lastSeq: 10,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.hydrationPromise = new Promise<WorkbenchSessionReplay>((_resolve, reject) => {
+      rejectHydration = reject;
+    });
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = buildSession();
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(terminalEvents.writeCalls.some((call) => call.data === 'current screen\n')).toBe(true);
+    });
+    const terminal = latestMockTerminal();
+    const viewport = terminal.openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 100);
+      dispatchSingleTouch(viewport, 'touchmove', 140);
+    });
+    await waitFor(() => expect(terminalEvents.hydrateCalls).toEqual(['s1']));
+    await act(async () => {
+      rejectHydration?.(new Error('temporary failure'));
+      await Promise.resolve();
+    });
+
+    terminalEvents.hydrationPromise = null;
+    terminalEvents.hydrationResult = {
+      sessionId: 's1',
+      buffer: 'history line\n'.repeat(60),
+      truncated: false,
+      lastSeq: 20,
+      ownerInstanceId: 'owner-1',
+    };
+    const retryTerminal = latestMockTerminal();
+    const retryViewport = retryTerminal.openedElement;
+    if (!retryViewport) throw new Error('expected retry xterm viewport');
+    act(() => {
+      dispatchSingleTouch(retryViewport, 'touchstart', 100);
+      dispatchSingleTouch(retryViewport, 'touchmove', 140);
+    });
+
+    await waitFor(() => expect(terminalEvents.hydrateCalls).toEqual(['s1', 's1']));
+    await waitFor(() => expect(terminalEvents.scrollToLineCalls).toHaveLength(1));
+    expect(terminalEvents.scrollToLineCalls[0]?.line).toBeLessThan(
+      retryTerminal.buffer.active.baseY,
+    );
   });
 
   test('continues rendering exact live deltas after the bounded store trims to identical text', async () => {

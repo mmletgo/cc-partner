@@ -1,4 +1,10 @@
-import { encodeTerminalSgrWheelReports } from '@/pages/Workbench/terminalWheel';
+import {
+  encodeTerminalSgrWheelReports,
+  resolveWorkbenchTerminalWheelAction,
+  type WorkbenchTerminalBufferType,
+  type WorkbenchTerminalMouseTrackingMode,
+  type WorkbenchTerminalWheelAction,
+} from '@/pages/Workbench/terminalWheel';
 
 export interface MobileTerminalTouchScrollState {
   lastClientY: number;
@@ -64,9 +70,9 @@ export function updateMobileTerminalTouchScroll(
   };
 }
 
-export type MobileTerminalBufferType = 'normal' | 'alternate';
+export type MobileTerminalBufferType = WorkbenchTerminalBufferType;
 
-export type MobileTerminalScrollMode = 'scrollback' | 'tuiWheel';
+export type MobileTerminalScrollMode = WorkbenchTerminalWheelAction;
 
 /** 单次 touchmove 最多向 PTY 注入的滚轮事件数，防止高速滑动打爆输入流。 */
 export const MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP = 8;
@@ -78,15 +84,19 @@ export const MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP = 8;
  *   移动端若一律 scrollLines 或误发方向键，Claude Code 会变成「上下选择」而非滚动。
  *
  * Code Logic（这个函数做什么）:
- *   alternate → tuiWheel；normal 且 baseY>0 → scrollback；否则 tuiWheel。
+ *   复用桌面端权威判定：mouse tracking 已协商时发 SGR；尚未协商且当前 xterm 未应用过
+ *   owner history 时先 hydration；完成后 normal buffer 才允许本地 scrollback。
  */
 export function resolveMobileTerminalScrollMode(
   bufferType: MobileTerminalBufferType,
-  baseY: number,
+  mouseTrackingMode: WorkbenchTerminalMouseTrackingMode,
+  historyHydrated: boolean,
 ): MobileTerminalScrollMode {
-  if (bufferType === 'alternate') return 'tuiWheel';
-  if (Number.isFinite(baseY) && baseY > 0) return 'scrollback';
-  return 'tuiWheel';
+  return resolveWorkbenchTerminalWheelAction({
+    bufferType,
+    mouseTrackingMode,
+    historyHydrated,
+  });
 }
 
 /**

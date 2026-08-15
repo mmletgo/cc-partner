@@ -62,7 +62,8 @@ export interface CreateTerminalLiveWriterOptions {
   maxPendingChars?: number;
   /**
    * 移动端已经把 HTTP replay 写入 xterm scrollback；后续短 Gap/reset 不应 clear 掉历史。
-   * preserve 模式只切换 store cursor，后续真实 live delta 仍逐字节追加。
+   * preserve 模式只对普通 snapshotReplace 切换 store cursor；显式 historyHydration 仍完整重放，
+   * 后续真实 live delta 继续逐字节追加。
    */
   resetStrategy?: 'replay' | 'preserveScrollback';
   /** 最新一次完整 snapshot 已由 xterm write callback 确认解析完成。 */

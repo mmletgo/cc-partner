@@ -857,8 +857,18 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         cols,
         rows,
       }, { policy: { kind: 'mutation' } }),
-    replay: (sessionId) =>
-      postJson<WorkbenchSessionReplay>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/replay`, { sessionId }, { policy: { kind: 'query' } }),
+    replay: (sessionId, signal?: AbortSignal) =>
+      postJson<WorkbenchSessionReplay>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/replay`,
+        { sessionId, refreshHistory: false },
+        { policy: { kind: 'query', signal } },
+      ),
+    hydrateScrollback: (sessionId, signal?: AbortSignal) =>
+      postJson<WorkbenchSessionReplay>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/replay`,
+        { sessionId, refreshHistory: true },
+        { policy: { kind: 'query', signal } },
+      ),
     focus: (sessionId, streamActive = true) =>
       postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/focus`, {
         sessionId,
