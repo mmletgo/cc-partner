@@ -169,14 +169,6 @@ export function AgentLedgerDrawer({
                 <dd>{summary.sessions}</dd>
               </div>
               <div>
-                <dt>{t('workbench:agentLedger.completed')}</dt>
-                <dd>{summary.completed}</dd>
-              </div>
-              <div>
-                <dt>{t('workbench:agentLedger.failed')}</dt>
-                <dd>{summary.failed}</dd>
-              </div>
-              <div>
                 <dt>{t('workbench:agentLedger.duration')}</dt>
                 <dd data-testid="ledger-duration">
                   {durationLabel(

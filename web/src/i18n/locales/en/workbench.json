@@ -934,8 +934,6 @@
     "summaryTitle": "Usage summary",
     "listTitle": "Recent sessions",
     "sessions": "Sessions",
-    "completed": "Completed",
-    "failed": "Failed",
     "duration": "Duration",
     "durationUnitDay": "d",
     "durationUnitHour": "h",
