@@ -98,6 +98,21 @@ describe('AgentLedgerDrawer', () => {
     expect(screen.getByTestId('ledger-cache-read-tokens').textContent).toBe('6.789k');
   });
 
+  it('formats duration as day/hour/minute/second at second precision', () => {
+    renderDrawer({
+      summary: { ...summaryPartial, durationMs: 90_061_000 },
+    });
+    expect(screen.getAllByTestId('ledger-duration')[0].textContent).toBe('1天 1时 1分 1秒');
+    renderDrawer({
+      summary: { ...summaryPartial, durationMs: 65_000 },
+    });
+    expect(screen.getAllByTestId('ledger-duration')[1].textContent).toBe('1分 5秒');
+    renderDrawer({
+      summary: { ...summaryPartial, durationMs: 0 },
+    });
+    expect(screen.getAllByTestId('ledger-duration')[2].textContent).toBe('0秒');
+  });
+
   it('shows partial coverage label', () => {
     renderDrawer();
     expect(screen.getByText(/部分/)).toBeTruthy();

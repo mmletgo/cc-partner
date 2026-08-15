@@ -16,6 +16,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Drawer, Pill } from '@/components/primitives';
 import { formatTokenCount } from '@/lib/tokenFormat';
 import { formatLocalDateTimeSeconds } from '@/lib/localDateTime';
+import { splitDurationParts } from '@/lib/durationFormat';
 import type {
   AgentLedgerEntry,
   AgentLedgerPage,
@@ -50,6 +51,35 @@ function tokenLabel(
   unavailable: string,
 ): string {
   return formatTokenCount(value) ?? unavailable;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   时长原始值为毫秒,需按天/时/分/秒自动划分、精确到秒展示;
+ *   各分量单位文案随 locale 切换,全零显示 0 秒。
+ *
+ * Code Logic（这个函数做什么）:
+ *   splitDurationParts 拆分后跳过零分量(至少保留秒)用 i18n 单位拼接;
+ *   非法时长返回「未提供」。
+ */
+function durationLabel(
+  ms: number,
+  unavailable: string,
+  unitDay: string,
+  unitHour: string,
+  unitMinute: string,
+  unitSecond: string,
+): string {
+  const parts = splitDurationParts(ms);
+  if (!parts) return unavailable;
+  const segments: string[] = [];
+  if (parts.days > 0) segments.push(`${parts.days}${unitDay}`);
+  if (parts.hours > 0) segments.push(`${parts.hours}${unitHour}`);
+  if (parts.minutes > 0) segments.push(`${parts.minutes}${unitMinute}`);
+  if (parts.seconds > 0 || segments.length === 0) {
+    segments.push(`${parts.seconds}${unitSecond}`);
+  }
+  return segments.join(' ');
 }
 
 /**
@@ -165,8 +195,15 @@ export function AgentLedgerDrawer({
               </div>
               <div>
                 <dt>{t('workbench:agentLedger.duration')}</dt>
-                <dd>
-                  {t('workbench:agentLedger.durationMs', { ms: summary.durationMs })}
+                <dd data-testid="ledger-duration">
+                  {durationLabel(
+                    summary.durationMs,
+                    unavailable,
+                    t('workbench:agentLedger.durationUnitDay'),
+                    t('workbench:agentLedger.durationUnitHour'),
+                    t('workbench:agentLedger.durationUnitMinute'),
+                    t('workbench:agentLedger.durationUnitSecond'),
+                  )}
                 </dd>
               </div>
               <div>
