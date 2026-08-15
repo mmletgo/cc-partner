@@ -34,7 +34,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { workbenchApi } from '@/api/workbench';
+import { workbenchApi, type FileApiScope } from '@/api/workbench';
 import type {
   WorkbenchFileNode,
   WorkbenchFileMode,
@@ -108,6 +108,7 @@ export interface UseWorkbenchFileControllerParams {
     key: WorkbenchFileMessageKey,
     vars?: Record<string, unknown>,
   ) => string;
+  api?: FileApiScope;
 }
 
 /**
@@ -202,6 +203,10 @@ export function useWorkbenchFileController(
     translateFileError,
     translateFileMessage,
   } = params;
+
+  // Plan 2 deferred: 文件域 API 走 Params 注入（FileApiScope），缺省回落 workbenchApi.files，
+  // 既保留生产默认行为，又允许测试/未来代理层注入 fake / 远端 client。
+  const filesApi = params.api ?? workbenchApi.files;
 
   const [rootNodes, setRootNodes] = useState<WorkbenchFileNode[]>([]);
   const [childrenByPath, setChildrenByPath] = useState<Record<string, WorkbenchFileNode[]>>({});
@@ -335,7 +340,7 @@ export function useWorkbenchFileController(
       try {
         setFileError(null);
         setFileLoadingPath(path);
-        const nodes = await workbenchApi.files.listDir(projectId, path, worktreeId);
+        const nodes = await filesApi.listDir(projectId, path, worktreeId);
         if (
           !isCurrentProject(projectId) ||
           activeWorktreeIdRef.current !== worktreeId ||
@@ -396,7 +401,7 @@ export function useWorkbenchFileController(
       if (!projectId) return;
       const worktreeId = activeWorktreeIdRef.current;
       try {
-        const info = await workbenchApi.files.info(projectId, path, worktreeId);
+        const info = await filesApi.info(projectId, path, worktreeId);
         if (!isCurrentProject(projectId) || activeWorktreeIdRef.current !== worktreeId) {
           return;
         }
@@ -453,7 +458,7 @@ export function useWorkbenchFileController(
       try {
         setFileError(null);
         setFileNotice(null);
-        const opened = await workbenchApi.files.open(projectId, node.path, worktreeId);
+        const opened = await filesApi.open(projectId, node.path, worktreeId);
         if (
           activeProjectIdRef.current !== projectId ||
           activeWorktreeIdRef.current !== worktreeId ||
@@ -742,7 +747,7 @@ export function useWorkbenchFileController(
         setFileSaving(true);
         setFileError(null);
         setFileNotice(null);
-        const saved = await workbenchApi.files.saveText(
+        const saved = await filesApi.saveText(
           projectId,
           tab.path,
           submittedContent,
@@ -859,7 +864,7 @@ export function useWorkbenchFileController(
       try {
         setFileError(null);
         setFileNotice(null);
-        const result = await workbenchApi.files.formatStructured(kind, submittedContent);
+        const result = await filesApi.formatStructured(kind, submittedContent);
         const latestTab = fileTabsRef.current.find((candidate) => candidate.id === id);
         if (
           activeProjectIdRef.current !== projectId ||
@@ -925,7 +930,7 @@ export function useWorkbenchFileController(
 
       try {
         setFileError(null);
-        const sqlite = await workbenchApi.files.previewSqlite(
+        const sqlite = await filesApi.previewSqlite(
           projectId,
           tab.path,
           table,
@@ -982,7 +987,7 @@ export function useWorkbenchFileController(
       if (!projectId) return null;
       const worktreeId = activeWorktreeIdRef.current;
       try {
-        return await workbenchApi.files.previewHtmlAsset(
+        return await filesApi.previewHtmlAsset(
           projectId,
           documentPath,
           assetPath,
@@ -1007,8 +1012,8 @@ export function useWorkbenchFileController(
         setFileNotice(null);
         const created =
           kind === 'file'
-            ? await workbenchApi.files.createFile(projectId, parentPath, newEntryName.trim(), worktreeId)
-            : await workbenchApi.files.createDir(projectId, parentPath, newEntryName.trim(), worktreeId);
+            ? await filesApi.createFile(projectId, parentPath, newEntryName.trim(), worktreeId)
+            : await filesApi.createDir(projectId, parentPath, newEntryName.trim(), worktreeId);
         if (
           activeProjectIdRef.current !== projectId ||
           activeWorktreeIdRef.current !== worktreeId
@@ -1056,7 +1061,7 @@ export function useWorkbenchFileController(
         setFileError(null);
         setFileNotice(null);
         const originalPath = currentSelectedInfo.path;
-        const renamed = await workbenchApi.files.renamePath(
+        const renamed = await filesApi.renamePath(
           projectId,
           originalPath,
           renameName.trim(),
@@ -1170,7 +1175,7 @@ export function useWorkbenchFileController(
       try {
         setFileError(null);
         setFileNotice(null);
-        await workbenchApi.files.deletePath(projectId, path, worktreeId);
+        await filesApi.deletePath(projectId, path, worktreeId);
         if (
           activeProjectIdRef.current !== projectId ||
           activeWorktreeIdRef.current !== worktreeId

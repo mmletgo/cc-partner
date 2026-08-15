@@ -33,7 +33,17 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { workbenchApi } from '@/api/workbench';
+import { workbenchApi, type WorktreeGitApiScope } from '@/api/workbench';
+
+/**
+ * 缺省 API scope：模块级稳定引用，避免 `params.api ?? {...}` 内联对象导致引用随 render
+ * 变化（进而让依赖 api.worktrees/api.git 的 useCallback 反复失效）。生产 build 走真实实现，
+ * 测试侧由 Params.api 注入 fake。
+ */
+const DEFAULT_WORKTREE_GIT_API: WorktreeGitApiScope = {
+  worktrees: workbenchApi.worktrees,
+  git: workbenchApi.git,
+};
 import {
   createOperationKey,
   isCurrentOperation,
@@ -171,6 +181,12 @@ export interface UseWorkbenchWorktreeGitControllerParams {
   setActiveWorktreeId: (next: string | null) => void;
   remoteWriteDisabled: boolean;
   inspectorTab: 'files' | 'history' | 'notes';
+  /**
+   * worktree/Git 域 API scope；用于让 controller 接受窄 API 注入，避免直接依赖
+   * `workbenchApi.worktrees` / `workbenchApi.git`。测试和生产均可注入。缺省回落
+   * `workbenchApi.worktrees` / `workbenchApi.git`。
+   */
+  api?: WorktreeGitApiScope;
   isCurrentProject: (projectId: string) => boolean;
   markRequestFailure: (projectId: string, error: unknown) => void;
   markRequestSuccess: (projectId: string) => void;
@@ -280,6 +296,11 @@ export function useWorkbenchWorktreeGitController(
     confirmAction,
     canListenToTauriEvents,
   } = params;
+
+  // Business Logic: 让 controller 接受窄 API 注入；缺省回落真实 workbenchApi（fallback 不去掉
+  // workbenchApi import，保证线上行为完全等价）。fallback 用 module 级稳定常量，避免内联对象
+  // 引起 useCallback dep 抖动。
+  const api = params.api ?? DEFAULT_WORKTREE_GIT_API;
 
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [worktreeBusy, setWorktreeBusy] = useState<WorktreeBusyKind | null>(null);
@@ -479,7 +500,7 @@ export function useWorkbenchWorktreeGitController(
       worktreeListRequestSeqRef.current[projectId] = requestSeq;
       try {
         setWorktreeError(null);
-        const list = await workbenchApi.worktrees.list(projectId);
+        const list = await api.worktrees.list(projectId);
         if (
           !isCurrentProject(projectId) ||
           !isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)
@@ -510,7 +531,7 @@ export function useWorkbenchWorktreeGitController(
         return null;
       }
     },
-    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, setActiveWorktreeId],
+    [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, setActiveWorktreeId, api.worktrees],
   );
 
   /**
@@ -575,7 +596,7 @@ export function useWorkbenchWorktreeGitController(
     try {
       setGitHistoryLoading(true);
       setGitHistoryError(null);
-      const commits = await workbenchApi.git.listCommits(projectId, worktreeId, 30);
+      const commits = await api.git.listCommits(projectId, worktreeId, 30);
       if (!isHistoryRequestCurrent()) {
         return;
       }
@@ -595,7 +616,7 @@ export function useWorkbenchWorktreeGitController(
         setGitHistoryLoading(false);
       }
     }
-  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, loadWorktrees]);
+  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, loadWorktrees, api.git]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -729,7 +750,7 @@ export function useWorkbenchWorktreeGitController(
       worktreeId: string,
       settled: WorkbenchOperationKey,
     ): Promise<WorkbenchMutationReconcileResult> => {
-      const ledger = await workbenchApi.worktrees
+      const ledger = await api.worktrees
         .getMutationOperation(clientOperationId)
         .catch(() => null);
       if (!isSettledCurrent(settled)) return 'unknown';
@@ -753,14 +774,14 @@ export function useWorkbenchWorktreeGitController(
 
       if (intent.kind === 'merge' || intent.kind === 'collectMerge' || intent.kind === 'remove') {
         try {
-          const latest = await workbenchApi.worktrees.list(projectId);
+          const latest = await api.worktrees.list(projectId);
           if (!isSettledCurrent(settled)) return 'unknown';
           let mainCommitHashes: string[] | undefined;
           if (intent.kind === 'merge' || intent.kind === 'collectMerge') {
             const main = latest.find((item) => item.isMain) ?? null;
             if (main) {
               try {
-                const commits = await workbenchApi.git.listCommits(projectId, main.id, 100);
+                const commits = await api.git.listCommits(projectId, main.id, 100);
                 if (!isSettledCurrent(settled)) return 'unknown';
                 mainCommitHashes = commits.map((commit) => commit.hash);
               } catch {
@@ -783,6 +804,8 @@ export function useWorkbenchWorktreeGitController(
       invalidateWorktreeListRequests,
       isSettledCurrent,
       loadWorktrees,
+      api.worktrees,
+      api.git,
     ],
   );
 
@@ -815,7 +838,7 @@ export function useWorkbenchWorktreeGitController(
     try {
       setWorktreeBusy('create');
       setWorktreeError(null);
-      const created = await workbenchApi.worktrees.create(projectId, branchName, null);
+      const created = await api.worktrees.create(projectId, branchName, null);
       if (!isSettledCurrent(settled)) return;
       // Business Logic: session 创建/注册通过终端域 bridge 完成；bridge 只在目标 worktree 已是 active 时
       // 才 focus。此时新 worktree 还未成为 active（setActiveWorktreeId 在下方），故 bridge 内不会 focus；
@@ -869,6 +892,7 @@ export function useWorkbenchWorktreeGitController(
     setActiveWorktreeId,
     terminalBridge,
     translateError,
+    api.worktrees,
   ]);
 
   /**
@@ -932,7 +956,7 @@ export function useWorkbenchWorktreeGitController(
       }
 
       const envelope: WorkbenchMutationEnvelope<WorkbenchWorktree> =
-        await workbenchApi.worktrees.commit(worktreeId, null, clientOperationId);
+        await api.worktrees.commit(worktreeId, null, clientOperationId);
       if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
@@ -1019,6 +1043,7 @@ export function useWorkbenchWorktreeGitController(
     resolveClientOperationId,
     translateError,
     unknownMutationLock,
+    api.worktrees,
   ]);
 
   /**
@@ -1042,7 +1067,7 @@ export function useWorkbenchWorktreeGitController(
     try {
       setWorktreeBusy('commit');
       setWorktreeError(null);
-      const repair = await workbenchApi.worktrees.repairHookFailure(
+      const repair = await api.worktrees.repairHookFailure(
         worktreeId,
         hookRepair.hookFailure,
       );
@@ -1074,6 +1099,7 @@ export function useWorkbenchWorktreeGitController(
     desktopUnavailableMessage,
     setWorktreeBusy,
     setWorktreeError,
+    api.worktrees,
   ]);
 
   /**
@@ -1131,7 +1157,7 @@ export function useWorkbenchWorktreeGitController(
         return;
       }
 
-      const envelope = await workbenchApi.worktrees.push(worktreeId, clientOperationId);
+      const envelope = await api.worktrees.push(worktreeId, clientOperationId);
       if (!isSettledCurrent(settled)) return;
 
       if (isMutationSucceeded(envelope)) {
@@ -1213,6 +1239,7 @@ export function useWorkbenchWorktreeGitController(
     resolveClientOperationId,
     translateError,
     unknownMutationLock,
+    api.worktrees,
   ]);
 
   /**
@@ -1342,7 +1369,7 @@ export function useWorkbenchWorktreeGitController(
         return;
       }
 
-      const envelope = await workbenchApi.worktrees.merge(worktreeId, clientOperationId);
+      const envelope = await api.worktrees.merge(worktreeId, clientOperationId);
 
       if (isMutationSucceeded(envelope)) {
         clearUnknownMutationLockForKind('merge');
@@ -1458,6 +1485,7 @@ export function useWorkbenchWorktreeGitController(
     updateProjectMergeProgress,
     worktreeBusy,
     worktrees,
+    api.worktrees,
   ]);
 
   /**
@@ -1529,7 +1557,7 @@ export function useWorkbenchWorktreeGitController(
         return;
       }
 
-      const envelope = await workbenchApi.worktrees.remove(
+      const envelope = await api.worktrees.remove(
         worktreeId,
         false,
         clientOperationId,
@@ -1611,6 +1639,7 @@ export function useWorkbenchWorktreeGitController(
     translateWorktreeMessage,
     unknownMutationLock,
     worktrees,
+    api.worktrees,
   ]);
 
   // Business Logic: merge 在后台运行时用户可切换 project/worktree；事件必须按 payload.projectId 写入缓存，

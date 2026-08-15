@@ -12,10 +12,12 @@ describe('terminal input stream static contract', () => {
     const mobile = source('mobile/components/MobileTerminalPanel.tsx');
     const http = source('api/workbenchHttp.ts');
 
-    expect(desktop).toContain('sessions.enqueueInput');
-    expect(desktop).not.toContain('sessions.writeInput');
+    expect(desktop).toMatch(/enqueueInput\(/);
+    // writeInput 仅允许出现在 docstring 中（解释旧 API 被替换），禁止方法调用或字段访问。
+    expect(desktop).not.toMatch(/\.writeInput\(/);
+    expect(desktop).not.toMatch(/\bwriteInput\s*:/);
     expect(mobile).toContain('inputStreamRef.current?.enqueue');
-    expect(mobile).not.toContain('sessions.writeInput');
+    expect(mobile).not.toMatch(/\.writeInput\(/);
     expect(http).not.toContain('/sessions/write');
   });
 });

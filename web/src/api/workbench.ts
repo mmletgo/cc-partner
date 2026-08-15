@@ -923,6 +923,66 @@ export const workbenchApi = {
 };
 
 /**
+ * 终端域 controller（useWorkbenchTerminalController）调用的 sessions API 子集。
+ * 通过 Params.api 注入，生产缺省回落 workbenchApi.sessions，测试侧由 fakeSessionsApi 接管。
+ */
+export type TerminalApiScope = Pick<
+  typeof workbenchApi.sessions,
+  | 'list'
+  | 'create'
+  | 'enqueueInput'
+  | 'resize'
+  | 'focus'
+  | 'focused'
+  | 'splitPane'
+  | 'switchPane'
+  | 'selectPaneAt'
+  | 'zoomPane'
+  | 'closePane'
+  | 'close'
+  | 'rename'
+>;
+
+/**
+ * Worktree + Git 域 controller（useWorkbenchWorktreeGitController）调用的
+ * worktrees / git API 子集合并对象（含 unknown mutation 对账所需的 getMutationOperation）。
+ * 缺省回落 { worktrees: workbenchApi.worktrees, git: workbenchApi.git }。
+ */
+export type WorktreeGitApiScope = {
+  worktrees: Pick<
+    typeof workbenchApi.worktrees,
+    | 'list'
+    | 'create'
+    | 'commit'
+    | 'push'
+    | 'merge'
+    | 'remove'
+    | 'getMutationOperation'
+    | 'repairHookFailure'
+  >;
+  git: Pick<typeof workbenchApi.git, 'listCommits'>;
+};
+
+/**
+ * 文件域 controller（useWorkbenchFileController）调用的 files API 子集。
+ * 缺省回落 workbenchApi.files。
+ */
+export type FileApiScope = Pick<
+  typeof workbenchApi.files,
+  | 'listDir'
+  | 'info'
+  | 'open'
+  | 'saveText'
+  | 'formatStructured'
+  | 'previewSqlite'
+  | 'previewHtmlAsset'
+  | 'createFile'
+  | 'createDir'
+  | 'renamePath'
+  | 'deletePath'
+>;
+
+/**
  * Workbench 窗口 API 命名导出（Workbench.tsx 等页面只暴露 `windows` 子集，
  * 避免误调 sessions/files/worktrees/git；与 `workbenchApi.windows` 同源）。
  */

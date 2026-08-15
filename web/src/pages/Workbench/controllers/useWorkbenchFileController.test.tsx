@@ -33,6 +33,12 @@ import type {
  *
  * Business Logic: controller 单元测试不应触发真实 Tauri invoke；用一个可断言的 fake 记录所有 files 调用，
  * 并允许测试动态设置返回值或抛出错误。
+ *
+ * Plan 2 deferred：放弃顶层 vi.mock('@/api/workbench')，改为通过 Params.api 注入 FileApiScope。
+ * 这里保留 vi.hoisted(fakeFilesApi) 作为单例 fake + mockResolvedValue 默认实现载体；renderController
+ * 内部调用 createFreshFakeFilesApi() 拿到同一份 fake 并通过 params.api 注入 controller，
+ * 既保留 14 个 describe / 44 个 test 用例对 fakeFilesApi.X.mockResolvedValueOnce(...) 的现有调用，
+ * 也保证 beforeEach 里的 vi.resetAllMocks + 11 行默认实现每次都落到 controller 实际拿到的 fake 上。
  * ------------------------------------------------------------------------- */
 
 interface FakeFilesApi {
@@ -63,11 +69,14 @@ const fakeFilesApi = vi.hoisted<FakeFilesApi>(() => ({
   deletePath: vi.fn(async () => ({ ok: true, path: '' })),
 }));
 
-vi.mock('@/api/workbench', () => ({
-  workbenchApi: {
-    files: fakeFilesApi,
-  },
-}));
+/**
+ * renderController 内部重建文件域 fake：返回与模块级 fakeFilesApi 同一份实例，使每个测试用例对
+ * fakeFilesApi.X.mockResolvedValueOnce(...) / expect(...).toHaveBeenCalledWith(...) 的现有调用全部
+ * 命中 controller 通过 params.api 实际拿到的 fake，零改动覆盖 14 个 describe / 44 个 test。
+ */
+function createFreshFakeFilesApi(): FakeFilesApi {
+  return fakeFilesApi;
+}
 
 /* ---------------------------------------------------------------------------
  * Fixture builders
@@ -155,10 +164,12 @@ interface ControllerProps {
       | 'confirmDeletePath',
     vars?: Record<string, unknown>,
   ) => string;
+  api?: FakeFilesApi;
 }
 
 function renderController(props: Partial<ControllerProps> = {}) {
-  const merged = baseControllerProps(props);
+  const freshFakeFilesApi = createFreshFakeFilesApi();
+  const merged = baseControllerProps({ ...props, api: freshFakeFilesApi });
   return renderHook(
     (currentProps: ControllerProps) =>
       useWorkbenchFileController(currentProps as UseWorkbenchFileControllerParams),

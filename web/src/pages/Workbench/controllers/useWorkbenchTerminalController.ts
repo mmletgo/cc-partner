@@ -26,8 +26,7 @@ import type {
   WorkbenchSession,
   WorkbenchSessionUpdatedEvent,
 } from '@/lib/types';
-import { workbenchApi } from '@/api/workbench';
-import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
+import { workbenchApi, type TerminalApiScope, type WorkbenchPaneSplitDirection } from '@/api/workbench';
 import { createTerminalInputPump } from '../terminalInputPump';
 import type { TerminalInputPump } from '../terminalInputPump';
 import { mountedTerminalSessions, visibleTerminalSessions } from '../terminalSessionOrder';
@@ -168,6 +167,11 @@ export interface UseWorkbenchTerminalControllerParams {
    * 与原 Workbench.tsx 行为一致——非 Tauri 环境跳过 terminal-status listen 注册。
    */
   canListenToTauriEvents?: () => boolean;
+  /**
+   * 可选注入：终端域 API scope（Plan 2 deferred 架构债）。
+   * 缺省回落 workbenchApi.sessions，生产路径不变；测试侧由 fakeSessionsApi 接管。
+   */
+  api?: TerminalApiScope;
 }
 
 /** controller 用到的 i18n 错误文案 key；调用方注入对应 t('workbench:errors.X')。 */
@@ -308,6 +312,10 @@ export function useWorkbenchTerminalController(
     desktopUnavailableMessage,
     canListenToTauriEvents: canListenToTauriEventsParam,
   } = params;
+
+  // Business Logic: Plan 2 deferred 架构债——优先用注入的 sessionsApi，
+  // 缺省回落 workbenchApi.sessions；既保生产路径零变化，又让测试侧注入 fake。
+  const sessionsApi = params.api ?? workbenchApi.sessions;
 
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -469,7 +477,7 @@ export function useWorkbenchTerminalController(
       const projectId = activeProjectIdRef.current;
       if (!projectId) return;
       try {
-        const list = await workbenchApi.sessions.list(projectId);
+        const list = await sessionsApi.list(projectId);
         if (!isCurrentProjectRef.current(projectId)) return;
         if (!writeBlockedSessionIdsRef.current.has(sessionId)) return;
         const found = list.find((session) => session.id === sessionId);
@@ -549,7 +557,7 @@ export function useWorkbenchTerminalController(
   // 下次 setup 重建，避免 disposed 泵永久吞掉全部 enqueue。
   useEffect(() => {
     const pump = createTerminalInputPump({
-      write: (sessionId, data) => workbenchApi.sessions.enqueueInput(sessionId, data),
+      write: (sessionId, data) => sessionsApi.enqueueInput(sessionId, data),
       onWriteError: (sessionId, error) => reportWriteErrorRef.current(sessionId, error),
     });
     terminalInputPumpRef.current = pump;
@@ -685,7 +693,7 @@ export function useWorkbenchTerminalController(
    *
    * Code Logic（这个函数做什么）:
    *   1. 记录本地 focus 时间戳，抑制随后的 tmux focus 轮询；
-   *   2. 设置 activeSessionId，触发 focus 同步 effect 调用 workbenchApi.sessions.focus。
+   *   2. 设置 activeSessionId，触发 focus 同步 effect 调用 sessionsApi.focus。
    */
   const focusSession = useCallback(async (sessionId: string): Promise<boolean> => {
     lastLocalFocusAtRef.current = Date.now();
@@ -704,7 +712,7 @@ export function useWorkbenchTerminalController(
     if (!activeSessionId || activeSession?.status !== 'running') return undefined;
     const focusedSessionId = activeSessionId;
     let cancelled = false;
-    void workbenchApi.sessions
+    void sessionsApi
       .focus(focusedSessionId)
       .then(() => {
         if (cancelled) return;
@@ -722,7 +730,7 @@ export function useWorkbenchTerminalController(
     return () => {
       cancelled = true;
       // compare-and-clear：迟到 cleanup 不会清掉随后已聚焦的新窗口。
-      void workbenchApi.sessions.focus(focusedSessionId, false).catch(() => {
+      void sessionsApi.focus(focusedSessionId, false).catch(() => {
         // cleanup 是带宽收敛的 best-effort；后端 idle/下一次 focus 仍会纠正目标。
       });
     };
@@ -750,7 +758,7 @@ export function useWorkbenchTerminalController(
       if (localFocusPendingRef.current !== null) return;
       const currentScoped = scopedSessionsRef.current;
       if (currentScoped.length === 0) return;
-      void workbenchApi.sessions
+      void sessionsApi
         .focused(activeProjectId, activeWorktreeId)
         .then(({ sessionId }) => {
           if (cancelled || !sessionId) return;
@@ -804,7 +812,7 @@ export function useWorkbenchTerminalController(
       sessionListRequestSeqRef.current[resolvedProjectId] = requestSeq;
       try {
         setSessionError(null);
-        const list = await workbenchApi.sessions.list(resolvedProjectId);
+        const list = await sessionsApi.list(resolvedProjectId);
         if (
           !isCurrentProject(resolvedProjectId) ||
           !isLatestRequest(sessionListRequestSeqRef.current[resolvedProjectId], requestSeq)
@@ -883,7 +891,7 @@ export function useWorkbenchTerminalController(
         setSessionBusy(true);
         setSessionError(null);
         const initialSize = measureInitialTerminalSize?.(terminalPanelRef.current, 'single');
-        const session = await workbenchApi.sessions.create(projectId, initialSize, worktreeId);
+        const session = await sessionsApi.create(projectId, initialSize, worktreeId);
         // Business Logic: 跨项目切换则丢弃响应（后端已创建，但 UI 不再属于当前 project）。
         if (activeProjectIdRef.current !== projectId) {
           return null;
@@ -950,7 +958,7 @@ export function useWorkbenchTerminalController(
       if (remoteWriteDisabled) return;
       try {
         setSessionError(null);
-        await workbenchApi.sessions.splitPane(activeSession.id, direction);
+        await sessionsApi.splitPane(activeSession.id, direction);
         invalidateSessionListRequests(activeSession.projectId);
         await loadSessions(activeSession.projectId);
       } catch (error) {
@@ -979,7 +987,7 @@ export function useWorkbenchTerminalController(
     if (!activeSession) return;
     if (remoteWriteDisabled) return;
     try {
-      await workbenchApi.sessions.switchPane(activeSession.id);
+      await sessionsApi.switchPane(activeSession.id);
     } catch (error) {
       markRequestFailure(activeSession.projectId, error);
       setSessionError(displayErrorMessage(error, t('switchPane')));
@@ -988,7 +996,7 @@ export function useWorkbenchTerminalController(
     // 与移动端 ensurePaneZoomedById 一致:切换成功后立即把当前 active pane zoom 成单 pane 视图。
     // zoomPane 后端幂等（pane 数 <=1 或已 zoom 时 no-op）；失败单独报错，不影响已完成的切换。
     try {
-      await workbenchApi.sessions.zoomPane(activeSession.id);
+      await sessionsApi.zoomPane(activeSession.id);
     } catch (error) {
       markRequestFailure(activeSession.projectId, error);
       setSessionError(displayErrorMessage(error, t('zoomPane')));
@@ -1008,7 +1016,7 @@ export function useWorkbenchTerminalController(
       const target = sessions.find((s) => s.id === sessionId) ?? activeSession;
       if (!target) return;
       try {
-        const result = await workbenchApi.sessions.selectPaneAt(target.id, col, row);
+        const result = await sessionsApi.selectPaneAt(target.id, col, row);
         if (result.changed) {
           await loadSessions();
         }
@@ -1028,7 +1036,7 @@ export function useWorkbenchTerminalController(
     if (!activeSession) return;
     if (remoteWriteDisabled) return;
     try {
-      await workbenchApi.sessions.zoomPane(activeSession.id);
+      await sessionsApi.zoomPane(activeSession.id);
     } catch (error) {
       markRequestFailure(activeSession.projectId, error);
       setSessionError(displayErrorMessage(error, t('zoomPane')));
@@ -1048,7 +1056,7 @@ export function useWorkbenchTerminalController(
     if (remoteWriteDisabled) return;
     try {
       setSessionError(null);
-      const result = await workbenchApi.sessions.closePane(activeSession.id);
+      const result = await sessionsApi.closePane(activeSession.id);
       const projectId = activeSession.projectId;
       if (result.closedWindow) {
         removeSessionFromHints(result.sessionId);
@@ -1096,7 +1104,7 @@ export function useWorkbenchTerminalController(
       // Business Logic: 关闭请求可能慢于用户切项目；必须绑定发起时的 project，不能读返回后的 active。
       const sourceProjectId = activeProjectIdRef.current;
       try {
-        await workbenchApi.sessions.close(sessionId);
+        await sessionsApi.close(sessionId);
         if (sourceProjectId) {
           // Business Logic: 只作废源项目 list，禁止递增新项目 seq 导致 B 的有效 list 被当 stale 丢弃。
           invalidateSessionListRequests(sourceProjectId);
@@ -1153,7 +1161,7 @@ export function useWorkbenchTerminalController(
       if (!target || target.projectId !== activeProjectIdRef.current) return false;
       try {
         setSessionError(null);
-        const renamed = await workbenchApi.sessions.rename(sessionId, trimmed);
+        const renamed = await sessionsApi.rename(sessionId, trimmed);
         invalidateSessionListRequests(target.projectId);
         setSessions((current) =>
           current.map((session) => (session.id === renamed.id ? renamed : session)),
@@ -1231,7 +1239,7 @@ export function useWorkbenchTerminalController(
   const handleResize = useCallback(
     async (sessionId: string, cols: number, rows: number): Promise<void> => {
       try {
-        await workbenchApi.sessions.resize(
+        await sessionsApi.resize(
           sessionId,
           clampU16(cols, MIN_TERMINAL_COLS),
           clampU16(rows, MIN_TERMINAL_ROWS),

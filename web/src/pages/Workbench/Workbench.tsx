@@ -41,7 +41,8 @@ import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
 import { routeAutomationWorkbenchOpen } from './workbenchWindowNavigation';
-import { windows } from '@/api/workbench';
+import * as workbenchModule from '@/api/workbench';
+const { workbenchApi, windows } = workbenchModule;
 import {
   canListenToTauriEvents,
   deferEffect,
@@ -166,6 +167,7 @@ export function Workbench() {
     streamPromptToTerminal,
   } = useWorkbenchPageBridges(t, activeProject?.deviceName);
   const terminalController = useWorkbenchTerminalController({
+    api: workbenchApi.sessions,
     activeProjectId,
     activeWorktreeId,
     remoteWriteDisabled,
@@ -230,6 +232,7 @@ export function Workbench() {
     [],
   );
   const worktreeGitController = useWorkbenchWorktreeGitController({
+    api: { worktrees: workbenchApi.worktrees, git: workbenchApi.git },
     activeProjectId,
     activeWorktreeId,
     setActiveWorktreeId,
@@ -293,6 +296,7 @@ export function Workbench() {
     setAutomationConsoleOpen(false);
   }, []);
   const fileController = useWorkbenchFileController({
+    api: workbenchApi.files,
     activeProjectId,
     activeWorktreeId,
     remoteWriteDisabled,

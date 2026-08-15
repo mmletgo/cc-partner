@@ -41,26 +41,40 @@ interface FakeSessionsApi {
   focused: ReturnType<typeof vi.fn>;
   splitPane: ReturnType<typeof vi.fn>;
   switchPane: ReturnType<typeof vi.fn>;
+  selectPaneAt: ReturnType<typeof vi.fn>;
   zoomPane: ReturnType<typeof vi.fn>;
   closePane: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   rename: ReturnType<typeof vi.fn>;
 }
 
-const fakeSessionsApi = vi.hoisted<FakeSessionsApi>(() => ({
-  list: vi.fn(async () => [] as WorkbenchSession[]),
-  create: vi.fn(async () => ({}) as WorkbenchSession),
-  enqueueInput: vi.fn(async () => ({ accepted: true, sessionId: 's' })),
-  resize: vi.fn(async () => ({ ok: true, sessionId: 's' })),
-  focus: vi.fn(async () => ({ ok: true, sessionId: 's' })),
-  focused: vi.fn(async () => ({ sessionId: null })),
-  splitPane: vi.fn(async () => ({ ok: true, sessionId: 's', direction: 'right' })),
-  switchPane: vi.fn(async () => ({ ok: true, sessionId: 's' })),
-  zoomPane: vi.fn(async () => ({ ok: true, sessionId: 's' })),
-  closePane: vi.fn(async () => ({ ok: true, sessionId: 's', closedWindow: false })),
-  close: vi.fn(async () => ({ ok: true, sessionId: 's' })),
-  rename: vi.fn(async () => ({}) as WorkbenchSession),
-}));
+/**
+ * 工厂函数：创建一组新的 sessions API fake vi.fn()。
+ *
+ * Business Logic: Plan 2 deferred 架构债——controller 已通过 `params.api` 注入 sessions API scope，
+ * 不再依赖顶层 `vi.mock('@/api/workbench')`。每个测试在 beforeEach 里重建一份 fresh fake，
+ * 避免 mockResolvedValueOnce 队列与永久 mockResolvedValue 在测试间泄漏。
+ */
+function createFreshFakeSessionsApi(): FakeSessionsApi {
+  return {
+    list: vi.fn(async () => [] as WorkbenchSession[]),
+    create: vi.fn(async () => ({}) as WorkbenchSession),
+    enqueueInput: vi.fn(async () => ({ accepted: true, sessionId: 's' })),
+    resize: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    focus: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    focused: vi.fn(async () => ({ sessionId: null })),
+    splitPane: vi.fn(async () => ({ ok: true, sessionId: 's', direction: 'right' })),
+    switchPane: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    selectPaneAt: vi.fn(async () => ({ ok: true, sessionId: 's', changed: false })),
+    zoomPane: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    closePane: vi.fn(async () => ({ ok: true, sessionId: 's', closedWindow: false })),
+    close: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    rename: vi.fn(async () => ({}) as WorkbenchSession),
+  };
+}
+
+/** 当前测试实例的 sessions API fake；beforeEach 重建，避免跨测试泄漏。 */
+let fakeSessionsApi: FakeSessionsApi = createFreshFakeSessionsApi();
 
 const eventListeners = vi.hoisted<
   Map<string, Set<(event: { event: string; payload: unknown }) => void>>
@@ -79,12 +93,6 @@ vi.mock('@/hooks/workbenchAgentHintStore', () => ({
     removeTerminal: (...args: unknown[]) => removeHintTerminalSpy(...args),
     ackCompletedForTerminal: (...args: unknown[]) => ackCompletedSpy(...args),
   }),
-}));
-
-vi.mock('@/api/workbench', () => ({
-  workbenchApi: {
-    sessions: fakeSessionsApi,
-  },
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -196,13 +204,17 @@ interface ControllerProps {
   isCurrentProject: (projectId: string) => boolean;
   desktopUnavailableMessage?: string;
   canListenToTauriEvents?: () => boolean;
+  /** 注入 sessions API fake；renderController 默认注入 `fakeSessionsApi`，rerender 也复用同一份。 */
+  api?: FakeSessionsApi;
 }
 
 function renderController(props: ControllerProps) {
   const merged = baseControllerProps(props);
   return renderHook(
     (currentProps: ControllerProps) =>
-      useWorkbenchTerminalController(currentProps as UseWorkbenchTerminalControllerParams),
+      useWorkbenchTerminalController(
+        currentProps as unknown as UseWorkbenchTerminalControllerParams,
+      ),
     {
       initialProps: merged,
     },
@@ -218,6 +230,9 @@ async function flushMicrotasks(rounds = 6): Promise<void> {
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true, advanceTimeDelta: 1 });
+  // Business Logic: 每个测试重建一份 fresh fake，确保 mockResolvedValueOnce / mockResolvedValue
+  // 不会被前一个 test 的实现污染。
+  fakeSessionsApi = createFreshFakeSessionsApi();
 });
 
 afterEach(() => {
@@ -245,6 +260,10 @@ function baseControllerProps(overrides: Partial<ControllerProps> = {}): Controll
     isCurrentProject: () => true,
     desktopUnavailableMessage: 'desktop unavailable',
     canListenToTauriEvents: () => true,
+    // Business Logic: Plan 2 架构债——默认注入 fresh fake sessions API。rerender 直接走
+    // baseControllerProps({...}) 时也会复用此 api，避免 fallback 到真实 workbenchApi.sessions
+    // （jsdom 无 Tauri）；overrides 不传 api 时被保留，传则按需覆盖。
+    api: fakeSessionsApi,
     ...overrides,
   };
 }

@@ -82,12 +82,10 @@ const fakeGitApi = vi.hoisted<FakeGitApi>(() => ({
   listCommits: vi.fn(async () => [] as WorkbenchGitCommit[]),
 }));
 
-vi.mock('@/api/workbench', () => ({
-  workbenchApi: {
-    worktrees: fakeWorktreesApi,
-    git: fakeGitApi,
-  },
-}));
+// Plan 2 deferred 架构债：移除顶层 vi.mock('@/api/workbench')；改为 renderController
+// 通过 `api: { worktrees, git }` 显式注入 scope。fakeWorktreesApi / fakeGitApi 仍以 vi.hoisted
+// 形式保持全局引用，确保 test body 中 `fakeWorktreesApi.X.mockResolvedValueOnce(...)` 仍能 mutate
+// 注入到 controller 的同一批 vi.fn。
 
 const eventListeners = vi.hoisted<
   Map<string, Set<(event: { event: string; payload: unknown }) => void>>
@@ -204,6 +202,8 @@ interface ControllerProps {
   confirmAction: (message: string) => boolean;
   /** 页面持有的 setActiveWorktreeId；测试用 stateful 实现记录最新值并触发 rerender。 */
   setActiveWorktreeId: (next: string | null) => void;
+  /** Plan 2 deferred 架构债：测试用 worktrees+git API scope 注入；缺省回落真实 workbenchApi。 */
+  api?: { worktrees: FakeWorktreesApi; git: FakeGitApi };
 }
 
 /**
@@ -312,6 +312,11 @@ function renderController(
         ) => string,
         confirmAction: currentProps.confirmAction,
         canListenToTauriEvents: currentProps.canListenToTauriEvents,
+        // Plan 2 deferred 架构债：测试用窄 scope 注入；缺省回落 fakeWorktreesApi / fakeGitApi，
+        // 避免测试侧 fallback 到真实 workbenchApi（在 jsdom 下不可用）。
+        api: (currentProps.api ?? { worktrees: fakeWorktreesApi, git: fakeGitApi }) as unknown as Parameters<
+          typeof useWorkbenchWorktreeGitController
+        >[0]['api'],
       });
     },
     { initialProps: merged },
