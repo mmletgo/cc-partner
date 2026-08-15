@@ -29,6 +29,7 @@ import {
   type HeldLiveTerminalEvent,
   type TerminalBufferDelta,
   type TerminalFrameScheduler,
+  type TerminalBufferResetEvent,
 } from './workbenchTerminalBuffer';
 
 /**
@@ -568,6 +569,33 @@ describe('workbenchTerminalBuffer store — scrollback-aware reset', () => {
 
   /**
    * Business Logic（为什么需要这个用例）:
+   *   显式 tmux history hydration 即使返回与缓存完全相同的快照，也必须唤醒 pane 的
+   *   reset → snapshot-complete 握手；否则首次向上滚轮会被 pending 门闩持续吞掉。
+   */
+  test('forceReplace resets an identical same-authority hydration snapshot', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: TerminalBufferResetEvent[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', (event) => resets.push(event));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    store.reset('s1', 'same-content', 5, 'owner-1');
+    resets.length = 0;
+    deltas.length = 0;
+
+    store.reset('s1', 'same-content', 5, 'owner-1', { forceReplace: true });
+
+    expect(resets).toEqual([{ sessionId: 's1', reason: 'snapshotReplace' }]);
+    expect(deltas).toHaveLength(0);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(2);
+    expect(store.getBuffer('s1')).toBe('same-content');
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
    *   owner 切换代表全新 stream，必须 destructive clear+replay，不得用旧 stream 的 scrollback 拼接。
    */
   test('authority change is destructive even when buffers overlap', () => {
@@ -769,6 +797,42 @@ describe('applyTerminalBaselineCutover', () => {
     expect(store.getBuffer('s1')).toBe('XYZbbbliveZ');
     expect(store.getLastSeq('s1')).toBe(11);
     expect(pruned).toEqual([{ chunk: 'liveZ', seq: 11 }]);
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   显式 history hydration 返回的是完整终端历史；若沿用普通 resync 的重叠尾部追加，
+   *   旧末屏会再次进入 xterm scrollback，表现为向上滚动反复看到最后一页。
+   */
+  test('forceReplace cutover replaces an overlapping same-authority snapshot', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: TerminalBufferResetEvent[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', (event) => resets.push(event));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+    store.reset('s1', 'aaaaXYZ', 5, 'owner-1');
+    resets.length = 0;
+    deltas.length = 0;
+
+    const pruned = applyTerminalBaselineCutover(
+      store,
+      's1',
+      'XYZbbb',
+      9,
+      [],
+      'owner-1',
+      false,
+      true,
+    );
+
+    expect(resets).toEqual([{ sessionId: 's1', reason: 'snapshotReplace' }]);
+    expect(deltas).toHaveLength(0);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(2);
+    expect(store.getBuffer('s1')).toBe('XYZbbb');
+    expect(pruned).toEqual([]);
   });
 });
 

@@ -495,6 +495,7 @@ export function WorkbenchTerminalBuffersProvider({
      * Code Logic（这个函数做什么）:
      *   shouldAccept(authority) → held + applyTerminalBaselineCutover(authorityChanged) →
      *   commitTerminalCutover(state, lastSeq, requestEpoch, authorityId) 回写 map；
+     *   显式 scrollback hydration 以 forceReplace 应用权威完整快照，禁止同源增量优化吞掉 reset；
      *   成功后清除该 session 的 replay recovery 与 history sync 失败状态。
      */
     const applyCutover = (
@@ -503,6 +504,7 @@ export function WorkbenchTerminalBuffersProvider({
       lastSeq: number,
       requestEpoch?: number,
       authorityId?: string | null,
+      forceReplace = false,
     ): boolean => {
       const state = ensureCutoverState(sessionId);
       if (!shouldAcceptTerminalCutover(state, lastSeq, requestEpoch, authorityId)) {
@@ -518,6 +520,7 @@ export function WorkbenchTerminalBuffersProvider({
         held,
         authorityId,
         authorityChanged,
+        forceReplace,
       );
       if (pruned.length === 0) {
         heldLiveBySessionRef.current.delete(sessionId);
@@ -686,6 +689,7 @@ export function WorkbenchTerminalBuffersProvider({
             replay.lastSeq,
             requestEpoch,
             authorityId,
+            hydrateScrollback,
           );
           if (applySucceeded && hydrateScrollback) {
             scrollbackHydrationRequestedBySessionRef.current.delete(sessionId);

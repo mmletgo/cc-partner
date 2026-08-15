@@ -67,7 +67,10 @@ import {
   useWorkbenchTerminalBuffers,
   useWorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffersContext';
-import type { TerminalHistorySyncFailure } from './workbenchTerminalBuffer';
+import type {
+  TerminalBufferResetEvent,
+  TerminalHistorySyncFailure,
+} from './workbenchTerminalBuffer';
 import { normalizeError } from '@/api/client';
 import { useTerminalHistorySyncFailure } from './workbenchTerminalBuffersContext';
 
@@ -379,6 +382,57 @@ describe('WorkbenchTerminalBuffersProvider explicit scrollback hydration', () =>
       expect(storeRef.current?.getBuffer(sessionId)).toBe('EARLY\r\nCURRENT');
     });
     expect(replayMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('identical hydration snapshot still forces a reset for the pane handshake', async () => {
+    const sessionId = 'session-resume-identical';
+    const authority = 'owner-1';
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
+    replayMock.mockResolvedValue({
+      sessionId,
+      buffer: 'EARLY\r\nCURRENT',
+      truncated: false,
+      lastSeq: 4,
+      ownerInstanceId: authority,
+    });
+    hydrateScrollbackMock.mockResolvedValue({
+      sessionId,
+      buffer: 'EARLY\r\nCURRENT',
+      truncated: false,
+      lastSeq: 4,
+      ownerInstanceId: authority,
+    });
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const refreshScrollbackRef: { current: ((id: string) => void) | null } = {
+      current: null,
+    };
+
+    renderProvider(storeRef, undefined, refreshScrollbackRef);
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('EARLY\r\nCURRENT');
+    });
+    const initialGeneration =
+      storeRef.current?.getSnapshot(sessionId).cursor.generation ?? 0;
+    const resets: TerminalBufferResetEvent[] = [];
+    const unsubscribe = storeRef.current?.subscribeReset(sessionId, (event) => {
+      resets.push(event);
+    });
+
+    act(() => {
+      refreshScrollbackRef.current?.(sessionId);
+    });
+
+    await waitFor(() => {
+      expect(hydrateScrollbackMock).toHaveBeenCalledTimes(1);
+      expect(storeRef.current?.getSnapshot(sessionId).cursor.generation).toBe(
+        initialGeneration + 1,
+      );
+    });
+    expect(resets).toEqual([{ sessionId, reason: 'snapshotReplace' }]);
+    expect(storeRef.current?.getBuffer(sessionId)).toBe('EARLY\r\nCURRENT');
+    unsubscribe?.();
   });
 
   test('refresh queued during an in-flight baseline is not swallowed', async () => {

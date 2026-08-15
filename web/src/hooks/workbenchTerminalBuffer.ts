@@ -102,6 +102,18 @@ export interface TerminalBufferStoreOptions {
 
 /**
  * Business Logic（为什么需要这个接口）:
+ *   普通 resync 可以保留既有 scrollback，但用户显式恢复 tmux 历史时，返回值是权威完整快照，
+ *   即使内容相同或与旧缓存重叠也必须驱动 xterm 重新解析并完成 hydration 握手。
+ *
+ * Code Logic（这个接口做什么）:
+ *   forceReplace 跳过同 authority 的 no-op/additive 优化，强制提升 generation 并发出 reset。
+ */
+export interface TerminalBufferResetOptions {
+  forceReplace?: boolean;
+}
+
+/**
+ * Business Logic（为什么需要这个接口）:
  *   终端输出缓存既要服务 React revision 订阅，也要服务 mounted xterm 的同步 live delta。
  *
  * Code Logic（这个接口做什么）:
@@ -146,6 +158,7 @@ export interface WorkbenchTerminalBufferStore {
     buffer?: string,
     lastSeq?: number,
     authorityId?: string | null,
+    options?: TerminalBufferResetOptions,
   ) => void;
   remove: (sessionId: string) => void;
 }
@@ -716,6 +729,7 @@ export function setTerminalCutoverReplayInFlight(
  *
  * Code Logic（这个函数做什么）:
  *   先 store.reset(sessionId, buffer, lastSeq, authorityId)；
+ *   forceReplace=true 时把完整快照作为权威 replacement，禁止 no-op/additive 优化；
  *   authority 变更时丢弃全部 held 返回 []；
  *   否则按序对 held 中 seq > lastSeq 的事件 store.append(..., authorityId)；
  *   返回仍应保留跟踪的 pruned held 列表。
@@ -729,8 +743,9 @@ export function applyTerminalBaselineCutover(
   heldLiveEvents: readonly HeldLiveTerminalEvent[],
   authorityId?: string | null,
   authorityChanged = false,
+  forceReplace = false,
 ): HeldLiveTerminalEvent[] {
-  store.reset(sessionId, buffer, lastSeq, authorityId);
+  store.reset(sessionId, buffer, lastSeq, authorityId, { forceReplace });
   if (authorityChanged) {
     // 旧 owner 的 held seq 与新 stream 不可比，全部丢弃。
     return [];
@@ -1242,7 +1257,7 @@ export function createWorkbenchTerminalBufferStore(
       });
       scheduleNotify(sessionId, session);
     },
-    reset(sessionId, buffer = '', lastSeq = 0, authorityId) {
+    reset(sessionId, buffer = '', lastSeq = 0, authorityId, options) {
       const session = ensureSession(sessionId);
       cancelScheduledFrame(session);
       const hasAuthorityArg = typeof authorityId === 'string' && authorityId.length > 0;
@@ -1254,7 +1269,7 @@ export function createWorkbenchTerminalBufferStore(
       // Business Logic: 同 authority 的 resync（远端 Gap 重基线）通常只是「当前屏幕态的滑动延续 + 新尾部」。
       // 此时 clear() 会摧毁 xterm scrollback（xterm v6 clear 仅保留光标行），改为把差异尾部作为 live delta
       // 追加，live writer 不 clear，旧 scrollback 保留。仅在 authority 变更/无法对齐/首次 baseline/显式清屏时回退 destructive。
-      if (!authorityChanged) {
+      if (!authorityChanged && options?.forceReplace !== true) {
         const previousBuffer = materializeSessionBuffer(session, onMaterializeForTest);
         const plan = planTerminalBufferWrite(previousBuffer, buffer);
         if (previousBuffer.length > 0 && plan.mode !== 'replay') {
