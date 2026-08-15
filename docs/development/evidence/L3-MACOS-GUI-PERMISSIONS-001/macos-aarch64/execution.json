@@ -8,15 +8,28 @@
   "packageSha256": "f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790",
   "deviceClass": "Apple Silicon Mac (M-series)",
   "osBuild": "25F80",
+<<<<<<< Updated upstream
   "executorId": "local-operator-path-a-l3-pass",
   "executedAt": "2026-07-16T07:16:15Z",
   "expiresAt": "2026-10-14T07:16:15Z",
   "result": "PASS",
+=======
+  "executorId": "local-agent-path-a-l3",
+  "executedAt": "2026-07-16T05:36:31Z",
+  "expiresAt": "2026-10-14T05:36:31Z",
+  "result": "FAIL",
+>>>>>>> Stashed changes
   "artifactShas": {
     "backend-lifecycle.log": "7e8d1b17c73d05fd9429af2e8549a9c949e5a76ff096ce292101ddc951dfac70",
     "rc-inventory.json": "b06a30cb62fd51231e244621404140da0edb1710e91468ba549169110efa9cdd",
     "freeze.json": "65e3c6eaa70c6b7e97d3cd5424dca9f8295a680aa5fb742852f58f31d8412840",
+<<<<<<< Updated upstream
     "checklist.md": "07180dc15eedc534490b5ef0259eee98fd232df9e1fe49bdda5ac98f4ebf6b66"
   },
   "notes": "Human L3 operator PASS on packaged candidate. See checklist.md."
+=======
+    "checklist.md": "cfe74d8c1267609e670c0c9d2931ec4dd7d616522eae4547074afb5d9574231b"
+  },
+  "notes": "Partial progress 2026-07-16: LAN disclosure PASS, Settings AX PASS, doctor healthy on isolated data-dir; TCC deny→grant / screenshot / hotkey / updater still FAIL. See checklist.md"
+>>>>>>> Stashed changes
 }

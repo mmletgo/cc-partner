@@ -9,6 +9,8 @@
 - subjectTag: subject-0.7.0-macos-aarch64-4
 - rcWorkflowRunId: 29429534980
 - package: cc-partner_0.7.0_aarch64.dmg sha256 f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790
+- operatorWorkspace: ~/cc-partner-l3-rc/ (isolated CC_PARTNER_DATA_DIR=.../data-dir)
+- appBinary: ~/cc-partner-l3-rc/cc-partner.app (v0.7.0, pid observed 7180)
 
 ## Checklist
 
@@ -16,6 +18,7 @@
 |------|--------|-------|
 | Install packaged candidate | PASS | DMG SHA verified; app extracted to ~/cc-partner-l3-rc/cc-partner.app |
 | Package SHA matches RC inventory | PASS | DMG + inventory binding unchanged (f9be87…) |
+<<<<<<< Updated upstream
 | Launch GUI process | PASS | com.cc-partner.app running; AXWebArea exposed after re-run |
 | Doctor --json healthy paths | PASS | schemaVersion=1 status=healthy against isolated data-dir |
 | Backend start/status/health | PASS | sidecar serve pid; port 62116; /api/health ok; capabilities v1 set; no auth headers |
@@ -34,6 +37,26 @@
 
 ## Overall execution result
 PASS — package / RC / backend / LAN disclosure / TCC permission matrix / screenshot / hotkey / GUI close / updater / VoiceOver operator journey completed on packaged candidate. Deferred platforms remain NOT VERIFIED.
+=======
+| Launch GUI process | PASS | com.cc-partner.app running; window title cc-partner; WebView AXWebArea exposed |
+| Doctor --json healthy paths | PASS | schemaVersion=1 status=healthy against isolated data-dir (paths/data/db/log/mdns/deps ok) |
+| Backend start/status/health | PASS | sidecar serve pid 7546; port 62116; /api/health ok; capabilities include protocol v1 set; no auth headers |
+| Backend stop + restart | PASS | previously verified in N8 lifecycle log; current session leaves running for interactive matrix |
+| Fixed unauth LAN model | PASS | health/capabilities; no pairing token introduced |
+| LAN disclosure UI confirm flow | PASS | data-dir gui-bootstrap.json lanDisclosureVersion=1 acknowledgedAt=2026-07-16T05:33:05Z; product shell (Home/Settings) reachable after gate |
+| Accessibility deny→grant lifecycle | FAIL | Not completed — requires manual System Settings; plan forbids automating System Settings. UI badge still 「忙碌 需要授权」 |
+| Screen Recording deny→grant | FAIL | Not completed (manual System Settings) |
+| Input Monitoring deny→grant | FAIL | Not completed (manual System Settings) |
+| Notification deny→grant | FAIL | Not completed (manual) |
+| Screenshot region capture | FAIL | Blocked on Screen Recording grant |
+| Hotkey conflict/recovery | FAIL | Not completed |
+| GUI close leave backend / stop backend | PARTIAL | Headless backend start/stop verified; GUI-owned close dialog paths not exercised this session |
+| Updater harness N-1 → production | FAIL | Harness artifacts present in RC inventory; end-to-end install/upgrade UI not executed |
+| Settings surface navigable via AX | PASS | AXPress 侧栏「设置」进入偏好设置；可见常规/依赖/健康/同步/AI/自动化/关于 tabs 与设备名/截图快捷键字段 |
+
+## Overall execution result
+FAIL — package/RC/backend/LAN disclosure/Settings AX proven; interactive TCC permission matrix, screenshot/hotkey, GUI close dialogs, and updater journey remain incomplete.
+>>>>>>> Stashed changes
 
 ## Honesty
 - Subject remains the **frozen** `7db9b88` RC bundle (DMG sha f9be87…), not the post-fix `3598744`/`70c3796` master.

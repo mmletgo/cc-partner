@@ -8,12 +8,23 @@
   "packageSha256": "f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790",
   "deviceClass": "Apple Silicon Mac (M-series)",
   "osBuild": "25F80",
+<<<<<<< Updated upstream
   "executorId": "local-operator-path-a-l3-pass",
   "executedAt": "2026-07-16T07:16:15Z",
   "expiresAt": "2026-10-14T07:16:15Z",
   "result": "PASS",
+=======
+  "executorId": "local-agent-path-a-l3",
+  "executedAt": "2026-07-16T05:37:42Z",
+  "expiresAt": "2026-10-14T05:37:42Z",
+  "result": "FAIL",
+>>>>>>> Stashed changes
   "artifactShas": {
-    "checklist.md": "12c254c6c6b67ad33e5cab0c0ff97baa60f75827f25a4fae77b8c44d833356c2"
+    "checklist.md": "ac5b3457b3147f9d5f199e22d82c8ee6bcaa3a82470a6da2c034878b7fe7e272"
   },
+<<<<<<< Updated upstream
   "notes": "Human L3 operator PASS on packaged candidate. See checklist.md."
+=======
+  "notes": "AX nav samples for Home/Workbench/Attention/Settings; VoiceOver journey not executed. See checklist.md"
+>>>>>>> Stashed changes
 }
