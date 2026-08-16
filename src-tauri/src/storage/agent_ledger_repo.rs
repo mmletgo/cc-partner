@@ -16,9 +16,10 @@ use crate::storage::maintenance_gate::{
 };
 use crate::workbench::agent_ledger::models::{
     compute_duration_ms, convert_major_to_minor_units, merge_usage_monotonic,
-    validate_currency_code, AgentLedgerEntry, AgentLedgerFinalizeInput, AgentLedgerOutcome,
-    AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, CurrencyAmount, LedgerUsageCoverage,
-    LedgerWindow, ReliableUsageSnapshot,
+    validate_currency_code, AgentLedgerEntry, AgentLedgerFilters, AgentLedgerFinalizeInput,
+    AgentLedgerGroupRow, AgentLedgerOutcome, AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary,
+    AgentLedgerTrendPoint, CurrencyAmount, LedgerUsageCoverage, LedgerWindow,
+    ReliableUsageSnapshot, TrendBucket,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -858,6 +859,7 @@ impl AgentLedgerRepo {
         let mut input_sum: Option<u64> = None;
         let mut output_sum: Option<u64> = None;
         let mut cache_read_sum: Option<u64> = None;
+        let mut cache_write_sum: Option<u64> = None;
         let mut usage_contributors = 0u64;
         let mut cost_map: BTreeMap<String, u64> = BTreeMap::new();
 
@@ -888,6 +890,9 @@ impl AgentLedgerRepo {
             if let Some(t) = entry.cache_read_tokens {
                 cache_read_sum = Some(cache_read_sum.unwrap_or(0).saturating_add(t));
             }
+            if let Some(t) = entry.cache_write_tokens {
+                cache_write_sum = Some(cache_write_sum.unwrap_or(0).saturating_add(t));
+            }
             if let (Some(m), Some(c)) = (entry.cost_minor_units, entry.cost_currency.as_ref()) {
                 let e = cost_map.entry(c.clone()).or_insert(0);
                 *e = e.saturating_add(m);
@@ -902,13 +907,29 @@ impl AgentLedgerRepo {
             LedgerUsageCoverage::Partial
         };
 
-        let cost_by_currency = cost_map
+        let cost_by_currency: Vec<CurrencyAmount> = cost_map
             .into_iter()
             .map(|(currency, minor_units)| CurrencyAmount {
                 currency,
                 minor_units,
             })
             .collect();
+
+        let real_consumed_tokens = match (input_sum, output_sum, cache_write_sum) {
+            (Some(i), Some(o), Some(cw)) => Some(i.saturating_add(o).saturating_add(cw)),
+            _ => None,
+        };
+        let cache_hit_rate = match (cache_read_sum, input_sum) {
+            (Some(cr), Some(i)) => {
+                let denom = cr.saturating_add(i);
+                if denom == 0 {
+                    None
+                } else {
+                    Some((cr as f64 / denom as f64) as f32)
+                }
+            }
+            _ => None,
+        };
 
         Ok(AgentLedgerSummary {
             window,
@@ -925,9 +946,381 @@ impl AgentLedgerRepo {
             input_tokens: input_sum,
             output_tokens: output_sum,
             cache_read_tokens: cache_read_sum,
+            cache_write_tokens: cache_write_sum,
+            real_consumed_tokens,
+            cache_hit_rate,
+            requests_count: sessions,
+            total_cost_by_currency: cost_by_currency.clone(),
             cost_by_currency,
+            by_model: Vec::new(),
+            by_provider: Vec::new(),
+            by_project: Vec::new(),
+            trend: Vec::new(),
+            bucket: bucket_for_window(window),
             usage_coverage,
         })
+    }
+
+    /// 全量筛选聚合（Token 统计页 + export 共用）。
+    ///
+    /// Business Logic:
+    ///     既有 `summarize(window, project_id, now)` 仅覆盖单 project + 24h/7d/30d；
+    ///     统计页需要 provider/model/project/worktree 多值过滤 + 自定义时间窗 + cache_write。
+    ///
+    /// Code Logic:
+    ///     WHERE 共享 `build_where`；token 累加语义与 `summarize` 完全一致；
+    ///     real_consumed / cache_hit_rate 同 `summarize` 派生；bucket 按 filters 推导。
+    pub async fn summarize_with_filters(
+        &self,
+        filters: AgentLedgerFilters,
+        now: DateTime<Utc>,
+    ) -> Result<AgentLedgerSummary, AppError> {
+        let (where_sql, binds) = build_where(&filters, &[], now);
+        let sql = format!("SELECT {SELECT_COLUMNS} FROM agent_session_ledger WHERE {where_sql}");
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = match b {
+                BindValue::Text(s) => q.bind(s),
+                BindValue::Int(i) => q.bind(*i),
+            };
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut sessions = 0u64;
+        let mut completed = 0u64;
+        let mut failed = 0u64;
+        let mut cancelled = 0u64;
+        let mut disconnected = 0u64;
+        let mut duration_ms = 0u64;
+        let mut input_sum: Option<u64> = None;
+        let mut output_sum: Option<u64> = None;
+        let mut cache_read_sum: Option<u64> = None;
+        let mut cache_write_sum: Option<u64> = None;
+        let mut usage_contributors = 0u64;
+        let mut cost_map: BTreeMap<String, u64> = BTreeMap::new();
+
+        for row in rows {
+            let entry = map_row(row)?;
+            sessions += 1;
+            duration_ms = duration_ms.saturating_add(entry.duration_ms);
+            match entry.outcome {
+                AgentLedgerOutcome::Completed => completed += 1,
+                AgentLedgerOutcome::Failed => failed += 1,
+                AgentLedgerOutcome::Cancelled => cancelled += 1,
+                AgentLedgerOutcome::Disconnected => disconnected += 1,
+            }
+            let has_usage = entry.input_tokens.is_some()
+                || entry.output_tokens.is_some()
+                || entry.cache_read_tokens.is_some()
+                || entry.cache_write_tokens.is_some()
+                || entry.cost_minor_units.is_some();
+            if has_usage {
+                usage_contributors += 1;
+            }
+            if let Some(t) = entry.input_tokens {
+                input_sum = Some(input_sum.unwrap_or(0).saturating_add(t));
+            }
+            if let Some(t) = entry.output_tokens {
+                output_sum = Some(output_sum.unwrap_or(0).saturating_add(t));
+            }
+            if let Some(t) = entry.cache_read_tokens {
+                cache_read_sum = Some(cache_read_sum.unwrap_or(0).saturating_add(t));
+            }
+            if let Some(t) = entry.cache_write_tokens {
+                cache_write_sum = Some(cache_write_sum.unwrap_or(0).saturating_add(t));
+            }
+            if let (Some(m), Some(c)) = (entry.cost_minor_units, entry.cost_currency.as_ref()) {
+                let e = cost_map.entry(c.clone()).or_insert(0);
+                *e = e.saturating_add(m);
+            }
+        }
+
+        let usage_coverage = if sessions == 0 || usage_contributors == 0 {
+            LedgerUsageCoverage::Unavailable
+        } else if usage_contributors == sessions {
+            LedgerUsageCoverage::Complete
+        } else {
+            LedgerUsageCoverage::Partial
+        };
+
+        let cost_by_currency: Vec<CurrencyAmount> = cost_map
+            .into_iter()
+            .map(|(currency, minor_units)| CurrencyAmount {
+                currency,
+                minor_units,
+            })
+            .collect();
+
+        let real_consumed_tokens = match (input_sum, output_sum, cache_write_sum) {
+            (Some(i), Some(o), Some(cw)) => Some(i.saturating_add(o).saturating_add(cw)),
+            _ => None,
+        };
+        let cache_hit_rate = match (cache_read_sum, input_sum) {
+            (Some(cr), Some(i)) => {
+                let denom = cr.saturating_add(i);
+                if denom == 0 {
+                    None
+                } else {
+                    Some((cr as f64 / denom as f64) as f32)
+                }
+            }
+            _ => None,
+        };
+
+        let project_id = filters
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let window = filters.window.unwrap_or(LedgerWindow::Days7);
+
+        Ok(AgentLedgerSummary {
+            window,
+            project_id,
+            sessions,
+            completed,
+            failed,
+            cancelled,
+            disconnected,
+            duration_ms,
+            input_tokens: input_sum,
+            output_tokens: output_sum,
+            cache_read_tokens: cache_read_sum,
+            cache_write_tokens: cache_write_sum,
+            real_consumed_tokens,
+            cache_hit_rate,
+            requests_count: sessions,
+            total_cost_by_currency: cost_by_currency.clone(),
+            cost_by_currency,
+            by_model: Vec::new(),
+            by_provider: Vec::new(),
+            by_project: Vec::new(),
+            trend: Vec::new(),
+            bucket: derive_bucket(&filters),
+            usage_coverage,
+        })
+    }
+
+    /// 三维拆分聚合（by_model / by_provider / by_project）。
+    ///
+    /// Business Logic:
+    ///     统计页需要按维度拆分；同一 SQL 与 WHERE 共享，与 summary 一致语义。
+    ///
+    /// Code Logic:
+    ///     dimension ∈ {model, provider, project}；NULL 值渲染为 "(unknown)"；
+    ///     cost 展开为多行 GROUP BY (dim_key, currency)；
+    ///     排序：sessions DESC，input_tokens DESC NULLS LAST（SQLite 用 CASE WHEN）, key ASC。
+    pub async fn summarize_grouped(
+        &self,
+        filters: &AgentLedgerFilters,
+        dimension: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<AgentLedgerGroupRow>, AppError> {
+        let (dim_select, dim_group) = match dimension {
+            "model" => ("model_id", "model_id"),
+            "provider" => ("provider_id", "provider_id"),
+            "project" => ("project_id", "project_id"),
+            other => {
+                return Err(AppError::validation(format!(
+                    "summarize_grouped 非法 dimension: {other}"
+                )));
+            }
+        };
+
+        let (where_sql, binds) = build_where(filters, &[], now);
+        let sql = format!(
+            "SELECT {dim_select} AS dim_key, \
+             COUNT(1) AS sessions, \
+             SUM(CASE WHEN outcome='completed' THEN 1 ELSE 0 END) AS completed, \
+             SUM(CASE WHEN outcome='failed' THEN 1 ELSE 0 END) AS failed, \
+             SUM(CASE WHEN outcome='cancelled' THEN 1 ELSE 0 END) AS cancelled, \
+             SUM(CASE WHEN outcome='disconnected' THEN 1 ELSE 0 END) AS disconnected, \
+             SUM(input_tokens) AS input_sum, \
+             SUM(output_tokens) AS output_sum, \
+             SUM(cache_read_tokens) AS cache_read_sum, \
+             SUM(cache_write_tokens) AS cache_write_sum, \
+             cost_minor_units, cost_currency \
+             FROM agent_session_ledger \
+             WHERE {where_sql} \
+             GROUP BY {dim_group}, cost_currency \
+             ORDER BY sessions DESC, input_sum DESC"
+        );
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = match b {
+                BindValue::Text(s) => q.bind(s),
+                BindValue::Int(i) => q.bind(*i),
+            };
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+
+        // 聚合 cost 桶到 dim_key
+        let mut by_key: BTreeMap<String, AgentLedgerGroupRow> = BTreeMap::new();
+        let mut order: Vec<(String, u64, Option<i64>)> = Vec::new();
+        for row in rows {
+            let raw_key: Option<String> = row.try_get("dim_key").ok();
+            let key = raw_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let sessions: i64 = row.try_get("sessions").unwrap_or(0);
+            let completed: i64 = row.try_get("completed").unwrap_or(0);
+            let failed: i64 = row.try_get("failed").unwrap_or(0);
+            let cancelled: i64 = row.try_get("cancelled").unwrap_or(0);
+            let disconnected: i64 = row.try_get("disconnected").unwrap_or(0);
+            let input_sum: Option<i64> = row.try_get("input_sum").ok();
+            let output_sum: Option<i64> = row.try_get("output_sum").ok();
+            let cache_read_sum: Option<i64> = row.try_get("cache_read_sum").ok();
+            let cache_write_sum: Option<i64> = row.try_get("cache_write_sum").ok();
+            let cost_minor: Option<i64> = row.try_get("cost_minor_units").ok();
+            let cost_currency: Option<String> = row.try_get("cost_currency").ok();
+
+            let entry = by_key
+                .entry(key.clone())
+                .or_insert_with(|| AgentLedgerGroupRow {
+                    label: None,
+                    sessions: 0,
+                    completed: 0,
+                    failed: 0,
+                    cancelled: 0,
+                    disconnected: 0,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    cost_by_currency: Vec::new(),
+                    key: key.clone(),
+                });
+            entry.sessions = entry.sessions.saturating_add(sessions.max(0) as u64);
+            entry.completed = entry.completed.saturating_add(completed.max(0) as u64);
+            entry.failed = entry.failed.saturating_add(failed.max(0) as u64);
+            entry.cancelled = entry.cancelled.saturating_add(cancelled.max(0) as u64);
+            entry.disconnected = entry
+                .disconnected
+                .saturating_add(disconnected.max(0) as u64);
+            merge_optional_sum(&mut entry.input_tokens, input_sum);
+            merge_optional_sum(&mut entry.output_tokens, output_sum);
+            merge_optional_sum(&mut entry.cache_read_tokens, cache_read_sum);
+            merge_optional_sum(&mut entry.cache_write_tokens, cache_write_sum);
+            if let (Some(m), Some(c)) = (cost_minor, cost_currency.as_deref()) {
+                if m > 0 && !c.trim().is_empty() {
+                    if let Some(slot) = entry.cost_by_currency.iter_mut().find(|x| x.currency == c)
+                    {
+                        slot.minor_units = slot.minor_units.saturating_add(m as u64);
+                    } else {
+                        entry.cost_by_currency.push(CurrencyAmount {
+                            currency: c.to_string(),
+                            minor_units: m.max(0) as u64,
+                        });
+                    }
+                }
+            }
+            order.push((key.clone(), sessions.max(0) as u64, input_sum));
+        }
+
+        // 排序：sessions DESC → input_tokens DESC（NULL 排最后）→ key ASC 兜底
+        order.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| match (a.2, b.2) {
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let mut out = Vec::with_capacity(order.len());
+        for (k, _, _) in order {
+            if let Some(row) = by_key.remove(&k) {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 趋势桶聚合。
+    ///
+    /// Business Logic:
+    ///     统计页趋势图 x 轴 = bucket_start；按桶粒度（hour|day）聚合。
+    ///
+    /// Code Logic:
+    ///     `strftime('%Y-%m-%dT%H:00:00Z', ended_at)` 或 `'%Y-%m-%dT00:00:00Z'`；
+    ///     与 grouped 同语义聚合 cost 桶；按 bucket_start ASC 排序。
+    pub async fn summarize_trend(
+        &self,
+        filters: &AgentLedgerFilters,
+        bucket: TrendBucket,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<AgentLedgerTrendPoint>, AppError> {
+        let (where_sql, binds) = build_where(filters, &[], now);
+        let bucket_expr = match bucket {
+            TrendBucket::Hour => "strftime('%Y-%m-%dT%H:00:00Z', ended_at)",
+            TrendBucket::Day => "strftime('%Y-%m-%dT00:00:00Z', ended_at)",
+        };
+        let sql = format!(
+            "SELECT {bucket_expr} AS bucket_start, \
+             SUM(input_tokens) AS input_sum, \
+             SUM(output_tokens) AS output_sum, \
+             SUM(cache_read_tokens) AS cache_read_sum, \
+             SUM(cache_write_tokens) AS cache_write_sum, \
+             cost_minor_units, cost_currency \
+             FROM agent_session_ledger \
+             WHERE {where_sql} \
+             GROUP BY bucket_start, cost_currency \
+             ORDER BY bucket_start ASC"
+        );
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = match b {
+                BindValue::Text(s) => q.bind(s),
+                BindValue::Int(i) => q.bind(*i),
+            };
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+
+        let mut by_bucket: BTreeMap<String, AgentLedgerTrendPoint> = BTreeMap::new();
+        for row in rows {
+            let bucket_start: String = row.try_get("bucket_start").unwrap_or_default();
+            let input_sum: Option<i64> = row.try_get("input_sum").ok();
+            let output_sum: Option<i64> = row.try_get("output_sum").ok();
+            let cache_read_sum: Option<i64> = row.try_get("cache_read_sum").ok();
+            let cache_write_sum: Option<i64> = row.try_get("cache_write_sum").ok();
+            let cost_minor: Option<i64> = row.try_get("cost_minor_units").ok();
+            let cost_currency: Option<String> = row.try_get("cost_currency").ok();
+
+            let entry =
+                by_bucket
+                    .entry(bucket_start.clone())
+                    .or_insert_with(|| AgentLedgerTrendPoint {
+                        bucket_start: bucket_start.clone(),
+                        input_tokens: None,
+                        output_tokens: None,
+                        cache_read_tokens: None,
+                        cache_write_tokens: None,
+                        cost_by_currency: Vec::new(),
+                    });
+            merge_optional_sum(&mut entry.input_tokens, input_sum);
+            merge_optional_sum(&mut entry.output_tokens, output_sum);
+            merge_optional_sum(&mut entry.cache_read_tokens, cache_read_sum);
+            merge_optional_sum(&mut entry.cache_write_tokens, cache_write_sum);
+            if let (Some(m), Some(c)) = (cost_minor, cost_currency.as_deref()) {
+                if m > 0 && !c.trim().is_empty() {
+                    if let Some(slot) = entry.cost_by_currency.iter_mut().find(|x| x.currency == c)
+                    {
+                        slot.minor_units = slot.minor_units.saturating_add(m as u64);
+                    } else {
+                        entry.cost_by_currency.push(CurrencyAmount {
+                            currency: c.to_string(),
+                            minor_units: m.max(0) as u64,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(by_bucket.into_values().collect())
     }
 }
 
@@ -935,6 +1328,172 @@ impl AgentLedgerRepo {
 enum BindValue {
     Text(String),
     Int(i64),
+}
+
+/// 由 window 推导桶粒度（24h→Hour，其它→Day）。
+///
+/// Business Logic:
+///     统计页 trends 默认按 window 推桶；24h 太长用 day 失去细节。
+///
+/// Code Logic:
+///     match window。
+fn bucket_for_window(window: LedgerWindow) -> TrendBucket {
+    match window {
+        LedgerWindow::Hours24 => TrendBucket::Hour,
+        _ => TrendBucket::Day,
+    }
+}
+
+/// 由 filters 推导桶粒度；显式 bucket 优先，否则按 window 推。
+///
+/// Business Logic:
+///     export 与统计页都通过 filters 推导同一桶粒度；保持口径一致。
+///
+/// Code Logic:
+///     filters.bucket → filters.window → Hours24 走 Hour，其它 Day。
+fn derive_bucket(filters: &AgentLedgerFilters) -> TrendBucket {
+    if let Some(b) = filters.bucket {
+        return b;
+    }
+    match filters.window {
+        Some(LedgerWindow::Hours24) => TrendBucket::Hour,
+        _ => TrendBucket::Day,
+    }
+}
+
+/// 构建共享 WHERE 子句与绑定参数。
+///
+/// Business Logic:
+///     summarize_with_filters / summarize_grouped / summarize_trend 共用同一筛选项；
+///     任何 IN 子句必须用占位符以防注入。
+///
+/// Code Logic:
+///     1) 时间窗（window→start/end）；2) started_after/before；3) project_id；
+///     4) worktree_id；5) outcome；6) provider_ids / model_ids / project_ids IN(?,?,…)；
+///     7) clear watermark；末尾追加 extra_clauses。
+fn build_where(
+    filters: &AgentLedgerFilters,
+    extra_clauses: &[&str],
+    now: DateTime<Utc>,
+) -> (String, Vec<BindValue>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<BindValue> = Vec::new();
+
+    // 1) 时间窗（window→start/end，None→Days7）
+    let window = filters.window.unwrap_or(LedgerWindow::Days7);
+    let start = now - ChronoDuration::seconds(window.duration_secs() as i64);
+    let start_s = start.to_rfc3339();
+    let now_s = now.to_rfc3339();
+    clauses.push("ended_at >= ?".into());
+    binds.push(BindValue::Text(start_s));
+    clauses.push("ended_at <= ?".into());
+    binds.push(BindValue::Text(now_s));
+
+    // 2) started_after/before
+    if let Some(after) = filters
+        .started_after
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        clauses.push("started_at >= ?".into());
+        binds.push(BindValue::Text(after.to_string()));
+    }
+    if let Some(before) = filters
+        .started_before
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        clauses.push("started_at <= ?".into());
+        binds.push(BindValue::Text(before.to_string()));
+    }
+
+    // 3) project_id（与 project_ids 互斥，多值优先）
+    if let Some(pids) = filters.project_ids.as_ref().filter(|v| !v.is_empty()) {
+        let placeholders = std::iter::repeat("?")
+            .take(pids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!("project_id IN ({placeholders})"));
+        for pid in pids {
+            binds.push(BindValue::Text(pid.trim().to_string()));
+        }
+    } else if let Some(pid) = filters
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        clauses.push("project_id = ?".into());
+        binds.push(BindValue::Text(pid.to_string()));
+    }
+
+    // 4) worktree_id
+    if let Some(wid) = filters
+        .worktree_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        clauses.push("worktree_id = ?".into());
+        binds.push(BindValue::Text(wid.to_string()));
+    }
+
+    // 5) outcome
+    if let Some(o) = filters.outcome {
+        clauses.push("outcome = ?".into());
+        binds.push(BindValue::Text(o.as_str().to_string()));
+    }
+
+    // 6) provider_ids IN
+    if let Some(p) = filters.provider_ids.as_ref().filter(|v| !v.is_empty()) {
+        let placeholders = std::iter::repeat("?")
+            .take(p.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!("provider_id IN ({placeholders})"));
+        for pid in p {
+            binds.push(BindValue::Text(pid.trim().to_string()));
+        }
+    }
+    // model_ids IN
+    if let Some(m) = filters.model_ids.as_ref().filter(|v| !v.is_empty()) {
+        let placeholders = std::iter::repeat("?")
+            .take(m.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!("model_id IN ({placeholders})"));
+        for mid in m {
+            binds.push(BindValue::Text(mid.trim().to_string()));
+        }
+    }
+
+    // 7) clear watermark：SQL 端过滤（避免历史复活）
+    clauses.push(
+        "ended_at > COALESCE((SELECT cleared_before FROM agent_ledger_clear_watermark WHERE id=1), '')"
+            .into(),
+    );
+
+    for c in extra_clauses {
+        clauses.push((*c).to_string());
+    }
+
+    let sql = clauses.join(" AND ");
+    (sql, binds)
+}
+
+/// 合并 Option<u64> += Option<i64>（None 跳过；双 None → None）。
+///
+/// Business Logic:
+///     SQL SUM 对 NULL 行返回 NULL；分项累加保持 unknown 不转 0 语义。
+///
+/// Code Logic:
+///     Some 优先 unwrap_or(0) → saturating_add；都 None → None。
+fn merge_optional_sum(target: &mut Option<u64>, incoming: Option<i64>) {
+    if let Some(v) = incoming {
+        *target = Some(target.unwrap_or(0).saturating_add(v.max(0) as u64));
+    }
 }
 
 /// 编码 opaque ledger cursor。

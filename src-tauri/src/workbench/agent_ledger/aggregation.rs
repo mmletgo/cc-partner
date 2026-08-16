@@ -2,14 +2,18 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     本机 drawer 与 summary 需要有界 query、coverage 语义与多货币桶；unknown 不转 0。
+//!     Token 统计页扩展：增加全量筛选聚合 + 三维拆分 + 趋势桶，
+//!     所有派生指标后端 SQL 聚合，前端不二次计算。
 //!
 //! Code Logic（这个模块做什么）:
-//!     薄封装 repo.get_page / summarize / clear；规范化 limit；window 边界 helper。
+//!     薄封装 repo.get_page / summarize / clear / summarize_with_filters；
+//!     规范化 limit；window 边界 helper；orchestrator 组合 grouped + trend。
 
 use crate::error::AppError;
 use crate::storage::agent_ledger_repo::{AgentLedgerRepo, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::workbench::agent_ledger::models::{
-    AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, LedgerWindow,
+    AgentLedgerFilters, AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, LedgerWindow,
+    TrendBucket,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
@@ -54,17 +58,69 @@ pub async fn list_entries(
 /// 本机时间窗聚合。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     desktop invoke 与 control 共用。
+///     desktop invoke 与 control 共用；保留兼容签名（Drawer 仍调此签名）。
 ///
 /// Code Logic（这个函数做什么）:
-///     repo.summarize。
+///     构造单 project filters → 委托 `summarize_with_filters`。
 pub async fn summarize_window(
     repo: &AgentLedgerRepo,
     window: LedgerWindow,
     project_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<AgentLedgerSummary, AppError> {
-    repo.summarize(window, project_id, now).await
+    let filters = AgentLedgerFilters {
+        window: Some(window),
+        project_id: project_id.map(|s| s.to_string()),
+        ..Default::default()
+    };
+    summarize_with_filters(repo, filters, now).await
+}
+
+/// Token 统计页 + export 共用的全量筛选聚合（orchestrator）。
+///
+/// Business Logic:
+///     统计页需要并行拉 by_model / by_provider / by_project 三维 + summary + trend；
+///     try_join 让 4 个查询共享同一 pool（SQLite 单 connection 时串行执行，
+///     但避免阻塞等待中某个查询报错而中断其它）。
+///
+/// Code Logic:
+///     repo.summarize_with_filters 拿主 summary；try_join 三维拆分；repo.summarize_trend 拉趋势；
+///     bucket 与 by_* / trend 字段写回 summary。
+pub async fn summarize_with_filters(
+    repo: &AgentLedgerRepo,
+    filters: AgentLedgerFilters,
+    now: DateTime<Utc>,
+) -> Result<AgentLedgerSummary, AppError> {
+    let (by_model, by_provider, by_project) = tokio::try_join!(
+        repo.summarize_grouped(&filters, "model", now),
+        repo.summarize_grouped(&filters, "provider", now),
+        repo.summarize_grouped(&filters, "project", now),
+    )?;
+    let mut summary = repo.summarize_with_filters(filters.clone(), now).await?;
+    let bucket = summary_bucket(&filters);
+    summary.bucket = bucket;
+    summary.by_model = by_model;
+    summary.by_provider = by_provider;
+    summary.by_project = by_project;
+    summary.trend = repo.summarize_trend(&filters, bucket, now).await?;
+    Ok(summary)
+}
+
+/// 由 filters 推导桶粒度（显式 bucket 优先，否则按 window 推）。
+///
+/// Business Logic:
+///     统计页 trend 与 summary.bucket 必须口径一致。
+///
+/// Code Logic:
+///     filters.bucket → filters.window → Hours24 走 Hour，其它 Day。
+pub fn summary_bucket(filters: &AgentLedgerFilters) -> TrendBucket {
+    if let Some(b) = filters.bucket {
+        return b;
+    }
+    match filters.window {
+        Some(LedgerWindow::Hours24) => TrendBucket::Hour,
+        _ => TrendBucket::Day,
+    }
 }
 
 /// 清除全部历史并写隐私水位；返回删除数。
@@ -164,6 +220,289 @@ mod batch_tests {
         assert_eq!(rows[0].sessions, 1);
         assert_eq!(rows[1].project_id.as_deref(), Some("p2"));
         assert_eq!(rows[1].usage_coverage, LedgerUsageCoverage::Unavailable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     summarize_with_filters 必须并行计算三维度拆分（by_model/by_provider/by_project），
+    ///     三种不同 provider → by_provider 长度 3。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 3 行（不同 provider）→ summarize_with_filters 走 7d 兜底 → by_provider.len() == 3。
+    #[tokio::test]
+    async fn summarize_with_filters_groups_three_dimensions() {
+        let repo = fixture().await;
+        let ended = "2026-07-15T12:00:00+00:00";
+        for (id, prov) in [
+            ("a1", "claudeCodeVisible"),
+            ("a2", "codexVisible"),
+            ("a3", "openCodeVisible"),
+        ] {
+            repo.finalize(AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                provider_id: prov.into(),
+                model_id: Some("m".into()),
+                started_at: ended.into(),
+                ended_at: ended.into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+                terminal_title: None,
+            })
+            .await
+            .unwrap();
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let filters = AgentLedgerFilters {
+            window: None,
+            ..Default::default()
+        };
+        let s = summarize_with_filters(&repo, filters, now).await.unwrap();
+        assert_eq!(s.by_provider.len(), 3);
+        // 同一 project，by_project 长度 1
+        assert_eq!(s.by_project.len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     model_id 为 NULL 的行在 by_model 必须落到 "(unknown)" 桶，不能抛错或漏算。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 2 行（其中一行 model_id=None）→ by_model 一项 key == "(unknown)"。
+    #[tokio::test]
+    async fn summarize_with_filters_groups_keys_unknown_for_null() {
+        let repo = fixture().await;
+        let ended = "2026-07-15T12:00:00+00:00";
+        for (id, mid) in [("a1", Some("claude-opus")), ("a2", None)] {
+            repo.finalize(AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                provider_id: "claudeCodeVisible".into(),
+                model_id: mid.map(|s| s.to_string()),
+                started_at: ended.into(),
+                ended_at: ended.into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+                terminal_title: None,
+            })
+            .await
+            .unwrap();
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let filters = AgentLedgerFilters {
+            window: None,
+            ..Default::default()
+        };
+        let s = summarize_with_filters(&repo, filters, now).await.unwrap();
+        assert!(s.by_model.iter().any(|r| r.key == "(unknown)"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     trend 跨午夜按 day 桶应合并到两个 day bucket 并按 ASC 排序。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 2 行（07-14 12:00 + 07-15 12:00）→ summarize_trend(day) 返回 2 个桶，最早在前。
+    #[tokio::test]
+    async fn summarize_trend_strftime_day() {
+        let repo = fixture().await;
+        for (id, ended) in [
+            ("a1", "2026-07-14T12:00:00+00:00"),
+            ("a2", "2026-07-15T03:00:00+00:00"),
+        ] {
+            repo.finalize(AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                provider_id: "claudeCodeVisible".into(),
+                model_id: None,
+                started_at: ended.into(),
+                ended_at: ended.into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+                terminal_title: None,
+            })
+            .await
+            .unwrap();
+        }
+        let filters = AgentLedgerFilters {
+            window: Some(LedgerWindow::Days30),
+            ..Default::default()
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let trend = repo
+            .summarize_trend(&filters, TrendBucket::Day, now)
+            .await
+            .unwrap();
+        assert_eq!(trend.len(), 2);
+        assert!(trend[0].bucket_start < trend[1].bucket_start);
+        assert!(trend[0].bucket_start.starts_with("2026-07-14T00:00:00"));
+        assert!(trend[1].bucket_start.starts_with("2026-07-15T00:00:00"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     trend 同小时多行 → 一个 hour bucket。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 2 行（07-15 12:00 与 12:30）→ summarize_trend(hour) 返回 1 个桶。
+    #[tokio::test]
+    async fn summarize_trend_strftime_hour() {
+        let repo = fixture().await;
+        for (id, ended) in [
+            ("a1", "2026-07-15T12:00:00+00:00"),
+            ("a2", "2026-07-15T12:30:00+00:00"),
+        ] {
+            repo.finalize(AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                provider_id: "claudeCodeVisible".into(),
+                model_id: None,
+                started_at: ended.into(),
+                ended_at: ended.into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+                terminal_title: None,
+            })
+            .await
+            .unwrap();
+        }
+        let filters = AgentLedgerFilters {
+            window: Some(LedgerWindow::Days30),
+            ..Default::default()
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let trend = repo
+            .summarize_trend(&filters, TrendBucket::Hour, now)
+            .await
+            .unwrap();
+        assert_eq!(trend.len(), 1);
+        assert!(trend[0].bucket_start.starts_with("2026-07-15T12:00:00"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     provider_ids 多值过滤必须用占位符生成 IN 子句（防注入 + 不掉串）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 3 行（不同 provider）→ filters.provider_ids 选 2 个 → summary.sessions=2、by_provider.len()=2。
+    #[tokio::test]
+    async fn summarize_with_filters_in_clause_placeholders() {
+        let repo = fixture().await;
+        let ended = "2026-07-15T12:00:00+00:00";
+        for (id, prov) in [
+            ("a1", "claudeCodeVisible"),
+            ("a2", "codexVisible"),
+            ("a3", "openCodeVisible"),
+        ] {
+            repo.finalize(AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                provider_id: prov.into(),
+                model_id: None,
+                started_at: ended.into(),
+                ended_at: ended.into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+                terminal_title: None,
+            })
+            .await
+            .unwrap();
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let filters = AgentLedgerFilters {
+            window: None,
+            provider_ids: Some(vec!["claudeCodeVisible".into(), "codexVisible".into()]),
+            ..Default::default()
+        };
+        let s = summarize_with_filters(&repo, filters, now).await.unwrap();
+        assert_eq!(s.sessions, 2);
+        assert_eq!(s.by_provider.len(), 2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     watermark 已清的行不得出现在新聚合结果中。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     finalize 一行 → clear_all → summarize_with_filters → sessions=0。
+    #[tokio::test]
+    async fn summarize_with_filters_skips_watermark_cleared_rows() {
+        let repo = fixture().await;
+        repo.finalize(AgentLedgerFinalizeInput {
+            agent_session_id: "a1".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            provider_id: "claudeCodeVisible".into(),
+            model_id: None,
+            started_at: "2026-07-15T12:00:00+00:00".into(),
+            ended_at: "2026-07-15T12:01:00+00:00".into(),
+            outcome: AgentLedgerOutcome::Completed,
+            usage: None,
+            terminal_title: None,
+        })
+        .await
+        .unwrap();
+        let _ = repo.clear_all().await.unwrap();
+        let filters = AgentLedgerFilters {
+            window: None,
+            ..Default::default()
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let s = summarize_with_filters(&repo, filters, now).await.unwrap();
+        assert_eq!(s.sessions, 0);
+    }
+
+    /// Business Logic: summary_bucket 推导规则。
+    /// Code Logic: 显式 bucket 优先；Hours24 → Hour；其它 → Day。
+    #[test]
+    fn bucket_default_for_window() {
+        assert_eq!(
+            summary_bucket(&AgentLedgerFilters {
+                window: Some(LedgerWindow::Hours24),
+                ..Default::default()
+            }),
+            TrendBucket::Hour
+        );
+        assert_eq!(
+            summary_bucket(&AgentLedgerFilters {
+                window: Some(LedgerWindow::Days7),
+                ..Default::default()
+            }),
+            TrendBucket::Day
+        );
+        assert_eq!(
+            summary_bucket(&AgentLedgerFilters {
+                window: Some(LedgerWindow::Days30),
+                ..Default::default()
+            }),
+            TrendBucket::Day
+        );
+        assert_eq!(
+            summary_bucket(&AgentLedgerFilters {
+                window: None,
+                ..Default::default()
+            }),
+            TrendBucket::Day
+        );
+        assert_eq!(
+            summary_bucket(&AgentLedgerFilters {
+                window: None,
+                bucket: Some(TrendBucket::Hour),
+                ..Default::default()
+            }),
+            TrendBucket::Hour
+        );
     }
 }
 

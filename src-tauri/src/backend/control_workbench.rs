@@ -575,9 +575,28 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(page)?)
         }
         "agent_ledger.summarize" => {
-            let window = required_string(&payload, "window")?;
+            let window = optional_string(&payload, "window");
             let project_id = optional_string(&payload, "projectId");
-            let req = crate::commands::workbench::SummarizeAgentLedgerReq { window, project_id };
+            let provider_ids = optional_string_vec(&payload, "providerIds");
+            let model_ids = optional_string_vec(&payload, "modelIds");
+            let project_ids = optional_string_vec(&payload, "projectIds");
+            let worktree_id = optional_string(&payload, "worktreeId");
+            let outcome = optional_string(&payload, "outcome");
+            let started_after = optional_string(&payload, "startedAfter");
+            let started_before = optional_string(&payload, "startedBefore");
+            let bucket = optional_string(&payload, "bucket");
+            let req = crate::commands::workbench::SummarizeAgentLedgerReq {
+                window,
+                project_id,
+                provider_ids,
+                model_ids,
+                project_ids,
+                worktree_id,
+                outcome,
+                started_after,
+                started_before,
+                bucket,
+            };
             let summary =
                 crate::commands::workbench::summarize_agent_ledger_for_state(state, req).await?;
             Ok(serde_json::to_value(summary)?)
@@ -1145,6 +1164,23 @@ fn optional_string(payload: &Value, key: &str) -> Option<String> {
 ///     仅接受 JSON bool；其它类型视为 None。
 fn optional_bool(payload: &Value, key: &str) -> Option<bool> {
     payload.get(key).and_then(|v| v.as_bool())
+}
+
+/// 读取 payload 可选字符串数组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Token 统计页 summarize/export 的 providerIds / modelIds / projectIds 多值。
+///
+/// Code Logic（这个函数做什么）:
+///     数组逐项取 str；非数组 / 元素非 str → None。
+fn optional_string_vec(payload: &Value, key: &str) -> Option<Vec<String>> {
+    payload.get(key).and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+    })
 }
 
 /// loopback + control token 双重鉴权。

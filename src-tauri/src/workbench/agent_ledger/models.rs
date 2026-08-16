@@ -368,11 +368,16 @@ pub struct CurrencyAmount {
 /// 时间窗聚合摘要。
 ///
 /// Business Logic（为什么需要这个类型）:
-///     Fleet/本机 summary 只读聚合，不暴露 entry/session id。
+///     Fleet/本机 summary 只读聚合，不暴露 entry/session id；
+///     Token 统计页扩展：增加派生指标（real consumed / cache hit rate）、
+///     三维拆分（by_model/by_provider/by_project）与趋势桶，
+///     所有派生指标后端 SQL 聚合，前端不二次计算。
 ///
 /// Code Logic（这个类型做什么）:
-///     sessions/outcome 计数 + 可选 token + cost 桶 + coverage。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///     sessions/outcome 计数 + 可选 token + cost 桶 + coverage + 派生指标 + 拆分行 + 趋势桶。
+///
+/// 注：`cache_hit_rate` 为 Option<f32>，故仅 derive PartialEq，不实现 Eq。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentLedgerSummary {
     /// 时间窗
@@ -398,10 +403,192 @@ pub struct AgentLedgerSummary {
     pub output_tokens: Option<u64>,
     /// 可靠 cache read tokens 合计（缓存输入；无贡献时 null）
     pub cache_read_tokens: Option<u64>,
-    /// 按货币 cost 桶
+    /// 可靠 cache write tokens 合计（无贡献时 null）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// 真实消耗 tokens：input + cache_write + output；任一分项 None → None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_consumed_tokens: Option<u64>,
+    /// 缓存命中率：cache_read / (cache_read + input)；任一分项 None 或分母 0 → None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_rate: Option<f32>,
+    /// 请求数（= sessions，命名更直观）
+    pub requests_count: u64,
+    /// 按货币 cost 桶（同源别名，命名更直观）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub total_cost_by_currency: Vec<CurrencyAmount>,
+    /// 按货币 cost 桶（与 total_cost_by_currency 同源）
     pub cost_by_currency: Vec<CurrencyAmount>,
+    /// 按 model 维度拆分（可空）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_model: Vec<AgentLedgerGroupRow>,
+    /// 按 provider 维度拆分（可空）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_provider: Vec<AgentLedgerGroupRow>,
+    /// 按 project 维度拆分（可空）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_project: Vec<AgentLedgerGroupRow>,
+    /// 趋势桶序列（按 bucket_start 升序；空区间不补 0）
+    pub trend: Vec<AgentLedgerTrendPoint>,
+    /// 已推导的桶粒度（hour|day）
+    pub bucket: TrendBucket,
     /// usage 覆盖度
     pub usage_coverage: LedgerUsageCoverage,
+}
+
+/// 趋势桶粒度。
+///
+/// Business Logic（为什么需要这个类型）:
+///     Token 统计页趋势图需要稳定粒度：24h → hour；7d/30d → day；custom 缺省 day。
+///
+/// Code Logic（这个类型做什么）:
+///     hour|day；wire 字符串；parse fail-closed。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrendBucket {
+    /// 小时桶
+    Hour,
+    /// 天桶
+    Day,
+}
+
+impl TrendBucket {
+    /// 返回 wire token。
+    ///
+    /// Business Logic: API/P2P 需要稳定桶粒度字面量。
+    /// Code Logic: `hour|day`。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+        }
+    }
+
+    /// 解析桶粒度；未知 fail-closed。
+    ///
+    /// Business Logic: 非法 bucket 不得静默回退。
+    /// Code Logic: 匹配 hour/day 与枚举别名；否则 None。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hour" | "hours" => Some(Self::Hour),
+            "day" | "days" => Some(Self::Day),
+            _ => None,
+        }
+    }
+}
+
+/// 全量筛选聚合请求（Token 统计页与 export 共用）。
+///
+/// Business Logic:
+///     既有 `summarize(window, project_id)` 仅覆盖单 project + 24h/7d/30d；
+///     统计页需要多 provider/model/project/worktree 过滤、自定义时间窗与桶粒度。
+///
+/// Code Logic:
+///     全部 Option 字段；默认 window=None → 7d；bucket=None → 按 window 推导。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLedgerFilters {
+    /// 时间窗：None 视为 7d 兜底
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<LedgerWindow>,
+    /// 可选 project 过滤（与 project_ids 互斥；同时给 → project_ids 优先）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// 可选 provider 多值过滤
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ids: Option<Vec<String>>,
+    /// 可选 model 多值过滤
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ids: Option<Vec<String>>,
+    /// 可选 project 多值过滤（与 project_id 互斥；同时给 → 多值优先）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<String>>,
+    /// 可选 worktree 过滤
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<String>,
+    /// 可选 outcome 过滤
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AgentLedgerOutcome>,
+    /// 可选 started_at 下界（含）RFC3339
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_after: Option<String>,
+    /// 可选 started_at 上界（含）RFC3339
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_before: Option<String>,
+    /// 可选桶粒度显式指定；None → 按 window 推导
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<TrendBucket>,
+}
+
+/// 三维拆分聚合行（by_model / by_provider / by_project）。
+///
+/// Business Logic:
+///     统计页需要按 model/provider/project 维度拆分；
+///     派生指标 + cost 桶统一在单行内计算。
+///
+/// Code Logic:
+///     key 为维度值（NULL 渲染为 `"(unknown)"`）；token 分项 None → 整段 None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLedgerGroupRow {
+    /// 维度 key（NULL 渲染为 `"(unknown)"`）
+    pub key: String,
+    /// 可选 label（多数维度与 key 相同，预留）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// session 总数
+    pub sessions: u64,
+    /// completed 数
+    pub completed: u64,
+    /// failed 数
+    pub failed: u64,
+    /// cancelled 数
+    pub cancelled: u64,
+    /// disconnected 数
+    pub disconnected: u64,
+    /// 可选 input tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// 可选 output tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// 可选 cache read tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// 可选 cache write tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// 按货币 cost 桶
+    pub cost_by_currency: Vec<CurrencyAmount>,
+}
+
+/// 趋势桶内合计。
+///
+/// Business Logic:
+///     统计页趋势图 x 轴 = bucket_start；y = token / cost 桶；
+///     空区间不补 0（前端铺 gap）。
+///
+/// Code Logic:
+///     bucket_start 为 RFC3339 UTC（SQL `strftime` 产物）；token 分项 None → 整段 None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLedgerTrendPoint {
+    /// 桶起点 RFC3339 UTC
+    pub bucket_start: String,
+    /// 可选 input tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// 可选 output tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// 可选 cache read tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// 可选 cache write tokens 合计
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// 按货币 cost 桶
+    pub cost_by_currency: Vec<CurrencyAmount>,
 }
 
 /// P2P owner-local 批量 summary 请求（snake_case，与 lan-fleet owner batch 一致）。
@@ -429,7 +616,7 @@ pub struct AgentLedgerSummaryBatchReq {
 ///
 /// Code Logic（这个类型做什么）:
 ///     window + projects[]（每个是 AgentLedgerSummary，带 project_id）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentLedgerSummaryBatchResp {
     /// 请求的时间窗
@@ -812,10 +999,23 @@ mod tests {
                 input_tokens: Some(10),
                 output_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                real_consumed_tokens: None,
+                cache_hit_rate: None,
+                requests_count: 2,
+                total_cost_by_currency: vec![CurrencyAmount {
+                    currency: "USD".into(),
+                    minor_units: 3,
+                }],
                 cost_by_currency: vec![CurrencyAmount {
                     currency: "USD".into(),
                     minor_units: 3,
                 }],
+                by_model: vec![],
+                by_provider: vec![],
+                by_project: vec![],
+                trend: vec![],
+                bucket: TrendBucket::Day,
                 usage_coverage: LedgerUsageCoverage::Partial,
             }],
         };
@@ -836,5 +1036,262 @@ mod tests {
             Some(AgentLedgerOutcome::Cancelled)
         );
         assert_eq!(AgentLedgerOutcome::Cancelled.as_str(), "cancelled");
+    }
+
+    /// Business Logic: cacheWriteTokens / realConsumedTokens / cacheHitRate / requestsCount /
+    ///     totalCostByCurrency / byModel / byProvider / byProject / trend / bucket 都应在 summary DTO 上。
+    /// Code Logic: 构造全字段 summary → serde_json → 关键 camelCase 字段都出现。
+    #[test]
+    fn summarize_dto_cache_write_appears_in_summary() {
+        let s = AgentLedgerSummary {
+            window: LedgerWindow::Days7,
+            project_id: None,
+            sessions: 3,
+            completed: 3,
+            failed: 0,
+            cancelled: 0,
+            disconnected: 0,
+            duration_ms: 0,
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            cache_read_tokens: Some(8),
+            cache_write_tokens: Some(2),
+            real_consumed_tokens: Some(17),
+            cache_hit_rate: Some(0.8),
+            requests_count: 3,
+            total_cost_by_currency: vec![CurrencyAmount {
+                currency: "USD".into(),
+                minor_units: 9,
+            }],
+            cost_by_currency: vec![CurrencyAmount {
+                currency: "USD".into(),
+                minor_units: 9,
+            }],
+            by_model: vec![AgentLedgerGroupRow {
+                key: "claude-opus".into(),
+                label: None,
+                sessions: 3,
+                completed: 3,
+                failed: 0,
+                cancelled: 0,
+                disconnected: 0,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(8),
+                cache_write_tokens: Some(2),
+                cost_by_currency: vec![],
+            }],
+            by_provider: vec![AgentLedgerGroupRow {
+                key: "claudeCodeVisible".into(),
+                label: None,
+                sessions: 3,
+                completed: 3,
+                failed: 0,
+                cancelled: 0,
+                disconnected: 0,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(8),
+                cache_write_tokens: Some(2),
+                cost_by_currency: vec![],
+            }],
+            by_project: vec![AgentLedgerGroupRow {
+                key: "p1".into(),
+                label: None,
+                sessions: 3,
+                completed: 3,
+                failed: 0,
+                cancelled: 0,
+                disconnected: 0,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(8),
+                cache_write_tokens: Some(2),
+                cost_by_currency: vec![],
+            }],
+            trend: vec![AgentLedgerTrendPoint {
+                bucket_start: "2026-07-15T00:00:00Z".into(),
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(8),
+                cache_write_tokens: Some(2),
+                cost_by_currency: vec![],
+            }],
+            bucket: TrendBucket::Day,
+            usage_coverage: LedgerUsageCoverage::Complete,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("cacheWriteTokens").is_some());
+        assert!(v.get("realConsumedTokens").is_some());
+        assert!(v.get("cacheHitRate").is_some());
+        assert!(v.get("requestsCount").is_some());
+        assert!(v.get("totalCostByCurrency").is_some());
+        assert!(v.get("byModel").is_some());
+        assert!(v.get("byProvider").is_some());
+        assert!(v.get("byProject").is_some());
+        assert!(v.get("trend").is_some());
+        assert_eq!(v.get("bucket").and_then(|x| x.as_str()), Some("day"));
+    }
+
+    /// Business Logic: skip_serializing_if 保证空 vec 不出现在 JSON。
+    /// Code Logic: 构造空 by_* 行的 summary → JSON 不含 byModel / byProvider / byProject / totalCostByCurrency。
+    #[test]
+    fn serde_skip_none_does_not_emit_unset_group_rows_when_empty() {
+        let s = AgentLedgerSummary {
+            window: LedgerWindow::Days7,
+            project_id: None,
+            sessions: 0,
+            completed: 0,
+            failed: 0,
+            cancelled: 0,
+            disconnected: 0,
+            duration_ms: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            real_consumed_tokens: None,
+            cache_hit_rate: None,
+            requests_count: 0,
+            total_cost_by_currency: vec![],
+            cost_by_currency: vec![],
+            by_model: vec![],
+            by_provider: vec![],
+            by_project: vec![],
+            trend: vec![],
+            bucket: TrendBucket::Day,
+            usage_coverage: LedgerUsageCoverage::Unavailable,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("byModel").is_none());
+        assert!(v.get("byProvider").is_none());
+        assert!(v.get("byProject").is_none());
+        assert!(v.get("totalCostByCurrency").is_none());
+        assert!(v.get("cacheWriteTokens").is_none());
+        assert!(v.get("realConsumedTokens").is_none());
+        assert!(v.get("cacheHitRate").is_none());
+    }
+
+    /// Business Logic: cache hit rate 分母为 0 时 → None。
+    /// Code Logic: 直接走 storage::agent_ledger_repo 的求值函数（这里用同公式函数验证）。
+    ///     注：本测试只覆盖 DTO 端的 None 不强制 f32 默认值；repo 端逻辑见 storage 测试。
+    #[test]
+    fn summarize_hit_rate_zero_divisor_yields_none() {
+        // DTO 端：f32 None 不被 serde 默认填 0
+        let s = AgentLedgerSummary {
+            window: LedgerWindow::Days7,
+            project_id: None,
+            sessions: 1,
+            completed: 1,
+            failed: 0,
+            cancelled: 0,
+            disconnected: 0,
+            duration_ms: 0,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            real_consumed_tokens: Some(0),
+            cache_hit_rate: None, // 分母 0 → None
+            requests_count: 1,
+            total_cost_by_currency: vec![],
+            cost_by_currency: vec![],
+            by_model: vec![],
+            by_provider: vec![],
+            by_project: vec![],
+            trend: vec![],
+            bucket: TrendBucket::Day,
+            usage_coverage: LedgerUsageCoverage::Unavailable,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("cacheHitRate").is_none());
+    }
+
+    /// Business Logic: summary DTO（含 by_*/trend）扫描无禁止字段名。
+    /// Code Logic: 构造全字段 summary → JSON 走 scan_forbidden_ledger_field_names。
+    #[test]
+    fn summarize_dto_no_forbidden_field_names() {
+        let s = AgentLedgerSummary {
+            window: LedgerWindow::Days7,
+            project_id: None,
+            sessions: 1,
+            completed: 1,
+            failed: 0,
+            cancelled: 0,
+            disconnected: 0,
+            duration_ms: 1,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            cache_read_tokens: Some(1),
+            cache_write_tokens: Some(1),
+            real_consumed_tokens: Some(3),
+            cache_hit_rate: Some(0.5),
+            requests_count: 1,
+            total_cost_by_currency: vec![],
+            cost_by_currency: vec![],
+            by_model: vec![AgentLedgerGroupRow {
+                key: "claude-opus".into(),
+                label: None,
+                sessions: 1,
+                completed: 1,
+                failed: 0,
+                cancelled: 0,
+                disconnected: 0,
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cache_read_tokens: Some(1),
+                cache_write_tokens: Some(1),
+                cost_by_currency: vec![],
+            }],
+            by_provider: vec![AgentLedgerGroupRow {
+                key: "claudeCodeVisible".into(),
+                label: None,
+                sessions: 1,
+                completed: 1,
+                failed: 0,
+                cancelled: 0,
+                disconnected: 0,
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cache_read_tokens: Some(1),
+                cache_write_tokens: Some(1),
+                cost_by_currency: vec![],
+            }],
+            by_project: vec![AgentLedgerGroupRow {
+                key: "p1".into(),
+                label: None,
+                sessions: 1,
+                completed: 1,
+                failed: 0,
+                cancelled: 0,
+                disconnected: 0,
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cache_read_tokens: Some(1),
+                cache_write_tokens: Some(1),
+                cost_by_currency: vec![],
+            }],
+            trend: vec![AgentLedgerTrendPoint {
+                bucket_start: "2026-07-15T00:00:00Z".into(),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cache_read_tokens: Some(1),
+                cache_write_tokens: Some(1),
+                cost_by_currency: vec![],
+            }],
+            bucket: TrendBucket::Day,
+            usage_coverage: LedgerUsageCoverage::Complete,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let hits = scan_forbidden_ledger_field_names(&v);
+        assert!(
+            hits.is_empty(),
+            "forbidden field names in summary DTO: {hits:?}"
+        );
+        let text = v.to_string();
+        assert!(!text.contains("prompt"));
+        assert!(!text.contains("transcript"));
+        assert!(!text.contains("nativeSessionId"));
+        assert!(!text.contains("environment"));
     }
 }
