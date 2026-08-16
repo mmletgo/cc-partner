@@ -93,6 +93,7 @@ cc-partner/
 │   │   │   ├── WordGame/          # 记单词闪卡（不进路由，由 GameHubDialog 挂载）
 │   │   │   ├── GamePluginPlayer/  # 插件游戏全应用播放器（不进路由，由 GameHubDialog 挂载）
 │   │   │   ├── ActivityStats/     # 活动统计（应用/窗口排行 + 小时分布）
+│   │   │   ├── TokenStats/        # Token 统计（KPI / 趋势 / 三维拆分 / 导出）
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
 │   │   ├── api/                  # 桌面 invoke + mobile HTTP 封装（含 attention / workbenchHttp）

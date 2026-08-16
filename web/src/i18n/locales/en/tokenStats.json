@@ -95,7 +95,8 @@
   "export": {
     "success": "Exported to {{path}}",
     "failure": "Export failed: {{message}}",
-    "reveal": "Show in Finder"
+    "reveal": "Show in Finder",
+    "close": "Dismiss"
   },
   "errors": {
     "loadFailed": "Failed to load token statistics.",
