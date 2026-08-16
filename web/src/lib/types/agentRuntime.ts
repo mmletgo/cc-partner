@@ -61,6 +61,30 @@ export interface AgentSessionProjection {
   /** owner 内 agent 单调版本对应的 outcome（可选，仅终态）。 */
   outcomeCode?: string | null;
   isActive?: boolean;
+  /** Agent session 开始时间 RFC3339；用于 live 平均 tok/s。 */
+  startedAt: string;
+  /** 终态结束时间 RFC3339。 */
+  endedAt?: string | null;
+  /** 进程内 live/终态最近一次可靠 usage；缺省表示尚未抽取。 */
+  usage?: AgentLiveUsage | null;
+}
+
+/**
+ * Agent runtime 投影上的 metadata-only usage。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   状态卡在 working/needsInput 也要展示速率与上下文；禁止 native id / 路径 / 正文。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust AgentLiveUsageDto camelCase。
+ */
+export interface AgentLiveUsage {
+  modelId?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  extractedAt: string;
 }
 
 /**
@@ -105,6 +129,8 @@ export interface AgentSessionRuntimeDto {
   outcomeCode?: string | null;
   resumedFromAgentSessionId?: string | null;
   isActive: boolean;
+  /** 可选 live usage；旧后端缺字段视为尚未抽取。 */
+  usage?: AgentLiveUsage | null;
 }
 
 /**

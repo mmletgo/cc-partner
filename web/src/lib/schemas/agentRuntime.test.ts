@@ -42,10 +42,15 @@ const sampleSnapshot = {
   truncated: false,
 };
 
+const decodedSession = { ...sampleSession, usage: undefined };
+
 describe('agentRuntime schemas', () => {
   test('decodes valid session and snapshot', () => {
-    expect(agentSessionRuntimeDtoDecoder.decode(sampleSession)).toEqual(sampleSession);
-    expect(agentRuntimeSnapshotDecoder.decode(sampleSnapshot)).toEqual(sampleSnapshot);
+    expect(agentSessionRuntimeDtoDecoder.decode(sampleSession)).toEqual(decodedSession);
+    expect(agentRuntimeSnapshotDecoder.decode(sampleSnapshot)).toEqual({
+      ...sampleSnapshot,
+      sessions: [decodedSession],
+    });
   });
 
   test('decodes event with optional owner/sequence', () => {
@@ -54,7 +59,30 @@ describe('agentRuntime schemas', () => {
       ownerInstanceId: 'owner-1',
       sequence: 12,
     };
-    expect(agentRuntimeEventDecoder.decode(event)).toEqual(event);
+    expect(agentRuntimeEventDecoder.decode(event)).toEqual({
+      ...event,
+      agentSession: decodedSession,
+    });
+  });
+
+  test('decodes optional live usage and rejects bad extractedAt', () => {
+    const withUsage = {
+      ...sampleSession,
+      usage: {
+        modelId: 'claude-sonnet-4-5',
+        inputTokens: 1200,
+        outputTokens: 80,
+        cacheReadTokens: 400,
+        cacheWriteTokens: 20,
+        extractedAt: '2026-07-15T00:02:00.000Z',
+      },
+    };
+    expect(agentSessionRuntimeDtoDecoder.decode(withUsage)).toEqual(withUsage);
+    const badUsage = {
+      ...sampleSession,
+      usage: { extractedAt: 'not-a-date', inputTokens: 1 },
+    };
+    expect(() => agentSessionRuntimeDtoDecoder.decode(badUsage)).toThrow(ContractDecodeError);
   });
 
   test('rejects unknown phase', () => {

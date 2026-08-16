@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * useAgentLedgerForAgent 单元测试。
  *
@@ -11,7 +12,7 @@
  *   - 断言调用次数与返回的 ledgerEntry 正确性；
  *   - 验证 working 阶段不调用、终态切换调用、id 切换调用。
  */
-import { renderHook, waitFor } from '@testing-library/react';
+import { cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentLedgerEntry } from '@/lib/types/agentLedger';
@@ -78,6 +79,7 @@ describe('useAgentLedgerForAgent', () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.clearAllMocks();
   });
 
@@ -102,14 +104,28 @@ describe('useAgentLedgerForAgent', () => {
     expect(result.current.ledgerEntry?.outputTokens).toBe(600);
   });
 
-  it('agentSessionId 不在 page.items 中时返回 null（不报错）', async () => {
-    mockedList.mockResolvedValueOnce({ items: [], nextCursor: null });
+  it('agentSessionId 不在 page.items 中时有界重试后仍返回 null（不报错）', async () => {
+    mockedList.mockResolvedValue({ items: [], nextCursor: null });
     const { result } = renderHook(() =>
       useAgentLedgerForAgent('project-1', 'agent-missing', 'failed'),
     );
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(mockedList).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(result.current.loading).toBe(false), { timeout: 3000 });
+    expect(mockedList).toHaveBeenCalledTimes(3);
     expect(result.current.ledgerEntry).toBeNull();
+    expect(result.current.error).toBeNull();
+  });
+
+  it('终态首次未命中后重试命中 ledger', async () => {
+    mockedList
+      .mockResolvedValueOnce({ items: [], nextCursor: null })
+      .mockResolvedValueOnce({ items: [sampleEntry], nextCursor: null });
+    const { result } = renderHook(() =>
+      useAgentLedgerForAgent('project-1', 'agent-1', 'completed'),
+    );
+    await waitFor(() => expect(result.current.ledgerEntry?.agentSessionId).toBe('agent-1'), {
+      timeout: 3000,
+    });
+    expect(mockedList).toHaveBeenCalledTimes(2);
     expect(result.current.error).toBeNull();
   });
 
@@ -151,11 +167,12 @@ describe('useAgentLedgerForAgent', () => {
   });
 
   it('ledger 拉取失败保留 error，ledgerEntry 置空', async () => {
-    mockedList.mockRejectedValueOnce(new Error('network down'));
+    mockedList.mockRejectedValue(new Error('network down'));
     const { result } = renderHook(() =>
       useAgentLedgerForAgent('project-1', 'agent-1', 'completed'),
     );
-    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(result.current.loading).toBe(false), { timeout: 3000 });
+    expect(mockedList).toHaveBeenCalledTimes(3);
     expect(result.current.error?.message).toBe('network down');
     expect(result.current.ledgerEntry).toBeNull();
   });

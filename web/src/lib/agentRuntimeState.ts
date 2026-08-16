@@ -59,6 +59,7 @@ export function toAgentSessionProjection(
     lastActivityAt: dto.lastActivityAt,
     freshness,
     isActive: dto.isActive,
+    startedAt: dto.startedAt,
   };
   if (dto.worktreeId != null && dto.worktreeId !== '') {
     projection.worktreeId = dto.worktreeId;
@@ -68,6 +69,12 @@ export function toAgentSessionProjection(
   }
   if (dto.outcomeCode !== undefined) {
     projection.outcomeCode = dto.outcomeCode;
+  }
+  if (dto.endedAt !== undefined) {
+    projection.endedAt = dto.endedAt;
+  }
+  if (dto.usage != null) {
+    projection.usage = dto.usage;
   }
   return projection;
 }
@@ -155,11 +162,69 @@ export function shouldAcceptAgentVersion(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   live usage 刷新不得抬 CAS version，否则会打乱 OSC expectedVersion；
+ *   同 version 时仍要接受更新的 extractedAt / tokens。
+ *
+ * Code Logic（这个函数做什么）:
+ *   version 更大 → true；更小 → false；相等则 incoming usage 更新才 true。
+ */
+export function shouldAcceptAgentRuntimeUpdate(
+  existing: AgentSessionProjection | undefined,
+  incoming: AgentSessionRuntimeDto,
+): boolean {
+  if (!existing) return true;
+  if (incoming.version > existing.version) return true;
+  if (incoming.version < existing.version) return false;
+  return isNewerLiveUsage(incoming.usage, existing.usage);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   同 version 的 usage 事件只在抽取时间更新或 tokens 变化时覆盖，避免回退。
+ *
+ * Code Logic（这个函数做什么）:
+ *   无 incoming → false；无 existing → true；extractedAt 可解析时比时间，否则比 fingerprint。
+ */
+function isNewerLiveUsage(
+  incoming: AgentSessionRuntimeDto['usage'],
+  existing: AgentSessionProjection['usage'],
+): boolean {
+  if (incoming == null) return false;
+  if (existing == null) return true;
+  const incomingAt = Date.parse(incoming.extractedAt);
+  const existingAt = Date.parse(existing.extractedAt);
+  if (Number.isFinite(incomingAt) && Number.isFinite(existingAt) && incomingAt !== existingAt) {
+    return incomingAt > existingAt;
+  }
+  return liveUsageFingerprint(incoming) !== liveUsageFingerprint(existing);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   extractedAt 相同时仍要用 tokens/model 判断是否值得替换。
+ *
+ * Code Logic（这个函数做什么）:
+ *   拼稳定字符串指纹。
+ */
+function liveUsageFingerprint(
+  usage: NonNullable<AgentSessionRuntimeDto['usage']>,
+): string {
+  return [
+    usage.modelId ?? '',
+    usage.inputTokens ?? '',
+    usage.outputTokens ?? '',
+    usage.cacheReadTokens ?? '',
+    usage.cacheWriteTokens ?? '',
+  ].join('|');
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   live/buffer 事件需幂等合并；旧 version 不得覆盖新状态；可推进 asOfSequence。
  *
  * Code Logic（这个函数做什么）:
  *   - ownerInstanceId 若 event 携带且与 state 不同且 state 已有 owner：拒绝（返回原 state）
- *   - 同 agent id 仅当 version 更大才替换
+ *   - 同 agent id：version 更大，或同 version 且 live usage 更新才替换
  *   - 不可变 Map 复制后写回
  *   - sequence 大于 asOfSequence 时更新 asOfSequence
  *   - freshness 默认 live，可由参数覆盖
@@ -183,7 +248,7 @@ export function applyAgentRuntimeEvent(
   }
 
   const existing = state.byAgentId.get(dto.id);
-  if (!shouldAcceptAgentVersion(existing, dto.version)) {
+  if (!shouldAcceptAgentRuntimeUpdate(existing, dto)) {
     return state;
   }
 

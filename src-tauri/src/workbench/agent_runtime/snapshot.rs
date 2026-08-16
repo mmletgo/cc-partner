@@ -19,13 +19,31 @@ pub const AGENT_RUNTIME_SNAPSHOT_LIMIT: i64 = 1_000;
 /// 稳定 cursor 捕获的最大重试次数（对齐 operational notification snapshot）。
 const SNAPSHOT_CURSOR_STABILITY_ATTEMPTS: usize = 8;
 
+/// 投影用 live usage（仅 tokens + model + 抽取时间）。
+///
+/// Business Logic（为什么需要这个类型）:
+///     状态卡在非终态也要展示速率/上下文；不得携带 native id、路径或正文。
+///
+/// Code Logic（这个类型做什么）:
+///     camelCase；全字段可选 tokens；extracted_at 为 RFC3339。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLiveUsageDto {
+    pub model_id: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub extracted_at: String,
+}
+
 /// 投影用 Agent session DTO（禁止 native_session_id）。
 ///
 /// Business Logic（为什么需要这个类型）:
 ///     UI/CLI/P2P 只需稳定 cc-partner ID 与 phase；provider-native id 仅 owner-local。
 ///
 /// Code Logic（这个类型做什么）:
-///     camelCase serde；字段集刻意不含 nativeSessionId。
+///     camelCase serde；字段集刻意不含 nativeSessionId；usage 可选且缺省省略。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionRuntimeDto {
@@ -44,6 +62,9 @@ pub struct AgentSessionRuntimeDto {
     pub outcome_code: Option<String>,
     pub resumed_from_agent_session_id: Option<String>,
     pub is_active: bool,
+    /// 进程内 live/终态最近一次可靠 usage；缺省不序列化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AgentLiveUsageDto>,
 }
 
 impl AgentSessionRuntimeDto {
@@ -53,7 +74,7 @@ impl AgentSessionRuntimeDto {
     ///     repo 行含 owner-local 字段；投影边界必须统一剥离。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     逐字段拷贝，忽略 native_session_id。
+    ///     逐字段拷贝，忽略 native_session_id；附上进程内 live usage 缓存。
     pub fn from_runtime(row: &AgentSessionRuntime) -> Self {
         Self {
             id: row.id.clone(),
@@ -71,6 +92,7 @@ impl AgentSessionRuntimeDto {
             outcome_code: row.outcome_code.clone(),
             resumed_from_agent_session_id: row.resumed_from_agent_session_id.clone(),
             is_active: row.is_active,
+            usage: super::live_usage::cached_usage_dto(&row.id),
         }
     }
 }
@@ -309,7 +331,54 @@ mod tests {
         assert!(!json.contains("nativeSessionId"));
         assert!(!json.contains("native_session_id"));
         assert!(!json.contains("native-secret"));
+        assert!(!json.contains("\"usage\""));
         assert!(json.contains("agent") || json.contains("\"id\":\"a1\""));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     live usage 可进投影，但绝不能带回 native id 或路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     store usage 后 from_runtime，JSON 含 tokens 且不含 native-secret。
+    #[test]
+    fn dto_attaches_live_usage_without_native_session_id() {
+        let row = AgentSessionRuntime {
+            id: "a-usage".into(),
+            project_id: "p".into(),
+            worktree_id: None,
+            terminal_session_id: "t".into(),
+            orchestrator_task_id: None,
+            orchestrator_attempt: None,
+            provider_id: "claudeCodeVisible".into(),
+            native_session_id: Some("native-secret".into()),
+            phase: AgentSessionPhase::Working,
+            version: 2,
+            started_at: "2026-07-15T00:00:00Z".into(),
+            last_activity_at: "2026-07-15T00:00:01Z".into(),
+            ended_at: None,
+            outcome_code: None,
+            resumed_from_agent_session_id: None,
+            is_active: true,
+        };
+        crate::workbench::agent_runtime::live_usage::store(
+            "a-usage",
+            &crate::workbench::agent_ledger::ReliableUsageSnapshot {
+                model_id: Some("claude-sonnet-4".into()),
+                input_tokens: Some(12),
+                output_tokens: Some(3),
+                cache_read_tokens: Some(4),
+                cache_write_tokens: Some(1),
+                cost_major: None,
+                cost_currency: None,
+            },
+        );
+        let dto = AgentSessionRuntimeDto::from_runtime(&row);
+        let usage = dto.usage.as_ref().expect("usage attached");
+        assert_eq!(usage.input_tokens, Some(12));
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("inputTokens"));
+        assert!(!json.contains("nativeSessionId"));
+        assert!(!json.contains("native-secret"));
     }
 
     /// Business Logic（为什么需要这个测试）:

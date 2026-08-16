@@ -226,7 +226,7 @@ export function Workbench() {
   // R12 M3：history sync 永久失败可订阅状态（hooks 必须在 early return 前）。
   const historySyncFailure = useTerminalHistorySyncFailure(activeSessionId);
   const startupBaselineFailure = useStartupBaselineFailure();
-  // 状态卡速率 / 上下文 % 派生自 ledger 单行；仅 phase 终态触发拉取，working 阶段返回 null。
+  // 状态卡速率 / 上下文 % 优先 live usage；ledger 仅终态回退（hook 仍只在终态拉取）。
   const activeAgentForStatusCard = activeSessionId
     ? agentRuntime.latestAgentForTerminal(activeSessionId)
     : null;

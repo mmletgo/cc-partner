@@ -2,9 +2,8 @@
  * TokenRateRow —— StatusCard 的输入/输出速率叶子组件。
  *
  * Business Logic（为什么需要这个组件）:
- *   工作台右侧「当前会话」卡需要在终态展示当前 agent session 的平均
- *   input / output tok/s。working 阶段没有 ledger 行，速率应显示「未提供」，
- *   禁止假装数字避免误导。
+ *   工作台右侧「当前会话」卡展示当前 agent session 的平均 input / output tok/s。
+ *   无 live usage 且无 ledger 时显示「未提供」，禁止假装数字避免误导。
  *
  * Code Logic（这个组件做什么）:
  *   - 单行两列（In / Out）；
@@ -23,7 +22,7 @@ import styles from './WorkbenchStatusCardMetrics.module.css';
  *
  * Business Logic: 所有数值由 StatusCard 计算后传入；组件本身只负责展示与 i18n。
  * Code Logic:
- *   - speedInTps / speedOutTps：null 表示无数据（working 阶段 / 拉取失败）；
+ *   - speedInTps / speedOutTps：null 表示无 live usage 且无 ledger（或速率无法计算）；
  *   - unavailableLabel：「—」/「未提供」等回退文案；
  */
 export interface TokenRateRowProps {

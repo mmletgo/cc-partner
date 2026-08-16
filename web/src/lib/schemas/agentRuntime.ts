@@ -10,6 +10,7 @@
  */
 
 import type {
+  AgentLiveUsage,
   AgentPhase,
   AgentRuntimeEvent,
   AgentRuntimeSnapshot,
@@ -82,6 +83,24 @@ export const agentRuntimeVersionDecoder: Decoder<number> = defineDecoder(
   },
 );
 
+/**
+ * live usage decoder（tokens + model + extractedAt）。
+ *
+ * Business Logic（为什么需要这个 decoder）:
+ *   usage 是可选投影；损坏数字不得进入状态卡，以免把垃圾当成 tok/s。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   extractedAt 必须是 RFC3339-like；token 字段可选可空有限数。
+ */
+export const agentLiveUsageDecoder: Decoder<AgentLiveUsage> = objectDecoder('AgentLiveUsage', {
+  modelId: optionalDecoder(nullableDecoder(stringDecoder)),
+  inputTokens: optionalDecoder(nullableDecoder(numberDecoder)),
+  outputTokens: optionalDecoder(nullableDecoder(numberDecoder)),
+  cacheReadTokens: optionalDecoder(nullableDecoder(numberDecoder)),
+  cacheWriteTokens: optionalDecoder(nullableDecoder(numberDecoder)),
+  extractedAt: agentRuntimeTimestampDecoder,
+});
+
 /** Agent phase 七态严格枚举。 */
 export const agentPhaseDecoder: Decoder<AgentPhase> = enumDecoder('AgentPhase', [
   'launching',
@@ -121,6 +140,7 @@ export const agentSessionRuntimeDtoDecoder: Decoder<AgentSessionRuntimeDto> = ob
     outcomeCode: optionalDecoder(nullableDecoder(stringDecoder)),
     resumedFromAgentSessionId: optionalDecoder(nullableDecoder(stringDecoder)),
     isActive: booleanDecoder,
+    usage: optionalDecoder(nullableDecoder(agentLiveUsageDecoder)),
   },
 );
 

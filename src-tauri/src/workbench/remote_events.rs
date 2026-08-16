@@ -3209,6 +3209,7 @@ mod tests {
                 outcome_code: None,
                 resumed_from_agent_session_id: None,
                 is_active: true,
+                usage: None,
             },
         });
         let mapped = map_remote_event_for_device("device-a", &HashMap::new(), event);

@@ -5,12 +5,13 @@
  *   Plan 2 Task 8 把 Workbench.tsx 内联的 inspectorPane 顶部状态卡渲染抽到独立叶子组件，便于页面降到 ≤1200 行。
  *   状态卡是 inspectorPane 的一部分，但不是 tab 切换内容，因此单独成件；组件只接收 controller 派生的渲染数据与回调，
  *   不持有自己的状态，也不导入文件/Git 域。运行时长由 SessionRuntimeText 叶子自持 1 Hz 时钟，避免根重渲染。
- *   Agent session 终态速率与上下文使用百分比由 ledger 单行派生（useAgentLedgerForAgent hook 在父层拉取）。
+ *   速率与上下文优先用 Agent runtime 投影上的 live usage（working/needsInput 也可展示）；
+ *   缺 live 时回退终态 ledger（useAgentLedgerForAgent）。null 显示「未提供」，禁止假装 0。
  *
  * Code Logic（这个组件做什么）:
  *   - 渲染会话状态 Pill、项目/worktree/session 元信息 grid、session rename 输入与 close 按钮；
  *   - statusRuntime 行挂 SessionRuntimeText（startedAt/endedAt/running/visible/emptyValue）；
- *   - ledgerEntry 派生 TokenRateRow（input/output tok/s）与 ContextMeter（cumulative / window + ProgressBar）；
+ *   - live usage 优先派生 TokenRateRow / ContextMeter，缺省回退 ledger；null 显示「未提供」。
  *   - 暴露 WorkbenchStatusCardProps 类型，所有数据均来自 useWorkbenchTerminalController + Workbench.tsx 跨域共享。
  */
 import type { ReactNode } from 'react';
@@ -89,6 +90,27 @@ function computeTokenRate(tokens: number | null | undefined, durationMs: number)
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   live 平均 tok/s 用 agent.startedAt 到 extractedAt（终态优先 endedAt），避免绑 1Hz 时钟。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析 RFC3339；end<=start 或非法返回 0。
+ */
+function computeLiveDurationMs(
+  startedAt: string | null | undefined,
+  extractedAt: string,
+  endedAt: string | null | undefined,
+): number {
+  if (!startedAt) return 0;
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return 0;
+  const endSource = endedAt && endedAt.trim().length > 0 ? endedAt : extractedAt;
+  const end = Date.parse(endSource);
+  if (!Number.isFinite(end) || end <= start) return 0;
+  return end - start;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   ProgressBar tone 不能硬编码到叶子组件；StatusCard 根据 phase 与百分比阈值统一决策。
  *
  * Code Logic（这个函数做什么）:
@@ -126,11 +148,11 @@ export interface WorkbenchStatusCardProps {
    * 由 Workbench 从既有 active 状态派生（如 !terminalFullscreen），不使用 IntersectionObserver。
    */
   runtimeVisible: boolean;
-  /** 当前 active terminal 的 Agent 投影（用于生命周期展示与终态判断）。 */
+  /** 当前 active terminal 的 Agent 投影（含可选 live usage）。 */
   activeAgent?: AgentSessionProjection | null;
   /**
-   * 当前 active agent session 的 ledger 单行（终态由 useAgentLedgerForAgent 父层拉取）。
-   * working 阶段或未命中时为 null。
+   * 当前 active agent session 的 ledger 单行（终态回退；live usage 优先）。
+   * 未命中时为 null。
    */
   ledgerEntry?: AgentLedgerEntry | null;
 }
@@ -179,21 +201,30 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     activeAgent?.phase === 'failed' ||
     activeAgent?.phase === 'disconnected';
 
-  const ledgerDurationMs = ledgerEntry?.durationMs ?? 0;
-  const ledgerInputTokens = ledgerEntry?.inputTokens ?? null;
-  const ledgerOutputTokens = ledgerEntry?.outputTokens ?? null;
-  const ledgerCacheRead = ledgerEntry?.cacheReadTokens ?? null;
-  const ledgerCacheWrite = ledgerEntry?.cacheWriteTokens ?? null;
+  const liveUsage = activeAgent?.usage ?? null;
+  const inputTokens = liveUsage?.inputTokens ?? ledgerEntry?.inputTokens ?? null;
+  const outputTokens = liveUsage?.outputTokens ?? ledgerEntry?.outputTokens ?? null;
+  const cacheRead = liveUsage?.cacheReadTokens ?? ledgerEntry?.cacheReadTokens ?? null;
+  const cacheWrite = liveUsage?.cacheWriteTokens ?? ledgerEntry?.cacheWriteTokens ?? null;
+  const modelId = liveUsage?.modelId ?? ledgerEntry?.modelId ?? null;
+  const hasTokenSource = liveUsage != null || ledgerEntry != null;
+
+  const durationMs = liveUsage
+    ? computeLiveDurationMs(
+        activeAgent?.startedAt ?? null,
+        liveUsage.extractedAt,
+        isAgentTerminal ? (activeAgent?.endedAt ?? null) : null,
+      )
+    : (ledgerEntry?.durationMs ?? 0);
 
   // 平均 tok/s：input = inputTokens（用户的 prompt 消耗），output = outputTokens。
-  const speedInTps = computeTokenRate(ledgerInputTokens, ledgerDurationMs);
-  const speedOutTps = computeTokenRate(ledgerOutputTokens, ledgerDurationMs);
+  const speedInTps = computeTokenRate(inputTokens, durationMs);
+  const speedOutTps = computeTokenRate(outputTokens, durationMs);
 
   // 上下文累计 = input + cache_read + cache_write；cache 命中与新写入都占 context 预算。
-  const cumulativeIn = ledgerEntry
-    ? sumTokens(ledgerInputTokens, ledgerCacheRead, ledgerCacheWrite)
-    : null;
-  const contextWindow = resolveContextWindow(ledgerEntry?.modelId);
+  const cumulativeSum = hasTokenSource ? sumTokens(inputTokens, cacheRead, cacheWrite) : 0;
+  const cumulativeIn = hasTokenSource && cumulativeSum > 0 ? cumulativeSum : null;
+  const contextWindow = resolveContextWindow(modelId);
   const pct =
     contextWindow != null && contextWindow > 0 && cumulativeIn != null && cumulativeIn > 0
       ? Math.min(1, cumulativeIn / contextWindow)

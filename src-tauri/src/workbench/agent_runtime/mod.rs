@@ -9,6 +9,7 @@
 
 mod agent_usage;
 mod claude_status;
+mod live_usage;
 pub mod models;
 pub mod opencode_bridge;
 pub mod osc;
@@ -66,10 +67,7 @@ async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) 
     if !row.phase.is_terminal() {
         return;
     }
-    if !matches!(
-        row.provider_id.as_str(),
-        "claudeCodeVisible" | "codex" | "opencode"
-    ) {
+    if !agent_usage::is_usage_extractable_provider(&row.provider_id) {
         return;
     }
     let Some(native) = row
@@ -90,6 +88,8 @@ async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) 
         }
     }
     let ledger_svc = state.agent_ledger_service.clone();
+    let state_for_emit = state.clone();
+    let row_for_emit = row.clone();
     let agent_id = row.id.clone();
     let provider = row.provider_id.clone();
     let native = native.to_string();
@@ -100,6 +100,12 @@ async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) 
         .await;
         match extracted {
             Ok(Some(snapshot)) if snapshot.has_any() => {
+                live_usage::store(&agent_id, &snapshot);
+                emit_agent_runtime_changed(
+                    &state_for_emit,
+                    &row_for_emit,
+                    Some(row_for_emit.phase),
+                );
                 if let Err(err) = ledger_svc.note_usage(&agent_id, snapshot).await {
                     tracing::debug!(
                         agent_id = %agent_id,
@@ -116,6 +122,64 @@ async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) 
             }
         }
     });
+}
+
+/// 有界刷新 active session 的 live usage，仅在 tokens/model 变化时投影。
+///
+/// Business Logic（为什么需要这个函数）:
+///     working/needsInput 期间状态卡必须读 CLI 会话文件，而不是等终态 Ledger。
+///
+/// Code Logic（这个函数做什么）:
+///     list_active ≤256 全部可抽取行进入 retain；stamp 未变跳过，真实抽取最多 32 次；
+///     变化的 id 再 emit（previous_phase=current，不发 OS 通知，不升 CAS version）。
+async fn refresh_and_emit_live_usage(state: &AppState) {
+    const LIVE_USAGE_LIST_LIMIT: i64 = 256;
+    let rows = match state
+        .workbench_agent_session_repo
+        .list_active(None, LIVE_USAGE_LIST_LIMIT)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::debug!("live usage list_active failed: {err}");
+            return;
+        }
+    };
+    let candidates: Vec<AgentSessionRuntime> = rows
+        .into_iter()
+        .filter(|row| {
+            agent_usage::is_usage_extractable_provider(&row.provider_id)
+                && row
+                    .native_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|native| !native.is_empty())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let changed = match tokio::task::spawn_blocking({
+        let candidates = candidates.clone();
+        move || live_usage::refresh_active_rows(&candidates)
+    })
+    .await
+    {
+        Ok(ids) => ids,
+        Err(err) => {
+            tracing::debug!("live usage refresh task failed: {err}");
+            return;
+        }
+    };
+    if changed.is_empty() {
+        return;
+    }
+    let changed: std::collections::HashSet<String> = changed.into_iter().collect();
+    for row in candidates {
+        if changed.contains(&row.id) {
+            emit_agent_runtime_changed(state, &row, Some(row.phase));
+        }
+    }
 }
 
 /// 解析 agent 对应终端窗口标题（供 Ledger「最近会话」明细行展示）。
@@ -435,6 +499,8 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
     }
     let mut claude_status_tick = tokio::time::interval(Duration::from_secs(1));
     claude_status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut live_usage_tick = tokio::time::interval(Duration::from_secs(2));
+    live_usage_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut unavailable_claude_status_counts = HashMap::new();
     loop {
         // 先冲刷 overflow（channel 曾满时保留的终态），避免轮询让高优先级事件饥饿。
@@ -467,6 +533,9 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                         tracing::debug!("Claude session 状态对账失败: {error}");
                     }
                 }
+            }
+            _ = live_usage_tick.tick() => {
+                refresh_and_emit_live_usage(&state).await;
             }
         }
     }

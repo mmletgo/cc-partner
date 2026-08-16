@@ -11,23 +11,23 @@
  *   - 传 ledgerEntry（终态）→ TokenRateRow 显示数值，ContextMeter 显示 cumulative / window 与 ProgressBar。
  */
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { I18nextProvider } from 'react-i18next';
-import i18next from 'i18next';
 
+import i18n from '@/i18n';
 import type { AgentLedgerEntry } from '@/lib/types/agentLedger';
+import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
 
 import { WorkbenchStatusCard, type WorkbenchStatusCardProps } from './WorkbenchStatusCard';
 
-async function setupI18n(): Promise<void> {
-  await i18next.changeLanguage('zh-CN');
-  if (!i18next.isInitialized) {
-    await new Promise<void>((resolve) => {
-      i18next.init({ lng: 'zh-CN', resources: {} }, () => resolve());
-    });
-  }
-}
+beforeAll(async () => {
+  await i18n.changeLanguage('zh');
+});
+
+afterEach(() => {
+  cleanup();
+});
 
 function makeProps(overrides: Partial<WorkbenchStatusCardProps> = {}): WorkbenchStatusCardProps {
   return {
@@ -58,7 +58,7 @@ function makeProps(overrides: Partial<WorkbenchStatusCardProps> = {}): Workbench
 
 function renderCard(props: WorkbenchStatusCardProps) {
   return render(
-    <I18nextProvider i18n={i18next}>
+    <I18nextProvider i18n={i18n}>
       <WorkbenchStatusCard {...props} />
     </I18nextProvider>,
   );
@@ -66,7 +66,6 @@ function renderCard(props: WorkbenchStatusCardProps) {
 
 describe('WorkbenchStatusCard — 字段重构', () => {
   it('移除的 5 字段（命令/状态/Agent/尺寸/退出码）不出现在 statusGrid', async () => {
-    await setupI18n();
     renderCard(makeProps());
     const html = document.body.textContent ?? '';
     expect(html).not.toMatch(/^命令$/m);
@@ -77,7 +76,6 @@ describe('WorkbenchStatusCard — 字段重构', () => {
   });
 
   it('保留的 6 行元信息（设备/项目/Worktree/路径/会话/开始）出现在 statusGrid', async () => {
-    await setupI18n();
     renderCard(makeProps());
     const html = document.body.textContent ?? '';
     expect(html).toContain('设备');
@@ -89,19 +87,41 @@ describe('WorkbenchStatusCard — 字段重构', () => {
   });
 });
 
+function makeWorkingAgent(overrides: Partial<AgentSessionProjection> = {}): AgentSessionProjection {
+  return {
+    id: 'a1',
+    projectId: 'p1',
+    terminalSessionId: 's1',
+    providerId: 'claudeCodeVisible',
+    phase: 'working',
+    version: 1,
+    lastActivityAt: '2026-08-16T10:05:00Z',
+    freshness: 'live',
+    isActive: true,
+    startedAt: '2026-08-16T10:00:00Z',
+    usage: {
+      modelId: 'claude-sonnet-4-5',
+      inputTokens: 100_000,
+      outputTokens: 10_000,
+      cacheReadTokens: 50_000,
+      cacheWriteTokens: 20_000,
+      extractedAt: '2026-08-16T10:05:00Z',
+    },
+    ...overrides,
+  };
+}
+
 describe('WorkbenchStatusCard — ledger 指标降级', () => {
-  it('ledgerEntry=null 时 TokenRateRow 与 ContextMeter 显示「—」', async () => {
-    await setupI18n();
+  it('ledgerEntry=null 时 TokenRateRow 与 ContextMeter 显示「未提供」', async () => {
     renderCard(makeProps({ ledgerEntry: null }));
     const rateRow = screen.getByTestId('workbench-status-token-rate-row');
     const meter = screen.getByTestId('workbench-status-context-meter');
-    expect(rateRow.textContent).toContain('—');
-    expect(meter.textContent).toContain('—');
+    expect(rateRow.textContent).toContain('未提供');
+    expect(meter.textContent).toContain('未提供');
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
   });
 
   it('终态 ledgerEntry 含 input/output/cache + modelId → 显示速率与 ProgressBar', async () => {
-    await setupI18n();
     const entry: AgentLedgerEntry = {
       id: 'l1',
       agentSessionId: 'a1',
@@ -138,7 +158,6 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
   });
 
   it('未知 modelId → ContextMeter 显示 noWindowLabel，无 ProgressBar', async () => {
-    await setupI18n();
     const entry: AgentLedgerEntry = {
       id: 'l1',
       agentSessionId: 'a1',
@@ -164,5 +183,39 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     const meter = screen.getByTestId('workbench-status-context-meter');
     expect(meter.textContent).toContain('无窗口信息');
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
+  });
+
+  it('working 阶段 live usage 优先于 ledger 显示速率与 ProgressBar', async () => {
+    const staleLedger: AgentLedgerEntry = {
+      id: 'l1',
+      agentSessionId: 'a1',
+      projectId: 'p1',
+      worktreeId: 'wt-1',
+      providerId: 'claudeCodeVisible',
+      modelId: 'unknown-model',
+      startedAt: '2026-08-16T10:00:00Z',
+      endedAt: '2026-08-16T10:05:00Z',
+      durationMs: 300_000,
+      outcome: 'completed',
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      terminalTitle: null,
+      costMinorUnits: null,
+      costCurrency: null,
+      createdAt: '2026-08-16T10:05:00Z',
+      updatedAt: '2026-08-16T10:05:00Z',
+    };
+    renderCard(makeProps({ activeAgent: makeWorkingAgent(), ledgerEntry: staleLedger }));
+    const rateRow = screen.getByTestId('workbench-status-token-rate-row');
+    const meter = screen.getByTestId('workbench-status-context-meter');
+    expect(rateRow.textContent).toContain('333.3 tok/s');
+    expect(rateRow.textContent).toContain('33.3 tok/s');
+    expect(meter.textContent).toContain('170.000k');
+    expect(meter.textContent).toContain('200.000k');
+    const bar = document.querySelector('[role="progressbar"]');
+    expect(bar?.getAttribute('aria-valuenow')).toBe('85');
+    expect(bar?.getAttribute('data-tone')).toBe('danger');
   });
 });

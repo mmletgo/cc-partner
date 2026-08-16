@@ -613,14 +613,29 @@ pub(crate) fn extract_opencode_usage(
 // D. 统一入口
 // ---------------------------------------------------------------------------
 
-/// 按 provider 分发提取终态 usage。
+/// 判断 provider 是否可从 CLI 本地会话文件/库提取 usage。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     runtime 终态接线只应认识一个入口，不感知各 CLI 数据源差异。
+///     交互式行的 wire id 是 `codexVisible` / `openCodeVisible`，历史抽取入口却只认
+///     `codex` / `opencode`，会导致 Codex/OpenCode 永远抽不到 tokens。
+///
+/// Code Logic（这个函数做什么）:
+///     接受 Claude / Codex / OpenCode 的稳定 id 与历史别名。
+pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        "claudeCodeVisible" | "codex" | "codexVisible" | "opencode" | "openCodeVisible"
+    )
+}
+
+/// 按 provider 分发提取 usage（终态 Ledger 与 live 投影共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     runtime 接线只应认识一个入口，不感知各 CLI 数据源差异。
 ///
 /// Code Logic（这个模块做什么）:
-///     claudeCodeVisible → Claude jsonl；codex → rollout jsonl；opencode → SQLite；
-///     其他 provider（含 generic terminal）返回 None。
+///     claudeCodeVisible → Claude jsonl；codex/codexVisible → rollout jsonl；
+///     opencode/openCodeVisible → SQLite；其他 provider（含 generic terminal）返回 None。
 pub fn extract_provider_usage(
     provider_id: &str,
     native_session_id: &str,
@@ -630,8 +645,54 @@ pub fn extract_provider_usage(
             crate::cc::collector::claude_projects_dir(),
             native_session_id,
         ),
-        "codex" => extract_codex_usage(codex_home(), native_session_id),
-        "opencode" => extract_opencode_usage(None, native_session_id),
+        "codex" | "codexVisible" => extract_codex_usage(codex_home(), native_session_id),
+        "opencode" | "openCodeVisible" => extract_opencode_usage(None, native_session_id),
+        _ => None,
+    }
+}
+
+/// 定位 CLI 会话文件（Claude jsonl / Codex rollout）；OpenCode 走 SQLite，返回 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     live 轮询必须缓存路径，避免每 2s 遍历最多 10_000 个项目目录。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 native id 后按 provider 调用既有有界查找；找不到或非文件源返回 None。
+pub(crate) fn locate_provider_session_file(
+    provider_id: &str,
+    native_session_id: &str,
+) -> Option<PathBuf> {
+    if !is_safe_native_id(native_session_id) {
+        return None;
+    }
+    match provider_id {
+        "claudeCodeVisible" => {
+            let root = crate::cc::collector::claude_projects_dir()?;
+            find_claude_session_file(&root, &format!("{native_session_id}.jsonl"))
+        }
+        "codex" | "codexVisible" => {
+            find_codex_rollout_file(&codex_home()?.join("sessions"), native_session_id)
+        }
+        _ => None,
+    }
+}
+
+/// 从已定位的会话文件（或 OpenCode SQLite）提取 usage。
+///
+/// Business Logic（为什么需要这个函数）:
+///     live cache 在路径命中后应跳过目录遍历，只重解析变更文件。
+///
+/// Code Logic（这个函数做什么）:
+///     Claude/Codex 解析给定 path；OpenCode 忽略 path 走 SQLite；未知 provider 返回 None。
+pub(crate) fn extract_provider_usage_from_path(
+    provider_id: &str,
+    path: &Path,
+    native_session_id: &str,
+) -> Option<ReliableUsageSnapshot> {
+    match provider_id {
+        "claudeCodeVisible" => parse_claude_jsonl(path, native_session_id),
+        "codex" | "codexVisible" => parse_codex_jsonl(path),
+        "opencode" | "openCodeVisible" => extract_opencode_usage(None, native_session_id),
         _ => None,
     }
 }
@@ -875,5 +936,17 @@ mod tests {
         assert!(extract_provider_usage("generic", "x").is_none());
         assert!(extract_provider_usage("claudeCodeVisible", "../x").is_none());
         assert!(extract_provider_usage("codex", "").is_none());
+        assert!(extract_provider_usage("codexVisible", "").is_none());
+    }
+
+    /// 交互式 wire id 必须与历史短码一样可抽取。
+    #[test]
+    fn extractable_provider_aliases() {
+        assert!(is_usage_extractable_provider("claudeCodeVisible"));
+        assert!(is_usage_extractable_provider("codex"));
+        assert!(is_usage_extractable_provider("codexVisible"));
+        assert!(is_usage_extractable_provider("opencode"));
+        assert!(is_usage_extractable_provider("openCodeVisible"));
+        assert!(!is_usage_extractable_provider("genericTerminal"));
     }
 }

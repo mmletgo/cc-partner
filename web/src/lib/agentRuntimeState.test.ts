@@ -15,6 +15,7 @@ import {
   emptyAgentRuntimeState,
   latestAgentForTerminal,
   markAgentRuntimeFreshness,
+  shouldAcceptAgentRuntimeUpdate,
   toAgentSessionProjection,
 } from './agentRuntimeState';
 import type {
@@ -106,6 +107,70 @@ describe('agentRuntimeState reducer', () => {
     );
     expect(latestAgentForTerminal(next, 't')?.version).toBe(3);
     expect(latestAgentForTerminal(next, 't')?.phase).toBe('working');
+  });
+
+  test('accepts same-version event when live usage is newer', () => {
+    const current = applyAgentRuntimeEvent(
+      emptyAgentRuntimeState(),
+      event({
+        id: 'a',
+        version: 1,
+        usage: {
+          modelId: 'claude-sonnet-4-5',
+          inputTokens: 10,
+          outputTokens: 2,
+          extractedAt: '2026-07-15T00:00:10.000Z',
+        },
+      }),
+    );
+    const next = applyAgentRuntimeEvent(
+      current,
+      event({
+        id: 'a',
+        version: 1,
+        usage: {
+          modelId: 'claude-sonnet-4-5',
+          inputTokens: 40,
+          outputTokens: 8,
+          extractedAt: '2026-07-15T00:00:20.000Z',
+        },
+      }),
+    );
+    expect(latestAgentForTerminal(next, 't')?.usage?.inputTokens).toBe(40);
+    expect(latestAgentForTerminal(next, 't')?.version).toBe(1);
+  });
+
+  test('rejects same-version event when live usage is older or missing', () => {
+    const current = applyAgentRuntimeEvent(
+      emptyAgentRuntimeState(),
+      event({
+        id: 'a',
+        version: 1,
+        usage: {
+          inputTokens: 40,
+          outputTokens: 8,
+          extractedAt: '2026-07-15T00:00:20.000Z',
+        },
+      }),
+    );
+    const older = applyAgentRuntimeEvent(
+      current,
+      event({
+        id: 'a',
+        version: 1,
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          extractedAt: '2026-07-15T00:00:10.000Z',
+        },
+      }),
+    );
+    const without = applyAgentRuntimeEvent(current, event({ id: 'a', version: 1 }));
+    expect(latestAgentForTerminal(older, 't')?.usage?.inputTokens).toBe(40);
+    expect(latestAgentForTerminal(without, 't')?.usage?.inputTokens).toBe(40);
+    expect(
+      shouldAcceptAgentRuntimeUpdate(latestAgentForTerminal(current, 't') ?? undefined, session({ version: 1 })),
+    ).toBe(false);
   });
 
   test('accepts strictly newer version and updates phase', () => {

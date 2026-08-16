@@ -159,8 +159,9 @@
 ### Agent 使用统计 UI（Agent Metadata Ledger / A9）
 
 - 用户文案统一为「Agent 使用统计 / Agent usage stats」（不再写 metadata history）。
-- 类型/schema：`web/src/lib/types/agentLedger.ts`、`web/src/lib/schemas/agentLedger.ts`。
+- 类型/schema：`web/src/lib/types/agentLedger.ts`、`web/src/lib/schemas/agentLedger.ts`；live usage 在 `agentRuntime` 投影（`AgentLiveUsage` / `agentLiveUsageDecoder`）。
 - API：`workbenchApi.agentLedger.{list,summarize,clear}`。
+- **状态卡**：右侧「当前会话」优先 `activeAgent.usage`（working/needsInput 也可有数）；缺 live 回退终态 ledger。`useAgentLedgerForAgent` 仍只在终态拉取，首次未命中有界重试。null 显示「未提供」不显示 0。同 version 的 runtime 事件仅当 usage 更新才接受，禁止为 live 刷新抬 CAS version。
 - **查看入口**：Workbench 工作区标题行 `AgentLedgerWorkbenchChrome` 按钮（`data-testid=agent-usage-stats-open`；终端全屏时隐藏触发按钮，Drawer 保持挂载）→ `AgentLedgerDrawer` 二级抽屉（用量摘要 + 最近会话列表）；加载态由 `useWorkbenchProjectController` 拥有，views 不 import `@/api/*`。
 - **发现性互链**：Drawer 底部「去设置清除」→ 关闭后 `navigate('/settings?tab=general')`（`data-testid=agent-usage-stats-open-settings`）；Settings 常规 helper 说明数据在工作台按钮查看、清除不影响终端/任务/Prompt/对话。
 - Fleet：`WorkbenchFleetView` 展示 7d Agent activity（unsupported/unavailable 不显示 0 tokens）。
