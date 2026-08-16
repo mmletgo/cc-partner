@@ -716,7 +716,8 @@
     "type": "类型",
     "path": "路径",
     "previewUnavailable": "该文件无法预览",
-    "empty": "未打开文件",
+    "empty": "还没有打开文件",
+    "emptyHint": "点击右侧「项目文件夹」里的文件即可在此显示。",
     "closeTab": "关闭 {{name}}",
     "saved": "文件已保存",
     "formatted": "内容已格式化"

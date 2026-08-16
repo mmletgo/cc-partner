@@ -724,6 +724,7 @@
     "path": "Path",
     "previewUnavailable": "This file cannot be previewed",
     "empty": "No file is open",
+    "emptyHint": "Click a file in the Project folder on the right to show it here.",
     "closeTab": "Close {{name}}",
     "saved": "File saved",
     "formatted": "Content formatted"

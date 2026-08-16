@@ -553,8 +553,13 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
           </div>
         </div>
       ) : (
-        <div className={styles.emptyState}>
-          <p>{t('workbench:fileWorkspace.empty')}</p>
+        <div
+          className={styles.emptyState}
+          data-testid="workbench-file-workspace-empty"
+          role="status"
+        >
+          <p className={styles.emptyTitle}>{t('workbench:fileWorkspace.empty')}</p>
+          <p className={styles.emptyHint}>{t('workbench:fileWorkspace.emptyHint')}</p>
         </div>
       )}
     </section>

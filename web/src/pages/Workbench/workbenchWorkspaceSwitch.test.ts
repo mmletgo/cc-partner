@@ -119,6 +119,16 @@ describe('workbenchWorkspaceSwitch', () => {
   );
   assertContains(
     workbenchSource,
+    'onChange={handleWorkspaceViewChange}',
+    'switch uses handleWorkspaceViewChange so files can open empty and flip inspector',
+  );
+  assertContains(
+    workbenchSource,
+    "setInspectorTab('files')",
+    'switching to files also selects the project-folder inspector tab',
+  );
+  assertContains(
+    workbenchSource,
     "id: 'terminal'",
     'switch exposes terminal option',
   );
@@ -152,10 +162,10 @@ describe('workbenchWorkspaceSwitch', () => {
     'disabled: !activeProject || !activeWorktree',
     'browser option is disabled when no project/worktree',
   );
-  assertContains(
+  assertNotContains(
     workbenchSource,
     'disabled: fileTabs.length === 0',
-    'files option is disabled when no opened file tabs',
+    'files option stays enabled even when no file tabs are open',
   );
   // 标题行不再用两个独立 Button 触发工作区切换
   assertNotContains(
@@ -214,12 +224,24 @@ describe('workbenchWorkspaceSwitch', () => {
   assertContains(zhLocale, '"terminal": "终端"', 'zh workspaceSwitch.terminal = 终端');
   assertContains(zhLocale, '"ariaLabel": "工作区切换"', 'zh workspaceSwitch.ariaLabel = 工作区切换');
   assertContains(zhLocale, '"openFiles": "文件浏览"', 'zh fileWorkspace.openFiles = 文件浏览');
+  assertContains(zhLocale, '"empty": "还没有打开文件"', 'zh fileWorkspace.empty guides the blank page');
+  assertContains(
+    zhLocale,
+    '"emptyHint": "点击右侧「项目文件夹」里的文件即可在此显示。"',
+    'zh fileWorkspace.emptyHint points to the project folder',
+  );
   assertContains(zhLocale, '"openWorkspace": "网页浏览"', 'zh browserPreview.openWorkspace = 网页浏览');
   assertNotContains(zhLocale, '"returnTerminal"', 'zh fileWorkspace.returnTerminal removed');
   assertContains(enLocale, '"workspaceSwitch"', 'en workspaceSwitch section exists');
   assertContains(enLocale, '"terminal": "Terminal"', 'en workspaceSwitch.terminal = Terminal');
   assertContains(enLocale, '"ariaLabel": "Workspace switch"', 'en workspaceSwitch.ariaLabel = Workspace switch');
   assertContains(enLocale, '"openFiles": "File browsing"', 'en fileWorkspace.openFiles = File browsing');
+  assertContains(enLocale, '"empty": "No file is open"', 'en fileWorkspace.empty guides the blank page');
+  assertContains(
+    enLocale,
+    '"emptyHint": "Click a file in the Project folder on the right to show it here."',
+    'en fileWorkspace.emptyHint points to the project folder',
+  );
   assertContains(enLocale, '"openWorkspace": "Web browsing"', 'en browserPreview.openWorkspace = Web browsing');
   assertNotContains(enLocale, '"returnTerminal"', 'en fileWorkspace.returnTerminal removed');
 
@@ -354,6 +376,16 @@ describe('workbenchWorkspaceSwitch', () => {
     'data-workbench-responsive-action="true"',
     2,
     'file workspace marks remaining toolbar actions as responsive',
+  );
+  assertContains(
+    fileWorkspaceSource,
+    'data-testid="workbench-file-workspace-empty"',
+    'file workspace empty page is addressable',
+  );
+  assertContains(
+    fileWorkspaceSource,
+    "t('workbench:fileWorkspace.emptyHint')",
+    'file workspace empty page tells users to open files from the inspector',
   );
   assertContains(
     fileWorkspaceSource,

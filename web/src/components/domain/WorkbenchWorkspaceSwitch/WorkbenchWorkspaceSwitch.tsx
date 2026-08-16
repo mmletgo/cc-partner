@@ -27,7 +27,7 @@ export interface WorkbenchWorkspaceSwitchOption {
   label: string;
   /** 16px 图标；通常取自 `lib/icons.tsx`。 */
   icon: ReactNode;
-  /** 当条件不满足时禁用该段（如无 worktree / 无已打开文件）。 */
+  /** 当条件不满足时禁用该段（如网页浏览无 project/worktree）。文件浏览默认不禁用。 */
   disabled?: boolean;
 }
 
@@ -49,7 +49,7 @@ export interface WorkbenchWorkspaceSwitchProps {
  *
  * Business Logic（为什么需要这个函数）:
  *   父级（Workbench 标题行）需要在任何状态下把当前 `workspaceView` 暴露为单选控件，且允许
- *   browser / files 在条件不满足时呈灰禁用态而不被点击。
+ *   browser 在条件不满足时呈灰禁用态而不被点击。文件浏览默认保持可点，以便进入空白页。
  *
  * Code Logic（这个函数做什么）:
  *   三段 `<button type="button" role="radio">` 包在一个 `<div role="radiogroup">` 内；每段点击

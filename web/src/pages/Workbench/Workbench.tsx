@@ -587,6 +587,28 @@ export function Workbench() {
     terminalController.handleExitTerminalFullscreen();
   }, [terminalController]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   文件浏览是独立工作区，即使尚未打开任何文件也应可进入空白页；同时把右侧栏切到
+   *   项目文件夹，让用户立刻看到可点开的文件树。离开终端全屏切到浏览层时必须退出 overlay，
+   *   否则 modal 终端层会盖住文件/浏览器工作区和右侧栏。
+   *
+   * Code Logic（这个函数做什么）:
+   *   切到非 terminal 时若处于全屏则先退出；切到 files 时写入 inspectorTab='files'；最后写入 workspaceView。
+   */
+  const handleWorkspaceViewChange = useCallback(
+    (next: WorkbenchWorkspaceSwitchValue): void => {
+      if (next !== 'terminal' && terminalFullscreen) {
+        terminalController.handleExitTerminalFullscreen();
+      }
+      if (next === 'files') {
+        setInspectorTab('files');
+      }
+      setWorkspaceView(next);
+    },
+    [terminalController, terminalFullscreen],
+  );
+
   // Business Logic: 文件域操作函数（toggle/select/open/activate/close/content-change/mode-change/
   // save/format/sqlite/html-asset/create/rename/delete/copy）已迁移到 useWorkbenchFileController；
   // 页面不再保留 handleReturnToTerminal / handleReturnToFiles 跨域回调——三工作区切换由标题行
@@ -781,9 +803,7 @@ export function Workbench() {
               <WorkbenchWorkspaceSwitch
                 ariaLabel={t('workbench:workspaceSwitch.ariaLabel')}
                 value={workspaceView}
-                onChange={(next) => {
-                  setWorkspaceView(next satisfies WorkbenchWorkspaceSwitchValue);
-                }}
+                onChange={handleWorkspaceViewChange}
                 options={[
                   {
                     id: 'terminal',
@@ -800,7 +820,6 @@ export function Workbench() {
                     id: 'files',
                     label: t('workbench:fileWorkspace.openFiles'),
                     icon: <FileIcon />,
-                    disabled: fileTabs.length === 0,
                   },
                 ]}
               />
