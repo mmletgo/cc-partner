@@ -1,0 +1,93 @@
+/* MobileWorktreeTabs.module.css — 移动端 worktree 工作区 tab 列表样式 */
+
+.mobileWorktreeStrip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.mobileWorktreeStrip::-webkit-scrollbar {
+  display: none;
+}
+
+.mobileWorktreeChip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-warm);
+  color: var(--fg);
+  font: var(--text-sm);
+  font-weight: var(--weight-regular);
+  cursor: pointer;
+  scroll-snap-align: start;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileWorktreeChip:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--muted) 30%, var(--border-soft));
+}
+
+.mobileWorktreeChip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mobileWorktreeChip[data-active='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: var(--weight-medium);
+}
+
+.mobileWorktreeChip[data-tone='warning'] {
+  border-color: color-mix(in oklab, var(--warn) 45%, var(--border-soft));
+}
+
+.mobileWorktreeChip[data-tone='danger'] {
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--border-soft));
+}
+
+.mobileWorktreeChip:disabled {
+  color: var(--muted);
+  background: var(--surface-warm);
+  cursor: not-allowed;
+}
+
+.mobileWorktreeDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.mobileWorktreeDot[data-tone='neutral'] {
+  background: var(--success);
+}
+
+.mobileWorktreeDot[data-tone='warning'] {
+  background: var(--warn);
+}
+
+.mobileWorktreeDot[data-tone='danger'] {
+  background: var(--danger);
+}
+
+.mobileWorktreeChipName {
+  font-weight: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 14ch;
+}

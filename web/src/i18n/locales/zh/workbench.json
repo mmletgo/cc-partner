@@ -171,6 +171,9 @@
       "manage": "完整管理",
       "close": "关闭"
     },
+    "worktreeTabs": {
+      "title": "Worktree 工作区"
+    },
     "favoriteQuickInput": {
       "kicker": "收藏 Prompt",
       "title": "收藏的 Prompt",

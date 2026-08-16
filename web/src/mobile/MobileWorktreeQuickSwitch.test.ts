@@ -19,8 +19,6 @@ type TestableMobileWorkbenchShellProps = {
   worktree: string | null;
   session: string | null;
   hasActiveProject?: boolean;
-  worktreeStatusDisabled?: boolean;
-  onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
   onBackToProjects?: () => void;
   children?: ReactNode;
@@ -242,24 +240,21 @@ describe('MobileWorktreeQuickSwitch', () => {
             worktree: 'feature/mobile',
             session: 'shell',
             hasActiveProject: true,
-            worktreeStatusDisabled: true,
-            onWorktreeStatusClick: () => undefined,
             onPanelChange: () => undefined,
             onBackToProjects: () => undefined,
           },
           createElement('section', null, 'panel'),
         ),
       );
-      assertIncludes(
-        shellMarkup,
-        'aria-haspopup="dialog"',
-        'worktree status pill should open a dialog',
-      );
-      assertIncludes(shellMarkup, 'disabled=""', 'disabled worktree status button should be disabled');
+      // 移动端 worktree 切换入口已迁移到 terminal panel 顶部的 `MobileWorktreeTabs`；
+      // shell 顶部的 worktree pill 现为只读 span，不再有 aria-haspopup/disabled 按钮交互。
+      if (shellMarkup.includes('aria-haspopup="dialog"')) {
+        throw new Error('shell worktree pill should not open a dialog after migration');
+      }
       assertIncludes(
         shellMarkup,
         'feature/mobile',
-        'worktree status button should render worktree name',
+        'worktree status pill should still render worktree name',
       );
       assertIncludes(
         shellMarkup,

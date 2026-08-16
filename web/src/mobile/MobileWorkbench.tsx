@@ -31,7 +31,6 @@ import type { MobileAutomationExecutionContext } from './components/MobileAutoma
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
-import { MobileWorktreeQuickSwitch } from './components/MobileWorktreeQuickSwitch';
 import {
   mapMobileAttentionTarget,
   resolveMobileAttentionMissingTargetPanel,
@@ -185,7 +184,14 @@ export function MobileWorkbench(): ReactElement {
     useState<MobileProjectDetailStatus>('idle');
   const [connectionState, setConnectionState] = useState<MobileConnectionState | null>(null);
   const [worktreeOperationBusy, setWorktreeOperationBusy] = useState<boolean>(false);
+  /**
+   * @deprecated quick switch sheet 暂未挂载（移动端 worktree 切换已迁移到 `MobileWorktreeTabs`），
+   *   本 state 仅保留以备未来 panel 内快捷刷新入口接入；当前始终为 false。grep
+   *   `MobileWorktreeQuickSwitch` 可见全部调用点。
+   */
   const [worktreeSwitcherOpen, setWorktreeSwitcherOpen] = useState<boolean>(false);
+  void worktreeSwitcherOpen;
+  void setWorktreeSwitcherOpen;
   // files 首次打开后保持挂载（hidden），以便 dirty snapshot 在切走后仍可用于 context guard
   const [filesPanelMounted, setFilesPanelMounted] = useState<boolean>(
     () => getInitialMobileWorkbenchPanel() === 'files',
@@ -782,12 +788,17 @@ export function MobileWorkbench(): ReactElement {
    *
    * Code Logic（这个函数做什么）:
    *   复用 canOpenMobileWorktreeSwitcher 判断当前项目和加载态；不可打开时忽略点击，可打开时置 open state。
+   *
+   * @deprecated 移动端 worktree 切换已迁移到 `MobileWorktreeTabs`（位于 terminal panel session tabs 上方）；
+   *   当前 quick switch sheet 暂未挂载，本 handler 仅保留以备未来 panel 内快捷刷新入口接入。grep
+   *   `MobileWorktreeQuickSwitch` 可见全部调用点。
    */
   const handleOpenWorktreeSwitcher = useCallback((): void => {
     if (worktreeOperationBusyRef.current) return;
     if (!canOpenMobileWorktreeSwitcher(activeProject, projectDetailsLoading)) return;
     setWorktreeSwitcherOpen(true);
   }, [activeProject, projectDetailsLoading]);
+  void handleOpenWorktreeSwitcher;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -795,10 +806,13 @@ export function MobileWorkbench(): ReactElement {
    *
    * Code Logic（这个函数做什么）:
    *   将 worktreeSwitcherOpen 写为 false，不改变当前 panel/worktree/session。
+   *
+   * @deprecated 与 `handleOpenWorktreeSwitcher` 同步保留；sheet 重新挂载时复用。
    */
   const handleCloseWorktreeSwitcher = useCallback((): void => {
     setWorktreeSwitcherOpen(false);
   }, []);
+  void handleCloseWorktreeSwitcher;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -806,10 +820,13 @@ export function MobileWorkbench(): ReactElement {
    *
    * Code Logic（这个函数做什么）:
    *   接收 MobileWorkbenchPanel 并写入当前 panel state。
+   *
+   * @deprecated 与 `handleOpenWorktreeSwitcher` 同步保留。
    */
   const handleQuickSwitchPanelChange = useCallback((nextPanel: MobileWorkbenchPanel): void => {
     setPanel(selectMobilePanelForProject(activeProjectRef.current, nextPanel));
   }, []);
+  void handleQuickSwitchPanelChange;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -817,6 +834,8 @@ export function MobileWorkbench(): ReactElement {
    *
    * Code Logic（这个函数做什么）:
    *   从 activeProjectRef 构造 expectedProjectId options；没有当前项目时调用默认刷新让 refreshWorktrees 自行忽略。
+   *
+   * @deprecated 与 `handleOpenWorktreeSwitcher` 同步保留。
    */
   const handleRefreshQuickSwitchWorktrees = useCallback((): Promise<void> | void => {
     const expectedProjectId = activeProjectRef.current?.id;
@@ -825,6 +844,7 @@ export function MobileWorkbench(): ReactElement {
     }
     return refreshWorktrees();
   }, [refreshWorktrees]);
+  void handleRefreshQuickSwitchWorktrees;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1367,6 +1387,9 @@ export function MobileWorkbench(): ReactElement {
         <MobileTerminalPanel
           project={activeProject}
           worktree={activeWorktree}
+          worktrees={worktrees}
+          activeWorktreeId={activeWorktree?.id ?? null}
+          onSelectWorktree={handleSelectWorktree}
           sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
           activeSession={activeSession}
           busy={projectDetailsLoading}
@@ -1406,9 +1429,6 @@ export function MobileWorkbench(): ReactElement {
       worktree={activeWorktree?.name ?? null}
       session={activeSession?.name ?? null}
       hasActiveProject={activeProject != null && canSelectMobileProject(activeProject)}
-      worktreeStatusDisabled={!canOpenMobileWorktreeSwitcher(activeProject, worktreeControlsBusy)}
-      worktreeStatusExpanded={worktreeSwitcherOpen}
-      onWorktreeStatusClick={handleOpenWorktreeSwitcher}
       onPanelChange={handlePanelChange}
       onBackToProjects={handleBackToProjects}
       attentionTotal={attentionTotal}
@@ -1416,18 +1436,6 @@ export function MobileWorkbench(): ReactElement {
       connectionCachedAt={connectionCachedAt}
     >
       {panelContent}
-      <MobileWorktreeQuickSwitch
-        open={worktreeSwitcherOpen}
-        project={activeProject}
-        worktrees={worktrees}
-        activeWorktreeId={activeWorktree?.id ?? null}
-        busy={worktreeControlsBusy}
-        t={t}
-        onClose={handleCloseWorktreeSwitcher}
-        onSelect={handleSelectWorktree}
-        onPanelChange={handleQuickSwitchPanelChange}
-        onRefresh={handleRefreshQuickSwitchWorktrees}
-      />
       {filesPanelMounted ? (
         <div hidden={panel !== 'files'}>
           <Suspense fallback={heavyPanelFallback}>

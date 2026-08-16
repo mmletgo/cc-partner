@@ -154,6 +154,12 @@ export interface MobileTerminalChromeVisibility {
   paneActions: boolean;
   terminalSurface: boolean;
   exitFullscreen: boolean;
+  /**
+   * worktree 工作区切换 strip（位于 panelHeader 与 windowTabs 之间）。
+   * 全屏时与 panelHeader/windowTabs 同处理（隐藏），避免被 fixed overlay 拖出
+   * bottom safe-area，违反 mobile 终端全屏合同（CLAUDE.md "Mobile 终端全屏模式"）。
+   */
+  worktreeStrip: boolean;
 }
 
 /**
@@ -448,10 +454,10 @@ export function closeMobileNav(): boolean {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   手机端终端全屏时，用户希望隐藏项目标题、window tabs 和导航等外围内容，专注当前 pane 操作与终端输出。
+ *   手机端终端全屏时，用户希望隐藏项目标题、window tabs 和 worktree strip 等外围内容，专注当前 pane 操作与终端输出。
  *
  * Code Logic（这个函数做什么）:
- *   根据 fullscreen 状态返回终端面板各 chrome 区域的可见性，组件据此决定渲染 header、window tabs、pane 功能行和退出入口。
+ *   根据 fullscreen 状态返回终端面板各 chrome 区域的可见性，组件据此决定渲染 header、worktree strip、window tabs、pane 功能行和退出入口。
  */
 export function getMobileTerminalChromeVisibility(
   fullscreen: boolean,
@@ -462,6 +468,7 @@ export function getMobileTerminalChromeVisibility(
     paneActions: true,
     terminalSurface: true,
     exitFullscreen: fullscreen,
+    worktreeStrip: !fullscreen,
   };
 }
 

@@ -173,6 +173,9 @@
       "manage": "Manage",
       "close": "Close"
     },
+    "worktreeTabs": {
+      "title": "Worktree workspaces"
+    },
     "favoriteQuickInput": {
       "kicker": "Favorite prompts",
       "title": "Favorite Prompts",

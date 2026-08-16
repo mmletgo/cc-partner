@@ -694,12 +694,14 @@ describe('mobileWorkbenchState', () => {
     assertEqual(normalChrome.paneActions, true);
     assertEqual(normalChrome.terminalSurface, true);
     assertEqual(normalChrome.exitFullscreen, false);
+    assertEqual(normalChrome.worktreeStrip, true);
 
     assertEqual(fullscreenChrome.panelHeader, false);
     assertEqual(fullscreenChrome.windowTabs, false);
     assertEqual(fullscreenChrome.paneActions, true);
     assertEqual(fullscreenChrome.terminalSurface, true);
     assertEqual(fullscreenChrome.exitFullscreen, true);
+    assertEqual(fullscreenChrome.worktreeStrip, false);
   });
 
   /**
