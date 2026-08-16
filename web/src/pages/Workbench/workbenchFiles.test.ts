@@ -156,6 +156,11 @@ describe('workbenchFiles', () => {
   assert(closedActiveTabs.activeTabId === 'readme', 'closing active tab activates previous tab');
   assert(closedActiveTabs.view === 'files', 'closing active tab keeps files view when tabs remain');
 
+  const closedLastTab = reduceFileTabs(closedActiveTabs, { type: 'closed', id: 'readme' });
+  assert(closedLastTab.tabs.length === 0, 'closing last tab empties the tab list');
+  assert(closedLastTab.activeTabId === null, 'closing last tab clears active tab');
+  assert(closedLastTab.view === 'files', 'closing last tab stays on the empty files page');
+
   assert(validateJsonText('{"ok":true}').ok, 'valid json accepted');
   assert(!validateJsonText('{bad').ok, 'invalid json rejected');
   assert(validateTomlText('title = "cc-partner"').ok, 'valid toml accepted');

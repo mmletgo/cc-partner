@@ -592,9 +592,11 @@ export function useWorkbenchFileController(
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户关闭文件 tab 后，工作区需要选择相邻文件继续显示；dirty tab 不能在未确认时丢弃修改。
+   *   关掉最后一个 tab 应留在空白文件页，方便继续从右侧项目文件夹打开文件。
    *
    * Code Logic（这个函数做什么）:
    *   关闭前检查目标 tab 是否 dirty；用户确认后移除目标 tab，并在关闭 active tab 时选择相邻或剩余 tab。
+   *   没有剩余 tab 时只清空 active，不切回 terminal。
    */
   const handleCloseFileTab = useCallback(
     (id: string): void => {
@@ -617,9 +619,8 @@ export function useWorkbenchFileController(
       activeFileTabIdRef.current = nextActiveTabId;
       setFileTabsState(nextTabs);
       setActiveFileTabId(nextActiveTabId);
-      if (!nextActiveTabId) requestWorkspaceView('terminal');
     },
-    [requestWorkspaceView, setFileTabsState, tm],
+    [setFileTabsState, tm],
   );
 
   /**
@@ -1150,6 +1151,7 @@ export function useWorkbenchFileController(
    * Code Logic（这个函数做什么）:
    *   删除前用当前 tabs 收集受影响路径并提示 dirty 文件；确认后调用后端 delete，成功后关闭命中 tab，
    *   active tab 被删除时按相邻/剩余 tab 重新选择，并让此前发出的旧路径 open 响应失效。
+   *   没有剩余 tab 时留在空白文件页，不切回 terminal。
    */
   const handleDeletePath = useCallback(
     async (): Promise<void> => {
@@ -1202,7 +1204,6 @@ export function useWorkbenchFileController(
         activeFileTabIdRef.current = nextActiveTabId;
         setFileTabsState(nextTabs);
         setActiveFileTabId(nextActiveTabId);
-        if (!nextActiveTabId) requestWorkspaceView('terminal');
         setSelectedPath(null);
         setSelectedInfo(null);
         setRenameName('');
@@ -1224,7 +1225,6 @@ export function useWorkbenchFileController(
       markRequestFailure,
       refreshParentDir,
       remoteWriteDisabled,
-      requestWorkspaceView,
       setFileTabsState,
       t,
       tm,

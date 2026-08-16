@@ -538,7 +538,7 @@ export function reduceFileTabs(
       const nextTabs = state.tabs.filter((tab) => tab.id !== action.id);
       if (state.activeTabId !== action.id) return { ...state, tabs: nextTabs };
       const nextActiveTabId = nextTabs.at(-1)?.id ?? null;
-      return { tabs: nextTabs, activeTabId: nextActiveTabId, view: nextActiveTabId ? 'files' : 'terminal' };
+      return { tabs: nextTabs, activeTabId: nextActiveTabId, view: 'files' };
     }
     case 'modeChanged': {
       return {

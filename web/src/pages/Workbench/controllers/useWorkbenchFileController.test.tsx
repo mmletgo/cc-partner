@@ -529,7 +529,7 @@ describe('useWorkbenchFileController — close tab dirty confirm', () => {
     expect(result.current.activeFileTabId).toBe('worktree-main:README.md');
   });
 
-  test('closing a dirty tab with confirm=true removes the tab and falls back to terminal', async () => {
+  test('closing a dirty tab with confirm=true removes the tab and stays on the files workspace', async () => {
     const opened = buildOpenedText('README.md', 'original', 'hash-1');
     fakeFilesApi.open.mockResolvedValueOnce(opened);
     const requestView = vi.fn();
@@ -543,6 +543,7 @@ describe('useWorkbenchFileController — close tab dirty confirm', () => {
     act(() => {
       result.current.handleFileContentChange('worktree-main:README.md', 'edited');
     });
+    requestView.mockClear();
 
     const original = window.confirm;
     window.confirm = () => true;
@@ -556,8 +557,7 @@ describe('useWorkbenchFileController — close tab dirty confirm', () => {
 
     expect(result.current.fileTabs).toHaveLength(0);
     expect(result.current.activeFileTabId).toBeNull();
-    // 关闭最后一个 tab 时应请求切回 terminal 视图。
-    expect(requestView).toHaveBeenCalledWith('terminal');
+    expect(requestView).not.toHaveBeenCalledWith('terminal');
   });
 
   test('closing a non-dirty tab skips confirm and removes it', async () => {
