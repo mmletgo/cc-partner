@@ -16,11 +16,17 @@
 const MODEL_CONTEXT_WINDOW: Readonly<Record<string, number>> = {
   // Claude Code
   'claude-haiku-4-5': 200_000,
+  'claude-haiku-4-6': 200_000,
   'claude-sonnet-4': 200_000,
   'claude-sonnet-4-5': 200_000,
   'claude-sonnet-4-5-1m': 1_000_000,
+  'claude-sonnet-4-6': 200_000,
+  'claude-sonnet-4-6-1m': 1_000_000,
   'claude-opus-4': 200_000,
   'claude-opus-4-1m': 1_000_000,
+  'claude-opus-4-5': 200_000,
+  'claude-opus-4-5-1m': 1_000_000,
+  'claude-opus-4-6': 200_000,
   // Codex（CLI 当前模型族；按需扩展）
   'gpt-5': 400_000,
   'gpt-5-codex': 400_000,
@@ -56,7 +62,9 @@ export function resolveContextWindow(modelId: string | null | undefined): number
   // 1. 精确命中
   const direct = MODEL_CONTEXT_WINDOW[normalized];
   if (typeof direct === 'number' && direct > 0) return direct;
-  // 2. 前缀命中：去掉日期/版本后缀（短横线分隔的最后一段若像日期则丢弃）
+  // 2. 1m 后缀：`…-1m` 或日期后缀前的 `-1m-`
+  if (/(?:^|-)1m(?:-|$)/.test(normalized)) return 1_000_000;
+  // 3. 前缀命中：去掉日期/版本后缀（短横线分隔的最后一段若像日期则丢弃）
   const segments = normalized.split('-');
   if (segments.length >= 4) {
     const trimmed = segments.slice(0, -1).join('-');

@@ -310,6 +310,7 @@ pub async fn handle_native_agent_event(
                 cache_write_tokens: delta.cache_write_tokens,
                 cost_major: delta.cost_major.clone(),
                 cost_currency: delta.cost_currency.clone(),
+                ..Default::default()
             };
             let agent_id = event.agent_session_id.clone();
             if let Err(e) = state.agent_ledger_service.note_usage(&agent_id, snap).await {

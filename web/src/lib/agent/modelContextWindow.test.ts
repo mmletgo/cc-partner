@@ -15,6 +15,8 @@ describe('resolveContextWindow', () => {
   it('已知模型返回精确 token 数', () => {
     expect(resolveContextWindow('claude-sonnet-4-5')).toBe(200_000);
     expect(resolveContextWindow('claude-sonnet-4-5-1m')).toBe(1_000_000);
+    expect(resolveContextWindow('claude-opus-4-5-20251101')).toBe(200_000);
+    expect(resolveContextWindow('claude-sonnet-4-6-1m-20260101')).toBe(1_000_000);
     expect(resolveContextWindow('claude-opus-4')).toBe(200_000);
     expect(resolveContextWindow('gpt-5')).toBe(400_000);
   });

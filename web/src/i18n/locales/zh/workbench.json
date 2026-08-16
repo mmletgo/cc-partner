@@ -790,6 +790,7 @@
   "metricsIn": "输入速率",
   "metricsOut": "输出速率",
   "metricsContext": "上下文用量",
+  "metricsContextLength": "上下文长度",
   "metricsContextAria": "上下文使用 {{pct}}%",
   "metricsUnavailable": "未提供",
   "metricsContextNoWindow": "无窗口信息",

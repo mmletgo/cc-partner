@@ -33,6 +33,8 @@ struct UsageFingerprint {
     output_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
     cache_write_tokens: Option<u64>,
+    context_length: Option<u64>,
+    context_window: Option<u64>,
 }
 
 impl UsageFingerprint {
@@ -43,6 +45,8 @@ impl UsageFingerprint {
             output_tokens: snapshot.output_tokens,
             cache_read_tokens: snapshot.cache_read_tokens,
             cache_write_tokens: snapshot.cache_write_tokens,
+            context_length: snapshot.context_length,
+            context_window: snapshot.context_window,
         }
     }
 }
@@ -133,6 +137,8 @@ fn snapshot_to_dto(snapshot: &ReliableUsageSnapshot, extracted_at: &str) -> Agen
         output_tokens: snapshot.output_tokens,
         cache_read_tokens: snapshot.cache_read_tokens,
         cache_write_tokens: snapshot.cache_write_tokens,
+        context_length: snapshot.context_length,
+        context_window: snapshot.context_window,
         extracted_at: extracted_at.to_string(),
     }
 }
@@ -306,7 +312,9 @@ pub fn refresh_active_rows(rows: &[AgentSessionRuntime]) -> Vec<String> {
     for row in rows {
         match refresh_row_inner(row) {
             RefreshOutcome::Skip => {}
-            RefreshOutcome::Extracted { changed: did_change } => {
+            RefreshOutcome::Extracted {
+                changed: did_change,
+            } => {
                 extracts += 1;
                 if did_change {
                     changed.push(row.id.clone());
@@ -334,6 +342,8 @@ mod tests {
             cache_write_tokens: Some(1),
             cost_major: None,
             cost_currency: None,
+            context_length: Some(input.saturating_add(3).saturating_add(1)),
+            context_window: Some(200_000),
         }
     }
 
@@ -367,6 +377,8 @@ mod tests {
         assert_eq!(dto.input_tokens, Some(10));
         assert_eq!(dto.output_tokens, Some(4));
         assert_eq!(dto.model_id.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(dto.context_length, Some(14));
+        assert_eq!(dto.context_window, Some(200_000));
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("native"));
         assert!(!json.contains("path"));
@@ -436,9 +448,7 @@ mod tests {
         .unwrap();
         assert!(store("agent-live-file", &grown));
         assert_eq!(
-            cached_usage_dto("agent-live-file")
-                .unwrap()
-                .input_tokens,
+            cached_usage_dto("agent-live-file").unwrap().input_tokens,
             Some(40)
         );
     }

@@ -89,6 +89,13 @@ pub struct ReliableUsageSnapshot {
     pub cost_major: Option<String>,
     /// ISO 4217 三字符货币（大写校验）
     pub cost_currency: Option<String>,
+    /// 当前上下文占用（末轮 input + cache_read + cache_write；压缩后取压缩后占用）。
+    /// 不是累计计费 token，compact 后可以回落；不落 ledger 列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    /// Provider 上报的模型最大上下文（如 Codex `model_context_window`）；缺省由前端查表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 impl ReliableUsageSnapshot {
@@ -107,6 +114,8 @@ impl ReliableUsageSnapshot {
             || self.cache_write_tokens.is_some()
             || self.cost_major.is_some()
             || self.cost_currency.is_some()
+            || self.context_length.is_some()
+            || self.context_window.is_some()
     }
 
     /// 将 cost_major + currency 无损转为 minor units；失败返回 None（不估算）。
@@ -403,30 +412,30 @@ pub struct AgentLedgerSummary {
     pub output_tokens: Option<u64>,
     /// 可靠 cache read tokens 合计（缓存输入；无贡献时 null）
     pub cache_read_tokens: Option<u64>,
-    /// 可靠 cache write tokens 合计（无贡献时 null）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 可靠 cache write tokens 合计（无贡献时 JSON `null`，不得省略键）
+    #[serde(default)]
     pub cache_write_tokens: Option<u64>,
-    /// 真实消耗 tokens：input + cache_write + output；任一分项 None → None
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 真实消耗 tokens：input + cache_write + output；任一分项 None → JSON `null`
+    #[serde(default)]
     pub real_consumed_tokens: Option<u64>,
-    /// 缓存命中率：cache_read / (cache_read + input)；任一分项 None 或分母 0 → None
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 缓存命中率：cache_read / (cache_read + input)；任一分项 None 或分母 0 → JSON `null`
+    #[serde(default)]
     pub cache_hit_rate: Option<f32>,
     /// 请求数（= sessions，命名更直观）
     pub requests_count: u64,
-    /// 按货币 cost 桶（同源别名，命名更直观）
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// 按货币 cost 桶（同源别名；空数组仍序列化，Token 统计页 decoder 要求键存在）
+    #[serde(default)]
     pub total_cost_by_currency: Vec<CurrencyAmount>,
     /// 按货币 cost 桶（与 total_cost_by_currency 同源）
     pub cost_by_currency: Vec<CurrencyAmount>,
-    /// 按 model 维度拆分（可空）
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// 按 model 维度拆分（空数组仍序列化）
+    #[serde(default)]
     pub by_model: Vec<AgentLedgerGroupRow>,
-    /// 按 provider 维度拆分（可空）
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// 按 provider 维度拆分（空数组仍序列化）
+    #[serde(default)]
     pub by_provider: Vec<AgentLedgerGroupRow>,
-    /// 按 project 维度拆分（可空）
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// 按 project 维度拆分（空数组仍序列化）
+    #[serde(default)]
     pub by_project: Vec<AgentLedgerGroupRow>,
     /// 趋势桶序列（按 bucket_start 升序；空区间不补 0）
     pub trend: Vec<AgentLedgerTrendPoint>,
@@ -546,17 +555,17 @@ pub struct AgentLedgerGroupRow {
     pub cancelled: u64,
     /// disconnected 数
     pub disconnected: u64,
-    /// 可选 input tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 可选 input tokens 合计（无贡献时 JSON `null`，不得省略键）
+    #[serde(default)]
     pub input_tokens: Option<u64>,
     /// 可选 output tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub output_tokens: Option<u64>,
     /// 可选 cache read tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cache_read_tokens: Option<u64>,
     /// 可选 cache write tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cache_write_tokens: Option<u64>,
     /// 按货币 cost 桶
     pub cost_by_currency: Vec<CurrencyAmount>,
@@ -575,17 +584,17 @@ pub struct AgentLedgerGroupRow {
 pub struct AgentLedgerTrendPoint {
     /// 桶起点 RFC3339 UTC
     pub bucket_start: String,
-    /// 可选 input tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 可选 input tokens 合计（无贡献时 JSON `null`，不得省略键）
+    #[serde(default)]
     pub input_tokens: Option<u64>,
     /// 可选 output tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub output_tokens: Option<u64>,
     /// 可选 cache read tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cache_read_tokens: Option<u64>,
     /// 可选 cache write tokens 合计
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cache_write_tokens: Option<u64>,
     /// 按货币 cost 桶
     pub cost_by_currency: Vec<CurrencyAmount>,
@@ -845,6 +854,9 @@ pub fn merge_usage_monotonic(
         )?,
         cost_major,
         cost_currency,
+        // 占用/窗口是瞬时值，允许 compact 后回落，取 incoming 覆盖。
+        context_length: incoming.context_length.or(base.context_length),
+        context_window: incoming.context_window.or(base.context_window),
     })
 }
 
@@ -1133,10 +1145,10 @@ mod tests {
         assert_eq!(v.get("bucket").and_then(|x| x.as_str()), Some("day"));
     }
 
-    /// Business Logic: skip_serializing_if 保证空 vec 不出现在 JSON。
-    /// Code Logic: 构造空 by_* 行的 summary → JSON 不含 byModel / byProvider / byProject / totalCostByCurrency。
+    /// Business Logic: Token 统计页 fail-closed decoder 要求键始终存在；空窗也必须发 null/[]。
+    /// Code Logic: 空 by_* / 派生 None 的 summary → JSON 仍含对应 camelCase 键。
     #[test]
-    fn serde_skip_none_does_not_emit_unset_group_rows_when_empty() {
+    fn serde_empty_summary_emits_null_and_empty_arrays_for_token_stats_contract() {
         let s = AgentLedgerSummary {
             window: LedgerWindow::Days7,
             project_id: None,
@@ -1163,13 +1175,13 @@ mod tests {
             usage_coverage: LedgerUsageCoverage::Unavailable,
         };
         let v = serde_json::to_value(&s).unwrap();
-        assert!(v.get("byModel").is_none());
-        assert!(v.get("byProvider").is_none());
-        assert!(v.get("byProject").is_none());
-        assert!(v.get("totalCostByCurrency").is_none());
-        assert!(v.get("cacheWriteTokens").is_none());
-        assert!(v.get("realConsumedTokens").is_none());
-        assert!(v.get("cacheHitRate").is_none());
+        assert_eq!(v.get("byModel"), Some(&serde_json::json!([])));
+        assert_eq!(v.get("byProvider"), Some(&serde_json::json!([])));
+        assert_eq!(v.get("byProject"), Some(&serde_json::json!([])));
+        assert_eq!(v.get("totalCostByCurrency"), Some(&serde_json::json!([])));
+        assert_eq!(v.get("cacheWriteTokens"), Some(&serde_json::Value::Null));
+        assert_eq!(v.get("realConsumedTokens"), Some(&serde_json::Value::Null));
+        assert_eq!(v.get("cacheHitRate"), Some(&serde_json::Value::Null));
     }
 
     /// Business Logic: cache hit rate 分母为 0 时 → None。
@@ -1204,7 +1216,7 @@ mod tests {
             usage_coverage: LedgerUsageCoverage::Unavailable,
         };
         let v = serde_json::to_value(&s).unwrap();
-        assert!(v.get("cacheHitRate").is_none());
+        assert_eq!(v.get("cacheHitRate"), Some(&serde_json::Value::Null));
     }
 
     /// Business Logic: summary DTO（含 by_*/trend）扫描无禁止字段名。

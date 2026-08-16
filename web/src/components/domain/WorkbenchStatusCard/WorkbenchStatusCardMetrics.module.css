@@ -68,6 +68,11 @@
   white-space: nowrap;
 }
 
+.contextValue[data-state='unavailable'] {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .contextDivider {
   margin: 0 var(--space-1);
   color: var(--muted);

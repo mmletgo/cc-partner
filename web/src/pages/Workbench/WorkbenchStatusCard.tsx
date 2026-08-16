@@ -5,13 +5,13 @@
  *   Plan 2 Task 8 把 Workbench.tsx 内联的 inspectorPane 顶部状态卡渲染抽到独立叶子组件，便于页面降到 ≤1200 行。
  *   状态卡是 inspectorPane 的一部分，但不是 tab 切换内容，因此单独成件；组件只接收 controller 派生的渲染数据与回调，
  *   不持有自己的状态，也不导入文件/Git 域。运行时长由 SessionRuntimeText 叶子自持 1 Hz 时钟，避免根重渲染。
- *   速率与上下文优先用 Agent runtime 投影上的 live usage（working/needsInput 也可展示）；
- *   缺 live 时回退终态 ledger（useAgentLedgerForAgent）。null 显示「未提供」，禁止假装 0。
+ *   速率优先用 live usage，缺省回退 ledger；上下文用量只用 live.contextLength（末轮占用），
+ *   禁止把累计计费 token 当占用。上下文长度用 provider 窗口或 model 查表。null 显示「未提供」。
  *
  * Code Logic（这个组件做什么）:
  *   - 渲染会话状态 Pill、项目/worktree/session 元信息 grid、session rename 输入与 close 按钮；
  *   - statusRuntime 行挂 SessionRuntimeText（startedAt/endedAt/running/visible/emptyValue）；
- *   - live usage 优先派生 TokenRateRow / ContextMeter，缺省回退 ledger；null 显示「未提供」。
+ *   - TokenRateRow 用 billed tokens/duration；ContextMeter 用 occupancy + window。
  *   - 暴露 WorkbenchStatusCardProps 类型，所有数据均来自 useWorkbenchTerminalController + Workbench.tsx 跨域共享。
  */
 import type { ReactNode } from 'react';
@@ -58,21 +58,6 @@ function formatDateTime(value: string | null, emptyValue: string): string {
     hour: '2-digit',
     minute: '2-digit',
   });
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   ledger 单行的 token 累计值可能 null（覆盖率 unavailable）；必须 null-safe 求和。
- *
- * Code Logic（这个函数做什么）:
- *   接受多个 nullable token 数字；返回非负整数求和（null 当 0）。
- */
-function sumTokens(...values: Array<number | null | undefined>): number {
-  let total = 0;
-  for (const v of values) {
-    if (typeof v === 'number' && Number.isFinite(v) && v > 0) total += v;
-  }
-  return total;
 }
 
 /**
@@ -204,10 +189,7 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
   const liveUsage = activeAgent?.usage ?? null;
   const inputTokens = liveUsage?.inputTokens ?? ledgerEntry?.inputTokens ?? null;
   const outputTokens = liveUsage?.outputTokens ?? ledgerEntry?.outputTokens ?? null;
-  const cacheRead = liveUsage?.cacheReadTokens ?? ledgerEntry?.cacheReadTokens ?? null;
-  const cacheWrite = liveUsage?.cacheWriteTokens ?? ledgerEntry?.cacheWriteTokens ?? null;
   const modelId = liveUsage?.modelId ?? ledgerEntry?.modelId ?? null;
-  const hasTokenSource = liveUsage != null || ledgerEntry != null;
 
   const durationMs = liveUsage
     ? computeLiveDurationMs(
@@ -221,13 +203,20 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
   const speedInTps = computeTokenRate(inputTokens, durationMs);
   const speedOutTps = computeTokenRate(outputTokens, durationMs);
 
-  // 上下文累计 = input + cache_read + cache_write；cache 命中与新写入都占 context 预算。
-  const cumulativeSum = hasTokenSource ? sumTokens(inputTokens, cacheRead, cacheWrite) : 0;
-  const cumulativeIn = hasTokenSource && cumulativeSum > 0 ? cumulativeSum : null;
-  const contextWindow = resolveContextWindow(modelId);
+  // 用量 = 末轮 occupancy（live.contextLength）；禁止把累计计费 token 当占用。
+  const contextUsed =
+    liveUsage?.contextLength != null && Number.isFinite(liveUsage.contextLength)
+      ? liveUsage.contextLength
+      : null;
+  const contextWindow =
+    liveUsage?.contextWindow != null &&
+    Number.isFinite(liveUsage.contextWindow) &&
+    liveUsage.contextWindow > 0
+      ? liveUsage.contextWindow
+      : resolveContextWindow(modelId);
   const pct =
-    contextWindow != null && contextWindow > 0 && cumulativeIn != null && cumulativeIn > 0
-      ? Math.min(1, cumulativeIn / contextWindow)
+    contextWindow != null && contextWindow > 0 && contextUsed != null && contextUsed > 0
+      ? Math.min(1, contextUsed / contextWindow)
       : null;
   const contextTone = decideContextTone(isAgentTerminal, pct);
 
@@ -280,7 +269,7 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
         unavailableLabel={unavailableLabel}
       />
       <ContextMeter
-        cumulativeIn={cumulativeIn}
+        contextUsed={contextUsed}
         contextWindow={contextWindow}
         unavailableLabel={unavailableLabel}
         noWindowLabel={noWindowLabel}

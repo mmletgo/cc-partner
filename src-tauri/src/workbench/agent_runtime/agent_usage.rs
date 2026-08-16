@@ -9,10 +9,13 @@
 //! Code Logic（这个模块做什么）:
 //!     三个纯函数提取器（root 可注入便于测试）+ 统一入口 `extract_provider_usage`：
 //!     - Claude：`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`，按 message.id
-//!       去重（stop_reason 优先 / output_tokens 更大者）后求和；
+//!       去重（stop_reason 优先 / output_tokens 更大者）后求和 billed tokens；
+//!       `context_length` 取末条主链占用（input+cache），compact_boundary 后取压缩后占用；
 //!     - Codex：`~/.codex/sessions/YYYY/MM/DD/rollout-*<uuid>*.jsonl`，取最后一个
-//!       token_count 的 `total_token_usage`（会话累计值）；
-//!     - OpenCode：只读打开 opencode SQLite，按 session 查 message 表 data JSON 求和。
+//!       token_count 的 `total_token_usage`（会话累计值）；`context_length` 取
+//!       `last_token_usage` occupancy，`context_window` 取 `model_context_window`；
+//!     - OpenCode：只读打开 opencode SQLite，按 session 查 message 表 data JSON 求和；
+//!       `context_length` 取末条 message occupancy。
 //!     所有提取有界、宽松解析，失败一律返回 None，不 panic。
 
 use crate::workbench::agent_ledger::ReliableUsageSnapshot;
@@ -67,6 +70,23 @@ struct ClaudeUsageEntry {
     cache_write: u64,
     cost_usd: f64,
     stop_reason: bool,
+}
+
+impl ClaudeUsageEntry {
+    fn occupancy(&self) -> u64 {
+        occupancy_tokens(self.input, self.cache_read, self.cache_write)
+    }
+}
+
+/// 当前上下文占用：input + cache_read + cache_write（不含 output）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ccstatusline-zh ContextLength 用末轮占用对照 window，不是累计计费 token。
+///
+/// Code Logic（这个函数做什么）:
+///     三端 saturating 相加。
+fn occupancy_tokens(input: u64, cache_read: u64, cache_write: u64) -> u64 {
+    input.saturating_add(cache_read).saturating_add(cache_write)
 }
 
 /// 从 Claude session JSONL 提取可靠 usage。
@@ -140,6 +160,10 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
     let mut total_cost = 0.0f64;
     let mut model_id: Option<String> = None;
     let mut matched = false;
+    let mut last_main_msg_id: Option<String> = None;
+    let mut last_main_after_compact: Option<String> = None;
+    let mut saw_compact = false;
+    let mut last_post_compact: Option<u64> = None;
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.len() > MAX_JSONL_LINE_BYTES {
@@ -153,6 +177,12 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
             if sid != expected_session {
                 continue;
             }
+        }
+        if is_claude_compact_boundary(&value) {
+            saw_compact = true;
+            last_main_after_compact = None;
+            last_post_compact = compact_boundary_post_tokens(&value);
+            continue;
         }
         let Some(message) = value.get("message") else {
             continue;
@@ -192,6 +222,14 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
                 .is_some_and(|s| !s.is_empty()),
         };
         matched = true;
+        let is_sidechain = value.get("isSidechain") == Some(&Value::Bool(true));
+        let is_api_error = value.get("isApiErrorMessage") == Some(&Value::Bool(true));
+        if !is_sidechain && !is_api_error {
+            last_main_msg_id = Some(msg_id.to_string());
+            if saw_compact {
+                last_main_after_compact = Some(msg_id.to_string());
+            }
+        }
         let should_replace = match messages.get(msg_id) {
             None => true,
             Some(existing) => {
@@ -230,6 +268,13 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
     } else {
         None
     };
+    let context_length = if saw_compact {
+        last_main_after_compact
+            .and_then(|id| messages.get(&id).map(ClaudeUsageEntry::occupancy))
+            .or(last_post_compact)
+    } else {
+        last_main_msg_id.and_then(|id| messages.get(&id).map(ClaudeUsageEntry::occupancy))
+    };
     Some(ReliableUsageSnapshot {
         model_id,
         input_tokens: Some(input),
@@ -238,7 +283,23 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         cache_write_tokens: Some(cache_write),
         cost_major: cost.as_ref().map(|(m, _)| m.clone()),
         cost_currency: cost.map(|(_, c)| c),
+        context_length,
+        context_window: None,
     })
+}
+
+/// 是否为 Claude 主链 compact_boundary 记录。
+fn is_claude_compact_boundary(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        && value.get("isSidechain") != Some(&Value::Bool(true))
+}
+
+/// 读取 compact_boundary 的 postTokens（压缩后占用）。
+fn compact_boundary_post_tokens(value: &Value) -> Option<u64> {
+    let meta = value.get("compactMetadata")?;
+    meta.get("postTokens")
+        .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f.max(0.0) as u64)))
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +431,8 @@ fn parse_codex_jsonl(path: &Path) -> Option<ReliableUsageSnapshot> {
     file.read_to_string(&mut content).ok()?;
 
     let mut latest: Option<CodexCumulativeUsage> = None;
+    let mut last_turn: Option<CodexCumulativeUsage> = None;
+    let mut context_window: Option<u64> = None;
     let mut model_id: Option<String> = None;
     for line in content.lines() {
         let line = line.trim();
@@ -415,11 +478,26 @@ fn parse_codex_jsonl(path: &Path) -> Option<ReliableUsageSnapshot> {
                         latest = Some(parsed);
                     }
                 }
+                if let Some(last) = info.get("last_token_usage") {
+                    if let Some(parsed) = parse_codex_total_usage(last) {
+                        last_turn = Some(parsed);
+                    }
+                }
+                if let Some(window) = info
+                    .get("model_context_window")
+                    .or_else(|| payload.get("model_context_window"))
+                    .and_then(Value::as_u64)
+                {
+                    if window > 0 {
+                        context_window = Some(window);
+                    }
+                }
             }
             _ => {}
         }
     }
     let usage = latest?;
+    let context_length = last_turn.map(|turn| occupancy_tokens(turn.input, turn.cache_read, 0));
     Some(ReliableUsageSnapshot {
         model_id,
         input_tokens: Some(usage.input),
@@ -428,6 +506,8 @@ fn parse_codex_jsonl(path: &Path) -> Option<ReliableUsageSnapshot> {
         cache_write_tokens: None,
         cost_major: None,
         cost_currency: None,
+        context_length,
+        context_window,
     })
 }
 
@@ -494,6 +574,7 @@ fn aggregate_opencode_usage(rows: Vec<OpenCodeMessageUsage>) -> Option<ReliableU
     let mut cache_write = 0u64;
     let mut total_cost = 0.0f64;
     let mut model_id: Option<String> = None;
+    let mut context_length: Option<u64> = None;
     for row in rows {
         input += row.input;
         output += row.output;
@@ -501,8 +582,9 @@ fn aggregate_opencode_usage(rows: Vec<OpenCodeMessageUsage>) -> Option<ReliableU
         cache_write += row.cache_write;
         total_cost += row.cost;
         if row.model_id.is_some() {
-            model_id = row.model_id;
+            model_id = row.model_id.clone();
         }
+        context_length = Some(occupancy_tokens(row.input, row.cache_read, row.cache_write));
     }
     let cost = if total_cost > 0.0 {
         Some((format_cost(total_cost), "USD".to_string()))
@@ -517,6 +599,8 @@ fn aggregate_opencode_usage(rows: Vec<OpenCodeMessageUsage>) -> Option<ReliableU
         cache_write_tokens: Some(cache_write),
         cost_major: cost.as_ref().map(|(m, _)| m.clone()),
         cost_currency: cost.map(|(_, c)| c),
+        context_length,
+        context_window: None,
     })
 }
 
@@ -774,6 +858,39 @@ mod tests {
         assert_eq!(snap.cost_major.as_deref(), Some("0.050000"));
         assert_eq!(snap.cost_currency.as_deref(), Some("USD"));
         assert_eq!(snap.model_id.as_deref(), Some("claude-sonnet-4"));
+        // 末轮占用 = msg_2 的 7+1+0，不是累计 17+6+2。
+        assert_eq!(snap.context_length, Some(8));
+        assert_eq!(snap.context_window, None);
+    }
+
+    /// Claude：compact_boundary 后占用取压缩后一轮，禁止泄漏压缩前占用。
+    #[test]
+    fn claude_context_length_uses_post_compact_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("-Users-hans-demo");
+        std::fs::create_dir_all(&project).unwrap();
+        let pre = serde_json::json!({
+            "sessionId": "s-c",
+            "timestamp": "2026-08-16T10:00:00Z",
+            "message": {
+                "id": "msg_pre",
+                "model": "claude-sonnet-4",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 80_000, "output_tokens": 10, "cache_read_input_tokens": 20_000, "cache_creation_input_tokens": 0},
+            },
+        })
+        .to_string();
+        let boundary = serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "sessionId": "s-c",
+            "compactMetadata": {"postTokens": 12_000, "preTokens": 100_000},
+        })
+        .to_string();
+        write_jsonl(&project, "s-c.jsonl", &[pre, boundary]);
+        let snap = extract_claude_usage(Some(tmp.path().to_path_buf()), "s-c").unwrap();
+        assert_eq!(snap.input_tokens, Some(80_000));
+        assert_eq!(snap.context_length, Some(12_000));
     }
 
     /// Claude：文件缺失 → None；id 带路径穿越 → None。
@@ -803,7 +920,14 @@ mod tests {
         .to_string();
         let tc2 = serde_json::json!({
             "type": "event_msg",
-            "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 30, "cached_input_tokens": 8, "output_tokens": 12}}},
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"input_tokens": 30, "cached_input_tokens": 8, "output_tokens": 12},
+                    "last_token_usage": {"input_tokens": 9, "cached_input_tokens": 8, "output_tokens": 4},
+                    "model_context_window": 400000
+                }
+            },
         })
         .to_string();
         let noise = serde_json::json!({
@@ -824,6 +948,8 @@ mod tests {
         assert_eq!(snap.model_id.as_deref(), Some("gpt-5"));
         assert!(snap.cost_major.is_none());
         assert!(snap.cache_write_tokens.is_none());
+        assert_eq!(snap.context_length, Some(17));
+        assert_eq!(snap.context_window, Some(400_000));
     }
 
     /// Codex：无 token_count → None。
@@ -861,6 +987,8 @@ mod tests {
         assert_eq!(snap.cache_write_tokens, Some(2));
         assert_eq!(snap.cost_major.as_deref(), Some("0.750000"));
         assert_eq!(snap.model_id.as_deref(), Some("m2"));
+        // 末条 5+0+0，不是累计 8+1+2。
+        assert_eq!(snap.context_length, Some(5));
     }
 
     /// OpenCode：sqlx 内存库端到端查询（含列缺失 → None）。

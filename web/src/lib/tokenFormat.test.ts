@@ -9,7 +9,7 @@
  *   直接断言 formatTokenCount 的边界值输出（原样 / k / M / null）。
  */
 import { describe, expect, it } from 'vitest';
-import { formatTokenCount, formatTokenRate } from './tokenFormat';
+import { formatContextTokens, formatTokenCount, formatTokenRate } from './tokenFormat';
 
 describe('formatTokenCount', () => {
   it('5000 及以下直接显示整数', () => {
@@ -35,6 +35,32 @@ describe('formatTokenCount', () => {
     expect(formatTokenCount(undefined)).toBeNull();
     expect(formatTokenCount(Number.NaN)).toBeNull();
     expect(formatTokenCount(-1)).toBeNull();
+  });
+});
+
+describe('formatContextTokens', () => {
+  it('默认 1 位小数 k，不到 1000 显示整数', () => {
+    expect(formatContextTokens(186)).toBe('186');
+    expect(formatContextTokens(18_600)).toBe('18.6k');
+    expect(formatContextTokens(200_000)).toBe('200.0k');
+  });
+
+  it('decimals=0 时窗口显示 200k / 50k', () => {
+    expect(formatContextTokens(200_000, 0)).toBe('200k');
+    expect(formatContextTokens(50_000, 0)).toBe('50k');
+  });
+
+  it('仅在会进位成 1000k 时升到 1.0M', () => {
+    expect(formatContextTokens(999_949)).toBe('999.9k');
+    expect(formatContextTokens(999_950)).toBe('1.0M');
+    expect(formatContextTokens(1_000_000, 0)).toBe('1.0M');
+  });
+
+  it('null / 非有限 / 负数返回 null', () => {
+    expect(formatContextTokens(null)).toBeNull();
+    expect(formatContextTokens(undefined)).toBeNull();
+    expect(formatContextTokens(Number.NaN)).toBeNull();
+    expect(formatContextTokens(-1)).toBeNull();
   });
 });
 

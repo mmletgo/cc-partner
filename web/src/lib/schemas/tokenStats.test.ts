@@ -102,6 +102,50 @@ describe('tokenStats schema', () => {
     const bad = makeSummary({ window: 'forever' });
     expect(() => agentLedgerSummaryDecoder.decode(bad)).toThrow(ContractDecodeError);
   });
+
+  it('agentLedgerSummaryDecoder accepts sparse empty-window wire from skip_serializing sidecar', () => {
+    const sparse = {
+      window: '7d',
+      sessions: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      durationMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      requestsCount: 0,
+      costByCurrency: [],
+      usageCoverage: 'unavailable',
+      trend: [],
+      bucket: 'day',
+    };
+    const decoded = agentLedgerSummaryDecoder.decode(sparse);
+    expect(decoded.cacheWriteTokens).toBeNull();
+    expect(decoded.realConsumedTokens).toBeNull();
+    expect(decoded.cacheHitRate).toBeNull();
+    expect(decoded.totalCostByCurrency).toEqual([]);
+    expect(decoded.byModel).toEqual([]);
+    expect(decoded.byProvider).toEqual([]);
+    expect(decoded.byProject).toEqual([]);
+  });
+
+  it('agentLedgerGroupRowDecoder treats omitted token fields as null', () => {
+    const decoded = agentLedgerGroupRowDecoder.decode({
+      key: 'claude-opus-4-1',
+      sessions: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      costByCurrency: [],
+    });
+    expect(decoded.inputTokens).toBeNull();
+    expect(decoded.outputTokens).toBeNull();
+    expect(decoded.cacheReadTokens).toBeNull();
+    expect(decoded.cacheWriteTokens).toBeNull();
+  });
 });
 
 describe('tokenStats helpers', () => {

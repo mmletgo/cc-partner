@@ -84,6 +84,10 @@ export interface AgentLiveUsage {
   outputTokens?: number | null;
   cacheReadTokens?: number | null;
   cacheWriteTokens?: number | null;
+  /** 当前上下文占用（末轮 occupancy）；缺省表示尚未抽取。 */
+  contextLength?: number | null;
+  /** Provider 上报的模型最大上下文；缺省由前端按 modelId 查表。 */
+  contextWindow?: number | null;
   extractedAt: string;
 }
 

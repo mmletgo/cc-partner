@@ -473,6 +473,7 @@ impl AgentLedgerRepo {
                 m.to_string()
             }),
             cost_currency: existing.cost_currency.clone(),
+            ..Default::default()
         };
 
         let incoming = input.usage.clone().unwrap_or_default();
@@ -486,6 +487,7 @@ impl AgentLedgerRepo {
                 cache_write_tokens: base_usage.cache_write_tokens,
                 cost_major: None,
                 cost_currency: base_usage.cost_currency.clone(),
+                ..Default::default()
             },
             &ReliableUsageSnapshot {
                 model_id: incoming.model_id.clone().or(input.model_id.clone()),
@@ -495,6 +497,7 @@ impl AgentLedgerRepo {
                 cache_write_tokens: incoming.cache_write_tokens,
                 cost_major: None,
                 cost_currency: incoming.cost_currency.clone(),
+                ..Default::default()
             },
         )?;
 
@@ -1633,6 +1636,7 @@ mod tests {
             cache_write_tokens: None,
             cost_major: Some(major.into()),
             cost_currency: Some(currency.into()),
+            ..Default::default()
         }
     }
 

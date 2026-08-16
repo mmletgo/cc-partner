@@ -39,6 +39,32 @@ export function formatTokenCount(value: number | null | undefined): string | nul
  *   - >= 1,000：以 k 缩写保留 2 位小数（`1.23k tok/s`）；
  *   - >= 1,000,000：以 M 缩写保留 2 位小数（`1.23M tok/s`）。
  */
+/**
+ * formatContextTokens
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   状态卡「上下文用量 / 上下文长度」必须对齐 ccstatusline-zh：
+ *   占用通常在 k 量级，不得把累计计费百万 token 格式化成 M 误导用户。
+ *   仅当 k 值会进位成 1000k 时才升到 1.0M。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对照 ccstatusline `formatTokens(count, decimals)`：
+ *   - 非有限 / 负数 → null；
+ *   - >= 1_000_000 - 500/10^decimals → 1 位小数 M；
+ *   - >= 1000 → decimals 位小数 k；
+ *   - 其余整数。
+ */
+export function formatContextTokens(
+  value: number | null | undefined,
+  decimals = 1,
+): string | null {
+  if (value == null || !Number.isFinite(value) || value < 0) return null;
+  const promoteAt = 1_000_000 - 500 / 10 ** decimals;
+  if (value >= promoteAt) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(decimals)}k`;
+  return String(Math.round(value));
+}
+
 export function formatTokenRate(value: number | null | undefined): string | null {
   if (value == null || !Number.isFinite(value) || value < 0) return null;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M tok/s`;

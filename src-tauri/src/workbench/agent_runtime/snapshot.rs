@@ -34,6 +34,12 @@ pub struct AgentLiveUsageDto {
     pub output_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    /// 当前上下文占用（末轮 occupancy）；缺省表示尚未抽取或旧后端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    /// Provider 上报的模型最大上下文；缺省由前端按 modelId 查表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     pub extracted_at: String,
 }
 
@@ -370,6 +376,7 @@ mod tests {
                 cache_write_tokens: Some(1),
                 cost_major: None,
                 cost_currency: None,
+                ..Default::default()
             },
         );
         let dto = AgentSessionRuntimeDto::from_runtime(&row);

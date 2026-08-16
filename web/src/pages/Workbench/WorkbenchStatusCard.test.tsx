@@ -7,8 +7,9 @@
  *
  * Code Logic（这个测试文件做什么）:
  *   - 渲染基础 props，断言 5 个旧字段的 i18n key（命令/状态/Agent/尺寸/退出码）不出现在 statusGrid 中；
- *   - 不传 ledgerEntry → TokenRateRow 显示「—」× 2，ContextMeter 显示「—」（无 ProgressBar）；
- *   - 传 ledgerEntry（终态）→ TokenRateRow 显示数值，ContextMeter 显示 cumulative / window 与 ProgressBar。
+ *   - 不传 ledgerEntry → TokenRateRow 显示「—」× 2，ContextMeter 用量「—」；
+ *   - 传 ledgerEntry（终态）→ TokenRateRow 显示数值；用量仍「—」（ledger 无 occupancy），长度按 model 查表。
+ *   - live usage 带 contextLength → 用量 k + ProgressBar。
  */
 // @vitest-environment jsdom
 import { cleanup, render, screen } from '@testing-library/react';
@@ -105,6 +106,7 @@ function makeWorkingAgent(overrides: Partial<AgentSessionProjection> = {}): Agen
       outputTokens: 10_000,
       cacheReadTokens: 50_000,
       cacheWriteTokens: 20_000,
+      contextLength: 42_000,
       extractedAt: '2026-08-16T10:05:00Z',
     },
     ...overrides,
@@ -121,7 +123,7 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
   });
 
-  it('终态 ledgerEntry 含 input/output/cache + modelId → 显示速率与 ProgressBar', async () => {
+  it('终态 ledgerEntry 含 input/output + modelId → 显示速率与窗口，用量不回退累计 token', async () => {
     const entry: AgentLedgerEntry = {
       id: 'l1',
       agentSessionId: 'a1',
@@ -149,12 +151,11 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     // 速率：input=100k/300s=333.3 tok/s, output=10k/300s=33.3 tok/s
     expect(rateRow.textContent).toContain('333.3 tok/s');
     expect(rateRow.textContent).toContain('33.3 tok/s');
-    // 累计：input+cache_read+cache_write = 170k；window 200k → 85% → ProgressBar danger
-    expect(meter.textContent).toContain('170.000k');
-    expect(meter.textContent).toContain('200.000k');
-    const bar = document.querySelector('[role="progressbar"]');
-    expect(bar?.getAttribute('aria-valuenow')).toBe('85');
-    expect(bar?.getAttribute('data-tone')).toBe('danger');
+    // ledger 只有累计计费 token，不得当成占用；窗口仍按 model 查表。
+    expect(meter.textContent).toContain('未提供');
+    expect(meter.textContent).toContain('200k');
+    expect(meter.textContent).not.toMatch(/M/);
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
   });
 
   it('未知 modelId → ContextMeter 显示 noWindowLabel，无 ProgressBar', async () => {
@@ -181,6 +182,7 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     };
     renderCard(makeProps({ ledgerEntry: entry }));
     const meter = screen.getByTestId('workbench-status-context-meter');
+    expect(meter.textContent).toContain('未提供');
     expect(meter.textContent).toContain('无窗口信息');
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
   });
@@ -212,10 +214,11 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     const meter = screen.getByTestId('workbench-status-context-meter');
     expect(rateRow.textContent).toContain('333.3 tok/s');
     expect(rateRow.textContent).toContain('33.3 tok/s');
-    expect(meter.textContent).toContain('170.000k');
-    expect(meter.textContent).toContain('200.000k');
+    expect(meter.textContent).toContain('42.0k');
+    expect(meter.textContent).toContain('200k');
+    expect(meter.textContent).not.toMatch(/M/);
     const bar = document.querySelector('[role="progressbar"]');
-    expect(bar?.getAttribute('aria-valuenow')).toBe('85');
-    expect(bar?.getAttribute('data-tone')).toBe('danger');
+    expect(bar?.getAttribute('aria-valuenow')).toBe('21');
+    expect(bar?.getAttribute('data-tone')).toBe('accent');
   });
 });

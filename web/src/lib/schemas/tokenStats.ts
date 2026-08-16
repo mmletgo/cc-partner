@@ -153,6 +153,15 @@ export const agentLedgerGroupRowDecoder: Decoder<AgentLedgerGroupRow> = objectDe
     cacheWriteTokens: nullableDecoder(nonNegativeIntDecoder),
     costByCurrency: arrayDecoder(currencyAmountDecoder),
   },
+  {
+    // 旧 sidecar 对 None token 用 skip_serializing_if 省略键；缺省按「未提供」而不是整页失败。
+    defaults: {
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+    },
+  },
 );
 
 /**
@@ -174,6 +183,14 @@ export const agentLedgerTrendPointDecoder: Decoder<AgentLedgerTrendPoint> = obje
     cacheWriteTokens: nullableDecoder(nonNegativeIntDecoder),
     costByCurrency: arrayDecoder(currencyAmountDecoder),
   },
+  {
+    defaults: {
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+    },
+  },
 );
 
 /**
@@ -185,6 +202,7 @@ export const agentLedgerTrendPointDecoder: Decoder<AgentLedgerTrendPoint> = obje
  *
  * Code Logic（做什么）:
  *   objectDecoder；trend 与 group 数组均允许空（空窗零 token）。
+ *   旧 sidecar 会 skip 省略空派生字段，缺省按 null/[] 收，避免整页「加载失败」。
  */
 export const agentLedgerSummaryDecoder: Decoder<AgentLedgerSummary> = objectDecoder(
   'AgentLedgerSummary',
@@ -212,6 +230,17 @@ export const agentLedgerSummaryDecoder: Decoder<AgentLedgerSummary> = objectDeco
     byProject: arrayDecoder(agentLedgerGroupRowDecoder),
     trend: arrayDecoder(agentLedgerTrendPointDecoder),
     bucket: tokenStatsBucketDecoder,
+  },
+  {
+    defaults: {
+      cacheWriteTokens: null,
+      realConsumedTokens: null,
+      cacheHitRate: null,
+      totalCostByCurrency: [],
+      byModel: [],
+      byProvider: [],
+      byProject: [],
+    },
   },
 );
 
