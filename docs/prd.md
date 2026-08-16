@@ -293,7 +293,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 健康状态页使用可见性感知轮询（页面 hidden 暂停、visible 立即刷新、single-flight），刷新失败保留已有数据
 - 健康提醒页：以状态概览、今日活跃指标和按已启用模板渲染的习惯统计展示监控控制台，头部配置入口跳转设置页健康提醒 tab
 - 活动统计页：独立侧栏入口，展示 app 使用时长排行、窗口标题排行和 24 小时活跃分布；头部配置入口跳转设置页活动统计 tab
-- Token 统计页（`/token-stats`，侧栏 System 组）：按 24h/7d/30d 与 provider/model/project/outcome 筛选 Agent Metadata Ledger，展示 8 项 KPI（新输入 / cache_read / 输出 / 命中率 / 真实消耗 / 请求数 / 总成本 / 覆盖度）、日或小时趋势、三维拆分表与 session 明细；null 用量显示「未提供」；导出 CSV/JSON 到本机 `~/.cc-partner/exports/token-stats`。数据只走既有 ledger 聚合，不直读 JSONL，也不进 P2P。
+- Token 统计页（`/token-stats`，侧栏 System 组）：按 24h/7d/30d 与 provider/model/project/outcome 筛选 Agent Metadata Ledger，展示 8 项 KPI（新输入 / cache_read / 输出 / 命中率 / 真实消耗 / 请求数 / 总成本 / 覆盖度）、日或小时趋势、三维拆分表与 session 明细；趋势图横轴与 tooltip 按设备时区显示（聚合仍按 UTC 分桶）；null 用量显示「未提供」；导出 CSV/JSON 到本机 `~/.cc-partner/exports/token-stats`。数据只走既有 ledger 聚合，不直读 JSONL，也不进 P2P。
 - 设置页健康提醒 tab：以「健康提醒 / 提醒模板 / 免打扰 / 通知与隐私」分栏目展示总开关、有效休息、模板列表（含完成充入分钟与每日次数上限）、免打扰和系统通知
 - 设置页活动统计 tab：独立展示记录窗口标题与数据保留天数；两端保存都走完整 `update_health_config`，但各自只合并自己的字段切片，避免互相覆盖；活动切片不改 `reminders`
 - 完整配置表单：健康监测总开关、有效休息、模板触发/完成参数、通知开关、免打扰起止 24 小时制时间选择器在健康提醒 tab；记录窗口标题、数据保留天数在活动统计 tab；全屏遮罩随监测固定启用，不提供独立开关

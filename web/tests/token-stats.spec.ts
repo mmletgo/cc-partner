@@ -127,6 +127,8 @@ test.describe('E2E-TOKEN-STATS-001 Token stats journey', () => {
     await expect(page.getByTestId('token-stats-kpi-hit-rate')).toContainText('23.1%');
     await expect(page.getByTestId('token-stats-kpi-cost')).toContainText('1.20 USD');
     await expect(page.getByTestId('token-stats-session-table')).toContainText('claude-opus');
+    await expect(page.getByTestId('token-stats-trend')).toBeVisible();
+    await expect(page.getByTestId('token-stats-trend')).not.toContainText('T00:00:00Z');
 
     await page.getByTestId('token-stats-export-menu').click();
     await page.getByTestId('token-stats-export-csv').click();
