@@ -33,8 +33,18 @@ vi.mock('../../../hooks/useAttention', () => ({
   useAttention: () => ({
     snapshot: {
       generatedAt: '2026-07-14T00:00:00.000Z',
-      counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+      counts: {
+        total: 0,
+        decision: 0,
+        blocked: 0,
+        environment: 0,
+        unreadTotal: 0,
+        unreadDecision: 0,
+        unreadBlocked: 0,
+        unreadEnvironment: 0,
+      },
       items: [],
+      myDeviceId: 'shell-test',
     },
   }),
 }));

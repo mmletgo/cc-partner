@@ -230,6 +230,11 @@ pub struct AttentionItemDto {
     pub project: Option<AttentionProjectRef>,
     pub device: Option<AttentionDeviceRef>,
     pub target: AttentionTargetDto,
+    /// 本设备视角的已读时间（RFC3339）；`Some` 即已读。
+    /// 该字段由聚合阶段从 `attention_read_by_device` 注入，不参与 source 输出。
+    /// 跨设备同步通过 sync push-batch 通道传播，对端取本设备的 read_set 后覆盖回填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<String>,
 }
 
 /// 分类计数。
@@ -246,6 +251,12 @@ pub struct AttentionCountsDto {
     pub decision: u32,
     pub blocked: u32,
     pub environment: u32,
+    /// 未读（read_at 为 None 的子集）分类计数；与 `total` 同源派生。
+    /// 前端 badge 仅消费 `unread_total`；保留 `total` 为“全部”便于表格灰显展示。
+    pub unread_total: u32,
+    pub unread_decision: u32,
+    pub unread_blocked: u32,
+    pub unread_environment: u32,
 }
 
 /// Attention 快照 DTO。
@@ -261,6 +272,8 @@ pub struct AttentionSnapshotDto {
     pub generated_at: String,
     pub counts: AttentionCountsDto,
     pub items: Vec<AttentionItemDto>,
+    /// 本机 device_id（用于前端"标为未读"等回写时携带）。
+    pub my_device_id: String,
 }
 
 #[cfg(test)]
@@ -293,6 +306,7 @@ mod tests {
                 project_id: "proj-1".to_string(),
                 task_id: "remote:dev-1:task-1".to_string(),
             },
+            read_at: None,
         }
     }
 
@@ -509,8 +523,13 @@ mod tests {
                 decision: 1,
                 blocked: 0,
                 environment: 0,
+                unread_total: 0,
+                unread_decision: 0,
+                unread_blocked: 0,
+                unread_environment: 0,
             },
             items: vec![sample_item()],
+            my_device_id: String::new(),
         };
         let snapshot_json = serde_json::to_value(snapshot).unwrap();
         assert!(snapshot_json.get("generatedAt").is_some());
@@ -540,8 +559,13 @@ mod tests {
                 decision: 1,
                 blocked: 0,
                 environment: 0,
+                unread_total: 0,
+                unread_decision: 0,
+                unread_blocked: 0,
+                unread_environment: 0,
             },
             items: vec![item],
+            my_device_id: String::new(),
         };
         assert_no_backend_urls(&serde_json::to_value(snapshot).unwrap());
     }

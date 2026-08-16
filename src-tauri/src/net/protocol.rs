@@ -100,6 +100,17 @@ pub const CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1: &str = "orchestrator.experimen
 pub const CAPABILITY_ATTENTION_V1: &str = "attention.v1";
 /// Attention Inbox v2（含 Agent needsInput/failed 投影；capability 仅协议协商）。
 pub const CAPABILITY_ATTENTION_V2: &str = "attention.v2";
+/// 能力 token：v1 Attention 已读元数据跨设备 push-batch
+/// （`POST /api/sync/attention-read/push-batch`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     对端在接收已读/未读 batch 前必须确认本机已挂载 ledger 落账路由；
+///     旧版本缺失该能力时发送端静默跳过，不得把旧 Inbox 路由当同步通道。
+///     本 token 与 push-batch 路由 + `sync_request_ledger` domain=`attention_read` 原子上线。
+///
+/// Code Logic: 字符串常量，列入 `server_protocol_info()`；字典序在 `attention.v1` 之前
+///     （`attention.read.v1` < `attention.v1`）。
+pub const CAPABILITY_ATTENTION_READ_V1: &str = "attention.read.v1";
 
 /// 能力 token：v1 文件传输显式 complete/finalize 握手
 /// （`POST /api/transfer/complete/:id`）。
@@ -355,6 +366,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_PORTABLE_PROJECT_V1.to_string(),
             CAPABILITY_PORTABLE_PULL_V1.to_string(),
             CAPABILITY_AGENT_HUB_V1.to_string(),
+            CAPABILITY_ATTENTION_READ_V1.to_string(),
             CAPABILITY_ATTENTION_V1.to_string(),
             CAPABILITY_ATTENTION_V2.to_string(),
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
@@ -525,6 +537,7 @@ mod tests {
                 "agent-hub.portable-project.v1".to_string(),
                 "agent-hub.portable-pull.v1".to_string(),
                 "agent-hub.v1".to_string(),
+                "attention.read.v1".to_string(),
                 "attention.v1".to_string(),
                 "attention.v2".to_string(),
                 "cc-history.paged-sync.v1".to_string(),
@@ -552,6 +565,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PULL_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
+        assert!(info.supports(CAPABILITY_ATTENTION_READ_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1));

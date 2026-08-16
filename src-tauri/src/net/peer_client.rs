@@ -1945,6 +1945,34 @@ impl PeerClient {
             .await?;
         Ok(())
     }
+
+    /// Attention 已读元数据 push-batch。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本地 mark 成功后异步把 read/unread 推到宣告 `attention.read.v1` 的对端；
+    ///     accepted 不得大于本批条数。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/sync/attention-read/push-batch`；snake_case body。
+    pub async fn push_attention_read_batch(
+        &self,
+        base_url: &str,
+        items: &[crate::sync::attention_read_apply::AttentionReadPushItem],
+        client_request_id: &str,
+        claimed_device_id: &str,
+    ) -> Result<crate::sync::attention_read_apply::AttentionReadPushBatchResp, PeerCallError> {
+        let url = format!("{base_url}/api/sync/attention-read/push-batch");
+        let body = serde_json::json!({
+            "items": items,
+            "client_request_id": client_request_id,
+            "claimed_device_id": claimed_device_id,
+        });
+        let data: crate::sync::attention_read_apply::AttentionReadPushBatchResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
+        Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
+        Ok(data)
+    }
 }
 
 impl Default for PeerClient {

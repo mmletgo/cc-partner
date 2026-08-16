@@ -14,7 +14,7 @@ use crate::error::AppError;
 use crate::models::claude_md::ClaudeMdRow;
 use crate::models::prompt::PromptRow;
 use crate::net::peer_client::PeerCallError;
-use crate::net::protocol::CAPABILITY_SYNC_MANIFEST_V2;
+use crate::net::protocol::{CAPABILITY_ATTENTION_READ_V1, CAPABILITY_SYNC_MANIFEST_V2};
 use crate::state::AppState;
 use crate::sync::apply_merge::apply_prompt_pull_items;
 use crate::sync::protocol::{
@@ -468,6 +468,12 @@ async fn sync_device_with_domains(
 
     // 工作台项目顺序：best-effort LWW 单例，不进入 settings domain 报告。
     workbench_project_order_sync_with_peer(state, &base_url).await;
+
+    // Attention 已读：best-effort 全量 INSERT OR IGNORE 追平，不计入 succeeded_devices。
+    if protocol.supports(CAPABILITY_ATTENTION_READ_V1) {
+        crate::sync::attention_read_apply::catch_up_attention_read_with_peer(state, &base_url)
+            .await;
+    }
 
     let domains = vec![
         DomainSyncReport {

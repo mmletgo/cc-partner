@@ -27,8 +27,34 @@ const validSnapshot = {
 };
 
 describe('attention schemas', () => {
-  test('decodes normal snapshot', () => {
-    expect(attentionSnapshotDecoder.decode(validSnapshot)).toEqual(validSnapshot);
+  test('decodes normal snapshot and defaults unread/myDeviceId', () => {
+    expect(attentionSnapshotDecoder.decode(validSnapshot)).toEqual({
+      ...validSnapshot,
+      counts: {
+        ...validSnapshot.counts,
+        unreadTotal: 0,
+        unreadDecision: 0,
+        unreadBlocked: 0,
+        unreadEnvironment: 0,
+      },
+      myDeviceId: '',
+    });
+  });
+
+  test('decodes readAt and unread counts when present', () => {
+    const withRead = {
+      ...validSnapshot,
+      counts: {
+        ...validSnapshot.counts,
+        unreadTotal: 0,
+        unreadDecision: 0,
+        unreadBlocked: 0,
+        unreadEnvironment: 0,
+      },
+      items: [{ ...validSnapshot.items[0], readAt: '2026-07-13T01:00:00.000Z' }],
+      myDeviceId: 'dev-1',
+    };
+    expect(attentionSnapshotDecoder.decode(withRead)).toEqual(withRead);
   });
 
   test('malformed category fails closed', () => {

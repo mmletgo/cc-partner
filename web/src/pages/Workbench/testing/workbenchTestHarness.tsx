@@ -967,8 +967,18 @@ export interface RenderedWorkbench {
 
 const emptyAttentionSnapshot = async (): Promise<AttentionSnapshot> => ({
   generatedAt: '2026-07-11T00:00:00.000Z',
-  counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+  counts: {
+    total: 0,
+    decision: 0,
+    blocked: 0,
+    environment: 0,
+    unreadTotal: 0,
+    unreadDecision: 0,
+    unreadBlocked: 0,
+    unreadEnvironment: 0,
+  },
   items: [],
+  myDeviceId: 'device-test',
 });
 
 export function renderWorkbench(

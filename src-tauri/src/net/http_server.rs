@@ -779,11 +779,32 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/mobile/attention/v2",
             get(attention::list_attention_v2),
         )
+        .route(
+            "/api/mobile/attention/mark-read",
+            post(attention::mark_attention_read),
+        )
+        .route(
+            "/api/mobile/attention/mark-unread",
+            post(attention::mark_attention_unread),
+        )
+        .route(
+            "/api/mobile/attention/mark-all-read",
+            post(attention::mark_all_attention_read),
+        )
+        .route(
+            "/api/mobile/attention/mark-category-read",
+            post(attention::mark_attention_category_read),
+        )
         // Mobile Prompt 库只读入口：复用 PromptRepo::list（含 favorite），移动端不 toggle
         .route("/api/mobile/prompts", get(prompts::list_mobile_prompts))
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
         .route("/api/sync/pull", post(sync::sync_pull))
         .route("/api/sync/push", post(sync::sync_push))
+        // Attention 已读元数据：capability attention.read.v1 + ledger domain=attention_read
+        .route(
+            "/api/sync/attention-read/push-batch",
+            post(attention::attention_read_push_batch),
+        )
         // Prompt v2 有界同步（Task 2+3；capability sync.manifest.v2 已与 ledger 原子宣告）
         .route(
             "/api/sync/prompts/manifest-page",

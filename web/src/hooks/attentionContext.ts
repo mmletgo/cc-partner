@@ -10,16 +10,16 @@
  */
 
 import { createContext, useContext } from 'react';
-import type { AttentionSnapshot } from '@/lib/types';
+import type { AttentionCategory, AttentionSnapshot } from '@/lib/types';
 
 /**
  * Attention Provider 对外 value。
  *
  * Business Logic（为什么需要这个类型）:
- *   页面只消费 snapshot/loading/refreshing/stale/error/refresh，不关心 requestId。
+ *   页面消费 snapshot/loading 与已读写入口，不关心 requestId。
  *
  * Code Logic（字段说明）:
- *   与计划 Shared Interfaces 中的 AttentionContextValue 对齐。
+ *   mark* 写本设备 read_state；pendingReadIds 驱动乐观 busy；markError 给 StatusMessage。
  */
 export interface AttentionContextValue {
   snapshot: AttentionSnapshot | null;
@@ -29,6 +29,12 @@ export interface AttentionContextValue {
   error: Error | null;
   lastSucceededAt: string | null;
   refresh: () => Promise<void>;
+  markRead: (itemIds: string[]) => Promise<void>;
+  markUnread: (itemIds: string[]) => Promise<void>;
+  markAllRead: () => Promise<void>;
+  markCategoryRead: (category: AttentionCategory) => Promise<void>;
+  pendingReadIds: ReadonlySet<string>;
+  markError: Error | null;
 }
 
 export const AttentionContext = createContext<AttentionContextValue | null>(null);

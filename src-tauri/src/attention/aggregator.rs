@@ -37,13 +37,23 @@ pub async fn aggregate_attention_sources(
 
     // 所有 source 成功后才打 generatedAt，避免失败路径产出半成品时间戳。
     let generated_at = Utc::now().to_rfc3339();
-    let items = dedupe_and_sort(collected)?;
+    let mut items = dedupe_and_sort(collected)?;
+    // 聚合阶段为每个 item 注入本设备视角的 read_at；
+    // 读仓储失败上抛使整次快照失败（与既有 fail-closed 语义一致）。
+    let read_set = state
+        .attention_read_repo
+        .load_read_ids(state.device_id.as_str())
+        .await?;
+    for item in items.iter_mut() {
+        item.read_at = read_set.get(&item.id).cloned();
+    }
     let counts = count_items(&items);
 
     Ok(AttentionSnapshotDto {
         generated_at,
         counts,
         items,
+        my_device_id: state.device_id.as_str().to_string(),
     })
 }
 
@@ -63,11 +73,13 @@ pub fn aggregate_attention_item_batches(
     }
     let generated_at = Utc::now().to_rfc3339();
     let items = dedupe_and_sort(collected)?;
+    // 测试 / 内部复用：read_at 与 unread_* 计数保持为"全部未读"默认值。
     let counts = count_items(&items);
     Ok(AttentionSnapshotDto {
         generated_at,
         counts,
         items,
+        my_device_id: String::new(),
     })
 }
 
@@ -124,11 +136,34 @@ fn count_items(items: &[AttentionItemDto]) -> AttentionCountsDto {
     let mut decision = 0u32;
     let mut blocked = 0u32;
     let mut environment = 0u32;
+    let mut unread_decision = 0u32;
+    let mut unread_blocked = 0u32;
+    let mut unread_environment = 0u32;
+    let mut unread_total = 0u32;
     for item in items {
+        let unread = item.read_at.is_none();
+        if unread {
+            unread_total += 1;
+        }
         match item.category {
-            AttentionCategory::Decision => decision += 1,
-            AttentionCategory::Blocked => blocked += 1,
-            AttentionCategory::Environment => environment += 1,
+            AttentionCategory::Decision => {
+                decision += 1;
+                if unread {
+                    unread_decision += 1;
+                }
+            }
+            AttentionCategory::Blocked => {
+                blocked += 1;
+                if unread {
+                    unread_blocked += 1;
+                }
+            }
+            AttentionCategory::Environment => {
+                environment += 1;
+                if unread {
+                    unread_environment += 1;
+                }
+            }
         }
     }
     AttentionCountsDto {
@@ -136,6 +171,10 @@ fn count_items(items: &[AttentionItemDto]) -> AttentionCountsDto {
         decision,
         blocked,
         environment,
+        unread_total,
+        unread_decision,
+        unread_blocked,
+        unread_environment,
     }
 }
 
@@ -189,6 +228,7 @@ mod tests {
                 name: "local".to_string(),
             }),
             target,
+            read_at: None,
         }
     }
 

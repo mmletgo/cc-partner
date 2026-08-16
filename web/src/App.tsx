@@ -600,7 +600,10 @@ export default function App() {
                 <WorkbenchProjectsProvider>
                   <WorkbenchAgentHintsProvider>
                     <WorkbenchTerminalBuffersProvider>
-                      <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
+                      <AttentionProvider
+                        loadSnapshot={attentionApi.listSnapshot}
+                        mutations={attentionApi}
+                      >
                         <ScratchpadAutosaveProvider>
                           {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
                           <MainWindowOperationalNotifications />

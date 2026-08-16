@@ -35,6 +35,8 @@ pub const DOMAIN_SCRATCHPAD: &str = "scratchpad";
 ///
 /// Code Logic: 与 content_versions 复用（不在 prompt/ssh 同步链路里走）。
 pub const DOMAIN_AGENT_HUB_USER_INSTRUCTION: &str = "agent_hub_user_instruction";
+/// 领域 token：Attention 已读元数据同步。
+pub const DOMAIN_ATTENTION_READ: &str = "attention_read";
 
 /// push-batch 落库 outcome（当前仅 accepted 条数；未来可扩展 failure 明细）。
 ///

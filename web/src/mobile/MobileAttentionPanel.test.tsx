@@ -75,6 +75,12 @@ function buildContext(
     error: null,
     lastSucceededAt: null,
     refresh: vi.fn(async () => undefined),
+    markRead: vi.fn(async () => undefined),
+    markUnread: vi.fn(async () => undefined),
+    markAllRead: vi.fn(async () => undefined),
+    markCategoryRead: vi.fn(async () => undefined),
+    pendingReadIds: new Set<string>(),
+    markError: null,
     ...overrides,
   };
 }
@@ -109,8 +115,18 @@ describe('MobileAttentionPanel', () => {
   test('renders compact grouped list and navigates on tap without side-effect actions', () => {
     const snapshot: AttentionSnapshot = {
       generatedAt: '2026-07-11T10:00:00.000Z',
-      counts: { total: 1, decision: 1, blocked: 0, environment: 0 },
+      counts: {
+        total: 1,
+        decision: 1,
+        blocked: 0,
+        environment: 0,
+        unreadTotal: 1,
+        unreadDecision: 1,
+        unreadBlocked: 0,
+        unreadEnvironment: 0,
+      },
       items: [buildItem()],
+      myDeviceId: 'mobile-test',
     };
     const onOpenItem = vi.fn();
     mockAttentionValue = buildContext({
@@ -164,7 +180,17 @@ describe('MobileAttentionPanel', () => {
   test('keeps items and shows stale banner when refresh fails with snapshot', () => {
     const snapshot: AttentionSnapshot = {
       generatedAt: '2026-07-11T10:00:00.000Z',
-      counts: { total: 1, decision: 0, blocked: 1, environment: 0 },
+      counts: {
+        total: 1,
+        decision: 0,
+        blocked: 1,
+        environment: 0,
+        unreadTotal: 1,
+        unreadDecision: 0,
+        unreadBlocked: 1,
+        unreadEnvironment: 0,
+      },
+      myDeviceId: 'mobile-test',
       items: [
         buildItem({
           id: 'orchestrator:blocked:task-2',
@@ -211,25 +237,35 @@ describe('MobileAttentionPanel', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   桌面与移动端 DOM 语义一致：每行只有一个 button，动作文案为内部 span，禁止嵌套可交互控件。
+   *   打开与标已读必须是兄弟按钮，禁止把已读控件嵌进打开按钮。
    *
    * Code Logic（这个测试做什么）:
-   *   渲染单条目，断言 item button 内无 nested button / role=button，动作标签为 span。
+   *   断言打开 button 内无嵌套 button，并存在独立 toggle。
    */
-  test('each mobile attention row is a single button without nested interactive controls', () => {
+  test('each mobile attention row splits open and mark-read into sibling buttons', () => {
     const snapshot: AttentionSnapshot = {
       generatedAt: '2026-07-11T10:00:00.000Z',
-      counts: { total: 1, decision: 1, blocked: 0, environment: 0 },
+      counts: {
+        total: 1,
+        decision: 1,
+        blocked: 0,
+        environment: 0,
+        unreadTotal: 1,
+        unreadDecision: 1,
+        unreadBlocked: 0,
+        unreadEnvironment: 0,
+      },
       items: [buildItem()],
+      myDeviceId: 'mobile-test',
     };
     mockAttentionValue = buildContext({ snapshot });
     renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} />);
 
-    const row = screen.getByRole('button', { name: /Review payment edge/i });
-    expect(row.tagName).toBe('BUTTON');
-    expect(row.querySelectorAll('button').length).toBe(0);
-    expect(row.querySelectorAll('[role="button"]').length).toBe(0);
-    const action = row.querySelector('[class*="actionLabel"]');
+    const open = screen.getByTestId('attention-action-orchestrator:human-review:task-1');
+    expect(open.tagName).toBe('BUTTON');
+    expect(open.querySelectorAll('button').length).toBe(0);
+    expect(screen.getByTestId('attention-toggle-read-orchestrator:human-review:task-1')).toBeTruthy();
+    const action = open.querySelector('[class*="actionLabel"]');
     expect(action?.tagName).toBe('SPAN');
   });
 });

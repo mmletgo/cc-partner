@@ -30,8 +30,18 @@ import type { AttentionSnapshot } from '@/lib/types';
 function emptySnapshot(): AttentionSnapshot {
   return {
     generatedAt: '2026-07-11T10:00:00.000Z',
-    counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+    counts: {
+      total: 0,
+      decision: 0,
+      blocked: 0,
+      environment: 0,
+      unreadTotal: 0,
+      unreadDecision: 0,
+      unreadBlocked: 0,
+      unreadEnvironment: 0,
+    },
     items: [],
+    myDeviceId: 'api-test',
   };
 }
 

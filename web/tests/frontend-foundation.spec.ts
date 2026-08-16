@@ -61,8 +61,13 @@ async function installFoundationMocks(
         decision: attentionItems.filter((item) => item.category === 'decision').length,
         blocked: attentionItems.filter((item) => item.category === 'blocked').length,
         environment: attentionItems.filter((item) => item.category === 'environment').length,
+        unreadTotal: attentionItems.length,
+        unreadDecision: attentionItems.filter((item) => item.category === 'decision').length,
+        unreadBlocked: attentionItems.filter((item) => item.category === 'blocked').length,
+        unreadEnvironment: attentionItems.filter((item) => item.category === 'environment').length,
       },
       items: attentionItems,
+      myDeviceId: 'foundation-device',
     };
 
     const baseConfig = {
@@ -171,7 +176,17 @@ async function installFoundationMocks(
             statusChangedAt: '2026-07-14T00:00:00.000Z',
           };
         }
-        if (cmd === 'list_attention_items') return attentionSnapshot;
+        if (cmd === 'list_attention_items' || cmd === 'list_attention_items_v2') {
+          return attentionSnapshot;
+        }
+        if (
+          cmd === 'mark_attention_items_read' ||
+          cmd === 'mark_attention_items_unread' ||
+          cmd === 'mark_all_attention_items_read' ||
+          cmd === 'mark_attention_category_read'
+        ) {
+          return attentionSnapshot;
+        }
         if (cmd === 'get_config' || cmd === 'get_default_config') return baseConfig;
         if (cmd === 'get_cloud_sync_config' || cmd === 'get_default_cloud_sync_config') {
           return {
@@ -482,12 +497,13 @@ test.describe('frontend foundation smoke', () => {
     await expect(first).toBeVisible({ timeout: 15_000 });
     await expect(second).toBeVisible();
 
-    // 每行仅一个 button；动作文案是内部 span，不可单独 tab
-    await expect(first.locator('button')).toHaveCount(0);
-    await expect(first).toHaveRole('button');
-    await first.focus();
+    const firstOpen = page.getByTestId('attention-action-orchestrator:human-review:task-1');
+    const firstToggle = page.getByTestId('attention-toggle-read-orchestrator:human-review:task-1');
+    await expect(first.locator('button')).toHaveCount(2);
+    await firstOpen.focus();
     await page.keyboard.press('Tab');
-    await expect(second).toBeFocused();
+    await expect(firstToggle).toBeFocused();
+    await expect(second).not.toBeFocused();
   });
 
   test('workbench terminal tabs support arrow key roving', async ({ page }) => {

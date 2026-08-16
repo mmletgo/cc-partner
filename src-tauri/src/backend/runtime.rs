@@ -370,6 +370,7 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     crate::storage::ensure_domain_delete_epoch_columns(&pool).await?;
     // Prompt 收藏(favorite)字段：旧库幂等补齐favorite 列
     crate::storage::ensure_prompts_favorite_column(&pool).await?;
+    crate::storage::AttentionReadRepo::ensure_schema(&pool).await?;
     // N2 recovery_jobs 状态机（导出/恢复）
     crate::storage::RecoveryJobRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
@@ -494,6 +495,10 @@ pub async fn build_app_state_with_role(
         pool.clone(),
         maintenance_gate.clone(),
     ));
+    let attention_read_repo = Arc::new(crate::storage::AttentionReadRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let transfer_repo = Arc::new(TransferRepo::with_gate(
         pool.clone(),
         maintenance_gate.clone(),
@@ -595,6 +600,7 @@ pub async fn build_app_state_with_role(
         db: pool,
         maintenance_gate,
         prompt_repo,
+        attention_read_repo,
         transfer_repo,
         claude_md_repo,
         scratchpad_repo,

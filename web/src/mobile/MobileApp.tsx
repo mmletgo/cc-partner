@@ -204,7 +204,10 @@ export function MobileApp(): ReactElement {
   return (
     <WorkbenchTerminalBuffersContext.Provider value={contextValue}>
       <WorkbenchDependencyProvider>
-        <AttentionProvider loadSnapshot={loadAttentionSnapshot}>
+        <AttentionProvider
+          loadSnapshot={loadAttentionSnapshot}
+          mutations={attentionHttpApi}
+        >
           <MobileWorkbench />
         </AttentionProvider>
       </WorkbenchDependencyProvider>

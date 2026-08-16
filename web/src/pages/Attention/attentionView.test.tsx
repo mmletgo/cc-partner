@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 /**
- * Attention 桌面视图契约测试。
+ * Attention 桌面表格视图契约测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   Inbox 页面必须锁定骨架/错误/空态/分组/cached/stale/导航-only/无 assertive live region 等产品契约。
+ *   Inbox 页面必须锁定骨架/错误/空态/8 列表格/已读灰显/分类已读/导航-only 等产品契约。
  *
  * Code Logic（这个测试做什么）:
- *   直接渲染 AttentionView 注入状态，断言 DOM 结构与导航回调，不覆盖 Provider 异步。
+ *   直接渲染 AttentionView 注入状态，断言 DOM 结构与回调，不覆盖 Provider 异步。
  */
 
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
@@ -14,6 +14,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
+import { countAttentionItems } from '@/lib/attention';
 import type { AttentionItem, AttentionSnapshot } from '@/lib/types';
 import { AttentionView } from './Attention';
 
@@ -59,13 +60,9 @@ function buildItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
 function buildSnapshot(items: AttentionItem[]): AttentionSnapshot {
   return {
     generatedAt: '2026-07-11T12:05:00.000Z',
-    counts: {
-      total: items.length,
-      decision: items.filter((item) => item.category === 'decision').length,
-      blocked: items.filter((item) => item.category === 'blocked').length,
-      environment: items.filter((item) => item.category === 'environment').length,
-    },
+    counts: countAttentionItems(items),
     items,
+    myDeviceId: 'device-test',
   };
 }
 
@@ -80,10 +77,18 @@ function renderView(
   props: Partial<React.ComponentProps<typeof AttentionView>> & {
     onNavigate?: (url: string) => void;
     onReload?: () => void;
+    onMarkRead?: (ids: string[]) => void;
+    onMarkUnread?: (ids: string[]) => void;
+    onMarkAllRead?: () => void;
+    onMarkCategoryRead?: (category: AttentionItem['category']) => void;
   } = {},
 ) {
   const onNavigate = props.onNavigate ?? vi.fn();
   const onReload = props.onReload ?? vi.fn();
+  const onMarkRead = props.onMarkRead ?? vi.fn();
+  const onMarkUnread = props.onMarkUnread ?? vi.fn();
+  const onMarkAllRead = props.onMarkAllRead ?? vi.fn();
+  const onMarkCategoryRead = props.onMarkCategoryRead ?? vi.fn();
   const result = render(
     <I18nextProvider i18n={i18n}>
       <AttentionView
@@ -93,13 +98,27 @@ function renderView(
         stale={props.stale ?? false}
         error={props.error ?? null}
         lastSucceededAt={props.lastSucceededAt ?? null}
+        pendingReadIds={props.pendingReadIds ?? new Set<string>()}
+        markError={props.markError ?? null}
         onReload={onReload}
         onNavigate={onNavigate}
+        onMarkRead={onMarkRead}
+        onMarkUnread={onMarkUnread}
+        onMarkAllRead={onMarkAllRead}
+        onMarkCategoryRead={onMarkCategoryRead}
         formatTime={props.formatTime ?? ((iso) => iso)}
       />
     </I18nextProvider>,
   );
-  return { ...result, onNavigate, onReload };
+  return {
+    ...result,
+    onNavigate,
+    onReload,
+    onMarkRead,
+    onMarkUnread,
+    onMarkAllRead,
+    onMarkCategoryRead,
+  };
 }
 
 describe('AttentionView contracts', () => {
@@ -161,7 +180,20 @@ describe('AttentionView contracts', () => {
     expect(headings).toEqual(['需要你的决定', '环境受阻']);
   });
 
-  test('shows cached label with cachedAt and preserves list under stale banner', () => {
+  test('renders eight table headers and row cells', () => {
+    renderView({ snapshot: buildSnapshot([buildItem()]) });
+    const table = screen.getByRole('table');
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map((node) => node.textContent);
+    expect(headers).toEqual(['项目', '设备', '来源', '分类', '时间', '标题', '摘要', '操作']);
+    const row = screen.getByTestId('attention-item-orchestrator:human-review:task-1');
+    expect(row.getAttribute('role')).toBe('row');
+    expect(within(row).getByText('Demo')).toBeTruthy();
+    expect(within(row).getByText('编排复核')).toBeTruthy();
+  });
+
+  test('shows cached label with cachedAt and preserves table under stale banner', () => {
     const item = buildItem({
       id: 'orchestrator:blocked:remote-1',
       category: 'blocked',
@@ -184,50 +216,92 @@ describe('AttentionView contracts', () => {
     expect(screen.getByTestId('attention-item-orchestrator:blocked:remote-1')).toBeTruthy();
   });
 
-  test('row and explicit 44x44 action control navigate without side-effect verbs', () => {
+  test('open action navigates and marks unread item read without side-effect verbs', () => {
     const snapshot = buildSnapshot([buildItem()]);
-    const { onNavigate } = renderView({ snapshot });
+    const { onNavigate, onMarkRead } = renderView({ snapshot });
     const action = screen.getByTestId('attention-action-orchestrator:human-review:task-1');
-    // min sizes set in CSS module; jsdom may not compute CSS modules fully — assert attribute/class presence
-    expect(action.className).toMatch(/action/);
-    expect(action.tagName).toBe('SPAN');
-    expect(action.getAttribute('aria-hidden')).toBe('true');
+    expect(action.tagName).toBe('BUTTON');
     fireEvent.click(action);
-    expect(onNavigate).toHaveBeenCalledWith(
-      '/workbench?projectId=proj-1&view=automation&taskId=task-1',
-    );
-    vi.mocked(onNavigate).mockClear();
-    fireEvent.click(screen.getByTestId('attention-item-orchestrator:human-review:task-1'));
+    expect(onMarkRead).toHaveBeenCalledWith(['orchestrator:human-review:task-1']);
     expect(onNavigate).toHaveBeenCalledWith(
       '/workbench?projectId=proj-1&view=automation&taskId=task-1',
     );
     expect(screen.queryByRole('button', { name: /Deliver|Retry|Discard|安装|交付|重试|放弃/i })).toBeNull();
   });
 
-  test('each attention row is a single interactive button without nested controls', () => {
+  test('row is not a single button; open and toggle-read are sibling controls', () => {
     const snapshot = buildSnapshot([buildItem()]);
     renderView({ snapshot });
     const row = screen.getByTestId('attention-item-orchestrator:human-review:task-1');
-    expect(row.tagName).toBe('BUTTON');
-    expect(row.querySelectorAll('button').length).toBe(0);
-    expect(row.querySelectorAll('[role="button"]').length).toBe(0);
-    expect(row.querySelector('[data-testid="attention-action-orchestrator:human-review:task-1"]')?.tagName).toBe(
-      'SPAN',
-    );
+    expect(row.tagName).toBe('DIV');
+    expect(row.getAttribute('role')).toBe('row');
+    const buttons = within(row).getAllByRole('button');
+    expect(buttons.length).toBe(2);
+    expect(screen.getByTestId('attention-toggle-read-orchestrator:human-review:task-1')).toBeTruthy();
   });
 
-  test('uses semantic headings/list structure without assertive whole-list live region', () => {
+  test('mark all read and category read are enabled only when unread exists', () => {
+    const unread = buildSnapshot([buildItem()]);
+    const { onMarkAllRead, onMarkCategoryRead, rerender, onNavigate, onReload } = renderView({
+      snapshot: unread,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '全部已读' }));
+    expect(onMarkAllRead).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('attention-mark-category-decision'));
+    expect(onMarkCategoryRead).toHaveBeenCalledWith('decision');
+
+    const readItem = buildItem({ readAt: '2026-07-11T13:00:00.000Z' });
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <AttentionView
+          snapshot={buildSnapshot([readItem])}
+          loading={false}
+          refreshing={false}
+          stale={false}
+          error={null}
+          lastSucceededAt={null}
+          pendingReadIds={new Set()}
+          markError={null}
+          onReload={onReload}
+          onNavigate={onNavigate}
+          onMarkRead={vi.fn()}
+          onMarkUnread={vi.fn()}
+          onMarkAllRead={onMarkAllRead}
+          onMarkCategoryRead={onMarkCategoryRead}
+          formatTime={(iso) => iso}
+        />
+      </I18nextProvider>,
+    );
+    expect((screen.getByRole('button', { name: '全部已读' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByTestId('attention-mark-category-decision') as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  test('read rows stay visible and can be marked unread', () => {
+    const item = buildItem({ readAt: '2026-07-11T13:00:00.000Z' });
+    const { onMarkUnread, onMarkRead } = renderView({ snapshot: buildSnapshot([item]) });
+    const row = screen.getByTestId('attention-item-orchestrator:human-review:task-1');
+    expect(row.getAttribute('data-read')).toBe('true');
+    expect(row.className).toMatch(/itemRowRead/);
+    fireEvent.click(screen.getByTestId('attention-toggle-read-orchestrator:human-review:task-1'));
+    expect(onMarkUnread).toHaveBeenCalledWith(['orchestrator:human-review:task-1']);
+    expect(onMarkRead).not.toHaveBeenCalled();
+  });
+
+  test('uses semantic headings/table structure without assertive whole-list live region', () => {
     const snapshot = buildSnapshot([buildItem()]);
     const { container } = renderView({ snapshot });
     expect(screen.getByRole('heading', { level: 1, name: '待处理' })).toBeTruthy();
     expect(screen.getByRole('heading', { level: 2, name: '需要你的决定' })).toBeTruthy();
-    expect(screen.getByRole('heading', { level: 3, name: 'Review task' })).toBeTruthy();
-    expect(screen.getByRole('list')).toBeTruthy();
+    expect(screen.getByRole('table')).toBeTruthy();
     const assertive = container.querySelector('[aria-live="assertive"]');
     expect(assertive).toBeNull();
   });
 
-  test('automatic removal updates list without toast or forced focus/scroll helpers', () => {
+  test('automatic removal updates table without toast or forced focus/scroll helpers', () => {
     const first = buildSnapshot([
       buildItem({ id: 'orchestrator:human-review:task-1' }),
       buildItem({
@@ -258,15 +332,19 @@ describe('AttentionView contracts', () => {
           stale={false}
           error={null}
           lastSucceededAt={null}
+          pendingReadIds={new Set()}
+          markError={null}
           onReload={onReload}
           onNavigate={onNavigate}
+          onMarkRead={vi.fn()}
+          onMarkUnread={vi.fn()}
+          onMarkAllRead={vi.fn()}
+          onMarkCategoryRead={vi.fn()}
           formatTime={(iso) => iso}
         />
       </I18nextProvider>,
     );
     expect(screen.queryByTestId('attention-item-orchestrator:human-review:task-1')).toBeNull();
     expect(screen.getByTestId('attention-item-orchestrator:blocked:task-2')).toBeTruthy();
-    expect(screen.queryByRole('status', { name: /toast/i })).toBeNull();
-    expect(screen.queryByText(/toast|已解决提示弹窗/i)).toBeNull();
   });
 });

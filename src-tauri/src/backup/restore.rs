@@ -1038,6 +1038,10 @@ mod tests {
             db: pool.clone(),
             maintenance_gate: gate.clone(),
             prompt_repo: Arc::new(PromptRepo::with_gate(pool.clone(), gate.clone())),
+            attention_read_repo: Arc::new(crate::storage::AttentionReadRepo::with_gate(
+                pool.clone(),
+                gate.clone(),
+            )),
             transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
             claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
             scratchpad_repo: Arc::new(ScratchpadRepo::with_gate(pool.clone(), gate.clone())),

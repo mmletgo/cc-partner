@@ -160,6 +160,7 @@ fn project_single_agent_row(
             terminal_session_id: row.terminal_session_id.clone(),
             agent_session_id: row.id.clone(),
         },
+        read_at: None,
     })
 }
 
@@ -193,6 +194,7 @@ pub fn experiment_decision_item_contract(
             project_id: project_id.to_string(),
             experiment_id: experiment_id.to_string(),
         },
+        read_at: None,
     }
 }
 

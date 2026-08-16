@@ -16,7 +16,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { AttentionSnapshot } from '@/lib/types';
+import type { AttentionCategory, AttentionSnapshot } from '@/lib/types';
+import { applyAttentionReadState } from '@/lib/attention';
 import { classifyTransportFault, planFaultRecovery } from '@/lib/faultRecovery';
 import { AttentionContext, type AttentionContextValue } from './attentionContext';
 import { subscribeAttentionInvalidation } from './attentionInvalidation';
@@ -52,9 +53,26 @@ export const ATTENTION_LOAD_TIMEOUT_MS = 35_000;
  * Code Logic（字段说明）:
  *   loadSnapshot 返回完整 AttentionSnapshot；children 为子树。
  */
+/**
+ * Attention 已读写注入面。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   桌面走 Tauri invoke，移动走同源 HTTP，Provider 不得写死通道。
+ *
+ * Code Logic（字段说明）:
+ *   四个方法都返回服务端新 snapshot，失败抛 Error。
+ */
+export interface AttentionMutations {
+  markRead: (itemIds: string[]) => Promise<AttentionSnapshot>;
+  markUnread: (itemIds: string[]) => Promise<AttentionSnapshot>;
+  markAllRead: () => Promise<AttentionSnapshot>;
+  markCategoryRead: (category: AttentionCategory) => Promise<AttentionSnapshot>;
+}
+
 export interface AttentionProviderProps {
   children: ReactNode;
   loadSnapshot: () => Promise<AttentionSnapshot>;
+  mutations?: AttentionMutations;
 }
 
 /**
@@ -79,7 +97,11 @@ function isAttentionLoadTimeoutError(error: unknown): boolean {
  *   硬超时额外暂停自动轮询（仅 force 路径恢复）；普通失败可等下个 interval 或显式 force；
  *   可见时 setInterval 10s；hidden 暂停。
  */
-export function AttentionProvider({ children, loadSnapshot }: AttentionProviderProps) {
+export function AttentionProvider({
+  children,
+  loadSnapshot,
+  mutations,
+}: AttentionProviderProps) {
   const [state, setState] = useState<AttentionViewState>(() => createInitialAttentionState());
   const requestIdRef = useRef(0);
   const mountedRef = useRef(true);
@@ -252,6 +274,125 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
     await runLoad({ force: true });
   }, [runLoad]);
 
+  const mutationsRef = useRef(mutations);
+  mutationsRef.current = mutations;
+  const markChainRef = useRef(Promise.resolve());
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   已读写必须先乐观改 badge，再等本机仓储；失败回滚，避免徽章假降后弹回无解释。
+   *
+   * Code Logic（这个函数做什么）:
+   *   串行化 mark；对当前 snapshot 套 applyAttentionReadState；成功替换服务端 snapshot。
+   */
+  const runMark = useCallback(
+    async (
+      ids: string[],
+      read: boolean,
+      execute: () => Promise<AttentionSnapshot>,
+    ): Promise<void> => {
+      const uniqueIds = [...new Set(ids.filter((id) => id.length > 0))];
+      if (uniqueIds.length === 0) {
+        return;
+      }
+      const run = async () => {
+        if (!mountedRef.current) return;
+        let rollback: AttentionSnapshot | null = null;
+        setState((current) => {
+          rollback = current.snapshot;
+          if (!current.snapshot) return current;
+          const optimistic = applyAttentionReadState(
+            current.snapshot,
+            uniqueIds,
+            read,
+            new Date().toISOString(),
+          );
+          return attentionReducer(current, {
+            type: 'readStarted',
+            ids: uniqueIds,
+            snapshot: optimistic,
+          });
+        });
+        try {
+          const snapshot = await execute();
+          if (!mountedRef.current) return;
+          setState((current) =>
+            attentionReducer(current, { type: 'readSucceeded', snapshot, ids: uniqueIds }),
+          );
+        } catch (reason) {
+          if (!mountedRef.current) return;
+          const error = reason instanceof Error ? reason : new Error(String(reason));
+          setState((current) =>
+            attentionReducer(current, {
+              type: 'readFailed',
+              ids: uniqueIds,
+              error,
+              snapshot: rollback ?? current.snapshot,
+            }),
+          );
+          throw error;
+        }
+      };
+      const queued = markChainRef.current.then(run, run);
+      markChainRef.current = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      await queued;
+    },
+    [],
+  );
+
+  const markRead = useCallback(
+    async (itemIds: string[]) => {
+      const api = mutationsRef.current;
+      if (!api) {
+        throw new Error('Attention mutations not available');
+      }
+      await runMark(itemIds, true, () => api.markRead(itemIds));
+    },
+    [runMark],
+  );
+
+  const markUnread = useCallback(
+    async (itemIds: string[]) => {
+      const api = mutationsRef.current;
+      if (!api) {
+        throw new Error('Attention mutations not available');
+      }
+      await runMark(itemIds, false, () => api.markUnread(itemIds));
+    },
+    [runMark],
+  );
+
+  const markAllRead = useCallback(async () => {
+    const api = mutationsRef.current;
+    if (!api) {
+      throw new Error('Attention mutations not available');
+    }
+    const ids = (state.snapshot?.items ?? [])
+      .filter((item) => item.readAt == null || item.readAt === '')
+      .map((item) => item.id);
+    await runMark(ids, true, () => api.markAllRead());
+  }, [runMark, state.snapshot]);
+
+  const markCategoryRead = useCallback(
+    async (category: AttentionCategory) => {
+      const api = mutationsRef.current;
+      if (!api) {
+        throw new Error('Attention mutations not available');
+      }
+      const ids = (state.snapshot?.items ?? [])
+        .filter(
+          (item) =>
+            item.category === category && (item.readAt == null || item.readAt === ''),
+        )
+        .map((item) => item.id);
+      await runMark(ids, true, () => api.markCategoryRead(category));
+    },
+    [runMark, state.snapshot],
+  );
+
   // 首次挂载加载；卸载时使 in-flight 请求失效。
   useEffect(() => {
     queueMicrotask(() => {
@@ -348,8 +489,14 @@ export function AttentionProvider({ children, loadSnapshot }: AttentionProviderP
       error: state.error,
       lastSucceededAt: state.lastSucceededAt,
       refresh,
+      markRead,
+      markUnread,
+      markAllRead,
+      markCategoryRead,
+      pendingReadIds: state.pendingReadIds,
+      markError: state.markError,
     }),
-    [state, refresh],
+    [state, refresh, markRead, markUnread, markAllRead, markCategoryRead],
   );
 
   return <AttentionContext.Provider value={value}>{children}</AttentionContext.Provider>;

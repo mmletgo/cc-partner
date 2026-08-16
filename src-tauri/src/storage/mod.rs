@@ -8,6 +8,7 @@
 
 pub mod agent_hub_repo;
 pub mod agent_ledger_repo;
+pub mod attention_read_repo;
 pub mod battery_repo;
 pub mod cc_history_repo;
 pub mod claude_md_repo;
@@ -47,6 +48,7 @@ pub use deletion_floor_repo::DeletionFloorRepo;
 // 引用（health 模块内部），不在此 re-export，避免 unused_imports 告警。
 // begin_shared_write / lease helpers 由调用方经 `maintenance_gate::` 全路径导入，
 // 避免 re-export 在 lib/lib-test 间出现 unused_imports。
+pub use attention_read_repo::AttentionReadRepo;
 pub use maintenance_gate::DatabaseMaintenanceGate;
 pub use prompt_repo::PromptRepo;
 pub use recovery_job_repo::{RecoveryJobRepo, RecoveryJobRow};
