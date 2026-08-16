@@ -542,3 +542,5 @@ function withAttentionLoadTimeout<T>(
 // 再导出读取 hook，便于页面 `import { useAttention, AttentionProvider } from '@/hooks/useAttention'`。
 // eslint-disable-next-line react-refresh/only-export-components -- Provider 与 hook 同入口；Context 定义在 attentionContext.ts
 export { useAttention } from './attentionContext';
+// eslint-disable-next-line react-refresh/only-export-components -- 与 Provider 同入口，避免 Workbench 再加一行 import
+export { useMarkNeedsInputAttentionOnSessionFocus } from './useMarkNeedsInputAttentionOnSessionFocus';

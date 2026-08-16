@@ -90,6 +90,8 @@ export interface AgentLiveUsage {
   contextWindow?: number | null;
   /** 有效生成时长（用户→助手区间合并，毫秒）。 */
   activeDurationMs?: number | null;
+  /** 用户发出指令到本轮首条助手回复的平均毫秒。 */
+  firstTokenAvgMs?: number | null;
   extractedAt: string;
 }
 

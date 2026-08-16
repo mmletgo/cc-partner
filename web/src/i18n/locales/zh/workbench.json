@@ -793,6 +793,8 @@
   "metricsContextLength": "上下文长度",
   "metricsContextAria": "上下文使用 {{pct}}%",
   "metricsUnavailable": "未提供",
+  "metricsFirstToken": "首 token 平均",
+  "metricsCacheHit": "缓存命中率",
   "metricsContextNoWindow": "无窗口信息",
   "agentPhase": {
     "launching": "Agent 启动中",

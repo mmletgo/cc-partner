@@ -101,6 +101,7 @@ export const agentLiveUsageDecoder: Decoder<AgentLiveUsage> = objectDecoder('Age
   contextLength: optionalDecoder(nullableDecoder(numberDecoder)),
   contextWindow: optionalDecoder(nullableDecoder(numberDecoder)),
   activeDurationMs: optionalDecoder(nullableDecoder(numberDecoder)),
+  firstTokenAvgMs: optionalDecoder(nullableDecoder(numberDecoder)),
   extractedAt: agentRuntimeTimestampDecoder,
 });
 

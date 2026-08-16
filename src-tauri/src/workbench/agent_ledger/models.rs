@@ -100,6 +100,9 @@ pub struct ReliableUsageSnapshot {
     /// 不是墙钟；不落 ledger 列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_duration_ms: Option<u64>,
+    /// 用户发出指令 → 本轮第一条助手回复首次落盘 的平均毫秒；不含工具回环。不落 ledger 列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_avg_ms: Option<u64>,
 }
 
 impl ReliableUsageSnapshot {
@@ -121,6 +124,7 @@ impl ReliableUsageSnapshot {
             || self.context_length.is_some()
             || self.context_window.is_some()
             || self.active_duration_ms.is_some()
+            || self.first_token_avg_ms.is_some()
     }
 
     /// 将 cost_major + currency 无损转为 minor units；失败返回 None（不估算）。
@@ -863,6 +867,7 @@ pub fn merge_usage_monotonic(
         context_length: incoming.context_length.or(base.context_length),
         context_window: incoming.context_window.or(base.context_window),
         active_duration_ms: incoming.active_duration_ms.or(base.active_duration_ms),
+        first_token_avg_ms: incoming.first_token_avg_ms.or(base.first_token_avg_ms),
     })
 }
 

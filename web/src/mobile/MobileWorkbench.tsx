@@ -11,7 +11,7 @@ import {
   isMutationUnknown,
   WorkbenchMutationUnknownError,
 } from '@/lib/asyncState/mutationOutcome';
-import { useAttention } from '@/hooks/attentionContext';
+import { useAttention, useMarkNeedsInputAttentionOnSessionFocus } from '@/hooks/useAttention';
 import { useWorkbenchHttpEvents } from '@/hooks/useWorkbenchHttpEvents';
 import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
 import type {
@@ -316,6 +316,7 @@ export function MobileWorkbench(): ReactElement {
   const connectionStateRef = useRef<MobileConnectionState | null>(null);
   const { t } = useTranslation(['workbench', 'attention']);
   const { snapshot: attentionSnapshot, refresh: refreshAttention } = useAttention();
+  useMarkNeedsInputAttentionOnSessionFocus(activeSession?.id ?? null, panel === 'terminal');
   const attentionTotal = attentionSnapshot?.counts.total ?? null;
   const projectDetailsLoading = projectDetailStatus === 'loading';
 

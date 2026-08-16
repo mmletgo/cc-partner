@@ -215,6 +215,10 @@ function liveUsageFingerprint(
     usage.outputTokens ?? '',
     usage.cacheReadTokens ?? '',
     usage.cacheWriteTokens ?? '',
+    usage.contextLength ?? '',
+    usage.contextWindow ?? '',
+    usage.activeDurationMs ?? '',
+    usage.firstTokenAvgMs ?? '',
   ].join('|');
 }
 

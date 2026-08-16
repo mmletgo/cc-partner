@@ -36,6 +36,7 @@ struct UsageFingerprint {
     context_length: Option<u64>,
     context_window: Option<u64>,
     active_duration_ms: Option<u64>,
+    first_token_avg_ms: Option<u64>,
 }
 
 impl UsageFingerprint {
@@ -49,6 +50,7 @@ impl UsageFingerprint {
             context_length: snapshot.context_length,
             context_window: snapshot.context_window,
             active_duration_ms: snapshot.active_duration_ms,
+            first_token_avg_ms: snapshot.first_token_avg_ms,
         }
     }
 }
@@ -142,6 +144,7 @@ fn snapshot_to_dto(snapshot: &ReliableUsageSnapshot, extracted_at: &str) -> Agen
         context_length: snapshot.context_length,
         context_window: snapshot.context_window,
         active_duration_ms: snapshot.active_duration_ms,
+        first_token_avg_ms: snapshot.first_token_avg_ms,
         extracted_at: extracted_at.to_string(),
     }
 }
@@ -348,6 +351,7 @@ mod tests {
             context_length: Some(input.saturating_add(3).saturating_add(1)),
             context_window: Some(200_000),
             active_duration_ms: Some(10_000),
+            first_token_avg_ms: Some(10_000),
         }
     }
 

@@ -12,11 +12,13 @@ import { describe, expect, test } from 'vitest';
 
 import {
   buildDesktopAttentionTargetUrl,
+  collectUnreadAgentNeedsInputItemIds,
   formatAttentionBadgeCount,
   getAttentionActionI18nKey,
   groupAttentionItems,
   isIsoTimestampOnLocalDay,
   partitionAttentionItemsByLocalDay,
+  planNeedsInputAttentionAutoRead,
   protectAttentionItemOrder,
 } from './attention';
 import type { AttentionItem } from './types';
@@ -218,5 +220,86 @@ describe('partitionAttentionItemsByLocalDay', () => {
     const partition = partitionAttentionItemsByLocalDay([invalid], now);
     expect(partition.today).toHaveLength(1);
     expect(partition.earlier).toHaveLength(0);
+  });
+});
+
+describe('collectUnreadAgentNeedsInputItemIds', () => {
+  test('keeps only unread needsInput items for the focused terminal', () => {
+    const items = [
+      buildItem({
+        id: 'agent:needs-input:a1',
+        sourceKind: 'agentNeedsInput',
+        target: {
+          kind: 'agentSession',
+          projectId: 'proj-1',
+          terminalSessionId: 'term-1',
+          agentSessionId: 'a1',
+        },
+      }),
+      buildItem({
+        id: 'agent:needs-input:a2',
+        sourceKind: 'agentNeedsInput',
+        target: {
+          kind: 'agentSession',
+          projectId: 'proj-1',
+          terminalSessionId: 'term-2',
+          agentSessionId: 'a2',
+        },
+      }),
+      buildItem({
+        id: 'agent:failed:a3',
+        category: 'blocked',
+        sourceKind: 'agentFailed',
+        target: {
+          kind: 'agentSession',
+          projectId: 'proj-1',
+          terminalSessionId: 'term-1',
+          agentSessionId: 'a3',
+        },
+      }),
+      buildItem({
+        id: 'agent:needs-input:read',
+        sourceKind: 'agentNeedsInput',
+        readAt: '2026-08-16T10:00:00.000Z',
+        target: {
+          kind: 'agentSession',
+          projectId: 'proj-1',
+          terminalSessionId: 'term-1',
+          agentSessionId: 'read',
+        },
+      }),
+    ];
+
+    expect(collectUnreadAgentNeedsInputItemIds(items, 'term-1')).toEqual([
+      'agent:needs-input:a1',
+    ]);
+    expect(collectUnreadAgentNeedsInputItemIds(items, '')).toEqual([]);
+  });
+});
+
+describe('planNeedsInputAttentionAutoRead', () => {
+  test('returns nothing when hidden, missing session, or already attempted', () => {
+    const items = [
+      buildItem({
+        id: 'agent:needs-input:a1',
+        sourceKind: 'agentNeedsInput',
+        target: {
+          kind: 'agentSession',
+          projectId: 'proj-1',
+          terminalSessionId: 'term-1',
+          agentSessionId: 'a1',
+        },
+      }),
+    ];
+
+    expect(planNeedsInputAttentionAutoRead(items, 'term-1', false, new Set())).toEqual([]);
+    expect(planNeedsInputAttentionAutoRead(items, null, true, new Set())).toEqual([]);
+    expect(planNeedsInputAttentionAutoRead(undefined, 'term-1', true, new Set())).toEqual([]);
+    expect(
+      planNeedsInputAttentionAutoRead(items, 'term-1', true, new Set(['agent:needs-input:a1'])),
+    ).toEqual([]);
+    expect(planNeedsInputAttentionAutoRead(items, 'term-1', true, new Set())).toEqual([
+      'agent:needs-input:a1',
+    ]);
   });
 });
