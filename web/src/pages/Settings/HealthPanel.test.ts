@@ -76,6 +76,12 @@ describe('HealthPanel', () => {
     if (HEALTH_RANGE.retainDays.min !== 1 || HEALTH_RANGE.retainDays.max !== 3650) {
       throw new Error(`HEALTH_RANGE.retainDays expected 1..3650, got ${HEALTH_RANGE.retainDays.min}..${HEALTH_RANGE.retainDays.max}`);
     }
+    if (HEALTH_RANGE.creditMinutes.min !== 0 || HEALTH_RANGE.creditMinutes.max !== 180) {
+      throw new Error(`HEALTH_RANGE.creditMinutes expected 0..180, got ${HEALTH_RANGE.creditMinutes.min}..${HEALTH_RANGE.creditMinutes.max}`);
+    }
+    if (HEALTH_RANGE.dailyCap.min !== 0 || HEALTH_RANGE.dailyCap.max !== 99) {
+      throw new Error(`HEALTH_RANGE.dailyCap expected 0..99, got ${HEALTH_RANGE.dailyCap.min}..${HEALTH_RANGE.dailyCap.max}`);
+    }
     if (isAllDayDnd(null, null) || isAllDayDnd('22:00', null) || isAllDayDnd('22:00', '07:00')) {
       throw new Error('isAllDayDnd should only be true when both ends non-null and equal');
     }

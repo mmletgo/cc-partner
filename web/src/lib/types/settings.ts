@@ -288,6 +288,10 @@ export interface HealthReminderTemplate {
   confirmLabel: string;
   /** 统计单位（杯/次） */
   unitLabel: string;
+  /** 完成一次充入分钟；缺省回退电池配置对应来源 */
+  creditMinutes?: number | null;
+  /** 该模板每日入账次数上限；缺省回退电池配置对应来源 */
+  dailyCap?: number | null;
 }
 
 /**

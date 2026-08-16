@@ -24,16 +24,23 @@
 - `charging` | `unlimited`
 - 一键切换，不设锁。切无限不抹余额。
 - 入口：footer 26×26 圆按钮（图标表示目标态）+ 设置 tab 同一开关。
-- 首次进入充电且从未赠送：+25 分钟，账本 `credit_welcome` 一次。
+- 不再发放「首次进入充电欢迎赠送」。旧 `welcomeGrantMinutes` / `welcome_granted` 仅兼容保留。
 
-## 4. 额度（设置可改）
+## 4. 额度
+
+健康习惯额度写在每条 `HealthReminderTemplate`（`creditMinutes` / `dailyCap`），设置页健康提醒模板编辑器可改。出厂默认：
 
 | 来源 | 默认 | 日上限 |
 |------|------|--------|
 | 喝水 `water` completed | +8 分 | 6 次 |
 | 休息 `rest` completed | +20 分 | 8 次 |
 | 提肛 `kegel` completed | +10 分 | 4 次 |
-| 自定义习惯 completed | +10 分 | 6 次 |
+| 自定义习惯 completed | +10 分 | 6 次（每条模板各自计） |
+
+电池设置只改闪卡与余额上限：
+
+| 来源 | 默认 | 日上限 |
+|------|------|--------|
 | 闪卡答对 1 张 | +3 分 | 30 张 |
 
 skip / snooze / 答错 = 0。余额上限默认 240 分钟，钳制 0，不扣负。
@@ -47,9 +54,9 @@ skip / snooze / 答错 = 0。余额上限默认 240 分钟，钳制 0，不扣�
 
 ## 6. 入账挂钩
 
-`habit_records` 写入 `kind=completed` 后 credit（含 acknowledge / 手动 +1 / record_water / record_rest）。  
+`habit_records` 写入 `kind=completed` 后按该模板 `creditMinutes`/`dailyCap` credit（含 acknowledge / 手动 +1 / record_water / record_rest）。缺字段回退 `battery` 对应来源桶。  
 `submit_wordgame_answer` 且 `correct` 后 credit。  
-幂等：健康 `habit:<id>`；闪卡 `wordgame:<lemma>:<type>:<date>:<correct_today>`。
+幂等：健康 `habit:{template_id}:{row}`；日上限前缀 `habit:{template_id}:`；闪卡 `wordgame:<lemma>:<type>:<date>:<correct_today>`。
 
 ## 7. UI
 
@@ -61,7 +68,8 @@ skip / snooze / 答错 = 0。余额上限默认 240 分钟，钳制 0，不扣�
 
 ## 8. 数据
 
-- `config.json` `battery`：rewards / dailyCaps / maxBalanceMinutes / welcomeGrantMinutes。模式不进 localStorage。
+- `config.json` `health.reminders[]`：`creditMinutes` / `dailyCap`（可选；缺则回退 battery 来源桶）。
+- `config.json` `battery`：仍含 rewards / dailyCaps / maxBalanceMinutes / welcomeGrantMinutes 作闪卡、余额上限与旧模板回退；欢迎赠送不再入账。模式不进 localStorage。
 - SQLite `battery_state`（单行）+ `battery_ledger`。禁止 `sqlx::migrate!`。
 
 ## 9. 非目标

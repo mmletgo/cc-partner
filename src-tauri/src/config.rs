@@ -913,6 +913,40 @@ pub struct HealthReminderTemplate {
     pub confirm_label: String,
     /// 统计单位（杯/次）。
     pub unit_label: String,
+    /// 完成一次充入分钟；None 表示回退 `BatteryConfig` 对应来源。
+    #[serde(default)]
+    pub credit_minutes: Option<i64>,
+    /// 该模板每日入账次数上限；None 表示回退 `BatteryConfig` 对应来源。
+    #[serde(default)]
+    pub daily_cap: Option<i64>,
+}
+
+impl HealthReminderTemplate {
+    /// 解析本条模板的完成充入分钟。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧配置没有模板额度字段，必须回退到电池设置里按来源桶保存的数字。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Some` 用模板值；`None` 按 template id 映射到 `BatteryConfig::reward_minutes`。
+    pub fn resolved_credit_minutes(&self, battery: &BatteryConfig) -> i64 {
+        self.credit_minutes.unwrap_or_else(|| {
+            battery.reward_minutes(BatteryCreditSource::from_health_template_id(&self.id))
+        })
+    }
+
+    /// 解析本条模板的每日入账次数上限。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     自定义习惯不能再挤同一个全局 custom cap；旧配置仍按来源桶回退。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Some` 用模板值；`None` 按 template id 映射到 `BatteryConfig::daily_cap`。
+    pub fn resolved_daily_cap(&self, battery: &BatteryConfig) -> i64 {
+        self.daily_cap.unwrap_or_else(|| {
+            battery.daily_cap(BatteryCreditSource::from_health_template_id(&self.id))
+        })
+    }
 }
 
 /// 健康提醒配置(久坐监测 + 可配置提醒模板)。
@@ -1028,6 +1062,7 @@ pub fn seed_health_reminders_from_legacy(
     work_window_seconds: i64,
     water_interval_seconds: i64,
 ) -> Vec<HealthReminderTemplate> {
+    let battery = BatteryConfig::default();
     vec![
         HealthReminderTemplate {
             id: HEALTH_REMINDER_WATER_ID.into(),
@@ -1043,6 +1078,8 @@ pub fn seed_health_reminders_from_legacy(
             body: "记得补充水分,喝口水再继续。".into(),
             confirm_label: "已喝水".into(),
             unit_label: "杯".into(),
+            credit_minutes: Some(battery.reward_minutes(BatteryCreditSource::Water)),
+            daily_cap: Some(battery.daily_cap(BatteryCreditSource::Water)),
         },
         HealthReminderTemplate {
             id: HEALTH_REMINDER_REST_ID.into(),
@@ -1058,6 +1095,8 @@ pub fn seed_health_reminders_from_legacy(
             body: "连续工作已久,站起来走走、伸展一下吧。".into(),
             confirm_label: "开始休息".into(),
             unit_label: "次".into(),
+            credit_minutes: Some(battery.reward_minutes(BatteryCreditSource::Rest)),
+            daily_cap: Some(battery.daily_cap(BatteryCreditSource::Rest)),
         },
         HealthReminderTemplate {
             id: HEALTH_REMINDER_KEGEL_ID.into(),
@@ -1073,6 +1112,8 @@ pub fn seed_health_reminders_from_legacy(
             body: "坐下太久，做一组短动作再继续。".into(),
             confirm_label: "开始".into(),
             unit_label: "次".into(),
+            credit_minutes: Some(battery.reward_minutes(BatteryCreditSource::Kegel)),
+            daily_cap: Some(battery.daily_cap(BatteryCreditSource::Kegel)),
         },
     ]
 }

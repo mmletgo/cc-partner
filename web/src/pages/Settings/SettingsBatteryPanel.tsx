@@ -59,7 +59,7 @@ function clampInt(raw: number, min: number, max: number): number {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   用户要在设置里改模式、看剩余、改各来源分钟与日上限、看流水。
+ *   用户要在设置里改模式、看剩余、改闪卡额度与余额上限、看流水。健康额度在提醒模板上。
  *
  * Code Logic（这个组件做什么）:
  *   见文件头。hooks 全部在 early return 之前。
@@ -236,54 +236,6 @@ export function SettingsBatteryPanel(): ReactElement {
           ) : (
             <div className={styles.healthFieldGrid}>
               <NumberField
-                label={t('settings.waterMinutes')}
-                value={draft.rewards.waterMinutes}
-                min={0}
-                max={180}
-                onChange={(waterMinutes) =>
-                  patchDraft({
-                    ...draft,
-                    rewards: { ...draft.rewards, waterMinutes },
-                  })
-                }
-              />
-              <NumberField
-                label={t('settings.restMinutes')}
-                value={draft.rewards.restMinutes}
-                min={0}
-                max={180}
-                onChange={(restMinutes) =>
-                  patchDraft({
-                    ...draft,
-                    rewards: { ...draft.rewards, restMinutes },
-                  })
-                }
-              />
-              <NumberField
-                label={t('settings.kegelMinutes')}
-                value={draft.rewards.kegelMinutes}
-                min={0}
-                max={180}
-                onChange={(kegelMinutes) =>
-                  patchDraft({
-                    ...draft,
-                    rewards: { ...draft.rewards, kegelMinutes },
-                  })
-                }
-              />
-              <NumberField
-                label={t('settings.customMinutes')}
-                value={draft.rewards.customMinutes}
-                min={0}
-                max={180}
-                onChange={(customMinutes) =>
-                  patchDraft({
-                    ...draft,
-                    rewards: { ...draft.rewards, customMinutes },
-                  })
-                }
-              />
-              <NumberField
                 label={t('settings.flashcardMinutes')}
                 value={draft.rewards.flashcardMinutes}
                 min={0}
@@ -296,6 +248,15 @@ export function SettingsBatteryPanel(): ReactElement {
                 }
               />
               <NumberField
+                label={t('settings.flashcardCap')}
+                value={draft.dailyCaps.flashcard}
+                min={0}
+                max={99}
+                onChange={(flashcard) =>
+                  patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, flashcard } })
+                }
+              />
+              <NumberField
                 label={t('settings.maxBalance')}
                 value={draft.maxBalanceMinutes}
                 min={30}
@@ -304,72 +265,8 @@ export function SettingsBatteryPanel(): ReactElement {
                   patchDraft({ ...draft, maxBalanceMinutes })
                 }
               />
-              <NumberField
-                label={t('settings.welcomeGrant')}
-                value={draft.welcomeGrantMinutes}
-                min={0}
-                max={180}
-                onChange={(welcomeGrantMinutes) =>
-                  patchDraft({ ...draft, welcomeGrantMinutes })
-                }
-              />
             </div>
           )}
-        </Card.Body>
-      </Card>
-
-      <Card variant="flat" padding="md">
-        <Card.Header>
-          <h2 className={styles.sectionTitle}>{t('settings.capsTitle')}</h2>
-        </Card.Header>
-        <Card.Body padding="md">
-          <div className={styles.healthFieldGrid}>
-            <NumberField
-              label={t('settings.waterCap')}
-              value={draft.dailyCaps.water}
-              min={0}
-              max={99}
-              onChange={(water) =>
-                patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, water } })
-              }
-            />
-            <NumberField
-              label={t('settings.restCap')}
-              value={draft.dailyCaps.rest}
-              min={0}
-              max={99}
-              onChange={(rest) =>
-                patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, rest } })
-              }
-            />
-            <NumberField
-              label={t('settings.kegelCap')}
-              value={draft.dailyCaps.kegel}
-              min={0}
-              max={99}
-              onChange={(kegel) =>
-                patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, kegel } })
-              }
-            />
-            <NumberField
-              label={t('settings.customCap')}
-              value={draft.dailyCaps.custom}
-              min={0}
-              max={99}
-              onChange={(custom) =>
-                patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, custom } })
-              }
-            />
-            <NumberField
-              label={t('settings.flashcardCap')}
-              value={draft.dailyCaps.flashcard}
-              min={0}
-              max={99}
-              onChange={(flashcard) =>
-                patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, flashcard } })
-              }
-            />
-          </div>
           <div className={styles.inputRow} style={{ marginTop: 'var(--space-5)' }}>
             <Button
               variant="secondary"

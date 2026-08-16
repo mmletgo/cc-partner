@@ -513,7 +513,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 - **功能定位**：自我约束开关。充电模式用健康 completed / 闪卡答对换工作分钟；无限模式不扣。余额权威在 SQLite，额度数字在 `config.json` `battery`。
 - **扣时**：仅 `charging && remaining>0`；前端每窗 `report_battery_focus({windowLabel,consuming})`，后端对 ≥1 消耗窗按 1× 墙钟结算；余额 0 后冻结。不拦 HTTP/WS/CLI/手机，不杀已跑 Agent。
-- **入账**：`persist_habit_event_by_id` 且 `kind=completed`；`submit_wordgame_answer` 且 `correct`。skip/snooze/答错 = 0。幂等 `source_id`；日上限与余额上限在 credit 内强制。首次切充电且未赠送：`welcome_grant`（每日重置在前，通常钳 0 不入账）。
+- **入账**：`persist_habit_event_by_id` 且 `kind=completed` 时按模板 `credit_minutes`/`daily_cap`（缺则回退 `BatteryConfig` 对应来源）走 `credit_health_habit`；`source_id`=`habit:{template_id}:{row}`，日上限前缀 `habit:{template_id}:`。`submit_wordgame_answer` 且 `correct` 仍走 flashcard `credit`。skip/snooze/答错 = 0。余额上限在 credit 内强制。不再发放首次充电欢迎赠送。
 - **每日重置**：每日本地时间 8:00（`policy::DAILY_RESET_HOUR` 固定常量）把 `remaining_ms` 置为 `max_balance_minutes` 满值，与当前模式无关；`battery_state.last_daily_reset_at` 记录已重置到的周期边界，`get_snapshot/set_mode/credit/report_focus` 四入口经 `evaluate_daily_reset` 惰性判定——错过 8 点在下次任意入口调用时补账、同周期不重复，无后台定时器。余额实际变化记 `daily_reset` 流水（幂等键 `daily_reset:<boundary>`，并发双触发只落一条）；`today_totals` 排除该 kind（今日已充只统计主动赚取）。旧表由 `ensure_schema` PRAGMA 检查补 `last_daily_reset_at INTEGER NOT NULL DEFAULT 0` 列。
 - **验证**：`cargo test --locked battery --lib`。
 

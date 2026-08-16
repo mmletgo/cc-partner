@@ -208,6 +208,8 @@ mod tests {
             body: "b".into(),
             confirm_label: "ok".into(),
             unit_label: "次".into(),
+            credit_minutes: None,
+            daily_cap: None,
         }
     }
 
@@ -226,6 +228,8 @@ mod tests {
             body: "b".into(),
             confirm_label: "开始".into(),
             unit_label: "次".into(),
+            credit_minutes: None,
+            daily_cap: None,
         }
     }
 

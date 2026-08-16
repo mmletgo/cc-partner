@@ -47,6 +47,14 @@ pub const REMINDER_TITLE_MAX_CHARS: usize = 40;
 pub const REMINDER_BODY_MAX_CHARS: usize = 200;
 /// 按钮/单位文案上限。
 pub const REMINDER_LABEL_MAX_CHARS: usize = 20;
+/// 模板完成充入分钟下限。
+pub const CREDIT_MINUTES_MIN: i64 = 0;
+/// 模板完成充入分钟上限。
+pub const CREDIT_MINUTES_MAX: i64 = 180;
+/// 模板每日入账次数下限。
+pub const DAILY_CAP_MIN: i64 = 0;
+/// 模板每日入账次数上限。
+pub const DAILY_CAP_MAX: i64 = 99;
 
 /// 校验失败时的稳定字段码 + 中文消息（内部用，供 daemon 日志与 AppError 映射）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +315,23 @@ fn validate_reminder_template(
         REMINDER_LABEL_MAX_CHARS,
     )?;
     reject_too_long("unitLabel", &template.unit_label, REMINDER_LABEL_MAX_CHARS)?;
+
+    if let Some(minutes) = template.credit_minutes {
+        if !(CREDIT_MINUTES_MIN..=CREDIT_MINUTES_MAX).contains(&minutes) {
+            return Err(HealthFieldError::new(
+                "health.reminders",
+                format!("[{idx}] creditMinutes 必须在 {CREDIT_MINUTES_MIN}..={CREDIT_MINUTES_MAX}"),
+            ));
+        }
+    }
+    if let Some(cap) = template.daily_cap {
+        if !(DAILY_CAP_MIN..=DAILY_CAP_MAX).contains(&cap) {
+            return Err(HealthFieldError::new(
+                "health.reminders",
+                format!("[{idx}] dailyCap 必须在 {DAILY_CAP_MIN}..={DAILY_CAP_MAX}"),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -777,6 +802,8 @@ mod tests {
             body: "活动一下再继续。".into(),
             confirm_label: "完成".into(),
             unit_label: "次".into(),
+            credit_minutes: None,
+            daily_cap: None,
         }
     }
 
@@ -806,6 +833,14 @@ mod tests {
         let mut session = base_cfg();
         template_by_id_mut(&mut session, "kegel").session_seconds = Some(9);
         assert!(validate_health_config(&session).is_err());
+
+        let mut credit = base_cfg();
+        template_by_id_mut(&mut credit, "water").credit_minutes = Some(181);
+        assert!(validate_health_config(&credit).is_err());
+
+        let mut cap = base_cfg();
+        template_by_id_mut(&mut cap, "rest").daily_cap = Some(100);
+        assert!(validate_health_config(&cap).is_err());
 
         let mut name = base_cfg();
         template_by_id_mut(&mut name, "water").name = "x".repeat(41);
