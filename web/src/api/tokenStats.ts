@@ -26,6 +26,7 @@ import type {
   AgentLedgerSummary,
   ExportFormat,
 } from '@/lib/types/tokenStats';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { invoke, invokeDecoded } from './client';
 
 /**
@@ -143,6 +144,23 @@ export const tokenStatsApi = {
     return invoke<string>(TOKEN_STATS_COMMANDS.export, {
       req: { ...filterToSummarizeReq(filter), format },
     });
+  },
+
+  /**
+   * 在系统文件管理器中显示导出文件。
+   *
+   * Business Logic（为什么需要）:
+   *   导出成功后用户要立刻打开访达/资源管理器核对 CSV/JSON，不应自己拼路径。
+   *
+   * Code Logic（做什么）:
+   *   非空绝对路径交给 plugin-opener `revealItemInDir`；空路径 fail-closed。
+   */
+  revealExport: async (path: string): Promise<void> => {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      throw new Error('export path is empty');
+    }
+    await revealItemInDir(trimmed);
   },
 };
 

@@ -143,6 +143,7 @@ function renderView(partial: Partial<TokenStatsViewProps> = {}) {
     onLoadMore: vi.fn(),
     onRefresh: vi.fn(),
     onExport: vi.fn(),
+    onRevealExport: vi.fn(),
     onDismissExport: vi.fn(),
     ...partial,
   };
@@ -198,7 +199,11 @@ describe('TokenStatsView', () => {
   it('切 30d chip 与 Load more / Export 都会回调', () => {
     const { props } = renderView();
     fireEvent.click(screen.getByTestId('token-stats-window-30d'));
-    expect(props.onChangeFilter).toHaveBeenCalledWith({ window: '30d' });
+    expect(props.onChangeFilter).toHaveBeenCalledWith({
+      window: '30d',
+      startedAfter: null,
+      startedBefore: null,
+    });
 
     fireEvent.click(screen.getByTestId('token-stats-load-more'));
     expect(props.onLoadMore).toHaveBeenCalledTimes(1);
@@ -206,6 +211,35 @@ describe('TokenStatsView', () => {
     fireEvent.click(screen.getByTestId('token-stats-export-menu'));
     fireEvent.click(screen.getByTestId('token-stats-export-csv'));
     expect(props.onExport).toHaveBeenCalledWith('csv');
+  });
+
+  it('自定义区间把本地时间转成 RFC3339 并清预设窗', () => {
+    const { props } = renderView();
+    fireEvent.click(screen.getByTestId('token-stats-window-custom'));
+    expect(props.onChangeFilter).toHaveBeenCalledWith({ window: null });
+
+    const { props: customProps } = renderView({ filter: { window: null } });
+    fireEvent.change(screen.getByTestId('token-stats-custom-start'), {
+      target: { value: '2026-06-01T08:00' },
+    });
+    const patch = (customProps.onChangeFilter as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as {
+      startedAfter: string | null;
+      window: null;
+    };
+    expect(patch.window).toBeNull();
+    expect(patch.startedAfter).toMatch(/^2026-06-0[12]T/);
+  });
+
+  it('导出成功可 reveal', () => {
+    const { props } = renderView({ lastExportPath: '/tmp/x.csv' });
+    fireEvent.click(screen.getByTestId('token-stats-export-reveal'));
+    expect(props.onRevealExport).toHaveBeenCalledTimes(1);
+  });
+
+  it('reveal 失败保留路径并显示 revealFailed', () => {
+    renderView({ lastExportPath: '/tmp/x.csv', exportError: 'no finder' });
+    expect(screen.getByTestId('token-stats-export-toast').textContent).toContain('无法在访达中显示');
+    expect(screen.getByTestId('token-stats-export-reveal')).toBeTruthy();
   });
 
   it('stale 横幅展示并可重试', () => {

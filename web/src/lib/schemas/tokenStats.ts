@@ -115,7 +115,7 @@ export const currencyAmountDecoder: Decoder<CurrencyAmount> = objectDecoder('Cur
 export const agentLedgerFiltersDecoder: Decoder<AgentLedgerFilters> = objectDecoder(
   'AgentLedgerFilters',
   {
-    window: optionalDecoder(tokenStatsWindowDecoder),
+    window: optionalDecoder(nullableDecoder(tokenStatsWindowDecoder)),
     projectId: optionalDecoder(nullableDecoder(stringDecoder)),
     providerIds: optionalDecoder(nullableDecoder(arrayDecoder(stringDecoder))),
     modelIds: optionalDecoder(nullableDecoder(arrayDecoder(stringDecoder))),

@@ -488,7 +488,7 @@ impl TrendBucket {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentLedgerFilters {
-    /// 时间窗：None 视为 7d 兜底
+    /// 时间窗：None 视为 7d 兜底（started_after/before 非空时不套预设窗）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<LedgerWindow>,
     /// 可选 project 过滤（与 project_ids 互斥；同时给 → project_ids 优先）
@@ -509,10 +509,10 @@ pub struct AgentLedgerFilters {
     /// 可选 outcome 过滤
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<AgentLedgerOutcome>,
-    /// 可选 started_at 下界（含）RFC3339
+    /// 自定义区间下界（含）RFC3339；与 list/export 对齐，落 ended_at
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_after: Option<String>,
-    /// 可选 started_at 上界（含）RFC3339
+    /// 自定义区间上界（含）RFC3339；与 list/export 对齐，落 ended_at
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_before: Option<String>,
     /// 可选桶粒度显式指定；None → 按 window 推导

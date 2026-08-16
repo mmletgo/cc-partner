@@ -463,6 +463,71 @@ mod batch_tests {
         assert_eq!(s.sessions, 0);
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     自定义区间必须覆盖 7d 之外的历史行，且不得再 AND 默认 7d。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     一行 8 天前 + 一行当天 → 默认 7d 只计 1；started_after/before 覆盖 8 天前则 sessions=2。
+    #[tokio::test]
+    async fn summarize_with_filters_custom_range_skips_default_window() {
+        let repo = fixture().await;
+        repo.finalize(AgentLedgerFinalizeInput {
+            agent_session_id: "old".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            provider_id: "claudeCodeVisible".into(),
+            model_id: None,
+            started_at: "2026-07-07T12:00:00+00:00".into(),
+            ended_at: "2026-07-07T12:01:00+00:00".into(),
+            outcome: AgentLedgerOutcome::Completed,
+            usage: None,
+            terminal_title: None,
+        })
+        .await
+        .unwrap();
+        repo.finalize(AgentLedgerFinalizeInput {
+            agent_session_id: "new".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            provider_id: "claudeCodeVisible".into(),
+            model_id: None,
+            started_at: "2026-07-15T12:00:00+00:00".into(),
+            ended_at: "2026-07-15T12:01:00+00:00".into(),
+            outcome: AgentLedgerOutcome::Completed,
+            usage: None,
+            terminal_title: None,
+        })
+        .await
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let defaulted = summarize_with_filters(
+            &repo,
+            AgentLedgerFilters {
+                window: None,
+                ..Default::default()
+            },
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(defaulted.sessions, 1);
+        let custom = summarize_with_filters(
+            &repo,
+            AgentLedgerFilters {
+                window: None,
+                started_after: Some("2026-07-01T00:00:00+00:00".into()),
+                started_before: Some("2026-07-15T13:00:00+00:00".into()),
+                ..Default::default()
+            },
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(custom.sessions, 2);
+    }
+
     /// Business Logic: summary_bucket 推导规则。
     /// Code Logic: 显式 bucket 优先；Hours24 → Hour；其它 → Day。
     #[test]

@@ -7,11 +7,12 @@
     "window": {
       "24h": "最近 24 小时",
       "7d": "最近 7 天",
-      "30d": "最近 30 天"
+      "30d": "最近 30 天",
+      "custom": "自定义"
     },
     "customRangeLabel": "自定义区间",
-    "customStart": "起始时间（RFC3339，可选）",
-    "customEnd": "结束时间（RFC3339，可选）",
+    "customStart": "起始时间",
+    "customEnd": "结束时间",
     "providerLabel": "Provider",
     "modelLabel": "模型",
     "projectLabel": "项目",
@@ -96,6 +97,7 @@
     "success": "已导出到 {{path}}",
     "failure": "导出失败：{{message}}",
     "reveal": "在访达中显示",
+    "revealFailed": "无法在访达中显示：{{message}}",
     "close": "关闭"
   },
   "errors": {

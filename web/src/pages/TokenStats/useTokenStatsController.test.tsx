@@ -27,6 +27,7 @@ vi.mock('@/api/tokenStats', () => ({
     list: vi.fn(),
     clear: vi.fn(),
     export: vi.fn(),
+    revealExport: vi.fn(),
   },
 }));
 
@@ -37,6 +38,7 @@ const mockedApi = tokenStatsApi as unknown as {
   summarize: ReturnType<typeof vi.fn>;
   list: ReturnType<typeof vi.fn>;
   export: ReturnType<typeof vi.fn>;
+  revealExport: ReturnType<typeof vi.fn>;
 };
 
 const SUMMARY: AgentLedgerSummary = {
@@ -95,6 +97,7 @@ describe('useTokenStatsController', () => {
     mockedApi.summarize.mockReset();
     mockedApi.list.mockReset();
     mockedApi.export.mockReset();
+    mockedApi.revealExport.mockReset();
     mockedApi.summarize.mockResolvedValue(SUMMARY);
     mockedApi.list.mockResolvedValue(PAGE);
   });
@@ -225,5 +228,26 @@ describe('useTokenStatsController', () => {
     });
     // 失败时清空 lastExportPath
     expect(result.current.lastExportPath).toBeNull();
+  });
+
+  it('onRevealExport 调 revealExport；失败写入 exportError 并保留路径', async () => {
+    mockedApi.export.mockResolvedValueOnce('/tmp/x.csv');
+    mockedApi.revealExport.mockRejectedValueOnce(new Error('no finder'));
+    const { result } = renderHook(() => useTokenStatsController());
+    await waitFor(() => expect(result.current.summary).toEqual(SUMMARY));
+
+    await act(async () => {
+      result.current.onExport('csv');
+    });
+    await waitFor(() => expect(result.current.lastExportPath).toBe('/tmp/x.csv'));
+
+    await act(async () => {
+      result.current.onRevealExport();
+    });
+    await waitFor(() => {
+      expect(mockedApi.revealExport).toHaveBeenCalledWith('/tmp/x.csv');
+      expect(result.current.exportError).toMatch(/no finder/);
+    });
+    expect(result.current.lastExportPath).toBe('/tmp/x.csv');
   });
 });

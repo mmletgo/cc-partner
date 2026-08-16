@@ -1368,9 +1368,10 @@ fn derive_bucket(filters: &AgentLedgerFilters) -> TrendBucket {
 ///     任何 IN 子句必须用占位符以防注入。
 ///
 /// Code Logic:
-///     1) 时间窗（window→start/end）；2) started_after/before；3) project_id；
-///     4) worktree_id；5) outcome；6) provider_ids / model_ids / project_ids IN(?,?,…)；
-///     7) clear watermark；末尾追加 extra_clauses。
+///     1) 预设 window→ended_at；若 started_after/before 非空则改用 ended_at 自定义区间
+///        （不再 AND 默认 7d，避免自定义被裁剪）；2) project_id；
+///     3) worktree_id；4) outcome；5) provider_ids / model_ids / project_ids IN(?,?,…)；
+///     6) clear watermark；末尾追加 extra_clauses。
 fn build_where(
     filters: &AgentLedgerFilters,
     extra_clauses: &[&str],
@@ -1379,34 +1380,35 @@ fn build_where(
     let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<BindValue> = Vec::new();
 
-    // 1) 时间窗（window→start/end，None→Days7）
-    let window = filters.window.unwrap_or(LedgerWindow::Days7);
-    let start = now - ChronoDuration::seconds(window.duration_secs() as i64);
-    let start_s = start.to_rfc3339();
-    let now_s = now.to_rfc3339();
-    clauses.push("ended_at >= ?".into());
-    binds.push(BindValue::Text(start_s));
-    clauses.push("ended_at <= ?".into());
-    binds.push(BindValue::Text(now_s));
-
-    // 2) started_after/before
-    if let Some(after) = filters
+    let custom_after = filters
         .started_after
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        clauses.push("started_at >= ?".into());
-        binds.push(BindValue::Text(after.to_string()));
-    }
-    if let Some(before) = filters
+        .filter(|s| !s.is_empty());
+    let custom_before = filters
         .started_before
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        clauses.push("started_at <= ?".into());
-        binds.push(BindValue::Text(before.to_string()));
+        .filter(|s| !s.is_empty());
+    let has_custom_range = custom_after.is_some() || custom_before.is_some();
+
+    // 1) 预设窗用 ended_at；自定义区间同样落 ended_at，与 list/export 对齐。
+    if has_custom_range {
+        if let Some(after) = custom_after {
+            clauses.push("ended_at >= ?".into());
+            binds.push(BindValue::Text(after.to_string()));
+        }
+        if let Some(before) = custom_before {
+            clauses.push("ended_at <= ?".into());
+            binds.push(BindValue::Text(before.to_string()));
+        }
+    } else {
+        let window = filters.window.unwrap_or(LedgerWindow::Days7);
+        let start = now - ChronoDuration::seconds(window.duration_secs() as i64);
+        clauses.push("ended_at >= ?".into());
+        binds.push(BindValue::Text(start.to_rfc3339()));
+        clauses.push("ended_at <= ?".into());
+        binds.push(BindValue::Text(now.to_rfc3339()));
     }
 
     // 3) project_id（与 project_ids 互斥，多值优先）

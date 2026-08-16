@@ -48,8 +48,8 @@ export interface CurrencyAmount {
  *   providerIds/modelIds/projectIds 既可 null 也可缺失。
  */
 export interface AgentLedgerFilters {
-  /** 时间窗（缺省由后端推导为 7d）。 */
-  window?: TokenStatsWindow;
+  /** 时间窗（缺省由后端推导为 7d；null = 自定义区间，不再套预设窗）。 */
+  window?: TokenStatsWindow | null;
   /** 单项目筛选；null/缺省 = 全项目。 */
   projectId?: string | null;
   /** 多 provider；当前 list 只取 [0]，summary 全量 IN。 */

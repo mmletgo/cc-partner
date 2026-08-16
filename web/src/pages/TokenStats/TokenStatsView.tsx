@@ -38,6 +38,7 @@ import type {
   CurrencyAmount,
 } from '@/lib/types/tokenStats';
 import styles from './TokenStats.module.css';
+import { datetimeLocalFromRfc3339, rfc3339FromDatetimeLocal } from './tokenStatsTime';
 
 /** view 使用的 controller 输出（避免 view 直接依赖 hook 文件）。 */
 export interface TokenStatsViewProps {
@@ -54,6 +55,7 @@ export interface TokenStatsViewProps {
   onLoadMore(): void;
   onRefresh(): void;
   onExport(format: 'csv' | 'json'): void;
+  onRevealExport(): void;
   onDismissExport(): void;
 }
 
@@ -218,6 +220,7 @@ export function TokenStatsView({
   onLoadMore,
   onRefresh,
   onExport,
+  onRevealExport,
   onDismissExport,
 }: TokenStatsViewProps) {
   const { t, i18n } = useTranslation(['tokenStats', 'common']);
@@ -501,7 +504,28 @@ export function TokenStatsView({
 
       {exportError || lastExportPath ? (
         <div className={styles.toast} aria-live="polite" data-testid="token-stats-export-toast">
-          {exportError ? (
+          {exportError && lastExportPath ? (
+            <StatusMessage
+              tone="danger"
+              action={
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={onRevealExport}
+                    data-testid="token-stats-export-reveal"
+                  >
+                    {t('tokenStats:export.reveal')}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={onDismissExport}>
+                    {t('tokenStats:export.close')}
+                  </Button>
+                </>
+              }
+            >
+              {t('tokenStats:export.revealFailed', { message: exportError })}
+            </StatusMessage>
+          ) : exportError ? (
             <StatusMessage
               tone="danger"
               action={
@@ -516,9 +540,19 @@ export function TokenStatsView({
             <StatusMessage
               tone="success"
               action={
-                <Button variant="secondary" size="sm" onClick={onDismissExport}>
-                  {t('tokenStats:export.close')}
-                </Button>
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={onRevealExport}
+                    data-testid="token-stats-export-reveal"
+                  >
+                    {t('tokenStats:export.reveal')}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={onDismissExport}>
+                    {t('tokenStats:export.close')}
+                  </Button>
+                </>
               }
             >
               {t('tokenStats:export.success', { path: lastExportPath })}
@@ -558,12 +592,52 @@ function FilterBar({
             variant={filter.window === item.key ? 'primary' : 'secondary'}
             size="sm"
             data-testid={`token-stats-window-${item.key}`}
-            onClick={() => onChange({ window: item.key })}
+            onClick={() =>
+              onChange({ window: item.key, startedAfter: null, startedBefore: null })
+            }
           >
             {item.label}
           </Button>
         ))}
+        <Button
+          variant={filter.window == null ? 'primary' : 'secondary'}
+          size="sm"
+          data-testid="token-stats-window-custom"
+          onClick={() => onChange({ window: null })}
+        >
+          {t('tokenStats:filters.window.custom')}
+        </Button>
       </div>
+      {filter.window == null ? (
+        <div className={styles.filterGroup} role="group" aria-label={t('tokenStats:filters.customRangeLabel')}>
+          <label className={styles.filterLabel}>
+            <span>{t('tokenStats:filters.customStart')}</span>
+            <input
+              type="datetime-local"
+              className={styles.filterSelect}
+              data-testid="token-stats-custom-start"
+              aria-label={t('tokenStats:filters.customStart')}
+              value={datetimeLocalFromRfc3339(filter.startedAfter)}
+              onChange={(event) =>
+                onChange({ window: null, startedAfter: rfc3339FromDatetimeLocal(event.target.value) })
+              }
+            />
+          </label>
+          <label className={styles.filterLabel}>
+            <span>{t('tokenStats:filters.customEnd')}</span>
+            <input
+              type="datetime-local"
+              className={styles.filterSelect}
+              data-testid="token-stats-custom-end"
+              aria-label={t('tokenStats:filters.customEnd')}
+              value={datetimeLocalFromRfc3339(filter.startedBefore)}
+              onChange={(event) =>
+                onChange({ window: null, startedBefore: rfc3339FromDatetimeLocal(event.target.value) })
+              }
+            />
+          </label>
+        </div>
+      ) : null}
       <label className={styles.filterLabel}>
         <span>{t('tokenStats:filters.outcomeLabel')}</span>
         <select

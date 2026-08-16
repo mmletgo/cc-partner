@@ -128,6 +128,29 @@ test.describe('E2E-TOKEN-STATS-001 Token stats journey', () => {
     await expect(page.getByTestId('token-stats-kpi-cost')).toContainText('1.20 USD');
     await expect(page.getByTestId('token-stats-session-table')).toContainText('claude-opus');
 
+    await page.getByTestId('token-stats-export-menu').click();
+    await page.getByTestId('token-stats-export-csv').click();
+    await expect(page.getByTestId('token-stats-export-toast')).toContainText(
+      '/tmp/cc-partner-exports/token-stats.csv',
+    );
+    await expect(page.getByTestId('token-stats-export-reveal')).toBeVisible();
+    await page.getByRole('button', { name: '关闭' }).click();
+
+    await page.getByTestId('token-stats-window-custom').click();
+    await page.getByTestId('token-stats-custom-start').fill('2026-06-01T00:00');
+    await expect
+      .poll(() =>
+        backendHarness
+          .calls()
+          .some(
+            (call) =>
+              call.type === 'invoke' &&
+              call.command === 'summarize_agent_ledger' &&
+              JSON.stringify(call).includes('startedAfter'),
+          ),
+      )
+      .toBe(true);
+
     await page.getByTestId('token-stats-window-30d').click();
     await expect
       .poll(() =>
@@ -141,12 +164,6 @@ test.describe('E2E-TOKEN-STATS-001 Token stats journey', () => {
           ),
       )
       .toBe(true);
-
-    await page.getByTestId('token-stats-export-menu').click();
-    await page.getByTestId('token-stats-export-csv').click();
-    await expect(page.getByTestId('token-stats-export-toast')).toContainText(
-      '/tmp/cc-partner-exports/token-stats.csv',
-    );
 
     backendHarness.command('summarize_agent_ledger', {
       kind: 'reject',

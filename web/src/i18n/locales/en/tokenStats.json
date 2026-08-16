@@ -7,11 +7,12 @@
     "window": {
       "24h": "Last 24 hours",
       "7d": "Last 7 days",
-      "30d": "Last 30 days"
+      "30d": "Last 30 days",
+      "custom": "Custom"
     },
     "customRangeLabel": "Custom range",
-    "customStart": "Start (RFC3339, optional)",
-    "customEnd": "End (RFC3339, optional)",
+    "customStart": "Start",
+    "customEnd": "End",
     "providerLabel": "Provider",
     "modelLabel": "Model",
     "projectLabel": "Project",
@@ -96,6 +97,7 @@
     "success": "Exported to {{path}}",
     "failure": "Export failed: {{message}}",
     "reveal": "Show in Finder",
+    "revealFailed": "Could not show in Finder: {{message}}",
     "close": "Dismiss"
   },
   "errors": {

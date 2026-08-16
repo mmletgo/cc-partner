@@ -54,6 +54,7 @@ export interface TokenStatsControllerResult {
   onLoadMore(): void;
   onRefresh(): void;
   onExport(format: 'csv' | 'json'): void;
+  onRevealExport(): void;
   onDismissExport(): void;
 }
 
@@ -207,6 +208,16 @@ export function useTokenStatsController(): TokenStatsControllerResult {
     [exporting],
   );
 
+  const revealExport = useCallback(async () => {
+    if (!lastExportPath) return;
+    try {
+      await tokenStatsApi.revealExport(lastExportPath);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setExportError(message);
+    }
+  }, [lastExportPath]);
+
   const dismissExport = useCallback(() => {
     setExportError(null);
     setLastExportPath(null);
@@ -236,6 +247,7 @@ export function useTokenStatsController(): TokenStatsControllerResult {
     onLoadMore: loadMore,
     onRefresh: handleRefresh,
     onExport: exportNow,
+    onRevealExport: revealExport,
     onDismissExport: dismissExport,
   };
 }
