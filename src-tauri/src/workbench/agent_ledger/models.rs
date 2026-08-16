@@ -100,7 +100,7 @@ pub struct ReliableUsageSnapshot {
     /// 不是墙钟；不落 ledger 列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_duration_ms: Option<u64>,
-    /// 各轮 user→assistant 区间的算术平均（毫秒），作「首 token 平均耗时」；不落 ledger 列。
+    /// 用户发出指令 → 本轮第一条助手回复首次落盘 的平均毫秒；不含工具回环。不落 ledger 列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_token_avg_ms: Option<u64>,
 }

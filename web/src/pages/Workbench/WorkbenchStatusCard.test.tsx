@@ -212,12 +212,12 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
         activeAgent: makeWorkingAgent({
           usage: {
             modelId: 'grok-4.6-build',
-            inputTokens: 10_000,
+            inputTokens: 13_000,
             outputTokens: 2_000,
             contextLength: 80_000,
             activeDurationMs: 10_000,
             firstTokenAvgMs: 10_000,
-            cacheReadTokens: 87,
+            cacheReadTokens: 87_000,
             cacheWriteTokens: 13,
             extractedAt: '2026-08-16T10:05:00Z',
           },
@@ -226,8 +226,9 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     );
     const rateRow = screen.getByTestId('workbench-status-token-rate-row');
     const meter = screen.getByTestId('workbench-status-context-meter');
-    // 10_000 / 10s = 1000 → 1.00k tok/s；2000/10s = 200.0 tok/s
-    expect(rateRow.textContent).toContain('1.00k tok/s');
+    // 13_000 / 10s = 1300 → 1.30k tok/s；2000/10s = 200.0 tok/s
+    // 命中率 = 87k / (87k + 13k) = 87.0%
+    expect(rateRow.textContent).toContain('1.30k tok/s');
     expect(rateRow.textContent).toContain('200.0 tok/s');
     const qualityRow = screen.getByTestId('workbench-status-session-quality-row');
     expect(qualityRow.textContent).toContain('10.0 s');

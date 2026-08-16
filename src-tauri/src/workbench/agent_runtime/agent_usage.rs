@@ -126,11 +126,11 @@ fn merge_intervals_ms(intervals: &[(i64, i64)]) -> Option<u64> {
     }
 }
 
-/// 各轮 user→assistant 区间的算术平均（不对重叠做 merge）。
+/// 区间算术平均（不对重叠做 merge）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     状态卡「首 token 平均耗时」要对齐每轮请求的平均等待，
-///     不能用合并后的总时长当单轮耗时。
+///     首 token 平均是「用户发出指令 → 本轮第一条助手回复」的均值，
+///     不能用合并总时长或工具回环当单次等待。
 ///
 /// Code Logic（这个函数做什么）:
 ///     只统计 end>start 的区间；平均向下取整毫秒。
@@ -226,6 +226,9 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
     let mut saw_compact = false;
     let mut last_post_compact: Option<u64> = None;
     let mut last_user_ts_ms: Option<i64> = None;
+    let mut last_human_ts_ms: Option<i64> = None;
+    let mut awaiting_first_assistant = false;
+    let mut first_token_intervals: Vec<(i64, i64)> = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.len() > MAX_JSONL_LINE_BYTES {
@@ -251,6 +254,10 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         if rec_type == Some("user") && !is_sidechain {
             if let Some(ts) = parse_jsonl_ts_ms(&value) {
                 last_user_ts_ms = Some(ts);
+                if is_claude_human_prompt(&value) {
+                    last_human_ts_ms = Some(ts);
+                    awaiting_first_assistant = true;
+                }
             }
             continue;
         }
@@ -298,6 +305,16 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         let is_api_error = value.get("isApiErrorMessage") == Some(&Value::Bool(true));
         if !is_sidechain && !is_api_error {
             entry.is_main_chain = true;
+            if awaiting_first_assistant {
+                if let (Some(human_ts), Some(assistant_ts)) =
+                    (last_human_ts_ms, entry.assistant_ts_ms)
+                {
+                    if assistant_ts > human_ts {
+                        first_token_intervals.push((human_ts, assistant_ts));
+                    }
+                }
+                awaiting_first_assistant = false;
+            }
             last_main_msg_id = Some(msg_id.to_string());
             if saw_compact {
                 last_main_after_compact = Some(msg_id.to_string());
@@ -368,8 +385,35 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         context_length,
         context_window: infer_context_window_from_model(model_id.as_deref()),
         active_duration_ms: merge_intervals_ms(&intervals),
-        first_token_avg_ms: average_interval_ms(&intervals),
+        first_token_avg_ms: average_interval_ms(&first_token_intervals),
     })
+}
+
+/// 判断 jsonl 行是否为用户发出的指令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     首 token 耗时从「用户发出指令」起算，不能把 tool_result 回环当成新指令。
+///
+/// Code Logic（这个函数做什么）:
+///     content 为字符串，或数组含 text 且不含 tool_result → true。
+fn is_claude_human_prompt(value: &Value) -> bool {
+    let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
+        return false;
+    };
+    if content.as_str().is_some() {
+        return true;
+    }
+    let Some(items) = content.as_array() else {
+        return false;
+    };
+    let has_tool_result = items.iter().any(|item| {
+        item.get("type").and_then(Value::as_str) == Some("tool_result")
+    });
+    let has_text = items.iter().any(|item| {
+        item.get("type").and_then(Value::as_str) == Some("text")
+            || item.get("text").and_then(Value::as_str).is_some()
+    });
+    !has_tool_result && has_text
 }
 
 /// 从 model id 解析窗口（`[1m]` / 已知 grok 族）；否则 None 交前端查表。
@@ -1075,6 +1119,56 @@ mod tests {
         assert_eq!(snap.first_token_avg_ms, Some(10_000));
         assert_eq!(snap.context_window, Some(1_000_000));
         assert_eq!(snap.model_id.as_deref(), Some("grok-4.6-build"));
+    }
+
+    /// 首 token 只计用户指令到本轮第一条助手回复，忽略 tool_result 回环。
+    #[test]
+    fn claude_first_token_ignores_tool_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("-Users-hans-demo");
+        std::fs::create_dir_all(&project).unwrap();
+        let human = serde_json::json!({
+            "type": "user",
+            "sessionId": "s-ttft",
+            "timestamp": "2026-08-16T10:00:00.000Z",
+            "message": {"role": "user", "content": "do it"},
+        })
+        .to_string();
+        let first = serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s-ttft",
+            "timestamp": "2026-08-16T10:00:05.000Z",
+            "message": {
+                "id": "msg_a",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            },
+        })
+        .to_string();
+        let tool_user = serde_json::json!({
+            "type": "user",
+            "sessionId": "s-ttft",
+            "timestamp": "2026-08-16T10:00:06.000Z",
+            "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s-ttft",
+            "timestamp": "2026-08-16T10:00:20.000Z",
+            "message": {
+                "id": "msg_b",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            },
+        })
+        .to_string();
+        write_jsonl(&project, "s-ttft.jsonl", &[human, first, tool_user, second]);
+        let snap = extract_claude_usage(Some(tmp.path().to_path_buf()), "s-ttft").unwrap();
+        assert_eq!(snap.first_token_avg_ms, Some(5_000));
+        assert_eq!(snap.active_duration_ms, Some(19_000));
     }
 
     /// Claude：文件缺失 → None；id 带路径穿越 → None。

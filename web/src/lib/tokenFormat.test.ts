@@ -10,7 +10,6 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  computeSessionCacheHitRate,
   formatCacheHitRate,
   formatContextTokens,
   formatFirstTokenLatency,
@@ -117,15 +116,10 @@ describe('formatFirstTokenLatency', () => {
   });
 });
 
-describe('computeSessionCacheHitRate / formatCacheHitRate', () => {
-  it('对齐 ccstatusline：read / (read + write)', () => {
-    expect(computeSessionCacheHitRate(87, 13)).toBeCloseTo(0.87);
+describe('formatCacheHitRate', () => {
+  it('0–1 显示一位小数百分比', () => {
     expect(formatCacheHitRate(0.87)).toBe('87.0%');
-  });
-
-  it('两项都缺或分母为 0 → null', () => {
-    expect(computeSessionCacheHitRate(null, null)).toBeNull();
-    expect(computeSessionCacheHitRate(0, 0)).toBeNull();
     expect(formatCacheHitRate(null)).toBeNull();
+    expect(formatCacheHitRate(1.2)).toBeNull();
   });
 });

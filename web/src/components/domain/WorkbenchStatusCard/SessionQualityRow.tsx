@@ -2,8 +2,8 @@
  * SessionQualityRow —— StatusCard 的首 token 平均耗时 + 缓存命中率。
  *
  * Business Logic（为什么需要这个组件）:
- *   工作台右侧「当前会话」卡需要补齐 ccstatusline-zh 常用的两项质量指标：
- *   每轮请求平均等待，以及 cache_read / (cache_read + cache_write)。
+ *   工作台右侧「当前会话」卡需要两项质量指标：
+ *   用户发出指令到首条助手回复的平均等待，以及 cache_read / (cache_read + input)。
  *
  * Code Logic（这个组件做什么）:
  *   - 单行两列，复用 metricsRow；

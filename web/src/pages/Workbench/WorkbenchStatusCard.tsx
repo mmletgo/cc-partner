@@ -22,7 +22,7 @@ import { ContextMeter, SessionQualityRow, TokenRateRow } from '@/components/doma
 import type { ProgressBarTone } from '@/components/primitives/ProgressBar';
 import { DEFAULT_CONTEXT_WINDOW, resolveContextWindow } from '@/lib/agent/modelContextWindow';
 import { EditIcon, XIcon } from '@/lib/icons';
-import { computeSessionCacheHitRate } from '@/lib/tokenFormat';
+import { computeCacheHitRate } from '@/lib/schemas/tokenStats';
 import type { AgentLedgerEntry } from '@/lib/types/agentLedger';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
@@ -219,9 +219,9 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     liveUsage.firstTokenAvgMs > 0
       ? liveUsage.firstTokenAvgMs
       : null;
-  const cacheHitRate = computeSessionCacheHitRate(
-    liveUsage?.cacheReadTokens ?? ledgerEntry?.cacheReadTokens,
-    liveUsage?.cacheWriteTokens ?? ledgerEntry?.cacheWriteTokens,
+  const cacheHitRate = computeCacheHitRate(
+    liveUsage?.cacheReadTokens ?? ledgerEntry?.cacheReadTokens ?? null,
+    liveUsage?.inputTokens ?? ledgerEntry?.inputTokens ?? null,
   );
 
   // 用量 = 末轮 occupancy（live.contextLength）；禁止把累计计费 token 当占用。

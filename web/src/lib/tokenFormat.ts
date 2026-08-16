@@ -77,7 +77,7 @@ export function formatTokenRate(value: number | null | undefined): string | null
  * formatFirstTokenLatency
  *
  * Business Logic（为什么需要这个函数）:
- *   状态卡「首 token 平均耗时」要把每轮 user→assistant 均值显示成可读时长。
+ *   状态卡「首 token 平均」要把「发出指令 → 首条回复」均值显示成可读时长。
  *
  * Code Logic（这个函数做什么）:
  *   - 非有限 / ≤0 → null；
@@ -90,30 +90,6 @@ export function formatFirstTokenLatency(ms: number | null | undefined): string |
   if (ms < 1000) return `${Math.round(ms)} ms`;
   if (ms < 10_000) return `${(ms / 1000).toFixed(2)} s`;
   return `${(ms / 1000).toFixed(1)} s`;
-}
-
-/**
- * computeSessionCacheHitRate
- *
- * Business Logic（为什么需要这个函数）:
- *   对齐 ccstatusline-zh CacheHitRate：热缓存占比 = cache_read / (cache_read + cache_write)。
- *
- * Code Logic（这个函数做什么）:
- *   两项都缺 → null；把缺失项当 0；分母为 0 → null；否则返回 0–1。
- */
-export function computeSessionCacheHitRate(
-  cacheRead: number | null | undefined,
-  cacheWrite: number | null | undefined,
-): number | null {
-  if (cacheRead == null && cacheWrite == null) return null;
-  if (cacheRead != null && !Number.isFinite(cacheRead)) return null;
-  if (cacheWrite != null && !Number.isFinite(cacheWrite)) return null;
-  const read = cacheRead ?? 0;
-  const write = cacheWrite ?? 0;
-  if (read < 0 || write < 0) return null;
-  const denom = read + write;
-  if (denom <= 0) return null;
-  return read / denom;
 }
 
 /**
