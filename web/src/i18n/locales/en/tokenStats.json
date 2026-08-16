@@ -1,0 +1,106 @@
+{
+  "eyebrow": "Token usage",
+  "title": "Token Statistics",
+  "lead": "Inspect Anthropic prompt-cache hit rate, real consumption, and per-agent cost across all your active sessions.",
+  "filters": {
+    "windowLabel": "Time window",
+    "window": {
+      "24h": "Last 24 hours",
+      "7d": "Last 7 days",
+      "30d": "Last 30 days"
+    },
+    "customRangeLabel": "Custom range",
+    "customStart": "Start (RFC3339, optional)",
+    "customEnd": "End (RFC3339, optional)",
+    "providerLabel": "Provider",
+    "modelLabel": "Model",
+    "projectLabel": "Project",
+    "outcomeLabel": "Outcome",
+    "outcome": {
+      "all": "All outcomes",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled",
+      "disconnected": "Disconnected"
+    },
+    "refresh": "Refresh",
+    "export": "Export…",
+    "exportMenu": "Export results",
+    "exportCsv": "Export CSV",
+    "exportJson": "Export JSON",
+    "reset": "Reset filters"
+  },
+  "kpi": {
+    "inputTokens": "New input tokens",
+    "cacheTokens": "Cached input tokens (cache_read)",
+    "outputTokens": "Output tokens",
+    "cacheHitRate": "Cache hit rate",
+    "realConsumed": "Real consumed tokens",
+    "requests": "Total requests",
+    "totalCost": "Total cost",
+    "coverage": "Usage coverage",
+    "coverageComplete": "Complete",
+    "coveragePartial": "Partial",
+    "coverageUnavailable": "Unavailable",
+    "notProvided": "Not provided",
+    "loading": "Loading token statistics…"
+  },
+  "trend": {
+    "title": "Usage trend",
+    "empty": "No data in this window yet.",
+    "tooltip": {
+      "bucket": "Bucket",
+      "tokens": "Tokens"
+    },
+    "legend": {
+      "input": "New input",
+      "output": "Output",
+      "cacheRead": "Cache read",
+      "cost": "Cost"
+    }
+  },
+  "groups": {
+    "byModel": "By model",
+    "byProvider": "By provider",
+    "byProject": "By project",
+    "noRows": "No rows in this group yet.",
+    "columns": {
+      "key": "Key",
+      "sessions": "Sessions",
+      "input": "New in",
+      "cacheRead": "Cache in",
+      "cacheWrite": "Cache create",
+      "output": "Out",
+      "cost": "Cost"
+    }
+  },
+  "session": {
+    "tableTitle": "Sessions",
+    "columns": {
+      "startedAt": "Started",
+      "agent": "Agent",
+      "model": "Model",
+      "project": "Project",
+      "outcome": "Outcome",
+      "input": "Input",
+      "cacheRead": "Cache read",
+      "output": "Output",
+      "cost": "Cost"
+    },
+    "loadMore": "Load more",
+    "empty": "No sessions match your filters yet.",
+    "unavailable": "Ledger detail unavailable.",
+    "staleBanner": "Refreshing latest usage failed; showing last known result."
+  },
+  "export": {
+    "success": "Exported to {{path}}",
+    "failure": "Export failed: {{message}}",
+    "reveal": "Show in Finder"
+  },
+  "errors": {
+    "loadFailed": "Failed to load token statistics.",
+    "staleRefreshFailed": "Couldn't refresh the latest data.",
+    "empty": "No usage data captured yet.",
+    "exportInvalid": "Unsupported export format."
+  }
+}
