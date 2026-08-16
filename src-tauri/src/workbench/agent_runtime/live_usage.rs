@@ -35,6 +35,7 @@ struct UsageFingerprint {
     cache_write_tokens: Option<u64>,
     context_length: Option<u64>,
     context_window: Option<u64>,
+    active_duration_ms: Option<u64>,
 }
 
 impl UsageFingerprint {
@@ -47,6 +48,7 @@ impl UsageFingerprint {
             cache_write_tokens: snapshot.cache_write_tokens,
             context_length: snapshot.context_length,
             context_window: snapshot.context_window,
+            active_duration_ms: snapshot.active_duration_ms,
         }
     }
 }
@@ -139,6 +141,7 @@ fn snapshot_to_dto(snapshot: &ReliableUsageSnapshot, extracted_at: &str) -> Agen
         cache_write_tokens: snapshot.cache_write_tokens,
         context_length: snapshot.context_length,
         context_window: snapshot.context_window,
+        active_duration_ms: snapshot.active_duration_ms,
         extracted_at: extracted_at.to_string(),
     }
 }
@@ -344,6 +347,7 @@ mod tests {
             cost_currency: None,
             context_length: Some(input.saturating_add(3).saturating_add(1)),
             context_window: Some(200_000),
+            active_duration_ms: Some(10_000),
         }
     }
 
@@ -379,6 +383,7 @@ mod tests {
         assert_eq!(dto.model_id.as_deref(), Some("claude-sonnet-4"));
         assert_eq!(dto.context_length, Some(14));
         assert_eq!(dto.context_window, Some(200_000));
+        assert_eq!(dto.active_duration_ms, Some(10_000));
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("native"));
         assert!(!json.contains("path"));

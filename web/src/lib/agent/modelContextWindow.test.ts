@@ -2,14 +2,21 @@
  * modelContextWindow 单元测试。
  *
  * Business Logic（为什么需要这个测试文件）:
- *   context window 命中 / 未命中 / null 输入是用户可见的百分比基石；
- *   必须防止前缀归一化或大小写处理回归。
+ *   窗口解析必须覆盖 grok-4.6-build / [1M] 与 ccstatusline 200k 回落。
  *
  * Code Logic（这个测试文件做什么）:
- *   直接断言 resolveContextWindow 的已知模型、大小写归一、前缀裁剪、null 路径。
+ *   断言 hint、表、家族、空输入。
  */
 import { describe, expect, it } from 'vitest';
-import { resolveContextWindow } from './modelContextWindow';
+import { parseContextWindowSize, resolveContextWindow } from './modelContextWindow';
+
+describe('parseContextWindowSize', () => {
+  it('解析方括号与圆括号 k/M', () => {
+    expect(parseContextWindowSize('grok-4.6[1M]')).toBe(1_000_000);
+    expect(parseContextWindowSize('claude-sonnet-4-5-20250929[1m]')).toBe(1_000_000);
+    expect(parseContextWindowSize('Opus 4.6 (200k)')).toBe(200_000);
+  });
+});
 
 describe('resolveContextWindow', () => {
   it('已知模型返回精确 token 数', () => {
@@ -17,8 +24,13 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('claude-sonnet-4-5-1m')).toBe(1_000_000);
     expect(resolveContextWindow('claude-opus-4-5-20251101')).toBe(200_000);
     expect(resolveContextWindow('claude-sonnet-4-6-1m-20260101')).toBe(1_000_000);
-    expect(resolveContextWindow('claude-opus-4')).toBe(200_000);
     expect(resolveContextWindow('gpt-5')).toBe(400_000);
+  });
+
+  it('grok-4.6-build / [1M] 显示 1M', () => {
+    expect(resolveContextWindow('grok-4.6-build')).toBe(1_000_000);
+    expect(resolveContextWindow('grok-4.6[1M]')).toBe(1_000_000);
+    expect(resolveContextWindow('  Grok-4.6-Build  ')).toBe(1_000_000);
   });
 
   it('大小写与首尾空白归一化', () => {
@@ -26,9 +38,9 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('GPT-5-CODEX')).toBe(400_000);
   });
 
-  it('未知模型返回 null（禁止假装 200K）', () => {
-    expect(resolveContextWindow('unknown-model')).toBeNull();
-    expect(resolveContextWindow('gpt-6')).toBeNull();
+  it('未知非空 modelId 回落 200k（对齐 ccstatusline）', () => {
+    expect(resolveContextWindow('unknown-model')).toBe(200_000);
+    expect(resolveContextWindow('gpt-6')).toBe(200_000);
   });
 
   it('null / undefined / 空串返回 null', () => {

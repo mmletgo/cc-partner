@@ -158,7 +158,7 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
   });
 
-  it('未知 modelId → ContextMeter 显示 noWindowLabel，无 ProgressBar', async () => {
+  it('未知非空 modelId → 回落 200k 窗口', async () => {
     const entry: AgentLedgerEntry = {
       id: 'l1',
       agentSessionId: 'a1',
@@ -183,8 +183,49 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     renderCard(makeProps({ ledgerEntry: entry }));
     const meter = screen.getByTestId('workbench-status-context-meter');
     expect(meter.textContent).toContain('未提供');
-    expect(meter.textContent).toContain('无窗口信息');
+    expect(meter.textContent).toContain('200k');
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
+  });
+
+  it('有 occupancy 但无 modelId 时窗口回落 200k（对齐 ccstatusline）', () => {
+    renderCard(
+      makeProps({
+        activeAgent: makeWorkingAgent({
+          usage: {
+            contextLength: 12_000,
+            extractedAt: '2026-08-16T10:05:00Z',
+          },
+        }),
+      }),
+    );
+    const meter = screen.getByTestId('workbench-status-context-meter');
+    expect(meter.textContent).toContain('12.0k');
+    expect(meter.textContent).toContain('200k');
+    expect(meter.textContent).not.toContain('无窗口信息');
+  });
+
+  it('live usage 的 activeDurationMs 作为速率分母，grok-4.6-build 显示 1M 窗口', () => {
+    renderCard(
+      makeProps({
+        activeAgent: makeWorkingAgent({
+          usage: {
+            modelId: 'grok-4.6-build',
+            inputTokens: 10_000,
+            outputTokens: 2_000,
+            contextLength: 80_000,
+            activeDurationMs: 10_000,
+            extractedAt: '2026-08-16T10:05:00Z',
+          },
+        }),
+      }),
+    );
+    const rateRow = screen.getByTestId('workbench-status-token-rate-row');
+    const meter = screen.getByTestId('workbench-status-context-meter');
+    // 10_000 / 10s = 1000 → 1.00k tok/s；2000/10s = 200.0 tok/s
+    expect(rateRow.textContent).toContain('1.00k tok/s');
+    expect(rateRow.textContent).toContain('200.0 tok/s');
+    expect(meter.textContent).toContain('80.0k');
+    expect(meter.textContent).toContain('1.0M');
   });
 
   it('working 阶段 live usage 优先于 ledger 显示速率与 ProgressBar', async () => {

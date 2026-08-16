@@ -88,6 +88,8 @@ export interface AgentLiveUsage {
   contextLength?: number | null;
   /** Provider 上报的模型最大上下文；缺省由前端按 modelId 查表。 */
   contextWindow?: number | null;
+  /** 有效生成时长（用户→助手区间合并，毫秒）。 */
+  activeDurationMs?: number | null;
   extractedAt: string;
 }
 

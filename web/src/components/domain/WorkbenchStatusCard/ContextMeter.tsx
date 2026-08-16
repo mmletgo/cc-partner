@@ -4,8 +4,7 @@
  * Business Logic（为什么需要这个组件）:
  *   工作台右侧「当前会话」卡需要按 ccstatusline-zh 口径展示：
  *   - 上下文用量 = 当前窗口占用（末轮 input + cache_read + cache_write），单位以 k 为主；
- *   - 上下文长度 = 模型最大上下文（provider 上报或 model 查表）；
- *   禁止把累计计费 token 当占用，也禁止默认 200k 假装精确。
+ *   - 上下文长度 = 模型最大上下文（provider 上报 / `[1M]` hint / 已知表 / 非空未知 200k）；
  *
  * Code Logic（这个组件做什么）:
  *   - 两行：用量 + 长度；有占用且有窗口时渲染 ProgressBar；

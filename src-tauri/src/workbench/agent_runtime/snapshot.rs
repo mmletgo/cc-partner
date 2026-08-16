@@ -40,6 +40,9 @@ pub struct AgentLiveUsageDto {
     /// Provider 上报的模型最大上下文；缺省由前端按 modelId 查表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// 有效生成时长（用户→助手区间合并，毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_duration_ms: Option<u64>,
     pub extracted_at: String,
 }
 

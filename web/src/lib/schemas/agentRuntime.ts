@@ -100,6 +100,7 @@ export const agentLiveUsageDecoder: Decoder<AgentLiveUsage> = objectDecoder('Age
   cacheWriteTokens: optionalDecoder(nullableDecoder(numberDecoder)),
   contextLength: optionalDecoder(nullableDecoder(numberDecoder)),
   contextWindow: optionalDecoder(nullableDecoder(numberDecoder)),
+  activeDurationMs: optionalDecoder(nullableDecoder(numberDecoder)),
   extractedAt: agentRuntimeTimestampDecoder,
 });
 

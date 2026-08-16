@@ -10,33 +10,32 @@
  *   - data-state 属性区分 available/unavailable 供 e2e 抓取。
  */
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { I18nextProvider } from 'react-i18next';
-import i18next from 'i18next';
+
+import i18n from '@/i18n';
 
 import { TokenRateRow } from './TokenRateRow';
 
-async function setupI18n(): Promise<void> {
-  await i18next.changeLanguage('zh-CN');
-  if (!i18next.isInitialized) {
-    await new Promise<void>((resolve) => {
-      i18next.init({ lng: 'zh-CN', resources: {} }, () => resolve());
-    });
-  }
-}
+beforeAll(async () => {
+  await i18n.changeLanguage('zh');
+});
+
+afterEach(() => {
+  cleanup();
+});
 
 function renderRow(props: { speedInTps: number | null; speedOutTps: number | null }) {
   return render(
-    <I18nextProvider i18n={i18next}>
+    <I18nextProvider i18n={i18n}>
       <TokenRateRow {...props} unavailableLabel="—" />
     </I18nextProvider>,
   );
 }
 
 describe('TokenRateRow', () => {
-  it('null 双值时显示 unavailableLabel', async () => {
-    await setupI18n();
+  it('null 双值时显示 unavailableLabel', () => {
     renderRow({ speedInTps: null, speedOutTps: null });
     const dds = screen.getAllByTestId('workbench-status-token-rate-row')[0].querySelectorAll('dd');
     expect(dds).toHaveLength(2);
@@ -46,8 +45,7 @@ describe('TokenRateRow', () => {
     expect(dds[1]?.getAttribute('data-state')).toBe('unavailable');
   });
 
-  it('数值时走 formatTokenRate 约定（>5k → k 单位）', async () => {
-    await setupI18n();
+  it('数值时走 formatTokenRate 约定（>5k → k 单位）', () => {
     renderRow({ speedInTps: 12345.6, speedOutTps: 6.5 });
     const container = screen.getByTestId('workbench-status-token-rate-row');
     expect(container.textContent).toContain('12.35k tok/s');
@@ -57,8 +55,7 @@ describe('TokenRateRow', () => {
     expect(dds[1]?.getAttribute('data-state')).toBe('available');
   });
 
-  it('仅单边 null 时另一边仍显示数值', async () => {
-    await setupI18n();
+  it('仅单边 null 时另一边仍显示数值', () => {
     renderRow({ speedInTps: 100, speedOutTps: null });
     const dds = screen.getByTestId('workbench-status-token-rate-row').querySelectorAll('dd');
     expect(dds[0]?.textContent).toBe('100.0 tok/s');

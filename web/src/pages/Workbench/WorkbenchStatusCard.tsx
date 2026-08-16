@@ -19,7 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { ContextMeter, TokenRateRow } from '@/components/domain/WorkbenchStatusCard';
 import type { ProgressBarTone } from '@/components/primitives/ProgressBar';
-import { resolveContextWindow } from '@/lib/agent/modelContextWindow';
+import { DEFAULT_CONTEXT_WINDOW, resolveContextWindow } from '@/lib/agent/modelContextWindow';
 import { EditIcon, XIcon } from '@/lib/icons';
 import type { AgentLedgerEntry } from '@/lib/types/agentLedger';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
@@ -191,15 +191,23 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
   const outputTokens = liveUsage?.outputTokens ?? ledgerEntry?.outputTokens ?? null;
   const modelId = liveUsage?.modelId ?? ledgerEntry?.modelId ?? null;
 
-  const durationMs = liveUsage
+  const wallDurationMs = liveUsage
     ? computeLiveDurationMs(
         activeAgent?.startedAt ?? null,
         liveUsage.extractedAt,
         isAgentTerminal ? (activeAgent?.endedAt ?? null) : null,
       )
     : (ledgerEntry?.durationMs ?? 0);
+  // 速率分母对齐 ccstatusline：用户→助手有效生成区间；没有区间才回落墙钟。
+  const activeDurationMs =
+    liveUsage?.activeDurationMs != null &&
+    Number.isFinite(liveUsage.activeDurationMs) &&
+    liveUsage.activeDurationMs > 0
+      ? liveUsage.activeDurationMs
+      : null;
+  const durationMs = activeDurationMs ?? wallDurationMs;
 
-  // 平均 tok/s：input = inputTokens（用户的 prompt 消耗），output = outputTokens。
+  // 平均 tok/s：billed input/output ÷ 有效生成时长。
   const speedInTps = computeTokenRate(inputTokens, durationMs);
   const speedOutTps = computeTokenRate(outputTokens, durationMs);
 
@@ -208,12 +216,13 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     liveUsage?.contextLength != null && Number.isFinite(liveUsage.contextLength)
       ? liveUsage.contextLength
       : null;
+  const lookedUpWindow = resolveContextWindow(modelId);
   const contextWindow =
     liveUsage?.contextWindow != null &&
     Number.isFinite(liveUsage.contextWindow) &&
     liveUsage.contextWindow > 0
       ? liveUsage.contextWindow
-      : resolveContextWindow(modelId);
+      : lookedUpWindow ?? (contextUsed != null ? DEFAULT_CONTEXT_WINDOW : null);
   const pct =
     contextWindow != null && contextWindow > 0 && contextUsed != null && contextUsed > 0
       ? Math.min(1, contextUsed / contextWindow)

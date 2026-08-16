@@ -96,6 +96,10 @@ pub struct ReliableUsageSnapshot {
     /// Provider 上报的模型最大上下文（如 Codex `model_context_window`）；缺省由前端查表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// 有效生成时长（用户请求 → 助手回复区间合并后的毫秒数，对齐 ccstatusline）。
+    /// 不是墙钟；不落 ledger 列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_duration_ms: Option<u64>,
 }
 
 impl ReliableUsageSnapshot {
@@ -116,6 +120,7 @@ impl ReliableUsageSnapshot {
             || self.cost_currency.is_some()
             || self.context_length.is_some()
             || self.context_window.is_some()
+            || self.active_duration_ms.is_some()
     }
 
     /// 将 cost_major + currency 无损转为 minor units；失败返回 None（不估算）。
@@ -857,6 +862,7 @@ pub fn merge_usage_monotonic(
         // 占用/窗口是瞬时值，允许 compact 后回落，取 incoming 覆盖。
         context_length: incoming.context_length.or(base.context_length),
         context_window: incoming.context_window.or(base.context_window),
+        active_duration_ms: incoming.active_duration_ms.or(base.active_duration_ms),
     })
 }
 

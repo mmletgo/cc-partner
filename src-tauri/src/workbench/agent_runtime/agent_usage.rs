@@ -70,6 +70,9 @@ struct ClaudeUsageEntry {
     cache_write: u64,
     cost_usd: f64,
     stop_reason: bool,
+    assistant_ts_ms: Option<i64>,
+    user_ts_ms: Option<i64>,
+    is_main_chain: bool,
 }
 
 impl ClaudeUsageEntry {
@@ -87,6 +90,40 @@ impl ClaudeUsageEntry {
 ///     三端 saturating 相加。
 fn occupancy_tokens(input: u64, cache_read: u64, cache_write: u64) -> u64 {
     input.saturating_add(cache_read).saturating_add(cache_write)
+}
+
+/// 解析 jsonl `timestamp` 为毫秒。
+fn parse_jsonl_ts_ms(value: &Value) -> Option<i64> {
+    let raw = value.get("timestamp")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+/// 合并重叠区间，返回总毫秒（对齐 ccstatusline speed metrics）。
+fn merge_intervals_ms(intervals: &[(i64, i64)]) -> Option<u64> {
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut sorted = intervals.to_vec();
+    sorted.sort_by_key(|(start, _)| *start);
+    let mut total = 0i64;
+    let (mut cur_start, mut cur_end) = sorted[0];
+    for &(start, end) in sorted.iter().skip(1) {
+        if start <= cur_end {
+            cur_end = cur_end.max(end);
+        } else {
+            total += cur_end - cur_start;
+            cur_start = start;
+            cur_end = end;
+        }
+    }
+    total += cur_end - cur_start;
+    if total > 0 {
+        Some(total as u64)
+    } else {
+        None
+    }
 }
 
 /// 从 Claude session JSONL 提取可靠 usage。
@@ -164,6 +201,7 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
     let mut last_main_after_compact: Option<String> = None;
     let mut saw_compact = false;
     let mut last_post_compact: Option<u64> = None;
+    let mut last_user_ts_ms: Option<i64> = None;
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.len() > MAX_JSONL_LINE_BYTES {
@@ -184,6 +222,14 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
             last_post_compact = compact_boundary_post_tokens(&value);
             continue;
         }
+        let rec_type = value.get("type").and_then(Value::as_str);
+        let is_sidechain = value.get("isSidechain") == Some(&Value::Bool(true));
+        if rec_type == Some("user") && !is_sidechain {
+            if let Some(ts) = parse_jsonl_ts_ms(&value) {
+                last_user_ts_ms = Some(ts);
+            }
+            continue;
+        }
         let Some(message) = value.get("message") else {
             continue;
         };
@@ -198,7 +244,7 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         if model.is_some() {
             model_id = model.map(str::to_string);
         }
-        let entry = ClaudeUsageEntry {
+        let mut entry = ClaudeUsageEntry {
             input: usage
                 .get("input_tokens")
                 .and_then(Value::as_u64)
@@ -220,11 +266,14 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
                 .get("stop_reason")
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.is_empty()),
+            assistant_ts_ms: parse_jsonl_ts_ms(&value),
+            user_ts_ms: last_user_ts_ms,
+            is_main_chain: false,
         };
         matched = true;
-        let is_sidechain = value.get("isSidechain") == Some(&Value::Bool(true));
         let is_api_error = value.get("isApiErrorMessage") == Some(&Value::Bool(true));
         if !is_sidechain && !is_api_error {
+            entry.is_main_chain = true;
             last_main_msg_id = Some(msg_id.to_string());
             if saw_compact {
                 last_main_after_compact = Some(msg_id.to_string());
@@ -276,7 +325,7 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         last_main_msg_id.and_then(|id| messages.get(&id).map(ClaudeUsageEntry::occupancy))
     };
     Some(ReliableUsageSnapshot {
-        model_id,
+        model_id: model_id.clone(),
         input_tokens: Some(input),
         output_tokens: Some(output),
         cache_read_tokens: Some(cache_read),
@@ -284,11 +333,85 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         cost_major: cost.as_ref().map(|(m, _)| m.clone()),
         cost_currency: cost.map(|(_, c)| c),
         context_length,
-        context_window: None,
+        context_window: infer_context_window_from_model(model_id.as_deref()),
+        active_duration_ms: {
+            let intervals: Vec<(i64, i64)> = messages
+                .values()
+                .filter(|entry| entry.is_main_chain)
+                .filter_map(|entry| {
+                    let start = entry.user_ts_ms?;
+                    let end = entry.assistant_ts_ms?;
+                    (end > start).then_some((start, end))
+                })
+                .collect();
+            merge_intervals_ms(&intervals)
+        },
     })
 }
 
-/// 是否为 Claude 主链 compact_boundary 记录。
+/// 从 model id 解析窗口（`[1m]` / 已知 grok 族）；否则 None 交前端查表。
+fn infer_context_window_from_model(model_id: Option<&str>) -> Option<u64> {
+    let raw = model_id?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    parse_model_window_hint(raw).or_else(|| {
+        let lower = raw.to_ascii_lowercase();
+        if lower.contains("grok-4.6") {
+            Some(1_000_000)
+        } else if lower.starts_with("grok-4") {
+            Some(256_000)
+        } else {
+            None
+        }
+    })
+}
+
+/// 解析 model 字符串中的显式窗口提示：`[1M]` / `(200k)`。
+fn parse_model_window_hint(model_id: &str) -> Option<u64> {
+    let lower = model_id.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if c != b'[' && c != b'(' {
+            continue;
+        }
+        if let Some(n) = parse_k_or_m_number(&lower[i + 1..]) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// 解析 `1m` / `200k` / `1.0m` 前缀。
+fn parse_k_or_m_number(s: &str) -> Option<u64> {
+    let trimmed = s.trim_start();
+    let mut end = 0;
+    for (i, ch) in trimmed.char_indices() {
+        if ch.is_ascii_digit() || ch == '.' || ch == ',' || ch == '_' {
+            end = i + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    let num: f64 = trimmed[..end].replace([',', '_'], "").parse().ok()?;
+    if !num.is_finite() || num <= 0.0 {
+        return None;
+    }
+    let unit = trimmed[end..]
+        .trim_start()
+        .chars()
+        .next()?
+        .to_ascii_lowercase();
+    let mult = match unit {
+        'm' => 1_000_000.0,
+        'k' => 1_000.0,
+        _ => return None,
+    };
+    Some((num * mult).round() as u64)
+}
 fn is_claude_compact_boundary(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some("system")
         && value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
@@ -499,7 +622,7 @@ fn parse_codex_jsonl(path: &Path) -> Option<ReliableUsageSnapshot> {
     let usage = latest?;
     let context_length = last_turn.map(|turn| occupancy_tokens(turn.input, turn.cache_read, 0));
     Some(ReliableUsageSnapshot {
-        model_id,
+        model_id: model_id.clone(),
         input_tokens: Some(usage.input),
         output_tokens: Some(usage.output),
         cache_read_tokens: Some(usage.cache_read),
@@ -507,7 +630,9 @@ fn parse_codex_jsonl(path: &Path) -> Option<ReliableUsageSnapshot> {
         cost_major: None,
         cost_currency: None,
         context_length,
-        context_window,
+        context_window: context_window
+            .or_else(|| infer_context_window_from_model(model_id.as_deref())),
+        active_duration_ms: None,
     })
 }
 
@@ -592,7 +717,7 @@ fn aggregate_opencode_usage(rows: Vec<OpenCodeMessageUsage>) -> Option<ReliableU
         None
     };
     Some(ReliableUsageSnapshot {
-        model_id,
+        model_id: model_id.clone(),
         input_tokens: Some(input),
         output_tokens: Some(output),
         cache_read_tokens: Some(cache_read),
@@ -600,7 +725,8 @@ fn aggregate_opencode_usage(rows: Vec<OpenCodeMessageUsage>) -> Option<ReliableU
         cost_major: cost.as_ref().map(|(m, _)| m.clone()),
         cost_currency: cost.map(|(_, c)| c),
         context_length,
-        context_window: None,
+        context_window: infer_context_window_from_model(model_id.as_deref()),
+        active_duration_ms: None,
     })
 }
 
@@ -891,6 +1017,38 @@ mod tests {
         let snap = extract_claude_usage(Some(tmp.path().to_path_buf()), "s-c").unwrap();
         assert_eq!(snap.input_tokens, Some(80_000));
         assert_eq!(snap.context_length, Some(12_000));
+    }
+
+    /// 有效生成时长 = 用户→助手区间，不是墙钟；grok-4.6-build 窗口为 1M。
+    #[test]
+    fn claude_active_duration_and_grok_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("-Users-hans-demo");
+        std::fs::create_dir_all(&project).unwrap();
+        let user = serde_json::json!({
+            "type": "user",
+            "sessionId": "s-g",
+            "timestamp": "2026-08-16T10:00:00.000Z",
+            "message": {"role": "user", "content": "hi"},
+        })
+        .to_string();
+        let asst = serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s-g",
+            "timestamp": "2026-08-16T10:00:10.000Z",
+            "message": {
+                "id": "msg_g",
+                "model": "grok-4.6-build",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+            },
+        })
+        .to_string();
+        write_jsonl(&project, "s-g.jsonl", &[user, asst]);
+        let snap = extract_claude_usage(Some(tmp.path().to_path_buf()), "s-g").unwrap();
+        assert_eq!(snap.active_duration_ms, Some(10_000));
+        assert_eq!(snap.context_window, Some(1_000_000));
+        assert_eq!(snap.model_id.as_deref(), Some("grok-4.6-build"));
     }
 
     /// Claude：文件缺失 → None；id 带路径穿越 → None。
