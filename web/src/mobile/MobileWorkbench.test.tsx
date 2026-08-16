@@ -45,6 +45,7 @@ vi.mock('@/api/workbenchHttp', () => ({
     },
     sessions: {
       list: (...args: unknown[]) => listSessionsMock(...args),
+      create: vi.fn(),
       focus: vi.fn(async () => ({ ok: true, sessionId: '' })),
     },
     git: {
@@ -320,5 +321,23 @@ describe('MobileWorkbench project retry and connection', () => {
     await waitFor(() => {
       expect(listWorktreesMock).toHaveBeenCalledTimes(1);
     });
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   打开项目进入工作区后，worktree 条必须在 shell chrome 里立刻可见，不能等终端 lazy chunk，
+   *   也不能埋在可滚动终端面板里被焦点滚走。
+   *
+   * Code Logic（这个测试做什么）:
+   *   打开项目后断言 mobile-worktree-chrome / mobile-worktree-tabs 与主 worktree chip。
+   */
+  test('opening a project shows the worktree strip in shell chrome', async () => {
+    renderWorkbench();
+    await openProject('Project p1');
+    await waitFor(() => {
+      expect(screen.getByTestId('mobile-worktree-chrome')).toBeTruthy();
+    });
+    expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /main/ })).toBeTruthy();
   });
 });

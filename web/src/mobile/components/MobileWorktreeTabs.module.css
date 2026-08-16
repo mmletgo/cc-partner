@@ -4,8 +4,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border-soft);
+  background: color-mix(in oklab, var(--surface) 35%, var(--bg));
 }
 
 .mobileWorktreeError {
@@ -15,7 +14,7 @@
 .mobileWorktreeStrip {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
   overflow-x: auto;
@@ -225,7 +224,7 @@
 .mobileWorktreeCreateForm {
   display: flex;
   align-items: center;
-  flex: 1 1 100%;
+  flex: 0 0 auto;
   gap: var(--space-2);
   min-width: 0;
 }

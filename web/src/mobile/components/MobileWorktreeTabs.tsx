@@ -45,8 +45,8 @@ export interface MobileWorktreeTabsProps {
  * MobileWorktreeTabs（移动端 worktree 工作区 tab 列表）
  *
  * Business Logic（为什么需要这个组件）:
- *   手机端用户需要在窗口 tab 上方直接切换、新建和移除非主 worktree，交互对齐桌面
- *   `WorkbenchWorktreeBar`，避免再绕到独立 Worktrees 面板或顶部 quick switch。
+ *   手机端用户需要在 terminal/files/browser/git 工作区直接切换、新建和移除非主 worktree，
+ *   交互对齐桌面 `WorkbenchWorktreeBar`，避免再绕到独立 Worktrees 面板或顶部 quick switch。
  *
  * Code Logic（这个组件做什么）:
  *   渲染 chip 条（状态点 + 分支名 + 主/worktree 元信息）；非主 chip 带关闭按钮；

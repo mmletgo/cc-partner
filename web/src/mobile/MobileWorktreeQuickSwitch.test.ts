@@ -246,7 +246,7 @@ describe('MobileWorktreeQuickSwitch', () => {
           createElement('section', null, 'panel'),
         ),
       );
-      // 移动端 worktree 切换入口已迁移到 terminal panel 顶部的 `MobileWorktreeTabs`；
+      // 移动端 worktree 切换入口已迁移到 shell 固定 chrome 的 `MobileWorktreeTabs`；
       // shell 顶部的 worktree pill 现为只读 span，不再有 aria-haspopup/disabled 按钮交互。
       if (shellMarkup.includes('aria-haspopup="dialog"')) {
         throw new Error('shell worktree pill should not open a dialog after migration');
