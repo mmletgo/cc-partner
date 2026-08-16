@@ -26,6 +26,7 @@ import {
 } from 'recharts';
 import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
 import { TokenIcon } from '@/lib/icons';
+import { formatLocalBucketLabel, formatLocalBucketTooltip } from '@/lib/localDateTime';
 import { pickPrimaryCurrencyCost } from '@/lib/schemas/tokenStats';
 import { formatTokenCount } from '@/lib/tokenFormat';
 import type {
@@ -74,6 +75,7 @@ interface TrendTooltipProps {
   active?: boolean;
   payload?: Array<{ payload?: TrendChartRow }>;
   label?: string | number;
+  bucket: 'hour' | 'day';
 }
 
 const OUTCOMES: AgentLedgerOutcome[] = ['completed', 'failed', 'cancelled', 'disconnected'];
@@ -100,19 +102,6 @@ function formatNumber(value: number | null | undefined): string {
 function formatPercent(value: number | null | undefined): string {
   if (value == null) return '—';
   return `${(value * 100).toFixed(1)}%`;
-}
-
-/**
- * Business Logic（为什么需要）:
- *   轴标签用短日期/小时，避免 RFC3339 挤爆横轴。
- *
- * Code Logic（做什么）:
- *   hour 取 HH:MM，day 取 MM-DD；均按 UTC 子串，不转本地时区。
- */
-function formatBucketLabel(iso: string, bucket: 'hour' | 'day'): string {
-  const hh = iso.length >= 13 ? iso.slice(11, 16) : '';
-  const md = iso.length >= 10 ? iso.slice(5, 10) : iso;
-  return bucket === 'hour' ? hh || md : md;
 }
 
 /**
@@ -385,7 +374,7 @@ export function TokenStatsView({
                     <CartesianGrid stroke="var(--border-soft)" strokeDasharray="2 4" />
                     <XAxis
                       dataKey="bucketStart"
-                      tickFormatter={(value: string) => formatBucketLabel(value, bucket)}
+                      tickFormatter={(value: string) => formatLocalBucketLabel(value, bucket)}
                       stroke="var(--fg-muted-readable)"
                       tickLine={false}
                     />
@@ -402,7 +391,7 @@ export function TokenStatsView({
                       tickLine={false}
                       tickFormatter={(value: number) => (value / 100).toFixed(2)}
                     />
-                    <Tooltip content={<TrendTooltip />} />
+                    <Tooltip content={<TrendTooltip bucket={bucket} />} />
                     <Bar
                       yAxisId="tokens"
                       dataKey="input"
@@ -869,13 +858,15 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
   );
 }
 
-function TrendTooltip({ active, payload, label }: TrendTooltipProps) {
+function TrendTooltip({ active, payload, label, bucket }: TrendTooltipProps) {
   const { t } = useTranslation(['tokenStats']);
   if (!active || !payload?.length) return null;
   const point = payload[0]?.payload;
+  const timeLabel =
+    typeof label === 'string' ? formatLocalBucketTooltip(label, bucket) : String(label ?? '');
   return (
     <div className={styles.tooltip}>
-      <div className={styles.tooltipLabel}>{label}</div>
+      <div className={styles.tooltipLabel}>{timeLabel}</div>
       <div className={styles.tooltipRow}>
         <span>{t('tokenStats:trend.legend.input')}</span>
         <strong>{formatTokenCount(point?.input ?? 0)}</strong>
