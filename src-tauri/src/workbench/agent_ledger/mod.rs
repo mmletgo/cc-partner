@@ -14,9 +14,10 @@ pub mod service;
 
 #[allow(unused_imports)]
 pub use models::{
-    AgentLedgerEntry, AgentLedgerFinalizeInput, AgentLedgerOutcome, AgentLedgerPage,
-    AgentLedgerQuery, AgentLedgerSummary, AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
-    CurrencyAmount, LedgerUsageCoverage, LedgerWindow, ReliableUsageSnapshot,
+    AgentLedgerEntry, AgentLedgerFilters, AgentLedgerFinalizeInput, AgentLedgerGroupRow,
+    AgentLedgerOutcome, AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary,
+    AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp, AgentLedgerTrendPoint, CurrencyAmount,
+    LedgerUsageCoverage, LedgerWindow, ReliableUsageSnapshot, TrendBucket,
     AGENT_LEDGER_SUMMARY_MAX_PROJECTS,
 };
 #[allow(unused_imports)]

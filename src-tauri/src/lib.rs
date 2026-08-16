@@ -653,6 +653,7 @@ pub fn run() {
             workbench_cmd::get_workbench_lan_fleet,
             workbench_cmd::list_agent_ledger,
             workbench_cmd::summarize_agent_ledger,
+            workbench_cmd::export_token_stats,
             workbench_cmd::clear_agent_ledger,
             workbench_cmd::list_workbench_sessions,
             workbench_cmd::create_workbench_session,
