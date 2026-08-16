@@ -82,5 +82,12 @@
   },
   "markError": "Could not update read state",
   "markReadAria": "Mark {{title}} as read",
-  "markUnreadAria": "Mark {{title}} as unread"
+  "markUnreadAria": "Mark {{title}} as unread",
+  "dayFilter": {
+    "todayEmpty": "Nothing needs attention today",
+    "earlierHidden": "{{count}} earlier items are hidden",
+    "showingEarlier": "Showing {{count}} earlier items too",
+    "showEarlier": "Show earlier",
+    "showTodayOnly": "Today only"
+  }
 }

@@ -85,6 +85,8 @@ function buildContext(
   };
 }
 
+const VIEW_NOW = new Date(2026, 6, 11, 18, 0, 0);
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
@@ -134,7 +136,7 @@ describe('MobileAttentionPanel', () => {
       lastSucceededAt: '2026-07-11T10:00:00.000Z',
     });
 
-    renderPanel(<MobileAttentionPanel onOpenItem={onOpenItem} />);
+    renderPanel(<MobileAttentionPanel onOpenItem={onOpenItem} now={VIEW_NOW} />);
 
     expect(screen.getByRole('heading', { name: '待处理' })).toBeTruthy();
     expect(screen.getAllByText('需要你的决定').length).toBeGreaterThan(0);
@@ -162,7 +164,7 @@ describe('MobileAttentionPanel', () => {
       error: new AttentionHttpError('no capability', 'unsupported', 'attention.v1'),
     });
 
-    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} />);
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} now={VIEW_NOW} />);
 
     expect(
       screen.getByText('当前后端不支持全局 Inbox（缺少 attention.v1）'),
@@ -210,7 +212,7 @@ describe('MobileAttentionPanel', () => {
       lastSucceededAt: '2026-07-11T09:30:00.000Z',
     });
 
-    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} />);
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} now={VIEW_NOW} />);
 
     expect(screen.getByText(/状态可能已过期/)).toBeTruthy();
     expect(screen.getByText('Blocked deploy')).toBeTruthy();
@@ -259,7 +261,7 @@ describe('MobileAttentionPanel', () => {
       myDeviceId: 'mobile-test',
     };
     mockAttentionValue = buildContext({ snapshot });
-    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} />);
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} now={VIEW_NOW} />);
 
     const open = screen.getByTestId('attention-action-orchestrator:human-review:task-1');
     expect(open.tagName).toBe('BUTTON');
@@ -267,5 +269,43 @@ describe('MobileAttentionPanel', () => {
     expect(screen.getByTestId('attention-toggle-read-orchestrator:human-review:task-1')).toBeTruthy();
     const action = open.querySelector('[class*="actionLabel"]');
     expect(action?.tagName).toBe('SPAN');
+  });
+
+  test('hides earlier items by default on mobile inbox', () => {
+    const snapshot: AttentionSnapshot = {
+      generatedAt: '2026-07-11T10:00:00.000Z',
+      counts: {
+        total: 2,
+        decision: 1,
+        blocked: 1,
+        environment: 0,
+        unreadTotal: 2,
+        unreadDecision: 1,
+        unreadBlocked: 1,
+        unreadEnvironment: 0,
+      },
+      items: [
+        buildItem({
+          id: 'orchestrator:human-review:today',
+          updatedAt: new Date(2026, 6, 11, 12, 0, 0).toISOString(),
+        }),
+        buildItem({
+          id: 'orchestrator:blocked:old',
+          category: 'blocked',
+          sourceKind: 'orchestratorBlocked',
+          title: 'Old blocked',
+          updatedAt: new Date(2026, 6, 9, 12, 0, 0).toISOString(),
+          target: { kind: 'orchestratorTask', projectId: 'proj-1', taskId: 'old' },
+        }),
+      ],
+      myDeviceId: 'mobile-test',
+    };
+    mockAttentionValue = buildContext({ snapshot });
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} now={VIEW_NOW} />);
+
+    expect(screen.getByTestId('attention-item-orchestrator:human-review:today')).toBeTruthy();
+    expect(screen.queryByTestId('attention-item-orchestrator:blocked:old')).toBeNull();
+    fireEvent.click(screen.getByTestId('attention-show-earlier'));
+    expect(screen.getByTestId('attention-item-orchestrator:blocked:old')).toBeTruthy();
   });
 });

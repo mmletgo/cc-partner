@@ -421,7 +421,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 全局 Inbox 是实时投影，不新增 Inbox 表，不做已读/忽略/稍后/关闭/snooze，不保留已解决历史；列表只反映当前权威阻塞，无独立持久化
 - v1 四类 source：本机/远端 Human Review（decision）、Blocked 任务（blocked）、failed remote outbox（blocked）、Workbench tmux 依赖缺失/失败/不支持（environment）；设备离线本身不是 source，只有它造成的 cached 任务/outbox 业务后果可以显示；mirrored/discarded outbox 与 ready/installing 依赖不投影
 - **v2 增量 source**（capability `attention.v2`）：Agent `needsInput`（decision）与 Agent `failed`（blocked）由 A1 runtime 实时派生，稳定 ID `agent:needs-input:<id>` / `agent:failed:<id>`；working/idle/completed 不投影；`ExperimentNeedsDecision`/`Experiment` 仅合同预留，A4 注册后才发射。v1 响应绝不序列化 Agent/Experiment 变体；客户端优先 v2 回落 v1
-- 桌面入口为侧栏固定页第二项「待处理」`/attention`（在 Github热门之后）；移动端在 Projects 后增加第二导航项「待处理」，Projects 仍为默认面板；两端对同一 snapshot 使用相同 badge（0 隐藏、1..99 数字、100+→99+）、相同分组顺序（需要你的决定 → 运行受阻 → 环境受阻）与空组省略规则；legacy 对端缺失 `attention.v1` 时移动端显式 unsupported，不得猜测旧接口
+- 桌面入口为侧栏固定页第二项「待处理」`/attention`（在 Github热门之后）；移动端在 Projects 后增加第二导航项「待处理」，Projects 仍为默认面板；两端对同一 snapshot 使用相同 badge（0 隐藏、1..99 数字、100+→99+）、相同分组顺序（需要你的决定 → 运行受阻 → 环境受阻）与空组省略规则；列表默认只展示本地日历日当天的事项（按 `updatedAt`），更早事项默认隐藏并可通过「显示更早」展开；侧栏 badge 仍统计全部未读；legacy 对端缺失 `attention.v1` 时移动端显式 unsupported，不得猜测旧接口
 - 条目**只导航**（导航-only）：任务/Evidence 进 Orchestrator 自动化控制台，failed outbox 进自动化控制台 outbox 区，tmux 依赖进 Settings `dependencies`，Agent 进既有 terminal session；列表内与 deep link 目标落地均**不**执行 Deliver、Request Rework、Retry、Discard、依赖安装或 terminal 输入；系统运营通知同样无业务 action 回调，点击至多导航到既有权威界面
 - 解决动作仍在 Orchestrator/Settings 原界面；Deliver、Request Rework、task Retry/Refresh、outbox Retry/Discard、依赖 install/recheck 成功后立即失效并刷新 Inbox；失败动作不失效；页面可见时 10 秒轮询仅作远端/外部变化兜底
 - 远端在线条目标 live；网络失败回退最近 mirror 时保留真实 `last_synced_at` 并标 cached，不得伪装 live；任一非网络 source 失败则整次快照失败，不得返回误导性部分快照

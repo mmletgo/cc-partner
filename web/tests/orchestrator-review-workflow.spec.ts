@@ -278,7 +278,7 @@ function makeAttentionItem(partial: {
     sourceKind: 'orchestratorHumanReview' as const,
     title: partial.title ?? 'Review delivery',
     summary: 'Need human review',
-    updatedAt: TS,
+    updatedAt: new Date().toISOString(),
     freshness: 'live' as const,
     cachedAt: null,
     project: { id: partial.projectId, name: 'Review Project', kind: 'local' as const },

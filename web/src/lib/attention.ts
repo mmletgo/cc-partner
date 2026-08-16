@@ -230,6 +230,60 @@ export function groupAttentionItems(items: AttentionItem[]): AttentionGroup[] {
 }
 
 /**
+ * Inbox 按本地日历日切分后的当天 / 更早条目。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   待处理默认只展示今天，过期条目需单独计数以便提示「显示更早」。
+ *
+ * Code Logic（字段说明）:
+ *   today 为 updatedAt 落在 now 本地日的条目；earlier 为其余可解析条目。
+ */
+export interface AttentionDayPartition {
+  today: AttentionItem[];
+  earlier: AttentionItem[];
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   待处理按用户本地「今天」过滤，不能用 UTC 日期把跨午夜条目判成过期。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析 ISO 后比较本地年/月/日；非法时间 fail-open 视为当天，避免误藏。
+ */
+export function isIsoTimestampOnLocalDay(iso: string, now: Date): boolean {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return true;
+  return (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Inbox 需要一次切分出当天与更早条目，供默认隐藏与展开共用。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 updatedAt 是否落在 now 的本地日历日分桶，保持原相对顺序。
+ */
+export function partitionAttentionItemsByLocalDay(
+  items: readonly AttentionItem[],
+  now: Date,
+): AttentionDayPartition {
+  const today: AttentionItem[] = [];
+  const earlier: AttentionItem[] = [];
+  for (const item of items) {
+    if (isIsoTimestampOnLocalDay(item.updatedAt, now)) {
+      today.push(item);
+    } else {
+      earlier.push(item);
+    }
+  }
+  return { today, earlier };
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   动作文案固定按 sourceKind 生成（前往复核 / 查看阻塞原因 / 查看失败项 / 打开设置），
  *   页面只消费 i18n key，不写死中文/英文。

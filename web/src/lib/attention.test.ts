@@ -15,6 +15,8 @@ import {
   formatAttentionBadgeCount,
   getAttentionActionI18nKey,
   groupAttentionItems,
+  isIsoTimestampOnLocalDay,
+  partitionAttentionItemsByLocalDay,
   protectAttentionItemOrder,
 } from './attention';
 import type { AttentionItem } from './types';
@@ -190,5 +192,31 @@ describe('buildDesktopAttentionTargetUrl', () => {
         conflictId: 'c-9',
       }),
     ).toBe('/agent-hub?assetId=asset-1&conflictId=c-9');
+  });
+});
+
+describe('partitionAttentionItemsByLocalDay', () => {
+  const now = new Date(2026, 7, 16, 15, 0, 0);
+
+  test('keeps same local calendar day and splits earlier items', () => {
+    const today = buildItem({
+      id: 'today',
+      updatedAt: new Date(2026, 7, 16, 9, 0, 0).toISOString(),
+    });
+    const earlier = buildItem({
+      id: 'earlier',
+      updatedAt: new Date(2026, 7, 15, 18, 0, 0).toISOString(),
+    });
+    const partition = partitionAttentionItemsByLocalDay([today, earlier], now);
+    expect(partition.today.map((item) => item.id)).toEqual(['today']);
+    expect(partition.earlier.map((item) => item.id)).toEqual(['earlier']);
+  });
+
+  test('treats invalid timestamps as today so they are not hidden', () => {
+    expect(isIsoTimestampOnLocalDay('not-a-date', now)).toBe(true);
+    const invalid = buildItem({ id: 'invalid', updatedAt: 'not-a-date' });
+    const partition = partitionAttentionItemsByLocalDay([invalid], now);
+    expect(partition.today).toHaveLength(1);
+    expect(partition.earlier).toHaveLength(0);
   });
 });

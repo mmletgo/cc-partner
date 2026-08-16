@@ -18,6 +18,10 @@ import { countAttentionItems } from '@/lib/attention';
 import type { AttentionItem, AttentionSnapshot } from '@/lib/types';
 import { AttentionView } from './Attention';
 
+const VIEW_NOW = new Date(2026, 6, 11, 18, 0, 0);
+const TODAY_ISO = new Date(2026, 6, 11, 12, 0, 0).toISOString();
+const EARLIER_ISO = new Date(2026, 6, 9, 12, 0, 0).toISOString();
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
@@ -107,6 +111,7 @@ function renderView(
         onMarkAllRead={onMarkAllRead}
         onMarkCategoryRead={onMarkCategoryRead}
         formatTime={props.formatTime ?? ((iso) => iso)}
+        now={props.now ?? VIEW_NOW}
       />
     </I18nextProvider>,
   );
@@ -269,6 +274,7 @@ describe('AttentionView contracts', () => {
           onMarkAllRead={onMarkAllRead}
           onMarkCategoryRead={onMarkCategoryRead}
           formatTime={(iso) => iso}
+          now={VIEW_NOW}
         />
       </I18nextProvider>,
     );
@@ -341,10 +347,59 @@ describe('AttentionView contracts', () => {
           onMarkAllRead={vi.fn()}
           onMarkCategoryRead={vi.fn()}
           formatTime={(iso) => iso}
+          now={VIEW_NOW}
         />
       </I18nextProvider>,
     );
     expect(screen.queryByTestId('attention-item-orchestrator:human-review:task-1')).toBeNull();
     expect(screen.getByTestId('attention-item-orchestrator:blocked:task-2')).toBeTruthy();
+  });
+
+  test('hides earlier items by default and reveals them on demand', () => {
+    const snapshot = buildSnapshot([
+      buildItem({
+        id: 'orchestrator:human-review:today',
+        updatedAt: TODAY_ISO,
+      }),
+      buildItem({
+        id: 'orchestrator:blocked:yesterday',
+        category: 'blocked',
+        sourceKind: 'orchestratorBlocked',
+        title: 'Old blocked',
+        updatedAt: EARLIER_ISO,
+        target: { kind: 'orchestratorTask', projectId: 'proj-1', taskId: 'old' },
+      }),
+    ]);
+    renderView({ snapshot });
+    expect(screen.getByTestId('attention-item-orchestrator:human-review:today')).toBeTruthy();
+    expect(screen.queryByTestId('attention-item-orchestrator:blocked:yesterday')).toBeNull();
+    expect(screen.getByTestId('attention-day-filter').textContent).toContain(
+      '另有 1 条更早的事项未显示',
+    );
+    fireEvent.click(screen.getByTestId('attention-show-earlier'));
+    expect(screen.getByTestId('attention-item-orchestrator:blocked:yesterday')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('attention-show-today-only'));
+    expect(screen.queryByTestId('attention-item-orchestrator:blocked:yesterday')).toBeNull();
+  });
+
+  test('shows today-empty copy instead of generic empty when only earlier items exist', () => {
+    const snapshot = buildSnapshot([
+      buildItem({
+        id: 'orchestrator:blocked:yesterday',
+        category: 'blocked',
+        sourceKind: 'orchestratorBlocked',
+        title: 'Old blocked',
+        updatedAt: EARLIER_ISO,
+        target: { kind: 'orchestratorTask', projectId: 'proj-1', taskId: 'old' },
+      }),
+    ]);
+    renderView({ snapshot });
+    expect(screen.queryByTestId('attention-empty')).toBeNull();
+    expect(screen.queryByTestId('attention-groups')).toBeNull();
+    expect(screen.getByTestId('attention-day-filter').textContent).toContain(
+      '今天没有待处理事项',
+    );
+    fireEvent.click(screen.getByTestId('attention-show-earlier'));
+    expect(screen.getByTestId('attention-item-orchestrator:blocked:yesterday')).toBeTruthy();
   });
 });

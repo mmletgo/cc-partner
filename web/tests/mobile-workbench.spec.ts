@@ -122,7 +122,7 @@ function makeAttentionSnapshot() {
         sourceKind: 'orchestratorHumanReview',
         title: 'Review delivery',
         summary: 'Need human review',
-        updatedAt: TS,
+        updatedAt: new Date().toISOString(),
         freshness: 'live',
         cachedAt: null,
         project: { id: 'mp-1', name: 'mobile-demo', kind: 'local' },

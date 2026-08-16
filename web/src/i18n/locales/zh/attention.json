@@ -82,5 +82,12 @@
   },
   "markError": "无法更新已读状态",
   "markReadAria": "将 {{title}} 标为已读",
-  "markUnreadAria": "将 {{title}} 标为未读"
+  "markUnreadAria": "将 {{title}} 标为未读",
+  "dayFilter": {
+    "todayEmpty": "今天没有待处理事项",
+    "earlierHidden": "另有 {{count}} 条更早的事项未显示",
+    "showingEarlier": "正在显示含更早的 {{count}} 条事项",
+    "showEarlier": "显示更早",
+    "showTodayOnly": "只看今天"
+  }
 }

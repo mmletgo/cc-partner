@@ -9,7 +9,7 @@
  *   unsupported/stale/empty/error 分态展示；点击后交给父级 target mapper，列表内不执行副作用动作。
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -19,6 +19,7 @@ import {
   getAttentionActionI18nKey,
   groupAttentionItems,
   isAttentionItemUnread,
+  partitionAttentionItemsByLocalDay,
 } from '@/lib/attention';
 import type { AttentionCategory, AttentionItem, AttentionSourceKind } from '@/lib/types';
 import panelStyles from '../MobileWorkbench.module.css';
@@ -27,6 +28,8 @@ import styles from './MobileAttentionPanel.module.css';
 export interface MobileAttentionPanelProps {
   onOpenItem: (item: AttentionItem) => void;
   notice?: string | null;
+  /** 测试注入当前时刻；生产默认本地 now。 */
+  now?: Date;
 }
 
 /**
@@ -117,8 +120,10 @@ function attentionActionLabelKey(
 export function MobileAttentionPanel({
   onOpenItem,
   notice = null,
+  now,
 }: MobileAttentionPanelProps): ReactElement {
   const { t } = useTranslation(['attention', 'workbench']);
+  const [includeEarlier, setIncludeEarlier] = useState(false);
   const {
     snapshot,
     loading,
@@ -134,10 +139,13 @@ export function MobileAttentionPanel({
     markError,
   } = useAttention();
 
-  const groups = useMemo(
-    () => groupAttentionItems(snapshot?.items ?? []),
-    [snapshot?.items],
+  const clock = now ?? new Date();
+  const dayPartition = useMemo(
+    () => partitionAttentionItemsByLocalDay(snapshot?.items ?? [], clock),
+    [snapshot?.items, clock],
   );
+  const visibleItems = includeEarlier ? (snapshot?.items ?? []) : dayPartition.today;
+  const groups = useMemo(() => groupAttentionItems(visibleItems), [visibleItems]);
 
   const unsupported =
     error instanceof AttentionHttpError && error.kind === 'unsupported';
@@ -145,7 +153,7 @@ export function MobileAttentionPanel({
   const showInitialError =
     !loading && snapshot === null && error !== null && !unsupported;
   const showEmpty =
-    !loading && snapshot !== null && groups.length === 0 && !unsupported;
+    !loading && snapshot !== null && snapshot.items.length === 0 && !unsupported;
 
   return (
     <section className={styles.panel} aria-labelledby="mobile-attention-title">
@@ -217,6 +225,36 @@ export function MobileAttentionPanel({
           {t('attention:error')}
           {error?.message ? `: ${error.message}` : null}
         </p>
+      ) : null}
+
+      {dayPartition.earlier.length > 0 ? (
+        <div
+          className={`${styles.banner} ${styles.dayFilter}`}
+          data-testid="attention-day-filter"
+          role="status"
+        >
+          <p className={styles.state}>
+            {includeEarlier
+              ? t('attention:dayFilter.showingEarlier', {
+                  count: dayPartition.earlier.length,
+                })
+              : dayPartition.today.length === 0
+                ? t('attention:dayFilter.todayEmpty')
+                : t('attention:dayFilter.earlierHidden', {
+                    count: dayPartition.earlier.length,
+                  })}
+          </p>
+          <button
+            type="button"
+            className={panelStyles.secondaryButton}
+            onClick={() => setIncludeEarlier((current: boolean) => !current)}
+            data-testid={includeEarlier ? 'attention-show-today-only' : 'attention-show-earlier'}
+          >
+            {includeEarlier
+              ? t('attention:dayFilter.showTodayOnly')
+              : t('attention:dayFilter.showEarlier')}
+          </button>
+        </div>
       ) : null}
 
       {showEmpty ? <p className={styles.state}>{t('attention:empty')}</p> : null}

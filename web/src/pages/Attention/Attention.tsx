@@ -6,11 +6,11 @@
  *   并从操作列导航到权威界面，而不是在列表内执行 Deliver/Retry。
  *
  * Code Logic（这个页面做什么）:
- *   读取共享 AttentionProvider 快照；8 列表格按分组渲染；打开条目同时标已读；
- *   顶部全部已读 + 分类已读；已读行灰显保留。
+ *   读取共享 AttentionProvider 快照；8 列表格按分组渲染；默认只展示当天 updatedAt；
+ *   打开条目同时标已读；顶部全部已读 + 分类已读；已读行灰显保留。
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -24,6 +24,7 @@ import {
   getAttentionSourceI18nKey,
   groupAttentionItems,
   isAttentionItemUnread,
+  partitionAttentionItemsByLocalDay,
 } from '@/lib/attention';
 import type { AttentionCategory, AttentionItem, AttentionSnapshot } from '@/lib/types';
 import {
@@ -57,6 +58,8 @@ export interface AttentionViewProps {
   onMarkAllRead: () => void;
   onMarkCategoryRead: (category: AttentionCategory) => void;
   formatTime?: (iso: string) => string;
+  /** 测试注入当前时刻；生产默认本地 now。 */
+  now?: Date;
 }
 
 const CATEGORY_I18N = {
@@ -99,7 +102,7 @@ function defaultFormatTime(iso: string, language: string): string {
  *   桌面 Inbox 需要独立、可测试的表格视图，固定 8 列与导航-only 动作。
  *
  * Code Logic（这个组件做什么）:
- *   按 loading/error/empty/table 分支渲染；已读灰显；操作列拆成打开 + 已读切换。
+ *   按 loading/error/empty/table 分支渲染；默认只展示当天；已读灰显；操作列拆成打开 + 已读切换。
  */
 export function AttentionView({
   snapshot,
@@ -117,17 +120,22 @@ export function AttentionView({
   onMarkAllRead,
   onMarkCategoryRead,
   formatTime,
+  now,
 }: AttentionViewProps) {
   const { t, i18n } = useTranslation(['attention', 'common']);
+  const [includeEarlier, setIncludeEarlier] = useState(false);
 
   const format =
     formatTime ??
     ((iso: string) => defaultFormatTime(iso, i18n.language.startsWith('zh') ? 'zh' : 'en'));
 
-  const groups = useMemo(
-    () => (snapshot ? groupAttentionItems(snapshot.items) : []),
-    [snapshot],
+  const clock = now ?? new Date();
+  const dayPartition = useMemo(
+    () => partitionAttentionItemsByLocalDay(snapshot?.items ?? [], clock),
+    [snapshot, clock],
   );
+  const visibleItems = includeEarlier ? (snapshot?.items ?? []) : dayPartition.today;
+  const groups = useMemo(() => groupAttentionItems(visibleItems), [visibleItems]);
 
   const showSkeleton = loading && snapshot === null && error === null;
   const showFirstError = snapshot === null && error !== null && !loading;
@@ -247,15 +255,37 @@ export function AttentionView({
           </div>
         ) : null}
 
+        {dayPartition.earlier.length > 0 ? (
+          <div className={styles.banner} data-testid="attention-day-filter" role="status">
+            <p className={styles.bannerText}>
+              {includeEarlier
+                ? t('attention:dayFilter.showingEarlier', {
+                    count: dayPartition.earlier.length,
+                  })
+                : dayPartition.today.length === 0
+                  ? t('attention:dayFilter.todayEmpty')
+                  : t('attention:dayFilter.earlierHidden', {
+                      count: dayPartition.earlier.length,
+                    })}
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setIncludeEarlier((current: boolean) => !current)}
+              data-testid={includeEarlier ? 'attention-show-today-only' : 'attention-show-earlier'}
+            >
+              {includeEarlier
+                ? t('attention:dayFilter.showTodayOnly')
+                : t('attention:dayFilter.showEarlier')}
+            </Button>
+          </div>
+        ) : null}
+
         {snapshot !== null && groups.length > 0 ? (
           <div className={styles.groups} data-testid="attention-groups">
             {groups.map((group) => {
-              const unreadInGroup =
-                group.category === 'decision'
-                  ? snapshot.counts.unreadDecision
-                  : group.category === 'blocked'
-                    ? snapshot.counts.unreadBlocked
-                    : snapshot.counts.unreadEnvironment;
+              const unreadInGroup = group.items.filter((item) => isAttentionItemUnread(item)).length;
               return (
                 <section
                   key={group.category}
