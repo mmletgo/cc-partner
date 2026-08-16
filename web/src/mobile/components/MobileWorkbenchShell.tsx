@@ -6,7 +6,6 @@ import { formatAttentionBadgeCount } from '@/lib/attention';
 import {
   BellIcon,
   BrowserIcon,
-  ChevronDownIcon,
   ChevronLeftIcon,
   FileIcon,
   FolderIcon,
@@ -70,9 +69,6 @@ export interface MobileWorkbenchShellProps {
   session: string | null;
   /** 是否已选中可进入工作台的项目；驱动 global/project 导航模式。 */
   hasActiveProject?: boolean;
-  worktreeStatusDisabled?: boolean;
-  worktreeStatusExpanded?: boolean;
-  onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
   /** 项目工作台导航中的「返回项目列表」；未传则不渲染返回按钮。 */
   onBackToProjects?: () => void;
@@ -226,9 +222,6 @@ export function MobileWorkbenchShell({
   worktree,
   session,
   hasActiveProject = false,
-  worktreeStatusDisabled = false,
-  worktreeStatusExpanded = false,
-  onWorktreeStatusClick,
   onPanelChange,
   onBackToProjects,
   attentionTotal = null,
@@ -447,25 +440,7 @@ export function MobileWorkbenchShell({
       <main className={styles.content} data-active-panel={panel}>
         <div className={styles.statusRow} aria-label={t('workbench:mobile.statusAriaLabel')}>
           <span className={styles.statusPill}>{project ?? t('workbench:mobile.status.project')}</span>
-          {onWorktreeStatusClick ? (
-            <button
-              type="button"
-              className={`${styles.statusPill} ${styles.statusPillButton}`}
-              disabled={worktreeStatusDisabled}
-              aria-haspopup="dialog"
-              aria-expanded={worktreeStatusExpanded}
-              onClick={onWorktreeStatusClick}
-            >
-              <span className={styles.statusPillText}>{worktreeStatusLabel}</span>
-              <ChevronDownIcon
-                size={14}
-                className={styles.statusPillIcon}
-                aria-hidden="true"
-              />
-            </button>
-          ) : (
-            <span className={styles.statusPill}>{worktreeStatusLabel}</span>
-          )}
+          <span className={styles.statusPill}>{worktreeStatusLabel}</span>
           <span className={styles.statusPill}>{session ?? t('workbench:mobile.status.session')}</span>
           {connectionLabel ? (
             <span
