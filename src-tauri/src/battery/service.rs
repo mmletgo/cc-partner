@@ -83,16 +83,13 @@ fn source_kind(source: BatteryCreditSource) -> &'static str {
     match source {
         BatteryCreditSource::Flashcard => "credit_wordgame",
         BatteryCreditSource::GamePlugin => "credit_game_plugin",
-        _ => "credit_health",
+        BatteryCreditSource::Health => "credit_health",
     }
 }
 
 fn source_prefix(source: BatteryCreditSource) -> &'static str {
     match source {
-        BatteryCreditSource::Water => "habit:water:",
-        BatteryCreditSource::Rest => "habit:rest:",
-        BatteryCreditSource::Kegel => "habit:kegel:",
-        BatteryCreditSource::Custom => "habit:custom:",
+        BatteryCreditSource::Health => "habit:",
         BatteryCreditSource::Flashcard => "wordgame:",
         BatteryCreditSource::GamePlugin => "game-plugin:",
     }
@@ -100,10 +97,7 @@ fn source_prefix(source: BatteryCreditSource) -> &'static str {
 
 fn source_token(source: BatteryCreditSource) -> &'static str {
     match source {
-        BatteryCreditSource::Water => "water",
-        BatteryCreditSource::Rest => "rest",
-        BatteryCreditSource::Kegel => "kegel",
-        BatteryCreditSource::Custom => "custom",
+        BatteryCreditSource::Health => "health",
         BatteryCreditSource::Flashcard => "flashcard",
         BatteryCreditSource::GamePlugin => "game-plugin",
     }
@@ -111,13 +105,12 @@ fn source_token(source: BatteryCreditSource) -> &'static str {
 
 /// 健康 completed 的幂等键。
 pub fn habit_source_id(template_id: &str, habit_row_id: i64) -> String {
-    let bucket = match BatteryCreditSource::from_health_template_id(template_id) {
-        BatteryCreditSource::Water => "water",
-        BatteryCreditSource::Rest => "rest",
-        BatteryCreditSource::Kegel => "kegel",
-        _ => "custom",
-    };
-    format!("habit:{bucket}:{habit_row_id}")
+    format!("habit:{template_id}:{habit_row_id}")
+}
+
+/// 按模板计日上限时的 source_id 前缀。
+pub fn habit_source_prefix(template_id: &str) -> String {
+    format!("habit:{template_id}:")
 }
 
 /// 闪卡答对的幂等键。
@@ -220,7 +213,7 @@ pub async fn get_snapshot(
     snapshot_from(repo, config, &state, now, consuming, None, None).await
 }
 
-/// 切换模式；首次进入充电且未赠送则入账欢迎分钟。
+/// 切换模式。不再发放首次充电欢迎赠送。
 pub async fn set_mode(
     repo: &BatteryRepo,
     config: &BatteryConfig,
@@ -240,34 +233,6 @@ pub async fn set_mode(
     }
     state.mode = mode.to_string();
     state.updated_at = now;
-    let mut credit_minutes = None;
-    if mode == "charging" && !state.welcome_granted && config.welcome_grant_minutes > 0 {
-        let grant = config
-            .welcome_grant_minutes
-            .saturating_mul(MS_PER_MINUTE)
-            .min(config.max_balance_minutes.saturating_mul(MS_PER_MINUTE) - state.remaining_ms)
-            .max(0);
-        if grant > 0 {
-            state.remaining_ms += grant;
-            state.welcome_granted = true;
-            let inserted = repo
-                .insert_ledger(&BatteryLedgerRow {
-                    id: 0,
-                    ts: now,
-                    kind: "credit_welcome".into(),
-                    source_id: Some("welcome".into()),
-                    delta_ms: grant,
-                    balance_after_ms: state.remaining_ms,
-                    note: None,
-                })
-                .await?;
-            if inserted {
-                credit_minutes = Some(grant / MS_PER_MINUTE);
-            }
-        } else {
-            state.welcome_granted = true;
-        }
-    }
     repo.upsert_state(&state).await?;
     let _ = repo
         .insert_ledger(&BatteryLedgerRow {
@@ -284,16 +249,7 @@ pub async fn set_mode(
         drain_runtime().last_settle_ms = None;
     }
     let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
-    snapshot_from(
-        repo,
-        config,
-        &state,
-        now,
-        consuming,
-        credit_minutes,
-        credit_minutes.map(|_| "welcome".into()),
-    )
-    .await
+    snapshot_from(repo, config, &state, now, consuming, None, None).await
 }
 
 /// 入账。source_id 已存在则返回当前快照且不改余额。
@@ -408,6 +364,45 @@ pub async fn credit_explicit(
         consuming,
         inserted.then_some(delta / MS_PER_MINUTE),
         inserted.then(|| source_token(source).into()),
+    )
+    .await
+}
+
+/// 健康模板入账：按模板分钟与日上限，幂等键 `habit:{template_id}:{row}`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每条健康提醒自己的额度与日上限不能再挤进 water/rest/kegel/custom 四个全局桶。
+///
+/// Code Logic（这个函数做什么）:
+///     日重置后按 `habit:{template_id}:` 计今日次数；达 cap 则不入账，否则走 `credit_explicit`。
+pub async fn credit_health_habit(
+    repo: &BatteryRepo,
+    config: &BatteryConfig,
+    source: BatteryCreditSource,
+    template_id: &str,
+    habit_row_id: i64,
+    minutes: i64,
+    daily_cap: i64,
+    now: i64,
+) -> Result<BatterySnapshotDto, AppError> {
+    let state = repo.ensure_default_state(now).await?;
+    let state = apply_daily_reset_if_due(repo, config, state, now).await?;
+    let (day_start, day_end) = local_day_bounds(now);
+    let prefix = habit_source_prefix(template_id);
+    let today_count = repo
+        .count_credits_today("credit_health", &prefix, day_start, day_end)
+        .await?;
+    if daily_cap >= 0 && today_count >= daily_cap {
+        let consuming = !drain_runtime().consuming.is_empty() && state.mode == "charging";
+        return snapshot_from(repo, config, &state, now, consuming, None, None).await;
+    }
+    credit_explicit(
+        repo,
+        config,
+        source,
+        &habit_source_id(template_id, habit_row_id),
+        minutes,
+        now,
     )
     .await
 }
@@ -530,8 +525,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_charging_after_daily_reset_clamps_welcome() {
-        // 每日重置先于 welcome：首次切 charging 余额已满，welcome 钳 0 不入账。
+    async fn first_charging_does_not_grant_welcome() {
+        // 欢迎赠送已下线：切 charging 只切模式，不另入账。
         let _lock = lock_drain_for_test().await;
         let repo = repo().await;
         let cfg = BatteryConfig::default();
@@ -565,16 +560,79 @@ mod tests {
         seeded.remaining_ms = 0;
         seeded.last_daily_reset_at = evaluate_daily_reset(0, now).unwrap();
         repo.upsert_state(&seeded).await.unwrap();
-        let id = habit_source_id("water", 9);
-        let a = credit(&repo, &cfg, BatteryCreditSource::Water, &id, now)
+        let id = wordgame_source_id("lemma", "spell", "2026-08-16", 1);
+        let a = credit(&repo, &cfg, BatteryCreditSource::Flashcard, &id, now)
             .await
             .unwrap();
-        let b = credit(&repo, &cfg, BatteryCreditSource::Water, &id, now + 1)
+        let b = credit(&repo, &cfg, BatteryCreditSource::Flashcard, &id, now + 1)
             .await
             .unwrap();
-        assert_eq!(a.remaining_ms, 8 * MS_PER_MINUTE);
-        assert_eq!(b.remaining_ms, 8 * MS_PER_MINUTE);
+        assert_eq!(a.remaining_ms, 3 * MS_PER_MINUTE);
+        assert_eq!(b.remaining_ms, 3 * MS_PER_MINUTE);
         assert_eq!(b.credit_minutes, None);
+    }
+
+    #[test]
+    fn habit_source_id_uses_template_id() {
+        assert_eq!(habit_source_id("water", 9), "habit:water:9");
+        assert_eq!(habit_source_id("custom-foo", 3), "habit:custom-foo:3");
+        assert_eq!(habit_source_prefix("custom-foo"), "habit:custom-foo:");
+    }
+
+    #[tokio::test]
+    async fn credit_health_habit_caps_per_template() {
+        let _lock = lock_drain_for_test().await;
+        let repo = repo().await;
+        let cfg = BatteryConfig::default();
+        let now = 1_700_000_100;
+        let mut seeded = repo.ensure_default_state(now).await.unwrap();
+        seeded.mode = "charging".into();
+        seeded.remaining_ms = 0;
+        seeded.last_daily_reset_at = evaluate_daily_reset(0, now).unwrap();
+        repo.upsert_state(&seeded).await.unwrap();
+
+        let first = credit_health_habit(
+            &repo,
+            &cfg,
+            BatteryCreditSource::Health,
+            "custom-a",
+            1,
+            10,
+            1,
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.remaining_ms, 10 * MS_PER_MINUTE);
+
+        let capped = credit_health_habit(
+            &repo,
+            &cfg,
+            BatteryCreditSource::Health,
+            "custom-a",
+            2,
+            10,
+            1,
+            now + 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(capped.remaining_ms, 10 * MS_PER_MINUTE);
+        assert_eq!(capped.credit_minutes, None);
+
+        let other = credit_health_habit(
+            &repo,
+            &cfg,
+            BatteryCreditSource::Health,
+            "custom-b",
+            3,
+            10,
+            1,
+            now + 2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(other.remaining_ms, 20 * MS_PER_MINUTE);
     }
 
     #[tokio::test]

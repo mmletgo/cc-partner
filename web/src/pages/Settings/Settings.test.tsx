@@ -318,29 +318,15 @@ vi.mock('@/api/battery', () => ({
   batteryApi: {
     getConfig: () =>
       Promise.resolve({
-        rewards: {
-          waterMinutes: 8,
-          restMinutes: 20,
-          kegelMinutes: 10,
-          customMinutes: 10,
-          flashcardMinutes: 3,
-        },
-        dailyCaps: { water: 6, rest: 8, kegel: 4, custom: 6, flashcard: 30 },
+        flashcardMinutes: 3,
+        flashcardCap: 30,
         maxBalanceMinutes: 240,
-        welcomeGrantMinutes: 25,
       }),
     getDefaultConfig: () =>
       Promise.resolve({
-        rewards: {
-          waterMinutes: 8,
-          restMinutes: 20,
-          kegelMinutes: 10,
-          customMinutes: 10,
-          flashcardMinutes: 3,
-        },
-        dailyCaps: { water: 6, rest: 8, kegel: 4, custom: 6, flashcard: 30 },
+        flashcardMinutes: 3,
+        flashcardCap: 30,
         maxBalanceMinutes: 240,
-        welcomeGrantMinutes: 25,
       }),
     updateConfig: (config: unknown) => Promise.resolve(config),
     listLedger: () => Promise.resolve([]),

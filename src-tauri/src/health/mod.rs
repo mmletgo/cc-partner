@@ -378,19 +378,42 @@ pub(crate) async fn persist_habit_event_by_id(
 /// 健康 completed 入账；失败只记日志，不回滚习惯记录。
 ///
 /// Business Logic: 打卡成功就该充电；账本故障不能让用户以为没完成健康行为。
-/// Code Logic: BatteryRepo 现取；credit 后 emit `battery:changed`。
+/// Code Logic: 读模板自身额度（缺字段视作 0）；按 habit:{template_id}: 计日上限后 credit_explicit。
 async fn credit_health_completed(
     state: &crate::state::AppState,
     template_id: &str,
     habit_id: i64,
     now: i64,
 ) {
-    let config = state.config.read().unwrap().battery.clone();
+    let (battery, minutes, cap) = {
+        let cfg = state.config.read().unwrap();
+        let template = cfg
+            .health
+            .reminders
+            .iter()
+            .find(|item| item.id == template_id);
+        let minutes = template
+            .map(|item| item.resolved_credit_minutes(&cfg.battery))
+            .unwrap_or(0);
+        let cap = template
+            .map(|item| item.resolved_daily_cap(&cfg.battery))
+            .unwrap_or(0);
+        (cfg.battery.clone(), minutes, cap)
+    };
     let repo =
         crate::storage::BatteryRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
-    let source = crate::config::BatteryCreditSource::from_health_template_id(template_id);
-    let source_id = crate::battery::habit_source_id(template_id, habit_id);
-    match crate::battery::credit(&repo, &config, source, &source_id, now).await {
+    match crate::battery::credit_health_habit(
+        &repo,
+        &battery,
+        crate::config::BatteryCreditSource::Health,
+        template_id,
+        habit_id,
+        minutes,
+        cap,
+        now,
+    )
+    .await
+    {
         Ok(snapshot) => state.emit_event("battery:changed", snapshot),
         Err(error) => tracing::warn!("充电入账失败: {error}"),
     }
@@ -745,6 +768,8 @@ mod activity_gate_tests {
             body: "b".into(),
             confirm_label: "ok".into(),
             unit_label: "次".into(),
+            credit_minutes: None,
+            daily_cap: None,
         }
     }
 
@@ -763,6 +788,8 @@ mod activity_gate_tests {
             body: "b".into(),
             confirm_label: "开始".into(),
             unit_label: "次".into(),
+            credit_minutes: None,
+            daily_cap: None,
         }
     }
 

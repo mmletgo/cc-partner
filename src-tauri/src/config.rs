@@ -673,141 +673,49 @@ pub const HEALTH_REMINDER_KEGEL_ID: &str = "kegel";
 /// 充电入账来源。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     健康模板与闪卡要用稳定来源键查奖励分钟和日上限。
+///     健康模板的额度写在每条 `HealthReminderTemplate` 上不入电池；只有闪卡与插件游戏
+///     仍查 `BatteryConfig` 的奖励桶。
 ///
 /// Code Logic（这个枚举做什么）:
-///     纯分类；water/rest/kegel 对应内置模板，其它健康模板归 custom。
+///     纯分类；健康入账用于流水 kind/note，闪卡 / 插件游戏两条来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatteryCreditSource {
-    /// 内置饮水。
-    Water,
-    /// 内置休息。
-    Rest,
-    /// 内置提肛。
-    Kegel,
-    /// 自定义健康模板。
-    Custom,
+    /// 健康习惯 completed 入账（流水 kind/note 用；分钟/上限走模板自身）。
+    Health,
     /// 记单词答对一张。
     Flashcard,
     /// 插件游戏自报完成一局。
     GamePlugin,
 }
 
-impl BatteryCreditSource {
-    /// 把健康模板 id 映射到入账来源。
-    ///
-    /// Business Logic（为什么需要这个函数）:
-    ///     入账挂钩只看见 template_id，需要落到可配置的奖励桶。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     water/rest/kegel 精确匹配，其余自定义。
-    pub fn from_health_template_id(template_id: &str) -> Self {
-        match template_id {
-            HEALTH_REMINDER_WATER_ID => Self::Water,
-            HEALTH_REMINDER_REST_ID => Self::Rest,
-            HEALTH_REMINDER_KEGEL_ID => Self::Kegel,
-            _ => Self::Custom,
-        }
-    }
-}
-
 /// 充电额度数字（设备策略，进 config.json）。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     用户要在设置里改各来源分钟、日上限和余额上限；模式与余额不放这里。
+///     用户要在设置里改闪卡分钟、日上限与余额上限；模式与余额不放这里。
+///     健康习惯的额度写在每条 `HealthReminderTemplate` 上，配置不再按来源桶保存。
 ///
 /// Code Logic（这个结构做什么）:
-///     camelCase 嵌套字段；`#[serde(default)]` 兼容旧 config。
+///     camelCase 字段；`#[serde(default)]` 兼容旧 config。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatteryConfig {
-    /// 各来源一次入账分钟。
-    #[serde(default)]
-    pub rewards: BatteryRewards,
-    /// 各来源每日次数上限。
-    #[serde(default)]
-    pub daily_caps: BatteryDailyCaps,
+    /// 闪卡答对一次充入分钟。
+    #[serde(default = "default_battery_flashcard_minutes")]
+    pub flashcard_minutes: i64,
+    /// 闪卡每日张数上限。
+    #[serde(default = "default_battery_flashcard_cap")]
+    pub flashcard_cap: i64,
     /// 余额上限（分钟），默认 240。
     #[serde(default = "default_battery_max_balance_minutes")]
     pub max_balance_minutes: i64,
-    /// 首次进入充电模式赠送分钟，默认 25。
-    #[serde(default = "default_battery_welcome_grant_minutes")]
-    pub welcome_grant_minutes: i64,
-}
-
-/// 各来源一次入账分钟。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BatteryRewards {
-    /// 喝水 completed。
-    #[serde(default = "default_battery_water_minutes")]
-    pub water_minutes: i64,
-    /// 休息 completed。
-    #[serde(default = "default_battery_rest_minutes")]
-    pub rest_minutes: i64,
-    /// 提肛 completed。
-    #[serde(default = "default_battery_kegel_minutes")]
-    pub kegel_minutes: i64,
-    /// 自定义习惯 completed。
-    #[serde(default = "default_battery_custom_minutes")]
-    pub custom_minutes: i64,
-    /// 闪卡答对一张。
-    #[serde(default = "default_battery_flashcard_minutes")]
-    pub flashcard_minutes: i64,
-}
-
-/// 各来源每日次数上限。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BatteryDailyCaps {
-    /// 喝水次数。
-    #[serde(default = "default_battery_water_cap")]
-    pub water: i64,
-    /// 休息次数。
-    #[serde(default = "default_battery_rest_cap")]
-    pub rest: i64,
-    /// 提肛次数。
-    #[serde(default = "default_battery_kegel_cap")]
-    pub kegel: i64,
-    /// 自定义次数。
-    #[serde(default = "default_battery_custom_cap")]
-    pub custom: i64,
-    /// 闪卡张数。
-    #[serde(default = "default_battery_flashcard_cap")]
-    pub flashcard: i64,
-}
-
-impl Default for BatteryRewards {
-    fn default() -> Self {
-        Self {
-            water_minutes: default_battery_water_minutes(),
-            rest_minutes: default_battery_rest_minutes(),
-            kegel_minutes: default_battery_kegel_minutes(),
-            custom_minutes: default_battery_custom_minutes(),
-            flashcard_minutes: default_battery_flashcard_minutes(),
-        }
-    }
-}
-
-impl Default for BatteryDailyCaps {
-    fn default() -> Self {
-        Self {
-            water: default_battery_water_cap(),
-            rest: default_battery_rest_cap(),
-            kegel: default_battery_kegel_cap(),
-            custom: default_battery_custom_cap(),
-            flashcard: default_battery_flashcard_cap(),
-        }
-    }
 }
 
 impl Default for BatteryConfig {
     fn default() -> Self {
         Self {
-            rewards: BatteryRewards::default(),
-            daily_caps: BatteryDailyCaps::default(),
+            flashcard_minutes: default_battery_flashcard_minutes(),
+            flashcard_cap: default_battery_flashcard_cap(),
             max_balance_minutes: default_battery_max_balance_minutes(),
-            welcome_grant_minutes: default_battery_welcome_grant_minutes(),
         }
     }
 }
@@ -816,63 +724,29 @@ impl BatteryConfig {
     /// 读取来源对应的一次入账分钟。
     pub fn reward_minutes(&self, source: BatteryCreditSource) -> i64 {
         match source {
-            BatteryCreditSource::Water => self.rewards.water_minutes,
-            BatteryCreditSource::Rest => self.rewards.rest_minutes,
-            BatteryCreditSource::Kegel => self.rewards.kegel_minutes,
-            BatteryCreditSource::Custom => self.rewards.custom_minutes,
-            BatteryCreditSource::Flashcard => self.rewards.flashcard_minutes,
-            BatteryCreditSource::GamePlugin => 0,
+            BatteryCreditSource::Flashcard => self.flashcard_minutes,
+            _ => 0,
         }
     }
 
     /// 读取来源对应的日次数上限。
     pub fn daily_cap(&self, source: BatteryCreditSource) -> i64 {
         match source {
-            BatteryCreditSource::Water => self.daily_caps.water,
-            BatteryCreditSource::Rest => self.daily_caps.rest,
-            BatteryCreditSource::Kegel => self.daily_caps.kegel,
-            BatteryCreditSource::Custom => self.daily_caps.custom,
-            BatteryCreditSource::Flashcard => self.daily_caps.flashcard,
+            BatteryCreditSource::Flashcard => self.flashcard_cap,
             BatteryCreditSource::GamePlugin => i64::MAX,
+            _ => 0,
         }
     }
 }
 
-fn default_battery_water_minutes() -> i64 {
-    8
-}
-fn default_battery_rest_minutes() -> i64 {
-    20
-}
-fn default_battery_kegel_minutes() -> i64 {
-    10
-}
-fn default_battery_custom_minutes() -> i64 {
-    10
-}
 fn default_battery_flashcard_minutes() -> i64 {
     3
-}
-fn default_battery_water_cap() -> i64 {
-    6
-}
-fn default_battery_rest_cap() -> i64 {
-    8
-}
-fn default_battery_kegel_cap() -> i64 {
-    4
-}
-fn default_battery_custom_cap() -> i64 {
-    6
 }
 fn default_battery_flashcard_cap() -> i64 {
     30
 }
 fn default_battery_max_balance_minutes() -> i64 {
     240
-}
-fn default_battery_welcome_grant_minutes() -> i64 {
-    25
 }
 
 /// 一条用户可配置的健康提醒模板。
@@ -913,6 +787,36 @@ pub struct HealthReminderTemplate {
     pub confirm_label: String,
     /// 统计单位（杯/次）。
     pub unit_label: String,
+    /// 完成一次充入分钟。
+    #[serde(default)]
+    pub credit_minutes: Option<i64>,
+    /// 该模板每日入账次数上限。
+    #[serde(default)]
+    pub daily_cap: Option<i64>,
+}
+
+impl HealthReminderTemplate {
+    /// 解析本条模板的完成充入分钟。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     健康习惯的额度写在模板上，不查电池配置。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Some` 用模板值；`None` 视作 0（不入账），让用户看到「没设置」就会去编辑。
+    pub fn resolved_credit_minutes(&self, _battery: &BatteryConfig) -> i64 {
+        self.credit_minutes.unwrap_or(0)
+    }
+
+    /// 解析本条模板的每日入账次数上限。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     自定义习惯不能挤同一个全局 cap。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Some` 用模板值；`None` 视作 0（从不入账），让用户看到「没设置」就会去编辑。
+    pub fn resolved_daily_cap(&self, _battery: &BatteryConfig) -> i64 {
+        self.daily_cap.unwrap_or(0)
+    }
 }
 
 /// 健康提醒配置(久坐监测 + 可配置提醒模板)。
@@ -1023,7 +927,8 @@ pub fn default_health_reminders() -> Vec<HealthReminderTemplate> {
 /// Business Logic（为什么需要这个函数）:
 ///     缺 reminders 的旧配置必须把用户已改的工作窗口/喝水间隔迁进 rest/water。
 /// Code Logic（这个函数做什么）:
-///     rest 阈值取 `work_window_seconds`，water 间隔取 `water_interval_seconds`，kegel 固定 7200/30。
+///     rest 阈值取 `work_window_seconds`，water 间隔取 `water_interval_seconds`，kegel 固定 7200/30；
+///     充入分钟与日上限与模板本身一一对应（不再回退电池配置）。
 pub fn seed_health_reminders_from_legacy(
     work_window_seconds: i64,
     water_interval_seconds: i64,
@@ -1043,6 +948,8 @@ pub fn seed_health_reminders_from_legacy(
             body: "记得补充水分,喝口水再继续。".into(),
             confirm_label: "已喝水".into(),
             unit_label: "杯".into(),
+            credit_minutes: Some(default_template_credit_minutes(HEALTH_REMINDER_WATER_ID)),
+            daily_cap: Some(default_template_daily_cap(HEALTH_REMINDER_WATER_ID)),
         },
         HealthReminderTemplate {
             id: HEALTH_REMINDER_REST_ID.into(),
@@ -1058,6 +965,8 @@ pub fn seed_health_reminders_from_legacy(
             body: "连续工作已久,站起来走走、伸展一下吧。".into(),
             confirm_label: "开始休息".into(),
             unit_label: "次".into(),
+            credit_minutes: Some(default_template_credit_minutes(HEALTH_REMINDER_REST_ID)),
+            daily_cap: Some(default_template_daily_cap(HEALTH_REMINDER_REST_ID)),
         },
         HealthReminderTemplate {
             id: HEALTH_REMINDER_KEGEL_ID.into(),
@@ -1073,8 +982,30 @@ pub fn seed_health_reminders_from_legacy(
             body: "坐下太久，做一组短动作再继续。".into(),
             confirm_label: "开始".into(),
             unit_label: "次".into(),
+            credit_minutes: Some(default_template_credit_minutes(HEALTH_REMINDER_KEGEL_ID)),
+            daily_cap: Some(default_template_daily_cap(HEALTH_REMINDER_KEGEL_ID)),
         },
     ]
+}
+
+/// 内置模板的默认充入分钟；自定义模板返回 10。
+pub fn default_template_credit_minutes(template_id: &str) -> i64 {
+    match template_id {
+        HEALTH_REMINDER_WATER_ID => 8,
+        HEALTH_REMINDER_REST_ID => 20,
+        HEALTH_REMINDER_KEGEL_ID => 10,
+        _ => 10,
+    }
+}
+
+/// 内置模板的默认每日次数上限；自定义模板返回 6。
+pub fn default_template_daily_cap(template_id: &str) -> i64 {
+    match template_id {
+        HEALTH_REMINDER_WATER_ID => 6,
+        HEALTH_REMINDER_REST_ID => 8,
+        HEALTH_REMINDER_KEGEL_ID => 4,
+        _ => 6,
+    }
 }
 
 /// serde 单字段缺失回退:布尔默认 true。
@@ -1458,44 +1389,15 @@ fn validate_hotkey_field(field: &str, value: &str) -> Result<(), AppError> {
 ///     非法分钟或日上限会把账本配坏；保存必须 fail-closed。
 ///
 /// Code Logic（这个函数做什么）:
-///     各来源分钟 0..=180；日次数 0..=99；余额上限 30..=720；欢迎赠送 0..=180。
+///     闪卡分钟 0..=180；闪卡每日张数 0..=99；余额上限 30..=720。
 fn validate_battery_config_fields(battery: &BatteryConfig) -> Result<(), AppError> {
-    let rewards = [
-        (
-            "battery.rewards.waterMinutes",
-            battery.rewards.water_minutes,
-        ),
-        ("battery.rewards.restMinutes", battery.rewards.rest_minutes),
-        (
-            "battery.rewards.kegelMinutes",
-            battery.rewards.kegel_minutes,
-        ),
-        (
-            "battery.rewards.customMinutes",
-            battery.rewards.custom_minutes,
-        ),
-        (
-            "battery.rewards.flashcardMinutes",
-            battery.rewards.flashcard_minutes,
-        ),
-        ("battery.welcomeGrantMinutes", battery.welcome_grant_minutes),
-    ];
-    for (field, value) in rewards {
-        if !(0..=180).contains(&value) {
-            return Err(AppError::validation(format!("{field} 必须在 0..=180")));
-        }
+    if !(0..=180).contains(&battery.flashcard_minutes) {
+        return Err(AppError::validation(
+            "battery.flashcardMinutes 必须在 0..=180",
+        ));
     }
-    let caps = [
-        ("battery.dailyCaps.water", battery.daily_caps.water),
-        ("battery.dailyCaps.rest", battery.daily_caps.rest),
-        ("battery.dailyCaps.kegel", battery.daily_caps.kegel),
-        ("battery.dailyCaps.custom", battery.daily_caps.custom),
-        ("battery.dailyCaps.flashcard", battery.daily_caps.flashcard),
-    ];
-    for (field, value) in caps {
-        if !(0..=99).contains(&value) {
-            return Err(AppError::validation(format!("{field} 必须在 0..=99")));
-        }
+    if !(0..=99).contains(&battery.flashcard_cap) {
+        return Err(AppError::validation("battery.flashcardCap 必须在 0..=99"));
     }
     if !(30..=720).contains(&battery.max_balance_minutes) {
         return Err(AppError::validation(

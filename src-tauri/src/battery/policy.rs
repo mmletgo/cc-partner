@@ -116,51 +116,35 @@ mod tests {
     }
 
     #[test]
-    fn water_credit_uses_default_eight_minutes() {
-        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Water, 0, 0);
-        assert_eq!(delta, 8 * MS_PER_MINUTE);
+    fn flashcard_credit_uses_default_three_minutes() {
+        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Flashcard, 0, 0);
+        assert_eq!(delta, 3 * MS_PER_MINUTE);
     }
 
     #[test]
-    fn rest_credit_uses_default_twenty_minutes() {
-        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Rest, 0, 0);
-        assert_eq!(delta, 20 * MS_PER_MINUTE);
-    }
-
-    #[test]
-    fn kegel_and_custom_and_flashcard_defaults() {
-        let c = cfg();
-        assert_eq!(
-            credit_delta_ms(&c, BatteryCreditSource::Kegel, 0, 0),
-            10 * MS_PER_MINUTE
-        );
-        assert_eq!(
-            credit_delta_ms(&c, BatteryCreditSource::Custom, 0, 0),
-            10 * MS_PER_MINUTE
-        );
-        assert_eq!(
-            credit_delta_ms(&c, BatteryCreditSource::Flashcard, 0, 0),
-            3 * MS_PER_MINUTE
-        );
-    }
-
-    #[test]
-    fn daily_cap_blocks_further_water_credits() {
-        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Water, 6, 0);
+    fn health_credit_uses_zero_from_battery_config() {
+        // 健康习惯的额度由模板自身决定，电池配置不再返回健康分钟。
+        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Health, 0, 0);
         assert_eq!(delta, 0);
     }
 
     #[test]
-    fn daily_cap_allows_count_just_below() {
-        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Water, 5, 0);
-        assert_eq!(delta, 8 * MS_PER_MINUTE);
+    fn flashcard_daily_cap_blocks_after_thirty() {
+        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Flashcard, 30, 0);
+        assert_eq!(delta, 0);
+    }
+
+    #[test]
+    fn flashcard_daily_cap_allows_count_just_below() {
+        let delta = credit_delta_ms(&cfg(), BatteryCreditSource::Flashcard, 29, 0);
+        assert_eq!(delta, 3 * MS_PER_MINUTE);
     }
 
     #[test]
     fn credit_clamps_to_max_balance() {
         let c = cfg();
         let almost_full = c.max_balance_minutes * MS_PER_MINUTE - MS_PER_MINUTE;
-        let delta = credit_delta_ms(&c, BatteryCreditSource::Rest, 0, almost_full);
+        let delta = credit_delta_ms(&c, BatteryCreditSource::Flashcard, 0, almost_full);
         assert_eq!(delta, MS_PER_MINUTE);
     }
 
@@ -168,7 +152,10 @@ mod tests {
     fn credit_is_zero_when_already_at_cap() {
         let c = cfg();
         let full = c.max_balance_minutes * MS_PER_MINUTE;
-        assert_eq!(credit_delta_ms(&c, BatteryCreditSource::Water, 0, full), 0);
+        assert_eq!(
+            credit_delta_ms(&c, BatteryCreditSource::Flashcard, 0, full),
+            0
+        );
     }
 
     #[test]
@@ -179,7 +166,7 @@ mod tests {
         let many_today = credit_delta_ms(&c, BatteryCreditSource::GamePlugin, 10_000, 0);
         assert_eq!(
             many_today, 0,
-            "GamePlugin 不走 rewards 表，分钟数必须显式传入"
+            "GamePlugin 不走 flashcard 桶，分钟数必须显式传入"
         );
     }
 

@@ -11,6 +11,7 @@ pub mod service;
 
 pub use policy::{credit_delta_ms, credit_delta_ms_explicit, debit_delta_ms, MS_PER_MINUTE};
 pub use service::{
-    credit, credit_explicit, game_plugin_source_id, get_snapshot, habit_source_id, list_ledger,
-    report_focus, set_mode, wordgame_source_id, BatterySnapshotDto,
+    credit, credit_explicit, credit_health_habit, game_plugin_source_id, get_snapshot,
+    habit_source_id, habit_source_prefix, list_ledger, report_focus, set_mode, wordgame_source_id,
+    BatterySnapshotDto,
 };

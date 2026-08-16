@@ -11,11 +11,9 @@
 import type {
   BatteryConfig,
   BatteryCreditSource,
-  BatteryDailyCaps,
   BatteryLedgerItem,
   BatteryLedgerKind,
   BatteryMode,
-  BatteryRewards,
   BatterySnapshot,
 } from '../types/battery';
 import {
@@ -36,14 +34,13 @@ const batteryModeDecoder: Decoder<BatteryMode> = enumDecoder('BatteryMode', [
 
 const batteryCreditSourceDecoder: Decoder<BatteryCreditSource> = enumDecoder(
   'BatteryCreditSource',
-  ['water', 'rest', 'kegel', 'custom', 'flashcard', 'welcome', 'game-plugin'] as const,
+  ['health', 'flashcard', 'game-plugin'] as const,
 );
 
 const batteryLedgerKindDecoder: Decoder<BatteryLedgerKind> = enumDecoder('BatteryLedgerKind', [
   'credit_health',
   'credit_wordgame',
   'credit_game_plugin',
-  'credit_welcome',
   'daily_reset',
   'debit_tick',
   'mode_change',
@@ -67,34 +64,17 @@ export const batterySnapshotDecoder: Decoder<BatterySnapshot> = objectDecoder('B
   creditSource: optionalDecoder(batteryCreditSourceDecoder),
 });
 
-const batteryRewardsDecoder: Decoder<BatteryRewards> = objectDecoder('BatteryRewards', {
-  waterMinutes: numberDecoder,
-  restMinutes: numberDecoder,
-  kegelMinutes: numberDecoder,
-  customMinutes: numberDecoder,
-  flashcardMinutes: numberDecoder,
-});
-
-const batteryDailyCapsDecoder: Decoder<BatteryDailyCaps> = objectDecoder('BatteryDailyCaps', {
-  water: numberDecoder,
-  rest: numberDecoder,
-  kegel: numberDecoder,
-  custom: numberDecoder,
-  flashcard: numberDecoder,
-});
-
 /**
  * Business Logic（为什么需要这个 decoder）:
  *   设置页保存前后必须确认额度数字齐全。
  *
  * Code Logic（这个 decoder 做什么）:
- *   解码 rewards / dailyCaps / 上限 / 欢迎赠送。
+ *   解码闪卡分钟 / 闪卡日上限 / 余额上限；健康习惯额度在模板上不入此结构。
  */
 export const batteryConfigDecoder: Decoder<BatteryConfig> = objectDecoder('BatteryConfig', {
-  rewards: batteryRewardsDecoder,
-  dailyCaps: batteryDailyCapsDecoder,
+  flashcardMinutes: numberDecoder,
+  flashcardCap: numberDecoder,
   maxBalanceMinutes: numberDecoder,
-  welcomeGrantMinutes: numberDecoder,
 });
 
 /**

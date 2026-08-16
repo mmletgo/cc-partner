@@ -95,7 +95,7 @@ describe('useBattery', () => {
       ...chargingSnap,
       remainingMs: 31 * 60_000,
       creditMinutes: 8,
-      creditSource: 'water',
+      creditSource: 'health',
     };
     getSnapshot.mockResolvedValue(credited);
     reportFocus.mockResolvedValue(credited);
@@ -103,6 +103,6 @@ describe('useBattery', () => {
     await waitFor(() => {
       expect(result.current.toast?.minutes).toBe(8);
     });
-    expect(result.current.toast?.source).toBe('water');
+    expect(result.current.toast?.source).toBe('health');
   });
 });

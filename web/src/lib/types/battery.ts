@@ -12,21 +12,13 @@
 export type BatteryMode = 'charging' | 'unlimited';
 
 /** 入账来源 token（toast / 流水 note）。 */
-export type BatteryCreditSource =
-  | 'water'
-  | 'rest'
-  | 'kegel'
-  | 'custom'
-  | 'flashcard'
-  | 'welcome'
-  | 'game-plugin';
+export type BatteryCreditSource = 'health' | 'flashcard' | 'game-plugin';
 
 /** 账本流水 kind。 */
 export type BatteryLedgerKind =
   | 'credit_health'
   | 'credit_wordgame'
   | 'credit_game_plugin'
-  | 'credit_welcome'
   | 'daily_reset'
   | 'debit_tick'
   | 'mode_change';
@@ -43,30 +35,14 @@ export interface BatterySnapshot {
   creditSource?: BatteryCreditSource;
 }
 
-/** 各来源一次入账分钟。 */
-export interface BatteryRewards {
-  waterMinutes: number;
-  restMinutes: number;
-  kegelMinutes: number;
-  customMinutes: number;
-  flashcardMinutes: number;
-}
-
-/** 各来源每日次数上限。 */
-export interface BatteryDailyCaps {
-  water: number;
-  rest: number;
-  kegel: number;
-  custom: number;
-  flashcard: number;
-}
-
-/** config.json 里的可调额度。 */
+/** config.json 里的可调额度。健康习惯额度写在 HealthReminderTemplate 上。 */
 export interface BatteryConfig {
-  rewards: BatteryRewards;
-  dailyCaps: BatteryDailyCaps;
+  /** 闪卡答对一次充入分钟。 */
+  flashcardMinutes: number;
+  /** 闪卡每日张数上限。 */
+  flashcardCap: number;
+  /** 余额上限（分钟）。 */
   maxBalanceMinutes: number;
-  welcomeGrantMinutes: number;
 }
 
 /** 流水行。 */
@@ -82,22 +58,9 @@ export interface BatteryLedgerItem {
 
 /** 与后端 BatteryConfig::default 对齐的默认额度。 */
 export const DEFAULT_BATTERY_CONFIG: BatteryConfig = {
-  rewards: {
-    waterMinutes: 8,
-    restMinutes: 20,
-    kegelMinutes: 10,
-    customMinutes: 10,
-    flashcardMinutes: 3,
-  },
-  dailyCaps: {
-    water: 6,
-    rest: 8,
-    kegel: 4,
-    custom: 6,
-    flashcard: 30,
-  },
+  flashcardMinutes: 3,
+  flashcardCap: 30,
   maxBalanceMinutes: 240,
-  welcomeGrantMinutes: 25,
 };
 
 /** 一分钟毫秒。 */

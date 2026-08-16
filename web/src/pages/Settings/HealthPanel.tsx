@@ -20,6 +20,7 @@ import { CheckIcon, XIcon } from '@/lib/icons';
 import {
   HEALTH_REMINDER_MAX_COUNT,
   createCustomHealthReminder,
+  defaultCreditForTemplate,
 } from '@/lib/healthReminders';
 import type { HealthForm } from './settingsState';
 import type {
@@ -52,6 +53,8 @@ export const HEALTH_RANGE = {
   waterIntervalMinutes: { min: 5, max: 1440 },
   sessionSeconds: { min: 10, max: 7200 },
   retainDays: { min: 1, max: 3650 },
+  creditMinutes: { min: 0, max: 180 },
+  dailyCap: { min: 0, max: 99 },
 } as const;
 
 /**
@@ -598,6 +601,27 @@ export function HealthPanel({
                       />
                     </div>
                     <div className={styles.healthFieldGrid}>
+                      <NumberRow
+                        label={t('health:creditMinutes')}
+                        helper={t('health:creditMinutesDescription')}
+                        min={HEALTH_RANGE.creditMinutes.min}
+                        max={HEALTH_RANGE.creditMinutes.max}
+                        value={
+                          reminder.creditMinutes ??
+                          defaultCreditForTemplate(reminder.id).creditMinutes
+                        }
+                        onChange={(v) => patchReminder(reminder.id, { creditMinutes: v })}
+                      />
+                      <NumberRow
+                        label={t('health:dailyCap')}
+                        helper={t('health:dailyCapDescription')}
+                        min={HEALTH_RANGE.dailyCap.min}
+                        max={HEALTH_RANGE.dailyCap.max}
+                        value={
+                          reminder.dailyCap ?? defaultCreditForTemplate(reminder.id).dailyCap
+                        }
+                        onChange={(v) => patchReminder(reminder.id, { dailyCap: v })}
+                      />
                       <div className={styles.field}>
                         <label className={styles.label} htmlFor={`reminder-confirm-${reminder.id}`}>
                           {t('health:confirmLabel')}

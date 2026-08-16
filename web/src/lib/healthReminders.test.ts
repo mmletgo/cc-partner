@@ -40,12 +40,20 @@ describe('healthReminders', () => {
       thresholdSeconds: 2700,
       sessionSeconds: 300,
     });
+    expect(reminders[0]).toMatchObject({ creditMinutes: 8, dailyCap: 6 });
+    expect(reminders[1]).toMatchObject({ creditMinutes: 20, dailyCap: 8 });
     expect(reminders[2]).toMatchObject({
       trigger: 'interval',
       complete: 'session',
       intervalSeconds: 7200,
       sessionSeconds: 30,
       name: '提肛',
+      creditMinutes: 10,
+      dailyCap: 4,
+    });
+    expect(createCustomHealthReminder('custom-x')).toMatchObject({
+      creditMinutes: 10,
+      dailyCap: 6,
     });
     expect(reminders[2].body).not.toMatch(/医学|解剖|盆底/);
   });

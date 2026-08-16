@@ -11,6 +11,7 @@ import {
   cloneHealthReminders,
   createDefaultHealthReminders,
   resetBuiltinHealthReminders,
+  withResolvedTemplateCredits,
 } from '../../lib/healthReminders';
 import { getDefaultShortcutValue } from './shortcutRecorder';
 
@@ -443,7 +444,7 @@ export function promptOptimizerSettingsFormToUpdate(
 export function healthConfigToForm(config: HealthConfig | null): HealthForm {
   const source = config ?? PENDING_HEALTH_FORM;
   const reminders = source.reminders?.length
-    ? cloneHealthReminders(source.reminders)
+    ? cloneHealthReminders(source.reminders).map(withResolvedTemplateCredits)
     : createDefaultHealthReminders({
         workWindowSeconds: source.workWindowSeconds,
         waterIntervalSeconds: source.waterIntervalSeconds,

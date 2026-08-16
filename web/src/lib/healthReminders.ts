@@ -9,6 +9,49 @@ export const HEALTH_REMINDER_KEGEL_ID = 'kegel';
 /** 提醒模板上限（含三条内置）。 */
 export const HEALTH_REMINDER_MAX_COUNT = 12;
 
+/** 出厂充入额度，对齐现电池默认：water 8/6、rest 20/8、kegel 10/4、custom 10/6。 */
+export const DEFAULT_TEMPLATE_CREDITS = {
+  water: { creditMinutes: 8, dailyCap: 6 },
+  rest: { creditMinutes: 20, dailyCap: 8 },
+  kegel: { creditMinutes: 10, dailyCap: 4 },
+  custom: { creditMinutes: 10, dailyCap: 6 },
+} as const;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   旧模板没有额度字段，表单和入账都要按内置 id 回退出厂值。
+ *
+ * Code Logic（这个函数做什么）:
+ *   water/rest/kegel 精确匹配，其余自定义。
+ */
+export function defaultCreditForTemplate(id: string): {
+  creditMinutes: number;
+  dailyCap: number;
+} {
+  if (id === HEALTH_REMINDER_WATER_ID) return DEFAULT_TEMPLATE_CREDITS.water;
+  if (id === HEALTH_REMINDER_REST_ID) return DEFAULT_TEMPLATE_CREDITS.rest;
+  if (id === HEALTH_REMINDER_KEGEL_ID) return DEFAULT_TEMPLATE_CREDITS.kegel;
+  return DEFAULT_TEMPLATE_CREDITS.custom;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   加载旧配置时要把缺省额度写成具体数字，保存后不再依赖电池页回退。
+ *
+ * Code Logic（这个函数做什么）:
+ *   缺 creditMinutes/dailyCap 时填入出厂值。
+ */
+export function withResolvedTemplateCredits(
+  template: HealthReminderTemplate,
+): HealthReminderTemplate {
+  const defaults = defaultCreditForTemplate(template.id);
+  return {
+    ...template,
+    creditMinutes: template.creditMinutes ?? defaults.creditMinutes,
+    dailyCap: template.dailyCap ?? defaults.dailyCap,
+  };
+}
+
 export interface OverlaySearchParams {
   get(name: string): string | null;
 }
@@ -45,6 +88,8 @@ export function createDefaultHealthReminders(
       body: '记得补充水分,喝口水再继续。',
       confirmLabel: '已喝水',
       unitLabel: '杯',
+      creditMinutes: DEFAULT_TEMPLATE_CREDITS.water.creditMinutes,
+      dailyCap: DEFAULT_TEMPLATE_CREDITS.water.dailyCap,
     },
     {
       id: HEALTH_REMINDER_REST_ID,
@@ -60,6 +105,8 @@ export function createDefaultHealthReminders(
       body: '连续工作已久,站起来走走、伸展一下吧。',
       confirmLabel: '开始休息',
       unitLabel: '次',
+      creditMinutes: DEFAULT_TEMPLATE_CREDITS.rest.creditMinutes,
+      dailyCap: DEFAULT_TEMPLATE_CREDITS.rest.dailyCap,
     },
     {
       id: HEALTH_REMINDER_KEGEL_ID,
@@ -75,6 +122,8 @@ export function createDefaultHealthReminders(
       body: '坐下太久，做一组短动作再继续。',
       confirmLabel: '开始',
       unitLabel: '次',
+      creditMinutes: DEFAULT_TEMPLATE_CREDITS.kegel.creditMinutes,
+      dailyCap: DEFAULT_TEMPLATE_CREDITS.kegel.dailyCap,
     },
   ];
 }
@@ -117,6 +166,8 @@ export function createCustomHealthReminder(
     body: '',
     confirmLabel: '完成',
     unitLabel: '次',
+    creditMinutes: DEFAULT_TEMPLATE_CREDITS.custom.creditMinutes,
+    dailyCap: DEFAULT_TEMPLATE_CREDITS.custom.dailyCap,
   };
 }
 
