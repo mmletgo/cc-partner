@@ -109,6 +109,20 @@ describe('MobileWorktreeTabs', () => {
     }
   });
 
+  test('strip stays in shell chrome, not buried in the terminal panel', () => {
+    const workbench = readFileSync(join(TEST_DIR, '../MobileWorkbench.tsx'), 'utf8');
+    const terminal = readFileSync(join(TEST_DIR, 'MobileTerminalPanel.tsx'), 'utf8');
+    if (!workbench.includes('worktreeStrip=')) {
+      throw new Error('MobileWorkbench must pass worktreeStrip into the shell');
+    }
+    if (!workbench.includes('shouldShowMobileWorktreeStrip')) {
+      throw new Error('MobileWorkbench must gate the strip with shouldShowMobileWorktreeStrip');
+    }
+    if (terminal.includes('MobileWorktreeTabs')) {
+      throw new Error('MobileTerminalPanel must not render MobileWorktreeTabs');
+    }
+  });
+
   test('renders chips with main/linked meta and active highlight', () => {
     const worktrees = [
       buildWorktree({ id: 'main', name: 'main', isMain: true }),

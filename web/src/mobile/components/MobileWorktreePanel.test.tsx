@@ -14,12 +14,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
-import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 
 const removeMock = vi.fn();
 const getMutationOperationMock = vi.fn();
 const listWorktreesMock = vi.fn();
+const createWorktreeApiMock = vi.fn();
+const createSessionApiMock = vi.fn();
 const refreshMock = vi.fn(async () => undefined);
+const refreshSessionsMock = vi.fn(async () => undefined);
+const createdSessionMock = vi.fn();
 
 vi.mock('@/api/workbenchHttp', () => ({
   createHttpOrchestratorClientRequestId: () => 'op-remove-1',
@@ -35,7 +39,10 @@ vi.mock('@/api/workbenchHttp', () => ({
   httpWorkbenchTransport: {
     worktrees: {
       list: (...args: unknown[]) => listWorktreesMock(...args),
-      create: vi.fn(),
+      create: (...args: unknown[]) => createWorktreeApiMock(...args),
+    },
+    sessions: {
+      create: (...args: unknown[]) => createSessionApiMock(...args),
     },
   },
 }));
@@ -84,6 +91,25 @@ function createWorktree(
   };
 }
 
+function createSession(worktreeId: string): WorkbenchSession {
+  return {
+    id: `session-${worktreeId}`,
+    projectId: 'project-1',
+    worktreeId,
+    name: 'window-1',
+    command: 'zsh',
+    cwd: `/tmp/${worktreeId}`,
+    status: 'running',
+    cols: 80,
+    rows: 24,
+    startedAt: '2026-07-14T00:00:00Z',
+    exitedAt: null,
+    exitCode: null,
+    supportsPanes: true,
+    paneCount: 1,
+  };
+}
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -93,7 +119,11 @@ beforeEach(() => {
   removeMock.mockReset();
   getMutationOperationMock.mockReset();
   listWorktreesMock.mockReset();
+  createWorktreeApiMock.mockReset();
+  createSessionApiMock.mockReset();
   refreshMock.mockClear();
+  refreshSessionsMock.mockClear();
+  createdSessionMock.mockClear();
   listWorktreesMock.mockResolvedValue([
     createWorktree({ id: 'main', name: 'main', isMain: true }),
   ]);
@@ -408,5 +438,50 @@ describe('MobileWorktreePanel remove reconciliation', () => {
     await waitFor(() => {
       expect(screen.queryByText(/操作结果未知/)).toBeNull();
     });
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Worktrees 面板创建必须像桌面/条一样自动开绑定终端窗口，窗口失败不回滚 worktree。
+   *
+   * Code Logic（这个测试做什么）:
+   *   mock worktrees.create + sessions.create；断言两者都被调用，并通知父级 session。
+   */
+  test('creating a worktree also opens a bound terminal window', async () => {
+    const main = createWorktree({ id: 'main', name: 'main', isMain: true });
+    const created = createWorktree({ id: 'wt-login', name: 'feature/login', branch: 'feature/login' });
+    const session = createSession('wt-login');
+    createWorktreeApiMock.mockResolvedValue(created);
+    createSessionApiMock.mockResolvedValue(session);
+    const onSelect = vi.fn(() => true);
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MobileWorktreePanel
+          project={createProject()}
+          worktrees={[main]}
+          activeWorktreeId="main"
+          onSelect={onSelect}
+          onRefreshWorktrees={refreshMock}
+          onRefreshSessions={refreshSessionsMock}
+          onCreatedSession={createdSessionMock}
+        />
+      </I18nextProvider>,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText('my-task'), { target: { value: 'login' } });
+    fireEvent.click(screen.getByRole('button', { name: '新 worktree' }));
+
+    await waitFor(() => {
+      expect(createWorktreeApiMock).toHaveBeenCalledWith('project-1', 'feature/login', null);
+    });
+    expect(createSessionApiMock).toHaveBeenCalledWith(
+      'project-1',
+      { cols: 80, rows: 24 },
+      'wt-login',
+    );
+    expect(createdSessionMock).toHaveBeenCalledWith(session);
+    expect(onSelect).toHaveBeenCalledWith(created);
+    expect(refreshSessionsMock).toHaveBeenCalled();
   });
 });

@@ -63,7 +63,6 @@ import {
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 import { MobileFavoriteQuickInput } from './MobileFavoriteQuickInput';
 import { MobilePromptOptimizerSheet } from './MobilePromptOptimizerSheet';
-import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './MobileWorktreeTabs';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 const MIN_TERMINAL_COLS = 20;
@@ -74,8 +73,6 @@ const SCROLLBACK_HYDRATION_TIMEOUT_MS = 10_000;
 export interface MobileTerminalPanelProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
-  /** 窗口 tab 上方的 worktree 条；由父级 hook 注入切换/新建/删除。 */
-  worktreeBar?: MobileWorktreeTabsProps;
   sessions: WorkbenchSession[];
   activeSession: WorkbenchSession | null;
   busy: boolean;
@@ -169,7 +166,6 @@ function getErrorMessage(reason: unknown, fallback: string): string {
 export function MobileTerminalPanel({
   project,
   worktree,
-  worktreeBar,
   sessions,
   activeSession,
   busy,
@@ -1340,10 +1336,6 @@ export function MobileTerminalPanel({
       className={`${styles.panel} ${styles.mobileTerminalPanel}`}
       data-fullscreen={isTerminalFullscreen || undefined}
     >
-
-      {terminalChrome.worktreeStrip && worktreeBar ? (
-        <MobileWorktreeTabs {...worktreeBar} />
-      ) : null}
 
       <div
         className={styles.mobileTerminalToolbar}

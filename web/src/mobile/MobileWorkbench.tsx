@@ -31,6 +31,7 @@ import type { MobileAutomationExecutionContext } from './components/MobileAutoma
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
+import { MobileWorktreeTabs } from './components/MobileWorktreeTabs';
 import { useMobileWorktreeBarController } from './controllers/useMobileWorktreeBarController';
 import {
   mapMobileAttentionTarget,
@@ -55,6 +56,7 @@ import {
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   shouldRefreshMobilePanelOnReconnect,
+  shouldShowMobileWorktreeStrip,
   shouldSkipMobileProjectReload,
   type MobileConnectionState,
   type MobileProjectDetailStatus,
@@ -186,7 +188,7 @@ export function MobileWorkbench(): ReactElement {
   const [connectionState, setConnectionState] = useState<MobileConnectionState | null>(null);
   const [worktreeOperationBusy, setWorktreeOperationBusy] = useState<boolean>(false);
   /**
-   * @deprecated quick switch sheet 暂未挂载（移动端 worktree 切换已迁移到 `MobileWorktreeTabs`），
+   * @deprecated quick switch sheet 暂未挂载（移动端 worktree 切换已迁移到 shell 固定 `MobileWorktreeTabs`），
    *   本 state 仅保留以备未来 panel 内快捷刷新入口接入；当前始终为 false。grep
    *   `MobileWorktreeQuickSwitch` 可见全部调用点。
    */
@@ -790,7 +792,7 @@ export function MobileWorkbench(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   复用 canOpenMobileWorktreeSwitcher 判断当前项目和加载态；不可打开时忽略点击，可打开时置 open state。
    *
-   * @deprecated 移动端 worktree 切换已迁移到 `MobileWorktreeTabs`（位于 terminal panel session tabs 上方）；
+   * @deprecated 移动端 worktree 切换已迁移到 shell 固定 `MobileWorktreeTabs`（terminal/files/browser/git）；
    *   当前 quick switch sheet 暂未挂载，本 handler 仅保留以备未来 panel 内快捷刷新入口接入。grep
    *   `MobileWorktreeQuickSwitch` 可见全部调用点。
    */
@@ -1384,6 +1386,13 @@ export function MobileWorkbench(): ReactElement {
           onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
           onActiveWorktreeChange={handleApplyActiveWorktreeChange}
           onRefreshWorktrees={refreshWorktrees}
+          onRefreshSessions={refreshSessions}
+          onCreatedSession={(session) => {
+            handleSessionsChange([
+              ...sessionsRef.current.filter((item) => item.id !== session.id),
+              session,
+            ]);
+          }}
           onMergeWorktree={handleMergeWorktree}
           onBeginWorktreeOperation={beginWorktreeOperation}
           onIsWorktreeActive={isCurrentActiveWorktree}
@@ -1435,36 +1444,6 @@ export function MobileWorkbench(): ReactElement {
         <MobileTerminalPanel
           project={activeProject}
           worktree={activeWorktree}
-          worktreeBar={{
-            worktrees,
-            activeWorktreeId: activeWorktree?.id ?? null,
-            projectId: activeProject?.id ?? null,
-            controlsBusy: worktreeControlsBusy,
-            createOpen: worktreeBar.createOpen,
-            createPrefix: worktreeBar.createPrefix,
-            createSuffix: worktreeBar.createSuffix,
-            creating: worktreeBar.creating,
-            removing: worktreeBar.removing,
-            pendingRemoval: worktreeBar.pendingRemoval,
-            error: worktreeBar.error,
-            mutationPhase: worktreeBar.mutationPhase,
-            onSelect: handleSelectWorktree,
-            onOpenCreate: worktreeBar.openCreate,
-            onCancelCreate: worktreeBar.cancelCreate,
-            onPrefixChange: worktreeBar.setCreatePrefix,
-            onSuffixChange: worktreeBar.setCreateSuffix,
-            onCreate: () => {
-              void worktreeBar.createWorktree();
-            },
-            onRequestRemove: worktreeBar.requestRemove,
-            onCancelRemove: worktreeBar.cancelRemove,
-            onConfirmRemove: () => {
-              void worktreeBar.confirmRemove();
-            },
-            onRetryReconcile: () => {
-              void worktreeBar.retryReconcile();
-            },
-          }}
           sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
           activeSession={activeSession}
           busy={projectDetailsLoading}
@@ -1508,6 +1487,40 @@ export function MobileWorkbench(): ReactElement {
       attentionTotal={attentionTotal}
       connectionState={connectionState}
       connectionCachedAt={connectionCachedAt}
+      worktreeStrip={
+        shouldShowMobileWorktreeStrip(panel) ? (
+          <MobileWorktreeTabs
+            worktrees={worktrees}
+            activeWorktreeId={activeWorktree?.id ?? null}
+            projectId={activeProject?.id ?? null}
+            controlsBusy={worktreeControlsBusy}
+            createOpen={worktreeBar.createOpen}
+            createPrefix={worktreeBar.createPrefix}
+            createSuffix={worktreeBar.createSuffix}
+            creating={worktreeBar.creating}
+            removing={worktreeBar.removing}
+            pendingRemoval={worktreeBar.pendingRemoval}
+            error={worktreeBar.error}
+            mutationPhase={worktreeBar.mutationPhase}
+            onSelect={handleSelectWorktree}
+            onOpenCreate={worktreeBar.openCreate}
+            onCancelCreate={worktreeBar.cancelCreate}
+            onPrefixChange={worktreeBar.setCreatePrefix}
+            onSuffixChange={worktreeBar.setCreateSuffix}
+            onCreate={() => {
+              void worktreeBar.createWorktree();
+            }}
+            onRequestRemove={worktreeBar.requestRemove}
+            onCancelRemove={worktreeBar.cancelRemove}
+            onConfirmRemove={() => {
+              void worktreeBar.confirmRemove();
+            }}
+            onRetryReconcile={() => {
+              void worktreeBar.retryReconcile();
+            }}
+          />
+        ) : null
+      }
     >
       {panelContent}
       {filesPanelMounted ? (

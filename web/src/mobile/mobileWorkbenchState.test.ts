@@ -34,6 +34,7 @@ import {
   selectPreferredMobileWorktree,
   selectMobilePanel,
   shouldRefreshMobilePanelOnReconnect,
+  shouldShowMobileWorktreeStrip,
   shouldSkipMobileProjectReload,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
@@ -693,13 +694,29 @@ describe('mobileWorkbenchState', () => {
     assertEqual(normalChrome.paneActions, true);
     assertEqual(normalChrome.terminalSurface, true);
     assertEqual(normalChrome.exitFullscreen, false);
-    assertEqual(normalChrome.worktreeStrip, true);
 
     assertEqual(fullscreenChrome.windowTabs, false);
     assertEqual(fullscreenChrome.paneActions, true);
     assertEqual(fullscreenChrome.terminalSurface, true);
     assertEqual(fullscreenChrome.exitFullscreen, true);
-    assertEqual(fullscreenChrome.worktreeStrip, false);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   worktree 条必须出现在 terminal/files/browser/git，不能只挂在终端面板。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言工作区四面板 true，Worktrees/自动化/全局面板 false。
+   */
+  test('shouldShowMobileWorktreeStrip covers workspace panels only', () => {
+    assertEqual(shouldShowMobileWorktreeStrip('terminal'), true);
+    assertEqual(shouldShowMobileWorktreeStrip('files'), true);
+    assertEqual(shouldShowMobileWorktreeStrip('browser'), true);
+    assertEqual(shouldShowMobileWorktreeStrip('git'), true);
+    assertEqual(shouldShowMobileWorktreeStrip('worktrees'), false);
+    assertEqual(shouldShowMobileWorktreeStrip('automation'), false);
+    assertEqual(shouldShowMobileWorktreeStrip('projects'), false);
+    assertEqual(shouldShowMobileWorktreeStrip('settings'), false);
   });
 
   /**

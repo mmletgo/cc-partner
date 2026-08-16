@@ -17,6 +17,7 @@ import {
 import type {
   MutationIntent,
   WorkbenchProject,
+  WorkbenchSession,
   WorkbenchWorktree,
 } from '@/lib/types';
 import {
@@ -25,6 +26,7 @@ import {
   composeWorktreeBranchName,
   type WorktreeBranchPrefix,
 } from '@/lib/workbenchWorktreeBranches';
+import { createWorktreeWithTerminalWindow } from '@/pages/Workbench/workbenchWorktrees';
 import {
   buildMergeRemoveAuthority,
   reconcileWorkbenchMutation,
@@ -55,6 +57,8 @@ export interface MobileWorktreePanelProps {
     skipFileContextConfirm?: boolean;
     expectedProjectId?: string;
   }) => Promise<void> | void;
+  onRefreshSessions?: () => Promise<void> | void;
+  onCreatedSession?: (session: WorkbenchSession) => void;
   onMergeWorktree?: (worktree: WorkbenchWorktree) => Promise<boolean> | boolean;
   onBeginWorktreeOperation?: () => () => void;
   onIsWorktreeActive?: (worktree: WorkbenchWorktree) => boolean;
@@ -92,6 +96,8 @@ export function MobileWorktreePanel({
   onConfirmActiveWorktreeChange,
   onActiveWorktreeChange,
   onRefreshWorktrees,
+  onRefreshSessions,
+  onCreatedSession,
   onMergeWorktree,
   onBeginWorktreeOperation,
   onIsWorktreeActive,
@@ -192,10 +198,10 @@ export function MobileWorktreePanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   手机端需要能从当前项目创建一个功能 worktree，供后续终端、文件和 Git 面板共同使用。
+   *   手机端从完整 Worktrees 面板新建工作区后，应像桌面/条一样自动开一个绑定终端窗口。
    *
    * Code Logic（这个函数做什么）:
-   *   组合表单前缀与后缀，调用 worktrees.create(projectId, composedBranchName, null)，成功后追加到列表并设为 active。
+   *   compose 分支名后走 createWorktreeWithTerminalWindow；窗口失败保留 worktree 并提示。
    */
   const handleCreateWorktree = useCallback(async (): Promise<void> => {
     if (!project || !composedBranchName) return;
@@ -203,17 +209,36 @@ export function MobileWorktreePanel({
     setError(null);
     const endWorktreeOperation = onBeginWorktreeOperation?.();
     try {
-      const created = await httpWorkbenchTransport.worktrees.create(
-        project.id,
-        composedBranchName,
-        null,
-      );
-      const nextWorktrees = [...worktrees.filter((item) => item.id !== created.id), created];
-      endWorktreeOperation?.();
-      const didApplyActive = applyWorktrees(nextWorktrees, created);
+      const result = await createWorktreeWithTerminalWindow({
+        projectId: project.id,
+        branchName: composedBranchName,
+        createWorktree: (projectId, name, baseBranch) =>
+          httpWorkbenchTransport.worktrees.create(projectId, name, baseBranch),
+        createSession: (projectId, initialSize, worktreeId) =>
+          httpWorkbenchTransport.sessions.create(
+            projectId,
+            initialSize ?? { cols: 80, rows: 24 },
+            worktreeId,
+          ),
+        initialSize: { cols: 80, rows: 24 },
+      });
+      const nextWorktrees = [
+        ...worktrees.filter((item) => item.id !== result.worktree.id),
+        result.worktree,
+      ];
+      if (result.session) {
+        onCreatedSession?.(result.session);
+      }
+      const didApplyActive = applyWorktrees(nextWorktrees, result.worktree);
       setBranchSuffix('');
+      if (result.sessionError) {
+        setError(
+          `${t('workbench:errors.createSession')}: ${getErrorMessage(result.sessionError)}`,
+        );
+      }
       if (didApplyActive) {
         await onRefreshWorktrees?.({ expectedProjectId: project.id });
+        await onRefreshSessions?.();
       }
     } catch (reason) {
       setError(`${t('workbench:errors.createWorktree')}: ${getErrorMessage(reason)}`);
@@ -225,6 +250,8 @@ export function MobileWorktreePanel({
     applyWorktrees,
     composedBranchName,
     onBeginWorktreeOperation,
+    onCreatedSession,
+    onRefreshSessions,
     onRefreshWorktrees,
     project,
     t,

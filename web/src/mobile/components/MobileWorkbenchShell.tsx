@@ -78,6 +78,11 @@ export interface MobileWorkbenchShellProps {
   connectionState?: MobileConnectionState | null;
   /** 可展示的缓存起点 epoch ms。 */
   connectionCachedAt?: number | null;
+  /**
+   * 工作区 worktree 条（对齐桌面 worktreeBar）。由父级按面板决定是否传入；
+   * 渲染在状态栏上方、面板滚动区之外，避免终端焦点把条滚出视口。
+   */
+  worktreeStrip?: ReactNode;
   children: ReactNode;
 }
 
@@ -210,7 +215,7 @@ function MobilePanelNav({
  *
  * Business Logic（为什么需要这个组件）:
  *   `/mobile` 需要在手机竖屏提供覆盖式抽屉导航，在平板/桌面宽屏提供固定 rail，给后续业务面板统一承载容器。
- *   顶部状态行还需要把当前 worktree 暴露为可选的 quick switch 入口；软键盘弹出时用 visualViewport 压缩高度。
+ *   工作区面板由父级注入固定 worktree 条（不随面板滚动）；状态行只读；软键盘弹出时用 visualViewport 压缩高度。
  *
  * Code Logic（这个组件做什么）:
  *   管理移动抽屉 open state，按分组渲染导航；监听 visualViewport 写入 shell CSS 变量；
@@ -227,6 +232,7 @@ export function MobileWorkbenchShell({
   attentionTotal = null,
   connectionState = null,
   connectionCachedAt = null,
+  worktreeStrip = null,
   children,
 }: MobileWorkbenchShellProps): ReactElement {
   const [isNavOpen, setIsNavOpen] = useState<boolean>(() => getInitialMobileNavOpen());
@@ -434,6 +440,11 @@ export function MobileWorkbenchShell({
       </aside>
 
       <main className={styles.content} data-active-panel={panel}>
+        {worktreeStrip ? (
+          <div className={styles.mobileWorktreeChrome} data-testid="mobile-worktree-chrome">
+            {worktreeStrip}
+          </div>
+        ) : null}
         <div className={styles.statusRow} aria-label={t('workbench:mobile.statusAriaLabel')}>
           <span className={styles.statusPill}>{project ?? t('workbench:mobile.status.project')}</span>
           <span className={styles.statusPill}>{worktreeStatusLabel}</span>
@@ -454,7 +465,7 @@ export function MobileWorkbenchShell({
             {offlineError}
           </p>
         ) : null}
-        {children}
+        <div className={styles.contentBody}>{children}</div>
       </main>
     </div>
   );
