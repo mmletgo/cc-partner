@@ -22,12 +22,11 @@ import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 function renderExtraKeys(
   onKeyPress: (key: MobileTerminalExtraKeyDef) => void,
   disabled = false,
-): { esc: HTMLButtonElement } {
+): { container: HTMLElement; esc: HTMLButtonElement } {
   const { container } = render(
     <I18nextProvider i18n={i18n}>
       <MobileTerminalExtraKeys
         disabled={disabled}
-        page={1}
         stickyModifier={null}
         onKeyPress={onKeyPress}
       />
@@ -35,7 +34,7 @@ function renderExtraKeys(
   );
   const esc = container.querySelector('[data-key-id="esc"]') as HTMLButtonElement | null;
   if (!esc) throw new Error('esc button not rendered');
-  return { esc };
+  return { container, esc };
 }
 
 describe('MobileTerminalExtraKeys', () => {
@@ -80,5 +79,15 @@ describe('MobileTerminalExtraKeys', () => {
     fireEvent.pointerDown(esc);
     fireEvent.click(esc);
     expect(onKeyPress).not.toHaveBeenCalled();
+  });
+
+  test('不再渲染翻页键（page kind 已从数据层移除）', () => {
+    const onKeyPress = vi.fn();
+    const { container } = renderExtraKeys(onKeyPress);
+    // 历史 PAGE 1 / PAGE 2 已合并为单一横向滚动序列；用户通过滑动浏览全部键。
+    // data-kind="page" 仍残留说明组件 props 或数据层未彻底收敛，需要排查。
+    expect(container.querySelector('[data-kind="page"]')).toBeNull();
+    expect(container.querySelector('[data-key-id="page-1"]')).toBeNull();
+    expect(container.querySelector('[data-key-id="page-2"]')).toBeNull();
   });
 });

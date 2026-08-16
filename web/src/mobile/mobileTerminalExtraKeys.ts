@@ -6,14 +6,14 @@
  *   且与 UI 解耦以便单测。
  *
  * Code Logic（这个模块做什么）:
- *   导出分页键位定义、payload 编码、sticky 变换与武装超时常量；不触碰 DOM / WebSocket。
+ *   导出扁平键位定义（合并历史 PAGE 1/PAGE 2 为单一横向滚动序列）、payload 编码、sticky 变换与武装超时常量；
+ *   不触碰 DOM / WebSocket。键条容器自带 `overflow-x: auto` + scroll-snap，用户通过左右滑动浏览全部键，
+ *   不再需要翻页按钮。
  */
-
-export type MobileTerminalExtraKeyPage = 1 | 2;
 
 export type MobileTerminalStickyModifier = 'ctrl' | 'alt';
 
-export type MobileTerminalExtraKeyKind = 'payload' | 'modifier' | 'page';
+export type MobileTerminalExtraKeyKind = 'payload' | 'modifier';
 
 export interface MobileTerminalExtraKeyDef {
   /** 稳定 id，用于 React key / 测试。 */
@@ -27,8 +27,6 @@ export interface MobileTerminalExtraKeyDef {
   payload?: string;
   /** kind=modifier */
   modifier?: MobileTerminalStickyModifier;
-  /** kind=page */
-  targetPage?: MobileTerminalExtraKeyPage;
 }
 
 /** sticky 武装后无后续输入的自动解除时长（毫秒）。 */
@@ -68,7 +66,8 @@ export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
   clear: 'clear',
 } as const;
 
-const PAGE_1_KEYS: MobileTerminalExtraKeyDef[] = [
+const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
+  // 基础键：取消 / 反向制表 / 制表 / 斜杠（Claude Code 提示符与补全常用）
   { id: 'esc', kind: 'payload', label: 'Esc', ariaKey: 'esc', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.esc },
   {
     id: 'shift-tab',
@@ -77,32 +76,26 @@ const PAGE_1_KEYS: MobileTerminalExtraKeyDef[] = [
     ariaKey: 'shiftTab',
     payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.shiftTab,
   },
+  { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
   { id: 'slash', kind: 'payload', label: '/', ariaKey: 'slash', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slash },
+  // 方向键
   { id: 'up', kind: 'payload', label: '↑', ariaKey: 'up', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up },
   { id: 'down', kind: 'payload', label: '↓', ariaKey: 'down', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down },
   { id: 'left', kind: 'payload', label: '←', ariaKey: 'left', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.left },
   { id: 'right', kind: 'payload', label: '→', ariaKey: 'right', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right },
   { id: 'enter', kind: 'payload', label: '⏎', ariaKey: 'enter', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter },
-  { id: 'page-2', kind: 'page', label: '2', ariaKey: 'page2', targetPage: 2 },
-];
-
-const PAGE_2_KEYS: MobileTerminalExtraKeyDef[] = [
+  // Sticky 修饰键（Ctrl / Alt 武装后下一次输入自动消耗）
   { id: 'ctrl', kind: 'modifier', label: 'Ctrl', ariaKey: 'ctrl', modifier: 'ctrl' },
   { id: 'alt', kind: 'modifier', label: 'Alt', ariaKey: 'alt', modifier: 'alt' },
-  { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
+  // Ctrl 组合快捷键
   { id: 'ctrl-c', kind: 'payload', label: '^C', ariaKey: 'ctrlC', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlC },
   { id: 'ctrl-d', kind: 'payload', label: '^D', ariaKey: 'ctrlD', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlD },
   { id: 'ctrl-z', kind: 'payload', label: '^Z', ariaKey: 'ctrlZ', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlZ },
   { id: 'ctrl-l', kind: 'payload', label: '^L', ariaKey: 'ctrlL', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlL },
+  // 导航键
   { id: 'home', kind: 'payload', label: 'Home', ariaKey: 'home', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.home },
   { id: 'end', kind: 'payload', label: 'End', ariaKey: 'end', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.end },
-  {
-    id: 'pgup',
-    kind: 'payload',
-    label: 'PgUp',
-    ariaKey: 'pageUp',
-    payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.pageUp,
-  },
+  { id: 'pgup', kind: 'payload', label: 'PgUp', ariaKey: 'pageUp', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.pageUp },
   {
     id: 'pgdn',
     kind: 'payload',
@@ -110,27 +103,23 @@ const PAGE_2_KEYS: MobileTerminalExtraKeyDef[] = [
     ariaKey: 'pageDown',
     payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.pageDown,
   },
+  // 常用 shell 片段
   { id: 'cd-up', kind: 'payload', label: 'cd..', ariaKey: 'cdUp', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.cdUp },
   { id: 'ls-la', kind: 'payload', label: 'ls', ariaKey: 'lsLa', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.lsLa },
-  {
-    id: 'clear-snippet',
-    kind: 'payload',
-    label: 'clr',
-    ariaKey: 'clearSnippet',
-    payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.clear,
-  },
-  { id: 'page-1', kind: 'page', label: '1', ariaKey: 'page1', targetPage: 1 },
+  { id: 'clear-snippet', kind: 'payload', label: 'clr', ariaKey: 'clearSnippet', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.clear },
 ];
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   面板渲染与测试需要按页取出固定键位，且不得在运行期可变。
+ *   面板渲染与测试需要取出固定键位，且不得在运行期可变。
  *
  * Code Logic（这个函数做什么）:
- *   返回对应页键位定义数组的浅拷贝，避免调用方误改模块常量。
+ *   返回扁平键位定义数组的浅拷贝，避免调用方误改模块常量。
+ *   历史上曾拆为 PAGE 1 / PAGE 2 两段并通过翻页按钮切换；现合并为单行横向滚动，
+ *   用户左右滑动浏览即可，不再需要 page 维度。
  */
-export function getMobileTerminalExtraKeys(page: MobileTerminalExtraKeyPage): MobileTerminalExtraKeyDef[] {
-  return page === 1 ? [...PAGE_1_KEYS] : [...PAGE_2_KEYS];
+export function getMobileTerminalExtraKeys(): MobileTerminalExtraKeyDef[] {
+  return [...MOBILE_TERMINAL_EXTRA_KEYS];
 }
 
 /**
@@ -219,7 +208,6 @@ export function toggleStickyModifier(
 export type ResolveExtraKeyPressResult =
   | { type: 'send'; data: string }
   | { type: 'toggleModifier'; modifier: MobileTerminalStickyModifier }
-  | { type: 'setPage'; page: MobileTerminalExtraKeyPage }
   | { type: 'ignore' };
 
 /**
@@ -227,7 +215,7 @@ export type ResolveExtraKeyPressResult =
  *   按钮点击需要纯函数结果，便于测试并让 UI 层只负责副作用（enqueue / setState）。
  *
  * Code Logic（这个函数做什么）:
- *   按 kind 分支：payload 需非空字符串；modifier/page 读定义字段；非法定义 ignore。
+ *   按 kind 分支：payload 需非空字符串；modifier 读定义字段；非法定义 ignore。
  */
 export function resolveMobileTerminalExtraKeyPress(
   key: MobileTerminalExtraKeyDef,
@@ -239,10 +227,6 @@ export function resolveMobileTerminalExtraKeyPress(
   if (key.kind === 'modifier') {
     if (key.modifier !== 'ctrl' && key.modifier !== 'alt') return { type: 'ignore' };
     return { type: 'toggleModifier', modifier: key.modifier };
-  }
-  if (key.kind === 'page') {
-    if (key.targetPage !== 1 && key.targetPage !== 2) return { type: 'ignore' };
-    return { type: 'setPage', page: key.targetPage };
   }
   return { type: 'ignore' };
 }

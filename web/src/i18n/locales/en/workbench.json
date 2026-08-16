@@ -244,8 +244,6 @@
         "down": "Arrow down",
         "left": "Arrow left",
         "right": "Arrow right",
-        "page1": "Show extra keys page 1",
-        "page2": "Show extra keys page 2",
         "ctrlC": "Ctrl+C interrupt",
         "ctrlD": "Ctrl+D end of file",
         "ctrlZ": "Ctrl+Z suspend",
