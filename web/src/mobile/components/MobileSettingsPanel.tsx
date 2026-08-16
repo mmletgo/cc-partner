@@ -38,7 +38,6 @@ export function MobileSettingsPanel(): ReactElement {
   return (
     <section className={styles.panel} aria-labelledby={titleId}>
       <div className={styles.panelHeader}>
-        <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
         <h1 id={titleId}>{t('workbench:mobile.placeholders.settings.title')}</h1>
       </div>
       <p className={styles.panelState}>

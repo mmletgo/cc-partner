@@ -48,7 +48,6 @@ export function MobileAutomationPanel(props: MobileAutomationPanelProps): ReactE
     <section className={styles.panel} aria-labelledby={titleId}>
       <div className={styles.panelHeaderRow}>
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id={titleId}>{t('workbench:mobile.automationPanel.title')}</h1>
         </div>
         <div className={styles.panelHeaderActions}>

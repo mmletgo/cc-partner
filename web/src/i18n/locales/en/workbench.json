@@ -157,8 +157,6 @@
   "newSession": "New window",
   "projectContextLabel": "Project",
   "mobile": {
-    "topTitle": "Workbench",
-    "kicker": "Mobile Workbench",
     "openNavigation": "Open navigation",
     "closeNavigation": "Close navigation",
     "navAriaLabel": "Mobile Workbench panels",
@@ -177,7 +175,6 @@
       "title": "Worktree workspaces"
     },
     "favoriteQuickInput": {
-      "kicker": "Favorite prompts",
       "title": "Favorite Prompts",
       "openButton": "Favorite prompts",
       "refresh": "Refresh",
@@ -205,7 +202,6 @@
       "title": "Mobile project preview"
     },
     "terminalPanel": {
-      "title": "Terminal",
       "tabsAriaLabel": "Mobile terminal windows",
       "actionsAriaLabel": "Mobile pane actions",
       "terminalAriaLabel": "Mobile terminal output",
@@ -380,7 +376,6 @@
       "runtimeRecentEvents": "Recent events",
       "runtimeSlots": "Slots {{used}}/{{max}} · running {{running}} · retrying {{retrying}}",
       "runtimeLatestError": "Latest error: {{error}}",
-      "detailKicker": "Task detail",
       "closeDetails": "Close details",
       "workflowState": "Workflow",
       "runStateLabel": "Run",

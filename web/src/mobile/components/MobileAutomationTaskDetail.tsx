@@ -44,9 +44,6 @@ export function MobileAutomationTaskDetail({
     <aside className={styles.mobileAutomationDetail} aria-labelledby={detailTitleId}>
       <div className={styles.mobileListTitleRow}>
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>
-            {t('workbench:mobile.automationPanel.detailKicker')}
-          </p>
           <h2 id={detailTitleId}>{selectedTask.title}</h2>
         </div>
         <button type="button" className={styles.secondaryButton} onClick={onCloseDetails}>

@@ -640,7 +640,6 @@ export function MobileGitPanel({
     <section className={styles.panel} aria-labelledby="mobile-git-panel-title">
       <div className={styles.panelHeaderRow}>
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id="mobile-git-panel-title">{t('workbench:mobile.gitPanel.title')}</h1>
         </div>
         <button

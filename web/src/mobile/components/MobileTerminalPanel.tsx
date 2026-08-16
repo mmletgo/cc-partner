@@ -74,7 +74,7 @@ const SCROLLBACK_HYDRATION_TIMEOUT_MS = 10_000;
 export interface MobileTerminalPanelProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
-  /** 当前项目下所有 worktree；非空时在 panelHeader 与 mobileTerminalToolbar 之间渲染 worktree 工作区 tab 列表。 */
+  /** 当前项目下所有 worktree；非空时在 panel 顶部与 mobileTerminalToolbar 之间渲染 worktree 工作区 tab 列表。 */
   worktrees?: WorkbenchWorktree[];
   /** worktree 列表中需要高亮的 active id；缺省回退到 `worktree?.id`。 */
   activeWorktreeId?: string | null;
@@ -1345,14 +1345,7 @@ export function MobileTerminalPanel({
     <section
       className={`${styles.panel} ${styles.mobileTerminalPanel}`}
       data-fullscreen={isTerminalFullscreen || undefined}
-      aria-labelledby="mobile-terminal-panel-title"
     >
-      {terminalChrome.panelHeader ? (
-        <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
-          <h1 id="mobile-terminal-panel-title">{t('workbench:mobile.terminalPanel.title')}</h1>
-        </div>
-      ) : null}
 
       {terminalChrome.worktreeStrip ? (
         <MobileWorktreeTabs

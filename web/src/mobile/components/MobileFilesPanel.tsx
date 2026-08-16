@@ -414,7 +414,6 @@ export function MobileFilesPanel({
     <section className={styles.panel} aria-labelledby="mobile-files-panel-title">
       <div className={styles.panelHeaderRow}>
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id="mobile-files-panel-title">{t('workbench:mobile.filesPanel.title')}</h1>
         </div>
         <button

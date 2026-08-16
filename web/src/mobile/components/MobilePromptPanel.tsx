@@ -75,7 +75,6 @@ export function MobilePromptPanel({ worktree, session }: MobilePromptPanelProps)
   return (
     <section className={styles.panel} aria-labelledby="mobile-prompt-panel-title">
       <div className={styles.panelHeader}>
-        <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
         <h1 id="mobile-prompt-panel-title">{t('workbench:mobile.promptPanel.title')}</h1>
       </div>
 

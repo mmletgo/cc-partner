@@ -90,6 +90,19 @@
   text-overflow: ellipsis;
 }
 
+/* 抽屉/rail 头部仅供屏幕阅读器识别的标题，避免向视觉用户暴露冗余文案。 */
+.srOnlyTitle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .topMeta {
   color: var(--muted);
   font-size: var(--text-xs);

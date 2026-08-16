@@ -127,7 +127,6 @@ export function MobileWorktreeQuickSwitch({
     <Dialog open={open} titleId={titleId} onClose={onClose} className={styles.quickSwitchSheet}>
       <header className={styles.quickSwitchHeader}>
         <div className={styles.quickSwitchTitle}>
-          <p>{t('mobile.kicker')}</p>
           <h2 id={titleId}>
             {t('mobile.worktreeQuickSwitch.title', { project: project?.name ?? '' })}
           </h2>

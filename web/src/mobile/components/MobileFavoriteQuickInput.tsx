@@ -209,7 +209,6 @@ function MobileFavoriteQuickInputDialog({
     >
       <header className={styles.favoriteHeader}>
         <div className={styles.favoriteTitle}>
-          <p>{t('workbench:mobile.favoriteQuickInput.kicker')}</p>
           <h2 id={titleId}>{t('workbench:mobile.favoriteQuickInput.title')}</h2>
         </div>
         <div className={styles.favoriteActions}>

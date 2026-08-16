@@ -145,7 +145,6 @@ export function MobileAttentionPanel({
   return (
     <section className={styles.panel} aria-labelledby="mobile-attention-title">
       <div className={styles.header}>
-        <p className={styles.kicker}>{t('workbench:mobile.kicker')}</p>
         <h1 id="mobile-attention-title" className={styles.title}>
           {t('attention:title')}
         </h1>

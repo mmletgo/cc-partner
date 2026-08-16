@@ -665,7 +665,6 @@ export function MobileWorktreePanel({
   return (
     <section className={styles.panel} aria-labelledby="mobile-worktree-panel-title">
       <div className={styles.panelHeader}>
-        <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
         <h1 id="mobile-worktree-panel-title">{t('workbench:mobile.worktreePanel.title')}</h1>
       </div>
 

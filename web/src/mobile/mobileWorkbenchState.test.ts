@@ -689,14 +689,12 @@ describe('mobileWorkbenchState', () => {
     const normalChrome = getMobileTerminalChromeVisibility(false);
     const fullscreenChrome = getMobileTerminalChromeVisibility(true);
 
-    assertEqual(normalChrome.panelHeader, true);
     assertEqual(normalChrome.windowTabs, true);
     assertEqual(normalChrome.paneActions, true);
     assertEqual(normalChrome.terminalSurface, true);
     assertEqual(normalChrome.exitFullscreen, false);
     assertEqual(normalChrome.worktreeStrip, true);
 
-    assertEqual(fullscreenChrome.panelHeader, false);
     assertEqual(fullscreenChrome.windowTabs, false);
     assertEqual(fullscreenChrome.paneActions, true);
     assertEqual(fullscreenChrome.terminalSurface, true);

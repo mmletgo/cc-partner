@@ -382,7 +382,6 @@ export function MobileWorkbenchShell({
           <MenuIcon size={16} aria-hidden="true" />
         </button>
         <div className={styles.titleBlock}>
-          <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
           <p className={styles.topMeta}>{project ?? t('workbench:mobile.noProject')}</p>
         </div>
       </header>
@@ -396,12 +395,10 @@ export function MobileWorkbenchShell({
         className={styles.drawer}
       >
         <div className={styles.drawerHeader}>
-          <div className={styles.titleBlock}>
-            <h2 id={MOBILE_NAV_DRAWER_TITLE_ID} className={styles.topTitle}>
-              {t('workbench:mobile.topTitle')}
-            </h2>
-            <p className={styles.topMeta}>{project ?? t('workbench:mobile.projectFallback')}</p>
-          </div>
+          <h2 id={MOBILE_NAV_DRAWER_TITLE_ID} className={styles.srOnlyTitle}>
+            {t('workbench:mobile.openNavigation')}
+          </h2>
+          <p className={styles.topMeta}>{project ?? t('workbench:mobile.projectFallback')}</p>
           <button
             ref={closeButtonRef}
             type="button"
@@ -424,7 +421,6 @@ export function MobileWorkbenchShell({
 
       <aside className={styles.rail} aria-label={t('workbench:mobile.railAriaLabel')}>
         <div className={styles.railHeader}>
-          <p className={styles.topTitle}>{t('workbench:mobile.topTitle')}</p>
           <p className={styles.topMeta}>{project ?? t('workbench:mobile.noProject')}</p>
         </div>
         <MobilePanelNav

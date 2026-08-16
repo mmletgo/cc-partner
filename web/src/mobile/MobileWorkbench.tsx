@@ -1402,7 +1402,6 @@ export function MobileWorkbench(): ReactElement {
     ) : (
       <section className={styles.panel} aria-labelledby="mobile-panel-title">
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id="mobile-panel-title">{placeholder.title}</h1>
         </div>
         {projectDetailsLoading ? (

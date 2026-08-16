@@ -155,8 +155,6 @@
   "newSession": "新窗口",
   "projectContextLabel": "项目",
   "mobile": {
-    "topTitle": "Workbench",
-    "kicker": "Mobile Workbench",
     "openNavigation": "打开导航",
     "closeNavigation": "关闭导航",
     "navAriaLabel": "移动端工作台面板",
@@ -175,7 +173,6 @@
       "title": "Worktree 工作区"
     },
     "favoriteQuickInput": {
-      "kicker": "收藏 Prompt",
       "title": "收藏的 Prompt",
       "openButton": "收藏 Prompt",
       "refresh": "刷新",
@@ -203,7 +200,6 @@
       "title": "移动端项目预览"
     },
     "terminalPanel": {
-      "title": "终端",
       "tabsAriaLabel": "移动端终端窗口",
       "actionsAriaLabel": "移动端 pane 操作",
       "terminalAriaLabel": "移动端终端输出",
@@ -376,7 +372,6 @@
       "runtimeRecentEvents": "最近事件",
       "runtimeSlots": "槽位 {{used}}/{{max}} · 运行 {{running}} · 重试 {{retrying}}",
       "runtimeLatestError": "最近错误：{{error}}",
-      "detailKicker": "任务详情",
       "closeDetails": "关闭详情",
       "workflowState": "Workflow",
       "runStateLabel": "Run",

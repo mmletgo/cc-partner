@@ -50,7 +50,6 @@ export function MobileAutomationCreateDialog({
     >
       <div className={styles.mobileDialogHeader}>
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h2 id={dialogTitleId}>{t('workbench:mobile.automationPanel.createOpen')}</h2>
         </div>
         <button

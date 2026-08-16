@@ -48,7 +48,6 @@ export function MobileProjectPanel({
     <section className={styles.panel} aria-labelledby="mobile-project-panel-title">
       <div className={styles.panelHeaderRow}>
         <div className={styles.panelHeader}>
-          <p className={styles.panelKicker}>{t('workbench:mobile.kicker')}</p>
           <h1 id="mobile-project-panel-title">{t('workbench:mobile.projectPanel.title')}</h1>
         </div>
         <button
