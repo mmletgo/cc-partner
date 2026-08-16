@@ -1,54 +1,95 @@
 import { useCallback, useRef } from 'react';
 import type { KeyboardEvent, ReactElement } from 'react';
-import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
+import { Button, Dialog, Input, StatusMessage } from '@/components/primitives';
+import { PlusIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchWorktree } from '@/lib/types';
+import {
+  WORKTREE_BRANCH_PREFIXES,
+  composeWorktreeBranchName,
+  type WorktreeBranchPrefix,
+} from '@/lib/workbenchWorktreeBranches';
 import { worktreeStatusTone } from '@/pages/Workbench/workbenchWorktrees';
-import styles from '../MobileWorkbench.module.css';
+import type { MobileMutationPhase } from '../mobilePanelState';
+import { canRunMobileWorktreeDestructiveAction } from '../mobileWorkbenchState';
+import { PointerPrimaryButton } from './PointerPrimaryButton';
+import styles from './MobileWorktreeTabs.module.css';
 
 export interface MobileWorktreeTabsProps {
   worktrees: WorkbenchWorktree[];
   activeWorktreeId: string | null;
-  /** 整行禁用（busy 时父级传入）；不影响 chip 渲染但禁用点击 */
-  busy?: boolean;
-  /**
-   * dirty-guard 入口（父级 `handleSelectWorktree` 已守护 busy + Files dirty snapshot）。
-   * 返回 `false` 时保持当前 active 不切换（由父级保证），新组件不乐观切换。
-   */
+  projectId: string | null;
+  /** 项目详情加载或全局 worktree 操作中；不包含终端 pane/session busy。 */
+  controlsBusy?: boolean;
+  createOpen: boolean;
+  createPrefix: WorktreeBranchPrefix;
+  createSuffix: string;
+  creating?: boolean;
+  removing?: boolean;
+  pendingRemoval: WorkbenchWorktree | null;
+  error: string | null;
+  mutationPhase?: MobileMutationPhase;
   onSelect: (worktree: WorkbenchWorktree) => boolean | void;
-  t: TFunction<'workbench'>;
+  onOpenCreate: () => void;
+  onCancelCreate: () => void;
+  onPrefixChange: (prefix: WorktreeBranchPrefix) => void;
+  onSuffixChange: (suffix: string) => void;
+  onCreate: () => void;
+  onRequestRemove: (worktree: WorkbenchWorktree) => void;
+  onCancelRemove: () => void;
+  onConfirmRemove: () => void;
+  onRetryReconcile?: () => void;
 }
 
 /**
  * MobileWorktreeTabs（移动端 worktree 工作区 tab 列表）
  *
  * Business Logic（为什么需要这个组件）:
- *   手机端用户需要在 terminal panel 内直接切换 worktree 工作区，与桌面 `WorkbenchWorktreeBar` 行为一致；
- *   把 worktree 切换入口从 shell 顶部 statusRow 下移到 panel 内部，session tabs 上方。
+ *   手机端用户需要在窗口 tab 上方直接切换、新建和移除非主 worktree，交互对齐桌面
+ *   `WorkbenchWorktreeBar`，避免再绕到独立 Worktrees 面板或顶部 quick switch。
  *
  * Code Logic（这个组件做什么）:
- *   渲染横向滚动 nav 容器，按 `worktreeStatusTone` 三档（neutral/warning/danger）映射
- *   `data-tone`；active chip 用 `data-active` + `aria-current="page"`；busy 时整行 disabled；
- *   `worktrees.length === 0` 时返回 null（min-height:0 自然收起）；键盘 ArrowLeft/Right/Home/End
- *   在 chip 间循环切换（与桌面 `WorkbenchSessionTabs` 风格一致）。tone 用 worktreeStatusTone
- *   而非 `getMobileWorktreeStatusKind`，两者语义不同（clean|dirty|conflict vs neutral|warning|danger）。
+ *   渲染 chip 条（状态点 + 分支名 + 主/worktree 元信息）；非主 chip 带关闭按钮；
+ *   末尾「新 worktree」展开 prefix/suffix 表单；移除走共享 Dialog；
+ *   触摸走 PointerPrimaryButton，避免 IME 首次 tap 被系统吞掉 click。
  */
 export function MobileWorktreeTabs({
   worktrees,
   activeWorktreeId,
-  busy = false,
+  projectId,
+  controlsBusy = false,
+  createOpen,
+  createPrefix,
+  createSuffix,
+  creating = false,
+  removing = false,
+  pendingRemoval,
+  error,
+  mutationPhase = 'idle',
   onSelect,
-  t,
-}: MobileWorktreeTabsProps): ReactElement | null {
+  onOpenCreate,
+  onCancelCreate,
+  onPrefixChange,
+  onSuffixChange,
+  onCreate,
+  onRequestRemove,
+  onCancelRemove,
+  onConfirmRemove,
+  onRetryReconcile,
+}: MobileWorktreeTabsProps): ReactElement {
+  const { t } = useTranslation(['workbench', 'common']);
   const navRef = useRef<HTMLElement | null>(null);
-  const title = t('mobile.worktreeTabs.title');
+  const composedBranchName = composeWorktreeBranchName(createPrefix, createSuffix);
+  const barBusy = controlsBusy || creating || removing || mutationPhase === 'reconciling'
+    || mutationPhase === 'unknown' || mutationPhase === 'busy';
+  const canCreate = Boolean(projectId) && !barBusy;
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   桌面 `WorkbenchSessionTabs` 用 roving tablist 风格让键盘用户快速切 chip；
-   *   mobile 主交互是 touch，但保持键盘可达性避免退化。
+   *   与窗口 tab 一样保留键盘循环，方便外接键盘在 chip 间移动焦点。
    *
    * Code Logic（这个函数做什么）:
-   *   ArrowLeft/Right/Home/End 循环切换 focus；其它键放行；preventDefault 避免滚动外层。
+   *   ArrowLeft/Right/Home/End 在 data-mobile-worktree-chip 间循环 focus。
    */
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLButtonElement>, currentIndex: number): void => {
@@ -62,8 +103,7 @@ export function MobileWorktreeTabs({
       let nextIndex: number;
       if (key === 'Home') nextIndex = 0;
       else if (key === 'End') nextIndex = last;
-      else if (key === 'ArrowLeft')
-        nextIndex = currentIndex <= 0 ? last : currentIndex - 1;
+      else if (key === 'ArrowLeft') nextIndex = currentIndex <= 0 ? last : currentIndex - 1;
       else nextIndex = currentIndex >= last ? 0 : currentIndex + 1;
       const nextChip = navRef.current?.querySelectorAll<HTMLButtonElement>(
         'button[data-mobile-worktree-chip]',
@@ -73,56 +113,228 @@ export function MobileWorktreeTabs({
     [worktrees],
   );
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   onSelect 返回 false 时父级拒绝切换（dirty guard 失败 / busy 拒绝）；
-   *   新组件不持有 active 状态、不乐观切换，因此无需额外处理返回值。
-   *
-   * Code Logic（这个函数做什么）:
-   *   busy 时忽略点击；否则透传到父级 onSelect；返回值不消费。
-   */
-  const handleClick = useCallback(
-    (worktree: WorkbenchWorktree): void => {
-      if (busy) return;
-      onSelect(worktree);
-    },
-    [busy, onSelect],
-  );
-
-  if (worktrees.length === 0) return null;
-
   return (
-    <nav
-      ref={navRef}
-      className={styles.mobileWorktreeStrip}
-      aria-label={title}
-      data-busy={busy || undefined}
-      data-testid="mobile-worktree-tabs"
-    >
-      {worktrees.map((worktree, index) => {
-        const tone = worktreeStatusTone(worktree);
-        const isActive = worktree.id === activeWorktreeId;
-        const label = worktree.branch ?? worktree.name;
-        return (
-          <button
-            key={worktree.id}
-            type="button"
-            data-mobile-worktree-chip
-            data-active={isActive || undefined}
-            data-tone={tone}
-            aria-current={isActive ? 'page' : undefined}
-            disabled={busy}
-            className={styles.mobileWorktreeChip}
-            onClick={() => handleClick(worktree)}
-            onKeyDown={(event) => handleKeyDown(event, index)}
+    <div className={styles.mobileWorktreeBar}>
+      {error ? (
+        <StatusMessage
+          tone="danger"
+          className={styles.mobileWorktreeError}
+          action={
+            mutationPhase === 'unknown' && onRetryReconcile ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={creating || removing}
+                onClick={() => onRetryReconcile()}
+              >
+                {t('workbench:mobile.worktreePanel.retryReconcile')}
+              </Button>
+            ) : undefined
+          }
+        >
+          {error}
+        </StatusMessage>
+      ) : null}
+
+      <nav
+        ref={navRef}
+        className={styles.mobileWorktreeStrip}
+        aria-label={t('workbench:mobile.worktreeTabs.title')}
+        data-busy={barBusy || undefined}
+        data-testid="mobile-worktree-tabs"
+      >
+        {worktrees.length === 0 ? (
+          <span className={styles.mobileWorktreeEmpty}>{t('workbench:worktrees.empty')}</span>
+        ) : (
+          worktrees.map((worktree, index) => {
+            const tone = worktreeStatusTone(worktree);
+            const isActive = worktree.id === activeWorktreeId;
+            const label = worktree.branch ?? worktree.name;
+            const meta = worktree.isMain
+              ? t('workbench:worktrees.main')
+              : t('workbench:worktrees.linked');
+            const chip = (
+              <PointerPrimaryButton
+                type="button"
+                data-mobile-worktree-chip
+                data-active={isActive || undefined}
+                data-tone={tone}
+                aria-current={isActive ? 'page' : undefined}
+                className={styles.mobileWorktreeChip}
+                onPrimary={() => {
+                  onSelect(worktree);
+                }}
+                onKeyDown={(event) => handleKeyDown(event, index)}
+              >
+                <span className={styles.mobileWorktreeDot} data-tone={tone} aria-hidden="true" />
+                <span className={styles.mobileWorktreeChipName} title={label}>
+                  {label}
+                </span>
+                <span className={styles.mobileWorktreeChipMeta}>{meta}</span>
+              </PointerPrimaryButton>
+            );
+
+            if (worktree.isMain) {
+              return <span key={worktree.id}>{chip}</span>;
+            }
+
+            const removable = canRunMobileWorktreeDestructiveAction(worktree, barBusy);
+            return (
+              <div
+                key={worktree.id}
+                className={styles.mobileWorktreeChipGroup}
+                data-active={isActive || undefined}
+                data-tone={tone}
+                data-removable={removable || undefined}
+              >
+                {chip}
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileWorktreeChipClose}
+                  data-testid={`mobile-worktree-remove-${worktree.id}`}
+                  aria-label={t('workbench:worktrees.removeAria', { name: label })}
+                  title={t('workbench:worktrees.removeAria', { name: label })}
+                  disabled={!removable}
+                  onPrimary={() => {
+                    onRequestRemove(worktree);
+                  }}
+                >
+                  <XIcon size={14} />
+                </PointerPrimaryButton>
+              </div>
+            );
+          })
+        )}
+
+        <div className={styles.mobileWorktreeCreateSlot}>
+          {createOpen ? null : (
+            <PointerPrimaryButton
+              type="button"
+              className={styles.mobileWorktreeCreateButton}
+              data-testid="mobile-worktree-create"
+              disabled={!canCreate}
+              onPrimary={() => {
+                if (!canCreate) return;
+                onOpenCreate();
+              }}
+            >
+              <PlusIcon size={14} aria-hidden="true" />
+              <span>{t('workbench:worktrees.create')}</span>
+            </PointerPrimaryButton>
+          )}
+        </div>
+
+        {createOpen ? (
+          <form
+            className={styles.mobileWorktreeCreateForm}
+            data-testid="mobile-worktree-create-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!composedBranchName || barBusy) return;
+              onCreate();
+            }}
           >
-            <span className={styles.mobileWorktreeDot} data-tone={tone} aria-hidden="true" />
-            <span className={styles.mobileWorktreeChipName} title={label}>
-              {label}
+            <label>
+              <span className="sr-only">{t('workbench:worktrees.prefixLabel')}</span>
+              <select
+                className={styles.mobileWorktreePrefixSelect}
+                value={createPrefix}
+                disabled={creating}
+                aria-label={t('workbench:worktrees.prefixLabel')}
+                onChange={(event) =>
+                  onPrefixChange(event.target.value as WorktreeBranchPrefix)
+                }
+              >
+                {WORKTREE_BRANCH_PREFIXES.map((prefix) => (
+                  <option key={prefix} value={prefix}>
+                    {prefix}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className={styles.mobileWorktreeBranchSlash} aria-hidden="true">
+              /
             </span>
-          </button>
-        );
-      })}
-    </nav>
+            <Input
+              size="sm"
+              mono
+              className={styles.mobileWorktreeBranchInput}
+              value={createSuffix}
+              placeholder={t('workbench:worktrees.suffixPlaceholder')}
+              aria-label={t('workbench:worktrees.suffixLabel')}
+              disabled={creating}
+              onChange={(event) => onSuffixChange(event.target.value)}
+            />
+            <PointerPrimaryButton
+              type="button"
+              className={styles.mobileWorktreeCreateButton}
+              data-active="true"
+              disabled={!composedBranchName || barBusy}
+              onPrimary={() => {
+                if (!composedBranchName || barBusy) return;
+                onCreate();
+              }}
+            >
+              {creating
+                ? t('workbench:mobile.worktreePanel.creating')
+                : t('common:action.confirm')}
+            </PointerPrimaryButton>
+            <PointerPrimaryButton
+              type="button"
+              className={styles.mobileWorktreeCreateButton}
+              disabled={creating}
+              onPrimary={() => {
+                if (creating) return;
+                onCancelCreate();
+              }}
+            >
+              {t('common:action.cancel')}
+            </PointerPrimaryButton>
+          </form>
+        ) : null}
+      </nav>
+
+      <Dialog
+        open={pendingRemoval !== null}
+        titleId="mobile-worktree-remove-confirm-title"
+        closeOnEscape={!removing}
+        closeOnBackdrop={!removing}
+        onClose={() => {
+          if (removing) return;
+          onCancelRemove();
+        }}
+      >
+        <h2
+          id="mobile-worktree-remove-confirm-title"
+          className={styles.mobileWorktreeRemoveTitle}
+        >
+          {t('workbench:worktrees.removeConfirmDialog.title')}
+        </h2>
+        <p className={styles.mobileWorktreeRemoveBody}>
+          {t('workbench:worktrees.removeConfirmDialog.body', {
+            name: pendingRemoval?.branch ?? pendingRemoval?.name ?? '',
+          })}
+        </p>
+        <div className={styles.mobileWorktreeRemoveActions}>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={removing}
+            onClick={onCancelRemove}
+          >
+            {t('workbench:worktrees.removeConfirmDialog.cancel')}
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            loading={removing}
+            disabled={removing || !pendingRemoval}
+            onClick={onConfirmRemove}
+          >
+            {t('workbench:worktrees.removeConfirmDialog.confirm')}
+          </Button>
+        </div>
+      </Dialog>
+    </div>
   );
 }

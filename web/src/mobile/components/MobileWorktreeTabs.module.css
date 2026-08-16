@@ -1,15 +1,25 @@
-/* MobileWorktreeTabs.module.css — 移动端 worktree 工作区 tab 列表样式 */
+/* MobileWorktreeTabs.module.css — 对齐桌面 WorkbenchWorktreeBar 的 chip + 创建/关闭 */
+
+.mobileWorktreeBar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.mobileWorktreeError {
+  margin: var(--space-2) var(--space-3) 0;
+}
 
 .mobileWorktreeStrip {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-3);
   overflow-x: auto;
-  scroll-snap-type: x mandatory;
   scrollbar-width: none;
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--surface);
   min-width: 0;
   box-sizing: border-box;
 }
@@ -18,25 +28,69 @@
   display: none;
 }
 
-.mobileWorktreeChip {
+.mobileWorktreeEmpty {
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+}
+
+.mobileWorktreeChip,
+.mobileWorktreeChipGroup {
   flex: 0 0 auto;
+}
+
+.mobileWorktreeChipGroup {
   display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg-2);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileWorktreeChipGroup[data-tone='warning'] {
+  border-color: color-mix(in oklab, var(--warn) 45%, var(--border-soft));
+}
+
+.mobileWorktreeChipGroup[data-tone='danger'] {
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--border-soft));
+}
+
+.mobileWorktreeChipGroup[data-active='true'] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  color: var(--fg);
+}
+
+.mobileWorktreeChipGroup > .mobileWorktreeChip {
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+
+.mobileWorktreeChipGroup[data-active='true'] > .mobileWorktreeChip {
+  background: transparent;
+}
+
+.mobileWorktreeChip {
+  height: 32px;
+  max-width: 180px;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-full);
   border: 1px solid var(--border-soft);
-  background: var(--surface-warm);
-  color: var(--fg);
-  font: var(--text-sm);
-  font-weight: var(--weight-regular);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-3);
+  background: var(--surface);
+  color: var(--fg-2);
   cursor: pointer;
-  scroll-snap-align: start;
+  font-size: var(--text-sm);
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
 .mobileWorktreeChip:hover:not(:disabled) {
-  border-color: color-mix(in oklab, var(--muted) 30%, var(--border-soft));
+  border-color: var(--accent-soft);
 }
 
 .mobileWorktreeChip:focus-visible {
@@ -46,9 +100,8 @@
 
 .mobileWorktreeChip[data-active='true'] {
   border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: var(--weight-medium);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  color: var(--fg);
 }
 
 .mobileWorktreeChip[data-tone='warning'] {
@@ -60,20 +113,15 @@
 }
 
 .mobileWorktreeChip:disabled {
-  color: var(--muted);
-  background: var(--surface-warm);
-  cursor: not-allowed;
+  cursor: default;
 }
 
 .mobileWorktreeDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-
-.mobileWorktreeDot[data-tone='neutral'] {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
   background: var(--success);
+  flex: 0 0 auto;
 }
 
 .mobileWorktreeDot[data-tone='warning'] {
@@ -85,9 +133,151 @@
 }
 
 .mobileWorktreeChipName {
-  font-weight: inherit;
-  white-space: nowrap;
+  min-width: 0;
   overflow: hidden;
+  color: inherit;
+  font-weight: var(--weight-medium);
   text-overflow: ellipsis;
-  max-width: 14ch;
+  white-space: nowrap;
+}
+
+.mobileWorktreeChipMeta {
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.mobileWorktreeChipClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  flex: 0 0 auto;
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileWorktreeChipClose:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 12%, transparent);
+}
+
+.mobileWorktreeChipClose:disabled {
+  color: var(--fg-muted-readable);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.mobileWorktreeChipClose:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.mobileWorktreeCreateButton {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-3);
+  background: var(--surface);
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileWorktreeCreateButton:hover:not(:disabled) {
+  border-color: var(--accent-soft);
+}
+
+.mobileWorktreeCreateButton:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mobileWorktreeCreateButton[data-active='true'] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  color: var(--fg);
+}
+
+.mobileWorktreeCreateButton:disabled {
+  color: var(--fg-muted-readable);
+  cursor: not-allowed;
+}
+
+.mobileWorktreeCreateSlot {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.mobileWorktreeCreateForm {
+  display: flex;
+  align-items: center;
+  flex: 1 1 100%;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.mobileWorktreePrefixSelect {
+  height: 26px;
+  min-width: 92px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-2);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.mobileWorktreePrefixSelect:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.mobileWorktreePrefixSelect:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.mobileWorktreeBranchSlash {
+  color: var(--fg-muted-readable);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.mobileWorktreeBranchInput {
+  width: min(160px, 42vw);
+}
+
+.mobileWorktreeRemoveTitle {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.mobileWorktreeRemoveBody {
+  margin: 0 0 var(--space-4);
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
+
+.mobileWorktreeRemoveActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }

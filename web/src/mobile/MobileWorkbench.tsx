@@ -31,6 +31,7 @@ import type { MobileAutomationExecutionContext } from './components/MobileAutoma
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
+import { useMobileWorktreeBarController } from './controllers/useMobileWorktreeBarController';
 import {
   mapMobileAttentionTarget,
   resolveMobileAttentionMissingTargetPanel,
@@ -930,6 +931,53 @@ export function MobileWorkbench(): ReactElement {
     [discardConfirmedFileContextSwitch, setActiveWorktreeWithSession],
   );
 
+  const applyWorktreeBarCreated = useCallback(
+    (
+      nextWorktrees: WorkbenchWorktree[],
+      nextActive: WorkbenchWorktree | null,
+      session: WorkbenchSession | null,
+    ): void => {
+      handleWorktreesChange(nextWorktrees);
+      if (session) {
+        handleSessionsChange([
+          ...sessionsRef.current.filter((item) => item.id !== session.id),
+          session,
+        ]);
+      }
+      setActiveWorktreeWithSession(nextActive);
+    },
+    [handleSessionsChange, handleWorktreesChange, setActiveWorktreeWithSession],
+  );
+
+  const applyWorktreeBarRemoval = useCallback(
+    (plan: {
+      nextWorktrees: WorkbenchWorktree[];
+      nextActive: WorkbenchWorktree | null;
+      requiresActivePreflight: boolean;
+    }): void => {
+      handleWorktreesChange(plan.nextWorktrees);
+      if (plan.requiresActivePreflight) {
+        handleApplyActiveWorktreeChange(plan.nextActive);
+      }
+    },
+    [handleApplyActiveWorktreeChange, handleWorktreesChange],
+  );
+
+  const worktreeBar = useMobileWorktreeBarController({
+    project: activeProject,
+    worktrees,
+    activeWorktreeId: activeWorktree?.id ?? null,
+    controlsBusy: worktreeControlsBusy,
+    confirmSwitchToWorktree: (nextWorktree) =>
+      confirmFileContextSwitch(createMobileFilePanelContext(activeProject, nextWorktree)),
+    confirmActiveWorktreeChange: handleConfirmActiveWorktreeChange,
+    applyCreated: applyWorktreeBarCreated,
+    applyRemoval: applyWorktreeBarRemoval,
+    beginWorktreeOperation,
+    refreshWorktrees,
+    refreshSessions,
+  });
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   Git 操作返回新的 worktree DTO 后，移动端需要更新列表和当前 active 状态，而不必等待下一轮全量刷新。
@@ -1387,9 +1435,36 @@ export function MobileWorkbench(): ReactElement {
         <MobileTerminalPanel
           project={activeProject}
           worktree={activeWorktree}
-          worktrees={worktrees}
-          activeWorktreeId={activeWorktree?.id ?? null}
-          onSelectWorktree={handleSelectWorktree}
+          worktreeBar={{
+            worktrees,
+            activeWorktreeId: activeWorktree?.id ?? null,
+            projectId: activeProject?.id ?? null,
+            controlsBusy: worktreeControlsBusy,
+            createOpen: worktreeBar.createOpen,
+            createPrefix: worktreeBar.createPrefix,
+            createSuffix: worktreeBar.createSuffix,
+            creating: worktreeBar.creating,
+            removing: worktreeBar.removing,
+            pendingRemoval: worktreeBar.pendingRemoval,
+            error: worktreeBar.error,
+            mutationPhase: worktreeBar.mutationPhase,
+            onSelect: handleSelectWorktree,
+            onOpenCreate: worktreeBar.openCreate,
+            onCancelCreate: worktreeBar.cancelCreate,
+            onPrefixChange: worktreeBar.setCreatePrefix,
+            onSuffixChange: worktreeBar.setCreateSuffix,
+            onCreate: () => {
+              void worktreeBar.createWorktree();
+            },
+            onRequestRemove: worktreeBar.requestRemove,
+            onCancelRemove: worktreeBar.cancelRemove,
+            onConfirmRemove: () => {
+              void worktreeBar.confirmRemove();
+            },
+            onRetryReconcile: () => {
+              void worktreeBar.retryReconcile();
+            },
+          }}
           sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
           activeSession={activeSession}
           busy={projectDetailsLoading}

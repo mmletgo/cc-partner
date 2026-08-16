@@ -63,7 +63,7 @@ import {
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 import { MobileFavoriteQuickInput } from './MobileFavoriteQuickInput';
 import { MobilePromptOptimizerSheet } from './MobilePromptOptimizerSheet';
-import { MobileWorktreeTabs } from './MobileWorktreeTabs';
+import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './MobileWorktreeTabs';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 const MIN_TERMINAL_COLS = 20;
@@ -74,12 +74,8 @@ const SCROLLBACK_HYDRATION_TIMEOUT_MS = 10_000;
 export interface MobileTerminalPanelProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
-  /** 当前项目下所有 worktree；非空时在 panel 顶部与 mobileTerminalToolbar 之间渲染 worktree 工作区 tab 列表。 */
-  worktrees?: WorkbenchWorktree[];
-  /** worktree 列表中需要高亮的 active id；缺省回退到 `worktree?.id`。 */
-  activeWorktreeId?: string | null;
-  /** dirty-guard 入口；返回 false 时保持 active 不切换（由父级保证）。 */
-  onSelectWorktree?: (worktree: WorkbenchWorktree) => boolean | void;
+  /** 窗口 tab 上方的 worktree 条；由父级 hook 注入切换/新建/删除。 */
+  worktreeBar?: MobileWorktreeTabsProps;
   sessions: WorkbenchSession[];
   activeSession: WorkbenchSession | null;
   busy: boolean;
@@ -173,9 +169,7 @@ function getErrorMessage(reason: unknown, fallback: string): string {
 export function MobileTerminalPanel({
   project,
   worktree,
-  worktrees,
-  activeWorktreeId,
-  onSelectWorktree,
+  worktreeBar,
   sessions,
   activeSession,
   busy,
@@ -1347,14 +1341,8 @@ export function MobileTerminalPanel({
       data-fullscreen={isTerminalFullscreen || undefined}
     >
 
-      {terminalChrome.worktreeStrip ? (
-        <MobileWorktreeTabs
-          worktrees={worktrees ?? []}
-          activeWorktreeId={activeWorktreeId ?? worktree?.id ?? null}
-          busy={isActionDisabled}
-          onSelect={(next) => onSelectWorktree?.(next) ?? false}
-          t={t}
-        />
+      {terminalChrome.worktreeStrip && worktreeBar ? (
+        <MobileWorktreeTabs {...worktreeBar} />
       ) : null}
 
       <div

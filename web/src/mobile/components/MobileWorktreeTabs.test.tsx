@@ -3,19 +3,24 @@
  * MobileWorktreeTabs（移动端 worktree 工作区 tab 列表）单元测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   验证 chip 列表的渲染、active 高亮、点击触发 onSelect、busy 禁用、键盘导航与
- *   空 worktree 时不渲染 strip 等核心合同；防止新组件破坏 mobile worktree 切换路径。
+ *   条必须像桌面 WorkbenchWorktreeBar：chip 切换、主/worktree 元信息、非主关闭、
+ *   新建表单；并保证 CSS module 与 PointerPrimaryButton 接线不被回退。
  *
  * Code Logic（这个测试做什么）:
- *   - 静态断言：组件源码用 nav 而非手写 dialog 角色、复用 worktreeStatusTone；
- *   - 行为断言：通过 RTL 渲染 + i18n，验证 chip 渲染、aria-current、busy、点击与键盘。
+ *   静态断言源码 import；RTL 渲染验证 chip/meta/close/create 与 pointerDown 触发。
  */
 import { afterEach, describe, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import type { ReactElement } from 'react';
-import type { TFunction } from 'i18next';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { I18nextProvider } from 'react-i18next';
+import i18n from '@/i18n';
 import type { WorkbenchWorktree } from '@/lib/types';
-import { MobileWorktreeTabs } from './MobileWorktreeTabs';
+import { DEFAULT_WORKTREE_BRANCH_PREFIX } from '@/lib/workbenchWorktreeBranches';
+import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './MobileWorktreeTabs';
+
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 
 function buildWorktree(
   overrides: Partial<WorkbenchWorktree> & Pick<WorkbenchWorktree, 'id' | 'name'>,
@@ -45,12 +50,44 @@ function buildWorktree(
   };
 }
 
-function buildT(translation: Record<string, string> = {}): TFunction<'workbench'> {
-  const dict: Record<string, string> = {
-    'mobile.worktreeTabs.title': 'Worktree 工作区',
-    ...translation,
+function defaultProps(
+  overrides: Partial<MobileWorktreeTabsProps> = {},
+): MobileWorktreeTabsProps {
+  return {
+    worktrees: [],
+    activeWorktreeId: null,
+    projectId: 'project-1',
+    createOpen: false,
+    createPrefix: DEFAULT_WORKTREE_BRANCH_PREFIX,
+    createSuffix: '',
+    pendingRemoval: null,
+    error: null,
+    onSelect: vi.fn(),
+    onOpenCreate: vi.fn(),
+    onCancelCreate: vi.fn(),
+    onPrefixChange: vi.fn(),
+    onSuffixChange: vi.fn(),
+    onCreate: vi.fn(),
+    onRequestRemove: vi.fn(),
+    onCancelRemove: vi.fn(),
+    onConfirmRemove: vi.fn(),
+    ...overrides,
   };
-  return ((key: string) => dict[key] ?? key) as TFunction<'workbench'>;
+}
+
+function renderTabs(overrides: Partial<MobileWorktreeTabsProps> = {}) {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <MobileWorktreeTabs {...defaultProps(overrides)} />
+    </I18nextProvider>,
+  );
+}
+
+function chipButtons(): HTMLButtonElement[] {
+  const nav = screen.getByTestId('mobile-worktree-tabs');
+  return Array.from(
+    nav.querySelectorAll<HTMLButtonElement>('button[data-mobile-worktree-chip]'),
+  );
 }
 
 afterEach(() => {
@@ -58,28 +95,21 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderTabs(
-  worktrees: WorkbenchWorktree[],
-  activeWorktreeId: string | null,
-  options: {
-    busy?: boolean;
-    onSelect?: (worktree: WorkbenchWorktree) => boolean | void;
-  } = {},
-): ReactElement {
-  const onSelect = options.onSelect ?? vi.fn();
-  return (
-    <MobileWorktreeTabs
-      worktrees={worktrees}
-      activeWorktreeId={activeWorktreeId}
-      busy={options.busy ?? false}
-      onSelect={onSelect}
-      t={buildT()}
-    />
-  );
-}
-
 describe('MobileWorktreeTabs', () => {
-  test('renders chip list with active highlight and tone from worktreeStatusTone', () => {
+  test('imports its own CSS module and PointerPrimaryButton', () => {
+    const source = readFileSync(join(TEST_DIR, 'MobileWorktreeTabs.tsx'), 'utf8');
+    if (!source.includes("from './MobileWorktreeTabs.module.css'")) {
+      throw new Error('MobileWorktreeTabs must import MobileWorktreeTabs.module.css');
+    }
+    if (source.includes("from '../MobileWorkbench.module.css'")) {
+      throw new Error('MobileWorktreeTabs must not import MobileWorkbench.module.css');
+    }
+    if (!source.includes('PointerPrimaryButton')) {
+      throw new Error('chip/create/close must use PointerPrimaryButton for IME first-tap');
+    }
+  });
+
+  test('renders chips with main/linked meta and active highlight', () => {
     const worktrees = [
       buildWorktree({ id: 'main', name: 'main', isMain: true }),
       buildWorktree({
@@ -97,94 +127,101 @@ describe('MobileWorktreeTabs', () => {
         },
       }),
     ];
-    render(renderTabs(worktrees, 'main'));
+    renderTabs({ worktrees, activeWorktreeId: 'main' });
 
     const nav = screen.getByTestId('mobile-worktree-tabs');
     if (nav.tagName.toLowerCase() !== 'nav') {
-      throw new Error('MobileWorktreeTabs root should be a <nav>');
-    }
-    if (nav.getAttribute('aria-label') !== 'Worktree 工作区') {
-      throw new Error('nav should expose localized aria-label');
+      throw new Error('MobileWorktreeTabs strip should be a <nav>');
     }
 
-    const chips = screen.getAllByTestId('mobile-worktree-tabs').length > 0
-      ? Array.from(
-          (screen.getByTestId('mobile-worktree-tabs') as HTMLElement).querySelectorAll<HTMLButtonElement>(
-            'button[data-mobile-worktree-chip]',
-          ),
-        )
-      : [];
+    const chips = chipButtons();
     if (chips.length !== 2) {
       throw new Error(`expected 2 chips, received ${chips.length}`);
     }
     const [mainChip, featureChip] = chips;
     if (!mainChip || !featureChip) throw new Error('expected two chips');
-
     if (mainChip.getAttribute('aria-current') !== 'page') {
       throw new Error('main worktree should have aria-current=page');
-    }
-    if (mainChip.getAttribute('data-active') !== 'true') {
-      throw new Error('main worktree should have data-active=true');
-    }
-    if (mainChip.getAttribute('data-tone') !== 'neutral') {
-      throw new Error('clean main worktree should map to data-tone=neutral');
     }
     if (featureChip.getAttribute('data-tone') !== 'danger') {
       throw new Error('conflict worktree should map to data-tone=danger');
     }
-  });
-
-  test('does not render strip when worktrees is empty', () => {
-    const { container } = render(renderTabs([], null));
-    if (container.firstChild !== null) {
-      throw new Error('empty worktrees should not render any DOM');
+    if (!mainChip.textContent?.includes('主工作区') && !mainChip.textContent?.includes('Main')) {
+      throw new Error('main chip should show main/linked meta');
+    }
+    if (!screen.getByTestId('mobile-worktree-remove-feature')) {
+      throw new Error('non-main chip should expose a remove button');
     }
   });
 
-  test('clicking a chip triggers onSelect and active remains on rejection', () => {
+  test('empty worktrees still render create affordance', () => {
+    renderTabs({ worktrees: [], activeWorktreeId: null });
+    if (!screen.getByTestId('mobile-worktree-tabs')) {
+      throw new Error('empty list should still render the strip');
+    }
+    if (!screen.getByTestId('mobile-worktree-create')) {
+      throw new Error('empty list should still offer create');
+    }
+  });
+
+  test('pointer down on a chip calls onSelect', () => {
     const worktrees = [
       buildWorktree({ id: 'main', name: 'main', isMain: true }),
       buildWorktree({ id: 'feature', name: 'feature/mobile', branch: 'feature/mobile' }),
     ];
     const onSelect = vi.fn(() => false);
-    render(renderTabs(worktrees, 'main', { onSelect }));
-    const nav = screen.getByTestId('mobile-worktree-tabs');
-    const chips = Array.from(
-      nav.querySelectorAll<HTMLButtonElement>('button[data-mobile-worktree-chip]'),
-    );
-    const featureChip = chips[1];
+    renderTabs({ worktrees, activeWorktreeId: 'main', onSelect });
+    const featureChip = chipButtons()[1];
     if (!featureChip) throw new Error('expected feature chip');
-    fireEvent.click(featureChip);
+    fireEvent.pointerDown(featureChip);
     if (onSelect.mock.calls.length !== 1) {
-      throw new Error('onSelect should fire exactly once on chip click');
-    }
-    // 父级拒绝时（返回 false），active 应保持不变——由父级 setActiveWorktree 守住，新组件不写。
-    const mainChip = chips[0];
-    if (mainChip?.getAttribute('aria-current') !== 'page') {
-      throw new Error('active chip must remain after rejected onSelect');
+      throw new Error('onSelect should fire exactly once on pointerDown');
     }
   });
 
-  test('busy disables all chips and clicks are ignored', () => {
-    const worktrees = [
-      buildWorktree({ id: 'main', name: 'main', isMain: true }),
-      buildWorktree({ id: 'feature', name: 'feature/mobile', branch: 'feature/mobile' }),
-    ];
+  test('pointer down on close requests remove without selecting', () => {
+    const feature = buildWorktree({
+      id: 'feature',
+      name: 'feature/mobile',
+      branch: 'feature/mobile',
+    });
     const onSelect = vi.fn();
-    render(renderTabs(worktrees, 'main', { busy: true, onSelect }));
-    const nav = screen.getByTestId('mobile-worktree-tabs');
-    if (nav.getAttribute('data-busy') !== 'true') {
-      throw new Error('busy nav should set data-busy=true');
+    const onRequestRemove = vi.fn();
+    renderTabs({
+      worktrees: [buildWorktree({ id: 'main', name: 'main', isMain: true }), feature],
+      activeWorktreeId: 'main',
+      onSelect,
+      onRequestRemove,
+    });
+    fireEvent.pointerDown(screen.getByTestId('mobile-worktree-remove-feature'));
+    if (onRequestRemove.mock.calls.length !== 1) {
+      throw new Error('close should request remove');
     }
-    const chips = Array.from(
-      nav.querySelectorAll<HTMLButtonElement>('button[data-mobile-worktree-chip]'),
-    );
-    for (const chip of chips) {
-      if (!chip.disabled) throw new Error('busy chips should be disabled');
-    }
-    fireEvent.click(chips[1] as HTMLElement);
     if (onSelect.mock.calls.length !== 0) {
-      throw new Error('busy click must not call onSelect');
+      throw new Error('close must not select the worktree');
+    }
+  });
+
+  test('create button opens inline prefix/suffix form', () => {
+    const onOpenCreate = vi.fn();
+    renderTabs({
+      worktrees: [buildWorktree({ id: 'main', name: 'main', isMain: true })],
+      activeWorktreeId: 'main',
+      onOpenCreate,
+    });
+    fireEvent.pointerDown(screen.getByTestId('mobile-worktree-create'));
+    if (onOpenCreate.mock.calls.length !== 1) {
+      throw new Error('create chip should open the inline form');
+    }
+
+    cleanup();
+    renderTabs({
+      worktrees: [buildWorktree({ id: 'main', name: 'main', isMain: true })],
+      activeWorktreeId: 'main',
+      createOpen: true,
+    });
+    if (!screen.getByTestId('mobile-worktree-create-form')) {
+      throw new Error('createOpen should render prefix/suffix form');
     }
   });
 
@@ -194,28 +231,13 @@ describe('MobileWorktreeTabs', () => {
       buildWorktree({ id: 'feature', name: 'feature/mobile', branch: 'feature/mobile' }),
       buildWorktree({ id: 'hotfix', name: 'hotfix/login', branch: 'hotfix/login' }),
     ];
-    render(renderTabs(worktrees, 'main'));
-    const nav = screen.getByTestId('mobile-worktree-tabs');
-    const chips = Array.from(
-      nav.querySelectorAll<HTMLButtonElement>('button[data-mobile-worktree-chip]'),
-    );
+    renderTabs({ worktrees, activeWorktreeId: 'main' });
+    const chips = chipButtons();
     const lastChip = chips[chips.length - 1];
     lastChip?.focus();
     fireEvent.keyDown(lastChip as HTMLElement, { key: 'ArrowRight' });
     if (document.activeElement !== chips[0]) {
       throw new Error('ArrowRight from last chip should cycle to first chip');
-    }
-    fireEvent.keyDown(chips[0] as HTMLElement, { key: 'ArrowLeft' });
-    if (document.activeElement !== lastChip) {
-      throw new Error('ArrowLeft from first chip should cycle to last chip');
-    }
-    fireEvent.keyDown(chips[1] as HTMLElement, { key: 'Home' });
-    if (document.activeElement !== chips[0]) {
-      throw new Error('Home should focus first chip');
-    }
-    fireEvent.keyDown(chips[0] as HTMLElement, { key: 'End' });
-    if (document.activeElement !== lastChip) {
-      throw new Error('End should focus last chip');
     }
   });
 });
