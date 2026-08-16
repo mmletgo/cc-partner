@@ -189,6 +189,49 @@ pub async fn agent_hub_save_user_instruction_blocks(
     AgentHubService::save_user_instruction_blocks(state.inner(), request).await
 }
 
+/// Business Logic: 列出三槽历史（公共 / 适配 / 独有）的最近 20 条 history + 30 天 conflict 副本。
+///
+/// Code Logic: owner 直接读 content_versions；GuiClient 经 loopback control query。
+///   slot → content_versions.item_id 映射在 inventory 层完成；
+///   返回 ContentVersionDto 数组供 VersionHistoryDrawer 渲染。
+#[tauri::command]
+pub async fn agent_hub_list_user_instruction_slot_versions(
+    state: State<'_, AppState>,
+    request: crate::agent_hub::user_instructions::ListUserInstructionSlotVersionsRequest,
+) -> Result<Vec<crate::commands::prompts::ContentVersionDto>, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_list_user_instruction_slot_versions(request));
+    }
+    let versions = AgentHubService::list_user_instruction_slot_versions(
+        state.inner(),
+        request.asset_id,
+        request.slot,
+    )
+    .await?;
+    Ok(versions
+        .iter()
+        .map(crate::commands::prompts::content_version_to_dto)
+        .collect())
+}
+
+/// Business Logic: 把目标历史版本恢复到当前槽，写一条新 head；与 save_blocks 同口径 CAS。
+///
+/// Code Logic: owner 走 inventory::restore_user_instruction_slot_version
+///   （CAS + pre-restore baseline + commit + prune_retention）；
+///   GuiClient 经 loopback control mutation（要求 agent_hub v4 write compatibility）。
+#[tauri::command]
+pub async fn agent_hub_restore_user_instruction_slot_version(
+    state: State<'_, AppState>,
+    request: crate::agent_hub::user_instructions::RestoreUserInstructionSlotRequest,
+) -> Result<UserInstructionCanonicalDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_restore_user_instruction_slot_version(request));
+    }
+    AgentHubService::restore_user_instruction_slot_version(state.inner(), request).await
+}
+
 /// Business Logic: 保存整份指令。
 /// Code Logic: mutation + write compatibility。
 #[tauri::command]

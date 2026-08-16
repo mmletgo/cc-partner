@@ -16,11 +16,13 @@ import type { TFunction } from 'i18next';
 import { agentHubApi, type AgentHubRequestContext } from '@/api/agentHub';
 import type {
   AgentTarget,
+  InstructionSlotKey,
   UserInstructionApplyResultDto,
   UserInstructionPlanDto,
   UserInstructionTargetSelection,
   UserInstructionWorkspaceDto,
 } from '@/lib/types/agentHub';
+import type { ContentVersion } from '@/lib/types/core';
 import {
   getAgentHubContextCapability,
   getAgentHubDraftIdentity,
@@ -42,6 +44,7 @@ import {
   initialThreePaneFromDisk,
   joinBlocksForTarget,
   normalizeInstructionBlocks,
+  replaceSlotText,
   resolveInstructionSlotText,
   resolveAdaptedSlotText,
   updateBlock,
@@ -149,6 +152,18 @@ export interface UseInstructionThreePaneControllerResult {
   dismissApplyResult: () => void;
   /** 上下文切换前经用户确认后放弃当前草稿。 */
   discardDraftForContextChange: () => void;
+  /** 三槽历史抽屉状态机：按 lane 打开 → 拉版本列表 → restore-as-new-version。 */
+  slotHistoryOpen: boolean;
+  slotHistorySlot: InstructionSlotKey | null;
+  slotHistoryVersions: ContentVersion[];
+  slotHistoryLoading: boolean;
+  slotHistoryError: string | null;
+  restoringSlotVersionId: string | null;
+  slotHistoryActionError: string | null;
+  openSlotHistory: (slot: InstructionSlotKey) => void;
+  closeSlotHistory: () => void;
+  copySlotVersion: (version: ContentVersion) => Promise<void>;
+  restoreSlotVersion: (version: ContentVersion) => Promise<boolean>;
 }
 
 function laneToMode(lane: InstructionLane): InstructionBlockDraft['mode'] {
@@ -316,6 +331,21 @@ export function useInstructionThreePaneController(
   const [previewOpen, setPreviewOpen] = useState(false);
   const [plan, setPlan] = useState<UserInstructionPlanDto | null>(null);
   const [applyResult, setApplyResult] = useState<UserInstructionApplyResultDto | null>(null);
+  /** 三槽历史抽屉状态机：slotHistorySlot 为 null 时抽屉关闭。 */
+  const [slotHistoryOpen, setSlotHistoryOpen] = useState(false);
+  const [slotHistorySlot, setSlotHistorySlot] = useState<InstructionSlotKey | null>(null);
+  const [slotHistoryVersions, setSlotHistoryVersions] = useState<ContentVersion[]>([]);
+  const [slotHistoryLoading, setSlotHistoryLoading] = useState(false);
+  const [slotHistoryError, setSlotHistoryError] = useState<string | null>(null);
+  const [restoringSlotVersionId, setRestoringSlotVersionId] = useState<string | null>(null);
+  const [slotHistoryActionError, setSlotHistoryActionError] = useState<string | null>(null);
+  /** Slot history load 的请求 seq；只接受最新 seq 的响应覆盖版本列表。 */
+  const slotHistoryLoadSeqRef = useRef(0);
+  /** 取消历史抽屉时正在 in-flight 的 list 请求作废 token。 */
+  const slotHistoryAbortRef = useRef<{ version: number; cancelled: boolean }>({
+    version: 0,
+    cancelled: false,
+  });
 
   const mountedRef = useRef(true);
   const loadSeqRef = useRef(0);
@@ -388,6 +418,228 @@ export function useInstructionThreePaneController(
     setActionError(null);
     setError(null);
   }, []);
+
+  /**
+   * Business Logic: 打开三槽历史抽屉；并发的 list 请求 seq 单飞，避免旧 list 覆盖新 slot。
+   * Code Logic: loadVersionRef++ → 异步 list → mountRef + seq 守卫；setter 同步前置。
+   */
+  const openSlotHistory = useCallback(
+    (slot: InstructionSlotKey) => {
+      setSlotHistorySlot(slot);
+      setSlotHistoryOpen(true);
+      setSlotHistoryError(null);
+      setSlotHistoryActionError(null);
+      const ws = workspace;
+      if (!ws) {
+        setSlotHistoryVersions([]);
+        setSlotHistoryLoading(false);
+        return;
+      }
+      const loadVersion = ++slotHistoryLoadSeqRef.current;
+      slotHistoryAbortRef.current = { version: loadVersion, cancelled: false };
+      setSlotHistoryLoading(true);
+      setSlotHistoryVersions([]);
+      void agentHubApi
+        .listUserInstructionSlotVersions({
+          assetId: ws.scopeId,
+          slot,
+          ...requestContext,
+        })
+        .then((versions) => {
+          if (!mountedRef.current || loadVersion !== slotHistoryLoadSeqRef.current) {
+            return;
+          }
+          setSlotHistoryVersions(versions);
+          setSlotHistoryLoading(false);
+        })
+        .catch((reason: unknown) => {
+          if (!mountedRef.current || loadVersion !== slotHistoryLoadSeqRef.current) {
+            return;
+          }
+          const code = errorCode(reason);
+          setSlotHistoryError(
+            code === PEER_CONTEXT_UNAVAILABLE
+              ? PEER_CONTEXT_UNAVAILABLE
+              : code === PROJECT_CONTEXT_UNAVAILABLE
+                ? PROJECT_CONTEXT_UNAVAILABLE
+                : reason instanceof Error
+                  ? reason.message
+                  : String(reason),
+          );
+          setSlotHistoryVersions([]);
+          setSlotHistoryLoading(false);
+        });
+    },
+    [workspace, requestContext],
+  );
+
+  const closeSlotHistory = useCallback(() => {
+    if (restoringSlotVersionId !== null) return;
+    // 作废任何 in-flight list 响应，避免覆盖已关闭的抽屉状态。
+    slotHistoryAbortRef.current.cancelled = true;
+    slotHistoryLoadSeqRef.current += 1;
+    setSlotHistoryOpen(false);
+    setSlotHistorySlot(null);
+    setSlotHistoryVersions([]);
+    setSlotHistoryLoading(false);
+    setSlotHistoryError(null);
+    setSlotHistoryActionError(null);
+  }, [restoringSlotVersionId]);
+
+  /**
+   * Business Logic: 复制历史版本文本到剪贴板；按 Prompts/Scratchpad 同语义。
+   * Code Logic: 优先 version.content；缺失则试 title/preview；仍缺失报 stable code。
+   */
+  const copySlotVersion = useCallback(
+    async (version: ContentVersion): Promise<void> => {
+      const text =
+        (typeof version.content === 'string' && version.content) ||
+        (typeof version.contentPreview === 'string' && version.contentPreview) ||
+        version.title ||
+        '';
+      if (!text) {
+        setSlotHistoryActionError(t('agentHub:userInstructions.errors.slotVersionCopyEmpty'));
+        return;
+      }
+      try {
+        if (
+          typeof navigator !== 'undefined' &&
+          navigator.clipboard &&
+          typeof navigator.clipboard.writeText === 'function'
+        ) {
+          await navigator.clipboard.writeText(text);
+        }
+      } catch (reason) {
+        setSlotHistoryActionError(
+          reason instanceof Error ? reason.message : String(reason),
+        );
+      }
+    },
+    [t],
+  );
+
+  /**
+   * Business Logic: 历史版本恢复为新版本写入 canonical；与 saveBlocks 共用
+   *   baseRevisionId CAS + inventorySnapshotHash 双保险。
+   * Code Logic: busy 时 short-circuit；actionSeq + mountRef + editVersion
+   *   守卫避免覆盖；成功后合并新 canonical（复用 saveBlocks 的 hydrate 路径）。
+   */
+  const restoreSlotVersion = useCallback(
+    async (version: ContentVersion): Promise<boolean> => {
+      if (busyAction !== null) return false;
+      const ws = workspace;
+      if (!ws) return false;
+      const slot = slotHistorySlot;
+      if (!slot) return false;
+      const versionText =
+        (typeof version.content === 'string' && version.content) || '';
+      if (!versionText) {
+        setSlotHistoryActionError(t('agentHub:userInstructions.errors.slotVersionRestoreEmpty'));
+        return false;
+      }
+      const generation = contextGenerationRef.current;
+      const actionSeq = ++actionSeqRef.current;
+      const editVersionAtStart = editVersionRef.current;
+      setRestoringSlotVersionId(version.id);
+      setSlotHistoryActionError(null);
+      try {
+        const next = replaceSlotText(stateRef.current, slot, versionText, agent);
+        stateRef.current = next;
+        setState(next);
+        await agentHubApi.saveUserInstructionBlocks({
+          blocks: normalizeInstructionBlocks(next.blocks).map(draftToDto),
+          baseRevisionId: ws.canonical?.headRevisionId ?? null,
+          inventorySnapshotHash: ws.inventorySnapshotHash,
+          ...requestContext,
+        });
+        if (
+          !mountedRef.current ||
+          generation !== contextGenerationRef.current ||
+          actionSeq !== actionSeqRef.current ||
+          editVersionAtStart !== editVersionRef.current
+        ) {
+          return false;
+        }
+        const refreshed = await agentHubApi.inspectUserInstructionWorkspace(requestContext);
+        if (
+          !mountedRef.current ||
+          generation !== contextGenerationRef.current ||
+          actionSeq !== actionSeqRef.current
+        ) {
+          return false;
+        }
+        setWorkspace(refreshed);
+        const { path, text } = originalFromWorkspace(refreshed, agent);
+        const hydrated = refreshed.canonical?.blocks?.map(dtoToDraft) ?? null;
+        const clean = initialThreePaneFromDisk(path, text, hydrated, agent);
+        const liveState = stateRef.current;
+        const nextSourceDrift =
+          liveState.sourceDrift ||
+          ws.inventorySnapshotHash !== refreshed.inventorySnapshotHash;
+        draftLeaseRef.current = {
+          contextKey: contextKeyRef.current,
+          baseRevisionId: refreshed.canonical?.headRevisionId ?? null,
+          inventorySnapshotHash: refreshed.inventorySnapshotHash,
+          originalPath: nextSourceDrift ? liveState.originalPath : path,
+          originalText: nextSourceDrift ? liveState.originalText : text,
+        };
+        observedInventorySnapshotHashRef.current = refreshed.inventorySnapshotHash;
+        stateRef.current = {
+          ...clean,
+          originalPath: liveState.originalPath,
+          originalText: liveState.originalText,
+          originalDirty: liveState.originalDirty,
+          sourceDrift: nextSourceDrift,
+          externalDrift: false,
+        };
+        setState(stateRef.current);
+        // 关闭抽屉，保留 busy 由 finally 释放。
+        slotHistoryAbortRef.current.cancelled = true;
+        slotHistoryLoadSeqRef.current += 1;
+        setSlotHistoryOpen(false);
+        setSlotHistorySlot(null);
+        setSlotHistoryVersions([]);
+        setSlotHistoryLoading(false);
+        setSlotHistoryError(null);
+        return true;
+      } catch (reason) {
+        if (
+          !mountedRef.current ||
+          generation !== contextGenerationRef.current ||
+          actionSeq !== actionSeqRef.current
+        ) {
+          return false;
+        }
+        const code = errorCode(reason);
+        if (code === 'USER_INSTRUCTION_REVISION_CHANGED') {
+          const drifted = { ...stateRef.current, externalDrift: true };
+          stateRef.current = drifted;
+          setState(drifted);
+        }
+        setSlotHistoryActionError(
+          code === PEER_CONTEXT_UNAVAILABLE
+            ? PEER_CONTEXT_UNAVAILABLE
+            : code === PROJECT_CONTEXT_UNAVAILABLE
+              ? PROJECT_CONTEXT_UNAVAILABLE
+              : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
+                ? t('agentHub:userInstructions.errors.backendUnavailable')
+                : code === 'USER_INSTRUCTION_REVISION_NOT_FOUND'
+                  ? t('agentHub:userInstructions.errors.slotVersionNotFound')
+                  : code === 'USER_INSTRUCTION_REVISION_CHANGED'
+                    ? t('agentHub:userInstructions.errors.previewStale')
+                    : reason instanceof Error
+                      ? reason.message
+                      : String(reason),
+        );
+        return false;
+      } finally {
+        if (mountedRef.current && actionSeq === actionSeqRef.current) {
+          setRestoringSlotVersionId(null);
+        }
+      }
+    },
+    [busyAction, workspace, slotHistorySlot, agent, requestContext, t],
+  );
 
   /**
    * Business Logic: 从 inspect 填充 ③，块/预览保持空（除非 apply 后 auto re-parse）。
@@ -1451,5 +1703,16 @@ export function useInstructionThreePaneController(
     cancelDualDirty,
     dismissApplyResult,
     discardDraftForContextChange,
+    slotHistoryOpen,
+    slotHistorySlot,
+    slotHistoryVersions,
+    slotHistoryLoading,
+    slotHistoryError,
+    restoringSlotVersionId,
+    slotHistoryActionError,
+    openSlotHistory,
+    closeSlotHistory,
+    copySlotVersion,
+    restoreSlotVersion,
   };
 }

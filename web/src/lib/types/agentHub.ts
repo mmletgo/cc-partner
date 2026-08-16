@@ -420,6 +420,42 @@ export interface InstructionBlockDto {
 }
 
 /**
+ * 三槽历史快照的逻辑槽位标识（与后端 `InstructionSlotKey` 1:1）。
+ *
+ * Business Logic: 公共槽不分 agent；适配/独有槽按 lane × agent 各 1 个
+ *   item_id；前端用此打开历史抽屉、定位 `content_versions.item_id`。
+ *
+ * Code Logic: discriminated union（tag = `kind`）；adapted/targetOnly 携带 agent；
+ *   与后端 serde tag 对齐，wire 直接通过 camelCase 解析。
+ */
+export type InstructionSlotKey =
+  | { kind: 'shared' }
+  | { kind: 'adapted'; agent: AgentTarget }
+  | { kind: 'targetOnly'; agent: AgentTarget };
+
+/**
+ * 三槽历史列表请求 / 恢复请求。
+ *
+ * Business Logic: 前端按 lane × agent 打开历史抽屉与恢复版本时统一传入；
+ *   `inventorySnapshotHash` 与 `baseRevisionId` 与 `saveBlocks` 同口径 CAS。
+ *
+ * Code Logic: 与后端 Rust request DTO 字段顺序 + 命名一致；恢复请求
+ *   `baseRevisionId` 可空（首版 canonical head 为 null）。
+ */
+export interface ListUserInstructionSlotVersionsRequest {
+  assetId: string;
+  slot: InstructionSlotKey;
+}
+
+export interface RestoreUserInstructionSlotRequest {
+  assetId: string;
+  slot: InstructionSlotKey;
+  versionId: string;
+  baseRevisionId: string | null;
+  inventorySnapshotHash: string;
+}
+
+/**
  * 资产冲突摘要。
  *
  * Business Logic: 冲突抽屉按 conflictId 展示并可 resolve。

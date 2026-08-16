@@ -17,7 +17,7 @@ import { CopyIcon, SyncIcon, XIcon } from '@/lib/icons';
 import type { ContentVersion } from '@/lib/types';
 import styles from './VersionHistoryDrawer.module.css';
 
-export type VersionHistoryNamespace = 'prompts' | 'scratchpad';
+export type VersionHistoryNamespace = 'prompts' | 'scratchpad' | 'agentHub';
 
 export interface VersionHistoryDrawerProps {
   open: boolean;

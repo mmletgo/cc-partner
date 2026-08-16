@@ -35,7 +35,7 @@ fn now_iso() -> String {
 ///
 /// Business Logic: 版本历史抽屉需要 id/来源设备/hash/时间/kind 与可选标题/预览/全文。
 /// Code Logic: 从 ContentVersion + snapshot_json 投影；不回传 domain/item_id。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentVersionDto {
     pub id: String,

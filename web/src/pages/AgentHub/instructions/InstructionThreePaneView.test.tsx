@@ -79,6 +79,10 @@ const labels: InstructionThreePaneViewLabels = {
   analyzeConfirmTitle: 'Analyze and overwrite?',
   analyzeConfirmDescription: 'Overwrite slots with split parts.',
   analyzeConfirm: 'Start analyze',
+  slotHistoryCommon: 'Common slot history',
+  slotHistoryAdapted: 'Adapted slot history',
+  slotHistoryTargetOnly: 'Exclusive slot history',
+  slotHistoryCopied: 'Copied to clipboard',
 };
 
 const SAMPLE = `## Shared
@@ -135,6 +139,16 @@ function buildProps(
     onCancelDualDirty: vi.fn(),
     onConfirmAnalyze: vi.fn(),
     onCancelAnalyze: vi.fn(),
+    slotHistoryOpen: false,
+    slotHistoryLoading: false,
+    slotHistoryError: null,
+    slotHistoryActionError: null,
+    restoringSlotVersionId: null,
+    slotHistoryVersions: [],
+    onOpenSlotHistory: vi.fn(),
+    onCloseSlotHistory: vi.fn(),
+    onCopySlotVersion: vi.fn(),
+    onRestoreSlotVersion: vi.fn(),
     ...overrides,
   };
 }

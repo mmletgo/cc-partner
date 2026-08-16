@@ -12,10 +12,11 @@
 
 import { useEffect, useRef, type JSX, type RefObject } from 'react';
 import { Button, Dialog, StatusMessage } from '@/components/primitives';
-import { SparkleIcon } from '@/lib/icons';
+import { SparkleIcon, HistoryIcon } from '@/lib/icons';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { InstructionLane } from '../context/agentHubContext';
 import { AiReviseInstructionDialog } from './AiReviseInstructionDialog';
+import { VersionHistoryDrawer } from '@/components/domain/VersionHistoryDrawer';
 import {
   findBlockByMode,
   resolveAdaptedSlotText,
@@ -78,6 +79,12 @@ export interface InstructionThreePaneViewLabels {
   analyzeConfirmTitle: string;
   analyzeConfirmDescription: string;
   analyzeConfirm: string;
+  /** 按 lane 打开当前槽历史抽屉的按钮文案。 */
+  slotHistoryCommon: string;
+  slotHistoryAdapted: string;
+  slotHistoryTargetOnly: string;
+  /** 抽屉内的复制成功反馈（与 VersionHistoryDrawer 共享命名空间对齐）。 */
+  slotHistoryCopied: string;
 }
 
 export interface InstructionThreePaneViewProps {
@@ -130,6 +137,17 @@ export interface InstructionThreePaneViewProps {
   onCancelDualDirty: () => void;
   onConfirmAnalyze: () => void;
   onCancelAnalyze: () => void;
+  /** 三槽历史抽屉状态机。 */
+  slotHistoryOpen: boolean;
+  slotHistoryLoading: boolean;
+  slotHistoryError: string | null;
+  slotHistoryActionError: string | null;
+  restoringSlotVersionId: string | null;
+  slotHistoryVersions: import('@/lib/types/core').ContentVersion[];
+  onOpenSlotHistory: () => void;
+  onCloseSlotHistory: () => void;
+  onCopySlotVersion: (version: import('@/lib/types/core').ContentVersion) => void;
+  onRestoreSlotVersion: (version: import('@/lib/types/core').ContentVersion) => void;
 }
 
 function slotHint(
@@ -166,6 +184,7 @@ function InstructionChrome(props: {
   showAdaptToOthers: boolean;
   showWriteToNative: boolean;
   aiReviseDisabled: boolean;
+  instructionLane: InstructionLane;
   onRetry: () => void;
   onDiscardAndReload: () => void;
   onSaveBlocks: () => void;
@@ -174,6 +193,7 @@ function InstructionChrome(props: {
   onRequestSync: () => void;
   onChooseBaseline: (baseline: 'blocks' | 'original') => void;
   onCancelDualDirty: () => void;
+  onOpenSlotHistory: () => void;
 }): JSX.Element {
   const {
     labels,
@@ -190,6 +210,7 @@ function InstructionChrome(props: {
     showAdaptToOthers,
     showWriteToNative,
     aiReviseDisabled,
+    instructionLane,
     onRetry,
     onDiscardAndReload,
     onSaveBlocks,
@@ -198,7 +219,37 @@ function InstructionChrome(props: {
     onRequestSync,
     onChooseBaseline,
     onCancelDualDirty,
+    onOpenSlotHistory,
   } = props;
+
+  /**
+   * Business Logic: 按当前 lane 决定显示哪个槽的历史按钮（per-slot 隔离）。
+   * Code Logic: shared/adapted/exclusive 三档互斥，none lane 不显示。
+   */
+  const slotHistoryLabel: string | null = (() => {
+    switch (instructionLane) {
+      case 'common':
+        return labels.slotHistoryCommon;
+      case 'adapted':
+        return labels.slotHistoryAdapted;
+      case 'exclusive':
+        return labels.slotHistoryTargetOnly;
+      default:
+        return null;
+    }
+  })();
+  const slotHistoryTestId = (() => {
+    switch (instructionLane) {
+      case 'common':
+        return 'instruction-slot-history-shared';
+      case 'adapted':
+        return 'instruction-slot-history-adapted';
+      case 'exclusive':
+        return 'instruction-slot-history-targetOnly';
+      default:
+        return null;
+    }
+  })();
 
   return (
     <>
@@ -235,6 +286,18 @@ function InstructionChrome(props: {
           >
             {labels.aiRevise}
           </Button>
+          {slotHistoryLabel && slotHistoryTestId ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<HistoryIcon />}
+              disabled={actionBusy}
+              onClick={onOpenSlotHistory}
+              data-testid={slotHistoryTestId}
+            >
+              {slotHistoryLabel}
+            </Button>
+          ) : null}
           {showWriteToNative ? (
             <Button
               variant="secondary"
@@ -596,6 +659,16 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     onCancelDualDirty,
     onConfirmAnalyze,
     onCancelAnalyze,
+    slotHistoryOpen,
+    slotHistoryLoading,
+    slotHistoryError,
+    slotHistoryActionError,
+    restoringSlotVersionId,
+    slotHistoryVersions,
+    onOpenSlotHistory,
+    onCloseSlotHistory,
+    onCopySlotVersion,
+    onRestoreSlotVersion,
   } = props;
   const slotTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -665,6 +738,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         showAdaptToOthers={showAdaptToOthers}
         showWriteToNative={showWriteToNative}
         aiReviseDisabled={aiReviseDisabled}
+        instructionLane={instructionLane}
         onRetry={onRetry}
         onDiscardAndReload={onDiscardAndReload}
         onSaveBlocks={onSaveBlocks}
@@ -673,6 +747,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
         onRequestSync={onRequestSync}
         onChooseBaseline={onChooseBaseline}
         onCancelDualDirty={onCancelDualDirty}
+        onOpenSlotHistory={onOpenSlotHistory}
       />
 
       {instructionLane !== 'exclusive' ? (
@@ -759,6 +834,27 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           </div>
         </div>
       </Dialog>
+
+      {slotHistoryActionError ? (
+        <StatusMessage
+          tone="danger"
+          data-testid="instruction-slot-history-action-error"
+        >
+          {slotHistoryActionError}
+        </StatusMessage>
+      ) : null}
+
+      <VersionHistoryDrawer
+        open={slotHistoryOpen}
+        onClose={onCloseSlotHistory}
+        versions={slotHistoryVersions}
+        loading={slotHistoryLoading}
+        error={slotHistoryError}
+        restoringVersionId={restoringSlotVersionId}
+        i18nNamespace="agentHub"
+        onRestore={onRestoreSlotVersion}
+        onCopy={onCopySlotVersion}
+      />
     </div>
   );
 }

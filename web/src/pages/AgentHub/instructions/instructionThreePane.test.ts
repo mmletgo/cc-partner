@@ -11,9 +11,11 @@ import {
   addBlock,
   appendAdaptedVariants,
   applyInstructionReviseResult,
+  extractSlotText,
   findInstructionTextChangeRange,
   replaceAdaptedVariants,
   replaceAnalyzedParts,
+  replaceSlotText,
   dtoToDraft,
   draftToDto,
   ensureModeBlock,
@@ -609,5 +611,54 @@ describe('update helpers (dirty flags)', () => {
     expect(state.blocks).toHaveLength(1);
     expect(state.blocksDirty).toBe(true);
     expect(state.previewText).toContain('one');
+  });
+});
+
+describe('extractSlotText / replaceSlotText (history drawer helpers)', () => {
+  /**
+   * Business Logic: shared slot 读取/写入都使用 commonMarkdown；写入后 preview 跟随重算。
+   * Code Logic: extractSlotText → shared.commonMarkdown；replaceSlotText → ensure shared → write common。
+   */
+  test('shared slot reads/writes commonMarkdown', () => {
+    let state = initialThreePaneFromDisk(null, '');
+    state = replaceSlotText(state, { kind: 'shared' }, 'shared-text', AGENT);
+    expect(extractSlotText(state, { kind: 'shared' })).toBe('shared-text');
+    expect(state.blocksDirty).toBe(true);
+    expect(state.previewText).toContain('shared-text');
+  });
+
+  /**
+   * Business Logic: adapted slot 按 (agent) variant 读写；缺失 variant 回落 common。
+   * Code Logic: 懒创建 adapted 块（确保存在），写入 variants[agent]，extract 返回该 variant。
+   */
+  test('adapted slot reads/writes variants[agent] with lazy create', () => {
+    let state = initialThreePaneFromDisk(null, '');
+    state = replaceSlotText(state, { kind: 'adapted', agent: 'claude' }, 'claude-only', 'claude');
+    expect(extractSlotText(state, { kind: 'adapted', agent: 'claude' })).toBe('claude-only');
+    expect(extractSlotText(state, { kind: 'adapted', agent: 'codex' })).toBe('');
+  });
+
+  /**
+   * Business Logic: targetOnly slot 按 (agent) variant 读写；缺失整个 block 返回空字符串。
+   * Code Logic: replaceSlotText 懒创建 targetOnly block，extract 返回该 agent variant。
+   */
+  test('targetOnly slot reads/writes variants[agent]', () => {
+    let state = initialThreePaneFromDisk(null, '');
+    state = replaceSlotText(state, { kind: 'targetOnly', agent: 'opencode' }, 'oc-only', 'opencode');
+    expect(extractSlotText(state, { kind: 'targetOnly', agent: 'opencode' })).toBe('oc-only');
+    expect(extractSlotText(state, { kind: 'targetOnly', agent: 'claude' })).toBe('');
+  });
+
+  /**
+   * Business Logic: replaceSlotText 写空串仍写入 history 候选；后续编辑可见同样的 dirty 状态。
+   * Code Logic: ensure + write commonMarkdown='' → previewText=空；state.blocksDirty=true。
+   */
+  test('empty replacement still marks dirty and clears slot', () => {
+    let state = initialThreePaneFromDisk(null, '');
+    state = replaceSlotText(state, { kind: 'shared' }, 'x', AGENT);
+    expect(state.blocksDirty).toBe(true);
+    state = replaceSlotText(state, { kind: 'shared' }, '', AGENT);
+    expect(extractSlotText(state, { kind: 'shared' })).toBe('');
+    expect(state.blocksDirty).toBe(true);
   });
 });

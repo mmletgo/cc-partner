@@ -411,6 +411,28 @@ impl AgentHubService {
         crate::agent_hub::user_instructions::save_user_instruction_blocks(state, req).await
     }
 
+    /// Business Logic: 三槽历史列表只读查询。
+    /// Code Logic: 委托 inventory 层 list_user_instruction_slot_versions。
+    pub async fn list_user_instruction_slot_versions(
+        state: &AppState,
+        asset_id: String,
+        slot: crate::agent_hub::user_instructions::InstructionSlotKey,
+    ) -> Result<Vec<crate::storage::content_version_repo::ContentVersion>, AppError> {
+        crate::agent_hub::user_instructions::list_user_instruction_slot_versions(
+            state, asset_id, slot,
+        )
+        .await
+    }
+
+    /// Business Logic: 三槽历史恢复 = 把目标版本正文替换当前槽，写一条新 head。
+    /// Code Logic: 委托 inventory 层 restore_user_instruction_slot_version（含 CAS + pre-restore baseline + commit）。
+    pub async fn restore_user_instruction_slot_version(
+        state: &AppState,
+        req: crate::agent_hub::user_instructions::RestoreUserInstructionSlotRequest,
+    ) -> Result<crate::agent_hub::user_instructions::UserInstructionCanonicalDto, AppError> {
+        crate::agent_hub::user_instructions::restore_user_instruction_slot_version(state, req).await
+    }
+
     /// Business Logic: 首屏 status。
     /// Code Logic: config + owner/writeCompatible + probes + counts。
     pub async fn get_status(state: &AppState) -> Result<AgentHubStatusDto, AppError> {
