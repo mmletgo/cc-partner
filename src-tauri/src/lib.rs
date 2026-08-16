@@ -11,6 +11,7 @@
 //!     setup 闭包内：load config → 建 SqlitePool（WAL + 手动建表）→ 构造 AppState → manage。
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
+pub mod agent_catalog;
 pub mod agent_cli;
 pub mod agent_hub;
 mod attention;

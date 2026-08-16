@@ -788,11 +788,7 @@ mod tests {
     fn sample_probe(target: AgentTarget) -> TargetProbe {
         TargetProbe {
             target,
-            executable: Some(PathBuf::from(match target {
-                AgentTarget::Claude => "/usr/bin/claude",
-                AgentTarget::Codex => "/usr/bin/codex",
-                AgentTarget::OpenCode => "/usr/bin/opencode",
-            })),
+            executable: Some(PathBuf::from(format!("/usr/bin/{}", target.executable_name()))),
             version: Some("1.0.0".into()),
             config_root: PathBuf::from("/tmp/cfg"),
             support: AdapterSupportLevel::Supported,

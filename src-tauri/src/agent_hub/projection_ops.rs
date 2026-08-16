@@ -524,6 +524,8 @@ async fn resolve_target_path(
                 AgentTarget::Claude => homes.claude.config_root,
                 AgentTarget::Codex => homes.codex.config_root,
                 AgentTarget::OpenCode => homes.opencode.config_root,
+                AgentTarget::Grok => homes.grok.config_root.join("rules"),
+                AgentTarget::Gemini => homes.gemini.config_root,
             };
             Ok(root.join(file_name))
         }
@@ -627,6 +629,8 @@ fn instruction_file_name(target: AgentTarget) -> &'static str {
         AgentTarget::Claude => "CLAUDE.md",
         AgentTarget::Codex => "AGENTS.override.md",
         AgentTarget::OpenCode => "AGENTS.md",
+        AgentTarget::Grok => "cc-partner.exclusive.md",
+        AgentTarget::Gemini => "GEMINI.md",
     }
 }
 
@@ -831,6 +835,20 @@ fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> Tar
                 support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
                 fingerprint: String::new(),
             }),
+        AgentTarget::Grok | AgentTarget::Gemini => {
+            crate::agent_hub::targets::probe_target(target, env).unwrap_or(TargetProbe {
+                target,
+                executable: None,
+                version: None,
+                config_root: if target == AgentTarget::Grok {
+                    homes.grok.config_root
+                } else {
+                    homes.gemini.config_root
+                },
+                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+                fingerprint: String::new(),
+            })
+        }
     }
 }
 

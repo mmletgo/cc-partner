@@ -24,6 +24,10 @@ pub const SOURCE_CLAUDE: &str = "claude";
 pub const SOURCE_CODEX: &str = "codex";
 /// Prompt 历史来源：OpenCode。
 pub const SOURCE_OPENCODE: &str = "opencode";
+/// Prompt 历史来源：Grok Build。
+pub const SOURCE_GROK: &str = "grok";
+/// Prompt 历史来源：Gemini CLI。
+pub const SOURCE_GEMINI: &str = "gemini";
 
 /// 缺省 source（旧对端 / 旧备份 / 旧库行）。
 fn default_source_claude() -> String {

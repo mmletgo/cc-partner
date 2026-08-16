@@ -427,10 +427,10 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
     let path = item.source_path.as_deref()?;
     let bytes = std::fs::read(path).ok()?;
     let owned = match item.target {
-        AgentTarget::Codex => TomlConfigPatcher
+        AgentTarget::Codex | AgentTarget::Grok => TomlConfigPatcher
             .inspect(&bytes, &["mcp_servers".into(), item.native_id.clone()])
             .ok()?,
-        AgentTarget::Claude | AgentTarget::OpenCode => JsoncConfigPatcher
+        AgentTarget::Claude | AgentTarget::OpenCode | AgentTarget::Gemini => JsoncConfigPatcher
             .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
             .ok()?,
     };

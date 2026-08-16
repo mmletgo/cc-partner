@@ -66,6 +66,8 @@ impl TargetEnvironment {
             "OPENCODE_CONFIG_DIR",
             "OPENCODE_CONFIG",
             "XDG_CONFIG_HOME",
+            "GROK_HOME",
+            "GEMINI_HOME",
         ] {
             if let Ok(v) = env::var(key) {
                 if !v.trim().is_empty() {
@@ -116,13 +118,13 @@ pub struct OpenCodeHomePaths {
     pub config_file: PathBuf,
 }
 
-/// 三个 target 的解析结果。
+/// 全部 Hub target 的解析结果。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     probe / scan / materialization 需要一次解析出全部 home，避免分次漂移。
 ///
 /// Code Logic（这个结构体做什么）:
-///     聚合 claude / codex / opencode 路径。
+///     聚合 claude / codex / opencode / grok / gemini 路径。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetHomes {
@@ -132,6 +134,10 @@ pub struct TargetHomes {
     pub codex: TargetHomePaths,
     /// OpenCode 配置根与文件
     pub opencode: OpenCodeHomePaths,
+    /// Grok Build 配置根（默认 `~/.grok`）
+    pub grok: TargetHomePaths,
+    /// Gemini CLI 配置根（默认 `~/.gemini`）
+    pub gemini: TargetHomePaths,
 }
 
 /// 目标路径解析器。
@@ -160,6 +166,8 @@ impl TargetPathResolver {
             claude: resolve_claude_home(env),
             codex: resolve_codex_home(env),
             opencode: resolve_opencode_home(env),
+            grok: resolve_grok_home(env),
+            gemini: resolve_gemini_home(env),
         }
     }
 }
@@ -214,6 +222,57 @@ fn resolve_opencode_home(env: &TargetEnvironment) -> OpenCodeHomePaths {
     OpenCodeHomePaths {
         config_root,
         config_file,
+    }
+}
+
+/// 解析 Grok Build 配置根。
+///
+/// Business Logic: `GROK_HOME` 覆盖默认 `~/.grok`。
+/// Code Logic: 优先 env，否则 home/.grok；skills 在 config_root/skills。
+fn resolve_grok_home(env: &TargetEnvironment) -> TargetHomePaths {
+    let config_root = env
+        .var("GROK_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env.home.join(".grok"));
+    TargetHomePaths {
+        skill_compat_root: Some(config_root.join("skills")),
+        config_root,
+    }
+}
+
+/// 解析 Gemini CLI 配置根。
+///
+/// Business Logic: `GEMINI_HOME` 覆盖默认 `~/.gemini`。
+/// Code Logic: 优先 env，否则 home/.gemini。
+fn resolve_gemini_home(env: &TargetEnvironment) -> TargetHomePaths {
+    let config_root = env
+        .var("GEMINI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env.home.join(".gemini"));
+    TargetHomePaths {
+        skill_compat_root: Some(config_root.join("skills")),
+        config_root,
+    }
+}
+
+impl TargetHomes {
+    /// 用户级指令默认落点。
+    ///
+    /// Business Logic: Grok 公共槽不写 AGENTS.md；专属写入 rules。
+    /// Code Logic: 按 target 拼路径。
+    pub fn default_user_instruction_path(&self, target: crate::agent_hub::models::AgentTarget) -> PathBuf {
+        use crate::agent_hub::models::AgentTarget;
+        match target {
+            AgentTarget::Claude => self.claude.config_root.join("CLAUDE.md"),
+            AgentTarget::Codex => self.codex.config_root.join("AGENTS.md"),
+            AgentTarget::OpenCode => self.opencode.config_root.join("AGENTS.md"),
+            AgentTarget::Grok => self
+                .grok
+                .config_root
+                .join("rules")
+                .join("cc-partner.exclusive.md"),
+            AgentTarget::Gemini => self.gemini.config_root.join("GEMINI.md"),
+        }
     }
 }
 

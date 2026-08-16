@@ -10,6 +10,7 @@
  *   无 React、无 api。
  */
 
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 
 /** 五 Tab：提示词 + 四类 portable 资产。 */
@@ -66,7 +67,7 @@ export interface AgentHubDraftIdentity {
   agent: AgentTarget;
 }
 
-const AGENT_TARGETS = new Set<AgentTarget>(['claude', 'codex', 'opencode']);
+const AGENT_TARGETS = new Set<AgentTarget>(allHubTargets());
 const TABS = new Set<AgentHubTab>(['instructions', 'skill', 'command', 'mcp', 'plugin']);
 const LANES = new Set<InstructionLane>(['common', 'adapted', 'exclusive']);
 /** 旧 portable kind 可直接映射为 tab（不含 instructions）。 */

@@ -1264,11 +1264,7 @@ impl AgentHubRepo {
                 let bind_now = chrono::Utc::now().to_rfc3339();
                 if rows.is_empty() {
                     // 无既有 binding 时插入三目标 Absent，保证 scheduler 可见删除意图
-                    for t in [
-                        crate::agent_hub::models::AgentTarget::Claude,
-                        crate::agent_hub::models::AgentTarget::Codex,
-                        crate::agent_hub::models::AgentTarget::OpenCode,
-                    ] {
+                    for t in crate::agent_hub::models::AgentTarget::ALL {
                         let id = uuid::Uuid::new_v4().to_string();
                         sqlx::query(
                             "INSERT INTO agent_hub_target_bindings

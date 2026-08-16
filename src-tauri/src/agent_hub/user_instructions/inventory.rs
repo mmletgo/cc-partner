@@ -679,6 +679,14 @@ fn add_declared_candidates(
                 InstructionSourceRole::Fallback,
             ),
         ],
+        AgentTarget::Grok => vec![(
+            homes.grok.config_root.join("rules").join("cc-partner.exclusive.md"),
+            InstructionSourceRole::ManagedProjection,
+        )],
+        AgentTarget::Gemini => vec![(
+            homes.gemini.config_root.join("GEMINI.md"),
+            InstructionSourceRole::NativePrimary,
+        )],
     };
     let existing: BTreeSet<PathBuf> = scanned.iter().map(|source| source.path.clone()).collect();
     for (path, role) in candidates {
@@ -885,6 +893,7 @@ fn resolve_managed_target_path(
         AgentTarget::Claude => homes.claude.config_root.join("CLAUDE.md"),
         AgentTarget::Codex => homes.codex.config_root.join("AGENTS.md"),
         AgentTarget::OpenCode => homes.opencode.config_root.join("AGENTS.md"),
+        AgentTarget::Grok | AgentTarget::Gemini => homes.default_user_instruction_path(target),
     }
 }
 

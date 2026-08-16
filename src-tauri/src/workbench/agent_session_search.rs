@@ -44,18 +44,22 @@ pub enum AgentSessionSource {
     Claude,
     Codex,
     OpenCode,
+    Grok,
+    Gemini,
 }
 
 impl AgentSessionSource {
     /// 解析 wire/前端 source token。
     ///
-    /// Business Logic: UI tab 与 API 共用 `claude|codex|opencode`。
+    /// Business Logic: UI tab 与 API 共用 catalog sessionSource。
     /// Code Logic: 大小写不敏感；未知返回 None。
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "" | "claude" | "claude-code" | "claudecode" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "opencode" | "open-code" | "open_code" => Some(Self::OpenCode),
+            "grok" | "grok-build" | "grokbuild" => Some(Self::Grok),
+            "gemini" | "gemini-cli" | "geminicli" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -66,6 +70,8 @@ impl AgentSessionSource {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Grok => "grok",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -818,6 +824,290 @@ pub async fn preview_opencode_session(
 }
 
 // ---------------------------------------------------------------------------
+// Grok / Gemini catalog session search
+// ---------------------------------------------------------------------------
+
+/// 按身份目录 source 搜索（Grok 读 summary.json；Gemini 暂扫 chats 目录）。
+pub fn search_catalog_sessions(
+    source: AgentSessionSource,
+    worktree_path: &str,
+    query: &str,
+    limit: usize,
+) -> Result<SessionSearchResult, AppError> {
+    match source {
+        AgentSessionSource::Grok => search_grok_sessions(worktree_path, query, limit),
+        AgentSessionSource::Gemini => search_gemini_sessions(worktree_path, query, limit),
+        _ => Ok(SessionSearchResult {
+            items: Vec::new(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::unavailable(),
+        }),
+    }
+}
+
+/// 预览 catalog session。
+pub fn preview_catalog_session(
+    source: AgentSessionSource,
+    worktree_path: &str,
+    session_id: &str,
+) -> Result<SessionPreview, AppError> {
+    let result = search_catalog_sessions(source, worktree_path, "", 200)?;
+    let hit = result
+        .items
+        .into_iter()
+        .find(|h| h.session_id == session_id)
+        .ok_or_else(|| AppError::not_found("session 不存在"))?;
+    Ok(SessionPreview {
+        session_id: hit.session_id,
+        title: hit.title,
+        cwd: None,
+        git_branch: None,
+        first_activity_at: hit.first_activity_at,
+        last_activity_at: hit.last_activity_at,
+        message_count: hit.message_count,
+        recent_messages: Vec::new(),
+    })
+}
+
+fn grok_sessions_root() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("GROK_HOME") {
+        if !home.trim().is_empty() {
+            return Some(PathBuf::from(home).join("sessions"));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".grok").join("sessions"))
+}
+
+fn search_grok_sessions(
+    worktree_path: &str,
+    query: &str,
+    limit: usize,
+) -> Result<SessionSearchResult, AppError> {
+    let Some(root) = grok_sessions_root() else {
+        return Ok(SessionSearchResult {
+            items: Vec::new(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::unavailable(),
+        });
+    };
+    if !root.is_dir() {
+        return Ok(SessionSearchResult {
+            items: Vec::new(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::unavailable(),
+        });
+    }
+    let query_lower = query.trim().to_lowercase();
+    let mut hits = Vec::new();
+    let mut files_considered = 0u64;
+    let mut files_indexed = 0u64;
+    let groups = match fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(_) => {
+            return Ok(SessionSearchResult {
+                items: Vec::new(),
+                truncated: false,
+                diagnostics: SessionSearchDiagnostics::unavailable(),
+            });
+        }
+    };
+    for group in groups.flatten() {
+        let group_path = group.path();
+        if !group_path.is_dir() {
+            continue;
+        }
+        let sessions = match fs::read_dir(&group_path) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in sessions.flatten() {
+            let session_dir = entry.path();
+            let summary_path = session_dir.join("summary.json");
+            if !summary_path.is_file() {
+                continue;
+            }
+            files_considered += 1;
+            let Ok(text) = fs::read_to_string(&summary_path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let cwd = value
+                .pointer("/info/cwd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !cwd.is_empty() && !paths_match(cwd, worktree_path) {
+                continue;
+            }
+            files_indexed += 1;
+            let session_id = value
+                .pointer("/info/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if session_id.is_empty() {
+                continue;
+            }
+            let title = value
+                .get("generated_title")
+                .and_then(|v| v.as_str())
+                .or_else(|| value.get("session_summary").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            let last = value
+                .get("updated_at")
+                .or_else(|| value.get("last_active_at"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let first = value
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| last.clone());
+            let message_count = value
+                .get("num_chat_messages")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let title_hit = !query_lower.is_empty() && title.to_lowercase().contains(&query_lower);
+            let user_hit = title_hit;
+            if !query_lower.is_empty() && !title_hit {
+                continue;
+            }
+            hits.push(SessionSearchHit {
+                session_id,
+                title,
+                title_hit,
+                user_hit,
+                assistant_hit: false,
+                first_activity_at: first,
+                last_activity_at: last,
+                message_count,
+                preview_snippets: Vec::new(),
+            });
+        }
+    }
+    Ok(SessionSearchResult {
+        items: sort_and_limit(hits, limit),
+        truncated: files_considered > files_indexed,
+        diagnostics: SessionSearchDiagnostics {
+            status: "ok".into(),
+            reasons: Vec::new(),
+            files_considered,
+            files_indexed,
+            bytes_read: 0,
+        },
+    })
+}
+
+fn search_gemini_sessions(
+    worktree_path: &str,
+    query: &str,
+    limit: usize,
+) -> Result<SessionSearchResult, AppError> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(SessionSearchResult {
+            items: Vec::new(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::unavailable(),
+        });
+    };
+    let tmp = home.join(".gemini").join("tmp");
+    if !tmp.is_dir() {
+        return Ok(SessionSearchResult {
+            items: Vec::new(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::unavailable(),
+        });
+    }
+    let query_lower = query.trim().to_lowercase();
+    let mut hits = Vec::new();
+    let mut files_considered = 0u64;
+    let mut files_indexed = 0u64;
+    let projects = match fs::read_dir(&tmp) {
+        Ok(rd) => rd,
+        Err(_) => {
+            return Ok(SessionSearchResult {
+                items: Vec::new(),
+                truncated: false,
+                diagnostics: SessionSearchDiagnostics::unavailable(),
+            });
+        }
+    };
+    for project in projects.flatten() {
+        let chats = project.path().join("chats");
+        if !chats.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&chats) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            files_considered += 1;
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let cwd = value
+                .get("cwd")
+                .or_else(|| value.pointer("/session/cwd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !cwd.is_empty() && !paths_match(cwd, worktree_path) {
+                continue;
+            }
+            files_indexed += 1;
+            let session_id = value
+                .get("id")
+                .or_else(|| value.get("sessionId"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+                .to_string();
+            if session_id.is_empty() {
+                continue;
+            }
+            let title = value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&session_id)
+                .to_string();
+            if !query_lower.is_empty() && !title.to_lowercase().contains(&query_lower) {
+                continue;
+            }
+            hits.push(SessionSearchHit {
+                session_id,
+                title,
+                title_hit: !query_lower.is_empty(),
+                user_hit: false,
+                assistant_hit: false,
+                first_activity_at: String::new(),
+                last_activity_at: String::new(),
+                message_count: 0,
+                preview_snippets: Vec::new(),
+            });
+        }
+    }
+    Ok(SessionSearchResult {
+        items: sort_and_limit(hits, limit),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics {
+            status: "ok".into(),
+            reasons: Vec::new(),
+            files_considered,
+            files_indexed,
+            bytes_read: 0,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Resume 命令与 CLI 探测
 // ---------------------------------------------------------------------------
 
@@ -831,6 +1121,8 @@ pub fn build_resume_command(source: AgentSessionSource, session_id: &str) -> Str
         }
         AgentSessionSource::Codex => format!("codex resume {id}\n"),
         AgentSessionSource::OpenCode => format!("opencode --session {id}\n"),
+        AgentSessionSource::Grok => format!("grok --resume {id}\n"),
+        AgentSessionSource::Gemini => format!("gemini --resume {id}\n"),
     }
 }
 
@@ -840,6 +1132,8 @@ pub async fn check_agent_cli_available(source: AgentSessionSource) -> Result<(),
         AgentSessionSource::Claude => "claude",
         AgentSessionSource::Codex => "codex",
         AgentSessionSource::OpenCode => "opencode",
+        AgentSessionSource::Grok => "grok",
+        AgentSessionSource::Gemini => "gemini",
     };
     let mut child = Command::new(exe)
         .arg("--version")
@@ -880,7 +1174,15 @@ mod tests {
             AgentSessionSource::parse("openCode"),
             Some(AgentSessionSource::OpenCode)
         );
-        assert_eq!(AgentSessionSource::parse("gemini"), None);
+        assert_eq!(
+            AgentSessionSource::parse("gemini"),
+            Some(AgentSessionSource::Gemini)
+        );
+        assert_eq!(
+            AgentSessionSource::parse("grok"),
+            Some(AgentSessionSource::Grok)
+        );
+        assert_eq!(AgentSessionSource::parse("antigravity"), None);
     }
 
     #[test]

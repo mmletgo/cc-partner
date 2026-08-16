@@ -18,6 +18,8 @@ import type { TFunction } from 'i18next';
 import { workbenchApi } from '@/api/workbench';
 import { Button, Dialog } from '@/components/primitives';
 import { SearchIcon } from '@/lib/icons';
+import { allSessionSources } from '@/lib/agentCatalog';
+import type { SessionSearchSource } from '@/lib/agentCatalog';
 import type {
   SessionPreview,
   SessionSearchDiagnostics,
@@ -26,9 +28,9 @@ import type {
 import styles from './WorkbenchSessionSearch.module.css';
 
 /** Session Search 支持的 agent 源（与后端 wire token 对齐）。 */
-export type SessionSearchSource = 'claude' | 'codex' | 'opencode';
+export type { SessionSearchSource } from '@/lib/agentCatalog';
 
-const SESSION_SEARCH_SOURCES: SessionSearchSource[] = ['claude', 'codex', 'opencode'];
+const SESSION_SEARCH_SOURCES: SessionSearchSource[] = allSessionSources();
 
 export interface WorkbenchSessionSearchProps {
   /** 是否展开浮层 */

@@ -641,6 +641,18 @@ pub fn render_discovery_before_edit(
 先定向读取，再扩大搜索。\n"
             )
         }
+        AgentTarget::Grok => {
+            format!(
+                "## 分层发现（Grok Build）\n\n\
+处理本目录（`{relative_key}`）前：读取仓库 `AGENTS.md`/`CLAUDE.md`，再读取 `.grok/rules/`。\n"
+            )
+        }
+        AgentTarget::Gemini => {
+            format!(
+                "## 分层发现（Gemini CLI）\n\n\
+处理本目录（`{relative_key}`）前：读取本层与祖先 `GEMINI.md`。\n"
+            )
+        }
         AgentTarget::OpenCode => {
             format!(
                 "## 分层发现（OpenCode）\n\n\
@@ -734,6 +746,8 @@ pub fn compile_render(
         AgentTarget::Claude => "CLAUDE.md",
         AgentTarget::Codex => "AGENTS.override.md",
         AgentTarget::OpenCode => "AGENTS.md",
+        AgentTarget::Grok => "cc-partner.exclusive.md",
+        AgentTarget::Gemini => "GEMINI.md",
     }
     .to_string();
 

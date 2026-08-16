@@ -40,6 +40,7 @@ import {
   clearAgentLedgerResultDecoder,
 } from '@/lib/schemas/agentLedger';
 import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
+import type { SessionSearchSource } from '@/lib/agentCatalog';
 import type {
   ResumeClaudeSessionResult,
   SessionPreview,
@@ -633,7 +634,7 @@ export const workbenchApi = {
       projectId: string,
       worktreeId: string | null,
       query: string,
-      source: 'claude' | 'codex' | 'opencode' = 'claude',
+      source: SessionSearchSource = 'claude',
     ): Promise<SessionSearchResult> =>
       invokeDecoded(
         'search_claude_sessions',
@@ -651,7 +652,7 @@ export const workbenchApi = {
       projectId: string,
       worktreeId: string | null,
       sessionId: string,
-      source: 'claude' | 'codex' | 'opencode' = 'claude',
+      source: SessionSearchSource = 'claude',
     ) =>
       invoke<SessionPreview>('get_claude_session_preview', {
         projectId,
@@ -665,7 +666,7 @@ export const workbenchApi = {
       projectId: string,
       worktreeId: string | null,
       sessionId: string,
-      source: 'claude' | 'codex' | 'opencode' = 'claude',
+      source: SessionSearchSource = 'claude',
     ) =>
       invoke<ResumeClaudeSessionResult>('resume_claude_session', {
         projectId,

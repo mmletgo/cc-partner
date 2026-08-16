@@ -131,9 +131,11 @@ pub(crate) fn evaluate_current_portable_target_support(
 ) -> Result<EvaluatedTargetSupport, AppError> {
     let env = current_target_environment();
     let probe = match target {
-        AgentTarget::Claude => ClaudeInstructionAdapter.probe(&env),
-        AgentTarget::Codex => CodexInstructionAdapter.probe(&env),
-        AgentTarget::OpenCode => OpenCodeInstructionAdapter.probe(&env),
+        AgentTarget::Claude
+        | AgentTarget::Codex
+        | AgentTarget::OpenCode
+        | AgentTarget::Grok
+        | AgentTarget::Gemini => crate::agent_hub::targets::probe_target(target, &env),
     }?;
     evaluate_probe_support(target, &probe)
 }
@@ -533,6 +535,8 @@ fn target_dto_from_probe(
         AgentTarget::Claude => homes.claude.config_root.display().to_string(),
         AgentTarget::Codex => homes.codex.config_root.display().to_string(),
         AgentTarget::OpenCode => homes.opencode.config_root.display().to_string(),
+        AgentTarget::Grok => homes.grok.config_root.display().to_string(),
+        AgentTarget::Gemini => homes.gemini.config_root.display().to_string(),
     };
     let installed = probe.executable.is_some();
     let manifest = builtin_support_manifest()?;
@@ -895,6 +899,34 @@ fn plugin_roots_for(
         .flat_map(|base| direct_manifest_plugin_roots(&base, target))
         .map(PluginRootCandidate::path_only)
         .collect(),
+        (AgentTarget::Grok, ScopeKind::User) => direct_manifest_plugin_roots(
+            &homes.grok.config_root.join("plugins"),
+            target,
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
+        (AgentTarget::Gemini, ScopeKind::User) => direct_manifest_plugin_roots(
+            &homes.gemini.config_root.join("plugins"),
+            target,
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
+        (AgentTarget::Grok, _) => direct_manifest_plugin_roots(
+            &scope.absolute_path.join(".grok").join("plugins"),
+            target,
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
+        (AgentTarget::Gemini, _) => direct_manifest_plugin_roots(
+            &scope.absolute_path.join(".gemini").join("extensions"),
+            target,
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
     };
     roots.sort_by(|a, b| a.path.cmp(&b.path));
     roots.dedup_by(|a, b| a.path == b.path);
@@ -914,6 +946,12 @@ pub(crate) fn user_plugin_package_root_paths(
         AgentTarget::Codex => codex_user_plugin_roots(config_root),
         AgentTarget::OpenCode => {
             direct_manifest_plugin_roots(&config_root.join("plugins"), AgentTarget::OpenCode)
+                .into_iter()
+                .map(PluginRootCandidate::path_only)
+                .collect()
+        }
+        AgentTarget::Grok | AgentTarget::Gemini => {
+            direct_manifest_plugin_roots(&config_root.join("plugins"), target)
                 .into_iter()
                 .map(PluginRootCandidate::path_only)
                 .collect()
@@ -1098,6 +1136,7 @@ fn direct_manifest_plugin_roots(base: &Path, target: AgentTarget) -> Vec<PathBuf
         AgentTarget::Claude => ".claude-plugin/plugin.json",
         AgentTarget::Codex => ".codex-plugin/plugin.json",
         AgentTarget::OpenCode => "package.json",
+        AgentTarget::Grok | AgentTarget::Gemini => "plugin.json",
     };
     let Ok(read) = fs::read_dir(base) else {
         return Vec::new();

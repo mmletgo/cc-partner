@@ -93,6 +93,7 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
         AgentTarget::Claude => Box::new(ClaudeTargetExecutor),
         AgentTarget::Codex => Box::new(CodexTargetExecutor),
         AgentTarget::OpenCode => Box::new(OpenCodeTargetExecutor),
+        AgentTarget::Grok | AgentTarget::Gemini => Box::new(OpenCodeTargetExecutor),
     }
 }
 

@@ -817,6 +817,8 @@ async fn resolve_install_root(
             AgentTarget::Claude => project_path.join(".claude"),
             AgentTarget::Codex => project_path.join(".agents"),
             AgentTarget::OpenCode => project_path.join(".opencode"),
+            AgentTarget::Grok => project_path.join(".grok"),
+            AgentTarget::Gemini => project_path.join(".gemini"),
         });
     }
     Ok(match item.target {
@@ -833,6 +835,12 @@ async fn resolve_install_root(
                     .map(|p| PathBuf::from(p).join("opencode"))
                     .unwrap_or_else(|| env_home.join(".config").join("opencode"))
             }),
+        AgentTarget::Grok => std::env::var_os("GROK_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".grok")),
+        AgentTarget::Gemini => std::env::var_os("GEMINI_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".gemini")),
     })
 }
 
@@ -2731,8 +2739,9 @@ async fn install_payload_to_target(
                         resolve_claude_mcp_config_path()
                     }
                 }
-                AgentTarget::Codex => root.join("config.toml"),
+                AgentTarget::Codex | AgentTarget::Grok => root.join("config.toml"),
                 AgentTarget::OpenCode => resolve_opencode_mcp_config_path(&root),
+                AgentTarget::Gemini => root.join("settings.json"),
             };
             if let Ok(payload) = from_canonical_bytes(&bytes) {
                 if let PortableAssetPayload::Mcp(server) = payload {

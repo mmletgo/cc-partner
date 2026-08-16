@@ -114,6 +114,58 @@
         "L3-AGENT-HUB-B-CLI-001",
         "L3-AGENT-HUB-OPENCODE-RUNTIME-001"
       ]
+    },
+    {
+      "target": "grok",
+      "adapterSchemaVersion": 1,
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
+      "guardedMajor": 1,
+      "executableProbe": {
+        "commandNames": ["grok"],
+        "versionArgs": ["--version"],
+        "versionPrefix": null,
+        "versionSuffix": null,
+        "helpFingerprint": null
+      },
+      "activationCommandFingerprints": {},
+      "capabilities": {
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
+        "liveReload": "blocked"
+      },
+      "capabilityEvidenceIds": {},
+      "evidenceIds": []
+    },
+    {
+      "target": "gemini",
+      "adapterSchemaVersion": 1,
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
+      "guardedMajor": 0,
+      "executableProbe": {
+        "commandNames": ["gemini"],
+        "versionArgs": ["--version"],
+        "versionPrefix": null,
+        "versionSuffix": null,
+        "helpFingerprint": null
+      },
+      "activationCommandFingerprints": {},
+      "capabilities": {
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
+        "liveReload": "blocked"
+      },
+      "capabilityEvidenceIds": {},
+      "evidenceIds": []
     }
   ],
   "hookMappings": []

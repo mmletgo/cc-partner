@@ -1845,6 +1845,16 @@ pub(crate) async fn search_agent_sessions_for_state(
                 .map_err(|e| AppError::generic(format!("Codex session 扫描 join 失败: {e}")))
         }
         AgentSessionSource::OpenCode => search_opencode_sessions(&worktree.path, query, 50).await,
+        AgentSessionSource::Grok | AgentSessionSource::Gemini => {
+            let path = worktree.path.clone();
+            let q = query.to_string();
+            let src = source;
+            tokio::task::spawn_blocking(move || {
+                crate::workbench::agent_session_search::search_catalog_sessions(src, &path, &q, 50)
+            })
+            .await
+            .map_err(|e| AppError::generic(format!("session 扫描 join 失败: {e}")))?
+        }
     }
 }
 
@@ -1949,6 +1959,16 @@ pub(crate) async fn get_agent_session_preview_for_state(
                 .map_err(|e| AppError::generic(format!("Codex preview join 失败: {e}")))?
         }
         AgentSessionSource::OpenCode => preview_opencode_session(&worktree.path, session_id).await,
+        AgentSessionSource::Grok | AgentSessionSource::Gemini => {
+            let path = worktree.path.clone();
+            let sid = session_id.to_string();
+            let src = source;
+            tokio::task::spawn_blocking(move || {
+                crate::workbench::agent_session_search::preview_catalog_session(src, &path, &sid)
+            })
+            .await
+            .map_err(|e| AppError::generic(format!("session preview join 失败: {e}")))?
+        }
     }
 }
 
@@ -2096,7 +2116,10 @@ pub(crate) async fn resume_agent_session_for_state(
                 session_id.trim()
             )
         }
-        AgentSessionSource::Codex | AgentSessionSource::OpenCode => {
+        AgentSessionSource::Codex
+        | AgentSessionSource::OpenCode
+        | AgentSessionSource::Grok
+        | AgentSessionSource::Gemini => {
             check_agent_cli_available(source).await?;
             build_resume_command(source, session_id)
         }

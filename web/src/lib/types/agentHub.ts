@@ -15,7 +15,7 @@
  * Business Logic: 投影与适配必须区分三端路径与能力。
  * Code Logic: wire token 为 claude / codex / opencode。
  */
-export type AgentTarget = 'claude' | 'codex' | 'opencode';
+export type AgentTarget = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini';
 
 /**
  * 用户级指令 V2 设置阶段。

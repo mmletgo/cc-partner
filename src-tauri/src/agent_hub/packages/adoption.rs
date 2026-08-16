@@ -1358,11 +1358,7 @@ fn find_package_root(data_dir: &Path, target: AgentTarget, package_id: &str) -> 
 fn sample_probe(target: AgentTarget) -> TargetProbe {
     TargetProbe {
         target,
-        executable: Some(PathBuf::from(match target {
-            AgentTarget::Claude => "claude",
-            AgentTarget::Codex => "codex",
-            AgentTarget::OpenCode => "opencode",
-        })),
+        executable: Some(PathBuf::from(target.executable_name())),
         version: Some("1.0.0".into()),
         config_root: PathBuf::from("/tmp/agent-hub-adoption-probe"),
         support: AdapterSupportLevel::Supported,
@@ -1378,6 +1374,9 @@ fn activator_for(
         AgentTarget::Claude => Box::new(ClaudePackageActivator::new(runner)),
         AgentTarget::Codex => Box::new(CodexPackageActivator::new(runner)),
         AgentTarget::OpenCode => Box::new(OpenCodePackageActivator::new(runner)),
+        // Grok/Gemini marketplace 激活未认证：走 OpenCode NativeVerify 骨架会误写 opencode 路径。
+        // 此处仍返回 OpenCode activator 仅用于编译；build_plan 会被 support-manifest 挡成 scan-only。
+        AgentTarget::Grok | AgentTarget::Gemini => Box::new(OpenCodePackageActivator::new(runner)),
     }
 }
 
@@ -1434,12 +1433,22 @@ fn build_unblocked_plan(
             activation_required: false,
             target_binding_id: binding.id.clone(),
         },
+        AgentTarget::Grok | AgentTarget::Gemini => ActivationPlan {
+            target,
+            package_root: pkg.package_root.clone(),
+            plugin_selector: String::new(),
+            marketplace_name: String::new(),
+            desired_enabled: binding.desired_enabled,
+            desired_presence: binding.desired_presence,
+            commands: vec![],
+            steps: vec![ActivationStep::NativeVerify],
+            blocked: true,
+            blocked_reason: Some("activate_package_unsupported_target".into()),
+            activation_required: false,
+            target_binding_id: binding.id.clone(),
+        },
         AgentTarget::Claude | AgentTarget::Codex => {
-            let program = PathBuf::from(match target {
-                AgentTarget::Claude => "claude",
-                AgentTarget::Codex => "codex",
-                AgentTarget::OpenCode => "opencode",
-            });
+            let program = PathBuf::from(target.executable_name());
             let pkg_s = pkg.package_root.to_string_lossy().into_owned();
             let install_label = if target == AgentTarget::Claude {
                 "plugin_install"
@@ -1612,6 +1621,9 @@ fn post_activate_discovery_gate(
             {
                 return Err("post_activate_opencode_not_present".into());
             }
+        }
+        AgentTarget::Grok | AgentTarget::Gemini => {
+            return Err("post_activate_unsupported_target".into());
         }
         AgentTarget::Claude | AgentTarget::Codex => {
             // 执行 plugin list inspect
@@ -1804,6 +1816,20 @@ fn build_reverse_plan(
                 target_binding_id: binding.id.clone(),
             }
         }
+        AgentTarget::Grok | AgentTarget::Gemini => ActivationPlan {
+            target,
+            package_root: pkg.package_root.clone(),
+            plugin_selector: String::new(),
+            marketplace_name: String::new(),
+            desired_enabled: false,
+            desired_presence: binding.desired_presence,
+            commands: vec![],
+            steps: vec![ActivationStep::NativeVerify],
+            blocked: true,
+            blocked_reason: Some("deactivate_package_unsupported_target".into()),
+            activation_required: false,
+            target_binding_id: binding.id.clone(),
+        },
     }
 }
 

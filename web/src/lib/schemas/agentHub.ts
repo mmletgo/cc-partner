@@ -92,6 +92,8 @@ export const agentTargetDecoder: Decoder<AgentTarget> = enumDecoder('AgentTarget
   'claude',
   'codex',
   'opencode',
+  'grok',
+  'gemini',
 ] as const);
 
 /**

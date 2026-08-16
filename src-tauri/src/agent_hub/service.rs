@@ -1587,14 +1587,9 @@ fn probe_all_targets_best_effort() -> Vec<AgentHubProbeDto> {
             None
         }
     };
-    let adapters: [(&dyn AssetAdapter, AgentTarget); 3] = [
-        (&ClaudeInstructionAdapter, AgentTarget::Claude),
-        (&CodexInstructionAdapter, AgentTarget::Codex),
-        (&OpenCodeInstructionAdapter, AgentTarget::OpenCode),
-    ];
-    adapters
+    AgentTarget::ALL
         .into_iter()
-        .map(|(adapter, target)| match adapter.probe(&env) {
+        .map(|target| match crate::agent_hub::targets::probe_target(target, &env) {
             Ok(probe) => {
                 let support = if let Some(manifest) = manifest.as_ref() {
                     let snap = RuntimeProbeSnapshot {
@@ -3228,7 +3223,7 @@ mod tests {
     #[test]
     fn status_probe_uses_evaluate_target_support_not_raw_supported() {
         let probes = probe_all_targets_best_effort();
-        assert_eq!(probes.len(), 3);
+        assert_eq!(probes.len(), crate::agent_hub::models::AgentTarget::ALL.len());
         for p in probes {
             match p.target {
                 crate::agent_hub::models::AgentTarget::OpenCode => {
@@ -3244,7 +3239,9 @@ mod tests {
                     );
                 }
                 crate::agent_hub::models::AgentTarget::Claude
-                | crate::agent_hub::models::AgentTarget::Codex => {
+                | crate::agent_hub::models::AgentTarget::Codex
+                | crate::agent_hub::models::AgentTarget::Grok
+                | crate::agent_hub::models::AgentTarget::Gemini => {
                     assert!(
                         matches!(p.support.as_str(), "supported" | "scanOnly" | "unsupported"),
                         "unexpected support={} for {}",

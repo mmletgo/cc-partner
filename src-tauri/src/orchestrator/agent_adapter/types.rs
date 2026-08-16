@@ -6,7 +6,8 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     定义 `AgentProviderId`、`AgentCompletionContract`、`RunnerAttemptPolicy` 与解析/解析函数；
-//!     wire 值固定为 `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible`。
+//!     wire 值固定为
+//!     `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible`。
 
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -30,7 +31,7 @@ pub const DEFAULT_STALL_TIMEOUT_MS: i64 = 300_000;
 ///     workflow / attempt 快照 / adapter registry 必须共享同一组稳定 provider token，未知值 fail-closed。
 ///
 /// Code Logic（这个枚举做什么）:
-///     四种内置 provider；`as_str`/`parse` 与 wire 字面量双向转换。
+///     内置 provider；`as_str`/`parse` 与 wire 字面量双向转换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentProviderId {
@@ -42,6 +43,10 @@ pub enum AgentProviderId {
     GenericTerminal,
     /// 可见 OpenCode 终端 Runner（依赖 project runtime bridge）
     OpenCodeVisible,
+    /// 可见 Grok Build 终端 Runner
+    GrokBuildVisible,
+    /// 可见 Gemini CLI 终端 Runner
+    GeminiCliVisible,
 }
 
 impl AgentProviderId {
@@ -51,13 +56,15 @@ impl AgentProviderId {
     ///     SQLite / P2P / 前端 DTO 都依赖固定 camelCase token。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     映射枚举到 `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible`。
+    ///     映射枚举到稳定 camelCase token。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeCodeVisible => "claudeCodeVisible",
             Self::CodexVisible => "codexVisible",
             Self::GenericTerminal => "genericTerminal",
             Self::OpenCodeVisible => "openCodeVisible",
+            Self::GrokBuildVisible => "grokBuildVisible",
+            Self::GeminiCliVisible => "geminiCliVisible",
         }
     }
 
@@ -67,15 +74,17 @@ impl AgentProviderId {
     ///     WORKFLOW 与 task 覆盖不能静默回退到 Claude。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     trim 后精确匹配四个内置 token；否则返回带 token 的业务错误。
+    ///     trim 后精确匹配内置 token；否则返回带 token 的业务错误。
     pub fn parse(value: &str) -> Result<Self, AppError> {
         match value.trim() {
             "claudeCodeVisible" => Ok(Self::ClaudeCodeVisible),
             "codexVisible" => Ok(Self::CodexVisible),
             "genericTerminal" => Ok(Self::GenericTerminal),
             "openCodeVisible" => Ok(Self::OpenCodeVisible),
+            "grokBuildVisible" => Ok(Self::GrokBuildVisible),
+            "geminiCliVisible" => Ok(Self::GeminiCliVisible),
             other => Err(AppError::generic(format!(
-                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible）"
+                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible）"
             ))),
         }
     }
@@ -108,7 +117,9 @@ impl AgentProviderId {
             Self::ClaudeCodeVisible => AgentCompletionContract::SentinelLine,
             // 未安装 cc-partner OSC Hook 桥接前 Codex 不得默认 HookEvent。
             Self::CodexVisible => AgentCompletionContract::SentinelLine,
-            Self::GenericTerminal => AgentCompletionContract::Manual,
+            Self::GenericTerminal
+            | Self::GrokBuildVisible
+            | Self::GeminiCliVisible => AgentCompletionContract::Manual,
             Self::OpenCodeVisible => AgentCompletionContract::HookEvent,
         }
     }
@@ -359,6 +370,8 @@ mod tests {
             "codexVisible",
             "genericTerminal",
             "openCodeVisible",
+            "grokBuildVisible",
+            "geminiCliVisible",
         ] {
             let id = AgentProviderId::parse(value).unwrap();
             assert_eq!(id.as_str(), value);
@@ -369,11 +382,11 @@ mod tests {
     ///     未知 provider 必须 fail-closed，禁止静默 Claude。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     parse("gemini") 断言错误。
+    ///     parse("notAProvider") 断言错误。
     #[test]
     fn unknown_provider_fails_closed() {
-        let err = AgentProviderId::parse("gemini").unwrap_err();
-        assert!(err.to_string().contains("gemini"));
+        let err = AgentProviderId::parse("notAProvider").unwrap_err();
+        assert!(err.to_string().contains("notAProvider"));
     }
 
     /// Business Logic（为什么需要这个测试）:

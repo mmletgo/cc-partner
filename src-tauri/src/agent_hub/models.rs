@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// CLI 目标运行时。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     投影与适配必须区分 Claude / Codex / OpenCode 的路径与能力差异。
+///     投影与适配必须区分各 CLI 的路径与能力差异。
 ///
 /// Code Logic（这个枚举做什么）:
 ///     camelCase 序列化；OpenCode wire 为 `opencode`（与设计文档一致）。
@@ -28,18 +28,33 @@ pub enum AgentTarget {
     /// OpenCode CLI
     #[serde(rename = "opencode")]
     OpenCode,
+    /// Grok Build
+    Grok,
+    /// Gemini CLI
+    Gemini,
 }
 
 impl AgentTarget {
+    /// 全部 Hub target（与身份目录对齐）。
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::OpenCode,
+        Self::Grok,
+        Self::Gemini,
+    ];
+
     /// 稳定 wire/DB 字符串。
     ///
     /// Business Logic: 持久化与日志需要稳定 token。
-    /// Code Logic: 返回 `claude` / `codex` / `opencode`。
+    /// Code Logic: 返回 catalog wire。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Grok => "grok",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -52,7 +67,30 @@ impl AgentTarget {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::OpenCode),
+            "grok" => Some(Self::Grok),
+            "gemini" => Some(Self::Gemini),
             _ => None,
+        }
+    }
+
+    /// 默认 CLI 可执行名。
+    pub fn executable_name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Grok => "grok",
+            Self::Gemini => "gemini",
+        }
+    }
+
+    /// 用户级原生指令文件名（Grok 专属槽用 rules 文件）。
+    pub fn native_instruction_file_name(self) -> &'static str {
+        match self {
+            Self::Claude => "CLAUDE.md",
+            Self::Codex | Self::OpenCode => "AGENTS.md",
+            Self::Grok => "cc-partner.exclusive.md",
+            Self::Gemini => "GEMINI.md",
         }
     }
 }
@@ -1360,8 +1398,11 @@ impl TargetDisableStrategy {
     /// Code Logic: 静态表。
     pub fn for_target(target: AgentTarget) -> Self {
         match target {
-            AgentTarget::Codex => Self::RemoveWithBindingRetained,
-            AgentTarget::Claude | AgentTarget::OpenCode => Self::RemoveWithBindingRetained,
+            AgentTarget::Codex
+            | AgentTarget::Claude
+            | AgentTarget::OpenCode
+            | AgentTarget::Grok
+            | AgentTarget::Gemini => Self::RemoveWithBindingRetained,
         }
     }
 }

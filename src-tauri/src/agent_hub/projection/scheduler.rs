@@ -1132,11 +1132,7 @@ impl ProjectionScheduler {
             vars,
             path_entries,
         };
-        let probe = match target {
-            AgentTarget::Claude => ClaudeInstructionAdapter.probe(&env).ok(),
-            AgentTarget::Codex => CodexInstructionAdapter.probe(&env).ok(),
-            AgentTarget::OpenCode => OpenCodeInstructionAdapter.probe(&env).ok(),
-        };
+        let probe = crate::agent_hub::targets::probe_target(target, &env).ok();
         let probe = match probe {
             Some(p) => p,
             None => {

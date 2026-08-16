@@ -394,6 +394,40 @@ pub(crate) fn build_probe(
     }
 }
 
+/// 按 target 探测 CLI；Grok/Gemini 在独立 adapter 落地前走路径+可执行 stub。
+///
+/// Business Logic: 身份目录五 target 都必须能 probe，不能因缺 adapter 编不过。
+/// Code Logic: 三家委托现有 adapter；Grok/Gemini 解析 home 并 `build_probe`。
+pub fn probe_target(target: AgentTarget, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
+    match target {
+        AgentTarget::Claude => ClaudeInstructionAdapter.probe(env),
+        AgentTarget::Codex => CodexInstructionAdapter.probe(env),
+        AgentTarget::OpenCode => OpenCodeInstructionAdapter.probe(env),
+        AgentTarget::Grok => {
+            let homes = TargetPathResolver::resolve_all(env);
+            let executable = resolve_executable("grok", env);
+            let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+            Ok(build_probe(
+                AgentTarget::Grok,
+                executable,
+                version,
+                homes.grok.config_root,
+            ))
+        }
+        AgentTarget::Gemini => {
+            let homes = TargetPathResolver::resolve_all(env);
+            let executable = resolve_executable("gemini", env);
+            let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+            Ok(build_probe(
+                AgentTarget::Gemini,
+                executable,
+                version,
+                homes.gemini.config_root,
+            ))
+        }
+    }
+}
+
 /// 计算相对路径字符串（正斜杠）。
 ///
 /// Business Logic: OpenCode prelude 与诊断显示需要稳定相对路径。
