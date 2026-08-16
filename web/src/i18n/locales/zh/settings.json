@@ -198,7 +198,9 @@
       "claudeCodeVisible": "Claude（可见）",
       "codexVisible": "Codex（可见）",
       "genericTerminal": "通用终端",
-      "openCodeVisible": "OpenCode（可见）"
+      "openCodeVisible": "OpenCode（可见）",
+      "grokBuildVisible": "Grok Build（可见）",
+      "geminiCliVisible": "Gemini CLI（可见）"
     },
     "bridgeStatus": {
       "ready": "Bridge 就绪",

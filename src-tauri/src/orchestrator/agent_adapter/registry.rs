@@ -452,6 +452,14 @@ impl AgentAdapterRegistry {
             Arc::new(GenericTerminalAdapter::new(generic)),
         );
         adapters.insert(AgentProviderId::OpenCodeVisible, Arc::new(OpenCodeAdapter));
+        adapters.insert(
+            AgentProviderId::GrokBuildVisible,
+            Arc::new(super::grok_build::GrokBuildAdapter),
+        );
+        adapters.insert(
+            AgentProviderId::GeminiCliVisible,
+            Arc::new(super::gemini_cli::GeminiCliAdapter),
+        );
         Self {
             adapters,
             probe_cache: Mutex::new(HashMap::new()),
@@ -519,6 +527,8 @@ impl AgentAdapterRegistry {
             AgentProviderId::CodexVisible,
             AgentProviderId::GenericTerminal,
             AgentProviderId::OpenCodeVisible,
+            AgentProviderId::GrokBuildVisible,
+            AgentProviderId::GeminiCliVisible,
         ];
         order.into_iter().map(|id| self.probe_cached(id)).collect()
     }
@@ -571,6 +581,8 @@ mod tests {
             AgentProviderId::CodexVisible,
             AgentProviderId::GenericTerminal,
             AgentProviderId::OpenCodeVisible,
+            AgentProviderId::GrokBuildVisible,
+            AgentProviderId::GeminiCliVisible,
         ] {
             assert_eq!(reg.get(id).unwrap().provider_id(), id);
         }

@@ -4,4 +4,6 @@
 //! Code Logic: 各源独立 scan，共用 bulk_ingest 与 scan_state；失败只记日志不阻断其它源。
 
 pub mod codex;
+pub mod gemini;
+pub mod grok;
 pub mod opencode;

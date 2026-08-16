@@ -15,6 +15,8 @@
   "sourceClaude": "Claude Code",
   "sourceCodex": "Codex",
   "sourceOpenCode": "OpenCode",
+  "sourceGrok": "Grok Build",
+  "sourceGemini": "Gemini CLI",
   "projectSearchPlaceholder": "搜索项目…",
   "projectSearchAriaLabel": "搜索 Prompt 历史项目",
   "projectSearchCount": "匹配 {{count}} 个项目",

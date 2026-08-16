@@ -198,7 +198,9 @@
       "claudeCodeVisible": "Claude (visible)",
       "codexVisible": "Codex (visible)",
       "genericTerminal": "Generic terminal",
-      "openCodeVisible": "OpenCode (visible)"
+      "openCodeVisible": "OpenCode (visible)",
+      "grokBuildVisible": "Grok Build (visible)",
+      "geminiCliVisible": "Gemini CLI (visible)"
     },
     "bridgeStatus": {
       "ready": "Bridge ready",

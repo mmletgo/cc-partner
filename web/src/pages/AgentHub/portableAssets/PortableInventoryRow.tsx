@@ -12,6 +12,7 @@
 
 import type { JSX } from 'react';
 import { Button, Pill } from '@/components/primitives';
+import type { AgentTarget } from '@/lib/types/agentHub';
 import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
@@ -25,7 +26,7 @@ import {
 import styles from './PortableInventoryRow.module.css';
 
 export interface PortableInventoryRowLabels {
-  targets: Record<'claude' | 'codex' | 'opencode', string>;
+  targets: Partial<Record<AgentTarget, string>>;
   kinds: Record<'skill' | 'command' | 'plugin' | 'mcp', string>;
   actual: Record<PortableActualStateClass, string>;
   management: Record<PortableInventoryItemDto['managementState'], string>;

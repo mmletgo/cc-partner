@@ -296,6 +296,14 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
         Ok(n) => total += n,
         Err(e) => tracing::error!("OpenCode Prompt 扫描失败: {e}"),
     }
+    match crate::cc::sources::grok::scan(state).await {
+        Ok(n) => total += n,
+        Err(e) => tracing::error!("Grok Prompt 扫描失败: {e}"),
+    }
+    match crate::cc::sources::gemini::scan(state).await {
+        Ok(n) => total += n,
+        Err(e) => tracing::error!("Gemini Prompt 扫描失败: {e}"),
+    }
     Ok(total)
 }
 

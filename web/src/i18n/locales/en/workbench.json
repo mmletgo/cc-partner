@@ -1009,7 +1009,9 @@
     "claudeCodeVisible": "Claude",
     "codexVisible": "Codex",
     "genericTerminal": "Generic",
-    "openCodeVisible": "OpenCode"
+    "openCodeVisible": "OpenCode",
+    "grokBuildVisible": "Grok Build",
+    "geminiCliVisible": "Gemini CLI"
   },
   "openCodeBridge": {
     "title": "OpenCode runtime bridge",

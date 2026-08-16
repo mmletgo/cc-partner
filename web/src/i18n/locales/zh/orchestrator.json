@@ -335,6 +335,8 @@
     "claudeCodeVisible": "Claude",
     "codexVisible": "Codex",
     "genericTerminal": "通用终端",
-    "openCodeVisible": "OpenCode"
+    "openCodeVisible": "OpenCode",
+    "grokBuildVisible": "Grok Build",
+    "geminiCliVisible": "Gemini CLI"
   }
 }

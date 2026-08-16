@@ -28,6 +28,7 @@ import { Button, Card, Dialog, Input, StatusMessage } from '@/components/primiti
 import { CcHistoryCard } from '@/components/domain';
 import { ccHistoryApi } from '@/api/ccHistory';
 import { promptsApi } from '@/api/prompts';
+import { allHistorySources } from '@/lib/agentCatalog';
 import type { CcHistoryDevice, CcHistorySource, CcProject, CcHistoryItem } from '@/lib/types';
 import { SearchIcon, SyncIcon, TrashIcon, HistoryIcon } from '@/lib/icons';
 import { debounce, formatRelativeTime } from '@/lib/format';
@@ -38,6 +39,21 @@ import {
 import styles from './CcHistory.module.css';
 
 type LoadState = 'loading' | 'success' | 'error';
+
+const HISTORY_SOURCE_LABEL: Record<CcHistorySource, 'sourceClaude' | 'sourceCodex' | 'sourceOpenCode' | 'sourceGrok' | 'sourceGemini'> = {
+  claude: 'sourceClaude',
+  codex: 'sourceCodex',
+  opencode: 'sourceOpenCode',
+  grok: 'sourceGrok',
+  gemini: 'sourceGemini',
+};
+
+function historySourceLabel(
+  t: (key: string) => string,
+  source: CcHistorySource,
+): string {
+  return t(`ccHistory:${HISTORY_SOURCE_LABEL[source]}`);
+}
 
 /**
  * CcHistory 页面主组件
@@ -576,9 +592,11 @@ export function CcHistory() {
               aria-label={t('ccHistory:sourceFilterAriaLabel')}
             >
               <option value="">{t('ccHistory:sourceAll')}</option>
-              <option value="claude">{t('ccHistory:sourceClaude')}</option>
-              <option value="codex">{t('ccHistory:sourceCodex')}</option>
-              <option value="opencode">{t('ccHistory:sourceOpenCode')}</option>
+              {allHistorySources().map((source) => (
+                <option key={source} value={source}>
+                  {historySourceLabel(t, source)}
+                </option>
+              ))}
             </select>
             <span className={styles.selectArrow} aria-hidden="true">
               ▾

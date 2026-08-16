@@ -9,7 +9,9 @@
 
 pub mod claude_code;
 pub mod codex;
+pub mod gemini_cli;
 pub mod generic_terminal;
+pub mod grok_build;
 pub mod opencode;
 pub mod registry;
 pub mod types;
