@@ -24,6 +24,7 @@ import {
   PortablePullDrawer,
   type PortableInventoryViewLabels,
 } from './portableAssets';
+import { allHubTargets } from '@/lib/agentCatalog';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
 import {
@@ -198,11 +199,9 @@ export function AgentHubView(props: AgentHubViewProps) {
         unsupported: t('agentHub:portable.inventory.managementFilter.unsupported'),
         unmanaged: t('agentHub:portable.inventory.managementFilter.unmanaged'),
       },
-      targets: {
-        claude: t('agentHub:targets.claude'),
-        codex: t('agentHub:targets.codex'),
-        opencode: t('agentHub:targets.opencode'),
-      },
+      targets: Object.fromEntries(
+        allHubTargets().map((target) => [target, t(`agentHub:targets.${target}`)]),
+      ),
       kinds: {
         skill: t('agentHub:kinds.skill'),
         command: t('agentHub:kinds.command'),

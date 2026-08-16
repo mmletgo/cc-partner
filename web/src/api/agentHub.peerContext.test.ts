@@ -116,6 +116,8 @@ describe('agentHubApi peer context', () => {
           claude: 'managed',
           codex: 'unmanaged',
           opencode: 'unmanaged',
+          grok: 'unmanaged',
+          gemini: 'unmanaged',
         },
         baseRevisionId: null,
         inventorySnapshotHash: 'h1',

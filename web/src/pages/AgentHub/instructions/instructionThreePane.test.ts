@@ -376,6 +376,19 @@ describe('applyInstructionReviseResult', () => {
     expect(findBlockByMode(next.blocks, 'targetOnly')?.variants.claude).toBe('revised exclusive');
     expect(findBlockByMode(next.blocks, 'shared')).toBeNull();
   });
+
+  test('adapted lane overwrites every catalog hub target including grok and gemini', () => {
+    const state = initialThreePaneFromDisk('/p.md', 'orig', null, AGENT);
+    const next = applyInstructionReviseResult(state, 'adapted', AGENT, {
+      variants: { claude: 'c', grok: 'g', gemini: 'm' },
+    });
+    const variants = findBlockByMode(next.blocks, 'adapted')?.variants;
+    expect(variants?.claude).toBe('c');
+    expect(variants?.grok).toBe('g');
+    expect(variants?.gemini).toBe('m');
+    expect(variants?.codex ?? '').toBe('');
+    expect(variants?.opencode ?? '').toBe('');
+  });
 });
 
 describe('findInstructionTextChangeRange', () => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { Button, Dialog, Pill, StatusMessage } from '@/components/primitives';
 import { agentHubApi } from '@/api/agentHub';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { TFunction } from 'i18next';
 import {
@@ -17,7 +18,7 @@ export interface CrossAgentSyncDialogProps {
   onClose: () => void;
 }
 
-const ALL_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const ALL_TARGETS: AgentTarget[] = allHubTargets();
 
 /** 响应必须与本次源和目标集合完全一致，且永远不可 Apply。 */
 function previewMatchesRequest(

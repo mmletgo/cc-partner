@@ -20,6 +20,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { getRovingTabIndex, isRovingTabKey } from '@/lib/rovingTablist';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type {
   AgentHubContext,
@@ -33,7 +34,7 @@ import {
 } from '../context/agentHubContext';
 import styles from './AgentHubShell.module.css';
 
-const AGENTS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const AGENTS: AgentTarget[] = allHubTargets();
 const SCOPES: AgentHubScope[] = ['user', 'project'];
 const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'];
 const ASSET_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);

@@ -86,7 +86,7 @@ import { contentVersionDecoder } from './core';
 
 /**
  * Business Logic: target 三端枚举必须稳定。
- * Code Logic: claude | codex | opencode。
+ * Code Logic: 与 `allHubTargets()` 对齐的 wire token。
  */
 export const agentTargetDecoder: Decoder<AgentTarget> = enumDecoder('AgentTarget', [
   'claude',
@@ -120,6 +120,8 @@ const instructionBlockVariantsDecoder: Decoder<Partial<Record<AgentTarget, strin
     claude: optionalDecoder(stringDecoder),
     codex: optionalDecoder(stringDecoder),
     opencode: optionalDecoder(stringDecoder),
+    grok: optionalDecoder(stringDecoder),
+    gemini: optionalDecoder(stringDecoder),
   });
 
 /**
@@ -357,6 +359,8 @@ const userInstructionTargetExtensionsDecoder: Decoder<
   claude: optionalDecoder(stringDecoder),
   codex: optionalDecoder(stringDecoder),
   opencode: optionalDecoder(stringDecoder),
+  grok: optionalDecoder(stringDecoder),
+  gemini: optionalDecoder(stringDecoder),
 });
 
 /** User Instruction canonical decoder。 */

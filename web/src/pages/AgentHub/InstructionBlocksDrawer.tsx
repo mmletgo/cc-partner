@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Drawer, Pill, StatusMessage } from '@/components/primitives';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type {
   AgentHubAssetDetail,
   AgentTarget,
@@ -30,7 +31,7 @@ import {
 } from './instructions/instructionThreePane';
 import styles from './AgentHub.module.css';
 
-const TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const TARGETS: AgentTarget[] = allHubTargets();
 const SLOTS: Array<{
   mode: InstructionBlockMode;
   lane: 'common' | 'adapted' | 'exclusive';

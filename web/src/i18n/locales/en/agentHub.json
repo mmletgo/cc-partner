@@ -1,6 +1,6 @@
 {
   "title": "Agent Hub",
-  "subtitle": "Manage multi-CLI instructions and portable assets for Claude, Codex, and OpenCode from one workspace.",
+  "subtitle": "Manage multi-CLI instructions and portable assets for Claude, Codex, OpenCode, Grok Build, and Gemini CLI from one workspace.",
   "versionHistory": "Version history",
   "versionHistoryEmpty": "No version history yet",
   "versionHistoryLoadFailed": "Failed to load version history: {{error}}",
@@ -117,7 +117,7 @@
       "aiReviseTitle": "AI-assisted prompt edit",
       "aiReviseDescriptionCommon": "Claude will revise the shared slot from your direction and save it to Agent Hub Canonical. Native agent files are not written.",
       "aiReviseDescriptionExclusive": "Only the current agent’s exclusive slot is revised and saved to Canonical. The native file is not written.",
-      "aiReviseDescriptionAdapted": "The same direction overwrites adapted slots for claude, codex, and opencode (empty slots are generated too), then saves Canonical.",
+      "aiReviseDescriptionAdapted": "The same direction overwrites adapted slots for every agent (empty slots are generated too), then saves Canonical.",
       "aiReviseDirectionLabel": "Revision direction",
       "aiReviseDirectionPlaceholder": "e.g. make it shorter, add acceptance criteria, drop outdated model names…",
       "aiReviseConfirm": "Revise and save",
@@ -182,13 +182,17 @@
         "common": "Shared instructions",
         "claude": "Claude extension",
         "codex": "Codex extension",
-        "opencode": "OpenCode extension"
+        "opencode": "OpenCode extension",
+        "grok": "Grok Build extension",
+        "gemini": "Gemini CLI extension"
       },
       "placeholders": {
         "common": "Instructions every managed agent should follow…",
         "claude": "Extra instructions only Claude needs…",
         "codex": "Extra instructions only Codex needs…",
-        "opencode": "Extra instructions only OpenCode needs…"
+        "opencode": "Extra instructions only OpenCode needs…",
+        "grok": "Extra instructions only Grok Build needs…",
+        "gemini": "Extra instructions only Gemini CLI needs…"
       }
     },
     "target": {
@@ -325,7 +329,9 @@
   "targets": {
     "claude": "Claude",
     "codex": "Codex",
-    "opencode": "OpenCode"
+    "opencode": "OpenCode",
+    "grok": "Grok Build",
+    "gemini": "Gemini CLI"
   },
   "kinds": {
     "instruction": "Instruction",
@@ -601,7 +607,9 @@
         "all": "All targets",
         "claude": "Claude",
         "codex": "Codex",
-        "opencode": "OpenCode"
+        "opencode": "OpenCode",
+        "grok": "Grok Build",
+        "gemini": "Gemini CLI"
       },
       "scopeFilter": {
         "all": "All scopes",
@@ -775,12 +783,16 @@
     "targets": {
       "claude": "Claude",
       "codex": "Codex",
-      "opencode": "OpenCode"
+      "opencode": "OpenCode",
+      "grok": "Grok Build",
+      "gemini": "Gemini CLI"
     },
     "destination": {
       "sameAsClaude": "Destination: Claude (same agent)",
       "sameAsCodex": "Destination: Codex (same agent)",
-      "sameAsOpenCode": "Destination: OpenCode (same agent)"
+      "sameAsOpenCode": "Destination: OpenCode (same agent)",
+      "sameAsGrok": "Destination: Grok Build (same agent)",
+      "sameAsGemini": "Destination: Gemini CLI (same agent)"
     },
     "policy": {
       "skipExisting": "Skip existing",

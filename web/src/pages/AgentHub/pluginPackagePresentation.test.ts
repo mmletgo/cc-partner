@@ -137,9 +137,17 @@ describe('pluginPackagePresentation', () => {
     const report = mixedReport();
     for (const component of report.components) {
       const ordered = orderedComponentTargets(component);
-      expect(ordered.map((o) => o.target)).toEqual(['claude', 'codex', 'opencode']);
-      expect(ordered.every((o) => o.cell != null)).toBe(true);
-      expect(new Set(ordered.map((o) => o.cell!.status)).size).toBeGreaterThan(1);
+      expect(ordered.map((o) => o.target)).toEqual([
+        'claude',
+        'codex',
+        'opencode',
+        'grok',
+        'gemini',
+      ]);
+      expect(ordered.filter((o) => o.cell != null)).toHaveLength(3);
+      expect(
+        new Set(ordered.filter((o) => o.cell != null).map((o) => o.cell!.status)).size,
+      ).toBeGreaterThan(1);
     }
   });
 

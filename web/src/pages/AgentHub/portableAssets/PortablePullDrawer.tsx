@@ -13,6 +13,7 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Drawer, Input, Pill, StatusMessage } from '@/components/primitives';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { Device } from '@/lib/types';
 import type {
@@ -83,7 +84,7 @@ const STATE_OPTIONS: Array<PortablePullFilters['actualState']> = [
   'disabled',
   'problem',
 ];
-const TARGET_OPTIONS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const TARGET_OPTIONS: AgentTarget[] = allHubTargets();
 
 /**
  * Business Logic: pure same-agent Pull drawer。

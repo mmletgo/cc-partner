@@ -9,6 +9,7 @@
  *   导出 cell 查找、聚合标签、动作可用性与 partial 原因列表。
  */
 
+import { allHubTargets } from '@/lib/agentCatalog';
 import type {
   AgentHubAssetSummary,
   AgentHubTargetCell,
@@ -17,7 +18,7 @@ import type {
   MaterializationStatus,
 } from '@/lib/types/agentHub';
 
-export const AGENT_TARGET_ORDER: AgentTarget[] = ['claude', 'codex', 'opencode'];
+export const AGENT_TARGET_ORDER: AgentTarget[] = allHubTargets();
 
 export const AGGREGATE_STATUSES: AssetAggregateStatus[] = [
   'unconfigured',

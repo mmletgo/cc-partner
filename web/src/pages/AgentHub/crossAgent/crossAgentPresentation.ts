@@ -9,11 +9,11 @@
  *   纯函数：候选列表、解析 DTO、canPreview/canApply gate、mode tone；无 React/API/i18n 实例。
  */
 
-import { allHubTargets } from '@/lib/agentCatalog';
+import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type { AgentHubScope } from '../context/agentHubContext';
 
-/** 三 Agent 全集（与壳层一致）。 */
+/** catalog Hub target 全集（与壳层一致）。 */
 export const ALL_AGENT_TARGETS: AgentTarget[] = allHubTargets();
 
 /** 适配分类 mode（与后端 CrossAgentAdaptMode camelCase 对齐）。 */
@@ -96,7 +96,7 @@ export interface CrossAgentApplyGate {
  * Code Logic: 三枚举字面量。
  */
 export function isAgentTarget(value: unknown): value is AgentTarget {
-  return value === 'claude' || value === 'codex' || value === 'opencode';
+  return isHubTarget(value);
 }
 
 /**

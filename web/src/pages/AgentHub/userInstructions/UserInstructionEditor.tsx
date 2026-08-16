@@ -1,5 +1,6 @@
 import type { JSX } from 'react';
 import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget, UserInstructionDraft } from '@/lib/types/agentHub';
 import type { TFunction } from 'i18next';
 import type { UserInstructionEditorPane } from './useUserInstructionManager';
@@ -19,14 +20,14 @@ export interface UserInstructionEditorProps {
   onPreview: () => void;
 }
 
-const PANES: UserInstructionEditorPane[] = ['common', 'claude', 'codex', 'opencode'];
+const PANES: UserInstructionEditorPane[] = ['common', ...allHubTargets()];
 
 /**
  * Business Logic（为什么需要）:
- *   用户以“公共规则 + 三 Agent 专属补充”编辑 canonical，而不是理解 block map/policy。
+ *   用户以“公共规则 + 各 Agent 专属补充”编辑 canonical，而不是理解 block map/policy。
  *
  * Code Logic（做什么）:
- *   可访问 tablist 切换四个 Markdown 草稿面；所有编辑仅回调 controller，不直接 mutation。
+ *   可访问 tablist 切换公共槽与 catalog Hub target 草稿面；所有编辑仅回调 controller，不直接 mutation。
  */
 export function UserInstructionEditor(props: UserInstructionEditorProps): JSX.Element {
   const {

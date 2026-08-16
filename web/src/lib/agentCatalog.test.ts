@@ -6,6 +6,7 @@ import {
   allSessionSources,
   headlessOptimizerProviders,
   identityByRuntime,
+  isHubTarget,
   parseAgentId,
 } from './agentCatalog';
 
@@ -15,6 +16,12 @@ describe('agentCatalog', () => {
     expect(allHubTargets()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini']);
     expect(allSessionSources()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini']);
     expect(allHistorySources()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini']);
+  });
+
+  it('accepts grok and gemini as hub targets', () => {
+    expect(parseAgentId('grok')).toBe('grok');
+    expect(isHubTarget('gemini')).toBe(true);
+    expect(isHubTarget('genericTerminal')).toBe(false);
   });
 
   it('rejects unknown agent ids', () => {

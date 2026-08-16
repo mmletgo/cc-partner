@@ -1,5 +1,6 @@
 import { useState, type JSX } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { TFunction } from 'i18next';
 import { CrossAgentSyncDialog } from './CrossAgentSyncDialog';
 import { UserInstructionDangerZone } from './UserInstructionDangerZone';
@@ -267,9 +268,7 @@ export function UserInstructionView(props: UserInstructionViewProps): JSX.Elemen
         open={crossAgentOpen}
         sourceMarkdown={[
           draft.commonContent,
-          draft.targetExtensions.claude,
-          draft.targetExtensions.codex,
-          draft.targetExtensions.opencode,
+          ...allHubTargets().map((target) => draft.targetExtensions[target]),
         ]
           .filter((part) => Boolean(part?.trim()))
           .join('\n\n')}

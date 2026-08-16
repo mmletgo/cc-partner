@@ -31,6 +31,7 @@ import {
   userInstructionSlotVersionListDecoder,
   userInstructionWorkspaceDecoder,
 } from '@/lib/schemas/agentHub';
+import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
 import type {
   AgentHubAssetDetail,
   AgentHubAssetSummary,
@@ -176,7 +177,7 @@ function createAgentHubBlockedError(code: string): Error {
 
 /** 严格识别 Agent wire token，未知值不得进入 IPC。 */
 function isAgentTargetToken(value: unknown): value is AgentTarget {
-  return value === 'claude' || value === 'codex' || value === 'opencode';
+  return isHubTarget(value);
 }
 
 /**
@@ -308,7 +309,7 @@ async function inspectLegacyUserInstructionWorkspace(): Promise<UserInstructionW
         contentTruncated: false,
       }
     : undefined;
-  const targets: UserInstructionTargetDto[] = (['claude', 'codex', 'opencode'] as const).map(
+  const targets: UserInstructionTargetDto[] = allHubTargets().map(
     (target) => {
       const probe = status.probes.find((item) => item.target === target);
       const cell = legacy?.targets.find((item) => item.target === target);

@@ -2,7 +2,7 @@
  * Multi-CLI Agent Hub 域类型。
  *
  * Business Logic（为什么需要这个模块）:
- *   Agent Hub 统一管理 Claude / Codex / OpenCode 的指令与资产投影；
+ *   Agent Hub 统一管理 catalog Hub target 的指令与资产投影；
  *   前端页面、Attention deep link 与 IPC schema 必须共享稳定 DTO。
  *
  * Code Logic（这个模块做什么）:
@@ -12,8 +12,8 @@
 /**
  * CLI 目标运行时。
  *
- * Business Logic: 投影与适配必须区分三端路径与能力。
- * Code Logic: wire token 为 claude / codex / opencode。
+ * Business Logic: 投影与适配必须区分各端路径与能力。
+ * Code Logic: wire token 与 `allHubTargets()` 对齐。
  */
 export type AgentTarget = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini';
 
@@ -175,7 +175,7 @@ export type UserInstructionTargetSelection =
       manageOverride?: boolean;
     };
 
-/** 用户级指令公共与三 Agent 专属草稿。 */
+/** 用户级指令公共与各 Agent 专属草稿。 */
 export interface UserInstructionDraft {
   commonContent: string;
   targetExtensions: Partial<Record<AgentTarget, string>>;

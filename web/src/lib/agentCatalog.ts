@@ -122,6 +122,14 @@ export function allHubTargets(): AgentTarget[] {
 }
 
 /**
+ * Business Logic: URL / IPC / 切换器只接受已登记 Hub target。
+ * Code Logic: 对照 allHubTargets。
+ */
+export function isHubTarget(value: unknown): value is AgentTarget {
+  return typeof value === 'string' && allHubTargets().includes(value as AgentTarget);
+}
+
+/**
  * Business Logic: 会话搜索 tab 列出全部 sessionSource。
  * Code Logic: filter map。
  */

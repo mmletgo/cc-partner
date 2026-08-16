@@ -26,6 +26,7 @@ import {
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
 import { workbenchApi } from '@/api/workbench';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
@@ -187,7 +188,7 @@ const SECTION_VALUES = new Set<string>([
   'diagnostics',
 ]);
 
-const AGENT_TARGETS = new Set(['claude', 'codex', 'opencode']);
+const AGENT_TARGETS = new Set(allHubTargets());
 const ASSET_KINDS = new Set(['skill', 'command', 'plugin', 'mcp']);
 const SCOPES = new Set(['user', 'project']);
 const ACTUAL_STATES = new Set(['all', 'enabled', 'disabled', 'problem']);

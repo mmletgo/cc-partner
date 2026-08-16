@@ -11,6 +11,7 @@
  *   per-agent 预览合成、同步内容 resolve，以及原文/块编辑 dirty 辅助。
  */
 
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget, InstructionBlockDto } from '@/lib/types/agentHub';
 
 /** 块草稿：与 InstructionBlockDto 同构（mode/variants/headingPath/sourceTarget/needsAdaptation）。 */
@@ -69,7 +70,7 @@ export type SyncBaseline = 'blocks' | 'original';
 export type InstructionBusyAction = 'save' | 'analyze' | 'adapt' | 'sync' | 'revise';
 
 const MODE_ORDER: InstructionBlockDraft['mode'][] = ['shared', 'adapted', 'targetOnly'];
-const AGENT_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const AGENT_TARGETS: AgentTarget[] = allHubTargets();
 
 /** InstructionBlockDto → InstructionBlockDraft。 */
 export function dtoToDraft(dto: InstructionBlockDto): InstructionBlockDraft {
@@ -744,7 +745,7 @@ export function replaceAdaptedVariants(
 
 /**
  * Business Logic: 把 Claude 改写结果落到对应 lane 槽，供保存前展示。
- * Code Logic: 公共写 shared.common；独有写当前 agent variants；适配覆盖三端。
+ * Code Logic: 公共写 shared.common；独有写当前 agent variants；适配覆盖 catalog 全部 Hub target。
  */
 export function applyInstructionReviseResult(
   state: InstructionThreePaneState,
@@ -776,15 +777,11 @@ export function applyInstructionReviseResult(
       agent,
     );
   }
-  return replaceAdaptedVariants(
-    state,
-    {
-      claude: result.variants?.claude ?? '',
-      codex: result.variants?.codex ?? '',
-      opencode: result.variants?.opencode ?? '',
-    },
-    agent,
-  );
+  const variants: Partial<Record<AgentTarget, string>> = {};
+  for (const target of AGENT_TARGETS) {
+    variants[target] = result.variants?.[target] ?? '';
+  }
+  return replaceAdaptedVariants(state, variants, agent);
 }
 
 /**

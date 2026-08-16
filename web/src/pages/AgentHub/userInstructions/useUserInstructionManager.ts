@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 import { agentHubApi } from '@/api/agentHub';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type {
   AgentTarget,
   UserInstructionApplyResultDto,
@@ -38,6 +39,8 @@ const EMPTY_TARGET_SELECTIONS: Record<AgentTarget, UserInstructionTargetSelectio
   claude: 'unmanaged',
   codex: 'unmanaged',
   opencode: 'unmanaged',
+  grok: 'unmanaged',
+  gemini: 'unmanaged',
 };
 
 /**
@@ -80,7 +83,7 @@ export function createUserInstructionDraft(
 
   // 仅单 target 有磁盘正文且无 canonical：放进 common（清空 extensions 避免 apply 双写）。
   if (!workspace.canonical && !commonContent.trim()) {
-    const filled = (['claude', 'codex', 'opencode'] as const).filter(
+    const filled = allHubTargets().filter(
       (key) => typeof targetExtensions[key] === 'string' && targetExtensions[key]!.trim().length > 0,
     );
     if (filled.length === 1) {

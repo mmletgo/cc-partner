@@ -58,7 +58,13 @@ function readOnlyManager(): UseUserInstructionManagerResult {
     draft: {
       commonContent: '',
       targetExtensions: {},
-      targetSelections: { claude: 'unmanaged', codex: 'unmanaged', opencode: 'unmanaged' },
+      targetSelections: {
+        claude: 'unmanaged',
+        codex: 'unmanaged',
+        opencode: 'unmanaged',
+        grok: 'unmanaged',
+        gemini: 'unmanaged',
+      },
     },
     dirty: false,
     activePane: 'common',

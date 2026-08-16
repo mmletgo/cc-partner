@@ -68,6 +68,15 @@ describe('AgentHubShell', () => {
     expect(source).not.toMatch(/from\s+['"]@\/api\//);
   });
 
+  test('agent switcher lists catalog hub targets including grok and gemini', () => {
+    renderShell({
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, instructionLane: 'adapted' },
+    });
+    expect(screen.getByTestId('agent-hub-agent-grok')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-agent-gemini')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-agent-switcher').querySelectorAll('[role="radio"]')).toHaveLength(5);
+  });
+
   test('click Codex emits onContextChange({ agent: "codex" }) in an agent-specific lane', () => {
     const onContextChange = vi.fn();
     renderShell({

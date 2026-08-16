@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 import { agentHubApi, type AgentHubRequestContext } from '@/api/agentHub';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type {
   AgentTarget,
   InstructionSlotKey,
@@ -241,10 +242,16 @@ function errorCode(reason: unknown): string | null {
 }
 
 function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> {
-  return { claude: 'unmanaged', codex: 'unmanaged', opencode: 'unmanaged' };
+  return {
+    claude: 'unmanaged',
+    codex: 'unmanaged',
+    opencode: 'unmanaged',
+    grok: 'unmanaged',
+    gemini: 'unmanaged',
+  };
 }
 
-const ALL_INSTRUCTION_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+const ALL_INSTRUCTION_TARGETS: AgentTarget[] = allHubTargets();
 
 /**
  * Business Logic: 按当前槽决定同步目标；公共槽同步全部 Agent，适配/独有槽同步当前 Agent；
