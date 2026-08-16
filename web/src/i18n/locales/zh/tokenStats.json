@@ -1,0 +1,109 @@
+{
+  "eyebrow": "Token 用量",
+  "title": "Token 统计",
+  "lead": "查看 Anthropic prompt-cache 命中率、真实消耗与每个会话的成本，覆盖全部活动 session。",
+  "filters": {
+    "windowLabel": "时间窗",
+    "window": {
+      "24h": "最近 24 小时",
+      "7d": "最近 7 天",
+      "30d": "最近 30 天",
+      "custom": "自定义"
+    },
+    "customRangeLabel": "自定义区间",
+    "customStart": "起始时间",
+    "customEnd": "结束时间",
+    "providerLabel": "Provider",
+    "modelLabel": "模型",
+    "projectLabel": "项目",
+    "outcomeLabel": "终态",
+    "outcome": {
+      "all": "全部终态",
+      "completed": "已完成",
+      "failed": "失败",
+      "cancelled": "已取消",
+      "disconnected": "已断开"
+    },
+    "refresh": "刷新",
+    "export": "导出…",
+    "exportMenu": "导出结果",
+    "exportCsv": "导出 CSV",
+    "exportJson": "导出 JSON",
+    "reset": "重置筛选"
+  },
+  "kpi": {
+    "inputTokens": "新输入 token",
+    "cacheTokens": "缓存输入 token（cache_read）",
+    "outputTokens": "输出 token",
+    "cacheHitRate": "缓存命中率",
+    "realConsumed": "真实消耗 token",
+    "requests": "总请求数",
+    "totalCost": "总成本",
+    "coverage": "用量覆盖度",
+    "coverageComplete": "完整",
+    "coveragePartial": "部分",
+    "coverageUnavailable": "无覆盖",
+    "notProvided": "未提供",
+    "loading": "正在加载 Token 统计…"
+  },
+  "trend": {
+    "title": "用量趋势",
+    "empty": "当前窗口暂无数据。",
+    "tooltip": {
+      "bucket": "时间桶",
+      "tokens": "Token"
+    },
+    "legend": {
+      "input": "新输入",
+      "output": "输出",
+      "cacheRead": "缓存读取",
+      "cost": "成本"
+    }
+  },
+  "groups": {
+    "byModel": "按模型",
+    "byProvider": "按 Provider",
+    "byProject": "按项目",
+    "noRows": "此分组暂无数据。",
+    "columns": {
+      "key": "键",
+      "sessions": "会话数",
+      "input": "新输入",
+      "cacheRead": "缓存读",
+      "cacheWrite": "缓存写",
+      "output": "输出",
+      "cost": "成本"
+    }
+  },
+  "session": {
+    "tableTitle": "会话明细",
+    "columns": {
+      "startedAt": "开始时间",
+      "agent": "Agent",
+      "model": "模型",
+      "project": "项目",
+      "outcome": "终态",
+      "input": "输入",
+      "cacheRead": "缓存读",
+      "output": "输出",
+      "cost": "成本"
+    },
+    "loadMore": "加载更多",
+    "empty": "当前筛选下暂无会话。",
+    "unavailable": "暂无可用的 ledger 明细。",
+    "staleBanner": "刷新最新用量失败，仍展示上次结果。"
+  },
+  "export": {
+    "success": "已导出到 {{path}}",
+    "failure": "导出失败：{{message}}",
+    "reveal": "在访达中显示",
+    "revealFailed": "无法在访达中显示：{{message}}",
+    "close": "关闭"
+  },
+  "errors": {
+    "loadFailed": "加载 token 统计失败。",
+    "staleRefreshFailed": "刷新最新数据失败。",
+    "empty": "尚未捕获到用量数据。",
+    "exportInvalid": "不支持的导出格式。"
+  }
+}

@@ -150,6 +150,18 @@ describe('App lazy routes contract', () => {
     );
   });
 
+  test('keeps /token-stats as a separate lazy route after Activity', () => {
+    expect(appSource).toMatch(
+      /path\s*=\s*["']\/token-stats["']\s+element=\{<ShellRoute><TokenStats\s*\/>\s*<\/ShellRoute>\}/,
+    );
+    expect(appSource).toMatch(
+      /lazyNamed\s*\(\s*\(\)\s*=>\s*import\s*\(\s*['"]\.\/pages\/TokenStats['"]\s*\)/,
+    );
+    expect(appShellSource).toMatch(
+      /<NavItem\s+to\s*=\s*["']\/token-stats["']\s+label=\{t\(['"]nav:tokenStats['"]\)\}/,
+    );
+  });
+
   test('legacy /claude-code deep-links to Agent Hub assets with Claude target', () => {
     expect(appSource).toMatch(
       /path\s*=\s*["']\/claude-code["']\s+element=\{<Navigate\s+to=["']\/agent-hub\?section=assets&target=claude["']\s+replace\s*\/>\}/,

@@ -174,7 +174,7 @@ impl AgentPhaseCounts {
 ///
 /// Code Logic（这个类型做什么）:
 ///     camelCase DTO；project_id 在控制侧 remote 时为 remote: 包装 ID。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanFleetProjectSummary {
     pub project_id: String,
@@ -203,7 +203,7 @@ pub struct LanFleetProjectSummary {
 ///
 /// Code Logic（这个类型做什么）:
 ///     camelCase；error_code 为稳定 token（如 timeout / peer_error）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanFleetDeviceSummary {
     pub device_id: String,
@@ -225,7 +225,7 @@ pub struct LanFleetDeviceSummary {
 ///
 /// Code Logic（这个类型做什么）:
 ///     devices 列表 + truncated 标志 + generated_at。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanFleetSnapshot {
     pub generated_at: String,
@@ -255,7 +255,7 @@ pub struct LanFleetOwnerBatchReq {
 ///
 /// Code Logic（这个类型做什么）:
 ///     单设备摘要 + generated_at。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanFleetOwnerBatchResp {
     pub generated_at: String,

@@ -2007,6 +2007,73 @@
         "docs/superpowers/specs/2026-08-14-wordgame-design.md"
       ],
       "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L0-TOKEN-STATS-001",
+      "surface": "token-stats",
+      "level": "L0",
+      "tests": [
+        "web/src/pages/TokenStats/useTokenStatsController.test.tsx",
+        "web/src/pages/TokenStats/TokenStatsView.test.tsx",
+        "web/src/lib/schemas/tokenStats.ts",
+        "web/src/api/tokenStats.ts"
+      ],
+      "command": "cd web && npm test -- src/pages/TokenStats src/lib/schemas/tokenStats src/api/tokenStats localeParity",
+      "ciJob": "quality",
+      "platforms": [
+        "node"
+      ],
+      "exclusions": [
+        "packaged desktop GUI",
+        "real SQLite aggregation"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "E2E-TOKEN-STATS-001",
+      "surface": "token-stats",
+      "level": "L1",
+      "tests": [
+        "web/tests/token-stats.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- token-stats.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real SQLite ledger aggregation",
+        "real export write to ~/.cc-partner/exports",
+        "packaged desktop GUI",
+        "macOS/Windows dual-theme chart rendering"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L3-TOKEN-STATS-001",
+      "surface": "token-stats",
+      "level": "L3",
+      "tests": [
+        "docs/development/testing.md"
+      ],
+      "command": "manual: open /token-stats in packaged macOS/Windows app; confirm recharts both themes, empty ledger copy, CSV in ~/.cc-partner/exports/token-stats",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows"
+      ],
+      "exclusions": [
+        "not executed in CI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
     }
   ]
 }

@@ -53,7 +53,7 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `L3-AGENT-HUB-C-LAN-001` | dual-host manual | Real multi-host mDNS agent-hub.v1 source-push + Git confirm import — **NOT VERIFIED** |
 | `L3-AGENT-HUB-D-OPENCODE-001` | real OpenCode TUI manual | Exact pinned OpenCode visible session/completion via runtime bridge — **NOT VERIFIED** |
 
-Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`, `E2E-AGENT-LEDGER-001`.
+Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`, `E2E-AGENT-LEDGER-001`, `E2E-TOKEN-STATS-001`.
 
 ### L0 / L2 / L3 anchors
 

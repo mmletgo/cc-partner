@@ -14,6 +14,7 @@
   "health": "Health",
   "activity": "Activity",
   "providerManager": "Provider Manager",
+  "tokenStats": "Token Stats",
   "primaryNav": "Primary",
   "groups": {
     "explore": "Explore",

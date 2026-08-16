@@ -560,3 +560,24 @@ export const BatteryLevelIcon = ({ size, level, ...rest }: IconProps & { level: 
     </svg>
   );
 };
+
+/**
+ * TokenIcon — Token 统计侧栏入口图标
+ *
+ * Business Logic（为什么需要这个组件):
+ *   侧栏 System 组在 ActivityStats 之后插入 Token Stats 入口；为与现有 token 计量视觉
+ *   对应，使用中心圆加三道等距横线的轻量象形，避开现成货币/键盘符号以避免与
+ *   ActivityIcon / ProviderManagerIcon 撞形。
+ *
+ * Code Logic（这个组件做什么):
+ *   16×16 viewBox、currentColor stroke 与 baseProps 同源；圆心 (8,8) 半径 5.5，
+ *   三条横线 y=6.5/8.5/10.5 各长 5 个单位。
+ */
+export const TokenIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <circle cx="8" cy="8" r="5.5" />
+    <path d="M5.5 6.5h5" />
+    <path d="M5.5 8.5h5" />
+    <path d="M5.5 10.5h5" />
+  </svg>
+);

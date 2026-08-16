@@ -42,6 +42,7 @@ import {
   ActivityIcon,
   ProviderManagerIcon,
   AlertIcon,
+  TokenIcon,
   SmartphoneIcon,
   XIcon,
   GameIcon,
@@ -310,6 +311,7 @@ export function AppShell({ children }: AppShellProps) {
               <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
                 <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
                 <NavItem to="/activity" label={t('nav:activity')} icon={<ActivityIcon />} />
+                <NavItem to="/token-stats" label={t('nav:tokenStats')} icon={<TokenIcon />} />
                 <NavItem
                   to="/provider-manager"
                   label={t('nav:providerManager')}
