@@ -354,6 +354,49 @@ describe('useWorkspaceSafeRestore — initial restore force terminal', () => {
     expect(calls.setWorkspaceView).not.toContain('browser');
   });
 
+  test('initial restore with leftover browserTarget does not createPreview or switch view', async () => {
+    vi.useFakeTimers();
+    layoutApi.preflight.mockResolvedValue(
+      buildPlan({
+        workspaceView: 'browser',
+        inspectorTab: 'files',
+        actions: [
+          { target: 'project', resourceId: 'p1', outcome: 'select' },
+          { target: 'worktree', resourceId: 'w1', outcome: 'select' },
+          { target: 'session', resourceId: 's1', outcome: 'select' },
+          { target: 'workspaceView', resourceId: 'browser', outcome: 'select' },
+          { target: 'inspectorTab', resourceId: 'files', outcome: 'select' },
+          {
+            target: 'browserTarget',
+            resourceId: 'http://127.0.0.1:3000/',
+            outcome: 'select',
+          },
+        ],
+      }),
+    );
+
+    const { calls } = makeHarness({
+      projectsLoading: false,
+      projectsLength: 1,
+      activeProjectId: 'p1',
+      activeWorktreeId: 'w1',
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+    });
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(browserApi.createPreview).not.toHaveBeenCalled();
+    expect(calls.setBrowserTargetUrl).toContain('http://127.0.0.1:3000/');
+    expect(calls.setWorkspaceView).toContain('terminal');
+    expect(calls.setWorkspaceView).not.toContain('browser');
+  });
+
   test('initial restore only runs once across re-renders (restoreRanRef gate)', async () => {
     vi.useFakeTimers();
     layoutApi.preflight.mockResolvedValue(buildPlan({ workspaceView: 'files' }));

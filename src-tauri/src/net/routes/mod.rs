@@ -139,6 +139,17 @@ impl ApiError {
         self.status
     }
 
+    /// 读取错误消息。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     preview iframe 网关失败页需要原样展示中文消息，且不能消费 self。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回内部 message 的借用。
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     /// 消费 self 取出错误消息（供边界信封转换使用）。
     ///
     /// Business Logic（为什么需要这个函数）:

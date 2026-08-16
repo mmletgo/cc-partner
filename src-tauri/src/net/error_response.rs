@@ -23,7 +23,7 @@
 use crate::error::{AppError, AppErrorCategory};
 use crate::net::request_context::P2pRequestContext;
 use axum::body::Body;
-use axum::http::{HeaderValue, Response, StatusCode};
+use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -520,6 +520,12 @@ impl IntoResponse for P2pError {
         response
             .headers_mut()
             .insert(REQUEST_ID_HEADER, header_value);
+        // iframe / 中文 locale WebView 把无 charset 的 JSON 当文档渲染时会按 GBK 解码，
+        // 出现「棰勮涓婃父…」这类乱码。RFC 8259 JSON 本就是 UTF-8，必须显式标出。
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
         response
     }
 }
@@ -1255,6 +1261,30 @@ mod tests {
 
         assert_eq!(header_id, "req-xyz-789");
         assert_eq!(body.request_id, "req-xyz-789");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     iframe / 中文 locale WebView 渲染 JSON 信封时，缺 charset 会按 GBK 解码中文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 P2pError 响应 Content-Type 为 application/json; charset=utf-8。
+    #[tokio::test]
+    async fn into_response_json_declares_utf8_charset() {
+        let app = AppError::generic("预览上游请求失败");
+        let p2p = P2pError::from_app_error(app, &ctx("req-charset"), DEFAULT_DOMAIN_CODE);
+        let response = p2p.into_response();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("content-type");
+        assert_eq!(content_type, "application/json; charset=utf-8");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).expect("body is utf-8");
+        assert!(body.contains("预览上游请求失败"));
+        assert!(!body.contains("棰勮涓婃父璇锋眰澶辫触"));
     }
 
     /// Business Logic（为什么需要这个测试）:

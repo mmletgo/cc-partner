@@ -218,8 +218,12 @@ export function WorkbenchBrowserWorkspaceView({
               data-active={preview?.targetUrl === target.url || undefined}
               onClick={() => void openTarget(target)}
             >
-              <span>{t(getWorkbenchBrowserTargetSourceLabelKey(target.source) as never)}</span>
-              <span>{target.displayUrl}</span>
+              <span className={styles.targetSource}>
+                {t(getWorkbenchBrowserTargetSourceLabelKey(target.source) as never)}
+              </span>
+              <span className={styles.targetUrl} title={target.displayUrl}>
+                {target.displayUrl}
+              </span>
             </button>
           ))}
         </div>

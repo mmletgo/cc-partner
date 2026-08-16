@@ -367,16 +367,91 @@ pub async fn proxy_workbench_browser_request(
     req: Request<Body>,
     route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
+    let prefers_html = prefers_html_document(req.headers());
     // 会话查找 + Origin 最终裁决（null 仅 live session；非 null 必须同源）。
-    let session = accept_preview_request_with_origin(
-        &state.workbench_browser_previews,
-        &preview_id,
-        req.headers(),
-    )?;
-    if is_websocket_upgrade(req.headers()) {
-        return proxy_workbench_browser_websocket(state, session, tail_path, req).await;
+    let result = async {
+        let session = accept_preview_request_with_origin(
+            &state.workbench_browser_previews,
+            &preview_id,
+            req.headers(),
+        )?;
+        if is_websocket_upgrade(req.headers()) {
+            return proxy_workbench_browser_websocket(state, session, tail_path, req).await;
+        }
+        proxy_http_request_for_session(session, tail_path, req, route_prefix).await
     }
-    proxy_http_request_for_session(session, tail_path, req, route_prefix).await
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) if prefers_html => Ok(preview_gateway_error_html(&error)),
+        Err(error) => Err(error),
+    }
+}
+
+/// 判断请求是否更希望收到 HTML 错误页。
+///
+/// Business Logic（为什么需要这个函数）:
+///     iframe 文档导航会把 JSON 信封当页面渲染；中文 locale 缺 charset 时按 GBK 解码出现乱码。
+///
+/// Code Logic（这个函数做什么）:
+///     Accept 里 `text/html` 先于 `application/json`（或缺 JSON）时返回 true；无 Accept / `*/*` 仍走信封。
+fn prefers_html_document(headers: &HeaderMap) -> bool {
+    let Some(accept) = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let html = accept.find("text/html");
+    let json = accept.find("application/json");
+    match (html, json) {
+        (Some(_), None) => true,
+        (Some(html_at), Some(json_at)) => html_at < json_at,
+        _ => false,
+    }
+}
+
+/// 把预览网关失败渲染成带 charset 的 HTML 页给 iframe。
+///
+/// Business Logic（为什么需要这个函数）:
+///     iframe 不应直接展示 P2P JSON 信封；HTML + meta charset=utf-8 才能稳定显示中文。
+///
+/// Code Logic（这个函数做什么）:
+///     转义消息后输出最小 HTML，状态码沿用 ApiError，Content-Type 为 `text/html; charset=utf-8`。
+fn preview_gateway_error_html(error: &ApiError) -> Response {
+    let body = format!(
+        "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Preview error</title><style>body{{margin:0;padding:24px;font:14px/1.5 system-ui,sans-serif;color:#222;background:#fafafa;word-break:break-word}}</style></head><body><p>{}</p></body></html>",
+        escape_html(error.message()),
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = error.status();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+}
+
+/// 转义 HTML 文本节点。
+///
+/// Business Logic（为什么需要这个函数）:
+///     上游错误消息含 URL，写入 iframe HTML 前必须转义，避免把 `<` 当标签。
+///
+/// Code Logic（这个函数做什么）:
+///     替换 `& < > \" '`。
+fn escape_html(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// 查找 preview session 或返回 404。
@@ -497,10 +572,12 @@ async fn read_proxy_request_body(body: Body) -> Result<Bytes, ApiError> {
 ///     preview proxy 只能请求已登记上游；即使上游返回外链 redirect，也不能由后端继续跟随请求。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建禁用自动 redirect 的 reqwest client，让 3xx 和 Location 原样进入响应重写流程。
+///     创建禁用自动 redirect 与系统代理的 reqwest client，让 3xx 和 Location 原样进入响应重写流程，
+///     并避免 HTTP_PROXY 把 127.0.0.1 预览打到无关上游。
 fn proxy_http_client() -> Result<reqwest::Client, ApiError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .map_err(|_| ApiError::bad_gateway("构造预览 HTTP 客户端失败"))
 }
@@ -1090,6 +1167,61 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::extract::State;
     use axum::http::{Request, StatusCode};
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     iframe 文档导航应拿 HTML 错误页；P2P/reqwest 默认 Accept 仍走 JSON 信封。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖无 Accept、*/*、text/html、json 优先、html 优先。
+    #[test]
+    fn prefers_html_document_only_when_html_outranks_json() {
+        let mut headers = HeaderMap::new();
+        assert!(!prefers_html_document(&headers));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("*/*"));
+        assert!(!prefers_html_document(&headers));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        assert!(!prefers_html_document(&headers));
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"),
+        );
+        assert!(prefers_html_document(&headers));
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json, text/html"),
+        );
+        assert!(!prefers_html_document(&headers));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     iframe 错误页必须带 UTF-8 charset，并转义消息中的 HTML 特殊字符。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造含 `<` 的中文 ApiError，断言 HTML 含 charset、原文与转义。
+    #[tokio::test]
+    async fn preview_gateway_error_html_is_utf8_and_escapes() {
+        let error = ApiError::bad_gateway("预览上游请求失败: url (http://127.0.0.1:3000/<x>)");
+        let response = preview_gateway_error_html(&error);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .expect("html body is utf-8");
+        assert!(body.contains("charset=\"utf-8\""));
+        assert!(body.contains("预览上游请求失败"));
+        assert!(body.contains("&lt;x&gt;"));
+        assert!(!body.contains("<x>"));
+        assert!(!body.contains("棰勮涓婃父璇锋眰澶辫触"));
+    }
     use axum::routing::any;
     use axum::Router;
     use std::convert::Infallible;

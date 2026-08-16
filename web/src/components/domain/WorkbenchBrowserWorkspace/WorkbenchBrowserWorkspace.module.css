@@ -51,9 +51,10 @@
 .targetChip {
   flex: 0 0 auto;
   display: inline-flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--space-2);
-  max-width: 320px;
+  max-width: min(320px, 100%);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--space-1) var(--space-2);
@@ -75,7 +76,13 @@
   color: var(--accent);
 }
 
-.targetChip span:last-child {
+.targetSource {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.targetUrl {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

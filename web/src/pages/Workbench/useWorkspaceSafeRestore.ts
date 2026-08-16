@@ -236,14 +236,19 @@ export function useWorkspaceSafeRestore(
       },
       restoreBrowserTarget: async (url: string) => {
         if (!activeProjectIdRef.current) return;
+        if (options.forceTerminalWorkspaceView) {
+          // 初始 restore 必须停在终端：只回填上次 URL，不建 preview、不切 browser。
+          // 用户之后点「网页浏览」再走 discover 的自动打开规则。
+          setBrowserTargetUrl(url);
+          return;
+        }
         await workbenchApi.browser.createPreview(
           activeProjectIdRef.current,
           activeWorktreeIdRef.current,
           url,
         );
         setBrowserTargetUrl(url);
-        // browser 目标由用户显式 apply（命名 snapshot 或 restore browserTarget action），
-        // 必须保留 browser view；此处不走 forceTerminalWorkspaceView 强制逻辑。
+        // 命名 snapshot 等显式 apply 才切到 browser。
         setWorkspaceView('browser');
       },
       applySelectionSnapshot: async (snapshot: {

@@ -26,6 +26,13 @@ use std::time::Duration;
 static DEV_URL_RE: OnceLock<Regex> = OnceLock::new();
 static HOST_PORT_RE: OnceLock<Regex> = OnceLock::new();
 
+/// 端口探测与「上次误开」残留共用的常见 dev server 端口。
+///
+/// Business Logic（为什么需要这个常量）:
+///     本机任意项目都可能占用 3000/5173/8080；不能仅凭 Remembered 或探测命中就把它们当当前项目默认页。
+const DEFAULT_PROBE_PORTS: [u16; 8] = [5173, 3000, 4173, 5174, 8080, 8000, 4321, 6006];
+const LOOPBACK_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// 获取 dev server URL 正则。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -60,11 +67,13 @@ fn host_port_re() -> &'static Regex {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户进入 Browser tab 时，应自动看到上次使用、终端输出、项目配置和可达端口的候选 URL。
-///     默认只自动打开上次使用 / 终端输出 / 项目配置；端口探测只列出，避免本机无关 3000/5173/8080 被当成当前项目网页。
+///     默认只自动打开上次使用 / 终端输出 / 项目配置；端口探测只列出。
+///     Remembered 若落在默认探测端口，必须同时被终端输出或项目配置印证，避免上次误开的 3000 残留继续默认打开。
 ///     Task 1 发现只能在项目所属设备上的 local project 执行；remote shortcut 必须由后续命令/路由 wrapper 转发到 owning device。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析本机 local 项目/worktree 根目录，合并 remembered/terminal/package/probe 四类候选，去重排序后只把可自动打开的可达项写入 selected_target_id。
+///     解析本机 local 项目/worktree 根目录，合并 remembered/terminal/package/probe 四类候选；
+///     Remembered 默认探测端口先标不可达，由 PortProbe 合并真实可达性；去重排序后按印证规则写 selected_target_id。
 ///     非 local 项目由 resolve 阶段拒绝，避免本机直接扫描远端 shortcut 的终端或端口。
 pub async fn discover_workbench_browser_targets(
     state: &AppState,
@@ -72,25 +81,28 @@ pub async fn discover_workbench_browser_targets(
     worktree_id: Option<String>,
 ) -> Result<WorkbenchBrowserDiscovery, AppError> {
     let root = resolve_browser_worktree_root(state, &project_id, worktree_id.as_deref()).await?;
-    let remembered = state
-        .workbench_browser_repo
-        .get_target(&project_id, worktree_id.as_deref())
-        .await?
-        .into_iter()
-        .filter_map(|url| {
-            browser_target_from_url(&url, WorkbenchBrowserTargetSource::Remembered, true).ok()
-        });
+    let probe_client = loopback_probe_client();
+    let remembered = remembered_browser_targets(
+        state
+            .workbench_browser_repo
+            .get_target(&project_id, worktree_id.as_deref())
+            .await?
+            .into_iter(),
+        probe_client.as_ref(),
+    )
+    .await;
     let terminal = terminal_output_targets(state, &project_id, worktree_id.as_deref()).await?;
     let config = project_config_targets(&root).await?;
-    let probed = probe_default_port_targets(state, &root).await?;
-    let targets = rank_browser_targets(
-        remembered
-            .chain(terminal)
-            .chain(config)
-            .chain(probed)
-            .collect::<Vec<_>>(),
-    );
-    let selected_target_id = select_auto_open_browser_target_id(&targets);
+    let probed = probe_default_port_targets(state, &root, probe_client.as_ref()).await?;
+    let unranked = remembered
+        .into_iter()
+        .chain(terminal)
+        .chain(config)
+        .chain(probed)
+        .collect::<Vec<_>>();
+    let corroborated_urls = corroborated_browser_urls(&unranked);
+    let targets = rank_browser_targets(unranked);
+    let selected_target_id = select_auto_open_browser_target_id(&targets, &corroborated_urls);
     Ok(WorkbenchBrowserDiscovery {
         project_id,
         worktree_id,
@@ -371,26 +383,23 @@ async fn project_config_targets(root: &Path) -> Result<Vec<WorkbenchBrowserTarge
 ///     用户已启动服务但终端 replay 不完整时，Workbench 仍应能发现常见端口上的本机 dev server。
 ///
 /// Code Logic（这个函数做什么）:
-///     对默认端口发起 300ms HTTP GET，排除 cc-partner 自身 HTTP 端口，只返回成功建立响应的端口。
+///     用禁用系统代理的短超时客户端对默认端口发起 GET，排除 cc-partner 自身 HTTP 端口，只返回成功建立响应的端口。
 async fn probe_default_port_targets(
     state: &AppState,
     _root: &Path,
+    client: Option<&reqwest::Client>,
 ) -> Result<Vec<WorkbenchBrowserTarget>, AppError> {
+    let Some(client) = client else {
+        return Ok(Vec::new());
+    };
     let actual_http_port = state.actual_http_port.load(Ordering::Relaxed);
-    let client = reqwest::Client::new();
     let mut targets = Vec::new();
-    for port in [5173_u16, 3000, 4173, 5174, 8080, 8000, 4321, 6006] {
+    for port in DEFAULT_PROBE_PORTS {
         if actual_http_port != 0 && port == actual_http_port {
             continue;
         }
         let raw = format!("http://127.0.0.1:{port}/");
-        let reachable = client
-            .get(&raw)
-            .timeout(Duration::from_millis(300))
-            .send()
-            .await
-            .is_ok();
-        if reachable {
+        if probe_loopback_url(client, &raw).await {
             targets.push(browser_target_from_url(
                 &raw,
                 WorkbenchBrowserTargetSource::PortProbe,
@@ -399,6 +408,66 @@ async fn probe_default_port_targets(
         }
     }
     Ok(targets)
+}
+
+/// 构造禁用系统代理的本机探测客户端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     HTTP_PROXY 会让 127.0.0.1:3000 看起来可达或把请求打到无关上游，不能用来判断本机 dev server。
+///
+/// Code Logic（这个函数做什么）:
+///     `no_proxy()` + 300ms timeout；构建失败返回 None，发现路径降级为不探测。
+fn loopback_probe_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(LOOPBACK_PROBE_TIMEOUT)
+        .build()
+        .ok()
+}
+
+/// 探测本机 loopback URL 是否能建立 HTTP 响应。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Remembered / PortProbe 必须用同一套直连探测，避免系统代理造成假可达。
+///
+/// Code Logic（这个函数做什么）:
+///     对 url 发 GET，任意成功建立的响应都算可达。
+async fn probe_loopback_url(client: &reqwest::Client, url: &str) -> bool {
+    client.get(url).send().await.is_ok()
+}
+
+/// 把已保存的上次预览地址转成 Remembered 候选。
+///
+/// Business Logic（为什么需要这个函数）:
+///     上次预览可能是误开的 3000；默认探测端口不能无条件标可达，否则会再次被自动打开。
+///
+/// Code Logic（这个函数做什么）:
+///     默认探测端口先标不可达，交给后续 PortProbe 合并真实可达性；自定义端口用 no_proxy 客户端实测。
+async fn remembered_browser_targets(
+    urls: impl IntoIterator<Item = String>,
+    client: Option<&reqwest::Client>,
+) -> Vec<WorkbenchBrowserTarget> {
+    let mut targets = Vec::new();
+    for url in urls {
+        let Ok(normalized) = normalize_browser_target_url(&url) else {
+            continue;
+        };
+        let reachable = if is_default_probe_url(&normalized) {
+            false
+        } else if let Some(client) = client {
+            probe_loopback_url(client, &normalized).await
+        } else {
+            false
+        };
+        if let Ok(target) = browser_target_from_url(
+            &normalized,
+            WorkbenchBrowserTargetSource::Remembered,
+            reachable,
+        ) {
+            targets.push(target);
+        }
+    }
+    targets
 }
 
 /// 构造浏览器候选目标。
@@ -477,17 +546,78 @@ fn is_auto_open_browser_source(source: &WorkbenchBrowserTargetSource) -> bool {
     )
 }
 
+/// 判断 URL 是否落在默认端口探测列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     上次误开的 3000/5173/8080 会以 Remembered 落库，必须与用户自定义端口区分。
+///
+/// Code Logic（这个函数做什么）:
+///     解析端口并对照 DEFAULT_PROBE_PORTS。
+fn is_default_probe_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.port())
+        .is_some_and(|port| DEFAULT_PROBE_PORTS.contains(&port))
+}
+
+/// 收集可印证自动打开的 URL（终端输出或项目配置）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     rank 会把同 URL 的 ProjectConfig/Terminal 合并进 Remembered，选默认页前必须先记下印证来源。
+///
+/// Code Logic（这个函数做什么）:
+///     归一化 TerminalOutput / ProjectConfig 的 URL 放进 HashSet。
+fn corroborated_browser_urls(targets: &[WorkbenchBrowserTarget]) -> HashSet<String> {
+    targets
+        .iter()
+        .filter(|target| {
+            matches!(
+                target.source,
+                WorkbenchBrowserTargetSource::TerminalOutput
+                    | WorkbenchBrowserTargetSource::ProjectConfig
+            )
+        })
+        .map(|target| {
+            normalize_browser_target_url(&target.url)
+                .unwrap_or_else(|_| target.url.trim().to_string())
+        })
+        .collect()
+}
+
+/// 判断已排序候选能否作为默认自动打开目标。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Remembered 默认探测端口只在终端或 package.json 也指向同一 URL 时才代表当前项目。
+///
+/// Code Logic（这个函数做什么）:
+///     要求 reachable 且来源允许自动打开；Remembered 默认探测端口还须出现在印证集合中。
+fn can_auto_open_browser_target(
+    target: &WorkbenchBrowserTarget,
+    corroborated_urls: &HashSet<String>,
+) -> bool {
+    if !target.reachable || !is_auto_open_browser_source(&target.source) {
+        return false;
+    }
+    if target.source != WorkbenchBrowserTargetSource::Remembered {
+        return true;
+    }
+    !is_default_probe_url(&target.url) || corroborated_urls.contains(&target.url)
+}
+
 /// 选出默认自动打开的候选 id。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     前端 discover 后会按 selectedTargetId 建 preview；必须排除 PortProbe / Manual。
+///     前端 discover 后会按 selectedTargetId 建 preview；必须排除 PortProbe / Manual，以及未印证的默认探测端口 Remembered。
 ///
 /// Code Logic（这个函数做什么）:
-///     在已排序列表中取第一个 reachable 且来源允许自动打开的项。
-fn select_auto_open_browser_target_id(targets: &[WorkbenchBrowserTarget]) -> Option<String> {
+///     在已排序列表中取第一个通过 can_auto_open_browser_target 的项。
+fn select_auto_open_browser_target_id(
+    targets: &[WorkbenchBrowserTarget],
+    corroborated_urls: &HashSet<String>,
+) -> Option<String> {
     targets
         .iter()
-        .find(|target| target.reachable && is_auto_open_browser_source(&target.source))
+        .find(|target| can_auto_open_browser_target(target, corroborated_urls))
         .map(|target| target.id.clone())
 }
 
@@ -843,7 +973,7 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(select_auto_open_browser_target_id(&ranked), None);
+        assert_eq!(select_from(ranked), None);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -853,7 +983,7 @@ mod tests {
     ///     同时存在 TerminalOutput 与 PortProbe，断言默认选中终端地址。
     #[test]
     fn auto_opens_terminal_over_port_probe() {
-        let ranked = rank_browser_targets_for_test(vec![
+        let selected = select_from(vec![
             target_for_test(
                 "http://127.0.0.1:8080/",
                 WorkbenchBrowserTargetSource::PortProbe,
@@ -864,10 +994,8 @@ mod tests {
                 WorkbenchBrowserTargetSource::TerminalOutput,
                 true,
             ),
-        ]);
-
-        let selected =
-            select_auto_open_browser_target_id(&ranked).expect("terminal should auto-open");
+        ])
+        .expect("terminal should auto-open");
         assert!(selected.contains("5173"));
         assert!(selected.contains("TerminalOutput"));
     }
@@ -903,22 +1031,38 @@ mod tests {
             .expect("config candidate");
         assert_eq!(config.source, WorkbenchBrowserTargetSource::ProjectConfig);
         assert!(config.reachable);
-        let selected =
-            select_auto_open_browser_target_id(&ranked).expect("config should auto-open");
+        let selected = select_from(vec![
+            target_for_test(
+                "http://127.0.0.1:5173/",
+                WorkbenchBrowserTargetSource::ProjectConfig,
+                false,
+            ),
+            target_for_test(
+                "http://127.0.0.1:5173/",
+                WorkbenchBrowserTargetSource::PortProbe,
+                true,
+            ),
+            target_for_test(
+                "http://127.0.0.1:3000/",
+                WorkbenchBrowserTargetSource::PortProbe,
+                true,
+            ),
+        ])
+        .expect("config should auto-open");
         assert!(selected.contains("5173"));
         assert!(selected.contains("ProjectConfig"));
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     用户上次手动打开过的地址应作为默认预览，即使本机还有其它探测端口。
+    ///     用户上次打开过的自定义端口应作为默认预览，即使本机还有其它探测端口。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     Remembered 与 PortProbe 并存时断言默认选中 Remembered。
+    ///     Remembered :3456 与 PortProbe 并存时断言默认选中 Remembered。
     #[test]
-    fn auto_opens_remembered_target() {
-        let ranked = rank_browser_targets_for_test(vec![
+    fn auto_opens_remembered_custom_port() {
+        let selected = select_from(vec![
             target_for_test(
-                "http://127.0.0.1:3000/",
+                "http://127.0.0.1:3456/",
                 WorkbenchBrowserTargetSource::Remembered,
                 true,
             ),
@@ -927,12 +1071,113 @@ mod tests {
                 WorkbenchBrowserTargetSource::PortProbe,
                 true,
             ),
-        ]);
+        ])
+        .expect("remembered custom port should auto-open");
+        assert!(selected.contains("3456"));
+        assert!(selected.contains("Remembered"));
+    }
 
-        let selected =
-            select_auto_open_browser_target_id(&ranked).expect("remembered should auto-open");
+    /// Business Logic（为什么需要这个测试）:
+    ///     上次误开的 3000 会以 Remembered 落库，不能在没有终端/配置印证时继续默认打开。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     可达 Remembered :3000 仅伴随 PortProbe 时断言不自动打开。
+    #[test]
+    fn does_not_auto_open_remembered_default_probe_port_without_corroboration() {
+        assert_eq!(
+            select_from(vec![
+                target_for_test(
+                    "http://127.0.0.1:3000/",
+                    WorkbenchBrowserTargetSource::Remembered,
+                    true,
+                ),
+                target_for_test(
+                    "http://127.0.0.1:5173/",
+                    WorkbenchBrowserTargetSource::PortProbe,
+                    true,
+                ),
+            ]),
+            None
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Next/Remix 等项目的 3000 若同时出现在 package.json 推断中，仍应自动打开。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Remembered :3000 与同 URL ProjectConfig 并存且可达时断言选中 Remembered。
+    #[test]
+    fn auto_opens_remembered_default_probe_port_when_project_config_corroborates() {
+        let selected = select_from(vec![
+            target_for_test(
+                "http://127.0.0.1:3000/",
+                WorkbenchBrowserTargetSource::Remembered,
+                true,
+            ),
+            target_for_test(
+                "http://127.0.0.1:3000/",
+                WorkbenchBrowserTargetSource::ProjectConfig,
+                false,
+            ),
+            target_for_test(
+                "http://127.0.0.1:3000/",
+                WorkbenchBrowserTargetSource::PortProbe,
+                true,
+            ),
+        ])
+        .expect("corroborated remembered 3000 should auto-open");
         assert!(selected.contains("3000"));
         assert!(selected.contains("Remembered"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     终端已经打出 :3000 时，Remembered 同地址应继续作为默认预览。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Remembered 与 TerminalOutput 同为 :3000 时断言自动打开。
+    #[test]
+    fn auto_opens_remembered_default_probe_port_when_terminal_corroborates() {
+        let selected = select_from(vec![
+            target_for_test(
+                "http://127.0.0.1:3000/",
+                WorkbenchBrowserTargetSource::Remembered,
+                true,
+            ),
+            target_for_test(
+                "http://127.0.0.1:3000/",
+                WorkbenchBrowserTargetSource::TerminalOutput,
+                true,
+            ),
+        ])
+        .expect("terminal-corroborated remembered 3000 should auto-open");
+        assert!(selected.contains("3000"));
+        assert!(selected.contains("Remembered"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     默认探测端口判定必须覆盖 3000/5173/8080，且不能误伤自定义端口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对典型 URL 断言 is_default_probe_url。
+    #[test]
+    fn default_probe_url_covers_common_dev_ports_only() {
+        assert!(is_default_probe_url("http://127.0.0.1:3000/"));
+        assert!(is_default_probe_url("http://127.0.0.1:5173/"));
+        assert!(is_default_probe_url("http://127.0.0.1:8080/"));
+        assert!(!is_default_probe_url("http://127.0.0.1:3456/"));
+    }
+
+    /// 按生产路径选出默认自动打开项。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     单测必须覆盖 rank 合并后丢失 ProjectConfig/Terminal 来源的情况。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先从原始列表收集印证 URL，再 rank，再调用 select_auto_open_browser_target_id。
+    fn select_from(targets: Vec<WorkbenchBrowserTarget>) -> Option<String> {
+        let corroborated = corroborated_browser_urls(&targets);
+        let ranked = rank_browser_targets(targets);
+        select_auto_open_browser_target_id(&ranked, &corroborated)
     }
 
     /// 构造测试用浏览器目标。

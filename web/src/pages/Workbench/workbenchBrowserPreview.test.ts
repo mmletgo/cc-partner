@@ -66,6 +66,26 @@ describe('workbenchBrowserPreview', () => {
       workspaceViewSource.includes('pickAutoOpenWorkbenchBrowserTarget'),
       'WorkbenchBrowserWorkspace must not auto-open the first discovered target when it is only a port probe',
     );
+    assert(
+      workspaceViewSource.includes('styles.targetSource')
+        && workspaceViewSource.includes('styles.targetUrl'),
+      'browser target chips must give the source label and URL separate classes so long URLs cannot stack the source text',
+    );
+
+    const workspaceCss = readFileSync(
+      new URL(
+        '../../components/domain/WorkbenchBrowserWorkspace/WorkbenchBrowserWorkspace.module.css',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    assert(
+      workspaceCss.includes('.targetSource')
+        && workspaceCss.includes('white-space: nowrap')
+        && workspaceCss.includes('.targetUrl')
+        && workspaceCss.includes('text-overflow: ellipsis'),
+      'source label must stay on one line; long display URLs must ellipsis instead of growing the chip height',
+    );
 
     assert.equal(
       canApplyWorkbenchBrowserRequest(
