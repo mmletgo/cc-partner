@@ -241,8 +241,6 @@
         "down": "下方向键",
         "left": "左方向键",
         "right": "右方向键",
-        "page1": "切换到快捷键第 1 页",
-        "page2": "切换到快捷键第 2 页",
         "ctrlC": "Ctrl+C 中断",
         "ctrlD": "Ctrl+D 结束输入",
         "ctrlZ": "Ctrl+Z 挂起",

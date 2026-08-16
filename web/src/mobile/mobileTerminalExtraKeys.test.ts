@@ -32,19 +32,40 @@ function assertTrue(value: boolean, message: string): void {
 }
 
 describe('mobileTerminalExtraKeys', () => {
-  test('page 1 and page 2 expose fixed Termux-like key ids', () => {
-    const page1 = getMobileTerminalExtraKeys(1).map((key) => key.id);
-    const page2 = getMobileTerminalExtraKeys(2).map((key) => key.id);
+  test('exposes a stable, dedup, flat Termux-like key sequence', () => {
+    const ids = getMobileTerminalExtraKeys().map((key) => key.id);
+    // 历史 PAGE 1 / PAGE 2 已合并为单一扁平序列；翻页键（page-1 / page-2）移除；
+    // 用户通过键条容器横向滑动浏览全部键，详见 MobileTerminalExtraKeys.tsx。
     assertEqual(
-      page1.join(','),
-      'esc,shift-tab,slash,up,down,left,right,enter,page-2',
-      'page 1 keys',
+      ids.join(','),
+      [
+        'esc',
+        'shift-tab',
+        'tab',
+        'slash',
+        'up',
+        'down',
+        'left',
+        'right',
+        'enter',
+        'ctrl',
+        'alt',
+        'ctrl-c',
+        'ctrl-d',
+        'ctrl-z',
+        'ctrl-l',
+        'home',
+        'end',
+        'pgup',
+        'pgdn',
+        'cd-up',
+        'ls-la',
+        'clear-snippet',
+      ].join(','),
+      'flat extra keys order',
     );
-    assertEqual(
-      page2.join(','),
-      'ctrl,alt,tab,ctrl-c,ctrl-d,ctrl-z,ctrl-l,home,end,pgup,pgdn,cd-up,ls-la,clear-snippet,page-1',
-      'page 2 keys',
-    );
+    const unique = new Set(ids);
+    assertEqual(unique.size, ids.length, 'extra key ids are unique');
   });
 
   test('control and navigation payloads match PTY sequences', () => {
@@ -119,14 +140,12 @@ describe('mobileTerminalExtraKeys', () => {
   });
 
   test('resolveMobileTerminalExtraKeyPress maps defs to actions', () => {
-    const page1 = getMobileTerminalExtraKeys(1);
-    const page2 = getMobileTerminalExtraKeys(2);
-    const esc = page1.find((key) => key.id === 'esc');
-    const enter = page1.find((key) => key.id === 'enter');
-    const ctrl = page2.find((key) => key.id === 'ctrl');
-    const page2Key = page1.find((key) => key.id === 'page-2');
-    assertTrue(Boolean(esc && enter && ctrl && page2Key), 'required keys present');
-    if (!esc || !enter || !ctrl || !page2Key) return;
+    const keys = getMobileTerminalExtraKeys();
+    const esc = keys.find((key) => key.id === 'esc');
+    const enter = keys.find((key) => key.id === 'enter');
+    const ctrl = keys.find((key) => key.id === 'ctrl');
+    assertTrue(Boolean(esc && enter && ctrl), 'required keys present');
+    if (!esc || !enter || !ctrl) return;
 
     const escResult = resolveMobileTerminalExtraKeyPress(esc);
     assertEqual(escResult.type, 'send', 'esc sends');
@@ -146,11 +165,7 @@ describe('mobileTerminalExtraKeys', () => {
       assertEqual(ctrlResult.modifier, 'ctrl', 'ctrl modifier');
     }
 
-    const pageResult = resolveMobileTerminalExtraKeyPress(page2Key);
-    assertEqual(pageResult.type, 'setPage', 'page switch');
-    if (pageResult.type === 'setPage') {
-      assertEqual(pageResult.page, 2, 'target page 2');
-    }
+    // setPage 分支已随翻页键移除；剩余分支 payload / modifier 仍正确映射。
   });
 
   test('sticky timeout constant is 3 seconds', () => {

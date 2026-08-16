@@ -58,7 +58,6 @@ import {
   resolveMobileTerminalExtraKeyPress,
   toggleStickyModifier,
   type MobileTerminalExtraKeyDef,
-  type MobileTerminalExtraKeyPage,
   type MobileTerminalStickyModifier,
 } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
@@ -184,7 +183,6 @@ export function MobileTerminalPanel({
   const [inputStreamState, setInputStreamState] = useState<MobileTerminalInputStreamState>({
     status: 'connecting',
   });
-  const [extraKeysPage, setExtraKeysPage] = useState<MobileTerminalExtraKeyPage>(1);
   const [stickyModifier, setStickyModifier] = useState<MobileTerminalStickyModifier | null>(null);
   const [favoriteSheetOpen, setFavoriteSheetOpen] = useState<boolean>(false);
   const [promptOptimizerSheetOpen, setPromptOptimizerSheetOpen] = useState<boolean>(false);
@@ -341,10 +339,10 @@ export function MobileTerminalPanel({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   额外键条的 payload/modifier/page 动作需要在面板层统一消化。
+   *   额外键条的 payload/modifier 动作需要在面板层统一消化。
    *
    * Code Logic（这个函数做什么）:
-   *   resolve 键定义 → send / toggle sticky / 翻页；payload 发送不消耗 sticky（与 Termux 独立宏键一致）。
+   *   resolve 键定义 → send / toggle sticky；payload 发送不消耗 sticky（与 Termux 独立宏键一致）。
    */
   const handleExtraKeyPress = useCallback(
     (key: MobileTerminalExtraKeyDef): void => {
@@ -359,9 +357,6 @@ export function MobileTerminalPanel({
         const next = toggleStickyModifier(stickyModifierRef.current, action.modifier);
         armStickyModifier(next.type === 'arm' ? next.modifier : null);
         return;
-      }
-      if (action.type === 'setPage') {
-        setExtraKeysPage(action.page);
       }
     },
     [armStickyModifier, sendTerminalInput],
@@ -1522,7 +1517,6 @@ export function MobileTerminalPanel({
                 busy ||
                 inputStreamState.status !== 'ready'
               }
-              page={extraKeysPage}
               stickyModifier={stickyModifier}
               onKeyPress={handleExtraKeyPress}
             />

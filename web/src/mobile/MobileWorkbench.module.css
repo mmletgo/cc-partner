@@ -1306,6 +1306,14 @@
   border-top: 1px solid var(--terminal-border);
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
+  /*
+   * 全部 extra keys 已合并为单一扁平序列（历史 PAGE 1 / PAGE 2 折叠为同一横向滚动行）。
+   * 启用 scroll-snap 让用户左右滑动后自动对齐按键起始位置，避免半截键停在视口边缘；
+   * `proximity`（非 mandatory）允许用户停在两个键之间的微调位置，保留手动精度。
+   * `scroll-padding-inline` 把 snap 安全区限制在容器内 padding，避免首末键贴边裁切。
+   */
+  scroll-snap-type: x proximity;
+  scroll-padding-inline: var(--space-1);
 }
 
 .mobileTerminalExtraKey {
@@ -1328,16 +1336,13 @@
   transition: all var(--motion-fast) var(--ease-standard);
   touch-action: manipulation;
   user-select: none;
+  scroll-snap-align: start;
 }
 
 .mobileTerminalExtraKey[data-kind='modifier'][data-pressed='true'] {
   color: var(--accent);
   background: var(--accent-soft);
   border-color: var(--accent);
-}
-
-.mobileTerminalExtraKey[data-kind='page'] {
-  color: var(--muted);
 }
 
 .mobileTerminalExtraKey:hover:not(:disabled) {
