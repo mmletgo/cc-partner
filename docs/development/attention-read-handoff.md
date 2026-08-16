@@ -1,6 +1,6 @@
 # 「工作 / 待处理」增强 — 实施进展 Handoff
 
-> 状态: **后端核心已完成 + 单测全绿**;**前端 UI / P2P sync 通道延后到后续 PR**。
+> 状态: **P1–P13 已落地**（含 `attention.read.v1` push-batch）；待 worktree 内验证后提交，**不要自动合并 master**。
 > 计划文件: `/Users/hans/.claude/plans/toasty-orbiting-treehouse.md`
 > Worktree: `.claude/worktrees/feat-attention-read`(`worktree-feat-attention-read` 分支)
 

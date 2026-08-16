@@ -48,5 +48,39 @@
     "label": "Inbox"
   },
   "listAriaLabel": "Attention items",
-  "badgeAriaLabel": "{{count}} attention items"
+  "badgeAriaLabel": "{{count}} attention items",
+  "table": {
+    "headers": {
+      "project": "Project",
+      "device": "Device",
+      "source": "Source",
+      "category": "Category",
+      "updatedAt": "Updated",
+      "title": "Title",
+      "summary": "Summary",
+      "action": "Actions"
+    },
+    "markRead": "Mark as read",
+    "markUnread": "Mark as unread",
+    "markAllRead": "Mark all read",
+    "markCategoryRead": "Mark this category read",
+    "readLabel": "Read",
+    "unreadLabel": "Unread",
+    "open": "Open",
+    "ariaLabel": "Attention items table"
+  },
+  "sources": {
+    "orchestratorHumanReview": "Orchestrator review",
+    "orchestratorBlocked": "Orchestrator blocked",
+    "remoteOutboxFailed": "Remote outbox failed",
+    "workbenchDependency": "Workbench dependency",
+    "agentNeedsInput": "Agent needs input",
+    "agentFailed": "Agent failed",
+    "experimentNeedsDecision": "Experiment needs decision",
+    "agentHubConflict": "Agent Hub conflict",
+    "agentHubProjectionBlocked": "Agent Hub projection blocked"
+  },
+  "markError": "Could not update read state",
+  "markReadAria": "Mark {{title}} as read",
+  "markUnreadAria": "Mark {{title}} as unread"
 }

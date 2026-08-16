@@ -18,6 +18,7 @@ import { useAttention } from '@/hooks/attentionContext';
 import {
   getAttentionActionI18nKey,
   groupAttentionItems,
+  isAttentionItemUnread,
 } from '@/lib/attention';
 import type { AttentionCategory, AttentionItem, AttentionSourceKind } from '@/lib/types';
 import panelStyles from '../MobileWorkbench.module.css';
@@ -99,12 +100,11 @@ function attentionActionLabelKey(
   | 'attention:action.review'
   | 'attention:action.viewBlocked'
   | 'attention:action.viewFailed'
-  | 'attention:action.openSettings' {
-  return getAttentionActionI18nKey(sourceKind) as
-    | 'attention:action.review'
-    | 'attention:action.viewBlocked'
-    | 'attention:action.viewFailed'
-    | 'attention:action.openSettings';
+  | 'attention:action.openSettings'
+  | 'attention:action.openTerminal'
+  | 'attention:action.openExperiment'
+  | 'attention:action.openAgentHub' {
+  return getAttentionActionI18nKey(sourceKind);
 }
 
 /**
@@ -127,6 +127,11 @@ export function MobileAttentionPanel({
     error,
     lastSucceededAt,
     refresh,
+    markRead,
+    markUnread,
+    markAllRead,
+    pendingReadIds,
+    markError,
   } = useAttention();
 
   const groups = useMemo(
@@ -152,6 +157,24 @@ export function MobileAttentionPanel({
       </div>
 
       <div className={styles.headerActions}>
+        {snapshot !== null ? (
+          <button
+            type="button"
+            className={panelStyles.secondaryButton}
+            onClick={() => {
+              void markAllRead();
+            }}
+            disabled={
+              loading ||
+              refreshing ||
+              pendingReadIds.size > 0 ||
+              (snapshot.counts.unreadTotal ?? 0) === 0
+            }
+            data-testid="mobile-attention-mark-all-read"
+          >
+            {t('attention:table.markAllRead')}
+          </button>
+        ) : null}
         <button
           type="button"
           className={panelStyles.secondaryButton}
@@ -163,6 +186,12 @@ export function MobileAttentionPanel({
           {snapshot ? t('attention:refresh') : t('attention:reload')}
         </button>
       </div>
+
+      {markError ? (
+        <p className={`${styles.banner} ${styles.bannerError}`} role="alert">
+          {t('attention:markError')}
+        </p>
+      ) : null}
 
       {notice ? <p className={styles.banner}>{notice}</p> : null}
 
@@ -201,36 +230,71 @@ export function MobileAttentionPanel({
                 {group.items.map((item) => {
                   const meta = projectDeviceLabel(item, t);
                   const actionKey = attentionActionLabelKey(item.sourceKind);
+                  const unread = isAttentionItemUnread(item);
                   return (
                     <li key={item.id}>
-                      <button
-                        type="button"
-                        className={styles.itemButton}
-                        onClick={() => onOpenItem(item)}
+                      <div
+                        className={unread ? styles.itemRow : `${styles.itemRow} ${styles.itemRowRead}`}
+                        data-testid={`attention-item-${item.id}`}
+                        data-read={unread ? 'false' : 'true'}
                       >
-                        <p className={styles.itemTitle}>{item.title}</p>
-                        <p className={styles.itemSummary}>{item.summary}</p>
-                        <div className={styles.metaRow}>
-                          <span className={styles.metaTag}>
-                            {t(categoryLabelKey(item.category))}
-                          </span>
-                          <span className={styles.metaTag}>
-                            {item.freshness === 'cached'
-                              ? t('attention:freshness.cached')
-                              : t('attention:freshness.live')}
-                          </span>
-                          {meta ? <span>{meta}</span> : null}
-                          <span>{formatAttentionTime(item.updatedAt)}</span>
-                          {item.freshness === 'cached' && item.cachedAt ? (
-                            <span>
-                              {t('attention:cachedAt', {
-                                time: formatAttentionTime(item.cachedAt),
-                              })}
+                        <button
+                          type="button"
+                          className={styles.itemButton}
+                          onClick={() => {
+                            if (unread) {
+                              void markRead([item.id]);
+                            }
+                            onOpenItem(item);
+                          }}
+                          data-testid={`attention-action-${item.id}`}
+                        >
+                          <p className={styles.itemTitle}>{item.title}</p>
+                          <p className={styles.itemSummary}>{item.summary}</p>
+                          <div className={styles.metaRow}>
+                            <span className={styles.metaTag}>
+                              {t(categoryLabelKey(item.category))}
                             </span>
-                          ) : null}
-                        </div>
-                        <span className={styles.actionLabel}>{t(actionKey)}</span>
-                      </button>
+                            <span className={styles.metaTag}>
+                              {item.freshness === 'cached'
+                                ? t('attention:freshness.cached')
+                                : t('attention:freshness.live')}
+                            </span>
+                            {meta ? <span>{meta}</span> : null}
+                            <span>{formatAttentionTime(item.updatedAt)}</span>
+                            {item.freshness === 'cached' && item.cachedAt ? (
+                              <span>
+                                {t('attention:cachedAt', {
+                                  time: formatAttentionTime(item.cachedAt),
+                                })}
+                              </span>
+                            ) : null}
+                          </div>
+                          <span className={styles.actionLabel}>{t(actionKey)}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.toggleRead}
+                          onClick={() => {
+                            if (unread) {
+                              void markRead([item.id]);
+                            } else {
+                              void markUnread([item.id]);
+                            }
+                          }}
+                          disabled={pendingReadIds.has(item.id)}
+                          data-testid={`attention-toggle-read-${item.id}`}
+                          aria-label={
+                            unread
+                              ? t('attention:markReadAria', { title: item.title })
+                              : t('attention:markUnreadAria', { title: item.title })
+                          }
+                        >
+                          {unread
+                            ? t('attention:table.markRead')
+                            : t('attention:table.markUnread')}
+                        </button>
+                      </div>
                     </li>
                   );
                 })}

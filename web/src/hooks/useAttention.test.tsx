@@ -57,8 +57,13 @@ function buildSnapshot(
       decision: total,
       blocked: 0,
       environment: 0,
+      unreadTotal: total,
+      unreadDecision: total,
+      unreadBlocked: 0,
+      unreadEnvironment: 0,
     },
     items: overrides.items ?? [],
+    myDeviceId: overrides.myDeviceId ?? 'device-test',
   };
 }
 

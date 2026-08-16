@@ -61,8 +61,18 @@ interface AttentionFixtureItem {
 
 interface AttentionFixtureSnapshot {
   generatedAt: string;
-  counts: { total: number; decision: number; blocked: number; environment: number };
+  counts: {
+    total: number;
+    decision: number;
+    blocked: number;
+    environment: number;
+    unreadTotal: number;
+    unreadDecision: number;
+    unreadBlocked: number;
+    unreadEnvironment: number;
+  };
   items: AttentionFixtureItem[];
+  myDeviceId: string;
 }
 
 /**
@@ -100,15 +110,25 @@ function buildSnapshot(
   items: AttentionFixtureItem[],
   generatedAt = '2026-07-11T12:05:00.000Z',
 ): AttentionFixtureSnapshot {
+  const decision = items.filter((item) => item.category === 'decision');
+  const blocked = items.filter((item) => item.category === 'blocked');
+  const environment = items.filter((item) => item.category === 'environment');
+  const unread = (list: AttentionFixtureItem[]) =>
+    list.filter((item) => !('readAt' in item) || item.readAt == null).length;
   return {
     generatedAt,
     counts: {
       total: items.length,
-      decision: items.filter((item) => item.category === 'decision').length,
-      blocked: items.filter((item) => item.category === 'blocked').length,
-      environment: items.filter((item) => item.category === 'environment').length,
+      decision: decision.length,
+      blocked: blocked.length,
+      environment: environment.length,
+      unreadTotal: unread(items),
+      unreadDecision: unread(decision),
+      unreadBlocked: unread(blocked),
+      unreadEnvironment: unread(environment),
     },
     items,
+    myDeviceId: 'e2e-device',
   };
 }
 
@@ -185,13 +205,23 @@ async function installAttentionDesktopMocks(
 
     // currentSnapshot 是稳定真源；React StrictMode 双挂载/轮询都复用它，
     // 不会像 queue.shift 那样被二次 mount 提前消费掉「下一次」快照。
-    let currentSnapshot =
+    let currentSnapshot: unknown =
       Array.isArray(snapshots) && snapshots.length > 0
         ? snapshots[0]
         : {
             generatedAt: '1970-01-01T00:00:00.000Z',
-            counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+            counts: {
+              total: 0,
+              decision: 0,
+              blocked: 0,
+              environment: 0,
+              unreadTotal: 0,
+              unreadDecision: 0,
+              unreadBlocked: 0,
+              unreadEnvironment: 0,
+            },
             items: [],
+            myDeviceId: 'e2e-device',
           };
     /** true 时 list_attention_items 持续失败，直到 setFailNext(false)。 */
     let failMode = false;
@@ -221,7 +251,7 @@ async function installAttentionDesktopMocks(
         currentWindow: { label: 'main' },
         currentWebview: { windowLabel: 'main', label: 'main' },
       },
-      invoke: async (cmd: string) => {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
         if (cmd === 'plugin:event|listen') return 1;
         if (cmd === 'plugin:event|unlisten') return undefined;
         if (cmd === 'get_version') return { version: '0.0.0-test' };
@@ -271,11 +301,53 @@ async function installAttentionDesktopMocks(
             statusChangedAt: '2026-07-11T00:00:00.000Z',
           };
         }
-        if (cmd === 'list_attention_items') {
+        if (cmd === 'list_attention_items' || cmd === 'list_attention_items_v2') {
           listCallCount += 1;
           if (failMode) {
             throw new Error('attention load failed');
           }
+          return currentSnapshot;
+        }
+        if (
+          cmd === 'mark_attention_items_read' ||
+          cmd === 'mark_attention_items_unread' ||
+          cmd === 'mark_all_attention_items_read' ||
+          cmd === 'mark_attention_category_read'
+        ) {
+          const snapshot = currentSnapshot as {
+            items: Array<{ id: string; category: string; readAt?: string | null }>;
+            counts: Record<string, number>;
+            generatedAt: string;
+            myDeviceId?: string;
+          } | null;
+          if (!snapshot || !Array.isArray(snapshot.items)) {
+            return currentSnapshot;
+          }
+          const ids = new Set(
+            cmd === 'mark_all_attention_items_read'
+              ? snapshot.items.map((item) => item.id)
+              : cmd === 'mark_attention_category_read'
+                ? snapshot.items
+                    .filter((item) => item.category === args?.category)
+                    .map((item) => item.id)
+                : Array.isArray(args?.itemIds)
+                  ? (args.itemIds as string[])
+                  : [],
+          );
+          const read = cmd !== 'mark_attention_items_unread';
+          const now = '2026-07-11T13:00:00.000Z';
+          snapshot.items = snapshot.items.map((item) =>
+            ids.has(item.id) ? { ...item, readAt: read ? now : undefined } : item,
+          );
+          const unread = snapshot.items.filter((item) => !item.readAt);
+          snapshot.counts = {
+            ...snapshot.counts,
+            unreadTotal: unread.length,
+            unreadDecision: unread.filter((item) => item.category === 'decision').length,
+            unreadBlocked: unread.filter((item) => item.category === 'blocked').length,
+            unreadEnvironment: unread.filter((item) => item.category === 'environment').length,
+          };
+          currentSnapshot = snapshot;
           return currentSnapshot;
         }
         if (cmd === 'get_config' || cmd === 'get_default_config') {
@@ -435,8 +507,18 @@ test.describe('Global Inbox attention', () => {
       window.__attentionTestApi?.setSnapshots([
         {
           generatedAt: '2026-07-11T12:30:00.000Z',
-          counts: { total: 1, decision: 0, blocked: 0, environment: 1 },
+          counts: {
+            total: 1,
+            decision: 0,
+            blocked: 0,
+            environment: 1,
+            unreadTotal: 1,
+            unreadDecision: 0,
+            unreadBlocked: 0,
+            unreadEnvironment: 1,
+          },
           items: [item],
+          myDeviceId: 'e2e-device',
         },
       ]);
       window.__attentionTestApi?.requestInvalidation();
@@ -502,10 +584,9 @@ test.describe('Global Inbox attention', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect(page.getByTestId(`attention-item-${HUMAN_REVIEW.id}`)).toBeVisible();
 
-    // 每行仅一个 button（动作文案是 visual span）；整行可聚焦即可证明键盘可达。
-    const item = page.getByTestId(`attention-item-${HUMAN_REVIEW.id}`);
-    await item.focus();
-    await expect(item).toBeFocused();
+    const action = page.getByTestId(`attention-action-${HUMAN_REVIEW.id}`);
+    await action.focus();
+    await expect(action).toBeFocused();
   });
 
   test('settings dependency target navigates to settings tab', async ({ page }) => {

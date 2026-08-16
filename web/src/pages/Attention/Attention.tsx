@@ -2,26 +2,28 @@
  * Attention 桌面 Inbox 页面。
  *
  * Business Logic（为什么需要这个页面）:
- *   用户需要在一个独立页面查看当前阻塞工作继续的事项，并从列表导航到
- *   Orchestrator 任务详情 / outbox / Settings 依赖页，而不是在列表内执行副作用动作。
+ *   用户需要在一个独立页面用表格查看当前阻塞工作继续的事项，标已读/未读，
+ *   并从操作列导航到权威界面，而不是在列表内执行 Deliver/Retry。
  *
  * Code Logic（这个页面做什么）:
- *   读取共享 AttentionProvider 快照；按分组渲染列表；点击行或动作控件仅 navigate；
- *   初次 loading 骨架、初次 error 可重载、stale 横幅保留列表、空态无庆祝/指标。
+ *   读取共享 AttentionProvider 快照；8 列表格按分组渲染；打开条目同时标已读；
+ *   顶部全部已读 + 分类已读；已读行灰显保留。
  */
 
 import { useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
-import { Button } from '@/components/primitives';
+import { Button, StatusMessage } from '@/components/primitives';
 import { workbenchApi } from '@/api/workbench';
 import { useAttention } from '@/hooks/useAttention';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import {
   buildDesktopAttentionTargetUrl,
   getAttentionActionI18nKey,
+  getAttentionSourceI18nKey,
   groupAttentionItems,
+  isAttentionItemUnread,
 } from '@/lib/attention';
 import type { AttentionCategory, AttentionItem, AttentionSnapshot } from '@/lib/types';
 import {
@@ -37,7 +39,7 @@ import styles from './Attention.module.css';
  *   视图契约测试应直接注入状态，避免耦合 Provider 异步与路由。
  *
  * Code Logic（字段说明）:
- *   镜像 AttentionContext 的展示字段，并提供 onNavigate / onReload。
+ *   镜像 AttentionContext 的展示字段，并提供导航与已读写回调。
  */
 export interface AttentionViewProps {
   snapshot: AttentionSnapshot | null;
@@ -46,8 +48,14 @@ export interface AttentionViewProps {
   stale: boolean;
   error: Error | null;
   lastSucceededAt: string | null;
+  pendingReadIds: ReadonlySet<string>;
+  markError: Error | null;
   onReload: () => void;
   onNavigate: (url: string) => void;
+  onMarkRead: (itemIds: string[]) => void;
+  onMarkUnread: (itemIds: string[]) => void;
+  onMarkAllRead: () => void;
+  onMarkCategoryRead: (category: AttentionCategory) => void;
   formatTime?: (iso: string) => string;
 }
 
@@ -56,6 +64,17 @@ const CATEGORY_I18N = {
   blocked: 'attention:groups.blocked',
   environment: 'attention:groups.environment',
 } as const satisfies Record<AttentionCategory, string>;
+
+const TABLE_HEADERS = [
+  { key: 'project', labelKey: 'attention:table.headers.project' },
+  { key: 'device', labelKey: 'attention:table.headers.device' },
+  { key: 'source', labelKey: 'attention:table.headers.source' },
+  { key: 'category', labelKey: 'attention:table.headers.category' },
+  { key: 'updatedAt', labelKey: 'attention:table.headers.updatedAt' },
+  { key: 'title', labelKey: 'attention:table.headers.title' },
+  { key: 'summary', labelKey: 'attention:table.headers.summary' },
+  { key: 'action', labelKey: 'attention:table.headers.action' },
+] as const;
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -77,11 +96,10 @@ function defaultFormatTime(iso: string, language: string): string {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   桌面 Inbox 需要独立、可测试的列表视图，固定三组语义与导航-only 动作。
+ *   桌面 Inbox 需要独立、可测试的表格视图，固定 8 列与导航-only 动作。
  *
  * Code Logic（这个组件做什么）:
- *   按 loading/error/empty/list 分支渲染；不使用 assertive 整表 live region；
- *   空组不渲染；每行仅一个 button（动作文案为内部 span），禁止嵌套可交互控件。
+ *   按 loading/error/empty/table 分支渲染；已读灰显；操作列拆成打开 + 已读切换。
  */
 export function AttentionView({
   snapshot,
@@ -90,8 +108,14 @@ export function AttentionView({
   stale,
   error,
   lastSucceededAt,
+  pendingReadIds,
+  markError,
   onReload,
   onNavigate,
+  onMarkRead,
+  onMarkUnread,
+  onMarkAllRead,
+  onMarkCategoryRead,
   formatTime,
 }: AttentionViewProps) {
   const { t, i18n } = useTranslation(['attention', 'common']);
@@ -108,19 +132,42 @@ export function AttentionView({
   const showSkeleton = loading && snapshot === null && error === null;
   const showFirstError = snapshot === null && error !== null && !loading;
   const showEmpty = snapshot !== null && snapshot.items.length === 0 && !showFirstError;
+  const unreadTotal = snapshot?.counts.unreadTotal ?? 0;
+  const markingBusy = pendingReadIds.size > 0;
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   行点击与动作控件共用导航，禁止在列表内执行 Deliver/Retry 等副作用。
+   *   打开权威界面后该条不应继续占未读徽章。
    *
    * Code Logic（这个函数做什么）:
-   *   用语义 target 构造桌面 URL 并回调 onNavigate。
+   *   未读则 fire-and-forget markRead，再导航。
    */
   const handleOpenItem = useCallback(
     (item: AttentionItem) => {
+      if (isAttentionItemUnread(item)) {
+        onMarkRead([item.id]);
+      }
       onNavigate(buildDesktopAttentionTargetUrl(item.target));
     },
-    [onNavigate],
+    [onMarkRead, onNavigate],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   已读切换必须与打开按钮分离，避免误导航。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按当前 readAt 调用 markRead 或 markUnread。
+   */
+  const handleToggleRead = useCallback(
+    (item: AttentionItem) => {
+      if (isAttentionItemUnread(item)) {
+        onMarkRead([item.id]);
+        return;
+      }
+      onMarkUnread([item.id]);
+    },
+    [onMarkRead, onMarkUnread],
   );
 
   return (
@@ -133,15 +180,26 @@ export function AttentionView({
               <p className={styles.subtitle}>{t('attention:subtitle')}</p>
             </div>
             {snapshot !== null ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={onReload}
-                disabled={refreshing || loading}
-              >
-                {t('attention:refresh')}
-              </Button>
+              <div className={styles.headerActions}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={onMarkAllRead}
+                  disabled={refreshing || loading || markingBusy || unreadTotal === 0}
+                >
+                  {t('attention:table.markAllRead')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={onReload}
+                  disabled={refreshing || loading}
+                >
+                  {t('attention:refresh')}
+                </Button>
+              </div>
             ) : null}
           </div>
           {lastSucceededAt && snapshot !== null ? (
@@ -150,6 +208,12 @@ export function AttentionView({
             </p>
           ) : null}
         </header>
+
+        {markError ? (
+          <StatusMessage tone="danger" data-testid="attention-mark-error">
+            {t('attention:markError')}
+          </StatusMessage>
+        ) : null}
 
         {stale && snapshot !== null ? (
           <div className={styles.banner} data-testid="attention-stale-banner" role="status">
@@ -185,70 +249,134 @@ export function AttentionView({
 
         {snapshot !== null && groups.length > 0 ? (
           <div className={styles.groups} data-testid="attention-groups">
-            {groups.map((group) => (
-              <section
-                key={group.category}
-                className={styles.group}
-                aria-labelledby={`attention-group-${group.category}`}
-                data-testid={`attention-group-${group.category}`}
-              >
-                <h2 id={`attention-group-${group.category}`} className={styles.groupTitle}>
-                  {t(CATEGORY_I18N[group.category])}
-                </h2>
-                <ul className={styles.list} role="list">
-                  {group.items.map((item) => {
-                    const actionLabel = t(getAttentionActionI18nKey(item.sourceKind));
-                    return (
-                      <li key={item.id}>
-                        <button
-                          type="button"
-                          className={styles.item}
-                          data-testid={`attention-item-${item.id}`}
-                          onClick={() => handleOpenItem(item)}
+            {groups.map((group) => {
+              const unreadInGroup =
+                group.category === 'decision'
+                  ? snapshot.counts.unreadDecision
+                  : group.category === 'blocked'
+                    ? snapshot.counts.unreadBlocked
+                    : snapshot.counts.unreadEnvironment;
+              return (
+                <section
+                  key={group.category}
+                  className={styles.group}
+                  aria-labelledby={`attention-group-${group.category}`}
+                  data-testid={`attention-group-${group.category}`}
+                >
+                  <div className={styles.groupHeader}>
+                    <h2 id={`attention-group-${group.category}`} className={styles.groupTitle}>
+                      {t(CATEGORY_I18N[group.category])}
+                    </h2>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onMarkCategoryRead(group.category)}
+                      disabled={markingBusy || unreadInGroup === 0}
+                      data-testid={`attention-mark-category-${group.category}`}
+                    >
+                      {t('attention:table.markCategoryRead')}
+                    </Button>
+                  </div>
+                  <div
+                    className={styles.table}
+                    role="table"
+                    aria-label={t('attention:table.ariaLabel')}
+                  >
+                    <div className={styles.headerRow} role="row">
+                      {TABLE_HEADERS.map((column) => (
+                        <div
+                          key={column.key}
+                          className={styles.headerCell}
+                          role="columnheader"
                         >
-                          <div className={styles.itemBody}>
-                            <h3 className={styles.itemTitle}>{item.title}</h3>
-                            <p className={styles.itemSummary}>{item.summary}</p>
-                            <div className={styles.metaRow}>
-                              {item.project ? (
-                                <span className={styles.metaChip}>
-                                  {t('attention:projectLabel', { name: item.project.name })}
-                                </span>
-                              ) : null}
-                              {item.device ? (
-                                <span className={styles.metaChip}>
-                                  {t('attention:deviceLabel', { name: item.device.name })}
-                                </span>
-                              ) : null}
-                              <span className={styles.metaChip}>{format(item.updatedAt)}</span>
-                              {item.freshness === 'cached' ? (
-                                <span
-                                  className={styles.metaChip}
-                                  data-testid={`attention-cached-${item.id}`}
-                                >
-                                  {t('attention:cachedLabel', {
-                                    time: format(item.cachedAt ?? item.updatedAt),
-                                  })}
-                                </span>
-                              ) : (
-                                <span className={styles.metaChip}>{t('attention:liveLabel')}</span>
-                              )}
-                            </div>
+                          {t(column.labelKey)}
+                        </div>
+                      ))}
+                    </div>
+                    {group.items.map((item) => {
+                      const unread = isAttentionItemUnread(item);
+                      const pending = pendingReadIds.has(item.id);
+                      const actionLabel = t(getAttentionActionI18nKey(item.sourceKind));
+                      const rowClass = unread
+                        ? styles.itemRow
+                        : `${styles.itemRow} ${styles.itemRowRead}`;
+                      return (
+                        <div
+                          key={item.id}
+                          className={rowClass}
+                          role="row"
+                          data-testid={`attention-item-${item.id}`}
+                          data-read={unread ? 'false' : 'true'}
+                        >
+                          <div className={styles.cell} role="cell">
+                            {item.project?.name ?? '—'}
                           </div>
-                          <span
-                            className={styles.action}
-                            data-testid={`attention-action-${item.id}`}
-                            aria-hidden="true"
-                          >
-                            {actionLabel}
-                          </span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </section>
-            ))}
+                          <div className={styles.cell} role="cell">
+                            {item.device?.name ?? '—'}
+                          </div>
+                          <div className={styles.cell} role="cell">
+                            {t(getAttentionSourceI18nKey(item.sourceKind))}
+                          </div>
+                          <div className={styles.cell} role="cell">
+                            {t(CATEGORY_I18N[item.category])}
+                          </div>
+                          <div className={styles.cell} role="cell">
+                            <span>{format(item.updatedAt)}</span>
+                            {item.freshness === 'cached' ? (
+                              <span
+                                className={styles.freshness}
+                                data-testid={`attention-cached-${item.id}`}
+                              >
+                                {t('attention:cachedLabel', {
+                                  time: format(item.cachedAt ?? item.updatedAt),
+                                })}
+                              </span>
+                            ) : (
+                              <span className={styles.freshness}>{t('attention:liveLabel')}</span>
+                            )}
+                          </div>
+                          <div className={`${styles.cell} ${styles.titleCell}`} role="cell">
+                            {item.title}
+                          </div>
+                          <div className={styles.cell} role="cell">
+                            {item.summary}
+                          </div>
+                          <div className={`${styles.cell} ${styles.actionCell}`} role="cell">
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleOpenItem(item)}
+                              data-testid={`attention-action-${item.id}`}
+                            >
+                              {actionLabel}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleToggleRead(item)}
+                              disabled={pending}
+                              data-testid={`attention-toggle-read-${item.id}`}
+                              aria-label={
+                                unread
+                                  ? t('attention:markReadAria', { title: item.title })
+                                  : t('attention:markUnreadAria', { title: item.title })
+                              }
+                            >
+                              {unread
+                                ? t('attention:table.markRead')
+                                : t('attention:table.markUnread')}
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })}
           </div>
         ) : null}
       </div>
@@ -261,11 +389,25 @@ export function AttentionView({
  *   路由页需要挂接 Provider 状态与 React Router 导航。
  *
  * Code Logic（这个组件做什么）:
- *   读取 useAttention，把状态传给 AttentionView；navigate 到 target URL。
+ *   读取 useAttention，把状态传给 AttentionView；打开条目走 deep link。
  */
 export function Attention() {
   const navigate = useNavigate();
-  const { snapshot, loading, refreshing, stale, error, lastSucceededAt, refresh } = useAttention();
+  const {
+    snapshot,
+    loading,
+    refreshing,
+    stale,
+    error,
+    lastSucceededAt,
+    refresh,
+    markRead,
+    markUnread,
+    markAllRead,
+    markCategoryRead,
+    pendingReadIds,
+    markError,
+  } = useAttention();
   const { currentWindowLabel, occupancy } = useWorkbenchProjects();
 
   const handleReload = useCallback(() => {
@@ -292,6 +434,31 @@ export function Attention() {
     [currentWindowLabel, navigate, occupancy],
   );
 
+  const handleMarkRead = useCallback(
+    (itemIds: string[]) => {
+      void markRead(itemIds);
+    },
+    [markRead],
+  );
+
+  const handleMarkUnread = useCallback(
+    (itemIds: string[]) => {
+      void markUnread(itemIds);
+    },
+    [markUnread],
+  );
+
+  const handleMarkAllRead = useCallback(() => {
+    void markAllRead();
+  }, [markAllRead]);
+
+  const handleMarkCategoryRead = useCallback(
+    (category: AttentionCategory) => {
+      void markCategoryRead(category);
+    },
+    [markCategoryRead],
+  );
+
   return (
     <AttentionView
       snapshot={snapshot}
@@ -300,8 +467,14 @@ export function Attention() {
       stale={stale}
       error={error}
       lastSucceededAt={lastSucceededAt}
+      pendingReadIds={pendingReadIds}
+      markError={markError}
       onReload={handleReload}
       onNavigate={handleNavigate}
+      onMarkRead={handleMarkRead}
+      onMarkUnread={handleMarkUnread}
+      onMarkAllRead={handleMarkAllRead}
+      onMarkCategoryRead={handleMarkCategoryRead}
     />
   );
 }

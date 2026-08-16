@@ -120,7 +120,9 @@ export function AppShell({ children }: AppShellProps) {
   // 从 /api/version 动态获取，前端不再硬编码，避免发版漏改导致版本不一致。
   const version = useAppVersion();
   const { snapshot: attentionSnapshot } = useAttention();
-  const attentionBadge = formatAttentionBadgeCount(attentionSnapshot?.counts.total ?? 0);
+  const attentionBadge = formatAttentionBadgeCount(
+    attentionSnapshot?.counts.unreadTotal ?? 0,
+  );
   // 传入命名空间数组,让 react-i18next v17 的 t() 类型校验 ns:key 形式
   // (无参时 t() 只接受 defaultNS 即 common 的扁平 key,'nav:*' 会类型报错)
   const { t } = useTranslation(['common', 'nav', 'settings', 'wordgame']);

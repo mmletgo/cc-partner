@@ -8,15 +8,37 @@
 //!     `GET /api/mobile/attention` 委托 `list_attention_items_for_state`；
 //!     使用 P2pRequestContext/P2pError 信封；不递归请求其它设备的 attention 聚合。
 
-use crate::attention::models::AttentionSnapshotDto;
+use crate::attention::models::{AttentionCategory, AttentionSnapshotDto};
 use crate::commands::attention::{
     list_attention_items_for_state, list_attention_items_v2_for_state,
+    mark_all_attention_items_read_for_state, mark_attention_category_read_for_state,
+    mark_attention_items_read_for_state, mark_attention_items_unread_for_state,
 };
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use crate::sync::attention_read_apply::{
+    apply_attention_read_push_batch, attention_read_batch_payload_hash, AttentionReadPushBatchReq,
+    AttentionReadPushBatchResp, ATTENTION_CHANGED_EVENT,
+};
 use axum::extract::{Extension, State};
 use axum::Json;
+use serde::Deserialize;
+use serde_json::json;
+
+/// Mobile 批量标已读/未读请求。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkAttentionItemsRequest {
+    pub item_ids: Vec<String>,
+}
+
+/// Mobile 按分类已读请求。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkAttentionCategoryRequest {
+    pub category: AttentionCategory,
+}
 
 /// Business Logic（为什么需要这个函数）:
 ///     手机 Inbox 需要通过同源 HTTP 读取本机聚合快照；本路由只聚合当前 backend 的项目，
@@ -49,12 +71,119 @@ pub async fn list_attention_v2(
     Ok(Json(snapshot))
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     手机 Inbox 标已读必须写本机仓储，不能只改前端。
+///
+/// Code Logic（这个函数做什么）:
+///     POST body `{itemIds}`，委托 mark_attention_items_read_for_state。
+pub async fn mark_attention_read(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<MarkAttentionItemsRequest>,
+) -> P2pResult<Json<AttentionSnapshotDto>> {
+    let snapshot = mark_attention_items_read_for_state(&state, body.item_ids)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.mark_read"))?;
+    Ok(Json(snapshot))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手机单条撤销已读。
+///
+/// Code Logic（这个函数做什么）:
+///     POST body `{itemIds}`，委托 mark_attention_items_unread_for_state。
+pub async fn mark_attention_unread(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<MarkAttentionItemsRequest>,
+) -> P2pResult<Json<AttentionSnapshotDto>> {
+    let snapshot = mark_attention_items_unread_for_state(&state, body.item_ids)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.mark_unread"))?;
+    Ok(Json(snapshot))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手机顶部「全部已读」。
+///
+/// Code Logic（这个函数做什么）:
+///     POST 空对象，委托 mark_all_attention_items_read_for_state。
+pub async fn mark_all_attention_read(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<AttentionSnapshotDto>> {
+    let snapshot = mark_all_attention_items_read_for_state(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.mark_all_read"))?;
+    Ok(Json(snapshot))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     手机按分类清未读。
+///
+/// Code Logic（这个函数做什么）:
+///     POST body `{category}`，委托 mark_attention_category_read_for_state。
+pub async fn mark_attention_category_read(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<MarkAttentionCategoryRequest>,
+) -> P2pResult<Json<AttentionSnapshotDto>> {
+    let snapshot = mark_attention_category_read_for_state(&state, body.category)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.mark_category_read"))?;
+    Ok(Json(snapshot))
+}
+
+/// POST /api/sync/attention-read/push-batch：对端推送已读/未读元数据。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跨设备已读必须走 sync ledger，不能复用 mobile mark-*（后者写的是本机用户手势）。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 client_request_id → payload hash → apply_attention_read_push_batch → emit 刷新。
+pub async fn attention_read_push_batch(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<AttentionReadPushBatchReq>,
+) -> P2pResult<Json<AttentionReadPushBatchResp>> {
+    let accepted = attention_read_push_batch_impl(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.read_push_batch"))?;
+    state.emit_event(ATTENTION_CHANGED_EVENT, json!({ "reason": "read-sync" }));
+    Ok(Json(AttentionReadPushBatchResp { accepted }))
+}
+
+/// push-batch 业务实现（可单测）。
+async fn attention_read_push_batch_impl(
+    state: &AppState,
+    req: AttentionReadPushBatchReq,
+) -> Result<usize, crate::error::AppError> {
+    let client_request_id = req.client_request_id.trim().to_string();
+    if client_request_id.is_empty() {
+        return Err(crate::error::AppError::validation(
+            "client_request_id 不能为空",
+        ));
+    }
+    let claimed_device_id = req.claimed_device_id.trim().to_string();
+    let payload_hash = attention_read_batch_payload_hash(&req.items);
+    let outcome = apply_attention_read_push_batch(
+        state.attention_read_repo.as_ref(),
+        state.device_id.as_str(),
+        &claimed_device_id,
+        &client_request_id,
+        &payload_hash,
+        &req.items,
+    )
+    .await?;
+    Ok(outcome.accepted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::net::protocol::{
-        server_protocol_info, PeerProtocolInfo, CAPABILITY_ATTENTION_V1,
-        CAPABILITY_ERRORS_ENVELOPE_V1, PROTOCOL_VERSION_V1,
+        server_protocol_info, PeerProtocolInfo, CAPABILITY_ATTENTION_READ_V1,
+        CAPABILITY_ATTENTION_V1, CAPABILITY_ERRORS_ENVELOPE_V1, PROTOCOL_VERSION_V1,
     };
     use crate::net::request_context::P2pRequestContext;
 
@@ -126,6 +255,10 @@ mod tests {
         assert!(
             info.supports(CAPABILITY_ATTENTION_V1),
             "本机必须宣告 attention.v1，与 HTTP 路由同提交落地"
+        );
+        assert!(
+            info.supports(CAPABILITY_ATTENTION_READ_V1),
+            "本机必须宣告 attention.read.v1，与 push-batch 路由同提交落地"
         );
         assert!(info.supports(CAPABILITY_ERRORS_ENVELOPE_V1));
     }

@@ -109,7 +109,7 @@ pub(crate) fn project_workbench_dependency(
         target: AttentionTargetDto::Settings {
             tab: AttentionSettingsTab::Dependencies,
         },
-        read_at: None
+        read_at: None,
     })
 }
 

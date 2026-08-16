@@ -228,7 +228,7 @@ mod tests {
                 name: "local".to_string(),
             }),
             target,
-            read_at: None
+            read_at: None,
         }
     }
 

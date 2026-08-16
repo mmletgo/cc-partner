@@ -48,5 +48,39 @@
     "label": "待处理"
   },
   "listAriaLabel": "待处理事项列表",
-  "badgeAriaLabel": "待处理 {{count}} 项"
+  "badgeAriaLabel": "待处理 {{count}} 项",
+  "table": {
+    "headers": {
+      "project": "项目",
+      "device": "设备",
+      "source": "来源",
+      "category": "分类",
+      "updatedAt": "时间",
+      "title": "标题",
+      "summary": "摘要",
+      "action": "操作"
+    },
+    "markRead": "标为已读",
+    "markUnread": "标为未读",
+    "markAllRead": "全部已读",
+    "markCategoryRead": "标记该类已读",
+    "readLabel": "已读",
+    "unreadLabel": "未读",
+    "open": "打开",
+    "ariaLabel": "待处理事项表格"
+  },
+  "sources": {
+    "orchestratorHumanReview": "编排复核",
+    "orchestratorBlocked": "编排阻塞",
+    "remoteOutboxFailed": "远端发件失败",
+    "workbenchDependency": "工作台依赖",
+    "agentNeedsInput": "Agent 等待输入",
+    "agentFailed": "Agent 失败",
+    "experimentNeedsDecision": "实验待决策",
+    "agentHubConflict": "Agent Hub 冲突",
+    "agentHubProjectionBlocked": "Agent Hub 投影阻塞"
+  },
+  "markError": "无法更新已读状态",
+  "markReadAria": "将 {{title}} 标为已读",
+  "markUnreadAria": "将 {{title}} 标为未读"
 }

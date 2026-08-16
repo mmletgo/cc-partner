@@ -28,7 +28,6 @@ use std::sync::Arc;
 /// Code Logic: 字段 `db: SqlitePool` + `gate: Arc<DatabaseMaintenanceGate>`。
 pub struct AttentionReadRepo {
     db: SqlitePool,
-    #[allow(dead_code)] // 保留字段以备未来直接取 lease（与 SyncRequestLedgerRepo 保持对称）
     gate: Arc<DatabaseMaintenanceGate>,
 }
 
@@ -48,6 +47,14 @@ impl AttentionReadRepo {
     #[allow(dead_code)] // intentional public API for tx assembly / tests
     pub fn pool(&self) -> &SqlitePool {
         &self.db
+    }
+
+    /// 暴露共享 gate（供 push-batch ledger 与域仓储对齐屏障）。
+    ///
+    /// Business Logic: ledger 必须与 attention_read 写路径共用同一 gate，否则 restore 独占可被旁路。
+    /// Code Logic: clone Arc。
+    pub fn gate(&self) -> Arc<DatabaseMaintenanceGate> {
+        self.gate.clone()
     }
 
     /// 幂等建表。
@@ -79,11 +86,16 @@ impl AttentionReadRepo {
     /// Business Logic: 聚合阶段调用；返回本设备已读集合。
     ///     跨设备隔离由 `WHERE device_id = ?` 保证（PRIMARY KEY 虽含 device_id 但需要索引覆盖）。
     /// Code Logic: 单 SELECT，row.item_id / row.read_at 收集到 HashMap。
-    pub async fn load_read_ids(&self, device_id: &str) -> Result<HashMap<String, String>, AppError> {
-        let rows = sqlx::query("SELECT item_id, read_at FROM attention_read_by_device WHERE device_id = ?")
-            .bind(device_id)
-            .fetch_all(&self.db)
-            .await?;
+    pub async fn load_read_ids(
+        &self,
+        device_id: &str,
+    ) -> Result<HashMap<String, String>, AppError> {
+        let rows = sqlx::query(
+            "SELECT item_id, read_at FROM attention_read_by_device WHERE device_id = ?",
+        )
+        .bind(device_id)
+        .fetch_all(&self.db)
+        .await?;
         let mut map = HashMap::with_capacity(rows.len());
         for row in rows {
             let item_id: String = row.try_get("item_id")?;
@@ -269,7 +281,11 @@ mod tests {
         AttentionReadRepo::mark_read_on_tx(
             &mut tx,
             "device-a",
-            &["item-1".to_string(), "item-2".to_string(), "item-3".to_string()],
+            &[
+                "item-1".to_string(),
+                "item-2".to_string(),
+                "item-3".to_string(),
+            ],
             "2026-08-16T10:00:00Z",
         )
         .await
@@ -344,8 +360,9 @@ mod tests {
             AttentionReadRepo::mark_read_on_tx(&mut tx, "device-a", &[], "2026-08-16T10:00:00Z")
                 .await
                 .unwrap();
-        let removed =
-            AttentionReadRepo::mark_unread_on_tx(&mut tx, "device-a", &[]).await.unwrap();
+        let removed = AttentionReadRepo::mark_unread_on_tx(&mut tx, "device-a", &[])
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         assert_eq!(written, 0);
         assert_eq!(removed, 0);

@@ -134,34 +134,56 @@ export const attentionItemDecoder: Decoder<AttentionItem> = objectDecoder('Atten
   project: attentionProjectDecoder,
   device: attentionDeviceDecoder,
   target: attentionTargetDecoder,
+  readAt: optionalDecoder(nullableDecoder(stringDecoder)),
 });
 
 /**
  * Business Logic（为什么需要这个 decoder）:
- *   badge 与空态依赖 counts 四字段完整。
+ *   badge 用 unreadTotal；旧后端缺 unread_* 时回落 0，避免 fail-closed 抹掉 Inbox。
  *
  * Code Logic（这个 decoder 做什么）:
- *   解码 total/decision/blocked/environment 有限 number。
+ *   解码 total/decision/blocked/environment 与四类 unread；缺失 unread 注入 0。
  */
-export const attentionCountsDecoder: Decoder<AttentionCounts> = objectDecoder('AttentionCounts', {
-  total: numberDecoder,
-  decision: numberDecoder,
-  blocked: numberDecoder,
-  environment: numberDecoder,
-});
+export const attentionCountsDecoder: Decoder<AttentionCounts> = objectDecoder<AttentionCounts>(
+  'AttentionCounts',
+  {
+    total: numberDecoder,
+    decision: numberDecoder,
+    blocked: numberDecoder,
+    environment: numberDecoder,
+    unreadTotal: numberDecoder,
+    unreadDecision: numberDecoder,
+    unreadBlocked: numberDecoder,
+    unreadEnvironment: numberDecoder,
+  },
+  {
+    defaults: {
+      unreadTotal: 0,
+      unreadDecision: 0,
+      unreadBlocked: 0,
+      unreadEnvironment: 0,
+    },
+  },
+);
 
 /**
  * Business Logic（为什么需要这个 decoder）:
  *   Provider 以完整 snapshot 为单位缓存，部分列表不得进入状态。
  *
  * Code Logic（这个 decoder 做什么）:
- *   解码 generatedAt + counts + items[]。
+ *   解码 generatedAt + counts + items[] + myDeviceId（旧后端缺省空串）。
  */
-export const attentionSnapshotDecoder: Decoder<AttentionSnapshot> = objectDecoder(
+export const attentionSnapshotDecoder: Decoder<AttentionSnapshot> = objectDecoder<AttentionSnapshot>(
   'AttentionSnapshot',
   {
     generatedAt: stringDecoder,
     counts: attentionCountsDecoder,
     items: arrayDecoder(attentionItemDecoder),
+    myDeviceId: stringDecoder,
+  },
+  {
+    defaults: {
+      myDeviceId: '',
+    },
   },
 );

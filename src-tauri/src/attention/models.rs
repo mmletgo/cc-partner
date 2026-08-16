@@ -306,7 +306,7 @@ mod tests {
                 project_id: "proj-1".to_string(),
                 task_id: "remote:dev-1:task-1".to_string(),
             },
-            read_at: None
+            read_at: None,
         }
     }
 

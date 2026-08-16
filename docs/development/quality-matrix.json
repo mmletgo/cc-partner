@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-08-13",
+  "updatedAt": "2026-08-16",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -20,6 +20,51 @@
         "packaged desktop GUI"
       ],
       "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-ATTENTION-READ-001",
+      "surface": "attention",
+      "level": "L1",
+      "tests": [
+        "web/tests/attention.spec.ts",
+        "web/src/pages/Attention/attentionView.test.tsx"
+      ],
+      "command": "cd web && npm run test:e2e -- attention.spec.ts && npm test -- attentionView",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real multi-device pairing",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/p2p-protocol.md",
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-ATTENTION-READ-SYNC-001",
+      "surface": "attention",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/storage/attention_read_repo.rs",
+        "src-tauri/src/sync/attention_read_apply.rs",
+        "src-tauri/src/attention/aggregator.rs",
+        "src-tauri/src/net/routes/attention.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked attention_read --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real multi-device delivery / LAN device pair"
+      ],
+      "docs": [
+        "docs/p2p-protocol.md",
         "docs/development/testing.md"
       ]
     },

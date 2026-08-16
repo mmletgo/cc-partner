@@ -10,10 +10,10 @@
  *   通过后 GET /api/mobile/attention；否则抛出带 kind=unsupported 的错误。
  */
 
-import type { AttentionSnapshot } from '@/lib/types';
+import type { AttentionCategory, AttentionSnapshot } from '@/lib/types';
 import { attentionSnapshotDecoder } from '@/lib/schemas/attention';
 import { protocolHealthInfoDecoder } from '@/lib/schemas/protocol';
-import { getJson } from './workbenchHttp';
+import { getJson, postJson } from './workbenchHttp';
 
 /** P2P capability token：与后端 CAPABILITY_ATTENTION_V1 一致。 */
 export const ATTENTION_CAPABILITY_V1 = 'attention.v1' as const;
@@ -26,6 +26,19 @@ export const ATTENTION_MOBILE_HTTP_PATH = '/api/mobile/attention' as const;
 
 /** Mobile Attention HTTP 路径（v2）。 */
 export const ATTENTION_MOBILE_HTTP_PATH_V2 = '/api/mobile/attention/v2' as const;
+
+/** Mobile 标记指定条目已读。 */
+export const ATTENTION_MOBILE_MARK_READ_PATH = '/api/mobile/attention/mark-read' as const;
+
+/** Mobile 撤销指定条目已读。 */
+export const ATTENTION_MOBILE_MARK_UNREAD_PATH = '/api/mobile/attention/mark-unread' as const;
+
+/** Mobile 全部已读。 */
+export const ATTENTION_MOBILE_MARK_ALL_READ_PATH = '/api/mobile/attention/mark-all-read' as const;
+
+/** Mobile 按分类已读。 */
+export const ATTENTION_MOBILE_MARK_CATEGORY_READ_PATH =
+  '/api/mobile/attention/mark-category-read' as const;
 
 /** 同源 health 路径，用于能力探测。 */
 export const ATTENTION_HEALTH_PATH = '/api/health' as const;
@@ -224,14 +237,116 @@ export async function listAttentionSnapshotHttp(
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   把 mark HTTP 失败统一成 AttentionHttpError，页面不靠裸 Error.message 分支。
+ *
+ * Code Logic（这个函数做什么）:
+ *   已是 AttentionHttpError 原样抛；其余按 kind 映射 network/protocol。
+ */
+function wrapAttentionHttpMutation(reason: unknown): never {
+  if (reason instanceof AttentionHttpError) throw reason;
+  const message = reason instanceof Error ? reason.message : String(reason);
+  const kind =
+    reason &&
+    typeof reason === 'object' &&
+    'kind' in reason &&
+    (reason as { kind?: string }).kind === 'network'
+      ? 'network'
+      : 'protocol';
+  throw new AttentionHttpError(message, kind);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手机 Inbox 标已读必须写本机仓储，不能只改前端状态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   POST /api/mobile/attention/mark-read，body `{itemIds}`。
+ */
+export async function markAttentionItemsReadHttp(itemIds: string[]): Promise<AttentionSnapshot> {
+  try {
+    return await postJson<AttentionSnapshot>(
+      ATTENTION_MOBILE_MARK_READ_PATH,
+      { itemIds },
+      { policy: { kind: 'mutation' }, decoder: attentionSnapshotDecoder },
+    );
+  } catch (reason) {
+    wrapAttentionHttpMutation(reason);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   误标已读时手机也要能单条撤销。
+ *
+ * Code Logic（这个函数做什么）:
+ *   POST /api/mobile/attention/mark-unread。
+ */
+export async function markAttentionItemsUnreadHttp(itemIds: string[]): Promise<AttentionSnapshot> {
+  try {
+    return await postJson<AttentionSnapshot>(
+      ATTENTION_MOBILE_MARK_UNREAD_PATH,
+      { itemIds },
+      { policy: { kind: 'mutation' }, decoder: attentionSnapshotDecoder },
+    );
+  } catch (reason) {
+    wrapAttentionHttpMutation(reason);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手机顶部「全部已读」与桌面同语义。
+ *
+ * Code Logic（这个函数做什么）:
+ *   POST /api/mobile/attention/mark-all-read。
+ */
+export async function markAllAttentionItemsReadHttp(): Promise<AttentionSnapshot> {
+  try {
+    return await postJson<AttentionSnapshot>(
+      ATTENTION_MOBILE_MARK_ALL_READ_PATH,
+      {},
+      { policy: { kind: 'mutation' }, decoder: attentionSnapshotDecoder },
+    );
+  } catch (reason) {
+    wrapAttentionHttpMutation(reason);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   按分类清未读，避免窄屏上逐条点。
+ *
+ * Code Logic（这个函数做什么）:
+ *   POST /api/mobile/attention/mark-category-read，body `{category}`。
+ */
+export async function markAttentionCategoryReadHttp(
+  category: AttentionCategory,
+): Promise<AttentionSnapshot> {
+  try {
+    return await postJson<AttentionSnapshot>(
+      ATTENTION_MOBILE_MARK_CATEGORY_READ_PATH,
+      { category },
+      { policy: { kind: 'mutation' }, decoder: attentionSnapshotDecoder },
+    );
+  } catch (reason) {
+    wrapAttentionHttpMutation(reason);
+  }
+}
+
+/**
  * Mobile Attention API 入口对象。
  *
  * Business Logic（为什么需要这个对象）:
- *   与桌面 attentionApi 形状对齐，Provider 可注入 loadSnapshot。
+ *   与桌面 attentionApi 形状对齐，Provider 可注入 loadSnapshot 与 mark mutations。
  *
  * Code Logic（这个对象做什么）:
- *   listSnapshot 委托 listAttentionSnapshotHttp。
+ *   listSnapshot 委托 listAttentionSnapshotHttp；四个 mark 走同源 POST。
  */
 export const attentionHttpApi = {
   listSnapshot: (): Promise<AttentionSnapshot> => listAttentionSnapshotHttp(),
+  markRead: markAttentionItemsReadHttp,
+  markUnread: markAttentionItemsUnreadHttp,
+  markAllRead: markAllAttentionItemsReadHttp,
+  markCategoryRead: markAttentionCategoryReadHttp,
 };

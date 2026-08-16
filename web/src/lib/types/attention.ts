@@ -95,22 +95,28 @@ export interface AttentionItem {
   project: { id: string; name: string; kind: 'local' | 'remote' } | null;
   device: { id: string; name: string } | null;
   target: AttentionTarget;
+  /** 本设备视角的已读时间；未读时后端省略该字段。 */
+  readAt?: string | null;
 }
 
 /**
  * Attention 分类计数。
  *
  * Business Logic（为什么需要这个类型）:
- *   前端 badge 与分组空态依赖 total 与三类计数一致。
+ *   前端 badge 用 unreadTotal；分组空态仍看 total 与三类计数。
  *
  * Code Logic（字段说明）:
- *   total/decision/blocked/environment，对齐后端 counts。
+ *   total/decision/blocked/environment 含已读；unread_* 由本设备 read_set 派生。
  */
 export interface AttentionCounts {
   total: number;
   decision: number;
   blocked: number;
   environment: number;
+  unreadTotal: number;
+  unreadDecision: number;
+  unreadBlocked: number;
+  unreadEnvironment: number;
 }
 
 /**
@@ -120,10 +126,11 @@ export interface AttentionCounts {
  *   一次聚合成功后才产出完整快照，失败不得返回部分列表；Provider 以 snapshot 为单位缓存。
  *
  * Code Logic（字段说明）:
- *   generatedAt + counts + items，对齐 Rust AttentionSnapshotDto。
+ *   generatedAt + counts + items + myDeviceId，对齐 Rust AttentionSnapshotDto。
  */
 export interface AttentionSnapshot {
   generatedAt: string;
   counts: AttentionCounts;
   items: AttentionItem[];
+  myDeviceId: string;
 }

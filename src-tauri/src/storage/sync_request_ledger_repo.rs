@@ -27,6 +27,8 @@ pub const DOMAIN_PROMPTS: &str = "prompts";
 pub const DOMAIN_SSH_TARGET: &str = "ssh_target";
 /// 领域 token：速记本同步。
 pub const DOMAIN_SCRATCHPAD: &str = "scratchpad";
+/// 领域 token：Attention 已读元数据同步。
+pub const DOMAIN_ATTENTION_READ: &str = "attention_read";
 
 /// push-batch 落库 outcome（当前仅 accepted 条数；未来可扩展 failure 明细）。
 ///

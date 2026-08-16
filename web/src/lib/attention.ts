@@ -12,7 +12,9 @@
 
 import type {
   AttentionCategory,
+  AttentionCounts,
   AttentionItem,
+  AttentionSnapshot,
   AttentionSourceKind,
   AttentionTarget,
 } from './types';
@@ -45,6 +47,129 @@ export interface AttentionGroup {
  * Code Logic（这个函数做什么）:
  *   total<=0 或非有限数返回 null；1..99 返回数字字符串；>=100 返回 "99+"。
  */
+/** 空计数，供测试夹具与乐观更新回落。 */
+export const EMPTY_ATTENTION_COUNTS: AttentionCounts = {
+  total: 0,
+  decision: 0,
+  blocked: 0,
+  environment: 0,
+  unreadTotal: 0,
+  unreadDecision: 0,
+  unreadBlocked: 0,
+  unreadEnvironment: 0,
+};
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   已读是本设备元数据；空串/缺省都视为未读，避免把 omit 字段当已读。
+ *
+ * Code Logic（这个函数做什么）:
+ *   readAt 非空字符串为已读。
+ */
+export function isAttentionItemUnread(item: AttentionItem): boolean {
+  return item.readAt == null || item.readAt === '';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   乐观更新与测试夹具必须与聚合器同一口径派生 total/unread_*。
+ *
+ * Code Logic（这个函数做什么）:
+ *   单次循环统计分类计数与未读子集。
+ */
+export function countAttentionItems(items: readonly AttentionItem[]): AttentionCounts {
+  const counts: AttentionCounts = { ...EMPTY_ATTENTION_COUNTS };
+  for (const item of items) {
+    counts.total += 1;
+    const unread = isAttentionItemUnread(item);
+    if (unread) counts.unreadTotal += 1;
+    if (item.category === 'decision') {
+      counts.decision += 1;
+      if (unread) counts.unreadDecision += 1;
+    } else if (item.category === 'blocked') {
+      counts.blocked += 1;
+      if (unread) counts.unreadBlocked += 1;
+    } else {
+      counts.environment += 1;
+      if (unread) counts.unreadEnvironment += 1;
+    }
+  }
+  return counts;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Provider 乐观已读/撤销时不得等下一轮聚合才改 badge。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 id 集合写入或清除 readAt，再重算 counts。
+ */
+export function applyAttentionReadState(
+  snapshot: AttentionSnapshot,
+  itemIds: readonly string[],
+  read: boolean,
+  readAt: string,
+): AttentionSnapshot {
+  const idSet = new Set(itemIds);
+  const items = snapshot.items.map((item) => {
+    if (!idSet.has(item.id)) return item;
+    if (read) {
+      return { ...item, readAt: item.readAt && item.readAt !== '' ? item.readAt : readAt };
+    }
+    return { ...item, readAt: undefined };
+  });
+  return {
+    ...snapshot,
+    items,
+    counts: countAttentionItems(items),
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   表格来源列需要稳定 i18n key，不能复用动作文案。
+ *
+ * Code Logic（这个函数做什么）:
+ *   映射 sourceKind 到 attention:sources.*。
+ */
+export type AttentionSourceI18nKey =
+  | 'attention:sources.orchestratorHumanReview'
+  | 'attention:sources.orchestratorBlocked'
+  | 'attention:sources.remoteOutboxFailed'
+  | 'attention:sources.workbenchDependency'
+  | 'attention:sources.agentNeedsInput'
+  | 'attention:sources.agentFailed'
+  | 'attention:sources.experimentNeedsDecision'
+  | 'attention:sources.agentHubConflict'
+  | 'attention:sources.agentHubProjectionBlocked';
+
+export function getAttentionSourceI18nKey(sourceKind: AttentionSourceKind): AttentionSourceI18nKey {
+  switch (sourceKind) {
+    case 'orchestratorHumanReview':
+      return 'attention:sources.orchestratorHumanReview';
+    case 'orchestratorBlocked':
+      return 'attention:sources.orchestratorBlocked';
+    case 'remoteOutboxFailed':
+      return 'attention:sources.remoteOutboxFailed';
+    case 'workbenchDependency':
+      return 'attention:sources.workbenchDependency';
+    case 'agentNeedsInput':
+      return 'attention:sources.agentNeedsInput';
+    case 'agentFailed':
+      return 'attention:sources.agentFailed';
+    case 'experimentNeedsDecision':
+      return 'attention:sources.experimentNeedsDecision';
+    case 'agentHubConflict':
+      return 'attention:sources.agentHubConflict';
+    case 'agentHubProjectionBlocked':
+      return 'attention:sources.agentHubProjectionBlocked';
+    default: {
+      const _exhaustive: never = sourceKind;
+      return _exhaustive;
+    }
+  }
+}
+
 export function formatAttentionBadgeCount(total: number): string | null {
   if (!Number.isFinite(total) || total <= 0) return null;
   if (total > 99) return '99+';

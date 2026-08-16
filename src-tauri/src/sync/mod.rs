@@ -12,6 +12,7 @@
 //!     apply_merge 由 HTTP push-batch 与引擎本地 apply 复用。
 
 pub mod apply_merge;
+pub mod attention_read_apply;
 pub mod claude_md;
 pub mod engine;
 pub mod merger;

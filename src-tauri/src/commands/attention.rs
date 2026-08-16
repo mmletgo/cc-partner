@@ -127,25 +127,28 @@ async fn write_attention_read_state(
     let written = match op {
         MarkReadOp::MarkRead => {
             crate::storage::AttentionReadRepo::mark_read_on_tx(
-                &mut tx,
-                &device_id,
-                &deduped,
-                &read_at,
+                &mut tx, &device_id, &deduped, &read_at,
             )
             .await?
         }
         MarkReadOp::MarkUnread => {
-            crate::storage::AttentionReadRepo::mark_unread_on_tx(
-                &mut tx,
-                &device_id,
-                &deduped,
-            )
-            .await?
+            crate::storage::AttentionReadRepo::mark_unread_on_tx(&mut tx, &device_id, &deduped)
+                .await?
         }
     };
     let _ = written; // 写入行数仅用于观测；事务成功即视为已写
     tx.commit().await?;
     drop(permit);
+    let outbound = crate::sync::attention_read_apply::local_attention_read_items(
+        &device_id,
+        &deduped,
+        match op {
+            MarkReadOp::MarkRead => crate::sync::attention_read_apply::AttentionReadOp::Read,
+            MarkReadOp::MarkUnread => crate::sync::attention_read_apply::AttentionReadOp::Unread,
+        },
+        &read_at,
+    );
+    crate::sync::attention_read_apply::spawn_push_attention_read_to_peers(state.clone(), outbound);
     // 重新聚合；写已读成功后再走一遍整套 source 链（含 plugin 投影、远端 mirror）
     // 让本次变化的 read_at 反映在 snapshot 上。
     list_attention_items_v2_for_state(state).await
@@ -157,13 +160,69 @@ enum MarkReadOp {
     MarkUnread,
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     Tauri 与 Mobile HTTP 必须共享同一套 mark-read 写路径。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 write_attention_read_state。
+pub async fn mark_attention_items_read_for_state(
+    state: &AppState,
+    item_ids: Vec<String>,
+) -> Result<AttentionSnapshotDto, AppError> {
+    write_attention_read_state(state, MarkReadOp::MarkRead, &item_ids).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     撤销已读与标已读走同一事务 helper。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 write_attention_read_state(MarkUnread)。
+pub async fn mark_attention_items_unread_for_state(
+    state: &AppState,
+    item_ids: Vec<String>,
+) -> Result<AttentionSnapshotDto, AppError> {
+    write_attention_read_state(state, MarkReadOp::MarkUnread, &item_ids).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     全部已读先聚合再写，避免误删历史 read_set。
+///
+/// Code Logic（这个函数做什么）:
+///     v2 聚合后对全部 item_id 调 mark_read。
+pub async fn mark_all_attention_items_read_for_state(
+    state: &AppState,
+) -> Result<AttentionSnapshotDto, AppError> {
+    let snapshot = list_attention_items_v2_for_state(state).await?;
+    let item_ids: Vec<String> = snapshot.items.iter().map(|it| it.id.clone()).collect();
+    write_attention_read_state(state, MarkReadOp::MarkRead, &item_ids).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     按分类已读只覆盖当前快照该分类的稳定 ID。
+///
+/// Code Logic（这个函数做什么）:
+///     过滤 category 后 mark_read。
+pub async fn mark_attention_category_read_for_state(
+    state: &AppState,
+    category: AttentionCategory,
+) -> Result<AttentionSnapshotDto, AppError> {
+    let snapshot = list_attention_items_v2_for_state(state).await?;
+    let item_ids: Vec<String> = snapshot
+        .items
+        .iter()
+        .filter(|it| it.category == category)
+        .map(|it| it.id.clone())
+        .collect();
+    write_attention_read_state(state, MarkReadOp::MarkRead, &item_ids).await
+}
+
 /// 业务逻辑：标记指定 item_ids 为本设备已读。
 #[tauri::command]
 pub async fn mark_attention_items_read(
     state: State<'_, AppState>,
     item_ids: Vec<String>,
 ) -> Result<AttentionSnapshotDto, AppError> {
-    write_attention_read_state(&state, MarkReadOp::MarkRead, &item_ids).await
+    mark_attention_items_read_for_state(&state, item_ids).await
 }
 
 /// 业务逻辑：撤销本设备对指定 item_ids 的已读标记。
@@ -172,7 +231,7 @@ pub async fn mark_attention_items_unread(
     state: State<'_, AppState>,
     item_ids: Vec<String>,
 ) -> Result<AttentionSnapshotDto, AppError> {
-    write_attention_read_state(&state, MarkReadOp::MarkUnread, &item_ids).await
+    mark_attention_items_unread_for_state(&state, item_ids).await
 }
 
 /// 业务逻辑：标记当前聚合快照全部条目为已读。
@@ -182,9 +241,7 @@ pub async fn mark_attention_items_unread(
 pub async fn mark_all_attention_items_read(
     state: State<'_, AppState>,
 ) -> Result<AttentionSnapshotDto, AppError> {
-    let snapshot = list_attention_items_v2_for_state(&state).await?;
-    let item_ids: Vec<String> = snapshot.items.iter().map(|it| it.id.clone()).collect();
-    write_attention_read_state(&state, MarkReadOp::MarkRead, &item_ids).await
+    mark_all_attention_items_read_for_state(&state).await
 }
 
 #[tauri::command]
@@ -192,14 +249,7 @@ pub async fn mark_attention_category_read(
     state: State<'_, AppState>,
     category: AttentionCategory,
 ) -> Result<AttentionSnapshotDto, AppError> {
-    let snapshot = list_attention_items_v2_for_state(&state).await?;
-    let item_ids: Vec<String> = snapshot
-        .items
-        .iter()
-        .filter(|it| it.category == category)
-        .map(|it| it.id.clone())
-        .collect();
-    write_attention_read_state(&state, MarkReadOp::MarkRead, &item_ids).await
+    mark_attention_category_read_for_state(&state, category).await
 }
 
 #[cfg(test)]
@@ -307,7 +357,7 @@ mod tests {
                 project_id: "p".into(),
                 task_id: "t1".into(),
             },
-            read_at: None
+            read_at: None,
         }];
         let agent = agent_item("a1", AgentSessionPhase::NeedsInput);
         let v1 = aggregate_attention_item_batches(vec![Ok(v1_only.clone())]).unwrap();

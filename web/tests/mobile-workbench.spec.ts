@@ -104,7 +104,17 @@ function makeMobileSession(projectId: string, worktreeId: string) {
 function makeAttentionSnapshot() {
   return {
     generatedAt: TS,
-    counts: { total: 1, decision: 1, blocked: 0, environment: 0 },
+    counts: {
+      total: 1,
+      decision: 1,
+      blocked: 0,
+      environment: 0,
+      unreadTotal: 1,
+      unreadDecision: 1,
+      unreadBlocked: 0,
+      unreadEnvironment: 0,
+    },
+    myDeviceId: 'mobile-e2e',
     items: [
       {
         id: 'orchestrator:human-review:task-1',

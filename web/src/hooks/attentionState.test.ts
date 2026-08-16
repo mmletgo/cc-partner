@@ -28,8 +28,18 @@ import type { AttentionSnapshot } from '@/lib/types';
 function emptySnapshot(generatedAt = '2026-07-11T10:00:00.000Z'): AttentionSnapshot {
   return {
     generatedAt,
-    counts: { total: 0, decision: 0, blocked: 0, environment: 0 },
+    counts: {
+      total: 0,
+      decision: 0,
+      blocked: 0,
+      environment: 0,
+      unreadTotal: 0,
+      unreadDecision: 0,
+      unreadBlocked: 0,
+      unreadEnvironment: 0,
+    },
     items: [],
+    myDeviceId: 'device-test',
   };
 }
 
@@ -113,6 +123,8 @@ describe('attentionReducer', () => {
         stale: true,
         error: new Error('old'),
         lastSucceededAt: '2026-07-11T08:00:01.000Z',
+        pendingReadIds: new Set<string>(),
+        markError: null,
       },
       {
         type: 'loadSucceeded',
