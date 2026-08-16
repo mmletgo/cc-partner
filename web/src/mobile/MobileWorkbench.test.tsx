@@ -80,6 +80,12 @@ vi.mock('@/hooks/attentionContext', () => ({
     error: null,
     lastSucceededAt: null,
     refresh: vi.fn(async () => undefined),
+    markRead: vi.fn(async () => undefined),
+    markUnread: vi.fn(async () => undefined),
+    markAllRead: vi.fn(async () => undefined),
+    markCategoryRead: vi.fn(async () => undefined),
+    pendingReadIds: new Set<string>(),
+    markError: null,
   }),
 }));
 

@@ -32,7 +32,7 @@ import {
   useTerminalHistorySyncFailure,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
-import { useAttention } from '@/hooks/useAttention';
+import { useAttention, useMarkNeedsInputAttentionOnSessionFocus } from '@/hooks/useAttention';
 import {
   BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon, TerminalIcon,
 } from '@/lib/icons';
@@ -387,6 +387,7 @@ export function Workbench() {
     focusOutboxId: automationFocusOutboxId,
   } = automationController;
   const { refresh: refreshAttention } = useAttention();
+  useMarkNeedsInputAttentionOnSessionFocus(activeSessionId, workspaceView === 'terminal' && !automationConsoleOpen);
   /**
    * Business Logic（为什么需要这个函数）:
    *   Attention deep link 目标已解决时不能打开空白详情/终端，应提示并回到 Inbox。

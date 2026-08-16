@@ -418,7 +418,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **描述**：回答“现在有哪些事情需要我处理，工作才能继续”。桌面与移动端共享同一套实时投影、数量与分类语义，并只导航到既有权威业务界面。
 
 **功能点**：
-- 全局 Inbox 是实时投影，不新增 Inbox 表，不做已读/忽略/稍后/关闭/snooze，不保留已解决历史；列表只反映当前权威阻塞，无独立持久化
+- 全局 Inbox 是实时投影，条目随权威阻塞出现/消失，不保留已解决历史，也不提供忽略/稍后/关闭/snooze。已读是本设备元数据（`readAt`），不从列表移除条目；侧栏 badge 用 `unreadTotal`。打开条目会标已读。用户切到正在等待输入的终端（桌面 terminal 工作区且非自动化控制台；移动端 terminal 面板）时，对应该 `terminalSessionId` 的未读 `agentNeedsInput` 条目自动标已读；`agentFailed` 与其它 source 不因此自动已读。同一终端聚焦期内已自动标过的条目不再重标，以免与手动标未读打架。跨设备经 `attention.read.v1` 异步追平，本地 mark 成功不因 push 失败回滚
 - v1 四类 source：本机/远端 Human Review（decision）、Blocked 任务（blocked）、failed remote outbox（blocked）、Workbench tmux 依赖缺失/失败/不支持（environment）；设备离线本身不是 source，只有它造成的 cached 任务/outbox 业务后果可以显示；mirrored/discarded outbox 与 ready/installing 依赖不投影
 - **v2 增量 source**（capability `attention.v2`）：Agent `needsInput`（decision）与 Agent `failed`（blocked）由 A1 runtime 实时派生，稳定 ID `agent:needs-input:<id>` / `agent:failed:<id>`；working/idle/completed 不投影；`ExperimentNeedsDecision`/`Experiment` 仅合同预留，A4 注册后才发射。v1 响应绝不序列化 Agent/Experiment 变体；客户端优先 v2 回落 v1
 - 桌面入口为侧栏固定页第二项「待处理」`/attention`（在 Github热门之后）；移动端在 Projects 后增加第二导航项「待处理」，Projects 仍为默认面板；两端对同一 snapshot 使用相同 badge（0 隐藏、1..99 数字、100+→99+）、相同分组顺序（需要你的决定 → 运行受阻 → 环境受阻）与空组省略规则；legacy 对端缺失 `attention.v1` 时移动端显式 unsupported，不得猜测旧接口

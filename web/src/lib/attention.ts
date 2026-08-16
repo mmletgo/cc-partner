@@ -7,7 +7,7 @@
  *
  * Code Logic（这个模块做什么）:
  *   提供无副作用纯函数：badge 文本、分组、排序保护、sourceKind→i18n key、
- *   语义 target→桌面 URL。不发起网络请求，不依赖 React。
+ *   语义 target→桌面 URL、切到等待输入终端时应收的 Inbox 条目。不发起网络请求，不依赖 React。
  */
 
 import type {
@@ -68,6 +68,49 @@ export const EMPTY_ATTENTION_COUNTS: AttentionCounts = {
  */
 export function isAttentionItemUnread(item: AttentionItem): boolean {
   return item.readAt == null || item.readAt === '';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户切到正在等待输入的终端时，只应收该 window 对应的 Inbox 未读条目，
+ *   不得误收其它 session、失败条目或非 Agent 来源。
+ *
+ * Code Logic（这个函数做什么）:
+ *   过滤未读、sourceKind=agentNeedsInput、target 为匹配 terminalSessionId 的 agentSession。
+ */
+export function collectUnreadAgentNeedsInputItemIds(
+  items: readonly AttentionItem[],
+  terminalSessionId: string,
+): string[] {
+  if (terminalSessionId.length === 0) return [];
+  const ids: string[] = [];
+  for (const item of items) {
+    if (!isAttentionItemUnread(item)) continue;
+    if (item.sourceKind !== 'agentNeedsInput') continue;
+    if (item.target.kind !== 'agentSession') continue;
+    if (item.target.terminalSessionId !== terminalSessionId) continue;
+    ids.push(item.id);
+  }
+  return ids;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   自动已读必须可单测：未看见终端、已尝试过的 id、空快照都不得再 mark。
+ *
+ * Code Logic（这个函数做什么）:
+ *   enabled 且 session 非空时收集匹配未读 id，再去掉 alreadyMarkedIds。
+ */
+export function planNeedsInputAttentionAutoRead(
+  items: readonly AttentionItem[] | undefined,
+  terminalSessionId: string | null,
+  enabled: boolean,
+  alreadyMarkedIds: ReadonlySet<string>,
+): string[] {
+  if (!enabled || !terminalSessionId || !items) return [];
+  return collectUnreadAgentNeedsInputItemIds(items, terminalSessionId).filter(
+    (id) => !alreadyMarkedIds.has(id),
+  );
 }
 
 /**
