@@ -153,6 +153,11 @@ export interface MobileTerminalChromeVisibility {
   paneActions: boolean;
   terminalSurface: boolean;
   exitFullscreen: boolean;
+  /**
+   * 终端面板内、窗口 tab 上方的 worktree 条。
+   * 全屏 overlay 覆盖 shell，必须在面板内自行隐藏。
+   */
+  worktreeStrip: boolean;
 }
 
 /**
@@ -450,8 +455,8 @@ export function closeMobileNav(): boolean {
  *   手机端终端全屏时，用户希望隐藏项目标题和 window tabs 等外围内容，专注当前 pane 操作与终端输出。
  *
  * Code Logic（这个函数做什么）:
- *   根据 fullscreen 状态返回终端面板内 chrome 的可见性。worktree 条已提升到 shell
- *   固定 chrome，全屏 overlay 覆盖整个 shell，不再由本函数控制。
+ *   根据 fullscreen 状态返回终端面板内 chrome 的可见性。终端页的 worktree 条
+ *   挂在窗口 tab 上方，全屏时与 window tabs 一同隐藏。
  */
 export function getMobileTerminalChromeVisibility(
   fullscreen: boolean,
@@ -461,19 +466,20 @@ export function getMobileTerminalChromeVisibility(
     paneActions: true,
     terminalSurface: true,
     exitFullscreen: fullscreen,
+    worktreeStrip: !fullscreen,
   };
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   桌面 worktree bar 在 terminal/files/browser 工作区都可见；移动端不能只挂在终端面板里，
- *   否则用户切到文件/浏览器/Git 就看不到，且终端焦点会把条滚出视口。
+ *   文件/浏览器/Git 没有窗口 tab，需要在 shell chrome 里放同一条 worktree 条。
+ *   终端页改回挂在窗口 tab 上方：终端面板 min-height≈100dvh 会把 shell 里的条裁出视口。
  *
  * Code Logic（这个函数做什么）:
- *   terminal / files / browser / git 返回 true；Worktrees 完整面板、自动化与全局面板返回 false。
+ *   files / browser / git 返回 true；terminal 由面板自己渲染，其它面板返回 false。
  */
 export function shouldShowMobileWorktreeStrip(panel: MobileWorkbenchPanel): boolean {
-  return panel === 'terminal' || panel === 'files' || panel === 'browser' || panel === 'git';
+  return panel === 'files' || panel === 'browser' || panel === 'git';
 }
 
 /**

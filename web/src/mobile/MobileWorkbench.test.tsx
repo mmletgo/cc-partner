@@ -47,6 +47,20 @@ vi.mock('@/api/workbenchHttp', () => ({
       list: (...args: unknown[]) => listSessionsMock(...args),
       create: vi.fn(),
       focus: vi.fn(async () => ({ ok: true, sessionId: '' })),
+      replay: vi.fn(async () => ({
+        sessionId: 'p1:s1',
+        buffer: '',
+        lastSeq: 0,
+        truncated: false,
+      })),
+      hydrateScrollback: vi.fn(async () => ({
+        sessionId: 'p1:s1',
+        buffer: '',
+        lastSeq: 0,
+        truncated: false,
+      })),
+      resize: vi.fn(async () => undefined),
+      zoomPane: vi.fn(async () => undefined),
     },
     git: {
       listCommits: vi.fn(async () => []),
@@ -69,28 +83,66 @@ vi.mock('@/hooks/attentionContext', () => ({
   }),
 }));
 
-vi.mock('@/hooks/workbenchTerminalBuffersContext', () => ({
-  useWorkbenchTerminalBuffers: () => ({
-    store: {
-      getBuffer: () => '',
-      getRevision: () => 0,
-      append: vi.fn(),
-      reset: vi.fn(),
-      remove: vi.fn(),
-      subscribe: () => () => undefined,
-    },
-    resetBuffer: vi.fn(),
-    removeBuffer: vi.fn(),
-    getHistorySyncFailure: () => null,
-    subscribeHistorySyncFailures: () => () => undefined,
-    getHistorySyncFailuresRevision: () => 0,
-    retryHistorySync: () => undefined,
-    refreshScrollback: () => undefined,
-    getStartupBaselineFailure: () => null,
-    subscribeStartupBaselineFailure: () => () => undefined,
-    getStartupBaselineFailureRevision: () => 0,
-    retryStartupBaseline: () => undefined,
-  }),
+vi.mock('@/hooks/workbenchTerminalBuffersContext', () => {
+  const store = {
+    getBuffer: () => '',
+    getRevision: () => 0,
+    getSnapshot: () => ({ buffer: '', cursor: { generation: 0 } }),
+    append: vi.fn(),
+    reset: vi.fn(),
+    remove: vi.fn(),
+    subscribe: () => () => undefined,
+    subscribeLive: () => () => undefined,
+    subscribeReset: () => () => undefined,
+  };
+  return {
+    useWorkbenchTerminalBuffers: () => ({
+      store,
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      getHistorySyncFailure: () => null,
+      subscribeHistorySyncFailures: () => () => undefined,
+      getHistorySyncFailuresRevision: () => 0,
+      retryHistorySync: () => undefined,
+      refreshScrollback: () => undefined,
+      getStartupBaselineFailure: () => null,
+      subscribeStartupBaselineFailure: () => () => undefined,
+      getStartupBaselineFailureRevision: () => 0,
+      retryStartupBaseline: () => undefined,
+    }),
+    useWorkbenchTerminalBufferStore: () => store,
+  };
+});
+
+vi.mock('@xterm/xterm', () => ({
+  Terminal: class {
+    cols = 80;
+    rows = 24;
+    options = {};
+    buffer = { active: { type: 'normal', baseY: 0, viewportY: 0 } };
+    modes = { mouseTrackingMode: 'none' };
+    loadAddon(): void {}
+    open(): void {}
+    onData(): { dispose: () => void } {
+      return { dispose: () => undefined };
+    }
+    write(_data: string, cb?: () => void): void {
+      cb?.();
+    }
+    clear(): void {}
+    scrollLines(): void {}
+    scrollToLine(): void {}
+    reset(): void {}
+    dispose(): void {}
+    blur(): void {}
+    focus(): void {}
+  },
+}));
+
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: class {
+    fit(): void {}
+  },
 }));
 
 import { MobileWorkbench } from './MobileWorkbench';
@@ -203,6 +255,13 @@ beforeEach(() => {
   listProjectsMock.mockResolvedValue([createProject('p1'), createProject('p2')]);
   listWorktreesMock.mockResolvedValue([createWorktree('p1')]);
   listSessionsMock.mockResolvedValue([createSession('p1')]);
+  if (typeof globalThis.ResizeObserver === 'undefined') {
+    globalThis.ResizeObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    } as typeof ResizeObserver;
+  }
 });
 
 afterEach(() => {
@@ -325,19 +384,19 @@ describe('MobileWorkbench project retry and connection', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   打开项目进入工作区后，worktree 条必须在 shell chrome 里立刻可见，不能等终端 lazy chunk，
-   *   也不能埋在可滚动终端面板里被焦点滚走。
+   *   打开项目默认进入终端；worktree 条必须出现在窗口 tab 上方，不能只挂在 shell chrome。
    *
    * Code Logic（这个测试做什么）:
-   *   打开项目后断言 mobile-worktree-chrome / mobile-worktree-tabs 与主 worktree chip。
+   *   打开项目后等待 lazy 终端面板，断言 mobile-worktree-tabs 与主 worktree chip，
+   *   且终端页不渲染 shell chrome 容器。
    */
-  test('opening a project shows the worktree strip in shell chrome', async () => {
+  test('opening a project shows the worktree strip above terminal window tabs', async () => {
     renderWorkbench();
     await openProject('Project p1');
     await waitFor(() => {
-      expect(screen.getByTestId('mobile-worktree-chrome')).toBeTruthy();
+      expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
     });
-    expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /main/ })).toBeTruthy();
+    expect(screen.queryByTestId('mobile-worktree-chrome')).toBeNull();
+    expect(screen.getByTestId('mobile-worktree-tabs').textContent).toMatch(/main/);
   });
 });

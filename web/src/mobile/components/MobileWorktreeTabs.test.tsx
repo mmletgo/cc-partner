@@ -109,17 +109,20 @@ describe('MobileWorktreeTabs', () => {
     }
   });
 
-  test('strip stays in shell chrome, not buried in the terminal panel', () => {
+  test('terminal mounts the strip above window tabs; other workspace panels use shell chrome', () => {
     const workbench = readFileSync(join(TEST_DIR, '../MobileWorkbench.tsx'), 'utf8');
     const terminal = readFileSync(join(TEST_DIR, 'MobileTerminalPanel.tsx'), 'utf8');
     if (!workbench.includes('worktreeStrip=')) {
       throw new Error('MobileWorkbench must pass worktreeStrip into the shell');
     }
     if (!workbench.includes('shouldShowMobileWorktreeStrip')) {
-      throw new Error('MobileWorkbench must gate the strip with shouldShowMobileWorktreeStrip');
+      throw new Error('MobileWorkbench must gate the shell strip with shouldShowMobileWorktreeStrip');
     }
-    if (terminal.includes('MobileWorktreeTabs')) {
-      throw new Error('MobileTerminalPanel must not render MobileWorktreeTabs');
+    if (!workbench.includes('worktreeBar={worktreeTabsProps}')) {
+      throw new Error('MobileWorkbench must pass worktreeBar into MobileTerminalPanel');
+    }
+    if (!terminal.includes('MobileWorktreeTabs')) {
+      throw new Error('MobileTerminalPanel must render MobileWorktreeTabs above window tabs');
     }
   });
 

@@ -31,7 +31,7 @@ import type { MobileAutomationExecutionContext } from './components/MobileAutoma
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
-import { MobileWorktreeTabs } from './components/MobileWorktreeTabs';
+import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './components/MobileWorktreeTabs';
 import { useMobileWorktreeBarController } from './controllers/useMobileWorktreeBarController';
 import {
   mapMobileAttentionTarget,
@@ -792,7 +792,7 @@ export function MobileWorkbench(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   复用 canOpenMobileWorktreeSwitcher 判断当前项目和加载态；不可打开时忽略点击，可打开时置 open state。
    *
-   * @deprecated 移动端 worktree 切换已迁移到 shell 固定 `MobileWorktreeTabs`（terminal/files/browser/git）；
+   * @deprecated 移动端 worktree 切换已迁移到 `MobileWorktreeTabs`（终端窗口 tab 上方 + files/browser/git shell chrome）；
    *   当前 quick switch sheet 暂未挂载，本 handler 仅保留以备未来 panel 内快捷刷新入口接入。grep
    *   `MobileWorktreeQuickSwitch` 可见全部调用点。
    */
@@ -1335,6 +1335,37 @@ export function MobileWorkbench(): ReactElement {
   }, [panel]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  const worktreeTabsProps: MobileWorktreeTabsProps = {
+    worktrees,
+    activeWorktreeId: activeWorktree?.id ?? null,
+    projectId: activeProject?.id ?? null,
+    controlsBusy: worktreeControlsBusy,
+    createOpen: worktreeBar.createOpen,
+    createPrefix: worktreeBar.createPrefix,
+    createSuffix: worktreeBar.createSuffix,
+    creating: worktreeBar.creating,
+    removing: worktreeBar.removing,
+    pendingRemoval: worktreeBar.pendingRemoval,
+    error: worktreeBar.error,
+    mutationPhase: worktreeBar.mutationPhase,
+    onSelect: handleSelectWorktree,
+    onOpenCreate: worktreeBar.openCreate,
+    onCancelCreate: worktreeBar.cancelCreate,
+    onPrefixChange: worktreeBar.setCreatePrefix,
+    onSuffixChange: worktreeBar.setCreateSuffix,
+    onCreate: () => {
+      void worktreeBar.createWorktree();
+    },
+    onRequestRemove: worktreeBar.requestRemove,
+    onCancelRemove: worktreeBar.cancelRemove,
+    onConfirmRemove: () => {
+      void worktreeBar.confirmRemove();
+    },
+    onRetryReconcile: () => {
+      void worktreeBar.retryReconcile();
+    },
+  };
+
   const heavyPanelFallback = (
     <p className={styles.panelState} role="status">
       {t('workbench:loading')}
@@ -1444,6 +1475,7 @@ export function MobileWorkbench(): ReactElement {
         <MobileTerminalPanel
           project={activeProject}
           worktree={activeWorktree}
+          worktreeBar={worktreeTabsProps}
           sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
           activeSession={activeSession}
           busy={projectDetailsLoading}
@@ -1489,36 +1521,7 @@ export function MobileWorkbench(): ReactElement {
       connectionCachedAt={connectionCachedAt}
       worktreeStrip={
         shouldShowMobileWorktreeStrip(panel) ? (
-          <MobileWorktreeTabs
-            worktrees={worktrees}
-            activeWorktreeId={activeWorktree?.id ?? null}
-            projectId={activeProject?.id ?? null}
-            controlsBusy={worktreeControlsBusy}
-            createOpen={worktreeBar.createOpen}
-            createPrefix={worktreeBar.createPrefix}
-            createSuffix={worktreeBar.createSuffix}
-            creating={worktreeBar.creating}
-            removing={worktreeBar.removing}
-            pendingRemoval={worktreeBar.pendingRemoval}
-            error={worktreeBar.error}
-            mutationPhase={worktreeBar.mutationPhase}
-            onSelect={handleSelectWorktree}
-            onOpenCreate={worktreeBar.openCreate}
-            onCancelCreate={worktreeBar.cancelCreate}
-            onPrefixChange={worktreeBar.setCreatePrefix}
-            onSuffixChange={worktreeBar.setCreateSuffix}
-            onCreate={() => {
-              void worktreeBar.createWorktree();
-            }}
-            onRequestRemove={worktreeBar.requestRemove}
-            onCancelRemove={worktreeBar.cancelRemove}
-            onConfirmRemove={() => {
-              void worktreeBar.confirmRemove();
-            }}
-            onRetryReconcile={() => {
-              void worktreeBar.retryReconcile();
-            }}
-          />
+          <MobileWorktreeTabs {...worktreeTabsProps} />
         ) : null
       }
     >

@@ -273,6 +273,20 @@
   gap: 0;
 }
 
+/*
+ * 终端面板自身带 ~100dvh min-height，若作为 grid/flex 子项按内容撑开，
+ * 会把 .content 顶出 shell 并把最上方的 chrome 裁掉。终端页让 body 吃满剩余高度。
+ */
+.content[data-active-panel='terminal'] .contentBody {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.content[data-active-panel='terminal'] .mobileTerminalSurface {
+  height: auto;
+}
+
 .mobileWorktreeChrome {
   flex: 0 0 auto;
   min-width: 0;
@@ -1069,16 +1083,18 @@
 }
 
 .mobileTerminalPanel {
-  /* 竖屏默认；横屏/软键盘时由 shell 的 --mobile-terminal-min-height 提升优先级 */
-  min-height: var(--mobile-terminal-min-height, calc(100dvh - var(--space-24) - var(--space-12)));
+  min-height: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: 0;
 }
 
-.shell[data-landscape='true'] .mobileTerminalPanel {
-  min-height: var(--mobile-terminal-min-height, 72dvh);
-}
-
-.shell[data-keyboard-open='true'] .mobileTerminalPanel {
-  min-height: var(--mobile-terminal-min-height, 40dvh);
+.panel.mobileTerminalPanel {
+  min-height: 0;
+  align-content: stretch;
 }
 
 .mobileTerminalPanel[data-fullscreen='true'] {
@@ -1270,11 +1286,17 @@
   background: var(--surface-warm);
 }
 
+.mobileTerminalWorktreeSlot,
+.mobileTerminalToolbar {
+  flex: 0 0 auto;
+}
+
 .mobileTerminalSurface {
   position: relative;
   min-width: 0;
   min-height: calc(var(--space-24) * 3);
   height: min(62dvh, calc(var(--space-24) * 6));
+  flex: 1 1 auto;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   background: var(--terminal-bg);
@@ -1749,6 +1771,10 @@
   .panel {
     min-height: calc(100dvh - var(--space-20) - var(--space-8));
     padding: var(--space-2) 0 0;
+  }
+
+  .panel.mobileTerminalPanel {
+    min-height: 0;
   }
 
   .mobileSplitPanel {

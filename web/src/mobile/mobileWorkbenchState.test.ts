@@ -694,11 +694,13 @@ describe('mobileWorkbenchState', () => {
     assertEqual(normalChrome.paneActions, true);
     assertEqual(normalChrome.terminalSurface, true);
     assertEqual(normalChrome.exitFullscreen, false);
+    assertEqual(normalChrome.worktreeStrip, true);
 
     assertEqual(fullscreenChrome.windowTabs, false);
     assertEqual(fullscreenChrome.paneActions, true);
     assertEqual(fullscreenChrome.terminalSurface, true);
     assertEqual(fullscreenChrome.exitFullscreen, true);
+    assertEqual(fullscreenChrome.worktreeStrip, false);
   });
 
   /**
@@ -708,8 +710,8 @@ describe('mobileWorkbenchState', () => {
    * Code Logic（这个测试做什么）:
    *   断言工作区四面板 true，Worktrees/自动化/全局面板 false。
    */
-  test('shouldShowMobileWorktreeStrip covers workspace panels only', () => {
-    assertEqual(shouldShowMobileWorktreeStrip('terminal'), true);
+  test('shouldShowMobileWorktreeStrip covers non-terminal workspace panels', () => {
+    assertEqual(shouldShowMobileWorktreeStrip('terminal'), false);
     assertEqual(shouldShowMobileWorktreeStrip('files'), true);
     assertEqual(shouldShowMobileWorktreeStrip('browser'), true);
     assertEqual(shouldShowMobileWorktreeStrip('git'), true);
