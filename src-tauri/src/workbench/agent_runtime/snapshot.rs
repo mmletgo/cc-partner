@@ -43,6 +43,9 @@ pub struct AgentLiveUsageDto {
     /// 有效生成时长（用户→助手区间合并，毫秒）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_duration_ms: Option<u64>,
+    /// 各轮请求平均耗时（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_avg_ms: Option<u64>,
     pub extracted_at: String,
 }
 

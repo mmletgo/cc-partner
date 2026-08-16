@@ -126,6 +126,30 @@ fn merge_intervals_ms(intervals: &[(i64, i64)]) -> Option<u64> {
     }
 }
 
+/// 各轮 user→assistant 区间的算术平均（不对重叠做 merge）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     状态卡「首 token 平均耗时」要对齐每轮请求的平均等待，
+///     不能用合并后的总时长当单轮耗时。
+///
+/// Code Logic（这个函数做什么）:
+///     只统计 end>start 的区间；平均向下取整毫秒。
+fn average_interval_ms(intervals: &[(i64, i64)]) -> Option<u64> {
+    let mut sum = 0i64;
+    let mut count = 0u64;
+    for &(start, end) in intervals {
+        if end > start {
+            sum += end - start;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some((sum as u64) / count)
+    }
+}
+
 /// 从 Claude session JSONL 提取可靠 usage。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -324,6 +348,15 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
     } else {
         last_main_msg_id.and_then(|id| messages.get(&id).map(ClaudeUsageEntry::occupancy))
     };
+    let intervals: Vec<(i64, i64)> = messages
+        .values()
+        .filter(|entry| entry.is_main_chain)
+        .filter_map(|entry| {
+            let start = entry.user_ts_ms?;
+            let end = entry.assistant_ts_ms?;
+            (end > start).then_some((start, end))
+        })
+        .collect();
     Some(ReliableUsageSnapshot {
         model_id: model_id.clone(),
         input_tokens: Some(input),
@@ -334,18 +367,8 @@ fn parse_claude_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsa
         cost_currency: cost.map(|(_, c)| c),
         context_length,
         context_window: infer_context_window_from_model(model_id.as_deref()),
-        active_duration_ms: {
-            let intervals: Vec<(i64, i64)> = messages
-                .values()
-                .filter(|entry| entry.is_main_chain)
-                .filter_map(|entry| {
-                    let start = entry.user_ts_ms?;
-                    let end = entry.assistant_ts_ms?;
-                    (end > start).then_some((start, end))
-                })
-                .collect();
-            merge_intervals_ms(&intervals)
-        },
+        active_duration_ms: merge_intervals_ms(&intervals),
+        first_token_avg_ms: average_interval_ms(&intervals),
     })
 }
 
@@ -633,6 +656,7 @@ fn parse_codex_jsonl(path: &Path) -> Option<ReliableUsageSnapshot> {
         context_window: context_window
             .or_else(|| infer_context_window_from_model(model_id.as_deref())),
         active_duration_ms: None,
+        first_token_avg_ms: None,
     })
 }
 
@@ -727,6 +751,7 @@ fn aggregate_opencode_usage(rows: Vec<OpenCodeMessageUsage>) -> Option<ReliableU
         context_length,
         context_window: infer_context_window_from_model(model_id.as_deref()),
         active_duration_ms: None,
+        first_token_avg_ms: None,
     })
 }
 
@@ -1047,6 +1072,7 @@ mod tests {
         write_jsonl(&project, "s-g.jsonl", &[user, asst]);
         let snap = extract_claude_usage(Some(tmp.path().to_path_buf()), "s-g").unwrap();
         assert_eq!(snap.active_duration_ms, Some(10_000));
+        assert_eq!(snap.first_token_avg_ms, Some(10_000));
         assert_eq!(snap.context_window, Some(1_000_000));
         assert_eq!(snap.model_id.as_deref(), Some("grok-4.6-build"));
     }

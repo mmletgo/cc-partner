@@ -117,8 +117,10 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
   it('ledgerEntry=null 时 TokenRateRow 与 ContextMeter 显示「未提供」', async () => {
     renderCard(makeProps({ ledgerEntry: null }));
     const rateRow = screen.getByTestId('workbench-status-token-rate-row');
+    const qualityRow = screen.getByTestId('workbench-status-session-quality-row');
     const meter = screen.getByTestId('workbench-status-context-meter');
     expect(rateRow.textContent).toContain('未提供');
+    expect(qualityRow.textContent).toContain('未提供');
     expect(meter.textContent).toContain('未提供');
     expect(document.querySelector('[role="progressbar"]')).toBeNull();
   });
@@ -214,6 +216,9 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
             outputTokens: 2_000,
             contextLength: 80_000,
             activeDurationMs: 10_000,
+            firstTokenAvgMs: 10_000,
+            cacheReadTokens: 87,
+            cacheWriteTokens: 13,
             extractedAt: '2026-08-16T10:05:00Z',
           },
         }),
@@ -224,6 +229,9 @@ describe('WorkbenchStatusCard — ledger 指标降级', () => {
     // 10_000 / 10s = 1000 → 1.00k tok/s；2000/10s = 200.0 tok/s
     expect(rateRow.textContent).toContain('1.00k tok/s');
     expect(rateRow.textContent).toContain('200.0 tok/s');
+    const qualityRow = screen.getByTestId('workbench-status-session-quality-row');
+    expect(qualityRow.textContent).toContain('10.0 s');
+    expect(qualityRow.textContent).toContain('87.0%');
     expect(meter.textContent).toContain('80.0k');
     expect(meter.textContent).toContain('1.0M');
   });

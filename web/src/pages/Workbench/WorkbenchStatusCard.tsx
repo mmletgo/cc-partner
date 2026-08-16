@@ -11,16 +11,18 @@
  * Code Logic（这个组件做什么）:
  *   - 渲染会话状态 Pill、项目/worktree/session 元信息 grid、session rename 输入与 close 按钮；
  *   - statusRuntime 行挂 SessionRuntimeText（startedAt/endedAt/running/visible/emptyValue）；
- *   - TokenRateRow 用 billed tokens/duration；ContextMeter 用 occupancy + window。
+ *   - TokenRateRow 用 billed tokens/duration；SessionQualityRow 用首响平均 + 缓存命中；
+ *   - ContextMeter 用 occupancy + window。
  *   - 暴露 WorkbenchStatusCardProps 类型，所有数据均来自 useWorkbenchTerminalController + Workbench.tsx 跨域共享。
  */
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Pill } from '@/components/primitives';
-import { ContextMeter, TokenRateRow } from '@/components/domain/WorkbenchStatusCard';
+import { ContextMeter, SessionQualityRow, TokenRateRow } from '@/components/domain/WorkbenchStatusCard';
 import type { ProgressBarTone } from '@/components/primitives/ProgressBar';
 import { DEFAULT_CONTEXT_WINDOW, resolveContextWindow } from '@/lib/agent/modelContextWindow';
 import { EditIcon, XIcon } from '@/lib/icons';
+import { computeSessionCacheHitRate } from '@/lib/tokenFormat';
 import type { AgentLedgerEntry } from '@/lib/types/agentLedger';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
@@ -211,6 +213,17 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
   const speedInTps = computeTokenRate(inputTokens, durationMs);
   const speedOutTps = computeTokenRate(outputTokens, durationMs);
 
+  const firstTokenAvgMs =
+    liveUsage?.firstTokenAvgMs != null &&
+    Number.isFinite(liveUsage.firstTokenAvgMs) &&
+    liveUsage.firstTokenAvgMs > 0
+      ? liveUsage.firstTokenAvgMs
+      : null;
+  const cacheHitRate = computeSessionCacheHitRate(
+    liveUsage?.cacheReadTokens ?? ledgerEntry?.cacheReadTokens,
+    liveUsage?.cacheWriteTokens ?? ledgerEntry?.cacheWriteTokens,
+  );
+
   // 用量 = 末轮 occupancy（live.contextLength）；禁止把累计计费 token 当占用。
   const contextUsed =
     liveUsage?.contextLength != null && Number.isFinite(liveUsage.contextLength)
@@ -275,6 +288,11 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
       <TokenRateRow
         speedInTps={speedInTps}
         speedOutTps={speedOutTps}
+        unavailableLabel={unavailableLabel}
+      />
+      <SessionQualityRow
+        firstTokenAvgMs={firstTokenAvgMs}
+        cacheHitRate={cacheHitRate}
         unavailableLabel={unavailableLabel}
       />
       <ContextMeter

@@ -10,6 +10,12 @@
   border-top: 1px solid var(--border-soft);
 }
 
+.metricsRow + .metricsRow {
+  margin-top: 0;
+  padding-top: var(--space-2);
+  border-top: none;
+}
+
 .metricCell {
   min-width: 0;
   display: grid;

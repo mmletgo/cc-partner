@@ -9,7 +9,14 @@
  *   直接断言 formatTokenCount 的边界值输出（原样 / k / M / null）。
  */
 import { describe, expect, it } from 'vitest';
-import { formatContextTokens, formatTokenCount, formatTokenRate } from './tokenFormat';
+import {
+  computeSessionCacheHitRate,
+  formatCacheHitRate,
+  formatContextTokens,
+  formatFirstTokenLatency,
+  formatTokenCount,
+  formatTokenRate,
+} from './tokenFormat';
 
 describe('formatTokenCount', () => {
   it('5000 及以下直接显示整数', () => {
@@ -93,5 +100,32 @@ describe('formatTokenRate', () => {
     expect(formatTokenRate(undefined)).toBeNull();
     expect(formatTokenRate(Number.NaN)).toBeNull();
     expect(formatTokenRate(-0.5)).toBeNull();
+  });
+});
+
+describe('formatFirstTokenLatency', () => {
+  it('按量级切换 ms / s', () => {
+    expect(formatFirstTokenLatency(320)).toBe('320 ms');
+    expect(formatFirstTokenLatency(1800)).toBe('1.80 s');
+    expect(formatFirstTokenLatency(12_400)).toBe('12.4 s');
+  });
+
+  it('非正数返回 null', () => {
+    expect(formatFirstTokenLatency(0)).toBeNull();
+    expect(formatFirstTokenLatency(null)).toBeNull();
+    expect(formatFirstTokenLatency(-1)).toBeNull();
+  });
+});
+
+describe('computeSessionCacheHitRate / formatCacheHitRate', () => {
+  it('对齐 ccstatusline：read / (read + write)', () => {
+    expect(computeSessionCacheHitRate(87, 13)).toBeCloseTo(0.87);
+    expect(formatCacheHitRate(0.87)).toBe('87.0%');
+  });
+
+  it('两项都缺或分母为 0 → null', () => {
+    expect(computeSessionCacheHitRate(null, null)).toBeNull();
+    expect(computeSessionCacheHitRate(0, 0)).toBeNull();
+    expect(formatCacheHitRate(null)).toBeNull();
   });
 });

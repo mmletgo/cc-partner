@@ -800,6 +800,8 @@
   "metricsContextLength": "Context length",
   "metricsContextAria": "Context usage {{pct}}%",
   "metricsUnavailable": "Unavailable",
+  "metricsFirstToken": "Avg first token",
+  "metricsCacheHit": "Cache hit rate",
   "metricsContextNoWindow": "No window",
   "agentPhase": {
     "launching": "Agent launching",
