@@ -1206,6 +1206,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::create_browser_preview),
         )
         .route(
+            "/api/workbench/browser/proxy/:previewId/",
+            any(workbench::proxy_browser_preview_root),
+        )
+        .route(
             "/api/workbench/browser/proxy/:previewId/*path",
             any(workbench::proxy_browser_preview),
         )
@@ -1354,6 +1358,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/workbench/browser/preview",
             post(workbench::mobile_create_browser_preview),
+        )
+        .route(
+            "/api/mobile/workbench/browser/proxy/:previewId/",
+            any(workbench::mobile_proxy_browser_preview_root),
         )
         .route(
             "/api/mobile/workbench/browser/proxy/:previewId/*path",

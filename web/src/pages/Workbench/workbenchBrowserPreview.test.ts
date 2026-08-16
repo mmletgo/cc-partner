@@ -6,8 +6,14 @@ import {
   WORKBENCH_BROWSER_IFRAME_SANDBOX,
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserTargetSourceLabelKey,
+  isAutoOpenWorkbenchBrowserSource,
+  pickAutoOpenWorkbenchBrowserTarget,
 } from '@/components/domain/WorkbenchBrowserWorkspace/workbenchBrowserHelpers';
-import type { WorkbenchBrowserPreview } from '@/lib/types';
+import type {
+  WorkbenchBrowserDiscovery,
+  WorkbenchBrowserPreview,
+  WorkbenchBrowserTarget,
+} from '@/lib/types';
 
 describe('workbenchBrowserPreview', () => {
   test('chooses frame src, sandbox tokens, request gate and source label keys', () => {
@@ -56,6 +62,10 @@ describe('workbenchBrowserPreview', () => {
       !workspaceViewSource.includes('allow-same-origin'),
       'WorkbenchBrowserWorkspace view must not opt preview iframe back into cc-partner same-origin access',
     );
+    assert(
+      workspaceViewSource.includes('pickAutoOpenWorkbenchBrowserTarget'),
+      'WorkbenchBrowserWorkspace must not auto-open the first discovered target when it is only a port probe',
+    );
 
     assert.equal(
       canApplyWorkbenchBrowserRequest(
@@ -95,4 +105,61 @@ describe('workbenchBrowserPreview', () => {
       'terminal source should render through workbench i18n instead of backend label text',
     );
   });
+
+  test('does not auto-open port probe candidates', () => {
+    assert.equal(isAutoOpenWorkbenchBrowserSource('portProbe'), false);
+    assert.equal(isAutoOpenWorkbenchBrowserSource('manual'), false);
+    assert.equal(isAutoOpenWorkbenchBrowserSource('remembered'), true);
+    assert.equal(isAutoOpenWorkbenchBrowserSource('terminalOutput'), true);
+    assert.equal(isAutoOpenWorkbenchBrowserSource('projectConfig'), true);
+
+    const probeOnly = discoveryWithTargets(
+      [
+        probeTarget('http://127.0.0.1:3000/'),
+        probeTarget('http://127.0.0.1:5173/'),
+        probeTarget('http://127.0.0.1:8080/'),
+      ],
+      'PortProbe:http://127.0.0.1:3000/',
+    );
+    assert.equal(pickAutoOpenWorkbenchBrowserTarget(probeOnly), null);
+
+    const noSelection = discoveryWithTargets([probeTarget('http://127.0.0.1:3000/')], null);
+    assert.equal(pickAutoOpenWorkbenchBrowserTarget(noSelection), null);
+
+    const terminal = discoveryWithTargets(
+      [
+        probeTarget('http://127.0.0.1:3000/'),
+        {
+          ...probeTarget('http://127.0.0.1:5173/'),
+          id: 'TerminalOutput:http://127.0.0.1:5173/',
+          source: 'terminalOutput',
+        },
+      ],
+      'TerminalOutput:http://127.0.0.1:5173/',
+    );
+    assert.equal(pickAutoOpenWorkbenchBrowserTarget(terminal)?.url, 'http://127.0.0.1:5173/');
+  });
 });
+
+function probeTarget(url: string): WorkbenchBrowserTarget {
+  return {
+    id: `PortProbe:${url}`,
+    url,
+    displayUrl: url,
+    source: 'portProbe',
+    label: 'portProbe',
+    reachable: true,
+  };
+}
+
+function discoveryWithTargets(
+  targets: WorkbenchBrowserTarget[],
+  selectedTargetId: string | null,
+): WorkbenchBrowserDiscovery {
+  return {
+    projectId: 'project-1',
+    worktreeId: 'worktree-1',
+    targets,
+    selectedTargetId,
+  };
+}

@@ -13,6 +13,7 @@ import {
   canApplyWorkbenchBrowserRequest,
   getWorkbenchBrowserFrameSrc,
   getWorkbenchBrowserTargetSourceLabelKey,
+  pickAutoOpenWorkbenchBrowserTarget,
   WORKBENCH_BROWSER_IFRAME_SANDBOX,
   type WorkbenchBrowserRequestSnapshot,
 } from './workbenchBrowserHelpers';
@@ -88,8 +89,7 @@ export function WorkbenchBrowserWorkspaceView({
       const next = await transport.browser.discover(request.projectId, request.worktreeId);
       if (!isCurrentBrowserRequest(request)) return;
       setDiscovery(next);
-      const selected =
-        next.targets.find((target) => target.id === next.selectedTargetId) ?? next.targets[0];
+      const selected = pickAutoOpenWorkbenchBrowserTarget(next);
       if (selected) {
         const created = await transport.browser.createPreview(
           request.projectId,

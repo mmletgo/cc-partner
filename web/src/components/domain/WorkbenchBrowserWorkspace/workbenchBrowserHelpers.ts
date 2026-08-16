@@ -10,7 +10,9 @@
  */
 
 import type {
+  WorkbenchBrowserDiscovery,
   WorkbenchBrowserPreview,
+  WorkbenchBrowserTarget,
   WorkbenchBrowserTargetSource,
 } from '@/lib/types';
 
@@ -51,6 +53,38 @@ export function getWorkbenchBrowserFrameSrc(
 ): string | null {
   if (!preview) return null;
   return surface === 'desktop' ? preview.desktopProxyUrl : preview.mobileProxyPath;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   端口探测会命中本机无关的 3000/5173/8080，进入网页浏览时不能把它们当默认页自动打开。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅 remembered / terminalOutput / projectConfig 允许自动打开。
+ */
+export function isAutoOpenWorkbenchBrowserSource(
+  source: WorkbenchBrowserTargetSource,
+): boolean {
+  return source === 'remembered' || source === 'terminalOutput' || source === 'projectConfig';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   discover 后前端只应按后端 selectedTargetId 建 preview，且必须再校验来源，避免旧后端仍选中 PortProbe。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 selectedTargetId 查找候选；找不到或来源不允许自动打开时返回 null，禁止回退到 targets[0]。
+ */
+export function pickAutoOpenWorkbenchBrowserTarget(
+  discovery: WorkbenchBrowserDiscovery,
+): WorkbenchBrowserTarget | null {
+  const selectedId = discovery.selectedTargetId;
+  if (!selectedId) return null;
+  const selected = discovery.targets.find((target) => target.id === selectedId);
+  if (!selected || !isAutoOpenWorkbenchBrowserSource(selected.source)) {
+    return null;
+  }
+  return selected;
 }
 
 /**

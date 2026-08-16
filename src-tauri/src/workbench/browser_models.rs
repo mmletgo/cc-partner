@@ -52,7 +52,7 @@ pub struct WorkbenchBrowserTarget {
 ///     打开 Workbench browser tab 时，前端需要一次性拿到项目、worktree、候选列表和默认选择。
 ///
 /// Code Logic（这个结构体做什么）:
-///     聚合 project_id、可选 worktree_id、已排序候选和默认 selected_target_id。
+///     聚合 project_id、可选 worktree_id、已排序候选和默认 selected_target_id（不含 PortProbe）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchBrowserDiscovery {

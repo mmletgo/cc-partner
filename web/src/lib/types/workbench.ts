@@ -337,7 +337,7 @@ export interface WorkbenchBrowserTarget {
  *   浏览器工作区挂载时需要一次性获取当前项目/worktree 下的候选目标和默认选择。
  *
  * Code Logic（字段说明）:
- *   targets 已由后端排序；selectedTargetId 为空时前端可回退到首个候选。
+ *   targets 已由后端排序；selectedTargetId 仅指向 remembered/terminalOutput/projectConfig，为空时不自动打开。
  */
 export interface WorkbenchBrowserDiscovery {
   projectId: string;

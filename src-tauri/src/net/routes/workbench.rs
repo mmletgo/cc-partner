@@ -391,6 +391,32 @@ pub async fn proxy_browser_preview(
     Ok(mark_response_as_passthrough(response))
 }
 
+/// 代理桌面端浏览器 preview 首页（无额外 path）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     iframe src 是 `/api/workbench/browser/proxy/{previewId}/`，axum `/*path` 匹配不了空 tail，
+///     否则首页会掉进 fallback 并显示 `{error:"Not Found"}` 信封。
+///
+/// Code Logic（这个函数做什么）:
+///     只提取 previewId，把 tail 当作空字符串交给同一套 proxy。
+pub async fn proxy_browser_preview_root(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    AxumPath(preview_id): AxumPath<String>,
+    req: Request<Body>,
+) -> P2pResult<Response> {
+    let response = proxy_workbench_browser_request(
+        state,
+        preview_id,
+        String::new(),
+        req,
+        DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+    )
+    .await
+    .map_err(|e| api_error_to_p2p(e, &ctx))?;
+    Ok(mark_response_as_passthrough(response))
+}
+
 /// 列出远端设备本机项目的 worktree。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1597,6 +1623,31 @@ pub async fn mobile_proxy_browser_preview(
         state,
         preview_id,
         path,
+        req,
+        MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
+    )
+    .await
+    .map_err(|e| api_error_to_p2p(e, &ctx))?;
+    Ok(mark_response_as_passthrough(response))
+}
+
+/// 代理手机端浏览器 preview 首页（无额外 path）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端 iframe 首页同样是 `.../proxy/{previewId}/`，必须与带 wildcard 的资源请求走同一套转发。
+///
+/// Code Logic（这个函数做什么）:
+///     只提取 previewId，把 tail 当作空字符串交给同一套 proxy。
+pub async fn mobile_proxy_browser_preview_root(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    AxumPath(preview_id): AxumPath<String>,
+    req: Request<Body>,
+) -> Result<Response, P2pError> {
+    let response = proxy_workbench_browser_request(
+        state,
+        preview_id,
+        String::new(),
         req,
         MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
     )

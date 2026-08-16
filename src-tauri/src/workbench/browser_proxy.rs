@@ -1173,6 +1173,17 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     iframe 首页 tail 为空，必须转发到登记 target 的根路径而不是丢掉末尾 `/`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     空 tail 拼回 base URL。
+    #[test]
+    fn join_proxy_url_keeps_base_when_tail_empty() {
+        let url = join_proxy_url("http://127.0.0.1:5173/", "", None).unwrap();
+        assert_eq!(url.as_str(), "http://127.0.0.1:5173/");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     本机 preview proxy 必须把 iframe 的 path/query 转发到用户选择的 loopback dev server。
     ///
     /// Code Logic（这个测试做什么）:
