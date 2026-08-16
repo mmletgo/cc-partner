@@ -216,6 +216,9 @@ pub struct AgentLedgerEntry {
     pub cost_currency: Option<String>,
     /// 可选工作台终端窗口标题（serde camelCase 自动映射 terminalTitle）
     pub terminal_title: Option<String>,
+    /// 可选项目名（LEFT JOIN workbench_projects 解析；缺失/未注册时 null）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     /// 创建时间
     pub created_at: String,
     /// 更新时间
@@ -232,12 +235,14 @@ pub struct AgentLedgerEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentLedgerQuery {
-    /// 可选 project 过滤
+    /// 可选 project 单值过滤（与 project_ids 互斥；同时给 → project_ids 优先）
     pub project_id: Option<String>,
-    /// 可选 provider 过滤
-    pub provider_id: Option<String>,
-    /// 可选 outcome 过滤
-    pub outcome: Option<AgentLedgerOutcome>,
+    /// 可选 provider 多值过滤
+    pub provider_ids: Option<Vec<String>>,
+    /// 可选 model 多值过滤
+    pub model_ids: Option<Vec<String>>,
+    /// 可选 project 多值过滤（与 project_id 互斥；同时给 → 多值优先）
+    pub project_ids: Option<Vec<String>>,
     /// 可选 ended_at 下界（含）RFC3339
     pub ended_after: Option<String>,
     /// 可选 ended_at 上界（含）RFC3339
@@ -524,9 +529,6 @@ pub struct AgentLedgerFilters {
     /// 可选 worktree 过滤
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_id: Option<String>,
-    /// 可选 outcome 过滤
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<AgentLedgerOutcome>,
     /// 自定义区间下界（含）RFC3339；与 list/export 对齐，落 ended_at
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_after: Option<String>,
@@ -985,6 +987,7 @@ mod tests {
             cost_minor_units: None,
             cost_currency: None,
             terminal_title: None,
+            project_name: None,
             created_at: "2026-01-01T00:01:00Z".into(),
             updated_at: "2026-01-01T00:01:00Z".into(),
         };

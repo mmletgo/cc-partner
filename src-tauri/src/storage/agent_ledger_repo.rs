@@ -99,6 +99,20 @@ const SELECT_COLUMNS: &str =
     cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
     terminal_title, created_at, updated_at";
 
+/// 详细 list / byProject 维度用的扩展 SELECT：追加 `wp.name AS project_name`。
+///
+/// Business Logic（为什么需要）:
+///     Token 统计页 Session 明细 / byProject 拆分行需要展示项目名（不是项目 ID）；
+///     不破坏 `SELECT_COLUMNS` 的其它消费者（summarize 主复算 / get_by_agent_session_id）。
+///
+/// Code Logic（做什么）:
+///     末尾追加 `wp.name AS project_name`；配合 `LEFT JOIN workbench_projects wp` 三元组。
+const SELECT_COLUMNS_WITH_PROJECT_NAME: &str =
+    "id, agent_session_id, project_id, worktree_id, provider_id, model_id, \
+    started_at, ended_at, duration_ms, outcome, input_tokens, output_tokens, \
+    cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
+    terminal_title, created_at, updated_at, wp.name AS project_name";
+
 /// opaque keyset cursor v1（ended_at DESC, id DESC）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LedgerCursorV1 {
@@ -195,6 +209,16 @@ impl AgentLedgerRepo {
         sqlx::query(AGENT_SESSION_LEDGER_ENDED_INDEX)
             .execute(pool)
             .await?;
+        // LEFT JOIN 兜底：生产 path 由 workbench 建 `workbench_projects` 完整表；本 fixture 单测
+        // 仅调 `AgentLedgerRepo::ensure_schema`，建 minimal 双列表使带 JOIN 的 list / byProject
+        // 维度查询不报 "no such table: workbench_projects"。Idempotent：如果生产表已存在则 skip；
+        // production `workbench_projects` 本身具有 `id` 主键 + `name` NOT NULL TEXT，schema 兼容。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await?;
         let columns = sqlx::query("PRAGMA table_info(agent_session_ledger)")
             .fetch_all(pool)
             .await?;
@@ -576,13 +600,15 @@ impl AgentLedgerRepo {
     ///     finalize 幂等与 reconcile 判断缺失 entry。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     SELECT 映射 DTO。
+    ///     LEFT JOIN workbench_projects 取 project_name；SELECT 映射 DTO。
     pub async fn get_by_agent_session_id(
         &self,
         agent_session_id: &str,
     ) -> Result<Option<AgentLedgerEntry>, AppError> {
         let row = sqlx::query(&format!(
-            "SELECT {SELECT_COLUMNS} FROM agent_session_ledger WHERE agent_session_id = ?"
+            "SELECT {SELECT_COLUMNS_WITH_PROJECT_NAME} FROM agent_session_ledger \
+             LEFT JOIN workbench_projects wp ON wp.id = agent_session_ledger.project_id \
+             WHERE agent_session_id = ?"
         ))
         .bind(agent_session_id)
         .fetch_optional(&self.pool)
@@ -613,10 +639,10 @@ impl AgentLedgerRepo {
     /// 有界分页（ended_at DESC, id DESC）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     本机明细 drawer 需要稳定 keyset 翻页与封闭 filter。
+    ///     本机明细 drawer 需要稳定 keyset 翻页与封闭 filter；project/provider/model 全部多值 IN。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     规范化 limit；解码 cursor；动态 WHERE；limit+1 探 has_more。
+    ///     LEFT JOIN 拿 project_name；规范化 limit；解码 cursor；动态 WHERE；limit+1 探 has_more。
     pub async fn get_page(&self, query: AgentLedgerQuery) -> Result<AgentLedgerPage, AppError> {
         let limit = query
             .limit
@@ -624,10 +650,24 @@ impl AgentLedgerRepo {
             .clamp(1, MAX_PAGE_LIMIT);
         let fetch = limit as i64 + 1;
 
-        let mut sql = format!("SELECT {SELECT_COLUMNS} FROM agent_session_ledger WHERE 1=1");
+        let mut sql = format!(
+            "SELECT {SELECT_COLUMNS_WITH_PROJECT_NAME} FROM agent_session_ledger \
+             LEFT JOIN workbench_projects wp ON wp.id = agent_session_ledger.project_id \
+             WHERE 1=1"
+        );
         let mut binds: Vec<BindValue> = Vec::new();
 
-        if let Some(pid) = query
+        // project 多值 IN（与单值 project_id 互斥；多值优先）
+        if let Some(pids) = query.project_ids.as_ref().filter(|v| !v.is_empty()) {
+            let placeholders = std::iter::repeat("?")
+                .take(pids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" AND project_id IN ({placeholders})"));
+            for pid in pids {
+                binds.push(BindValue::Text(pid.trim().to_string()));
+            }
+        } else if let Some(pid) = query
             .project_id
             .as_deref()
             .map(str::trim)
@@ -636,19 +676,31 @@ impl AgentLedgerRepo {
             sql.push_str(" AND project_id = ?");
             binds.push(BindValue::Text(pid.to_string()));
         }
-        if let Some(prov) = query
-            .provider_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            sql.push_str(" AND provider_id = ?");
-            binds.push(BindValue::Text(prov.to_string()));
+
+        // provider 多值 IN
+        if let Some(provs) = query.provider_ids.as_ref().filter(|v| !v.is_empty()) {
+            let placeholders = std::iter::repeat("?")
+                .take(provs.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" AND provider_id IN ({placeholders})"));
+            for prov in provs {
+                binds.push(BindValue::Text(prov.trim().to_string()));
+            }
         }
-        if let Some(outcome) = query.outcome {
-            sql.push_str(" AND outcome = ?");
-            binds.push(BindValue::Text(outcome.as_str().to_string()));
+
+        // model 多值 IN
+        if let Some(mids) = query.model_ids.as_ref().filter(|v| !v.is_empty()) {
+            let placeholders = std::iter::repeat("?")
+                .take(mids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" AND model_id IN ({placeholders})"));
+            for mid in mids {
+                binds.push(BindValue::Text(mid.trim().to_string()));
+            }
         }
+
         if let Some(after) = query
             .ended_after
             .as_deref()
@@ -1131,8 +1183,20 @@ impl AgentLedgerRepo {
         };
 
         let (where_sql, binds) = build_where(filters, &[], now);
+        // byProject 维度 LEFT JOIN 解析 `wp.name` 填入 row label，供 UI 渲染
+        // 项目名（不是项目 ID）；缺失 join 时回 None 仍走 key 兜底。
+        let project_label_select = if dimension == "project" {
+            ", wp.name AS project_label"
+        } else {
+            ""
+        };
+        let project_join = if dimension == "project" {
+            " LEFT JOIN workbench_projects wp ON wp.id = agent_session_ledger.project_id"
+        } else {
+            ""
+        };
         let sql = format!(
-            "SELECT {dim_select} AS dim_key, \
+            "SELECT {dim_select} AS dim_key{project_label_select}, \
              COUNT(1) AS sessions, \
              SUM(CASE WHEN outcome='completed' THEN 1 ELSE 0 END) AS completed, \
              SUM(CASE WHEN outcome='failed' THEN 1 ELSE 0 END) AS failed, \
@@ -1143,7 +1207,7 @@ impl AgentLedgerRepo {
              SUM(cache_read_tokens) AS cache_read_sum, \
              SUM(cache_write_tokens) AS cache_write_sum, \
              cost_minor_units, cost_currency \
-             FROM agent_session_ledger \
+             FROM agent_session_ledger{project_join} \
              WHERE {where_sql} \
              GROUP BY {dim_group}, cost_currency \
              ORDER BY sessions DESC, input_sum DESC"
@@ -1168,6 +1232,14 @@ impl AgentLedgerRepo {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "(unknown)".to_string());
+            let project_label: Option<String> = if dimension == "project" {
+                row.try_get::<Option<String>, _>("project_label")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.trim().is_empty())
+            } else {
+                None
+            };
             let sessions: i64 = row.try_get("sessions").unwrap_or(0);
             let completed: i64 = row.try_get("completed").unwrap_or(0);
             let failed: i64 = row.try_get("failed").unwrap_or(0);
@@ -1196,6 +1268,11 @@ impl AgentLedgerRepo {
                     cost_by_currency: Vec::new(),
                     key: key.clone(),
                 });
+            if entry.label.is_none() {
+                if let Some(name) = project_label.clone() {
+                    entry.label = Some(name);
+                }
+            }
             entry.sessions = entry.sessions.saturating_add(sessions.max(0) as u64);
             entry.completed = entry.completed.saturating_add(completed.max(0) as u64);
             entry.failed = entry.failed.saturating_add(failed.max(0) as u64);
@@ -1445,12 +1522,6 @@ fn build_where(
         binds.push(BindValue::Text(wid.to_string()));
     }
 
-    // 5) outcome
-    if let Some(o) = filters.outcome {
-        clauses.push("outcome = ?".into());
-        binds.push(BindValue::Text(o.as_str().to_string()));
-    }
-
     // 6) provider_ids IN
     if let Some(p) = filters.provider_ids.as_ref().filter(|v| !v.is_empty()) {
         let placeholders = std::iter::repeat("?")
@@ -1540,7 +1611,8 @@ fn decode_ledger_cursor(cursor: &str) -> Result<LedgerCursorV1, ()> {
 ///     统一列 → DTO，避免各查询重复。
 ///
 /// Code Logic（这个函数做什么）:
-///     try_get 各列；outcome parse fail → Err。
+///     try_get 各列；outcome parse fail → Err；
+///     `project_name` 来自 LEFT JOIN（`SELECT_COLUMNS_WITH_PROJECT_NAME` 形式），缺失列回 None。
 fn map_row(row: SqliteRow) -> Result<AgentLedgerEntry, AppError> {
     let outcome_raw: String = row.try_get("outcome")?;
     let outcome = AgentLedgerOutcome::parse(&outcome_raw)
@@ -1573,6 +1645,7 @@ fn map_row(row: SqliteRow) -> Result<AgentLedgerEntry, AppError> {
             .map(|v| v as u64),
         cost_currency: row.try_get("cost_currency")?,
         terminal_title: row.try_get("terminal_title")?,
+        project_name: row.try_get::<Option<String>, _>("project_name").ok().flatten(),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -1943,5 +2016,139 @@ mod tests {
             .is_ended_after_clear_watermark("2099-01-01T00:00:00Z")
             .await
             .unwrap());
+    }
+
+    /// Business Logic: list 多值 IN 子句必须按 provider_id / model_id / project_id 收窄交集。
+    ///
+    /// Code Logic: finalize 3 条不同 provider + 不同 project → 选 2 provider + 2 project →
+    ///     断言只命中交集；model_ids 选择性也试一遍。
+    #[tokio::test]
+    async fn list_query_filters_by_provider_and_model_and_project_multivalue() {
+        let repo = ledger_repo().await;
+        // 三行：p1+claudeCodeVisible+claude-opus, p2+codexVisible+codex-1, p3+claudeCodeVisible+(None)
+        for (id, pid, prov, mid) in [
+            ("a1", "p1", "claudeCodeVisible", Some("claude-opus")),
+            ("a2", "p2", "codexVisible", Some("codex-1")),
+            ("a3", "p3", "claudeCodeVisible", None),
+        ] {
+            let mut input = AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: pid.into(),
+                worktree_id: None,
+                provider_id: prov.into(),
+                model_id: mid.map(|s| s.to_string()),
+                started_at: "2026-07-01T10:00:00Z".into(),
+                ended_at: "2026-07-01T10:05:00Z".into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+                terminal_title: None,
+            };
+            repo.finalize(input).await.unwrap();
+        }
+        // 多 provider_ids + 多 project_ids 交集
+        let page = repo
+            .get_page(AgentLedgerQuery {
+                provider_ids: Some(vec!["claudeCodeVisible".into(), "codexVisible".into()]),
+                project_ids: Some(vec!["p1".into(), "p2".into()]),
+                limit: Some(50),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let keys: Vec<_> = page.items.iter().map(|e| e.agent_session_id.clone()).collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"a1".to_string()));
+        assert!(keys.contains(&"a2".to_string()));
+        // 只 model_ids 过滤
+        let only_model = repo
+            .get_page(AgentLedgerQuery {
+                model_ids: Some(vec!["claude-opus".into()]),
+                limit: Some(50),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(only_model.items.len(), 1);
+        assert_eq!(only_model.items[0].agent_session_id, "a1");
+    }
+
+    /// Business Logic: token 统计页 Session 明细需要展示项目名（不是 ID）；
+    ///     LEFT JOIN workbench_projects 取 wp.name 填到 `project_name`，缺失时 None。
+    ///
+    /// Code Logic: 兜底 minimal `workbench_projects` 表已含 id/name，插入 'p1' → 'Demo Project' →
+    ///     finalize 一行 → get_page + get_by_agent_session_id 两条路径都带 project_name='Demo Project'。
+    #[tokio::test]
+    async fn list_and_get_return_project_name_via_left_join() {
+        let repo = ledger_repo().await;
+        let pool = repo.pool();
+        sqlx::query("INSERT INTO workbench_projects (id, name) VALUES ('p1', 'Demo Project')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.finalize(finalize("a1", None)).await.unwrap();
+        // page → project_name 填充
+        let page = repo.get_page(default_query()).await.unwrap();
+        assert_eq!(page.items[0].project_name.as_deref(), Some("Demo Project"));
+        // 单行 get → project_name 填充
+        let one = repo
+            .get_by_agent_session_id("a1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.project_name.as_deref(), Some("Demo Project"));
+    }
+
+    /// Business Logic: workbench_projects 没建时 LEFT JOIN 兜底成 NULL project_name，
+    ///     不应阻塞 UI 渲染（前端 fallback 到 project_id）。
+    ///
+    /// Code Logic: ensure_schema 默认建 minimal 表 → finalize → project_name == None。
+    #[tokio::test]
+    async fn project_name_is_null_when_no_workbench_projects_row() {
+        let repo = ledger_repo().await; // minimal 表已建（id+name 两列）
+        repo.finalize(finalize("a1", None)).await.unwrap();
+        let page = repo.get_page(default_query()).await.unwrap();
+        assert_eq!(page.items[0].project_id, "p1");
+        assert!(page.items[0].project_name.is_none());
+    }
+
+    /// Business Logic: byProject 维度 label 必须填入 LEFT JOIN 的 wp.name,
+    ///     缺失时仍 (unknown) 兜底 key。
+    ///
+    /// Code Logic: insert 'p1' → 'Demo Project One' → finalize 一行 → 第二项目无对应行 →
+    ///     summarize_grouped(project) 断言 row.label == Some(name) 当 join 命中；不命中保留 None。
+    #[tokio::test]
+    async fn summarize_grouped_project_fills_label_from_left_join() {
+        use crate::workbench::agent_ledger::models::{
+            AgentLedgerFilters, LedgerWindow,
+        };
+        let repo = ledger_repo().await;
+        let pool = repo.pool();
+        sqlx::query("INSERT INTO workbench_projects (id, name) VALUES ('p1', 'Demo Project One')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.finalize(finalize("a1", None)).await.unwrap();
+        // 第二项目无对应 workbench_projects 行 → label 应为 None
+        let mut other = finalize("a2", None);
+        other.project_id = "p_unknown".into();
+        repo.finalize(other).await.unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = repo
+            .summarize_grouped(
+                &AgentLedgerFilters {
+                    window: Some(LedgerWindow::Days7),
+                    ..Default::default()
+                },
+                "project",
+                now,
+            )
+            .await
+            .unwrap();
+        let p1 = rows.iter().find(|r| r.key == "p1").expect("p1 row");
+        assert_eq!(p1.label.as_deref(), Some("Demo Project One"));
+        let p2 = rows.iter().find(|r| r.key == "p_unknown").expect("p2 row");
+        assert!(p2.label.is_none());
     }
 }

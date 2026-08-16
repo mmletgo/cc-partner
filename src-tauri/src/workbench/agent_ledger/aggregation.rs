@@ -779,7 +779,7 @@ mod tests {
         assert!(!cur.is_empty());
     }
 
-    /// Business Logic: project/provider/outcome/time filters。
+    /// Business Logic: project/provider/model/时间 多值 IN 筛选。
     #[tokio::test]
     async fn filters_apply() {
         let repo = fixture().await;
@@ -802,8 +802,7 @@ mod tests {
             &repo,
             AgentLedgerQuery {
                 project_id: Some("p2".into()),
-                provider_id: Some("codexVisible".into()),
-                outcome: Some(AgentLedgerOutcome::Failed),
+                provider_ids: Some(vec!["codexVisible".into()]),
                 ended_after: Some("2026-07-01T00:00:00Z".into()),
                 ended_before: Some("2026-07-01T01:30:00Z".into()),
                 ..Default::default()

@@ -581,7 +581,6 @@ async fn dispatch_workbench_op(
             let model_ids = optional_string_vec(&payload, "modelIds");
             let project_ids = optional_string_vec(&payload, "projectIds");
             let worktree_id = optional_string(&payload, "worktreeId");
-            let outcome = optional_string(&payload, "outcome");
             let started_after = optional_string(&payload, "startedAfter");
             let started_before = optional_string(&payload, "startedBefore");
             let bucket = optional_string(&payload, "bucket");
@@ -592,7 +591,6 @@ async fn dispatch_workbench_op(
                 model_ids,
                 project_ids,
                 worktree_id,
-                outcome,
                 started_after,
                 started_before,
                 bucket,

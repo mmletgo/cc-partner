@@ -26,8 +26,12 @@ use super::common::proxy_workbench_if_gui;
 #[serde(rename_all = "camelCase")]
 pub struct ListAgentLedgerReq {
     pub project_id: Option<String>,
-    pub provider_id: Option<String>,
-    pub outcome: Option<String>,
+    /// 可选 provider 多值过滤
+    pub provider_ids: Option<Vec<String>>,
+    /// 可选 model 多值过滤
+    pub model_ids: Option<Vec<String>>,
+    /// 可选 project 多值过滤（与 projectId 互斥；同时给 → projectIds 优先）
+    pub project_ids: Option<Vec<String>>,
     pub ended_after: Option<String>,
     pub ended_before: Option<String>,
     pub cursor: Option<String>,
@@ -50,8 +54,6 @@ pub struct SummarizeAgentLedgerReq {
     pub project_ids: Option<Vec<String>>,
     /// 可选 worktree 过滤
     pub worktree_id: Option<String>,
-    /// 可选 outcome 过滤
-    pub outcome: Option<String>,
     /// 可选 started_at 下界（含）RFC3339
     pub started_after: Option<String>,
     /// 可选 started_at 上界（含）RFC3339
@@ -78,8 +80,6 @@ pub struct ExportTokenStatsReq {
     pub project_ids: Option<Vec<String>>,
     /// 可选 worktree 过滤
     pub worktree_id: Option<String>,
-    /// 可选 outcome 过滤
-    pub outcome: Option<String>,
     /// 可选 started_at 下界（含）RFC3339
     pub started_after: Option<String>,
     /// 可选 started_at 上界（含）RFC3339
@@ -116,27 +116,16 @@ pub async fn list_agent_ledger(
 ///     control 与 tauri 共用。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 outcome → AgentLedgerQuery → list_entries。
+///     构造 AgentLedgerQuery（多值 provider/model/project）→ list_entries。
 pub async fn list_agent_ledger_for_state(
     state: &AppState,
     req: ListAgentLedgerReq,
 ) -> Result<AgentLedgerPage, AppError> {
-    let outcome = match req
-        .outcome
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(raw) => Some(
-            crate::workbench::agent_ledger::models::AgentLedgerOutcome::parse(raw)
-                .ok_or_else(|| AppError::validation(format!("非法 outcome: {raw}")))?,
-        ),
-        None => None,
-    };
     let query = AgentLedgerQuery {
         project_id: req.project_id,
-        provider_id: req.provider_id,
-        outcome,
+        provider_ids: req.provider_ids,
+        model_ids: req.model_ids,
+        project_ids: req.project_ids,
         ended_after: req.ended_after,
         ended_before: req.ended_before,
         cursor: req.cursor,
@@ -175,7 +164,7 @@ pub async fn summarize_agent_ledger(
 ///     control 与 tauri 共用；Token 统计页扩展支持全量筛选。
 ///
 /// Code Logic（这个函数做什么）:
-///     parse window/bucket/outcome → 构造 AgentLedgerFilters → aggregation。
+///     parse window/bucket → 构造 AgentLedgerFilters → aggregation。
 pub async fn summarize_agent_ledger_for_state(
     state: &AppState,
     req: SummarizeAgentLedgerReq,
@@ -192,19 +181,6 @@ pub async fn summarize_agent_ledger_for_state(
             })?),
             None => None,
         };
-
-    let outcome = match req
-        .outcome
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(raw) => Some(
-            crate::workbench::agent_ledger::models::AgentLedgerOutcome::parse(raw)
-                .ok_or_else(|| AppError::validation(format!("非法 outcome: {raw}")))?,
-        ),
-        None => None,
-    };
 
     let bucket =
         match req
@@ -226,7 +202,6 @@ pub async fn summarize_agent_ledger_for_state(
         model_ids: req.model_ids,
         project_ids: req.project_ids,
         worktree_id: req.worktree_id,
-        outcome,
         started_after: req.started_after,
         started_before: req.started_before,
         bucket,
@@ -325,18 +300,6 @@ pub async fn export_token_stats_for_state(
             })?),
             None => None,
         };
-    let outcome = match req
-        .outcome
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(raw) => Some(
-            crate::workbench::agent_ledger::models::AgentLedgerOutcome::parse(raw)
-                .ok_or_else(|| AppError::validation(format!("非法 outcome: {raw}")))?,
-        ),
-        None => None,
-    };
     let filters = AgentLedgerFilters {
         window,
         project_id: req.project_id.clone(),
@@ -344,7 +307,6 @@ pub async fn export_token_stats_for_state(
         model_ids: req.model_ids.clone(),
         project_ids: req.project_ids.clone(),
         worktree_id: req.worktree_id.clone(),
-        outcome,
         started_after: req.started_after.clone(),
         started_before: req.started_before.clone(),
         bucket: None,
@@ -363,11 +325,9 @@ pub async fn export_token_stats_for_state(
     loop {
         let q = crate::workbench::agent_ledger::models::AgentLedgerQuery {
             project_id: filters.project_id.clone(),
-            provider_id: filters
-                .provider_ids
-                .as_ref()
-                .and_then(|v| v.first().cloned()),
-            outcome: filters.outcome,
+            provider_ids: filters.provider_ids.clone(),
+            model_ids: filters.model_ids.clone(),
+            project_ids: filters.project_ids.clone(),
             ended_after: filters.started_after.clone(),
             ended_before: filters.started_before.clone(),
             cursor: cursor.clone(),
@@ -529,8 +489,9 @@ impl serde::Serialize for ListAgentLedgerReq {
         use serde::ser::SerializeStruct;
         let mut st = serializer.serialize_struct("ListAgentLedgerReq", 7)?;
         st.serialize_field("projectId", &self.project_id)?;
-        st.serialize_field("providerId", &self.provider_id)?;
-        st.serialize_field("outcome", &self.outcome)?;
+        st.serialize_field("providerIds", &self.provider_ids)?;
+        st.serialize_field("modelIds", &self.model_ids)?;
+        st.serialize_field("projectIds", &self.project_ids)?;
         st.serialize_field("endedAfter", &self.ended_after)?;
         st.serialize_field("endedBefore", &self.ended_before)?;
         st.serialize_field("cursor", &self.cursor)?;
@@ -545,14 +506,13 @@ impl serde::Serialize for SummarizeAgentLedgerReq {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut st = serializer.serialize_struct("SummarizeAgentLedgerReq", 10)?;
+        let mut st = serializer.serialize_struct("SummarizeAgentLedgerReq", 9)?;
         st.serialize_field("window", &self.window)?;
         st.serialize_field("projectId", &self.project_id)?;
         st.serialize_field("providerIds", &self.provider_ids)?;
         st.serialize_field("modelIds", &self.model_ids)?;
         st.serialize_field("projectIds", &self.project_ids)?;
         st.serialize_field("worktreeId", &self.worktree_id)?;
-        st.serialize_field("outcome", &self.outcome)?;
         st.serialize_field("startedAfter", &self.started_after)?;
         st.serialize_field("startedBefore", &self.started_before)?;
         st.serialize_field("bucket", &self.bucket)?;
@@ -644,13 +604,12 @@ mod tests {
         assert!(req.model_ids.is_none());
         assert!(req.project_ids.is_none());
         assert!(req.worktree_id.is_none());
-        assert!(req.outcome.is_none());
         assert!(req.started_after.is_none());
         assert!(req.started_before.is_none());
         assert!(req.bucket.is_none());
 
         // 全字段填齐（含 camelCase）→ 反序列化成功
-        let j = r#"{"window":"24h","projectId":"p","providerIds":["a"],"modelIds":["m"],"projectIds":["p"],"worktreeId":"w","outcome":"completed","startedAfter":"2026-07-15T00:00:00Z","startedBefore":"2026-07-15T01:00:00Z","bucket":"hour"}"#;
+        let j = r#"{"window":"24h","projectId":"p","providerIds":["a"],"modelIds":["m"],"projectIds":["p"],"worktreeId":"w","startedAfter":"2026-07-15T00:00:00Z","startedBefore":"2026-07-15T01:00:00Z","bucket":"hour"}"#;
         let req: SummarizeAgentLedgerReq = serde_json::from_str(j).unwrap();
         assert_eq!(req.window.as_deref(), Some("24h"));
         assert_eq!(req.bucket.as_deref(), Some("hour"));
@@ -671,7 +630,6 @@ mod tests {
             model_ids: None,
             project_ids: None,
             worktree_id: None,
-            outcome: None,
             started_after: None,
             started_before: None,
         };
@@ -723,7 +681,6 @@ mod tests {
             model_ids: None,
             project_ids: None,
             worktree_id: None,
-            outcome: None,
             started_after: None,
             started_before: None,
         };
@@ -812,7 +769,6 @@ mod tests {
             model_ids: None,
             project_ids: None,
             worktree_id: None,
-            outcome: None,
             started_after: None,
             started_before: None,
         };
