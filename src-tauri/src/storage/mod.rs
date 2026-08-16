@@ -8,6 +8,7 @@
 
 pub mod agent_hub_repo;
 pub mod agent_ledger_repo;
+pub mod attention_read_repo;
 pub mod battery_repo;
 pub mod cc_history_repo;
 pub mod claude_md_repo;
@@ -50,6 +51,7 @@ pub use deletion_floor_repo::DeletionFloorRepo;
 pub use maintenance_gate::DatabaseMaintenanceGate;
 pub use prompt_repo::PromptRepo;
 pub use recovery_job_repo::{RecoveryJobRepo, RecoveryJobRow};
+pub use attention_read_repo::AttentionReadRepo;
 pub use scratchpad_repo::ScratchpadRepo;
 pub use ssh_target_repo::SshTargetRepo;
 pub use sync_delete_sequence_repo::SyncDeleteSequenceRepo;

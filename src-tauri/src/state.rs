@@ -59,6 +59,8 @@ pub struct AppState {
     pub maintenance_gate: Arc<DatabaseMaintenanceGate>,
     /// Prompt 仓库
     pub prompt_repo: Arc<PromptRepo>,
+    /// Attention 全局 Inbox per-device 已读标记仓储（永久已读 + 跨设备同步元数据）
+    pub attention_read_repo: Arc<crate::storage::AttentionReadRepo>,
     /// 传输历史仓库（M5）
     pub transfer_repo: Arc<TransferRepo>,
     /// CLAUDE.md 单例仓库（user 级 CLAUDE.md 同步）

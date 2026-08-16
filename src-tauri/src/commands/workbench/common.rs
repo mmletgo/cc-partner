@@ -1720,6 +1720,7 @@ pub(super) mod restore_holder_fail_closed_tests {
             db: pool.clone(),
             maintenance_gate: maintenance_gate.clone(),
             prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+            attention_read_repo: Arc::new(crate::storage::AttentionReadRepo::new(pool.clone())),
             transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
             claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
             scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),

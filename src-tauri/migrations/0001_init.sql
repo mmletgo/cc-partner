@@ -567,3 +567,15 @@ CREATE TABLE IF NOT EXISTS wordgame_preheat (
     retry_count INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- Attention 全局 Inbox 的 per-device 永久已读标记（仅元数据表；条目本身不落库）。
+-- 主键 (item_id, device_id)：同一 item 在不同设备可独立已读；
+-- 跨设备同步经 sync push-batch v2 通道（attention.read 域）传播；
+-- read_at 为本设备视角的 monotonic max(RFC3339)；撤销 = DELETE 当前 device_id 行。
+CREATE TABLE IF NOT EXISTS attention_read_by_device (
+    item_id   TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    read_at   TEXT NOT NULL,
+    PRIMARY KEY (item_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attention_read_device
+    ON attention_read_by_device(device_id, read_at DESC);

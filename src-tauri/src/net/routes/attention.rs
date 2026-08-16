@@ -74,6 +74,10 @@ mod tests {
                 decision: 0,
                 blocked: 0,
                 environment: 1,
+                unread_total: 0,
+                unread_decision: 0,
+                unread_blocked: 0,
+                unread_environment: 0,
             },
             items: vec![crate::attention::models::AttentionItemDto {
                 id: "workbench:dependency:tmux".to_string(),
@@ -89,7 +93,9 @@ mod tests {
                 target: crate::attention::models::AttentionTargetDto::Settings {
                     tab: crate::attention::models::AttentionSettingsTab::Dependencies,
                 },
+                read_at: None,
             }],
+            my_device_id: String::new(),
         };
 
         // 模拟 Tauri command 返回路径：直接序列化 helper 结果。

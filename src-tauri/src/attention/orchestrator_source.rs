@@ -223,6 +223,7 @@ pub(crate) fn project_local_task_row(
             project_id: task.project_id.clone(),
             task_id,
         },
+        read_at: None
     })
 }
 
@@ -290,6 +291,7 @@ pub(crate) fn project_remote_task_dto(
             project_id: remote_shortcut.id.clone(),
             task_id: wrapped_task_id,
         },
+        read_at: None
     })
 }
 
@@ -338,6 +340,7 @@ pub(crate) fn project_failed_outbox_row(
             project_id: remote_shortcut.id.clone(),
             outbox_id: row.id.clone(),
         },
+        read_at: None
     })
 }
 

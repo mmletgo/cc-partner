@@ -153,6 +153,7 @@ pub fn project_source_push_failure_item(row: &SourcePushTargetRow) -> AttentionI
             asset_id: String::new(),
             conflict_id: None,
         },
+        read_at: None
     }
 }
 
@@ -180,6 +181,7 @@ pub fn project_conflict_item(conflict: &AgentHubConflict) -> AttentionItemDto {
             asset_id: conflict.asset_id.clone(),
             conflict_id: Some(conflict.id.clone()),
         },
+        read_at: None
     }
 }
 
@@ -218,6 +220,7 @@ pub fn project_blocked_item(mat: &Materialization) -> AttentionItemDto {
             asset_id: mat.asset_id.clone(),
             conflict_id: None,
         },
+        read_at: None
     }
 }
 
