@@ -794,6 +794,12 @@
     "disconnected": "Disconnected"
   },
   "statusAgent": "Agent",
+  "metricsIn": "Input rate",
+  "metricsOut": "Output rate",
+  "metricsContext": "Context usage",
+  "metricsContextAria": "Context usage {{pct}}%",
+  "metricsUnavailable": "Unavailable",
+  "metricsContextNoWindow": "No window",
   "agentPhase": {
     "launching": "Agent launching",
     "working": "Agent working",

@@ -9,7 +9,7 @@
  *   直接断言 formatTokenCount 的边界值输出（原样 / k / M / null）。
  */
 import { describe, expect, it } from 'vitest';
-import { formatTokenCount } from './tokenFormat';
+import { formatTokenCount, formatTokenRate } from './tokenFormat';
 
 describe('formatTokenCount', () => {
   it('5000 及以下直接显示整数', () => {
@@ -35,5 +35,37 @@ describe('formatTokenCount', () => {
     expect(formatTokenCount(undefined)).toBeNull();
     expect(formatTokenCount(Number.NaN)).toBeNull();
     expect(formatTokenCount(-1)).toBeNull();
+  });
+});
+
+describe('formatTokenRate', () => {
+  it('< 10 tok/s 保留 2 位小数', () => {
+    expect(formatTokenRate(0)).toBe('0.00 tok/s');
+    expect(formatTokenRate(0.05)).toBe('0.05 tok/s');
+    expect(formatTokenRate(4.32)).toBe('4.32 tok/s');
+    expect(formatTokenRate(9.999)).toBe('10.00 tok/s');
+  });
+
+  it('10 ≤ tps < 1000 保留 1 位小数', () => {
+    expect(formatTokenRate(10)).toBe('10.0 tok/s');
+    expect(formatTokenRate(123.4)).toBe('123.4 tok/s');
+    expect(formatTokenRate(999.9)).toBe('999.9 tok/s');
+  });
+
+  it('>= 1000 tok/s 以 k 缩写（2 位小数）', () => {
+    expect(formatTokenRate(1_000)).toBe('1.00k tok/s');
+    expect(formatTokenRate(12_345)).toBe('12.35k tok/s');
+  });
+
+  it('>= 1,000,000 tok/s 以 M 缩写（2 位小数）', () => {
+    expect(formatTokenRate(1_000_000)).toBe('1.00M tok/s');
+    expect(formatTokenRate(2_500_000)).toBe('2.50M tok/s');
+  });
+
+  it('null / undefined / NaN / 负数返回 null', () => {
+    expect(formatTokenRate(null)).toBeNull();
+    expect(formatTokenRate(undefined)).toBeNull();
+    expect(formatTokenRate(Number.NaN)).toBeNull();
+    expect(formatTokenRate(-0.5)).toBeNull();
   });
 });

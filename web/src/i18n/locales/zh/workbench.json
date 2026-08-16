@@ -787,6 +787,12 @@
     "disconnected": "已断开"
   },
   "statusAgent": "Agent",
+  "metricsIn": "输入速率",
+  "metricsOut": "输出速率",
+  "metricsContext": "上下文用量",
+  "metricsContextAria": "上下文使用 {{pct}}%",
+  "metricsUnavailable": "未提供",
+  "metricsContextNoWindow": "无窗口信息",
   "agentPhase": {
     "launching": "Agent 启动中",
     "working": "Agent 工作中",

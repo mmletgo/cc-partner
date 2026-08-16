@@ -22,3 +22,27 @@ export function formatTokenCount(value: number | null | undefined): string | nul
   if (value > 5_000) return `${(value / 1_000).toFixed(3)}k`;
   return String(value);
 }
+
+/**
+ * formatTokenRate
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   工作台右侧「当前会话」卡需要把终态平均速率（output_tokens / durationMs * 1000）
+ *   格式化为「12.3 tok/s」一类的紧凑可读字符串；速率的量级通常远小于累计 tokens，
+ *   但仍需按 k/M 收敛到合理位数，避免 0.000123 tok/s 这种噪声读数。
+ *
+ * Code Logic（这个函数做什么）:
+ *   - 非有限数 /  < 0 → null（交由调用方显示「未提供」）；
+ *   - 单位为 `tok/s`（与 ccstatusline 一致）；
+ *   - < 10：保留 2 位小数（`4.32 tok/s`）；
+ *   - < 1,000：保留 1 位小数（`123.4 tok/s`）；
+ *   - >= 1,000：以 k 缩写保留 2 位小数（`1.23k tok/s`）；
+ *   - >= 1,000,000：以 M 缩写保留 2 位小数（`1.23M tok/s`）。
+ */
+export function formatTokenRate(value: number | null | undefined): string | null {
+  if (value == null || !Number.isFinite(value) || value < 0) return null;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M tok/s`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(2)}k tok/s`;
+  if (value >= 10) return `${value.toFixed(1)} tok/s`;
+  return `${value.toFixed(2)} tok/s`;
+}

@@ -58,6 +58,7 @@ import { useWorkbenchPromptOptimizerController } from './controllers/useWorkbenc
 import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchSessionSearchController';
 import { useWorkbenchFavoriteQuickInput } from './hooks/useWorkbenchFavoriteQuickInput';
 import { useAgentRuntime } from '@/hooks/useAgentRuntime';
+import { useAgentLedgerForAgent } from '@/hooks/useAgentLedgerForAgent';
 import { WorkbenchTerminalArea } from './WorkbenchTerminalArea';
 import { WorkbenchInspector } from './WorkbenchInspector';
 import type { WorkbenchInspectorTab } from './WorkbenchInspector';
@@ -225,6 +226,15 @@ export function Workbench() {
   // R12 M3：history sync 永久失败可订阅状态（hooks 必须在 early return 前）。
   const historySyncFailure = useTerminalHistorySyncFailure(activeSessionId);
   const startupBaselineFailure = useStartupBaselineFailure();
+  // 状态卡速率 / 上下文 % 派生自 ledger 单行；仅 phase 终态触发拉取，working 阶段返回 null。
+  const activeAgentForStatusCard = activeSessionId
+    ? agentRuntime.latestAgentForTerminal(activeSessionId)
+    : null;
+  const agentLedgerForStatusCard = useAgentLedgerForAgent(
+    activeProjectId,
+    activeAgentForStatusCard?.id ?? null,
+    activeAgentForStatusCard?.phase ?? null,
+  );
   // Business Logic: worktree/Git 域（worktree 生命周期 + 创建表单/busy/error + Git 提交刷新 + merge 阶段）
   // 由独立 controller 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调 +
   // terminalBridge，不复制邻接域 state。activeWorktreeId 仍由页面持有（终端域 controller / 文件 effect /
@@ -1131,9 +1141,8 @@ export function Workbench() {
           handleRenameSession={handleRenameSession}
           handleCloseSession={handleCloseSession}
           runtimeVisible={runtimeVisible}
-          activeAgent={
-            activeSessionId ? agentRuntime.latestAgentForTerminal(activeSessionId) : null
-          }
+          activeAgent={activeAgentForStatusCard}
+          ledgerEntry={agentLedgerForStatusCard.ledgerEntry}
         />
         <WorkbenchInspector
           inspectorTab={inspectorTab}

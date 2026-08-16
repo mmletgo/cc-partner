@@ -1,0 +1,85 @@
+/* StatusCard agent session 指标块（输入/输出速率、上下文长度、上下文 %）。
+   所有颜色/间距/圆角/字号来自 design tokens；不引入新颜色。 */
+
+.metricsRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.metricCell {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.metricCell dt {
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+}
+
+.metricCell dd {
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metricCell dd[data-state='unavailable'] {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.contextMeter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.contextHeaderRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.contextHeaderRow dt {
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+}
+
+.contextValue {
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contextDivider {
+  margin: 0 var(--space-1);
+  color: var(--muted);
+}
+
+.contextHint {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.contextPct {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}

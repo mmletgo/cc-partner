@@ -5,24 +5,24 @@
  *   Plan 2 Task 8 把 Workbench.tsx 内联的 inspectorPane 顶部状态卡渲染抽到独立叶子组件，便于页面降到 ≤1200 行。
  *   状态卡是 inspectorPane 的一部分，但不是 tab 切换内容，因此单独成件；组件只接收 controller 派生的渲染数据与回调，
  *   不持有自己的状态，也不导入文件/Git 域。运行时长由 SessionRuntimeText 叶子自持 1 Hz 时钟，避免根重渲染。
+ *   Agent session 终态速率与上下文使用百分比由 ledger 单行派生（useAgentLedgerForAgent hook 在父层拉取）。
  *
  * Code Logic（这个组件做什么）:
  *   - 渲染会话状态 Pill、项目/worktree/session 元信息 grid、session rename 输入与 close 按钮；
  *   - statusRuntime 行挂 SessionRuntimeText（startedAt/endedAt/running/visible/emptyValue）；
+ *   - ledgerEntry 派生 TokenRateRow（input/output tok/s）与 ContextMeter（cumulative / window + ProgressBar）；
  *   - 暴露 WorkbenchStatusCardProps 类型，所有数据均来自 useWorkbenchTerminalController + Workbench.tsx 跨域共享。
  */
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Pill } from '@/components/primitives';
+import { ContextMeter, TokenRateRow } from '@/components/domain/WorkbenchStatusCard';
+import type { ProgressBarTone } from '@/components/primitives/ProgressBar';
+import { resolveContextWindow } from '@/lib/agent/modelContextWindow';
 import { EditIcon, XIcon } from '@/lib/icons';
+import type { AgentLedgerEntry } from '@/lib/types/agentLedger';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
-import {
-  agentFreshnessI18nKey,
-  agentPhaseI18nKey,
-  agentPhaseTone,
-  agentProviderShortLabel,
-} from './agentPhasePresentation';
 import styles from './Workbench.module.css';
 import { SessionRuntimeText } from './SessionRuntimeText';
 
@@ -60,6 +60,52 @@ function formatDateTime(value: string | null, emptyValue: string): string {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   ledger 单行的 token 累计值可能 null（覆盖率 unavailable）；必须 null-safe 求和。
+ *
+ * Code Logic（这个函数做什么）:
+ *   接受多个 nullable token 数字；返回非负整数求和（null 当 0）。
+ */
+function sumTokens(...values: Array<number | null | undefined>): number {
+  let total = 0;
+  for (const v of values) {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) total += v;
+  }
+  return total;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终态历史平均速率 = tokens / durationSec；duration 必须为正数才有效。
+ *
+ * Code Logic（这个函数做什么）:
+ *   durationMs > 0 时计算 tok/s；否则返回 null（避免除零或负值）。
+ */
+function computeTokenRate(tokens: number | null | undefined, durationMs: number): number | null {
+  if (tokens == null || !Number.isFinite(tokens) || tokens <= 0) return null;
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
+  return (tokens / durationMs) * 1000;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   ProgressBar tone 不能硬编码到叶子组件；StatusCard 根据 phase 与百分比阈值统一决策。
+ *
+ * Code Logic（这个函数做什么）:
+ *   终态 → success；其它阶段按百分比阈值：<0.6 accent，<0.85 warn，>=0.85 danger。
+ */
+function decideContextTone(
+  isTerminal: boolean,
+  pct: number | null,
+): ProgressBarTone {
+  if (isTerminal) return 'success';
+  if (pct == null) return 'accent';
+  if (pct >= 0.85) return 'danger';
+  if (pct >= 0.6) return 'warn';
+  return 'accent';
+}
+
+/**
  * 状态卡叶子组件的输入 props。
  *
  * Business Logic: 所有数据均由 useWorkbenchTerminalController + Workbench.tsx 跨域共享派生；
@@ -80,8 +126,13 @@ export interface WorkbenchStatusCardProps {
    * 由 Workbench 从既有 active 状态派生（如 !terminalFullscreen），不使用 IntersectionObserver。
    */
   runtimeVisible: boolean;
-  /** 当前 active terminal 的 Agent 投影（无则不展示 Agent 行）。 */
+  /** 当前 active terminal 的 Agent 投影（用于生命周期展示与终态判断）。 */
   activeAgent?: AgentSessionProjection | null;
+  /**
+   * 当前 active agent session 的 ledger 单行（终态由 useAgentLedgerForAgent 父层拉取）。
+   * working 阶段或未命中时为 null。
+   */
+  ledgerEntry?: AgentLedgerEntry | null;
 }
 
 /**
@@ -89,7 +140,8 @@ export interface WorkbenchStatusCardProps {
  *   Workbench 右侧 inspectorPane 顶部需要稳定的状态摘要，让用户在不切换 tab 的情况下看到当前项目/worktree/session 状态。
  *
  * Code Logic（这个组件做什么）:
- *   渲染状态 Pill + 11 行元信息 grid + rename 输入 + close 按钮；不持有状态、不调用 workbenchApi。
+ *   渲染状态 Pill + 6 行元信息 grid + TokenRateRow + ContextMeter + rename 输入 + close 按钮；
+ *   不持有状态、不调用 workbenchApi。
  */
 export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
   const { t } = useTranslation(['workbench']);
@@ -105,9 +157,13 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     handleCloseSession,
     runtimeVisible,
     activeAgent = null,
+    ledgerEntry = null,
   } = props;
 
   const emptyValue = t('workbench:emptyValue');
+  const unavailableLabel = t('workbench:metricsUnavailable');
+  const noWindowLabel = t('workbench:metricsContextNoWindow');
+
   const sessionStatusLabel = activeSession
     ? activeSession.status === 'running'
       ? t('workbench:sessionStatus.running')
@@ -118,43 +174,41 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
           : activeSession.status
     : t('workbench:sessionStatus.none');
 
-  const agentPhaseLabel = activeAgent
-    ? t(`workbench:${agentPhaseI18nKey(activeAgent.phase)}`)
+  const isAgentTerminal =
+    activeAgent?.phase === 'completed' ||
+    activeAgent?.phase === 'failed' ||
+    activeAgent?.phase === 'disconnected';
+
+  const ledgerDurationMs = ledgerEntry?.durationMs ?? 0;
+  const ledgerInputTokens = ledgerEntry?.inputTokens ?? null;
+  const ledgerOutputTokens = ledgerEntry?.outputTokens ?? null;
+  const ledgerCacheRead = ledgerEntry?.cacheReadTokens ?? null;
+  const ledgerCacheWrite = ledgerEntry?.cacheWriteTokens ?? null;
+
+  // 平均 tok/s：input = inputTokens（用户的 prompt 消耗），output = outputTokens。
+  const speedInTps = computeTokenRate(ledgerInputTokens, ledgerDurationMs);
+  const speedOutTps = computeTokenRate(ledgerOutputTokens, ledgerDurationMs);
+
+  // 上下文累计 = input + cache_read + cache_write；cache 命中与新写入都占 context 预算。
+  const cumulativeIn = ledgerEntry
+    ? sumTokens(ledgerInputTokens, ledgerCacheRead, ledgerCacheWrite)
     : null;
-  const agentFreshnessKey = activeAgent
-    ? agentFreshnessI18nKey(activeAgent.freshness)
-    : null;
-  const agentStatusValue =
-    activeAgent && agentPhaseLabel
-      ? [
-          agentProviderShortLabel(activeAgent.providerId),
-          agentPhaseLabel,
-          agentFreshnessKey ? t(`workbench:${agentFreshnessKey}`) : null,
-        ]
-          .filter(Boolean)
-          .join(' · ')
-      : emptyValue;
+  const contextWindow = resolveContextWindow(ledgerEntry?.modelId);
+  const pct =
+    contextWindow != null && contextWindow > 0 && cumulativeIn != null && cumulativeIn > 0
+      ? Math.min(1, cumulativeIn / contextWindow)
+      : null;
+  const contextTone = decideContextTone(isAgentTerminal, pct);
 
   // Business Logic: 元信息以 (label key, value) 数组驱动；runtime 行挂叶子 SessionRuntimeText 自持时钟。
+  // 已移除的字段：statusCommand / statusState（lifecycle 由 Pill 表达）/ statusAgent / statusSize / statusExit。
+  // 改由 TokenRateRow + ContextMeter 表达 agent session 指标。
   const rows: Array<{ label: string; value: ReactNode }> = [
     { label: t('workbench:statusDevice'), value: activeProject?.deviceName ?? emptyValue },
     { label: t('workbench:statusProject'), value: activeProject?.name ?? emptyValue },
     { label: t('workbench:statusWorktree'), value: activeWorktree?.name ?? emptyValue },
     { label: t('workbench:statusProjectPath'), value: activeRootPath || emptyValue },
     { label: t('workbench:statusSession'), value: activeSession?.name ?? emptyValue },
-    { label: t('workbench:statusCommand'), value: activeSession?.command ?? emptyValue },
-    { label: t('workbench:statusState'), value: sessionStatusLabel },
-    {
-      label: t('workbench:statusAgent'),
-      value:
-        activeAgent && agentPhaseLabel ? (
-          <Pill tone={agentPhaseTone(activeAgent.phase)} dot>
-            {agentStatusValue}
-          </Pill>
-        ) : (
-          emptyValue
-        ),
-    },
     {
       label: t('workbench:statusRuntime'),
       value: (
@@ -168,14 +222,9 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
       ),
     },
     {
-      label: t('workbench:statusSize'),
-      value: activeSession ? `${activeSession.cols} × ${activeSession.rows}` : emptyValue,
-    },
-    {
       label: t('workbench:statusStarted'),
       value: formatDateTime(activeSession?.startedAt ?? null, emptyValue),
     },
-    { label: t('workbench:statusExit'), value: activeSession?.exitCode !== null && activeSession?.exitCode !== undefined ? String(activeSession.exitCode) : emptyValue },
   ];
 
   return (
@@ -194,6 +243,18 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
           </div>
         ))}
       </dl>
+      <TokenRateRow
+        speedInTps={speedInTps}
+        speedOutTps={speedOutTps}
+        unavailableLabel={unavailableLabel}
+      />
+      <ContextMeter
+        cumulativeIn={cumulativeIn}
+        contextWindow={contextWindow}
+        unavailableLabel={unavailableLabel}
+        noWindowLabel={noWindowLabel}
+        tone={contextTone}
+      />
       <div className={styles.statusActions}>
         <Input
           value={sessionNameDraft}
