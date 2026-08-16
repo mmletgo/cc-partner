@@ -107,7 +107,9 @@ pub async fn scan(state: &AppState) -> Result<usize, AppError> {
                     .or_else(|| value.get("sessionId"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| {
-                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown")
                     })
                     .to_string();
                 let cwd = value

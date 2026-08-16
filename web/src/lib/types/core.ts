@@ -340,6 +340,9 @@ export interface MobileAccessInfo {
 
 export type PromptOptimizerFillLanguage = 'zh' | 'en';
 
+/** Prompt 优化 HeadlessCompletion provider（catalog hasHeadless 且本轮已实现）。 */
+export type PromptOptimizerProvider = 'claude' | 'grok';
+
 /**
  * Prompt 优化响应（对齐 Rust optimize_prompt 返回）。
  */

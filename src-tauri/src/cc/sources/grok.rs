@@ -108,10 +108,7 @@ pub async fn scan(state: &AppState) -> Result<usize, AppError> {
                         continue;
                     }
                 }
-                let session_id = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned();
+                let session_id = entry.file_name().to_string_lossy().into_owned();
                 let cwd = fs::read_to_string(entry.path().join("summary.json"))
                     .ok()
                     .and_then(|t| serde_json::from_str::<Value>(&t).ok())

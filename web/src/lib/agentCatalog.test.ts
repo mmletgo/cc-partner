@@ -4,6 +4,7 @@ import {
   allHistorySources,
   allHubTargets,
   allSessionSources,
+  headlessOptimizerProviders,
   identityByRuntime,
   parseAgentId,
 } from './agentCatalog';
@@ -19,6 +20,10 @@ describe('agentCatalog', () => {
   it('rejects unknown agent ids', () => {
     expect(parseAgentId('antigravity')).toBeNull();
     expect(parseAgentId('genericTerminal')).toBeNull();
+  });
+
+  it('offers only implemented headless optimizer providers', () => {
+    expect(headlessOptimizerProviders().map((row) => row.id)).toEqual(['claude', 'grok']);
   });
 
   it('does not map genericTerminal to a product identity', () => {

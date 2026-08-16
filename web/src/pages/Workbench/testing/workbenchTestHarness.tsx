@@ -700,6 +700,7 @@ export function buildDefaultInvokeHandler(data: {
           screenshotHotkey: '<ctrl>',
           promptOptimizerHotkey: '<ctrl>',
           promptOptimizerFillLanguage: 'zh' satisfies PromptOptimizerFillLanguage,
+          promptOptimizerProvider: 'claude',
         };
       default:
         return { ok: true };

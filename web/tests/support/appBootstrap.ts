@@ -22,6 +22,7 @@ export type TestAppConfig = {
   promptOptimizerHotkey: string;
   promptQuickInputHotkey: string;
   promptOptimizerFillLanguage: 'zh' | 'en';
+  promptOptimizerProvider: 'claude' | 'grok';
   httpPort: number;
 };
 
@@ -42,6 +43,7 @@ export function makeAppConfig(partial: Partial<TestAppConfig> = {}): TestAppConf
     promptOptimizerHotkey: 'Control',
     promptQuickInputHotkey: '<ctrl>+/',
     promptOptimizerFillLanguage: 'zh',
+    promptOptimizerProvider: 'claude',
     httpPort: 62116,
     ...partial,
   };

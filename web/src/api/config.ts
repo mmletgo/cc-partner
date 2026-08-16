@@ -38,6 +38,7 @@ export type ConfigUpdate = Pick<
   | 'screenshotHotkey'
   | 'promptOptimizerHotkey'
   | 'promptOptimizerFillLanguage'
+  | 'promptOptimizerProvider'
   | 'promptQuickInputHotkey'
 >;
 

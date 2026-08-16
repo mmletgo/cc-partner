@@ -5,12 +5,14 @@
 //!     但不需要保存历史、入库、跨设备同步或缓存。
 //!
 //! Code Logic（这个模块做什么）:
-//!     校验输入长度，复用 GitHub Trending 设置中的 Claude CLI 路径和模型，调用共享
-//!     `claude_cli` headless helper，并返回 camelCase DTO；Workbench 可传项目目录加载 CLAUDE.md。
+//!     按 Settings 的 HeadlessCompletion provider 分发：默认 Claude，可选 Grok；
+//!     Gemini 不可选。输出 DTO 不变；Github 热门解说仍走 Claude。
 
 use crate::claude_cli;
 use crate::commands::workbench::device_base_url;
+use crate::config::{parse_prompt_optimizer_provider, PromptOptimizerProvider};
 use crate::error::AppError;
+use crate::grok_cli;
 use crate::state::AppState;
 use crate::workbench::{
     remote_client::RemoteWorkbenchClient, remote_ids::parse_remote_entity_id,
@@ -120,8 +122,8 @@ impl PromptOptimizeTargetLanguage {
 ///     Workbench 小组件只得到设置页选择的单语版本。结果只在当前页面展示，不入库、不缓存、不跨设备同步。
 ///
 /// Code Logic（这个命令做什么）:
-///     校验输入长度；读取 GitHub Trending 的 Claude CLI 路径和模型；按 target_language 构造 schema 与任务指令；
-///     未传工作目录时执行 pure/bare CLI 调用，传入工作目录时执行项目上下文 CLI 调用。
+///     校验输入长度；读取 Settings 的优化 provider（默认 Claude）；按 target_language 构造 schema 与任务指令；
+///     未传工作目录时执行 pure/bare CLI 调用，传入工作目录时在项目根执行。
 #[tauri::command]
 pub async fn optimize_prompt(
     state: State<'_, AppState>,
@@ -132,43 +134,27 @@ pub async fn optimize_prompt(
     validate_prompt_input(&prompt)?;
     let working_directory = resolve_working_directory(working_directory)?;
     let target_language = PromptOptimizeTargetLanguage::parse(target_language)?;
-    let (cli_path, model, provider_id) = {
-        let cfg = state.config.read().unwrap();
-        (
-            cfg.github_trending.claude_cli_path.clone(),
-            cfg.github_trending.claude_model.clone(),
-            cfg.internal_claude.provider_id.clone(),
-        )
-    };
-    let provider_dir =
-        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
-            .await?;
+    let runtime = read_optimizer_runtime(&state)?;
     let schema = prompt_optimize_schema_for_target(target_language)?;
     let instruction = build_optimize_instruction_for_target(&prompt, target_language);
 
     if let Some(target_language) = target_language {
-        let result = claude_cli::run_structured_json_with_cwd::<SinglePromptOptimizeResponseDto>(
-            &cli_path,
-            &model,
-            provider_dir.as_deref(),
+        let result = run_structured_optimize::<SinglePromptOptimizeResponseDto>(
+            &runtime,
             &schema.to_string(),
             &instruction,
             working_directory.as_deref(),
-            PROMPT_OPTIMIZE_TIMEOUT_SECS,
             "优化 Prompt",
         )
         .await?;
         return Ok(single_prompt_response_to_full(target_language, result));
     }
 
-    claude_cli::run_structured_json_with_cwd::<PromptOptimizeResponseDto>(
-        &cli_path,
-        &model,
-        provider_dir.as_deref(),
+    run_structured_optimize::<PromptOptimizeResponseDto>(
+        &runtime,
         &schema.to_string(),
         &instruction,
         working_directory.as_deref(),
-        PROMPT_OPTIMIZE_TIMEOUT_SECS,
         "优化 Prompt",
     )
     .await
@@ -206,28 +192,15 @@ pub(crate) async fn local_complete_orchestrator_task_prompt(
 ) -> Result<OrchestratorTaskPromptCompletionDto, AppError> {
     validate_prompt_input(&prompt)?;
     let working_directory = resolve_working_directory(working_directory)?;
-    let (cli_path, model, provider_id) = {
-        let cfg = state.config.read().unwrap();
-        (
-            cfg.github_trending.claude_cli_path.clone(),
-            cfg.github_trending.claude_model.clone(),
-            cfg.internal_claude.provider_id.clone(),
-        )
-    };
-    let provider_dir =
-        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
-            .await?;
+    let runtime = read_optimizer_runtime(state)?;
     let schema = orchestrator_task_prompt_completion_schema();
     let instruction = build_orchestrator_task_prompt_completion_instruction(&prompt);
 
-    claude_cli::run_structured_json_with_cwd::<OrchestratorTaskPromptCompletionDto>(
-        &cli_path,
-        &model,
-        provider_dir.as_deref(),
+    run_structured_optimize::<OrchestratorTaskPromptCompletionDto>(
+        &runtime,
         &schema.to_string(),
         &instruction,
         working_directory.as_deref(),
-        PROMPT_OPTIMIZE_TIMEOUT_SECS,
         "完善自动化任务 Prompt",
     )
     .await
@@ -317,32 +290,45 @@ pub(crate) async fn local_stream_optimize_prompt_to_workbench_session(
     }
     let (target_language, _) = parse_required_target_language(target_language)?;
     let working_directory = resolve_working_directory(working_directory)?;
-    let (cli_path, model, provider_id) = {
-        let cfg = state.config.read().unwrap();
-        (
-            cfg.github_trending.claude_cli_path.clone(),
-            cfg.github_trending.claude_model.clone(),
-            cfg.internal_claude.provider_id.clone(),
-        )
-    };
-    let provider_dir =
-        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
-            .await?;
-    let instruction = build_streaming_optimize_instruction(&prompt, target_language);
+    let runtime = read_optimizer_runtime(state)?;
     let sessions = state.workbench_sessions.clone();
     let write_session_id = session_id.clone();
 
-    claude_cli::run_streaming_text_with_cwd(
-        &cli_path,
-        &model,
-        provider_dir.as_deref(),
-        &instruction,
-        working_directory.as_deref(),
-        PROMPT_OPTIMIZE_TIMEOUT_SECS,
-        "流式优化 Prompt",
-        move |chunk| sessions.write_input(&write_session_id, chunk),
-    )
-    .await?;
+    match runtime.provider {
+        PromptOptimizerProvider::Claude => {
+            let provider_dir = crate::internal_claude::resolve_internal_provider_config_dir(
+                runtime.internal_provider_id.as_deref(),
+            )
+            .await?;
+            let instruction = build_streaming_optimize_instruction(&prompt, target_language);
+            claude_cli::run_streaming_text_with_cwd(
+                &runtime.claude_cli_path,
+                &runtime.claude_model,
+                provider_dir.as_deref(),
+                &instruction,
+                working_directory.as_deref(),
+                PROMPT_OPTIMIZE_TIMEOUT_SECS,
+                "流式优化 Prompt",
+                move |chunk| sessions.write_input(&write_session_id, chunk),
+            )
+            .await?;
+        }
+        PromptOptimizerProvider::Grok => {
+            let schema = prompt_optimize_schema_for_target(Some(target_language))?;
+            let instruction = build_optimize_instruction_for_target(&prompt, Some(target_language));
+            let result = grok_cli::run_structured_json_with_cwd::<SinglePromptOptimizeResponseDto>(
+                &instruction,
+                &schema.to_string(),
+                working_directory.as_deref(),
+                PROMPT_OPTIMIZE_TIMEOUT_SECS,
+                "流式优化 Prompt",
+            )
+            .await?;
+            if !result.optimized_prompt.is_empty() {
+                sessions.write_input(&write_session_id, &result.optimized_prompt)?;
+            }
+        }
+    }
 
     Ok(json!({ "ok": true, "sessionId": session_id }))
 }
@@ -381,6 +367,79 @@ async fn remote_stream_optimize_prompt_to_workbench_session(
         .await?;
 
     Ok(json!({ "ok": true, "sessionId": local_session_id }))
+}
+
+/// Prompt 优化运行时选择（provider + Claude 专属 CLI 配置）。
+struct OptimizerRuntime {
+    provider: PromptOptimizerProvider,
+    claude_cli_path: String,
+    claude_model: String,
+    internal_provider_id: Option<String>,
+}
+
+/// 读取当前配置中的 Prompt 优化 provider。
+///
+/// Business Logic（为什么需要这个函数）:
+///     优化命令必须按 Settings 选择的 HeadlessCompletion 身份分发；未知 token fail-closed。
+///
+/// Code Logic（这个函数做什么）:
+///     从 AppConfig 解析 provider；同时带上 Claude CLI 路径/模型/内部 provider，供 Claude 路径使用。
+fn read_optimizer_runtime(state: &AppState) -> Result<OptimizerRuntime, AppError> {
+    let cfg = state.config.read().unwrap();
+    Ok(OptimizerRuntime {
+        provider: parse_prompt_optimizer_provider(&cfg.prompt_optimizer_provider)?,
+        claude_cli_path: cfg.github_trending.claude_cli_path.clone(),
+        claude_model: cfg.github_trending.claude_model.clone(),
+        internal_provider_id: cfg.internal_claude.provider_id.clone(),
+    })
+}
+
+/// 按 provider 执行结构化 JSON 优化。
+///
+/// Business Logic（为什么需要这个函数）:
+///     普通优化页、Workbench 单语结果和 Orchestrator 任务完善共用同一套分发，避免三处 CLI 选择漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     Claude 走 `claude_cli` structured-json；Grok 走 `grok -p --output-format json`。
+async fn run_structured_optimize<T>(
+    runtime: &OptimizerRuntime,
+    schema: &str,
+    instruction: &str,
+    working_directory: Option<&std::path::Path>,
+    task_label: &str,
+) -> Result<T, AppError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match runtime.provider {
+        PromptOptimizerProvider::Claude => {
+            let provider_dir = crate::internal_claude::resolve_internal_provider_config_dir(
+                runtime.internal_provider_id.as_deref(),
+            )
+            .await?;
+            claude_cli::run_structured_json_with_cwd(
+                &runtime.claude_cli_path,
+                &runtime.claude_model,
+                provider_dir.as_deref(),
+                schema,
+                instruction,
+                working_directory,
+                PROMPT_OPTIMIZE_TIMEOUT_SECS,
+                task_label,
+            )
+            .await
+        }
+        PromptOptimizerProvider::Grok => {
+            grok_cli::run_structured_json_with_cwd(
+                instruction,
+                schema,
+                working_directory,
+                PROMPT_OPTIMIZE_TIMEOUT_SECS,
+                task_label,
+            )
+            .await
+        }
+    }
 }
 
 /// 校验原始 Prompt 输入。
@@ -692,6 +751,25 @@ fn parse_orchestrator_task_prompt_completion_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_provider_fails_closed_and_default_is_claude() {
+        assert_eq!(
+            parse_prompt_optimizer_provider("").unwrap(),
+            PromptOptimizerProvider::Claude
+        );
+        assert_eq!(
+            parse_prompt_optimizer_provider("claude").unwrap(),
+            PromptOptimizerProvider::Claude
+        );
+        assert_eq!(
+            parse_prompt_optimizer_provider("grok").unwrap(),
+            PromptOptimizerProvider::Grok
+        );
+        assert!(parse_prompt_optimizer_provider("gemini").is_err());
+        assert!(parse_prompt_optimizer_provider("codex").is_err());
+        assert!(parse_prompt_optimizer_provider("unknown").is_err());
+    }
 
     #[test]
     fn validates_prompt_length_and_empty_input() {

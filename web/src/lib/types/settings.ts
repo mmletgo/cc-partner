@@ -9,7 +9,7 @@
  *   仅从 ./core 引入 upstream 类型（如 PromptOptimizerFillLanguage）。
  */
 
-import type { PromptOptimizerFillLanguage } from './core';
+import type { PromptOptimizerFillLanguage, PromptOptimizerProvider } from './core';
 
 export interface AppConfig {
   deviceId: string;
@@ -19,6 +19,7 @@ export interface AppConfig {
   screenshotHotkey: string;
   promptOptimizerHotkey: string;
   promptOptimizerFillLanguage: PromptOptimizerFillLanguage;
+  promptOptimizerProvider: PromptOptimizerProvider;
   /** 工作台「收藏快捷输入」浮层触发快捷键（pynput 风格，默认 "<ctrl>+/"） */
   promptQuickInputHotkey: string;
   httpPort: number;

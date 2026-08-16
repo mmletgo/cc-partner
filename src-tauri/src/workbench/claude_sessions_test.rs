@@ -1542,6 +1542,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         screenshot_hotkey: "<cmd>+s".to_string(),
         prompt_optimizer_hotkey: "<ctrl>".to_string(),
         prompt_optimizer_fill_language: "zh".to_string(),
+        prompt_optimizer_provider: "claude".into(),
         prompt_quick_input_hotkey: "<ctrl>+/".to_string(),
         cloud_sync_repo_url: None,
         cloud_sync_enabled: false,

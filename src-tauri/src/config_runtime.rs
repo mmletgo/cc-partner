@@ -14,8 +14,8 @@
 //!     `apply_patch_if_generation` 在同一 update_lock 下校验 owner/generation 后应用 allowlist patch。
 
 use crate::config::{
-    normalize_prompt_optimizer_fill_language, AppConfig, BatteryConfig, GithubTrendingConfig,
-    HealthConfig, OrchestratorAutomationConfig,
+    normalize_prompt_optimizer_fill_language, parse_prompt_optimizer_provider, AppConfig,
+    BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
 };
 use crate::config_store::ConfigStore;
 use crate::error::AppError;
@@ -390,6 +390,9 @@ pub struct ConfigSnapshot {
     pub screenshot_hotkey: String,
     pub prompt_optimizer_hotkey: String,
     pub prompt_optimizer_fill_language: String,
+    /// Prompt 优化 HeadlessCompletion provider：`claude` | `grok`。
+    #[serde(default = "crate::config::default_prompt_optimizer_provider")]
+    pub prompt_optimizer_provider: String,
     /// Prompt 库 Quick Input 面板快捷键（pynput 风格；窗口级，不走 GlobalShortcut）。
     pub prompt_quick_input_hotkey: String,
     pub cloud_sync_repo_url: Option<String>,
@@ -426,6 +429,7 @@ impl ConfigSnapshot {
             prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
                 &config.prompt_optimizer_fill_language,
             ),
+            prompt_optimizer_provider: config.prompt_optimizer_provider.clone(),
             prompt_quick_input_hotkey: config.prompt_quick_input_hotkey.clone(),
             cloud_sync_repo_url: config.cloud_sync_repo_url.clone(),
             cloud_sync_enabled: config.cloud_sync_enabled,
@@ -457,6 +461,7 @@ impl ConfigSnapshot {
         cfg.prompt_optimizer_hotkey = self.prompt_optimizer_hotkey.clone();
         cfg.prompt_optimizer_fill_language =
             normalize_prompt_optimizer_fill_language(&self.prompt_optimizer_fill_language);
+        cfg.prompt_optimizer_provider = self.prompt_optimizer_provider.clone();
         cfg.prompt_quick_input_hotkey = self.prompt_quick_input_hotkey.clone();
         cfg.cloud_sync_repo_url = self.cloud_sync_repo_url.clone();
         cfg.cloud_sync_enabled = self.cloud_sync_enabled;
@@ -625,6 +630,8 @@ pub struct RuntimeConfigPatch {
     pub prompt_optimizer_hotkey: Option<String>,
     #[serde(default)]
     pub prompt_optimizer_fill_language: Option<String>,
+    #[serde(default)]
+    pub prompt_optimizer_provider: Option<String>,
     /// Prompt 库 Quick Input 面板快捷键（窗口级 keydown，不走 GlobalShortcut/hotkey.rs）。
     #[serde(default)]
     pub prompt_quick_input_hotkey: Option<String>,
@@ -680,6 +687,11 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref language) = self.prompt_optimizer_fill_language {
             cfg.prompt_optimizer_fill_language = normalize_prompt_optimizer_fill_language(language);
+        }
+        if let Some(ref provider) = self.prompt_optimizer_provider {
+            cfg.prompt_optimizer_provider = parse_prompt_optimizer_provider(provider)?
+                .as_str()
+                .to_string();
         }
         if let Some(ref hotkey) = self.prompt_quick_input_hotkey {
             cfg.prompt_quick_input_hotkey = hotkey.clone();
@@ -973,6 +985,7 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
         "screenshot_hotkey": config.screenshot_hotkey,
         "prompt_optimizer_hotkey": config.prompt_optimizer_hotkey,
         "prompt_optimizer_fill_language": config.prompt_optimizer_fill_language,
+        "prompt_optimizer_provider": config.prompt_optimizer_provider,
         "prompt_quick_input_hotkey": config.prompt_quick_input_hotkey,
         "cloud_sync_enabled": config.cloud_sync_enabled,
         "cloud_sync_auto": config.cloud_sync_auto,
@@ -1016,6 +1029,7 @@ mod tests {
             screenshot_hotkey: "<ctrl>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_optimizer_provider: "claude".into(),
             prompt_quick_input_hotkey: "<ctrl>+/".into(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,

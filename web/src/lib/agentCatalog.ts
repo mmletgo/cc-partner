@@ -152,3 +152,13 @@ export function identityByHubTarget(target: AgentTarget): AgentIdentity | null {
 export function identityByRuntime(provider: string): AgentIdentity | null {
   return IDENTITIES.find((row) => row.runtimeProvider === provider) ?? null;
 }
+
+/**
+ * Business Logic: Prompt 优化只开放 catalog hasHeadless 且本轮已实现的身份。
+ * Code Logic: 过滤 hasHeadless，并排除尚未稳定结构化输出的 Gemini。
+ */
+export function headlessOptimizerProviders(): AgentIdentity[] {
+  return IDENTITIES.filter(
+    (row) => row.hasHeadless && (row.id === 'claude' || row.id === 'grok'),
+  );
+}

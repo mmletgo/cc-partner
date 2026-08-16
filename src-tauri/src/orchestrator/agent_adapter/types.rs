@@ -117,9 +117,9 @@ impl AgentProviderId {
             Self::ClaudeCodeVisible => AgentCompletionContract::SentinelLine,
             // 未安装 cc-partner OSC Hook 桥接前 Codex 不得默认 HookEvent。
             Self::CodexVisible => AgentCompletionContract::SentinelLine,
-            Self::GenericTerminal
-            | Self::GrokBuildVisible
-            | Self::GeminiCliVisible => AgentCompletionContract::Manual,
+            Self::GenericTerminal | Self::GrokBuildVisible | Self::GeminiCliVisible => {
+                AgentCompletionContract::Manual
+            }
             Self::OpenCodeVisible => AgentCompletionContract::HookEvent,
         }
     }

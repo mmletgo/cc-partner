@@ -13,6 +13,7 @@ import type {
   PermissionActionResult,
   PermissionsStatus,
   PromptOptimizerFillLanguage,
+  PromptOptimizerProvider,
 } from '../types';
 import {
   booleanDecoder,
@@ -26,6 +27,11 @@ import {
 const fillLanguageDecoder: Decoder<PromptOptimizerFillLanguage> = enumDecoder(
   'PromptOptimizerFillLanguage',
   ['zh', 'en'] as const,
+);
+
+const promptOptimizerProviderDecoder: Decoder<PromptOptimizerProvider> = enumDecoder(
+  'PromptOptimizerProvider',
+  ['claude', 'grok'] as const,
 );
 
 /**
@@ -43,8 +49,13 @@ export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   screenshotHotkey: stringDecoder,
   promptOptimizerHotkey: stringDecoder,
   promptOptimizerFillLanguage: fillLanguageDecoder,
+  promptOptimizerProvider: promptOptimizerProviderDecoder,
   promptQuickInputHotkey: stringDecoder,
   httpPort: numberDecoder,
+}, {
+  defaults: {
+    promptOptimizerProvider: 'claude',
+  },
 });
 
 const grantedDecoder = objectDecoder('PermissionGranted', {

@@ -42,6 +42,7 @@ function buildProps(overrides: Partial<SettingsAiPanelProps> = {}): SettingsAiPa
   };
   const promptOptimizerForm: PromptOptimizerSettingsForm = {
     fillLanguage: 'zh',
+    provider: 'claude',
   };
 
   return {
@@ -111,5 +112,15 @@ describe('SettingsAiPanel interactions', () => {
     expect(onPatchGithubTrending).toHaveBeenCalledWith({
       claudeCliPath: '/usr/local/bin/claude',
     });
+  });
+
+  test('selecting Grok provider calls onPatchPromptOptimizer', () => {
+    const onPatchPromptOptimizer = vi.fn();
+    render(<SettingsAiPanel {...buildProps({ onPatchPromptOptimizer })} />);
+
+    fireEvent.click(screen.getByTestId('settings-prompt-optimizer-provider-grok'));
+
+    expect(onPatchPromptOptimizer).toHaveBeenCalledWith({ provider: 'grok' });
+    expect(screen.queryByTestId('settings-prompt-optimizer-provider-gemini')).toBeNull();
   });
 });

@@ -57,6 +57,7 @@ fn sample_config(data_dir: &Path) -> AppConfig {
         screenshot_hotkey: "<ctrl>+s".into(),
         prompt_optimizer_hotkey: "<ctrl>".into(),
         prompt_optimizer_fill_language: "zh".into(),
+        prompt_optimizer_provider: "claude".into(),
         prompt_quick_input_hotkey: "<ctrl>+/".into(),
         cloud_sync_repo_url: None,
         cloud_sync_enabled: false,

@@ -128,7 +128,11 @@
   },
   "promptOptimizerSettings": {
     "title": "Workbench Prompt optimizer",
-    "subtitle": "Configure the language used when filling optimized text into the terminal. The shortcut has moved to General → Shortcuts.",
+    "subtitle": "Choose the local Headless CLI for prompt optimization and the language filled into the terminal. The shortcut has moved to General → Shortcuts.",
+    "provider": {
+      "label": "Optimizer CLI",
+      "helper": "Defaults to Claude Code. Grok Build uses grok -p --output-format json. Gemini CLI is unavailable until structured output is stable."
+    },
     "hotkey": {
       "label": "Open shortcut",
       "helper": "Defaults to tapping Control. It triggers only when Control is pressed and released by itself, so terminal chords such as Control+C still pass through."

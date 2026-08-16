@@ -14,6 +14,7 @@ import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon, InfoIcon } from '@/lib/icons';
 import type { ClaudeCliTestResult, GithubTrendingConfig } from '@/lib/types';
 import { InternalClaudeProviderCard } from '@/components/domain/InternalClaudeProviderCard';
+import { headlessOptimizerProviders } from '@/lib/agentCatalog';
 import type {
   GithubTrendingForm,
   PromptOptimizerSettingsForm,
@@ -296,6 +297,51 @@ export function SettingsAiPanel({
         <Card.Body padding="md">
           <p className={styles.helper}>{t('settings:promptOptimizerSettings.subtitle')}</p>
 
+          <div className={styles.field}>
+            <span className={styles.label} id="settings-prompt-optimizer-provider-label">
+              {t('settings:promptOptimizerSettings.provider.label')}
+            </span>
+            <p className={styles.helper}>{t('settings:promptOptimizerSettings.provider.helper')}</p>
+            <div
+              className={styles.toggleList}
+              role="radiogroup"
+              aria-labelledby="settings-prompt-optimizer-provider-label"
+            >
+              {headlessOptimizerProviders().map((identity) => (
+                <button
+                  key={identity.id}
+                  type="button"
+                  className={styles.toggleRow}
+                  onClick={() =>
+                    onPatchPromptOptimizer({
+                      provider: identity.id === 'grok' ? 'grok' : 'claude',
+                    })
+                  }
+                  role="radio"
+                  aria-checked={promptOptimizerForm.provider === identity.id}
+                  aria-label={identity.displayName}
+                  data-testid={`settings-prompt-optimizer-provider-${identity.id}`}
+                >
+                  <div className={styles.toggleText}>
+                    <span className={styles.toggleLabel}>{identity.displayName}</span>
+                  </div>
+                  <span className={styles.toggleState}>
+                    {promptOptimizerForm.provider === identity.id ? (
+                      <Pill tone="success" dot>
+                        <CheckIcon size={12} />
+                        {t('settings:sync.enabled')}
+                      </Pill>
+                    ) : (
+                      <Pill tone="neutral" dot>
+                        {t('settings:sync.disabled')}
+                      </Pill>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className={styles.toggleList}>
             <button
               type="button"
@@ -363,6 +409,10 @@ export function SettingsAiPanel({
                 {t('settings:promptOptimizerSettings.appliedConfig')}
               </span>
               <span className={styles.metaValue}>
+                {headlessOptimizerProviders().find(
+                  (identity) => identity.id === promptOptimizerConfig.provider,
+                )?.displayName ?? 'Claude Code'}
+                {' · '}
                 {promptOptimizerConfig.fillLanguage === 'en'
                   ? t('settings:promptOptimizerSettings.fillLanguage.en')
                   : t('settings:promptOptimizerSettings.fillLanguage.zh')}

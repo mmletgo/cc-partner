@@ -14,7 +14,8 @@
 
 use crate::backend::control_client::BackendControlClient;
 use crate::config::{
-    default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
+    default_preference_values, normalize_prompt_optimizer_fill_language,
+    parse_prompt_optimizer_provider, AppConfig,
 };
 #[cfg(test)]
 use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
@@ -39,10 +40,27 @@ pub struct ConfigDto {
     pub screenshot_hotkey: String,
     pub prompt_optimizer_hotkey: String,
     pub prompt_optimizer_fill_language: String,
+    pub prompt_optimizer_provider: String,
     /// Prompt 库 Quick Input 面板快捷键（窗口级 keydown，不走 GlobalShortcut）。
     pub prompt_quick_input_hotkey: String,
     /// HTTP 端口（M1 未实际监听，暂返回配置值；M3 接入真实监听端口后更新）
     pub http_port: i64,
+}
+
+/// 把磁盘/快照里的 provider 投影成前端 wire。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧配置缺字段应展示默认 Claude；已保存的 `claude`/`grok` 原样返回。
+///
+/// Code Logic（这个函数做什么）:
+///     空串用默认值；非空原样返回，未知值留给前端 decoder / 优化命令 fail-closed。
+fn config_provider_wire(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        crate::config::default_prompt_optimizer_provider()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// 将 AppConfig 转为前端 ConfigDto。
@@ -63,6 +81,7 @@ fn config_to_dto(cfg: &AppConfig) -> ConfigDto {
         prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
             &cfg.prompt_optimizer_fill_language,
         ),
+        prompt_optimizer_provider: config_provider_wire(&cfg.prompt_optimizer_provider),
         prompt_quick_input_hotkey: cfg.prompt_quick_input_hotkey.clone(),
         http_port: cfg.http_port,
     }
@@ -118,6 +137,7 @@ fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
         prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
             &snap.prompt_optimizer_fill_language,
         ),
+        prompt_optimizer_provider: config_provider_wire(&snap.prompt_optimizer_provider),
         prompt_quick_input_hotkey: snap.prompt_quick_input_hotkey.clone(),
         http_port: snap.http_port,
     }
@@ -137,6 +157,7 @@ fn build_preference_patch(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) -> RuntimeConfigPatch {
     RuntimeConfigPatch {
@@ -146,6 +167,7 @@ fn build_preference_patch(
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_optimizer_provider,
         prompt_quick_input_hotkey,
         ..Default::default()
     }
@@ -167,6 +189,7 @@ async fn update_config_via_owner(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let client = BackendControlClient::from_control_file()?;
@@ -178,6 +201,7 @@ async fn update_config_via_owner(
             screenshot_hotkey,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
+            prompt_optimizer_provider,
             prompt_quick_input_hotkey,
         ))
         .await?;
@@ -205,6 +229,7 @@ async fn update_config_via_owner_with_hotkey(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let client = BackendControlClient::from_control_file()?;
@@ -218,6 +243,7 @@ async fn update_config_via_owner_with_hotkey(
                 screenshot_hotkey,
                 prompt_optimizer_hotkey,
                 prompt_optimizer_fill_language,
+                prompt_optimizer_provider,
                 prompt_quick_input_hotkey,
             ),
         )
@@ -253,6 +279,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_optimizer_provider: crate::config::default_prompt_optimizer_provider(),
         prompt_quick_input_hotkey,
         http_port: cfg.http_port,
     })
@@ -275,6 +302,7 @@ fn apply_config_patch(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) {
     if let Some(n) = device_name {
@@ -294,6 +322,13 @@ fn apply_config_patch(
     }
     if let Some(language) = prompt_optimizer_fill_language {
         cfg.prompt_optimizer_fill_language = normalize_prompt_optimizer_fill_language(&language);
+    }
+    if let Some(provider) = prompt_optimizer_provider {
+        if let Ok(parsed) = parse_prompt_optimizer_provider(&provider) {
+            cfg.prompt_optimizer_provider = parsed.as_str().to_string();
+        } else {
+            cfg.prompt_optimizer_provider = provider;
+        }
     }
     if let Some(h) = prompt_quick_input_hotkey {
         cfg.prompt_quick_input_hotkey = h;
@@ -317,6 +352,7 @@ pub async fn update_config_for_runtime(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
@@ -328,6 +364,7 @@ pub async fn update_config_for_runtime(
             screenshot_hotkey,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
+            prompt_optimizer_provider,
             prompt_quick_input_hotkey,
         );
         Ok(config_to_dto(cfg))
@@ -356,6 +393,7 @@ pub async fn update_config_with_hotkey_backend(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let _guard = runtime.lock_for_update().await;
@@ -381,6 +419,7 @@ pub async fn update_config_with_hotkey_backend(
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_optimizer_provider,
         prompt_quick_input_hotkey,
     );
 
@@ -429,6 +468,7 @@ pub async fn update_config(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     if screenshot_hotkey.is_none() {
@@ -440,6 +480,7 @@ pub async fn update_config(
             None,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
+            prompt_optimizer_provider,
             prompt_quick_input_hotkey,
         )
         .await;
@@ -455,6 +496,7 @@ pub async fn update_config(
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_optimizer_provider,
         prompt_quick_input_hotkey,
     )
     .await
@@ -509,6 +551,7 @@ mod tests {
             screenshot_hotkey: "<ctrl>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_optimizer_provider: "claude".into(),
             prompt_quick_input_hotkey: "<ctrl>+/".into(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
@@ -537,6 +580,7 @@ mod tests {
         let err = update_config_for_runtime(
             &runtime,
             Some("mutated-name".into()),
+            None,
             None,
             None,
             None,
@@ -577,6 +621,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("update");
@@ -608,6 +653,7 @@ mod tests {
             None,
             None,
             Some("<ctrl>+<shift>+s".into()),
+            None,
             None,
             None,
             None,
@@ -647,6 +693,7 @@ mod tests {
             None,
             None,
             Some("<ctrl>+<shift>+s".into()),
+            None,
             None,
             None,
             None,

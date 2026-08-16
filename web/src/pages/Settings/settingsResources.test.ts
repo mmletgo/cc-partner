@@ -45,6 +45,7 @@ function appConfig(partial: Partial<AppConfig> = {}): AppConfig {
     screenshotHotkey: '<cmd>+<shift>+s',
     promptOptimizerHotkey: '<ctrl>',
     promptOptimizerFillLanguage: 'zh',
+    promptOptimizerProvider: 'claude',
     promptQuickInputHotkey: '<ctrl>+/',
     httpPort: 0,
     ...partial,

@@ -18,6 +18,7 @@ const validConfig = {
   screenshotHotkey: '<cmd>+s',
   promptOptimizerHotkey: '<ctrl>',
   promptOptimizerFillLanguage: 'zh',
+  promptOptimizerProvider: 'claude',
   promptQuickInputHotkey: '<ctrl>+/',
   httpPort: 0,
 };
@@ -82,6 +83,18 @@ describe('config schemas', () => {
   test('malformed fill language fails', () => {
     expect(() =>
       appConfigDecoder.decode({ ...validConfig, promptOptimizerFillLanguage: 'jp' }),
+    ).toThrow(ContractDecodeError);
+  });
+
+  test('defaults missing optimizer provider to claude and rejects unknown', () => {
+    const { promptOptimizerProvider: _omitted, ...rest } = validConfig;
+    expect(appConfigDecoder.decode(rest).promptOptimizerProvider).toBe('claude');
+    void _omitted;
+    expect(() =>
+      appConfigDecoder.decode({ ...validConfig, promptOptimizerProvider: 'gemini' }),
+    ).toThrow(ContractDecodeError);
+    expect(() =>
+      appConfigDecoder.decode({ ...validConfig, promptOptimizerProvider: 'unknown' }),
     ).toThrow(ContractDecodeError);
   });
 });

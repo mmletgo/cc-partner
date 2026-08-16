@@ -55,6 +55,7 @@ function configFixture(partial: Partial<AppConfig> = {}): AppConfig {
     screenshotHotkey: '<cmd>+<shift>+s',
     promptOptimizerHotkey: '<ctrl>',
     promptOptimizerFillLanguage: 'zh',
+    promptOptimizerProvider: 'claude',
     promptQuickInputHotkey: '<ctrl>+/',
     httpPort: 0,
     ...partial,
@@ -182,14 +183,17 @@ describe('settingsState', () => {
 
     assertDeepEqual(promptOptimizerSettingsConfigToForm(configFixture()), {
       fillLanguage: 'zh',
+      provider: 'claude',
     });
 
     assertDeepEqual(
       promptOptimizerSettingsFormToUpdate({
         fillLanguage: 'en',
+        provider: 'grok',
       }),
       {
         promptOptimizerFillLanguage: 'en',
+        promptOptimizerProvider: 'grok',
       },
     );
 

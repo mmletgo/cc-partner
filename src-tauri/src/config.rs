@@ -438,6 +438,74 @@ fn default_prompt_optimizer_fill_language() -> String {
     "zh".to_string()
 }
 
+/// Prompt 优化默认 HeadlessCompletion provider：Claude。
+pub(crate) fn default_prompt_optimizer_provider() -> String {
+    PromptOptimizerProvider::Claude.as_str().to_string()
+}
+
+/// Prompt 优化可选的 HeadlessCompletion provider。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Settings 只允许在 catalog `hasHeadless` 且本轮已实现的身份间切换；
+///     默认 Claude，可选 Grok；Gemini 结构化输出未稳定，不可选。
+///
+/// Code Logic（这个枚举做什么）:
+///     稳定 wire 为 `claude` / `grok`；未知 token 不回退 Claude。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptOptimizerProvider {
+    /// Claude Code CLI（默认）
+    Claude,
+    /// Grok Build CLI
+    Grok,
+}
+
+impl PromptOptimizerProvider {
+    /// 稳定 wire token。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Grok => "grok",
+        }
+    }
+}
+
+/// 解析 Prompt 优化 provider。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧配置缺字段应默认 Claude；手写/未知 token（含未实现的 Gemini）必须 fail-closed，
+///     禁止静默回退 Claude。
+///
+/// Code Logic（这个函数做什么）:
+///     空串 → Claude；`claude`/`grok` 按 catalog hasHeadless 接受；其余返回校验错误。
+pub(crate) fn parse_prompt_optimizer_provider(
+    value: &str,
+) -> Result<PromptOptimizerProvider, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(PromptOptimizerProvider::Claude);
+    }
+    let Some(identity) = crate::agent_catalog::identity_by_wire(trimmed) else {
+        return Err(AppError::validation(format!(
+            "未知 Prompt 优化 provider: {trimmed}"
+        )));
+    };
+    if !identity.has_headless {
+        return Err(AppError::validation(format!(
+            "Prompt 优化不支持该 provider: {trimmed}"
+        )));
+    }
+    match identity.id {
+        crate::agent_catalog::AgentId::Claude => Ok(PromptOptimizerProvider::Claude),
+        crate::agent_catalog::AgentId::Grok => Ok(PromptOptimizerProvider::Grok),
+        crate::agent_catalog::AgentId::Gemini => Err(AppError::validation(
+            "Gemini CLI 结构化输出尚未稳定，Prompt 优化不可选",
+        )),
+        _ => Err(AppError::validation(format!(
+            "Prompt 优化不支持该 provider: {trimmed}"
+        ))),
+    }
+}
+
 /// 归一化 Workbench Prompt 优化填入语言。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1092,6 +1160,9 @@ pub struct AppConfig {
     /// Workbench Prompt 优化结果自动填入语言：`zh` 或 `en`。
     #[serde(default = "default_prompt_optimizer_fill_language")]
     pub prompt_optimizer_fill_language: String,
+    /// Prompt 优化 HeadlessCompletion provider：`claude`（默认）或 `grok`。
+    #[serde(default = "default_prompt_optimizer_provider")]
+    pub prompt_optimizer_provider: String,
     /// Prompt 库 Quick Input 面板快捷键（pynput 风格字符串，如 `<ctrl>+/`）。
     /// 窗口级 keydown（前端监听），不走 GlobalShortcut/hotkey.rs，故无 OS 全局副作用。
     #[serde(default = "default_prompt_quick_input_hotkey")]
@@ -1249,6 +1320,7 @@ impl AppConfig {
         validate_hotkey_field("screenshot_hotkey", &self.screenshot_hotkey)?;
         validate_hotkey_field("prompt_optimizer_hotkey", &self.prompt_optimizer_hotkey)?;
         validate_hotkey_field("prompt_quick_input_hotkey", &self.prompt_quick_input_hotkey)?;
+        parse_prompt_optimizer_provider(&self.prompt_optimizer_provider)?;
 
         // data_dir isolation：override 生效时 db_path 必须在根内
         if std::env::var_os(DATA_DIR_ENV).is_some() {
@@ -1323,6 +1395,7 @@ impl AppConfig {
                 screenshot_hotkey: default_screenshot_hotkey(),
                 prompt_optimizer_hotkey: default_prompt_optimizer_hotkey(),
                 prompt_optimizer_fill_language: default_prompt_optimizer_fill_language(),
+                prompt_optimizer_provider: default_prompt_optimizer_provider(),
                 prompt_quick_input_hotkey: default_prompt_quick_input_hotkey(),
                 cloud_sync_repo_url: None,
                 cloud_sync_enabled: false,
@@ -1832,6 +1905,7 @@ mod tests {
         assert_eq!(cfg.github_trending.claude_cli_path, "claude");
         assert_eq!(cfg.prompt_optimizer_hotkey, "<ctrl>");
         assert_eq!(cfg.prompt_optimizer_fill_language, "zh");
+        assert_eq!(cfg.prompt_optimizer_provider, "claude");
         assert!(!cfg.orchestrator.enabled);
         assert_eq!(cfg.orchestrator.max_concurrent_tasks, 1);
         assert!(cfg.orchestrator.auto_commit);
@@ -1849,6 +1923,7 @@ mod tests {
             screenshot_hotkey: "<cmd>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "en".into(),
+            prompt_optimizer_provider: default_prompt_optimizer_provider(),
             prompt_quick_input_hotkey: default_prompt_quick_input_hotkey(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
@@ -1944,6 +2019,7 @@ mod tests {
             screenshot_hotkey: "<cmd>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_optimizer_provider: default_prompt_optimizer_provider(),
             prompt_quick_input_hotkey: default_prompt_quick_input_hotkey(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
@@ -2005,6 +2081,33 @@ mod tests {
         cfg.screenshot_hotkey = default_screenshot_hotkey();
         cfg.prompt_optimizer_hotkey = default_prompt_optimizer_hotkey();
         cfg.validate().expect("默认样例应通过");
+    }
+
+    #[test]
+    fn prompt_optimizer_provider_defaults_to_claude_and_rejects_unknown() {
+        assert_eq!(
+            parse_prompt_optimizer_provider("").unwrap(),
+            PromptOptimizerProvider::Claude
+        );
+        assert_eq!(
+            parse_prompt_optimizer_provider(" claude ").unwrap(),
+            PromptOptimizerProvider::Claude
+        );
+        assert_eq!(
+            parse_prompt_optimizer_provider("grok").unwrap(),
+            PromptOptimizerProvider::Grok
+        );
+        assert!(parse_prompt_optimizer_provider("gemini").is_err());
+        assert!(parse_prompt_optimizer_provider("codex").is_err());
+        assert!(parse_prompt_optimizer_provider("antigravity").is_err());
+
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/data.db");
+        cfg.screenshot_hotkey = default_screenshot_hotkey();
+        cfg.prompt_optimizer_hotkey = default_prompt_optimizer_hotkey();
+        cfg.prompt_optimizer_provider = "unknown".into();
+        let err = cfg.validate().expect_err("unknown provider");
+        assert!(err.to_string().contains("未知 Prompt 优化 provider"));
     }
 
     #[test]
