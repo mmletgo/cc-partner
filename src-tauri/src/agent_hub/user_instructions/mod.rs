@@ -10,10 +10,13 @@
 
 mod inventory;
 mod plan;
+mod slot_history;
 
 pub use inventory::{
     inspect_user_instruction_workspace, inspect_user_instruction_workspace_with_env,
-    save_user_instruction_blocks, SaveUserInstructionBlocksRequest, UserInstructionAction,
+    list_user_instruction_slot_versions, restore_user_instruction_slot_version,
+    save_user_instruction_blocks, ListUserInstructionSlotVersionsRequest,
+    RestoreUserInstructionSlotRequest, SaveUserInstructionBlocksRequest, UserInstructionAction,
     UserInstructionActivationSupport, UserInstructionCanonicalDto, UserInstructionCapabilityDto,
     UserInstructionCapabilityLevel, UserInstructionCliDto, UserInstructionHealthState,
     UserInstructionManagementMode, UserInstructionOwnership, UserInstructionProjectionDto,
@@ -28,3 +31,7 @@ pub use plan::{
     UserInstructionTargetApplyState, UserInstructionTargetSelectionDto,
 };
 pub(crate) use plan::{read_text_bounded, render_bounded_diff};
+pub use slot_history::{
+    all_slot_keys, extract_slot_text, replace_slot_text, snapshot_dirty_slot_versions,
+    InstructionSlotKey, SlotSnapshot,
+};

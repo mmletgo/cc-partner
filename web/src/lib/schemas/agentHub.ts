@@ -37,6 +37,7 @@ import type {
   DesiredPresence,
   InstructionBlockDto,
   InstructionBlockMode,
+  InstructionSlotKey,
   MaterializationStatus,
   OpenCodeBridgeStatus,
   OpenCodeBridgeView,
@@ -71,6 +72,7 @@ import type {
 import {
   arrayDecoder,
   booleanDecoder,
+  defineDecoder,
   enumDecoder,
   numberDecoder,
   nullableDecoder,
@@ -79,6 +81,8 @@ import {
   stringDecoder,
   type Decoder,
 } from '../runtimeSchema';
+import type { ContentVersion } from '../types/core';
+import { contentVersionDecoder } from './core';
 
 /**
  * Business Logic: target 三端枚举必须稳定。
@@ -886,5 +890,77 @@ export const agentHubAssetDetailDecoder: Decoder<AgentHubAssetDetail> = objectDe
     contentMarkdown: optionalDecoder(nullableDecoder(stringDecoder)),
     conflicts: optionalDecoder(arrayDecoder(agentHubConflictDtoDecoder)),
     pluginReport: optionalDecoder(nullableDecoder(pluginPackageReportDecoder)),
+  },
+);
+
+/**
+ * Business Logic: 三槽历史槽位 key（与 Rust `InstructionSlotKey` 1:1）。
+ *
+ * Code Logic: discriminated union tag=kind；adapted/targetOnly 携带必填 agent。
+ *   未知 kind 直接 fail-closed（避免前后端漂移）。
+ *   runtimeSchema 未提供 tag-aware unionDecoder，这里手动按 kind 分支。
+ */
+export const instructionSlotKeyDecoder: Decoder<InstructionSlotKey> = defineDecoder(
+  'InstructionSlotKey',
+  (value, path) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(
+        `Contract "InstructionSlotKey" failed at ${path}: expected object`,
+      );
+    }
+    const kindRaw = (value as Record<string, unknown>).kind;
+    if (kindRaw === 'shared') {
+      return { kind: 'shared' as const };
+    }
+    if (kindRaw === 'adapted') {
+      const agent = (value as Record<string, unknown>).agent;
+      return {
+        kind: 'adapted' as const,
+        agent: agentTargetDecoder.decode(agent, `${path}.agent`),
+      };
+    }
+    if (kindRaw === 'targetOnly') {
+      const agent = (value as Record<string, unknown>).agent;
+      return {
+        kind: 'targetOnly' as const,
+        agent: agentTargetDecoder.decode(agent, `${path}.agent`),
+      };
+    }
+    throw new Error(
+      `Contract "InstructionSlotKey" failed at ${path}.kind: unknown tag`,
+    );
+  },
+);
+
+/**
+ * Business Logic: 三槽历史列表 = ContentVersion[]，与 prompts/scratchpad 列表同构。
+ *
+ * Code Logic: `contentVersionDecoder` 已严格 fail-closed；`MAX_ARRAY_LENGTH` 防止恶意膨胀。
+ */
+export const userInstructionSlotVersionListDecoder: Decoder<ContentVersion[]> =
+  arrayDecoder(contentVersionDecoder);
+
+/**
+ * Business Logic: 三槽历史恢复请求 / 列表请求共用同一 shape 校验。
+ *
+ * Code Logic: baseRevisionId 可空（首版 canonical head 为 null）；slot 复用
+ *   `instructionSlotKeyDecoder`；inventorySnapshotHash 非空。
+ */
+export const listUserInstructionSlotVersionsRequestDecoder = objectDecoder(
+  'ListUserInstructionSlotVersionsRequest',
+  {
+    assetId: stringDecoder,
+    slot: instructionSlotKeyDecoder,
+  },
+);
+
+export const restoreUserInstructionSlotRequestDecoder = objectDecoder(
+  'RestoreUserInstructionSlotRequest',
+  {
+    assetId: stringDecoder,
+    slot: instructionSlotKeyDecoder,
+    versionId: stringDecoder,
+    baseRevisionId: nullableDecoder(stringDecoder),
+    inventorySnapshotHash: stringDecoder,
   },
 );

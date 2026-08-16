@@ -22,8 +22,15 @@ use crate::agent_hub::targets::{
     InstructionSourceRole, LocalScopeMapping, OpenCodeInstructionAdapter, TargetEnvironment,
     TargetPathResolver,
 };
+use crate::agent_hub::user_instructions::slot_history::{
+    extract_slot_text, replace_slot_text, snapshot_dirty_slot_versions, InstructionSlotKey,
+    SlotSnapshot,
+};
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::storage::content_version_repo::ContentVersion;
+use crate::storage::content_version_repo::ContentVersionRepo;
+use crate::storage::sync_request_ledger_repo::DOMAIN_AGENT_HUB_USER_INSTRUCTION;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -522,6 +529,7 @@ async fn load_canonical(
 ///
 /// Code Logic（这个函数做什么）:
 ///     inspect 验证 baseRevisionId/inventorySnapshotHash → blocks round-trip 成 InstructionDocument
+///     → 写 dirty slot history（content_versions reuse，复用 20/30d 保留）
 ///     → commit_user_instruction_document（head CAS）→ 重新 load_canonical 返回新 head + blocks。
 pub async fn save_user_instruction_blocks(
     state: &AppState,
@@ -553,8 +561,43 @@ pub async fn save_user_instruction_blocks(
         )
         .await?
         .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
-    let document = instruction_document_from_block_dtos(&request.blocks)?;
-    commit_user_instruction_document(state, &asset, &document).await?;
+    let before_document = instruction_document_from_block_dtos(&canonical.blocks)?;
+    let after_document = instruction_document_from_block_dtos(&request.blocks)?;
+    // 三槽各自 history 快照：与 prompts/scratchpad 同 20 条 / 30 天保留窗口。
+    // dirty 槽写入 history；同 (domain, item_id, source_device, content_hash) 重放由
+    // ContentVersionRepo::insert_idempotent 去重；history 失败不阻塞 commit（仅 debug）。
+    let version_repo =
+        ContentVersionRepo::with_gate(state.agent_hub_repo.pool(), state.maintenance_gate.clone());
+    if let Err(reason) = ContentVersionRepo::ensure_schema(version_repo.pool()).await {
+        tracing::warn!(error = %reason, "USER_INSTRUCTION_SLOT_HISTORY_SCHEMA_FAILED");
+    }
+    match snapshot_dirty_slot_versions(
+        &before_document,
+        &after_document,
+        &asset.id,
+        state.device_id.as_str(),
+        &version_repo,
+    )
+    .await
+    {
+        Ok(written) => {
+            if written > 0 {
+                tracing::debug!(
+                    asset_id = %asset.id,
+                    written,
+                    "USER_INSTRUCTION_SLOT_HISTORY_WRITTEN"
+                );
+            }
+        }
+        Err(reason) => {
+            tracing::warn!(
+                error = %reason,
+                asset_id = %asset.id,
+                "USER_INSTRUCTION_SLOT_HISTORY_WRITE_FAILED"
+            );
+        }
+    }
+    commit_user_instruction_document(state, &asset, &after_document).await?;
     // commit 推进了 DB head；重新读 asset 拿新 current_revision_id 再 load_canonical
     let refreshed_asset = state
         .agent_hub_repo
@@ -1170,6 +1213,184 @@ fn current_target_environment() -> TargetEnvironment {
         vars,
         path_entries,
     }
+}
+
+/// 三槽历史列表请求（只读）。
+///
+/// Business Logic: 前端按 lane × agent 打开历史抽屉，需要稳定的
+///   `asset_id` + `slot` → `content_versions` item_id 映射。
+///
+/// Code Logic: camelCase 与前端 `InstructionSlotKey` wire 一致；
+///   `asset_id` 与 `slot` 都必填（避免空串查询全表）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListUserInstructionSlotVersionsRequest {
+    pub asset_id: String,
+    pub slot: InstructionSlotKey,
+}
+
+/// 三槽历史恢复请求（mutation）。
+///
+/// Business Logic: 与 `save_user_instruction_blocks` 同口径的双保险：
+///   `base_revision_id` + `inventory_snapshot_hash` 在 owner 处 CAS，
+///   任何并发编辑都让 restore 失败并保留草稿（前端 busy 释放后重试）。
+///
+/// Code Logic: 字段顺序与 `SaveUserInstructionBlocksRequest` 对齐；
+///   version_id 为 `content_versions.id`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreUserInstructionSlotRequest {
+    pub asset_id: String,
+    pub slot: InstructionSlotKey,
+    pub version_id: String,
+    pub base_revision_id: Option<String>,
+    pub inventory_snapshot_hash: String,
+}
+
+/// 三槽历史列表（只读）。
+///
+/// Business Logic: 校验 `asset_id` 是用户级 instruction 资产（避免误查
+///   其它资产历史），再读 `content_versions`（DOMAIN_AGENT_HUB_USER_INSTRUCTION）。
+///
+/// Code Logic: 复用 `ContentVersionRepo::ensure_schema`（幂等） +
+///   `list_versions(domain, item_id)`；返回原 `ContentVersion` 供 commands
+///   层映射 DTO；空 item 视为合法空数组。
+pub async fn list_user_instruction_slot_versions(
+    state: &AppState,
+    asset_id: String,
+    slot: InstructionSlotKey,
+) -> Result<Vec<ContentVersion>, AppError> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err(AppError::validation("USER_INSTRUCTION_ASSET_REQUIRED"));
+    }
+    let asset = state
+        .agent_hub_repo
+        .get_asset(asset_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
+    if asset.kind != AssetKind::Instruction {
+        return Err(AppError::validation("USER_INSTRUCTION_ASSET_KIND_MISMATCH"));
+    }
+    let version_repo =
+        ContentVersionRepo::with_gate(state.agent_hub_repo.pool(), state.maintenance_gate.clone());
+    if let Err(reason) = ContentVersionRepo::ensure_schema(version_repo.pool()).await {
+        tracing::warn!(error = %reason, "USER_INSTRUCTION_SLOT_HISTORY_SCHEMA_FAILED");
+    }
+    let item_id = slot.to_item_id(asset_id);
+    version_repo
+        .list_versions(DOMAIN_AGENT_HUB_USER_INSTRUCTION, &item_id)
+        .await
+}
+
+/// 三槽历史恢复（mutation）。
+///
+/// Business Logic: 同 saveUserInstructionBlocks 的双保险（head CAS +
+///   inventory snapshot 防 stale）。把目标版本的 `snapshot_json.content`
+///   替换到当前 canonical 的对应 slot，写一条新 head；当前 slot 文本
+///   在替换前先入 history（pre-restore baseline），避免静默丢失用户
+///   在「打开历史抽屉」期间做的中间编辑。
+///
+/// Code Logic: load_canonical → 解析 version.snapshot_json → 校验
+///   domain+item_id → 在 document 上 `replace_slot_text` →
+///   `commit_user_instruction_document` 推进 head → `prune_retention`
+///   保持 20 / 30 天窗口 → 返回新 `UserInstructionCanonicalDto`。
+///   错误码沿用既有：USER_INSTRUCTION_REVISION_CHANGED /
+///   USER_INSTRUCTION_PREVIEW_STALE；新增 USER_INSTRUCTION_REVISION_NOT_FOUND。
+pub async fn restore_user_instruction_slot_version(
+    state: &AppState,
+    request: RestoreUserInstructionSlotRequest,
+) -> Result<UserInstructionCanonicalDto, AppError> {
+    if request.inventory_snapshot_hash.trim().is_empty() {
+        return Err(AppError::validation("USER_INSTRUCTION_SNAPSHOT_REQUIRED"));
+    }
+    let asset_id = request.asset_id.trim();
+    if asset_id.is_empty() {
+        return Err(AppError::validation("USER_INSTRUCTION_ASSET_REQUIRED"));
+    }
+    let workspace = inspect_user_instruction_workspace(state).await?;
+    let canonical = workspace
+        .canonical
+        .as_ref()
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_CANONICAL_MISSING"))?;
+    // head CAS + inventory snapshot 防 stale 覆盖（与 save 同口径）。
+    let current_revision = canonical.head_revision_id.as_deref();
+    if current_revision != request.base_revision_id.as_deref() {
+        return Err(AppError::conflict("USER_INSTRUCTION_REVISION_CHANGED"));
+    }
+    if workspace.inventory_snapshot_hash != request.inventory_snapshot_hash {
+        return Err(AppError::conflict("USER_INSTRUCTION_PREVIEW_STALE"));
+    }
+    let asset = state
+        .agent_hub_repo
+        .get_asset(asset_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
+    if asset.kind != AssetKind::Instruction {
+        return Err(AppError::validation("USER_INSTRUCTION_ASSET_KIND_MISMATCH"));
+    }
+    let version_repo =
+        ContentVersionRepo::with_gate(state.agent_hub_repo.pool(), state.maintenance_gate.clone());
+    if let Err(reason) = ContentVersionRepo::ensure_schema(version_repo.pool()).await {
+        tracing::warn!(error = %reason, "USER_INSTRUCTION_SLOT_HISTORY_SCHEMA_FAILED");
+    }
+    let slot = request.slot;
+    let item_id = slot.to_item_id(asset_id);
+    let version = version_repo
+        .get(&request.version_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_REVISION_NOT_FOUND"))?;
+    if version.domain != DOMAIN_AGENT_HUB_USER_INSTRUCTION || version.item_id != item_id {
+        return Err(AppError::not_found("USER_INSTRUCTION_REVISION_NOT_FOUND"));
+    }
+    // 解析 history snapshot 取得 content 文本。
+    let snapshot: SlotSnapshot = serde_json::from_str(&version.snapshot_json).map_err(|e| {
+        AppError::generic(format!("USER_INSTRUCTION_SLOT_SNAPSHOT_PARSE_FAILED:{e}"))
+    })?;
+    // 把当前 canonical 文档化、pre-restore baseline、replace、commit、prune。
+    let before_document = instruction_document_from_block_dtos(&canonical.blocks)?;
+    let after_document = replace_slot_text(&before_document, slot, &snapshot.content);
+    // 当前 slot 文本若非空且与 history 不同，先写一条 history 防止静默丢失。
+    let baseline_text = extract_slot_text(&before_document, slot);
+    if !baseline_text.is_empty() && baseline_text != snapshot.content {
+        if let Err(reason) = snapshot_dirty_slot_versions(
+            &before_document,
+            &before_document, // 仅当前 slot 写入；其它槽 before==after 视为 no-op
+            asset_id,
+            state.device_id.as_str(),
+            &version_repo,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %reason,
+                asset_id,
+                slot = ?slot,
+                "USER_INSTRUCTION_SLOT_HISTORY_BASELINE_FAILED"
+            );
+        }
+    }
+    commit_user_instruction_document(state, &asset, &after_document).await?;
+    // prune slot-specific history（保留 20 / 30 天窗口）。
+    if let Err(reason) = version_repo
+        .prune_retention(
+            DOMAIN_AGENT_HUB_USER_INSTRUCTION,
+            &item_id,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .await
+    {
+        tracing::warn!(error = %reason, "USER_INSTRUCTION_SLOT_HISTORY_PRUNE_FAILED");
+    }
+    // commit 推进了 DB head；重新读 asset 拿新 current_revision_id 再 load_canonical。
+    let refreshed_asset = state
+        .agent_hub_repo
+        .get_asset(asset_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
+    load_canonical(state, Some(&refreshed_asset))
+        .await?
+        .ok_or_else(|| AppError::generic("USER_INSTRUCTION_CANONICAL_MISSING_AFTER_RESTORE"))
 }
 
 #[cfg(test)]

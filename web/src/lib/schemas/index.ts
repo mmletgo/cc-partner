@@ -17,5 +17,6 @@ export * from './config';
 export * from './agentRuntime';
 export * from './agentLedger';
 export * from './agentHub';
+export * from './core';
 export * from './portableInventory';
 export * from './providerManager';

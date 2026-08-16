@@ -1211,6 +1211,27 @@ impl BackendControlClient {
             .await
     }
 
+    /// Business Logic: 三槽历史只读查询。
+    /// Code Logic: agent_hub.list_user_instruction_slot_versions 是 owner read op。
+    pub async fn agent_hub_list_user_instruction_slot_versions(
+        &self,
+        req: crate::agent_hub::user_instructions::ListUserInstructionSlotVersionsRequest,
+    ) -> Result<Vec<crate::commands::prompts::ContentVersionDto>, AppError> {
+        self.agent_hub_op("agent_hub.list_user_instruction_slot_versions", req)
+            .await
+    }
+
+    /// Business Logic: 三槽历史恢复是 V2 mutation，必须阻断旧 sidecar。
+    /// Code Logic: 版本门闩后调用 owner canonical CAS。
+    pub async fn agent_hub_restore_user_instruction_slot_version(
+        &self,
+        req: crate::agent_hub::user_instructions::RestoreUserInstructionSlotRequest,
+    ) -> Result<UserInstructionCanonicalDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.restore_user_instruction_slot_version", req)
+            .await
+    }
+
     /// Business Logic: 保存整份指令（mutation）。
     /// Code Logic: 调用方须先 require_agent_hub_write_compatibility；再 agent_hub.update_instruction。
     pub async fn agent_hub_update_instruction(

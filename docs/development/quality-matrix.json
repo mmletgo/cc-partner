@@ -1279,6 +1279,30 @@
       "notes": "L1 backendHarness mock only: verifies effective Claude/Codex/OpenCode source paths and scan-only UI, with the setup/update-preview and apply commands never invoked. It is not target-file write evidence."
     },
     {
+      "id": "E2E-AGENT-HUB-INSTR-HISTORY-001",
+      "surface": "agent-hub-user-instruction-history",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub-instruction-history.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub-instruction-history.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem projection",
+        "real CLI activation or remove behavior",
+        "packaged desktop GUI",
+        "multi-host LAN"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/agent-hub/manifest.md"
+      ],
+      "notes": "L1 backendHarness mock only: covers the per-slot (shared / adapted×3 agents / targetOnly×3 agents = 7 logical slots) version-history drawer open / list / copy / restore-as-new-version flow, with mocked agent_hub_list_user_instruction_slot_versions and agent_hub_restore_user_instruction_slot_version commands. It is not target-file write evidence."
+    },
+    {
       "id": "L3-AGENT-HUB-USER-INSTRUCTION-WRITE-001",
       "surface": "agent-hub-user-instruction",
       "level": "L3",

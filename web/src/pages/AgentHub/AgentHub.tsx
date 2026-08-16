@@ -164,6 +164,10 @@ export function AgentHubView(props: AgentHubViewProps) {
         'agentHub:instructions.threePane.analyzeConfirmDescription',
       ),
       analyzeConfirm: t('agentHub:instructions.threePane.analyzeConfirm'),
+      slotHistoryCommon: t('agentHub:instructions.threePane.slotHistoryCommon'),
+      slotHistoryAdapted: t('agentHub:instructions.threePane.slotHistoryAdapted'),
+      slotHistoryTargetOnly: t('agentHub:instructions.threePane.slotHistoryTargetOnly'),
+      slotHistoryCopied: t('agentHub:userInstructions.errors.slotVersionCopyEmpty'),
     }),
     [t],
   );
@@ -411,6 +415,31 @@ export function AgentHubView(props: AgentHubViewProps) {
             onCancelDualDirty={instructionThreePane.cancelDualDirty}
             onConfirmAnalyze={instructionThreePane.confirmAnalyzeDecompose}
             onCancelAnalyze={instructionThreePane.cancelAnalyzeDecompose}
+            slotHistoryOpen={instructionThreePane.slotHistoryOpen}
+            slotHistoryLoading={instructionThreePane.slotHistoryLoading}
+            slotHistoryError={instructionThreePane.slotHistoryError}
+            slotHistoryActionError={instructionThreePane.slotHistoryActionError}
+            restoringSlotVersionId={instructionThreePane.restoringSlotVersionId}
+            slotHistoryVersions={instructionThreePane.slotHistoryVersions}
+            onOpenSlotHistory={() => {
+              const slot =
+                hubContext.instructionLane === 'common'
+                  ? { kind: 'shared' as const }
+                  : hubContext.instructionLane === 'adapted'
+                    ? { kind: 'adapted' as const, agent: hubContext.agent }
+                    : hubContext.instructionLane === 'exclusive'
+                      ? { kind: 'targetOnly' as const, agent: hubContext.agent }
+                      : null;
+              if (!slot) return;
+              instructionThreePane.openSlotHistory(slot);
+            }}
+            onCloseSlotHistory={instructionThreePane.closeSlotHistory}
+            onCopySlotVersion={(version) => {
+              void instructionThreePane.copySlotVersion(version);
+            }}
+            onRestoreSlotVersion={(version) => {
+              void instructionThreePane.restoreSlotVersion(version);
+            }}
           />
         ) : null}
 

@@ -28,6 +28,7 @@ import {
   userInstructionApplyResultDecoder,
   userInstructionCanonicalDecoder,
   userInstructionPlanDecoder,
+  userInstructionSlotVersionListDecoder,
   userInstructionWorkspaceDecoder,
 } from '@/lib/schemas/agentHub';
 import type {
@@ -59,6 +60,11 @@ import type {
   UserInstructionTargetPreviewRequest,
   UserInstructionWorkspaceDto,
 } from '@/lib/types/agentHub';
+import type {
+  ListUserInstructionSlotVersionsRequest,
+  RestoreUserInstructionSlotRequest,
+} from '@/lib/types/agentHub';
+import type { ContentVersion } from '@/lib/types/core';
 import { invoke, invokeDecoded } from './client';
 import { openPath } from '@tauri-apps/plugin-opener';
 
@@ -98,6 +104,8 @@ export const AGENT_HUB_COMMANDS = {
   previewUserInstructionSetup: 'agent_hub_preview_user_instruction_setup',
   applyUserInstructionPlan: 'agent_hub_apply_user_instruction_plan',
   saveUserInstructionBlocks: 'agent_hub_save_user_instruction_blocks',
+  listUserInstructionSlotVersions: 'agent_hub_list_user_instruction_slot_versions',
+  restoreUserInstructionSlotVersion: 'agent_hub_restore_user_instruction_slot_version',
   previewUserInstructionUpdate: 'agent_hub_preview_user_instruction_update',
   previewAdoptUserInstructionSource: 'agent_hub_preview_adopt_user_instruction_source',
   previewPauseUserInstructionTarget: 'agent_hub_preview_pause_user_instruction_target',
@@ -868,6 +876,61 @@ export const agentHubApi = {
       return rethrowUserInstructionMutationError(
         reason,
         AGENT_HUB_COMMANDS.saveUserInstructionBlocks,
+      );
+    }
+  },
+
+  /**
+   * Business Logic: 列出指定三槽（公共 / 适配 / 独有）的历史版本快照；
+   *   槽内互不干扰（per-slot item_id 隔离），供 VersionHistoryDrawer 复用。
+   * Code Logic: assertLocal + decoder fail-closed；read-only 不需要
+   *   V2 unavailable 兜底（list 在 V1 后端不存在时也会失败，沿用通用错误）。
+   */
+  listUserInstructionSlotVersions: async (
+    request: ListUserInstructionSlotVersionsRequest & AgentHubRequestContext,
+  ): Promise<ContentVersion[]> => {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.listUserInstructionSlotVersions,
+        { request: body },
+        userInstructionSlotVersionListDecoder,
+      );
+    } catch (reason) {
+      throw rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.listUserInstructionSlotVersions,
+      );
+    }
+  },
+
+  /**
+   * Business Logic: 把历史版本恢复为新版本写入当前 canonical；与
+   *   saveBlocks 共用 baseRevisionId CAS + inventorySnapshotHash 双保险，
+   *   并发编辑会触发 USER_INSTRUCTION_REVISION_CHANGED / _PREVIEW_STALE。
+   * Code Logic: assertLocal + decoder fail-closed；后端先做 pre-restore
+   *   baseline（避免静默丢失抽屉打开期间的中间编辑），再 commit。
+   */
+  restoreUserInstructionSlotVersion: async (
+    request: RestoreUserInstructionSlotRequest & AgentHubRequestContext,
+  ): Promise<UserInstructionCanonicalDto> => {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.restoreUserInstructionSlotVersion,
+        { request: body },
+        userInstructionCanonicalDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.restoreUserInstructionSlotVersion,
       );
     }
   },

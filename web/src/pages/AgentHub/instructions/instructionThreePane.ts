@@ -974,6 +974,77 @@ function hasMeaningfulContent(text: string): boolean {
 }
 
 /**
+ * Business Logic: 三槽历史版本（公共 / 适配 / 独有）按 `InstructionSlotKey` 取
+ *   当前草稿中的可编辑正文；共享/适配支持懒创建空块，独有仅当已有 block 才返回
+ *   当前 agent variant（无 block 返回空串）。
+ * Code Logic: shared → block.commonMarkdown；adapted → variants[agent] || commonMarkdown；
+ *   targetOnly → variants[agent]。
+ */
+export function extractSlotText(
+  state: InstructionThreePaneState,
+  slot: { kind: 'shared' } | { kind: 'adapted'; agent: AgentTarget } | { kind: 'targetOnly'; agent: AgentTarget },
+): string {
+  if (slot.kind === 'shared') {
+    return findBlockByMode(state.blocks, 'shared')?.commonMarkdown ?? '';
+  }
+  if (slot.kind === 'adapted') {
+    return resolveAdaptedSlotText(findBlockByMode(state.blocks, 'adapted'), slot.agent);
+  }
+  const block = findBlockByMode(state.blocks, 'targetOnly');
+  if (!block) return '';
+  return block.variants[slot.agent] ?? '';
+}
+
+/**
+ * Business Logic: 历史版本恢复为新版本时，把指定槽位正文写入当前草稿；
+ *   与 `applyInstructionReviseResult` 对齐语义但不依赖 lane 字符串：
+ *   shared 写 commonMarkdown；adapted 写 variants[agent]；targetOnly 写 variants[agent]。
+ *   adapted 不会清空 commonMarkdown（与恢复语义一致；空 variant 自然回落 common）。
+ * Code Logic: ensure 三 mode → find block → updateBlock patch → blocksDirty=true。
+ */
+export function replaceSlotText(
+  state: InstructionThreePaneState,
+  slot:
+    | { kind: 'shared' }
+    | { kind: 'adapted'; agent: AgentTarget }
+    | { kind: 'targetOnly'; agent: AgentTarget },
+  text: string,
+  agent: AgentTarget,
+): InstructionThreePaneState {
+  if (slot.kind === 'shared') {
+    const next = ensureModeBlock(state, 'shared', agent);
+    const block = findBlockByMode(next.blocks, 'shared');
+    if (!block) return next;
+    return updateBlock(next, block.id, { commonMarkdown: text }, agent);
+  }
+  if (slot.kind === 'adapted') {
+    const next = ensureModeBlock(state, 'adapted', agent);
+    const block = findBlockByMode(next.blocks, 'adapted');
+    if (!block) return next;
+    return updateBlock(
+      next,
+      block.id,
+      {
+        variants: { ...block.variants, [slot.agent]: text },
+      },
+      agent,
+    );
+  }
+  const next = ensureModeBlock(state, 'targetOnly', agent);
+  const block = findBlockByMode(next.blocks, 'targetOnly');
+  if (!block) return next;
+  return updateBlock(
+    next,
+    block.id,
+    {
+      variants: { ...block.variants, [slot.agent]: text },
+      sourceTarget: block.sourceTarget ?? agent,
+    },
+    agent,
+  );
+}
+
+/**
  * Business Logic: 双脏比较时忽略尾随空白差异，减少伪冲突。
  * Code Logic: trimEnd + 统一换行。
  */

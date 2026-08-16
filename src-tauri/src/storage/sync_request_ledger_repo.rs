@@ -27,6 +27,14 @@ pub const DOMAIN_PROMPTS: &str = "prompts";
 pub const DOMAIN_SSH_TARGET: &str = "ssh_target";
 /// 领域 token：速记本同步。
 pub const DOMAIN_SCRATCHPAD: &str = "scratchpad";
+/// 领域 token：AgentHub 用户级三槽（公共 / 适配 / 独有）历史版本。
+///
+/// Business Logic: 三槽共享同一 canonical head，但每个槽（共享 1 条 +
+///   3 agent × 适配 + 3 agent × 独有 = 共 7 个逻辑 item_id）独立保留 20 条
+///   history / 30 天 retention（与 prompts/scratchpad 同）。
+///
+/// Code Logic: 与 content_versions 复用（不在 prompt/ssh 同步链路里走）。
+pub const DOMAIN_AGENT_HUB_USER_INSTRUCTION: &str = "agent_hub_user_instruction";
 
 /// push-batch 落库 outcome（当前仅 accepted 条数；未来可扩展 failure 明细）。
 ///
