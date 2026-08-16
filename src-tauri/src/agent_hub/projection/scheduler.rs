@@ -1104,10 +1104,7 @@ impl ProjectionScheduler {
             builtin_support_manifest, evaluate_target_support, CapabilitySupport,
             RuntimeProbeSnapshot, TargetCapability,
         };
-        use crate::agent_hub::targets::{
-            AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
-            OpenCodeInstructionAdapter, TargetEnvironment,
-        };
+        use crate::agent_hub::targets::TargetEnvironment;
         // 与 projection_ops 一致：注入当前 process 的 home/vars/PATH，不改真实 env
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         let mut vars = std::collections::BTreeMap::new();
@@ -1117,6 +1114,8 @@ impl ProjectionScheduler {
             "OPENCODE_CONFIG_DIR",
             "OPENCODE_CONFIG",
             "XDG_CONFIG_HOME",
+            "GROK_HOME",
+            "GEMINI_HOME",
         ] {
             if let Ok(v) = std::env::var(key) {
                 if !v.trim().is_empty() {

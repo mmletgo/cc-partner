@@ -35,8 +35,9 @@ use crate::agent_hub::targets::portable::{
     DiscoveredPortableAsset, PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, LocalScopeMapping,
-    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
+    GrokInstructionAdapter, LocalScopeMapping, OpenCodeInstructionAdapter, TargetEnvironment,
+    TargetPathResolver, TargetProbe,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -276,6 +277,8 @@ pub fn scan_portable_inventory_facts_query(
         Box::new(ClaudeInstructionAdapter),
         Box::new(CodexInstructionAdapter),
         Box::new(OpenCodeInstructionAdapter),
+        Box::new(GrokInstructionAdapter),
+        Box::new(GeminiInstructionAdapter),
     ];
     let homes = TargetPathResolver::resolve_all(env);
     let mut target_dtos = Vec::with_capacity(adapters.len());
@@ -899,27 +902,24 @@ fn plugin_roots_for(
         .flat_map(|base| direct_manifest_plugin_roots(&base, target))
         .map(PluginRootCandidate::path_only)
         .collect(),
-        (AgentTarget::Grok, ScopeKind::User) => direct_manifest_plugin_roots(
-            &homes.grok.config_root.join("plugins"),
-            target,
-        )
-        .into_iter()
-        .map(PluginRootCandidate::path_only)
-        .collect(),
-        (AgentTarget::Gemini, ScopeKind::User) => direct_manifest_plugin_roots(
-            &homes.gemini.config_root.join("plugins"),
-            target,
-        )
-        .into_iter()
-        .map(PluginRootCandidate::path_only)
-        .collect(),
-        (AgentTarget::Grok, _) => direct_manifest_plugin_roots(
-            &scope.absolute_path.join(".grok").join("plugins"),
-            target,
-        )
-        .into_iter()
-        .map(PluginRootCandidate::path_only)
-        .collect(),
+        (AgentTarget::Grok, ScopeKind::User) => {
+            direct_manifest_plugin_roots(&homes.grok.config_root.join("plugins"), target)
+                .into_iter()
+                .map(PluginRootCandidate::path_only)
+                .collect()
+        }
+        (AgentTarget::Gemini, ScopeKind::User) => {
+            direct_manifest_plugin_roots(&homes.gemini.config_root.join("plugins"), target)
+                .into_iter()
+                .map(PluginRootCandidate::path_only)
+                .collect()
+        }
+        (AgentTarget::Grok, _) => {
+            direct_manifest_plugin_roots(&scope.absolute_path.join(".grok").join("plugins"), target)
+                .into_iter()
+                .map(PluginRootCandidate::path_only)
+                .collect()
+        }
         (AgentTarget::Gemini, _) => direct_manifest_plugin_roots(
             &scope.absolute_path.join(".gemini").join("extensions"),
             target,
@@ -1777,6 +1777,8 @@ fn current_target_environment() -> TargetEnvironment {
         "OPENCODE_DISABLE_CLAUDE_CODE",
         "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT",
         "XDG_CONFIG_HOME",
+        "GROK_HOME",
+        "GEMINI_HOME",
         "HOME",
         "USERPROFILE",
     ];
@@ -1804,7 +1806,7 @@ mod tests {
     use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory_with_facts;
     use crate::agent_hub::targets::{
         AdapterSupportLevel, ClaudeInstructionAdapter, CodexInstructionAdapter,
-        OpenCodeInstructionAdapter,
+        GeminiInstructionAdapter, GrokInstructionAdapter, OpenCodeInstructionAdapter,
     };
     use std::collections::BTreeMap as Map;
 
@@ -2668,6 +2670,12 @@ enabled = false
             .scan_portable_assets(&scope, &env)
             .unwrap();
         let _ = OpenCodeInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        let _ = GrokInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        let _ = GeminiInstructionAdapter
             .scan_portable_assets(&scope, &env)
             .unwrap();
         let after = walk_snapshot(&env.home);

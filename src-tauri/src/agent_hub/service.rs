@@ -22,8 +22,8 @@ use crate::agent_hub::project_scope::{
     AgentHubProjectStatus, EnableAgentHubProjectRequest,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, OpenCodeInstructionAdapter,
-    TargetEnvironment,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
+    GrokInstructionAdapter, OpenCodeInstructionAdapter, TargetEnvironment,
 };
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::{self, AGENT_HUB_API_VERSION};
@@ -1589,49 +1589,51 @@ fn probe_all_targets_best_effort() -> Vec<AgentHubProbeDto> {
     };
     AgentTarget::ALL
         .into_iter()
-        .map(|target| match crate::agent_hub::targets::probe_target(target, &env) {
-            Ok(probe) => {
-                let support = if let Some(manifest) = manifest.as_ref() {
-                    let snap = RuntimeProbeSnapshot {
-                        target: probe.target,
-                        executable: probe.executable.clone(),
-                        version: probe.version.clone(),
-                        config_root: probe.config_root.clone(),
-                        fingerprint: probe.fingerprint.clone(),
-                        help_fingerprint: None,
-                    };
-                    let eval = evaluate_target_support(manifest, &snap);
-                    match &eval.mode {
-                        EvaluatedSupportMode::Certified => {
-                            if eval.write_allowed {
-                                "supported".to_string()
-                            } else {
-                                "scanOnly".to_string()
+        .map(
+            |target| match crate::agent_hub::targets::probe_target(target, &env) {
+                Ok(probe) => {
+                    let support = if let Some(manifest) = manifest.as_ref() {
+                        let snap = RuntimeProbeSnapshot {
+                            target: probe.target,
+                            executable: probe.executable.clone(),
+                            version: probe.version.clone(),
+                            config_root: probe.config_root.clone(),
+                            fingerprint: probe.fingerprint.clone(),
+                            help_fingerprint: None,
+                        };
+                        let eval = evaluate_target_support(manifest, &snap);
+                        match &eval.mode {
+                            EvaluatedSupportMode::Certified => {
+                                if eval.write_allowed {
+                                    "supported".to_string()
+                                } else {
+                                    "scanOnly".to_string()
+                                }
                             }
+                            EvaluatedSupportMode::ScanOnly { .. } => "scanOnly".to_string(),
+                            EvaluatedSupportMode::Blocked { .. } => "unsupported".to_string(),
                         }
-                        EvaluatedSupportMode::ScanOnly { .. } => "scanOnly".to_string(),
-                        EvaluatedSupportMode::Blocked { .. } => "unsupported".to_string(),
+                    } else {
+                        // fail-closed：manifest 不可用时不得抬升为 Supported
+                        "scanOnly".to_string()
+                    };
+                    AgentHubProbeDto {
+                        target: probe.target,
+                        executable: probe.executable.map(|p| p.to_string_lossy().into_owned()),
+                        version: probe.version,
+                        support,
+                        config_root: Some(probe.config_root.to_string_lossy().into_owned()),
                     }
-                } else {
-                    // fail-closed：manifest 不可用时不得抬升为 Supported
-                    "scanOnly".to_string()
-                };
-                AgentHubProbeDto {
-                    target: probe.target,
-                    executable: probe.executable.map(|p| p.to_string_lossy().into_owned()),
-                    version: probe.version,
-                    support,
-                    config_root: Some(probe.config_root.to_string_lossy().into_owned()),
                 }
-            }
-            Err(_) => AgentHubProbeDto {
-                target,
-                executable: None,
-                version: None,
-                support: "unsupported".to_string(),
-                config_root: None,
+                Err(_) => AgentHubProbeDto {
+                    target,
+                    executable: None,
+                    version: None,
+                    support: "unsupported".to_string(),
+                    config_root: None,
+                },
             },
-        })
+        )
         .collect()
 }
 
@@ -1650,6 +1652,8 @@ fn current_target_environment() -> TargetEnvironment {
         "OPENCODE_CONFIG_DIR",
         "OPENCODE_CONFIG",
         "XDG_CONFIG_HOME",
+        "GROK_HOME",
+        "GEMINI_HOME",
         "HOME",
         "USERPROFILE",
     ];
@@ -1884,6 +1888,8 @@ fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
         (Box::new(ClaudeInstructionAdapter), AgentTarget::Claude),
         (Box::new(CodexInstructionAdapter), AgentTarget::Codex),
         (Box::new(OpenCodeInstructionAdapter), AgentTarget::OpenCode),
+        (Box::new(GrokInstructionAdapter), AgentTarget::Grok),
+        (Box::new(GeminiInstructionAdapter), AgentTarget::Gemini),
     ];
     let mut map = BTreeMap::new();
     for (adapter, target) in adapters {
@@ -2652,6 +2658,7 @@ mod tests {
             screenshot_hotkey: "<cmd>+s".to_string(),
             prompt_optimizer_hotkey: "<ctrl>".to_string(),
             prompt_optimizer_fill_language: "zh".to_string(),
+            prompt_optimizer_provider: "claude".into(),
             prompt_quick_input_hotkey: "<ctrl>+/".to_string(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
@@ -3223,7 +3230,10 @@ mod tests {
     #[test]
     fn status_probe_uses_evaluate_target_support_not_raw_supported() {
         let probes = probe_all_targets_best_effort();
-        assert_eq!(probes.len(), crate::agent_hub::models::AgentTarget::ALL.len());
+        assert_eq!(
+            probes.len(),
+            crate::agent_hub::models::AgentTarget::ALL.len()
+        );
         for p in probes {
             match p.target {
                 crate::agent_hub::models::AgentTarget::OpenCode => {

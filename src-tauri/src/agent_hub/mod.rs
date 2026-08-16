@@ -204,11 +204,12 @@ pub use support::{
 };
 pub use targets::{
     AdapterSupportLevel, AssetAdapter, AssetRenderContext, ClaudeInstructionAdapter,
-    CodexInstructionAdapter, DiscoveredPortableAsset, InstructionDocument,
-    InstructionRenderContext, InstructionSource, InstructionSourceRole, LocalScopeMapping,
-    OpenCodeHomePaths, OpenCodeInstructionAdapter, PortableAssetOrigin, PortableDiscoveryStatus,
-    PortableOriginKind, ProjectedAssetFile, RenderedInstruction, TargetAssetProjection,
-    TargetEnvironment, TargetHomePaths, TargetHomes, TargetPathResolver, TargetProbe,
+    CodexInstructionAdapter, DiscoveredPortableAsset, GeminiInstructionAdapter,
+    GrokInstructionAdapter, InstructionDocument, InstructionRenderContext, InstructionSource,
+    InstructionSourceRole, LocalScopeMapping, OpenCodeHomePaths, OpenCodeInstructionAdapter,
+    PortableAssetOrigin, PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile,
+    RenderedInstruction, TargetAssetProjection, TargetEnvironment, TargetHomePaths, TargetHomes,
+    TargetPathResolver, TargetProbe,
 };
 pub use user_instructions::{
     apply_user_instruction_plan, inspect_user_instruction_workspace,

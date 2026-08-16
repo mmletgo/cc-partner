@@ -260,7 +260,10 @@ impl TargetHomes {
     ///
     /// Business Logic: Grok 公共槽不写 AGENTS.md；专属写入 rules。
     /// Code Logic: 按 target 拼路径。
-    pub fn default_user_instruction_path(&self, target: crate::agent_hub::models::AgentTarget) -> PathBuf {
+    pub fn default_user_instruction_path(
+        &self,
+        target: crate::agent_hub::models::AgentTarget,
+    ) -> PathBuf {
         use crate::agent_hub::models::AgentTarget;
         match target {
             AgentTarget::Claude => self.claude.config_root.join("CLAUDE.md"),

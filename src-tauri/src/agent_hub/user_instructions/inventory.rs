@@ -18,9 +18,9 @@ use crate::agent_hub::support::{
     RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, InstructionSource,
-    InstructionSourceRole, LocalScopeMapping, OpenCodeInstructionAdapter, TargetEnvironment,
-    TargetPathResolver,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
+    GrokInstructionAdapter, InstructionSource, InstructionSourceRole, LocalScopeMapping,
+    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver,
 };
 use crate::agent_hub::user_instructions::slot_history::{
     extract_slot_text, replace_slot_text, snapshot_dirty_slot_versions, InstructionSlotKey,
@@ -412,6 +412,8 @@ pub async fn inspect_user_instruction_workspace_with_env(
         Box::new(ClaudeInstructionAdapter),
         Box::new(CodexInstructionAdapter),
         Box::new(OpenCodeInstructionAdapter),
+        Box::new(GrokInstructionAdapter),
+        Box::new(GeminiInstructionAdapter),
     ];
     let mut targets = Vec::with_capacity(adapters.len());
     for adapter in adapters {
@@ -679,14 +681,38 @@ fn add_declared_candidates(
                 InstructionSourceRole::Fallback,
             ),
         ],
-        AgentTarget::Grok => vec![(
-            homes.grok.config_root.join("rules").join("cc-partner.exclusive.md"),
-            InstructionSourceRole::ManagedProjection,
-        )],
-        AgentTarget::Gemini => vec![(
-            homes.gemini.config_root.join("GEMINI.md"),
-            InstructionSourceRole::NativePrimary,
-        )],
+        AgentTarget::Grok => vec![
+            (
+                homes
+                    .grok
+                    .config_root
+                    .join("rules")
+                    .join("cc-partner.adapted.md"),
+                InstructionSourceRole::ManagedProjection,
+            ),
+            (
+                homes
+                    .grok
+                    .config_root
+                    .join("rules")
+                    .join("cc-partner.exclusive.md"),
+                InstructionSourceRole::ManagedProjection,
+            ),
+        ],
+        AgentTarget::Gemini => vec![
+            (
+                homes.gemini.config_root.join("GEMINI.md"),
+                InstructionSourceRole::NativePrimary,
+            ),
+            (
+                homes.gemini.config_root.join("cc-partner.adapted.md"),
+                InstructionSourceRole::ManagedProjection,
+            ),
+            (
+                homes.gemini.config_root.join("cc-partner.exclusive.md"),
+                InstructionSourceRole::ManagedProjection,
+            ),
+        ],
     };
     let existing: BTreeSet<PathBuf> = scanned.iter().map(|source| source.path.clone()).collect();
     for (path, role) in candidates {

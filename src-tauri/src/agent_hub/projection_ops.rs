@@ -21,8 +21,9 @@ use crate::agent_hub::support::{
     RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, InstructionRenderContext,
-    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
+    GrokInstructionAdapter, InstructionRenderContext, OpenCodeInstructionAdapter,
+    TargetEnvironment, TargetPathResolver, TargetProbe,
 };
 use crate::config_runtime::update_config_transactionally;
 use crate::error::AppError;
@@ -835,20 +836,22 @@ fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> Tar
                 support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
                 fingerprint: String::new(),
             }),
-        AgentTarget::Grok | AgentTarget::Gemini => {
-            crate::agent_hub::targets::probe_target(target, env).unwrap_or(TargetProbe {
-                target,
-                executable: None,
-                version: None,
-                config_root: if target == AgentTarget::Grok {
-                    homes.grok.config_root
-                } else {
-                    homes.gemini.config_root
-                },
-                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
-                fingerprint: String::new(),
-            })
-        }
+        AgentTarget::Grok => GrokInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.grok.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
+        AgentTarget::Gemini => GeminiInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.gemini.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
     }
 }
 

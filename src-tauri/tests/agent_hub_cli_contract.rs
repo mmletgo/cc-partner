@@ -32,7 +32,8 @@ use app_lib::agent_hub::support::{
 };
 use app_lib::agent_hub::targets::{
     compute_probe_fingerprint, probe_cli_version, resolve_executable, ClaudeInstructionAdapter,
-    CodexInstructionAdapter, OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver,
+    CodexInstructionAdapter, GeminiInstructionAdapter, GrokInstructionAdapter,
+    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver,
 };
 use app_lib::agent_hub::AssetAdapter;
 use app_lib::AgentTarget;
@@ -177,15 +178,13 @@ fn adapter_for(target: AgentTarget) -> &'static dyn AssetAdapter {
         AgentTarget::Claude => &ClaudeInstructionAdapter,
         AgentTarget::Codex => &CodexInstructionAdapter,
         AgentTarget::OpenCode => &OpenCodeInstructionAdapter,
+        AgentTarget::Grok => &GrokInstructionAdapter,
+        AgentTarget::Gemini => &GeminiInstructionAdapter,
     }
 }
 
 fn command_name(target: AgentTarget) -> &'static str {
-    match target {
-        AgentTarget::Claude => "claude",
-        AgentTarget::Codex => "codex",
-        AgentTarget::OpenCode => "opencode",
-    }
+    target.executable_name()
 }
 
 /// L3：对选定 target 跑真实 CLI 合同。
