@@ -2,17 +2,17 @@
 
 ## 1. 产品概述
 
-cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用于 Claude Code 用户在局域网环境下的多设备协作。
+cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用于在局域网环境下协作使用多种 CLI Agent（Claude Code、Codex、OpenCode、Grok Build、Gemini CLI）。
 
 ### 1.1 目标用户
-使用 Claude Code 进行开发的程序员，拥有多台局域网设备。
+使用一种或多种 CLI Agent 进行开发的程序员，拥有多台局域网设备。
 
 ### 1.2 核心价值
 - 在多台设备间快速传输文件
-- 一键区域截图并粘贴到 Claude Code
+- 一键区域截图并粘贴到当前 CLI Agent 终端
 - 集中管理常用 Prompt，跨设备同步
-- 浏览、搜索、复用和跨设备同步 Claude Code 历史 Prompt
-- 通过 Agent Hub 用户级指令（Claude targetOnly）管理本机 user 级 `~/.claude/CLAUDE.md`；旧「CLAUDE.md」编辑/推送页面已下线，后端 `claude_md` 推送路由与云同步域保留
+- 浏览、搜索、复用和跨设备同步各 CLI Agent 的历史用户 Prompt
+- 通过 Agent Hub 管理本机/远端/项目级多 CLI 指令与可移植资产（Claude / Codex / OpenCode / Grok Build / Gemini CLI）；旧「CLAUDE.md」编辑/推送页面已下线，后端 `claude_md` 推送路由与云同步域保留
 - 使用多页面速记本记录临时文本，并在局域网与 GitHub 间同步
 - 在项目文件夹维度管理 Git worktree、多个普通终端 window/pane，并直接操作当前工作区文件树
 - 通过局域网 `/mobile` 入口在手机浏览器操作 Workbench 项目、worktree、终端、文件、Git 和项目级自动化任务（无访问 token）
@@ -92,19 +92,20 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 按标签筛选 Prompt 列表
 - 文本搜索（搜索标题和内容）
 - 列表按后端返回顺序展示；当前页面提供搜索和标签筛选，不提供显式排序控件
-- Prompt 优化：用户输入原始编程任务 Prompt 后，调用本机 Claude Code CLI 的 pure/headless 模式生成中文优化版与等价英文优化版
+- Prompt 优化：用户输入原始编程任务 Prompt 后，调用本机已登记且具备 HeadlessCompletion 能力的 CLI（默认 Claude Code；可选 Grok Build；Gemini CLI 仅在结构化输出稳定时可选）生成中文优化版与等价英文优化版
 - Prompt 优化结果只用于当前页面展示和复制，不保存历史、不入库、不跨设备同步、不做缓存
 - Prompt 优化输出必须以需求方视角写成可直接粘贴给 Claude Code 的委托式 Prompt，不得生成“请确认/是否需要/请指定”等继续询问用户的澄清句；原始信息不足时只能写成待补充占位或执行假设，除非原始 Prompt 明确要求文档或文件输出，否则不得新增 `docs/`、写文件、持久化等确认要求
 - Prompt 优化结果区以中文/英文双卡片展示，每张卡片内部包含标题与复制操作区、分隔线和只读文本内容区
 - 工作台终端界面可通过工具栏或快捷键唤出 Prompt 优化浮层；浮层只显示一个原始 Prompt 输入框，不显示优化按钮、填入终端按钮、双语结果标题/结果区或关闭按钮；优化时应以当前项目根目录作为 Claude Code 工作目录，使其可读取项目 CLAUDE.md 上下文，并只按设置页选择的中文/英文语种生成一个优化版 Prompt；默认快捷键为轻按 Control 单键，首次触发打开浮层并聚焦原始 Prompt 输入框；浮层打开后再次触发快捷键时，如果输入框为空则直接关闭浮层，如果输入框非空则自动优化；输入框内非空时按 Enter 与再次触发快捷键等价，Shift+Enter 保留换行，输入法 composing 状态下的 Enter 不提交；后端把优化后的 Prompt 边生成边流式写入当前运行中的终端，完成后自动关闭浮层；填入只插入文本，不自动追加回车或执行命令
 
-### 2.4 Claude Code 历史
+### 2.4 Prompt 历史（原 Claude Code 历史）
 
-**描述**：采集本机 Claude Code 历史会话中的用户输入 Prompt，按项目维度浏览、复用和同步。
+**描述**：采集本机各已登记 CLI Agent（Claude Code / Codex / OpenCode / Grok Build / Gemini CLI）历史会话中的用户输入 Prompt，按项目维度浏览、复用和同步。身份与筛选来源见 `docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`。
 
 **功能点**：
-- 从本机 Claude Code 历史目录采集用户输入 Prompt，并按 Git 主项目聚合展示；通过 `git worktree list --porcelain -z` 获取项目全部 worktree，以 Git 返回的主工作区作为项目身份，不依赖 worktree 所在目录命名或 Workbench 是否登记；Git 无法证明归属的已删除/不存在路径保持原值，不做字符串猜测
-- 历史只收录用户在交互式 Claude Code 中直接输入的 Prompt；子 Agent sidechain 指令、Claude 内部元消息、任务通知、压缩摘要、工具结果与 SDK 自动输入必须过滤。过滤规则升级后应重扫本机 transcript，把旧版本误收项软删除并通过既有同步链路传播删除
+- 从各 agent 的本机历史目录采集用户输入 Prompt，并按 Git 主项目聚合展示；通过 `git worktree list --porcelain -z` 获取项目全部 worktree，以 Git 返回的主工作区作为项目身份，不依赖 worktree 所在目录命名或 Workbench 是否登记；Git 无法证明归属的已删除/不存在路径保持原值，不做字符串猜测
+- 历史只收录用户在交互式 CLI 中直接输入的 Prompt；子 Agent sidechain 指令、内部元消息、任务通知、压缩摘要、工具结果与 SDK 自动输入必须过滤。过滤规则升级后应重扫本机 transcript，把旧版本误收项软删除并通过既有同步链路传播删除
+- 每条历史带稳定 `source`（`claude` / `codex` / `opencode` / `grok` / `gemini`）；页面可按来源筛选；非 Claude 行的主键带源前缀，避免与 Claude `{session}:{uuid}` 碰撞
 - 旧版按 cwd 存储的历史在首次读取项目列表时持久迁移到 Git 主项目路径，同时推进本机向量时钟，使路径变更可通过既有 CC 历史同步链路收敛
 - 项目列表展示每个项目的 Prompt 数量和最近更新时间
 - 历史页先按历史所属设备筛选项目，默认只显示本机设备采集的项目及对应 Prompt；用户可切换到同步历史中出现过的其他设备（含当前离线设备）。项目下拉筛选器与项目列表选中态同步；选中项目内的 Prompt 时间线支持文本搜索、详情查看和一键复制
@@ -113,11 +114,11 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 支持手动刷新采集，并在全局同步中通过独立 `cc-history` 链路跨设备合并
 - 跨设备 CC 历史同步为**有界、可收敛**行为：支持分页的对端按摘要页与分批正文交换合并；不支持分页能力的旧对端继续走完整摘要/正文路径；任一轮中断后下一轮从摘要起点重新交换，合并语义幂等，不会出现半批次落库
 - 单条历史正文与单批同步体量有固定上限；超限时本轮同步以稳定错误结束该批次，不静默丢弃或半写入
-- Claude Code 历史纳入 GitHub 私有仓库云端同步范围
+- Prompt 历史纳入 GitHub 私有仓库云端同步范围
 
 ### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode 指令和可移植资产。用户级远端设备复用 same-agent Pull 与 Snapshot Push；本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存；提示词页面已经展示将写入的合成内容与原始文件，用户点击“写入原始文件”后，后端内部生成 expected-hash 一次性 plan 并直接原子写入，不再重复弹出预览确认。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的后台自动投影与 portable mutation 保持 scan-only，跨 Agent 仅开放本机用户级 bounded selective preview。
+**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode / Grok Build / Gemini CLI 指令和可移植资产。Grok 的公共指令复用已有 `AGENTS.md`/`CLAUDE.md`，专属槽写入 `.grok/rules/cc-partner.*.md`；Gemini 公共指令写入 `GEMINI.md`。Plugin 跨这五端默认 residual。完整身份与能力矩阵见 `docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`。用户级远端设备复用 same-agent Pull 与 Snapshot Push；本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存；提示词页面已经展示将写入的合成内容与原始文件，用户点击“写入原始文件”后，后端内部生成 expected-hash 一次性 plan 并直接原子写入，不再重复弹出预览确认。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的后台自动投影与 portable mutation 保持 scan-only，跨 Agent 仅开放本机用户级 bounded selective preview。
 
 **2026-08-10 安全纠正（当前权威行为）**：
 - Shell 是 Agent、范围和主 Tab 的唯一上下文真源；主界面只有 Agent 指令、Skill、命令、MCP、Plugin，observed inventory 是资产唯一真源。
@@ -140,7 +141,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - Skill / Command / Agent / MCP 的 **canonical Hub 载荷**（common 字段 + `target_extensions`；MCP 凭据原文进 CAS，诊断/日志脱敏）
 - 三端 **只读 portable 扫描**（native / compatibility / legacyStandalone / plugin origin；扫描不写盘）
 - managed package renderer、activator 与 ownership-aware patch 仍用于预览、测试与未来认证；当前 support manifest 三 target 的原生写 capability 均为 Blocked，任何 writer 前必须 force-inspect，因此生产不会物化/启停/卸载 CLI 资产
-- **shared** 资产对三端可见；**targetOnly** 严格隔离（OpenCode 不接收 Claude/Codex targetOnly）
+- **shared** 资产对已登记 Hub target 可见；**targetOnly** 严格隔离（OpenCode / Grok / Gemini 不接收其它 target 的 targetOnly）
 - ownership-aware **TOML/JSONC** 语义 patch：managed 字段 enable/disable/update/remove 后，unmanaged 键与注释仍存活
 - legacy adoption 的 planner/恢复合同保留，但 production legacy matrix 与 writer 不可达；旧 URL 只翻译到 canonical inventory，不能 fallback 到旧 `listAssets/getAsset` 或 mutation drawer
 - 前端仅保留搜索、资产状态、管理状态、详情与刷新；Agent/kind/scope 来自 Shell。Blocked/stale 时 mutation 动作不可见，并展示稳定原因
@@ -293,7 +294,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 健康状态页使用可见性感知轮询（页面 hidden 暂停、visible 立即刷新、single-flight），刷新失败保留已有数据
 - 健康提醒页：以状态概览、今日活跃指标和按已启用模板渲染的习惯统计展示监控控制台，头部配置入口跳转设置页健康提醒 tab
 - 活动统计页：独立侧栏入口，展示 app 使用时长排行、窗口标题排行和 24 小时活跃分布；头部配置入口跳转设置页活动统计 tab
-- Token 统计页（`/token-stats`，侧栏 System 组）：按 24h/7d/30d 与 provider/model/project/outcome 筛选 Agent Metadata Ledger，展示 8 项 KPI（新输入 / cache_read / 输出 / 命中率 / 真实消耗 / 请求数 / 总成本 / 覆盖度）、日或小时趋势、三维拆分表与 session 明细；趋势图横轴与 tooltip 按设备时区显示（聚合仍按 UTC 分桶）；null 用量显示「未提供」；导出 CSV/JSON 到本机 `~/.cc-partner/exports/token-stats`。数据只走既有 ledger 聚合，不直读 JSONL，也不进 P2P。
+- Token 统计页（`/token-stats`，侧栏 System 组）：按 24h/7d/30d 与 provider/model/project/outcome 筛选 Agent Metadata Ledger，展示 8 项 KPI（新输入 / cache_read / 输出 / 命中率 / 真实消耗 / 请求数 / 总成本 / 覆盖度）、日或小时趋势、三维拆分表与 session 明细；provider 列表来自身份目录（含 `grokBuildVisible` / `geminiCliVisible`）；趋势图横轴与 tooltip 按设备时区显示（聚合仍按 UTC 分桶）；null 用量显示「未提供」，禁止把缺失写成 0；导出 CSV/JSON 到本机 `~/.cc-partner/exports/token-stats`。数据只走既有 ledger 聚合，不直读 JSONL，也不进 P2P。
 - 设置页健康提醒 tab：以「健康提醒 / 提醒模板 / 免打扰 / 通知与隐私」分栏目展示总开关、有效休息、模板列表（含完成充入分钟与每日次数上限）、免打扰和系统通知
 - 设置页活动统计 tab：独立展示记录窗口标题与数据保留天数；两端保存都走完整 `update_health_config`，但各自只合并自己的字段切片，避免互相覆盖；活动切片不改 `reminders`
 - 完整配置表单：健康监测总开关、有效休息、模板触发/完成参数、通知开关、免打扰起止 24 小时制时间选择器在健康提醒 tab；记录窗口标题、数据保留天数在活动统计 tab；全屏遮罩随监测固定启用，不提供独立开关
