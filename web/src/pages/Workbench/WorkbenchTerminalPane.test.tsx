@@ -55,6 +55,9 @@ interface MockTerminal {
   scrollToLine: Mock<(line: number) => void>;
   scrollToBottom: () => void;
   dispose: () => void;
+  attachCustomKeyEventHandler: (handler: (event: KeyboardEvent) => boolean) => void;
+  /** 测试用：主动触发已注册的键盘处理器。 */
+  invokeKey: (event: Partial<KeyboardEvent>) => boolean | undefined;
   attachCustomWheelEventHandler: (handler: (event: WheelEvent) => boolean) => void;
   invokeWheel: (event: Partial<WheelEvent>) => boolean | undefined;
   modes: { mouseTrackingMode: 'none' | 'x10' | 'vt200' | 'drag' | 'any' };
@@ -193,6 +196,13 @@ vi.mock('@xterm/xterm', () => {
     }
     dispose() {
       terminalEvents.disposeCount += 1;
+    }
+    private keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+      this.keyHandler = handler;
+    }
+    invokeKey(event: Partial<KeyboardEvent>) {
+      return this.keyHandler?.(event as KeyboardEvent);
     }
     private wheelHandler: ((event: WheelEvent) => boolean) | null = null;
     attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean) {
@@ -533,6 +543,77 @@ describe('WorkbenchTerminalPane — xterm lifecycle', () => {
 });
 
 describe('WorkbenchTerminalPane — replay gate', () => {
+  test('real Ctrl+V reaches Claude while a long replay gate is still active', () => {
+    const onInput = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    render(
+      <PaneHost
+        session={session}
+        store={store}
+        inputEnabled={true}
+        onInput={onInput}
+      />,
+    );
+
+    act(() => {
+      // Mock write callback 同步完成，但 gate 要到下一个 macrotask 才释放；此刻等价于长快照仍在解析。
+      store.reset('s1', 'long-history-snapshot');
+    });
+    const terminal = terminalEvents.instances[terminalEvents.instances.length - 1]!;
+    const preventDefault = vi.fn();
+    const stopPropagation = vi.fn();
+
+    let handled: boolean | undefined;
+    act(() => {
+      handled = terminal.invokeKey({
+        type: 'keydown',
+        key: 'v',
+        ctrlKey: true,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+        preventDefault,
+        stopPropagation,
+      });
+    });
+
+    expect(handled).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(stopPropagation).toHaveBeenCalledOnce();
+    expect(terminal.scrollToBottom).toHaveBeenCalledOnce();
+    expect(onInput).toHaveBeenCalledOnce();
+    expect(onInput).toHaveBeenCalledWith('s1', '\x16');
+  });
+
+  test('Ctrl+V keeps the normal xterm onData path after replay gate release', async () => {
+    const onInput = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    render(
+      <PaneHost
+        session={session}
+        store={store}
+        inputEnabled={true}
+        onInput={onInput}
+      />,
+    );
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    });
+    const terminal = terminalEvents.instances[terminalEvents.instances.length - 1]!;
+
+    expect(terminal.invokeKey({
+      type: 'keydown',
+      key: 'v',
+      ctrlKey: true,
+      altKey: false,
+      metaKey: false,
+      shiftKey: false,
+    })).toBe(true);
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
   test('historical buffer replay writes through writeTerminalReplay and gates onData until release', async () => {
     const { advanceRevision } = renderPaneWithRevision();
 

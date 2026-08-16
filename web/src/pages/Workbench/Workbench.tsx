@@ -967,31 +967,29 @@ export function Workbench() {
               }
               actions={
                 <>
-                  {!terminalFullscreen ? (
-                    <Button
-                      className={styles.terminalActionButton}
-                      variant="secondary"
-                      size="sm"
-                      icon={<SearchIcon />}
-                      title={t('workbench:sessionSearch.open')}
-                      aria-label={t('workbench:sessionSearch.open')}
-                      data-workbench-responsive-action="true"
-                      disabled={!activeProjectId || !activeWorktree}
-                      onClick={openSessionSearch}
-                    >
-                      <span data-workbench-responsive-label="true">{t('workbench:sessionSearch.open')}</span>
-                    </Button>
-                  ) : null}
-                  {!terminalFullscreen ? (
-                    <WorkbenchPromptTools
-                      hasActiveSession={!!activeSession}
-                      remoteWriteDisabled={remoteWriteDisabled}
-                      promptPanelOpen={promptPanelOpen}
-                      onTogglePromptOptimizer={togglePromptOptimizerPanel}
-                      favoriteOpen={favoriteQuickInput.open}
-                      onToggleFavorite={favoriteQuickInput.onToggle}
-                    />
-                  ) : null}
+                  {/* 会话搜索按钮全屏态下保留,与窗格菜单同级(离开全屏切到浏览器/文件仍可走 WorkbenchWorkspaceSwitch) */}
+                  <Button
+                    className={styles.terminalActionButton}
+                    variant="secondary"
+                    size="sm"
+                    icon={<SearchIcon />}
+                    title={t('workbench:sessionSearch.open')}
+                    aria-label={t('workbench:sessionSearch.open')}
+                    data-workbench-responsive-action="true"
+                    disabled={!activeProjectId || !activeWorktree}
+                    onClick={openSessionSearch}
+                  >
+                    <span data-workbench-responsive-label="true">{t('workbench:sessionSearch.open')}</span>
+                  </Button>
+                  {/* Prompt 工具组(Prompt 优化 + 收藏快捷输入)全屏态下保留,与既有规范对齐 */}
+                  <WorkbenchPromptTools
+                    hasActiveSession={!!activeSession}
+                    remoteWriteDisabled={remoteWriteDisabled}
+                    promptPanelOpen={promptPanelOpen}
+                    onTogglePromptOptimizer={togglePromptOptimizerPanel}
+                    favoriteOpen={favoriteQuickInput.open}
+                    onToggleFavorite={favoriteQuickInput.onToggle}
+                  />
                   <Button
                     className={styles.terminalActionButton}
                     variant="secondary"

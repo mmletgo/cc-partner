@@ -122,7 +122,8 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
 
   return (
     <div className={styles.terminalArea} ref={terminalAreaRef}>
-      {promptPanelOpen && !terminalFullscreen ? (
+      {/* Prompt 优化浮层:进入全屏会自动 closePromptPanel,但允许用户在全屏态点击工具栏按钮重新打开,浮层在 terminalArea 内 stacking 上叠在终端面板之上 */}
+      {promptPanelOpen ? (
         <aside
           className={styles.promptOptimizerPanel}
           style={promptPanelStyle}
@@ -141,21 +142,19 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
         </aside>
       ) : null}
 
-      {/* 收藏快捷输入浮层（与 prompt 优化浮层相互独立，可共存） */}
-      {!terminalFullscreen ? (
-        <WorkbenchFavoriteQuickInput
-          open={favoriteQuickInput.open}
-          selectedTag={favoriteQuickInput.selectedTag}
-          query={favoriteQuickInput.query}
-          favoritePrompts={favoriteQuickInput.favoritePrompts}
-          loading={favoriteQuickInput.loading}
-          loadError={favoriteQuickInput.loadError}
-          onSelectTag={favoriteQuickInput.onSelectTag}
-          onQueryChange={favoriteQuickInput.onQueryChange}
-          onSelectPrompt={favoriteQuickInput.onSelectPrompt}
-          onClose={favoriteQuickInput.onClose}
-        />
-      ) : null}
+      {/* 收藏快捷输入浮层（与 prompt 优化浮层相互独立，可共存；全屏态下也允许渲染） */}
+      <WorkbenchFavoriteQuickInput
+        open={favoriteQuickInput.open}
+        selectedTag={favoriteQuickInput.selectedTag}
+        query={favoriteQuickInput.query}
+        favoritePrompts={favoriteQuickInput.favoritePrompts}
+        loading={favoriteQuickInput.loading}
+        loadError={favoriteQuickInput.loadError}
+        onSelectTag={favoriteQuickInput.onSelectTag}
+        onQueryChange={favoriteQuickInput.onQueryChange}
+        onSelectPrompt={favoriteQuickInput.onSelectPrompt}
+        onClose={favoriteQuickInput.onClose}
+      />
 
       <section
         className={styles.terminalPanel}

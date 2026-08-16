@@ -512,6 +512,32 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) return;
       onInput(sessionId, data);
     });
+    /**
+     * Business Logic（为什么需要这个处理器）:
+     *   Claude Code 的图片粘贴是一次性的 Ctrl+V 控制字节。长会话恢复或 history hydration
+     *   重放大快照时，replay gate 会短暂屏蔽 xterm onData，以免历史里的设备查询响应写回 PTY；
+     *   若用户刚好在此时粘贴图片，原实现会静默丢掉这次真实键盘输入，而空会话几乎不会命中该窗口。
+     *
+     * Code Logic（这个处理器做什么）:
+     *   只在 replay gate 开启时识别真实 keydown 的 Ctrl+V，直接把同一个 C0 SYN 字节写入 PTY，
+     *   并阻止 xterm 再生成重复 onData；其它按键仍由 xterm 与 replay gate 的既有逻辑处理。
+     */
+    terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+      const isClaudeImagePaste =
+        event.type === 'keydown' &&
+        event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === 'v';
+      if (!isClaudeImagePaste || !replayGateRef.current.current) return true;
+      if (!inputEnabledRef.current) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      terminal.scrollToBottom();
+      onInput(sessionId, '\x16');
+      return false;
+    });
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
     // reset 通知必须先于 live writer 注册：先标记 hydration 快照已开始，再让 xterm 排队解析。
     const unsubscribeHydrationReset = store.subscribeReset(sessionId, () => {
