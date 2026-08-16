@@ -22,3 +22,17 @@ export * from './providerManager';
 export * from './wordgame';
 export * from './gamePlugin';
 export * from './battery';
+// tokenStats 与 agentLedger 重名（AgentLedgerOutcome / CurrencyAmount /
+// AgentLedgerSummary 等）各自承载不同 DTO，barrel 仅 re-export tokenStats
+// 引入的新类型，避免重名冲突。
+export type {
+  AgentLedgerFilters,
+  AgentLedgerGroupRow,
+  AgentLedgerSessionEntry,
+  AgentLedgerSessionPage,
+  AgentLedgerTrendPoint,
+  ExportFormat,
+  TokenStatsBucket,
+  TokenStatsWindow,
+  UsageCoverage,
+} from './tokenStats';

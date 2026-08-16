@@ -14,6 +14,7 @@
   "health": "健康提醒",
   "activity": "活动统计",
   "providerManager": "Provider 管理",
+  "tokenStats": "Token 统计",
   "primaryNav": "主导航",
   "groups": {
     "explore": "探索",

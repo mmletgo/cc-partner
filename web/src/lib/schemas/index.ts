@@ -19,3 +19,19 @@ export * from './agentLedger';
 export * from './agentHub';
 export * from './portableInventory';
 export * from './providerManager';
+// tokenStats 与 agentLedger 共享一组基础枚举与 decoder（如 nonNegativeIntDecoder、
+// currencyAmountDecoder、agentLedgerSummaryDecoder 双方各自维护更窄/更宽的 shape）；
+// 这里只 re-export tokenStats 引入的全新名称以避免 barrel 名称冲突。
+export {
+  agentLedgerFiltersDecoder,
+  agentLedgerGroupRowDecoder,
+  agentLedgerSessionEntryDecoder,
+  agentLedgerSessionPageDecoder,
+  agentLedgerTrendPointDecoder,
+  clearTokenStatsResultDecoder,
+  exportFormatDecoder,
+  tokenStatsBucketDecoder,
+  tokenStatsOutcomeDecoder,
+  tokenStatsWindowDecoder,
+  usageCoverageDecoder,
+} from './tokenStats';
