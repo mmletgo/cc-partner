@@ -55,7 +55,7 @@ pub struct BatteryLedgerRow {
     pub id: i64,
     /// unix 秒。
     pub ts: i64,
-    /// credit_health / credit_wordgame / credit_welcome / debit_tick / mode_change。
+    /// credit_health / credit_wordgame / credit_game_plugin / debit_tick / mode_change / daily_reset。
     pub kind: String,
     /// 幂等键；debit 可为空。
     pub source_id: Option<String>,

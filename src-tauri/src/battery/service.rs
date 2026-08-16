@@ -83,16 +83,13 @@ fn source_kind(source: BatteryCreditSource) -> &'static str {
     match source {
         BatteryCreditSource::Flashcard => "credit_wordgame",
         BatteryCreditSource::GamePlugin => "credit_game_plugin",
-        _ => "credit_health",
+        BatteryCreditSource::Health => "credit_health",
     }
 }
 
 fn source_prefix(source: BatteryCreditSource) -> &'static str {
     match source {
-        BatteryCreditSource::Water => "habit:water:",
-        BatteryCreditSource::Rest => "habit:rest:",
-        BatteryCreditSource::Kegel => "habit:kegel:",
-        BatteryCreditSource::Custom => "habit:custom:",
+        BatteryCreditSource::Health => "habit:",
         BatteryCreditSource::Flashcard => "wordgame:",
         BatteryCreditSource::GamePlugin => "game-plugin:",
     }
@@ -100,10 +97,7 @@ fn source_prefix(source: BatteryCreditSource) -> &'static str {
 
 fn source_token(source: BatteryCreditSource) -> &'static str {
     match source {
-        BatteryCreditSource::Water => "water",
-        BatteryCreditSource::Rest => "rest",
-        BatteryCreditSource::Kegel => "kegel",
-        BatteryCreditSource::Custom => "custom",
+        BatteryCreditSource::Health => "health",
         BatteryCreditSource::Flashcard => "flashcard",
         BatteryCreditSource::GamePlugin => "game-plugin",
     }
@@ -566,15 +560,15 @@ mod tests {
         seeded.remaining_ms = 0;
         seeded.last_daily_reset_at = evaluate_daily_reset(0, now).unwrap();
         repo.upsert_state(&seeded).await.unwrap();
-        let id = habit_source_id("water", 9);
-        let a = credit(&repo, &cfg, BatteryCreditSource::Water, &id, now)
+        let id = wordgame_source_id("lemma", "spell", "2026-08-16", 1);
+        let a = credit(&repo, &cfg, BatteryCreditSource::Flashcard, &id, now)
             .await
             .unwrap();
-        let b = credit(&repo, &cfg, BatteryCreditSource::Water, &id, now + 1)
+        let b = credit(&repo, &cfg, BatteryCreditSource::Flashcard, &id, now + 1)
             .await
             .unwrap();
-        assert_eq!(a.remaining_ms, 8 * MS_PER_MINUTE);
-        assert_eq!(b.remaining_ms, 8 * MS_PER_MINUTE);
+        assert_eq!(a.remaining_ms, 3 * MS_PER_MINUTE);
+        assert_eq!(b.remaining_ms, 3 * MS_PER_MINUTE);
         assert_eq!(b.credit_minutes, None);
     }
 
@@ -600,7 +594,7 @@ mod tests {
         let first = credit_health_habit(
             &repo,
             &cfg,
-            BatteryCreditSource::Custom,
+            BatteryCreditSource::Health,
             "custom-a",
             1,
             10,
@@ -614,7 +608,7 @@ mod tests {
         let capped = credit_health_habit(
             &repo,
             &cfg,
-            BatteryCreditSource::Custom,
+            BatteryCreditSource::Health,
             "custom-a",
             2,
             10,
@@ -629,7 +623,7 @@ mod tests {
         let other = credit_health_habit(
             &repo,
             &cfg,
-            BatteryCreditSource::Custom,
+            BatteryCreditSource::Health,
             "custom-b",
             3,
             10,

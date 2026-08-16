@@ -378,37 +378,34 @@ pub(crate) async fn persist_habit_event_by_id(
 /// 健康 completed 入账；失败只记日志，不回滚习惯记录。
 ///
 /// Business Logic: 打卡成功就该充电；账本故障不能让用户以为没完成健康行为。
-/// Code Logic: 读模板额度（缺则回退 BatteryConfig）；按 habit:{template_id}: 计日上限后 credit_explicit。
+/// Code Logic: 读模板自身额度（缺字段视作 0）；按 habit:{template_id}: 计日上限后 credit_explicit。
 async fn credit_health_completed(
     state: &crate::state::AppState,
     template_id: &str,
     habit_id: i64,
     now: i64,
 ) {
-    let (battery, minutes, cap, source) = {
+    let (battery, minutes, cap) = {
         let cfg = state.config.read().unwrap();
-        let source = crate::config::BatteryCreditSource::from_health_template_id(template_id);
         let template = cfg
             .health
             .reminders
             .iter()
             .find(|item| item.id == template_id);
-        let minutes = template.map_or_else(
-            || cfg.battery.reward_minutes(source),
-            |item| item.resolved_credit_minutes(&cfg.battery),
-        );
-        let cap = template.map_or_else(
-            || cfg.battery.daily_cap(source),
-            |item| item.resolved_daily_cap(&cfg.battery),
-        );
-        (cfg.battery.clone(), minutes, cap, source)
+        let minutes = template
+            .map(|item| item.resolved_credit_minutes(&cfg.battery))
+            .unwrap_or(0);
+        let cap = template
+            .map(|item| item.resolved_daily_cap(&cfg.battery))
+            .unwrap_or(0);
+        (cfg.battery.clone(), minutes, cap)
     };
     let repo =
         crate::storage::BatteryRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
     match crate::battery::credit_health_habit(
         &repo,
         &battery,
-        source,
+        crate::config::BatteryCreditSource::Health,
         template_id,
         habit_id,
         minutes,

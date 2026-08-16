@@ -33,7 +33,6 @@ const LEDGER_KIND_KEYS = {
   credit_health: 'settings.kinds.credit_health',
   credit_wordgame: 'settings.kinds.credit_wordgame',
   credit_game_plugin: 'settings.kinds.credit_game_plugin',
-  credit_welcome: 'settings.kinds.credit_welcome',
   daily_reset: 'settings.kinds.daily_reset',
   debit_tick: 'settings.kinds.debit_tick',
   mode_change: 'settings.kinds.mode_change',
@@ -41,10 +40,9 @@ const LEDGER_KIND_KEYS = {
 
 function cloneConfig(config: BatteryConfig): BatteryConfig {
   return {
-    rewards: { ...config.rewards },
-    dailyCaps: { ...config.dailyCaps },
+    flashcardMinutes: config.flashcardMinutes,
+    flashcardCap: config.flashcardCap,
     maxBalanceMinutes: config.maxBalanceMinutes,
-    welcomeGrantMinutes: config.welcomeGrantMinutes,
   };
 }
 
@@ -123,22 +121,9 @@ export function SettingsBatteryPanel(): ReactElement {
 
   const handleSave = useCallback(async (): Promise<void> => {
     const next: BatteryConfig = {
-      rewards: {
-        waterMinutes: clampInt(draft.rewards.waterMinutes, 0, 180),
-        restMinutes: clampInt(draft.rewards.restMinutes, 0, 180),
-        kegelMinutes: clampInt(draft.rewards.kegelMinutes, 0, 180),
-        customMinutes: clampInt(draft.rewards.customMinutes, 0, 180),
-        flashcardMinutes: clampInt(draft.rewards.flashcardMinutes, 0, 180),
-      },
-      dailyCaps: {
-        water: clampInt(draft.dailyCaps.water, 0, 99),
-        rest: clampInt(draft.dailyCaps.rest, 0, 99),
-        kegel: clampInt(draft.dailyCaps.kegel, 0, 99),
-        custom: clampInt(draft.dailyCaps.custom, 0, 99),
-        flashcard: clampInt(draft.dailyCaps.flashcard, 0, 99),
-      },
+      flashcardMinutes: clampInt(draft.flashcardMinutes, 0, 180),
+      flashcardCap: clampInt(draft.flashcardCap, 0, 99),
       maxBalanceMinutes: clampInt(draft.maxBalanceMinutes, 30, 720),
-      welcomeGrantMinutes: clampInt(draft.welcomeGrantMinutes, 0, 180),
     };
     requestSeq.current += 1;
     const attempt = createSaveAttempt(requestSeq.current, next, editVersion.current);
@@ -237,23 +222,20 @@ export function SettingsBatteryPanel(): ReactElement {
             <div className={styles.healthFieldGrid}>
               <NumberField
                 label={t('settings.flashcardMinutes')}
-                value={draft.rewards.flashcardMinutes}
+                value={draft.flashcardMinutes}
                 min={0}
                 max={180}
                 onChange={(flashcardMinutes) =>
-                  patchDraft({
-                    ...draft,
-                    rewards: { ...draft.rewards, flashcardMinutes },
-                  })
+                  patchDraft({ ...draft, flashcardMinutes })
                 }
               />
               <NumberField
                 label={t('settings.flashcardCap')}
-                value={draft.dailyCaps.flashcard}
+                value={draft.flashcardCap}
                 min={0}
                 max={99}
-                onChange={(flashcard) =>
-                  patchDraft({ ...draft, dailyCaps: { ...draft.dailyCaps, flashcard } })
+                onChange={(flashcardCap) =>
+                  patchDraft({ ...draft, flashcardCap })
                 }
               />
               <NumberField
