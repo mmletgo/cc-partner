@@ -1,13 +1,12 @@
-//! workbench/agent_runtime/agent_usage — Agent 终态 usage 提取（Claude/Codex/OpenCode）
+//! workbench/agent_runtime/agent_usage — Agent 终态 usage 提取
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Agent 使用统计 Ledger 的 tokens 在生产中长期为 null，因为 `note_usage()` 没有调用者。
-//!     各 CLI（Claude Code / Codex / OpenCode）在会话结束时会把可靠 usage 落到本地
-//!     session 文件或 SQLite 中；runtime 进入终态时应提取这些数据补记 Ledger，
-//!     让 UI 不再显示「未提供」。
+//!     各 CLI 在会话结束时会把可靠 usage 落到本地 session 文件或 SQLite 中；
+//!     runtime 进入终态时应提取这些数据补记 Ledger，让 UI 不再显示「未提供」。
 //!
 //! Code Logic（这个模块做什么）:
-//!     三个纯函数提取器（root 可注入便于测试）+ 统一入口 `extract_provider_usage`：
+//!     五个纯函数提取器（root 可注入便于测试）+ 统一入口 `extract_provider_usage`：
 //!     - Claude：`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`，按 message.id
 //!       去重（stop_reason 优先 / output_tokens 更大者）后求和 billed tokens；
 //!       `context_length` 取末条主链占用（input+cache），compact_boundary 后取压缩后占用；
@@ -16,7 +15,11 @@
 //!       `last_token_usage` occupancy，`context_window` 取 `model_context_window`；
 //!     - OpenCode：只读打开 opencode SQLite，按 session 查 message 表 data JSON 求和；
 //!       `context_length` 取末条 message occupancy。
-//!     所有提取有界、宽松解析，失败一律返回 None，不 panic。
+//!     - Grok：`~/.grok/sessions/<group>/<session-id>/signals.json` 宽松解析
+//!       input/output/cache 与 context 字段；缺字段保持 None，对不上返回 None。
+//!     - Gemini：`~/.gemini/tmp/*/chats/*.json` 仅当能稳定读到 input/output/cached
+//!       时返回 Some，否则 None。
+//!     所有提取有界、宽松解析，失败一律返回 None，不 panic；禁止把缺失写成 0。
 
 use crate::workbench::agent_ledger::ReliableUsageSnapshot;
 use serde_json::Value;
@@ -34,6 +37,14 @@ const MAX_JSONL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
 /// Codex sessions 下最多检查的 rollout 文件数。
 const MAX_CODEX_SESSION_FILES: usize = 10_000;
+/// Grok sessions 下最多检查的一级 group 目录数。
+const MAX_GROK_GROUP_DIRS: usize = 10_000;
+/// Grok sessions 下最多检查的二级 session 目录数。
+const MAX_GROK_SESSION_DIRS: usize = 10_000;
+/// Gemini tmp 下最多检查的 project hash 目录数。
+const MAX_GEMINI_PROJECT_DIRS: usize = 10_000;
+/// Gemini chats 下最多检查的 json 文件数。
+const MAX_GEMINI_CHAT_FILES: usize = 10_000;
 
 /// 校验 native session id 可安全拼进文件路径：非空、无路径分隔符、无 `..`。
 ///
@@ -406,9 +417,9 @@ fn is_claude_human_prompt(value: &Value) -> bool {
     let Some(items) = content.as_array() else {
         return false;
     };
-    let has_tool_result = items.iter().any(|item| {
-        item.get("type").and_then(Value::as_str) == Some("tool_result")
-    });
+    let has_tool_result = items
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"));
     let has_text = items.iter().any(|item| {
         item.get("type").and_then(Value::as_str) == Some("text")
             || item.get("text").and_then(Value::as_str).is_some()
@@ -889,21 +900,631 @@ pub(crate) fn extract_opencode_usage(
 }
 
 // ---------------------------------------------------------------------------
-// D. 统一入口
+// D. 宽松 token 字段 + Grok
+// ---------------------------------------------------------------------------
+
+/// 从磁盘读取有界 JSON 对象；空文件 / 非对象 / 超限一律 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok signals 与 Gemini chat 都是单文件 JSON，读取必须有上限且不得 panic。
+///
+/// Code Logic（这个函数做什么）:
+///     文件 ≤64MiB；trim 后反序列化为 object。
+fn read_json_object(path: &Path) -> Option<Value> {
+    let mut file = fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if meta.len() > MAX_JSONL_FILE_BYTES {
+        return None;
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    value.is_object().then_some(value)
+}
+
+/// 把 JSON 数值宽松读成非负 token 计数；缺席或非法返回 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     禁止把缺失字段写成 0；只有显式出现的非负数才可信。
+///
+/// Code Logic（这个函数做什么）:
+///     接受 u64 / 非负 i64 / 有限非负 f64（四舍五入）。
+fn as_nonneg_u64(value: &Value) -> Option<u64> {
+    if let Some(n) = value.as_u64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_i64() {
+        return (n >= 0).then_some(n as u64);
+    }
+    if let Some(f) = value.as_f64() {
+        if f.is_finite() && f >= 0.0 {
+            return Some(f.round() as u64);
+        }
+    }
+    None
+}
+
+/// 按候选键读取第一个可解析的非负 token。
+fn json_token_u64(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(as_nonneg_u64))
+}
+
+/// 宽松 usage 字段（缺席保持 None，不填 0）。
+#[derive(Debug, Clone, Default)]
+struct LooseUsageFields {
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+    model_id: Option<String>,
+    context_length: Option<u64>,
+    context_window: Option<u64>,
+    cost_usd: Option<f64>,
+    first_token_avg_ms: Option<u64>,
+}
+
+impl LooseUsageFields {
+    fn has_token_dim(&self) -> bool {
+        self.input.is_some()
+            || self.output.is_some()
+            || self.cache_read.is_some()
+            || self.cache_write.is_some()
+            || self.context_length.is_some()
+            || self.context_window.is_some()
+    }
+
+    fn has_gemini_stable(&self) -> bool {
+        self.input.is_some() || self.output.is_some() || self.cache_read.is_some()
+    }
+
+    fn fill_missing_from(&mut self, other: &Self) {
+        if self.input.is_none() {
+            self.input = other.input;
+        }
+        if self.output.is_none() {
+            self.output = other.output;
+        }
+        if self.cache_read.is_none() {
+            self.cache_read = other.cache_read;
+        }
+        if self.cache_write.is_none() {
+            self.cache_write = other.cache_write;
+        }
+        if self.model_id.is_none() {
+            self.model_id = other.model_id.clone();
+        }
+        if self.context_length.is_none() {
+            self.context_length = other.context_length;
+        }
+        if self.context_window.is_none() {
+            self.context_window = other.context_window;
+        }
+        if self.cost_usd.is_none() {
+            self.cost_usd = other.cost_usd;
+        }
+        if self.first_token_avg_ms.is_none() {
+            self.first_token_avg_ms = other.first_token_avg_ms;
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.input = sum_opt_u64(self.input, other.input);
+        self.output = sum_opt_u64(self.output, other.output);
+        self.cache_read = sum_opt_u64(self.cache_read, other.cache_read);
+        self.cache_write = sum_opt_u64(self.cache_write, other.cache_write);
+        if other.model_id.is_some() {
+            self.model_id = other.model_id.clone();
+        }
+        if other.context_length.is_some() {
+            self.context_length = other.context_length;
+        }
+        if other.context_window.is_some() {
+            self.context_window = other.context_window;
+        }
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (None, None) => None,
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (Some(a), Some(b)) => Some(a + b),
+        };
+        if other.first_token_avg_ms.is_some() {
+            self.first_token_avg_ms = other.first_token_avg_ms;
+        }
+    }
+
+    fn into_snapshot(self) -> ReliableUsageSnapshot {
+        let model_id = self.model_id.filter(|s| !s.is_empty());
+        let cost = self
+            .cost_usd
+            .filter(|c| *c > 0.0)
+            .map(|c| (format_cost(c), "USD".to_string()));
+        ReliableUsageSnapshot {
+            model_id: model_id.clone(),
+            input_tokens: self.input,
+            output_tokens: self.output,
+            cache_read_tokens: self.cache_read,
+            cache_write_tokens: self.cache_write,
+            cost_major: cost.as_ref().map(|(m, _)| m.clone()),
+            cost_currency: cost.map(|(_, c)| c),
+            context_length: self.context_length,
+            context_window: self
+                .context_window
+                .or_else(|| infer_context_window_from_model(model_id.as_deref())),
+            active_duration_ms: None,
+            first_token_avg_ms: self.first_token_avg_ms,
+        }
+    }
+}
+
+fn sum_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (Some(x), Some(y)) => Some(x.saturating_add(y)),
+    }
+}
+
+/// 从 JSON 对象宽松读取 token / model / context；缺席保持 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok signals 与 Gemini chat 字段名不稳定，只能认常见别名，不能把缺失写成 0。
+///
+/// Code Logic（这个函数做什么）:
+///     识别 input/output/cache、prompt/completion、usageMetadata 与 Grok context 键。
+fn read_loose_usage(value: &Value) -> LooseUsageFields {
+    let mut fields = LooseUsageFields {
+        input: json_token_u64(
+            value,
+            &[
+                "input",
+                "input_tokens",
+                "inputTokens",
+                "prompt",
+                "prompt_tokens",
+                "promptTokens",
+                "promptTokenCount",
+                "prompt_token_count",
+            ],
+        ),
+        output: json_token_u64(
+            value,
+            &[
+                "output",
+                "output_tokens",
+                "outputTokens",
+                "completion",
+                "completion_tokens",
+                "completionTokens",
+                "candidatesTokenCount",
+                "candidates_token_count",
+            ],
+        ),
+        cache_read: None,
+        cache_write: json_token_u64(
+            value,
+            &[
+                "cache_write",
+                "cache_write_tokens",
+                "cacheWriteTokens",
+                "cache_creation_input_tokens",
+            ],
+        ),
+        model_id: [
+            "primaryModelId",
+            "model_id",
+            "modelId",
+            "current_model_id",
+            "model",
+        ]
+        .iter()
+        .find_map(|key| {
+            value
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        }),
+        context_length: json_token_u64(
+            value,
+            &[
+                "contextTokensUsed",
+                "context_tokens_used",
+                "context_length",
+                "contextLength",
+            ],
+        ),
+        context_window: json_token_u64(
+            value,
+            &[
+                "contextWindowTokens",
+                "context_window_tokens",
+                "context_window",
+                "contextWindow",
+                "model_context_window",
+            ],
+        ),
+        cost_usd: value
+            .get("costUSD")
+            .or_else(|| value.get("cost_usd"))
+            .or_else(|| value.get("cost"))
+            .and_then(Value::as_f64),
+        first_token_avg_ms: json_token_u64(
+            value,
+            &[
+                "avgTimeToFirstTokenMs",
+                "first_token_avg_ms",
+                "firstTokenAvgMs",
+            ],
+        ),
+    };
+    if let Some(cache) = value.get("cache") {
+        if cache.is_object() {
+            if fields.cache_read.is_none() {
+                fields.cache_read = cache
+                    .get("read")
+                    .or_else(|| cache.get("cache_read"))
+                    .and_then(as_nonneg_u64);
+            }
+            if fields.cache_write.is_none() {
+                fields.cache_write = cache
+                    .get("write")
+                    .or_else(|| cache.get("cache_write"))
+                    .and_then(as_nonneg_u64);
+            }
+        } else if fields.cache_read.is_none() {
+            fields.cache_read = as_nonneg_u64(cache);
+        }
+    }
+    if fields.cache_read.is_none() {
+        fields.cache_read = json_token_u64(
+            value,
+            &[
+                "cached",
+                "cache_read",
+                "cache_read_tokens",
+                "cacheReadTokens",
+                "cached_input_tokens",
+                "cachedInputTokens",
+                "cached_tokens",
+                "cachedTokens",
+                "cachedContentTokenCount",
+                "cached_content_token_count",
+            ],
+        );
+    }
+    if fields.model_id.is_none() {
+        if let Some(first) = value
+            .get("modelsUsed")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find_map(|item| item.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+        {
+            fields.model_id = Some(first.to_string());
+        }
+    }
+    fields
+}
+
+/// 解析 Grok 配置根：注入路径 / `GROK_HOME` / `~/.grok`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok CLI 可用 `GROK_HOME` 重定向数据目录，测试则注入临时根。
+///
+/// Code Logic（这个函数做什么）:
+///     非空注入优先，其次非空 `GROK_HOME`，否则 home 下 `.grok`。
+fn resolve_grok_home(injected: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = injected {
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(raw) = std::env::var("GROK_HOME") {
+        let p = PathBuf::from(raw.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".grok"))
+}
+
+/// 从 Grok `signals.json` 提取可靠 usage。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok Build 把 token / context 写在 session 目录的 `signals.json`；
+///     ledger 只能读这份磁盘真值，抽不到必须返回 None，禁止把缺失写成 0。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 native id 后，在 `sessions/<group>/<session-id>/signals.json` 有界查找；
+///     宽松解析 input/output/cache 与 context 字段，缺字段保持 None。
+pub(crate) fn extract_grok_usage(
+    grok_home: Option<PathBuf>,
+    native_session_id: &str,
+) -> Option<ReliableUsageSnapshot> {
+    if !is_safe_native_id(native_session_id) {
+        return None;
+    }
+    let root = resolve_grok_home(grok_home)?;
+    let target = find_grok_signals_file(&root.join("sessions"), native_session_id)?;
+    parse_grok_signals(&target)
+}
+
+/// 在 `sessions` 下按一级 group、二级 session 目录有界查找 `signals.json`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     group 名是 url-encoded cwd，不能从 session id 反推，但不得无限递归。
+///
+/// Code Logic（这个函数做什么）:
+///     先试 `<group>/<id>/signals.json`，再扫二级目录名等于 native id 的项。
+fn find_grok_signals_file(sessions: &Path, native_session_id: &str) -> Option<PathBuf> {
+    let groups = fs::read_dir(sessions).ok()?;
+    let mut checked_sessions = 0usize;
+    for (i, group) in groups.enumerate() {
+        if i >= MAX_GROK_GROUP_DIRS {
+            break;
+        }
+        let Ok(group) = group else { continue };
+        if !group.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let direct = group.path().join(native_session_id).join("signals.json");
+        if direct.is_file() {
+            return Some(direct);
+        }
+        let Ok(session_dirs) = fs::read_dir(group.path()) else {
+            continue;
+        };
+        for entry in session_dirs {
+            if checked_sessions >= MAX_GROK_SESSION_DIRS {
+                return None;
+            }
+            checked_sessions += 1;
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if entry.file_name().to_str() != Some(native_session_id) {
+                continue;
+            }
+            let candidate = entry.path().join("signals.json");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// 解析 Grok `signals.json`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     字段名可能在根级或 tokens/usage 嵌套对象里；对不上任何 token 维则整文件丢弃。
+///
+/// Code Logic（这个函数做什么）:
+///     优先读 tokens/usage 子对象，再用根级补缺；无 token/context 维返回 None。
+fn parse_grok_signals(path: &Path) -> Option<ReliableUsageSnapshot> {
+    let value = read_json_object(path)?;
+    let nested = ["tokens", "usage", "token_usage", "tokenUsage", "signals"]
+        .iter()
+        .find_map(|key| {
+            let obj = value.get(*key)?;
+            let parsed = read_loose_usage(obj);
+            parsed.has_token_dim().then_some(parsed)
+        });
+    let mut fields = nested.unwrap_or_default();
+    fields.fill_missing_from(&read_loose_usage(&value));
+    if !fields.has_token_dim() {
+        return None;
+    }
+    Some(fields.into_snapshot())
+}
+
+// ---------------------------------------------------------------------------
+// E. Gemini
+// ---------------------------------------------------------------------------
+
+/// 解析 Gemini 配置根：注入路径或 `~/.gemini`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     测试注入临时根；生产读用户主目录下的 Gemini CLI 数据。
+///
+/// Code Logic（这个函数做什么）:
+///     非空注入优先，否则 `home/.gemini`。
+fn resolve_gemini_home(injected: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = injected {
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".gemini"))
+}
+
+/// 从 Gemini chat/session JSON 提取可靠 usage。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Gemini CLI 会话 JSON 并不保证有 token 字段；只有稳定读到
+///     input/output 或 cached 时才能写入 ledger，否则显示「未提供」。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 native id 后扫描 `{root}/tmp/*/chats/*.json`，按 `id` /
+///     `sessionId` / 文件 stem 匹配；抽不到稳定字段返回 None。
+pub(crate) fn extract_gemini_usage(
+    gemini_home: Option<PathBuf>,
+    native_session_id: &str,
+) -> Option<ReliableUsageSnapshot> {
+    if !is_safe_native_id(native_session_id) {
+        return None;
+    }
+    let root = resolve_gemini_home(gemini_home)?;
+    let target = find_gemini_chat_file(&root, native_session_id)?;
+    parse_gemini_chat(&target, native_session_id)
+}
+
+/// 在 `{home}/tmp/*/chats/*.json` 有界查找匹配 session 的文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     project hash 不能猜，只能枚举 tmp 下的 chats，且必须设上限。
+///
+/// Code Logic（这个函数做什么）:
+///     先试 `<id>.json` 文件名，再读 `id` / `sessionId`；超过文件上限放弃。
+fn find_gemini_chat_file(gemini_home: &Path, native_session_id: &str) -> Option<PathBuf> {
+    let tmp = gemini_home.join("tmp");
+    let projects = fs::read_dir(&tmp).ok()?;
+    let mut checked_files = 0usize;
+    for (i, project) in projects.enumerate() {
+        if i >= MAX_GEMINI_PROJECT_DIRS {
+            break;
+        }
+        let Ok(project) = project else { continue };
+        if !project.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let chats = project.path().join("chats");
+        if !chats.is_dir() {
+            continue;
+        }
+        let exact = chats.join(format!("{native_session_id}.json"));
+        if exact.is_file() {
+            return Some(exact);
+        }
+        let Ok(entries) = fs::read_dir(&chats) else {
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            checked_files += 1;
+            if checked_files > MAX_GEMINI_CHAT_FILES {
+                return None;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if path.file_stem().and_then(|s| s.to_str()) == Some(native_session_id) {
+                return Some(path);
+            }
+            if gemini_json_session_id(&path).as_deref() == Some(native_session_id) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// 读取 Gemini chat JSON 内的 session id（`id` / `sessionId`）。
+fn gemini_json_session_id(path: &Path) -> Option<String> {
+    let value = read_json_object(path)?;
+    value
+        .get("id")
+        .or_else(|| value.get("sessionId"))
+        .or_else(|| value.pointer("/session/id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// 解析 Gemini chat JSON 的稳定 usage。
+///
+/// Business Logic（为什么需要这个函数）:
+///     只接受能稳定对应 input/output/cached 的字段；无这些键则整文件 None。
+///
+/// Code Logic（这个函数做什么）:
+///     先看根级 usage/tokens/usageMetadata；否则累加 messages/history 中的同类对象。
+fn parse_gemini_chat(path: &Path, expected_session: &str) -> Option<ReliableUsageSnapshot> {
+    let value = read_json_object(path)?;
+    if let Some(sid) = value
+        .get("id")
+        .or_else(|| value.get("sessionId"))
+        .or_else(|| value.pointer("/session/id"))
+        .and_then(Value::as_str)
+    {
+        let stem_ok = path.file_stem().and_then(|s| s.to_str()) == Some(expected_session);
+        if sid != expected_session && !stem_ok {
+            return None;
+        }
+    }
+    collect_gemini_usage(&value).map(LooseUsageFields::into_snapshot)
+}
+
+/// 收集 Gemini JSON 中可稳定识别的 input/output/cached。
+fn collect_gemini_usage(value: &Value) -> Option<LooseUsageFields> {
+    let candidates = [
+        value.get("usage"),
+        value.get("tokens"),
+        value.get("usageMetadata"),
+        value.pointer("/metrics/tokens"),
+        value.pointer("/session/usage"),
+        value.pointer("/session/tokens"),
+        value.pointer("/session/usageMetadata"),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let mut fields = read_loose_usage(candidate);
+        if fields.has_gemini_stable() {
+            fields.fill_missing_from(&read_loose_usage(value));
+            return Some(fields);
+        }
+    }
+    let messages = value
+        .get("messages")
+        .or_else(|| value.get("history"))
+        .and_then(Value::as_array)?;
+    let mut acc = LooseUsageFields::default();
+    let mut any = false;
+    for msg in messages {
+        let part_src = msg
+            .get("usage")
+            .or_else(|| msg.get("tokens"))
+            .or_else(|| msg.get("usageMetadata"))
+            .unwrap_or(msg);
+        let part = read_loose_usage(part_src);
+        if part.has_gemini_stable() {
+            acc.add_assign(&part);
+            any = true;
+        }
+    }
+    if !any {
+        return None;
+    }
+    acc.fill_missing_from(&read_loose_usage(value));
+    Some(acc)
+}
+
+// ---------------------------------------------------------------------------
+// F. 统一入口
 // ---------------------------------------------------------------------------
 
 /// 判断 provider 是否可从 CLI 本地会话文件/库提取 usage。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     交互式行的 wire id 是 `codexVisible` / `openCodeVisible`，历史抽取入口却只认
-///     `codex` / `opencode`，会导致 Codex/OpenCode 永远抽不到 tokens。
+///     交互式行的 wire id 是 `codexVisible` / `grokBuildVisible` 等，历史抽取入口
+///     还认 catalog 短码；漏掉任一别名会导致该 provider 永远抽不到 tokens。
 ///
 /// Code Logic（这个函数做什么）:
-///     接受 Claude / Codex / OpenCode 的稳定 id 与历史别名。
+///     接受 Claude / Codex / OpenCode / Grok / Gemini 的稳定 id 与历史别名。
 pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
     matches!(
         provider_id,
-        "claudeCodeVisible" | "codex" | "codexVisible" | "opencode" | "openCodeVisible"
+        "claudeCodeVisible"
+            | "codex"
+            | "codexVisible"
+            | "opencode"
+            | "openCodeVisible"
+            | "grokBuildVisible"
+            | "grok"
+            | "geminiCliVisible"
+            | "gemini"
     )
 }
 
@@ -914,7 +1535,8 @@ pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
 ///
 /// Code Logic（这个模块做什么）:
 ///     claudeCodeVisible → Claude jsonl；codex/codexVisible → rollout jsonl；
-///     opencode/openCodeVisible → SQLite；其他 provider（含 generic terminal）返回 None。
+///     opencode/openCodeVisible → SQLite；grokBuildVisible/grok → signals.json；
+///     geminiCliVisible/gemini → chat JSON；其他 provider 返回 None。
 pub fn extract_provider_usage(
     provider_id: &str,
     native_session_id: &str,
@@ -926,11 +1548,13 @@ pub fn extract_provider_usage(
         ),
         "codex" | "codexVisible" => extract_codex_usage(codex_home(), native_session_id),
         "opencode" | "openCodeVisible" => extract_opencode_usage(None, native_session_id),
+        "grokBuildVisible" | "grok" => extract_grok_usage(None, native_session_id),
+        "geminiCliVisible" | "gemini" => extract_gemini_usage(None, native_session_id),
         _ => None,
     }
 }
 
-/// 定位 CLI 会话文件（Claude jsonl / Codex rollout）；OpenCode 走 SQLite，返回 None。
+/// 定位 CLI 会话文件（Claude jsonl / Codex rollout / Grok signals / Gemini chat）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     live 轮询必须缓存路径，避免每 2s 遍历最多 10_000 个项目目录。
@@ -952,6 +1576,13 @@ pub(crate) fn locate_provider_session_file(
         "codex" | "codexVisible" => {
             find_codex_rollout_file(&codex_home()?.join("sessions"), native_session_id)
         }
+        "grokBuildVisible" | "grok" => find_grok_signals_file(
+            &resolve_grok_home(None)?.join("sessions"),
+            native_session_id,
+        ),
+        "geminiCliVisible" | "gemini" => {
+            find_gemini_chat_file(&resolve_gemini_home(None)?, native_session_id)
+        }
         _ => None,
     }
 }
@@ -962,7 +1593,7 @@ pub(crate) fn locate_provider_session_file(
 ///     live cache 在路径命中后应跳过目录遍历，只重解析变更文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     Claude/Codex 解析给定 path；OpenCode 忽略 path 走 SQLite；未知 provider 返回 None。
+///     Claude/Codex/Grok/Gemini 解析给定 path；OpenCode 忽略 path 走 SQLite。
 pub(crate) fn extract_provider_usage_from_path(
     provider_id: &str,
     path: &Path,
@@ -972,6 +1603,8 @@ pub(crate) fn extract_provider_usage_from_path(
         "claudeCodeVisible" => parse_claude_jsonl(path, native_session_id),
         "codex" | "codexVisible" => parse_codex_jsonl(path),
         "opencode" | "openCodeVisible" => extract_opencode_usage(None, native_session_id),
+        "grokBuildVisible" | "grok" => parse_grok_signals(path),
+        "geminiCliVisible" | "gemini" => parse_gemini_chat(path, native_session_id),
         _ => None,
     }
 }
@@ -1353,6 +1986,108 @@ mod tests {
         assert!(is_usage_extractable_provider("codexVisible"));
         assert!(is_usage_extractable_provider("opencode"));
         assert!(is_usage_extractable_provider("openCodeVisible"));
+        assert!(is_usage_extractable_provider("grokBuildVisible"));
+        assert!(is_usage_extractable_provider("grok"));
+        assert!(is_usage_extractable_provider("geminiCliVisible"));
+        assert!(is_usage_extractable_provider("gemini"));
         assert!(!is_usage_extractable_provider("genericTerminal"));
+    }
+
+    /// Grok：signals.json 抽出 tokens；缺字段保持 None。
+    #[test]
+    fn grok_signals_extracts_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("sessions/encoded-cwd/sess-g");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("signals.json"),
+            serde_json::json!({
+                "input_tokens": 11,
+                "output_tokens": 22,
+                "cache_read_tokens": 3,
+                "primaryModelId": "grok-4.6",
+                "contextTokensUsed": 100,
+                "contextWindowTokens": 500000,
+                "avgTimeToFirstTokenMs": 1629
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let snap = extract_grok_usage(Some(tmp.path().to_path_buf()), "sess-g").unwrap();
+        assert_eq!(snap.input_tokens, Some(11));
+        assert_eq!(snap.output_tokens, Some(22));
+        assert_eq!(snap.cache_read_tokens, Some(3));
+        assert!(snap.cache_write_tokens.is_none());
+        assert_eq!(snap.model_id.as_deref(), Some("grok-4.6"));
+        assert_eq!(snap.context_length, Some(100));
+        assert_eq!(snap.context_window, Some(500000));
+        assert_eq!(snap.first_token_avg_ms, Some(1629));
+    }
+
+    /// Grok：缺文件 / 空 json / 不安全 id → None。
+    #[test]
+    fn grok_missing_or_empty_signals_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(extract_grok_usage(Some(tmp.path().to_path_buf()), "nope").is_none());
+
+        let session = tmp.path().join("sessions/g/empty-s");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("signals.json"), "{}").unwrap();
+        assert!(extract_grok_usage(Some(tmp.path().to_path_buf()), "empty-s").is_none());
+
+        std::fs::write(session.join("signals.json"), "").unwrap();
+        assert!(extract_grok_usage(Some(tmp.path().to_path_buf()), "empty-s").is_none());
+
+        assert!(extract_grok_usage(Some(tmp.path().to_path_buf()), "../x").is_none());
+        assert!(extract_grok_usage(Some(tmp.path().to_path_buf()), "a/b").is_none());
+    }
+
+    /// Gemini：稳定 input/output/cached 才抽取；按 sessionId 匹配。
+    #[test]
+    fn gemini_extracts_stable_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chats = tmp.path().join("tmp/proj-hash/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(
+            chats.join("chat-001.json"),
+            serde_json::json!({
+                "sessionId": "sess-gem",
+                "usageMetadata": {
+                    "promptTokenCount": 8,
+                    "candidatesTokenCount": 13,
+                    "cachedContentTokenCount": 2
+                },
+                "model": "gemini-2.5-pro"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let snap = extract_gemini_usage(Some(tmp.path().to_path_buf()), "sess-gem").unwrap();
+        assert_eq!(snap.input_tokens, Some(8));
+        assert_eq!(snap.output_tokens, Some(13));
+        assert_eq!(snap.cache_read_tokens, Some(2));
+        assert!(snap.cache_write_tokens.is_none());
+        assert_eq!(snap.model_id.as_deref(), Some("gemini-2.5-pro"));
+    }
+
+    /// Gemini：无 token 字段 → None。
+    #[test]
+    fn gemini_without_token_fields_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chats = tmp.path().join("tmp/proj/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(
+            chats.join("sess-g.json"),
+            serde_json::json!({
+                "id": "sess-g",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(extract_gemini_usage(Some(tmp.path().to_path_buf()), "sess-g").is_none());
+        assert!(extract_gemini_usage(Some(tmp.path().to_path_buf()), "../x").is_none());
     }
 }
