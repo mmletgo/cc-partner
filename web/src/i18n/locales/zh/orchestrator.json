@@ -82,6 +82,8 @@
     "title": "任务队列",
     "subtitle": "按工作流泳道查看当前项目任务。",
     "toolbarAria": "任务队列操作",
+    "availableAgents": "可用 Agent",
+    "availableAgentsAria": "当前可用的 Agent",
     "taskAria": "选择任务 {{title}}",
     "priority": "优先级 {{priority}}",
     "localTask": "本机",

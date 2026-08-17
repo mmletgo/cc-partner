@@ -55,6 +55,16 @@ export function isAgentAdapterEffectivelyAvailable(
 }
 
 /**
+ * Business Logic: 工作台项目自动化只应列出当前可选用的 Agent，诊断面（Settings）才展示不可用项。
+ * Code Logic: filter isAgentAdapterEffectivelyAvailable，保持原 catalog 顺序。
+ */
+export function listEffectivelyAvailableAgentAdapters<
+  T extends Pick<OrchestratorAgentAdapterCatalogItem, 'provider' | 'available' | 'bridgeStatus'>,
+>(items: readonly T[]): T[] {
+  return items.filter(isAgentAdapterEffectivelyAvailable);
+}
+
+/**
  * Business Logic: 聚合可用性 tone；partial/preview 不得 success green。
  * Code Logic: effectively available → success；OpenCode previewRequired → warn；其余 neutral/danger。
  */

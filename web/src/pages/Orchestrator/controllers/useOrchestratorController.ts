@@ -257,6 +257,7 @@ export interface UseOrchestratorControllerResult {
   handleApproveExperimentWinner: (experimentId: string, winnerTaskId: string) => Promise<void>;
   handleCancelExperiment: (experimentId: string) => Promise<void>;
   agentAdapters: OrchestratorAgentAdapterCatalogItem[];
+  canCreateExperiment: boolean;
 }
 
 /**
@@ -330,6 +331,10 @@ export function useOrchestratorController(
   const [creatingExperiment, setCreatingExperiment] = useState(false);
   const [experimentActionId, setExperimentActionId] = useState<string | null>(null);
   const agentAdapters = useAgentAdapterCatalog();
+  const canCreateExperiment = useMemo(
+    () => buildExperimentCandidates(agentAdapters).length >= 2,
+    [agentAdapters],
+  );
   const activeProjectId = activeProject?.id ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const taskLoadDecision = useMemo(
@@ -900,6 +905,11 @@ export function useOrchestratorController(
       setActionError({ projectId, message: t('orchestrator:errors.required') });
       return;
     }
+    const candidates = buildExperimentCandidates(agentAdapters);
+    if (candidates.length < 2) {
+      setActionError({ projectId, message: t('orchestrator:errors.experimentsCreate') });
+      return;
+    }
     setCreatingExperiment(true);
     setActionError(null);
     try {
@@ -909,7 +919,8 @@ export function useOrchestratorController(
         title,
         goal,
         acceptance,
-        maxParallel: 1, candidates: buildExperimentCandidates(agentAdapters),
+        maxParallel: 1,
+        candidates,
       });
       if (activeProjectIdRef.current !== projectId) return;
       setExperiments((current) => {
@@ -1914,6 +1925,8 @@ export function useOrchestratorController(
     experimentActionId,
     handleCreateExperiment,
     handleApproveExperimentWinner,
-    handleCancelExperiment, agentAdapters,
+    handleCancelExperiment,
+    agentAdapters,
+    canCreateExperiment,
   };
 }

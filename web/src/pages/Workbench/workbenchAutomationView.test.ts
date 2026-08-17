@@ -563,6 +563,21 @@ describe('workbenchAutomationView', () => {
     '.boardStage {',
     'orchestrator board stage fills remaining workspace height',
   );
+  assertContains(
+    orchestratorStyles,
+    'container: orchestrator-board / inline-size',
+    'orchestrator board stage is a named container so lane layout can follow board width, not viewport',
+  );
+  assertContains(
+    orchestratorStyles,
+    '@container orchestrator-board (max-width: 1439px)',
+    'orchestrator board wraps to 4×2 when eight columns would be too narrow',
+  );
+  assertContains(
+    orchestratorStyles,
+    '.availableAgents',
+    'available agent chips have a compact toolbar style',
+  );
   assertContains(orchestratorStyles, '.snapshotStrip', 'runtime snapshot uses a compact strip');
   assertContains(appSource, '<Navigate to="/workbench" replace />', 'legacy /orchestrator route redirects to Workbench');
   assertNotContains(appShellSource, 'to="/orchestrator"', 'sidebar no longer exposes a standalone automation nav item');

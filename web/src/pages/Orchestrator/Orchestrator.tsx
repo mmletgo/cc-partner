@@ -12,11 +12,8 @@
  *   - 不直接调用 orchestratorApi；hooks 全部位于渲染分支之前
  */
 import type { JSX } from 'react';
-import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import { Button, Pill } from '@/components/primitives';
-import { openCodeBridgePreviewHref } from '@/lib/agentAdapterPresentation';
 import { PlusIcon, SyncIcon } from '@/lib/icons';
 import {
   useOrchestratorController,
@@ -46,12 +43,7 @@ export type { OrchestratorPanelProps };
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const c = useOrchestratorController(props);
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
-  const navigate = useNavigate();
-  const handleOpenOpenCodeBridgePreview = useCallback(() => {
-    navigate(openCodeBridgePreviewHref(c.activeProjectId));
-  }, [c.activeProjectId, navigate]);
   const showExperiments = c.experimentsLoading || c.experiments.length > 0;
-  const showSecondary = showExperiments || c.agentAdapters.length > 0;
 
   return (
     <div className={c.embedded ? styles.embedded : styles.page}>
@@ -85,6 +77,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 <p className={styles.sectionLead}>{t('orchestrator:queue.subtitle')}</p>
               ) : null}
             </div>
+            <AgentAdapterCatalogStrip agentAdapters={c.agentAdapters} />
             <div className={styles.queueActions}>
               <Pill tone="neutral">{c.tasks.length + c.pendingRemoteItems.length}</Pill>
               <Button
@@ -155,41 +148,35 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
               />
             </div>
           ) : null}
-          {!c.loading && showSecondary ? (
+          {!c.loading && showExperiments ? (
             <div className={styles.secondaryStack}>
-              {showExperiments ? (
-                <section className={styles.group} aria-label={t('orchestrator:experiments.title')}>
-                  <div className={styles.groupHeader}>
-                    <span>{t('orchestrator:experiments.title')}</span>
-                    <Pill tone="neutral">{c.experiments.length}</Pill>
-                  </div>
-                  {c.experimentsLoading ? (
-                    <p className={styles.muted}>{t('common:loading')}</p>
-                  ) : null}
-                  {!c.experimentsLoading && c.experiments.length === 0 ? (
-                    <p className={styles.muted}>{t('orchestrator:experiments.empty')}</p>
-                  ) : null}
-                  {c.experiments.map((experiment) => (
-                    <OrchestratorExperimentPanel
-                      key={experiment.id}
-                      experiment={experiment}
-                      onApproveRecommended={(experimentId, winnerTaskId) => {
-                        void c.handleApproveExperimentWinner(experimentId, winnerTaskId);
-                      }}
-                      onSelectCandidate={(experimentId, taskId) => {
-                        void c.handleApproveExperimentWinner(experimentId, taskId);
-                      }}
-                      onCancel={(experimentId) => {
-                        void c.handleCancelExperiment(experimentId);
-                      }}
-                    />
-                  ))}
-                </section>
-              ) : null}
-              <AgentAdapterCatalogStrip
-                agentAdapters={c.agentAdapters}
-                onOpenOpenCodeBridgePreview={handleOpenOpenCodeBridgePreview}
-              />
+              <section className={styles.group} aria-label={t('orchestrator:experiments.title')}>
+                <div className={styles.groupHeader}>
+                  <span>{t('orchestrator:experiments.title')}</span>
+                  <Pill tone="neutral">{c.experiments.length}</Pill>
+                </div>
+                {c.experimentsLoading ? (
+                  <p className={styles.muted}>{t('common:loading')}</p>
+                ) : null}
+                {!c.experimentsLoading && c.experiments.length === 0 ? (
+                  <p className={styles.muted}>{t('orchestrator:experiments.empty')}</p>
+                ) : null}
+                {c.experiments.map((experiment) => (
+                  <OrchestratorExperimentPanel
+                    key={experiment.id}
+                    experiment={experiment}
+                    onApproveRecommended={(experimentId, winnerTaskId) => {
+                      void c.handleApproveExperimentWinner(experimentId, winnerTaskId);
+                    }}
+                    onSelectCandidate={(experimentId, taskId) => {
+                      void c.handleApproveExperimentWinner(experimentId, taskId);
+                    }}
+                    onCancel={(experimentId) => {
+                      void c.handleCancelExperiment(experimentId);
+                    }}
+                  />
+                ))}
+              </section>
             </div>
           ) : null}
         </div>
@@ -267,9 +254,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         onCreateAction={(createAction) => {
           void c.handleCreateTaskAction(createAction);
         }}
-        onCreateExperiment={() => {
-          void c.handleCreateExperiment();
-        }}
+        onCreateExperiment={
+          c.canCreateExperiment
+            ? () => {
+                void c.handleCreateExperiment();
+              }
+            : undefined
+        }
       />
       <WorkflowWizardDialog
         open={c.workflowWizardOpen}

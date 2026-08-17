@@ -16,6 +16,7 @@ import {
   effectiveOpenCodeBridgeStatus,
   isAgentAdapterEffectivelyAvailable,
   isOpenCodeBridgeReady,
+  listEffectivelyAvailableAgentAdapters,
   openCodeBridgePreviewHref,
 } from './agentAdapterPresentation';
 
@@ -57,6 +58,18 @@ describe('agentAdapterPresentation', () => {
     expect(isAgentAdapterEffectivelyAvailable(item)).toBe(false);
     expect(agentAdapterAvailabilityTone(item)).toBe('danger');
     expect(agentAdapterBlockedReason(item)).toBe('external_collision');
+  });
+
+  test('listEffectivelyAvailableAgentAdapters keeps catalog order and drops unavailable', () => {
+    const items = [
+      openCode({ available: true, bridgeStatus: 'ready' }),
+      { ...openCode({ available: false }), provider: 'codexVisible' },
+      { ...openCode({ available: true, bridgeStatus: 'ready' }), provider: 'claudeCodeVisible' },
+    ];
+    expect(listEffectivelyAvailableAgentAdapters(items).map((item) => item.provider)).toEqual([
+      'openCodeVisible',
+      'claudeCodeVisible',
+    ]);
   });
 
   test('preview href targets Agent Hub with fixed bridge path', () => {

@@ -82,6 +82,8 @@
     "title": "Task Queue",
     "subtitle": "Review current project tasks by workflow lane.",
     "toolbarAria": "Task queue actions",
+    "availableAgents": "Available agents",
+    "availableAgentsAria": "Currently available agents",
     "taskAria": "Select task {{title}}",
     "priority": "Priority {{priority}}",
     "localTask": "Local",

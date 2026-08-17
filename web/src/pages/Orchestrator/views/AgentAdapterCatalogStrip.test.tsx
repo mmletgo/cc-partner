@@ -1,34 +1,23 @@
 // @vitest-environment jsdom
 /**
- * AgentAdapterCatalogStrip OpenCode fail-closed 合同。
+ * AgentAdapterCatalogStrip 只列出 effectively available Agent。
  */
 
 import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test } from 'vitest';
 import type { OrchestratorAgentAdapterCatalogItem } from '@/lib/types';
 import { AgentAdapterCatalogStrip } from './AgentAdapterCatalogStrip';
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string, opts?: Record<string, string>) => {
-      if (!opts) return key;
-      return `${key}:${Object.values(opts).join('|')}`;
-    },
-  }),
-}));
-
-function openCode(
+function adapter(
+  provider: string,
   overrides: Partial<OrchestratorAgentAdapterCatalogItem> = {},
 ): OrchestratorAgentAdapterCatalogItem {
   return {
-    provider: 'openCodeVisible',
+    provider,
     available: true,
     completionContract: 'hookEvent',
     supportsResume: true,
     supportsUsage: true,
-    executable: 'opencode',
-    version: '0.1.0',
-    supportEvidence: 'L3-AGENT-HUB-OPENCODE-RUNTIME-001',
     ...overrides,
   };
 }
@@ -36,29 +25,54 @@ function openCode(
 afterEach(() => cleanup());
 
 describe('AgentAdapterCatalogStrip', () => {
-  test('missing bridgeStatus is not effectively available green', () => {
+  test('hides OpenCode when bridge is missing (not effectively available)', () => {
     render(
       <AgentAdapterCatalogStrip
-        agentAdapters={[openCode({ available: true, bridgeStatus: undefined })]}
-        onOpenOpenCodeBridgePreview={vi.fn()}
+        agentAdapters={[adapter('openCodeVisible', { available: true, bridgeStatus: undefined })]}
       />,
     );
-    const row = screen.getByTestId('agent-adapter-openCodeVisible');
-    expect(row.getAttribute('data-effectively-available')).toBe('false');
-    expect(row.getAttribute('data-bridge-status')).toBe('previewRequired');
-    expect(row.getAttribute('data-completion')).toBe('hookEvent');
-    expect(row.textContent).toContain('hookEvent');
-    expect(screen.getByTestId('open-code-bridge-preview-openCodeVisible')).toBeTruthy();
+    expect(screen.queryByTestId('agent-adapter-catalog-strip')).toBeNull();
+    expect(screen.queryByTestId('agent-adapter-openCodeVisible')).toBeNull();
   });
 
-  test('ready bridge can present available', () => {
+  test('ready OpenCode still presents as available', () => {
     render(
       <AgentAdapterCatalogStrip
-        agentAdapters={[openCode({ available: true, bridgeStatus: 'ready' })]}
+        agentAdapters={[adapter('openCodeVisible', { available: true, bridgeStatus: 'ready' })]}
       />,
     );
     const row = screen.getByTestId('agent-adapter-openCodeVisible');
     expect(row.getAttribute('data-effectively-available')).toBe('true');
     expect(row.getAttribute('data-bridge-status')).toBe('ready');
+    expect(row.getAttribute('data-completion')).toBe('hookEvent');
+  });
+
+  test('lists only effectively available adapters from a mixed catalog', () => {
+    render(
+      <AgentAdapterCatalogStrip
+        agentAdapters={[
+          adapter('claudeCodeVisible', { available: true }),
+          adapter('codexVisible', { available: false }),
+          adapter('openCodeVisible', { available: true, bridgeStatus: 'previewRequired' }),
+          adapter('geminiCliVisible', { available: true }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId('agent-adapter-claudeCodeVisible')).toBeTruthy();
+    expect(screen.getByTestId('agent-adapter-geminiCliVisible')).toBeTruthy();
+    expect(screen.queryByTestId('agent-adapter-codexVisible')).toBeNull();
+    expect(screen.queryByTestId('agent-adapter-openCodeVisible')).toBeNull();
+  });
+
+  test('returns null when every adapter is unavailable', () => {
+    render(
+      <AgentAdapterCatalogStrip
+        agentAdapters={[
+          adapter('codexVisible', { available: false }),
+          adapter('genericTerminal', { available: false }),
+        ]}
+      />,
+    );
+    expect(screen.queryByTestId('agent-adapter-catalog-strip')).toBeNull();
   });
 });
