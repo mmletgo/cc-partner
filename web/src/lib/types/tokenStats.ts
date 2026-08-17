@@ -45,19 +45,20 @@ export interface CurrencyAmount {
  *
  * Code Logic（字段说明）:
  *   window/bucket 只 optional（缺省后端推导）；其它标量既可缺省也可 null；
- *   providerIds/modelIds/projectIds 既可 null 也可缺失。
+ *   providerIds/modelIds/projectIds 既可 null 也可缺失；
+ *   outcome 已移除（Token 统计页 UI 不再按终态筛选）。
  */
 export interface AgentLedgerFilters {
   /** 时间窗（缺省由后端推导为 7d；null = 自定义区间，不再套预设窗）。 */
   window?: TokenStatsWindow | null;
-  /** 单项目筛选；null/缺省 = 全项目。 */
+  /** 单项目筛选（与 projectIds 互斥；多值优先）。null/缺省 = 全项目。 */
   projectId?: string | null;
-  /** 多 provider；当前 list 只取 [0]，summary 全量 IN。 */
+  /** 多 provider；list + summary 全量 IN。 */
   providerIds?: string[] | null;
   modelIds?: string[] | null;
+  /** 多项目（与 projectId 互斥；多值优先）。 */
   projectIds?: string[] | null;
   worktreeId?: string | null;
-  outcome?: AgentLedgerOutcome | null;
   /** RFC3339 半开区间左端。 */
   startedAfter?: string | null;
   startedBefore?: string | null;
@@ -73,7 +74,8 @@ export interface AgentLedgerFilters {
  *
  * Code Logic（字段说明）:
  *   cost 拆为 costMinorUnits/costCurrency（不折算）；
- *   输入/输出/cache 各自 nullable（旧行可能缺字段）。
+ *   输入/输出/cache 各自 nullable（旧行可能缺字段）；
+ *   projectName 来自后端 LEFT JOIN workbench_proprojects，缺失回 null → UI 回退到 projectId。
  */
 export interface AgentLedgerSessionEntry {
   id: string;
@@ -85,7 +87,6 @@ export interface AgentLedgerSessionEntry {
   startedAt: string;
   endedAt: string;
   durationMs: number;
-  outcome: AgentLedgerOutcome;
   inputTokens: number | null;
   outputTokens: number | null;
   cacheReadTokens: number | null;
@@ -93,6 +94,7 @@ export interface AgentLedgerSessionEntry {
   costMinorUnits: number | null;
   costCurrency: string | null;
   terminalTitle: string | null;
+  projectName: string | null;
 }
 
 /** session list 翻页结果（hasMore 由 nextCursor 是否存在推导）。 */

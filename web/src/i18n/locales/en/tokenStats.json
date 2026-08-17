@@ -16,14 +16,6 @@
     "providerLabel": "Provider",
     "modelLabel": "Model",
     "projectLabel": "Project",
-    "outcomeLabel": "Outcome",
-    "outcome": {
-      "all": "All outcomes",
-      "completed": "Completed",
-      "failed": "Failed",
-      "cancelled": "Cancelled",
-      "disconnected": "Disconnected"
-    },
     "refresh": "Refresh",
     "export": "Export…",
     "exportMenu": "Export results",
@@ -60,21 +52,6 @@
       "cost": "Cost"
     }
   },
-  "groups": {
-    "byModel": "By model",
-    "byProvider": "By provider",
-    "byProject": "By project",
-    "noRows": "No rows in this group yet.",
-    "columns": {
-      "key": "Key",
-      "sessions": "Sessions",
-      "input": "New in",
-      "cacheRead": "Cache in",
-      "cacheWrite": "Cache create",
-      "output": "Out",
-      "cost": "Cost"
-    }
-  },
   "session": {
     "tableTitle": "Sessions",
     "columns": {
@@ -82,7 +59,6 @@
       "agent": "Agent",
       "model": "Model",
       "project": "Project",
-      "outcome": "Outcome",
       "input": "Input",
       "cacheRead": "Cache read",
       "output": "Output",

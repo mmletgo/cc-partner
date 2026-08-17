@@ -2,14 +2,17 @@
  * TokenStatsView - Token 统计页 pure view
  *
  * Business Logic（为什么需要这个组件）:
- *   把 Token 统计页所有展示逻辑（筛选 / KPI / 趋势图 / 三维分组 / 明细表 / 导出）
+ *   把 Token 统计页所有展示逻辑（筛选 / KPI / 趋势图 / 明细表 / 导出）
  *   集中在一个 pure view，禁止 import `@/api/*` 或 transport，与 controller 完全解耦。
+ *   按筛选条件直接显示汇总结果（KPI + Trend + Session），不再单独渲染 byModel /
+ *   byProvider / byProject 三维分组表；Session 明细按 projectName 优先展示，缺失时
+ *   回落到 projectId。
  *
  * Code Logic（这个组件做什么）:
- *   - 顶部时间窗 / outcome / provider·model·project chips / 刷新 / 导出。
+ *   - 顶部时间窗 / provider·model·project chips / 刷新 / 导出；不再有 outcome 筛选。
  *   - 8 个 KPI tile；null token 显示「—」并在 hint 标未提供。
  *   - recharts ComposedChart：input/output Bar + cacheRead/cost Line。
- *   - 三维分组 tab + cursor 分页明细。
+ *   - Session 明细表：项目列显示 projectName ?? projectId；无 outcome 列。
  */
 
 import { useMemo, useState } from 'react';
@@ -24,7 +27,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
+import { Button, Card, StatusMessage } from '@/components/primitives';
 import { TokenIcon } from '@/lib/icons';
 import { formatLocalBucketLabel, formatLocalBucketTooltip } from '@/lib/localDateTime';
 import { pickPrimaryCurrencyCost } from '@/lib/schemas/tokenStats';
@@ -32,7 +35,6 @@ import { formatTokenCount } from '@/lib/tokenFormat';
 import type {
   AgentLedgerFilters,
   AgentLedgerGroupRow,
-  AgentLedgerOutcome,
   AgentLedgerSessionEntry,
   AgentLedgerSummary,
   AgentLedgerTrendPoint,
@@ -78,8 +80,6 @@ interface TrendTooltipProps {
   bucket: 'hour' | 'day';
 }
 
-const OUTCOMES: AgentLedgerOutcome[] = ['completed', 'failed', 'cancelled', 'disconnected'];
-
 /**
  * Business Logic（为什么需要）:
  *   表格与 KPI 要把 null 与 0 分开，避免把缺失用量显示成零消耗。
@@ -102,20 +102,6 @@ function formatNumber(value: number | null | undefined): string {
 function formatPercent(value: number | null | undefined): string {
   if (value == null) return '—';
   return `${(value * 100).toFixed(1)}%`;
-}
-
-/**
- * Business Logic（为什么需要）:
- *   分组表成本列只展示主货币，避免多币种折算。
- *
- * Code Logic（做什么）:
- *   pickPrimaryCurrencyCost + minorUnits/100。
- */
-function bucketToMinorLabel(rows: CurrencyAmount[], locale: string): string {
-  if (rows.length === 0) return '—';
-  const primary = pickPrimaryCurrencyCost(rows, locale);
-  if (primary.primary == null) return '—';
-  return `${(primary.primary.minorUnits / 100).toFixed(2)} ${primary.primary.currency}`;
 }
 
 /**
@@ -190,10 +176,11 @@ function KpiTile({
 
 /**
  * Business Logic（为什么需要）:
- *   Token 统计页的主展示面：筛选后立刻能看到 KPI、趋势、拆分和明细。
+ *   Token 统计页的主展示面：筛选后立刻能看到 KPI、趋势与 Session 明细。
  *
  * Code Logic（做什么）:
- *   消费 controller props 渲染；group tab / export menu 为本地 UI 状态。
+ *   消费 controller props 渲染；当前不再展示 byModel/byProvider/byProject 分组表，
+ *   导出菜单为本地 UI 状态。
  */
 export function TokenStatsView({
   filter,
@@ -213,15 +200,7 @@ export function TokenStatsView({
   onDismissExport,
 }: TokenStatsViewProps) {
   const { t, i18n } = useTranslation(['tokenStats', 'common']);
-  const [groupTab, setGroupTab] = useState<'model' | 'provider' | 'project'>('model');
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
-
-  const currentByTab: AgentLedgerGroupRow[] = useMemo(() => {
-    if (!summary) return [];
-    if (groupTab === 'model') return summary.byModel;
-    if (groupTab === 'provider') return summary.byProvider;
-    return summary.byProject;
-  }, [summary, groupTab]);
 
   const locale = i18n.language || 'en';
   const totalCost = useMemo(() => {
@@ -433,47 +412,6 @@ export function TokenStatsView({
 
         <Card variant="outlined" padding="md">
           <Card.Body>
-            <div className={styles.tabsBar} role="tablist" aria-label={t('tokenStats:title')}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={groupTab === 'model'}
-                className={groupTab === 'model' ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
-                onClick={() => setGroupTab('model')}
-              >
-                {t('tokenStats:groups.byModel')}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={groupTab === 'provider'}
-                className={
-                  groupTab === 'provider' ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton
-                }
-                onClick={() => setGroupTab('provider')}
-              >
-                {t('tokenStats:groups.byProvider')}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={groupTab === 'project'}
-                className={groupTab === 'project' ? `${styles.tabButton} ${styles.tabButtonActive}` : styles.tabButton}
-                onClick={() => setGroupTab('project')}
-              >
-                {t('tokenStats:groups.byProject')}
-              </button>
-            </div>
-            {currentByTab.length === 0 ? (
-              <p className={styles.groupEmpty}>{t('tokenStats:groups.noRows')}</p>
-            ) : (
-              <GroupTable rows={currentByTab} locale={locale} />
-            )}
-          </Card.Body>
-        </Card>
-
-        <Card variant="outlined" padding="md">
-          <Card.Body>
             <h2 className={styles.groupTitle}>{t('tokenStats:session.tableTitle')}</h2>
             {entries.length === 0 ? (
               <p className={styles.groupEmpty}>{t('tokenStats:session.empty')}</p>
@@ -627,26 +565,6 @@ function FilterBar({
           </label>
         </div>
       ) : null}
-      <label className={styles.filterLabel}>
-        <span>{t('tokenStats:filters.outcomeLabel')}</span>
-        <select
-          className={styles.filterSelect}
-          data-testid="token-stats-filter-outcome"
-          aria-label={t('tokenStats:filters.outcomeLabel')}
-          value={filter.outcome ?? ''}
-          onChange={(event) => {
-            const next = event.target.value;
-            onChange({ outcome: next === '' ? null : (next as AgentLedgerOutcome) });
-          }}
-        >
-          <option value="">{t('tokenStats:filters.outcome.all')}</option>
-          {OUTCOMES.map((outcome) => (
-            <option key={outcome} value={outcome}>
-              {t(`tokenStats:filters.outcome.${outcome}`)}
-            </option>
-          ))}
-        </select>
-      </label>
       {providers.length > 0 ? (
         <ChipFilter
           label={t('tokenStats:filters.providerLabel')}
@@ -681,7 +599,6 @@ function FilterBar({
             providerIds: null,
             modelIds: null,
             projectIds: null,
-            outcome: null,
             startedAfter: null,
             startedBefore: null,
           })
@@ -774,46 +691,18 @@ function ExportMenu({
   );
 }
 
-function GroupTable({ rows, locale }: { rows: AgentLedgerGroupRow[]; locale: string }) {
-  const { t } = useTranslation(['tokenStats']);
-  return (
-    <table className={styles.table} data-testid="token-stats-group-table">
-      <thead>
-        <tr>
-          <th>{t('tokenStats:groups.columns.key')}</th>
-          <th>{t('tokenStats:groups.columns.sessions')}</th>
-          <th>{t('tokenStats:groups.columns.input')}</th>
-          <th>{t('tokenStats:groups.columns.cacheRead')}</th>
-          <th>{t('tokenStats:groups.columns.cacheWrite')}</th>
-          <th>{t('tokenStats:groups.columns.output')}</th>
-          <th>{t('tokenStats:groups.columns.cost')}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.key}>
-            <td>{row.label ?? row.key}</td>
-            <td>
-              {row.sessions}
-              {row.failed > 0 ? (
-                <>
-                  {' '}
-                  <Pill tone="danger">{row.failed}</Pill>
-                </>
-              ) : null}
-            </td>
-            <td>{formatNumber(row.inputTokens)}</td>
-            <td>{formatNumber(row.cacheReadTokens)}</td>
-            <td>{formatNumber(row.cacheWriteTokens)}</td>
-            <td>{formatNumber(row.outputTokens)}</td>
-            <td>{bucketToMinorLabel(row.costByCurrency, locale)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
+/**
+ * Session 明细表。
+ *
+ * Business Logic（为什么需要）:
+ *   明细行展示单条 Agent session 元数据；项目列优先显示后端 LEFT JOIN 得到的
+ *   projectName，缺失时回落到 projectId，避免给用户看一串路径编码。
+ *
+ * Code Logic（做什么）:
+ *   - 项目列 `row.projectName ?? row.projectId`；
+ *   - 不渲染 outcome 列（已与 Token 统计页 UI 隔离）；
+ *   - token 字段统一走 formatNumber 区分 null 与 0。
+ */
 function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
   const { t, i18n } = useTranslation(['tokenStats']);
   const fmt = new Intl.DateTimeFormat(i18n.language || 'en', {
@@ -828,7 +717,6 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
           <th>{t('tokenStats:session.columns.agent')}</th>
           <th>{t('tokenStats:session.columns.model')}</th>
           <th>{t('tokenStats:session.columns.project')}</th>
-          <th>{t('tokenStats:session.columns.outcome')}</th>
           <th>{t('tokenStats:session.columns.input')}</th>
           <th>{t('tokenStats:session.columns.cacheRead')}</th>
           <th>{t('tokenStats:session.columns.output')}</th>
@@ -841,8 +729,7 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
             <td>{fmt.format(new Date(row.startedAt))}</td>
             <td>{row.providerId}</td>
             <td>{row.modelId ?? '—'}</td>
-            <td>{row.projectId}</td>
-            <td>{t(`tokenStats:filters.outcome.${row.outcome}`)}</td>
+            <td>{row.projectName ?? row.projectId}</td>
             <td>{formatNumber(row.inputTokens)}</td>
             <td>{formatNumber(row.cacheReadTokens)}</td>
             <td>{formatNumber(row.outputTokens)}</td>

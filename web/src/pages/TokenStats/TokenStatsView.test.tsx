@@ -123,7 +123,6 @@ function renderView(partial: Partial<TokenStatsViewProps> = {}) {
         startedAt: '2026-07-01T10:00:00Z',
         endedAt: '2026-07-01T10:05:00Z',
         durationMs: 300_000,
-        outcome: 'completed',
         inputTokens: 100,
         outputTokens: 50,
         cacheReadTokens: 30,
@@ -131,6 +130,7 @@ function renderView(partial: Partial<TokenStatsViewProps> = {}) {
         costMinorUnits: 120,
         costCurrency: 'USD',
         terminalTitle: null,
+        projectName: 'cc-partner',
       },
     ],
     hasMore: true,
@@ -247,5 +247,56 @@ describe('TokenStatsView', () => {
     expect(screen.getByTestId('token-stats-stale-banner')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
     expect(props.onRefresh).toHaveBeenCalled();
+  });
+
+  it('session 明细表项目列显示 projectName 缺失时回落到 projectId', () => {
+    const { props } = renderView({
+      entries: [
+        {
+          id: 'id-with-name',
+          agentSessionId: 'a1',
+          projectId: 'p1',
+          worktreeId: null,
+          providerId: 'claudeCodeVisible',
+          modelId: 'claude-opus',
+          startedAt: '2026-07-01T10:00:00Z',
+          endedAt: '2026-07-01T10:05:00Z',
+          durationMs: 0,
+          inputTokens: null,
+          outputTokens: null,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          costMinorUnits: null,
+          costCurrency: null,
+          terminalTitle: null,
+          projectName: 'cc-partner',
+        },
+        {
+          id: 'id-no-name',
+          agentSessionId: 'a2',
+          projectId: 'p2',
+          worktreeId: null,
+          providerId: 'claudeCodeVisible',
+          modelId: 'claude-opus',
+          startedAt: '2026-07-01T11:00:00Z',
+          endedAt: '2026-07-01T11:05:00Z',
+          durationMs: 0,
+          inputTokens: null,
+          outputTokens: null,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          costMinorUnits: null,
+          costCurrency: null,
+          terminalTitle: null,
+          projectName: null,
+        },
+      ],
+    });
+    const table = screen.getByTestId('token-stats-session-table');
+    expect(table.textContent).toContain('cc-partner');
+    expect(table.textContent).toContain('p2');
+    // 不再有 outcome 表头/列
+    expect(table.querySelectorAll('th').length).toBe(8);
+    expect(props.onChangeFilter).toBeDefined();
   });
 });

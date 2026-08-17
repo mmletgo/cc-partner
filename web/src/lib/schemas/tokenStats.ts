@@ -121,7 +121,6 @@ export const agentLedgerFiltersDecoder: Decoder<AgentLedgerFilters> = objectDeco
     modelIds: optionalDecoder(nullableDecoder(arrayDecoder(stringDecoder))),
     projectIds: optionalDecoder(nullableDecoder(arrayDecoder(stringDecoder))),
     worktreeId: optionalDecoder(nullableDecoder(stringDecoder)),
-    outcome: optionalDecoder(nullableDecoder(tokenStatsOutcomeDecoder)),
     startedAfter: optionalDecoder(nullableDecoder(stringDecoder)),
     startedBefore: optionalDecoder(nullableDecoder(stringDecoder)),
     bucket: optionalDecoder(nullableDecoder(tokenStatsBucketDecoder)),
@@ -251,7 +250,8 @@ export const agentLedgerSummaryDecoder: Decoder<AgentLedgerSummary> = objectDeco
  *   明细表与 session 详情卡消费；必须不含 transcript/cwd/nativeSessionId。
  *
  * Code Logic（做什么）:
- *   cost 拆 costMinorUnits/costCurrency；token 全部 nullable。
+ *   cost 拆 costMinorUnits/costCurrency；token 全部 nullable；
+ *   projectName 来自后端 LEFT JOIN workbench_projects，缺省为 null（UI 回落到 projectId）。
  */
 export const agentLedgerSessionEntryDecoder: Decoder<AgentLedgerSessionEntry> = objectDecoder(
   'AgentLedgerSessionEntry',
@@ -265,7 +265,6 @@ export const agentLedgerSessionEntryDecoder: Decoder<AgentLedgerSessionEntry> = 
     startedAt: stringDecoder,
     endedAt: stringDecoder,
     durationMs: nonNegativeIntDecoder,
-    outcome: tokenStatsOutcomeDecoder,
     inputTokens: nullableDecoder(nonNegativeIntDecoder),
     outputTokens: nullableDecoder(nonNegativeIntDecoder),
     cacheReadTokens: nullableDecoder(nonNegativeIntDecoder),
@@ -273,6 +272,13 @@ export const agentLedgerSessionEntryDecoder: Decoder<AgentLedgerSessionEntry> = 
     costMinorUnits: nullableDecoder(nonNegativeIntDecoder),
     costCurrency: nullableDecoder(stringDecoder),
     terminalTitle: nullableDecoder(stringDecoder),
+    projectName: nullableDecoder(stringDecoder),
+  },
+  {
+    // 后端 LEFT JOIN 缺失时 projectName=null；UI 落到 projectId 即可。
+    defaults: {
+      projectName: null,
+    },
   },
 );
 

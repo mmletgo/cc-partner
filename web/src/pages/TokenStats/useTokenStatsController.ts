@@ -8,7 +8,7 @@
  *   符合巨型页 controller/view 拆分合同），并以 requestSeq 防 stale 写入。
  *
  * Code Logic（这个 hook 做什么):
- *   - filter 默认 7d；窗口 chip / provider/model/project 多选 / outcome 全部走
+ *   - filter 默认 7d；窗口 chip / provider/model/project 多选全部走
  *     `changeFilter(patch)`，按 250ms debounce 把新过滤器合并入实际 fetch。
  *   - `refresh()` 并发拉 summarize + list(cursor=null, limit=50)；成功合并 summary/
  *     entries，stale guard 通过 `requestSeqRef` 丢弃旧响应；失败按 `summary` 是否存在
@@ -73,7 +73,6 @@ function stringifyFilter(filter: AgentLedgerFilters): string {
   const parts: string[] = [
     filter.window ?? '',
     filter.projectId ?? '',
-    filter.outcome ?? '',
     filter.bucket ?? '',
     filter.startedAfter ?? '',
     filter.startedBefore ?? '',

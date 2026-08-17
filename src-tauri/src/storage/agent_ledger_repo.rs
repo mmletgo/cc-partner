@@ -99,19 +99,22 @@ const SELECT_COLUMNS: &str =
     cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
     terminal_title, created_at, updated_at";
 
-/// 详细 list / byProject 维度用的扩展 SELECT：追加 `wp.name AS project_name`。
+/// 详细 list / byProject 维度用的扩展 SELECT：所有列以 `al.` 限定避免与
+/// `workbench_projects` 同名列歧义，末尾追加 `wp.name AS project_name`。
 ///
 /// Business Logic（为什么需要）:
 ///     Token 统计页 Session 明细 / byProject 拆分行需要展示项目名（不是项目 ID）；
-///     不破坏 `SELECT_COLUMNS` 的其它消费者（summarize 主复算 / get_by_agent_session_id）。
+///     `agent_session_ledger` 与 `workbench_projects` 都有 `id` 列，必须用表前缀消除歧义。
 ///
 /// Code Logic（做什么）:
-///     末尾追加 `wp.name AS project_name`；配合 `LEFT JOIN workbench_projects wp` 三元组。
+///     所有列以 `al.` 前缀；末尾追加 `wp.name AS project_name`；
+///     配合 `LEFT JOIN workbench_projects wp` 三元组使用（仅 JOIN 场景，避免单表 SELECT 报
+///     "no such column: al.id"）。
 const SELECT_COLUMNS_WITH_PROJECT_NAME: &str =
-    "id, agent_session_id, project_id, worktree_id, provider_id, model_id, \
-    started_at, ended_at, duration_ms, outcome, input_tokens, output_tokens, \
-    cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
-    terminal_title, created_at, updated_at, wp.name AS project_name";
+    "al.id, al.agent_session_id, al.project_id, al.worktree_id, al.provider_id, al.model_id, \
+    al.started_at, al.ended_at, al.duration_ms, al.outcome, al.input_tokens, al.output_tokens, \
+    al.cache_read_tokens, al.cache_write_tokens, al.cost_minor_units, al.cost_currency, \
+    al.terminal_title, al.created_at, al.updated_at, wp.name AS project_name";
 
 /// opaque keyset cursor v1（ended_at DESC, id DESC）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +222,20 @@ impl AgentLedgerRepo {
         )
         .execute(pool)
         .await?;
+        // 兼容旧 schema (例如单测或更早版本) `workbench_projects` 只含 `id` 列：
+        // LEFT JOIN 取 `wp.name` 会触发 `no such column: wp.name`。补 `name` 列
+        // （PRAGMA 检查幂等；生产 schema 已有 NOT NULL，重复 ALTER 仍等价 ok）。
+        let wp_columns = sqlx::query("PRAGMA table_info(workbench_projects)")
+            .fetch_all(pool)
+            .await?;
+        let wp_has_name = wp_columns
+            .iter()
+            .any(|row| row.try_get::<String, _>("name").ok().as_deref() == Some("name"));
+        if !wp_has_name {
+            sqlx::query("ALTER TABLE workbench_projects ADD COLUMN name TEXT")
+                .execute(pool)
+                .await?;
+        }
         let columns = sqlx::query("PRAGMA table_info(agent_session_ledger)")
             .fetch_all(pool)
             .await?;
@@ -606,9 +623,9 @@ impl AgentLedgerRepo {
         agent_session_id: &str,
     ) -> Result<Option<AgentLedgerEntry>, AppError> {
         let row = sqlx::query(&format!(
-            "SELECT {SELECT_COLUMNS_WITH_PROJECT_NAME} FROM agent_session_ledger \
-             LEFT JOIN workbench_projects wp ON wp.id = agent_session_ledger.project_id \
-             WHERE agent_session_id = ?"
+            "SELECT {SELECT_COLUMNS_WITH_PROJECT_NAME} FROM agent_session_ledger AS al \
+             LEFT JOIN workbench_projects wp ON wp.id = al.project_id \
+             WHERE al.agent_session_id = ?"
         ))
         .bind(agent_session_id)
         .fetch_optional(&self.pool)
@@ -651,8 +668,8 @@ impl AgentLedgerRepo {
         let fetch = limit as i64 + 1;
 
         let mut sql = format!(
-            "SELECT {SELECT_COLUMNS_WITH_PROJECT_NAME} FROM agent_session_ledger \
-             LEFT JOIN workbench_projects wp ON wp.id = agent_session_ledger.project_id \
+            "SELECT {SELECT_COLUMNS_WITH_PROJECT_NAME} FROM agent_session_ledger AS al \
+             LEFT JOIN workbench_projects wp ON wp.id = al.project_id \
              WHERE 1=1"
         );
         let mut binds: Vec<BindValue> = Vec::new();
@@ -663,7 +680,7 @@ impl AgentLedgerRepo {
                 .take(pids.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            sql.push_str(&format!(" AND project_id IN ({placeholders})"));
+            sql.push_str(&format!(" AND al.project_id IN ({placeholders})"));
             for pid in pids {
                 binds.push(BindValue::Text(pid.trim().to_string()));
             }
@@ -673,7 +690,7 @@ impl AgentLedgerRepo {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            sql.push_str(" AND project_id = ?");
+            sql.push_str(" AND al.project_id = ?");
             binds.push(BindValue::Text(pid.to_string()));
         }
 
@@ -683,7 +700,7 @@ impl AgentLedgerRepo {
                 .take(provs.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            sql.push_str(&format!(" AND provider_id IN ({placeholders})"));
+            sql.push_str(&format!(" AND al.provider_id IN ({placeholders})"));
             for prov in provs {
                 binds.push(BindValue::Text(prov.trim().to_string()));
             }
@@ -695,7 +712,7 @@ impl AgentLedgerRepo {
                 .take(mids.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            sql.push_str(&format!(" AND model_id IN ({placeholders})"));
+            sql.push_str(&format!(" AND al.model_id IN ({placeholders})"));
             for mid in mids {
                 binds.push(BindValue::Text(mid.trim().to_string()));
             }
@@ -707,7 +724,7 @@ impl AgentLedgerRepo {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            sql.push_str(" AND ended_at >= ?");
+            sql.push_str(" AND al.ended_at >= ?");
             binds.push(BindValue::Text(after.to_string()));
         }
         if let Some(before) = query
@@ -716,7 +733,7 @@ impl AgentLedgerRepo {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            sql.push_str(" AND ended_at <= ?");
+            sql.push_str(" AND al.ended_at <= ?");
             binds.push(BindValue::Text(before.to_string()));
         }
         if let Some(cursor_raw) = query
@@ -727,12 +744,12 @@ impl AgentLedgerRepo {
         {
             let cur = decode_ledger_cursor(cursor_raw)
                 .map_err(|_| AppError::validation("invalid ledger cursor"))?;
-            sql.push_str(" AND (ended_at < ? OR (ended_at = ? AND id < ?))");
+            sql.push_str(" AND (al.ended_at < ? OR (al.ended_at = ? AND al.id < ?))");
             binds.push(BindValue::Text(cur.ended_at.clone()));
             binds.push(BindValue::Text(cur.ended_at));
             binds.push(BindValue::Text(cur.id));
         }
-        sql.push_str(" ORDER BY ended_at DESC, id DESC LIMIT ?");
+        sql.push_str(" ORDER BY al.ended_at DESC, al.id DESC LIMIT ?");
         binds.push(BindValue::Int(fetch));
 
         let mut q = sqlx::query(&sql);
@@ -1191,7 +1208,7 @@ impl AgentLedgerRepo {
             ""
         };
         let project_join = if dimension == "project" {
-            " LEFT JOIN workbench_projects wp ON wp.id = agent_session_ledger.project_id"
+            " LEFT JOIN workbench_projects wp ON wp.id = al.project_id"
         } else {
             ""
         };
@@ -1207,7 +1224,7 @@ impl AgentLedgerRepo {
              SUM(cache_read_tokens) AS cache_read_sum, \
              SUM(cache_write_tokens) AS cache_write_sum, \
              cost_minor_units, cost_currency \
-             FROM agent_session_ledger{project_join} \
+             FROM agent_session_ledger AS al{project_join} \
              WHERE {where_sql} \
              GROUP BY {dim_group}, cost_currency \
              ORDER BY sessions DESC, input_sum DESC"
@@ -2138,7 +2155,7 @@ mod tests {
         let rows = repo
             .summarize_grouped(
                 &AgentLedgerFilters {
-                    window: Some(LedgerWindow::Days7),
+                    window: Some(LedgerWindow::Days30),
                     ..Default::default()
                 },
                 "project",

@@ -4,7 +4,7 @@
  * Business Logic（为什么需要这个模块）:
  *   桌面 Token 统计页的所有读写都应集中走本模块，避免散落 invoke 字符串
  *   与解码逻辑；filter 与 wire 请求结构 shape 不同，必须在同一处转换。
- *   多 providerIds 明细本期只取首项（list 命令单值 providerId 约束）。
+ *   list / summarize 都支持 providerIds / modelIds / projectIds 多值 IN。
  *
  * Code Logic（这个模块做什么）:
  *   - summarize：invokeDecoded<AgentLedgerSummary>('summarize_agent_ledger', { req }, decoder)
@@ -61,7 +61,6 @@ function filterToSummarizeReq(filter: AgentLedgerFilters): Record<string, unknow
     modelIds: filter.modelIds ?? null,
     projectIds: filter.projectIds ?? null,
     worktreeId: filter.worktreeId ?? null,
-    outcome: filter.outcome ?? null,
     startedAfter: filter.startedAfter ?? null,
     startedBefore: filter.startedBefore ?? null,
     bucket: filter.bucket ?? null,
@@ -72,12 +71,12 @@ function filterToSummarizeReq(filter: AgentLedgerFilters): Record<string, unknow
  * 把前端 AgentLedgerFilters 转换为 ListAgentLedgerReq wire shape。
  *
  * Business Logic（为什么需要）:
- *   list 命令当前只接受单 providerId；多 providerIds 场景只取首项做明细，
- *   但 controller 在 UI 端应提前收口。其它多值字段（modelIds/projectIds）暂未透传，
- *   后续后端支持再扩展。
+ *   list 与 summarize 语义对齐：providerIds / modelIds / projectIds 全部多值 IN 透传；
+ *   明细表 UI 一次性允许用户多选并直接交付给后端，不需要 controller 二次裁剪。
  *
  * Code Logic（做什么）:
- *   providerId = providerIds?.[0] ?? null；其它字段 null/limit/cursor 透传。
+ *   projectId / projectIds 互斥：projectIds 优先（前端多值语义），单 projectId 与多值并存
+ *   时由后端按 list 字段去重；其它字段 null/limit/cursor 透传。
  */
 function filterToListReq(
   filter: AgentLedgerFilters,
@@ -86,8 +85,10 @@ function filterToListReq(
 ): Record<string, unknown> {
   return {
     projectId: filter.projectId ?? null,
-    providerId: filter.providerIds?.[0] ?? null,
-    outcome: filter.outcome ?? null,
+    providerIds: filter.providerIds ?? null,
+    modelIds: filter.modelIds ?? null,
+    projectIds: filter.projectIds ?? null,
+    worktreeId: filter.worktreeId ?? null,
     endedAfter: filter.startedAfter ?? null,
     endedBefore: filter.startedBefore ?? null,
     cursor: cursor ?? null,
