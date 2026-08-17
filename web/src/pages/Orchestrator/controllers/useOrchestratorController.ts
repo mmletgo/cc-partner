@@ -37,7 +37,7 @@ import {
 import {
   getOrchestratorTaskViewTaskId,
   type OrchestratorRenderableTask,
-  isLocalOrchestratorTaskView,
+  isOrchestratorRemoteActionOnline,
   isOrchestratorTaskViewActionable,
   splitOrchestratorTaskViews,
   upsertOrchestratorTaskView,
@@ -447,7 +447,8 @@ export function useOrchestratorController(
   const selectedTask = selectedRenderableTask?.task ?? null;
   const selectedTaskCanStart = canStartOrchestratorTaskForProject(selectedTask, activeProjectId);
   const selectedTaskCanComplete =
-    isLocalOrchestratorTaskView(selectedTaskView) &&
+    isOrchestratorTaskViewActionable(selectedTaskView) &&
+    isOrchestratorRemoteActionOnline(runtimeRemoteStatus) &&
     canCompleteAgentRunForProject(selectedTask, activeProjectId);
   const selectedTaskCanRequestRework = canRequestReworkForProject(selectedTask, activeProjectId);
   const selectedTaskShowDeliver = canDeliverReviewedTaskForProject(selectedTask, activeProjectId);
@@ -1075,7 +1076,7 @@ export function useOrchestratorController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   只有本机非活跃且可移至相邻泳道的任务才允许开始拖拽。
+   *   只有非活跃且可移至相邻泳道的本机/远端任务才允许开始拖拽。
    *
    * Code Logic（这个函数做什么）:
    *   校验 canMove；通过则 setData 与 setDraggedTaskId，否则 preventDefault。
@@ -1127,7 +1128,7 @@ export function useOrchestratorController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   合法 drop 需要把本机任务移动到相邻 workflow 泳道。
+   *   合法 drop 需要把本机或远端任务移动到相邻 workflow 泳道。
    *
    * Code Logic（这个函数做什么）:
    *   调用 orchestratorApi.moveTaskWorkflowState，成功后 replace 列表并刷新 runtime snapshot。
@@ -1218,15 +1219,16 @@ export function useOrchestratorController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   本机 running 任务可触发 complete agent run，进入验证/交付链路。
+   *   可行动且在线的 running 任务可触发 complete agent run，进入 owning device 验证/交付链路。
    *
    * Code Logic（这个函数做什么）:
-   *   仅 local 可完成任务调用 completeAgentRun，成功后 replace 并重新拉 evidence。
+   *   校验 actionable + online 后调用 project-scoped completeAgentRun，成功后 replace 并重新拉 evidence。
    */
   const handleCompleteAgentRun = useCallback(async () => {
     if (
       !selectedTask ||
-      !isLocalOrchestratorTaskView(selectedTaskView) ||
+      !isOrchestratorTaskViewActionable(selectedTaskView) ||
+      !isOrchestratorRemoteActionOnline(runtimeRemoteStatus) ||
       !canCompleteAgentRunForProject(selectedTask, activeProjectIdRef.current) ||
       completingTaskId === selectedTask.id
     ) {
@@ -1237,14 +1239,15 @@ export function useOrchestratorController(
     setCompletingTaskId(taskId);
     setActionError(null);
     try {
-      const updated = await orchestratorApi.completeAgentRun(taskId);
+      const updated = await orchestratorApi.completeAgentRun(projectId, taskId);
+      const updatedProjectId = updated.origin === 'pendingRemote' ? null : updated.task.projectId;
       if (
         !orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId) ||
-        updated.projectId !== projectId
+        updatedProjectId !== projectId
       ) {
         return;
       }
-      replaceTaskViewInCurrentProject(projectId, { origin: 'local', task: updated });
+      replaceTaskViewInCurrentProject(projectId, updated);
       void refreshRuntimeSnapshot();
       try {
         const items = await orchestratorApi.listEvidence(projectId, taskId);
@@ -1275,6 +1278,7 @@ export function useOrchestratorController(
     completingTaskId,
     refreshRuntimeSnapshot,
     replaceTaskViewInCurrentProject,
+    runtimeRemoteStatus,
     selectedTask,
     selectedTaskView,
     t,

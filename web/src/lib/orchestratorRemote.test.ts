@@ -9,6 +9,7 @@ import {
   getOrchestratorTaskViewProjectId,
   getOrchestratorTaskViewTaskId,
   groupOrchestratorRenderableTasks,
+  isOrchestratorRemoteActionOnline,
   isOrchestratorTaskViewActionable,
   splitOrchestratorTaskViews,
   upsertOrchestratorTaskView,
@@ -151,6 +152,14 @@ describe('orchestratorRemote', () => {
     assert(isOrchestratorTaskViewActionable(localView), 'local task views should be actionable');
     assert(isOrchestratorTaskViewActionable(remoteView), 'remote task views should be actionable');
     assert(!isOrchestratorTaskViewActionable(pendingView), 'pending remote views should not be actionable');
+    assert(
+      isOrchestratorRemoteActionOnline(null),
+      'local snapshot status should count as online for complete/drag writes',
+    );
+    assert(isOrchestratorRemoteActionOnline('live'), 'remote live status should unlock complete');
+    assert(!isOrchestratorRemoteActionOnline('offline'), 'offline remote should hide complete');
+    assert(!isOrchestratorRemoteActionOnline('unsupported'), 'unsupported remote should hide complete');
+    assert(!isOrchestratorRemoteActionOnline('unavailable'), 'unavailable remote should hide complete');
 
     assert(
       getOrchestratorTaskViewTaskId(remoteView) === 'remote-1',

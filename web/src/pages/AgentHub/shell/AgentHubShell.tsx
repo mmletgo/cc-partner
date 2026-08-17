@@ -58,6 +58,8 @@ export interface AgentHubShellPeer {
   deviceId: string;
   name: string;
   online: boolean;
+  /** health capabilities；用户级三栏按 agent-hub.user-instructions.v1 门闩。 */
+  capabilities?: string[];
 }
 
 /** 壳层项目摘要；remote 项目仍保留其 Workbench shortcut id。 */

@@ -13,6 +13,8 @@ import {
   fitBannerFontSize,
   isSafeHttpUrl,
   parseBannerMarkdown,
+  clearLegacyBannerSeed,
+  peekLegacyBannerSeed,
   readWorkbenchBanner,
   writeWorkbenchBanner,
 } from './workbenchBanner';
@@ -108,6 +110,14 @@ describe('banner storage', () => {
 
     window.localStorage.setItem(BANNER_STORAGE_KEY, JSON.stringify({ version: 1, markdown: 3 }));
     expect(readWorkbenchBanner()).toBe('');
+  });
+
+  it('peeks and clears the legacy localStorage seed once', () => {
+    writeWorkbenchBanner('legacy motto');
+    expect(peekLegacyBannerSeed()).toBe('legacy motto');
+    clearLegacyBannerSeed();
+    expect(peekLegacyBannerSeed()).toBe('');
+    expect(window.localStorage.getItem(BANNER_STORAGE_KEY)).toBeNull();
   });
 });
 

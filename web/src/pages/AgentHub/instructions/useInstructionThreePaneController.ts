@@ -308,6 +308,11 @@ export function useInstructionThreePaneController(
     contextCapability === 'remote'
       ? PEER_CONTEXT_UNAVAILABLE
       : PROJECT_CONTEXT_UNAVAILABLE;
+  /** 本机 user 与用户级 peer 可直读/保存；项目级仍 fail-closed。 */
+  const contextUnsupported = !(
+    contextCapability === 'direct' ||
+    (context.scope === 'user' && contextCapability === 'remote')
+  );
   /** 用户级 deviceId；项目级 projectKey 作为 projectRef。 */
   const requestContext = useMemo((): AgentHubRequestContext => {
     if (context.scope === 'project') {
@@ -789,7 +794,7 @@ export function useInstructionThreePaneController(
       setRefreshing(false);
       return;
     }
-    if (contextCapability !== 'direct') {
+    if (contextUnsupported) {
       setError(contextUnavailableCode);
       setLoading(false);
       setRefreshing(false);
@@ -808,6 +813,7 @@ export function useInstructionThreePaneController(
     loadWorkspace,
     contextCapability,
     contextUnavailableCode,
+    contextUnsupported,
   ]);
 
   const currentTarget = useMemo(
@@ -815,8 +821,7 @@ export function useInstructionThreePaneController(
     [workspace, agent],
   );
 
-  /** 三栏直读/保存只允许本机 user；peer 必须经 Pull，project 仍未安全绑定。 */
-  const directContextUnsupported = contextCapability !== 'direct';
+  /** 三栏直读/保存允许本机 user 与用户级 peer；project 仍未安全绑定。 */
 
   const syncAgents = useMemo(
     () => instructionLane === 'common'
@@ -836,7 +841,7 @@ export function useInstructionThreePaneController(
   }, [workspace, agent]);
 
   const writeBlocked = useMemo(() => {
-    if (directContextUnsupported) return true;
+    if (contextUnsupported) return true;
     if (!workspace) return true;
     if (state.externalDrift || state.sourceDrift) return true;
     if (workspace.canonical?.contentTruncated || sourceContentTruncated) return true;
@@ -848,14 +853,14 @@ export function useInstructionThreePaneController(
     syncAgents,
     instructionLane,
     sourceContentTruncated,
-    directContextUnsupported,
+    contextUnsupported,
     state.externalDrift,
     state.sourceDrift,
   ]);
 
   const writeBlockedReason = useMemo(() => {
     if (!writeBlocked) return null;
-    if (directContextUnsupported) {
+    if (contextUnsupported) {
       return t('agentHub:instructions.threePane.directContextUnsupported');
     }
     if (state.sourceDrift) {
@@ -884,7 +889,7 @@ export function useInstructionThreePaneController(
     workspace,
     currentTarget,
     sourceContentTruncated,
-    directContextUnsupported,
+    contextUnsupported,
     state.externalDrift,
     state.sourceDrift,
     instructionLane,
@@ -893,12 +898,12 @@ export function useInstructionThreePaneController(
 
   const aiReviseDisabled = useMemo(
     () =>
-      directContextUnsupported ||
+      contextUnsupported ||
       state.externalDrift ||
       Boolean(workspace?.canonical?.contentTruncated) ||
       sourceContentTruncated,
     [
-      directContextUnsupported,
+      contextUnsupported,
       sourceContentTruncated,
       state.externalDrift,
       workspace?.canonical?.contentTruncated,
@@ -1193,7 +1198,7 @@ export function useInstructionThreePaneController(
    */
   const saveBlocks = useCallback(
     async (blocksOverride?: InstructionBlockDraft[]): Promise<UserInstructionWorkspaceDto | null> => {
-      if (directContextUnsupported) {
+      if (contextUnsupported) {
         setActionError(contextUnavailableCode);
         return null;
       }
@@ -1319,7 +1324,7 @@ export function useInstructionThreePaneController(
     [
       agent,
       contextUnavailableCode,
-      directContextUnsupported,
+      contextUnsupported,
       requestContext,
       t,
       workspace,
@@ -1449,7 +1454,7 @@ export function useInstructionThreePaneController(
   }, [busyAction]);
 
   const applyPlan = useCallback(async (preparedPlan?: UserInstructionPlanDto) => {
-    if (directContextUnsupported) {
+    if (contextUnsupported) {
       setActionError(contextUnavailableCode);
       return;
     }
@@ -1555,7 +1560,7 @@ export function useInstructionThreePaneController(
     }
   }, [
     contextUnavailableCode,
-    directContextUnsupported,
+    contextUnsupported,
     loadWorkspace,
     plan,
     requestContext,
@@ -1569,7 +1574,7 @@ export function useInstructionThreePaneController(
    *   本地三槽与 preview 皆空时拒绝（避免误把磁盘原文当写入源）。
    */
   const requestSync = useCallback(async () => {
-    if (directContextUnsupported) {
+    if (contextUnsupported) {
       setActionError(contextUnavailableCode);
       return;
     }
@@ -1593,7 +1598,7 @@ export function useInstructionThreePaneController(
     agent,
     applyPlan,
     contextUnavailableCode,
-    directContextUnsupported,
+    contextUnsupported,
     runPreviewWithBaseline,
     saveBlocks,
     state.blocks,

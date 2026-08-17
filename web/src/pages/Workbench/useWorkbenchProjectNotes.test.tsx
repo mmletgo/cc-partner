@@ -131,4 +131,28 @@ describe('useWorkbenchProjectNotes', () => {
     await waitFor(() => expect(notesApi.get).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(result.current.content).toBe('# hello'));
   });
+
+  test('does not schedule save when remoteWriteDisabled', async () => {
+    const { result } = renderHook(() =>
+      useWorkbenchProjectNotes({
+        activeProjectId: 'p1',
+        inspectorTab: 'notes',
+        desktopUnavailableMessage: 'desktop down',
+        loadFailedFallback: 'load failed',
+        remoteWriteDisabled: true,
+      }),
+    );
+    await waitFor(() => {
+      expect(result.current.content).toBe('# hello');
+      expect(result.current.readOnly).toBe(true);
+    });
+    act(() => {
+      result.current.onChange('should not save');
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(notesApi.save).not.toHaveBeenCalled();
+    expect(result.current.content).toBe('# hello');
+  });
 });

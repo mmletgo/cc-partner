@@ -923,6 +923,47 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/agent-hub/portable/project/action/get",
             post(agent_hub::agent_hub_portable_project_action_get),
         )
+        // Agent Hub 用户级三栏（capability agent-hub.user-instructions.v1）；owner 只跑本机，拒绝递归。
+        .route(
+            "/api/agent-hub/user-instructions/inspect",
+            post(agent_hub::agent_hub_user_instructions_inspect),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/save-blocks",
+            post(agent_hub::agent_hub_user_instructions_save_blocks),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/preview-setup",
+            post(agent_hub::agent_hub_user_instructions_preview_setup),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/preview-update",
+            post(agent_hub::agent_hub_user_instructions_preview_update),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/apply-plan",
+            post(agent_hub::agent_hub_user_instructions_apply_plan),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/analyze",
+            post(agent_hub::agent_hub_user_instructions_analyze),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/adapt",
+            post(agent_hub::agent_hub_user_instructions_adapt),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/revise",
+            post(agent_hub::agent_hub_user_instructions_revise),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/slot-versions",
+            post(agent_hub::agent_hub_user_instructions_slot_versions),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/restore-slot-version",
+            post(agent_hub::agent_hub_user_instructions_restore_slot_version),
+        )
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
         .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))
@@ -1074,6 +1115,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::get_mutation_operation),
         )
         .route(
+            "/api/workbench/worktrees/repair-hook-failure",
+            post(workbench::repair_hook_failure),
+        )
+        .route(
             "/api/workbench/git/commits",
             post(workbench::list_git_commits),
         )
@@ -1116,6 +1161,28 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/workbench/files/delete",
             post(workbench::delete_workbench_path),
+        )
+        .route(
+            "/api/workbench/notes/get",
+            post(workbench::get_project_note),
+        )
+        .route(
+            "/api/workbench/notes/save",
+            post(workbench::save_project_note),
+        )
+        .route("/api/workbench/banner/get", post(workbench::get_banner))
+        .route("/api/workbench/banner/save", post(workbench::save_banner))
+        .route(
+            "/api/workbench/dependency/status",
+            post(workbench::dependency_status),
+        )
+        .route(
+            "/api/workbench/dependency/install",
+            post(workbench::dependency_install),
+        )
+        .route(
+            "/api/workbench/dependency/cancel",
+            post(workbench::dependency_cancel),
         )
         .route("/api/workbench/events", get(workbench::workbench_events))
         .route(
@@ -1428,6 +1495,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/orchestrator/tasks/start",
             post(orchestrator::start_task),
+        )
+        .route(
+            "/api/orchestrator/tasks/move-workflow-state",
+            post(orchestrator::move_workflow_state),
+        )
+        .route(
+            "/api/orchestrator/tasks/complete-agent-run",
+            post(orchestrator::complete_agent_run),
         )
         .route(
             "/api/orchestrator/tasks/retry",

@@ -1,13 +1,13 @@
 /**
- * WorkbenchBanner — 工作台顶栏本机标语。
+ * WorkbenchBanner — 工作台顶栏 owning-device 标语。
  *
  * Business Logic（为什么需要）:
- *   用户要在顶栏中间写一句本机标语（轻量 Markdown + emoji），
- *   自动保存且不进局域网同步；全文可见并尽量撑满红框。
+ *   用户要在顶栏中间写一句设备标语（轻量 Markdown + emoji），
+ *   本机项目写本机、远端项目写对端；离线只读。
  *
  * Code Logic（做什么）:
- *   单击预览进入 textarea；debounce / 失焦 / ⌘Enter 写 localStorage；
- *   Esc 丢草稿；ResizeObserver + 离屏测量二分字号。叶子组件，不 import @/api。
+ *   单击预览进入 textarea；debounce / 失焦 / ⌘Enter 经 hook 写 owning device；
+ *   Esc 丢草稿；ResizeObserver + 离屏测量二分字号。
  */
 
 import {
@@ -21,19 +21,21 @@ import {
 import type { KeyboardEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  BANNER_CHANGE_EVENT,
   BANNER_LINE_HEIGHT,
   BANNER_MAX_CHARS,
   BANNER_MIN_FONT_PX,
   BANNER_SAVE_DEBOUNCE_MS,
-  BANNER_STORAGE_KEY,
   fitBannerFontSize,
   parseBannerMarkdown,
-  readWorkbenchBanner,
-  writeWorkbenchBanner,
   type BannerInline,
 } from '../workbenchBanner';
+import { useWorkbenchBanner } from '../useWorkbenchBanner';
 import styles from './WorkbenchBanner.module.css';
+
+export interface WorkbenchBannerProps {
+  deviceId?: string;
+  remoteWriteDisabled?: boolean;
+}
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -87,8 +89,13 @@ function renderBannerNodes(nodes: BannerInline[]): ReactElement[] {
  * Code Logic（这个函数做什么）:
  *   读/写 localStorage；预览/编辑两态；容器尺寸变化后重算字号。
  */
-export function WorkbenchBanner(): ReactElement {
+export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement {
+  const { deviceId, remoteWriteDisabled = false } = props;
   const { t } = useTranslation(['workbench']);
+  const { markdown, persist: persistRemote, readOnly } = useWorkbenchBanner({
+    deviceId,
+    remoteWriteDisabled,
+  });
   const limitId = useId();
   const frameRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -96,20 +103,26 @@ export function WorkbenchBanner(): ReactElement {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const ignoreBlurRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
-  const [markdown, setMarkdown] = useState(() => readWorkbenchBanner());
   const [draft, setDraft] = useState(markdown);
   const [editing, setEditing] = useState(false);
   const [fontPx, setFontPx] = useState(BANNER_MIN_FONT_PX);
   const draftRef = useRef(markdown);
   const savedRef = useRef(markdown);
 
+  useEffect(() => {
+    if (editing) return;
+    savedRef.current = markdown;
+    draftRef.current = markdown;
+    setDraft(markdown);
+  }, [editing, markdown]);
+
   const persist = useCallback((next: string) => {
-    const record = writeWorkbenchBanner(next);
-    savedRef.current = record.markdown;
-    draftRef.current = record.markdown;
-    setMarkdown(record.markdown);
-    setDraft(record.markdown);
-  }, []);
+    void persistRemote(next).then(() => {
+      savedRef.current = next;
+      draftRef.current = next;
+      setDraft(next);
+    });
+  }, [persistRemote]);
 
   const schedulePersist = useCallback(
     (next: string) => {
@@ -128,36 +141,11 @@ export function WorkbenchBanner(): ReactElement {
     return () => {
       if (saveTimerRef.current === null) return;
       window.clearTimeout(saveTimerRef.current);
-      writeWorkbenchBanner(draftRef.current);
+      if (!readOnly) {
+        void persistRemote(draftRef.current);
+      }
     };
-  }, []);
-
-  useEffect(() => {
-    /**
-     * Business Logic: 同机另一窗口改标语后，当前顶栏要跟着变，且不覆盖正在编辑的草稿。
-     */
-    const applyExternal = (next: string): void => {
-      if (editing) return;
-      savedRef.current = next;
-      draftRef.current = next;
-      setMarkdown(next);
-      setDraft(next);
-    };
-    const onStorage = (event: StorageEvent): void => {
-      if (event.key !== BANNER_STORAGE_KEY) return;
-      applyExternal(readWorkbenchBanner());
-    };
-    const onLocal = (event: Event): void => {
-      const detail = (event as CustomEvent<string>).detail;
-      if (typeof detail === 'string') applyExternal(detail);
-    };
-    window.addEventListener('storage', onStorage);
-    window.addEventListener(BANNER_CHANGE_EVENT, onLocal);
-    return () => {
-      window.removeEventListener('storage', onStorage);
-      window.removeEventListener(BANNER_CHANGE_EVENT, onLocal);
-    };
-  }, [editing]);
+  }, [persistRemote, readOnly]);
 
   const refit = useCallback(() => {
     const preview = previewRef.current;
@@ -212,11 +200,12 @@ export function WorkbenchBanner(): ReactElement {
   }, [editing]);
 
   const beginEdit = useCallback(() => {
+    if (readOnly) return;
     const saved = savedRef.current;
     draftRef.current = saved;
     setDraft(saved);
     setEditing(true);
-  }, []);
+  }, [readOnly]);
 
   const commitEdit = useCallback(() => {
     if (saveTimerRef.current !== null) {
@@ -319,6 +308,7 @@ export function WorkbenchBanner(): ReactElement {
           role="group"
           tabIndex={0}
           data-empty={isEmpty || undefined}
+          data-readonly={readOnly || undefined}
           data-testid="workbench-banner-preview"
           aria-label={t('workbench:banner.previewAriaLabel')}
           onClick={beginEdit}

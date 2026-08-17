@@ -561,6 +561,64 @@ pub struct RemoteSafeAttachReq {
     pub session_id: String,
 }
 
+/// 项目笔记 DTO（Tauri / P2P 共用）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchProjectNoteDto {
+    pub project_id: String,
+    pub content: String,
+    pub updated_at: String,
+}
+
+/// 设备标语 DTO（Tauri / P2P 共用）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchBannerDto {
+    pub markdown: String,
+    pub updated_at: String,
+}
+
+/// 远端项目笔记保存请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     控制端必须把 inner local project id 与正文交给 owning device。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId,content}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProjectNoteSaveReq {
+    pub project_id: String,
+    pub content: String,
+}
+
+/// 远端设备标语保存请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     标语是设备级，无 project id。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{markdown}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteBannerSaveReq {
+    pub markdown: String,
+}
+
+/// 远端钩子修复请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     owner 必须用 inner worktree id 跑同一套 repair 函数。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{worktreeId,hookFailure}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRepairHookFailureReq {
+    pub worktree_id: String,
+    pub hook_failure: crate::workbench::operation_ledger::WorkbenchHookFailureDto,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

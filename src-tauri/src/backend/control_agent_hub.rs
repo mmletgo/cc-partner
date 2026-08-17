@@ -27,6 +27,12 @@ use crate::agent_hub::portable_actions::{
 };
 use crate::agent_hub::portable_inventory::PortableInventoryQuery;
 use crate::agent_hub::portable_service::PortableService;
+use crate::agent_hub::remote_client::{
+    apply_user_instruction_plan_for_state, inspect_user_instruction_workspace_for_state,
+    list_user_instruction_slot_versions_for_state, preview_user_instruction_setup_for_state,
+    preview_user_instruction_update_for_state, restore_user_instruction_slot_version_for_state,
+    save_user_instruction_blocks_for_state, take_device_id,
+};
 use crate::agent_hub::replication::pull::{
     apply_remote_project_portable_action, enable_remote_project,
     get_remote_project_portable_action, inspect_remote_project_portable_inventory,
@@ -48,7 +54,8 @@ use crate::agent_hub::service::{
 use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
 use crate::agent_hub::targets::TargetEnvironment;
 use crate::agent_hub::user_instructions::{
-    ApplyUserInstructionPlanRequest, PreviewUserInstructionRequest,
+    AdaptInstructionToOtherAgentsRequest, AnalyzeInstructionOriginalRequest,
+    ApplyUserInstructionPlanRequest, PreviewUserInstructionRequest, ReviseInstructionSlotRequest,
     SaveUserInstructionBlocksRequest,
 };
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
@@ -154,42 +161,59 @@ async fn dispatch_agent_hub_op(
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.inspect_user_instruction_workspace" => {
-            let dto = AgentHubService::inspect_user_instruction_workspace(state).await?;
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let dto =
+                inspect_user_instruction_workspace_for_state(state, device_id.as_deref()).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.preview_user_instruction_setup" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: PreviewUserInstructionRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!("preview_user_instruction_setup payload: {e}"))
                 })?;
-            let dto = AgentHubService::preview_user_instruction_setup(state, req).await?;
+            let dto =
+                preview_user_instruction_setup_for_state(state, device_id.as_deref(), req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.preview_user_instruction_update" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: PreviewUserInstructionRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!("preview_user_instruction_update payload: {e}"))
                 })?;
-            let dto = AgentHubService::preview_user_instruction_update(state, req).await?;
+            let dto =
+                preview_user_instruction_update_for_state(state, device_id.as_deref(), req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.apply_user_instruction_plan" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: ApplyUserInstructionPlanRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!("apply_user_instruction_plan payload: {e}"))
                 })?;
-            let dto = AgentHubService::apply_user_instruction_plan(state, req).await?;
+            let dto =
+                apply_user_instruction_plan_for_state(state, device_id.as_deref(), req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.save_user_instruction_blocks" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: SaveUserInstructionBlocksRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!("save_user_instruction_blocks payload: {e}"))
                 })?;
-            let dto = AgentHubService::save_user_instruction_blocks(state, req).await?;
+            let dto =
+                save_user_instruction_blocks_for_state(state, device_id.as_deref(), req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.list_user_instruction_slot_versions" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: crate::agent_hub::user_instructions::ListUserInstructionSlotVersionsRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!(
@@ -197,23 +221,73 @@ async fn dispatch_agent_hub_op(
                     ))
                 })?;
             let versions =
-                AgentHubService::list_user_instruction_slot_versions(state, req.asset_id, req.slot)
+                list_user_instruction_slot_versions_for_state(state, device_id.as_deref(), req)
                     .await?;
-            Ok(serde_json::to_value(
-                versions
-                    .iter()
-                    .map(crate::commands::prompts::content_version_to_dto)
-                    .collect::<Vec<_>>(),
-            )?)
+            Ok(serde_json::to_value(versions)?)
         }
         "agent_hub.restore_user_instruction_slot_version" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: crate::agent_hub::user_instructions::RestoreUserInstructionSlotRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!(
                         "restore_user_instruction_slot_version payload: {e}"
                     ))
                 })?;
-            let dto = AgentHubService::restore_user_instruction_slot_version(state, req).await?;
+            let dto =
+                restore_user_instruction_slot_version_for_state(state, device_id.as_deref(), req)
+                    .await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.analyze_instruction_original" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let req: AnalyzeInstructionOriginalRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("analyze_instruction_original payload: {e}"))
+                })?;
+            let dto = crate::agent_hub::remote_client::analyze_instruction_original_for_device(
+                state,
+                device_id.as_deref(),
+                req.clone(),
+                crate::commands::agent_hub::analyze_instruction_original_for_state(state, req),
+            )
+            .await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.adapt_instruction_to_other_agents" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let req: AdaptInstructionToOtherAgentsRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("adapt_instruction_to_other_agents payload: {e}"))
+                })?;
+            let dto =
+                crate::agent_hub::remote_client::adapt_instruction_to_other_agents_for_device(
+                    state,
+                    device_id.as_deref(),
+                    req.clone(),
+                    crate::commands::agent_hub::adapt_instruction_to_other_agents_for_state(
+                        state, req,
+                    ),
+                )
+                .await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.revise_instruction_slot" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let req: ReviseInstructionSlotRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("revise_instruction_slot payload: {e}"))
+                })?;
+            let dto = crate::agent_hub::remote_client::revise_instruction_slot_for_device(
+                state,
+                device_id.as_deref(),
+                req.clone(),
+                crate::commands::agent_hub::revise_instruction_slot_for_state(state, req),
+            )
+            .await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.update_instruction" => {
@@ -558,6 +632,9 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.apply_user_instruction_plan"
             | "agent_hub.save_user_instruction_blocks"
             | "agent_hub.restore_user_instruction_slot_version"
+            | "agent_hub.analyze_instruction_original"
+            | "agent_hub.adapt_instruction_to_other_agents"
+            | "agent_hub.revise_instruction_slot"
             | "agent_hub.update_instruction_block"
             | "agent_hub.pair_instruction_variants"
             | "agent_hub.enable_project"
@@ -740,6 +817,9 @@ mod tests {
             "agent_hub.save_user_instruction_blocks",
             "agent_hub.list_user_instruction_slot_versions",
             "agent_hub.restore_user_instruction_slot_version",
+            "agent_hub.analyze_instruction_original",
+            "agent_hub.adapt_instruction_to_other_agents",
+            "agent_hub.revise_instruction_slot",
             "agent_hub.update_instruction",
             "agent_hub.update_instruction_block",
             "agent_hub.pair_instruction_variants",
@@ -789,6 +869,11 @@ mod tests {
         assert!(is_mutation_op(
             "agent_hub.restore_user_instruction_slot_version"
         ));
+        assert!(is_mutation_op("agent_hub.analyze_instruction_original"));
+        assert!(is_mutation_op(
+            "agent_hub.adapt_instruction_to_other_agents"
+        ));
+        assert!(is_mutation_op("agent_hub.revise_instruction_slot"));
         assert!(!is_mutation_op(
             "agent_hub.list_user_instruction_slot_versions"
         ));

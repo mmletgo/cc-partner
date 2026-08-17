@@ -267,7 +267,7 @@ async fn move_workflow_state_for_local_project_returns_local_view() {
     repo.create_task(&task).await.unwrap();
     let project = local_project_row(temp_project_dir("orch-local-move"));
 
-    let view = move_orchestrator_task_workflow_state_for_project(
+    let view = move_orchestrator_task_workflow_state_for_local_project(
         &repo,
         &project,
         MoveOrchestratorTaskWorkflowStateRequest {
@@ -289,16 +289,16 @@ async fn move_workflow_state_for_local_project_returns_local_view() {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     本轮拖拽动作只支持本机项目，remote shortcut 必须被明确拒绝，避免本机误改 mirror 或远端权威状态。
+///     owner 本地 helper 只接受 local 项目；remote shortcut 必须 local_project_required，避免误改 mirror。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 remote WorkbenchProjectRow 调用命令层 helper，断言返回中文 remote 拒绝错误。
+///     用 remote WorkbenchProjectRow 调用本机 helper，断言返回 local_project_required。
 #[tokio::test]
-async fn move_workflow_state_rejects_remote_project() {
+async fn move_workflow_state_local_helper_rejects_remote_project() {
     let repo = setup_orchestrator_repo().await;
     let project = remote_shortcut_row();
 
-    let error = move_orchestrator_task_workflow_state_for_project(
+    let error = move_orchestrator_task_workflow_state_for_local_project(
         &repo,
         &project,
         MoveOrchestratorTaskWorkflowStateRequest {
@@ -308,9 +308,9 @@ async fn move_workflow_state_rejects_remote_project() {
         },
     )
     .await
-    .expect_err("remote drag must be rejected");
+    .expect_err("remote drag must be rejected by local helper");
 
-    assert!(error.to_string().contains("远端项目暂不支持拖拽移动"));
+    assert!(error.to_string().contains("local_project_required"));
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -323,7 +323,7 @@ async fn move_workflow_state_rejects_project_id_mismatch() {
     let repo = setup_orchestrator_repo().await;
     let project = local_project_row(temp_project_dir("orch-project-mismatch"));
 
-    let error = move_orchestrator_task_workflow_state_for_project(
+    let error = move_orchestrator_task_workflow_state_for_local_project(
         &repo,
         &project,
         MoveOrchestratorTaskWorkflowStateRequest {
@@ -353,7 +353,7 @@ async fn move_workflow_state_rejects_task_from_another_project() {
     repo.create_task(&task).await.unwrap();
     let project = local_project_row(temp_project_dir("orch-task-project-mismatch"));
 
-    let error = move_orchestrator_task_workflow_state_for_project(
+    let error = move_orchestrator_task_workflow_state_for_local_project(
         &repo,
         &project,
         MoveOrchestratorTaskWorkflowStateRequest {
@@ -368,6 +368,45 @@ async fn move_workflow_state_rejects_task_from_another_project() {
 
     assert!(error.to_string().contains("任务不属于当前项目"));
     assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Backlog);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     看板拖拽与 completeAgentRun 都不能作用在尚未投递的 pending outbox 上。
+///
+/// Code Logic（这个测试做什么）:
+///     插入 pending outbox 后用其 id 调用 reject helper，断言返回尚未创建错误。
+#[tokio::test]
+async fn reject_pending_remote_task_action_rejects_outbox_id() {
+    let repo = setup_orchestrator_repo().await;
+    let item = repo
+        .insert_remote_outbox_pending(
+            "device-a",
+            "Mac mini",
+            "/Users/hans/remote-project",
+            None,
+            r#"{"title":"pending"}"#,
+        )
+        .await
+        .unwrap();
+
+    let error = reject_pending_remote_task_action(&repo, &item.id)
+        .await
+        .expect_err("pending outbox must reject move/complete");
+
+    assert!(error.to_string().contains("尚未创建"));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     真实远端任务 id 不应被 pending-outbox 门闩误拦。
+///
+/// Code Logic（这个测试做什么）:
+///     对不存在于 outbox 的 task id 调用 reject helper，断言 Ok。
+#[tokio::test]
+async fn reject_pending_remote_task_action_allows_real_task_id() {
+    let repo = setup_orchestrator_repo().await;
+    reject_pending_remote_task_action(&repo, "task-real")
+        .await
+        .expect("real task id must pass pending-outbox guard");
 }
 
 /// Business Logic（为什么需要这个函数）:

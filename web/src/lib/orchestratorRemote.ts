@@ -1,6 +1,7 @@
 import { ORCHESTRATOR_STATUSES } from './orchestrator';
 import type {
   OrchestratorRemoteOutboxItem,
+  OrchestratorRemoteRuntimeStatus,
   OrchestratorTask,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
@@ -110,7 +111,20 @@ export function isOrchestratorTaskViewActionable(view: OrchestratorTaskView | nu
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   completeAgentRun 目前只有本机旧命令，远端 running task 不能显示该操作入口。
+ *   完成运行等写操作只能在本机或远端 live 时发出；offline/unsupported 不得假装可写。
+ *
+ * Code Logic（这个函数做什么）:
+ *   本机 snapshot 归一化为 null，视为在线；远端仅 live 为在线。
+ */
+export function isOrchestratorRemoteActionOnline(
+  remoteStatus: OrchestratorRemoteRuntimeStatus | null,
+): boolean {
+  return remoteStatus === null || remoteStatus === 'live';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   少数本机-only 路径仍需区分 origin，但不能再当作完成按钮门闩。
  *
  * Code Logic（这个函数做什么）:
  *   仅当 view origin 为 local 时返回 true。

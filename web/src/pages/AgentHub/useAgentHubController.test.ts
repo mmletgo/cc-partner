@@ -296,8 +296,13 @@ describe('useAgentHubController', () => {
     vi.clearAllMocks();
     searchParamsMock.current = new URLSearchParams();
     devicesListMock.mockResolvedValue([
-      { id: 'peer-online', name: 'Peer Online', status: 'online' as const },
-      { id: 'peer-offline', name: 'Peer Offline', status: 'offline' as const },
+      {
+        id: 'peer-online',
+        name: 'Peer Online',
+        status: 'online' as const,
+        capabilities: ['agent-hub.user-instructions.v1'],
+      },
+      { id: 'peer-offline', name: 'Peer Offline', status: 'offline' as const, capabilities: [] },
     ]);
     workbenchProjectsListMock.mockResolvedValue([
       {
@@ -410,6 +415,9 @@ describe('useAgentHubController', () => {
     expect(result.current.activeSection).toBe('assets');
     expect(result.current.portableLaneActive).toBe(true);
     await waitFor(() => expect(result.current.shellPeers.length).toBeGreaterThan(0));
+    expect(
+      result.current.shellPeers.find((peer) => peer.deviceId === 'peer-online')?.capabilities,
+    ).toEqual(['agent-hub.user-instructions.v1']);
     expect(result.current.hubContext.deviceId).toBe('peer-online');
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
     expect(listAssets).not.toHaveBeenCalled();

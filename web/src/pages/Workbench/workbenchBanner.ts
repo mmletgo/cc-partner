@@ -96,6 +96,33 @@ export function readWorkbenchBanner(): string {
  * Code Logic（这个函数做什么）:
  *   clamp 后写 localStorage，派发 BANNER_CHANGE_EVENT；写失败吞掉。
  */
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   本机 SQLite 标语为空时，只能偷看一次 legacy localStorage，不能把它当生产源。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 readWorkbenchBanner；不删除 key。
+ */
+export function peekLegacyBannerSeed(): string {
+  return readWorkbenchBanner();
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   成功灌入 owning device 后必须停用该 key，避免双源。
+ *
+ * Code Logic（这个函数做什么）:
+ *   removeItem；失败吞掉。
+ */
+export function clearLegacyBannerSeed(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(BANNER_STORAGE_KEY);
+  } catch {
+    // quota / 隐私模式
+  }
+}
+
 export function writeWorkbenchBanner(markdown: string): WorkbenchBannerRecord {
   const record: WorkbenchBannerRecord = {
     version: BANNER_SCHEMA_VERSION,

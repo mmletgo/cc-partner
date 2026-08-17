@@ -3,6 +3,7 @@ import type { WorkbenchDependencyStatus } from './types';
 import {
   canInstallWorkbenchDependency,
   canRecheckWorkbenchDependency,
+  dependencyStatusFromError,
   dependencyStatusTone,
   formatInstallCommandPreview,
 } from './workbenchDependency';
@@ -52,6 +53,13 @@ describe('workbenchDependency', () => {
 
     if (formatInstallCommandPreview(['wsl.exe', '--exec', 'sh', '-lc', 'sudo apt-get install -y tmux']) !== 'wsl.exe --exec sh -lc "sudo apt-get install -y tmux"') {
       throw new Error('install preview should quote shell command arguments');
+    }
+
+    const unsupported = dependencyStatusFromError(
+      new Error('capability_unsupported:workbench.dependency-install.v1'),
+    );
+    if (unsupported.status !== 'unsupported' || unsupported.installable) {
+      throw new Error('missing capability must map to unsupported and not installable');
     }
   });
 });

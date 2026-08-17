@@ -389,14 +389,37 @@ pub async fn refresh_orchestrator_project(
 ///     Workbench 自动化看板需要通过拖拽调整任务所在业务泳道，但移动规则必须由后端统一校验。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 projectId 对应 Workbench 项目，委托本机项目 helper 校验 remote/归属/相邻移动并返回 task view。
+///     本机项目委托 local helper；远端项目 reject pending 后经 RemoteOrchestratorClient 代理到 owning device。
 #[tauri::command]
 pub async fn move_orchestrator_task_workflow_state(
     state: State<'_, AppState>,
     request: MoveOrchestratorTaskWorkflowStateRequest,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state.inner(), &request.project_id).await?;
-    move_orchestrator_task_workflow_state_for_project(
+    if project.kind == "remote" {
+        reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &request.task_id)
+            .await?;
+        let target_state = request.target_state;
+        return update_remote_orchestrator_task_with_project(
+            state.inner(),
+            &project,
+            &request.task_id,
+            move |client, base_url, project_id, task_id| async move {
+                client
+                    .move_task_workflow_state(
+                        &base_url,
+                        crate::orchestrator::remote_protocol::RemoteMoveWorkflowStateReq {
+                            project_id,
+                            task_id,
+                            target_state,
+                        },
+                    )
+                    .await
+            },
+        )
+        .await;
+    }
+    move_orchestrator_task_workflow_state_for_local_project(
         state.orchestrator_repo.as_ref(),
         &project,
         request,

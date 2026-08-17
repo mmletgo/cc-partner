@@ -34,6 +34,7 @@ export interface UseWorkbenchProjectNotesParams {
   inspectorTab: WorkbenchInspectorTab;
   desktopUnavailableMessage: string;
   loadFailedFallback: string;
+  remoteWriteDisabled?: boolean;
 }
 
 /**
@@ -49,6 +50,7 @@ export interface UseWorkbenchProjectNotesResult {
   error: string | null;
   onChange: (next: string) => void;
   onRetry: () => void;
+  readOnly: boolean;
 }
 
 interface ProjectNotesState {
@@ -78,7 +80,13 @@ function createProjectNotesState(projectId: string | null): ProjectNotesState {
 export function useWorkbenchProjectNotes(
   params: UseWorkbenchProjectNotesParams,
 ): UseWorkbenchProjectNotesResult {
-  const { activeProjectId, inspectorTab, desktopUnavailableMessage, loadFailedFallback } = params;
+  const {
+    activeProjectId,
+    inspectorTab,
+    desktopUnavailableMessage,
+    loadFailedFallback,
+    remoteWriteDisabled = false,
+  } = params;
   const notesOpen = inspectorTab === 'notes';
 
   const [notesState, setNotesState] = useState<ProjectNotesState>(() =>
@@ -161,6 +169,7 @@ export function useWorkbenchProjectNotes(
   const onChange = useCallback(
     (next: string) => {
       if (
+        remoteWriteDisabled ||
         !activeProjectId ||
         notesState.projectId !== activeProjectId ||
         notesState.phase !== 'ready'
@@ -170,7 +179,7 @@ export function useWorkbenchProjectNotes(
       setNotesState((previous) => ({ ...previous, content: next }));
       queue.schedule(activeProjectId, next);
     },
-    [activeProjectId, notesState.phase, notesState.projectId, queue],
+    [activeProjectId, notesState.phase, notesState.projectId, queue, remoteWriteDisabled],
   );
 
   const onRetry = useCallback(() => {
@@ -192,5 +201,6 @@ export function useWorkbenchProjectNotes(
     error,
     onChange,
     onRetry,
+    readOnly: remoteWriteDisabled,
   };
 }

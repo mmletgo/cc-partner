@@ -264,7 +264,7 @@ fn status_json_bytes_fully_received(status: &serde_json::Value) -> bool {
 /// Business Logic: 所有对端调用复用同一 Client（内部连接池），提升效率。
 ///     Client 本身是 Clone 廉贵的（内部 Arc），故 PeerClient 可直接 Clone 共享。
 ///     长连接事件桥复用无默认超时的 `stream_client`，禁止每桥 `Client::new()`。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct PeerClient {
     client: reqwest::Client,

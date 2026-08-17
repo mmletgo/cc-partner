@@ -434,6 +434,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     WorkbenchProjectNoteRepo::new(pool.clone())
         .ensure_schema()
         .await?;
+    crate::storage::WorkbenchBannerRepo::new(pool.clone())
+        .ensure_schema()
+        .await?;
     OrchestratorRepo::init_schema(&pool).await?;
     crate::storage::WordGameRepo::ensure_schema(&pool).await?;
     crate::storage::BatteryRepo::ensure_schema(&pool).await?;

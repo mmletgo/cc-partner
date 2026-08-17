@@ -45,6 +45,30 @@ export function canRecheckWorkbenchDependency(status: WorkbenchDependencyStatus)
  * Code Logic（这个函数做什么）:
  *   将 argv 格式化为 shell-like 预览；包含空白的参数使用双引号包裹。
  */
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   缺 capability 时卡片必须显示 unsupported，不能把错误当成安装成功。
+ *
+ * Code Logic（这个函数做什么）:
+ *   含 capability_unsupported 的错误 → unsupported DTO；其它 → failed。
+ */
+export function dependencyStatusFromError(error: unknown): WorkbenchDependencyStatus {
+  const message = error instanceof Error ? error.message : String(error);
+  const unsupported = message.includes('capability_unsupported');
+  return {
+    status: unsupported ? 'unsupported' : 'failed',
+    available: false,
+    version: null,
+    backend: '',
+    path: null,
+    installable: false,
+    installCommandPreview: [],
+    error: message,
+    output: [],
+    statusChangedAt: '',
+  };
+}
+
 export function formatInstallCommandPreview(command: string[]): string {
   return command
     .map((part) => (/\s/.test(part) ? `"${part.replaceAll('"', '\\"')}"` : part))

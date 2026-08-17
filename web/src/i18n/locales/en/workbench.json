@@ -140,6 +140,7 @@
     "recheck": "Recheck",
     "noCommand": "No install command provided",
     "installConfirm": "The following command will be used to install tmux:\n\n{{command}}\n\nConfirm that you trust this command. The install process may ask for your system password.",
+    "installConfirmRemote": "The following command will run on device \"{{device}}\" to install tmux:\n\n{{command}}\n\nConfirm that you trust this command. The install process may ask for a system password.",
     "status": {
       "checking": "Checking",
       "ready": "Ready",

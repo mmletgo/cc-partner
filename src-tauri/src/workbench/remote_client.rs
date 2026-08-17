@@ -14,7 +14,9 @@ use crate::net::peer_error::peer_call_error_to_app_error;
 use crate::net::protocol::CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1;
 use crate::net::protocol::{
     PeerProtocolInfo, CAPABILITY_DEVICE_REQUEST_BINDING_V1,
-    CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+    CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_BANNER_V1,
+    CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1,
+    CAPABILITY_WORKBENCH_HOOK_REPAIR_V1, CAPABILITY_WORKBENCH_PROJECT_NOTES_V1,
 };
 use crate::workbench::agent_ledger::models::{
     AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
@@ -26,6 +28,8 @@ use crate::workbench::browser_verification::{
 use crate::workbench::claude_sessions::{
     decode_session_search_response_body, SessionPreview, SessionSearchResult,
 };
+use crate::workbench::dependencies::WorkbenchDependencyStatusDto;
+use crate::workbench::hook_repair::RepairHookFailureDto;
 use crate::workbench::lan_fleet::models::{LanFleetOwnerBatchReq, LanFleetOwnerBatchResp};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
@@ -37,17 +41,18 @@ use crate::workbench::operation_ledger::{
     WorkbenchMutationEnvelopeDto, WorkbenchMutationOperationDto,
 };
 use crate::workbench::remote_protocol::{
-    RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
-    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
+    RemoteBannerSaveReq, RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq,
+    RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
     RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
     RemoteMutationOperationReq, RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
-    RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq,
-    RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
+    RemotePreviewSqliteReq, RemoteProjectNoteSaveReq, RemoteProjectReq, RemotePromptOptimizerReq,
+    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
+    RemoteRepairHookFailureReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
     RemoteSafeAttachReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq,
     RemoteSelectPaneAtResp, RemoteSessionReq, RemoteSplitPaneReq,
     RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq,
     RemoteWorkspaceRestorePreflightReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
-    ResumeClaudeSessionResult,
+    ResumeClaudeSessionResult, WorkbenchBannerDto, WorkbenchProjectNoteDto,
 };
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
@@ -850,6 +855,140 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/workspace/restore/safe-attach"),
             req,
             RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     新路由必须 fail-closed；缺 token 不得继续 POST。
+    async fn require_peer_capability(&self, base_url: &str, token: &str) -> Result<(), AppError> {
+        if !self.peer_supports_capability(base_url, token).await? {
+            return Err(AppError::unavailable(format!(
+                "capability_unsupported:{token}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 读取 owning device 项目笔记。
+    pub async fn get_project_note(
+        &self,
+        base_url: &str,
+        project_id: &str,
+    ) -> Result<WorkbenchProjectNoteDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_PROJECT_NOTES_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/notes/get"),
+            &RemoteProjectReq {
+                project_id: project_id.to_string(),
+            },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 保存 owning device 项目笔记。
+    pub async fn save_project_note(
+        &self,
+        base_url: &str,
+        req: RemoteProjectNoteSaveReq,
+    ) -> Result<WorkbenchProjectNoteDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_PROJECT_NOTES_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/notes/save"),
+            &req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 读取 owning device 标语。
+    pub async fn get_banner(&self, base_url: &str) -> Result<WorkbenchBannerDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_BANNER_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/banner/get"),
+            &serde_json::json!({}),
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 保存 owning device 标语。
+    pub async fn save_banner(
+        &self,
+        base_url: &str,
+        req: RemoteBannerSaveReq,
+    ) -> Result<WorkbenchBannerDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_BANNER_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/banner/save"),
+            &req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 读取 owning device tmux 依赖状态。
+    pub async fn dependency_status(
+        &self,
+        base_url: &str,
+    ) -> Result<WorkbenchDependencyStatusDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/dependency/status"),
+            &serde_json::json!({}),
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 在 owning device 启动 tmux 安装。
+    pub async fn dependency_install(
+        &self,
+        base_url: &str,
+    ) -> Result<WorkbenchDependencyStatusDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/dependency/install"),
+            &serde_json::json!({}),
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 取消 owning device tmux 安装。
+    pub async fn dependency_cancel(
+        &self,
+        base_url: &str,
+    ) -> Result<WorkbenchDependencyStatusDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/dependency/cancel"),
+            &serde_json::json!({}),
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 在 owning device 修复钩子失败。
+    pub async fn repair_hook_failure(
+        &self,
+        base_url: &str,
+        req: RemoteRepairHookFailureReq,
+    ) -> Result<RepairHookFailureDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_HOOK_REPAIR_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/repair-hook-failure"),
+            &req,
+            RemoteRequestTimeoutKind::Long,
         )
         .await
     }
@@ -2895,5 +3034,62 @@ mod tests {
             "production RemoteWorkbenchClient::new() 必须链式 with_expected_device_id，未绑定: {:?}",
             unbound
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 peer 缺 notes/banner/deps/repair token 时必须 unsupported，不得继续 POST。
+    #[tokio::test]
+    async fn parity_routes_fail_closed_without_capability() {
+        use axum::routing::get;
+        let app = Router::new().route(
+            "/api/health",
+            get(|| async {
+                Json(serde_json::json!({
+                    "protocol_version": 1,
+                    "capabilities": ["errors.envelope.v1"]
+                }))
+            }),
+        );
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{addr}");
+        let client = RemoteWorkbenchClient::new();
+
+        let notes = client
+            .get_project_note(&base, "inner")
+            .await
+            .expect_err("notes");
+        assert!(
+            notes.code().contains("capability_unsupported")
+                || notes.to_string().contains("capability_unsupported")
+        );
+
+        let banner = client.get_banner(&base).await.expect_err("banner");
+        assert!(banner.to_string().contains("capability_unsupported"));
+
+        let deps = client.dependency_status(&base).await.expect_err("deps");
+        assert!(deps.to_string().contains("capability_unsupported"));
+
+        let repair = client
+            .repair_hook_failure(
+                &base,
+                RemoteRepairHookFailureReq {
+                    worktree_id: "wt".into(),
+                    hook_failure: crate::workbench::operation_ledger::WorkbenchHookFailureDto {
+                        stage: crate::workbench::operation_ledger::WorkbenchHookStage::PreCommit,
+                        stdout: String::new(),
+                        stderr: "boom".into(),
+                        exit_code: Some(1),
+                    },
+                },
+            )
+            .await
+            .expect_err("repair");
+        assert!(repair.to_string().contains("capability_unsupported"));
     }
 }

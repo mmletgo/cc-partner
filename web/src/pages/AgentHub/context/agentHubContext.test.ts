@@ -7,10 +7,12 @@
 
 import { describe, expect, test } from 'vitest';
 import {
+  AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY,
   getAgentHubContextCapability,
   getAgentHubDraftIdentity,
   mapLegacySection,
   parseAgentHubContext,
+  peerAllowsUserInstructionThreePane,
   writeAgentHubContext,
   type AgentHubContext,
 } from './agentHubContext';
@@ -248,6 +250,23 @@ describe('Agent Hub context capability', () => {
     expect(
       getAgentHubContextCapability({ ...DEFAULT_CONTEXT, projectKey: 'mixed' }),
     ).toBe('unsupported');
+  });
+
+  test('peerAllowsUserInstructionThreePane requires online plus capability token', () => {
+    expect(peerAllowsUserInstructionThreePane(null)).toBe(false);
+    expect(
+      peerAllowsUserInstructionThreePane({
+        online: false,
+        capabilities: [AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY],
+      }),
+    ).toBe(false);
+    expect(peerAllowsUserInstructionThreePane({ online: true, capabilities: [] })).toBe(false);
+    expect(
+      peerAllowsUserInstructionThreePane({
+        online: true,
+        capabilities: [AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY],
+      }),
+    ).toBe(true);
   });
 
   test('draft identity includes owner and agent but excludes transient tab/lane/view', () => {

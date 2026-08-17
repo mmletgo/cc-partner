@@ -14,8 +14,11 @@ import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
+import { AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY } from './context/agentHubContext';
+import { initialThreePaneFromDisk } from './instructions/instructionThreePane';
+import type { UseInstructionThreePaneControllerResult } from './instructions';
 import type { UseAgentHubControllerResult } from './useAgentHubController';
-import { AgentHubView } from './AgentHub';
+import { AgentHubView, type AgentHubViewProps } from './AgentHub';
 
 const pageDir = dirname(fileURLToPath(import.meta.url));
 
@@ -347,14 +350,78 @@ function buildProps(
 }
 
 /**
+ * Business Logic: 远端用户级三栏门闩测试需要可渲染的三栏 stub。
+ * Code Logic: 非 loading/error，足以露出 instruction-three-pane。
+ */
+function stubThreePane(): UseInstructionThreePaneControllerResult {
+  return {
+    state: initialThreePaneFromDisk(null, 'peer original'),
+    workspace: null,
+    loading: false,
+    refreshing: false,
+    error: null,
+    actionError: null,
+    actionBusy: false,
+    busyAction: null,
+    dirty: false,
+    writeBlocked: false,
+    writeBlockedReason: null,
+    dualDirtyOpen: false,
+    analyzeConfirmOpen: false,
+    aiReviseOpen: false,
+    aiReviseDirection: '',
+    aiReviseError: null,
+    aiReviseFeedback: null,
+    aiReviseDisabled: false,
+    openAiRevise: vi.fn(),
+    setAiReviseDirection: vi.fn(),
+    cancelAiRevise: vi.fn(),
+    confirmAiRevise: vi.fn(async () => undefined),
+    previewOpen: false,
+    plan: null,
+    applyResult: null,
+    analyzeDecompose: vi.fn(),
+    confirmAnalyzeDecompose: vi.fn(),
+    cancelAnalyzeDecompose: vi.fn(),
+    adaptToOtherAgents: vi.fn(async () => undefined),
+    requestSync: vi.fn(async () => undefined),
+    applyPlan: vi.fn(async () => undefined),
+    saveBlocks: vi.fn(async () => true),
+    closePreview: vi.fn(),
+    refresh: vi.fn(async () => undefined),
+    discardAndReload: vi.fn(async () => undefined),
+    updateOriginal: vi.fn(),
+    changeBlock: vi.fn(),
+    appendBlock: vi.fn(),
+    editCurrentSlot: vi.fn(),
+    chooseBaseline: vi.fn(),
+    cancelDualDirty: vi.fn(),
+    dismissApplyResult: vi.fn(),
+    discardDraftForContextChange: vi.fn(),
+    slotHistoryOpen: false,
+    slotHistorySlot: null,
+    slotHistoryVersions: [],
+    slotHistoryLoading: false,
+    slotHistoryError: null,
+    restoringSlotVersionId: null,
+    slotHistoryActionError: null,
+    openSlotHistory: vi.fn(),
+    closeSlotHistory: vi.fn(),
+    copySlotVersion: vi.fn(async () => undefined),
+    restoreSlotVersion: vi.fn(async () => true),
+  };
+}
+
+/**
  * Business Logic: i18n + view 统一挂载。
  * Code Logic: I18nextProvider 包装。
  */
-function renderView(props: Partial<UseAgentHubControllerResult> = {}) {
-  const merged = buildProps(props);
+function renderView(props: Partial<AgentHubViewProps> = {}) {
+  const { instructionThreePane, ...controllerProps } = props;
+  const merged = buildProps(controllerProps);
   return render(
     <I18nextProvider i18n={i18n}>
-      <AgentHubView {...merged} />
+      <AgentHubView {...merged} instructionThreePane={instructionThreePane} />
     </I18nextProvider>,
   );
 }
@@ -464,6 +531,85 @@ describe('AgentHub page characterization', () => {
     });
     expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
     expect(screen.queryByTestId('portable-inventory-workspace')).toBeNull();
+  });
+
+  test('online peer with user-instructions capability mounts three-pane', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        deviceId: 'peer-a',
+        tab: 'instructions',
+      },
+      shellPeers: [
+        {
+          deviceId: 'peer-a',
+          name: 'Peer A',
+          online: true,
+          capabilities: [AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY],
+        },
+      ],
+      instructionThreePane: stubThreePane(),
+    });
+    expect(screen.getByTestId('instruction-three-pane')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-remote-management')).toBeNull();
+  });
+
+  test('online peer missing user-instructions capability keeps remote hint', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        deviceId: 'peer-a',
+        tab: 'instructions',
+      },
+      shellPeers: [{ deviceId: 'peer-a', name: 'Peer A', online: true, capabilities: [] }],
+      instructionThreePane: stubThreePane(),
+    });
+    expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
+  });
+
+  test('offline peer with user-instructions capability keeps remote hint', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        deviceId: 'peer-a',
+        tab: 'instructions',
+      },
+      shellPeers: [
+        {
+          deviceId: 'peer-a',
+          name: 'Peer A',
+          online: false,
+          capabilities: [AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY],
+        },
+      ],
+      instructionThreePane: stubThreePane(),
+    });
+    expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
+  });
+
+  test('remote project instructions keep hint and never mount three-pane', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        scope: 'project',
+        projectKey: 'remote:peer-a:inner',
+        deviceId: null,
+        tab: 'instructions',
+      },
+      shellPeers: [
+        {
+          deviceId: 'peer-a',
+          name: 'Peer A',
+          online: true,
+          capabilities: [AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY],
+        },
+      ],
+      instructionThreePane: stubThreePane(),
+    });
+    expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
+    expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
   });
 
   test('URL migration notice is visible without exposing a legacy action', () => {

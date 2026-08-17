@@ -151,8 +151,22 @@ describe('orchestratorBoard', () => {
       'local task should not move across two lanes',
     );
     assert(
-      !canMoveRenderableTaskToWorkflowState(createRenderableTask('remote-next', 'todo', 'idle', 'remote'), 'inProgress'),
-      'remote task should not be draggable by the local board',
+      canMoveRenderableTaskToWorkflowState(createRenderableTask('remote-next', 'todo', 'idle', 'remote'), 'inProgress'),
+      'remote idle task should move to the next lane',
+    );
+    assert(
+      !canMoveRenderableTaskToWorkflowState(
+        createRenderableTask('remote-skip', 'todo', 'idle', 'remote'),
+        'humanReview',
+      ),
+      'remote task should not move across two lanes',
+    );
+    assert(
+      !canMoveRenderableTaskToWorkflowState(
+        createRenderableTask('remote-running', 'todo', 'running', 'remote'),
+        'inProgress',
+      ),
+      'remote running task should not be draggable',
     );
     assert(
       !canMoveRenderableTaskToWorkflowState(createRenderableTask('active-next', 'todo', 'running'), 'inProgress'),

@@ -21,6 +21,7 @@ import {
   workbenchOpenFileDecoder,
   workbenchPathInfoDecoder,
   workbenchProjectDecoder,
+  workbenchBannerDecoder,
   workbenchProjectNoteDecoder,
   workbenchProjectsDecoder,
   workbenchRemoveResultDecoder,
@@ -274,7 +275,7 @@ export const workbenchApi = {
      *
      * Code Logic（这个函数做什么）:
      *   invokeDecoded repair_worktree_hook_failure → WorkbenchRepairHookFailureDto（agent/terminal id）。
-     *   V1 仅本机 worktree；远端项目返回可操作错误，由调用方降级处理。
+     *   远端 worktree 由 owning device 执行同一套修复，返回 remapped session id。
      */
     repairHookFailure: (
       worktreeId: string,
@@ -934,6 +935,24 @@ export const workbenchApi = {
         'save_workbench_project_note',
         { projectId, content },
         workbenchProjectNoteDecoder,
+      ),
+  },
+
+  /**
+   * 设备级顶栏标语（owning device SQLite）。
+   */
+  banner: {
+    get: (deviceId?: string) =>
+      invokeDecoded(
+        'get_workbench_banner',
+        { deviceId: deviceId ?? null },
+        workbenchBannerDecoder,
+      ),
+    save: (markdown: string, deviceId?: string) =>
+      invokeDecoded(
+        'save_workbench_banner',
+        { markdown, deviceId: deviceId ?? null },
+        workbenchBannerDecoder,
       ),
   },
 };

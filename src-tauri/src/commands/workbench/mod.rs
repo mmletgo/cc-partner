@@ -8,6 +8,7 @@
 
 mod agent_ledger;
 mod agent_runtime;
+mod banner;
 mod browser;
 mod browser_verification;
 mod common;
@@ -164,6 +165,12 @@ pub use layout::{
     preflight_workspace_restore_cmd, save_workspace_layout,
 };
 
+pub use banner::{
+    __cmd__get_workbench_banner, __cmd__save_workbench_banner,
+    __tauri_command_name_get_workbench_banner, __tauri_command_name_save_workbench_banner,
+    get_workbench_banner, save_workbench_banner,
+};
+
 pub use notes::{
     __cmd__get_workbench_project_note, __cmd__save_workbench_project_note,
     __tauri_command_name_get_workbench_project_note,
@@ -200,8 +207,14 @@ pub(crate) use layout::{
     preflight_workspace_restore_for_state, save_workspace_layout_for_state,
 };
 
+pub(crate) use banner::{
+    get_workbench_banner_for_state, local_get_workbench_banner, local_save_workbench_banner,
+    save_workbench_banner_for_state,
+};
+
 pub(crate) use notes::{
-    get_workbench_project_note_for_state, save_workbench_project_note_for_state,
+    get_workbench_project_note_for_state, local_get_workbench_project_note,
+    local_save_workbench_project_note, save_workbench_project_note_for_state,
 };
 
 // control_workbench 与其它 crate 内 owner 路径需要 common 中的远程映射/设备 helper。
@@ -209,7 +222,7 @@ pub(crate) use common::{
     build_remote_project_shortcut_row, device_base_url, device_name_from_state,
     ensure_main_worktree, ensure_remote_event_bridge_for_project_mapping,
     ensure_remote_project_context, get_project, local_project_id_for_remote_inner_project,
-    map_remote_session_dtos_with_project, now_iso, remote_inner_session_id,
+    map_remote_session_dtos_with_project, now_iso, proxy_workbench_if_gui, remote_inner_session_id,
     remote_inner_worktree_id, remove_local_workbench_project_with_barrier, WorkbenchMergeResultDto,
 };
 

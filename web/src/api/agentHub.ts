@@ -219,6 +219,34 @@ export function assertLocalAgentHubContext(context?: AgentHubRequestContext | nu
   });
 }
 
+/**
+ * Business Logic: 用户级三栏可打本机或 peer；项目级仍无 V2 路径，禁止静默本机。
+ * Code Logic: 任意 projectRef fail-closed；deviceId 留给 invoke 顶层转发。
+ */
+export function assertUserInstructionContext(context?: AgentHubRequestContext | null): void {
+  const projectRef = context?.projectRef?.trim() ?? '';
+  if (!projectRef) return;
+  if (isRemoteProjectRef(projectRef)) {
+    throw Object.assign(new Error(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE), {
+      code: AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
+    });
+  }
+  throw Object.assign(new Error(AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE), {
+    code: AGENT_HUB_PROJECT_CONTEXT_UNAVAILABLE,
+  });
+}
+
+/**
+ * Business Logic: GuiClient/owner 用顶层 deviceId 转发到 owning peer。
+ * Code Logic: 空/缺省省略，保持本机 invoke 形态。
+ */
+function userInstructionDeviceIdArg(
+  context?: AgentHubRequestContext | null,
+): string | undefined {
+  const deviceId = context?.deviceId?.trim() ?? '';
+  return deviceId.length > 0 ? deviceId : undefined;
+}
+
 /** 用户级指令 plan apply 请求。 */
 export interface ApplyUserInstructionPlanArgs {
   planToken: string;
@@ -773,20 +801,24 @@ export const agentHubApi = {
 
   /**
    * Business Logic: 首屏只读枚举三个 Agent 的真实来源、路径、优先级与 ownership。
-   * Code Logic: peer/远端 project 先 assertLocal；V2 不存在时降级 legacy workspace；绝不回退写操作。
+   * Code Logic: 项目级 fail-closed；用户级 deviceId 透传到 invoke；V2 不存在时仅本机降级 legacy。
    */
   inspectUserInstructionWorkspace: async (
     context?: AgentHubRequestContext,
   ): Promise<UserInstructionWorkspaceDto> => {
-    assertLocalAgentHubContext(context);
+    assertUserInstructionContext(context);
+    const deviceId = userInstructionDeviceIdArg(context);
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.inspectUserInstructionWorkspace,
-        undefined,
+        deviceId ? { deviceId } : undefined,
         userInstructionWorkspaceDecoder,
       );
     } catch (reason) {
       if (!isUserInstructionV2Unavailable(reason, AGENT_HUB_COMMANDS.inspectUserInstructionWorkspace)) {
+        throw reason;
+      }
+      if (deviceId) {
         throw reason;
       }
       return inspectLegacyUserInstructionWorkspace();
@@ -797,14 +829,15 @@ export const agentHubApi = {
   previewUserInstructionSetup: async (
     request: UserInstructionPreviewRequest & AgentHubRequestContext,
   ): Promise<UserInstructionPlanDto> => {
-    assertLocalAgentHubContext(request);
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.previewUserInstructionSetup,
-        { request: body },
+        deviceId ? { request: body, deviceId } : { request: body },
         userInstructionPlanDecoder,
       );
     } catch (reason) {
@@ -819,14 +852,15 @@ export const agentHubApi = {
   previewUserInstructionUpdate: async (
     request: UserInstructionPreviewRequest & AgentHubRequestContext,
   ): Promise<UserInstructionPlanDto> => {
-    assertLocalAgentHubContext(request);
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.previewUserInstructionUpdate,
-        { request: body },
+        deviceId ? { request: body, deviceId } : { request: body },
         userInstructionPlanDecoder,
       );
     } catch (reason) {
@@ -841,14 +875,15 @@ export const agentHubApi = {
   applyUserInstructionPlan: async (
     request: ApplyUserInstructionPlanArgs,
   ): Promise<UserInstructionApplyResultDto> => {
-    assertLocalAgentHubContext(request);
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.applyUserInstructionPlan,
-        { request: body },
+        deviceId ? { request: body, deviceId } : { request: body },
         userInstructionApplyResultDecoder,
       );
     } catch (reason) {
@@ -858,19 +893,20 @@ export const agentHubApi = {
 
   /**
    * Business Logic: 保存块文档是 cc-partner 内部编辑态，独立于 CLI 写入门禁。
-   * Code Logic: assertLocal + V2 unavailable 兜底；返回新 canonical（含新 head + blocks）。
+   * Code Logic: 用户级 deviceId 透传；V2 unavailable 仅本机兜底。
    */
   saveUserInstructionBlocks: async (
     request: SaveUserInstructionBlocksRequest & AgentHubRequestContext,
   ): Promise<UserInstructionCanonicalDto> => {
-    assertLocalAgentHubContext(request);
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.saveUserInstructionBlocks,
-        { request: body },
+        deviceId ? { request: body, deviceId } : { request: body },
         userInstructionCanonicalDecoder,
       );
     } catch (reason) {
@@ -884,20 +920,20 @@ export const agentHubApi = {
   /**
    * Business Logic: 列出指定三槽（公共 / 适配 / 独有）的历史版本快照；
    *   槽内互不干扰（per-slot item_id 隔离），供 VersionHistoryDrawer 复用。
-   * Code Logic: assertLocal + decoder fail-closed；read-only 不需要
-   *   V2 unavailable 兜底（list 在 V1 后端不存在时也会失败，沿用通用错误）。
+   * Code Logic: 用户级 deviceId 透传；read-only 不需要 V2 unavailable 兜底。
    */
   listUserInstructionSlotVersions: async (
     request: ListUserInstructionSlotVersionsRequest & AgentHubRequestContext,
   ): Promise<ContentVersion[]> => {
-    assertLocalAgentHubContext(request);
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.listUserInstructionSlotVersions,
-        { request: body },
+        deviceId ? { request: body, deviceId } : { request: body },
         userInstructionSlotVersionListDecoder,
       );
     } catch (reason) {
@@ -912,20 +948,20 @@ export const agentHubApi = {
    * Business Logic: 把历史版本恢复为新版本写入当前 canonical；与
    *   saveBlocks 共用 baseRevisionId CAS + inventorySnapshotHash 双保险，
    *   并发编辑会触发 USER_INSTRUCTION_REVISION_CHANGED / _PREVIEW_STALE。
-   * Code Logic: assertLocal + decoder fail-closed；后端先做 pre-restore
-   *   baseline（避免静默丢失抽屉打开期间的中间编辑），再 commit。
+   * Code Logic: 用户级 deviceId 透传；后端先做 pre-restore baseline 再 commit。
    */
   restoreUserInstructionSlotVersion: async (
     request: RestoreUserInstructionSlotRequest & AgentHubRequestContext,
   ): Promise<UserInstructionCanonicalDto> => {
-    assertLocalAgentHubContext(request);
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.restoreUserInstructionSlotVersion,
-        { request: body },
+        deviceId ? { request: body, deviceId } : { request: body },
         userInstructionCanonicalDecoder,
       );
     } catch (reason) {
@@ -1130,8 +1166,8 @@ export const agentHubApi = {
   },
 
   /**
-   * Business Logic: 独有页分析拆解 — Claude 把原始文件拆成公共/适配/独有三部分。
-   * Code Logic: agent_hub_analyze_instruction_original；仅本机用户级。
+   * Business Logic: 独有页分析拆解 — 在 owning device 把原始文件拆成公共/适配/独有。
+   * Code Logic: 用户级 deviceId 透传；项目级 fail-closed。
    */
   analyzeInstructionOriginal: async (request: {
     originalMarkdown: string;
@@ -1139,20 +1175,20 @@ export const agentHubApi = {
     deviceId?: string | null;
     projectRef?: string | null;
   }): Promise<{ common: string; adapted: string; exclusive: string }> => {
-    if (request.deviceId || request.projectRef) {
-      throw createAgentHubBlockedError(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    }
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     return invoke(AGENT_HUB_COMMANDS.analyzeInstructionOriginal, {
       request: {
         originalMarkdown: request.originalMarkdown,
         agent: request.agent,
       },
+      ...(deviceId ? { deviceId } : {}),
     });
   },
 
   /**
-   * Business Logic: 适配页 — 把当前 agent 适配正文改写为其他 agent 变体。
-   * Code Logic: agent_hub_adapt_instruction_to_other_agents；仅本机用户级。
+   * Business Logic: 适配页 — 在 owning device 把当前 agent 适配正文改写为其他 agent 变体。
+   * Code Logic: 用户级 deviceId 透传；项目级 fail-closed。
    */
   adaptInstructionToOtherAgents: async (request: {
     sourceAgent: string;
@@ -1160,20 +1196,20 @@ export const agentHubApi = {
     deviceId?: string | null;
     projectRef?: string | null;
   }): Promise<{ variants: Partial<Record<string, string>> }> => {
-    if (request.deviceId || request.projectRef) {
-      throw createAgentHubBlockedError(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    }
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     return invoke(AGENT_HUB_COMMANDS.adaptInstructionToOtherAgents, {
       request: {
         sourceAgent: request.sourceAgent,
         adaptedMarkdown: request.adaptedMarkdown,
       },
+      ...(deviceId ? { deviceId } : {}),
     });
   },
 
   /**
-   * Business Logic: 三槽 AI 辅助改写 — 按方向改当前 lane 并返回新正文（保存由前端 saveBlocks）。
-   * Code Logic: agent_hub_revise_instruction_slot；仅本机用户级。
+   * Business Logic: 三槽 AI 辅助改写 — 在 owning device 按方向改当前 lane。
+   * Code Logic: 用户级 deviceId 透传；保存仍由前端 saveBlocks。
    */
   reviseInstructionSlot: async (request: {
     lane: 'common' | 'adapted' | 'exclusive';
@@ -1189,9 +1225,8 @@ export const agentHubApi = {
     exclusive?: string | null;
     variants?: Partial<Record<string, string>> | null;
   }> => {
-    if (request.deviceId || request.projectRef) {
-      throw createAgentHubBlockedError(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    }
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
     return invoke(AGENT_HUB_COMMANDS.reviseInstructionSlot, {
       request: {
         lane: request.lane,
@@ -1201,6 +1236,7 @@ export const agentHubApi = {
         exclusiveMarkdown: request.exclusiveMarkdown ?? null,
         adaptedVariants: request.adaptedVariants ?? null,
       },
+      ...(deviceId ? { deviceId } : {}),
     });
   },
 };

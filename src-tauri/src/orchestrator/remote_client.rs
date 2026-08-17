@@ -16,18 +16,19 @@ use crate::error::AppError;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::{parse_peer_response, peer_call_error_to_app_error, PeerCallError};
 use crate::net::protocol::{
-    CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
-    CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
+    PeerProtocolInfo, CAPABILITY_DEVICE_REQUEST_BINDING_V1,
+    CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1, CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1,
+    CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1, CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
 };
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
 use crate::orchestrator::remote_protocol::{
-    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq,
-    RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
-    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
-    RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
-    RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp, RemoteWorkflowDocumentSaveReq,
-    RemoteWorkflowDocumentValidateReq,
+    RemoteCompleteAgentRunReq, RemoteCompleteOrchestratorTaskPromptReq,
+    RemoteCreateOrchestratorTaskReq, RemoteDeliverReviewedReq, RemoteListTasksReq,
+    RemoteMoveWorkflowStateReq, RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
+    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
+    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
+    RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
 };
 use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{de::DeserializeOwned, Serialize};
@@ -35,6 +36,7 @@ use std::time::Duration;
 
 const SHORT_REMOTE_ORCHESTRATOR_TIMEOUT_SECS: u64 = 15;
 const LONG_REMOTE_ORCHESTRATOR_TIMEOUT_SECS: u64 = 120;
+const COMPLETE_REMOTE_ORCHESTRATOR_TIMEOUT_SECS: u64 = 360;
 const REMOTE_ERROR_BODY_MAX_CHARS: usize = 240;
 
 /// 远端请求超时类别。
@@ -48,6 +50,7 @@ const REMOTE_ERROR_BODY_MAX_CHARS: usize = 240;
 enum RemoteRequestTimeoutKind {
     Short,
     Long,
+    Complete,
 }
 
 /// Orchestrator 远端 HTTP 客户端。
@@ -441,6 +444,83 @@ impl RemoteOrchestratorClient {
             RemoteRequestTimeoutKind::Long,
         )
         .await
+    }
+
+    /// 在 owning device 上移动任务工作流泳道。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     控制端拖拽必须改对端权威行，不得写本机 mirror 当真相。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/orchestrator/tasks/move-workflow-state`。
+    pub async fn move_task_workflow_state(
+        &self,
+        base_url: &str,
+        req: RemoteMoveWorkflowStateReq,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        if !self
+            .peer_supports_capability(base_url, CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1)
+            .await?
+        {
+            return Err(AppError::unavailable(
+                "capability_unsupported:orchestrator.move-workflow-state.v1".to_string(),
+            ));
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/orchestrator/tasks/move-workflow-state"),
+            &req,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 在 owning device 上完成 Agent 运行并走验证/交付。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     验证 pipeline 必须在任务所在设备执行；超时约 360s，no-transport-retry。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/orchestrator/tasks/complete-agent-run`。
+    pub async fn complete_agent_run(
+        &self,
+        base_url: &str,
+        req: RemoteCompleteAgentRunReq,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        if !self
+            .peer_supports_capability(base_url, CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1)
+            .await?
+        {
+            return Err(AppError::unavailable(
+                "capability_unsupported:orchestrator.complete-agent-run.v1".to_string(),
+            ));
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/orchestrator/tasks/complete-agent-run"),
+            &req,
+            RemoteRequestTimeoutKind::Complete,
+        )
+        .await
+    }
+
+    /// 探测对端是否支持某 capability。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     新契约只能在 capability 命中时使用，缺能力必须 fail-closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     GET /api/health 解析 PeerProtocolInfo::supports。
+    pub async fn peer_supports_capability(
+        &self,
+        base_url: &str,
+        capability: &str,
+    ) -> Result<bool, AppError> {
+        let info: PeerProtocolInfo = self
+            .get_json(
+                endpoint_url(base_url, "/api/health"),
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(info.supports(capability))
     }
 
     /// 重试远端阻塞任务。
@@ -841,6 +921,9 @@ fn remote_request_timeout(kind: RemoteRequestTimeoutKind) -> Duration {
         }
         RemoteRequestTimeoutKind::Long => {
             Duration::from_secs(LONG_REMOTE_ORCHESTRATOR_TIMEOUT_SECS)
+        }
+        RemoteRequestTimeoutKind::Complete => {
+            Duration::from_secs(COMPLETE_REMOTE_ORCHESTRATOR_TIMEOUT_SECS)
         }
     }
 }
@@ -1691,6 +1774,117 @@ mod tests {
             hits.load(Ordering::SeqCst),
             0,
             "capability gate 不得调用目标路由"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     看板拖拽与 completeAgentRun 必须 fail-closed：对端缺 capability 时不得打目标路由。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 无 token + 两个目标路由计数器，分别调用 move/complete，断言 unavailable 且 hit=0。
+    #[tokio::test]
+    async fn move_and_complete_return_unsupported_when_capability_absent() {
+        use crate::net::protocol::{
+            CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1,
+            CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1,
+        };
+        use crate::net::routes::health::HealthResponse;
+        use crate::orchestrator::models::OrchestratorWorkflowState;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let move_hits = Arc::new(AtomicU32::new(0));
+        let complete_hits = Arc::new(AtomicU32::new(0));
+        let move_hits_route = move_hits.clone();
+        let complete_hits_route = complete_hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/move-workflow-state",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = move_hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(deliver_reviewed_task_dto_json())
+                    }
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/complete-agent-run",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = complete_hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(deliver_reviewed_task_dto_json())
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+        let client = RemoteOrchestratorClient::new();
+
+        let move_err = client
+            .move_task_workflow_state(
+                &base_url,
+                RemoteMoveWorkflowStateReq {
+                    project_id: "project-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    target_state: OrchestratorWorkflowState::Todo,
+                },
+            )
+            .await
+            .expect_err("缺 move capability 必须失败");
+        assert!(
+            move_err
+                .to_string()
+                .contains(CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1),
+            "move 应 fail-closed 为 capability_unsupported，实际: {move_err}"
+        );
+        assert_eq!(move_hits.load(Ordering::SeqCst), 0);
+
+        let complete_err = client
+            .complete_agent_run(
+                &base_url,
+                RemoteCompleteAgentRunReq {
+                    project_id: "project-1".to_string(),
+                    task_id: "task-1".to_string(),
+                },
+            )
+            .await
+            .expect_err("缺 complete capability 必须失败");
+        assert!(
+            complete_err
+                .to_string()
+                .contains(CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1),
+            "complete 应 fail-closed 为 capability_unsupported，实际: {complete_err}"
+        );
+        assert_eq!(complete_hits.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     complete-agent-run 必须与 control 路径一致使用约 360s 超时，避免验证 pipeline 被短超时切断。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 Complete timeout kind 为 360 秒。
+    #[test]
+    fn complete_agent_run_timeout_is_360_seconds() {
+        assert_eq!(
+            remote_request_timeout(RemoteRequestTimeoutKind::Complete),
+            Duration::from_secs(360)
         );
     }
 

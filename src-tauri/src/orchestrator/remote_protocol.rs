@@ -61,6 +61,35 @@ pub struct RemoteTaskReq {
     pub task_id: String,
 }
 
+/// 远端看板拖拽请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     控制端拖拽必须改 owning device 权威任务行，并带上 inner project id。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId,taskId,targetState}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMoveWorkflowStateReq {
+    pub project_id: String,
+    pub task_id: String,
+    pub target_state: crate::orchestrator::models::OrchestratorWorkflowState,
+}
+
+/// 远端完成 Agent 运行请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     完成运行必须在 owning device 上走验证/交付，并绑定 local project。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{projectId,taskId}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCompleteAgentRunReq {
+    pub project_id: String,
+    pub task_id: String,
+}
+
 /// 远端交付人工复核任务请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:

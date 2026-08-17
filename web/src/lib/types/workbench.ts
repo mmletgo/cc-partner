@@ -98,6 +98,14 @@ export interface WorkbenchProjectNote {
 }
 
 /**
+ * 工作台设备标语 DTO（对齐 Rust WorkbenchBannerDto）。
+ */
+export interface WorkbenchBanner {
+  markdown: string;
+  updatedAt: string;
+}
+
+/**
  * 工作台 Git 状态摘要。
  *
  * Business Logic（为什么需要这个类型）:

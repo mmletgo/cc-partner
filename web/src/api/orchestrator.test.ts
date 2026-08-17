@@ -80,6 +80,11 @@ describe('orchestrator', () => {
       'moveTaskWorkflowState should use the split-state backend command',
     );
     assert(
+      ORCHESTRATOR_REMOTE_COMMANDS.completeAgentRunForProject ===
+        'complete_orchestrator_agent_run_for_project',
+      'completeAgentRun should use the project-scoped backend command',
+    );
+    assert(
       ORCHESTRATOR_REMOTE_COMMANDS.getRuntimeSnapshot === 'get_orchestrator_runtime_snapshot',
       'getRuntimeSnapshot should use the runtime snapshot backend command',
     );
@@ -160,6 +165,18 @@ describe('orchestrator', () => {
     assert(
       'moveTaskWorkflowState' in orchestratorApi,
       'orchestrator task API should expose moveTaskWorkflowState',
+    );
+    assert(
+      'completeAgentRun' in orchestratorApi,
+      'orchestrator task API should expose completeAgentRun',
+    );
+    assert(
+      orchestratorApiSource.includes('complete_orchestrator_agent_run_for_project'),
+      'completeAgentRun should invoke the project-scoped command, not the local-only sentinel',
+    );
+    assert(
+      !orchestratorApiSource.includes("'complete_orchestrator_agent_run'"),
+      'completeAgentRun should not invoke the task-id-only local command',
     );
     assert('startTaskView' in orchestratorApi, 'orchestrator task API should expose startTaskView');
     assert(

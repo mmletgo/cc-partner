@@ -28,9 +28,12 @@ use crate::agent_hub::service::{
     SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 use crate::agent_hub::user_instructions::{
+    AdaptInstructionToOtherAgentsRequest, AdaptInstructionToOtherAgentsResult,
+    AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto,
-    UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
+    SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto, UserInstructionPlanDto,
+    UserInstructionWorkspaceDto,
 };
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
@@ -88,6 +91,23 @@ fn portable_control_read_timeout(op: &str) -> Duration {
         }
         _ => QUERY_TIMEOUT,
     }
+}
+
+/// 把可选 deviceId 写入 control payload，供 owner 决定本机或 P2P。
+///
+/// Business Logic: Preview 等请求 deny_unknown_fields，owner 会先剥离 deviceId。
+/// Code Logic: 空/缺省不写字段；非空插入 camelCase `deviceId`。
+fn merge_device_id(
+    mut payload: serde_json::Value,
+    device_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(id) = device_id.filter(|s| !s.trim().is_empty()) {
+        let obj = payload.as_object_mut().ok_or_else(|| {
+            AppError::generic("agent hub control payload 必须是对象才能附加 deviceId")
+        })?;
+        obj.insert("deviceId".to_string(), serde_json::Value::String(id));
+    }
+    Ok(payload)
 }
 
 /// 包装 get-config 响应（与 control_api::ControlConfigResponse 对齐）。
@@ -1162,26 +1182,31 @@ impl BackendControlClient {
     }
 
     /// Business Logic: GuiClient 必须读取 sidecar owner 的用户级 source chain。
-    /// Code Logic: agent_hub.inspect_user_instruction_workspace 只读查询。
+    /// Code Logic: 透传可选 deviceId；owner 再决定本机或 P2P。
     pub async fn agent_hub_inspect_user_instruction_workspace(
         &self,
+        device_id: Option<String>,
     ) -> Result<UserInstructionWorkspaceDto, AppError> {
         self.agent_hub_op(
             "agent_hub.inspect_user_instruction_workspace",
-            serde_json::json!({}),
+            merge_device_id(serde_json::json!({}), device_id)?,
         )
         .await
     }
 
     /// Business Logic: 首次设置 preview 属于 V2 合同，旧 sidecar 不得静默降级。
-    /// Code Logic: 版本门闩后调用 setup preview。
+    /// Code Logic: 版本门闩后调用 setup preview；deviceId 写入 payload 供 owner 路由。
     pub async fn agent_hub_preview_user_instruction_setup(
         &self,
         req: PreviewUserInstructionRequest,
+        device_id: Option<String>,
     ) -> Result<UserInstructionPlanDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.preview_user_instruction_setup", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.preview_user_instruction_setup",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
     }
 
     /// Business Logic: 日常更新 preview 也必须由 owner 绑定计划。
@@ -1189,10 +1214,14 @@ impl BackendControlClient {
     pub async fn agent_hub_preview_user_instruction_update(
         &self,
         req: PreviewUserInstructionRequest,
+        device_id: Option<String>,
     ) -> Result<UserInstructionPlanDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.preview_user_instruction_update", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.preview_user_instruction_update",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
     }
 
     /// Business Logic: 应用 plan 是 V2 mutation，必须阻断旧 sidecar。
@@ -1200,10 +1229,14 @@ impl BackendControlClient {
     pub async fn agent_hub_apply_user_instruction_plan(
         &self,
         req: ApplyUserInstructionPlanRequest,
+        device_id: Option<String>,
     ) -> Result<ApplyUserInstructionPlanResultDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.apply_user_instruction_plan", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.apply_user_instruction_plan",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
     }
 
     /// Business Logic: 保存块文档是 V2 mutation，必须阻断旧 sidecar（独立于 CLI 写入门禁）。
@@ -1211,10 +1244,14 @@ impl BackendControlClient {
     pub async fn agent_hub_save_user_instruction_blocks(
         &self,
         req: SaveUserInstructionBlocksRequest,
+        device_id: Option<String>,
     ) -> Result<UserInstructionCanonicalDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.save_user_instruction_blocks", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.save_user_instruction_blocks",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
     }
 
     /// Business Logic: 三槽历史只读查询。
@@ -1222,9 +1259,13 @@ impl BackendControlClient {
     pub async fn agent_hub_list_user_instruction_slot_versions(
         &self,
         req: crate::agent_hub::user_instructions::ListUserInstructionSlotVersionsRequest,
+        device_id: Option<String>,
     ) -> Result<Vec<crate::commands::prompts::ContentVersionDto>, AppError> {
-        self.agent_hub_op("agent_hub.list_user_instruction_slot_versions", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.list_user_instruction_slot_versions",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
     }
 
     /// Business Logic: 三槽历史恢复是 V2 mutation，必须阻断旧 sidecar。
@@ -1232,10 +1273,59 @@ impl BackendControlClient {
     pub async fn agent_hub_restore_user_instruction_slot_version(
         &self,
         req: crate::agent_hub::user_instructions::RestoreUserInstructionSlotRequest,
+        device_id: Option<String>,
     ) -> Result<UserInstructionCanonicalDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.restore_user_instruction_slot_version", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.restore_user_instruction_slot_version",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
+    }
+
+    /// Business Logic: 远端 analyze 必须经 sidecar 再 P2P，GuiClient 不得直连 peer。
+    /// Code Logic: 长超时对齐 HeadlessCompletion 180s。
+    pub async fn agent_hub_analyze_instruction_original(
+        &self,
+        req: AnalyzeInstructionOriginalRequest,
+        device_id: Option<String>,
+    ) -> Result<AnalyzeInstructionOriginalResult, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.analyze_instruction_original",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+            Duration::from_secs(200),
+        )
+        .await
+    }
+
+    /// Business Logic: 远端 adapt 在 owning device 跑 HeadlessCompletion。
+    /// Code Logic: 长超时 control op。
+    pub async fn agent_hub_adapt_instruction_to_other_agents(
+        &self,
+        req: AdaptInstructionToOtherAgentsRequest,
+        device_id: Option<String>,
+    ) -> Result<AdaptInstructionToOtherAgentsResult, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.adapt_instruction_to_other_agents",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+            Duration::from_secs(200),
+        )
+        .await
+    }
+
+    /// Business Logic: 远端 revise 在 owning device 跑 HeadlessCompletion。
+    /// Code Logic: 长超时 control op。
+    pub async fn agent_hub_revise_instruction_slot(
+        &self,
+        req: ReviseInstructionSlotRequest,
+        device_id: Option<String>,
+    ) -> Result<ReviseInstructionSlotResult, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.revise_instruction_slot",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+            Duration::from_secs(200),
+        )
+        .await
     }
 
     /// Business Logic: 保存整份指令（mutation）。

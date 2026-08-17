@@ -140,7 +140,7 @@
       "contextSave": "Save slots and switch",
       "contextDiscard": "Discard draft and switch",
       "projectScopeUnsupported": "Project-scoped instruction writes are not available on this backend yet; no user-scoped write will be attempted.",
-      "directContextUnsupported": "Direct instruction access is limited to this device at user scope. Use Pull for a remote device; project scope remains unavailable.",
+      "directContextUnsupported": "Direct instruction access is limited to user scope on this device or a capable peer. Project scope remains unavailable.",
       "writeBlocked": "The current agent cannot write its native file yet. You can still edit and save the Hub draft.",
       "writeBlockedTargets": "At least one target agent cannot write its native file yet. You can still edit and save the shared Hub draft.",
       "errors": {

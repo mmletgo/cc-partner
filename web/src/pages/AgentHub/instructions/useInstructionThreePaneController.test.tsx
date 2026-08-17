@@ -905,13 +905,14 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.plan).toBeNull();
   });
 
-  test('changing deviceId blocks direct inspect and exposes Pull-only error', async () => {
+  test('changing deviceId inspects the peer workspace with deviceId', async () => {
     apiMocks.inspectUserInstructionWorkspace.mockImplementation(
       async (ctx?: { deviceId?: string | null }) => {
         if (ctx?.deviceId === 'peer-9') {
-          throw Object.assign(new Error('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE'), {
-            code: 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE',
-          });
+          return {
+            ...workspaceFixture(),
+            inventorySnapshotHash: 'peer-hash',
+          };
         }
         return workspaceFixture();
       },
@@ -935,10 +936,14 @@ describe('useInstructionThreePaneController', () => {
     });
 
     await waitFor(() => {
-      expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
+      expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledWith({
+        deviceId: 'peer-9',
+        projectRef: null,
+      });
+      expect(result.current.workspace?.inventorySnapshotHash).toBe('peer-hash');
     });
-    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledTimes(1);
-    expect(result.current.workspace).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(result.current.writeBlocked).toBe(false);
   });
 
   test('local and remote project contexts both fail closed before inspect', async () => {

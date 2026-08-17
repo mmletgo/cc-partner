@@ -20,13 +20,15 @@ mod tests;
 // Tauri command 入口（含 generate_handler 依赖的 __cmd__/__tauri_command_name_ 宏）
 pub use actions::{
     __cmd__abort_orchestrator_task, __cmd__complete_orchestrator_agent_run,
-    __cmd__dispatch_orchestrator_once, __cmd__queue_orchestrator_task,
-    __cmd__retry_orchestrator_task, __tauri_command_name_abort_orchestrator_task,
+    __cmd__complete_orchestrator_agent_run_for_project, __cmd__dispatch_orchestrator_once,
+    __cmd__queue_orchestrator_task, __cmd__retry_orchestrator_task,
+    __tauri_command_name_abort_orchestrator_task,
     __tauri_command_name_complete_orchestrator_agent_run,
+    __tauri_command_name_complete_orchestrator_agent_run_for_project,
     __tauri_command_name_dispatch_orchestrator_once, __tauri_command_name_queue_orchestrator_task,
     __tauri_command_name_retry_orchestrator_task, abort_orchestrator_task,
-    complete_orchestrator_agent_run, dispatch_orchestrator_once, queue_orchestrator_task,
-    retry_orchestrator_task,
+    complete_orchestrator_agent_run, complete_orchestrator_agent_run_for_project,
+    dispatch_orchestrator_once, queue_orchestrator_task, retry_orchestrator_task,
 };
 pub use evidence::{
     __cmd__get_orchestrator_config_for_project, __cmd__get_orchestrator_project_config,
@@ -105,7 +107,8 @@ pub(crate) use actions::{
 pub(crate) use common::{
     build_orchestrator_task_row, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
-    run_delivery_for_task,
+    move_orchestrator_task_workflow_state_for_local_project, run_delivery_for_task,
+    MoveOrchestratorTaskWorkflowStateRequest,
 };
 pub use common::{
     CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
