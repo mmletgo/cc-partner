@@ -1487,8 +1487,9 @@ pub fn scan_plugin_components_readonly_filtered(
 mod tests {
     use super::*;
     use crate::agent_hub::targets::{
-        AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
-        GrokInstructionAdapter, LocalScopeMapping, OpenCodeInstructionAdapter, TargetEnvironment,
+        AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
+        GeminiInstructionAdapter, GrokInstructionAdapter, LocalScopeMapping,
+        OpenCodeInstructionAdapter, TargetEnvironment,
     };
     use std::collections::BTreeMap as Map;
 
@@ -1866,6 +1867,9 @@ enabled = true
             .scan_portable_assets(&scope, &env)
             .unwrap();
         let _ = GeminiInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        let _ = CursorInstructionAdapter
             .scan_portable_assets(&scope, &env)
             .unwrap();
         let after = walk_snapshot(&env.home);

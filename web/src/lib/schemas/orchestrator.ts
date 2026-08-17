@@ -421,6 +421,7 @@ export const agentProviderIdDecoder: Decoder<AgentProviderId> = enumDecoder('Age
   'openCodeVisible',
   'grokBuildVisible',
   'geminiCliVisible',
+  'cursorCliVisible',
 ] as const);
 
 /**

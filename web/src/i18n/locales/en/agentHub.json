@@ -184,7 +184,8 @@
         "codex": "Codex extension",
         "opencode": "OpenCode extension",
         "grok": "Grok Build extension",
-        "gemini": "Gemini CLI extension"
+        "gemini": "Gemini CLI extension",
+        "cursor": "Cursor CLI extension"
       },
       "placeholders": {
         "common": "Instructions every managed agent should follow…",
@@ -192,7 +193,8 @@
         "codex": "Extra instructions only Codex needs…",
         "opencode": "Extra instructions only OpenCode needs…",
         "grok": "Extra instructions only Grok Build needs…",
-        "gemini": "Extra instructions only Gemini CLI needs…"
+        "gemini": "Extra instructions only Gemini CLI needs…",
+        "cursor": "Extra instructions only Cursor CLI needs…"
       }
     },
     "target": {
@@ -331,7 +333,8 @@
     "codex": "Codex",
     "opencode": "OpenCode",
     "grok": "Grok Build",
-    "gemini": "Gemini CLI"
+    "gemini": "Gemini CLI",
+    "cursor": "Cursor CLI"
   },
   "kinds": {
     "instruction": "Instruction",
@@ -609,7 +612,8 @@
         "codex": "Codex",
         "opencode": "OpenCode",
         "grok": "Grok Build",
-        "gemini": "Gemini CLI"
+        "gemini": "Gemini CLI",
+        "cursor": "Cursor CLI"
       },
       "scopeFilter": {
         "all": "All scopes",
@@ -785,14 +789,16 @@
       "codex": "Codex",
       "opencode": "OpenCode",
       "grok": "Grok Build",
-      "gemini": "Gemini CLI"
+      "gemini": "Gemini CLI",
+      "cursor": "Cursor CLI"
     },
     "destination": {
       "sameAsClaude": "Destination: Claude (same agent)",
       "sameAsCodex": "Destination: Codex (same agent)",
       "sameAsOpenCode": "Destination: OpenCode (same agent)",
       "sameAsGrok": "Destination: Grok Build (same agent)",
-      "sameAsGemini": "Destination: Gemini CLI (same agent)"
+      "sameAsGemini": "Destination: Gemini CLI (same agent)",
+      "sameAsCursor": "Destination: Cursor CLI (same agent)"
     },
     "policy": {
       "skipExisting": "Skip existing",

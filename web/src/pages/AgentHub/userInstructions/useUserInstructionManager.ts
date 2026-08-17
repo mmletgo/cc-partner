@@ -35,13 +35,11 @@ export type UserInstructionTargetIntent =
   | 'adopt'
   | 'restore';
 
-const EMPTY_TARGET_SELECTIONS: Record<AgentTarget, UserInstructionTargetSelection> = {
-  claude: 'unmanaged',
-  codex: 'unmanaged',
-  opencode: 'unmanaged',
-  grok: 'unmanaged',
-  gemini: 'unmanaged',
-};
+const EMPTY_TARGET_SELECTIONS: Record<AgentTarget, UserInstructionTargetSelection> =
+  Object.fromEntries(allHubTargets().map((target) => [target, 'unmanaged'])) as Record<
+    AgentTarget,
+    UserInstructionTargetSelection
+  >;
 
 /**
  * Business Logic（为什么需要）:

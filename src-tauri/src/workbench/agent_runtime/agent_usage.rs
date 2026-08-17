@@ -57,15 +57,105 @@ fn is_safe_native_id(id: &str) -> bool {
     !id.is_empty() && !id.contains('/') && !id.contains('\\') && !id.contains("..")
 }
 
-/// 把 f64 金额格式化为保留 6 位小数的字符串。
+/// USD ISO 4217 exponent（分）。provider 提取的 cost 目前都是美元。
+const USD_COST_EXPONENT: usize = 2;
+
+/// 把 provider 给出的 f64 金额格式成可无损转为 USD minor units 的十进制字符串。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Ledger 的 cost_major 是字符串主单位金额，需要稳定格式便于 minor units 换算。
+///     Ledger 只接受 ISO 4217 exponent 以内的 cost_major。`{:.6}` 会把 `0.05`
+///     写成 `0.050000`，USD exponent=2 的无损换算全部失败，会话明细成本变成「—」。
 ///
-/// Code Logic（这个模块做什么）:
-///     `format!("{:.6}", v)`；调用方在总额为 0 时直接传 None。
+/// Code Logic（这个函数做什么）:
+///     先格式化为 12 位小数字符串，再按 USD exponent=2 四舍五入并去掉尾随零。
+///     调用方在总额为 0 时直接传 None。
 fn format_cost(v: f64) -> String {
-    format!("{:.6}", v)
+    if !v.is_finite() || v <= 0.0 {
+        return "0".to_string();
+    }
+    round_decimal_to_exponent(&format!("{v:.12}"), USD_COST_EXPONENT)
+        .unwrap_or_else(|| format!("{v:.2}"))
+}
+
+/// 去掉十进制字符串小数部分的尾随零（以及空小数点）。
+fn trim_trailing_decimal_zeros(major: &str) -> String {
+    if !major.contains('.') {
+        return major.to_string();
+    }
+    let trimmed = major.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 将十进制主单位字符串四舍五入到 `exp` 位小数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     provider 的 costUSD 是 f64，常带分以下精度；Ledger 按 ISO 4217 分存储，
+///     必须在进入无损换算前把字符串收敛到 exponent，而不是 `f64 * 100`。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 `整数.小数`；超出 `exp` 的下一位 ≥5 则进位；失败返回 None。
+fn round_decimal_to_exponent(major: &str, exp: usize) -> Option<String> {
+    let s = major.trim();
+    if s.is_empty() || s.starts_with('-') || s.contains(['e', 'E', '+']) {
+        return None;
+    }
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => return Some(s.to_string()),
+    };
+    if int_part.is_empty() || !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !frac_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if frac_part.len() <= exp {
+        return Some(trim_trailing_decimal_zeros(&format!(
+            "{int_part}.{frac_part}"
+        )));
+    }
+    let keep = &frac_part[..exp];
+    let round_up = frac_part.as_bytes().get(exp).is_some_and(|b| *b >= b'5');
+    if !round_up {
+        return Some(trim_trailing_decimal_zeros(&format!("{int_part}.{keep}")));
+    }
+    let mut digits: Vec<u8> = int_part.bytes().chain(keep.bytes()).collect();
+    if digits.is_empty() {
+        digits.push(b'0');
+    }
+    let mut i = digits.len();
+    let mut carry = true;
+    while carry && i > 0 {
+        i -= 1;
+        if digits[i] == b'9' {
+            digits[i] = b'0';
+        } else {
+            digits[i] += 1;
+            carry = false;
+        }
+    }
+    if carry {
+        digits.insert(0, b'1');
+    }
+    let rounded = String::from_utf8(digits).ok()?;
+    if exp == 0 {
+        return Some(trim_trailing_decimal_zeros(&rounded));
+    }
+    let padded = if rounded.len() <= exp {
+        format!("{:0>width$}", rounded, width = exp + 1)
+    } else {
+        rounded
+    };
+    let split = padded.len() - exp;
+    Some(trim_trailing_decimal_zeros(&format!(
+        "{}.{}",
+        &padded[..split],
+        &padded[split..]
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,6 +1615,8 @@ pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
             | "grok"
             | "geminiCliVisible"
             | "gemini"
+            | "cursorCliVisible"
+            | "cursor"
     )
 }
 
@@ -1629,7 +1721,46 @@ fn codex_home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workbench::agent_ledger::models::convert_major_to_minor_units;
     use std::str::FromStr;
+
+    /// Business Logic: 提取出的 cost_major 必须能按 USD 分无损入库，否则明细全是「—」。
+    #[test]
+    fn format_cost_is_convertible_to_usd_cents() {
+        assert_eq!(format_cost(0.05), "0.05");
+        assert_eq!(
+            convert_major_to_minor_units(&format_cost(0.05), "USD").unwrap(),
+            5
+        );
+        assert_eq!(format_cost(0.012345), "0.01");
+        assert_eq!(
+            convert_major_to_minor_units(&format_cost(0.012345), "USD").unwrap(),
+            1
+        );
+        assert_eq!(format_cost(0.75), "0.75");
+        assert_eq!(
+            convert_major_to_minor_units(&format_cost(0.75), "USD").unwrap(),
+            75
+        );
+    }
+
+    /// Business Logic: 分以下精度按十进制字符串四舍五入，不走 f64*100。
+    #[test]
+    fn round_decimal_to_exponent_half_up() {
+        assert_eq!(
+            round_decimal_to_exponent("0.015", 2).as_deref(),
+            Some("0.02")
+        );
+        assert_eq!(
+            round_decimal_to_exponent("0.014", 2).as_deref(),
+            Some("0.01")
+        );
+        assert_eq!(
+            round_decimal_to_exponent("0.050000", 2).as_deref(),
+            Some("0.05")
+        );
+        assert_eq!(round_decimal_to_exponent("9.995", 2).as_deref(), Some("10"));
+    }
 
     /// 写入临时 jsonl 文件的辅助。
     fn write_jsonl(dir: &Path, name: &str, lines: &[String]) -> PathBuf {
@@ -1683,7 +1814,7 @@ mod tests {
         assert_eq!(snap.output_tokens, Some(28));
         assert_eq!(snap.cache_read_tokens, Some(6));
         assert_eq!(snap.cache_write_tokens, Some(2));
-        assert_eq!(snap.cost_major.as_deref(), Some("0.050000"));
+        assert_eq!(snap.cost_major.as_deref(), Some("0.05"));
         assert_eq!(snap.cost_currency.as_deref(), Some("USD"));
         assert_eq!(snap.model_id.as_deref(), Some("claude-sonnet-4"));
         // 末轮占用 = msg_2 的 7+1+0，不是累计 17+6+2。
@@ -1896,7 +2027,7 @@ mod tests {
         assert_eq!(snap.output_tokens, Some(10));
         assert_eq!(snap.cache_read_tokens, Some(1));
         assert_eq!(snap.cache_write_tokens, Some(2));
-        assert_eq!(snap.cost_major.as_deref(), Some("0.750000"));
+        assert_eq!(snap.cost_major.as_deref(), Some("0.75"));
         assert_eq!(snap.model_id.as_deref(), Some("m2"));
         // 末条 5+0+0，不是累计 8+1+2。
         assert_eq!(snap.context_length, Some(5));
@@ -1949,7 +2080,7 @@ mod tests {
         let snap = query_opencode_usage(&pool, "sess").await.unwrap();
         assert_eq!(snap.input_tokens, Some(11));
         assert_eq!(snap.output_tokens, Some(22));
-        assert_eq!(snap.cost_major.as_deref(), Some("0.300000"));
+        assert_eq!(snap.cost_major.as_deref(), Some("0.3"));
         assert_eq!(snap.model_id.as_deref(), Some("mo2"));
         // 不存在的 session → None
         assert!(query_opencode_usage(&pool, "other").await.is_none());

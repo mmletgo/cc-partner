@@ -35,9 +35,9 @@ use crate::agent_hub::targets::portable::{
     DiscoveredPortableAsset, PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
-    GrokInstructionAdapter, LocalScopeMapping, OpenCodeInstructionAdapter, TargetEnvironment,
-    TargetPathResolver, TargetProbe,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
+    GeminiInstructionAdapter, GrokInstructionAdapter, LocalScopeMapping,
+    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -136,7 +136,8 @@ pub(crate) fn evaluate_current_portable_target_support(
         | AgentTarget::Codex
         | AgentTarget::OpenCode
         | AgentTarget::Grok
-        | AgentTarget::Gemini => crate::agent_hub::targets::probe_target(target, &env),
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor => crate::agent_hub::targets::probe_target(target, &env),
     }?;
     evaluate_probe_support(target, &probe)
 }
@@ -279,6 +280,7 @@ pub fn scan_portable_inventory_facts_query(
         Box::new(OpenCodeInstructionAdapter),
         Box::new(GrokInstructionAdapter),
         Box::new(GeminiInstructionAdapter),
+        Box::new(CursorInstructionAdapter),
     ];
     let homes = TargetPathResolver::resolve_all(env);
     let mut target_dtos = Vec::with_capacity(adapters.len());
@@ -540,6 +542,7 @@ fn target_dto_from_probe(
         AgentTarget::OpenCode => homes.opencode.config_root.display().to_string(),
         AgentTarget::Grok => homes.grok.config_root.display().to_string(),
         AgentTarget::Gemini => homes.gemini.config_root.display().to_string(),
+        AgentTarget::Cursor => homes.cursor.config_root.display().to_string(),
     };
     let installed = probe.executable.is_some();
     let manifest = builtin_support_manifest()?;
@@ -914,6 +917,12 @@ fn plugin_roots_for(
                 .map(PluginRootCandidate::path_only)
                 .collect()
         }
+        (AgentTarget::Cursor, ScopeKind::User) => {
+            direct_manifest_plugin_roots(&homes.cursor.config_root.join("plugins"), target)
+                .into_iter()
+                .map(PluginRootCandidate::path_only)
+                .collect()
+        }
         (AgentTarget::Grok, _) => {
             direct_manifest_plugin_roots(&scope.absolute_path.join(".grok").join("plugins"), target)
                 .into_iter()
@@ -922,6 +931,13 @@ fn plugin_roots_for(
         }
         (AgentTarget::Gemini, _) => direct_manifest_plugin_roots(
             &scope.absolute_path.join(".gemini").join("extensions"),
+            target,
+        )
+        .into_iter()
+        .map(PluginRootCandidate::path_only)
+        .collect(),
+        (AgentTarget::Cursor, _) => direct_manifest_plugin_roots(
+            &scope.absolute_path.join(".cursor").join("plugins"),
             target,
         )
         .into_iter()
@@ -950,7 +966,7 @@ pub(crate) fn user_plugin_package_root_paths(
                 .map(PluginRootCandidate::path_only)
                 .collect()
         }
-        AgentTarget::Grok | AgentTarget::Gemini => {
+        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor => {
             direct_manifest_plugin_roots(&config_root.join("plugins"), target)
                 .into_iter()
                 .map(PluginRootCandidate::path_only)
@@ -1136,7 +1152,7 @@ fn direct_manifest_plugin_roots(base: &Path, target: AgentTarget) -> Vec<PathBuf
         AgentTarget::Claude => ".claude-plugin/plugin.json",
         AgentTarget::Codex => ".codex-plugin/plugin.json",
         AgentTarget::OpenCode => "package.json",
-        AgentTarget::Grok | AgentTarget::Gemini => "plugin.json",
+        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor => "plugin.json",
     };
     let Ok(read) = fs::read_dir(base) else {
         return Vec::new();
@@ -1806,7 +1822,8 @@ mod tests {
     use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory_with_facts;
     use crate::agent_hub::targets::{
         AdapterSupportLevel, ClaudeInstructionAdapter, CodexInstructionAdapter,
-        GeminiInstructionAdapter, GrokInstructionAdapter, OpenCodeInstructionAdapter,
+        CursorInstructionAdapter, GeminiInstructionAdapter, GrokInstructionAdapter,
+        OpenCodeInstructionAdapter,
     };
     use std::collections::BTreeMap as Map;
 
@@ -2676,6 +2693,9 @@ enabled = false
             .scan_portable_assets(&scope, &env)
             .unwrap();
         let _ = GeminiInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        let _ = CursorInstructionAdapter
             .scan_portable_assets(&scope, &env)
             .unwrap();
         let after = walk_snapshot(&env.home);

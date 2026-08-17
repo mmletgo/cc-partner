@@ -46,6 +46,7 @@ pub enum AgentSessionSource {
     OpenCode,
     Grok,
     Gemini,
+    Cursor,
 }
 
 impl AgentSessionSource {
@@ -60,6 +61,7 @@ impl AgentSessionSource {
             "opencode" | "open-code" | "open_code" => Some(Self::OpenCode),
             "grok" | "grok-build" | "grokbuild" => Some(Self::Grok),
             "gemini" | "gemini-cli" | "geminicli" => Some(Self::Gemini),
+            "cursor" | "cursor-cli" | "cursorcli" => Some(Self::Cursor),
             _ => None,
         }
     }
@@ -72,6 +74,7 @@ impl AgentSessionSource {
             Self::OpenCode => "opencode",
             Self::Grok => "grok",
             Self::Gemini => "gemini",
+            Self::Cursor => "cursor",
         }
     }
 }
@@ -837,6 +840,7 @@ pub fn search_catalog_sessions(
     match source {
         AgentSessionSource::Grok => search_grok_sessions(worktree_path, query, limit),
         AgentSessionSource::Gemini => search_gemini_sessions(worktree_path, query, limit),
+        AgentSessionSource::Cursor => search_cursor_sessions(worktree_path, query, limit),
         _ => Ok(SessionSearchResult {
             items: Vec::new(),
             truncated: false,
@@ -1107,6 +1111,22 @@ fn search_gemini_sessions(
     })
 }
 
+/// Cursor CLI 会话布局尚未作为合同 evidence 固化；v1 保持 fail-closed 空结果。
+///
+/// Business Logic: Hub/Runtime 已登记 `cursor` session source，搜索不得猜路径或误扫 Claude jsonl。
+/// Code Logic: 返回 unavailable 诊断，不遍历磁盘。
+fn search_cursor_sessions(
+    _worktree_path: &str,
+    _query: &str,
+    _limit: usize,
+) -> Result<SessionSearchResult, AppError> {
+    Ok(SessionSearchResult {
+        items: Vec::new(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Resume 命令与 CLI 探测
 // ---------------------------------------------------------------------------
@@ -1123,6 +1143,7 @@ pub fn build_resume_command(source: AgentSessionSource, session_id: &str) -> Str
         AgentSessionSource::OpenCode => format!("opencode --session {id}\n"),
         AgentSessionSource::Grok => format!("grok --resume {id}\n"),
         AgentSessionSource::Gemini => format!("gemini --resume {id}\n"),
+        AgentSessionSource::Cursor => format!("agent --resume {id}\n"),
     }
 }
 
@@ -1134,6 +1155,7 @@ pub async fn check_agent_cli_available(source: AgentSessionSource) -> Result<(),
         AgentSessionSource::OpenCode => "opencode",
         AgentSessionSource::Grok => "grok",
         AgentSessionSource::Gemini => "gemini",
+        AgentSessionSource::Cursor => "agent",
     };
     let mut child = Command::new(exe)
         .arg("--version")
@@ -1181,6 +1203,10 @@ mod tests {
         assert_eq!(
             AgentSessionSource::parse("grok"),
             Some(AgentSessionSource::Grok)
+        );
+        assert_eq!(
+            AgentSessionSource::parse("cursor"),
+            Some(AgentSessionSource::Cursor)
         );
         assert_eq!(AgentSessionSource::parse("antigravity"), None);
     }

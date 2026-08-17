@@ -15,7 +15,7 @@
  * Business Logic: 投影与适配必须区分各端路径与能力。
  * Code Logic: wire token 与 `allHubTargets()` 对齐。
  */
-export type AgentTarget = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini';
+export type AgentTarget = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor';
 
 /**
  * 用户级指令 V2 设置阶段。

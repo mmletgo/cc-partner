@@ -204,7 +204,8 @@
       "genericTerminal": "Generic terminal",
       "openCodeVisible": "OpenCode (visible)",
       "grokBuildVisible": "Grok Build (visible)",
-      "geminiCliVisible": "Gemini CLI (visible)"
+      "geminiCliVisible": "Gemini CLI (visible)",
+      "cursorCliVisible": "Cursor CLI (visible)"
     },
     "bridgeStatus": {
       "ready": "Bridge ready",

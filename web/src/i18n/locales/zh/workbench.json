@@ -642,7 +642,10 @@
     "agents": {
       "claude": "Claude",
       "codex": "Codex",
-      "opencode": "OpenCode"
+      "opencode": "OpenCode",
+      "grok": "Grok Build",
+      "gemini": "Gemini CLI",
+      "cursor": "Cursor CLI"
     },
     "scopeWorktree": "worktree",
     "groupRecent": "最近 · worktree {{name}}",
@@ -1004,7 +1007,8 @@
     "genericTerminal": "通用终端",
     "openCodeVisible": "OpenCode",
     "grokBuildVisible": "Grok Build",
-    "geminiCliVisible": "Gemini CLI"
+    "geminiCliVisible": "Gemini CLI",
+    "cursorCliVisible": "Cursor CLI"
   },
   "openCodeBridge": {
     "title": "OpenCode runtime bridge",

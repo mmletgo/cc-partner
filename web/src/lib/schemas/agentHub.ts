@@ -94,6 +94,7 @@ export const agentTargetDecoder: Decoder<AgentTarget> = enumDecoder('AgentTarget
   'opencode',
   'grok',
   'gemini',
+  'cursor',
 ] as const);
 
 /**
@@ -122,6 +123,7 @@ const instructionBlockVariantsDecoder: Decoder<Partial<Record<AgentTarget, strin
     opencode: optionalDecoder(stringDecoder),
     grok: optionalDecoder(stringDecoder),
     gemini: optionalDecoder(stringDecoder),
+    cursor: optionalDecoder(stringDecoder),
   });
 
 /**

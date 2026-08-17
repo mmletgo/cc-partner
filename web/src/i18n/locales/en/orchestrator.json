@@ -337,6 +337,7 @@
     "genericTerminal": "Generic",
     "openCodeVisible": "OpenCode",
     "grokBuildVisible": "Grok Build",
-    "geminiCliVisible": "Gemini CLI"
+    "geminiCliVisible": "Gemini CLI",
+    "cursorCliVisible": "Cursor CLI"
   }
 }

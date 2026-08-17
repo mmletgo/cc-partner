@@ -22,8 +22,9 @@ use crate::agent_hub::project_scope::{
     AgentHubProjectStatus, EnableAgentHubProjectRequest,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
-    GrokInstructionAdapter, OpenCodeInstructionAdapter, TargetEnvironment,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
+    GeminiInstructionAdapter, GrokInstructionAdapter, OpenCodeInstructionAdapter,
+    TargetEnvironment,
 };
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::{self, AGENT_HUB_API_VERSION};
@@ -1890,6 +1891,7 @@ fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
         (Box::new(OpenCodeInstructionAdapter), AgentTarget::OpenCode),
         (Box::new(GrokInstructionAdapter), AgentTarget::Grok),
         (Box::new(GeminiInstructionAdapter), AgentTarget::Gemini),
+        (Box::new(CursorInstructionAdapter), AgentTarget::Cursor),
     ];
     let mut map = BTreeMap::new();
     for (adapter, target) in adapters {
@@ -3251,7 +3253,8 @@ mod tests {
                 crate::agent_hub::models::AgentTarget::Claude
                 | crate::agent_hub::models::AgentTarget::Codex
                 | crate::agent_hub::models::AgentTarget::Grok
-                | crate::agent_hub::models::AgentTarget::Gemini => {
+                | crate::agent_hub::models::AgentTarget::Gemini
+                | crate::agent_hub::models::AgentTarget::Cursor => {
                     assert!(
                         matches!(p.support.as_str(), "supported" | "scanOnly" | "unsupported"),
                         "unexpected support={} for {}",

@@ -1845,7 +1845,7 @@ pub(crate) async fn search_agent_sessions_for_state(
                 .map_err(|e| AppError::generic(format!("Codex session 扫描 join 失败: {e}")))
         }
         AgentSessionSource::OpenCode => search_opencode_sessions(&worktree.path, query, 50).await,
-        AgentSessionSource::Grok | AgentSessionSource::Gemini => {
+        AgentSessionSource::Grok | AgentSessionSource::Gemini | AgentSessionSource::Cursor => {
             let path = worktree.path.clone();
             let q = query.to_string();
             let src = source;
@@ -1888,8 +1888,12 @@ pub async fn search_claude_sessions(
     {
         return Ok(v);
     }
-    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude"))
-        .ok_or_else(|| AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"))?;
+    let agent =
+        AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(|| {
+            AppError::validation(
+                "未知 session 搜索源，支持 claude|codex|opencode|grok|gemini|cursor",
+            )
+        })?;
     search_agent_sessions_for_state(
         state.inner(),
         &project_id,
@@ -1959,7 +1963,7 @@ pub(crate) async fn get_agent_session_preview_for_state(
                 .map_err(|e| AppError::generic(format!("Codex preview join 失败: {e}")))?
         }
         AgentSessionSource::OpenCode => preview_opencode_session(&worktree.path, session_id).await,
-        AgentSessionSource::Grok | AgentSessionSource::Gemini => {
+        AgentSessionSource::Grok | AgentSessionSource::Gemini | AgentSessionSource::Cursor => {
             let path = worktree.path.clone();
             let sid = session_id.to_string();
             let src = source;
@@ -2002,8 +2006,12 @@ pub async fn get_claude_session_preview(
     {
         return Ok(v);
     }
-    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude"))
-        .ok_or_else(|| AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"))?;
+    let agent =
+        AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(|| {
+            AppError::validation(
+                "未知 session 搜索源，支持 claude|codex|opencode|grok|gemini|cursor",
+            )
+        })?;
     get_agent_session_preview_for_state(
         state.inner(),
         &project_id,
@@ -2119,7 +2127,8 @@ pub(crate) async fn resume_agent_session_for_state(
         AgentSessionSource::Codex
         | AgentSessionSource::OpenCode
         | AgentSessionSource::Grok
-        | AgentSessionSource::Gemini => {
+        | AgentSessionSource::Gemini
+        | AgentSessionSource::Cursor => {
             check_agent_cli_available(source).await?;
             build_resume_command(source, session_id)
         }
@@ -2171,8 +2180,12 @@ pub async fn resume_claude_session(
     {
         return Ok(v);
     }
-    let agent = AgentSessionSource::parse(source.as_deref().unwrap_or("claude"))
-        .ok_or_else(|| AppError::validation("未知 session 搜索源，支持 claude|codex|opencode"))?;
+    let agent =
+        AgentSessionSource::parse(source.as_deref().unwrap_or("claude")).ok_or_else(|| {
+            AppError::validation(
+                "未知 session 搜索源，支持 claude|codex|opencode|grok|gemini|cursor",
+            )
+        })?;
     resume_agent_session_for_state(
         state.inner(),
         &project_id,

@@ -430,9 +430,11 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
         AgentTarget::Codex | AgentTarget::Grok => TomlConfigPatcher
             .inspect(&bytes, &["mcp_servers".into(), item.native_id.clone()])
             .ok()?,
-        AgentTarget::Claude | AgentTarget::OpenCode | AgentTarget::Gemini => JsoncConfigPatcher
-            .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
-            .ok()?,
+        AgentTarget::Claude | AgentTarget::OpenCode | AgentTarget::Gemini | AgentTarget::Cursor => {
+            JsoncConfigPatcher
+                .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
+                .ok()?
+        }
     };
     if owned.present {
         Some(value_content_hash(&owned.value))

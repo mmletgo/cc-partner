@@ -68,6 +68,7 @@ impl TargetEnvironment {
             "XDG_CONFIG_HOME",
             "GROK_HOME",
             "GEMINI_HOME",
+            "CURSOR_HOME",
         ] {
             if let Ok(v) = env::var(key) {
                 if !v.trim().is_empty() {
@@ -124,7 +125,7 @@ pub struct OpenCodeHomePaths {
 ///     probe / scan / materialization 需要一次解析出全部 home，避免分次漂移。
 ///
 /// Code Logic（这个结构体做什么）:
-///     聚合 claude / codex / opencode / grok / gemini 路径。
+///     聚合 claude / codex / opencode / grok / gemini / cursor 路径。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetHomes {
@@ -138,6 +139,8 @@ pub struct TargetHomes {
     pub grok: TargetHomePaths,
     /// Gemini CLI 配置根（默认 `~/.gemini`）
     pub gemini: TargetHomePaths,
+    /// Cursor CLI 配置根（默认 `~/.cursor`）
+    pub cursor: TargetHomePaths,
 }
 
 /// 目标路径解析器。
@@ -168,6 +171,7 @@ impl TargetPathResolver {
             opencode: resolve_opencode_home(env),
             grok: resolve_grok_home(env),
             gemini: resolve_gemini_home(env),
+            cursor: resolve_cursor_home(env),
         }
     }
 }
@@ -255,6 +259,21 @@ fn resolve_gemini_home(env: &TargetEnvironment) -> TargetHomePaths {
     }
 }
 
+/// 解析 Cursor CLI 配置根。
+///
+/// Business Logic: `CURSOR_HOME` 覆盖默认 `~/.cursor`。
+/// Code Logic: 优先 env，否则 home/.cursor。
+fn resolve_cursor_home(env: &TargetEnvironment) -> TargetHomePaths {
+    let config_root = env
+        .var("CURSOR_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env.home.join(".cursor"));
+    TargetHomePaths {
+        skill_compat_root: Some(config_root.join("skills")),
+        config_root,
+    }
+}
+
 impl TargetHomes {
     /// 用户级指令默认落点。
     ///
@@ -275,6 +294,11 @@ impl TargetHomes {
                 .join("rules")
                 .join("cc-partner.exclusive.md"),
             AgentTarget::Gemini => self.gemini.config_root.join("GEMINI.md"),
+            AgentTarget::Cursor => self
+                .cursor
+                .config_root
+                .join("rules")
+                .join("cc-partner.exclusive.mdc"),
         }
     }
 }
@@ -574,6 +598,9 @@ mod tests {
                 ("CODEX_HOME", "/tmp/codex-home"),
                 ("OPENCODE_CONFIG_DIR", "/tmp/oc-dir"),
                 ("OPENCODE_CONFIG", "/tmp/custom-opencode.json"),
+                ("GROK_HOME", "/tmp/grok-home"),
+                ("GEMINI_HOME", "/tmp/gemini-home"),
+                ("CURSOR_HOME", "/tmp/cursor-home"),
             ],
             vec![],
         );
@@ -589,6 +616,9 @@ mod tests {
             homes.codex.skill_compat_root,
             Some(PathBuf::from("/tmp/home/.agents"))
         );
+        assert_eq!(homes.grok.config_root, PathBuf::from("/tmp/grok-home"));
+        assert_eq!(homes.gemini.config_root, PathBuf::from("/tmp/gemini-home"));
+        assert_eq!(homes.cursor.config_root, PathBuf::from("/tmp/cursor-home"));
     }
 
     #[test]

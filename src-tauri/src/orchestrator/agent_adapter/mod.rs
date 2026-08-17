@@ -9,6 +9,7 @@
 
 pub mod claude_code;
 pub mod codex;
+pub mod cursor_cli;
 pub mod gemini_cli;
 pub mod generic_terminal;
 pub mod grok_build;

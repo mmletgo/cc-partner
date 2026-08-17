@@ -544,6 +544,7 @@ export type AgentProviderId =
   | 'openCodeVisible'
   | 'grokBuildVisible'
   | 'geminiCliVisible'
+  | 'cursorCliVisible'
 
 /**
  * Agent 完成合同。

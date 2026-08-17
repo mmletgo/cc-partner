@@ -26,7 +26,7 @@ import {
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
 import { workbenchApi } from '@/api/workbench';
-import { allHubTargets } from '@/lib/agentCatalog';
+import { isHubTarget } from '@/lib/agentCatalog';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
@@ -188,7 +188,6 @@ const SECTION_VALUES = new Set<string>([
   'diagnostics',
 ]);
 
-const AGENT_TARGETS = new Set(allHubTargets());
 const ASSET_KINDS = new Set(['skill', 'command', 'plugin', 'mcp']);
 const SCOPES = new Set(['user', 'project']);
 const ACTUAL_STATES = new Set(['all', 'enabled', 'disabled', 'problem']);
@@ -223,7 +222,7 @@ export function parsePortableFiltersFromSearchParams(
 ): Partial<PortableInventoryFilters> {
   const patch: Partial<PortableInventoryFilters> = {};
   const target = params.get('target');
-  if (target === 'all' || (target && AGENT_TARGETS.has(target))) {
+  if (target === 'all' || isHubTarget(target)) {
     patch.target = target as PortableInventoryFilters['target'];
   }
   const kind = params.get('kind');

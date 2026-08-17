@@ -140,6 +140,7 @@ export function agentProviderLabelKey(
   | 'providers.openCodeVisible'
   | 'providers.grokBuildVisible'
   | 'providers.geminiCliVisible'
+  | 'providers.cursorCliVisible'
   | null {
   switch (providerId) {
     case 'claudeCodeVisible':
@@ -159,6 +160,10 @@ export function agentProviderLabelKey(
     case 'geminiCliVisible':
     case 'gemini':
       return 'providers.geminiCliVisible';
+    case 'cursorCliVisible':
+    case 'cursor':
+    case 'agent':
+      return 'providers.cursorCliVisible';
     default:
       return null;
   }
@@ -177,6 +182,7 @@ export function settingsProviderLabelKey(
   | 'automation.provider.openCodeVisible'
   | 'automation.provider.grokBuildVisible'
   | 'automation.provider.geminiCliVisible'
+  | 'automation.provider.cursorCliVisible'
   | null {
   switch (providerId) {
     case 'claudeCodeVisible':
@@ -191,6 +197,8 @@ export function settingsProviderLabelKey(
       return 'automation.provider.grokBuildVisible';
     case 'geminiCliVisible':
       return 'automation.provider.geminiCliVisible';
+    case 'cursorCliVisible':
+      return 'automation.provider.cursorCliVisible';
     default:
       return null;
   }

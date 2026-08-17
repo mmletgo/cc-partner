@@ -819,6 +819,7 @@ async fn resolve_install_root(
             AgentTarget::OpenCode => project_path.join(".opencode"),
             AgentTarget::Grok => project_path.join(".grok"),
             AgentTarget::Gemini => project_path.join(".gemini"),
+            AgentTarget::Cursor => project_path.join(".cursor"),
         });
     }
     Ok(match item.target {
@@ -841,6 +842,9 @@ async fn resolve_install_root(
         AgentTarget::Gemini => std::env::var_os("GEMINI_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| env_home.join(".gemini")),
+        AgentTarget::Cursor => std::env::var_os("CURSOR_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".cursor")),
     })
 }
 
@@ -2742,10 +2746,17 @@ async fn install_payload_to_target(
                 AgentTarget::Codex | AgentTarget::Grok => root.join("config.toml"),
                 AgentTarget::OpenCode => resolve_opencode_mcp_config_path(&root),
                 AgentTarget::Gemini => root.join("settings.json"),
+                AgentTarget::Cursor => root.join("mcp.json"),
             };
             if let Ok(payload) = from_canonical_bytes(&bytes) {
                 if let PortableAssetPayload::Mcp(server) = payload {
-                    if matches!(item.target, AgentTarget::Claude | AgentTarget::OpenCode) {
+                    if matches!(
+                        item.target,
+                        AgentTarget::Claude
+                            | AgentTarget::OpenCode
+                            | AgentTarget::Gemini
+                            | AgentTarget::Cursor
+                    ) {
                         // ownership-aware semantic patch；skipExisting 若 leaf 已存在则跳过
                         let current_bytes = if path.exists() {
                             std::fs::read(&path)?

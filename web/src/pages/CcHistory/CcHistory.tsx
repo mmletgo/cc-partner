@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Button, Card, Dialog, Input, StatusMessage } from '@/components/primitives';
 import { CcHistoryCard } from '@/components/domain';
 import { ccHistoryApi } from '@/api/ccHistory';
@@ -40,19 +41,24 @@ import styles from './CcHistory.module.css';
 
 type LoadState = 'loading' | 'success' | 'error';
 
-const HISTORY_SOURCE_LABEL: Record<CcHistorySource, 'sourceClaude' | 'sourceCodex' | 'sourceOpenCode' | 'sourceGrok' | 'sourceGemini'> = {
-  claude: 'sourceClaude',
-  codex: 'sourceCodex',
-  opencode: 'sourceOpenCode',
-  grok: 'sourceGrok',
-  gemini: 'sourceGemini',
-};
-
 function historySourceLabel(
-  t: (key: string) => string,
+  t: TFunction<['ccHistory', 'common']>,
   source: CcHistorySource,
 ): string {
-  return t(`ccHistory:${HISTORY_SOURCE_LABEL[source]}`);
+  switch (source) {
+    case 'codex':
+      return t('ccHistory:sourceCodex');
+    case 'opencode':
+      return t('ccHistory:sourceOpenCode');
+    case 'grok':
+      return t('ccHistory:sourceGrok');
+    case 'gemini':
+      return t('ccHistory:sourceGemini');
+    case 'cursor':
+      return t('ccHistory:sourceCursor');
+    default:
+      return t('ccHistory:sourceClaude');
+  }
 }
 
 /**

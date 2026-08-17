@@ -25,6 +25,8 @@ pub enum AgentId {
     Grok,
     /// Gemini CLI（可执行 `gemini`）
     Gemini,
+    /// Cursor CLI（可执行 `agent`）
+    Cursor,
 }
 
 /// 一条身份登记。
@@ -113,6 +115,18 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_headless: true,
         executable_names: &["gemini"],
     },
+    AgentIdentity {
+        id: AgentId::Cursor,
+        wire: "cursor",
+        display_name: "Cursor CLI",
+        hub_target: Some(AgentTarget::Cursor),
+        runtime_provider: Some(AgentProviderId::CursorCliVisible),
+        session_source: Some("cursor"),
+        history_source: Some("cursor"),
+        has_usage: true,
+        has_headless: true,
+        executable_names: &["agent"],
+    },
 ];
 
 impl AgentId {
@@ -152,9 +166,7 @@ pub fn identity_by_wire(wire: &str) -> Option<&'static AgentIdentity> {
 
 /// 按 Hub target 反查。
 pub fn identity_by_hub_target(target: AgentTarget) -> Option<&'static AgentIdentity> {
-    IDENTITIES
-        .iter()
-        .find(|row| row.hub_target == Some(target))
+    IDENTITIES.iter().find(|row| row.hub_target == Some(target))
 }
 
 /// 按 Runtime provider 反查（genericTerminal 返回 None）。
@@ -166,16 +178,12 @@ pub fn identity_by_runtime(provider: AgentProviderId) -> Option<&'static AgentId
 
 /// 是否为已登记 session source。
 pub fn is_session_source(raw: &str) -> bool {
-    IDENTITIES
-        .iter()
-        .any(|row| row.session_source == Some(raw))
+    IDENTITIES.iter().any(|row| row.session_source == Some(raw))
 }
 
 /// 是否为已登记 history source。
 pub fn is_history_source(raw: &str) -> bool {
-    IDENTITIES
-        .iter()
-        .any(|row| row.history_source == Some(raw))
+    IDENTITIES.iter().any(|row| row.history_source == Some(raw))
 }
 
 #[cfg(test)]
@@ -183,9 +191,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_registers_five_agent_ids() {
-        assert_eq!(all_identities().len(), 5);
-        for wire in ["claude", "codex", "opencode", "grok", "gemini"] {
+    fn catalog_registers_six_agent_ids() {
+        assert_eq!(all_identities().len(), 6);
+        for wire in ["claude", "codex", "opencode", "grok", "gemini", "cursor"] {
             assert!(AgentId::parse(wire).is_some(), "{wire}");
         }
     }
@@ -200,7 +208,7 @@ mod tests {
     #[test]
     fn generic_terminal_has_no_hub_or_product_id() {
         assert!(identity_by_runtime(AgentProviderId::GenericTerminal).is_none());
-        assert_eq!(all_hub_targets().count(), 5);
+        assert_eq!(all_hub_targets().count(), 6);
     }
 
     #[test]
@@ -224,6 +232,18 @@ mod tests {
             Some(AgentProviderId::GeminiCliVisible)
         );
         assert_eq!(gemini.session_source, Some("gemini"));
+
+        let cursor = AgentId::Cursor.identity();
+        assert_eq!(cursor.hub_target, Some(AgentTarget::Cursor));
+        assert_eq!(
+            cursor.runtime_provider,
+            Some(AgentProviderId::CursorCliVisible)
+        );
+        assert_eq!(cursor.session_source, Some("cursor"));
+        assert_eq!(cursor.history_source, Some("cursor"));
+        assert!(cursor.has_usage);
+        assert!(cursor.has_headless);
+        assert_eq!(cursor.executable_names, &["agent"]);
     }
 
     #[test]

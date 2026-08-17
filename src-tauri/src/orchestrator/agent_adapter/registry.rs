@@ -460,6 +460,10 @@ impl AgentAdapterRegistry {
             AgentProviderId::GeminiCliVisible,
             Arc::new(super::gemini_cli::GeminiCliAdapter),
         );
+        adapters.insert(
+            AgentProviderId::CursorCliVisible,
+            Arc::new(super::cursor_cli::CursorCliAdapter),
+        );
         Self {
             adapters,
             probe_cache: Mutex::new(HashMap::new()),
@@ -529,6 +533,7 @@ impl AgentAdapterRegistry {
             AgentProviderId::OpenCodeVisible,
             AgentProviderId::GrokBuildVisible,
             AgentProviderId::GeminiCliVisible,
+            AgentProviderId::CursorCliVisible,
         ];
         order.into_iter().map(|id| self.probe_cached(id)).collect()
     }
@@ -583,6 +588,7 @@ mod tests {
             AgentProviderId::OpenCodeVisible,
             AgentProviderId::GrokBuildVisible,
             AgentProviderId::GeminiCliVisible,
+            AgentProviderId::CursorCliVisible,
         ] {
             assert_eq!(reg.get(id).unwrap().provider_id(), id);
         }

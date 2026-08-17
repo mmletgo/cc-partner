@@ -5,10 +5,11 @@
 //!     扫描/渲染指令文档（Gate A）以及 Skill/Command/Agent/MCP 可移植资产（Gate B Task 3）。
 //!
 //! Code Logic（这个模块做什么）:
-//!     定义 `AssetAdapter` trait 与共享 DTO；导出 paths 解析、portable 扫描 DTO 与五 target adapter。
+//!     定义 `AssetAdapter` trait 与共享 DTO；导出 paths 解析、portable 扫描 DTO 与六 target adapter。
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod gemini;
 pub mod grok;
 pub mod opencode;
@@ -24,6 +25,7 @@ use std::path::PathBuf;
 
 pub use claude::ClaudeInstructionAdapter;
 pub use codex::CodexInstructionAdapter;
+pub use cursor::CursorInstructionAdapter;
 pub use gemini::GeminiInstructionAdapter;
 pub use grok::GrokInstructionAdapter;
 pub use opencode::OpenCodeInstructionAdapter;
@@ -400,7 +402,7 @@ pub(crate) fn build_probe(
 
 /// 按 target 探测 CLI。
 ///
-/// Business Logic: 身份目录五 target 都必须能 probe，禁止因缺 adapter 走重复 stub。
+/// Business Logic: 身份目录全部 target 都必须能 probe，禁止因缺 adapter 走重复 stub。
 /// Code Logic: 全部委托对应 `*InstructionAdapter.probe`。
 pub fn probe_target(target: AgentTarget, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
     match target {
@@ -409,6 +411,7 @@ pub fn probe_target(target: AgentTarget, env: &TargetEnvironment) -> Result<Targ
         AgentTarget::OpenCode => OpenCodeInstructionAdapter.probe(env),
         AgentTarget::Grok => GrokInstructionAdapter.probe(env),
         AgentTarget::Gemini => GeminiInstructionAdapter.probe(env),
+        AgentTarget::Cursor => CursorInstructionAdapter.probe(env),
     }
 }
 

@@ -204,7 +204,8 @@
       "genericTerminal": "通用终端",
       "openCodeVisible": "OpenCode（可见）",
       "grokBuildVisible": "Grok Build（可见）",
-      "geminiCliVisible": "Gemini CLI（可见）"
+      "geminiCliVisible": "Gemini CLI（可见）",
+      "cursorCliVisible": "Cursor CLI（可见）"
     },
     "bridgeStatus": {
       "ready": "Bridge 就绪",

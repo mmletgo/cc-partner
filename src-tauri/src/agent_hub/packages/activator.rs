@@ -788,7 +788,10 @@ mod tests {
     fn sample_probe(target: AgentTarget) -> TargetProbe {
         TargetProbe {
             target,
-            executable: Some(PathBuf::from(format!("/usr/bin/{}", target.executable_name()))),
+            executable: Some(PathBuf::from(format!(
+                "/usr/bin/{}",
+                target.executable_name()
+            ))),
             version: Some("1.0.0".into()),
             config_root: PathBuf::from("/tmp/cfg"),
             support: AdapterSupportLevel::Supported,

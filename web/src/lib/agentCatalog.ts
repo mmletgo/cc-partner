@@ -14,10 +14,10 @@ import type { AgentProviderId } from '@/lib/types/orchestrator';
 import type { CcHistorySource } from '@/lib/types/core';
 
 /** 产品级 Agent 身份。 */
-export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini';
+export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor';
 
 /** 会话搜索 source（与 history source 当前同形）。 */
-export type SessionSearchSource = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini';
+export type SessionSearchSource = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor';
 
 /** 一条身份登记。 */
 export interface AgentIdentity {
@@ -93,6 +93,18 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['gemini'],
+  },
+  {
+    id: 'cursor',
+    wire: 'cursor',
+    displayName: 'Cursor CLI',
+    hubTarget: 'cursor',
+    runtimeProvider: 'cursorCliVisible',
+    sessionSource: 'cursor',
+    historySource: 'cursor',
+    hasUsage: true,
+    hasHeadless: true,
+    executableNames: ['agent'],
   },
 ];
 

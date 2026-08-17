@@ -139,6 +139,33 @@ function renderHighlighted(text: string, query: string): ReactNode {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   会话搜索 tab 必须显示 catalog 全部 source，不能把 Grok/Gemini/Cursor 误标成 Claude。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 SessionSearchSource 取 typed i18n key。
+ */
+function sessionSearchAgentLabel(
+  source: SessionSearchSource,
+  t: TFunction<['workbench', 'common']>,
+): string {
+  switch (source) {
+    case 'codex':
+      return t('workbench:sessionSearch.agents.codex');
+    case 'opencode':
+      return t('workbench:sessionSearch.agents.opencode');
+    case 'grok':
+      return t('workbench:sessionSearch.agents.grok');
+    case 'gemini':
+      return t('workbench:sessionSearch.agents.gemini');
+    case 'cursor':
+      return t('workbench:sessionSearch.agents.cursor');
+    default:
+      return t('workbench:sessionSearch.agents.claude');
+  }
+}
+
+/**
  * 把后端截断 reason token 映射为 i18n 短标签。
  *
  * Business Logic（为什么需要这个函数）:
@@ -436,13 +463,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     [hits.length, t],
   );
 
-  /** 当前 agent 显示名（i18n；用分支保证 typed key） */
-  const agentLabel =
-    source === 'codex'
-      ? t('workbench:sessionSearch.agents.codex')
-      : source === 'opencode'
-        ? t('workbench:sessionSearch.agents.opencode')
-        : t('workbench:sessionSearch.agents.claude');
+  /** 当前 agent 显示名（i18n；用 catalog source → typed key） */
+  const agentLabel = sessionSearchAgentLabel(source, t);
 
   /**
    * 截断/不可用诊断横幅（非阻塞，不替代结果列表）。
@@ -711,12 +733,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
             aria-label={t('workbench:sessionSearch.sourceTabsAria')}
           >
             {SESSION_SEARCH_SOURCES.map((item) => {
-              const label =
-                item === 'codex'
-                  ? t('workbench:sessionSearch.agents.codex')
-                  : item === 'opencode'
-                    ? t('workbench:sessionSearch.agents.opencode')
-                    : t('workbench:sessionSearch.agents.claude');
+              const label = sessionSearchAgentLabel(item, t);
               return (
                 <button
                   key={item}

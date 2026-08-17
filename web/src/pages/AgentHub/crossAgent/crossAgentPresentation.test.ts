@@ -59,8 +59,8 @@ function previewFixture(
 
 describe('destinationCandidates / sanitize', () => {
   test('excludes source from destination candidates', () => {
-    expect(destinationCandidates('claude')).toEqual(['codex', 'opencode', 'grok', 'gemini']);
-    expect(destinationCandidates('codex')).toEqual(['claude', 'opencode', 'grok', 'gemini']);
+    expect(destinationCandidates('claude')).toEqual(['codex', 'opencode', 'grok', 'gemini', 'cursor']);
+    expect(destinationCandidates('codex')).toEqual(['claude', 'opencode', 'grok', 'gemini', 'cursor']);
   });
 
   test('cannot select source as destination', () => {
@@ -87,7 +87,7 @@ describe('destinationCandidates / sanitize', () => {
   });
 
   test('defaultDestinationsForSource is all others', () => {
-    expect(defaultDestinationsForSource('opencode')).toEqual(['claude', 'codex', 'grok', 'gemini']);
+    expect(defaultDestinationsForSource('opencode')).toEqual(['claude', 'codex', 'grok', 'gemini', 'cursor']);
   });
 });
 

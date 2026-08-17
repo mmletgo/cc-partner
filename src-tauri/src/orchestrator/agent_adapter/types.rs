@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     定义 `AgentProviderId`、`AgentCompletionContract`、`RunnerAttemptPolicy` 与解析/解析函数；
 //!     wire 值固定为
-//!     `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible`。
+//!     `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible|cursorCliVisible`。
 
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,8 @@ pub enum AgentProviderId {
     GrokBuildVisible,
     /// 可见 Gemini CLI 终端 Runner
     GeminiCliVisible,
+    /// 可见 Cursor CLI 终端 Runner
+    CursorCliVisible,
 }
 
 impl AgentProviderId {
@@ -65,6 +67,7 @@ impl AgentProviderId {
             Self::OpenCodeVisible => "openCodeVisible",
             Self::GrokBuildVisible => "grokBuildVisible",
             Self::GeminiCliVisible => "geminiCliVisible",
+            Self::CursorCliVisible => "cursorCliVisible",
         }
     }
 
@@ -83,8 +86,9 @@ impl AgentProviderId {
             "openCodeVisible" => Ok(Self::OpenCodeVisible),
             "grokBuildVisible" => Ok(Self::GrokBuildVisible),
             "geminiCliVisible" => Ok(Self::GeminiCliVisible),
+            "cursorCliVisible" => Ok(Self::CursorCliVisible),
             other => Err(AppError::generic(format!(
-                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible）"
+                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible|cursorCliVisible）"
             ))),
         }
     }
@@ -117,9 +121,10 @@ impl AgentProviderId {
             Self::ClaudeCodeVisible => AgentCompletionContract::SentinelLine,
             // 未安装 cc-partner OSC Hook 桥接前 Codex 不得默认 HookEvent。
             Self::CodexVisible => AgentCompletionContract::SentinelLine,
-            Self::GenericTerminal | Self::GrokBuildVisible | Self::GeminiCliVisible => {
-                AgentCompletionContract::Manual
-            }
+            Self::GenericTerminal
+            | Self::GrokBuildVisible
+            | Self::GeminiCliVisible
+            | Self::CursorCliVisible => AgentCompletionContract::Manual,
             Self::OpenCodeVisible => AgentCompletionContract::HookEvent,
         }
     }
@@ -372,6 +377,7 @@ mod tests {
             "openCodeVisible",
             "grokBuildVisible",
             "geminiCliVisible",
+            "cursorCliVisible",
         ] {
             let id = AgentProviderId::parse(value).unwrap();
             assert_eq!(id.as_str(), value);

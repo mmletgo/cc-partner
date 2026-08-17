@@ -11,11 +11,11 @@ import {
 } from './agentCatalog';
 
 describe('agentCatalog', () => {
-  it('registers five product identities', () => {
-    expect(allAgentIdentities()).toHaveLength(5);
-    expect(allHubTargets()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini']);
-    expect(allSessionSources()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini']);
-    expect(allHistorySources()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini']);
+  it('registers six product identities', () => {
+    expect(allAgentIdentities()).toHaveLength(6);
+    expect(allHubTargets()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini', 'cursor']);
+    expect(allSessionSources()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini', 'cursor']);
+    expect(allHistorySources()).toEqual(['claude', 'codex', 'opencode', 'grok', 'gemini', 'cursor']);
   });
 
   it('accepts grok and gemini as hub targets', () => {
@@ -37,5 +37,6 @@ describe('agentCatalog', () => {
     expect(identityByRuntime('genericTerminal')).toBeNull();
     expect(identityByRuntime('grokBuildVisible')?.id).toBe('grok');
     expect(identityByRuntime('geminiCliVisible')?.id).toBe('gemini');
+    expect(identityByRuntime('cursorCliVisible')?.id).toBe('cursor');
   });
 });

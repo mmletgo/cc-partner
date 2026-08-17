@@ -21,9 +21,9 @@ use crate::agent_hub::support::{
     RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, GeminiInstructionAdapter,
-    GrokInstructionAdapter, InstructionRenderContext, OpenCodeInstructionAdapter,
-    TargetEnvironment, TargetPathResolver, TargetProbe,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
+    GeminiInstructionAdapter, GrokInstructionAdapter, InstructionRenderContext,
+    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
 };
 use crate::config_runtime::update_config_transactionally;
 use crate::error::AppError;
@@ -527,6 +527,7 @@ async fn resolve_target_path(
                 AgentTarget::OpenCode => homes.opencode.config_root,
                 AgentTarget::Grok => homes.grok.config_root.join("rules"),
                 AgentTarget::Gemini => homes.gemini.config_root,
+                AgentTarget::Cursor => homes.cursor.config_root.join("rules"),
             };
             Ok(root.join(file_name))
         }
@@ -632,6 +633,7 @@ fn instruction_file_name(target: AgentTarget) -> &'static str {
         AgentTarget::OpenCode => "AGENTS.md",
         AgentTarget::Grok => "cc-partner.exclusive.md",
         AgentTarget::Gemini => "GEMINI.md",
+        AgentTarget::Cursor => "cc-partner.exclusive.mdc",
     }
 }
 
@@ -849,6 +851,14 @@ fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> Tar
             executable: None,
             version: None,
             config_root: homes.gemini.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
+        AgentTarget::Cursor => CursorInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.cursor.config_root,
             support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
             fingerprint: String::new(),
         }),

@@ -144,6 +144,8 @@ export function sameAgentDestinationLabelKey(sourceTarget: AgentTarget): string 
       return 'agentHub:portablePull.destination.sameAsGrok';
     case 'gemini':
       return 'agentHub:portablePull.destination.sameAsGemini';
+    case 'cursor':
+      return 'agentHub:portablePull.destination.sameAsCursor';
   }
 }
 

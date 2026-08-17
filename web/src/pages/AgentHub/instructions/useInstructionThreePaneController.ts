@@ -242,13 +242,10 @@ function errorCode(reason: unknown): string | null {
 }
 
 function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> {
-  return {
-    claude: 'unmanaged',
-    codex: 'unmanaged',
-    opencode: 'unmanaged',
-    grok: 'unmanaged',
-    gemini: 'unmanaged',
-  };
+  return Object.fromEntries(allHubTargets().map((target) => [target, 'unmanaged'])) as Record<
+    AgentTarget,
+    UserInstructionTargetSelection
+  >;
 }
 
 const ALL_INSTRUCTION_TARGETS: AgentTarget[] = allHubTargets();

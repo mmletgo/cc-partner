@@ -118,6 +118,7 @@ describe('agentHubApi peer context', () => {
           opencode: 'unmanaged',
           grok: 'unmanaged',
           gemini: 'unmanaged',
+          cursor: 'unmanaged',
         },
         baseRevisionId: null,
         inventorySnapshotHash: 'h1',
