@@ -2827,13 +2827,19 @@ async fn install_payload_to_target(
 mod tests {
     use super::*;
     use crate::agent_hub::models::ScopeKind;
-    use crate::agent_hub::portable_inventory::PortableInventoryItemCapabilitiesDto;
+    use crate::agent_hub::portable_inventory::{
+        PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableOriginKind,
+    };
     use crate::agent_hub::snapshot::envelope::SnapshotSelection;
 
     fn sample_local_item(target: AgentTarget, native: &str) -> PortableInventoryItemDto {
         PortableInventoryItemDto {
             inventory_item_id: format!("id-{native}"),
             target,
+            loaded_by: target,
+            owned_by: PortableAssetOwner::from_target(target),
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Command,
             native_id: native.into(),
             display_name: native.into(),

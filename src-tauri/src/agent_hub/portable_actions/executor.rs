@@ -882,9 +882,10 @@ mod tests {
     use crate::agent_hub::portable_actions::planner::preview_portable_asset_action_with_inventory;
     use crate::agent_hub::portable_inventory::{
         hash_plugin_root, inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
-        PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
+        PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
         PortableInventoryManagementState, PortableInventoryMutationCapability,
         PortableInventoryScanCapability, PortableInventorySourceOrigin, PortableInventoryTargetDto,
+        PortableOriginKind,
     };
     use crate::agent_hub::targets::portable::hash_skill_directory;
     use chrono::Utc;
@@ -931,6 +932,10 @@ mod tests {
         PortableInventoryItemDto {
             inventory_item_id: inventory_item_id(target, "user", "standalone", native_id),
             target,
+            loaded_by: target,
+            owned_by: PortableAssetOwner::from_target(target),
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind,
             native_id: native_id.into(),
             display_name: native_id.into(),

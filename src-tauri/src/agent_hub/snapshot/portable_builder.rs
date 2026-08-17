@@ -699,8 +699,8 @@ mod tests {
     use super::*;
     use crate::agent_hub::models::DesiredPresence;
     use crate::agent_hub::portable_inventory::{
-        PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
-        PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
+        PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
+        PortableInventorySourceOrigin, PortableMcpCredentialFactDto, PortableOriginKind,
     };
     use tempfile::tempdir;
 
@@ -713,6 +713,10 @@ mod tests {
         PortableInventoryItemDto {
             inventory_item_id: format!("id-{native}"),
             target,
+            loaded_by: target,
+            owned_by: PortableAssetOwner::from_target(target),
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind,
             native_id: native.into(),
             display_name: native.into(),

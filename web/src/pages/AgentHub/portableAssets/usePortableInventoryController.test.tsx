@@ -44,8 +44,9 @@ function makeItem(
   overrides: Partial<PortableInventoryItemDto> &
     Pick<PortableInventoryItemDto, 'inventoryItemId' | 'kind' | 'nativeId'>,
 ): PortableInventoryItemDto {
+  const target = overrides.target ?? 'claude';
   return {
-    target: 'claude',
+    target,
     displayName: overrides.nativeId,
     description: null,
     version: null,
@@ -67,6 +68,10 @@ function makeItem(
     materializationStatus: 'applied',
     capabilities: { ...baseCapabilities },
     warnings: [],
+    originKind: 'native',
+    ownedBy: target,
+    loadedBy: target,
+    nativeOutputCandidate: true,
     ...overrides,
   };
 }

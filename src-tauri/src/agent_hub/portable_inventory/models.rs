@@ -12,6 +12,7 @@
 use crate::agent_hub::models::{AgentTarget, AssetKind, DesiredPresence, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::snapshot::canonical_json::canonicalize_value;
+use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 
@@ -302,6 +303,14 @@ pub struct PortableInventoryItemDto {
     pub inventory_item_id: String,
     /// 所属 target
     pub target: AgentTarget,
+    /// 当前扫描/加载该行的 target（与 `target` 相同）
+    pub loaded_by: AgentTarget,
+    /// 资产所有者（兼容/共享根可与 target 不同）
+    pub owned_by: PortableAssetOwner,
+    /// 发现分类
+    pub origin_kind: PortableOriginKind,
+    /// 是否可作为该 target 的 native 写出候选
+    pub native_output_candidate: bool,
     /// 四类 kind
     pub kind: PortableAssetKind,
     /// 目标侧原生 ID
@@ -444,6 +453,9 @@ pub fn inventory_snapshot_hash(
         .map(|i| ItemHashMaterial {
             inventory_item_id: i.inventory_item_id.clone(),
             target: i.target.as_str().to_string(),
+            origin_kind: i.origin_kind.as_str().to_string(),
+            owned_by: i.owned_by.as_str().to_string(),
+            native_output_candidate: i.native_output_candidate,
             kind: i.kind.as_str().to_string(),
             native_id: i.native_id.clone(),
             scope_id: i.scope_id.clone(),
@@ -528,6 +540,9 @@ struct TargetHashMaterial {
 struct ItemHashMaterial {
     inventory_item_id: String,
     target: String,
+    origin_kind: String,
+    owned_by: String,
+    native_output_candidate: bool,
     kind: String,
     native_id: String,
     scope_id: String,

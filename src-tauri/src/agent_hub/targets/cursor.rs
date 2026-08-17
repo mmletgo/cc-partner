@@ -8,17 +8,16 @@
 //!     Claude 兼容目录 `~/.claude` / `.claude` 禁止当作 Cursor native 输出。
 //!
 //! Code Logic（这个模块做什么）:
-//!     实现 `AssetAdapter`：probe `agent`；扫描 `.mdc` rules 与只读原生指令；portable
-//!     只扫 `.cursor/skills|commands` 与 `mcp.json` 的 `mcpServers`；render 落到
-//!     `.cursor/rules/` 并包裹 YAML frontmatter。
+//!     实现 `AssetAdapter`：按 support-manifest `commandNames` 顺序 probe
+//!     `cursor-agent` 再 `agent`；扫描 `.mdc` rules 与只读原生指令；portable
+//!     经 runtime-discovery 表扫 `.cursor` native 与 Claude/Codex/`.agents`
+//!     兼容 skills；render 落到 `.cursor/rules/` 并包裹 YAML frontmatter。
 
 use super::paths::{
-    is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+    is_non_empty_utf8_file, probe_cli_version, resolve_first_executable, TargetPathResolver,
 };
 use super::portable::{
-    merge_discoveries, parse_json_or_jsonc, parse_mcp_servers_json_map, render_portable_payload,
-    scan_command_markdown_dir, scan_skill_dirs, scan_skill_dirs_manifest_only, AssetRenderContext,
-    DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
+    render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -27,6 +26,7 @@ use super::{
 };
 use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
+use crate::agent_hub::support::{builtin_support_manifest, find_target_record, scan_table_roots};
 use crate::error::AppError;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,8 @@ use std::path::{Path, PathBuf};
 pub(crate) const CURSOR_ADAPTED_FILE: &str = "cc-partner.adapted.mdc";
 /// Cursor 受管 exclusive 文件名。
 pub(crate) const CURSOR_EXCLUSIVE_FILE: &str = "cc-partner.exclusive.mdc";
+/// Cursor CLI 探测命令名回退顺序（与 support-manifest `commandNames` 对齐）。
+const CURSOR_COMMAND_NAMES_FALLBACK: &[&str] = &["cursor-agent", "agent"];
 /// `.mdc` alwaysApply frontmatter 描述（静态，禁止插入用户正文以免 YAML 注入）。
 const CURSOR_MDC_DESCRIPTION: &str = "cc-partner Cursor CLI instructions";
 
@@ -76,12 +78,14 @@ impl AssetAdapter for CursorInstructionAdapter {
 
     /// 探测 Cursor CLI 可执行文件、版本与配置根。
     ///
-    /// Business Logic: 官方 CLI 名为 `agent`；版本未知只能 scan-only；
-    ///     `CURSOR_HOME` 覆盖默认 `~/.cursor`。
-    /// Code Logic: `resolve_all` + `resolve_executable("agent")` + `probe_cli_version` + `build_probe`。
+    /// Business Logic: 官方 CLI 现为 `cursor-agent`；旧名 `agent` 可能指向 Grok
+    ///     symlink，必须后试。版本未知只能 scan-only；`CURSOR_HOME` 覆盖默认 `~/.cursor`。
+    /// Code Logic: `resolve_all` + `cursor_command_names` + `resolve_first_executable`
+    ///     + `probe_cli_version` + `build_probe`。
     fn probe(&self, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
         let homes = TargetPathResolver::resolve_all(env);
-        let executable = resolve_executable("agent", env);
+        let names = cursor_command_names();
+        let executable = resolve_first_executable(names.iter().map(String::as_str), env);
         let version = executable.as_ref().and_then(|p| probe_cli_version(p));
         Ok(build_probe(
             AgentTarget::Cursor,
@@ -129,35 +133,23 @@ impl AssetAdapter for CursorInstructionAdapter {
         Ok(rendered)
     }
 
-    /// 扫描 Cursor native Skill/Command 与 MCP。
+    /// 扫描 Cursor native Skill/Command/MCP 与兼容 skills。
     ///
-    /// Business Logic: 只扫 `.cursor` 树与 `mcp.json`；禁止把 Claude 目录当 Cursor native。
-    /// Code Logic: user=`config_root/{skills,commands,mcp.json}`；project=`<root>/.cursor/...`。
+    /// Business Logic: `.cursor` 为 native；`~/.claude|/.codex|/.agents/skills` 为兼容根，
+    ///     不得成为 Cursor native 写出目标。
+    /// Code Logic: 委托 `scan_table_roots`，由发现表 stamp owned_by / origin_kind。
     fn scan_portable_assets(
         &self,
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = cursor_portable_root(scope, &homes);
-        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
-        parts.push(scan_skill_dirs(
-            AgentTarget::Cursor,
-            scope.scope_kind,
-            &base.join("skills"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_command_markdown_dir(
-            AgentTarget::Cursor,
-            scope.scope_kind,
-            &base.join("commands"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_cursor_mcp(scope, &homes)?);
-        Ok(merge_discoveries(parts))
+        scan_table_roots(AgentTarget::Cursor, scope, env, None, false)
     }
 
     /// Inventory 精确 kind 扫描。
+    ///
+    /// Business Logic: Skill 过滤走 manifest-only，避免全树 hash；兼容根仍按表发现。
+    /// Code Logic: `kind=None` 回退全量；Skill 传 `manifest_only=true`。
     fn scan_portable_assets_filtered(
         &self,
         scope: &LocalScopeMapping,
@@ -167,26 +159,13 @@ impl AssetAdapter for CursorInstructionAdapter {
         let Some(kind) = kind else {
             return self.scan_portable_assets(scope, env);
         };
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = cursor_portable_root(scope, &homes);
-        let mut parts = Vec::new();
-        match kind {
-            AssetKind::Skill => parts.push(scan_skill_dirs_manifest_only(
-                AgentTarget::Cursor,
-                scope.scope_kind,
-                &base.join("skills"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Command => parts.push(scan_command_markdown_dir(
-                AgentTarget::Cursor,
-                scope.scope_kind,
-                &base.join("commands"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Mcp => parts.push(scan_cursor_mcp(scope, &homes)?),
-            AssetKind::Agent | AssetKind::Instruction | AssetKind::Plugin | AssetKind::Hook => {}
-        }
-        Ok(merge_discoveries(parts))
+        scan_table_roots(
+            AgentTarget::Cursor,
+            scope,
+            env,
+            Some(kind),
+            kind == AssetKind::Skill,
+        )
     }
 
     /// 渲染 Cursor portable 投影。
@@ -200,6 +179,30 @@ impl AssetAdapter for CursorInstructionAdapter {
     ) -> Result<TargetAssetProjection, AppError> {
         render_portable_payload(AgentTarget::Cursor, asset)
     }
+}
+
+/// 读取 Cursor 探测命令名（与 support-manifest `commandNames` 同序）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     probe 必须与编译期 support 合同共用同一优先序，避免硬编码漂移到 Grok 的 `agent`。
+///
+/// Code Logic（这个函数做什么）:
+///     解析内置 manifest 的 Cursor `commandNames`；空或缺记录时回退
+///     `cursor-agent` → `agent`。
+fn cursor_command_names() -> Vec<String> {
+    builtin_support_manifest()
+        .ok()
+        .and_then(|manifest| {
+            find_target_record(&manifest, AgentTarget::Cursor)
+                .map(|record| record.executable_probe.command_names.clone())
+        })
+        .filter(|names| !names.is_empty())
+        .unwrap_or_else(|| {
+            CURSOR_COMMAND_NAMES_FALLBACK
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect()
+        })
 }
 
 /// Cursor 指令槽相对路径。
@@ -263,14 +266,6 @@ fn wrap_cursor_mdc(body: &str) -> String {
         return body.to_string();
     }
     format!("---\ndescription: {CURSOR_MDC_DESCRIPTION}\nalwaysApply: true\n---\n\n{body}")
-}
-
-/// 用户级 / 项目级 portable 根。
-fn cursor_portable_root(scope: &LocalScopeMapping, homes: &super::paths::TargetHomes) -> PathBuf {
-    match scope.scope_kind {
-        ScopeKind::User => homes.cursor.config_root.clone(),
-        ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".cursor"),
-    }
 }
 
 /// 扫描用户级 Cursor 指令。
@@ -396,45 +391,10 @@ fn push_existing(
     Ok(())
 }
 
-/// 只读解析 Cursor `mcp.json` 的 `mcpServers`。
-///
-/// Business Logic: 复用 Gemini/Claude JSONC helper；仅扫 Cursor 配置根。
-/// Code Logic: user=`config_root/mcp.json`；project=`.cursor/mcp.json`。
-fn scan_cursor_mcp(
-    scope: &LocalScopeMapping,
-    homes: &super::paths::TargetHomes,
-) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-    let path = match scope.scope_kind {
-        ScopeKind::User => homes.cursor.config_root.join("mcp.json"),
-        ScopeKind::Project | ScopeKind::Directory => {
-            scope.absolute_path.join(".cursor").join("mcp.json")
-        }
-    };
-    if !path.is_file() {
-        return Ok(vec![]);
-    }
-    let text = fs::read_to_string(&path)?;
-    let value = match parse_json_or_jsonc(&text) {
-        Ok(v) => v,
-        Err(_) => return Ok(vec![]),
-    };
-    let Some(map) = value.get("mcpServers").and_then(|v| v.as_object()).cloned() else {
-        return Ok(vec![]);
-    };
-    Ok(parse_mcp_servers_json_map(
-        AgentTarget::Cursor,
-        scope.scope_kind,
-        &map,
-        &path,
-        PortableOriginKind::Native,
-        true,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::targets::portable::PortableOriginKind;
+    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -575,12 +535,82 @@ mod tests {
             }),
             "portable scan marked ~/.claude as Cursor native: {found:?}"
         );
-        assert!(found
+        let claude = found
             .iter()
-            .any(|asset| asset.semantic_name == "cursor-skill"));
+            .find(|asset| {
+                asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.claude/")
+            })
+            .expect("claude compatibility skill");
+        assert_eq!(claude.semantic_name, "review");
+        assert_eq!(claude.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!claude.origin.native_output_candidate);
+        assert_eq!(claude.origin.owned_by, PortableAssetOwner::Claude);
+        assert!(found.iter().any(|asset| {
+            asset.semantic_name == "cursor-skill"
+                && asset.origin.origin_kind == PortableOriginKind::Native
+                && asset.origin.native_output_candidate
+        }));
         assert!(found
             .iter()
             .all(|asset| asset.origin.target == AgentTarget::Cursor));
+    }
+
+    #[test]
+    fn user_scan_finds_native_cursor_and_compatibility_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        write_text(
+            &home.join(".cursor/skills/cursor-skill/SKILL.md"),
+            "---\nname: cursor-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".claude/skills/claude-skill/SKILL.md"),
+            "---\nname: claude-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".agents/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: d\n---\nbody\n",
+        );
+        let env = isolated_env(home);
+        let scope = user_scope(home);
+        let found = CursorInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+
+        let native = found
+            .iter()
+            .find(|asset| asset.semantic_name == "cursor-skill")
+            .expect("native cursor skill");
+        assert_eq!(native.origin.origin_kind, PortableOriginKind::Native);
+        assert!(native.origin.native_output_candidate);
+        assert_eq!(native.origin.owned_by, PortableAssetOwner::Cursor);
+        assert!(native
+            .origin
+            .path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/.cursor/skills/"));
+
+        let claude = found
+            .iter()
+            .find(|asset| asset.semantic_name == "claude-skill")
+            .expect("claude compatibility skill");
+        assert_eq!(claude.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!claude.origin.native_output_candidate);
+        assert_eq!(claude.origin.owned_by, PortableAssetOwner::Claude);
+
+        let shared = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-skill")
+            .expect("shared agents compatibility skill");
+        assert_eq!(shared.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!shared.origin.native_output_candidate);
+        assert_eq!(shared.origin.owned_by, PortableAssetOwner::SharedAgents);
     }
 
     #[test]
@@ -618,5 +648,50 @@ mod tests {
             )
             .unwrap();
         assert!(!rendered.file_name.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn command_names_match_support_manifest_and_prefer_cursor_agent() {
+        let names = cursor_command_names();
+        assert_eq!(names, ["cursor-agent", "agent"]);
+        let manifest = crate::agent_hub::support::builtin_support_manifest().unwrap();
+        let record = crate::agent_hub::support::find_target_record(&manifest, AgentTarget::Cursor)
+            .expect("cursor support record");
+        assert_eq!(record.executable_probe.command_names, names);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_prefers_cursor_agent_over_agent_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let write_cli = |name: &str, stamp: &str| {
+            let path = bin.join(name);
+            fs::write(&path, format!("#!/bin/sh\necho '{stamp}'\n")).unwrap();
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        };
+        write_cli("cursor-agent", "cursor-agent 1.2.3");
+        write_cli("agent", "grok-agent 9.9.9");
+        let mut env = isolated_env(home);
+        env.path_entries = vec![bin];
+        let probe = CursorInstructionAdapter.probe(&env).unwrap();
+        let exe = probe.executable.expect("cursor executable");
+        assert!(
+            exe.file_name().and_then(|s| s.to_str()) == Some("cursor-agent"),
+            "probe must prefer cursor-agent, got {exe:?}"
+        );
+        assert!(
+            probe
+                .version
+                .as_deref()
+                .is_some_and(|v| v.contains("cursor-agent")),
+            "version={:?}",
+            probe.version
+        );
     }
 }

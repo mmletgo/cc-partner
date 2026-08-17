@@ -39,7 +39,8 @@ pub use pi::PiInstructionAdapter;
 pub use portable::{
     scan_disabled_command_markdown_dir, scan_disabled_skill_dirs, scan_plugin_components_readonly,
     stamp_parent_plugin, AssetRenderContext, DiscoveredPortableAsset, PortableAssetOrigin,
-    PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile, TargetAssetProjection,
+    PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile,
+    TargetAssetProjection,
 };
 
 /// adapter 能力支持级别。

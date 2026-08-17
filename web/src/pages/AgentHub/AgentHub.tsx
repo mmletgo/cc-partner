@@ -24,7 +24,7 @@ import {
   PortablePullDrawer,
   type PortableInventoryViewLabels,
 } from './portableAssets';
-import { allHubTargets } from '@/lib/agentCatalog';
+import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
 import {
@@ -239,6 +239,21 @@ export function AgentHubView(props: AgentHubViewProps) {
         nativeConfig: t('agentHub:portable.inventory.sourceOrigin.nativeConfig'),
       },
       unmanagedRefreshHint: t('agentHub:portable.inventory.unmanagedRefreshHint'),
+      groupInstalled: t('agentHub:portable.inventory.groupInstalled'),
+      groupBorrowed: t('agentHub:portable.inventory.groupBorrowed'),
+      emptyRuntimeHint: t('agentHub:portable.inventory.emptyRuntimeHint'),
+      openInOwnerAgent: t('agentHub:portable.inventory.openInOwnerAgent'),
+      borrowedFrom: {
+        claude: t('agentHub:portable.inventory.borrowedFrom.claude'),
+        codex: t('agentHub:portable.inventory.borrowedFrom.codex'),
+        opencode: t('agentHub:portable.inventory.borrowedFrom.opencode'),
+        grok: t('agentHub:portable.inventory.borrowedFrom.grok'),
+        gemini: t('agentHub:portable.inventory.borrowedFrom.gemini'),
+        cursor: t('agentHub:portable.inventory.borrowedFrom.cursor'),
+        pi: t('agentHub:portable.inventory.borrowedFrom.pi'),
+        sharedAgents: t('agentHub:portable.inventory.borrowedFrom.sharedAgents'),
+        unknown: t('agentHub:portable.inventory.borrowedFrom.unknown'),
+      },
     }),
     [t],
   );
@@ -552,6 +567,13 @@ export function AgentHubView(props: AgentHubViewProps) {
             <PortableInventoryView
               controller={portableInventory}
               labels={portableInventoryLabels}
+              onOpenOwner={(item) => {
+                if (isHubTarget(item.ownedBy)) {
+                  onContextChange({ agent: item.ownedBy });
+                  return;
+                }
+                portableInventory.selectItem(item.inventoryItemId);
+              }}
             />
           </div>
         ) : null}

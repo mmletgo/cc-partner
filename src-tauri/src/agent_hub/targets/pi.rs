@@ -10,14 +10,14 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     实现 `AssetAdapter`：probe `pi`；扫描 `.pi` 受管文件与只读原生指令；
-//!     portable 只扫 `.pi/skills` 与 `~/.pi/agent/skills`；render 落到 `.pi/`。
+//!     portable 经 runtime-discovery 表扫 native skills、无条件 `.agents/skills`，
+//!     以及 settings 点名后的 `~/.claude/skills`；render 落到 `.pi/`。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
-    merge_discoveries, render_portable_payload, scan_skill_dirs, scan_skill_dirs_manifest_only,
-    AssetRenderContext, DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
+    render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -26,6 +26,7 @@ use super::{
 };
 use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
+use crate::agent_hub::support::scan_table_roots;
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 
@@ -121,28 +122,23 @@ impl AssetAdapter for PiInstructionAdapter {
         Ok(rendered)
     }
 
-    /// 扫描 Pi native Skill。
+    /// 扫描 Pi native Skill 与兼容 skills。
     ///
-    /// Business Logic: 只扫 `.pi/skills` 与 `~/.pi/agent/skills`；禁止把 Claude 目录当 Pi native；
-    ///     不伪造 MCP（Pi 故意不内建）。
-    /// Code Logic: user=`config_root/skills`；project=`<root>/.pi/skills`。
+    /// Business Logic: `{piConfigRoot,project/.pi}/skills` 为 native；`~/.agents/skills`
+    ///     始终兼容发现；`~/.claude/skills` 仅当 settings 点名。不伪造 MCP。
+    /// Code Logic: 委托 `scan_table_roots`（含 `piSettingsSkills` gate）。
     fn scan_portable_assets(
         &self,
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = pi_portable_root(scope, &homes);
-        let parts = vec![scan_skill_dirs(
-            AgentTarget::Pi,
-            scope.scope_kind,
-            &base.join("skills"),
-            PortableOriginKind::Native,
-        )?];
-        Ok(merge_discoveries(parts))
+        scan_table_roots(AgentTarget::Pi, scope, env, None, false)
     }
 
     /// Inventory 精确 kind 扫描。
+    ///
+    /// Business Logic: Skill 过滤走 manifest-only；gate 与全量扫描一致。
+    /// Code Logic: `kind=None` 回退全量；Skill 传 `manifest_only=true`。
     fn scan_portable_assets_filtered(
         &self,
         scope: &LocalScopeMapping,
@@ -152,24 +148,13 @@ impl AssetAdapter for PiInstructionAdapter {
         let Some(kind) = kind else {
             return self.scan_portable_assets(scope, env);
         };
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = pi_portable_root(scope, &homes);
-        let mut parts = Vec::new();
-        match kind {
-            AssetKind::Skill => parts.push(scan_skill_dirs_manifest_only(
-                AgentTarget::Pi,
-                scope.scope_kind,
-                &base.join("skills"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Command
-            | AssetKind::Mcp
-            | AssetKind::Agent
-            | AssetKind::Instruction
-            | AssetKind::Plugin
-            | AssetKind::Hook => {}
-        }
-        Ok(merge_discoveries(parts))
+        scan_table_roots(
+            AgentTarget::Pi,
+            scope,
+            env,
+            Some(kind),
+            kind == AssetKind::Skill,
+        )
     }
 
     /// 渲染 Pi portable 投影。
@@ -220,14 +205,6 @@ fn pi_render_file_name(compiler_name: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(PI_EXCLUSIVE_FILE);
     format!(".pi/{file}")
-}
-
-/// 用户级 / 项目级 portable 根。
-fn pi_portable_root(scope: &LocalScopeMapping, homes: &super::paths::TargetHomes) -> PathBuf {
-    match scope.scope_kind {
-        ScopeKind::User => homes.pi.config_root.clone(),
-        ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".pi"),
-    }
 }
 
 /// 扫描用户级 Pi 指令。
@@ -366,7 +343,7 @@ fn push_existing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::targets::portable::PortableOriginKind;
+    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
@@ -463,6 +440,14 @@ mod tests {
             &home.join(".pi/agent/skills/pi-skill/SKILL.md"),
             "---\nname: pi-skill\ndescription: d\n---\nbody\n",
         );
+        write_text(
+            &home.join(".pi/agent/settings.json"),
+            r#"{"skills": [".claude/skills"]}"#,
+        );
+        write_text(
+            &home.join(".agents/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: d\n---\nbody\n",
+        );
         let env = isolated_env(home);
         let scope = user_scope(home);
 
@@ -498,9 +483,93 @@ mod tests {
             }),
             "portable scan marked ~/.claude as Pi native: {found:?}"
         );
-        assert!(found.iter().any(|asset| asset.semantic_name == "pi-skill"));
+        let claude = found
+            .iter()
+            .find(|asset| {
+                asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.claude/")
+            })
+            .expect("claude compatibility skill when settings list it");
+        assert_eq!(claude.semantic_name, "review");
+        assert_eq!(claude.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!claude.origin.native_output_candidate);
+        assert_eq!(claude.origin.owned_by, PortableAssetOwner::Claude);
+        let shared = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-skill")
+            .expect("shared agents compatibility skill");
+        assert_eq!(shared.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!shared.origin.native_output_candidate);
+        assert_eq!(shared.origin.owned_by, PortableAssetOwner::SharedAgents);
+        assert!(found.iter().any(|asset| {
+            asset.semantic_name == "pi-skill"
+                && asset.origin.origin_kind == PortableOriginKind::Native
+        }));
         assert!(found
             .iter()
             .all(|asset| asset.origin.target == AgentTarget::Pi));
+    }
+
+    #[test]
+    fn user_scan_skips_claude_skills_unless_settings_list_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        write_text(
+            &home.join(".claude/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".agents/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".pi/agent/skills/pi-skill/SKILL.md"),
+            "---\nname: pi-skill\ndescription: d\n---\nbody\n",
+        );
+        let env = isolated_env(home);
+        let scope = user_scope(home);
+
+        let without_settings = PiInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        assert!(
+            without_settings.iter().all(|asset| {
+                !asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.claude/")
+            }),
+            "claude skills must stay hidden without settings: {without_settings:?}"
+        );
+        assert!(without_settings
+            .iter()
+            .any(|asset| asset.semantic_name == "shared-skill"
+                && asset.origin.origin_kind == PortableOriginKind::Compatibility
+                && asset.origin.owned_by == PortableAssetOwner::SharedAgents
+                && !asset.origin.native_output_candidate));
+        assert!(without_settings
+            .iter()
+            .any(|asset| asset.semantic_name == "pi-skill"));
+
+        write_text(
+            &home.join(".pi/agent/settings.json"),
+            r#"{"skills": [".claude/skills"]}"#,
+        );
+        let with_settings = PiInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        let claude = with_settings
+            .iter()
+            .find(|asset| asset.semantic_name == "review")
+            .expect("claude skill after settings mention");
+        assert_eq!(claude.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!claude.origin.native_output_candidate);
+        assert_eq!(claude.origin.owned_by, PortableAssetOwner::Claude);
     }
 }

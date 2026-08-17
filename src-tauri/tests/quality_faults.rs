@@ -1092,7 +1092,8 @@ async fn agent_hub_projection_directory_unknown_files_never_deleted() {
 
 use app_lib::{
     hash_skill_directory, DiscoveredPortableAsset, FakeProcessRunner, PortableAssetOrigin,
-    PortableAssetPayload, PortableDiscoveryStatus, PortableOriginKind, PortableSkill,
+    PortableAssetOwner, PortableAssetPayload, PortableDiscoveryStatus, PortableOriginKind,
+    PortableSkill,
 };
 use std::path::PathBuf;
 
@@ -1159,6 +1160,7 @@ fn discovered_legacy(target: AgentTarget, path: &Path) -> DiscoveredPortableAsse
             tree_hash: Some(tree),
             status: PortableDiscoveryStatus::Active,
             native_output_candidate: false,
+            owned_by: PortableAssetOwner::from_target(target),
             parent_plugin_id: None,
         },
         diagnostics: diags,

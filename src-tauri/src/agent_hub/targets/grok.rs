@@ -7,16 +7,15 @@
 //!     Claude 兼容目录 `~/.claude` / `.claude` 禁止当作 Grok native 输出。
 //!
 //! Code Logic（这个模块做什么）:
-//!     实现 `AssetAdapter`：probe `grok`；扫描 rules 与只读原生指令；portable 只扫
-//!     `.grok/skills|commands` 与 `config.toml` 的 `[mcp_servers.*]`；render 落到 `.grok/rules/`。
+//!     实现 `AssetAdapter`：probe `grok`；扫描 rules 与只读原生指令；portable 走
+//!     runtime-discovery 表（native `.grok` + Claude 兼容 registry/skills/MCP）；
+//!     render 落到 `.grok/rules/`。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
-    merge_discoveries, parse_codex_mcp_toml, render_portable_payload, scan_command_markdown_dir,
-    scan_skill_dirs, scan_skill_dirs_manifest_only, AssetRenderContext, DiscoveredPortableAsset,
-    PortableOriginKind, TargetAssetProjection,
+    render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -122,35 +121,22 @@ impl AssetAdapter for GrokInstructionAdapter {
         Ok(rendered)
     }
 
-    /// 扫描 Grok native Skill/Command 与 user MCP。
+    /// 扫描 Grok runtimeEffective Skill/Command/Plugin/MCP。
     ///
-    /// Business Logic: 只扫 `.grok` 树与 `config.toml`；禁止把 Claude 目录当 Grok native。
-    /// Code Logic: user=`config_root/{skills,commands,config.toml}`；project=`<root>/.grok/...`。
+    /// Business Logic: 表驱动扫描 native `.grok` 与 Claude 兼容根；兼容项不得当 native 写出。
+    /// Code Logic: 委托 `scan_table_roots`；不复制 `~/.claude`，不调用 `grok inspect`。
     fn scan_portable_assets(
         &self,
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = grok_portable_root(scope, &homes);
-        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
-        parts.push(scan_skill_dirs(
-            AgentTarget::Grok,
-            scope.scope_kind,
-            &base.join("skills"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_command_markdown_dir(
-            AgentTarget::Grok,
-            scope.scope_kind,
-            &base.join("commands"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_grok_mcp(scope, &homes)?);
-        Ok(merge_discoveries(parts))
+        crate::agent_hub::support::scan_table_roots(AgentTarget::Grok, scope, env, None, false)
     }
 
     /// Inventory 精确 kind 扫描。
+    ///
+    /// Business Logic: Skill 列表只需 manifest 身份；其余 kind 走完整表扫描。
+    /// Code Logic: Skill 传 `manifest_only=true`；其它 kind 为 false。
     fn scan_portable_assets_filtered(
         &self,
         scope: &LocalScopeMapping,
@@ -160,26 +146,13 @@ impl AssetAdapter for GrokInstructionAdapter {
         let Some(kind) = kind else {
             return self.scan_portable_assets(scope, env);
         };
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = grok_portable_root(scope, &homes);
-        let mut parts = Vec::new();
-        match kind {
-            AssetKind::Skill => parts.push(scan_skill_dirs_manifest_only(
-                AgentTarget::Grok,
-                scope.scope_kind,
-                &base.join("skills"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Command => parts.push(scan_command_markdown_dir(
-                AgentTarget::Grok,
-                scope.scope_kind,
-                &base.join("commands"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Mcp => parts.push(scan_grok_mcp(scope, &homes)?),
-            AssetKind::Agent | AssetKind::Instruction | AssetKind::Plugin | AssetKind::Hook => {}
-        }
-        Ok(merge_discoveries(parts))
+        crate::agent_hub::support::scan_table_roots(
+            AgentTarget::Grok,
+            scope,
+            env,
+            Some(kind),
+            kind == AssetKind::Skill,
+        )
     }
 
     /// 渲染 Grok portable 投影。
@@ -230,14 +203,6 @@ fn grok_render_file_name(compiler_name: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(GROK_EXCLUSIVE_FILE);
     format!(".grok/rules/{file}")
-}
-
-/// 用户级 / 项目级 portable 根。
-fn grok_portable_root(scope: &LocalScopeMapping, homes: &super::paths::TargetHomes) -> PathBuf {
-    match scope.scope_kind {
-        ScopeKind::User => homes.grok.config_root.clone(),
-        ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".grok"),
-    }
 }
 
 /// 扫描用户级 Grok 指令。
@@ -370,31 +335,14 @@ fn push_existing(
     Ok(())
 }
 
-/// 只读解析 Grok `config.toml` 的 `[mcp_servers.*]`。
-///
-/// Business Logic: 复用 Codex TOML helper；仅扫 Grok 配置根，不读 Claude JSON。
-/// Code Logic: user=`config_root/config.toml`；project=`.grok/config.toml`。
-fn scan_grok_mcp(
-    scope: &LocalScopeMapping,
-    homes: &super::paths::TargetHomes,
-) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-    let path = match scope.scope_kind {
-        ScopeKind::User => homes.grok.config_root.join("config.toml"),
-        ScopeKind::Project | ScopeKind::Directory => {
-            scope.absolute_path.join(".grok").join("config.toml")
-        }
-    };
-    if !path.is_file() {
-        return Ok(vec![]);
-    }
-    let text = fs::read_to_string(&path)?;
-    parse_codex_mcp_toml(AgentTarget::Grok, scope.scope_kind, &text, &path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::targets::portable::PortableOriginKind;
+    use crate::agent_hub::portable_inventory::models::{PortableAssetKind, PortableInventoryQuery};
+    use crate::agent_hub::portable_inventory::scanner::{
+        scan_portable_inventory_facts_query, PortableScanScope,
+    };
+    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -530,11 +478,141 @@ mod tests {
             }),
             "portable scan marked ~/.claude as Grok native: {found:?}"
         );
+        let claude_assets: Vec<_> = found
+            .iter()
+            .filter(|asset| {
+                asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.claude/")
+            })
+            .collect();
+        assert!(
+            !claude_assets.is_empty(),
+            "must discover Claude-path compatibility assets: {found:?}"
+        );
+        assert!(
+            claude_assets.iter().all(|asset| {
+                asset.origin.origin_kind == PortableOriginKind::Compatibility
+                    && asset.origin.owned_by == PortableAssetOwner::Claude
+                    && !asset.origin.native_output_candidate
+            }),
+            "Claude-path assets must be borrowed compatibility: {claude_assets:?}"
+        );
         assert!(found
             .iter()
             .any(|asset| asset.semantic_name == "grok-skill"));
         assert!(found
             .iter()
             .all(|asset| asset.origin.target == AgentTarget::Grok));
+    }
+
+    /// Grok 库存必须同时看到 native `.grok` 与 Claude registry 插件组件。
+    #[test]
+    fn scan_sees_native_and_claude_runtime_effective_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let plugin_root = home.join(".claude/plugins/cache/market/compat-plugin/1.0.0");
+        write_text(
+            &plugin_root.join(".claude-plugin/plugin.json"),
+            r#"{"name":"compat-plugin","version":"1.0.0"}"#,
+        );
+        write_text(
+            &plugin_root.join("skills/claude-plugin-skill/SKILL.md"),
+            "---\nname: claude-plugin-skill\ndescription: borrowed\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".claude/plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "compat-plugin@market": [{
+                        "scope": "user",
+                        "installPath": plugin_root.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        write_text(
+            &home.join(".grok/skills/grok-skill/SKILL.md"),
+            "---\nname: grok-skill\ndescription: native\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".grok/installed-plugins/native-plugin/plugin.json"),
+            r#"{"name":"native-plugin","version":"0.1.0"}"#,
+        );
+        write_text(
+            &home.join(".grok/installed-plugins/native-plugin/skills/grok-plugin-skill/SKILL.md"),
+            "---\nname: grok-plugin-skill\ndescription: native plugin\n---\nbody\n",
+        );
+        let env = isolated_env(home);
+        let scope = user_scope(home);
+
+        let found = GrokInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        assert!(
+            found.iter().any(|asset| asset.semantic_name == "grok-skill"
+                && asset.origin.origin_kind == PortableOriginKind::Native),
+            "missing native grok-skill: {found:?}"
+        );
+        assert!(
+            found.iter().any(|asset| {
+                asset.semantic_name == "claude-plugin-skill"
+                    && asset.origin.origin_kind == PortableOriginKind::Compatibility
+                    && asset.origin.owned_by == PortableAssetOwner::Claude
+                    && !asset.origin.native_output_candidate
+            }),
+            "missing Claude plugin skill as compatibility: {found:?}"
+        );
+        assert!(
+            found.iter().any(|asset| {
+                asset.semantic_name == "grok-plugin-skill"
+                    && asset.origin.origin_kind == PortableOriginKind::Native
+            }),
+            "missing native installed-plugins skill: {found:?}"
+        );
+        assert!(found
+            .iter()
+            .all(|asset| asset.origin.target == AgentTarget::Grok));
+        assert!(found.iter().all(|asset| {
+            let path = asset.origin.path.to_string_lossy().replace('\\', "/");
+            !path.contains("/.claude/") || !asset.origin.native_output_candidate
+        }));
+
+        let scopes = [PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.to_path_buf(),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Grok),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (_targets, items) = scan_portable_inventory_facts_query(&env, &scopes, query)
+            .expect("grok plugin inventory");
+        let claude_plugin = items
+            .iter()
+            .find(|item| {
+                item.target == AgentTarget::Grok
+                    && item.kind == PortableAssetKind::Plugin
+                    && (item.native_id == "compat-plugin" || item.display_name == "compat-plugin")
+            })
+            .expect("Grok inventory must list the borrowed Claude plugin");
+        assert_eq!(claude_plugin.origin_kind, PortableOriginKind::Compatibility);
+        assert_eq!(claude_plugin.owned_by, PortableAssetOwner::Claude);
+        assert!(!claude_plugin.native_output_candidate);
+        assert!(!claude_plugin.capabilities.can_uninstall);
+        assert_eq!(
+            claude_plugin.capabilities.reason_code.as_deref(),
+            Some("borrowed_runtime_origin")
+        );
     }
 }

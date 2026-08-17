@@ -713,8 +713,8 @@ mod tests {
         PortableAssetCanonicalEffect, PortableAssetConflictPolicy, PortableAssetPlanOperation,
     };
     use crate::agent_hub::portable_inventory::{
-        PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
-        PortableInventorySourceOrigin,
+        PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
+        PortableInventorySourceOrigin, PortableOriginKind,
     };
     use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::TempDir;
@@ -774,6 +774,10 @@ mod tests {
         PortableInventoryItemDto {
             inventory_item_id: format!("id-{native_id}"),
             target: AgentTarget::Codex,
+            loaded_by: AgentTarget::Codex,
+            owned_by: PortableAssetOwner::Codex,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind,
             native_id: native_id.into(),
             display_name: native_id.into(),

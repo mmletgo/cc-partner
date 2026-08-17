@@ -15,9 +15,8 @@ use super::paths::{
 };
 use super::portable::{
     merge_discoveries, parse_json_or_jsonc, parse_mcp_servers_json_map, render_portable_payload,
-    scan_agent_markdown_dir, scan_command_markdown_dir, scan_skill_dirs,
-    scan_skill_dirs_manifest_only, AssetRenderContext, DiscoveredPortableAsset, PortableOriginKind,
-    TargetAssetProjection,
+    scan_disabled_skill_dirs, scan_disabled_skill_dirs_manifest_only, AssetRenderContext,
+    DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -26,6 +25,7 @@ use super::{
 };
 use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
+use crate::agent_hub::support::scan_table_roots;
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 
@@ -96,125 +96,32 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
         Ok(RenderedInstruction::from_compiled(compiled))
     }
 
-    /// 扫描 OpenCode portable 资产（native + compatibility）。
+    /// 扫描 OpenCode portable 资产（表驱动 native/compat + 表外 extras）。
     ///
-    /// Business Logic: `.claude/skills` / `.agents/skills` 标记 compatibility，非 native 输出。
-    /// Code Logic: config_root 原生树 + home 兼容 skills + opencode.json(c) MCP。
+    /// Business Logic: `.claude/skills` / `.agents/skills` 标记 compatibility，非 native 输出；
+    ///     MCP 与 `disabled/skills` 不在发现表，必须由适配器合并。
+    /// Code Logic: `scan_table_roots` + disabled-skill helper + opencode.json(c) MCP。
     fn scan_portable_assets(
         &self,
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-        let homes = TargetPathResolver::resolve_all(env);
-        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
-
-        let native_root = match scope.scope_kind {
-            ScopeKind::User => homes.opencode.config_root.clone(),
-            ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".opencode"),
-        };
-
-        use super::portable::{scan_disabled_skill_dirs, scan_plugin_components_readonly};
-        use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
-
-        parts.push(scan_skill_dirs(
+        let mut parts = vec![scan_table_roots(
             AgentTarget::OpenCode,
-            scope.scope_kind,
-            &native_root.join("skills"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_disabled_skill_dirs(
-            AgentTarget::OpenCode,
-            scope.scope_kind,
-            &native_root.join("disabled").join("skills"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_command_markdown_dir(
-            AgentTarget::OpenCode,
-            scope.scope_kind,
-            &native_root.join("commands"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_agent_markdown_dir(
-            AgentTarget::OpenCode,
-            scope.scope_kind,
-            &native_root.join("agents"),
-            PortableOriginKind::Native,
-        )?);
-
-        // Plugin packages under config_root/plugins
-        let plugins_root = native_root.join("plugins");
-        if plugins_root.is_dir() {
-            if let Ok(read) = std::fs::read_dir(&plugins_root) {
-                for entry in read.flatten() {
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-                    let plugin_id = discover_plugin_source_for_target(
-                        AgentTarget::OpenCode,
-                        &path,
-                        "scan",
-                        scope.scope_kind,
-                    )
-                    .map(|s| s.plugin_id)
-                    .unwrap_or_else(|_| {
-                        path.file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("plugin")
-                            .to_string()
-                    });
-                    parts.push(scan_plugin_components_readonly(
-                        AgentTarget::OpenCode,
-                        scope.scope_kind,
-                        &path,
-                        &plugin_id,
-                    )?);
-                }
-            }
-        }
-
-        // MCP from OPENCODE_CONFIG / opencode.json(c)
-        if scope.scope_kind == ScopeKind::User {
-            parts.push(scan_opencode_mcp_config(scope.scope_kind, env, &homes)?);
-            // Compatibility skill roots (user home)
-            parts.push(scan_skill_dirs(
-                AgentTarget::OpenCode,
-                scope.scope_kind,
-                &env.home.join(".claude").join("skills"),
-                PortableOriginKind::Compatibility,
-            )?);
-            parts.push(scan_skill_dirs(
-                AgentTarget::OpenCode,
-                scope.scope_kind,
-                &env.home.join(".agents").join("skills"),
-                PortableOriginKind::Compatibility,
-            )?);
-        } else {
-            // 项目级兼容路径
-            parts.push(scan_skill_dirs(
-                AgentTarget::OpenCode,
-                scope.scope_kind,
-                &scope.absolute_path.join(".claude").join("skills"),
-                PortableOriginKind::Compatibility,
-            )?);
-            parts.push(scan_skill_dirs(
-                AgentTarget::OpenCode,
-                scope.scope_kind,
-                &scope.absolute_path.join(".agents").join("skills"),
-                PortableOriginKind::Compatibility,
-            )?);
-            for name in ["opencode.json", "opencode.jsonc"] {
-                let p = scope.absolute_path.join(name);
-                if p.is_file() {
-                    parts.push(scan_mcp_file(scope.scope_kind, &p)?);
-                }
-            }
-        }
-
+            scope,
+            env,
+            None,
+            false,
+        )?];
+        parts.push(scan_opencode_disabled_skills(scope, env, false)?);
+        parts.push(scan_opencode_mcp_extras(scope, env)?);
         Ok(merge_discoveries(parts))
     }
 
     /// Inventory 精确 kind 扫描；Plugin component 由 inventory 权威安装根扫描器补充。
+    ///
+    /// Business Logic: Skill 过滤走 manifest-only，并保留 disabled extras；MCP 仍走表外扫描。
+    /// Code Logic: 表根 + disabled skills；Command/Agent/Plugin 仅表；MCP 仅 extras。
     fn scan_portable_assets_filtered(
         &self,
         scope: &LocalScopeMapping,
@@ -224,67 +131,29 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
         let Some(kind) = kind else {
             return self.scan_portable_assets(scope, env);
         };
-        use super::portable::scan_disabled_skill_dirs_manifest_only;
-        let homes = TargetPathResolver::resolve_all(env);
-        let native_root = match scope.scope_kind {
-            ScopeKind::User => homes.opencode.config_root.clone(),
-            ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".opencode"),
-        };
         let mut parts = Vec::new();
         match kind {
             AssetKind::Skill => {
-                parts.push(scan_skill_dirs_manifest_only(
+                parts.push(scan_table_roots(
                     AgentTarget::OpenCode,
-                    scope.scope_kind,
-                    &native_root.join("skills"),
-                    PortableOriginKind::Native,
+                    scope,
+                    env,
+                    Some(AssetKind::Skill),
+                    true,
                 )?);
-                parts.push(scan_disabled_skill_dirs_manifest_only(
+                parts.push(scan_opencode_disabled_skills(scope, env, true)?);
+            }
+            AssetKind::Command | AssetKind::Agent | AssetKind::Plugin => {
+                parts.push(scan_table_roots(
                     AgentTarget::OpenCode,
-                    scope.scope_kind,
-                    &native_root.join("disabled/skills"),
-                    PortableOriginKind::Native,
+                    scope,
+                    env,
+                    Some(kind),
+                    false,
                 )?);
-                let compatibility_base = if scope.scope_kind == ScopeKind::User {
-                    env.home.clone()
-                } else {
-                    scope.absolute_path.clone()
-                };
-                for relative in [".claude/skills", ".agents/skills"] {
-                    parts.push(scan_skill_dirs_manifest_only(
-                        AgentTarget::OpenCode,
-                        scope.scope_kind,
-                        &compatibility_base.join(relative),
-                        PortableOriginKind::Compatibility,
-                    )?);
-                }
             }
-            AssetKind::Command => parts.push(scan_command_markdown_dir(
-                AgentTarget::OpenCode,
-                scope.scope_kind,
-                &native_root.join("commands"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Agent => parts.push(scan_agent_markdown_dir(
-                AgentTarget::OpenCode,
-                scope.scope_kind,
-                &native_root.join("agents"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Mcp => {
-                if scope.scope_kind == ScopeKind::User {
-                    parts.push(scan_opencode_mcp_config(scope.scope_kind, env, &homes)?);
-                } else {
-                    for name in ["opencode.json", "opencode.jsonc"] {
-                        let path = scope.absolute_path.join(name);
-                        if path.is_file() {
-                            parts.push(scan_mcp_file(scope.scope_kind, &path)?);
-                            break;
-                        }
-                    }
-                }
-            }
-            AssetKind::Instruction | AssetKind::Plugin | AssetKind::Hook => {}
+            AssetKind::Mcp => parts.push(scan_opencode_mcp_extras(scope, env)?),
+            AssetKind::Instruction | AssetKind::Hook => {}
         }
         Ok(merge_discoveries(parts))
     }
@@ -301,6 +170,66 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
     ) -> Result<TargetAssetProjection, AppError> {
         render_portable_payload(AgentTarget::OpenCode, asset)
     }
+}
+
+/// 扫描表外 `disabled/skills`（发现表不含该根）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode 禁用技能仍需进入库存，但不能标成 compatibility 或改写 native 根。
+///
+/// Code Logic（这个函数做什么）:
+///     user=`config_root/disabled/skills`；project=`.opencode/disabled/skills`。
+fn scan_opencode_disabled_skills(
+    scope: &LocalScopeMapping,
+    env: &TargetEnvironment,
+    manifest_only: bool,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let homes = TargetPathResolver::resolve_all(env);
+    let native_root = match scope.scope_kind {
+        ScopeKind::User => homes.opencode.config_root.clone(),
+        ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".opencode"),
+    };
+    let root = native_root.join("disabled").join("skills");
+    if manifest_only {
+        scan_disabled_skill_dirs_manifest_only(
+            AgentTarget::OpenCode,
+            scope.scope_kind,
+            &root,
+            PortableOriginKind::Native,
+        )
+    } else {
+        scan_disabled_skill_dirs(
+            AgentTarget::OpenCode,
+            scope.scope_kind,
+            &root,
+            PortableOriginKind::Native,
+        )
+    }
+}
+
+/// 扫描表外 OpenCode MCP（发现表不含 MCP 行）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户级读 OPENCODE_CONFIG / config_root json(c)；项目级读仓库根 opencode.json(c)。
+///
+/// Code Logic（这个函数做什么）:
+///     委托既有 `scan_opencode_mcp_config` 与 `scan_mcp_file`。
+fn scan_opencode_mcp_extras(
+    scope: &LocalScopeMapping,
+    env: &TargetEnvironment,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let homes = TargetPathResolver::resolve_all(env);
+    if scope.scope_kind == ScopeKind::User {
+        return scan_opencode_mcp_config(scope.scope_kind, env, &homes);
+    }
+    let mut out = Vec::new();
+    for name in ["opencode.json", "opencode.jsonc"] {
+        let path = scope.absolute_path.join(name);
+        if path.is_file() {
+            out.extend(scan_mcp_file(scope.scope_kind, &path)?);
+        }
+    }
+    Ok(out)
 }
 
 /// 扫描 OpenCode 用户 MCP 配置文件。
@@ -520,4 +449,154 @@ pub fn discover_opencode_plugin_source(
         scope_id,
         scope_kind,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableDiscoveryStatus};
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    fn write_text(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, text).unwrap();
+    }
+
+    fn isolated_env(home: &Path) -> TargetEnvironment {
+        let config_root = home.join(".opencode");
+        TargetEnvironment {
+            home: home.to_path_buf(),
+            vars: BTreeMap::from([
+                (
+                    "OPENCODE_CONFIG_DIR".into(),
+                    config_root.to_string_lossy().into_owned(),
+                ),
+                (
+                    "OPENCODE_CONFIG".into(),
+                    config_root
+                        .join("opencode.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ]),
+            path_entries: vec![],
+        }
+    }
+
+    fn user_scope(home: &Path) -> LocalScopeMapping {
+        LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: home.to_path_buf(),
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        }
+    }
+
+    fn seed_opencode_fixture(home: &Path) {
+        write_text(
+            &home.join(".opencode/skills/oc-skill/SKILL.md"),
+            "---\nname: oc-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".opencode/disabled/skills/off-skill/SKILL.md"),
+            "---\nname: off-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".claude/skills/claude-skill/SKILL.md"),
+            "---\nname: claude-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".agents/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".opencode/opencode.json"),
+            r#"{
+  "mcpServers": {
+    "private-api": {
+      "command": "uvx",
+      "args": ["oc-srv"]
+    }
+  }
+}"#,
+        );
+    }
+
+    #[test]
+    fn user_scan_finds_compat_skills_and_mcp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        seed_opencode_fixture(home);
+        let env = isolated_env(home);
+        let scope = user_scope(home);
+        let found = OpenCodeInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+
+        let native = found
+            .iter()
+            .find(|asset| asset.semantic_name == "oc-skill")
+            .expect("native opencode skill");
+        assert_eq!(native.origin.origin_kind, PortableOriginKind::Native);
+        assert!(native.origin.native_output_candidate);
+        assert_eq!(native.origin.owned_by, PortableAssetOwner::OpenCode);
+
+        let claude = found
+            .iter()
+            .find(|asset| asset.semantic_name == "claude-skill")
+            .expect("claude compatibility skill");
+        assert_eq!(claude.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!claude.origin.native_output_candidate);
+        assert_eq!(claude.origin.owned_by, PortableAssetOwner::Claude);
+
+        let shared = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-skill")
+            .expect("shared agents compatibility skill");
+        assert_eq!(shared.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!shared.origin.native_output_candidate);
+        assert_eq!(shared.origin.owned_by, PortableAssetOwner::SharedAgents);
+
+        let disabled = found
+            .iter()
+            .find(|asset| asset.semantic_name == "off-skill")
+            .expect("disabled skill extra");
+        assert_eq!(disabled.origin.status, PortableDiscoveryStatus::Disabled);
+        assert_eq!(disabled.origin.origin_kind, PortableOriginKind::Native);
+
+        assert!(found
+            .iter()
+            .any(|asset| { asset.kind == AssetKind::Mcp && asset.semantic_name == "private-api" }));
+    }
+
+    #[test]
+    fn disable_claude_code_skills_hides_compat_but_keeps_mcp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        seed_opencode_fixture(home);
+        let mut env = isolated_env(home);
+        env.vars
+            .insert("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS".into(), "1".into());
+        let scope = user_scope(home);
+        let found = OpenCodeInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+
+        assert!(
+            found.iter().all(|asset| {
+                let path = asset.origin.path.to_string_lossy().replace('\\', "/");
+                !path.contains("/.claude/") && !path.contains("/.agents/skills/")
+            }),
+            "compat skills must hide when disable env is set: {found:?}"
+        );
+        assert!(found.iter().any(|asset| asset.semantic_name == "oc-skill"));
+        assert!(found
+            .iter()
+            .any(|asset| { asset.kind == AssetKind::Mcp && asset.semantic_name == "private-api" }));
+        assert!(found.iter().any(|asset| asset.semantic_name == "off-skill"));
+    }
 }

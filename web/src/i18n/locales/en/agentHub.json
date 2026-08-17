@@ -609,6 +609,21 @@
       "filterActual": "Actual state",
       "filterManagement": "Consistency",
       "unmanagedRefreshHint": "Not managed yet — refresh inventory to bring this asset under Hub management.",
+      "groupInstalled": "Installed here",
+      "groupBorrowed": "Loaded at runtime from other agents",
+      "emptyRuntimeHint": "This agent has no locally installed assets, but runtime still loads assets from other agents.",
+      "openInOwnerAgent": "Open in owner Agent",
+      "borrowedFrom": {
+        "claude": "From Claude Code",
+        "codex": "From Codex",
+        "opencode": "From OpenCode",
+        "grok": "From Grok Build",
+        "gemini": "From Gemini CLI",
+        "cursor": "From Cursor CLI",
+        "pi": "From Pi",
+        "sharedAgents": "Shared ~/.agents",
+        "unknown": "From unknown owner"
+      },
       "targetFilter": {
         "all": "All targets",
         "claude": "Claude",

@@ -32,7 +32,7 @@ use crate::agent_hub::support::{
     EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::portable::{
-    DiscoveredPortableAsset, PortableDiscoveryStatus, PortableOriginKind,
+    DiscoveredPortableAsset, PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
@@ -660,7 +660,7 @@ fn scan_plugin_packages(
         BTreeMap::new()
     };
     for candidate in roots {
-        let root = candidate.path;
+        let root = candidate.path.clone();
         if !root.is_dir() {
             continue;
         }
@@ -760,9 +760,20 @@ fn scan_plugin_packages(
             } else {
                 action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
             };
+            let (mut origin_kind, mut owned_by, mut native_output_candidate) =
+                classify_plugin_package_origin(target, &root, homes);
+            if candidate.origin_kind != PortableOriginKind::Native {
+                origin_kind = candidate.origin_kind;
+                owned_by = candidate.owned_by;
+                native_output_candidate = origin_kind.is_native_output_candidate();
+            }
             let item = PortableInventoryItemDto {
                 inventory_item_id: inv_id.clone(),
                 target,
+                loaded_by: target,
+                owned_by,
+                origin_kind,
+                native_output_candidate,
                 kind: PortableAssetKind::Plugin,
                 native_id: source.plugin_id.clone(),
                 display_name: source.name.clone(),
@@ -792,6 +803,8 @@ fn scan_plugin_packages(
                     can_deactivate,
                     true,
                     reason,
+                    origin_kind,
+                    native_output_candidate,
                 ),
                 warnings,
                 mcp_credential: None,
@@ -847,21 +860,76 @@ fn scan_plugin_packages(
     Ok(())
 }
 
-/// 可扫描的 plugin package 根（含可选 registry 身份）。
+/// 可扫描的 plugin package 根（含可选 registry 身份与 origin 戳）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PluginRootCandidate {
     path: PathBuf,
     /// installed_plugins.json 的 key 前缀（`pyright-lsp@market` → `pyright-lsp`）
     registry_plugin_id: Option<String>,
+    origin_kind: PortableOriginKind,
+    owned_by: PortableAssetOwner,
 }
 
 impl PluginRootCandidate {
+    /// 默认 native 根；调用方可再按路径重分类。
     fn path_only(path: PathBuf) -> Self {
+        Self::native(path, PortableAssetOwner::Unknown)
+    }
+
+    /// Native 写出候选，所有者已知。
+    fn native(path: PathBuf, owned_by: PortableAssetOwner) -> Self {
         Self {
             path,
             registry_plugin_id: None,
+            origin_kind: PortableOriginKind::Native,
+            owned_by,
         }
     }
+
+    /// Native 写出候选，所有者由扫描 target 推导。
+    #[allow(dead_code)]
+    fn native_for(target: AgentTarget, path: PathBuf) -> Self {
+        Self::native(path, PortableAssetOwner::from_target(target))
+    }
+}
+
+/// 按路径判断 plugin package 的 origin / 所有者 / 是否可作 native 写出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     非本 target 的 Claude / `.agents` 根只是运行时借用，不得变成可卸载写出目标。
+///
+/// Code Logic（这个函数做什么）:
+///     Claude 配置根且 target≠Claude → Compatibility/Claude；`.agents` →
+///     Codex 为 LegacyStandalone、其余 Compatibility，ownedBy SharedAgents；
+///     否则 Native + from_target。
+fn classify_plugin_package_origin(
+    target: AgentTarget,
+    path: &Path,
+    homes: &crate::agent_hub::targets::paths::TargetHomes,
+) -> (PortableOriginKind, PortableAssetOwner, bool) {
+    let under_claude = path.starts_with(&homes.claude.config_root)
+        || path.components().any(|c| c.as_os_str() == ".claude");
+    if under_claude && target != AgentTarget::Claude {
+        return (
+            PortableOriginKind::Compatibility,
+            PortableAssetOwner::Claude,
+            false,
+        );
+    }
+    let under_agents = path.components().any(|c| c.as_os_str() == ".agents");
+    if under_agents {
+        let origin_kind = if target == AgentTarget::Codex {
+            PortableOriginKind::LegacyStandalone
+        } else {
+            PortableOriginKind::Compatibility
+        };
+        return (origin_kind, PortableAssetOwner::SharedAgents, false);
+    }
+    (
+        PortableOriginKind::Native,
+        PortableAssetOwner::from_target(target),
+        true,
+    )
 }
 
 /// 当前 scope 下应扫描的 plugin package 根（权威入口）。
@@ -910,10 +978,7 @@ fn plugin_roots_for(
         .map(PluginRootCandidate::path_only)
         .collect(),
         (AgentTarget::Grok, ScopeKind::User) => {
-            direct_manifest_plugin_roots(&homes.grok.config_root.join("plugins"), target)
-                .into_iter()
-                .map(PluginRootCandidate::path_only)
-                .collect()
+            grok_user_plugin_roots(&homes.grok.config_root, &homes.claude.config_root)
         }
         (AgentTarget::Gemini, ScopeKind::User) => {
             direct_manifest_plugin_roots(&homes.gemini.config_root.join("plugins"), target)
@@ -982,7 +1047,14 @@ pub(crate) fn user_plugin_package_root_paths(
                 .map(PluginRootCandidate::path_only)
                 .collect()
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
+        AgentTarget::Grok => {
+            let claude_root = config_root
+                .parent()
+                .map(|home| home.join(".claude"))
+                .unwrap_or_else(|| config_root.join(".claude"));
+            grok_user_plugin_roots(config_root, &claude_root)
+        }
+        AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
             direct_manifest_plugin_roots(&config_root.join("plugins"), target)
                 .into_iter()
                 .map(PluginRootCandidate::path_only)
@@ -990,6 +1062,83 @@ pub(crate) fn user_plugin_package_root_paths(
         }
     };
     candidates.into_iter().map(|c| c.path).collect()
+}
+
+/// 收集 Grok user-scope plugin 根：native `.grok` + Claude 兼容 registry/marketplace。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok 运行时同时加载 `plugins`、`installed-plugins` 与 Claude 已安装插件；
+///     兼容根必须标成 borrowed，不得当成 Grok native 写出/卸载目标。
+///
+/// Code Logic（这个函数做什么）:
+///     直装 manifest + installed-plugins + `claude_user_plugin_roots` 重分类 +
+///     `known_marketplaces.json` installLocation 下的 Claude manifest 包。
+fn grok_user_plugin_roots(
+    grok_config_root: &Path,
+    claude_config_root: &Path,
+) -> Vec<PluginRootCandidate> {
+    let mut roots = Vec::new();
+    roots.extend(
+        direct_manifest_plugin_roots(&grok_config_root.join("plugins"), AgentTarget::Grok)
+            .into_iter()
+            .map(|path| PluginRootCandidate::native(path, PortableAssetOwner::Grok)),
+    );
+    roots.extend(
+        direct_manifest_plugin_roots(
+            &grok_config_root.join("installed-plugins"),
+            AgentTarget::Grok,
+        )
+        .into_iter()
+        .map(|path| PluginRootCandidate::native(path, PortableAssetOwner::Grok)),
+    );
+    roots.extend(reclassify_claude_plugin_roots_for_grok(
+        claude_user_plugin_roots(claude_config_root),
+    ));
+    roots.extend(claude_marketplace_plugin_roots_for_grok(claude_config_root));
+    roots
+}
+
+/// 把 Claude registry 候选改成 Grok 借用的 compatibility 根。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `claude_user_plugin_roots` 对 Claude 自己标 Native；Grok 只能借用，不能写成 native。
+///
+/// Code Logic（这个函数做什么）:
+///     保留 path / registry_plugin_id，覆盖 origin_kind=Compatibility、owned_by=Claude。
+fn reclassify_claude_plugin_roots_for_grok(
+    candidates: Vec<PluginRootCandidate>,
+) -> Vec<PluginRootCandidate> {
+    candidates
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.origin_kind = PortableOriginKind::Compatibility;
+            candidate.owned_by = PortableAssetOwner::Claude;
+            candidate
+        })
+        .collect()
+}
+
+/// 解析 Claude `known_marketplaces.json` 的 installLocation，标成 Grok compatibility。
+///
+/// Business Logic（为什么需要这个函数）:
+///     marketplace 克隆目录里的 Claude 插件对 Grok 也是运行时可见的借用资产。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 `parse_marketplace_install_locations`，再只收含 Claude manifest 的子目录。
+fn claude_marketplace_plugin_roots_for_grok(claude_config_root: &Path) -> Vec<PluginRootCandidate> {
+    let marketplace = claude_config_root
+        .join("plugins")
+        .join("known_marketplaces.json");
+    crate::agent_hub::support::parse_marketplace_install_locations(&marketplace)
+        .into_iter()
+        .flat_map(|location| direct_manifest_plugin_roots(&location, AgentTarget::Claude))
+        .map(|path| PluginRootCandidate {
+            path,
+            registry_plugin_id: None,
+            origin_kind: PortableOriginKind::Compatibility,
+            owned_by: PortableAssetOwner::Claude,
+        })
+        .collect()
 }
 
 /// Claude 的 installed_plugins.json 是安装状态权威；cache/marketplaces/data 本身不是插件。
@@ -1033,6 +1182,8 @@ fn claude_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
                         roots.push(PluginRootCandidate {
                             path,
                             registry_plugin_id: registry_plugin_id.clone(),
+                            origin_kind: PortableOriginKind::Native,
+                            owned_by: PortableAssetOwner::Claude,
                         });
                     }
                 }
@@ -1091,6 +1242,8 @@ fn codex_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
                 roots.push(PluginRootCandidate {
                     path: root.to_path_buf(),
                     registry_plugin_id,
+                    origin_kind: PortableOriginKind::Native,
+                    owned_by: PortableAssetOwner::Codex,
                 });
             }
         }
@@ -1477,6 +1630,10 @@ fn discovered_to_item(
     let item = PortableInventoryItemDto {
         inventory_item_id: inv_id.clone(),
         target: disc.origin.target,
+        loaded_by: disc.origin.target,
+        owned_by: disc.origin.owned_by,
+        origin_kind: disc.origin.origin_kind,
+        native_output_candidate: disc.origin.native_output_candidate,
         kind,
         native_id: disc.origin.native_id.clone(),
         display_name: disc.semantic_name.clone(),
@@ -1510,6 +1667,8 @@ fn discovered_to_item(
             can_deactivate,
             enable_semantics,
             reason,
+            disc.origin.origin_kind,
+            disc.origin.native_output_candidate,
         ),
         warnings,
         mcp_credential,
@@ -1697,6 +1856,7 @@ fn action_capability_reason(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // origin 戳与 mutation 开关必须同函数强制 borrowed 能力
 fn item_capabilities(
     target: AgentTarget,
     kind: PortableAssetKind,
@@ -1705,6 +1865,8 @@ fn item_capabilities(
     can_deactivate_mutation: bool,
     enable_semantics: bool,
     reason: Option<String>,
+    origin_kind: PortableOriginKind,
+    native_output_candidate: bool,
 ) -> PortableInventoryItemCapabilitiesDto {
     let can_toggle_enable = can_enable_mutation && enable_semantics && actual_enabled.is_some();
     let can_toggle_deactivate =
@@ -1715,7 +1877,7 @@ fn item_capabilities(
     let can_disable = can_toggle_deactivate
         && actual_enabled == Some(true)
         && supports_direct_local_action(target, kind, PortableAssetActionKind::Disable);
-    PortableInventoryItemCapabilitiesDto {
+    let mut capabilities = PortableInventoryItemCapabilitiesDto {
         can_enable,
         can_disable,
         can_uninstall: can_deactivate_mutation
@@ -1726,7 +1888,22 @@ fn item_capabilities(
         can_install_to_source_target: false,
         reason_code: reason,
         evidence_ids: vec![format!("L2-PORTABLE-{}-SCAN", kind.as_str().to_uppercase())],
+    };
+    let borrowed = !native_output_candidate
+        || matches!(
+            origin_kind,
+            PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
+        );
+    if borrowed {
+        capabilities.can_enable = false;
+        capabilities.can_disable = false;
+        capabilities.can_uninstall = false;
+        capabilities.can_install_to_source_target = false;
+        if capabilities.reason_code.is_none() {
+            capabilities.reason_code = Some("borrowed_runtime_origin".into());
+        }
     }
+    capabilities
 }
 
 fn mcp_credential_fact(disc: &DiscoveredPortableAsset) -> PortableMcpCredentialFactDto {
@@ -2084,6 +2261,8 @@ enabled = false
             false,
             true,
             mutation_capability_reason(&target),
+            PortableOriginKind::Native,
+            true,
         );
         assert!(!capabilities.can_enable);
         assert!(!capabilities.can_disable);
@@ -2150,6 +2329,8 @@ enabled = false
                 target.target,
                 PortableAssetKind::Plugin,
             ),
+            PortableOriginKind::Native,
+            true,
         );
 
         assert!(capabilities.can_enable);
@@ -2208,6 +2389,8 @@ enabled = false
             can_render,
             true,
             action_capability_reason(&target, &evaluated, target.target, PortableAssetKind::Skill),
+            PortableOriginKind::Native,
+            true,
         );
 
         assert!(capabilities.can_disable);
@@ -2489,10 +2672,32 @@ enabled = false
             true,
             true,
             None,
+            PortableOriginKind::Native,
+            true,
         );
         assert!(caps.can_disable);
         assert!(caps.can_uninstall);
         assert!(!caps.can_adopt);
+    }
+
+    #[test]
+    fn compatibility_discovery_blocks_uninstall_with_borrowed_runtime_origin() {
+        let caps = item_capabilities(
+            AgentTarget::OpenCode,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            true,
+            None,
+            PortableOriginKind::Compatibility,
+            false,
+        );
+        assert!(!caps.can_enable);
+        assert!(!caps.can_disable);
+        assert!(!caps.can_uninstall);
+        assert!(!caps.can_install_to_source_target);
+        assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
     }
 
     #[test]
@@ -2561,6 +2766,101 @@ enabled = false
         let roots = codex_user_plugin_roots(&codex_root);
         assert_eq!(roots.len(), 1, "{roots:?}");
         assert_eq!(roots[0].path, codex_plugin);
+    }
+
+    /// Grok user 根必须同时包含 native installed-plugins 与 Claude registry/marketplace。
+    #[test]
+    fn grok_user_plugin_roots_include_installed_plugins_and_claude_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let grok = home.join(".grok");
+        let claude = home.join(".claude");
+        let installed = claude.join("plugins/cache/market/compat-plugin/1.0.0");
+        write(
+            &installed.join(".claude-plugin/plugin.json"),
+            r#"{"name":"compat-plugin"}"#,
+        );
+        write(
+            &claude.join("plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "compat-plugin@market": [{
+                        "scope": "user",
+                        "installPath": installed.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        let native_plugin = grok.join("installed-plugins/native-plugin");
+        write(
+            &native_plugin.join("plugin.json"),
+            r#"{"name":"native-plugin"}"#,
+        );
+        let market_root = home.join("cache/marketplaces/demo-market");
+        let market_plugin = market_root.join("listed-plugin");
+        write(
+            &market_plugin.join(".claude-plugin/plugin.json"),
+            r#"{"name":"listed-plugin"}"#,
+        );
+        write(
+            &claude.join("plugins/known_marketplaces.json"),
+            &serde_json::json!({
+                "marketplaces": {
+                    "demo-market": {
+                        "installLocation": market_root.to_string_lossy()
+                    }
+                }
+            })
+            .to_string(),
+        );
+
+        let mut vars = Map::new();
+        vars.insert("GROK_HOME".into(), grok.to_string_lossy().into_owned());
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            claude.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.to_path_buf(),
+            vars,
+            path_entries: vec![],
+        };
+        let scope = PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.to_path_buf(),
+        };
+        let homes = TargetPathResolver::resolve_all(&env);
+        let roots = plugin_roots_for(AgentTarget::Grok, &scope, &env, &homes);
+
+        let native = roots
+            .iter()
+            .find(|c| c.path == native_plugin)
+            .expect("native installed-plugins");
+        assert_eq!(native.origin_kind, PortableOriginKind::Native);
+        assert_eq!(native.owned_by, PortableAssetOwner::Grok);
+
+        let borrowed = roots
+            .iter()
+            .find(|c| c.path == installed)
+            .expect("Claude registry plugin");
+        assert_eq!(borrowed.origin_kind, PortableOriginKind::Compatibility);
+        assert_eq!(borrowed.owned_by, PortableAssetOwner::Claude);
+        assert_eq!(
+            borrowed.registry_plugin_id.as_deref(),
+            Some("compat-plugin")
+        );
+
+        let market = roots
+            .iter()
+            .find(|c| c.path == market_plugin)
+            .expect("Claude marketplace plugin");
+        assert_eq!(market.origin_kind, PortableOriginKind::Compatibility);
+        assert_eq!(market.owned_by, PortableAssetOwner::Claude);
     }
 
     /// Codex config.toml `[plugins."id@market"] enabled` 是启用权威。

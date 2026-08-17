@@ -5,16 +5,14 @@
 //!     `.gemini/cc-partner.adapted.md` / `cc-partner.exclusive.md`，禁止与同文件分块双写。
 //!
 //! Code Logic（这个模块做什么）:
-//!     实现 `AssetAdapter`：probe `gemini`；扫描 GEMINI.md + 侧车；portable 扫
-//!     `.gemini/skills|commands` 与 `settings.json` 的 `mcpServers`。
+//!     实现 `AssetAdapter`：probe `gemini`；扫描 GEMINI.md + 侧车；portable 经
+//!     runtime-discovery 表扫 `.gemini` native 与 `{home,project}/.agents/skills`。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
-    merge_discoveries, parse_json_or_jsonc, parse_mcp_servers_json_map, render_portable_payload,
-    scan_command_markdown_dir, scan_skill_dirs, scan_skill_dirs_manifest_only, AssetRenderContext,
-    DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
+    render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
@@ -23,8 +21,9 @@ use super::{
 };
 use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
+use crate::agent_hub::support::scan_table_roots;
 use crate::error::AppError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Gemini 公共指令文件名。
 pub(crate) const GEMINI_COMMON_FILE: &str = "GEMINI.md";
@@ -156,36 +155,22 @@ impl AssetAdapter for GeminiInstructionAdapter {
         Ok(rendered)
     }
 
-    /// 扫描 Gemini Skill/Command 与 MCP。
+    /// 扫描 Gemini native Skill/Command/MCP 与兼容 `.agents/skills`。
     ///
-    /// Business Logic: 用户 `~/.gemini/skills|commands`；项目 `.gemini/skills|commands`；
-    ///     MCP 读 `settings.json` 的 `mcpServers`。
-    /// Code Logic: JSONC helper 解析 settings；不扫 `AGENTS.md`。
+    /// Business Logic: `.gemini` 为 native；共享 `.agents/skills` 为兼容根，不得写出。
+    /// Code Logic: 委托 `scan_table_roots`，由发现表 stamp owned_by / origin_kind。
     fn scan_portable_assets(
         &self,
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = gemini_portable_root(scope, &homes);
-        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
-        parts.push(scan_skill_dirs(
-            AgentTarget::Gemini,
-            scope.scope_kind,
-            &base.join("skills"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_command_markdown_dir(
-            AgentTarget::Gemini,
-            scope.scope_kind,
-            &base.join("commands"),
-            PortableOriginKind::Native,
-        )?);
-        parts.push(scan_gemini_mcp(scope, &homes)?);
-        Ok(merge_discoveries(parts))
+        scan_table_roots(AgentTarget::Gemini, scope, env, None, false)
     }
 
     /// Inventory 精确 kind 扫描。
+    ///
+    /// Business Logic: Skill 过滤走 manifest-only；兼容 `.agents` 仍按表发现。
+    /// Code Logic: `kind=None` 回退全量；Skill 传 `manifest_only=true`。
     fn scan_portable_assets_filtered(
         &self,
         scope: &LocalScopeMapping,
@@ -195,26 +180,13 @@ impl AssetAdapter for GeminiInstructionAdapter {
         let Some(kind) = kind else {
             return self.scan_portable_assets(scope, env);
         };
-        let homes = TargetPathResolver::resolve_all(env);
-        let base = gemini_portable_root(scope, &homes);
-        let mut parts = Vec::new();
-        match kind {
-            AssetKind::Skill => parts.push(scan_skill_dirs_manifest_only(
-                AgentTarget::Gemini,
-                scope.scope_kind,
-                &base.join("skills"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Command => parts.push(scan_command_markdown_dir(
-                AgentTarget::Gemini,
-                scope.scope_kind,
-                &base.join("commands"),
-                PortableOriginKind::Native,
-            )?),
-            AssetKind::Mcp => parts.push(scan_gemini_mcp(scope, &homes)?),
-            AssetKind::Agent | AssetKind::Instruction | AssetKind::Plugin | AssetKind::Hook => {}
-        }
-        Ok(merge_discoveries(parts))
+        scan_table_roots(
+            AgentTarget::Gemini,
+            scope,
+            env,
+            Some(kind),
+            kind == AssetKind::Skill,
+        )
     }
 
     /// 渲染 Gemini portable 投影。
@@ -260,14 +232,6 @@ fn gemini_render_file_name(compiler_name: &str) -> String {
     name
 }
 
-/// 用户级 / 项目级 portable 根。
-fn gemini_portable_root(scope: &LocalScopeMapping, homes: &super::paths::TargetHomes) -> PathBuf {
-    match scope.scope_kind {
-        ScopeKind::User => homes.gemini.config_root.clone(),
-        ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".gemini"),
-    }
-}
-
 /// 文件存在则登记为指令源。
 fn push_existing(
     sources: &mut Vec<InstructionSource>,
@@ -298,54 +262,13 @@ fn push_existing(
     Ok(())
 }
 
-/// 扫描 Gemini `settings.json` 的 `mcpServers`。
-///
-/// Business Logic: 复用 Claude JSONC helper；用户读 config_root，项目读 `.gemini/settings.json`。
-/// Code Logic: 解析 JSON/JSONC → `parse_mcp_servers_json_map`。
-fn scan_gemini_mcp(
-    scope: &LocalScopeMapping,
-    homes: &super::paths::TargetHomes,
-) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-    let path = match scope.scope_kind {
-        ScopeKind::User => homes.gemini.config_root.join("settings.json"),
-        ScopeKind::Project | ScopeKind::Directory => {
-            scope.absolute_path.join(".gemini").join("settings.json")
-        }
-    };
-    scan_mcp_json_file(&path, scope.scope_kind)
-}
-
-/// 从 JSON/JSONC 文件读 `mcpServers`。
-fn scan_mcp_json_file(
-    path: &Path,
-    scope_kind: ScopeKind,
-) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
-    if !path.is_file() {
-        return Ok(vec![]);
-    }
-    let text = std::fs::read_to_string(path)?;
-    let value = match parse_json_or_jsonc(&text) {
-        Ok(v) => v,
-        Err(_) => return Ok(vec![]),
-    };
-    let Some(map) = value.get("mcpServers").and_then(|v| v.as_object()).cloned() else {
-        return Ok(vec![]);
-    };
-    Ok(parse_mcp_servers_json_map(
-        AgentTarget::Gemini,
-        scope_kind,
-        &map,
-        path,
-        PortableOriginKind::Native,
-        true,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::Path;
 
     fn write_text(path: &Path, text: &str) {
         if let Some(parent) = path.parent() {
@@ -470,5 +393,52 @@ mod tests {
             )
             .unwrap();
         assert!(!rendered.file_name.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn user_scan_finds_agents_skills_as_shared_agents_compatibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        write_text(
+            &home.join(".gemini/skills/gemini-skill/SKILL.md"),
+            "---\nname: gemini-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".agents/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: d\n---\nbody\n",
+        );
+        let env = isolated_env(home);
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: home.to_path_buf(),
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let found = GeminiInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+
+        let native = found
+            .iter()
+            .find(|asset| asset.semantic_name == "gemini-skill")
+            .expect("native gemini skill");
+        assert_eq!(native.origin.origin_kind, PortableOriginKind::Native);
+        assert!(native.origin.native_output_candidate);
+        assert_eq!(native.origin.owned_by, PortableAssetOwner::Gemini);
+
+        let shared = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-skill")
+            .expect("shared agents compatibility skill");
+        assert_eq!(shared.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!shared.origin.native_output_candidate);
+        assert_eq!(shared.origin.owned_by, PortableAssetOwner::SharedAgents);
+        assert!(shared
+            .origin
+            .path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/.agents/skills/"));
     }
 }

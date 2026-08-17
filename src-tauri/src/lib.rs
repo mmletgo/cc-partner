@@ -104,8 +104,8 @@ pub use agent_hub::projection::{
 };
 pub use agent_hub::snapshot::{ConfirmedImportSelection, SnapshotImporter, ValidatedSnapshot};
 pub use agent_hub::targets::portable::{
-    hash_skill_directory, DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus,
-    PortableOriginKind,
+    hash_skill_directory, DiscoveredPortableAsset, PortableAssetOrigin, PortableAssetOwner,
+    PortableDiscoveryStatus, PortableOriginKind,
 };
 pub use agent_hub::{
     AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionRequest, AdoptionState, AgentTarget,

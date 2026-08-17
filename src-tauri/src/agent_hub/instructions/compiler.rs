@@ -826,6 +826,13 @@ pub fn compile_render(
         });
     }
 
+    if target != AgentTarget::Claude && body_has_claude_plugin_invocation(&body) {
+        diagnostics.push(PortabilityDiagnostic::foreign_plugin_reference(
+            "preview",
+            "正文点名了 Claude Code 插件/斜杠命令，当前 CLI 并不原生实现该调用",
+        ));
+    }
+
     let mut bytes = Vec::with_capacity(managed_prefix_len + body.len());
     bytes.extend_from_slice(managed_prefix.as_bytes());
     bytes.extend_from_slice(body.as_bytes());
@@ -838,6 +845,17 @@ pub fn compile_render(
         managed_prefix_len,
         diagnostics,
     }
+}
+
+/// 扫描正文是否点名 Claude Code 插件/斜杠调用。
+///
+/// Business Logic（为什么需要这个函数）:
+///     这些调用只在 Claude Code 原生实现；投影到其他 CLI 时只读警告，禁止自动安装插件。
+///
+/// Code Logic（这个函数做什么）:
+///     子串匹配 `/codex:` 与 `/plugin:`。
+fn body_has_claude_plugin_invocation(body: &str) -> bool {
+    body.contains("/codex:") || body.contains("/plugin:")
 }
 
 /// 解析块在目标上的最终文本。
@@ -1286,5 +1304,44 @@ mod tests {
         assert!(blocks.len() >= 3, "blocks={blocks:?}");
         assert!(blocks.iter().any(|b| b.text.contains("```rust")));
         assert!(blocks.iter().any(|b| b.starts_with_heading));
+    }
+
+    #[test]
+    fn compile_render_warns_foreign_plugin_on_non_claude() {
+        let doc = InstructionDocument {
+            relative_key: String::new(),
+            blocks: vec![InstructionBlock::shared(
+                new_block_id(),
+                "先运行 /codex:foo 再继续\n",
+                vec![],
+            )],
+        };
+        let ctx = InstructionRenderContext::default();
+        let grok = compile_render(&doc, AgentTarget::Grok, &ctx);
+        let cursor = compile_render(&doc, AgentTarget::Cursor, &ctx);
+        let claude = compile_render(&doc, AgentTarget::Claude, &ctx);
+        assert!(
+            grok.diagnostics
+                .iter()
+                .any(|d| d.code == "foreignPluginReference"),
+            "grok diagnostics={:?}",
+            grok.diagnostics
+        );
+        assert!(
+            cursor
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "foreignPluginReference"),
+            "cursor diagnostics={:?}",
+            cursor.diagnostics
+        );
+        assert!(
+            !claude
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "foreignPluginReference"),
+            "claude must not warn on its own plugin slash: {:?}",
+            claude.diagnostics
+        );
     }
 }

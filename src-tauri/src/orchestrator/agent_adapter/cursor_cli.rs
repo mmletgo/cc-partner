@@ -10,18 +10,50 @@ use crate::workbench::agent_runtime::AgentRuntimeMutation;
 use std::process::Command;
 use std::time::Duration;
 
+/// Cursor CLI 探测/启动命令名（与 support-manifest `commandNames` 同序）。
+const CURSOR_COMMAND_NAMES: &[&str] = &["cursor-agent", "agent"];
+
 /// Cursor CLI 可见终端 adapter。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CursorCliAdapter;
 
 impl CursorCliAdapter {
+    /// 按序探测 Cursor CLI，优先 `cursor-agent`，避免命中 Grok 的 `agent` symlink。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧实现只调 `agent`，会把 Grok Build 当成 Cursor。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 `CURSOR_COMMAND_NAMES` 依次 `--version`；首个成功的命令名作为 executable。
     fn probe_version() -> Result<(Option<String>, Option<String>), AppError> {
-        let mut child = Command::new("agent")
+        let mut last_err: Option<AppError> = None;
+        for name in CURSOR_COMMAND_NAMES {
+            match Self::probe_named(name) {
+                Ok((Some(exe), version)) => return Ok((Some(exe), version)),
+                Ok((None, _)) => {}
+                Err(err) => last_err = Some(err),
+            }
+        }
+        if let Some(err) = last_err {
+            return Err(err);
+        }
+        Ok((None, None))
+    }
+
+    /// 探测单个命令名的 `--version`。
+    ///
+    /// Business Logic: 与 Grok/Gemini adapter 相同的短超时，避免 probe 挂死。
+    /// Code Logic: spawn `name --version`，成功则返回该命令名与版本行。
+    fn probe_named(name: &str) -> Result<(Option<String>, Option<String>), AppError> {
+        let mut child = match Command::new(name)
             .arg("--version")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|_| AppError::generic("agent executable unavailable"))?;
+        {
+            Ok(child) => child,
+            Err(_) => return Ok((None, None)),
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             match child.try_wait() {
@@ -38,7 +70,7 @@ impl CursorCliAdapter {
                         } else {
                             Some(text.chars().take(128).collect())
                         };
-                        return Ok((Some("agent".into()), version));
+                        return Ok((Some(name.into()), version));
                     }
                     return Ok((None, None));
                 }
@@ -48,10 +80,21 @@ impl CursorCliAdapter {
                 Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(AppError::timeout("agent --version 超时"));
+                    return Err(AppError::timeout(format!("{name} --version 超时")));
                 }
-                Err(err) => return Err(AppError::generic(format!("agent probe 失败: {err}"))),
+                Err(err) => return Err(AppError::generic(format!("{name} probe 失败: {err}"))),
             }
+        }
+    }
+
+    /// 启动/恢复用的 Cursor 命令名。
+    ///
+    /// Business Logic: 可见终端必须启动真正的 Cursor CLI，而不是 Grok 的 `agent`。
+    /// Code Logic: 复用 probe 顺序；都不可用时仍返回首选名 `cursor-agent`。
+    fn preferred_command() -> String {
+        match Self::probe_version() {
+            Ok((Some(exe), _)) => exe,
+            _ => CURSOR_COMMAND_NAMES[0].to_string(),
         }
     }
 }
@@ -87,7 +130,7 @@ impl AgentAdapter for CursorCliAdapter {
             Some(format!("{}\n", request.prompt.trim_end_matches('\n')))
         };
         Ok(AgentLaunchPlan {
-            executable: "agent".into(),
+            executable: Self::preferred_command(),
             args: vec![],
             stdin,
             env: vec![],
@@ -103,7 +146,7 @@ impl AgentAdapter for CursorCliAdapter {
             .filter(|v| !v.is_empty())
         {
             return Ok(AgentLaunchPlan {
-                executable: "agent".into(),
+                executable: Self::preferred_command(),
                 args: vec!["--resume".into(), native.to_string()],
                 stdin: None,
                 env: vec![],

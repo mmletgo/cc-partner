@@ -458,6 +458,18 @@ impl PortabilityDiagnostic {
             message: message.into(),
         }
     }
+
+    /// 构造 foreignPluginReference 诊断。
+    ///
+    /// Business Logic: 非 Claude CLI 预览到 Claude 插件/斜杠调用时只警告，不自动安装。
+    /// Code Logic: code=`foreignPluginReference`。
+    pub fn foreign_plugin_reference(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: "foreignPluginReference".into(),
+            path: path.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// 冲突作用域。

@@ -144,9 +144,10 @@ import type {
 function makePortableItem(
   overrides: Partial<PortableInventoryItemDto> = {},
 ): PortableInventoryItemDto {
+  const target = overrides.target ?? 'claude';
   return {
     inventoryItemId: 'claude-skill-alpha',
-    target: 'claude',
+    target,
     kind: 'skill',
     nativeId: 'alpha',
     displayName: 'Alpha',
@@ -178,6 +179,10 @@ function makePortableItem(
       evidenceIds: [],
     },
     warnings: [],
+    originKind: 'native',
+    ownedBy: target,
+    loadedBy: target,
+    nativeOutputCandidate: true,
     ...overrides,
   };
 }

@@ -36,11 +36,11 @@ mod tests {
     use super::*;
     use crate::agent_hub::models::{AgentTarget, PortableActionClaim, ScopeKind};
     use crate::agent_hub::portable_inventory::{
-        inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
+        inventory_item_id, inventory_snapshot_hash, PortableAssetKind, PortableAssetOwner,
         PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
         PortableInventoryManagementState, PortableInventoryMutationCapability,
         PortableInventoryScanCapability, PortableInventorySnapshotDto,
-        PortableInventorySourceOrigin, PortableInventoryTargetDto,
+        PortableInventorySourceOrigin, PortableInventoryTargetDto, PortableOriginKind,
     };
     use crate::storage::agent_hub_repo::AgentHubRepo;
     use chrono::{Duration, Utc};
@@ -85,6 +85,10 @@ mod tests {
         PortableInventoryItemDto {
             inventory_item_id: inventory_item_id(target, "user", path, native_id),
             target,
+            loaded_by: target,
+            owned_by: PortableAssetOwner::from_target(target),
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Skill,
             native_id: native_id.into(),
             display_name: native_id.into(),

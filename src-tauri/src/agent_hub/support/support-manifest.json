@@ -174,7 +174,7 @@
       "currentTestedVersion": null,
       "guardedMajor": 0,
       "executableProbe": {
-        "commandNames": ["agent"],
+        "commandNames": ["cursor-agent", "agent"],
         "versionArgs": ["--version"],
         "versionPrefix": null,
         "versionSuffix": null,

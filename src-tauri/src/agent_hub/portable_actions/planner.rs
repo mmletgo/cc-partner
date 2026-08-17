@@ -453,9 +453,9 @@ mod tests {
     use crate::agent_hub::models::{AgentTarget, ScopeKind};
     use crate::agent_hub::portable_actions::models::PortableAssetConflictPolicy;
     use crate::agent_hub::portable_inventory::{
-        inventory_item_id, PortableInventoryItemCapabilitiesDto,
+        inventory_item_id, PortableAssetOwner, PortableInventoryItemCapabilitiesDto,
         PortableInventoryMutationCapability, PortableInventoryScanCapability,
-        PortableInventorySourceOrigin, PortableInventoryTargetDto,
+        PortableInventorySourceOrigin, PortableInventoryTargetDto, PortableOriginKind,
     };
     use std::fs;
 
@@ -482,6 +482,10 @@ args = ["mcp"]
                 "node_repl",
             ),
             target: AgentTarget::Codex,
+            loaded_by: AgentTarget::Codex,
+            owned_by: PortableAssetOwner::Codex,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Mcp,
             native_id: "node_repl".into(),
             display_name: "node_repl".into(),
@@ -537,6 +541,10 @@ args = ["mcp"]
                 "ctx",
             ),
             target: AgentTarget::Claude,
+            loaded_by: AgentTarget::Claude,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Mcp,
             native_id: "ctx".into(),
             display_name: "ctx".into(),
@@ -580,6 +588,10 @@ args = ["mcp"]
                 "demo@local",
             ),
             target: AgentTarget::Claude,
+            loaded_by: AgentTarget::Claude,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Plugin,
             native_id: "demo@local".into(),
             display_name: "demo".into(),

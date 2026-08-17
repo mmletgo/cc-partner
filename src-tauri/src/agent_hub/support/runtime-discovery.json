@@ -1,0 +1,582 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "target": "grok",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{grokConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{grokConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "plugin",
+          "scope": "user",
+          "pathPattern": "{grokConfigRoot}/plugins",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "plugin",
+          "scope": "user",
+          "pathPattern": "{grokConfigRoot}/installed-plugins",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{grokConfigRoot}/config.toml",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.grok/skills",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.grok/commands",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "plugin",
+          "scope": "project",
+          "pathPattern": "{project}/.grok/plugins",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.grok/config.toml",
+          "originKind": "native",
+          "ownedBy": "grok"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "agent",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/agents",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "pluginRegistry",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/plugins/installed_plugins.json",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "pluginMarketplace",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/plugins/known_marketplaces.json",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{home}/.claude.json",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/.mcp.json",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.mcp.json",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        }
+      ]
+    },
+    {
+      "target": "cursor",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{cursorConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "cursor"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{cursorConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "cursor"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{cursorConfigRoot}/mcp.json",
+          "originKind": "native",
+          "ownedBy": "cursor"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.cursor/skills",
+          "originKind": "native",
+          "ownedBy": "cursor"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.cursor/commands",
+          "originKind": "native",
+          "ownedBy": "cursor"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.cursor/mcp.json",
+          "originKind": "native",
+          "ownedBy": "cursor"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.codex/skills",
+          "originKind": "compatibility",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.codex/skills",
+          "originKind": "compatibility",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        }
+      ]
+    },
+    {
+      "target": "gemini",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{geminiConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "gemini"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{geminiConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "gemini"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{geminiConfigRoot}/settings.json",
+          "originKind": "native",
+          "ownedBy": "gemini"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.gemini/skills",
+          "originKind": "native",
+          "ownedBy": "gemini"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.gemini/commands",
+          "originKind": "native",
+          "ownedBy": "gemini"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.gemini/settings.json",
+          "originKind": "native",
+          "ownedBy": "gemini"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        }
+      ]
+    },
+    {
+      "target": "pi",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{piConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "pi"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.pi/skills",
+          "originKind": "native",
+          "ownedBy": "pi"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude",
+          "gatedBy": { "type": "piSettingsSkills" }
+        }
+      ]
+    },
+    {
+      "target": "opencode",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{opencodeConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{opencodeConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "agent",
+          "scope": "user",
+          "pathPattern": "{opencodeConfigRoot}/agents",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "plugin",
+          "scope": "user",
+          "pathPattern": "{opencodeConfigRoot}/plugins",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.opencode/skills",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.opencode/commands",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "agent",
+          "scope": "project",
+          "pathPattern": "{project}/.opencode/agents",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "plugin",
+          "scope": "project",
+          "pathPattern": "{project}/.opencode/plugins",
+          "originKind": "native",
+          "ownedBy": "opencode"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude",
+          "gatedBy": {
+            "type": "envUnset",
+            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+          }
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents",
+          "gatedBy": {
+            "type": "envUnset",
+            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+          }
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/skills",
+          "originKind": "compatibility",
+          "ownedBy": "claude",
+          "gatedBy": {
+            "type": "envUnset",
+            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+          }
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents",
+          "gatedBy": {
+            "type": "envUnset",
+            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+          }
+        }
+      ]
+    },
+    {
+      "target": "codex",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{codexConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{codexConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "plugin",
+          "scope": "user",
+          "pathPattern": "{codexConfigRoot}/plugins",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{codexConfigRoot}/config.toml",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "legacyStandalone",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.codex/skills",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.codex/commands",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "plugin",
+          "scope": "project",
+          "pathPattern": "{project}/.codex/plugins",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.codex/config.toml",
+          "originKind": "native",
+          "ownedBy": "codex"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.agents/skills",
+          "originKind": "legacyStandalone",
+          "ownedBy": "sharedAgents"
+        }
+      ]
+    },
+    {
+      "target": "claude",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "agent",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/agents",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "plugin",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/plugins",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{home}/.claude.json",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{claudeConfigRoot}/.mcp.json",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/skills",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/commands",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "agent",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/agents",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "plugin",
+          "scope": "project",
+          "pathPattern": "{project}/.claude/plugins",
+          "originKind": "native",
+          "ownedBy": "claude"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.mcp.json",
+          "originKind": "native",
+          "ownedBy": "claude"
+        }
+      ]
+    }
+  ]
+}

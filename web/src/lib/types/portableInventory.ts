@@ -26,6 +26,22 @@ export type PortableInventoryManagementState =
 /** 扫描到的资产来源命名空间。 */
 export type PortableInventorySourceOrigin = 'standalone' | 'pluginComponent' | 'nativeConfig';
 
+/** 库存项发现/归属 origin（与 backend PortableOriginKind camelCase 对齐）。 */
+export type PortableInventoryOriginKind =
+  | 'native'
+  | 'compatibility'
+  | 'legacyStandalone'
+  | 'plugin';
+
+/** 与 backend `PortableOriginKind` 同名别名。 */
+export type PortableOriginKind = PortableInventoryOriginKind;
+
+/** 库存项所有权：本机 Agent、共享 ~/.agents，或未知。 */
+export type PortableInventoryOwnedBy = AgentTarget | 'sharedAgents' | 'unknown';
+
+/** 与 backend `PortableAssetOwner` 同名别名。 */
+export type PortableAssetOwner = PortableInventoryOwnedBy;
+
 /** Target 扫描能力。 */
 export type PortableInventoryScanCapability = 'supported' | 'readOnly' | 'blocked';
 
@@ -152,6 +168,14 @@ export interface PortableInventoryItemDto {
   warnings: string[];
   /** 仅 MCP 可能出现；非 MCP 常省略。 */
   mcpCredential?: PortableMcpCredentialFactDto | null;
+  /** 发现 origin：native/plugin 且本机所有才算「已安装在此」。 */
+  originKind: PortableInventoryOriginKind;
+  /** 资产所有者；sharedAgents 视为运行时借用。 */
+  ownedBy: PortableInventoryOwnedBy;
+  /** 当前扫描 target（等于 item.target）。 */
+  loadedBy: AgentTarget;
+  /** false 表示只是运行时加载，不是本机 native 产出。 */
+  nativeOutputCandidate: boolean;
 }
 
 /** 完整库存快照。 */

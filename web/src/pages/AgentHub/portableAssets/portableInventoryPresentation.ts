@@ -9,12 +9,14 @@
  *   暴露 filters 默认值、match/filter、kind count、actualState 分类、primary action 解析。
  */
 
+import { isHubTarget } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type {
   PortableAssetActionKind,
   PortableAssetKind,
   PortableInventoryItemDto,
   PortableInventoryManagementState,
+  PortableInventoryOwnedBy,
 } from '@/lib/types/portableInventory';
 
 /** 列表筛选状态（前端本地，不回传后端自由文本）。 */
@@ -39,6 +41,15 @@ export interface PortablePrimaryActionContext {
 
 /** kind tab 计数（排除 pluginComponent）。 */
 export type PortableKindCounts = Partial<Record<PortableAssetKind, number>>;
+
+/** borrowedFrom i18n 片段：Agent target / 共享 ~/.agents / 未知。 */
+export type PortableBorrowedOwnerLabelKey = PortableInventoryOwnedBy;
+
+/** 已安装在此 vs 运行时借用分区。 */
+export interface PortableInventoryPartition {
+  installed: PortableInventoryItemDto[];
+  borrowed: PortableInventoryItemDto[];
+}
 
 /**
  * 默认筛选：Skill tab + 当前工作台默认 Agent（claude）。
@@ -89,6 +100,55 @@ export function portableInventoryProblemWarnings(
  */
 export function isPortablePluginComponent(item: PortableInventoryItemDto): boolean {
   return item.sourceOrigin === 'pluginComponent';
+}
+
+/**
+ * Business Logic: 运行时从其他 Agent / 共享目录加载的项不得在当前 Agent 列表里 mutation。
+ *   native + ownedBy===target 才是「已安装在此」；sharedAgents 一律借用。
+ * Code Logic: nativeOutputCandidate=false、compatibility/legacyStandalone、
+ *   或 ownedBy 为其他 Agent / sharedAgents → borrowed。ownedBy unknown 不单独判借用。
+ */
+export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): boolean {
+  if (item.nativeOutputCandidate === false) return true;
+  if (item.originKind === 'compatibility' || item.originKind === 'legacyStandalone') {
+    return true;
+  }
+  if (item.ownedBy === 'sharedAgents') return true;
+  if (isHubTarget(item.ownedBy) && item.ownedBy !== item.target) return true;
+  return false;
+}
+
+/**
+ * Business Logic: 借用徽标要落到具体所有者文案（Claude / 共享 ~/.agents）。
+ * Code Logic: ownedBy 已是 label key；缺省或无法识别 → unknown。
+ */
+export function portableBorrowedOwnerLabelKey(
+  item: PortableInventoryItemDto,
+): PortableBorrowedOwnerLabelKey {
+  if (item.ownedBy === 'sharedAgents' || item.ownedBy === 'unknown') {
+    return item.ownedBy;
+  }
+  if (isHubTarget(item.ownedBy)) return item.ownedBy;
+  return 'unknown';
+}
+
+/**
+ * Business Logic: 主列表拆成「已安装在此」与「运行时从其他 Agent 加载」。
+ * Code Logic: 保持输入顺序；plugin component 排除由 filter 负责，本函数不二次过滤。
+ */
+export function partitionPortableInventoryItems(
+  items: readonly PortableInventoryItemDto[],
+): PortableInventoryPartition {
+  const installed: PortableInventoryItemDto[] = [];
+  const borrowed: PortableInventoryItemDto[] = [];
+  for (const item of items) {
+    if (isPortableBorrowedRuntimeItem(item)) {
+      borrowed.push(item);
+    } else {
+      installed.push(item);
+    }
+  }
+  return { installed, borrowed };
 }
 
 /**
@@ -226,6 +286,7 @@ export function resolvePortablePrimaryAction(
   item: PortableInventoryItemDto,
   context: PortablePrimaryActionContext,
 ): PortableAssetActionKind | null {
+  if (isPortableBorrowedRuntimeItem(item)) return null;
   if (context.stale || context.mutationBlocked) return null;
   if (context.lockedItemIds.has(item.inventoryItemId)) return null;
   if (isPortableItemReadOnly(item)) return null;
@@ -258,6 +319,7 @@ export function resolvePortableRowActions(
   item: PortableInventoryItemDto,
   context: PortablePrimaryActionContext,
 ): PortableAssetActionKind[] {
+  if (isPortableBorrowedRuntimeItem(item)) return [];
   if (context.stale || context.mutationBlocked) return [];
   if (context.lockedItemIds.has(item.inventoryItemId)) return [];
   if (isPortableItemReadOnly(item)) return [];

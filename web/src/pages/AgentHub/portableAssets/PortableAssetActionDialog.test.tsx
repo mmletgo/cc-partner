@@ -63,8 +63,12 @@ const item: PortableInventoryItemDto = {
     reasonCode: null,
     evidenceIds: [],
   },
-  warnings: [],
-};
+    warnings: [],
+    originKind: 'native',
+    ownedBy: 'claude',
+    loadedBy: 'claude',
+    nativeOutputCandidate: true,
+  };
 
 function planFixture(
   overrides: Partial<PortableAssetActionPlanDto> = {},

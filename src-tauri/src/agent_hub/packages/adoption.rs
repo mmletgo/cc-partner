@@ -1865,6 +1865,9 @@ fn rec_to_minimal_discovery(rec: &AdoptionRecord, origin: &Path) -> DiscoveredPo
             tree_hash: Some(rec.origin_tree_hash.clone()),
             status: PortableDiscoveryStatus::Active,
             native_output_candidate: false,
+            owned_by: crate::agent_hub::targets::portable::PortableAssetOwner::from_target(
+                rec.target,
+            ),
             parent_plugin_id: None,
         },
         diagnostics: vec![],
@@ -1951,6 +1954,9 @@ mod tests {
                 tree_hash: Some(tree),
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: false,
+                owned_by: crate::agent_hub::targets::portable::PortableAssetOwner::from_target(
+                    target,
+                ),
                 parent_plugin_id: None,
             },
             diagnostics: diags,

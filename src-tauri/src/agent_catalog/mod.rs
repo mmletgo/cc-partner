@@ -25,7 +25,7 @@ pub enum AgentId {
     Grok,
     /// Gemini CLI（可执行 `gemini`）
     Gemini,
-    /// Cursor CLI（可执行 `agent`）
+    /// Cursor CLI（可执行 `cursor-agent`，兼容 `agent`）
     Cursor,
     /// Pi Coding Agent（可执行 `pi`）
     Pi,
@@ -127,7 +127,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         history_source: Some("cursor"),
         has_usage: true,
         has_headless: true,
-        executable_names: &["agent"],
+        executable_names: &["cursor-agent", "agent"],
     },
     AgentIdentity {
         id: AgentId::Pi,
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(cursor.history_source, Some("cursor"));
         assert!(cursor.has_usage);
         assert!(cursor.has_headless);
-        assert_eq!(cursor.executable_names, &["agent"]);
+        assert_eq!(cursor.executable_names, &["cursor-agent", "agent"]);
 
         let pi = AgentId::Pi.identity();
         assert_eq!(pi.hub_target, Some(AgentTarget::Pi));

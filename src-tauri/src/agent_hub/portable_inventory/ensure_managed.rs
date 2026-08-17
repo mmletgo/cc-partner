@@ -593,6 +593,7 @@ mod tests {
         PortableInventoryScanCapability, PortableInventoryTargetDto, PortableScanScope,
     };
     use crate::agent_hub::targets::paths::TargetEnvironment;
+    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
     use crate::storage::AgentHubRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::collections::BTreeMap;
@@ -633,6 +634,10 @@ mod tests {
         PortableInventoryItemDto {
             inventory_item_id: inventory_item_id(AgentTarget::Claude, "user", &source_path, name),
             target: AgentTarget::Claude,
+            loaded_by: AgentTarget::Claude,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Skill,
             native_id: name.into(),
             display_name: name.into(),
