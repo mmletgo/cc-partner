@@ -9,19 +9,18 @@
  *   回落到 projectId。
  *
  * Code Logic（这个组件做什么）:
- *   - 顶部时间窗 / provider·model·project chips / 刷新 / 导出；不再有 outcome 筛选。
+ *   - 顶部时间窗 / provider·model·project 各占一行；后三类为多选 chips（空选 = 全部）。
  *   - 8 个 KPI tile；null token 显示「—」并在 hint 标未提供。
- *   - recharts ComposedChart：input/output Bar + cacheRead/cost Line。
+ *   - 用量趋势拆成 3 张图（新输入 / 缓存 / 输出），每张只保留 token 数纵轴。
  *   - Session 明细表：项目列显示 projectName ?? projectId；无 outcome 列。
  */
 
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Bar,
   CartesianGrid,
-  ComposedChart,
   Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -39,6 +38,7 @@ import type {
   AgentLedgerSummary,
   AgentLedgerTrendPoint,
   CurrencyAmount,
+  TokenStatsFacetOptions,
 } from '@/lib/types/tokenStats';
 import styles from './TokenStats.module.css';
 import { datetimeLocalFromRfc3339, rfc3339FromDatetimeLocal } from './tokenStatsTime';
@@ -47,6 +47,8 @@ import { datetimeLocalFromRfc3339, rfc3339FromDatetimeLocal } from './tokenStats
 export interface TokenStatsViewProps {
   filter: AgentLedgerFilters;
   summary: AgentLedgerSummary | null;
+  /** 时间窗内完整选项；缺省时回落到 summary 分组，避免测试样例必填。 */
+  facetOptions?: TokenStatsFacetOptions | null;
   entries: AgentLedgerSessionEntry[];
   hasMore: boolean;
   loading: boolean;
@@ -68,16 +70,24 @@ interface TrendChartRow {
   input: number;
   output: number;
   cacheRead: number;
-  costMinor: number;
-  currency: string;
 }
+
+/** chip 展示项：id 用于筛选，label 用于按钮文案。 */
+interface ChipOption {
+  id: string;
+  label: string;
+}
+
+/** 单张趋势图绑定的 token 字段。 */
+type TrendMetricKey = 'input' | 'cacheRead' | 'output';
 
 /** recharts Tooltip 只读必要字段。 */
 interface TrendTooltipProps {
   active?: boolean;
-  payload?: Array<{ payload?: TrendChartRow }>;
+  payload?: Array<{ payload?: TrendChartRow; value?: number }>;
   label?: string | number;
   bucket: 'hour' | 'day';
+  metric: TrendMetricKey;
 }
 
 /**
@@ -114,19 +124,22 @@ function formatPercent(value: number | null | undefined): string {
 function chipOptions(
   rows: AgentLedgerGroupRow[] | undefined,
   selected: string[] | null | undefined,
-): string[] {
+): ChipOption[] {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: ChipOption[] = [];
   for (const id of selected ?? []) {
     if (!seen.has(id)) {
       seen.add(id);
-      out.push(id);
+      out.push({ id, label: id });
     }
   }
   for (const row of rows ?? []) {
     if (!seen.has(row.key)) {
       seen.add(row.key);
-      out.push(row.key);
+      out.push({ id: row.key, label: row.label?.trim() || row.key });
+    } else {
+      const existing = out.find((item) => item.id === row.key);
+      if (existing && row.label?.trim()) existing.label = row.label.trim();
     }
   }
   return out;
@@ -185,6 +198,7 @@ function KpiTile({
 export function TokenStatsView({
   filter,
   summary,
+  facetOptions,
   entries,
   hasMore,
   loading,
@@ -215,19 +229,13 @@ export function TokenStatsView({
 
   const trendData: TrendChartRow[] = useMemo(() => {
     if (!summary) return [];
-    return summary.trend.map((point: AgentLedgerTrendPoint) => {
-      const picked = pickPrimaryCurrencyCost(point.costByCurrency, locale);
-      const minor = picked.primary ?? point.costByCurrency[0] ?? null;
-      return {
-        bucketStart: point.bucketStart,
-        input: point.inputTokens ?? 0,
-        output: point.outputTokens ?? 0,
-        cacheRead: point.cacheReadTokens ?? 0,
-        costMinor: minor ? minor.minorUnits : 0,
-        currency: minor ? minor.currency : 'USD',
-      };
-    });
-  }, [summary, locale]);
+    return summary.trend.map((point: AgentLedgerTrendPoint) => ({
+      bucketStart: point.bucketStart,
+      input: point.inputTokens ?? 0,
+      output: point.outputTokens ?? 0,
+      cacheRead: point.cacheReadTokens ?? 0,
+    }));
+  }, [summary]);
 
   const bucket = summary?.bucket ?? 'day';
 
@@ -256,7 +264,12 @@ export function TokenStatsView({
           </div>
         </header>
 
-        <FilterBar filter={filter} summary={summary} onChange={onChangeFilter} />
+        <FilterBar
+          filter={filter}
+          summary={summary}
+          facetOptions={facetOptions}
+          onChange={onChangeFilter}
+        />
 
         {refreshError === 'stale' ? (
           <div className={styles.staleBanner} role="status" data-testid="token-stats-stale-banner">
@@ -347,64 +360,31 @@ export function TokenStatsView({
                 {t('tokenStats:trend.empty')}
               </div>
             ) : (
-              <div data-testid="token-stats-trend">
-                <ResponsiveContainer width="100%" height={280}>
-                  <ComposedChart data={trendData} margin={{ top: 12, right: 12, bottom: 8, left: 0 }}>
-                    <CartesianGrid stroke="var(--border-soft)" strokeDasharray="2 4" />
-                    <XAxis
-                      dataKey="bucketStart"
-                      tickFormatter={(value: string) => formatLocalBucketLabel(value, bucket)}
-                      stroke="var(--fg-muted-readable)"
-                      tickLine={false}
-                    />
-                    <YAxis
-                      yAxisId="tokens"
-                      stroke="var(--fg-muted-readable)"
-                      tickLine={false}
-                      tickFormatter={(value: number) => formatTokenCount(value) ?? '0'}
-                    />
-                    <YAxis
-                      yAxisId="cost"
-                      orientation="right"
-                      stroke="var(--fg-muted-readable)"
-                      tickLine={false}
-                      tickFormatter={(value: number) => (value / 100).toFixed(2)}
-                    />
-                    <Tooltip content={<TrendTooltip bucket={bucket} />} />
-                    <Bar
-                      yAxisId="tokens"
-                      dataKey="input"
-                      name={t('tokenStats:trend.legend.input')}
-                      fill="var(--accent)"
-                      radius={[3, 3, 0, 0]}
-                    />
-                    <Bar
-                      yAxisId="tokens"
-                      dataKey="output"
-                      name={t('tokenStats:trend.legend.output')}
-                      fill="var(--success)"
-                      radius={[3, 3, 0, 0]}
-                    />
-                    <Line
-                      yAxisId="tokens"
-                      type="monotone"
-                      dataKey="cacheRead"
-                      name={t('tokenStats:trend.legend.cacheRead')}
-                      stroke="var(--warn)"
-                      strokeWidth={1.6}
-                      dot={false}
-                    />
-                    <Line
-                      yAxisId="cost"
-                      type="monotone"
-                      dataKey="costMinor"
-                      name={t('tokenStats:trend.legend.cost')}
-                      stroke="var(--fg-2)"
-                      strokeWidth={1.4}
-                      dot={false}
-                    />
-                  </ComposedChart>
-                </ResponsiveContainer>
+              <div className={styles.trendStack} data-testid="token-stats-trend">
+                <TrendMetricChart
+                  testId="token-stats-trend-input"
+                  title={t('tokenStats:trend.charts.input')}
+                  data={trendData}
+                  bucket={bucket}
+                  metric="input"
+                  stroke="var(--accent)"
+                />
+                <TrendMetricChart
+                  testId="token-stats-trend-cache"
+                  title={t('tokenStats:trend.charts.cache')}
+                  data={trendData}
+                  bucket={bucket}
+                  metric="cacheRead"
+                  stroke="var(--warn)"
+                />
+                <TrendMetricChart
+                  testId="token-stats-trend-output"
+                  title={t('tokenStats:trend.charts.output')}
+                  data={trendData}
+                  bucket={bucket}
+                  metric="output"
+                  stroke="var(--success)"
+                />
               </div>
             )}
           </Card.Body>
@@ -494,10 +474,12 @@ export function TokenStatsView({
 function FilterBar({
   filter,
   summary,
+  facetOptions,
   onChange,
 }: {
   filter: AgentLedgerFilters;
   summary: AgentLedgerSummary | null;
+  facetOptions?: TokenStatsFacetOptions | null;
   onChange: (patch: Partial<AgentLedgerFilters>) => void;
 }) {
   const { t } = useTranslation(['tokenStats']);
@@ -506,135 +488,201 @@ function FilterBar({
     { key: '7d', label: t('tokenStats:filters.window.7d') },
     { key: '30d', label: t('tokenStats:filters.window.30d') },
   ];
-  const providers = chipOptions(summary?.byProvider, filter.providerIds);
-  const models = chipOptions(summary?.byModel, filter.modelIds);
-  const projects = chipOptions(summary?.byProject, filter.projectIds);
+  const catalog = facetOptions ?? {
+    providers: summary?.byProvider ?? [],
+    models: summary?.byModel ?? [],
+    projects: summary?.byProject ?? [],
+  };
+  const providers = chipOptions(catalog.providers, filter.providerIds);
+  const models = chipOptions(catalog.models, filter.modelIds);
+  const projects = chipOptions(catalog.projects, filter.projectIds);
 
   return (
     <div className={styles.filterBar} data-testid="token-stats-filters">
-      <div className={styles.filterGroup} role="group" aria-label={t('tokenStats:filters.windowLabel')}>
-        {windows.map((item) => (
+      <div
+        className={styles.filterRow}
+        data-testid="token-stats-filter-row-time"
+        role="group"
+        aria-label={t('tokenStats:filters.windowLabel')}
+      >
+        <span className={styles.filterRowLabel}>{t('tokenStats:filters.windowLabel')}</span>
+        <div className={styles.filterRowChips}>
+          {windows.map((item) => (
+            <Button
+              key={item.key}
+              variant={filter.window === item.key ? 'primary' : 'secondary'}
+              size="sm"
+              data-testid={`token-stats-window-${item.key}`}
+              onClick={() =>
+                onChange({ window: item.key, startedAfter: null, startedBefore: null })
+              }
+            >
+              {item.label}
+            </Button>
+          ))}
           <Button
-            key={item.key}
-            variant={filter.window === item.key ? 'primary' : 'secondary'}
+            variant={filter.window == null ? 'primary' : 'secondary'}
             size="sm"
-            data-testid={`token-stats-window-${item.key}`}
-            onClick={() =>
-              onChange({ window: item.key, startedAfter: null, startedBefore: null })
-            }
+            data-testid="token-stats-window-custom"
+            onClick={() => onChange({ window: null })}
           >
-            {item.label}
+            {t('tokenStats:filters.window.custom')}
           </Button>
-        ))}
-        <Button
-          variant={filter.window == null ? 'primary' : 'secondary'}
-          size="sm"
-          data-testid="token-stats-window-custom"
-          onClick={() => onChange({ window: null })}
-        >
-          {t('tokenStats:filters.window.custom')}
-        </Button>
+        </div>
       </div>
       {filter.window == null ? (
-        <div className={styles.filterGroup} role="group" aria-label={t('tokenStats:filters.customRangeLabel')}>
-          <label className={styles.filterLabel}>
-            <span>{t('tokenStats:filters.customStart')}</span>
-            <input
-              type="datetime-local"
-              className={styles.filterSelect}
-              data-testid="token-stats-custom-start"
-              aria-label={t('tokenStats:filters.customStart')}
-              value={datetimeLocalFromRfc3339(filter.startedAfter)}
-              onChange={(event) =>
-                onChange({ window: null, startedAfter: rfc3339FromDatetimeLocal(event.target.value) })
-              }
-            />
-          </label>
-          <label className={styles.filterLabel}>
-            <span>{t('tokenStats:filters.customEnd')}</span>
-            <input
-              type="datetime-local"
-              className={styles.filterSelect}
-              data-testid="token-stats-custom-end"
-              aria-label={t('tokenStats:filters.customEnd')}
-              value={datetimeLocalFromRfc3339(filter.startedBefore)}
-              onChange={(event) =>
-                onChange({ window: null, startedBefore: rfc3339FromDatetimeLocal(event.target.value) })
-              }
-            />
-          </label>
+        <div
+          className={styles.filterRow}
+          data-testid="token-stats-filter-row-custom"
+          role="group"
+          aria-label={t('tokenStats:filters.customRangeLabel')}
+        >
+          <span className={styles.filterRowLabel}>{t('tokenStats:filters.customRangeLabel')}</span>
+          <div className={styles.filterRowChips}>
+            <label className={styles.filterLabel}>
+              <span>{t('tokenStats:filters.customStart')}</span>
+              <input
+                type="datetime-local"
+                className={styles.filterSelect}
+                data-testid="token-stats-custom-start"
+                aria-label={t('tokenStats:filters.customStart')}
+                value={datetimeLocalFromRfc3339(filter.startedAfter)}
+                onChange={(event) =>
+                  onChange({ window: null, startedAfter: rfc3339FromDatetimeLocal(event.target.value) })
+                }
+              />
+            </label>
+            <label className={styles.filterLabel}>
+              <span>{t('tokenStats:filters.customEnd')}</span>
+              <input
+                type="datetime-local"
+                className={styles.filterSelect}
+                data-testid="token-stats-custom-end"
+                aria-label={t('tokenStats:filters.customEnd')}
+                value={datetimeLocalFromRfc3339(filter.startedBefore)}
+                onChange={(event) =>
+                  onChange({
+                    window: null,
+                    startedBefore: rfc3339FromDatetimeLocal(event.target.value),
+                  })
+                }
+              />
+            </label>
+          </div>
         </div>
       ) : null}
-      {providers.length > 0 ? (
-        <ChipFilter
-          label={t('tokenStats:filters.providerLabel')}
-          options={providers}
-          selected={filter.providerIds}
-          onToggle={(id) => onChange({ providerIds: toggleId(filter.providerIds, id) })}
-        />
-      ) : null}
-      {models.length > 0 ? (
-        <ChipFilter
-          label={t('tokenStats:filters.modelLabel')}
-          options={models}
-          selected={filter.modelIds}
-          onToggle={(id) => onChange({ modelIds: toggleId(filter.modelIds, id) })}
-        />
-      ) : null}
-      {projects.length > 0 ? (
-        <ChipFilter
-          label={t('tokenStats:filters.projectLabel')}
-          options={projects}
-          selected={filter.projectIds}
-          onToggle={(id) => onChange({ projectIds: toggleId(filter.projectIds, id) })}
-        />
-      ) : null}
-      <Button
-        variant="ghost"
-        size="sm"
-        data-testid="token-stats-filter-reset"
-        onClick={() =>
-          onChange({
-            window: '7d',
-            providerIds: null,
-            modelIds: null,
-            projectIds: null,
-            startedAfter: null,
-            startedBefore: null,
-          })
-        }
-      >
-        {t('tokenStats:filters.reset')}
-      </Button>
+      <ChipFilter
+        rowTestId="token-stats-filter-row-provider"
+        chipTestIdPrefix="token-stats-provider"
+        label={t('tokenStats:filters.providerLabel')}
+        allLabel={t('tokenStats:filters.all')}
+        emptyLabel={t('tokenStats:filters.emptyOptions')}
+        options={providers}
+        selected={filter.providerIds}
+        onToggle={(id) => onChange({ providerIds: toggleId(filter.providerIds, id) })}
+        onClear={() => onChange({ providerIds: null })}
+      />
+      <ChipFilter
+        rowTestId="token-stats-filter-row-model"
+        chipTestIdPrefix="token-stats-model"
+        label={t('tokenStats:filters.modelLabel')}
+        allLabel={t('tokenStats:filters.all')}
+        emptyLabel={t('tokenStats:filters.emptyOptions')}
+        options={models}
+        selected={filter.modelIds}
+        onToggle={(id) => onChange({ modelIds: toggleId(filter.modelIds, id) })}
+        onClear={() => onChange({ modelIds: null })}
+      />
+      <ChipFilter
+        rowTestId="token-stats-filter-row-project"
+        chipTestIdPrefix="token-stats-project"
+        label={t('tokenStats:filters.projectLabel')}
+        allLabel={t('tokenStats:filters.all')}
+        emptyLabel={t('tokenStats:filters.emptyOptions')}
+        options={projects}
+        selected={filter.projectIds}
+        onToggle={(id) => onChange({ projectIds: toggleId(filter.projectIds, id) })}
+        onClear={() => onChange({ projectIds: null })}
+      />
+      <div className={styles.filterRow}>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-testid="token-stats-filter-reset"
+          onClick={() =>
+            onChange({
+              window: '7d',
+              providerIds: null,
+              modelIds: null,
+              projectIds: null,
+              startedAfter: null,
+              startedBefore: null,
+            })
+          }
+        >
+          {t('tokenStats:filters.reset')}
+        </Button>
+      </div>
     </div>
   );
 }
 
 function ChipFilter({
+  rowTestId,
+  chipTestIdPrefix,
   label,
+  allLabel,
+  emptyLabel,
   options,
   selected,
   onToggle,
+  onClear,
 }: {
+  rowTestId: string;
+  chipTestIdPrefix: string;
   label: string;
-  options: string[];
+  allLabel: string;
+  emptyLabel: string;
+  options: ChipOption[];
   selected: string[] | null | undefined;
   onToggle: (id: string) => void;
+  onClear: () => void;
 }) {
   const active = selected ?? [];
+  const allSelected = active.length === 0;
   return (
-    <div className={styles.filterGroup} role="group" aria-label={label}>
-      <span className={styles.chipLabel}>{label}</span>
-      {options.map((id) => (
+    <div className={styles.filterRow} data-testid={rowTestId} role="group" aria-label={label}>
+      <span className={styles.filterRowLabel}>{label}</span>
+      <div className={styles.filterRowChips}>
         <Button
-          key={id}
-          variant={active.includes(id) ? 'primary' : 'secondary'}
+          variant={allSelected ? 'primary' : 'secondary'}
           size="sm"
-          onClick={() => onToggle(id)}
+          aria-pressed={allSelected}
+          data-testid={`${chipTestIdPrefix}-all`}
+          onClick={onClear}
         >
-          {id}
+          {allLabel}
         </Button>
-      ))}
+        {options.length === 0 ? (
+          <span className={styles.filterEmpty}>{emptyLabel}</span>
+        ) : (
+          options.map((option) => {
+            const pressed = active.includes(option.id);
+            return (
+              <Button
+                key={option.id}
+                variant={pressed ? 'primary' : 'secondary'}
+                size="sm"
+                aria-pressed={pressed}
+                data-testid={`${chipTestIdPrefix}-${option.id}`}
+                onClick={() => onToggle(option.id)}
+              >
+                {option.label}
+              </Button>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }
@@ -745,30 +793,91 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
   );
 }
 
-function TrendTooltip({ active, payload, label, bucket }: TrendTooltipProps) {
+/**
+ * Business Logic（为什么需要）:
+ *   三张用量趋势图要共用同一套纵轴单位，避免一张用原始个数、另一张用 k。
+ *   用户要求刻度单位固定为百万 token（M），且不要三位小数。
+ *
+ * Code Logic（做什么）:
+ *   把 token 数除以 1e6；最多保留 2 位小数并去掉末尾 0，再加 `M`。
+ */
+function formatTrendAxisTick(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '0M';
+  const millions = value / 1_000_000;
+  const text = millions.toFixed(2).replace(/\.?0+$/, '');
+  return `${text === '' ? '0' : text}M`;
+}
+
+function TrendMetricChart({
+  testId,
+  title,
+  data,
+  bucket,
+  metric,
+  stroke,
+}: {
+  testId: string;
+  title: string;
+  data: TrendChartRow[];
+  bucket: 'hour' | 'day';
+  metric: TrendMetricKey;
+  stroke: string;
+}) {
+  return (
+    <section className={styles.trendChart} data-testid={testId} aria-label={title}>
+      <h3 className={styles.trendChartTitle}>{title}</h3>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 4, left: 4 }}>
+          <CartesianGrid stroke="var(--border-soft)" strokeDasharray="2 4" />
+          <XAxis
+            dataKey="bucketStart"
+            tickFormatter={(value: string) => formatLocalBucketLabel(value, bucket)}
+            stroke="var(--fg-muted-readable)"
+            tickLine={false}
+          />
+          <YAxis
+            domain={[0, 'auto']}
+            allowDecimals={false}
+            stroke="var(--fg-muted-readable)"
+            tickLine={false}
+            width={64}
+            tickFormatter={formatTrendAxisTick}
+          />
+          <Tooltip content={<TrendTooltip bucket={bucket} metric={metric} />} />
+          <Line
+            type="monotone"
+            dataKey={metric}
+            name={title}
+            stroke={stroke}
+            strokeWidth={2}
+            dot={{ r: 3, strokeWidth: 0, fill: stroke }}
+            activeDot={{ r: 5 }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </section>
+  );
+}
+
+function TrendTooltip({ active, payload, label, bucket, metric }: TrendTooltipProps) {
   const { t } = useTranslation(['tokenStats']);
   if (!active || !payload?.length) return null;
   const point = payload[0]?.payload;
   const timeLabel =
     typeof label === 'string' ? formatLocalBucketTooltip(label, bucket) : String(label ?? '');
+  const metricLabel =
+    metric === 'input'
+      ? t('tokenStats:trend.legend.input')
+      : metric === 'output'
+        ? t('tokenStats:trend.legend.output')
+        : t('tokenStats:trend.legend.cacheRead');
+  const value = point?.[metric] ?? 0;
   return (
     <div className={styles.tooltip}>
       <div className={styles.tooltipLabel}>{timeLabel}</div>
       <div className={styles.tooltipRow}>
-        <span>{t('tokenStats:trend.legend.input')}</span>
-        <strong>{formatTokenCount(point?.input ?? 0)}</strong>
-      </div>
-      <div className={styles.tooltipRow}>
-        <span>{t('tokenStats:trend.legend.output')}</span>
-        <strong>{formatTokenCount(point?.output ?? 0)}</strong>
-      </div>
-      <div className={styles.tooltipRow}>
-        <span>{t('tokenStats:trend.legend.cacheRead')}</span>
-        <strong>{formatTokenCount(point?.cacheRead ?? 0)}</strong>
-      </div>
-      <div className={styles.tooltipRow}>
-        <span>{t('tokenStats:trend.legend.cost')}</span>
-        <strong>{point ? `${((point.costMinor ?? 0) / 100).toFixed(2)} ${point.currency ?? ''}` : '—'}</strong>
+        <span>{metricLabel}</span>
+        <strong>{formatTokenCount(value)}</strong>
       </div>
     </div>
   );

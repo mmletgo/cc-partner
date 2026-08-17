@@ -104,6 +104,22 @@ export interface AgentLedgerSessionPage {
 }
 
 /**
+ * Token 统计页筛选项目录（按时间窗取全量，不受当前 provider/model/project 多选收缩）。
+ *
+ * Business Logic（为什么需要）:
+ *   KPI/trend 会按已选维度过滤；若 chip 选项也跟着 summary 走，选中一项后其余选项消失，
+ *   看起来像单选。目录必须独立于当前维度筛选，才能真正多选。
+ *
+ * Code Logic（做什么）:
+ *   三组 GroupRow 列表；由 controller 在时间窗变化时刷新。
+ */
+export interface TokenStatsFacetOptions {
+  providers: AgentLedgerGroupRow[];
+  models: AgentLedgerGroupRow[];
+  projects: AgentLedgerGroupRow[];
+}
+
+/**
  * 单聚合分组的行（byModel/byProvider/byProject 共形）。
  *
  * Business Logic（为什么需要）:

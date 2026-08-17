@@ -28,6 +28,7 @@ import type {
   AgentLedgerFilters,
   AgentLedgerSummary,
   AgentLedgerSessionEntry,
+  TokenStatsFacetOptions,
 } from '@/lib/types/tokenStats';
 
 /** 视图层消费的 controller 错误原因；具体文案由 view 用 t() 选择。 */
@@ -40,6 +41,8 @@ const REFRESH_FAILURE_STALE = 'stale';
 export interface TokenStatsControllerResult {
   filter: AgentLedgerFilters;
   summary: AgentLedgerSummary | null;
+  /** 时间窗内的完整 provider/model/project 选项，不受当前多选收缩。 */
+  facetOptions: TokenStatsFacetOptions | null;
   entries: AgentLedgerSessionEntry[];
   nextCursor: string | null;
   loading: boolean;
@@ -84,6 +87,40 @@ function stringifyFilter(filter: AgentLedgerFilters): string {
   return parts.join('|');
 }
 
+/** 时间窗键：筛选项目录只随窗口/自定义区间变化，不随维度多选收缩。 */
+function timeScopeKey(filter: AgentLedgerFilters): string {
+  return `${filter.window ?? ''}|${filter.startedAfter ?? ''}|${filter.startedBefore ?? ''}|${filter.bucket ?? ''}`;
+}
+
+/** 当前是否启用了 provider/model/project 维度筛选。 */
+function dimensionFilterActive(filter: AgentLedgerFilters): boolean {
+  return (
+    (filter.providerIds?.length ?? 0) > 0 ||
+    (filter.modelIds?.length ?? 0) > 0 ||
+    (filter.projectIds?.length ?? 0) > 0 ||
+    Boolean(filter.projectId)
+  );
+}
+
+/** 只带时间窗的 summarize 请求，用来刷新筛选项目录。 */
+function facetOnlyFilter(filter: AgentLedgerFilters): AgentLedgerFilters {
+  return {
+    window: filter.window,
+    startedAfter: filter.startedAfter,
+    startedBefore: filter.startedBefore,
+    bucket: filter.bucket,
+  };
+}
+
+/** 从 summary 抽出 chip 目录。 */
+function facetsFromSummary(summary: AgentLedgerSummary): TokenStatsFacetOptions {
+  return {
+    providers: summary.byProvider,
+    models: summary.byModel,
+    projects: summary.byProject,
+  };
+}
+
 export function useTokenStatsController(): TokenStatsControllerResult {
   // 0. 持久化的当前过滤器（用户输入）
   const [filter, setFilterState] = useState<AgentLedgerFilters>(DEFAULT_FILTER);
@@ -91,6 +128,7 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   const [appliedFilter, setAppliedFilter] = useState<AgentLedgerFilters>(DEFAULT_FILTER);
   // 2. 派生数据
   const [summary, setSummary] = useState<AgentLedgerSummary | null>(null);
+  const [facetOptions, setFacetOptions] = useState<TokenStatsFacetOptions | null>(null);
   const [entries, setEntries] = useState<AgentLedgerSessionEntry[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   // 3. 状态机
@@ -106,6 +144,8 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   const listSeqRef = useRef(0);
   const summaryRef = useRef<AgentLedgerSummary | null>(null);
   const appliedFilterRef = useRef<AgentLedgerFilters>(DEFAULT_FILTER);
+  const facetOptionsRef = useRef<TokenStatsFacetOptions | null>(null);
+  const facetTimeRef = useRef<string | null>(null);
 
   // 同步 ref 供 timeout 与 polling 读取
   useEffect(() => {
@@ -114,6 +154,9 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   useEffect(() => {
     appliedFilterRef.current = appliedFilter;
   }, [appliedFilter]);
+  useEffect(() => {
+    facetOptionsRef.current = facetOptions;
+  }, [facetOptions]);
 
   // 合并 filter 防抖：每次 setFilter 后 250ms 把应用过滤器推进。
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -137,14 +180,32 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   const refresh = useCallback(async () => {
     const seq = ++requestSeqRef.current;
     const targetFilter = appliedFilterRef.current;
+    const nextTimeKey = timeScopeKey(targetFilter);
+    const shouldRefreshFacets =
+      nextTimeKey !== facetTimeRef.current || facetOptionsRef.current == null;
+    const needFacetFetch = dimensionFilterActive(targetFilter) && shouldRefreshFacets;
     try {
-      const [nextSummary, page] = await Promise.all([
+      const [nextSummary, page, facetSummary] = await Promise.all([
         tokenStatsApi.summarize(targetFilter),
         tokenStatsApi.list(targetFilter, null, PAGE_SIZE),
+        needFacetFetch
+          ? tokenStatsApi.summarize(facetOnlyFilter(targetFilter))
+          : Promise.resolve(null),
       ]);
       if (seq !== requestSeqRef.current) return; // 旧请求，丢弃
       setSummary(nextSummary);
       summaryRef.current = nextSummary;
+      if (!dimensionFilterActive(targetFilter)) {
+        const nextFacets = facetsFromSummary(nextSummary);
+        setFacetOptions(nextFacets);
+        facetOptionsRef.current = nextFacets;
+        facetTimeRef.current = nextTimeKey;
+      } else if (facetSummary) {
+        const nextFacets = facetsFromSummary(facetSummary);
+        setFacetOptions(nextFacets);
+        facetOptionsRef.current = nextFacets;
+        facetTimeRef.current = nextTimeKey;
+      }
       setEntries(page.items);
       setNextCursor(page.nextCursor);
       setRefreshError('idle');
@@ -234,6 +295,7 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   return {
     filter,
     summary,
+    facetOptions,
     entries,
     nextCursor,
     loading,

@@ -21,12 +21,11 @@ vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: unknown }) => (
     <div data-testid="recharts-mock">{children as never}</div>
   ),
-  ComposedChart: ({ children }: { children: unknown }) => <div>{children as never}</div>,
+  LineChart: ({ children }: { children: unknown }) => <div>{children as never}</div>,
   CartesianGrid: () => null,
   XAxis: () => null,
   YAxis: () => null,
   Tooltip: () => null,
-  Bar: () => null,
   Line: () => null,
 }));
 
@@ -70,6 +69,20 @@ const SUMMARY: AgentLedgerSummary = {
       cacheWriteTokens: null,
       costByCurrency: [{ currency: 'USD', minorUnits: 120 }],
     },
+    {
+      key: 'gpt-5',
+      label: 'gpt-5',
+      sessions: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      inputTokens: 40,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: null,
+      costByCurrency: [],
+    },
   ],
   byProvider: [
     {
@@ -86,8 +99,51 @@ const SUMMARY: AgentLedgerSummary = {
       cacheWriteTokens: null,
       costByCurrency: [{ currency: 'USD', minorUnits: 120 }],
     },
+    {
+      key: 'codex',
+      label: 'Codex',
+      sessions: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      inputTokens: 40,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: null,
+      costByCurrency: [],
+    },
   ],
-  byProject: [],
+  byProject: [
+    {
+      key: 'p1',
+      label: 'cc-partner',
+      sessions: 2,
+      completed: 2,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 30,
+      cacheWriteTokens: null,
+      costByCurrency: [{ currency: 'USD', minorUnits: 120 }],
+    },
+    {
+      key: 'p2',
+      label: 'other-app',
+      sessions: 1,
+      completed: 1,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: null,
+      costByCurrency: [],
+    },
+  ],
   trend: [
     {
       bucketStart: '2026-07-01T00:00:00Z',
@@ -298,5 +354,37 @@ describe('TokenStatsView', () => {
     // 不再有 outcome 表头/列
     expect(table.querySelectorAll('th').length).toBe(8);
     expect(props.onChangeFilter).toBeDefined();
+  });
+
+  it('时间 / provider / 模型 / 项目筛选各占一行', () => {
+    renderView();
+    const filters = screen.getByTestId('token-stats-filters');
+    expect(filters.querySelector('[data-testid="token-stats-filter-row-time"]')).toBeTruthy();
+    expect(filters.querySelector('[data-testid="token-stats-filter-row-provider"]')).toBeTruthy();
+    expect(filters.querySelector('[data-testid="token-stats-filter-row-model"]')).toBeTruthy();
+    expect(filters.querySelector('[data-testid="token-stats-filter-row-project"]')).toBeTruthy();
+  });
+
+  it('provider / 模型 / 项目可多选累加，不会互相覆盖', () => {
+    const { props } = renderView({
+      filter: { window: '7d', providerIds: ['claudeCodeVisible'] },
+    });
+    fireEvent.click(screen.getByTestId('token-stats-provider-codex'));
+    expect(props.onChangeFilter).toHaveBeenCalledWith({
+      providerIds: ['claudeCodeVisible', 'codex'],
+    });
+
+    fireEvent.click(screen.getByTestId('token-stats-model-gpt-5'));
+    expect(props.onChangeFilter).toHaveBeenCalledWith({ modelIds: ['gpt-5'] });
+
+    fireEvent.click(screen.getByTestId('token-stats-project-p2'));
+    expect(props.onChangeFilter).toHaveBeenCalledWith({ projectIds: ['p2'] });
+  });
+
+  it('用量趋势拆成三张曲线图', () => {
+    renderView();
+    expect(screen.getByTestId('token-stats-trend-input')).toBeTruthy();
+    expect(screen.getByTestId('token-stats-trend-cache')).toBeTruthy();
+    expect(screen.getByTestId('token-stats-trend-output')).toBeTruthy();
   });
 });

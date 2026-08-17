@@ -16,6 +16,8 @@
     "providerLabel": "Provider",
     "modelLabel": "Model",
     "projectLabel": "Project",
+    "all": "All",
+    "emptyOptions": "No options in this window",
     "refresh": "Refresh",
     "export": "Export…",
     "exportMenu": "Export results",
@@ -41,6 +43,12 @@
   "trend": {
     "title": "Usage trend",
     "empty": "No data in this window yet.",
+    "axisTokens": "Tokens",
+    "charts": {
+      "input": "New input tokens",
+      "cache": "Cached tokens",
+      "output": "Output tokens"
+    },
     "tooltip": {
       "bucket": "Bucket",
       "tokens": "Tokens"

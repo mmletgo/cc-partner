@@ -250,4 +250,54 @@ describe('useTokenStatsController', () => {
     });
     expect(result.current.lastExportPath).toBe('/tmp/x.csv');
   });
+
+  it('首屏把 summary 分组写入 facetOptions；只改 provider 不再多打一次 summarize', async () => {
+    const withGroups: AgentLedgerSummary = {
+      ...SUMMARY,
+      byProvider: [
+        {
+          key: 'claudeCodeVisible',
+          label: 'Claude',
+          sessions: 1,
+          completed: 1,
+          failed: 0,
+          cancelled: 0,
+          disconnected: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: null,
+          costByCurrency: [],
+        },
+        {
+          key: 'codex',
+          label: 'Codex',
+          sessions: 1,
+          completed: 1,
+          failed: 0,
+          cancelled: 0,
+          disconnected: 0,
+          inputTokens: 8,
+          outputTokens: 4,
+          cacheReadTokens: 0,
+          cacheWriteTokens: null,
+          costByCurrency: [],
+        },
+      ],
+    };
+    mockedApi.summarize.mockResolvedValue(withGroups);
+    const { result } = renderHook(() => useTokenStatsController());
+    await waitFor(() => expect(result.current.facetOptions?.providers).toHaveLength(2));
+
+    mockedApi.summarize.mockClear();
+    mockedApi.list.mockClear();
+    act(() => result.current.onChangeFilter({ providerIds: ['claudeCodeVisible'] }));
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 280);
+      });
+    });
+    await waitFor(() => expect(mockedApi.summarize).toHaveBeenCalledTimes(1));
+    expect(result.current.facetOptions?.providers).toHaveLength(2);
+  });
 });

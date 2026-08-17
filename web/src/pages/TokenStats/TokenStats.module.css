@@ -149,9 +149,39 @@
 
 .filterBar {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+}
+
+.filterRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.filterRowLabel {
+  flex: 0 0 auto;
+  min-width: 4.5rem;
+  padding-top: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+.filterRowChips {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.filterEmpty {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
 }
 
 .filterGroup {
@@ -227,7 +257,24 @@
 
 .chartBody {
   padding: var(--space-3) 0;
-  min-height: 280px;
+  min-height: 220px;
+}
+
+.trendStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.trendChart {
+  min-width: 0;
+}
+
+.trendChartTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-2);
 }
 
 .chartEmpty {

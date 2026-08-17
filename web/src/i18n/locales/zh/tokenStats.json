@@ -16,6 +16,8 @@
     "providerLabel": "Provider",
     "modelLabel": "模型",
     "projectLabel": "项目",
+    "all": "全部",
+    "emptyOptions": "当前窗口暂无选项",
     "refresh": "刷新",
     "export": "导出…",
     "exportMenu": "导出结果",
@@ -41,6 +43,12 @@
   "trend": {
     "title": "用量趋势",
     "empty": "当前窗口暂无数据。",
+    "axisTokens": "Token 数",
+    "charts": {
+      "input": "新输入 token",
+      "cache": "缓存 token",
+      "output": "输出 token"
+    },
     "tooltip": {
       "bucket": "时间桶",
       "tokens": "Token"
