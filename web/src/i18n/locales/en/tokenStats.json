@@ -63,7 +63,13 @@
       "output": "Output",
       "cost": "Cost"
     },
-    "loadMore": "Load more",
+    "pagination": {
+      "label": "Session details pagination",
+      "prev": "Previous",
+      "next": "Next",
+      "pageStatus": "Page {{current}} of {{total}}",
+      "rangeStatus": "{{from}}–{{to}} of {{total}}"
+    },
     "empty": "No sessions match your filters yet.",
     "unavailable": "Ledger detail unavailable.",
     "staleBanner": "Refreshing latest usage failed; showing last known result."

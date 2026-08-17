@@ -385,10 +385,25 @@
   color: var(--fg-muted-readable);
 }
 
-.sessionActions {
+.sessionPagination {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
   padding: var(--space-3) 0 0;
+}
+
+.sessionPaginationRange,
+.sessionPaginationStatus {
+  font-size: var(--text-sm);
+  color: var(--fg-muted-readable);
+}
+
+.sessionPaginationControls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .exportMenuRoot {

@@ -4,13 +4,13 @@
  *
  * Business Logic（为什么需要这个测试):
  *   Token 统计页是回顾性数据，控制器必须正确处理：首屏拉取 / 筛选防抖 / stale guard /
- *   Load more / 导出成功失败 / refreshError state machine。
+ *   分页替换 / 导出成功失败 / refreshError state machine。
  *
  * Code Logic（这个测试做什么):
  *   - vi.mock('@/api/tokenStats') 注入 fake tokenStatsApi；单 case 只调用必要方法。
  *   - renderHook + act 推进 React state；debounce 用真实 250ms 等待，避免
  *     fake timers 与 useVisibilityPolling 的 interval/waitFor 互相卡住。
- *   - 校验每次调用后的 filter / summary / entries / refreshError / cursor 变化。
+ *   - 校验每次调用后的 filter / summary / entries / refreshError / pageIndex 变化。
  */
 
 import { act, renderHook, waitFor } from '@testing-library/react';
@@ -32,7 +32,7 @@ vi.mock('@/api/tokenStats', () => ({
 }));
 
 import { tokenStatsApi } from '@/api/tokenStats';
-import { useTokenStatsController } from './useTokenStatsController';
+import { useTokenStatsController, TOKEN_STATS_PAGE_SIZE } from './useTokenStatsController';
 
 const mockedApi = tokenStatsApi as unknown as {
   summarize: ReturnType<typeof vi.fn>;
@@ -113,10 +113,13 @@ describe('useTokenStatsController', () => {
     });
     expect(result.current.filter.window).toBe('7d');
     expect(result.current.entries).toEqual(PAGE.items);
-    expect(result.current.nextCursor).toBe('cursor-next');
+    expect(result.current.pageIndex).toBe(0);
+    expect(result.current.canPrevPage).toBe(false);
+    expect(result.current.canNextPage).toBe(true);
     expect(result.current.refreshError).toBe('idle');
     expect(mockedApi.summarize).toHaveBeenCalledTimes(1);
     expect(mockedApi.list).toHaveBeenCalledTimes(1);
+    expect(mockedApi.list).toHaveBeenCalledWith({ window: '7d' }, null, TOKEN_STATS_PAGE_SIZE);
   });
 
   it('changeFilter 进入 250ms debounce，再触发 fetch；连续相同字符串不重复 fetch', async () => {
@@ -173,7 +176,7 @@ describe('useTokenStatsController', () => {
     await waitFor(() => expect(result.current.refreshError).toBe('stale'));
   });
 
-  it('onLoadMore 在 cursor 存在时拉下一页，并 append', async () => {
+  it('onNextPage 替换当前页；onPrevPage 回到缓存的上一页且不再请求', async () => {
     const nextPage: AgentLedgerSessionPage = {
       items: [
         {
@@ -192,15 +195,31 @@ describe('useTokenStatsController', () => {
     await waitFor(() => expect(result.current.entries).toHaveLength(1));
 
     await act(async () => {
-      result.current.onLoadMore();
+      result.current.onNextPage();
     });
 
     await waitFor(() => {
-      expect(result.current.entries).toHaveLength(2);
+      expect(result.current.pageIndex).toBe(1);
     });
+    expect(result.current.entries).toHaveLength(1);
+    expect(result.current.entries[0].id).toBe('id-2');
+    expect(result.current.canNextPage).toBe(false);
+    expect(result.current.canPrevPage).toBe(true);
+    expect(mockedApi.list).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      result.current.onPrevPage();
+    });
+    expect(result.current.pageIndex).toBe(0);
     expect(result.current.entries[0].id).toBe('id-1');
-    expect(result.current.entries[1].id).toBe('id-2');
-    expect(result.current.nextCursor).toBeNull();
+    expect(mockedApi.list).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      result.current.onNextPage();
+    });
+    expect(result.current.pageIndex).toBe(1);
+    expect(result.current.entries[0].id).toBe('id-2');
+    expect(mockedApi.list).toHaveBeenCalledTimes(2);
   });
 
   it('onExport 成功暴露 lastExportPath，失败时暴露 exportError', async () => {

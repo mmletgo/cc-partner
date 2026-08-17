@@ -13,6 +13,7 @@
  *   - 6 个 KPI tile（新输入 / 缓存 / 输出 / 命中率 / 请求数 / 总成本）；null token 显示「—」并在 hint 标未提供。
  *   - 用量趋势合成一张折线图（新输入 / 缓存 / 输出三条曲线，共用 token 数纵轴）。
  *   - Session 明细表：标题列显示 terminalTitle；项目列显示 projectName ?? projectId；无 outcome 列。
+ *   - 会话明细按页展示（每页 20 条），底栏上一页 / 下一页，不再无限加载。
  */
 
 import type { TFunction } from 'i18next';
@@ -51,14 +52,22 @@ export interface TokenStatsViewProps {
   /** 时间窗内完整选项；缺省时回落到 summary 分组，避免测试样例必填。 */
   facetOptions?: TokenStatsFacetOptions | null;
   entries: AgentLedgerSessionEntry[];
-  hasMore: boolean;
+  pageIndex: number;
+  totalPages: number;
+  sessionFrom: number;
+  sessionTo: number;
+  sessionCount: number;
+  canPrevPage: boolean;
+  canNextPage: boolean;
+  loadingPage: boolean;
   loading: boolean;
   refreshError: 'idle' | 'loading' | 'stale' | 'error';
   exporting: boolean;
   exportError: string | null;
   lastExportPath: string | null;
   onChangeFilter(patch: Partial<AgentLedgerFilters>): void;
-  onLoadMore(): void;
+  onPrevPage(): void;
+  onNextPage(): void;
   onRefresh(): void;
   onExport(format: 'csv' | 'json'): void;
   onRevealExport(): void;
@@ -225,14 +234,22 @@ export function TokenStatsView({
   summary,
   facetOptions,
   entries,
-  hasMore,
+  pageIndex,
+  totalPages,
+  sessionFrom,
+  sessionTo,
+  sessionCount,
+  canPrevPage,
+  canNextPage,
+  loadingPage,
   loading,
   refreshError,
   exporting,
   exportError,
   lastExportPath,
   onChangeFilter,
-  onLoadMore,
+  onPrevPage,
+  onNextPage,
   onRefresh,
   onExport,
   onRevealExport,
@@ -377,15 +394,50 @@ export function TokenStatsView({
             {entries.length === 0 ? (
               <p className={styles.groupEmpty}>{t('tokenStats:session.empty')}</p>
             ) : (
-              <SessionTable rows={entries} />
+              <>
+                <SessionTable rows={entries} />
+                <nav
+                  className={styles.sessionPagination}
+                  aria-label={t('tokenStats:session.pagination.label')}
+                  data-testid="token-stats-pagination"
+                >
+                  <span className={styles.sessionPaginationRange} data-testid="token-stats-page-range">
+                    {t('tokenStats:session.pagination.rangeStatus', {
+                      from: sessionFrom,
+                      to: sessionTo,
+                      total: sessionCount,
+                    })}
+                  </span>
+                  <div className={styles.sessionPaginationControls}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={!canPrevPage}
+                      onClick={onPrevPage}
+                      data-testid="token-stats-page-prev"
+                    >
+                      {t('tokenStats:session.pagination.prev')}
+                    </Button>
+                    <span className={styles.sessionPaginationStatus} data-testid="token-stats-page-status">
+                      {t('tokenStats:session.pagination.pageStatus', {
+                        current: pageIndex + 1,
+                        total: Math.max(totalPages, 1),
+                      })}
+                    </span>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={!canNextPage}
+                      loading={loadingPage}
+                      onClick={onNextPage}
+                      data-testid="token-stats-page-next"
+                    >
+                      {t('tokenStats:session.pagination.next')}
+                    </Button>
+                  </div>
+                </nav>
+              </>
             )}
-            {hasMore ? (
-              <div className={styles.sessionActions}>
-                <Button variant="secondary" size="sm" onClick={onLoadMore} data-testid="token-stats-load-more">
-                  {t('tokenStats:session.loadMore')}
-                </Button>
-              </div>
-            ) : null}
           </Card.Body>
         </Card>
       </div>

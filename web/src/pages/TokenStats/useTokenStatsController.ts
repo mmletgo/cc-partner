@@ -10,24 +10,25 @@
  * Code Logic（这个 hook 做什么):
  *   - filter 默认 7d；窗口 chip / provider/model/project 多选全部走
  *     `changeFilter(patch)`，按 250ms debounce 把新过滤器合并入实际 fetch。
- *   - `refresh()` 并发拉 summarize + list(cursor=null, limit=50)；成功合并 summary/
- *     entries，stale guard 通过 `requestSeqRef` 丢弃旧响应；失败按 `summary` 是否存在
- *     分流 loadFailed / staleRefreshFailed。
- *   - `loadMore()` 仅在还有 cursor 时翻页，limit=50；与 refresh 并发，单独走
- *     `listSeqRef`。
+ *   - `refresh()` 并发拉 summarize + list(cursor=null, limit=20)；成功合并 summary/
+ *     并重置到第 1 页，stale guard 通过 `requestSeqRef` 丢弃旧响应；失败按 `summary`
+ *     是否存在分流 loadFailed / staleRefreshFailed。
+ *   - 会话明细按页替换（每页 20 条）：下一页用 nextCursor 拉新页并缓存，上一页走缓存；
+ *     与 refresh 并发时走 `listSeqRef` 丢弃过期响应。
  *   - `exportNow(format)` 调 tokenStatsApi.export 把响应绝对路径返回；写盘失败标记
  *     exportError 不挡页面。
  *   - 整页 hooks 必须挂在早期 early-return 前；useVisibilityPolling(30s) 仅文档可见时
  *     拉数据。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { tokenStatsApi } from '@/api/tokenStats';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import type {
   AgentLedgerFilters,
   AgentLedgerSummary,
   AgentLedgerSessionEntry,
+  AgentLedgerSessionPage,
   TokenStatsFacetOptions,
 } from '@/lib/types/tokenStats';
 
@@ -44,7 +45,20 @@ export interface TokenStatsControllerResult {
   /** 时间窗内的完整 provider/model/project 选项，不受当前多选收缩。 */
   facetOptions: TokenStatsFacetOptions | null;
   entries: AgentLedgerSessionEntry[];
-  nextCursor: string | null;
+  /** 当前页（0-based）。 */
+  pageIndex: number;
+  /** 总页数；无会话时为 0。 */
+  totalPages: number;
+  /** 当前页第一条在全量中的 1-based 序号；空页为 0。 */
+  sessionFrom: number;
+  /** 当前页最后一条在全量中的 1-based 序号。 */
+  sessionTo: number;
+  /** 筛选窗内会话总数（来自 summary）。 */
+  sessionCount: number;
+  canPrevPage: boolean;
+  canNextPage: boolean;
+  /** 正在拉取尚未缓存的下一页。 */
+  loadingPage: boolean;
   loading: boolean;
   refreshError: TokenStatsRefreshState;
   /** 'idle' = 不弹横幅；'loading' = 首屏加载；'stale' = 已有数据但刷新失败；'error' = 首屏失败。 */
@@ -52,9 +66,9 @@ export interface TokenStatsControllerResult {
   exportError: string | null;
   /** 导出成功后的绝对路径（最近一次成功），给 "在 Finder 显示" 按钮使用。 */
   lastExportPath: string | null;
-  hasMore: boolean;
   onChangeFilter(patch: Partial<AgentLedgerFilters>): void;
-  onLoadMore(): void;
+  onPrevPage(): void;
+  onNextPage(): void;
   onRefresh(): void;
   onExport(format: 'csv' | 'json'): void;
   onRevealExport(): void;
@@ -66,8 +80,8 @@ const DEFAULT_FILTER: AgentLedgerFilters = { window: '7d' };
 
 /** 拉取新数据时的轮询间隔（ms）。 */
 const REFRESH_INTERVAL_MS = 30_000;
-/** 列表分页大小，与 schema 默认 50 一致。 */
-const PAGE_SIZE = 50;
+/** 会话明细每页条数。 */
+export const TOKEN_STATS_PAGE_SIZE = 20;
 /** 连续筛选防抖，避免快速切换造成未完成请求堆积。 */
 const FILTER_DEBOUNCE_MS = 250;
 
@@ -121,6 +135,27 @@ function facetsFromSummary(summary: AgentLedgerSummary): TokenStatsFacetOptions 
   };
 }
 
+/**
+ * Business Logic（为什么需要）:
+ *   分页控件需要总页数；summary.sessions 是权威总数，cursor 可在数据刚增长时补一页。
+ *
+ * Code Logic（做什么）:
+ *   用 ceil(sessionCount / 20) 作下限，再与当前页、是否还有下一页取 max。
+ */
+export function tokenStatsTotalPages(
+  sessionCount: number,
+  pageIndex: number,
+  hasNextPage: boolean,
+): number {
+  const fromCount = sessionCount > 0 ? Math.ceil(sessionCount / TOKEN_STATS_PAGE_SIZE) : 0;
+  const fromCursor = hasNextPage
+    ? pageIndex + 2
+    : sessionCount > 0 || pageIndex > 0
+      ? pageIndex + 1
+      : 0;
+  return Math.max(fromCount, fromCursor);
+}
+
 export function useTokenStatsController(): TokenStatsControllerResult {
   // 0. 持久化的当前过滤器（用户输入）
   const [filter, setFilterState] = useState<AgentLedgerFilters>(DEFAULT_FILTER);
@@ -129,8 +164,9 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   // 2. 派生数据
   const [summary, setSummary] = useState<AgentLedgerSummary | null>(null);
   const [facetOptions, setFacetOptions] = useState<TokenStatsFacetOptions | null>(null);
-  const [entries, setEntries] = useState<AgentLedgerSessionEntry[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [pages, setPages] = useState<AgentLedgerSessionPage[]>([]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [loadingPage, setLoadingPage] = useState(false);
   // 3. 状态机
   const [loading, setLoading] = useState(true);
   const [refreshError, setRefreshError] =
@@ -146,6 +182,8 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   const appliedFilterRef = useRef<AgentLedgerFilters>(DEFAULT_FILTER);
   const facetOptionsRef = useRef<TokenStatsFacetOptions | null>(null);
   const facetTimeRef = useRef<string | null>(null);
+  const pagesRef = useRef<AgentLedgerSessionPage[]>([]);
+  const pageIndexRef = useRef(0);
 
   // 同步 ref 供 timeout 与 polling 读取
   useEffect(() => {
@@ -157,6 +195,12 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   useEffect(() => {
     facetOptionsRef.current = facetOptions;
   }, [facetOptions]);
+  useEffect(() => {
+    pagesRef.current = pages;
+  }, [pages]);
+  useEffect(() => {
+    pageIndexRef.current = pageIndex;
+  }, [pageIndex]);
 
   // 合并 filter 防抖：每次 setFilter 后 250ms 把应用过滤器推进。
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -179,6 +223,8 @@ export function useTokenStatsController(): TokenStatsControllerResult {
   // 主刷新：清旧 entries，取首屏
   const refresh = useCallback(async () => {
     const seq = ++requestSeqRef.current;
+    listSeqRef.current += 1;
+    setLoadingPage(false);
     const targetFilter = appliedFilterRef.current;
     const nextTimeKey = timeScopeKey(targetFilter);
     const shouldRefreshFacets =
@@ -187,12 +233,14 @@ export function useTokenStatsController(): TokenStatsControllerResult {
     try {
       const [nextSummary, page, facetSummary] = await Promise.all([
         tokenStatsApi.summarize(targetFilter),
-        tokenStatsApi.list(targetFilter, null, PAGE_SIZE),
+        tokenStatsApi.list(targetFilter, null, TOKEN_STATS_PAGE_SIZE),
         needFacetFetch
           ? tokenStatsApi.summarize(facetOnlyFilter(targetFilter))
           : Promise.resolve(null),
       ]);
       if (seq !== requestSeqRef.current) return; // 旧请求，丢弃
+      listSeqRef.current += 1;
+      setLoadingPage(false);
       setSummary(nextSummary);
       summaryRef.current = nextSummary;
       if (!dimensionFilterActive(targetFilter)) {
@@ -206,8 +254,8 @@ export function useTokenStatsController(): TokenStatsControllerResult {
         facetOptionsRef.current = nextFacets;
         facetTimeRef.current = nextTimeKey;
       }
-      setEntries(page.items);
-      setNextCursor(page.nextCursor);
+      setPages([page]);
+      setPageIndex(0);
       setRefreshError('idle');
     } catch {
       if (seq !== requestSeqRef.current) return;
@@ -229,19 +277,38 @@ export function useTokenStatsController(): TokenStatsControllerResult {
     void runNow({ force: true }).catch(() => undefined);
   }, [appliedFilter, runNow]);
 
-  // 列表加载更多（cursor 分页）
-  const loadMore = useCallback(async () => {
-    if (!nextCursor) return;
-    const seq = ++listSeqRef.current;
-    try {
-      const page = await tokenStatsApi.list(appliedFilterRef.current, nextCursor, PAGE_SIZE);
-      if (seq !== listSeqRef.current) return;
-      setEntries((prev) => [...prev, ...page.items]);
-      setNextCursor(page.nextCursor);
-    } catch {
-      // 分页失败不打断已有列表；用户可再点「加载更多」。
+  const goPrevPage = useCallback(() => {
+    if (loadingPage) return;
+    setPageIndex((index) => Math.max(0, index - 1));
+  }, [loadingPage]);
+
+  const goNextPage = useCallback(async () => {
+    if (loadingPage) return;
+    const index = pageIndexRef.current;
+    const cached = pagesRef.current;
+    if (index + 1 < cached.length) {
+      setPageIndex(index + 1);
+      return;
     }
-  }, [nextCursor]);
+    const cursor = cached[index]?.nextCursor;
+    if (!cursor) return;
+    const seq = ++listSeqRef.current;
+    setLoadingPage(true);
+    try {
+      const page = await tokenStatsApi.list(
+        appliedFilterRef.current,
+        cursor,
+        TOKEN_STATS_PAGE_SIZE,
+      );
+      if (seq !== listSeqRef.current) return;
+      setPages((prev) => (prev.length > index + 1 ? prev : [...prev, page]));
+      setPageIndex(index + 1);
+    } catch {
+      // 翻页失败保留当前页；用户可再点下一页。
+    } finally {
+      if (seq === listSeqRef.current) setLoadingPage(false);
+    }
+  }, [loadingPage]);
 
   // 手动刷新（onRefresh 给 view 当 retry 按钮用）
   const handleRefresh = useCallback(() => {
@@ -290,22 +357,35 @@ export function useTokenStatsController(): TokenStatsControllerResult {
     };
   }, []);
 
-  const hasMore = useMemo(() => nextCursor !== null, [nextCursor]);
+  const entries = pages[pageIndex]?.items ?? [];
+  const hasNextPage =
+    pageIndex + 1 < pages.length || Boolean(pages[pageIndex]?.nextCursor);
+  const sessionCount = summary?.sessions ?? 0;
+  const totalPages = tokenStatsTotalPages(sessionCount, pageIndex, hasNextPage);
+  const sessionFrom = entries.length === 0 ? 0 : pageIndex * TOKEN_STATS_PAGE_SIZE + 1;
+  const sessionTo = pageIndex * TOKEN_STATS_PAGE_SIZE + entries.length;
 
   return {
     filter,
     summary,
     facetOptions,
     entries,
-    nextCursor,
+    pageIndex,
+    totalPages,
+    sessionFrom,
+    sessionTo,
+    sessionCount,
+    canPrevPage: pageIndex > 0 && !loadingPage,
+    canNextPage: hasNextPage && !loadingPage,
+    loadingPage,
     loading,
     refreshError,
     exporting,
     exportError,
     lastExportPath,
-    hasMore,
     onChangeFilter: changeFilter,
-    onLoadMore: loadMore,
+    onPrevPage: goPrevPage,
+    onNextPage: goNextPage,
     onRefresh: handleRefresh,
     onExport: exportNow,
     onRevealExport: revealExport,

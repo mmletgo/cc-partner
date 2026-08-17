@@ -3,12 +3,12 @@
  * TokenStatsView 展示合同。
  *
  * Business Logic（为什么需要这个测试）:
- *   KPI 必须区分 null 与 0、主货币优先、筛选/导出/加载更多都要落到 props 回调；
+ *   KPI 必须区分 null 与 0、主货币优先、筛选/导出/分页都要落到 props 回调；
  *   顶部不展示真实消耗 / 覆盖度；会话明细必须带标题。
  *
  * Code Logic（这个测试做什么）:
  *   mock recharts，渲染 I18n 包裹的 TokenStatsView，断言数字格式、未提供 hint、
- *   多货币 hint、window chip / load more / export 回调。
+ *   多货币 hint、window chip / 分页 / export 回调。
  */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -190,14 +190,22 @@ function renderView(partial: Partial<TokenStatsViewProps> = {}) {
         projectName: 'cc-partner',
       },
     ],
-    hasMore: true,
+    pageIndex: 0,
+    totalPages: 1,
+    sessionFrom: 1,
+    sessionTo: 1,
+    sessionCount: 2,
+    canPrevPage: false,
+    canNextPage: true,
+    loadingPage: false,
     loading: false,
     refreshError: 'idle',
     exporting: false,
     exportError: null,
     lastExportPath: null,
     onChangeFilter: vi.fn(),
-    onLoadMore: vi.fn(),
+    onPrevPage: vi.fn(),
+    onNextPage: vi.fn(),
     onRefresh: vi.fn(),
     onExport: vi.fn(),
     onRevealExport: vi.fn(),
@@ -253,7 +261,7 @@ describe('TokenStatsView', () => {
     expect(screen.getByTestId('token-stats-kpi-cost').textContent).toContain('—');
   });
 
-  it('切 30d chip 与 Load more / Export 都会回调', () => {
+  it('切 30d chip 与分页 / Export 都会回调', () => {
     const { props } = renderView();
     fireEvent.click(screen.getByTestId('token-stats-window-30d'));
     expect(props.onChangeFilter).toHaveBeenCalledWith({
@@ -262,8 +270,11 @@ describe('TokenStatsView', () => {
       startedBefore: null,
     });
 
-    fireEvent.click(screen.getByTestId('token-stats-load-more'));
-    expect(props.onLoadMore).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('token-stats-page-next'));
+    expect(props.onNextPage).toHaveBeenCalledTimes(1);
+    expect((screen.getByTestId('token-stats-page-prev') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('token-stats-page-status').textContent).toContain('第 1 / 1 页');
+    expect(screen.getByTestId('token-stats-page-range').textContent).toContain('第 1–1 条，共 2 条');
 
     fireEvent.click(screen.getByTestId('token-stats-export-menu'));
     fireEvent.click(screen.getByTestId('token-stats-export-csv'));
