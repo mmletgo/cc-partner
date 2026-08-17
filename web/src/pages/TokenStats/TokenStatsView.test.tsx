@@ -3,7 +3,8 @@
  * TokenStatsView 展示合同。
  *
  * Business Logic（为什么需要这个测试）:
- *   KPI 必须区分 null 与 0、主货币优先、筛选/导出/加载更多都要落到 props 回调。
+ *   KPI 必须区分 null 与 0、主货币优先、筛选/导出/加载更多都要落到 props 回调；
+ *   顶部不展示真实消耗 / 覆盖度；会话明细必须带标题。
  *
  * Code Logic（这个测试做什么）:
  *   mock recharts，渲染 I18n 包裹的 TokenStatsView，断言数字格式、未提供 hint、
@@ -185,7 +186,7 @@ function renderView(partial: Partial<TokenStatsViewProps> = {}) {
         cacheWriteTokens: null,
         costMinorUnits: 120,
         costCurrency: 'USD',
-        terminalTitle: null,
+        terminalTitle: '修复登录超时',
         projectName: 'cc-partner',
       },
     ],
@@ -222,16 +223,16 @@ afterEach(() => {
 });
 
 describe('TokenStatsView', () => {
-  it('渲染 KPI 数字、命中率与覆盖度', () => {
+  it('渲染 KPI 数字与命中率，不展示真实消耗与覆盖度', () => {
     renderView();
     expect(screen.getByTestId('token-stats-kpi-input').textContent).toContain('100');
     expect(screen.getByTestId('token-stats-kpi-output').textContent).toContain('50');
     expect(screen.getByTestId('token-stats-kpi-hit-rate').textContent).toContain('23.1%');
-    expect(screen.getByTestId('token-stats-kpi-real').textContent).toContain('150');
     expect(screen.getByTestId('token-stats-kpi-requests').textContent).toContain('2');
-    expect(screen.getByTestId('token-stats-kpi-coverage').textContent).toContain('部分');
     expect(screen.getByTestId('token-stats-kpi-cost').textContent).toContain('1.20 USD');
     expect(screen.getByTestId('token-stats-kpi-cost').textContent).toContain('8.00 CNY');
+    expect(screen.queryByTestId('token-stats-kpi-real')).toBeNull();
+    expect(screen.queryByTestId('token-stats-kpi-coverage')).toBeNull();
   });
 
   it('null token 显示占位并标未提供', () => {
@@ -305,7 +306,7 @@ describe('TokenStatsView', () => {
     expect(props.onRefresh).toHaveBeenCalled();
   });
 
-  it('session 明细表项目列显示 projectName 缺失时回落到 projectId', () => {
+  it('session 明细表展示标题，项目列优先 projectName 缺失时回落到 projectId', () => {
     const { props } = renderView({
       entries: [
         {
@@ -324,7 +325,7 @@ describe('TokenStatsView', () => {
           cacheWriteTokens: null,
           costMinorUnits: null,
           costCurrency: null,
-          terminalTitle: null,
+          terminalTitle: '修复登录超时',
           projectName: 'cc-partner',
         },
         {
@@ -343,16 +344,19 @@ describe('TokenStatsView', () => {
           cacheWriteTokens: null,
           costMinorUnits: null,
           costCurrency: null,
-          terminalTitle: null,
+          terminalTitle: '   ',
           projectName: null,
         },
       ],
     });
     const table = screen.getByTestId('token-stats-session-table');
+    expect(table.textContent).toContain('标题');
+    expect(table.textContent).toContain('修复登录超时');
+    expect(table.textContent).toContain('—');
     expect(table.textContent).toContain('cc-partner');
     expect(table.textContent).toContain('p2');
-    // 不再有 outcome 表头/列
-    expect(table.querySelectorAll('th').length).toBe(8);
+    // 标题列加入后共 9 列；不再有 outcome 表头/列
+    expect(table.querySelectorAll('th').length).toBe(9);
     expect(props.onChangeFilter).toBeDefined();
   });
 
@@ -381,10 +385,15 @@ describe('TokenStatsView', () => {
     expect(props.onChangeFilter).toHaveBeenCalledWith({ projectIds: ['p2'] });
   });
 
-  it('用量趋势拆成三张曲线图', () => {
+  it('用量趋势合成一张三条曲线图', () => {
     renderView();
-    expect(screen.getByTestId('token-stats-trend-input')).toBeTruthy();
-    expect(screen.getByTestId('token-stats-trend-cache')).toBeTruthy();
-    expect(screen.getByTestId('token-stats-trend-output')).toBeTruthy();
+    expect(screen.getByTestId('token-stats-trend')).toBeTruthy();
+    expect(screen.queryByTestId('token-stats-trend-input')).toBeNull();
+    expect(screen.queryByTestId('token-stats-trend-cache')).toBeNull();
+    expect(screen.queryByTestId('token-stats-trend-output')).toBeNull();
+    const legend = screen.getByTestId('token-stats-trend-legend');
+    expect(legend.textContent).toContain('新输入');
+    expect(legend.textContent).toContain('缓存读取');
+    expect(legend.textContent).toContain('输出');
   });
 });

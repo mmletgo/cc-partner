@@ -100,7 +100,7 @@ const PAGE = {
       cacheWriteTokens: null,
       costMinorUnits: 120,
       costCurrency: 'USD',
-      terminalTitle: null,
+      terminalTitle: '修复登录超时',
     },
   ],
   nextCursor: null,
@@ -127,7 +127,9 @@ test.describe('E2E-TOKEN-STATS-001 Token stats journey', () => {
     await expect(page.getByTestId('token-stats-kpi-hit-rate')).toContainText('23.1%');
     await expect(page.getByTestId('token-stats-kpi-cost')).toContainText('1.20 USD');
     await expect(page.getByTestId('token-stats-session-table')).toContainText('claude-opus');
+    await expect(page.getByTestId('token-stats-session-table')).toContainText('修复登录超时');
     await expect(page.getByTestId('token-stats-trend')).toBeVisible();
+    await expect(page.getByTestId('token-stats-trend-legend')).toContainText('新输入');
     await expect(page.getByTestId('token-stats-trend')).not.toContainText('T00:00:00Z');
 
     await page.getByTestId('token-stats-export-menu').click();

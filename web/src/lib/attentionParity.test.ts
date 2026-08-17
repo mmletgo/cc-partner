@@ -89,8 +89,13 @@ function buildParitySnapshot(): AttentionSnapshot {
       decision: 1,
       blocked: 2,
       environment: 1,
+      unreadTotal: items.length,
+      unreadDecision: 1,
+      unreadBlocked: 2,
+      unreadEnvironment: 1,
     },
     items,
+    myDeviceId: 'd0',
   };
 }
 

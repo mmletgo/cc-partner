@@ -1662,7 +1662,10 @@ fn map_row(row: SqliteRow) -> Result<AgentLedgerEntry, AppError> {
             .map(|v| v as u64),
         cost_currency: row.try_get("cost_currency")?,
         terminal_title: row.try_get("terminal_title")?,
-        project_name: row.try_get::<Option<String>, _>("project_name").ok().flatten(),
+        project_name: row
+            .try_get::<Option<String>, _>("project_name")
+            .ok()
+            .flatten(),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -1765,6 +1768,18 @@ mod tests {
         assert_eq!(rows[0].input_tokens, Some(120));
         assert_eq!(rows[0].cost_currency.as_deref(), Some("USD"));
         assert_eq!(rows[0].cost_minor_units, Some(3));
+    }
+
+    /// Business Logic: 提取层曾把 USD 写成 6 位小数，换算不得因此丢掉成本。
+    #[tokio::test]
+    async fn padded_usd_cost_major_stores_minor_units() {
+        let repo = ledger_repo().await;
+        repo.finalize(finalize("a1", Some(usage(10, 4, "USD", "0.050000"))))
+            .await
+            .unwrap();
+        let rows = repo.get_page(default_query()).await.unwrap().items;
+        assert_eq!(rows[0].cost_currency.as_deref(), Some("USD"));
+        assert_eq!(rows[0].cost_minor_units, Some(5));
     }
 
     /// Business Logic: agent_session_id 唯一。
@@ -2072,7 +2087,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let keys: Vec<_> = page.items.iter().map(|e| e.agent_session_id.clone()).collect();
+        let keys: Vec<_> = page
+            .items
+            .iter()
+            .map(|e| e.agent_session_id.clone())
+            .collect();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&"a1".to_string()));
         assert!(keys.contains(&"a2".to_string()));
@@ -2107,11 +2126,7 @@ mod tests {
         let page = repo.get_page(default_query()).await.unwrap();
         assert_eq!(page.items[0].project_name.as_deref(), Some("Demo Project"));
         // 单行 get → project_name 填充
-        let one = repo
-            .get_by_agent_session_id("a1")
-            .await
-            .unwrap()
-            .unwrap();
+        let one = repo.get_by_agent_session_id("a1").await.unwrap().unwrap();
         assert_eq!(one.project_name.as_deref(), Some("Demo Project"));
     }
 
@@ -2135,9 +2150,7 @@ mod tests {
     ///     summarize_grouped(project) 断言 row.label == Some(name) 当 join 命中；不命中保留 None。
     #[tokio::test]
     async fn summarize_grouped_project_fills_label_from_left_join() {
-        use crate::workbench::agent_ledger::models::{
-            AgentLedgerFilters, LedgerWindow,
-        };
+        use crate::workbench::agent_ledger::models::{AgentLedgerFilters, LedgerWindow};
         let repo = ledger_repo().await;
         let pool = repo.pool();
         sqlx::query("INSERT INTO workbench_projects (id, name) VALUES ('p1', 'Demo Project One')")

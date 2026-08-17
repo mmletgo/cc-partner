@@ -603,6 +603,16 @@ async fn dispatch_workbench_op(
             let deleted = crate::commands::workbench::clear_agent_ledger_for_state(state).await?;
             Ok(serde_json::to_value(deleted)?)
         }
+        "agent_ledger.export_token_stats" => {
+            let req: crate::commands::workbench::ExportTokenStatsReq =
+                serde_json::from_value(payload.clone()).map_err(|e| {
+                    AppError::validation(format!(
+                        "agent_ledger.export_token_stats payload 无效: {e}"
+                    ))
+                })?;
+            let path = crate::commands::workbench::export_token_stats_for_state(state, req).await?;
+            Ok(serde_json::to_value(path)?)
+        }
 
         // ---- gap sources / sessions ----
         // Gap inventory：活跃 bridge 设备集合（兼容旧客户端）。
@@ -1242,4 +1252,20 @@ fn ensure_response_within_limit<T: Serialize>(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// GUI `export_token_stats` 代理到 sidecar；缺 arm 会返回
+    /// 「未知 workbench control op: agent_ledger.export_token_stats」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op。
+    #[test]
+    fn dispatch_recognizes_agent_ledger_export_token_stats() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"agent_ledger.export_token_stats\" =>"),
+            "dispatch_workbench_op 必须注册 agent_ledger.export_token_stats"
+        );
+    }
 }

@@ -13,9 +13,10 @@
 //!     - get_version: 返回 {version, buildDate}，version 取 CARGO_PKG_VERSION。
 
 use crate::backend::control_client::BackendControlClient;
+#[cfg(test)]
+use crate::config::parse_prompt_optimizer_provider;
 use crate::config::{
-    default_preference_values, normalize_prompt_optimizer_fill_language,
-    parse_prompt_optimizer_provider, AppConfig,
+    default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
 };
 #[cfg(test)]
 use crate::config_runtime::{update_config_transactionally, ConfigRuntime};

@@ -616,6 +616,19 @@ mod tests {
         assert_eq!(req.provider_ids.as_ref().unwrap().len(), 1);
     }
 
+    /// Business Logic: 导出 payload 必须带 format；其余筛选字段与 summarize 同 camelCase。
+    #[test]
+    fn export_req_requires_format_and_accepts_camel_case() {
+        assert!(serde_json::from_str::<ExportTokenStatsReq>(r#"{}"#).is_err());
+        let req: ExportTokenStatsReq = serde_json::from_str(
+            r#"{"format":"csv","window":"7d","providerIds":["claudeCodeVisible"]}"#,
+        )
+        .unwrap();
+        assert_eq!(req.format, "csv");
+        assert_eq!(req.window.as_deref(), Some("7d"));
+        assert_eq!(req.provider_ids.as_ref().unwrap().len(), 1);
+    }
+
     /// Business Logic: 非法 format 直接拒绝。
     /// Code Logic: write_token_stats_export 对 "xml" 返回 Validation。
     #[tokio::test]

@@ -196,8 +196,14 @@ fn workbench_control_path(op: &str) -> &'static str {
 ///     长 Git/Claude 类 op 用 360s，其余用 MUTATE_TIMEOUT。
 fn workbench_control_timeout(op: &str) -> Duration {
     match op {
-        "worktrees.commit" | "worktrees.merge" | "worktrees.push" | "worktrees.create"
-        | "claude.resume" | "files.open" | "files.save_text" => Duration::from_secs(360),
+        "worktrees.commit"
+        | "worktrees.merge"
+        | "worktrees.push"
+        | "worktrees.create"
+        | "claude.resume"
+        | "files.open"
+        | "files.save_text"
+        | "agent_ledger.export_token_stats" => Duration::from_secs(360),
         _ => MUTATE_TIMEOUT,
     }
 }
@@ -3419,6 +3425,23 @@ mod tests {
         assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
         assert_eq!(workbench_control_path("notes.save"), "workbench/data");
         assert_eq!(workbench_control_path("notes.get"), "workbench");
+        assert_eq!(
+            workbench_control_path("agent_ledger.export_token_stats"),
+            "workbench"
+        );
+    }
+
+    /// Token 统计导出可能翻页写盘，不能用默认 15s mutation 超时。
+    #[test]
+    fn workbench_control_timeout_extends_token_stats_export() {
+        assert_eq!(
+            workbench_control_timeout("agent_ledger.export_token_stats"),
+            Duration::from_secs(360)
+        );
+        assert_eq!(
+            workbench_control_timeout("agent_ledger.summarize"),
+            MUTATE_TIMEOUT
+        );
     }
 
     /// 验证 NDJSON decoder 可跨 chunk 重组 UTF-8 与多行消息。

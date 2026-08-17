@@ -1,7 +1,7 @@
 {
   "eyebrow": "Token 用量",
   "title": "Token 统计",
-  "lead": "查看 Anthropic prompt-cache 命中率、真实消耗与每个会话的成本，覆盖全部活动 session。",
+  "lead": "查看 Anthropic prompt-cache 命中率与每个会话的成本，覆盖全部活动 session。",
   "filters": {
     "windowLabel": "时间窗",
     "window": {
@@ -30,13 +30,8 @@
     "cacheTokens": "缓存输入 token（cache_read）",
     "outputTokens": "输出 token",
     "cacheHitRate": "缓存命中率",
-    "realConsumed": "真实消耗 token",
     "requests": "总请求数",
     "totalCost": "总成本",
-    "coverage": "用量覆盖度",
-    "coverageComplete": "完整",
-    "coveragePartial": "部分",
-    "coverageUnavailable": "无覆盖",
     "notProvided": "未提供",
     "loading": "正在加载 Token 统计…"
   },
@@ -44,11 +39,6 @@
     "title": "用量趋势",
     "empty": "当前窗口暂无数据。",
     "axisTokens": "Token 数",
-    "charts": {
-      "input": "新输入 token",
-      "cache": "缓存 token",
-      "output": "输出 token"
-    },
     "tooltip": {
       "bucket": "时间桶",
       "tokens": "Token"
@@ -64,6 +54,7 @@
     "tableTitle": "会话明细",
     "columns": {
       "startedAt": "开始时间",
+      "title": "标题",
       "agent": "Agent",
       "model": "模型",
       "project": "项目",

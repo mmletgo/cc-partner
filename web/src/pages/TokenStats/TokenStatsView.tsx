@@ -5,16 +5,17 @@
  *   把 Token 统计页所有展示逻辑（筛选 / KPI / 趋势图 / 明细表 / 导出）
  *   集中在一个 pure view，禁止 import `@/api/*` 或 transport，与 controller 完全解耦。
  *   按筛选条件直接显示汇总结果（KPI + Trend + Session），不再单独渲染 byModel /
- *   byProvider / byProject 三维分组表；Session 明细按 projectName 优先展示，缺失时
- *   回落到 projectId。
+ *   byProvider / byProject 三维分组表；Session 明细展示会话标题，项目列按
+ *   projectName 优先、缺失时回落到 projectId。
  *
  * Code Logic（这个组件做什么）:
  *   - 顶部时间窗 / provider·model·project 各占一行；后三类为多选 chips（空选 = 全部）。
- *   - 8 个 KPI tile；null token 显示「—」并在 hint 标未提供。
- *   - 用量趋势拆成 3 张图（新输入 / 缓存 / 输出），每张只保留 token 数纵轴。
- *   - Session 明细表：项目列显示 projectName ?? projectId；无 outcome 列。
+ *   - 6 个 KPI tile（新输入 / 缓存 / 输出 / 命中率 / 请求数 / 总成本）；null token 显示「—」并在 hint 标未提供。
+ *   - 用量趋势合成一张折线图（新输入 / 缓存 / 输出三条曲线，共用 token 数纵轴）。
+ *   - Session 明细表：标题列显示 terminalTitle；项目列显示 projectName ?? projectId；无 outcome 列。
  */
 
+import type { TFunction } from 'i18next';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -78,16 +79,40 @@ interface ChipOption {
   label: string;
 }
 
-/** 单张趋势图绑定的 token 字段。 */
-type TrendMetricKey = 'input' | 'cacheRead' | 'output';
+/** 合成趋势图上的一条曲线。 */
+interface TrendSeries {
+  key: keyof Pick<TrendChartRow, 'input' | 'cacheRead' | 'output'>;
+  stroke: string;
+  tone: 'input' | 'cache' | 'output';
+  legendKey: 'input' | 'cacheRead' | 'output';
+}
+
+/** 三条曲线固定顺序与配色：新输入 / 缓存 / 输出。 */
+const TREND_SERIES: TrendSeries[] = [
+  { key: 'input', stroke: 'var(--accent)', tone: 'input', legendKey: 'input' },
+  { key: 'cacheRead', stroke: 'var(--warn)', tone: 'cache', legendKey: 'cacheRead' },
+  { key: 'output', stroke: 'var(--success)', tone: 'output', legendKey: 'output' },
+];
+
+/**
+ * Business Logic（为什么需要）:
+ *   图例与 tooltip 必须走字面量 i18n key，模板拼接过不了 tsc 校验。
+ *
+ * Code Logic（做什么）:
+ *   按 legendKey 返回对应 `trend.legend.*` 文案。
+ */
+function trendLegendLabel(t: TFunction<['tokenStats']>, key: TrendSeries['legendKey']): string {
+  if (key === 'input') return t('tokenStats:trend.legend.input');
+  if (key === 'output') return t('tokenStats:trend.legend.output');
+  return t('tokenStats:trend.legend.cacheRead');
+}
 
 /** recharts Tooltip 只读必要字段。 */
 interface TrendTooltipProps {
   active?: boolean;
-  payload?: Array<{ payload?: TrendChartRow; value?: number }>;
+  payload?: Array<{ payload?: TrendChartRow }>;
   label?: string | number;
   bucket: 'hour' | 'day';
-  metric: TrendMetricKey;
 }
 
 /**
@@ -160,7 +185,7 @@ function toggleId(current: string[] | null | undefined, id: string): string[] | 
 
 /**
  * Business Logic（为什么需要）:
- *   KPI 需要独立视觉块，避免 8 个指标挤在一段文字里。
+ *   KPI 需要独立视觉块，避免多个指标挤在一段文字里。
  *
  * Code Logic（做什么）:
  *   渲染 label/value/hint；可选 accent 与 testid。
@@ -312,12 +337,6 @@ export function TokenStatsView({
                   hint={summary?.cacheHitRate == null ? t('tokenStats:kpi.notProvided') : undefined}
                 />
                 <KpiTile
-                  testId="token-stats-kpi-real"
-                  label={t('tokenStats:kpi.realConsumed')}
-                  value={formatNumber(summary?.realConsumedTokens)}
-                  hint={summary?.realConsumedTokens == null ? t('tokenStats:kpi.notProvided') : undefined}
-                />
-                <KpiTile
                   testId="token-stats-kpi-requests"
                   label={t('tokenStats:kpi.requests')}
                   value={summary?.requestsCount != null ? String(summary.requestsCount) : '—'}
@@ -334,19 +353,6 @@ export function TokenStatsView({
                       : undefined
                   }
                 />
-                <KpiTile
-                  testId="token-stats-kpi-coverage"
-                  label={t('tokenStats:kpi.coverage')}
-                  value={
-                    summary
-                      ? summary.usageCoverage === 'complete'
-                        ? t('tokenStats:kpi.coverageComplete')
-                        : summary.usageCoverage === 'partial'
-                          ? t('tokenStats:kpi.coveragePartial')
-                          : t('tokenStats:kpi.coverageUnavailable')
-                      : '—'
-                  }
-                />
               </section>
             )}
           </Card.Body>
@@ -360,32 +366,7 @@ export function TokenStatsView({
                 {t('tokenStats:trend.empty')}
               </div>
             ) : (
-              <div className={styles.trendStack} data-testid="token-stats-trend">
-                <TrendMetricChart
-                  testId="token-stats-trend-input"
-                  title={t('tokenStats:trend.charts.input')}
-                  data={trendData}
-                  bucket={bucket}
-                  metric="input"
-                  stroke="var(--accent)"
-                />
-                <TrendMetricChart
-                  testId="token-stats-trend-cache"
-                  title={t('tokenStats:trend.charts.cache')}
-                  data={trendData}
-                  bucket={bucket}
-                  metric="cacheRead"
-                  stroke="var(--warn)"
-                />
-                <TrendMetricChart
-                  testId="token-stats-trend-output"
-                  title={t('tokenStats:trend.charts.output')}
-                  data={trendData}
-                  bucket={bucket}
-                  metric="output"
-                  stroke="var(--success)"
-                />
-              </div>
+              <TrendCombinedChart data={trendData} bucket={bucket} />
             )}
           </Card.Body>
         </Card>
@@ -743,10 +724,11 @@ function ExportMenu({
  * Session 明细表。
  *
  * Business Logic（为什么需要）:
- *   明细行展示单条 Agent session 元数据；项目列优先显示后端 LEFT JOIN 得到的
- *   projectName，缺失时回落到 projectId，避免给用户看一串路径编码。
+ *   明细行展示单条 Agent session 元数据；标题列显示工作台终端窗口标题，
+ *   项目列优先显示后端 LEFT JOIN 得到的 projectName，缺失时回落到 projectId。
  *
  * Code Logic（做什么）:
+ *   - 标题列 `row.terminalTitle`，空白/缺失显示「—」；
  *   - 项目列 `row.projectName ?? row.projectId`；
  *   - 不渲染 outcome 列（已与 Token 统计页 UI 隔离）；
  *   - token 字段统一走 formatNumber 区分 null 与 0。
@@ -762,6 +744,7 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
       <thead>
         <tr>
           <th>{t('tokenStats:session.columns.startedAt')}</th>
+          <th>{t('tokenStats:session.columns.title')}</th>
           <th>{t('tokenStats:session.columns.agent')}</th>
           <th>{t('tokenStats:session.columns.model')}</th>
           <th>{t('tokenStats:session.columns.project')}</th>
@@ -775,6 +758,7 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
         {rows.map((row) => (
           <tr key={row.id}>
             <td>{fmt.format(new Date(row.startedAt))}</td>
+            <td className={styles.sessionTitle}>{row.terminalTitle?.trim() || '—'}</td>
             <td>{row.providerId}</td>
             <td>{row.modelId ?? '—'}</td>
             <td>{row.projectName ?? row.projectId}</td>
@@ -795,7 +779,7 @@ function SessionTable({ rows }: { rows: AgentLedgerSessionEntry[] }) {
 
 /**
  * Business Logic（为什么需要）:
- *   三张用量趋势图要共用同一套纵轴单位，避免一张用原始个数、另一张用 k。
+ *   合成趋势图三条曲线共用同一套纵轴单位，避免一条用原始个数、另一条用 k。
  *   用户要求刻度单位固定为百万 token（M），且不要三位小数。
  *
  * Code Logic（做什么）:
@@ -808,25 +792,33 @@ function formatTrendAxisTick(value: number): string {
   return `${text === '' ? '0' : text}M`;
 }
 
-function TrendMetricChart({
-  testId,
-  title,
+/**
+ * Business Logic（为什么需要）:
+ *   新输入 / 缓存 / 输出放在同一张图上，才能直接对比三条曲线的相对高低。
+ *
+ * Code Logic（做什么）:
+ *   一张 LineChart 叠三条曲线，图例用 token 色区分；tooltip 同时列出三个值。
+ */
+function TrendCombinedChart({
   data,
   bucket,
-  metric,
-  stroke,
 }: {
-  testId: string;
-  title: string;
   data: TrendChartRow[];
   bucket: 'hour' | 'day';
-  metric: TrendMetricKey;
-  stroke: string;
 }) {
+  const { t } = useTranslation(['tokenStats']);
+  const title = t('tokenStats:trend.title');
   return (
-    <section className={styles.trendChart} data-testid={testId} aria-label={title}>
-      <h3 className={styles.trendChartTitle}>{title}</h3>
-      <ResponsiveContainer width="100%" height={220}>
+    <section className={styles.trendChart} data-testid="token-stats-trend" aria-label={title}>
+      <ul className={styles.trendLegend} data-testid="token-stats-trend-legend">
+        {TREND_SERIES.map((series) => (
+          <li key={series.key} className={styles.trendLegendItem}>
+            <span className={styles.trendSwatch} data-tone={series.tone} />
+            {trendLegendLabel(t, series.legendKey)}
+          </li>
+        ))}
+      </ul>
+      <ResponsiveContainer width="100%" height={280}>
         <LineChart data={data} margin={{ top: 8, right: 8, bottom: 4, left: 4 }}>
           <CartesianGrid stroke="var(--border-soft)" strokeDasharray="2 4" />
           <XAxis
@@ -843,42 +835,43 @@ function TrendMetricChart({
             width={64}
             tickFormatter={formatTrendAxisTick}
           />
-          <Tooltip content={<TrendTooltip bucket={bucket} metric={metric} />} />
-          <Line
-            type="monotone"
-            dataKey={metric}
-            name={title}
-            stroke={stroke}
-            strokeWidth={2}
-            dot={{ r: 3, strokeWidth: 0, fill: stroke }}
-            activeDot={{ r: 5 }}
-          />
+          <Tooltip content={<TrendTooltip bucket={bucket} />} />
+          {TREND_SERIES.map((series) => (
+            <Line
+              key={series.key}
+              type="monotone"
+              dataKey={series.key}
+              name={trendLegendLabel(t, series.legendKey)}
+              stroke={series.stroke}
+              strokeWidth={2}
+              dot={{ r: 2, strokeWidth: 0, fill: series.stroke }}
+              activeDot={{ r: 4 }}
+            />
+          ))}
         </LineChart>
       </ResponsiveContainer>
     </section>
   );
 }
 
-function TrendTooltip({ active, payload, label, bucket, metric }: TrendTooltipProps) {
+function TrendTooltip({ active, payload, label, bucket }: TrendTooltipProps) {
   const { t } = useTranslation(['tokenStats']);
   if (!active || !payload?.length) return null;
   const point = payload[0]?.payload;
   const timeLabel =
     typeof label === 'string' ? formatLocalBucketTooltip(label, bucket) : String(label ?? '');
-  const metricLabel =
-    metric === 'input'
-      ? t('tokenStats:trend.legend.input')
-      : metric === 'output'
-        ? t('tokenStats:trend.legend.output')
-        : t('tokenStats:trend.legend.cacheRead');
-  const value = point?.[metric] ?? 0;
   return (
     <div className={styles.tooltip}>
       <div className={styles.tooltipLabel}>{timeLabel}</div>
-      <div className={styles.tooltipRow}>
-        <span>{metricLabel}</span>
-        <strong>{formatTokenCount(value)}</strong>
-      </div>
+      {TREND_SERIES.map((series) => (
+        <div key={series.key} className={styles.tooltipRow}>
+          <span className={styles.tooltipSeries}>
+            <span className={styles.trendSwatch} data-tone={series.tone} />
+            {trendLegendLabel(t, series.legendKey)}
+          </span>
+          <strong>{formatTokenCount(point?.[series.key] ?? 0)}</strong>
+        </div>
+      ))}
     </div>
   );
 }

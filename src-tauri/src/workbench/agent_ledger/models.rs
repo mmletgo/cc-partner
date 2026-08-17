@@ -694,7 +694,7 @@ pub fn currency_exponent(currency: &str) -> Option<u32> {
 ///     需要舍入或 exponent 未知时返回错误，调用方写 null。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析可选符号的 `整数.小数`；小数位数 > exp → Err；否则 pad 后解析 u64。
+///     解析 `整数.小数`；先去掉小数尾随 0，再比较有效小数位与 exp；超出 → Err；否则 pad 后解析 u64。
 pub fn convert_major_to_minor_units(major: &str, currency: &str) -> Result<u64, AppError> {
     let currency = validate_currency_code(currency)?;
     let exp = currency_exponent(&currency).ok_or_else(|| {
@@ -724,6 +724,8 @@ pub fn convert_major_to_minor_units(major: &str, currency: &str) -> Result<u64, 
             "cost_major 小数部分非法: {major}"
         )));
     }
+    // 尾随 0 不增加有效小数位："0.050000" USD 与 "0.05" 等值，必须能无损换算。
+    let frac_part = frac_part.trim_end_matches('0');
     if frac_part.len() as u32 > exp {
         return Err(AppError::validation(format!(
             "cost_major 小数位数超过 {currency} exponent={exp}，禁止舍入: {major}"
@@ -937,12 +939,14 @@ mod tests {
         assert_eq!(validate_currency_code("USD").unwrap(), "USD");
     }
 
-    /// Business Logic: cost 必须无损；多一位小数禁止舍入。
+    /// Business Logic: cost 必须无损；有效小数位超过 exponent 禁止舍入；尾随 0 可去。
     /// Code Logic: USD exp=2；JPY exp=0。
     #[test]
     fn cost_conversion_is_lossless_or_null() {
         assert_eq!(convert_major_to_minor_units("1.23", "USD").unwrap(), 123);
         assert_eq!(convert_major_to_minor_units("1", "USD").unwrap(), 100);
+        assert_eq!(convert_major_to_minor_units("0.050000", "USD").unwrap(), 5);
+        assert_eq!(convert_major_to_minor_units("1.230", "USD").unwrap(), 123);
         assert!(convert_major_to_minor_units("1.234", "USD").is_err());
         assert_eq!(convert_major_to_minor_units("100", "JPY").unwrap(), 100);
         assert!(convert_major_to_minor_units("100.1", "JPY").is_err());

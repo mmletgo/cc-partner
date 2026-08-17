@@ -1,7 +1,7 @@
 {
   "eyebrow": "Token usage",
   "title": "Token Statistics",
-  "lead": "Inspect Anthropic prompt-cache hit rate, real consumption, and per-agent cost across all your active sessions.",
+  "lead": "Inspect Anthropic prompt-cache hit rate and per-session cost across all your active sessions.",
   "filters": {
     "windowLabel": "Time window",
     "window": {
@@ -30,13 +30,8 @@
     "cacheTokens": "Cached input tokens (cache_read)",
     "outputTokens": "Output tokens",
     "cacheHitRate": "Cache hit rate",
-    "realConsumed": "Real consumed tokens",
     "requests": "Total requests",
     "totalCost": "Total cost",
-    "coverage": "Usage coverage",
-    "coverageComplete": "Complete",
-    "coveragePartial": "Partial",
-    "coverageUnavailable": "Unavailable",
     "notProvided": "Not provided",
     "loading": "Loading token statistics…"
   },
@@ -44,11 +39,6 @@
     "title": "Usage trend",
     "empty": "No data in this window yet.",
     "axisTokens": "Tokens",
-    "charts": {
-      "input": "New input tokens",
-      "cache": "Cached tokens",
-      "output": "Output tokens"
-    },
     "tooltip": {
       "bucket": "Bucket",
       "tokens": "Tokens"
@@ -64,6 +54,7 @@
     "tableTitle": "Sessions",
     "columns": {
       "startedAt": "Started",
+      "title": "Title",
       "agent": "Agent",
       "model": "Model",
       "project": "Project",
