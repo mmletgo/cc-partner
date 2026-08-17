@@ -40,6 +40,20 @@ export function canRecheckWorkbenchDependency(status: WorkbenchDependencyStatus)
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   终端工作台只应在 tmux 阻塞真实 window/pane 时占位；就绪成功页属于 Settings，
+ *   探测中也不应把整张依赖卡塞进终端区。
+ *
+ * Code Logic（这个函数做什么）:
+ *   ready / checking 返回 false；missing / installing / 失败 / 不支持 / 待重检返回 true。
+ */
+export function shouldShowWorkbenchDependencyNotice(
+  status: WorkbenchDependencyStatus['status'],
+): boolean {
+  return status !== 'ready' && status !== 'checking';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   安装确认框需要展示即将执行的命令，带空格的参数必须可读且不误导用户。
  *
  * Code Logic（这个函数做什么）:

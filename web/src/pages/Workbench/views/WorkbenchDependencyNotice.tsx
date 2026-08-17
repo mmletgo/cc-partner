@@ -3,16 +3,21 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   选中远端项目时必须展示对端 tmux 状态，确认框写明设备名 + argv；
+ *   tmux 已就绪时不得占用终端工作台（就绪详情只在 Settings）；
  *   Settings 卡仍走本机 Context，本组件不得被 Settings 复用错装控制端。
  *
  * Code Logic（这个组件做什么）:
- *   local 项目渲染 WorkbenchDependencyCard；remote 用 deviceId 调 API 并传入 source。
+ *   local / remote 仅在非 ready、非 checking 时渲染 WorkbenchDependencyCard；
+ *   remote 用 deviceId 调 API 并传入 source。
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { WorkbenchDependencyCard } from '@/components/domain/WorkbenchDependencyCard';
 import { workbenchDependencyApi } from '@/api/workbenchDependency';
-import { dependencyStatusFromError } from '@/lib/workbenchDependency';
+import {
+  dependencyStatusFromError,
+  shouldShowWorkbenchDependencyNotice,
+} from '@/lib/workbenchDependency';
 import type { WorkbenchDependencyStatus, WorkbenchProject } from '@/lib/types';
 
 export interface WorkbenchDependencyNoticeProps {
@@ -24,7 +29,7 @@ export interface WorkbenchDependencyNoticeProps {
 }
 
 const EMPTY_STATUS: WorkbenchDependencyStatus = {
-  status: 'missing',
+  status: 'checking',
   available: false,
   version: null,
   backend: '',
@@ -38,13 +43,13 @@ const EMPTY_STATUS: WorkbenchDependencyStatus = {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   Workbench 页不能把本机 tmux 卡误当成对端状态。
+ *   Workbench 页不能把本机 tmux 卡误当成对端状态，也不能在 tmux 已可用时挡住终端。
  *
  * Code Logic（这个函数做什么）:
- *   remote → 轮询对端 check/status；local → 复用 Context 卡。
+ *   remote → 轮询对端 check/status；local → 复用 Context 卡；ready/checking 不渲染。
  */
 export function WorkbenchDependencyNotice(props: WorkbenchDependencyNoticeProps) {
-  const { compact, className, project, remoteWriteDisabled = false } = props;
+  const { compact, className, project, localStatus, remoteWriteDisabled = false } = props;
   const remote = project.kind === 'remote';
   const deviceId = remote ? project.deviceId : undefined;
   const [status, setStatus] = useState<WorkbenchDependencyStatus>(EMPTY_STATUS);
@@ -108,7 +113,14 @@ export function WorkbenchDependencyNotice(props: WorkbenchDependencyNoticeProps)
   }, [deviceId, remote, status.status]);
 
   if (!remote) {
+    if (!shouldShowWorkbenchDependencyNotice(localStatus)) {
+      return null;
+    }
     return <WorkbenchDependencyCard compact={compact} className={className} />;
+  }
+
+  if (!shouldShowWorkbenchDependencyNotice(status.status)) {
+    return null;
   }
 
   return (

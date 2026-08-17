@@ -6,6 +6,7 @@ import {
   dependencyStatusFromError,
   dependencyStatusTone,
   formatInstallCommandPreview,
+  shouldShowWorkbenchDependencyNotice,
 } from './workbenchDependency';
 
 /**
@@ -53,6 +54,20 @@ describe('workbenchDependency', () => {
 
     if (formatInstallCommandPreview(['wsl.exe', '--exec', 'sh', '-lc', 'sudo apt-get install -y tmux']) !== 'wsl.exe --exec sh -lc "sudo apt-get install -y tmux"') {
       throw new Error('install preview should quote shell command arguments');
+    }
+
+    if (shouldShowWorkbenchDependencyNotice('ready') || shouldShowWorkbenchDependencyNotice('checking')) {
+      throw new Error('ready/checking tmux must not occupy the terminal workbench');
+    }
+    if (!shouldShowWorkbenchDependencyNotice('missing') || !shouldShowWorkbenchDependencyNotice('failed')) {
+      throw new Error('blocked tmux states must still show the workbench notice');
+    }
+    if (
+      !shouldShowWorkbenchDependencyNotice('installing')
+      || !shouldShowWorkbenchDependencyNotice('unsupported')
+      || !shouldShowWorkbenchDependencyNotice('installedNeedsRecheck')
+    ) {
+      throw new Error('installing/unsupported/needs-recheck must still show the workbench notice');
     }
 
     const unsupported = dependencyStatusFromError(
