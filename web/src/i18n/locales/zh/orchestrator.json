@@ -75,11 +75,13 @@
     "remoteUnsupported": "该远端设备不支持运行时快照；请在所属设备查看，或升级对端版本。",
     "remoteOffline": "远端设备离线，当前无法获取运行时状态。",
     "remoteOfflineCached": "正在显示上次成功的运行时状态。最后更新 {{time}}。",
-    "remoteOfflineCachedBadge": "缓存 · {{time}}"
+    "remoteOfflineCachedBadge": "缓存 · {{time}}",
+    "details": "运行摘要与事件"
   },
   "queue": {
     "title": "任务队列",
     "subtitle": "按工作流泳道查看当前项目任务。",
+    "toolbarAria": "任务队列操作",
     "taskAria": "选择任务 {{title}}",
     "priority": "优先级 {{priority}}",
     "localTask": "本机",

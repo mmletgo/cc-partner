@@ -13,6 +13,9 @@
   width: 100%;
   height: 100%;
   min-height: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
   box-sizing: border-box;
   background: var(--bg);
   color: var(--fg);
@@ -20,8 +23,12 @@
 
 .embedded .grid {
   max-width: none;
-  min-height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  height: 100%;
   margin: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .header {
@@ -82,6 +89,73 @@
   grid-template-columns: minmax(0, 1fr);
   gap: var(--space-5);
   align-items: start;
+}
+
+.workspace {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.embedded .workspace {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+}
+
+.toolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.embedded .toolbar {
+  justify-content: flex-end;
+}
+
+.embedded .toolbarCopy {
+  display: none;
+}
+
+.embedded .error {
+  max-width: none;
+  margin: 0 0 var(--space-3);
+}
+
+.boardStage {
+  min-width: 0;
+  min-height: 280px;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow: hidden;
+}
+
+.embedded .boardStage {
+  min-height: 0;
+}
+
+.outboxSlot {
+  min-width: 0;
+  flex: 0 0 auto;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.secondaryStack {
+  min-width: 0;
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: 36vh;
+  overflow: auto;
 }
 
 .queue,
@@ -216,6 +290,38 @@
   border-top: 0;
 }
 
+.adaptersDetails {
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-2) var(--space-3);
+}
+
+.adaptersDetails[open] {
+  padding-bottom: var(--space-3);
+}
+
+.snapshotDetailsSummary,
+.adaptersSummary {
+  cursor: pointer;
+  list-style: none;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.snapshotDetailsSummary:hover,
+.adaptersSummary:hover {
+  color: var(--fg);
+}
+
+.adaptersSummary {
+  display: flex;
+}
+
+.adaptersSummary::-webkit-details-marker {
+  display: none;
+}
+
 .groupHeader {
   display: flex;
   align-items: center;
@@ -252,6 +358,10 @@
   padding: var(--space-2) 0;
 }
 
+.runtimeItem + .runtimeItem {
+  border-top: 1px solid var(--border-soft);
+}
+
 .runtimeItem strong {
   display: block;
   color: var(--fg);
@@ -268,13 +378,15 @@
 .snapshotBar {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
-  background: var(--surface-warm);
+  background: color-mix(in oklab, var(--surface) 72%, var(--bg));
 }
 
+.snapshotStrip,
+.snapshotPrimary,
 .snapshotHeader,
 .snapshotItems {
   display: flex;
@@ -283,8 +395,42 @@
   flex-wrap: wrap;
 }
 
+.snapshotStrip,
 .snapshotHeader {
   justify-content: space-between;
+}
+
+.snapshotPrimary {
+  min-width: 0;
+}
+
+.snapshotDetails {
+  min-width: 0;
+  border-top: 1px solid var(--border-soft);
+  padding-top: var(--space-2);
+}
+
+.snapshotDetailsSummary {
+  cursor: pointer;
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-normal);
+  letter-spacing: var(--tracking-normal);
+  color: var(--fg-muted-readable);
+  text-transform: uppercase;
+  list-style: none;
+}
+
+.snapshotDetailsSummary::-webkit-details-marker {
+  display: none;
+}
+
+.snapshotDetailsBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
 }
 
 .snapshotActions {
@@ -383,22 +529,26 @@
 }
 
 .board {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(220px, 240px);
+  grid-template-columns: repeat(8, minmax(168px, 1fr));
   gap: var(--space-3);
   overflow-x: auto;
-  padding: 0 0 var(--space-2);
+  overflow-y: hidden;
+  padding: 0 0 var(--space-1);
   overscroll-behavior-x: contain;
 }
 
 .lane {
   min-width: 0;
-  min-height: 220px;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3);
+  gap: var(--space-2);
+  padding: var(--space-2);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: color-mix(in oklab, var(--surface-warm) 56%, var(--surface));
@@ -424,21 +574,23 @@
 }
 
 .laneTaskList {
-  min-height: 152px;
+  min-height: 0;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  overflow-y: auto;
 }
 
 .task,
 .taskActive {
   width: 100%;
-  min-height: 56px;
+  min-height: 52px;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-1);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);

@@ -41,16 +41,19 @@ export function AgentAdapterCatalogStrip(
     return null;
   }
 
+  const hasUnavailable = agentAdapters.some((item) => !isAgentAdapterEffectivelyAvailable(item));
+
   return (
-    <section
-      className={styles.group}
+    <details
+      className={styles.adaptersDetails}
       aria-label={t('settings:automation.agentAdaptersAriaLabel')}
       data-testid="agent-adapter-catalog-strip"
+      {...(hasUnavailable ? { open: true } : {})}
     >
-      <div className={styles.groupHeader}>
+      <summary className={`${styles.adaptersSummary} ${styles.groupHeader}`}>
         <span>{t('settings:automation.agentAdaptersTitle')}</span>
         <Pill tone="neutral">{agentAdapters.length}</Pill>
-      </div>
+      </summary>
       <ul className={styles.runtimeList}>
         {agentAdapters.map((item) => {
           const isOpenCode = item.provider === 'openCodeVisible';
@@ -127,6 +130,6 @@ export function AgentAdapterCatalogStrip(
           );
         })}
       </ul>
-    </section>
+    </details>
   );
 }

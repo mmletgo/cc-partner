@@ -75,6 +75,10 @@ describe('workbenchAutomationView', () => {
     new URL('../Orchestrator/views/OrchestratorOutbox.tsx', import.meta.url),
     'utf8',
   );
+  const orchestratorSnapshotSource = readFileSync(
+    new URL('../Orchestrator/views/OrchestratorSnapshotBar.tsx', import.meta.url),
+    'utf8',
+  );
   const orchestratorSource = [
     orchestratorShellSource,
     orchestratorControllerSource,
@@ -83,6 +87,7 @@ describe('workbenchAutomationView', () => {
     orchestratorCreateSource,
     orchestratorBoardSource,
     orchestratorOutboxSource,
+    orchestratorSnapshotSource,
   ].join('\n');
   const orchestratorStyles = readFileSync(new URL('../Orchestrator/Orchestrator.module.css', import.meta.url), 'utf8');
   const orchestratorLibSource = readFileSync(new URL('../../lib/orchestrator.ts', import.meta.url), 'utf8');
@@ -552,6 +557,13 @@ describe('workbenchAutomationView', () => {
     '.embedded .grid',
     'embedded Orchestrator grid should have a Workbench-specific layout boundary',
   );
+  assertContains(orchestratorStyles, '.workspace {', 'orchestrator workspace layout exists');
+  assertContains(
+    orchestratorStyles,
+    '.boardStage {',
+    'orchestrator board stage fills remaining workspace height',
+  );
+  assertContains(orchestratorStyles, '.snapshotStrip', 'runtime snapshot uses a compact strip');
   assertContains(appSource, '<Navigate to="/workbench" replace />', 'legacy /orchestrator route redirects to Workbench');
   assertNotContains(appShellSource, 'to="/orchestrator"', 'sidebar no longer exposes a standalone automation nav item');
   assertContains(zhWorkbench, '"projectAutomation"', 'zh Workbench locale includes project automation copy');

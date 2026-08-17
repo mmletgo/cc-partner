@@ -8,36 +8,26 @@
  *
  * Code Logic（这个组件做什么）:
  *   - 调用 useOrchestratorController 获取状态与 handler
- *   - 组合 shell（header / error / queue 卡 / runtime snapshot 条）与 Board/Outbox/Drawer/Create 视图
+ *   - 组合工作区（toolbar / snapshot / outbox / board / secondary）与 Drawer/Create 视图
  *   - 不直接调用 orchestratorApi；hooks 全部位于渲染分支之前
  */
 import type { JSX } from 'react';
 import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Button, Card, Pill } from '@/components/primitives';
+import { Button, Pill } from '@/components/primitives';
 import { openCodeBridgePreviewHref } from '@/lib/agentAdapterPresentation';
-import { PlusIcon, RefreshIcon, SettingsIcon, SyncIcon } from '@/lib/icons';
-import type {
-  OrchestratorRuntimeEvent,
-  OrchestratorRuntimeTaskSummary,
-} from '@/lib/types';
+import { PlusIcon, SyncIcon } from '@/lib/icons';
 import {
   useOrchestratorController,
   type OrchestratorPanelProps,
 } from './controllers/useOrchestratorController';
-import {
-  ATTEMPT_PHASE_LABEL_KEYS,
-  formatOptionalTaskTimestamp,
-  formatTaskTimestamp,
-  RUN_STATE_LABEL_KEYS,
-  WORKFLOW_STATE_LABEL_KEYS,
-} from './orchestratorViewHelpers';
 import { AgentAdapterCatalogStrip } from './views/AgentAdapterCatalogStrip';
 import { OrchestratorBoard } from './views/OrchestratorBoard';
 import { OrchestratorCreateDialog } from './views/OrchestratorCreateDialog';
 import { OrchestratorExperimentPanel } from './views/OrchestratorExperimentPanel';
 import { OrchestratorOutbox } from './views/OrchestratorOutbox';
+import { OrchestratorSnapshotBar } from './views/OrchestratorSnapshotBar';
 import { OrchestratorTaskDrawer } from './views/OrchestratorTaskDrawer';
 import { WorkflowWizardDialog } from './views/WorkflowWizardDialog';
 import styles from './Orchestrator.module.css';
@@ -51,7 +41,7 @@ export type { OrchestratorPanelProps };
  *   Workbench 需要把自动化看板作为终端、文件预览同级的工作区视图，同时保留页面壳复用能力。
  *
  * Code Logic（这个函数做什么）:
- *   调用 controller，渲染 shell + Board/Outbox/Drawer/Create 视图；embedded=true 时省略页面级 header。
+ *   调用 controller，渲染工作区 + Board/Outbox/Drawer/Create 视图；embedded=true 时省略页面级 header。
  */
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const c = useOrchestratorController(props);
@@ -60,6 +50,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const handleOpenOpenCodeBridgePreview = useCallback(() => {
     navigate(openCodeBridgePreviewHref(c.activeProjectId));
   }, [c.activeProjectId, navigate]);
+  const showExperiments = c.experimentsLoading || c.experiments.length > 0;
+  const showSecondary = showExperiments || c.agentAdapters.length > 0;
 
   return (
     <div className={c.embedded ? styles.embedded : styles.page}>
@@ -85,11 +77,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       ) : null}
 
       <div className={styles.grid}>
-        <Card variant="outlined" padding="md" className={styles.queue}>
-          <Card.Header className={styles.cardHeader}>
-            <div>
+        <div className={styles.workspace}>
+          <div className={styles.toolbar} role="toolbar" aria-label={t('orchestrator:queue.toolbarAria')}>
+            <div className={styles.toolbarCopy}>
               <h2 className={styles.sectionTitle}>{t('orchestrator:queue.title')}</h2>
-              <p className={styles.sectionLead}>{t('orchestrator:queue.subtitle')}</p>
+              {!c.embedded ? (
+                <p className={styles.sectionLead}>{t('orchestrator:queue.subtitle')}</p>
+              ) : null}
             </div>
             <div className={styles.queueActions}>
               <Pill tone="neutral">{c.tasks.length + c.pendingRemoteItems.length}</Pill>
@@ -115,208 +109,38 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 {t('orchestrator:create.open')}
               </Button>
             </div>
-          </Card.Header>
-          <Card.Body className={styles.queueBody}>
-            {c.activeProject ? (
-              <div className={styles.snapshotBar}>
-                <div className={styles.snapshotHeader}>
-                  <span className={styles.label}>{t('orchestrator:snapshot.title')}</span>
-                  <div className={styles.snapshotActions}>
-                    {c.runtimeSnapshotLoading ? (
-                      <Pill tone="accent">{t('orchestrator:snapshot.loading')}</Pill>
-                    ) : null}
-                    {c.runtimeRemoteStatus === 'offline' && c.runtimeCachedAt ? (
-                      <Pill tone="warn">
-                        {t('orchestrator:snapshot.remoteOfflineCachedBadge', {
-                          time: formatTaskTimestamp(c.runtimeCachedAt),
-                        })}
-                      </Pill>
-                    ) : null}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={<RefreshIcon />}
-                      disabled={c.runtimeSnapshotLoading}
-                      onClick={c.handleRefreshRuntimeSnapshot}
-                    >
-                      {t('orchestrator:snapshot.refresh')}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={<SettingsIcon />}
-                      onClick={c.handleOpenAutomationSettings}
-                    >
-                      {t('orchestrator:snapshot.settings')}
-                    </Button>
-                  </div>
+          </div>
+          {c.activeProject ? (
+            <OrchestratorSnapshotBar
+              snapshot={c.runtimeSnapshot}
+              remoteStatus={c.runtimeRemoteStatus}
+              cachedAt={c.runtimeCachedAt}
+              loading={c.runtimeSnapshotLoading}
+              errorMessage={c.runtimeSnapshotErrorMessage}
+              showContent={c.showRuntimeSnapshotContent}
+              onRefresh={c.handleRefreshRuntimeSnapshot}
+              onOpenSettings={c.handleOpenAutomationSettings}
+              onOpenWorkflowWizard={c.handleOpenWorkflowWizard}
+            />
+          ) : null}
+          {c.loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
+          {!c.loading ? (
+            <div className={styles.boardStage}>
+              {c.pendingRemoteItems.length > 0 ? (
+                <div className={styles.outboxSlot}>
+                  <OrchestratorOutbox
+                    pendingRemoteItems={c.pendingRemoteItems}
+                    focusedOutboxId={c.focusedOutboxId}
+                    outboxActionId={c.outboxActionId}
+                    onRetry={(outboxId) => {
+                      void c.handleRetryRemoteOutbox(outboxId);
+                    }}
+                    onDiscard={(outboxId) => {
+                      void c.handleDiscardRemoteOutbox(outboxId);
+                    }}
+                  />
                 </div>
-                {c.showRuntimeSnapshotContent && c.runtimeSnapshot ? (
-                  <>
-                    {c.runtimeRemoteStatus === 'offline' && c.runtimeCachedAt ? (
-                      <p className={styles.snapshotMuted} role="status">
-                        {t('orchestrator:snapshot.remoteOfflineCached', {
-                          time: formatTaskTimestamp(c.runtimeCachedAt),
-                        })}
-                      </p>
-                    ) : null}
-                    <div className={styles.snapshotItems}>
-                      <Pill tone={c.runtimeSnapshot.schedulerEnabled ? 'success' : 'warn'} dot>
-                        {c.runtimeSnapshot.schedulerEnabled
-                          ? t('orchestrator:snapshot.schedulerEnabled')
-                          : t('orchestrator:snapshot.schedulerDisabled')}
-                      </Pill>
-                      <Pill tone={c.runtimeSnapshot.workflowValid ? 'success' : 'danger'} dot>
-                        {c.runtimeSnapshot.workflowValid
-                          ? t('orchestrator:snapshot.workflowValid')
-                          : t('orchestrator:snapshot.workflowInvalid')}
-                      </Pill>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={c.handleOpenWorkflowWizard}
-                        data-testid="open-workflow-wizard"
-                      >
-                        {t('orchestrator:workflowWizard.open')}
-                      </Button>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.slotsUsed', {
-                          used: c.runtimeSnapshot.slotsUsed,
-                          max: c.runtimeSnapshot.maxConcurrentTasks,
-                        })}
-                      </span>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.slotsAvailable', {
-                          available: c.runtimeSnapshot.slotsAvailable,
-                        })}
-                      </span>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.runningCount', {
-                          count: c.runtimeSnapshot.runningTasks.length,
-                        })}
-                      </span>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.retryingCount', {
-                          count: c.runtimeSnapshot.retryingTasks.length,
-                        })}
-                      </span>
-                    </div>
-                    <div className={styles.snapshotMetaGrid}>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.generatedAt', {
-                          time: formatTaskTimestamp(c.runtimeSnapshot.generatedAt),
-                        })}
-                      </span>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.latestTickAt', {
-                          time: formatOptionalTaskTimestamp(
-                            c.runtimeSnapshot.latestTickAt,
-                            t('orchestrator:snapshot.latestTickUnknown'),
-                          ),
-                        })}
-                      </span>
-                      <span className={styles.snapshotMetric}>
-                        {t('orchestrator:snapshot.lastDispatchedCount', {
-                          count: c.runtimeSnapshot.lastDispatchedCount,
-                        })}
-                      </span>
-                    </div>
-                    {c.runtimeSnapshot.runningTasks.length > 0 ? (
-                      <section className={styles.snapshotSection}>
-                        <h3 className={styles.snapshotSectionTitle}>
-                          {t('orchestrator:snapshot.runningTasks')}
-                        </h3>
-                        <ul className={styles.snapshotList}>
-                          {c.runtimeSnapshot.runningTasks.map(
-                            (task: OrchestratorRuntimeTaskSummary) => (
-                              <li className={styles.snapshotListItem} key={task.taskId}>
-                                <span className={styles.snapshotItemTitle}>{task.title}</span>
-                                <span className={styles.snapshotItemMeta}>
-                                  {t(RUN_STATE_LABEL_KEYS[task.runState])}
-                                  {task.attemptPhase
-                                    ? ` · ${t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}`
-                                    : ''}
-                                  {task.lastRuntimeMessage ? ` · ${task.lastRuntimeMessage}` : ''}
-                                </span>
-                              </li>
-                            ),
-                          )}
-                        </ul>
-                      </section>
-                    ) : null}
-                    {c.runtimeSnapshot.retryingTasks.length > 0 ? (
-                      <section className={styles.snapshotSection}>
-                        <h3 className={styles.snapshotSectionTitle}>
-                          {t('orchestrator:snapshot.retryingTasks')}
-                        </h3>
-                        <ul className={styles.snapshotList}>
-                          {c.runtimeSnapshot.retryingTasks.map(
-                            (task: OrchestratorRuntimeTaskSummary) => (
-                              <li className={styles.snapshotListItem} key={task.taskId}>
-                                <span className={styles.snapshotItemTitle}>{task.title}</span>
-                                <span className={styles.snapshotItemMeta}>
-                                  {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
-                                  {' · '}
-                                  {t(RUN_STATE_LABEL_KEYS[task.runState])}
-                                </span>
-                              </li>
-                            ),
-                          )}
-                        </ul>
-                      </section>
-                    ) : null}
-                    {c.runtimeSnapshot.recentEvents.length > 0 ? (
-                      <section className={styles.snapshotSection}>
-                        <h3 className={styles.snapshotSectionTitle}>
-                          {t('orchestrator:snapshot.recentEvents')}
-                        </h3>
-                        <ul className={styles.snapshotList}>
-                          {c.runtimeSnapshot.recentEvents.map((event: OrchestratorRuntimeEvent) => (
-                            <li className={styles.snapshotListItem} key={event.id}>
-                              <span className={styles.snapshotItemTitle}>{event.taskTitle}</span>
-                              <span className={styles.snapshotItemMeta}>
-                                {event.kind} · {event.message} ·{' '}
-                                {formatTaskTimestamp(event.createdAt)}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </section>
-                    ) : null}
-                    {c.runtimeSnapshot.workflowError ? (
-                      <p className={styles.snapshotWarning}>
-                        {t('orchestrator:snapshot.workflowError', {
-                          error: c.runtimeSnapshot.workflowError,
-                        })}
-                      </p>
-                    ) : null}
-                    {c.runtimeSnapshot.latestError ? (
-                      <p className={styles.snapshotWarning}>
-                        {t('orchestrator:snapshot.latestError', {
-                          error: c.runtimeSnapshot.latestError,
-                        })}
-                      </p>
-                    ) : null}
-                  </>
-                ) : null}
-                {!c.showRuntimeSnapshotContent && !c.runtimeSnapshotLoading ? (
-                  <p className={styles.snapshotMuted} role="status">
-                    {c.runtimeRemoteStatus === 'unsupported'
-                      ? t('orchestrator:snapshot.remoteUnsupported')
-                      : c.runtimeRemoteStatus === 'offline'
-                        ? t('orchestrator:snapshot.remoteOffline')
-                        : t('orchestrator:snapshot.remoteUnavailable')}
-                  </p>
-                ) : null}
-                {c.runtimeSnapshotErrorMessage ? (
-                  <p className={styles.snapshotWarning} role="status">
-                    {c.runtimeSnapshotErrorMessage}
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
-            {c.loading ? <p className={styles.muted}>{t('common:loading')}</p> : null}
-            {!c.loading ? (
+              ) : null}
               <OrchestratorBoard
                 groups={c.groups}
                 selectedTask={c.selectedTask}
@@ -329,57 +153,46 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                   void c.handleLaneDrop(event, targetState);
                 }}
               />
-            ) : null}
-            {!c.loading ? (
-              <OrchestratorOutbox
-                pendingRemoteItems={c.pendingRemoteItems}
-                focusedOutboxId={c.focusedOutboxId}
-                outboxActionId={c.outboxActionId}
-                onRetry={(outboxId) => {
-                  void c.handleRetryRemoteOutbox(outboxId);
-                }}
-                onDiscard={(outboxId) => {
-                  void c.handleDiscardRemoteOutbox(outboxId);
-                }}
-              />
-            ) : null}
-            {!c.loading ? (
+            </div>
+          ) : null}
+          {!c.loading && showSecondary ? (
+            <div className={styles.secondaryStack}>
+              {showExperiments ? (
+                <section className={styles.group} aria-label={t('orchestrator:experiments.title')}>
+                  <div className={styles.groupHeader}>
+                    <span>{t('orchestrator:experiments.title')}</span>
+                    <Pill tone="neutral">{c.experiments.length}</Pill>
+                  </div>
+                  {c.experimentsLoading ? (
+                    <p className={styles.muted}>{t('common:loading')}</p>
+                  ) : null}
+                  {!c.experimentsLoading && c.experiments.length === 0 ? (
+                    <p className={styles.muted}>{t('orchestrator:experiments.empty')}</p>
+                  ) : null}
+                  {c.experiments.map((experiment) => (
+                    <OrchestratorExperimentPanel
+                      key={experiment.id}
+                      experiment={experiment}
+                      onApproveRecommended={(experimentId, winnerTaskId) => {
+                        void c.handleApproveExperimentWinner(experimentId, winnerTaskId);
+                      }}
+                      onSelectCandidate={(experimentId, taskId) => {
+                        void c.handleApproveExperimentWinner(experimentId, taskId);
+                      }}
+                      onCancel={(experimentId) => {
+                        void c.handleCancelExperiment(experimentId);
+                      }}
+                    />
+                  ))}
+                </section>
+              ) : null}
               <AgentAdapterCatalogStrip
                 agentAdapters={c.agentAdapters}
                 onOpenOpenCodeBridgePreview={handleOpenOpenCodeBridgePreview}
               />
-            ) : null}
-            {!c.loading ? (
-              <section className={styles.group} aria-label={t('orchestrator:experiments.title')}>
-                <div className={styles.groupHeader}>
-                  <span>{t('orchestrator:experiments.title')}</span>
-                  <Pill tone="neutral">{c.experiments.length}</Pill>
-                </div>
-                {c.experimentsLoading ? (
-                  <p className={styles.muted}>{t('common:loading')}</p>
-                ) : null}
-                {!c.experimentsLoading && c.experiments.length === 0 ? (
-                  <p className={styles.muted}>{t('orchestrator:experiments.empty')}</p>
-                ) : null}
-                {c.experiments.map((experiment) => (
-                  <OrchestratorExperimentPanel
-                    key={experiment.id}
-                    experiment={experiment}
-                    onApproveRecommended={(experimentId, winnerTaskId) => {
-                      void c.handleApproveExperimentWinner(experimentId, winnerTaskId);
-                    }}
-                    onSelectCandidate={(experimentId, taskId) => {
-                      void c.handleApproveExperimentWinner(experimentId, taskId);
-                    }}
-                    onCancel={(experimentId) => {
-                      void c.handleCancelExperiment(experimentId);
-                    }}
-                  />
-                ))}
-              </section>
-            ) : null}
-          </Card.Body>
-        </Card>
+            </div>
+          ) : null}
+        </div>
 
         <OrchestratorTaskDrawer
           selectedTask={c.selectedTask}

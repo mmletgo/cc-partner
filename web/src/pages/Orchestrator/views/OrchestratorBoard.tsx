@@ -84,6 +84,8 @@ export function OrchestratorBoard(props: OrchestratorBoardProps): JSX.Element {
               const { task } = item;
               const active = selectedTask?.id === task.id;
               const moving = movingTaskId === task.id;
+              const showRunState = task.runState !== 'idle';
+              const showStatus = task.status === 'blocked' || task.status === 'aborted';
               const draggable =
                 !moving &&
                 ORCHESTRATOR_BOARD_LANES.some((targetLane) =>
@@ -114,20 +116,23 @@ export function OrchestratorBoard(props: OrchestratorBoardProps): JSX.Element {
                         })
                       : t('orchestrator:queue.localTask')}
                   </span>
-                  <span className={styles.taskPills}>
-                    <Pill tone={orchestratorWorkflowStateTone(task.workflowState)}>
-                      {t(WORKFLOW_STATE_LABEL_KEYS[task.workflowState])}
-                    </Pill>
-                    <Pill tone={orchestratorStatusTone(task.status)}>
-                      {t(STATUS_LABEL_KEYS[task.status])}
-                    </Pill>
-                    <Pill tone={runStateTone(task.runState)}>
-                      {t(RUN_STATE_LABEL_KEYS[task.runState])}
-                    </Pill>
-                    {task.attemptPhase ? (
-                      <Pill tone="neutral">{t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}</Pill>
-                    ) : null}
-                  </span>
+                  {showRunState || showStatus || task.attemptPhase ? (
+                    <span className={styles.taskPills}>
+                      {showRunState ? (
+                        <Pill tone={runStateTone(task.runState)}>
+                          {t(RUN_STATE_LABEL_KEYS[task.runState])}
+                        </Pill>
+                      ) : null}
+                      {showStatus ? (
+                        <Pill tone={orchestratorStatusTone(task.status)}>
+                          {t(STATUS_LABEL_KEYS[task.status])}
+                        </Pill>
+                      ) : null}
+                      {task.attemptPhase ? (
+                        <Pill tone="neutral">{t(ATTEMPT_PHASE_LABEL_KEYS[task.attemptPhase])}</Pill>
+                      ) : null}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
