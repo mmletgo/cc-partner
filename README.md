@@ -225,6 +225,8 @@ cd cc-partner
 # macOS：统一生成 ~/Applications/cc-partner (Dev).app；检测到固定签名
 # identity 时使用固定签名，否则使用可手动配置输入监控的 ad-hoc 签名。
 # 详见 docs/development/macos-internal-signing.md
+# 并行 git worktree：brew install sccache 后 start.sh 会启用跨树 rustc 缓存，
+# 并 cargo clean 未在编译的其它 worktree（不要设共享 CARGO_TARGET_DIR）。
 
 # 或手动（裸 tauri dev 不是可在系统设置中稳定定位的 `.app`，不适合权限调试）
 cd web && npm install

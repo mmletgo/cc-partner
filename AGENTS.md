@@ -38,7 +38,7 @@
 
 **Prompt 同步**：向量时钟 + 严格领先覆盖 / 并发 LWW；时间戳相等 `device_id` 字典序 tie-break。手动 `trigger_sync` 返回 per-device/domain 真值（仅全成功设备计入 `synced`/`succeeded_devices`）。
 
-**一键启动**：`./start.sh`（dev / build / web / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 固定组装到 `~/Applications/cc-partner (Dev).app`（`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权；无固定签名时可在系统设置中手动添加。
+**一键启动**：`./start.sh`（dev / build / web / clean / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 固定组装到 `~/Applications/cc-partner (Dev).app`（`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权；无固定签名时可在系统设置中手动添加。并行 git worktree 不要共用 `CARGO_TARGET_DIR`；PATH 有 `sccache` 时 `start.sh` 会设 `RUSTC_WRAPPER` + 每个 worktree 根的 `SCCACHE_BASEDIRS`，并对无 cargo/tauri/rustc 占用的其它树 `cargo clean`（`CC_PARTNER_IDLE_CARGO_CLEAN=0` 关闭）。安装：`brew install sccache`。
 
 ## 2. 目录结构
 
@@ -115,7 +115,7 @@ cc-partner/
 │   ├── icons/                    # 应用图标
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
-├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory / check-quality-traceability / check-docs + 图标源
+├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory / check-quality-traceability / check-docs / prune-build-artifacts / worktree-dev-cache + 图标源
 ├── .github/workflows/            # ci/smoke/docs + 公开 macOS/Windows/Linux release + macOS 固定签名手动构建
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
@@ -459,6 +459,7 @@ cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture -
 ./start.sh                         # 推荐：自检工具链 + tauri dev
 # macOS 固定组装 ~/Applications/cc-partner (Dev).app；检测到固定 identity 时固定签名，
 # 否则 ad-hoc 签名且输入监控可手动添加授权，详见 macOS 签名文档
+# 多 worktree：brew install sccache 后 start.sh 启用跨树 rustc 缓存，并回收闲置树 target
 # 或：cd web && npm install && ./node_modules/.bin/tauri dev  # 裸 binary，无开发壳
 ```
 

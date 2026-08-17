@@ -63,6 +63,9 @@ jobs:
       - name: Browser runtime prepare self-test
         run: node scripts/prepare-browser-runtime.mjs --self-test
 
+      - name: Worktree cargo cache helpers self-test
+        run: node scripts/worktree-dev-cache.mjs --self-test
+
       - name: Install Linux build deps (Tauri 编译/clippy 依赖：webkit2gtk-4.1 等)
         run: |
           sudo apt-get update

@@ -13,6 +13,9 @@
 # 打包/开发会 best-effort 调用 scripts/prune-build-artifacts.mjs：
 #   - dev：清陈旧 incremental + debug 超阈值（默认 20GB）整清
 #   - build：成功后清 release 的 deps/build/incremental（保留 bundle/bin）
+# 多 git worktree：dev 启动若 PATH 有 sccache 则设 RUSTC_WRAPPER + SCCACHE_BASEDIRS
+# （禁止共用 CARGO_TARGET_DIR）；并对无 cargo/tauri/rustc 占用的其它 worktree
+# cargo clean（CC_PARTNER_IDLE_CARGO_CLEAN=0 关闭）。
 
 set -euo pipefail
 
@@ -100,6 +103,61 @@ configure_macos_dev_signing() {
   info "已自动启用 macOS 固定 Dev 签名 (${detected_fingerprint:0:12}...)"
 }
 
+# 多 worktree 共享 rustc 缓存。不写入仓库 .cargo/config.toml，以免 CI 无 sccache 时失败。
+# 已有非 sccache 的 RUSTC_WRAPPER 不覆盖。
+configure_sccache() {
+  local wrapper="${RUSTC_WRAPPER:-}"
+  if [[ -n "$wrapper" && "$wrapper" != *sccache* ]]; then
+    info "保留已有 RUSTC_WRAPPER=${wrapper}（不改为 sccache）"
+    return 0
+  fi
+
+  local sccache_bin=""
+  if command -v sccache >/dev/null 2>&1; then
+    sccache_bin="$(command -v sccache)"
+  fi
+
+  if [[ -z "$wrapper" ]]; then
+    if [[ -z "$sccache_bin" ]]; then
+      info "未检测到 sccache。并行 git worktree 编译可安装: brew install sccache"
+      return 0
+    fi
+    export RUSTC_WRAPPER="$sccache_bin"
+  fi
+
+  if [[ "${RUSTC_WRAPPER}" != *sccache* ]]; then
+    return 0
+  fi
+
+  local cache_js="$PWD/scripts/worktree-dev-cache.mjs"
+  if [[ -f "$cache_js" ]] && command -v node >/dev/null 2>&1; then
+    local basedirs
+    if basedirs="$(node "$cache_js" --print-sccache-basedirs)"; then
+      if [[ -n "$basedirs" ]]; then
+        export SCCACHE_BASEDIRS="$basedirs"
+      fi
+    fi
+  fi
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
+  info "已启用 sccache（CACHE_SIZE=${SCCACHE_CACHE_SIZE}；勿共用 CARGO_TARGET_DIR）"
+}
+
+# 回收其它 git worktree 上无编译进程的 src-tauri/target。失败不阻断。
+idle_cargo_clean() {
+  if [[ "${CC_PARTNER_IDLE_CARGO_CLEAN:-1}" == "0" ]]; then
+    return 0
+  fi
+  local cache_js="$PWD/scripts/worktree-dev-cache.mjs"
+  if [[ ! -f "$cache_js" ]] || ! command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  info "回收闲置 git worktree 的 Cargo target..."
+  node "$cache_js" --mode=idle-clean || {
+    error "idle cargo clean 未完全成功（已忽略）"
+    return 0
+  }
+}
+
 # 自动修剪过期/超阈值中间产物。失败不阻断主流程（并发 cargo 占用 target 时会 skip）。
 # $1: prune mode（auto|release-intermediates|debug-threshold|stale-incremental）
 prune_build_artifacts() {
@@ -122,7 +180,9 @@ prune_build_artifacts() {
 run_dev() {
   info "启动开发模式 (Tauri dev:Rust 后端 + Vite 前端 + 热重载)..."
   info "首次启动 Rust 编译较慢(数分钟),之后增量编译很快。"
-  # 启动前回收：陈旧 incremental + 超阈值 debug（默认 20GB）。不碰 release bundle。
+  configure_sccache
+  # 先回收其它闲置 worktree 的 target，再修剪本树陈旧 incremental / 超阈值 debug。
+  idle_cargo_clean
   prune_build_artifacts auto
   configure_macos_dev_signing
   # tauri dev 内部只 `cargo run` 默认 binary(app),不会自动构建独立后端 CLI。
@@ -151,6 +211,7 @@ run_dev() {
 
 run_build() {
   info "生产构建 (Tauri build,产出 dmg/安装包)..."
+  configure_sccache
   # 不能 exec：打包成功后还要 prune release 中间层（deps/build），否则 target/release 持续膨胀。
   # set -e 下用 if 捕获失败，避免 build 失败时脚本提前退出而跳过状态返回。
   if "$TAURI_BIN" build; then
@@ -171,6 +232,7 @@ run_clean() {
   if command -v cargo >/dev/null 2>&1; then
     (cd src-tauri && cargo clean)
   fi
+  idle_cargo_clean
   info "清理完成"
 }
 
@@ -192,7 +254,11 @@ cc-partner 启动脚本
 说明:
   dev 启动前会 best-effort 修剪陈旧 incremental，以及超过
   CC_PARTNER_DEBUG_TARGET_MAX_GB（默认 20）的 debug target。
-  全量回收磁盘请用 clean。
+  若已安装 sccache，dev/build 会设置 RUSTC_WRAPPER 与 SCCACHE_BASEDIRS
+  （每个 git worktree 根单独列出，禁止共用 CARGO_TARGET_DIR）。
+  同时会对无 cargo/tauri/rustc 占用的其它 worktree 执行 cargo clean
+  （CC_PARTNER_IDLE_CARGO_CLEAN=0 关闭）。
+  全量回收本树磁盘请用 clean。
 EOF
 }
 

@@ -8,6 +8,8 @@ Workbench 交互式终端输入使用能力 `workbench.terminal-input-stream.v1`
 
 cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而来。Tauri 2 主进程用 Rust 实现配置/存储/网络/同步/传输/截图/权限/更新等全部能力；前端复用 `web/` 的 React。GUI 通过 sidecar 复用 `cc-partner-backend`；headless CLI 是远端设备一等公民。
 
+本地多 git worktree 编译：**禁止**共用 `CARGO_TARGET_DIR`（整目录锁会串行，同名 crate fingerprint 会串味）。`./start.sh` 若 PATH 有 `sccache` 会设 `RUSTC_WRAPPER` + 每个 worktree 根的 `SCCACHE_BASEDIRS`，并对无 cargo/tauri/rustc 占用的其它树 `cargo clean`。不经 `start.sh` 的 `cargo test`/`clippy` 需自行导出 `RUSTC_WRAPPER`。实现见 `scripts/worktree-dev-cache.mjs`。
+
 ## 通信架构（核心，务必遵守）
 
 - **本地前端 ↔ Rust**：Tauri `invoke()` IPC（`#[tauri::command]`）。**无本地 HTTP API 端口给桌面前端**、无 CORS、无启动端口竞态。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`。
