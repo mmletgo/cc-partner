@@ -27,6 +27,8 @@ import type {
   PortableInventoryItemCapabilitiesDto,
   PortableInventoryItemDto,
   PortableInventoryManagementState,
+  PortableInventoryOriginKind,
+  PortableInventoryOwnedBy,
   PortableInventoryMutationCapability,
   PortableInventoryScanCapability,
   PortableInventorySnapshotDto,
@@ -80,6 +82,30 @@ export const portableInventorySourceOriginDecoder: Decoder<PortableInventorySour
     'standalone',
     'pluginComponent',
     'nativeConfig',
+  ] as const);
+
+/** 发现/归属 originKind。 */
+export const portableInventoryOriginKindDecoder: Decoder<PortableInventoryOriginKind> =
+  enumDecoder('PortableInventoryOriginKind', [
+    'native',
+    'compatibility',
+    'legacyStandalone',
+    'plugin',
+  ] as const);
+
+/** 所有权：Hub target / 共享 ~/.agents / 未知。 */
+export const portableInventoryOwnedByDecoder: Decoder<PortableInventoryOwnedBy> = enumDecoder(
+  'PortableInventoryOwnedBy',
+  [
+    'claude',
+    'codex',
+    'opencode',
+    'grok',
+    'gemini',
+    'cursor',
+    'pi',
+    'sharedAgents',
+    'unknown',
   ] as const);
 
 /** 扫描能力。 */
@@ -202,12 +228,20 @@ export const portableInventoryTargetDecoder: Decoder<PortableInventoryTargetDto>
   },
 );
 
-/** 库存项。 */
+/**
+ * Business Logic: inventory 必须带 loadedBy/ownedBy/originKind/nativeOutputCandidate，
+ *   缺字段不得默认为 native，避免兼容根被当成可卸载写出目标。
+ * Code Logic: 四字段均为 required enum/boolean。
+ */
 export const portableInventoryItemDecoder: Decoder<PortableInventoryItemDto> = objectDecoder(
   'PortableInventoryItemDto',
   {
     inventoryItemId: stringDecoder,
     target: agentTargetDecoder,
+    loadedBy: agentTargetDecoder,
+    ownedBy: portableInventoryOwnedByDecoder,
+    originKind: portableInventoryOriginKindDecoder,
+    nativeOutputCandidate: booleanDecoder,
     kind: portableAssetKindDecoder,
     nativeId: stringDecoder,
     displayName: stringDecoder,

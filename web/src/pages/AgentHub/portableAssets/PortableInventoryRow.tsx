@@ -19,9 +19,12 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   classifyPortableActualState,
+  isPortableBorrowedRuntimeItem,
   needsPortableEnsureManagedRefresh,
+  portableBorrowedOwnerLabelKey,
   portableInventoryProblemWarnings,
   type PortableActualStateClass,
+  type PortableBorrowedOwnerLabelKey,
 } from './portableInventoryPresentation';
 import styles from './PortableInventoryRow.module.css';
 
@@ -35,6 +38,8 @@ export interface PortableInventoryRowLabels {
   sourceOrigin: Record<PortableInventoryItemDto['sourceOrigin'], string>;
   /** 历史 unmanaged：引导刷新纳入（无 Adopt 主按钮）。 */
   unmanagedRefreshHint?: string;
+  borrowedFrom: Record<PortableBorrowedOwnerLabelKey, string>;
+  openInOwnerAgent: string;
 }
 
 export interface PortableInventoryRowProps {
@@ -53,6 +58,8 @@ export interface PortableInventoryRowProps {
   labels: PortableInventoryRowLabels;
   onSelect?: (item: PortableInventoryItemDto) => void;
   onPrimaryAction?: (item: PortableInventoryItemDto, action: PortableAssetActionKind) => void;
+  /** 借用行：在所有者 Agent 中打开；不是 PortableAssetActionKind。 */
+  onOpenOwner?: (item: PortableInventoryItemDto) => void;
 }
 
 function actualTone(
@@ -85,14 +92,21 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     labels,
     onSelect,
     onPrimaryAction,
+    onOpenOwner,
   } = props;
   const actual = classifyPortableActualState(item);
   const problemWarnings = portableInventoryProblemWarnings(item);
   const disabledVisual = actual === 'disabled';
+  const borrowed = isPortableBorrowedRuntimeItem(item);
+  const borrowedOwnerKey = borrowed ? portableBorrowedOwnerLabelKey(item) : null;
   const showRefreshHint =
-    needsPortableEnsureManagedRefresh(item) && Boolean(labels.unmanagedRefreshHint);
-  // actions 优先；未提供时回退到旧的单 primaryAction（向后兼容）。
-  const rowActions = actions ?? (primaryAction ? [primaryAction] : []);
+    !borrowed &&
+    needsPortableEnsureManagedRefresh(item) &&
+    Boolean(labels.unmanagedRefreshHint);
+  // 借用行即使 stale backend 仍给 canUninstall 也不渲染 mutation。
+  const rowActions = borrowed
+    ? []
+    : (actions ?? (primaryAction ? [primaryAction] : []));
   const handleAction = onAction ?? onPrimaryAction;
 
   return (
@@ -125,6 +139,11 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
               <Pill tone={managementTone(item.managementState)}>
                 {labels.management[item.managementState]}
               </Pill>
+              {borrowed && borrowedOwnerKey ? (
+                <Pill tone="accent" data-testid="portable-row-borrowed-badge">
+                  {labels.borrowedFrom[borrowedOwnerKey]}
+                </Pill>
+              ) : null}
             </div>
           </div>
           {item.description ? <p className={styles.description}>{item.description}</p> : null}
@@ -150,7 +169,18 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           ) : null}
         </div>
       </button>
-      {rowActions.length > 0 && handleAction ? (
+      {borrowed && onOpenOwner ? (
+        <div className={styles.rowActions}>
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="portable-row-open-owner"
+            onClick={() => onOpenOwner(item)}
+          >
+            {labels.openInOwnerAgent}
+          </Button>
+        </div>
+      ) : rowActions.length > 0 && handleAction ? (
         <div className={styles.rowActions}>
           {rowActions.map((action) => (
             <Button

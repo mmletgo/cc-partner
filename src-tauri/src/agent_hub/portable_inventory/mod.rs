@@ -16,6 +16,7 @@ pub mod plugin_paths;
 pub mod reconcile;
 pub mod scanner;
 
+pub use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableOriginKind};
 pub use cache::invalidate_portable_inventory_cache;
 pub use ensure_managed::{
     ensure_discovered_portable_items_managed, EnsureManagedFailure, EnsureManagedReport,
@@ -125,6 +126,10 @@ mod tests {
         PortableInventoryItemDto {
             inventory_item_id: inventory_item_id(target, "user", source_identity, native_id),
             target,
+            loaded_by: target,
+            owned_by: PortableAssetOwner::from_target(target),
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Skill,
             native_id: native_id.to_string(),
             display_name: native_id.to_string(),

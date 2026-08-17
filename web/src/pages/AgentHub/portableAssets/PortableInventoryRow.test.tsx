@@ -45,12 +45,25 @@ const labels: PortableInventoryRowLabels = {
     nativeConfig: 'Native config',
   },
   unmanagedRefreshHint: 'Refresh inventory to manage this asset.',
+  openInOwnerAgent: 'Open in owner Agent',
+  borrowedFrom: {
+    claude: 'From Claude Code',
+    codex: 'From Codex',
+    opencode: 'From OpenCode',
+    grok: 'From Grok Build',
+    gemini: 'From Gemini CLI',
+    cursor: 'From Cursor CLI',
+    pi: 'From Pi',
+    sharedAgents: 'Shared ~/.agents',
+    unknown: 'From unknown owner',
+  },
 };
 
 function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInventoryItemDto {
+  const target = overrides.target ?? 'claude';
   return {
     inventoryItemId: 'claude-skill-alpha',
-    target: 'claude',
+    target,
     kind: 'skill',
     nativeId: 'alpha',
     displayName: 'Alpha Skill',
@@ -82,6 +95,10 @@ function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInvent
       evidenceIds: [],
     },
     warnings: [],
+    originKind: 'native',
+    ownedBy: target,
+    loadedBy: target,
+    nativeOutputCandidate: true,
     ...overrides,
   };
 }
@@ -234,5 +251,36 @@ describe('PortableInventoryRow', () => {
       inventoryItemId: 'claude-skill-alpha',
     }), 'uninstall');
     expect(onAction).toHaveBeenCalledTimes(2);
+  });
+
+  test('borrowed row shows owner badge and no uninstall even if actions are stale', () => {
+    const onOpenOwner = vi.fn();
+    const onAction = vi.fn();
+    render(
+      <PortableInventoryRow
+        item={item({
+          inventoryItemId: 'grok-skill-from-claude',
+          target: 'grok',
+          displayName: 'Borrowed Skill',
+          originKind: 'compatibility',
+          ownedBy: 'claude',
+          loadedBy: 'grok',
+          nativeOutputCandidate: false,
+        })}
+        actions={['disable', 'uninstall']}
+        labels={labels}
+        onAction={onAction}
+        onOpenOwner={onOpenOwner}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
+      'From Claude Code',
+    );
+    expect(screen.queryByTestId('portable-row-action-uninstall-grok-skill-from-claude')).toBeNull();
+    expect(screen.queryByTestId('portable-row-action-disable-grok-skill-from-claude')).toBeNull();
+    fireEvent.click(screen.getByTestId('portable-row-open-owner'));
+    expect(onOpenOwner).toHaveBeenCalledTimes(1);
+    expect(onAction).not.toHaveBeenCalled();
   });
 });

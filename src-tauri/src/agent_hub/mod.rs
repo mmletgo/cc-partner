@@ -208,9 +208,9 @@ pub use targets::{
     GeminiInstructionAdapter, GrokInstructionAdapter, InstructionDocument,
     InstructionRenderContext, InstructionSource, InstructionSourceRole, LocalScopeMapping,
     OpenCodeHomePaths, OpenCodeInstructionAdapter, PiInstructionAdapter, PortableAssetOrigin,
-    PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile, RenderedInstruction,
-    TargetAssetProjection, TargetEnvironment, TargetHomePaths, TargetHomes, TargetPathResolver,
-    TargetProbe,
+    PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile,
+    RenderedInstruction, TargetAssetProjection, TargetEnvironment, TargetHomePaths, TargetHomes,
+    TargetPathResolver, TargetProbe,
 };
 pub use user_instructions::{
     apply_user_instruction_plan, inspect_user_instruction_workspace,

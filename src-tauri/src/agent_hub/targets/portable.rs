@@ -35,10 +35,11 @@ pub(crate) static DATA_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// Code Logic（这个枚举做什么）:
 ///     camelCase：`native` / `compatibility` / `legacyStandalone` / `plugin`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum PortableOriginKind {
     /// 该 target 原生路径（可成为受管投影目标）
+    #[default]
     Native,
     /// 兼容扫描路径（如 OpenCode 对 `.claude/skills` / `.agents/skills`）
     Compatibility,
@@ -46,6 +47,76 @@ pub enum PortableOriginKind {
     LegacyStandalone,
     /// Plugin 包内提供的组件
     Plugin,
+}
+
+/// 可移植资产的所有权身份。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     库存必须区分「谁拥有这份文件」与「谁加载了它」；兼容/共享根不得被当成当前
+///     target 的 native 写出目标。
+///
+/// Code Logic（这个枚举做什么）:
+///     camelCase wire；OpenCode 与 `AgentTarget` 一样 rename 为 `opencode`；
+///     `from_target` 映射 Hub target；缺省 `unknown`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableAssetOwner {
+    /// Claude Code
+    Claude,
+    /// Codex CLI
+    Codex,
+    /// OpenCode CLI
+    #[serde(rename = "opencode")]
+    OpenCode,
+    /// Grok Build
+    Grok,
+    /// Gemini CLI
+    Gemini,
+    /// Cursor CLI
+    Cursor,
+    /// Pi Coding Agent
+    Pi,
+    /// 共享 `~/.agents` 根
+    SharedAgents,
+    /// 无法判定所有者
+    #[default]
+    Unknown,
+}
+
+impl PortableAssetOwner {
+    /// 稳定 wire 字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Grok => "grok",
+            Self::Gemini => "gemini",
+            Self::Cursor => "cursor",
+            Self::Pi => "pi",
+            Self::SharedAgents => "sharedAgents",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// 从扫描 target 推导 native 所有者。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     原生构造路径上 ownedBy 必须等于加载该资产的 target，避免默认 unknown。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     一对一映射 `AgentTarget` → 同名 owner。
+    pub fn from_target(target: AgentTarget) -> Self {
+        match target {
+            AgentTarget::Claude => Self::Claude,
+            AgentTarget::Codex => Self::Codex,
+            AgentTarget::OpenCode => Self::OpenCode,
+            AgentTarget::Grok => Self::Grok,
+            AgentTarget::Gemini => Self::Gemini,
+            AgentTarget::Cursor => Self::Cursor,
+            AgentTarget::Pi => Self::Pi,
+        }
+    }
 }
 
 impl PortableOriginKind {
@@ -123,9 +194,45 @@ pub struct PortableAssetOrigin {
     pub status: PortableDiscoveryStatus,
     /// 是否可作为该 target 的 native 输出候选
     pub native_output_candidate: bool,
+    /// 资产所有者（兼容/共享根可与 `target` 不同）
+    #[serde(default)]
+    pub owned_by: PortableAssetOwner,
     /// 父 Plugin 原生 ID（component 专用；standalone 为 None）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_plugin_id: Option<String>,
+}
+
+/// 为已扫描发现打上所有者。
+///
+/// Business Logic（为什么需要这个函数）:
+///     共享扫描 helper 默认按 target 填 ownedBy；表驱动/兼容根需要覆盖为真实所有者。
+///
+/// Code Logic（这个函数做什么）:
+///     就地写入 `origin.owned_by`。
+pub fn stamp_owned_by(assets: &mut [DiscoveredPortableAsset], owner: PortableAssetOwner) {
+    for asset in assets {
+        asset.origin.owned_by = owner;
+    }
+}
+
+/// 按发现表覆盖 origin 分类、所有者与 native 写出资格。
+///
+/// Business Logic（为什么需要这个函数）:
+///     兼容/legacy 根绝不能成为 native 写出目标；表是权威，扫描 helper 的默认值必须被覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     写入 owned_by / origin_kind，并用 `origin_kind.is_native_output_candidate()` 重算写出资格。
+pub fn stamp_table_origin(
+    assets: &mut [DiscoveredPortableAsset],
+    owner: PortableAssetOwner,
+    origin_kind: PortableOriginKind,
+) {
+    let native_output_candidate = origin_kind.is_native_output_candidate();
+    for asset in assets {
+        asset.origin.owned_by = owner;
+        asset.origin.origin_kind = origin_kind;
+        asset.origin.native_output_candidate = native_output_candidate;
+    }
 }
 
 /// 扫描到的可移植资产（含 payload 与 origin）。
@@ -569,6 +676,7 @@ fn scan_skill_dirs_with_mode(
                 tree_hash,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
+                owned_by: PortableAssetOwner::from_target(target),
                 parent_plugin_id: None,
             },
             diagnostics: diags,
@@ -646,6 +754,7 @@ pub fn scan_command_markdown_dir(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
+                owned_by: PortableAssetOwner::from_target(target),
                 parent_plugin_id: None,
             },
             diagnostics: all_diags,
@@ -776,6 +885,7 @@ pub fn scan_agent_markdown_dir(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
+                owned_by: PortableAssetOwner::from_target(target),
                 parent_plugin_id: None,
             },
             diagnostics: all_diags,
@@ -821,6 +931,7 @@ pub fn parse_mcp_servers_json_map(
                             PortableDiscoveryStatus::Disabled
                         },
                         native_output_candidate: origin_kind.is_native_output_candidate(),
+                        owned_by: PortableAssetOwner::from_target(target),
                         parent_plugin_id: None,
                     },
                     diagnostics: diags,
@@ -1020,6 +1131,7 @@ pub fn parse_codex_mcp_toml(
                         PortableDiscoveryStatus::Disabled
                     },
                     native_output_candidate: true,
+                    owned_by: PortableAssetOwner::from_target(target),
                     parent_plugin_id: None,
                 },
                 diagnostics: diags,
@@ -1133,6 +1245,7 @@ pub fn parse_codex_agents_toml(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: true,
+                owned_by: PortableAssetOwner::from_target(target),
                 parent_plugin_id: None,
             },
             diagnostics: diags,

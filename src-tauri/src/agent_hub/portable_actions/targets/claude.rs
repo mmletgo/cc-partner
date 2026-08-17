@@ -702,14 +702,18 @@ mod tests {
         PortableAssetCanonicalEffect, PortableAssetPlanOperation,
     };
     use crate::agent_hub::portable_inventory::{
-        PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
-        PortableInventorySourceOrigin,
+        PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
+        PortableInventorySourceOrigin, PortableOriginKind,
     };
 
     fn sample_item(scope_kind: ScopeKind, path: &str, opted: bool) -> PortableInventoryItemDto {
         PortableInventoryItemDto {
             inventory_item_id: "id-proj-skill".into(),
             target: crate::agent_hub::models::AgentTarget::Claude,
+            loaded_by: crate::agent_hub::models::AgentTarget::Claude,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
             kind: PortableAssetKind::Skill,
             native_id: "proj-skill".into(),
             display_name: "proj-skill".into(),

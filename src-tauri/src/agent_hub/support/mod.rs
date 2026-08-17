@@ -9,10 +9,17 @@
 //!     按版本/指纹/evidence 对每个 `TargetCapability` 做 fail-closed 求值。
 
 pub mod manifest;
+pub mod runtime_discovery;
 
 pub use manifest::{
     builtin_support_manifest, evaluate_target_support, find_target_record, format_probe_identity,
     load_support_manifest_from_str, parse_semver_core, CapabilitySupport, EvaluatedSupportMode,
     EvaluatedTargetSupport, ExecutableProbeSpec, RuntimeProbeSnapshot, SupportHookMappingRecord,
     SupportManifest, TargetCapability, TargetSupportRecord, SUPPORT_MANIFEST_JSON,
+};
+pub use runtime_discovery::{
+    builtin_runtime_discovery, gate_allows, load_runtime_discovery_from_str,
+    parse_installed_plugin_paths, parse_marketplace_install_locations, resolve_path, roots_for,
+    scan_table_roots, DiscoveryAgent, DiscoveryGate, DiscoveryRoot, DiscoveryRootKind,
+    RuntimeDiscoveryTable, RUNTIME_DISCOVERY_JSON,
 };

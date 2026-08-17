@@ -16,6 +16,7 @@ import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
 } from '@/lib/types/portableInventory';
+import { isPortableBorrowedRuntimeItem } from './portableInventoryPresentation';
 import styles from '../AgentHub.module.css';
 import { CommandDetails } from './CommandDetails';
 import { McpDetails } from './McpDetails';
@@ -54,6 +55,7 @@ function mutationAllowed(
   inventoryBlocked: boolean,
 ): boolean {
   if (inventoryBlocked) return false;
+  if (isPortableBorrowedRuntimeItem(item)) return false;
   if (item.managementState === 'unsupported') return false;
   if (!item.projectOptedIn && item.scopeKind === 'project') return false;
   return true;

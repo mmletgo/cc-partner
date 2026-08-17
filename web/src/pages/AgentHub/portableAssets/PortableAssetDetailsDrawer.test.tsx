@@ -63,6 +63,10 @@ function baseItem(
       evidenceIds: [],
     },
     warnings: [],
+    originKind: 'native',
+    ownedBy: 'claude',
+    loadedBy: 'claude',
+    nativeOutputCandidate: true,
     ...extra,
   };
 }

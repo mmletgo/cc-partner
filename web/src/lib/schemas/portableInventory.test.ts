@@ -50,6 +50,10 @@ function makeItem(
   return {
     inventoryItemId: `${target}-${kind}-${nativeId}`,
     target,
+    loadedBy: target,
+    ownedBy: target,
+    originKind: 'native',
+    nativeOutputCandidate: true,
     kind,
     nativeId,
     displayName: nativeId,
@@ -232,6 +236,10 @@ describe('portable inventory schemas', () => {
     expect(
       decoded.items.find((i) => i.kind === 'mcp' && i.target === 'claude')?.mcpCredential,
     ).toEqual({ present: true, hash: 'cred-mcp-a' });
+    expect(decoded.items.every((item) => item.originKind === 'native')).toBe(true);
+    expect(decoded.items.every((item) => item.ownedBy === item.target)).toBe(true);
+    expect(decoded.items.every((item) => item.loadedBy === item.target)).toBe(true);
+    expect(decoded.items.every((item) => item.nativeOutputCandidate === true)).toBe(true);
   });
 
   test('rejects missing inventorySnapshotHash', () => {
@@ -246,6 +254,19 @@ describe('portable inventory schemas', () => {
       items: [{ ...makeItem('claude', 'skill', 'x'), target: undefined }],
     };
     expect(() => portableInventorySnapshotDecoder.decode(bad)).toThrow(ContractDecodeError);
+  });
+
+  test('rejects missing origin stamps on item', () => {
+    for (const field of [
+      'loadedBy',
+      'ownedBy',
+      'originKind',
+      'nativeOutputCandidate',
+    ] as const) {
+      const noField = { ...makeItem('claude', 'skill', 'x') } as Record<string, unknown>;
+      delete noField[field];
+      expect(() => portableInventoryItemDecoder.decode(noField)).toThrow(ContractDecodeError);
+    }
   });
 
   test('rejects missing kind on item', () => {

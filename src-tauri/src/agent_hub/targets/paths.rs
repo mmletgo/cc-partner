@@ -344,6 +344,22 @@ pub fn resolve_executable(command: &str, env: &TargetEnvironment) -> Option<Path
     None
 }
 
+/// 按序解析第一个可找到的可执行文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Cursor 等 CLI 可能有多个命令名；必须先试官方名，避免命中其它产品的同名 symlink。
+///
+/// Code Logic（这个函数做什么）:
+///     对 `names` 依次调用 `resolve_executable`，返回第一个 Some。
+pub fn resolve_first_executable<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    env: &TargetEnvironment,
+) -> Option<PathBuf> {
+    names
+        .into_iter()
+        .find_map(|name| resolve_executable(name, env))
+}
+
 /// 目录内查找可执行候选。
 ///
 /// Business Logic: 跨平台 CLI 安装形态不同。
@@ -685,6 +701,27 @@ mod tests {
             fs::canonicalize(&bin).unwrap()
         );
         assert!(resolve_executable("missing-cli", &env).is_none());
+    }
+
+    #[test]
+    fn resolve_first_executable_prefers_earlier_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("cursor-agent");
+        let second = dir.path().join("agent");
+        fs::write(&first, b"#!/bin/sh\necho first\n").expect("write");
+        fs::write(&second, b"#!/bin/sh\necho second\n").expect("write");
+        for bin in [&first, &second] {
+            let mut perms = fs::metadata(bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(bin, perms).unwrap();
+        }
+        let env = env_with("/tmp/home", &[], vec![dir.path().to_path_buf()]);
+        let resolved = resolve_first_executable(["cursor-agent", "agent"], &env).expect("found");
+        assert_eq!(
+            fs::canonicalize(&resolved).unwrap(),
+            fs::canonicalize(&first).unwrap()
+        );
+        assert!(resolve_first_executable(["missing-a", "missing-b"], &env).is_none());
     }
 
     #[test]

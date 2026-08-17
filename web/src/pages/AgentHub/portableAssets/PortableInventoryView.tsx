@@ -11,6 +11,11 @@
 
 import type { JSX } from 'react';
 import { Button, Input, StatusMessage } from '@/components/primitives';
+import type {
+  PortableAssetActionKind,
+  PortableInventoryItemDto,
+} from '@/lib/types/portableInventory';
+import { partitionPortableInventoryItems } from './portableInventoryPresentation';
 import type { UsePortableInventoryControllerResult } from './usePortableInventoryController';
 import {
   PortableInventoryRow,
@@ -42,18 +47,22 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   filterManagement: string;
   actualFilter: Record<(typeof ACTUAL_OPTIONS)[number], string>;
   managementFilter: Record<(typeof MANAGEMENT_OPTIONS)[number], string>;
+  groupInstalled: string;
+  groupBorrowed: string;
+  emptyRuntimeHint: string;
 }
 
 export interface PortableInventoryViewProps {
   controller: UsePortableInventoryControllerResult;
   labels: PortableInventoryViewLabels;
+  onOpenOwner?: (item: PortableInventoryItemDto) => void;
 }
 
 /**
  * 渲染 portable inventory workspace 主体（F2 范围，不含 details/pull）。
  */
 export function PortableInventoryView(props: PortableInventoryViewProps): JSX.Element {
-  const { controller, labels } = props;
+  const { controller, labels, onOpenOwner } = props;
   const {
     loading,
     refreshing,
@@ -191,12 +200,68 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
       </div>
 
       <div className={styles.list} data-testid="portable-inventory-list">
-        {visibleItems.length === 0 ? (
-          <p className={styles.empty} data-testid="portable-inventory-empty">
-            {labels.empty}
-          </p>
-        ) : (
-          visibleItems.map((item) => (
+        {renderInventoryGroups({
+          visibleItems,
+          selectedItemId,
+          lockedItemIds,
+          getRowActions,
+          labels,
+          onOpenOwner,
+          selectItem,
+          openAction,
+        })}
+      </div>
+    </div>
+  );
+}
+
+interface InventoryGroupRenderProps {
+  visibleItems: PortableInventoryItemDto[];
+  selectedItemId: string | null;
+  lockedItemIds: ReadonlySet<string>;
+  getRowActions: (item: PortableInventoryItemDto) => PortableAssetActionKind[];
+  labels: PortableInventoryViewLabels;
+  onOpenOwner?: (item: PortableInventoryItemDto) => void;
+  selectItem: (itemId: string) => void;
+  openAction: (itemId: string, action: PortableAssetActionKind) => void;
+}
+
+/**
+ * Business Logic: 筛选后拆「已安装在此」与「运行时借用」；仅借用时不假装空库存。
+ * Code Logic: 两边都空才 empty；有借用则渲染 borrowed 组，installed 为空时附 emptyRuntimeHint。
+ */
+function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
+  const {
+    visibleItems,
+    selectedItemId,
+    lockedItemIds,
+    getRowActions,
+    labels,
+    onOpenOwner,
+    selectItem,
+    openAction,
+  } = props;
+  const { installed, borrowed } = partitionPortableInventoryItems(visibleItems);
+  if (installed.length === 0 && borrowed.length === 0) {
+    return (
+      <p className={styles.empty} data-testid="portable-inventory-empty">
+        {labels.empty}
+      </p>
+    );
+  }
+
+  return (
+    <>
+      {installed.length > 0 ? (
+        <section
+          className={styles.inventoryGroup}
+          data-testid="portable-inventory-group-installed"
+          aria-labelledby="portable-inventory-group-installed-title"
+        >
+          <h3 id="portable-inventory-group-installed-title" className={styles.inventoryGroupTitle}>
+            {labels.groupInstalled}
+          </h3>
+          {installed.map((item) => (
             <PortableInventoryRow
               key={item.inventoryItemId}
               item={item}
@@ -207,9 +272,37 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
               onSelect={(selected) => selectItem(selected.inventoryItemId)}
               onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
             />
-          ))
-        )}
-      </div>
-    </div>
+          ))}
+        </section>
+      ) : null}
+      {borrowed.length > 0 ? (
+        <section
+          className={styles.inventoryGroup}
+          data-testid="portable-inventory-group-borrowed"
+          aria-labelledby="portable-inventory-group-borrowed-title"
+        >
+          <h3 id="portable-inventory-group-borrowed-title" className={styles.inventoryGroupTitle}>
+            {labels.groupBorrowed}
+          </h3>
+          {installed.length === 0 ? (
+            <p className={styles.emptyInline} data-testid="portable-inventory-runtime-hint">
+              {labels.emptyRuntimeHint}
+            </p>
+          ) : null}
+          {borrowed.map((item) => (
+            <PortableInventoryRow
+              key={item.inventoryItemId}
+              item={item}
+              selected={selectedItemId === item.inventoryItemId}
+              busy={lockedItemIds.has(item.inventoryItemId)}
+              actions={[]}
+              labels={labels}
+              onSelect={(selected) => selectItem(selected.inventoryItemId)}
+              onOpenOwner={onOpenOwner}
+            />
+          ))}
+        </section>
+      ) : null}
+    </>
   );
 }

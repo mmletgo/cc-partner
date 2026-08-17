@@ -536,6 +536,9 @@ fn scan_hub_disabled_mcp_snapshots(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Disabled,
                 native_output_candidate: true,
+                owned_by: crate::agent_hub::targets::portable::PortableAssetOwner::from_target(
+                    AgentTarget::Claude,
+                ),
                 parent_plugin_id: None,
             },
             diagnostics: vec![],

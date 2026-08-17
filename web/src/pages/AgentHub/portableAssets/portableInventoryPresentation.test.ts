@@ -20,10 +20,13 @@ import {
   countPortableItemsByKind,
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   filterPortableInventoryItems,
+  isPortableBorrowedRuntimeItem,
   isPortableInventoryProblem,
   isPortableItemReadOnly,
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
+  partitionPortableInventoryItems,
+  portableBorrowedOwnerLabelKey,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
   type PortableInventoryFilters,
@@ -44,8 +47,9 @@ function makeItem(
   overrides: Partial<PortableInventoryItemDto> &
     Pick<PortableInventoryItemDto, 'inventoryItemId' | 'kind' | 'nativeId'>,
 ): PortableInventoryItemDto {
+  const target = overrides.target ?? 'claude';
   return {
-    target: 'claude',
+    target,
     displayName: overrides.nativeId,
     description: null,
     version: null,
@@ -67,6 +71,10 @@ function makeItem(
     materializationStatus: 'applied',
     capabilities: { ...baseCapabilities },
     warnings: [],
+    originKind: 'native',
+    ownedBy: target,
+    loadedBy: target,
+    nativeOutputCandidate: true,
     ...overrides,
   };
 }
@@ -568,5 +576,105 @@ describe('portableInventoryPresentation row actions', () => {
       },
     });
     expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable']);
+  });
+
+  test('borrowed item has no row actions even when stale backend sends canUninstall', () => {
+    const borrowed = makeItem({
+      inventoryItemId: 'grok-skill-borrowed-claude',
+      kind: 'skill',
+      nativeId: 'borrowed-claude',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(borrowed)).toBe(true);
+    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual([]);
+    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBeNull();
+  });
+});
+
+describe('portableInventoryPresentation ownership partition', () => {
+  const healthyCtx: PortablePrimaryActionContext = {
+    stale: false,
+    mutationBlocked: false,
+    lockedItemIds: new Set(),
+  };
+
+  test('native grok skill stays installed and keeps mutation actions', () => {
+    const grokNative = makeItem({
+      inventoryItemId: 'grok-skill-native',
+      kind: 'skill',
+      nativeId: 'grok-native',
+      target: 'grok',
+      originKind: 'native',
+      ownedBy: 'grok',
+      loadedBy: 'grok',
+      nativeOutputCandidate: true,
+    });
+    expect(isPortableBorrowedRuntimeItem(grokNative)).toBe(false);
+    expect(portableBorrowedOwnerLabelKey(grokNative)).toBe('grok');
+    expect(resolvePortableRowActions(grokNative, healthyCtx)).toEqual(['disable', 'uninstall']);
+  });
+
+  test('partition splits installed vs borrowed by origin, owner and nativeOutputCandidate', () => {
+    const installed = makeItem({
+      inventoryItemId: 'grok-skill-own',
+      kind: 'skill',
+      nativeId: 'own',
+      target: 'grok',
+    });
+    const fromClaude = makeItem({
+      inventoryItemId: 'grok-skill-from-claude',
+      kind: 'skill',
+      nativeId: 'from-claude',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+    });
+    const shared = makeItem({
+      inventoryItemId: 'grok-skill-shared',
+      kind: 'skill',
+      nativeId: 'shared',
+      target: 'grok',
+      originKind: 'native',
+      ownedBy: 'sharedAgents',
+      loadedBy: 'grok',
+      nativeOutputCandidate: true,
+    });
+    const legacy = makeItem({
+      inventoryItemId: 'grok-skill-legacy',
+      kind: 'skill',
+      nativeId: 'legacy',
+      target: 'grok',
+      originKind: 'legacyStandalone',
+      ownedBy: 'unknown',
+      loadedBy: 'grok',
+      nativeOutputCandidate: true,
+    });
+    const { installed: installedItems, borrowed } = partitionPortableInventoryItems([
+      installed,
+      fromClaude,
+      shared,
+      legacy,
+    ]);
+    expect(installedItems.map((item) => item.inventoryItemId)).toEqual(['grok-skill-own']);
+    expect(borrowed.map((item) => item.inventoryItemId)).toEqual([
+      'grok-skill-from-claude',
+      'grok-skill-shared',
+      'grok-skill-legacy',
+    ]);
+    expect(portableBorrowedOwnerLabelKey(fromClaude)).toBe('claude');
+    expect(portableBorrowedOwnerLabelKey(shared)).toBe('sharedAgents');
+    expect(portableBorrowedOwnerLabelKey(legacy)).toBe('unknown');
   });
 });

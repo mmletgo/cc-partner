@@ -24,11 +24,11 @@ use app_lib::agent_hub::portable_actions::{
 };
 use app_lib::agent_hub::portable_inventory::{
     inspect_portable_inventory, inspect_portable_inventory_force, inventory_item_id,
-    inventory_snapshot_hash, scan_portable_inventory_facts, PortableAssetKind,
+    inventory_snapshot_hash, scan_portable_inventory_facts, PortableAssetKind, PortableAssetOwner,
     PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
     PortableInventoryManagementState, PortableInventoryMutationCapability,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
-    PortableInventoryTargetDto, PortableScanScope,
+    PortableInventoryTargetDto, PortableOriginKind, PortableScanScope,
 };
 use app_lib::agent_hub::targets::paths::TargetEnvironment;
 use app_lib::backend::runtime::build_app_state;
@@ -406,6 +406,10 @@ fn sample_item(
     PortableInventoryItemDto {
         inventory_item_id: inventory_item_id(target, "user", path, native_id),
         target,
+        loaded_by: target,
+        owned_by: PortableAssetOwner::from_target(target),
+        origin_kind: PortableOriginKind::Native,
+        native_output_candidate: true,
         kind,
         native_id: native_id.into(),
         display_name: native_id.into(),

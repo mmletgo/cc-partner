@@ -37,8 +37,8 @@ use app_lib::agent_hub::targets::{
 };
 use app_lib::{
     hash_skill_directory, AdoptionState, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind,
-    DiscoveredPortableAsset, FakeProcessRunner, PortableAssetOrigin, PortableDiscoveryStatus,
-    PortableOriginKind, PortableSkill, ScopeKind,
+    DiscoveredPortableAsset, FakeProcessRunner, PortableAssetOrigin, PortableAssetOwner,
+    PortableDiscoveryStatus, PortableOriginKind, PortableSkill, ScopeKind,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::BTreeMap;
@@ -639,6 +639,7 @@ fn discovered_legacy(target: AgentTarget, path: &Path) -> DiscoveredPortableAsse
             tree_hash: Some(tree),
             status: PortableDiscoveryStatus::Active,
             native_output_candidate: false,
+            owned_by: PortableAssetOwner::from_target(target),
             parent_plugin_id: None,
         },
         diagnostics: diags,

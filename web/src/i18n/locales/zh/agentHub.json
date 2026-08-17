@@ -609,6 +609,21 @@
       "filterActual": "实际状态",
       "filterManagement": "一致性",
       "unmanagedRefreshHint": "尚未纳入管理 — 请刷新库存，由 Hub 自动建立管理记录。",
+      "groupInstalled": "已安装在此",
+      "groupBorrowed": "运行时从其他 Agent 加载",
+      "emptyRuntimeHint": "当前 Agent 没有本机安装的资产，但运行时仍会加载其他 Agent 的资产。",
+      "openInOwnerAgent": "在所有者 Agent 中打开",
+      "borrowedFrom": {
+        "claude": "来自 Claude Code",
+        "codex": "来自 Codex",
+        "opencode": "来自 OpenCode",
+        "grok": "来自 Grok Build",
+        "gemini": "来自 Gemini CLI",
+        "cursor": "来自 Cursor CLI",
+        "pi": "来自 Pi",
+        "sharedAgents": "共享 ~/.agents",
+        "unknown": "来自未知来源"
+      },
       "targetFilter": {
         "all": "全部目标",
         "claude": "Claude",

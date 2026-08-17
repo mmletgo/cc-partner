@@ -71,12 +71,28 @@ const labels: PortableInventoryViewLabels = {
     nativeConfig: 'Native config',
   },
   unmanagedRefreshHint: 'Refresh inventory to manage this asset.',
+  groupInstalled: 'Installed here',
+  groupBorrowed: 'Loaded at runtime from other agents',
+  emptyRuntimeHint: 'Runtime still loads assets from other agents.',
+  openInOwnerAgent: 'Open in owner Agent',
+  borrowedFrom: {
+    claude: 'From Claude Code',
+    codex: 'From Codex',
+    opencode: 'From OpenCode',
+    grok: 'From Grok Build',
+    gemini: 'From Gemini CLI',
+    cursor: 'From Cursor CLI',
+    pi: 'From Pi',
+    sharedAgents: 'Shared ~/.agents',
+    unknown: 'From unknown owner',
+  },
 };
 
-function item(): PortableInventoryItemDto {
+function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInventoryItemDto {
+  const target = overrides.target ?? 'claude';
   return {
     inventoryItemId: 'claude-skill-alpha',
-    target: 'claude',
+    target,
     kind: 'skill',
     nativeId: 'alpha',
     displayName: 'Alpha Skill',
@@ -108,6 +124,11 @@ function item(): PortableInventoryItemDto {
       evidenceIds: [],
     },
     warnings: [],
+    originKind: 'native',
+    ownedBy: target,
+    loadedBy: target,
+    nativeOutputCandidate: true,
+    ...overrides,
   };
 }
 
@@ -215,5 +236,91 @@ describe('PortableInventoryView', () => {
       />,
     );
     expect(screen.getByTestId('portable-inventory-error').textContent).toContain('boom');
+  });
+
+  test('partitions borrowed items into a runtime group without uninstall buttons', () => {
+    const installed = item();
+    const borrowed = item({
+      inventoryItemId: 'grok-skill-from-claude',
+      target: 'grok',
+      nativeId: 'from-claude',
+      displayName: 'Borrowed Skill',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    render(
+      <PortableInventoryView
+        controller={controller({
+          visibleItems: [installed, borrowed],
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [installed, borrowed],
+          },
+          getRowActions: (row) =>
+            row.inventoryItemId === borrowed.inventoryItemId ? [] : ['disable', 'uninstall'],
+        })}
+        labels={labels}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-inventory-group-installed')).toBeTruthy();
+    expect(screen.getByTestId('portable-inventory-group-borrowed')).toBeTruthy();
+    expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
+      'From Claude Code',
+    );
+    expect(screen.queryByTestId('portable-row-action-uninstall-grok-skill-from-claude')).toBeNull();
+    expect(screen.queryByTestId('portable-inventory-empty')).toBeNull();
+  });
+
+  test('borrowed-only filter shows runtime group instead of empty installed copy', () => {
+    const borrowed = item({
+      inventoryItemId: 'grok-skill-shared',
+      target: 'grok',
+      nativeId: 'shared',
+      displayName: 'Shared Skill',
+      ownedBy: 'sharedAgents',
+      loadedBy: 'grok',
+    });
+    render(
+      <PortableInventoryView
+        controller={controller({
+          visibleItems: [borrowed],
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [borrowed],
+          },
+          getRowActions: () => ['uninstall'],
+        })}
+        labels={labels}
+      />,
+    );
+
+    expect(screen.queryByTestId('portable-inventory-empty')).toBeNull();
+    expect(screen.queryByTestId('portable-inventory-group-installed')).toBeNull();
+    expect(screen.getByTestId('portable-inventory-group-borrowed')).toBeTruthy();
+    expect(screen.getByTestId('portable-inventory-runtime-hint').textContent).toContain(
+      'Runtime still loads',
+    );
+    expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
+      'Shared ~/.agents',
+    );
+    expect(screen.queryByTestId('portable-row-action-uninstall-grok-skill-shared')).toBeNull();
   });
 });

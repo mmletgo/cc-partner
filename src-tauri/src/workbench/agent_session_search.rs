@@ -1146,22 +1146,42 @@ pub fn build_resume_command(source: AgentSessionSource, session_id: &str) -> Str
         AgentSessionSource::OpenCode => format!("opencode --session {id}\n"),
         AgentSessionSource::Grok => format!("grok --resume {id}\n"),
         AgentSessionSource::Gemini => format!("gemini --resume {id}\n"),
-        AgentSessionSource::Cursor => format!("agent --resume {id}\n"),
+        AgentSessionSource::Cursor => format!("cursor-agent --resume {id}\n"),
         AgentSessionSource::Pi => format!("pi --session {id}\n"),
     }
 }
 
 /// 检测 PATH 上 CLI 是否可用（`--version`，2s）。
 pub async fn check_agent_cli_available(source: AgentSessionSource) -> Result<(), AppError> {
-    let exe = match source {
-        AgentSessionSource::Claude => "claude",
-        AgentSessionSource::Codex => "codex",
-        AgentSessionSource::OpenCode => "opencode",
-        AgentSessionSource::Grok => "grok",
-        AgentSessionSource::Gemini => "gemini",
-        AgentSessionSource::Cursor => "agent",
-        AgentSessionSource::Pi => "pi",
+    let names: &[&str] = match source {
+        AgentSessionSource::Claude => &["claude"],
+        AgentSessionSource::Codex => &["codex"],
+        AgentSessionSource::OpenCode => &["opencode"],
+        AgentSessionSource::Grok => &["grok"],
+        AgentSessionSource::Gemini => &["gemini"],
+        AgentSessionSource::Cursor => &["cursor-agent", "agent"],
+        AgentSessionSource::Pi => &["pi"],
     };
+    let mut last_err: Option<AppError> = None;
+    for exe in names {
+        match probe_cli_version_available(exe).await {
+            Ok(()) => return Ok(()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        AppError::generic("CLI 不可用：未找到可执行文件，请确认已安装并配置 PATH")
+    }))
+}
+
+/// 对单个命令名做短超时 `--version` 探测。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Cursor 必须先试 `cursor-agent` 再试 `agent`，避免把 Grok symlink 当成唯一候选。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn `exe --version`；成功或非 0 退出视为存在；找不到/超时返回错误。
+async fn probe_cli_version_available(exe: &str) -> Result<(), AppError> {
     let mut child = Command::new(exe)
         .arg("--version")
         .stdout(Stdio::null())
