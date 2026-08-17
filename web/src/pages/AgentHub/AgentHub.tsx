@@ -27,6 +27,7 @@ import {
 import { allHubTargets } from '@/lib/agentCatalog';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
+import { peerAllowsUserInstructionThreePane } from './context/agentHubContext';
 import {
   isAssetKindTab,
   useAgentHubController,
@@ -291,6 +292,20 @@ export function AgentHubView(props: AgentHubViewProps) {
     hubContext.projectKey !== null &&
     !hubContext.projectKey.startsWith('remote:');
   const isProject = hubContext.scope === 'project' && hubContext.projectKey !== null;
+  const selectedPeer =
+    hubContext.deviceId === null
+      ? null
+      : shellPeers.find((peer) => peer.deviceId === hubContext.deviceId) ?? null;
+  /** 用户级对端在线且宣告 user-instructions 才挂三栏；否则保持远端 hint。 */
+  const canMountRemoteUserThreePane =
+    hubContext.scope === 'user' &&
+    hubContext.deviceId !== null &&
+    peerAllowsUserInstructionThreePane(selectedPeer);
+  const showInstructionThreePane =
+    hubContext.tab === 'instructions' &&
+    !isLocalProject &&
+    Boolean(instructionThreePane) &&
+    (!isRemoteContext || canMountRemoteUserThreePane);
 
   /**
    * Business Logic: 把三栏 refresh 注入 hub controller，供 header reload 分发。
@@ -367,7 +382,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           projects={shellProjects}
           tabCounts={portableInventory.kindCounts}
         >
-        {hubContext.tab === 'instructions' && !isRemoteContext && !isLocalProject && instructionThreePane ? (
+        {showInstructionThreePane && instructionThreePane ? (
           <InstructionThreePaneView
             labels={instructionThreePaneLabels}
             state={instructionThreePane.state}
@@ -519,7 +534,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           </section>
         ) : null}
 
-        {hubContext.tab === 'instructions' && isRemoteContext ? (
+        {hubContext.tab === 'instructions' && isRemoteContext && !canMountRemoteUserThreePane ? (
           <StatusMessage tone="info" data-testid="agent-hub-remote-management">
             {hubContext.scope === 'user'
               ? t('agentHub:shell.remoteDeviceManageHint')
@@ -680,13 +695,19 @@ export function AgentHub() {
     UseAgentHubControllerResult['hubContext'] | null
   >(null);
   const contextStayRef = useRef<HTMLButtonElement | null>(null);
+  const selectedCommittedPeer =
+    committedHubContext.deviceId === null
+      ? null
+      : controller.shellPeers.find((peer) => peer.deviceId === committedHubContext.deviceId) ??
+        null;
   const instructionThreePane = useInstructionThreePaneController({
     context: committedHubContext,
     t,
     enabled:
       (committedHubContext.tab === 'instructions' || committedHubContext.adaptView) &&
       committedHubContext.scope === 'user' &&
-      committedHubContext.deviceId === null,
+      (committedHubContext.deviceId === null ||
+        peerAllowsUserInstructionThreePane(selectedCommittedPeer)),
   });
 
   const committedFingerprint = JSON.stringify(committedHubContext);

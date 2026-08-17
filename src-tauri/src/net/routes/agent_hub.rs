@@ -28,11 +28,18 @@ use crate::agent_hub::replication::receiver::{
     PreparePushRequest, PreparePushResponse, PutObjectResponse, AGENT_HUB_MAX_CHUNK_BYTES,
 };
 use crate::agent_hub::service::AgentHubService;
+use crate::agent_hub::user_instructions::{
+    AdaptInstructionToOtherAgentsRequest, AnalyzeInstructionOriginalRequest,
+    ApplyUserInstructionPlanRequest, ListUserInstructionSlotVersionsRequest,
+    PreviewUserInstructionRequest, RestoreUserInstructionSlotRequest, ReviseInstructionSlotRequest,
+    SaveUserInstructionBlocksRequest,
+};
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions
 #[cfg(test)]
 use crate::net::protocol::{
     CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PROJECT_V1, CAPABILITY_PORTABLE_PULL_V1,
+    CAPABILITY_USER_INSTRUCTIONS_V1,
 };
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
@@ -355,6 +362,195 @@ pub async fn agent_hub_portable_project_action_get(
     Ok(Json(dto))
 }
 
+/// P2P 用户级路由拒绝嵌套 deviceId，避免 owner 再代理。
+///
+/// Business Logic: owning peer 只执行本机用户目录；`remote:` / 再转发是递归。
+/// Code Logic: body 含非空 deviceId → `local_user_scope_required`。
+fn reject_nested_user_instruction_device_id(
+    body: &serde_json::Value,
+    ctx: &P2pRequestContext,
+) -> Result<(), P2pError> {
+    if body
+        .get("deviceId")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err(P2pError::from_app_error(
+            crate::error::AppError::validation("local_user_scope_required".to_string()),
+            ctx,
+            "agent_hub.user_instructions",
+        ));
+    }
+    Ok(())
+}
+
+/// POST /api/agent-hub/user-instructions/inspect
+///
+/// Business Logic: 读取 owning device 用户级三栏 workspace；LAN 无鉴权。
+/// Code Logic: 空 body；只调本机 AgentHubService。
+pub async fn agent_hub_user_instructions_inspect(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserInstructionWorkspaceDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let dto = AgentHubService::inspect_user_instruction_workspace(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.inspect"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/save-blocks
+pub async fn agent_hub_user_instructions_save_blocks(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserInstructionCanonicalDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: SaveUserInstructionBlocksRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("save-blocks body: {e}"), &ctx))?;
+    let dto = AgentHubService::save_user_instruction_blocks(&state, req)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.save_blocks")
+        })?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/preview-setup
+pub async fn agent_hub_user_instructions_preview_setup(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserInstructionPlanDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: PreviewUserInstructionRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("preview-setup body: {e}"), &ctx))?;
+    let dto = AgentHubService::preview_user_instruction_setup(&state, req)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.preview_setup")
+        })?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/preview-update
+pub async fn agent_hub_user_instructions_preview_update(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserInstructionPlanDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: PreviewUserInstructionRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("preview-update body: {e}"), &ctx))?;
+    let dto = AgentHubService::preview_user_instruction_update(&state, req)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.preview_update")
+        })?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/apply-plan
+pub async fn agent_hub_user_instructions_apply_plan(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::ApplyUserInstructionPlanResultDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: ApplyUserInstructionPlanRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("apply-plan body: {e}"), &ctx))?;
+    let dto = AgentHubService::apply_user_instruction_plan(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.apply_plan"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/analyze
+pub async fn agent_hub_user_instructions_analyze(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::AnalyzeInstructionOriginalResult>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: AnalyzeInstructionOriginalRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("analyze body: {e}"), &ctx))?;
+    let dto = crate::commands::agent_hub::analyze_instruction_original_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.analyze"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/adapt
+pub async fn agent_hub_user_instructions_adapt(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::AdaptInstructionToOtherAgentsResult>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: AdaptInstructionToOtherAgentsRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("adapt body: {e}"), &ctx))?;
+    let dto = crate::commands::agent_hub::adapt_instruction_to_other_agents_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.adapt"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/revise
+pub async fn agent_hub_user_instructions_revise(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::ReviseInstructionSlotResult>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: ReviseInstructionSlotRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("revise body: {e}"), &ctx))?;
+    let dto = crate::commands::agent_hub::revise_instruction_slot_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.revise"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/slot-versions
+pub async fn agent_hub_user_instructions_slot_versions(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<Vec<crate::commands::prompts::ContentVersionDto>>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: ListUserInstructionSlotVersionsRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("slot-versions body: {e}"), &ctx))?;
+    let versions =
+        AgentHubService::list_user_instruction_slot_versions(&state, req.asset_id, req.slot)
+            .await
+            .map_err(|e| {
+                P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.slot_versions")
+            })?;
+    Ok(Json(
+        versions
+            .iter()
+            .map(crate::commands::prompts::content_version_to_dto)
+            .collect(),
+    ))
+}
+
+/// POST /api/agent-hub/user-instructions/restore-slot-version
+pub async fn agent_hub_user_instructions_restore_slot_version(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserInstructionCanonicalDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: RestoreUserInstructionSlotRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("restore-slot-version body: {e}"), &ctx))?;
+    let dto = AgentHubService::restore_user_instruction_slot_version(&state, req)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.restore_slot_version")
+        })?;
+    Ok(Json(dto))
+}
+
 /// 路由/能力原子性：push 三路由 + portable-pull 三路由同 build 宣告。
 ///
 /// 注意：expected-device / Host / Origin 守卫是协议完整性约束，**不是**身份认证。
@@ -390,6 +586,11 @@ mod tests {
             info.capabilities
         );
         assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
+        assert!(
+            info.supports(CAPABILITY_USER_INSTRUCTIONS_V1),
+            "server_protocol_info 必须宣告 agent-hub.user-instructions.v1，实际: {:?}",
+            info.capabilities
+        );
         // 引用 handler，防止 capability 宣告而路由未接线被优化掉
         let _ = (
             agent_hub_push_prepare as *const (),
@@ -405,6 +606,16 @@ mod tests {
             agent_hub_portable_project_action_preview as *const (),
             agent_hub_portable_project_action_apply as *const (),
             agent_hub_portable_project_action_get as *const (),
+            agent_hub_user_instructions_inspect as *const (),
+            agent_hub_user_instructions_save_blocks as *const (),
+            agent_hub_user_instructions_preview_setup as *const (),
+            agent_hub_user_instructions_preview_update as *const (),
+            agent_hub_user_instructions_apply_plan as *const (),
+            agent_hub_user_instructions_analyze as *const (),
+            agent_hub_user_instructions_adapt as *const (),
+            agent_hub_user_instructions_revise as *const (),
+            agent_hub_user_instructions_slot_versions as *const (),
+            agent_hub_user_instructions_restore_slot_version as *const (),
         );
         assert_eq!(CAPABILITY_AGENT_HUB_V1, "agent-hub.v1");
         assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");
@@ -412,8 +623,28 @@ mod tests {
             CAPABILITY_PORTABLE_PROJECT_V1,
             "agent-hub.portable-project.v1"
         );
+        assert_eq!(
+            CAPABILITY_USER_INSTRUCTIONS_V1,
+            "agent-hub.user-instructions.v1"
+        );
         // 能力列表字典序应包含 token
         assert!(info.capabilities.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    /// Business Logic: owner 用户级路由不得再按 deviceId 转发。
+    #[test]
+    fn user_instruction_routes_reject_nested_device_id() {
+        let ctx = crate::net::request_context::P2pRequestContext {
+            request_id: "req-nested".into(),
+        };
+        let err = reject_nested_user_instruction_device_id(
+            &serde_json::json!({ "deviceId": "peer-2" }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert_eq!(err.envelope().code, "validation_error");
+        assert!(err.envelope().error.contains("local_user_scope_required"));
+        assert!(reject_nested_user_instruction_device_id(&serde_json::json!({}), &ctx).is_ok());
     }
 
     /// Business Logic: portable inventory 不得声明为鉴权。

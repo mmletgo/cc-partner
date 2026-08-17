@@ -69,17 +69,16 @@ export function isActiveOrchestratorRunState(state: OrchestratorRunState): boole
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   看板拖拽只能调整本机、非活跃任务，且每次只能移动到相邻 workflow 泳道，避免远端或运行中任务被本机 UI 误改。
+ *   看板拖拽可调整本机或远端非活跃任务，且每次只能移动到相邻 workflow 泳道；运行中任务不得改泳道。
  *
  * Code Logic（这个函数做什么）:
- *   对 null、remote、active run state、相同泳道和非相邻泳道逐项拒绝；只有 local 且目标索引相差 1 时返回 true。
+ *   对 null、active run state、相同泳道和非相邻泳道逐项拒绝；local/remote 只要目标索引相差 1 即返回 true。
  */
 export function canMoveRenderableTaskToWorkflowState(
   item: OrchestratorRenderableTask | null,
   targetState: OrchestratorWorkflowState,
 ): boolean {
   if (!item) return false;
-  if (item.origin !== 'local') return false;
   if (isActiveOrchestratorRunState(item.task.runState)) return false;
   if (item.task.workflowState === targetState) return false;
 

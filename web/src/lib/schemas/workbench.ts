@@ -30,6 +30,7 @@ import type {
   WorkbenchMutationOperation,
   WorkbenchOpenFile,
   WorkbenchPathInfo,
+  WorkbenchBanner,
   WorkbenchProject,
   WorkbenchProjectNote,
   WorkbenchSaveTextResult,
@@ -100,6 +101,14 @@ export const workbenchProjectNoteDecoder: Decoder<WorkbenchProjectNote> = object
   {
     projectId: stringDecoder,
     content: stringDecoder,
+    updatedAt: stringDecoder,
+  },
+);
+
+export const workbenchBannerDecoder: Decoder<WorkbenchBanner> = objectDecoder(
+  'WorkbenchBanner',
+  {
+    markdown: stringDecoder,
     updatedAt: stringDecoder,
   },
 );

@@ -51,6 +51,7 @@ pub mod portable_service;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
+pub mod remote_client;
 pub mod replication;
 pub mod revision_graph;
 pub mod runtime;
@@ -215,8 +216,10 @@ pub use targets::{
 pub use user_instructions::{
     apply_user_instruction_plan, inspect_user_instruction_workspace,
     preview_user_instruction_setup, preview_user_instruction_update,
+    AdaptInstructionToOtherAgentsRequest, AdaptInstructionToOtherAgentsResult,
+    AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, UserInstructionAction, UserInstructionCanonicalDto,
-    UserInstructionManagementMode, UserInstructionPlanDto, UserInstructionTargetDto,
-    UserInstructionWorkspaceDto,
+    PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
+    UserInstructionAction, UserInstructionCanonicalDto, UserInstructionManagementMode,
+    UserInstructionPlanDto, UserInstructionTargetDto, UserInstructionWorkspaceDto,
 };

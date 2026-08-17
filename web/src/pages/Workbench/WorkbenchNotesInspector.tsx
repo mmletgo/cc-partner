@@ -34,6 +34,7 @@ export interface WorkbenchNotesInspectorProps {
   error: string | null;
   onChange: (next: string) => void;
   onRetry: () => void;
+  readOnly?: boolean;
 }
 
 /**
@@ -45,7 +46,8 @@ export interface WorkbenchNotesInspectorProps {
  */
 export function WorkbenchNotesInspector(props: WorkbenchNotesInspectorProps) {
   const { t } = useTranslation(['workbench']);
-  const { activeProjectId, content, loading, saving, error, onChange, onRetry } = props;
+  const { activeProjectId, content, loading, saving, error, onChange, onRetry, readOnly = false } =
+    props;
 
   if (!activeProjectId) {
     return <p className={styles.muted}>{t('workbench:notesNoProject')}</p>;
@@ -86,6 +88,7 @@ export function WorkbenchNotesInspector(props: WorkbenchNotesInspectorProps) {
           showModeBar={false}
           onModeChange={handleModeChange}
           onChange={onChange}
+          readOnly={readOnly}
         />
       </Suspense>
     </div>

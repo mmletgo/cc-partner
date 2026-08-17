@@ -12,6 +12,65 @@ mod inventory;
 mod plan;
 mod slot_history;
 
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// 分析拆解请求（camelCase IPC / P2P）。
+///
+/// Business Logic: 独有页把 owning device 上的原始文件拆成三槽草稿。
+/// Code Logic: 与 Tauri invoke / control / P2P body 同形；Serialize 供远端 POST。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeInstructionOriginalRequest {
+    pub original_markdown: String,
+    pub agent: String,
+}
+
+/// 分析拆解结果：公共 / 当前 agent 适配 / 当前 agent 独有。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzeInstructionOriginalResult {
+    pub common: String,
+    pub adapted: String,
+    pub exclusive: String,
+}
+
+/// 适配到其他 agent 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptInstructionToOtherAgentsRequest {
+    pub source_agent: String,
+    pub adapted_markdown: String,
+}
+
+/// 适配到其他 agent 结果：destination → rewritten body。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptInstructionToOtherAgentsResult {
+    pub variants: BTreeMap<String, String>,
+}
+
+/// AI 辅助改写当前提示词槽请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviseInstructionSlotRequest {
+    pub lane: String,
+    pub agent: String,
+    pub direction: String,
+    pub common_markdown: Option<String>,
+    pub exclusive_markdown: Option<String>,
+    pub adapted_variants: Option<BTreeMap<String, String>>,
+}
+
+/// AI 辅助改写结果：按 lane 只填对应字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviseInstructionSlotResult {
+    pub common: Option<String>,
+    pub exclusive: Option<String>,
+    pub variants: Option<BTreeMap<String, String>>,
+}
+
 pub use inventory::{
     inspect_user_instruction_workspace, inspect_user_instruction_workspace_with_env,
     list_user_instruction_slot_versions, restore_user_instruction_slot_version,

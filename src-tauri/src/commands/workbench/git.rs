@@ -34,7 +34,9 @@ use crate::workbench::{
         WorkbenchRemoteEvent,
     },
     remote_ids::remote_entity_id,
-    remote_protocol::{RemoteCommitWorktreeReq, RemoteCreateWorktreeReq},
+    remote_protocol::{
+        RemoteCommitWorktreeReq, RemoteCreateWorktreeReq, RemoteRepairHookFailureReq,
+    },
     sqlite_preview,
 };
 use serde_json::{json, Value};
@@ -811,22 +813,61 @@ pub async fn push_workbench_worktree(
     push_workbench_worktree_for_state(state.inner(), worktree_id, client_operation_id).await
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     控制端前端必须聚焦 `remote:<deviceId>:<inner>` 会话，不能拿 owner 本机 id。
+///
+/// Code Logic（这个函数做什么）:
+///     remap agent/terminal session id；project/worktree 用控制端 shortcut id。
+pub(crate) fn remap_repair_hook_failure_dto(
+    dto: RepairHookFailureDto,
+    device_id: &str,
+    local_project_id: &str,
+    local_worktree_id: &str,
+) -> RepairHookFailureDto {
+    RepairHookFailureDto {
+        agent_session_id: remote_entity_id(device_id, &dto.agent_session_id),
+        terminal_session_id: remote_entity_id(device_id, &dto.terminal_session_id),
+        worktree_id: local_worktree_id.to_string(),
+        project_id: local_project_id.to_string(),
+    }
+}
+
 /// 修复 worktree 的 pre-commit/pre-push 钩子失败：在 worktree 终端启动可见 Claude agent。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     本机/远端 commit/push 共用入口；V1 只支持本机 worktree，远端返回可操作错误。
+///     本机/远端 commit/push 共用入口；远端走 owner 同一套 repair 函数。
 ///
 /// Code Logic（这个函数做什么）:
-///     Remote → 错误（V1）；Local → repair_local_worktree_hook_failure。
+///     Remote → P2P repair-hook-failure 后 remap 会话 id；Local → repair_local_worktree_hook_failure。
 pub(crate) async fn repair_worktree_hook_failure_for_state(
     state: &AppState,
     worktree_id: String,
     hook_failure: WorkbenchHookFailureDto,
 ) -> Result<RepairHookFailureDto, AppError> {
     match worktree_command_target(&worktree_id)? {
-        WorktreeCommandTarget::Remote { .. } => Err(AppError::generic(
-            "钩子修复目前仅支持本机 worktree；远端 worktree 请在对端设备执行",
-        )),
+        WorktreeCommandTarget::Remote {
+            device_id,
+            inner_worktree_id,
+        } => {
+            let context =
+                ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
+            let dto = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&context.device_id)
+                .repair_hook_failure(
+                    &context.base_url,
+                    RemoteRepairHookFailureReq {
+                        worktree_id: context.inner_worktree_id.clone(),
+                        hook_failure,
+                    },
+                )
+                .await?;
+            Ok(remap_repair_hook_failure_dto(
+                dto,
+                &context.device_id,
+                &context.local_project_id,
+                &worktree_id,
+            ))
+        }
         WorktreeCommandTarget::Local(local_worktree_id) => {
             repair_local_worktree_hook_failure(
                 state,
@@ -3831,5 +3872,31 @@ mod collect_merge_tests {
             message.contains("没有可收集") || message.contains("可收集"),
             "expected no-collectible error, got {message}"
         );
+    }
+}
+
+#[cfg(test)]
+mod repair_remap_tests {
+    use super::{remap_repair_hook_failure_dto, RepairHookFailureDto};
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     控制端必须用 remapped session id 聚焦对端终端。
+    #[test]
+    fn remaps_session_ids_to_remote_prefix() {
+        let remapped = remap_repair_hook_failure_dto(
+            RepairHookFailureDto {
+                agent_session_id: "agent-1".into(),
+                terminal_session_id: "term-1".into(),
+                worktree_id: "inner-wt".into(),
+                project_id: "inner-proj".into(),
+            },
+            "dev-9",
+            "shortcut-proj",
+            "remote:dev-9:inner-wt",
+        );
+        assert_eq!(remapped.agent_session_id, "remote:dev-9:agent-1");
+        assert_eq!(remapped.terminal_session_id, "remote:dev-9:term-1");
+        assert_eq!(remapped.project_id, "shortcut-proj");
+        assert_eq!(remapped.worktree_id, "remote:dev-9:inner-wt");
     }
 }

@@ -314,7 +314,12 @@ export interface UseAgentHubControllerResult {
   /** 壳层 patch → URL write + 双路径 activeSection 同步。 */
   onContextChange: (patch: Partial<AgentHubContext>) => void;
   /** 壳层可选择的局域网设备。 */
-  shellPeers: Array<{ deviceId: string; name: string; online: boolean }>;
+  shellPeers: Array<{
+    deviceId: string;
+    name: string;
+    online: boolean;
+    capabilities?: string[];
+  }>;
   /** 壳层可选择的本机/远端 Workbench 项目。 */
   shellProjects: Array<{
     key: string;
@@ -688,7 +693,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [lanPreviewFingerprint, setLanPreviewFingerprint] = useState<string | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
   const [shellPeers, setShellPeers] = useState<
-    Array<{ deviceId: string; name: string; online: boolean }>
+    Array<{ deviceId: string; name: string; online: boolean; capabilities?: string[] }>
   >([]);
   const [shellProjects, setShellProjects] = useState<
     Array<{ key: string; label: string; remote: boolean; deviceId: string | null }>
@@ -889,6 +894,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
             deviceId: device.id,
             name: device.name,
             online: device.status === 'online',
+            capabilities: device.capabilities ?? [],
           })),
         );
       })

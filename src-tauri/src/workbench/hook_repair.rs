@@ -54,7 +54,7 @@ pub struct RepairHookFailureDto {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     failedHook envelope 把结构化钩子输出交给前端；用户点「让 AI 修复」后调用本函数。
-///     只支持本机 worktree；远端 worktree 需 P2P 路由在对端设备执行同一入口（V1 不覆盖）。
+///     只支持本机 worktree；远端 worktree 由控制端 P2P `repair-hook-failure` 在 owning device 调本函数。
 ///
 /// Code Logic（这个函数做什么）:
 ///     require_owner → 解析 worktree + 校验本机项目 → 创建 terminal session → 创建 workbench-scoped
@@ -78,9 +78,7 @@ pub(crate) async fn repair_local_worktree_hook_failure(
         .await?
         .ok_or_else(|| AppError::not_found("工作台项目不存在"))?;
     if project.kind != "local" {
-        return Err(AppError::generic(
-            "钩子修复目前仅支持本机 worktree；远端 worktree 请在对端设备执行",
-        ));
+        return Err(AppError::validation("local_project_required".to_string()));
     }
 
     // 1) 在该 worktree 下创建一个 terminal session（绑定 worktree cwd）。

@@ -2,7 +2,7 @@
  * Orchestrator 看板视图
  *
  * Business Logic（为什么需要这个组件）:
- *   用户需要按 workflow 泳道查看项目任务，并在本机非活跃任务上拖拽到相邻泳道。
+ *   用户需要按 workflow 泳道查看项目任务，并在非活跃本机/远端任务上拖拽到相邻泳道。
  *
  * Code Logic（这个组件做什么）:
  *   渲染固定 ORCHESTRATOR_BOARD_LANES 泳道与任务卡；通过 props 接收 groups/selection/drag handlers；

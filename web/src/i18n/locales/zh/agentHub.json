@@ -140,7 +140,7 @@
       "contextSave": "保存三槽并切换",
       "contextDiscard": "放弃草稿并切换",
       "projectScopeUnsupported": "当前后端尚不支持项目级指令写入；不会改写用户级指令。",
-      "directContextUnsupported": "指令直读仅支持本机用户级。远端设备请使用 Pull；项目级仍保持关闭。",
+      "directContextUnsupported": "指令直读仅支持用户级（本机或已宣告 user-instructions 的对端）。项目级仍保持关闭。",
       "writeBlocked": "当前 Agent 暂不能写入原生文件。仍可编辑并保存 Hub 草稿。",
       "writeBlockedTargets": "至少一个目标 Agent 暂不能写入原生文件。公共槽仍可编辑并保存 Hub 草稿。",
       "errors": {

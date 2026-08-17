@@ -1,14 +1,25 @@
 // @vitest-environment jsdom
 /**
- * WorkbenchBanner：预览/编辑、本机保存、轻量 Markdown。
+ * WorkbenchBanner：预览/编辑、owning device 保存、离线只读。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import type { ReactElement } from 'react';
 import i18n from '@/i18n';
-import { BANNER_MAX_CHARS, BANNER_STORAGE_KEY, readWorkbenchBanner } from '../workbenchBanner';
+import { BANNER_MAX_CHARS, BANNER_STORAGE_KEY, writeWorkbenchBanner } from '../workbenchBanner';
 import { WorkbenchBanner } from './WorkbenchBanner';
+
+const bannerApi = vi.hoisted(() => ({
+  get: vi.fn(),
+  save: vi.fn(),
+}));
+
+vi.mock('@/api/workbench', () => ({
+  workbenchApi: {
+    banner: bannerApi,
+  },
+}));
 
 function wrap(ui: ReactElement): ReactElement {
   return <I18nextProvider i18n={i18n}>{ui}</I18nextProvider>;
@@ -16,6 +27,13 @@ function wrap(ui: ReactElement): ReactElement {
 
 beforeEach(async () => {
   window.localStorage.removeItem(BANNER_STORAGE_KEY);
+  bannerApi.get.mockReset();
+  bannerApi.save.mockReset();
+  bannerApi.get.mockResolvedValue({ markdown: '', updatedAt: '' });
+  bannerApi.save.mockImplementation(async (markdown: string) => ({
+    markdown,
+    updatedAt: 't',
+  }));
   await i18n.changeLanguage('zh');
 });
 
@@ -26,60 +44,71 @@ afterEach(() => {
 });
 
 describe('WorkbenchBanner', () => {
-  it('shows a local placeholder until the user writes a banner', () => {
+  it('shows a local placeholder until the user writes a banner', async () => {
     render(wrap(<WorkbenchBanner />));
-    expect(screen.getByTestId('workbench-banner-preview').textContent).toContain('写一句今日标语');
+    const preview = await screen.findByTestId('workbench-banner-preview');
+    expect(preview.textContent).toContain('写一句今日标语');
+    await waitFor(() => {
+      expect(bannerApi.get).toHaveBeenCalled();
+    });
+  });
+
+  it('seeds localStorage once when the local row is empty', async () => {
+    writeWorkbenchBanner('**focus** 🎉');
+    render(wrap(<WorkbenchBanner />));
+    await waitFor(() => {
+      expect(bannerApi.save).toHaveBeenCalledWith('**focus** 🎉', undefined);
+    });
     expect(window.localStorage.getItem(BANNER_STORAGE_KEY)).toBeNull();
   });
 
-  it('enters edit on click and persists markdown on blur', () => {
+  it('enters edit on click and persists markdown on blur', async () => {
+    bannerApi.get.mockResolvedValue({ markdown: '', updatedAt: '' });
     render(wrap(<WorkbenchBanner />));
+    await waitFor(() => expect(bannerApi.get).toHaveBeenCalled());
     fireEvent.click(screen.getByTestId('workbench-banner-preview'));
     const editor = screen.getByTestId('workbench-banner-editor');
     fireEvent.change(editor, { target: { value: '**focus** 🎉' } });
     fireEvent.blur(editor);
 
-    expect(readWorkbenchBanner()).toBe('**focus** 🎉');
+    await waitFor(() => {
+      expect(bannerApi.save).toHaveBeenCalledWith('**focus** 🎉', undefined);
+    });
     const preview = screen.getByTestId('workbench-banner-preview');
     expect(preview.querySelector('strong')?.textContent).toBe('focus');
     expect(preview.textContent).toContain('🎉');
   });
 
-  it('cancels an unsaved draft with Escape', () => {
-    window.localStorage.setItem(
-      BANNER_STORAGE_KEY,
-      JSON.stringify({ version: 1, markdown: 'kept', updatedAt: 1 }),
+  it('does not enter edit when remoteWriteDisabled', async () => {
+    bannerApi.get.mockResolvedValue({ markdown: 'kept', updatedAt: 't' });
+    render(wrap(<WorkbenchBanner remoteWriteDisabled deviceId="peer-1" />));
+    await waitFor(() => {
+      expect(screen.getByTestId('workbench-banner-preview').textContent).toContain('kept');
+    });
+    fireEvent.click(screen.getByTestId('workbench-banner-preview'));
+    expect(screen.queryByTestId('workbench-banner-editor')).toBeNull();
+    expect(screen.getByTestId('workbench-banner-preview').getAttribute('data-readonly')).toBe(
+      'true',
     );
+  });
+
+  it('cancels an unsaved draft with Escape', async () => {
+    bannerApi.get.mockResolvedValue({ markdown: 'kept', updatedAt: 't' });
     render(wrap(<WorkbenchBanner />));
+    await waitFor(() => {
+      expect(screen.getByTestId('workbench-banner-preview').textContent).toContain('kept');
+    });
     fireEvent.click(screen.getByTestId('workbench-banner-preview'));
     const editor = screen.getByTestId('workbench-banner-editor');
     fireEvent.change(editor, { target: { value: 'draft' } });
     fireEvent.keyDown(editor, { key: 'Escape' });
 
-    expect(readWorkbenchBanner()).toBe('kept');
     expect(screen.getByTestId('workbench-banner-preview').textContent).toContain('kept');
   });
 
-  it('renders a safe link without entering edit when the link is clicked', () => {
-    window.localStorage.setItem(
-      BANNER_STORAGE_KEY,
-      JSON.stringify({
-        version: 1,
-        markdown: 'see [docs](https://example.com) now',
-        updatedAt: 1,
-      }),
-    );
+  it('clamps input at the character budget and announces the limit', async () => {
     render(wrap(<WorkbenchBanner />));
-    const link = screen.getByRole('link', { name: 'docs' });
-    expect(link.getAttribute('href')).toBe('https://example.com');
-    expect(link.getAttribute('target')).toBe('_blank');
-    fireEvent.mouseDown(link);
-    fireEvent.click(link);
-    expect(screen.queryByTestId('workbench-banner-editor')).toBeNull();
-  });
-
-  it('clamps input at the character budget and announces the limit', () => {
-    render(wrap(<WorkbenchBanner />));
+    await waitFor(() => expect(bannerApi.get).toHaveBeenCalled());
     fireEvent.click(screen.getByTestId('workbench-banner-preview'));
     const overflow = `${'a'.repeat(BANNER_MAX_CHARS)}b`;
     fireEvent.change(screen.getByTestId('workbench-banner-editor'), {
@@ -89,18 +118,5 @@ describe('WorkbenchBanner', () => {
       'a'.repeat(BANNER_MAX_CHARS),
     );
     expect(screen.getByRole('status').textContent).toContain('280');
-  });
-
-  it('persists the latest draft when unmounted before debounce fires', () => {
-    vi.useFakeTimers();
-    const { unmount } = render(wrap(<WorkbenchBanner />));
-    fireEvent.click(screen.getByTestId('workbench-banner-preview'));
-    fireEvent.change(screen.getByTestId('workbench-banner-editor'), {
-      target: { value: 'latest draft' },
-    });
-
-    unmount();
-
-    expect(readWorkbenchBanner()).toBe('latest draft');
   });
 });

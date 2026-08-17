@@ -82,6 +82,56 @@ pub async fn complete_orchestrator_agent_run(
     complete_orchestrator_agent_run_for_state(state.inner(), &task_id).await
 }
 
+/// 按项目完成 Agent 运行（本机走 owner pipeline，远端走 P2P）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     看板完成按钮必须带 projectId，才能把 remote shortcut 转发到 owning device；
+///     旧的 task-id-only 命令留给 sentinel / 本机 control。
+///
+/// Code Logic（这个函数做什么）:
+///     remote → reject pending → P2P complete-agent-run 并刷新 mirror；
+///     local GuiClient → control complete；local owner → 校验归属后跑本机 pipeline。
+#[tauri::command]
+pub async fn complete_orchestrator_agent_run_for_project(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    if project.kind == "remote" {
+        reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
+        return update_remote_orchestrator_task_with_project(
+            state.inner(),
+            &project,
+            &task_id,
+            |client, base_url, remote_project_id, remote_task_id| async move {
+                client
+                    .complete_agent_run(
+                        &base_url,
+                        crate::orchestrator::remote_protocol::RemoteCompleteAgentRunReq {
+                            project_id: remote_project_id,
+                            task_id: remote_task_id,
+                        },
+                    )
+                    .await
+            },
+        )
+        .await;
+    }
+
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let task = BackendControlClient::from_control_file()?
+            .complete_orchestrator_agent_run(&task_id)
+            .await?;
+        return Ok(OrchestratorTaskViewDto::Local { task });
+    }
+
+    get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)
+        .await?;
+    let task = complete_orchestrator_agent_run_for_state(state.inner(), &task_id).await?;
+    Ok(OrchestratorTaskViewDto::Local { task })
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     手动完成按钮和 terminal completion sentinel 必须共用同一验证/交付 pipeline，避免状态机和 evidence 语义分叉。
 ///

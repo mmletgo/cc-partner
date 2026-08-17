@@ -14,7 +14,6 @@ import {
   orchestratorProjectRefreshResultDecoder,
   orchestratorRemoteOutboxItemDecoder,
   orchestratorRuntimeSnapshotDecoder,
-  orchestratorTaskDecoder,
   orchestratorTaskViewDecoder,
   orchestratorTaskViewListDecoder,
   workflowDocumentDecoder,
@@ -70,8 +69,9 @@ export const ORCHESTRATOR_REMOTE_COMMANDS = {
   getWorkflowDocument: 'get_workflow_document',
   validateWorkflowDocument: 'validate_workflow_document',
   saveWorkflowDocument: 'save_workflow_document',
-  // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机项目看板。
+  // 常量名保留 remote 以减少本轮迁移面；下面两个命令服务 Workbench 本机/远端项目看板。
   moveTaskWorkflowState: 'move_orchestrator_task_workflow_state',
+  completeAgentRunForProject: 'complete_orchestrator_agent_run_for_project',
   getRuntimeSnapshot: 'get_orchestrator_runtime_snapshot',
   retryRemoteOutbox: 'retry_orchestrator_remote_outbox',
   discardRemoteOutbox: 'discard_orchestrator_remote_outbox',
@@ -289,7 +289,7 @@ export function buildOrchestratorRuntimeSnapshotInvokeArgs(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   completeAgentRun 仍是本机-only 旧命令，参数 helper 需要与 remote-aware action helper 分开。
+ *   旧的 task-id-only complete 命令留给 sentinel / 本机 control；看板走 project-scoped helper。
  *
  * Code Logic（这个函数做什么）:
  *   taskId 首尾空白会被 trim，再包装成 `{ taskId }` 供 invoke 使用。
@@ -435,16 +435,16 @@ export const orchestratorApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户确认 Claude Code 已完成后，需要触发后端验证并推进任务状态。
+   *   用户确认 Claude Code 已完成后，需要在 owning device 上触发验证并推进任务状态。
    *
    * Code Logic（这个函数做什么）:
-   *   invokeDecoded complete_orchestrator_agent_run → OrchestratorTask（local-only）。
+   *   invokeDecoded complete_orchestrator_agent_run_for_project → OrchestratorTaskView。
    */
-  completeAgentRun: (taskId: string) =>
+  completeAgentRun: (projectId: string, taskId: string) =>
     invokeDecoded(
-      'complete_orchestrator_agent_run',
-      buildOrchestratorTaskIdInvokeArgs(taskId),
-      orchestratorTaskDecoder,
+      ORCHESTRATOR_REMOTE_COMMANDS.completeAgentRunForProject,
+      buildOrchestratorTaskViewActionInvokeArgs(projectId, taskId),
+      orchestratorTaskViewDecoder,
     ),
 
   /**

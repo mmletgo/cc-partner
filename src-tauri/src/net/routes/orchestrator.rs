@@ -9,16 +9,19 @@
 //!     所有项目入口都先确认 projectId 指向本设备 local Workbench 项目，拒绝 remote shortcut 递归代理。
 
 use crate::commands::orchestrator::{
-    build_orchestrator_task_row, create_orchestrator_task_view_for_http_with_request_id,
+    build_orchestrator_task_row, complete_orchestrator_agent_run_for_state,
+    create_orchestrator_task_view_for_http_with_request_id,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_local_owner_workflow_document,
     get_orchestrator_runtime_snapshot_for_project,
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
     list_orchestrator_task_views_for_state_with_request_id,
+    move_orchestrator_task_workflow_state_for_local_project,
     retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
     save_local_owner_workflow_document, save_workflow_document_for_state,
     validate_local_owner_workflow_document, validate_workflow_document_for_state,
-    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    CreateOrchestratorTaskRequest, MoveOrchestratorTaskWorkflowStateRequest,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::orchestrator_adapters::{
     build_agent_adapter_catalog, OrchestratorAgentAdapterCatalog,
@@ -40,8 +43,9 @@ use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
     MobileRuntimeSnapshotReq, MobileWorkflowDocumentGetReq, MobileWorkflowDocumentSaveReq,
-    MobileWorkflowDocumentValidateReq, RemoteCompleteOrchestratorTaskPromptReq,
-    RemoteCreateOrchestratorTaskReq, RemoteDeliverReviewedReq, RemoteListTasksReq,
+    MobileWorkflowDocumentValidateReq, RemoteCompleteAgentRunReq,
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq,
+    RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteMoveWorkflowStateReq,
     RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
     RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
     RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
@@ -262,6 +266,59 @@ async fn start_task_for_state(
     dispatch_orchestrator_best_effort(state).await;
     let latest = context.orchestrator_repo.get_task(&task.id).await?;
     Ok(OrchestratorTaskDto::from(latest))
+}
+
+/// 在 owning device 上移动本机任务泳道。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制端拖拽到达后必须只改本机 local 项目任务，并拒绝 remote: 递归。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 projectId 为 local、任务归属后委托相邻泳道 helper，返回权威 DTO。
+async fn move_workflow_state_for_state(
+    state: &OrchestratorRouteContext,
+    req: RemoteMoveWorkflowStateReq,
+) -> Result<OrchestratorTaskDto, AppError> {
+    ensure_remote_orchestrator_local_project_id(state, &req.project_id).await?;
+    let project = state
+        .workbench_project_repo
+        .get(&req.project_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("远端 Orchestrator 项目不存在"))?;
+    let view = move_orchestrator_task_workflow_state_for_local_project(
+        state.orchestrator_repo.as_ref(),
+        &project,
+        MoveOrchestratorTaskWorkflowStateRequest {
+            project_id: req.project_id,
+            task_id: req.task_id,
+            target_state: req.target_state,
+        },
+    )
+    .await?;
+    match view {
+        OrchestratorTaskViewDto::Local { task } => Ok(task),
+        _ => Err(AppError::generic("远端移动泳道必须返回本机任务")),
+    }
+}
+
+/// 在 owning device 上完成本机任务的 Agent 运行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     验证/交付必须在任务所在设备执行，并绑定 local project。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 projectId 为 local 且任务归属后委托 complete_orchestrator_agent_run_for_state。
+async fn complete_agent_run_for_state(
+    state: &AppState,
+    req: RemoteCompleteAgentRunReq,
+) -> Result<OrchestratorTaskDto, AppError> {
+    let context = OrchestratorRouteContext::from_app_state(state);
+    ensure_remote_orchestrator_local_project_id(&context, &req.project_id).await?;
+    let task = get_local_project_task(&context, &req.task_id).await?;
+    if task.project_id != req.project_id {
+        return Err(AppError::generic("任务不属于当前项目"));
+    }
+    complete_orchestrator_agent_run_for_state(state, &req.task_id).await
 }
 
 /// 重试远端阻塞任务。
@@ -821,6 +878,43 @@ pub async fn start_task(
     let task = start_task_for_state(&state, req)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.start"))?;
+    Ok(Json(task))
+}
+
+/// 移动任务泳道 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制端看板拖拽必须改 owning device 权威行，并拒绝 remote: 递归。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{projectId,taskId,targetState}`，确认 local 项目与任务归属后委托相邻泳道移动。
+pub async fn move_workflow_state(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteMoveWorkflowStateReq>,
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    let context = OrchestratorRouteContext::from_app_state(&state);
+    let task = move_workflow_state_for_state(&context, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.move_workflow_state"))?;
+    Ok(Json(task))
+}
+
+/// 完成 Agent 运行 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     验证/交付 pipeline 必须在 owning device 执行；控制端不得本地跑 complete。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 `{projectId,taskId}`，确认 local 项目与任务归属后委托 complete pipeline。
+pub async fn complete_agent_run(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteCompleteAgentRunReq>,
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    let task = complete_agent_run_for_state(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.tasks.complete_agent_run"))?;
     Ok(Json(task))
 }
 

@@ -16,7 +16,7 @@ import '@xterm/xterm/css/xterm.css';
 import { tauriWorkbenchTransport } from '@/api/workbenchTransport';
 import { OrchestratorPanel } from '@/pages/Orchestrator';
 import { WorkbenchBrowserWorkspace } from '@/components/domain/WorkbenchBrowserWorkspace';
-import { WorkbenchDependencyCard } from '@/components/domain/WorkbenchDependencyCard';
+import { WorkbenchDependencyNotice } from './views/WorkbenchDependencyNotice';
 import { WorkbenchFileWorkspace } from '@/components/domain/WorkbenchFileWorkspace';
 import { WorkbenchSessionSearch } from '@/components/domain/WorkbenchSessionSearch';
 import {
@@ -494,7 +494,7 @@ export function Workbench() {
   });
 
   const notes = useWorkbenchProjectNotes({
-    activeProjectId, inspectorTab, desktopUnavailableMessage,
+    activeProjectId, inspectorTab, desktopUnavailableMessage, remoteWriteDisabled,
     loadFailedFallback: t('workbench:notesLoadFailed'),
   });
 
@@ -756,7 +756,7 @@ export function Workbench() {
               <p className={styles.workspacePath}>{workspaceLine}</p>
             </div>
           </div>
-          <WorkbenchBanner />
+          <WorkbenchBanner deviceId={activeProject.kind === 'remote' ? activeProject.deviceId : undefined} remoteWriteDisabled={remoteWriteDisabled} />
           <div className={styles.workspaceHeaderActions}>
             {/* Agent Ledger 整块保留原条件：仅隐藏触发按钮，Drawer 保持挂载（原样移动） */}
             <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
@@ -947,7 +947,7 @@ export function Workbench() {
           ) : null}
           {worktreeError ? <StatusMessage tone="danger" className={styles.errorBox}>{worktreeError}</StatusMessage> : null}
           {agentRuntime.phase === 'error' && agentRuntime.error ? <StatusMessage tone="warn" className={styles.errorBox} action={<Button variant="secondary" size="sm" onClick={() => { void agentRuntime.refresh(); }}>{t('workbench:refresh')}</Button>}>{agentRuntime.error.message}</StatusMessage> : null}
-          {dependencyStatus.status !== 'ready' ? <WorkbenchDependencyCard compact className={styles.dependencyNotice} /> : null}
+          <WorkbenchDependencyNotice compact className={styles.dependencyNotice} project={activeProject} localStatus={dependencyStatus.status} remoteWriteDisabled={remoteWriteDisabled} />
         </div>
 
         <div className={styles.mainWorkspace}>

@@ -23,12 +23,14 @@ use crate::commands::workbench::{
     list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
     local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
     local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
-    local_focus_workbench_session, local_get_workbench_path_info, local_get_workbench_worktree,
-    local_list_workbench_dir, local_list_workbench_git_commits, local_list_workbench_sessions,
+    local_focus_workbench_session, local_get_workbench_banner, local_get_workbench_path_info,
+    local_get_workbench_project_note, local_get_workbench_worktree, local_list_workbench_dir,
+    local_list_workbench_git_commits, local_list_workbench_sessions,
     local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
     local_preview_workbench_html_asset, local_preview_workbench_sqlite,
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
-    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
+    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_banner,
+    local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
     local_write_workbench_session_input, local_zoom_workbench_pane,
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
@@ -62,6 +64,10 @@ use crate::workbench::models::{
 use crate::workbench::remote_directory;
 use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson_filtered;
 use crate::workbench::remote_protocol::{
+    RemoteBannerSaveReq, RemoteProjectNoteSaveReq, RemoteRepairHookFailureReq, RemoteSafeAttachReq,
+    RemoteWorkspaceRestorePreflightReq, WorkbenchBannerDto, WorkbenchProjectNoteDto,
+};
+use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
     RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
     RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
@@ -71,7 +77,6 @@ use crate::workbench::remote_protocol::{
     RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq, RemoteSessionReq, RemoteSplitPaneReq,
     RemoteWorktreeReq, RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
-use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use axum::body::Body;
@@ -2459,6 +2464,144 @@ pub async fn workspace_restore_safe_attach(
             P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.safe_attach")
         })?;
     Ok(Json(result))
+}
+
+/// 读取 owner 本机项目笔记。
+pub async fn get_project_note(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteProjectReq>,
+) -> P2pResult<Json<WorkbenchProjectNoteDto>> {
+    if crate::workbench::remote_ids::is_remote_id(&req.project_id) {
+        return Err(P2pError::from_app_error(
+            AppError::validation("local_project_required".to_string()),
+            &ctx,
+            "workbench.notes.get",
+        ));
+    }
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.notes.get"))?;
+    let note = local_get_workbench_project_note(&state, req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.notes.get"))?;
+    Ok(Json(note))
+}
+
+/// 保存 owner 本机项目笔记。
+pub async fn save_project_note(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteProjectNoteSaveReq>,
+) -> P2pResult<Json<WorkbenchProjectNoteDto>> {
+    if crate::workbench::remote_ids::is_remote_id(&req.project_id) {
+        return Err(P2pError::from_app_error(
+            AppError::validation("local_project_required".to_string()),
+            &ctx,
+            "workbench.notes.save",
+        ));
+    }
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.notes.save"))?;
+    let note = local_save_workbench_project_note(&state, req.project_id, req.content)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.notes.save"))?;
+    Ok(Json(note))
+}
+
+/// 读取 owner 设备标语。
+pub async fn get_banner(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<WorkbenchBannerDto>> {
+    let banner = local_get_workbench_banner(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.banner.get"))?;
+    Ok(Json(banner))
+}
+
+/// 保存 owner 设备标语。
+pub async fn save_banner(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteBannerSaveReq>,
+) -> P2pResult<Json<WorkbenchBannerDto>> {
+    let banner = local_save_workbench_banner(&state, req.markdown)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.banner.save"))?;
+    Ok(Json(banner))
+}
+
+/// 读取 owner 本机 tmux 依赖状态。
+pub async fn dependency_status(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<crate::workbench::dependencies::WorkbenchDependencyStatusDto>> {
+    let status =
+        crate::commands::workbench_dependencies::get_workbench_dependency_install_status_for_state(
+            &state, None,
+        )
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.dependency.status"))?;
+    Ok(Json(status))
+}
+
+/// 在 owner 本机启动 tmux 安装。
+pub async fn dependency_install(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<crate::workbench::dependencies::WorkbenchDependencyStatusDto>> {
+    let status = crate::commands::workbench_dependencies::install_workbench_dependency_for_state(
+        &state, None,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.dependency.install"))?;
+    Ok(Json(status))
+}
+
+/// 取消 owner 本机 tmux 安装。
+pub async fn dependency_cancel(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<crate::workbench::dependencies::WorkbenchDependencyStatusDto>> {
+    let status =
+        crate::commands::workbench_dependencies::cancel_workbench_dependency_install_for_state(
+            &state, None,
+        )
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.dependency.cancel"))?;
+    Ok(Json(status))
+}
+
+/// 在 owner 本机 worktree 启动钩子 AI 修复。
+pub async fn repair_hook_failure(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteRepairHookFailureReq>,
+) -> P2pResult<Json<crate::workbench::hook_repair::RepairHookFailureDto>> {
+    if crate::workbench::remote_ids::is_remote_id(&req.worktree_id) {
+        return Err(P2pError::from_app_error(
+            AppError::validation("local_project_required".to_string()),
+            &ctx,
+            "workbench.worktrees.repair_hook_failure",
+        ));
+    }
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "workbench.worktrees.repair_hook_failure")
+        })?;
+    let dto = crate::workbench::hook_repair::repair_local_worktree_hook_failure(
+        &state,
+        crate::workbench::hook_repair::RepairHookFailureReq {
+            worktree_id: req.worktree_id,
+            hook_failure: req.hook_failure,
+        },
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.repair_hook_failure"))?;
+    Ok(Json(dto))
 }
 
 #[cfg(test)]

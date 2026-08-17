@@ -12,6 +12,7 @@ import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
+import type { WorkbenchDependencyStatus } from '@/lib/types';
 import {
   canInstallWorkbenchDependency,
   canRecheckWorkbenchDependency,
@@ -20,9 +21,22 @@ import {
 } from '@/lib/workbenchDependency';
 import styles from './WorkbenchDependencyCard.module.css';
 
+export interface WorkbenchDependencyCardSource {
+  status: WorkbenchDependencyStatus;
+  checking: boolean;
+  installing: boolean;
+  error: string | null;
+  check: () => Promise<void>;
+  install: () => Promise<void>;
+  cancel: () => Promise<void>;
+}
+
 export interface WorkbenchDependencyCardProps {
   compact?: boolean;
   className?: string;
+  source?: WorkbenchDependencyCardSource;
+  deviceName?: string;
+  remoteWriteDisabled?: boolean;
 }
 
 /**
@@ -32,17 +46,22 @@ export interface WorkbenchDependencyCardProps {
  * Code Logic（这个函数做什么）:
  *   使用浏览器原生 confirm 展示命令预览；用户确认后调用 install。
  */
-function useConfirmedInstall(commandPreview: string, install: () => Promise<void>) {
+function useConfirmedInstall(
+  commandPreview: string,
+  install: () => Promise<void>,
+  deviceName?: string,
+) {
   const { t } = useTranslation(['workbench']);
   return useCallback(() => {
+    const command = commandPreview || t('workbench:dependency.noCommand');
     const ok = window.confirm(
-      t('workbench:dependency.installConfirm', {
-        command: commandPreview || t('workbench:dependency.noCommand'),
-      }),
+      deviceName
+        ? t('workbench:dependency.installConfirmRemote', { device: deviceName, command })
+        : t('workbench:dependency.installConfirm', { command }),
     );
     if (!ok) return;
     void install();
-  }, [commandPreview, install, t]);
+  }, [commandPreview, deviceName, install, t]);
 }
 
 /**
@@ -53,11 +72,12 @@ function useConfirmedInstall(commandPreview: string, install: () => Promise<void
  *   组合 Card/Pill/Button 展示共享依赖状态；操作通过 Context 调用后端 check/install/cancel。
  */
 export function WorkbenchDependencyCard(props: WorkbenchDependencyCardProps) {
-  const { compact = false, className } = props;
+  const { compact = false, className, source, deviceName, remoteWriteDisabled = false } = props;
   const { t } = useTranslation(['workbench']);
-  const { status, checking, installing, error, check, install, cancel } = useWorkbenchDependency();
+  const local = useWorkbenchDependency();
+  const { status, checking, installing, error, check, install, cancel } = source ?? local;
   const commandPreview = formatInstallCommandPreview(status.installCommandPreview);
-  const confirmedInstall = useConfirmedInstall(commandPreview, install);
+  const confirmedInstall = useConfirmedInstall(commandPreview, install, deviceName);
   const tone = dependencyStatusTone(status);
   const pillTone = tone === 'warning' ? 'warn' : tone === 'neutral' ? 'neutral' : tone;
   const title = status.available
@@ -112,7 +132,7 @@ export function WorkbenchDependencyCard(props: WorkbenchDependencyCardProps) {
         ) : null}
 
         <div className={styles.actions}>
-          {canInstallWorkbenchDependency(status) ? (
+          {canInstallWorkbenchDependency(status) && !remoteWriteDisabled ? (
             <Button
               variant="primary"
               size="sm"

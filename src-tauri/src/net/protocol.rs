@@ -84,6 +84,28 @@ pub const CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1: &str = "orchestrator.agent-
 ///     字符串常量，列入 `server_protocol_info()`。
 pub const CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1: &str = "orchestrator.experiments.v1";
 
+/// 能力 token：owning-device 完成 Agent 运行并走验证/交付。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端看板「完成运行」必须在任务 owning device 上执行验证 pipeline；
+///     旧 peer 缺失时 fail-closed，不得在控制端本地跑验证。超时约 360s，no-transport-retry。
+///
+/// Code Logic（这个常量做什么）:
+///     `orchestrator.complete-agent-run.v1`，与 complete-agent-run 路由原子上线。
+pub const CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1: &str =
+    "orchestrator.complete-agent-run.v1";
+
+/// 能力 token：owning-device 看板相邻泳道拖拽。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端拖拽必须改 owning device 上的权威任务行；旧 peer 缺失时禁用拖拽，
+///     不得写本机 mirror 当真相。
+///
+/// Code Logic（这个常量做什么）:
+///     `orchestrator.move-workflow-state.v1`，与 move-workflow-state 路由原子上线。
+pub const CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1: &str =
+    "orchestrator.move-workflow-state.v1";
+
 /// 能力 token：v1 全局 Attention/Inbox 快照路由（`GET /api/mobile/attention`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -265,6 +287,50 @@ pub const CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1: &str = "workbench.wordgame-e
 ///     字符串常量，列入 `server_protocol_info()`；与 summary 路由原子上线。
 pub const CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1: &str = "workbench.agent-ledger-summary.v1";
 
+/// 能力 token：v1 Workbench 项目笔记 owner-local 读写
+/// （`POST /api/workbench/notes/{get,save}`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端在转发远端项目笔记前必须确认 owning device 已实现 inner project id 读写；
+///     旧 peer 缺失时 fail-closed 为 unsupported，不得静默写回本机 shortcut。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 notes 路由原子上线。
+pub const CAPABILITY_WORKBENCH_PROJECT_NOTES_V1: &str = "workbench.project-notes.v1";
+
+/// 能力 token：v1 Workbench 设备级标语
+/// （`POST /api/workbench/banner/{get,save}`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     选中远端项目时顶栏标语必须读写 owning device SQLite；旧 peer 缺失时 unsupported，
+///     不得把对端标语写进控制端 localStorage。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 banner 路由原子上线。
+pub const CAPABILITY_WORKBENCH_BANNER_V1: &str = "workbench.banner.v1";
+
+/// 能力 token：v1 Workbench tmux 依赖 status/install/cancel
+/// （`POST /api/workbench/dependency/{status,install,cancel}`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     从控制端给对端（含 headless）装 tmux 前必须确认对端已实现 owner-local spawn_install；
+///     旧 peer 缺失时卡片 unsupported，不得假装安装成功。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 dependency 路由原子上线。
+pub const CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1: &str = "workbench.dependency-install.v1";
+
+/// 能力 token：v1 Workbench 钩子失败 AI 修复
+/// （`POST /api/workbench/worktrees/repair-hook-failure`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     远端 worktree 的「让 AI 修复」必须在 owning device 跑同一套 repair 函数；
+///     旧 peer 缺失时 unsupported，不得在控制端拼 sessions.create+write。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 repair-hook-failure 路由原子上线。
+pub const CAPABILITY_WORKBENCH_HOOK_REPAIR_V1: &str = "workbench.hook-repair.v1";
+
 /// 能力 token：Agent Hub LAN source-push 三阶段协议
 /// （`POST /api/agent-hub/push/prepare`、`PUT .../objects/:hash`、`POST .../commit`）。
 ///
@@ -298,6 +364,19 @@ pub const CAPABILITY_PORTABLE_PULL_V1: &str = "agent-hub.portable-pull.v1";
 /// Code Logic（这个常量做什么）:
 ///     与 project inventory/action 路由及 project-aware Pull body 原子发布。
 pub const CAPABILITY_PORTABLE_PROJECT_V1: &str = "agent-hub.portable-project.v1";
+
+/// 能力 token：v1 Agent Hub 用户级三栏 inspect/save/CAS/AI/槽历史
+/// （`POST /api/agent-hub/user-instructions/*`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端选中对端设备后，三栏读写与 HeadlessCompletion 必须在 owning device 执行；
+///     旧 peer 缺失时 fail-closed 为 unsupported，不得静默回落本机 `~/.claude`。
+///     该 token 仅是协议协商，不是 LAN 鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量 `agent-hub.user-instructions.v1`，列入 `server_protocol_info()`（字典序）；
+///     与 10 条 user-instructions 路由原子上线。
+pub const CAPABILITY_USER_INSTRUCTIONS_V1: &str = "agent-hub.user-instructions.v1";
 
 /// 能力 token：移动端/对端切换 cc-switch provider（`/api/provider-manager/*`）。
 ///
@@ -362,9 +441,10 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
-            // 字典序：agent-hub.portable-project.v1 < agent-hub.portable-pull.v1 < agent-hub.v1
+            // 字典序：portable-project < portable-pull < user-instructions < v1
             CAPABILITY_PORTABLE_PROJECT_V1.to_string(),
             CAPABILITY_PORTABLE_PULL_V1.to_string(),
+            CAPABILITY_USER_INSTRUCTIONS_V1.to_string(),
             CAPABILITY_AGENT_HUB_V1.to_string(),
             CAPABILITY_ATTENTION_READ_V1.to_string(),
             CAPABILITY_ATTENTION_V1.to_string(),
@@ -373,7 +453,9 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1.to_string(),
+            CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1.to_string(),
+            CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
             CAPABILITY_PROVIDER_MANAGER_V1.to_string(),
@@ -382,9 +464,13 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
             CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1.to_string(),
             CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1.to_string(),
+            CAPABILITY_WORKBENCH_BANNER_V1.to_string(),
             CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1.to_string(),
+            CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1.to_string(),
+            CAPABILITY_WORKBENCH_HOOK_REPAIR_V1.to_string(),
             CAPABILITY_WORKBENCH_LAN_FLEET_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
+            CAPABILITY_WORKBENCH_PROJECT_NOTES_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
             CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1.to_string(),
             CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1.to_string(),
@@ -536,6 +622,7 @@ mod tests {
             vec![
                 "agent-hub.portable-project.v1".to_string(),
                 "agent-hub.portable-pull.v1".to_string(),
+                "agent-hub.user-instructions.v1".to_string(),
                 "agent-hub.v1".to_string(),
                 "attention.read.v1".to_string(),
                 "attention.v1".to_string(),
@@ -544,7 +631,9 @@ mod tests {
                 "device.request-binding.v1".to_string(),
                 "errors.envelope.v1".to_string(),
                 "orchestrator.agent-adapters.v1".to_string(),
+                "orchestrator.complete-agent-run.v1".to_string(),
                 "orchestrator.experiments.v1".to_string(),
+                "orchestrator.move-workflow-state.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
                 "orchestrator.workflow-document.v1".to_string(),
                 "provider-manager.v1".to_string(),
@@ -553,9 +642,13 @@ mod tests {
                 "transfer.resume.v1".to_string(),
                 "workbench.agent-ledger-summary.v1".to_string(),
                 "workbench.agent-runtime.v1".to_string(),
+                "workbench.banner.v1".to_string(),
                 "workbench.browser-verification.v1".to_string(),
+                "workbench.dependency-install.v1".to_string(),
+                "workbench.hook-repair.v1".to_string(),
                 "workbench.lan-fleet.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
+                "workbench.project-notes.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
                 "workbench.terminal-input-stream.v1".to_string(),
                 "workbench.wordgame-extract.v1".to_string(),
@@ -565,6 +658,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PULL_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
+        assert!(info.supports(CAPABILITY_USER_INSTRUCTIONS_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_READ_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
@@ -575,8 +669,12 @@ mod tests {
         assert!(info.supports(CAPABILITY_TRANSFER_RESUME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_BANNER_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_HOOK_REPAIR_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_LAN_FLEET_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_PROJECT_NOTES_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
         assert!(info.supports(CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1));

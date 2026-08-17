@@ -686,8 +686,8 @@ pub(crate) fn invalid_workflow_source_label(project_path: &Path) -> &'static str
 ///     看板拖拽必须只作用于当前本机项目的真实任务，不能误改远端 mirror 或其它项目任务。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验请求 projectId、项目 kind 和任务归属后委托 repo 相邻泳道移动，返回 Local task view。
-pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
+///     校验请求 projectId 和任务归属后委托 repo 相邻泳道移动，返回 Local task view。
+pub(crate) async fn move_orchestrator_task_workflow_state_for_local_project(
     repo: &OrchestratorRepo,
     project: &WorkbenchProjectRow,
     request: MoveOrchestratorTaskWorkflowStateRequest,
@@ -695,8 +695,8 @@ pub(crate) async fn move_orchestrator_task_workflow_state_for_project(
     if request.project_id != project.id {
         return Err(AppError::generic("请求项目与当前项目不一致"));
     }
-    if project.kind == "remote" {
-        return Err(AppError::generic("远端项目暂不支持拖拽移动"));
+    if project.kind != "local" {
+        return Err(AppError::validation("local_project_required".to_string()));
     }
 
     let current = repo.get_task(&request.task_id).await?;
@@ -989,6 +989,40 @@ where
     let task = operation(
         RemoteOrchestratorClient::new().with_expected_device_id(&context.device_id),
         context.base_url.clone(),
+        remote_task_id,
+    )
+    .await?;
+    upsert_remote_task_view(
+        state,
+        remote_shortcut,
+        &context.remote_project_id,
+        &context.remote_project_path,
+        task,
+    )
+    .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     看板拖拽和完成运行需要同时把 inner project id 与 inner task id 发给 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     打开远端项目后把 `(client, base_url, remote_project_id, remote_task_id)` 交给调用方，再写 mirror。
+pub(crate) async fn update_remote_orchestrator_task_with_project<F, Fut>(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    task_id: &str,
+    operation: F,
+) -> Result<OrchestratorTaskViewDto, AppError>
+where
+    F: FnOnce(RemoteOrchestratorClient, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<OrchestratorTaskDto, AppError>>,
+{
+    let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
+    let remote_task_id = remote_inner_task_id_for_shortcut(remote_shortcut, task_id)?;
+    let task = operation(
+        RemoteOrchestratorClient::new().with_expected_device_id(&context.device_id),
+        context.base_url.clone(),
+        context.remote_project_id.clone(),
         remote_task_id,
     )
     .await?;

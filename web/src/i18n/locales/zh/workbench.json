@@ -138,6 +138,7 @@
     "recheck": "重新检测",
     "noCommand": "未提供安装命令",
     "installConfirm": "将执行以下命令安装 tmux：\n\n{{command}}\n\n请确认你信任该命令。安装过程可能要求输入系统密码。",
+    "installConfirmRemote": "将在设备「{{device}}」上执行以下命令安装 tmux：\n\n{{command}}\n\n请确认你信任该命令。安装过程可能要求输入系统密码。",
     "status": {
       "checking": "检测中",
       "ready": "可用",

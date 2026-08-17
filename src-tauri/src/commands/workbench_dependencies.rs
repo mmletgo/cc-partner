@@ -7,14 +7,47 @@
 //! Code Logic（这个模块做什么）:
 //!     暴露 dependency manager 的四个 thin command，状态与任务句柄保存在 AppState；
 //!     另提供 state helper 供 Attention 只读缓存状态，不触发探测。
+//!     可选 deviceId：外机走 P2P，本机路径保持 GUI 进程缓存（Attention 仍只投影本机）。
 
+use crate::commands::workbench::{device_base_url, proxy_workbench_if_gui};
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::dependencies::{
-    actual_install_command_preview, probe_workbench_dependency, WorkbenchDependencyState,
-    WorkbenchDependencyStatusDto,
+    actual_install_command_preview, probe_workbench_dependency, unsupported_dependency_status,
+    WorkbenchDependencyState, WorkbenchDependencyStatusDto,
 };
+use crate::workbench::remote_client::RemoteWorkbenchClient;
 use tauri::State;
+
+/// Business Logic（为什么需要这个函数）:
+///     Settings/Attention 必须继续打本机；只有选中远端设备时才走 P2P。
+///
+/// Code Logic（这个函数做什么）:
+///     空或等于本机 deviceId → false。
+fn is_foreign_device(state: &AppState, device_id: Option<&str>) -> bool {
+    let device_id = device_id.unwrap_or("").trim();
+    !device_id.is_empty() && device_id != state.device_id.as_str()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     缺 capability 时卡片要显示 unsupported，不能把错误当成安装成功。
+///
+/// Code Logic（这个函数做什么）:
+///     `capability_unsupported` → unsupported DTO；其它错误原样上抛。
+fn map_remote_dependency_result(
+    result: Result<WorkbenchDependencyStatusDto, AppError>,
+) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    match result {
+        Ok(status) => Ok(status),
+        Err(error)
+            if error.code().contains("capability_unsupported")
+                || error.to_string().contains("capability_unsupported") =>
+        {
+            Ok(unsupported_dependency_status(error.to_string()))
+        }
+        Err(error) => Err(error),
+    }
+}
 
 /// Business Logic（为什么需要这个函数）:
 ///     Attention 聚合依赖 tmux 环境条目时，必须读取进程内缓存的稳定 statusChangedAt，
@@ -32,12 +65,41 @@ pub fn get_workbench_dependency_status_for_state(state: &AppState) -> WorkbenchD
 ///     进入 Workbench 或设置页时，前端需要知道 tmux 是否可用以及缺失时可执行的安装命令预览。
 ///
 /// Code Logic（这个函数做什么）:
-///     运行后端探测并写入共享 dependency runtime；安装中则保留当前安装状态；
-///     写入时由 manager 按语义状态差维护 status_changed_at。
+///     本机探测写入共享 runtime；外机经 sidecar P2P。
 #[tauri::command]
 pub async fn check_workbench_dependency(
     state: State<'_, AppState>,
+    device_id: Option<String>,
 ) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state.inner(), device_id.as_deref()) {
+        if let Some(v) = proxy_workbench_if_gui(
+            state.inner(),
+            "dependency.check",
+            serde_json::json!({ "deviceId": device_id }),
+        )
+        .await?
+        {
+            return Ok(v);
+        }
+    }
+    check_workbench_dependency_for_state(state.inner(), device_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     control 与 invoke 共享探测；远端必须读 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     外机 → P2P status；本机 → 现有 probe + runtime 缓存（Attention 仍读本机）。
+pub async fn check_workbench_dependency_for_state(
+    state: &AppState,
+    device_id: Option<String>,
+) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state, device_id.as_deref()) {
+        let device_id = device_id.unwrap_or_default();
+        let base_url = device_base_url(state, device_id.trim())?;
+        let client = RemoteWorkbenchClient::new().with_expected_device_id(device_id.trim());
+        return map_remote_dependency_result(client.dependency_status(&base_url).await);
+    }
     Ok(state
         .workbench_dependency
         .set_checked_status(probe_workbench_dependency()))
@@ -53,7 +115,37 @@ pub async fn check_workbench_dependency(
 #[tauri::command]
 pub async fn install_workbench_dependency(
     state: State<'_, AppState>,
+    device_id: Option<String>,
 ) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state.inner(), device_id.as_deref()) {
+        if let Some(v) = proxy_workbench_if_gui(
+            state.inner(),
+            "dependency.install",
+            serde_json::json!({ "deviceId": device_id }),
+        )
+        .await?
+        {
+            return Ok(v);
+        }
+    }
+    install_workbench_dependency_for_state(state.inner(), device_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端安装必须在 owning device（含 headless）执行，不得装到控制端。
+///
+/// Code Logic（这个函数做什么）:
+///     外机 → P2P install；本机 → 现有 spawn_install。
+pub async fn install_workbench_dependency_for_state(
+    state: &AppState,
+    device_id: Option<String>,
+) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state, device_id.as_deref()) {
+        let device_id = device_id.unwrap_or_default();
+        let base_url = device_base_url(state, device_id.trim())?;
+        let client = RemoteWorkbenchClient::new().with_expected_device_id(device_id.trim());
+        return map_remote_dependency_result(client.dependency_install(&base_url).await);
+    }
     let detected = probe_workbench_dependency();
     if detected.status == WorkbenchDependencyState::Ready {
         return Ok(state.workbench_dependency.set_checked_status(detected));
@@ -74,8 +166,38 @@ pub async fn install_workbench_dependency(
 #[tauri::command]
 pub async fn get_workbench_dependency_install_status(
     state: State<'_, AppState>,
+    device_id: Option<String>,
 ) -> Result<WorkbenchDependencyStatusDto, AppError> {
-    Ok(get_workbench_dependency_status_for_state(&state))
+    if is_foreign_device(state.inner(), device_id.as_deref()) {
+        if let Some(v) = proxy_workbench_if_gui(
+            state.inner(),
+            "dependency.status",
+            serde_json::json!({ "deviceId": device_id }),
+        )
+        .await?
+        {
+            return Ok(v);
+        }
+    }
+    get_workbench_dependency_install_status_for_state(state.inner(), device_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端安装轮询必须读对端 runtime，不能读控制端本机缓存。
+///
+/// Code Logic（这个函数做什么）:
+///     外机 → P2P status；本机 → 现有缓存快照。
+pub async fn get_workbench_dependency_install_status_for_state(
+    state: &AppState,
+    device_id: Option<String>,
+) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state, device_id.as_deref()) {
+        let device_id = device_id.unwrap_or_default();
+        let base_url = device_base_url(state, device_id.trim())?;
+        let client = RemoteWorkbenchClient::new().with_expected_device_id(device_id.trim());
+        return map_remote_dependency_result(client.dependency_status(&base_url).await);
+    }
+    Ok(get_workbench_dependency_status_for_state(state))
 }
 
 /// 取消正在进行的 Workbench tmux 依赖安装。
@@ -88,12 +210,44 @@ pub async fn get_workbench_dependency_install_status(
 #[tauri::command]
 pub async fn cancel_workbench_dependency_install(
     state: State<'_, AppState>,
+    device_id: Option<String>,
 ) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state.inner(), device_id.as_deref()) {
+        if let Some(v) = proxy_workbench_if_gui(
+            state.inner(),
+            "dependency.cancel",
+            serde_json::json!({ "deviceId": device_id }),
+        )
+        .await?
+        {
+            return Ok(v);
+        }
+    }
+    cancel_workbench_dependency_install_for_state(state.inner(), device_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     取消必须落到对端安装任务。
+///
+/// Code Logic（这个函数做什么）:
+///     外机 → P2P cancel；本机 → 现有 runtime cancel。
+pub async fn cancel_workbench_dependency_install_for_state(
+    state: &AppState,
+    device_id: Option<String>,
+) -> Result<WorkbenchDependencyStatusDto, AppError> {
+    if is_foreign_device(state, device_id.as_deref()) {
+        let device_id = device_id.unwrap_or_default();
+        let base_url = device_base_url(state, device_id.trim())?;
+        let client = RemoteWorkbenchClient::new().with_expected_device_id(device_id.trim());
+        return map_remote_dependency_result(client.dependency_cancel(&base_url).await);
+    }
     Ok(state.workbench_dependency.cancel())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{is_foreign_device, map_remote_dependency_result};
+    use crate::error::AppError;
     use crate::workbench::dependencies::{
         WorkbenchDependencyInstallRuntime, WorkbenchDependencyState, WorkbenchDependencyStatusDto,
     };
@@ -126,5 +280,32 @@ mod tests {
         assert!(!first.status_changed_at.is_empty());
         assert_eq!(second.status_changed_at, first.status_changed_at);
         assert_eq!(third.status_changed_at, first.status_changed_at);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     缺 capability 必须变成卡片 unsupported，不能冒充安装成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     map_remote_dependency_result 把 capability_unsupported 收成 unsupported DTO。
+    #[test]
+    fn missing_capability_maps_to_unsupported_status() {
+        let mapped = map_remote_dependency_result(Err(AppError::unavailable(
+            "capability_unsupported:workbench.dependency-install.v1".to_string(),
+        )))
+        .expect("mapped");
+        assert_eq!(mapped.status, WorkbenchDependencyState::Unsupported);
+        assert!(!mapped.installable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     非 capability 错误必须原样失败，不能吞成 unsupported。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     generic 错误仍是 Err。
+    #[test]
+    fn other_remote_errors_stay_errors() {
+        let _ = is_foreign_device;
+        let other = map_remote_dependency_result(Err(AppError::generic("boom".to_string())));
+        assert!(other.is_err());
     }
 }

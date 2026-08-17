@@ -9,7 +9,7 @@
 use crate::error::AppError;
 use chrono::Utc;
 use portable_pty::CommandBuilder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Read};
 use std::process::{Child, ChildStderr, ChildStdout, Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -753,7 +753,7 @@ impl TmuxCommand {
 ///
 /// Code Logic（这个枚举做什么）:
 ///     以小写字符串序列化到 IPC DTO，保持 TypeScript 联合类型契约。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkbenchDependencyState {
     Ready,
@@ -772,7 +772,7 @@ pub enum WorkbenchDependencyState {
 /// Code Logic（这个结构体做什么）:
 ///     序列化为 camelCase，字段与前端 WorkbenchDependencyStatus 对齐；
 ///     `status_changed_at` 仅在语义状态枚举变化时由 dependency manager 更新，不落 SQLite。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchDependencyStatusDto {
     pub status: WorkbenchDependencyState,
@@ -947,6 +947,7 @@ impl WorkbenchDependencyInstallRuntime {
             return Err(AppError::generic("缺少安装命令"));
         };
         self.mark_installing(command.clone());
+        let uses_sudo = install_command_uses_sudo(&command);
         let token = CancellationToken::new();
         let runtime = Arc::clone(self);
         let program = program.clone();
@@ -973,6 +974,18 @@ impl WorkbenchDependencyInstallRuntime {
             tokio::select! {
                 _ = task_token.cancelled() => {
                     runtime.mark_cancelled();
+                }
+                _ = async {
+                    if uses_sudo {
+                        tokio::time::sleep(SUDO_NO_TTY_TIMEOUT).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    runtime.mark_failed(
+                        SUDO_NO_TTY_OPERABLE_ERROR,
+                        vec![SUDO_NO_TTY_OPERABLE_ERROR.to_string()],
+                    );
                 }
                 result = &mut output_future => {
                     match result {
@@ -1132,6 +1145,42 @@ pub fn probe_workbench_dependency() -> WorkbenchDependencyStatusDto {
 ///
 /// Code Logic（这个函数做什么）:
 ///     按当前平台与系统可见包管理器生成安装命令 argv。
+/// sudo 无 TTY 时的可操作错误（headless / P2P 安装不得挂死等密码）。
+pub const SUDO_NO_TTY_OPERABLE_ERROR: &str =
+    "无 TTY 无法输入密码，请在对端本机执行 doctor 提示的命令";
+const SUDO_NO_TTY_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Business Logic（为什么需要这个函数）:
+///     Linux/WSL 安装命令含 sudo 时，无 TTY 会永久阻塞；必须识别后加超时。
+///
+/// Code Logic（这个函数做什么）:
+///     argv 任一段等于 `sudo` 或包含 `sudo ` 则 true。
+pub fn install_command_uses_sudo(command: &[String]) -> bool {
+    command
+        .iter()
+        .any(|part| part == "sudo" || part.contains("sudo "))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     缺 capability 时卡片要显示 unsupported，不能冒充 ready。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 installable=false 的 unsupported DTO。
+pub fn unsupported_dependency_status(error: impl Into<String>) -> WorkbenchDependencyStatusDto {
+    WorkbenchDependencyStatusDto {
+        status: WorkbenchDependencyState::Unsupported,
+        available: false,
+        version: None,
+        backend: backend_for_platform(current_platform()).to_string(),
+        path: None,
+        installable: false,
+        install_command_preview: Vec::new(),
+        error: Some(error.into()),
+        output: Vec::new(),
+        status_changed_at: now_status_changed_at(),
+    }
+}
+
 pub fn actual_install_command_preview() -> Option<Vec<String>> {
     let tools = ["brew", "apt-get", "dnf", "pacman", "wsl.exe"]
         .iter()
@@ -3451,5 +3500,45 @@ mod tests {
             Err(ProbeCommandError::SpawnOrIo)
         });
         assert!(matches!(outcome, TmuxProbeOutcome::Missing));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Linux/WSL argv 与 `sh -lc` 里的 sudo 都必须被识别，才能加无 TTY 超时。
+    #[test]
+    fn install_command_detects_sudo_argv_and_shell_string() {
+        assert!(install_command_uses_sudo(&[
+            "sudo".into(),
+            "apt-get".into(),
+            "install".into(),
+            "-y".into(),
+            "tmux".into()
+        ]));
+        assert!(install_command_uses_sudo(&[
+            "wsl.exe".into(),
+            "--exec".into(),
+            "sh".into(),
+            "-lc".into(),
+            "sudo apt-get install -y tmux".into()
+        ]));
+        assert!(!install_command_uses_sudo(&[
+            "brew".into(),
+            "install".into(),
+            "tmux".into()
+        ]));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     缺 capability 的 DTO 必须 unsupported 且不可安装。
+    #[test]
+    fn unsupported_status_is_not_installable() {
+        let status =
+            unsupported_dependency_status("capability_unsupported:workbench.dependency-install.v1");
+        assert_eq!(status.status, WorkbenchDependencyState::Unsupported);
+        assert!(!status.installable);
+        assert!(!status.available);
+        let encoded = serde_json::to_value(&status).expect("json");
+        let decoded: WorkbenchDependencyStatusDto =
+            serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded.status, WorkbenchDependencyState::Unsupported);
     }
 }

@@ -62,17 +62,14 @@ describe('agentHubApi peer context', () => {
     );
   });
 
-  test('inspectUserInstructionWorkspace peer device fails closed without invoke', async () => {
-    let thrown: unknown;
-    try {
-      await agentHubApi.inspectUserInstructionWorkspace({ deviceId: 'peer-1', projectRef: null });
-    } catch (reason) {
-      thrown = reason;
-    }
-    expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as Error).message).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    expect(mockInvoke).not.toHaveBeenCalled();
+  test('inspectUserInstructionWorkspace peer device invokes with deviceId', async () => {
+    mockInvoke.mockRejectedValueOnce(new Error('decode-not-under-test'));
+    await expect(
+      agentHubApi.inspectUserInstructionWorkspace({ deviceId: 'peer-1', projectRef: null }),
+    ).rejects.toThrow('decode-not-under-test');
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_inspect_user_instruction_workspace', {
+      deviceId: 'peer-1',
+    });
   });
 
   test('inspectUserInstructionWorkspace local project scope fails closed without user fallback', async () => {
@@ -91,19 +88,34 @@ describe('agentHubApi peer context', () => {
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
-  test('applyUserInstructionPlan peer context fails closed without local write', async () => {
-    let thrown: unknown;
-    try {
-      await agentHubApi.applyUserInstructionPlan({
+  test('applyUserInstructionPlan peer context invokes with deviceId', async () => {
+    mockInvoke.mockRejectedValueOnce(new Error('decode-not-under-test'));
+    await expect(
+      agentHubApi.applyUserInstructionPlan({
         planToken: 'p1',
         clientRequestId: 'c1',
         deviceId: 'peer-1',
-      });
-    } catch (reason) {
-      thrown = reason;
-    }
-    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
-    expect(mockInvoke).not.toHaveBeenCalled();
+      }),
+    ).rejects.toThrow('decode-not-under-test');
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_apply_user_instruction_plan', {
+      request: { planToken: 'p1', clientRequestId: 'c1' },
+      deviceId: 'peer-1',
+    });
+  });
+
+  test('analyzeInstructionOriginal peer context invokes with deviceId', async () => {
+    mockInvoke.mockResolvedValueOnce({ common: 'c', adapted: 'a', exclusive: 'e' });
+    await expect(
+      agentHubApi.analyzeInstructionOriginal({
+        originalMarkdown: '# hi',
+        agent: 'claude',
+        deviceId: 'peer-1',
+      }),
+    ).resolves.toEqual({ common: 'c', adapted: 'a', exclusive: 'e' });
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_analyze_instruction_original', {
+      request: { originalMarkdown: '# hi', agent: 'claude' },
+      deviceId: 'peer-1',
+    });
   });
 
   test('previewUserInstructionUpdate remote project fails closed', async () => {

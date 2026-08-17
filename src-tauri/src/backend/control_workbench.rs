@@ -803,7 +803,7 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(item)?)
         }
 
-        // ---- project notes（本机 SQLite，不代理远端磁盘）----
+        // ---- project notes（owning device SQLite；remote 由 for_state P2P）----
         "notes.get" => {
             let project_id = required_string(&payload, "projectId")?;
             let item = workbench::get_workbench_project_note_for_state(state, project_id).await?;
@@ -818,6 +818,56 @@ async fn dispatch_workbench_op(
                 .to_string();
             let item = workbench::save_workbench_project_note_for_state(state, project_id, content)
                 .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "banner.get" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item = workbench::get_workbench_banner_for_state(state, device_id).await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "banner.save" => {
+            let markdown = payload
+                .get("markdown")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AppError::validation("markdown required".to_string()))?
+                .to_string();
+            let device_id = optional_string(&payload, "deviceId");
+            let item =
+                workbench::save_workbench_banner_for_state(state, markdown, device_id).await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "dependency.check" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item =
+                crate::commands::workbench_dependencies::check_workbench_dependency_for_state(
+                    state, device_id,
+                )
+                .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "dependency.install" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item =
+                crate::commands::workbench_dependencies::install_workbench_dependency_for_state(
+                    state, device_id,
+                )
+                .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "dependency.status" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item = crate::commands::workbench_dependencies::get_workbench_dependency_install_status_for_state(
+                state, device_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "dependency.cancel" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item = crate::commands::workbench_dependencies::cancel_workbench_dependency_install_for_state(
+                state, device_id,
+            )
+            .await?;
             Ok(serde_json::to_value(item)?)
         }
 

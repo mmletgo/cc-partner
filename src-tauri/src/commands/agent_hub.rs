@@ -30,6 +30,12 @@ use crate::agent_hub::portable_actions::{
 use crate::agent_hub::portable_inventory::{PortableInventoryQuery, PortableInventorySnapshotDto};
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
+use crate::agent_hub::remote_client::{
+    apply_user_instruction_plan_for_state, inspect_user_instruction_workspace_for_state,
+    list_user_instruction_slot_versions_for_state, preview_user_instruction_setup_for_state,
+    preview_user_instruction_update_for_state, restore_user_instruction_slot_version_for_state,
+    save_user_instruction_blocks_for_state,
+};
 use crate::agent_hub::replication::pull::{
     apply_remote_project_portable_action, enable_remote_project,
     get_remote_project_portable_action, inspect_remote_project_portable_inventory,
@@ -54,9 +60,12 @@ use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionReque
 use crate::agent_hub::snapshot::importer::ResolvedProjectMapping;
 use crate::agent_hub::targets::TargetEnvironment;
 use crate::agent_hub::user_instructions::{
+    AdaptInstructionToOtherAgentsRequest, AdaptInstructionToOtherAgentsResult,
+    AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto,
-    UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
+    SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto, UserInstructionPlanDto,
+    UserInstructionWorkspaceDto,
 };
 use crate::backend::authority::RuntimeRole;
 #[cfg(test)]
@@ -121,16 +130,17 @@ pub async fn agent_hub_get_asset(
 }
 
 /// Business Logic: 用户级指令默认入口展示 sidecar owner 解析的真实 source chain。
-/// Code Logic: owner inspect / GuiClient control query。
+/// Code Logic: deviceId 非空则 P2P 到 owning peer；GuiClient 经 control 透传 deviceId。
 #[tauri::command]
 pub async fn agent_hub_inspect_user_instruction_workspace(
     state: State<'_, AppState>,
+    device_id: Option<String>,
 ) -> Result<UserInstructionWorkspaceDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_inspect_user_instruction_workspace());
+            .agent_hub_inspect_user_instruction_workspace(device_id.clone()));
     }
-    AgentHubService::inspect_user_instruction_workspace(state.inner()).await
+    inspect_user_instruction_workspace_for_state(state.inner(), device_id.as_deref()).await
 }
 
 /// Business Logic: 首次设置必须先生成绑定 revision/inventory/hash 的预览计划。
@@ -139,12 +149,13 @@ pub async fn agent_hub_inspect_user_instruction_workspace(
 pub async fn agent_hub_preview_user_instruction_setup(
     state: State<'_, AppState>,
     request: PreviewUserInstructionRequest,
+    device_id: Option<String>,
 ) -> Result<UserInstructionPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_preview_user_instruction_setup(request));
+            .agent_hub_preview_user_instruction_setup(request, device_id.clone()));
     }
-    AgentHubService::preview_user_instruction_setup(state.inner(), request).await
+    preview_user_instruction_setup_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
 /// Business Logic: 日常更新与首次设置共享相同的 preview 安全门闩。
@@ -153,12 +164,13 @@ pub async fn agent_hub_preview_user_instruction_setup(
 pub async fn agent_hub_preview_user_instruction_update(
     state: State<'_, AppState>,
     request: PreviewUserInstructionRequest,
+    device_id: Option<String>,
 ) -> Result<UserInstructionPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_preview_user_instruction_update(request));
+            .agent_hub_preview_user_instruction_update(request, device_id.clone()));
     }
-    AgentHubService::preview_user_instruction_update(state.inner(), request).await
+    preview_user_instruction_update_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
 /// Business Logic: 用户确认后才可应用短期 plan；当前写能力未认证时逐 target blocked。
@@ -167,12 +179,13 @@ pub async fn agent_hub_preview_user_instruction_update(
 pub async fn agent_hub_apply_user_instruction_plan(
     state: State<'_, AppState>,
     request: ApplyUserInstructionPlanRequest,
+    device_id: Option<String>,
 ) -> Result<ApplyUserInstructionPlanResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_apply_user_instruction_plan(request));
+            .agent_hub_apply_user_instruction_plan(request, device_id.clone()));
     }
-    AgentHubService::apply_user_instruction_plan(state.inner(), request).await
+    apply_user_instruction_plan_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
 /// Business Logic: 保存块文档是 cc-partner 内部编辑态，独立于 CLI 写入门禁，但仍受 V2 合同约束。
@@ -181,12 +194,13 @@ pub async fn agent_hub_apply_user_instruction_plan(
 pub async fn agent_hub_save_user_instruction_blocks(
     state: State<'_, AppState>,
     request: SaveUserInstructionBlocksRequest,
+    device_id: Option<String>,
 ) -> Result<UserInstructionCanonicalDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_save_user_instruction_blocks(request));
+            .agent_hub_save_user_instruction_blocks(request, device_id.clone()));
     }
-    AgentHubService::save_user_instruction_blocks(state.inner(), request).await
+    save_user_instruction_blocks_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
 /// Business Logic: 列出三槽历史（公共 / 适配 / 独有）的最近 20 条 history + 30 天 conflict 副本。
@@ -198,21 +212,14 @@ pub async fn agent_hub_save_user_instruction_blocks(
 pub async fn agent_hub_list_user_instruction_slot_versions(
     state: State<'_, AppState>,
     request: crate::agent_hub::user_instructions::ListUserInstructionSlotVersionsRequest,
+    device_id: Option<String>,
 ) -> Result<Vec<crate::commands::prompts::ContentVersionDto>, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_list_user_instruction_slot_versions(request));
+            .agent_hub_list_user_instruction_slot_versions(request, device_id.clone()));
     }
-    let versions = AgentHubService::list_user_instruction_slot_versions(
-        state.inner(),
-        request.asset_id,
-        request.slot,
-    )
-    .await?;
-    Ok(versions
-        .iter()
-        .map(crate::commands::prompts::content_version_to_dto)
-        .collect())
+    list_user_instruction_slot_versions_for_state(state.inner(), device_id.as_deref(), request)
+        .await
 }
 
 /// Business Logic: 把目标历史版本恢复到当前槽，写一条新 head；与 save_blocks 同口径 CAS。
@@ -224,12 +231,14 @@ pub async fn agent_hub_list_user_instruction_slot_versions(
 pub async fn agent_hub_restore_user_instruction_slot_version(
     state: State<'_, AppState>,
     request: crate::agent_hub::user_instructions::RestoreUserInstructionSlotRequest,
+    device_id: Option<String>,
 ) -> Result<UserInstructionCanonicalDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_restore_user_instruction_slot_version(request));
+            .agent_hub_restore_user_instruction_slot_version(request, device_id.clone()));
     }
-    AgentHubService::restore_user_instruction_slot_version(state.inner(), request).await
+    restore_user_instruction_slot_version_for_state(state.inner(), device_id.as_deref(), request)
+        .await
 }
 
 /// Business Logic: 保存整份指令。
@@ -823,59 +832,6 @@ pub async fn agent_hub_apply_cross_agent_full(
     Err(AppError::validation("CROSS_AGENT_FULL_ADAPT_UNAVAILABLE"))
 }
 
-/// 分析拆解请求（camelCase IPC）。
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnalyzeInstructionOriginalRequest {
-    pub original_markdown: String,
-    pub agent: String,
-}
-
-/// 分析拆解结果：公共 / 当前 agent 适配 / 当前 agent 独有。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnalyzeInstructionOriginalResult {
-    pub common: String,
-    pub adapted: String,
-    pub exclusive: String,
-}
-
-/// 适配到其他 agent 请求。
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdaptInstructionToOtherAgentsRequest {
-    pub source_agent: String,
-    pub adapted_markdown: String,
-}
-
-/// 适配到其他 agent 结果：destination → rewritten body。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdaptInstructionToOtherAgentsResult {
-    pub variants: BTreeMap<String, String>,
-}
-
-/// AI 辅助改写当前提示词槽请求。
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviseInstructionSlotRequest {
-    pub lane: String,
-    pub agent: String,
-    pub direction: String,
-    pub common_markdown: Option<String>,
-    pub exclusive_markdown: Option<String>,
-    pub adapted_variants: Option<BTreeMap<String, String>>,
-}
-
-/// AI 辅助改写结果：按 lane 只填对应字段。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviseInstructionSlotResult {
-    pub common: Option<String>,
-    pub exclusive: Option<String>,
-    pub variants: Option<BTreeMap<String, String>>,
-}
-
 /// 已通过校验的改写任务（按 lane 携带当前正文）。
 #[derive(Debug)]
 enum PreparedReviseLane {
@@ -1144,10 +1100,37 @@ fn push_unique_block(blocks: &mut Vec<String>, block: String) {
 }
 
 /// Business Logic: 独有页把原始文件拆成公共/适配/独有三部分（仅草稿，不写盘）。
-/// Code Logic: 本机 Claude CLI structured JSON；GuiClient 可直跑（只读 CLI，不改 sidecar 状态）。
+/// Code Logic: deviceId 非空则对端 HeadlessCompletion；本机 GuiClient 仍可直跑 CLI。
 #[tauri::command]
 pub async fn agent_hub_analyze_instruction_original(
     state: State<'_, AppState>,
+    request: AnalyzeInstructionOriginalRequest,
+    device_id: Option<String>,
+) -> Result<AnalyzeInstructionOriginalResult, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        if device_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+        {
+            return proxy_agent_hub!(state, |client| client
+                .agent_hub_analyze_instruction_original(request, device_id.clone()));
+        }
+        return analyze_instruction_original_for_state(state.inner(), request).await;
+    }
+    crate::agent_hub::remote_client::analyze_instruction_original_for_device(
+        state.inner(),
+        device_id.as_deref(),
+        request.clone(),
+        analyze_instruction_original_for_state(state.inner(), request),
+    )
+    .await
+}
+
+/// Business Logic: owner / P2P 路由共用本机拆解。
+/// Code Logic: 校验长度后跑 Claude structured JSON。
+pub(crate) async fn analyze_instruction_original_for_state(
+    state: &AppState,
     request: AnalyzeInstructionOriginalRequest,
 ) -> Result<AnalyzeInstructionOriginalResult, AppError> {
     let original = request.original_markdown.trim();
@@ -1249,10 +1232,37 @@ pub async fn agent_hub_analyze_instruction_original(
 }
 
 /// Business Logic: 适配页把当前 agent 适配正文改写为其他 agent 变体（仅草稿）。
-/// Code Logic: Claude CLI structured JSON → variants map（不含 source）。
+/// Code Logic: deviceId 非空则对端 HeadlessCompletion；本机仍直跑 CLI。
 #[tauri::command]
 pub async fn agent_hub_adapt_instruction_to_other_agents(
     state: State<'_, AppState>,
+    request: AdaptInstructionToOtherAgentsRequest,
+    device_id: Option<String>,
+) -> Result<AdaptInstructionToOtherAgentsResult, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        if device_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+        {
+            return proxy_agent_hub!(state, |client| client
+                .agent_hub_adapt_instruction_to_other_agents(request, device_id.clone()));
+        }
+        return adapt_instruction_to_other_agents_for_state(state.inner(), request).await;
+    }
+    crate::agent_hub::remote_client::adapt_instruction_to_other_agents_for_device(
+        state.inner(),
+        device_id.as_deref(),
+        request.clone(),
+        adapt_instruction_to_other_agents_for_state(state.inner(), request),
+    )
+    .await
+}
+
+/// Business Logic: owner / P2P 路由共用本机适配改写。
+/// Code Logic: 校验后跑 Claude structured JSON → variants。
+pub(crate) async fn adapt_instruction_to_other_agents_for_state(
+    state: &AppState,
     request: AdaptInstructionToOtherAgentsRequest,
 ) -> Result<AdaptInstructionToOtherAgentsResult, AppError> {
     let source = normalize_agent_target_token(&request.source_agent)?;
@@ -1342,10 +1352,37 @@ pub async fn agent_hub_adapt_instruction_to_other_agents(
 }
 
 /// Business Logic: 按用户方向改写当前 lane 槽（公共/独有单槽，适配覆盖三端）。
-/// Code Logic: 校验 → Claude structured JSON；GuiClient 可直跑（只读 CLI）。
+/// Code Logic: deviceId 非空则对端 HeadlessCompletion；本机仍直跑 CLI。
 #[tauri::command]
 pub async fn agent_hub_revise_instruction_slot(
     state: State<'_, AppState>,
+    request: ReviseInstructionSlotRequest,
+    device_id: Option<String>,
+) -> Result<ReviseInstructionSlotResult, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        if device_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|id| !id.is_empty())
+        {
+            return proxy_agent_hub!(state, |client| client
+                .agent_hub_revise_instruction_slot(request, device_id.clone()));
+        }
+        return revise_instruction_slot_for_state(state.inner(), request).await;
+    }
+    crate::agent_hub::remote_client::revise_instruction_slot_for_device(
+        state.inner(),
+        device_id.as_deref(),
+        request.clone(),
+        revise_instruction_slot_for_state(state.inner(), request),
+    )
+    .await
+}
+
+/// Business Logic: owner / P2P 路由共用本机槽改写。
+/// Code Logic: prepare → Claude structured JSON。
+pub(crate) async fn revise_instruction_slot_for_state(
+    state: &AppState,
     request: ReviseInstructionSlotRequest,
 ) -> Result<ReviseInstructionSlotResult, AppError> {
     let prepared = prepare_revise_instruction_slot(&request)?;
