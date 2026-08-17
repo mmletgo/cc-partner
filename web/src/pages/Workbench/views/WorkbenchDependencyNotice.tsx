@@ -93,8 +93,10 @@ export function WorkbenchDependencyNotice(props: WorkbenchDependencyNoticeProps)
 
   useEffect(() => {
     if (!remote || !deviceId) return undefined;
-    void check();
-    return undefined;
+    const timer = window.setTimeout(() => {
+      void check();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [check, deviceId, remote]);
 
   useEffect(() => {

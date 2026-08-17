@@ -35,9 +35,16 @@ export function BatteryWorkbenchScrim({
   const { t } = useTranslation('battery');
   if (!visible) return null;
   return (
-    <div className={styles.scrim} data-testid="battery-workbench-scrim" role="dialog" aria-modal="true">
+    <div
+      className={styles.scrim}
+      data-testid="battery-workbench-scrim"
+      role="region"
+      aria-labelledby="battery-workbench-scrim-title"
+    >
       <div className={styles.card}>
-        <h2 className={styles.title}>{t('scrim.title')}</h2>
+        <h2 id="battery-workbench-scrim-title" className={styles.title}>
+          {t('scrim.title')}
+        </h2>
         <p className={styles.body}>{t('scrim.body')}</p>
         <div className={styles.actions}>
           <Link to="/health" className={styles.linkReset}>

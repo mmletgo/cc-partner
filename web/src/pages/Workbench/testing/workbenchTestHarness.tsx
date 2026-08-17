@@ -234,7 +234,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@xterm/xterm', () => {
   /**
    * xterm Terminal 桩：覆盖 Workbench 实际使用的全部方法（loadAddon/open/onData/onCursorMove/
-   * attachCustomWheelEventHandler/onResize/dispose/buffer.active/write/options/getSelection），
+   * attachCustomWheelEventHandler/attachCustomKeyEventHandler/onResize/dispose/buffer.active/write/options/getSelection），
    * 让 TerminalPane effect 在 jsdom 下也能完成挂载。
    * getSelection 必须存在：visible recovery 会在 selection 非空时跳过，缺方法会炸 characterization。
    */
@@ -246,6 +246,7 @@ vi.mock('@xterm/xterm', () => {
     onData = vi.fn(() => ({ dispose: () => undefined }));
     onCursorMove = vi.fn(() => ({ dispose: () => undefined }));
     attachCustomWheelEventHandler = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
     loadAddon = vi.fn();
     open = vi.fn();
     write = vi.fn();

@@ -296,9 +296,7 @@ impl RemoteAgentHubClient {
 /// Business Logic: Preview 等请求 `deny_unknown_fields`，deviceId 不能留在领域 body。
 /// Code Logic: 删除 `deviceId` 后 trim；空串视为本机。
 pub fn take_device_id(payload: &mut Value) -> Option<String> {
-    let Some(obj) = payload.as_object_mut() else {
-        return None;
-    };
+    let obj = payload.as_object_mut()?;
     let raw = obj.remove("deviceId")?;
     let id = raw.as_str().unwrap_or("").trim();
     if id.is_empty() {
@@ -603,9 +601,10 @@ mod tests {
             url: "http://127.0.0.1:1".into(),
             capability: CAPABILITY_USER_INSTRUCTIONS_V1,
         });
-        assert_eq!(err.code(), "unavailable");
-        assert!(err
-            .to_string()
-            .contains("capability_unsupported:agent-hub.user-instructions.v1"));
+        assert_eq!(err.classify(), crate::error::AppErrorCategory::Unavailable);
+        assert_eq!(
+            err.code(),
+            "capability_unsupported:agent-hub.user-instructions.v1"
+        );
     }
 }

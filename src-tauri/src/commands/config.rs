@@ -151,6 +151,7 @@ fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
 ///
 /// Code Logic（这个函数做什么）:
 ///     Option 字段映射到 RuntimeConfigPatch。
+#[allow(clippy::too_many_arguments)]
 fn build_preference_patch(
     device_name: Option<String>,
     receive_dir: Option<String>,

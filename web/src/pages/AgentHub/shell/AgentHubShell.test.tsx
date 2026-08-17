@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
+import { allHubTargets } from '@/lib/agentCatalog';
 import i18n from '@/i18n';
 import {
   DEFAULT_AGENT_HUB_CONTEXT,
@@ -74,7 +75,11 @@ describe('AgentHubShell', () => {
     });
     expect(screen.getByTestId('agent-hub-agent-grok')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-agent-gemini')).toBeTruthy();
-    expect(screen.getByTestId('agent-hub-agent-switcher').querySelectorAll('[role="radio"]')).toHaveLength(5);
+    expect(screen.getByTestId('agent-hub-agent-cursor')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-agent-pi')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-agent-switcher').querySelectorAll('[role="radio"]')).toHaveLength(
+      allHubTargets().length,
+    );
   });
 
   test('click Codex emits onContextChange({ agent: "codex" }) in an agent-specific lane', () => {

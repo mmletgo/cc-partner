@@ -3323,13 +3323,12 @@ mod tests {
         let map = probe_support_map();
         assert_eq!(
             map.len(),
-            3,
-            "probe_support_map must cover all three targets"
+            AgentTarget::ALL.len(),
+            "probe_support_map must cover all hub targets"
         );
-        assert!(map.keys().all(|target| matches!(
-            target,
-            AgentTarget::Claude | AgentTarget::Codex | AgentTarget::OpenCode
-        )));
+        assert!(AgentTarget::ALL
+            .iter()
+            .all(|target| map.contains_key(target)));
     }
 
     /// R5 P2.3: `evaluate_target_support_flags` is exposed at `pub(crate)` so future

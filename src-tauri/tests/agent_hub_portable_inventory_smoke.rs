@@ -495,7 +495,7 @@ async fn l2_agent_hub_portable_parity_001_inventory_and_actions() {
 
     // ---- Real inspect 3×4 ----
     let (targets, items) = scan_portable_inventory_facts(&target_env, &scopes).expect("scan");
-    assert_eq!(targets.len(), 3);
+    assert_eq!(targets.len(), AgentTarget::ALL.len());
     for target in [
         AgentTarget::Claude,
         AgentTarget::Codex,

@@ -221,15 +221,16 @@ enum RefreshOutcome {
     Extracted { changed: bool },
 }
 
-/// 对一行 active session 抽取并更新缓存。
+/// 测试辅助：对一行 active session 抽取并报告 fingerprint 是否变化。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     owner worker 每 2s 刷新 working/needsInput/idle 的 tokens，文件未变则跳过重解析。
+///     单测需要断言不可抽取行不会写入缓存，不必走批量 refresh_active_rows。
 ///
 /// Code Logic（这个函数做什么）:
 ///     无 native / 不支持的 provider → false；文件 stamp 未变 → false；
 ///     抽取成功且 fingerprint 变化 → true。
-pub fn refresh_row(row: &AgentSessionRuntime) -> bool {
+#[cfg(test)]
+fn refresh_row(row: &AgentSessionRuntime) -> bool {
     matches!(
         refresh_row_inner(row),
         RefreshOutcome::Extracted { changed: true }

@@ -2063,7 +2063,7 @@ mod tests {
             ("a2", "p2", "codexVisible", Some("codex-1")),
             ("a3", "p3", "claudeCodeVisible", None),
         ] {
-            let mut input = AgentLedgerFinalizeInput {
+            let input = AgentLedgerFinalizeInput {
                 agent_session_id: id.into(),
                 project_id: pid.into(),
                 worktree_id: None,

@@ -275,6 +275,8 @@ export function AttentionProvider({
   }, [runLoad]);
 
   const mutationsRef = useRef(mutations);
+  // Latest-ref：事件处理器读当前 mutations；同帧 click 必须看到本轮 render 的 api。
+  // eslint-disable-next-line react-hooks/refs -- latest-ref pattern
   mutationsRef.current = mutations;
   const markChainRef = useRef(Promise.resolve());
 

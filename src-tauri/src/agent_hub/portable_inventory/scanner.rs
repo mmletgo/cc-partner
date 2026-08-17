@@ -1899,9 +1899,8 @@ fn item_capabilities(
         capabilities.can_disable = false;
         capabilities.can_uninstall = false;
         capabilities.can_install_to_source_target = false;
-        if capabilities.reason_code.is_none() {
-            capabilities.reason_code = Some("borrowed_runtime_origin".into());
-        }
+        // borrowed 比 CLI 认证门更具体：即使 grok 版本未知，也不能 Enable/Uninstall 外借资产。
+        capabilities.reason_code = Some("borrowed_runtime_origin".into());
     }
     capabilities
 }
@@ -2444,7 +2443,7 @@ enabled = false
         let (_tmp, env) = seed_all_targets_fixture();
         let scopes = user_and_projects(&env.home);
         let (targets, items) = scan_portable_inventory_facts(&env, &scopes).expect("scan");
-        assert_eq!(targets.len(), 3);
+        assert_eq!(targets.len(), AgentTarget::ALL.len());
 
         for target in [
             AgentTarget::Claude,
@@ -2689,7 +2688,7 @@ enabled = false
             true,
             true,
             true,
-            None,
+            Some("cli_version_unknown".into()),
             PortableOriginKind::Compatibility,
             false,
         );

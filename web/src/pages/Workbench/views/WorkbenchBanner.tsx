@@ -109,11 +109,14 @@ export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement 
   const draftRef = useRef(markdown);
   const savedRef = useRef(markdown);
 
+  if (!editing && draft !== markdown) {
+    setDraft(markdown);
+  }
+
   useEffect(() => {
     if (editing) return;
     savedRef.current = markdown;
     draftRef.current = markdown;
-    setDraft(markdown);
   }, [editing, markdown]);
 
   const persist = useCallback((next: string) => {

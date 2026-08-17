@@ -244,11 +244,7 @@ fn average_interval_ms(intervals: &[(i64, i64)]) -> Option<u64> {
             count += 1;
         }
     }
-    if count == 0 {
-        None
-    } else {
-        Some((sum as u64) / count)
-    }
+    (sum as u64).checked_div(count)
 }
 
 /// 从 Claude session JSONL 提取可靠 usage。

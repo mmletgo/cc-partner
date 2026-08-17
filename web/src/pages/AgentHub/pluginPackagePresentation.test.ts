@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, test } from 'vitest';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { PluginPackageReport } from '@/lib/types/agentHub';
 import {
   groupDeletePreview,
@@ -137,13 +138,7 @@ describe('pluginPackagePresentation', () => {
     const report = mixedReport();
     for (const component of report.components) {
       const ordered = orderedComponentTargets(component);
-      expect(ordered.map((o) => o.target)).toEqual([
-        'claude',
-        'codex',
-        'opencode',
-        'grok',
-        'gemini',
-      ]);
+      expect(ordered.map((o) => o.target)).toEqual(allHubTargets());
       expect(ordered.filter((o) => o.cell != null)).toHaveLength(3);
       expect(
         new Set(ordered.filter((o) => o.cell != null).map((o) => o.cell!.status)).size,

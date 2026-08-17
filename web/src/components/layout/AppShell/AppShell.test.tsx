@@ -187,6 +187,7 @@ describe('AppShell grouped navigation', () => {
       '/agent-hub',
       '/health',
       '/activity',
+      '/token-stats',
       '/provider-manager',
     ]);
     expect(hrefs.filter((href) => href === '/discover')).toHaveLength(0);
@@ -275,7 +276,7 @@ describe('AppShell grouped navigation', () => {
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
     const links = within(nav).getAllByRole('link');
-    expect(links).toHaveLength(11);
+    expect(links).toHaveLength(12);
 
     for (const link of links) {
       const tabIndex = link.getAttribute('tabindex');

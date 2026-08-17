@@ -61,16 +61,17 @@ impl DiscoveryRootKind {
 
     /// 是否匹配 inventory/adapter 的 `AssetKind` 过滤。
     fn matches_asset_kind(self, kind: AssetKind) -> bool {
-        match (self, kind) {
+        matches!(
+            (self, kind),
             (Self::Skill, AssetKind::Skill)
-            | (Self::Command, AssetKind::Command)
-            | (Self::Agent, AssetKind::Agent)
-            | (Self::Mcp, AssetKind::Mcp)
-            | (Self::Plugin | Self::PluginRegistry | Self::PluginMarketplace, AssetKind::Plugin) => {
-                true
-            }
-            _ => false,
-        }
+                | (Self::Command, AssetKind::Command)
+                | (Self::Agent, AssetKind::Agent)
+                | (Self::Mcp, AssetKind::Mcp)
+                | (
+                    Self::Plugin | Self::PluginRegistry | Self::PluginMarketplace,
+                    AssetKind::Plugin
+                )
+        )
     }
 }
 

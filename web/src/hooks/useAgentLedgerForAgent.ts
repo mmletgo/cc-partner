@@ -64,30 +64,30 @@ export function useAgentLedgerForAgent(
   agentSessionId: string | null | undefined,
   phase: AgentPhase | null | undefined,
 ): UseAgentLedgerForAgentResult {
+  const shouldFetch = Boolean(projectId && agentSessionId && isAgentTerminalPhase(phase));
+  const identityKey = `${projectId ?? ''}:${agentSessionId ?? ''}:${phase ?? ''}`;
   const [ledgerEntry, setLedgerEntry] = useState<AgentLedgerEntry | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(shouldFetch);
   const [error, setError] = useState<Error | null>(null);
+  const [seenKey, setSeenKey] = useState(identityKey);
   const requestSeqRef = useRef(0);
 
-  // Reset on project/agent/phase 身份变化
-  useEffect(() => {
+  if (seenKey !== identityKey) {
+    setSeenKey(identityKey);
     setLedgerEntry(null);
     setError(null);
-    setLoading(false);
-    requestSeqRef.current += 1;
-  }, [projectId, agentSessionId, phase]);
+    setLoading(shouldFetch);
+  }
 
   useEffect(() => {
     const seq = ++requestSeqRef.current;
-    if (!projectId || !agentSessionId || !isAgentTerminalPhase(phase)) {
+    if (!shouldFetch || !projectId || !agentSessionId) {
       return undefined;
     }
 
     let cancelled = false;
-    setLoading(true);
-    setError(null);
 
-    (async () => {
+    void (async () => {
       try {
         let matched: AgentLedgerEntry | null = null;
         let lastError: Error | null = null;
@@ -126,7 +126,7 @@ export function useAgentLedgerForAgent(
     return () => {
       cancelled = true;
     };
-  }, [projectId, agentSessionId, phase]);
+  }, [agentSessionId, phase, projectId, shouldFetch]);
 
   return { ledgerEntry, loading, error };
 }

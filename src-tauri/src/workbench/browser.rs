@@ -86,8 +86,7 @@ pub async fn discover_workbench_browser_targets(
         state
             .workbench_browser_repo
             .get_target(&project_id, worktree_id.as_deref())
-            .await?
-            .into_iter(),
+            .await?,
         probe_client.as_ref(),
     )
     .await;

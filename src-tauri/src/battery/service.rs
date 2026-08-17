@@ -375,6 +375,7 @@ pub async fn credit_explicit(
 ///
 /// Code Logic（这个函数做什么）:
 ///     日重置后按 `habit:{template_id}:` 计今日次数；达 cap 则不入账，否则走 `credit_explicit`。
+#[allow(clippy::too_many_arguments)]
 pub async fn credit_health_habit(
     repo: &BatteryRepo,
     config: &BatteryConfig,
