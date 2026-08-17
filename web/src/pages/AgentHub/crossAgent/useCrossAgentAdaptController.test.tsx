@@ -99,12 +99,12 @@ describe('useCrossAgentAdaptController', () => {
     );
 
     await waitFor(() => {
-      expect(result.current.destinationOptions).toEqual(['codex', 'opencode', 'grok', 'gemini', 'cursor']);
+      expect(result.current.destinationOptions).toEqual(['codex', 'opencode', 'grok', 'gemini', 'cursor', 'pi']);
     });
     act(() => result.current.toggleDestination('claude'));
     expect(result.current.destinations).not.toContain('claude');
     act(() => result.current.toggleDestination('codex'));
-    expect(result.current.destinations).toEqual(['opencode', 'grok', 'gemini', 'cursor']);
+    expect(result.current.destinations).toEqual(['opencode', 'grok', 'gemini', 'cursor', 'pi']);
   });
 
   test('peer and project contexts are preview-blocked', async () => {
@@ -131,7 +131,7 @@ describe('useCrossAgentAdaptController', () => {
 
   test('valid selective preview remains read-only', async () => {
     previewMock.mockResolvedValue(
-      previewResponse('claude', ['codex', 'opencode', 'grok', 'gemini', 'cursor']),
+      previewResponse('claude', ['codex', 'opencode', 'grok', 'gemini', 'cursor', 'pi']),
     );
     const { result } = renderHook(() =>
       useCrossAgentAdaptController({
@@ -147,7 +147,7 @@ describe('useCrossAgentAdaptController', () => {
     expect(previewMock).toHaveBeenCalledWith(
       expect.objectContaining({
         source: 'claude',
-        destinations: ['codex', 'opencode', 'grok', 'gemini', 'cursor'],
+        destinations: ['codex', 'opencode', 'grok', 'gemini', 'cursor', 'pi'],
         sourceMarkdown: 'Always run tests before commit.',
         scope: 'user',
       }),

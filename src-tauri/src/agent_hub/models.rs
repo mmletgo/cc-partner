@@ -34,17 +34,20 @@ pub enum AgentTarget {
     Gemini,
     /// Cursor CLI
     Cursor,
+    /// Pi Coding Agent
+    Pi,
 }
 
 impl AgentTarget {
     /// 全部 Hub target（与身份目录对齐）。
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
         Self::Grok,
         Self::Gemini,
         Self::Cursor,
+        Self::Pi,
     ];
 
     /// 稳定 wire/DB 字符串。
@@ -59,6 +62,7 @@ impl AgentTarget {
             Self::Grok => "grok",
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
+            Self::Pi => "pi",
         }
     }
 
@@ -74,6 +78,7 @@ impl AgentTarget {
             "grok" => Some(Self::Grok),
             "gemini" => Some(Self::Gemini),
             "cursor" => Some(Self::Cursor),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -87,6 +92,7 @@ impl AgentTarget {
             Self::Grok => "grok",
             Self::Gemini => "gemini",
             Self::Cursor => "agent",
+            Self::Pi => "pi",
         }
     }
 
@@ -98,6 +104,7 @@ impl AgentTarget {
             Self::Grok => "cc-partner.exclusive.md",
             Self::Gemini => "GEMINI.md",
             Self::Cursor => "cc-partner.exclusive.mdc",
+            Self::Pi => "cc-partner.exclusive.md",
         }
     }
 }
@@ -1410,7 +1417,8 @@ impl TargetDisableStrategy {
             | AgentTarget::OpenCode
             | AgentTarget::Grok
             | AgentTarget::Gemini
-            | AgentTarget::Cursor => Self::RemoveWithBindingRetained,
+            | AgentTarget::Cursor
+            | AgentTarget::Pi => Self::RemoveWithBindingRetained,
         }
     }
 }

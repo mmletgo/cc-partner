@@ -435,6 +435,7 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
                 .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
                 .ok()?
         }
+        AgentTarget::Pi => return None,
     };
     if owned.present {
         Some(value_content_hash(&owned.value))

@@ -645,7 +645,8 @@
       "opencode": "OpenCode",
       "grok": "Grok Build",
       "gemini": "Gemini CLI",
-      "cursor": "Cursor CLI"
+      "cursor": "Cursor CLI",
+      "pi": "Pi"
     },
     "scopeWorktree": "worktree",
     "groupRecent": "最近 · worktree {{name}}",
@@ -1008,7 +1009,8 @@
     "openCodeVisible": "OpenCode",
     "grokBuildVisible": "Grok Build",
     "geminiCliVisible": "Gemini CLI",
-    "cursorCliVisible": "Cursor CLI"
+    "cursorCliVisible": "Cursor CLI",
+    "piVisible": "Pi"
   },
   "openCodeBridge": {
     "title": "OpenCode runtime bridge",

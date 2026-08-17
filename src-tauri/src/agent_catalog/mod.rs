@@ -27,6 +27,8 @@ pub enum AgentId {
     Gemini,
     /// Cursor CLI（可执行 `agent`）
     Cursor,
+    /// Pi Coding Agent（可执行 `pi`）
+    Pi,
 }
 
 /// 一条身份登记。
@@ -127,6 +129,18 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_headless: true,
         executable_names: &["agent"],
     },
+    AgentIdentity {
+        id: AgentId::Pi,
+        wire: "pi",
+        display_name: "Pi",
+        hub_target: Some(AgentTarget::Pi),
+        runtime_provider: Some(AgentProviderId::PiVisible),
+        session_source: Some("pi"),
+        history_source: Some("pi"),
+        has_usage: true,
+        has_headless: true,
+        executable_names: &["pi"],
+    },
 ];
 
 impl AgentId {
@@ -191,9 +205,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_registers_six_agent_ids() {
-        assert_eq!(all_identities().len(), 6);
-        for wire in ["claude", "codex", "opencode", "grok", "gemini", "cursor"] {
+    fn catalog_registers_seven_agent_ids() {
+        assert_eq!(all_identities().len(), 7);
+        for wire in [
+            "claude", "codex", "opencode", "grok", "gemini", "cursor", "pi",
+        ] {
             assert!(AgentId::parse(wire).is_some(), "{wire}");
         }
     }
@@ -208,7 +224,7 @@ mod tests {
     #[test]
     fn generic_terminal_has_no_hub_or_product_id() {
         assert!(identity_by_runtime(AgentProviderId::GenericTerminal).is_none());
-        assert_eq!(all_hub_targets().count(), 6);
+        assert_eq!(all_hub_targets().count(), 7);
     }
 
     #[test]
@@ -244,6 +260,15 @@ mod tests {
         assert!(cursor.has_usage);
         assert!(cursor.has_headless);
         assert_eq!(cursor.executable_names, &["agent"]);
+
+        let pi = AgentId::Pi.identity();
+        assert_eq!(pi.hub_target, Some(AgentTarget::Pi));
+        assert_eq!(pi.runtime_provider, Some(AgentProviderId::PiVisible));
+        assert_eq!(pi.session_source, Some("pi"));
+        assert_eq!(pi.history_source, Some("pi"));
+        assert!(pi.has_usage);
+        assert!(pi.has_headless);
+        assert_eq!(pi.executable_names, &["pi"]);
     }
 
     #[test]

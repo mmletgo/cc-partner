@@ -56,6 +56,8 @@ function historySourceLabel(
       return t('ccHistory:sourceGemini');
     case 'cursor':
       return t('ccHistory:sourceCursor');
+    case 'pi':
+      return t('ccHistory:sourcePi');
     default:
       return t('ccHistory:sourceClaude');
   }

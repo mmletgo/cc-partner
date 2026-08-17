@@ -578,6 +578,7 @@ describe('useInstructionThreePaneController', () => {
       grok: 'unmanaged',
       gemini: 'unmanaged',
       cursor: 'unmanaged',
+      pi: 'unmanaged',
     });
     // backend preview 基于持久化 head 投影；前端只传 targetSelections/base/snapshot
     expect(previewArg?.commonContent).toBe('');

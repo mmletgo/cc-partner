@@ -659,6 +659,12 @@ pub fn render_discovery_before_edit(
 处理本目录（`{relative_key}`）前：读取仓库 `AGENTS.md`/`CLAUDE.md`，再读取 `.cursor/rules/`（`.mdc` alwaysApply）。\n"
             )
         }
+        AgentTarget::Pi => {
+            format!(
+                "## 分层发现（Pi）\n\n\
+处理本目录（`{relative_key}`）前：读取仓库 `AGENTS.md`/`CLAUDE.md`，再读取 `.pi/` 下的 cc-partner 专属文件。\n"
+            )
+        }
         AgentTarget::OpenCode => {
             format!(
                 "## 分层发现（OpenCode）\n\n\
@@ -755,6 +761,7 @@ pub fn compile_render(
         AgentTarget::Grok => "cc-partner.exclusive.md",
         AgentTarget::Gemini => "GEMINI.md",
         AgentTarget::Cursor => "cc-partner.exclusive.mdc",
+        AgentTarget::Pi => "cc-partner.exclusive.md",
     }
     .to_string();
 

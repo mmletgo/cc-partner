@@ -14,10 +14,17 @@ import type { AgentProviderId } from '@/lib/types/orchestrator';
 import type { CcHistorySource } from '@/lib/types/core';
 
 /** 产品级 Agent 身份。 */
-export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor';
+export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor' | 'pi';
 
 /** 会话搜索 source（与 history source 当前同形）。 */
-export type SessionSearchSource = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor';
+export type SessionSearchSource =
+  | 'claude'
+  | 'codex'
+  | 'opencode'
+  | 'grok'
+  | 'gemini'
+  | 'cursor'
+  | 'pi';
 
 /** 一条身份登记。 */
 export interface AgentIdentity {
@@ -105,6 +112,18 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['agent'],
+  },
+  {
+    id: 'pi',
+    wire: 'pi',
+    displayName: 'Pi',
+    hubTarget: 'pi',
+    runtimeProvider: 'piVisible',
+    sessionSource: 'pi',
+    historySource: 'pi',
+    hasUsage: true,
+    hasHeadless: true,
+    executableNames: ['pi'],
   },
 ];
 

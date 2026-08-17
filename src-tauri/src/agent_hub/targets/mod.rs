@@ -5,7 +5,7 @@
 //!     扫描/渲染指令文档（Gate A）以及 Skill/Command/Agent/MCP 可移植资产（Gate B Task 3）。
 //!
 //! Code Logic（这个模块做什么）:
-//!     定义 `AssetAdapter` trait 与共享 DTO；导出 paths 解析、portable 扫描 DTO 与六 target adapter。
+//!     定义 `AssetAdapter` trait 与共享 DTO；导出 paths 解析、portable 扫描 DTO 与七 target adapter。
 
 pub mod claude;
 pub mod codex;
@@ -14,6 +14,7 @@ pub mod gemini;
 pub mod grok;
 pub mod opencode;
 pub mod paths;
+pub mod pi;
 pub mod portable;
 pub(crate) mod tree_metadata;
 
@@ -34,6 +35,7 @@ pub use paths::{
     resolve_executable, OpenCodeHomePaths, TargetEnvironment, TargetHomePaths, TargetHomes,
     TargetPathResolver,
 };
+pub use pi::PiInstructionAdapter;
 pub use portable::{
     scan_disabled_command_markdown_dir, scan_disabled_skill_dirs, scan_plugin_components_readonly,
     stamp_parent_plugin, AssetRenderContext, DiscoveredPortableAsset, PortableAssetOrigin,
@@ -412,6 +414,7 @@ pub fn probe_target(target: AgentTarget, env: &TargetEnvironment) -> Result<Targ
         AgentTarget::Grok => GrokInstructionAdapter.probe(env),
         AgentTarget::Gemini => GeminiInstructionAdapter.probe(env),
         AgentTarget::Cursor => CursorInstructionAdapter.probe(env),
+        AgentTarget::Pi => PiInstructionAdapter.probe(env),
     }
 }
 

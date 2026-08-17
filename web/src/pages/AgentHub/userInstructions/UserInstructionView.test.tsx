@@ -65,6 +65,7 @@ function readOnlyManager(): UseUserInstructionManagerResult {
         grok: 'unmanaged',
         gemini: 'unmanaged',
         cursor: 'unmanaged',
+        pi: 'unmanaged',
       },
     },
     dirty: false,

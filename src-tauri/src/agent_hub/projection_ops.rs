@@ -23,7 +23,8 @@ use crate::agent_hub::support::{
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
     GeminiInstructionAdapter, GrokInstructionAdapter, InstructionRenderContext,
-    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
+    OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment, TargetPathResolver,
+    TargetProbe,
 };
 use crate::config_runtime::update_config_transactionally;
 use crate::error::AppError;
@@ -528,6 +529,7 @@ async fn resolve_target_path(
                 AgentTarget::Grok => homes.grok.config_root.join("rules"),
                 AgentTarget::Gemini => homes.gemini.config_root,
                 AgentTarget::Cursor => homes.cursor.config_root.join("rules"),
+                AgentTarget::Pi => homes.pi.config_root,
             };
             Ok(root.join(file_name))
         }
@@ -634,6 +636,7 @@ fn instruction_file_name(target: AgentTarget) -> &'static str {
         AgentTarget::Grok => "cc-partner.exclusive.md",
         AgentTarget::Gemini => "GEMINI.md",
         AgentTarget::Cursor => "cc-partner.exclusive.mdc",
+        AgentTarget::Pi => "cc-partner.exclusive.md",
     }
 }
 
@@ -859,6 +862,14 @@ fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> Tar
             executable: None,
             version: None,
             config_root: homes.cursor.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
+        AgentTarget::Pi => PiInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.pi.config_root,
             support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
             fingerprint: String::new(),
         }),

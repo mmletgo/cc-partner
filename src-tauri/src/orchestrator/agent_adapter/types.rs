@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     定义 `AgentProviderId`、`AgentCompletionContract`、`RunnerAttemptPolicy` 与解析/解析函数；
 //!     wire 值固定为
-//!     `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible|cursorCliVisible`。
+//!     `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible|cursorCliVisible|piVisible`。
 
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,8 @@ pub enum AgentProviderId {
     GeminiCliVisible,
     /// 可见 Cursor CLI 终端 Runner
     CursorCliVisible,
+    /// 可见 Pi Coding Agent 终端 Runner
+    PiVisible,
 }
 
 impl AgentProviderId {
@@ -68,6 +70,7 @@ impl AgentProviderId {
             Self::GrokBuildVisible => "grokBuildVisible",
             Self::GeminiCliVisible => "geminiCliVisible",
             Self::CursorCliVisible => "cursorCliVisible",
+            Self::PiVisible => "piVisible",
         }
     }
 
@@ -87,8 +90,9 @@ impl AgentProviderId {
             "grokBuildVisible" => Ok(Self::GrokBuildVisible),
             "geminiCliVisible" => Ok(Self::GeminiCliVisible),
             "cursorCliVisible" => Ok(Self::CursorCliVisible),
+            "piVisible" => Ok(Self::PiVisible),
             other => Err(AppError::generic(format!(
-                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible|cursorCliVisible）"
+                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible|grokBuildVisible|geminiCliVisible|cursorCliVisible|piVisible）"
             ))),
         }
     }
@@ -124,7 +128,8 @@ impl AgentProviderId {
             Self::GenericTerminal
             | Self::GrokBuildVisible
             | Self::GeminiCliVisible
-            | Self::CursorCliVisible => AgentCompletionContract::Manual,
+            | Self::CursorCliVisible
+            | Self::PiVisible => AgentCompletionContract::Manual,
             Self::OpenCodeVisible => AgentCompletionContract::HookEvent,
         }
     }
@@ -378,6 +383,7 @@ mod tests {
             "grokBuildVisible",
             "geminiCliVisible",
             "cursorCliVisible",
+            "piVisible",
         ] {
             let id = AgentProviderId::parse(value).unwrap();
             assert_eq!(id.as_str(), value);

@@ -1617,6 +1617,8 @@ pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
             | "gemini"
             | "cursorCliVisible"
             | "cursor"
+            | "piVisible"
+            | "pi"
     )
 }
 

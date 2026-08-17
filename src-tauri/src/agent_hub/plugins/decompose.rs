@@ -333,7 +333,7 @@ pub fn discover_plugin_source_for_target(
         AgentTarget::Claude => Some(".claude-plugin/plugin.json"),
         AgentTarget::Codex => Some(".codex-plugin/plugin.json"),
         AgentTarget::OpenCode => Some("package.json"),
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor => None,
+        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => None,
     };
     if let Some(rel) = manifest_rel {
         if let Ok(text) = fs::read_to_string(root.join(rel)) {
@@ -563,7 +563,7 @@ pub async fn inspect_plugin_source(
             )
             .await?;
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor => {
+        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
             collect_portable_children(source, &mut components, &mut claimed, objects).await?;
             collect_residual_groups(
                 source,

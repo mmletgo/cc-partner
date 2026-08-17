@@ -820,6 +820,7 @@ async fn resolve_install_root(
             AgentTarget::Grok => project_path.join(".grok"),
             AgentTarget::Gemini => project_path.join(".gemini"),
             AgentTarget::Cursor => project_path.join(".cursor"),
+            AgentTarget::Pi => project_path.join(".pi"),
         });
     }
     Ok(match item.target {
@@ -845,6 +846,7 @@ async fn resolve_install_root(
         AgentTarget::Cursor => std::env::var_os("CURSOR_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| env_home.join(".cursor")),
+        AgentTarget::Pi => env_home.join(".pi").join("agent"),
     })
 }
 
@@ -2747,6 +2749,9 @@ async fn install_payload_to_target(
                 AgentTarget::OpenCode => resolve_opencode_mcp_config_path(&root),
                 AgentTarget::Gemini => root.join("settings.json"),
                 AgentTarget::Cursor => root.join("mcp.json"),
+                AgentTarget::Pi => {
+                    return Ok(());
+                }
             };
             if let Ok(payload) = from_canonical_bytes(&bytes) {
                 if let PortableAssetPayload::Mcp(server) = payload {

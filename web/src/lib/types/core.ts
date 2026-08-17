@@ -457,7 +457,7 @@ export interface CcHistoryDevice {
 }
 
 /** Prompt 历史采集来源（与后端 claude_history.source 对齐） */
-export type CcHistorySource = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor';
+export type CcHistorySource = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor' | 'pi';
 
 /**
  * Prompt 历史采集——单条用户输入 prompt

@@ -340,6 +340,7 @@
     "openCodeVisible": "OpenCode",
     "grokBuildVisible": "Grok Build",
     "geminiCliVisible": "Gemini CLI",
-    "cursorCliVisible": "Cursor CLI"
+    "cursorCliVisible": "Cursor CLI",
+    "piVisible": "Pi"
   }
 }

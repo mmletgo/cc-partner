@@ -95,6 +95,7 @@ export const agentTargetDecoder: Decoder<AgentTarget> = enumDecoder('AgentTarget
   'grok',
   'gemini',
   'cursor',
+  'pi',
 ] as const);
 
 /**
@@ -124,6 +125,7 @@ const instructionBlockVariantsDecoder: Decoder<Partial<Record<AgentTarget, strin
     grok: optionalDecoder(stringDecoder),
     gemini: optionalDecoder(stringDecoder),
     cursor: optionalDecoder(stringDecoder),
+    pi: optionalDecoder(stringDecoder),
   });
 
 /**
@@ -363,6 +365,8 @@ const userInstructionTargetExtensionsDecoder: Decoder<
   opencode: optionalDecoder(stringDecoder),
   grok: optionalDecoder(stringDecoder),
   gemini: optionalDecoder(stringDecoder),
+  cursor: optionalDecoder(stringDecoder),
+  pi: optionalDecoder(stringDecoder),
 });
 
 /** User Instruction canonical decoder。 */

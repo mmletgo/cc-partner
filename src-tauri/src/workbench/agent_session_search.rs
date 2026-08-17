@@ -47,6 +47,7 @@ pub enum AgentSessionSource {
     Grok,
     Gemini,
     Cursor,
+    Pi,
 }
 
 impl AgentSessionSource {
@@ -62,6 +63,7 @@ impl AgentSessionSource {
             "grok" | "grok-build" | "grokbuild" => Some(Self::Grok),
             "gemini" | "gemini-cli" | "geminicli" => Some(Self::Gemini),
             "cursor" | "cursor-cli" | "cursorcli" => Some(Self::Cursor),
+            "pi" | "pi-coding-agent" | "picodingagent" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -75,6 +77,7 @@ impl AgentSessionSource {
             Self::Grok => "grok",
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
+            Self::Pi => "pi",
         }
     }
 }
@@ -1144,6 +1147,7 @@ pub fn build_resume_command(source: AgentSessionSource, session_id: &str) -> Str
         AgentSessionSource::Grok => format!("grok --resume {id}\n"),
         AgentSessionSource::Gemini => format!("gemini --resume {id}\n"),
         AgentSessionSource::Cursor => format!("agent --resume {id}\n"),
+        AgentSessionSource::Pi => format!("pi --session {id}\n"),
     }
 }
 
@@ -1156,6 +1160,7 @@ pub async fn check_agent_cli_available(source: AgentSessionSource) -> Result<(),
         AgentSessionSource::Grok => "grok",
         AgentSessionSource::Gemini => "gemini",
         AgentSessionSource::Cursor => "agent",
+        AgentSessionSource::Pi => "pi",
     };
     let mut child = Command::new(exe)
         .arg("--version")
@@ -1207,6 +1212,10 @@ mod tests {
         assert_eq!(
             AgentSessionSource::parse("cursor"),
             Some(AgentSessionSource::Cursor)
+        );
+        assert_eq!(
+            AgentSessionSource::parse("pi"),
+            Some(AgentSessionSource::Pi)
         );
         assert_eq!(AgentSessionSource::parse("antigravity"), None);
     }

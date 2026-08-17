@@ -185,7 +185,8 @@
         "opencode": "OpenCode 专属",
         "grok": "Grok Build 专属",
         "gemini": "Gemini CLI 专属",
-        "cursor": "Cursor CLI 专属"
+        "cursor": "Cursor CLI 专属",
+        "pi": "Pi 专属"
       },
       "placeholders": {
         "common": "写下希望所有已纳管 Agent 遵循的指令…",
@@ -194,7 +195,8 @@
         "opencode": "仅 OpenCode 需要的补充指令…",
         "grok": "仅 Grok Build 需要的补充指令…",
         "gemini": "仅 Gemini CLI 需要的补充指令…",
-        "cursor": "仅 Cursor CLI 需要的补充指令…"
+        "cursor": "仅 Cursor CLI 需要的补充指令…",
+        "pi": "仅 Pi 需要的补充指令…"
       }
     },
     "target": {
@@ -334,7 +336,8 @@
     "opencode": "OpenCode",
     "grok": "Grok Build",
     "gemini": "Gemini CLI",
-    "cursor": "Cursor CLI"
+    "cursor": "Cursor CLI",
+    "pi": "Pi"
   },
   "kinds": {
     "instruction": "指令",
@@ -613,7 +616,8 @@
         "opencode": "OpenCode",
         "grok": "Grok Build",
         "gemini": "Gemini CLI",
-        "cursor": "Cursor CLI"
+        "cursor": "Cursor CLI",
+        "pi": "Pi"
       },
       "scopeFilter": {
         "all": "全部作用域",
@@ -790,7 +794,8 @@
       "opencode": "OpenCode",
       "grok": "Grok Build",
       "gemini": "Gemini CLI",
-      "cursor": "Cursor CLI"
+      "cursor": "Cursor CLI",
+      "pi": "Pi"
     },
     "destination": {
       "sameAsClaude": "目标：Claude（同类 Agent）",
@@ -798,7 +803,8 @@
       "sameAsOpenCode": "目标：OpenCode（同类 Agent）",
       "sameAsGrok": "目标：Grok Build（同类 Agent）",
       "sameAsGemini": "目标：Gemini CLI（同类 Agent）",
-      "sameAsCursor": "目标：Cursor CLI（同类 Agent）"
+      "sameAsCursor": "目标：Cursor CLI（同类 Agent）",
+      "sameAsPi": "目标：Pi（同类 Agent）"
     },
     "policy": {
       "skipExisting": "跳过已有",

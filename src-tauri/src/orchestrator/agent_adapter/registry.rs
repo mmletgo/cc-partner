@@ -464,6 +464,7 @@ impl AgentAdapterRegistry {
             AgentProviderId::CursorCliVisible,
             Arc::new(super::cursor_cli::CursorCliAdapter),
         );
+        adapters.insert(AgentProviderId::PiVisible, Arc::new(super::pi::PiAdapter));
         Self {
             adapters,
             probe_cache: Mutex::new(HashMap::new()),
@@ -534,6 +535,7 @@ impl AgentAdapterRegistry {
             AgentProviderId::GrokBuildVisible,
             AgentProviderId::GeminiCliVisible,
             AgentProviderId::CursorCliVisible,
+            AgentProviderId::PiVisible,
         ];
         order.into_iter().map(|id| self.probe_cached(id)).collect()
     }
@@ -589,6 +591,7 @@ mod tests {
             AgentProviderId::GrokBuildVisible,
             AgentProviderId::GeminiCliVisible,
             AgentProviderId::CursorCliVisible,
+            AgentProviderId::PiVisible,
         ] {
             assert_eq!(reg.get(id).unwrap().provider_id(), id);
         }

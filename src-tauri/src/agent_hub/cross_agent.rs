@@ -322,7 +322,7 @@ fn default_user_instruction_path(
         AgentTarget::Claude => homes.claude.config_root.join("CLAUDE.md"),
         AgentTarget::Codex => homes.codex.config_root.join("AGENTS.md"),
         AgentTarget::OpenCode => homes.opencode.config_root.join("AGENTS.md"),
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor => {
+        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
             homes.default_user_instruction_path(target)
         }
     }

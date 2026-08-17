@@ -160,6 +160,8 @@ function sessionSearchAgentLabel(
       return t('workbench:sessionSearch.agents.gemini');
     case 'cursor':
       return t('workbench:sessionSearch.agents.cursor');
+    case 'pi':
+      return t('workbench:sessionSearch.agents.pi');
     default:
       return t('workbench:sessionSearch.agents.claude');
   }

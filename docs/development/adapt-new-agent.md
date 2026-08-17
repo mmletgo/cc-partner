@@ -2,7 +2,7 @@
 
 > 给下一次「再适配一种 Agent」用。本文是落地清单：先锁身份，再按面接线，最后用编译器与 grep 清漏网。
 >
-> 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
+> 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
 >
 > 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
 
@@ -260,7 +260,27 @@ CARGO_TARGET_DIR=/tmp/cc-partner-agent-check cargo check --locked --lib --tests
 - 会话搜索 tab 把 grok/gemini/cursor 显示成 Claude
 - Prompt 历史 `sourceCursor` 文案
 
-## 8. 明确不要做的
+## 8. 实例：Pi（2026-08-17）
+
+当时按 Grok 型接入，作为第七身份。决策与结果：
+
+| 项 | 取值 |
+|----|------|
+| wire / 显示名 / CLI | `pi` / Pi / `pi` |
+| home | `~/.pi/agent`（官方目录；文档无覆盖 env，未臆造 `PI_HOME`） |
+| 公共槽 | 不写 `AGENTS.md` |
+| 适配 / 独有 | `.pi/cc-partner.adapted.md` 与 `cc-partner.exclusive.md`（Pi 无官方 rules 引擎；单一落点，不双写 `APPEND_SYSTEM.md`） |
+| 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `AGENTS.override.md` / `.pi/SYSTEM.md`；绝不把 `~/.claude` 当 Pi native |
+| Portable | `.pi/skills`、`~/.pi/agent/skills`；无内建 MCP，不伪造 `mcp.json` |
+| Runtime | `piVisible`；stdin prompt；`pi --session {id}`；Manual；Fresh |
+| 会话搜索 | 已登记；v1 `unavailable`（JSONL 布局未认证） |
+| 用量 | 已登记；extract = `None` |
+| 历史 collector | 未做；`historySource: 'pi'` 筛选可为空 |
+| 优化器 | catalog `hasHeadless`，设置页仍仅 claude+grok |
+| Hub 原生写 | support-manifest 全 blocked（同 Grok/Gemini/Cursor） |
+| cc-switch | 未扩展 |
+
+## 9. 明确不要做的
 
 - 不要为了「看起来对称」去猜 session 目录或 usage JSON 字段
 - 不要把 GUI 二进制（如 `cursor`）当 CLI

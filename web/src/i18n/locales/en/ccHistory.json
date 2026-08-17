@@ -18,6 +18,7 @@
   "sourceGrok": "Grok Build",
   "sourceGemini": "Gemini CLI",
   "sourceCursor": "Cursor CLI",
+  "sourcePi": "Pi",
   "projectSearchPlaceholder": "Search projects…",
   "projectSearchAriaLabel": "Search Prompt history projects",
   "projectSearchCount_one": "{{count}} project matched",

@@ -14,6 +14,7 @@ pub mod gemini_cli;
 pub mod generic_terminal;
 pub mod grok_build;
 pub mod opencode;
+pub mod pi;
 pub mod registry;
 pub mod types;
 

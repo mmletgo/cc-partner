@@ -141,6 +141,8 @@ pub struct TargetHomes {
     pub gemini: TargetHomePaths,
     /// Cursor CLI 配置根（默认 `~/.cursor`）
     pub cursor: TargetHomePaths,
+    /// Pi Coding Agent 配置根（默认 `~/.pi/agent`）
+    pub pi: TargetHomePaths,
 }
 
 /// 目标路径解析器。
@@ -172,6 +174,7 @@ impl TargetPathResolver {
             grok: resolve_grok_home(env),
             gemini: resolve_gemini_home(env),
             cursor: resolve_cursor_home(env),
+            pi: resolve_pi_home(env),
         }
     }
 }
@@ -274,6 +277,18 @@ fn resolve_cursor_home(env: &TargetEnvironment) -> TargetHomePaths {
     }
 }
 
+/// 解析 Pi Coding Agent 配置根。
+///
+/// Business Logic: 官方目录是 `~/.pi/agent`；文档未提供覆盖 env，禁止臆造 `PI_HOME`。
+/// Code Logic: 固定 `home/.pi/agent`；skills 在 config_root/skills。
+fn resolve_pi_home(env: &TargetEnvironment) -> TargetHomePaths {
+    let config_root = env.home.join(".pi").join("agent");
+    TargetHomePaths {
+        skill_compat_root: Some(config_root.join("skills")),
+        config_root,
+    }
+}
+
 impl TargetHomes {
     /// 用户级指令默认落点。
     ///
@@ -299,6 +314,7 @@ impl TargetHomes {
                 .config_root
                 .join("rules")
                 .join("cc-partner.exclusive.mdc"),
+            AgentTarget::Pi => self.pi.config_root.join("cc-partner.exclusive.md"),
         }
     }
 }
@@ -650,6 +666,7 @@ mod tests {
             homes.opencode.config_file,
             PathBuf::from("/tmp/home/.config/opencode/opencode.json")
         );
+        assert_eq!(homes.pi.config_root, PathBuf::from("/tmp/home/.pi/agent"));
     }
 
     #[test]

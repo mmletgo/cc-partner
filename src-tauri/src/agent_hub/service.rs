@@ -24,7 +24,7 @@ use crate::agent_hub::project_scope::{
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
     GeminiInstructionAdapter, GrokInstructionAdapter, OpenCodeInstructionAdapter,
-    TargetEnvironment,
+    PiInstructionAdapter, TargetEnvironment,
 };
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::{self, AGENT_HUB_API_VERSION};
@@ -1892,6 +1892,7 @@ fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
         (Box::new(GrokInstructionAdapter), AgentTarget::Grok),
         (Box::new(GeminiInstructionAdapter), AgentTarget::Gemini),
         (Box::new(CursorInstructionAdapter), AgentTarget::Cursor),
+        (Box::new(PiInstructionAdapter), AgentTarget::Pi),
     ];
     let mut map = BTreeMap::new();
     for (adapter, target) in adapters {
@@ -3254,7 +3255,8 @@ mod tests {
                 | crate::agent_hub::models::AgentTarget::Codex
                 | crate::agent_hub::models::AgentTarget::Grok
                 | crate::agent_hub::models::AgentTarget::Gemini
-                | crate::agent_hub::models::AgentTarget::Cursor => {
+                | crate::agent_hub::models::AgentTarget::Cursor
+                | crate::agent_hub::models::AgentTarget::Pi => {
                     assert!(
                         matches!(p.support.as_str(), "supported" | "scanOnly" | "unsupported"),
                         "unexpected support={} for {}",

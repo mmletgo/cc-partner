@@ -205,7 +205,8 @@
       "openCodeVisible": "OpenCode (visible)",
       "grokBuildVisible": "Grok Build (visible)",
       "geminiCliVisible": "Gemini CLI (visible)",
-      "cursorCliVisible": "Cursor CLI (visible)"
+      "cursorCliVisible": "Cursor CLI (visible)",
+      "piVisible": "Pi (visible)"
     },
     "bridgeStatus": {
       "ready": "Bridge ready",
