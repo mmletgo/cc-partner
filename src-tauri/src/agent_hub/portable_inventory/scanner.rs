@@ -807,7 +807,7 @@ fn scan_plugin_packages(
             } else {
                 action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
             };
-            let item = PortableInventoryItemDto {
+            let mut item = PortableInventoryItemDto {
                 inventory_item_id: inv_id.clone(),
                 target,
                 loaded_by: target,
@@ -855,6 +855,7 @@ fn scan_plugin_packages(
                 mcp_credential: None,
                 store: PortableStoreFactDto::default(),
             };
+            apply_unopted_readonly_store_caps(&mut item, can_mutate_scope);
             // seen 去重：与 discovered_to_item 同一套 disabled-wins 合并策略。
             match seen.get(&inv_id).copied() {
                 None => {
@@ -1676,6 +1677,7 @@ fn discovered_to_item(
         store,
     };
     apply_escape_link_repair_capability(&mut item);
+    apply_unopted_readonly_store_caps(&mut item, can_mutate_scope);
 
     // seen 去重：按 inv_id 索引已存在 item。
     // 同一逻辑资产在 active/disabled 路径下产出相同 id（路径无关 source_identity）；
@@ -2047,15 +2049,23 @@ fn item_capabilities(
     reason: Option<String>,
     borrowed: bool,
     origin_kind: PortableOriginKind,
-    native_output_candidate: bool,
+    _native_output_candidate: bool,
     store: &PortableStoreFactDto,
     _kind_for_store: PortableAssetKind,
 ) -> PortableInventoryItemCapabilitiesDto {
     let store_kind = kind.supports_portable_store();
     let store_write = store_kind
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Attach);
-    let can_toggle_enable = can_enable_mutation && enable_semantics && actual_enabled.is_some();
-    let can_toggle_disable = can_disable_mutation && enable_semantics && actual_enabled.is_some();
+    // Skill/Command 生命周期改走仓库：迁入 / 附加 / 卸下 / 彻底删除。
+    // 启停与卸载只留给 Plugin（viewing 开关）和 MCP（各家配置 leaf）。
+    let can_toggle_enable = !store_kind
+        && can_enable_mutation
+        && enable_semantics
+        && actual_enabled.is_some();
+    let can_toggle_disable = !store_kind
+        && can_disable_mutation
+        && enable_semantics
+        && actual_enabled.is_some();
     let can_enable = can_toggle_enable
         && actual_enabled == Some(false)
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Enable);
@@ -2065,7 +2075,8 @@ fn item_capabilities(
     let mut capabilities = PortableInventoryItemCapabilitiesDto {
         can_enable,
         can_disable,
-        can_uninstall: can_uninstall_mutation
+        can_uninstall: !store_kind
+            && can_uninstall_mutation
             && supports_direct_local_action(
                 uninstall_target,
                 kind,
@@ -2075,12 +2086,15 @@ fn item_capabilities(
         // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
         can_adopt: false,
         can_install_to_source_target: false,
+        // 未进仓库的独立 Skill/Command 都应能迁入，含 ~/.agents、兼容根、legacy。
+        // Plugin 组件真树仍在包内，不得单独迁入。
         can_migrate_to_store: store_write
             && store.store_id.is_none()
-            && native_output_candidate
             && matches!(
                 origin_kind,
-                PortableOriginKind::Native | PortableOriginKind::Plugin
+                PortableOriginKind::Native
+                    | PortableOriginKind::LegacyStandalone
+                    | PortableOriginKind::Compatibility
             ),
         can_attach: store_write && store.store_id.is_some() && !store.store_attached,
         can_detach: store_write && store.store_attached,
@@ -2126,11 +2140,25 @@ fn apply_escape_link_repair_capability(item: &mut PortableInventoryItemDto) {
     item.capabilities.can_install_to_source_target = false;
 }
 
-/// 按 origin 决定启停门闩：plugin 启停看当前 Agent，卸载/技能移动看所有者。
+/// 未 opt-in 项目只读：仓库动作同样不得露出。
+///
+/// Business Logic: 项目未接入 Hub 时不得迁入/附加/卸下/销毁仓库真树。
+/// Code Logic: `can_mutate_scope=false` 时关掉全部 store mutation 旗标。
+fn apply_unopted_readonly_store_caps(item: &mut PortableInventoryItemDto, can_mutate_scope: bool) {
+    if can_mutate_scope {
+        return;
+    }
+    item.capabilities.can_migrate_to_store = false;
+    item.capabilities.can_attach = false;
+    item.capabilities.can_detach = false;
+    item.capabilities.can_destroy_store = false;
+}
+
+/// 按 origin 决定写盘门闩：plugin 启停看当前 Agent，卸载/技能移动看所有者。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     每个 Agent 有自己的 plugin 开关；借用包不得拿所有者标记当当前 Agent 已关。
-///     卸载仍改所有者磁盘。Skill 启停仍是所有者目录语义。
+///     卸载仍改所有者磁盘。Skill/Command 迁入仓库仍走所有者目录。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Plugin 借用项：Enable/Disable → viewing allowlist；Uninstall → owner allowlist。
@@ -2722,8 +2750,9 @@ enabled = false
             PortableAssetKind::Skill,
         );
 
-        assert!(capabilities.can_disable);
-        assert!(capabilities.can_uninstall);
+        assert!(!capabilities.can_disable);
+        assert!(!capabilities.can_uninstall);
+        assert!(capabilities.can_migrate_to_store);
         assert!(capabilities.reason_code.is_none());
     }
 
@@ -2847,6 +2876,27 @@ enabled = false
             active.capabilities.can_migrate_to_store,
             "native Skill remains eligible for portable-store migrate"
         );
+        assert!(
+            !active.capabilities.can_enable && !active.capabilities.can_disable,
+            "Skill/Command no longer expose enable/disable; store lifecycle replaced them"
+        );
+        let agents_skill = items
+            .iter()
+            .find(|i| {
+                i.target == AgentTarget::Codex
+                    && i.kind == PortableAssetKind::Skill
+                    && i.native_id == "review"
+                    && i.source_path
+                        .as_deref()
+                        .is_some_and(|p| p.contains(".agents"))
+            })
+            .expect("codex ~/.agents skill");
+        assert!(
+            agents_skill.capabilities.can_migrate_to_store,
+            "~/.agents Skill must be eligible to migrate into portable-store"
+        );
+        assert!(!agents_skill.capabilities.can_disable);
+        assert!(!agents_skill.capabilities.can_detach);
         let wire = serde_json::to_value(cred).unwrap();
         assert!(!wire.to_string().contains("plain-fixture"));
 
@@ -2986,6 +3036,7 @@ enabled = false
         assert!(!unopted.capabilities.can_enable);
         assert!(!unopted.capabilities.can_disable);
         assert!(!unopted.capabilities.can_uninstall);
+        assert!(!unopted.capabilities.can_migrate_to_store);
         assert!(!unopted.capabilities.can_adopt);
         assert_eq!(
             unopted.capabilities.reason_code.as_deref(),
@@ -3020,8 +3071,10 @@ enabled = false
             &PortableStoreFactDto::default(),
             PortableAssetKind::Skill,
         );
-        assert!(caps.can_disable);
-        assert!(caps.can_uninstall);
+        assert!(!caps.can_enable);
+        assert!(!caps.can_disable);
+        assert!(!caps.can_uninstall);
+        assert!(caps.can_migrate_to_store);
         assert!(!caps.can_adopt);
     }
 
@@ -3044,8 +3097,10 @@ enabled = false
             PortableAssetKind::Skill,
         );
         assert!(!caps.can_enable);
-        assert!(caps.can_disable);
-        assert!(caps.can_uninstall);
+        assert!(!caps.can_disable);
+        assert!(!caps.can_uninstall);
+        assert!(caps.can_migrate_to_store);
+        assert!(!caps.can_detach);
         assert!(!caps.can_install_to_source_target);
         assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
     }
@@ -3071,7 +3126,53 @@ enabled = false
         assert!(!caps.can_enable);
         assert!(!caps.can_disable);
         assert!(!caps.can_uninstall);
+        assert!(!caps.can_migrate_to_store);
         assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
+    }
+
+    #[test]
+    fn legacy_and_shared_skills_migrate_instead_of_toggle() {
+        let agents = item_capabilities(
+            AgentTarget::Codex,
+            AgentTarget::Codex,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            true,
+            true,
+            None,
+            false,
+            PortableOriginKind::LegacyStandalone,
+            false,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
+        );
+        assert!(agents.can_migrate_to_store);
+        assert!(!agents.can_enable);
+        assert!(!agents.can_disable);
+        assert!(!agents.can_uninstall);
+        assert!(!agents.can_detach);
+
+        let plugin_component = item_capabilities(
+            AgentTarget::Claude,
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            true,
+            true,
+            None,
+            false,
+            PortableOriginKind::Plugin,
+            true,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
+        );
+        assert!(!plugin_component.can_migrate_to_store);
+        assert!(!plugin_component.can_enable);
+        assert!(!plugin_component.can_disable);
     }
 
     #[test]

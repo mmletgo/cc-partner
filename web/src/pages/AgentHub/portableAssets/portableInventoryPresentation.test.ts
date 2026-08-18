@@ -92,6 +92,13 @@ const catalog: PortableInventoryItemDto[] = [
     target: 'claude',
     actualEnabled: true,
     managementState: 'hubManaged',
+    capabilities: {
+      ...baseCapabilities,
+      canEnable: false,
+      canDisable: false,
+      canUninstall: false,
+      canMigrateToStore: true,
+    },
   }),
   makeItem({
     inventoryItemId: 'codex-skill-beta',
@@ -439,7 +446,7 @@ describe('portableInventoryPresentation primary action', () => {
     expect(resolvePortablePrimaryAction(unmanagedAdoptOnly, healthyCtx)).not.toBe('adopt');
     expect(resolvePortablePrimaryAction(unmanagedAdoptOnly, healthyCtx)).toBeNull();
 
-    // 后端已 ensure_managed 后：unmanaged 残留但具备 enable/disable 时直接启停
+    // 后端已 ensure_managed 后：unmanaged 残留但具备迁入仓库时直接走仓库
     const unmanagedAlreadyManaged = makeItem({
       inventoryItemId: 'codex-skill-managed-path',
       kind: 'skill',
@@ -450,16 +457,19 @@ describe('portableInventoryPresentation primary action', () => {
       capabilities: {
         ...baseCapabilities,
         canAdopt: true,
-        canEnable: true,
+        canEnable: false,
         canDisable: false,
+        canMigrateToStore: true,
       },
     });
     expect(needsPortableEnsureManagedRefresh(unmanagedAlreadyManaged)).toBe(false);
-    expect(resolvePortablePrimaryAction(unmanagedAlreadyManaged, healthyCtx)).toBe('enable');
+    expect(resolvePortablePrimaryAction(unmanagedAlreadyManaged, healthyCtx)).toBe(
+      'migrateToStore',
+    );
     expect(resolvePortablePrimaryAction(unmanagedAlreadyManaged, healthyCtx)).not.toBe('adopt');
 
     const enabled = catalog.find((i) => i.inventoryItemId === 'claude-skill-alpha')!;
-    expect(resolvePortablePrimaryAction(enabled, healthyCtx)).toBe('disable');
+    expect(resolvePortablePrimaryAction(enabled, healthyCtx)).toBe('migrateToStore');
 
     const disabled = makeItem({
       inventoryItemId: 'claude-skill-off',
@@ -467,9 +477,14 @@ describe('portableInventoryPresentation primary action', () => {
       nativeId: 'off',
       actualEnabled: false,
       managementState: 'hubManaged',
-      capabilities: { ...baseCapabilities, canEnable: true, canDisable: false },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canMigrateToStore: true,
+      },
     });
-    expect(resolvePortablePrimaryAction(disabled, healthyCtx)).toBe('enable');
+    expect(resolvePortablePrimaryAction(disabled, healthyCtx)).toBe('migrateToStore');
   });
 
   test('stale / mutationBlocked / unsupported / locked never expose mutation action', () => {
@@ -516,8 +531,8 @@ describe('portableInventoryPresentation primary action', () => {
 
   test('installToSourceTarget is available when capability allows and no enable/disable', () => {
     const item = makeItem({
-      inventoryItemId: 'claude-skill-install',
-      kind: 'skill',
+      inventoryItemId: 'claude-mcp-install',
+      kind: 'mcp',
       nativeId: 'install-me',
       actualEnabled: null,
       managementState: 'hubManaged',
@@ -542,10 +557,10 @@ describe('portableInventoryPresentation row actions', () => {
     lockedItemIds: new Set(),
   };
 
-  test('enabled item with canDisable+canUninstall exposes disable then uninstall', () => {
+  test('enabled plugin with canDisable+canUninstall exposes disable then uninstall', () => {
     const enabled = makeItem({
-      inventoryItemId: 'claude-skill-on',
-      kind: 'skill',
+      inventoryItemId: 'claude-plugin-on',
+      kind: 'plugin',
       nativeId: 'on',
       actualEnabled: true,
       capabilities: {
@@ -558,10 +573,10 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable', 'uninstall']);
   });
 
-  test('disabled item with canEnable+canUninstall exposes enable then uninstall', () => {
+  test('disabled plugin with canEnable+canUninstall exposes enable then uninstall', () => {
     const disabled = makeItem({
-      inventoryItemId: 'claude-skill-off',
-      kind: 'skill',
+      inventoryItemId: 'claude-plugin-off',
+      kind: 'plugin',
       nativeId: 'off',
       actualEnabled: false,
       capabilities: {
@@ -574,10 +589,10 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(disabled, healthyCtx)).toEqual(['enable', 'uninstall']);
   });
 
-  test('actualEnabled=null with canInstallToSourceTarget+canUninstall exposes install then uninstall', () => {
+  test('actualEnabled=null mcp with canInstallToSourceTarget+canUninstall exposes install then uninstall', () => {
     const nullState = makeItem({
-      inventoryItemId: 'claude-skill-null',
-      kind: 'skill',
+      inventoryItemId: 'claude-mcp-null',
+      kind: 'mcp',
       nativeId: 'null',
       actualEnabled: null,
       capabilities: {
@@ -636,10 +651,10 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(unsupported, healthyCtx)).toEqual([]);
   });
 
-  test('canUninstall=false omits uninstall from the action list', () => {
+  test('canUninstall=false omits uninstall from the plugin action list', () => {
     const enabled = makeItem({
-      inventoryItemId: 'claude-skill-nouninstall',
-      kind: 'skill',
+      inventoryItemId: 'claude-plugin-nouninstall',
+      kind: 'plugin',
       nativeId: 'nouninstall',
       actualEnabled: true,
       capabilities: {
@@ -652,7 +667,7 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable']);
   });
 
-  test('borrowed item exposes row actions from owner capabilities', () => {
+  test('borrowed skill exposes migrate, never disable or detach', () => {
     const borrowed = makeItem({
       inventoryItemId: 'grok-skill-borrowed-claude',
       kind: 'skill',
@@ -667,11 +682,40 @@ describe('portableInventoryPresentation row actions', () => {
         canEnable: true,
         canDisable: true,
         canUninstall: true,
+        canMigrateToStore: true,
       },
     });
     expect(isPortableBorrowedRuntimeItem(borrowed)).toBe(true);
-    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual(['disable', 'uninstall']);
-    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBe('disable');
+    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual(['migrateToStore']);
+    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBe('migrateToStore');
+  });
+
+  test('shared ~/.agents skill without store exposes migrate, never disable or unload', () => {
+    const agentsSkill = makeItem({
+      inventoryItemId: 'codex-skill-agents-video',
+      kind: 'skill',
+      nativeId: 'web-video-presentation',
+      target: 'codex',
+      originKind: 'legacyStandalone',
+      ownedBy: 'sharedAgents',
+      loadedBy: 'codex',
+      nativeOutputCandidate: false,
+      sourcePath: '/Users/hans/.agents/skills/web-video-presentation',
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canMigrateToStore: true,
+        canAttach: false,
+        canDetach: false,
+        canDestroyStore: false,
+      },
+    });
+    expect(resolvePortableRowActions(agentsSkill, healthyCtx)).toEqual(['migrateToStore']);
+    expect(resolvePortablePrimaryAction(agentsSkill, healthyCtx)).toBe('migrateToStore');
+    expect(resolvePortableRowActions(agentsSkill, healthyCtx)).not.toContain('disable');
+    expect(resolvePortableRowActions(agentsSkill, healthyCtx)).not.toContain('detach');
   });
 
   test('skill store capabilities expose migrate/attach/detach/destroy instead of enable/disable', () => {
@@ -914,7 +958,7 @@ describe('portableInventoryPresentation ownership partition', () => {
     });
     expect(isPortableBorrowedRuntimeItem(grokNative)).toBe(false);
     expect(portableBorrowedOwnerLabelKey(grokNative)).toBe('grok');
-    expect(resolvePortableRowActions(grokNative, healthyCtx)).toEqual(['disable', 'uninstall']);
+    expect(resolvePortableRowActions(grokNative, healthyCtx)).toEqual([]);
   });
 
   test('same-agent drifted native item stays installed, not borrowed', () => {

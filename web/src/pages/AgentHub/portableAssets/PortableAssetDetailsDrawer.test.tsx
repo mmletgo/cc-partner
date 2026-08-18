@@ -286,7 +286,7 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
 
   test('delete everywhere only appears in danger zone and requests uninstall action', () => {
     const onRequestAction = vi.fn();
-    const item = baseItem('skill');
+    const item = baseItem('plugin');
 
     render(
       <PortableAssetDetailsDrawer
@@ -319,7 +319,7 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
 
   test('mutationBlocked hides mutation affordances', () => {
     const onRequestAction = vi.fn();
-    const item = baseItem('skill');
+    const item = baseItem('plugin');
 
     render(
       <PortableAssetDetailsDrawer
@@ -387,7 +387,7 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     );
   });
 
-  test('borrowed runtime item warns about owner impact and still offers mutations', () => {
+  test('borrowed runtime skill warns about owner impact and offers migrate', () => {
     const onOpenOwner = vi.fn();
     const onRequestAction = vi.fn();
     const item = baseItem('skill', {
@@ -403,6 +403,7 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
         canUninstall: true,
         canAdopt: false,
         canInstallToSourceTarget: false,
+        canMigrateToStore: true,
         reasonCode: 'borrowed_runtime_origin',
         evidenceIds: [],
       },
@@ -423,12 +424,14 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     );
     expect(screen.queryByTestId('portable-asset-diagnostic')).toBeNull();
     expect(screen.getByTestId('portable-asset-actions')).toBeTruthy();
-    expect(screen.getByTestId('portable-action-disable')).toBeTruthy();
-    expect(screen.getByTestId('portable-action-uninstall')).toBeTruthy();
+    expect(screen.getByTestId('portable-action-migrate-to-store')).toBeTruthy();
+    expect(screen.queryByTestId('portable-action-disable')).toBeNull();
+    expect(screen.queryByTestId('portable-action-uninstall')).toBeNull();
+    expect(screen.queryByTestId('portable-action-detach')).toBeNull();
     fireEvent.click(screen.getByTestId('portable-action-open-owner'));
     expect(onOpenOwner).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId('portable-action-disable'));
-    expect(onRequestAction).toHaveBeenCalledWith('disable');
+    fireEvent.click(screen.getByTestId('portable-action-migrate-to-store'));
+    expect(onRequestAction).toHaveBeenCalledWith('migrateToStore');
   });
 
   test('borrowed plugin hint does not claim owner flag rewrite', () => {
@@ -467,7 +470,7 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     );
   });
 
-  test('sharedAgents borrowed item warns without an owner-agent switch and still mutates', () => {
+  test('sharedAgents borrowed skill warns without an owner-agent switch and offers migrate', () => {
     const onOpenOwner = vi.fn();
     const onRequestAction = vi.fn();
     const item = baseItem('skill', {
@@ -475,14 +478,15 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
       target: 'grok',
       ownedBy: 'sharedAgents',
       loadedBy: 'grok',
-      originKind: 'native',
-      nativeOutputCandidate: true,
+      originKind: 'legacyStandalone',
+      nativeOutputCandidate: false,
       capabilities: {
         canEnable: false,
         canDisable: true,
         canUninstall: true,
         canAdopt: false,
         canInstallToSourceTarget: false,
+        canMigrateToStore: true,
         reasonCode: 'borrowed_runtime_origin',
         evidenceIds: [],
       },
@@ -500,8 +504,9 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
 
     expect(screen.getByTestId('portable-asset-borrowed-banner')).toBeTruthy();
     expect(screen.queryByTestId('portable-action-open-owner')).toBeNull();
-    expect(screen.getByTestId('portable-action-disable')).toBeTruthy();
-    expect(screen.getByTestId('portable-action-uninstall')).toBeTruthy();
+    expect(screen.getByTestId('portable-action-migrate-to-store')).toBeTruthy();
+    expect(screen.queryByTestId('portable-action-disable')).toBeNull();
+    expect(screen.queryByTestId('portable-action-uninstall')).toBeNull();
   });
 
   test('drifted item exposes confirm current version', () => {

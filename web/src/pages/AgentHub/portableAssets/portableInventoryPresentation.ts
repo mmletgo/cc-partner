@@ -334,12 +334,21 @@ export function needsPortableEnsureManagedRefresh(
   if (isPortableItemReadOnly(item)) return false;
   const caps = item.capabilities;
   if (caps.canEnable || caps.canDisable || caps.canInstallToSourceTarget) return false;
+  if (
+    caps.canMigrateToStore ||
+    caps.canAttach ||
+    caps.canDetach ||
+    caps.canDestroyStore
+  ) {
+    return false;
+  }
   if (caps.canMaterializeEscapeLink) return false;
   return true;
 }
 
 /**
  * Business Logic: 行上只暴露一个主动作；stale/未 opt-in/unsupported 不得 mutation。
+ *   Skill/Command 只走仓库（迁入/附加/卸下），不再启停；Plugin/MCP 仍走 enable/disable。
  *   漂移项优先「确认当前版本」；发现即管理后 **永不** 以 adopt 作为主动作（可保留 API kind 给遗留 apply）。
  * Code Logic: capability 驱动 materializeEscapeLink → confirmCurrentVersion → store → enable/disable → installToSourceTarget；跳过 canAdopt。
  */
@@ -364,6 +373,7 @@ export function resolvePortablePrimaryAction(
     if (caps.canDetach && item.store?.storeAttached) return 'detach';
     if (caps.canAttach && !item.store?.storeAttached) return 'attach';
     if (caps.canMigrateToStore) return 'migrateToStore';
+    return null;
   }
   if (item.actualEnabled === true && caps.canDisable) return 'disable';
   if (item.actualEnabled === false && caps.canEnable) return 'enable';
@@ -377,12 +387,13 @@ export function resolvePortablePrimaryAction(
 }
 
 /**
- * Business Logic: 列表行同时暴露启用/禁用与卸载动作，让用户无需打开详情 Drawer 即可管理。
- *   借用项同样按 capability 暴露动作，确认弹窗再提示对其他 Agent 的影响。
+ * Business Logic: 列表行同时暴露仓库或启停动作，让用户无需打开详情 Drawer 即可管理。
+ *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下 / 彻底删除仓库项；卸下只出现在便携仓库项。
+ *   Plugin/MCP：仍走 enable/disable/uninstall。借用项同样按 capability 暴露动作。
  *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
  *
  * Code Logic: 复用 stale/mutationBlocked/locked/readOnly/unsupported/unmanaged 判定，
- *   按 capabilities 累加有序数组：enable/disable（互斥）→ installToSourceTarget → uninstall。
+ *   Skill/Command 只累加 store 动作；其余 kind 按 enable/disable → install → uninstall。
  *   返回的数组可能为空（无任何 mutation 资格）或含多项；调用方按顺序渲染按钮。
  */
 export function resolvePortableRowActions(
@@ -404,17 +415,17 @@ export function resolvePortableRowActions(
     actions.push('confirmCurrentVersion');
   }
   const storeKind = isPortableStoreAssetKind(item.kind);
-  if (storeKind && caps.canMigrateToStore) {
-    actions.push('migrateToStore');
+  if (storeKind) {
+    if (caps.canMigrateToStore) actions.push('migrateToStore');
+    if (caps.canAttach) actions.push('attach');
+    if (caps.canDetach) actions.push('detach');
+    if (caps.canDestroyStore) actions.push('destroyStore');
+    return actions;
   }
-  if (storeKind && caps.canAttach) {
-    actions.push('attach');
-  } else if (item.actualEnabled !== true && caps.canEnable) {
+  if (item.actualEnabled !== true && caps.canEnable) {
     actions.push('enable');
   }
-  if (storeKind && caps.canDetach) {
-    actions.push('detach');
-  } else if (item.actualEnabled !== false && caps.canDisable) {
+  if (item.actualEnabled !== false && caps.canDisable) {
     actions.push('disable');
   }
   if (
@@ -423,12 +434,7 @@ export function resolvePortableRowActions(
   ) {
     actions.push('installToSourceTarget');
   }
-  if (storeKind && caps.canDestroyStore) {
-    actions.push('destroyStore');
-  } else if (
-    caps.canUninstall &&
-    (!storeKind || (!caps.canDetach && !caps.canDestroyStore))
-  ) {
+  if (caps.canUninstall) {
     actions.push('uninstall');
   }
   return actions;

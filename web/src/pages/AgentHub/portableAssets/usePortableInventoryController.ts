@@ -322,8 +322,8 @@ export function usePortableInventoryController(
   );
 
   /**
-   * Business Logic: 列表行内同时暴露启停/卸载，复用 getPrimaryAction 的安全门闩。
-   * Code Logic: 调 resolvePortableRowActions 输出有序动作数组（enable/disable → install → uninstall）。
+   * Business Logic: 列表行内同时暴露仓库或启停动作，复用 getPrimaryAction 的安全门闩。
+   * Code Logic: 调 resolvePortableRowActions 输出有序动作数组（store 或 enable/disable → install → uninstall）。
    */
   const getRowActions = useCallback(
     (item: PortableInventoryItemDto) =>
@@ -350,9 +350,9 @@ export function usePortableInventoryController(
       // discover-as-managed：不再开放 adopt 入口；其余 mutation 仍 capability 门闩。
       const storeKind = isPortableStoreAssetKind(item.kind);
       const allowed =
-        (action === 'enable' && caps.canEnable) ||
-        (action === 'disable' && caps.canDisable) ||
-        (action === 'uninstall' && caps.canUninstall) ||
+        (action === 'enable' && !storeKind && caps.canEnable) ||
+        (action === 'disable' && !storeKind && caps.canDisable) ||
+        (action === 'uninstall' && !storeKind && caps.canUninstall) ||
         (action === 'installToSourceTarget' && caps.canInstallToSourceTarget) ||
         (action === 'attach' && storeKind && Boolean(caps.canAttach)) ||
         (action === 'detach' && storeKind && Boolean(caps.canDetach)) ||

@@ -31,11 +31,12 @@ vi.mock('@/api/portableInventory', () => ({
 import { usePortableInventoryController } from './usePortableInventoryController';
 
 const baseCapabilities = {
-  canEnable: true,
-  canDisable: true,
-  canUninstall: true,
+  canEnable: false,
+  canDisable: false,
+  canUninstall: false,
   canAdopt: false,
   canInstallToSourceTarget: false,
+  canMigrateToStore: true,
   reasonCode: null as string | null,
   evidenceIds: [] as string[],
 };
@@ -201,14 +202,14 @@ describe('usePortableInventoryController', () => {
       kind: 'skill',
       nativeId: 'beta',
       actualEnabled: false,
-      capabilities: { ...baseCapabilities, canEnable: true, canDisable: false },
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
     });
     apiMocks.inspect.mockResolvedValue(snapshot('snap-lock', [alpha, beta]));
     const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
 
-    expect(result.current.getPrimaryAction(alpha)).toBe('disable');
-    expect(result.current.getPrimaryAction(beta)).toBe('enable');
+    expect(result.current.getPrimaryAction(alpha)).toBe('migrateToStore');
+    expect(result.current.getPrimaryAction(beta)).toBe('migrateToStore');
 
     act(() => {
       result.current.setItemLocked('claude-skill-alpha', true);
@@ -216,25 +217,29 @@ describe('usePortableInventoryController', () => {
 
     expect(result.current.lockedItemIds.has('claude-skill-alpha')).toBe(true);
     expect(result.current.getPrimaryAction(alpha)).toBeNull();
-    expect(result.current.getPrimaryAction(beta)).toBe('enable');
+    expect(result.current.getPrimaryAction(beta)).toBe('migrateToStore');
   });
 
-  test('getRowActions exposes enable/disable + uninstall per capability matrix', async () => {
-    // alpha: enabled + canDisable + canUninstall → disable + uninstall
-    // betaOff:  disabled + canEnable + canUninstall → enable + uninstall
-    const betaOff = makeItem({
-      inventoryItemId: 'claude-skill-beta-off',
-      kind: 'skill',
-      nativeId: 'beta-off',
+  test('getRowActions exposes store migrate for skills and enable/disable for plugins', async () => {
+    const pluginOff = makeItem({
+      inventoryItemId: 'claude-plugin-off',
+      kind: 'plugin',
+      nativeId: 'plugin-off',
       actualEnabled: false,
-      capabilities: { ...baseCapabilities, canEnable: true, canDisable: false },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: false,
+        canUninstall: true,
+        canMigrateToStore: false,
+      },
     });
-    apiMocks.inspect.mockResolvedValue(snapshot('snap-rowactions', [alpha, betaOff]));
+    apiMocks.inspect.mockResolvedValue(snapshot('snap-rowactions', [alpha, pluginOff]));
     const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
 
-    expect(result.current.getRowActions(alpha)).toEqual(['disable', 'uninstall']);
-    expect(result.current.getRowActions(betaOff)).toEqual(['enable', 'uninstall']);
+    expect(result.current.getRowActions(alpha)).toEqual(['migrateToStore']);
+    expect(result.current.getRowActions(pluginOff)).toEqual(['enable', 'uninstall']);
   });
 
   test('unopted/unsupported/stale items never expose mutation action', async () => {
@@ -309,11 +314,11 @@ describe('usePortableInventoryController', () => {
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
 
     act(() => {
-      result.current.openAction('claude-skill-alpha', 'disable');
+      result.current.openAction('claude-skill-alpha', 'migrateToStore');
     });
     expect(result.current.pendingAction).toEqual({
       itemIds: ['claude-skill-alpha'],
-      action: 'disable',
+      action: 'migrateToStore',
     });
 
     act(() => {

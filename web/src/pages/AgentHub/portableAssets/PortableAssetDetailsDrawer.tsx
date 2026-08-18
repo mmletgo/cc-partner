@@ -121,10 +121,18 @@ export function PortableAssetDetailsDrawer({
   const canDestroyStore = Boolean(
     storeKind && item?.capabilities.canDestroyStore && canMutate,
   );
-  const canEnable = Boolean(!canAttach && item?.capabilities.canEnable && canMutate);
-  const canDisable = Boolean(!canDetach && item?.capabilities.canDisable && canMutate);
+  const canEnable = Boolean(
+    !storeKind && !canAttach && item?.capabilities.canEnable && canMutate,
+  );
+  const canDisable = Boolean(
+    !storeKind && !canDetach && item?.capabilities.canDisable && canMutate,
+  );
   const canUninstall = Boolean(
-    !canDetach && !canDestroyStore && item?.capabilities.canUninstall && canMutate,
+    !storeKind &&
+      !canDetach &&
+      !canDestroyStore &&
+      item?.capabilities.canUninstall &&
+      canMutate,
   );
   // 发现即管理：不在详情暴露 Adopt 主 CTA（历史 canAdopt 能力忽略）。
   const canInstall = Boolean(item?.capabilities.canInstallToSourceTarget && canMutate);
@@ -526,7 +534,7 @@ export function PortableAssetDetailsDrawer({
                 >
                   {t('agentHub:portable.actions.uninstall')}
                 </Button>
-              ) : !canDestroyStore ? (
+              ) : !canDestroyStore && !storeKind ? (
                 <p className={styles.hint} data-testid="portable-action-uninstall-blocked">
                   {t('agentHub:portable.details.uninstallBlocked')}
                 </p>
