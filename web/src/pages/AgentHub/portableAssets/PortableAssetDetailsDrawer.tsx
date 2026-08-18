@@ -19,6 +19,7 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   isPortableBorrowedRuntimeItem,
+  isPortableStoreAssetKind,
   portableBorrowedOwnerLabelKey,
 } from './portableInventoryPresentation';
 import styles from '../AgentHub.module.css';
@@ -103,7 +104,7 @@ export function PortableAssetDetailsDrawer({
   const reasonCode = item?.capabilities.reasonCode ?? null;
   const diagnosticReason =
     reasonCode && reasonCode !== 'borrowed_runtime_origin' ? reasonCode : null;
-  const storeKind = item?.kind !== 'plugin';
+  const storeKind = item ? isPortableStoreAssetKind(item.kind) : false;
   const canMigrateToStore = Boolean(
     storeKind && item?.capabilities.canMigrateToStore && canMutate,
   );

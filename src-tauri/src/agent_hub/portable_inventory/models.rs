@@ -97,6 +97,15 @@ impl PortableAssetKind {
             Self::Mcp => AssetKind::Mcp,
         }
     }
+
+    /// 是否进入 portable-store 软链附加模型。
+    ///
+    /// Business Logic: 只有 Skill/Command 能本机一份 + native 软链。
+    ///     MCP 是各家配置 leaf，跨 Agent 走 Pull；Plugin 是 viewing 开关。
+    /// Code Logic: skill/command 为真。
+    pub fn supports_portable_store(self) -> bool {
+        matches!(self, Self::Skill | Self::Command)
+    }
 }
 
 /// 库存对账后的管理状态。
@@ -242,7 +251,7 @@ pub struct PortableInventoryItemCapabilitiesDto {
     /// 是否允许把 store 附加到当前 Agent
     #[serde(default)]
     pub can_attach: bool,
-    /// 是否允许从当前 Agent 卸下 store 软链/leaf
+    /// 是否允许从当前 Agent 卸下 store 软链
     #[serde(default)]
     pub can_detach: bool,
     /// 是否允许本机彻底删除 store 真树

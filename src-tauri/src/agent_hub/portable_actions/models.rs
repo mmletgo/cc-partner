@@ -32,13 +32,13 @@ pub enum PortableAssetActionKind {
     Uninstall,
     /// 安装到源同类 target
     InstallToSourceTarget,
-    /// 把当前 Agent 的 native 根挂到 store（建软链 / upsert MCP leaf）
+    /// 把当前 Agent 的 native 根挂到 store（Skill/Command 建软链）
     Attach,
-    /// 只拆当前 Agent 的 store 软链 / 只删该 Agent MCP leaf
+    /// 只拆当前 Agent 的 store 软链
     Detach,
     /// 本机彻底删除 store 真树及剩余附加
     DestroyStore,
-    /// 把非 store 的 native Skill/Command/MCP 迁入 store
+    /// 把非 store 的 native Skill/Command 迁入 store
     MigrateToStore,
     /// 把当前磁盘内容记为一致基准（只改 Hub 账本，不改文件）
     ConfirmCurrentVersion,
@@ -70,6 +70,17 @@ impl PortableAssetActionKind {
     ///     `confirmCurrentVersion` 为真；其余动作仍走 CLI/文件门禁。
     pub fn is_hub_ledger_only(self) -> bool {
         matches!(self, Self::ConfirmCurrentVersion)
+    }
+
+    /// 是否为 portable-store 附加/迁移/销毁动作。
+    ///
+    /// Business Logic: MCP/Plugin 不得走这条合同；MCP 用 native leaf，Plugin 用 viewing 开关。
+    /// Code Logic: attach/detach/destroyStore/migrateToStore。
+    pub fn is_portable_store_action(self) -> bool {
+        matches!(
+            self,
+            Self::Attach | Self::Detach | Self::DestroyStore | Self::MigrateToStore
+        )
     }
 }
 

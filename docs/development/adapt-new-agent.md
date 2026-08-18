@@ -4,7 +4,7 @@
 >
 > 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
 >
-> 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。Plugin 启用标记跟 viewing Agent（§3.9，`plugin_enablement.rs`）。Skill/Command/MCP 本机一份在 `<data_dir>/portable-store/`（§3.10，`portable_store/`）。漂移项「确认当前版本」只改 Hub 账本（§3.11）。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
+> 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。Plugin 启用标记跟 viewing Agent（§3.9，`plugin_enablement.rs`）。Skill/Command 本机一份在 `<data_dir>/portable-store/`（§3.10，`portable_store/`）；MCP 仍是各家配置 native leaf，跨 Agent 走已有 Pull。漂移项「确认当前版本」只改 Hub 账本（§3.11）。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
 
 ## 0. 硬规则（写代码前先接受）
 
@@ -13,7 +13,7 @@
 3. **能做的做实，不能做的仍要露脸**。新身份必须出现在壳层切换器；做不到的面用 scan-only / blocked / residual / unavailable / 缺席，禁止从 UI 藏掉。
 4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本，不是原生文件，无 L3 也必须能 apply。
 5. **Plugin 开关跟当前查看的 Agent，不跟所有者。** Claude `enabledPlugins=false` 不得让 Codex / Grok / OpenCode / Gemini / Cursor / Pi 的同一包显示为已关。Enable/Disable 只写 viewing 标记；Plugin Uninstall 仍改所有者磁盘。详见 §3.9。
-6. **Skill / Command / MCP 本机一份在 portable-store，不在 `~/.agents`。** 附加只在该 Agent **自己的 native 根**建软链（MCP 则投影 leaf）；卸下只拆 viewing 的链/leaf。Grok 仍扫 Claude 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改 Claude。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。详见 §3.10。
+6. **Skill / Command 本机一份在 portable-store，不在 `~/.agents`。** MCP **不进仓库**：启停/卸载走当前（或 owner）配置 leaf，跨 Agent 用已有 Pull，不要 `migrateToStore` / `attach` / `detach` / `destroyStore`。附加只在该 Agent **自己的 native 根**建软链；卸下只拆 viewing 的链。Grok 仍扫 Claude 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改 Claude。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。详见 §3.10。
 7. **漂移「确认当前版本」只改 Hub 账本。** CLI 自己更新 Skill/Command/Plugin/MCP 后，用户可以把当前磁盘记为一致基准。禁止把这条动作绑到 `supports_direct_local_action`、CLI mutation 门禁或另一家 executor。按钮文案是「确认当前版本」/ `Confirm current version`，不要写成「接受磁盘」或「重记哈希」。详见 §3.11。
 8. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
 9. **可执行名 ≠ 产品名**。只启动官方 CLI（Cursor 是 `agent`），禁止拉起 GUI。
@@ -42,7 +42,7 @@
 | Prompt 历史 | 有用户输入文件才加 collector | `history_source` 可登记；无 collector 则筛选为空 |
 | Headless / 优化器 | catalog 位 ≠ 设置里可选 | `has_headless: true`，优化器仍只开 claude+grok |
 | Plugin / marketplace | 原生 plugin 根、**本 Agent 的开关文件**、是否真会加载其他 Agent 的 registry | 只扫自己的目录；**不要**抄 Grok 去列 Claude `installed_plugins.json`，除非该 CLI 运行时确实加载。跨 Agent 翻译仍 residual |
-| portable-store 挂载点 | native skills / commands / MCP 配置文件；是否扫其他 Agent 根 | Skill=`~/.cursor/skills`；Command=`~/.cursor/commands`；MCP=`mcp.json` `mcpServers`。会扫 Claude 则必须处理 `loadedViaOtherPath`。无 L3 → apply attach/detach/migrate/destroy blocked |
+| portable-store 挂载点 | native skills / commands；MCP 仍是该 Agent 配置 leaf（不进仓库）；是否扫其他 Agent 根 | Skill=`~/.cursor/skills`；Command=`~/.cursor/commands`；MCP=`mcp.json` `mcpServers`（native leaf + Pull）。会扫 Claude 则必须处理 Skill/Command 的 `loadedViaOtherPath`。无 L3 → apply attach/detach/migrate/destroy blocked |
 | 漂移确认当前版本 | Hub 账本对齐，不写该 CLI | 必须能 preview+apply；无 L3 也不得 `MUTATION_BLOCKED`。文案「确认当前版本」 |
 
 选模板（只抄结构，不抄路径）：
@@ -223,27 +223,27 @@ Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local
 |------|------|----------------|-----------------|--------------|
 | Skill | `portable-store/skills/<id>/` | native skills 根上的**目录软链** | 只拆 viewing 这条链 | 删真树 + 清 Claude/Codex 链 |
 | Command | `portable-store/commands/<id>.md` | native commands 根上的**文件软链**；无 command 根（如 Pi）→ 缺席 | 同上 | 同上 |
-| MCP | `portable-store/mcp/<id>.json`（0600，含凭据） | **不是软链**：投影到 viewing 的 config leaf（JSON `mcpServers` / TOML `mcp_servers`） | 只改 viewing leaf | 删 store JSON + 清 Claude `~/.claude.json` 与 Codex `config.toml` |
+| MCP | **不进仓库**（遗留 `portable-store/mcp/*.json` 不自动删除、也不再投影） | 各家配置 **native leaf**（JSON `mcpServers` / TOML `mcp_servers`） | Enable/Disable/Uninstall 改当前或 owner 配置 | Uninstall 删该配置 leaf（可 snapshot 到 hub disabled）；跨 Agent 用已有 Pull |
 | Plugin | 不进仓库 | 仍走 §3.9 viewing 开关；不翻译 marketplace | Enable/Disable 只改 viewing | Uninstall 仍改所有者磁盘 |
 
 未迁入 store 的 native Skill/Command：Claude/Codex 仍可能 **MOVE** 到 hub disabled（旧语义）。**已经是 store 软链**时，Disable/Detach/Uninstall-from-agent 必须 `unlink`，禁止 `portable_set_tree_enabled` 把真树 rename 进 `claude-assets/disabled`。
 
-一键迁移：该 Agent 盘点里非软链 native Skill/Command → move 进 store → 原处放回软链。MCP 把 leaf 复制进 store（0600）并记下 attachment。同名不同 hash → 阻断。Plugin 不迁移。
+一键迁移：该 Agent 盘点里非软链 native Skill/Command → move 进 store → 原处放回软链。同名不同 hash → 阻断。**MCP 与 Plugin 不迁移**；不要把 MCP 做成 Plugin 那种 viewing 开关。
 
 Grok（以及任何会扫 Claude 根的后来者）：
 
-- 卸下只拆**自己的 native 根**。
+- 卸下只拆**自己的 native 根**（Skill/Command 软链）。
 - 同一 `storeId` 若 Claude 仍附加，本 Agent 库存去重后保留 `store.loadedViaOtherPath` + `loadedViaTarget=claude` + warning `store_loaded_via_other_path`。文案 `storeStillLoadedVia`。
-- **不得**为了本列表干净去拆 Claude 链或改 Claude MCP。
+- **不得**为了本列表干净去拆 Claude 链或改 Claude MCP leaf。
 
-写盘门禁：无 L3 时 **只有 Claude / Codex** 能 apply attach / detach / migrateToStore / destroyStore（复用 `supports_direct_local_action`，不要为此新增 Supported write-side `TargetCapability`）。新身份默认 inventory + preview，apply blocked。Windows 用 junction/symlink，禁止静默 copy 成第二份安装。漂移「确认当前版本」不走这条门禁，见 §3.11。
+写盘门禁：无 L3 时 **只有 Claude / Codex** 能 apply attach / detach / migrateToStore / destroyStore（复用 `supports_direct_local_action`，不要为此新增 Supported write-side `TargetCapability`；且仅 Skill/Command）。新身份默认 inventory + preview，apply blocked。Windows 用 junction/symlink，禁止静默 copy 成第二份安装。漂移「确认当前版本」不走这条门禁，见 §3.11。
 
 接入新身份时 store 最低测试：
 
 - scanner：store 软链 Skill 的 content hash 跟随真树；指向 `/etc` 的逃逸链拒绝
 - 若该 CLI 扫 Claude skills：Claude 已附加、本 Agent native 无链 → `loadedViaOtherPath`，且 Claude 链未改
 - planner/apply：无 L3 时 attach/detach/migrate/destroy 不得写该 Agent 原生目录
-- MCP（仅 Claude/Codex 已实现）：detach viewing 只改该配置文件
+- MCP：scanner 不得给出 `canMigrateToStore` / `canAttach` / `canDetach` / `canDestroyStore`；Claude/Codex Enable/Disable/Uninstall 仍改该配置 leaf；跨 Agent 只走 Pull
 
 ### 3.11 Portable 一致性：确认当前版本
 
@@ -406,7 +406,8 @@ CARGO_TARGET_DIR=/tmp/cc-partner-agent-check cargo check --locked --lib --tests
 - 不要为了「看起来对称」去猜 session 目录或 usage JSON 字段
 - 不要把 GUI 二进制（如 `cursor`）当 CLI
 - 不要把新 CLI 的 Claude 兼容扫描根再写一套副本
-- 不要把 Plugin marketplace 翻译成另一家的 plugin，也不要把 Plugin 迁入 portable-store
+- 不要把 Plugin marketplace 翻译成另一家的 plugin，也不要把 Plugin 或 MCP 迁入 portable-store
+- 不要把 MCP 做成 Plugin 那种 viewing 开关；MCP 启停/卸载走当前或 owner 配置 leaf，跨 Agent 用已有 Pull
 - 不要在 `runtime-discovery.json` 里给不会加载 Claude plugin 的 Agent 加 `pluginRegistry`
 - 不要把 Claude `enabledPlugins`（或 Codex/Grok 白名单）当成其他 Agent 的 `actualEnabled`
 - 不要在无 L3 / 无本 target executor 时，把 Enable/Disable 映射到所有者 CLI（例如 Grok 列表调用 `claude plugin disable`）

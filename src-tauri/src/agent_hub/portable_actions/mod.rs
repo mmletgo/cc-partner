@@ -438,7 +438,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(plan.blocking_reasons.is_empty(), "{:?}", plan.blocking_reasons);
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "{:?}",
+            plan.blocking_reasons
+        );
         assert_eq!(plan.changes.len(), 2);
         assert!(plan.changes.iter().all(|change| {
             change.operation

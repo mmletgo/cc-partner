@@ -24,7 +24,7 @@ use crate::agent_hub::portable_inventory::{
     hash_plugin_root, PortableAssetKind, PortableInventoryItemDto,
 };
 use crate::agent_hub::portable_store::{
-    execute_mcp_store, execute_skill_or_command_store, should_use_store_semantics,
+    execute_skill_or_command_store, should_use_store_semantics,
 };
 use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
@@ -472,16 +472,6 @@ fn execute_mcp(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
-    if should_use_store_semantics(ctx.action, None, pre_item) {
-        return execute_mcp_store(
-            AgentTarget::Codex,
-            ctx.action,
-            &id,
-            &roots.config_toml,
-            true,
-            pre_item,
-        );
-    }
     let config_path = roots.config_toml.clone();
     let bytes = if config_path.exists() {
         fs::read(&config_path)?
@@ -622,14 +612,10 @@ fn execute_mcp(
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
-        | PortableAssetActionKind::MigrateToStore => execute_mcp_store(
-            AgentTarget::Codex,
-            ctx.action,
-            &id,
-            &config_path,
-            true,
-            pre_item,
-        ),
+        | PortableAssetActionKind::MigrateToStore => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_MCP_STORE_UNSUPPORTED".into(),
+            message: "MCP stays a native config leaf; use enable/disable/uninstall or Pull".into(),
+        }),
     }
 }
 

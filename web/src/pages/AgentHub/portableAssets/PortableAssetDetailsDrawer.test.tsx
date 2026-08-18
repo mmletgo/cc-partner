@@ -216,6 +216,41 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     expect(root.textContent).not.toContain('also-secret');
   });
 
+  test('mcp fake store capabilities stay on native leaf enable/disable/uninstall', () => {
+    const onRequestAction = vi.fn();
+    const item = baseItem('mcp', {
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canMigrateToStore: true,
+        canAttach: true,
+        canDetach: true,
+        canDestroyStore: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-action-disable')).toBeTruthy();
+    expect(screen.getByTestId('portable-action-uninstall')).toBeTruthy();
+    expect(screen.queryByTestId('portable-action-migrate-to-store')).toBeNull();
+    expect(screen.queryByTestId('portable-action-attach')).toBeNull();
+    expect(screen.queryByTestId('portable-action-detach')).toBeNull();
+    expect(screen.queryByTestId('portable-action-destroy-store')).toBeNull();
+  });
+
   test('unsupported management uses honest diagnostic not fabricated success', () => {
     const item = baseItem('skill', {
       managementState: 'unsupported',

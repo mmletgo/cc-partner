@@ -28,6 +28,7 @@ import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   countPortableItemsByKind,
   filterPortableInventoryItems,
+  isPortableStoreAssetKind,
   listConfirmableCurrentVersionItems,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
@@ -337,15 +338,16 @@ export function usePortableInventoryController(
       }
       const caps = item.capabilities;
       // discover-as-managed：不再开放 adopt 入口；其余 mutation 仍 capability 门闩。
+      const storeKind = isPortableStoreAssetKind(item.kind);
       const allowed =
         (action === 'enable' && caps.canEnable) ||
         (action === 'disable' && caps.canDisable) ||
         (action === 'uninstall' && caps.canUninstall) ||
         (action === 'installToSourceTarget' && caps.canInstallToSourceTarget) ||
-        (action === 'attach' && Boolean(caps.canAttach)) ||
-        (action === 'detach' && Boolean(caps.canDetach)) ||
-        (action === 'destroyStore' && Boolean(caps.canDestroyStore)) ||
-        (action === 'migrateToStore' && Boolean(caps.canMigrateToStore)) ||
+        (action === 'attach' && storeKind && Boolean(caps.canAttach)) ||
+        (action === 'detach' && storeKind && Boolean(caps.canDetach)) ||
+        (action === 'destroyStore' && storeKind && Boolean(caps.canDestroyStore)) ||
+        (action === 'migrateToStore' && storeKind && Boolean(caps.canMigrateToStore)) ||
         (action === 'confirmCurrentVersion' && Boolean(caps.canConfirmCurrentVersion));
       if (!allowed) {
         setPendingAction(null);

@@ -285,6 +285,14 @@ export function needsPortableEnsureManagedRefresh(
 }
 
 /**
+ * Business Logic: 只有 Skill/Command 进 portable-store 软链；MCP 是各家配置 leaf，Plugin 是 viewing 开关。
+ * Code Logic: skill/command 为真。
+ */
+export function isPortableStoreAssetKind(kind: PortableAssetKind): boolean {
+  return kind === 'skill' || kind === 'command';
+}
+
+/**
  * Business Logic: 行上只暴露一个主动作；stale/未 opt-in/unsupported 不得 mutation。
  *   漂移项优先「确认当前版本」；发现即管理后 **永不** 以 adopt 作为主动作（可保留 API kind 给遗留 apply）。
  * Code Logic: capability 驱动 confirmCurrentVersion → store → enable/disable → installToSourceTarget；跳过 canAdopt。
@@ -303,7 +311,7 @@ export function resolvePortablePrimaryAction(
   const caps = item.capabilities;
   if (caps.canConfirmCurrentVersion) return 'confirmCurrentVersion';
   // 故意不返回 'adopt'：discover-as-managed 已取代纳入主路径。
-  if (item.kind !== 'plugin') {
+  if (isPortableStoreAssetKind(item.kind)) {
     if (caps.canDetach && item.store?.storeAttached) return 'detach';
     if (caps.canAttach && !item.store?.storeAttached) return 'attach';
     if (caps.canMigrateToStore) return 'migrateToStore';
@@ -343,7 +351,7 @@ export function resolvePortableRowActions(
   if (caps.canConfirmCurrentVersion) {
     actions.push('confirmCurrentVersion');
   }
-  const storeKind = item.kind !== 'plugin';
+  const storeKind = isPortableStoreAssetKind(item.kind);
   if (storeKind && caps.canMigrateToStore) {
     actions.push('migrateToStore');
   }

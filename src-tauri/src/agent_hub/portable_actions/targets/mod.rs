@@ -109,6 +109,7 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
 /// Code Logic（做什么）:
 ///     以 target × kind × action 的显式 allowlist 对齐实际 executor；
 ///     Claude 与 Codex 四类 enable/disable/uninstall adapter 已实现；
+///     Skill/Command 另含 store attach/detach/migrate/destroy；MCP/Plugin 排除 store 动作；
 ///     OpenCode、Adopt、InstallToSourceTarget 仍 fail-closed。
 pub fn supports_direct_local_action(
     target: AgentTarget,
@@ -133,13 +134,7 @@ pub fn supports_direct_local_action(
                 | PortableAssetActionKind::DestroyStore
                 | PortableAssetActionKind::MigrateToStore
         )
-        && !(matches!(
-            action,
-            PortableAssetActionKind::Attach
-                | PortableAssetActionKind::Detach
-                | PortableAssetActionKind::DestroyStore
-                | PortableAssetActionKind::MigrateToStore
-        ) && kind == PortableAssetKind::Plugin)
+        && !(action.is_portable_store_action() && !kind.supports_portable_store())
 }
 
 /// 判断 target 是否至少具备一个本机直管动作。
@@ -261,6 +256,33 @@ mod direct_action_support_tests {
                 AgentTarget::Claude,
                 kind,
                 PortableAssetActionKind::InstallToSourceTarget,
+            ));
+        }
+        for action in [
+            PortableAssetActionKind::Attach,
+            PortableAssetActionKind::Detach,
+            PortableAssetActionKind::DestroyStore,
+            PortableAssetActionKind::MigrateToStore,
+        ] {
+            assert!(supports_direct_local_action(
+                AgentTarget::Claude,
+                PortableAssetKind::Skill,
+                action
+            ));
+            assert!(supports_direct_local_action(
+                AgentTarget::Codex,
+                PortableAssetKind::Command,
+                action
+            ));
+            assert!(!supports_direct_local_action(
+                AgentTarget::Claude,
+                PortableAssetKind::Mcp,
+                action
+            ));
+            assert!(!supports_direct_local_action(
+                AgentTarget::Claude,
+                PortableAssetKind::Plugin,
+                action
             ));
         }
     }

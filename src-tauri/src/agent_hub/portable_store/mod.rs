@@ -1,26 +1,25 @@
-//! portable_store — Hub 自有「本机一份」可移植资产库
+//! portable_store — Hub 自有「本机一份」Skill/Command 库
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Skill/Command 只能有一份真树；各 Agent 用指向 store 的软链表示附加。
-//!     MCP 不能软链，目录里放 0600 JSON，再投影进各 Agent 配置 leaf。
+//!     MCP 不进仓库：启停/卸载改各家配置 leaf，跨 Agent 走已有 Pull。
 //!     禁止把 `~/.agents` 当 Claude/Grok 的统一库，也禁止跟随逃逸 symlink。
 //!
 //! Code Logic（这个模块做什么）:
 //!     布局 `<data_dir>/portable-store/{skills,commands,mcp,manifest.json}`；
-//!     分类/创建/拆除 store 软链；读写 manifest 与 MCP JSON。
+//!     分类/创建/拆除 Skill/Command 软链；读写 manifest。
+//!     仍创建 `mcp/` 以免打散遗留 JSON，但不再写入或投影。
 
 mod actions;
 mod manifest;
-mod mcp;
 mod symlink;
 
-pub use actions::{execute_mcp_store, execute_skill_or_command_store, should_use_store_semantics};
+pub use actions::{execute_skill_or_command_store, should_use_store_semantics};
 pub use manifest::{
     load_manifest, remove_manifest_attachment, remove_manifest_entry, store_id_from_canonical,
     upsert_manifest_entry, ManifestAttachment, PortableStoreKind, PortableStoreManifest,
     PortableStoreManifestEntry,
 };
-pub use mcp::{read_mcp_store_json, write_mcp_store_json};
 pub use symlink::{
     attach_store_link, classify_store_link, create_store_link, is_under_portable_store,
     unlink_if_store_link, unlink_store_link, StoreLinkClass,
@@ -52,8 +51,8 @@ pub fn current_portable_store_root() -> Option<PathBuf> {
 
 /// 确保 store 布局存在。
 ///
-/// Business Logic: 迁移/附加前必须有 skills/commands/mcp 目录。
-/// Code Logic: `create_dir_all` 三个子目录；不写 manifest（按需创建）。
+/// Business Logic: 迁移/附加前必须有 skills/commands；保留 mcp/ 以免打散遗留凭据文件。
+/// Code Logic: `create_dir_all` 三个子目录；不写 manifest（按需创建）；不写新 MCP JSON。
 pub fn ensure_portable_store_layout(data_dir: &Path) -> Result<PathBuf, AppError> {
     let root = portable_store_root(data_dir);
     fs::create_dir_all(root.join("skills"))?;
@@ -72,7 +71,9 @@ pub fn store_command_file(store_root: &Path, native_id: &str) -> PathBuf {
     store_root.join("commands").join(format!("{native_id}.md"))
 }
 
-/// MCP 目录 JSON：`portable-store/mcp/<id>.json`。
+/// 遗留 MCP 目录 JSON 路径：`portable-store/mcp/<id>.json`。
+///
+/// Business Logic: 旧版曾把 leaf 复制进仓库；现不再写入或投影，只用来识别遗留文件。
 pub fn store_mcp_file(store_root: &Path, native_id: &str) -> PathBuf {
     store_root.join("mcp").join(format!("{native_id}.json"))
 }
@@ -189,21 +190,21 @@ mod tests {
     }
 
     #[test]
-    fn mcp_json_is_mode_0600_on_unix() {
+    fn leftover_mcp_json_is_kept_and_classified() {
         let (_tmp, data) = isolated_data_dir();
         let root = ensure_portable_store_layout(&data).expect("layout");
-        let path = store_mcp_file(&root, "private");
-        let value =
-            serde_json::json!({"command": "uvx", "args": ["mcp"], "env": {"TOKEN": "s3cret"}});
-        write_mcp_store_json(&path, &value).expect("write");
-        let read = read_mcp_store_json(&path).expect("read");
-        assert_eq!(read["env"]["TOKEN"], "s3cret");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
+        let path = store_mcp_file(&root, "private-api");
+        fs::write(&path, r#"{"command":"uvx","env":{"TOKEN":"s3cret"}}"#).unwrap();
+        ensure_portable_store_layout(&data).expect("layout again");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"{"command":"uvx","env":{"TOKEN":"s3cret"}}"#
+        );
+        let canonical = fs::canonicalize(&path).unwrap();
+        assert_eq!(
+            store_id_from_canonical(&canonical, &root).as_deref(),
+            Some("mcp:private-api")
+        );
     }
 
     #[test]
@@ -262,115 +263,6 @@ mod tests {
         .expect("disable");
         assert!(!native.exists());
         assert!(store_tree.join("SKILL.md").is_file());
-        std::env::remove_var("CC_PARTNER_DATA_DIR");
-    }
-
-    #[test]
-    fn mcp_detach_codex_leaves_claude_json() {
-        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (_tmp, data) = isolated_data_dir();
-        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
-        let root = ensure_portable_store_layout(&data).unwrap();
-        let store_file = store_mcp_file(&root, "private-api");
-        write_mcp_store_json(
-            &store_file,
-            &serde_json::json!({"command": "uvx", "args": ["svc"]}),
-        )
-        .unwrap();
-        let claude_json = data.join("claude.json");
-        fs::write(
-            &claude_json,
-            r#"{"mcpServers":{"private-api":{"command":"uvx","args":["svc"]}}}"#,
-        )
-        .unwrap();
-        let codex_toml = data.join("config.toml");
-        fs::write(
-            &codex_toml,
-            "[mcp_servers.private-api]\ncommand = \"uvx\"\nargs = [\"svc\"]\n",
-        )
-        .unwrap();
-        crate::agent_hub::portable_store::execute_mcp_store(
-            crate::agent_hub::models::AgentTarget::Codex,
-            crate::agent_hub::portable_actions::models::PortableAssetActionKind::Detach,
-            "private-api",
-            &codex_toml,
-            true,
-            None,
-        )
-        .expect("detach");
-        let toml_after = fs::read_to_string(&codex_toml).unwrap();
-        assert!(
-            !toml_after.contains("private-api"),
-            "codex leaf must be removed: {toml_after}"
-        );
-        let claude_after = fs::read_to_string(&claude_json).unwrap();
-        assert!(
-            claude_after.contains("private-api"),
-            "claude json must stay: {claude_after}"
-        );
-        std::env::remove_var("CC_PARTNER_DATA_DIR");
-    }
-
-    #[test]
-    fn mcp_destroy_clears_claude_and_codex_leaves() {
-        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (_tmp, data) = isolated_data_dir();
-        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
-        let claude_home = data.join("claude-home");
-        fs::create_dir_all(&claude_home).unwrap();
-        let claude_json = claude_home.join(".claude.json");
-        fs::write(
-            &claude_json,
-            r#"{"mcpServers":{"private-api":{"command":"uvx","args":["svc"]}}}"#,
-        )
-        .unwrap();
-        let codex_home = data.join("codex-home");
-        fs::create_dir_all(&codex_home).unwrap();
-        let codex_toml = codex_home.join("config.toml");
-        fs::write(
-            &codex_toml,
-            "[mcp_servers.private-api]\ncommand = \"uvx\"\nargs = [\"svc\"]\n",
-        )
-        .unwrap();
-        let prev_claude = std::env::var_os("CLAUDE_CONFIG_DIR");
-        let prev_codex = std::env::var_os("CODEX_HOME");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_home);
-        std::env::set_var("CODEX_HOME", &codex_home);
-        let root = ensure_portable_store_layout(&data).unwrap();
-        let store_file = store_mcp_file(&root, "private-api");
-        write_mcp_store_json(
-            &store_file,
-            &serde_json::json!({"command": "uvx", "args": ["svc"]}),
-        )
-        .unwrap();
-        crate::agent_hub::portable_store::execute_mcp_store(
-            crate::agent_hub::models::AgentTarget::Codex,
-            crate::agent_hub::portable_actions::models::PortableAssetActionKind::DestroyStore,
-            "private-api",
-            &codex_toml,
-            true,
-            None,
-        )
-        .expect("destroy");
-        assert!(!store_file.exists(), "destroy must remove store MCP json");
-        let claude_after = fs::read_to_string(&claude_json).unwrap();
-        assert!(
-            !claude_after.contains("private-api"),
-            "claude leaf must clear: {claude_after}"
-        );
-        let toml_after = fs::read_to_string(&codex_toml).unwrap();
-        assert!(
-            !toml_after.contains("private-api"),
-            "codex leaf must clear: {toml_after}"
-        );
-        match prev_claude {
-            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-        match prev_codex {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 }

@@ -631,6 +631,28 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortablePrimaryAction(storeSkill, healthyCtx)).toBe('detach');
   });
 
+  test('mcp store capabilities stay on native leaf enable/disable/uninstall', () => {
+    const mcp = makeItem({
+      inventoryItemId: 'claude-mcp-keep',
+      kind: 'mcp',
+      nativeId: 'good-api',
+      actualEnabled: true,
+      sourceOrigin: 'nativeConfig',
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canMigrateToStore: true,
+        canAttach: true,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    expect(resolvePortableRowActions(mcp, healthyCtx)).toEqual(['disable', 'uninstall']);
+    expect(resolvePortablePrimaryAction(mcp, healthyCtx)).toBe('disable');
+  });
+
   test('plugin store capabilities stay on viewing-agent enable flags', () => {
     const plugin = makeItem({
       inventoryItemId: 'claude-plugin-keep',

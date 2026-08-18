@@ -115,16 +115,8 @@ pub async fn preview_portable_asset_action_with_inventory(
                 | PortableAssetActionKind::MigrateToStore
                 | PortableAssetActionKind::DestroyStore
         );
-        if item.kind == PortableAssetKind::Plugin
-            && matches!(
-                request.action,
-                PortableAssetActionKind::Attach
-                    | PortableAssetActionKind::Detach
-                    | PortableAssetActionKind::DestroyStore
-                    | PortableAssetActionKind::MigrateToStore
-            )
-        {
-            plan_blocking.push("PORTABLE_ASSET_ACTION_PLUGIN_STORE_UNSUPPORTED".into());
+        if let Some(code) = portable_store_kind_block(item.kind, request.action) {
+            plan_blocking.push(code.into());
         }
         let mutation_target = if request.action.is_hub_ledger_only() {
             item.target
@@ -196,6 +188,21 @@ pub async fn preview_portable_asset_action_with_inventory(
     })
     .await?;
     Ok(public)
+}
+
+/// MCP/Plugin 不得走 store attach/migrate/destroy。
+fn portable_store_kind_block(
+    kind: PortableAssetKind,
+    action: PortableAssetActionKind,
+) -> Option<&'static str> {
+    if !action.is_portable_store_action() || kind.supports_portable_store() {
+        return None;
+    }
+    Some(if kind == PortableAssetKind::Mcp {
+        "PORTABLE_ASSET_ACTION_MCP_STORE_UNSUPPORTED"
+    } else {
+        "PORTABLE_ASSET_ACTION_PLUGIN_STORE_UNSUPPORTED"
+    })
 }
 
 fn target_fingerprint(
@@ -1001,5 +1008,32 @@ args = ["mcp"]
             .expect("build codex plugin disable");
         assert_eq!(change.target, AgentTarget::Codex);
         assert_ne!(change.target, AgentTarget::Claude);
+    }
+
+    #[test]
+    fn mcp_store_actions_are_blocked_without_plugin_switch_semantics() {
+        for action in [
+            PortableAssetActionKind::Attach,
+            PortableAssetActionKind::Detach,
+            PortableAssetActionKind::DestroyStore,
+            PortableAssetActionKind::MigrateToStore,
+        ] {
+            assert_eq!(
+                portable_store_kind_block(PortableAssetKind::Mcp, action),
+                Some("PORTABLE_ASSET_ACTION_MCP_STORE_UNSUPPORTED")
+            );
+            assert_eq!(
+                portable_store_kind_block(PortableAssetKind::Plugin, action),
+                Some("PORTABLE_ASSET_ACTION_PLUGIN_STORE_UNSUPPORTED")
+            );
+            assert_eq!(
+                portable_store_kind_block(PortableAssetKind::Skill, action),
+                None
+            );
+        }
+        assert_eq!(
+            portable_store_kind_block(PortableAssetKind::Mcp, PortableAssetActionKind::Enable),
+            None
+        );
     }
 }

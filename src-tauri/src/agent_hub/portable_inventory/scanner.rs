@@ -1941,10 +1941,10 @@ fn action_required_capability(
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
         | PortableAssetActionKind::MigrateToStore => {
-            if kind == PortableAssetKind::Plugin {
-                None
-            } else {
+            if kind.supports_portable_store() {
                 Some(TargetCapability::RenderPortableAssets)
+            } else {
+                None
             }
         }
     }
@@ -2031,7 +2031,7 @@ fn item_capabilities(
     store: &PortableStoreFactDto,
     _kind_for_store: PortableAssetKind,
 ) -> PortableInventoryItemCapabilitiesDto {
-    let store_kind = kind != PortableAssetKind::Plugin;
+    let store_kind = kind.supports_portable_store();
     let store_write = store_kind
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Attach);
     let can_toggle_enable = can_enable_mutation && enable_semantics && actual_enabled.is_some();
@@ -2786,6 +2786,17 @@ enabled = false
         let cred = mcp.mcp_credential.as_ref().expect("cred");
         assert!(cred.present);
         assert!(cred.hash.is_some());
+        assert!(
+            !mcp.capabilities.can_migrate_to_store
+                && !mcp.capabilities.can_attach
+                && !mcp.capabilities.can_detach
+                && !mcp.capabilities.can_destroy_store,
+            "MCP stays a native leaf, not a store attach item"
+        );
+        assert!(
+            active.capabilities.can_migrate_to_store,
+            "native Skill remains eligible for portable-store migrate"
+        );
         let wire = serde_json::to_value(cred).unwrap();
         assert!(!wire.to_string().contains("plain-fixture"));
 
