@@ -2,7 +2,7 @@
 
 > 根层概览、组件清单、token/复用规范见仓库根 `AGENTS.md`。后端协议/端口/CLI 见 `src-tauri/AGENTS.md`。跨平台 CI / smoke 矩阵见 [`docs/development/testing.md`](../docs/development/testing.md)。同目录 `CLAUDE.md` 是指向本文件的软链。
 
-交互式终端输入固定走 `cc-partner.terminal-input.v1` 常驻 WebSocket：桌面 invoke 只等待 GUI Rust 有界队列接纳，mobile 连接同源 `/api/mobile/workbench/terminal-input-stream`，peer 数据阶段不得逐帧 health/HTTP。ACK 仅确认 PTY write+flush，不作为下一帧发送闸门；断线未 ACK 输入不得自动重放，也不得回退 `/sessions/write`。输出继续使用 NDJSON/replay/gap。
+交互式终端输入固定走 `cc-partner.terminal-input.v1` 常驻 WebSocket：桌面 invoke 只等待 GUI Rust 有界队列接纳，mobile 连接同源 `/api/mobile/workbench/terminal-input-stream`，peer 数据阶段不得逐帧 health/HTTP。ACK 仅确认 PTY write+flush，不作为下一帧发送闸门；断线未 ACK 输入不得自动重放，也不得回退 `/sessions/write`。输出继续使用 NDJSON/replay/gap。Agent TUI 图片粘贴（Claude Code / Grok 等从 OS 剪贴板读图）不走该 32 KiB 输入帧：桌面拦截 paste / Ctrl+V 后 `paste_workbench_session_image` / `read_clipboard_image`，mobile 拦截 paste 后 `POST /api/mobile/workbench/sessions/paste-image`，由 owning device 写系统剪贴板再注入 Ctrl+V。
 
 ## 概述
 

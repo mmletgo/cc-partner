@@ -319,6 +319,20 @@ pub struct RemoteWriteSessionInputReq {
     pub data: String,
 }
 
+/// 远端终端图片粘贴请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Agent TUI 从 owning device 剪贴板读图；控制端必须把本机 PNG data URL 送到对端写入。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{sessionId, dataUrl}`；dataUrl 为 `data:image/...;base64,...`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePasteSessionImageReq {
+    pub session_id: String,
+    pub data_url: String,
+}
+
 /// 远端终端 resize 请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:

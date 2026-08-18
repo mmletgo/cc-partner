@@ -218,6 +218,7 @@ export function Workbench() {
     handleRenameSession,
     renameSessionById,
     handleInput,
+    handlePasteImage,
     isWriteBlocked,
     handleResize,
     handleRefreshTerminalSize,
@@ -1065,6 +1066,7 @@ export function Workbench() {
               renderedActiveSessionId={renderedActiveSessionId}
               terminalResizeRequestKey={terminalResizeRequestKey}
               handleInput={handleInput}
+              handlePasteImage={handlePasteImage}
               isWriteBlocked={isWriteBlocked}
               resolveAgent={agentRuntime.latestAgentForTerminal}
               handleResize={handleResize}

@@ -541,6 +541,28 @@ export const workbenchApi = {
         data,
       }),
 
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Agent TUI 从 owning device 剪贴板读图；必须把 PNG 送到会话所在设备再注入 Ctrl+V。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke paste_workbench_session_image；不经 32 KiB 输入 WebSocket。
+     */
+    pasteImage: (sessionId: string, dataUrl: string) =>
+      invoke<{ ok: boolean; sessionId: string }>('paste_workbench_session_image', {
+        sessionId,
+        dataUrl,
+      }),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   macOS Ctrl+V 不触发 paste 事件，需从 GUI 进程读 OS 剪贴板。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke read_clipboard_image；无图返回 null。
+     */
+    readClipboardImage: () => invoke<string | null>('read_clipboard_image'),
+
     /** 调整终端 PTY 行列数。 */
     resize: (sessionId: string, cols: number, rows: number) =>
       invoke<{ ok: boolean; sessionId: string }>('resize_workbench_session', {
@@ -966,6 +988,8 @@ export type TerminalApiScope = Pick<
   | 'list'
   | 'create'
   | 'enqueueInput'
+  | 'pasteImage'
+  | 'readClipboardImage'
   | 'resize'
   | 'focus'
   | 'focused'

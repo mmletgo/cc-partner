@@ -516,6 +516,87 @@ pub(crate) async fn write_workbench_session_input_for_state(
     local_write_workbench_session_input(state, session_id, data).await
 }
 
+/// Agent TUI（Claude Code / Grok 等）识别图片粘贴的 C0 SYN / Ctrl+V 字节。
+const TERMINAL_IMAGE_PASTE_KEY: &str = "\u{0016}";
+
+/// 把图片写入本机会话所在设备的剪贴板，再向 PTY 发送 Ctrl+V。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Agent 从 **CLI 所在机器** 的 OS 剪贴板读图。本机会话写本机 pasteboard；调用方保证
+///     session 属于本机。图片不得走 32 KiB 终端输入 WebSocket。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn_blocking 写剪贴板，成功后 `write_input("\x16")`。
+pub(crate) async fn local_paste_workbench_session_image(
+    state: &AppState,
+    session_id: String,
+    data_url: String,
+) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
+    crate::screenshot::capture::decode_image_data_url_to_rgba(&data_url)?;
+    let data_url_for_clipboard = data_url;
+    tokio::task::spawn_blocking(move || {
+        crate::screenshot::capture::save_clipboard_from_image_data_url(&data_url_for_clipboard)
+    })
+    .await
+    .map_err(|e| AppError::generic(format!("写入剪贴板任务失败: {e}")))??;
+    state
+        .workbench_sessions
+        .write_input(&session_id, TERMINAL_IMAGE_PASTE_KEY)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 把图片粘贴到本机或远端终端会话的 Agent TUI。
+///
+/// Business Logic（为什么需要这个函数）:
+///     远端项目的 Claude/Grok 跑在 owning device 上；本机 Ctrl+V 只会让对端读空剪贴板。
+///     必须把图片字节送到 owning device 写其剪贴板，再发同一个 Ctrl+V。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 解析后 POST paste-image；local 调用本地 helper。
+pub(crate) async fn paste_workbench_session_image_for_state(
+    state: &AppState,
+    session_id: String,
+    data_url: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
+            .paste_image(&base_url, &inner_session_id, &data_url)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_paste_workbench_session_image(state, session_id, data_url).await
+}
+
+/// 把图片粘贴到工作台终端的 Agent TUI。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端拦截到图片粘贴后，需要把 PNG 写到会话 owning device 的剪贴板并注入 Ctrl+V。
+///
+/// Code Logic（这个命令做什么）:
+///     GuiClient 经 control `sessions.pasteImage`（data 路径）代理；owner 走 for_state。
+#[tauri::command]
+pub async fn paste_workbench_session_image(
+    state: State<'_, AppState>,
+    session_id: String,
+    data_url: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.pasteImage",
+        serde_json::json!({ "sessionId": session_id.clone(), "dataUrl": data_url.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    paste_workbench_session_image_for_state(state.inner(), session_id, data_url).await
+}
+
 /// 向工作台终端写入输入。
 ///
 /// Business Logic（为什么需要这个命令）:

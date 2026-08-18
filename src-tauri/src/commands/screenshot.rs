@@ -7,6 +7,7 @@
 //!     - `start_region_capture(app)`：每屏建透明置顶选区窗口。
 //!     - `get_region_snapshot(display, x, y, w, h, dpr)`：抓该屏纯桌面选区，返回 PNG base64。
 //!     - `save_clipboard_image(app, dataUrl)`：把前端合成的 PNG data URL 写剪贴板 + 关全部 overlay。
+//!     - `read_clipboard_image()`：GUI 进程读取 OS 剪贴板图片，返回 PNG data URL 或 null。
 //!     - `cancel_region_capture(app)`：emit `region-capture:result` {cancelled:true}，关全部 overlay。
 
 use serde_json::json;
@@ -53,6 +54,19 @@ pub async fn save_clipboard_image(app: AppHandle, data_url: String) -> Result<()
     let _ = app.emit("region-capture:result", json!({ "ok": true }));
     overlay::close_all_overlays(&app);
     Ok(())
+}
+
+/// 读取本机 GUI 进程看到的系统剪贴板图片。
+///
+/// Business Logic（为什么需要这个命令）:
+///     macOS Ctrl+V 不触发 paste 事件；必须在用户复制图片的那台机器上读 pasteboard，
+///     不能让 sidecar/远端去读空剪贴板。
+///
+/// Code Logic（这个命令做什么）:
+///     在 GUI 进程调用 `read_clipboard_image_png_data_url`，无图返回 null。
+#[tauri::command]
+pub fn read_clipboard_image() -> Result<Option<String>, AppError> {
+    capture::read_clipboard_image_png_data_url()
 }
 
 /// 取消区域截图。

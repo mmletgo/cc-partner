@@ -202,6 +202,7 @@ fn workbench_control_path(op: &str) -> &'static str {
         | "browser.create_preview"
         | "sessions.replay"
         | "sessions.write"
+        | "sessions.pasteImage"
         | "notes.save" => "workbench/data",
         _ => "workbench",
     }
@@ -223,7 +224,8 @@ fn workbench_control_timeout(op: &str) -> Duration {
         | "claude.resume"
         | "files.open"
         | "files.save_text"
-        | "agent_ledger.export_token_stats" => Duration::from_secs(360),
+        | "agent_ledger.export_token_stats"
+        | "sessions.pasteImage" => Duration::from_secs(360),
         _ => MUTATE_TIMEOUT,
     }
 }
@@ -3513,6 +3515,10 @@ mod tests {
             "workbench/data"
         );
         assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
+        assert_eq!(
+            workbench_control_path("sessions.pasteImage"),
+            "workbench/data"
+        );
         assert_eq!(workbench_control_path("notes.save"), "workbench/data");
         assert_eq!(workbench_control_path("notes.get"), "workbench");
         assert_eq!(

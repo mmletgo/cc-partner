@@ -11,12 +11,16 @@
 //!     - `capture_region(...)`：抓屏 + clamp_crop_rect + crop_imm，返回选区 RgbaImage。
 //!     - `region_to_png_base64(...)`：capture_region → PNG → base64 data URL（前端 canvas 背景）。
 //!     - `save_clipboard_from_png(data_url)`：剥 data URL 前缀 → base64 解码 → image 解码 → arboard 写剪贴板。
+//!     - `decode_image_data_url_to_rgba` / `read_clipboard_image_png_data_url`：终端图片粘贴读写剪贴板。
 
 use std::io::Cursor;
 
 use arboard::{Clipboard, ImageData};
-use image::RgbaImage;
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use xcap::Monitor;
+
+/// 终端/截图写入剪贴板的解码后图片上限（8 MiB）。
+pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 use crate::error::AppError;
 
@@ -119,33 +123,97 @@ pub fn region_to_png_base64(
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
+/// 把图片 data URL 解码为 RGBA 像素。
+///
+/// Business Logic（为什么需要这个函数）:
+///     截图确认与终端图片粘贴都要把浏览器/对端传来的 data URL 变成系统剪贴板能写的像素。
+///
+/// Code Logic（这个函数做什么）:
+///     接受 `data:image/(png|jpeg|jpg);base64,...`；校验体积后 base64 解码并用 `image` crate 转 RGBA。
+pub fn decode_image_data_url_to_rgba(data_url: &str) -> Result<(usize, usize, Vec<u8>), AppError> {
+    let (header, b64) = data_url
+        .split_once(',')
+        .ok_or_else(|| AppError::Bad("无效的图片 data URL".into()))?;
+    let header_lc = header.to_ascii_lowercase();
+    if !header_lc.starts_with("data:image/") || !header_lc.contains("base64") {
+        return Err(AppError::Bad(
+            "无效的图片 data URL（需要 image/*;base64）".into(),
+        ));
+    }
+    if b64.len() > MAX_CLIPBOARD_IMAGE_BYTES.saturating_mul(2) {
+        return Err(AppError::Bad("粘贴图片过大".into()));
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| AppError::Bad(format!("base64 解码失败: {e}")))?;
+    if bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(AppError::Bad("粘贴图片过大".into()));
+    }
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| AppError::Bad(format!("图片解码失败: {e}")))?
+        .to_rgba8();
+    Ok((img.width() as usize, img.height() as usize, img.into_raw()))
+}
+
 /// 把前端 canvas 合成的 PNG data URL 解码后写入系统剪贴板。
 ///
 /// Business Logic: 用户点「确认」后，前端把「桌面选区 + 标注」合成的 PNG 传过来写剪贴板，
-///     可直接粘贴到 Claude Code。
-/// Code Logic: 剥 `data:image/png;base64,` 前缀 → base64 解码 → `image::load_from_memory` →
-///     `to_rgba8()` → `arboard::ImageData` → `Clipboard::new()?.set_image(...)`。
+///     可直接粘贴到 Claude Code。终端远端粘贴也复用同一写入路径。
+/// Code Logic: 解码 data URL → RGBA → `arboard::ImageData` → `Clipboard::new()?.set_image(...)`。
 pub fn save_clipboard_from_png(data_url: &str) -> Result<(), AppError> {
-    let b64 = data_url
-        .strip_prefix("data:image/png;base64,")
-        .ok_or_else(|| AppError::Bad("无效的 PNG data URL（缺少前缀）".into()))?;
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| AppError::Bad(format!("base64 解码失败: {e}")))?;
-    let img = image::load_from_memory(&bytes)
-        .map_err(|e| AppError::Bad(format!("PNG 解码失败: {e}")))?
-        .to_rgba8();
-    let (w_out, h_out) = (img.width() as usize, img.height() as usize);
+    save_clipboard_from_image_data_url(data_url)
+}
+
+/// 把任意受支持的图片 data URL 写入系统剪贴板。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code / Grok 等 Agent TUI 从 **本机** 剪贴板读图；远端会话必须先把图写到 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     解码 RGBA 后 `Clipboard::set_image`。
+pub fn save_clipboard_from_image_data_url(data_url: &str) -> Result<(), AppError> {
+    let (width, height, raw) = decode_image_data_url_to_rgba(data_url)?;
     let img_data = ImageData {
-        width: w_out,
-        height: h_out,
-        bytes: img.into_raw().into(),
+        width,
+        height,
+        bytes: raw.into(),
     };
     let mut cb = Clipboard::new().map_err(|e| AppError::Bad(format!("打开剪贴板失败: {e}")))?;
     cb.set_image(img_data)
         .map_err(|e| AppError::Bad(format!("写入剪贴板失败: {e}")))?;
     Ok(())
+}
+
+/// 读取系统剪贴板中的图片并编码为 PNG data URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     macOS Ctrl+V 不会触发浏览器 paste 事件；GUI 进程必须从 OS pasteboard 取出图片再转发。
+///
+/// Code Logic（这个函数做什么）:
+///     `Clipboard::get_image` 失败视为无图（Ok(None)）；成功则编码 PNG data URL，超限返回错误。
+pub fn read_clipboard_image_png_data_url() -> Result<Option<String>, AppError> {
+    let mut cb = Clipboard::new().map_err(|e| AppError::Bad(format!("打开剪贴板失败: {e}")))?;
+    let img = match cb.get_image() {
+        Ok(img) => img,
+        Err(_) => return Ok(None),
+    };
+    let width = u32::try_from(img.width).map_err(|_| AppError::Bad("剪贴板图片宽度非法".into()))?;
+    let height =
+        u32::try_from(img.height).map_err(|_| AppError::Bad("剪贴板图片高度非法".into()))?;
+    let rgba = RgbaImage::from_raw(width, height, img.bytes.into_owned())
+        .ok_or_else(|| AppError::Bad("剪贴板图片尺寸与像素不匹配".into()))?;
+    let mut buf = Cursor::new(Vec::with_capacity(64 * 1024));
+    DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut buf, ImageFormat::Png)
+        .map_err(|e| AppError::Bad(format!("PNG 编码失败: {e}")))?;
+    let png = buf.into_inner();
+    if png.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(AppError::Bad("剪贴板图片过大".into()));
+    }
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    Ok(Some(format!("data:image/png;base64,{b64}")))
 }
 
 #[cfg(test)]
@@ -168,5 +236,26 @@ mod tests {
     #[test]
     fn clamp_empty_returns_err() {
         assert!(clamp_crop_rect(100, 100, 0, 0, 0, 10, 1.0).is_err());
+    }
+
+    /// 1×1 透明 PNG data URL，供解码契约测试使用。
+    const ONE_PX_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     终端粘贴与截图写剪贴板共用解码入口，非法/过大 payload 必须在写 pasteboard 前失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     合法 1×1 PNG 得到 1×1 RGBA；缺前缀与超大 base64 返回错误。
+    #[test]
+    fn decode_image_data_url_accepts_png_and_rejects_invalid() {
+        let (w, h, raw) = super::decode_image_data_url_to_rgba(ONE_PX_PNG).expect("1px png");
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(raw.len(), 4);
+        assert!(super::decode_image_data_url_to_rgba("not-a-data-url").is_err());
+        let oversized = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(super::MAX_CLIPBOARD_IMAGE_BYTES * 2 + 8)
+        );
+        assert!(super::decode_image_data_url_to_rgba(&oversized).is_err());
     }
 }

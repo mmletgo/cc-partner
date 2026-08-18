@@ -216,6 +216,18 @@ pub const CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1: &str = "workbench.mutation-o
 pub const CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1: &str =
     "workbench.terminal-input-stream.v1";
 
+/// 能力 token：v1 Workbench 终端图片粘贴
+/// （`POST /api/workbench/sessions/paste-image`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     Claude Code / Grok 等 Agent 从 CLI 所在机器的 OS 剪贴板读图。远端会话必须把本机图片
+///     写到 owning device 剪贴板再注入 Ctrl+V；旧 peer 缺 token 时 unsupported，不得把数 MB
+///     图片塞进 32 KiB 终端输入 WebSocket。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 paste-image 路由原子上线。
+pub const CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1: &str = "workbench.terminal-paste-image.v1";
+
 /// 能力 token：v2 Workbench Claude session 搜索结果 DTO
 /// （`{items, truncated, diagnostics}` + 混部 dual-decode）。
 ///
@@ -473,6 +485,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_PROJECT_NOTES_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
             CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1.to_string(),
+            CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1.to_string(),
             CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1.to_string(),
             CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
         ],
@@ -651,6 +664,7 @@ mod tests {
                 "workbench.project-notes.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
                 "workbench.terminal-input-stream.v1".to_string(),
+                "workbench.terminal-paste-image.v1".to_string(),
                 "workbench.wordgame-extract.v1".to_string(),
                 "workbench.workspace-safe-restore.v1".to_string(),
             ]
@@ -678,6 +692,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
         assert!(info.supports(CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1));
     }

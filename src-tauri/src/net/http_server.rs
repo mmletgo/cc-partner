@@ -1286,6 +1286,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::write_workbench_session_input),
         )
         .route(
+            "/api/workbench/sessions/paste-image",
+            post(workbench::paste_workbench_session_image),
+        )
+        .route(
             "/api/workbench/terminal-input-stream",
             get(workbench::terminal_input_stream),
         )
@@ -1462,6 +1466,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/workbench/sessions/replay",
             post(workbench::mobile_replay_workbench_session),
+        )
+        .route(
+            "/api/mobile/workbench/sessions/paste-image",
+            post(workbench::mobile_paste_workbench_session_image),
         )
         .route(
             "/api/mobile/workbench/terminal-input-stream",

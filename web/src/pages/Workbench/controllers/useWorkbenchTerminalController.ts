@@ -185,7 +185,8 @@ export type WorkbenchTerminalErrorKey =
   | 'closePane'
   | 'closeSession'
   | 'renameSession'
-  | 'writeSession';
+  | 'writeSession'
+  | 'pasteImage';
 
 /**
  * controller 暴露给页面 deep link / 项目切换等流程的窄接口。
@@ -249,6 +250,12 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   renameSessionById: (sessionId: string, name: string) => Promise<boolean>;
   handleRenameSession: () => Promise<void>;
   handleInput: (sessionId: string, data: string) => Promise<void>;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Agent TUI 图片粘贴必须先把 PNG 写到 owning device 剪贴板；dataUrl 为 null 时读本机 OS 剪贴板，
+   *   无图则回退 Ctrl+V 文本粘贴。
+   */
+  handlePasteImage: (sessionId: string, dataUrl: string | null) => Promise<void>;
   /**
    * Business Logic（为什么需要这个函数）:
    *   write 失败后 pump lane 永久 blocked，若 xterm 仍启用输入会变成静默键盘黑洞；
@@ -1214,6 +1221,34 @@ export function useWorkbenchTerminalController(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   远端 Agent 读 owning device 剪贴板。paste 事件带 dataUrl；Ctrl+V 为 null，需读本机 OS 剪贴板。
+   *   无图时回退 `\x16`，保持 Claude 文本粘贴。
+   *
+   * Code Logic（这个函数做什么）:
+   *   remoteWriteDisabled 直接返回；解析 dataUrl 后 sessions.pasteImage；失败写入 sessionError。
+   */
+  const handlePasteImage = useCallback(
+    async (sessionId: string, dataUrl: string | null): Promise<void> => {
+      if (remoteWriteDisabled) return;
+      try {
+        let resolved = dataUrl;
+        if (!resolved) {
+          resolved = (await sessionsApi.readClipboardImage()) ?? null;
+        }
+        if (!resolved) {
+          terminalInputPumpRef.current?.enqueue(sessionId, '\x16');
+          return;
+        }
+        await sessionsApi.pasteImage(sessionId, resolved);
+      } catch (error) {
+        setSessionError(displayErrorMessage(error, t('pasteImage')));
+      }
+    },
+    [displayErrorMessage, remoteWriteDisabled, sessionsApi, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   write 失败后 pump 会 silent-block enqueue；视图需用本查询禁用 xterm 输入，
    *   并配合 sessionError 让用户看到错误而非键盘黑洞。
    *
@@ -1449,6 +1484,7 @@ export function useWorkbenchTerminalController(
     renameSessionById,
     handleRenameSession,
     handleInput,
+    handlePasteImage,
     isWriteBlocked,
     hasWriteBlockedSessions,
     retryWriteBlockRecovery,

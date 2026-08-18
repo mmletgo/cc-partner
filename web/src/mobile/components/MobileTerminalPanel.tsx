@@ -22,6 +22,10 @@ import {
 import { scrollTerminalBufferLines } from '@/pages/Workbench/terminalWheel';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
+  clipboardEventImageFile,
+  fileToPngDataUrl,
+} from '@/pages/Workbench/terminalImagePaste';
+import {
   appendHeldLiveAfterReplay,
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
@@ -758,6 +762,34 @@ export function MobileTerminalPanel({
       }
     };
 
+    /**
+     * Business Logic（为什么需要这个监听器）:
+     *   手机长按粘贴走浏览器 paste 事件；xterm helper textarea 不会把图片交给 Agent。
+     *   必须拦截 image file，经 HTTP paste-image 写 owning device 剪贴板再注入 Ctrl+V。
+     *
+     * Code Logic（这个监听器做什么）:
+     *   capture 阶段取 image file → PNG data URL → sessions.pasteImage；纯文本放行给 xterm。
+     */
+    const handlePaste = (event: ClipboardEvent): void => {
+      if (!inputEnabledRef.current) return;
+      const file = clipboardEventImageFile(event);
+      if (!file) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void fileToPngDataUrl(file)
+        .then((dataUrl) => httpWorkbenchTransport.sessions.pasteImage(sessionId, dataUrl))
+        .catch((reason) => {
+          if (disposed) return;
+          setPanelError(
+            `${t('workbench:errors.pasteImage')}: ${getErrorMessage(
+              reason,
+              t('workbench:errors.pasteImage'),
+            )}`,
+          );
+        });
+    };
+    viewport.addEventListener('paste', handlePaste, true);
+
     const dataDisposable = terminal.onData((data: string) => {
       if (
         !shouldForwardMobileTerminalInput(
@@ -1055,6 +1087,7 @@ export function MobileTerminalPanel({
       viewport.removeEventListener('touchend', handleTouchEnd, touchListenerOptions);
       viewport.removeEventListener('touchcancel', handleTouchCancel, touchListenerOptions);
       viewport.removeEventListener('click', handleViewportClick);
+      viewport.removeEventListener('paste', handlePaste, true);
       touchScrollStateRef.current = null;
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);

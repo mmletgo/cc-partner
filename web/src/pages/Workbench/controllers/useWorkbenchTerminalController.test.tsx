@@ -36,6 +36,8 @@ interface FakeSessionsApi {
   list: ReturnType<typeof vi.fn>;
   create: ReturnType<typeof vi.fn>;
   enqueueInput: ReturnType<typeof vi.fn>;
+  pasteImage: ReturnType<typeof vi.fn>;
+  readClipboardImage: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   focused: ReturnType<typeof vi.fn>;
@@ -60,6 +62,8 @@ function createFreshFakeSessionsApi(): FakeSessionsApi {
     list: vi.fn(async () => [] as WorkbenchSession[]),
     create: vi.fn(async () => ({}) as WorkbenchSession),
     enqueueInput: vi.fn(async () => ({ accepted: true, sessionId: 's' })),
+    pasteImage: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    readClipboardImage: vi.fn(async () => null),
     resize: vi.fn(async () => ({ ok: true, sessionId: 's' })),
     focus: vi.fn(async () => ({ ok: true, sessionId: 's' })),
     focused: vi.fn(async () => ({ sessionId: null })),
@@ -1628,6 +1632,40 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
       await flushMicrotasks();
     });
     expect(fakeSessionsApi.enqueueInput).not.toHaveBeenCalled();
+  });
+
+  test('handlePasteImage writes image to owning device and falls back to Ctrl+V without an image', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    fakeSessionsApi.readClipboardImage.mockResolvedValueOnce(null);
+    fakeSessionsApi.pasteImage.mockClear();
+    fakeSessionsApi.enqueueInput.mockClear();
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.handlePasteImage('s1', 'data:image/png;base64,aaa');
+    });
+    expect(fakeSessionsApi.pasteImage).toHaveBeenCalledWith('s1', 'data:image/png;base64,aaa');
+
+    await act(async () => {
+      await result.current.handlePasteImage('s1', null);
+      await flushMicrotasks();
+    });
+    expect(fakeSessionsApi.readClipboardImage).toHaveBeenCalled();
+    expect(fakeSessionsApi.enqueueInput).toHaveBeenCalledWith('s1', '\x16');
   });
 
   test('handleInput serializes rapid keys per session and coalesces only while in flight', async () => {

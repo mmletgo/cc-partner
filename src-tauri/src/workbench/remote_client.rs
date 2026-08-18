@@ -17,6 +17,7 @@ use crate::net::protocol::{
     CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_BANNER_V1,
     CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1,
     CAPABILITY_WORKBENCH_HOOK_REPAIR_V1, CAPABILITY_WORKBENCH_PROJECT_NOTES_V1,
+    CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
 };
 use crate::workbench::agent_ledger::models::{
     AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
@@ -44,9 +45,9 @@ use crate::workbench::remote_protocol::{
     RemoteBannerSaveReq, RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq,
     RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
     RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
-    RemoteMutationOperationReq, RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
-    RemotePreviewSqliteReq, RemoteProjectNoteSaveReq, RemoteProjectReq, RemotePromptOptimizerReq,
-    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
+    RemoteMutationOperationReq, RemoteOpenFileReq, RemotePasteSessionImageReq, RemotePathInfoReq,
+    RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectNoteSaveReq, RemoteProjectReq,
+    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
     RemoteRepairHookFailureReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
     RemoteSafeAttachReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq,
     RemoteSelectPaneAtResp, RemoteSessionReq, RemoteSplitPaneReq,
@@ -1382,6 +1383,34 @@ impl RemoteWorkbenchClient {
                     data: data.to_string(),
                 },
                 RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 向远端终端粘贴图片（写对端剪贴板 + Ctrl+V）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Agent 在 owning device 读 OS 剪贴板；必须把本机图片送到对端，不能经 32 KiB 输入 WS。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     要求 `workbench.terminal-paste-image.v1` 后 POST `/api/workbench/sessions/paste-image`。
+    pub async fn paste_image(
+        &self,
+        base_url: &str,
+        session_id: &str,
+        data_url: &str,
+    ) -> Result<(), AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1)
+            .await?;
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/paste-image"),
+                &RemotePasteSessionImageReq {
+                    session_id: session_id.to_string(),
+                    data_url: data_url.to_string(),
+                },
+                RemoteRequestTimeoutKind::Long,
             )
             .await?;
         Ok(())

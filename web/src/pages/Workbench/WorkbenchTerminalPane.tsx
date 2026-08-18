@@ -38,6 +38,11 @@ import {
   type WorkbenchTerminalBufferType,
   type WorkbenchTerminalMouseTrackingMode,
 } from './terminalWheel';
+import {
+  clipboardEventImageFile,
+  fileToPngDataUrl,
+  isCtrlVPasteKey,
+} from './terminalImagePaste';
 
 export interface WorkbenchTerminalPaneProps {
   session: WorkbenchSession | null;
@@ -48,6 +53,12 @@ export interface WorkbenchTerminalPaneProps {
   /** 权威 Agent Runtime 是否确认该 terminal 仍由活跃 Agent 持有虚拟 transcript。 */
   agentTranscriptActive: boolean;
   onInput: (sessionId: string, data: string) => void;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   Agent TUI 从 owning device 剪贴板读图。dataUrl 来自 paste 事件；null 表示 Ctrl+V，
+   *   由 controller 读本机 OS 剪贴板。未提供时保持旧的 Ctrl+V → `\x16` 路径（测试/无图）。
+   */
+  onPasteImage?: (sessionId: string, dataUrl: string | null) => void;
   onResize: (sessionId: string, cols: number, rows: number) => void;
   resizeRequestKey?: number;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
@@ -153,6 +164,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     agentTranscriptActive,
     onInput,
     onResize,
+    onPasteImage,
     resizeRequestKey = 0,
     onCursorAnchorChange,
     onSelectPaneAt,
@@ -173,6 +185,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     onCursorAnchorChange,
   );
   const selectPaneCallbackRef = useRef<WorkbenchTerminalPaneProps['onSelectPaneAt']>(onSelectPaneAt);
+  const pasteImageCallbackRef = useRef<WorkbenchTerminalPaneProps['onPasteImage']>(onPasteImage);
   // Business Logic: 区分“点击切换分栏”与“拖拽选中文字”，需要记住 mousedown 落在哪个字符格。
   const pointerDownCellRef = useRef<TerminalCell | null>(null);
   // Business Logic: 同格内仍可能拖出几个像素形成选区；用按下坐标算位移，避免只靠字符格误判。
@@ -218,6 +231,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   useEffect(() => {
     selectPaneCallbackRef.current = onSelectPaneAt;
   }, [onSelectPaneAt]);
+
+  useEffect(() => {
+    pasteImageCallbackRef.current = onPasteImage;
+  }, [onPasteImage]);
 
   useEffect(() => {
     refreshScrollbackRef.current = refreshScrollback;
@@ -514,30 +531,57 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     });
     /**
      * Business Logic（为什么需要这个处理器）:
-     *   Claude Code 的图片粘贴是一次性的 Ctrl+V 控制字节。长会话恢复或 history hydration
+     *   Claude Code / Grok 的图片粘贴是一次性的 Ctrl+V 控制字节。长会话恢复或 history hydration
      *   重放大快照时，replay gate 会短暂屏蔽 xterm onData，以免历史里的设备查询响应写回 PTY；
      *   若用户刚好在此时粘贴图片，原实现会静默丢掉这次真实键盘输入，而空会话几乎不会命中该窗口。
+     *   远端会话还必须在发 Ctrl+V 之前把本机图片写到 owning device 剪贴板，否则对端 Agent 读空板。
      *
      * Code Logic（这个处理器做什么）:
-     *   只在 replay gate 开启时识别真实 keydown 的 Ctrl+V，直接把同一个 C0 SYN 字节写入 PTY，
-     *   并阻止 xterm 再生成重复 onData；其它按键仍由 xterm 与 replay gate 的既有逻辑处理。
+     *   Ctrl+V（不含 Cmd+V）：若有 onPasteImage 则始终交给它（null=读 OS 剪贴板），并阻止 xterm onData；
+     *   否则仅在 replay gate 开启时把 C0 SYN 写入 PTY。其它按键仍由 xterm 处理。
      */
     terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
-      const isClaudeImagePaste =
-        event.type === 'keydown' &&
-        event.ctrlKey &&
-        !event.altKey &&
-        !event.metaKey &&
-        !event.shiftKey &&
-        event.key.toLowerCase() === 'v';
-      if (!isClaudeImagePaste || !replayGateRef.current.current) return true;
+      if (!isCtrlVPasteKey(event)) return true;
       if (!inputEnabledRef.current) return false;
+      const pasteImage = pasteImageCallbackRef.current;
+      if (pasteImage && sessionId) {
+        event.preventDefault();
+        event.stopPropagation();
+        terminal.scrollToBottom();
+        pasteImage(sessionId, null);
+        return false;
+      }
+      if (!replayGateRef.current.current) return true;
       event.preventDefault();
       event.stopPropagation();
       terminal.scrollToBottom();
       onInput(sessionId, '\x16');
       return false;
     });
+    /**
+     * Business Logic（为什么需要这个监听器）:
+     *   macOS Cmd+V 走浏览器 paste 事件；xterm 只粘贴 text/plain，image-only 剪贴板会静默失败。
+     *
+     * Code Logic（这个监听器做什么）:
+     *   capture 阶段若发现 image file，preventDefault 并回调 PNG data URL；纯文本放行给 xterm。
+     */
+    const handlePaste = (event: ClipboardEvent): void => {
+      if (!inputEnabledRef.current || !sessionId) return;
+      const pasteImage = pasteImageCallbackRef.current;
+      if (!pasteImage) return;
+      const file = clipboardEventImageFile(event);
+      if (!file) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void fileToPngDataUrl(file)
+        .then((dataUrl) => {
+          pasteImage(sessionId, dataUrl);
+        })
+        .catch(() => {
+          // 编码失败不写 PTY；用户可重试粘贴。
+        });
+    };
+    viewport.addEventListener('paste', handlePaste, true);
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
     // reset 通知必须先于 live writer 注册：先标记 hydration 快照已开始，再让 xterm 排队解析。
     const unsubscribeHydrationReset = store.subscribeReset(sessionId, () => {
@@ -632,6 +676,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       observer.disconnect();
       viewport.removeEventListener('pointerdown', handlePointerDown);
       viewport.removeEventListener('pointerup', handlePointerUp);
+      viewport.removeEventListener('paste', handlePaste, true);
       dataDisposable.dispose();
       cursorDisposable.dispose();
       pointerDownCellRef.current = null;

@@ -76,7 +76,7 @@ sha2 = "0.10"
 # M6 区域截图：xcap 跨平台抓屏（物理像素）、arboard 直接写剪贴板图片、image 裁剪/PNG 编码、base64 给前端背景
 xcap = "0.4"
 arboard = { version = "3", features = ["image-data"] }
-image = { version = "0.25", features = ["png"] }
+image = { version = "0.25", features = ["png", "jpeg"] }
 base64 = "0.22"
 # M8 自动更新：tauri-plugin-updater 负责 check/download/install（签名校验 + 三平台替换），
 # tauri-plugin-process 提供 app.restart() 安装后重启

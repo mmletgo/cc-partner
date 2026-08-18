@@ -323,6 +323,7 @@ interface PaneHostProps {
   agentTranscriptActive?: boolean;
   resizeRequestKey?: number;
   onInput?: (sessionId: string, data: string) => void;
+  onPasteImage?: (sessionId: string, dataUrl: string | null) => void;
   onResize?: (sessionId: string, cols: number, rows: number) => void;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
   refreshScrollback?: (sessionId: string) => void;
@@ -344,6 +345,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
     agentTranscriptActive = false,
     resizeRequestKey = 0,
     onInput,
+    onPasteImage,
     onResize,
     onCursorAnchorChange,
     refreshScrollback,
@@ -372,6 +374,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
         inputEnabled={inputEnabled}
         agentTranscriptActive={agentTranscriptActive}
         onInput={stableInput}
+        onPasteImage={onPasteImage}
         onResize={stableResize}
         resizeRequestKey={resizeRequestKey}
         onCursorAnchorChange={onCursorAnchorChange ? stableCursor : undefined}
@@ -612,6 +615,90 @@ describe('WorkbenchTerminalPane — replay gate', () => {
       shiftKey: false,
     })).toBe(true);
     expect(onInput).not.toHaveBeenCalled();
+  });
+
+  test('Ctrl+V with onPasteImage reads clipboard instead of sending SYN immediately', () => {
+    const onInput = vi.fn();
+    const onPasteImage = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    render(
+      <PaneHost
+        session={session}
+        store={store}
+        inputEnabled={true}
+        onInput={onInput}
+        onPasteImage={onPasteImage}
+      />,
+    );
+    const terminal = terminalEvents.instances[terminalEvents.instances.length - 1]!;
+    const preventDefault = vi.fn();
+    const stopPropagation = vi.fn();
+    let handled: boolean | undefined;
+    act(() => {
+      handled = terminal.invokeKey({
+        type: 'keydown',
+        key: 'v',
+        ctrlKey: true,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+        preventDefault,
+        stopPropagation,
+      });
+    });
+    expect(handled).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(onPasteImage).toHaveBeenCalledOnce();
+    expect(onPasteImage).toHaveBeenCalledWith('s1', null);
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  test('paste event with an image file is intercepted', async () => {
+    const onPasteImage = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    render(
+      <PaneHost
+        session={session}
+        store={store}
+        inputEnabled={true}
+        onPasteImage={onPasteImage}
+      />,
+    );
+    const viewport = document.querySelector('[data-testid="terminal-pane"] > div');
+    expect(viewport).toBeTruthy();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' });
+    const items = [
+      {
+        kind: 'file',
+        type: 'image/png',
+        getAsFile: () => file,
+      },
+    ];
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        items,
+        files: {
+          length: 1,
+          item: () => file,
+          [Symbol.iterator]: function* iter() {
+            yield file;
+          },
+        },
+      },
+    });
+    act(() => {
+      viewport!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(onPasteImage).toHaveBeenCalledWith(
+        's1',
+        expect.stringMatching(/^data:image\/png;base64,/),
+      );
+    });
   });
 
   test('historical buffer replay writes through writeTerminalReplay and gates onData until release', async () => {

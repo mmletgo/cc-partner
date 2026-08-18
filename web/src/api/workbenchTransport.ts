@@ -89,6 +89,10 @@ export interface WorkbenchTransport {
       sessionId: string,
       signal?: AbortSignal,
     ) => Promise<WorkbenchSessionReplay>;
+    pasteImage: (
+      sessionId: string,
+      dataUrl: string,
+    ) => Promise<{ ok: boolean; sessionId: string }>;
     focus: (
       sessionId: string,
       streamActive?: boolean,
@@ -288,6 +292,7 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     resize: (sessionId, cols, rows) => workbenchApi.sessions.resize(sessionId, cols, rows),
     replay: async (sessionId) => createEmptyDesktopReplay(sessionId),
     hydrateScrollback: (sessionId) => workbenchApi.sessions.hydrateScrollback(sessionId),
+    pasteImage: (sessionId, dataUrl) => workbenchApi.sessions.pasteImage(sessionId, dataUrl),
     focus: (sessionId, streamActive) => workbenchApi.sessions.focus(sessionId, streamActive),
     focused: (projectId, worktreeId) => workbenchApi.sessions.focused(projectId, worktreeId),
     splitPane: (sessionId, direction) => workbenchApi.sessions.splitPane(sessionId, direction),

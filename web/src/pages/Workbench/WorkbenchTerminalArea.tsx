@@ -50,6 +50,7 @@ export interface WorkbenchTerminalAreaProps {
   renderedActiveSessionId: string | null;
   terminalResizeRequestKey: number;
   handleInput: (sessionId: string, data: string) => void;
+  handlePasteImage: (sessionId: string, dataUrl: string | null) => void;
   /**
    * Business Logic（为什么需要这个回调）:
    *   write 失败后输入泵 silent-block enqueue；UI 必须禁用 xterm 输入，避免键盘黑洞。
@@ -105,6 +106,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
     renderedActiveSessionId,
     terminalResizeRequestKey,
     handleInput,
+    handlePasteImage,
     isWriteBlocked,
     resolveAgent,
     handleResize,
@@ -170,6 +172,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
                 : t('workbench:terminalNoProject')
             }
             onInput={handleInput}
+            onPasteImage={handlePasteImage}
             onResize={handleResize}
             resizeRequestKey={0}
             renderVisible={terminalSurfaceVisible}
@@ -208,6 +211,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
               session={session}
               placeholder={t('workbench:terminalPlaceholder')}
               onInput={handleInput}
+              onPasteImage={handlePasteImage}
               onResize={handleResize}
               resizeRequestKey={
                 session.id === renderedActiveSessionId ? terminalResizeRequestKey : 0

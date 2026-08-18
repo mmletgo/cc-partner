@@ -676,6 +676,11 @@ async fn dispatch_workbench_op(
             let data = required_string(&payload, "data")?;
             workbench::write_workbench_session_input_for_state(state, session_id, data).await
         }
+        "sessions.pasteImage" => {
+            let session_id = required_string(&payload, "sessionId")?;
+            let data_url = required_string(&payload, "dataUrl")?;
+            workbench::paste_workbench_session_image_for_state(state, session_id, data_url).await
+        }
         "sessions.resize" => {
             let session_id = required_string(&payload, "sessionId")?;
             let cols = payload

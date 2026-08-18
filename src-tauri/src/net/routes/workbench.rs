@@ -27,19 +27,20 @@ use crate::commands::workbench::{
     local_get_workbench_project_note, local_get_workbench_worktree, local_list_workbench_dir,
     local_list_workbench_git_commits, local_list_workbench_sessions,
     local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
-    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
-    local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
-    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_banner,
-    local_save_workbench_project_note, local_save_workbench_text_file,
+    local_paste_workbench_session_image, local_preview_workbench_html_asset,
+    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
+    local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
+    local_save_workbench_banner, local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
     local_write_workbench_session_input, local_zoom_workbench_pane,
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
     owner_local_preflight_for_state, owner_local_safe_attach_for_state,
-    push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
-    replay_workbench_session_for_state, resize_workbench_session_for_state,
-    resume_agent_session_for_state, save_workbench_text_file_for_state,
-    search_agent_sessions_for_state, split_workbench_pane_for_state,
-    switch_workbench_pane_for_state, zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
+    paste_workbench_session_image_for_state, push_workbench_worktree_for_state,
+    remove_workbench_worktree_for_state, replay_workbench_session_for_state,
+    resize_workbench_session_for_state, resume_agent_session_for_state,
+    save_workbench_text_file_for_state, search_agent_sessions_for_state,
+    split_workbench_pane_for_state, switch_workbench_pane_for_state, zoom_workbench_pane_for_state,
+    WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
 use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
@@ -71,11 +72,11 @@ use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
     RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
     RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
-    RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
-    RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
-    RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
-    RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorktreeReq, RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
+    RemoteOpenFileReq, RemotePasteSessionImageReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
+    RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq,
+    RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
+    RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq, RemoteSessionReq,
+    RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
@@ -1330,6 +1331,27 @@ pub async fn write_workbench_session_input(
     Ok(Json(result))
 }
 
+/// 向远端设备本机终端粘贴图片。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote Agent TUI 必须读 owning device 剪贴板；对端把 PNG 写 pasteboard 再发 Ctrl+V。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 paste-image helper。
+pub async fn paste_workbench_session_image(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemotePasteSessionImageReq>,
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.paste-image"))?;
+    let result = local_paste_workbench_session_image(&state, req.session_id, req.data_url)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.paste-image"))?;
+    Ok(Json(result))
+}
+
 /// 调整远端设备本机终端尺寸。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2098,6 +2120,24 @@ pub async fn mobile_replay_workbench_session(
     }
     .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.replay"))?;
     Ok(Json(replay))
+}
+
+/// 手机端把图片粘贴到本机或远端 Agent 终端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `/mobile` 浏览器粘贴图片时，必须把 PNG 送到会话 owning device 的剪贴板再发 Ctrl+V。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 remote-aware paste-image helper（可二级代理到远端）。
+pub async fn mobile_paste_workbench_session_image(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemotePasteSessionImageReq>,
+) -> P2pResult<Json<Value>> {
+    let value = paste_workbench_session_image_for_state(&state, req.session_id, req.data_url)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.paste-image"))?;
+    Ok(Json(value))
 }
 
 /// 手机端调整本机或远端 terminal 尺寸。
@@ -2891,6 +2931,19 @@ mod tests {
             server_protocol_info, CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1,
         };
         assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 必须宣告 terminal-paste-image.v1，控制端才能把图片送到 owning device。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     server_protocol_info supports CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1。
+    #[test]
+    fn server_advertises_terminal_paste_image_capability() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
+        };
+        assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1));
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -869,6 +869,12 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         { sessionId, refreshHistory: true },
         { policy: { kind: 'query', signal } },
       ),
+    pasteImage: (sessionId, dataUrl) =>
+      postJson<{ ok: boolean; sessionId: string }>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/sessions/paste-image`,
+        { sessionId, dataUrl },
+        { policy: { kind: 'longMutation' } },
+      ),
     focus: (sessionId, streamActive = true) =>
       postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/focus`, {
         sessionId,

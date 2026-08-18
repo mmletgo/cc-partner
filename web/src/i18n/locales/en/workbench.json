@@ -890,6 +890,7 @@
     "closeSession": "Failed to close terminal",
     "renameSession": "Failed to rename session",
     "writeSession": "Failed to write to terminal",
+    "pasteImage": "Failed to paste image into the terminal",
     "files": "Failed to load folder",
     "openFile": "Failed to open file",
     "saveFile": "Failed to save file",

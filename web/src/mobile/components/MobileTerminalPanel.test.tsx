@@ -51,6 +51,7 @@ const terminalEvents = vi.hoisted(() => ({
   hydrationPromise: null as Promise<WorkbenchSessionReplay | null> | null,
   hydrateCalls: [] as string[],
   resizeCalls: [] as Array<{ sessionId: string; cols: number; rows: number }>,
+  pasteImageCalls: [] as Array<{ sessionId: string; dataUrl: string }>,
   resetCalls: [] as Array<{ instance: number }>,
   scrollToLineCalls: [] as Array<{ instance: number; line: number }>,
   instances: [] as MockTerminalInstance[],
@@ -139,6 +140,10 @@ vi.mock('@/api/workbenchHttp', () => ({
         terminalEvents.resizeCalls.push({ sessionId, cols, rows });
         return Promise.resolve();
       }),
+      pasteImage: vi.fn((sessionId: string, dataUrl: string) => {
+        terminalEvents.pasteImageCalls.push({ sessionId, dataUrl });
+        return Promise.resolve({ ok: true, sessionId });
+      }),
     },
   },
 }));
@@ -152,6 +157,9 @@ vi.mock('react-i18next', () => {
 
 vi.mock('../mobileTerminalInputStream', () => ({
   MobileTerminalInputStream: class {
+    constructor(options?: { onStateChange?: (state: { status: string }) => void }) {
+      options?.onStateChange?.({ status: 'ready' });
+    }
     enqueue(): void {}
     close(): void {}
   },
@@ -272,6 +280,7 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.hydrationPromise = null;
     terminalEvents.hydrateCalls.length = 0;
     terminalEvents.resizeCalls.length = 0;
+    terminalEvents.pasteImageCalls.length = 0;
     terminalEvents.resetCalls.length = 0;
     terminalEvents.scrollToLineCalls.length = 0;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
@@ -795,5 +804,70 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     expect(
       terminalEvents.writeCalls.some((call) => call.data.includes('history line')),
     ).toBe(true);
+  });
+
+  test('paste event with an image file posts paste-image instead of typing into xterm', async () => {
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = buildSession();
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+    await waitFor(() => {
+      expect(terminalEvents.writeCalls.some((call) => call.data.includes('ready'))).toBe(true);
+    });
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        items: [
+          {
+            kind: 'file',
+            type: 'image/png',
+            getAsFile: () => file,
+          },
+        ],
+        files: {
+          length: 1,
+          item: () => file,
+          [Symbol.iterator]: function* iter() {
+            yield file;
+          },
+        },
+      },
+    });
+    act(() => {
+      viewport.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() => {
+      expect(terminalEvents.pasteImageCalls).toEqual([
+        {
+          sessionId: 's1',
+          dataUrl: expect.stringMatching(/^data:image\/png;base64,/),
+        },
+      ]);
+    });
   });
 });
