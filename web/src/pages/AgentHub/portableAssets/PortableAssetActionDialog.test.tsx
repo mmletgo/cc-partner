@@ -521,4 +521,46 @@ describe('PortableAssetActionDialog state machine', () => {
       'borrowedImpactDisable:',
     );
   });
+
+  test('store detach shows unlink copy and Grok-still-loaded-via-Claude hint', () => {
+    const grokStore: PortableInventoryItemDto = {
+      ...item,
+      inventoryItemId: 'grok-skill-store',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      nativeOutputCandidate: false,
+      store: {
+        storeId: 'skill:skill-a',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+    };
+    render(
+      <PortableAssetActionDialog
+        open
+        item={grokStore}
+        action="detach"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        onPreview={() => undefined}
+        onConfirm={() => undefined}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-action-store-hint').textContent).toContain(
+      'agentHub:portable.actionDialog.storeDetachHint',
+    );
+    expect(screen.getByTestId('portable-action-store-still-loaded').textContent).toContain(
+      'storeStillLoadedVia',
+    );
+    expect(screen.queryByTestId('portable-action-borrowed-impact')).toBeNull();
+  });
 });

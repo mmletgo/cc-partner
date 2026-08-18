@@ -236,10 +236,47 @@ pub struct PortableInventoryItemCapabilitiesDto {
     pub can_adopt: bool,
     /// 是否允许安装到源同类 target
     pub can_install_to_source_target: bool,
+    /// 是否允许把本机 native 迁入 portable-store
+    #[serde(default)]
+    pub can_migrate_to_store: bool,
+    /// 是否允许把 store 附加到当前 Agent
+    #[serde(default)]
+    pub can_attach: bool,
+    /// 是否允许从当前 Agent 卸下 store 软链/leaf
+    #[serde(default)]
+    pub can_detach: bool,
+    /// 是否允许本机彻底删除 store 真树
+    #[serde(default)]
+    pub can_destroy_store: bool,
     /// 能力阻断/限制原因码
     pub reason_code: Option<String>,
     /// 证据 ID
     pub evidence_ids: Vec<String>,
+}
+
+/// portable-store 观测事实。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     同一 storeId 在 Grok/Claude 路径上必须去重；卸下 Grok 后若 Claude 仍挂着，
+///     只能提示「仍被其他路径加载」，不得暗改 Claude。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase；缺省全 false/None，旧快照可反序列化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableStoreFactDto {
+    /// `skill:foo` / `command:bar` / `mcp:id`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<String>,
+    /// 当前 viewing Agent 自己的 native 根是否已挂上
+    #[serde(default)]
+    pub store_attached: bool,
+    /// 本 Agent 未挂，但仍被其他路径加载（如 Grok 扫到 Claude 链）
+    #[serde(default)]
+    pub loaded_via_other_path: bool,
+    /// 仍在加载的另一路径所属 target
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_via_target: Option<AgentTarget>,
 }
 
 /// MCP 凭据观测事实（仅 present/hash）。
@@ -360,6 +397,9 @@ pub struct PortableInventoryItemDto {
     /// MCP 凭据事实（仅 present/hash；非 MCP 为 None）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_credential: Option<PortableMcpCredentialFactDto>,
+    /// portable-store 观测（缺省表示与 store 无关）
+    #[serde(default)]
+    pub store: PortableStoreFactDto,
 }
 
 /// 完整库存快照。
@@ -487,6 +527,10 @@ pub fn inventory_snapshot_hash(
                 can_uninstall: i.capabilities.can_uninstall,
                 can_adopt: i.capabilities.can_adopt,
                 can_install_to_source_target: i.capabilities.can_install_to_source_target,
+                can_migrate_to_store: i.capabilities.can_migrate_to_store,
+                can_attach: i.capabilities.can_attach,
+                can_detach: i.capabilities.can_detach,
+                can_destroy_store: i.capabilities.can_destroy_store,
                 reason_code: i.capabilities.reason_code.clone(),
                 evidence_ids: {
                     let mut e = i.capabilities.evidence_ids.clone();
@@ -494,6 +538,10 @@ pub fn inventory_snapshot_hash(
                     e
                 },
             },
+            store_id: i.store.store_id.clone(),
+            store_attached: i.store.store_attached,
+            loaded_via_other_path: i.store.loaded_via_other_path,
+            loaded_via_target: i.store.loaded_via_target.map(|t| t.as_str().to_string()),
         })
         .collect();
     item_materials.sort_by(|a, b| {
@@ -565,6 +613,10 @@ struct ItemHashMaterial {
     mcp_credential_present: Option<bool>,
     mcp_credential_hash: Option<String>,
     capabilities: CapabilityHashMaterial,
+    store_id: Option<String>,
+    store_attached: bool,
+    loaded_via_other_path: bool,
+    loaded_via_target: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -575,6 +627,10 @@ struct CapabilityHashMaterial {
     can_uninstall: bool,
     can_adopt: bool,
     can_install_to_source_target: bool,
+    can_migrate_to_store: bool,
+    can_attach: bool,
+    can_detach: bool,
+    can_destroy_store: bool,
     reason_code: Option<String>,
     evidence_ids: Vec<String>,
 }

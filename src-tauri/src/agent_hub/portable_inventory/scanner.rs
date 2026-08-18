@@ -24,12 +24,15 @@ use crate::agent_hub::portable_inventory::models::{
     PortableInventoryItemDto, PortableInventoryManagementState,
     PortableInventoryMutationCapability, PortableInventoryQuery, PortableInventoryScanCapability,
     PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableInventoryTargetDto,
-    PortableMcpCredentialFactDto,
+    PortableMcpCredentialFactDto, PortableStoreFactDto,
 };
 use crate::agent_hub::portable_inventory::plugin_enablement::{
     plugin_actual_enabled, ViewingPluginEnablement,
 };
 use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
+use crate::agent_hub::portable_store::{
+    classify_store_link, current_portable_store_root, store_id_from_canonical, StoreLinkClass,
+};
 use crate::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
     EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
@@ -401,8 +404,18 @@ pub fn scan_portable_inventory_facts_query(
                     &mut items,
                 );
             }
+            inject_store_catalog_items(
+                target,
+                scope,
+                &target_dto,
+                &evaluated,
+                query.kind,
+                &mut seen_ids,
+                &mut items,
+            );
         }
     }
+    annotate_store_loaded_via_other_path(&mut items);
 
     // 稳定排序，便于断言
     items.sort_by(|a, b| {
@@ -818,9 +831,12 @@ fn scan_plugin_packages(
                     reason,
                     origin_kind,
                     native_output_candidate,
+                    &PortableStoreFactDto::default(),
+                    PortableAssetKind::Plugin,
                 ),
                 warnings,
                 mcp_credential: None,
+                store: PortableStoreFactDto::default(),
             };
             // seen 去重：与 discovered_to_item 同一套 disabled-wins 合并策略。
             match seen.get(&inv_id).copied() {
@@ -1530,9 +1546,13 @@ fn discovered_to_item(
         ),
     };
 
+    let (owned_by, store) = store_fact_for_discovery(disc);
     let mut warnings: Vec<String> = disc.diagnostics.iter().map(|d| d.code.clone()).collect();
     if matches!(disc.origin.status, PortableDiscoveryStatus::Blocked) {
         warnings.push("source_blocked".into());
+    }
+    if store.loaded_via_other_path {
+        warnings.push("store_loaded_via_other_path".into());
     }
 
     let mcp_credential = if kind == PortableAssetKind::Mcp {
@@ -1545,7 +1565,7 @@ fn discovered_to_item(
     let (can_enable, can_disable, can_uninstall, enablement_target, uninstall_target) =
         mutation_gates_for_origin(
             disc.origin.target,
-            disc.origin.owned_by,
+            owned_by,
             disc.origin.native_output_candidate,
             disc.origin.origin_kind,
             kind,
@@ -1554,7 +1574,7 @@ fn discovered_to_item(
         );
     let borrowed = is_borrowed_runtime_origin(
         disc.origin.target,
-        disc.origin.owned_by,
+        owned_by,
         disc.origin.native_output_candidate,
         disc.origin.origin_kind,
     );
@@ -1590,7 +1610,7 @@ fn discovered_to_item(
         inventory_item_id: inv_id.clone(),
         target: disc.origin.target,
         loaded_by: disc.origin.target,
-        owned_by: disc.origin.owned_by,
+        owned_by,
         origin_kind: disc.origin.origin_kind,
         native_output_candidate: disc.origin.native_output_candidate,
         kind,
@@ -1630,9 +1650,12 @@ fn discovered_to_item(
             reason,
             disc.origin.origin_kind,
             disc.origin.native_output_candidate,
+            &store,
+            kind,
         ),
         warnings,
         mcp_credential,
+        store,
     };
 
     // seen 去重：按 inv_id 索引已存在 item。
@@ -1672,10 +1695,168 @@ fn should_replace_with(
     new_item: &PortableInventoryItemDto,
     existing: &PortableInventoryItemDto,
 ) -> bool {
+    if let (Some(new_id), Some(old_id)) = (&new_item.store.store_id, &existing.store.store_id) {
+        if new_id == old_id {
+            if new_item.store.store_attached && !existing.store.store_attached {
+                return true;
+            }
+            if new_item.origin_kind == PortableOriginKind::Native
+                && existing.origin_kind != PortableOriginKind::Native
+            {
+                return true;
+            }
+            return false;
+        }
+    }
     if new_item.actual_enabled == Some(false) && existing.actual_enabled != Some(false) {
         return true;
     }
     false
+}
+
+/// 从发现路径推导 store 事实与所有者。
+///
+/// Business Logic: store 软链归 portableStore；兼容根上的同一 storeId 只标「仍被其他路径加载」。
+/// Code Logic: classify_store_link；兼容/非 native → loaded_via_other_path。
+fn store_fact_for_discovery(
+    disc: &DiscoveredPortableAsset,
+) -> (PortableAssetOwner, PortableStoreFactDto) {
+    let path = &disc.origin.path;
+    match classify_store_link(path) {
+        StoreLinkClass::StoreLink { store_id, .. } => {
+            let via = disc.origin.owned_by.as_hub_target();
+            let store_attached = disc.origin.origin_kind == PortableOriginKind::Native
+                && disc.origin.native_output_candidate;
+            (
+                PortableAssetOwner::PortableStore,
+                PortableStoreFactDto {
+                    store_id: Some(store_id),
+                    store_attached,
+                    loaded_via_other_path: !store_attached,
+                    loaded_via_target: if store_attached { None } else { via },
+                },
+            )
+        }
+        StoreLinkClass::Regular => {
+            if let (Ok(canonical), Some(store_root)) =
+                (std::fs::canonicalize(path), current_portable_store_root())
+            {
+                if let Some(store_id) = store_id_from_canonical(&canonical, &store_root) {
+                    return (
+                        PortableAssetOwner::PortableStore,
+                        PortableStoreFactDto {
+                            store_id: Some(store_id),
+                            store_attached: false,
+                            loaded_via_other_path: false,
+                            loaded_via_target: None,
+                        },
+                    );
+                }
+            }
+            (disc.origin.owned_by, PortableStoreFactDto::default())
+        }
+        StoreLinkClass::EscapeLink => (disc.origin.owned_by, PortableStoreFactDto::default()),
+    }
+}
+
+/// 把 store 目录里尚未出现在该 target 盘点中的资产补进列表。
+///
+/// Business Logic: 卸下后真树仍在，UI 还要能附加/彻底删除。
+/// Code Logic: 扫描 portable-store/skills|commands，再走 discovered_to_item 去重。
+fn inject_store_catalog_items(
+    target: AgentTarget,
+    scope: &PortableScanScope,
+    target_dto: &PortableInventoryTargetDto,
+    evaluated: &EvaluatedTargetSupport,
+    kind_filter: Option<PortableAssetKind>,
+    seen: &mut BTreeMap<String, usize>,
+    items: &mut Vec<PortableInventoryItemDto>,
+) {
+    let Some(store_root) = current_portable_store_root() else {
+        return;
+    };
+    if !store_root.is_dir() {
+        return;
+    }
+    if kind_filter.is_none() || kind_filter == Some(PortableAssetKind::Skill) {
+        if let Ok(discs) = crate::agent_hub::targets::portable::scan_skill_dirs(
+            target,
+            scope.scope_kind,
+            &store_root.join("skills"),
+            PortableOriginKind::Native,
+        ) {
+            for disc in discs {
+                discovered_to_item(
+                    PortableAssetKind::Skill,
+                    &disc,
+                    scope,
+                    target_dto,
+                    evaluated,
+                    seen,
+                    items,
+                );
+            }
+        }
+    }
+    if kind_filter.is_none() || kind_filter == Some(PortableAssetKind::Command) {
+        if let Ok(discs) = crate::agent_hub::targets::portable::scan_command_markdown_dir(
+            target,
+            scope.scope_kind,
+            &store_root.join("commands"),
+            PortableOriginKind::Native,
+        ) {
+            for disc in discs {
+                discovered_to_item(
+                    PortableAssetKind::Command,
+                    &disc,
+                    scope,
+                    target_dto,
+                    evaluated,
+                    seen,
+                    items,
+                );
+            }
+        }
+    }
+}
+
+/// 同一 storeId 若本 Agent 未附加、但兼容路径仍在，保留「仍被其他路径加载」。
+///
+/// Business Logic: 卸 Grok 不得为了列表干净去改 Claude。
+/// Code Logic: 按 (target, storeId) 看是否已有 store_attached；否则标 hint。
+fn annotate_store_loaded_via_other_path(items: &mut [PortableInventoryItemDto]) {
+    let mut attached: BTreeMap<(AgentTarget, String), bool> = BTreeMap::new();
+    for item in items.iter() {
+        if let Some(id) = item.store.store_id.as_deref() {
+            let key = (item.target, id.to_string());
+            let flag = attached.entry(key).or_insert(false);
+            *flag |= item.store.store_attached;
+        }
+    }
+    for item in items.iter_mut() {
+        let Some(id) = item.store.store_id.clone() else {
+            continue;
+        };
+        let attached_here = attached.get(&(item.target, id)).copied().unwrap_or(false);
+        if !attached_here
+            && (item.origin_kind == PortableOriginKind::Compatibility
+                || item.store.loaded_via_other_path)
+        {
+            item.store.store_attached = false;
+            item.store.loaded_via_other_path = true;
+            if item.store.loaded_via_target.is_none() {
+                item.store.loaded_via_target =
+                    item.owned_by.as_hub_target().or(Some(AgentTarget::Claude));
+            }
+            if !item
+                .warnings
+                .iter()
+                .any(|w| w == "store_loaded_via_other_path")
+            {
+                item.warnings.push("store_loaded_via_other_path".into());
+            }
+        }
+    }
 }
 
 fn origin_to_inventory_origin(
@@ -1750,6 +1931,16 @@ fn action_required_capability(
             })
         }
         PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => None,
+        PortableAssetActionKind::Attach
+        | PortableAssetActionKind::Detach
+        | PortableAssetActionKind::DestroyStore
+        | PortableAssetActionKind::MigrateToStore => {
+            if kind == PortableAssetKind::Plugin {
+                None
+            } else {
+                Some(TargetCapability::RenderPortableAssets)
+            }
+        }
     }
 }
 
@@ -1830,7 +2021,12 @@ fn item_capabilities(
     reason: Option<String>,
     origin_kind: PortableOriginKind,
     native_output_candidate: bool,
+    store: &PortableStoreFactDto,
+    _kind_for_store: PortableAssetKind,
 ) -> PortableInventoryItemCapabilitiesDto {
+    let store_kind = kind != PortableAssetKind::Plugin;
+    let store_write = store_kind
+        && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Attach);
     let can_toggle_enable = can_enable_mutation && enable_semantics && actual_enabled.is_some();
     let can_toggle_disable = can_disable_mutation && enable_semantics && actual_enabled.is_some();
     let can_enable = can_toggle_enable
@@ -1852,6 +2048,16 @@ fn item_capabilities(
         // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
         can_adopt: false,
         can_install_to_source_target: false,
+        can_migrate_to_store: store_write
+            && store.store_id.is_none()
+            && native_output_candidate
+            && matches!(
+                origin_kind,
+                PortableOriginKind::Native | PortableOriginKind::Plugin
+            ),
+        can_attach: store_write && store.store_id.is_some() && !store.store_attached,
+        can_detach: store_write && store.store_attached,
+        can_destroy_store: store_write && store.store_id.is_some(),
         reason_code: reason,
         evidence_ids: vec![format!("L2-PORTABLE-{}-SCAN", kind.as_str().to_uppercase())],
     };
@@ -2315,6 +2521,8 @@ enabled = false
             mutation_capability_reason(&target),
             PortableOriginKind::Native,
             true,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
         );
         assert!(!capabilities.can_enable);
         assert!(!capabilities.can_disable);
@@ -2390,6 +2598,8 @@ enabled = false
             ),
             PortableOriginKind::Native,
             true,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
         );
 
         assert!(capabilities.can_enable);
@@ -2452,6 +2662,8 @@ enabled = false
             action_capability_reason(&target, &evaluated, target.target, PortableAssetKind::Skill),
             PortableOriginKind::Native,
             true,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
         );
 
         assert!(capabilities.can_disable);
@@ -2737,6 +2949,8 @@ enabled = false
             None,
             PortableOriginKind::Native,
             true,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
         );
         assert!(caps.can_disable);
         assert!(caps.can_uninstall);
@@ -2757,6 +2971,8 @@ enabled = false
             None,
             PortableOriginKind::Compatibility,
             false,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
         );
         assert!(!caps.can_enable);
         assert!(caps.can_disable);
@@ -2779,6 +2995,8 @@ enabled = false
             Some("cli_version_unknown".into()),
             PortableOriginKind::Compatibility,
             false,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Skill,
         );
         assert!(!caps.can_enable);
         assert!(!caps.can_disable);
@@ -3515,5 +3733,86 @@ enabled = ["native-only"]
         }
         v.sort();
         v
+    }
+
+    fn store_item(
+        target: AgentTarget,
+        origin: PortableOriginKind,
+        attached: bool,
+        via_other: bool,
+    ) -> PortableInventoryItemDto {
+        PortableInventoryItemDto {
+            inventory_item_id: format!("{}-skill-foo", target.as_str()),
+            target,
+            loaded_by: target,
+            owned_by: PortableAssetOwner::PortableStore,
+            origin_kind: origin,
+            native_output_candidate: origin == PortableOriginKind::Native && attached,
+            kind: PortableAssetKind::Skill,
+            native_id: "foo".into(),
+            display_name: "foo".into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some(format!("/{}/skills/foo", target.as_str())),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(attached),
+            content_hash: Some("hash-foo".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::HubManaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: false,
+                can_disable: false,
+                can_uninstall: false,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: !attached,
+                can_detach: attached,
+                can_destroy_store: true,
+                reason_code: None,
+                evidence_ids: vec![],
+            },
+            warnings: vec![],
+            mcp_credential: None,
+            store: PortableStoreFactDto {
+                store_id: Some("skill:foo".into()),
+                store_attached: attached,
+                loaded_via_other_path: via_other,
+                loaded_via_target: None,
+            },
+        }
+    }
+
+    #[test]
+    fn grok_unattached_store_keeps_loaded_via_claude_hint() {
+        let claude = store_item(AgentTarget::Claude, PortableOriginKind::Native, true, false);
+        let mut grok = store_item(
+            AgentTarget::Grok,
+            PortableOriginKind::Compatibility,
+            false,
+            false,
+        );
+        let mut items = vec![claude, grok];
+        annotate_store_loaded_via_other_path(&mut items);
+        assert!(items[0].store.store_attached);
+        assert!(!items[0].store.loaded_via_other_path);
+        grok = items.remove(1);
+        assert!(!grok.store.store_attached);
+        assert!(grok.store.loaded_via_other_path);
+        assert_eq!(grok.store.loaded_via_target, Some(AgentTarget::Claude));
+        assert!(grok
+            .warnings
+            .iter()
+            .any(|w| w == "store_loaded_via_other_path"));
     }
 }

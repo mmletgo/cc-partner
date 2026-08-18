@@ -234,6 +234,10 @@ export function AgentHubView(props: AgentHubViewProps) {
         disable: t('agentHub:portable.actions.disable'),
         uninstall: t('agentHub:portable.actions.uninstall'),
         installToSourceTarget: t('agentHub:portable.actions.installToSourceTarget'),
+        attach: t('agentHub:portable.actions.attach'),
+        detach: t('agentHub:portable.actions.detach'),
+        destroyStore: t('agentHub:portable.actions.destroyStore'),
+        migrateToStore: t('agentHub:portable.actions.migrateToStore'),
       },
       sourceOrigin: {
         standalone: t('agentHub:portable.inventory.sourceOrigin.standalone'),
@@ -243,6 +247,7 @@ export function AgentHubView(props: AgentHubViewProps) {
       unmanagedRefreshHint: t('agentHub:portable.inventory.unmanagedRefreshHint'),
       groupInstalled: t('agentHub:portable.inventory.groupInstalled'),
       groupBorrowed: t('agentHub:portable.inventory.groupBorrowed'),
+      storeBadge: t('agentHub:portable.inventory.storeBadge'),
       emptyRuntimeHint: t('agentHub:portable.inventory.emptyRuntimeHint'),
       openInOwnerAgent: t('agentHub:portable.inventory.openInOwnerAgent'),
       borrowedFrom: {
@@ -254,6 +259,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         cursor: t('agentHub:portable.inventory.borrowedFrom.cursor'),
         pi: t('agentHub:portable.inventory.borrowedFrom.pi'),
         sharedAgents: t('agentHub:portable.inventory.borrowedFrom.sharedAgents'),
+        portableStore: t('agentHub:portable.inventory.borrowedFrom.portableStore'),
         unknown: t('agentHub:portable.inventory.borrowedFrom.unknown'),
       },
     }),

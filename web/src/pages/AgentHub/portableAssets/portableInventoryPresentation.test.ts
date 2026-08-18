@@ -599,6 +599,89 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual(['disable', 'uninstall']);
     expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBe('disable');
   });
+
+  test('skill store capabilities expose migrate/attach/detach/destroy instead of enable/disable', () => {
+    const storeSkill = makeItem({
+      inventoryItemId: 'claude-skill-store',
+      kind: 'skill',
+      nativeId: 'store-skill',
+      actualEnabled: true,
+      ownedBy: 'portableStore',
+      originKind: 'native',
+      nativeOutputCandidate: true,
+      store: { storeId: 'skill:store-skill', storeAttached: true },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canMigrateToStore: false,
+        canAttach: false,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(storeSkill)).toBe(false);
+    expect(resolvePortableRowActions(storeSkill, healthyCtx)).toEqual([
+      'detach',
+      'destroyStore',
+    ]);
+    expect(resolvePortablePrimaryAction(storeSkill, healthyCtx)).toBe('detach');
+  });
+
+  test('plugin store capabilities stay on viewing-agent enable flags', () => {
+    const plugin = makeItem({
+      inventoryItemId: 'claude-plugin-keep',
+      kind: 'plugin',
+      nativeId: 'superpowers',
+      actualEnabled: true,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canMigrateToStore: true,
+        canAttach: true,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    expect(resolvePortableRowActions(plugin, healthyCtx)).toEqual(['disable', 'uninstall']);
+    expect(resolvePortablePrimaryAction(plugin, healthyCtx)).toBe('disable');
+  });
+
+  test('store item loaded via other path is borrowed and still offers attach', () => {
+    const grokHint = makeItem({
+      inventoryItemId: 'grok-skill-via-claude',
+      kind: 'skill',
+      nativeId: 'shared-skill',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      nativeOutputCandidate: false,
+      store: {
+        storeId: 'skill:shared-skill',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAttach: true,
+        canDetach: false,
+        canDestroyStore: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(grokHint)).toBe(true);
+    expect(portableBorrowedOwnerLabelKey(grokHint)).toBe('portableStore');
+    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual([
+      'attach',
+      'destroyStore',
+    ]);
+  });
 });
 
 describe('portableInventoryPresentation ownership partition', () => {

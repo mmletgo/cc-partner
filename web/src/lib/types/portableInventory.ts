@@ -36,8 +36,12 @@ export type PortableInventoryOriginKind =
 /** 与 backend `PortableOriginKind` 同名别名。 */
 export type PortableOriginKind = PortableInventoryOriginKind;
 
-/** 库存项所有权：本机 Agent、共享 ~/.agents，或未知。 */
-export type PortableInventoryOwnedBy = AgentTarget | 'sharedAgents' | 'unknown';
+/** 库存项所有权：本机 Agent、共享 ~/.agents、便携仓库，或未知。 */
+export type PortableInventoryOwnedBy =
+  | AgentTarget
+  | 'sharedAgents'
+  | 'portableStore'
+  | 'unknown';
 
 /** 与 backend `PortableAssetOwner` 同名别名。 */
 export type PortableAssetOwner = PortableInventoryOwnedBy;
@@ -57,7 +61,11 @@ export type PortableAssetActionKind =
   | 'enable'
   | 'disable'
   | 'uninstall'
-  | 'installToSourceTarget';
+  | 'installToSourceTarget'
+  | 'attach'
+  | 'detach'
+  | 'destroyStore'
+  | 'migrateToStore';
 
 /** 单条动作结果状态。 */
 export type PortableAssetActionItemState =
@@ -81,7 +89,11 @@ export type PortableAssetPlanOperation =
   | 'disable'
   | 'uninstall'
   | 'install'
-  | 'adopt';
+  | 'adopt'
+  | 'attach'
+  | 'detach'
+  | 'destroyStore'
+  | 'migrateToStore';
 
 /** 备份策略。 */
 export type PortableAssetBackupPolicy = 'none' | 'recoverableBeforeDelete';
@@ -112,8 +124,25 @@ export interface PortableInventoryItemCapabilitiesDto {
   canUninstall: boolean;
   canAdopt: boolean;
   canInstallToSourceTarget: boolean;
+  canMigrateToStore?: boolean;
+  canAttach?: boolean;
+  canDetach?: boolean;
+  canDestroyStore?: boolean;
   reasonCode: string | null;
   evidenceIds: string[];
+}
+
+/**
+ * portable-store 观测事实。
+ *
+ * Business Logic: 同一 storeId 去重；Grok 卸下后若 Claude 仍挂着，只提示仍被其他路径加载。
+ * Code Logic: 缺省表示与 store 无关。
+ */
+export interface PortableStoreFactDto {
+  storeId?: string | null;
+  storeAttached?: boolean;
+  loadedViaOtherPath?: boolean;
+  loadedViaTarget?: AgentTarget | null;
 }
 
 /**
@@ -176,6 +205,8 @@ export interface PortableInventoryItemDto {
   loadedBy: AgentTarget;
   /** false 表示只是运行时加载，不是本机 native 产出。 */
   nativeOutputCandidate: boolean;
+  /** portable-store 观测；旧快照可缺省。 */
+  store?: PortableStoreFactDto | null;
 }
 
 /** 完整库存快照。 */

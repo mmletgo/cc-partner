@@ -124,11 +124,17 @@ mod tests {
                 can_uninstall: true,
                 can_adopt: true,
                 can_install_to_source_target: true,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
+
                 reason_code: None,
                 evidence_ids: vec![],
             },
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         }
     }
 

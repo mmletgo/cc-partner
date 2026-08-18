@@ -48,6 +48,7 @@ pub mod plugins;
 pub mod portable_actions;
 pub mod portable_inventory;
 pub mod portable_service;
+pub mod portable_store;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;

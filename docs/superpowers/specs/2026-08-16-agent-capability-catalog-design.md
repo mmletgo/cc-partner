@@ -43,6 +43,9 @@ cc-partner 已按 Claude / Codex / OpenCode 适配了运行时、会话搜索、
 - 不把 `cc-switch` / `internal_claude`（API 供应商切换）并进身份目录。
 - 不把用户自建 Prompt 库、传输、截图、速记本、Git、浏览器预览改成按 agent 分叉。
 - 不在本 spec 宣称 L3 真机写盘 / 真机 TUI 已认证。
+- 不把 `~/.agents` 当成 Claude / Grok 的 portable-store 真树；共享仓库只在 `<data_dir>/portable-store/`。
+- 不为 Grok / OpenCode / Gemini / Cursor / Pi 开放 portable-store 原生写入（无 L3 则 inventory/preview only）。
+- 不把 Plugin marketplace / 启用标记翻译进 portable-store；Plugin 仍是 viewing-agent residual。
 
 ## 4. 身份目录
 
@@ -218,6 +221,8 @@ Gemini 不读 `AGENTS.md`。指令入口是 `GEMINI.md`（项目）与 `~/.gemin
 
 `shared` 资产对五端可见；`targetOnly` 仍严格隔离。
 
+本机一份的用户资产（非 Hub managed plugin@cc-partner）进 `<data_dir>/portable-store/`：Skill/Command 软链到各家 native 根，MCP 投影 leaf。Grok 卸下只拆 `~/.grok/...`；若 Claude 仍附加，盘点标仍经 Claude 路径加载。Plugin 不进该仓库。
+
 ### 5.6 HeadlessCompletion — Prompt 优化
 
 新能力，不塞进 Runtime。Settings 增加优化用 provider，默认 `claude`。
@@ -255,6 +260,8 @@ Gemini 不读 `AGENTS.md`。指令入口是 `GEMINI.md`（项目）与 `~/.gemin
 | MCP 扫描 / patch | TOML | JSON |
 | Plugin 互拷 / 跨 Agent 翻译 | residual | residual |
 | Plugin 启用标记 | 跟 viewing Agent；不继承 Claude `enabledPlugins` | 同左 |
+| portable-store Skill/Command 附加 | scan + 兼容提示；apply blocked（无 L3） | 同左 |
+| portable-store MCP 投影 | 盘点可；不写该 Agent config leaf | 同左 |
 | Prompt 优化 | 接 headless JSON | 仅结构化输出稳定时开放 |
 | Claude 式 status 文件 | 缺席 | 缺席 |
 | OpenCode 式 runtime bridge | 不做 | 不做 |

@@ -611,6 +611,9 @@
       "unmanagedRefreshHint": "Not managed yet — refresh inventory to bring this asset under Hub management.",
       "groupInstalled": "Installed here",
       "groupBorrowed": "Loaded at runtime from other agents",
+      "storeBadge": "Portable store",
+      "storeAttached": "Attached to this agent",
+      "storeLoadedViaOther": "Still loaded via another path",
       "emptyRuntimeHint": "This agent has no locally installed assets, but runtime still loads assets from other agents.",
       "openInOwnerAgent": "Open in owner Agent",
       "borrowedFrom": {
@@ -622,6 +625,7 @@
         "cursor": "From Cursor CLI",
         "pi": "From Pi",
         "sharedAgents": "Shared ~/.agents",
+        "portableStore": "Portable store",
         "unknown": "From unknown owner"
       },
       "targetFilter": {
@@ -682,7 +686,11 @@
       "enable": "Enable",
       "disable": "Disable",
       "uninstall": "Uninstall",
-      "installToSourceTarget": "Install to source target"
+      "installToSourceTarget": "Install to source target",
+      "attach": "Attach to this agent",
+      "detach": "Detach from this agent",
+      "destroyStore": "Destroy store copy",
+      "migrateToStore": "Migrate to portable store"
     },
     "management": {
       "hubManaged": "Consistent",
@@ -757,7 +765,13 @@
       "borrowedImpactEnablePlugin": "This plugin belongs to {{owner}}, but each Agent has its own enable flag. This change only updates {{current}} and does not change {{owner}} or other agents.",
       "borrowedImpactDisablePlugin": "This plugin belongs to {{owner}}, but each Agent has its own enable flag. This change only updates {{current}} and does not change {{owner}} or other agents.",
       "borrowedImpactUninstall": "This asset belongs to {{owner}}; {{current}} only loads it at runtime. Uninstall removes or rewrites the owner's files, and other agents that load it will lose it.",
-      "borrowedImpactSharedAgents": "The shared ~/.agents directory is read by multiple agents, so this change affects every agent that loads from it."
+      "borrowedImpactSharedAgents": "The shared ~/.agents directory is read by multiple agents, so this change affects every agent that loads from it.",
+      "storeAttachHint": "Attach only creates a symlink from this agent's native root to the portable store. It does not copy a second install.",
+      "storeDetachHint": "Detach only removes this agent's symlink. The real store tree stays, and other attached agents are unchanged.",
+      "storeMigrateHint": "Migrate moves the native files into the shared portable store and leaves a symlink. Same-name different content is blocked.",
+      "storeDestroyHint": "Destroy deletes the shared store tree and clears Claude / Codex attachments. This cannot be undone.",
+      "storeStillLoadedVia": "After detaching {{current}}, this store asset is still loaded via {{via}}. This action will not rewrite {{via}}.",
+      "storePluginUnchanged": "Plugins do not use the portable store. Enable flags still change only the viewing agent's switch."
     }
   },
   "portablePull": {

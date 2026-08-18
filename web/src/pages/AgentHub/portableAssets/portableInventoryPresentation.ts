@@ -106,10 +106,15 @@ export function isPortablePluginComponent(item: PortableInventoryItemDto): boole
  * Business Logic: 运行时从其他 Agent / 共享目录加载的项分到「借用」分区。
  *   Plugin 启停跟当前 Agent 自己的开关；Skill/Command/MCP 启停与卸载仍改所有者磁盘。
  *   native + ownedBy===target 才是「已安装在此」；sharedAgents 一律借用。
+ *   portableStore + 本机软链算已安装；仍被其他路径加载则借用。
  * Code Logic: nativeOutputCandidate=false、compatibility/legacyStandalone、
  *   或 ownedBy 为其他 Agent / sharedAgents → borrowed。ownedBy unknown 不单独判借用。
  */
 export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): boolean {
+  if (item.ownedBy === 'portableStore') {
+    return Boolean(item.store?.loadedViaOtherPath) || item.originKind === 'compatibility'
+      || item.originKind === 'legacyStandalone';
+  }
   if (item.nativeOutputCandidate === false) return true;
   if (item.originKind === 'compatibility' || item.originKind === 'legacyStandalone') {
     return true;
@@ -126,7 +131,11 @@ export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): b
 export function portableBorrowedOwnerLabelKey(
   item: PortableInventoryItemDto,
 ): PortableBorrowedOwnerLabelKey {
-  if (item.ownedBy === 'sharedAgents' || item.ownedBy === 'unknown') {
+  if (
+    item.ownedBy === 'sharedAgents' ||
+    item.ownedBy === 'unknown' ||
+    item.ownedBy === 'portableStore'
+  ) {
     return item.ownedBy;
   }
   if (isHubTarget(item.ownedBy)) return item.ownedBy;
@@ -296,6 +305,11 @@ export function resolvePortablePrimaryAction(
 
   const caps = item.capabilities;
   // 故意不返回 'adopt'：discover-as-managed 已取代纳入主路径。
+  if (item.kind !== 'plugin') {
+    if (caps.canDetach && item.store?.storeAttached) return 'detach';
+    if (caps.canAttach && !item.store?.storeAttached) return 'attach';
+    if (caps.canMigrateToStore) return 'migrateToStore';
+  }
   if (item.actualEnabled === true && caps.canDisable) return 'disable';
   if (item.actualEnabled === false && caps.canEnable) return 'enable';
   if (item.actualEnabled === null || item.actualEnabled === undefined) {
@@ -328,22 +342,32 @@ export function resolvePortableRowActions(
 
   const caps = item.capabilities;
   const actions: PortableAssetActionKind[] = [];
-  // enable 与 disable 基于 actualEnabled 互斥；与详情 drawer 的展示一致。
-  if (item.actualEnabled !== true && caps.canEnable) {
+  const storeKind = item.kind !== 'plugin';
+  if (storeKind && caps.canMigrateToStore) {
+    actions.push('migrateToStore');
+  }
+  if (storeKind && caps.canAttach) {
+    actions.push('attach');
+  } else if (item.actualEnabled !== true && caps.canEnable) {
     actions.push('enable');
   }
-  if (item.actualEnabled !== false && caps.canDisable) {
+  if (storeKind && caps.canDetach) {
+    actions.push('detach');
+  } else if (item.actualEnabled !== false && caps.canDisable) {
     actions.push('disable');
   }
-  // installToSourceTarget 仅在无原生 enable 语义（actualEnabled 为 null/undefined）时出现。
   if (
     (item.actualEnabled === null || item.actualEnabled === undefined) &&
     caps.canInstallToSourceTarget
   ) {
     actions.push('installToSourceTarget');
   }
-  // uninstall 始终在末尾，仅看 canUninstall。
-  if (caps.canUninstall) {
+  if (storeKind && caps.canDestroyStore) {
+    actions.push('destroyStore');
+  } else if (
+    caps.canUninstall &&
+    (!storeKind || (!caps.canDetach && !caps.canDestroyStore))
+  ) {
     actions.push('uninstall');
   }
   return actions;

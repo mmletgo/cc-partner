@@ -458,8 +458,12 @@ async fn execute_claimed_plan(
             Some(existing) => {
                 // 优先保留与 action 期望 actual_enabled 一致的项；否则保持稳定，跳过覆盖。
                 let desired = match plan.action {
-                    PortableAssetActionKind::Enable => Some(true),
-                    PortableAssetActionKind::Disable => Some(false),
+                    PortableAssetActionKind::Enable
+                    | PortableAssetActionKind::Attach
+                    | PortableAssetActionKind::MigrateToStore => Some(true),
+                    PortableAssetActionKind::Disable | PortableAssetActionKind::Detach => {
+                        Some(false)
+                    }
                     _ => existing.actual_enabled,
                 };
                 if desired.is_some() && item.actual_enabled == desired {
@@ -594,7 +598,11 @@ fn reconcile_item(
                         )
                     }
                 }
-                PortableAssetActionKind::Enable | PortableAssetActionKind::Disable => {
+                PortableAssetActionKind::Enable
+                | PortableAssetActionKind::Disable
+                | PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::MigrateToStore => {
                     let expected =
                         expected_enabled_after(action, kind, pre.and_then(|p| p.actual_enabled));
                     let observed = post.and_then(|p| p.actual_enabled);
@@ -645,6 +653,24 @@ fn reconcile_item(
                             PortableAssetActionItemState::Failed,
                             Some("PORTABLE_ASSET_ACTION_RESCAN_MISSING".into()),
                             Some("install not observed".into()),
+                        )
+                    }
+                }
+                PortableAssetActionKind::DestroyStore => {
+                    if post.is_none()
+                        || post
+                            .is_some_and(|p| p.store.store_id.is_none() && !p.store.store_attached)
+                    {
+                        (
+                            PortableAssetActionItemState::Succeeded,
+                            None,
+                            Some("store destroyed".into()),
+                        )
+                    } else {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
+                            Some("store item still present after destroy".into()),
                         )
                     }
                 }
@@ -775,6 +801,10 @@ fn item_action_capability_block(
         PortableAssetActionKind::InstallToSourceTarget => {
             item.capabilities.can_install_to_source_target
         }
+        PortableAssetActionKind::Attach => item.capabilities.can_attach,
+        PortableAssetActionKind::Detach => item.capabilities.can_detach,
+        PortableAssetActionKind::DestroyStore => item.capabilities.can_destroy_store,
+        PortableAssetActionKind::MigrateToStore => item.capabilities.can_migrate_to_store,
     };
     if allowed {
         return None;
@@ -979,11 +1009,16 @@ mod tests {
                 can_uninstall: true,
                 can_adopt: true,
                 can_install_to_source_target: true,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
                 reason_code: None,
                 evidence_ids: vec![],
             },
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         }
     }
 

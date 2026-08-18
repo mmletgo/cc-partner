@@ -32,6 +32,14 @@ pub enum PortableAssetActionKind {
     Uninstall,
     /// 安装到源同类 target
     InstallToSourceTarget,
+    /// 把当前 Agent 的 native 根挂到 store（建软链 / upsert MCP leaf）
+    Attach,
+    /// 只拆当前 Agent 的 store 软链 / 只删该 Agent MCP leaf
+    Detach,
+    /// 本机彻底删除 store 真树及剩余附加
+    DestroyStore,
+    /// 把非 store 的 native Skill/Command/MCP 迁入 store
+    MigrateToStore,
 }
 
 impl PortableAssetActionKind {
@@ -43,6 +51,10 @@ impl PortableAssetActionKind {
             Self::Disable => "disable",
             Self::Uninstall => "uninstall",
             Self::InstallToSourceTarget => "installToSourceTarget",
+            Self::Attach => "attach",
+            Self::Detach => "detach",
+            Self::DestroyStore => "destroyStore",
+            Self::MigrateToStore => "migrateToStore",
         }
     }
 }
@@ -129,6 +141,14 @@ pub enum PortableAssetPlanOperation {
     Install,
     /// 纳入
     Adopt,
+    /// 附加到当前 Agent
+    Attach,
+    /// 从当前 Agent 卸下
+    Detach,
+    /// 彻底删除 store
+    DestroyStore,
+    /// 迁入 portable-store
+    MigrateToStore,
 }
 
 impl PortableAssetPlanOperation {
@@ -140,6 +160,10 @@ impl PortableAssetPlanOperation {
             Self::Uninstall => "uninstall",
             Self::Install => "install",
             Self::Adopt => "adopt",
+            Self::Attach => "attach",
+            Self::Detach => "detach",
+            Self::DestroyStore => "destroyStore",
+            Self::MigrateToStore => "migrateToStore",
         }
     }
 }

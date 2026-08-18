@@ -38,6 +38,10 @@ const labels: PortableInventoryRowLabels = {
     disable: 'Disable',
     uninstall: 'Uninstall',
     installToSourceTarget: 'Install',
+    attach: 'Attach',
+    detach: 'Detach',
+    destroyStore: 'Destroy store',
+    migrateToStore: 'Migrate to store',
   },
   sourceOrigin: {
     standalone: 'Standalone',
@@ -55,6 +59,7 @@ const labels: PortableInventoryRowLabels = {
     cursor: 'From Cursor CLI',
     pi: 'From Pi',
     sharedAgents: 'Shared ~/.agents',
+    portableStore: 'Portable store',
     unknown: 'From unknown owner',
   },
 };

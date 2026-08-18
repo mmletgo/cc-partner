@@ -2864,6 +2864,7 @@ mod tests {
             capabilities: PortableInventoryItemCapabilitiesDto::default(),
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         }
     }
 

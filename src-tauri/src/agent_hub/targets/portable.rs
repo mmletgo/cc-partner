@@ -16,6 +16,7 @@ use crate::agent_hub::assets::{
 use crate::agent_hub::config_patch::value_content_hash;
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::agent_hub::object_store::{sha256_hex, TreeEntry, TreeEntryType, TreeManifest};
+use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,6 +79,8 @@ pub enum PortableAssetOwner {
     Pi,
     /// 共享 `~/.agents` 根
     SharedAgents,
+    /// Hub portable-store 真树（各 Agent 仅挂软链/投影）
+    PortableStore,
     /// 无法判定所有者
     #[default]
     Unknown,
@@ -95,6 +98,7 @@ impl PortableAssetOwner {
             Self::Cursor => "cursor",
             Self::Pi => "pi",
             Self::SharedAgents => "sharedAgents",
+            Self::PortableStore => "portableStore",
             Self::Unknown => "unknown",
         }
     }
@@ -128,7 +132,7 @@ impl PortableAssetOwner {
             Self::Gemini => Some(AgentTarget::Gemini),
             Self::Cursor => Some(AgentTarget::Cursor),
             Self::Pi => Some(AgentTarget::Pi),
-            Self::SharedAgents | Self::Unknown => None,
+            Self::SharedAgents | Self::PortableStore | Self::Unknown => None,
         }
     }
 }
@@ -159,6 +163,12 @@ pub fn is_borrowed_runtime_origin(
     }
     if owned_by == PortableAssetOwner::SharedAgents {
         return true;
+    }
+    if owned_by == PortableAssetOwner::PortableStore {
+        return matches!(
+            origin_kind,
+            PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
+        );
     }
     owned_by
         .as_hub_target()
@@ -300,7 +310,9 @@ pub struct PortableAssetOrigin {
 ///     就地写入 `origin.owned_by`。
 pub fn stamp_owned_by(assets: &mut [DiscoveredPortableAsset], owner: PortableAssetOwner) {
     for asset in assets {
-        asset.origin.owned_by = owner;
+        if asset.origin.owned_by != PortableAssetOwner::PortableStore {
+            asset.origin.owned_by = owner;
+        }
     }
 }
 
@@ -318,7 +330,9 @@ pub fn stamp_table_origin(
 ) {
     let native_output_candidate = origin_kind.is_native_output_candidate();
     for asset in assets {
-        asset.origin.owned_by = owner;
+        if asset.origin.owned_by != PortableAssetOwner::PortableStore {
+            asset.origin.owned_by = owner;
+        }
         asset.origin.origin_kind = origin_kind;
         asset.origin.native_output_candidate = native_output_candidate;
     }
@@ -588,11 +602,41 @@ fn walk_files(
             Err(_) => continue,
         };
         if meta.file_type().is_symlink() {
-            diagnostics.push(PortabilityDiagnostic::new(
-                CODE_UNKNOWN_SOURCE_FIELD,
-                relative_posix(root, &path),
-                "symlink in skill tree recorded as diagnostic only",
-            ));
+            match classify_store_link(&path) {
+                StoreLinkClass::StoreLink { .. } => {
+                    let followed = match fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    if followed.is_dir() {
+                        walk_files(root, &path, entries, diagnostics, skill_md_hash)?;
+                        continue;
+                    }
+                    if followed.is_file() {
+                        let bytes = fs::read(&path)?;
+                        let hash = sha256_hex(&bytes);
+                        let rel = relative_posix(root, &path);
+                        if rel == "SKILL.md" || rel.ends_with("/SKILL.md") {
+                            *skill_md_hash = Some(hash.clone());
+                        }
+                        entries.push(TreeEntry {
+                            path: rel,
+                            blob_hash: hash,
+                            entry_type: TreeEntryType::File,
+                            executable: is_executable(&followed),
+                        });
+                        continue;
+                    }
+                }
+                StoreLinkClass::EscapeLink | StoreLinkClass::Regular => {
+                    diagnostics.push(PortabilityDiagnostic::new(
+                        "store_symlink_escape",
+                        relative_posix(root, &path),
+                        "symlink outside portable-store rejected",
+                    ));
+                    continue;
+                }
+            }
             continue;
         }
         if meta.is_dir() {
@@ -686,6 +730,23 @@ fn scan_skill_dirs_with_mode(
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            match classify_store_link(&path) {
+                StoreLinkClass::StoreLink { .. } => {
+                    // 包根 store 软链：跟随并按目录扫描。
+                }
+                StoreLinkClass::EscapeLink | StoreLinkClass::Regular => {
+                    out.push(blocked_escape_skill(target, scope_kind, origin_kind, &path));
+                    continue;
+                }
+            }
+        } else if !meta.is_dir() {
+            continue;
+        }
         if !path.is_dir() {
             continue;
         }
@@ -758,6 +819,7 @@ fn scan_skill_dirs_with_mode(
             payload,
             origin: PortableAssetOrigin {
                 target,
+                owned_by: store_or_target_owner(target, &path),
                 path,
                 origin_kind,
                 native_id: dir_name,
@@ -765,7 +827,6 @@ fn scan_skill_dirs_with_mode(
                 tree_hash,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
-                owned_by: PortableAssetOwner::from_target(target),
                 parent_plugin_id: None,
             },
             diagnostics: diags,
@@ -794,6 +855,19 @@ pub fn scan_command_markdown_dir(
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
+        }
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink()
+                && !matches!(classify_store_link(&path), StoreLinkClass::StoreLink { .. })
+            {
+                out.push(blocked_escape_command(
+                    target,
+                    scope_kind,
+                    origin_kind,
+                    &path,
+                ));
+                continue;
+            }
         }
         let bytes = fs::read(&path)?;
         let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -836,6 +910,7 @@ pub fn scan_command_markdown_dir(
             payload: PortableAssetPayload::Command(payload_cmd),
             origin: PortableAssetOrigin {
                 target,
+                owned_by: store_or_target_owner(target, &path),
                 path,
                 origin_kind,
                 native_id: stem,
@@ -843,13 +918,110 @@ pub fn scan_command_markdown_dir(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
-                owned_by: PortableAssetOwner::from_target(target),
                 parent_plugin_id: None,
             },
             diagnostics: all_diags,
         });
     }
     Ok(out)
+}
+
+/// store 软链归 portableStore；其余按扫描 target。
+///
+/// Business Logic: 真树属于 Hub store，不能再标成 Claude/Grok 私有副本。
+/// Code Logic: `classify_store_link` 命中 StoreLink → PortableStore。
+fn store_or_target_owner(target: AgentTarget, path: &Path) -> PortableAssetOwner {
+    if matches!(classify_store_link(path), StoreLinkClass::StoreLink { .. }) {
+        PortableAssetOwner::PortableStore
+    } else {
+        PortableAssetOwner::from_target(target)
+    }
+}
+
+/// 逃逸 skill 包根：记 blocked，不跟随哈希。
+fn blocked_escape_skill(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    origin_kind: PortableOriginKind,
+    path: &Path,
+) -> DiscoveredPortableAsset {
+    let dir_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("skill")
+        .to_string();
+    DiscoveredPortableAsset {
+        kind: AssetKind::Skill,
+        semantic_name: dir_name.clone(),
+        scope_kind,
+        payload: PortableAssetPayload::Skill(PortableSkill {
+            name: dir_name.clone(),
+            description: String::new(),
+            skill_markdown_hash: String::new(),
+            tree_manifest_hash: String::new(),
+            target_extensions: BTreeMap::new(),
+        }),
+        origin: PortableAssetOrigin {
+            target,
+            path: path.to_path_buf(),
+            origin_kind,
+            native_id: dir_name,
+            content_hash: String::new(),
+            tree_hash: None,
+            status: PortableDiscoveryStatus::Blocked,
+            native_output_candidate: false,
+            owned_by: PortableAssetOwner::Unknown,
+            parent_plugin_id: None,
+        },
+        diagnostics: vec![PortabilityDiagnostic::new(
+            "store_symlink_escape",
+            relative_posix(path.parent().unwrap_or(path), path),
+            "skill root symlink escapes portable-store",
+        )],
+    }
+}
+
+/// 逃逸 command 文件软链：记 blocked。
+fn blocked_escape_command(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    origin_kind: PortableOriginKind,
+    path: &Path,
+) -> DiscoveredPortableAsset {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("command")
+        .to_string();
+    DiscoveredPortableAsset {
+        kind: AssetKind::Command,
+        semantic_name: stem.clone(),
+        scope_kind,
+        payload: PortableAssetPayload::Command(PortableCommand {
+            name: stem.clone(),
+            description: None,
+            prompt_template: String::new(),
+            arguments: vec![],
+            target_extensions: BTreeMap::new(),
+        }),
+        origin: PortableAssetOrigin {
+            target,
+            path: path.to_path_buf(),
+            origin_kind,
+            native_id: stem,
+            content_hash: String::new(),
+            tree_hash: None,
+            status: PortableDiscoveryStatus::Blocked,
+            native_output_candidate: false,
+            owned_by: PortableAssetOwner::Unknown,
+            parent_plugin_id: None,
+        },
+        diagnostics: vec![PortabilityDiagnostic::new(
+            "store_symlink_escape",
+            relative_posix(path.parent().unwrap_or(path), path),
+            "command symlink escapes portable-store",
+        )],
+    }
 }
 
 fn parse_argument_hint(hint: Option<&String>) -> Vec<CommandArgument> {
@@ -2178,5 +2350,63 @@ enabled = true
         let text = String::from_utf8(proj.files[0].bytes.clone()).unwrap();
         assert!(text.contains("name: release"));
         assert!(text.contains("go"));
+    }
+
+    #[test]
+    fn skill_scan_follows_store_symlink_and_rejects_escape() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store = crate::agent_hub::portable_store::ensure_portable_store_layout(&data).unwrap();
+        let skill = crate::agent_hub::portable_store::store_skill_dir(&store, "foo");
+        write(
+            &skill.join("SKILL.md"),
+            "---\nname: foo\ndescription: Store skill\n---\n# Foo\n",
+        );
+        let native_root = dir.path().join("skills");
+        fs::create_dir_all(&native_root).unwrap();
+        crate::agent_hub::portable_store::create_store_link(&skill, &native_root.join("foo"))
+            .unwrap();
+        let found = scan_skill_dirs(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &native_root,
+            PortableOriginKind::Native,
+        )
+        .unwrap();
+        let store_hit = found
+            .iter()
+            .find(|a| a.origin.native_id == "foo")
+            .expect("store skill");
+        assert_eq!(store_hit.origin.owned_by, PortableAssetOwner::PortableStore);
+        assert_eq!(store_hit.origin.status, PortableDiscoveryStatus::Active);
+        assert!(!store_hit.origin.content_hash.is_empty());
+
+        let escape = dir.path().join("escape");
+        fs::create_dir_all(&escape).unwrap();
+        write(&escape.join("SKILL.md"), "---\nname: evil\n---\n# x\n");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&escape, native_root.join("evil")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&escape, native_root.join("evil")).unwrap();
+        let again = scan_skill_dirs(
+            AgentTarget::Claude,
+            ScopeKind::User,
+            &native_root,
+            PortableOriginKind::Native,
+        )
+        .unwrap();
+        let blocked = again
+            .iter()
+            .find(|a| a.origin.native_id == "evil")
+            .expect("escape");
+        assert_eq!(blocked.origin.status, PortableDiscoveryStatus::Blocked);
+        assert!(blocked
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "store_symlink_escape"));
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 }

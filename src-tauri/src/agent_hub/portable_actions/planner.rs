@@ -108,8 +108,24 @@ pub async fn preview_portable_asset_action_with_inventory(
         }
         let enablement_action = matches!(
             request.action,
-            PortableAssetActionKind::Enable | PortableAssetActionKind::Disable
+            PortableAssetActionKind::Enable
+                | PortableAssetActionKind::Disable
+                | PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::MigrateToStore
+                | PortableAssetActionKind::DestroyStore
         );
+        if item.kind == PortableAssetKind::Plugin
+            && matches!(
+                request.action,
+                PortableAssetActionKind::Attach
+                    | PortableAssetActionKind::Detach
+                    | PortableAssetActionKind::DestroyStore
+                    | PortableAssetActionKind::MigrateToStore
+            )
+        {
+            plan_blocking.push("PORTABLE_ASSET_ACTION_PLUGIN_STORE_UNSUPPORTED".into());
+        }
         let mutation_target = mutation_target_for_action(
             item.target,
             item.owned_by,
@@ -250,6 +266,10 @@ async fn build_change(
                 | PortableAssetActionKind::Disable
                 | PortableAssetActionKind::Uninstall
                 | PortableAssetActionKind::Adopt
+                | PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::DestroyStore
+                | PortableAssetActionKind::MigrateToStore
         )
     {
         blocking.push("PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into());
@@ -281,6 +301,10 @@ async fn build_change(
                         | PortableAssetActionKind::Uninstall
                         | PortableAssetActionKind::InstallToSourceTarget
                         | PortableAssetActionKind::Adopt
+                        | PortableAssetActionKind::Attach
+                        | PortableAssetActionKind::Detach
+                        | PortableAssetActionKind::DestroyStore
+                        | PortableAssetActionKind::MigrateToStore
                 )
             {
                 // preview 仍可生成计划，但标记 blocked 供 apply fail-closed
@@ -298,6 +322,10 @@ async fn build_change(
             PortableAssetActionKind::Enable
                 | PortableAssetActionKind::Disable
                 | PortableAssetActionKind::Uninstall
+                | PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::DestroyStore
+                | PortableAssetActionKind::MigrateToStore
         )
     {
         blocking.push("PORTABLE_ASSET_ACTION_TARGET_WRITE_NOT_CERTIFIED".into());
@@ -333,6 +361,18 @@ async fn build_change(
             if !item.capabilities.can_install_to_source_target =>
         {
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_INSTALL_TO_SOURCE".into());
+        }
+        PortableAssetActionKind::Attach if !item.capabilities.can_attach => {
+            blocking.push("PORTABLE_ASSET_ACTION_CANNOT_ATTACH".into());
+        }
+        PortableAssetActionKind::Detach if !item.capabilities.can_detach => {
+            blocking.push("PORTABLE_ASSET_ACTION_CANNOT_DETACH".into());
+        }
+        PortableAssetActionKind::DestroyStore if !item.capabilities.can_destroy_store => {
+            blocking.push("PORTABLE_ASSET_ACTION_CANNOT_DESTROY_STORE".into());
+        }
+        PortableAssetActionKind::MigrateToStore if !item.capabilities.can_migrate_to_store => {
+            blocking.push("PORTABLE_ASSET_ACTION_CANNOT_MIGRATE_TO_STORE".into());
         }
         _ => {}
     }
@@ -386,6 +426,30 @@ async fn build_change(
             PortableAssetPlanOperation::Install,
             false,
             PortableAssetCanonicalEffect::UpdateDesired,
+            PortableAssetBackupPolicy::None,
+        ),
+        PortableAssetActionKind::Attach => (
+            PortableAssetPlanOperation::Attach,
+            false,
+            PortableAssetCanonicalEffect::None,
+            PortableAssetBackupPolicy::None,
+        ),
+        PortableAssetActionKind::Detach => (
+            PortableAssetPlanOperation::Detach,
+            false,
+            PortableAssetCanonicalEffect::None,
+            PortableAssetBackupPolicy::None,
+        ),
+        PortableAssetActionKind::DestroyStore => (
+            PortableAssetPlanOperation::DestroyStore,
+            false,
+            PortableAssetCanonicalEffect::None,
+            PortableAssetBackupPolicy::None,
+        ),
+        PortableAssetActionKind::MigrateToStore => (
+            PortableAssetPlanOperation::MigrateToStore,
+            false,
+            PortableAssetCanonicalEffect::None,
             PortableAssetBackupPolicy::None,
         ),
     };
@@ -563,6 +627,7 @@ args = ["mcp"]
             capabilities: PortableInventoryItemCapabilitiesDto::default(),
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         };
         let got = mcp_expected_leaf_hash(&item).expect("codex mcp leaf hash");
         let bytes = fs::read(&config).unwrap();
@@ -621,6 +686,7 @@ args = ["mcp"]
             capabilities: PortableInventoryItemCapabilitiesDto::default(),
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         };
         let got = mcp_expected_leaf_hash(&item).expect("claude mcp leaf hash");
         let bytes = fs::read(&config).unwrap();
@@ -671,11 +737,16 @@ args = ["mcp"]
                 can_uninstall: false,
                 can_adopt: false,
                 can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
                 reason_code: Some("deactivate_package_not_supported".into()),
                 evidence_ids: vec![],
             },
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         };
         let target = PortableInventoryTargetDto {
             target: AgentTarget::Claude,
@@ -768,11 +839,16 @@ args = ["mcp"]
                 can_uninstall: true,
                 can_adopt: false,
                 can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
                 reason_code: Some("borrowed_runtime_origin".into()),
                 evidence_ids: vec![],
             },
             warnings: vec!["borrowed_runtime_origin".into()],
             mcp_credential: None,
+            store: Default::default(),
         };
         let grok_target = PortableInventoryTargetDto {
             target: AgentTarget::Grok,
@@ -851,11 +927,16 @@ args = ["mcp"]
                 can_uninstall: true,
                 can_adopt: false,
                 can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
                 reason_code: Some("borrowed_runtime_origin".into()),
                 evidence_ids: vec![],
             },
             warnings: vec!["borrowed_runtime_origin".into()],
             mcp_credential: None,
+            store: Default::default(),
         };
         let codex_target = PortableInventoryTargetDto {
             target: AgentTarget::Codex,

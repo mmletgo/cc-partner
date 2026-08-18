@@ -12,6 +12,7 @@ use super::{
     TargetActionRawOutcome,
 };
 use crate::agent_hub::config_patch::{value_content_hash, CAS_EXPECT_ABSENT};
+use crate::agent_hub::models::AgentTarget;
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::packages::activator::{ProcessOutcome, ProcessSpec};
 use crate::agent_hub::portable_actions::models::{
@@ -20,6 +21,9 @@ use crate::agent_hub::portable_actions::models::{
 };
 use crate::agent_hub::portable_inventory::hash_plugin_root;
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
+use crate::agent_hub::portable_store::{
+    execute_mcp_store, execute_skill_or_command_store, should_use_store_semantics,
+};
 use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
     portable_backup_path, portable_claude_roots, portable_move_path, portable_remove_path,
@@ -307,7 +311,12 @@ fn execute_plugin(
             }
             a
         }
-        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => {
+        PortableAssetActionKind::Adopt
+        | PortableAssetActionKind::InstallToSourceTarget
+        | PortableAssetActionKind::Attach
+        | PortableAssetActionKind::Detach
+        | PortableAssetActionKind::DestroyStore
+        | PortableAssetActionKind::MigrateToStore => {
             return Ok(TargetActionRawOutcome::Failed {
                 code: "PORTABLE_ASSET_ACTION_PLUGIN_ACTION_UNSUPPORTED".into(),
                 message: format!("plugin action {} not executed here", ctx.action.as_str()),
@@ -353,7 +362,12 @@ fn claude_plugin_cli_already_satisfied(action: PortableAssetActionKind, stderr: 
         PortableAssetActionKind::Uninstall => {
             lower.contains("already uninstalled") || lower.contains("is not installed")
         }
-        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => false,
+        PortableAssetActionKind::Adopt
+        | PortableAssetActionKind::InstallToSourceTarget
+        | PortableAssetActionKind::Attach
+        | PortableAssetActionKind::Detach
+        | PortableAssetActionKind::DestroyStore
+        | PortableAssetActionKind::MigrateToStore => false,
     }
 }
 
@@ -400,6 +414,22 @@ fn execute_skill(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
+    let native_link = roots.skills_dir.join(&id);
+    if should_use_store_semantics(ctx.action, Some(&native_link), pre_item)
+        || change
+            .path
+            .as_deref()
+            .is_some_and(|p| should_use_store_semantics(ctx.action, Some(Path::new(p)), pre_item))
+    {
+        return execute_skill_or_command_store(
+            AgentTarget::Claude,
+            ctx.action,
+            PortableAssetKind::Skill,
+            &id,
+            &native_link,
+            pre_item,
+        );
+    }
     match ctx.action {
         PortableAssetActionKind::Enable => {
             portable_set_tree_enabled(
@@ -462,6 +492,17 @@ fn execute_skill(
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
             message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
+        PortableAssetActionKind::Attach
+        | PortableAssetActionKind::Detach
+        | PortableAssetActionKind::DestroyStore
+        | PortableAssetActionKind::MigrateToStore => execute_skill_or_command_store(
+            AgentTarget::Claude,
+            ctx.action,
+            PortableAssetKind::Skill,
+            &id,
+            &native_link,
+            pre_item,
+        ),
     }
 }
 
@@ -472,6 +513,22 @@ fn execute_command(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
+    let native_link = roots.commands_dir.join(format!("{id}.md"));
+    if should_use_store_semantics(ctx.action, Some(&native_link), pre_item)
+        || change
+            .path
+            .as_deref()
+            .is_some_and(|p| should_use_store_semantics(ctx.action, Some(Path::new(p)), pre_item))
+    {
+        return execute_skill_or_command_store(
+            AgentTarget::Claude,
+            ctx.action,
+            PortableAssetKind::Command,
+            &id,
+            &native_link,
+            pre_item,
+        );
+    }
     match ctx.action {
         PortableAssetActionKind::Enable => {
             portable_set_command_enabled(
@@ -514,6 +571,17 @@ fn execute_command(
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
             message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
+        PortableAssetActionKind::Attach
+        | PortableAssetActionKind::Detach
+        | PortableAssetActionKind::DestroyStore
+        | PortableAssetActionKind::MigrateToStore => execute_skill_or_command_store(
+            AgentTarget::Claude,
+            ctx.action,
+            PortableAssetKind::Command,
+            &id,
+            &native_link,
+            pre_item,
+        ),
     }
 }
 
@@ -528,6 +596,16 @@ fn execute_mcp(
     };
 
     let id = native_id(change, pre_item);
+    if should_use_store_semantics(ctx.action, None, pre_item) {
+        return execute_mcp_store(
+            AgentTarget::Claude,
+            ctx.action,
+            &id,
+            &roots.claude_json_path,
+            false,
+            pre_item,
+        );
+    }
     let config_path = roots.claude_json_path.clone();
     let bytes = if config_path.exists() {
         fs::read(&config_path)?
@@ -687,6 +765,17 @@ fn execute_mcp(
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
             message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
+        PortableAssetActionKind::Attach
+        | PortableAssetActionKind::Detach
+        | PortableAssetActionKind::DestroyStore
+        | PortableAssetActionKind::MigrateToStore => execute_mcp_store(
+            AgentTarget::Claude,
+            ctx.action,
+            &id,
+            &config_path,
+            false,
+            pre_item,
+        ),
     }
 }
 
@@ -768,6 +857,7 @@ mod tests {
             capabilities: PortableInventoryItemCapabilitiesDto::default(),
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         }
     }
 

@@ -103,9 +103,20 @@ export function PortableAssetDetailsDrawer({
   const reasonCode = item?.capabilities.reasonCode ?? null;
   const diagnosticReason =
     reasonCode && reasonCode !== 'borrowed_runtime_origin' ? reasonCode : null;
-  const canEnable = Boolean(item?.capabilities.canEnable && canMutate);
-  const canDisable = Boolean(item?.capabilities.canDisable && canMutate);
-  const canUninstall = Boolean(item?.capabilities.canUninstall && canMutate);
+  const storeKind = item?.kind !== 'plugin';
+  const canMigrateToStore = Boolean(
+    storeKind && item?.capabilities.canMigrateToStore && canMutate,
+  );
+  const canAttach = Boolean(storeKind && item?.capabilities.canAttach && canMutate);
+  const canDetach = Boolean(storeKind && item?.capabilities.canDetach && canMutate);
+  const canDestroyStore = Boolean(
+    storeKind && item?.capabilities.canDestroyStore && canMutate,
+  );
+  const canEnable = Boolean(!canAttach && item?.capabilities.canEnable && canMutate);
+  const canDisable = Boolean(!canDetach && item?.capabilities.canDisable && canMutate);
+  const canUninstall = Boolean(
+    !canDetach && !canDestroyStore && item?.capabilities.canUninstall && canMutate,
+  );
   // 发现即管理：不在详情暴露 Adopt 主 CTA（历史 canAdopt 能力忽略）。
   const canInstall = Boolean(item?.capabilities.canInstallToSourceTarget && canMutate);
   const needsRefresh =
@@ -113,6 +124,9 @@ export function PortableAssetDetailsDrawer({
     !canEnable &&
     !canDisable &&
     !canInstall &&
+    !canAttach &&
+    !canDetach &&
+    !canMigrateToStore &&
     canMutate;
 
   const skillLabels = useMemo(
@@ -379,6 +393,39 @@ export function PortableAssetDetailsDrawer({
                 </StatusMessage>
               ) : null}
               <div className={styles.dialogActions}>
+                {canMigrateToStore ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onRequestAction('migrateToStore')}
+                    data-testid="portable-action-migrate-to-store"
+                  >
+                    {t('agentHub:portable.actions.migrateToStore')}
+                  </Button>
+                ) : null}
+                {canAttach ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onRequestAction('attach')}
+                    data-testid="portable-action-attach"
+                  >
+                    {t('agentHub:portable.actions.attach')}
+                  </Button>
+                ) : null}
+                {canDetach ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onRequestAction('detach')}
+                    data-testid="portable-action-detach"
+                  >
+                    {t('agentHub:portable.actions.detach')}
+                  </Button>
+                ) : null}
                 {canEnable ? (
                   <Button
                     variant="secondary"
@@ -426,6 +473,17 @@ export function PortableAssetDetailsDrawer({
               <StatusMessage tone="warn" live="off">
                 {t('agentHub:portable.details.dangerHint')}
               </StatusMessage>
+              {canDestroyStore ? (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => onRequestAction('destroyStore')}
+                  data-testid="portable-action-destroy-store"
+                >
+                  {t('agentHub:portable.actions.destroyStore')}
+                </Button>
+              ) : null}
               {canUninstall ? (
                 <Button
                   variant="danger"
@@ -436,11 +494,11 @@ export function PortableAssetDetailsDrawer({
                 >
                   {t('agentHub:portable.actions.uninstall')}
                 </Button>
-              ) : (
+              ) : !canDestroyStore ? (
                 <p className={styles.hint} data-testid="portable-action-uninstall-blocked">
                   {t('agentHub:portable.details.uninstallBlocked')}
                 </p>
-              )}
+              ) : null}
             </section>
           </>
         )}

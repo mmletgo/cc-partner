@@ -335,7 +335,11 @@ export function usePortableInventoryController(
         (action === 'enable' && caps.canEnable) ||
         (action === 'disable' && caps.canDisable) ||
         (action === 'uninstall' && caps.canUninstall) ||
-        (action === 'installToSourceTarget' && caps.canInstallToSourceTarget);
+        (action === 'installToSourceTarget' && caps.canInstallToSourceTarget) ||
+        (action === 'attach' && Boolean(caps.canAttach)) ||
+        (action === 'detach' && Boolean(caps.canDetach)) ||
+        (action === 'destroyStore' && Boolean(caps.canDestroyStore)) ||
+        (action === 'migrateToStore' && Boolean(caps.canMigrateToStore));
       if (!allowed) {
         setPendingAction(null);
         return;

@@ -27,7 +27,7 @@ pub use models::{
     PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
     PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
-    PortableInventoryTargetDto, PortableMcpCredentialFactDto,
+    PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableStoreFactDto,
 };
 pub use plugin_paths::{
     infer_plugin_package_root, is_plugin_infrastructure_name, is_plugin_infrastructure_path,
@@ -158,11 +158,17 @@ mod tests {
                 can_uninstall: true,
                 can_adopt: true,
                 can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
+
                 reason_code: None,
                 evidence_ids: vec![],
             },
             warnings: vec![],
             mcp_credential: None,
+            store: Default::default(),
         }
     }
 

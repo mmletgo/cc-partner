@@ -93,7 +93,7 @@ export const portableInventoryOriginKindDecoder: Decoder<PortableInventoryOrigin
     'plugin',
   ] as const);
 
-/** 所有权：Hub target / 共享 ~/.agents / 未知。 */
+/** 所有权：Hub target / 共享 ~/.agents / 便携仓库 / 未知。 */
 export const portableInventoryOwnedByDecoder: Decoder<PortableInventoryOwnedBy> = enumDecoder(
   'PortableInventoryOwnedBy',
   [
@@ -105,6 +105,7 @@ export const portableInventoryOwnedByDecoder: Decoder<PortableInventoryOwnedBy> 
     'cursor',
     'pi',
     'sharedAgents',
+    'portableStore',
     'unknown',
   ] as const);
 
@@ -133,7 +134,17 @@ export const portableScopeKindDecoder: Decoder<PortableScopeKind> = enumDecoder(
 /** 本机动作 kind。 */
 export const portableAssetActionKindDecoder: Decoder<PortableAssetActionKind> = enumDecoder(
   'PortableAssetActionKind',
-  ['adopt', 'enable', 'disable', 'uninstall', 'installToSourceTarget'] as const,
+  [
+    'adopt',
+    'enable',
+    'disable',
+    'uninstall',
+    'installToSourceTarget',
+    'attach',
+    'detach',
+    'destroyStore',
+    'migrateToStore',
+  ] as const,
 );
 
 /** 动作结果状态。 */
@@ -158,7 +169,18 @@ export const portableAssetCanonicalEffectDecoder: Decoder<PortableAssetCanonical
 /** Plan 操作。 */
 export const portableAssetPlanOperationDecoder: Decoder<PortableAssetPlanOperation> = enumDecoder(
   'PortableAssetPlanOperation',
-  ['leave', 'enable', 'disable', 'uninstall', 'install', 'adopt'] as const,
+  [
+    'leave',
+    'enable',
+    'disable',
+    'uninstall',
+    'install',
+    'adopt',
+    'attach',
+    'detach',
+    'destroyStore',
+    'migrateToStore',
+  ] as const,
 );
 
 /** 备份策略。 */
@@ -208,9 +230,23 @@ export const portableInventoryItemCapabilitiesDecoder: Decoder<PortableInventory
     canUninstall: booleanDecoder,
     canAdopt: booleanDecoder,
     canInstallToSourceTarget: booleanDecoder,
+    canMigrateToStore: optionalDecoder(booleanDecoder),
+    canAttach: optionalDecoder(booleanDecoder),
+    canDetach: optionalDecoder(booleanDecoder),
+    canDestroyStore: optionalDecoder(booleanDecoder),
     reasonCode: nullableDecoder(stringDecoder),
     evidenceIds: arrayDecoder(stringDecoder),
   });
+
+/** portable-store 观测（旧快照可缺省）。 */
+export const portableStoreFactDecoder: Decoder<
+  import('../types/portableInventory').PortableStoreFactDto
+> = objectDecoder('PortableStoreFactDto', {
+  storeId: optionalDecoder(nullableDecoder(stringDecoder)),
+  storeAttached: optionalDecoder(booleanDecoder),
+  loadedViaOtherPath: optionalDecoder(booleanDecoder),
+  loadedViaTarget: optionalDecoder(nullableDecoder(agentTargetDecoder)),
+});
 
 /** Target DTO。 */
 export const portableInventoryTargetDecoder: Decoder<PortableInventoryTargetDto> = objectDecoder(
@@ -268,6 +304,7 @@ export const portableInventoryItemDecoder: Decoder<PortableInventoryItemDto> = o
     mcpCredential: optionalDecoder(
       nullableDecoder(portableMcpCredentialFactDecoder),
     ),
+    store: optionalDecoder(nullableDecoder(portableStoreFactDecoder)),
   },
 );
 

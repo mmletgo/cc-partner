@@ -40,6 +40,8 @@ export interface PortableInventoryRowLabels {
   unmanagedRefreshHint?: string;
   borrowedFrom: Record<PortableBorrowedOwnerLabelKey, string>;
   openInOwnerAgent: string;
+  /** 便携仓库徽章；缺省时不渲染。 */
+  storeBadge?: string;
 }
 
 export interface PortableInventoryRowProps {
@@ -144,6 +146,14 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
                   {labels.borrowedFrom[borrowedOwnerKey]}
                 </Pill>
               ) : null}
+              {item.store?.storeId && labels.storeBadge ? (
+                <Pill
+                  tone={item.store.storeAttached ? 'success' : 'neutral'}
+                  data-testid="portable-row-store-badge"
+                >
+                  {labels.storeBadge}
+                </Pill>
+              ) : null}
             </div>
           </div>
           {item.description ? <p className={styles.description}>{item.description}</p> : null}
@@ -175,7 +185,9 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
             ? rowActions.map((action) => (
                 <Button
                   key={action}
-                  variant={action === 'uninstall' ? 'danger' : 'secondary'}
+                  variant={
+                    action === 'uninstall' || action === 'destroyStore' ? 'danger' : 'secondary'
+                  }
                   size="sm"
                   loading={busy}
                   disabled={busy}

@@ -128,7 +128,18 @@ pub fn supports_direct_local_action(
             PortableAssetActionKind::Enable
                 | PortableAssetActionKind::Disable
                 | PortableAssetActionKind::Uninstall
+                | PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::DestroyStore
+                | PortableAssetActionKind::MigrateToStore
         )
+        && !(matches!(
+            action,
+            PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::DestroyStore
+                | PortableAssetActionKind::MigrateToStore
+        ) && kind == PortableAssetKind::Plugin)
 }
 
 /// 判断 target 是否至少具备一个本机直管动作。
@@ -201,6 +212,9 @@ pub(crate) fn expected_enabled_after(
                 previous.or(Some(true))
             }
         }
+        PortableAssetActionKind::Attach | PortableAssetActionKind::MigrateToStore => Some(true),
+        PortableAssetActionKind::Detach => Some(false),
+        PortableAssetActionKind::DestroyStore => None,
     }
 }
 
