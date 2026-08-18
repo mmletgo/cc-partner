@@ -1162,7 +1162,7 @@ pub fn install_command_uses_sudo(command: &[String]) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     缺 capability 时卡片要显示 unsupported，不能冒充 ready。
+///     缺 capability 或旧路由时卡片为 unsupported，不能冒充 ready，也不能当成 tmux missing。
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 installable=false 的 unsupported DTO。

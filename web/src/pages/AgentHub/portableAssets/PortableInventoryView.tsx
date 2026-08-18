@@ -15,7 +15,11 @@ import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
 } from '@/lib/types/portableInventory';
-import { partitionPortableInventoryItems } from './portableInventoryPresentation';
+import {
+  isPortableStoreAssetKind,
+  partitionPortableInventoryItems,
+  partitionPortableStoreCatalogItems,
+} from './portableInventoryPresentation';
 import type { UsePortableInventoryControllerResult } from './usePortableInventoryController';
 import {
   PortableInventoryRow,
@@ -40,6 +44,7 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   loading: string;
   empty: string;
   refresh: string;
+  migrateAllToStore: string;
   confirmAllVersions: string;
   retry: string;
   staleBanner: string;
@@ -50,6 +55,8 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   managementFilter: Record<(typeof MANAGEMENT_OPTIONS)[number], string>;
   groupInstalled: string;
   groupBorrowed: string;
+  groupStoreAttached: string;
+  groupStoreAvailable: string;
   emptyRuntimeHint: string;
 }
 
@@ -81,10 +88,20 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     refresh,
     confirmableCurrentVersionItems,
     openConfirmAllCurrentVersions,
+    migratableToStoreItems,
+    openMigrateAllToStore,
     pendingAction,
     mutationBlocked,
   } = controller;
 
+  const showMigrateAllToStore = isPortableStoreAssetKind(filters.kind);
+  const migrateAllCount = migratableToStoreItems.length;
+  const migrateAllDisabled =
+    migrateAllCount === 0 ||
+    Boolean(pendingAction) ||
+    refreshing ||
+    stale ||
+    mutationBlocked;
   const confirmAllCount = confirmableCurrentVersionItems.length;
   const confirmAllDisabled =
     confirmAllCount === 0 ||
@@ -141,6 +158,17 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
           >
             {labels.refresh}
           </Button>
+          {showMigrateAllToStore ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={migrateAllDisabled}
+              onClick={() => openMigrateAllToStore()}
+              data-testid="portable-inventory-migrate-all-to-store"
+            >
+              {labels.migrateAllToStore}
+            </Button>
+          ) : null}
           <Button
             variant="secondary"
             size="sm"
@@ -231,6 +259,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
           onOpenOwner,
           selectItem,
           openAction,
+          storeLane: filters.assetLane === 'store',
         })}
       </div>
     </div>
@@ -246,11 +275,12 @@ interface InventoryGroupRenderProps {
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
   selectItem: (itemId: string) => void;
   openAction: (itemId: string, action: PortableAssetActionKind) => void;
+  storeLane: boolean;
 }
 
 /**
- * Business Logic: 筛选后拆「已安装在此」与「运行时借用」；仅借用时不假装空库存。
- * Code Logic: 两边都空才 empty；有借用则渲染 borrowed 组，installed 为空时附 emptyRuntimeHint。
+ * Business Logic: 已装备拆「已安装在此」与「运行时借用」；仓库拆「已附加」与「未附加」。
+ * Code Logic: 两边都空才 empty；已装备仅借用时附 emptyRuntimeHint。
  */
 function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
   const {
@@ -262,7 +292,76 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
     onOpenOwner,
     selectItem,
     openAction,
+    storeLane,
   } = props;
+
+  if (storeLane) {
+    const { attached, available } = partitionPortableStoreCatalogItems(visibleItems);
+    if (attached.length === 0 && available.length === 0) {
+      return (
+        <p className={styles.empty} data-testid="portable-inventory-empty">
+          {labels.empty}
+        </p>
+      );
+    }
+    return (
+      <>
+        {attached.length > 0 ? (
+          <section
+            className={styles.inventoryGroup}
+            data-testid="portable-inventory-group-store-attached"
+            aria-labelledby="portable-inventory-group-store-attached-title"
+          >
+            <h3
+              id="portable-inventory-group-store-attached-title"
+              className={styles.inventoryGroupTitle}
+            >
+              {labels.groupStoreAttached}
+            </h3>
+            {attached.map((item) => (
+              <PortableInventoryRow
+                key={item.inventoryItemId}
+                item={item}
+                selected={selectedItemId === item.inventoryItemId}
+                busy={lockedItemIds.has(item.inventoryItemId)}
+                actions={getRowActions(item)}
+                labels={labels}
+                onSelect={(selected) => selectItem(selected.inventoryItemId)}
+                onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
+              />
+            ))}
+          </section>
+        ) : null}
+        {available.length > 0 ? (
+          <section
+            className={styles.inventoryGroup}
+            data-testid="portable-inventory-group-store-available"
+            aria-labelledby="portable-inventory-group-store-available-title"
+          >
+            <h3
+              id="portable-inventory-group-store-available-title"
+              className={styles.inventoryGroupTitle}
+            >
+              {labels.groupStoreAvailable}
+            </h3>
+            {available.map((item) => (
+              <PortableInventoryRow
+                key={item.inventoryItemId}
+                item={item}
+                selected={selectedItemId === item.inventoryItemId}
+                busy={lockedItemIds.has(item.inventoryItemId)}
+                actions={getRowActions(item)}
+                labels={labels}
+                onSelect={(selected) => selectItem(selected.inventoryItemId)}
+                onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
+              />
+            ))}
+          </section>
+        ) : null}
+      </>
+    );
+  }
+
   const { installed, borrowed } = partitionPortableInventoryItems(visibleItems);
   if (installed.length === 0 && borrowed.length === 0) {
     return (

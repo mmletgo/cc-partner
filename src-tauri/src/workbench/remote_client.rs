@@ -870,6 +870,18 @@ impl RemoteWorkbenchClient {
         Ok(())
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     status 探测失败时，传输离线必须与「旧后端无路由」分开，不能把掉线收成 unsupported。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Timeout / Unavailable 视为传输失败。
+    fn is_remote_dependency_transport_error(error: &AppError) -> bool {
+        matches!(
+            error.classify(),
+            AppErrorCategory::Timeout | AppErrorCategory::Unavailable
+        )
+    }
+
     /// 读取 owning device 项目笔记。
     pub async fn get_project_note(
         &self,
@@ -933,18 +945,44 @@ impl RemoteWorkbenchClient {
     }
 
     /// 读取 owning device tmux 依赖状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动安装仍 gated 在 `workbench.dependency-install.v1`。只读 status 必须 best-effort：
+    ///     对端已装 tmux 时，不得因 health 未宣告该 token 就误报「需要安装 tmux」。
+    ///     旧 peer 无路由时收成 capability_unsupported，由命令层映射 unsupported，Workbench 不占位。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 POST `/api/workbench/dependency/status`（不预检 token）。
+    ///     成功则采用对端真实探测结果；传输失败原样上抛；其它失败且对端未宣告 token 时
+    ///     改写为 `capability_unsupported`，避免把缺路由当成 tmux missing。
     pub async fn dependency_status(
         &self,
         base_url: &str,
     ) -> Result<WorkbenchDependencyStatusDto, AppError> {
-        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1)
-            .await?;
-        self.post_json(
-            endpoint_url(base_url, "/api/workbench/dependency/status"),
-            &serde_json::json!({}),
-            RemoteRequestTimeoutKind::Short,
-        )
-        .await
+        match self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/dependency/status"),
+                &serde_json::json!({}),
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await
+        {
+            Ok(status) => Ok(status),
+            Err(error) if Self::is_remote_dependency_transport_error(&error) => Err(error),
+            Err(error) => {
+                if self
+                    .peer_supports_capability(base_url, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1)
+                    .await
+                    .unwrap_or(true)
+                {
+                    Err(error)
+                } else {
+                    Err(AppError::unavailable(
+                        "capability_unsupported:workbench.dependency-install.v1".to_string(),
+                    ))
+                }
+            }
+        }
     }
 
     /// 在 owning device 启动 tmux 安装。
@@ -3091,5 +3129,58 @@ mod tests {
             .await
             .expect_err("repair");
         assert!(repair.to_string().contains("capability_unsupported"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端未宣告 install token 但 status 路由已能探测到 tmux 时，不得误报缺失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 不含 `workbench.dependency-install.v1`，POST status 返回 ready。
+    #[tokio::test]
+    async fn dependency_status_uses_peer_probe_without_install_capability() {
+        use axum::routing::{get, post};
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "protocol_version": 1,
+                        "capabilities": ["errors.envelope.v1"]
+                    }))
+                }),
+            )
+            .route(
+                "/api/workbench/dependency/status",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "status": "ready",
+                        "available": true,
+                        "version": "3.4",
+                        "backend": "native",
+                        "path": "/usr/bin/tmux",
+                        "installable": false,
+                        "installCommandPreview": [],
+                        "error": null,
+                        "output": [],
+                        "statusChangedAt": "2026-08-18T00:00:00.000Z"
+                    }))
+                }),
+            );
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{addr}");
+        let client = RemoteWorkbenchClient::new();
+        let deps = client.dependency_status(&base).await.expect("deps");
+        assert!(deps.available);
+        assert_eq!(
+            deps.status,
+            crate::workbench::dependencies::WorkbenchDependencyState::Ready
+        );
+        assert_eq!(deps.path.as_deref(), Some("/usr/bin/tmux"));
     }
 }

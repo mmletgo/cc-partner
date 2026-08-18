@@ -325,7 +325,11 @@ export function PortableAssetActionDialog({
               ? t('agentHub:portable.actionDialog.confirmAllCurrentVersionHint', {
                   count: items.length,
                 })
-              : t(`agentHub:portable.actionDialog.${storeHintKey}`)}
+              : isBatch && action === 'migrateToStore'
+                ? t('agentHub:portable.actionDialog.migrateAllToStoreHint', {
+                    count: items.length,
+                  })
+                : t(`agentHub:portable.actionDialog.${storeHintKey}`)}
           </StatusMessage>
         ) : null}
 

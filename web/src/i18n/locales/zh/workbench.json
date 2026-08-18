@@ -127,8 +127,10 @@
   "dependency": {
     "readyTitle": "tmux 已就绪",
     "missingTitle": "需要安装 tmux",
+    "unsupportedTitle": "无法自动安装 tmux",
     "readyDescription": "当前环境可使用真实 tmux window 和 pane，终端上下文可在重启后恢复。",
     "missingDescription": "安装 tmux 后可启用真实 window、pane 分屏和重启恢复；也可以继续使用普通终端。",
+    "unsupportedDescription": "对端后端版本不支持自动探测或安装 tmux。若对端已安装 tmux，可直接使用终端；window 与 pane 由对端会话能力决定。",
     "backend": "后端",
     "version": "版本",
     "path": "路径",

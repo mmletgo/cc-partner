@@ -28,7 +28,7 @@ import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
 import type { PortableInventoryItemDto } from '@/lib/types/portableInventory';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
-import { peerAllowsUserInstructionThreePane } from './context/agentHubContext';
+import { isPortableStoreTab, peerAllowsUserInstructionThreePane } from './context/agentHubContext';
 import {
   isAssetKindTab,
   useAgentHubController,
@@ -176,12 +176,24 @@ export function AgentHubView(props: AgentHubViewProps) {
   );
 
   const portableInventoryLabels: PortableInventoryViewLabels = useMemo(
-    () => ({
-      title: t('agentHub:portable.inventory.title'),
-      subtitle: t('agentHub:portable.inventory.subtitle'),
+    () => {
+      const storeCatalog =
+        isPortableStoreTab(hubContext.tab) && hubContext.assetLane === 'store';
+      return {
+      title: storeCatalog
+        ? t('agentHub:portable.inventory.storeTitle')
+        : t('agentHub:portable.inventory.title'),
+      subtitle: storeCatalog
+        ? t('agentHub:portable.inventory.storeSubtitle')
+        : t('agentHub:portable.inventory.subtitle'),
       loading: t('agentHub:portable.inventory.loading'),
-      empty: t('agentHub:portable.inventory.empty'),
+      empty: storeCatalog
+        ? t('agentHub:portable.inventory.emptyStore')
+        : t('agentHub:portable.inventory.empty'),
       refresh: t('agentHub:portable.inventory.refresh'),
+      migrateAllToStore: t('agentHub:portable.inventory.migrateAllToStore', {
+        count: portableInventory.migratableToStoreItems.length,
+      }),
       confirmAllVersions: t('agentHub:portable.inventory.confirmAllVersions', {
         count: portableInventory.confirmableCurrentVersionItems.length,
       }),
@@ -251,6 +263,8 @@ export function AgentHubView(props: AgentHubViewProps) {
       unmanagedRefreshHint: t('agentHub:portable.inventory.unmanagedRefreshHint'),
       groupInstalled: t('agentHub:portable.inventory.groupInstalled'),
       groupBorrowed: t('agentHub:portable.inventory.groupBorrowed'),
+      groupStoreAttached: t('agentHub:portable.inventory.groupStoreAttached'),
+      groupStoreAvailable: t('agentHub:portable.inventory.groupStoreAvailable'),
       storeBadge: t('agentHub:portable.inventory.storeBadge'),
       emptyRuntimeHint: t('agentHub:portable.inventory.emptyRuntimeHint'),
       openInOwnerAgent: t('agentHub:portable.inventory.openInOwnerAgent'),
@@ -266,8 +280,15 @@ export function AgentHubView(props: AgentHubViewProps) {
         portableStore: t('agentHub:portable.inventory.borrowedFrom.portableStore'),
         unknown: t('agentHub:portable.inventory.borrowedFrom.unknown'),
       },
-    }),
-    [portableInventory.confirmableCurrentVersionItems.length, t],
+    };
+    },
+    [
+      hubContext.assetLane,
+      hubContext.tab,
+      portableInventory.confirmableCurrentVersionItems.length,
+      portableInventory.migratableToStoreItems.length,
+      t,
+    ],
   );
 
   /**

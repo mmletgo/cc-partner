@@ -2,8 +2,8 @@
  * Agent Hub URL 上下文纯模型。
  *
  * Business Logic（为什么需要）:
- *   当前发布以 tab × scope × owner × (instructions:lane) × agent 恢复工作台；
- *   本机、远端设备和项目上下文都必须可深链往返，不能因某个写动作暂不可用而丢失导航身份。
+ *   当前发布以 tab × scope × owner × (instructions:lane | skill/command:assetLane) × agent
+ *   恢复工作台；本机、远端设备和项目上下文都必须可深链往返。
  *
  * Code Logic（做什么）:
  *   parse/write URLSearchParams；mapLegacySection 把五段分区映射为 Partial context。
@@ -28,10 +28,19 @@ export type AgentHubScope = 'user' | 'project';
 export type InstructionLane = 'common' | 'adapted' | 'exclusive';
 
 /**
+ * Skill/Command 存放面（仅 tab=skill|command 有意义）。
+ *
+ * Business Logic: 「已装备」是当前 Agent 自己的 native / 已附加软链；
+ *   「仓库」是本机一份 portable-store 目录。MCP/Plugin 没有这一层。
+ * Code Logic: URL 键 `assetLane`；默认 equipped。
+ */
+export type PortableAssetLane = 'equipped' | 'store';
+
+/**
  * Agent Hub 可深链恢复的导航上下文。
  *
  * Business Logic: 用户级带 deviceId（null=本机）；项目级带 projectKey；adapt 独立全页。
- * Code Logic: 与 query 键 agent/scope/deviceId/project/tab/lane/view 对齐。
+ * Code Logic: 与 query 键 agent/scope/deviceId/project/tab/lane/assetLane/view 对齐。
  */
 export interface AgentHubContext {
   agent: AgentTarget;
@@ -45,6 +54,10 @@ export interface AgentHubContext {
    * 提示词三槽；仅 tab=instructions 时有效，其它 tab 恒为默认 exclusive。
    */
   instructionLane: InstructionLane;
+  /**
+   * Skill/Command 已装备 / 仓库；仅 skill|command 时有效，其它 tab 恒为 equipped。
+   */
+  assetLane: PortableAssetLane;
   /** true when view=adapt cross-agent page */
   adaptView: boolean;
 }
@@ -84,8 +97,11 @@ export interface AgentHubDraftIdentity {
 const AGENT_TARGETS = new Set<AgentTarget>(allHubTargets());
 const TABS = new Set<AgentHubTab>(['instructions', 'skill', 'command', 'mcp', 'plugin']);
 const LANES = new Set<InstructionLane>(['common', 'adapted', 'exclusive']);
+const ASSET_LANES = new Set<PortableAssetLane>(['equipped', 'store']);
 /** 旧 portable kind 可直接映射为 tab（不含 instructions）。 */
 const ASSET_KIND_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
+/** Skill/Command 才有 portable-store 存放面。 */
+const STORE_TABS = new Set<AgentHubTab>(['skill', 'command']);
 
 /** 空 URL 的默认上下文。 */
 export const DEFAULT_AGENT_HUB_CONTEXT: AgentHubContext = {
@@ -95,6 +111,7 @@ export const DEFAULT_AGENT_HUB_CONTEXT: AgentHubContext = {
   projectKey: null,
   tab: 'instructions',
   instructionLane: 'exclusive',
+  assetLane: 'equipped',
   adaptView: false,
 };
 
@@ -155,7 +172,7 @@ export function mapLegacySection(section: string | null): Partial<AgentHubContex
 /**
  * Business Logic: 从 search params 恢复导航上下文（新键优先，legacy 兜底）。
  * Code Logic: defaults ← mapLegacySection ← legacy target/kind ← 显式 agent/scope/tab/lane/…；
- *   再按 scope 清空互斥的 deviceId/projectKey；非 instructions 时 lane 回默认。
+ *   再按 scope 清空互斥的 deviceId/projectKey；normalize 清非当前 tab 的 lane / assetLane。
  */
 export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
   const ctx: AgentHubContext = { ...DEFAULT_AGENT_HUB_CONTEXT };
@@ -205,17 +222,17 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
 
   ctx.adaptView = params.get('view') === 'adapt';
 
-  // 4) lane 仅 instructions 有意义
-  if (ctx.tab !== 'instructions') {
-    ctx.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
+  const assetLane = params.get('assetLane');
+  if (assetLane && isPortableAssetLane(assetLane)) {
+    ctx.assetLane = assetLane;
   }
 
-  return ctx;
+  return normalizeAgentHubContext(ctx);
 }
 
 /**
  * Business Logic: 把上下文写回 URL，保留无关 deep link；默认值删 key 降噪。
- * Code Logic: 写 agent/scope/deviceId/project/tab/lane/view；剥离会干扰 re-parse 的 legacy section/target/kind。
+ * Code Logic: 写 agent/scope/deviceId/project/tab/lane/assetLane/view；剥离会干扰 re-parse 的 legacy section/target/kind。
  */
 export function writeAgentHubContext(
   params: URLSearchParams,
@@ -250,6 +267,15 @@ export function writeAgentHubContext(
     next.set('lane', ctx.instructionLane);
   } else {
     next.delete('lane');
+  }
+
+  if (
+    isPortableStoreTab(ctx.tab) &&
+    ctx.assetLane !== DEFAULT_AGENT_HUB_CONTEXT.assetLane
+  ) {
+    next.set('assetLane', ctx.assetLane);
+  } else {
+    next.delete('assetLane');
   }
 
   if (ctx.adaptView) next.set('view', 'adapt');
@@ -289,4 +315,37 @@ export function isAssetKindTab(value: string): value is AgentHubTab {
  */
 export function isInstructionLane(value: string): value is InstructionLane {
   return LANES.has(value as InstructionLane);
+}
+
+/**
+ * Business Logic: 校验 Skill/Command 存放面。
+ * Code Logic: 对照 ASSET_LANES 集合。
+ */
+export function isPortableAssetLane(value: string): value is PortableAssetLane {
+  return ASSET_LANES.has(value as PortableAssetLane);
+}
+
+/**
+ * Business Logic: 只有 Skill/Command 才有 portable-store 仓库页。
+ * Code Logic: 对照 STORE_TABS。
+ */
+export function isPortableStoreTab(tab: AgentHubTab): boolean {
+  return STORE_TABS.has(tab);
+}
+
+/**
+ * Business Logic: 离开提示词时清三槽；离开 Skill/Command 时清仓库面，避免 URL 脏状态。
+ * Code Logic: 非 instructions → exclusive；非 skill|command → equipped。
+ */
+export function normalizeAgentHubContext(ctx: AgentHubContext): AgentHubContext {
+  return {
+    ...ctx,
+    instructionLane:
+      ctx.tab === 'instructions'
+        ? ctx.instructionLane
+        : DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
+    assetLane: isPortableStoreTab(ctx.tab)
+      ? ctx.assetLane
+      : DEFAULT_AGENT_HUB_CONTEXT.assetLane,
+  };
 }

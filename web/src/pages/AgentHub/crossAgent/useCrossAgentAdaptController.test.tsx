@@ -42,6 +42,7 @@ function localContext(overrides: Partial<AgentHubContext> = {}): AgentHubContext
     tab: 'instructions',
     instructionLane: 'common',
     adaptView: true,
+    assetLane: 'equipped',
     ...overrides,
   };
 }

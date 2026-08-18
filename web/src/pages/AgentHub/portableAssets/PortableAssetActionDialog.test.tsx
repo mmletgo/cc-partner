@@ -599,4 +599,40 @@ describe('PortableAssetActionDialog state machine', () => {
       'confirmAllCurrentVersionHint',
     );
   });
+
+  test('batch migrate to store previews all item ids and shows the bulk hint', () => {
+    const second: PortableInventoryItemDto = {
+      ...item,
+      inventoryItemId: 'claude-skill-skill-b',
+      nativeId: 'skill-b',
+      displayName: 'Skill B',
+    };
+    const onPreview = vi.fn();
+    render(
+      <PortableAssetActionDialog
+        open
+        items={[item, second]}
+        action="migrateToStore"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        onPreview={onPreview}
+        onConfirm={() => undefined}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    const request = onPreview.mock.calls[0][0] as PreviewPortableAssetActionRequest;
+    expect(request.inventoryItemIds).toEqual([item.inventoryItemId, second.inventoryItemId]);
+    expect(request.expectedCanonicalRevisionId).toBeNull();
+    expect(screen.getByTestId('portable-action-batch-summary').textContent).toContain('Skill B');
+    expect(screen.getByTestId('portable-action-store-hint').textContent).toContain(
+      'migrateAllToStoreHint',
+    );
+  });
 });

@@ -24,6 +24,7 @@ import {
   isPortableInventoryProblem,
   isPortableItemReadOnly,
   listConfirmableCurrentVersionItems,
+  listMigratableToStoreItems,
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
   partitionPortableInventoryItems,
@@ -334,6 +335,53 @@ describe('portableInventoryPresentation filters', () => {
         filters({ kind: 'command', actualState: 'all' }),
       ),
     ).toBe(true);
+  });
+
+  test('equipped hides unattached store catalog; store shows catalog and hides native-only', () => {
+    const native = makeItem({
+      inventoryItemId: 'claude-skill-native',
+      kind: 'skill',
+      nativeId: 'native-only',
+    });
+    const attached = makeItem({
+      inventoryItemId: 'claude-skill-attached',
+      kind: 'skill',
+      nativeId: 'attached',
+      ownedBy: 'portableStore',
+      store: { storeId: 'skill:attached', storeAttached: true },
+    });
+    const available = makeItem({
+      inventoryItemId: 'claude-skill-available',
+      kind: 'skill',
+      nativeId: 'available',
+      ownedBy: 'portableStore',
+      store: { storeId: 'skill:available', storeAttached: false },
+    });
+    const mcp = makeItem({
+      inventoryItemId: 'claude-mcp-native',
+      kind: 'mcp',
+      nativeId: 'native-mcp',
+    });
+
+    expect(
+      filterPortableInventoryItems(
+        [native, attached, available],
+        filters({ kind: 'skill', assetLane: 'equipped' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-native', 'claude-skill-attached']);
+
+    expect(
+      filterPortableInventoryItems(
+        [native, attached, available],
+        filters({ kind: 'skill', assetLane: 'store' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-attached', 'claude-skill-available']);
+
+    expect(
+      filterPortableInventoryItems([mcp], filters({ kind: 'mcp', assetLane: 'store' })).map(
+        (item) => item.inventoryItemId,
+      ),
+    ).toEqual(['claude-mcp-native']);
   });
 
   test('problem classification covers management and warnings', () => {
@@ -728,6 +776,48 @@ describe('portableInventoryPresentation row actions', () => {
     ).toEqual(['claude-skill-a', 'claude-skill-b']);
     expect(samePortableItemIds(['b', 'a'], ['a', 'b'])).toBe(true);
     expect(samePortableItemIds(['a'], ['a', 'b'])).toBe(false);
+  });
+
+  test('listMigratableToStoreItems takes snapshot native skill/command and skips filters/components/mcp', () => {
+    const nativeA = makeItem({
+      inventoryItemId: 'claude-skill-a',
+      kind: 'skill',
+      nativeId: 'a',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
+    const nativeB = makeItem({
+      inventoryItemId: 'claude-command-b',
+      kind: 'command',
+      nativeId: 'b',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
+    const alreadyInStore = makeItem({
+      inventoryItemId: 'claude-skill-store',
+      kind: 'skill',
+      nativeId: 'store',
+      ownedBy: 'portableStore',
+      store: { storeId: 'skill:store', storeAttached: true },
+      capabilities: { ...baseCapabilities, canMigrateToStore: false, canDetach: true },
+    });
+    const component = makeItem({
+      inventoryItemId: 'claude-skill-comp',
+      kind: 'skill',
+      nativeId: 'comp',
+      sourceOrigin: 'pluginComponent',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
+    const mcp = makeItem({
+      inventoryItemId: 'claude-mcp-keep',
+      kind: 'mcp',
+      nativeId: 'good-api',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
+    expect(
+      listMigratableToStoreItems(
+        [nativeA, alreadyInStore, nativeB, component, mcp],
+        healthyCtx,
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-a', 'claude-command-b']);
   });
 
   test('store item loaded via other path is borrowed and still offers attach', () => {

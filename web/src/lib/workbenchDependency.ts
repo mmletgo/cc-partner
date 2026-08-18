@@ -40,16 +40,16 @@ export function canRecheckWorkbenchDependency(status: WorkbenchDependencyStatus)
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端工作台只应在 tmux 阻塞真实 window/pane 时占位；就绪成功页属于 Settings，
- *   探测中也不应把整张依赖卡塞进终端区。
+ *   终端工作台只应在 tmux 真正缺失或安装失败时占位；就绪成功页属于 Settings。
+ *   对端后端版本缺自动安装能力时，不能把「无法探测」误报成「需要安装 tmux」挡住终端。
  *
  * Code Logic（这个函数做什么）:
- *   ready / checking 返回 false；missing / installing / 失败 / 不支持 / 待重检返回 true。
+ *   ready / checking / unsupported 返回 false；missing / installing / 失败 / 待重检返回 true。
  */
 export function shouldShowWorkbenchDependencyNotice(
   status: WorkbenchDependencyStatus['status'],
 ): boolean {
-  return status !== 'ready' && status !== 'checking';
+  return status !== 'ready' && status !== 'checking' && status !== 'unsupported';
 }
 
 /**

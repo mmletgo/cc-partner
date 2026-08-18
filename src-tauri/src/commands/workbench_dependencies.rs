@@ -10,7 +10,7 @@
 //!     可选 deviceId：外机走 P2P，本机路径保持 GUI 进程缓存（Attention 仍只投影本机）。
 
 use crate::commands::workbench::{device_base_url, proxy_workbench_if_gui};
-use crate::error::AppError;
+use crate::error::{AppError, AppErrorCategory};
 use crate::state::AppState;
 use crate::workbench::dependencies::{
     actual_install_command_preview, probe_workbench_dependency, unsupported_dependency_status,
@@ -30,19 +30,35 @@ fn is_foreign_device(state: &AppState, device_id: Option<&str>) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     缺 capability 时卡片要显示 unsupported，不能把错误当成安装成功。
+///     旧 peer 可能未宣告 `workbench.dependency-install.v1`，或根本没有 status 路由。
+///     这两种情况都不能当成「tmux 未安装」，更不能冒充 ready。
 ///
 /// Code Logic（这个函数做什么）:
-///     `capability_unsupported` → unsupported DTO；其它错误原样上抛。
+///     capability 缺失、404、405 → true。传输离线与其它业务错误仍 false。
+fn is_unprobeable_remote_dependency_error(error: &AppError) -> bool {
+    if error.classify() == AppErrorCategory::NotFound {
+        return true;
+    }
+    let code = error.code();
+    let text = error.to_string();
+    code.contains("capability_unsupported")
+        || text.contains("capability_unsupported")
+        || code == "method_not_allowed"
+        || text.contains("method_not_allowed")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     无法探测或无法自动安装时卡片为 unsupported，不能把错误当成安装成功，
+///     也不能把缺路由误报成 tmux missing。
+///
+/// Code Logic（这个函数做什么）:
+///     不可探测错误 → unsupported DTO；其它错误原样上抛。
 fn map_remote_dependency_result(
     result: Result<WorkbenchDependencyStatusDto, AppError>,
 ) -> Result<WorkbenchDependencyStatusDto, AppError> {
     match result {
         Ok(status) => Ok(status),
-        Err(error)
-            if error.code().contains("capability_unsupported")
-                || error.to_string().contains("capability_unsupported") =>
-        {
+        Err(error) if is_unprobeable_remote_dependency_error(&error) => {
             Ok(unsupported_dependency_status(error.to_string()))
         }
         Err(error) => Err(error),
@@ -283,10 +299,10 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     缺 capability 必须变成卡片 unsupported，不能冒充安装成功。
+    ///     缺 capability 或旧路由 404 必须变成卡片 unsupported，不能冒充安装成功，也不能当成 tmux missing。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     map_remote_dependency_result 把 capability_unsupported 收成 unsupported DTO。
+    ///     map_remote_dependency_result 把 capability_unsupported 与 not_found 收成 unsupported DTO。
     #[test]
     fn missing_capability_maps_to_unsupported_status() {
         let mapped = map_remote_dependency_result(Err(AppError::unavailable(
@@ -295,6 +311,22 @@ mod tests {
         .expect("mapped");
         assert_eq!(mapped.status, WorkbenchDependencyState::Unsupported);
         assert!(!mapped.installable);
+        assert!(!mapped.available);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 peer 没有 dependency/status 路由时，404 也不能占成「需要安装 tmux」。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     not_found 同样收成 unsupported。
+    #[test]
+    fn missing_status_route_maps_to_unsupported_status() {
+        let mapped = map_remote_dependency_result(Err(AppError::not_found(
+            "远端 Workbench 请求失败: HTTP 404".to_string(),
+        )))
+        .expect("mapped");
+        assert_eq!(mapped.status, WorkbenchDependencyState::Unsupported);
+        assert!(!mapped.available);
     }
 
     /// Business Logic（为什么需要这个测试）:

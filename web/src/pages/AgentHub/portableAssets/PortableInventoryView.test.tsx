@@ -23,6 +23,7 @@ const labels: PortableInventoryViewLabels = {
   loading: 'Loading inventory',
   empty: 'No assets',
   refresh: 'Refresh',
+  migrateAllToStore: 'Migrate all to store',
   confirmAllVersions: 'Confirm all versions',
   retry: 'Retry',
   staleBanner: 'Inventory is stale',
@@ -79,6 +80,8 @@ const labels: PortableInventoryViewLabels = {
   unmanagedRefreshHint: 'Refresh inventory to manage this asset.',
   groupInstalled: 'Installed here',
   groupBorrowed: 'Loaded at runtime from other agents',
+  groupStoreAttached: 'Attached to this agent',
+  groupStoreAvailable: 'Not attached',
   emptyRuntimeHint: 'Runtime still loads assets from other agents.',
   openInOwnerAgent: 'Open in owner Agent',
   borrowedFrom: {
@@ -168,6 +171,8 @@ function controller(
     openAction: vi.fn(),
     confirmableCurrentVersionItems: [],
     openConfirmAllCurrentVersions: vi.fn(),
+    migratableToStoreItems: [],
+    openMigrateAllToStore: vi.fn(),
     clearPendingAction: vi.fn(),
     getPrimaryAction: () => 'disable',
     getRowActions: () => ['disable', 'uninstall'],
@@ -201,6 +206,74 @@ describe('PortableInventoryView', () => {
       target: { value: 'problem' },
     });
     expect(ctl.setFilters).toHaveBeenCalledWith({ actualState: 'problem' });
+  });
+
+  test('migrate-all button sits under refresh, before confirm-all, and opens the batch action', () => {
+    const nativeA = item({
+      inventoryItemId: 'claude-skill-alpha',
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canMigrateToStore: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    const openMigrateAllToStore = vi.fn();
+    render(
+      <PortableInventoryView
+        controller={controller({
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [nativeA],
+          },
+          visibleItems: [nativeA],
+          migratableToStoreItems: [nativeA],
+          openMigrateAllToStore,
+        })}
+        labels={labels}
+      />,
+    );
+
+    const refresh = screen.getByTestId('portable-inventory-refresh');
+    const migrateAll = screen.getByTestId('portable-inventory-migrate-all-to-store');
+    const confirmAll = screen.getByTestId('portable-inventory-confirm-all-versions');
+    expect(refresh.compareDocumentPosition(migrateAll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(migrateAll.compareDocumentPosition(confirmAll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect((migrateAll as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(migrateAll);
+    expect(openMigrateAllToStore).toHaveBeenCalledTimes(1);
+  });
+
+  test('hides migrate-all on plugin and mcp inventory', () => {
+    const { rerender } = render(
+      <PortableInventoryView
+        controller={controller({
+          filters: { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, kind: 'plugin' },
+          inventoryQuery: { target: 'claude', kind: 'plugin' },
+        })}
+        labels={labels}
+      />,
+    );
+    expect(screen.queryByTestId('portable-inventory-migrate-all-to-store')).toBeNull();
+
+    rerender(
+      <PortableInventoryView
+        controller={controller({
+          filters: { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, kind: 'mcp' },
+          inventoryQuery: { target: 'claude', kind: 'mcp' },
+        })}
+        labels={labels}
+      />,
+    );
+    expect(screen.queryByTestId('portable-inventory-migrate-all-to-store')).toBeNull();
+    expect(screen.getByTestId('portable-inventory-confirm-all-versions')).toBeTruthy();
   });
 
   test('confirm-all button sits under refresh and opens the batch action', () => {
@@ -374,5 +447,48 @@ describe('PortableInventoryView', () => {
       'Shared ~/.agents',
     );
     expect(screen.getByTestId('portable-row-action-uninstall-grok-skill-shared')).toBeTruthy();
+  });
+
+  test('store lane groups attached vs available catalog items', () => {
+    const attached = item({
+      inventoryItemId: 'claude-skill-attached',
+      nativeId: 'attached',
+      displayName: 'Attached Skill',
+      ownedBy: 'portableStore',
+      store: { storeId: 'skill:attached', storeAttached: true },
+    });
+    const available = item({
+      inventoryItemId: 'claude-skill-available',
+      nativeId: 'available',
+      displayName: 'Available Skill',
+      ownedBy: 'portableStore',
+      store: { storeId: 'skill:available', storeAttached: false },
+    });
+    render(
+      <PortableInventoryView
+        controller={controller({
+          visibleItems: [attached, available],
+          filters: { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, assetLane: 'store' },
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [attached, available],
+          },
+          getRowActions: () => ['attach'],
+        })}
+        labels={labels}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-inventory-group-store-attached').textContent).toContain(
+      'Attached to this agent',
+    );
+    expect(screen.getByTestId('portable-inventory-group-store-available').textContent).toContain(
+      'Not attached',
+    );
+    expect(screen.queryByTestId('portable-inventory-group-installed')).toBeNull();
+    expect(screen.queryByTestId('portable-inventory-group-borrowed')).toBeNull();
   });
 });

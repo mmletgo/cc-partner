@@ -13,6 +13,7 @@ export {
 export {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   listConfirmableCurrentVersionItems,
+  listMigratableToStoreItems,
   samePortableItemIds,
   type PortableInventoryFilters,
   type PortableKindCounts,

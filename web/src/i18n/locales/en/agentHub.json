@@ -61,6 +61,12 @@
       "adapted": "Adapted",
       "exclusive": "Exclusive"
     },
+    "assetLaneLabel": "Placement",
+    "assetLaneAria": "Equipped, store",
+    "assetLanes": {
+      "equipped": "Equipped",
+      "store": "Store"
+    },
     "pull": "Pull…",
     "push": "Push…",
     "adapt": "Adapt to other agents…",
@@ -598,9 +604,13 @@
     "inventory": {
       "title": "Agent assets",
       "subtitle": "Observed inventory for the selected agent. Actual disk state is the source of truth; discovery creates Hub management automatically.",
+      "storeTitle": "Portable store",
+      "storeSubtitle": "One local copy of each Skill/Command. Attach it to the current agent to show it under Equipped; detach only removes the symlink.",
       "loading": "Loading inventory…",
       "empty": "No portable assets match the current filters.",
+      "emptyStore": "The store is empty. Migrate a local Skill or Command from Equipped, then any agent can attach the same copy.",
       "refresh": "Refresh inventory",
+      "migrateAllToStore": "Migrate all to store ({{count}})",
       "confirmAllVersions": "Confirm all versions ({{count}})",
       "retry": "Retry",
       "staleBanner": "Inventory is stale. Mutations are blocked until a successful refresh.",
@@ -612,6 +622,8 @@
       "unmanagedRefreshHint": "Not managed yet — refresh inventory to bring this asset under Hub management.",
       "groupInstalled": "Installed here",
       "groupBorrowed": "Loaded at runtime from other agents",
+      "groupStoreAttached": "Attached to this agent",
+      "groupStoreAvailable": "Not attached",
       "storeBadge": "Portable store",
       "storeAttached": "Attached to this agent",
       "storeLoadedViaOther": "Still loaded via another path",
@@ -771,12 +783,13 @@
       "borrowedImpactSharedAgents": "The shared ~/.agents directory is read by multiple agents, so this change affects every agent that loads from it.",
       "storeAttachHint": "Attach only creates a symlink from this agent's native root to the portable store. It does not copy a second install.",
       "storeDetachHint": "Detach only removes this agent's symlink. The real store tree stays, and other attached agents are unchanged.",
-      "storeMigrateHint": "Migrate moves the native files into the shared portable store and leaves a symlink. Same-name different content is blocked.",
+      "storeMigrateHint": "Migrate moves the native files into the shared portable store and leaves a symlink. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
       "storeDestroyHint": "Destroy deletes the shared store tree and clears Claude / Codex attachments. This cannot be undone.",
       "storeStillLoadedVia": "After detaching {{current}}, this store asset is still loaded via {{via}}. This action will not rewrite {{via}}.",
       "storePluginUnchanged": "Plugins do not use the portable store. Enable flags still change only the viewing agent's switch.",
       "confirmCurrentVersionHint": "Files on disk may have been updated. Confirming records the current files as Hub's consistent baseline and does not rewrite disk.",
-      "confirmAllCurrentVersionHint": "Records {{count}} drifted assets in this Agent and category as Hub's consistent baseline. Does not rewrite disk."
+      "confirmAllCurrentVersionHint": "Records {{count}} drifted assets in this Agent and category as Hub's consistent baseline. Does not rewrite disk.",
+      "migrateAllToStoreHint": "Migrates {{count}} native Skill/Command assets for this Agent and category into the portable store and leaves a symlink at the original path. If the same name already exists with different content, the newer version is kept and the older tree is deleted."
     }
   },
   "portablePull": {

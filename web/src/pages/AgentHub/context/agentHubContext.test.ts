@@ -25,6 +25,7 @@ const DEFAULT_CONTEXT: AgentHubContext = {
   projectKey: null,
   tab: 'instructions',
   instructionLane: 'exclusive',
+  assetLane: 'equipped',
   adaptView: false,
 };
 
@@ -56,6 +57,7 @@ describe('parseAgentHubContext', () => {
       projectKey: 'wb:proj-1',
       tab: 'mcp',
       instructionLane: 'exclusive',
+      assetLane: 'equipped',
       adaptView: true,
     });
   });
@@ -70,6 +72,24 @@ describe('parseAgentHubContext', () => {
     const ctx = parseAgentHubContext(new URLSearchParams('tab=skill&lane=common'));
     expect(ctx.tab).toBe('skill');
     expect(ctx.instructionLane).toBe('exclusive');
+  });
+
+  test('assetLane=store on skill is preserved', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('tab=skill&assetLane=store'));
+    expect(ctx.tab).toBe('skill');
+    expect(ctx.assetLane).toBe('store');
+  });
+
+  test('assetLane on non-store tab is forced back to equipped', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('tab=mcp&assetLane=store'));
+    expect(ctx.tab).toBe('mcp');
+    expect(ctx.assetLane).toBe('equipped');
+  });
+
+  test('skill to command keeps store assetLane', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('tab=command&assetLane=store'));
+    expect(ctx.tab).toBe('command');
+    expect(ctx.assetLane).toBe('store');
   });
 
   test('peer user URL keeps the peer and ignores the project field', () => {
@@ -169,6 +189,7 @@ describe('writeAgentHubContext', () => {
       projectKey: null,
       tab: 'command',
       instructionLane: 'exclusive',
+      assetLane: 'equipped',
       adaptView: true,
     };
     const written = writeAgentHubContext(new URLSearchParams('conflictId=c1'), original);
@@ -206,6 +227,39 @@ describe('writeAgentHubContext', () => {
     expect(parseAgentHubContext(written).instructionLane).toBe('exclusive');
   });
 
+  test('assetLane=store on skill is written and round-trips', () => {
+    const original: AgentHubContext = {
+      ...DEFAULT_CONTEXT,
+      tab: 'skill',
+      assetLane: 'store',
+    };
+    const written = writeAgentHubContext(new URLSearchParams(), original);
+    expect(written.get('assetLane')).toBe('store');
+    expect(parseAgentHubContext(written)).toEqual(original);
+  });
+
+  test('default equipped assetLane is omitted from empty params', () => {
+    const original: AgentHubContext = {
+      ...DEFAULT_CONTEXT,
+      tab: 'skill',
+    };
+    const written = writeAgentHubContext(new URLSearchParams(), original);
+    expect(written.get('assetLane')).toBeNull();
+    expect(parseAgentHubContext(written).assetLane).toBe('equipped');
+  });
+
+  test('assetLane is stripped when tab is not skill or command', () => {
+    const original: AgentHubContext = {
+      ...DEFAULT_CONTEXT,
+      tab: 'mcp',
+      assetLane: 'equipped',
+    };
+    const withStale = new URLSearchParams('assetLane=store&tab=mcp');
+    const written = writeAgentHubContext(withStale, original);
+    expect(written.get('assetLane')).toBeNull();
+    expect(parseAgentHubContext(written).assetLane).toBe('equipped');
+  });
+
   test('project scope round-trips with its project identity', () => {
     const original: AgentHubContext = {
       agent: 'claude',
@@ -214,6 +268,7 @@ describe('writeAgentHubContext', () => {
       projectKey: 'local:proj-x',
       tab: 'instructions',
       instructionLane: 'exclusive',
+      assetLane: 'equipped',
       adaptView: false,
     };
     const written = writeAgentHubContext(new URLSearchParams(), original);

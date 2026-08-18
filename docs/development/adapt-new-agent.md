@@ -226,9 +226,11 @@ Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local
 | MCP | **不进仓库**（遗留 `portable-store/mcp/*.json` 不自动删除、也不再投影） | 各家配置 **native leaf**（JSON `mcpServers` / TOML `mcp_servers`） | Enable/Disable/Uninstall 改当前或 owner 配置 | Uninstall 删该配置 leaf（可 snapshot 到 hub disabled）；跨 Agent 用已有 Pull |
 | Plugin | 不进仓库 | 仍走 §3.9 viewing 开关；不翻译 marketplace | Enable/Disable 只改 viewing | Uninstall 仍改所有者磁盘 |
 
+Hub 前端 Skill/Command：**范围之后、Agent 之前**有「已装备 / 仓库」一层（`assetLane`；MCP/Plugin 没有）。已装备 = 当前 Agent native + 已附加软链（仍展示运行时借用）；仓库 = `portable-store` 目录（已附加 / 未附加）。Agent 在两面都保留，因为附加状态按 viewing Agent 算。
+
 未迁入 store 的 native Skill/Command：Claude/Codex 仍可能 **MOVE** 到 hub disabled（旧语义）。**已经是 store 软链**时，Disable/Detach/Uninstall-from-agent 必须 `unlink`，禁止 `portable_set_tree_enabled` 把真树 rename 进 `claude-assets/disabled`。
 
-一键迁移：该 Agent 盘点里非软链 native Skill/Command → move 进 store → 原处放回软链。同名不同 hash → 阻断。**MCP 与 Plugin 不迁移**；不要把 MCP 做成 Plugin 那种 viewing 开关。
+一键迁移：该 Agent 盘点里非软链 native Skill/Command → move 进 store → 原处放回软链。同名不同 hash → 保留 frontmatter `version` 较新的一份（无比对版本则比 mtime），旧树直接删除，不再阻断。**MCP 与 Plugin 不迁移**；不要把 MCP 做成 Plugin 那种 viewing 开关。
 
 Grok（以及任何会扫 Claude 根的后来者）：
 
@@ -265,7 +267,7 @@ Grok（以及任何会扫 Claude 根的后来者）：
 - Enable/Disable 同字节 MOVE 不是漂移。假漂移：刷新即可，不要逼用户点确认。
 - `canConfirmCurrentVersion` 在 reconcile 之后才置位，scanner 默认 false。Plugin store 动作仍不支持；确认当前版本**可以**用于 Plugin（包字节可变）。
 
-穷尽 match：Rust `PortableAssetActionKind` / `PortableAssetPlanOperation`；前端 type + decoder + `agentHub.json` 中英键；行主动作与详情抽屉优先这条。planner 必须对 drift **豁免**本动作（其它 mutation 仍 `SOURCE_DRIFTED`）。库存页「刷新库存」下方提供 **全部确认版本**：一次 preview/apply 当前 Agent、当前类别快照里所有 `canConfirmCurrentVersion` 项（不受搜索/一致性筛选裁切；Plugin component 除外）。
+穷尽 match：Rust `PortableAssetActionKind` / `PortableAssetPlanOperation`；前端 type + decoder + `agentHub.json` 中英键；行主动作与详情抽屉优先这条。planner 必须对 drift **豁免**本动作（其它 mutation 仍 `SOURCE_DRIFTED`）。库存页「刷新库存」下方提供 **全部迁入仓库**（仅 Skill/Command）与 **全部确认版本**：前者一次 preview/apply 当前 Agent、当前类别快照里所有 `canMigrateToStore` 项（移入便携仓库并留下软链）；后者一次确认所有 `canConfirmCurrentVersion` 项。两者都不受搜索/一致性筛选裁切；Plugin component 除外。
 
 接入新身份时最低测试：
 

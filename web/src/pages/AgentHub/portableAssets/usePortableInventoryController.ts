@@ -30,6 +30,7 @@ import {
   filterPortableInventoryItems,
   isPortableStoreAssetKind,
   listConfirmableCurrentVersionItems,
+  listMigratableToStoreItems,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
   type PortableInventoryFilters,
@@ -81,6 +82,10 @@ export interface UsePortableInventoryControllerResult {
   confirmableCurrentVersionItems: PortableInventoryItemDto[];
   /** 一键确认当前类别、当前 Agent 的全部漂移项。 */
   openConfirmAllCurrentVersions: () => void;
+  /** 当前快照里可「迁入便携仓库」的 Skill/Command（当前 Agent + 当前类别）。 */
+  migratableToStoreItems: PortableInventoryItemDto[];
+  /** 一键把当前类别、当前 Agent 的可迁入项移入仓库并留下软链。 */
+  openMigrateAllToStore: () => void;
   clearPendingAction: () => void;
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
   /** 行内多动作（与 getPrimaryAction 共享同一组门闩，含 uninstall）。 */
@@ -382,6 +387,29 @@ export function usePortableInventoryController(
     setPendingAction({ itemIds: ids, action: 'confirmCurrentVersion' });
   }, [confirmableCurrentVersionItems, mutationBlocked, stale]);
 
+  const migratableToStoreItems = useMemo(
+    () =>
+      listMigratableToStoreItems(snapshotMatchesQuery ? snapshot?.items ?? [] : [], {
+        stale,
+        mutationBlocked,
+        lockedItemIds,
+      }),
+    [snapshot, snapshotMatchesQuery, stale, mutationBlocked, lockedItemIds],
+  );
+
+  /**
+   * Business Logic: 一键把当前 Agent、当前类别快照里全部可迁入项移入仓库并软链，不跟搜索/一致性筛选。
+   * Code Logic: 空集或 mutation 门闩时清 pending；否则打开 migrateToStore 批量 dialog。
+   */
+  const openMigrateAllToStore = useCallback(() => {
+    const ids = migratableToStoreItems.map((item) => item.inventoryItemId);
+    if (ids.length === 0 || mutationBlocked || stale) {
+      setPendingAction(null);
+      return;
+    }
+    setPendingAction({ itemIds: ids, action: 'migrateToStore' });
+  }, [migratableToStoreItems, mutationBlocked, stale]);
+
   const clearPendingAction = useCallback(() => {
     setPendingAction(null);
   }, []);
@@ -405,6 +433,8 @@ export function usePortableInventoryController(
     openAction,
     confirmableCurrentVersionItems,
     openConfirmAllCurrentVersions,
+    migratableToStoreItems,
+    openMigrateAllToStore,
     clearPendingAction,
     getPrimaryAction,
     getRowActions,

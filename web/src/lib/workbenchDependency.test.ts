@@ -64,10 +64,12 @@ describe('workbenchDependency', () => {
     }
     if (
       !shouldShowWorkbenchDependencyNotice('installing')
-      || !shouldShowWorkbenchDependencyNotice('unsupported')
       || !shouldShowWorkbenchDependencyNotice('installedNeedsRecheck')
     ) {
-      throw new Error('installing/unsupported/needs-recheck must still show the workbench notice');
+      throw new Error('installing/needs-recheck must still show the workbench notice');
+    }
+    if (shouldShowWorkbenchDependencyNotice('unsupported')) {
+      throw new Error('legacy peer without install capability must not occupy the terminal workbench');
     }
 
     const unsupported = dependencyStatusFromError(

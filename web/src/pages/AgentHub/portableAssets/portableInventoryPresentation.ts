@@ -18,6 +18,7 @@ import type {
   PortableInventoryManagementState,
   PortableInventoryOwnedBy,
 } from '@/lib/types/portableInventory';
+import type { PortableAssetLane } from '../context/agentHubContext';
 
 /** 列表筛选状态（前端本地，不回传后端自由文本）。 */
 export type PortableInventoryFilters = {
@@ -27,6 +28,8 @@ export type PortableInventoryFilters = {
   actualState: 'all' | 'enabled' | 'disabled' | 'problem';
   management: 'all' | PortableInventoryManagementState;
   search: string;
+  /** Skill/Command 已装备 / 仓库；MCP/Plugin 忽略。 */
+  assetLane: PortableAssetLane;
 };
 
 /** actual 状态分类（enabled/disabled/problem/unknown）。 */
@@ -51,6 +54,12 @@ export interface PortableInventoryPartition {
   borrowed: PortableInventoryItemDto[];
 }
 
+/** 仓库页：已附加到当前 Agent vs 未附加。 */
+export interface PortableStoreCatalogPartition {
+  attached: PortableInventoryItemDto[];
+  available: PortableInventoryItemDto[];
+}
+
 /**
  * 默认筛选：Skill tab + 当前工作台默认 Agent（claude）。
  * 壳层有 hubContext 时由父层 setFilters({ target: context.agent }) 覆盖；
@@ -63,6 +72,7 @@ export const DEFAULT_PORTABLE_INVENTORY_FILTERS: PortableInventoryFilters = {
   actualState: 'all',
   management: 'all',
   search: '',
+  assetLane: 'equipped',
 };
 
 const PROBLEM_MANAGEMENT: ReadonlySet<PortableInventoryManagementState> = new Set([
@@ -159,6 +169,41 @@ export function partitionPortableInventoryItems(
 }
 
 /**
+ * Business Logic: 便携仓库目录项（含已附加软链与未附加注入）。
+ * Code Logic: 有 storeId 或 ownedBy=portableStore。
+ */
+export function isPortableStoreCatalogItem(item: PortableInventoryItemDto): boolean {
+  return Boolean(item.store?.storeId) || item.ownedBy === 'portableStore';
+}
+
+/**
+ * Business Logic: 只有 Skill/Command 进 portable-store 软链；MCP 是各家配置 leaf，Plugin 是 viewing 开关。
+ * Code Logic: skill/command 为真。
+ */
+export function isPortableStoreAssetKind(kind: PortableAssetKind): boolean {
+  return kind === 'skill' || kind === 'command';
+}
+
+/**
+ * Business Logic: 仓库页按「已附加到此 Agent」与「未附加」拆组。
+ * Code Logic: storeAttached 为真进 attached，其余 catalog 项进 available。
+ */
+export function partitionPortableStoreCatalogItems(
+  items: readonly PortableInventoryItemDto[],
+): PortableStoreCatalogPartition {
+  const attached: PortableInventoryItemDto[] = [];
+  const available: PortableInventoryItemDto[] = [];
+  for (const item of items) {
+    if (item.store?.storeAttached) {
+      attached.push(item);
+    } else {
+      available.push(item);
+    }
+  }
+  return { attached, available };
+}
+
+/**
  * Business Logic: 异常态优先于 enabled/disabled，避免把 collision/drift 显示成健康。
  * Code Logic: management/warnings 命中 problem；否则按 actualEnabled。
  */
@@ -233,6 +278,14 @@ export function matchesPortableInventoryItem(
     }
   }
   if (!matchesSearch(item, filters.search)) return false;
+  if (isPortableStoreAssetKind(item.kind)) {
+    const catalog = isPortableStoreCatalogItem(item);
+    if (filters.assetLane === 'store') {
+      if (!catalog) return false;
+    } else if (catalog && item.store?.storeAttached !== true) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -282,14 +335,6 @@ export function needsPortableEnsureManagedRefresh(
   const caps = item.capabilities;
   if (caps.canEnable || caps.canDisable || caps.canInstallToSourceTarget) return false;
   return true;
-}
-
-/**
- * Business Logic: 只有 Skill/Command 进 portable-store 软链；MCP 是各家配置 leaf，Plugin 是 viewing 开关。
- * Code Logic: skill/command 为真。
- */
-export function isPortableStoreAssetKind(kind: PortableAssetKind): boolean {
-  return kind === 'skill' || kind === 'command';
 }
 
 /**
@@ -394,6 +439,22 @@ export function listConfirmableCurrentVersionItems(
   return items.filter((item) => {
     if (isPortablePluginComponent(item)) return false;
     return resolvePortableRowActions(item, context).includes('confirmCurrentVersion');
+  });
+}
+
+/**
+ * Business Logic: 「全部迁入仓库」覆盖当前 Agent、当前类别快照里所有可迁入项，
+ *   不受搜索/一致性筛选裁切；仅 Skill/Command；Plugin component 不进批量。
+ * Code Logic: 复用行动作同一组 stale/lock/readOnly/unsupported 门闩与 canMigrateToStore。
+ */
+export function listMigratableToStoreItems(
+  items: readonly PortableInventoryItemDto[],
+  context: PortablePrimaryActionContext,
+): PortableInventoryItemDto[] {
+  return items.filter((item) => {
+    if (!isPortableStoreAssetKind(item.kind)) return false;
+    if (isPortablePluginComponent(item)) return false;
+    return resolvePortableRowActions(item, context).includes('migrateToStore');
   });
 }
 

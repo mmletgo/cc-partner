@@ -80,9 +80,12 @@ export function WorkbenchDependencyCard(props: WorkbenchDependencyCardProps) {
   const confirmedInstall = useConfirmedInstall(commandPreview, install, deviceName);
   const tone = dependencyStatusTone(status);
   const pillTone = tone === 'warning' ? 'warn' : tone === 'neutral' ? 'neutral' : tone;
+  const unsupported = status.status === 'unsupported';
   const title = status.available
     ? t('workbench:dependency.readyTitle')
-    : t('workbench:dependency.missingTitle');
+    : unsupported
+      ? t('workbench:dependency.unsupportedTitle')
+      : t('workbench:dependency.missingTitle');
 
   return (
     <Card className={[styles.card, compact ? styles.compact : null, className].filter(Boolean).join(' ')}>
@@ -98,7 +101,9 @@ export function WorkbenchDependencyCard(props: WorkbenchDependencyCardProps) {
         <p className={styles.description}>
           {status.available
             ? t('workbench:dependency.readyDescription')
-            : t('workbench:dependency.missingDescription')}
+            : unsupported
+              ? t('workbench:dependency.unsupportedDescription')
+              : t('workbench:dependency.missingDescription')}
         </p>
 
         <dl className={styles.metaGrid}>

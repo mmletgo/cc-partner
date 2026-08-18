@@ -451,6 +451,130 @@ mod tests {
         }));
     }
 
+    /// Business Logic: 确认当前版本不得跟随逃逸软链重算树，必须沿用库存观测哈希。
+    #[tokio::test]
+    async fn confirm_current_version_keeps_inventory_hash_for_escaped_skill() {
+        let repo = test_repo().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(real.join("nested")).unwrap();
+        fs::write(real.join("SKILL.md"), "---\nname: grilling\n---\nbody\n").unwrap();
+        fs::write(real.join("nested/data.txt"), "payload").unwrap();
+        let link = tmp.path().join("grilling");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+        let followed = crate::agent_hub::targets::portable::hash_skill_directory(&real).unwrap();
+        let identity = crate::agent_hub::object_store::sha256_hex(
+            format!(
+                "store_symlink_escape\0{}",
+                fs::read_link(&link)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+            .as_bytes(),
+        );
+        assert_ne!(identity, followed.0);
+
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            "grilling",
+            &link.to_string_lossy(),
+            PortableInventoryManagementState::Drifted,
+            true,
+        );
+        item.tree_hash = None;
+        item.content_hash = Some(identity.clone());
+        item.warnings = vec!["store_symlink_escape".into(), "source_blocked".into()];
+        item.capabilities.can_confirm_current_version = true;
+        item.capabilities.reason_code = Some("source_blocked".into());
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snap,
+                PortableAssetActionKind::ConfirmCurrentVersion,
+                vec![item.inventory_item_id.clone()],
+            ),
+            &snap,
+            "owner",
+        )
+        .await
+        .unwrap();
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "{:?}",
+            plan.blocking_reasons
+        );
+        assert_eq!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            Some(identity.as_str())
+        );
+        assert_eq!(plan.changes[0].expected_tree_hash, None);
+        assert_ne!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            Some(followed.0.as_str())
+        );
+    }
+
+    /// Business Logic: 全部迁入仓库一次 preview 当前快照里多条可迁入 Skill。
+    #[tokio::test]
+    async fn migrate_to_store_batches_multiple_native_items() {
+        let repo = test_repo().await;
+        let mut first = sample_item(
+            AgentTarget::Claude,
+            "skill-a",
+            "/skills/a",
+            PortableInventoryManagementState::HubManaged,
+            true,
+        );
+        first.capabilities.can_migrate_to_store = true;
+        first.canonical_asset_id = Some("asset-a".into());
+        let mut second = sample_item(
+            AgentTarget::Claude,
+            "skill-b",
+            "/skills/b",
+            PortableInventoryManagementState::HubManaged,
+            true,
+        );
+        second.capabilities.can_migrate_to_store = true;
+        second.canonical_asset_id = Some("asset-b".into());
+        let snap = snapshot_from(
+            vec![sample_target(AgentTarget::Claude)],
+            vec![first.clone(), second.clone()],
+        );
+
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snap,
+                PortableAssetActionKind::MigrateToStore,
+                vec![
+                    first.inventory_item_id.clone(),
+                    second.inventory_item_id.clone(),
+                ],
+            ),
+            &snap,
+            "owner",
+        )
+        .await
+        .unwrap();
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "{:?}",
+            plan.blocking_reasons
+        );
+        assert_eq!(plan.changes.len(), 2);
+        assert!(plan.changes.iter().all(|change| {
+            change.operation
+                == crate::agent_hub::portable_actions::models::PortableAssetPlanOperation::MigrateToStore
+                && change.blocking_reasons.is_empty()
+        }));
+    }
+
     /// Business Logic: 未漂移不得确认当前版本。
     #[tokio::test]
     async fn hub_managed_confirm_current_version_is_blocked() {

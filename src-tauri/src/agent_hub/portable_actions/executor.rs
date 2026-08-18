@@ -389,7 +389,8 @@ async fn execute_claimed_plan(
 
         // 生产 apply 必须在任何 target mutation 前重算确定性递归 tree hash。
         // 注入式旧单测使用虚构路径/快照，仍由 target adapter 的既有 hash seam 覆盖。
-        if state.is_some() || deps.env.is_some() {
+        // 确认当前版本只写 Hub 账本，禁止跟随任意 symlink 重算树。
+        if !plan.action.is_hub_ledger_only() && (state.is_some() || deps.env.is_some()) {
             if let Some(outcome) = verify_expected_tree_hash(change) {
                 raw_results.push((change.inventory_item_id.clone(), outcome, pre));
                 continue;
@@ -1306,6 +1307,161 @@ mod tests {
             .expect("mat exists");
         assert_eq!(mat.rendered_hash.as_deref(), Some("new-hash"));
         assert_eq!(mat.observed_external_hash.as_deref(), Some("new-hash"));
+        assert_eq!(mat.status, MaterializationStatus::Synced);
+    }
+
+    /// Business Logic: 逃逸软链确认当前版本只改账本，不跟随目标树、不改磁盘。
+    #[tokio::test]
+    async fn confirm_current_version_accepts_escaped_skill_without_following() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("agents/grilling");
+        std::fs::create_dir_all(real.join("nested")).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: grilling\n---\nbody\n").unwrap();
+        std::fs::write(real.join("nested/data.txt"), "payload").unwrap();
+        let link = dir.path().join("claude/skills/grilling");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+        let identity = crate::agent_hub::object_store::sha256_hex(
+            format!(
+                "store_symlink_escape\0{}",
+                std::fs::read_link(&link)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+            .as_bytes(),
+        );
+        let followed = hash_skill_directory(&real).unwrap();
+        assert_ne!(identity, followed.0);
+
+        let repo = test_repo().await;
+        repo.insert_scope(NewScopeNode {
+            id: Some("user".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .expect("scope");
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: "user".into(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "grilling".into(),
+                display_name: "grilling".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .expect("asset");
+        let binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .expect("binding");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: binding.id.clone(),
+            native_path: Some(link.to_string_lossy().into()),
+            last_projected_revision_id: None,
+            rendered_hash: Some("old-skill-md".into()),
+            observed_external_hash: Some("old-skill-md".into()),
+            status: MaterializationStatus::Drift,
+            last_error: None,
+        })
+        .await
+        .expect("materialization");
+
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "grilling",
+            link.to_str().unwrap(),
+            Some(true),
+        );
+        item.canonical_asset_id = Some(asset.id.clone());
+        item.management_state = PortableInventoryManagementState::Drifted;
+        item.content_hash = Some(identity.clone());
+        item.tree_hash = None;
+        item.warnings = vec!["store_symlink_escape".into(), "source_blocked".into()];
+        item.capabilities.can_confirm_current_version = true;
+        item.capabilities.reason_code = Some("source_blocked".into());
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![item.inventory_item_id.clone()],
+            PortableAssetActionKind::ConfirmCurrentVersion,
+            false,
+        )
+        .await;
+        assert_eq!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            Some(identity.as_str())
+        );
+        assert_eq!(plan.changes[0].expected_tree_hash, None);
+
+        let mut post_item = item.clone();
+        post_item.management_state = PortableInventoryManagementState::HubManaged;
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
+        let runner = Arc::new(FakeProcessRunner::new());
+        let env = crate::agent_hub::targets::TargetEnvironment {
+            home: dir.path().to_path_buf(),
+            vars: Default::default(),
+            path_entries: vec![],
+        };
+        let deps = PortableActionExecutorDeps {
+            repo: repo.clone(),
+            runner: runner.clone(),
+            env: Some(env),
+            pre_inventory: Some(snap),
+            claude_config_dir: Some(dir.path().join("claude")),
+            data_dir: Some(dir.path().join("data")),
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token.clone(),
+                client_request_id: "req-confirm-escape".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded,
+            "escaped confirm must not fail source-hash recheck: {:?}",
+            result.items[0].error_code
+        );
+        assert_ne!(
+            result.items[0].error_code.as_deref(),
+            Some("PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED")
+        );
+        assert!(runner.calls().is_empty(), "ledger-only must not spawn CLI");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), real);
+        let mat = repo
+            .get_materialization_by_binding(&binding.id)
+            .await
+            .expect("read mat")
+            .expect("mat exists");
+        assert_eq!(mat.rendered_hash.as_deref(), Some(identity.as_str()));
+        assert_eq!(
+            mat.observed_external_hash.as_deref(),
+            Some(identity.as_str())
+        );
         assert_eq!(mat.status, MaterializationStatus::Synced);
     }
 

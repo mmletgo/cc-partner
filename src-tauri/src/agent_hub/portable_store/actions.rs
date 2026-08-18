@@ -14,12 +14,17 @@ use super::{
     upsert_manifest_entry, ManifestAttachment, PortableStoreKind, StoreLinkClass,
 };
 use crate::agent_hub::models::AgentTarget;
+use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
 use crate::agent_hub::portable_actions::targets::TargetActionRawOutcome;
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
+use crate::agent_hub::targets::portable::{hash_skill_directory, parse_simple_frontmatter};
 use crate::error::AppError;
+use std::cmp::Ordering;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 在 viewing Agent 的 native 根上执行 store Skill/Command 动作。
 ///
@@ -102,19 +107,33 @@ pub fn execute_skill_or_command_store(
             ) {
                 return Ok(TargetActionRawOutcome::Skipped);
             }
-            if store_target.exists() {
-                return Ok(TargetActionRawOutcome::Blocked {
-                    code: "PORTABLE_STORE_MIGRATE_NAME_CONFLICT".into(),
-                    message: "store already has this id; same name different hash is blocked"
-                        .into(),
-                });
-            }
-            migrate_native_into_store(native_path, &store_target)?;
+            let native_won = if store_target.exists() {
+                match resolve_migrate_name_conflict(native_path, &store_target, kind)? {
+                    MigrateNameConflict::SameContent | MigrateNameConflict::KeepStore => {
+                        remove_real_tree(native_path)?;
+                        attach_store_link(&store_target, native_path)?;
+                        false
+                    }
+                    MigrateNameConflict::KeepNative => {
+                        remove_real_tree(&store_target)?;
+                        migrate_native_into_store(native_path, &store_target)?;
+                        true
+                    }
+                }
+            } else {
+                migrate_native_into_store(native_path, &store_target)?;
+                true
+            };
+            let content_hash = if native_won {
+                item.and_then(|i| i.content_hash.clone())
+            } else {
+                None
+            };
             let _ = upsert_manifest_entry(
                 &store_root,
                 store_kind,
                 native_id,
-                item.and_then(|i| i.content_hash.clone()),
+                content_hash,
                 Some(ManifestAttachment {
                     target: viewing,
                     path: native_path.display().to_string(),
@@ -138,6 +157,160 @@ pub fn execute_skill_or_command_store(
             message: "unsupported store skill/command action".into(),
         }),
     }
+}
+
+/// 同名迁入冲突的裁决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrateNameConflict {
+    /// 内容相同，只把 native 换成软链
+    SameContent,
+    /// native 更新，覆盖仓库真树
+    KeepNative,
+    /// 仓库已有更新副本，丢掉 native 真树
+    KeepStore,
+}
+
+/// 同名不同内容时保留版本较新的一份；无版本则比 mtime；旧树直接删除。
+///
+/// Business Logic: 一键迁入不得因同名阻断；用户要的是本机一份最新真树。
+/// Code Logic: hash 相同 → SameContent；双方 frontmatter version 可比则更高者赢；否则 mtime，并列偏 native。
+fn resolve_migrate_name_conflict(
+    native: &Path,
+    store_dest: &Path,
+    kind: PortableAssetKind,
+) -> Result<MigrateNameConflict, AppError> {
+    let native_fp = content_fingerprint(native, kind)?;
+    if let Ok(store_fp) = content_fingerprint(store_dest, kind) {
+        if store_fp == native_fp {
+            return Ok(MigrateNameConflict::SameContent);
+        }
+    }
+    let native_ver = asset_frontmatter_version(native, kind);
+    let store_ver = asset_frontmatter_version(store_dest, kind);
+    if let (Some(native_ver), Some(store_ver)) = (native_ver.as_deref(), store_ver.as_deref()) {
+        match cmp_dot_version(native_ver, store_ver) {
+            Ordering::Greater => return Ok(MigrateNameConflict::KeepNative),
+            Ordering::Less => return Ok(MigrateNameConflict::KeepStore),
+            Ordering::Equal => {}
+        }
+    }
+    let native_mtime = newest_mtime(native)?;
+    let store_mtime = newest_mtime(store_dest)?;
+    if native_mtime >= store_mtime {
+        Ok(MigrateNameConflict::KeepNative)
+    } else {
+        Ok(MigrateNameConflict::KeepStore)
+    }
+}
+
+/// Skill 用目录树 hash，Command 用文件字节 hash。
+fn content_fingerprint(path: &Path, kind: PortableAssetKind) -> Result<String, AppError> {
+    match kind {
+        PortableAssetKind::Skill => hash_skill_directory(path).map(|(_, tree, _, _)| tree),
+        PortableAssetKind::Command => {
+            let bytes = fs::read(path)?;
+            Ok(sha256_hex(&bytes))
+        }
+        _ => Err(AppError::validation(
+            "PORTABLE_STORE_KIND_UNSUPPORTED".to_string(),
+        )),
+    }
+}
+
+/// 读 SKILL.md / command markdown 的 frontmatter `version`。
+fn asset_frontmatter_version(path: &Path, kind: PortableAssetKind) -> Option<Vec<u64>> {
+    let md = match kind {
+        PortableAssetKind::Skill => path.join("SKILL.md"),
+        PortableAssetKind::Command => path.to_path_buf(),
+        _ => return None,
+    };
+    let text = fs::read_to_string(md).ok()?;
+    let (fields, _, _) = parse_simple_frontmatter(&text);
+    parse_dot_version(fields.get("version")?)
+}
+
+/// `1.2.3` / `v1.2` 切成数字段；非数字则 None。
+fn parse_dot_version(raw: &str) -> Option<Vec<u64>> {
+    let trimmed = raw.trim().trim_start_matches(['v', 'V']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in trimmed.split('.') {
+        parts.push(part.parse::<u64>().ok()?);
+    }
+    Some(parts)
+}
+
+fn cmp_dot_version(left: &[u64], right: &[u64]) -> Ordering {
+    let len = left.len().max(right.len());
+    for i in 0..len {
+        let a = left.get(i).copied().unwrap_or(0);
+        let b = right.get(i).copied().unwrap_or(0);
+        match a.cmp(&b) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
+/// 不跟随 symlink 的最新 mtime（目录取子文件最大值）。
+fn newest_mtime(path: &Path) -> Result<SystemTime, AppError> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(meta.modified().unwrap_or(UNIX_EPOCH));
+    }
+    if meta.is_file() {
+        return Ok(meta.modified().unwrap_or(UNIX_EPOCH));
+    }
+    let mut best = meta.modified().unwrap_or(UNIX_EPOCH);
+    walk_newest_mtime(path, &mut best)?;
+    Ok(best)
+}
+
+fn walk_newest_mtime(dir: &Path, best: &mut SystemTime) -> Result<(), AppError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(AppError::from(err)),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let child = entry.path();
+        let meta = fs::symlink_metadata(&child)?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+        if modified > *best {
+            *best = modified;
+        }
+        if meta.is_dir() {
+            walk_newest_mtime(&child, best)?;
+        }
+    }
+    Ok(())
+}
+
+/// 删除真文件/目录；拒绝跟随 symlink，避免误清 store 或逃逸目标。
+fn remove_real_tree(path: &Path) -> Result<(), AppError> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(AppError::from(err)),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(AppError::validation(
+            "PORTABLE_STORE_REFUSE_REPLACE_SYMLINK".to_string(),
+        ));
+    }
+    if meta.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 /// 当前路径是否应按 store 语义处理（已是链，或动作是 store 专用）。

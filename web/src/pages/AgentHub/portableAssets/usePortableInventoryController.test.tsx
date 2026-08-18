@@ -361,6 +361,48 @@ describe('usePortableInventoryController', () => {
     });
   });
 
+  test('openMigrateAllToStore batches native skill items in the current snapshot', async () => {
+    const nativeA = makeItem({
+      inventoryItemId: 'claude-skill-a',
+      kind: 'skill',
+      nativeId: 'a',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
+    const nativeB = makeItem({
+      inventoryItemId: 'claude-skill-b',
+      kind: 'skill',
+      nativeId: 'b',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
+    const alreadyInStore = makeItem({
+      inventoryItemId: 'claude-skill-c',
+      kind: 'skill',
+      nativeId: 'c',
+      ownedBy: 'portableStore',
+      store: { storeId: 'skill:c', storeAttached: true },
+      capabilities: { ...baseCapabilities, canMigrateToStore: false, canDetach: true },
+    });
+    apiMocks.inspect.mockResolvedValue(
+      snapshot('snap-migrate-all', [nativeA, alreadyInStore, nativeB]),
+    );
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    expect(result.current.migratableToStoreItems.map((item) => item.inventoryItemId)).toEqual([
+      'claude-skill-a',
+      'claude-skill-b',
+    ]);
+
+    act(() => {
+      result.current.setFilters({ search: 'zzz' });
+      result.current.openMigrateAllToStore();
+    });
+    expect(result.current.pendingAction).toEqual({
+      itemIds: ['claude-skill-a', 'claude-skill-b'],
+      action: 'migrateToStore',
+    });
+  });
+
   test('changing deviceId retriggers inspect with new context and clears prior snapshot', async () => {
     apiMocks.inspect.mockImplementation(async (ctx?: { deviceId?: string | null }) => {
       if (ctx?.deviceId === 'peer-1') {

@@ -73,6 +73,8 @@ import {
   mapLegacySection,
   DEFAULT_AGENT_HUB_CONTEXT,
   isAssetKindTab,
+  isPortableStoreTab,
+  normalizeAgentHubContext,
   type AgentHubContext,
   type AgentHubTab,
   type AgentHubScope,
@@ -579,6 +581,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
       scope: hubContext.scope,
+      assetLane: isPortableStoreTab(hubContext.tab)
+        ? hubContext.assetLane
+        : DEFAULT_PORTABLE_INVENTORY_FILTERS.assetLane,
     },
   });
   const clearPortablePendingAction = portableInventoryBase.clearPendingAction;
@@ -1801,15 +1806,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     (patch: Partial<AgentHubContext>) => {
       setSearchParams((prev) => {
         const current = parseAgentHubContext(prev);
-        const next: AgentHubContext = { ...current, ...patch };
+        const next = normalizeAgentHubContext({
+          ...current,
+          ...patch,
+        });
         if (next.scope === 'user') {
           next.projectKey = null;
         } else {
           next.deviceId = null;
-        }
-        // lane 仅 instructions 有意义
-        if (next.tab !== 'instructions') {
-          next.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
         }
         let written = writeAgentHubContext(prev, next);
         // 离开 portable 资产 tab 时必须清掉 kind/section=assets 等，否则 re-parse 会盖回资产 tab
@@ -1819,17 +1823,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         return written;
       }, { replace: true });
 
-      const merged: AgentHubContext = {
+      const merged = normalizeAgentHubContext({
         ...parseAgentHubContext(searchParams),
         ...patch,
-      };
+      });
       if (merged.scope === 'user') {
         merged.projectKey = null;
       } else {
         merged.deviceId = null;
-      }
-      if (merged.tab !== 'instructions') {
-        merged.instructionLane = DEFAULT_AGENT_HUB_CONTEXT.instructionLane;
       }
 
       // dual path: keep legacy section content in sync with shell
@@ -1839,12 +1840,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setActiveSectionState(mapContextToSection(merged));
       }
 
-      // 粗映射：资产 tab → portable kind/target 筛选
+      // 粗映射：资产 tab → portable kind/target/assetLane 筛选
       if (isAssetKindTab(merged.tab)) {
       portableInventoryBase.setFilters({
         kind: merged.tab as PortableInventoryFilters['kind'],
         target: merged.agent,
         scope: merged.scope,
+        assetLane: isPortableStoreTab(merged.tab)
+          ? merged.assetLane
+          : DEFAULT_PORTABLE_INVENTORY_FILTERS.assetLane,
       });
       }
     },
@@ -1879,6 +1883,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
             nextSection === 'assets'
               ? DEFAULT_AGENT_HUB_CONTEXT.instructionLane
               : current.instructionLane,
+          assetLane:
+            nextSection === 'assets' && isPortableStoreTab(current.tab)
+              ? current.assetLane
+              : DEFAULT_AGENT_HUB_CONTEXT.assetLane,
           adaptView: false,
         };
         let next = writeAgentHubContext(prev, ctx);
@@ -1911,6 +1919,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     const fingerprint = JSON.stringify({
       agent: hubContext.agent,
       tab: hubContext.tab,
+      assetLane: hubContext.assetLane,
       section: deepLinkSection,
       actualState: parsed.actualState ?? 'all',
       management: parsed.management ?? 'all',
@@ -1928,6 +1937,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
       scope: hubContext.scope,
+      assetLane: isPortableStoreTab(hubContext.tab)
+        ? hubContext.assetLane
+        : DEFAULT_PORTABLE_INVENTORY_FILTERS.assetLane,
       actualState: parsed.actualState ?? 'all',
       management: parsed.management ?? 'all',
     };
@@ -1936,6 +1948,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       current.target !== desired.target ||
       current.kind !== desired.kind ||
       current.scope !== desired.scope ||
+      current.assetLane !== desired.assetLane ||
       current.actualState !== desired.actualState ||
       current.management !== desired.management;
     if (!sameFingerprint) {

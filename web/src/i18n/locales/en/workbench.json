@@ -129,8 +129,10 @@
   "dependency": {
     "readyTitle": "tmux is ready",
     "missingTitle": "tmux is required",
+    "unsupportedTitle": "Automatic tmux install is unavailable",
     "readyDescription": "This environment can use real tmux windows and panes, with terminal context restored after restart.",
     "missingDescription": "Install tmux to enable real windows, pane splits, and restart recovery. You can still continue with a plain terminal.",
+    "unsupportedDescription": "This peer's backend cannot probe or auto-install tmux. If tmux is already installed there, keep using the terminal. Windows and panes depend on the peer's session capabilities.",
     "backend": "Backend",
     "version": "Version",
     "path": "Path",

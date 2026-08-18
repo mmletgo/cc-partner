@@ -239,6 +239,7 @@ const baseContext: AgentHubContext = {
   projectKey: null,
   tab: 'instructions',
   instructionLane: 'common',
+  assetLane: 'equipped',
   adaptView: false,
 };
 

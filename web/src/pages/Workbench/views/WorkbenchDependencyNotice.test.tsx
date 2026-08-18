@@ -123,4 +123,24 @@ describe('WorkbenchDependencyNotice', () => {
     render(<WorkbenchDependencyNotice project={remoteProject()} localStatus="ready" />);
     expect(await screen.findByTestId('workbench-dependency-card')).toBeTruthy();
   });
+
+  it('hides the remote tmux card when the peer lacks the install capability', async () => {
+    checkRemote.mockResolvedValue(
+      remoteStatus({
+        status: 'unsupported',
+        available: false,
+        version: null,
+        path: null,
+        error: 'capability_unsupported:workbench.dependency-install.v1',
+      }),
+    );
+    const { container } = render(
+      <WorkbenchDependencyNotice project={remoteProject()} localStatus="ready" />,
+    );
+    await waitFor(() => {
+      expect(checkRemote).toHaveBeenCalledWith('device-a');
+    });
+    expect(screen.queryByTestId('workbench-dependency-card')).toBeNull();
+    expect(container.firstChild).toBeNull();
+  });
 });

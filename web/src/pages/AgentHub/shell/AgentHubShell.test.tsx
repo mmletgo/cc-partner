@@ -145,6 +145,68 @@ describe('AgentHubShell', () => {
     expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
   });
 
+  test('skill and command tabs show equipped/store switcher between scope and agent', () => {
+    const onContextChange = vi.fn();
+    const skillContext: AgentHubContext = {
+      ...DEFAULT_AGENT_HUB_CONTEXT,
+      tab: 'skill',
+    };
+    const { rerender, props } = renderShell({ onContextChange, context: skillContext });
+    expect(screen.getByTestId('agent-hub-asset-lane-switcher')).toBeTruthy();
+    const lanes = Array.from(
+      screen.getByTestId('agent-hub-asset-lane-switcher').querySelectorAll('[role="radio"]'),
+    ).map((node) => node.getAttribute('data-testid'));
+    expect(lanes).toEqual([
+      'agent-hub-asset-lane-equipped',
+      'agent-hub-asset-lane-store',
+    ]);
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-hub-asset-lane-store'));
+    expect(onContextChange).toHaveBeenCalledWith({ assetLane: 'store' });
+
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <AgentHubShell
+          {...props}
+          context={{ ...skillContext, assetLane: 'store' }}
+          onContextChange={onContextChange}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-hub-tab-command'));
+    expect(onContextChange).toHaveBeenCalledWith({
+      tab: 'command',
+      instructionLane: 'exclusive',
+    });
+
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <AgentHubShell
+          {...props}
+          context={{ ...DEFAULT_AGENT_HUB_CONTEXT, tab: 'mcp' }}
+          onContextChange={onContextChange}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.queryByTestId('agent-hub-asset-lane-switcher')).toBeNull();
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+  });
+
+  test('leaving skill store for mcp resets assetLane', () => {
+    const onContextChange = vi.fn();
+    renderShell({
+      onContextChange,
+      context: { ...DEFAULT_AGENT_HUB_CONTEXT, tab: 'skill', assetLane: 'store' },
+    });
+    fireEvent.click(screen.getByTestId('agent-hub-tab-mcp'));
+    expect(onContextChange).toHaveBeenCalledWith({
+      tab: 'mcp',
+      instructionLane: 'exclusive',
+      assetLane: 'equipped',
+    });
+  });
+
   test('scope and device selectors are visible and project selection is reachable', () => {
     renderShell();
     expect(screen.getByTestId('agent-hub-scope-switcher')).toBeTruthy();

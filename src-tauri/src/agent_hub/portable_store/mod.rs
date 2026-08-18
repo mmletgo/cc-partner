@@ -265,4 +265,131 @@ mod tests {
         assert!(store_tree.join("SKILL.md").is_file());
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
+
+    fn write_skill(dir: &Path, version: Option<&str>, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let version_line = version
+            .map(|v| format!("version: {v}\n"))
+            .unwrap_or_default();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: foo\n{version_line}---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn migrate_foo(
+        native: &Path,
+    ) -> crate::agent_hub::portable_actions::targets::TargetActionRawOutcome {
+        crate::agent_hub::portable_store::execute_skill_or_command_store(
+            crate::agent_hub::models::AgentTarget::Claude,
+            crate::agent_hub::portable_actions::models::PortableAssetActionKind::MigrateToStore,
+            crate::agent_hub::portable_inventory::PortableAssetKind::Skill,
+            "foo",
+            native,
+            None,
+        )
+        .expect("migrate")
+    }
+
+    fn assert_store_link(native: &Path) {
+        assert!(
+            fs::symlink_metadata(native)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "native should become a store symlink"
+        );
+    }
+
+    fn set_mtime(path: &Path, ago_secs: u64) {
+        use std::time::{Duration, SystemTime};
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(ago_secs))
+            .unwrap();
+    }
+
+    #[test]
+    fn migrate_same_content_attaches_without_duplicating() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store = store_skill_dir(&ensure_portable_store_layout(&data).unwrap(), "foo");
+        write_skill(&store, Some("1.0.0"), "same-body");
+        let native = data.join("claude").join("skills").join("foo");
+        write_skill(&native, Some("1.0.0"), "same-body");
+        assert_eq!(
+            migrate_foo(&native),
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert_store_link(&native);
+        assert_eq!(
+            fs::read_to_string(store.join("SKILL.md")).unwrap(),
+            "---\nname: foo\nversion: 1.0.0\n---\nsame-body"
+        );
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn migrate_keeps_newer_frontmatter_version_and_deletes_old() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store = store_skill_dir(&ensure_portable_store_layout(&data).unwrap(), "foo");
+        write_skill(&store, Some("1.0.0"), "old-body");
+        let native = data.join("claude").join("skills").join("foo");
+        write_skill(&native, Some("2.0.0"), "new-body");
+        assert_eq!(
+            migrate_foo(&native),
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert_store_link(&native);
+        let text = fs::read_to_string(store.join("SKILL.md")).unwrap();
+        assert!(text.contains("version: 2.0.0"));
+        assert!(text.contains("new-body"));
+        assert!(!text.contains("old-body"));
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn migrate_keeps_store_when_store_version_is_newer() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store = store_skill_dir(&ensure_portable_store_layout(&data).unwrap(), "foo");
+        write_skill(&store, Some("2.1.0"), "store-new");
+        let native = data.join("claude").join("skills").join("foo");
+        write_skill(&native, Some("1.9.0"), "native-old");
+        assert_eq!(
+            migrate_foo(&native),
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert_store_link(&native);
+        let text = fs::read_to_string(store.join("SKILL.md")).unwrap();
+        assert!(text.contains("version: 2.1.0"));
+        assert!(text.contains("store-new"));
+        assert!(!text.contains("native-old"));
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn migrate_without_version_keeps_newer_mtime() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store = store_skill_dir(&ensure_portable_store_layout(&data).unwrap(), "foo");
+        write_skill(&store, None, "older-mtime");
+        set_mtime(&store.join("SKILL.md"), 120);
+        let native = data.join("claude").join("skills").join("foo");
+        write_skill(&native, None, "newer-mtime");
+        assert_eq!(
+            migrate_foo(&native),
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert_store_link(&native);
+        let text = fs::read_to_string(store.join("SKILL.md")).unwrap();
+        assert!(text.contains("newer-mtime"));
+        assert!(!text.contains("older-mtime"));
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
 }

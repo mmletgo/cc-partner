@@ -518,6 +518,11 @@ pub fn unknown_fields_extension(
 pub fn hash_skill_directory(
     dir: &Path,
 ) -> Result<(String, String, TreeManifest, Vec<PortabilityDiagnostic>), AppError> {
+    if matches!(classify_store_link(dir), StoreLinkClass::EscapeLink) {
+        return Err(AppError::validation(
+            "agent_hub_portable_skill_tree_symlink_escape".to_string(),
+        ));
+    }
     let mut entries = Vec::new();
     let mut diagnostics = Vec::new();
     let mut skill_md_hash: Option<String> = None;
@@ -931,6 +936,17 @@ fn store_or_target_owner(target: AgentTarget, path: &Path) -> PortableAssetOwner
     }
 }
 
+/// 逃逸软链身份哈希：只记链目标字符串，不跟随正文。
+///
+/// Business Logic: 确认当前版本必须能把「当前就是逃逸链」记为基准，但不能把链外树当 SKILL.md hash。
+/// Code Logic: `read_link` 原文 + 固定前缀；canonicalize 会跟随，禁止使用。
+fn blocked_escape_identity_hash(path: &Path) -> String {
+    let target = fs::read_link(path)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    sha256_hex(format!("store_symlink_escape\0{target}").as_bytes())
+}
+
 /// 逃逸 skill 包根：记 blocked，不跟随哈希。
 fn blocked_escape_skill(
     target: AgentTarget,
@@ -943,6 +959,7 @@ fn blocked_escape_skill(
         .and_then(|s| s.to_str())
         .unwrap_or("skill")
         .to_string();
+    let content_hash = blocked_escape_identity_hash(path);
     DiscoveredPortableAsset {
         kind: AssetKind::Skill,
         semantic_name: dir_name.clone(),
@@ -959,7 +976,7 @@ fn blocked_escape_skill(
             path: path.to_path_buf(),
             origin_kind,
             native_id: dir_name,
-            content_hash: String::new(),
+            content_hash,
             tree_hash: None,
             status: PortableDiscoveryStatus::Blocked,
             native_output_candidate: false,
@@ -1002,7 +1019,7 @@ fn blocked_escape_command(
             path: path.to_path_buf(),
             origin_kind,
             native_id: stem,
-            content_hash: String::new(),
+            content_hash: blocked_escape_identity_hash(path),
             tree_hash: None,
             status: PortableDiscoveryStatus::Blocked,
             native_output_candidate: false,
@@ -2467,6 +2484,13 @@ enabled = true
             .diagnostics
             .iter()
             .any(|d| d.code == "store_symlink_escape"));
+        assert!(!blocked.origin.content_hash.is_empty());
+        let followed = hash_skill_directory(&escape).unwrap();
+        assert_ne!(
+            blocked.origin.content_hash, followed.0,
+            "escape identity must not follow the target SKILL.md"
+        );
+        assert!(hash_skill_directory(&native_root.join("evil")).is_err());
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 }

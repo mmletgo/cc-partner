@@ -6,8 +6,8 @@
  *   Shell 负责选择 owner，内容区和动作层再按能力证据决定只读、预览或写入。
  *
  * Code Logic（这个组件做什么）:
- *   渲染受控 tablist、三个 radiogroup 与设备/项目选择器；复用共享 roving 索引合同，
- *   并用关联 tabpanel 承载页面内容。无业务 API 调用。
+ *   渲染受控 tablist、范围 / 提示词槽或存放面 / Agent radiogroup 与设备/项目选择器；
+ *   复用共享 roving 索引合同，并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
 
 import {
@@ -27,10 +27,12 @@ import type {
   AgentHubScope,
   AgentHubTab,
   InstructionLane,
+  PortableAssetLane,
 } from '../context/agentHubContext';
 import {
   DEFAULT_AGENT_HUB_CONTEXT,
   getAgentHubContextCapability,
+  isPortableStoreTab,
 } from '../context/agentHubContext';
 import styles from './AgentHubShell.module.css';
 
@@ -40,6 +42,8 @@ const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'
 const ASSET_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
 /** 提示词槽顺序：独有 → 适配 → 公共。 */
 const LANES: InstructionLane[] = ['exclusive', 'adapted', 'common'];
+/** Skill/Command 存放面：已装备 → 仓库。 */
+const ASSET_LANES: PortableAssetLane[] = ['equipped', 'store'];
 const PANEL_ID = 'agent-hub-active-panel';
 
 export type AgentHubShellTabCounts = Partial<
@@ -110,10 +114,12 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const scopeRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const laneRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const assetLaneRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const agentRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeTabIndex = Math.max(0, TABS.indexOf(context.tab));
   const activeScopeIndex = Math.max(0, SCOPES.indexOf(context.scope));
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
+  const activeAssetLaneIndex = Math.max(0, ASSET_LANES.indexOf(context.assetLane));
   const activeAgentIndex = Math.max(0, AGENTS.indexOf(context.agent));
   const showAgentSwitcher =
     context.tab !== 'instructions' || context.instructionLane !== 'common';
@@ -131,11 +137,18 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
     actions.pushDisabledReason ?? contextDisabledReason;
 
   function handleTabChange(tab: AgentHubTab): void {
-    onContextChange(
-      tab === 'instructions'
-        ? { tab }
-        : { tab, instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane },
-    );
+    if (tab === 'instructions') {
+      onContextChange({ tab });
+      return;
+    }
+    const patch: Partial<AgentHubContext> = {
+      tab,
+      instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
+    };
+    if (!isPortableStoreTab(tab) && isPortableStoreTab(context.tab)) {
+      patch.assetLane = DEFAULT_AGENT_HUB_CONTEXT.assetLane;
+    }
+    onContextChange(patch);
   }
 
   function handleScopeChange(scope: AgentHubScope): void {
@@ -345,6 +358,44 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </div>
         ) : null}
 
+        {isPortableStoreTab(context.tab) ? (
+          <div className={styles.row}>
+            <span className={styles.label}>{t('agentHub:shell.assetLaneLabel')}</span>
+            <div
+              className={styles.segment}
+              role="radiogroup"
+              aria-label={t('agentHub:shell.assetLaneAria')}
+              data-testid="agent-hub-asset-lane-switcher"
+            >
+              {ASSET_LANES.map((lane, index) => {
+                const selected = context.assetLane === lane;
+                return (
+                  <Button
+                    key={lane}
+                    ref={(node) => {
+                      assetLaneRefs.current[index] = node;
+                    }}
+                    variant={selected ? 'primary' : 'ghost'}
+                    size="sm"
+                    role="radio"
+                    tabIndex={selected ? 0 : -1}
+                    aria-checked={selected}
+                    onClick={() => onContextChange({ assetLane: lane })}
+                    onKeyDown={(event) =>
+                      moveRovingSelection(event, index, ASSET_LANES, assetLaneRefs, (next) =>
+                        onContextChange({ assetLane: next }),
+                      )
+                    }
+                    data-testid={`agent-hub-asset-lane-${lane}`}
+                  >
+                    {t(`agentHub:shell.assetLanes.${lane}`)}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
         {showAgentSwitcher ? (
           <div className={styles.row}>
             <span className={styles.label}>{t('agentHub:shell.agentLabel')}</span>
@@ -393,6 +444,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
         data-active-tab-index={activeTabIndex}
         data-active-scope-index={activeScopeIndex}
         data-active-lane-index={activeLaneIndex}
+        data-active-asset-lane-index={activeAssetLaneIndex}
         data-active-agent-index={activeAgentIndex}
         data-testid="agent-hub-shell-body"
       >

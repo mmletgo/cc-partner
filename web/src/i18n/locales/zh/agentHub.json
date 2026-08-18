@@ -61,6 +61,12 @@
       "adapted": "适配",
       "exclusive": "独有"
     },
+    "assetLaneLabel": "存放",
+    "assetLaneAria": "已装备、仓库",
+    "assetLanes": {
+      "equipped": "已装备",
+      "store": "仓库"
+    },
     "pull": "拉取…",
     "push": "推送…",
     "adapt": "适配到其他 Agent…",
@@ -598,9 +604,13 @@
     "inventory": {
       "title": "Agent 资产",
       "subtitle": "当前 Agent 的 observed 库存。磁盘 actual 状态是真源；扫描发现时自动建立 Hub 管理记录。",
+      "storeTitle": "便携仓库",
+      "storeSubtitle": "本机一份 Skill/Command。附加到当前 Agent 后会出现在「已装备」；卸下只拆软链，不会删仓库真树。",
       "loading": "正在加载库存…",
       "empty": "没有符合当前筛选条件的 portable 资产。",
+      "emptyStore": "仓库还是空的。到「已装备」把本机 Skill/Command 迁入后，各 Agent 都能附加同一份。",
       "refresh": "刷新库存",
+      "migrateAllToStore": "全部迁入仓库（{{count}}）",
       "confirmAllVersions": "全部确认版本（{{count}}）",
       "retry": "重试",
       "staleBanner": "库存已过期。在成功刷新前禁止变更。",
@@ -612,6 +622,8 @@
       "unmanagedRefreshHint": "尚未纳入管理 — 请刷新库存，由 Hub 自动建立管理记录。",
       "groupInstalled": "已安装在此",
       "groupBorrowed": "运行时从其他 Agent 加载",
+      "groupStoreAttached": "已附加到此 Agent",
+      "groupStoreAvailable": "未附加",
       "storeBadge": "便携仓库",
       "storeAttached": "已附加到此 Agent",
       "storeLoadedViaOther": "仍经其他路径加载",
@@ -771,12 +783,13 @@
       "borrowedImpactSharedAgents": "共享 ~/.agents 目录会被多个 Agent 读取，这次操作会影响所有从该目录加载的 Agent。",
       "storeAttachHint": "附加只在当前 Agent 的原生目录创建指向便携仓库的软链，不会复制第二份安装。",
       "storeDetachHint": "卸下只删除当前 Agent 的软链。仓库真树仍保留，其他已附加的 Agent 不受影响。",
-      "storeMigrateHint": "迁移会把当前原生文件移入共享便携仓库，并留下软链。同名不同内容会被拒绝。",
+      "storeMigrateHint": "迁移会把当前原生文件移入共享便携仓库，并留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。",
       "storeDestroyHint": "彻底删除会清掉共享仓库真树，并移除 Claude / Codex 上的附加。此操作不可恢复。",
       "storeStillLoadedVia": "卸下 {{current}} 之后，这项仓库资产仍会经 {{via}} 加载。这次不会改写 {{via}}。",
       "storePluginUnchanged": "Plugin 不走便携仓库。启用标记仍只改当前查看 Agent 的开关。",
       "confirmCurrentVersionHint": "磁盘上的文件可能已更新。确认后 Hub 只把当前文件记为一致基准，不会改写磁盘。",
-      "confirmAllCurrentVersionHint": "将把当前 Agent、当前类别中 {{count}} 项已漂移资产记为一致基准，不会改写磁盘。"
+      "confirmAllCurrentVersionHint": "将把当前 Agent、当前类别中 {{count}} 项已漂移资产记为一致基准，不会改写磁盘。",
+      "migrateAllToStoreHint": "将把当前 Agent、当前类别中 {{count}} 项原生 Skill/Command 迁入便携仓库，并在原路径留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。"
     }
   },
   "portablePull": {

@@ -1294,6 +1294,7 @@ describe('Agent Hub URL helpers', () => {
       projectKey: null,
       tab: 'instructions',
       instructionLane: 'common',
+      assetLane: 'equipped',
       adaptView: false,
     });
     // writeAgentHubContext 已剥 legacy；再 clear 是防御双写

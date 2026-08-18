@@ -18,6 +18,7 @@ use crate::agent_hub::portable_inventory::{
     PortableAssetKind, PortableInventoryItemDto, PortableInventoryManagementState,
     PortableInventoryMutationCapability, PortableInventorySnapshotDto,
 };
+use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
 use crate::agent_hub::targets::portable::{
     is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
 };
@@ -202,6 +203,32 @@ fn portable_store_kind_block(
         "PORTABLE_ASSET_ACTION_MCP_STORE_UNSUPPORTED"
     } else {
         "PORTABLE_ASSET_ACTION_PLUGIN_STORE_UNSUPPORTED"
+    })
+}
+
+/// 确认当前版本与逃逸软链不得 live 跟随目录树。
+///
+/// Business Logic: inventory 延迟 tree hash 只给会写盘的动作展开；确认版本只记库存观测值。
+/// Code Logic: hub-ledger-only / `source_blocked` / `store_symlink_escape` / EscapeLink 跳过。
+fn skip_live_source_tree_hash(
+    action: PortableAssetActionKind,
+    item: &PortableInventoryItemDto,
+) -> bool {
+    if action.is_hub_ledger_only() {
+        return true;
+    }
+    if item
+        .warnings
+        .iter()
+        .any(|warning| warning == "store_symlink_escape" || warning == "source_blocked")
+    {
+        return true;
+    }
+    item.source_path.as_deref().is_some_and(|path| {
+        matches!(
+            classify_store_link(std::path::Path::new(path)),
+            StoreLinkClass::EscapeLink
+        )
     })
 }
 
@@ -499,12 +526,14 @@ async fn build_change(
 
     // MCP expected_source_hash 必须与 config_patch leaf value_content_hash 同域。
     // Skill/Command content_hash 已是 inventory 语义（Skill=SKILL.md-only）。
+    // 确认当前版本 / 逃逸软链不得 live 跟随目录，否则 preview 哈希与库存观测值分域。
+    let skip_live_tree = skip_live_source_tree_hash(request.action, item);
     let (expected_source_hash, expected_tree_hash) = match item.kind {
         PortableAssetKind::Mcp => (
             mcp_expected_leaf_hash(item).or_else(|| item.content_hash.clone()),
             item.tree_hash.clone(),
         ),
-        PortableAssetKind::Plugin if item.tree_hash.is_none() => {
+        PortableAssetKind::Plugin if item.tree_hash.is_none() && !skip_live_tree => {
             let root: std::path::PathBuf = item
                 .source_path
                 .as_deref()
@@ -519,7 +548,7 @@ async fn build_change(
             })??;
             (Some(content_hash), Some(tree_hash))
         }
-        PortableAssetKind::Skill if item.tree_hash.is_none() => {
+        PortableAssetKind::Skill if item.tree_hash.is_none() && !skip_live_tree => {
             let root: std::path::PathBuf = item
                 .source_path
                 .as_deref()
