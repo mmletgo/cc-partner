@@ -60,6 +60,7 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
+  classifyActionOutcome,
   samePortableItemIds,
   usePortableInventoryController,
   usePortablePullController,
@@ -2211,6 +2212,20 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     ],
   );
 
+  /**
+   * Business Logic: 关掉确认弹窗并清掉本次 preview/apply 会话。
+   * Code Logic: 抬 seq 丢弃 in-flight；busy 门闩由调用方负责。
+   */
+  const resetPortableActionSession = useCallback(() => {
+    portableActionSeqRef.current += 1;
+    portableActionPlanContextRef.current = null;
+    portableInventoryBase.clearPendingAction();
+    setPortableActionPlan(null);
+    setPortableActionResult(null);
+    setPortableActionError(null);
+    setPortableActionClientRequestId(null);
+  }, [portableInventoryBase]);
+
   const confirmPortableAction = useCallback(
     async (planToken: string, clientRequestId: string) => {
       // 同步 busy 门闩：confirm 在已 busy 时直接拒绝。
@@ -2239,6 +2254,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setPortableActionBusy(true);
       setPortableActionError(null);
       for (const itemId of itemIds) portableInventoryBase.setItemLocked(itemId, true);
+      let closeAfterSuccess = false;
       try {
         const applyRequest: ApplyPortableAssetActionRequest = {
           planToken,
@@ -2253,9 +2269,20 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ) {
           return;
         }
-        setPortableActionResult(result);
         setPortableActionClientRequestId(clientRequestId);
         await portableInventoryBase.refresh();
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
+        if (classifyActionOutcome(result) === 'fullSuccess') {
+          closeAfterSuccess = true;
+        } else {
+          setPortableActionResult(result);
+        }
       } catch (reason) {
         if (
           !mountedRef.current ||
@@ -2274,10 +2301,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
           for (const itemId of itemIds) portableInventoryBase.setItemLocked(itemId, false);
           portableActionBusyRef.current = false;
           setPortableActionBusy(false);
+          if (closeAfterSuccess) {
+            resetPortableActionSession();
+          }
         }
       }
     },
-    [portableActionPlan, portableInventoryBase, t],
+    [portableActionPlan, portableInventoryBase, resetPortableActionSession, t],
   );
 
   const reconcilePortableAction = useCallback(
@@ -2298,6 +2328,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       const contextFingerprint = portableActionContextFingerprintRef.current;
       setPortableActionBusy(true);
       setPortableActionError(null);
+      let closeAfterSuccess = false;
       try {
         const result = await portableAssetApi.getAction(
           clientRequestId,
@@ -2310,8 +2341,19 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ) {
           return;
         }
-        setPortableActionResult(result);
         await portableInventoryBase.refresh();
+        if (
+          !mountedRef.current ||
+          actionSeq !== portableActionSeqRef.current ||
+          contextFingerprint !== portableActionContextFingerprintRef.current
+        ) {
+          return;
+        }
+        if (classifyActionOutcome(result) === 'fullSuccess') {
+          closeAfterSuccess = true;
+        } else {
+          setPortableActionResult(result);
+        }
       } catch (reason) {
         if (
           !mountedRef.current ||
@@ -2329,22 +2371,19 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ) {
           portableActionBusyRef.current = false;
           setPortableActionBusy(false);
+          if (closeAfterSuccess) {
+            resetPortableActionSession();
+          }
         }
       }
     },
-    [portableInventoryBase, t],
+    [portableInventoryBase, resetPortableActionSession, t],
   );
 
   const closePortableAction = useCallback(() => {
     if (portableActionBusy || portableActionBusyRef.current) return;
-    portableActionSeqRef.current += 1;
-    portableActionPlanContextRef.current = null;
-    portableInventoryBase.clearPendingAction();
-    setPortableActionPlan(null);
-    setPortableActionResult(null);
-    setPortableActionError(null);
-    setPortableActionClientRequestId(null);
-  }, [portableActionBusy, portableInventoryBase]);
+    resetPortableActionSession();
+  }, [portableActionBusy, resetPortableActionSession]);
 
   const openPortablePull = useCallback(() => {
     setPortablePullOpen(true);

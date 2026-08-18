@@ -1195,6 +1195,92 @@ describe('useAgentHubController', () => {
       await Promise.all([first, second]);
     });
     expect(portableApiMocks.applyAction).toHaveBeenCalledTimes(1);
+    expect(result.current.portableActionOpen).toBe(false);
+    expect(result.current.portableActionResult).toBeNull();
+  });
+
+  test('full-success apply closes the portable action dialog after inventory refresh', async () => {
+    const item = makePortableItem();
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    searchParamsMock.current = new URLSearchParams('tab=skill');
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
+
+    act(() => {
+      result.current.requestPortableAction(item.inventoryItemId, 'disable');
+    });
+    await act(async () => {
+      await result.current.previewPortableAction({
+        inventorySnapshotHash: 'snap-ok',
+        inventoryItemIds: [item.inventoryItemId],
+        action: 'disable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: item.canonicalRevisionId,
+      });
+    });
+    const clientRequestId = result.current.portableActionClientRequestId!;
+    expect(result.current.portableActionOpen).toBe(true);
+
+    await act(async () => {
+      await result.current.confirmPortableAction('plan-token-1', clientRequestId);
+    });
+
+    expect(portableApiMocks.applyAction).toHaveBeenCalledTimes(1);
+    expect(result.current.portableActionOpen).toBe(false);
+    expect(result.current.portableActionPlan).toBeNull();
+    expect(result.current.portableActionResult).toBeNull();
+    expect(result.current.portableActionBusy).toBe(false);
+    expect(result.current.portableInventory.pendingAction).toBeNull();
+  });
+
+  test('partial apply keeps the portable action dialog open with the result', async () => {
+    const item = makePortableItem();
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    portableApiMocks.applyAction.mockResolvedValueOnce({
+      planToken: 'plan-token-1',
+      clientRequestId: 'req-partial',
+      items: [
+        {
+          inventoryItemId: item.inventoryItemId,
+          state: 'succeeded',
+          errorCode: null,
+          message: null,
+        },
+        {
+          inventoryItemId: 'claude-skill-beta',
+          state: 'failed',
+          errorCode: 'PORTABLE_SOURCE_CHANGED',
+          message: 'source changed',
+        },
+      ],
+    });
+    searchParamsMock.current = new URLSearchParams('tab=skill');
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
+
+    act(() => {
+      result.current.requestPortableAction(item.inventoryItemId, 'disable');
+    });
+    await act(async () => {
+      await result.current.previewPortableAction({
+        inventorySnapshotHash: 'snap-ok',
+        inventoryItemIds: [item.inventoryItemId],
+        action: 'disable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: item.canonicalRevisionId,
+      });
+    });
+    const clientRequestId = result.current.portableActionClientRequestId!;
+
+    await act(async () => {
+      await result.current.confirmPortableAction('plan-token-1', clientRequestId);
+    });
+
+    expect(result.current.portableActionOpen).toBe(true);
+    expect(result.current.portableActionResult?.items).toHaveLength(2);
+    expect(result.current.portableActionBusy).toBe(false);
   });
 });
 
