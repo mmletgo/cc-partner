@@ -54,6 +54,20 @@ describe('orchestratorOwnership', () => {
     }
   });
 
+  test('board and create dialog expose lane-add and task-block props without API imports', () => {
+    const board = readSource('views/OrchestratorBoard.tsx');
+    const dialog = readSource('views/OrchestratorCreateDialog.tsx');
+    const controller = readSource('controllers/useOrchestratorController.ts');
+    assert(board.includes('canCreateTaskBlock'), 'board must receive canCreateTaskBlock');
+    assert(board.includes('onOpenLaneCreate'), 'board must open create dialog from lane +');
+    assert(board.includes('onOpenAppend'), 'board must expose append-at-end');
+    assert(dialog.includes('createMode'), 'create dialog must support task/taskBlock mode');
+    assert(dialog.includes('preferredCreateAction'), 'create dialog must keep explicit createAction');
+    assert(dialog.includes('dialogKind'), 'create dialog must support append mode');
+    assert(controller.includes('groupBoardItems'), 'controller must own board grouping');
+    assert(!dialog.includes("@/api/"), 'create dialog must not import @/api');
+  });
+
   test('controller contains no modal/board Drawer Dialog JSX', () => {
     const source = readSource('controllers/useOrchestratorController.ts');
     const forbidden = [

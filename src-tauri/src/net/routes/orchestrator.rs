@@ -9,7 +9,8 @@
 //!     所有项目入口都先确认 projectId 指向本设备 local Workbench 项目，拒绝 remote shortcut 递归代理。
 
 use crate::commands::orchestrator::{
-    build_orchestrator_task_row, complete_orchestrator_agent_run_for_state,
+    append_orchestrator_task_block_member_for_http, build_orchestrator_task_row,
+    complete_orchestrator_agent_run_for_state, create_orchestrator_task_block_view_for_http,
     create_orchestrator_task_view_for_http_with_request_id,
     discard_orchestrator_remote_outbox_for_repos, dispatch_orchestrator_best_effort,
     ensure_reviewed_delivery_allowed, get_local_owner_workflow_document,
@@ -17,11 +18,11 @@ use crate::commands::orchestrator::{
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
     list_orchestrator_task_views_for_state_with_request_id,
     move_orchestrator_task_workflow_state_for_local_project,
-    retry_orchestrator_remote_outbox_for_repos, run_delivery_for_task,
-    save_local_owner_workflow_document, save_workflow_document_for_state,
+    reorder_orchestrator_task_block_members_for_http, retry_orchestrator_remote_outbox_for_repos,
+    run_delivery_for_task, save_local_owner_workflow_document, save_workflow_document_for_state,
     validate_local_owner_workflow_document, validate_workflow_document_for_state,
     CreateOrchestratorTaskRequest, MoveOrchestratorTaskWorkflowStateRequest,
-    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskBlockViewCreatedDto, OrchestratorTaskViewDto,
 };
 use crate::commands::orchestrator_adapters::{
     build_agent_adapter_catalog, OrchestratorAgentAdapterCatalog,
@@ -43,13 +44,14 @@ use crate::orchestrator::outbox::OrchestratorRemoteOutboxDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::{
     MobileRuntimeSnapshotReq, MobileWorkflowDocumentGetReq, MobileWorkflowDocumentSaveReq,
-    MobileWorkflowDocumentValidateReq, RemoteCompleteAgentRunReq,
-    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq,
-    RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteMoveWorkflowStateReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
-    RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
+    MobileWorkflowDocumentValidateReq, RemoteAppendTaskBlockMemberReq, RemoteCompleteAgentRunReq,
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskBlockReq,
+    RemoteCreateOrchestratorTaskReq, RemoteDeliverReviewedReq, RemoteListTasksReq,
+    RemoteMoveWorkflowStateReq, RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
+    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp,
+    RemoteReorderTaskBlockMembersReq, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
+    RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp, RemoteWorkflowDocumentSaveReq,
+    RemoteWorkflowDocumentValidateReq,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetrySnapshot;
@@ -672,6 +674,64 @@ pub async fn create_task_view(
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.create"))?;
     Ok(Json(view))
+}
+
+/// 创建串行任务块 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut / mobile 必须在 owning device 上原子创建 2–8 成员块。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝 remote shortcut 递归代理后委托 create-block HTTP helper。
+pub async fn create_task_block_view(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteCreateOrchestratorTaskBlockReq>,
+) -> P2pResult<Json<OrchestratorTaskBlockViewCreatedDto>> {
+    let created = create_orchestrator_task_block_view_for_http(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.task_views.create_block"))?;
+    Ok(Json(created))
+}
+
+/// 追加任务块成员 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     追加必须在 owner 上按 live head/上限校验后写入 max+1。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝 remote shortcut 后委托 append HTTP helper。
+pub async fn append_task_block_member_view(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteAppendTaskBlockMemberReq>,
+) -> P2pResult<Json<OrchestratorTaskViewDto>> {
+    let task = append_orchestrator_task_block_member_for_http(&state, req)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.task_views.append_block_member")
+        })?;
+    Ok(Json(task))
+}
+
+/// 重排任务块成员 HTTP handler。
+///
+/// Business Logic（为什么需要这个函数）:
+///     重排必须在 owner 上校验全部成员仍 backlog/todo 且 idle。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝 remote shortcut 后委托 reorder HTTP helper。
+pub async fn reorder_task_block_members_view(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteReorderTaskBlockMembersReq>,
+) -> P2pResult<Json<Vec<OrchestratorTaskViewDto>>> {
+    let tasks = reorder_orchestrator_task_block_members_for_http(&state, req)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &ctx, "orchestrator.task_views.reorder_block_members")
+        })?;
+    Ok(Json(tasks))
 }
 
 /// 列出 Orchestrator 任务 HTTP handler。

@@ -823,8 +823,8 @@ impl OrchestratorRepo {
                   runtime_started_at, last_activity_at, last_runtime_event, last_runtime_message, \
                   worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
                   state_version, created_at, updated_at, started_at, finished_at, \
-                  experiment_id, delivery_suppressed) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  experiment_id, delivery_suppressed, block_id, block_index) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&task.id)
             .bind(&task.project_id)
@@ -865,6 +865,8 @@ impl OrchestratorRepo {
             .bind(&task.finished_at)
             .bind(&task.experiment_id)
             .bind(if task.delivery_suppressed { 1i64 } else { 0i64 })
+            .bind(&task.block_id)
+            .bind(task.block_index)
             .execute(&mut *tx)
             .await?;
 

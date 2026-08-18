@@ -165,10 +165,14 @@ pub async fn prepare_runner_attempt(
         ));
     }
 
-    let branch_name = task
-        .branch_name
-        .clone()
-        .unwrap_or_else(|| task_branch_name(&task.id, &task.title));
+    let branch_name = task.branch_name.clone().unwrap_or_else(|| {
+        if let Some(block_id) = task.block_id.as_deref() {
+            let title = task.block_title.as_deref().unwrap_or(&task.title);
+            task_branch_name(block_id, title)
+        } else {
+            task_branch_name(&task.id, &task.title)
+        }
+    });
     // 长 git worktree 创建前续租，避免调度 lease 误回收仍在 prepare 的任务。
     if !state
         .orchestrator_repo
@@ -388,6 +392,12 @@ pub async fn prepare_runner_attempt(
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
         return Ok(running_task);
+    }
+    if let Some(block_id) = running_task.block_id.as_deref() {
+        let _ = state
+            .orchestrator_repo
+            .persist_block_shared_worktree(block_id, &worktree.id, &branch_name)
+            .await;
     }
 
     let mut running_task = state
@@ -689,15 +699,18 @@ fn worktree_seed_for_attempt(
     if attempt <= 0 {
         return Err(AppError::generic("任务尝试轮次必须大于 0"));
     }
-    if attempt == 1 {
-        return Ok(None);
-    }
-    task.worktree_id
+    if let Some(existing) = task
+        .worktree_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| Some(value.to_string()))
-        .ok_or_else(|| AppError::generic("修复轮次缺少已有 worktree，无法继续执行"))
+    {
+        return Ok(Some(existing.to_string()));
+    }
+    if attempt == 1 {
+        return Ok(None);
+    }
+    Err(AppError::generic("修复轮次缺少已有 worktree，无法继续执行"))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1070,11 +1083,16 @@ mod tests {
     fn runner_attempt_worktree_seed_reuses_existing_worktree_after_first_attempt() {
         let first = runner_task_row(None, 0);
         let repair = runner_task_row(Some("worktree-1"), 1);
+        let block_first = runner_task_row(Some("shared-wt"), 0);
 
         assert_eq!(super::worktree_seed_for_attempt(&first, 1).unwrap(), None);
         assert_eq!(
             super::worktree_seed_for_attempt(&repair, 2).unwrap(),
             Some("worktree-1".to_string())
+        );
+        assert_eq!(
+            super::worktree_seed_for_attempt(&block_first, 1).unwrap(),
+            Some("shared-wt".to_string())
         );
     }
 

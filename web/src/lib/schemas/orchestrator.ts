@@ -24,6 +24,8 @@ import type {
   OrchestratorRuntimeSnapshot,
   OrchestratorRuntimeTaskSummary,
   OrchestratorTask,
+  OrchestratorTaskBlock,
+  OrchestratorTaskBlockCreated,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
@@ -154,6 +156,9 @@ export const orchestratorTaskDecoder: Decoder<OrchestratorTask> = objectDecoder(
   updatedAt: stringDecoder,
   startedAt: nullableDecoder(stringDecoder),
   finishedAt: nullableDecoder(stringDecoder),
+  blockId: optionalDecoder(nullableDecoder(stringDecoder)),
+  blockIndex: optionalDecoder(nullableDecoder(numberDecoder)),
+  blockTitle: optionalDecoder(nullableDecoder(stringDecoder)),
 });
 
 const runtimeTaskSummaryDecoder: Decoder<OrchestratorRuntimeTaskSummary> = objectDecoder(
@@ -267,6 +272,42 @@ export const orchestratorTaskViewDecoder: Decoder<OrchestratorTaskView> =
 export const orchestratorTaskViewListDecoder: Decoder<OrchestratorTaskView[]> = arrayDecoder(
   orchestratorTaskViewDecoder,
 );
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   创建任务块后必须校验块元数据，避免看板吃到残缺 blockId。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 camelCase 块字段；共享 worktree/branch 可缺省。
+ */
+export const orchestratorTaskBlockDecoder: Decoder<OrchestratorTaskBlock> = objectDecoder(
+  'OrchestratorTaskBlock',
+  {
+    id: stringDecoder,
+    projectId: stringDecoder,
+    title: stringDecoder,
+    sharedWorktreeId: optionalDecoder(nullableDecoder(stringDecoder)),
+    sharedBranchName: optionalDecoder(nullableDecoder(stringDecoder)),
+    createdAt: stringDecoder,
+    updatedAt: stringDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Tauri 返回成员视图；P2P/mobile HTTP 返回普通 task DTO。两边都要能进看板。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   tasks 先尝试 TaskView 数组，失败再回落 Task 数组。
+ */
+export const orchestratorTaskBlockCreatedDecoder: Decoder<OrchestratorTaskBlockCreated> =
+  objectDecoder('OrchestratorTaskBlockCreated', {
+    block: orchestratorTaskBlockDecoder,
+    tasks: unionDecoder<OrchestratorTaskView[] | OrchestratorTask[]>('OrchestratorTaskBlockTasks', [
+      orchestratorTaskViewListDecoder,
+      arrayDecoder(orchestratorTaskDecoder),
+    ]),
+  });
 
 /**
  * Business Logic（为什么需要这个 decoder）:

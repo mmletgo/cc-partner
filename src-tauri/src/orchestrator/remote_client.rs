@@ -18,17 +18,21 @@ use crate::net::peer_error::{parse_peer_response, peer_call_error_to_app_error, 
 use crate::net::protocol::{
     PeerProtocolInfo, CAPABILITY_DEVICE_REQUEST_BINDING_V1,
     CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1, CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1,
-    CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1, CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
+    CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1, CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1,
+    CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
 };
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
 use crate::orchestrator::remote_protocol::{
-    RemoteCompleteAgentRunReq, RemoteCompleteOrchestratorTaskPromptReq,
+    block_created_dto_from_wire, task_dto_from_view_or_task_json, OrchestratorTaskBlockCreatedDto,
+    RemoteAppendTaskBlockMemberReq, RemoteCompleteAgentRunReq,
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskBlockReq,
     RemoteCreateOrchestratorTaskReq, RemoteDeliverReviewedReq, RemoteListTasksReq,
     RemoteMoveWorkflowStateReq, RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
-    RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
+    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp,
+    RemoteReorderTaskBlockMembersReq, RemoteRuntimeSnapshotReq, RemoteTaskReq, RemoteTaskReworkReq,
+    RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp, RemoteWorkflowDocumentSaveReq,
+    RemoteWorkflowDocumentValidateReq,
 };
 use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{de::DeserializeOwned, Serialize};
@@ -173,6 +177,102 @@ impl RemoteOrchestratorClient {
             RemoteRequestTimeoutKind::Long,
         )
         .await
+    }
+
+    /// 在 owning device 上创建串行任务块。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 peer 缺失 capability 时必须 fail-closed，不得拆成多条普通任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     要求 `orchestrator.task-blocks.v1` 后 POST create-block。
+    pub async fn create_task_block(
+        &self,
+        base_url: &str,
+        req: RemoteCreateOrchestratorTaskBlockReq,
+    ) -> Result<OrchestratorTaskBlockCreatedDto, AppError> {
+        self.require_task_blocks_capability(base_url).await?;
+        let value: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/orchestrator/task-views/create-block"),
+                &req,
+                RemoteRequestTimeoutKind::Long,
+            )
+            .await?;
+        block_created_dto_from_wire(value).map_err(AppError::generic)
+    }
+
+    /// 在 owning device 上追加任务块成员。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     追加改变 live last-member，必须在 owner 上执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability gate 后 POST append-block-member。
+    pub async fn append_task_block_member(
+        &self,
+        base_url: &str,
+        req: RemoteAppendTaskBlockMemberReq,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        self.require_task_blocks_capability(base_url).await?;
+        let value: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/orchestrator/task-views/append-block-member"),
+                &req,
+                RemoteRequestTimeoutKind::Long,
+            )
+            .await?;
+        task_dto_from_view_or_task_json(&value)
+            .ok_or_else(|| AppError::generic("追加任务块成员响应缺少任务"))
+    }
+
+    /// 在 owning device 上重排任务块成员。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     重排只能在 owner 上校验整块仍 backlog/todo 且 idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability gate 后 POST reorder-block-members。
+    pub async fn reorder_task_block_members(
+        &self,
+        base_url: &str,
+        req: RemoteReorderTaskBlockMembersReq,
+    ) -> Result<Vec<OrchestratorTaskDto>, AppError> {
+        self.require_task_blocks_capability(base_url).await?;
+        let value: serde_json::Value = self
+            .post_json(
+                endpoint_url(
+                    base_url,
+                    "/api/orchestrator/task-views/reorder-block-members",
+                ),
+                &req,
+                RemoteRequestTimeoutKind::Long,
+            )
+            .await?;
+        let tasks = value
+            .as_array()
+            .ok_or_else(|| AppError::generic("重排任务块成员响应必须是数组"))?
+            .iter()
+            .filter_map(task_dto_from_view_or_task_json)
+            .collect();
+        Ok(tasks)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 peer 不能被误判为支持任务块，否则会拆成普通任务或 404。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     peer_supports_capability；缺失返回 unavailable。
+    async fn require_task_blocks_capability(&self, base_url: &str) -> Result<(), AppError> {
+        if !self
+            .peer_supports_capability(base_url, CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1)
+            .await?
+        {
+            return Err(AppError::unavailable(
+                "capability_unsupported:orchestrator.task-blocks.v1".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// 在远端设备上完善 Orchestrator 创建任务 Prompt。
@@ -1068,6 +1168,37 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     task-views/create-block 可能返回 origin 视图；client 必须抽出 task，不能当整段 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     喂入 Local view JSON，断言 block_created_dto_from_wire 得到 task.id。
+    #[test]
+    fn block_created_wire_unwraps_origin_views() {
+        let task = deliver_reviewed_task_dto_json();
+        let task_id = task["id"].as_str().unwrap().to_string();
+        let value = serde_json::json!({
+            "block": {
+                "id": "block-1",
+                "projectId": "project-1",
+                "title": "Serial",
+                "sharedWorktreeId": null,
+                "sharedBranchName": null,
+                "createdAt": "2026-08-18T00:00:00Z",
+                "updatedAt": "2026-08-18T00:00:00Z"
+            },
+            "tasks": [{
+                "origin": "remote",
+                "deviceId": "device-a",
+                "deviceName": "Mini",
+                "task": task
+            }]
+        });
+        let created = block_created_dto_from_wire(value).expect("parse view wire");
+        assert_eq!(created.tasks.len(), 1);
+        assert_eq!(created.tasks[0].id, task_id);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     远端 Orchestrator 业务错误由对端序列化为 `{error}`（v0 老形态）；Task 7 起改用共享
     ///     `parse_peer_response`，本机 UI 仍应展示对端原始中文文案，而不是 HTTP 状态包装。
     ///
@@ -1873,6 +2004,156 @@ mod tests {
             "complete 应 fail-closed 为 capability_unsupported，实际: {complete_err}"
         );
         assert_eq!(complete_hits.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 peer 缺 `orchestrator.task-blocks.v1` 时 create/append/reorder 必须 fail-closed，不得拆成普通任务。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 无 token + 三条目标路由计数器，分别调用 client，断言 capability_unsupported 且 hit=0。
+    #[tokio::test]
+    async fn task_block_mutations_return_unsupported_when_capability_absent() {
+        use crate::net::protocol::CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1;
+        use crate::net::routes::health::HealthResponse;
+        use crate::orchestrator::remote_protocol::{
+            RemoteAppendTaskBlockMemberReq, RemoteCreateOrchestratorTaskBlockReq,
+            RemoteReorderTaskBlockMembersReq, RemoteTaskBlockMemberReq,
+        };
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let create_hits = Arc::new(AtomicU32::new(0));
+        let append_hits = Arc::new(AtomicU32::new(0));
+        let reorder_hits = Arc::new(AtomicU32::new(0));
+        let create_hits_route = create_hits.clone();
+        let append_hits_route = append_hits.clone();
+        let reorder_hits_route = reorder_hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/task-views/create-block",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = create_hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({}))
+                    }
+                }),
+            )
+            .route(
+                "/api/orchestrator/task-views/append-block-member",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = append_hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({}))
+                    }
+                }),
+            )
+            .route(
+                "/api/orchestrator/task-views/reorder-block-members",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = reorder_hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({}))
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+        let client = RemoteOrchestratorClient::new();
+
+        let create_err = client
+            .create_task_block(
+                &base_url,
+                RemoteCreateOrchestratorTaskBlockReq {
+                    project_id: "project-1".to_string(),
+                    title: "Serial".to_string(),
+                    members: vec![
+                        RemoteTaskBlockMemberReq {
+                            title: "one".to_string(),
+                            goal: "g1".to_string(),
+                            acceptance_criteria: "a1".to_string(),
+                        },
+                        RemoteTaskBlockMemberReq {
+                            title: "two".to_string(),
+                            goal: "g2".to_string(),
+                            acceptance_criteria: "a2".to_string(),
+                        },
+                    ],
+                    create_action: crate::orchestrator::models::OrchestratorCreateAction::Todo,
+                    client_request_id: Some("req-create-block".to_string()),
+                    mutation_kind: Some("createBlock".to_string()),
+                },
+            )
+            .await
+            .expect_err("缺 task-blocks capability 必须失败");
+        assert!(
+            create_err
+                .to_string()
+                .contains(CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1),
+            "create-block 应 fail-closed 为 capability_unsupported，实际: {create_err}"
+        );
+        assert_eq!(create_hits.load(Ordering::SeqCst), 0);
+
+        let append_err = client
+            .append_task_block_member(
+                &base_url,
+                RemoteAppendTaskBlockMemberReq {
+                    project_id: "project-1".to_string(),
+                    block_id: "block-1".to_string(),
+                    title: "three".to_string(),
+                    goal: "g3".to_string(),
+                    acceptance_criteria: "a3".to_string(),
+                    client_request_id: Some("req-append".to_string()),
+                    mutation_kind: Some("appendBlockMember".to_string()),
+                },
+            )
+            .await
+            .expect_err("缺 task-blocks capability 必须失败");
+        assert!(
+            append_err
+                .to_string()
+                .contains(CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1),
+            "append 应 fail-closed 为 capability_unsupported，实际: {append_err}"
+        );
+        assert_eq!(append_hits.load(Ordering::SeqCst), 0);
+
+        let reorder_err = client
+            .reorder_task_block_members(
+                &base_url,
+                RemoteReorderTaskBlockMembersReq {
+                    project_id: "project-1".to_string(),
+                    block_id: "block-1".to_string(),
+                    ordered_task_ids: vec!["t1".to_string(), "t2".to_string()],
+                    client_request_id: Some("req-reorder".to_string()),
+                    mutation_kind: Some("reorderBlockMembers".to_string()),
+                },
+            )
+            .await
+            .expect_err("缺 task-blocks capability 必须失败");
+        assert!(
+            reorder_err
+                .to_string()
+                .contains(CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1),
+            "reorder 应 fail-closed 为 capability_unsupported，实际: {reorder_err}"
+        );
+        assert_eq!(reorder_hits.load(Ordering::SeqCst), 0);
     }
 
     /// Business Logic（为什么需要这个测试）:

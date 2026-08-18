@@ -231,6 +231,19 @@ export const ChevronDownIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   任务块成员在 Backlog/Todo 需要上移控件，与下移 chevron 对称。
+ *
+ * Code Logic（做什么）:
+ *   渲染向上 chevron 的 16x16 stroke SVG。
+ */
+export const ChevronUpIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="m4 10 4-4 4 4" />
+  </svg>
+);
+
 export const StopIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <rect x="4" y="4" width="8" height="8" rx="1.2" />

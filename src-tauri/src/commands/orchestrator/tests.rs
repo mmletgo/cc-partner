@@ -283,6 +283,8 @@ async fn move_workflow_state_for_local_project_returns_local_view() {
         OrchestratorTaskViewDto::Local { task } => {
             assert_eq!(task.id, "task-local-move");
             assert_eq!(task.workflow_state, OrchestratorWorkflowState::Todo);
+            assert_eq!(task.status, OrchestratorTaskStatus::Queued);
+            assert_eq!(task.run_state, OrchestratorRunState::Idle);
         }
         other => panic!("expected local view, got {other:?}"),
     }
@@ -2252,4 +2254,132 @@ fn local_owner_workflow_document_helpers_round_trip_without_dispatch() {
         save_local_owner_workflow_document(&project, &hash, &updated).expect("update save");
     assert_eq!(saved2.status, WorkflowDocumentStatus::Valid);
     assert_ne!(saved2.content_hash.as_deref(), Some(hash.as_str()));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     远端任务块 outbox 必须带着稳定 clientRequestId 与 mutationKind，恢复在线后才能按同一指纹投递。
+///
+/// Code Logic（这个测试做什么）:
+///     序列化 create/append/reorder 请求，断言 camelCase mutationKind 与非空 clientRequestId 在 clone 后保持不变。
+#[test]
+fn remote_task_block_outbox_payload_keeps_stable_fingerprint_fields() {
+    use crate::orchestrator::remote_protocol::{
+        RemoteAppendTaskBlockMemberReq, RemoteCreateOrchestratorTaskBlockReq,
+        RemoteReorderTaskBlockMembersReq, RemoteTaskBlockMemberReq,
+    };
+
+    let create = RemoteCreateOrchestratorTaskBlockReq {
+        project_id: "shortcut-1".to_string(),
+        title: "Serial login".to_string(),
+        members: vec![
+            RemoteTaskBlockMemberReq {
+                title: "one".to_string(),
+                goal: "g1".to_string(),
+                acceptance_criteria: "a1".to_string(),
+            },
+            RemoteTaskBlockMemberReq {
+                title: "two".to_string(),
+                goal: "g2".to_string(),
+                acceptance_criteria: "a2".to_string(),
+            },
+        ],
+        create_action: OrchestratorCreateAction::Todo,
+        client_request_id: Some("req-create-block-1".to_string()),
+        mutation_kind: Some("createBlock".to_string()),
+    };
+    let cloned = create.clone();
+    let value = serde_json::to_value(&create).expect("serialize create-block outbox");
+    assert_eq!(value["mutationKind"], "createBlock");
+    assert_eq!(value["clientRequestId"], "req-create-block-1");
+    assert_eq!(create.client_request_id, cloned.client_request_id);
+
+    let append = RemoteAppendTaskBlockMemberReq {
+        project_id: "shortcut-1".to_string(),
+        block_id: "block-1".to_string(),
+        title: "three".to_string(),
+        goal: "g3".to_string(),
+        acceptance_criteria: "a3".to_string(),
+        client_request_id: Some("req-append-1".to_string()),
+        mutation_kind: Some("appendBlockMember".to_string()),
+    };
+    let append_value = serde_json::to_value(&append).expect("serialize append outbox");
+    assert_eq!(append_value["mutationKind"], "appendBlockMember");
+    assert_eq!(append_value["clientRequestId"], "req-append-1");
+
+    let reorder = RemoteReorderTaskBlockMembersReq {
+        project_id: "shortcut-1".to_string(),
+        block_id: "block-1".to_string(),
+        ordered_task_ids: vec!["t2".to_string(), "t1".to_string()],
+        client_request_id: Some("req-reorder-1".to_string()),
+        mutation_kind: Some("reorderBlockMembers".to_string()),
+    };
+    let reorder_value = serde_json::to_value(&reorder).expect("serialize reorder outbox");
+    assert_eq!(reorder_value["mutationKind"], "reorderBlockMembers");
+    assert_eq!(reorder_value["clientRequestId"], "req-reorder-1");
+    assert_eq!(reorder_value["orderedTaskIds"][0], "t2");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     当时的最后成员（live max index）必须走 Human Review，不能被当成中间步 Done。
+///
+/// Code Logic（这个测试做什么）:
+///     建 2 人块，断言末成员不是 intermediate，再把末成员标成 Verifying 后走 HR helper。
+#[tokio::test]
+async fn last_block_member_verifier_pass_enters_human_review() {
+    use crate::orchestrator::repo::{is_intermediate_block_member, BlockMemberDraft};
+
+    let repo = setup_orchestrator_repo().await;
+    let created = repo
+        .create_task_block_idempotent(
+            Some("req-last-hr"),
+            "project-1",
+            "Last member review",
+            &[
+                BlockMemberDraft {
+                    title: "one".to_string(),
+                    goal: "g1".to_string(),
+                    acceptance_criteria: "a1".to_string(),
+                },
+                BlockMemberDraft {
+                    title: "two".to_string(),
+                    goal: "g2".to_string(),
+                    acceptance_criteria: "a2".to_string(),
+                },
+            ],
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .expect("create block");
+    let last_id = created.tasks[1].id.clone();
+    let max_index = repo
+        .max_block_index(&created.block.id)
+        .await
+        .expect("max index")
+        .expect("block has members");
+    assert!(
+        !is_intermediate_block_member(created.tasks[1].block_index.unwrap(), max_index),
+        "live last member must take Human Review / delivering path"
+    );
+
+    sqlx::query("UPDATE orchestrator_tasks SET status = ? WHERE id = ?")
+        .bind(OrchestratorTaskStatus::Verifying.as_str())
+        .bind(&last_id)
+        .execute(&repo.pool)
+        .await
+        .expect("mark verifying");
+
+    let transition = transition_verified_task_to_human_review(&repo, &last_id)
+        .await
+        .expect("human review transition");
+    let persisted = repo
+        .get_task(&last_id)
+        .await
+        .expect("persisted last member");
+    assert!(transition.transitioned);
+    assert_eq!(
+        persisted.workflow_state,
+        OrchestratorWorkflowState::HumanReview
+    );
+    assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Done);
 }

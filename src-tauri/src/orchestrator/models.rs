@@ -597,6 +597,12 @@ pub struct OrchestratorTaskRow {
     pub experiment_id: Option<String>,
     /// A4：candidate 任务禁止直接进入普通 delivery；默认 false 保持普通任务语义。
     pub delivery_suppressed: bool,
+    /// 所属任务块 id；普通独立任务为 None。
+    pub block_id: Option<String>,
+    /// 块内 0-based 序号；独立任务为 None。
+    pub block_index: Option<i64>,
+    /// 块标题（JOIN/后处理填充，不是 orchestrator_tasks 列）。
+    pub block_title: Option<String>,
 }
 
 /// 运营通知 kind（隐私安全，不含任务正文）。
@@ -721,6 +727,59 @@ pub struct OrchestratorTaskAttemptRow {
     pub completed_at: Option<String>,
 }
 
+/// 任务块数据库行。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     串行任务块要持久化共享 worktree/branch 与块标题，供 claim/runner/看板复用。
+///
+/// Code Logic（这个结构体做什么）:
+///     字段与 `orchestrator_task_blocks` 一一对应。
+#[derive(Debug, Clone)]
+pub struct OrchestratorTaskBlockRow {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub shared_worktree_id: Option<String>,
+    pub shared_branch_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 任务块前端 DTO。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     创建/追加响应需要把块元数据与成员任务一起回传给看板。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 序列化块 id/标题/共享 worktree。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorTaskBlockDto {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_worktree_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_branch_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<OrchestratorTaskBlockRow> for OrchestratorTaskBlockDto {
+    fn from(row: OrchestratorTaskBlockRow) -> Self {
+        Self {
+            id: row.id,
+            project_id: row.project_id,
+            title: row.title,
+            shared_worktree_id: row.shared_worktree_id,
+            shared_branch_name: row.shared_branch_name,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
 /// Orchestrator 任务前端 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -772,6 +831,12 @@ pub struct OrchestratorTaskDto {
     pub experiment_id: Option<String>,
     #[serde(default)]
     pub delivery_suppressed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_index: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_title: Option<String>,
 }
 
 /// Orchestrator legacy 项目配置 DTO。
@@ -908,6 +973,9 @@ impl OrchestratorTaskRow {
             finished_at: None,
             experiment_id: None,
             delivery_suppressed: false,
+            block_id: None,
+            block_index: None,
+            block_title: None,
         }
     }
 
@@ -977,6 +1045,9 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             finished_at: row.finished_at,
             experiment_id: row.experiment_id,
             delivery_suppressed: row.delivery_suppressed,
+            block_id: row.block_id,
+            block_index: row.block_index,
+            block_title: row.block_title,
         }
     }
 }

@@ -349,6 +349,47 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
         )
         .await?;
 
+        if let Some(block_id) = task.block_id.as_deref() {
+            if let Some(current_index) = task.block_index {
+                let max_index = state
+                    .orchestrator_repo
+                    .max_block_index(block_id)
+                    .await?
+                    .unwrap_or(current_index);
+                if crate::orchestrator::repo::is_intermediate_block_member(current_index, max_index)
+                {
+                    let repo = state.orchestrator_repo.as_ref();
+                    let split = crate::orchestrator::models::SplitTaskState {
+                        workflow_state:
+                            crate::orchestrator::models::OrchestratorWorkflowState::Done,
+                        run_state: crate::orchestrator::models::OrchestratorRunState::Idle,
+                    };
+                    let _ = repo
+                        .try_transition_task_split_state(
+                            &task.id,
+                            crate::orchestrator::models::OrchestratorTaskStatus::Verifying,
+                            crate::orchestrator::models::OrchestratorTaskStatus::Done,
+                            split.workflow_state,
+                            split.run_state,
+                            Some(crate::orchestrator::models::OrchestratorAttemptPhase::Succeeded),
+                            None,
+                        )
+                        .await?;
+                    let members = repo.list_block_members(block_id).await?;
+                    if let Some(next) = members
+                        .iter()
+                        .find(|member| member.block_index == Some(current_index + 1))
+                    {
+                        let _ = repo
+                            .copy_shared_worktree_to_member(block_id, &next.id)
+                            .await;
+                    }
+                    let current = repo.get_task(&task.id).await?;
+                    return Ok(OrchestratorTaskDto::from(current));
+                }
+            }
+        }
+
         // A4：experiment candidate 永不进入普通 HumanReview/delivery
         if task.delivery_suppressed || task.experiment_id.is_some() {
             // 将 Verifying 任务落到非交付终态：Done + InProgress/Idle，outcome=CandidateReady

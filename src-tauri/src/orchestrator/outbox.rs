@@ -11,7 +11,10 @@
 use crate::error::AppError;
 use crate::orchestrator::models::OrchestratorTaskDto;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
-use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
+use crate::orchestrator::remote_protocol::{
+    RemoteAppendTaskBlockMemberReq, RemoteCreateOrchestratorTaskBlockReq,
+    RemoteCreateOrchestratorTaskReq, RemoteReorderTaskBlockMembersReq,
+};
 use crate::state::AppState;
 use crate::workbench::models::WorkbenchProjectRow;
 use crate::workbench::remote_client::RemoteWorkbenchClient;
@@ -502,8 +505,23 @@ async fn dispatch_claimed_remote_outbox_item(
     state: &AppState,
     item: &OrchestratorRemoteOutboxRow,
 ) -> Result<(), RemoteOutboxDispatchError> {
-    let mut request: RemoteCreateOrchestratorTaskReq = serde_json::from_str(&item.request_json)
-        .map_err(|err| {
+    let raw: serde_json::Value = serde_json::from_str(&item.request_json).map_err(|err| {
+        RemoteOutboxDispatchError::Protocol(format!("远端 outbox 请求解析失败: {err}"))
+    })?;
+    let mutation_kind = raw
+        .get("mutationKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    if mutation_kind == "createBlock"
+        || mutation_kind == "appendBlockMember"
+        || mutation_kind == "reorderBlockMembers"
+    {
+        return dispatch_claimed_remote_block_outbox_item(state, item, &mutation_kind, raw).await;
+    }
+
+    let mut request: RemoteCreateOrchestratorTaskReq =
+        serde_json::from_value(raw).map_err(|err| {
             RemoteOutboxDispatchError::Protocol(format!("远端 outbox 请求解析失败: {err}"))
         })?;
     if ensure_remote_create_client_request_id(&mut request, &item.id) {
@@ -551,6 +569,139 @@ async fn dispatch_claimed_remote_outbox_item(
             &context.remote_project_id,
             &context.remote_project_path,
             &task.id,
+            &payload,
+        )
+        .await
+        .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     任务块 outbox 必须按 mutationKind 投递整组 create/append/reorder，不能当普通单任务解析。
+///
+/// Code Logic（这个函数做什么）:
+///     打开远端项目后调用对应 RemoteOrchestratorClient 方法，成功后镜像首个/新增任务。
+async fn dispatch_claimed_remote_block_outbox_item(
+    state: &AppState,
+    item: &OrchestratorRemoteOutboxRow,
+    mutation_kind: &str,
+    raw: serde_json::Value,
+) -> Result<(), RemoteOutboxDispatchError> {
+    let shortcut = WorkbenchProjectRow {
+        id: String::new(),
+        name: item.remote_project_path.clone(),
+        kind: "remote".to_string(),
+        device_id: item.device_id.clone(),
+        device_name: item.device_name.clone(),
+        path: item.remote_project_path.clone(),
+        last_opened_at: item.updated_at.clone(),
+        created_at: item.created_at.clone(),
+        updated_at: item.updated_at.clone(),
+    };
+    let context = open_remote_project_for_shortcut(state, &shortcut, None)
+        .await
+        .map_err(classify_remote_error)?;
+    let client = RemoteOrchestratorClient::new().with_expected_device_id(&context.device_id);
+    let (remote_task_id, payload) = match mutation_kind {
+        "createBlock" => {
+            let mut request: RemoteCreateOrchestratorTaskBlockReq = serde_json::from_value(raw)
+                .map_err(|err| {
+                    RemoteOutboxDispatchError::Protocol(format!("任务块 outbox 解析失败: {err}"))
+                })?;
+            request.project_id = context.remote_project_id.clone();
+            let created = client
+                .create_task_block(&context.base_url, request)
+                .await
+                .map_err(classify_remote_error)?;
+            for task in &created.tasks {
+                let task_payload = mirror_payload_from_task(task)
+                    .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
+                let _ = state
+                    .orchestrator_repo
+                    .upsert_remote_task_mirror(
+                        &context.device_id,
+                        &context.device_name,
+                        &context.remote_project_id,
+                        &context.remote_project_path,
+                        &task.id,
+                        &task_payload,
+                    )
+                    .await;
+            }
+            let first = created.tasks.first().cloned().ok_or_else(|| {
+                RemoteOutboxDispatchError::Protocol("任务块创建响应缺少成员".to_string())
+            })?;
+            (
+                first.id.clone(),
+                mirror_payload_from_task(&first)
+                    .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?,
+            )
+        }
+        "appendBlockMember" => {
+            let mut request: RemoteAppendTaskBlockMemberReq =
+                serde_json::from_value(raw).map_err(|err| {
+                    RemoteOutboxDispatchError::Protocol(format!("追加成员 outbox 解析失败: {err}"))
+                })?;
+            request.project_id = context.remote_project_id.clone();
+            let task = client
+                .append_task_block_member(&context.base_url, request)
+                .await
+                .map_err(classify_remote_error)?;
+            (
+                task.id.clone(),
+                mirror_payload_from_task(&task)
+                    .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?,
+            )
+        }
+        "reorderBlockMembers" => {
+            let mut request: RemoteReorderTaskBlockMembersReq = serde_json::from_value(raw)
+                .map_err(|err| {
+                    RemoteOutboxDispatchError::Protocol(format!("重排成员 outbox 解析失败: {err}"))
+                })?;
+            request.project_id = context.remote_project_id.clone();
+            let tasks = client
+                .reorder_task_block_members(&context.base_url, request)
+                .await
+                .map_err(classify_remote_error)?;
+            for task in &tasks {
+                let task_payload = mirror_payload_from_task(task)
+                    .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?;
+                let _ = state
+                    .orchestrator_repo
+                    .upsert_remote_task_mirror(
+                        &context.device_id,
+                        &context.device_name,
+                        &context.remote_project_id,
+                        &context.remote_project_path,
+                        &task.id,
+                        &task_payload,
+                    )
+                    .await;
+            }
+            let first = tasks.first().cloned().ok_or_else(|| {
+                RemoteOutboxDispatchError::Protocol("任务块重排响应缺少成员".to_string())
+            })?;
+            (
+                first.id.clone(),
+                mirror_payload_from_task(&first)
+                    .map_err(|err| RemoteOutboxDispatchError::Protocol(err.to_string()))?,
+            )
+        }
+        other => {
+            return Err(RemoteOutboxDispatchError::Protocol(format!(
+                "未知任务块 mutationKind: {other}"
+            )));
+        }
+    };
+    let _ = state
+        .orchestrator_repo
+        .mark_remote_outbox_mirrored_and_upsert_mirror_if_sending(
+            &item.id,
+            &context.device_id,
+            &context.device_name,
+            &context.remote_project_id,
+            &context.remote_project_path,
+            &remote_task_id,
             &payload,
         )
         .await

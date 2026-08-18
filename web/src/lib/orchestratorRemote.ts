@@ -3,6 +3,7 @@ import type {
   OrchestratorRemoteOutboxItem,
   OrchestratorRemoteRuntimeStatus,
   OrchestratorTask,
+  OrchestratorTaskBlockCreated,
   OrchestratorTaskStatus,
   OrchestratorTaskView,
 } from './types';
@@ -164,6 +165,26 @@ export function getOrchestratorTaskViewProjectId(view: OrchestratorTaskView | nu
  * Code Logic（这个函数做什么）:
  *   local/remote 按 task.id 替换；pendingRemote 按 outbox item.id 替换；找不到时插入列表头部。
  */
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   创建任务块后要把全部成员视图合并进当前列表；仅无 origin 的裸 DTO 才回落成本地 view。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若元素带 origin 则视为 TaskView；否则包装为 local view；再逐个 upsert。
+ */
+export function upsertOrchestratorTaskBlockCreated(
+  current: OrchestratorTaskView[],
+  created: OrchestratorTaskBlockCreated,
+): OrchestratorTaskView[] {
+  return created.tasks.reduce<OrchestratorTaskView[]>((views, item) => {
+    const view: OrchestratorTaskView =
+      item && typeof item === 'object' && 'origin' in item
+        ? (item as OrchestratorTaskView)
+        : { origin: 'local', task: item as OrchestratorTask };
+    return upsertOrchestratorTaskView(views, view);
+  }, current);
+}
+
 export function upsertOrchestratorTaskView(
   current: OrchestratorTaskView[],
   next: OrchestratorTaskView,

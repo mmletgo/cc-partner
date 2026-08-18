@@ -131,8 +131,8 @@ impl OrchestratorRepo {
               external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
               agent_session_id, transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
               last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
-              updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              updated_at, started_at, finished_at, block_id, block_index) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row_to_insert.id)
         .bind(&row_to_insert.project_id)
@@ -168,6 +168,8 @@ impl OrchestratorRepo {
         .bind(&row_to_insert.updated_at)
         .bind(&row_to_insert.started_at)
         .bind(&row_to_insert.finished_at)
+        .bind(&row_to_insert.block_id)
+        .bind(row_to_insert.block_index)
         .execute(&mut *tx)
         .await?;
 

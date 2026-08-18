@@ -14,6 +14,7 @@ import {
   orchestratorProjectRefreshResultDecoder,
   orchestratorRemoteOutboxItemDecoder,
   orchestratorRuntimeSnapshotDecoder,
+  orchestratorTaskBlockCreatedDecoder,
   orchestratorTaskViewDecoder,
   orchestratorTaskViewListDecoder,
   workflowDocumentDecoder,
@@ -24,6 +25,7 @@ import type {
   PrepareAgentDowngradeResult,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
+  OrchestratorTaskBlockCreated,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
   WorkflowDocument,
@@ -57,6 +59,9 @@ export function buildOrchestratorRemoteOutboxActionInvokeArgs(
 export const ORCHESTRATOR_REMOTE_COMMANDS = {
   listTaskViews: 'list_orchestrator_task_views',
   createTaskView: 'create_orchestrator_task_view',
+  createTaskBlockView: 'create_orchestrator_task_block_view',
+  appendTaskBlockMemberView: 'append_orchestrator_task_block_member_view',
+  reorderTaskBlockMembersView: 'reorder_orchestrator_task_block_members_view',
   queueTaskView: 'queue_orchestrator_task_view',
   startTaskView: 'start_orchestrator_task_view',
   retryTaskView: 'retry_orchestrator_task_view',
@@ -102,6 +107,48 @@ export interface CreateOrchestratorTaskRequest {
 }
 
 export type OrchestratorCreateAction = 'backlog' | 'todo' | 'start';
+
+/**
+ * 创建任务块成员请求。
+ */
+export interface CreateOrchestratorTaskBlockMemberRequest {
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+}
+
+/**
+ * 创建串行任务块请求。
+ */
+export interface CreateOrchestratorTaskBlockRequest {
+  projectId: string;
+  title: string;
+  members: CreateOrchestratorTaskBlockMemberRequest[];
+  createAction: OrchestratorCreateAction;
+  clientRequestId?: string;
+}
+
+/**
+ * 追加任务块成员请求。
+ */
+export interface AppendOrchestratorTaskBlockMemberRequest {
+  projectId: string;
+  blockId: string;
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+  clientRequestId?: string;
+}
+
+/**
+ * 重排任务块成员请求。
+ */
+export interface ReorderOrchestratorTaskBlockMembersRequest {
+  projectId: string;
+  blockId: string;
+  orderedTaskIds: string[];
+  clientRequestId?: string;
+}
 
 /**
  * Orchestrator 项目刷新结果。
@@ -339,6 +386,63 @@ export const orchestratorApi = {
       ORCHESTRATOR_REMOTE_COMMANDS.createTaskView,
       buildCreateOrchestratorTaskViewInvokeArgs(request),
       orchestratorTaskViewDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   看板 Lane + 需要一次创建 2–8 成员的串行任务块，不能拆成多次单任务 create。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded create_orchestrator_task_block_view，自动补 clientRequestId。
+   */
+  createTaskBlockView: (request: CreateOrchestratorTaskBlockRequest) =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.createTaskBlockView,
+      {
+        request: {
+          ...request,
+          clientRequestId: request.clientRequestId?.trim() || crypto.randomUUID(),
+        },
+      },
+      orchestratorTaskBlockCreatedDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块卡片末尾追加必须走独立 mutation，才能在 owner 上重写 live max index。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded append_orchestrator_task_block_member_view。
+   */
+  appendTaskBlockMemberView: (request: AppendOrchestratorTaskBlockMemberRequest) =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.appendTaskBlockMemberView,
+      {
+        request: {
+          ...request,
+          clientRequestId: request.clientRequestId?.trim() || crypto.randomUUID(),
+        },
+      },
+      orchestratorTaskViewDecoder,
+    ),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Backlog/Todo 空闲块需要一次提交全部成员置换。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invokeDecoded reorder_orchestrator_task_block_members_view。
+   */
+  reorderTaskBlockMembersView: (request: ReorderOrchestratorTaskBlockMembersRequest) =>
+    invokeDecoded(
+      ORCHESTRATOR_REMOTE_COMMANDS.reorderTaskBlockMembersView,
+      {
+        request: {
+          ...request,
+          clientRequestId: request.clientRequestId?.trim() || crypto.randomUUID(),
+        },
+      },
+      orchestratorTaskViewListDecoder,
     ),
 
   /**

@@ -9,7 +9,8 @@
 
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorTaskDto,
+    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorTaskBlockDto,
+    OrchestratorTaskDto,
 };
 use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,137 @@ pub struct RemoteCreateOrchestratorTaskReq {
     pub external_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_labels: Option<Vec<String>>,
+}
+
+/// 远端创建任务块成员。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     建块只提交每步的标题/目标/验收，不能把 tracker 字段混进块契约。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 三字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTaskBlockMemberReq {
+    pub title: String,
+    pub goal: String,
+    pub acceptance_criteria: String,
+}
+
+/// 远端创建任务块请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     remote shortcut 必须把整块转发 owning device，并用 clientRequestId 整组幂等。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase：projectId/title/members/createAction/clientRequestId。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCreateOrchestratorTaskBlockReq {
+    pub project_id: String,
+    pub title: String,
+    pub members: Vec<RemoteTaskBlockMemberReq>,
+    #[serde(default)]
+    pub create_action: OrchestratorCreateAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_kind: Option<String>,
+}
+
+/// 远端追加块成员请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     追加必须带 blockId 与三字段，供 owner 校验 head/上限后写 max+1。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 追加入参。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAppendTaskBlockMemberReq {
+    pub project_id: String,
+    pub block_id: String,
+    pub title: String,
+    pub goal: String,
+    pub acceptance_criteria: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_kind: Option<String>,
+}
+
+/// 远端重排块成员请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     重排必须提交全部成员 id 的置换，owner 事务内重写 block_index。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase：projectId/blockId/orderedTaskIds/clientRequestId。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteReorderTaskBlockMembersReq {
+    pub project_id: String,
+    pub block_id: String,
+    pub ordered_task_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_kind: Option<String>,
+}
+
+/// 创建任务块响应。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     看板需要一次拿到块元数据与全部成员 DTO，才能立刻画出块卡片。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase：block + tasks。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorTaskBlockCreatedDto {
+    pub block: OrchestratorTaskBlockDto,
+    pub tasks: Vec<OrchestratorTaskDto>,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     task-views 路由可能返回 origin 视图或裸 task DTO；远端 client 只要权威 task。
+///
+/// Code Logic（这个函数做什么）:
+///     有 origin 则读 `.task`；否则整段当 OrchestratorTaskDto。
+pub fn task_dto_from_view_or_task_json(value: &serde_json::Value) -> Option<OrchestratorTaskDto> {
+    if value.get("origin").and_then(|item| item.as_str()).is_some() {
+        serde_json::from_value(value.get("task")?.clone()).ok()
+    } else {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     create-block HTTP 现在返回带 origin 的成员视图，client 仍消费 DTO 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 block，再把 tasks 数组逐条投影为 OrchestratorTaskDto。
+pub fn block_created_dto_from_wire(
+    value: serde_json::Value,
+) -> Result<OrchestratorTaskBlockCreatedDto, String> {
+    let block = serde_json::from_value(
+        value
+            .get("block")
+            .cloned()
+            .ok_or_else(|| "任务块响应缺少 block".to_string())?,
+    )
+    .map_err(|err| format!("任务块响应解析失败: {err}"))?;
+    let tasks = value
+        .get("tasks")
+        .and_then(|item| item.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(task_dto_from_view_or_task_json)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(OrchestratorTaskBlockCreatedDto { block, tasks })
 }
 
 /// 远端任务 ID 请求体。

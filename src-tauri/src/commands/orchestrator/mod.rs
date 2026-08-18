@@ -7,6 +7,7 @@
 //!     子模块 + 显式 re-export：命令入口（含 tauri 隐藏宏）、pub DTO 与 pub(crate) helper。
 
 mod actions;
+mod blocks;
 mod common;
 mod evidence;
 mod experiments;
@@ -29,6 +30,20 @@ pub use actions::{
     __tauri_command_name_retry_orchestrator_task, abort_orchestrator_task,
     complete_orchestrator_agent_run, complete_orchestrator_agent_run_for_project,
     dispatch_orchestrator_once, queue_orchestrator_task, retry_orchestrator_task,
+};
+pub use blocks::{
+    __cmd__append_orchestrator_task_block_member_view, __cmd__create_orchestrator_task_block_view,
+    __cmd__reorder_orchestrator_task_block_members_view,
+    __tauri_command_name_append_orchestrator_task_block_member_view,
+    __tauri_command_name_create_orchestrator_task_block_view,
+    __tauri_command_name_reorder_orchestrator_task_block_members_view,
+    append_orchestrator_task_block_member_for_http, append_orchestrator_task_block_member_view,
+    append_orchestrator_task_block_member_view_for_state, create_orchestrator_task_block_view,
+    create_orchestrator_task_block_view_for_http, create_orchestrator_task_block_view_for_state,
+    reorder_orchestrator_task_block_members_for_http, reorder_orchestrator_task_block_members_view,
+    reorder_orchestrator_task_block_members_view_for_state,
+    AppendOrchestratorTaskBlockMemberRequest, CreateOrchestratorTaskBlockRequest,
+    OrchestratorTaskBlockViewCreatedDto, ReorderOrchestratorTaskBlockMembersRequest,
 };
 pub use evidence::{
     __cmd__get_orchestrator_config_for_project, __cmd__get_orchestrator_project_config,

@@ -16,8 +16,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent, FormEvent, RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { devicesApi } from '@/api/devices';
 import { orchestratorApi } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
+import { canCreateOrchestratorTaskBlock } from '@/lib/orchestratorCapabilities';
 import { buildExperimentCandidates, useAgentAdapterCatalog } from './useAgentAdapterCatalog';
 import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { useOrchestratorRuntimeSnapshot } from '@/hooks/useOrchestratorRuntimeSnapshot';
@@ -40,9 +42,11 @@ import {
   isOrchestratorRemoteActionOnline,
   isOrchestratorTaskViewActionable,
   splitOrchestratorTaskViews,
+  upsertOrchestratorTaskBlockCreated,
   upsertOrchestratorTaskView,
 } from '@/lib/orchestratorRemote';
 import type {
+  Device,
   OrchestratorEvidence,
   OrchestratorExperiment,
   OrchestratorTask,
@@ -57,16 +61,22 @@ import type {
 import type { OrchestratorDetailTab } from '../views/OrchestratorTaskDrawer';
 import type { OrchestratorBoardGroups } from '../orchestratorBoard';
 import {
+  canMoveBoardBlockToWorkflowState,
   canMoveRenderableTaskToWorkflowState,
-  groupRenderableTasksByWorkflowState,
+  groupBoardItems,
+  MAX_ORCHESTRATOR_BLOCK_MEMBERS,
+  MIN_ORCHESTRATOR_BLOCK_MEMBERS,
   ORCHESTRATOR_BOARD_LANES,
 } from '../orchestratorBoard';
+import type { OrchestratorCreateDialogKind } from '../views/OrchestratorCreateDialog';
+import type { OrchestratorCreateMode } from '../views/OrchestratorBoard';
 import { resolveOrchestratorFocusTarget } from '../orchestratorFocus';
 import type { OrchestratorCreateAction, OrchestratorCreateForm } from '../orchestratorViewHelpers';
 import {
   buildWorkbenchTaskUrl,
   displayOrchestratorErrorMessage,
   EMPTY_ORCHESTRATOR_CREATE_FORM,
+  emptyOrchestratorBlockMembers,
   evidenceItemsByKind,
   latestEvidenceByKind,
 } from '../orchestratorViewHelpers';
@@ -180,6 +190,16 @@ export interface UseOrchestratorControllerResult {
   outboxActionId: string | null;
   form: OrchestratorCreateForm;
   createDialogOpen: boolean;
+  createDialogKind: OrchestratorCreateDialogKind;
+  createMode: OrchestratorCreateMode;
+  preferredCreateAction: OrchestratorCreateAction | null;
+  blockTitle: string;
+  blockMembers: OrchestratorCreateForm[];
+  appending: boolean;
+  canCreateBlock: boolean;
+  canAppend: boolean;
+  canCreateTaskBlock: boolean;
+  movingBlockId: string | null;
   completionPrompt: string;
   setCompletionPrompt: (value: string) => void;
   completingPrompt: boolean;
@@ -199,7 +219,25 @@ export interface UseOrchestratorControllerResult {
   runtimeSnapshotErrorMessage: string | null;
   showRuntimeSnapshotContent: boolean;
   handleOpenCreateDialog: () => void;
+  handleOpenLaneCreate: (lane: OrchestratorWorkflowState, mode: OrchestratorCreateMode) => void;
+  handleOpenAppend: (blockId: string) => void;
   handleCloseCreateDialog: () => void;
+  handleCreateModeChange: (mode: OrchestratorCreateMode) => void;
+  handleBlockTitleChange: (value: string) => void;
+  handleUpdateBlockMember: (
+    index: number,
+    field: keyof OrchestratorCreateForm,
+    value: string,
+  ) => void;
+  handleAddBlockMember: () => void;
+  handleRemoveBlockMember: (index: number) => void;
+  handleAppendSubmit: () => Promise<void>;
+  handleReorderBlock: (blockId: string, orderedTaskIds: string[]) => Promise<void>;
+  handleBlockDragStart: (
+    event: DragEvent<HTMLElement>,
+    blockId: string,
+    members: OrchestratorRenderableTask[],
+  ) => void;
   handleCloseTaskDrawer: () => void;
   handleRefreshRuntimeSnapshot: () => void;
   handleOpenAutomationSettings: () => void;
@@ -300,6 +338,19 @@ export function useOrchestratorController(
   const [actionError, setActionError] = useState<OrchestratorActionError | null>(null);
   const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
+  const [createDialogKind, setCreateDialogKind] = useState<OrchestratorCreateDialogKind>('create');
+  const [createMode, setCreateMode] = useState<OrchestratorCreateMode>('task');
+  const [preferredCreateAction, setPreferredCreateAction] =
+    useState<OrchestratorCreateAction | null>(null);
+  const [blockTitle, setBlockTitle] = useState('');
+  const [blockMembers, setBlockMembers] = useState<OrchestratorCreateForm[]>(
+    emptyOrchestratorBlockMembers,
+  );
+  const [appending, setAppending] = useState(false);
+  const [appendBlockId, setAppendBlockId] = useState<string | null>(null);
+  const [movingBlockId, setMovingBlockId] = useState<string | null>(null);
+  const [draggedBlockId, setDraggedBlockId] = useState<string | null>(null);
+  const [peerDevices, setPeerDevices] = useState<Device[]>([]);
   const [completionPrompt, setCompletionPrompt] = useState('');
   const [completingPrompt, setCompletingPrompt] = useState(false);
   const completionPromptRef = useRef<HTMLTextAreaElement | null>(null);
@@ -366,6 +417,32 @@ export function useOrchestratorController(
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
   }, [activeProjectId]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   remote shortcut 的「添加任务块」必须按 owner 的 health/mDNS capabilities 禁用，不能写死 true。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   仅 remote 项目拉取 devicesApi.list；失败 fail-closed 为空列表。
+   */
+  useEffect(() => {
+    if (activeProject?.kind !== 'remote') {
+      setPeerDevices([]);
+      return;
+    }
+    let cancelled = false;
+    void devicesApi
+      .list()
+      .then((list) => {
+        if (!cancelled) setPeerDevices(list);
+      })
+      .catch(() => {
+        if (!cancelled) setPeerDevices([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.deviceId, activeProject?.id, activeProject?.kind]);
 
   const activeTaskListResult =
     taskLoadDecision.kind === 'load' && taskListResult?.projectId === taskLoadDecision.projectId
@@ -439,7 +516,15 @@ export function useOrchestratorController(
     tasks,
   ]);
 
-  const groups = useMemo(() => groupRenderableTasksByWorkflowState(tasks), [tasks]);
+  const groups = useMemo(() => groupBoardItems(tasks), [tasks]);
+  const ownerPeer = useMemo(
+    () => peerDevices.find((device) => device.id === activeProject?.deviceId) ?? null,
+    [activeProject?.deviceId, peerDevices],
+  );
+  const canCreateTaskBlock = canCreateOrchestratorTaskBlock({
+    projectKind: activeProject?.kind,
+    peer: ownerPeer,
+  });
   const selectedRenderableTask = useMemo(() => {
     return tasks.find((item) => item.task.id === selectedTaskId) ?? null;
   }, [selectedTaskId, tasks]);
@@ -502,6 +587,25 @@ export function useOrchestratorController(
     !creatingAction;
   const canCompletePrompt =
     Boolean(activeProjectId) && completionPrompt.trim().length > 0 && !completingPrompt;
+  const canCreateBlock =
+    Boolean(activeProjectId) &&
+    blockTitle.trim().length > 0 &&
+    blockMembers.length >= MIN_ORCHESTRATOR_BLOCK_MEMBERS &&
+    blockMembers.length <= MAX_ORCHESTRATOR_BLOCK_MEMBERS &&
+    blockMembers.every(
+      (member) =>
+        member.title.trim().length > 0 &&
+        member.goal.trim().length > 0 &&
+        member.acceptanceCriteria.trim().length > 0,
+    ) &&
+    !creatingAction;
+  const canAppend =
+    Boolean(activeProjectId) &&
+    Boolean(appendBlockId) &&
+    form.title.trim().length > 0 &&
+    form.goal.trim().length > 0 &&
+    form.acceptanceCriteria.trim().length > 0 &&
+    !appending;
 
   const createPromptWorkingDirectory = useMemo(() => {
     if (!activeProject || activeProject.kind !== 'local') return null;
@@ -517,7 +621,123 @@ export function useOrchestratorController(
    */
   const handleOpenCreateDialog = useCallback(() => {
     setActionError(null);
+    setCreateDialogKind('create');
+    setCreateMode('task');
+    setPreferredCreateAction(null);
+    setAppendBlockId(null);
     setCreateDialogOpen(true);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Backlog/Todo 的 + 必须打开同一套独立 Dialog，并带上泳道对应的 preferredCreateAction。
+   *
+   * Code Logic（这个函数做什么）:
+   *   设置 createMode 与 preferredCreateAction（backlog/todo），打开 create 弹窗。
+   */
+  const handleOpenLaneCreate = useCallback(
+    (lane: OrchestratorWorkflowState, mode: OrchestratorCreateMode) => {
+      if (lane !== 'backlog' && lane !== 'todo') return;
+      const nextMode = mode === 'taskBlock' && !canCreateTaskBlock ? 'task' : mode;
+      setActionError(null);
+      setCreateDialogKind('create');
+      setCreateMode(nextMode);
+      setPreferredCreateAction(lane);
+      setAppendBlockId(null);
+      setCreateDialogOpen(true);
+    },
+    [canCreateTaskBlock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块卡片末尾追加只填三字段，不能出现 createAction 三按钮。
+   *
+   * Code Logic（这个函数做什么）:
+   *   记录 appendBlockId，切到 append 弹窗并清空单任务表单。
+   */
+  const handleOpenAppend = useCallback((blockId: string) => {
+    setActionError(null);
+    setCreateDialogKind('append');
+    setCreateMode('task');
+    setPreferredCreateAction(null);
+    setAppendBlockId(blockId);
+    setForm(EMPTY_ORCHESTRATOR_CREATE_FORM);
+    setCreateDialogOpen(true);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   任务 / 任务块切换必须由 controller 持有，视图不得自管业务 mode。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 createMode。
+   */
+  const handleCreateModeChange = useCallback(
+    (mode: OrchestratorCreateMode) => {
+      if (mode === 'taskBlock' && !canCreateTaskBlock) return;
+      setCreateMode(mode);
+    },
+    [canCreateTaskBlock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块标题与成员表单必须受控在 controller。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 blockTitle。
+   */
+  const handleBlockTitleChange = useCallback((value: string) => {
+    setBlockTitle(value);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块成员三字段各自独立编辑。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 index/field 更新 blockMembers。
+   */
+  const handleUpdateBlockMember = useCallback(
+    (index: number, field: keyof OrchestratorCreateForm, value: string) => {
+      setBlockMembers((current) =>
+        current.map((member, memberIndex) =>
+          memberIndex === index ? { ...member, [field]: value } : member,
+        ),
+      );
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可在 8 人上限内继续加步骤。
+   *
+   * Code Logic（这个函数做什么）:
+   *   未满 MAX 时追加一份空三字段。
+   */
+  const handleAddBlockMember = useCallback(() => {
+    setBlockMembers((current) =>
+      current.length >= MAX_ORCHESTRATOR_BLOCK_MEMBERS
+        ? current
+        : [...current, { ...EMPTY_ORCHESTRATOR_CREATE_FORM }],
+    );
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块模式至少保留 2 个成员。
+   *
+   * Code Logic（这个函数做什么）:
+   *   多于 MIN 时按 index 删除。
+   */
+  const handleRemoveBlockMember = useCallback((index: number) => {
+    setBlockMembers((current) =>
+      current.length <= MIN_ORCHESTRATOR_BLOCK_MEMBERS
+        ? current
+        : current.filter((_, memberIndex) => memberIndex !== index),
+    );
   }, []);
 
   /**
@@ -528,9 +748,11 @@ export function useOrchestratorController(
    *   creatingAction 或 completingPrompt 为真时 early-return；否则关闭 createDialogOpen。
    */
   const handleCloseCreateDialog = useCallback(() => {
-    if (creatingAction || completingPrompt || creatingExperiment) return;
+    if (creatingAction || completingPrompt || creatingExperiment || appending) return;
     setCreateDialogOpen(false);
-  }, [completingPrompt, creatingAction, creatingExperiment]);
+    setAppendBlockId(null);
+    setCreateDialogKind('create');
+  }, [appending, completingPrompt, creatingAction, creatingExperiment]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -788,11 +1010,19 @@ export function useOrchestratorController(
         workingDirectory: createPromptWorkingDirectory,
       });
       if (activeProjectIdRef.current !== projectId) return;
-      setForm({
+      const nextForm = {
         title: completed.title.trim(),
         goal: completed.goal.trim(),
         acceptanceCriteria: completed.acceptanceCriteria.trim(),
-      });
+      };
+      setForm(nextForm);
+      if (createMode === 'taskBlock') {
+        setBlockTitle((current) => current.trim() || nextForm.title);
+        setBlockMembers((current) => {
+          if (current.length === 0) return [nextForm];
+          return current.map((member, index) => (index === 0 ? nextForm : member));
+        });
+      }
     } catch (err) {
       if (activeProjectIdRef.current === projectId) {
         setActionError({
@@ -803,7 +1033,7 @@ export function useOrchestratorController(
     } finally {
       setCompletingPrompt(false);
     }
-  }, [activeProject, activeProjectId, completionPrompt, createPromptWorkingDirectory, t]);
+  }, [activeProject, activeProjectId, completionPrompt, createMode, createPromptWorkingDirectory, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -846,8 +1076,12 @@ export function useOrchestratorController(
           };
         });
         setForm(EMPTY_ORCHESTRATOR_CREATE_FORM);
+        setBlockTitle('');
+        setBlockMembers(emptyOrchestratorBlockMembers());
         setCompletionPrompt('');
         setCreateDialogOpen(false);
+        setAppendBlockId(null);
+        setCreateDialogKind('create');
         void refreshRuntimeSnapshot();
       } catch (err) {
         setActionError({
@@ -879,11 +1113,182 @@ export function useOrchestratorController(
    * Code Logic（这个函数做什么）:
    *   转发 createAction 到 submitCreateTask。
    */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   任务块必须一次提交块标题与 2–8 个成员，并显式带 createAction。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 createTaskBlockView，成功后 upsert 全部成员视图并关闭弹窗。
+   */
+  const submitCreateTaskBlock = useCallback(
+    async (createAction: OrchestratorCreateAction) => {
+      if (!activeProject) {
+        setActionError({ projectId: activeProjectId, message: t('orchestrator:errors.noProject') });
+        return;
+      }
+      const projectId = activeProject.id;
+      const title = blockTitle.trim();
+      const members = blockMembers.map((member) => ({
+        title: member.title.trim(),
+        goal: member.goal.trim(),
+        acceptanceCriteria: member.acceptanceCriteria.trim(),
+      }));
+      if (!title) {
+        setActionError({ projectId, message: t('orchestrator:errors.blockTitleRequired') });
+        return;
+      }
+      if (
+        members.length < MIN_ORCHESTRATOR_BLOCK_MEMBERS ||
+        members.length > MAX_ORCHESTRATOR_BLOCK_MEMBERS ||
+        members.some((member) => !member.title || !member.goal || !member.acceptanceCriteria)
+      ) {
+        setActionError({ projectId, message: t('orchestrator:errors.blockMembersRequired') });
+        return;
+      }
+      setCreatingAction(createAction);
+      setActionError(null);
+      try {
+        const created = await orchestratorApi.createTaskBlockView({
+          projectId,
+          title,
+          members,
+          createAction,
+        });
+        if (!orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
+          return;
+        }
+        setTaskListResult((current) => {
+          const currentViews = current?.projectId === projectId ? current.views : [];
+          return {
+            projectId,
+            views: upsertOrchestratorTaskBlockCreated(currentViews, created),
+            error: null,
+          };
+        });
+        setForm(EMPTY_ORCHESTRATOR_CREATE_FORM);
+        setBlockTitle('');
+        setBlockMembers(emptyOrchestratorBlockMembers());
+        setCompletionPrompt('');
+        setCreateDialogOpen(false);
+        setCreateDialogKind('create');
+        void refreshRuntimeSnapshot();
+      } catch (err) {
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.createBlock')),
+        });
+      } finally {
+        setCreatingAction(null);
+      }
+    },
+    [activeProject, activeProjectId, blockMembers, blockTitle, refreshRuntimeSnapshot, t],
+  );
+
   const handleCreateTaskAction = useCallback(
     async (createAction: OrchestratorCreateAction) => {
+      if (createMode === 'taskBlock') {
+        await submitCreateTaskBlock(createAction);
+        return;
+      }
       await submitCreateTask(createAction);
     },
-    [submitCreateTask],
+    [createMode, submitCreateTask, submitCreateTaskBlock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块末尾追加没有 createAction，提交即 append。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 appendTaskBlockMemberView，成功 upsert 新成员并关闭弹窗。
+   */
+  const handleAppendSubmit = useCallback(async () => {
+    if (!activeProject || !appendBlockId) {
+      setActionError({ projectId: activeProjectId, message: t('orchestrator:errors.noProject') });
+      return;
+    }
+    const projectId = activeProject.id;
+    const payload = {
+      projectId,
+      blockId: appendBlockId,
+      title: form.title.trim(),
+      goal: form.goal.trim(),
+      acceptanceCriteria: form.acceptanceCriteria.trim(),
+    };
+    if (!payload.title || !payload.goal || !payload.acceptanceCriteria) {
+      setActionError({ projectId, message: t('orchestrator:errors.required') });
+      return;
+    }
+    setAppending(true);
+    setActionError(null);
+    try {
+      const created = await orchestratorApi.appendTaskBlockMemberView(payload);
+      if (!orchestratorCreateResultMatchesProject(activeProjectIdRef.current, projectId)) {
+        return;
+      }
+      setTaskListResult((current) => {
+        const currentViews = current?.projectId === projectId ? current.views : [];
+        return {
+          projectId,
+          views: upsertOrchestratorTaskView(currentViews, created),
+          error: null,
+        };
+      });
+      setForm(EMPTY_ORCHESTRATOR_CREATE_FORM);
+      setCreateDialogOpen(false);
+      setAppendBlockId(null);
+      setCreateDialogKind('create');
+      void refreshRuntimeSnapshot();
+    } catch (err) {
+      setActionError({
+        projectId,
+        message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.appendBlock')),
+      });
+    } finally {
+      setAppending(false);
+    }
+  }, [activeProject, activeProjectId, appendBlockId, form, refreshRuntimeSnapshot, t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Backlog/Todo 空闲块的上移/下移必须提交完整成员置换。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 reorderTaskBlockMembersView，成功后逐个 upsert 成员视图。
+   */
+  const handleReorderBlock = useCallback(
+    async (blockId: string, orderedTaskIds: string[]) => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      setActionError(null);
+      try {
+        const updated = await orchestratorApi.reorderTaskBlockMembersView({
+          projectId,
+          blockId,
+          orderedTaskIds,
+        });
+        if (activeProjectIdRef.current !== projectId) return;
+        setTaskListResult((current) => {
+          const currentViews = current?.projectId === projectId ? current.views : [];
+          return {
+            projectId,
+            views: updated.reduce(
+              (views, view) => upsertOrchestratorTaskView(views, view),
+              currentViews,
+            ),
+            error: null,
+          };
+        });
+      } catch (err) {
+        if (activeProjectIdRef.current === projectId) {
+          setActionError({
+            projectId,
+            message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.reorderBlock')),
+          });
+        }
+      }
+    },
+    [t],
   );
 
   /**
@@ -1083,6 +1488,10 @@ export function useOrchestratorController(
    */
   const handleTaskDragStart = useCallback(
     (event: DragEvent<HTMLButtonElement>, item: OrchestratorRenderableTask) => {
+      if (item.task.blockId) {
+        event.preventDefault();
+        return;
+      }
       const canMoveToAdjacentLane = ORCHESTRATOR_BOARD_LANES.some((lane) =>
         canMoveRenderableTaskToWorkflowState(item, lane),
       );
@@ -1091,10 +1500,39 @@ export function useOrchestratorController(
         return;
       }
       event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/plain', item.task.id);
+      event.dataTransfer.setData('text/plain', `task:${item.task.id}`);
       setDraggedTaskId(item.task.id);
+      setDraggedBlockId(null);
     },
     [movingTaskId],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   整块只在全部成员仍 backlog 或全部仍 todo 时可拖到相邻泳道。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 canMoveBoardBlock 后写入 `block:<id>`。
+   */
+  const handleBlockDragStart = useCallback(
+    (
+      event: DragEvent<HTMLElement>,
+      blockId: string,
+      members: OrchestratorRenderableTask[],
+    ) => {
+      const canMove = ORCHESTRATOR_BOARD_LANES.some((lane) =>
+        canMoveBoardBlockToWorkflowState(members, lane),
+      );
+      if (!canMove || movingBlockId === blockId) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', `block:${blockId}`);
+      setDraggedBlockId(blockId);
+      setDraggedTaskId(null);
+    },
+    [movingBlockId],
   );
 
   /**
@@ -1102,42 +1540,106 @@ export function useOrchestratorController(
    *   拖拽结束后需要清掉 dragged 高亮态。
    *
    * Code Logic（这个函数做什么）:
-   *   setDraggedTaskId(null)。
+   *   清空 draggedTaskId 与 draggedBlockId。
    */
   const handleTaskDragEnd = useCallback(() => {
     setDraggedTaskId(null);
+    setDraggedBlockId(null);
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   按 blockId 找回当前块的全部成员，供拖拽校验与整块移动。
+   *
+   * Code Logic（这个函数做什么）:
+   *   过滤 tasks.task.blockId 匹配项。
+   */
+  const getBlockMembers = useCallback(
+    (blockId: string | null): OrchestratorRenderableTask[] => {
+      if (!blockId) return [];
+      return tasks.filter((item) => item.task.blockId === blockId);
+    },
+    [tasks],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   泳道 dragOver 只在合法相邻移动时允许 drop。
    *
    * Code Logic（这个函数做什么）:
-   *   校验 canMove 后 preventDefault 并设置 dropEffect。
+   *   任务或整块通过 canMove 后 preventDefault。
    */
   const handleLaneDragOver = useCallback(
     (event: DragEvent<HTMLElement>, targetState: OrchestratorWorkflowState) => {
-      if (movingTaskId) return;
+      if (movingTaskId || movingBlockId) return;
+      if (draggedBlockId) {
+        if (!canMoveBoardBlockToWorkflowState(getBlockMembers(draggedBlockId), targetState)) {
+          return;
+        }
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        return;
+      }
       const draggedItem = getRenderableTaskById(draggedTaskId);
       if (!canMoveRenderableTaskToWorkflowState(draggedItem, targetState)) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
     },
-    [draggedTaskId, getRenderableTaskById, movingTaskId],
+    [draggedBlockId, draggedTaskId, getBlockMembers, getRenderableTaskById, movingBlockId, movingTaskId],
   );
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   合法 drop 需要把本机或远端任务移动到相邻 workflow 泳道。
+   *   合法 drop 需要把本机或远端任务移动到相邻 workflow 泳道；整块则逐个移动全部成员。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 orchestratorApi.moveTaskWorkflowState，成功后 replace 列表并刷新 runtime snapshot。
+   *   解析 `task:`/`block:` payload；任务走单次 move，块对每个成员调用 moveTaskWorkflowState。
    */
   const handleLaneDrop = useCallback(
     async (event: DragEvent<HTMLElement>, targetState: OrchestratorWorkflowState) => {
-      const droppedTaskId = event.dataTransfer.getData('text/plain') || draggedTaskId;
+      const raw = event.dataTransfer.getData('text/plain');
+      const payload = raw || (draggedBlockId ? `block:${draggedBlockId}` : draggedTaskId ? `task:${draggedTaskId}` : '');
+      if (payload.startsWith('block:')) {
+        const blockId = payload.slice('block:'.length) || draggedBlockId;
+        const members = getBlockMembers(blockId);
+        if (!blockId || movingBlockId || !canMoveBoardBlockToWorkflowState(members, targetState)) {
+          return;
+        }
+        event.preventDefault();
+        const projectId = members[0]?.task.projectId;
+        if (!projectId) return;
+        setMovingBlockId(blockId);
+        setActionError(null);
+        try {
+          for (const member of members) {
+            const moved = await orchestratorApi.moveTaskWorkflowState(
+              projectId,
+              member.task.id,
+              targetState,
+            );
+            const movedProjectId = moved.origin === 'pendingRemote' ? null : moved.task.projectId;
+            if (activeProjectIdRef.current !== projectId || movedProjectId !== projectId) {
+              return;
+            }
+            replaceTaskViewInCurrentProject(projectId, moved);
+          }
+          void refreshRuntimeSnapshot();
+        } catch (err) {
+          if (activeProjectIdRef.current === projectId) {
+            setActionError({
+              projectId,
+              message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.move')),
+            });
+          }
+        } finally {
+          setMovingBlockId((current) => (current === blockId ? null : current));
+          setDraggedBlockId((current) => (current === blockId ? null : current));
+        }
+        return;
+      }
+      const droppedTaskId = payload.startsWith('task:') ? payload.slice('task:'.length) : payload || draggedTaskId;
       const droppedItem = getRenderableTaskById(droppedTaskId);
-      if (!droppedItem || movingTaskId || !canMoveRenderableTaskToWorkflowState(droppedItem, targetState)) {
+      if (!droppedItem || droppedItem.task.blockId || movingTaskId || !canMoveRenderableTaskToWorkflowState(droppedItem, targetState)) {
         return;
       }
       event.preventDefault();
@@ -1166,8 +1668,11 @@ export function useOrchestratorController(
       }
     },
     [
+      draggedBlockId,
       draggedTaskId,
+      getBlockMembers,
       getRenderableTaskById,
+      movingBlockId,
       movingTaskId,
       refreshRuntimeSnapshot,
       replaceTaskViewInCurrentProject,
@@ -1854,6 +2359,16 @@ export function useOrchestratorController(
     outboxActionId,
     form,
     createDialogOpen,
+    createDialogKind,
+    createMode,
+    preferredCreateAction,
+    blockTitle,
+    blockMembers,
+    appending,
+    canCreateBlock,
+    canAppend,
+    canCreateTaskBlock,
+    movingBlockId,
     completionPrompt,
     setCompletionPrompt,
     completingPrompt,
@@ -1873,7 +2388,17 @@ export function useOrchestratorController(
     runtimeSnapshotErrorMessage,
     showRuntimeSnapshotContent,
     handleOpenCreateDialog,
+    handleOpenLaneCreate,
+    handleOpenAppend,
     handleCloseCreateDialog,
+    handleCreateModeChange,
+    handleBlockTitleChange,
+    handleUpdateBlockMember,
+    handleAddBlockMember,
+    handleRemoveBlockMember,
+    handleAppendSubmit,
+    handleReorderBlock,
+    handleBlockDragStart,
     handleCloseTaskDrawer,
     handleRefreshRuntimeSnapshot,
     handleOpenAutomationSettings,

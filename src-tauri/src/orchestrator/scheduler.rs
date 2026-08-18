@@ -819,8 +819,8 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     split state 后，scheduler 只领取 **Queued + Idle** 且 active workflow 上的任务（Todo/Rework）；
-    ///     Backlog 不自动启动，仅拖入 Todo 的 Draft 不启动，Blocked 必须经用户 retry 回到 Idle 后才能再 claim。
+    ///     split state 后，scheduler 领取 **Queued + Idle** 或 **Rework 空闲非堵塞** 且 active workflow 上的任务；
+    ///     Backlog 不自动启动，Blocked 必须经用户 retry 回到 Idle 后才能再 claim。
     ///
     /// Code Logic（这个函数做什么）:
     ///     构造 Backlog/Draft idle、Queued Todo idle、Queued Rework idle 与 Blocked Rework 四个本机任务，
@@ -907,12 +907,12 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     用户仅把 Draft 拖到 Todo 泳道时不得隐式启动 Runner；只有 queue/start/createAction 产生的 Queued 才可 claim。
+    ///     用户把 Draft 拖到 Todo 等于入队；仓储层不得写成 Preparing，但 scheduler 必须能领取。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     创建 Draft 任务后 move_task_workflow_state 到 Todo，再跑 claim helper，断言不被领取且仍为 Draft/Todo/Idle。
+    ///     创建 Draft 任务后 move_task_workflow_state 到 Todo，断言先变成 Queued/Idle，再被 claim helper 领取。
     #[tokio::test]
-    async fn draft_dragged_to_todo_is_not_claimed_by_scheduler() {
+    async fn draft_dragged_to_todo_is_claimed_by_scheduler() {
         let (pool, repo) = setup_repo().await;
         create_workbench_projects_table(&pool).await;
         insert_workbench_project(&pool, "local-a", "local").await;
@@ -922,7 +922,7 @@ mod tests {
             .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Todo)
             .await
             .unwrap();
-        assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+        assert_eq!(moved.status, OrchestratorTaskStatus::Queued);
         assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
         assert_eq!(moved.run_state, OrchestratorRunState::Idle);
 
@@ -932,10 +932,14 @@ mod tests {
             .unwrap();
         let persisted = repo.get_task(&created.id).await.unwrap();
 
-        assert!(claimed.is_empty(), "仅拖拽 Draft→Todo 不得 claim");
-        assert_eq!(persisted.status, OrchestratorTaskStatus::Draft);
-        assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
-        assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, created.id);
+        assert_eq!(persisted.status, OrchestratorTaskStatus::Preparing);
+        assert_eq!(
+            persisted.workflow_state,
+            OrchestratorWorkflowState::InProgress
+        );
+        assert_eq!(persisted.run_state, OrchestratorRunState::Preparing);
     }
 
     /// Business Logic（为什么需要这个函数）:

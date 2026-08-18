@@ -161,6 +161,8 @@ impl OrchestratorRepo {
         migrate_remote_task_create_request_scope(pool).await?;
         // A4：实验组表、唯一 winner 索引、task.experiment_id / delivery_suppressed
         OrchestratorRepo::init_experiment_schema(pool).await?;
+        // 任务块表 + task.block_id / block_index
+        OrchestratorRepo::init_task_block_schema(pool).await?;
         // A1/A2：operational notification UNION 查询 workbench_agent_sessions（测试库与生产共享 DDL）
         crate::storage::workbench_agent_session_repo::WorkbenchAgentSessionRepo::ensure_schema(
             pool,

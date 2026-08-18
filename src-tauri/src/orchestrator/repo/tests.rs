@@ -201,6 +201,8 @@ async fn init_schema_adds_split_state_columns() {
         "workflow_state",
         "run_state",
         "attempt_phase",
+        "block_id",
+        "block_index",
         "source",
         "external_id",
         "external_identifier",
@@ -220,6 +222,17 @@ async fn init_schema_adds_split_state_columns() {
             "missing column {expected}"
         );
     }
+
+    let block_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orchestrator_task_blocks'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("查询任务块表");
+    assert_eq!(
+        block_tables, 1,
+        "init_schema 必须创建 orchestrator_task_blocks"
+    );
 }
 
 /// Business Logic（为什么需要这个测试）:
@@ -1000,12 +1013,12 @@ async fn queue_task_result_is_claimable_by_split_state_scheduler() {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     看板拖拽只改 workflow_state，不得把 Draft 变成可调度的 Queued；否则启用自动化后拖入 Todo 会隐式启动 Claude。
+///     Backlog 拖到 Todo 必须与 queue_task 一样变成可调度的 Queued/Idle，调度器才能领取。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 Draft 任务并 move 到 Todo，再 claim，断言 0 领取且 status 仍为 Draft。
+///     创建 Draft 任务并 move 到 Todo，断言入队后可被 claim，且 move 当时仍是 Queued 而非 Preparing。
 #[tokio::test]
-async fn draft_moved_to_todo_is_not_claimable_without_queue() {
+async fn draft_moved_to_todo_is_queued_and_claimable() {
     let (pool, repo) = setup_repo().await;
     create_workbench_projects_table(&pool).await;
     insert_workbench_project(&pool, "project-1", "local").await;
@@ -1019,8 +1032,9 @@ async fn draft_moved_to_todo_is_not_claimable_without_queue() {
         .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Todo)
         .await
         .unwrap();
-    assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+    assert_eq!(moved.status, OrchestratorTaskStatus::Queued);
     assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
+    assert_eq!(moved.run_state, OrchestratorRunState::Idle);
 
     let claimed = repo
         .claim_next_local_queued_tasks_with_global_capacity(4)
@@ -1028,10 +1042,14 @@ async fn draft_moved_to_todo_is_not_claimable_without_queue() {
         .unwrap();
     let persisted = repo.get_task(&created.id).await.unwrap();
 
-    assert!(claimed.is_empty());
-    assert_eq!(persisted.status, OrchestratorTaskStatus::Draft);
-    assert_eq!(persisted.workflow_state, OrchestratorWorkflowState::Todo);
-    assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, created.id);
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Preparing);
+    assert_eq!(
+        persisted.workflow_state,
+        OrchestratorWorkflowState::InProgress
+    );
+    assert_eq!(persisted.run_state, OrchestratorRunState::Preparing);
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1745,10 +1763,10 @@ async fn queue_task_rejects_non_draft_without_mutating_task() {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     用户在看板拖拽任务时，只允许把非运行中任务移动到相邻泳道，避免一次跨越多个阶段绕过工作流约束。
+///     用户在看板把 Backlog 草稿拖到 Todo 时，应入队为 Queued/Idle，且不得在仓储层写成 Preparing。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 Backlog/Idle 任务并移动到 Todo，断言只更新 workflow_state，不改变 legacy status 或 run_state。
+///     创建 Backlog/Idle 任务并移动到 Todo，断言 status=Queued、run_state=Idle。
 #[tokio::test]
 async fn move_task_workflow_state_allows_adjacent_lane() {
     let (_pool, repo) = setup_repo().await;
@@ -1762,7 +1780,132 @@ async fn move_task_workflow_state_allows_adjacent_lane() {
 
     assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Todo);
     assert_eq!(moved.run_state, OrchestratorRunState::Idle);
+    assert_eq!(moved.status, OrchestratorTaskStatus::Queued);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户把已入队的 Todo 拖回 Backlog，应退出队列回到 Draft，避免待整理列里残留可调度任务。
+///
+/// Code Logic（这个函数做什么）:
+///     创建 Queued/Todo 任务并移动到 Backlog，断言 Draft/Backlog/Idle。
+#[tokio::test]
+async fn move_task_workflow_state_unqueues_todo_back_to_backlog() {
+    let (_pool, repo) = setup_repo().await;
+    let created = task_row("drag-unqueue", "project-1", OrchestratorTaskStatus::Queued);
+    repo.create_task(&created).await.unwrap();
+    assert_eq!(created.workflow_state, OrchestratorWorkflowState::Todo);
+
+    let moved = repo
+        .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Backlog)
+        .await
+        .unwrap();
+
     assert_eq!(moved.status, OrchestratorTaskStatus::Draft);
+    assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Backlog);
+    assert_eq!(moved.run_state, OrchestratorRunState::Idle);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     人工复核拖到返工必须直接入队，不能再要求用户点「请求返工」才变成 Queued。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 HumanReview/Done/Idle 任务并移动到 Rework，断言 Queued/Idle。
+#[tokio::test]
+async fn move_task_workflow_state_queues_human_review_dropped_on_rework() {
+    let (pool, repo) = setup_repo().await;
+    let created = task_row("drag-hr-rework", "project-1", OrchestratorTaskStatus::Done);
+    repo.create_task(&created).await.unwrap();
+    set_task_split_state(
+        &pool,
+        &created.id,
+        OrchestratorWorkflowState::HumanReview,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+
+    let moved = repo
+        .move_task_workflow_state(&created.id, OrchestratorWorkflowState::Rework)
+        .await
+        .unwrap();
+
+    assert_eq!(moved.status, OrchestratorTaskStatus::Queued);
+    assert_eq!(moved.workflow_state, OrchestratorWorkflowState::Rework);
+    assert_eq!(moved.run_state, OrchestratorRunState::Idle);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     从返工拖回人工复核应恢复可交付的 Done/Idle，避免 Queued 任务停在复核列被误领。
+///
+/// Code Logic（这个函数做什么）:
+///     把 Queued/Rework 任务移回 HumanReview，断言 Done/Idle。
+#[tokio::test]
+async fn move_task_workflow_state_restores_human_review_from_rework() {
+    let (pool, repo) = setup_repo().await;
+    let created = task_row(
+        "drag-rework-hr",
+        "project-1",
+        OrchestratorTaskStatus::Queued,
+    );
+    repo.create_task(&created).await.unwrap();
+    set_task_split_state(
+        &pool,
+        &created.id,
+        OrchestratorWorkflowState::Rework,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+
+    let moved = repo
+        .move_task_workflow_state(&created.id, OrchestratorWorkflowState::HumanReview)
+        .await
+        .unwrap();
+
+    assert_eq!(moved.status, OrchestratorTaskStatus::Done);
+    assert_eq!(moved.workflow_state, OrchestratorWorkflowState::HumanReview);
+    assert_eq!(moved.run_state, OrchestratorRunState::Idle);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     已停在返工空闲态、但 legacy status 仍是 Done 的任务，调度器也应领取，不能卡在「未点请求返工」。
+///
+/// Code Logic（这个函数做什么）:
+///     写入 Rework/Idle/Done 本机任务后 claim，断言被领取为 Preparing。
+#[tokio::test]
+async fn idle_rework_is_claimable_without_queued_status() {
+    let (pool, repo) = setup_repo().await;
+    create_workbench_projects_table(&pool).await;
+    insert_workbench_project(&pool, "project-1", "local").await;
+    let created = task_row(
+        "rework-done-idle",
+        "project-1",
+        OrchestratorTaskStatus::Done,
+    );
+    repo.create_task(&created).await.unwrap();
+    set_task_split_state(
+        &pool,
+        &created.id,
+        OrchestratorWorkflowState::Rework,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+
+    let claimed = repo
+        .claim_next_local_queued_tasks_with_global_capacity(4)
+        .await
+        .unwrap();
+    let persisted = repo.get_task(&created.id).await.unwrap();
+
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, created.id);
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Preparing);
+    assert_eq!(
+        persisted.workflow_state,
+        OrchestratorWorkflowState::InProgress
+    );
+    assert_eq!(persisted.run_state, OrchestratorRunState::Preparing);
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -3981,4 +4124,304 @@ async fn touch_task_last_activity_updates_running_task_anchor() {
         row.last_activity_at.as_deref(),
         Some("2026-07-15T12:00:00Z")
     );
+}
+
+fn block_member(title: &str) -> BlockMemberDraft {
+    BlockMemberDraft {
+        title: title.to_string(),
+        goal: format!("goal-{title}"),
+        acceptance_criteria: format!("accept-{title}"),
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     同一 clientRequestId + 指纹必须整组回放，不能再插入第二块。
+///
+/// Code Logic（这个测试做什么）:
+///     两次 create_task_block_idempotent 使用同一 request id，断言 block id 相同且 newly_created 第二次为 false。
+#[tokio::test]
+async fn create_task_block_is_idempotent_for_same_client_request() {
+    let (_pool, repo) = setup_repo().await;
+    let members = vec![block_member("step-a"), block_member("step-b")];
+    let first = repo
+        .create_task_block_idempotent(
+            Some("req-block-1"),
+            "project-1",
+            "Serial login",
+            &members,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+    let second = repo
+        .create_task_block_idempotent(
+            Some("req-block-1"),
+            "project-1",
+            "Serial login",
+            &members,
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+    assert!(first.newly_created);
+    assert!(!second.newly_created);
+    assert_eq!(first.block.id, second.block.id);
+    assert_eq!(first.tasks.len(), 2);
+    assert_eq!(second.tasks.len(), 2);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     未完成前驱存在时，后一步不得被 claim，避免并行跑同一共享 worktree。
+///
+/// Code Logic（这个测试做什么）:
+///     创建 Todo 块后 claim 一次，断言只领取 block_index=0；第二次 claim 在前驱未 Done 时为空。
+#[tokio::test]
+async fn claim_skips_block_member_until_predecessor_is_done() {
+    let (pool, repo) = setup_repo().await;
+    create_workbench_projects_table(&pool).await;
+    insert_workbench_project(&pool, "project-1", "local").await;
+    let created = repo
+        .create_task_block_idempotent(
+            Some("req-block-claim"),
+            "project-1",
+            "Serial claim",
+            &[block_member("first"), block_member("second")],
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+    let first_batch = repo
+        .claim_next_local_queued_tasks_with_global_capacity(2)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_batch.len(),
+        1,
+        "same block may claim at most one member"
+    );
+    assert_eq!(first_batch[0].block_index, Some(0));
+
+    sqlx::query("UPDATE orchestrator_tasks SET status = ? WHERE id = ?")
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(&created.tasks[0].id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    set_task_split_state(
+        &pool,
+        &created.tasks[0].id,
+        OrchestratorWorkflowState::Done,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+
+    let next_batch = repo
+        .claim_next_local_queued_tasks_with_global_capacity(2)
+        .await
+        .unwrap();
+    assert_eq!(next_batch.len(), 1);
+    assert_eq!(next_batch[0].id, created.tasks[1].id);
+    assert_eq!(next_batch[0].block_index, Some(1));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     In Progress 块追加后 live max index 增长，正在 verifying 的原最后一步不再是 last member。
+///
+/// Code Logic（这个测试做什么）:
+///     建 2 人块，把头标成 verifying，追加第三人，断言 max_block_index=2 且 Human Review 块拒绝追加。
+#[tokio::test]
+async fn append_block_member_extends_live_max_index_and_rejects_review_or_full() {
+    let (pool, repo) = setup_repo().await;
+    let created = repo
+        .create_task_block_idempotent(
+            Some("req-block-append"),
+            "project-1",
+            "Appendable",
+            &[block_member("one"), block_member("two")],
+            OrchestratorCreateAction::Todo,
+        )
+        .await
+        .unwrap();
+    set_task_split_state(
+        &pool,
+        &created.tasks[0].id,
+        OrchestratorWorkflowState::InProgress,
+        OrchestratorRunState::Verifying,
+        None,
+    )
+    .await;
+    let appended = repo
+        .append_task_block_member_idempotent(
+            Some("req-append-1"),
+            "project-1",
+            &created.block.id,
+            "three",
+            "goal-three",
+            "accept-three",
+        )
+        .await
+        .unwrap();
+    assert_eq!(appended.task.block_index, Some(2));
+    assert_eq!(
+        repo.max_block_index(&created.block.id).await.unwrap(),
+        Some(2)
+    );
+
+    set_task_split_state(
+        &pool,
+        &created.tasks[0].id,
+        OrchestratorWorkflowState::HumanReview,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+    let rejected = repo
+        .append_task_block_member_idempotent(
+            Some("req-append-hr"),
+            "project-1",
+            &created.block.id,
+            "four",
+            "goal-four",
+            "accept-four",
+        )
+        .await;
+    assert!(rejected.is_err(), "human review head must reject append");
+
+    let full = repo
+        .create_task_block_idempotent(
+            Some("req-block-full"),
+            "project-1",
+            "Full",
+            &(0..8)
+                .map(|index| block_member(&format!("m{index}")))
+                .collect::<Vec<_>>(),
+            OrchestratorCreateAction::Backlog,
+        )
+        .await
+        .unwrap();
+    let overflow = repo
+        .append_task_block_member_idempotent(
+            Some("req-append-full"),
+            "project-1",
+            &full.block.id,
+            "nine",
+            "goal-nine",
+            "accept-nine",
+        )
+        .await;
+    assert!(overflow.is_err(), "ninth member must be rejected");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     未开工块可按 orderedTaskIds 重写 index；任一成员进入 In Progress 后拒绝。
+///
+/// Code Logic（这个测试做什么）:
+///     Backlog 块对调两个 id 后断言 index 互换；把其中一个标成 inProgress 再 reorder 失败。
+#[tokio::test]
+async fn reorder_block_members_rewrites_indexes_until_in_progress() {
+    let (pool, repo) = setup_repo().await;
+    let created = repo
+        .create_task_block_idempotent(
+            Some("req-block-reorder"),
+            "project-1",
+            "Reorderable",
+            &[block_member("alpha"), block_member("beta")],
+            OrchestratorCreateAction::Backlog,
+        )
+        .await
+        .unwrap();
+    let first_id = created.tasks[0].id.clone();
+    let second_id = created.tasks[1].id.clone();
+    let (_block, reordered_tasks, _newly) = repo
+        .reorder_task_block_members_idempotent(
+            Some("req-reorder-1"),
+            "project-1",
+            &created.block.id,
+            &[second_id.clone(), first_id.clone()],
+        )
+        .await
+        .unwrap();
+    let by_id: std::collections::HashMap<_, _> = reordered_tasks
+        .iter()
+        .map(|task| (task.id.clone(), task.block_index))
+        .collect();
+    assert_eq!(by_id.get(&second_id).copied().flatten(), Some(0));
+    assert_eq!(by_id.get(&first_id).copied().flatten(), Some(1));
+
+    set_task_split_state(
+        &pool,
+        &first_id,
+        OrchestratorWorkflowState::InProgress,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+    let rejected = repo
+        .reorder_task_block_members_idempotent(
+            Some("req-reorder-2"),
+            "project-1",
+            &created.block.id,
+            &[first_id, second_id],
+        )
+        .await;
+    assert!(rejected.is_err(), "in-progress member must reject reorder");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     last-member 必须以 verifier 通过当下的 max index 为准；追加后原最后一步必须变成中间步。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 `is_intermediate_block_member`：max=1 时 index=1 是最后一步，追加到 max=2 后变为中间步。
+#[test]
+fn live_last_member_follows_current_max_index() {
+    assert!(is_intermediate_block_member(0, 1));
+    assert!(!is_intermediate_block_member(1, 1));
+    assert!(is_intermediate_block_member(1, 2));
+    assert!(!is_intermediate_block_member(2, 2));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     块 create/append/reorder 指纹必须互不相同，且不能撞上单任务 create 指纹。
+///
+/// Code Logic（这个测试做什么）:
+///     用相同 title/goal 分别算单任务指纹与三种块指纹，断言全部不相等。
+#[test]
+fn block_fingerprints_do_not_collide_with_single_task_create() {
+    use super::blocks::{
+        append_block_member_fingerprint, create_block_fingerprint,
+        reorder_block_members_fingerprint,
+    };
+    let row = task_row("task-1", "project-1", OrchestratorTaskStatus::Draft);
+    let single = create_request_fingerprint(&row, OrchestratorCreateAction::Todo, &None).unwrap();
+    let members = vec![block_member("task-1"), block_member("task-2")];
+    let create = create_block_fingerprint(
+        "project-1",
+        "task-1",
+        &members,
+        OrchestratorCreateAction::Todo,
+    )
+    .unwrap();
+    let append = append_block_member_fingerprint(
+        "project-1",
+        "block-1",
+        "task-1",
+        "goal-task-1",
+        "accept-task-1",
+    )
+    .unwrap();
+    let reorder = reorder_block_members_fingerprint(
+        "project-1",
+        "block-1",
+        &["task-1".to_string(), "task-2".to_string()],
+    )
+    .unwrap();
+    let fingerprints = [single, create, append, reorder];
+    for (left, right) in fingerprints
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| fingerprints[i + 1..].iter().map(move |b| (a, b)))
+    {
+        assert_ne!(left, right, "block fingerprints must stay unique");
+    }
 }

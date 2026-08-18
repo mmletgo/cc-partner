@@ -2,17 +2,33 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
+import { transferHttp } from '@/api/transferHttp';
 import {
   createHttpOrchestratorClientRequestId,
   httpOrchestratorTransport,
 } from '@/api/workbenchHttp';
 import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
+import {
+  canCreateOrchestratorTaskBlock,
+  type OrchestratorPeerProtocolHint,
+} from '@/lib/orchestratorCapabilities';
 import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import {
   splitOrchestratorTaskViews,
+  upsertOrchestratorTaskBlockCreated,
   upsertOrchestratorTaskView,
 } from '@/lib/orchestratorRemote';
 import type { OrchestratorRenderableTask } from '@/lib/orchestratorRemote';
+import {
+  groupBoardItems,
+  MAX_ORCHESTRATOR_BLOCK_MEMBERS,
+  MIN_ORCHESTRATOR_BLOCK_MEMBERS,
+  type OrchestratorBoardGroups,
+} from '@/pages/Orchestrator/orchestratorBoard';
+import type { OrchestratorCreateForm } from '@/pages/Orchestrator/orchestratorViewHelpers';
+import { EMPTY_ORCHESTRATOR_CREATE_FORM, emptyOrchestratorBlockMembers } from '@/pages/Orchestrator/orchestratorViewHelpers';
+import type { OrchestratorCreateMode } from '@/pages/Orchestrator/views/OrchestratorBoard';
+import type { OrchestratorCreateDialogKind } from '@/pages/Orchestrator/views/OrchestratorCreateDialog';
 import type {
   OrchestratorAttemptPhase,
   OrchestratorEvidence,
@@ -81,10 +97,7 @@ export interface MobileAutomationPanelProps {
  */
 export type UseMobileAutomationControllerParams = MobileAutomationPanelProps;
 
-export type MobileAutomationTaskGroups = Record<
-  OrchestratorWorkflowState,
-  OrchestratorRenderableTask[]
->;
+export type MobileAutomationTaskGroups = OrchestratorBoardGroups;
 
 export interface MobileAutomationCreateActionConfig {
   createAction: HttpCreateOrchestratorTaskAction;
@@ -251,19 +264,15 @@ export function createEmptyMobileAutomationGroups(): MobileAutomationTaskGroups 
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   手机端自动化列表必须是桌面 workflow board 的 compact grouped-list，而不是 legacy status 平铺。
+ *   手机端自动化列表必须是桌面 workflow board 的 compact grouped-list，块要落在 head 泳道。
  *
  * Code Logic（这个函数做什么）:
- *   按 task.task.workflowState 把 local/remote 真实任务加入对应分组；pendingRemote 不会传入本函数。
+ *   委托 groupBoardItems，按 blockId 聚合并把块放到 head 泳道。
  */
 export function groupMobileAutomationTasks(
   tasks: OrchestratorRenderableTask[],
 ): MobileAutomationTaskGroups {
-  const groupedTasks = createEmptyMobileAutomationGroups();
-  for (const task of tasks) {
-    groupedTasks[task.task.workflowState].push(task);
-  }
-  return groupedTasks;
+  return groupBoardItems(tasks);
 }
 
 /**
@@ -407,7 +416,13 @@ export interface MobileAutomationTaskListProps {
   groupedTasks: MobileAutomationTaskGroups;
   selectedTaskId: string | null;
   unknownLabel: string;
+  expandedBlockIds: readonly string[];
   onSelectTaskView: (view: OrchestratorTaskView) => void;
+  onToggleBlock: (blockId: string) => void;
+  canCreateTaskBlock: boolean;
+  onOpenLaneCreate: (lane: OrchestratorWorkflowState, mode: OrchestratorCreateMode) => void;
+  onOpenAppend: (blockId: string) => void;
+  onReorderBlock: (blockId: string, orderedTaskIds: string[]) => void;
 }
 
 /**
@@ -439,27 +454,42 @@ export interface MobileAutomationTaskDetailProps {
 export interface MobileAutomationCreateDialogProps {
   open: boolean;
   dialogTitleId: string;
+  dialogKind: OrchestratorCreateDialogKind;
+  createMode: OrchestratorCreateMode;
+  preferredCreateAction: HttpCreateOrchestratorTaskAction | null;
   promptDraftRef: RefObject<HTMLTextAreaElement | null>;
   creating: boolean;
   completingPrompt: boolean;
   creatingAction: HttpCreateOrchestratorTaskAction | null;
+  appending: boolean;
   promptDraft: string;
   title: string;
   goal: string;
   acceptanceCriteria: string;
+  blockTitle: string;
+  blockMembers: OrchestratorCreateForm[];
   canCompletePrompt: boolean;
   canSubmit: boolean;
+  canCreateBlock: boolean;
+  canCreateTaskBlock: boolean;
+  canAppend: boolean;
   createActions: readonly MobileAutomationCreateActionConfig[];
   onClose: () => void;
+  onCreateModeChange: (mode: OrchestratorCreateMode) => void;
   onPromptDraftChange: (value: string) => void;
   onTitleChange: (value: string) => void;
   onGoalChange: (value: string) => void;
   onAcceptanceCriteriaChange: (value: string) => void;
+  onBlockTitleChange: (value: string) => void;
+  onUpdateBlockMember: (index: number, field: keyof OrchestratorCreateForm, value: string) => void;
+  onAddBlockMember: () => void;
+  onRemoveBlockMember: (index: number) => void;
   onCompletePrompt: () => void;
   onCreateTask: (
     createAction: HttpCreateOrchestratorTaskAction,
     statusKey: MobileAutomationCreateActionStatusKey,
   ) => void;
+  onAppendSubmit: () => void;
 }
 
 /**
@@ -530,6 +560,18 @@ export function useMobileAutomationController({
   const [goal, setGoal] = useState<string>('');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState<string>('');
   const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
+  const [createDialogKind, setCreateDialogKind] = useState<OrchestratorCreateDialogKind>('create');
+  const [createMode, setCreateMode] = useState<OrchestratorCreateMode>('task');
+  const [preferredCreateAction, setPreferredCreateAction] =
+    useState<HttpCreateOrchestratorTaskAction | null>(null);
+  const [blockTitle, setBlockTitle] = useState('');
+  const [blockMembers, setBlockMembers] = useState<OrchestratorCreateForm[]>(
+    emptyOrchestratorBlockMembers,
+  );
+  const [appending, setAppending] = useState(false);
+  const [appendBlockId, setAppendBlockId] = useState<string | null>(null);
+  const [expandedBlockIds, setExpandedBlockIds] = useState<string[]>([]);
+  const [ownerPeer, setOwnerPeer] = useState<OrchestratorPeerProtocolHint | null>(null);
   const [promptDraft, setPromptDraft] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
@@ -575,10 +617,16 @@ export function useMobileAutomationController({
     [taskViews],
   );
   const groupedTasks = useMemo(() => groupMobileAutomationTasks(tasks), [tasks]);
-  const visibleWorkflowStates = useMemo(
-    () => MOBILE_AUTOMATION_WORKFLOW_STATES.filter((state) => groupedTasks[state].length > 0),
-    [groupedTasks],
-  );
+  const visibleWorkflowStates = useMemo(() => {
+    const present = new Set(
+      MOBILE_AUTOMATION_WORKFLOW_STATES.filter((state) => groupedTasks[state].length > 0),
+    );
+    if (hasProject) {
+      present.add('backlog');
+      present.add('todo');
+    }
+    return MOBILE_AUTOMATION_WORKFLOW_STATES.filter((state) => present.has(state));
+  }, [groupedTasks, hasProject]);
   const taskCount = tasks.length;
   const pendingCount = pendingRemoteItems.length;
   const isListEmpty = !loading && taskCount === 0 && pendingCount === 0;
@@ -595,6 +643,32 @@ export function useMobileAutomationController({
       trimmedGoal &&
       trimmedAcceptanceCriteria &&
       !creating &&
+      !completingPrompt &&
+      !loading,
+  );
+  const canCreateBlock = Boolean(
+    hasProject &&
+      blockTitle.trim() &&
+      blockMembers.length >= MIN_ORCHESTRATOR_BLOCK_MEMBERS &&
+      blockMembers.length <= MAX_ORCHESTRATOR_BLOCK_MEMBERS &&
+      blockMembers.every(
+        (member) => member.title.trim() && member.goal.trim() && member.acceptanceCriteria.trim(),
+      ) &&
+      !creating &&
+      !completingPrompt &&
+      !loading,
+  );
+  const canCreateTaskBlock = canCreateOrchestratorTaskBlock({
+    projectKind: project?.kind,
+    peer: ownerPeer,
+  });
+  const canAppend = Boolean(
+    hasProject &&
+      appendBlockId &&
+      trimmedTitle &&
+      trimmedGoal &&
+      trimmedAcceptanceCriteria &&
+      !appending &&
       !completingPrompt &&
       !loading,
   );
@@ -724,6 +798,34 @@ export function useMobileAutomationController({
       resetMobileRuntimeSnapshotStore();
     }
   }, [loadRuntimeSnapshot, loadTasks, project?.id]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   remote shortcut 的「添加任务块」必须看 owner 能力；本机项目与当前 host 同版本。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   remote 时 GET /api/mobile/devices 匹配 project.deviceId；失败或非 remote 清空 peer（local 不依赖 peer）。
+   */
+  useEffect(() => {
+    if (!project || project.kind !== 'remote') {
+      setOwnerPeer(null);
+      return;
+    }
+    let cancelled = false;
+    void transferHttp
+      .listDevices()
+      .then((devices) => {
+        if (cancelled) return;
+        const owner = devices.find((device) => device.id === project.deviceId) ?? null;
+        setOwnerPeer(owner);
+      })
+      .catch(() => {
+        if (!cancelled) setOwnerPeer(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, project?.deviceId, project?.id, project?.kind]);
 
   /**
    * Business Logic（为什么需要这个 effect）:
@@ -907,7 +1009,73 @@ export function useMobileAutomationController({
     createClientRequestFingerprintRef.current = null;
     setError(null);
     setStatus(null);
+    setCreateDialogKind('create');
+    setCreateMode('task');
+    setPreferredCreateAction(null);
+    setAppendBlockId(null);
     setCreateDialogOpen(true);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端 Backlog/Todo 分组头 + 必须打开同一套独立 Dialog。
+   *
+   * Code Logic（这个函数做什么）:
+   *   设置 createMode 与 preferredCreateAction 后打开弹窗。
+   */
+  const handleOpenLaneCreate = useCallback(
+    (lane: OrchestratorWorkflowState, mode: OrchestratorCreateMode) => {
+      if (!activeProjectIdRef.current || (lane !== 'backlog' && lane !== 'todo')) return;
+      createClientRequestIdRef.current = null;
+      createClientRequestFingerprintRef.current = null;
+      setError(null);
+      setStatus(null);
+      setCreateDialogKind('create');
+      setCreateMode(mode === 'taskBlock' && !canCreateTaskBlock ? 'task' : mode);
+      setPreferredCreateAction(lane);
+      setAppendBlockId(null);
+      setCreateDialogOpen(true);
+    },
+    [canCreateTaskBlock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   块组末尾追加只填三字段。
+   *
+   * Code Logic（这个函数做什么）:
+   *   切到 append 弹窗并清空单任务三字段。
+   */
+  const handleOpenAppend = useCallback((blockId: string) => {
+    if (!activeProjectIdRef.current) return;
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
+    setError(null);
+    setStatus(null);
+    setCreateDialogKind('append');
+    setCreateMode('task');
+    setPreferredCreateAction(null);
+    setAppendBlockId(blockId);
+    setTitle('');
+    setGoal('');
+    setAcceptanceCriteria('');
+    setCreateDialogOpen(true);
+  }, []);
+
+  const handleCreateModeChange = useCallback(
+    (mode: OrchestratorCreateMode) => {
+      if (mode === 'taskBlock' && !canCreateTaskBlock) return;
+      setCreateMode(mode);
+    },
+    [canCreateTaskBlock],
+  );
+
+  const handleToggleBlock = useCallback((blockId: string) => {
+    setExpandedBlockIds((current) =>
+      current.includes(blockId)
+        ? current.filter((id) => id !== blockId)
+        : [...current, blockId],
+    );
   }, []);
 
   /**
@@ -918,11 +1086,13 @@ export function useMobileAutomationController({
    *   若没有 pending 请求则关闭 dialog 并清空逻辑提交幂等键；请求中忽略关闭动作。
    */
   const handleCloseCreateDialog = useCallback((): void => {
-    if (creating || completingPrompt) return;
+    if (creating || completingPrompt || appending) return;
     createClientRequestIdRef.current = null;
     createClientRequestFingerprintRef.current = null;
     setCreateDialogOpen(false);
-  }, [creating, completingPrompt]);
+    setAppendBlockId(null);
+    setCreateDialogKind('create');
+  }, [appending, creating, completingPrompt]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1173,12 +1343,179 @@ export function useMobileAutomationController({
    * Code Logic（这个函数做什么）:
    *   fire-and-forget 调用 handleCreateTask。
    */
-  const handleCreateTaskClick = useCallback((
-    createAction: HttpCreateOrchestratorTaskAction,
-    statusKey: MobileAutomationCreateActionStatusKey,
-  ): void => {
-    void handleCreateTask(createAction, statusKey);
-  }, [handleCreateTask]);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端创建任务块必须走 create-block HTTP，不能拆成多次 createView。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST createBlock，成功 upsert 成员并关闭弹窗。
+   */
+  const handleCreateTaskBlock = useCallback(
+    async (
+      createAction: HttpCreateOrchestratorTaskAction,
+      statusKey: MobileAutomationCreateActionStatusKey,
+    ): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) {
+        setError(t('workbench:mobile.automationPanel.noProject'));
+        return;
+      }
+      if (!canCreateTaskBlock) {
+        setError(t('orchestrator:create.unsupportedBlocks'));
+        return;
+      }
+      const nextTitle = blockTitle.trim();
+      const members = blockMembers.map((member) => ({
+        title: member.title.trim(),
+        goal: member.goal.trim(),
+        acceptanceCriteria: member.acceptanceCriteria.trim(),
+      }));
+      if (
+        !nextTitle ||
+        members.length < MIN_ORCHESTRATOR_BLOCK_MEMBERS ||
+        members.some((member) => !member.title || !member.goal || !member.acceptanceCriteria)
+      ) {
+        setError(t('workbench:mobile.automationPanel.errors.blockRequired'));
+        return;
+      }
+      const fingerprint = [projectId, nextTitle, JSON.stringify(members), createAction].join('\u0001');
+      if (
+        createClientRequestIdRef.current === null ||
+        createClientRequestFingerprintRef.current !== fingerprint
+      ) {
+        createClientRequestIdRef.current = createHttpOrchestratorClientRequestId();
+        createClientRequestFingerprintRef.current = fingerprint;
+      }
+      const clientRequestId = createClientRequestIdRef.current;
+      setCreatingAction(createAction);
+      setError(null);
+      setStatus(null);
+      try {
+        const created = await httpOrchestratorTransport.tasks.createBlock({
+          projectId,
+          title: nextTitle,
+          members,
+          createAction,
+          clientRequestId,
+        });
+        if (activeProjectIdRef.current !== projectId) return;
+        setTaskViews((current) => upsertOrchestratorTaskBlockCreated(current, created));
+        setBlockTitle('');
+        setBlockMembers(emptyOrchestratorBlockMembers());
+        setPromptDraft('');
+        createClientRequestIdRef.current = null;
+        createClientRequestFingerprintRef.current = null;
+        setCreateDialogOpen(false);
+        setStatus(t(statusKey));
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.createBlock')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setCreatingAction(null);
+        }
+      }
+    },
+    [blockMembers, blockTitle, canCreateTaskBlock, t],
+  );
+
+  const handleCreateTaskClick = useCallback(
+    (
+      createAction: HttpCreateOrchestratorTaskAction,
+      statusKey: MobileAutomationCreateActionStatusKey,
+    ): void => {
+      if (createMode === 'taskBlock') {
+        void handleCreateTaskBlock(createAction, statusKey);
+        return;
+      }
+      void handleCreateTask(createAction, statusKey);
+    },
+    [createMode, handleCreateTask, handleCreateTaskBlock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端块末尾追加必须走 append-block-member。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST appendBlockMember 后刷新列表。
+   */
+  const handleAppendSubmit = useCallback(async (): Promise<void> => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId || !appendBlockId) {
+      setError(t('workbench:mobile.automationPanel.noProject'));
+      return;
+    }
+    if (!trimmedTitle || !trimmedGoal || !trimmedAcceptanceCriteria) {
+      setError(t('workbench:mobile.automationPanel.errors.required'));
+      return;
+    }
+    setAppending(true);
+    setError(null);
+    try {
+      const created = await httpOrchestratorTransport.tasks.appendBlockMember({
+        projectId,
+        blockId: appendBlockId,
+        title: trimmedTitle,
+        goal: trimmedGoal,
+        acceptanceCriteria: trimmedAcceptanceCriteria,
+        clientRequestId: createHttpOrchestratorClientRequestId(),
+      });
+      if (activeProjectIdRef.current !== projectId) return;
+      setTaskViews((current) => upsertOrchestratorTaskView(current, created));
+      setTitle('');
+      setGoal('');
+      setAcceptanceCriteria('');
+      setCreateDialogOpen(false);
+      setAppendBlockId(null);
+      setCreateDialogKind('create');
+    } catch (reason) {
+      if (activeProjectIdRef.current !== projectId) return;
+      setError(
+        `${t('workbench:mobile.automationPanel.errors.appendBlock')}: ${getErrorMessage(reason)}`,
+      );
+    } finally {
+      if (activeProjectIdRef.current === projectId) {
+        setAppending(false);
+      }
+    }
+  }, [appendBlockId, t, trimmedAcceptanceCriteria, trimmedGoal, trimmedTitle]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端 Backlog/Todo 块提供上移/下移。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST reorderBlockMembers 后按返回任务 upsert。
+   */
+  const handleReorderBlock = useCallback(
+    (blockId: string, orderedTaskIds: string[]): void => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      void (async () => {
+        try {
+          const updated = await httpOrchestratorTransport.tasks.reorderBlockMembers({
+            projectId,
+            blockId,
+            orderedTaskIds,
+            clientRequestId: createHttpOrchestratorClientRequestId(),
+          });
+          if (activeProjectIdRef.current !== projectId) return;
+          setTaskViews((current) =>
+            updated.reduce((views, view) => upsertOrchestratorTaskView(views, view), current),
+          );
+        } catch (reason) {
+          if (activeProjectIdRef.current !== projectId) return;
+          setError(
+            `${t('workbench:mobile.automationPanel.errors.reorderBlock')}: ${getErrorMessage(reason)}`,
+          );
+        }
+      })();
+    },
+    [t],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1261,7 +1598,13 @@ export function useMobileAutomationController({
       groupedTasks,
       selectedTaskId: selectedTask?.id ?? null,
       unknownLabel,
+      expandedBlockIds,
+      canCreateTaskBlock,
       onSelectTaskView: handleSelectTaskView,
+      onToggleBlock: handleToggleBlock,
+      onOpenLaneCreate: handleOpenLaneCreate,
+      onOpenAppend: handleOpenAppend,
+      onReorderBlock: handleReorderBlock,
     },
     taskDetail: {
       selectedTask,
@@ -1277,24 +1620,59 @@ export function useMobileAutomationController({
     createDialog: {
       open: createDialogOpen,
       dialogTitleId,
+      dialogKind: createDialogKind,
+      createMode,
+      preferredCreateAction,
       promptDraftRef,
       creating,
       completingPrompt,
       creatingAction,
+      appending,
       promptDraft,
       title,
       goal,
       acceptanceCriteria,
+      blockTitle,
+      blockMembers,
       canCompletePrompt,
       canSubmit,
+      canCreateBlock,
+      canCreateTaskBlock,
+      canAppend,
       createActions: MOBILE_AUTOMATION_CREATE_ACTIONS,
       onClose: handleCloseCreateDialog,
+      onCreateModeChange: handleCreateModeChange,
       onPromptDraftChange: handlePromptDraftChange,
       onTitleChange: handleTitleChange,
       onGoalChange: handleGoalChange,
       onAcceptanceCriteriaChange: handleAcceptanceCriteriaChange,
+      onBlockTitleChange: setBlockTitle,
+      onUpdateBlockMember: (index, field, value) => {
+        setBlockMembers((current) =>
+          current.map((member, memberIndex) =>
+            memberIndex === index ? { ...member, [field]: value } : member,
+          ),
+        );
+      },
+      onAddBlockMember: () => {
+        setBlockMembers((current) =>
+          current.length >= MAX_ORCHESTRATOR_BLOCK_MEMBERS
+            ? current
+            : [...current, { ...EMPTY_ORCHESTRATOR_CREATE_FORM }],
+        );
+      },
+      onRemoveBlockMember: (index) => {
+        setBlockMembers((current) =>
+          current.length <= MIN_ORCHESTRATOR_BLOCK_MEMBERS
+            ? current
+            : current.filter((_, memberIndex) => memberIndex !== index),
+        );
+      },
       onCompletePrompt: handleCompletePromptClick,
       onCreateTask: handleCreateTaskClick,
+      onAppendSubmit: () => {
+        void handleAppendSubmit();
+      },
     },
     outbox: {
       pendingRemoteItems,

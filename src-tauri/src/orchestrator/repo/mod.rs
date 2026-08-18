@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 mod attempts;
+mod blocks;
 mod evidence;
 mod experiments;
 mod helpers;
@@ -19,6 +20,7 @@ mod tasks;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use blocks::{is_intermediate_block_member, BlockMemberDraft};
 pub use helpers::{
     OrchestratorRecentEventRow, ORCHESTRATOR_EVENT_SCHEMA, ORCHESTRATOR_EVIDENCE_SCHEMA,
     ORCHESTRATOR_PROJECT_CONFIG_SCHEMA, ORCHESTRATOR_REMOTE_OUTBOX_SCHEMA,
@@ -43,6 +45,20 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct IdempotentCreateTaskOutcome {
     pub task: crate::orchestrator::models::OrchestratorTaskRow,
+    pub newly_created: bool,
+}
+
+/// 幂等 create-block 结果：块行 + 成员任务 + 是否首次插入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     clientRequestId 重试时需区分新建与幂等命中，避免 Start 重放再次调度。
+///
+/// Code Logic（这个结构体做什么）:
+///     `block` 与 `tasks` 为权威行；`newly_created` 表示本次是否 insert。
+#[derive(Debug, Clone)]
+pub struct IdempotentCreateBlockOutcome {
+    pub block: crate::orchestrator::models::OrchestratorTaskBlockRow,
+    pub tasks: Vec<crate::orchestrator::models::OrchestratorTaskRow>,
     pub newly_created: bool,
 }
 

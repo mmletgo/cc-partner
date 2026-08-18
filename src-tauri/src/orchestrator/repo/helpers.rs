@@ -39,7 +39,7 @@ pub(crate) const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_c
     runner_stall_timeout_ms, claude_session_id, agent_session_id, transcript_path, runtime_started_at, \
     last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, session_id, \
     prepare_claim_token, blocked_reason, attempt, state_version, created_at, updated_at, started_at, finished_at, \
-    experiment_id, delivery_suppressed";
+    experiment_id, delivery_suppressed, block_id, block_index";
 
 /// Business Logic（为什么需要这个函数）:
 ///     claim 候选 SELECT 需要 JOIN `workbench_projects`，未加表前缀时 `id/created_at/updated_at` 会与 project 列歧义。
@@ -80,6 +80,85 @@ pub(crate) fn workflow_lane_index(state: OrchestratorWorkflowState) -> Result<us
         .iter()
         .position(|item| *item == state)
         .ok_or_else(|| AppError::generic("未知 Orchestrator 工作流泳道"))
+}
+
+/// 看板拖拽在相邻泳道约束下对 legacy status / run_state 的副作用。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Backlog 拖到 Todo、空闲非堵塞任务拖到 Rework 必须入队；反向拖回则退出队列。
+///
+/// Code Logic（这个结构体做什么）:
+///     记录下一发 status/run_state，以及入队时是否清空 blocked_reason。
+pub(crate) struct WorkflowMovePatch {
+    pub status: OrchestratorTaskStatus,
+    pub run_state: OrchestratorRunState,
+    pub clear_blocked_reason: bool,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     待办与返工是调度器默认活跃泳道：拖进去就应入队，不必再点「开始执行」或「请求返工」。
+///     堵塞任务仍要等人重试，不能被拖拽悄悄解除阻塞。
+///
+/// Code Logic（这个函数做什么）:
+///     Backlog/Draft/Idle → Todo、以及非 Blocked 的 Idle → Rework，映射为 Queued/Idle；
+///     Todo/Queued → Backlog 退回 Draft；Rework/Queued → HumanReview 恢复 Done/Idle；
+///     其余相邻移动保持当前 status/run_state。
+pub(crate) fn workflow_move_patch(
+    current: &OrchestratorTaskRow,
+    target: OrchestratorWorkflowState,
+) -> WorkflowMovePatch {
+    let enqueue_draft = current.status == OrchestratorTaskStatus::Draft
+        && current.workflow_state == OrchestratorWorkflowState::Backlog
+        && current.run_state == OrchestratorRunState::Idle
+        && target == OrchestratorWorkflowState::Todo;
+    if enqueue_draft {
+        return WorkflowMovePatch {
+            status: OrchestratorTaskStatus::Queued,
+            run_state: OrchestratorRunState::Idle,
+            clear_blocked_reason: true,
+        };
+    }
+
+    let unqueue_todo = current.status == OrchestratorTaskStatus::Queued
+        && current.workflow_state == OrchestratorWorkflowState::Todo
+        && current.run_state == OrchestratorRunState::Idle
+        && target == OrchestratorWorkflowState::Backlog;
+    if unqueue_todo {
+        return WorkflowMovePatch {
+            status: OrchestratorTaskStatus::Draft,
+            run_state: OrchestratorRunState::Idle,
+            clear_blocked_reason: false,
+        };
+    }
+
+    let enqueue_rework = target == OrchestratorWorkflowState::Rework
+        && current.run_state == OrchestratorRunState::Idle
+        && current.status != OrchestratorTaskStatus::Blocked;
+    if enqueue_rework {
+        return WorkflowMovePatch {
+            status: OrchestratorTaskStatus::Queued,
+            run_state: OrchestratorRunState::Idle,
+            clear_blocked_reason: true,
+        };
+    }
+
+    let restore_human_review = target == OrchestratorWorkflowState::HumanReview
+        && current.workflow_state == OrchestratorWorkflowState::Rework
+        && current.status == OrchestratorTaskStatus::Queued
+        && current.run_state == OrchestratorRunState::Idle;
+    if restore_human_review {
+        return WorkflowMovePatch {
+            status: OrchestratorTaskStatus::Done,
+            run_state: OrchestratorRunState::Idle,
+            clear_blocked_reason: false,
+        };
+    }
+
+    WorkflowMovePatch {
+        status: current.status,
+        run_state: current.run_state,
+        clear_blocked_reason: false,
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -151,8 +230,36 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   started_at TEXT,
-  finished_at TEXT
+  finished_at TEXT,
+  block_id TEXT,
+  block_index INTEGER
 )";
+
+/// 任务块表 schema。
+///
+/// Business Logic（为什么需要这个常量）:
+///     串行任务块需要独立表保存共享 worktree/branch 与块标题，不能复用 experiment 表。
+///
+/// Code Logic（这个常量做什么）:
+///     定义 `orchestrator_task_blocks` 的 CREATE TABLE IF NOT EXISTS 语句。
+pub const ORCHESTRATOR_TASK_BLOCK_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_task_blocks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  shared_worktree_id TEXT,
+  shared_branch_name TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)";
+
+pub(crate) const ORCHESTRATOR_TASK_BLOCKS_PROJECT_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orchestrator_task_blocks_project \
+     ON orchestrator_task_blocks(project_id, updated_at)";
+
+pub(crate) const ORCHESTRATOR_TASKS_BLOCK_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_orchestrator_tasks_block \
+     ON orchestrator_tasks(block_id, block_index)";
 
 pub(crate) const ORCHESTRATOR_TASKS_PROJECT_STATUS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_orchestrator_tasks_project_status \
@@ -352,6 +459,18 @@ pub(crate) fn create_request_fingerprint(
         "external_labels": external_labels_json.as_deref().unwrap_or(""),
     });
     let encoded = serde_json::to_vec(&payload)?;
+    let digest = Sha256::digest(&encoded);
+    Ok(format!("{digest:x}"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     任务块 create/append/reorder 必须用独立 fingerprint，避免与单任务 create 碰撞或绕过 fail-closed。
+///
+/// Code Logic（这个函数做什么）:
+///     对已按固定 key 顺序构造的 JSON payload 做 SHA256，输出小写 hex。
+pub(crate) fn block_request_fingerprint(payload: &serde_json::Value) -> Result<String, AppError> {
+    use sha2::{Digest, Sha256};
+    let encoded = serde_json::to_vec(payload)?;
     let digest = Sha256::digest(&encoded);
     Ok(format!("{digest:x}"))
 }
@@ -630,6 +749,9 @@ pub(crate) fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppErr
             .try_get::<i64, _>("delivery_suppressed")
             .map(|v| v != 0)
             .unwrap_or(false),
+        block_id: row.try_get("block_id").unwrap_or(None),
+        block_index: row.try_get("block_index").unwrap_or(None),
+        block_title: row.try_get("block_title").unwrap_or(None),
     })
 }
 

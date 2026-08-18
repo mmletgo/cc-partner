@@ -13,6 +13,7 @@ import type {
   OrchestratorRemoteOutboxItem,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
+  OrchestratorTaskBlockCreated,
   OrchestratorTaskPromptCompletion,
   OrchestratorTaskView,
   WorkbenchBrowserDiscovery,
@@ -30,11 +31,13 @@ import type {
   Prompt,
 } from '@/lib/types';
 import type { Decoder } from '@/lib/runtimeSchema';
-import { ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
+import { arrayDecoder, ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
 import {
   orchestratorRemoteOutboxItemDecoder,
   orchestratorRuntimeSnapshotDecoder,
+  orchestratorTaskBlockCreatedDecoder,
   orchestratorTaskViewDecoder,
+  orchestratorTaskViewListDecoder,
   orchestratorTaskViewListResponseDecoder,
 } from '@/lib/schemas/orchestrator';
 import {
@@ -689,6 +692,39 @@ export const httpOrchestratorTransport = {
           externalLabels: request.externalLabels,
           clientRequestId: resolveHttpOrchestratorClientRequestId(request),
         }, { policy: { kind: 'mutation' }, decoder: orchestratorTaskViewDecoder }),
+    createBlock: (request: {
+      projectId: string;
+      title: string;
+      members: Array<{ title: string; goal: string; acceptanceCriteria: string }>;
+      createAction: HttpCreateOrchestratorTaskAction;
+      clientRequestId: string;
+    }): Promise<OrchestratorTaskBlockCreated> =>
+      postJson<OrchestratorTaskBlockCreated>('/api/orchestrator/task-views/create-block', request, {
+        policy: { kind: 'mutation' },
+        decoder: orchestratorTaskBlockCreatedDecoder,
+      }),
+    appendBlockMember: (request: {
+      projectId: string;
+      blockId: string;
+      title: string;
+      goal: string;
+      acceptanceCriteria: string;
+      clientRequestId: string;
+    }): Promise<OrchestratorTaskView> =>
+      postJson<OrchestratorTaskView>('/api/orchestrator/task-views/append-block-member', request, {
+        policy: { kind: 'mutation' },
+        decoder: orchestratorTaskViewDecoder,
+      }),
+    reorderBlockMembers: (request: {
+      projectId: string;
+      blockId: string;
+      orderedTaskIds: string[];
+      clientRequestId: string;
+    }): Promise<OrchestratorTaskView[]> =>
+      postJson<OrchestratorTaskView[]>('/api/orchestrator/task-views/reorder-block-members', request, {
+        policy: { kind: 'mutation' },
+        decoder: orchestratorTaskViewListDecoder,
+      }),
     completePrompt: (
       request: HttpCompleteOrchestratorTaskPromptRequest,
     ): Promise<OrchestratorTaskPromptCompletion> =>

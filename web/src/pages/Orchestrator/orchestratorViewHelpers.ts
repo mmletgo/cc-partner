@@ -207,6 +207,20 @@ export const EMPTY_ORCHESTRATOR_CREATE_FORM: OrchestratorCreateForm = {
 };
 
 /**
+ * Business Logic（为什么需要这个常量）:
+ *   任务块创建至少 2 个成员，打开弹窗时就要给出可填空表。
+ *
+ * Code Logic（这个常量做什么）:
+ *   返回两份空三字段表单的浅拷贝。
+ */
+export function emptyOrchestratorBlockMembers(): OrchestratorCreateForm[] {
+  return [
+    { ...EMPTY_ORCHESTRATOR_CREATE_FORM },
+    { ...EMPTY_ORCHESTRATOR_CREATE_FORM },
+  ];
+}
+
+/**
  * Business Logic（为什么需要这个映射）:
  *   legacy status 必须映射到静态 i18n key 才能通过 i18next 类型检查。
  *

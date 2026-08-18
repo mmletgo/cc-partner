@@ -210,7 +210,27 @@
     "createBacklog": "Create in Backlog",
     "createTodo": "Create in Todo",
     "createStart": "Create and Start",
-    "submit": "Create Task"
+    "submit": "Create Task",
+    "modeTask": "Task",
+    "modeBlock": "Task block",
+    "blockTitle": "Block title",
+    "blockTitlePlaceholder": "Example: login form serial implementation",
+    "addMember": "Add member",
+    "removeMember": "Remove member",
+    "memberIndex": "Step {{index}}",
+    "appendTitle": "Add task at end",
+    "appendSubtitle": "The new step is appended after the current last member.",
+    "appendSubmit": "Append task",
+    "unsupportedBlocks": "The peer does not support task blocks."
+  },
+  "blocks": {
+    "addTask": "Add task",
+    "addBlock": "Add task block",
+    "members": "{{count}} steps",
+    "append": "Add task at end",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "blockAria": "Task block {{title}}"
   },
   "evidence": {
     "title": "Evidence",
@@ -266,7 +286,12 @@
     "experimentsLoad": "Failed to load experiment groups.",
     "experimentsCreate": "Failed to create the experiment group.",
     "experimentsApprove": "Failed to approve the recommended winner.",
-    "experimentsCancel": "Failed to cancel the experiment group."
+    "experimentsCancel": "Failed to cancel the experiment group.",
+    "createBlock": "Failed to create the task block.",
+    "appendBlock": "Failed to append a task to the block.",
+    "reorderBlock": "Failed to reorder the task block.",
+    "blockMembersRequired": "A task block needs 2 to 8 members, each with title, goal, and acceptance criteria.",
+    "blockTitleRequired": "Enter a block title."
   },
   "experiments": {
     "title": "Candidate experiments",

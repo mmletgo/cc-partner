@@ -305,8 +305,8 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'groupRenderableTasksByWorkflowState(tasks)',
-    'Orchestrator queue groups renderable tasks by workflow state',
+    'groupBoardItems(tasks)',
+    'Orchestrator queue groups standalone tasks and serial blocks by head lane',
   );
   assertContains(
     orchestratorSource,
@@ -445,8 +445,8 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'const busy = Boolean(creatingAction) || completingPrompt || creatingExperiment;',
-    'Orchestrator create dialog derives busy from creatingAction/completingPrompt/creatingExperiment',
+    'const busy = Boolean(creatingAction) || completingPrompt || creatingExperiment || appending;',
+    'Orchestrator create dialog derives busy from creatingAction/completingPrompt/creatingExperiment/appending',
   );
   assertContains(
     orchestratorSource,

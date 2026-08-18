@@ -595,29 +595,6 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 )),
         )
         .route(
-            "/api/backend/control/orchestrator/task-blocks/create",
-            post(crate::backend::control_api::control_orchestrator_task_block_create).layer(
-                axum::extract::DefaultBodyLimit::max(
-                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                ),
-            ),
-        )
-        .route(
-            "/api/backend/control/orchestrator/task-blocks/append-member",
-            post(crate::backend::control_api::control_orchestrator_task_block_append_member).layer(
-                axum::extract::DefaultBodyLimit::max(
-                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                ),
-            ),
-        )
-        .route(
-            "/api/backend/control/orchestrator/task-blocks/reorder-members",
-            post(crate::backend::control_api::control_orchestrator_task_block_reorder_members)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                )),
-        )
-        .route(
             "/api/backend/control/orchestrator/workflow-document/get",
             post(crate::backend::control_api::control_orchestrator_workflow_document_get).layer(
                 axum::extract::DefaultBodyLimit::max(
@@ -1547,6 +1524,18 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/orchestrator/task-views/create",
             post(orchestrator::create_task_view),
+        )
+        .route(
+            "/api/orchestrator/task-views/create-block",
+            post(orchestrator::create_task_block_view),
+        )
+        .route(
+            "/api/orchestrator/task-views/append-block-member",
+            post(orchestrator::append_task_block_member_view),
+        )
+        .route(
+            "/api/orchestrator/task-views/reorder-block-members",
+            post(orchestrator::reorder_task_block_members_view),
         )
         .route(
             "/api/orchestrator/outbox/retry",

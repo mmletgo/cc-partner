@@ -106,6 +106,16 @@ pub const CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1: &str =
 pub const CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1: &str =
     "orchestrator.move-workflow-state.v1";
 
+/// 能力 token：owning-device 任务块 create/append/reorder。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端创建/追加/重排串行任务块必须在 owning device 上原子落库；
+///     旧 peer 缺失时 fail-closed，不得拆成多条普通任务。
+///
+/// Code Logic（这个常量做什么）:
+///     `orchestrator.task-blocks.v1`，与 create-block / append / reorder 路由原子上线。
+pub const CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1: &str = "orchestrator.task-blocks.v1";
+
 /// 能力 token：v1 全局 Attention/Inbox 快照路由（`GET /api/mobile/attention`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -469,6 +479,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_MOVE_WORKFLOW_STATE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
+            CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
             CAPABILITY_PROVIDER_MANAGER_V1.to_string(),
             CAPABILITY_SYNC_MANIFEST_V2.to_string(),
@@ -648,6 +659,7 @@ mod tests {
                 "orchestrator.experiments.v1".to_string(),
                 "orchestrator.move-workflow-state.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
+                "orchestrator.task-blocks.v1".to_string(),
                 "orchestrator.workflow-document.v1".to_string(),
                 "provider-manager.v1".to_string(),
                 "sync.manifest.v2".to_string(),

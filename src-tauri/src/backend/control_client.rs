@@ -39,7 +39,11 @@ use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERS
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
-use crate::commands::orchestrator::{OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto};
+use crate::commands::orchestrator::{
+    AppendOrchestratorTaskBlockMemberRequest, CreateOrchestratorTaskBlockRequest,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskBlockViewCreatedDto, OrchestratorTaskViewDto,
+    ReorderOrchestratorTaskBlockMembersRequest,
+};
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateRequest, ConfigUpdateResponse, RuntimeConfigPatch,
     RuntimeOwnerStatus,
@@ -295,6 +299,30 @@ struct ControlOrchestratorExperimentCreateBody {
     control_token: String,
     #[serde(flatten)]
     request: CreateExperimentRequest,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorTaskBlockCreateBody {
+    control_token: String,
+    #[serde(flatten)]
+    request: CreateOrchestratorTaskBlockRequest,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorTaskBlockAppendBody {
+    control_token: String,
+    #[serde(flatten)]
+    request: AppendOrchestratorTaskBlockMemberRequest,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorTaskBlockReorderBody {
+    control_token: String,
+    #[serde(flatten)]
+    request: ReorderOrchestratorTaskBlockMembersRequest,
 }
 
 /// orchestrator experiment list control body。
@@ -2040,6 +2068,95 @@ impl BackendControlClient {
         };
         match self
             .send_once("orchestrator/experiments/create", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧创建串行任务块。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得写本机空库或双路径 dispatch；建块权威只在 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/task-blocks/create`；mutation 不自动重试。
+    pub async fn create_orchestrator_task_block(
+        &self,
+        request: CreateOrchestratorTaskBlockRequest,
+    ) -> Result<OrchestratorTaskBlockViewCreatedDto, AppError> {
+        let body = ControlOrchestratorTaskBlockCreateBody {
+            control_token: self.control_token.clone(),
+            request,
+        };
+        match self
+            .send_once("orchestrator/task-blocks/create", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧追加任务块成员。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     追加改变 live last-member，必须走 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/task-blocks/append-member`。
+    pub async fn append_orchestrator_task_block_member(
+        &self,
+        request: AppendOrchestratorTaskBlockMemberRequest,
+    ) -> Result<OrchestratorTaskViewDto, AppError> {
+        let body = ControlOrchestratorTaskBlockAppendBody {
+            control_token: self.control_token.clone(),
+            request,
+        };
+        match self
+            .send_once(
+                "orchestrator/task-blocks/append-member",
+                &body,
+                MUTATE_TIMEOUT,
+            )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧重排任务块成员。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     重排只能在 owner 上校验整块仍 backlog/todo 且 idle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/task-blocks/reorder-members`。
+    pub async fn reorder_orchestrator_task_block_members(
+        &self,
+        request: ReorderOrchestratorTaskBlockMembersRequest,
+    ) -> Result<Vec<OrchestratorTaskViewDto>, AppError> {
+        let body = ControlOrchestratorTaskBlockReorderBody {
+            control_token: self.control_token.clone(),
+            request,
+        };
+        match self
+            .send_once(
+                "orchestrator/task-blocks/reorder-members",
+                &body,
+                MUTATE_TIMEOUT,
+            )
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

@@ -138,8 +138,16 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 groups={c.groups}
                 selectedTask={c.selectedTask}
                 movingTaskId={c.movingTaskId}
+                movingBlockId={c.movingBlockId}
+                canCreateTaskBlock={c.canCreateTaskBlock}
                 onSelectTask={(taskId) => c.setSelectedTaskId(taskId)}
+                onOpenLaneCreate={c.handleOpenLaneCreate}
+                onOpenAppend={c.handleOpenAppend}
+                onReorderBlock={(blockId, orderedTaskIds) => {
+                  void c.handleReorderBlock(blockId, orderedTaskIds);
+                }}
                 onTaskDragStart={c.handleTaskDragStart}
+                onBlockDragStart={c.handleBlockDragStart}
                 onTaskDragEnd={c.handleTaskDragEnd}
                 onLaneDragOver={c.handleLaneDragOver}
                 onLaneDrop={(event, targetState) => {
@@ -236,23 +244,40 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
       </div>
       <OrchestratorCreateDialog
         open={c.createDialogOpen}
+        dialogKind={c.createDialogKind}
+        createMode={c.createMode}
+        preferredCreateAction={c.preferredCreateAction}
         form={c.form}
+        blockTitle={c.blockTitle}
+        blockMembers={c.blockMembers}
         completionPrompt={c.completionPrompt}
         completingPrompt={c.completingPrompt}
         creatingAction={c.creatingAction}
+        appending={c.appending}
         canCreate={c.canCreate}
+        canCreateBlock={c.canCreateBlock}
+        canAppend={c.canAppend}
         canCompletePrompt={c.canCompletePrompt}
+        canCreateTaskBlock={c.canCreateTaskBlock}
         completionPromptRef={c.completionPromptRef}
         creatingExperiment={c.creatingExperiment}
         onClose={c.handleCloseCreateDialog}
+        onCreateModeChange={c.handleCreateModeChange}
         onCompletionPromptChange={c.setCompletionPrompt}
         onUpdateFormField={c.updateFormField}
+        onBlockTitleChange={c.handleBlockTitleChange}
+        onUpdateBlockMember={c.handleUpdateBlockMember}
+        onAddBlockMember={c.handleAddBlockMember}
+        onRemoveBlockMember={c.handleRemoveBlockMember}
         onCompleteWithAi={() => {
           void c.handleCompleteTaskPrompt();
         }}
         onCreateFormSubmit={c.handleCreateFormSubmit}
         onCreateAction={(createAction) => {
           void c.handleCreateTaskAction(createAction);
+        }}
+        onAppendSubmit={() => {
+          void c.handleAppendSubmit();
         }}
         onCreateExperiment={
           c.canCreateExperiment

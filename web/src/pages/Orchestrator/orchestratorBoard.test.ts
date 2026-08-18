@@ -9,7 +9,12 @@ import type {
 import type { OrchestratorRenderableTask } from '@/lib/orchestratorRemote';
 import {
   ORCHESTRATOR_BOARD_LANES,
+  blockHeadLane,
+  canAppendToBlock,
+  canMoveBoardBlockToWorkflowState,
   canMoveRenderableTaskToWorkflowState,
+  canReorderBlock,
+  groupBoardItems,
   groupRenderableTasksByWorkflowState,
   isActiveOrchestratorRunState,
 } from './orchestratorBoard';
@@ -210,5 +215,52 @@ describe('orchestratorBoard', () => {
       !canMoveRenderableTaskToWorkflowState(null, 'todo'),
       'null renderable task should not be draggable',
     );
+  });
+
+  test('groupBoardItems places a block card on the head lane and hides member cards elsewhere', () => {
+    const first = createRenderableTask('block-0', 'inProgress', 'verifying');
+    first.task.blockId = 'block-1';
+    first.task.blockIndex = 0;
+    first.task.blockTitle = 'Login series';
+    const second = createRenderableTask('block-1', 'todo');
+    second.task.blockId = 'block-1';
+    second.task.blockIndex = 1;
+    second.task.blockTitle = 'Login series';
+    const standalone = createRenderableTask('solo', 'backlog');
+
+    const grouped = groupBoardItems([first, second, standalone]);
+    assert(grouped.backlog.length === 1 && grouped.backlog[0]?.kind === 'task', 'standalone stays in its lane');
+    assert(grouped.inProgress.length === 1 && grouped.inProgress[0]?.kind === 'block', 'block sits on head lane');
+    assert(grouped.todo.length === 0, 'later members must not appear as standalone cards');
+    const block = grouped.inProgress[0];
+    assert(block?.kind === 'block' && block.members.length === 2, 'block keeps both members');
+    assert(blockHeadLane([first, second]) === 'inProgress', 'head lane is first unfinished member');
+    assert(canAppendToBlock([first, second]), 'in-progress head still allows append');
+    assert(!canReorderBlock([first, second]), 'in-progress block cannot reorder');
+    assert(
+      !canMoveBoardBlockToWorkflowState([first, second], 'todo'),
+      'mixed-lane started block cannot drag',
+    );
+
+    const backlogA = createRenderableTask('a', 'backlog');
+    backlogA.task.blockId = 'block-2';
+    backlogA.task.blockIndex = 0;
+    const backlogB = createRenderableTask('b', 'backlog');
+    backlogB.task.blockId = 'block-2';
+    backlogB.task.blockIndex = 1;
+    assert(canReorderBlock([backlogA, backlogB]), 'idle backlog block can reorder');
+    assert(
+      canMoveBoardBlockToWorkflowState([backlogA, backlogB], 'todo'),
+      'all-backlog block can drag to todo',
+    );
+
+    const review = createRenderableTask('review', 'humanReview');
+    review.task.blockId = 'block-3';
+    review.task.blockIndex = 0;
+    review.task.blockTitle = 'Review block';
+    const queued = createRenderableTask('queued', 'todo');
+    queued.task.blockId = 'block-3';
+    queued.task.blockIndex = 1;
+    assert(!canAppendToBlock([review, queued]), 'human review head rejects append');
   });
 });

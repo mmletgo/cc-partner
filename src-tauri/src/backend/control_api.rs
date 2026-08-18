@@ -23,13 +23,18 @@ use crate::backup::{
     RestoreRequest, RestoreResult, FORMAT_VERSION,
 };
 use crate::commands::orchestrator::{
+    append_orchestrator_task_block_member_view_for_state,
     approve_orchestrator_experiment_winner_for_state, cancel_orchestrator_experiment_for_state,
     complete_orchestrator_agent_run_for_state, create_orchestrator_experiment_for_state,
+    create_orchestrator_task_block_view_for_state,
     deliver_reviewed_orchestrator_task_view_for_state, get_orchestrator_experiment_for_state,
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
     list_orchestrator_experiments_for_state, prepare_experiment_downgrade_for_state,
-    save_workflow_document_for_state, validate_workflow_document_for_state,
-    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    reorder_orchestrator_task_block_members_view_for_state, save_workflow_document_for_state,
+    validate_workflow_document_for_state, AppendOrchestratorTaskBlockMemberRequest,
+    CreateOrchestratorTaskBlockRequest, OrchestratorRuntimeSnapshotDto,
+    OrchestratorTaskBlockViewCreatedDto, OrchestratorTaskViewDto,
+    ReorderOrchestratorTaskBlockMembersRequest,
 };
 use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
@@ -2056,6 +2061,111 @@ pub async fn control_orchestrator_experiment_prepare_downgrade(
             )
         })?;
     Ok(Json(cancelled))
+}
+
+/// 任务块 create control 请求体。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorTaskBlockCreateRequest {
+    pub control_token: String,
+    #[serde(flatten)]
+    pub request: CreateOrchestratorTaskBlockRequest,
+}
+
+/// owner 路径：创建串行任务块。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 不得写本机空库；建块权威只在 sidecar。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → create_orchestrator_task_block_view_for_state。
+pub async fn control_orchestrator_task_block_create(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorTaskBlockCreateRequest>,
+) -> P2pResult<Json<OrchestratorTaskBlockViewCreatedDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_task_block_create")
+    })?;
+    let outcome = create_orchestrator_task_block_view_for_state(&state, request.request)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_task_block_create")
+        })?;
+    ensure_response_within_limit(&outcome, &context)?;
+    Ok(Json(outcome))
+}
+
+/// 任务块 append control 请求体。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorTaskBlockAppendRequest {
+    pub control_token: String,
+    #[serde(flatten)]
+    pub request: AppendOrchestratorTaskBlockMemberRequest,
+}
+
+/// owner 路径：追加任务块成员。
+///
+/// Business Logic（为什么需要这个函数）:
+///     追加会改变 live last-member；必须在 owner 上校验 head/上限。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → append for_state。
+pub async fn control_orchestrator_task_block_append_member(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorTaskBlockAppendRequest>,
+) -> P2pResult<Json<OrchestratorTaskViewDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_task_block_append")
+    })?;
+    let outcome = append_orchestrator_task_block_member_view_for_state(&state, request.request)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_task_block_append")
+        })?;
+    ensure_response_within_limit(&outcome, &context)?;
+    Ok(Json(outcome))
+}
+
+/// 任务块 reorder control 请求体。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorTaskBlockReorderRequest {
+    pub control_token: String,
+    #[serde(flatten)]
+    pub request: ReorderOrchestratorTaskBlockMembersRequest,
+}
+
+/// owner 路径：重排任务块成员。
+///
+/// Business Logic（为什么需要这个函数）:
+///     重排只能在 owner 上校验全部成员仍 backlog/todo 且 idle。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → reorder for_state。
+pub async fn control_orchestrator_task_block_reorder_members(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorTaskBlockReorderRequest>,
+) -> P2pResult<Json<Vec<OrchestratorTaskViewDto>>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_task_block_reorder")
+    })?;
+    let outcome = reorder_orchestrator_task_block_members_view_for_state(&state, request.request)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_task_block_reorder")
+        })?;
+    ensure_response_within_limit(&outcome, &context)?;
+    Ok(Json(outcome))
 }
 
 /// 序列化后检查响应不超过 1 MiB。

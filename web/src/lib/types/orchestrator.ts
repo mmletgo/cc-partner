@@ -147,6 +147,42 @@ export interface OrchestratorTask {
   finishedAt: string | null;
   experimentId?: string | null;
   deliverySuppressed?: boolean;
+  blockId?: string | null;
+  blockIndex?: number | null;
+  blockTitle?: string | null;
+}
+
+/**
+ * Orchestrator 任务块 DTO（对齐 Rust OrchestratorTaskBlockDto）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   创建/追加后看板需要块标题与共享 worktree 元数据，才能立刻画出块卡片。
+ *
+ * Code Logic（字段说明）:
+ *   camelCase；共享 worktree/branch 在首个成员启动前可为空。
+ */
+export interface OrchestratorTaskBlock {
+  id: string;
+  projectId: string;
+  title: string;
+  sharedWorktreeId?: string | null;
+  sharedBranchName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * 创建任务块后的看板响应。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   桌面 invoke 返回带 origin 的成员视图，移动端 HTTP 可能只回普通 task DTO。
+ *
+ * Code Logic（字段说明）:
+ *   block 为块元数据；tasks 为成员视图或任务 DTO 数组。
+ */
+export interface OrchestratorTaskBlockCreated {
+  block: OrchestratorTaskBlock;
+  tasks: OrchestratorTaskView[] | OrchestratorTask[];
 }
 
 /**

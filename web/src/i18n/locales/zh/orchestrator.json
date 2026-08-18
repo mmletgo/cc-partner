@@ -210,7 +210,27 @@
     "createBacklog": "创建到 Backlog",
     "createTodo": "创建到 Todo",
     "createStart": "创建并启动",
-    "submit": "创建任务"
+    "submit": "创建任务",
+    "modeTask": "任务",
+    "modeBlock": "任务块",
+    "blockTitle": "块标题",
+    "blockTitlePlaceholder": "例如：登录表单串行实现",
+    "addMember": "添加成员",
+    "removeMember": "移除成员",
+    "memberIndex": "第 {{index}} 步",
+    "appendTitle": "在末尾添加任务",
+    "appendSubtitle": "新步骤会追加到当前最后一步之后。",
+    "appendSubmit": "追加任务",
+    "unsupportedBlocks": "对端不支持任务块。"
+  },
+  "blocks": {
+    "addTask": "添加任务",
+    "addBlock": "添加任务块",
+    "members": "{{count}} 步",
+    "append": "在末尾添加任务",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "blockAria": "任务块 {{title}}"
   },
   "evidence": {
     "title": "证据",
@@ -266,7 +286,12 @@
     "experimentsLoad": "实验组列表加载失败。",
     "experimentsCreate": "实验组创建失败。",
     "experimentsApprove": "采用推荐失败。",
-    "experimentsCancel": "取消实验组失败。"
+    "experimentsCancel": "取消实验组失败。",
+    "createBlock": "任务块创建失败。",
+    "appendBlock": "追加任务失败。",
+    "reorderBlock": "任务块重排失败。",
+    "blockMembersRequired": "任务块需要 2–8 个成员，且每人都要填写标题、目标和验收标准。",
+    "blockTitleRequired": "请填写块标题。"
   },
   "experiments": {
     "title": "候选实验组",

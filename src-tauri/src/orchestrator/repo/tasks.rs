@@ -52,8 +52,8 @@ impl OrchestratorRepo {
                   runtime_started_at, last_activity_at, last_runtime_event, last_runtime_message, \
                   worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
                   state_version, created_at, updated_at, started_at, finished_at, \
-                  experiment_id, delivery_suppressed) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  experiment_id, delivery_suppressed, block_id, block_index) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.project_id)
@@ -94,6 +94,8 @@ impl OrchestratorRepo {
             .bind(&row.finished_at)
             .bind(&row.experiment_id)
             .bind(if row.delivery_suppressed { 1i64 } else { 0i64 })
+            .bind(&row.block_id)
+            .bind(row.block_index)
             .execute(&self.pool)
             .await
         }).await?;
@@ -159,7 +161,10 @@ impl OrchestratorRepo {
                 .await?
             }
         };
-        rows.iter().map(row_to_task).collect()
+        let mut tasks: Vec<OrchestratorTaskRow> =
+            rows.iter().map(row_to_task).collect::<Result<_, _>>()?;
+        self.attach_block_titles(&mut tasks).await?;
+        Ok(tasks)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -175,7 +180,12 @@ impl OrchestratorRepo {
         .fetch_optional(&self.pool)
         .await?;
         match row {
-            Some(row) => row_to_task(&row),
+            Some(row) => {
+                let mut task = row_to_task(&row)?;
+                self.attach_block_titles(std::slice::from_mut(&mut task))
+                    .await?;
+                Ok(task)
+            }
             None => Err(AppError::not_found(format!(
                 "Orchestrator 任务不存在: {task_id}"
             ))),
@@ -604,6 +614,8 @@ impl OrchestratorRepo {
             std::collections::HashMap::new();
         let mut claimed_experiments_this_tick: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut claimed_blocks_this_tick: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let ordered = crate::orchestrator::claim::fair_order_claim_candidates(eligible.to_vec());
 
         let mut claimed = Vec::new();
@@ -647,6 +659,41 @@ impl OrchestratorRepo {
                 }
             }
 
+            if let Some(block_id) = candidate.task.block_id.as_deref() {
+                if claimed_blocks_this_tick.contains(block_id) {
+                    continue;
+                }
+                let block_index = candidate.task.block_index.unwrap_or(0);
+                let unfinished_predecessor: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM orchestrator_tasks \
+                     WHERE block_id = ? AND block_index < ? AND status != ?",
+                )
+                .bind(block_id)
+                .bind(block_index)
+                .bind(OrchestratorTaskStatus::Done.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(0);
+                if unfinished_predecessor > 0 {
+                    continue;
+                }
+                let active_in_block: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM orchestrator_tasks \
+                     WHERE block_id = ? AND run_state IN (?, ?, ?, ?)",
+                )
+                .bind(block_id)
+                .bind(OrchestratorRunState::Preparing.as_str())
+                .bind(OrchestratorRunState::Running.as_str())
+                .bind(OrchestratorRunState::Verifying.as_str())
+                .bind(OrchestratorRunState::Delivering.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(0);
+                if active_in_block > 0 {
+                    continue;
+                }
+            }
+
             let task_id = candidate.task.id.as_str();
             let now = Utc::now().to_rfc3339();
             // 每次 claim 签发新 token，使旧 runner 的 touch/mark_running CAS 全部失效。
@@ -673,7 +720,7 @@ impl OrchestratorRepo {
             .bind(&claim_token)
             .bind(now)
             .bind(task_id)
-            .bind(OrchestratorTaskStatus::Queued.as_str())
+            .bind(candidate.task.status.as_str())
             .bind(candidate.task.workflow_state.as_str())
             .bind(OrchestratorRunState::Idle.as_str())
             .execute(&mut *tx)
@@ -687,6 +734,9 @@ impl OrchestratorRepo {
             if let Some(exp_id) = candidate.task.experiment_id.as_deref() {
                 *group_active.entry(exp_id.to_string()).or_insert(0) += 1;
                 claimed_experiments_this_tick.insert(exp_id.to_string());
+            }
+            if let Some(block_id) = candidate.task.block_id.as_deref() {
+                claimed_blocks_this_tick.insert(block_id.to_string());
             }
 
             let updated = sqlx::query(&format!(
@@ -706,12 +756,14 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     三阶段 claim 的阶段 A 需要在短 DB 读取中拿到有界 Queued/Idle local 候选快照，
+    ///     三阶段 claim 的阶段 A 需要在短 DB 读取中拿到有界可领取 local 候选快照，
     ///     且每行一次 JOIN 带出 project path，避免事务内逐候选查项目或无界 SELECT。
+    ///     返工列空闲非堵塞任务视为已入队，不必再点「请求返工」。
     ///
     /// Code Logic（这个函数做什么）:
     ///     不开启事务、不调用 workflow resolver。JOIN `workbench_projects` 过滤 `kind='local'`，
-    ///     且 `status=queued`、`run_state=idle`。排序固定 `priority DESC, created_at ASC, id ASC`。
+    ///     且 `run_state=idle`，并且（`status=queued` 或 `workflow_state=rework` 且 `status!=blocked`）。
+    ///     排序固定 `priority DESC, created_at ASC, id ASC`。
     ///     `limit` 绑定为 `min(requested, CLAIM_CANDIDATE_LIMIT)`；`cursor` 非空时使用 keyset 谓词继续翻页。
     ///     返回的每行 `ClaimCandidate` 已携带 JOIN 得到的 `project_path`。
     pub async fn list_local_queued_claim_candidates(
@@ -730,8 +782,11 @@ impl OrchestratorRepo {
              FROM orchestrator_tasks task \
              INNER JOIN workbench_projects project ON project.id = task.project_id \
              WHERE project.kind = 'local' \
-               AND task.status = ? \
-               AND task.run_state = ?"
+               AND task.run_state = ? \
+               AND ( \
+                 task.status = ? \
+                 OR (task.workflow_state = ? AND task.status != ?) \
+               )"
         );
 
         let rows = if let Some(cursor) = cursor {
@@ -747,8 +802,10 @@ impl OrchestratorRepo {
                  LIMIT ?"
             );
             sqlx::query(&sql)
-                .bind(OrchestratorTaskStatus::Queued.as_str())
                 .bind(OrchestratorRunState::Idle.as_str())
+                .bind(OrchestratorTaskStatus::Queued.as_str())
+                .bind(OrchestratorWorkflowState::Rework.as_str())
+                .bind(OrchestratorTaskStatus::Blocked.as_str())
                 .bind(cursor.priority)
                 .bind(cursor.priority)
                 .bind(&cursor.created_at)
@@ -765,8 +822,10 @@ impl OrchestratorRepo {
                  LIMIT ?"
             );
             sqlx::query(&sql)
-                .bind(OrchestratorTaskStatus::Queued.as_str())
                 .bind(OrchestratorRunState::Idle.as_str())
+                .bind(OrchestratorTaskStatus::Queued.as_str())
+                .bind(OrchestratorWorkflowState::Rework.as_str())
+                .bind(OrchestratorTaskStatus::Blocked.as_str())
                 .bind(page_limit as i64)
                 .fetch_all(&self.pool)
                 .await?
@@ -1370,7 +1429,8 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     人工复核未通过时，用户需要显式 requestRework 并留下原因，后续 scheduler 才能在同一现场继续领取任务。
+    ///     人工复核未通过时，用户可显式 requestRework 并留下原因；拖到返工列同样入队。
+    ///     后续 scheduler 才能在同一现场继续领取任务。
     ///
     /// Code Logic（这个函数做什么）:
     ///     仅允许 legacy Done + workflow HumanReview + run Idle 的任务进入 Queued + Rework/Idle；
@@ -1730,10 +1790,12 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     看板拖拽是用户手动调整任务工作流阶段的轻量动作，必须避免隐式启动 Runner 或改变交付设置。
+    ///     看板拖拽是用户手动调整任务工作流阶段的轻量动作；Backlog→Todo 与空闲非堵塞→Rework 视为入队，
+    ///     但不得在仓储层隐式启动 Runner 或改变交付设置。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     读取当前任务，拒绝 active run_state，只允许移动到固定顺序中的相邻泳道；通过后仅更新 workflow_state 和 updated_at。
+    ///     读取当前任务，拒绝 active run_state，只允许移动到固定顺序中的相邻泳道；
+    ///     通过后按 workflow_move_patch 更新 workflow_state/status/run_state。
     pub async fn move_task_workflow_state(
         &self,
         task_id: &str,
@@ -1748,7 +1810,9 @@ impl OrchestratorRepo {
     ///     拖拽移动需要基于用户看到的任务快照做条件更新，防止 scheduler 或其它动作在读写之间改变任务后被覆盖。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     校验快照 run_state 和相邻泳道后，用 workflow_state/run_state 作为 CAS 条件更新；未命中时读取最新任务返回中文业务错误。
+    ///     校验快照 run_state 和相邻泳道后，用 status/workflow_state/run_state 作为 CAS 条件更新；
+    ///     Backlog Draft 入队、空闲非堵塞拖入 Rework、或 Todo/Rework 反向拖出时同步改 legacy status；
+    ///     未命中时读取最新任务返回中文业务错误。
     pub(crate) async fn move_task_workflow_state_from_snapshot(
         &self,
         current: &OrchestratorTaskRow,
@@ -1764,16 +1828,26 @@ impl OrchestratorRepo {
             return Err(AppError::generic("只能移动到相邻泳道"));
         }
 
+        let patch = workflow_move_patch(current, target);
+        let next_blocked_reason = if patch.clear_blocked_reason {
+            None
+        } else {
+            current.blocked_reason.as_deref()
+        };
         let now = Utc::now().to_rfc3339();
         let result = with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET workflow_state = ?, updated_at = ? \
-                 WHERE id = ? AND workflow_state = ? AND run_state = ?",
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
+                 WHERE id = ? AND status = ? AND workflow_state = ? AND run_state = ?",
             )
+            .bind(patch.status.as_str())
             .bind(target.as_str())
+            .bind(patch.run_state.as_str())
+            .bind(next_blocked_reason)
             .bind(now)
             .bind(&current.id)
+            .bind(current.status.as_str())
             .bind(current.workflow_state.as_str())
             .bind(current.run_state.as_str())
             .execute(&self.pool)

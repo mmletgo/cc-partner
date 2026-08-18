@@ -153,13 +153,13 @@ describe('MobileAutomationPanel', () => {
     assertContains(createDialogSource, 'titleId={dialogTitleId}', 'mobile automation Dialog should wire titleId');
     assertContains(
       createDialogSource,
-      'closeOnEscape={!(creating || completingPrompt)}',
-      'mobile automation Dialog should block Escape while creating/completing',
+      'closeOnEscape={!(creating || completingPrompt || appending)}',
+      'mobile automation Dialog should block Escape while creating/completing/appending',
     );
     assertContains(
       createDialogSource,
-      'closeOnBackdrop={!(creating || completingPrompt)}',
-      'mobile automation Dialog should block backdrop close while creating/completing',
+      'closeOnBackdrop={!(creating || completingPrompt || appending)}',
+      'mobile automation Dialog should block backdrop close while creating/completing/appending',
     );
     assertContains(
       createDialogSource,
@@ -379,8 +379,8 @@ describe('MobileAutomationPanel', () => {
     );
     assertContains(
       controllerSource,
-      'groupedTasks[task.task.workflowState].push(task)',
-      'mobile automation grouping must use workflowState rather than legacy status',
+      'groupBoardItems(tasks)',
+      'mobile automation grouping must place serial blocks on the head lane',
     );
     assertContains(
       outboxSource,
