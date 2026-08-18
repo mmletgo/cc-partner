@@ -23,8 +23,8 @@ use crate::net::mobile_dev_proxy;
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
-    health, mobile, orchestrator, prompts, provider_manager, scratchpad_sync, ssh_target_sync,
-    sync, transfer, workbench, workbench_project_order_sync,
+    health, mobile, mobile_transfer, orchestrator, prompts, provider_manager, scratchpad_sync,
+    ssh_target_sync, sync, transfer, workbench, workbench_project_order_sync,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
@@ -595,6 +595,29 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 )),
         )
         .route(
+            "/api/backend/control/orchestrator/task-blocks/create",
+            post(crate::backend::control_api::control_orchestrator_task_block_create).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/task-blocks/append-member",
+            post(crate::backend::control_api::control_orchestrator_task_block_append_member).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/task-blocks/reorder-members",
+            post(crate::backend::control_api::control_orchestrator_task_block_reorder_members)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                )),
+        )
+        .route(
             "/api/backend/control/orchestrator/workflow-document/get",
             post(crate::backend::control_api::control_orchestrator_workflow_document_get).layer(
                 axum::extract::DefaultBodyLimit::max(
@@ -797,6 +820,47 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         )
         // Mobile Prompt 库只读入口：复用 PromptRepo::list（含 favorite），移动端不 toggle
         .route("/api/mobile/prompts", get(prompts::list_mobile_prompts))
+        // Mobile 主机中转文件传输：staging 分块上传 → 本机落盘或 start_sending；不含 loopback control
+        .route(
+            "/api/mobile/devices",
+            get(mobile_transfer::list_mobile_devices),
+        )
+        .route(
+            "/api/mobile/transfer/tasks",
+            get(mobile_transfer::list_mobile_transfer_tasks),
+        )
+        .route(
+            "/api/mobile/transfer/upload/init",
+            post(mobile_transfer::upload_init),
+        )
+        .route(
+            "/api/mobile/transfer/upload/chunk/:id",
+            post(mobile_transfer::upload_chunk).layer(DefaultBodyLimit::max(CHUNK_SIZE)),
+        )
+        .route(
+            "/api/mobile/transfer/upload/complete/:id",
+            post(mobile_transfer::upload_complete),
+        )
+        .route(
+            "/api/mobile/transfer/cancel",
+            post(mobile_transfer::cancel_mobile_transfer),
+        )
+        .route(
+            "/api/mobile/transfer/retry",
+            post(mobile_transfer::retry_mobile_transfer),
+        )
+        .route(
+            "/api/mobile/transfer/resume",
+            post(mobile_transfer::resume_mobile_transfer),
+        )
+        .route(
+            "/api/mobile/transfer/get-operation",
+            post(mobile_transfer::get_mobile_transfer_operation),
+        )
+        .route(
+            "/api/mobile/transfer/download/:taskId",
+            get(mobile_transfer::download_mobile_transfer),
+        )
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
         .route("/api/sync/pull", post(sync::sync_pull))
         .route("/api/sync/push", post(sync::sync_push))

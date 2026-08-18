@@ -193,9 +193,11 @@ describe('mobileWorkbenchState', () => {
     assertEqual(selectMobilePanelForProject(null, 'terminal'), 'projects');
     assertEqual(selectMobilePanelForProject(null, 'automation'), 'projects');
     assertEqual(selectMobilePanelForProject(null, 'prompt'), 'prompt');
+    assertEqual(selectMobilePanelForProject(null, 'transfer'), 'transfer');
     assertEqual(selectMobilePanelForProject(null, 'attention'), 'attention');
     assertEqual(isMobileProjectBoundPanel('terminal'), true);
     assertEqual(isMobileProjectBoundPanel('prompt'), false);
+    assertEqual(isMobileProjectBoundPanel('transfer'), false);
   });
 
   /**
@@ -213,7 +215,7 @@ describe('mobileWorkbenchState', () => {
     );
     assertArrayEqual(globalGroups[0]?.panels ?? [], ['projects']);
     assertArrayEqual(globalGroups[1]?.panels ?? [], ['attention']);
-    assertArrayEqual(globalGroups[2]?.panels ?? [], ['prompt']);
+    assertArrayEqual(globalGroups[2]?.panels ?? [], ['prompt', 'transfer']);
     assertArrayEqual(globalGroups[3]?.panels ?? [], ['settings', 'provider']);
 
     const projectGroups = getMobileWorkbenchNavGroups('project');
@@ -229,13 +231,14 @@ describe('mobileWorkbenchState', () => {
       'worktrees',
       'automation',
     ]);
-    assertArrayEqual(projectGroups[1]?.panels ?? [], ['attention', 'prompt', 'settings']);
+    assertArrayEqual(projectGroups[1]?.panels ?? [], ['attention', 'prompt', 'transfer', 'settings']);
 
     const flat = getMobileWorkbenchPanelOrder();
     assertArrayEqual(flat, [
       'projects',
       'attention',
       'prompt',
+      'transfer',
       'settings',
       'provider',
       'terminal',
@@ -251,6 +254,9 @@ describe('mobileWorkbenchState', () => {
     assertEqual(getMobileNavGroupIdForPanel('settings', 'global'), 'system');
     assertEqual(getMobileNavGroupIdForPanel('provider', 'global'), 'system');
     assertEqual(getMobileNavGroupIdForPanel('prompt', 'global'), 'tools');
+    assertEqual(getMobileNavGroupIdForPanel('transfer', 'global'), 'tools');
+    assertEqual(getMobileNavGroupIdForPanel('transfer', 'project'), 'shortcuts');
+    assertEqual(flat.filter((panel) => panel === 'transfer').length, 1);
     assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
   });
 
@@ -313,6 +319,7 @@ describe('mobileWorkbenchState', () => {
     assertEqual(resolveMobileNavMode('terminal', true), 'project');
     assertEqual(resolveMobileNavMode('attention', true), 'project');
     assertEqual(resolveMobileNavMode('prompt', true), 'project');
+    assertEqual(resolveMobileNavMode('transfer', true), 'project');
     assertEqual(resolveMobileNavMode('settings', true), 'project');
     assertEqual(resolveMobileNavMode('projects', true), 'global');
     assertEqual(resolveMobileNavMode('provider', true), 'global');

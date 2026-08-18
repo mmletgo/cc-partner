@@ -388,7 +388,7 @@ export function ComponentName() { ... }
 
 ### 5.7 API 调用
 
-`web/src/api/` 按业务模块拆分。**桌面端**统一经 `client.ts` 的 `invoke()`（Tauri IPC），**禁止**组件直接 `fetch` 本机后端；**`/mobile` 浏览器**走 `workbenchHttp.ts` / `attentionHttp.ts` 等同源 HTTP helper。事件用 `@tauri-apps/api/event` 的 `listen`（替代旧 SSE）。命令名与 DTO 细节见 `web/AGENTS.md` 与 `src-tauri/AGENTS.md`。
+`web/src/api/` 按业务模块拆分。**桌面端**统一经 `client.ts` 的 `invoke()`（Tauri IPC），**禁止**组件直接 `fetch` 本机后端；**`/mobile` 浏览器**走 `workbenchHttp.ts` / `attentionHttp.ts` / `transferHttp.ts`（主机中转传输 + `MobileTransferPanel`）等同源 HTTP helper。事件用 `@tauri-apps/api/event` 的 `listen`（替代旧 SSE）。命令名与 DTO 细节见 `web/AGENTS.md` 与 `src-tauri/AGENTS.md`。
 
 ### 5.8 React Hooks 顺序（必读）
 

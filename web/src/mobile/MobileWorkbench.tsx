@@ -127,6 +127,11 @@ const MobileWorktreePanel = lazy(() =>
     default: module.MobileWorktreePanel,
   })),
 );
+const MobileTransferPanel = lazy(() =>
+  import('./components/MobileTransferPanel').then((module) => ({
+    default: module.MobileTransferPanel,
+  })),
+);
 
 export interface MobileRefreshWorktreesOptions {
   skipFileContextConfirm?: boolean;
@@ -204,6 +209,9 @@ export function MobileWorkbench(): ReactElement {
     context: null,
   });
   const [filesDiscardContextToken, setFilesDiscardContextToken] = useState<number>(0);
+  const [transferPanelMounted, setTransferPanelMounted] = useState<boolean>(
+    () => getInitialMobileWorkbenchPanel() === 'transfer',
+  );
   const [error, setError] = useState<string | null>(null);
   const [attentionNotice, setAttentionNotice] = useState<string | null>(null);
   const [attentionFocusTaskId, setAttentionFocusTaskId] = useState<string | null>(null);
@@ -352,6 +360,10 @@ export function MobileWorkbench(): ReactElement {
     prompt: {
       title: t('workbench:mobile.placeholders.prompt.title'),
       label: t('workbench:mobile.placeholders.prompt.label'),
+    },
+    transfer: {
+      title: t('workbench:mobile.placeholders.transfer.title'),
+      label: t('workbench:mobile.placeholders.transfer.label'),
     },
     automation: {
       title: t('workbench:mobile.placeholders.automation.title'),
@@ -1328,10 +1340,13 @@ export function MobileWorkbench(): ReactElement {
     }
   }, [connectionState, loadProjects, refreshSessions, refreshWorktrees]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- files 首次激活后保持挂载以保留 dirty 草稿 */
+  /* eslint-disable react-hooks/set-state-in-effect -- files/transfer 首次激活后保持挂载 */
   useEffect(() => {
     if (panel === 'files') {
       setFilesPanelMounted(true);
+    }
+    if (panel === 'transfer') {
+      setTransferPanelMounted(true);
     }
   }, [panel]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -1430,7 +1445,7 @@ export function MobileWorkbench(): ReactElement {
           onIsWorktreeActive={isCurrentActiveWorktree}
         />
       </Suspense>
-    ) : panel === 'files' ? null : panel === 'git' ? (
+    ) : panel === 'files' || panel === 'transfer' ? null : panel === 'git' ? (
       <Suspense fallback={heavyPanelFallback}>
         <MobileGitPanel
           project={activeProject}
@@ -1536,6 +1551,13 @@ export function MobileWorkbench(): ReactElement {
               discardContextToken={filesDiscardContextToken}
               onDirtyContextChange={setFilesDirtySnapshot}
             />
+          </Suspense>
+        </div>
+      ) : null}
+      {transferPanelMounted ? (
+        <div hidden={panel !== 'transfer'}>
+          <Suspense fallback={heavyPanelFallback}>
+            <MobileTransferPanel />
           </Suspense>
         </div>
       ) : null}

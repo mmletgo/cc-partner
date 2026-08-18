@@ -13,6 +13,7 @@ export type MobileWorkbenchPanel =
   | 'git'
   | 'worktrees'
   | 'prompt'
+  | 'transfer'
   | 'automation'
   | 'settings'
   | 'provider';
@@ -90,7 +91,7 @@ const MOBILE_PROJECT_BOUND_PANELS: readonly MobileWorkbenchPanel[] = [
 const MOBILE_GLOBAL_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
   { id: 'projects', panels: ['projects'] },
   { id: 'inbox', panels: ['attention'] },
-  { id: 'tools', panels: ['prompt'] },
+  { id: 'tools', panels: ['prompt', 'transfer'] },
   { id: 'system', panels: ['settings', 'provider'] },
 ];
 
@@ -103,7 +104,7 @@ const MOBILE_PROJECT_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
     id: 'work',
     panels: ['terminal', 'browser', 'files', 'git', 'worktrees', 'automation'],
   },
-  { id: 'shortcuts', panels: ['attention', 'prompt', 'settings'] },
+  { id: 'shortcuts', panels: ['attention', 'prompt', 'transfer', 'settings'] },
 ];
 
 /** 全量 panel 枚举（去重后），供测试与「存在性」合同使用。 */
@@ -111,6 +112,7 @@ const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
   'projects',
   'attention',
   'prompt',
+  'transfer',
   'settings',
   'provider',
   'terminal',
@@ -284,7 +286,7 @@ export function isMobileProjectBoundPanel(panel: MobileWorkbenchPanel): boolean 
  *
  * Code Logic（这个函数做什么）:
  *   无 active project → global；panel 为 projects/provider → global；
- *   其余（含 attention/prompt/settings 与项目绑定面板）在有项目时 → project。
+ *   其余（含 attention/prompt/transfer/settings 与项目绑定面板）在有项目时 → project。
  */
 export function resolveMobileNavMode(
   panel: MobileWorkbenchPanel,

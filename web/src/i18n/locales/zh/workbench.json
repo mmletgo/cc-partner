@@ -473,6 +473,7 @@
       "git": "Git",
       "worktrees": "Worktrees",
       "prompt": "Prompt",
+      "transfer": "传输",
       "automation": "自动化",
       "settings": "设置",
       "provider": "Provider",
@@ -514,6 +515,10 @@
       "prompt": {
         "title": "Prompt",
         "label": "等待输入"
+      },
+      "transfer": {
+        "title": "文件传输",
+        "label": "选择设备并发送文件"
       },
       "automation": {
         "title": "自动化",

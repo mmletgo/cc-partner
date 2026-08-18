@@ -31,7 +31,7 @@ pub(super) fn init_metadata_matches(
 ///
 /// Code Logic（这个函数做什么）:
 ///     trim 后拒绝空串；Path components 必须恰好一个 Normal，且不含 `/` `\` 或 `.`/`..`。
-pub(super) fn sanitize_receive_basename(raw: &str, field: &str) -> Result<String, AppError> {
+pub(crate) fn sanitize_receive_basename(raw: &str, field: &str) -> Result<String, AppError> {
     let name = raw.trim();
     if name.is_empty() {
         return Err(AppError::validation(format!("{field} 不能为空")));
@@ -82,7 +82,7 @@ pub(super) fn receive_tmp_path(receive_dir: &Path, transfer_id: &str) -> Result<
 ///
 /// Code Logic（这个函数做什么）:
 ///     对父目录做 canonicalize（不存在时回退规范化），断言目标仍以 receive_dir 为前缀。
-pub(super) fn ensure_path_within_dir(dir: &Path, candidate: &Path) -> Result<(), AppError> {
+pub(crate) fn ensure_path_within_dir(dir: &Path, candidate: &Path) -> Result<(), AppError> {
     let canonical_dir = match dir.canonicalize() {
         Ok(p) => p,
         Err(_) => normalize_path(dir),

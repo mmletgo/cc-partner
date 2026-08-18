@@ -63,6 +63,8 @@ export interface TransferItemProps {
   onOpen?: () => void;
   /** 在文件夹中显示（仅 same-device receive completed） */
   onReveal?: () => void;
+  /** 下载已完成任务（移动端 Receive completed；桌面不传） */
+  onDownload?: () => void;
   /** 取消进行中时禁用取消按钮并标 aria-busy */
   cancelling?: boolean;
   className?: string;
@@ -132,7 +134,7 @@ function formatSpeed(bytesPerSec: number): string {
  *
  * Code Logic（这个函数做什么）:
  *   渲染文件名/进度/阶段/状态；reconciling 仅提示对账；
- *   其余仅在回调存在时显示 pause/resume/cancel/retry/open/reveal。
+ *   其余仅在回调存在时显示 pause/resume/cancel/retry/open/reveal/download。
  */
 function TransferItemInner({
   task,
@@ -142,6 +144,7 @@ function TransferItemInner({
   onRetry,
   onOpen,
   onReveal,
+  onDownload,
   cancelling = false,
   className,
   style,
@@ -169,6 +172,7 @@ function TransferItemInner({
   const handleRetry = useCallback(() => onRetry?.(), [onRetry]);
   const handleOpen = useCallback(() => onOpen?.(), [onOpen]);
   const handleReveal = useCallback(() => onReveal?.(), [onReveal]);
+  const handleDownload = useCallback(() => onDownload?.(), [onDownload]);
 
   const isProgressVisible =
     !reconciling && (task.status === 'transferring' || task.status === 'pending');
@@ -301,6 +305,18 @@ function TransferItemInner({
                     title={t('transfer:revealInFolder')}
                   >
                     {t('transfer:revealInFolder')}
+                  </Button>
+                ) : null}
+                {task.status === 'completed' && onDownload ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<DownloadIcon />}
+                    onClick={handleDownload}
+                    aria-label={t('transfer:download')}
+                    title={t('transfer:download')}
+                  >
+                    {t('transfer:download')}
                   </Button>
                 ) : null}
               </div>

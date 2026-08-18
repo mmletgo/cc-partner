@@ -19,6 +19,7 @@ pub mod claude_code_assets;
 pub mod claude_md_sync;
 pub mod health;
 pub mod mobile;
+pub mod mobile_transfer;
 pub mod orchestrator;
 pub mod prompts;
 pub mod provider_manager;

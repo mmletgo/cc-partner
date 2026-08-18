@@ -477,6 +477,7 @@
       "git": "Git",
       "worktrees": "Worktrees",
       "prompt": "Prompt",
+      "transfer": "Transfer",
       "automation": "Automation",
       "settings": "Settings",
       "attention": "Attention",
@@ -519,6 +520,10 @@
       "prompt": {
         "title": "Prompt",
         "label": "Waiting for input"
+      },
+      "transfer": {
+        "title": "File Transfer",
+        "label": "Pick a device and send a file"
       },
       "automation": {
         "title": "Automation",

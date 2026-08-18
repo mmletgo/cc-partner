@@ -31,10 +31,22 @@ use tauri::State;
 /// 列出全部传输任务（活跃 + 历史），按创建时间倒序。
 ///
 /// Business Logic: 前端传输面板展示进行中任务与已结束历史。对照 Python `/api/transfer/tasks`。
-/// Code Logic: 合并 registry.list()（活跃）与 transfer_repo.list()（历史，去重活跃 id），
-///     按 created_at 倒序，转为 TransferTaskDto。
+/// Code Logic: 委托 `list_transfers_for_state`（Tauri 与 mobile HTTP 共用）。
 #[tauri::command]
 pub async fn list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferTaskDto>, AppError> {
+    list_transfers_for_state(state.inner()).await
+}
+
+/// owner/本地：合并 registry 活跃任务与 transfer_history。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Tauri 与 `/api/mobile/transfer/tasks` 必须看到同一份主机任务列表；
+///     抽成 helper 避免 HTTP 再抄一份合并/去重逻辑。
+///
+/// Code Logic（这个函数做什么）:
+///     合并 `registry.list()` 与 `transfer_repo.list()`（历史去重活跃 id），
+///     按 `created_at` 倒序，转为 `TransferTaskDto`（桌面 DTO 仍含 path；mobile 路由再剥离）。
+pub async fn list_transfers_for_state(state: &AppState) -> Result<Vec<TransferTaskDto>, AppError> {
     let active = state.transfers.list();
     let history = state.transfer_repo.list().await?;
 

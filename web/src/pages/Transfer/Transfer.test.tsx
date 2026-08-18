@@ -187,7 +187,7 @@ function taskRowByFileName(fileName: string): HTMLElement {
  */
 function expectRowActions(fileName: string, actions: string[]): void {
   const row = taskRowByFileName(fileName);
-  const known = ['取消', '继续传输', '重新传输', '打开', '在文件夹中显示', '暂停', '重试'];
+  const known = ['取消', '继续传输', '重新传输', '打开', '在文件夹中显示', '下载', '暂停', '重试'];
   for (const name of known) {
     const nodes = within(row).queryAllByRole('button', { name });
     if (actions.includes(name)) {

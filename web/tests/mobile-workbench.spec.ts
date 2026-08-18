@@ -3,8 +3,9 @@
  *
  * Business Logic（为什么需要这个套件）:
  *   验证 `/mobile` 在 390×844 下 Projects→Attention→Terminal→Files→Automation 导航、
- *   Drawer 焦点/Escape、终端 replay 门控不重复写、移动端写走 HTTP 而非 Tauri invoke，
- *   以及离线后 Attention 缓存标 stale。L1 不宣称真实多机/WebView。
+ *   Drawer 焦点/Escape、终端 replay 门控不重复写、移动端写走 HTTP 而非 Tauri invoke、
+ *   全局 Tools 传输面板看到「这台电脑」并走 HTTP cancel，以及离线后 Attention 缓存标 stale。
+ *   L1 不宣称真实多机/WebView，也不宣称 L3-DUAL-HOST-LAN-001。
  *
  * Code Logic（这个套件做什么）:
  *   backendHarness 注册同源 `/api/mobile/*` 与 health/events；viewport 390×844；
@@ -134,6 +135,53 @@ function makeAttentionSnapshot() {
         },
       },
     ],
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   传输面板需要主机合成的「这台电脑」目标。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 isSelf=true 的 DeviceDto。
+ */
+function makeMobileTransferSelfDevice() {
+  return {
+    id: 'self-1',
+    name: 'Test Device',
+    address: '127.0.0.1',
+    port: 62116,
+    isSelf: true,
+    online: true,
+    lastSeen: TS,
+    protoVersion: 1,
+    capabilities: [],
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   取消路径需要一条进行中任务；JSON 不得带 filePath。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 transferring Send 任务。
+ */
+function makeMobileTransferringTask() {
+  return {
+    id: 'mt-1',
+    fileName: 'photo.jpg',
+    fileSize: 1024,
+    direction: 'send',
+    status: 'transferring',
+    progress: 0.4,
+    peerDeviceName: 'Test Device',
+    startedAt: TS,
+    transferredBytes: 400,
+    phase: 'transferring',
+    attempt: 1,
+    logicalTransferId: 'mt-1',
+    attemptId: 'mt-1',
+    protocolTransferId: 'mt-1',
   };
 }
 
@@ -308,6 +356,18 @@ function registerMobileRoutes(
   harness.route('POST', '/api/orchestrator/tasks/evidence', {
     kind: 'resolve',
     value: { evidence: [] },
+  });
+  harness.route('GET', '/api/mobile/devices', {
+    kind: 'resolve',
+    value: [makeMobileTransferSelfDevice()],
+  });
+  harness.route('GET', '/api/mobile/transfer/tasks', {
+    kind: 'resolve',
+    value: [],
+  });
+  harness.route('POST', '/api/mobile/transfer/cancel', {
+    kind: 'resolve',
+    value: { ok: true, id: 'mt-1' },
   });
 
   // 桌面命令若被误调用必须可见；注册空 resolve 以免白屏，断言时检查 calls
@@ -545,6 +605,57 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     await expect(page.getByText('状态可能已过期')).toBeVisible({ timeout: 15_000 });
     // 列表仍保留
     await expect(page.getByText('Review delivery')).toBeVisible();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   全局 Tools 传输面板必须看到主机合成的「这台电脑」，并对进行中任务走 HTTP cancel。
+   *
+   * Code Logic（这个测试做什么）:
+   *   mock devices/tasks/cancel；打开传输；断言目标文案与 POST /cancel `{taskId}`。
+   */
+  test('transfer panel shows this-computer target and cancel path', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeMobileProject();
+    const worktree = makeMobileWorktree(project.id);
+    const session = makeMobileSession(project.id, worktree.id);
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cp-lang', 'zh');
+      window.localStorage.setItem('cp-theme', 'light');
+    });
+    registerMobileRoutes(backendHarness, { project, worktree, session });
+    backendHarness.route('GET', '/api/mobile/transfer/tasks', {
+      kind: 'resolve',
+      value: [makeMobileTransferringTask()],
+    });
+
+    await page.goto('/mobile');
+    const openNav = page.getByRole('button', { name: /打开导航/ });
+    await expect(openNav).toBeVisible({ timeout: 20_000 });
+    await openNav.click();
+    await page.getByRole('dialog').getByRole('button', { name: /^传输$/ }).click();
+
+    await expect(page.getByRole('heading', { name: '文件传输' })).toBeVisible({
+      timeout: 10_000,
+    });
+    const deviceSelect = page.getByLabel('选择目标设备');
+    await expect(deviceSelect).toBeVisible();
+    await expect(deviceSelect.locator('option:checked')).toHaveText(/这台电脑/);
+
+    const cancel = page.getByRole('button', { name: '取消' });
+    await expect(cancel).toBeVisible();
+    await cancel.click();
+
+    await expect
+      .poll(() => fetchCallsFor(backendHarness, '/api/mobile/transfer/cancel').length, {
+        timeout: 10_000,
+      })
+      .toBeGreaterThanOrEqual(1);
+    const cancelCall = fetchCallsFor(backendHarness, '/api/mobile/transfer/cancel')[0];
+    expect(cancelCall?.body).toEqual({ taskId: 'mt-1' });
+    expect(invokeCallsFor(backendHarness, 'cancel_transfer')).toBe(0);
   });
 });
 

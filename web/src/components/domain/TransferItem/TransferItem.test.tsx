@@ -128,7 +128,7 @@ function buildFixture(
  *   对期望动作 getByRole；并确认其它 recovery 动作不存在。
  */
 function expectVisibleActions(actions: string[]): void {
-  const allKnown = ['取消', '继续传输', '重新传输', '打开', '在文件夹中显示', '暂停', '重试'];
+  const allKnown = ['取消', '继续传输', '重新传输', '打开', '在文件夹中显示', '下载', '暂停', '重试'];
   for (const name of allKnown) {
     const nodes = screen.queryAllByRole('button', { name });
     if (actions.includes(name)) {
@@ -207,6 +207,24 @@ describe('TransferItem action guards', () => {
       task: buildTask({ status: 'completed', progress: 1, speed: undefined }),
     });
 
+    expect(screen.queryByRole('button', { name: '打开' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '在文件夹中显示' })).toBeNull();
+  });
+
+  test('completed with onDownload renders download and not open/reveal', () => {
+    const onDownload = vi.fn();
+    renderItem({
+      task: buildTask({
+        status: 'completed',
+        direction: 'receive',
+        progress: 1,
+        speed: undefined,
+      }),
+      onDownload,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '下载' }));
+    expect(onDownload).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: '打开' })).toBeNull();
     expect(screen.queryByRole('button', { name: '在文件夹中显示' })).toBeNull();
   });

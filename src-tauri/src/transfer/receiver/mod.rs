@@ -39,6 +39,7 @@ use resume::*;
 use validation::*;
 
 pub use finalize::finalize_transfer;
+pub(crate) use validation::{ensure_path_within_dir, sanitize_receive_basename};
 
 use crate::error::AppError;
 use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};

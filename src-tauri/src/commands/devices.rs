@@ -17,12 +17,25 @@ use tauri::State;
 /// 列出当前已发现的对端设备。
 ///
 /// Business Logic: 前端设备面板初始化时展示局域网内在线对端。
-/// Code Logic: 读 RwLock<HashMap> 拷贝快照，每个 Device 转 DTO（is_self=false），按 name 排序稳定输出。
+/// Code Logic: 委托 `list_devices_for_state`。
 #[tauri::command]
 pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceDto>, AppError> {
-    let devices = state.devices.read().expect("devices 读锁中毒");
+    list_devices_for_state(state.inner())
+}
+
+/// owner/本地：对端设备快照（`is_self=false`）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Tauri 与 `/api/mobile/devices` 共用同一份 mDNS 对端表。
+///
+/// Code Logic（这个函数做什么）:
+///     读 `devices` 表，转 DTO（`is_self=false`），按 name 排序。
+pub fn list_devices_for_state(state: &AppState) -> Result<Vec<DeviceDto>, AppError> {
+    let devices = state
+        .devices
+        .read()
+        .map_err(|_| AppError::generic("devices 读锁中毒"))?;
     let mut dtos: Vec<DeviceDto> = devices.values().map(|d| d.to_dto(false)).collect();
-    // 按 name 排序，保证前端展示顺序稳定
     dtos.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(dtos)
 }
@@ -30,16 +43,24 @@ pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceDto>, 
 /// 返回本机设备信息。
 ///
 /// Business Logic: 前端设备面板顶部展示"本机"卡片，需本机 id/name/端口。
-/// Code Logic: device_id 从 AppState.device_id 取，device_name 从 config 读，
-///             address 固定 127.0.0.1（本机回环，供前端展示；实际局域网 IP 由对端发现），
-///             port 取 actual_http_port 原子读。
+/// Code Logic: 委托 `get_local_device_for_state`。
 #[tauri::command]
 pub async fn get_local_device(state: State<'_, AppState>) -> Result<DeviceDto, AppError> {
+    Ok(get_local_device_for_state(state.inner()))
+}
+
+/// owner/本地：合成「这台电脑」设备（`is_self=true`）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端目标列表要把本机放在对端之前；与桌面 `get_local_device` 字段一致。
+///
+/// Code Logic（这个函数做什么）:
+///     `device_id` + config 名 + `127.0.0.1` + `actual_http_port` + 本机协议能力。
+pub fn get_local_device_for_state(state: &AppState) -> DeviceDto {
     let device_name = state.device_name();
     let port = state.actual_http_port.load(Ordering::SeqCst);
-    // 本机设备直接宣告权威协议元数据（与对端 health 一致），前端可据此判断本机能力。
     let info = crate::net::protocol::server_protocol_info();
-    Ok(DeviceDto {
+    DeviceDto {
         id: state.device_id.as_ref().clone(),
         name: device_name,
         address: "127.0.0.1".to_string(),
@@ -49,5 +70,5 @@ pub async fn get_local_device(state: State<'_, AppState>) -> Result<DeviceDto, A
         is_self: true,
         proto_version: info.protocol_version,
         capabilities: info.capabilities,
-    })
+    }
 }

@@ -15,6 +15,7 @@ import {
   OrchestratorIcon,
   ProviderManagerIcon,
   PromptsIcon,
+  SendIcon,
   SettingsIcon,
   TerminalIcon,
   XIcon,
@@ -48,6 +49,7 @@ const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
   git: HistoryIcon,
   worktrees: ForkIcon,
   prompt: PromptsIcon,
+  transfer: SendIcon,
   automation: OrchestratorIcon,
   settings: SettingsIcon,
   provider: ProviderManagerIcon,
@@ -99,7 +101,7 @@ interface MobilePanelNavProps {
  * MobilePanelNav（移动端工作台分组导航）
  *
  * Business Logic（为什么需要这个组件）:
- *   全局壳只展示项目/待处理/Prompt/设置；进入项目后切换为项目内工具 + 全局快捷，
+ *   全局壳只展示项目/待处理/Prompt/传输/设置；进入项目后切换为项目内工具 + 全局快捷，
  *   与桌面「先选项目再进工作台」一致。
  *
  * Code Logic（这个组件做什么）:
@@ -123,6 +125,7 @@ function MobilePanelNav({
     git: t('workbench:mobile.nav.git'),
     worktrees: t('workbench:mobile.nav.worktrees'),
     prompt: t('workbench:mobile.nav.prompt'),
+    transfer: t('workbench:mobile.nav.transfer'),
     automation: t('workbench:mobile.nav.automation'),
     settings: t('workbench:mobile.nav.settings'),
     provider: t('workbench:mobile.nav.provider'),
