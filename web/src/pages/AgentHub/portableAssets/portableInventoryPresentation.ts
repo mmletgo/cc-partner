@@ -90,6 +90,8 @@ const PORTABILITY_ADVISORY_CODES: ReadonlySet<string> = new Set([
   'unknownSourceField',
   'materializedAlias',
   'plugin_has_components',
+  'store_loaded_via_other_path',
+  'borrowed_runtime_origin',
 ]);
 
 /** 判断 warning token 是否只是跨设备/跨 CLI 可移植性提示。 */
@@ -133,20 +135,31 @@ export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): b
 
 /**
  * Business Logic: 借用徽标要落到具体所有者文案（Claude / 共享 ~/.agents）。
- * Code Logic: ownedBy 已是 label key；缺省或无法识别 → unknown。
+ *   仓库真树本身不是「来自谁」；经其他 Agent 路径加载时用 loadedViaTarget。
+ * Code Logic: loadedViaTarget 优先；否则 ownedBy；portableStore 仅作兜底。
  */
 export function portableBorrowedOwnerLabelKey(
   item: PortableInventoryItemDto,
 ): PortableBorrowedOwnerLabelKey {
-  if (
-    item.ownedBy === 'sharedAgents' ||
-    item.ownedBy === 'unknown' ||
-    item.ownedBy === 'portableStore'
-  ) {
+  const via = item.store?.loadedViaTarget;
+  if (via && isHubTarget(via)) return via;
+  if (item.ownedBy === 'sharedAgents' || item.ownedBy === 'unknown') {
     return item.ownedBy;
   }
   if (isHubTarget(item.ownedBy)) return item.ownedBy;
+  if (item.ownedBy === 'portableStore') return 'portableStore';
   return 'unknown';
+}
+
+/**
+ * Business Logic: 「在所有者 Agent 中打开」要跳到实际加载源，而不是便携仓库抽象所有者。
+ * Code Logic: 徽标 key 若是 Hub target 则用之。
+ */
+export function portableBorrowedOwnerJumpTarget(
+  item: PortableInventoryItemDto,
+): AgentTarget | null {
+  const key = portableBorrowedOwnerLabelKey(item);
+  return isHubTarget(key) ? key : null;
 }
 
 /**
@@ -205,6 +218,26 @@ export function canOfferPortableDestroyStore(item: PortableInventoryItemDto): bo
   if (!item.capabilities.canDestroyStore) return false;
   if (item.originKind === 'compatibility' || item.store?.loadedViaOtherPath) return false;
   return true;
+}
+
+/**
+ * Business Logic: 运行时从其他 Agent 加载的仓库项已经在用源软链，不必再给当前 Agent 附加。
+ * Code Logic: borrowed runtime 隐藏 attach，即使 capability 泄漏。
+ */
+export function canOfferPortableAttach(item: PortableInventoryItemDto): boolean {
+  if (!isPortableStoreAssetKind(item.kind)) return false;
+  if (!item.capabilities.canAttach) return false;
+  if (isPortableBorrowedRuntimeItem(item)) return false;
+  return true;
+}
+
+/**
+ * Business Logic: 本 Agent 已附加，或借用视图卸下源 Agent 软链，都可以「从此 Agent 卸下」。
+ * Code Logic: 信任后端 canDetach；借用项由扫描器打开该旗标。
+ */
+export function canOfferPortableDetach(item: PortableInventoryItemDto): boolean {
+  if (!isPortableStoreAssetKind(item.kind)) return false;
+  return Boolean(item.capabilities.canDetach);
 }
 
 /**
@@ -301,14 +334,18 @@ export function matchesPortableInventoryItem(
     }
   }
   if (!matchesSearch(item, filters.search)) return false;
-  if (isPortableStoreAssetKind(item.kind)) {
-    const catalog = isPortableStoreCatalogItem(item);
-    if (filters.assetLane === 'store') {
-      if (!catalog) return false;
-    } else if (catalog && item.store?.storeAttached !== true) {
-      return false;
+    if (isPortableStoreAssetKind(item.kind)) {
+      const catalog = isPortableStoreCatalogItem(item);
+      if (filters.assetLane === 'store') {
+        if (!catalog) return false;
+      } else if (
+        catalog &&
+        item.store?.storeAttached !== true &&
+        !isPortableBorrowedRuntimeItem(item)
+      ) {
+        return false;
+      }
     }
-  }
   return true;
 }
 
@@ -359,8 +396,8 @@ export function needsPortableEnsureManagedRefresh(
   if (caps.canEnable || caps.canDisable || caps.canInstallToSourceTarget) return false;
   if (
     canOfferPortableMigrateToStore(item) ||
-    caps.canAttach ||
-    caps.canDetach ||
+    canOfferPortableAttach(item) ||
+    canOfferPortableDetach(item) ||
     canOfferPortableDestroyStore(item)
   ) {
     return false;
@@ -393,8 +430,8 @@ export function resolvePortablePrimaryAction(
   if (caps.canConfirmCurrentVersion) return 'confirmCurrentVersion';
   // 故意不返回 'adopt'：discover-as-managed 已取代纳入主路径。
   if (isPortableStoreAssetKind(item.kind)) {
-    if (caps.canDetach && item.store?.storeAttached) return 'detach';
-    if (caps.canAttach && !item.store?.storeAttached) return 'attach';
+    if (canOfferPortableDetach(item)) return 'detach';
+    if (canOfferPortableAttach(item)) return 'attach';
     if (canOfferPortableMigrateToStore(item)) return 'migrateToStore';
     return null;
   }
@@ -412,7 +449,7 @@ export function resolvePortablePrimaryAction(
 /**
  * Business Logic: 列表行同时暴露仓库或启停动作，无需详情侧栏。
  *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下 / 彻底删除仓库项；卸下只出现在便携仓库项。
- *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/销毁。
+ *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/附加/销毁，可卸下源软链。
  *   Plugin/MCP：仍走 enable/disable/uninstall。借用项同样按 capability 暴露动作。
  *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
  *
@@ -441,8 +478,8 @@ export function resolvePortableRowActions(
   const storeKind = isPortableStoreAssetKind(item.kind);
   if (storeKind) {
     if (canOfferPortableMigrateToStore(item)) actions.push('migrateToStore');
-    if (caps.canAttach) actions.push('attach');
-    if (caps.canDetach) actions.push('detach');
+    if (canOfferPortableAttach(item)) actions.push('attach');
+    if (canOfferPortableDetach(item)) actions.push('detach');
     if (canOfferPortableDestroyStore(item)) actions.push('destroyStore');
     return actions;
   }

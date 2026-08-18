@@ -26,7 +26,9 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
+  canOfferPortableAttach,
   canOfferPortableDestroyStore,
+  canOfferPortableDetach,
   canOfferPortableMigrateToStore,
   countPortableItemsByKind,
   filterPortableInventoryItems,
@@ -42,6 +44,15 @@ import {
 
 /** 同 contextKey 下 skill↔instructions 回切免 re-inspect 的 soft TTL（ms）。 */
 export const PORTABLE_INVENTORY_SOFT_TTL_MS = 60_000;
+
+/** 手动/mutation 后刷新库存的选项。 */
+export interface PortableInventoryRefreshOptions {
+  /**
+   * 附加/卸下等写盘后丢掉全部 query 槽。
+   * 否则切到其他 Agent 仍会命中 60s 旧快照。
+   */
+  invalidateAll?: boolean;
+}
 
 /** Controller 打开动作的待确认状态（F3 Dialog 消费；F2 仅持有）。 */
 export interface PortableInventoryPendingAction {
@@ -97,7 +108,7 @@ export interface UsePortableInventoryControllerResult {
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
   /** 行内多动作（与 getPrimaryAction 共享同一组门闩，含 uninstall）。 */
   getRowActions: (item: PortableInventoryItemDto) => PortableAssetActionKind[];
-  refresh: () => Promise<void>;
+  refresh: (options?: PortableInventoryRefreshOptions) => Promise<void>;
   /** 当前 inspect 使用的上下文（便于页面层 mutation 透传）。 */
   requestContext: AgentHubRequestContext;
   /** 当前快照的后端扫描过滤条件；preview/apply 重校验必须复用。 */
@@ -183,10 +194,13 @@ export function usePortableInventoryController(
   }, []);
 
   /**
-   * Business Logic: 手动/自动刷新 observed inventory。
+   * Business Logic: 手动/自动刷新 observed inventory；附加/卸下后必须带 invalidateAll。
    * Code Logic: generation 丢弃过期响应；有 snapshot 时用 refreshing 而非整区 loading。
    */
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options?: PortableInventoryRefreshOptions) => {
+    if (options?.invalidateAll) {
+      snapshotCacheRef.current.clear();
+    }
     const seq = ++refreshSeqRef.current;
     if (hasSnapshotRef.current) {
       setRefreshing(true);
@@ -356,8 +370,8 @@ export function usePortableInventoryController(
         (action === 'disable' && !storeKind && caps.canDisable) ||
         (action === 'uninstall' && !storeKind && caps.canUninstall) ||
         (action === 'installToSourceTarget' && caps.canInstallToSourceTarget) ||
-        (action === 'attach' && storeKind && Boolean(caps.canAttach)) ||
-        (action === 'detach' && storeKind && Boolean(caps.canDetach)) ||
+        (action === 'attach' && storeKind && canOfferPortableAttach(item)) ||
+        (action === 'detach' && storeKind && canOfferPortableDetach(item)) ||
         (action === 'destroyStore' &&
           storeKind &&
           Boolean(canOfferPortableDestroyStore(item))) ||

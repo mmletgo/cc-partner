@@ -22,7 +22,7 @@ use crate::agent_hub::portable_actions::models::{
 use crate::agent_hub::portable_inventory::hash_plugin_root;
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
 use crate::agent_hub::portable_store::{
-    execute_skill_or_command_store, should_use_store_semantics,
+    execute_skill_or_command_store, observed_or_native_store_mount, should_use_store_semantics,
 };
 use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
@@ -423,7 +423,8 @@ fn execute_skill(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
-    let native_link = roots.skills_dir.join(&id);
+    let native_link =
+        observed_or_native_store_mount(change.path.as_deref(), roots.skills_dir.join(&id));
     if should_use_store_semantics(ctx.action, Some(&native_link), pre_item)
         || change
             .path
@@ -530,7 +531,10 @@ fn execute_command(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
-    let native_link = roots.commands_dir.join(format!("{id}.md"));
+    let native_link = observed_or_native_store_mount(
+        change.path.as_deref(),
+        roots.commands_dir.join(format!("{id}.md")),
+    );
     if should_use_store_semantics(ctx.action, Some(&native_link), pre_item)
         || change
             .path

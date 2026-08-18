@@ -119,17 +119,8 @@ pub async fn preview_portable_asset_action_with_inventory(
         if let Some(code) = portable_store_kind_block(item.kind, request.action) {
             plan_blocking.push(code.into());
         }
-        let mutation_target = if request.action.is_hub_ledger_only() {
-            item.target
-        } else {
-            mutation_target_for_action(
-                item.target,
-                item.owned_by,
-                item.native_output_candidate,
-                item.kind.to_asset_kind(),
-                enablement_action,
-            )
-        };
+        let mutation_target =
+            mutation_target_for_item_action(item, request.action, enablement_action);
         let owner_target =
             mutation_target_for_origin(item.target, item.owned_by, item.native_output_candidate);
         let owner_dto = snapshot.targets.iter().find(|t| t.target == owner_target);
@@ -189,6 +180,34 @@ pub async fn preview_portable_asset_action_with_inventory(
     })
     .await?;
     Ok(public)
+}
+
+/// 按动作选择写盘 target；仓库借用卸下改写源 Agent。
+///
+/// Business Logic: Grok 列表里经 Claude 软链加载的仓库 Skill，卸下必须拆 Claude 的链。
+///     所有读取该源配置的 Agent 会同步卸下；不得在 Grok 原生根再附加一份。
+/// Code Logic: Detach + `loaded_via_other_path` → `loaded_via_target`；其余沿用既有规则。
+fn mutation_target_for_item_action(
+    item: &PortableInventoryItemDto,
+    action: PortableAssetActionKind,
+    enablement_action: bool,
+) -> AgentTarget {
+    if action.is_hub_ledger_only() {
+        return item.target;
+    }
+    let fallback = mutation_target_for_action(
+        item.target,
+        item.owned_by,
+        item.native_output_candidate,
+        item.kind.to_asset_kind(),
+        enablement_action,
+    );
+    if action == PortableAssetActionKind::Detach && item.store.loaded_via_other_path {
+        if let Some(via) = item.store.loaded_via_target {
+            return via;
+        }
+    }
+    fallback
 }
 
 /// MCP/Plugin 不得走 store attach/migrate/destroy。
@@ -1312,5 +1331,65 @@ args = ["mcp"]
         );
         assert_eq!(change.operation, PortableAssetPlanOperation::Detach);
         assert_eq!(change.target, AgentTarget::OpenCode);
+    }
+
+    /// Business Logic: Grok 借用 Claude 仓库软链时，卸下必须改写 Claude，不能给 Grok 再挂一份。
+    /// Code Logic: Detach + loaded_via_other_path → mutation_target = loaded_via_target。
+    #[test]
+    fn borrowed_store_detach_targets_loaded_via_agent() {
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Grok,
+                "user",
+                "standalone",
+                "hyperframes-animation",
+            ),
+            target: AgentTarget::Grok,
+            loaded_by: AgentTarget::Grok,
+            owned_by: PortableAssetOwner::PortableStore,
+            origin_kind: PortableOriginKind::Compatibility,
+            native_output_candidate: false,
+            kind: PortableAssetKind::Skill,
+            native_id: "hyperframes-animation".into(),
+            display_name: "hyperframes-animation".into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some("/Users/hans/.claude/skills/hyperframes-animation".into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("h".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::HubManaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_detach: true,
+                ..PortableInventoryItemCapabilitiesDto::default()
+            },
+            warnings: vec!["store_loaded_via_other_path".into()],
+            mcp_credential: None,
+            store: PortableStoreFactDto {
+                store_id: Some("skill:hyperframes-animation".into()),
+                store_attached: false,
+                loaded_via_other_path: true,
+                loaded_via_target: Some(AgentTarget::Claude),
+            },
+        };
+        assert_eq!(
+            mutation_target_for_item_action(&item, PortableAssetActionKind::Detach, true),
+            AgentTarget::Claude
+        );
+        assert_eq!(
+            mutation_target_for_item_action(&item, PortableAssetActionKind::Attach, true),
+            AgentTarget::Grok
+        );
     }
 }

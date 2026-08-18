@@ -526,4 +526,43 @@ describe('usePortableInventoryController', () => {
     });
     expect(result.current.requestContext.projectRef).toBe('wb-local-2');
   });
+
+  test('mutation refresh drops other-query cache so agent switch re-inspects', async () => {
+    apiMocks.inspect.mockImplementation(async (ctx?: { target?: string }) => {
+      const target = ctx?.target === 'grok' ? 'grok' : 'claude';
+      return snapshot(`snap-${target}`, [
+        makeItem({
+          inventoryItemId: `${target}-skill-alpha`,
+          kind: 'skill',
+          nativeId: 'alpha',
+          target,
+        }),
+      ]);
+    });
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
+    await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-claude'));
+
+    await act(async () => {
+      result.current.setFilters({ target: 'grok' });
+    });
+    await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-grok'));
+    const callsAfterGrok = apiMocks.inspect.mock.calls.length;
+
+    await act(async () => {
+      result.current.setFilters({ target: 'claude' });
+    });
+    await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-claude'));
+    expect(apiMocks.inspect.mock.calls.length).toBe(callsAfterGrok);
+
+    await act(async () => {
+      await result.current.refresh({ invalidateAll: true });
+    });
+    expect(apiMocks.inspect.mock.calls.length).toBe(callsAfterGrok + 1);
+
+    await act(async () => {
+      result.current.setFilters({ target: 'grok' });
+    });
+    await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-grok'));
+    expect(apiMocks.inspect.mock.calls.length).toBe(callsAfterGrok + 2);
+  });
 });

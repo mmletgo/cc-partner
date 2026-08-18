@@ -132,7 +132,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
               <Pill tone={managementTone(item.managementState)}>
                 {labels.management[item.managementState]}
               </Pill>
-              {borrowed && borrowedOwnerKey ? (
+              {borrowed && borrowedOwnerKey && borrowedOwnerKey !== 'portableStore' ? (
                 <Pill tone="accent" data-testid="portable-row-borrowed-badge">
                   {labels.borrowedFrom[borrowedOwnerKey]}
                 </Pill>

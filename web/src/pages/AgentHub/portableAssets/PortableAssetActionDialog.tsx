@@ -84,7 +84,8 @@ type BorrowedImpactKey =
   | 'borrowedImpactDisable'
   | 'borrowedImpactEnablePlugin'
   | 'borrowedImpactDisablePlugin'
-  | 'borrowedImpactUninstall';
+  | 'borrowedImpactUninstall'
+  | 'borrowedImpactDetach';
 
 function borrowedImpactKey(
   action: PortableAssetActionKind | null,
@@ -94,20 +95,22 @@ function borrowedImpactKey(
   if (action === 'enable') return plugin ? 'borrowedImpactEnablePlugin' : 'borrowedImpactEnable';
   if (action === 'disable') return plugin ? 'borrowedImpactDisablePlugin' : 'borrowedImpactDisable';
   if (action === 'uninstall') return 'borrowedImpactUninstall';
+  if (action === 'detach') return 'borrowedImpactDetach';
   return null;
 }
 
 /**
  * Business Logic: Skill/Command/MCP 的仓库动作文案不得复用 Plugin viewing-switch；
- *   「确认当前版本」只改 Hub 账本，用独立 hint。
+ *   「确认当前版本」只改 Hub 账本，用独立 hint。借用卸下改写源 Agent 软链，用独立文案。
  * Code Logic: confirm/attach/detach/migrate/destroy 各用独立 hint；Plugin 保持原开关语义。
  */
 function storeActionHintKey(
   action: PortableAssetActionKind | null,
-  kind: PortableInventoryItemDto['kind'] | undefined,
+  item: PortableInventoryItemDto | null,
 ):
   | 'storeAttachHint'
   | 'storeDetachHint'
+  | 'storeDetachBorrowedHint'
   | 'storeMigrateHint'
   | 'storeDestroyHint'
   | 'confirmCurrentVersionHint'
@@ -115,9 +118,13 @@ function storeActionHintKey(
   | null {
   if (action === 'confirmCurrentVersion') return 'confirmCurrentVersionHint';
   if (action === 'materializeEscapeLink') return 'materializeEscapeLinkHint';
-  if (kind === 'plugin') return null;
+  if (item?.kind === 'plugin') return null;
   if (action === 'attach') return 'storeAttachHint';
-  if (action === 'detach') return 'storeDetachHint';
+  if (action === 'detach') {
+    return item && isPortableBorrowedRuntimeItem(item)
+      ? 'storeDetachBorrowedHint'
+      : 'storeDetachHint';
+  }
   if (action === 'migrateToStore') return 'storeMigrateHint';
   if (action === 'destroyStore') return 'storeDestroyHint';
   return null;
@@ -209,13 +216,19 @@ export function PortableAssetActionDialog({
   const borrowed = Boolean(item && isPortableBorrowedRuntimeItem(item));
   const borrowedOwnerKey = item && borrowed ? portableBorrowedOwnerLabelKey(item) : null;
   const impactKey = borrowed ? borrowedImpactKey(action, item?.kind) : null;
-  const storeHintKey = storeActionHintKey(action, item?.kind);
+  const storeHintKey = storeActionHintKey(action, item);
   const loadedVia =
     item?.store?.loadedViaTarget && isHubTarget(item.store.loadedViaTarget)
       ? t(`agentHub:targets.${item.store.loadedViaTarget}`)
       : item?.store?.loadedViaOtherPath
         ? t('agentHub:portable.inventory.borrowedFrom.portableStore')
         : null;
+  const ownerLabel = borrowedOwnerKey
+    ? isHubTarget(borrowedOwnerKey)
+      ? t(`agentHub:targets.${borrowedOwnerKey}`)
+      : t(`agentHub:portable.inventory.borrowedFrom.${borrowedOwnerKey}`)
+    : t('agentHub:portable.inventory.borrowedFrom.unknown');
+  const sourceAgentLabel = loadedVia ?? ownerLabel;
 
   useEffect(() => {
     if (!open) {
@@ -300,12 +313,9 @@ export function PortableAssetActionDialog({
             data-testid="portable-action-borrowed-impact"
           >
             {t(`agentHub:portable.actionDialog.${impactKey}`, {
-              owner: borrowedOwnerKey
-                ? isHubTarget(borrowedOwnerKey)
-                  ? t(`agentHub:targets.${borrowedOwnerKey}`)
-                  : t(`agentHub:portable.inventory.borrowedFrom.${borrowedOwnerKey}`)
-                : t('agentHub:portable.inventory.borrowedFrom.unknown'),
+              owner: ownerLabel,
               current: t(`agentHub:targets.${item.target}`),
+              via: sourceAgentLabel,
             })}
             {item.ownedBy === 'sharedAgents'
               ? ` ${t('agentHub:portable.actionDialog.borrowedImpactSharedAgents')}`
@@ -337,20 +347,10 @@ export function PortableAssetActionDialog({
                 ? t('agentHub:portable.actionDialog.materializeAllEscapeLinksHint', {
                     count: items.length,
                   })
-                : t(`agentHub:portable.actionDialog.${storeHintKey}`)}
-          </StatusMessage>
-        ) : null}
-
-        {item?.store?.loadedViaOtherPath && loadedVia && action === 'detach' ? (
-          <StatusMessage
-            tone="info"
-            live="off"
-            data-testid="portable-action-store-still-loaded"
-          >
-            {t('agentHub:portable.actionDialog.storeStillLoadedVia', {
-              current: t(`agentHub:targets.${item.target}`),
-              via: loadedVia,
-            })}
+                : t(`agentHub:portable.actionDialog.${storeHintKey}`, {
+                    current: item ? t(`agentHub:targets.${item.target}`) : '',
+                    via: sourceAgentLabel,
+                  })}
           </StatusMessage>
         ) : null}
 

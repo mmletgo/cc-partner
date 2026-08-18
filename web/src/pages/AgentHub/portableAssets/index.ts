@@ -14,6 +14,7 @@ export {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   listConfirmableCurrentVersionItems,
   listMigratableToStoreItems,
+  portableBorrowedOwnerJumpTarget,
   samePortableItemIds,
   type PortableInventoryFilters,
   type PortableKindCounts,

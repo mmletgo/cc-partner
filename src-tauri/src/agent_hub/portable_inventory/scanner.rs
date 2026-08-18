@@ -1720,13 +1720,18 @@ fn should_replace_with(
             if new_item.store.store_attached && !existing.store.store_attached {
                 return true;
             }
+            // 本 Agent 真正挂上的 native 软链可以盖过兼容根；未附加的仓库目录注入不能盖。
             if new_item.origin_kind == PortableOriginKind::Native
                 && existing.origin_kind != PortableOriginKind::Native
+                && new_item.store.store_attached
             {
                 return true;
             }
             return false;
         }
+    }
+    if new_item.store.store_id.is_some() && !new_item.store.store_attached {
+        return false;
     }
     if new_item.actual_enabled == Some(false) && existing.actual_enabled != Some(false) {
         return true;
@@ -1811,6 +1816,15 @@ fn inject_store_catalog_items(
             PortableOriginKind::Native,
         ) {
             for disc in discs {
+                let inv_id = inventory_item_id(
+                    target,
+                    &scope.scope_id,
+                    "standalone",
+                    &disc.origin.native_id,
+                );
+                if seen.contains_key(&inv_id) {
+                    continue;
+                }
                 discovered_to_item(
                     PortableAssetKind::Skill,
                     &disc,
@@ -1831,6 +1845,15 @@ fn inject_store_catalog_items(
             PortableOriginKind::Native,
         ) {
             for disc in discs {
+                let inv_id = inventory_item_id(
+                    target,
+                    &scope.scope_id,
+                    "standalone",
+                    &disc.origin.native_id,
+                );
+                if seen.contains_key(&inv_id) {
+                    continue;
+                }
                 discovered_to_item(
                     PortableAssetKind::Command,
                     &disc,
@@ -2068,6 +2091,9 @@ fn item_capabilities(
     let store_kind = kind.supports_portable_store();
     let store_write = store_kind
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Attach);
+    let borrowed_store_runtime = borrowed
+        && store.store_id.is_some()
+        && (store.loaded_via_other_path || origin_kind == PortableOriginKind::Compatibility);
     // Skill/Command 生命周期改走仓库：迁入 / 附加 / 卸下 / 彻底删除。
     // 启停与卸载只留给 Plugin（viewing 开关）和 MCP（各家配置 leaf）。
     let can_toggle_enable =
@@ -2104,8 +2130,15 @@ fn item_capabilities(
                 PortableOriginKind::Native | PortableOriginKind::LegacyStandalone
             )
             && !(borrowed && origin_kind != PortableOriginKind::LegacyStandalone),
-        can_attach: store_write && store.store_id.is_some() && !store.store_attached,
-        can_detach: store_write && store.store_attached,
+        // 运行时从其他 Agent 加载的仓库项已经在用源软链，不必再给当前 Agent 附加一份；
+        // 卸下则拆源 Agent 上的软链（Claude 等），让所有读取该配置的 Agent 同步卸下。
+        can_attach: store_write
+            && store.store_id.is_some()
+            && !store.store_attached
+            && !borrowed_store_runtime,
+        can_detach: store_write
+            && store.store_id.is_some()
+            && (store.store_attached || borrowed_store_runtime),
         can_destroy_store: store_write
             && store.store_id.is_some()
             && !(borrowed && origin_kind == PortableOriginKind::Compatibility),
@@ -3189,7 +3222,7 @@ enabled = false
     }
 
     #[test]
-    fn grok_borrowed_store_skill_can_attach_but_not_migrate_or_destroy() {
+    fn grok_borrowed_store_skill_can_detach_source_but_not_attach_or_migrate() {
         let store = PortableStoreFactDto {
             store_id: Some("skill:media-use".into()),
             store_attached: false,
@@ -3214,10 +3247,13 @@ enabled = false
         );
         assert!(!caps.can_migrate_to_store);
         assert!(
-            caps.can_attach,
-            "viewing Agent may still attach its own native symlink"
+            !caps.can_attach,
+            "borrowed runtime view must not attach a second native symlink"
         );
-        assert!(!caps.can_detach);
+        assert!(
+            caps.can_detach,
+            "borrowed store skill must expose 从此 Agent 卸下 against the source link"
+        );
         assert!(
             !caps.can_destroy_store,
             "borrowed runtime view must not delete the shared store tree"
@@ -4209,5 +4245,23 @@ enabled = ["native-only"]
             .warnings
             .iter()
             .any(|w| w == "store_loaded_via_other_path"));
+    }
+
+    #[test]
+    fn unattached_store_catalog_does_not_replace_borrowed_compat() {
+        let existing = store_item(
+            AgentTarget::Grok,
+            PortableOriginKind::Compatibility,
+            false,
+            true,
+        );
+        let mut catalog = store_item(AgentTarget::Grok, PortableOriginKind::Native, false, false);
+        catalog.actual_enabled = Some(false);
+        assert!(
+            !should_replace_with(&catalog, &existing),
+            "injecting the store tree must not hide Grok/Pi runtime-loaded skills"
+        );
+        let attached = store_item(AgentTarget::Grok, PortableOriginKind::Native, true, false);
+        assert!(should_replace_with(&attached, &existing));
     }
 }

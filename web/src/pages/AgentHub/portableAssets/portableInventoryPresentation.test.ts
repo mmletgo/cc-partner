@@ -29,6 +29,7 @@ import {
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
   partitionPortableInventoryItems,
+  portableBorrowedOwnerJumpTarget,
   portableBorrowedOwnerLabelKey,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
@@ -371,12 +372,34 @@ describe('portableInventoryPresentation filters', () => {
       nativeId: 'native-mcp',
     });
 
+    const borrowedViaClaude = makeItem({
+      inventoryItemId: 'grok-skill-via-claude',
+      kind: 'skill',
+      nativeId: 'via-claude',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      store: {
+        storeId: 'skill:via-claude',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+    });
+
     expect(
       filterPortableInventoryItems(
         [native, attached, available],
         filters({ kind: 'skill', assetLane: 'equipped' }),
       ).map((item) => item.inventoryItemId),
     ).toEqual(['claude-skill-native', 'claude-skill-attached']);
+
+    expect(
+      filterPortableInventoryItems(
+        [native, attached, available, borrowedViaClaude],
+        filters({ kind: 'skill', target: 'grok', assetLane: 'equipped' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['grok-skill-via-claude']);
 
     expect(
       filterPortableInventoryItems(
@@ -417,6 +440,26 @@ describe('portableInventoryPresentation filters', () => {
 
     expect(isPortableInventoryProblem(healthyWithNotes)).toBe(false);
     expect(classifyPortableActualState(healthyWithNotes)).toBe('enabled');
+  });
+
+  test('runtime load via another agent is not a health problem', () => {
+    const borrowedViaOther = makeItem({
+      inventoryItemId: 'grok-skill-via-claude',
+      kind: 'skill',
+      nativeId: 'via-claude',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      warnings: ['store_loaded_via_other_path', 'borrowed_runtime_origin'],
+      store: {
+        storeId: 'skill:via-claude',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+    });
+    expect(isPortableInventoryProblem(borrowedViaOther)).toBe(false);
+    expect(classifyPortableActualState(borrowedViaOther)).toBe('enabled');
   });
 
   test('projectOptedIn=false is read-only and never exposes mutation primary action', () => {
@@ -914,7 +957,7 @@ describe('portableInventoryPresentation row actions', () => {
     ).toEqual(['claude-skill-a', 'claude-command-b']);
   });
 
-  test('store item loaded via other path is borrowed and still offers attach', () => {
+  test('store item loaded via other path is borrowed and offers detach, not attach', () => {
     const grokHint = makeItem({
       inventoryItemId: 'grok-skill-via-claude',
       kind: 'skill',
@@ -935,13 +978,15 @@ describe('portableInventoryPresentation row actions', () => {
         canDisable: false,
         canUninstall: false,
         canAttach: true,
-        canDetach: false,
+        canDetach: true,
         canDestroyStore: true,
       },
     });
     expect(isPortableBorrowedRuntimeItem(grokHint)).toBe(true);
-    expect(portableBorrowedOwnerLabelKey(grokHint)).toBe('portableStore');
-    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual(['attach']);
+    expect(portableBorrowedOwnerLabelKey(grokHint)).toBe('claude');
+    expect(portableBorrowedOwnerJumpTarget(grokHint)).toBe('claude');
+    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual(['detach']);
+    expect(resolvePortablePrimaryAction(grokHint, healthyCtx)).toBe('detach');
   });
 });
 

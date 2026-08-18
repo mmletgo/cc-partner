@@ -1242,6 +1242,7 @@ describe('useAgentHubController', () => {
     expect(result.current.portableActionResult).toBeNull();
     expect(result.current.portableActionBusy).toBe(false);
     expect(result.current.portableInventory.pendingAction).toBeNull();
+    expect(portableApiMocks.inspect.mock.calls.length).toBeGreaterThan(1);
   });
 
   test('partial apply keeps the portable action dialog open with the result', async () => {

@@ -2210,6 +2210,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setPortableActionClientRequestId(null);
   }, [portableInventoryBase]);
 
+  /**
+   * Business Logic: 确认后写盘，并立刻重扫全部库存缓存，避免附加/卸下后列表仍显示旧软链。
+   * Code Logic: apply → refresh({ invalidateAll }) → 全成功关窗。
+   */
   const confirmPortableAction = useCallback(
     async (planToken: string, clientRequestId: string) => {
       // 同步 busy 门闩：confirm 在已 busy 时直接拒绝。
@@ -2254,7 +2258,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
           return;
         }
         setPortableActionClientRequestId(clientRequestId);
-        await portableInventoryBase.refresh();
+        await portableInventoryBase.refresh({ invalidateAll: true });
         if (
           !mountedRef.current ||
           actionSeq !== portableActionSeqRef.current ||
@@ -2325,7 +2329,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ) {
           return;
         }
-        await portableInventoryBase.refresh();
+        await portableInventoryBase.refresh({ invalidateAll: true });
         if (
           !mountedRef.current ||
           actionSeq !== portableActionSeqRef.current ||

@@ -21,9 +21,10 @@ import {
   PortableAssetActionDialog,
   PortableInventoryView,
   PortablePullDrawer,
+  portableBorrowedOwnerJumpTarget,
   type PortableInventoryViewLabels,
 } from './portableAssets';
-import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
+import { allHubTargets } from '@/lib/agentCatalog';
 import type { PortableInventoryItemDto } from '@/lib/types/portableInventory';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
@@ -292,13 +293,14 @@ export function AgentHubView(props: AgentHubViewProps) {
   );
 
   /**
-   * Business Logic: 借用项可在当前列表启停/卸载；也可切到所有者 Agent。
-   * Code Logic: Hub target 只切 agent；sharedAgents/unknown 无详情面，保持当前列表。
+   * Business Logic: 借用项可在当前列表启停/卸载；也可切到实际加载源 Agent。
+   * Code Logic: Hub target（含经 Claude 加载的仓库项）切 agent；sharedAgents/unknown 保持当前列表。
    */
   const openPortableOwner = useCallback(
     (item: PortableInventoryItemDto) => {
-      if (!isHubTarget(item.ownedBy)) return;
-      onContextChange({ agent: item.ownedBy });
+      const owner = portableBorrowedOwnerJumpTarget(item);
+      if (!owner) return;
+      onContextChange({ agent: owner });
     },
     [onContextChange],
   );

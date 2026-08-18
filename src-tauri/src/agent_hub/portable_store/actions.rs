@@ -27,6 +27,23 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// 已观测到的仓库软链优先于按 config_root 拼出的 native 挂载点。
+///
+/// Business Logic: 运行时从其他 Agent 加载的项，库存 `source_path` 才是要拆的源软链。
+/// Code Logic: 观测路径是软链则用之，否则回退 constructed native 路径。
+pub fn observed_or_native_store_mount(observed: Option<&str>, fallback: PathBuf) -> PathBuf {
+    let Some(path) = observed.map(Path::new) else {
+        return fallback;
+    };
+    if fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        return path.to_path_buf();
+    }
+    fallback
+}
+
 /// 在 viewing Agent 的 native 根上执行 store Skill/Command 动作。
 ///
 /// Business Logic: Enable/Attach 建链；Disable/Detach/Uninstall 只拆链；Destroy 删真树。

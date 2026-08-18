@@ -667,7 +667,16 @@ fn reconcile_item(
                     }
                 }
                 PortableAssetActionKind::Detach => {
-                    if post.is_none() || post.is_some_and(|p| !p.store.store_attached) {
+                    let pre_via_other = pre.is_some_and(|p| p.store.loaded_via_other_path);
+                    let detached = if pre_via_other {
+                        post.is_none()
+                            || post.is_some_and(|p| {
+                                !p.store.loaded_via_other_path && !p.store.store_attached
+                            })
+                    } else {
+                        post.is_none() || post.is_some_and(|p| !p.store.store_attached)
+                    };
+                    if detached {
                         (
                             PortableAssetActionItemState::Succeeded,
                             None,
@@ -677,7 +686,11 @@ fn reconcile_item(
                         (
                             PortableAssetActionItemState::Failed,
                             Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
-                            Some("expected storeAttached=false after detach".into()),
+                            Some(if pre_via_other {
+                                "expected source store link gone after borrowed detach".into()
+                            } else {
+                                "expected storeAttached=false after detach".into()
+                            }),
                         )
                     }
                 }
@@ -2700,5 +2713,65 @@ mod tests {
             code.as_deref(),
             Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH")
         );
+    }
+
+    /// Business Logic: 借用卸下必须让源路径加载消失，不能把「仍经其他路径加载」当成成功。
+    /// Code Logic: pre.loaded_via_other_path 时 post 仍 via-other → mismatch；item 消失或不再 via-other → 成功。
+    #[test]
+    fn borrowed_detach_rescan_fails_when_still_loaded_via_other_path() {
+        let mut pre = sample_item(
+            AgentTarget::Grok,
+            PortableAssetKind::Skill,
+            "hyperframes-animation",
+            "/claude/skills/hyperframes-animation",
+            Some(true),
+        );
+        pre.origin_kind = PortableOriginKind::Compatibility;
+        pre.store = PortableStoreFactDto {
+            store_id: Some("skill:hyperframes-animation".into()),
+            store_attached: false,
+            loaded_via_other_path: true,
+            loaded_via_target: Some(AgentTarget::Claude),
+        };
+        let (state, code, _) = reconcile_item(
+            PortableAssetActionKind::Detach,
+            false,
+            PortableAssetKind::Skill,
+            &TargetActionRawOutcome::Applied,
+            Some(&pre),
+            Some(&pre),
+        );
+        assert_eq!(state, PortableAssetActionItemState::Failed);
+        assert_eq!(
+            code.as_deref(),
+            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn borrowed_detach_rescan_succeeds_when_item_gone() {
+        let mut pre = sample_item(
+            AgentTarget::Grok,
+            PortableAssetKind::Skill,
+            "hyperframes-animation",
+            "/claude/skills/hyperframes-animation",
+            Some(true),
+        );
+        pre.store = PortableStoreFactDto {
+            store_id: Some("skill:hyperframes-animation".into()),
+            store_attached: false,
+            loaded_via_other_path: true,
+            loaded_via_target: Some(AgentTarget::Claude),
+        };
+        let (state, code, _) = reconcile_item(
+            PortableAssetActionKind::Detach,
+            false,
+            PortableAssetKind::Skill,
+            &TargetActionRawOutcome::Applied,
+            Some(&pre),
+            None,
+        );
+        assert_eq!(state, PortableAssetActionItemState::Succeeded);
+        assert!(code.is_none());
     }
 }

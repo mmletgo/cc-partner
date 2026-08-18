@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 const labels: PortableInventoryRowLabels = {
-  targets: { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' },
+  targets: { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', grok: 'Grok Build' },
   kinds: { skill: 'Skill', command: 'Command', plugin: 'Plugin', mcp: 'MCP' },
   actual: {
     enabled: 'Enabled',
@@ -64,6 +64,7 @@ const labels: PortableInventoryRowLabels = {
     portableStore: 'Portable store',
     unknown: 'From unknown owner',
   },
+  storeBadge: 'Portable store',
 };
 
 function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInventoryItemDto {
@@ -278,5 +279,38 @@ describe('PortableInventoryRow', () => {
     expect(onOpenOwner).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByTestId('portable-row-action-disable-grok-skill-from-claude'));
     expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  test('borrowed store skill shows source-agent badge once plus a single store badge', () => {
+    render(
+      <PortableInventoryRow
+        item={item({
+          inventoryItemId: 'grok-skill-via-claude',
+          target: 'grok',
+          displayName: 'hyperframes-core',
+          originKind: 'compatibility',
+          ownedBy: 'portableStore',
+          loadedBy: 'grok',
+          nativeOutputCandidate: false,
+          store: {
+            storeId: 'skill:hyperframes-core',
+            storeAttached: false,
+            loadedViaOtherPath: true,
+            loadedViaTarget: 'claude',
+          },
+        })}
+        actions={['detach']}
+        labels={labels}
+        onAction={() => undefined}
+        onOpenOwner={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
+      'From Claude Code',
+    );
+    expect(screen.getAllByTestId('portable-row-store-badge')).toHaveLength(1);
+    expect(screen.getByTestId('portable-row-store-badge').textContent).toContain('Portable store');
+    expect(screen.queryAllByText('Portable store')).toHaveLength(1);
   });
 });

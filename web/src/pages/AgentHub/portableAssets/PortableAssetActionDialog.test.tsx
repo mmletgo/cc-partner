@@ -522,7 +522,7 @@ describe('PortableAssetActionDialog state machine', () => {
     );
   });
 
-  test('store detach shows unlink copy and Grok-still-loaded-via-Claude hint', () => {
+  test('store detach of borrowed runtime item warns about source-agent unlink', () => {
     const grokStore: PortableInventoryItemDto = {
       ...item,
       inventoryItemId: 'grok-skill-store',
@@ -556,12 +556,12 @@ describe('PortableAssetActionDialog state machine', () => {
     );
 
     expect(screen.getByTestId('portable-action-store-hint').textContent).toContain(
-      'agentHub:portable.actionDialog.storeDetachHint',
+      'agentHub:portable.actionDialog.storeDetachBorrowedHint',
     );
-    expect(screen.getByTestId('portable-action-store-still-loaded').textContent).toContain(
-      'storeStillLoadedVia',
+    expect(screen.getByTestId('portable-action-borrowed-impact').textContent).toContain(
+      'agentHub:portable.actionDialog.borrowedImpactDetach',
     );
-    expect(screen.queryByTestId('portable-action-borrowed-impact')).toBeNull();
+    expect(screen.queryByTestId('portable-action-store-still-loaded')).toBeNull();
   });
 
   test('batch confirm current version previews all item ids without canonical revision', () => {

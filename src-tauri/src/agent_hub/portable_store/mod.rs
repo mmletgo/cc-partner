@@ -14,7 +14,9 @@ mod actions;
 mod manifest;
 mod symlink;
 
-pub use actions::{execute_skill_or_command_store, should_use_store_semantics};
+pub use actions::{
+    execute_skill_or_command_store, observed_or_native_store_mount, should_use_store_semantics,
+};
 pub use manifest::{
     load_manifest, remove_manifest_attachment, remove_manifest_entry, store_id_from_canonical,
     upsert_manifest_entry, ManifestAttachment, PortableStoreKind, PortableStoreManifest,
