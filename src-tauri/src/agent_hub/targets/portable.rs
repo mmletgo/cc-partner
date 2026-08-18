@@ -117,6 +117,95 @@ impl PortableAssetOwner {
             AgentTarget::Pi => Self::Pi,
         }
     }
+
+    /// 把 Hub 所有者映射回 AgentTarget；共享 `~/.agents` / unknown 没有一对一 target。
+    pub fn as_hub_target(self) -> Option<AgentTarget> {
+        match self {
+            Self::Claude => Some(AgentTarget::Claude),
+            Self::Codex => Some(AgentTarget::Codex),
+            Self::OpenCode => Some(AgentTarget::OpenCode),
+            Self::Grok => Some(AgentTarget::Grok),
+            Self::Gemini => Some(AgentTarget::Gemini),
+            Self::Cursor => Some(AgentTarget::Cursor),
+            Self::Pi => Some(AgentTarget::Pi),
+            Self::SharedAgents | Self::Unknown => None,
+        }
+    }
+}
+
+/// 运行时从其他 Agent / 共享目录加载的项：启停卸载必须改写所有者磁盘。
+///
+/// Business Logic（为什么需要这个函数）:
+///     当前 Agent 列表里的 compatibility / 外借项与「已安装在此」分区一致，
+///     mutation 不能假装改当前 Agent 的 native 根。
+///
+/// Code Logic（这个函数做什么）:
+///     nativeOutputCandidate=false、compatibility/legacyStandalone、
+///     sharedAgents、或 ownedBy 为其他 Hub target → true。
+pub fn is_borrowed_runtime_origin(
+    viewing: AgentTarget,
+    owned_by: PortableAssetOwner,
+    native_output_candidate: bool,
+    origin_kind: PortableOriginKind,
+) -> bool {
+    if !native_output_candidate {
+        return true;
+    }
+    if matches!(
+        origin_kind,
+        PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
+    ) {
+        return true;
+    }
+    if owned_by == PortableAssetOwner::SharedAgents {
+        return true;
+    }
+    owned_by
+        .as_hub_target()
+        .is_some_and(|owner| owner != viewing)
+}
+
+/// 借用项的真实写盘 target：Hub 所有者，或共享 `~/.agents` 走 Codex adapter。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok 列表里的 Claude skill 必须用 Claude 目录语义 disable；
+///     `~/.agents/skills` 由 Codex executor 认路径（active↔hub disabled）。
+///
+/// Code Logic（这个函数做什么）:
+///     SharedAgents → Codex；其他 Hub owner 且非本 target native → owner；否则 viewing。
+pub fn mutation_target_for_origin(
+    viewing: AgentTarget,
+    owned_by: PortableAssetOwner,
+    native_output_candidate: bool,
+) -> AgentTarget {
+    if owned_by == PortableAssetOwner::SharedAgents {
+        return AgentTarget::Codex;
+    }
+    match owned_by.as_hub_target() {
+        Some(owner) if !native_output_candidate || owner != viewing => owner,
+        Some(_) | None => viewing,
+    }
+}
+
+/// 按动作选择写盘 target：plugin 启停跟当前 Agent，卸载/技能移动仍跟所有者。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每个 Agent 有自己的 plugin 开关；在 Codex/Grok/OpenCode 里禁用不得去改 Claude 标记。
+///     卸载仍改所有者磁盘。
+///
+/// Code Logic（这个函数做什么）:
+///     Plugin 且 enablement_action → viewing；否则 `mutation_target_for_origin`。
+pub fn mutation_target_for_action(
+    viewing: AgentTarget,
+    owned_by: PortableAssetOwner,
+    native_output_candidate: bool,
+    kind: AssetKind,
+    enablement_action: bool,
+) -> AgentTarget {
+    if kind == AssetKind::Plugin && enablement_action {
+        return viewing;
+    }
+    mutation_target_for_origin(viewing, owned_by, native_output_candidate)
 }
 
 impl PortableOriginKind {
@@ -1611,6 +1700,70 @@ mod tests {
             fs::create_dir_all(p).unwrap();
         }
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn plugin_enablement_writes_viewing_agent_not_owner() {
+        assert_eq!(
+            mutation_target_for_action(
+                AgentTarget::Grok,
+                PortableAssetOwner::Claude,
+                false,
+                AssetKind::Plugin,
+                true,
+            ),
+            AgentTarget::Grok
+        );
+        assert_eq!(
+            mutation_target_for_action(
+                AgentTarget::Grok,
+                PortableAssetOwner::Claude,
+                false,
+                AssetKind::Plugin,
+                false,
+            ),
+            AgentTarget::Claude
+        );
+        assert_eq!(
+            mutation_target_for_action(
+                AgentTarget::Grok,
+                PortableAssetOwner::Claude,
+                false,
+                AssetKind::Skill,
+                true,
+            ),
+            AgentTarget::Claude
+        );
+        assert_eq!(
+            mutation_target_for_action(
+                AgentTarget::Codex,
+                PortableAssetOwner::Claude,
+                false,
+                AssetKind::Plugin,
+                true,
+            ),
+            AgentTarget::Codex
+        );
+        assert_eq!(
+            mutation_target_for_action(
+                AgentTarget::OpenCode,
+                PortableAssetOwner::Claude,
+                false,
+                AssetKind::Plugin,
+                true,
+            ),
+            AgentTarget::OpenCode
+        );
+        assert_eq!(
+            mutation_target_for_action(
+                AgentTarget::Cursor,
+                PortableAssetOwner::Claude,
+                false,
+                AssetKind::Plugin,
+                true,
+            ),
+            AgentTarget::Cursor
+        );
     }
 
     fn isolated_fixture() -> (tempfile::TempDir, TargetEnvironment) {

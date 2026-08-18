@@ -1,17 +1,19 @@
 /**
- * PortableAssetActionDialog — 本机 portable 资产 preview/apply 确认 Dialog。
+ * PortableAssetActionDialog — 本机 portable 资产确认 Dialog。
  *
  * Business Logic（为什么需要这个对话框）:
- *   所有本机 mutation 必须 inspect→preview→confirm→apply；partial/outcomeUnknown 诚实；
- *   危险动作不用 window.confirm。
+ *   所有本机 mutation 仍须 inspect→preview→confirm→apply；用户只点一次确认。
+ *   打开即自动 preview，危险动作不用 window.confirm，也不再点「预览」按钮。
  *
  * Code Logic（这个组件做什么）:
  *   pure props：回调由 controller 持有 planToken/clientRequestId；views 不 import @/api/*。
+ *   keepData / conflictPolicy 变化会自动重跑 preview，避免确认过期计划。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog, Pill, StatusMessage } from '@/components/primitives';
+import { isHubTarget } from '@/lib/agentCatalog';
 import type {
   PortableAssetActionKind,
   PortableAssetActionPlanDto,
@@ -19,6 +21,10 @@ import type {
   PortableInventoryItemDto,
   PreviewPortableAssetActionRequest,
 } from '@/lib/types/portableInventory';
+import {
+  isPortableBorrowedRuntimeItem,
+  portableBorrowedOwnerLabelKey,
+} from './portableInventoryPresentation';
 import styles from '../AgentHub.module.css';
 
 export interface PortableAssetActionDialogProps {
@@ -70,8 +76,30 @@ function planIsActionable(plan: PortableAssetActionPlanDto | null): boolean {
 }
 
 /**
- * Business Logic: preview/apply 共享 Dialog。
- * Code Logic: hooks 在 early return 前；busy 禁用 close。
+ * Business Logic: 借用 skill/command/MCP 启停会改所有者磁盘；plugin 启停只改当前 Agent 开关。
+ * Code Logic: plugin 的 enable/disable 用独立文案；卸载仍走所有者影响提示。
+ */
+type BorrowedImpactKey =
+  | 'borrowedImpactEnable'
+  | 'borrowedImpactDisable'
+  | 'borrowedImpactEnablePlugin'
+  | 'borrowedImpactDisablePlugin'
+  | 'borrowedImpactUninstall';
+
+function borrowedImpactKey(
+  action: PortableAssetActionKind | null,
+  kind: PortableInventoryItemDto['kind'] | undefined,
+): BorrowedImpactKey | null {
+  const plugin = kind === 'plugin';
+  if (action === 'enable') return plugin ? 'borrowedImpactEnablePlugin' : 'borrowedImpactEnable';
+  if (action === 'disable') return plugin ? 'borrowedImpactDisablePlugin' : 'borrowedImpactDisable';
+  if (action === 'uninstall') return 'borrowedImpactUninstall';
+  return null;
+}
+
+/**
+ * Business Logic: 打开即自动 preview，用户只确认或取消。
+ * Code Logic: hooks 在 early return 前；busy 禁用 close；选项变化自动重跑 preview。
  */
 export function PortableAssetActionDialog({
   open,
@@ -92,40 +120,75 @@ export function PortableAssetActionDialog({
 }: PortableAssetActionDialogProps) {
   const { t } = useTranslation(['agentHub', 'common']);
   const focusRef = useRef<HTMLButtonElement | null>(null);
-  const [keepData, setKeepData] = useState(false);
-  const [conflictPolicy, setConflictPolicy] = useState<'skipExisting' | 'replaceAfterPreview'>(
-    'skipExisting',
-  );
-
-  useEffect(() => {
-    if (!open) return;
-    // Each open + item + action tuple is a new mutation session. Never carry
-    // destructive options from a previous asset/action into this session.
-    /* eslint-disable react-hooks/set-state-in-effect -- session reset is the effect's contract. */
-    setKeepData(false);
-    setConflictPolicy('skipExisting');
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [open, item?.inventoryItemId, action]);
+  const previewedKeyRef = useRef<string | null>(null);
+  const sessionKey = `${open ? 'open' : 'closed'}|${item?.inventoryItemId ?? ''}|${action ?? ''}`;
+  const [options, setOptions] = useState<{
+    sessionKey: string;
+    keepData: boolean;
+    conflictPolicy: 'skipExisting' | 'replaceAfterPreview';
+  }>({
+    sessionKey,
+    keepData: false,
+    conflictPolicy: 'skipExisting',
+  });
+  if (options.sessionKey !== sessionKey) {
+    setOptions({
+      sessionKey,
+      keepData: false,
+      conflictPolicy: 'skipExisting',
+    });
+  }
+  const keepData = options.sessionKey === sessionKey ? options.keepData : false;
+  const conflictPolicy =
+    options.sessionKey === sessionKey ? options.conflictPolicy : 'skipExisting';
 
   const outcome = useMemo(() => classifyActionOutcome(result), [result]);
   // Global Constraints: stale 禁止 mutation —— preview 后 inventory 变 stale 也不得 confirm。
   const inventoryBlocked = mutationBlocked || stale;
+  const planMatchesOptions = Boolean(
+    plan &&
+      plan.action === action &&
+      plan.keepData === keepData &&
+      plan.conflictPolicy === conflictPolicy &&
+      plan.inventorySnapshotHash === inventorySnapshotHash,
+  );
   const canConfirm = Boolean(
     plan &&
+      planMatchesOptions &&
       clientRequestId &&
       planIsActionable(plan) &&
       !busy &&
       !inventoryBlocked &&
       outcome === 'none',
   );
-  const canPreview = Boolean(item && action && inventorySnapshotHash && !busy && !inventoryBlocked);
+  const canAutoPreview = Boolean(
+    open &&
+      item &&
+      action &&
+      inventorySnapshotHash &&
+      !busy &&
+      !inventoryBlocked &&
+      !result &&
+      !planMatchesOptions,
+  );
+  const previewRequestKey = [
+    sessionKey,
+    inventorySnapshotHash ?? '',
+    keepData ? 'keep' : 'drop',
+    conflictPolicy,
+  ].join('|');
+  const borrowed = Boolean(item && isPortableBorrowedRuntimeItem(item));
+  const borrowedOwnerKey = item && borrowed ? portableBorrowedOwnerLabelKey(item) : null;
+  const impactKey = borrowed ? borrowedImpactKey(action, item?.kind) : null;
 
-  /**
-   * Business Logic: preview 必须显式发送 keepData/conflictPolicy/expected revision。
-   * Code Logic: 组装 PreviewPortableAssetActionRequest。
-   */
-  function handlePreview() {
-    if (!item || !action || !inventorySnapshotHash || !canPreview) return;
+  useEffect(() => {
+    if (!open) {
+      previewedKeyRef.current = null;
+      return;
+    }
+    if (!canAutoPreview || !item || !action || !inventorySnapshotHash) return;
+    if (previewedKeyRef.current === previewRequestKey) return;
+    previewedKeyRef.current = previewRequestKey;
     onPreview({
       inventorySnapshotHash,
       inventoryItemIds: [item.inventoryItemId],
@@ -134,7 +197,17 @@ export function PortableAssetActionDialog({
       conflictPolicy,
       expectedCanonicalRevisionId: item.canonicalRevisionId,
     });
-  }
+  }, [
+    open,
+    canAutoPreview,
+    item,
+    action,
+    inventorySnapshotHash,
+    keepData,
+    conflictPolicy,
+    previewRequestKey,
+    onPreview,
+  ]);
 
   /**
    * Business Logic: confirm 只透传 planToken + clientRequestId。
@@ -173,6 +246,30 @@ export function PortableAssetActionDialog({
         </h2>
         <p className={styles.drawerSubtitle}>{t('agentHub:portable.actionDialog.subtitle')}</p>
 
+        {borrowed && item && impactKey ? (
+          <StatusMessage
+            tone={
+              impactKey === 'borrowedImpactEnablePlugin' || impactKey === 'borrowedImpactDisablePlugin'
+                ? 'info'
+                : 'warn'
+            }
+            live="off"
+            data-testid="portable-action-borrowed-impact"
+          >
+            {t(`agentHub:portable.actionDialog.${impactKey}`, {
+              owner: borrowedOwnerKey
+                ? isHubTarget(borrowedOwnerKey)
+                  ? t(`agentHub:targets.${borrowedOwnerKey}`)
+                  : t(`agentHub:portable.inventory.borrowedFrom.${borrowedOwnerKey}`)
+                : t('agentHub:portable.inventory.borrowedFrom.unknown'),
+              current: t(`agentHub:targets.${item.target}`),
+            })}
+            {item.ownedBy === 'sharedAgents'
+              ? ` ${t('agentHub:portable.actionDialog.borrowedImpactSharedAgents')}`
+              : ''}
+          </StatusMessage>
+        ) : null}
+
         {inventoryBlocked ? (
           <StatusMessage tone="warn" data-testid="portable-action-stale-banner">
             {t('agentHub:portable.actionDialog.mutationBlocked')}
@@ -203,8 +300,14 @@ export function PortableAssetActionDialog({
             <input
               type="checkbox"
               checked={keepData}
-              disabled={busy || Boolean(plan)}
-              onChange={(event) => setKeepData(event.target.checked)}
+              disabled={busy}
+              onChange={(event) =>
+                setOptions((current) => ({
+                  ...current,
+                  sessionKey,
+                  keepData: event.target.checked,
+                }))
+              }
               data-testid="portable-action-keep-data"
             />{' '}
             {t('agentHub:portable.actionDialog.keepData')}
@@ -216,9 +319,13 @@ export function PortableAssetActionDialog({
             {t('agentHub:portable.actionDialog.conflictPolicy')}
             <select
               value={conflictPolicy}
-              disabled={busy || Boolean(plan)}
+              disabled={busy}
               onChange={(event) =>
-                setConflictPolicy(event.target.value as 'skipExisting' | 'replaceAfterPreview')
+                setOptions((current) => ({
+                  ...current,
+                  sessionKey,
+                  conflictPolicy: event.target.value as 'skipExisting' | 'replaceAfterPreview',
+                }))
               }
               data-testid="portable-action-conflict-policy"
             >
@@ -352,29 +459,16 @@ export function PortableAssetActionDialog({
           >
             {t('common:action.cancel')}
           </Button>
-          {!plan ? (
-            <Button
-              variant="primary"
-              size="sm"
-              loading={busy}
-              disabled={!canPreview}
-              onClick={handlePreview}
-              data-testid="portable-action-run-preview"
-            >
-              {t('agentHub:portable.actionDialog.preview')}
-            </Button>
-          ) : (
-            <Button
-              variant={action === 'uninstall' ? 'danger' : 'primary'}
-              size="sm"
-              loading={busy}
-              disabled={!canConfirm}
-              onClick={handleConfirm}
-              data-testid="portable-action-confirm"
-            >
-              {t('agentHub:portable.actionDialog.confirm')}
-            </Button>
-          )}
+          <Button
+            variant={action === 'uninstall' ? 'danger' : 'primary'}
+            size="sm"
+            loading={busy}
+            disabled={!canConfirm}
+            onClick={handleConfirm}
+            data-testid="portable-action-confirm"
+          >
+            {t('agentHub:portable.actionDialog.confirm')}
+          </Button>
         </div>
       </div>
     </Dialog>

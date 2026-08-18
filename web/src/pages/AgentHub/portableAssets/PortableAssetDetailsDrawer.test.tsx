@@ -351,4 +351,121 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
       /\benabled\b|\bdisabled\b/,
     );
   });
+
+  test('borrowed runtime item warns about owner impact and still offers mutations', () => {
+    const onOpenOwner = vi.fn();
+    const onRequestAction = vi.fn();
+    const item = baseItem('skill', {
+      inventoryItemId: 'grok-skill-from-claude',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: 'borrowed_runtime_origin',
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+        onOpenOwner={onOpenOwner}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-asset-borrowed-banner').textContent).toContain(
+      'agentHub:portable.details.borrowedHint',
+    );
+    expect(screen.queryByTestId('portable-asset-diagnostic')).toBeNull();
+    expect(screen.getByTestId('portable-asset-actions')).toBeTruthy();
+    expect(screen.getByTestId('portable-action-disable')).toBeTruthy();
+    expect(screen.getByTestId('portable-action-uninstall')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('portable-action-open-owner'));
+    expect(onOpenOwner).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('portable-action-disable'));
+    expect(onRequestAction).toHaveBeenCalledWith('disable');
+  });
+
+  test('borrowed plugin hint does not claim owner flag rewrite', () => {
+    const item = baseItem('plugin', {
+      inventoryItemId: 'codex-plugin-from-claude',
+      target: 'codex',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'codex',
+      nativeOutputCandidate: false,
+      capabilities: {
+        canEnable: false,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: 'borrowed_runtime_origin',
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-asset-borrowed-banner').textContent).toContain(
+      'agentHub:portable.details.borrowedHintPlugin',
+    );
+    expect(screen.queryByTestId('portable-asset-borrowed-banner')?.textContent).not.toContain(
+      'borrowedHint:',
+    );
+  });
+
+  test('sharedAgents borrowed item warns without an owner-agent switch and still mutates', () => {
+    const onOpenOwner = vi.fn();
+    const onRequestAction = vi.fn();
+    const item = baseItem('skill', {
+      inventoryItemId: 'grok-skill-shared',
+      target: 'grok',
+      ownedBy: 'sharedAgents',
+      loadedBy: 'grok',
+      originKind: 'native',
+      nativeOutputCandidate: true,
+      capabilities: {
+        canEnable: false,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: 'borrowed_runtime_origin',
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+        onOpenOwner={onOpenOwner}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-asset-borrowed-banner')).toBeTruthy();
+    expect(screen.queryByTestId('portable-action-open-owner')).toBeNull();
+    expect(screen.getByTestId('portable-action-disable')).toBeTruthy();
+    expect(screen.getByTestId('portable-action-uninstall')).toBeTruthy();
+  });
 });

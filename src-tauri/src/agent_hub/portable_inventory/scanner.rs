@@ -26,12 +26,16 @@ use crate::agent_hub::portable_inventory::models::{
     PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableInventoryTargetDto,
     PortableMcpCredentialFactDto,
 };
+use crate::agent_hub::portable_inventory::plugin_enablement::{
+    plugin_actual_enabled, ViewingPluginEnablement,
+};
 use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
 use crate::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
     EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::portable::{
+    is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
     DiscoveredPortableAsset, PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
@@ -651,14 +655,17 @@ fn scan_plugin_packages(
 ) -> Result<(), AppError> {
     let target = target_dto.target;
     let roots = plugin_roots_for(target, scope, env, homes);
-    // Codex：config.toml [plugins] 启用表；Claude/OpenCode 不用。
-    let codex_enablement = if target == AgentTarget::Codex && scope.scope_kind == ScopeKind::User {
-        load_codex_plugin_enablement(&homes.codex.config_root)
-    } else if target == AgentTarget::Codex {
-        load_codex_plugin_enablement(&scope.absolute_path.join(".codex"))
+    let codex_config_root = if target == AgentTarget::Codex && scope.scope_kind != ScopeKind::User {
+        scope.absolute_path.join(".codex")
     } else {
-        BTreeMap::new()
+        homes.codex.config_root.clone()
     };
+    let enablement = ViewingPluginEnablement::load(
+        target,
+        &homes.claude.config_root,
+        &codex_config_root,
+        &homes.grok.config_root,
+    );
     for candidate in roots {
         let root = candidate.path.clone();
         if !root.is_dir() {
@@ -728,38 +735,8 @@ fn scan_plugin_packages(
             if component_skill.is_dir() {
                 warnings.push("plugin_has_components".into());
             }
-            let actual_enabled = if target == AgentTarget::Codex {
-                let (enabled, warn) =
-                    codex_plugin_actual_enabled(&source.plugin_id, &codex_enablement);
-                if let Some(w) = warn {
-                    warnings.push(w);
-                }
-                Some(enabled)
-            } else {
-                // Claude/OpenCode：目录存在即 installed；无统一 disabled 语义时 true
-                Some(true)
-            };
             let can_mutate_scope =
                 scope.project_opted_in && scope.scope_kind != ScopeKind::Directory;
-            let can_enable = can_mutate_scope
-                && action_capability_supported(
-                    evaluated,
-                    target,
-                    PortableAssetKind::Plugin,
-                    PortableAssetActionKind::Enable,
-                );
-            let can_deactivate = can_mutate_scope
-                && action_capability_supported(
-                    evaluated,
-                    target,
-                    PortableAssetKind::Plugin,
-                    PortableAssetActionKind::Disable,
-                );
-            let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
-                Some("project_not_opted_in".into())
-            } else {
-                action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
-            };
             let (mut origin_kind, mut owned_by, mut native_output_candidate) =
                 classify_plugin_package_origin(target, &root, homes);
             if candidate.origin_kind != PortableOriginKind::Native {
@@ -767,6 +744,40 @@ fn scan_plugin_packages(
                 owned_by = candidate.owned_by;
                 native_output_candidate = origin_kind.is_native_output_candidate();
             }
+            let native = owned_by.as_hub_target() == Some(target)
+                && origin_kind == PortableOriginKind::Native;
+            let (enabled, warn) = plugin_actual_enabled(
+                &enablement,
+                &source.plugin_id,
+                candidate.registry_key.as_deref(),
+                native,
+            );
+            if let Some(w) = warn {
+                warnings.push(w);
+            }
+            let actual_enabled = Some(enabled);
+            let (can_enable, can_disable, can_uninstall, enablement_target, uninstall_target) =
+                mutation_gates_for_origin(
+                    target,
+                    owned_by,
+                    native_output_candidate,
+                    origin_kind,
+                    PortableAssetKind::Plugin,
+                    evaluated,
+                    can_mutate_scope,
+                );
+            let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
+                Some("project_not_opted_in".into())
+            } else if is_borrowed_runtime_origin(
+                target,
+                owned_by,
+                native_output_candidate,
+                origin_kind,
+            ) {
+                None
+            } else {
+                action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
+            };
             let item = PortableInventoryItemDto {
                 inventory_item_id: inv_id.clone(),
                 target,
@@ -796,11 +807,13 @@ fn scan_plugin_packages(
                 desired_enabled: None,
                 materialization_status: None,
                 capabilities: item_capabilities(
-                    target,
+                    enablement_target,
+                    uninstall_target,
                     PortableAssetKind::Plugin,
                     actual_enabled,
                     can_enable,
-                    can_deactivate,
+                    can_disable,
+                    can_uninstall,
                     true,
                     reason,
                     origin_kind,
@@ -866,6 +879,8 @@ struct PluginRootCandidate {
     path: PathBuf,
     /// installed_plugins.json 的 key 前缀（`pyright-lsp@market` → `pyright-lsp`）
     registry_plugin_id: Option<String>,
+    /// 完整 registry key（`pyright-lsp@claude-plugins-official`），用于 enabledPlugins 精确查找
+    registry_key: Option<String>,
     origin_kind: PortableOriginKind,
     owned_by: PortableAssetOwner,
 }
@@ -881,6 +896,7 @@ impl PluginRootCandidate {
         Self {
             path,
             registry_plugin_id: None,
+            registry_key: None,
             origin_kind: PortableOriginKind::Native,
             owned_by,
         }
@@ -1135,6 +1151,7 @@ fn claude_marketplace_plugin_roots_for_grok(claude_config_root: &Path) -> Vec<Pl
         .map(|path| PluginRootCandidate {
             path,
             registry_plugin_id: None,
+            registry_key: None,
             origin_kind: PortableOriginKind::Compatibility,
             owned_by: PortableAssetOwner::Claude,
         })
@@ -1149,8 +1166,8 @@ fn claude_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
     if let Ok(raw) = fs::read_to_string(plugins_root.join("installed_plugins.json")) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(plugins) = value.get("plugins").and_then(|v| v.as_object()) {
-                for (registry_key, installs) in plugins {
-                    let registry_plugin_id = registry_key
+                for (full_key, installs) in plugins {
+                    let registry_plugin_id = full_key
                         .split('@')
                         .next()
                         .map(str::trim)
@@ -1182,6 +1199,7 @@ fn claude_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
                         roots.push(PluginRootCandidate {
                             path,
                             registry_plugin_id: registry_plugin_id.clone(),
+                            registry_key: Some(full_key.clone()),
                             origin_kind: PortableOriginKind::Native,
                             owned_by: PortableAssetOwner::Claude,
                         });
@@ -1242,6 +1260,7 @@ fn codex_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
                 roots.push(PluginRootCandidate {
                     path: root.to_path_buf(),
                     registry_plugin_id,
+                    registry_key: None,
                     origin_kind: PortableOriginKind::Native,
                     owned_by: PortableAssetOwner::Codex,
                 });
@@ -1249,70 +1268,6 @@ fn codex_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
         }
     }
     roots
-}
-
-/// 解析 Codex `config.toml` 中 `[plugins."id@market"] enabled` 映射。
-///
-/// Business Logic: 表存在即安装；`enabled` 缺省 true；`enabled=false` 为禁用。
-/// Code Logic: toml_edit 扫描 `plugins` 表；key 保留完整 `id@market` 字符串。
-pub(crate) fn parse_codex_plugin_enablement_from_toml(text: &str) -> BTreeMap<String, bool> {
-    let mut out = BTreeMap::new();
-    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
-        return out;
-    };
-    let Some(plugins) = doc.get("plugins").and_then(|i| i.as_table()) else {
-        return out;
-    };
-    for (key, item) in plugins.iter() {
-        let Some(table) = item.as_table() else {
-            continue;
-        };
-        let enabled = table
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        out.insert(key.to_string(), enabled);
-    }
-    out
-}
-
-/// 从 CODEX_HOME/config.toml 加载 plugin 启用表。
-fn load_codex_plugin_enablement(config_root: &Path) -> BTreeMap<String, bool> {
-    let path = config_root.join("config.toml");
-    match fs::read_to_string(&path) {
-        Ok(text) => parse_codex_plugin_enablement_from_toml(&text),
-        Err(_) => BTreeMap::new(),
-    }
-}
-
-/// 解析 package 在 Codex config 中的启用态。
-///
-/// Business Logic: 优先精确 `id@market`；否则任意同 short id 的 key；
-/// cache 残留且 config 无记录 → false（不得硬编码 true）。
-/// Code Logic: BTreeMap 查找 + short-id 前缀匹配。
-fn codex_plugin_actual_enabled(
-    plugin_id: &str,
-    enablement: &BTreeMap<String, bool>,
-) -> (bool, Option<String>) {
-    if enablement.is_empty() {
-        // 无 config 表时保持 installed=true 兼容旧 fixture（无 plugins 段）
-        return (true, None);
-    }
-    if let Some(v) = enablement.get(plugin_id) {
-        return (*v, None);
-    }
-    // short id `browser` 匹配 `browser@openai-bundled`
-    let prefix = format!("{plugin_id}@");
-    let mut matched: Option<bool> = None;
-    for (key, enabled) in enablement {
-        if key == plugin_id || key.starts_with(&prefix) {
-            matched = Some(matched.map(|m| m || *enabled).unwrap_or(*enabled));
-        }
-    }
-    match matched {
-        Some(v) => (v, None),
-        None => (false, Some("codex_plugin_not_in_config".into())),
-    }
 }
 
 /// 只返回含目标 manifest 的一级插件目录，拒绝 cache/data/staging 等基础设施目录。
@@ -1587,24 +1542,28 @@ fn discovered_to_item(
     };
 
     let can_mutate_scope = scope.project_opted_in;
-    let can_enable = can_mutate_scope
-        && action_capability_supported(
-            evaluated,
+    let (can_enable, can_disable, can_uninstall, enablement_target, uninstall_target) =
+        mutation_gates_for_origin(
             disc.origin.target,
+            disc.origin.owned_by,
+            disc.origin.native_output_candidate,
+            disc.origin.origin_kind,
             kind,
-            PortableAssetActionKind::Enable,
-        );
-    let can_deactivate = can_mutate_scope
-        && action_capability_supported(
             evaluated,
-            disc.origin.target,
-            kind,
-            PortableAssetActionKind::Disable,
+            can_mutate_scope,
         );
-    let enable_semantics = enable_semantics_supported(kind, disc.origin.target);
+    let borrowed = is_borrowed_runtime_origin(
+        disc.origin.target,
+        disc.origin.owned_by,
+        disc.origin.native_output_candidate,
+        disc.origin.origin_kind,
+    );
+    let enable_semantics = enable_semantics_supported(kind, enablement_target);
     let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
         Some("project_not_opted_in".into())
-    } else if !can_enable || !can_deactivate {
+    } else if borrowed {
+        None
+    } else if !can_enable || !can_disable {
         action_capability_reason(target_dto, evaluated, disc.origin.target, kind)
     } else if !enable_semantics {
         Some("enable_semantics_unsupported".into())
@@ -1660,11 +1619,13 @@ fn discovered_to_item(
         desired_enabled: None,
         materialization_status: None,
         capabilities: item_capabilities(
-            disc.origin.target,
+            enablement_target,
+            uninstall_target,
             kind,
             actual_enabled,
             can_enable,
-            can_deactivate,
+            can_disable,
+            can_uninstall,
             enable_semantics,
             reason,
             disc.origin.origin_kind,
@@ -1858,30 +1819,35 @@ fn action_capability_reason(
 
 #[allow(clippy::too_many_arguments)] // origin 戳与 mutation 开关必须同函数强制 borrowed 能力
 fn item_capabilities(
-    target: AgentTarget,
+    enablement_target: AgentTarget,
+    uninstall_target: AgentTarget,
     kind: PortableAssetKind,
     actual_enabled: Option<bool>,
     can_enable_mutation: bool,
-    can_deactivate_mutation: bool,
+    can_disable_mutation: bool,
+    can_uninstall_mutation: bool,
     enable_semantics: bool,
     reason: Option<String>,
     origin_kind: PortableOriginKind,
     native_output_candidate: bool,
 ) -> PortableInventoryItemCapabilitiesDto {
     let can_toggle_enable = can_enable_mutation && enable_semantics && actual_enabled.is_some();
-    let can_toggle_deactivate =
-        can_deactivate_mutation && enable_semantics && actual_enabled.is_some();
+    let can_toggle_disable = can_disable_mutation && enable_semantics && actual_enabled.is_some();
     let can_enable = can_toggle_enable
         && actual_enabled == Some(false)
-        && supports_direct_local_action(target, kind, PortableAssetActionKind::Enable);
-    let can_disable = can_toggle_deactivate
+        && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Enable);
+    let can_disable = can_toggle_disable
         && actual_enabled == Some(true)
-        && supports_direct_local_action(target, kind, PortableAssetActionKind::Disable);
+        && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Disable);
     let mut capabilities = PortableInventoryItemCapabilitiesDto {
         can_enable,
         can_disable,
-        can_uninstall: can_deactivate_mutation
-            && supports_direct_local_action(target, kind, PortableAssetActionKind::Uninstall),
+        can_uninstall: can_uninstall_mutation
+            && supports_direct_local_action(
+                uninstall_target,
+                kind,
+                PortableAssetActionKind::Uninstall,
+            ),
         // Adopt ownership write is not wired (PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED).
         // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
         can_adopt: false,
@@ -1895,14 +1861,96 @@ fn item_capabilities(
             PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
         );
     if borrowed {
-        capabilities.can_enable = false;
-        capabilities.can_disable = false;
-        capabilities.can_uninstall = false;
-        capabilities.can_install_to_source_target = false;
-        // borrowed 比 CLI 认证门更具体：即使 grok 版本未知，也不能 Enable/Uninstall 外借资产。
+        // plugin 启停跟当前 Agent；卸载/技能移动仍跟所有者。reason 只作 UI 提示。
         capabilities.reason_code = Some("borrowed_runtime_origin".into());
     }
     capabilities
+}
+
+/// 按 origin 决定启停门闩：plugin 启停看当前 Agent，卸载/技能移动看所有者。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每个 Agent 有自己的 plugin 开关；借用包不得拿所有者标记当当前 Agent 已关。
+///     卸载仍改所有者磁盘。Skill 启停仍是所有者目录语义。
+///
+/// Code Logic（这个函数做什么）:
+///     Plugin 借用项：Enable/Disable → viewing allowlist；Uninstall → owner allowlist。
+///     其余借用项仍走 owner direct-local-action。
+fn mutation_gates_for_origin(
+    viewing: AgentTarget,
+    owned_by: PortableAssetOwner,
+    native_output_candidate: bool,
+    origin_kind: PortableOriginKind,
+    kind: PortableAssetKind,
+    evaluated: &EvaluatedTargetSupport,
+    can_mutate_scope: bool,
+) -> (bool, bool, bool, AgentTarget, AgentTarget) {
+    let owner_target = mutation_target_for_origin(viewing, owned_by, native_output_candidate);
+    let enablement_target = mutation_target_for_action(
+        viewing,
+        owned_by,
+        native_output_candidate,
+        kind.to_asset_kind(),
+        true,
+    );
+    let borrowed =
+        is_borrowed_runtime_origin(viewing, owned_by, native_output_candidate, origin_kind);
+    if borrowed {
+        let plugin_enablement = kind == PortableAssetKind::Plugin;
+        let enable_target = if plugin_enablement {
+            viewing
+        } else {
+            owner_target
+        };
+        (
+            can_mutate_scope
+                && supports_direct_local_action(
+                    enable_target,
+                    kind,
+                    PortableAssetActionKind::Enable,
+                ),
+            can_mutate_scope
+                && supports_direct_local_action(
+                    enable_target,
+                    kind,
+                    PortableAssetActionKind::Disable,
+                ),
+            can_mutate_scope
+                && supports_direct_local_action(
+                    owner_target,
+                    kind,
+                    PortableAssetActionKind::Uninstall,
+                ),
+            enablement_target,
+            owner_target,
+        )
+    } else {
+        (
+            can_mutate_scope
+                && action_capability_supported(
+                    evaluated,
+                    viewing,
+                    kind,
+                    PortableAssetActionKind::Enable,
+                ),
+            can_mutate_scope
+                && action_capability_supported(
+                    evaluated,
+                    viewing,
+                    kind,
+                    PortableAssetActionKind::Disable,
+                ),
+            can_mutate_scope
+                && action_capability_supported(
+                    evaluated,
+                    viewing,
+                    kind,
+                    PortableAssetActionKind::Uninstall,
+                ),
+            enablement_target,
+            owner_target,
+        )
+    }
 }
 
 fn mcp_credential_fact(disc: &DiscoveredPortableAsset) -> PortableMcpCredentialFactDto {
@@ -2013,6 +2061,9 @@ fn current_target_environment() -> TargetEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_hub::portable_inventory::plugin_enablement::{
+        parse_claude_plugin_enablement_from_settings, parse_codex_plugin_enablement_from_toml,
+    };
     use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory_with_facts;
     use crate::agent_hub::targets::{
         AdapterSupportLevel, ClaudeInstructionAdapter, CodexInstructionAdapter,
@@ -2254,8 +2305,10 @@ enabled = false
         );
         let capabilities = item_capabilities(
             target.target,
+            target.target,
             PortableAssetKind::Skill,
             Some(true),
+            false,
             false,
             false,
             true,
@@ -2307,6 +2360,7 @@ enabled = false
         };
         let capabilities = item_capabilities(
             target.target,
+            target.target,
             PortableAssetKind::Plugin,
             Some(false),
             action_capability_supported(
@@ -2320,6 +2374,12 @@ enabled = false
                 target.target,
                 PortableAssetKind::Plugin,
                 PortableAssetActionKind::Disable,
+            ),
+            action_capability_supported(
+                &evaluated,
+                target.target,
+                PortableAssetKind::Plugin,
+                PortableAssetActionKind::Uninstall,
             ),
             true,
             action_capability_reason(
@@ -2382,8 +2442,10 @@ enabled = false
         );
         let capabilities = item_capabilities(
             target.target,
+            target.target,
             PortableAssetKind::Skill,
             Some(true),
+            can_render,
             can_render,
             can_render,
             true,
@@ -2665,8 +2727,10 @@ enabled = false
     fn can_adopt_is_always_false_even_when_mutable() {
         let caps = item_capabilities(
             AgentTarget::Claude,
+            AgentTarget::Claude,
             PortableAssetKind::Skill,
             Some(true),
+            true,
             true,
             true,
             true,
@@ -2680,11 +2744,35 @@ enabled = false
     }
 
     #[test]
-    fn compatibility_discovery_blocks_uninstall_with_borrowed_runtime_origin() {
+    fn compatibility_discovery_keeps_owner_mutation_affordances_with_borrowed_reason() {
         let caps = item_capabilities(
+            AgentTarget::Claude,
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            true,
+            true,
+            None,
+            PortableOriginKind::Compatibility,
+            false,
+        );
+        assert!(!caps.can_enable);
+        assert!(caps.can_disable);
+        assert!(caps.can_uninstall);
+        assert!(!caps.can_install_to_source_target);
+        assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
+    }
+
+    #[test]
+    fn compatibility_on_uncertified_owner_still_has_zero_direct_actions() {
+        let caps = item_capabilities(
+            AgentTarget::OpenCode,
             AgentTarget::OpenCode,
             PortableAssetKind::Skill,
             Some(true),
+            true,
             true,
             true,
             true,
@@ -2695,7 +2783,6 @@ enabled = false
         assert!(!caps.can_enable);
         assert!(!caps.can_disable);
         assert!(!caps.can_uninstall);
-        assert!(!caps.can_install_to_source_target);
         assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
     }
 
@@ -2958,6 +3045,292 @@ enabled = false
     }
 
     #[test]
+    fn parse_claude_plugin_enablement_reads_enabled_plugins() {
+        let text = r#"{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false,
+    "pyright-lsp@claude-plugins-official": true
+  }
+}"#;
+        let map = parse_claude_plugin_enablement_from_settings(text);
+        assert_eq!(map.get("superpowers@claude-plugins-official"), Some(&false));
+        assert_eq!(map.get("pyright-lsp@claude-plugins-official"), Some(&true));
+        assert!(!map.contains_key("missing@x"));
+        assert!(parse_claude_plugin_enablement_from_settings("{}").is_empty());
+    }
+
+    #[test]
+    fn claude_plugin_package_actual_enabled_follows_settings_not_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let claude = home.join(".claude");
+        let official = claude.join("plugins/cache/claude-plugins-official/superpowers/6.3.0");
+        write(
+            &official.join(".claude-plugin/plugin.json"),
+            r#"{"name":"superpowers","version":"6.3.0"}"#,
+        );
+        let pyright = claude.join("plugins/cache/claude-plugins-official/pyright-lsp/1.0.0");
+        write(
+            &pyright.join(".claude-plugin/plugin.json"),
+            r#"{"name":"pyright-lsp","version":"1.0.0"}"#,
+        );
+        write(
+            &claude.join("plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "superpowers@claude-plugins-official": [{
+                        "scope": "user",
+                        "installPath": official.to_string_lossy()
+                    }],
+                    "pyright-lsp@claude-plugins-official": [{
+                        "scope": "user",
+                        "installPath": pyright.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        write(
+            &claude.join("settings.json"),
+            r#"{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false,
+    "pyright-lsp@claude-plugins-official": true
+  }
+}"#,
+        );
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            claude.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scopes = [PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (_targets, items) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+        let superpowers = items
+            .iter()
+            .find(|i| i.native_id == "superpowers" || i.source_path.as_deref() == official.to_str())
+            .expect("superpowers package");
+        assert_eq!(
+            superpowers.actual_enabled,
+            Some(false),
+            "enabledPlugins false must not report directory-exists as enabled"
+        );
+        let pyright_item = items
+            .iter()
+            .find(|i| i.native_id == "pyright-lsp")
+            .expect("pyright package");
+        assert_eq!(pyright_item.actual_enabled, Some(true));
+    }
+
+    #[test]
+    fn grok_plugin_package_actual_enabled_ignores_claude_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let claude = home.join(".claude");
+        let grok = home.join(".grok");
+        let official = claude.join("plugins/cache/claude-plugins-official/superpowers/6.3.0");
+        write(
+            &official.join(".claude-plugin/plugin.json"),
+            r#"{"name":"superpowers","version":"6.3.0"}"#,
+        );
+        write(
+            &claude.join("plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "superpowers@claude-plugins-official": [{
+                        "scope": "user",
+                        "installPath": official.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        write(
+            &claude.join("settings.json"),
+            r#"{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false
+  }
+}"#,
+        );
+        write(
+            &grok.join("config.toml"),
+            r#"
+[plugins]
+enabled = ["native-only"]
+"#,
+        );
+        write(
+            &grok.join("installed-plugins/native-only/plugin.json"),
+            r#"{"name":"native-only","version":"0.1.0"}"#,
+        );
+        let mut vars = BTreeMap::new();
+        vars.insert("GROK_HOME".into(), grok.to_string_lossy().into_owned());
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            claude.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scopes = [PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Grok),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (_targets, items) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+        let superpowers = items
+            .iter()
+            .find(|i| i.native_id == "superpowers" || i.source_path.as_deref() == official.to_str())
+            .expect("borrowed superpowers on Grok");
+        assert_eq!(superpowers.target, AgentTarget::Grok);
+        assert_eq!(superpowers.owned_by, PortableAssetOwner::Claude);
+        assert_eq!(
+            superpowers.actual_enabled,
+            Some(true),
+            "Claude enabledPlugins=false must not mark Grok inventory disabled"
+        );
+        assert!(
+            !superpowers.capabilities.can_disable,
+            "Grok has no plugin enable/disable executor; must not remap to Claude CLI"
+        );
+        let native = items
+            .iter()
+            .find(|i| i.native_id == "native-only")
+            .expect("native grok plugin");
+        assert_eq!(native.actual_enabled, Some(true));
+        assert_eq!(native.owned_by, PortableAssetOwner::Grok);
+    }
+
+    #[test]
+    fn agents_without_plugin_flags_ignore_claude_enabled_plugins() {
+        struct Case {
+            target: AgentTarget,
+            env_key: Option<&'static str>,
+            config_rel: &'static str,
+            manifest: &'static str,
+            manifest_body: &'static str,
+        }
+        let cases = [
+            Case {
+                target: AgentTarget::OpenCode,
+                env_key: Some("OPENCODE_CONFIG_DIR"),
+                config_rel: ".opencode",
+                manifest: "package.json",
+                manifest_body: r#"{"name":"demo"}"#,
+            },
+            Case {
+                target: AgentTarget::Gemini,
+                env_key: Some("GEMINI_HOME"),
+                config_rel: ".gemini",
+                manifest: "plugin.json",
+                manifest_body: r#"{"name":"demo"}"#,
+            },
+            Case {
+                target: AgentTarget::Cursor,
+                env_key: Some("CURSOR_HOME"),
+                config_rel: ".cursor",
+                manifest: "plugin.json",
+                manifest_body: r#"{"name":"demo"}"#,
+            },
+            Case {
+                target: AgentTarget::Pi,
+                env_key: None,
+                config_rel: ".pi/agent",
+                manifest: "plugin.json",
+                manifest_body: r#"{"name":"demo"}"#,
+            },
+        ];
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().to_path_buf();
+            let config = home.join(case.config_rel);
+            write(
+                &config.join("plugins/demo").join(case.manifest),
+                case.manifest_body,
+            );
+            write(
+                &home.join(".claude/settings.json"),
+                r#"{
+  "enabledPlugins": {
+    "demo": false,
+    "demo@claude-plugins-official": false
+  }
+}"#,
+            );
+            let mut vars = BTreeMap::new();
+            vars.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                home.join(".claude").to_string_lossy().into_owned(),
+            );
+            if let Some(key) = case.env_key {
+                vars.insert(key.into(), config.to_string_lossy().into_owned());
+            }
+            let env = TargetEnvironment {
+                home: home.clone(),
+                vars,
+                path_entries: vec![],
+            };
+            let scopes = [PortableScanScope {
+                scope_id: "user".into(),
+                scope_kind: ScopeKind::User,
+                project_id: None,
+                project_opted_in: true,
+                absolute_path: home.clone(),
+            }];
+            let query = PortableInventoryQuery {
+                target: Some(case.target),
+                kind: Some(PortableAssetKind::Plugin),
+                scope_kind: Some(ScopeKind::User),
+                local_project_id: None,
+            };
+            let (_targets, items) =
+                scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+            let demo = items
+                .iter()
+                .find(|i| i.native_id == "demo")
+                .unwrap_or_else(|| panic!("{:?} missing demo plugin: {items:?}", case.target));
+            assert_eq!(
+                demo.actual_enabled,
+                Some(true),
+                "{:?} must not inherit Claude enabledPlugins=false",
+                case.target
+            );
+        }
+    }
+
+    #[test]
     fn claude_registry_identity_used_when_install_lacks_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let claude_root = dir.path().join(".claude");
@@ -2981,6 +3354,10 @@ enabled = false
         let roots = claude_user_plugin_roots(&claude_root);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].registry_plugin_id.as_deref(), Some("pyright-lsp"));
+        assert_eq!(
+            roots[0].registry_key.as_deref(),
+            Some("pyright-lsp@claude-plugins-official")
+        );
     }
 
     #[test]

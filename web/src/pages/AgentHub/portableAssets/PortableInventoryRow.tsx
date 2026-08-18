@@ -103,11 +103,11 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     !borrowed &&
     needsPortableEnsureManagedRefresh(item) &&
     Boolean(labels.unmanagedRefreshHint);
-  // 借用行即使 stale backend 仍给 canUninstall 也不渲染 mutation。
-  const rowActions = borrowed
-    ? []
-    : (actions ?? (primaryAction ? [primaryAction] : []));
+  // 借用行保留所有者徽章与「在所有者中打开」，同时按 capability 渲染启停/卸载。
+  const rowActions = actions ?? (primaryAction ? [primaryAction] : []);
   const handleAction = onAction ?? onPrimaryAction;
+  const showOwnerJump = borrowed && Boolean(onOpenOwner);
+  const showMutations = rowActions.length > 0 && Boolean(handleAction);
 
   return (
     <article
@@ -169,32 +169,33 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           ) : null}
         </div>
       </button>
-      {borrowed && onOpenOwner ? (
+      {showMutations || showOwnerJump ? (
         <div className={styles.rowActions}>
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="portable-row-open-owner"
-            onClick={() => onOpenOwner(item)}
-          >
-            {labels.openInOwnerAgent}
-          </Button>
-        </div>
-      ) : rowActions.length > 0 && handleAction ? (
-        <div className={styles.rowActions}>
-          {rowActions.map((action) => (
+          {showMutations && handleAction
+            ? rowActions.map((action) => (
+                <Button
+                  key={action}
+                  variant={action === 'uninstall' ? 'danger' : 'secondary'}
+                  size="sm"
+                  loading={busy}
+                  disabled={busy}
+                  data-testid={`portable-row-action-${action}-${item.inventoryItemId}`}
+                  onClick={() => handleAction(item, action)}
+                >
+                  {labels.actions[action]}
+                </Button>
+              ))
+            : null}
+          {showOwnerJump && onOpenOwner ? (
             <Button
-              key={action}
-              variant={action === 'uninstall' ? 'danger' : 'secondary'}
+              variant="ghost"
               size="sm"
-              loading={busy}
-              disabled={busy}
-              data-testid={`portable-row-action-${action}-${item.inventoryItemId}`}
-              onClick={() => handleAction(item, action)}
+              data-testid="portable-row-open-owner"
+              onClick={() => onOpenOwner(item)}
             >
-              {labels.actions[action]}
+              {labels.openInOwnerAgent}
             </Button>
-          ))}
+          ) : null}
         </div>
       ) : null}
     </article>

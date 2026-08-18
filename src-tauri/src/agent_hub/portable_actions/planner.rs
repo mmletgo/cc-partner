@@ -12,10 +12,14 @@ use super::models::{
     PortableAssetBackupPolicy, PortableAssetCanonicalEffect, PortableAssetPlanOperation,
     PreviewPortableAssetActionRequest, StoredPortableAssetActionPlan,
 };
-use crate::agent_hub::models::PortableAssetActionPlanRecord;
+use crate::agent_hub::models::{AgentTarget, PortableAssetActionPlanRecord};
+use crate::agent_hub::portable_actions::targets::supports_direct_local_action;
 use crate::agent_hub::portable_inventory::{
     PortableAssetKind, PortableInventoryItemDto, PortableInventoryManagementState,
     PortableInventoryMutationCapability, PortableInventorySnapshotDto,
+};
+use crate::agent_hub::targets::portable::{
+    is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -102,8 +106,35 @@ pub async fn preview_portable_asset_action_with_inventory(
         if let Some(t) = target_dto {
             fingerprints.insert(target_fingerprint(t));
         }
+        let enablement_action = matches!(
+            request.action,
+            PortableAssetActionKind::Enable | PortableAssetActionKind::Disable
+        );
+        let mutation_target = mutation_target_for_action(
+            item.target,
+            item.owned_by,
+            item.native_output_candidate,
+            item.kind.to_asset_kind(),
+            enablement_action,
+        );
+        let owner_target =
+            mutation_target_for_origin(item.target, item.owned_by, item.native_output_candidate);
+        let owner_dto = snapshot.targets.iter().find(|t| t.target == owner_target);
+        let borrowed = is_borrowed_runtime_origin(
+            item.target,
+            item.owned_by,
+            item.native_output_candidate,
+            item.origin_kind,
+        );
+        // Plugin 启停跟当前 Agent 的标记；卸载才看所有者 CLI。
+        let gate_dto = if borrowed && !enablement_action {
+            owner_dto.or(target_dto)
+        } else {
+            target_dto
+        };
 
-        let (change, mut reasons) = build_change(item, target_dto, &request).await?;
+        let (change, mut reasons) =
+            build_change(item, gate_dto, mutation_target, borrowed, &request).await?;
         plan_blocking.append(&mut reasons);
         changes.push(change);
     }
@@ -183,6 +214,8 @@ fn blocked_missing_change(
 async fn build_change(
     item: &PortableInventoryItemDto,
     target_dto: Option<&crate::agent_hub::portable_inventory::PortableInventoryTargetDto>,
+    mutation_target: AgentTarget,
+    borrowed: bool,
     request: &PreviewPortableAssetActionRequest,
 ) -> Result<(PortableAssetActionChangeDto, Vec<String>), AppError> {
     let mut blocking = Vec::new();
@@ -233,28 +266,41 @@ async fn build_change(
         }
     }
 
-    if let Some(t) = target_dto {
-        if t.mutation_capability == PortableInventoryMutationCapability::Blocked {
-            blocking.push("PORTABLE_ASSET_ACTION_MUTATION_BLOCKED".into());
+    let apply_target_cli_gates =
+        !(borrowed && target_dto.map(|t| t.target) != Some(mutation_target));
+    if apply_target_cli_gates {
+        if let Some(t) = target_dto {
+            if t.mutation_capability == PortableInventoryMutationCapability::Blocked {
+                blocking.push("PORTABLE_ASSET_ACTION_MUTATION_BLOCKED".into());
+            }
+            if t.mutation_capability == PortableInventoryMutationCapability::PreviewOnly
+                && matches!(
+                    request.action,
+                    PortableAssetActionKind::Enable
+                        | PortableAssetActionKind::Disable
+                        | PortableAssetActionKind::Uninstall
+                        | PortableAssetActionKind::InstallToSourceTarget
+                        | PortableAssetActionKind::Adopt
+                )
+            {
+                // preview 仍可生成计划，但标记 blocked 供 apply fail-closed
+                blocking.push("PORTABLE_ASSET_ACTION_MUTATION_PREVIEW_ONLY".into());
+            }
+            if !t.installed {
+                blocking.push("PORTABLE_ASSET_ACTION_CLI_NOT_INSTALLED".into());
+            }
+        } else {
+            blocking.push("PORTABLE_ASSET_ACTION_CLI_FINGERPRINT_MISSING".into());
         }
-        if t.mutation_capability == PortableInventoryMutationCapability::PreviewOnly
-            && matches!(
-                request.action,
-                PortableAssetActionKind::Enable
-                    | PortableAssetActionKind::Disable
-                    | PortableAssetActionKind::Uninstall
-                    | PortableAssetActionKind::InstallToSourceTarget
-                    | PortableAssetActionKind::Adopt
-            )
-        {
-            // preview 仍可生成计划，但标记 blocked 供 apply fail-closed
-            blocking.push("PORTABLE_ASSET_ACTION_MUTATION_PREVIEW_ONLY".into());
-        }
-        if !t.installed {
-            blocking.push("PORTABLE_ASSET_ACTION_CLI_NOT_INSTALLED".into());
-        }
-    } else {
-        blocking.push("PORTABLE_ASSET_ACTION_CLI_FINGERPRINT_MISSING".into());
+    } else if !supports_direct_local_action(mutation_target, item.kind, request.action)
+        && matches!(
+            request.action,
+            PortableAssetActionKind::Enable
+                | PortableAssetActionKind::Disable
+                | PortableAssetActionKind::Uninstall
+        )
+    {
+        blocking.push("PORTABLE_ASSET_ACTION_TARGET_WRITE_NOT_CERTIFIED".into());
     }
 
     // capability gates
@@ -393,9 +439,14 @@ async fn build_change(
         _ => (item.content_hash.clone(), item.tree_hash.clone()),
     };
 
+    let mut warnings = item.warnings.clone();
+    if borrowed && !warnings.iter().any(|w| w == "borrowed_runtime_origin") {
+        warnings.push("borrowed_runtime_origin".into());
+    }
+
     let change = PortableAssetActionChangeDto {
         inventory_item_id: item.inventory_item_id.clone(),
-        target: item.target,
+        target: mutation_target,
         kind: item.kind,
         path: item.source_path.clone(),
         operation,
@@ -409,7 +460,7 @@ async fn build_change(
         creates_ownership,
         canonical_effect,
         blocking_reasons: blocking.clone(),
-        warnings: item.warnings.clone(),
+        warnings,
     };
     Ok((change, blocking))
 }
@@ -423,10 +474,11 @@ fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
     use crate::agent_hub::config_patch::{
         value_content_hash, JsoncConfigPatcher, SemanticConfigPatcher, TomlConfigPatcher,
     };
-    use crate::agent_hub::models::AgentTarget;
     let path = item.source_path.as_deref()?;
     let bytes = std::fs::read(path).ok()?;
-    let owned = match item.target {
+    let hash_target =
+        mutation_target_for_origin(item.target, item.owned_by, item.native_output_candidate);
+    let owned = match hash_target {
         AgentTarget::Codex | AgentTarget::Grok => TomlConfigPatcher
             .inspect(&bytes, &["mcp_servers".into(), item.native_id.clone()])
             .ok()?,
@@ -646,9 +698,10 @@ args = ["mcp"]
             expected_canonical_revision_id: None,
         };
 
-        let (change, reasons) = build_change(&item, Some(&target), &request)
-            .await
-            .expect("build change");
+        let (change, reasons) =
+            build_change(&item, Some(&target), AgentTarget::Claude, false, &request)
+                .await
+                .expect("build change");
         assert_eq!(change.operation, PortableAssetPlanOperation::Uninstall);
         assert!(reasons
             .iter()
@@ -660,11 +713,182 @@ args = ["mcp"]
 
         let mut unavailable = item;
         unavailable.capabilities.reason_code = Some("portable_direct_action_unavailable".into());
-        let (_, reasons) = build_change(&unavailable, Some(&target), &request)
-            .await
-            .expect("build unavailable change");
+        let (_, reasons) = build_change(
+            &unavailable,
+            Some(&target),
+            AgentTarget::Claude,
+            false,
+            &request,
+        )
+        .await
+        .expect("build unavailable change");
         assert!(!reasons
             .iter()
             .any(|reason| reason == "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn borrowed_plugin_disable_from_grok_does_not_target_claude() {
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Grok,
+                "user",
+                "/claude/plugins/superpowers",
+                "superpowers",
+            ),
+            target: AgentTarget::Grok,
+            loaded_by: AgentTarget::Grok,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Compatibility,
+            native_output_candidate: false,
+            kind: PortableAssetKind::Plugin,
+            native_id: "superpowers".into(),
+            display_name: "superpowers".into(),
+            description: None,
+            version: Some("6.3.0".into()),
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some("/claude/plugins/superpowers".into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("content".into()),
+            tree_hash: Some("tree".into()),
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: false,
+                can_disable: false,
+                can_uninstall: true,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                reason_code: Some("borrowed_runtime_origin".into()),
+                evidence_ids: vec![],
+            },
+            warnings: vec!["borrowed_runtime_origin".into()],
+            mcp_credential: None,
+        };
+        let grok_target = PortableInventoryTargetDto {
+            target: AgentTarget::Grok,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/grok".into()),
+            config_root: "/cfg/grok".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Blocked,
+            reason_code: Some("cli_version_unknown".into()),
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+        let mutation_target = mutation_target_for_action(
+            item.target,
+            item.owned_by,
+            item.native_output_candidate,
+            item.kind.to_asset_kind(),
+            true,
+        );
+        assert_eq!(mutation_target, AgentTarget::Grok);
+        let (change, _) = build_change(&item, Some(&grok_target), mutation_target, true, &request)
+            .await
+            .expect("build grok plugin disable");
+        assert_eq!(change.target, AgentTarget::Grok);
+        assert_ne!(change.target, AgentTarget::Claude);
+        assert_eq!(change.operation, PortableAssetPlanOperation::Disable);
+    }
+
+    #[tokio::test]
+    async fn borrowed_plugin_disable_from_codex_does_not_target_claude() {
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Codex,
+                "user",
+                "/claude/plugins/superpowers",
+                "superpowers",
+            ),
+            target: AgentTarget::Codex,
+            loaded_by: AgentTarget::Codex,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Compatibility,
+            native_output_candidate: false,
+            kind: PortableAssetKind::Plugin,
+            native_id: "superpowers".into(),
+            display_name: "superpowers".into(),
+            description: None,
+            version: Some("6.3.0".into()),
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some("/claude/plugins/superpowers".into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("content".into()),
+            tree_hash: Some("tree".into()),
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: false,
+                can_disable: true,
+                can_uninstall: true,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                reason_code: Some("borrowed_runtime_origin".into()),
+                evidence_ids: vec![],
+            },
+            warnings: vec!["borrowed_runtime_origin".into()],
+            mcp_credential: None,
+        };
+        let codex_target = PortableInventoryTargetDto {
+            target: AgentTarget::Codex,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/codex".into()),
+            config_root: "/cfg/codex".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Supported,
+            reason_code: None,
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+        let mutation_target = mutation_target_for_action(
+            item.target,
+            item.owned_by,
+            item.native_output_candidate,
+            item.kind.to_asset_kind(),
+            true,
+        );
+        assert_eq!(mutation_target, AgentTarget::Codex);
+        let (change, _) = build_change(&item, Some(&codex_target), mutation_target, true, &request)
+            .await
+            .expect("build codex plugin disable");
+        assert_eq!(change.target, AgentTarget::Codex);
+        assert_ne!(change.target, AgentTarget::Claude);
     }
 }

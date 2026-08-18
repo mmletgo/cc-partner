@@ -731,11 +731,14 @@
       "dangerTitle": "危险区",
       "dangerHint": "卸载或全局删除必须先预览，再确认写入。",
       "uninstallBlocked": "该项不可卸载。",
+      "borrowedHint": "这项资产属于{{owner}}。启用、禁用或卸载会改写所有者磁盘，并影响其他运行时加载它的 Agent。",
+      "borrowedHintPlugin": "这项插件属于{{owner}}，但启用标记是每个 Agent 独立的。启用/禁用只改当前 Agent 的开关；卸载仍会改写所有者文件。",
+      "openInOwnerAgent": "在所有者 Agent 中打开",
       "parentPlugin": "所属插件"
     },
     "actionDialog": {
-      "title": "预览 {{action}}",
-      "subtitle": "先检查计划再确认。确认前不会写入。",
+      "title": "确认 {{action}}",
+      "subtitle": "打开后会自动准备计划。确认前不会写入。",
       "keepData": "卸载时保留本地数据",
       "conflictPolicy": "冲突策略",
       "conflictSkip": "跳过已有",
@@ -748,7 +751,13 @@
       "partial": "部分项失败或被阻止，请查看逐项报告。",
       "outcomeUnknown": "结果未知。请先核对，再使用新的请求 id 重试。",
       "mutationBlocked": "库存已过期。成功刷新前禁止预览与应用。",
-      "contextChanged": "资产或 Agent 上下文已变化，请重新生成预览。"
+      "contextChanged": "资产或 Agent 上下文已变化，请重新生成预览。",
+      "borrowedImpactEnable": "这项资产属于{{owner}}，{{current}} 只是运行时加载。启用会改写所有者磁盘上的启用状态，其他运行时加载它的 Agent 也会一起看到启用。",
+      "borrowedImpactDisable": "这项资产属于{{owner}}，{{current}} 只是运行时加载。禁用会改写所有者磁盘上的启用状态，其他运行时加载它的 Agent 也会一起看到禁用。",
+      "borrowedImpactEnablePlugin": "这项插件属于{{owner}}，但启用标记是每个 Agent 独立的。这次只改 {{current}} 的开关，不会改 {{owner}} 或其他 Agent 的启用状态。",
+      "borrowedImpactDisablePlugin": "这项插件属于{{owner}}，但启用标记是每个 Agent 独立的。这次只改 {{current}} 的开关，不会改 {{owner}} 或其他 Agent 的启用状态。",
+      "borrowedImpactUninstall": "这项资产属于{{owner}}，{{current}} 只是运行时加载。卸载会删除或改写所有者磁盘上的文件，其他运行时加载它的 Agent 将无法再使用这项资产。",
+      "borrowedImpactSharedAgents": "共享 ~/.agents 目录会被多个 Agent 读取，这次操作会影响所有从该目录加载的 Agent。"
     }
   },
   "portablePull": {

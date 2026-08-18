@@ -103,7 +103,8 @@ export function isPortablePluginComponent(item: PortableInventoryItemDto): boole
 }
 
 /**
- * Business Logic: 运行时从其他 Agent / 共享目录加载的项不得在当前 Agent 列表里 mutation。
+ * Business Logic: 运行时从其他 Agent / 共享目录加载的项分到「借用」分区。
+ *   Plugin 启停跟当前 Agent 自己的开关；Skill/Command/MCP 启停与卸载仍改所有者磁盘。
  *   native + ownedBy===target 才是「已安装在此」；sharedAgents 一律借用。
  * Code Logic: nativeOutputCandidate=false、compatibility/legacyStandalone、
  *   或 ownedBy 为其他 Agent / sharedAgents → borrowed。ownedBy unknown 不单独判借用。
@@ -286,7 +287,6 @@ export function resolvePortablePrimaryAction(
   item: PortableInventoryItemDto,
   context: PortablePrimaryActionContext,
 ): PortableAssetActionKind | null {
-  if (isPortableBorrowedRuntimeItem(item)) return null;
   if (context.stale || context.mutationBlocked) return null;
   if (context.lockedItemIds.has(item.inventoryItemId)) return null;
   if (isPortableItemReadOnly(item)) return null;
@@ -309,6 +309,7 @@ export function resolvePortablePrimaryAction(
 
 /**
  * Business Logic: 列表行同时暴露启用/禁用与卸载动作，让用户无需打开详情 Drawer 即可管理。
+ *   借用项同样按 capability 暴露动作，确认弹窗再提示对其他 Agent 的影响。
  *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
  *
  * Code Logic: 复用 stale/mutationBlocked/locked/readOnly/unsupported/unmanaged 判定，
@@ -319,7 +320,6 @@ export function resolvePortableRowActions(
   item: PortableInventoryItemDto,
   context: PortablePrimaryActionContext,
 ): PortableAssetActionKind[] {
-  if (isPortableBorrowedRuntimeItem(item)) return [];
   if (context.stale || context.mutationBlocked) return [];
   if (context.lockedItemIds.has(item.inventoryItemId)) return [];
   if (isPortableItemReadOnly(item)) return [];

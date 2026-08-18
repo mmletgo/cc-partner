@@ -537,6 +537,21 @@ mod tests {
             .to_string(),
         );
         write_text(
+            &home.join(".claude/settings.json"),
+            r#"{
+  "enabledPlugins": {
+    "compat-plugin@market": false
+  }
+}"#,
+        );
+        write_text(
+            &home.join(".grok/config.toml"),
+            r#"
+[plugins]
+enabled = ["native-plugin"]
+"#,
+        );
+        write_text(
             &home.join(".grok/skills/grok-skill/SKILL.md"),
             "---\nname: grok-skill\ndescription: native\n---\nbody\n",
         );
@@ -609,7 +624,16 @@ mod tests {
         assert_eq!(claude_plugin.origin_kind, PortableOriginKind::Compatibility);
         assert_eq!(claude_plugin.owned_by, PortableAssetOwner::Claude);
         assert!(!claude_plugin.native_output_candidate);
-        assert!(!claude_plugin.capabilities.can_uninstall);
+        assert_eq!(
+            claude_plugin.actual_enabled,
+            Some(true),
+            "Claude closing the plugin must not close it on Grok"
+        );
+        assert!(
+            !claude_plugin.capabilities.can_disable,
+            "plugin enable/disable follows Grok flags; Grok has no direct executor"
+        );
+        assert!(claude_plugin.capabilities.can_uninstall);
         assert_eq!(
             claude_plugin.capabilities.reason_code.as_deref(),
             Some("borrowed_runtime_origin")

@@ -4,16 +4,17 @@
 >
 > 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
 >
-> 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
+> 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。Plugin 启用标记跟 viewing Agent，见本文 §3.9 与 `portable_inventory/plugin_enablement.rs`。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
 
 ## 0. 硬规则（写代码前先接受）
 
 1. **一份身份表**。Hub / Runtime / 会话搜索 / Prompt 历史 / 用量 / headless 只投影 `agent_catalog`，禁止再按功能面复制枚举。
 2. **未知 token fail-closed**。parse / decoder 失败，禁止静默映射 Claude。
 3. **能做的做实，不能做的仍要露脸**。新身份必须出现在壳层切换器；做不到的面用 scan-only / blocked / residual / unavailable / 缺席，禁止从 UI 藏掉。
-4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。
-5. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
-6. **可执行名 ≠ 产品名**。只启动官方 CLI（Cursor 是 `agent`），禁止拉起 GUI。
+4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。
+5. **Plugin 开关跟当前查看的 Agent，不跟所有者。** Claude `enabledPlugins=false` 不得让 Codex / Grok / OpenCode / Gemini / Cursor / Pi 的同一包显示为已关。Enable/Disable 只写 viewing 标记；Uninstall 与 Skill/Command/MCP 移动才改所有者磁盘。详见 §3.9。
+6. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
+7. **可执行名 ≠ 产品名**。只启动官方 CLI（Cursor 是 `agent`），禁止拉起 GUI。
 
 ## 1. 先锁身份（未锁完禁止开写）
 
@@ -38,7 +39,7 @@
 | 用量抽取 | 有稳定字段才实现 | `has_usage: true`，extract 返回 `None` |
 | Prompt 历史 | 有用户输入文件才加 collector | `history_source` 可登记；无 collector 则筛选为空 |
 | Headless / 优化器 | catalog 位 ≠ 设置里可选 | `has_headless: true`，优化器仍只开 claude+grok |
-| Plugin / marketplace | V1 通常 residual | 不翻译成 Claude plugin |
+| Plugin / marketplace | 原生 plugin 根、**本 Agent 的开关文件**、是否真会加载其他 Agent 的 registry | 只扫自己的目录；**不要**抄 Grok 去列 Claude `installed_plugins.json`，除非该 CLI 运行时确实加载。跨 Agent 翻译仍 residual |
 
 选模板（只抄结构，不抄路径）：
 
@@ -58,7 +59,7 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 2. **Hub 枚举与路径**（`AgentTarget`、`TargetHomes`、support-manifest）
 3. **Hub AssetAdapter**（新 `targets/<id>.rs`，单测锁「不写 AGENTS.md / 不写 ~/.claude」）
 4. **Runtime AgentAdapter**（新 `orchestrator/agent_adapter/<id>.rs` + registry）
-5. **穷尽 match / 列表**（Hub 投影、portable、packages、session、usage）
+5. **穷尽 match / 列表**（Hub 投影、portable、`plugin_enablement`、packages、session、usage）
 6. **前端类型 / decoder / i18n / 列表 helper**
 7. **验证**（§6）
 
@@ -93,7 +94,8 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 | `web/src/lib/types/agentHub.ts` | `AgentTarget` 联合 |
 | `web/src/lib/schemas/agentHub.ts` | `agentTargetDecoder` |
 | `src-tauri/src/agent_hub/targets/paths.rs` | env 白名单、`TargetHomes` 字段、`resolve_*_home`、`default_user_instruction_path`；单测覆盖覆盖 env |
-| `src-tauri/src/agent_hub/support/support-manifest.json` | 新 `targets[]`；写能力全 `blocked`，扫描 `readOnly`；`commandNames` 用真实 CLI |
+| `src-tauri/src/agent_hub/support/support-manifest.json` | 新 `targets[]`；写能力全 `blocked`，扫描 `readOnly`；`commandNames` 用真实 CLI；`activatePackage` / `deactivatePackage` 无 L3 保持 `blocked` |
+| `src-tauri/src/agent_hub/support/runtime-discovery.json` | 只登记该 CLI **真实会加载**的根。`pluginRegistry` / `pluginMarketplace` 今天仅 Grok 指向 Claude cache；没有运行时证据就不要加 |
 | `src-tauri/src/agent_hub/support/manifest.rs` | 若有名字列表单测，补新 token |
 
 ### 3.3 Hub：AssetAdapter
@@ -101,8 +103,8 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 复制最接近的模板到 `src-tauri/src/agent_hub/targets/<id>.rs`，然后：
 
 1. `targets/mod.rs`：`pub mod`、`pub use`、`probe_target` match
-2. 接到 `service.rs` 的 adapter vec、`projection_ops.rs`、`instructions/compiler.rs`、`user_instructions/inventory.rs`、`portable_inventory/scanner.rs`、`portable_actions/{planner,targets}`、`packages/{builder,adoption,activator}`、`plugins/decompose.rs`、`replication/pull.rs`、`cross_agent.rs`、`tests/agent_hub_cli_contract.rs`
-3. 单测至少覆盖：公共槽不写不该写的共享文件；Claude 兼容目录不是 native；受管文件名固定
+2. 接到 `service.rs` 的 adapter vec、`projection_ops.rs`、`instructions/compiler.rs`、`user_instructions/inventory.rs`、`portable_inventory/{scanner,plugin_enablement}.rs`、`portable_actions/{planner,targets}`、`packages/{builder,adoption,activator}`、`plugins/decompose.rs`、`replication/pull.rs`、`cross_agent.rs`、`tests/agent_hub_cli_contract.rs`
+3. 单测至少覆盖：公共槽不写不该写的共享文件；Claude 兼容目录不是 native；受管文件名固定；**plugin `actualEnabled` 不继承 Claude `enabledPlugins`**（见 §3.9）
 
 指令槽经验：
 
@@ -160,7 +162,7 @@ UI 列表必须读 catalog。仍会手写、必须同步的地方：
 | `Record<AgentTarget, …>` 字面量 | `useUserInstructionManager.ts`、`useInstructionThreePaneController.ts` 及它们的测试、`agentHub.peerContext.test.ts` |
 | 跨 Agent 目的地 | `crossAgentPresentation.ts` 测试里的期望数组 |
 | portable pull 标签 | `portablePullPresentation.ts` 的 `sameAs<Id>` + `agentHub.json` |
-| Agent Hub 文案 | `agentHub.json`：`targets`、`targetFilter`、三槽 placeholder、pane 名 |
+| Agent Hub 文案 | `agentHub.json`：`targets`、`targetFilter`、三槽 placeholder、pane 名；plugin 借用文案 `borrowedHintPlugin` / `borrowedImpactEnablePlugin` / `borrowedImpactDisablePlugin` |
 | decoder | `schemas/agentHub.ts`、`schemas/orchestrator.ts` |
 
 `Record<AgentTarget, T>` 不会随 catalog 变长而自动补键，`tsc -b` 会在这里抓住漏网。新增身份后用 catalog 生成空对象：
@@ -170,6 +172,40 @@ Object.fromEntries(allHubTargets().map((t) => [t, 'unmanaged'])) as Record<Agent
 ```
 
 测试里的期望对象也要加新键。
+
+### 3.9 Portable plugin：启用标记跟 viewing Agent
+
+Skill / Command / MCP 的启停与卸载仍是**所有者磁盘**语义（借用项改 Claude / Codex / `~/.agents`）。Plugin **不是**：每个 Hub target 有自己的开关，关掉 Claude 不等于关掉 Grok。
+
+权威实现：`src-tauri/src/agent_hub/portable_inventory/plugin_enablement.rs`。`ViewingPluginEnablement::load(target, …)` **只读当前查看 Agent 的配置**；`plugin_actual_enabled` 必须穷尽 `AgentTarget`。禁止在 scanner 里再写一套 `if Claude / if Codex / else 目录存在即开`。
+
+| Viewing target | 开关文件 | native 未登记 | borrowed 未登记 |
+|----------------|----------|---------------|-----------------|
+| Claude | `~/.claude/settings.json` → `enabledPlugins`（优先完整 `id@marketplace`） | 已安装且表中无键 → **开** | 查看 Claude 时走 Claude 表 |
+| Codex | `config.toml` → `[plugins."id@market"] enabled` | 表非空且未登记 → **关** + `codex_plugin_not_in_config` | **开**（不得把 native 白名单套到借用包） |
+| Grok | `config.toml` → `[plugins] enabled = […]` / `disabled = […]` | `enabled` 非空则当白名单 | 只认 `disabled`；**不要**把 Claude `enabledPlugins` 或 Grok `enabled` 白名单当成借用包已关 |
+| OpenCode / Gemini / Cursor / Pi | 无独立 Hub 可读开关 | 目录存在 → **开** | 永不读 Claude / Codex / Grok 的开关文件 |
+
+写盘分流（`targets/portable.rs::mutation_target_for_action`）：
+
+- Plugin **Enable / Disable** → **viewing** target（改当前 Agent 的标记）
+- Plugin **Uninstall**、以及 Skill / Command / MCP 启停卸载 → **owner**（`SharedAgents` → Codex adapter）
+
+Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local_action`）目前只有 **Claude | Codex**。Grok / OpenCode / Gemini / Cursor / Pi 的 `activatePackage` / `deactivatePackage` 在 support-manifest 里仍是 `blocked`：列表里不得出现可点的 Enable/Disable，更不得 remap 到 `claude plugin …`。Grok 短名 `grok plugin disable superpowers` 会碰到 native 安装与 Claude cache 同名，未认证前禁止从 Hub 去调。
+
+盘点范围：
+
+- 只有 `runtime-discovery.json` 为该 target 登记了 `pluginRegistry` / `pluginMarketplace`，并且该 CLI **运行时确实加载**那些包，才允许在它的库存里列出 Claude cache。今天 **仅 Grok**。
+- Codex / OpenCode / Cursor / Gemini / Pi **不要**为了对称去扫 `~/.claude/plugins/installed_plugins.json`。列出来等于谎称它们会加载 Claude plugin 包。
+- 不要把 Grok marketplace / Gemini extensions / Cursor plugins 翻译成 Claude plugin。
+
+前端文案：plugin 借用横幅用 `borrowedHintPlugin`；确认框 Enable/Disable 用 `borrowedImpactEnablePlugin` / `borrowedImpactDisablePlugin`（只改当前 Agent）；卸载仍用所有者影响提示。
+
+接入新身份时最低测试：
+
+- `plugin_enablement`：空 viewing store 不得继承另一家；borrowed 忽略 Claude-off
+- scanner：该 target 原生 plugin + Claude `enabledPlugins=false` → `actual_enabled == Some(true)`（除非该 target 自己的开关文件把它关掉）
+- planner：从该 target 预览 borrowed plugin Disable 时 `change.target ==` viewing，不是 Claude
 
 ## 4. 编译器抓不到的漏网（必须 grep）
 
@@ -190,9 +226,13 @@ rg -n "targetFilter" web/src/i18n/locales/en/agentHub.json
 
 # support-manifest 是否少一行
 rg -n '"target": "' src-tauri/src/agent_hub/support/support-manifest.json
+
+# plugin 开关是否漏新臂 / 是否误扫 Claude registry
+rg -n "match enablement.target" src-tauri/src/agent_hub/portable_inventory/plugin_enablement.rs
+rg -n '"kind": "pluginRegistry"' src-tauri/src/agent_hub/support/runtime-discovery.json
 ```
 
-文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。
+文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。不要写「关掉 Claude plugin 等于关掉所有 Agent」。
 
 ## 5. 能力状态怎么填
 
@@ -215,6 +255,8 @@ cargo fmt --all
 cargo check --locked --all-targets
 cargo test --locked --lib -- agent_catalog::
 cargo test --locked --lib -- targets::<id>::
+cargo test --locked --lib -- plugin_enablement
+cargo test --locked --lib -- agents_without_plugin_flags
 
 # 前端
 cd web
@@ -244,7 +286,7 @@ CARGO_TARGET_DIR=/tmp/cc-partner-agent-check cargo check --locked --lib --tests
 | 公共槽 | 不写 `AGENTS.md` |
 | 适配 / 独有 | `.cursor/rules/cc-partner.adapted.mdc` 与 `cc-partner.exclusive.mdc`，静态 `alwaysApply` frontmatter |
 | 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `.cursorrules` Fallback；`.cursor/rules/*.mdc`；绝不把 `~/.claude` 当 Cursor native |
-| Portable | `.cursor/skills`、`.cursor/commands`、`mcp.json` → `mcpServers`（JSONC） |
+| Portable | `.cursor/skills`、`.cursor/commands`、`mcp.json` → `mcpServers`（JSONC）；无独立 plugin 开关，不得继承 Claude `enabledPlugins` |
 | Runtime | `cursorCliVisible`；stdin prompt；`agent --resume {id}`；Manual；Fresh |
 | 会话搜索 | 已登记；v1 `unavailable`（布局未认证） |
 | 用量 | 已登记；extract = `None` |
@@ -271,7 +313,7 @@ CARGO_TARGET_DIR=/tmp/cc-partner-agent-check cargo check --locked --lib --tests
 | 公共槽 | 不写 `AGENTS.md` |
 | 适配 / 独有 | `.pi/cc-partner.adapted.md` 与 `cc-partner.exclusive.md`（Pi 无官方 rules 引擎；单一落点，不双写 `APPEND_SYSTEM.md`） |
 | 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `AGENTS.override.md` / `.pi/SYSTEM.md`；绝不把 `~/.claude` 当 Pi native |
-| Portable | `.pi/skills`、`~/.pi/agent/skills`；无内建 MCP，不伪造 `mcp.json` |
+| Portable | `.pi/skills`、`~/.pi/agent/skills`；无内建 MCP，不伪造 `mcp.json`；无独立 plugin 开关，不得继承 Claude `enabledPlugins` |
 | Runtime | `piVisible`；stdin prompt；`pi --session {id}`；Manual；Fresh |
 | 会话搜索 | 已登记；v1 `unavailable`（JSONL 布局未认证） |
 | 用量 | 已登记；extract = `None` |
@@ -286,5 +328,9 @@ CARGO_TARGET_DIR=/tmp/cc-partner-agent-check cargo check --locked --lib --tests
 - 不要把 GUI 二进制（如 `cursor`）当 CLI
 - 不要把新 CLI 的 Claude 兼容扫描根再写一套副本
 - 不要把 Plugin marketplace 翻译成另一家的 plugin
+- 不要在 `runtime-discovery.json` 里给不会加载 Claude plugin 的 Agent 加 `pluginRegistry`
+- 不要把 Claude `enabledPlugins`（或 Codex/Grok 白名单）当成其他 Agent 的 `actualEnabled`
+- 不要在无 L3 / 无本 target executor 时，把 Enable/Disable 映射到所有者 CLI（例如 Grok 列表调用 `claude plugin disable`）
+- 不要把 native plugin 白名单套到借用包（缺席 ≠ 已关）
 - 不要在同一槽写两个落点「以防万一」
 - 不要把 `has_headless` 直接接到 Prompt 优化下拉（Gemini/Cursor 都登记了，但优化器未开放）

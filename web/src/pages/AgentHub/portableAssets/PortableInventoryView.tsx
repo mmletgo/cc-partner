@@ -295,9 +295,10 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
               item={item}
               selected={selectedItemId === item.inventoryItemId}
               busy={lockedItemIds.has(item.inventoryItemId)}
-              actions={[]}
+              actions={getRowActions(item)}
               labels={labels}
               onSelect={(selected) => selectItem(selected.inventoryItemId)}
+              onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
               onOpenOwner={onOpenOwner}
             />
           ))}

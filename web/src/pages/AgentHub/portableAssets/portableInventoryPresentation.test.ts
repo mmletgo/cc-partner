@@ -578,7 +578,7 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable']);
   });
 
-  test('borrowed item has no row actions even when stale backend sends canUninstall', () => {
+  test('borrowed item exposes row actions from owner capabilities', () => {
     const borrowed = makeItem({
       inventoryItemId: 'grok-skill-borrowed-claude',
       kind: 'skill',
@@ -596,8 +596,8 @@ describe('portableInventoryPresentation row actions', () => {
       },
     });
     expect(isPortableBorrowedRuntimeItem(borrowed)).toBe(true);
-    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual([]);
-    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBeNull();
+    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual(['disable', 'uninstall']);
+    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBe('disable');
   });
 });
 

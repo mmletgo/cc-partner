@@ -238,7 +238,7 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-inventory-error').textContent).toContain('boom');
   });
 
-  test('partitions borrowed items into a runtime group without uninstall buttons', () => {
+  test('partitions borrowed items into a runtime group with mutation buttons', () => {
     const installed = item();
     const borrowed = item({
       inventoryItemId: 'grok-skill-from-claude',
@@ -270,8 +270,7 @@ describe('PortableInventoryView', () => {
             targets: [],
             items: [installed, borrowed],
           },
-          getRowActions: (row) =>
-            row.inventoryItemId === borrowed.inventoryItemId ? [] : ['disable', 'uninstall'],
+          getRowActions: () => ['disable', 'uninstall'],
         })}
         labels={labels}
       />,
@@ -282,7 +281,9 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
       'From Claude Code',
     );
-    expect(screen.queryByTestId('portable-row-action-uninstall-grok-skill-from-claude')).toBeNull();
+    expect(
+      screen.getByTestId('portable-row-action-uninstall-grok-skill-from-claude'),
+    ).toBeTruthy();
     expect(screen.queryByTestId('portable-inventory-empty')).toBeNull();
   });
 
@@ -321,6 +322,6 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
       'Shared ~/.agents',
     );
-    expect(screen.queryByTestId('portable-row-action-uninstall-grok-skill-shared')).toBeNull();
+    expect(screen.getByTestId('portable-row-action-uninstall-grok-skill-shared')).toBeTruthy();
   });
 });

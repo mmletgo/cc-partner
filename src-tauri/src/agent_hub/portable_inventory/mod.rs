@@ -12,6 +12,7 @@
 pub mod cache;
 pub mod ensure_managed;
 pub mod models;
+pub mod plugin_enablement;
 pub mod plugin_paths;
 pub mod reconcile;
 pub mod scanner;

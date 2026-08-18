@@ -253,7 +253,7 @@ describe('PortableInventoryRow', () => {
     expect(onAction).toHaveBeenCalledTimes(2);
   });
 
-  test('borrowed row shows owner badge and no uninstall even if actions are stale', () => {
+  test('borrowed row shows owner badge, mutations, and open-owner jump', () => {
     const onOpenOwner = vi.fn();
     const onAction = vi.fn();
     render(
@@ -277,10 +277,11 @@ describe('PortableInventoryRow', () => {
     expect(screen.getByTestId('portable-row-borrowed-badge').textContent).toContain(
       'From Claude Code',
     );
-    expect(screen.queryByTestId('portable-row-action-uninstall-grok-skill-from-claude')).toBeNull();
-    expect(screen.queryByTestId('portable-row-action-disable-grok-skill-from-claude')).toBeNull();
+    expect(screen.getByTestId('portable-row-action-uninstall-grok-skill-from-claude')).toBeTruthy();
+    expect(screen.getByTestId('portable-row-action-disable-grok-skill-from-claude')).toBeTruthy();
     fireEvent.click(screen.getByTestId('portable-row-open-owner'));
     expect(onOpenOwner).toHaveBeenCalledTimes(1);
-    expect(onAction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('portable-row-action-disable-grok-skill-from-claude'));
+    expect(onAction).toHaveBeenCalledTimes(1);
   });
 });

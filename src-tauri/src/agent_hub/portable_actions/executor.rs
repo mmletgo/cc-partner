@@ -716,26 +716,42 @@ async fn revalidate_target_mutation_before_write(
             })
         }
     };
-    let capability = live
-        .targets
-        .iter()
-        .find(|candidate| candidate.target == change.target)
-        .map(|candidate| candidate.mutation_capability)
-        .unwrap_or(PortableInventoryMutationCapability::Blocked);
-    if capability != PortableInventoryMutationCapability::Supported {
-        return Some(TargetActionRawOutcome::Blocked {
-            code: "PORTABLE_ASSET_ACTION_TARGET_MUTATION_NOT_SUPPORTED".into(),
-            message: format!(
-                "target {} mutation capability is {:?}",
-                change.target.as_str(),
-                capability
-            ),
-        });
-    }
     let live_item = live
         .items
         .iter()
         .find(|candidate| candidate.inventory_item_id == change.inventory_item_id);
+    let capability = live
+        .targets
+        .iter()
+        .find(|candidate| candidate.target == change.target)
+        .map(|candidate| candidate.mutation_capability);
+    match capability {
+        Some(PortableInventoryMutationCapability::Supported) => {}
+        Some(other) => {
+            return Some(TargetActionRawOutcome::Blocked {
+                code: "PORTABLE_ASSET_ACTION_TARGET_MUTATION_NOT_SUPPORTED".into(),
+                message: format!(
+                    "target {} mutation capability is {:?}",
+                    change.target.as_str(),
+                    other
+                ),
+            });
+        }
+        None => {
+            // 借用项把 change.target 重映射到所有者；过滤后的 inspect 可能不含所有者 CLI 指纹。
+            let remapped = live_item.is_some_and(|item| item.target != change.target);
+            if !remapped {
+                return Some(TargetActionRawOutcome::Blocked {
+                    code: "PORTABLE_ASSET_ACTION_TARGET_MUTATION_NOT_SUPPORTED".into(),
+                    message: format!(
+                        "target {} mutation capability is {:?}",
+                        change.target.as_str(),
+                        PortableInventoryMutationCapability::Blocked
+                    ),
+                });
+            }
+        }
+    }
     item_action_capability_block(change, action, live_item)
 }
 

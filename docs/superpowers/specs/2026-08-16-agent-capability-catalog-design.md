@@ -36,6 +36,7 @@ cc-partner 已按 Claude / Codex / OpenCode 适配了运行时、会话搜索、
 - 不引入可切换 LAN 模式、鉴权矩阵或把 peer 称为已认证设备。
 - 不自动安装 CLI、不读取或同步 API key / `~/.grok/auth.json` / Google 登录态。
 - 不把 Grok Plugin marketplace 或 Gemini extensions 翻译成 Claude/Codex/OpenCode Plugin。
+- 不把一家 CLI 的 plugin 开关当成另一家的启用态（Claude `enabledPlugins=false` 不等于 Grok/Codex 已关）。借用 Claude plugin 包时，盘点可以显示，Enable/Disable 只写 **当前查看 Agent** 的标记。
 - 不把 Grok 的 Claude 兼容扫描目录（`~/.claude/skills` 等）再写一份 Grok 副本。
 - 不为 Grok / Gemini 做 OpenCode 式项目内 runtime bridge。
 - 不把 Antigravity CLI 登记为 `gemini` 的别名；若日后二进制改名，另开 `AgentId`。
@@ -211,7 +212,7 @@ Gemini 不读 `AGENTS.md`。指令入口是 `GEMINI.md`（项目）与 `~/.gemin
 | Skill | `~/.grok/skills`、`<repo>/.grok/skills` 的 `SKILL.md`；扫描必做；evidence 齐才投影 | `~/.gemini/skills`、`<repo>/.gemini/skills`；同上 |
 | Command | `~/.grok/commands` 的 `*.md` | `~/.gemini/commands` |
 | MCP | `~/.grok/config.toml` 的 `[mcp_servers.*]`，复用已有 TOML patch | `~/.gemini/settings.json` 或项目 `.gemini/settings.json` 的 `mcpServers`，复用 JSONC patch |
-| Plugin | marketplace 模型；V1 只读盘点 + 跨 Agent residual | extensions；同样 scan-only / residual |
+| Plugin | marketplace 模型；V1 只读盘点 + 跨 Agent residual。Grok 可按 `runtime-discovery` 列出 Claude `pluginRegistry`，但 `actualEnabled` 只读 Grok `[plugins]`，禁止继承 Claude `enabledPlugins`。无 L3 不得打开 Hub 内 Grok plugin 启停 | extensions；同样 scan-only / residual；不得继承 Claude 开关 |
 
 跨 Agent：目的地列表 = catalog 中所有 `hubTarget != None`。指令公共正文与 Skill 正文可以流向 Grok/Gemini；Plugin / Hook / OpenCode JS/TS/npm **必须 residual**，只回写 source target。Grok 作为目的地时，common 指令若已存在于 `AGENTS.md`，计划项标 skip（已由其它 target 物化），不重复写入。
 
@@ -253,6 +254,7 @@ Gemini 不读 `AGENTS.md`。指令入口是 `GEMINI.md`（项目）与 `~/.gemin
 | Skill / Command 投影 | evidence 齐则写，否则 scan-only | 同左 |
 | MCP 扫描 / patch | TOML | JSON |
 | Plugin 互拷 / 跨 Agent 翻译 | residual | residual |
+| Plugin 启用标记 | 跟 viewing Agent；不继承 Claude `enabledPlugins` | 同左 |
 | Prompt 优化 | 接 headless JSON | 仅结构化输出稳定时开放 |
 | Claude 式 status 文件 | 缺席 | 缺席 |
 | OpenCode 式 runtime bridge | 不做 | 不做 |

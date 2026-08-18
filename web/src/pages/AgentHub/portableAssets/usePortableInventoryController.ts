@@ -28,7 +28,6 @@ import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   countPortableItemsByKind,
   filterPortableInventoryItems,
-  isPortableBorrowedRuntimeItem,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
   type PortableInventoryFilters,
@@ -382,7 +381,6 @@ export function usePortableInventoryController(
  * Code Logic: 复用 presentation 只读判定 + managementState。
  */
 function isReadOnlyBlocked(item: PortableInventoryItemDto): boolean {
-  if (isPortableBorrowedRuntimeItem(item)) return true;
   if (item.managementState === 'unsupported') return true;
   if (item.scopeKind === 'project' && !item.projectOptedIn) return true;
   return false;

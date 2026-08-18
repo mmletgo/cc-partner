@@ -25,6 +25,7 @@ import {
   type PortableInventoryViewLabels,
 } from './portableAssets';
 import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
+import type { PortableInventoryItemDto } from '@/lib/types/portableInventory';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
 import { peerAllowsUserInstructionThreePane } from './context/agentHubContext';
@@ -257,6 +258,22 @@ export function AgentHubView(props: AgentHubViewProps) {
       },
     }),
     [t],
+  );
+
+  /**
+   * Business Logic: 借用项可在当前列表启停/卸载（先弹跨 Agent 影响确认）；也可切到所有者 Agent。
+   * Code Logic: Hub target 切 agent 并关详情；sharedAgents/unknown 仍打开当前详情。
+   */
+  const openPortableOwner = useCallback(
+    (item: PortableInventoryItemDto) => {
+      if (isHubTarget(item.ownedBy)) {
+        closePortableDetails();
+        onContextChange({ agent: item.ownedBy });
+        return;
+      }
+      portableInventory.selectItem(item.inventoryItemId);
+    },
+    [closePortableDetails, onContextChange, portableInventory],
   );
 
   /**
@@ -582,13 +599,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             <PortableInventoryView
               controller={portableInventory}
               labels={portableInventoryLabels}
-              onOpenOwner={(item) => {
-                if (isHubTarget(item.ownedBy)) {
-                  onContextChange({ agent: item.ownedBy });
-                  return;
-                }
-                portableInventory.selectItem(item.inventoryItemId);
-              }}
+              onOpenOwner={openPortableOwner}
             />
           </div>
         ) : null}
@@ -624,6 +635,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         mutationBlocked={portableInventory.mutationBlocked}
         stale={portableInventory.stale}
         onClose={closePortableDetails}
+        onOpenOwner={openPortableOwner}
         onRequestAction={(action) => {
           if (!portableSelectedItem) return;
           requestPortableAction(portableSelectedItem.inventoryItemId, action);

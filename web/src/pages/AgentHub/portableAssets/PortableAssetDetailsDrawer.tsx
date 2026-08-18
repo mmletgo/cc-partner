@@ -12,11 +12,15 @@
 import { useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Drawer, Pill, StatusMessage } from '@/components/primitives';
+import { isHubTarget } from '@/lib/agentCatalog';
 import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
 } from '@/lib/types/portableInventory';
-import { isPortableBorrowedRuntimeItem } from './portableInventoryPresentation';
+import {
+  isPortableBorrowedRuntimeItem,
+  portableBorrowedOwnerLabelKey,
+} from './portableInventoryPresentation';
 import styles from '../AgentHub.module.css';
 import { CommandDetails } from './CommandDetails';
 import { McpDetails } from './McpDetails';
@@ -44,10 +48,12 @@ export interface PortableAssetDetailsDrawerProps {
   stale?: boolean;
   onClose: () => void;
   onRequestAction: (action: PortableAssetActionKind) => void;
+  /** 借用项：切到所有者 Agent；不是 PortableAssetActionKind。 */
+  onOpenOwner?: (item: PortableInventoryItemDto) => void;
 }
 
 /**
- * Business Logic: unsupported/stale 不暴露 mutation 动作。
+ * Business Logic: unsupported/stale 不暴露 mutation 动作；借用项仍可按 capability 启停/卸载。
  * Code Logic: capabilities + managementState + inventory mutationBlocked 门闩。
  */
 function mutationAllowed(
@@ -55,7 +61,6 @@ function mutationAllowed(
   inventoryBlocked: boolean,
 ): boolean {
   if (inventoryBlocked) return false;
-  if (isPortableBorrowedRuntimeItem(item)) return false;
   if (item.managementState === 'unsupported') return false;
   if (!item.projectOptedIn && item.scopeKind === 'project') return false;
   return true;
@@ -75,16 +80,29 @@ export function PortableAssetDetailsDrawer({
   stale = false,
   onClose,
   onRequestAction,
+  onOpenOwner,
 }: PortableAssetDetailsDrawerProps) {
   const { t } = useTranslation(['agentHub', 'common']);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
   const inventoryBlocked = mutationBlocked || stale;
+  const borrowed = Boolean(item && isPortableBorrowedRuntimeItem(item));
+  const borrowedOwnerKey = item && borrowed ? portableBorrowedOwnerLabelKey(item) : null;
+  const borrowedOwnerLabel = borrowedOwnerKey
+    ? isHubTarget(borrowedOwnerKey)
+      ? t(`agentHub:targets.${borrowedOwnerKey}`)
+      : t(`agentHub:portable.inventory.borrowedFrom.${borrowedOwnerKey}`)
+    : null;
+  const canOpenOwner = Boolean(
+    item && borrowed && onOpenOwner && isHubTarget(item.ownedBy),
+  );
   const canMutate = useMemo(
     () => (item ? mutationAllowed(item, inventoryBlocked) : false),
     [item, inventoryBlocked],
   );
   const reasonCode = item?.capabilities.reasonCode ?? null;
+  const diagnosticReason =
+    reasonCode && reasonCode !== 'borrowed_runtime_origin' ? reasonCode : null;
   const canEnable = Boolean(item?.capabilities.canEnable && canMutate);
   const canDisable = Boolean(item?.capabilities.canDisable && canMutate);
   const canUninstall = Boolean(item?.capabilities.canUninstall && canMutate);
@@ -227,16 +245,52 @@ export function PortableAssetDetailsDrawer({
                   </span>
                 </div>
               </div>
-              {reasonCode || item.warnings.length > 0 ? (
+              {diagnosticReason || item.warnings.length > 0 ? (
                 <StatusMessage
                   tone="warn"
                   data-testid="portable-asset-diagnostic"
                   className={styles.drawerSection}
                 >
-                  {reasonCode ?? item.warnings[0]}
+                  {diagnosticReason ?? item.warnings[0]}
                 </StatusMessage>
               ) : null}
             </Card>
+
+            {borrowed ? (
+              <section
+                className={styles.drawerSection}
+                data-testid="portable-asset-borrowed-banner"
+              >
+                <StatusMessage
+                  tone={item?.kind === 'plugin' ? 'info' : 'warn'}
+                  live="off"
+                >
+                  {t(
+                    item?.kind === 'plugin'
+                      ? 'agentHub:portable.details.borrowedHintPlugin'
+                      : 'agentHub:portable.details.borrowedHint',
+                    {
+                      owner:
+                        borrowedOwnerLabel ??
+                        t('agentHub:portable.inventory.borrowedFrom.unknown'),
+                    },
+                  )}
+                </StatusMessage>
+                {canOpenOwner && item && onOpenOwner ? (
+                  <div className={styles.dialogActions}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => onOpenOwner(item)}
+                      data-testid="portable-action-open-owner"
+                    >
+                      {t('agentHub:portable.details.openInOwnerAgent')}
+                    </Button>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
 
             {item.kind === 'skill' ? <SkillDetails item={item} labels={skillLabels} /> : null}
             {item.kind === 'command' ? (

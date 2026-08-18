@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * PortableAssetActionDialog preview/apply state-machine 合同。
+ * PortableAssetActionDialog auto-preview / apply state-machine 合同。
  *
- * Business Logic: inspect→preview→confirm→apply→rescan；partial/outcomeUnknown 诚实。
+ * Business Logic: inspect→自动 preview→confirm→apply→rescan；用户不再点预览按钮。
  * Code Logic: pure props + user events；禁止 window.confirm。
  */
 
@@ -126,7 +126,7 @@ afterEach(() => {
 });
 
 describe('PortableAssetActionDialog state machine', () => {
-  test('preview request preserves action keepData and expected revision', () => {
+  test('opening the dialog auto-previews and keepData change re-previews', () => {
     const onPreview = vi.fn();
     render(
       <PortableAssetActionDialog
@@ -146,19 +146,23 @@ describe('PortableAssetActionDialog state machine', () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId('portable-action-keep-data'));
-    fireEvent.click(screen.getByTestId('portable-action-run-preview'));
-
     expect(onPreview).toHaveBeenCalledTimes(1);
-    const request = onPreview.mock.calls[0][0] as PreviewPortableAssetActionRequest;
-    expect(request).toEqual({
+    expect(screen.queryByTestId('portable-action-run-preview')).toBeNull();
+    expect(screen.getByTestId('portable-action-confirm')).toBeTruthy();
+    const first = onPreview.mock.calls[0][0] as PreviewPortableAssetActionRequest;
+    expect(first).toEqual({
       inventorySnapshotHash: 'snap-hash-3x4',
       inventoryItemIds: [item.inventoryItemId],
       action: 'uninstall',
-      keepData: true,
+      keepData: false,
       conflictPolicy: 'skipExisting',
       expectedCanonicalRevisionId: 'rev-a',
     });
+
+    fireEvent.click(screen.getByTestId('portable-action-keep-data'));
+    expect(onPreview).toHaveBeenCalledTimes(2);
+    const second = onPreview.mock.calls[1][0] as PreviewPortableAssetActionRequest;
+    expect(second.keepData).toBe(true);
   });
 
   test('confirm passes planToken and clientRequestId', () => {
@@ -380,7 +384,7 @@ describe('PortableAssetActionDialog state machine', () => {
     expect(screen.getByTestId('portable-action-plan-token').textContent).toContain('plan-token-1');
   });
 
-  test('mutationBlocked / stale disables preview and confirm', () => {
+  test('mutationBlocked / stale disables auto-preview and confirm', () => {
     const onPreview = vi.fn();
     const onConfirm = vi.fn();
     const { rerender } = render(
@@ -402,11 +406,11 @@ describe('PortableAssetActionDialog state machine', () => {
       />,
     );
 
-    expect(
-      (screen.getByTestId('portable-action-run-preview') as HTMLButtonElement).disabled,
-    ).toBe(true);
-    fireEvent.click(screen.getByTestId('portable-action-run-preview'));
+    expect(screen.queryByTestId('portable-action-run-preview')).toBeNull();
     expect(onPreview).not.toHaveBeenCalled();
+    expect(
+      (screen.getByTestId('portable-action-confirm') as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(screen.getByTestId('portable-action-stale-banner')).toBeTruthy();
 
     rerender(
@@ -433,5 +437,88 @@ describe('PortableAssetActionDialog state machine', () => {
     ).toBe(true);
     fireEvent.click(screen.getByTestId('portable-action-confirm'));
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  test('borrowed item shows cross-agent impact before preview', () => {
+    const borrowed: PortableInventoryItemDto = {
+      ...item,
+      inventoryItemId: 'grok-skill-from-claude',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      capabilities: {
+        ...item.capabilities,
+        reasonCode: 'borrowed_runtime_origin',
+      },
+    };
+    render(
+      <PortableAssetActionDialog
+        open
+        item={borrowed}
+        action="disable"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        onPreview={() => undefined}
+        onConfirm={() => undefined}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-action-borrowed-impact').textContent).toContain(
+      'agentHub:portable.actionDialog.borrowedImpactDisable',
+    );
+    expect(screen.queryByTestId('portable-action-borrowed-impact')?.textContent).toContain(
+      'owner=',
+    );
+  });
+
+  test('borrowed plugin enablement copy does not claim owner flag rewrite', () => {
+    const borrowed: PortableInventoryItemDto = {
+      ...item,
+      inventoryItemId: 'grok-plugin-from-claude',
+      target: 'grok',
+      kind: 'plugin',
+      nativeId: 'superpowers',
+      displayName: 'superpowers',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      capabilities: {
+        ...item.capabilities,
+        reasonCode: 'borrowed_runtime_origin',
+      },
+    };
+    render(
+      <PortableAssetActionDialog
+        open
+        item={borrowed}
+        action="disable"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        onPreview={() => undefined}
+        onConfirm={() => undefined}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-action-borrowed-impact').textContent).toContain(
+      'agentHub:portable.actionDialog.borrowedImpactDisablePlugin',
+    );
+    expect(screen.queryByTestId('portable-action-borrowed-impact')?.textContent).not.toContain(
+      'borrowedImpactDisable:',
+    );
   });
 });

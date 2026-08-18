@@ -13,7 +13,7 @@ use super::{
 };
 use crate::agent_hub::config_patch::{value_content_hash, CAS_EXPECT_ABSENT};
 use crate::agent_hub::object_store::sha256_hex;
-use crate::agent_hub::packages::activator::ProcessSpec;
+use crate::agent_hub::packages::activator::{ProcessOutcome, ProcessSpec};
 use crate::agent_hub::portable_actions::models::{
     PortableAssetActionChangeDto, PortableAssetActionKind, PortableAssetActionPlanDto,
     PortableAssetBackupPolicy,
@@ -315,7 +315,7 @@ fn execute_plugin(
         }
     };
     match ctx.runner.run(&ProcessSpec { program, args, cwd }) {
-        Ok(out) => Ok(map_process_outcome(out, "claude plugin")),
+        Ok(out) => Ok(map_claude_plugin_process_outcome(ctx.action, out)),
         Err(e) if is_outcome_unknown_error(&e) => Ok(TargetActionRawOutcome::OutcomeUnknown {
             code: "PORTABLE_ASSET_ACTION_SPAWN_UNKNOWN".into(),
             message: e.to_string(),
@@ -324,6 +324,36 @@ fn execute_plugin(
             code: "PORTABLE_ASSET_ACTION_CLI_ERROR".into(),
             message: e.to_string(),
         }),
+    }
+}
+
+/// 将 Claude plugin CLI 结果映射为 raw outcome。
+///
+/// Business Logic: `already disabled/enabled` 是幂等终态，不得标 CLI_FAILED。
+/// Code Logic: exit 0 → Applied；stderr 已满足 → Skipped；其余走通用失败信封。
+fn map_claude_plugin_process_outcome(
+    action: PortableAssetActionKind,
+    outcome: ProcessOutcome,
+) -> TargetActionRawOutcome {
+    if outcome.code == 0 {
+        return TargetActionRawOutcome::Applied;
+    }
+    if claude_plugin_cli_already_satisfied(action, &outcome.stderr) {
+        return TargetActionRawOutcome::Skipped;
+    }
+    map_process_outcome(outcome, "claude plugin")
+}
+
+/// 判定 Claude plugin CLI 是否报告目标状态已满足。
+fn claude_plugin_cli_already_satisfied(action: PortableAssetActionKind, stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    match action {
+        PortableAssetActionKind::Disable => lower.contains("already disabled"),
+        PortableAssetActionKind::Enable => lower.contains("already enabled"),
+        PortableAssetActionKind::Uninstall => {
+            lower.contains("already uninstalled") || lower.contains("is not installed")
+        }
+        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => false,
     }
 }
 
@@ -961,6 +991,112 @@ mod tests {
         assert_eq!(calls[0].cwd.as_deref(), Some(project.as_path()));
         let scope_idx = calls[0].args.iter().position(|a| a == "--scope").unwrap();
         assert_eq!(calls[0].args[scope_idx + 1], "project");
+    }
+
+    /// Business Logic: Claude CLI 对已禁用插件返回 exit 1，Hub 必须当成幂等跳过。
+    #[test]
+    fn plugin_disable_already_disabled_is_skipped() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::{
+            TargetActionContext, TargetActionRawOutcome,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_path = tmp
+            .path()
+            .join("cache/claude-plugins-official/superpowers/6.3.0");
+        std::fs::create_dir_all(&plugin_path).unwrap();
+        let mut item = sample_item(ScopeKind::User, plugin_path.to_str().unwrap(), true);
+        item.kind = PortableAssetKind::Plugin;
+        item.native_id = "superpowers".into();
+        item.display_name = "superpowers".into();
+        item.inventory_item_id = "id-superpowers".into();
+
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Plugin,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_err(
+            1,
+            r#"✘ Failed to disable plugin "superpowers": Plugin "superpowers" is already disabled at user scope"#,
+        );
+        let ctx = TargetActionContext {
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            runner,
+            claude_config_dir: Some(tmp.path().join("claude")),
+            data_dir: Some(tmp.path().join("data")),
+        };
+        let out = ClaudeTargetExecutor
+            .execute_change(&ctx, &dummy_plan(), &change, Some(&item))
+            .unwrap();
+        assert!(
+            matches!(out, TargetActionRawOutcome::Skipped),
+            "already-disabled CLI must skip, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_disable_other_cli_error_still_fails() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::{
+            TargetActionContext, TargetActionRawOutcome,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_path = tmp.path().join("plugins/demo");
+        std::fs::create_dir_all(&plugin_path).unwrap();
+        let mut item = sample_item(ScopeKind::User, plugin_path.to_str().unwrap(), true);
+        item.kind = PortableAssetKind::Plugin;
+        item.native_id = "demo".into();
+
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Plugin,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_err(1, "claude plugin: marketplace unreachable");
+        let ctx = TargetActionContext {
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            runner,
+            claude_config_dir: Some(tmp.path().join("claude")),
+            data_dir: Some(tmp.path().join("data")),
+        };
+        let out = ClaudeTargetExecutor
+            .execute_change(&ctx, &dummy_plan(), &change, Some(&item))
+            .unwrap();
+        match out {
+            TargetActionRawOutcome::Failed { code, .. } => {
+                assert_eq!(code, "PORTABLE_ASSET_ACTION_CLI_FAILED");
+            }
+            other => panic!("expected CLI_FAILED, got {other:?}"),
+        }
     }
 
     fn dummy_plan() -> PortableAssetActionPlanDto {

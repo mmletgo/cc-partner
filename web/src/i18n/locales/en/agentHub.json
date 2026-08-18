@@ -731,11 +731,14 @@
       "dangerTitle": "Danger zone",
       "dangerHint": "Uninstall or delete-everywhere requires a preview before any write.",
       "uninstallBlocked": "Uninstall is not available for this item.",
+      "borrowedHint": "This asset belongs to {{owner}}. Enable, disable, or uninstall rewrites the owner's files and affects other agents that load it at runtime.",
+      "borrowedHintPlugin": "This plugin belongs to {{owner}}, but each Agent has its own enable flag. Enable/disable only updates the current Agent; uninstall still rewrites the owner's files.",
+      "openInOwnerAgent": "Open in owner Agent",
       "parentPlugin": "Parent plugin"
     },
     "actionDialog": {
-      "title": "Preview {{action}}",
-      "subtitle": "Inspect the plan, then confirm. Nothing is written until you confirm.",
+      "title": "Confirm {{action}}",
+      "subtitle": "The plan is prepared automatically. Nothing is written until you confirm.",
       "keepData": "Keep local data when uninstalling",
       "conflictPolicy": "Conflict policy",
       "conflictSkip": "Skip existing",
@@ -748,7 +751,13 @@
       "partial": "Some items failed or were blocked. Review the per-item report.",
       "outcomeUnknown": "Outcome is unknown. Reconcile before retrying with a new request id.",
       "mutationBlocked": "Inventory is stale. Preview and apply are blocked until a successful refresh.",
-      "contextChanged": "The asset or Agent context changed. Generate a new preview."
+      "contextChanged": "The asset or Agent context changed. Generate a new preview.",
+      "borrowedImpactEnable": "This asset belongs to {{owner}}; {{current}} only loads it at runtime. Enabling rewrites the owner's on-disk enabled state, and other agents that runtime-load it will see the same change.",
+      "borrowedImpactDisable": "This asset belongs to {{owner}}; {{current}} only loads it at runtime. Disabling rewrites the owner's on-disk enabled state, and other agents that runtime-load it will see the same change.",
+      "borrowedImpactEnablePlugin": "This plugin belongs to {{owner}}, but each Agent has its own enable flag. This change only updates {{current}} and does not change {{owner}} or other agents.",
+      "borrowedImpactDisablePlugin": "This plugin belongs to {{owner}}, but each Agent has its own enable flag. This change only updates {{current}} and does not change {{owner}} or other agents.",
+      "borrowedImpactUninstall": "This asset belongs to {{owner}}; {{current}} only loads it at runtime. Uninstall removes or rewrites the owner's files, and other agents that load it will lose it.",
+      "borrowedImpactSharedAgents": "The shared ~/.agents directory is read by multiple agents, so this change affects every agent that loads from it."
     }
   },
   "portablePull": {
