@@ -18,13 +18,16 @@ use super::models::{
 use super::targets::{
     executor_for, expected_enabled_after, TargetActionContext, TargetActionRawOutcome,
 };
-use crate::agent_hub::models::{AgentTarget, PortableActionClaim};
+use crate::agent_hub::models::{
+    AgentTarget, MaterializationStatus, NewMaterialization, PortableActionClaim,
+};
 use crate::agent_hub::packages::activator::ProcessRunner;
 use crate::agent_hub::portable_inventory::{
     hash_directory_tree, hash_plugin_root, inspect_portable_inventory_force_query,
     inspect_portable_inventory_force_with_env_query, inspect_portable_inventory_query,
     inspect_portable_inventory_with_env_query, PortableInventoryItemDto,
-    PortableInventoryMutationCapability, PortableInventoryQuery, PortableInventorySnapshotDto,
+    PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
+    PortableInventorySnapshotDto,
 };
 use crate::agent_hub::targets::paths::TargetEnvironment;
 use crate::agent_hub::targets::portable::hash_skill_directory;
@@ -393,6 +396,12 @@ async fn execute_claimed_plan(
             }
         }
 
+        if plan.action.is_hub_ledger_only() {
+            let outcome = confirm_current_version_on_ledger(&deps.repo, change, pre.as_ref()).await;
+            raw_results.push((change.inventory_item_id.clone(), outcome, pre));
+            continue;
+        }
+
         // 写入 target 前最后一次读取当前 manifest/CLI capability。
         // revalidate_claimed_plan 早先的 force inspect 只绑定 inventory hash；在
         // preview/claim 后 manifest 变为 scan-only 时，旧 plan 仍可能带着 direct-local
@@ -674,6 +683,29 @@ fn reconcile_item(
                         )
                     }
                 }
+                PortableAssetActionKind::ConfirmCurrentVersion => {
+                    if post.is_some_and(|p| {
+                        p.management_state == PortableInventoryManagementState::HubManaged
+                    }) {
+                        (
+                            PortableAssetActionItemState::Succeeded,
+                            None,
+                            Some("current version recorded".into()),
+                        )
+                    } else if post.is_none() {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISSING".into()),
+                            Some("item missing after confirm current version".into()),
+                        )
+                    } else {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
+                            Some("item still drifted after confirm current version".into()),
+                        )
+                    }
+                }
             }
         }
     }
@@ -727,6 +759,9 @@ async fn revalidate_target_mutation_before_write(
     action: PortableAssetActionKind,
     change: &super::models::PortableAssetActionChangeDto,
 ) -> Option<TargetActionRawOutcome> {
+    if action.is_hub_ledger_only() {
+        return None;
+    }
     let state = state?;
     let live = if let Some(env) = &deps.env {
         inspect_portable_inventory_force_with_env_query(state, env, query).await
@@ -805,6 +840,9 @@ fn item_action_capability_block(
         PortableAssetActionKind::Detach => item.capabilities.can_detach,
         PortableAssetActionKind::DestroyStore => item.capabilities.can_destroy_store,
         PortableAssetActionKind::MigrateToStore => item.capabilities.can_migrate_to_store,
+        PortableAssetActionKind::ConfirmCurrentVersion => {
+            item.capabilities.can_confirm_current_version
+        }
     };
     if allowed {
         return None;
@@ -846,6 +884,99 @@ async fn resolve_post_inventory(
         return inspect_portable_inventory_force_with_env_query(state, env, query).await;
     }
     inspect_portable_inventory_force_query(state, query).await
+}
+
+/// 把当前磁盘 hash 写回 materialization，不改 Agent 文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Skill/Command/Plugin/MCP 可能被 CLI 自己更新；用户确认后 Hub 只把当前文件记为一致基准。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 preview 绑定的 observed hash，按 viewing target 找到 binding/materialization，
+///     把 `rendered_hash`/`observed_external_hash` 对齐并标 Synced。
+async fn confirm_current_version_on_ledger(
+    repo: &AgentHubRepo,
+    change: &super::models::PortableAssetActionChangeDto,
+    pre: Option<&PortableInventoryItemDto>,
+) -> TargetActionRawOutcome {
+    let Some(item) = pre else {
+        return TargetActionRawOutcome::Blocked {
+            code: "PORTABLE_ASSET_ACTION_ITEM_NOT_FOUND".into(),
+            message: "inventory item missing before confirm current version".into(),
+        };
+    };
+    let Some(asset_id) = item.canonical_asset_id.as_deref() else {
+        return TargetActionRawOutcome::Blocked {
+            code: "PORTABLE_ASSET_ACTION_CANONICAL_MISSING".into(),
+            message: "canonical asset missing for confirm current version".into(),
+        };
+    };
+    let observed = item.content_hash.clone().or_else(|| item.tree_hash.clone());
+    let Some(observed) = observed else {
+        return TargetActionRawOutcome::Blocked {
+            code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into(),
+            message: "observed hash missing for confirm current version".into(),
+        };
+    };
+    if let Some(expected) = change.expected_source_hash.as_deref() {
+        if expected != observed {
+            return TargetActionRawOutcome::Failed {
+                code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+                message: "disk hash changed since preview".into(),
+            };
+        }
+    }
+
+    match confirm_current_version_write(repo, item, asset_id, &observed).await {
+        Ok(outcome) => outcome,
+        Err(error) => TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_CONFIRM_CURRENT_VERSION_FAILED".into(),
+            message: error.to_string(),
+        },
+    }
+}
+
+async fn confirm_current_version_write(
+    repo: &AgentHubRepo,
+    item: &PortableInventoryItemDto,
+    asset_id: &str,
+    observed: &str,
+) -> Result<TargetActionRawOutcome, AppError> {
+    let bindings = repo.list_target_bindings_for_asset(asset_id).await?;
+    let Some(binding) = bindings
+        .into_iter()
+        .find(|binding| binding.target == item.target)
+    else {
+        return Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_MATERIALIZATION_MISSING".into(),
+            message: "target binding missing for confirm current version".into(),
+        });
+    };
+    let Some(existing) = repo.get_materialization_by_binding(&binding.id).await? else {
+        return Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_MATERIALIZATION_MISSING".into(),
+            message: "materialization missing for confirm current version".into(),
+        });
+    };
+    let already_current = existing.rendered_hash.as_deref() == Some(observed)
+        && existing.observed_external_hash.as_deref() == Some(observed)
+        && existing.status == MaterializationStatus::Synced;
+    if already_current {
+        return Ok(TargetActionRawOutcome::Skipped);
+    }
+    repo.upsert_materialization(NewMaterialization {
+        asset_id: existing.asset_id,
+        target: existing.target,
+        target_binding_id: existing.target_binding_id,
+        native_path: item.source_path.clone().or(existing.native_path),
+        last_projected_revision_id: existing.last_projected_revision_id,
+        rendered_hash: Some(observed.to_string()),
+        observed_external_hash: Some(observed.to_string()),
+        status: MaterializationStatus::Synced,
+        last_error: None,
+    })
+    .await?;
+    Ok(TargetActionRawOutcome::Applied)
 }
 
 /// 按 inventory 行的 tree hash 域重算源树，并在 mutation 前 fail-closed。
@@ -919,7 +1050,10 @@ pub fn test_deps_with_runner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::models::{AgentTarget, ScopeKind};
+    use crate::agent_hub::models::{
+        AgentTarget, AssetKind, AssetPolicy, DesiredPresence, MaterializationStatus,
+        NewLogicalAsset, NewMaterialization, NewScopeNode, NewTargetBinding, ScopeKind,
+    };
     use crate::agent_hub::packages::activator::FakeProcessRunner;
     use crate::agent_hub::portable_actions::models::{
         PortableAssetActionKind, PortableAssetActionPlanDto, PortableAssetConflictPolicy,
@@ -1013,6 +1147,7 @@ mod tests {
                 can_attach: false,
                 can_detach: false,
                 can_destroy_store: false,
+                can_confirm_current_version: false,
                 reason_code: None,
                 evidence_ids: vec![],
             },
@@ -1059,6 +1194,119 @@ mod tests {
         )
         .await
         .expect("preview")
+    }
+
+    /// Business Logic: 确认当前版本只重记哈希，不 spawn CLI、不改磁盘。
+    #[tokio::test]
+    async fn confirm_current_version_updates_materialization_hashes() {
+        let repo = test_repo().await;
+        repo.insert_scope(NewScopeNode {
+            id: Some("user".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .expect("scope");
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: "user".into(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "tool".into(),
+                display_name: "tool".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .expect("asset");
+        let binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .expect("binding");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: binding.id.clone(),
+            native_path: Some("/skills/tool".into()),
+            last_projected_revision_id: None,
+            rendered_hash: Some("old-hash".into()),
+            observed_external_hash: Some("new-hash".into()),
+            status: MaterializationStatus::Drift,
+            last_error: None,
+        })
+        .await
+        .expect("materialization");
+
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "tool",
+            "/skills/tool",
+            Some(true),
+        );
+        item.canonical_asset_id = Some(asset.id.clone());
+        item.management_state = PortableInventoryManagementState::Drifted;
+        item.content_hash = Some("new-hash".into());
+        item.tree_hash = Some("tree-new".into());
+        item.capabilities.can_confirm_current_version = true;
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![item.inventory_item_id.clone()],
+            PortableAssetActionKind::ConfirmCurrentVersion,
+            false,
+        )
+        .await;
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "unexpected blocking: {:?}",
+            plan.blocking_reasons
+        );
+
+        let mut post_item = item.clone();
+        post_item.management_state = PortableInventoryManagementState::HubManaged;
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
+        let runner = Arc::new(FakeProcessRunner::new());
+        let deps = PortableActionExecutorDeps {
+            repo: repo.clone(),
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snap),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token.clone(),
+                client_request_id: "req-confirm-current".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded
+        );
+        assert!(runner.calls().is_empty(), "ledger-only must not spawn CLI");
+        let mat = repo
+            .get_materialization_by_binding(&binding.id)
+            .await
+            .expect("read mat")
+            .expect("mat exists");
+        assert_eq!(mat.rendered_hash.as_deref(), Some("new-hash"));
+        assert_eq!(mat.observed_external_hash.as_deref(), Some("new-hash"));
+        assert_eq!(mat.status, MaterializationStatus::Synced);
     }
 
     /// Business Logic: Claude Plugin enable 必须带 --scope user argv。

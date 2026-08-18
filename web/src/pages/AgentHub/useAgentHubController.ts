@@ -60,6 +60,7 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
+  samePortableItemIds,
   usePortableInventoryController,
   usePortablePullController,
   type PortableInventoryFilters,
@@ -647,7 +648,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     portableInventoryBase.inventoryQuery.kind ?? '',
     portableInventoryBase.inventoryQuery.scopeKind ?? '',
     portableInventoryBase.inventoryQuery.localProjectId ?? '',
-    portableInventoryBase.pendingAction?.itemId ?? '',
+    portableInventoryBase.pendingAction?.itemIds.join('\0') ?? '',
     portableInventoryBase.pendingAction?.action ?? '',
   ].join('\0');
   /** layout commit 时同步最新值，使 history 切换后的旧 Promise 无法提交。 */
@@ -2129,8 +2130,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       const pendingAction = portableInventoryBase.pendingAction;
       if (
         !pendingAction ||
-        request.inventoryItemIds.length !== 1 ||
-        request.inventoryItemIds[0] !== pendingAction.itemId ||
+        !samePortableItemIds(request.inventoryItemIds, pendingAction.itemIds) ||
         request.action !== pendingAction.action ||
         request.inventorySnapshotHash !==
           portableInventoryBase.snapshot?.inventorySnapshotHash
@@ -2220,12 +2220,12 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setPortableActionError(t('agentHub:portable.actionDialog.contextChanged'));
         return;
       }
-      const itemId = portableInventoryBase.pendingAction?.itemId;
+      const itemIds = portableInventoryBase.pendingAction?.itemIds ?? [];
       portableActionBusyRef.current = true;
       const actionSeq = ++portableActionSeqRef.current;
       setPortableActionBusy(true);
       setPortableActionError(null);
-      if (itemId) portableInventoryBase.setItemLocked(itemId, true);
+      for (const itemId of itemIds) portableInventoryBase.setItemLocked(itemId, true);
       try {
         const applyRequest: ApplyPortableAssetActionRequest = {
           planToken,
@@ -2258,7 +2258,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
           actionSeq === portableActionSeqRef.current &&
           contextFingerprint === portableActionContextFingerprintRef.current
         ) {
-          if (itemId) portableInventoryBase.setItemLocked(itemId, false);
+          for (const itemId of itemIds) portableInventoryBase.setItemLocked(itemId, false);
           portableActionBusyRef.current = false;
           setPortableActionBusy(false);
         }

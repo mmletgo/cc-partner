@@ -312,7 +312,7 @@ describe('usePortableInventoryController', () => {
       result.current.openAction('claude-skill-alpha', 'disable');
     });
     expect(result.current.pendingAction).toEqual({
-      itemId: 'claude-skill-alpha',
+      itemIds: ['claude-skill-alpha'],
       action: 'disable',
     });
 
@@ -320,6 +320,45 @@ describe('usePortableInventoryController', () => {
       result.current.clearPendingAction();
     });
     expect(result.current.pendingAction).toBeNull();
+  });
+
+  test('openConfirmAllCurrentVersions batches drifted items in the current snapshot', async () => {
+    const driftedA = makeItem({
+      inventoryItemId: 'claude-skill-a',
+      kind: 'skill',
+      nativeId: 'a',
+      managementState: 'drifted',
+      capabilities: { ...baseCapabilities, canConfirmCurrentVersion: true },
+    });
+    const driftedB = makeItem({
+      inventoryItemId: 'claude-skill-b',
+      kind: 'skill',
+      nativeId: 'b',
+      managementState: 'drifted',
+      capabilities: { ...baseCapabilities, canConfirmCurrentVersion: true },
+    });
+    const consistent = makeItem({
+      inventoryItemId: 'claude-skill-c',
+      kind: 'skill',
+      nativeId: 'c',
+    });
+    apiMocks.inspect.mockResolvedValue(snapshot('snap-confirm-all', [driftedA, consistent, driftedB]));
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    expect(result.current.confirmableCurrentVersionItems.map((item) => item.inventoryItemId)).toEqual([
+      'claude-skill-a',
+      'claude-skill-b',
+    ]);
+
+    act(() => {
+      result.current.setFilters({ search: 'zzz' });
+      result.current.openConfirmAllCurrentVersions();
+    });
+    expect(result.current.pendingAction).toEqual({
+      itemIds: ['claude-skill-a', 'claude-skill-b'],
+      action: 'confirmCurrentVersion',
+    });
   });
 
   test('changing deviceId retriggers inspect with new context and clears prior snapshot', async () => {

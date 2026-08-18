@@ -107,6 +107,9 @@ export function PortableAssetDetailsDrawer({
   const canMigrateToStore = Boolean(
     storeKind && item?.capabilities.canMigrateToStore && canMutate,
   );
+  const canConfirmCurrentVersion = Boolean(
+    item?.capabilities.canConfirmCurrentVersion && canMutate,
+  );
   const canAttach = Boolean(storeKind && item?.capabilities.canAttach && canMutate);
   const canDetach = Boolean(storeKind && item?.capabilities.canDetach && canMutate);
   const canDestroyStore = Boolean(
@@ -393,6 +396,17 @@ export function PortableAssetDetailsDrawer({
                 </StatusMessage>
               ) : null}
               <div className={styles.dialogActions}>
+                {canConfirmCurrentVersion ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onRequestAction('confirmCurrentVersion')}
+                    data-testid="portable-action-confirm-current-version"
+                  >
+                    {t('agentHub:portable.actions.confirmCurrentVersion')}
+                  </Button>
+                ) : null}
                 {canMigrateToStore ? (
                   <Button
                     variant="secondary"

@@ -236,6 +236,7 @@ pub async fn inspect_portable_inventory_with_env_query(
         if let Some(reason) = failed_ids.get(&item.inventory_item_id) {
             item.management_state = PortableInventoryManagementState::Unsupported;
             item.capabilities.reason_code = Some("ensure_managed_failed".into());
+            item.capabilities.can_confirm_current_version = false;
             let warn = format!("ensure_managed_failed:{reason}");
             if !item.warnings.iter().any(|w| w == &warn) {
                 item.warnings.push(warn);
@@ -779,14 +780,11 @@ fn scan_plugin_packages(
                     evaluated,
                     can_mutate_scope,
                 );
+            let borrowed =
+                is_borrowed_runtime_origin(target, owned_by, native_output_candidate, origin_kind);
             let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
                 Some("project_not_opted_in".into())
-            } else if is_borrowed_runtime_origin(
-                target,
-                owned_by,
-                native_output_candidate,
-                origin_kind,
-            ) {
+            } else if borrowed {
                 None
             } else {
                 action_capability_reason(target_dto, evaluated, target, PortableAssetKind::Plugin)
@@ -829,6 +827,7 @@ fn scan_plugin_packages(
                     can_uninstall,
                     true,
                     reason,
+                    borrowed,
                     origin_kind,
                     native_output_candidate,
                     &PortableStoreFactDto::default(),
@@ -1648,6 +1647,7 @@ fn discovered_to_item(
             can_uninstall,
             enable_semantics,
             reason,
+            borrowed,
             disc.origin.origin_kind,
             disc.origin.native_output_candidate,
             &store,
@@ -1717,7 +1717,8 @@ fn should_replace_with(
 /// 从发现路径推导 store 事实与所有者。
 ///
 /// Business Logic: store 软链归 portableStore；兼容根上的同一 storeId 只标「仍被其他路径加载」。
-/// Code Logic: classify_store_link；兼容/非 native → loaded_via_other_path。
+/// Code Logic: classify_store_link；兼容路径 → loaded_via_other_path；
+///     native/legacyStandalone 软链算本 Agent 已附加。
 fn store_fact_for_discovery(
     disc: &DiscoveredPortableAsset,
 ) -> (PortableAssetOwner, PortableStoreFactDto) {
@@ -1725,8 +1726,12 @@ fn store_fact_for_discovery(
     match classify_store_link(path) {
         StoreLinkClass::StoreLink { store_id, .. } => {
             let via = disc.origin.owned_by.as_hub_target();
-            let store_attached = disc.origin.origin_kind == PortableOriginKind::Native
-                && disc.origin.native_output_candidate;
+            // Native 与 Codex 自有 legacy 根上的 store 软链都是本 Agent 附加；
+            // 不得要求 native_output_candidate（legacyStandalone 恒为 false）。
+            let store_attached = matches!(
+                disc.origin.origin_kind,
+                PortableOriginKind::Native | PortableOriginKind::LegacyStandalone
+            );
             (
                 PortableAssetOwner::PortableStore,
                 PortableStoreFactDto {
@@ -1931,6 +1936,7 @@ fn action_required_capability(
             })
         }
         PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => None,
+        PortableAssetActionKind::ConfirmCurrentVersion => None,
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -2019,6 +2025,7 @@ fn item_capabilities(
     can_uninstall_mutation: bool,
     enable_semantics: bool,
     reason: Option<String>,
+    borrowed: bool,
     origin_kind: PortableOriginKind,
     native_output_candidate: bool,
     store: &PortableStoreFactDto,
@@ -2058,14 +2065,10 @@ fn item_capabilities(
         can_attach: store_write && store.store_id.is_some() && !store.store_attached,
         can_detach: store_write && store.store_attached,
         can_destroy_store: store_write && store.store_id.is_some(),
+        can_confirm_current_version: false,
         reason_code: reason,
         evidence_ids: vec![format!("L2-PORTABLE-{}-SCAN", kind.as_str().to_uppercase())],
     };
-    let borrowed = !native_output_candidate
-        || matches!(
-            origin_kind,
-            PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
-        );
     if borrowed {
         // plugin 启停跟当前 Agent；卸载/技能移动仍跟所有者。reason 只作 UI 提示。
         capabilities.reason_code = Some("borrowed_runtime_origin".into());
@@ -2519,6 +2522,7 @@ enabled = false
             false,
             true,
             mutation_capability_reason(&target),
+            false,
             PortableOriginKind::Native,
             true,
             &PortableStoreFactDto::default(),
@@ -2596,6 +2600,7 @@ enabled = false
                 target.target,
                 PortableAssetKind::Plugin,
             ),
+            false,
             PortableOriginKind::Native,
             true,
             &PortableStoreFactDto::default(),
@@ -2660,6 +2665,7 @@ enabled = false
             can_render,
             true,
             action_capability_reason(&target, &evaluated, target.target, PortableAssetKind::Skill),
+            false,
             PortableOriginKind::Native,
             true,
             &PortableStoreFactDto::default(),
@@ -2947,6 +2953,7 @@ enabled = false
             true,
             true,
             None,
+            false,
             PortableOriginKind::Native,
             true,
             &PortableStoreFactDto::default(),
@@ -2969,6 +2976,7 @@ enabled = false
             true,
             true,
             None,
+            true,
             PortableOriginKind::Compatibility,
             false,
             &PortableStoreFactDto::default(),
@@ -2993,6 +3001,7 @@ enabled = false
             true,
             true,
             Some("cli_version_unknown".into()),
+            true,
             PortableOriginKind::Compatibility,
             false,
             &PortableStoreFactDto::default(),
@@ -3779,6 +3788,7 @@ enabled = ["native-only"]
                 can_attach: !attached,
                 can_detach: attached,
                 can_destroy_store: true,
+                can_confirm_current_version: false,
                 reason_code: None,
                 evidence_ids: vec![],
             },

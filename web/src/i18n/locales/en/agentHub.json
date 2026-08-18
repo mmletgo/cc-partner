@@ -601,6 +601,7 @@
       "loading": "Loading inventory…",
       "empty": "No portable assets match the current filters.",
       "refresh": "Refresh inventory",
+      "confirmAllVersions": "Confirm all versions ({{count}})",
       "retry": "Retry",
       "staleBanner": "Inventory is stale. Mutations are blocked until a successful refresh.",
       "searchPlaceholder": "Search name, native id, or path",
@@ -690,7 +691,8 @@
       "attach": "Attach to this agent",
       "detach": "Detach from this agent",
       "destroyStore": "Destroy store copy",
-      "migrateToStore": "Migrate to portable store"
+      "migrateToStore": "Migrate to portable store",
+      "confirmCurrentVersion": "Confirm current version"
     },
     "management": {
       "hubManaged": "Consistent",
@@ -746,6 +748,7 @@
     },
     "actionDialog": {
       "title": "Confirm {{action}}",
+      "titleBatch": "Confirm {{action}} ({{count}} items)",
       "subtitle": "The plan is prepared automatically. Nothing is written until you confirm.",
       "keepData": "Keep local data when uninstalling",
       "conflictPolicy": "Conflict policy",
@@ -771,7 +774,9 @@
       "storeMigrateHint": "Migrate moves the native files into the shared portable store and leaves a symlink. Same-name different content is blocked.",
       "storeDestroyHint": "Destroy deletes the shared store tree and clears Claude / Codex attachments. This cannot be undone.",
       "storeStillLoadedVia": "After detaching {{current}}, this store asset is still loaded via {{via}}. This action will not rewrite {{via}}.",
-      "storePluginUnchanged": "Plugins do not use the portable store. Enable flags still change only the viewing agent's switch."
+      "storePluginUnchanged": "Plugins do not use the portable store. Enable flags still change only the viewing agent's switch.",
+      "confirmCurrentVersionHint": "Files on disk may have been updated. Confirming records the current files as Hub's consistent baseline and does not rewrite disk.",
+      "confirmAllCurrentVersionHint": "Records {{count}} drifted assets in this Agent and category as Hub's consistent baseline. Does not rewrite disk."
     }
   },
   "portablePull": {

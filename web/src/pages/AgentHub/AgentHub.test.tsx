@@ -288,6 +288,8 @@ function buildProps(
       setItemLocked: vi.fn(),
       pendingAction: null,
       openAction: vi.fn(),
+      confirmableCurrentVersionItems: [],
+      openConfirmAllCurrentVersions: vi.fn(),
       clearPendingAction: vi.fn(),
       getPrimaryAction: vi.fn(() => null),
       getRowActions: vi.fn(() => []),

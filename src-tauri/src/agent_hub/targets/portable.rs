@@ -140,35 +140,28 @@ impl PortableAssetOwner {
 /// 运行时从其他 Agent / 共享目录加载的项：启停卸载必须改写所有者磁盘。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     当前 Agent 列表里的 compatibility / 外借项与「已安装在此」分区一致，
-///     mutation 不能假装改当前 Agent 的 native 根。
+///     「借用」只描述所有权/扫描根，不描述 Hub 一致性。漂移（hash 偏离）仍是
+///     本 Agent 已安装资产，不得因为 nativeOutputCandidate=false 或
+///     legacyStandalone（如 Codex `~/.agents/skills`）被当成外借。
 ///
 /// Code Logic（这个函数做什么）:
-///     nativeOutputCandidate=false、compatibility/legacyStandalone、
-///     sharedAgents、或 ownedBy 为其他 Hub target → true。
+///     compatibility 根、sharedAgents、其他 Hub owner、或 store 挂在兼容路径
+///     → true。同 Agent 的 native/legacy/plugin 即使不能 native 写出也不是借用。
+///     `native_output_candidate` 只保留给调用方签名对齐，不再单独判借用。
 pub fn is_borrowed_runtime_origin(
     viewing: AgentTarget,
     owned_by: PortableAssetOwner,
-    native_output_candidate: bool,
+    _native_output_candidate: bool,
     origin_kind: PortableOriginKind,
 ) -> bool {
-    if !native_output_candidate {
-        return true;
-    }
-    if matches!(
-        origin_kind,
-        PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
-    ) {
+    if origin_kind == PortableOriginKind::Compatibility {
         return true;
     }
     if owned_by == PortableAssetOwner::SharedAgents {
         return true;
     }
     if owned_by == PortableAssetOwner::PortableStore {
-        return matches!(
-            origin_kind,
-            PortableOriginKind::Compatibility | PortableOriginKind::LegacyStandalone
-        );
+        return origin_kind == PortableOriginKind::Compatibility;
     }
     owned_by
         .as_hub_target()
@@ -1936,6 +1929,73 @@ mod tests {
             ),
             AgentTarget::Cursor
         );
+    }
+
+    #[test]
+    fn borrowed_runtime_origin_is_owner_based_not_drift_or_legacy() {
+        assert!(
+            !is_borrowed_runtime_origin(
+                AgentTarget::Claude,
+                PortableAssetOwner::Claude,
+                true,
+                PortableOriginKind::Native,
+            ),
+            "same-agent native is installed"
+        );
+        assert!(
+            !is_borrowed_runtime_origin(
+                AgentTarget::Claude,
+                PortableAssetOwner::Claude,
+                false,
+                PortableOriginKind::Native,
+            ),
+            "same-agent native stays installed even when not a native output candidate"
+        );
+        assert!(
+            !is_borrowed_runtime_origin(
+                AgentTarget::Codex,
+                PortableAssetOwner::Codex,
+                false,
+                PortableOriginKind::LegacyStandalone,
+            ),
+            "Codex ~/.agents/skills is this Agent's install, not borrowed"
+        );
+        assert!(
+            !is_borrowed_runtime_origin(
+                AgentTarget::Claude,
+                PortableAssetOwner::PortableStore,
+                true,
+                PortableOriginKind::Native,
+            ),
+            "store attached on native path is installed"
+        );
+        assert!(
+            !is_borrowed_runtime_origin(
+                AgentTarget::Codex,
+                PortableAssetOwner::PortableStore,
+                false,
+                PortableOriginKind::LegacyStandalone,
+            ),
+            "store attached on Codex legacy root is installed"
+        );
+        assert!(is_borrowed_runtime_origin(
+            AgentTarget::Grok,
+            PortableAssetOwner::Claude,
+            false,
+            PortableOriginKind::Compatibility,
+        ));
+        assert!(is_borrowed_runtime_origin(
+            AgentTarget::Grok,
+            PortableAssetOwner::SharedAgents,
+            true,
+            PortableOriginKind::Native,
+        ));
+        assert!(is_borrowed_runtime_origin(
+            AgentTarget::Grok,
+            PortableAssetOwner::PortableStore,
+            false,
+            PortableOriginKind::Compatibility,
+        ));
     }
 
     fn isolated_fixture() -> (tempfile::TempDir, TargetEnvironment) {

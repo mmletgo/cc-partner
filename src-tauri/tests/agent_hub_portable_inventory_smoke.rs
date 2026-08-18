@@ -441,6 +441,7 @@ fn sample_item(
             can_attach: false,
             can_detach: false,
             can_destroy_store: false,
+            can_confirm_current_version: false,
 
             reason_code: None,
             evidence_ids: vec![EVIDENCE.into()],

@@ -128,6 +128,7 @@ mod tests {
                 can_attach: false,
                 can_detach: false,
                 can_destroy_store: false,
+                can_confirm_current_version: false,
 
                 reason_code: None,
                 evidence_ids: vec![],
@@ -346,6 +347,135 @@ mod tests {
             .blocking_reasons
             .iter()
             .any(|r| r.contains("SOURCE_DRIFTED") || r.contains("MUTATION_BLOCKED")));
+    }
+
+    /// Business Logic: 确认当前版本只改 Hub 账本，漂移 + CLI mutation blocked 也必须能 preview。
+    #[tokio::test]
+    async fn drifted_confirm_current_version_skips_cli_mutation_gates() {
+        let repo = test_repo().await;
+        let mut item = sample_item(
+            AgentTarget::Grok,
+            "skill-a",
+            "/skills/a",
+            PortableInventoryManagementState::Drifted,
+            true,
+        );
+        item.content_hash = Some("disk-now".into());
+        item.capabilities.can_confirm_current_version = true;
+        let mut target = sample_target(AgentTarget::Grok);
+        target.mutation_capability = PortableInventoryMutationCapability::Blocked;
+        target.installed = false;
+        let snap = snapshot_from(vec![target], vec![item.clone()]);
+
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snap,
+                PortableAssetActionKind::ConfirmCurrentVersion,
+                vec![item.inventory_item_id.clone()],
+            ),
+            &snap,
+            "owner",
+        )
+        .await
+        .unwrap();
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "unexpected blocking: {:?}",
+            plan.blocking_reasons
+        );
+        assert_eq!(
+            plan.changes[0].operation,
+            crate::agent_hub::portable_actions::models::PortableAssetPlanOperation::ConfirmCurrentVersion
+        );
+        assert_eq!(plan.changes[0].target, AgentTarget::Grok);
+        assert_eq!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            Some("disk-now")
+        );
+    }
+
+    /// Business Logic: 全部确认版本一次 preview 当前快照里多条漂移项。
+    #[tokio::test]
+    async fn confirm_current_version_batches_multiple_drifted_items() {
+        let repo = test_repo().await;
+        let mut first = sample_item(
+            AgentTarget::Grok,
+            "skill-a",
+            "/skills/a",
+            PortableInventoryManagementState::Drifted,
+            true,
+        );
+        first.content_hash = Some("disk-a".into());
+        first.capabilities.can_confirm_current_version = true;
+        first.canonical_asset_id = Some("asset-a".into());
+        let mut second = sample_item(
+            AgentTarget::Grok,
+            "skill-b",
+            "/skills/b",
+            PortableInventoryManagementState::Drifted,
+            true,
+        );
+        second.content_hash = Some("disk-b".into());
+        second.capabilities.can_confirm_current_version = true;
+        second.canonical_asset_id = Some("asset-b".into());
+        let mut target = sample_target(AgentTarget::Grok);
+        target.mutation_capability = PortableInventoryMutationCapability::Blocked;
+        let snap = snapshot_from(vec![target], vec![first.clone(), second.clone()]);
+
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snap,
+                PortableAssetActionKind::ConfirmCurrentVersion,
+                vec![
+                    first.inventory_item_id.clone(),
+                    second.inventory_item_id.clone(),
+                ],
+            ),
+            &snap,
+            "owner",
+        )
+        .await
+        .unwrap();
+        assert!(plan.blocking_reasons.is_empty(), "{:?}", plan.blocking_reasons);
+        assert_eq!(plan.changes.len(), 2);
+        assert!(plan.changes.iter().all(|change| {
+            change.operation
+                == crate::agent_hub::portable_actions::models::PortableAssetPlanOperation::ConfirmCurrentVersion
+                && change.blocking_reasons.is_empty()
+        }));
+    }
+
+    /// Business Logic: 未漂移不得确认当前版本。
+    #[tokio::test]
+    async fn hub_managed_confirm_current_version_is_blocked() {
+        let repo = test_repo().await;
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            "skill-a",
+            "/skills/a",
+            PortableInventoryManagementState::HubManaged,
+            true,
+        );
+        item.capabilities.can_confirm_current_version = false;
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let plan = preview_portable_asset_action_with_inventory(
+            &repo,
+            preview_req(
+                &snap,
+                PortableAssetActionKind::ConfirmCurrentVersion,
+                vec![item.inventory_item_id.clone()],
+            ),
+            &snap,
+            "owner",
+        )
+        .await
+        .unwrap();
+        assert!(plan
+            .blocking_reasons
+            .iter()
+            .any(|r| r.contains("NOT_DRIFTED") || r.contains("CANNOT_CONFIRM_CURRENT_VERSION")));
     }
 
     /// Business Logic: 项目未 opt-in 不得执行目录写入意图。

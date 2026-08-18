@@ -182,6 +182,9 @@ export function AgentHubView(props: AgentHubViewProps) {
       loading: t('agentHub:portable.inventory.loading'),
       empty: t('agentHub:portable.inventory.empty'),
       refresh: t('agentHub:portable.inventory.refresh'),
+      confirmAllVersions: t('agentHub:portable.inventory.confirmAllVersions', {
+        count: portableInventory.confirmableCurrentVersionItems.length,
+      }),
       retry: t('agentHub:portable.inventory.retry'),
       staleBanner: t('agentHub:portable.inventory.staleBanner'),
       searchPlaceholder: t('agentHub:portable.inventory.searchPlaceholder'),
@@ -238,6 +241,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         detach: t('agentHub:portable.actions.detach'),
         destroyStore: t('agentHub:portable.actions.destroyStore'),
         migrateToStore: t('agentHub:portable.actions.migrateToStore'),
+        confirmCurrentVersion: t('agentHub:portable.actions.confirmCurrentVersion'),
       },
       sourceOrigin: {
         standalone: t('agentHub:portable.inventory.sourceOrigin.standalone'),
@@ -263,7 +267,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         unknown: t('agentHub:portable.inventory.borrowedFrom.unknown'),
       },
     }),
-    [t],
+    [portableInventory.confirmableCurrentVersionItems.length, t],
   );
 
   /**
@@ -650,12 +654,17 @@ export function AgentHubView(props: AgentHubViewProps) {
 
       <PortableAssetActionDialog
         open={portableActionOpen}
-        item={
+        items={
           portableInventory.pendingAction
-            ? portableInventory.snapshot?.items.find(
-                (entry) => entry.inventoryItemId === portableInventory.pendingAction?.itemId,
-              ) ?? portableSelectedItem
-            : null
+            ? portableInventory.pendingAction.itemIds
+                .map(
+                  (itemId) =>
+                    portableInventory.snapshot?.items.find(
+                      (entry) => entry.inventoryItemId === itemId,
+                    ) ?? null,
+                )
+                .filter((entry): entry is PortableInventoryItemDto => entry !== null)
+            : []
         }
         action={portableActionKind}
         inventorySnapshotHash={portableInventory.snapshot?.inventorySnapshotHash ?? null}

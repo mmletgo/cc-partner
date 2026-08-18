@@ -23,12 +23,14 @@ import {
   isPortableBorrowedRuntimeItem,
   isPortableInventoryProblem,
   isPortableItemReadOnly,
+  listConfirmableCurrentVersionItems,
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
   partitionPortableInventoryItems,
   portableBorrowedOwnerLabelKey,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
+  samePortableItemIds,
   type PortableInventoryFilters,
   type PortablePrimaryActionContext,
 } from './portableInventoryPresentation';
@@ -650,6 +652,62 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortablePrimaryAction(plugin, healthyCtx)).toBe('disable');
   });
 
+  test('drifted item exposes confirm current version first', () => {
+    const drifted = makeItem({
+      inventoryItemId: 'claude-skill-updated',
+      kind: 'skill',
+      nativeId: 'updated-skill',
+      managementState: 'drifted',
+      capabilities: {
+        ...baseCapabilities,
+        canDisable: true,
+        canUninstall: true,
+        canConfirmCurrentVersion: true,
+      },
+    });
+    expect(resolvePortablePrimaryAction(drifted, healthyCtx)).toBe('confirmCurrentVersion');
+    expect(resolvePortableRowActions(drifted, healthyCtx)[0]).toBe('confirmCurrentVersion');
+  });
+
+  test('listConfirmableCurrentVersionItems takes snapshot drifted items and skips filters/components', () => {
+    const driftedA = makeItem({
+      inventoryItemId: 'claude-skill-a',
+      kind: 'skill',
+      nativeId: 'a',
+      managementState: 'drifted',
+      capabilities: { ...baseCapabilities, canConfirmCurrentVersion: true },
+    });
+    const driftedB = makeItem({
+      inventoryItemId: 'claude-skill-b',
+      kind: 'skill',
+      nativeId: 'b',
+      managementState: 'drifted',
+      capabilities: { ...baseCapabilities, canConfirmCurrentVersion: true },
+    });
+    const consistent = makeItem({
+      inventoryItemId: 'claude-skill-c',
+      kind: 'skill',
+      nativeId: 'c',
+      managementState: 'hubManaged',
+    });
+    const component = makeItem({
+      inventoryItemId: 'claude-skill-comp',
+      kind: 'skill',
+      nativeId: 'comp',
+      sourceOrigin: 'pluginComponent',
+      managementState: 'drifted',
+      capabilities: { ...baseCapabilities, canConfirmCurrentVersion: true },
+    });
+    expect(
+      listConfirmableCurrentVersionItems(
+        [driftedA, consistent, driftedB, component],
+        healthyCtx,
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-a', 'claude-skill-b']);
+    expect(samePortableItemIds(['b', 'a'], ['a', 'b'])).toBe(true);
+    expect(samePortableItemIds(['a'], ['a', 'b'])).toBe(false);
+  });
+
   test('store item loaded via other path is borrowed and still offers attach', () => {
     const grokHint = makeItem({
       inventoryItemId: 'grok-skill-via-claude',
@@ -707,7 +765,68 @@ describe('portableInventoryPresentation ownership partition', () => {
     expect(resolvePortableRowActions(grokNative, healthyCtx)).toEqual(['disable', 'uninstall']);
   });
 
-  test('partition splits installed vs borrowed by origin, owner and nativeOutputCandidate', () => {
+  test('same-agent drifted native item stays installed, not borrowed', () => {
+    const drifted = makeItem({
+      inventoryItemId: 'claude-skill-drifted',
+      kind: 'skill',
+      nativeId: 'drifted-skill',
+      target: 'claude',
+      originKind: 'native',
+      ownedBy: 'claude',
+      loadedBy: 'claude',
+      nativeOutputCandidate: true,
+      managementState: 'drifted',
+    });
+    expect(isPortableBorrowedRuntimeItem(drifted)).toBe(false);
+    const { installed, borrowed } = partitionPortableInventoryItems([drifted]);
+    expect(installed.map((item) => item.inventoryItemId)).toEqual(['claude-skill-drifted']);
+    expect(borrowed).toEqual([]);
+  });
+
+  test('same-agent legacyStandalone drifted item stays installed', () => {
+    const codexLegacy = makeItem({
+      inventoryItemId: 'codex-skill-agents',
+      kind: 'skill',
+      nativeId: 'agents-skill',
+      target: 'codex',
+      originKind: 'legacyStandalone',
+      ownedBy: 'codex',
+      loadedBy: 'codex',
+      nativeOutputCandidate: false,
+      managementState: 'drifted',
+    });
+    expect(isPortableBorrowedRuntimeItem(codexLegacy)).toBe(false);
+  });
+
+  test('nativeOutputCandidate false does not by itself mean borrowed', () => {
+    const blockedNative = makeItem({
+      inventoryItemId: 'claude-skill-blocked',
+      kind: 'skill',
+      nativeId: 'blocked',
+      originKind: 'native',
+      ownedBy: 'claude',
+      nativeOutputCandidate: false,
+      managementState: 'unsupported',
+    });
+    expect(isPortableBorrowedRuntimeItem(blockedNative)).toBe(false);
+  });
+
+  test('cross-agent compatibility stays borrowed even when drifted', () => {
+    const driftedBorrowed = makeItem({
+      inventoryItemId: 'grok-skill-drifted-claude',
+      kind: 'skill',
+      nativeId: 'from-claude',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      managementState: 'drifted',
+    });
+    expect(isPortableBorrowedRuntimeItem(driftedBorrowed)).toBe(true);
+  });
+
+  test('partition splits installed vs borrowed by origin and owner, not nativeOutputCandidate', () => {
     const installed = makeItem({
       inventoryItemId: 'grok-skill-own',
       kind: 'skill',
@@ -735,14 +854,14 @@ describe('portableInventoryPresentation ownership partition', () => {
       nativeOutputCandidate: true,
     });
     const legacy = makeItem({
-      inventoryItemId: 'grok-skill-legacy',
+      inventoryItemId: 'codex-skill-legacy',
       kind: 'skill',
       nativeId: 'legacy',
-      target: 'grok',
+      target: 'codex',
       originKind: 'legacyStandalone',
-      ownedBy: 'unknown',
-      loadedBy: 'grok',
-      nativeOutputCandidate: true,
+      ownedBy: 'codex',
+      loadedBy: 'codex',
+      nativeOutputCandidate: false,
     });
     const { installed: installedItems, borrowed } = partitionPortableInventoryItems([
       installed,
@@ -750,14 +869,16 @@ describe('portableInventoryPresentation ownership partition', () => {
       shared,
       legacy,
     ]);
-    expect(installedItems.map((item) => item.inventoryItemId)).toEqual(['grok-skill-own']);
+    expect(installedItems.map((item) => item.inventoryItemId)).toEqual([
+      'grok-skill-own',
+      'codex-skill-legacy',
+    ]);
     expect(borrowed.map((item) => item.inventoryItemId)).toEqual([
       'grok-skill-from-claude',
       'grok-skill-shared',
-      'grok-skill-legacy',
     ]);
     expect(portableBorrowedOwnerLabelKey(fromClaude)).toBe('claude');
     expect(portableBorrowedOwnerLabelKey(shared)).toBe('sharedAgents');
-    expect(portableBorrowedOwnerLabelKey(legacy)).toBe('unknown');
+    expect(isPortableBorrowedRuntimeItem(legacy)).toBe(false);
   });
 });

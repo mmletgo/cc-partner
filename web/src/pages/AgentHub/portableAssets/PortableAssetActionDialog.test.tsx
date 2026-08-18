@@ -131,7 +131,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={null}
@@ -170,7 +170,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture()}
@@ -193,7 +193,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture({
@@ -228,7 +228,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="enable"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture({ action: 'enable' })}
@@ -275,7 +275,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="disable"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture({ action: 'disable' })}
@@ -312,7 +312,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture()}
@@ -339,7 +339,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture()}
@@ -363,7 +363,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="enable"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture({ action: 'enable' })}
@@ -390,7 +390,7 @@ describe('PortableAssetActionDialog state machine', () => {
     const { rerender } = render(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={null}
@@ -416,7 +416,7 @@ describe('PortableAssetActionDialog state machine', () => {
     rerender(
       <PortableAssetActionDialog
         open
-        item={item}
+        items={[item]}
         action="uninstall"
         inventorySnapshotHash="snap-hash-3x4"
         plan={planFixture()}
@@ -456,7 +456,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={borrowed}
+        items={[borrowed]}
         action="disable"
         inventorySnapshotHash="snap-hash-3x4"
         plan={null}
@@ -499,7 +499,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={borrowed}
+        items={[borrowed]}
         action="disable"
         inventorySnapshotHash="snap-hash-3x4"
         plan={null}
@@ -540,7 +540,7 @@ describe('PortableAssetActionDialog state machine', () => {
     render(
       <PortableAssetActionDialog
         open
-        item={grokStore}
+        items={[grokStore]}
         action="detach"
         inventorySnapshotHash="snap-hash-3x4"
         plan={null}
@@ -562,5 +562,41 @@ describe('PortableAssetActionDialog state machine', () => {
       'storeStillLoadedVia',
     );
     expect(screen.queryByTestId('portable-action-borrowed-impact')).toBeNull();
+  });
+
+  test('batch confirm current version previews all item ids without canonical revision', () => {
+    const second: PortableInventoryItemDto = {
+      ...item,
+      inventoryItemId: 'claude-skill-skill-b',
+      nativeId: 'skill-b',
+      displayName: 'Skill B',
+    };
+    const onPreview = vi.fn();
+    render(
+      <PortableAssetActionDialog
+        open
+        items={[item, second]}
+        action="confirmCurrentVersion"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        onPreview={onPreview}
+        onConfirm={() => undefined}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    const request = onPreview.mock.calls[0][0] as PreviewPortableAssetActionRequest;
+    expect(request.inventoryItemIds).toEqual([item.inventoryItemId, second.inventoryItemId]);
+    expect(request.expectedCanonicalRevisionId).toBeNull();
+    expect(screen.getByTestId('portable-action-batch-summary').textContent).toContain('Skill B');
+    expect(screen.getByTestId('portable-action-confirm-current-hint').textContent).toContain(
+      'confirmAllCurrentVersionHint',
+    );
   });
 });

@@ -468,4 +468,33 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     expect(screen.getByTestId('portable-action-disable')).toBeTruthy();
     expect(screen.getByTestId('portable-action-uninstall')).toBeTruthy();
   });
+
+  test('drifted item exposes confirm current version', () => {
+    const onRequestAction = vi.fn();
+    const item = baseItem('skill', {
+      managementState: 'drifted',
+      capabilities: {
+        canEnable: false,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canConfirmCurrentVersion: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('portable-action-confirm-current-version'));
+    expect(onRequestAction).toHaveBeenCalledWith('confirmCurrentVersion');
+  });
 });

@@ -29,7 +29,7 @@ import styles from '../AgentHub.module.css';
 
 export interface PortableAssetActionDialogProps {
   open: boolean;
-  item: PortableInventoryItemDto | null;
+  items: PortableInventoryItemDto[];
   action: PortableAssetActionKind | null;
   inventorySnapshotHash: string | null;
   plan: PortableAssetActionPlanDto | null;
@@ -98,8 +98,9 @@ function borrowedImpactKey(
 }
 
 /**
- * Business Logic: Skill/Command/MCP 的仓库动作文案不得复用 Plugin viewing-switch。
- * Code Logic: attach/detach/migrate/destroy 各用独立 hint；Plugin 保持原开关语义。
+ * Business Logic: Skill/Command/MCP 的仓库动作文案不得复用 Plugin viewing-switch；
+ *   「确认当前版本」只改 Hub 账本，用独立 hint。
+ * Code Logic: confirm/attach/detach/migrate/destroy 各用独立 hint；Plugin 保持原开关语义。
  */
 function storeActionHintKey(
   action: PortableAssetActionKind | null,
@@ -109,7 +110,9 @@ function storeActionHintKey(
   | 'storeDetachHint'
   | 'storeMigrateHint'
   | 'storeDestroyHint'
+  | 'confirmCurrentVersionHint'
   | null {
+  if (action === 'confirmCurrentVersion') return 'confirmCurrentVersionHint';
   if (kind === 'plugin') return null;
   if (action === 'attach') return 'storeAttachHint';
   if (action === 'detach') return 'storeDetachHint';
@@ -124,7 +127,7 @@ function storeActionHintKey(
  */
 export function PortableAssetActionDialog({
   open,
-  item,
+  items,
   action,
   inventorySnapshotHash,
   plan,
@@ -142,7 +145,10 @@ export function PortableAssetActionDialog({
   const { t } = useTranslation(['agentHub', 'common']);
   const focusRef = useRef<HTMLButtonElement | null>(null);
   const previewedKeyRef = useRef<string | null>(null);
-  const sessionKey = `${open ? 'open' : 'closed'}|${item?.inventoryItemId ?? ''}|${action ?? ''}`;
+  const item = items[0] ?? null;
+  const isBatch = items.length > 1;
+  const itemIdsKey = items.map((entry) => entry.inventoryItemId).join(',');
+  const sessionKey = `${open ? 'open' : 'closed'}|${itemIdsKey}|${action ?? ''}`;
   const [options, setOptions] = useState<{
     sessionKey: string;
     keepData: boolean;
@@ -184,7 +190,7 @@ export function PortableAssetActionDialog({
   );
   const canAutoPreview = Boolean(
     open &&
-      item &&
+      items.length > 0 &&
       action &&
       inventorySnapshotHash &&
       !busy &&
@@ -214,20 +220,22 @@ export function PortableAssetActionDialog({
       previewedKeyRef.current = null;
       return;
     }
-    if (!canAutoPreview || !item || !action || !inventorySnapshotHash) return;
+    if (!canAutoPreview || items.length === 0 || !action || !inventorySnapshotHash) return;
     if (previewedKeyRef.current === previewRequestKey) return;
     previewedKeyRef.current = previewRequestKey;
     onPreview({
       inventorySnapshotHash,
-      inventoryItemIds: [item.inventoryItemId],
+      inventoryItemIds: items.map((entry) => entry.inventoryItemId),
       action,
       keepData,
       conflictPolicy,
-      expectedCanonicalRevisionId: item.canonicalRevisionId,
+      expectedCanonicalRevisionId: isBatch ? null : item?.canonicalRevisionId,
     });
   }, [
     open,
     canAutoPreview,
+    items,
+    isBatch,
     item,
     action,
     inventorySnapshotHash,
@@ -267,14 +275,19 @@ export function PortableAssetActionDialog({
     >
       <div className={styles.dialogBody} data-testid="portable-asset-action-dialog">
         <h2 id="portable-asset-action-title" className={styles.drawerTitle}>
-          {t('agentHub:portable.actionDialog.title', {
-            action: action ?? 'unknown',
-            name: item?.displayName ?? '',
-          })}
+          {isBatch
+            ? t('agentHub:portable.actionDialog.titleBatch', {
+                action: action ? t(`agentHub:portable.actions.${action}`) : 'unknown',
+                count: items.length,
+              })
+            : t('agentHub:portable.actionDialog.title', {
+                action: action ? t(`agentHub:portable.actions.${action}`) : 'unknown',
+                name: item?.displayName ?? '',
+              })}
         </h2>
         <p className={styles.drawerSubtitle}>{t('agentHub:portable.actionDialog.subtitle')}</p>
 
-        {borrowed && item && impactKey ? (
+        {borrowed && item && impactKey && !isBatch ? (
           <StatusMessage
             tone={
               impactKey === 'borrowedImpactEnablePlugin' || impactKey === 'borrowedImpactDisablePlugin'
@@ -302,9 +315,17 @@ export function PortableAssetActionDialog({
           <StatusMessage
             tone={action === 'destroyStore' ? 'warn' : 'info'}
             live="off"
-            data-testid="portable-action-store-hint"
+            data-testid={
+              action === 'confirmCurrentVersion'
+                ? 'portable-action-confirm-current-hint'
+                : 'portable-action-store-hint'
+            }
           >
-            {t(`agentHub:portable.actionDialog.${storeHintKey}`)}
+            {isBatch && action === 'confirmCurrentVersion'
+              ? t('agentHub:portable.actionDialog.confirmAllCurrentVersionHint', {
+                  count: items.length,
+                })
+              : t(`agentHub:portable.actionDialog.${storeHintKey}`)}
           </StatusMessage>
         ) : null}
 
@@ -333,7 +354,15 @@ export function PortableAssetActionDialog({
           </StatusMessage>
         ) : null}
 
-        {item ? (
+        {isBatch ? (
+          <ul className={styles.partialList} data-testid="portable-action-batch-summary">
+            {items.map((entry) => (
+              <li key={entry.inventoryItemId} className={styles.mono}>
+                {entry.displayName || entry.nativeId}
+              </li>
+            ))}
+          </ul>
+        ) : item ? (
           <div className={styles.metaBlock} data-testid="portable-action-item-summary">
             <div>
               <span className={styles.metaLabel}>{t('agentHub:portable.details.nativeId')}</span>

@@ -248,6 +248,9 @@ pub struct PortableInventoryItemCapabilitiesDto {
     /// 是否允许本机彻底删除 store 真树
     #[serde(default)]
     pub can_destroy_store: bool,
+    /// 是否允许把当前磁盘记为一致基准（漂移项）
+    #[serde(default)]
+    pub can_confirm_current_version: bool,
     /// 能力阻断/限制原因码
     pub reason_code: Option<String>,
     /// 证据 ID
@@ -531,6 +534,7 @@ pub fn inventory_snapshot_hash(
                 can_attach: i.capabilities.can_attach,
                 can_detach: i.capabilities.can_detach,
                 can_destroy_store: i.capabilities.can_destroy_store,
+                can_confirm_current_version: i.capabilities.can_confirm_current_version,
                 reason_code: i.capabilities.reason_code.clone(),
                 evidence_ids: {
                     let mut e = i.capabilities.evidence_ids.clone();
@@ -631,6 +635,7 @@ struct CapabilityHashMaterial {
     can_attach: bool,
     can_detach: bool,
     can_destroy_store: bool,
+    can_confirm_current_version: bool,
     reason_code: Option<String>,
     evidence_ids: Vec<String>,
 }

@@ -740,7 +740,7 @@ export function Workbench() {
   }
 
   return (
-    <div className={styles.page}>
+    <div className={styles.page} data-automation-open={automationConsoleOpen || undefined}>
       <main className={styles.centerPane}>
         <WorkspaceRestoreNotice
           summary={restoreSummary}

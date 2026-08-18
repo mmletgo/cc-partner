@@ -12,6 +12,15 @@
   overflow: hidden;
 }
 
+/* 项目自动化吃满中心工作区：worktree 条已隐藏，文件/Git 检查器不是看板主路径。 */
+.page[data-automation-open='true'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.page[data-automation-open='true'] .inspectorPane {
+  display: none;
+}
+
 .centerPane,
 .inspectorPane {
   min-width: 0;
@@ -655,10 +664,12 @@
 .automationLayer {
   position: relative;
   z-index: var(--z-sticky);
+  width: 100%;
   min-width: 0;
   height: 100%;
   min-height: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--bg);
@@ -711,11 +722,21 @@
 }
 
 .automationBody {
+  width: 100%;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   padding: var(--space-4) var(--space-5);
   background: var(--bg);
+}
+
+.automationBody > * {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .sessionTab {
@@ -1430,6 +1451,10 @@
     min-height: 100%;
     height: 100%;
     overflow: auto;
+  }
+
+  .page[data-automation-open='true'] {
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .inspectorPane {

@@ -42,6 +42,7 @@ const labels: PortableInventoryRowLabels = {
     detach: 'Detach',
     destroyStore: 'Destroy store',
     migrateToStore: 'Migrate to store',
+    confirmCurrentVersion: 'Confirm current version',
   },
   sourceOrigin: {
     standalone: 'Standalone',

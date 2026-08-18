@@ -162,6 +162,7 @@ mod tests {
                 can_attach: false,
                 can_detach: false,
                 can_destroy_store: false,
+                can_confirm_current_version: false,
 
                 reason_code: None,
                 evidence_ids: vec![],
@@ -330,6 +331,7 @@ mod tests {
             PortableInventoryManagementState::HubManaged
         );
         assert_eq!(snap.items[0].canonical_asset_id.as_deref(), Some("asset-1"));
+        assert!(!snap.items[0].capabilities.can_confirm_current_version);
         assert_eq!(
             snap.items[0].desired_presence,
             Some(DesiredPresence::Present)
@@ -372,6 +374,7 @@ mod tests {
             snap.items[0].management_state,
             PortableInventoryManagementState::Drifted
         );
+        assert!(snap.items[0].capabilities.can_confirm_current_version);
     }
 
     #[test]

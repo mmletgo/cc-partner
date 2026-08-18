@@ -368,12 +368,12 @@ fn execute_skill(
             }
             Ok(TargetActionRawOutcome::Applied)
         }
-        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => {
-            Ok(TargetActionRawOutcome::Failed {
-                code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
-                message: "adopt/install not wired for codex".into(),
-            })
-        }
+        PortableAssetActionKind::Adopt
+        | PortableAssetActionKind::InstallToSourceTarget
+        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
+            message: "adopt/install not wired for codex".into(),
+        }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -445,12 +445,12 @@ fn execute_command(
             )?;
             Ok(TargetActionRawOutcome::Applied)
         }
-        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => {
-            Ok(TargetActionRawOutcome::Failed {
-                code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
-                message: "adopt/install not wired for codex".into(),
-            })
-        }
+        PortableAssetActionKind::Adopt
+        | PortableAssetActionKind::InstallToSourceTarget
+        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
+            message: "adopt/install not wired for codex".into(),
+        }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -613,12 +613,12 @@ fn execute_mcp(
             }
             Ok(TargetActionRawOutcome::Applied)
         }
-        PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => {
-            Ok(TargetActionRawOutcome::Failed {
-                code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
-                message: "adopt/install not wired for codex".into(),
-            })
-        }
+        PortableAssetActionKind::Adopt
+        | PortableAssetActionKind::InstallToSourceTarget
+        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
+            message: "adopt/install not wired for codex".into(),
+        }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -677,7 +677,8 @@ fn execute_plugin(
         | PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
-        | PortableAssetActionKind::MigrateToStore => Ok(TargetActionRawOutcome::Failed {
+        | PortableAssetActionKind::MigrateToStore
+        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
             message: "adopt/install not wired for codex".into(),
         }),

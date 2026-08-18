@@ -12,6 +12,8 @@ export {
 } from './usePortableInventoryController';
 export {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
+  listConfirmableCurrentVersionItems,
+  samePortableItemIds,
   type PortableInventoryFilters,
   type PortableKindCounts,
 } from './portableInventoryPresentation';

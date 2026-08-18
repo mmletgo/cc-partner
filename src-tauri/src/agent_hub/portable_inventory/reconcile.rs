@@ -85,6 +85,7 @@ pub fn reconcile_portable_inventory_with_facts(
     for mut item in discovered {
         let fact = find_matching_fact(&item, facts);
         apply_reconcile_state(&mut item, fact);
+        apply_confirm_current_version_capability(&mut item);
         items.push(item);
     }
 
@@ -405,4 +406,18 @@ fn apply_reconcile_state(
     }
 
     item.management_state = PortableInventoryManagementState::HubManaged;
+}
+
+/// 漂移且已有 observed hash 时才开放「确认当前版本」。
+///
+/// Business Logic（为什么需要这个函数）:
+///     资产可能被 Agent 自己更新；只有账本与磁盘哈希分叉时才允许把当前文件记为一致基准。
+///
+/// Code Logic（这个函数做什么）:
+///     依据 reconcile 后的 management_state / canonical / hash 写 `can_confirm_current_version`。
+fn apply_confirm_current_version_capability(item: &mut PortableInventoryItemDto) {
+    item.capabilities.can_confirm_current_version = item.management_state
+        == PortableInventoryManagementState::Drifted
+        && item.canonical_asset_id.is_some()
+        && (item.content_hash.is_some() || item.tree_hash.is_some());
 }

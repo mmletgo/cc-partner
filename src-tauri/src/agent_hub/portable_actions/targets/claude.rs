@@ -316,7 +316,8 @@ fn execute_plugin(
         | PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
-        | PortableAssetActionKind::MigrateToStore => {
+        | PortableAssetActionKind::MigrateToStore
+        | PortableAssetActionKind::ConfirmCurrentVersion => {
             return Ok(TargetActionRawOutcome::Failed {
                 code: "PORTABLE_ASSET_ACTION_PLUGIN_ACTION_UNSUPPORTED".into(),
                 message: format!("plugin action {} not executed here", ctx.action.as_str()),
@@ -367,7 +368,8 @@ fn claude_plugin_cli_already_satisfied(action: PortableAssetActionKind, stderr: 
         | PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
-        | PortableAssetActionKind::MigrateToStore => false,
+        | PortableAssetActionKind::MigrateToStore
+        | PortableAssetActionKind::ConfirmCurrentVersion => false,
     }
 }
 
@@ -492,6 +494,10 @@ fn execute_skill(
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
             message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
+        PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_LEDGER_ONLY".into(),
+            message: "confirmCurrentVersion is hub-ledger only".into(),
+        }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -570,6 +576,10 @@ fn execute_command(
         PortableAssetActionKind::InstallToSourceTarget => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
             message: "installToSourceTarget not wired; refuse fake success".into(),
+        }),
+        PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_LEDGER_ONLY".into(),
+            message: "confirmCurrentVersion is hub-ledger only".into(),
         }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
@@ -764,6 +774,10 @@ fn execute_mcp(
         PortableAssetActionKind::InstallToSourceTarget => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
             message: "installToSourceTarget not wired; refuse fake success".into(),
+        }),
+        PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_LEDGER_ONLY".into(),
+            message: "confirmCurrentVersion is hub-ledger only".into(),
         }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach

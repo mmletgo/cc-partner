@@ -11,6 +11,7 @@
 
 .embedded {
   width: 100%;
+  max-width: none;
   height: 100%;
   min-height: 100%;
   min-width: 0;
@@ -19,11 +20,15 @@
   box-sizing: border-box;
   background: var(--bg);
   color: var(--fg);
+  /* 容器查询必须挂在已有确定宽度的嵌入根上；inline-size containment
+     不能自己按内容算宽，否则会在 flex/grid 里塌成工具栏内容宽。 */
   container: orchestrator-panel / inline-size;
 }
 
 .embedded .grid {
+  width: 100%;
   max-width: none;
+  min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
   height: 100%;
@@ -93,6 +98,7 @@
 }
 
 .workspace {
+  width: 100%;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -108,6 +114,7 @@
 }
 
 .toolbar {
+  width: 100%;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -117,7 +124,7 @@
 }
 
 .embedded .toolbar {
-  justify-content: flex-start;
+  justify-content: space-between;
 }
 
 .embedded .toolbarCopy {
@@ -130,6 +137,7 @@
 }
 
 .boardStage {
+  width: 100%;
   min-width: 0;
   min-height: 280px;
   flex: 1 1 auto;
@@ -567,6 +575,7 @@
 
 .board {
   flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   display: grid;

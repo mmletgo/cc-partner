@@ -105,20 +105,17 @@ export function isPortablePluginComponent(item: PortableInventoryItemDto): boole
 /**
  * Business Logic: 运行时从其他 Agent / 共享目录加载的项分到「借用」分区。
  *   Plugin 启停跟当前 Agent 自己的开关；Skill/Command/MCP 启停与卸载仍改所有者磁盘。
- *   native + ownedBy===target 才是「已安装在此」；sharedAgents 一律借用。
- *   portableStore + 本机软链算已安装；仍被其他路径加载则借用。
- * Code Logic: nativeOutputCandidate=false、compatibility/legacyStandalone、
- *   或 ownedBy 为其他 Agent / sharedAgents → borrowed。ownedBy unknown 不单独判借用。
+ *   漂移是 Hub 一致性状态，不是外借：ownedBy===target 的 native/legacy 即使
+ *   nativeOutputCandidate=false 也留在「已安装在此」。sharedAgents 一律借用。
+ *   portableStore + 本机软链（含 Codex legacy 根）算已安装；兼容路径仍被加载则借用。
+ * Code Logic: compatibility、sharedAgents、或其他 Hub owner → borrowed。
+ *   不以 nativeOutputCandidate / legacyStandalone / managementState 判借用。
  */
 export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): boolean {
   if (item.ownedBy === 'portableStore') {
-    return Boolean(item.store?.loadedViaOtherPath) || item.originKind === 'compatibility'
-      || item.originKind === 'legacyStandalone';
+    return Boolean(item.store?.loadedViaOtherPath) || item.originKind === 'compatibility';
   }
-  if (item.nativeOutputCandidate === false) return true;
-  if (item.originKind === 'compatibility' || item.originKind === 'legacyStandalone') {
-    return true;
-  }
+  if (item.originKind === 'compatibility') return true;
   if (item.ownedBy === 'sharedAgents') return true;
   if (isHubTarget(item.ownedBy) && item.ownedBy !== item.target) return true;
   return false;
@@ -289,8 +286,8 @@ export function needsPortableEnsureManagedRefresh(
 
 /**
  * Business Logic: 行上只暴露一个主动作；stale/未 opt-in/unsupported 不得 mutation。
- *   发现即管理后 **永不** 以 adopt 作为主动作（可保留 API kind 给遗留 apply）。
- * Code Logic: capability 驱动 enable/disable → installToSourceTarget；跳过 canAdopt。
+ *   漂移项优先「确认当前版本」；发现即管理后 **永不** 以 adopt 作为主动作（可保留 API kind 给遗留 apply）。
+ * Code Logic: capability 驱动 confirmCurrentVersion → store → enable/disable → installToSourceTarget；跳过 canAdopt。
  */
 export function resolvePortablePrimaryAction(
   item: PortableInventoryItemDto,
@@ -304,6 +301,7 @@ export function resolvePortablePrimaryAction(
   if (needsPortableEnsureManagedRefresh(item)) return null;
 
   const caps = item.capabilities;
+  if (caps.canConfirmCurrentVersion) return 'confirmCurrentVersion';
   // 故意不返回 'adopt'：discover-as-managed 已取代纳入主路径。
   if (item.kind !== 'plugin') {
     if (caps.canDetach && item.store?.storeAttached) return 'detach';
@@ -342,6 +340,9 @@ export function resolvePortableRowActions(
 
   const caps = item.capabilities;
   const actions: PortableAssetActionKind[] = [];
+  if (caps.canConfirmCurrentVersion) {
+    actions.push('confirmCurrentVersion');
+  }
   const storeKind = item.kind !== 'plugin';
   if (storeKind && caps.canMigrateToStore) {
     actions.push('migrateToStore');
@@ -371,4 +372,33 @@ export function resolvePortableRowActions(
     actions.push('uninstall');
   }
   return actions;
+}
+
+/**
+ * Business Logic: 「全部确认版本」覆盖当前 Agent、当前类别快照里所有可确认项，
+ *   不受搜索/一致性筛选裁切；Plugin component 不进主列表，也不进批量。
+ * Code Logic: 复用行动作同一组 stale/lock/readOnly/unsupported 门闩。
+ */
+export function listConfirmableCurrentVersionItems(
+  items: readonly PortableInventoryItemDto[],
+  context: PortablePrimaryActionContext,
+): PortableInventoryItemDto[] {
+  return items.filter((item) => {
+    if (isPortablePluginComponent(item)) return false;
+    return resolvePortableRowActions(item, context).includes('confirmCurrentVersion');
+  });
+}
+
+/**
+ * Business Logic: preview 请求的 id 集合必须与 pending 动作一致，顺序无关。
+ * Code Logic: 拷贝排序后逐项比较。
+ */
+export function samePortableItemIds(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((id, index) => id === b[index]);
 }

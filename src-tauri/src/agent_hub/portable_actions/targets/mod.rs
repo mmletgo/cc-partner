@@ -215,6 +215,7 @@ pub(crate) fn expected_enabled_after(
         PortableAssetActionKind::Attach | PortableAssetActionKind::MigrateToStore => Some(true),
         PortableAssetActionKind::Detach => Some(false),
         PortableAssetActionKind::DestroyStore => None,
+        PortableAssetActionKind::ConfirmCurrentVersion => previous,
     }
 }
 

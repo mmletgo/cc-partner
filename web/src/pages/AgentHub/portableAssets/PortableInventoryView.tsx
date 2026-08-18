@@ -40,6 +40,7 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   loading: string;
   empty: string;
   refresh: string;
+  confirmAllVersions: string;
   retry: string;
   staleBanner: string;
   searchPlaceholder: string;
@@ -78,7 +79,19 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     openAction,
     lockedItemIds,
     refresh,
+    confirmableCurrentVersionItems,
+    openConfirmAllCurrentVersions,
+    pendingAction,
+    mutationBlocked,
   } = controller;
+
+  const confirmAllCount = confirmableCurrentVersionItems.length;
+  const confirmAllDisabled =
+    confirmAllCount === 0 ||
+    Boolean(pendingAction) ||
+    refreshing ||
+    stale ||
+    mutationBlocked;
 
   if (loading && !snapshot) {
     return (
@@ -118,7 +131,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
             </p>
           ) : null}
         </div>
-        <div className={styles.userHeroActions}>
+        <div className={styles.portableHeroActions}>
           <Button
             variant="secondary"
             size="sm"
@@ -127,6 +140,15 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
             data-testid="portable-inventory-refresh"
           >
             {labels.refresh}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={confirmAllDisabled}
+            onClick={() => openConfirmAllCurrentVersions()}
+            data-testid="portable-inventory-confirm-all-versions"
+          >
+            {labels.confirmAllVersions}
           </Button>
         </div>
       </section>

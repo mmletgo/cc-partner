@@ -28,6 +28,7 @@ import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   countPortableItemsByKind,
   filterPortableInventoryItems,
+  listConfirmableCurrentVersionItems,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
   type PortableInventoryFilters,
@@ -39,7 +40,8 @@ export const PORTABLE_INVENTORY_SOFT_TTL_MS = 60_000;
 
 /** Controller 打开动作的待确认状态（F3 Dialog 消费；F2 仅持有）。 */
 export interface PortableInventoryPendingAction {
-  itemId: string;
+  /** 参与本次 preview/apply 的 inventory item id；单项动作为单元素。 */
+  itemIds: string[];
   action: PortableAssetActionKind;
 }
 
@@ -74,6 +76,10 @@ export interface UsePortableInventoryControllerResult {
   setItemLocked: (itemId: string, locked: boolean) => void;
   pendingAction: PortableInventoryPendingAction | null;
   openAction: (itemId: string, action: PortableAssetActionKind) => void;
+  /** 当前快照里可「确认当前版本」的项（当前 Agent + 当前类别）。 */
+  confirmableCurrentVersionItems: PortableInventoryItemDto[];
+  /** 一键确认当前类别、当前 Agent 的全部漂移项。 */
+  openConfirmAllCurrentVersions: () => void;
   clearPendingAction: () => void;
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
   /** 行内多动作（与 getPrimaryAction 共享同一组门闩，含 uninstall）。 */
@@ -339,16 +345,40 @@ export function usePortableInventoryController(
         (action === 'attach' && Boolean(caps.canAttach)) ||
         (action === 'detach' && Boolean(caps.canDetach)) ||
         (action === 'destroyStore' && Boolean(caps.canDestroyStore)) ||
-        (action === 'migrateToStore' && Boolean(caps.canMigrateToStore));
+        (action === 'migrateToStore' && Boolean(caps.canMigrateToStore)) ||
+        (action === 'confirmCurrentVersion' && Boolean(caps.canConfirmCurrentVersion));
       if (!allowed) {
         setPendingAction(null);
         return;
       }
       setSelectedItemId(itemId);
-      setPendingAction({ itemId, action });
+      setPendingAction({ itemIds: [itemId], action });
     },
     [mutationBlocked, stale, snapshot, lockedItemIds],
   );
+
+  const confirmableCurrentVersionItems = useMemo(
+    () =>
+      listConfirmableCurrentVersionItems(snapshotMatchesQuery ? snapshot?.items ?? [] : [], {
+        stale,
+        mutationBlocked,
+        lockedItemIds,
+      }),
+    [snapshot, snapshotMatchesQuery, stale, mutationBlocked, lockedItemIds],
+  );
+
+  /**
+   * Business Logic: 一键确认当前 Agent、当前类别快照里全部可确认项，不跟搜索/一致性筛选。
+   * Code Logic: 空集或 mutation 门闩时清 pending；否则打开 confirmCurrentVersion 批量 dialog。
+   */
+  const openConfirmAllCurrentVersions = useCallback(() => {
+    const ids = confirmableCurrentVersionItems.map((item) => item.inventoryItemId);
+    if (ids.length === 0 || mutationBlocked || stale) {
+      setPendingAction(null);
+      return;
+    }
+    setPendingAction({ itemIds: ids, action: 'confirmCurrentVersion' });
+  }, [confirmableCurrentVersionItems, mutationBlocked, stale]);
 
   const clearPendingAction = useCallback(() => {
     setPendingAction(null);
@@ -371,6 +401,8 @@ export function usePortableInventoryController(
     setItemLocked,
     pendingAction,
     openAction,
+    confirmableCurrentVersionItems,
+    openConfirmAllCurrentVersions,
     clearPendingAction,
     getPrimaryAction,
     getRowActions,

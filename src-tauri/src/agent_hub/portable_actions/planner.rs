@@ -126,13 +126,17 @@ pub async fn preview_portable_asset_action_with_inventory(
         {
             plan_blocking.push("PORTABLE_ASSET_ACTION_PLUGIN_STORE_UNSUPPORTED".into());
         }
-        let mutation_target = mutation_target_for_action(
-            item.target,
-            item.owned_by,
-            item.native_output_candidate,
-            item.kind.to_asset_kind(),
-            enablement_action,
-        );
+        let mutation_target = if request.action.is_hub_ledger_only() {
+            item.target
+        } else {
+            mutation_target_for_action(
+                item.target,
+                item.owned_by,
+                item.native_output_candidate,
+                item.kind.to_asset_kind(),
+                enablement_action,
+            )
+        };
         let owner_target =
             mutation_target_for_origin(item.target, item.owned_by, item.native_output_candidate);
         let owner_dto = snapshot.targets.iter().find(|t| t.target == owner_target);
@@ -250,12 +254,22 @@ async fn build_change(
             blocking.push("PORTABLE_ASSET_ACTION_UNSUPPORTED_MANAGEMENT".into());
         }
         PortableInventoryManagementState::Drifted
-            if request.action != PortableAssetActionKind::Adopt =>
+            if request.action != PortableAssetActionKind::Adopt
+                && !request.action.is_hub_ledger_only() =>
         {
-            // 漂移下非 adopt 的 mutation fail-closed（需 re-inspect）
+            // 漂移下非 adopt / 确认当前版本 的 mutation fail-closed
             blocking.push("PORTABLE_ASSET_ACTION_SOURCE_DRIFTED".into());
         }
         _ => {}
+    }
+
+    if request.action.is_hub_ledger_only()
+        && item.management_state != PortableInventoryManagementState::Drifted
+    {
+        blocking.push("PORTABLE_ASSET_ACTION_NOT_DRIFTED".into());
+    }
+    if request.action.is_hub_ledger_only() && item.canonical_asset_id.is_none() {
+        blocking.push("PORTABLE_ASSET_ACTION_CANONICAL_MISSING".into());
     }
 
     if item.content_hash.is_none()
@@ -270,6 +284,7 @@ async fn build_change(
                 | PortableAssetActionKind::Detach
                 | PortableAssetActionKind::DestroyStore
                 | PortableAssetActionKind::MigrateToStore
+                | PortableAssetActionKind::ConfirmCurrentVersion
         )
     {
         blocking.push("PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into());
@@ -286,8 +301,8 @@ async fn build_change(
         }
     }
 
-    let apply_target_cli_gates =
-        !(borrowed && target_dto.map(|t| t.target) != Some(mutation_target));
+    let apply_target_cli_gates = !(request.action.is_hub_ledger_only()
+        || (borrowed && target_dto.map(|t| t.target) != Some(mutation_target)));
     if apply_target_cli_gates {
         if let Some(t) = target_dto {
             if t.mutation_capability == PortableInventoryMutationCapability::Blocked {
@@ -316,7 +331,8 @@ async fn build_change(
         } else {
             blocking.push("PORTABLE_ASSET_ACTION_CLI_FINGERPRINT_MISSING".into());
         }
-    } else if !supports_direct_local_action(mutation_target, item.kind, request.action)
+    } else if !request.action.is_hub_ledger_only()
+        && !supports_direct_local_action(mutation_target, item.kind, request.action)
         && matches!(
             request.action,
             PortableAssetActionKind::Enable
@@ -373,6 +389,11 @@ async fn build_change(
         }
         PortableAssetActionKind::MigrateToStore if !item.capabilities.can_migrate_to_store => {
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_MIGRATE_TO_STORE".into());
+        }
+        PortableAssetActionKind::ConfirmCurrentVersion
+            if !item.capabilities.can_confirm_current_version =>
+        {
+            blocking.push("PORTABLE_ASSET_ACTION_CANNOT_CONFIRM_CURRENT_VERSION".into());
         }
         _ => {}
     }
@@ -448,6 +469,12 @@ async fn build_change(
         ),
         PortableAssetActionKind::MigrateToStore => (
             PortableAssetPlanOperation::MigrateToStore,
+            false,
+            PortableAssetCanonicalEffect::None,
+            PortableAssetBackupPolicy::None,
+        ),
+        PortableAssetActionKind::ConfirmCurrentVersion => (
+            PortableAssetPlanOperation::ConfirmCurrentVersion,
             false,
             PortableAssetCanonicalEffect::None,
             PortableAssetBackupPolicy::None,
@@ -741,6 +768,7 @@ args = ["mcp"]
                 can_attach: false,
                 can_detach: false,
                 can_destroy_store: false,
+                can_confirm_current_version: false,
                 reason_code: Some("deactivate_package_not_supported".into()),
                 evidence_ids: vec![],
             },
@@ -843,6 +871,7 @@ args = ["mcp"]
                 can_attach: false,
                 can_detach: false,
                 can_destroy_store: false,
+                can_confirm_current_version: false,
                 reason_code: Some("borrowed_runtime_origin".into()),
                 evidence_ids: vec![],
             },
@@ -931,6 +960,7 @@ args = ["mcp"]
                 can_attach: false,
                 can_detach: false,
                 can_destroy_store: false,
+                can_confirm_current_version: false,
                 reason_code: Some("borrowed_runtime_origin".into()),
                 evidence_ids: vec![],
             },

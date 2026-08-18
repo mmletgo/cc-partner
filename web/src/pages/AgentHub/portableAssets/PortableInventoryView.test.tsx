@@ -23,6 +23,7 @@ const labels: PortableInventoryViewLabels = {
   loading: 'Loading inventory',
   empty: 'No assets',
   refresh: 'Refresh',
+  confirmAllVersions: 'Confirm all versions',
   retry: 'Retry',
   staleBanner: 'Inventory is stale',
   searchPlaceholder: 'Search assets',
@@ -68,6 +69,7 @@ const labels: PortableInventoryViewLabels = {
     detach: 'Detach',
     destroyStore: 'Destroy store',
     migrateToStore: 'Migrate to store',
+    confirmCurrentVersion: 'Confirm current version',
   },
   sourceOrigin: {
     standalone: 'Standalone',
@@ -164,6 +166,8 @@ function controller(
     setItemLocked: vi.fn(),
     pendingAction: null,
     openAction: vi.fn(),
+    confirmableCurrentVersionItems: [],
+    openConfirmAllCurrentVersions: vi.fn(),
     clearPendingAction: vi.fn(),
     getPrimaryAction: () => 'disable',
     getRowActions: () => ['disable', 'uninstall'],
@@ -197,6 +201,48 @@ describe('PortableInventoryView', () => {
       target: { value: 'problem' },
     });
     expect(ctl.setFilters).toHaveBeenCalledWith({ actualState: 'problem' });
+  });
+
+  test('confirm-all button sits under refresh and opens the batch action', () => {
+    const drifted = item({
+      inventoryItemId: 'claude-skill-alpha',
+      managementState: 'drifted',
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canConfirmCurrentVersion: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    const openConfirmAllCurrentVersions = vi.fn();
+    render(
+      <PortableInventoryView
+        controller={controller({
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [drifted],
+          },
+          visibleItems: [drifted],
+          confirmableCurrentVersionItems: [drifted],
+          openConfirmAllCurrentVersions,
+        })}
+        labels={labels}
+      />,
+    );
+
+    const refresh = screen.getByTestId('portable-inventory-refresh');
+    const confirmAll = screen.getByTestId('portable-inventory-confirm-all-versions');
+    expect(refresh.compareDocumentPosition(confirmAll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect((confirmAll as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(confirmAll);
+    expect(openConfirmAllCurrentVersions).toHaveBeenCalledTimes(1);
   });
 
   test('shows stale banner and empty state', () => {

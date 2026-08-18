@@ -601,6 +601,7 @@
       "loading": "正在加载库存…",
       "empty": "没有符合当前筛选条件的 portable 资产。",
       "refresh": "刷新库存",
+      "confirmAllVersions": "全部确认版本（{{count}}）",
       "retry": "重试",
       "staleBanner": "库存已过期。在成功刷新前禁止变更。",
       "searchPlaceholder": "搜索名称、native id 或路径",
@@ -690,7 +691,8 @@
       "attach": "附加到此 Agent",
       "detach": "从此 Agent 卸下",
       "destroyStore": "彻底删除仓库副本",
-      "migrateToStore": "迁入便携仓库"
+      "migrateToStore": "迁入便携仓库",
+      "confirmCurrentVersion": "确认当前版本"
     },
     "management": {
       "hubManaged": "一致",
@@ -746,6 +748,7 @@
     },
     "actionDialog": {
       "title": "确认 {{action}}",
+      "titleBatch": "确认 {{action}}（{{count}} 项）",
       "subtitle": "打开后会自动准备计划。确认前不会写入。",
       "keepData": "卸载时保留本地数据",
       "conflictPolicy": "冲突策略",
@@ -771,7 +774,9 @@
       "storeMigrateHint": "迁移会把当前原生文件移入共享便携仓库，并留下软链。同名不同内容会被拒绝。",
       "storeDestroyHint": "彻底删除会清掉共享仓库真树，并移除 Claude / Codex 上的附加。此操作不可恢复。",
       "storeStillLoadedVia": "卸下 {{current}} 之后，这项仓库资产仍会经 {{via}} 加载。这次不会改写 {{via}}。",
-      "storePluginUnchanged": "Plugin 不走便携仓库。启用标记仍只改当前查看 Agent 的开关。"
+      "storePluginUnchanged": "Plugin 不走便携仓库。启用标记仍只改当前查看 Agent 的开关。",
+      "confirmCurrentVersionHint": "磁盘上的文件可能已更新。确认后 Hub 只把当前文件记为一致基准，不会改写磁盘。",
+      "confirmAllCurrentVersionHint": "将把当前 Agent、当前类别中 {{count}} 项已漂移资产记为一致基准，不会改写磁盘。"
     }
   },
   "portablePull": {

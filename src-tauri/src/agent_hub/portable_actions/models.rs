@@ -40,6 +40,8 @@ pub enum PortableAssetActionKind {
     DestroyStore,
     /// 把非 store 的 native Skill/Command/MCP 迁入 store
     MigrateToStore,
+    /// 把当前磁盘内容记为一致基准（只改 Hub 账本，不改文件）
+    ConfirmCurrentVersion,
 }
 
 impl PortableAssetActionKind {
@@ -55,7 +57,19 @@ impl PortableAssetActionKind {
             Self::Detach => "detach",
             Self::DestroyStore => "destroyStore",
             Self::MigrateToStore => "migrateToStore",
+            Self::ConfirmCurrentVersion => "confirmCurrentVersion",
         }
+    }
+
+    /// 是否只写 Hub 账本、不改 Agent 磁盘/CLI。
+    ///
+    /// Business Logic（为什么需要）:
+    ///     资产可能被 CLI 自己更新；确认当前版本只重记哈希，不得被「无 L3 写入」挡住。
+    ///
+    /// Code Logic（做什么）:
+    ///     `confirmCurrentVersion` 为真；其余动作仍走 CLI/文件门禁。
+    pub fn is_hub_ledger_only(self) -> bool {
+        matches!(self, Self::ConfirmCurrentVersion)
     }
 }
 
@@ -149,6 +163,8 @@ pub enum PortableAssetPlanOperation {
     DestroyStore,
     /// 迁入 portable-store
     MigrateToStore,
+    /// 确认当前版本（重记账本哈希）
+    ConfirmCurrentVersion,
 }
 
 impl PortableAssetPlanOperation {
@@ -164,6 +180,7 @@ impl PortableAssetPlanOperation {
             Self::Detach => "detach",
             Self::DestroyStore => "destroyStore",
             Self::MigrateToStore => "migrateToStore",
+            Self::ConfirmCurrentVersion => "confirmCurrentVersion",
         }
     }
 }

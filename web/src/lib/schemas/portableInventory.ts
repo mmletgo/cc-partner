@@ -144,6 +144,7 @@ export const portableAssetActionKindDecoder: Decoder<PortableAssetActionKind> = 
     'detach',
     'destroyStore',
     'migrateToStore',
+    'confirmCurrentVersion',
   ] as const,
 );
 
@@ -180,6 +181,7 @@ export const portableAssetPlanOperationDecoder: Decoder<PortableAssetPlanOperati
     'detach',
     'destroyStore',
     'migrateToStore',
+    'confirmCurrentVersion',
   ] as const,
 );
 
@@ -234,6 +236,7 @@ export const portableInventoryItemCapabilitiesDecoder: Decoder<PortableInventory
     canAttach: optionalDecoder(booleanDecoder),
     canDetach: optionalDecoder(booleanDecoder),
     canDestroyStore: optionalDecoder(booleanDecoder),
+    canConfirmCurrentVersion: optionalDecoder(booleanDecoder),
     reasonCode: nullableDecoder(stringDecoder),
     evidenceIds: arrayDecoder(stringDecoder),
   });

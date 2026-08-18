@@ -544,6 +544,36 @@ describe('workbenchAutomationView', () => {
   assertContains(workbenchStyles, '.automationLayer {', 'automation layer has a dedicated style block');
   assertContains(workbenchStyles, '.automationHeader {', 'automation console has a project context header');
   assertContains(workbenchStyles, '.automationBody {', 'automation layer scroll body exists');
+  assertContains(
+    workbenchSource,
+    'data-automation-open={automationConsoleOpen || undefined}',
+    'Workbench page marks automation-open so the inspector can yield horizontal space to the board',
+  );
+  assertContains(
+    workbenchStyles,
+    ".page[data-automation-open='true']",
+    'automation-open Workbench uses a single-column page grid',
+  );
+  assertContains(
+    workbenchStyles,
+    'grid-template-columns: minmax(0, 1fr);',
+    'automation layer occupies the full center-pane inline size instead of shrinking to toolbar content',
+  );
+  assertContains(
+    orchestratorStyles,
+    'width: 100%;',
+    'embedded Orchestrator panel stretches to the automation body width',
+  );
+  assertContains(
+    orchestratorStyles,
+    'justify-content: space-between;',
+    'embedded toolbar keeps create actions on the trailing edge of the full-width row',
+  );
+  assertNotContains(
+    orchestratorStyles,
+    '.embedded .toolbar {\n  justify-content: flex-start;',
+    'embedded toolbar must not hug content on the leading edge of a wide Workbench',
+  );
   assertContains(orchestratorSource, 'export function OrchestratorPanel', 'Orchestrator exports an embeddable panel');
   assertContains(orchestratorSource, 'embedded?: boolean;', 'OrchestratorPanel supports embedded mode');
   assertContains(orchestratorSource, 'onOpenWorkbench?: (url: string) => void;', 'OrchestratorPanel lets Workbench own embedded deep-link handling');
