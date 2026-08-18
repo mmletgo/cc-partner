@@ -699,34 +699,52 @@ fn scan_plugin_packages(
             Ok(s) => s,
             Err(_) => continue,
         };
-        // 稳定身份：registry key > 路径布局 id > manifest/目录名
-        if let Some(reg) = candidate.registry_plugin_id.as_ref() {
-            if !reg.trim().is_empty() {
-                source.plugin_id = reg.clone();
-                // 无 manifest 时目录名常是版本号；展示名也用 registry id
-                if source.name == root.file_name().and_then(|s| s.to_str()).unwrap_or("") {
-                    source.name = reg.clone();
-                }
-            }
-        } else if let Some(path_id) =
-            crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
-                &root.display().to_string(),
-            ))
-        {
-            // cache 布局下目录名/manifest 可能是版本号；以路径 id 为准
-            let dir_name = root
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-            if source.plugin_id == dir_name || source.plugin_id.is_empty() {
-                source.plugin_id = path_id.clone();
-                if source.name == dir_name {
-                    source.name = path_id;
-                }
-            }
+        // 稳定身份：完整 registry key（id@marketplace）> 短 registry id > 路径布局 id > manifest/目录名。
+        // 短 id 会把官方源与第三方 marketplace 安装塌成一行；uninstall 短名只卸掉其中一个，
+        // rescan 仍看到另一份 → PORTABLE_ASSET_ACTION_RESCAN_MISMATCH。
+        let dir_name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let qualified = candidate
+            .registry_key
+            .as_ref()
+            .filter(|k| k.contains('@') && !k.trim().is_empty())
+            .cloned()
+            .or_else(|| {
+                crate::agent_hub::portable_inventory::plugin_paths::plugin_registry_key_from_path(
+                    Some(&root.display().to_string()),
+                )
+                .filter(|k| k.contains('@'))
+            });
+        let short = candidate
+            .registry_plugin_id
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .or_else(|| {
+                crate::agent_hub::portable_inventory::plugin_paths::plugin_id_from_path(Some(
+                    &root.display().to_string(),
+                ))
+            })
+            .unwrap_or_else(|| source.plugin_id.clone());
+        if source.name == dir_name || source.name.is_empty() {
+            source.name = short.clone();
         }
+        if let Some(key) = qualified {
+            source.plugin_id = key;
+        } else if !short.is_empty() && (source.plugin_id == dir_name || source.plugin_id.is_empty())
+        {
+            source.plugin_id = short;
+        }
+        let identity_leaf = source
+            .plugin_id
+            .split('@')
+            .next()
+            .unwrap_or(source.plugin_id.as_str());
         if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_name(
-            &source.plugin_id,
+            identity_leaf,
         ) {
             continue;
         }
@@ -3397,8 +3415,16 @@ enabled = false
             scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
         let superpowers = items
             .iter()
-            .find(|i| i.native_id == "superpowers" || i.source_path.as_deref() == official.to_str())
+            .find(|i| {
+                i.native_id == "superpowers"
+                    || i.native_id == "superpowers@claude-plugins-official"
+                    || i.source_path.as_deref() == official.to_str()
+            })
             .expect("superpowers package");
+        assert_eq!(
+            superpowers.native_id, "superpowers@claude-plugins-official",
+            "cache installs must keep marketplace-qualified native id"
+        );
         assert_eq!(
             superpowers.actual_enabled,
             Some(false),
@@ -3406,9 +3432,95 @@ enabled = false
         );
         let pyright_item = items
             .iter()
-            .find(|i| i.native_id == "pyright-lsp")
+            .find(|i| {
+                i.native_id == "pyright-lsp" || i.native_id == "pyright-lsp@claude-plugins-official"
+            })
             .expect("pyright package");
         assert_eq!(pyright_item.actual_enabled, Some(true));
+    }
+
+    #[test]
+    fn claude_same_plugin_from_two_marketplaces_stays_two_inventory_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let claude = home.join(".claude");
+        let official = claude.join("plugins/cache/claude-plugins-official/superpowers/6.3.0");
+        write(
+            &official.join(".claude-plugin/plugin.json"),
+            r#"{"name":"superpowers","version":"6.3.0"}"#,
+        );
+        let marketplace = claude.join("plugins/cache/superpowers-marketplace/superpowers/6.1.1");
+        write(
+            &marketplace.join(".claude-plugin/plugin.json"),
+            r#"{"name":"superpowers","version":"6.1.1"}"#,
+        );
+        write(
+            &claude.join("plugins/installed_plugins.json"),
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "superpowers@claude-plugins-official": [{
+                        "scope": "user",
+                        "installPath": official.to_string_lossy()
+                    }],
+                    "superpowers@superpowers-marketplace": [{
+                        "scope": "user",
+                        "installPath": marketplace.to_string_lossy()
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        write(
+            &claude.join("settings.json"),
+            r#"{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false,
+    "superpowers@superpowers-marketplace": true
+  }
+}"#,
+        );
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            claude.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scopes = [PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (_targets, items) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+        let official_item = items
+            .iter()
+            .find(|i| i.native_id == "superpowers@claude-plugins-official")
+            .expect("official superpowers row");
+        let market_item = items
+            .iter()
+            .find(|i| i.native_id == "superpowers@superpowers-marketplace")
+            .expect("marketplace superpowers row");
+        assert_ne!(
+            official_item.inventory_item_id, market_item.inventory_item_id,
+            "marketplace copies must not collapse to one inventory id"
+        );
+        assert_eq!(official_item.actual_enabled, Some(false));
+        assert_eq!(market_item.actual_enabled, Some(true));
+        assert_eq!(official_item.display_name, "superpowers");
+        assert_eq!(market_item.display_name, "superpowers");
     }
 
     #[test]
@@ -3482,7 +3594,11 @@ enabled = ["native-only"]
             scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
         let superpowers = items
             .iter()
-            .find(|i| i.native_id == "superpowers" || i.source_path.as_deref() == official.to_str())
+            .find(|i| {
+                i.native_id == "superpowers"
+                    || i.native_id == "superpowers@claude-plugins-official"
+                    || i.source_path.as_deref() == official.to_str()
+            })
             .expect("borrowed superpowers on Grok");
         assert_eq!(superpowers.target, AgentTarget::Grok);
         assert_eq!(superpowers.owned_by, PortableAssetOwner::Claude);

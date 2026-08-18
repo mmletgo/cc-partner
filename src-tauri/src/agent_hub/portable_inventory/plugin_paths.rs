@@ -50,6 +50,36 @@ pub fn plugin_id_from_path(path: Option<&str>) -> Option<String> {
     plugin_id_from_owned_segments(&parts)
 }
 
+/// Business Logic: Claude/Codex CLI 与 enabledPlugins 用 `id@marketplace`；短 id
+///     会把官方源与第三方 marketplace 安装塌成同一行。
+/// Code Logic:
+///   - cache 布局 → `<id>@<market>`
+///   - 直装布局 → `<id>`（无 marketplace）
+///   - 其它 → None
+pub fn plugin_registry_key_from_path(path: Option<&str>) -> Option<String> {
+    let path = path?;
+    let parts = path_segments_owned(path);
+    match plugin_layout_from_owned_segments(&parts)?.1 {
+        PluginLayoutOwned::Cache { market, plugin, .. } => Some(format!("{plugin}@{market}")),
+        PluginLayoutOwned::Direct { plugin } => Some(plugin),
+    }
+}
+
+/// Business Logic: CLI argv 必须指向具体 marketplace 安装，不能只用短 native id。
+/// Code Logic: 已含 `@` 的 native_id 原样使用；否则从 cache 路径还原 `id@market`。
+pub fn plugin_cli_selector(native_id: &str, source_path: Option<&str>) -> String {
+    let native = native_id.trim();
+    if native.contains('@') && !native.is_empty() {
+        return native.to_string();
+    }
+    if let Some(key) = plugin_registry_key_from_path(source_path) {
+        if key.contains('@') {
+            return key;
+        }
+    }
+    native.to_string()
+}
+
 /// Business Logic: package 根用于 parent inventory id 与 native_path。
 /// Code Logic:
 ///   - cache 布局：停在 version 目录
@@ -207,6 +237,45 @@ mod tests {
                 r"C:\Users\a\.claude\plugins\cache\market\pyright-lsp\1.0.0"
             )),
             Some("pyright-lsp".into())
+        );
+    }
+
+    #[test]
+    fn registry_key_from_cache_layout_is_id_at_market() {
+        assert_eq!(
+            plugin_registry_key_from_path(Some(
+                "/Users/h/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0"
+            )),
+            Some("superpowers@claude-plugins-official".into())
+        );
+        assert_eq!(
+            plugin_registry_key_from_path(Some(
+                "/Users/h/.claude/plugins/cache/superpowers-marketplace/superpowers/6.1.1"
+            )),
+            Some("superpowers@superpowers-marketplace".into())
+        );
+        assert_eq!(
+            plugin_registry_key_from_path(Some("/home/.claude/plugins/demo")),
+            Some("demo".into())
+        );
+    }
+
+    #[test]
+    fn plugin_cli_selector_prefers_qualified_native_then_path() {
+        assert_eq!(
+            plugin_cli_selector("superpowers@superpowers-marketplace", None),
+            "superpowers@superpowers-marketplace"
+        );
+        assert_eq!(
+            plugin_cli_selector(
+                "superpowers",
+                Some("/Users/h/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0")
+            ),
+            "superpowers@claude-plugins-official"
+        );
+        assert_eq!(
+            plugin_cli_selector("demo", Some("/home/.claude/plugins/demo")),
+            "demo"
         );
     }
 

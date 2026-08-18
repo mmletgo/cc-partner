@@ -274,7 +274,12 @@ fn execute_plugin(
     change: &PortableAssetActionChangeDto,
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
-    let id = native_id(change, pre_item);
+    let id = crate::agent_hub::portable_inventory::plugin_paths::plugin_cli_selector(
+        &native_id(change, pre_item),
+        pre_item
+            .and_then(|i| i.source_path.as_deref())
+            .or(change.path.as_deref()),
+    );
     let scope = scope_arg(pre_item);
     // Claude resolves --scope project from process cwd; fail-closed if unresolved.
     let cwd = plugin_process_cwd(pre_item, change)?;
@@ -1177,6 +1182,64 @@ mod tests {
         assert_eq!(calls[0].cwd.as_deref(), Some(project.as_path()));
         let scope_idx = calls[0].args.iter().position(|a| a == "--scope").unwrap();
         assert_eq!(calls[0].args[scope_idx + 1], "project");
+    }
+
+    /// Business Logic: 短 native_id 必须还原成 id@marketplace，否则 CLI 只卸掉其中一个源。
+    #[test]
+    fn plugin_uninstall_uses_marketplace_qualified_selector() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::TargetActionContext;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_path = tmp
+            .path()
+            .join("plugins/cache/claude-plugins-official/superpowers/6.3.0");
+        std::fs::create_dir_all(&plugin_path).unwrap();
+        let mut item = sample_item(ScopeKind::User, plugin_path.to_str().unwrap(), true);
+        item.kind = PortableAssetKind::Plugin;
+        item.native_id = "superpowers".into();
+        item.display_name = "superpowers".into();
+        item.inventory_item_id = "id-superpowers".into();
+
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Plugin,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Uninstall,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_ok("ok");
+        let ctx = TargetActionContext {
+            action: PortableAssetActionKind::Uninstall,
+            keep_data: false,
+            runner: runner.clone(),
+            claude_config_dir: Some(tmp.path().join("claude")),
+            data_dir: Some(tmp.path().join("data")),
+        };
+        ClaudeTargetExecutor
+            .execute_change(&ctx, &dummy_plan(), &change, Some(&item))
+            .unwrap();
+        let args = &runner.calls()[0].args;
+        assert!(args.iter().any(|a| a == "uninstall"));
+        assert!(
+            args.iter()
+                .any(|a| a == "superpowers@claude-plugins-official"),
+            "uninstall argv must use qualified selector, got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "superpowers"),
+            "short id must not be passed when path encodes marketplace, got {args:?}"
+        );
     }
 
     /// Business Logic: Claude CLI 对已禁用插件返回 exit 1，Hub 必须当成幂等跳过。

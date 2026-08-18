@@ -2465,6 +2465,70 @@ mod tests {
         assert!(args.iter().any(|a| a == "--keep-data"));
     }
 
+    /// Business Logic: 卸载官方 marketplace 行不得把另一 marketplace 的同名插件当成残留。
+    #[tokio::test]
+    async fn plugin_uninstall_rescan_ignores_other_marketplace_copy() {
+        let repo = test_repo().await;
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_ok("ok");
+        let official = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            "superpowers@claude-plugins-official",
+            "/plugins/cache/claude-plugins-official/superpowers/6.3.0",
+            Some(false),
+        );
+        let marketplace = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            "superpowers@superpowers-marketplace",
+            "/plugins/cache/superpowers-marketplace/superpowers/6.1.1",
+            Some(true),
+        );
+        let snap = snapshot_from(
+            vec![sample_target(AgentTarget::Claude)],
+            vec![official.clone(), marketplace.clone()],
+        );
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![official.inventory_item_id.clone()],
+            PortableAssetActionKind::Uninstall,
+            false,
+        )
+        .await;
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![marketplace]);
+        let deps = PortableActionExecutorDeps {
+            repo,
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snap),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token,
+                client_request_id: "req-uninst-official".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded,
+            "other marketplace copy must not fail full uninstall: {:?}",
+            result.items[0]
+        );
+        let args = &runner.calls()[0].args;
+        assert!(args
+            .iter()
+            .any(|a| a == "superpowers@claude-plugins-official"));
+    }
+
     /// Business Logic: partial manifest 仅放行 Activate/Render 时，Plugin deactivation
     /// 既不能进入 adapter，也不能产生任何 CLI 调用。
     #[tokio::test]
