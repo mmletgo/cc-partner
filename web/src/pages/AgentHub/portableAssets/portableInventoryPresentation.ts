@@ -97,7 +97,7 @@ function isPortabilityAdvisory(code: string): boolean {
   return PORTABILITY_ADVISORY_CODES.has(code) || code.startsWith('transport:');
 }
 
-/** 返回会影响本机健康态的 warning；可移植性提示留在详情，不污染主列表。 */
+/** 返回会影响本机健康态的 warning；可移植性提示不标红主列表。 */
 export function portableInventoryProblemWarnings(
   item: PortableInventoryItemDto,
 ): string[] {
@@ -410,7 +410,7 @@ export function resolvePortablePrimaryAction(
 }
 
 /**
- * Business Logic: 列表行同时暴露仓库或启停动作，让用户无需打开详情 Drawer 即可管理。
+ * Business Logic: 列表行同时暴露仓库或启停动作，无需详情侧栏。
  *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下 / 彻底删除仓库项；卸下只出现在便携仓库项。
  *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/销毁。
  *   Plugin/MCP：仍走 enable/disable/uninstall。借用项同样按 capability 暴露动作。

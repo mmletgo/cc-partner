@@ -19,7 +19,6 @@ import {
 } from './instructions';
 import {
   PortableAssetActionDialog,
-  PortableAssetDetailsDrawer,
   PortableInventoryView,
   PortablePullDrawer,
   type PortableInventoryViewLabels,
@@ -57,10 +56,6 @@ export function AgentHubView(props: AgentHubViewProps) {
     shellPeers,
     shellProjects,
     portableInventory,
-    portableDetailsOpen,
-    portableSelectedItem,
-    closePortableDetails,
-    requestPortableAction,
     portableActionOpen,
     portableActionKind,
     portableActionPlan,
@@ -297,19 +292,15 @@ export function AgentHubView(props: AgentHubViewProps) {
   );
 
   /**
-   * Business Logic: 借用项可在当前列表启停/卸载（先弹跨 Agent 影响确认）；也可切到所有者 Agent。
-   * Code Logic: Hub target 切 agent 并关详情；sharedAgents/unknown 仍打开当前详情。
+   * Business Logic: 借用项可在当前列表启停/卸载；也可切到所有者 Agent。
+   * Code Logic: Hub target 只切 agent；sharedAgents/unknown 无详情面，保持当前列表。
    */
   const openPortableOwner = useCallback(
     (item: PortableInventoryItemDto) => {
-      if (isHubTarget(item.ownedBy)) {
-        closePortableDetails();
-        onContextChange({ agent: item.ownedBy });
-        return;
-      }
-      portableInventory.selectItem(item.inventoryItemId);
+      if (!isHubTarget(item.ownedBy)) return;
+      onContextChange({ agent: item.ownedBy });
     },
-    [closePortableDetails, onContextChange, portableInventory],
+    [onContextChange],
   );
 
   /**
@@ -660,22 +651,6 @@ export function AgentHubView(props: AgentHubViewProps) {
         onPreview={() => void runLanPreview()}
         onStart={() => void runLanStart()}
         onClose={closeLanPushDialog}
-      />
-
-      <PortableAssetDetailsDrawer
-        open={portableDetailsOpen}
-        item={portableSelectedItem}
-        pluginReport={null}
-        busy={portableActionBusy}
-        error={portableActionError}
-        mutationBlocked={portableInventory.mutationBlocked}
-        stale={portableInventory.stale}
-        onClose={closePortableDetails}
-        onOpenOwner={openPortableOwner}
-        onRequestAction={(action) => {
-          if (!portableSelectedItem) return;
-          requestPortableAction(portableSelectedItem.inventoryItemId, action);
-        }}
       />
 
       <PortableAssetActionDialog

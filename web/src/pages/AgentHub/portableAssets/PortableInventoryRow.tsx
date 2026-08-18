@@ -3,11 +3,11 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   列表展示 observed 事实：名称、target、scope、实际状态、管理态与行内动作集合。
- *   行内直接暴露启用/禁用/卸载等多个动作，用户无需打开详情 Drawer 即可管理。
+ *   行内直接暴露启用/禁用/卸载等多个动作；没有详情侧栏。
  *
  * Code Logic（这个组件做什么）:
  *   pure props 视图；无 @/api；action 文案由父层经 labels 注入。
- *   actions 优先于 primaryAction；二者均缺时行内不渲染动作区。
+ *   名称区只读；actions 优先于 primaryAction；二者均缺时行内不渲染动作区。
  */
 
 import type { JSX } from 'react';
@@ -46,7 +46,6 @@ export interface PortableInventoryRowLabels {
 
 export interface PortableInventoryRowProps {
   item: PortableInventoryItemDto;
-  selected?: boolean;
   busy?: boolean;
   /** 行内多动作（启用/禁用/卸载等）；提供时优先于 primaryAction。 */
   actions?: PortableAssetActionKind[];
@@ -58,9 +57,8 @@ export interface PortableInventoryRowProps {
   /** 旧的单主动作（向后兼容；actions 优先）。 */
   primaryAction?: PortableAssetActionKind | null;
   labels: PortableInventoryRowLabels;
-  onSelect?: (item: PortableInventoryItemDto) => void;
   onPrimaryAction?: (item: PortableInventoryItemDto, action: PortableAssetActionKind) => void;
-  /** 借用行：在所有者 Agent 中打开；不是 PortableAssetActionKind。 */
+  /** 借用行：切到所有者 Agent；不是 PortableAssetActionKind。 */
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
 }
 
@@ -86,13 +84,11 @@ function managementTone(
 export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Element {
   const {
     item,
-    selected = false,
     busy = false,
     actions,
     onAction,
     primaryAction,
     labels,
-    onSelect,
     onPrimaryAction,
     onOpenOwner,
   } = props;
@@ -115,19 +111,14 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     <article
       className={styles.row}
       data-testid={`portable-inventory-row-${item.inventoryItemId}`}
-      data-selected={selected || undefined}
       data-disabled={disabledVisual || undefined}
       data-kind={item.kind}
       data-target={item.target}
       data-management={item.managementState}
     >
-      <button
-        type="button"
-        className={styles.selectButton}
-        aria-label={item.displayName}
-        aria-pressed={selected}
+      <div
+        className={styles.mainWrap}
         data-testid={`portable-inventory-select-${item.inventoryItemId}`}
-        onClick={() => onSelect?.(item)}
       >
         <div className={styles.main}>
           <div className={styles.titleLine}>
@@ -178,7 +169,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
             </div>
           ) : null}
         </div>
-      </button>
+      </div>
       {showMutations || showOwnerJump ? (
         <div className={styles.rowActions}>
           {showMutations && handleAction

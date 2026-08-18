@@ -84,7 +84,7 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 - `/agent-hub` 统一管理本机用户级、局域网远端设备与项目级 Claude / Codex / OpenCode 指令和可移植资产（旧 `/claude-md` 页重定向至此）
 - 提示词固定**公共 / 适配 / 独有**三槽编辑（canonical 文档带修订历史与 CAS 保存）；合成预览按 公共→适配→独有 顺序渲染
 - **AI 辅助提示词修改**（调用本机 Claude CLI）：原始指令「分析拆解」为三槽；把当前 agent 的适配正文「适配到其他 Agent」；按用户给定方向改写当前槽并保存 Canonical——均不自动写入 Agent 原始文件
-- **可移植资产**：Skill / Command / Agent / MCP 的扫描、enable/disable/uninstall/恢复（物理移动文件，资产启停不漂移）；行内动作组 + 详情 Drawer 预览确认流程
+- **可移植资产**：Skill / Command / Agent / MCP 的扫描、enable/disable/uninstall/恢复（物理移动文件，资产启停不漂移）；行内动作组预览确认流程
 - **LAN Pull / Snapshot Push**：从局域网对端同目标 Agent 拉取资产（清单对比、8MiB 分块断点续传、冲突可预览替换）；快照导出为可读目录归档并原子导入；多目标 LAN 推送失败进 Attention
 - **Git device-lane 备份**：Agent Hub 资产经 Cloud Sync 写入 `agent-hub/devices/<deviceId>/`；拉取远端 lane 后需 inspect/preview/confirm 才导入，不自动 import
 - 后台 Agent Hub 服务支持登录自启动与崩溃监督重启（`supervise`）

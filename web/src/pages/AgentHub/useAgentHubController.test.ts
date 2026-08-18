@@ -187,6 +187,16 @@ function makePortableItem(
   };
 }
 
+/**
+ * Skill/Command 走仓库动作，openAction 拒绝 enable/disable。
+ * 预览/确认竞态测试需要能真正打开 PortableAssetActionDialog 的项。
+ */
+function makeDisableablePortableItem(
+  overrides: Partial<PortableInventoryItemDto> = {},
+): PortableInventoryItemDto {
+  return makePortableItem({ kind: 'plugin', ...overrides });
+}
+
 function portableSnapshot(
   items: PortableInventoryItemDto[],
   stale = false,
@@ -998,7 +1008,7 @@ describe('useAgentHubController', () => {
   });
 
   test('H1: preview then inventory refresh fail must not allow applyAction on confirm', async () => {
-    const item = makePortableItem();
+    const item = makeDisableablePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
     searchParamsMock.current = new URLSearchParams('tab=skill');
     const { result } = renderHook(() => useAgentHubController());
@@ -1042,7 +1052,7 @@ describe('useAgentHubController', () => {
   });
 
   test('M1: double preview before re-render only starts one previewAction', async () => {
-    const item = makePortableItem();
+    const item = makeDisableablePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
     let resolvePreview!: (value: PortableAssetActionPlanDto) => void;
     const previewPromise = new Promise<PortableAssetActionPlanDto>((resolve) => {
@@ -1085,7 +1095,7 @@ describe('useAgentHubController', () => {
   });
 
   test('history context change discards a pending portable action preview response', async () => {
-    const item = makePortableItem();
+    const item = makeDisableablePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
     let resolvePreview!: (value: PortableAssetActionPlanDto) => void;
     portableApiMocks.previewAction.mockReturnValueOnce(
@@ -1125,7 +1135,7 @@ describe('useAgentHubController', () => {
   });
 
   test('M1: confirm refuses entry when already busy', async () => {
-    const item = makePortableItem();
+    const item = makeDisableablePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
     let resolveApply!: (value: {
       planToken: string;
@@ -1200,7 +1210,7 @@ describe('useAgentHubController', () => {
   });
 
   test('full-success apply closes the portable action dialog after inventory refresh', async () => {
-    const item = makePortableItem();
+    const item = makeDisableablePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
     searchParamsMock.current = new URLSearchParams('tab=skill');
     const { result } = renderHook(() => useAgentHubController());
@@ -1235,7 +1245,7 @@ describe('useAgentHubController', () => {
   });
 
   test('partial apply keeps the portable action dialog open with the result', async () => {
-    const item = makePortableItem();
+    const item = makeDisableablePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
     portableApiMocks.applyAction.mockResolvedValueOnce({
       planToken: 'plan-token-1',

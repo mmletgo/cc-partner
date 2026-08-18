@@ -303,9 +303,6 @@ function buildProps(
       requestContext: { deviceId: null, projectRef: null },
       inventoryQuery: { kind: 'skill' },
     } as UseAgentHubControllerResult['portableInventory'],
-    portableDetailsOpen: false,
-    portableSelectedItem: null,
-    closePortableDetails: vi.fn(),
     requestPortableAction: vi.fn(),
     portableActionOpen: false,
     portableActionKind: null,
@@ -463,6 +460,7 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('instruction-blocks-drawer')).toBeNull();
     expect(screen.queryByTestId('agent-hub-delete-everywhere-dialog')).toBeNull();
     expect(screen.queryByTestId('agent-hub-adoption-dialog')).toBeNull();
+    expect(screen.queryByTestId('portable-asset-details-drawer')).toBeNull();
     expect(screen.queryByTestId('agent-hub-status-card')).toBeNull();
   });
 

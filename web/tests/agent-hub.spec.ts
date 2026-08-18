@@ -7,7 +7,7 @@
  *
  * Code Logic（这个套件做什么）:
  *   backendHarness 提供 scan-only workspace/inventory，验证 /claude-md、
- *   /claude-code、assetId/conflictId 的规范化、零 legacy API 与库存行键盘详情。
+ *   /claude-code、assetId/conflictId 的规范化、零 legacy API；库存行不打开详情侧栏。
  */
 
 import { expect, test } from './fixtures';
@@ -166,6 +166,10 @@ function makePortableInventory(): Record<string, unknown> {
       {
         inventoryItemId: 'claude-skill-safe-read',
         target: 'claude',
+        loadedBy: 'claude',
+        ownedBy: 'claude',
+        originKind: 'native',
+        nativeOutputCandidate: true,
         kind: 'skill',
         nativeId: 'safe-read',
         displayName: 'Safe Read Skill',
@@ -256,7 +260,7 @@ test.describe('E2E-AGENT-HUB-CORRECTION-001 production-only Agent Hub', () => {
 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('agent-hub-fixed-scope')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
     await expect(page.getByTestId('instruction-three-pane')).toBeVisible();
     await expect(page.getByTestId('instruction-write-blocked')).toBeVisible();
     await expect(page.getByTestId('agent-hub-asset-list')).toHaveCount(0);
@@ -281,7 +285,7 @@ test.describe('E2E-AGENT-HUB-CORRECTION-001 production-only Agent Hub', () => {
     expect(legacyCalls(backendHarness)).toHaveLength(0);
   });
 
-  test('/claude-code canonicalizes to inventory and keyboard opens native details button', async ({
+  test('/claude-code canonicalizes to inventory and does not open a details sidebar', async ({
     page,
     backendHarness,
   }) => {
@@ -293,18 +297,11 @@ test.describe('E2E-AGENT-HUB-CORRECTION-001 production-only Agent Hub', () => {
     await expect(page).not.toHaveURL(/section=|target=|kind=/);
     await expect(page.getByTestId('portable-inventory-workspace')).toBeVisible();
 
-    const selectButton = page.getByTestId(
-      'portable-inventory-select-claude-skill-safe-read',
-    );
-    await selectButton.focus();
-    await page.keyboard.press('Enter');
-    await expect(page.getByTestId('portable-asset-details-drawer')).toBeVisible();
-    await expect(page.getByTestId('portable-asset-diagnostic')).toContainText(
-      'CLI_WRITE_NOT_CERTIFIED',
-    );
-    await expect(page.getByTestId('portable-action-enable')).toHaveCount(0);
-    await expect(page.getByTestId('portable-action-disable')).toHaveCount(0);
-    await expect(page.getByTestId('portable-action-uninstall-blocked')).toBeVisible();
+    await expect(
+      page.getByTestId('portable-inventory-select-claude-skill-safe-read'),
+    ).toBeVisible();
+    await page.getByTestId('portable-inventory-select-claude-skill-safe-read').click();
+    await expect(page.getByTestId('portable-asset-details-drawer')).toHaveCount(0);
     expect(legacyCalls(backendHarness)).toHaveLength(0);
   });
 

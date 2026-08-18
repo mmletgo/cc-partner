@@ -3,7 +3,7 @@
  * PortableInventoryRow pure view 测试。
  *
  * Business Logic: 行展示 observed 状态与单一主动作，不直接调 API。
- * Code Logic: 选中/primary action 点击委托回调。
+ * Code Logic: 行内动作点击委托回调；名称区只读。
  */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -111,16 +111,13 @@ function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInvent
 }
 
 describe('PortableInventoryRow', () => {
-  test('renders observed facts and fires select/action callbacks', () => {
-    const onSelect = vi.fn();
+  test('renders observed facts and fires action callbacks', () => {
     const onAction = vi.fn();
     render(
       <PortableInventoryRow
         item={item()}
-        selected
         actions={['disable']}
         labels={labels}
-        onSelect={onSelect}
         onAction={onAction}
       />,
     );
@@ -131,8 +128,8 @@ describe('PortableInventoryRow', () => {
     expect(screen.getByText('Consistent')).toBeTruthy();
     expect(screen.getByText('/tmp/alpha')).toBeTruthy();
 
-    fireEvent.click(screen.getByTestId('portable-inventory-select-claude-skill-alpha'));
-    expect(onSelect).toHaveBeenCalledTimes(1);
+    const name = screen.getByTestId('portable-inventory-select-claude-skill-alpha');
+    expect(name.tagName).not.toBe('BUTTON');
 
     fireEvent.click(screen.getByTestId('portable-row-action-disable-claude-skill-alpha'));
     expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
@@ -140,36 +137,27 @@ describe('PortableInventoryRow', () => {
     }), 'disable');
   });
 
-  test('uses a native selection button beside row actions without nested button semantics', () => {
-    const onSelect = vi.fn();
+  test('keeps row actions as native buttons without nested button semantics', () => {
     const onAction = vi.fn();
     render(
       <PortableInventoryRow
         item={item()}
-        selected
         actions={['disable']}
         labels={labels}
-        onSelect={onSelect}
         onAction={onAction}
       />,
     );
 
     const row = screen.getByTestId('portable-inventory-row-claude-skill-alpha');
     expect(row.getAttribute('role')).toBeNull();
-    const selectionButton = screen.getByTestId(
+    const name = screen.getByTestId(
       'portable-inventory-select-claude-skill-alpha',
-    ) as HTMLButtonElement;
-    expect(selectionButton.tagName).toBe('BUTTON');
-    expect(selectionButton.getAttribute('aria-pressed')).toBe('true');
-    expect(row.querySelectorAll('button')).toHaveLength(2);
-
-    fireEvent.keyDown(selectionButton, { key: 'Enter' });
-    fireEvent.click(selectionButton);
-    expect(onSelect).toHaveBeenCalledTimes(1);
+    );
+    expect(name.tagName).not.toBe('BUTTON');
+    expect(row.querySelectorAll('button')).toHaveLength(1);
 
     fireEvent.click(screen.getByTestId('portable-row-action-disable-claude-skill-alpha'));
     expect(onAction).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
   test('hides action buttons when actions array is empty', () => {

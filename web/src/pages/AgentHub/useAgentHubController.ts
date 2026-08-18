@@ -2,7 +2,7 @@
  * Agent Hub 页面控制器。
  *
  * Business Logic（为什么需要这个 hook）:
- *   Agent Hub 持有 status/assets/选中详情/预览/冲突与块抽屉状态；
+ *   Agent Hub 持有 status/assets/预览与动作 Dialog 状态；
  *   按需加载：默认只跑当前 tab lane，不在 mount 全量 listAssets/portable inspect。
  *
  * Code Logic（这个 hook 做什么）:
@@ -55,7 +55,6 @@ import type {
   PortableAssetActionKind,
   PortableAssetActionPlanDto,
   PortableAssetActionResultDto,
-  PortableInventoryItemDto,
   PreviewPortableAssetActionRequest,
 } from '@/lib/types/portableInventory';
 import {
@@ -334,10 +333,7 @@ export interface UseAgentHubControllerResult {
   userInstructions: UseUserInstructionManagerResult;
   /** F2 inventory controller（URL 同步后的包装）。 */
   portableInventory: UsePortableInventoryControllerResult;
-  /** F3 详情/动作编排。 */
-  portableDetailsOpen: boolean;
-  portableSelectedItem: PortableInventoryItemDto | null;
-  closePortableDetails: () => void;
+  /** F3 动作编排（行内动作 → PortableAssetActionDialog）。 */
   requestPortableAction: (itemId: string, action: PortableAssetActionKind) => void;
   portableActionOpen: boolean;
   portableActionKind: PortableAssetActionKind | null;
@@ -2095,18 +2091,6 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setSearchParams,
   ]);
 
-  const portableSelectedItem = useMemo(() => {
-    const id = portableInventoryBase.selectedItemId;
-    if (!id || !portableInventoryBase.snapshot) return null;
-    return (
-      portableInventoryBase.snapshot.items.find((item) => item.inventoryItemId === id) ?? null
-    );
-  }, [portableInventoryBase.selectedItemId, portableInventoryBase.snapshot]);
-
-  const closePortableDetails = useCallback(() => {
-    portableInventoryBase.selectItem(null);
-  }, [portableInventoryBase]);
-
   const requestPortableAction = useCallback(
     (itemId: string, action: PortableAssetActionKind) => {
       portableActionSeqRef.current += 1;
@@ -2408,9 +2392,6 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     shellProjects,
     userInstructions,
     portableInventory,
-    portableDetailsOpen: Boolean(portableInventoryBase.selectedItemId),
-    portableSelectedItem,
-    closePortableDetails,
     requestPortableAction,
     portableActionOpen,
     portableActionKind,

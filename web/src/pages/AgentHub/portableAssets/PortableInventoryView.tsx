@@ -81,8 +81,6 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     filters,
     setFilters,
     stale,
-    selectedItemId,
-    selectItem,
     getRowActions,
     openAction,
     lockedItemIds,
@@ -274,12 +272,10 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
       <div className={styles.list} data-testid="portable-inventory-list">
         {renderInventoryGroups({
           visibleItems,
-          selectedItemId,
           lockedItemIds,
           getRowActions,
           labels,
           onOpenOwner,
-          selectItem,
           openAction,
           storeLane: filters.assetLane === 'store',
         })}
@@ -290,12 +286,10 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
 
 interface InventoryGroupRenderProps {
   visibleItems: PortableInventoryItemDto[];
-  selectedItemId: string | null;
   lockedItemIds: ReadonlySet<string>;
   getRowActions: (item: PortableInventoryItemDto) => PortableAssetActionKind[];
   labels: PortableInventoryViewLabels;
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
-  selectItem: (itemId: string) => void;
   openAction: (itemId: string, action: PortableAssetActionKind) => void;
   storeLane: boolean;
 }
@@ -307,15 +301,30 @@ interface InventoryGroupRenderProps {
 function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
   const {
     visibleItems,
-    selectedItemId,
     lockedItemIds,
     getRowActions,
     labels,
     onOpenOwner,
-    selectItem,
     openAction,
     storeLane,
   } = props;
+
+  function renderRow(
+    item: PortableInventoryItemDto,
+    extra?: Pick<Parameters<typeof PortableInventoryRow>[0], 'onOpenOwner'>,
+  ): JSX.Element {
+    return (
+      <PortableInventoryRow
+        key={item.inventoryItemId}
+        item={item}
+        busy={lockedItemIds.has(item.inventoryItemId)}
+        actions={getRowActions(item)}
+        labels={labels}
+        onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
+        onOpenOwner={extra?.onOpenOwner}
+      />
+    );
+  }
 
   if (storeLane) {
     const { attached, available } = partitionPortableStoreCatalogItems(visibleItems);
@@ -340,18 +349,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
             >
               {labels.groupStoreAttached}
             </h3>
-            {attached.map((item) => (
-              <PortableInventoryRow
-                key={item.inventoryItemId}
-                item={item}
-                selected={selectedItemId === item.inventoryItemId}
-                busy={lockedItemIds.has(item.inventoryItemId)}
-                actions={getRowActions(item)}
-                labels={labels}
-                onSelect={(selected) => selectItem(selected.inventoryItemId)}
-                onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
-              />
-            ))}
+            {attached.map((item) => renderRow(item))}
           </section>
         ) : null}
         {available.length > 0 ? (
@@ -366,18 +364,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
             >
               {labels.groupStoreAvailable}
             </h3>
-            {available.map((item) => (
-              <PortableInventoryRow
-                key={item.inventoryItemId}
-                item={item}
-                selected={selectedItemId === item.inventoryItemId}
-                busy={lockedItemIds.has(item.inventoryItemId)}
-                actions={getRowActions(item)}
-                labels={labels}
-                onSelect={(selected) => selectItem(selected.inventoryItemId)}
-                onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
-              />
-            ))}
+            {available.map((item) => renderRow(item))}
           </section>
         ) : null}
       </>
@@ -404,18 +391,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
           <h3 id="portable-inventory-group-installed-title" className={styles.inventoryGroupTitle}>
             {labels.groupInstalled}
           </h3>
-          {installed.map((item) => (
-            <PortableInventoryRow
-              key={item.inventoryItemId}
-              item={item}
-              selected={selectedItemId === item.inventoryItemId}
-              busy={lockedItemIds.has(item.inventoryItemId)}
-              actions={getRowActions(item)}
-              labels={labels}
-              onSelect={(selected) => selectItem(selected.inventoryItemId)}
-              onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
-            />
-          ))}
+          {installed.map((item) => renderRow(item))}
         </section>
       ) : null}
       {borrowed.length > 0 ? (
@@ -432,19 +408,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
               {labels.emptyRuntimeHint}
             </p>
           ) : null}
-          {borrowed.map((item) => (
-            <PortableInventoryRow
-              key={item.inventoryItemId}
-              item={item}
-              selected={selectedItemId === item.inventoryItemId}
-              busy={lockedItemIds.has(item.inventoryItemId)}
-              actions={getRowActions(item)}
-              labels={labels}
-              onSelect={(selected) => selectItem(selected.inventoryItemId)}
-              onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
-              onOpenOwner={onOpenOwner}
-            />
-          ))}
+          {borrowed.map((item) => renderRow(item, { onOpenOwner }))}
         </section>
       ) : null}
     </>

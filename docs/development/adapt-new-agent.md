@@ -269,7 +269,7 @@ Grok（以及任何会扫 Claude 根的后来者）：
 - Enable/Disable 同字节 MOVE 不是漂移。假漂移：刷新即可，不要逼用户点确认。
 - `canConfirmCurrentVersion` 在 reconcile 之后才置位，scanner 默认 false。Plugin store 动作仍不支持；确认当前版本**可以**用于 Plugin（包字节可变）。
 
-穷尽 match：Rust `PortableAssetActionKind` / `PortableAssetPlanOperation`；前端 type + decoder + `agentHub.json` 中英键；行主动作与详情抽屉优先这条。planner 必须对 drift **豁免**本动作（其它 mutation 仍 `SOURCE_DRIFTED`）。库存页「刷新库存」下方提供 **全部迁入仓库**（仅 Skill/Command）与 **全部确认版本**：前者一次 preview/apply 当前 Agent、当前类别快照里所有 `canMigrateToStore` 项（移入便携仓库并留下软链）；后者一次确认所有 `canConfirmCurrentVersion` 项。两者都不受搜索/一致性筛选裁切；Plugin component 除外。
+穷尽 match：Rust `PortableAssetActionKind` / `PortableAssetPlanOperation`；前端 type + decoder + `agentHub.json` 中英键；行内动作优先这条。planner 必须对 drift **豁免**本动作（其它 mutation 仍 `SOURCE_DRIFTED`）。库存页「刷新库存」下方提供 **全部迁入仓库**（仅 Skill/Command）与 **全部确认版本**：前者一次 preview/apply 当前 Agent、当前类别快照里所有 `canMigrateToStore` 项（移入便携仓库并留下软链）；后者一次确认所有 `canConfirmCurrentVersion` 项。两者都不受搜索/一致性筛选裁切；Plugin component 除外。
 
 接入新身份时最低测试：
 
@@ -293,7 +293,7 @@ Scanner 对 canonicalize 落在 `portable-store/` 外的 Skill/Command 根软链
 
 - **不是** `migrateToStore`（那才把真树搬进 store 并留下软链）。
 - **不是** §3.11 确认当前版本（那只改账本）。
-- `canMaterializeEscapeLink` 在 scanner 发现 `store_symlink_escape` 后置位，并关掉 enable/disable/uninstall/store 能力。行主动作与详情抽屉优先这条，即使 management 是 unsupported。
+- `canMaterializeEscapeLink` 在 scanner 发现 `store_symlink_escape` 后置位，并关掉 enable/disable/uninstall/store 能力。行内动作优先这条，即使 management 是 unsupported。
 
 穷尽 match 同 §3.11。库存页 Skill/Command 提供 **全部解引软链**：一次 preview/apply 当前 Agent、当前类别快照里所有 `canMaterializeEscapeLink` 项，不受搜索/一致性筛选裁切。
 
@@ -375,8 +375,7 @@ npx --no-install tsc -b --pretty false
 npx --no-install vitest run src/lib/agentCatalog.test.ts \
   src/pages/AgentHub/crossAgent/crossAgentPresentation.test.ts \
   src/pages/AgentHub/portableAssets/portablePullPresentation.test.ts \
-  src/pages/AgentHub/portableAssets/portableInventoryPresentation.test.ts \
-  src/pages/AgentHub/portableAssets/PortableAssetDetailsDrawer.test.tsx
+  src/pages/AgentHub/portableAssets/portableInventoryPresentation.test.ts
 ```
 
 本机若已有 `tauri dev` 占用 `src-tauri/target`，用独立目录避免锁：
