@@ -62,7 +62,9 @@ function mutationAllowed(
   inventoryBlocked: boolean,
 ): boolean {
   if (inventoryBlocked) return false;
-  if (item.managementState === 'unsupported') return false;
+  if (item.managementState === 'unsupported' && !item.capabilities.canMaterializeEscapeLink) {
+    return false;
+  }
   if (!item.projectOptedIn && item.scopeKind === 'project') return false;
   return true;
 }
@@ -111,6 +113,9 @@ export function PortableAssetDetailsDrawer({
   const canConfirmCurrentVersion = Boolean(
     item?.capabilities.canConfirmCurrentVersion && canMutate,
   );
+  const canMaterializeEscapeLink = Boolean(
+    item?.capabilities.canMaterializeEscapeLink && canMutate,
+  );
   const canAttach = Boolean(storeKind && item?.capabilities.canAttach && canMutate);
   const canDetach = Boolean(storeKind && item?.capabilities.canDetach && canMutate);
   const canDestroyStore = Boolean(
@@ -131,6 +136,7 @@ export function PortableAssetDetailsDrawer({
     !canAttach &&
     !canDetach &&
     !canMigrateToStore &&
+    !canMaterializeEscapeLink &&
     canMutate;
 
   const skillLabels = useMemo(
@@ -397,6 +403,17 @@ export function PortableAssetDetailsDrawer({
                 </StatusMessage>
               ) : null}
               <div className={styles.dialogActions}>
+                {canMaterializeEscapeLink ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onRequestAction('materializeEscapeLink')}
+                    data-testid="portable-action-materialize-escape-link"
+                  >
+                    {t('agentHub:portable.actions.materializeEscapeLink')}
+                  </Button>
+                ) : null}
                 {canConfirmCurrentVersion ? (
                   <Button
                     variant="primary"

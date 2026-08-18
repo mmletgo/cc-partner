@@ -294,6 +294,8 @@ function buildProps(
       openConfirmAllCurrentVersions: vi.fn(),
       migratableToStoreItems: [],
       openMigrateAllToStore: vi.fn(),
+      materializableEscapeLinkItems: [],
+      openMaterializeAllEscapeLinks: vi.fn(),
       clearPendingAction: vi.fn(),
       getPrimaryAction: vi.fn(() => null),
       getRowActions: vi.fn(() => []),

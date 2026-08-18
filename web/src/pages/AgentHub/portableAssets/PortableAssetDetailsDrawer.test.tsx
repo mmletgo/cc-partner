@@ -532,4 +532,34 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     fireEvent.click(screen.getByTestId('portable-action-confirm-current-version'));
     expect(onRequestAction).toHaveBeenCalledWith('confirmCurrentVersion');
   });
+
+  test('escaped unsupported item exposes materialize escape link', () => {
+    const onRequestAction = vi.fn();
+    const item = baseItem('skill', {
+      managementState: 'unsupported',
+      warnings: ['store_symlink_escape', 'source_blocked'],
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canMaterializeEscapeLink: true,
+        reasonCode: 'source_blocked',
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('portable-action-materialize-escape-link'));
+    expect(onRequestAction).toHaveBeenCalledWith('materializeEscapeLink');
+  });
 });

@@ -370,7 +370,8 @@ fn execute_skill(
         }
         PortableAssetActionKind::Adopt
         | PortableAssetActionKind::InstallToSourceTarget
-        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+        | PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
             message: "adopt/install not wired for codex".into(),
         }),
@@ -447,7 +448,8 @@ fn execute_command(
         }
         PortableAssetActionKind::Adopt
         | PortableAssetActionKind::InstallToSourceTarget
-        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+        | PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
             message: "adopt/install not wired for codex".into(),
         }),
@@ -605,7 +607,8 @@ fn execute_mcp(
         }
         PortableAssetActionKind::Adopt
         | PortableAssetActionKind::InstallToSourceTarget
-        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+        | PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
             message: "adopt/install not wired for codex".into(),
         }),
@@ -664,7 +667,8 @@ fn execute_plugin(
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
         | PortableAssetActionKind::MigrateToStore
-        | PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
+        | PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
             message: "adopt/install not wired for codex".into(),
         }),

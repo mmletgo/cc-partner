@@ -22,7 +22,7 @@ pub use manifest::{
 };
 pub use symlink::{
     attach_store_link, classify_store_link, create_store_link, is_under_portable_store,
-    unlink_if_store_link, unlink_store_link, StoreLinkClass,
+    materialize_escape_link, unlink_if_store_link, unlink_store_link, StoreLinkClass,
 };
 
 use crate::error::AppError;

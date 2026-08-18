@@ -211,6 +211,7 @@ pub(crate) fn expected_enabled_after(
         PortableAssetActionKind::Detach => Some(false),
         PortableAssetActionKind::DestroyStore => None,
         PortableAssetActionKind::ConfirmCurrentVersion => previous,
+        PortableAssetActionKind::MaterializeEscapeLink => previous,
     }
 }
 
@@ -285,5 +286,15 @@ mod direct_action_support_tests {
                 action
             ));
         }
+        assert!(!supports_direct_local_action(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            PortableAssetActionKind::MaterializeEscapeLink,
+        ));
+        assert!(!supports_direct_local_action(
+            AgentTarget::Grok,
+            PortableAssetKind::Skill,
+            PortableAssetActionKind::MaterializeEscapeLink,
+        ));
     }
 }

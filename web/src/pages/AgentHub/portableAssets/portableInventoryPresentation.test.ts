@@ -24,6 +24,7 @@ import {
   isPortableInventoryProblem,
   isPortableItemReadOnly,
   listConfirmableCurrentVersionItems,
+  listMaterializableEscapeLinkItems,
   listMigratableToStoreItems,
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
@@ -490,6 +491,29 @@ describe('portableInventoryPresentation primary action', () => {
     expect(resolvePortablePrimaryAction(unsupported, healthyCtx)).toBeNull();
   });
 
+  test('escape-link items expose materialize even when unsupported', () => {
+    const escaped = makeItem({
+      inventoryItemId: 'claude-skill-escape',
+      kind: 'skill',
+      nativeId: 'huashu-design',
+      managementState: 'unsupported',
+      warnings: ['store_symlink_escape', 'source_blocked'],
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canMaterializeEscapeLink: true,
+        reasonCode: 'source_blocked',
+      },
+    });
+    expect(resolvePortablePrimaryAction(escaped, healthyCtx)).toBe('materializeEscapeLink');
+    expect(resolvePortableRowActions(escaped, healthyCtx)).toEqual(['materializeEscapeLink']);
+    expect(
+      listMaterializableEscapeLinkItems([escaped], healthyCtx).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-escape']);
+  });
+
   test('installToSourceTarget is available when capability allows and no enable/disable', () => {
     const item = makeItem({
       inventoryItemId: 'claude-skill-install',
@@ -737,6 +761,22 @@ describe('portableInventoryPresentation row actions', () => {
     });
     expect(resolvePortablePrimaryAction(drifted, healthyCtx)).toBe('confirmCurrentVersion');
     expect(resolvePortableRowActions(drifted, healthyCtx)[0]).toBe('confirmCurrentVersion');
+  });
+
+  test('materialize escape link outranks confirm current version', () => {
+    const escaped = makeItem({
+      inventoryItemId: 'claude-skill-escape-drift',
+      kind: 'skill',
+      nativeId: 'updated-escape',
+      managementState: 'drifted',
+      capabilities: {
+        ...baseCapabilities,
+        canConfirmCurrentVersion: true,
+        canMaterializeEscapeLink: true,
+      },
+    });
+    expect(resolvePortablePrimaryAction(escaped, healthyCtx)).toBe('materializeEscapeLink');
+    expect(resolvePortableRowActions(escaped, healthyCtx)).toEqual(['materializeEscapeLink']);
   });
 
   test('listConfirmableCurrentVersionItems takes snapshot drifted items and skips filters/components', () => {

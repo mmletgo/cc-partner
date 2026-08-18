@@ -749,6 +749,7 @@ mod tests {
                 can_detach: false,
                 can_destroy_store: false,
                 can_confirm_current_version: false,
+                can_materialize_escape_link: false,
 
                 reason_code: None,
                 evidence_ids: vec![],

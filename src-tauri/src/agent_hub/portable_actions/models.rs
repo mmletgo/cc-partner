@@ -42,6 +42,8 @@ pub enum PortableAssetActionKind {
     MigrateToStore,
     /// 把当前磁盘内容记为一致基准（只改 Hub 账本，不改文件）
     ConfirmCurrentVersion,
+    /// 把 native 路径上的逃逸软链替换为真实副本（不删源树、不迁入 store）
+    MaterializeEscapeLink,
 }
 
 impl PortableAssetActionKind {
@@ -58,6 +60,7 @@ impl PortableAssetActionKind {
             Self::DestroyStore => "destroyStore",
             Self::MigrateToStore => "migrateToStore",
             Self::ConfirmCurrentVersion => "confirmCurrentVersion",
+            Self::MaterializeEscapeLink => "materializeEscapeLink",
         }
     }
 
@@ -70,6 +73,22 @@ impl PortableAssetActionKind {
     ///     `confirmCurrentVersion` 为真；其余动作仍走 CLI/文件门禁。
     pub fn is_hub_ledger_only(self) -> bool {
         matches!(self, Self::ConfirmCurrentVersion)
+    }
+
+    /// 是否为逃逸软链解引（改 native 路径，但不走 CLI / store / 直管 allowlist）。
+    ///
+    /// Business Logic: Hub 扫描 fail-closed 后用户必须能就地恢复；不得 remap 到另一家 CLI。
+    /// Code Logic: `materializeEscapeLink` 为真。
+    pub fn is_escape_link_repair(self) -> bool {
+        matches!(self, Self::MaterializeEscapeLink)
+    }
+
+    /// 是否跳过 target CLI / 直管 allowlist 门禁。
+    ///
+    /// Business Logic: 确认版本只改账本；解引软链是本机文件修复，两者都不能被无 L3 挡住。
+    /// Code Logic: ledger-only 或 escape-link repair。
+    pub fn bypasses_target_cli_gates(self) -> bool {
+        self.is_hub_ledger_only() || self.is_escape_link_repair()
     }
 
     /// 是否为 portable-store 附加/迁移/销毁动作。
@@ -176,6 +195,8 @@ pub enum PortableAssetPlanOperation {
     MigrateToStore,
     /// 确认当前版本（重记账本哈希）
     ConfirmCurrentVersion,
+    /// 把逃逸软链解引为真实副本
+    MaterializeEscapeLink,
 }
 
 impl PortableAssetPlanOperation {
@@ -192,6 +213,7 @@ impl PortableAssetPlanOperation {
             Self::DestroyStore => "destroyStore",
             Self::MigrateToStore => "migrateToStore",
             Self::ConfirmCurrentVersion => "confirmCurrentVersion",
+            Self::MaterializeEscapeLink => "materializeEscapeLink",
         }
     }
 }

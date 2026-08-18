@@ -145,6 +145,7 @@ export const portableAssetActionKindDecoder: Decoder<PortableAssetActionKind> = 
     'destroyStore',
     'migrateToStore',
     'confirmCurrentVersion',
+    'materializeEscapeLink',
   ] as const,
 );
 
@@ -182,6 +183,7 @@ export const portableAssetPlanOperationDecoder: Decoder<PortableAssetPlanOperati
     'destroyStore',
     'migrateToStore',
     'confirmCurrentVersion',
+    'materializeEscapeLink',
   ] as const,
 );
 
@@ -237,6 +239,7 @@ export const portableInventoryItemCapabilitiesDecoder: Decoder<PortableInventory
     canDetach: optionalDecoder(booleanDecoder),
     canDestroyStore: optionalDecoder(booleanDecoder),
     canConfirmCurrentVersion: optionalDecoder(booleanDecoder),
+    canMaterializeEscapeLink: optionalDecoder(booleanDecoder),
     reasonCode: nullableDecoder(stringDecoder),
     evidenceIds: arrayDecoder(stringDecoder),
   });

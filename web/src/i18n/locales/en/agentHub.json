@@ -612,6 +612,7 @@
       "refresh": "Refresh inventory",
       "migrateAllToStore": "Migrate all to store ({{count}})",
       "confirmAllVersions": "Confirm all versions ({{count}})",
+      "materializeAllEscapeLinks": "Replace all escape symlinks ({{count}})",
       "retry": "Retry",
       "staleBanner": "Inventory is stale. Mutations are blocked until a successful refresh.",
       "searchPlaceholder": "Search name, native id, or path",
@@ -704,7 +705,8 @@
       "detach": "Detach from this agent",
       "destroyStore": "Destroy store copy",
       "migrateToStore": "Migrate to portable store",
-      "confirmCurrentVersion": "Confirm current version"
+      "confirmCurrentVersion": "Confirm current version",
+      "materializeEscapeLink": "Replace symlink with a copy"
     },
     "management": {
       "hubManaged": "Consistent",
@@ -788,8 +790,10 @@
       "storeStillLoadedVia": "After detaching {{current}}, this store asset is still loaded via {{via}}. This action will not rewrite {{via}}.",
       "storePluginUnchanged": "Plugins do not use the portable store. Enable flags still change only the viewing agent's switch.",
       "confirmCurrentVersionHint": "Files on disk may have been updated. Confirming records the current files as Hub's consistent baseline and does not rewrite disk.",
-      "confirmAllCurrentVersionHint": "Records {{count}} drifted assets in this Agent and category as Hub's consistent baseline. Does not rewrite disk.",
-      "migrateAllToStoreHint": "Migrates {{count}} native Skill/Command assets for this Agent and category into the portable store and leaves a symlink at the original path. If the same name already exists with different content, the newer version is kept and the older tree is deleted."
+      "confirmAllCurrentVersionHint": "Records {{count}} drifted assets for this Agent and category as Hub's consistent baseline and does not rewrite disk.",
+      "migrateAllToStoreHint": "Migrates {{count}} native Skill/Command assets for this Agent and category into the portable store and leaves a symlink at the original path. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
+      "materializeEscapeLinkHint": "Replaces the escape symlink at this Agent's native path with a real copy, keeps the original target, and does not migrate into the portable store or delete ~/.agents sources.",
+      "materializeAllEscapeLinksHint": "Replaces {{count}} escape symlinks for this Agent and category with real copies, keeps the original targets, and does not migrate into the portable store."
     }
   },
   "portablePull": {

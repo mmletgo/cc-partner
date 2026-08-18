@@ -44,10 +44,11 @@ cc-partner 已按 Claude / Codex / OpenCode 适配了运行时、会话搜索、
 - 不把用户自建 Prompt 库、传输、截图、速记本、Git、浏览器预览改成按 agent 分叉。
 - 不在本 spec 宣称 L3 真机写盘 / 真机 TUI 已认证。
 - 不把 `~/.agents` 当成 Claude / Grok 的 portable-store 真树；共享仓库只在 `<data_dir>/portable-store/`。
-- 不为 Grok / OpenCode / Gemini / Cursor / Pi 开放 portable-store 原生写入（无 L3 则 inventory/preview only）。「确认当前版本」不是原生写入：无 L3 仍可 apply，只对齐 Hub 账本。
+- 不为 Grok / OpenCode / Gemini / Cursor / Pi 开放 portable-store 原生写入（无 L3 则 inventory/preview only）。「确认当前版本」不是原生写入：无 L3 仍可 apply，只对齐 Hub 账本。「解引软链」是 native 路径上的布局修复：无 L3 仍可 apply，复制逃逸目标、不删源树、不迁入 store。
 - 不把 Plugin marketplace / 启用标记翻译进 portable-store；Plugin 仍是 viewing-agent residual。
 - 不把 MCP 迁入 portable-store，也不把 MCP 做成 Plugin 那种 viewing 开关；MCP 是各家配置 native leaf，跨 Agent 走已有 Pull。
 - 不把 portable 漂移「确认当前版本」绑到 `supports_direct_local_action` 或 remap 到另一家 CLI；也不把它与指令三栏 `externalDrift` 做成同一条路。
+- 不把逃逸软链「解引软链」绑到 CLI allowlist、store migrate 或删除 `~/.agents`。
 
 ## 4. 身份目录
 
@@ -223,7 +224,7 @@ Gemini 不读 `AGENTS.md`。指令入口是 `GEMINI.md`（项目）与 `~/.gemin
 
 `shared` 资产对五端可见；`targetOnly` 仍严格隔离。
 
-本机一份的用户 Skill/Command（非 Hub managed plugin@cc-partner）进 `<data_dir>/portable-store/`，软链到各家 native 根。MCP 不进该仓库：各家配置 native leaf，跨 Agent 走已有 Pull。Grok 卸下只拆 `~/.grok/...`；若 Claude 仍附加 Skill/Command，盘点标仍经 Claude 路径加载。Plugin 不进该仓库，仍是 viewing 开关。磁盘相对 Hub 账本漂移时，「确认当前版本」只 upsert viewing 的 materialization 哈希，不写该 Agent 文件。遗留 `portable-store/mcp/*.json` 不自动删除、也不再投影。
+本机一份的用户 Skill/Command（非 Hub managed plugin@cc-partner）进 `<data_dir>/portable-store/`，软链到各家 native 根。MCP 不进该仓库：各家配置 native leaf，跨 Agent 走已有 Pull。Grok 卸下只拆 `~/.grok/...`；若 Claude 仍附加 Skill/Command，盘点标仍经 Claude 路径加载。Plugin 不进该仓库，仍是 viewing 开关。磁盘相对 Hub 账本漂移时，「确认当前版本」只 upsert viewing 的 materialization 哈希，不写该 Agent 文件。逃逸软链「解引软链」把 native 路径换成真实副本，不删源树、不迁入 store。遗留 `portable-store/mcp/*.json` 不自动删除、也不再投影。
 
 ### 5.6 HeadlessCompletion — Prompt 优化
 
@@ -265,6 +266,7 @@ Gemini 不读 `AGENTS.md`。指令入口是 `GEMINI.md`（项目）与 `~/.gemin
 | portable-store Skill/Command 附加 | scan + 兼容提示；apply blocked（无 L3） | 同左 |
 | MCP native leaf / Pull | 盘点 + 该 Agent 配置 leaf；不 migrate/attach/detach/destroyStore | 同左 |
 | 确认当前版本（漂移账本） | 可 apply；只写 Hub materialization，不写该 Agent 文件 | 同左 |
+| 解引逃逸软链 | 可 apply；复制目标到 native 路径，不删源、不迁入 store | 同左 |
 | Prompt 优化 | 接 headless JSON | 仅结构化输出稳定时开放 |
 | Claude 式 status 文件 | 缺席 | 缺席 |
 | OpenCode 式 runtime bridge | 不做 | 不做 |

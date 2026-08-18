@@ -334,13 +334,14 @@ export function needsPortableEnsureManagedRefresh(
   if (isPortableItemReadOnly(item)) return false;
   const caps = item.capabilities;
   if (caps.canEnable || caps.canDisable || caps.canInstallToSourceTarget) return false;
+  if (caps.canMaterializeEscapeLink) return false;
   return true;
 }
 
 /**
  * Business Logic: 行上只暴露一个主动作；stale/未 opt-in/unsupported 不得 mutation。
  *   漂移项优先「确认当前版本」；发现即管理后 **永不** 以 adopt 作为主动作（可保留 API kind 给遗留 apply）。
- * Code Logic: capability 驱动 confirmCurrentVersion → store → enable/disable → installToSourceTarget；跳过 canAdopt。
+ * Code Logic: capability 驱动 materializeEscapeLink → confirmCurrentVersion → store → enable/disable → installToSourceTarget；跳过 canAdopt。
  */
 export function resolvePortablePrimaryAction(
   item: PortableInventoryItemDto,
@@ -349,11 +350,14 @@ export function resolvePortablePrimaryAction(
   if (context.stale || context.mutationBlocked) return null;
   if (context.lockedItemIds.has(item.inventoryItemId)) return null;
   if (isPortableItemReadOnly(item)) return null;
+
+  const caps = item.capabilities;
+  if (caps.canMaterializeEscapeLink) return 'materializeEscapeLink';
+
   if (item.managementState === 'unsupported') return null;
   // 历史 unmanaged 且尚无启停能力：不伪装 Adopt；父层展示刷新文案。
   if (needsPortableEnsureManagedRefresh(item)) return null;
 
-  const caps = item.capabilities;
   if (caps.canConfirmCurrentVersion) return 'confirmCurrentVersion';
   // 故意不返回 'adopt'：discover-as-managed 已取代纳入主路径。
   if (isPortableStoreAssetKind(item.kind)) {
@@ -388,10 +392,13 @@ export function resolvePortableRowActions(
   if (context.stale || context.mutationBlocked) return [];
   if (context.lockedItemIds.has(item.inventoryItemId)) return [];
   if (isPortableItemReadOnly(item)) return [];
+
+  const caps = item.capabilities;
+  if (caps.canMaterializeEscapeLink) return ['materializeEscapeLink'];
+
   if (item.managementState === 'unsupported') return [];
   if (needsPortableEnsureManagedRefresh(item)) return [];
 
-  const caps = item.capabilities;
   const actions: PortableAssetActionKind[] = [];
   if (caps.canConfirmCurrentVersion) {
     actions.push('confirmCurrentVersion');
@@ -455,6 +462,22 @@ export function listMigratableToStoreItems(
     if (!isPortableStoreAssetKind(item.kind)) return false;
     if (isPortablePluginComponent(item)) return false;
     return resolvePortableRowActions(item, context).includes('migrateToStore');
+  });
+}
+
+/**
+ * Business Logic: 「全部解引软链」覆盖当前 Agent、当前类别快照里所有逃逸项，
+ *   不受搜索/一致性筛选裁切；仅 Skill/Command；Plugin component 不进批量。
+ * Code Logic: 复用行动作同一组 stale/lock/readOnly 门闩与 canMaterializeEscapeLink。
+ */
+export function listMaterializableEscapeLinkItems(
+  items: readonly PortableInventoryItemDto[],
+  context: PortablePrimaryActionContext,
+): PortableInventoryItemDto[] {
+  return items.filter((item) => {
+    if (!isPortableStoreAssetKind(item.kind)) return false;
+    if (isPortablePluginComponent(item)) return false;
+    return resolvePortableRowActions(item, context).includes('materializeEscapeLink');
   });
 }
 

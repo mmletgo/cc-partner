@@ -46,6 +46,7 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   refresh: string;
   migrateAllToStore: string;
   confirmAllVersions: string;
+  materializeAllEscapeLinks: string;
   retry: string;
   staleBanner: string;
   searchPlaceholder: string;
@@ -90,6 +91,8 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     openConfirmAllCurrentVersions,
     migratableToStoreItems,
     openMigrateAllToStore,
+    materializableEscapeLinkItems,
+    openMaterializeAllEscapeLinks,
     pendingAction,
     mutationBlocked,
   } = controller;
@@ -105,6 +108,14 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
   const confirmAllCount = confirmableCurrentVersionItems.length;
   const confirmAllDisabled =
     confirmAllCount === 0 ||
+    Boolean(pendingAction) ||
+    refreshing ||
+    stale ||
+    mutationBlocked;
+  const showMaterializeAllEscapeLinks = isPortableStoreAssetKind(filters.kind);
+  const materializeAllCount = materializableEscapeLinkItems.length;
+  const materializeAllDisabled =
+    materializeAllCount === 0 ||
     Boolean(pendingAction) ||
     refreshing ||
     stale ||
@@ -167,6 +178,17 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
               data-testid="portable-inventory-migrate-all-to-store"
             >
               {labels.migrateAllToStore}
+            </Button>
+          ) : null}
+          {showMaterializeAllEscapeLinks ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={materializeAllDisabled}
+              onClick={() => openMaterializeAllEscapeLinks()}
+              data-testid="portable-inventory-materialize-all-escape-links"
+            >
+              {labels.materializeAllEscapeLinks}
             </Button>
           ) : null}
           <Button

@@ -30,6 +30,7 @@ import {
   filterPortableInventoryItems,
   isPortableStoreAssetKind,
   listConfirmableCurrentVersionItems,
+  listMaterializableEscapeLinkItems,
   listMigratableToStoreItems,
   resolvePortablePrimaryAction,
   resolvePortableRowActions,
@@ -86,6 +87,10 @@ export interface UsePortableInventoryControllerResult {
   migratableToStoreItems: PortableInventoryItemDto[];
   /** 一键把当前类别、当前 Agent 的可迁入项移入仓库并留下软链。 */
   openMigrateAllToStore: () => void;
+  /** 当前快照里可「解引软链」的 Skill/Command。 */
+  materializableEscapeLinkItems: PortableInventoryItemDto[];
+  /** 一键把当前类别、当前 Agent 的逃逸软链替换为真实副本。 */
+  openMaterializeAllEscapeLinks: () => void;
   clearPendingAction: () => void;
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
   /** 行内多动作（与 getPrimaryAction 共享同一组门闩，含 uninstall）。 */
@@ -353,7 +358,8 @@ export function usePortableInventoryController(
         (action === 'detach' && storeKind && Boolean(caps.canDetach)) ||
         (action === 'destroyStore' && storeKind && Boolean(caps.canDestroyStore)) ||
         (action === 'migrateToStore' && storeKind && Boolean(caps.canMigrateToStore)) ||
-        (action === 'confirmCurrentVersion' && Boolean(caps.canConfirmCurrentVersion));
+        (action === 'confirmCurrentVersion' && Boolean(caps.canConfirmCurrentVersion)) ||
+        (action === 'materializeEscapeLink' && Boolean(caps.canMaterializeEscapeLink));
       if (!allowed) {
         setPendingAction(null);
         return;
@@ -410,6 +416,29 @@ export function usePortableInventoryController(
     setPendingAction({ itemIds: ids, action: 'migrateToStore' });
   }, [migratableToStoreItems, mutationBlocked, stale]);
 
+  const materializableEscapeLinkItems = useMemo(
+    () =>
+      listMaterializableEscapeLinkItems(snapshotMatchesQuery ? snapshot?.items ?? [] : [], {
+        stale,
+        mutationBlocked,
+        lockedItemIds,
+      }),
+    [snapshot, snapshotMatchesQuery, stale, mutationBlocked, lockedItemIds],
+  );
+
+  /**
+   * Business Logic: 一键把当前 Agent、当前类别快照里全部逃逸软链解引为真实副本。
+   * Code Logic: 空集或 mutation 门闩时清 pending；否则打开 materializeEscapeLink 批量 dialog。
+   */
+  const openMaterializeAllEscapeLinks = useCallback(() => {
+    const ids = materializableEscapeLinkItems.map((item) => item.inventoryItemId);
+    if (ids.length === 0 || mutationBlocked || stale) {
+      setPendingAction(null);
+      return;
+    }
+    setPendingAction({ itemIds: ids, action: 'materializeEscapeLink' });
+  }, [materializableEscapeLinkItems, mutationBlocked, stale]);
+
   const clearPendingAction = useCallback(() => {
     setPendingAction(null);
   }, []);
@@ -435,6 +464,8 @@ export function usePortableInventoryController(
     openConfirmAllCurrentVersions,
     migratableToStoreItems,
     openMigrateAllToStore,
+    materializableEscapeLinkItems,
+    openMaterializeAllEscapeLinks,
     clearPendingAction,
     getPrimaryAction,
     getRowActions,

@@ -197,6 +197,9 @@ export function AgentHubView(props: AgentHubViewProps) {
       confirmAllVersions: t('agentHub:portable.inventory.confirmAllVersions', {
         count: portableInventory.confirmableCurrentVersionItems.length,
       }),
+      materializeAllEscapeLinks: t('agentHub:portable.inventory.materializeAllEscapeLinks', {
+        count: portableInventory.materializableEscapeLinkItems.length,
+      }),
       retry: t('agentHub:portable.inventory.retry'),
       staleBanner: t('agentHub:portable.inventory.staleBanner'),
       searchPlaceholder: t('agentHub:portable.inventory.searchPlaceholder'),
@@ -254,6 +257,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         destroyStore: t('agentHub:portable.actions.destroyStore'),
         migrateToStore: t('agentHub:portable.actions.migrateToStore'),
         confirmCurrentVersion: t('agentHub:portable.actions.confirmCurrentVersion'),
+        materializeEscapeLink: t('agentHub:portable.actions.materializeEscapeLink'),
       },
       sourceOrigin: {
         standalone: t('agentHub:portable.inventory.sourceOrigin.standalone'),
@@ -287,6 +291,7 @@ export function AgentHubView(props: AgentHubViewProps) {
       hubContext.tab,
       portableInventory.confirmableCurrentVersionItems.length,
       portableInventory.migratableToStoreItems.length,
+      portableInventory.materializableEscapeLinkItems.length,
       t,
     ],
   );

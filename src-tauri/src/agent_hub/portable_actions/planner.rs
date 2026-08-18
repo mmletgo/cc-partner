@@ -214,7 +214,7 @@ fn skip_live_source_tree_hash(
     action: PortableAssetActionKind,
     item: &PortableInventoryItemDto,
 ) -> bool {
-    if action.is_hub_ledger_only() {
+    if action.is_hub_ledger_only() || action.is_escape_link_repair() {
         return true;
     }
     if item
@@ -284,12 +284,14 @@ async fn build_change(
         PortableInventoryManagementState::ExternalCollision => {
             blocking.push("PORTABLE_ASSET_ACTION_EXTERNAL_COLLISION".into());
         }
-        PortableInventoryManagementState::Unsupported => {
+        PortableInventoryManagementState::Unsupported
+            if !request.action.is_escape_link_repair() =>
+        {
             blocking.push("PORTABLE_ASSET_ACTION_UNSUPPORTED_MANAGEMENT".into());
         }
         PortableInventoryManagementState::Drifted
             if request.action != PortableAssetActionKind::Adopt
-                && !request.action.is_hub_ledger_only() =>
+                && !request.action.bypasses_target_cli_gates() =>
         {
             // 漂移下非 adopt / 确认当前版本 的 mutation fail-closed
             blocking.push("PORTABLE_ASSET_ACTION_SOURCE_DRIFTED".into());
@@ -335,7 +337,7 @@ async fn build_change(
         }
     }
 
-    let apply_target_cli_gates = !(request.action.is_hub_ledger_only()
+    let apply_target_cli_gates = !(request.action.bypasses_target_cli_gates()
         || (borrowed && target_dto.map(|t| t.target) != Some(mutation_target)));
     if apply_target_cli_gates {
         if let Some(t) = target_dto {
@@ -429,6 +431,11 @@ async fn build_change(
         {
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_CONFIRM_CURRENT_VERSION".into());
         }
+        PortableAssetActionKind::MaterializeEscapeLink
+            if !item.capabilities.can_materialize_escape_link =>
+        {
+            blocking.push("PORTABLE_ASSET_ACTION_CANNOT_MATERIALIZE_ESCAPE_LINK".into());
+        }
         _ => {}
     }
 
@@ -513,7 +520,39 @@ async fn build_change(
             PortableAssetCanonicalEffect::None,
             PortableAssetBackupPolicy::None,
         ),
+        PortableAssetActionKind::MaterializeEscapeLink => (
+            PortableAssetPlanOperation::MaterializeEscapeLink,
+            false,
+            PortableAssetCanonicalEffect::None,
+            PortableAssetBackupPolicy::None,
+        ),
     };
+
+    if request.action.is_escape_link_repair() {
+        if !matches!(
+            item.kind,
+            PortableAssetKind::Skill | PortableAssetKind::Command
+        ) {
+            blocking.push("PORTABLE_ASSET_ACTION_MATERIALIZE_KIND_UNSUPPORTED".into());
+        }
+        match item.source_path.as_deref().map(std::path::Path::new) {
+            None => blocking.push("PORTABLE_ASSET_ACTION_SOURCE_MISSING".into()),
+            Some(path) => match classify_store_link(path) {
+                StoreLinkClass::StoreLink { .. } => {
+                    blocking.push("PORTABLE_STORE_REFUSE_MATERIALIZE_STORE_LINK".into());
+                }
+                StoreLinkClass::Regular
+                    if !item
+                        .warnings
+                        .iter()
+                        .any(|warning| warning == "store_symlink_escape") =>
+                {
+                    blocking.push("PORTABLE_ASSET_ACTION_NOT_ESCAPE_LINK".into());
+                }
+                _ => {}
+            },
+        }
+    }
 
     // 未纳管动作不得创建 ownership（仅 adopt 例外，上面已设 true）
     debug_assert!(creates_ownership == (request.action == PortableAssetActionKind::Adopt));
@@ -805,6 +844,7 @@ args = ["mcp"]
                 can_detach: false,
                 can_destroy_store: false,
                 can_confirm_current_version: false,
+                can_materialize_escape_link: false,
                 reason_code: Some("deactivate_package_not_supported".into()),
                 evidence_ids: vec![],
             },
@@ -908,6 +948,7 @@ args = ["mcp"]
                 can_detach: false,
                 can_destroy_store: false,
                 can_confirm_current_version: false,
+                can_materialize_escape_link: false,
                 reason_code: Some("borrowed_runtime_origin".into()),
                 evidence_ids: vec![],
             },
@@ -997,6 +1038,7 @@ args = ["mcp"]
                 can_detach: false,
                 can_destroy_store: false,
                 can_confirm_current_version: false,
+                can_materialize_escape_link: false,
                 reason_code: Some("borrowed_runtime_origin".into()),
                 evidence_ids: vec![],
             },
@@ -1064,5 +1106,108 @@ args = ["mcp"]
             portable_store_kind_block(PortableAssetKind::Mcp, PortableAssetActionKind::Enable),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn materialize_escape_link_preview_bypasses_cli_and_unsupported_management() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("agents/skills/grilling");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("SKILL.md"), "ok\n").unwrap();
+        let link = tmp.path().join("grok/skills/grilling");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Grok,
+                "user",
+                "standalone",
+                "grilling",
+            ),
+            target: AgentTarget::Grok,
+            loaded_by: AgentTarget::Grok,
+            owned_by: PortableAssetOwner::Grok,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
+            kind: PortableAssetKind::Skill,
+            native_id: "grilling".into(),
+            display_name: "grilling".into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some(link.to_string_lossy().into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("escape-hash".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unsupported,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: false,
+                can_disable: false,
+                can_uninstall: false,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
+                can_confirm_current_version: false,
+                can_materialize_escape_link: true,
+                reason_code: Some("source_blocked".into()),
+                evidence_ids: vec![],
+            },
+            warnings: vec!["store_symlink_escape".into(), "source_blocked".into()],
+            mcp_credential: None,
+            store: Default::default(),
+        };
+        let grok_target = PortableInventoryTargetDto {
+            target: AgentTarget::Grok,
+            installed: false,
+            version: None,
+            executable: None,
+            config_root: "/cfg/grok".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Blocked,
+            reason_code: Some("cli_version_unknown".into()),
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::MaterializeEscapeLink,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+        let (change, reasons) = build_change(
+            &item,
+            Some(&grok_target),
+            AgentTarget::Grok,
+            false,
+            &request,
+        )
+        .await
+        .expect("build materialize");
+        assert!(reasons.is_empty(), "unexpected blocking: {reasons:?}");
+        assert!(change.blocking_reasons.is_empty());
+        assert_eq!(
+            change.operation,
+            PortableAssetPlanOperation::MaterializeEscapeLink
+        );
+        assert_eq!(change.target, AgentTarget::Grok);
     }
 }

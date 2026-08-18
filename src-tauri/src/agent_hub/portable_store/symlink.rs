@@ -230,6 +230,183 @@ fn is_exdev(err: &io::Error) -> bool {
     matches!(err.raw_os_error(), Some(17) | Some(18))
 }
 
+/// 把逃逸软链替换为指向内容的真实副本；不删除源树，也不迁入 portable-store。
+///
+/// Business Logic: 扫描 fail-closed 后用户必须能在 Hub 内修复 native 路径；
+///     解引只复制可读内容，禁止跟随 store 软链、禁止删 `~/.agents` 源。
+/// Code Logic: 分类 StoreLink 拒绝；Regular 幂等跳过；EscapeLink 复制到 sibling temp，
+///     把软链 rename 到备份名，再把副本 rename 进原路径；失败则还原软链。
+pub fn materialize_escape_link(native: &Path) -> Result<(), AppError> {
+    let data_dir = crate::config::data_dir().ok();
+    let home = dirs::home_dir();
+    materialize_escape_link_with(native, data_dir.as_deref(), home.as_deref())
+}
+
+fn materialize_escape_link_with(
+    native: &Path,
+    data_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<(), AppError> {
+    match classify_store_link(native) {
+        StoreLinkClass::StoreLink { .. } => {
+            return Err(AppError::validation(
+                "PORTABLE_STORE_REFUSE_MATERIALIZE_STORE_LINK".to_string(),
+            ));
+        }
+        StoreLinkClass::Regular => match fs::symlink_metadata(native) {
+            Ok(meta) if meta.file_type().is_symlink() => {}
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(AppError::not_found("PORTABLE_STORE_LINK_MISSING"));
+            }
+            Err(err) => return Err(AppError::from(err)),
+        },
+        StoreLinkClass::EscapeLink => {}
+    }
+
+    let source = resolve_escape_source(native, data_dir, home)?;
+    if source == native {
+        return Err(AppError::validation(
+            "PORTABLE_STORE_MATERIALIZE_SOURCE_IS_NATIVE".to_string(),
+        ));
+    }
+
+    let parent = native.parent().ok_or_else(|| {
+        AppError::validation("PORTABLE_STORE_MATERIALIZE_PARENT_MISSING".to_string())
+    })?;
+    let name = native.file_name().ok_or_else(|| {
+        AppError::validation("PORTABLE_STORE_MATERIALIZE_NAME_MISSING".to_string())
+    })?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        ".{}.cc-partner-materialize-{stamp}",
+        name.to_string_lossy()
+    ));
+    let backup = parent.join(format!(".{}.cc-partner-escape-bak", name.to_string_lossy()));
+    if tmp.exists() {
+        return Err(AppError::validation(
+            "PORTABLE_STORE_MATERIALIZE_TEMP_EXISTS".to_string(),
+        ));
+    }
+    if backup.exists() {
+        return Err(AppError::validation(
+            "PORTABLE_STORE_MATERIALIZE_BACKUP_EXISTS".to_string(),
+        ));
+    }
+
+    if let Err(err) = copy_tree(&source, &tmp) {
+        let _ = remove_copied_tree(&tmp);
+        return Err(err);
+    }
+
+    if let Err(err) = fs::rename(native, &backup) {
+        let _ = remove_copied_tree(&tmp);
+        return Err(AppError::from(err));
+    }
+    if let Err(err) = fs::rename(&tmp, native) {
+        let _ = fs::rename(&backup, native);
+        let _ = remove_copied_tree(&tmp);
+        return Err(AppError::from(err));
+    }
+    if let Err(err) = remove_symlink_only(&backup) {
+        tracing::warn!(
+            target: "agent_hub.portable_store",
+            path = %backup.display(),
+            error = %err,
+            "materialize left escape-link backup"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_escape_source(
+    native: &Path,
+    data_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<PathBuf, AppError> {
+    if let Ok(canonical) = fs::canonicalize(native) {
+        if canonical.exists() {
+            return Ok(canonical);
+        }
+    }
+    if let Ok(raw) = fs::read_link(native) {
+        let joined = if raw.is_absolute() {
+            raw
+        } else {
+            native.parent().unwrap_or(native).join(raw)
+        };
+        if joined.exists() {
+            return Ok(fs::canonicalize(&joined).unwrap_or(joined));
+        }
+    }
+    let name = native
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::validation("PORTABLE_STORE_ESCAPE_TARGET_MISSING".to_string()))?;
+    let mut candidates = Vec::new();
+    if let Some(data) = data_dir {
+        for agent in ["claude-assets", "codex-assets"] {
+            for kind in ["skills", "commands"] {
+                candidates.push(data.join(agent).join("disabled").join(kind).join(&name));
+            }
+        }
+    }
+    if let Some(home) = home {
+        candidates.push(home.join(".agents").join("skills").join(&name));
+        candidates.push(home.join(".agents").join("commands").join(&name));
+        if let Some(stem) = name.file_stem() {
+            if name.extension().is_some() {
+                candidates.push(home.join(".agents").join("skills").join(stem));
+            }
+        }
+    }
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(fs::canonicalize(&candidate).unwrap_or(candidate));
+        }
+    }
+    Err(AppError::validation(
+        "PORTABLE_STORE_ESCAPE_TARGET_MISSING".to_string(),
+    ))
+}
+
+fn copy_tree(src: &Path, dest: &Path) -> Result<(), AppError> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.is_dir() || (meta.file_type().is_symlink() && src.is_dir()) {
+        copy_dir_all(src, dest)
+    } else {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dest)?;
+        Ok(())
+    }
+}
+
+fn remove_copied_tree(path: &Path) -> io::Result<()> {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn remove_symlink_only(link_path: &Path) -> Result<(), AppError> {
+    let meta = fs::symlink_metadata(link_path)?;
+    if !meta.file_type().is_symlink() {
+        return Err(AppError::validation(
+            "PORTABLE_STORE_REFUSE_UNLINK_REAL_TREE".to_string(),
+        ));
+    }
+    remove_os_link(link_path, &meta)
+}
+
 fn copy_then_remove(src: &Path, dest: &Path) -> Result<(), AppError> {
     let meta = fs::symlink_metadata(src)?;
     if meta.is_dir() {
@@ -270,5 +447,90 @@ fn map_symlink_error(err: io::Error) -> AppError {
     #[cfg(not(windows))]
     {
         AppError::from(err)
+    }
+}
+
+#[cfg(test)]
+mod materialize_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn materialize_replaces_escape_dir_link_and_keeps_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("agents/skills/huashu-design");
+        fs::create_dir_all(real.join("nested")).unwrap();
+        fs::write(
+            real.join("SKILL.md"),
+            "---\nname: huashu-design\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(real.join("nested/data.txt"), "payload").unwrap();
+        let native = tmp.path().join("claude/skills/huashu-design");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &native).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &native).unwrap();
+
+        materialize_escape_link_with(&native, None, None).expect("materialize");
+
+        let meta = fs::symlink_metadata(&native).unwrap();
+        assert!(
+            !meta.file_type().is_symlink(),
+            "native must become a real dir"
+        );
+        assert!(native.join("SKILL.md").is_file());
+        assert!(native.join("nested/data.txt").is_file());
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "original target must remain"
+        );
+        assert!(!native
+            .parent()
+            .unwrap()
+            .join(".huashu-design.cc-partner-escape-bak")
+            .exists());
+    }
+
+    #[test]
+    fn materialize_restores_broken_link_from_disabled_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let disabled = data.join("claude-assets/disabled/skills/hyperframes");
+        fs::create_dir_all(&disabled).unwrap();
+        fs::write(disabled.join("SKILL.md"), "restored\n").unwrap();
+        let native = tmp.path().join("codex/skills/hyperframes");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        let missing = tmp.path().join("missing/hyperframes");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&missing, &native).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&missing, &native).unwrap();
+
+        materialize_escape_link_with(&native, Some(&data), None).expect("fallback");
+        assert!(!fs::symlink_metadata(&native)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(native.join("SKILL.md")).unwrap(),
+            "restored\n"
+        );
+        assert_eq!(
+            fs::read_to_string(disabled.join("SKILL.md")).unwrap(),
+            "restored\n"
+        );
+    }
+
+    #[test]
+    fn materialize_regular_path_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let native = tmp.path().join("skills/real");
+        fs::create_dir_all(&native).unwrap();
+        let mut skill = fs::File::create(native.join("SKILL.md")).unwrap();
+        skill.write_all(b"ok\n").unwrap();
+        materialize_escape_link_with(&native, None, None).expect("skip regular");
+        assert!(native.join("SKILL.md").is_file());
     }
 }

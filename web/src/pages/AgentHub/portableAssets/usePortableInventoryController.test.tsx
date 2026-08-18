@@ -403,6 +403,57 @@ describe('usePortableInventoryController', () => {
     });
   });
 
+  test('openMaterializeAllEscapeLinks batches escaped items in the current snapshot', async () => {
+    const escapedA = makeItem({
+      inventoryItemId: 'claude-skill-a',
+      kind: 'skill',
+      nativeId: 'a',
+      managementState: 'unsupported',
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canMaterializeEscapeLink: true,
+      },
+    });
+    const escapedB = makeItem({
+      inventoryItemId: 'claude-skill-b',
+      kind: 'skill',
+      nativeId: 'b',
+      managementState: 'unmanaged',
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canMaterializeEscapeLink: true,
+      },
+    });
+    const healthy = makeItem({
+      inventoryItemId: 'claude-skill-c',
+      kind: 'skill',
+      nativeId: 'c',
+    });
+    apiMocks.inspect.mockResolvedValue(
+      snapshot('snap-materialize-all', [escapedA, healthy, escapedB]),
+    );
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    expect(
+      result.current.materializableEscapeLinkItems.map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-a', 'claude-skill-b']);
+
+    act(() => {
+      result.current.openMaterializeAllEscapeLinks();
+    });
+    expect(result.current.pendingAction).toEqual({
+      itemIds: ['claude-skill-a', 'claude-skill-b'],
+      action: 'materializeEscapeLink',
+    });
+  });
+
   test('changing deviceId retriggers inspect with new context and clears prior snapshot', async () => {
     apiMocks.inspect.mockImplementation(async (ctx?: { deviceId?: string | null }) => {
       if (ctx?.deviceId === 'peer-1') {

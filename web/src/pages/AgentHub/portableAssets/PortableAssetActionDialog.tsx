@@ -111,8 +111,10 @@ function storeActionHintKey(
   | 'storeMigrateHint'
   | 'storeDestroyHint'
   | 'confirmCurrentVersionHint'
+  | 'materializeEscapeLinkHint'
   | null {
   if (action === 'confirmCurrentVersion') return 'confirmCurrentVersionHint';
+  if (action === 'materializeEscapeLink') return 'materializeEscapeLinkHint';
   if (kind === 'plugin') return null;
   if (action === 'attach') return 'storeAttachHint';
   if (action === 'detach') return 'storeDetachHint';
@@ -318,7 +320,9 @@ export function PortableAssetActionDialog({
             data-testid={
               action === 'confirmCurrentVersion'
                 ? 'portable-action-confirm-current-hint'
-                : 'portable-action-store-hint'
+                : action === 'materializeEscapeLink'
+                  ? 'portable-action-materialize-escape-hint'
+                  : 'portable-action-store-hint'
             }
           >
             {isBatch && action === 'confirmCurrentVersion'
@@ -327,6 +331,10 @@ export function PortableAssetActionDialog({
                 })
               : isBatch && action === 'migrateToStore'
                 ? t('agentHub:portable.actionDialog.migrateAllToStoreHint', {
+                    count: items.length,
+                  })
+              : isBatch && action === 'materializeEscapeLink'
+                ? t('agentHub:portable.actionDialog.materializeAllEscapeLinksHint', {
                     count: items.length,
                   })
                 : t(`agentHub:portable.actionDialog.${storeHintKey}`)}

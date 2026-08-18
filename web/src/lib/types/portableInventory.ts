@@ -66,7 +66,8 @@ export type PortableAssetActionKind =
   | 'detach'
   | 'destroyStore'
   | 'migrateToStore'
-  | 'confirmCurrentVersion';
+  | 'confirmCurrentVersion'
+  | 'materializeEscapeLink';
 
 /** 单条动作结果状态。 */
 export type PortableAssetActionItemState =
@@ -95,7 +96,8 @@ export type PortableAssetPlanOperation =
   | 'detach'
   | 'destroyStore'
   | 'migrateToStore'
-  | 'confirmCurrentVersion';
+  | 'confirmCurrentVersion'
+  | 'materializeEscapeLink';
 
 /** 备份策略。 */
 export type PortableAssetBackupPolicy = 'none' | 'recoverableBeforeDelete';
@@ -131,6 +133,7 @@ export interface PortableInventoryItemCapabilitiesDto {
   canDetach?: boolean;
   canDestroyStore?: boolean;
   canConfirmCurrentVersion?: boolean;
+  canMaterializeEscapeLink?: boolean;
   reasonCode: string | null;
   evidenceIds: string[];
 }

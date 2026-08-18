@@ -1605,7 +1605,7 @@ fn discovered_to_item(
         PortableAssetPayload::Agent(a) => a.description.clone(),
     };
 
-    let item = PortableInventoryItemDto {
+    let mut item = PortableInventoryItemDto {
         inventory_item_id: inv_id.clone(),
         target: disc.origin.target,
         loaded_by: disc.origin.target,
@@ -1657,6 +1657,7 @@ fn discovered_to_item(
         mcp_credential,
         store,
     };
+    apply_escape_link_repair_capability(&mut item);
 
     // seen 去重：按 inv_id 索引已存在 item。
     // 同一逻辑资产在 active/disabled 路径下产出相同 id（路径无关 source_identity）；
@@ -1936,7 +1937,8 @@ fn action_required_capability(
             })
         }
         PortableAssetActionKind::Adopt | PortableAssetActionKind::InstallToSourceTarget => None,
-        PortableAssetActionKind::ConfirmCurrentVersion => None,
+        PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => None,
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -2066,6 +2068,7 @@ fn item_capabilities(
         can_detach: store_write && store.store_attached,
         can_destroy_store: store_write && store.store_id.is_some(),
         can_confirm_current_version: false,
+        can_materialize_escape_link: false,
         reason_code: reason,
         evidence_ids: vec![format!("L2-PORTABLE-{}-SCAN", kind.as_str().to_uppercase())],
     };
@@ -2074,6 +2077,35 @@ fn item_capabilities(
         capabilities.reason_code = Some("borrowed_runtime_origin".into());
     }
     capabilities
+}
+
+/// 逃逸软链只能解引，不能同时暴露启停/迁入。
+///
+/// Business Logic: `store_symlink_escape` 的 Skill/Command 必须给用户一条修复路；
+///     Enable 会竞争主按钮且写盘语义不成立。
+/// Code Logic: 独立/非 plugin 组件命中 warning 后打开 `can_materialize_escape_link` 并关掉其它 mutation。
+fn apply_escape_link_repair_capability(item: &mut PortableInventoryItemDto) {
+    let is_escape = matches!(
+        item.kind,
+        PortableAssetKind::Skill | PortableAssetKind::Command
+    ) && item.source_origin != PortableInventorySourceOrigin::PluginComponent
+        && item
+            .warnings
+            .iter()
+            .any(|warning| warning == "store_symlink_escape");
+    if !is_escape {
+        item.capabilities.can_materialize_escape_link = false;
+        return;
+    }
+    item.capabilities.can_materialize_escape_link = true;
+    item.capabilities.can_enable = false;
+    item.capabilities.can_disable = false;
+    item.capabilities.can_uninstall = false;
+    item.capabilities.can_migrate_to_store = false;
+    item.capabilities.can_attach = false;
+    item.capabilities.can_detach = false;
+    item.capabilities.can_destroy_store = false;
+    item.capabilities.can_install_to_source_target = false;
 }
 
 /// 按 origin 决定启停门闩：plugin 启停看当前 Agent，卸载/技能移动看所有者。
@@ -3800,6 +3832,7 @@ enabled = ["native-only"]
                 can_detach: attached,
                 can_destroy_store: true,
                 can_confirm_current_version: false,
+                can_materialize_escape_link: false,
                 reason_code: None,
                 evidence_ids: vec![],
             },

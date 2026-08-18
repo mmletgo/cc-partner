@@ -317,7 +317,8 @@ fn execute_plugin(
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
         | PortableAssetActionKind::MigrateToStore
-        | PortableAssetActionKind::ConfirmCurrentVersion => {
+        | PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => {
             return Ok(TargetActionRawOutcome::Failed {
                 code: "PORTABLE_ASSET_ACTION_PLUGIN_ACTION_UNSUPPORTED".into(),
                 message: format!("plugin action {} not executed here", ctx.action.as_str()),
@@ -369,7 +370,8 @@ fn claude_plugin_cli_already_satisfied(action: PortableAssetActionKind, stderr: 
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
         | PortableAssetActionKind::MigrateToStore
-        | PortableAssetActionKind::ConfirmCurrentVersion => false,
+        | PortableAssetActionKind::ConfirmCurrentVersion
+        | PortableAssetActionKind::MaterializeEscapeLink => false,
     }
 }
 
@@ -498,6 +500,10 @@ fn execute_skill(
             code: "PORTABLE_ASSET_ACTION_LEDGER_ONLY".into(),
             message: "confirmCurrentVersion is hub-ledger only".into(),
         }),
+        PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ESCAPE_REPAIR_INTERCEPT".into(),
+            message: "materializeEscapeLink is executed by the shared executor".into(),
+        }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
         | PortableAssetActionKind::DestroyStore
@@ -580,6 +586,10 @@ fn execute_command(
         PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_LEDGER_ONLY".into(),
             message: "confirmCurrentVersion is hub-ledger only".into(),
+        }),
+        PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ESCAPE_REPAIR_INTERCEPT".into(),
+            message: "materializeEscapeLink is executed by the shared executor".into(),
         }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach
@@ -768,6 +778,10 @@ fn execute_mcp(
         PortableAssetActionKind::ConfirmCurrentVersion => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_LEDGER_ONLY".into(),
             message: "confirmCurrentVersion is hub-ledger only".into(),
+        }),
+        PortableAssetActionKind::MaterializeEscapeLink => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ESCAPE_REPAIR_INTERCEPT".into(),
+            message: "materializeEscapeLink is executed by the shared executor".into(),
         }),
         PortableAssetActionKind::Attach
         | PortableAssetActionKind::Detach

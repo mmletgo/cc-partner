@@ -635,4 +635,36 @@ describe('PortableAssetActionDialog state machine', () => {
       'migrateAllToStoreHint',
     );
   });
+
+  test('batch materialize escape link shows the bulk repair hint', () => {
+    const second: PortableInventoryItemDto = {
+      ...item,
+      inventoryItemId: 'claude-skill-skill-b',
+      nativeId: 'skill-b',
+      displayName: 'Skill B',
+    };
+    const onPreview = vi.fn();
+    render(
+      <PortableAssetActionDialog
+        open
+        items={[item, second]}
+        action="materializeEscapeLink"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        onPreview={onPreview}
+        onConfirm={() => undefined}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('portable-action-materialize-escape-hint').textContent).toContain(
+      'materializeAllEscapeLinksHint',
+    );
+  });
 });
