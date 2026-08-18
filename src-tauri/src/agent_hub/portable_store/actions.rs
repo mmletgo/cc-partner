@@ -107,6 +107,17 @@ pub fn execute_skill_or_command_store(
             ) {
                 return Ok(TargetActionRawOutcome::Skipped);
             }
+            // Disabled 项的真树在 hub disabled 目录，native 挂载点是空的。
+            // 先把 inventory source_path 搬到 native，再迁入 store，软链落在 Agent 原路径。
+            let Some(source) = resolve_migrate_source(native_path, item) else {
+                return Ok(TargetActionRawOutcome::Failed {
+                    code: "PORTABLE_ASSET_ACTION_SOURCE_MISSING".into(),
+                    message: "native skill/command tree is missing".into(),
+                });
+            };
+            if source != native_path {
+                crate::claude_code_assets::portable_move_path(&source, native_path)?;
+            }
             let native_won = if store_target.exists() {
                 match resolve_migrate_name_conflict(native_path, &store_target, kind)? {
                     MigrateNameConflict::SameContent | MigrateNameConflict::KeepStore => {
@@ -157,6 +168,33 @@ pub fn execute_skill_or_command_store(
             message: "unsupported store skill/command action".into(),
         }),
     }
+}
+
+/// 迁入真树：优先 native 挂载点；否则用库存 `source_path`（disabled 副本）。
+///
+/// Business Logic: 已停用的 Skill/Command 真树在 hub disabled 目录，不在 Agent native 根。
+///     迁入仍应成功，并在 native 路径留下 store 软链（与 Enable 后的挂载点一致）。
+/// Code Logic: native 上已有非软链真树则用之；否则 `item.source_path` 存在且不是软链才采用。
+fn resolve_migrate_source(
+    native_path: &Path,
+    item: Option<&PortableInventoryItemDto>,
+) -> Option<PathBuf> {
+    if exists_as_real_tree(native_path) {
+        return Some(native_path.to_path_buf());
+    }
+    let source = item.and_then(|i| i.source_path.as_deref()).map(Path::new)?;
+    if source != native_path && exists_as_real_tree(source) {
+        Some(source.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// 路径上是否有可迁入的真文件/目录（不是软链、不是缺失）。
+fn exists_as_real_tree(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|meta| !meta.file_type().is_symlink() && (meta.is_dir() || meta.is_file()))
 }
 
 /// 同名迁入冲突的裁决。

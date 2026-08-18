@@ -1046,6 +1046,88 @@ mod tests {
         assert!(!disabled.exists());
     }
 
+    /// Business Logic: 已停用 Skill 的真树在 claude-assets/disabled，native 根是空的。
+    ///     迁入便携仓库必须从 disabled 搬出，并在 ~/.claude/skills/<id> 留下软链。
+    #[test]
+    fn migrate_disabled_user_skill_moves_tree_and_attaches_native_link() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::{
+            TargetActionContext, TargetActionRawOutcome,
+        };
+        use crate::agent_hub::portable_store::{portable_store_root, store_skill_dir};
+        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
+        use std::sync::Arc;
+
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let user_claude = tmp.path().join("user-claude");
+        let data = tmp.path().join("data");
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        std::fs::create_dir_all(&user_claude).unwrap();
+        let disabled = data.join("claude-assets/disabled/skills/foo");
+        std::fs::create_dir_all(&disabled).unwrap();
+        std::fs::write(
+            disabled.join("SKILL.md"),
+            "---\nname: foo\nversion: 1.0.0\n---\nfrom-disabled\n",
+        )
+        .unwrap();
+
+        let mut item = sample_item(ScopeKind::User, disabled.to_str().unwrap(), false);
+        item.native_id = "foo".into();
+        item.display_name = "foo".into();
+        item.actual_enabled = Some(false);
+        item.project_id = None;
+        item.scope_id = "user".into();
+        item.content_hash = None;
+
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Skill,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::MigrateToStore,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let ctx = TargetActionContext {
+            action: PortableAssetActionKind::MigrateToStore,
+            keep_data: false,
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: Some(user_claude.clone()),
+            data_dir: Some(data.clone()),
+        };
+        let out = ClaudeTargetExecutor
+            .execute_change(&ctx, &dummy_plan(), &change, Some(&item))
+            .unwrap();
+        assert!(
+            matches!(out, TargetActionRawOutcome::Applied),
+            "expected Applied, got {out:?}"
+        );
+
+        let native = user_claude.join("skills/foo");
+        assert!(
+            std::fs::symlink_metadata(&native)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "native path should become a store symlink"
+        );
+        let store_tree = store_skill_dir(&portable_store_root(&data), "foo");
+        let text = std::fs::read_to_string(store_tree.join("SKILL.md")).unwrap();
+        assert!(text.contains("from-disabled"));
+        assert!(
+            !disabled.exists(),
+            "disabled copy must be moved into the store"
+        );
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
     /// Business Logic: project-scope plugin CLI must run with project root cwd.
     #[test]
     fn project_plugin_cli_sets_process_cwd_to_project_root() {

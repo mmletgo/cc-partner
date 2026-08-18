@@ -392,4 +392,113 @@ mod tests {
         assert!(!text.contains("older-mtime"));
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
+
+    fn sample_item(
+        native_id: &str,
+        source_path: &Path,
+    ) -> crate::agent_hub::portable_inventory::PortableInventoryItemDto {
+        use crate::agent_hub::models::ScopeKind;
+        use crate::agent_hub::portable_inventory::{
+            PortableAssetOwner, PortableInventoryItemCapabilitiesDto,
+            PortableInventoryManagementState, PortableInventorySourceOrigin, PortableOriginKind,
+        };
+        crate::agent_hub::portable_inventory::PortableInventoryItemDto {
+            inventory_item_id: format!("id-{native_id}"),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            loaded_by: crate::agent_hub::models::AgentTarget::Claude,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
+            kind: crate::agent_hub::portable_inventory::PortableAssetKind::Skill,
+            native_id: native_id.into(),
+            display_name: native_id.into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: false,
+            source_path: Some(source_path.to_string_lossy().into_owned()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(false),
+            content_hash: Some("h".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto::default(),
+            warnings: vec![],
+            mcp_credential: None,
+            store: Default::default(),
+        }
+    }
+
+    #[test]
+    fn migrate_from_disabled_source_path_attaches_native_link() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let disabled = data
+            .join("claude-assets")
+            .join("disabled")
+            .join("skills")
+            .join("foo");
+        write_skill(&disabled, Some("1.0.0"), "from-disabled");
+        let native = data.join("claude").join("skills").join("foo");
+        assert!(!native.exists());
+        let item = sample_item("foo", &disabled);
+        let outcome = crate::agent_hub::portable_store::execute_skill_or_command_store(
+            crate::agent_hub::models::AgentTarget::Claude,
+            crate::agent_hub::portable_actions::models::PortableAssetActionKind::MigrateToStore,
+            crate::agent_hub::portable_inventory::PortableAssetKind::Skill,
+            "foo",
+            &native,
+            Some(&item),
+        )
+        .expect("migrate");
+        assert_eq!(
+            outcome,
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert_store_link(&native);
+        let store_tree = store_skill_dir(&portable_store_root(&data), "foo");
+        let text = fs::read_to_string(store_tree.join("SKILL.md")).unwrap();
+        assert!(text.contains("from-disabled"));
+        assert!(
+            !disabled.exists(),
+            "disabled copy must be moved, not left as a second tree"
+        );
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn migrate_missing_source_returns_typed_error() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let native = data.join("claude").join("skills").join("foo");
+        let outcome = crate::agent_hub::portable_store::execute_skill_or_command_store(
+            crate::agent_hub::models::AgentTarget::Claude,
+            crate::agent_hub::portable_actions::models::PortableAssetActionKind::MigrateToStore,
+            crate::agent_hub::portable_inventory::PortableAssetKind::Skill,
+            "foo",
+            &native,
+            None,
+        )
+        .expect("typed failure, not IO Err");
+        match outcome {
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Failed {
+                code,
+                ..
+            } => {
+                assert_eq!(code, "PORTABLE_ASSET_ACTION_SOURCE_MISSING");
+            }
+            other => panic!("expected SOURCE_MISSING, got {other:?}"),
+        }
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
 }
