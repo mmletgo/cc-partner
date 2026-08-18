@@ -185,6 +185,29 @@ export function isPortableStoreAssetKind(kind: PortableAssetKind): boolean {
 }
 
 /**
+ * Business Logic: 只有本 Agent 自己的 native / Codex ~/.agents（legacyStandalone）能迁入仓库。
+ *   Grok/Pi 等运行时从其他 Agent 加载的 compatibility 项不得出现「迁入便携仓库」。
+ * Code Logic: 后端 canMigrateToStore 再加 originKind 闸，capability 泄漏也不会露出按钮。
+ */
+export function canOfferPortableMigrateToStore(item: PortableInventoryItemDto): boolean {
+  if (!isPortableStoreAssetKind(item.kind)) return false;
+  if (!item.capabilities.canMigrateToStore) return false;
+  if (item.originKind === 'compatibility') return false;
+  return true;
+}
+
+/**
+ * Business Logic: 借用视图不得删共享仓库真树；本 Agent 已附加或仓库目录项仍可销毁。
+ * Code Logic: compatibility / loadedViaOtherPath 隐藏 destroyStore。
+ */
+export function canOfferPortableDestroyStore(item: PortableInventoryItemDto): boolean {
+  if (!isPortableStoreAssetKind(item.kind)) return false;
+  if (!item.capabilities.canDestroyStore) return false;
+  if (item.originKind === 'compatibility' || item.store?.loadedViaOtherPath) return false;
+  return true;
+}
+
+/**
  * Business Logic: 仓库页按「已附加到此 Agent」与「未附加」拆组。
  * Code Logic: storeAttached 为真进 attached，其余 catalog 项进 available。
  */
@@ -335,10 +358,10 @@ export function needsPortableEnsureManagedRefresh(
   const caps = item.capabilities;
   if (caps.canEnable || caps.canDisable || caps.canInstallToSourceTarget) return false;
   if (
-    caps.canMigrateToStore ||
+    canOfferPortableMigrateToStore(item) ||
     caps.canAttach ||
     caps.canDetach ||
-    caps.canDestroyStore
+    canOfferPortableDestroyStore(item)
   ) {
     return false;
   }
@@ -372,7 +395,7 @@ export function resolvePortablePrimaryAction(
   if (isPortableStoreAssetKind(item.kind)) {
     if (caps.canDetach && item.store?.storeAttached) return 'detach';
     if (caps.canAttach && !item.store?.storeAttached) return 'attach';
-    if (caps.canMigrateToStore) return 'migrateToStore';
+    if (canOfferPortableMigrateToStore(item)) return 'migrateToStore';
     return null;
   }
   if (item.actualEnabled === true && caps.canDisable) return 'disable';
@@ -389,6 +412,7 @@ export function resolvePortablePrimaryAction(
 /**
  * Business Logic: 列表行同时暴露仓库或启停动作，让用户无需打开详情 Drawer 即可管理。
  *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下 / 彻底删除仓库项；卸下只出现在便携仓库项。
+ *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/销毁。
  *   Plugin/MCP：仍走 enable/disable/uninstall。借用项同样按 capability 暴露动作。
  *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
  *
@@ -416,10 +440,10 @@ export function resolvePortableRowActions(
   }
   const storeKind = isPortableStoreAssetKind(item.kind);
   if (storeKind) {
-    if (caps.canMigrateToStore) actions.push('migrateToStore');
+    if (canOfferPortableMigrateToStore(item)) actions.push('migrateToStore');
     if (caps.canAttach) actions.push('attach');
     if (caps.canDetach) actions.push('detach');
-    if (caps.canDestroyStore) actions.push('destroyStore');
+    if (canOfferPortableDestroyStore(item)) actions.push('destroyStore');
     return actions;
   }
   if (item.actualEnabled !== true && caps.canEnable) {

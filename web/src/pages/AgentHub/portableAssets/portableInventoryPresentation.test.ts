@@ -667,7 +667,7 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortableRowActions(enabled, healthyCtx)).toEqual(['disable']);
   });
 
-  test('borrowed skill exposes migrate, never disable or detach', () => {
+  test('borrowed compatibility skill never exposes migrate, even if capability leaked', () => {
     const borrowed = makeItem({
       inventoryItemId: 'grok-skill-borrowed-claude',
       kind: 'skill',
@@ -686,8 +686,8 @@ describe('portableInventoryPresentation row actions', () => {
       },
     });
     expect(isPortableBorrowedRuntimeItem(borrowed)).toBe(true);
-    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual(['migrateToStore']);
-    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBe('migrateToStore');
+    expect(resolvePortableRowActions(borrowed, healthyCtx)).toEqual([]);
+    expect(resolvePortablePrimaryAction(borrowed, healthyCtx)).toBeNull();
   });
 
   test('shared ~/.agents skill without store exposes migrate, never disable or unload', () => {
@@ -896,9 +896,19 @@ describe('portableInventoryPresentation row actions', () => {
       nativeId: 'good-api',
       capabilities: { ...baseCapabilities, canMigrateToStore: true },
     });
+    const grokBorrowed = makeItem({
+      inventoryItemId: 'grok-skill-from-claude',
+      kind: 'skill',
+      nativeId: 'from-claude',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
+    });
     expect(
       listMigratableToStoreItems(
-        [nativeA, alreadyInStore, nativeB, component, mcp],
+        [nativeA, alreadyInStore, nativeB, component, mcp, grokBorrowed],
         healthyCtx,
       ).map((item) => item.inventoryItemId),
     ).toEqual(['claude-skill-a', 'claude-command-b']);
@@ -931,10 +941,7 @@ describe('portableInventoryPresentation row actions', () => {
     });
     expect(isPortableBorrowedRuntimeItem(grokHint)).toBe(true);
     expect(portableBorrowedOwnerLabelKey(grokHint)).toBe('portableStore');
-    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual([
-      'attach',
-      'destroyStore',
-    ]);
+    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual(['attach']);
   });
 });
 
@@ -945,7 +952,7 @@ describe('portableInventoryPresentation ownership partition', () => {
     lockedItemIds: new Set(),
   };
 
-  test('native grok skill stays installed and keeps mutation actions', () => {
+  test('native grok skill stays installed and can migrate into the store', () => {
     const grokNative = makeItem({
       inventoryItemId: 'grok-skill-native',
       kind: 'skill',
@@ -955,10 +962,12 @@ describe('portableInventoryPresentation ownership partition', () => {
       ownedBy: 'grok',
       loadedBy: 'grok',
       nativeOutputCandidate: true,
+      capabilities: { ...baseCapabilities, canMigrateToStore: true },
     });
     expect(isPortableBorrowedRuntimeItem(grokNative)).toBe(false);
     expect(portableBorrowedOwnerLabelKey(grokNative)).toBe('grok');
-    expect(resolvePortableRowActions(grokNative, healthyCtx)).toEqual([]);
+    expect(resolvePortableRowActions(grokNative, healthyCtx)).toEqual(['migrateToStore']);
+    expect(resolvePortablePrimaryAction(grokNative, healthyCtx)).toBe('migrateToStore');
   });
 
   test('same-agent drifted native item stays installed, not borrowed', () => {

@@ -18,6 +18,8 @@ import type {
   PortableInventoryItemDto,
 } from '@/lib/types/portableInventory';
 import {
+  canOfferPortableDestroyStore,
+  canOfferPortableMigrateToStore,
   isPortableBorrowedRuntimeItem,
   isPortableStoreAssetKind,
   portableBorrowedOwnerLabelKey,
@@ -108,7 +110,7 @@ export function PortableAssetDetailsDrawer({
     reasonCode && reasonCode !== 'borrowed_runtime_origin' ? reasonCode : null;
   const storeKind = item ? isPortableStoreAssetKind(item.kind) : false;
   const canMigrateToStore = Boolean(
-    storeKind && item?.capabilities.canMigrateToStore && canMutate,
+    storeKind && item && canOfferPortableMigrateToStore(item) && canMutate,
   );
   const canConfirmCurrentVersion = Boolean(
     item?.capabilities.canConfirmCurrentVersion && canMutate,
@@ -119,7 +121,7 @@ export function PortableAssetDetailsDrawer({
   const canAttach = Boolean(storeKind && item?.capabilities.canAttach && canMutate);
   const canDetach = Boolean(storeKind && item?.capabilities.canDetach && canMutate);
   const canDestroyStore = Boolean(
-    storeKind && item?.capabilities.canDestroyStore && canMutate,
+    storeKind && item && canOfferPortableDestroyStore(item) && canMutate,
   );
   const canEnable = Boolean(
     !storeKind && !canAttach && item?.capabilities.canEnable && canMutate,

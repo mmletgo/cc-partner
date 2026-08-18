@@ -105,17 +105,20 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
 ///     本机库存启停/卸载与 canonical package 投影是两套能力；不能因为后者尚未完成
 ///     就把实现存在误当成运行时已认证；allowlist 只描述 adapter 覆盖面，最终写入仍须
 ///     通过 support manifest 的逐动作 capability 门禁。
+///     仓库软链附加/卸下只改本机文件，不 spawn CLI，OpenCode 等未认证 target 也必须能卸下。
 ///
 /// Code Logic（做什么）:
-///     以 target × kind × action 的显式 allowlist 对齐实际 executor；
-///     Claude 与 Codex 四类 enable/disable/uninstall adapter 已实现；
-///     Skill/Command 另含 store attach/detach/migrate/destroy；MCP/Plugin 排除 store 动作；
-///     OpenCode、Adopt、InstallToSourceTarget 仍 fail-closed。
+///     Skill/Command 的 store attach/detach/migrate/destroy 对全部 target 开放；
+///     Claude 与 Codex 另覆盖四类 enable/disable/uninstall；
+///     MCP/Plugin 排除 store 动作；Adopt / InstallToSourceTarget 仍 fail-closed。
 pub fn supports_direct_local_action(
     target: AgentTarget,
     kind: PortableAssetKind,
     action: PortableAssetActionKind,
 ) -> bool {
+    if action.is_portable_store_action() {
+        return kind.supports_portable_store();
+    }
     matches!(target, AgentTarget::Claude | AgentTarget::Codex)
         && matches!(
             kind,
@@ -129,12 +132,7 @@ pub fn supports_direct_local_action(
             PortableAssetActionKind::Enable
                 | PortableAssetActionKind::Disable
                 | PortableAssetActionKind::Uninstall
-                | PortableAssetActionKind::Attach
-                | PortableAssetActionKind::Detach
-                | PortableAssetActionKind::DestroyStore
-                | PortableAssetActionKind::MigrateToStore
         )
-        && !(action.is_portable_store_action() && !kind.supports_portable_store())
 }
 
 /// 判断 target 是否至少具备一个本机直管动作。
@@ -283,6 +281,16 @@ mod direct_action_support_tests {
             assert!(!supports_direct_local_action(
                 AgentTarget::Claude,
                 PortableAssetKind::Plugin,
+                action
+            ));
+            assert!(supports_direct_local_action(
+                AgentTarget::OpenCode,
+                PortableAssetKind::Skill,
+                action
+            ));
+            assert!(supports_direct_local_action(
+                AgentTarget::Grok,
+                PortableAssetKind::Command,
                 action
             ));
         }

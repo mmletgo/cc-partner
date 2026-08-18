@@ -1552,7 +1552,8 @@ fn discovered_to_item(
             infer_parent_plugin_from_path(disc.origin.target, &scope.scope_id, &disc.origin.path)
         });
 
-    let actual_enabled = actual_enabled_for(kind, disc);
+    let (owned_by, store) = store_fact_for_discovery(disc);
+    let actual_enabled = store_catalog_enabled(&store, actual_enabled_for(kind, disc));
     let (content_hash, tree_hash) = match kind {
         PortableAssetKind::Skill => (
             Some(disc.origin.content_hash.clone()),
@@ -1563,8 +1564,6 @@ fn discovered_to_item(
             disc.origin.tree_hash.clone(),
         ),
     };
-
-    let (owned_by, store) = store_fact_for_discovery(disc);
     let mut warnings: Vec<String> = disc.diagnostics.iter().map(|d| d.code.clone()).collect();
     if matches!(disc.origin.status, PortableDiscoveryStatus::Blocked) {
         warnings.push("source_blocked".into());
@@ -1916,6 +1915,19 @@ fn actual_enabled_for(kind: PortableAssetKind, disc: &DiscoveredPortableAsset) -
     }
 }
 
+/// 未挂到当前 Agent 的仓库目录项不能标成已启用。
+///
+/// Business Logic: 卸下后真树仍在，inject 会把它当 Native Active 扫回来；
+///     那不是当前 Agent 的加载路径，不得让 detach 回扫描到 enabled=true。
+/// Code Logic: 有 storeId、未附加、也不是「仍被其他路径加载」→ Some(false)。
+fn store_catalog_enabled(store: &PortableStoreFactDto, discovered: Option<bool>) -> Option<bool> {
+    if store.store_id.is_some() && !store.store_attached && !store.loaded_via_other_path {
+        Some(false)
+    } else {
+        discovered
+    }
+}
+
 fn enable_semantics_supported(kind: PortableAssetKind, target: AgentTarget) -> bool {
     match kind {
         PortableAssetKind::Skill | PortableAssetKind::Plugin | PortableAssetKind::Mcp => true,
@@ -2058,14 +2070,10 @@ fn item_capabilities(
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Attach);
     // Skill/Command 生命周期改走仓库：迁入 / 附加 / 卸下 / 彻底删除。
     // 启停与卸载只留给 Plugin（viewing 开关）和 MCP（各家配置 leaf）。
-    let can_toggle_enable = !store_kind
-        && can_enable_mutation
-        && enable_semantics
-        && actual_enabled.is_some();
-    let can_toggle_disable = !store_kind
-        && can_disable_mutation
-        && enable_semantics
-        && actual_enabled.is_some();
+    let can_toggle_enable =
+        !store_kind && can_enable_mutation && enable_semantics && actual_enabled.is_some();
+    let can_toggle_disable =
+        !store_kind && can_disable_mutation && enable_semantics && actual_enabled.is_some();
     let can_enable = can_toggle_enable
         && actual_enabled == Some(false)
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Enable);
@@ -2086,19 +2094,21 @@ fn item_capabilities(
         // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
         can_adopt: false,
         can_install_to_source_target: false,
-        // 未进仓库的独立 Skill/Command 都应能迁入，含 ~/.agents、兼容根、legacy。
+        // 只迁本 Agent 自己的 native / Codex ~/.agents（legacyStandalone）。
+        // Grok/Pi 等运行时从其他 Agent 加载的 compatibility 项不得迁入。
         // Plugin 组件真树仍在包内，不得单独迁入。
         can_migrate_to_store: store_write
             && store.store_id.is_none()
             && matches!(
                 origin_kind,
-                PortableOriginKind::Native
-                    | PortableOriginKind::LegacyStandalone
-                    | PortableOriginKind::Compatibility
-            ),
+                PortableOriginKind::Native | PortableOriginKind::LegacyStandalone
+            )
+            && !(borrowed && origin_kind != PortableOriginKind::LegacyStandalone),
         can_attach: store_write && store.store_id.is_some() && !store.store_attached,
         can_detach: store_write && store.store_attached,
-        can_destroy_store: store_write && store.store_id.is_some(),
+        can_destroy_store: store_write
+            && store.store_id.is_some()
+            && !(borrowed && origin_kind == PortableOriginKind::Compatibility),
         can_confirm_current_version: false,
         can_materialize_escape_link: false,
         reason_code: reason,
@@ -3079,7 +3089,7 @@ enabled = false
     }
 
     #[test]
-    fn compatibility_discovery_keeps_owner_mutation_affordances_with_borrowed_reason() {
+    fn compatibility_discovery_does_not_offer_migrate_for_borrowed_runtime_skills() {
         let caps = item_capabilities(
             AgentTarget::Claude,
             AgentTarget::Claude,
@@ -3099,7 +3109,10 @@ enabled = false
         assert!(!caps.can_enable);
         assert!(!caps.can_disable);
         assert!(!caps.can_uninstall);
-        assert!(caps.can_migrate_to_store);
+        assert!(
+            !caps.can_migrate_to_store,
+            "Grok/Pi runtime-loaded skills must not expose 迁入便携仓库"
+        );
         assert!(!caps.can_detach);
         assert!(!caps.can_install_to_source_target);
         assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
@@ -3127,7 +3140,118 @@ enabled = false
         assert!(!caps.can_disable);
         assert!(!caps.can_uninstall);
         assert!(!caps.can_migrate_to_store);
+        assert!(!caps.can_detach);
         assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
+    }
+
+    #[test]
+    fn uncertified_native_store_skills_can_detach() {
+        let store = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: true,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        for target in [
+            AgentTarget::OpenCode,
+            AgentTarget::Grok,
+            AgentTarget::Gemini,
+            AgentTarget::Cursor,
+            AgentTarget::Pi,
+        ] {
+            let caps = item_capabilities(
+                target,
+                target,
+                PortableAssetKind::Skill,
+                Some(true),
+                true,
+                true,
+                true,
+                true,
+                Some("cli_version_unknown".into()),
+                false,
+                PortableOriginKind::Native,
+                true,
+                &store,
+                PortableAssetKind::Skill,
+            );
+            assert!(!caps.can_enable, "{target:?}");
+            assert!(!caps.can_disable, "{target:?}");
+            assert!(!caps.can_uninstall, "{target:?}");
+            assert!(!caps.can_migrate_to_store, "{target:?}");
+            assert!(!caps.can_attach, "{target:?}");
+            assert!(
+                caps.can_detach,
+                "attached native store Skill on {target:?} must expose 从此 Agent 卸下"
+            );
+            assert!(caps.can_destroy_store, "{target:?}");
+        }
+    }
+
+    #[test]
+    fn grok_borrowed_store_skill_can_attach_but_not_migrate_or_destroy() {
+        let store = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: false,
+            loaded_via_other_path: true,
+            loaded_via_target: Some(AgentTarget::Claude),
+        };
+        let caps = item_capabilities(
+            AgentTarget::Grok,
+            AgentTarget::Grok,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            true,
+            true,
+            Some("cli_version_unknown".into()),
+            true,
+            PortableOriginKind::Compatibility,
+            false,
+            &store,
+            PortableAssetKind::Skill,
+        );
+        assert!(!caps.can_migrate_to_store);
+        assert!(
+            caps.can_attach,
+            "viewing Agent may still attach its own native symlink"
+        );
+        assert!(!caps.can_detach);
+        assert!(
+            !caps.can_destroy_store,
+            "borrowed runtime view must not delete the shared store tree"
+        );
+        assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
+    }
+
+    #[test]
+    fn unattached_store_catalog_is_not_enabled() {
+        let attached = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: true,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        let catalog = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: false,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        let via_other = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: false,
+            loaded_via_other_path: true,
+            loaded_via_target: Some(AgentTarget::Claude),
+        };
+        assert_eq!(store_catalog_enabled(&attached, Some(true)), Some(true));
+        assert_eq!(store_catalog_enabled(&catalog, Some(true)), Some(false));
+        assert_eq!(store_catalog_enabled(&via_other, Some(true)), Some(true));
+        assert_eq!(
+            store_catalog_enabled(&PortableStoreFactDto::default(), Some(true)),
+            Some(true)
+        );
     }
 
     #[test]

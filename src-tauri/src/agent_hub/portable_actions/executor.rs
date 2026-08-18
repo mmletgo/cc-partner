@@ -613,11 +613,7 @@ fn reconcile_item(
                         )
                     }
                 }
-                PortableAssetActionKind::Enable
-                | PortableAssetActionKind::Disable
-                | PortableAssetActionKind::Attach
-                | PortableAssetActionKind::Detach
-                | PortableAssetActionKind::MigrateToStore => {
+                PortableAssetActionKind::Enable | PortableAssetActionKind::Disable => {
                     let expected =
                         expected_enabled_after(action, kind, pre.and_then(|p| p.actual_enabled));
                     let observed = post.and_then(|p| p.actual_enabled);
@@ -628,7 +624,6 @@ fn reconcile_item(
                             Some("rescan matches expected".into()),
                         )
                     } else if expected.is_none() {
-                        // 无 enable 语义
                         (
                             PortableAssetActionItemState::Succeeded,
                             None,
@@ -647,6 +642,42 @@ fn reconcile_item(
                             Some(format!(
                                 "expected enabled={expected:?} observed={observed:?}"
                             )),
+                        )
+                    }
+                }
+                PortableAssetActionKind::Attach | PortableAssetActionKind::MigrateToStore => {
+                    if post.is_some_and(|p| p.store.store_attached) {
+                        (
+                            PortableAssetActionItemState::Succeeded,
+                            None,
+                            Some("store attachment verified by rescan".into()),
+                        )
+                    } else if post.is_none() {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISSING".into()),
+                            Some("item missing after store attach".into()),
+                        )
+                    } else {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
+                            Some("expected storeAttached=true after attach".into()),
+                        )
+                    }
+                }
+                PortableAssetActionKind::Detach => {
+                    if post.is_none() || post.is_some_and(|p| !p.store.store_attached) {
+                        (
+                            PortableAssetActionItemState::Succeeded,
+                            None,
+                            Some("native store link removed".into()),
+                        )
+                    } else {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
+                            Some("expected storeAttached=false after detach".into()),
                         )
                     }
                 }
@@ -1133,7 +1164,7 @@ mod tests {
         PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
         PortableInventoryManagementState, PortableInventoryMutationCapability,
         PortableInventoryScanCapability, PortableInventorySourceOrigin, PortableInventoryTargetDto,
-        PortableOriginKind,
+        PortableOriginKind, PortableStoreFactDto,
     };
     use crate::agent_hub::targets::portable::hash_skill_directory;
     use chrono::Utc;
@@ -2606,6 +2637,68 @@ mod tests {
         assert!(
             runner.calls().is_empty(),
             "blocked uninstall must not spawn CLI"
+        );
+    }
+
+    /// Business Logic: 卸下只拆当前 Agent 软链；仓库真树仍会被 inject，可能仍显示 enabled。
+    /// Code Logic: Detach 对账看 store_attached，不看 actual_enabled。
+    #[test]
+    fn detach_rescan_succeeds_when_unattached_even_if_catalog_still_enabled() {
+        let mut pre = sample_item(
+            AgentTarget::OpenCode,
+            PortableAssetKind::Skill,
+            "media-use",
+            "/opencode/skills/media-use",
+            Some(true),
+        );
+        pre.store = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: true,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        let mut post = pre.clone();
+        post.store.store_attached = false;
+        post.actual_enabled = Some(true);
+        let (state, code, _) = reconcile_item(
+            PortableAssetActionKind::Detach,
+            false,
+            PortableAssetKind::Skill,
+            &TargetActionRawOutcome::Applied,
+            Some(&pre),
+            Some(&post),
+        );
+        assert_eq!(state, PortableAssetActionItemState::Succeeded);
+        assert!(code.is_none());
+    }
+
+    #[test]
+    fn detach_rescan_fails_when_native_link_still_attached() {
+        let mut pre = sample_item(
+            AgentTarget::OpenCode,
+            PortableAssetKind::Skill,
+            "media-use",
+            "/opencode/skills/media-use",
+            Some(true),
+        );
+        pre.store = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: true,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        let (state, code, _) = reconcile_item(
+            PortableAssetActionKind::Detach,
+            false,
+            PortableAssetKind::Skill,
+            &TargetActionRawOutcome::Applied,
+            Some(&pre),
+            Some(&pre),
+        );
+        assert_eq!(state, PortableAssetActionItemState::Failed);
+        assert_eq!(
+            code.as_deref(),
+            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH")
         );
     }
 }

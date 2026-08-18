@@ -16,7 +16,7 @@ use crate::agent_hub::models::{AgentTarget, PortableAssetActionPlanRecord};
 use crate::agent_hub::portable_actions::targets::supports_direct_local_action;
 use crate::agent_hub::portable_inventory::{
     PortableAssetKind, PortableInventoryItemDto, PortableInventoryManagementState,
-    PortableInventoryMutationCapability, PortableInventorySnapshotDto,
+    PortableInventoryMutationCapability, PortableInventorySnapshotDto, PortableOriginKind,
 };
 use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
 use crate::agent_hub::targets::portable::{
@@ -423,7 +423,10 @@ async fn build_change(
         PortableAssetActionKind::DestroyStore if !item.capabilities.can_destroy_store => {
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_DESTROY_STORE".into());
         }
-        PortableAssetActionKind::MigrateToStore if !item.capabilities.can_migrate_to_store => {
+        PortableAssetActionKind::MigrateToStore
+            if !item.capabilities.can_migrate_to_store
+                || item.origin_kind == PortableOriginKind::Compatibility =>
+        {
             blocking.push("PORTABLE_ASSET_ACTION_CANNOT_MIGRATE_TO_STORE".into());
         }
         PortableAssetActionKind::ConfirmCurrentVersion
@@ -674,6 +677,7 @@ mod tests {
         inventory_item_id, PortableAssetOwner, PortableInventoryItemCapabilitiesDto,
         PortableInventoryMutationCapability, PortableInventoryScanCapability,
         PortableInventorySourceOrigin, PortableInventoryTargetDto, PortableOriginKind,
+        PortableStoreFactDto,
     };
     use std::fs;
 
@@ -1209,5 +1213,104 @@ args = ["mcp"]
             PortableAssetPlanOperation::MaterializeEscapeLink
         );
         assert_eq!(change.target, AgentTarget::Grok);
+    }
+
+    /// Business Logic: OpenCode 仓库卸下只改软链，不得被 CLI 未认证挡住。
+    /// Code Logic: mutation_capability=Blocked 时 Detach 仍生成可执行 plan。
+    #[tokio::test]
+    async fn opencode_store_detach_bypasses_blocked_cli_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let native = tmp.path().join("opencode/skills/media-use");
+        fs::create_dir_all(&native).unwrap();
+        fs::write(native.join("SKILL.md"), "---\nname: media-use\n---\n").unwrap();
+        let source_path = native.to_string_lossy().into_owned();
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::OpenCode,
+                "user",
+                "standalone",
+                "media-use",
+            ),
+            target: AgentTarget::OpenCode,
+            loaded_by: AgentTarget::OpenCode,
+            owned_by: PortableAssetOwner::PortableStore,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
+            kind: PortableAssetKind::Skill,
+            native_id: "media-use".into(),
+            display_name: "media-use".into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some(source_path),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("h".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::HubManaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_detach: true,
+                ..PortableInventoryItemCapabilitiesDto::default()
+            },
+            warnings: vec![],
+            mcp_credential: None,
+            store: PortableStoreFactDto {
+                store_id: Some("skill:media-use".into()),
+                store_attached: true,
+                loaded_via_other_path: false,
+                loaded_via_target: None,
+            },
+        };
+        let opencode_target = PortableInventoryTargetDto {
+            target: AgentTarget::OpenCode,
+            installed: true,
+            version: Some("1.0.0".into()),
+            executable: Some("/bin/opencode".into()),
+            config_root: "/cfg/opencode".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Blocked,
+            reason_code: Some("cli_version_unknown".into()),
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::Detach,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+        let (change, reasons) = build_change(
+            &item,
+            Some(&opencode_target),
+            AgentTarget::OpenCode,
+            false,
+            &request,
+        )
+        .await
+        .expect("build opencode detach");
+        assert!(
+            !reasons.iter().any(|r| r.contains("MUTATION_BLOCKED")
+                || r.contains("TARGET_WRITE_NOT_CERTIFIED")
+                || r.contains("CLI_NOT_INSTALLED")),
+            "unexpected blocking: {reasons:?}"
+        );
+        assert!(
+            change.blocking_reasons.is_empty(),
+            "{:?}",
+            change.blocking_reasons
+        );
+        assert_eq!(change.operation, PortableAssetPlanOperation::Detach);
+        assert_eq!(change.target, AgentTarget::OpenCode);
     }
 }

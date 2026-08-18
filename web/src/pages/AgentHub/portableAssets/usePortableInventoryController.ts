@@ -26,6 +26,8 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
+  canOfferPortableDestroyStore,
+  canOfferPortableMigrateToStore,
   countPortableItemsByKind,
   filterPortableInventoryItems,
   isPortableStoreAssetKind,
@@ -356,8 +358,12 @@ export function usePortableInventoryController(
         (action === 'installToSourceTarget' && caps.canInstallToSourceTarget) ||
         (action === 'attach' && storeKind && Boolean(caps.canAttach)) ||
         (action === 'detach' && storeKind && Boolean(caps.canDetach)) ||
-        (action === 'destroyStore' && storeKind && Boolean(caps.canDestroyStore)) ||
-        (action === 'migrateToStore' && storeKind && Boolean(caps.canMigrateToStore)) ||
+        (action === 'destroyStore' &&
+          storeKind &&
+          Boolean(canOfferPortableDestroyStore(item))) ||
+        (action === 'migrateToStore' &&
+          storeKind &&
+          Boolean(canOfferPortableMigrateToStore(item))) ||
         (action === 'confirmCurrentVersion' && Boolean(caps.canConfirmCurrentVersion)) ||
         (action === 'materializeEscapeLink' && Boolean(caps.canMaterializeEscapeLink));
       if (!allowed) {

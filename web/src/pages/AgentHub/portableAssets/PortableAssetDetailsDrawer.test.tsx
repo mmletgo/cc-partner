@@ -387,7 +387,7 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     );
   });
 
-  test('borrowed runtime skill warns about owner impact and offers migrate', () => {
+  test('borrowed runtime skill warns about owner impact and does not offer migrate', () => {
     const onOpenOwner = vi.fn();
     const onRequestAction = vi.fn();
     const item = baseItem('skill', {
@@ -423,15 +423,12 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
       'agentHub:portable.details.borrowedHint',
     );
     expect(screen.queryByTestId('portable-asset-diagnostic')).toBeNull();
-    expect(screen.getByTestId('portable-asset-actions')).toBeTruthy();
-    expect(screen.getByTestId('portable-action-migrate-to-store')).toBeTruthy();
+    expect(screen.queryByTestId('portable-action-migrate-to-store')).toBeNull();
     expect(screen.queryByTestId('portable-action-disable')).toBeNull();
     expect(screen.queryByTestId('portable-action-uninstall')).toBeNull();
     expect(screen.queryByTestId('portable-action-detach')).toBeNull();
     fireEvent.click(screen.getByTestId('portable-action-open-owner'));
     expect(onOpenOwner).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByTestId('portable-action-migrate-to-store'));
-    expect(onRequestAction).toHaveBeenCalledWith('migrateToStore');
   });
 
   test('borrowed plugin hint does not claim owner flag rewrite', () => {
@@ -474,10 +471,10 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     const onOpenOwner = vi.fn();
     const onRequestAction = vi.fn();
     const item = baseItem('skill', {
-      inventoryItemId: 'grok-skill-shared',
-      target: 'grok',
+      inventoryItemId: 'codex-skill-shared',
+      target: 'codex',
       ownedBy: 'sharedAgents',
-      loadedBy: 'grok',
+      loadedBy: 'codex',
       originKind: 'legacyStandalone',
       nativeOutputCandidate: false,
       capabilities: {

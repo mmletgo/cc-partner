@@ -5,7 +5,7 @@
 //!     彻底删除才清 store 真树与剩余软链。
 //!
 //! Code Logic（这个模块做什么）:
-//!     建/拆软链；destroy 清 Claude/Codex 链。
+//!     建/拆软链；destroy 清各 Agent native 根与 `~/.agents` 上仍指向真树的软链。
 
 use super::{
     attach_store_link, classify_store_link, current_portable_store_root,
@@ -18,6 +18,7 @@ use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
 use crate::agent_hub::portable_actions::targets::TargetActionRawOutcome;
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
+use crate::agent_hub::targets::paths::{TargetEnvironment, TargetPathResolver};
 use crate::agent_hub::targets::portable::{hash_skill_directory, parse_simple_frontmatter};
 use crate::error::AppError;
 use std::cmp::Ordering;
@@ -384,19 +385,28 @@ fn destroy_remaining_skill_command_links(
             PortableStoreKind::Mcp => {}
         }
     }
-    if let Some(home) = dirs::home_dir() {
-        let codex = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+    let homes = TargetPathResolver::resolve_all(&TargetEnvironment::from_process());
+    let config_roots = [
+        homes.claude.config_root,
+        homes.codex.config_root,
+        homes.opencode.config_root,
+        homes.grok.config_root,
+        homes.gemini.config_root,
+        homes.cursor.config_root,
+        homes.pi.config_root,
+    ];
+    for root in config_roots {
         match kind {
-            PortableStoreKind::Skill => {
-                candidates.push(codex.join("skills").join(native_id));
-                candidates.push(home.join(".agents").join("skills").join(native_id));
-            }
+            PortableStoreKind::Skill => candidates.push(root.join("skills").join(native_id)),
             PortableStoreKind::Command => {
-                candidates.push(codex.join("commands").join(format!("{native_id}.md")));
+                candidates.push(root.join("commands").join(format!("{native_id}.md")))
             }
             PortableStoreKind::Mcp => {}
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        if kind == PortableStoreKind::Skill {
+            candidates.push(home.join(".agents").join("skills").join(native_id));
         }
     }
     for path in candidates {

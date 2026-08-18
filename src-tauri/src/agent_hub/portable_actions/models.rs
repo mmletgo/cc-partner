@@ -85,10 +85,11 @@ impl PortableAssetActionKind {
 
     /// 是否跳过 target CLI / 直管 allowlist 门禁。
     ///
-    /// Business Logic: 确认版本只改账本；解引软链是本机文件修复，两者都不能被无 L3 挡住。
-    /// Code Logic: ledger-only 或 escape-link repair。
+    /// Business Logic: 确认版本只改账本；解引软链与仓库软链附加/卸下只改本机文件，
+    ///     都不能被 OpenCode 等无 L3 写入挡住。
+    /// Code Logic: ledger-only、escape-link repair 或 portable-store 动作。
     pub fn bypasses_target_cli_gates(self) -> bool {
-        self.is_hub_ledger_only() || self.is_escape_link_repair()
+        self.is_hub_ledger_only() || self.is_escape_link_repair() || self.is_portable_store_action()
     }
 
     /// 是否为 portable-store 附加/迁移/销毁动作。
