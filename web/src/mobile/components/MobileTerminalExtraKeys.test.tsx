@@ -12,17 +12,18 @@
  */
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
 import type { MobileTerminalExtraKeyDef } from '../mobileTerminalExtraKeys';
+import { MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 
 function renderExtraKeys(
   onKeyPress: (key: MobileTerminalExtraKeyDef) => void,
   disabled = false,
-): { container: HTMLElement; esc: HTMLButtonElement } {
+): { container: HTMLElement; esc: HTMLButtonElement; slash: HTMLButtonElement } {
   const { container } = render(
     <I18nextProvider i18n={i18n}>
       <MobileTerminalExtraKeys
@@ -33,12 +34,34 @@ function renderExtraKeys(
     </I18nextProvider>,
   );
   const esc = container.querySelector('[data-key-id="esc"]') as HTMLButtonElement | null;
+  const slash = container.querySelector('[data-key-id="slash"]') as HTMLButtonElement | null;
   if (!esc) throw new Error('esc button not rendered');
-  return { container, esc };
+  if (!slash) throw new Error('slash button not rendered');
+  return { container, esc, slash };
+}
+
+function mockRect(
+  el: Element,
+  box: { left: number; top: number; width: number; height: number },
+): void {
+  vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+    x: box.left,
+    y: box.top,
+    left: box.left,
+    top: box.top,
+    width: box.width,
+    height: box.height,
+    right: box.left + box.width,
+    bottom: box.top + box.height,
+    toJSON() {
+      return this;
+    },
+  });
 }
 
 describe('MobileTerminalExtraKeys', () => {
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
   });
 
@@ -89,5 +112,71 @@ describe('MobileTerminalExtraKeys', () => {
     expect(container.querySelector('[data-kind="page"]')).toBeNull();
     expect(container.querySelector('[data-key-id="page-1"]')).toBeNull();
     expect(container.querySelector('[data-key-id="page-2"]')).toBeNull();
+  });
+
+  test('slash pointerDown 不立即发送；短按抬手才插入 /', () => {
+    vi.useFakeTimers();
+    const onKeyPress = vi.fn();
+    const { slash } = renderExtraKeys(onKeyPress);
+
+    fireEvent.pointerDown(slash, { pointerId: 1, clientX: 110, clientY: 420 });
+    expect(onKeyPress).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-popup-item-id="slash-rewind"]')).toBeNull();
+
+    fireEvent.pointerUp(slash, { pointerId: 1, clientX: 110, clientY: 420 });
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
+    expect(onKeyPress.mock.calls[0]?.[0]?.id).toBe('slash');
+    vi.useRealTimers();
+  });
+
+  test('slash 长按弹出三项；滑到 /rewind 松手插入该命令', () => {
+    vi.useFakeTimers();
+    const onKeyPress = vi.fn();
+    const { slash } = renderExtraKeys(onKeyPress);
+    mockRect(slash, { left: 100, top: 400, width: 48, height: 48 });
+
+    fireEvent.pointerDown(slash, { pointerId: 1, clientX: 120, clientY: 420 });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS);
+    });
+
+    const rewind = document.querySelector('[data-popup-item-id="slash-rewind"]');
+    const resume = document.querySelector('[data-popup-item-id="slash-resume"]');
+    const compact = document.querySelector('[data-popup-item-id="slash-compact"]');
+    expect(rewind).toBeTruthy();
+    expect(resume).toBeTruthy();
+    expect(compact).toBeTruthy();
+    if (!rewind) throw new Error('rewind popup missing');
+    mockRect(rewind, { left: 80, top: 340, width: 88, height: 48 });
+
+    fireEvent.pointerMove(slash, { pointerId: 1, clientX: 120, clientY: 360 });
+    fireEvent.pointerUp(slash, { pointerId: 1, clientX: 120, clientY: 360 });
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
+    expect(onKeyPress.mock.calls[0]?.[0]?.id).toBe('slash-rewind');
+    expect(onKeyPress.mock.calls[0]?.[0]?.payload).toBe('/rewind');
+    expect(document.querySelector('[data-popup-item-id="slash-rewind"]')).toBeNull();
+    vi.useRealTimers();
+  });
+
+  test('slash 无 pointer 前导的 click 仍立即插入 /', () => {
+    const onKeyPress = vi.fn();
+    const { slash } = renderExtraKeys(onKeyPress);
+    fireEvent.click(slash);
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
+    expect(onKeyPress.mock.calls[0]?.[0]?.id).toBe('slash');
+  });
+
+  test('slash pointerCancel 不发送任何键', () => {
+    vi.useFakeTimers();
+    const onKeyPress = vi.fn();
+    const { slash } = renderExtraKeys(onKeyPress);
+    fireEvent.pointerDown(slash, { pointerId: 1, clientX: 110, clientY: 420 });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS);
+    });
+    fireEvent.pointerCancel(slash, { pointerId: 1 });
+    expect(onKeyPress).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-popup-item-id="slash-rewind"]')).toBeNull();
+    vi.useRealTimers();
   });
 });

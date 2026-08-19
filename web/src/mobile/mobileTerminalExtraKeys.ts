@@ -27,10 +27,21 @@ export interface MobileTerminalExtraKeyDef {
   payload?: string;
   /** kind=modifier */
   modifier?: MobileTerminalStickyModifier;
+  /**
+   * 长按弹出项（可选）。数组顺序为靠近主键优先：第一项渲染在弹出层最底部。
+   * 弹出项本身不再嵌套 popup。
+   */
+  popup?: MobileTerminalExtraKeyDef[];
 }
 
 /** sticky 武装后无后续输入的自动解除时长（毫秒）。 */
 export const MOBILE_TERMINAL_STICKY_TIMEOUT_MS = 3000;
+
+/** `/` 等带 popup 的键：短按抬手阈值；超过则打开弹出层。 */
+export const MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS = 400;
+
+/** hit-test / hover 表示手指仍停在主键（trigger）上。 */
+export const EXTRA_KEY_POPUP_TRIGGER_HIT_ID = 'trigger';
 
 const CSI = '\x1b[';
 
@@ -49,6 +60,9 @@ export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
   // 终端 Enter 发送 CR（回车）；Claude Code 用它确认 / 发送消息。
   enter: '\r',
   slash: '/',
+  slashRewind: '/rewind',
+  slashResume: '/resume',
+  slashCompact: '/compact',
   up: `${CSI}A`,
   down: `${CSI}B`,
   right: `${CSI}C`,
@@ -77,7 +91,36 @@ const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
     payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.shiftTab,
   },
   { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
-  { id: 'slash', kind: 'payload', label: '/', ariaKey: 'slash', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slash },
+  {
+    id: 'slash',
+    kind: 'payload',
+    label: '/',
+    ariaKey: 'slash',
+    payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slash,
+    popup: [
+      {
+        id: 'slash-rewind',
+        kind: 'payload',
+        label: '/rewind',
+        ariaKey: 'slashRewind',
+        payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashRewind,
+      },
+      {
+        id: 'slash-resume',
+        kind: 'payload',
+        label: '/resume',
+        ariaKey: 'slashResume',
+        payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashResume,
+      },
+      {
+        id: 'slash-compact',
+        kind: 'payload',
+        label: '/compact',
+        ariaKey: 'slashCompact',
+        payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashCompact,
+      },
+    ],
+  },
   // 方向键
   { id: 'up', kind: 'payload', label: '↑', ariaKey: 'up', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up },
   { id: 'down', kind: 'payload', label: '↓', ariaKey: 'down', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down },
@@ -229,6 +272,139 @@ export function resolveMobileTerminalExtraKeyPress(
     return { type: 'toggleModifier', modifier: key.modifier };
   }
   return { type: 'ignore' };
+}
+
+export interface ExtraKeyPopupHitRect {
+  id: string;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export type ExtraKeyPopupPressSession =
+  | { phase: 'idle' }
+  | { phase: 'pending'; keyId: string }
+  | { phase: 'open'; keyId: string; hoverId: string | null };
+
+export type ExtraKeyPopupPointerUpResult =
+  | { type: 'send'; keyId: string; hitId: string }
+  | { type: 'cancel' };
+
+export const IDLE_EXTRA_KEY_POPUP_PRESS: ExtraKeyPopupPressSession = { phase: 'idle' };
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   带 popup 的 extra key 不能在 pointerDown 立刻发送，否则长按无法区分短按。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 pending 会话，等待超时武装或提前抬手。
+ */
+export function beginExtraKeyPopupPress(keyId: string): ExtraKeyPopupPressSession {
+  return { phase: 'pending', keyId };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   长按超时后才展示弹出层，避免短按闪一下菜单。
+ *
+ * Code Logic（这个函数做什么）:
+ *   pending → open，hover 初始落在 trigger；其它 phase 原样返回。
+ */
+export function armExtraKeyPopup(session: ExtraKeyPopupPressSession): ExtraKeyPopupPressSession {
+  if (session.phase !== 'pending') return session;
+  return { phase: 'open', keyId: session.keyId, hoverId: EXTRA_KEY_POPUP_TRIGGER_HIT_ID };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手指滑动时需要更新当前高亮项，松手才提交。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅 open 会话接受 hover；hitId 为 null 表示滑出全部可点区域。
+ */
+export function hoverExtraKeyPopup(
+  session: ExtraKeyPopupPressSession,
+  hitId: string | null,
+): ExtraKeyPopupPressSession {
+  if (session.phase !== 'open') return session;
+  return { phase: 'open', keyId: session.keyId, hoverId: hitId };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   pointerCancel / 松手取消需要回到空闲，且不得误发 payload。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 idle 常量会话。
+ */
+export function cancelExtraKeyPopupPress(): ExtraKeyPopupPressSession {
+  return IDLE_EXTRA_KEY_POPUP_PRESS;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   短按、选中弹出项、滑出取消三条路径必须是纯函数，UI 只负责 hit-test 与副作用。
+ *
+ * Code Logic（这个函数做什么）:
+ *   pending 抬手 → 发送 trigger；open 且 hover 非空 → 发送该项；否则 cancel。
+ */
+export function resolveExtraKeyPopupPointerUp(
+  session: ExtraKeyPopupPressSession,
+): ExtraKeyPopupPointerUpResult {
+  if (session.phase === 'pending') {
+    return { type: 'send', keyId: session.keyId, hitId: EXTRA_KEY_POPUP_TRIGGER_HIT_ID };
+  }
+  if (session.phase === 'open' && session.hoverId != null) {
+    return { type: 'send', keyId: session.keyId, hitId: session.hoverId };
+  }
+  return { type: 'cancel' };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   弹出层 pointer-events:none（手指 capture 在主键上），必须用坐标命中。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 regions 数组顺序取第一个包含点的矩形；调用方应把 popup 项放在 trigger 之前。
+ */
+export function hitTestExtraKeyPopup(
+  x: number,
+  y: number,
+  regions: ExtraKeyPopupHitRect[],
+): string | null {
+  for (const region of regions) {
+    if (x >= region.left && x < region.right && y >= region.top && y < region.bottom) {
+      return region.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   松手后要把 hitId 还原成可交给 onKeyPress 的键定义。
+ *
+ * Code Logic（这个函数做什么）:
+ *   trigger → 主键；否则在 popup 数组里按 id 查找；找不到返回 null。
+ */
+export function selectExtraKeyPopupItem(
+  key: MobileTerminalExtraKeyDef,
+  hitId: string,
+): MobileTerminalExtraKeyDef | null {
+  if (hitId === EXTRA_KEY_POPUP_TRIGGER_HIT_ID) return key;
+  return key.popup?.find((item) => item.id === hitId) ?? null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   UI 需要判断某键是否走长按手势而不是 pointerDown 即发。
+ *
+ * Code Logic（这个函数做什么）:
+ *   popup 为非空数组则为 true。
+ */
+export function extraKeyHasPopup(key: MobileTerminalExtraKeyDef): boolean {
+  return Array.isArray(key.popup) && key.popup.length > 0;
 }
 
 /**

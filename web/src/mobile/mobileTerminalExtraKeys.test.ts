@@ -1,16 +1,25 @@
 import { describe, test } from 'vitest';
 import {
   applyStickyModifierToInput,
+  armExtraKeyPopup,
+  beginExtraKeyPopupPress,
+  cancelExtraKeyPopupPress,
   clearMobileTerminalHelperTextareaAfterCommit,
   dismissMobileTerminalSoftKeyboard,
   encodeAltKeyInput,
   encodeCtrlKeyInput,
   enterMobileTerminalTypingMode,
+  EXTRA_KEY_POPUP_TRIGGER_HIT_ID,
   getMobileTerminalExtraKeys,
+  hitTestExtraKeyPopup,
+  hoverExtraKeyPopup,
   leaveMobileTerminalTypingMode,
+  MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS,
   MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS,
   MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
+  resolveExtraKeyPopupPointerUp,
   resolveMobileTerminalExtraKeyPress,
+  selectExtraKeyPopupItem,
   toggleStickyModifier,
 } from './mobileTerminalExtraKeys';
 
@@ -263,5 +272,79 @@ describe('mobileTerminalExtraKeys', () => {
       'still clears when setSelectionRange throws',
     );
     assertEqual(flakyHelper.value, '', 'value cleared despite selection error');
+  });
+
+  test('slash key exposes rewind/resume/compact popup snippets without auto-enter', () => {
+    const slash = getMobileTerminalExtraKeys().find((key) => key.id === 'slash');
+    assertTrue(slash != null, 'slash key exists');
+    const popupIds = (slash?.popup ?? []).map((item) => item.id);
+    assertEqual(popupIds.join(','), 'slash-rewind,slash-resume,slash-compact', 'popup nearest-first');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashRewind, '/rewind', 'rewind payload');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashResume, '/resume', 'resume payload');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashCompact, '/compact', 'compact payload');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashRewind.includes('\r'), 'rewind no CR');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashResume.includes('\n'), 'resume no LF');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashCompact.endsWith('\r'), 'compact no auto-enter');
+    const rewind = slash?.popup?.find((item) => item.id === 'slash-rewind');
+    assertEqual(rewind?.payload, '/rewind', 'rewind item payload');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS, 400, 'long-press delay');
+  });
+
+  test('popup press session: short tap sends trigger; slide sends item; miss cancels', () => {
+    const pending = beginExtraKeyPopupPress('slash');
+    assertEqual(pending.phase, 'pending', 'down starts pending');
+    const shortTap = resolveExtraKeyPopupPointerUp(pending);
+    assertEqual(shortTap.type, 'send', 'short tap sends');
+    if (shortTap.type === 'send') {
+      assertEqual(shortTap.keyId, 'slash', 'short tap key');
+      assertEqual(shortTap.hitId, EXTRA_KEY_POPUP_TRIGGER_HIT_ID, 'short tap trigger');
+    }
+
+    const opened = armExtraKeyPopup(pending);
+    assertEqual(opened.phase, 'open', 'timeout opens popup');
+    if (opened.phase === 'open') {
+      assertEqual(opened.hoverId, EXTRA_KEY_POPUP_TRIGGER_HIT_ID, 'hover starts on trigger');
+    }
+
+    const hovered = hoverExtraKeyPopup(opened, 'slash-rewind');
+    const rewindUp = resolveExtraKeyPopupPointerUp(hovered);
+    assertEqual(rewindUp.type, 'send', 'slide send');
+    if (rewindUp.type === 'send') {
+      assertEqual(rewindUp.hitId, 'slash-rewind', 'slide hit rewind');
+    }
+
+    const missed = hoverExtraKeyPopup(opened, null);
+    const missUp = resolveExtraKeyPopupPointerUp(missed);
+    assertEqual(missUp.type, 'cancel', 'outside popup cancels');
+
+    const cancelled = cancelExtraKeyPopupPress();
+    assertEqual(cancelled.phase, 'idle', 'cancel returns idle');
+    assertEqual(resolveExtraKeyPopupPointerUp(cancelled).type, 'cancel', 'idle up is cancel');
+  });
+
+  test('hit-test prefers popup items over the trigger rect', () => {
+    const hit = hitTestExtraKeyPopup(12, 20, [
+      { id: EXTRA_KEY_POPUP_TRIGGER_HIT_ID, left: 0, top: 40, right: 40, bottom: 80 },
+      { id: 'slash-rewind', left: 0, top: 0, right: 40, bottom: 40 },
+    ]);
+    assertEqual(hit, 'slash-rewind', 'item wins');
+    assertEqual(hitTestExtraKeyPopup(12, 50, [
+      { id: 'slash-rewind', left: 0, top: 0, right: 40, bottom: 40 },
+      { id: EXTRA_KEY_POPUP_TRIGGER_HIT_ID, left: 0, top: 40, right: 40, bottom: 80 },
+    ]), EXTRA_KEY_POPUP_TRIGGER_HIT_ID, 'trigger when over key');
+    assertEqual(hitTestExtraKeyPopup(100, 100, [
+      { id: 'slash-rewind', left: 0, top: 0, right: 40, bottom: 40 },
+    ]), null, 'outside is miss');
+  });
+
+  test('selectExtraKeyPopupItem maps trigger to the key and item id to popup def', () => {
+    const slash = getMobileTerminalExtraKeys().find((key) => key.id === 'slash');
+    assertTrue(slash != null, 'slash exists');
+    if (!slash) return;
+    const trigger = selectExtraKeyPopupItem(slash, EXTRA_KEY_POPUP_TRIGGER_HIT_ID);
+    assertEqual(trigger?.id, 'slash', 'trigger is slash');
+    const rewind = selectExtraKeyPopupItem(slash, 'slash-rewind');
+    assertEqual(rewind?.payload, '/rewind', 'rewind selected');
+    assertEqual(selectExtraKeyPopupItem(slash, 'missing'), null, 'unknown id');
   });
 });
