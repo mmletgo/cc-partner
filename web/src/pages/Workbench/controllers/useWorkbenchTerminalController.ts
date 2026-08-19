@@ -13,7 +13,7 @@
  * Code Logic（这个 controller 做什么）:
  *   - 持有 sessions / activeSessionId / sessionNameDraft / sessionBusy / sessionError / terminalFullscreen /
  *     terminalResizeRequestKey 单一权威状态。
- *   - 维护 activeProjectIdRef / activeWorktreeIdRef / knownSessionIdsRef / lastLocalFocusAtRef，让异步回调读取最新值。
+ *   - 维护 activeProjectIdRef / activeWorktreeIdRef / knownSessionIdsRef / lastLocalFocusAtRef / localFocusEpochRef，让异步回调读取最新值。
  *   - 暴露 bridge（loadSessions / focusSession / createSessionForWorktree / clearBuffersForWorktree）和渲染数据/动作。
  *   - 注册 focus 同步 effect、tmux focus 轮询 effect、terminal-status listen effect、scopedSessions/activeSession.name defer effect。
  *
@@ -347,6 +347,9 @@ export function useWorkbenchTerminalController(
   // Business Logic: 用 localFocusPendingRef 标记本地 focusSession 已发出但后端 focus IPC 尚未确认成功；
   // 在此期间轮询不得用后端 tmux current 覆盖本地选择（IPC 飞行/失败时后端 tmux 可能仍是旧 window）。
   const localFocusPendingRef = useRef<string | null>(null);
+  // Business Logic: 每次本地 tab 点击递增 generation。远端 focused() 往返常 200–400ms，与 700ms 轮询重叠约一半时间；
+  // 仅在发请求时检查 grace/pending 挡不住「点击前已发出、点击后才返回」的过期结果，必须按 generation 丢弃。
+  const localFocusEpochRef = useRef(0);
   // Business Logic: 同一 project 的 session list 可能并发；用单调 request seq 丢弃过期 list，避免 create/close/split 后被慢响应回写旧列表。
   const sessionListRequestSeqRef = useRef<Record<string, number>>({});
   // Business Logic: terminal-status listen 只想在 mount 时注册一次；用 ref 读取最新的 canListenToTauriEvents，
@@ -699,11 +702,12 @@ export function useWorkbenchTerminalController(
    *   返回 Promise<boolean> 是 bridge 契约要求；当前实现同步设置 activeSessionId，effect 链路异步完成 focus API。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 记录本地 focus 时间戳，抑制随后的 tmux focus 轮询；
+   *   1. 记录本地 focus 时间戳并递增 generation，抑制随后的 tmux focus 轮询并作废已在飞行中的旧结果；
    *   2. 设置 activeSessionId，触发 focus 同步 effect 调用 sessionsApi.focus。
    */
   const focusSession = useCallback(async (sessionId: string): Promise<boolean> => {
     lastLocalFocusAtRef.current = Date.now();
+    localFocusEpochRef.current += 1;
     // 标记本地 focus pending：在后端 focus IPC 确认成功前，禁止轮询用后端 tmux current 覆盖本地选择。
     localFocusPendingRef.current = sessionId;
     setActiveSessionId(sessionId);
@@ -746,6 +750,8 @@ export function useWorkbenchTerminalController(
   // Business Logic: 每 TMUX_FOCUS_SYNC_INTERVAL_MS 轮询后端 get_focused_workbench_session，
   // 把外部（如另一台设备/移动端）的焦点变化同步到当前 worktree 的 active session。
   // 最近的本地 focus 操作在 LOCAL_FOCUS_GRACE_MS 内抑制轮询，避免与用户刚点击的 tab 冲突。
+  // 已发出的 focused() 在返回时必须再核对 localFocusEpochRef：远端往返常与 700ms 间隔重叠，
+  // 仅在发请求时检查挡不住「点击前已在飞行、点击后才返回第一个 window」的过期结果。
   //
   // 关键：effect 依赖只含 [activeProjectId, activeWorktreeId]，**不**含 scopedSessions。
   // 否则 terminal-status 事件（setSessions(.map) 产生新数组引用）会让 effect 反复 cleanup+setup，
@@ -765,11 +771,17 @@ export function useWorkbenchTerminalController(
       if (localFocusPendingRef.current !== null) return;
       const currentScoped = scopedSessionsRef.current;
       if (currentScoped.length === 0) return;
+      const pollEpoch = localFocusEpochRef.current;
       void sessionsApi
         .focused(activeProjectId, activeWorktreeId)
         .then(({ sessionId }) => {
           if (cancelled || !sessionId) return;
-          if (!currentScoped.some((session) => session.id === sessionId)) return;
+          // 点击前发出的 focused() 在点击后返回时，grace/pending 可能已过期；generation 不一致则整段丢弃。
+          if (pollEpoch !== localFocusEpochRef.current) return;
+          if (Date.now() - lastLocalFocusAtRef.current < LOCAL_FOCUS_GRACE_MS) return;
+          if (localFocusPendingRef.current !== null) return;
+          const latestScoped = scopedSessionsRef.current;
+          if (!latestScoped.some((session) => session.id === sessionId)) return;
           setActiveSessionId((current) => {
             if (current === sessionId) return current;
             ackCompletedForTerminal(sessionId);

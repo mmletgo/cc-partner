@@ -647,6 +647,79 @@ describe('useWorkbenchTerminalController — load / focus', () => {
       await flushMicrotasks();
     });
   });
+
+  test('focusSession ignores in-flight tmux focused() that started before the local tab click', async () => {
+    // Regression（远端 ~50%）：700ms 轮询在用户仍停在第一个 window 时发出 focused()；
+    // 远端 P2P 往返常 200–400ms，用户在结果回来前点了第二个 tab。过期 focused() 返回 s1
+    // 时 grace/pending 可能已过期（focus IPC 已成功），不得把 UI 切回第一个 window。
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id });
+    const s2 = buildSession({ id: 's2', worktreeId: worktree.id });
+    fakeSessionsApi.list.mockResolvedValue([s1, s2]);
+
+    const pendingFocusedResolvers: Array<(value: { sessionId: string | null }) => void> = [];
+    fakeSessionsApi.focused.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          pendingFocusedResolvers.push(resolve);
+        }),
+    );
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    expect(result.current.activeSessionId).toBe('s1');
+    fakeSessionsApi.focus.mockClear();
+
+    // 推进到 interval，让一轮 focused() 在用户仍选中 s1 时起飞并保持 pending。
+    await act(async () => {
+      vi.advanceTimersByTime(700);
+      await flushMicrotasks();
+    });
+    const stalePollCount = pendingFocusedResolvers.length;
+    expect(stalePollCount).toBeGreaterThan(0);
+
+    await act(async () => {
+      result.current.focusSession('s2');
+      await flushMicrotasks();
+    });
+    expect(result.current.activeSessionId).toBe('s2');
+
+    // focus IPC 已成功（pending 清除）且 grace 已过：仅 generation 能挡住点击前发出的过期结果。
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      pendingFocusedResolvers.splice(0, stalePollCount).forEach((fn) => fn({ sessionId: 's1' }));
+      await flushMicrotasks();
+    });
+
+    expect(result.current.activeSessionId).toBe('s2');
+
+    await act(async () => {
+      pendingFocusedResolvers.forEach((fn) => fn({ sessionId: 's2' }));
+      await flushMicrotasks();
+    });
+  });
 });
 
 describe('useWorkbenchTerminalController — create / rename / close session', () => {
