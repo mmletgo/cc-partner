@@ -9,7 +9,7 @@
  * Code Logic（这个组件做什么）:
  *   基于原生 <button> 渲染的受控展示组件，支持 5 种 variant、3 种 size、loading/icon 状态；
  *   使用 React.forwardRef 暴露底层 button 引用以支持父级聚焦/工具库绑定（如 tippy/floating-ui）；
- *   loading=true 时禁用点击并替换原 icon 为旋转 spinner。
+ *   loading=true 时禁用点击，spinner 叠在原内容上，不改按钮宽高，也不改 accessible name。
  */
 
 import { forwardRef } from 'react';
@@ -26,7 +26,7 @@ export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement
   size?: ButtonSize;
   /** 禁用态 */
   disabled?: boolean;
-  /** 加载中：禁用点击并显示 spinner */
+  /** 加载中：禁用点击，原地叠 spinner，尺寸与文案与 idle 一致 */
   loading?: boolean;
   /** 左侧图标 */
   icon?: ReactNode;
@@ -94,9 +94,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       onClick={handleClick}
       {...rest}
     >
-      {loading ? <span className={styles.spinner} aria-hidden="true" /> : icon ? <span className={styles.iconWrap}>{icon}</span> : null}
-      {variant !== 'icon' ? children : null}
-      {iconRight && !loading ? <span className={styles.iconWrap}>{iconRight}</span> : null}
+      {loading ? <span className={styles.spinner} aria-hidden="true" /> : null}
+      <span className={styles.inner}>
+        {icon ? <span className={styles.iconWrap}>{icon}</span> : null}
+        {variant !== 'icon' ? children : null}
+        {iconRight ? <span className={styles.iconWrap}>{iconRight}</span> : null}
+      </span>
     </button>
   );
 });

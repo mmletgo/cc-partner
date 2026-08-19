@@ -331,6 +331,10 @@ describe('PortableAssetActionDialog state machine', () => {
     expect(closeBtn.disabled).toBe(true);
     fireEvent.click(closeBtn);
     expect(onClose).not.toHaveBeenCalled();
+
+    const confirmBtn = screen.getByTestId('portable-action-confirm');
+    expect(confirmBtn.getAttribute('data-loading')).toBe('true');
+    expect(confirmBtn.textContent).toContain('agentHub:portable.actionDialog.confirm');
   });
 
   test('does not use window.confirm for destructive actions', () => {

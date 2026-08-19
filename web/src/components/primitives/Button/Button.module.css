@@ -4,14 +4,15 @@
  */
 
 .button {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   font-family: var(--font-body);
   font-weight: var(--weight-medium);
+  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
   user-select: none;
@@ -108,14 +109,29 @@
   background-color: var(--surface-warm);
 }
 
-/* ── loading spinner ── */
+/* ── loading spinner：绝对居中叠在原文案上，避免宽高跳动 ── */
+.inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.button[data-loading] .inner {
+  opacity: 0;
+}
+
 .spinner {
-  width: 14px;
-  height: 14px;
+  position: absolute;
+  inset: 0;
+  width: var(--text-sm);
+  height: var(--text-sm);
+  margin: auto;
   border: 1.5px solid currentColor;
   border-top-color: transparent;
   border-radius: var(--radius-full);
   animation: spin 0.7s linear infinite;
+  pointer-events: none;
 }
 
 .iconWrap {
