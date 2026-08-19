@@ -159,6 +159,8 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     currentWindowLabel: 'main',
     occupancy: [],
     openProjectInNewWindow: vi.fn(async () => undefined),
+    remoteWriteDisabled: false,
+    setRemoteWriteDisabled: vi.fn(),
     ...partial,
   };
 

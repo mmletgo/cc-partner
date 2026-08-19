@@ -73,7 +73,6 @@ import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
 import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
 import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
-import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
 
@@ -99,7 +98,7 @@ export function Workbench() {
     refreshProjectSessionStats,
     chooseAndAddProject,
     currentWindowLabel,
-    occupancy,
+    occupancy, setRemoteWriteDisabled,
   } = useWorkbenchProjects();
   const { layoutSlotKey } = useWorkbenchWindowRole();
   const restoreSlotKey = layoutSlotKey ?? 'desktop:auto';
@@ -114,13 +113,13 @@ export function Workbench() {
     () => parseWorkbenchDeepLink(locationSearch),
     [locationSearch],
   );
-  // Business Logic: 项目域（远端离线状态机 + 跨项目请求守卫 + 项目级 deep link）由独立 controller 持有，
-  // 避免在 Workbench.tsx 里散落多处 state/effect；controller 接收窄 API/回调，不复制邻接域 state。
+  // Business Logic: 项目域由独立 controller 持有，不复制邻接域 state；只读态同步给 AppShell 标语。
   const projectCtrl = useWorkbenchProjectController({
     activeProject,
     activeProjectId,
     projects,
     selectProject,
+    onRemoteWriteDisabledChange: setRemoteWriteDisabled,
   });
   const {
     remoteProjectOffline,
@@ -757,7 +756,6 @@ export function Workbench() {
               <p className={styles.workspacePath}>{workspaceLine}</p>
             </div>
           </div>
-          <WorkbenchBanner deviceId={activeProject.kind === 'remote' ? activeProject.deviceId : undefined} remoteWriteDisabled={remoteWriteDisabled} />
           <div className={styles.workspaceHeaderActions}>
             {/* Agent Ledger 整块保留原条件：仅隐藏触发按钮，Drawer 保持挂载（原样移动） */}
             <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}

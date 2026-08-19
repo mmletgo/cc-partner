@@ -34,6 +34,9 @@ export interface WorkbenchProjectsContextValue {
   occupancy: Array<{ projectId: string; windowLabel: string }>;
   /** 在新卫星窗打开项目；已占用则聚焦。 */
   openProjectInNewWindow: (project: WorkbenchProject) => Promise<void>;
+  /** 当前工作台远端项目是否只读；供 AppShell 标语等壳层 chrome 复用。 */
+  remoteWriteDisabled: boolean;
+  setRemoteWriteDisabled: (disabled: boolean) => void;
 }
 
 export const WorkbenchProjectsContext = createContext<WorkbenchProjectsContextValue | null>(null);

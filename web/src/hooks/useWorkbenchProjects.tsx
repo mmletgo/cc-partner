@@ -135,6 +135,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
   const [occupancy, setOccupancy] = useState<Array<{ projectId: string; windowLabel: string }>>(
     [],
   );
+  const [remoteWriteDisabled, setRemoteWriteDisabled] = useState(false);
   const projectAddBusyRef = useRef<boolean>(false);
 
   const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
@@ -442,6 +443,8 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       currentWindowLabel,
       occupancy,
       openProjectInNewWindow,
+      remoteWriteDisabled,
+      setRemoteWriteDisabled,
     }),
     [
       activeProject,
@@ -458,6 +461,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       refreshProjectSessionStats,
       occupancy,
       openProjectInNewWindow,
+      remoteWriteDisabled,
       removeProject,
       reorderProjects,
       selectProject,

@@ -802,6 +802,8 @@ export function buildProjectsContextValue(
     currentWindowLabel: 'main',
     occupancy: [],
     openProjectInNewWindow: vi.fn(async () => Promise.resolve()),
+    remoteWriteDisabled: false,
+    setRemoteWriteDisabled: vi.fn(),
     ...overrides,
   };
 }

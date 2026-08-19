@@ -18,6 +18,7 @@
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
  *   - 右侧 main 区域是 <outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
+ *   - 今日标语挂在外壳顶栏，按整窗水平居中，不跟工作台标题行剩余空档对齐
  *
  *   注意：本组件是 <Outlet /> 容器，children 不直接使用。
  */
@@ -63,6 +64,7 @@ import { MobileAccessCard } from '@/components/domain/MobileAccessCard';
 import { PermissionStatusBadge } from '@/components/domain/PermissionStatusBadge';
 import { WorkbenchProjectRail } from '@/components/domain/WorkbenchProjectRail';
 import { Dialog } from '@/components/primitives';
+import { WorkbenchBanner } from '@/pages/Workbench/views/WorkbenchBanner';
 
 const GameHubDialog = lazy(async () => {
   const module = await import('@/components/domain/GameHubDialog');
@@ -150,10 +152,14 @@ export function AppShell({ children }: AppShellProps) {
   const mobileAccessButtonRef = useRef<HTMLButtonElement | null>(null);
   const appName = t('common:app.name');
   const { role } = useWorkbenchWindowRole();
-  const { activeProject } = useWorkbenchProjects();
+  const { activeProject, remoteWriteDisabled } = useWorkbenchProjects();
   // 卫星窗不渲染 ThemeToggle，但仍须挂载 useTheme 才能写 data-theme 并跨窗同步。
   useTheme();
   const isSatellite = role === 'satellite';
+  const bannerDeviceId =
+    location.pathname.startsWith('/workbench') && activeProject?.kind === 'remote'
+      ? activeProject.deviceId
+      : undefined;
 
   useEffect(() => {
     void syncWorkbenchWindowTitle(
@@ -325,6 +331,12 @@ export function AppShell({ children }: AppShellProps) {
           </>
         )}
       </Sidebar>
+      <div className={styles.bannerSlot} data-testid="app-banner-slot">
+        <WorkbenchBanner
+          deviceId={bannerDeviceId}
+          remoteWriteDisabled={Boolean(bannerDeviceId) && remoteWriteDisabled}
+        />
+      </div>
       <main className={styles.main}>
         {children ?? <Outlet />}
         <BatteryWorkbenchScrim visible={showWorkbenchScrim} onOpenGame={openGameHub} />

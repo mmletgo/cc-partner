@@ -75,6 +75,7 @@ vi.mock('@/hooks/useWorkbenchWindowRole', () => ({
 vi.mock('@/hooks/workbenchProjectsContext', () => ({
   useWorkbenchProjects: () => ({
     activeProject: { name: 'demo-app' },
+    remoteWriteDisabled: false,
   }),
 }));
 
@@ -102,6 +103,9 @@ vi.mock('@/hooks/useBattery', () => ({
   useBattery: () => batterySnapshotMock,
 }));
 
+vi.mock('@/pages/Workbench/views/WorkbenchBanner', () => ({
+  WorkbenchBanner: () => <div data-testid="workbench-banner" />,
+}));
 
 import { AppShell } from './AppShell';
 
@@ -325,5 +329,17 @@ describe('AppShell grouped navigation', () => {
     expect(sidebarCss).toMatch(/\.content\s*\{[\s\S]*?overflow-y:\s*auto;/);
     // footer 保留在 flex 流内，侧栏自身不再整栏滚动以免盖住 footer
     expect(sidebarCss).toMatch(/\.sidebar\s*\{[\s\S]*?overflow:\s*hidden;/);
+  });
+
+  test('centers the daily banner on the full app window', () => {
+    const css = readFileSync(
+      resolve(process.cwd(), 'src/components/layout/AppShell/AppShell.module.css'),
+      'utf8',
+    );
+    expect(css).toMatch(/\.bannerSlot\s*\{[\s\S]*?left:\s*50%;/);
+    expect(css).toMatch(/\.bannerSlot\s*\{[\s\S]*?transform:\s*translateX\(-50%\)/);
+    renderShell();
+    expect(screen.getByTestId('app-banner-slot')).toBeTruthy();
+    expect(screen.getByTestId('workbench-banner')).toBeTruthy();
   });
 });

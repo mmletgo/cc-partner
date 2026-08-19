@@ -999,8 +999,8 @@
   },
   "banner": {
     "placeholder": "写一句今日标语",
-    "previewAriaLabel": "工作台标语，单击编辑",
-    "editorAriaLabel": "编辑工作台标语",
+    "previewAriaLabel": "今日标语，单击编辑",
+    "editorAriaLabel": "编辑今日标语",
     "limitReached": "最多 {{max}} 个字符"
   },
   "workspaceSnapshot": {

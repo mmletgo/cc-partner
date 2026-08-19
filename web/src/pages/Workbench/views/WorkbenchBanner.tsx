@@ -1,13 +1,13 @@
 /**
- * WorkbenchBanner — 工作台顶栏 owning-device 标语。
+ * WorkbenchBanner — 应用顶栏 owning-device 标语。
  *
  * Business Logic（为什么需要）:
- *   用户要在顶栏中间写一句设备标语（轻量 Markdown + emoji），
- *   本机项目写本机、远端项目写对端；离线只读。
+ *   用户要在整窗水平居中写一句设备标语（轻量 Markdown + emoji），
+ *   本机读写本机、工作台选中远端项目时读写对端；离线只读。
  *
  * Code Logic（做什么）:
  *   单击预览进入 textarea；debounce / 失焦 / ⌘Enter 经 hook 写 owning device；
- *   Esc 丢草稿；ResizeObserver + 离屏测量二分字号。
+ *   Esc 丢草稿；ResizeObserver + 离屏测量二分字号。挂在 AppShell，不进工作台标题 flex。
  */
 
 import {
@@ -84,10 +84,10 @@ function renderBannerNodes(nodes: BannerInline[]): ReactElement[] {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   顶栏中间空档要变成可编辑、可缩放的本机标语，且不能膨胀 Workbench.tsx。
+ *   整窗居中的可编辑标语要独立成叶子，且不能膨胀 Workbench.tsx。
  *
  * Code Logic（这个函数做什么）:
- *   读/写 localStorage；预览/编辑两态；容器尺寸变化后重算字号。
+ *   预览/编辑两态；容器尺寸变化后重算字号。
  */
 export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement {
   const { deviceId, remoteWriteDisabled = false } = props;

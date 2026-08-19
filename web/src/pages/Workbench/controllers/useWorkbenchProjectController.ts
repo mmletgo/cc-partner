@@ -54,6 +54,8 @@ export interface UseWorkbenchProjectControllerParams {
   activeProjectId: string | null;
   projects: WorkbenchProject[];
   selectProject: (project: WorkbenchProject) => Promise<WorkbenchProject>;
+  /** 把远端只读态同步给 AppShell 标语等壳层 chrome；离开工作台时应变回 false。 */
+  onRemoteWriteDisabledChange?: (disabled: boolean) => void;
 }
 
 /**
@@ -120,7 +122,8 @@ function launchErrorMessage(error: unknown, fallback: string): string {
 export function useWorkbenchProjectController(
   params: UseWorkbenchProjectControllerParams,
 ): WorkbenchProjectControllerResult {
-  const { activeProject, activeProjectId, projects, selectProject } = params;
+  const { activeProject, activeProjectId, projects, selectProject, onRemoteWriteDisabledChange } =
+    params;
 
   const [remoteOfflineProjectId, setRemoteOfflineProjectId] = useState<string | null>(null);
   const [launchSummary, setLaunchSummary] = useState<WorkbenchLaunchSummaryState>(
@@ -307,6 +310,16 @@ export function useWorkbenchProjectController(
   );
   const remoteWriteDisabled = remoteProjectOffline;
   const agentLedgerLocalOnly = activeProject?.kind === 'local';
+
+  useEffect(() => {
+    onRemoteWriteDisabledChange?.(remoteWriteDisabled);
+  }, [onRemoteWriteDisabledChange, remoteWriteDisabled]);
+
+  useEffect(() => {
+    return () => {
+      onRemoteWriteDisabledChange?.(false);
+    };
+  }, [onRemoteWriteDisabledChange]);
 
   /**
    * Business Logic（为什么需要这个函数）:

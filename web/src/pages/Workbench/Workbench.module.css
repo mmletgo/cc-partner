@@ -317,12 +317,13 @@
 }
 
 .workspaceTitleGroup {
-  /* 顶部项目路径需要完整显示：放宽最大宽度并允许与 WorkbenchBanner 共享剩余空间，
-     路径在 .workspacePath 中按 overflow-wrap 任意位置换行，避免单行 ellipsis 截断。 */
+  /* 标语已按整窗居中浮层，标题区收窄以免盖住中线；路径仍 overflow-wrap 完整换行。 */
   flex: 1 1 auto;
-  max-width: 600px;
+  max-width: min(22rem, 32vw);
   min-width: 0;
   gap: var(--space-3);
+  position: relative;
+  z-index: calc(var(--z-sticky) + 1);
 }
 
 .workspaceTitleGroup > div {
@@ -349,6 +350,8 @@
   justify-content: flex-end;
   gap: var(--space-3);
   margin-left: 0;
+  position: relative;
+  z-index: calc(var(--z-sticky) + 1);
 }
 
 .projectAutomationButton[data-active='true'] {
