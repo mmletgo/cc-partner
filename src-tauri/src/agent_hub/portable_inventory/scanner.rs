@@ -20,11 +20,11 @@ use crate::agent_hub::portable_actions::targets::{
 };
 use crate::agent_hub::portable_inventory::ensure_managed::ensure_discovered_portable_items_managed;
 use crate::agent_hub::portable_inventory::models::{
-    inventory_item_id, PortableAssetKind, PortableInventoryItemCapabilitiesDto,
-    PortableInventoryItemDto, PortableInventoryManagementState,
-    PortableInventoryMutationCapability, PortableInventoryQuery, PortableInventoryScanCapability,
-    PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableInventoryTargetDto,
-    PortableMcpCredentialFactDto, PortableStoreFactDto,
+    inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
+    PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
+    PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
+    PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
+    PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableStoreFactDto,
 };
 use crate::agent_hub::portable_inventory::plugin_enablement::{
     plugin_actual_enabled, ViewingPluginEnablement,
@@ -39,9 +39,8 @@ use crate::agent_hub::support::{
     EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::portable::{
-    hash_skill_directory, is_borrowed_runtime_origin, mutation_target_for_action,
-    mutation_target_for_origin, DiscoveredPortableAsset, PortableAssetOwner,
-    PortableDiscoveryStatus, PortableOriginKind,
+    is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
+    DiscoveredPortableAsset, PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
@@ -244,6 +243,10 @@ pub async fn inspect_portable_inventory_with_env_query(
                 item.warnings.push(warn);
             }
         }
+    }
+    if !failed_ids.is_empty() {
+        snapshot.inventory_snapshot_hash =
+            inventory_snapshot_hash(&snapshot.targets, &snapshot.items)?;
     }
     Ok(snapshot)
 }
@@ -1741,10 +1744,11 @@ fn should_replace_with(
     false
 }
 
-/// 本机真树若与 portable-store 同 native_id 且内容相同，视为已在仓库中的重复挂载。
+/// 本机真树若与 portable-store 同 native_id 且身份内容相同，视为已在仓库中的重复挂载。
 ///
 /// Business Logic: 卸下 CODEX_HOME 软链后，~/.agents 同内容真树不应再显示「迁入便携仓库」。
-/// Code Logic: store 真树存在且 tree/content hash 一致才返回 store_id。
+///     列表扫描不得为判定 leftover 而递归哈希大型 Skill 树。
+/// Code Logic: Skill 比对 SKILL.md 内容 hash；Command 比对文件 content hash。
 fn leftover_duplicate_store_id(
     disc: &DiscoveredPortableAsset,
     store_root: &Path,
@@ -1764,15 +1768,9 @@ fn leftover_duplicate_store_id(
     }
     let same = match store_kind {
         PortableStoreKind::Skill => {
-            let native_hash = disc.origin.tree_hash.clone().or_else(|| {
-                hash_skill_directory(&disc.origin.path)
-                    .ok()
-                    .map(|(_, tree, _, _)| tree)
-            });
-            let store_hash = hash_skill_directory(&store_target)
-                .ok()
-                .map(|(_, tree, _, _)| tree);
-            matches!((native_hash, store_hash), (Some(a), Some(b)) if a == b)
+            let store_md = store_target.join("SKILL.md");
+            let store_hash = fs::read(&store_md).ok().map(|bytes| sha256_hex(&bytes));
+            store_hash.is_some_and(|hash| hash == disc.origin.content_hash)
         }
         PortableStoreKind::Command => {
             let store_hash = fs::read(&store_target).ok().map(|bytes| sha256_hex(&bytes));
@@ -1857,6 +1855,8 @@ fn store_fact_for_discovery(
 ///
 /// Business Logic: 卸下后真树仍在，UI 还要能附加/彻底删除。
 /// Code Logic: 扫描 portable-store/skills|commands，再走 discovered_to_item 去重。
+///     Skill 列表查询与 adapter 一样只读 SKILL.md，目录树延迟到动作 preview；
+///     完整扫描仍算 tree hash，与 `scan_portable_assets` 对齐。
 fn inject_store_catalog_items(
     target: AgentTarget,
     scope: &PortableScanScope,
@@ -1873,12 +1873,23 @@ fn inject_store_catalog_items(
         return;
     }
     if kind_filter.is_none() || kind_filter == Some(PortableAssetKind::Skill) {
-        if let Ok(discs) = crate::agent_hub::targets::portable::scan_skill_dirs(
-            target,
-            scope.scope_kind,
-            &store_root.join("skills"),
-            PortableOriginKind::Native,
-        ) {
+        let skills_root = store_root.join("skills");
+        let discs = if kind_filter == Some(PortableAssetKind::Skill) {
+            crate::agent_hub::targets::portable::scan_skill_dirs_manifest_only(
+                target,
+                scope.scope_kind,
+                &skills_root,
+                PortableOriginKind::Native,
+            )
+        } else {
+            crate::agent_hub::targets::portable::scan_skill_dirs(
+                target,
+                scope.scope_kind,
+                &skills_root,
+                PortableOriginKind::Native,
+            )
+        };
+        if let Ok(discs) = discs {
             for disc in discs {
                 let inv_id = inventory_item_id(
                     target,
@@ -4327,5 +4338,116 @@ enabled = ["native-only"]
         );
         let attached = store_item(AgentTarget::Grok, PortableOriginKind::Native, true, false);
         assert!(should_replace_with(&attached, &existing));
+    }
+
+    /// Business Logic: Codex Skill 列表 preview/apply 绑定整页 inventory hash；
+    ///     未附加仓库树或 leftover 附加文件变化不得误报 HASH_MISMATCH。
+    /// Code Logic: kind=skill 延迟 tree hash；两次扫描中间改 sibling/leftover 日志后 hash 不变。
+    #[test]
+    fn skill_query_hash_ignores_unattached_store_tree_churn() {
+        use crate::agent_hub::portable_store::{
+            create_store_link, ensure_portable_store_layout, store_skill_dir,
+        };
+        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
+
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+        let store = ensure_portable_store_layout(&data).expect("layout");
+        let cli = store_skill_dir(&store, "hyperframes-cli");
+        write(
+            &cli.join("SKILL.md"),
+            "---\nname: hyperframes-cli\n---\n# CLI\n",
+        );
+        write(&cli.join("extra.bin"), "stable");
+        create_store_link(&cli, &home.join(".codex/skills/hyperframes-cli")).expect("attach");
+        write(
+            &home.join(".agents/skills/hyperframes-cli/SKILL.md"),
+            "---\nname: hyperframes-cli\n---\n# CLI\n",
+        );
+        write(
+            &home.join(".agents/skills/hyperframes-cli/leftover.log"),
+            "v1",
+        );
+
+        let sibling = store_skill_dir(&store, "hyperframes-core");
+        write(
+            &sibling.join("SKILL.md"),
+            "---\nname: hyperframes-core\n---\n# Core\n",
+        );
+        write(&sibling.join("volatile.log"), "v1");
+
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars: {
+                let mut vars = Map::new();
+                vars.insert(
+                    "CODEX_HOME".into(),
+                    home.join(".codex").to_string_lossy().into(),
+                );
+                vars
+            },
+            path_entries: vec![],
+        };
+        let scopes = vec![PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Codex),
+            kind: Some(PortableAssetKind::Skill),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+
+        let (targets1, items1) =
+            scan_portable_inventory_facts_query(&env, &scopes, query.clone()).expect("scan1");
+        let attached = items1
+            .iter()
+            .find(|item| item.native_id == "hyperframes-cli" && item.target == AgentTarget::Codex)
+            .expect("attached cli");
+        assert!(
+            attached.store.store_attached,
+            "Codex native store link must count as attached"
+        );
+        assert!(
+            attached.capabilities.can_detach,
+            "attached store skill must offer detach"
+        );
+        assert!(
+            attached.tree_hash.is_none(),
+            "skill list must defer tree hash"
+        );
+        let sibling_item = items1
+            .iter()
+            .find(|item| item.native_id == "hyperframes-core" && item.target == AgentTarget::Codex)
+            .expect("unattached sibling");
+        assert!(!sibling_item.store.store_attached);
+        assert!(sibling_item.tree_hash.is_none());
+        let hash1 = inventory_snapshot_hash(&targets1, &items1).expect("hash1");
+
+        write(&sibling.join("volatile.log"), "v2-changed");
+        write(
+            &home.join(".agents/skills/hyperframes-cli/leftover.log"),
+            "v2-changed",
+        );
+
+        let (targets2, items2) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan2");
+        let hash2 = inventory_snapshot_hash(&targets2, &items2).expect("hash2");
+        assert_eq!(
+            hash1, hash2,
+            "unattached store / leftover extra files must not change skill-page CAS hash"
+        );
+
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 }

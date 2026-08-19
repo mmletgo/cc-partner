@@ -410,7 +410,8 @@ pub struct ProjectedAssetFile {
 /// 解析 YAML frontmatter（`---` ... `---`）为 key→string map + 未知键列表。
 ///
 /// Business Logic: Skill/Command/Agent 元数据在 frontmatter；未知键不得丢弃。
-/// Code Logic: 仅处理简单 `key: value` 行，不引入完整 YAML 依赖。
+///     Codex/部分生成器会把中文写成双引号 JSON `\uXXXX`，必须解码后才能在 Hub 正常显示。
+/// Code Logic: 仅处理简单 `key: value` 行，不引入完整 YAML 依赖；双引号标量按 JSON 字符串解码。
 pub fn parse_simple_frontmatter(text: &str) -> (BTreeMap<String, String>, Vec<String>, &str) {
     let trimmed = text.strip_prefix('\u{feff}').unwrap_or(text);
     if !trimmed.starts_with("---") {
@@ -442,18 +443,75 @@ pub fn parse_simple_frontmatter(text: &str) -> (BTreeMap<String, String>, Vec<St
             continue;
         };
         let key = k.trim().to_string();
-        let mut val = v.trim().to_string();
-        if (val.starts_with('"') && val.ends_with('"'))
-            || (val.starts_with('\'') && val.ends_with('\''))
-        {
-            val = val[1..val.len().saturating_sub(1)].to_string();
-        }
+        let val = decode_frontmatter_scalar(v);
         if !map.contains_key(&key) {
             unknown_order.push(key.clone());
         }
         map.insert(key, val);
     }
     (map, unknown_order, body)
+}
+
+/// 解码 frontmatter 单行标量。
+///
+/// Business Logic: 生成器常把中文 description 写成 `"\u7528..."`；只剥引号会把转义原文展示给用户。
+/// Code Logic: 双引号优先 `serde_json` 解码（含 `\uXXXX` / `\"` / `\\`）；失败则剥引号并手工展开
+///     常见 JSON 转义。单引号只把 YAML `''` 还原成 `'`。未加引号的 UTF-8 原文原样返回。
+fn decode_frontmatter_scalar(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        if let Ok(decoded) = serde_json::from_str::<String>(trimmed) {
+            return decoded;
+        }
+        return unescape_json_string_inner(&trimmed[1..trimmed.len() - 1]);
+    }
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return trimmed[1..trimmed.len() - 1].replace("''", "'");
+    }
+    trimmed.to_string()
+}
+
+/// 把 JSON/YAML 双引号字符串的内部转义展开为真实字符。
+///
+/// Business Logic: `serde_json` 失败时（YAML 独有转义）仍应尽量把 `\uXXXX` 显示成汉字。
+/// Code Logic: 识别 `\uXXXX`、`\"`、`\\`、`\n`/`\r`/`\t`、`\/`；非法序列原样保留。
+fn unescape_json_string_inner(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('/') => out.push('/'),
+            Some('u') => {
+                let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                if hex.len() == 4 {
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(decoded) = char::from_u32(code) {
+                            out.push(decoded);
+                            continue;
+                        }
+                    }
+                }
+                out.push('\\');
+                out.push('u');
+                out.push_str(&hex);
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// 已知 frontmatter 键（不进入 unknown）。
@@ -1882,6 +1940,50 @@ mod tests {
             fs::create_dir_all(p).unwrap();
         }
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn parse_simple_frontmatter_decodes_quoted_unicode_escapes() {
+        let text = concat!(
+            "---\n",
+            "name: \"reinvent-from-scratch\"\n",
+            "description: \"\\u7528\\u6770\\u68ee\\u00b7\\u5a01\\u5c14\\u514b\\u65af\\\"\\u524d\\u6570\\u5b66\\\"\"\n",
+            "---\n# body\n",
+        );
+        let (fields, _, body) = parse_simple_frontmatter(text);
+        assert_eq!(
+            fields.get("description").map(String::as_str),
+            Some("用杰森·威尔克斯\"前数学\"")
+        );
+        assert_eq!(
+            fields.get("name").map(String::as_str),
+            Some("reinvent-from-scratch")
+        );
+        assert_eq!(body, "# body\n");
+    }
+
+    #[test]
+    fn parse_simple_frontmatter_keeps_unquoted_utf8_chinese() {
+        let text = "---\nname: huashu\ndescription: 花叔Design——用HTML做高保真原型\n---\nbody\n";
+        let (fields, _, _) = parse_simple_frontmatter(text);
+        assert_eq!(
+            fields.get("description").map(String::as_str),
+            Some("花叔Design——用HTML做高保真原型")
+        );
+    }
+
+    #[test]
+    fn parse_simple_frontmatter_single_quotes_unescape_doubled_quote() {
+        let text = "---\nname: 'it''s ok'\ndescription: 'plain'\n---\n";
+        let (fields, _, _) = parse_simple_frontmatter(text);
+        assert_eq!(fields.get("name").map(String::as_str), Some("it's ok"));
+        assert_eq!(fields.get("description").map(String::as_str), Some("plain"));
+    }
+
+    #[test]
+    fn unescape_json_string_inner_keeps_invalid_unicode_escape() {
+        assert_eq!(unescape_json_string_inner(r"\uZZZZ left"), r"\uZZZZ left");
+        assert_eq!(unescape_json_string_inner(r"\u7528"), "用");
     }
 
     #[test]

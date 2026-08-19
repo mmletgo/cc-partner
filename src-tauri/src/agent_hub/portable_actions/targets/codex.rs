@@ -393,7 +393,13 @@ fn execute_skill(
                 | PortableAssetActionKind::Disable
                 | PortableAssetActionKind::Uninstall
         ) {
-            return detach_codex_skill_store_mounts(ctx.action, &id, &native_link, change, pre_item);
+            return detach_codex_skill_store_mounts(
+                ctx.action,
+                &id,
+                &native_link,
+                change,
+                pre_item,
+            );
         }
         return execute_skill_or_command_store(
             AgentTarget::Codex,
