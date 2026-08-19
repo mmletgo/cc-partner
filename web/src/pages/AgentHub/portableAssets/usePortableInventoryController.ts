@@ -148,17 +148,20 @@ export function usePortableInventoryController(
     null,
   );
 
-  const inventoryQuery = useMemo(
-    (): PortableInventoryQuery => ({
+  const inventoryQuery = useMemo((): PortableInventoryQuery => {
+    // 本机 projectRef 必须带 scopeKind=project，否则 Rust 拒绝解析 localProjectId。
+    const localProjectId =
+      projectRef && !projectRef.startsWith('remote:') ? projectRef : undefined;
+    return {
       ...(filters.target === 'all' ? {} : { target: filters.target }),
       kind: filters.kind,
-      ...(filters.scope === 'all' ? {} : { scopeKind: filters.scope }),
-      ...(projectRef && !projectRef.startsWith('remote:')
-        ? { localProjectId: projectRef }
-        : {}),
-    }),
-    [filters.kind, filters.scope, filters.target, projectRef],
-  );
+      ...(localProjectId
+        ? { scopeKind: 'project', localProjectId }
+        : filters.scope === 'all'
+          ? {}
+          : { scopeKind: filters.scope }),
+    };
+  }, [filters.kind, filters.scope, filters.target, projectRef]);
   const inspectRequest = useMemo(
     (): PortableInventoryRequestContext => ({ ...requestContext, ...inventoryQuery }),
     [inventoryQuery, requestContext],

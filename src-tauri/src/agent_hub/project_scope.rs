@@ -12,10 +12,12 @@ use crate::agent_hub::models::{NewScopeNode, ScopeKind};
 use crate::commands::workbench::ensure_main_worktree;
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::storage::agent_hub_repo::AgentHubProjectMappingRow;
 use crate::storage::{
     AgentHubCheckoutBindingRow, UpsertAgentHubCheckoutBinding, UpsertAgentHubProjectMapping,
 };
 use crate::workbench::git as workbench_git;
+use crate::workbench::models::WorkbenchProjectRow;
 use crate::workbench::projects::{normalize_git_remote_fingerprint, read_git_remote_url};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -209,47 +211,28 @@ pub async fn build_project_enable_preview(
     })
 }
 
-/// 确认启用项目 Agent Hub 作用域。
+/// 为本机 Workbench 项目确保 portable mapping 身份存在，不自动 opt-in。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户 confirm 后创建 portable hubProjectId 映射与 checkout bindings，后续 worktree 继承 opt-in。
+///     项目 Agent 的 Skill/Command/Plugin/MCP 扫描需要 hubProjectId 与已登记路径；
+///     缺失 mapping 时不得整表 404。路径来自当前 Workbench 项目，不是猜测；
+///     opted_in 保持原值，新建时为 false，mutation 仍只读。
 ///
 /// Code Logic（这个函数做什么）:
-///     confirm 必须 true；已 opt-in 则 refresh 返回；否则 UUID hub_id + project ScopeNode + mapping + refresh。
-pub async fn enable_project_scope(
+///     已有 mapping 原样返回；否则 UUID hub_id + 空 relative_path 的 project scope +
+///     opted_in=false 的 mapping（含 workbench id / 绝对路径 / git fingerprint）。
+pub(crate) async fn ensure_local_project_mapping_identity(
     state: &AppState,
-    request: EnableAgentHubProjectRequest,
-) -> Result<AgentHubProjectStatus, AppError> {
-    if !request.confirm {
-        return Err(AppError::validation(
-            "启用 Agent Hub 项目作用域需要 confirm=true",
-        ));
-    }
-    let project = load_local_project(state, &request.project_id).await?;
-    let existing = state
+    project: &WorkbenchProjectRow,
+) -> Result<AgentHubProjectMappingRow, AppError> {
+    if let Some(existing) = state
         .agent_hub_repo
-        .get_project_mapping_by_local_workbench_id(&request.project_id)
-        .await?;
-
-    let hub_project_id = if let Some(mapping) = existing {
-        if mapping.opted_in {
-            let bindings = refresh_checkout_bindings(state, &request.project_id).await?;
-            let warnings = collect_binding_warnings(&bindings);
-            return Ok(AgentHubProjectStatus {
-                project_id: request.project_id,
-                hub_project_id: mapping.hub_project_id,
-                opted_in: true,
-                git_remote_fingerprint: mapping.git_remote_fingerprint,
-                bindings,
-                warnings,
-            });
-        }
-        mapping.hub_project_id
-    } else {
-        uuid::Uuid::new_v4().to_string()
-    };
-
-    // 幂等创建 project scope（相对路径为空，绝不写绝对路径）
+        .get_project_mapping_by_local_workbench_id(&project.id)
+        .await?
+    {
+        return Ok(existing);
+    }
+    let hub_project_id = uuid::Uuid::new_v4().to_string();
     if state
         .agent_hub_repo
         .get_project_scope_by_hub_project_id(&hub_project_id)
@@ -266,6 +249,51 @@ pub async fn enable_project_scope(
             })
             .await?;
     }
+    let fingerprint = read_git_remote_url(Path::new(&project.path))
+        .map(|url| normalize_git_remote_fingerprint(&url));
+    state
+        .agent_hub_repo
+        .upsert_project_mapping(UpsertAgentHubProjectMapping {
+            hub_project_id,
+            local_workbench_project_id: Some(project.id.clone()),
+            git_remote_fingerprint: fingerprint,
+            local_absolute_path: Some(project.path.clone()),
+            opted_in: false,
+        })
+        .await
+}
+
+/// 确认启用项目 Agent Hub 作用域。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户 confirm 后创建 portable hubProjectId 映射与 checkout bindings，后续 worktree 继承 opt-in。
+///
+/// Code Logic（这个函数做什么）:
+///     confirm 必须 true；已 opt-in 则 refresh 返回；否则 ensure mapping 身份后 opted_in=true + refresh。
+pub async fn enable_project_scope(
+    state: &AppState,
+    request: EnableAgentHubProjectRequest,
+) -> Result<AgentHubProjectStatus, AppError> {
+    if !request.confirm {
+        return Err(AppError::validation(
+            "启用 Agent Hub 项目作用域需要 confirm=true",
+        ));
+    }
+    let project = load_local_project(state, &request.project_id).await?;
+    let existing = ensure_local_project_mapping_identity(state, &project).await?;
+    if existing.opted_in {
+        let bindings = refresh_checkout_bindings(state, &request.project_id).await?;
+        let warnings = collect_binding_warnings(&bindings);
+        return Ok(AgentHubProjectStatus {
+            project_id: request.project_id,
+            hub_project_id: existing.hub_project_id,
+            opted_in: true,
+            git_remote_fingerprint: existing.git_remote_fingerprint,
+            bindings,
+            warnings,
+        });
+    }
+    let hub_project_id = existing.hub_project_id;
 
     let fingerprint = read_git_remote_url(Path::new(&project.path))
         .map(|url| normalize_git_remote_fingerprint(&url));
@@ -1175,5 +1203,83 @@ mod tests {
             .unwrap();
         let bindings = refresh_checkout_bindings(&state, project_id).await.unwrap();
         assert!(bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inspect_project_inventory_without_prior_opt_in_scans_read_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let registered = tmp.path().join("wt-reg");
+        let external = tmp.path().join("wt-ext");
+        let db = tmp.path().join("data.db");
+        std::fs::create_dir_all(repo.join(".claude/skills/demo")).unwrap();
+        init_git_repo(&repo, "https://example.com/unmapped.git");
+        std::fs::write(
+            repo.join(".claude/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\n---\n# Demo\n",
+        )
+        .unwrap();
+
+        let state = build_hub_state(&db).await;
+        let project_id = "proj-unmapped-inv";
+        seed_project_with_worktrees(&state, project_id, &repo, &registered, &external).await;
+        assert!(state
+            .agent_hub_repo
+            .get_project_mapping_by_local_workbench_id(project_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let env = crate::agent_hub::targets::TargetEnvironment {
+            home: tmp.path().to_path_buf(),
+            vars: Default::default(),
+            path_entries: vec![],
+        };
+        let snap = crate::agent_hub::portable_inventory::inspect_portable_inventory_with_env_query(
+            &state,
+            &env,
+            crate::agent_hub::portable_inventory::PortableInventoryQuery {
+                target: Some(crate::agent_hub::models::AgentTarget::Claude),
+                kind: Some(crate::agent_hub::portable_inventory::PortableAssetKind::Skill),
+                scope_kind: Some(ScopeKind::Project),
+                local_project_id: Some(project_id.to_string()),
+            },
+        )
+        .await
+        .expect("unmapped local workbench project must scan without mapping 404");
+
+        assert!(
+            snap.items.iter().any(|item| item.native_id == "demo"),
+            "expected project skill demo in {:?}",
+            snap.items
+                .iter()
+                .map(|item| item.native_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(snap.items.iter().all(|item| !item.project_opted_in));
+        assert!(snap.items.iter().all(|item| {
+            item.capabilities.reason_code.as_deref() == Some("project_not_opted_in")
+        }));
+
+        let mapping = state
+            .agent_hub_repo
+            .get_project_mapping_by_local_workbench_id(project_id)
+            .await
+            .unwrap()
+            .expect("inspect should persist mapping identity");
+        assert!(!mapping.opted_in);
+        let hub_project_id = mapping.hub_project_id.clone();
+
+        let enabled = enable_project_scope(
+            &state,
+            EnableAgentHubProjectRequest {
+                project_id: project_id.to_string(),
+                confirm: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(enabled.opted_in);
+        assert_eq!(enabled.hub_project_id, hub_project_id);
     }
 }

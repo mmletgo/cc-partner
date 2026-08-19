@@ -552,6 +552,7 @@ describe('usePortableInventoryController', () => {
       projectRef: 'wb-local-2',
       target: 'claude',
       kind: 'skill',
+      scopeKind: 'project',
       localProjectId: 'wb-local-2',
     });
     expect(result.current.requestContext.projectRef).toBe('wb-local-2');

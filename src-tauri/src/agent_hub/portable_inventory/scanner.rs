@@ -436,6 +436,14 @@ pub fn scan_portable_inventory_facts_query(
 }
 
 /// 从 AppState 收集 user + 已注册 mapping 的 project scopes。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户级列举不得猜测未映射项目路径；项目 Agent 显式传入本机 workbench id 时
+///     必须能只读扫描，不能因尚未 opt-in 而 404。
+///
+/// Code Logic（这个函数做什么）:
+///     有 local_project_id 则校验本机项目并 ensure mapping 身份（新建 opted_in=false）；
+///     否则 user home + 已映射 projects。
 async fn collect_scan_scopes(
     state: &AppState,
     env: &TargetEnvironment,
@@ -468,11 +476,9 @@ async fn collect_scan_scopes(
                 "PORTABLE_INVENTORY_REMOTE_PROJECT_UNSUPPORTED",
             ));
         }
-        let mapping = state
-            .agent_hub_repo
-            .get_project_mapping_by_local_workbench_id(local_project_id)
-            .await?
-            .ok_or_else(|| AppError::not_found("PORTABLE_INVENTORY_PROJECT_MAPPING_NOT_FOUND"))?;
+        let mapping =
+            crate::agent_hub::project_scope::ensure_local_project_mapping_identity(state, &project)
+                .await?;
         if mapping.local_workbench_project_id.as_deref() != Some(local_project_id) {
             return Err(AppError::validation(
                 "PORTABLE_INVENTORY_PROJECT_MAPPING_MISMATCH",
@@ -505,7 +511,8 @@ async fn collect_scan_scopes(
         absolute_path: env.home.clone(),
     }];
 
-    // 路径只来自已注册 mapping（经 workbench local project 关联）；未映射不猜测。
+    // 全量列举：路径只来自已注册 mapping；未映射不猜测。
+    // 显式 local_project_id 已在上方 ensure 身份（opted_in 保持原值 / 新建为 false）。
     let projects = state
         .workbench_project_repo
         .list()
