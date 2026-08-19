@@ -27,7 +27,8 @@ use crate::agent_hub::portable_inventory::{
     hash_plugin_root, PortableAssetKind, PortableInventoryItemDto,
 };
 use crate::agent_hub::portable_store::{
-    execute_skill_or_command_store, should_use_store_semantics,
+    current_portable_store_root, execute_skill_or_command_store, is_under_portable_store,
+    observed_or_native_store_mount, should_use_store_semantics,
 };
 use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
@@ -175,7 +176,9 @@ fn resolve_codex_roots(
 
     let skills_dir = if let Some(path) = change.path.as_deref().map(Path::new) {
         // Prefer active skills root under CODEX_HOME (…/skills/<id>), but never treat
-        // hub `…/disabled/skills` as the active skills_dir.
+        // hub `…/disabled/skills` or the portable-store 真树 as the active skills_dir.
+        // 未附加仓库项的 source_path 就是 store/skills/<id>；若把那层当 native 根，
+        // attach 会在真树上创建指向自己的软链并报 LINK_CONFLICT_REAL_PATH。
         path.ancestors()
             .find(|a| {
                 let name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -187,7 +190,7 @@ fn resolve_codex_roots(
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str())
                     == Some("disabled");
-                !parent_is_disabled
+                !parent_is_disabled && !path_is_under_portable_store(a)
             })
             .map(Path::to_path_buf)
             .unwrap_or_else(|| codex_home.join("skills"))
@@ -278,6 +281,32 @@ fn inventory_content_hash_for_path(
     }
 }
 
+/// 路径是否落在 portable-store 真树内。
+///
+/// Business Logic: 仓库真树不能当 Codex native 挂载点，否则附加会覆盖真安装。
+/// Code Logic: canonicalize 后 `is_under_portable_store`；失败则前缀匹配。
+fn path_is_under_portable_store(path: &Path) -> bool {
+    let Some(store_root) = current_portable_store_root() else {
+        return false;
+    };
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return is_under_portable_store(&canonical, &store_root);
+    }
+    path.starts_with(&store_root)
+}
+
+/// Codex 上应挂/拆的 native 路径。
+///
+/// Business Logic: 已附加软链用观测路径；未附加仓库项的 source_path 是真树，必须落到 CODEX_HOME。
+/// Code Logic: 观测路径是软链则用之；落在 store 内则回退 native 挂载点。
+fn codex_native_store_mount(observed: Option<&str>, fallback: PathBuf) -> PathBuf {
+    let mounted = observed_or_native_store_mount(observed, fallback.clone());
+    if path_is_under_portable_store(&mounted) {
+        return fallback;
+    }
+    mounted
+}
+
 fn native_id(
     change: &PortableAssetActionChangeDto,
     pre_item: Option<&PortableInventoryItemDto>,
@@ -301,7 +330,7 @@ fn execute_skill(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
-    let native_link = roots.skills_dir.join(&id);
+    let native_link = codex_native_store_mount(change.path.as_deref(), roots.skills_dir.join(&id));
     if should_use_store_semantics(ctx.action, Some(&native_link), pre_item)
         || change
             .path
@@ -399,7 +428,10 @@ fn execute_command(
     pre_item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
-    let native_link = roots.commands_dir.join(format!("{id}.md"));
+    let native_link = codex_native_store_mount(
+        change.path.as_deref(),
+        roots.commands_dir.join(format!("{id}.md")),
+    );
     if should_use_store_semantics(ctx.action, Some(&native_link), pre_item)
         || change
             .path
@@ -873,8 +905,12 @@ mod tests {
     };
     use crate::agent_hub::portable_inventory::{
         PortableAssetOwner, PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
-        PortableInventorySourceOrigin, PortableOriginKind,
+        PortableInventorySourceOrigin, PortableOriginKind, PortableStoreFactDto,
     };
+    use crate::agent_hub::portable_store::{
+        ensure_portable_store_layout, portable_store_root, store_skill_dir,
+    };
+    use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
     use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::TempDir;
 
@@ -1027,6 +1063,81 @@ mod tests {
         assert_eq!(out2, TargetActionRawOutcome::Applied);
         assert!(skill_dir.exists());
         std::env::remove_var("CODEX_HOME");
+    }
+
+    /// Business Logic: 仓库附加必须在 CODEX_HOME/skills 建软链，不得把 store 真树当挂载点。
+    /// Code Logic: change.path 指向 portable-store/skills/<id> 时 attach 仍落到 ~/.codex/skills。
+    #[test]
+    fn attach_store_skill_links_codex_home_not_store_tree() {
+        let _data_guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _codex_guard = codex_home_lock();
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        let codex_home = tmp.path().join("codex-home");
+        fs::create_dir_all(codex_home.join("skills")).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data_dir);
+        std::env::set_var("CODEX_HOME", &codex_home);
+        let store_root = ensure_portable_store_layout(&data_dir).unwrap();
+        let store_tree = store_skill_dir(&store_root, "web-video-presentation");
+        fs::create_dir_all(&store_tree).unwrap();
+        fs::write(
+            store_tree.join("SKILL.md"),
+            "---\nname: web-video-presentation\n---\n",
+        )
+        .unwrap();
+
+        let store_path = store_tree.to_string_lossy().into_owned();
+        let mut item = sample_item(
+            PortableAssetKind::Skill,
+            "web-video-presentation",
+            &store_path,
+        );
+        item.owned_by = PortableAssetOwner::PortableStore;
+        item.actual_enabled = Some(false);
+        item.store = PortableStoreFactDto {
+            store_id: Some("skill:web-video-presentation".into()),
+            store_attached: false,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        let change = base_change(
+            PortableAssetKind::Skill,
+            "id-web-video-presentation",
+            &store_path,
+            PortableAssetPlanOperation::Attach,
+        );
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: None,
+            data_dir: Some(data_dir.clone()),
+            keep_data: false,
+            action: PortableAssetActionKind::Attach,
+        };
+        let plan = empty_plan(PortableAssetActionKind::Attach, vec![change.clone()]);
+        let out = CodexTargetExecutor
+            .execute_change(&ctx, &plan, &change, Some(&item))
+            .unwrap();
+        assert_eq!(out, TargetActionRawOutcome::Applied, "attach must succeed");
+        let native = codex_home.join("skills").join("web-video-presentation");
+        let meta = fs::symlink_metadata(&native).expect("native mount");
+        assert!(
+            meta.file_type().is_symlink(),
+            "CODEX_HOME/skills must receive the store symlink"
+        );
+        assert_eq!(
+            fs::canonicalize(&native).unwrap(),
+            fs::canonicalize(&store_tree).unwrap()
+        );
+        assert!(
+            !fs::symlink_metadata(&store_tree)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "store tree must remain a real directory"
+        );
+        let _ = portable_store_root(&data_dir);
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 
     #[test]
