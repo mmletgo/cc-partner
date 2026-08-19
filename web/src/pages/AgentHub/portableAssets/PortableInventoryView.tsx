@@ -17,13 +17,17 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   isPortableStoreAssetKind,
+  groupPortableStoreCatalog,
+  matchesPortableStoreCatalogGroup,
+  portableStoreAgentChipStates,
   partitionPortableInventoryItems,
-  partitionPortableStoreCatalogItems,
+  type PortableInventoryFilters,
 } from './portableInventoryPresentation';
 import type { UsePortableInventoryControllerResult } from './usePortableInventoryController';
 import {
   PortableInventoryRow,
   type PortableInventoryRowLabels,
+  type PortableStoreAgentChip,
 } from './PortableInventoryRow';
 import styles from '../AgentHub.module.css';
 
@@ -95,7 +99,8 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     mutationBlocked,
   } = controller;
 
-  const showMigrateAllToStore = isPortableStoreAssetKind(filters.kind);
+  const showMigrateAllToStore =
+    isPortableStoreAssetKind(filters.kind) && filters.assetLane !== 'store';
   const migrateAllCount = migratableToStoreItems.length;
   const migrateAllDisabled =
     migrateAllCount === 0 ||
@@ -278,6 +283,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
           onOpenOwner,
           openAction,
           storeLane: filters.assetLane === 'store',
+          filters,
         })}
       </div>
     </div>
@@ -292,10 +298,11 @@ interface InventoryGroupRenderProps {
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
   openAction: (itemId: string, action: PortableAssetActionKind) => void;
   storeLane: boolean;
+  filters: PortableInventoryFilters;
 }
 
 /**
- * Business Logic: 已装备拆「已安装在此」与「运行时借用」；仓库拆「已附加」与「未附加」。
+ * Business Logic: 已装备拆「已安装在此」与「运行时借用」；仓库按 Skill/Command 去重并展示各 Agent 启用芯片。
  * Code Logic: 两边都空才 empty；已装备仅借用时附 emptyRuntimeHint。
  */
 function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
@@ -307,6 +314,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
     onOpenOwner,
     openAction,
     storeLane,
+    filters,
   } = props;
 
   function renderRow(
@@ -327,8 +335,10 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
   }
 
   if (storeLane) {
-    const { attached, available } = partitionPortableStoreCatalogItems(visibleItems);
-    if (attached.length === 0 && available.length === 0) {
+    const groups = groupPortableStoreCatalog(visibleItems).filter((group) =>
+      matchesPortableStoreCatalogGroup(group, filters),
+    );
+    if (groups.length === 0) {
       return (
         <p className={styles.empty} data-testid="portable-inventory-empty">
           {labels.empty}
@@ -336,38 +346,46 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
       );
     }
     return (
-      <>
-        {attached.length > 0 ? (
-          <section
-            className={styles.inventoryGroup}
-            data-testid="portable-inventory-group-store-attached"
-            aria-labelledby="portable-inventory-group-store-attached-title"
-          >
-            <h3
-              id="portable-inventory-group-store-attached-title"
-              className={styles.inventoryGroupTitle}
-            >
-              {labels.groupStoreAttached}
-            </h3>
-            {attached.map((item) => renderRow(item))}
-          </section>
-        ) : null}
-        {available.length > 0 ? (
-          <section
-            className={styles.inventoryGroup}
-            data-testid="portable-inventory-group-store-available"
-            aria-labelledby="portable-inventory-group-store-available-title"
-          >
-            <h3
-              id="portable-inventory-group-store-available-title"
-              className={styles.inventoryGroupTitle}
-            >
-              {labels.groupStoreAvailable}
-            </h3>
-            {available.map((item) => renderRow(item))}
-          </section>
-        ) : null}
-      </>
+      <section
+        className={styles.inventoryGroup}
+        data-testid="portable-inventory-group-store-catalog"
+        aria-label={labels.title}
+      >
+        {groups.map((group) => {
+          const item = group.representative;
+          const chips: PortableStoreAgentChip[] = portableStoreAgentChipStates(group).map(
+            (chip) => ({
+              target: chip.target,
+              enabled: chip.enabled,
+              derived: chip.derived,
+              derivedFrom: chip.derivedFrom,
+              canToggle: chip.canToggle,
+              busy: chip.item ? lockedItemIds.has(chip.item.inventoryItemId) : false,
+            }),
+          );
+          const actions = getRowActions(item).filter(
+            (action) => action !== 'attach' && action !== 'detach',
+          );
+          return (
+            <PortableInventoryRow
+              key={group.key}
+              item={item}
+              busy={lockedItemIds.has(item.inventoryItemId) || chips.some((chip) => chip.busy)}
+              actions={actions}
+              labels={labels}
+              catalogAgentChips={chips}
+              onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
+              onToggleCatalogAgent={(target) => {
+                const chip = portableStoreAgentChipStates(group).find(
+                  (entry) => entry.target === target,
+                );
+                if (!chip?.canToggle || !chip.item) return;
+                openAction(chip.item.inventoryItemId, chip.enabled ? 'detach' : 'attach');
+              }}
+            />
+          );
+        })}
+      </section>
     );
   }
 

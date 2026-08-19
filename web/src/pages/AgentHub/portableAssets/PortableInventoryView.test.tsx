@@ -453,46 +453,71 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-row-action-uninstall-grok-skill-shared')).toBeTruthy();
   });
 
-  test('store lane groups attached vs available catalog items', () => {
+  test('store lane lists each skill once with per-agent enable chips', () => {
     const attached = item({
-      inventoryItemId: 'claude-skill-attached',
-      nativeId: 'attached',
-      displayName: 'Attached Skill',
+      inventoryItemId: 'claude-skill-shared',
+      nativeId: 'shared',
+      displayName: 'Shared Skill',
       ownedBy: 'portableStore',
-      store: { storeId: 'skill:attached', storeAttached: true },
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canAttach: true,
+        canDetach: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+      store: { storeId: 'skill:shared', storeAttached: true },
     });
-    const available = item({
-      inventoryItemId: 'claude-skill-available',
-      nativeId: 'available',
-      displayName: 'Available Skill',
+    const grokViaClaude = item({
+      inventoryItemId: 'grok-skill-shared',
+      nativeId: 'shared',
+      displayName: 'Shared Skill',
+      target: 'grok',
       ownedBy: 'portableStore',
-      store: { storeId: 'skill:available', storeAttached: false },
+      originKind: 'compatibility',
+      actualEnabled: true,
+      store: {
+        storeId: 'skill:shared',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
     });
+    const openAction = vi.fn();
     render(
       <PortableInventoryView
         controller={controller({
-          visibleItems: [attached, available],
+          visibleItems: [attached, grokViaClaude],
           filters: { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, assetLane: 'store' },
           snapshot: {
             inventorySnapshotHash: 'snap-1',
             refreshedAt: '2026-08-07T12:00:00.000Z',
             stale: false,
             targets: [],
-            items: [attached, available],
+            items: [attached, grokViaClaude],
           },
-          getRowActions: () => ['attach'],
+          getRowActions: () => ['attach', 'detach', 'destroyStore'],
+          openAction,
         })}
         labels={labels}
       />,
     );
 
-    expect(screen.getByTestId('portable-inventory-group-store-attached').textContent).toContain(
-      'Attached to this agent',
+    expect(screen.getByTestId('portable-inventory-group-store-catalog')).toBeTruthy();
+    expect(screen.queryByTestId('portable-inventory-group-store-attached')).toBeNull();
+    expect(screen.queryByTestId('portable-inventory-group-store-available')).toBeNull();
+    expect(screen.getAllByTestId('portable-store-agent-chips')).toHaveLength(1);
+    expect(screen.getByTestId('portable-store-agent-chip-claude').getAttribute('data-enabled')).toBe(
+      'true',
     );
-    expect(screen.getByTestId('portable-inventory-group-store-available').textContent).toContain(
-      'Not attached',
+    expect(screen.getByTestId('portable-store-agent-chip-grok').getAttribute('data-derived')).toBe(
+      'true',
     );
-    expect(screen.queryByTestId('portable-inventory-group-installed')).toBeNull();
-    expect(screen.queryByTestId('portable-inventory-group-borrowed')).toBeNull();
+    fireEvent.click(screen.getByTestId('portable-store-agent-chip-claude'));
+    expect(openAction).toHaveBeenCalledWith('claude-skill-shared', 'detach');
   });
 });

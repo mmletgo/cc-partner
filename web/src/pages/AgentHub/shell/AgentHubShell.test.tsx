@@ -173,7 +173,7 @@ describe('AgentHubShell', () => {
         />
       </I18nextProvider>,
     );
-    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-agent-switcher')).toBeNull();
     fireEvent.click(screen.getByTestId('agent-hub-tab-command'));
     expect(onContextChange).toHaveBeenCalledWith({
       tab: 'command',

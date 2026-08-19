@@ -3,7 +3,8 @@
  *
  * Business Logic（为什么需要）:
  *   当前发布以 tab × scope × owner × (instructions:lane | skill/command:assetLane) × agent
- *   恢复工作台；本机、远端设备和项目上下文都必须可深链往返。
+ *   恢复工作台；Skill/Command 仓库面与提示词公共槽一样隐藏 Agent 切换。
+ *   本机、远端设备和项目上下文都必须可深链往返。
  *
  * Code Logic（做什么）:
  *   parse/write URLSearchParams；mapLegacySection 把五段分区映射为 Partial context。
@@ -30,8 +31,9 @@ export type InstructionLane = 'common' | 'adapted' | 'exclusive';
 /**
  * Skill/Command 存放面（仅 tab=skill|command 有意义）。
  *
- * Business Logic: 「已装备」是当前 Agent 自己的 native / 已附加软链；
- *   「仓库」是本机一份 portable-store 目录。MCP/Plugin 没有这一层。
+ * Business Logic: 「已装备」是当前 Agent 已启用的 native / 已附加 / 运行时借用；
+ *   「仓库」是本机一份 portable-store 目录，跨 Agent 列同一份，不按 Agent 切换。
+ *   MCP/Plugin 没有这一层。
  * Code Logic: URL 键 `assetLane`；默认 equipped。
  */
 export type PortableAssetLane = 'equipped' | 'store';
@@ -331,6 +333,17 @@ export function isPortableAssetLane(value: string): value is PortableAssetLane {
  */
 export function isPortableStoreTab(tab: AgentHubTab): boolean {
   return STORE_TABS.has(tab);
+}
+
+/**
+ * Business Logic: 仓库是本机一份目录，inspect 必须拉全部 Agent；已装备才跟当前 Agent。
+ * Code Logic: skill/command + store → `all`；其余返回 context.agent。
+ */
+export function portableInventoryTargetForHubContext(
+  ctx: Pick<AgentHubContext, 'tab' | 'assetLane' | 'agent'>,
+): 'all' | AgentTarget {
+  if (isPortableStoreTab(ctx.tab) && ctx.assetLane === 'store') return 'all';
+  return ctx.agent;
 }
 
 /**

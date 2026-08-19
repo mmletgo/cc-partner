@@ -74,6 +74,7 @@ import {
   DEFAULT_AGENT_HUB_CONTEXT,
   isAssetKindTab,
   isPortableStoreTab,
+  portableInventoryTargetForHubContext,
   normalizeAgentHubContext,
   type AgentHubContext,
   type AgentHubTab,
@@ -573,7 +574,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       hubContext.deviceId === null &&
       (hubContext.scope !== 'project' || hubContext.projectKey !== null),
     initialFilters: {
-      target: hubContext.agent,
+      target: portableInventoryTargetForHubContext(hubContext),
       kind: isAssetKindTab(hubContext.tab)
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,
@@ -1841,7 +1842,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       if (isAssetKindTab(merged.tab)) {
       portableInventoryBase.setFilters({
         kind: merged.tab as PortableInventoryFilters['kind'],
-        target: merged.agent,
+        target: portableInventoryTargetForHubContext(merged),
         scope: merged.scope,
         assetLane: isPortableStoreTab(merged.tab)
           ? merged.assetLane
@@ -1929,7 +1930,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     portableUrlHydrationFingerprintRef.current = fingerprint;
 
     const desired: Partial<PortableInventoryFilters> = {
-      target: hubContext.agent,
+      target: portableInventoryTargetForHubContext(hubContext),
       kind: isAssetKindTab(hubContext.tab)
         ? (hubContext.tab as PortableInventoryFilters['kind'])
         : DEFAULT_PORTABLE_INVENTORY_FILTERS.kind,

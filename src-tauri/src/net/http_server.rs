@@ -467,7 +467,7 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(crate::backend::control_workbench::control_workbench_data)
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
-        // Gate A Task9：Agent Hub owner control（metadata 256 KiB；不进 server_protocol_info）
+        // Gate A Task9：Agent Hub owner control（metadata 256 KiB；inventory inspect 响应不强制 1 MiB；不进 server_protocol_info）
         .route(
             "/api/backend/control/agent-hub",
             post(crate::backend::control_agent_hub::control_agent_hub).layer(

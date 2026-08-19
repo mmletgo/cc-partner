@@ -266,6 +266,23 @@ export function AgentHubView(props: AgentHubViewProps) {
       groupStoreAttached: t('agentHub:portable.inventory.groupStoreAttached'),
       groupStoreAvailable: t('agentHub:portable.inventory.groupStoreAvailable'),
       storeBadge: t('agentHub:portable.inventory.storeBadge'),
+      storeAgentGroupAria: t('agentHub:portable.inventory.storeAgentGroupAria'),
+      storeAgentToggleAria: Object.fromEntries(
+        allHubTargets().map((target) => [
+          target,
+          t('agentHub:portable.inventory.storeAgentToggle', {
+            agent: t(`agentHub:targets.${target}`),
+          }),
+        ]),
+      ),
+      storeEnabledVia: Object.fromEntries(
+        allHubTargets().map((target) => [
+          target,
+          t('agentHub:portable.inventory.storeEnabledVia', {
+            agent: t(`agentHub:targets.${target}`),
+          }),
+        ]),
+      ),
       emptyRuntimeHint: t('agentHub:portable.inventory.emptyRuntimeHint'),
       openInOwnerAgent: t('agentHub:portable.inventory.openInOwnerAgent'),
       borrowedFrom: {

@@ -13,6 +13,7 @@ import {
   mapLegacySection,
   parseAgentHubContext,
   peerAllowsUserInstructionThreePane,
+  portableInventoryTargetForHubContext,
   writeAgentHubContext,
   type AgentHubContext,
 } from './agentHubContext';
@@ -90,6 +91,37 @@ describe('parseAgentHubContext', () => {
     const ctx = parseAgentHubContext(new URLSearchParams('tab=command&assetLane=store'));
     expect(ctx.tab).toBe('command');
     expect(ctx.assetLane).toBe('store');
+  });
+
+  test('store lane inspects all agents; equipped follows the current agent', () => {
+    expect(
+      portableInventoryTargetForHubContext({
+        tab: 'skill',
+        assetLane: 'store',
+        agent: 'claude',
+      }),
+    ).toBe('all');
+    expect(
+      portableInventoryTargetForHubContext({
+        tab: 'command',
+        assetLane: 'store',
+        agent: 'grok',
+      }),
+    ).toBe('all');
+    expect(
+      portableInventoryTargetForHubContext({
+        tab: 'skill',
+        assetLane: 'equipped',
+        agent: 'grok',
+      }),
+    ).toBe('grok');
+    expect(
+      portableInventoryTargetForHubContext({
+        tab: 'mcp',
+        assetLane: 'store',
+        agent: 'codex',
+      }),
+    ).toBe('codex');
   });
 
   test('peer user URL keeps the peer and ignores the project field', () => {

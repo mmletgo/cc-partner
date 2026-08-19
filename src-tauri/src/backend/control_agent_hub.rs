@@ -7,7 +7,8 @@
 //! Code Logic（这个模块做什么）:
 //!     POST `/api/backend/control/agent-hub`：loopback+token 鉴权 → require_owner →
 //!     按 `op` 分发到 `AgentHubService`；mutation 额外校验 agentHubApiVersion；
-//!     响应 ≤1 MiB；永不记录 instruction content。
+//!     普通元数据响应 ≤1 MiB；portable inventory inspect/list 与仓库全 Agent 扫描一样
+//!     可能超过该上限，不强制裁切；永不记录 instruction content。
 
 use crate::agent_hub::cross_agent::{
     apply_cross_agent_instruction, preview_cross_agent_instruction,
@@ -108,7 +109,7 @@ pub struct ControlAgentHubResponse {
 ///     桌面 GUI 与 CLI 通过 loopback control 读写 Agent Hub 权威状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     鉴权 → owner 分发 → 响应 ≤1 MiB。
+///     鉴权 → owner 分发；inventory 大读豁免 1 MiB，其余响应仍校验上限。
 pub async fn control_agent_hub(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Extension(context): Extension<P2pRequestContext>,
@@ -124,7 +125,9 @@ pub async fn control_agent_hub(
         owner_instance_id,
         result,
     };
-    ensure_response_within_limit(&body, &context)?;
+    if !is_unbounded_inventory_read_op(&request.op) {
+        ensure_response_within_limit(&body, &context)?;
+    }
     Ok(Json(body))
 }
 
@@ -616,6 +619,20 @@ async fn dispatch_agent_hub_op(
     }
 }
 
+/// portable inventory 全量/远端列表可能超过 1 MiB 元数据上限。
+///
+/// Business Logic: 仓库页按全部 Agent 扫描 Skill/Command；每条资产还会按 target
+///     注入目录项。这是 observed 库存，不是意外膨胀，不能用 1 MiB 卡死。
+/// Code Logic: inspect 本机/远端项目 + list remote metadata 豁免响应上限。
+fn is_unbounded_inventory_read_op(op: &str) -> bool {
+    matches!(
+        op,
+        "agent_hub.inspect_portable_inventory"
+            | "agent_hub.inspect_remote_project_portable_inventory"
+            | "agent_hub.list_remote_portable_inventory"
+    )
+}
+
 /// 是否为写路径 op。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -908,6 +925,30 @@ mod tests {
         assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
         assert!(!is_mutation_op("agent_hub.list_remote_portable_inventory"));
         assert!(!is_mutation_op("agent_hub.get_portable_pull"));
+    }
+
+    /// Business Logic: 仓库全 Agent inspect 不得被 1 MiB 元数据上限拒绝。
+    /// Code Logic: 仅 inventory 大读豁免；status/preview 仍受上限。
+    #[test]
+    fn inventory_reads_are_exempt_from_one_mib_metadata_cap() {
+        assert!(is_unbounded_inventory_read_op(
+            "agent_hub.inspect_portable_inventory"
+        ));
+        assert!(is_unbounded_inventory_read_op(
+            "agent_hub.inspect_remote_project_portable_inventory"
+        ));
+        assert!(is_unbounded_inventory_read_op(
+            "agent_hub.list_remote_portable_inventory"
+        ));
+        assert!(!is_unbounded_inventory_read_op("agent_hub.get_status"));
+        assert!(!is_unbounded_inventory_read_op(
+            "agent_hub.preview_portable_asset_action"
+        ));
+        let src = include_str!("control_agent_hub.rs");
+        assert!(
+            src.contains("if !is_unbounded_inventory_read_op(&request.op)"),
+            "handler must skip the 1 MiB cap for inventory reads"
+        );
     }
 
     /// Business Logic: portable preview/apply 属 v3 写路径；inspect/get 只读。

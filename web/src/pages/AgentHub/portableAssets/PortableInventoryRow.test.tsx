@@ -313,4 +313,38 @@ describe('PortableInventoryRow', () => {
     expect(screen.getByTestId('portable-row-store-badge').textContent).toContain('Portable store');
     expect(screen.queryAllByText('Portable store')).toHaveLength(1);
   });
+
+  test('store catalog chips toggle the matching agent item', () => {
+    const onToggleCatalogAgent = vi.fn();
+    render(
+      <PortableInventoryRow
+        item={item()}
+        labels={labels}
+        catalogAgentChips={[
+          {
+            target: 'claude',
+            enabled: true,
+            derived: false,
+            derivedFrom: null,
+            canToggle: true,
+          },
+          {
+            target: 'grok',
+            enabled: true,
+            derived: true,
+            derivedFrom: 'claude',
+            canToggle: false,
+          },
+        ]}
+        onToggleCatalogAgent={onToggleCatalogAgent}
+      />,
+    );
+
+    expect(screen.getAllByTestId('portable-store-agent-chips')).toHaveLength(1);
+    fireEvent.click(screen.getByTestId('portable-store-agent-chip-claude'));
+    expect(onToggleCatalogAgent).toHaveBeenCalledWith('claude');
+    expect((screen.getByTestId('portable-store-agent-chip-grok') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
 });

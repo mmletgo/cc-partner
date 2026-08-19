@@ -125,6 +125,13 @@
   align-self: start;
 }
 
+.agentChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  align-items: center;
+}
+
 @media (max-width: 760px) {
   .row {
     grid-template-columns: minmax(0, 1fr);

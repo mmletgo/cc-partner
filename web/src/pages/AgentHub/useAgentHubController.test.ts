@@ -696,6 +696,20 @@ describe('useAgentHubController', () => {
     alias.unmount();
   });
 
+  test('skill store lane inspects all agents instead of the current agent', async () => {
+    searchParamsMock.current = new URLSearchParams('tab=skill&assetLane=store&agent=grok');
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
+    const { result, unmount } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(portableApiMocks.inspect).toHaveBeenCalled());
+    expect(result.current.portableInventory.filters.target).toBe('all');
+    expect(result.current.hubContext.agent).toBe('grok');
+    const inspectArg = portableApiMocks.inspect.mock.calls.at(-1)?.[0] as {
+      target?: string;
+    };
+    expect(inspectArg.target).toBeUndefined();
+    unmount();
+  });
+
   test('setActiveSection writes modern tab and removes retired mutation params', async () => {
     searchParamsMock.current = new URLSearchParams('conflictId=c1&bridge=/tmp/bridge');
     setSearchParamsMock.mockImplementation((updater: unknown) => {

@@ -9,7 +9,7 @@
  *   暴露 filters 默认值、match/filter、kind count、actualState 分类、primary action 解析。
  */
 
-import { isHubTarget } from '@/lib/agentCatalog';
+import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type {
   PortableAssetActionKind,
@@ -54,10 +54,22 @@ export interface PortableInventoryPartition {
   borrowed: PortableInventoryItemDto[];
 }
 
-/** 仓库页：已附加到当前 Agent vs 未附加。 */
-export interface PortableStoreCatalogPartition {
-  attached: PortableInventoryItemDto[];
-  available: PortableInventoryItemDto[];
+/** 仓库页：同一 storeId（或 nativeId）跨 Agent 合成一行。 */
+export interface PortableStoreCatalogGroup {
+  key: string;
+  displayName: string;
+  representative: PortableInventoryItemDto;
+  byTarget: Partial<Record<AgentTarget, PortableInventoryItemDto>>;
+}
+
+/** 仓库行上某个 Agent 的启用芯片。 */
+export interface PortableStoreAgentChipState {
+  target: AgentTarget;
+  enabled: boolean;
+  derived: boolean;
+  derivedFrom: AgentTarget | null;
+  canToggle: boolean;
+  item: PortableInventoryItemDto | null;
 }
 
 /**
@@ -243,22 +255,135 @@ export function canOfferPortableDetach(item: PortableInventoryItemDto): boolean 
 }
 
 /**
- * Business Logic: 仓库页按「已附加到此 Agent」与「未附加」拆组。
- * Code Logic: storeAttached 为真进 attached，其余 catalog 项进 available。
+ * Business Logic: 仓库按 Skill/Command 去重，不按 Agent 拆行。
+ * Code Logic: 优先 storeId；否则 kind+nativeId+scope。
  */
-export function partitionPortableStoreCatalogItems(
+export function portableStoreCatalogGroupKey(item: PortableInventoryItemDto): string {
+  if (item.store?.storeId) return item.store.storeId;
+  return `${item.kind}:${item.nativeId}:${item.scopeKind}:${item.scopeId}`;
+}
+
+/**
+ * Business Logic: 同一 Agent 可能同时有本机软链、兼容路径扫描和未附加注入；芯片要看真正生效的那条。
+ * Code Logic: 本机已附加 > 运行时借用/经其他路径加载 > 未附加目录项。
+ */
+function rankPortableStoreGroupItem(item: PortableInventoryItemDto): number {
+  if (item.store?.storeAttached === true && !isPortableBorrowedRuntimeItem(item)) return 3;
+  if (item.store?.loadedViaOtherPath || isPortableBorrowedRuntimeItem(item)) return 2;
+  if (item.store?.storeAttached === true) return 2;
+  return 1;
+}
+
+function preferPortableStoreGroupItem(
+  current: PortableInventoryItemDto | undefined,
+  next: PortableInventoryItemDto,
+): PortableInventoryItemDto {
+  if (!current) return next;
+  return rankPortableStoreGroupItem(next) > rankPortableStoreGroupItem(current) ? next : current;
+}
+
+/**
+ * Business Logic: 仓库列出本机每一份 Skill/Command，一行代表所有 Agent 的启用态。
+ * Code Logic: 按 group key 合并；byTarget 保留每个 Agent 最高优先级的库存项。
+ */
+export function groupPortableStoreCatalog(
   items: readonly PortableInventoryItemDto[],
-): PortableStoreCatalogPartition {
-  const attached: PortableInventoryItemDto[] = [];
-  const available: PortableInventoryItemDto[] = [];
+): PortableStoreCatalogGroup[] {
+  const groups = new Map<string, PortableStoreCatalogGroup>();
   for (const item of items) {
-    if (item.store?.storeAttached) {
-      attached.push(item);
-    } else {
-      available.push(item);
+    const key = portableStoreCatalogGroupKey(item);
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, {
+        key,
+        displayName: item.displayName,
+        representative: item,
+        byTarget: { [item.target]: item },
+      });
+      continue;
     }
+    existing.byTarget[item.target] = preferPortableStoreGroupItem(
+      existing.byTarget[item.target],
+      item,
+    );
+    existing.representative = preferPortableStoreGroupItem(existing.representative, item);
+    existing.displayName = existing.representative.displayName;
   }
-  return { attached, available };
+  return [...groups.values()];
+}
+
+/**
+ * Business Logic: 芯片 = 该 Agent 是否会加载这份仓库资产；Grok 等借用路径随源 Agent 变化。
+ * Code Logic: 已附加或 loadedViaOtherPath / actualEnabled 视为启用；借用且无本机软链则只读。
+ */
+export function portableStoreAgentChipState(
+  group: PortableStoreCatalogGroup,
+  target: AgentTarget,
+): PortableStoreAgentChipState {
+  const item = group.byTarget[target] ?? null;
+  if (!item) {
+    return {
+      target,
+      enabled: false,
+      derived: false,
+      derivedFrom: null,
+      canToggle: false,
+      item: null,
+    };
+  }
+  const derived =
+    isPortableBorrowedRuntimeItem(item) && item.store?.storeAttached !== true;
+  const enabled =
+    item.store?.storeAttached === true ||
+    item.store?.loadedViaOtherPath === true ||
+    item.actualEnabled === true;
+  const canToggle = derived
+    ? false
+    : enabled
+      ? canOfferPortableDetach(item)
+      : canOfferPortableAttach(item);
+  return {
+    target,
+    enabled,
+    derived,
+    derivedFrom: derived ? portableBorrowedOwnerJumpTarget(item) : null,
+    canToggle,
+    item,
+  };
+}
+
+/**
+ * Business Logic: 仓库行展示全部 Hub Agent，缺扫描项的芯片保持未启用且不可点。
+ * Code Logic: allHubTargets 固定顺序。
+ */
+export function portableStoreAgentChipStates(
+  group: PortableStoreCatalogGroup,
+): PortableStoreAgentChipState[] {
+  return allHubTargets().map((target) => portableStoreAgentChipState(group, target));
+}
+
+/**
+ * Business Logic: 仓库筛选作用在整份 Skill/Command 上，而不是某个 Agent 的副本。
+ * Code Logic: management / actualState 看 representative 与「是否有 Agent 已启用」。
+ */
+export function matchesPortableStoreCatalogGroup(
+  group: PortableStoreCatalogGroup,
+  filters: PortableInventoryFilters,
+): boolean {
+  if (
+    filters.management !== 'all' &&
+    group.representative.managementState !== filters.management
+  ) {
+    return false;
+  }
+  if (filters.actualState === 'all') return true;
+  const chips = portableStoreAgentChipStates(group);
+  if (filters.actualState === 'enabled') return chips.some((chip) => chip.enabled);
+  if (filters.actualState === 'disabled') return chips.every((chip) => !chip.enabled);
+  if (filters.actualState === 'problem') {
+    return isPortableInventoryProblem(group.representative);
+  }
+  return true;
 }
 
 /**
@@ -319,35 +444,43 @@ export function matchesPortableInventoryItem(
   filters: PortableInventoryFilters,
 ): boolean {
   if (item.kind !== filters.kind) return false;
-  if (filters.target !== 'all' && item.target !== filters.target) return false;
+  const storeCatalogLane =
+    isPortableStoreAssetKind(item.kind) && filters.assetLane === 'store';
+  if (!storeCatalogLane && filters.target !== 'all' && item.target !== filters.target) {
+    return false;
+  }
   if (filters.scope !== 'all') {
     if (filters.scope === 'user' && item.scopeKind !== 'user') return false;
     if (filters.scope === 'project' && item.scopeKind !== 'project') return false;
   }
-  if (filters.management !== 'all' && item.managementState !== filters.management) {
-    return false;
-  }
-  if (filters.actualState !== 'all') {
-    const actual = classifyPortableActualState(item);
-    if (filters.actualState === 'problem') {
-      if (actual !== 'problem') return false;
-    } else if (actual !== filters.actualState) {
+  if (!storeCatalogLane) {
+    if (filters.management !== 'all' && item.managementState !== filters.management) {
       return false;
     }
-  }
-  if (!matchesSearch(item, filters.search)) return false;
-    if (isPortableStoreAssetKind(item.kind)) {
-      const catalog = isPortableStoreCatalogItem(item);
-      if (filters.assetLane === 'store') {
-        if (!catalog) return false;
-      } else if (
-        catalog &&
-        item.store?.storeAttached !== true &&
-        !isPortableBorrowedRuntimeItem(item)
-      ) {
+    if (filters.actualState !== 'all') {
+      const actual = classifyPortableActualState(item);
+      if (filters.actualState === 'problem') {
+        if (actual !== 'problem') return false;
+      } else if (actual !== filters.actualState) {
         return false;
       }
     }
+  }
+  if (!matchesSearch(item, filters.search)) return false;
+  if (isPortableStoreAssetKind(item.kind)) {
+    const catalog = isPortableStoreCatalogItem(item);
+    if (storeCatalogLane) {
+      if (!catalog) return false;
+    } else if (
+      catalog &&
+      item.store?.storeAttached !== true &&
+      !isPortableBorrowedRuntimeItem(item)
+    ) {
+      return false;
+    } else if (item.actualEnabled === false) {
+      return false;
+    }
+  }
   return true;
 }
 

@@ -42,6 +42,12 @@ export interface PortableInventoryRowLabels {
   openInOwnerAgent: string;
   /** 便携仓库徽章；缺省时不渲染。 */
   storeBadge?: string;
+  /** 仓库行 Agent 芯片组无障碍名称。 */
+  storeAgentGroupAria?: string;
+  /** 为某 Agent 启用/卸下的 aria-label。 */
+  storeAgentToggleAria?: Partial<Record<AgentTarget, string>>;
+  /** 借用启用：经另一 Agent 加载。 */
+  storeEnabledVia?: Partial<Record<AgentTarget, string>>;
 }
 
 export interface PortableInventoryRowProps {
@@ -60,6 +66,22 @@ export interface PortableInventoryRowProps {
   onPrimaryAction?: (item: PortableInventoryItemDto, action: PortableAssetActionKind) => void;
   /** 借用行：切到所有者 Agent；不是 PortableAssetActionKind。 */
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
+  /**
+   * 仓库全局列表：每个 Agent 一枚启用芯片。
+   * 提供时隐藏单 Agent 目标徽标，并用芯片替代 attach/detach。
+   */
+  catalogAgentChips?: PortableStoreAgentChip[];
+  onToggleCatalogAgent?: (target: AgentTarget) => void;
+}
+
+/** 仓库行上展示的 Agent 启用芯片（已由 presentation 算好）。 */
+export interface PortableStoreAgentChip {
+  target: AgentTarget;
+  enabled: boolean;
+  derived: boolean;
+  derivedFrom: AgentTarget | null;
+  canToggle: boolean;
+  busy?: boolean;
 }
 
 function actualTone(
@@ -91,6 +113,8 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     labels,
     onPrimaryAction,
     onOpenOwner,
+    catalogAgentChips,
+    onToggleCatalogAgent,
   } = props;
   const actual = classifyPortableActualState(item);
   const problemWarnings = portableInventoryProblemWarnings(item);
@@ -106,6 +130,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
   const handleAction = onAction ?? onPrimaryAction;
   const showOwnerJump = borrowed && Boolean(onOpenOwner);
   const showMutations = rowActions.length > 0 && Boolean(handleAction);
+  const showCatalogChips = Boolean(catalogAgentChips && catalogAgentChips.length > 0);
 
   return (
     <article
@@ -125,10 +150,14 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
             <div className={styles.titleMeta}>
               <span className={styles.name}>{item.displayName}</span>
               <Pill tone="neutral">{labels.kinds[item.kind]}</Pill>
-              <Pill tone="neutral">{labels.targets[item.target]}</Pill>
-              <Pill tone={actualTone(actual)} dot>
-                {labels.actual[actual]}
-              </Pill>
+              {showCatalogChips ? null : (
+                <Pill tone="neutral">{labels.targets[item.target]}</Pill>
+              )}
+              {showCatalogChips ? null : (
+                <Pill tone={actualTone(actual)} dot>
+                  {labels.actual[actual]}
+                </Pill>
+              )}
               <Pill tone={managementTone(item.managementState)}>
                 {labels.management[item.managementState]}
               </Pill>
@@ -153,7 +182,9 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
             <span>{labels.sourceOrigin[item.sourceOrigin]}</span>
             {item.version ? <span>{item.version}</span> : null}
           </div>
-          {item.sourcePath ? <div className={styles.path}>{item.sourcePath}</div> : null}
+          {showCatalogChips || !item.sourcePath ? null : (
+            <div className={styles.path}>{item.sourcePath}</div>
+          )}
           {showRefreshHint ? (
             <p className={styles.refreshHint} data-testid="portable-row-unmanaged-refresh-hint">
               {labels.unmanagedRefreshHint}
@@ -170,8 +201,41 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           ) : null}
         </div>
       </div>
-      {showMutations || showOwnerJump ? (
+      {showMutations || showOwnerJump || showCatalogChips ? (
         <div className={styles.rowActions}>
+          {showCatalogChips && catalogAgentChips ? (
+            <div
+              className={styles.agentChips}
+              role="group"
+              aria-label={labels.storeAgentGroupAria}
+              data-testid="portable-store-agent-chips"
+            >
+              {catalogAgentChips.map((chip) => {
+                const viaLabel =
+                  chip.derived && chip.derivedFrom
+                    ? labels.storeEnabledVia?.[chip.derivedFrom]
+                    : undefined;
+                return (
+                  <Button
+                    key={chip.target}
+                    variant={chip.enabled ? 'primary' : 'secondary'}
+                    size="sm"
+                    disabled={!chip.canToggle || busy || chip.busy}
+                    loading={Boolean(chip.busy)}
+                    aria-pressed={chip.enabled}
+                    title={viaLabel}
+                    aria-label={labels.storeAgentToggleAria?.[chip.target] ?? chip.target}
+                    data-testid={`portable-store-agent-chip-${chip.target}`}
+                    data-enabled={chip.enabled || undefined}
+                    data-derived={chip.derived || undefined}
+                    onClick={() => onToggleCatalogAgent?.(chip.target)}
+                  >
+                    {labels.targets[chip.target] ?? chip.target}
+                  </Button>
+                );
+              })}
+            </div>
+          ) : null}
           {showMutations && handleAction
             ? rowActions.map((action) => (
                 <Button

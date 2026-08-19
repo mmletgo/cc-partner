@@ -28,6 +28,10 @@ import {
   listMigratableToStoreItems,
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
+  groupPortableStoreCatalog,
+  portableStoreAgentChipState,
+  portableStoreAgentChipStates,
+  matchesPortableStoreCatalogGroup,
   partitionPortableInventoryItems,
   portableBorrowedOwnerJumpTarget,
   portableBorrowedOwnerLabelKey,
@@ -208,18 +212,14 @@ describe('portableInventoryPresentation filters', () => {
     const visible = filterPortableInventoryItems(catalog, filters({ kind: 'skill' }));
     expect(visible.map((item) => item.inventoryItemId)).toEqual([
       'claude-skill-alpha',
-      'codex-skill-beta',
       'claude-skill-project',
       'opencode-skill-warn',
-      'claude-skill-unsupported',
     ]);
     expect(visible.some((item) => item.sourceOrigin === 'pluginComponent')).toBe(false);
   });
 
   test('covers all four kind tabs independently', () => {
     expect(filterPortableInventoryItems(catalog, filters({ kind: 'skill' })).map((i) => i.kind)).toEqual([
-      'skill',
-      'skill',
       'skill',
       'skill',
       'skill',
@@ -249,7 +249,7 @@ describe('portableInventoryPresentation filters', () => {
       filterPortableInventoryItems(catalog, filters({ kind: 'skill', target: 'codex' })).map(
         (item) => item.inventoryItemId,
       ),
-    ).toEqual(['codex-skill-beta']);
+    ).toEqual([]);
 
     expect(
       filterPortableInventoryItems(catalog, filters({ kind: 'skill', scope: 'project' })).map(
@@ -261,17 +261,10 @@ describe('portableInventoryPresentation filters', () => {
       filterPortableInventoryItems(catalog, filters({ kind: 'skill', scope: 'user' })).map(
         (item) => item.inventoryItemId,
       ),
-    ).toEqual([
-      'claude-skill-alpha',
-      'codex-skill-beta',
-      'opencode-skill-warn',
-      'claude-skill-unsupported',
-    ]);
+    ).toEqual(['claude-skill-alpha', 'opencode-skill-warn']);
 
     const managementCases: Array<[PortableInventoryManagementState, string]> = [
       ['hubManaged', 'claude-skill-alpha'],
-      ['unmanaged', 'codex-skill-beta'],
-      ['unsupported', 'claude-skill-unsupported'],
       ['drifted', 'claude-plugin-delta'],
       ['externalCollision', 'claude-mcp-echo'],
     ];
@@ -323,13 +316,13 @@ describe('portableInventoryPresentation filters', () => {
       filterPortableInventoryItems(catalog, filters({ kind: 'skill', actualState: 'disabled' })).map(
         (item) => item.inventoryItemId,
       ),
-    ).toEqual(['codex-skill-beta']);
+    ).toEqual([]);
 
     expect(
       filterPortableInventoryItems(catalog, filters({ kind: 'skill', actualState: 'problem' })).map(
         (item) => item.inventoryItemId,
       ),
-    ).toEqual(['opencode-skill-warn', 'claude-skill-unsupported']);
+    ).toEqual(['opencode-skill-warn']);
 
     // actualEnabled=null is not enabled/disabled/problem unless other problem signals
     expect(
@@ -413,6 +406,131 @@ describe('portableInventoryPresentation filters', () => {
         (item) => item.inventoryItemId,
       ),
     ).toEqual(['claude-mcp-native']);
+
+    const disabledNative = makeItem({
+      inventoryItemId: 'claude-skill-disabled',
+      kind: 'skill',
+      nativeId: 'disabled-native',
+      actualEnabled: false,
+    });
+    expect(
+      filterPortableInventoryItems(
+        [native, disabledNative, attached],
+        filters({ kind: 'skill', assetLane: 'equipped' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-native', 'claude-skill-attached']);
+
+    expect(
+      filterPortableInventoryItems(
+        [attached, available, borrowedViaClaude],
+        filters({ kind: 'skill', target: 'claude', assetLane: 'store' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-attached', 'claude-skill-available', 'grok-skill-via-claude']);
+  });
+
+  test('store catalog groups one row per skill and derives Grok from the source agent', () => {
+    const attachCaps = {
+      ...baseCapabilities,
+      canEnable: false,
+      canDisable: false,
+      canUninstall: false,
+      canAttach: true,
+      canDetach: true,
+    };
+    const claudeAttached = makeItem({
+      inventoryItemId: 'claude-skill-shared',
+      kind: 'skill',
+      nativeId: 'shared',
+      displayName: 'Shared Skill',
+      target: 'claude',
+      ownedBy: 'portableStore',
+      actualEnabled: true,
+      capabilities: attachCaps,
+      store: { storeId: 'skill:shared', storeAttached: true },
+    });
+    const grokViaClaude = makeItem({
+      inventoryItemId: 'grok-skill-shared',
+      kind: 'skill',
+      nativeId: 'shared',
+      displayName: 'Shared Skill',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      actualEnabled: true,
+      capabilities: { ...attachCaps, canAttach: false, canDetach: true },
+      store: {
+        storeId: 'skill:shared',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+    });
+    const codexAvailable = makeItem({
+      inventoryItemId: 'codex-skill-shared',
+      kind: 'skill',
+      nativeId: 'shared',
+      displayName: 'Shared Skill',
+      target: 'codex',
+      ownedBy: 'portableStore',
+      actualEnabled: false,
+      capabilities: attachCaps,
+      store: { storeId: 'skill:shared', storeAttached: false },
+    });
+    const groups = groupPortableStoreCatalog([claudeAttached, grokViaClaude, codexAvailable]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.key).toBe('skill:shared');
+    expect(groups[0]?.representative.inventoryItemId).toBe('claude-skill-shared');
+
+    const claudeChip = portableStoreAgentChipState(groups[0]!, 'claude');
+    const grokChip = portableStoreAgentChipState(groups[0]!, 'grok');
+    const codexChip = portableStoreAgentChipState(groups[0]!, 'codex');
+    expect(claudeChip).toMatchObject({
+      enabled: true,
+      derived: false,
+      canToggle: true,
+      item: expect.objectContaining({ inventoryItemId: 'claude-skill-shared' }),
+    });
+    expect(grokChip).toMatchObject({
+      enabled: true,
+      derived: true,
+      derivedFrom: 'claude',
+      canToggle: false,
+    });
+    expect(codexChip).toMatchObject({
+      enabled: false,
+      derived: false,
+      canToggle: true,
+      item: expect.objectContaining({ inventoryItemId: 'codex-skill-shared' }),
+    });
+
+    const afterClaudeDetached = groupPortableStoreCatalog([
+      {
+        ...claudeAttached,
+        actualEnabled: false,
+        store: { storeId: 'skill:shared', storeAttached: false },
+        capabilities: attachCaps,
+      },
+      {
+        ...grokViaClaude,
+        actualEnabled: false,
+        store: {
+          storeId: 'skill:shared',
+          storeAttached: false,
+          loadedViaOtherPath: false,
+          loadedViaTarget: 'claude',
+        },
+      },
+      codexAvailable,
+    ]);
+    expect(portableStoreAgentChipState(afterClaudeDetached[0]!, 'claude').enabled).toBe(false);
+    expect(portableStoreAgentChipState(afterClaudeDetached[0]!, 'grok').enabled).toBe(false);
+
+    expect(
+      matchesPortableStoreCatalogGroup(groups[0]!, filters({ kind: 'skill', assetLane: 'store' })),
+    ).toBe(true);
+    expect(portableStoreAgentChipStates(groups[0]!).map((chip) => chip.target)).toEqual(
+      expect.arrayContaining(['claude', 'codex', 'grok']),
+    );
   });
 
   test('problem classification covers management and warnings', () => {

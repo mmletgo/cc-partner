@@ -7,7 +7,8 @@
  *
  * Code Logic（这个组件做什么）:
  *   渲染受控 tablist、范围 / 提示词槽或存放面 / Agent radiogroup 与设备/项目选择器；
- *   复用共享 roving 索引合同，并用关联 tabpanel 承载页面内容。无业务 API 调用。
+ *   公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。复用共享 roving 索引合同，
+ *   并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
 
 import {
@@ -122,7 +123,8 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const activeAssetLaneIndex = Math.max(0, ASSET_LANES.indexOf(context.assetLane));
   const activeAgentIndex = Math.max(0, AGENTS.indexOf(context.agent));
   const showAgentSwitcher =
-    context.tab !== 'instructions' || context.instructionLane !== 'common';
+    !(context.tab === 'instructions' && context.instructionLane === 'common') &&
+    !(isPortableStoreTab(context.tab) && context.assetLane === 'store');
   const activeTabId = `agent-hub-tab-${context.tab}`;
   const capability = getAgentHubContextCapability(context);
   const projectMissing = context.scope === 'project' && context.projectKey === null;
