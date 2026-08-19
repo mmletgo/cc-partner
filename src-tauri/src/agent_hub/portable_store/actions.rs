@@ -113,6 +113,19 @@ pub fn execute_skill_or_command_store(
             if !native_path.exists() {
                 return Ok(TargetActionRawOutcome::Skipped);
             }
+            // Codex 还会扫 ~/.agents/skills：迁入仓库后那里常留下一份与 store 同内容的真树。
+            // 卸下若只拆 CODEX_HOME 软链，这份真树会重新变成「迁入便携仓库」。
+            // 同内容 / 仓库更新 → 删本机真树、保留仓库；本机独有更新则拒绝，避免丢改动。
+            if exists_as_real_tree(native_path) && store_target.exists() {
+                match resolve_migrate_name_conflict(native_path, &store_target, kind)? {
+                    MigrateNameConflict::SameContent | MigrateNameConflict::KeepStore => {
+                        remove_real_tree(native_path)?;
+                        let _ = remove_manifest_attachment(&store_root, &store_id, viewing);
+                        return Ok(TargetActionRawOutcome::Applied);
+                    }
+                    MigrateNameConflict::KeepNative => {}
+                }
+            }
             Ok(TargetActionRawOutcome::Failed {
                 code: "PORTABLE_STORE_DISABLE_NOT_A_LINK".into(),
                 message: "refusing to move a real tree out of store".into(),

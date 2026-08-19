@@ -439,6 +439,40 @@ mod tests {
         }
     }
 
+    /// Business Logic: 与仓库同内容的 ~/.agents 真树在卸下时删除，不得再变成「迁入便携仓库」。
+    #[test]
+    fn detach_same_content_leftover_real_tree_keeps_store() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store_tree = store_skill_dir(&ensure_portable_store_layout(&data).unwrap(), "foo");
+        write_skill(&store_tree, Some("1.0.0"), "canonical");
+        let leftover = data.join("agents").join("skills").join("foo");
+        write_skill(&leftover, Some("1.0.0"), "canonical");
+        let outcome = crate::agent_hub::portable_store::execute_skill_or_command_store(
+            crate::agent_hub::models::AgentTarget::Codex,
+            crate::agent_hub::portable_actions::models::PortableAssetActionKind::Detach,
+            crate::agent_hub::portable_inventory::PortableAssetKind::Skill,
+            "foo",
+            &leftover,
+            None,
+        )
+        .expect("detach leftover");
+        assert_eq!(
+            outcome,
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert!(
+            !leftover.exists(),
+            "same-content leftover must be removed on detach"
+        );
+        assert!(
+            store_tree.join("SKILL.md").is_file(),
+            "portable-store tree must remain"
+        );
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
     #[test]
     fn migrate_from_disabled_source_path_attaches_native_link() {
         let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

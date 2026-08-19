@@ -11,7 +11,7 @@
 //!     inspect：scan → ensure_managed（ledger）→ reconcile；unopted 项目只读 mutation 能力。
 
 use crate::agent_hub::assets::{McpTransport, PortableAssetPayload};
-use crate::agent_hub::models::{AgentTarget, ScopeKind};
+use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
 use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
@@ -31,15 +31,17 @@ use crate::agent_hub::portable_inventory::plugin_enablement::{
 };
 use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
 use crate::agent_hub::portable_store::{
-    classify_store_link, current_portable_store_root, store_id_from_canonical, StoreLinkClass,
+    classify_store_link, current_portable_store_root, store_command_file, store_id_for,
+    store_id_from_canonical, store_skill_dir, PortableStoreKind, StoreLinkClass,
 };
 use crate::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
     EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::portable::{
-    is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
-    DiscoveredPortableAsset, PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind,
+    hash_skill_directory, is_borrowed_runtime_origin, mutation_target_for_action,
+    mutation_target_for_origin, DiscoveredPortableAsset, PortableAssetOwner,
+    PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
@@ -1739,6 +1741,48 @@ fn should_replace_with(
     false
 }
 
+/// 本机真树若与 portable-store 同 native_id 且内容相同，视为已在仓库中的重复挂载。
+///
+/// Business Logic: 卸下 CODEX_HOME 软链后，~/.agents 同内容真树不应再显示「迁入便携仓库」。
+/// Code Logic: store 真树存在且 tree/content hash 一致才返回 store_id。
+fn leftover_duplicate_store_id(
+    disc: &DiscoveredPortableAsset,
+    store_root: &Path,
+) -> Option<String> {
+    let store_kind = match disc.kind {
+        AssetKind::Skill => PortableStoreKind::Skill,
+        AssetKind::Command => PortableStoreKind::Command,
+        _ => return None,
+    };
+    let store_target = match store_kind {
+        PortableStoreKind::Skill => store_skill_dir(store_root, &disc.origin.native_id),
+        PortableStoreKind::Command => store_command_file(store_root, &disc.origin.native_id),
+        PortableStoreKind::Mcp => return None,
+    };
+    if !store_target.exists() {
+        return None;
+    }
+    let same = match store_kind {
+        PortableStoreKind::Skill => {
+            let native_hash = disc.origin.tree_hash.clone().or_else(|| {
+                hash_skill_directory(&disc.origin.path)
+                    .ok()
+                    .map(|(_, tree, _, _)| tree)
+            });
+            let store_hash = hash_skill_directory(&store_target)
+                .ok()
+                .map(|(_, tree, _, _)| tree);
+            matches!((native_hash, store_hash), (Some(a), Some(b)) if a == b)
+        }
+        PortableStoreKind::Command => {
+            let store_hash = fs::read(&store_target).ok().map(|bytes| sha256_hex(&bytes));
+            store_hash.is_some_and(|hash| hash == disc.origin.content_hash)
+        }
+        PortableStoreKind::Mcp => false,
+    };
+    same.then(|| store_id_for(store_kind, &disc.origin.native_id))
+}
+
 /// 从发现路径推导 store 事实与所有者。
 ///
 /// Business Logic: store 软链归 portableStore；兼容根上的同一 storeId 只标「仍被其他路径加载」。
@@ -1779,6 +1823,26 @@ fn store_fact_for_discovery(
                             store_attached: false,
                             loaded_via_other_path: false,
                             loaded_via_target: None,
+                        },
+                    );
+                }
+                if let Some(store_id) = leftover_duplicate_store_id(disc, &store_root) {
+                    // ~/.agents 等兼容根上的同内容真树仍会被 Codex 加载，应显示「卸下」而不是「再迁入」。
+                    let attached = matches!(
+                        disc.origin.origin_kind,
+                        PortableOriginKind::Native | PortableOriginKind::LegacyStandalone
+                    );
+                    return (
+                        PortableAssetOwner::PortableStore,
+                        PortableStoreFactDto {
+                            store_id: Some(store_id),
+                            store_attached: attached,
+                            loaded_via_other_path: !attached,
+                            loaded_via_target: if attached {
+                                None
+                            } else {
+                                disc.origin.owned_by.as_hub_target()
+                            },
                         },
                     );
                 }

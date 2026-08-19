@@ -323,6 +323,56 @@ fn native_id(
         .unwrap_or_else(|| change.inventory_item_id.clone())
 }
 
+/// Codex Skill 卸下要覆盖 CODEX_HOME 与 ~/.agents 两处挂载点。
+///
+/// Business Logic: 迁入仓库后 ~/.agents 常留下同内容真树；只拆 ~/.codex 软链会让它重新变成「未迁入」。
+/// Code Logic: 对每个候选路径执行 store detach；任一 Applied 即成功。
+fn detach_codex_skill_store_mounts(
+    action: PortableAssetActionKind,
+    native_id: &str,
+    native_link: &Path,
+    change: &PortableAssetActionChangeDto,
+    pre_item: Option<&PortableInventoryItemDto>,
+) -> Result<TargetActionRawOutcome, AppError> {
+    let mut mounts = vec![native_link.to_path_buf()];
+    if let Some(path) = change.path.as_deref().map(PathBuf::from) {
+        mounts.push(path);
+    }
+    if let Some(home) = dirs::home_dir() {
+        mounts.push(home.join(".agents").join("skills").join(native_id));
+    }
+    mounts.sort();
+    mounts.dedup();
+    let mut outcome = TargetActionRawOutcome::Skipped;
+    for mount in mounts {
+        let next = execute_skill_or_command_store(
+            AgentTarget::Codex,
+            action,
+            PortableAssetKind::Skill,
+            native_id,
+            &mount,
+            pre_item,
+        )?;
+        outcome = merge_store_detach_outcome(outcome, next);
+    }
+    Ok(outcome)
+}
+
+/// 合并多挂载点卸下结果：有一处 Applied 就算卸下成功。
+fn merge_store_detach_outcome(
+    acc: TargetActionRawOutcome,
+    next: TargetActionRawOutcome,
+) -> TargetActionRawOutcome {
+    match (acc, next) {
+        (TargetActionRawOutcome::Applied, _) | (_, TargetActionRawOutcome::Applied) => {
+            TargetActionRawOutcome::Applied
+        }
+        (TargetActionRawOutcome::Skipped, other) => other,
+        (other, TargetActionRawOutcome::Skipped) => other,
+        (_, next) => next,
+    }
+}
+
 fn execute_skill(
     ctx: &TargetActionContext,
     roots: &CodexRoots,
@@ -337,6 +387,14 @@ fn execute_skill(
             .as_deref()
             .is_some_and(|p| should_use_store_semantics(ctx.action, Some(Path::new(p)), pre_item))
     {
+        if matches!(
+            ctx.action,
+            PortableAssetActionKind::Detach
+                | PortableAssetActionKind::Disable
+                | PortableAssetActionKind::Uninstall
+        ) {
+            return detach_codex_skill_store_mounts(ctx.action, &id, &native_link, change, pre_item);
+        }
         return execute_skill_or_command_store(
             AgentTarget::Codex,
             ctx.action,
@@ -1135,6 +1193,73 @@ mod tests {
                 .is_symlink(),
             "store tree must remain a real directory"
         );
+        let _ = portable_store_root(&data_dir);
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    /// Business Logic: 卸下 Codex 仓库项时，change.path 上的 ~/.agents 同内容真树也要清掉。
+    #[test]
+    fn detach_store_skill_removes_agents_leftover_duplicate() {
+        let _data_guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _codex_guard = codex_home_lock();
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        let codex_home = tmp.path().join("codex-home");
+        fs::create_dir_all(codex_home.join("skills")).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data_dir);
+        std::env::set_var("CODEX_HOME", &codex_home);
+        let store_root = ensure_portable_store_layout(&data_dir).unwrap();
+        let store_tree = store_skill_dir(&store_root, "leftover-registry");
+        fs::create_dir_all(&store_tree).unwrap();
+        fs::write(
+            store_tree.join("SKILL.md"),
+            "---\nname: leftover-registry\nversion: 1.0.0\n---\ncanonical\n",
+        )
+        .unwrap();
+        let leftover = tmp.path().join("home/.agents/skills/leftover-registry");
+        fs::create_dir_all(&leftover).unwrap();
+        fs::write(
+            leftover.join("SKILL.md"),
+            "---\nname: leftover-registry\nversion: 1.0.0\n---\ncanonical\n",
+        )
+        .unwrap();
+        let leftover_path = leftover.to_string_lossy().into_owned();
+        let mut item = sample_item(
+            PortableAssetKind::Skill,
+            "leftover-registry",
+            &leftover_path,
+        );
+        item.owned_by = PortableAssetOwner::PortableStore;
+        item.store = PortableStoreFactDto {
+            store_id: Some("skill:leftover-registry".into()),
+            store_attached: true,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
+        let change = base_change(
+            PortableAssetKind::Skill,
+            "id-leftover-registry",
+            &leftover_path,
+            PortableAssetPlanOperation::Detach,
+        );
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: None,
+            data_dir: Some(data_dir.clone()),
+            keep_data: false,
+            action: PortableAssetActionKind::Detach,
+        };
+        let plan = empty_plan(PortableAssetActionKind::Detach, vec![change.clone()]);
+        let out = CodexTargetExecutor
+            .execute_change(&ctx, &plan, &change, Some(&item))
+            .unwrap();
+        assert_eq!(out, TargetActionRawOutcome::Applied);
+        assert!(
+            !leftover.exists(),
+            "Codex ~/.agents leftover duplicate must be removed"
+        );
+        assert!(store_tree.join("SKILL.md").is_file());
         let _ = portable_store_root(&data_dir);
         std::env::remove_var("CODEX_HOME");
         std::env::remove_var("CC_PARTNER_DATA_DIR");
