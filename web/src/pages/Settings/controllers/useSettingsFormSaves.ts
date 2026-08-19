@@ -2,7 +2,7 @@
  * Settings 表单草稿与 safe-save 控制器（composer）
  *
  * Business Logic（为什么需要这个 hook）:
- *   General/CloudSync/GitHub·AI/PromptOptimizer/Health/Automation 与备份/LAN 同步
+ *   General/CloudSync/GitHub·AI/Health/Automation 与备份/LAN 同步
  *   需要共享 dirty 保护与 saveAttempt 合同；对外仍是单一 FormSaves 面。
  *
  * Code Logic（这个 hook 做什么）:
@@ -36,7 +36,6 @@ import type {
   CloudSyncForm,
   GithubTrendingForm,
   HealthForm,
-  PromptOptimizerSettingsForm,
   SettingsState,
 } from '../settingsState';
 import type { AutomationSettingsForm } from '../automationSettingsState';
@@ -163,14 +162,6 @@ export interface UseSettingsFormSavesResult {
   handleResetGithubTrendingDefaults: () => void;
   handleApplyGithubTrending: () => Promise<void>;
   handleTestClaudeCli: () => Promise<void>;
-
-  promptOptimizerForm: PromptOptimizerSettingsForm;
-  promptOptimizerConfig: PromptOptimizerSettingsForm | null;
-  applyingPromptOptimizer: boolean;
-  promptOptimizerSettingsError: string | null;
-  patchPromptOptimizerForm: (partial: Partial<PromptOptimizerSettingsForm>) => void;
-  handleResetPromptOptimizerSettingsDefaults: () => void;
-  handleApplyPromptOptimizerSettings: () => Promise<void>;
 
   automationForm: AutomationSettingsForm;
   defaultAutomationForm: AutomationSettingsForm;
@@ -434,15 +425,12 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
         const result = groupResult as ResourceResult<import('@/lib/types').AppConfig>;
         if (isResourceReady(result)) {
           const config = result.value;
-          // shortcuts（含三个 hotkey）由 settingsStateFromConfig 从 config 重新生成；
-          // promptOptimizer 的 fillLanguage 仍在 secondary 表单，单独水合。
           const loaded = settingsStateFromConfig(config);
           const rewrite = allowRewriteForm || !isSettingsStateDirty(state, initialState);
           if (rewrite) {
             setState(loaded);
           }
           setInitialState(loaded);
-          secondary.applyCorePromptOptimizer(config, rewrite);
         }
         return;
       }
@@ -450,7 +438,6 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
         const result = groupResult as ResourceResult<import('@/lib/types').AppConfig>;
         if (isResourceReady(result)) {
           setDefaultState(settingsStateFromConfig(result.value));
-          secondary.applyDefaultsPromptOptimizer(result.value);
         }
         return;
       }
@@ -486,8 +473,6 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
       initialState,
       state,
       secondary.applyAutomationGroup,
-      secondary.applyCorePromptOptimizer,
-      secondary.applyDefaultsPromptOptimizer,
       secondary.applyGithubGroup,
       secondary.applyHealthGroup,
       syncBackup.applyGroup,
@@ -582,15 +567,6 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
     handleResetGithubTrendingDefaults: secondary.handleResetGithubTrendingDefaults,
     handleApplyGithubTrending: secondary.handleApplyGithubTrending,
     handleTestClaudeCli: secondary.handleTestClaudeCli,
-
-    promptOptimizerForm: secondary.promptOptimizerForm,
-    promptOptimizerConfig: secondary.promptOptimizerConfig,
-    applyingPromptOptimizer: secondary.applyingPromptOptimizer,
-    promptOptimizerSettingsError: secondary.promptOptimizerSettingsError,
-    patchPromptOptimizerForm: secondary.patchPromptOptimizerForm,
-    handleResetPromptOptimizerSettingsDefaults:
-      secondary.handleResetPromptOptimizerSettingsDefaults,
-    handleApplyPromptOptimizerSettings: secondary.handleApplyPromptOptimizerSettings,
 
     automationForm: secondary.automationForm,
     defaultAutomationForm: secondary.defaultAutomationForm,

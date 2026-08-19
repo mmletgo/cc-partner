@@ -60,6 +60,19 @@ export type AppLanguage = 'en' | 'zh';
 export const LANGUAGE_STORAGE_KEY = 'cp-lang';
 
 /**
+ * 把任意语言码归一成应用支持的界面语种。
+ *
+ * Business Logic（为什么需要）:
+ *   Prompt 优化等能力应跟随当前界面语种，不能另存一套中英开关。
+ *
+ * Code Logic（做什么）:
+ *   仅 `zh` 视为中文，其余一律英文。
+ */
+export function resolveAppLanguage(raw: string | null | undefined): AppLanguage {
+  return raw === 'zh' ? 'zh' : 'en';
+}
+
+/**
  * 检测初始语言
  *
  * Business Logic（为什么需要这个函数）:

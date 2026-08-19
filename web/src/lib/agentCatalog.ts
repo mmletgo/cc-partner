@@ -193,11 +193,9 @@ export function identityByRuntime(provider: string): AgentIdentity | null {
 }
 
 /**
- * Business Logic: Prompt 优化只开放 catalog hasHeadless 且本轮已实现的身份。
- * Code Logic: 过滤 hasHeadless，并排除尚未稳定结构化输出的 Gemini。
+ * Business Logic: Prompt 优化固定使用 Claude Code。
+ * Code Logic: 只返回 claude 身份。
  */
 export function headlessOptimizerProviders(): AgentIdentity[] {
-  return IDENTITIES.filter(
-    (row) => row.hasHeadless && (row.id === 'claude' || row.id === 'grok'),
-  );
+  return IDENTITIES.filter((row) => row.id === 'claude');
 }

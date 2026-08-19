@@ -167,4 +167,12 @@ describe('App lazy routes contract', () => {
       /path\s*=\s*["']\/claude-code["']\s+element=\{<Navigate\s+to=["']\/agent-hub\?section=assets&target=claude["']\s+replace\s*\/>\}/,
     );
   });
+
+  test('legacy /prompt-optimizer redirects to Workbench and is not a sidebar item', () => {
+    expect(appSource).toMatch(
+      /path\s*=\s*["']\/prompt-optimizer["']\s+element=\{<Navigate\s+to=["']\/workbench["']\s+replace\s*\/>\}/,
+    );
+    expect(appSource).not.toMatch(/pages\/PromptOptimizer/);
+    expect(appShellSource).not.toMatch(/to\s*=\s*["']\/prompt-optimizer["']/);
+  });
 });

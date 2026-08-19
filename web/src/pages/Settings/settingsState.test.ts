@@ -13,8 +13,6 @@ import {
   isUpdateCheckDisabled,
   isUpdateDownloadDisabled,
   parseSettingsTabFromSearch,
-  promptOptimizerSettingsConfigToForm,
-  promptOptimizerSettingsFormToUpdate,
   mergeActivityStatsSlice,
   mergeHealthReminderSlice,
   resetHealthReminderDefaults,
@@ -178,22 +176,6 @@ describe('settingsState', () => {
         claudeCliPath: 'claude',
         claudeModel: 'sonnet',
         cacheTtlHours: 24,
-      },
-    );
-
-    assertDeepEqual(promptOptimizerSettingsConfigToForm(configFixture()), {
-      fillLanguage: 'zh',
-      provider: 'claude',
-    });
-
-    assertDeepEqual(
-      promptOptimizerSettingsFormToUpdate({
-        fillLanguage: 'en',
-        provider: 'grok',
-      }),
-      {
-        promptOptimizerFillLanguage: 'en',
-        promptOptimizerProvider: 'grok',
       },
     );
 

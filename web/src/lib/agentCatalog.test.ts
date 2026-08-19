@@ -53,8 +53,8 @@ describe('agentCatalog', () => {
     expect(parseAgentId('genericTerminal')).toBeNull();
   });
 
-  it('offers only implemented headless optimizer providers', () => {
-    expect(headlessOptimizerProviders().map((row) => row.id)).toEqual(['claude', 'grok']);
+  it('offers only Claude Code as the optimizer provider', () => {
+    expect(headlessOptimizerProviders().map((row) => row.id)).toEqual(['claude']);
   });
 
   it('does not map genericTerminal to a product identity', () => {

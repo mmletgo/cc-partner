@@ -14,13 +14,27 @@
  *   - 模拟 window keydown/keyup 事件触发 Control 单键快捷键；
  *   - 通过 rerender 修改 activeSession / remoteWriteDisabled / workspaceView 等输入。
  */
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 
+import { useLanguage } from '@/hooks/useLanguage';
 import { useWorkbenchPromptOptimizerController } from './useWorkbenchPromptOptimizerController';
 import type { UseWorkbenchPromptOptimizerControllerParams } from './useWorkbenchPromptOptimizerController';
-import type { PromptOptimizerFillLanguage, WorkbenchProject, WorkbenchSession } from '@/lib/types';
+import type { WorkbenchProject, WorkbenchSession } from '@/lib/types';
 import type { TerminalCursorAnchor } from '../WorkbenchTerminalPane';
+import type { AppLanguage } from '@/i18n';
+
+vi.mock('@/hooks/useLanguage', () => ({
+  useLanguage: vi.fn(),
+}));
+
+function mockUiLanguage(language: AppLanguage): void {
+  vi.mocked(useLanguage).mockReturnValue({
+    language,
+    setLanguage: vi.fn(),
+    toggleLanguage: vi.fn(),
+  });
+}
 
 function buildLocalProject(overrides: Partial<WorkbenchProject> = {}): WorkbenchProject {
   return {
@@ -84,7 +98,6 @@ function buildHarness(overrides: HarnessOverrides = {}): UseWorkbenchPromptOptim
       overrides.loadConfig ??
       vi.fn(async () => ({
         promptOptimizerHotkey: '<ctrl>',
-        promptOptimizerFillLanguage: 'zh' as PromptOptimizerFillLanguage,
       })),
     streamToTerminal:
       overrides.streamToTerminal ?? vi.fn(async () => ({ ok: true, sessionId: 's1' })),
@@ -117,21 +130,23 @@ afterEach(() => {
 });
 
 describe('useWorkbenchPromptOptimizerController', () => {
-  test('loads hotkey and fill language from config on mount', async () => {
+  beforeEach(() => {
+    mockUiLanguage('zh');
+  });
+
+  test('loads hotkey from config on mount', async () => {
     const loadConfig = vi.fn(async () => ({
       promptOptimizerHotkey: '<cmd>+p',
-      promptOptimizerFillLanguage: 'en' as PromptOptimizerFillLanguage,
     }));
     const { result } = renderController(buildHarness({ loadConfig }));
 
     await waitFor(() => {
       expect(result.current.promptOptimizerHotkey).toBe('<cmd>+p');
     });
-    expect(result.current.promptOptimizerFillLanguage).toBe('en');
     expect(loadConfig).toHaveBeenCalled();
   });
 
-  test('falls back to defaults when config load rejects', async () => {
+  test('falls back to default hotkey when config load rejects', async () => {
     const loadConfig = vi.fn(async () => {
       throw new Error('no tauri');
     });
@@ -140,7 +155,6 @@ describe('useWorkbenchPromptOptimizerController', () => {
     await waitFor(() => {
       expect(result.current.promptOptimizerHotkey).toBe('<ctrl>');
     });
-    expect(result.current.promptOptimizerFillLanguage).toBe('zh');
   });
 
   test('openPromptOptimizerPanel clears input and positions panel from cursor anchor', () => {
@@ -288,6 +302,23 @@ describe('useWorkbenchPromptOptimizerController', () => {
     await waitFor(() => {
       expect(result.current.promptPanelOpen).toBe(false);
     });
+  });
+
+  test('streams optimized prompt in the current UI language', async () => {
+    mockUiLanguage('en');
+    const streamToTerminal = vi.fn(async () => ({ ok: true, sessionId: 's1' }));
+    const { result } = renderController(buildHarness({ streamToTerminal }));
+    act(() => {
+      result.current.openPromptOptimizerPanel();
+      result.current.setPromptInput('fix the bug');
+    });
+    await act(async () => {
+      await result.current.runPromptOptimization();
+    });
+    expect(streamToTerminal).toHaveBeenCalledWith(
+      'fix the bug',
+      expect.objectContaining({ targetLanguage: 'en' }),
+    );
   });
 
   test('runPromptOptimization focuses input and aborts on empty input', () => {

@@ -11,7 +11,7 @@
 - **局域网文件传输** — 任意大小分块传输，支持断点续传
 - **区域截图** — 框选截图保存到剪贴板，可直接粘贴到 Claude Code
 - **Prompt 管理** — 记录 / 复制 / 打标签 / 跨设备同步
-- **Prompt 优化** — 调用本机 HeadlessCompletion CLI（默认 Claude Code，可选 Grok Build）生成中英文优化版 Prompt
+- **Prompt 优化** — 调用本机 Claude Code CLI 生成优化版 Prompt（结果语言跟随当前界面语种）
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
 - **Agent Hub** — `/agent-hub` 统一管理 Claude/Codex/OpenCode/Grok Build/Gemini CLI/Cursor CLI/Pi 用户级与项目级指令（公共/适配/独有三槽 + AI 辅助修订）与 Skill/Command/Agent/MCP 可移植资产；身份目录见 `src-tauri/src/agent_catalog`
@@ -84,7 +84,6 @@ cc-partner/
 │   │   │   ├── Home/             # 01-main.html
 │   │   │   ├── Transfer/         # 02-transfer.html
 │   │   │   ├── Prompts/          # 03-prompts.html
-│   │   │   ├── PromptOptimizer/  # Prompt 优化（本机 Claude / 可选 Grok headless）
 │   │   │   ├── Attention/        # 全局 Inbox（/attention）：实时阻塞投影，只导航不动作
 │   │   │   ├── Workbench/        # 本机/远端项目文件夹 + 多项目终端 + 文件树/文件工作区 + Git 提交树 + 自动化工作区
 │   │   │   ├── Orchestrator/     # 自动编排器可嵌入面板；旧路由重定向 Workbench

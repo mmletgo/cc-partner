@@ -77,7 +77,6 @@ export function useWorkbenchPageBridges(t: TFunction<'workbench'>, deviceName: s
       const config = await configApi.get();
       return {
         promptOptimizerHotkey: config.promptOptimizerHotkey,
-        promptOptimizerFillLanguage: config.promptOptimizerFillLanguage,
       };
     },
     [],

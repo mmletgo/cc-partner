@@ -321,11 +321,6 @@
       "noSession": "先选择或创建终端窗口",
       "promptLabel": "原始 Prompt",
       "promptPlaceholder": "输入需要优化并写入当前终端的 Prompt",
-      "languageLabel": "目标语言",
-      "languages": {
-        "zh": "中文",
-        "en": "English"
-      },
       "send": "写入当前终端",
       "sending": "写入中",
       "sent": "已开始写入当前终端",

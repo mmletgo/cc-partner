@@ -782,34 +782,6 @@ describe('Settings safe save preserves concurrent edits', () => {
     expect(model.value).toBe('opus-edit');
   });
 
-  test('keeps fill language selection while prompt optimizer save is pending', async () => {
-    const save = deferred<AppConfig>();
-    updateConfig.mockImplementation(() => save.promise);
-    searchParamsState.value = new URLSearchParams('tab=ai');
-    renderSettings();
-
-    const enOption = await screen.findByRole('radio', {
-      name: 'settings:promptOptimizerSettings.fillLanguage.en',
-    });
-    fireEvent.click(enOption);
-    fireEvent.click(
-      screen.getByRole('button', { name: 'settings:promptOptimizerSettings.apply' }),
-    );
-
-    expect(updateConfig).toHaveBeenCalledTimes(1);
-
-    const zhOption = screen.getByRole('radio', {
-      name: 'settings:promptOptimizerSettings.fillLanguage.zh',
-    });
-    fireEvent.click(zhOption);
-
-    save.resolve(appConfig({ promptOptimizerFillLanguage: 'en' }));
-    await new Promise((r) => setTimeout(r, 10));
-
-    // 保存期间改回 zh，成功响应不得回填 en
-    expect(zhOption.getAttribute('aria-checked')).toBe('true');
-  });
-
   test('keeps edits typed while health save is pending', async () => {
     const save = deferred<HealthConfig>();
     updateHealthConfig.mockImplementation(() => save.promise);

@@ -81,7 +81,7 @@
   },
   "githubTrending": {
     "title": "AI tools (Claude CLI)",
-    "subtitle": "Configure the local Claude Code CLI shared by GitHub Trending explanations and Prompt Optimizer. Trending explanations are cached locally; Prompt Optimizer only shows and copies the current result.",
+    "subtitle": "Configure the local Claude Code CLI shared by GitHub Trending explanations and Prompt Optimizer. Prompt Optimizer always uses Claude Code; output language follows the current UI language. Trending explanations are cached locally; Prompt Optimizer only shows and copies the current result.",
     "aiEnabled": {
       "label": "Enable GitHub explanations",
       "helper": "When off, the homepage still shows GitHub descriptions. Prompt Optimizer can still call Claude CLI with this path and model."
@@ -127,25 +127,10 @@
     "saveFailed": "Failed to update internal Claude provider: {{error}}"
   },
   "promptOptimizerSettings": {
-    "title": "Workbench Prompt optimizer",
-    "subtitle": "Choose the local Headless CLI for prompt optimization and the language filled into the terminal. The shortcut has moved to General → Shortcuts.",
-    "provider": {
-      "label": "Optimizer CLI",
-      "helper": "Defaults to Claude Code. Grok Build uses grok -p --output-format json. Gemini CLI is unavailable until structured output is stable."
-    },
     "hotkey": {
       "label": "Open shortcut",
       "helper": "Defaults to tapping Control. It triggers only when Control is pressed and released by itself, so terminal chords such as Control+C still pass through."
-    },
-    "fillLanguage": {
-      "helper": "When the same shortcut is pressed a second time, the optimizer runs and fills this preferred language into the active terminal.",
-      "zh": "Chinese optimized prompt",
-      "en": "English optimized prompt"
-    },
-    "appliedConfig": "Applied config",
-    "apply": "Apply",
-    "applying": "Applying…",
-    "applyFailed": "Failed to apply Prompt optimizer settings"
+    }
   },
   "promptQuickInputSettings": {
     "hotkey": {

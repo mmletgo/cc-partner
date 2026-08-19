@@ -81,7 +81,7 @@
   },
   "githubTrending": {
     "title": "AI 能力（Claude CLI）",
-    "subtitle": "配置本机 Claude Code CLI，供 GitHub 周热门项目解说和 Prompt 优化共用。GitHub 解说会本地缓存；Prompt 优化只展示和复制当前结果。",
+    "subtitle": "配置本机 Claude Code CLI，供 GitHub 周热门项目解说和 Prompt 优化共用。Prompt 优化固定使用 Claude Code，结果语言跟随当前界面语种。GitHub 解说会本地缓存；Prompt 优化只展示和复制当前结果。",
     "aiEnabled": {
       "label": "启用 GitHub 项目解说",
       "helper": "关闭后首页仍展示 GitHub 原始简介；Prompt 优化仍会使用下方 CLI 路径和模型进行单次调用。"
@@ -127,25 +127,10 @@
     "saveFailed": "更新内部 Claude provider 失败：{{error}}"
   },
   "promptOptimizerSettings": {
-    "title": "Workbench Prompt 优化",
-    "subtitle": "选择本机优化用的 Headless CLI，并设置一键填入终端时使用的语言。快捷键已移至「常规 → 快捷键」。",
-    "provider": {
-      "label": "优化用 CLI",
-      "helper": "默认 Claude Code。Grok Build 使用 grok -p --output-format json。Gemini CLI 结构化输出尚未稳定，不可选。"
-    },
     "hotkey": {
       "label": "唤起快捷键",
       "helper": "默认轻按 Control。只有单独按下并松开 Control 才触发，Control+C 等终端组合键不会触发。"
-    },
-    "fillLanguage": {
-      "helper": "同一个快捷键第二次触发优化完成后，会按这里选择的语言自动填入当前终端。",
-      "zh": "中文优化版",
-      "en": "英文优化版"
-    },
-    "appliedConfig": "已应用配置",
-    "apply": "应用配置",
-    "applying": "应用中…",
-    "applyFailed": "应用 Prompt 优化设置失败"
+    }
   },
   "promptQuickInputSettings": {
     "hotkey": {

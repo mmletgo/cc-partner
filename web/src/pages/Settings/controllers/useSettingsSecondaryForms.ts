@@ -1,16 +1,15 @@
 /**
- * Settings 次级表单（AI / Prompt 优化 / Health / Automation）控制器
+ * Settings 次级表单（AI / Health / Automation）控制器
  *
  * Business Logic（为什么需要这个 hook）:
  *   这些 tab 的 safe-save 与 general/sync 解耦后，FormSaves 可守 soft 行数上限。
  *
  * Code Logic（这个 hook 做什么）:
- *   持有 github/prompt/health/automation 草稿与 apply/save/reset；
+ *   持有 github/health/automation 草稿与 apply/save/reset；
  *   导出 applyFromResults/applyGroup* 供资源水合。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
 import { orchestratorConfigApi } from '@/api/orchestratorConfig';
 import { githubTrendingApi } from '@/api/githubTrending';
@@ -39,15 +38,8 @@ import {
   resetHealthReminderDefaults,
   PENDING_GITHUB_TRENDING_FORM,
   PENDING_HEALTH_FORM,
-  PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM,
-  promptOptimizerSettingsConfigToForm,
-  promptOptimizerSettingsFormToUpdate,
 } from '../settingsState';
-import type {
-  GithubTrendingForm,
-  HealthForm,
-  PromptOptimizerSettingsForm,
-} from '../settingsState';
+import type { GithubTrendingForm, HealthForm } from '../settingsState';
 import type {
   ClaudeCliTestResult,
   GithubTrendingConfig,
@@ -76,14 +68,6 @@ export interface UseSettingsSecondaryFormsResult {
   handleResetGithubTrendingDefaults: () => void;
   handleApplyGithubTrending: () => Promise<void>;
   handleTestClaudeCli: () => Promise<void>;
-
-  promptOptimizerForm: PromptOptimizerSettingsForm;
-  promptOptimizerConfig: PromptOptimizerSettingsForm | null;
-  applyingPromptOptimizer: boolean;
-  promptOptimizerSettingsError: string | null;
-  patchPromptOptimizerForm: (partial: Partial<PromptOptimizerSettingsForm>) => void;
-  handleResetPromptOptimizerSettingsDefaults: () => void;
-  handleApplyPromptOptimizerSettings: () => Promise<void>;
 
   healthForm: HealthForm;
   healthConfig: HealthConfig | null;
@@ -120,8 +104,6 @@ export interface UseSettingsSecondaryFormsResult {
     pair: PairResourceResult<OrchestratorAutomationConfig>,
     options?: ApplyGroupOptions,
   ) => void;
-  applyCorePromptOptimizer: (config: import('@/lib/types').AppConfig, rewriteForm: boolean) => void;
-  applyDefaultsPromptOptimizer: (config: import('@/lib/types').AppConfig) => void;
 }
 
 /**
@@ -131,7 +113,7 @@ export interface UseSettingsSecondaryFormsResult {
  *   AI/Health/Automation 与 general 解耦，降低 FormSaves 体积。
  *
  * Code Logic（这个函数做什么）:
- *   持有四组表单与 safe-save handlers，并提供资源水合。
+ *   持有三组表单与 safe-save handlers，并提供资源水合。
  *
  * @returns 次级表单状态与动作
  */
@@ -151,20 +133,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   const [githubTrendingError, setGithubTrendingError] = useState<string | null>(null);
   const [testingClaudeCli, setTestingClaudeCli] = useState(false);
   const [applyingGithubTrending, setApplyingGithubTrending] = useState(false);
-
-  const [promptOptimizerForm, setPromptOptimizerForm] = useState<PromptOptimizerSettingsForm>({
-    ...PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM,
-  });
-  const [defaultPromptOptimizerForm, setDefaultPromptOptimizerForm] =
-    useState<PromptOptimizerSettingsForm>({
-      ...PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM,
-    });
-  const [promptOptimizerConfig, setPromptOptimizerConfig] =
-    useState<PromptOptimizerSettingsForm | null>(null);
-  const [applyingPromptOptimizer, setApplyingPromptOptimizer] = useState(false);
-  const [promptOptimizerSettingsError, setPromptOptimizerSettingsError] = useState<string | null>(
-    null,
-  );
 
   const [healthForm, setHealthForm] = useState<HealthForm>({ ...PENDING_HEALTH_FORM });
   const [defaultHealthForm, setDefaultHealthForm] = useState<HealthForm>({ ...PENDING_HEALTH_FORM });
@@ -189,8 +157,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
 
   const githubTrendingEditVersionRef = useRef(0);
   const githubTrendingRequestSeqRef = useRef(0);
-  const promptOptimizerEditVersionRef = useRef(0);
-  const promptOptimizerRequestSeqRef = useRef(0);
   const healthEditVersionRef = useRef(0);
   const healthRequestSeqRef = useRef(0);
   const activityEditVersionRef = useRef(0);
@@ -200,8 +166,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
 
   const githubTrendingFormRef = useRef(githubTrendingForm);
   const githubTrendingConfigRef = useRef(githubTrendingConfig);
-  const promptOptimizerFormRef = useRef(promptOptimizerForm);
-  const promptOptimizerConfigRef = useRef(promptOptimizerConfig);
   const healthFormRef = useRef(healthForm);
   const healthConfigRef = useRef(healthConfig);
   const automationFormRef = useRef(automationForm);
@@ -209,8 +173,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
   useEffect(() => {
     githubTrendingFormRef.current = githubTrendingForm;
     githubTrendingConfigRef.current = githubTrendingConfig;
-    promptOptimizerFormRef.current = promptOptimizerForm;
-    promptOptimizerConfigRef.current = promptOptimizerConfig;
     healthFormRef.current = healthForm;
     healthConfigRef.current = healthConfig;
     automationFormRef.current = automationForm;
@@ -226,16 +188,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
    * 全量资源水合次级表单
    */
   const applyFromResults = useCallback((results: SettingsResourceResults) => {
-    if (isResourceReady(results.core)) {
-      const config = results.core.value;
-      setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
-      setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
-    }
-    if (isResourceReady(results.defaults)) {
-      setDefaultPromptOptimizerForm(
-        promptOptimizerSettingsConfigToForm(results.defaults.value),
-      );
-    }
     if (isResourceReady(results.githubTrending.current)) {
       const loaded = results.githubTrending.current.value;
       setGithubTrendingConfig(loaded);
@@ -266,26 +218,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     if (isResourceReady(results.automation.defaults)) {
       setDefaultAutomationForm(automationConfigToForm(results.automation.defaults.value));
     }
-  }, []);
-
-  /**
-   * core 重试时同步 prompt optimizer（按 rewrite 决定是否写 form）
-   */
-  const applyCorePromptOptimizer = useCallback(
-    (config: import('@/lib/types').AppConfig, rewriteForm: boolean) => {
-      if (rewriteForm) {
-        setPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
-      }
-      setPromptOptimizerConfig(promptOptimizerSettingsConfigToForm(config));
-    },
-    [],
-  );
-
-  /**
-   * defaults 重试时同步 prompt optimizer 默认快照
-   */
-  const applyDefaultsPromptOptimizer = useCallback((config: import('@/lib/types').AppConfig) => {
-    setDefaultPromptOptimizerForm(promptOptimizerSettingsConfigToForm(config));
   }, []);
 
   /**
@@ -447,69 +379,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
       });
     } finally {
       setTestingClaudeCli(false);
-    }
-  };
-
-  const patchPromptOptimizerForm = useCallback((partial: Partial<PromptOptimizerSettingsForm>) => {
-    setPromptOptimizerForm((prev) => {
-      const next = { ...prev, ...partial };
-      promptOptimizerFormRef.current = next;
-      return next;
-    });
-    promptOptimizerEditVersionRef.current += 1;
-    setPromptOptimizerSettingsError(null);
-  }, []);
-
-  const handleResetPromptOptimizerSettingsDefaults = useCallback(() => {
-    promptOptimizerFormRef.current = defaultPromptOptimizerForm;
-    promptOptimizerEditVersionRef.current += 1;
-    setPromptOptimizerForm(defaultPromptOptimizerForm);
-    setPromptOptimizerSettingsError(null);
-  }, [defaultPromptOptimizerForm]);
-
-  const handleApplyPromptOptimizerSettings = async () => {
-    const snapshot: PromptOptimizerSettingsForm = { ...promptOptimizerFormRef.current };
-    const attempt = createSaveAttempt(
-      ++promptOptimizerRequestSeqRef.current,
-      snapshot,
-      promptOptimizerEditVersionRef.current,
-    );
-    setApplyingPromptOptimizer(true);
-    setPromptOptimizerSettingsError(null);
-    try {
-      const updated = await configApi.update(
-        promptOptimizerSettingsFormToUpdate(attempt.submittedSnapshot),
-      );
-      const serverForm = promptOptimizerSettingsConfigToForm(updated);
-      const baselineForm = promptOptimizerConfigRef.current ?? attempt.submittedSnapshot;
-      const resolution = resolveSaveSuccess({
-        attempt,
-        currentRequestSeq: promptOptimizerRequestSeqRef.current,
-        currentDraft: promptOptimizerFormRef.current,
-        currentEditVersion: promptOptimizerEditVersionRef.current,
-        serverValue: serverForm,
-        currentBaseline: baselineForm,
-      });
-      if (!resolution.applied) return;
-      promptOptimizerConfigRef.current = resolution.baseline;
-      promptOptimizerFormRef.current = resolution.draft;
-      setPromptOptimizerConfig(resolution.baseline);
-      setPromptOptimizerForm(resolution.draft);
-    } catch (err) {
-      const failure = resolveSaveFailure({
-        attempt,
-        currentRequestSeq: promptOptimizerRequestSeqRef.current,
-        currentDraft: promptOptimizerFormRef.current,
-        currentBaseline: promptOptimizerConfigRef.current ?? attempt.submittedSnapshot,
-      });
-      if (!failure.applied) return;
-      setPromptOptimizerSettingsError(
-        err instanceof Error ? err.message : t('settings:promptOptimizerSettings.applyFailed'),
-      );
-    } finally {
-      if (attempt.requestSeq === promptOptimizerRequestSeqRef.current) {
-        setApplyingPromptOptimizer(false);
-      }
     }
   };
 
@@ -717,13 +586,6 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     handleResetGithubTrendingDefaults,
     handleApplyGithubTrending,
     handleTestClaudeCli,
-    promptOptimizerForm,
-    promptOptimizerConfig,
-    applyingPromptOptimizer,
-    promptOptimizerSettingsError,
-    patchPromptOptimizerForm,
-    handleResetPromptOptimizerSettingsDefaults,
-    handleApplyPromptOptimizerSettings,
     healthForm,
     healthConfig,
     applyingHealth,
@@ -748,7 +610,5 @@ export function useSettingsSecondaryForms(): UseSettingsSecondaryFormsResult {
     applyGithubGroup,
     applyHealthGroup,
     applyAutomationGroup,
-    applyCorePromptOptimizer,
-    applyDefaultsPromptOptimizer,
   };
 }

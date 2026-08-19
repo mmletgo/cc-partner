@@ -3,8 +3,6 @@ import type {
   CloudSyncConfig,
   GithubTrendingConfig,
   HealthConfig,
-  PromptOptimizerFillLanguage,
-  PromptOptimizerProvider,
   UpdateDownloadStatus,
   UpdateDownloadStatusValue,
 } from '../../lib/types';
@@ -79,19 +77,6 @@ export interface GithubTrendingForm {
   cacheTtlHours: number;
 }
 
-/**
- * Workbench Prompt 优化小组件设置表单。
- *
- * Business Logic（为什么只剩 fillLanguage + provider）:
- *   Prompt 优化快捷键已迁到常规 tab 的 shortcuts 数组（随常规保存持久化），
- *   AI tab 的 secondary 表单负责填入语言与 HeadlessCompletion provider。
- */
-export interface PromptOptimizerSettingsForm {
-  fillLanguage: PromptOptimizerFillLanguage;
-  provider: PromptOptimizerProvider;
-}
-
-/** 健康提醒 / 活动统计 tab 的受控表单值;与 HealthConfig 同构,提交前按切片 merge。 */
 export type HealthForm = HealthConfig;
 
 /** Settings 页内子 tab id（与 Settings.tsx SETTINGS_TABS 对齐）。 */
@@ -185,12 +170,6 @@ export interface CloudSyncFormUpdate {
   branch: string;
 }
 
-/** Workbench Prompt 优化设置提交 payload（填入语言 + provider；快捷键由常规 shortcuts 持久化）。 */
-export interface PromptOptimizerSettingsUpdate {
-  promptOptimizerFillLanguage: PromptOptimizerFillLanguage;
-  promptOptimizerProvider: PromptOptimizerProvider;
-}
-
 /** 云端同步表单加载前占位值；真实默认值由后端 get_default_cloud_sync_config 覆盖。 */
 export const PENDING_CLOUD_SYNC_FORM: CloudSyncForm = {
   repoUrl: '',
@@ -206,12 +185,6 @@ export const PENDING_GITHUB_TRENDING_FORM: GithubTrendingForm = {
   claudeCliPath: 'claude',
   claudeModel: 'sonnet',
   cacheTtlHours: 24,
-};
-
-/** Prompt 优化设置加载前占位值；真实默认值由后端 get_default_config 覆盖。 */
-export const PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM: PromptOptimizerSettingsForm = {
-  fillLanguage: 'zh',
-  provider: 'claude',
 };
 
 /** 健康表单加载前占位值;真实值由后端 get_health_config / get_default_health_config 覆盖。 */
@@ -396,43 +369,6 @@ export function githubTrendingConfigToForm(config: GithubTrendingConfig | null):
     claudeCliPath: config.claudeCliPath || 'claude',
     claudeModel: config.claudeModel || 'sonnet',
     cacheTtlHours: config.cacheTtlHours,
-  };
-}
-
-/**
- * 将后端 AppConfig 映射为 Workbench Prompt 优化设置表单。
- *
- * Business Logic（为什么需要）:
- *   AI tab 仍独立编辑「填入语言」和优化 provider；快捷键已迁到常规 tab。
- *
- * Code Logic（做什么）:
- *   从 AppConfig 读取 fillLanguage / provider；未知语言回退 zh，未知 provider 回退 claude。
- */
-export function promptOptimizerSettingsConfigToForm(
-  config: AppConfig | null,
-): PromptOptimizerSettingsForm {
-  if (!config) return { ...PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM };
-  return {
-    fillLanguage: config.promptOptimizerFillLanguage === 'en' ? 'en' : 'zh',
-    provider: config.promptOptimizerProvider === 'grok' ? 'grok' : 'claude',
-  };
-}
-
-/**
- * 将 Prompt 优化设置表单映射为 update_config payload。
- *
- * Business Logic（为什么需要）:
- *   AI tab 保存 Prompt 优化偏好时，只应提交填入语言与 provider；快捷键随常规 shortcuts 持久化。
- *
- * Code Logic（做什么）:
- *   语言只允许 zh/en；provider 只允许 catalog 已实现的 claude/grok。
- */
-export function promptOptimizerSettingsFormToUpdate(
-  form: PromptOptimizerSettingsForm,
-): PromptOptimizerSettingsUpdate {
-  return {
-    promptOptimizerFillLanguage: form.fillLanguage === 'en' ? 'en' : 'zh',
-    promptOptimizerProvider: form.provider === 'grok' ? 'grok' : 'claude',
   };
 }
 

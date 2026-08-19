@@ -467,14 +467,6 @@ export function Settings(): ReactElement {
                 void ctrl.handleRetryResourceGroup('githubTrending')
               }
               retryingGithubTrending={ctrl.retryingGroup === 'githubTrending'}
-              promptOptimizerForm={ctrl.promptOptimizerForm}
-              promptOptimizerConfig={ctrl.promptOptimizerConfig}
-              applyingPromptOptimizer={ctrl.applyingPromptOptimizer}
-              promptOptimizerSettingsError={ctrl.promptOptimizerSettingsError}
-              canResetPromptOptimizerDefaults={ctrl.canResetPromptOptimizerDefaults}
-              onPatchPromptOptimizer={ctrl.patchPromptOptimizerForm}
-              onResetPromptOptimizerDefaults={ctrl.handleResetPromptOptimizerSettingsDefaults}
-              onApplyPromptOptimizer={() => void ctrl.handleApplyPromptOptimizerSettings()}
             />
           </div>
         ) : null}

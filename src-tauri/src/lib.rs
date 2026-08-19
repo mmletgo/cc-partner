@@ -51,7 +51,6 @@ pub use transfer::sender::{
 };
 mod claude_cli;
 mod claude_code_assets;
-mod grok_cli;
 mod internal_claude;
 // Gate C N/N+1: mixed_version harness cites Gate B fail-closed by stable production function name.
 #[cfg(test)]

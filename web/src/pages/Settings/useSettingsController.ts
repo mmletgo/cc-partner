@@ -34,7 +34,6 @@ import type {
   CloudSyncForm,
   GithubTrendingForm,
   HealthForm,
-  PromptOptimizerSettingsForm,
   SettingsState,
 } from './settingsState';
 import type { AutomationSettingsForm } from './automationSettingsState';
@@ -220,16 +219,6 @@ export interface UseSettingsControllerResult {
   handleResetGithubTrendingDefaults: () => void;
   handleApplyGithubTrending: () => Promise<void>;
   handleTestClaudeCli: () => Promise<void>;
-
-  // prompt optimizer
-  promptOptimizerForm: PromptOptimizerSettingsForm;
-  promptOptimizerConfig: PromptOptimizerSettingsForm | null;
-  applyingPromptOptimizer: boolean;
-  promptOptimizerSettingsError: string | null;
-  canResetPromptOptimizerDefaults: boolean;
-  patchPromptOptimizerForm: (partial: Partial<PromptOptimizerSettingsForm>) => void;
-  handleResetPromptOptimizerSettingsDefaults: () => void;
-  handleApplyPromptOptimizerSettings: () => Promise<void>;
 
   // automation
   automationForm: AutomationSettingsForm;
@@ -606,15 +595,6 @@ export function useSettingsController(): UseSettingsControllerResult {
     handleResetGithubTrendingDefaults: form.handleResetGithubTrendingDefaults,
     handleApplyGithubTrending: form.handleApplyGithubTrending,
     handleTestClaudeCli: form.handleTestClaudeCli,
-
-    promptOptimizerForm: form.promptOptimizerForm,
-    promptOptimizerConfig: form.promptOptimizerConfig,
-    applyingPromptOptimizer: form.applyingPromptOptimizer,
-    promptOptimizerSettingsError: form.promptOptimizerSettingsError,
-    canResetPromptOptimizerDefaults: resources.canResetPromptOptimizerDefaults,
-    patchPromptOptimizerForm: form.patchPromptOptimizerForm,
-    handleResetPromptOptimizerSettingsDefaults: form.handleResetPromptOptimizerSettingsDefaults,
-    handleApplyPromptOptimizerSettings: form.handleApplyPromptOptimizerSettings,
 
     automationForm: form.automationForm,
     defaultAutomationForm: form.defaultAutomationForm,

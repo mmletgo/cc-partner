@@ -72,13 +72,10 @@ vi.mock('@/hooks/useWorkbenchWindowRole', () => ({
   }),
 }));
 
-const projectsMock = vi.hoisted(() => ({
-  activeProject: { name: 'demo-app' } as { name: string } | null,
-  remoteWriteDisabled: false,
-}));
-
 vi.mock('@/hooks/workbenchProjectsContext', () => ({
-  useWorkbenchProjects: () => projectsMock,
+  useWorkbenchProjects: () => ({
+    activeProject: { name: 'demo-app' },
+  }),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
@@ -105,9 +102,6 @@ vi.mock('@/hooks/useBattery', () => ({
   useBattery: () => batterySnapshotMock,
 }));
 
-vi.mock('@/pages/Workbench/views/WorkbenchBanner', () => ({
-  WorkbenchBanner: () => <div data-testid="workbench-banner" />,
-}));
 
 import { AppShell } from './AppShell';
 
@@ -191,7 +185,6 @@ describe('AppShell grouped navigation', () => {
       '/prompts',
       '/cc-history',
       '/scratchpad',
-      '/prompt-optimizer',
       '/agent-hub',
       '/health',
       '/activity',
@@ -284,7 +277,7 @@ describe('AppShell grouped navigation', () => {
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
     const links = within(nav).getAllByRole('link');
-    expect(links).toHaveLength(12);
+    expect(links).toHaveLength(11);
 
     for (const link of links) {
       const tabIndex = link.getAttribute('tabindex');

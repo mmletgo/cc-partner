@@ -2,11 +2,8 @@ import { useCallback, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
-import type {
-  PromptOptimizerFillLanguage,
-  WorkbenchSession,
-  WorkbenchWorktree,
-} from '@/lib/types';
+import { useLanguage } from '@/hooks/useLanguage';
+import type { WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobilePromptPanelProps {
@@ -33,12 +30,13 @@ function getErrorMessage(reason: unknown): string {
  *   手机端 Workbench 需要把用户输入的原始 Prompt 交给本机 Claude Code CLI 优化，并写入当前终端窗口。
  *
  * Code Logic（这个组件做什么）:
- *   管理原始 Prompt 与目标语种状态，调用 HTTP prompt transport；成功后清空输入，只显示短状态，不本地拼接终端输出。
+ *   管理原始 Prompt 状态，调用 HTTP prompt transport；优化结果语言跟随当前界面语种；
+ *   成功后清空输入，只显示短状态，不本地拼接终端输出。
  */
 export function MobilePromptPanel({ worktree, session }: MobilePromptPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
+  const { language } = useLanguage();
   const [rawPrompt, setRawPrompt] = useState<string>('');
-  const [targetLanguage, setTargetLanguage] = useState<PromptOptimizerFillLanguage>('zh');
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -60,7 +58,7 @@ export function MobilePromptPanel({ worktree, session }: MobilePromptPanelProps)
     try {
       await httpWorkbenchTransport.prompt.streamToTerminal(trimmedPrompt, {
         workingDirectory: worktree.path,
-        targetLanguage,
+        targetLanguage: language,
         sessionId: session.id,
       });
       setRawPrompt('');
@@ -70,7 +68,7 @@ export function MobilePromptPanel({ worktree, session }: MobilePromptPanelProps)
     } finally {
       setSubmitting(false);
     }
-  }, [session, t, targetLanguage, trimmedPrompt, worktree]);
+  }, [language, session, t, trimmedPrompt, worktree]);
 
   return (
     <section className={styles.panel} aria-labelledby="mobile-prompt-panel-title">
@@ -105,21 +103,6 @@ export function MobilePromptPanel({ worktree, session }: MobilePromptPanelProps)
               setStatus(null);
             }}
           />
-        </label>
-
-        <label className={styles.mobileField}>
-          <span>{t('workbench:mobile.promptPanel.languageLabel')}</span>
-          <select
-            className={styles.mobileSelect}
-            value={targetLanguage}
-            disabled={submitting}
-            onChange={(event) => {
-              setTargetLanguage(event.target.value as PromptOptimizerFillLanguage);
-            }}
-          >
-            <option value="zh">{t('workbench:mobile.promptPanel.languages.zh')}</option>
-            <option value="en">{t('workbench:mobile.promptPanel.languages.en')}</option>
-          </select>
         </label>
 
         <button

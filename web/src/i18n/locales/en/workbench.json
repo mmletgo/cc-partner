@@ -324,11 +324,6 @@
       "noSession": "Select or create a terminal window first",
       "promptLabel": "Original prompt",
       "promptPlaceholder": "Enter the prompt to optimize and write into the current terminal",
-      "languageLabel": "Target language",
-      "languages": {
-        "zh": "中文",
-        "en": "English"
-      },
       "send": "Write to current terminal",
       "sending": "Writing",
       "sent": "Started writing to the current terminal",

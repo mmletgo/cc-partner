@@ -19,9 +19,9 @@
  *
  * Code Logic（这个 controller 做什么）:
  *   - 持有 `promptPanelOpen` / `promptInput` / `promptOptimizing` / `promptOptimizerHotkey` /
- *     `promptOptimizerFillLanguage` / `promptPanelPosition` state；
+ *     `promptPanelPosition` state；优化结果语言跟随 `useLanguage()` 的当前界面语种；
  *   - 持有 `promptShortcutStateRef` / `promptPanelOpenRef` ref（快捷键状态机 + 异步读最新开关态）；
- *   - 注册 configApi 加载 effect（mount 时拉取 hotkey / fillLanguage，失败回退默认）；
+ *   - 注册 configApi 加载 effect（mount 时拉取 hotkey，失败回退默认）；
  *   - 注册打开后焦点回归 effect（requestAnimationFrame 聚焦 textarea）；
  *   - 注册 Control 单键 / 组合快捷键 keydown+keyup 监听（capture 阶段，按 reducePromptOptimizerShortcut
  *     状态机判定，命中后触发 open/close/optimize）；
@@ -33,6 +33,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { useLanguage } from '@/hooks/useLanguage';
+import { resolveAppLanguage } from '@/i18n';
 import {
   canFillPromptIntoTerminal,
   createPromptOptimizerShortcutState,
@@ -44,10 +46,7 @@ import {
 } from '../promptOptimizerWidget';
 import type { PromptOptimizerShortcutState } from '../promptOptimizerWidget';
 import type { TerminalCursorAnchor } from '../WorkbenchTerminalPane';
-import type {
-  PromptOptimizerFillLanguage,
-  WorkbenchSession,
-} from '@/lib/types';
+import type { PromptOptimizerFillLanguage, WorkbenchSession } from '@/lib/types';
 
 /** 浮层相对 terminalArea 的定位（CSS custom property 来源）。 */
 export interface PromptOptimizerPanelPosition {
@@ -75,7 +74,6 @@ export function promptOptimizerPanelPosition(
 /** controller 注入的配置加载函数（通常包装 configApi.get）。 */
 export interface PromptOptimizerConfigLoadResult {
   promptOptimizerHotkey?: string | null;
-  promptOptimizerFillLanguage?: PromptOptimizerFillLanguage | null;
 }
 
 /** 流式写入终端的注入函数（通常包装 promptOptimizerApi.streamToTerminal）。 */
@@ -136,7 +134,7 @@ export interface UseWorkbenchPromptOptimizerControllerParams {
  *
  * 字段语义：
  *   - promptPanelOpen / promptInput / promptOptimizing / promptOptimizerHotkey /
- *     promptOptimizerFillLanguage / promptPanelPosition：渲染浮层所需状态。
+ *     promptPanelPosition：渲染浮层所需状态。优化结果语言跟随当前界面语种，不在此暴露独立开关。
  *   - setPromptInput：textarea onChange 回写。
  *   - openPromptOptimizerPanel：清空输入并按光标锚点定位后打开浮层。
  *   - closePromptPanel：关闭浮层。
@@ -150,7 +148,6 @@ export interface WorkbenchPromptOptimizerControllerResult {
   promptInput: string;
   promptOptimizing: boolean;
   promptOptimizerHotkey: string;
-  promptOptimizerFillLanguage: PromptOptimizerFillLanguage;
   promptPanelPosition: PromptOptimizerPanelPosition;
   setPromptInput: (next: string) => void;
   openPromptOptimizerPanel: () => void;
@@ -192,13 +189,13 @@ export function useWorkbenchPromptOptimizerController(
     translateOptimizeFailed,
     translateRemoteOffline,
   } = params;
+  const { language } = useLanguage();
+  const promptOptimizerTargetLanguage: PromptOptimizerFillLanguage = resolveAppLanguage(language);
 
   const [promptPanelOpen, setPromptPanelOpen] = useState<boolean>(false);
   const [promptInput, setPromptInput] = useState<string>('');
   const [promptOptimizing, setPromptOptimizing] = useState<boolean>(false);
   const [promptOptimizerHotkey, setPromptOptimizerHotkey] = useState<string>('<ctrl>');
-  const [promptOptimizerFillLanguage, setPromptOptimizerFillLanguage] =
-    useState<PromptOptimizerFillLanguage>('zh');
   const [promptPanelPosition, setPromptPanelPosition] = useState<PromptOptimizerPanelPosition>({
     left: 24,
     top: 24,
@@ -219,20 +216,17 @@ export function useWorkbenchPromptOptimizerController(
   // openPromptOptimizerPanel 共同读写；声明在 hooks 区域（early return 之前）。
   const cursorAnchorRef = useRef<TerminalCursorAnchor | null>(null);
 
-  // Business Logic: mount 时拉取用户配置的快捷键与单语设置；普通浏览器调试环境 configApi 会 reject，
-  // 此时保留默认快捷键 '<ctrl>' 与中文设置（与原 Workbench.tsx 行为一致）。
+  // Business Logic: mount 时拉取用户配置的快捷键；普通浏览器调试环境 configApi 会 reject，
+  // 此时保留默认快捷键 '<ctrl>'。优化结果语言跟随当前界面语种，不再读独立配置。
   useEffect(() => {
     let cancelled = false;
     void loadConfig()
       .then((config) => {
         if (cancelled) return;
         setPromptOptimizerHotkey(config.promptOptimizerHotkey || '<ctrl>');
-        setPromptOptimizerFillLanguage(
-          config.promptOptimizerFillLanguage === 'en' ? 'en' : 'zh',
-        );
       })
       .catch(() => {
-        // 普通浏览器调试环境没有 Tauri invoke；保留默认快捷键与语言即可。
+        // 普通浏览器调试环境没有 Tauri invoke；保留默认快捷键即可。
       });
     return () => {
       cancelled = true;
@@ -309,7 +303,7 @@ export function useWorkbenchPromptOptimizerController(
       setPromptOptimizing(true);
       await streamToTerminal(promptInput, {
         workingDirectory: promptWorkingDirectory,
-        targetLanguage: promptOptimizerFillLanguage,
+        targetLanguage: promptOptimizerTargetLanguage,
         sessionId: activeSession.id,
       });
       setPromptPanelOpen(false);
@@ -332,7 +326,7 @@ export function useWorkbenchPromptOptimizerController(
     promptInput,
     promptInputRef,
     promptOptimizing,
-    promptOptimizerFillLanguage,
+    promptOptimizerTargetLanguage,
     promptWorkingDirectory,
     remoteWriteDisabled,
     setSessionError,
@@ -478,7 +472,6 @@ export function useWorkbenchPromptOptimizerController(
     promptInput,
     promptOptimizing,
     promptOptimizerHotkey,
-    promptOptimizerFillLanguage,
     promptPanelPosition,
     setPromptInput,
     openPromptOptimizerPanel,

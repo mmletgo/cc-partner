@@ -87,7 +87,6 @@ export interface UseSettingsResourcesResult {
   canResetCoreDefaults: boolean;
   canResetCloudSyncDefaults: boolean;
   canResetGithubTrendingDefaults: boolean;
-  canResetPromptOptimizerDefaults: boolean;
   canResetHealthDefaults: boolean;
   canResetAutomationDefaults: boolean;
   cloudSyncLoadError: Error | null;
@@ -147,7 +146,6 @@ export function useSettingsResources(
   const canResetCloudSyncDefaults = resourceResults?.cloudSync.defaults.status === 'ready';
   const canResetGithubTrendingDefaults =
     resourceResults?.githubTrending.defaults.status === 'ready';
-  const canResetPromptOptimizerDefaults = canResetCoreDefaults;
   const canResetHealthDefaults = resourceResults?.health.defaults.status === 'ready';
   const canResetAutomationDefaults = resourceResults?.automation.defaults.status === 'ready';
 
@@ -301,7 +299,6 @@ export function useSettingsResources(
     canResetCoreDefaults: Boolean(canResetCoreDefaults),
     canResetCloudSyncDefaults: Boolean(canResetCloudSyncDefaults),
     canResetGithubTrendingDefaults: Boolean(canResetGithubTrendingDefaults),
-    canResetPromptOptimizerDefaults: Boolean(canResetPromptOptimizerDefaults),
     canResetHealthDefaults: Boolean(canResetHealthDefaults),
     canResetAutomationDefaults: Boolean(canResetAutomationDefaults),
     cloudSyncLoadError,

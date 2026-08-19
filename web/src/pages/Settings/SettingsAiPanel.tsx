@@ -2,11 +2,11 @@
  * Settings AI 设置面板
  *
  * Business Logic（为什么需要这个组件）:
- *   用户在 AI tab 配置 GitHub Trending Claude CLI 与 Workbench Prompt 优化填入语种；
+ *   用户在 AI tab 配置 GitHub Trending / Prompt 优化共用的 Claude CLI；
  *   状态与 API 调用由 controller 持有，本组件只渲染受控表单。
  *
  * Code Logic（这个组件做什么）:
- *   渲染 githubTrending Card 与 promptOptimizer Card；无 @/api 导入，无业务副作用状态。
+ *   渲染 githubTrending Card 与内部 Claude provider Card；无 @/api 导入，无业务副作用状态。
  */
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -14,11 +14,7 @@ import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon, InfoIcon } from '@/lib/icons';
 import type { ClaudeCliTestResult, GithubTrendingConfig } from '@/lib/types';
 import { InternalClaudeProviderCard } from '@/components/domain/InternalClaudeProviderCard';
-import { headlessOptimizerProviders } from '@/lib/agentCatalog';
-import type {
-  GithubTrendingForm,
-  PromptOptimizerSettingsForm,
-} from './settingsState';
+import type { GithubTrendingForm } from './settingsState';
 import styles from './Settings.module.css';
 
 /**
@@ -28,7 +24,7 @@ import styles from './Settings.module.css';
  *   Settings 壳层把 controller 的 AI 相关状态透传给 pure panel，避免 panel 直接读 hook。
  *
  * Code Logic（这个接口做什么）:
- *   声明 githubTrending / promptOptimizer 受控值、loading/error 与 patch/reset/apply/test/retry 回调。
+ *   声明 githubTrending 受控值、loading/error 与 patch/reset/apply/test/retry 回调。
  */
 export interface SettingsAiPanelProps {
   githubTrendingForm: GithubTrendingForm;
@@ -45,15 +41,6 @@ export interface SettingsAiPanelProps {
   onTestClaudeCli: () => void;
   onRetryGithubTrendingLoad: () => void;
   retryingGithubTrending: boolean;
-
-  promptOptimizerForm: PromptOptimizerSettingsForm;
-  promptOptimizerConfig: PromptOptimizerSettingsForm | null;
-  applyingPromptOptimizer: boolean;
-  promptOptimizerSettingsError: string | null;
-  canResetPromptOptimizerDefaults: boolean;
-  onPatchPromptOptimizer: (partial: Partial<PromptOptimizerSettingsForm>) => void;
-  onResetPromptOptimizerDefaults: () => void;
-  onApplyPromptOptimizer: () => void;
 }
 
 /**
@@ -63,7 +50,7 @@ export interface SettingsAiPanelProps {
  *   AI tab 是独立业务组（CLI 配置 + Prompt 优化偏好），需要 pure 视图配合 ownership 守卫。
  *
  * Code Logic（这个组件做什么）:
- *   useTranslation 置顶；原样渲染 githubTrending 与 promptOptimizer 两张 Card。
+ *   useTranslation 置顶；原样渲染 githubTrending 与内部 Claude provider Card。
  *
  * @param props 受控 AI 表单与动作
  * @returns AI tab 内容
@@ -83,14 +70,6 @@ export function SettingsAiPanel({
   onTestClaudeCli,
   onRetryGithubTrendingLoad,
   retryingGithubTrending,
-  promptOptimizerForm,
-  promptOptimizerConfig,
-  applyingPromptOptimizer,
-  promptOptimizerSettingsError,
-  canResetPromptOptimizerDefaults,
-  onPatchPromptOptimizer,
-  onResetPromptOptimizerDefaults,
-  onApplyPromptOptimizer,
 }: SettingsAiPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
 
@@ -286,171 +265,6 @@ export function SettingsAiPanel({
 
       {/* Card: 内部 Claude provider 覆盖（自包含 domain 卡，不改 controller） */}
       <InternalClaudeProviderCard />
-
-      {/* Card: Workbench Prompt 优化小组件 */}
-      <Card variant="flat" padding="md">
-        <Card.Header>
-          <h2 className={styles.sectionTitle}>
-            {t('settings:promptOptimizerSettings.title')}
-          </h2>
-        </Card.Header>
-        <Card.Body padding="md">
-          <p className={styles.helper}>{t('settings:promptOptimizerSettings.subtitle')}</p>
-
-          <div className={styles.field}>
-            <span className={styles.label} id="settings-prompt-optimizer-provider-label">
-              {t('settings:promptOptimizerSettings.provider.label')}
-            </span>
-            <p className={styles.helper}>{t('settings:promptOptimizerSettings.provider.helper')}</p>
-            <div
-              className={styles.toggleList}
-              role="radiogroup"
-              aria-labelledby="settings-prompt-optimizer-provider-label"
-            >
-              {headlessOptimizerProviders().map((identity) => (
-                <button
-                  key={identity.id}
-                  type="button"
-                  className={styles.toggleRow}
-                  onClick={() =>
-                    onPatchPromptOptimizer({
-                      provider: identity.id === 'grok' ? 'grok' : 'claude',
-                    })
-                  }
-                  role="radio"
-                  aria-checked={promptOptimizerForm.provider === identity.id}
-                  aria-label={identity.displayName}
-                  data-testid={`settings-prompt-optimizer-provider-${identity.id}`}
-                >
-                  <div className={styles.toggleText}>
-                    <span className={styles.toggleLabel}>{identity.displayName}</span>
-                  </div>
-                  <span className={styles.toggleState}>
-                    {promptOptimizerForm.provider === identity.id ? (
-                      <Pill tone="success" dot>
-                        <CheckIcon size={12} />
-                        {t('settings:sync.enabled')}
-                      </Pill>
-                    ) : (
-                      <Pill tone="neutral" dot>
-                        {t('settings:sync.disabled')}
-                      </Pill>
-                    )}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className={styles.toggleList}>
-            <button
-              type="button"
-              className={styles.toggleRow}
-              onClick={() => onPatchPromptOptimizer({ fillLanguage: 'zh' })}
-              role="radio"
-              aria-checked={promptOptimizerForm.fillLanguage === 'zh'}
-              aria-label={t('settings:promptOptimizerSettings.fillLanguage.zh')}
-            >
-              <div className={styles.toggleText}>
-                <span className={styles.toggleLabel}>
-                  {t('settings:promptOptimizerSettings.fillLanguage.zh')}
-                </span>
-                <span className={styles.toggleHelper}>
-                  {t('settings:promptOptimizerSettings.fillLanguage.helper')}
-                </span>
-              </div>
-              <span className={styles.toggleState}>
-                {promptOptimizerForm.fillLanguage === 'zh' ? (
-                  <Pill tone="success" dot>
-                    <CheckIcon size={12} />
-                    {t('settings:sync.enabled')}
-                  </Pill>
-                ) : (
-                  <Pill tone="neutral" dot>
-                    {t('settings:sync.disabled')}
-                  </Pill>
-                )}
-              </span>
-            </button>
-            <button
-              type="button"
-              className={styles.toggleRow}
-              onClick={() => onPatchPromptOptimizer({ fillLanguage: 'en' })}
-              role="radio"
-              aria-checked={promptOptimizerForm.fillLanguage === 'en'}
-              aria-label={t('settings:promptOptimizerSettings.fillLanguage.en')}
-            >
-              <div className={styles.toggleText}>
-                <span className={styles.toggleLabel}>
-                  {t('settings:promptOptimizerSettings.fillLanguage.en')}
-                </span>
-                <span className={styles.toggleHelper}>
-                  {t('settings:promptOptimizerSettings.fillLanguage.helper')}
-                </span>
-              </div>
-              <span className={styles.toggleState}>
-                {promptOptimizerForm.fillLanguage === 'en' ? (
-                  <Pill tone="success" dot>
-                    <CheckIcon size={12} />
-                    {t('settings:sync.enabled')}
-                  </Pill>
-                ) : (
-                  <Pill tone="neutral" dot>
-                    {t('settings:sync.disabled')}
-                  </Pill>
-                )}
-              </span>
-            </button>
-          </div>
-
-          {promptOptimizerConfig ? (
-            <div className={styles.metaRow}>
-              <span className={styles.metaKey}>
-                {t('settings:promptOptimizerSettings.appliedConfig')}
-              </span>
-              <span className={styles.metaValue}>
-                {headlessOptimizerProviders().find(
-                  (identity) => identity.id === promptOptimizerConfig.provider,
-                )?.displayName ?? 'Claude Code'}
-                {' · '}
-                {promptOptimizerConfig.fillLanguage === 'en'
-                  ? t('settings:promptOptimizerSettings.fillLanguage.en')
-                  : t('settings:promptOptimizerSettings.fillLanguage.zh')}
-              </span>
-            </div>
-          ) : null}
-
-          <div className={styles.aboutActions}>
-            <Button
-              variant="ghost"
-              size="md"
-              onClick={onResetPromptOptimizerDefaults}
-              disabled={!canResetPromptOptimizerDefaults}
-              title={
-                canResetPromptOptimizerDefaults
-                  ? undefined
-                  : t('settings:resource.defaultsUnavailable')
-              }
-            >
-              {t('settings:action.resetDefault')}
-            </Button>
-            <Button
-              variant="primary"
-              size="md"
-              onClick={onApplyPromptOptimizer}
-              disabled={applyingPromptOptimizer}
-            >
-              {applyingPromptOptimizer
-                ? t('settings:promptOptimizerSettings.applying')
-                : t('settings:promptOptimizerSettings.apply')}
-            </Button>
-          </div>
-
-          {promptOptimizerSettingsError ? (
-            <span className={styles.updateError}>{promptOptimizerSettingsError}</span>
-          ) : null}
-        </Card.Body>
-      </Card>
     </>
   );
 }

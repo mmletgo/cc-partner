@@ -59,7 +59,6 @@ const Prompts = lazyNamed(() => import('./pages/Prompts'), 'Prompts');
 const CcHistory = lazyNamed(() => import('./pages/CcHistory'), 'CcHistory');
 const Workbench = lazyNamed(() => import('./pages/Workbench'), 'Workbench');
 const Scratchpad = lazyNamed(() => import('./pages/Scratchpad'), 'Scratchpad');
-const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'PromptOptimizer');
 // ClaudeMd page module retained under pages/ for N/N+1; ClaudeCodeAssets frontend deleted after portable parity E2E.
 // ownership routes redirect to Agent Hub. Gate D Task 7: old routes stay registered
 // but hidden; only /agent-hub is the new UI entry until N+2 removal evidence lands.
@@ -627,7 +626,7 @@ export default function App() {
               element={<Navigate to="/settings?tab=fleet" replace />}
             />
             <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
-            <Route path="/prompt-optimizer" element={<ShellRoute><PromptOptimizer /></ShellRoute>} />
+            <Route path="/prompt-optimizer" element={<Navigate to="/workbench" replace />} />
             <Route path="/agent-hub" element={<ShellRoute><AgentHub /></ShellRoute>} />
             <Route
               path="/provider-manager"

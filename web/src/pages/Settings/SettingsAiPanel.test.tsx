@@ -12,7 +12,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SettingsAiPanel, type SettingsAiPanelProps } from './SettingsAiPanel';
-import type { GithubTrendingForm, PromptOptimizerSettingsForm } from './settingsState';
+import type { GithubTrendingForm } from './settingsState';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -40,10 +40,6 @@ function buildProps(overrides: Partial<SettingsAiPanelProps> = {}): SettingsAiPa
     claudeModel: 'sonnet',
     cacheTtlHours: 24,
   };
-  const promptOptimizerForm: PromptOptimizerSettingsForm = {
-    fillLanguage: 'zh',
-    provider: 'claude',
-  };
 
   return {
     githubTrendingForm,
@@ -60,14 +56,6 @@ function buildProps(overrides: Partial<SettingsAiPanelProps> = {}): SettingsAiPa
     onTestClaudeCli: vi.fn(),
     onRetryGithubTrendingLoad: vi.fn(),
     retryingGithubTrending: false,
-    promptOptimizerForm,
-    promptOptimizerConfig: null,
-    applyingPromptOptimizer: false,
-    promptOptimizerSettingsError: null,
-    canResetPromptOptimizerDefaults: true,
-    onPatchPromptOptimizer: vi.fn(),
-    onResetPromptOptimizerDefaults: vi.fn(),
-    onApplyPromptOptimizer: vi.fn(),
     ...overrides,
   };
 }
@@ -112,15 +100,5 @@ describe('SettingsAiPanel interactions', () => {
     expect(onPatchGithubTrending).toHaveBeenCalledWith({
       claudeCliPath: '/usr/local/bin/claude',
     });
-  });
-
-  test('selecting Grok provider calls onPatchPromptOptimizer', () => {
-    const onPatchPromptOptimizer = vi.fn();
-    render(<SettingsAiPanel {...buildProps({ onPatchPromptOptimizer })} />);
-
-    fireEvent.click(screen.getByTestId('settings-prompt-optimizer-provider-grok'));
-
-    expect(onPatchPromptOptimizer).toHaveBeenCalledWith({ provider: 'grok' });
-    expect(screen.queryByTestId('settings-prompt-optimizer-provider-gemini')).toBeNull();
   });
 });

@@ -8,7 +8,8 @@
  *
  * Code Logic（这个组件做什么）:
  *   - 共享 Dialog 原语渲染 bottom sheet（portal / Escape / backdrop / focus trap），禁止手写 modal。
- *   - 自管原始 Prompt / 目标语种 / 提交态 / 错误 / 状态，调用 httpWorkbenchTransport.prompt.streamToTerminal。
+ *   - 自管原始 Prompt / 提交态 / 错误 / 状态，调用 httpWorkbenchTransport.prompt.streamToTerminal；
+ *     优化结果语言跟随当前界面语种。
  *   - 提交成功清空输入并提示已发送；失败展示可读错误。颜色/间距走 tokens，文案走 t('workbench:mobile.promptPanel.*')。
  *   - 所有 hooks 在 return 之前；open=false 时由 Dialog 返回 null。
  */
@@ -17,11 +18,8 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Dialog } from '@/components/primitives';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
-import type {
-  PromptOptimizerFillLanguage,
-  WorkbenchSession,
-  WorkbenchWorktree,
-} from '@/lib/types';
+import { useLanguage } from '@/hooks/useLanguage';
+import type { WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobilePromptOptimizerSheetProps {
@@ -50,9 +48,9 @@ export function MobilePromptOptimizerSheet({
   session,
 }: MobilePromptOptimizerSheetProps): ReactElement {
   const { t } = useTranslation(['workbench']);
+  const { language } = useLanguage();
   const titleId = useId();
   const [rawPrompt, setRawPrompt] = useState<string>('');
-  const [targetLanguage, setTargetLanguage] = useState<PromptOptimizerFillLanguage>('zh');
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -74,7 +72,7 @@ export function MobilePromptOptimizerSheet({
     try {
       await httpWorkbenchTransport.prompt.streamToTerminal(trimmedPrompt, {
         workingDirectory: worktree.path,
-        targetLanguage,
+        targetLanguage: language,
         sessionId: session.id,
       });
       setRawPrompt('');
@@ -84,7 +82,7 @@ export function MobilePromptOptimizerSheet({
     } finally {
       setSubmitting(false);
     }
-  }, [session, t, targetLanguage, trimmedPrompt, worktree]);
+  }, [language, session, t, trimmedPrompt, worktree]);
 
   return (
     <Dialog
@@ -125,21 +123,6 @@ export function MobilePromptOptimizerSheet({
               setStatus(null);
             }}
           />
-        </label>
-
-        <label className={styles.mobileField}>
-          <span>{t('workbench:mobile.promptPanel.languageLabel')}</span>
-          <select
-            className={styles.mobileSelect}
-            value={targetLanguage}
-            disabled={submitting}
-            onChange={(event) => {
-              setTargetLanguage(event.target.value as PromptOptimizerFillLanguage);
-            }}
-          >
-            <option value="zh">{t('workbench:mobile.promptPanel.languages.zh')}</option>
-            <option value="en">{t('workbench:mobile.promptPanel.languages.en')}</option>
-          </select>
         </label>
 
         <button
