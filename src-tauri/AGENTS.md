@@ -8,7 +8,7 @@ Workbench 交互式终端输入使用能力 `workbench.terminal-input-stream.v1`
 
 cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而来。Tauri 2 主进程用 Rust 实现配置/存储/网络/同步/传输/截图/权限/更新等全部能力；前端复用 `web/` 的 React。GUI 通过 sidecar 复用 `cc-partner-backend`；headless CLI 是远端设备一等公民。
 
-本地多 git worktree 编译：**禁止**共用 `CARGO_TARGET_DIR`（整目录锁会串行，同名 crate fingerprint 会串味）。`./start.sh` 若 PATH 有 `sccache` 会设 `RUSTC_WRAPPER` + 每个 worktree 根的 `SCCACHE_BASEDIRS`，并对无 cargo/tauri/rustc 占用的其它树 `cargo clean`。不经 `start.sh` 的 `cargo test`/`clippy` 需自行导出 `RUSTC_WRAPPER`。实现见 `scripts/worktree-dev-cache.mjs`。
+本地多 git worktree 编译：**禁止**共用 `CARGO_TARGET_DIR`（整目录锁会串行，同名 crate fingerprint 会串味）。**同一 worktree 内的 `cargo test`/`clippy`/`check` 必须用默认 `src-tauri/target`**：禁止 `CARGO_TARGET_DIR=/tmp/...` 或其它空目录——那会从 `unicode-ident` 起重编整棵依赖图，比等待 `Blocking waiting for file lock on artifact directory` 更慢。锁等待结束后通常只编 `app`。rust-analyzer 使用 `target/rust-analyzer`（见 `.vscode/settings.json`），不要和 cargo test 抢同一把锁。`./start.sh` 若 PATH 有 `sccache` 会设 `RUSTC_WRAPPER` + 每个 worktree 根的 `SCCACHE_BASEDIRS`，并对无 cargo/tauri/rustc 占用的其它树 `cargo clean`。不经 `start.sh` 时用 `./scripts/cc-partner-cargo.sh test --locked ...`（会启用 sccache 并丢掉空 `/tmp` target）。实现见 `scripts/worktree-dev-cache.mjs` 与 `scripts/cargo-dev-env.sh`。
 
 ## 通信架构（核心，务必遵守）
 

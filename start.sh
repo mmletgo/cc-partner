@@ -29,6 +29,10 @@ TAURI_BIN="$WEB_DIR/node_modules/.bin/tauri"
 info()  { printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
 error() { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*" >&2; }
 
+# sccache / 拒绝空 /tmp CARGO_TARGET_DIR（与 scripts/cc-partner-cargo.sh 共用）
+# shellcheck source=scripts/cargo-dev-env.sh
+source "$PWD/scripts/cargo-dev-env.sh"
+
 # 前置依赖检查
 check_prereqs() {
   # Node / npm 始终需要
@@ -101,45 +105,6 @@ configure_macos_dev_signing() {
   export CC_PARTNER_INTERNAL_SIGNING_IDENTITY='cc-partner Internal Code Signing'
   export CC_PARTNER_INTERNAL_CERT_SHA256="$detected_fingerprint"
   info "已自动启用 macOS 固定 Dev 签名 (${detected_fingerprint:0:12}...)"
-}
-
-# 多 worktree 共享 rustc 缓存。不写入仓库 .cargo/config.toml，以免 CI 无 sccache 时失败。
-# 已有非 sccache 的 RUSTC_WRAPPER 不覆盖。
-configure_sccache() {
-  local wrapper="${RUSTC_WRAPPER:-}"
-  if [[ -n "$wrapper" && "$wrapper" != *sccache* ]]; then
-    info "保留已有 RUSTC_WRAPPER=${wrapper}（不改为 sccache）"
-    return 0
-  fi
-
-  local sccache_bin=""
-  if command -v sccache >/dev/null 2>&1; then
-    sccache_bin="$(command -v sccache)"
-  fi
-
-  if [[ -z "$wrapper" ]]; then
-    if [[ -z "$sccache_bin" ]]; then
-      info "未检测到 sccache。并行 git worktree 编译可安装: brew install sccache"
-      return 0
-    fi
-    export RUSTC_WRAPPER="$sccache_bin"
-  fi
-
-  if [[ "${RUSTC_WRAPPER}" != *sccache* ]]; then
-    return 0
-  fi
-
-  local cache_js="$PWD/scripts/worktree-dev-cache.mjs"
-  if [[ -f "$cache_js" ]] && command -v node >/dev/null 2>&1; then
-    local basedirs
-    if basedirs="$(node "$cache_js" --print-sccache-basedirs)"; then
-      if [[ -n "$basedirs" ]]; then
-        export SCCACHE_BASEDIRS="$basedirs"
-      fi
-    fi
-  fi
-  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
-  info "已启用 sccache（CACHE_SIZE=${SCCACHE_CACHE_SIZE}；勿共用 CARGO_TARGET_DIR）"
 }
 
 # 回收其它 git worktree 上无编译进程的 src-tauri/target。失败不阻断。
@@ -255,7 +220,8 @@ cc-partner 启动脚本
   dev 启动前会 best-effort 修剪陈旧 incremental，以及超过
   CC_PARTNER_DEBUG_TARGET_MAX_GB（默认 20）的 debug target。
   若已安装 sccache，dev/build 会设置 RUSTC_WRAPPER 与 SCCACHE_BASEDIRS
-  （每个 git worktree 根单独列出，禁止共用 CARGO_TARGET_DIR）。
+  （每个 git worktree 根单独列出，禁止跨 worktree 共用 CARGO_TARGET_DIR）。
+  同树 cargo test 请用 ./scripts/cc-partner-cargo.sh，不要设空的 /tmp CARGO_TARGET_DIR。
   同时会对无 cargo/tauri/rustc 占用的其它 worktree 执行 cargo clean
   （CC_PARTNER_IDLE_CARGO_CLEAN=0 关闭）。
   全量回收本树磁盘请用 clean。

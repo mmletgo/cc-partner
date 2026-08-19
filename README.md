@@ -226,7 +226,9 @@ cd cc-partner
 # identity 时使用固定签名，否则使用可手动配置输入监控的 ad-hoc 签名。
 # 详见 docs/development/macos-internal-signing.md
 # 并行 git worktree：brew install sccache 后 start.sh 会启用跨树 rustc 缓存，
-# 并 cargo clean 未在编译的其它 worktree（不要设共享 CARGO_TARGET_DIR）。
+# 并 cargo clean 未在编译的其它 worktree（不要跨 worktree 设共享 CARGO_TARGET_DIR）。
+# 同树 cargo test 复用 src-tauri/target；不要 CARGO_TARGET_DIR=/tmp/...（会全量重编）。
+# 不经 start.sh 时：./scripts/cc-partner-cargo.sh test --locked ...
 
 # 或手动（裸 tauri dev 不是可在系统设置中稳定定位的 `.app`，不适合权限调试）
 cd web && npm install

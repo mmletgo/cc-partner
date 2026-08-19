@@ -378,10 +378,10 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
   src/pages/AgentHub/portableAssets/portableInventoryPresentation.test.ts
 ```
 
-本机若已有 `tauri dev` 占用 `src-tauri/target`，用独立目录避免锁：
+本机若已有 `tauri dev` 占用 `src-tauri/target`，**等待** `Blocking waiting for file lock on artifact directory`，不要换空的 `CARGO_TARGET_DIR=/tmp/...`（会从 `unicode-ident` 起全量重编，比等锁更慢）。rust-analyzer 已使用独立的 `target/rust-analyzer`。验证用：
 
 ```bash
-CARGO_TARGET_DIR=/tmp/cc-partner-agent-check cargo check --locked --lib --tests
+./scripts/cc-partner-cargo.sh check --locked --lib --tests
 ```
 
 `tsc -b` 会编进测试文件：任何 `Record<AgentTarget, …>` 测试夹具漏键都会失败，这是预期门禁。

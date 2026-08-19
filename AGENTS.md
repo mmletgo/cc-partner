@@ -38,7 +38,7 @@
 
 **Prompt 同步**：向量时钟 + 严格领先覆盖 / 并发 LWW；时间戳相等 `device_id` 字典序 tie-break。手动 `trigger_sync` 返回 per-device/domain 真值（仅全成功设备计入 `synced`/`succeeded_devices`）。
 
-**一键启动**：`./start.sh`（dev / build / web / clean / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 固定组装到 `~/Applications/cc-partner (Dev).app`（`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权；无固定签名时可在系统设置中手动添加。并行 git worktree 不要共用 `CARGO_TARGET_DIR`；PATH 有 `sccache` 时 `start.sh` 会设 `RUSTC_WRAPPER` + 每个 worktree 根的 `SCCACHE_BASEDIRS`，并对无 cargo/tauri/rustc 占用的其它树 `cargo clean`（`CC_PARTNER_IDLE_CARGO_CLEAN=0` 关闭）。安装：`brew install sccache`。
+**一键启动**：`./start.sh`（dev / build / web / clean / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 固定组装到 `~/Applications/cc-partner (Dev).app`（`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权；无固定签名时可在系统设置中手动添加。并行 git worktree 不要共用 `CARGO_TARGET_DIR`；**同树 `cargo test`/`check` 必须复用 `src-tauri/target`，禁止 `CARGO_TARGET_DIR=/tmp/...`（空目录会从 `unicode-ident` 起全量重编）**。看到 artifact file lock 就等，不要换临时 target。PATH 有 `sccache` 时 `start.sh` 会设 `RUSTC_WRAPPER` + 每个 worktree 根的 `SCCACHE_BASEDIRS`，并对无 cargo/tauri/rustc 占用的其它树 `cargo clean`（`CC_PARTNER_IDLE_CARGO_CLEAN=0` 关闭）。不经 `start.sh` 的测试用 `./scripts/cc-partner-cargo.sh test --locked ...`。安装：`brew install sccache`。
 
 ## 2. 目录结构
 

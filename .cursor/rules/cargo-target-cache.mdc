@@ -1,0 +1,14 @@
+---
+description: Reuse src-tauri/target for cargo test; never isolate to an empty /tmp dir
+alwaysApply: true
+---
+
+# Cargo target 缓存
+
+`cargo test` / `cargo check` / `cargo clippy` **必须**用默认 `src-tauri/target`。
+
+- **禁止** `CARGO_TARGET_DIR=/tmp/...` 或任何空目录。空 target 会从 `unicode-ident` 起重编整棵依赖图（十几分钟），不是增量。
+- 看到 `Blocking waiting for file lock on artifact directory` 时**等待**同一把锁。等完通常只编 `app`，几分钟；换临时目录会全量冷编译。
+- rust-analyzer 使用 `target/rust-analyzer`，不要和 `cargo test` 抢 `src-tauri/target`。
+- 本机有 sccache 时用 `./scripts/cc-partner-cargo.sh test --locked ...`，或先 `./start.sh` 再在同一终端跑 cargo。
+- 「禁止共用 CARGO_TARGET_DIR」只适用于**不同 git worktree**，不是同树里再开一个 `/tmp` target。
