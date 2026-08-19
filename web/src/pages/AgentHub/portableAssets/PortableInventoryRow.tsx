@@ -67,7 +67,7 @@ export interface PortableInventoryRowProps {
   /** 借用行：切到所有者 Agent；不是 PortableAssetActionKind。 */
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
   /**
-   * 仓库全局列表：每个 Agent 一枚启用芯片。
+   * 仓库全局列表：每个 Agent 一枚启用芯片，横排放在资产详情下方。
    * 提供时隐藏单 Agent 目标徽标，并用芯片替代 attach/detach。
    */
   catalogAgentChips?: PortableStoreAgentChip[];
@@ -199,16 +199,13 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
               ))}
             </div>
           ) : null}
-        </div>
-      </div>
-      {showMutations || showOwnerJump || showCatalogChips ? (
-        <div className={styles.rowActions}>
           {showCatalogChips && catalogAgentChips ? (
             <div
               className={styles.agentChips}
               role="group"
               aria-label={labels.storeAgentGroupAria}
               data-testid="portable-store-agent-chips"
+              data-orientation="horizontal"
             >
               {catalogAgentChips.map((chip) => {
                 const viaLabel =
@@ -236,6 +233,10 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
               })}
             </div>
           ) : null}
+        </div>
+      </div>
+      {showMutations || showOwnerJump ? (
+        <div className={styles.rowActions}>
           {showMutations && handleAction
             ? rowActions.map((action) => (
                 <Button

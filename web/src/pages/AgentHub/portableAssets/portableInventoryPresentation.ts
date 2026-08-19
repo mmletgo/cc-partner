@@ -40,6 +40,11 @@ export interface PortablePrimaryActionContext {
   stale: boolean;
   mutationBlocked: boolean;
   lockedItemIds: ReadonlySet<string>;
+  /**
+   * 当前 Skill/Command 存放面。已装备不暴露 destroyStore（删真树只在仓库页）。
+   * 缺省视为非 equipped，保持旧调用方仍能测到 destroyStore。
+   */
+  assetLane?: PortableAssetLane;
 }
 
 /** kind tab 计数（排除 pluginComponent）。 */
@@ -583,7 +588,7 @@ export function resolvePortablePrimaryAction(
 
 /**
  * Business Logic: 列表行同时暴露仓库或启停动作，无需详情侧栏。
- *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下 / 彻底删除仓库项；卸下只出现在便携仓库项。
+ *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下；彻底删除仓库项只在仓库页。
  *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/附加/销毁，可卸下源软链。
  *   Plugin/MCP：仍走 enable/disable/uninstall。借用项同样按 capability 暴露动作。
  *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
@@ -615,7 +620,9 @@ export function resolvePortableRowActions(
     if (canOfferPortableMigrateToStore(item)) actions.push('migrateToStore');
     if (canOfferPortableAttach(item)) actions.push('attach');
     if (canOfferPortableDetach(item)) actions.push('detach');
-    if (canOfferPortableDestroyStore(item)) actions.push('destroyStore');
+    if (context.assetLane !== 'equipped' && canOfferPortableDestroyStore(item)) {
+      actions.push('destroyStore');
+    }
     return actions;
   }
   if (item.actualEnabled !== true && caps.canEnable) {

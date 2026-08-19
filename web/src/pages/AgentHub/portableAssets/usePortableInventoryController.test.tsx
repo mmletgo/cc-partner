@@ -242,6 +242,36 @@ describe('usePortableInventoryController', () => {
     expect(result.current.getRowActions(pluginOff)).toEqual(['enable', 'uninstall']);
   });
 
+  test('getRowActions hides destroyStore on equipped and keeps it on store', async () => {
+    const storeSkill = makeItem({
+      inventoryItemId: 'claude-skill-store',
+      kind: 'skill',
+      nativeId: 'store-skill',
+      ownedBy: 'portableStore',
+      originKind: 'native',
+      store: { storeId: 'skill:store-skill', storeAttached: true },
+      capabilities: {
+        ...baseCapabilities,
+        canMigrateToStore: false,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    apiMocks.inspect.mockResolvedValue(snapshot('snap-destroy-lane', [storeSkill]));
+    const { result } = renderHook(() =>
+      usePortableInventoryController({ enabled: true, initialFilters: { kind: 'skill' } }),
+    );
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    expect(result.current.filters.assetLane).toBe('equipped');
+    expect(result.current.getRowActions(storeSkill)).toEqual(['detach']);
+
+    act(() => {
+      result.current.setFilters({ assetLane: 'store' });
+    });
+    expect(result.current.getRowActions(storeSkill)).toEqual(['detach', 'destroyStore']);
+  });
+
   test('unopted/unsupported/stale items never expose mutation action', async () => {
     apiMocks.inspect.mockResolvedValue(
       snapshot('snap-readonly', [alpha, projectItem, unsupported], true),

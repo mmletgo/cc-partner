@@ -519,5 +519,20 @@ describe('PortableInventoryView', () => {
     );
     fireEvent.click(screen.getByTestId('portable-store-agent-chip-claude'));
     expect(openAction).toHaveBeenCalledWith('claude-skill-shared', 'detach');
+    expect(screen.getByTestId('portable-row-action-destroyStore-claude-skill-shared')).toBeTruthy();
+  });
+
+  test('equipped rows hide destroyStore even if getRowActions still offers it', () => {
+    render(
+      <PortableInventoryView
+        controller={controller({
+          getRowActions: () => ['detach', 'destroyStore'],
+        })}
+        labels={labels}
+      />,
+    );
+
+    expect(screen.getByTestId('portable-row-action-detach-claude-skill-alpha')).toBeTruthy();
+    expect(screen.queryByTestId('portable-row-action-destroyStore-claude-skill-alpha')).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-/* 应用顶栏标语：由 AppShell 按整窗水平居中放置，颜色/字号走 token。 */
+/* 工作台顶栏标语：由 AppShell 仅在已选中项目时按整窗水平居中放置，颜色/字号走 token。 */
 
 .frame {
   position: relative;

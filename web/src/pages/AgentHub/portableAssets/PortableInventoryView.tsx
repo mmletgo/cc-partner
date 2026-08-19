@@ -303,7 +303,8 @@ interface InventoryGroupRenderProps {
 
 /**
  * Business Logic: 已装备拆「已安装在此」与「运行时借用」；仓库按 Skill/Command 去重并展示各 Agent 启用芯片。
- * Code Logic: 两边都空才 empty；已装备仅借用时附 emptyRuntimeHint。
+ *   已装备不渲染彻底删除仓库副本；该动作只留在仓库页。
+ * Code Logic: 两边都空才 empty；已装备仅借用时附 emptyRuntimeHint；equipped 行过滤 destroyStore。
  */
 function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
   const {
@@ -326,7 +327,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
         key={item.inventoryItemId}
         item={item}
         busy={lockedItemIds.has(item.inventoryItemId)}
-        actions={getRowActions(item)}
+        actions={getRowActions(item).filter((action) => action !== 'destroyStore')}
         labels={labels}
         onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
         onOpenOwner={extra?.onOpenOwner}

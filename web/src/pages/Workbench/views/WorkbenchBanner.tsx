@@ -2,8 +2,8 @@
  * WorkbenchBanner — 应用顶栏 owning-device 标语。
  *
  * Business Logic（为什么需要）:
- *   用户要在整窗水平居中写一句设备标语（轻量 Markdown + emoji），
- *   本机读写本机、工作台选中远端项目时读写对端；离线只读。
+ *   用户要在工作台顶栏按整窗水平居中写一句设备标语（轻量 Markdown + emoji），
+ *   本机项目写本机、远端项目写对端；离线只读。非工作台路由不展示。
  *
  * Code Logic（做什么）:
  *   单击预览进入 textarea；debounce / 失焦 / ⌘Enter 经 hook 写 owning device；

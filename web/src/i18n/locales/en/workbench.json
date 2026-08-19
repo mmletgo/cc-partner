@@ -1006,8 +1006,8 @@
   },
   "banner": {
     "placeholder": "Write today's banner",
-    "previewAriaLabel": "Today's banner, click to edit",
-    "editorAriaLabel": "Edit today's banner",
+    "previewAriaLabel": "Workbench banner, click to edit",
+    "editorAriaLabel": "Edit workbench banner",
     "limitReached": "At most {{max}} characters"
   },
   "workspaceSnapshot": {

@@ -347,8 +347,9 @@ export function usePortableInventoryController(
         stale,
         mutationBlocked,
         lockedItemIds,
+        assetLane: filters.assetLane,
       }),
-    [stale, mutationBlocked, lockedItemIds],
+    [stale, mutationBlocked, lockedItemIds, filters.assetLane],
   );
 
   const openAction = useCallback(

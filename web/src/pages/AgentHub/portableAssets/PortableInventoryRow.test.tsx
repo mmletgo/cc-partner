@@ -340,7 +340,10 @@ describe('PortableInventoryRow', () => {
       />,
     );
 
-    expect(screen.getAllByTestId('portable-store-agent-chips')).toHaveLength(1);
+    const chips = screen.getByTestId('portable-store-agent-chips');
+    expect(chips.getAttribute('data-orientation')).toBe('horizontal');
+    const details = screen.getByTestId('portable-inventory-select-claude-skill-alpha');
+    expect(details.contains(chips)).toBe(true);
     fireEvent.click(screen.getByTestId('portable-store-agent-chip-claude'));
     expect(onToggleCatalogAgent).toHaveBeenCalledWith('claude');
     expect((screen.getByTestId('portable-store-agent-chip-grok') as HTMLButtonElement).disabled).toBe(

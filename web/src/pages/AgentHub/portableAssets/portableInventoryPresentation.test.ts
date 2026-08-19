@@ -921,6 +921,12 @@ describe('portableInventoryPresentation row actions', () => {
       'destroyStore',
     ]);
     expect(resolvePortablePrimaryAction(storeSkill, healthyCtx)).toBe('detach');
+    expect(
+      resolvePortableRowActions(storeSkill, { ...healthyCtx, assetLane: 'equipped' }),
+    ).toEqual(['detach']);
+    expect(
+      resolvePortableRowActions(storeSkill, { ...healthyCtx, assetLane: 'store' }),
+    ).toEqual(['detach', 'destroyStore']);
   });
 
   test('mcp store capabilities stay on native leaf enable/disable/uninstall', () => {
