@@ -955,7 +955,8 @@ impl PluginRootCandidate {
 ///
 /// Code Logic（这个函数做什么）:
 ///     Claude 配置根且 target≠Claude → Compatibility/Claude；`.agents` →
-///     Codex 为 LegacyStandalone、其余 Compatibility，ownedBy SharedAgents；
+///     Codex Skill 表为 LegacyStandalone + ownedBy Codex，plugin 包仍 SharedAgents；
+///     其余 Agent 的 `.agents` Skill 为 Compatibility / SharedAgents；
 ///     否则 Native + from_target。
 fn classify_plugin_package_origin(
     target: AgentTarget,

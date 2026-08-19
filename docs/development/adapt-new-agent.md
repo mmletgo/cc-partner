@@ -13,7 +13,7 @@
 3. **能做的做实，不能做的仍要露脸**。新身份必须出现在壳层切换器；做不到的面用 scan-only / blocked / residual / unavailable / 缺席，禁止从 UI 藏掉。
 4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本；§3.12「解引软链」把 native 路径上的逃逸软链换成真实副本（不 spawn CLI、不 remap、不删源树），两者无 L3 也必须能 apply。
 5. **Plugin 开关跟当前查看的 Agent，不跟所有者。** Claude `enabledPlugins=false` 不得让 Codex / Grok / OpenCode / Gemini / Cursor / Pi 的同一包显示为已关。Enable/Disable 只写 viewing 标记；Plugin Uninstall 仍改所有者磁盘。详见 §3.9。
-6. **Skill / Command 本机一份在 portable-store，不在 `~/.agents`。** MCP **不进仓库**：启停/卸载走当前（或 owner）配置 leaf，跨 Agent 用已有 Pull，不要 `migrateToStore` / `attach` / `detach` / `destroyStore`。附加只在该 Agent **自己的 native 根**建软链；卸下只拆 viewing 的链。Grok 仍扫 Claude 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改 Claude。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。详见 §3.10。
+6. **Skill / Command 本机一份在 portable-store，不在 `~/.agents`。** MCP **不进仓库**：启停/卸载走当前（或 owner）配置 leaf，跨 Agent 用已有 Pull，不要 `migrateToStore` / `attach` / `detach` / `destroyStore`。附加只在该 Agent **自己的 native 根**建软链；卸下只拆 viewing 的链。会扫 Claude / `.agents` / Codex 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改所有者磁盘。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。借用芯片必须跟该 CLI **官方会加载的目录**走，禁止抄别家扫描表。详见 §3.10、§3.13。
 7. **漂移「确认当前版本」只改 Hub 账本。** CLI 自己更新 Skill/Command/Plugin/MCP 后，用户可以把当前磁盘记为一致基准。禁止把这条动作绑到 `supports_direct_local_action`、CLI mutation 门禁或另一家 executor。按钮文案是「确认当前版本」/ `Confirm current version`，不要写成「接受磁盘」或「重记哈希」。详见 §3.11。
 8. **逃逸软链「解引软链」是布局修复，不是迁入仓库。** `store_symlink_escape` / `source_blocked` 的 Skill/Command 必须能在 Hub 内把 native 路径换成真实副本：复制目标树、只拆这条软链、保留原目标。禁止 remap 到另一家 CLI，禁止绑 `supports_direct_local_action`，禁止删除 `~/.agents` 源，禁止顺手 `migrateToStore`。文案「解引软链」/ `Replace symlink with a copy`。详见 §3.12。
 9. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
@@ -33,6 +33,8 @@
 | 适配 / 独有槽落点 | 单一路径，禁止同一槽双写 | `.cursor/rules/cc-partner.{adapted,exclusive}.mdc` |
 | 特殊文件格式 | 扩展名、frontmatter、忽略规则 | 必须 `.mdc` + `alwaysApply` YAML；禁止把用户正文塞进 YAML |
 | Claude 兼容目录 | 是否会扫 `~/.claude` | 会扫 → **禁止当本身份 native 输出** |
+| 运行时借用根 | 该 CLI **官方文档写明会加载**的他人目录；禁止为对称抄 Cursor 的 Claude+Codex+`.agents` 套餐 | Cursor：Claude + **Codex** + `.agents`；Grok：Claude + 用户级 `.agents`（**不扫** `.codex`）；Gemini：仅 `.agents` |
+| 借用门控 | 环境变量 / settings 必须与官方开关同语义 | OpenCode：`OPENCODE_DISABLE_CLAUDE_CODE(_SKILLS)` 只关 `.claude`；`.agents` 只认 `OPENCODE_DISABLE_EXTERNAL_SKILLS`。Pi：Claude/Codex 目录仅 settings `skills` **点名该条路径** |
 | Portable Skill/Command | 目录约定 | `.cursor/skills`、`.cursor/commands` |
 | MCP | 文件 + 键名 + TOML/JSONC | `.cursor/mcp.json` 的 `mcpServers`（JSONC） |
 | Runtime provider | camelCase，带 `Visible` 后缀 | `cursorCliVisible` |
@@ -43,7 +45,7 @@
 | Prompt 历史 | 有用户输入文件才加 collector | `history_source` 可登记；无 collector 则筛选为空 |
 | Headless / 优化器 | catalog 位 ≠ 设置里可选 | `has_headless: true`，优化器仍只开 claude+grok |
 | Plugin / marketplace | 原生 plugin 根、**本 Agent 的开关文件**、是否真会加载其他 Agent 的 registry | 只扫自己的目录；**不要**抄 Grok 去列 Claude `installed_plugins.json`，除非该 CLI 运行时确实加载。跨 Agent 翻译仍 residual |
-| portable-store 挂载点 | native skills / commands；MCP 仍是该 Agent 配置 leaf（不进仓库）；是否扫其他 Agent 根 | Skill=`~/.cursor/skills`；Command=`~/.cursor/commands`；MCP=`mcp.json` `mcpServers`（native leaf + Pull）。会扫 Claude 则必须处理 Skill/Command 的 `loadedViaOtherPath`。无 L3 → apply attach/detach/migrate/destroy blocked |
+| portable-store 挂载点 | native skills / commands；MCP 仍是该 Agent 配置 leaf（不进仓库）；是否扫其他 Agent 根 | Skill=`~/.cursor/skills`；Command=`~/.cursor/commands`；MCP=`mcp.json` `mcpServers`（native leaf + Pull）。会扫 Claude / Codex / `.agents` 则必须处理 Skill/Command 的 `loadedViaOtherPath` 与仓库行 **暗淡芯片**（§3.13）。无 L3 → apply attach/detach/migrate/destroy blocked |
 | 漂移确认当前版本 | Hub 账本对齐，不写该 CLI | 必须能 preview+apply；无 L3 也不得 `MUTATION_BLOCKED`。文案「确认当前版本」 |
 | 逃逸软链解引 | native 路径换成真实副本 | 必须能 preview+apply；无 L3 也不得 CLI 门禁。文案「解引软链」 |
 
@@ -101,7 +103,7 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 | `web/src/lib/schemas/agentHub.ts` | `agentTargetDecoder` |
 | `src-tauri/src/agent_hub/targets/paths.rs` | env 白名单、`TargetHomes` 字段、`resolve_*_home`、`default_user_instruction_path`；单测覆盖覆盖 env |
 | `src-tauri/src/agent_hub/support/support-manifest.json` | 新 `targets[]`；写能力全 `blocked`，扫描 `readOnly`；`commandNames` 用真实 CLI；`activatePackage` / `deactivatePackage` 无 L3 保持 `blocked` |
-| `src-tauri/src/agent_hub/support/runtime-discovery.json` | 只登记该 CLI **真实会加载**的根。`pluginRegistry` / `pluginMarketplace` 今天仅 Grok 指向 Claude cache；没有运行时证据就不要加 |
+| `src-tauri/src/agent_hub/support/runtime-discovery.json` | 只登记该 CLI **真实会加载**的根（对照官方 skills 文档，不要抄已有 Agent）。`pluginRegistry` / `pluginMarketplace` 今天仅 Grok 指向 Claude cache；没有运行时证据就不要加。兼容根的 `ownedBy` / `originKind` / `gatedBy` 决定仓库芯片是实心、暗淡还是描边，见 §3.13 |
 | `src-tauri/src/agent_hub/support/manifest.rs` | 若有名字列表单测，补新 token |
 
 ### 3.3 Hub：AssetAdapter
@@ -219,7 +221,7 @@ Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local
 
 四类资产**并不都通用**。接入新身份时按合同选挂载方式，禁止为对称去软链 Plugin 包。
 
-权威实现：`src-tauri/src/agent_hub/portable_store/`。真树只在 `<data_dir>/portable-store/`（跟 `CC_PARTNER_DATA_DIR`），**不是** `~/.agents`（Claude / Grok 不把它当技能库）。`ownedBy: portableStore`。scanner 只跟随 canonicalize 落在 store 内的软链；逃逸 fail-closed。
+权威实现：`src-tauri/src/agent_hub/portable_store/`。真树只在 `<data_dir>/portable-store/`（跟 `CC_PARTNER_DATA_DIR`），**不是** `~/.agents`。Grok / Cursor / Gemini / OpenCode / Pi 运行时可能**读取** `~/.agents/skills`，但那是借用扫描根，不能当 store 真树。Claude **不**把 `~/.agents` 当技能库。`ownedBy: portableStore`。scanner 只跟随 canonicalize 落在 store 内的软链；逃逸 fail-closed。
 
 | 资产 | 真树 | 附加到该 Agent | 从此 Agent 卸下 | 本机彻底删除 |
 |------|------|----------------|-----------------|--------------|
@@ -234,18 +236,18 @@ Hub 前端 Skill/Command：**范围之后、Agent 之前**有「已装备 / 仓�
 
 一键迁移：该 Agent 盘点里非软链 native Skill/Command → move 进 store → 原处放回软链。同名不同 hash → 保留 frontmatter `version` 较新的一份（无比对版本则比 mtime），旧树直接删除，不再阻断。**MCP 与 Plugin 不迁移**；不要把 MCP 做成 Plugin 那种 viewing 开关。
 
-Grok（以及任何会扫 Claude 根的后来者）：
+Grok（以及任何会扫 Claude / `.agents` 根的后来者）：
 
 - 卸下只拆**自己的 native 根**（Skill/Command 软链）。
-- 同一 `storeId` 若 Claude 仍附加，本 Agent 库存去重后保留 `store.loadedViaOtherPath` + `loadedViaTarget=claude` + warning `store_loaded_via_other_path`。文案 `storeStillLoadedVia`。
-- **不得**为了本列表干净去拆 Claude 链或改 Claude MCP leaf。
+- 同一 `storeId` 若源 Agent 仍附加，本 Agent 库存去重后保留 `store.loadedViaOtherPath` + `loadedViaTarget` + warning `store_loaded_via_other_path`。文案 `storeStillLoadedVia`。
+- **不得**为了本列表干净去拆 Claude / Codex / `.agents` 链或改他人 MCP leaf。
 
 写盘门禁：无 L3 时 **只有 Claude / Codex** 能 apply attach / detach / migrateToStore / destroyStore（复用 `supports_direct_local_action`，不要为此新增 Supported write-side `TargetCapability`；且仅 Skill/Command）。新身份默认 inventory + preview，apply blocked。Windows 用 junction/symlink，禁止静默 copy 成第二份安装。漂移「确认当前版本」不走这条门禁，见 §3.11。
 
 接入新身份时 store 最低测试：
 
 - scanner：store 软链 Skill 的 content hash 跟随真树；指向 `/etc` 的逃逸链拒绝
-- 若该 CLI 扫 Claude skills：Claude 已附加、本 Agent native 无链 → `loadedViaOtherPath`，且 Claude 链未改
+- 若该 CLI 扫 Claude / Codex / `.agents`：源 Agent 已附加、本 Agent native 无链 → `loadedViaOtherPath` 或 compatibility 暗淡芯片，且源链未改
 - planner/apply：无 L3 时 attach/detach/migrate/destroy 不得写该 Agent 原生目录
 - MCP：scanner 不得给出 `canMigrateToStore` / `canAttach` / `canDetach` / `canDestroyStore`；Claude/Codex Enable/Disable/Uninstall 仍改该配置 leaf；跨 Agent 只走 Pull
 
@@ -302,6 +304,42 @@ Scanner 对 canonicalize 落在 `portable-store/` 外的 Skill/Command 根软链
 - planner：该 target `mutationCapability=blocked`、`management=unsupported` 时 preview `materializeEscapeLink` 的 `blockingReasons` 为空
 - apply 不 spawn ProcessRunner；native 路径不再是 symlink；原目标仍在；rescan 无 `store_symlink_escape`
 
+### 3.13 仓库芯片借用：只画该 CLI 真会加载的根
+
+仓库行上每个 Hub Agent 一颗芯片（`portableStoreAgentChipState`）：
+
+| 外观 | 判定 | 含义 |
+|------|------|------|
+| 实心 | `storeAttached` 或本 Agent native 启用 | 挂在**自己的** native / Codex `legacyStandalone` 根 |
+| 暗淡（`derived`） | `isPortableBorrowedRuntimeItem` 且未 `storeAttached` | 运行时看得到，但是别人的目录；芯片只读 |
+| 描边 | 扫描表没有这项，或未启用 | 该 CLI **不会**加载这份资产 |
+
+借用判定（Rust `is_borrowed_runtime_origin` / 前端 `isPortableBorrowedRuntimeItem`）：`originKind=compatibility`、`ownedBy` 是别的 Hub Agent、或 `ownedBy=sharedAgents`。Codex 自己的 `~/.agents/skills` 必须是 `legacyStandalone` + `ownedBy=codex`，**不是**借用。漂移 / `nativeOutputCandidate=false` 单独不构成借用。
+
+**禁止**为对称把 Cursor 的兼容集（Claude + Codex + `.agents`）抄给后来者。芯片跟 `runtime-discovery.json` 走，表跟官方 skills 文档走。
+
+当前已登记身份（Skill，对照官方文档，2026-08）：
+
+| Agent | native | 会借用（compatibility） | 明确不扫 |
+|-------|--------|-------------------------|----------|
+| Claude | `~/.claude/skills`、项目 `.claude/skills` | 无 | `.agents` / `.codex` |
+| Codex | `~/.codex/skills`；`~/.agents/skills` 为 **本 Agent** `legacyStandalone` | 无 | `.claude` |
+| Cursor | `.cursor/skills` | Claude + **Codex** + `.agents`（user/project） | — |
+| Grok | `.grok/skills` | Claude；用户级 `~/.agents/skills` 与 `~/.agents/commands` | **`.codex`**（官方未列） |
+| Gemini | `.gemini/skills` | 仅 `.agents` 别名 | Claude / Codex |
+| OpenCode | `.opencode` / config-root `skills` | Claude + `.agents`。门控：`OPENCODE_DISABLE_EXTERNAL_SKILLS` 关全部外部；`OPENCODE_DISABLE_CLAUDE_CODE` / `_SKILLS` **只关** `.claude`，不得拿来关 `.agents` | `.codex` |
+| Pi | `{piConfigRoot,project/.pi}/skills` | `.agents` 无条件；`~/.claude/skills` 与 `{codexConfigRoot}/skills` 仅当 `settings.json` 的 `skills` 数组 **点名该条路径**（点名 Claude 不得打开 Codex） | 未点名的 Claude/Codex 根 |
+
+接入核对清单：
+
+1. 打开该 CLI 官方 skills 文档，列出它会加载的每一个目录。
+2. 只把这些目录写进 `runtime-discovery.json`。没有文档证据就不要加 `~/.codex/skills` 或 Claude plugin registry。
+3. 兼容根：`originKind=compatibility`，`ownedBy` 为真实所有者（Claude / Codex / `sharedAgents`），`nativeOutputCandidate` 由 stamp 自动关掉。
+4. 官方有环境变量 / settings 门闩时用 `gatedBy`，语义必须与官方一致；不要把「关 Claude」绑到 `.agents`。
+5. Codex 的 `~/.agents` 对 Codex 自己不是借用；对 Cursor/Grok/Gemini/OpenCode/Pi 才是 `sharedAgents` 借用。
+6. 单测至少：native 不是 compatibility；会加载的兼容根能发现且 `ownedBy` 正确；不会加载的根保持缺席；门控开/关各一条。
+7. 仓库芯片：源 Agent 附加后，只有扫描表包含该挂载路径的 Agent 才应变暗淡。
+
 ## 4. 编译器抓不到的漏网（必须 grep）
 
 `cargo check` 能抓住 Rust 穷尽 match。下面这些 **不会** 报非穷尽，接入后要搜一遍旧的「最后一家」：
@@ -325,6 +363,12 @@ rg -n '"target": "' src-tauri/src/agent_hub/support/support-manifest.json
 # plugin 开关是否漏新臂 / 是否误扫 Claude registry
 rg -n "match enablement.target" src-tauri/src/agent_hub/portable_inventory/plugin_enablement.rs
 rg -n '"kind": "pluginRegistry"' src-tauri/src/agent_hub/support/runtime-discovery.json
+
+# 借用根是否抄了别家套餐 / Codex ~/.agents 是否误标 sharedAgents
+rg -n '"originKind": "compatibility"' src-tauri/src/agent_hub/support/runtime-discovery.json
+rg -n 'ownedBy": "sharedAgents"' src-tauri/src/agent_hub/support/runtime-discovery.json
+rg -n "OPENCODE_DISABLE_EXTERNAL_SKILLS|piSettingsSkills" src-tauri/src/agent_hub/support/runtime-discovery.json
+rg -n "isPortableBorrowedRuntimeItem|portableStoreAgentChipState" web/src/pages/AgentHub
 
 # portable-store 是否漏新 Agent 挂载 / 是否把 ~/.agents 当 store
 rg -n "portable_store_root|PortableAssetOwner::PortableStore" src-tauri/src/agent_hub
@@ -361,6 +405,7 @@ cd src-tauri
 cargo fmt --all
 cargo check --locked --all-targets
 cargo test --locked --lib -- agent_catalog::
+cargo test --locked --lib -- runtime_discovery
 cargo test --locked --lib -- targets::<id>::
 cargo test --locked --lib -- plugin_enablement
 cargo test --locked --lib -- agents_without_plugin_flags
@@ -397,7 +442,7 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 | 公共槽 | 不写 `AGENTS.md` |
 | 适配 / 独有 | `.cursor/rules/cc-partner.adapted.mdc` 与 `cc-partner.exclusive.mdc`，静态 `alwaysApply` frontmatter |
 | 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `.cursorrules` Fallback；`.cursor/rules/*.mdc`；绝不把 `~/.claude` 当 Cursor native |
-| Portable | `.cursor/skills`、`.cursor/commands`、`mcp.json` → `mcpServers`（JSONC）；无独立 plugin 开关，不得继承 Claude `enabledPlugins`；portable-store 可盘点，apply attach 仍 blocked（无 L3）；漂移「确认当前版本」仍可 apply（只改 Hub 账本） |
+| Portable | `.cursor/skills`、`.cursor/commands`、`mcp.json` → `mcpServers`（JSONC）；兼容扫描 Claude + **Codex** + `.agents`（官方 skills 目录）；无独立 plugin 开关，不得继承 Claude `enabledPlugins`；portable-store 可盘点，apply attach 仍 blocked（无 L3）；漂移「确认当前版本」仍可 apply（只改 Hub 账本） |
 | Runtime | `cursorCliVisible`；stdin prompt；`agent --resume {id}`；Manual；Fresh |
 | 会话搜索 | 已登记；v1 `unavailable`（布局未认证） |
 | 用量 | 已登记；extract = `None` |
@@ -424,7 +469,7 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 | 公共槽 | 不写 `AGENTS.md` |
 | 适配 / 独有 | `.pi/cc-partner.adapted.md` 与 `cc-partner.exclusive.md`（Pi 无官方 rules 引擎；单一落点，不双写 `APPEND_SYSTEM.md`） |
 | 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `AGENTS.override.md` / `.pi/SYSTEM.md`；绝不把 `~/.claude` 当 Pi native |
-| Portable | `.pi/skills`、`~/.pi/agent/skills`；无内建 MCP，不伪造 `mcp.json`；无 command 根（store Command 缺席）；无独立 plugin 开关，不得继承 Claude `enabledPlugins`；store apply blocked；漂移「确认当前版本」仍可 apply |
+| Portable | `.pi/skills`、`~/.pi/agent/skills`；无条件 `~/.agents/skills`；Claude / Codex skills 仅 settings `skills` 点名该路径；无内建 MCP，不伪造 `mcp.json`；无 command 根（store Command 缺席）；无独立 plugin 开关，不得继承 Claude `enabledPlugins`；store apply blocked；漂移「确认当前版本」仍可 apply |
 | Runtime | `piVisible`；stdin prompt；`pi --session {id}`；Manual；Fresh |
 | 会话搜索 | 已登记；v1 `unavailable`（JSONL 布局未认证） |
 | 用量 | 已登记；extract = `None` |
@@ -438,13 +483,17 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 - 不要为了「看起来对称」去猜 session 目录或 usage JSON 字段
 - 不要把 GUI 二进制（如 `cursor`）当 CLI
 - 不要把新 CLI 的 Claude 兼容扫描根再写一套副本
+- 不要把 Cursor 的 Claude+Codex+`.agents` 兼容集抄给不会加载 `.codex` 的 Agent（Grok / Gemini / OpenCode / Pi 默认都不扫 Codex 目录）
+- 不要用 `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` 去关 `.agents`；OpenCode 关外部技能用 `OPENCODE_DISABLE_EXTERNAL_SKILLS`
+- 不要把 Pi settings 点名 `.claude/skills` 当成也打开了 `~/.codex/skills`
+- 不要把 Codex 自己的 `~/.agents/skills` 标成 `sharedAgents` 借用（那是 Codex `legacyStandalone`）
 - 不要把 Plugin marketplace 翻译成另一家的 plugin，也不要把 Plugin 或 MCP 迁入 portable-store
 - 不要把 MCP 做成 Plugin 那种 viewing 开关；MCP 启停/卸载走当前或 owner 配置 leaf，跨 Agent 用已有 Pull
 - 不要在 `runtime-discovery.json` 里给不会加载 Claude plugin 的 Agent 加 `pluginRegistry`
 - 不要把 Claude `enabledPlugins`（或 Codex/Grok 白名单）当成其他 Agent 的 `actualEnabled`
 - 不要在无 L3 / 无本 target executor 时，把 Enable/Disable 映射到所有者 CLI（例如 Grok 列表调用 `claude plugin disable`）
 - 不要把 native plugin 白名单套到借用包（缺席 ≠ 已关）
-- 不要把 `~/.agents` 当成 Claude / Grok 的统一技能库；store 只在 `<data_dir>/portable-store/`
+- 不要把 `~/.agents` 当成 Claude 的技能库，也不要把它当成 portable-store 真树；store 只在 `<data_dir>/portable-store/`。Grok / Cursor / Gemini / OpenCode / Pi 运行时读取 `~/.agents` 时，Hub 必须按借用扫描，不得漏标、也不得写成 native
 - 不要跟随任意 symlink，只跟随目标在 `portable-store/` 内的链
 - 不要为「从会扫 Claude 的 Agent 卸下」去改 Claude 磁盘
 - 不要把 store 软链 Disable 做成 MOVE 真树进 disabled

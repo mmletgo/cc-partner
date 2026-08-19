@@ -96,6 +96,20 @@
           "ownedBy": "claude"
         },
         {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/commands",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
           "kind": "pluginRegistry",
           "scope": "user",
           "pathPattern": "{claudeConfigRoot}/plugins/installed_plugins.json",
@@ -313,6 +327,14 @@
           "originKind": "compatibility",
           "ownedBy": "claude",
           "gatedBy": { "type": "piSettingsSkills" }
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{codexConfigRoot}/skills",
+          "originKind": "compatibility",
+          "ownedBy": "codex",
+          "gatedBy": { "type": "piSettingsSkills" }
         }
       ]
     },
@@ -383,7 +405,11 @@
           "ownedBy": "claude",
           "gatedBy": {
             "type": "envUnset",
-            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+            "names": [
+              "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+              "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+              "OPENCODE_DISABLE_CLAUDE_CODE"
+            ]
           }
         },
         {
@@ -394,7 +420,7 @@
           "ownedBy": "sharedAgents",
           "gatedBy": {
             "type": "envUnset",
-            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+            "names": ["OPENCODE_DISABLE_EXTERNAL_SKILLS"]
           }
         },
         {
@@ -405,7 +431,11 @@
           "ownedBy": "claude",
           "gatedBy": {
             "type": "envUnset",
-            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+            "names": [
+              "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+              "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+              "OPENCODE_DISABLE_CLAUDE_CODE"
+            ]
           }
         },
         {
@@ -416,7 +446,7 @@
           "ownedBy": "sharedAgents",
           "gatedBy": {
             "type": "envUnset",
-            "names": ["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"]
+            "names": ["OPENCODE_DISABLE_EXTERNAL_SKILLS"]
           }
         }
       ]
@@ -457,7 +487,7 @@
           "scope": "user",
           "pathPattern": "{home}/.agents/skills",
           "originKind": "legacyStandalone",
-          "ownedBy": "sharedAgents"
+          "ownedBy": "codex"
         },
         {
           "kind": "skill",
@@ -492,7 +522,7 @@
           "scope": "project",
           "pathPattern": "{project}/.agents/skills",
           "originKind": "legacyStandalone",
-          "ownedBy": "sharedAgents"
+          "ownedBy": "codex"
         }
       ]
     },

@@ -99,7 +99,8 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
     /// 扫描 OpenCode portable 资产（表驱动 native/compat + 表外 extras）。
     ///
     /// Business Logic: `.claude/skills` / `.agents/skills` 标记 compatibility，非 native 输出；
-    ///     MCP 与 `disabled/skills` 不在发现表，必须由适配器合并。
+    ///     `.claude` 受 Claude/external disable env 控制，`.agents` 只受
+    ///     `OPENCODE_DISABLE_EXTERNAL_SKILLS` 控制。MCP 与 `disabled/skills` 不在发现表。
     /// Code Logic: `scan_table_roots` + disabled-skill helper + opencode.json(c) MCP。
     fn scan_portable_assets(
         &self,
@@ -454,7 +455,9 @@ pub fn discover_opencode_plugin_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::targets::portable::{PortableAssetOwner, PortableDiscoveryStatus};
+    use crate::agent_hub::targets::portable::{
+        PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind,
+    };
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -574,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn disable_claude_code_skills_hides_compat_but_keeps_mcp() {
+    fn disable_claude_code_skills_hides_claude_but_keeps_agents() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         seed_opencode_fixture(home);
@@ -588,10 +591,47 @@ mod tests {
 
         assert!(
             found.iter().all(|asset| {
+                !asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.claude/")
+            }),
+            "Claude skills must hide when Claude disable env is set: {found:?}"
+        );
+        let shared = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-skill")
+            .expect(".agents skills stay loaded when only Claude skills are disabled");
+        assert_eq!(shared.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert_eq!(shared.origin.owned_by, PortableAssetOwner::SharedAgents);
+        assert!(found.iter().any(|asset| asset.semantic_name == "oc-skill"));
+        assert!(found
+            .iter()
+            .any(|asset| { asset.kind == AssetKind::Mcp && asset.semantic_name == "private-api" }));
+        assert!(found.iter().any(|asset| asset.semantic_name == "off-skill"));
+    }
+
+    #[test]
+    fn disable_external_skills_hides_claude_and_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        seed_opencode_fixture(home);
+        let mut env = isolated_env(home);
+        env.vars
+            .insert("OPENCODE_DISABLE_EXTERNAL_SKILLS".into(), "1".into());
+        let scope = user_scope(home);
+        let found = OpenCodeInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+
+        assert!(
+            found.iter().all(|asset| {
                 let path = asset.origin.path.to_string_lossy().replace('\\', "/");
                 !path.contains("/.claude/") && !path.contains("/.agents/skills/")
             }),
-            "compat skills must hide when disable env is set: {found:?}"
+            "external skills must hide when OPENCODE_DISABLE_EXTERNAL_SKILLS is set: {found:?}"
         );
         assert!(found.iter().any(|asset| asset.semantic_name == "oc-skill"));
         assert!(found

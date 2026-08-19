@@ -11,7 +11,7 @@
 //! Code Logic（这个模块做什么）:
 //!     实现 `AssetAdapter`：probe `pi`；扫描 `.pi` 受管文件与只读原生指令；
 //!     portable 经 runtime-discovery 表扫 native skills、无条件 `.agents/skills`，
-//!     以及 settings 点名后的 `~/.claude/skills`；render 落到 `.pi/`。
+//!     以及 settings 点名后的 `~/.claude/skills` / Codex skills；render 落到 `.pi/`。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
@@ -125,7 +125,8 @@ impl AssetAdapter for PiInstructionAdapter {
     /// 扫描 Pi native Skill 与兼容 skills。
     ///
     /// Business Logic: `{piConfigRoot,project/.pi}/skills` 为 native；`~/.agents/skills`
-    ///     始终兼容发现；`~/.claude/skills` 仅当 settings 点名。不伪造 MCP。
+    ///     始终兼容发现；`~/.claude/skills` 与 `{codexConfigRoot}/skills` 仅当 settings
+    ///     点名**该条路径**。不伪造 MCP。
     /// Code Logic: 委托 `scan_table_roots`（含 `piSettingsSkills` gate）。
     fn scan_portable_assets(
         &self,
@@ -527,6 +528,10 @@ mod tests {
             "---\nname: shared-skill\ndescription: d\n---\nbody\n",
         );
         write_text(
+            &home.join(".codex/skills/codex-skill/SKILL.md"),
+            "---\nname: codex-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
             &home.join(".pi/agent/skills/pi-skill/SKILL.md"),
             "---\nname: pi-skill\ndescription: d\n---\nbody\n",
         );
@@ -538,14 +543,10 @@ mod tests {
             .unwrap();
         assert!(
             without_settings.iter().all(|asset| {
-                !asset
-                    .origin
-                    .path
-                    .to_string_lossy()
-                    .replace('\\', "/")
-                    .contains("/.claude/")
+                let path = asset.origin.path.to_string_lossy().replace('\\', "/");
+                !path.contains("/.claude/") && !path.contains("/.codex/skills/")
             }),
-            "claude skills must stay hidden without settings: {without_settings:?}"
+            "claude/codex skills must stay hidden without settings: {without_settings:?}"
         );
         assert!(without_settings
             .iter()
@@ -561,15 +562,52 @@ mod tests {
             &home.join(".pi/agent/settings.json"),
             r#"{"skills": [".claude/skills"]}"#,
         );
-        let with_settings = PiInstructionAdapter
+        let with_claude = PiInstructionAdapter
             .scan_portable_assets(&scope, &env)
             .unwrap();
-        let claude = with_settings
+        let claude = with_claude
             .iter()
             .find(|asset| asset.semantic_name == "review")
             .expect("claude skill after settings mention");
         assert_eq!(claude.origin.origin_kind, PortableOriginKind::Compatibility);
         assert!(!claude.origin.native_output_candidate);
         assert_eq!(claude.origin.owned_by, PortableAssetOwner::Claude);
+        assert!(
+            with_claude.iter().all(|asset| {
+                !asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.codex/skills/")
+            }),
+            "listing Claude skills must not open Codex skills: {with_claude:?}"
+        );
+
+        write_text(
+            &home.join(".pi/agent/settings.json"),
+            r#"{"skills": ["~/.codex/skills"]}"#,
+        );
+        let with_codex = PiInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .unwrap();
+        let codex = with_codex
+            .iter()
+            .find(|asset| asset.semantic_name == "codex-skill")
+            .expect("codex skill after settings mention");
+        assert_eq!(codex.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!codex.origin.native_output_candidate);
+        assert_eq!(codex.origin.owned_by, PortableAssetOwner::Codex);
+        assert!(
+            with_codex.iter().all(|asset| {
+                !asset
+                    .origin
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/.claude/skills/")
+            }),
+            "listing Codex skills must not open Claude skills: {with_codex:?}"
+        );
     }
 }

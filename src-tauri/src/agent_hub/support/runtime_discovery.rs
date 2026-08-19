@@ -77,7 +77,8 @@ impl DiscoveryRootKind {
 
 /// 扫描门闩（环境变量或 Pi settings 列表）。
 ///
-/// Business Logic: 兼容根可能被 CLI 环境开关关掉；Pi 仅在 settings 点名 Claude skills 时才扫。
+/// Business Logic: 兼容根可能被 CLI 环境开关关掉；Pi 仅在 settings 点名**该条路径**时才扫
+///     （Claude 与 Codex 根各自 gated，禁止子串误开）。
 /// Code Logic: internally tagged `type`；`envUnset` 要求全部 names 未设置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -276,10 +277,11 @@ fn config_root_for(hinted: Option<AgentTarget>, homes: &TargetHomes) -> PathBuf 
 /// 判断 gate 是否允许扫描该根。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     环境开关关闭时不得把兼容目录算进库存；Pi 未点名 Claude skills 时必须跳过。
+///     环境开关关闭时不得把兼容目录算进库存；Pi 未在 settings `skills` 点名该根时必须跳过。
 ///
 /// Code Logic（这个函数做什么）:
-///     `envUnset`：全部 names 在注入 env 中为空；`piSettingsSkills`：settings 文本包含路径。
+///     `envUnset`：全部 names 在注入 env 中为空；`piSettingsSkills`：解析 settings.json
+///     的 `skills` 数组，按条目匹配 resolved（`~` 展开 + 后缀），不得用整文件子串误开另一家根。
 pub fn gate_allows(
     gate: Option<&DiscoveryGate>,
     env: &TargetEnvironment,
@@ -289,18 +291,81 @@ pub fn gate_allows(
     match gate {
         None => true,
         Some(DiscoveryGate::EnvUnset { names }) => names.iter().all(|name| env.var(name).is_none()),
-        Some(DiscoveryGate::PiSettingsSkills) => pi_settings_lists_path(homes, resolved),
+        Some(DiscoveryGate::PiSettingsSkills) => pi_settings_lists_path(homes, env, resolved),
     }
 }
 
-/// Pi settings 是否点名该 skills 路径（stub：未列出则跳过）。
-fn pi_settings_lists_path(homes: &TargetHomes, resolved: &Path) -> bool {
+/// Pi settings 是否点名该 skills 路径。
+fn pi_settings_lists_path(homes: &TargetHomes, env: &TargetEnvironment, resolved: &Path) -> bool {
     let settings = homes.pi.config_root.join("settings.json");
     let Ok(text) = fs::read_to_string(settings) else {
         return false;
     };
-    let needle = resolved.to_string_lossy();
-    text.contains(needle.as_ref()) || text.contains(".claude/skills")
+    pi_settings_text_lists_path(&text, &env.home, resolved)
+}
+
+/// 解析 Pi `settings.json` 的 `skills` 数组是否指向 `resolved`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     点名 `~/.claude/skills` 不得顺带打开 `~/.codex/skills`；反之亦然。
+///
+/// Code Logic（这个函数做什么）:
+///     JSON `skills` 字符串条目：`~/` 相对 `home` 展开后与 resolved 比；否则用规范化后缀匹配。
+fn pi_settings_text_lists_path(text: &str, home: &Path, resolved: &Path) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(skills) = value.get("skills").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    skills
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .any(|entry| pi_skill_entry_matches(entry, home, resolved))
+}
+
+/// 单条 Pi skills 设置是否指向 resolved 根。
+fn pi_skill_entry_matches(entry: &str, home: &Path, resolved: &Path) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    let resolved_norm = normalize_discovery_path(resolved);
+    let expanded = expand_pi_skill_entry(entry, home);
+    if normalize_discovery_path(&expanded) == resolved_norm {
+        return true;
+    }
+    let suffix = entry
+        .strip_prefix("~/")
+        .or_else(|| entry.strip_prefix("~\\"))
+        .unwrap_or(entry)
+        .trim_start_matches("./")
+        .replace('\\', "/");
+    let suffix = suffix.trim_start_matches('/');
+    if suffix.is_empty() {
+        return false;
+    }
+    resolved_norm == suffix || resolved_norm.ends_with(&format!("/{suffix}"))
+}
+
+/// 把 `~/…` 展开到注入 HOME。
+fn expand_pi_skill_entry(entry: &str, home: &Path) -> PathBuf {
+    let entry = entry.trim();
+    if entry == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(rest) = entry
+        .strip_prefix("~/")
+        .or_else(|| entry.strip_prefix("~\\"))
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(entry)
+}
+
+/// 发现路径比较用的正斜杠形式。
+fn normalize_discovery_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// 按发现表扫描匹配根并 stamp origin。
@@ -606,6 +671,80 @@ mod tests {
         assert!(compat
             .iter()
             .any(|r| r.path_pattern.contains(".agents/skills")));
+        let grok_agents: Vec<_> = grok
+            .roots
+            .iter()
+            .filter(|r| r.path_pattern.contains(".agents/"))
+            .collect();
+        assert!(
+            grok_agents.iter().any(|r| {
+                r.kind == DiscoveryRootKind::Skill
+                    && r.path_pattern.contains(".agents/skills")
+                    && r.origin_kind == PortableOriginKind::Compatibility
+                    && r.owned_by == PortableAssetOwner::SharedAgents
+            }),
+            "Grok must list ~/.agents/skills as sharedAgents compatibility"
+        );
+        assert!(
+            grok_agents.iter().any(|r| {
+                r.kind == DiscoveryRootKind::Command
+                    && r.path_pattern.contains(".agents/commands")
+                    && r.origin_kind == PortableOriginKind::Compatibility
+                    && r.owned_by == PortableAssetOwner::SharedAgents
+            }),
+            "Grok must list ~/.agents/commands as sharedAgents compatibility"
+        );
+        let opencode_agents_gate = opencode
+            .roots
+            .iter()
+            .find(|r| r.path_pattern.ends_with(".agents/skills") && r.scope == ScopeKind::User)
+            .and_then(|r| r.gated_by.as_ref());
+        match opencode_agents_gate {
+            Some(DiscoveryGate::EnvUnset { names }) => {
+                assert_eq!(names, &["OPENCODE_DISABLE_EXTERNAL_SKILLS".to_string()]);
+            }
+            other => panic!("OpenCode ~/.agents must use EXTERNAL_SKILLS gate, got {other:?}"),
+        }
+        let opencode_claude_gate = opencode
+            .roots
+            .iter()
+            .find(|r| r.path_pattern.contains(".claude/skills") && r.scope == ScopeKind::User)
+            .and_then(|r| r.gated_by.as_ref());
+        match opencode_claude_gate {
+            Some(DiscoveryGate::EnvUnset { names }) => {
+                assert!(names.contains(&"OPENCODE_DISABLE_EXTERNAL_SKILLS".into()));
+                assert!(names.contains(&"OPENCODE_DISABLE_CLAUDE_CODE_SKILLS".into()));
+                assert!(names.contains(&"OPENCODE_DISABLE_CLAUDE_CODE".into()));
+            }
+            other => panic!("OpenCode ~/.claude must use Claude+external gate, got {other:?}"),
+        }
+        let pi = table
+            .agents
+            .iter()
+            .find(|a| a.target == AgentTarget::Pi)
+            .expect("pi agent");
+        assert!(
+            pi.roots.iter().any(|r| {
+                r.kind == DiscoveryRootKind::Skill
+                    && r.path_pattern.contains("{codexConfigRoot}/skills")
+                    && r.origin_kind == PortableOriginKind::Compatibility
+                    && r.owned_by == PortableAssetOwner::Codex
+                    && matches!(r.gated_by, Some(DiscoveryGate::PiSettingsSkills))
+            }),
+            "Pi must list Codex skills only when settings name that path"
+        );
+        let codex = table
+            .agents
+            .iter()
+            .find(|a| a.target == AgentTarget::Codex)
+            .expect("codex agent");
+        assert!(
+            codex.roots.iter().all(|r| {
+                !r.path_pattern.contains(".agents/skills")
+                    || r.owned_by == PortableAssetOwner::Codex
+            }),
+            "Codex ~/.agents/skills is this Agent's install, not sharedAgents borrow"
+        );
     }
 
     #[test]
@@ -729,5 +868,19 @@ mod tests {
         assert!(!compat.origin.native_output_candidate);
         assert_eq!(compat.origin.owned_by, PortableAssetOwner::Claude);
         assert_eq!(compat.origin.target, AgentTarget::OpenCode);
+    }
+
+    #[test]
+    fn pi_settings_lists_only_the_named_skill_root() {
+        let home = PathBuf::from("/tmp/pi-home");
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".codex/skills");
+        let named_claude = r#"{"skills": [".claude/skills"]}"#;
+        assert!(pi_settings_text_lists_path(named_claude, &home, &claude));
+        assert!(!pi_settings_text_lists_path(named_claude, &home, &codex));
+        let named_codex = r#"{"skills": ["~/.codex/skills"]}"#;
+        assert!(pi_settings_text_lists_path(named_codex, &home, &codex));
+        assert!(!pi_settings_text_lists_path(named_codex, &home, &claude));
+        assert!(!pi_settings_text_lists_path("not json", &home, &claude));
     }
 }

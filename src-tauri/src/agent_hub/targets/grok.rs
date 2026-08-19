@@ -8,8 +8,8 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     实现 `AssetAdapter`：probe `grok`；扫描 rules 与只读原生指令；portable 走
-//!     runtime-discovery 表（native `.grok` + Claude 兼容 registry/skills/MCP）；
-//!     render 落到 `.grok/rules/`。
+//!     runtime-discovery 表（native `.grok` + Claude 兼容 registry/skills/MCP +
+//!     用户级 `~/.agents` skills/commands）；render 落到 `.grok/rules/`。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
@@ -123,7 +123,8 @@ impl AssetAdapter for GrokInstructionAdapter {
 
     /// 扫描 Grok runtimeEffective Skill/Command/Plugin/MCP。
     ///
-    /// Business Logic: 表驱动扫描 native `.grok` 与 Claude 兼容根；兼容项不得当 native 写出。
+    /// Business Logic: 表驱动扫描 native `.grok`、Claude 兼容根与用户级 `~/.agents`；
+    ///     兼容项不得当 native 写出。
     /// Code Logic: 委托 `scan_table_roots`；不复制 `~/.claude`，不调用 `grok inspect`。
     fn scan_portable_assets(
         &self,
@@ -443,6 +444,14 @@ mod tests {
             &home.join(".grok/skills/grok-skill/SKILL.md"),
             "---\nname: grok-skill\ndescription: d\n---\nbody\n",
         );
+        write_text(
+            &home.join(".agents/skills/shared-skill/SKILL.md"),
+            "---\nname: shared-skill\ndescription: d\n---\nbody\n",
+        );
+        write_text(
+            &home.join(".agents/commands/shared-cmd.md"),
+            "---\nname: shared-cmd\n---\nbody\n",
+        );
         let env = isolated_env(home);
         let scope = user_scope(home);
 
@@ -504,6 +513,22 @@ mod tests {
         assert!(found
             .iter()
             .any(|asset| asset.semantic_name == "grok-skill"));
+        let shared = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-skill")
+            .expect("Grok must discover ~/.agents/skills");
+        assert_eq!(shared.origin.origin_kind, PortableOriginKind::Compatibility);
+        assert!(!shared.origin.native_output_candidate);
+        assert_eq!(shared.origin.owned_by, PortableAssetOwner::SharedAgents);
+        let shared_cmd = found
+            .iter()
+            .find(|asset| asset.semantic_name == "shared-cmd")
+            .expect("Grok must discover ~/.agents/commands");
+        assert_eq!(
+            shared_cmd.origin.origin_kind,
+            PortableOriginKind::Compatibility
+        );
+        assert_eq!(shared_cmd.origin.owned_by, PortableAssetOwner::SharedAgents);
         assert!(found
             .iter()
             .all(|asset| asset.origin.target == AgentTarget::Grok));

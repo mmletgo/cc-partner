@@ -2421,6 +2421,7 @@ enabled = true
             .expect("legacy .agents/skills");
         assert!(legacy.origin.path.to_string_lossy().contains(".agents"));
         assert!(!legacy.origin.native_output_candidate);
+        assert_eq!(legacy.origin.owned_by, PortableAssetOwner::Codex);
         assert!(found.iter().any(|d| d.kind == AssetKind::Agent));
     }
 
