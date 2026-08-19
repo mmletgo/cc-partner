@@ -92,9 +92,11 @@ const PORTABILITY_ADVISORY_CODES: ReadonlySet<string> = new Set([
   'plugin_has_components',
   'store_loaded_via_other_path',
   'borrowed_runtime_origin',
+  // Codex 缓存包未写入 `[plugins."id@market"]`：等同未启用，不是损坏。
+  'codex_plugin_not_in_config',
 ]);
 
-/** 判断 warning token 是否只是跨设备/跨 CLI 可移植性提示。 */
+/** 判断 warning token 是否只是提示，不应把主列表标成异常。 */
 function isPortabilityAdvisory(code: string): boolean {
   return PORTABILITY_ADVISORY_CODES.has(code) || code.startsWith('transport:');
 }

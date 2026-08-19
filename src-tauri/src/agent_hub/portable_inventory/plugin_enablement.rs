@@ -180,10 +180,9 @@ fn claude_plugin_actual_enabled(
     if let Some(v) = enablement.get(plugin_id) {
         return (*v, None);
     }
-    let prefix = format!("{plugin_id}@");
     let mut matched: Option<bool> = None;
     for (key, enabled) in enablement {
-        if key == plugin_id || key.starts_with(&prefix) {
+        if plugin_config_key_matches(plugin_id, key) {
             matched = Some(matched.map(|m| m && *enabled).unwrap_or(*enabled));
         }
     }
@@ -250,9 +249,8 @@ fn load_grok_plugin_enablement(config_root: &Path) -> GrokPluginEnablement {
 }
 
 fn grok_plugin_list_contains(list: &[String], plugin_id: &str) -> bool {
-    let prefix = format!("{plugin_id}@");
     list.iter()
-        .any(|key| key == plugin_id || key.starts_with(&prefix))
+        .any(|key| plugin_config_key_matches(plugin_id, key))
 }
 
 fn grok_plugin_actual_enabled(
@@ -270,14 +268,32 @@ fn grok_plugin_actual_enabled(
 }
 
 fn lookup_plugin_bool(enablement: &BTreeMap<String, bool>, plugin_id: &str) -> Option<bool> {
-    let prefix = format!("{plugin_id}@");
     let mut matched: Option<bool> = None;
     for (key, enabled) in enablement {
-        if key == plugin_id || key.starts_with(&prefix) {
+        if plugin_config_key_matches(plugin_id, key) {
             matched = Some(matched.map(|m| m || *enabled).unwrap_or(*enabled));
         }
     }
     matched
+}
+
+/// Codex / Claude plugin 键匹配：短 id 对上 `id@market`；已是 `id@market` 时只精确匹配。
+///
+/// Business Logic: scanner 的 native_id 已是 `product-design@openai-curated-remote`，
+///     前缀再加 `@` 会变成 `…remote@`，对不上 config 键。
+/// Code Logic: 精确相等，或短 id 的 `id@` 前缀；qualified id 不再二次加 `@`。
+pub(crate) fn plugin_config_key_matches(plugin_id: &str, key: &str) -> bool {
+    let id = plugin_id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    if key == id {
+        return true;
+    }
+    if !id.contains('@') && key.starts_with(&format!("{id}@")) {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -356,6 +372,10 @@ mod tests {
         assert!(warn.is_none());
         let (listed, _) = plugin_actual_enabled(&viewing, "browser", None, true);
         assert!(listed);
+        let (qualified, warn) =
+            plugin_actual_enabled(&viewing, "browser@openai-bundled", None, true);
+        assert!(qualified, "scanner native_id is already id@market");
+        assert!(warn.is_none());
     }
 
     #[test]
@@ -376,6 +396,23 @@ mod tests {
         assert!(!plugin_actual_enabled(&viewing, "ecc", None, false).0);
         assert!(plugin_actual_enabled(&viewing, "native-only", None, true).0);
         assert!(!plugin_actual_enabled(&viewing, "other-native", None, true).0);
+        let qualified = ViewingPluginEnablement {
+            target: AgentTarget::Grok,
+            claude: BTreeMap::new(),
+            codex: BTreeMap::new(),
+            grok: GrokPluginEnablement {
+                enabled: vec!["native-only@market".into()],
+                disabled: Vec::new(),
+            },
+        };
+        assert!(
+            plugin_actual_enabled(&qualified, "native-only@market", None, true).0,
+            "qualified native_id must match enabled list exactly"
+        );
+        assert!(
+            !plugin_actual_enabled(&qualified, "other@market", None, true).0,
+            "unlisted qualified native must stay closed"
+        );
     }
 
     #[test]
@@ -401,6 +438,30 @@ mod tests {
         assert!(empty_map, "missing settings keeps installed=true");
         let (unlisted, _) = plugin_actual_enabled(&viewing, "other", None, true);
         assert!(unlisted, "installed but unlisted defaults enabled");
+    }
+
+    #[test]
+    fn plugin_config_key_matches_short_and_qualified_ids() {
+        assert!(plugin_config_key_matches(
+            "product-design",
+            "product-design@openai-curated-remote"
+        ));
+        assert!(plugin_config_key_matches(
+            "product-design@openai-curated-remote",
+            "product-design@openai-curated-remote"
+        ));
+        assert!(!plugin_config_key_matches(
+            "product-design@openai-curated-remote",
+            "product-design"
+        ));
+        assert!(!plugin_config_key_matches(
+            "product-design@openai-curated-remote",
+            "product-design@openai-curated-remote@extra"
+        ));
+        assert!(!plugin_config_key_matches(
+            "browser@openai-bundled",
+            "browser@openai-curated-remote"
+        ));
     }
 
     #[test]

@@ -430,6 +430,21 @@ describe('portableInventoryPresentation filters', () => {
     );
   });
 
+  test('Codex cache plugin missing from config is disabled, not a health problem', () => {
+    const cacheOnly = makeItem({
+      inventoryItemId: 'codex-plugin-product-design',
+      kind: 'plugin',
+      nativeId: 'product-design@openai-curated-remote',
+      displayName: 'product-design',
+      target: 'codex',
+      actualEnabled: false,
+      warnings: ['codex_plugin_not_in_config'],
+    });
+
+    expect(isPortableInventoryProblem(cacheOnly)).toBe(false);
+    expect(classifyPortableActualState(cacheOnly)).toBe('disabled');
+  });
+
   test('portability notes do not mark a healthy local item as problem', () => {
     const healthyWithNotes = makeItem({
       inventoryItemId: 'claude-skill-portability-notes',

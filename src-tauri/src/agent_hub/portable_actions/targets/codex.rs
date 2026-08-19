@@ -22,6 +22,7 @@ use crate::agent_hub::portable_actions::models::{
     PortableAssetActionChangeDto, PortableAssetActionKind, PortableAssetActionPlanDto,
     PortableAssetBackupPolicy,
 };
+use crate::agent_hub::portable_inventory::plugin_enablement::plugin_config_key_matches;
 use crate::agent_hub::portable_inventory::{
     hash_plugin_root, PortableAssetKind, PortableInventoryItemDto,
 };
@@ -770,7 +771,6 @@ fn set_codex_plugin_enabled_in_config(
     let doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| AppError::validation(format!("codex_config_toml_invalid:{e}")))?;
-    let prefix = format!("{plugin_id}@");
     let keys: Vec<String> = doc
         .get("plugins")
         .and_then(|i| i.as_table())
@@ -778,7 +778,7 @@ fn set_codex_plugin_enabled_in_config(
             plugins
                 .iter()
                 .map(|(k, _)| k.to_string())
-                .filter(|k| k == plugin_id || k.starts_with(&prefix))
+                .filter(|k| plugin_config_key_matches(plugin_id, k))
                 .collect()
         })
         .unwrap_or_default();
@@ -1392,6 +1392,65 @@ enabled = true
         assert!(
             after.contains("enabled = true") || after.contains("enabled=true"),
             "new plugin must be enabled: {after}"
+        );
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    /// scanner 的 native_id 已是 `id@market` 时，Enable 仍须写入同一键，不能二次加 `@`。
+    #[test]
+    fn codex_plugin_enable_registers_qualified_native_id() {
+        let _guard = codex_home_lock();
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"
+[plugins."browser@openai-bundled"]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let plugin_root = tmp
+            .path()
+            .join("plugins/cache/openai-curated-remote/product-design/0.1.52");
+        let manifest = plugin_root.join(".codex-plugin/plugin.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, r#"{"name":"product-design","version":"0.1.52"}"#).unwrap();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        std::env::set_var("CODEX_HOME", tmp.path());
+
+        let item = sample_item(
+            PortableAssetKind::Plugin,
+            "product-design@openai-curated-remote",
+            &plugin_root.to_string_lossy(),
+        );
+        let change = base_change(
+            PortableAssetKind::Plugin,
+            "id-product-design",
+            &plugin_root.to_string_lossy(),
+            PortableAssetPlanOperation::Enable,
+        );
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: None,
+            data_dir: Some(data_dir),
+            keep_data: false,
+            action: PortableAssetActionKind::Enable,
+        };
+        let plan = empty_plan(PortableAssetActionKind::Enable, vec![change.clone()]);
+        let out = CodexTargetExecutor
+            .execute_change(&ctx, &plan, &change, Some(&item))
+            .unwrap();
+        assert_eq!(out, TargetActionRawOutcome::Applied, "{out:?}");
+        let after = fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("product-design@openai-curated-remote"),
+            "enable must register scanner native_id: {after}"
+        );
+        assert!(
+            !after.contains("product-design@openai-curated-remote@"),
+            "must not append a second @market: {after}"
         );
         std::env::remove_var("CODEX_HOME");
     }
