@@ -2,11 +2,13 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Codex skill 位于 CODEX_HOME/skills 或 ~/.agents/skills；MCP 在 config.toml 的
-//!     `mcp_servers`；plugins 在 CODEX_HOME/plugins。阶段一要求 certified pin 后真实写盘。
+//!     `mcp_servers`（原生用 leaf 内 `enabled` 开关，不是删表）；plugins 在
+//!     CODEX_HOME/plugins。阶段一要求 certified pin 后真实写盘。
 //!
 //! Code Logic（这个模块做什么）:
 //!     实现 `TargetActionExecutor`：Skill/Command 用 active↔disabled move；
-//!     MCP 用 TomlConfigPatcher semantic patch；Plugin enable/disable 写 config.toml
+//!     MCP Enable/Disable 写 `mcp_servers.{id}.enabled`，leaf 缺失时 Enable 才从
+//!     disabled snapshot 恢复；Plugin enable/disable 写 config.toml
 //!     `[plugins."id@market"].enabled`，uninstall 仍备份并移除 package 目录。
 
 use super::{TargetActionContext, TargetActionExecutor, TargetActionRawOutcome};
@@ -484,19 +486,33 @@ fn execute_mcp(
 
     match ctx.action {
         PortableAssetActionKind::Enable => {
+            let owned = patcher.inspect(&bytes, &["mcp_servers".into(), id.clone()])?;
+            if owned.present {
+                if let Some(failed) =
+                    mcp_leaf_hash_mismatch(&owned, change.expected_source_hash.as_deref())
+                {
+                    return Ok(failed);
+                }
+                let out = set_codex_mcp_enabled_flag(&patcher, &config_path, &bytes, &id, true)?;
+                if matches!(out, TargetActionRawOutcome::Applied) {
+                    let disabled = roots.disabled_mcp_dir.join(format!("{id}.json"));
+                    let _ = fs::remove_file(disabled);
+                }
+                return Ok(out);
+            }
+            // leaf 已不在 config：仅此时从 Hub Disable 留下的 snapshot 恢复。
             let disabled = roots.disabled_mcp_dir.join(format!("{id}.json"));
-            let value = if disabled.exists() {
+            let mut value = if disabled.exists() {
                 let text = fs::read_to_string(&disabled)?;
-                serde_json::from_str(&text)?
+                serde_json::from_str::<serde_json::Value>(&text)?
             } else {
                 return Ok(TargetActionRawOutcome::Failed {
                     code: "PORTABLE_ASSET_ACTION_MCP_DISABLED_MISSING".into(),
                     message: "disabled MCP snapshot missing".into(),
                 });
             };
-            let owned = patcher.inspect(&bytes, &["mcp_servers".into(), id.clone()])?;
-            if owned.present {
-                return Ok(TargetActionRawOutcome::Skipped);
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("enabled".into(), serde_json::Value::Bool(true));
             }
             let patches = [ManagedConfigPatch {
                 owner_id: format!("portable-codex:{id}"),
@@ -527,56 +543,22 @@ fn execute_mcp(
             if !owned.present {
                 return Ok(TargetActionRawOutcome::Skipped);
             }
-            let leaf_hash = value_content_hash(&owned.value);
-            if let Some(expected) = change.expected_source_hash.as_deref() {
-                if expected != leaf_hash {
-                    return Ok(TargetActionRawOutcome::Failed {
-                        code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
-                        message: "mcp leaf hash changed since preview".into(),
-                    });
-                }
+            if let Some(failed) =
+                mcp_leaf_hash_mismatch(&owned, change.expected_source_hash.as_deref())
+            {
+                return Ok(failed);
             }
-            fs::create_dir_all(&roots.disabled_mcp_dir)?;
-            let disabled = roots.disabled_mcp_dir.join(format!("{id}.json"));
-            if disabled.exists() {
-                portable_backup_path(ClaudeCodeAssetKind::Mcp, &id, &disabled, &roots.backup_root)?;
-            }
-            fs::write(&disabled, serde_json::to_vec_pretty(&owned.value)?)?;
-            let patches = [ManagedConfigPatch {
-                owner_id: format!("portable-codex:{id}"),
-                path: vec!["mcp_servers".into(), id.clone()],
-                value: None,
-                expected_base_hash: Some(leaf_hash),
-            }];
-            let prepared = apply_config_patch_atomically(&patcher, &config_path, &patches)?;
-            match prepared.patched.outcome {
-                crate::agent_hub::config_patch::ConfigPatchOutcome::Applied => {
-                    Ok(TargetActionRawOutcome::Applied)
-                }
-                crate::agent_hub::config_patch::ConfigPatchOutcome::Conflict { .. } => {
-                    Ok(TargetActionRawOutcome::Failed {
-                        code: "PORTABLE_ASSET_ACTION_MCP_CAS_CONFLICT".into(),
-                        message: "mcp disable CAS conflict".into(),
-                    })
-                }
-                other => Ok(TargetActionRawOutcome::Failed {
-                    code: "PORTABLE_ASSET_ACTION_MCP_PATCH_FAILED".into(),
-                    message: format!("{other:?}"),
-                }),
-            }
+            set_codex_mcp_enabled_flag(&patcher, &config_path, &bytes, &id, false)
         }
         PortableAssetActionKind::Uninstall => {
             let owned = patcher.inspect(&bytes, &["mcp_servers".into(), id.clone()])?;
             if owned.present {
-                let leaf_hash = value_content_hash(&owned.value);
-                if let Some(expected) = change.expected_source_hash.as_deref() {
-                    if expected != leaf_hash {
-                        return Ok(TargetActionRawOutcome::Failed {
-                            code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
-                            message: "mcp leaf hash changed since preview".into(),
-                        });
-                    }
+                if let Some(failed) =
+                    mcp_leaf_hash_mismatch(&owned, change.expected_source_hash.as_deref())
+                {
+                    return Ok(failed);
                 }
+                let leaf_hash = value_content_hash(&owned.value);
                 if !ctx.keep_data {
                     fs::create_dir_all(&roots.backup_root)?;
                     let snap = roots.backup_root.join(format!("mcp-{id}.json"));
@@ -622,6 +604,82 @@ fn execute_mcp(
     }
 }
 
+/// 校验 MCP leaf 的 preview `expected_source_hash`。
+///
+/// Business Logic: planner 绑定整 leaf hash；apply 前必须拒绝并发改写。
+/// Code Logic: 与 `value_content_hash` 同域；不匹配则 SOURCE_HASH_CHANGED。
+fn mcp_leaf_hash_mismatch(
+    owned: &crate::agent_hub::config_patch::OwnedConfigValue,
+    expected: Option<&str>,
+) -> Option<TargetActionRawOutcome> {
+    let expected = expected?;
+    let leaf_hash = value_content_hash(&owned.value);
+    if expected == leaf_hash {
+        None
+    } else {
+        Some(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+            message: "mcp leaf hash changed since preview".into(),
+        })
+    }
+}
+
+/// 翻转 Codex `mcp_servers.{id}.enabled`，不改 sibling 字段。
+///
+/// Business Logic: Codex 原生用 leaf 内 `enabled` 开关 MCP。`enabled = false` 的
+///     server 仍在 config.toml，Enable 不得要求 Hub Disable snapshot。
+/// Code Logic: 缺省无 enabled 字段视为 true；只 patch `.enabled` 保留注释与其它键。
+fn set_codex_mcp_enabled_flag(
+    patcher: &TomlConfigPatcher,
+    config_path: &Path,
+    bytes: &[u8],
+    id: &str,
+    enabled: bool,
+) -> Result<TargetActionRawOutcome, AppError> {
+    let path = vec!["mcp_servers".into(), id.to_string(), "enabled".into()];
+    let owned = patcher.inspect(bytes, &path)?;
+    let patch = if owned.present {
+        if owned.value.as_bool() == Some(enabled) {
+            return Ok(TargetActionRawOutcome::Skipped);
+        }
+        ManagedConfigPatch {
+            owner_id: format!("portable-codex:{id}"),
+            path,
+            value: Some(serde_json::Value::Bool(enabled)),
+            expected_base_hash: owned.value_hash,
+        }
+    } else if enabled {
+        return Ok(TargetActionRawOutcome::Skipped);
+    } else {
+        ManagedConfigPatch {
+            owner_id: format!("portable-codex:{id}"),
+            path,
+            value: Some(serde_json::Value::Bool(false)),
+            expected_base_hash: Some(CAS_EXPECT_ABSENT.to_string()),
+        }
+    };
+    let prepared = apply_config_patch_atomically(patcher, config_path, &[patch])?;
+    match prepared.patched.outcome {
+        crate::agent_hub::config_patch::ConfigPatchOutcome::Applied => {
+            Ok(TargetActionRawOutcome::Applied)
+        }
+        crate::agent_hub::config_patch::ConfigPatchOutcome::Conflict { .. } => {
+            Ok(TargetActionRawOutcome::Failed {
+                code: "PORTABLE_ASSET_ACTION_MCP_CAS_CONFLICT".into(),
+                message: if enabled {
+                    "mcp enable CAS conflict".into()
+                } else {
+                    "mcp disable CAS conflict".into()
+                },
+            })
+        }
+        other => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_MCP_PATCH_FAILED".into(),
+            message: format!("{other:?}"),
+        }),
+    }
+}
+
 fn execute_plugin(
     ctx: &TargetActionContext,
     roots: &CodexRoots,
@@ -645,7 +703,11 @@ fn execute_plugin(
                 });
             }
             let want_enabled = matches!(ctx.action, PortableAssetActionKind::Enable);
-            set_codex_plugin_enabled_in_config(&roots.config_toml, &id, want_enabled)
+            let source = change
+                .path
+                .as_deref()
+                .or_else(|| pre_item.and_then(|item| item.source_path.as_deref()));
+            set_codex_plugin_enabled_in_config(&roots.config_toml, &id, source, want_enabled)
         }
         PortableAssetActionKind::Uninstall => {
             if !path.exists() {
@@ -658,7 +720,12 @@ fn execute_plugin(
                 &roots.backup_root,
             )?;
             // 同步去掉 config 中启用项（若存在）
-            let _ = set_codex_plugin_enabled_in_config(&roots.config_toml, &id, false);
+            let _ = set_codex_plugin_enabled_in_config(
+                &roots.config_toml,
+                &id,
+                change.path.as_deref(),
+                false,
+            );
             Ok(TargetActionRawOutcome::Applied)
         }
         PortableAssetActionKind::Adopt
@@ -677,17 +744,20 @@ fn execute_plugin(
 
 /// 在 Codex config.toml 中设置 `[plugins."…"] enabled`。
 ///
-/// Business Logic: short id（browser）匹配 `browser@market`；无匹配项时 Enable 失败、
-/// Disable 视为已禁用 skip。
-/// Code Logic: toml_edit 定位 plugins 表 → 写 enabled → 原子写回。
+/// Business Logic: short id（browser）匹配 `browser@market`。cache 里已有但未登记的
+///     native 包（`codex_plugin_not_in_config`）Enable 必须写入 `id@market`，不能失败。
+///     Disable 对未登记项视为已关闭 skip。
+/// Code Logic: 已有 key 则翻 enabled；Enable 且无 key 时按 cache 路径插入新表。
 fn set_codex_plugin_enabled_in_config(
     config_path: &Path,
     plugin_id: &str,
+    source_path: Option<&str>,
     enabled: bool,
 ) -> Result<TargetActionRawOutcome, AppError> {
     use crate::agent_hub::config_patch::{
         apply_config_patch_atomically, ManagedConfigPatch, SemanticConfigPatcher, TomlConfigPatcher,
     };
+    use crate::agent_hub::portable_inventory::plugin_paths::plugin_cli_selector;
 
     if !config_path.is_file() {
         return Ok(TargetActionRawOutcome::Failed {
@@ -700,35 +770,38 @@ fn set_codex_plugin_enabled_in_config(
     let doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| AppError::validation(format!("codex_config_toml_invalid:{e}")))?;
-    let Some(plugins) = doc.get("plugins").and_then(|i| i.as_table()) else {
-        return if enabled {
-            Ok(TargetActionRawOutcome::Failed {
-                code: "PORTABLE_ASSET_ACTION_PLUGIN_NOT_IN_CONFIG".into(),
-                message: format!("plugin {plugin_id} not registered in config.toml"),
-            })
-        } else {
-            Ok(TargetActionRawOutcome::Skipped)
-        };
-    };
-
     let prefix = format!("{plugin_id}@");
-    let keys: Vec<String> = plugins
-        .iter()
-        .map(|(k, _)| k.to_string())
-        .filter(|k| k == plugin_id || k.starts_with(&prefix))
-        .collect();
-    if keys.is_empty() {
-        return if enabled {
-            Ok(TargetActionRawOutcome::Failed {
-                code: "PORTABLE_ASSET_ACTION_PLUGIN_NOT_IN_CONFIG".into(),
-                message: format!("plugin {plugin_id} not registered in config.toml"),
-            })
-        } else {
-            Ok(TargetActionRawOutcome::Skipped)
-        };
-    }
+    let keys: Vec<String> = doc
+        .get("plugins")
+        .and_then(|i| i.as_table())
+        .map(|plugins| {
+            plugins
+                .iter()
+                .map(|(k, _)| k.to_string())
+                .filter(|k| k == plugin_id || k.starts_with(&prefix))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let patcher = TomlConfigPatcher;
+    if keys.is_empty() {
+        if !enabled {
+            return Ok(TargetActionRawOutcome::Skipped);
+        }
+        let key = plugin_cli_selector(plugin_id, source_path);
+        let patches = [ManagedConfigPatch {
+            owner_id: format!("portable-codex-plugin:{key}"),
+            path: vec!["plugins".into(), key, "enabled".into()],
+            value: Some(serde_json::Value::Bool(true)),
+            expected_base_hash: Some(CAS_EXPECT_ABSENT.to_string()),
+        }];
+        return plugin_config_patch_outcome(apply_config_patch_atomically(
+            &patcher,
+            config_path,
+            &patches,
+        )?);
+    }
+
     let mut patches = Vec::new();
     for key in keys {
         let path = vec!["plugins".into(), key.clone(), "enabled".into()];
@@ -759,7 +832,20 @@ fn set_codex_plugin_enabled_in_config(
     if patches.is_empty() {
         return Ok(TargetActionRawOutcome::Skipped);
     }
-    let prepared = apply_config_patch_atomically(&patcher, config_path, &patches)?;
+    plugin_config_patch_outcome(apply_config_patch_atomically(
+        &patcher,
+        config_path,
+        &patches,
+    )?)
+}
+
+/// 把 plugin config patch 结果收成 executor outcome。
+///
+/// Business Logic: CAS 冲突必须可区分，禁止当成成功。
+/// Code Logic: Applied / Conflict / 其它失败码。
+fn plugin_config_patch_outcome(
+    prepared: crate::agent_hub::config_patch::PreparedConfigProjection,
+) -> Result<TargetActionRawOutcome, AppError> {
     match prepared.patched.outcome {
         crate::agent_hub::config_patch::ConfigPatchOutcome::Applied => {
             Ok(TargetActionRawOutcome::Applied)
@@ -944,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_mcp_disable_removes_toml_leaf_preserving_sibling() {
+    fn codex_mcp_disable_sets_enabled_false_preserving_sibling() {
         let _guard = codex_home_lock();
         let tmp = TempDir::new().unwrap();
         let config = tmp.path().join("config.toml");
@@ -985,7 +1071,12 @@ env = { TOKEN = "plain-secret-value" }
         assert_eq!(out, TargetActionRawOutcome::Applied);
         let after = fs::read_to_string(&config).unwrap();
         assert!(after.contains("keep-me"));
-        assert!(!after.contains("drop-me"));
+        assert!(after.contains("drop-me"));
+        assert!(after.contains("secret-cmd"));
+        assert!(
+            after.contains("enabled = false") || after.contains("enabled=false"),
+            "disable must flip native enabled flag: {after}"
+        );
         std::env::remove_var("CODEX_HOME");
     }
 
@@ -1051,7 +1142,7 @@ args = ["mcp"]
             "incomplete hash must fail CAS: {out_bad:?}"
         );
 
-        // 正确 Toml leaf hash 必须成功
+        // 正确 Toml leaf hash 必须成功，且只翻转 enabled、保留 int 字段
         let mut good = base_change(
             PortableAssetKind::Mcp,
             "id-node_repl",
@@ -1065,7 +1156,124 @@ args = ["mcp"]
             .unwrap();
         assert_eq!(out_good, TargetActionRawOutcome::Applied);
         let after = fs::read_to_string(&config).unwrap();
-        assert!(!after.contains("node_repl"));
+        assert!(after.contains("node_repl"));
+        assert!(after.contains("startup_timeout_sec"));
+        assert!(
+            after.contains("enabled = false") || after.contains("enabled=false"),
+            "disable must keep leaf and set enabled=false: {after}"
+        );
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    /// Codex 原生 `enabled = false` 的 MCP 必须直接翻回 true，不要求 disabled snapshot。
+    #[test]
+    fn codex_mcp_enable_flips_native_enabled_false_without_snapshot() {
+        let _guard = codex_home_lock();
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"
+[mcp_servers.computer-use]
+command = "./Codex Computer Use.app/Contents/MacOS/SkyComputerUseClient"
+args = ["mcp"]
+cwd = "."
+enabled = false
+"#,
+        )
+        .unwrap();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        std::env::set_var("CODEX_HOME", tmp.path());
+
+        let item = sample_item(
+            PortableAssetKind::Mcp,
+            "computer-use",
+            &config.to_string_lossy(),
+        );
+        let change = base_change(
+            PortableAssetKind::Mcp,
+            "id-computer-use",
+            &config.to_string_lossy(),
+            PortableAssetPlanOperation::Enable,
+        );
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: None,
+            data_dir: Some(data_dir),
+            keep_data: false,
+            action: PortableAssetActionKind::Enable,
+        };
+        let plan = empty_plan(PortableAssetActionKind::Enable, vec![change.clone()]);
+        let out = CodexTargetExecutor
+            .execute_change(&ctx, &plan, &change, Some(&item))
+            .unwrap();
+        assert_eq!(out, TargetActionRawOutcome::Applied, "{out:?}");
+        let after = fs::read_to_string(&config).unwrap();
+        assert!(after.contains("computer-use"));
+        assert!(after.contains("cwd"));
+        assert!(
+            after.contains("enabled = true") || after.contains("enabled=true"),
+            "enable must flip native flag without snapshot: {after}"
+        );
+        assert!(
+            !after.contains("enabled = false") && !after.contains("enabled=false"),
+            "enabled=false must not remain: {after}"
+        );
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    /// leaf 已被删时，Enable 仍从 Hub disabled snapshot 恢复。
+    #[test]
+    fn codex_mcp_enable_restores_disabled_snapshot_when_leaf_absent() {
+        let _guard = codex_home_lock();
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"
+[mcp_servers.keep-me]
+command = "echo"
+"#,
+        )
+        .unwrap();
+        let data_dir = tmp.path().join("data");
+        let disabled_dir = data_dir.join("codex-assets").join("disabled").join("mcp");
+        fs::create_dir_all(&disabled_dir).unwrap();
+        fs::write(
+            disabled_dir.join("computer-use.json"),
+            r#"{"command":"cua","args":["mcp"],"cwd":"."}"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", tmp.path());
+
+        let item = sample_item(
+            PortableAssetKind::Mcp,
+            "computer-use",
+            &config.to_string_lossy(),
+        );
+        let change = base_change(
+            PortableAssetKind::Mcp,
+            "id-computer-use",
+            &config.to_string_lossy(),
+            PortableAssetPlanOperation::Enable,
+        );
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: None,
+            data_dir: Some(data_dir),
+            keep_data: false,
+            action: PortableAssetActionKind::Enable,
+        };
+        let plan = empty_plan(PortableAssetActionKind::Enable, vec![change.clone()]);
+        let out = CodexTargetExecutor
+            .execute_change(&ctx, &plan, &change, Some(&item))
+            .unwrap();
+        assert_eq!(out, TargetActionRawOutcome::Applied, "{out:?}");
+        let after = fs::read_to_string(&config).unwrap();
+        assert!(after.contains("keep-me"));
+        assert!(after.contains("computer-use"));
+        assert!(after.contains("cua"));
         std::env::remove_var("CODEX_HOME");
     }
 
@@ -1122,6 +1330,69 @@ enabled = true
             "config must flip enabled: {after}"
         );
         assert!(plugin_root.exists(), "cache dir remains after disable");
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    /// cache 已有但 config 未登记的 native 包，Enable 必须写入 `id@market`。
+    #[test]
+    fn codex_plugin_enable_registers_cache_package_not_in_config() {
+        let _guard = codex_home_lock();
+        let tmp = TempDir::new().unwrap();
+        let config = tmp.path().join("config.toml");
+        fs::write(
+            &config,
+            r#"
+[plugins."browser@openai-bundled"]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let plugin_root = tmp
+            .path()
+            .join("plugins/cache/openai-curated-remote/product-design/0.1.52");
+        let manifest = plugin_root.join(".codex-plugin/plugin.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, r#"{"name":"product-design","version":"0.1.52"}"#).unwrap();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        std::env::set_var("CODEX_HOME", tmp.path());
+
+        let item = sample_item(
+            PortableAssetKind::Plugin,
+            "product-design",
+            &plugin_root.to_string_lossy(),
+        );
+        let change = base_change(
+            PortableAssetKind::Plugin,
+            "id-product-design",
+            &plugin_root.to_string_lossy(),
+            PortableAssetPlanOperation::Enable,
+        );
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::new()),
+            claude_config_dir: None,
+            data_dir: Some(data_dir),
+            keep_data: false,
+            action: PortableAssetActionKind::Enable,
+        };
+        let plan = empty_plan(PortableAssetActionKind::Enable, vec![change.clone()]);
+        let out = CodexTargetExecutor
+            .execute_change(&ctx, &plan, &change, Some(&item))
+            .unwrap();
+        assert_eq!(out, TargetActionRawOutcome::Applied, "{out:?}");
+        let after = fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("browser@openai-bundled"),
+            "sibling plugin must remain: {after}"
+        );
+        assert!(
+            after.contains("product-design@openai-curated-remote"),
+            "enable must register cache marketplace key: {after}"
+        );
+        assert!(
+            after.contains("enabled = true") || after.contains("enabled=true"),
+            "new plugin must be enabled: {after}"
+        );
         std::env::remove_var("CODEX_HOME");
     }
 }
