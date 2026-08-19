@@ -7,17 +7,23 @@
  *
  * Code Logic（字段说明）:
  *   projectId/worktreeId/sessionId 定位执行现场；view=automation 打开自动化控制台；
- *   view=files + path 打开文件工作区相对路径；taskId/outboxId 聚焦详情/outbox。
- *   可选字段省略时按 null 处理以兼容旧调用方。
+ *   view=files + path 打开文件工作区相对路径；view=projectAgent 打开项目 Agent 控制台；
+ *   taskId/outboxId 聚焦详情/outbox。项目 Agent 用 agent/tab/lane/assetLane/adapt 恢复 Hub
+ *   内部导航，且不得把 Hub 的 view=adapt 写进 workbench view。可选字段省略时按 null 处理。
  */
 export interface WorkbenchDeepLink {
   projectId: string | null;
   worktreeId: string | null;
   sessionId: string | null;
-  view?: 'automation' | 'files' | null;
+  view?: 'automation' | 'files' | 'projectAgent' | null;
   taskId?: string | null;
   outboxId?: string | null;
   path?: string | null;
+  agent?: string | null;
+  tab?: string | null;
+  instructionLane?: string | null;
+  assetLane?: string | null;
+  adapt?: boolean | null;
 }
 
 /**
@@ -52,7 +58,7 @@ export function buildWorkbenchDeepLink(target: WorkbenchDeepLink): string {
   if (target.projectId?.trim()) params.set('projectId', target.projectId.trim());
   if (target.worktreeId?.trim()) params.set('worktreeId', target.worktreeId.trim());
   if (target.sessionId?.trim()) params.set('sessionId', target.sessionId.trim());
-  if (target.view === 'automation' || target.view === 'files') {
+  if (target.view === 'automation' || target.view === 'files' || target.view === 'projectAgent') {
     params.set('view', target.view);
   }
   if (target.taskId?.trim()) params.set('taskId', target.taskId.trim());
@@ -60,6 +66,13 @@ export function buildWorkbenchDeepLink(target: WorkbenchDeepLink): string {
   const path = target.path?.trim() ?? '';
   if (path && isSafeWorkbenchRelativePath(path)) {
     params.set('path', path);
+  }
+  if (target.view === 'projectAgent') {
+    if (target.agent?.trim()) params.set('agent', target.agent.trim());
+    if (target.tab?.trim()) params.set('tab', target.tab.trim());
+    if (target.instructionLane?.trim()) params.set('lane', target.instructionLane.trim());
+    if (target.assetLane?.trim()) params.set('assetLane', target.assetLane.trim());
+    if (target.adapt) params.set('adapt', '1');
   }
   const query = params.toString();
   return query ? `/workbench?${query}` : '/workbench';
@@ -72,7 +85,7 @@ export function buildWorkbenchDeepLink(target: WorkbenchDeepLink): string {
  *
  * Code Logic（这个函数做什么）:
  *   解析 location.search；缺失、空字符串或纯空白值统一返回 null；
- *   仅识别 view=automation|files；path 未通过安全校验时视为 null。
+ *   仅识别 view=automation|files|projectAgent；path 未通过安全校验时视为 null。
  */
 export function parseWorkbenchDeepLink(search: string): WorkbenchDeepLink {
   const normalized =
@@ -88,11 +101,100 @@ export function parseWorkbenchDeepLink(search: string): WorkbenchDeepLink {
   const worktreeId = params.get('worktreeId')?.trim() || null;
   const sessionId = params.get('sessionId')?.trim() || null;
   const rawView = params.get('view')?.trim() || null;
-  const view = rawView === 'automation' || rawView === 'files' ? rawView : null;
+  const view =
+    rawView === 'automation' || rawView === 'files' || rawView === 'projectAgent' ? rawView : null;
   const taskId = params.get('taskId')?.trim() || null;
   const outboxId = params.get('outboxId')?.trim() || null;
   const rawPath = params.get('path')?.trim() || null;
   const path = rawPath && isSafeWorkbenchRelativePath(rawPath) ? rawPath : null;
+  const agent = params.get('agent')?.trim() || null;
+  const tab = params.get('tab')?.trim() || null;
+  const instructionLane = params.get('lane')?.trim() || null;
+  const assetLane = params.get('assetLane')?.trim() || null;
+  const adapt = params.get('adapt') === '1' ? true : null;
 
-  return { projectId, worktreeId, sessionId, view, taskId, outboxId, path };
+  return {
+    projectId,
+    worktreeId,
+    sessionId,
+    view,
+    taskId,
+    outboxId,
+    path,
+    agent,
+    tab,
+    instructionLane,
+    assetLane,
+    adapt,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   旧 Agent Hub `scope=project` 书签与 Attention 项目资产深链必须落到当前 Workbench 项目的
+ *   项目 Agent 控制台，不能再把项目当作 Hub 的查看上下文。
+ *
+ * Code Logic（这个函数做什么）:
+ *   以 projectId + view=projectAgent 构造 `/workbench` URL；Hub 内部导航写入 agent/tab/lane/
+ *   assetLane，adapt 用 `adapt=1` 而不是覆盖 workbench `view`。
+ */
+export function buildWorkbenchProjectAgentDeepLink(target: {
+  projectId: string;
+  agent?: string | null;
+  tab?: string | null;
+  instructionLane?: string | null;
+  assetLane?: string | null;
+  adapt?: boolean | null;
+}): string {
+  return buildWorkbenchDeepLink({
+    projectId: target.projectId,
+    worktreeId: null,
+    sessionId: null,
+    view: 'projectAgent',
+    agent: target.agent ?? null,
+    tab: target.tab ?? null,
+    instructionLane: target.instructionLane ?? null,
+    assetLane: target.assetLane ?? null,
+    adapt: target.adapt ?? null,
+  });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   关闭项目 Agent 后若 URL 仍带 view=projectAgent，staged deep link 会立刻把控制台再打开。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从当前 search 去掉项目 Agent 视图及其 Hub 导航键，保留 projectId/worktree/session 等现场键。
+ */
+export function stripWorkbenchProjectAgentSearch(search: string): string {
+  const normalized = search.startsWith('?') ? search.slice(1) : search.replace(/^\/workbench\??/, '');
+  const params = new URLSearchParams(normalized);
+  if (params.get('view') === 'projectAgent') {
+    params.delete('view');
+  }
+  params.delete('agent');
+  params.delete('tab');
+  params.delete('lane');
+  params.delete('assetLane');
+  params.delete('adapt');
+  const query = params.toString();
+  return query ? `/workbench?${query}` : '/workbench';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   标题栏打开项目 Agent 时要把可刷新的深链写进 URL，同时清掉 automation 的 task/outbox 焦点。
+ *
+ * Code Logic（这个函数做什么）:
+ *   保留当前 projectId 等现场键，强制 view=projectAgent，删除 taskId/outboxId。
+ */
+export function withWorkbenchProjectAgentView(search: string, projectId: string): string {
+  const normalized = search.startsWith('?') ? search.slice(1) : search.replace(/^\/workbench\??/, '');
+  const params = new URLSearchParams(normalized);
+  if (projectId.trim()) params.set('projectId', projectId.trim());
+  params.set('view', 'projectAgent');
+  params.delete('taskId');
+  params.delete('outboxId');
+  params.delete('path');
+  return `/workbench?${params.toString()}`;
 }

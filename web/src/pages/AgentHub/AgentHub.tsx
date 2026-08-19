@@ -8,12 +8,11 @@
  *   controller 持有数据/动作；AgentHubView 为 pure 视图（禁止 @/api/*）。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Dialog, StatusMessage } from '@/components/primitives';
+import { useCallback, useEffect, useMemo } from 'react';
+import { Button, StatusMessage } from '@/components/primitives';
 import { LanPushDialog } from './LanPushDialog';
 import {
   InstructionThreePaneView,
-  useInstructionThreePaneController,
   type InstructionThreePaneViewLabels,
   type UseInstructionThreePaneControllerResult,
 } from './instructions';
@@ -34,6 +33,7 @@ import {
   useAgentHubController,
   type UseAgentHubControllerResult,
 } from './useAgentHubController';
+import { useAgentHubSession } from './useAgentHubSession';
 import styles from './AgentHub.module.css';
 
 /**
@@ -42,11 +42,19 @@ import styles from './AgentHub.module.css';
  */
 export type AgentHubViewProps = UseAgentHubControllerResult & {
   instructionThreePane?: UseInstructionThreePaneControllerResult | null;
+  /** Workbench 嵌入时隐藏页面 H1，并使用铺满高度的布局。 */
+  embedded?: boolean;
+  /** 生产 Agent Hub 锁定 user；Workbench 项目 Agent 锁定 project。 */
+  scopeLock?: 'user' | 'project';
+  /** 项目锁定时展示的当前项目名。 */
+  frozenProjectLabel?: string | null;
+  /** 文件工作区有未保存标签时的提示（可选）。 */
+  unsavedFilesNotice?: string | null;
 };
 
 /**
  * Business Logic: 可测试的 pure 页面视图。
- * Code Logic: 只渲染 props；hooks 仅 useTranslation/useMemo/useRef。
+ * Code Logic: 只渲染 props；hooks 仅 useTranslation/useMemo/useCallback/useEffect。
  */
 export function AgentHubView(props: AgentHubViewProps) {
   const {
@@ -99,6 +107,10 @@ export function AgentHubView(props: AgentHubViewProps) {
     writeBlocked,
     upgradeRequired,
     instructionThreePane,
+    embedded = false,
+    scopeLock,
+    frozenProjectLabel,
+    unsavedFilesNotice,
   } = props;
 
   const instructionApplyHasFailure = Boolean(
@@ -403,14 +415,20 @@ export function AgentHubView(props: AgentHubViewProps) {
 
   if (hubContext.adaptView) {
     return (
-      <div className={styles.page} data-testid="agent-hub-page">
+      <div
+        className={embedded ? styles.pageEmbedded : styles.page}
+        data-testid="agent-hub-page"
+        data-embedded={embedded || undefined}
+      >
         <div className={styles.container}>
-          <header className={styles.header}>
-            <div className={styles.titleBlock}>
-              <h1 className={styles.title}>{t('agentHub:title')}</h1>
-              <p className={styles.subtitle}>{t('agentHub:crossAgent.pageTitle')}</p>
-            </div>
-          </header>
+          {embedded ? null : (
+            <header className={styles.header}>
+              <div className={styles.titleBlock}>
+                <h1 className={styles.title}>{t('agentHub:title')}</h1>
+                <p className={styles.subtitle}>{t('agentHub:crossAgent.pageTitle')}</p>
+              </div>
+            </header>
+          )}
           <CrossAgentAdaptPage
             context={hubContext}
             initialSourceMarkdown={adaptInitialMarkdown}
@@ -422,13 +440,13 @@ export function AgentHubView(props: AgentHubViewProps) {
   }
 
   return (
-    <div className={styles.page} data-testid="agent-hub-page">
+    <div
+      className={embedded ? styles.pageEmbedded : styles.page}
+      data-testid="agent-hub-page"
+      data-embedded={embedded || undefined}
+    >
       <div className={styles.container}>
-        <header className={styles.header}>
-          <div className={styles.titleBlock}>
-            <h1 className={styles.title}>{t('agentHub:title')}</h1>
-            <p className={styles.subtitle}>{t('agentHub:subtitle')}</p>
-          </div>
+        {embedded ? (
           <div className={styles.headerActions}>
             <Button
               variant="secondary"
@@ -444,7 +462,35 @@ export function AgentHubView(props: AgentHubViewProps) {
               {t('common:action.refresh')}
             </Button>
           </div>
-        </header>
+        ) : (
+          <header className={styles.header}>
+            <div className={styles.titleBlock}>
+              <h1 className={styles.title}>{t('agentHub:title')}</h1>
+              <p className={styles.subtitle}>{t('agentHub:subtitle')}</p>
+            </div>
+            <div className={styles.headerActions}>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={
+                  hubContext.tab === 'instructions'
+                    ? Boolean(instructionThreePane?.refreshing)
+                    : portableInventory.refreshing
+                }
+                onClick={() => void reload()}
+                data-testid="agent-hub-reload"
+              >
+                {t('common:action.refresh')}
+              </Button>
+            </div>
+          </header>
+        )}
+
+        {unsavedFilesNotice ? (
+          <StatusMessage tone="info" data-testid="agent-hub-unsaved-files-notice">
+            {unsavedFilesNotice}
+          </StatusMessage>
+        ) : null}
 
         {contextMigrationNotice ? (
           <StatusMessage tone="info" data-testid="agent-hub-context-migration-notice">
@@ -459,6 +505,8 @@ export function AgentHubView(props: AgentHubViewProps) {
           peers={shellPeers}
           projects={shellProjects}
           tabCounts={portableInventory.kindCounts}
+          scopeLock={scopeLock ?? (hubContext.scope === 'project' ? 'project' : 'user')}
+          frozenProjectLabel={frozenProjectLabel}
         >
         {showInstructionThreePane && instructionThreePane ? (
           <InstructionThreePaneView
@@ -750,166 +798,22 @@ export function AgentHubView(props: AgentHubViewProps) {
 }
 
 /**
- * 页面入口：注入 hub controller 与提示词三栏 controller（hooks 在 early return 前）。
+ * 页面入口：注入 hub controller 与提示词三栏 session（hooks 在 early return 前）。
  */
 export function AgentHub() {
   const controller = useAgentHubController();
-  const {
-    hubContext: requestedHubContext,
-    onContextChange: navigateContext,
-    t,
-  } = controller;
-  const [committedHubContext, setCommittedHubContext] = useState(requestedHubContext);
-  const [pendingHubContext, setPendingHubContext] = useState<
-    UseAgentHubControllerResult['hubContext'] | null
-  >(null);
-  const contextStayRef = useRef<HTMLButtonElement | null>(null);
-  const selectedCommittedPeer =
-    committedHubContext.deviceId === null
-      ? null
-      : controller.shellPeers.find((peer) => peer.deviceId === committedHubContext.deviceId) ??
-        null;
-  const instructionThreePane = useInstructionThreePaneController({
-    context: committedHubContext,
-    t,
-    enabled:
-      (committedHubContext.tab === 'instructions' || committedHubContext.adaptView) &&
-      committedHubContext.scope === 'user' &&
-      (committedHubContext.deviceId === null ||
-        peerAllowsUserInstructionThreePane(selectedCommittedPeer)),
-  });
-
-  const committedFingerprint = JSON.stringify(committedHubContext);
-  const requestedFingerprint = JSON.stringify(requestedHubContext);
-
-  /**
-   * Business Logic: browser back/forward 与直接 deep link 也必须经过同一脏稿守卫。
-   * Code Logic: dirty 时立即把 URL 恢复到 committed context，并暂存 requested context；
-   *   clean 时才提交。正文和 Shell 始终只消费 committed context。
-   */
-  useEffect(() => {
-    if (requestedFingerprint === committedFingerprint) return;
-    const timeoutId = window.setTimeout(() => {
-      if (instructionThreePane.dirty) {
-        navigateContext(committedHubContext);
-        setPendingHubContext(requestedHubContext);
-        return;
-      }
-      setCommittedHubContext(requestedHubContext);
-    }, 0);
-    return () => window.clearTimeout(timeoutId);
-  }, [
-    committedFingerprint,
-    committedHubContext,
-    instructionThreePane.dirty,
-    navigateContext,
-    requestedHubContext,
-    requestedFingerprint,
-  ]);
-
-  const onContextChange = useCallback(
-    (patch: Partial<UseAgentHubControllerResult['hubContext']>) => {
-      const next = {
-        ...committedHubContext,
-        ...patch,
-      };
-      if (next.scope === 'user') next.projectKey = null;
-      else next.deviceId = null;
-      if (JSON.stringify(next) === committedFingerprint) return;
-      if (instructionThreePane.dirty) {
-        setPendingHubContext(next);
-        return;
-      }
-      setCommittedHubContext(next);
-      navigateContext(next);
-    },
-    [
-      committedFingerprint,
-      committedHubContext,
-      instructionThreePane.dirty,
-      navigateContext,
-    ],
-  );
-
-  const stayInCommittedContext = useCallback(() => {
-    setPendingHubContext(null);
-    navigateContext(committedHubContext);
-  }, [committedHubContext, navigateContext]);
-
-  const commitPendingContext = useCallback(() => {
-    if (!pendingHubContext) return;
-    instructionThreePane.discardDraftForContextChange();
-    setCommittedHubContext(pendingHubContext);
-    navigateContext(pendingHubContext);
-    setPendingHubContext(null);
-  }, [instructionThreePane, navigateContext, pendingHubContext]);
-
-  const saveAndCommitPendingContext = useCallback(async () => {
-    if (!pendingHubContext) return;
-    const saved = await instructionThreePane.saveBlocks();
-    if (!saved) return;
-    setCommittedHubContext(pendingHubContext);
-    navigateContext(pendingHubContext);
-    setPendingHubContext(null);
-  }, [instructionThreePane, navigateContext, pendingHubContext]);
+  const session = useAgentHubSession(controller);
 
   return (
     <>
       <AgentHubView
         {...controller}
-        hubContext={committedHubContext}
-        onContextChange={onContextChange}
-        instructionThreePane={instructionThreePane}
+        hubContext={session.committedHubContext}
+        onContextChange={session.onContextChange}
+        instructionThreePane={session.instructionThreePane}
+        scopeLock="user"
       />
-      <Dialog
-        open={pendingHubContext !== null}
-        titleId="agent-hub-context-change-title"
-        onClose={stayInCommittedContext}
-        initialFocusRef={contextStayRef}
-      >
-        <div className={styles.dialogBody} data-testid="agent-hub-context-change-dialog">
-          <h2 id="agent-hub-context-change-title" className={styles.drawerTitle}>
-            {t('agentHub:instructions.threePane.contextSwitchTitle')}
-          </h2>
-          <p className={styles.drawerSubtitle}>
-            {t('agentHub:instructions.threePane.contextSwitchWarning')}
-          </p>
-          <div className={styles.dialogActions}>
-            <Button
-              ref={contextStayRef}
-              variant="primary"
-              size="sm"
-              onClick={stayInCommittedContext}
-              data-testid="agent-hub-context-stay"
-            >
-              {t('agentHub:instructions.threePane.contextStay')}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={
-                instructionThreePane.actionBusy ||
-                !instructionThreePane.state.blocksDirty ||
-                instructionThreePane.state.externalDrift
-              }
-              loading={instructionThreePane.busyAction === 'save'}
-              onClick={() => void saveAndCommitPendingContext()}
-              data-testid="agent-hub-context-save"
-            >
-              {t('agentHub:instructions.threePane.contextSave')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              disabled={instructionThreePane.actionBusy}
-              onClick={commitPendingContext}
-              data-testid="agent-hub-context-discard"
-            >
-              {t('agentHub:instructions.threePane.contextDiscard')}
-            </Button>
-          </div>
-        </div>
-      </Dialog>
+      {session.contextSwitchDialog}
     </>
   );
 }

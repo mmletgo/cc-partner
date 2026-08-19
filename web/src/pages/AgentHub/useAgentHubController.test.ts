@@ -619,7 +619,9 @@ describe('useAgentHubController', () => {
   test('openLanPushDialog keeps project mode but never treats Workbench id as Hub id', async () => {
     searchParamsMock.current = new URLSearchParams('scope=project&project=local-1&agent=claude');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
-    const { result } = renderHook(() => useAgentHubController());
+    const { result } = renderHook(() =>
+      useAgentHubController({ kind: 'workbenchProject', projectKey: 'local-1' }),
+    );
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     act(() => {

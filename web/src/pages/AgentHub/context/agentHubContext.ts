@@ -222,7 +222,7 @@ export function parseAgentHubContext(params: URLSearchParams): AgentHubContext {
     ctx.projectKey = null;
   }
 
-  ctx.adaptView = params.get('view') === 'adapt';
+  ctx.adaptView = params.get('view') === 'adapt' || params.get('adapt') === '1';
 
   const assetLane = params.get('assetLane');
   if (assetLane && isPortableAssetLane(assetLane)) {
@@ -282,6 +282,7 @@ export function writeAgentHubContext(
 
   if (ctx.adaptView) next.set('view', 'adapt');
   else next.delete('view');
+  next.delete('adapt');
 
   // 现代上下文成为权威后，去掉会二次覆盖 parse 的 legacy 导航键
   next.delete('section');
@@ -289,6 +290,52 @@ export function writeAgentHubContext(
   next.delete('kind');
 
   return next;
+}
+
+/**
+ * Business Logic: Workbench 托管的项目 Agent 必须冻结当前项目，且不能让 Hub 的 view=adapt
+ *   覆盖 workbench 的 view=projectAgent，也不能删掉 Workbench 的 projectId。
+ *
+ * Code Logic: 先按 user 写出 agent/tab/lane/assetLane；再强制 view=projectAgent、adapt=1 别名；
+ *   从不写 scope/project/deviceId。
+ */
+export function writeWorkbenchHostedAgentHubContext(
+  params: URLSearchParams,
+  ctx: AgentHubContext,
+): URLSearchParams {
+  const next = writeAgentHubContext(params, {
+    ...ctx,
+    scope: 'user',
+    projectKey: null,
+    deviceId: null,
+    adaptView: false,
+  });
+  next.set('view', 'projectAgent');
+  next.delete('scope');
+  next.delete('project');
+  next.delete('deviceId');
+  if (ctx.adaptView) next.set('adapt', '1');
+  else next.delete('adapt');
+  return next;
+}
+
+/**
+ * Business Logic: Workbench 项目 Agent 的 URL 只有 Hub 内部导航键，范围由当前项目冻结。
+ *
+ * Code Logic: parse 普通 Hub 键后强制 scope=project + 传入的 projectKey，并识别 adapt=1。
+ */
+export function parseWorkbenchHostedAgentHubContext(
+  params: URLSearchParams,
+  projectKey: string,
+): AgentHubContext {
+  const parsed = parseAgentHubContext(params);
+  return normalizeAgentHubContext({
+    ...parsed,
+    scope: 'project',
+    projectKey,
+    deviceId: null,
+    adaptView: parsed.adaptView || params.get('adapt') === '1',
+  });
 }
 
 function isAgentTarget(value: string): value is AgentTarget {

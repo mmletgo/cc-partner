@@ -288,6 +288,27 @@ vi.mock('@xterm/addon-fit', () => {
 
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 
+vi.mock('@/pages/AgentHub/WorkbenchProjectAgentConsole', async () => {
+  const { forwardRef, useImperativeHandle } = await import('react');
+  return {
+    WorkbenchProjectAgentConsole: forwardRef(function WorkbenchProjectAgentConsoleStub(
+      props: { projectKey: string },
+      ref: unknown,
+    ) {
+      useImperativeHandle(ref as never, () => ({
+        confirmClose: async () => true,
+        isDirty: () => false,
+      }));
+      return (
+        <div
+          data-testid="workbench-project-agent-console"
+          data-project-key={props.projectKey}
+        />
+      );
+    }),
+  };
+});
+
 vi.mock('@/pages/Orchestrator', () => ({
   OrchestratorPanel: (props: { embedded?: boolean; onOpenWorkbench?: (url: string) => void }) => (
     <div

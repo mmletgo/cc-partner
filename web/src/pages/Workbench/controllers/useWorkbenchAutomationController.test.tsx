@@ -104,6 +104,7 @@ interface HarnessOverrides extends Partial<WorkbenchAutomationControllerParams> 
   worktrees?: WorkbenchWorktree[];
   scopedSessions?: WorkbenchSession[];
   automationConsoleOpen?: boolean;
+  setProjectAgentConsoleOpen?: (open: boolean) => void;
 }
 
 function buildHarness(overrides: HarnessOverrides = {}): WorkbenchAutomationControllerParams {
@@ -134,6 +135,7 @@ function buildHarness(overrides: HarnessOverrides = {}): WorkbenchAutomationCont
       }),
     focusSession: overrides.focusSession ?? vi.fn(async () => true),
     setAutomationConsoleOpen: overrides.setAutomationConsoleOpen ?? vi.fn(),
+    setProjectAgentConsoleOpen: overrides.setProjectAgentConsoleOpen ?? vi.fn(),
     requestWorkspaceView: overrides.requestWorkspaceView ?? vi.fn(),
     openFileByPath: overrides.openFileByPath ?? vi.fn(async () => true),
     navigate: overrides.navigate ?? vi.fn(),
@@ -513,6 +515,41 @@ describe('useWorkbenchAutomationController', () => {
     });
     expect(setAutomationConsoleOpen).toHaveBeenCalledWith(false);
     expect(requestWorkspaceView).toHaveBeenCalledWith('files');
+    expect(focusSession).not.toHaveBeenCalled();
+  });
+
+  test('project Agent deep link opens the project Agent console and skips worktree/session', async () => {
+    const setAutomationConsoleOpen = vi.fn();
+    const setProjectAgentConsoleOpen = vi.fn();
+    const requestWorkspaceView = vi.fn();
+    const setActiveWorktreeId = vi.fn();
+    const focusSession = vi.fn(async () => true);
+
+    renderController(
+      buildHarness({
+        deepLink: {
+          projectId: 'p1',
+          worktreeId: 'wt-main',
+          sessionId: 's1',
+          view: 'projectAgent',
+          tab: 'skill',
+        },
+        locationSearch: '?projectId=p1&view=projectAgent&tab=skill',
+        activeProjectId: 'p1',
+        setAutomationConsoleOpen,
+        setProjectAgentConsoleOpen,
+        requestWorkspaceView,
+        setActiveWorktreeId,
+        focusSession,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(setProjectAgentConsoleOpen).toHaveBeenCalledWith(true);
+    });
+    expect(setAutomationConsoleOpen).toHaveBeenCalledWith(false);
+    expect(requestWorkspaceView).toHaveBeenCalledWith('terminal');
+    expect(setActiveWorktreeId).not.toHaveBeenCalled();
     expect(focusSession).not.toHaveBeenCalled();
   });
 

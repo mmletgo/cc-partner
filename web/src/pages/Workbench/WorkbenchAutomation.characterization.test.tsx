@@ -93,6 +93,66 @@ describe('Workbench automation domain (characterization)', () => {
     expect(screen.queryByRole('button', { name: '项目自动化' })).toBeNull();
   });
 
+  test('toggling project Agent mounts the overlay and is mutually exclusive with automation', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const session = buildSession();
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [worktree];
+        case 'list_workbench_sessions':
+          return [session];
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    expect(screen.queryByTestId('workbench-project-agent-layer')).toBeNull();
+    fireEvent.click(screen.getByTestId('workbench-project-agent-toggle'));
+    await waitFor(() => {
+      if (!screen.queryByTestId('workbench-project-agent-layer')) {
+        throw new Error('project Agent layer not mounted');
+      }
+    });
+    expect(screen.queryByTestId('orchestrator-panel')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '项目自动化' }));
+    await waitFor(() => {
+      if (!screen.queryByTestId('orchestrator-panel')) {
+        throw new Error('orchestrator panel not mounted after mutex switch');
+      }
+    });
+    expect(screen.queryByTestId('workbench-project-agent-layer')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('workbench-project-agent-toggle'));
+    await waitFor(() => {
+      if (!screen.queryByTestId('workbench-project-agent-layer')) {
+        throw new Error('project Agent layer not remounted');
+      }
+    });
+    expect(screen.queryByTestId('orchestrator-panel')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('workbench-project-agent-toggle'));
+    await waitFor(() => {
+      if (screen.queryByTestId('workbench-project-agent-layer')) {
+        throw new Error('project Agent layer still mounted after toggle off');
+      }
+    });
+  });
+
   test('OrchestratorPanel open-workbench callback navigates via deep link and closes console', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();

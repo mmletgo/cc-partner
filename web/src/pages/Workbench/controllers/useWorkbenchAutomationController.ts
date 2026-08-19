@@ -72,6 +72,7 @@ export interface WorkbenchAutomationControllerParams {
   ) => void;
   focusSession: (sessionId: string) => Promise<boolean>;
   setAutomationConsoleOpen: (open: boolean) => void;
+  setProjectAgentConsoleOpen: (open: boolean) => void;
   requestWorkspaceView: (view: WorkbenchFileWorkspaceView) => void;
   openFileByPath: (path: string) => Promise<boolean>;
   navigate: (url: string) => void;
@@ -130,6 +131,7 @@ export function useWorkbenchAutomationController(
     setActiveWorktreeId,
     focusSession,
     setAutomationConsoleOpen,
+    setProjectAgentConsoleOpen,
     requestWorkspaceView,
     openFileByPath,
     navigate,
@@ -175,7 +177,9 @@ export function useWorkbenchAutomationController(
   const deepLinkOutboxId = deepLink.outboxId ?? null;
   const deepLinkPath = deepLink.path ?? null;
   const isAutomationDeepLink = deepLinkView === 'automation';
+  const isProjectAgentDeepLink = deepLinkView === 'projectAgent';
   const isFilesDeepLink = deepLinkView === 'files';
+  const isOverlayDeepLink = isAutomationDeepLink || isProjectAgentDeepLink;
 
   // Business Logic: staged deep link —— project 段。命中后 fire-and-forget 触发 selectProjectFromDeepLink，
   // 与原 Workbench.tsx 行为一致（不等待切换完成，让后续 worktree/session 段 effect 自行守卫）。
@@ -205,6 +209,7 @@ export function useWorkbenchAutomationController(
     if (!isAutomationDeepLink) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     if (!automationConsoleOpen) {
+      setProjectAgentConsoleOpen(false);
       setAutomationConsoleOpen(true);
       requestWorkspaceView('terminal');
     }
@@ -215,12 +220,35 @@ export function useWorkbenchAutomationController(
     isAutomationDeepLink,
     requestWorkspaceView,
     setAutomationConsoleOpen,
+    setProjectAgentConsoleOpen,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   旧 Hub 项目深链与标题栏打开的项目 Agent 必须先打开项目 Agent 控制台，不能误开终端或自动化。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   view=projectAgent 且 project 已对齐时打开项目 Agent 并关闭自动化。
+   */
+  useEffect(() => {
+    if (!isProjectAgentDeepLink) return;
+    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
+    setAutomationConsoleOpen(false);
+    setProjectAgentConsoleOpen(true);
+    requestWorkspaceView('terminal');
+  }, [
+    activeProjectId,
+    deepLinkProjectId,
+    isProjectAgentDeepLink,
+    requestWorkspaceView,
+    setAutomationConsoleOpen,
+    setProjectAgentConsoleOpen,
   ]);
 
   // Business Logic: staged deep link —— worktree 段。等 project 段对齐后，命中目标 worktree 则选中。
   // Attention automation 链接不消费 worktree/session，避免误开终端。
   useEffect(() => {
-    if (isAutomationDeepLink) return;
+    if (isOverlayDeepLink) return;
     if (!deepLinkWorktreeId) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     const applied = deepLinkApplicationRef.current;
@@ -236,7 +264,7 @@ export function useWorkbenchAutomationController(
     activeProjectId,
     deepLinkProjectId,
     deepLinkWorktreeId,
-    isAutomationDeepLink,
+    isOverlayDeepLink,
     locationSearch,
     worktrees,
     setActiveWorktreeId,
@@ -245,7 +273,7 @@ export function useWorkbenchAutomationController(
   // Business Logic: staged deep link —— session 段。等 project+worktree 段对齐后，命中目标 session 则 focus。
   // files deep link 不消费 session，避免误开终端。
   useEffect(() => {
-    if (isAutomationDeepLink || isFilesDeepLink) return;
+    if (isOverlayDeepLink || isFilesDeepLink) return;
     if (!deepLinkSessionId) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
@@ -266,7 +294,7 @@ export function useWorkbenchAutomationController(
     deepLinkSessionId,
     deepLinkWorktreeId,
     focusSession,
-    isAutomationDeepLink,
+    isOverlayDeepLink,
     isFilesDeepLink,
     locationSearch,
     scopedSessions,
@@ -288,6 +316,7 @@ export function useWorkbenchAutomationController(
     if (applied.search !== locationSearch || applied.path === deepLinkPath) return;
     applied.path = deepLinkPath;
     setAutomationConsoleOpen(false);
+    setProjectAgentConsoleOpen(false);
     requestWorkspaceView('files');
     void openFileByPath(deepLinkPath);
   }, [
@@ -301,6 +330,7 @@ export function useWorkbenchAutomationController(
     openFileByPath,
     requestWorkspaceView,
     setAutomationConsoleOpen,
+    setProjectAgentConsoleOpen,
   ]);
 
   /**
@@ -311,9 +341,10 @@ export function useWorkbenchAutomationController(
    *   标记控制台为开，并请求把中心工作区切回 terminal（保证 Orchestrator 面板可见且不被文件/浏览器层遮挡）。
    */
   const openAutomation = useCallback((): void => {
+    setProjectAgentConsoleOpen(false);
     setAutomationConsoleOpen(true);
     requestWorkspaceView('terminal');
-  }, [setAutomationConsoleOpen, requestWorkspaceView]);
+  }, [setAutomationConsoleOpen, setProjectAgentConsoleOpen, requestWorkspaceView]);
 
   /**
    * Business Logic（为什么需要这个函数）:

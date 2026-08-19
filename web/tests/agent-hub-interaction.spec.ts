@@ -605,7 +605,7 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await expect(page.getByTestId('agent-hub-shell')).toBeVisible();
     await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-scope-lock')).toBeVisible();
     await expect(page.getByTestId('agent-hub-tablist')).toBeVisible();
     await expect(page.getByTestId('agent-hub-toolbar')).toBeVisible();
     await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();
@@ -658,7 +658,7 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await expect(page).not.toHaveURL(/section=|target=|kind=|scope=project|deviceId=/);
   });
 
-  test('legacy asset deep link canonicalizes while preserving its explicit project context', async ({
+  test('legacy project deep link replace-navigates to Workbench Project Agent', async ({
     page,
     backendHarness,
   }) => {
@@ -668,19 +668,13 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await page.goto(
       '/agent-hub?scope=project&projectKey=local-1&deviceId=peer-ok&section=assets&target=claude&kind=skill',
     );
-    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('agent-hub-context-migration-notice')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-scope-switcher')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-device-select')).toHaveCount(0);
-    await expect(page.getByTestId('agent-hub-project-select')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-agent-claude')).toHaveAttribute(
-      'aria-checked',
-      'true',
-    );
+    await expect(page).toHaveURL(/\/workbench\?/, { timeout: 15_000 });
+    await expect(page).toHaveURL(/projectId=local-1/);
+    await expect(page).toHaveURL(/view=projectAgent/);
     await expect(page).toHaveURL(/tab=skill/);
-    await expect(page).toHaveURL(/scope=project/);
-    await expect(page).toHaveURL(/project=local-1/);
-    await expect(page).not.toHaveURL(/deviceId=|section=|target=|kind=/);
+    await expect(page).not.toHaveURL(/\/agent-hub/);
+    await expect(page).not.toHaveURL(/scope=project/);
+    await expect(page).not.toHaveURL(/deviceId=/);
   });
 });
 

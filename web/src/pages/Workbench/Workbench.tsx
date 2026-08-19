@@ -14,7 +14,6 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import '@xterm/xterm/css/xterm.css';
 import { tauriWorkbenchTransport } from '@/api/workbenchTransport';
-import { OrchestratorPanel } from '@/pages/Orchestrator';
 import { WorkbenchBrowserWorkspace } from '@/components/domain/WorkbenchBrowserWorkspace';
 import { WorkbenchDependencyNotice } from './views/WorkbenchDependencyNotice';
 import { WorkbenchFileWorkspace } from '@/components/domain/WorkbenchFileWorkspace';
@@ -34,12 +33,12 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention, useMarkNeedsInputAttentionOnSessionFocus } from '@/hooks/useAttention';
 import {
-  BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon, RefreshIcon, SearchIcon, TerminalIcon,
+  BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, RefreshIcon, SearchIcon, TerminalIcon,
 } from '@/lib/icons';
 import { WorkbenchPaneTools } from '@/components/domain/WorkbenchPaneTools';
 import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';
-import { parseWorkbenchDeepLink } from './workbenchDeepLink';
+import { parseWorkbenchDeepLink, stripWorkbenchProjectAgentSearch, withWorkbenchProjectAgentView } from './workbenchDeepLink';
 import { routeAutomationWorkbenchOpen } from './workbenchWindowNavigation';
 import * as workbenchModule from '@/api/workbench';
 const { workbenchApi, windows } = workbenchModule;
@@ -72,8 +71,9 @@ import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
 import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
 import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
-import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
-import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
+import { WorkbenchWorkspaceHeader } from './WorkbenchWorkspaceHeader';
+import { WorkbenchProjectOverlayLayers } from './WorkbenchProjectOverlayLayers';
+import type { WorkbenchProjectAgentConsoleHandle } from '@/pages/AgentHub/WorkbenchProjectAgentConsole';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
 
 /**
@@ -136,6 +136,8 @@ export function Workbench() {
   // 仍由 Workbench.tsx 持有；文件域 controller 通过 requestWorkspaceView / requestHideAutomationConsole 回调表达意图。
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
+  const [projectAgentConsoleOpen, setProjectAgentConsoleOpen] = useState<boolean>(false);
+  const projectOverlayOpen = automationConsoleOpen || projectAgentConsoleOpen;
   // Business Logic: 右侧栏默认 Git 历史（用户偏好）；持久化 layout 恢复仍优先生效，无记录时才落到此默认。
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('history');
   // Business Logic: workspace layout autosave 需要真实 browser target；由 BrowserWorkspace 回写。
@@ -149,6 +151,8 @@ export function Workbench() {
   const terminalAreaRef = useRef<HTMLDivElement | null>(null);
   const worktreeBranchInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const projectAgentConsoleRef = useRef<WorkbenchProjectAgentConsoleHandle | null>(null);
+  const workspaceViewBeforeOverlayRef = useRef<WorkbenchFileWorkspaceView>('terminal');
 
   // Business Logic: 终端域（session 生命周期 + focus 同步 + pane 操作 + terminal-status 事件）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
@@ -306,6 +310,7 @@ export function Workbench() {
   );
   const requestHideAutomationConsole = useCallback(() => {
     setAutomationConsoleOpen(false);
+    setProjectAgentConsoleOpen(false);
   }, []);
   const fileController = useWorkbenchFileController({
     api: workbenchApi.files,
@@ -376,6 +381,7 @@ export function Workbench() {
     setActiveWorktreeId,
     focusSession,
     setAutomationConsoleOpen,
+    setProjectAgentConsoleOpen,
     requestWorkspaceView,
     openFileByPath,
     navigate,
@@ -387,7 +393,7 @@ export function Workbench() {
     focusOutboxId: automationFocusOutboxId,
   } = automationController;
   const { refresh: refreshAttention } = useAttention();
-  useMarkNeedsInputAttentionOnSessionFocus(activeSessionId, workspaceView === 'terminal' && !automationConsoleOpen);
+  useMarkNeedsInputAttentionOnSessionFocus(activeSessionId, workspaceView === 'terminal' && !projectOverlayOpen);
   /**
    * Business Logic（为什么需要这个函数）:
    *   Attention deep link 目标已解决时不能打开空白详情/终端，应提示并回到 Inbox。
@@ -423,7 +429,7 @@ export function Workbench() {
     activeProjectId,
     promptWorkingDirectory,
     remoteWriteDisabled,
-    automationConsoleOpen,
+    automationConsoleOpen: projectOverlayOpen,
     workspaceView,
     terminalAreaRef,
     promptInputRef,
@@ -636,25 +642,43 @@ export function Workbench() {
     [fileController, setActiveWorktreeId],
   );
 
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户需要从 Workbench 项目层级进入或退出自动化任务队列，避免再通过自动化层内部的返回按钮理解页面层级。
-   *
-   * Code Logic（这个函数做什么）:
-   *   当前已打开时通过 automation controller 的 closeAutomation 关闭控制台并切回 terminal；
-   *   未打开时关闭 Prompt 浮层并打开项目级自动化控制台。
-   *   保留 setAutomationConsoleOpen(true) / setWorkspaceView('terminal') 字面调用以稳定共享状态写入顺序，
-   *   并满足 workbenchAutomationView 静态契约。
-   */
   const handleToggleProjectAutomation = useCallback(() => {
     closePromptPanel();
     if (automationConsoleOpen) {
       closeAutomationConsole();
       return;
     }
-    setWorkspaceView('terminal');
-    setAutomationConsoleOpen(true);
-  }, [automationConsoleOpen, closeAutomationConsole, closePromptPanel]);
+    void (async () => {
+      if (projectAgentConsoleOpen) {
+        const ok = (await projectAgentConsoleRef.current?.confirmClose()) ?? true;
+        if (!ok) return;
+        setProjectAgentConsoleOpen(false);
+        navigate(stripWorkbenchProjectAgentSearch(locationSearch), { replace: true });
+      }
+      setWorkspaceView('terminal');
+      setAutomationConsoleOpen(true);
+    })();
+  }, [automationConsoleOpen, closeAutomationConsole, closePromptPanel, locationSearch, navigate, projectAgentConsoleOpen]);
+
+  const handleToggleProjectAgent = useCallback(() => {
+    closePromptPanel();
+    if (projectAgentConsoleOpen) {
+      void (async () => {
+        const ok = (await projectAgentConsoleRef.current?.confirmClose()) ?? true;
+        if (!ok) return;
+        setProjectAgentConsoleOpen(false);
+        setWorkspaceView(workspaceViewBeforeOverlayRef.current);
+        navigate(stripWorkbenchProjectAgentSearch(locationSearch), { replace: true });
+      })();
+      return;
+    }
+    if (automationConsoleOpen) closeAutomationConsole();
+    workspaceViewBeforeOverlayRef.current = workspaceView;
+    if (activeProjectId) {
+      navigate(withWorkbenchProjectAgentView(locationSearch, activeProjectId), { replace: true });
+    }
+    setProjectAgentConsoleOpen(true);
+  }, [activeProjectId, automationConsoleOpen, closeAutomationConsole, closePromptPanel, locationSearch, navigate, projectAgentConsoleOpen, workspaceView]);
 
   const handleOpenAutomationTaskWorkbench = useCallback(
     (url: string): void => {
@@ -740,52 +764,34 @@ export function Workbench() {
   }
 
   return (
-    <div className={styles.page} data-automation-open={automationConsoleOpen || undefined}>
+    <div className={styles.page} data-automation-open={projectOverlayOpen || undefined}>
       <main className={styles.centerPane}>
         <WorkspaceRestoreNotice
           summary={restoreSummary}
           onDismiss={dismissRestoreNotice}
         />
-        <section className={styles.workspaceHeader}>
-          <div className={styles.workspaceTitleGroup}>
-            <div>
-              <div className={styles.workspaceTitleRow}>
-                <h1 className={styles.workspaceTitle}>{t('workbench:title')}</h1>
-                <WorkbenchBatteryBadge />
-              </div>
-              <p className={styles.workspacePath}>{workspaceLine}</p>
-            </div>
-          </div>
-          <div className={styles.workspaceHeaderActions}>
-            {/* Agent Ledger 整块保留原条件：仅隐藏触发按钮，Drawer 保持挂载（原样移动） */}
-            <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
-              open={projectCtrl.agentLedgerOpen} localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
-              page={projectCtrl.agentLedgerPage} summary={projectCtrl.agentLedgerSummary}
-              loading={projectCtrl.agentLedgerLoading} loadingMore={projectCtrl.agentLedgerLoadingMore}
-              error={projectCtrl.agentLedgerError} onOpen={projectCtrl.openAgentLedger}
-              onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
-              onRefresh={() => void projectCtrl.refreshAgentLedger()} />
-            <Button
-              className={styles.projectAutomationButton}
-              variant="secondary"
-              size="sm"
-              icon={<OrchestratorIcon />}
-              title={t('workbench:projectAutomation.description')}
-              aria-label={t('workbench:projectAutomation.open')}
-              aria-pressed={automationConsoleOpen}
-              data-active={automationConsoleOpen || undefined}
-              disabled={!activeProjectId}
-              onClick={handleToggleProjectAutomation}
-            >
-              {t('workbench:projectAutomation.open')}
-            </Button>
-          </div>
-        </section>
+        {workbenchDeepLink.view === 'projectAgent' &&
+        workbenchDeepLink.projectId &&
+        !projects.some((project) => project.id === workbenchDeepLink.projectId) ? (
+          <StatusMessage tone="warn" data-testid="workbench-project-agent-missing">
+            {t('workbench:projectAgent.missingProject')}
+          </StatusMessage>
+        ) : null}
+        <WorkbenchWorkspaceHeader
+          workspaceLine={workspaceLine}
+          terminalFullscreen={terminalFullscreen}
+          activeProjectId={activeProjectId}
+          projectCtrl={projectCtrl}
+          projectAgentOpen={projectAgentConsoleOpen}
+          automationOpen={automationConsoleOpen}
+          onToggleProjectAgent={handleToggleProjectAgent}
+          onToggleAutomation={handleToggleProjectAutomation}
+        />
 
         <section
           className={styles.worktreeBar}
           aria-label={t('workbench:worktrees.label')}
-          hidden={automationConsoleOpen}
+          hidden={projectOverlayOpen}
         >
           <WorkbenchWorktreeBar
             worktrees={worktrees}
@@ -946,13 +952,13 @@ export function Workbench() {
           ) : null}
           {worktreeError ? <StatusMessage tone="danger" className={styles.errorBox}>{worktreeError}</StatusMessage> : null}
           {agentRuntime.phase === 'error' && agentRuntime.error ? <StatusMessage tone="warn" className={styles.errorBox} action={<Button variant="secondary" size="sm" onClick={() => { void agentRuntime.refresh(); }}>{t('workbench:refresh')}</Button>}>{agentRuntime.error.message}</StatusMessage> : null}
-          <WorkbenchDependencyNotice compact className={styles.dependencyNotice} project={activeProject} localStatus={dependencyStatus.status} remoteWriteDisabled={remoteWriteDisabled} />
+          {activeProject ? <WorkbenchDependencyNotice compact className={styles.dependencyNotice} project={activeProject} localStatus={dependencyStatus.status} remoteWriteDisabled={remoteWriteDisabled} /> : null}
         </div>
 
         <div className={styles.mainWorkspace}>
           <div
             className={styles.terminalLayer}
-            data-hidden={(!terminalFullscreen && (automationConsoleOpen || workspaceView !== 'terminal')) || undefined}
+            data-hidden={(!terminalFullscreen && (projectOverlayOpen || workspaceView !== 'terminal')) || undefined}
             data-fullscreen={terminalFullscreen || undefined}
           >
             <WorkbenchWorkspaceNav
@@ -1056,7 +1062,7 @@ export function Workbench() {
               handlePromptInputKeyDown={handlePromptInputKeyDown}
               promptOptimizing={promptOptimizing}
               remoteWriteDisabled={remoteWriteDisabled}
-              automationConsoleOpen={automationConsoleOpen}
+              automationConsoleOpen={projectOverlayOpen}
               workspaceView={workspaceView}
               activeProject={activeProject}
               visibleSessions={visibleSessions}
@@ -1077,7 +1083,7 @@ export function Workbench() {
 
           <div
             className={styles.browserLayer}
-            data-hidden={(automationConsoleOpen || workspaceView !== 'browser') || undefined}
+            data-hidden={(projectOverlayOpen || workspaceView !== 'browser') || undefined}
           >
             <WorkbenchBrowserWorkspace
               surface="desktop"
@@ -1090,7 +1096,7 @@ export function Workbench() {
 
           <div
             className={styles.fileLayer}
-            data-hidden={(automationConsoleOpen || workspaceView !== 'files') || undefined}
+            data-hidden={(projectOverlayOpen || workspaceView !== 'files') || undefined}
           >
             <WorkbenchFileWorkspace
               tabs={fileTabs}
@@ -1108,24 +1114,18 @@ export function Workbench() {
             />
           </div>
 
-          {automationConsoleOpen ? (
-            <div className={styles.automationLayer}>
-              <header className={styles.automationHeader}>
-                <div className={styles.automationHeadingGroup}>
-                  <h2 className={styles.automationTitle}>{t('workbench:projectAutomation.title')}</h2>
-                  <p className={styles.automationDescription}>{t('workbench:projectAutomation.description')}</p>
-                </div>
-              </header>
-              <div className={styles.automationBody}>
-                <OrchestratorPanel
-                  embedded
-                  onOpenWorkbench={handleOpenAutomationTaskWorkbench}
-                  focusTaskId={automationFocusTaskId}
-                  focusOutboxId={automationFocusOutboxId}
-                  onFocusTargetNotFound={handleAttentionTargetNotFound}
-                />
-              </div>
-            </div>
+          {automationConsoleOpen || projectAgentConsoleOpen ? (
+            <WorkbenchProjectOverlayLayers
+              automationOpen={automationConsoleOpen}
+              projectAgentOpen={projectAgentConsoleOpen}
+              project={activeProject}
+              unsavedFiles={fileTabs.some((tab) => tab.dirty)}
+              projectAgentRef={projectAgentConsoleRef}
+              automationFocusTaskId={automationFocusTaskId}
+              automationFocusOutboxId={automationFocusOutboxId}
+              onOpenAutomationTaskWorkbench={handleOpenAutomationTaskWorkbench}
+              onFocusTargetNotFound={handleAttentionTargetNotFound}
+            />
           ) : null}
         </div>
       </main>

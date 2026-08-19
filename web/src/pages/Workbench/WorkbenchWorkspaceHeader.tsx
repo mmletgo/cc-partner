@@ -1,0 +1,109 @@
+/**
+ * Workbench 标题区：项目路径、Agent 历史、项目 Agent 与项目自动化开关。
+ *
+ * Business Logic（为什么需要）:
+ *   项目 Agent 与项目自动化共用标题栏入口且互斥；抽到独立 view 让 Workbench.tsx 保持 ≤1200 行。
+ *
+ * Code Logic（做什么）:
+ *   渲染 workspaceHeader；ledger 仅隐藏触发按钮；项目 Agent 在终端全屏时隐藏。
+ */
+
+import type { ReactElement } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/primitives';
+import { ClaudeMdIcon, OrchestratorIcon } from '@/lib/icons';
+import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
+import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
+import type { WorkbenchProjectControllerResult } from './controllers/useWorkbenchProjectController';
+import styles from './Workbench.module.css';
+
+export interface WorkbenchWorkspaceHeaderProps {
+  workspaceLine: string;
+  terminalFullscreen: boolean;
+  activeProjectId: string | null;
+  projectCtrl: WorkbenchProjectControllerResult;
+  projectAgentOpen: boolean;
+  automationOpen: boolean;
+  onToggleProjectAgent: () => void;
+  onToggleAutomation: () => void;
+}
+
+/**
+ * Business Logic: 标题栏是项目级控制台的唯一入口，不进终端/文件工具栏。
+ * Code Logic: 组合 title + ledger + 两个 toggle；不持有 overlay 内容。
+ */
+export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): ReactElement {
+  const {
+    workspaceLine,
+    terminalFullscreen,
+    activeProjectId,
+    projectCtrl,
+    projectAgentOpen,
+    automationOpen,
+    onToggleProjectAgent,
+    onToggleAutomation,
+  } = props;
+  const { t } = useTranslation(['workbench']);
+
+  return (
+    <section className={styles.workspaceHeader}>
+      <div className={styles.workspaceTitleGroup}>
+        <div>
+          <div className={styles.workspaceTitleRow}>
+            <h1 className={styles.workspaceTitle}>{t('workbench:title')}</h1>
+            <WorkbenchBatteryBadge />
+          </div>
+          <p className={styles.workspacePath}>{workspaceLine}</p>
+        </div>
+      </div>
+      <div className={styles.workspaceHeaderActions}>
+        <AgentLedgerWorkbenchChrome
+          showTrigger={!terminalFullscreen}
+          disabled={!activeProjectId}
+          open={projectCtrl.agentLedgerOpen}
+          localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
+          page={projectCtrl.agentLedgerPage}
+          summary={projectCtrl.agentLedgerSummary}
+          loading={projectCtrl.agentLedgerLoading}
+          loadingMore={projectCtrl.agentLedgerLoadingMore}
+          error={projectCtrl.agentLedgerError}
+          onOpen={projectCtrl.openAgentLedger}
+          onClose={projectCtrl.closeAgentLedger}
+          onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
+          onRefresh={() => void projectCtrl.refreshAgentLedger()}
+        />
+        {terminalFullscreen ? null : (
+          <Button
+            className={styles.projectAutomationButton}
+            variant="secondary"
+            size="sm"
+            icon={<ClaudeMdIcon />}
+            title={t('workbench:projectAgent.description')}
+            aria-label={t('workbench:projectAgent.open')}
+            aria-pressed={projectAgentOpen}
+            data-active={projectAgentOpen || undefined}
+            data-testid="workbench-project-agent-toggle"
+            disabled={!activeProjectId}
+            onClick={onToggleProjectAgent}
+          >
+            {t('workbench:projectAgent.open')}
+          </Button>
+        )}
+        <Button
+          className={styles.projectAutomationButton}
+          variant="secondary"
+          size="sm"
+          icon={<OrchestratorIcon />}
+          title={t('workbench:projectAutomation.description')}
+          aria-label={t('workbench:projectAutomation.open')}
+          aria-pressed={automationOpen}
+          data-active={automationOpen || undefined}
+          disabled={!activeProjectId}
+          onClick={onToggleAutomation}
+        >
+          {t('workbench:projectAutomation.open')}
+        </Button>
+      </div>
+    </section>
+  );
+}

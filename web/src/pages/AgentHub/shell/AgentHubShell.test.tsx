@@ -207,12 +207,27 @@ describe('AgentHubShell', () => {
     });
   });
 
-  test('scope and device selectors are visible and project selection is reachable', () => {
-    renderShell();
-    expect(screen.getByTestId('agent-hub-scope-switcher')).toBeTruthy();
-    expect(screen.getByTestId('agent-hub-device-select')).toBeTruthy();
+  test('project scope lock shows frozen project label without device or project pickers', () => {
+    renderShell({
+      scopeLock: 'project',
+      frozenProjectLabel: 'demo (Remote · peer-1)',
+    });
+    expect(screen.getByTestId('agent-hub-scope-lock')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-scope-project-lock')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-frozen-project').textContent).toContain('demo (Remote · peer-1)');
+    expect(screen.queryByTestId('agent-hub-device-select')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-scope-switcher')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
-    expect(screen.getByTestId('agent-hub-scope-project')).toBeTruthy();
+  });
+
+  test('scope lock shows local device selector and never a project picker', () => {
+    renderShell();
+    expect(screen.getByTestId('agent-hub-scope-lock')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-scope-user-lock')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-device-select')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-scope-switcher')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-scope-project')).toBeNull();
   });
 
   test('peer context keeps Pull and Push and does not expose Adapt toolbar button', () => {
@@ -253,7 +268,8 @@ describe('AgentHubShell', () => {
     expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
-    expect(screen.getByTestId('agent-hub-project-select')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-frozen-project')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     expect(onPull).toHaveBeenCalledOnce();
   });

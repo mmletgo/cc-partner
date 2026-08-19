@@ -102,6 +102,13 @@
   cursor: not-allowed;
 }
 
+.frozenValue {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+}
+
 .adaptHint {
   margin: 0;
   font-size: var(--text-xs);

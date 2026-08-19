@@ -1,5 +1,10 @@
 import { describe, test } from 'vitest';
-import { buildWorkbenchDeepLink, parseWorkbenchDeepLink } from './workbenchDeepLink';
+import {
+  buildWorkbenchDeepLink,
+  buildWorkbenchProjectAgentDeepLink,
+  parseWorkbenchDeepLink,
+  stripWorkbenchProjectAgentSearch,
+} from './workbenchDeepLink';
 
 describe('workbench deep links', () => {
   /**
@@ -180,6 +185,30 @@ describe('workbench deep links', () => {
     }
     if (built.includes('path=')) {
       throw new Error(`expected build to drop traversal path, got ${built}`);
+    }
+  });
+
+  test('builds and parses project Agent deep links without overwriting view with adapt', () => {
+    const url = buildWorkbenchProjectAgentDeepLink({
+      projectId: 'local-1',
+      tab: 'skill',
+      adapt: true,
+    });
+    const parsed = parseWorkbenchDeepLink(url);
+
+    if (
+      !url.includes('view=projectAgent') ||
+      url.includes('view=adapt') ||
+      parsed.view !== 'projectAgent' ||
+      parsed.tab !== 'skill' ||
+      parsed.adapt !== true
+    ) {
+      throw new Error(`unexpected project agent deep link: ${url} / ${JSON.stringify(parsed)}`);
+    }
+
+    const stripped = stripWorkbenchProjectAgentSearch(url.replace('/workbench', ''));
+    if (stripped.includes('view=projectAgent') || stripped.includes('tab=skill')) {
+      throw new Error(`expected strip to drop project agent keys, got ${stripped}`);
     }
   });
 });

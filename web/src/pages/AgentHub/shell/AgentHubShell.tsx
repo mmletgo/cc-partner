@@ -6,7 +6,7 @@
  *   Shell 负责选择 owner，内容区和动作层再按能力证据决定只读、预览或写入。
  *
  * Code Logic（这个组件做什么）:
- *   渲染受控 tablist、范围 / 提示词槽或存放面 / Agent radiogroup 与设备/项目选择器；
+ *   渲染受控 tablist、冻结范围文案 / 提示词槽或存放面 / Agent radiogroup 与设备选择器；
  *   公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。复用共享 roving 索引合同，
  *   并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
@@ -25,7 +25,6 @@ import { allHubTargets } from '@/lib/agentCatalog';
 import type { AgentTarget } from '@/lib/types/agentHub';
 import type {
   AgentHubContext,
-  AgentHubScope,
   AgentHubTab,
   InstructionLane,
   PortableAssetLane,
@@ -38,7 +37,6 @@ import {
 import styles from './AgentHubShell.module.css';
 
 const AGENTS: AgentTarget[] = allHubTargets();
-const SCOPES: AgentHubScope[] = ['user', 'project'];
 const TABS: AgentHubTab[] = ['instructions', 'skill', 'command', 'mcp', 'plugin'];
 const ASSET_TABS = new Set<AgentHubTab>(['skill', 'command', 'mcp', 'plugin']);
 /** 提示词槽顺序：独有 → 适配 → 公共。 */
@@ -82,6 +80,10 @@ export interface AgentHubShellProps {
   peers: AgentHubShellPeer[];
   projects: AgentHubShellProject[];
   tabCounts?: AgentHubShellTabCounts | null;
+  /** 生产路径锁定 user；Workbench 项目 Agent 锁定 project。不再提供 user|project 切换。 */
+  scopeLock?: 'user' | 'project';
+  /** 项目锁定时展示的当前项目名（远端含设备）。 */
+  frozenProjectLabel?: string | null;
   children: ReactNode;
 }
 
@@ -110,15 +112,23 @@ function moveRovingSelection<T>(
 
 /** 渲染 Agent Hub 顶栏、可访问选择器与活动 tabpanel。 */
 export function AgentHubShell(props: AgentHubShellProps): ReactElement {
-  const { context, onContextChange, actions, peers, projects, tabCounts, children } = props;
+  const {
+    context,
+    onContextChange,
+    actions,
+    peers,
+    tabCounts,
+    frozenProjectLabel,
+    children,
+  } = props;
+  const scopeLock = props.scopeLock ?? (context.scope === 'project' ? 'project' : 'user');
   const { t } = useTranslation(['agentHub', 'common']);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const scopeRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const laneRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const assetLaneRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const agentRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeTabIndex = Math.max(0, TABS.indexOf(context.tab));
-  const activeScopeIndex = Math.max(0, SCOPES.indexOf(context.scope));
+  const activeScopeIndex = scopeLock === 'project' ? 1 : 0;
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
   const activeAssetLaneIndex = Math.max(0, ASSET_LANES.indexOf(context.assetLane));
   const activeAgentIndex = Math.max(0, AGENTS.indexOf(context.agent));
@@ -153,13 +163,10 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
     onContextChange(patch);
   }
 
-  function handleScopeChange(scope: AgentHubScope): void {
-    onContextChange(
-      scope === 'user'
-        ? { scope, projectKey: null }
-        : { scope, deviceId: null },
-    );
-  }
+  const frozenProjectText =
+    frozenProjectLabel?.trim() ||
+    context.projectKey ||
+    t('agentHub:shell.projectPlaceholder');
 
   return (
     <div className={styles.shell} data-testid="agent-hub-shell">
@@ -242,40 +249,20 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </p>
         ) : null}
 
-        <div className={styles.row}>
+        <div className={styles.row} data-testid="agent-hub-scope-lock">
           <span className={styles.label}>{t('agentHub:shell.scopeLabel')}</span>
-          <div
-            className={styles.segment}
-            role="radiogroup"
-            aria-label={t('agentHub:shell.scopeAria')}
-            data-testid="agent-hub-scope-switcher"
+          <span
+            className={styles.frozenValue}
+            data-testid={
+              scopeLock === 'project' ? 'agent-hub-scope-project-lock' : 'agent-hub-scope-user-lock'
+            }
           >
-            {SCOPES.map((scope, index) => {
-              const selected = context.scope === scope;
-              return (
-                <Button
-                  key={scope}
-                  ref={(node) => {
-                    scopeRefs.current[index] = node;
-                  }}
-                  variant={selected ? 'primary' : 'ghost'}
-                  size="sm"
-                  role="radio"
-                  tabIndex={selected ? 0 : -1}
-                  aria-checked={selected}
-                  onClick={() => handleScopeChange(scope)}
-                  onKeyDown={(event) =>
-                    moveRovingSelection(event, index, SCOPES, scopeRefs, handleScopeChange)
-                  }
-                  data-testid={`agent-hub-scope-${scope}`}
-                >
-                  {t(`agentHub:shell.scope${scope === 'user' ? 'User' : 'Project'}`)}
-                </Button>
-              );
-            })}
-          </div>
+            {scopeLock === 'project'
+              ? t('agentHub:shell.scopeLockedProject')
+              : t('agentHub:shell.scopeLockedUser')}
+          </span>
 
-          {context.scope === 'user' ? (
+          {scopeLock === 'user' ? (
             <label className={styles.cluster}>
               <span className={styles.label}>{t('agentHub:shell.deviceLabel')}</span>
               <select
@@ -298,27 +285,10 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
               </select>
             </label>
           ) : (
-            <label className={styles.cluster}>
+            <span className={styles.cluster} data-testid="agent-hub-frozen-project">
               <span className={styles.label}>{t('agentHub:shell.projectLabel')}</span>
-              <select
-                className={styles.select}
-                aria-label={t('agentHub:shell.projectAria')}
-                value={context.projectKey ?? ''}
-                onChange={(event) =>
-                  onContextChange({ projectKey: event.currentTarget.value || null })
-                }
-                data-testid="agent-hub-project-select"
-              >
-                <option value="">{t('agentHub:shell.projectPlaceholder')}</option>
-                {projects.map((project) => (
-                  <option key={project.key} value={project.key}>
-                    {project.remote
-                      ? `${project.label} (${t('agentHub:shell.projectRemote')})`
-                      : project.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <span className={styles.frozenValue}>{frozenProjectText}</span>
+            </span>
           )}
         </div>
 

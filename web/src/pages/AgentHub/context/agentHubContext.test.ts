@@ -12,9 +12,11 @@ import {
   getAgentHubDraftIdentity,
   mapLegacySection,
   parseAgentHubContext,
+  parseWorkbenchHostedAgentHubContext,
   peerAllowsUserInstructionThreePane,
   portableInventoryTargetForHubContext,
   writeAgentHubContext,
+  writeWorkbenchHostedAgentHubContext,
   type AgentHubContext,
 } from './agentHubContext';
 
@@ -45,6 +47,11 @@ describe('parseAgentHubContext', () => {
     expect(ctx.instructionLane).toBe('exclusive');
     expect(ctx.deviceId).toBeNull();
     expect(ctx.projectKey).toBeNull();
+  });
+
+  test('adapt=1 alias also sets adaptView', () => {
+    const ctx = parseAgentHubContext(new URLSearchParams('adapt=1'));
+    expect(ctx.adaptView).toBe(true);
   });
 
   test('explicit project navigation params round-trip as the selected owner', () => {
@@ -372,5 +379,35 @@ describe('Agent Hub context capability', () => {
       projectKey: null,
       agent: 'codex',
     });
+  });
+});
+
+describe('workbench hosted agent hub context', () => {
+  test('keeps view=projectAgent and projectId while freezing project identity', () => {
+    const written = writeWorkbenchHostedAgentHubContext(
+      new URLSearchParams('projectId=local-1&worktreeId=w1'),
+      {
+        ...DEFAULT_CONTEXT,
+        scope: 'project',
+        projectKey: 'local-1',
+        tab: 'skill',
+        adaptView: true,
+      },
+    );
+    expect(written.get('view')).toBe('projectAgent');
+    expect(written.get('adapt')).toBe('1');
+    expect(written.get('projectId')).toBe('local-1');
+    expect(written.get('worktreeId')).toBe('w1');
+    expect(written.get('tab')).toBe('skill');
+    expect(written.get('scope')).toBeNull();
+    expect(written.get('project')).toBeNull();
+    expect(written.get('deviceId')).toBeNull();
+
+    const parsed = parseWorkbenchHostedAgentHubContext(written, 'local-1');
+    expect(parsed.scope).toBe('project');
+    expect(parsed.projectKey).toBe('local-1');
+    expect(parsed.deviceId).toBeNull();
+    expect(parsed.tab).toBe('skill');
+    expect(parsed.adaptView).toBe(true);
   });
 });

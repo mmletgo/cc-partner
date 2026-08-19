@@ -784,6 +784,15 @@
     "scopeValue": "Project: {{project}}",
     "noProject": "No project selected"
   },
+  "projectAgent": {
+    "title": "Project Agent",
+    "description": "Manage this project's instructions, skills, commands, MCP, and plugins. Scope is frozen to the current project.",
+    "open": "Project Agent",
+    "unsavedFilesNotice": "The files workspace has unsaved tabs. Project Agent reads Hub and disk, not unsaved editor buffers.",
+    "missingProject": "This project is not in the current Workbench list, so Project Agent cannot open.",
+    "remoteProject": "{{name}} (Remote · {{device}})",
+    "loading": "Opening Project Agent…"
+  },
   "workspaceSwitch": {
     "terminal": "Terminal",
     "ariaLabel": "Workspace switch"

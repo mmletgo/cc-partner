@@ -37,6 +37,8 @@
     "scopeAria": "Select scope",
     "scopeUser": "User",
     "scopeProject": "Project",
+    "scopeLockedUser": "Scope: user",
+    "scopeLockedProject": "Scope: project",
     "deviceLabel": "Device",
     "deviceAria": "Select device",
     "localDevice": "This device",

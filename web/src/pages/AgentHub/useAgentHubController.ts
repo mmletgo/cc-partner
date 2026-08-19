@@ -70,6 +70,8 @@ import {
 import {
   parseAgentHubContext,
   writeAgentHubContext,
+  parseWorkbenchHostedAgentHubContext,
+  writeWorkbenchHostedAgentHubContext,
   mapLegacySection,
   DEFAULT_AGENT_HUB_CONTEXT,
   isAssetKindTab,
@@ -80,6 +82,85 @@ import {
   type AgentHubTab,
   type AgentHubScope,
 } from './context/agentHubContext';
+
+/**
+ * Agent Hub controller 宿主。
+ *
+ * Business Logic: 生产路径的 `/agent-hub` 只查看用户级；Workbench 项目 Agent 冻结当前项目。
+ * Code Logic: page 强制 user；workbenchProject 强制 project + projectKey，且不改 Workbench URL 身份键。
+ */
+export type AgentHubControllerHost =
+  | { kind: 'page' }
+  | { kind: 'workbenchProject'; projectKey: string };
+
+const PAGE_HOST: AgentHubControllerHost = { kind: 'page' };
+
+/**
+ * Business Logic: 页面不得再把项目当查看上下文；Workbench 则始终冻结传入的项目。
+ * Code Logic: page 清 projectKey 并强制 user；workbench 走托管 parse。
+ */
+function resolveHostedHubContext(
+  params: URLSearchParams,
+  host: AgentHubControllerHost,
+): AgentHubContext {
+  if (host.kind === 'workbenchProject') {
+    return parseWorkbenchHostedAgentHubContext(params, host.projectKey);
+  }
+  const parsed = parseAgentHubContext(params);
+  return normalizeAgentHubContext({
+    ...parsed,
+    scope: 'user',
+    projectKey: null,
+  });
+}
+
+/**
+ * Business Logic: Workbench 写回时必须保留 view=projectAgent 与 projectId。
+ * Code Logic: page 走 writeAgentHubContext；workbench 走托管 writer。
+ */
+function persistHostedHubContext(
+  params: URLSearchParams,
+  ctx: AgentHubContext,
+  host: AgentHubControllerHost,
+): URLSearchParams {
+  if (host.kind === 'workbenchProject') {
+    return writeWorkbenchHostedAgentHubContext(params, {
+      ...ctx,
+      scope: 'project',
+      projectKey: host.projectKey,
+      deviceId: null,
+    });
+  }
+  return writeAgentHubContext(params, {
+    ...ctx,
+    scope: 'user',
+    projectKey: null,
+  });
+}
+
+/**
+ * Business Logic: 宿主冻结的身份字段不能被壳层 patch 改掉。
+ * Code Logic: workbench 忽略 scope/projectKey/deviceId；page 忽略 scope/projectKey。
+ */
+function applyHostedContextPatch(
+  current: AgentHubContext,
+  patch: Partial<AgentHubContext>,
+  host: AgentHubControllerHost,
+): AgentHubContext {
+  const next = normalizeAgentHubContext({
+    ...current,
+    ...patch,
+  });
+  if (host.kind === 'workbenchProject') {
+    next.scope = 'project';
+    next.projectKey = host.projectKey;
+    next.deviceId = null;
+    return next;
+  }
+  next.scope = 'user';
+  next.projectKey = null;
+  return next;
+}
 
 export {
   parseAgentHubContext,
@@ -511,7 +592,9 @@ export function remoteProjectDeviceId(projectRef: string | null): string | null 
  * Business Logic: 页面挂载即持有全部 Agent Hub 编排状态。
  * Code Logic: hooks 全在 early return 前；refreshSeq 丢弃过期响应。
  */
-export function useAgentHubController(): UseAgentHubControllerResult {
+export function useAgentHubController(
+  host: AgentHubControllerHost = PAGE_HOST,
+): UseAgentHubControllerResult {
   const { t } = useTranslation(['agentHub', 'common']);
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkAssetId = searchParams.get('assetId');
@@ -521,13 +604,21 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const deepLinkBridge = searchParams.get('bridge');
   const deepLinkSection = searchParams.get('section');
   const deepLinkInventoryItemId = searchParams.get('inventoryItemId');
+  const hostKind = host.kind;
+  const hostProjectKey = host.kind === 'workbenchProject' ? host.projectKey : null;
   /**
    * Business Logic: URL 权威的壳层上下文，须在子 controller 之前解析以便透传 device/project。
-   * Code Logic: 每次 searchParams 变化 re-parse。
+   * Code Logic: 每次 searchParams / host 变化 re-parse；page 强制 user，Workbench 冻结项目。
    */
   const hubContext = useMemo(
-    () => parseAgentHubContext(searchParams),
-    [searchParams],
+    () =>
+      resolveHostedHubContext(
+        searchParams,
+        hostKind === 'workbenchProject' && hostProjectKey
+          ? { kind: 'workbenchProject', projectKey: hostProjectKey }
+          : PAGE_HOST,
+      ),
+    [hostKind, hostProjectKey, searchParams],
   );
   /** portable / instruction inspect 用的 device|project 上下文。 */
   const inventoryRequestContext = useMemo(
@@ -930,6 +1021,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, []);
 
   useEffect(() => {
+    if (hostKind === 'workbenchProject') return;
     const legacySection = searchParams.get('section');
     const unsupportedOwner = searchParams.has('inventoryScope');
     const retiredView =
@@ -941,7 +1033,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     const legacyNavigation =
       legacySection !== null || searchParams.has('target') || searchParams.has('kind');
 
-    const next = writeAgentHubContext(searchParams, hubContext);
+    const next = persistHostedHubContext(searchParams, hubContext, PAGE_HOST);
     next.delete('inventoryScope');
     next.delete('preview');
     next.delete('projectId');
@@ -956,7 +1048,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     if (next.toString() !== searchParams.toString()) {
       setSearchParams(next, { replace: true });
     }
-  }, [hubContext, searchParams, setSearchParams, t]);
+  }, [hostKind, hubContext, searchParams, setSearchParams, t]);
 
   useEffect(() => {
     // 跳过 mount 首轮；仅 legacy 已加载时 filter 变化才 listAssets
@@ -1802,18 +1894,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
    */
   const onContextChange = useCallback(
     (patch: Partial<AgentHubContext>) => {
+      const hostedHost: AgentHubControllerHost =
+        hostKind === 'workbenchProject' && hostProjectKey
+          ? { kind: 'workbenchProject', projectKey: hostProjectKey }
+          : PAGE_HOST;
       setSearchParams((prev) => {
-        const current = parseAgentHubContext(prev);
-        const next = normalizeAgentHubContext({
-          ...current,
-          ...patch,
-        });
-        if (next.scope === 'user') {
-          next.projectKey = null;
-        } else {
-          next.deviceId = null;
-        }
-        let written = writeAgentHubContext(prev, next);
+        const current = resolveHostedHubContext(prev, hostedHost);
+        const next = applyHostedContextPatch(current, patch, hostedHost);
+        let written = persistHostedHubContext(prev, next, hostedHost);
         // 离开 portable 资产 tab 时必须清掉 kind/section=assets 等，否则 re-parse 会盖回资产 tab
         if (!isAssetKindTab(next.tab)) {
           written = clearPortableFilterSearchParams(written);
@@ -1821,15 +1909,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         return written;
       }, { replace: true });
 
-      const merged = normalizeAgentHubContext({
-        ...parseAgentHubContext(searchParams),
-        ...patch,
-      });
-      if (merged.scope === 'user') {
-        merged.projectKey = null;
-      } else {
-        merged.deviceId = null;
-      }
+      const merged = applyHostedContextPatch(
+        resolveHostedHubContext(searchParams, hostedHost),
+        patch,
+        hostedHost,
+      );
 
       // dual path: keep legacy section content in sync with shell
       if (merged.adaptView) {
@@ -1850,7 +1934,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       });
       }
     },
-    [portableInventoryBase, searchParams, setSearchParams],
+    [hostKind, hostProjectKey, portableInventoryBase, searchParams, setSearchParams],
   );
 
   /**
@@ -1865,41 +1949,47 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setContextMigrationNotice(t('agentHub:shell.unsupportedContextMigrated'));
       }
       setSearchParams((prev) => {
-        const current = parseAgentHubContext(prev);
-        const ctx: AgentHubContext = {
-          ...current,
-          scope: 'user',
-          deviceId: null,
-          projectKey: null,
-          tab:
-            nextSection === 'assets'
-              ? isAssetKindTab(current.tab)
-                ? current.tab
-                : 'skill'
-              : 'instructions',
-          instructionLane:
-            nextSection === 'assets'
-              ? DEFAULT_AGENT_HUB_CONTEXT.instructionLane
-              : current.instructionLane,
-          assetLane:
-            nextSection === 'assets' && isPortableStoreTab(current.tab)
-              ? current.assetLane
-              : DEFAULT_AGENT_HUB_CONTEXT.assetLane,
-          adaptView: false,
-        };
-        let next = writeAgentHubContext(prev, ctx);
+        const hostedHost: AgentHubControllerHost =
+          hostKind === 'workbenchProject' && hostProjectKey
+            ? { kind: 'workbenchProject', projectKey: hostProjectKey }
+            : PAGE_HOST;
+        const current = resolveHostedHubContext(prev, hostedHost);
+        const ctx = applyHostedContextPatch(
+          current,
+          {
+            tab:
+              nextSection === 'assets'
+                ? isAssetKindTab(current.tab)
+                  ? current.tab
+                  : 'skill'
+                : 'instructions',
+            instructionLane:
+              nextSection === 'assets'
+                ? DEFAULT_AGENT_HUB_CONTEXT.instructionLane
+                : current.instructionLane,
+            assetLane:
+              nextSection === 'assets' && isPortableStoreTab(current.tab)
+                ? current.assetLane
+                : DEFAULT_AGENT_HUB_CONTEXT.assetLane,
+            adaptView: false,
+          },
+          hostedHost,
+        );
+        let next = persistHostedHubContext(prev, ctx, hostedHost);
         next.delete('assetId');
         next.delete('conflictId');
         next.delete('preview');
-        next.delete('projectId');
         next.delete('bridge');
+        if (hostedHost.kind !== 'workbenchProject') {
+          next.delete('projectId');
+        }
         if (nextSection !== 'assets') {
           next = clearPortableFilterSearchParams(next);
         }
         return next;
       }, { replace: true });
     },
-    [setSearchParams, t],
+    [hostKind, hostProjectKey, setSearchParams, t],
   );
 
   const portableInventory: UsePortableInventoryControllerResult = portableInventoryBase;
@@ -2014,29 +2104,28 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         ) ?? null
       : null;
     setSearchParams((prev) => {
-      const nextContext: AgentHubContext = matched
-        ? {
-            ...parseAgentHubContext(prev),
-            agent: matched.target,
-            tab: matched.kind,
-            scope: 'user',
-            deviceId: null,
-            projectKey: null,
-            instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
-            adaptView: false,
-          }
-        : {
-            ...parseAgentHubContext(prev),
-            tab: isAssetKindTab(parseAgentHubContext(prev).tab)
-              ? parseAgentHubContext(prev).tab
-              : 'skill',
-            scope: 'user',
-            deviceId: null,
-            projectKey: null,
-            instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
-            adaptView: false,
-          };
-      const next = writeAgentHubContext(prev, nextContext);
+      const hostedHost: AgentHubControllerHost =
+        hostKind === 'workbenchProject' && hostProjectKey
+          ? { kind: 'workbenchProject', projectKey: hostProjectKey }
+          : PAGE_HOST;
+      const current = resolveHostedHubContext(prev, hostedHost);
+      const nextContext = applyHostedContextPatch(
+        current,
+        matched
+          ? {
+              agent: matched.target,
+              tab: matched.kind,
+              instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
+              adaptView: false,
+            }
+          : {
+              tab: isAssetKindTab(current.tab) ? current.tab : 'skill',
+              instructionLane: DEFAULT_AGENT_HUB_CONTEXT.instructionLane,
+              adaptView: false,
+            },
+        hostedHost,
+      );
+      const next = persistHostedHubContext(prev, nextContext, hostedHost);
       next.delete('assetId');
       next.delete('conflictId');
       if (matched) next.set('inventoryItemId', matched.inventoryItemId);
@@ -2057,6 +2146,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     portableInventoryBase.loading,
     portableInventoryBase.refreshing,
     portableInventoryBase.snapshot,
+    hostKind,
+    hostProjectKey,
     setSearchParams,
     t,
   ]);
@@ -2073,9 +2164,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     // 改为以 window.location.search（DOM 最新 URL，replaceState 后立即可见）为基准：
     // desired 的 tab 始终与 DOM 一致，只叠加 filters/selection，无变化则不写。
     const live = new URLSearchParams(window.location.search);
-    const liveCtx = parseAgentHubContext(live);
+    const hostedHost: AgentHubControllerHost =
+      hostKind === 'workbenchProject' && hostProjectKey
+        ? { kind: 'workbenchProject', projectKey: hostProjectKey }
+        : PAGE_HOST;
+    const liveCtx = resolveHostedHubContext(live, hostedHost);
     if (!isAssetKindTab(liveCtx.tab)) return;
-    const modernContext = writeAgentHubContext(live, liveCtx);
+    const modernContext = persistHostedHubContext(live, liveCtx, hostedHost);
     const desired = writePortableFiltersToSearchParams(
       modernContext,
       portableInventoryBase.filters,
@@ -2087,6 +2182,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [
     activeSection,
     hubContext,
+    hostKind,
+    hostProjectKey,
     portableInventoryBase.filters,
     portableInventoryBase.selectedItemId,
     setSearchParams,

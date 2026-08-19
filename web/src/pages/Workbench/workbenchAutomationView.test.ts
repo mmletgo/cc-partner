@@ -47,6 +47,14 @@ function assertNotContains(source: string, unexpected: string, message: string):
 describe('workbenchAutomationView', () => {
   test('keeps automation console inside Workbench and the embedded Orchestrator contract intact', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
+  const workbenchHeaderSource = readFileSync(
+    new URL('./WorkbenchWorkspaceHeader.tsx', import.meta.url),
+    'utf8',
+  );
+  const workbenchOverlaySource = readFileSync(
+    new URL('./WorkbenchProjectOverlayLayers.tsx', import.meta.url),
+    'utf8',
+  );
   const workbenchFilesSource = readFileSync(new URL('./workbenchFiles.ts', import.meta.url), 'utf8');
   const workbenchStyles = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
   // S4 拆分后：组合壳 + controller + pure helpers + views 共同构成 Orchestrator 合同真源
@@ -116,7 +124,7 @@ describe('workbenchAutomationView', () => {
     "'automation'",
     'Project automation must not be modeled as a file/terminal workspace view',
   );
-  assertContains(workbenchSource, "from '@/pages/Orchestrator';", 'Workbench imports the Orchestrator panel boundary');
+  assertContains(workbenchOverlaySource, "from '@/pages/Orchestrator';", 'Workbench overlay imports the Orchestrator panel boundary');
   assertContains(
     workbenchSource,
     'const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);',
@@ -144,7 +152,7 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     workbenchSource,
-    'onClick={handleToggleProjectAutomation}',
+    'onToggleAutomation={handleToggleProjectAutomation}',
     'clicking the project automation button again toggles back to the terminal page',
   );
   assertNotContains(
@@ -164,32 +172,53 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     workbenchSource,
-    '{automationConsoleOpen ? (',
+    '{automationConsoleOpen || projectAgentConsoleOpen ? (',
     'Workbench should mount the automation layer only after the project automation console is open',
   );
-  assertContains(workbenchSource, '<div className={styles.automationLayer}>', 'Workbench renders an automation layer');
+  assertContains(workbenchOverlaySource, '<div className={styles.automationLayer}>', 'Workbench renders an automation layer');
+  assertContains(
+    workbenchHeaderSource,
+    'data-testid="workbench-project-agent-toggle"',
+    'Workbench header exposes a Project Agent toggle next to Project Automation',
+  );
+  assertContains(
+    workbenchOverlaySource,
+    'data-testid="workbench-project-agent-layer"',
+    'Project Agent console mounts as a document-flow overlay layer, not a hidden workspace view',
+  );
+  assertContains(
+    workbenchOverlaySource,
+    "import('@/pages/AgentHub/WorkbenchProjectAgentConsole')",
+    'Project Agent overlay lazy-loads Agent Hub so Workbench chunk stays small',
+  );
+  assertContains(
+    workbenchSource,
+    'const handleToggleProjectAgent = useCallback',
+    'Project Agent toggle lives on the Workbench page, not as an 8th domain controller',
+  );
+  assertNotContains(
+    workbenchSource,
+    "setWorkspaceView('projectAgent')",
+    'Workbench must not switch workspaceView to a 4th projectAgent surface',
+  );
   assertNotContains(
     workbenchSource,
     'data-hidden={!automationConsoleOpen || undefined}',
     'automation layer must not stay in the DOM behind a hidden/data-hidden style that can leave a black workspace',
   );
+  assertContains(workbenchOverlaySource, '<OrchestratorPanel', 'mounted automation layer should contain the embedded Orchestrator UI');
   assertContains(
-    workbenchSource,
-    '<OrchestratorPanel',
-    'mounted automation layer should contain the embedded Orchestrator UI',
-  );
-  assertContains(
-    workbenchSource,
-    'onOpenWorkbench={handleOpenAutomationTaskWorkbench}',
+    workbenchOverlaySource,
+    'onOpenWorkbench={onOpenAutomationTaskWorkbench}',
     'embedded Orchestrator should hand open-workbench back to Workbench',
   );
   assertContains(
-    workbenchSource,
+    workbenchOverlaySource,
     'focusTaskId={automationFocusTaskId}',
     'Attention automation deep links should pass focusTaskId into OrchestratorPanel',
   );
   assertContains(
-    workbenchSource,
+    workbenchOverlaySource,
     'focusOutboxId={automationFocusOutboxId}',
     'Attention automation deep links should pass focusOutboxId into OrchestratorPanel',
   );
@@ -199,13 +228,13 @@ describe('workbenchAutomationView', () => {
     'automation layer must not rely on the HTML hidden attribute because it can keep the opened console display:none',
   );
   assertContains(
-    workbenchSource,
+    workbenchHeaderSource,
     "t('workbench:projectAutomation.open')",
     'Workbench header uses localized Project Automation entry',
   );
   assertContains(
     workbenchSource,
-    'hidden={automationConsoleOpen}',
+    'hidden={projectOverlayOpen}',
     'project automation console hides the worktree switcher to avoid worktree ownership ambiguity',
   );
   assertContains(
@@ -546,7 +575,7 @@ describe('workbenchAutomationView', () => {
   assertContains(workbenchStyles, '.automationBody {', 'automation layer scroll body exists');
   assertContains(
     workbenchSource,
-    'data-automation-open={automationConsoleOpen || undefined}',
+    'data-automation-open={projectOverlayOpen || undefined}',
     'Workbench page marks automation-open so the inspector can yield horizontal space to the board',
   );
   assertContains(
@@ -613,6 +642,8 @@ describe('workbenchAutomationView', () => {
   assertNotContains(appShellSource, 'to="/orchestrator"', 'sidebar no longer exposes a standalone automation nav item');
   assertContains(zhWorkbench, '"projectAutomation"', 'zh Workbench locale includes project automation copy');
   assertContains(enWorkbench, '"projectAutomation"', 'en Workbench locale includes project automation copy');
+  assertContains(zhWorkbench, '"projectAgent"', 'zh Workbench locale includes project Agent copy');
+  assertContains(enWorkbench, '"projectAgent"', 'en Workbench locale includes project Agent copy');
   assertContains(zhWorkbench, '"open": "项目自动化"', 'zh Workbench locale uses project-level automation label');
   assertContains(enWorkbench, '"open": "Project Automation"', 'en Workbench locale uses project-level automation label');
   assertContains(zhOrchestrator, '"activeSession": "执行现场"', 'zh Orchestrator detail avoids terminal-only wording');
