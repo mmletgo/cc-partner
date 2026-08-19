@@ -61,10 +61,10 @@ const labels: PortableInventoryRowLabels = {
     cursor: 'From Cursor CLI',
     pi: 'From Pi',
     sharedAgents: 'Shared ~/.agents',
-    portableStore: 'Portable store',
+    portableStore: 'Store',
     unknown: 'From unknown owner',
   },
-  storeBadge: 'Portable store',
+  storeBadge: 'Store',
 };
 
 function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInventoryItemDto {
@@ -310,8 +310,8 @@ describe('PortableInventoryRow', () => {
       'From Claude Code',
     );
     expect(screen.getAllByTestId('portable-row-store-badge')).toHaveLength(1);
-    expect(screen.getByTestId('portable-row-store-badge').textContent).toContain('Portable store');
-    expect(screen.queryAllByText('Portable store')).toHaveLength(1);
+    expect(screen.getByTestId('portable-row-store-badge').textContent).toContain('Store');
+    expect(screen.queryAllByText('Store')).toHaveLength(1);
   });
 
   test('store catalog chips toggle the matching agent item', () => {

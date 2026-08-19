@@ -96,7 +96,7 @@ export interface UsePortableInventoryControllerResult {
   confirmableCurrentVersionItems: PortableInventoryItemDto[];
   /** 一键确认当前类别、当前 Agent 的全部漂移项。 */
   openConfirmAllCurrentVersions: () => void;
-  /** 当前快照里可「迁入便携仓库」的 Skill/Command（当前 Agent + 当前类别）。 */
+  /** 当前快照里可「迁入仓库」的 Skill/Command（当前 Agent + 当前类别）。 */
   migratableToStoreItems: PortableInventoryItemDto[];
   /** 一键把当前类别、当前 Agent 的可迁入项移入仓库并留下软链。 */
   openMigrateAllToStore: () => void;

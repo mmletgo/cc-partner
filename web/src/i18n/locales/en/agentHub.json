@@ -604,7 +604,7 @@
     "inventory": {
       "title": "Agent assets",
       "subtitle": "Observed inventory for the selected agent. Actual disk state is the source of truth; discovery creates Hub management automatically.",
-      "storeTitle": "Portable store",
+      "storeTitle": "Store",
       "storeSubtitle": "One local copy of each Skill/Command, listed once. Toggle an agent to attach or detach; detach only removes the symlink. Agents that load another agent's files (such as Grok Build) update when that source agent changes.",
       "loading": "Loading inventory…",
       "empty": "No portable assets match the current filters.",
@@ -625,7 +625,7 @@
       "groupBorrowed": "Loaded at runtime from other agents",
       "groupStoreAttached": "Attached to this agent",
       "groupStoreAvailable": "Not attached",
-      "storeBadge": "Portable store",
+      "storeBadge": "Store",
       "storeAgentGroupAria": "Agent enablement",
       "storeAgentToggle": "Enable for {{agent}}",
       "storeEnabledVia": "Loaded via {{agent}}",
@@ -642,7 +642,7 @@
         "cursor": "From Cursor CLI",
         "pi": "From Pi",
         "sharedAgents": "Shared ~/.agents",
-        "portableStore": "Portable store",
+        "portableStore": "Store",
         "unknown": "From unknown owner"
       },
       "targetFilter": {
@@ -707,7 +707,7 @@
       "attach": "Attach to this agent",
       "detach": "Detach from this agent",
       "destroyStore": "Destroy store copy",
-      "migrateToStore": "Migrate to portable store",
+      "migrateToStore": "Migrate to store",
       "confirmCurrentVersion": "Confirm current version",
       "materializeEscapeLink": "Replace symlink with a copy"
     },
@@ -745,18 +745,18 @@
       "borrowedImpactUninstall": "This asset belongs to {{owner}}; {{current}} only loads it at runtime. Uninstall removes or rewrites the owner's files, and other agents that load it will lose it.",
       "borrowedImpactDetach": "This asset is loaded by {{via}}. Detach removes {{via}}'s store symlink. {{via}} and other agents that read {{via}}'s config (including {{current}}) will unload this asset together. The real store tree stays.",
       "borrowedImpactSharedAgents": "The shared ~/.agents directory is read by multiple agents, so this change affects every agent that loads from it.",
-      "storeAttachHint": "Attach only creates a symlink from this agent's native root to the portable store. It does not copy a second install.",
+      "storeAttachHint": "Attach only creates a symlink from this agent's native root to the store. It does not copy a second install.",
       "storeDetachHint": "Detach only removes this agent's symlink. The real store tree stays, and other attached agents are unchanged.",
       "storeDetachBorrowedHint": "Detach removes the source agent ({{via}}) store symlink. The real store tree stays. {{via}} and other agents that read {{via}}'s config (including {{current}}) will unload this asset together.",
-      "storeMigrateHint": "Migrate moves the native files into the shared portable store and leaves a symlink. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
+      "storeMigrateHint": "Migrate moves the native files into the shared store and leaves a symlink. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
       "storeDestroyHint": "Destroy deletes the shared store tree and clears Claude / Codex attachments. This cannot be undone.",
       "storeStillLoadedVia": "After detaching {{current}}, this store asset is still loaded via {{via}}. This action will not rewrite {{via}}.",
-      "storePluginUnchanged": "Plugins do not use the portable store. Enable flags still change only the viewing agent's switch.",
+      "storePluginUnchanged": "Plugins do not use the store. Enable flags still change only the viewing agent's switch.",
       "confirmCurrentVersionHint": "Files on disk may have been updated. Confirming records the current files as Hub's consistent baseline and does not rewrite disk.",
       "confirmAllCurrentVersionHint": "Records {{count}} drifted assets for this Agent and category as Hub's consistent baseline and does not rewrite disk.",
-      "migrateAllToStoreHint": "Migrates {{count}} native Skill/Command assets for this Agent and category into the portable store and leaves a symlink at the original path. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
-      "materializeEscapeLinkHint": "Replaces the escape symlink at this Agent's native path with a real copy, keeps the original target, and does not migrate into the portable store or delete ~/.agents sources.",
-      "materializeAllEscapeLinksHint": "Replaces {{count}} escape symlinks for this Agent and category with real copies, keeps the original targets, and does not migrate into the portable store."
+      "migrateAllToStoreHint": "Migrates {{count}} native Skill/Command assets for this Agent and category into the store and leaves a symlink at the original path. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
+      "materializeEscapeLinkHint": "Replaces the escape symlink at this Agent's native path with a real copy, keeps the original target, and does not migrate into the store or delete ~/.agents sources.",
+      "materializeAllEscapeLinksHint": "Replaces {{count}} escape symlinks for this Agent and category with real copies, keeps the original targets, and does not migrate into the store."
     }
   },
   "portablePull": {

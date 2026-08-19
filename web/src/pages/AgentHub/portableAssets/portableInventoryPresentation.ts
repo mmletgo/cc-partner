@@ -171,7 +171,7 @@ export function portableBorrowedOwnerLabelKey(
 }
 
 /**
- * Business Logic: 「在所有者 Agent 中打开」要跳到实际加载源，而不是便携仓库抽象所有者。
+ * Business Logic: 「在所有者 Agent 中打开」要跳到实际加载源，而不是仓库抽象所有者。
  * Code Logic: 徽标 key 若是 Hub target 则用之。
  */
 export function portableBorrowedOwnerJumpTarget(
@@ -201,7 +201,7 @@ export function partitionPortableInventoryItems(
 }
 
 /**
- * Business Logic: 便携仓库目录项（含已附加软链与未附加注入）。
+ * Business Logic: 仓库目录项（含已附加软链与未附加注入）。
  * Code Logic: 有 storeId 或 ownedBy=portableStore。
  */
 export function isPortableStoreCatalogItem(item: PortableInventoryItemDto): boolean {
@@ -218,7 +218,7 @@ export function isPortableStoreAssetKind(kind: PortableAssetKind): boolean {
 
 /**
  * Business Logic: 只有本 Agent 自己的 native / Codex ~/.agents（legacyStandalone）能迁入仓库。
- *   Grok/Pi 等运行时从其他 Agent 加载的 compatibility 项不得出现「迁入便携仓库」。
+ *   Grok/Pi 等运行时从其他 Agent 加载的 compatibility 项不得出现「迁入仓库」。
  * Code Logic: 后端 canMigrateToStore 再加 originKind 闸，capability 泄漏也不会露出按钮。
  */
 export function canOfferPortableMigrateToStore(item: PortableInventoryItemDto): boolean {

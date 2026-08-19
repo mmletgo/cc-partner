@@ -604,7 +604,7 @@
     "inventory": {
       "title": "Agent 资产",
       "subtitle": "当前 Agent 的 observed 库存。磁盘 actual 状态是真源；扫描发现时自动建立 Hub 管理记录。",
-      "storeTitle": "便携仓库",
+      "storeTitle": "仓库",
       "storeSubtitle": "本机一份 Skill/Command，按名称列出。点 Agent 即可启用或卸下；卸下只拆软链，不删仓库真树。会读取其他 Agent 目录的（如 Grok Build）会随源 Agent 的启用状态一起更新。",
       "loading": "正在加载库存…",
       "empty": "没有符合当前筛选条件的 portable 资产。",
@@ -625,7 +625,7 @@
       "groupBorrowed": "运行时从其他 Agent 加载",
       "groupStoreAttached": "已附加到此 Agent",
       "groupStoreAvailable": "未附加",
-      "storeBadge": "便携仓库",
+      "storeBadge": "仓库",
       "storeAgentGroupAria": "各 Agent 启用状态",
       "storeAgentToggle": "为 {{agent}} 启用",
       "storeEnabledVia": "经 {{agent}} 加载",
@@ -642,7 +642,7 @@
         "cursor": "来自 Cursor CLI",
         "pi": "来自 Pi",
         "sharedAgents": "共享 ~/.agents",
-        "portableStore": "便携仓库",
+        "portableStore": "仓库",
         "unknown": "来自未知来源"
       },
       "targetFilter": {
@@ -707,7 +707,7 @@
       "attach": "附加到此 Agent",
       "detach": "从此 Agent 卸下",
       "destroyStore": "彻底删除仓库副本",
-      "migrateToStore": "迁入便携仓库",
+      "migrateToStore": "迁入仓库",
       "confirmCurrentVersion": "确认当前版本",
       "materializeEscapeLink": "解引软链"
     },
@@ -745,18 +745,18 @@
       "borrowedImpactUninstall": "这项资产属于{{owner}}，{{current}} 只是运行时加载。卸载会删除或改写所有者磁盘上的文件，其他运行时加载它的 Agent 将无法再使用这项资产。",
       "borrowedImpactDetach": "这项资产由{{via}}加载。卸下会删除 {{via}} 上的仓库软链。{{via}} 以及运行时读取 {{via}} 配置的其他 Agent（包括 {{current}}）会同步卸下这项资产。仓库真树仍保留。",
       "borrowedImpactSharedAgents": "共享 ~/.agents 目录会被多个 Agent 读取，这次操作会影响所有从该目录加载的 Agent。",
-      "storeAttachHint": "附加只在当前 Agent 的原生目录创建指向便携仓库的软链，不会复制第二份安装。",
+      "storeAttachHint": "附加只在当前 Agent 的原生目录创建指向仓库的软链，不会复制第二份安装。",
       "storeDetachHint": "卸下只删除当前 Agent 的软链。仓库真树仍保留，其他已附加的 Agent 不受影响。",
-      "storeDetachBorrowedHint": "卸下会去掉源 Agent（{{via}}）上指向便携仓库的软链，不会删除仓库真树。{{via}} 以及运行时读取 {{via}} 配置的其他 Agent（包括 {{current}}）会同时不再加载这项资产。",
-      "storeMigrateHint": "迁移会把当前原生文件移入共享便携仓库，并留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。",
+      "storeDetachBorrowedHint": "卸下会去掉源 Agent（{{via}}）上指向仓库的软链，不会删除仓库真树。{{via}} 以及运行时读取 {{via}} 配置的其他 Agent（包括 {{current}}）会同时不再加载这项资产。",
+      "storeMigrateHint": "迁移会把当前原生文件移入共享仓库，并留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。",
       "storeDestroyHint": "彻底删除会清掉共享仓库真树，并移除 Claude / Codex 上的附加。此操作不可恢复。",
       "storeStillLoadedVia": "卸下 {{current}} 之后，这项仓库资产仍会经 {{via}} 加载。这次不会改写 {{via}}。",
-      "storePluginUnchanged": "Plugin 不走便携仓库。启用标记仍只改当前查看 Agent 的开关。",
+      "storePluginUnchanged": "Plugin 不走仓库。启用标记仍只改当前查看 Agent 的开关。",
       "confirmCurrentVersionHint": "磁盘上的文件可能已更新。确认后 Hub 只把当前文件记为一致基准，不会改写磁盘。",
       "confirmAllCurrentVersionHint": "将把当前 Agent、当前类别中 {{count}} 项已漂移资产记为一致基准，不会改写磁盘。",
-      "migrateAllToStoreHint": "将把当前 Agent、当前类别中 {{count}} 项原生 Skill/Command 迁入便携仓库，并在原路径留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。",
-      "materializeEscapeLinkHint": "会把当前 Agent 原生路径上的逃逸软链替换为真实副本，保留原来的目标目录，不会迁入便携仓库，也不会删除 ~/.agents 源。",
-      "materializeAllEscapeLinksHint": "将把当前 Agent、当前类别中 {{count}} 项逃逸软链替换为真实副本，保留原来的目标目录，不会迁入便携仓库。"
+      "migrateAllToStoreHint": "将把当前 Agent、当前类别中 {{count}} 项原生 Skill/Command 迁入仓库，并在原路径留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。",
+      "materializeEscapeLinkHint": "会把当前 Agent 原生路径上的逃逸软链替换为真实副本，保留原来的目标目录，不会迁入仓库，也不会删除 ~/.agents 源。",
+      "materializeAllEscapeLinksHint": "将把当前 Agent、当前类别中 {{count}} 项逃逸软链替换为真实副本，保留原来的目标目录，不会迁入仓库。"
     }
   },
   "portablePull": {

@@ -95,7 +95,7 @@ const labels: PortableInventoryViewLabels = {
     cursor: 'From Cursor CLI',
     pi: 'From Pi',
     sharedAgents: 'Shared ~/.agents',
-    portableStore: 'Portable store',
+    portableStore: 'Store',
     unknown: 'From unknown owner',
   },
 };

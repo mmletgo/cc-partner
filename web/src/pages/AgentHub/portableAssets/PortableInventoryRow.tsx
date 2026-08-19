@@ -40,7 +40,7 @@ export interface PortableInventoryRowLabels {
   unmanagedRefreshHint?: string;
   borrowedFrom: Record<PortableBorrowedOwnerLabelKey, string>;
   openInOwnerAgent: string;
-  /** 便携仓库徽章；缺省时不渲染。 */
+  /** 仓库徽章；缺省时不渲染。 */
   storeBadge?: string;
   /** 仓库行 Agent 芯片组无障碍名称。 */
   storeAgentGroupAria?: string;
