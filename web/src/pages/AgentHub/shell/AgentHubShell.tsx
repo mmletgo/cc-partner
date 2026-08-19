@@ -6,9 +6,9 @@
  *   Shell 负责选择 owner，内容区和动作层再按能力证据决定只读、预览或写入。
  *
  * Code Logic（这个组件做什么）:
- *   渲染受控 tablist、冻结范围文案 / 提示词槽或存放面 / Agent radiogroup 与设备选择器；
- *   公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。复用共享 roving 索引合同，
- *   并用关联 tabpanel 承载页面内容。无业务 API 调用。
+ *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级只保留设备选择器，
+ *   项目级只展示冻结项目名，不展示「范围 / 范围：项目」。公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。
+ *   复用共享 roving 索引合同，并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
 
 import {
@@ -249,20 +249,13 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </p>
         ) : null}
 
-        <div className={styles.row} data-testid="agent-hub-scope-lock">
-          <span className={styles.label}>{t('agentHub:shell.scopeLabel')}</span>
-          <span
-            className={styles.frozenValue}
-            data-testid={
-              scopeLock === 'project' ? 'agent-hub-scope-project-lock' : 'agent-hub-scope-user-lock'
-            }
-          >
-            {scopeLock === 'project'
-              ? t('agentHub:shell.scopeLockedProject')
-              : t('agentHub:shell.scopeLockedUser')}
-          </span>
-
-          {scopeLock === 'user' ? (
+        {scopeLock === 'project' ? (
+          <div className={styles.row} data-testid="agent-hub-frozen-project">
+            <span className={styles.label}>{t('agentHub:shell.projectLabel')}</span>
+            <span className={styles.frozenValue}>{frozenProjectText}</span>
+          </div>
+        ) : (
+          <div className={styles.row}>
             <label className={styles.cluster}>
               <span className={styles.label}>{t('agentHub:shell.deviceLabel')}</span>
               <select
@@ -284,13 +277,8 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
                 ))}
               </select>
             </label>
-          ) : (
-            <span className={styles.cluster} data-testid="agent-hub-frozen-project">
-              <span className={styles.label}>{t('agentHub:shell.projectLabel')}</span>
-              <span className={styles.frozenValue}>{frozenProjectText}</span>
-            </span>
-          )}
-        </div>
+          </div>
+        )}
 
         {context.tab === 'instructions' ? (
           <div className={styles.row}>

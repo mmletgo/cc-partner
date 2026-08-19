@@ -18,6 +18,8 @@ export const BANNER_MIN_FONT_PX = 11;
 export const BANNER_MAX_FONT_PX = 64;
 export const BANNER_LINE_HEIGHT = 1.2;
 export const BANNER_SAVE_DEBOUNCE_MS = 400;
+/** 标语在空隙内的首选最大宽度；空隙更窄时继续缩小，避免盖住标题/按钮。 */
+export const BANNER_PREFERRED_MAX_PX = 448;
 
 export interface WorkbenchBannerRecord {
   version: typeof BANNER_SCHEMA_VERSION;
@@ -277,4 +279,33 @@ export function fitBannerFontSize(options: {
     }
   }
   return best;
+}
+
+export interface BannerGapPlacement {
+  offset: number;
+  width: number;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   标语要尽量靠近窗口中线，但不能盖住标题或右侧按钮；空隙不够就缩小。
+ *
+ * Code Logic（这个函数做什么）:
+ *   在 [gapLeft, gapRight] 内放入不超过 preferredMaxWidth 的盒子，
+ *   中心尽量贴近 viewportCenter，并夹紧在空隙内。offset 相对 gapLeft。
+ */
+export function placeBannerInGap(params: {
+  gapLeft: number;
+  gapRight: number;
+  viewportCenter: number;
+  preferredMaxWidth: number;
+}): BannerGapPlacement {
+  const gap = Math.max(0, params.gapRight - params.gapLeft);
+  const width = Math.min(gap, Math.max(0, params.preferredMaxWidth));
+  if (width <= 0) return { offset: 0, width: 0 };
+  const half = width / 2;
+  const minCenter = params.gapLeft + half;
+  const maxCenter = params.gapRight - half;
+  const center = Math.min(Math.max(params.viewportCenter, minCenter), maxCenter);
+  return { offset: center - half - params.gapLeft, width };
 }

@@ -485,7 +485,6 @@
       "files": "文件",
       "git": "Git",
       "worktrees": "Worktrees",
-      "prompt": "Prompt",
       "transfer": "传输",
       "automation": "自动化",
       "settings": "设置",
@@ -524,10 +523,6 @@
       "worktrees": {
         "title": "Worktrees",
         "label": "等待项目"
-      },
-      "prompt": {
-        "title": "Prompt",
-        "label": "等待输入"
       },
       "transfer": {
         "title": "文件传输",

@@ -2,7 +2,7 @@
  * MobileAttentionPanel（移动端全局 Inbox）
  *
  * Business Logic（为什么需要这个组件）:
- *   手机端需要在导航第二项查看“当前阻塞工作的事项”，并只导航到现有 Automation/Settings 权威界面。
+ *   手机端需要在导航第二项查看“当前阻塞工作的事项”，并只导航到现有 Automation/Terminal 权威界面。
  *
  * Code Logic（这个组件做什么）:
  *   消费 useAttention；复用 groupAttentionItems/action/freshness helpers 渲染紧凑分组列表；
@@ -22,6 +22,7 @@ import {
   partitionAttentionItemsByLocalDay,
 } from '@/lib/attention';
 import type { AttentionCategory, AttentionItem, AttentionSourceKind } from '@/lib/types';
+import { filterMobileInboxAttentionItems } from '../mobileAttentionTarget';
 import panelStyles from '../MobileWorkbench.module.css';
 import styles from './MobileAttentionPanel.module.css';
 
@@ -140,12 +141,20 @@ export function MobileAttentionPanel({
   } = useAttention();
 
   const clock = now ?? new Date();
-  const dayPartition = useMemo(
-    () => partitionAttentionItemsByLocalDay(snapshot?.items ?? [], clock),
-    [snapshot?.items, clock],
+  const inboxItems = useMemo(
+    () => filterMobileInboxAttentionItems(snapshot?.items ?? []),
+    [snapshot?.items],
   );
-  const visibleItems = includeEarlier ? (snapshot?.items ?? []) : dayPartition.today;
+  const dayPartition = useMemo(
+    () => partitionAttentionItemsByLocalDay(inboxItems, clock),
+    [inboxItems, clock],
+  );
+  const visibleItems = includeEarlier ? inboxItems : dayPartition.today;
   const groups = useMemo(() => groupAttentionItems(visibleItems), [visibleItems]);
+  const visibleUnreadTotal = useMemo(
+    () => inboxItems.reduce((count, item) => count + (isAttentionItemUnread(item) ? 1 : 0), 0),
+    [inboxItems],
+  );
 
   const unsupported =
     error instanceof AttentionHttpError && error.kind === 'unsupported';
@@ -153,7 +162,7 @@ export function MobileAttentionPanel({
   const showInitialError =
     !loading && snapshot === null && error !== null && !unsupported;
   const showEmpty =
-    !loading && snapshot !== null && snapshot.items.length === 0 && !unsupported;
+    !loading && snapshot !== null && inboxItems.length === 0 && !unsupported;
 
   return (
     <section className={styles.panel} aria-labelledby="mobile-attention-title">
@@ -176,7 +185,7 @@ export function MobileAttentionPanel({
               loading ||
               refreshing ||
               pendingReadIds.size > 0 ||
-              (snapshot.counts.unreadTotal ?? 0) === 0
+              visibleUnreadTotal === 0
             }
             data-testid="mobile-attention-mark-all-read"
           >

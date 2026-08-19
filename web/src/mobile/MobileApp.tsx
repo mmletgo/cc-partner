@@ -2,7 +2,6 @@ import { useCallback, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { attentionHttpApi } from '@/api/attentionHttp';
 import { AttentionProvider } from '@/hooks/useAttention';
-import { WorkbenchDependencyProvider } from '@/hooks/useWorkbenchDependency';
 import {
   createWorkbenchTerminalBufferStore,
   type WorkbenchTerminalBufferStore,
@@ -23,7 +22,8 @@ import { MobileWorkbench } from './MobileWorkbench';
  * Code Logic（这个组件做什么）:
  *   懒初始化 session 级 ring-buffer store（options API，默认 rAF 帧批处理）；
  *   启用 NDJSON HTTP event hook；
- *   用 AttentionProvider(loadSnapshot=attentionHttpApi) 与 WorkbenchDependencyProvider 包裹 MobileWorkbench。
+ *   用 AttentionProvider(loadSnapshot=attentionHttpApi) 包裹 MobileWorkbench。
+ *   不挂 WorkbenchDependencyProvider：移动端不探测/安装 tmux。
  */
 export function MobileApp(): ReactElement {
   const [store] = useState<WorkbenchTerminalBufferStore>(() =>
@@ -203,14 +203,12 @@ export function MobileApp(): ReactElement {
 
   return (
     <WorkbenchTerminalBuffersContext.Provider value={contextValue}>
-      <WorkbenchDependencyProvider>
-        <AttentionProvider
-          loadSnapshot={loadAttentionSnapshot}
-          mutations={attentionHttpApi}
-        >
-          <MobileWorkbench />
-        </AttentionProvider>
-      </WorkbenchDependencyProvider>
+      <AttentionProvider
+        loadSnapshot={loadAttentionSnapshot}
+        mutations={attentionHttpApi}
+      >
+        <MobileWorkbench />
+      </AttentionProvider>
     </WorkbenchTerminalBuffersContext.Provider>
   );
 }

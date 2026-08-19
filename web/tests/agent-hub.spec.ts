@@ -260,7 +260,8 @@ test.describe('E2E-AGENT-HUB-CORRECTION-001 production-only Agent Hub', () => {
 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('agent-hub-scope-lock')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-scope-lock')).toHaveCount(0);
     await expect(page.getByTestId('instruction-three-pane')).toBeVisible();
     await expect(page.getByTestId('instruction-write-blocked')).toBeVisible();
     await expect(page.getByTestId('agent-hub-asset-list')).toHaveCount(0);

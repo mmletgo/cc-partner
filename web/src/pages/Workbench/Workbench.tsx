@@ -98,7 +98,7 @@ export function Workbench() {
     refreshProjectSessionStats,
     chooseAndAddProject,
     currentWindowLabel,
-    occupancy, setRemoteWriteDisabled,
+    occupancy,
   } = useWorkbenchProjects();
   const { layoutSlotKey } = useWorkbenchWindowRole();
   const restoreSlotKey = layoutSlotKey ?? 'desktop:auto';
@@ -113,13 +113,12 @@ export function Workbench() {
     () => parseWorkbenchDeepLink(locationSearch),
     [locationSearch],
   );
-  // Business Logic: 项目域由独立 controller 持有，不复制邻接域 state；只读态同步给 AppShell 标语。
+  // Business Logic: 项目域由独立 controller 持有，不复制邻接域 state。
   const projectCtrl = useWorkbenchProjectController({
     activeProject,
     activeProjectId,
     projects,
     selectProject,
-    onRemoteWriteDisabledChange: setRemoteWriteDisabled,
   });
   const {
     remoteProjectOffline,

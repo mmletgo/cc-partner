@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     分类 Regular / StoreLink / EscapeLink；创建与拆除软链；从不 copy。
 
-use super::{current_portable_store_root, store_id_from_canonical, PortableStoreKind};
+use super::{current_portable_store_roots, store_id_from_canonical, PortableStoreKind};
 use crate::error::AppError;
 use std::fs;
 use std::io;
@@ -54,33 +54,37 @@ pub fn classify_store_link(path: &Path) -> StoreLinkClass {
     if !meta.file_type().is_symlink() {
         return StoreLinkClass::Regular;
     }
-    let Some(store_root) = current_portable_store_root() else {
-        return StoreLinkClass::EscapeLink;
-    };
-    if !store_root.exists() {
+    let roots = current_portable_store_roots();
+    if roots.is_empty() {
         return StoreLinkClass::EscapeLink;
     }
     let Ok(canonical) = fs::canonicalize(path) else {
         return StoreLinkClass::EscapeLink;
     };
-    if !is_under_portable_store(&canonical, &store_root) {
-        return StoreLinkClass::EscapeLink;
+    for store_root in &roots {
+        if !store_root.exists() {
+            continue;
+        }
+        if !is_under_portable_store(&canonical, store_root) {
+            continue;
+        }
+        let Some(store_id) = store_id_from_canonical(&canonical, store_root) else {
+            continue;
+        };
+        let kind = if store_id.starts_with("skill:") {
+            PortableStoreKind::Skill
+        } else if store_id.starts_with("command:") {
+            PortableStoreKind::Command
+        } else {
+            PortableStoreKind::Mcp
+        };
+        return StoreLinkClass::StoreLink {
+            store_id,
+            canonical,
+            kind,
+        };
     }
-    let Some(store_id) = store_id_from_canonical(&canonical, &store_root) else {
-        return StoreLinkClass::EscapeLink;
-    };
-    let kind = if store_id.starts_with("skill:") {
-        PortableStoreKind::Skill
-    } else if store_id.starts_with("command:") {
-        PortableStoreKind::Command
-    } else {
-        PortableStoreKind::Mcp
-    };
-    StoreLinkClass::StoreLink {
-        store_id,
-        canonical,
-        kind,
-    }
+    StoreLinkClass::EscapeLink
 }
 
 /// 在 `link_path` 创建指向 `store_target` 的软链。

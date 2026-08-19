@@ -69,13 +69,15 @@ export interface PortableInventoryViewProps {
   controller: UsePortableInventoryControllerResult;
   labels: PortableInventoryViewLabels;
   onOpenOwner?: (item: PortableInventoryItemDto) => void;
+  /** 项目 Agent 冻结身份后隐藏行内范围。 */
+  hideScope?: boolean;
 }
 
 /**
  * 渲染 portable inventory workspace 主体（F2 范围，不含 details/pull）。
  */
 export function PortableInventoryView(props: PortableInventoryViewProps): JSX.Element {
-  const { controller, labels, onOpenOwner } = props;
+  const { controller, labels, onOpenOwner, hideScope = false } = props;
   const {
     loading,
     refreshing,
@@ -284,6 +286,7 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
           openAction,
           storeLane: filters.assetLane === 'store',
           filters,
+          hideScope,
         })}
       </div>
     </div>
@@ -299,6 +302,7 @@ interface InventoryGroupRenderProps {
   openAction: (itemId: string, action: PortableAssetActionKind) => void;
   storeLane: boolean;
   filters: PortableInventoryFilters;
+  hideScope: boolean;
 }
 
 /**
@@ -316,6 +320,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
     openAction,
     storeLane,
     filters,
+    hideScope,
   } = props;
 
   function renderRow(
@@ -331,6 +336,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
         labels={labels}
         onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
         onOpenOwner={extra?.onOpenOwner}
+        hideScope={hideScope}
       />
     );
   }
@@ -376,6 +382,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
               labels={labels}
               catalogAgentChips={chips}
               onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
+              hideScope={hideScope}
               onToggleCatalogAgent={(target) => {
                 const chip = portableStoreAgentChipStates(group).find(
                   (entry) => entry.target === target,

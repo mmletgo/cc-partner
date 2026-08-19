@@ -31,9 +31,10 @@ const RUNTIME_STRUCTURAL_ALLOWLIST = new Set([
   'prompt-panel-left',
   'prompt-panel-top',
   'git-graph-color',
-  // Mobile shell visualViewport 注入（高度/键盘 inset/终端最小高度）
+  // Mobile shell visualViewport 注入（高度/键盘占用/实际上移量/终端最小高度）
   'mobile-shell-height',
   'mobile-keyboard-inset',
+  'mobile-keyboard-shift',
   'mobile-terminal-min-height',
 ]);
 

@@ -16,7 +16,7 @@
  *     live 被 append。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode, type ReactElement, type ReactNode } from 'react';
 
 import { MobileTerminalPanel } from './MobileTerminalPanel';
@@ -24,7 +24,12 @@ import { WorkbenchTerminalBuffersContext } from '@/hooks/workbenchTerminalBuffer
 import type { WorkbenchTerminalBuffersContextValue } from '@/hooks/workbenchTerminalBuffersContext';
 import { createWorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffer';
 import type { WorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffer';
-import type { WorkbenchProject, WorkbenchSession, WorkbenchSessionReplay } from '@/lib/types';
+import type {
+  WorkbenchProject,
+  WorkbenchSession,
+  WorkbenchSessionReplay,
+  WorkbenchWorktree,
+} from '@/lib/types';
 
 interface MockTerminalInstance {
   write: (data: string, cb?: () => void) => void;
@@ -55,6 +60,8 @@ const terminalEvents = vi.hoisted(() => ({
   resetCalls: [] as Array<{ instance: number }>,
   scrollToLineCalls: [] as Array<{ instance: number; line: number }>,
   instances: [] as MockTerminalInstance[],
+  commitCalls: [] as Array<{ worktreeId: string; message: string | null; clientOperationId: string }>,
+  commitResult: null as unknown,
 }));
 
 vi.mock('@xterm/xterm', () => {
@@ -125,6 +132,30 @@ vi.mock('@xterm/addon-fit', () => ({
 }));
 
 vi.mock('@/api/workbenchHttp', () => ({
+  createHttpOrchestratorClientRequestId: vi.fn(() => 'op-terminal-1'),
+  workbenchHttp: {
+    git: {
+      commit: vi.fn((request: {
+        worktreeId: string;
+        message?: string | null;
+        clientOperationId: string;
+      }) => {
+        terminalEvents.commitCalls.push({
+          worktreeId: request.worktreeId,
+          message: request.message ?? null,
+          clientOperationId: request.clientOperationId,
+        });
+        return Promise.resolve(
+          terminalEvents.commitResult ?? {
+            kind: 'succeeded',
+            value: null,
+            clientOperationId: request.clientOperationId,
+          },
+        );
+      }),
+      getMutationOperation: vi.fn(() => Promise.resolve(null)),
+    },
+  },
   httpWorkbenchTransport: {
     sessions: {
       replay: vi.fn(() =>
@@ -152,6 +183,7 @@ vi.mock('react-i18next', () => {
   const translate = (key: string): string => key;
   return {
     useTranslation: () => ({ t: translate }),
+    initReactI18next: { type: '3rdParty', init: () => undefined },
   };
 });
 
@@ -167,6 +199,7 @@ vi.mock('../mobileTerminalInputStream', () => ({
 
 vi.mock('@/lib/icons', () => ({
   ArrowRightIcon: (): null => null,
+  CommitIcon: (): null => null,
   EditIcon: (): null => null,
   MaximizeIcon: (): null => null,
   MinimizeIcon: (): null => null,
@@ -192,7 +225,7 @@ function buildProject(): WorkbenchProject {
   };
 }
 
-function buildSession(): WorkbenchSession {
+function buildSession(overrides: Partial<WorkbenchSession> = {}): WorkbenchSession {
   return {
     id: 's1',
     projectId: 'p1',
@@ -208,6 +241,34 @@ function buildSession(): WorkbenchSession {
     exitCode: null,
     supportsPanes: false,
     paneCount: 1,
+    ...overrides,
+  };
+}
+
+function buildWorktree(overrides: Partial<WorkbenchWorktree> = {}): WorkbenchWorktree {
+  return {
+    id: 'wt-1',
+    projectId: 'p1',
+    name: 'main',
+    branch: 'main',
+    baseBranch: null,
+    path: '/p',
+    isMain: true,
+    canCollectMerge: false,
+    homeBranch: null,
+    collectibleBranches: [],
+    status: {
+      branch: 'main',
+      changed: 2,
+      ahead: 0,
+      behind: 0,
+      conflicts: 0,
+      clean: false,
+      canPush: true,
+    },
+    createdAt: '',
+    updatedAt: '',
+    ...overrides,
   };
 }
 
@@ -283,6 +344,8 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.pasteImageCalls.length = 0;
     terminalEvents.resetCalls.length = 0;
     terminalEvents.scrollToLineCalls.length = 0;
+    terminalEvents.commitCalls.length = 0;
+    terminalEvents.commitResult = null;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
     global.ResizeObserver = class {
       observe(): void {}
@@ -868,6 +931,149 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
           dataUrl: expect.stringMatching(/^data:image\/png;base64,/),
         },
       ]);
+    });
+  });
+});
+
+describe('MobileTerminalPanel — commit FAB', () => {
+  beforeEach(() => {
+    terminalEvents.clearCalls.length = 0;
+    terminalEvents.writeCalls.length = 0;
+    terminalEvents.instances.length = 0;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.replayPromise = null;
+    terminalEvents.commitCalls.length = 0;
+    terminalEvents.commitResult = null;
+    global.ResizeObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   终端右侧悬浮按钮组必须把 Commit 放在 Prompt 优化上方，方便在不离开终端时提交。
+   *
+   * Code Logic（这个测试做什么）:
+   *   有 worktree 时断言 Commit 按钮存在，且在 FAB 组内位于优化 Prompt 之前。
+   */
+  test('renders commit FAB above the prompt optimizer button', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    const optimizer = screen.getByRole('button', { name: 'workbench:promptOptimizer.open' });
+    screen.getByRole('button', { name: 'workbench:mobile.favoriteQuickInput.openButton' });
+    const group = commit.parentElement;
+    expect(group).not.toBeNull();
+    expect(group).toBe(optimizer.parentElement);
+    const labels = Array.from(group?.querySelectorAll('button') ?? []).map((button) =>
+      button.getAttribute('aria-label'),
+    );
+    expect(labels.indexOf('workbench:worktrees.commit')).toBeLessThan(
+      labels.indexOf('workbench:promptOptimizer.open'),
+    );
+    expect(labels.indexOf('workbench:promptOptimizer.open')).toBeLessThan(
+      labels.indexOf('workbench:mobile.favoriteQuickInput.openButton'),
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   无 worktree 时不能发起 AI commit，避免打到空路径。
+   *
+   * Code Logic（这个测试做什么）:
+   *   worktree=null 时 Commit 按钮 disabled。
+   */
+  test('disables commit FAB when no worktree is selected', () => {
+    const session = buildSession();
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    expect(
+      (screen.getByRole('button', { name: 'workbench:worktrees.commit' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   点击必须与 PC Git 历史 Commit 同口径：message=null + 稳定 clientOperationId。
+   *
+   * Code Logic（这个测试做什么）:
+   *   点击 Commit FAB，断言 git.commit 参数。
+   */
+  test('clicking commit FAB posts git.commit with null message', async () => {
+    const worktree = buildWorktree();
+    terminalEvents.commitResult = {
+      kind: 'succeeded',
+      value: { ...worktree, status: { ...worktree.status, clean: true, changed: 0 } },
+      clientOperationId: 'op-terminal-1',
+    };
+    const onWorktreeChange = vi.fn();
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={worktree}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onWorktreeChange={onWorktreeChange}
+        />
+      </BuffersProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
+
+    await waitFor(() => {
+      expect(terminalEvents.commitCalls).toEqual([
+        {
+          worktreeId: 'wt-1',
+          message: null,
+          clientOperationId: 'op-terminal-1',
+        },
+      ]);
+    });
+    await waitFor(() => {
+      expect(onWorktreeChange).toHaveBeenCalledTimes(1);
     });
   });
 });

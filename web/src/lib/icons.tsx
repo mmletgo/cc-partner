@@ -594,3 +594,20 @@ export const TokenIcon = ({ size, ...rest }: IconProps) => (
     <path d="M5.5 10.5h5" />
   </svg>
 );
+
+/**
+ * CommitIcon — Git 提交节点
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   移动端终端右侧需要与 Prompt 优化/收藏区分的 Commit 快捷键图标，避免复用铅笔 EditIcon。
+ *
+ * Code Logic（这个组件做什么）:
+ *   竖直线穿过中心圆，表示 Git 历史上的一次提交节点。
+ */
+export const CommitIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M8 2v3.8" />
+    <circle cx="8" cy="8" r="2.2" />
+    <path d="M8 10.2V14" />
+  </svg>
+);

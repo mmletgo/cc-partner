@@ -14,7 +14,6 @@ import {
   MenuIcon,
   OrchestratorIcon,
   ProviderManagerIcon,
-  PromptsIcon,
   SendIcon,
   SettingsIcon,
   TerminalIcon,
@@ -22,9 +21,13 @@ import {
 } from '@/lib/icons';
 import {
   closeMobileNav,
+  computeMobileKeyboardShift,
   computeMobileViewportLayoutHints,
   getInitialMobileNavOpen,
   getMobileWorkbenchNavGroups,
+  isMobileEditableKeyboardTarget,
+  isMobileTerminalTypingTarget,
+  resolveAppliedMobileKeyboardShift,
   openMobileNav,
   resolveMobileNavMode,
   selectMobilePanel,
@@ -48,7 +51,6 @@ const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
   files: FileIcon,
   git: HistoryIcon,
   worktrees: ForkIcon,
-  prompt: PromptsIcon,
   transfer: SendIcon,
   automation: OrchestratorIcon,
   settings: SettingsIcon,
@@ -101,7 +103,7 @@ interface MobilePanelNavProps {
  * MobilePanelNav（移动端工作台分组导航）
  *
  * Business Logic（为什么需要这个组件）:
- *   全局壳只展示项目/待处理/Prompt/传输/设置；进入项目后切换为项目内工具 + 全局快捷，
+ *   全局壳只展示项目/待处理/传输/设置；进入项目后切换为项目内工具 + 全局快捷，
  *   与桌面「先选项目再进工作台」一致。
  *
  * Code Logic（这个组件做什么）:
@@ -124,7 +126,6 @@ function MobilePanelNav({
     files: t('workbench:mobile.nav.files'),
     git: t('workbench:mobile.nav.git'),
     worktrees: t('workbench:mobile.nav.worktrees'),
-    prompt: t('workbench:mobile.nav.prompt'),
     transfer: t('workbench:mobile.nav.transfer'),
     automation: t('workbench:mobile.nav.automation'),
     settings: t('workbench:mobile.nav.settings'),
@@ -218,7 +219,7 @@ function MobilePanelNav({
  *
  * Business Logic（为什么需要这个组件）:
  *   `/mobile` 需要在手机竖屏提供覆盖式抽屉导航，在平板/桌面宽屏提供固定 rail，给后续业务面板统一承载容器。
- *   工作区面板由父级注入固定 worktree 条（不随面板滚动）；状态行只读；软键盘弹出时用 visualViewport 压缩高度。
+ *   工作区面板由父级注入固定 worktree 条（不随面板滚动）；状态行只读；软键盘弹出时按终端/焦点计算上移量。
  *
  * Code Logic（这个组件做什么）:
  *   管理移动抽屉 open state，按分组渲染导航；监听 visualViewport 写入 shell CSS 变量；
@@ -317,23 +318,43 @@ export function MobileWorkbenchShell({
 
   /**
    * Business Logic（为什么需要这个 effect）:
-   *   软键盘弹出时 layout viewport 通常不变但 visualViewport 变矮；shell 与终端全屏 overlay
-   *   都依赖同一套 CSS 变量整体上移，避免输入区被键盘遮挡。
+   *   软键盘弹出时 layout viewport 通常不变但 visualViewport 变矮；终端输入要把 shell /
+   *   全屏 overlay 整体顶到键盘上方，其它输入只把焦点抬到未遮挡可视区中线附近。
    *
    * Code Logic（这个 effect 做什么）:
-   *   监听 visualViewport resize/scroll 与 window resize，写入 --mobile-shell-height /
-   *   --mobile-keyboard-inset / --mobile-terminal-min-height 与 data-keyboard-open。
+   *   监听 visualViewport resize/scroll、window resize 与 focusin/focusout；写入
+   *   --mobile-shell-height / --mobile-keyboard-inset / --mobile-keyboard-shift /
+   *   --mobile-terminal-min-height 与 data-keyboard-open；弹层 portal 同步 transform。
    */
   useEffect(() => {
     const root = shellRef.current;
     if (!root) return;
+    const shiftRef = { current: 0 };
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   viewport 变化后需要同步 shell 高度、键盘上移量与终端优先高度 token。
+     *   Dialog portal 在 document.body，不继承 shell 的 top 上移，必须同步平移否则焦点仍被键盘盖住。
      *
      * Code Logic（这个函数做什么）:
-     *   读取 visualViewport/inner*，调用 computeMobileViewportLayoutHints 并写 CSS 变量。
+     *   给 [data-dialog-root] 写入/清除 translateY(-shift)；shift=0 时去掉 transform，避免多余 containing block。
+     */
+    const applyPortalShift = (shift: number): void => {
+      const nodes = document.querySelectorAll<HTMLElement>('[data-dialog-root]');
+      nodes.forEach((node) => {
+        if (shift > 0) {
+          node.style.transform = `translateY(-${shift}px)`;
+        } else {
+          node.style.removeProperty('transform');
+        }
+      });
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   viewport 或焦点变化后需要同步 shell 高度、键盘占用、实际上移量与终端优先高度 token。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取 visualViewport/inner* 与 activeElement，计算 inset 与 shift，写 CSS 变量并平移弹层。
      */
     const applyViewportHints = (): void => {
       const vv = window.visualViewport;
@@ -344,13 +365,52 @@ export function MobileWorkbenchShell({
         vv?.height ?? null,
         offsetTop,
       );
-      // shell 与全屏 terminal overlay 共用：height 保持 layout 全屏，top 取负 inset 整体上移。
+      const active = document.activeElement;
+      const terminalTyping = isMobileTerminalTypingTarget(active);
+      const editable = isMobileEditableKeyboardTarget(active);
+      let focusTop: number | null = null;
+      let focusHeight = 0;
+      if (editable && active instanceof HTMLElement) {
+        const rect = active.getBoundingClientRect();
+        const dialogRoot = active.closest('[data-dialog-root]');
+        const appliedShift = resolveAppliedMobileKeyboardShift({
+          dialogTransform:
+            dialogRoot instanceof HTMLElement ? dialogRoot.style.transform || null : null,
+          insideShell: root.contains(active),
+          shellShift: shiftRef.current,
+        });
+        focusTop = rect.top + appliedShift;
+        focusHeight = rect.height;
+      }
+      const shift = computeMobileKeyboardShift({
+        keyboardInset: hints.keyboardInset,
+        layoutViewportHeight: hints.shellHeight,
+        focusTop,
+        focusHeight,
+        mode: terminalTyping ? 'full' : 'focused',
+        previousShift: shiftRef.current,
+      });
+      shiftRef.current = shift;
       root.style.setProperty('--mobile-shell-height', `${hints.shellHeight}px`);
-      // inset 驱动 shell/fullscreen top；CSS 不得再把它叠到 padding-bottom。
+      // inset = 键盘占用高度；shift = 实际 CSS 上移量。CSS 不得把 inset 再叠到 padding-bottom。
       root.style.setProperty('--mobile-keyboard-inset', `${hints.keyboardInset}px`);
+      root.style.setProperty('--mobile-keyboard-shift', `${shift}px`);
+      document.documentElement.style.setProperty('--mobile-keyboard-shift', `${shift}px`);
       root.style.setProperty('--mobile-terminal-min-height', `${hints.terminalMinHeight}px`);
       root.dataset.landscape = hints.landscape ? 'true' : 'false';
       root.dataset.keyboardOpen = hints.keyboardInset > 0 ? 'true' : 'false';
+      applyPortalShift(shift);
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   focusout 时下一个可编辑焦点可能尚未挂上，立即按「无焦点」计算会让页面先掉下去再抬起。
+     *
+     * Code Logic（这个函数做什么）:
+     *   下一帧再跑 applyViewportHints，让同一次切焦点的 focusin 先写入。
+     */
+    const handleFocusOut = (): void => {
+      window.requestAnimationFrame(applyViewportHints);
     };
 
     applyViewportHints();
@@ -358,10 +418,16 @@ export function MobileWorkbenchShell({
     vv?.addEventListener('resize', applyViewportHints);
     vv?.addEventListener('scroll', applyViewportHints);
     window.addEventListener('resize', applyViewportHints);
+    document.addEventListener('focusin', applyViewportHints);
+    document.addEventListener('focusout', handleFocusOut);
     return () => {
       vv?.removeEventListener('resize', applyViewportHints);
       vv?.removeEventListener('scroll', applyViewportHints);
       window.removeEventListener('resize', applyViewportHints);
+      document.removeEventListener('focusin', applyViewportHints);
+      document.removeEventListener('focusout', handleFocusOut);
+      document.documentElement.style.removeProperty('--mobile-keyboard-shift');
+      applyPortalShift(0);
     };
   }, []);
 
@@ -375,6 +441,7 @@ export function MobileWorkbenchShell({
           // 初始 SSR/首帧回退：真实值由 visualViewport effect 覆盖
           ['--mobile-shell-height' as string]: '100dvh',
           ['--mobile-keyboard-inset' as string]: '0px',
+          ['--mobile-keyboard-shift' as string]: '0px',
           ['--mobile-terminal-min-height' as string]: '48dvh',
         } as CSSProperties
       }

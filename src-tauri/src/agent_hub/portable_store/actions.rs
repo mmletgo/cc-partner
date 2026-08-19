@@ -8,12 +8,13 @@
 //!     建/拆软链；destroy 清各 Agent native 根与 `~/.agents` 上仍指向真树的软链。
 
 use super::{
-    attach_store_link, classify_store_link, current_portable_store_root,
-    ensure_portable_store_layout, migrate_native_into_store, remove_manifest_attachment,
-    remove_manifest_entry, store_command_file, store_id_for, store_skill_dir, unlink_if_store_link,
-    upsert_manifest_entry, ManifestAttachment, PortableStoreKind, StoreLinkClass,
+    attach_store_link, classify_store_link, current_portable_store_root, ensure_store_layout,
+    migrate_native_into_store, remove_manifest_attachment, remove_manifest_entry,
+    store_command_file, store_id_for, store_skill_dir, try_portable_store_root_for_scope,
+    unlink_if_store_link, upsert_manifest_entry, ManifestAttachment, PortableStoreKind,
+    StoreLinkClass,
 };
-use crate::agent_hub::models::AgentTarget;
+use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
 use crate::agent_hub::portable_actions::targets::TargetActionRawOutcome;
@@ -57,7 +58,17 @@ pub fn execute_skill_or_command_store(
     item: Option<&PortableInventoryItemDto>,
 ) -> Result<TargetActionRawOutcome, AppError> {
     let data_dir = crate::config::data_dir()?;
-    let store_root = ensure_portable_store_layout(&data_dir)?;
+    let Some(chosen_root) = try_portable_store_root_for_scope(
+        &data_dir,
+        item.map(|i| i.scope_kind).unwrap_or(ScopeKind::User),
+        item.and_then(|i| i.project_id.as_deref()),
+    ) else {
+        return Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_STORE_PROJECT_ID_REQUIRED".into(),
+            message: "project store requires hub project id".into(),
+        });
+    };
+    let store_root = ensure_store_layout(&chosen_root)?;
     let store_kind = match kind {
         PortableAssetKind::Skill => PortableStoreKind::Skill,
         PortableAssetKind::Command => PortableStoreKind::Command,
