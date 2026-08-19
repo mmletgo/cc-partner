@@ -6,7 +6,8 @@
 //!     禁止把 `~/.agents` 当 Claude/Grok 的统一库，也禁止跟随逃逸 symlink。
 //!
 //! Code Logic（这个模块做什么）:
-//!     布局 `<data_dir>/portable-store/{skills,commands,mcp,manifest.json}`；
+//!     用户级 `<data_dir>/portable-store/`；项目级
+//!     `<data_dir>/project-portable-store/<hubProjectId>/`；
 //!     分类/创建/拆除 Skill/Command 软链；读写 manifest。
 //!     仍创建 `mcp/` 以免打散遗留 JSON，但不再写入或投影。
 
@@ -27,6 +28,7 @@ pub use symlink::{
     materialize_escape_link, unlink_if_store_link, unlink_store_link, StoreLinkClass,
 };
 
+use crate::agent_hub::models::ScopeKind;
 use crate::error::AppError;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,7 +43,7 @@ pub fn portable_store_root(data_dir: &Path) -> PathBuf {
     data_dir.join("portable-store")
 }
 
-/// 解析当前进程的 portable-store 根；data_dir 失败则 None。
+/// 解析当前进程的用户级 portable-store 根；data_dir 失败则 None。
 ///
 /// Business Logic: 扫描时拿不到数据根就不能白名单跟随，必须 fail-closed。
 /// Code Logic: `config::data_dir()` 成功才返回根路径。
@@ -51,16 +53,87 @@ pub fn current_portable_store_root() -> Option<PathBuf> {
         .map(|dir| portable_store_root(&dir))
 }
 
-/// 确保 store 布局存在。
+/// 项目级 Skill/Command 仓库根：`<data_dir>/project-portable-store/<hubProjectId>`。
+///
+/// Business Logic: 项目 Agent 的仓库不得混入用户级 portable-store。
+/// Code Logic: 与用户仓库并列，避免 `is_under_portable_store` 把项目真树当成用户库。
+pub fn portable_project_store_root(data_dir: &Path, hub_project_id: &str) -> PathBuf {
+    data_dir
+        .join("project-portable-store")
+        .join(hub_project_id.trim())
+}
+
+/// 按 scope 选择仓库根；项目级缺合法 hub id 时返回 None，不回退用户库。
+pub fn try_portable_store_root_for_scope(
+    data_dir: &Path,
+    scope_kind: ScopeKind,
+    hub_project_id: Option<&str>,
+) -> Option<PathBuf> {
+    if scope_kind == ScopeKind::Project {
+        let id = hub_project_id.map(str::trim).filter(|s| !s.is_empty())?;
+        validate_store_native_id(id).ok()?;
+        return Some(portable_project_store_root(data_dir, id));
+    }
+    Some(portable_store_root(data_dir))
+}
+
+/// 按 scope 选择仓库根；非法/空的项目 id 回退用户库。
+pub fn portable_store_root_for_scope(
+    data_dir: &Path,
+    scope_kind: ScopeKind,
+    hub_project_id: Option<&str>,
+) -> PathBuf {
+    try_portable_store_root_for_scope(data_dir, scope_kind, hub_project_id)
+        .unwrap_or_else(|| portable_store_root(data_dir))
+}
+
+/// 当前进程下用户库 + 已存在的项目库根。
+///
+/// Business Logic: 分类软链时必须认出项目仓库，否则项目附加会被当成逃逸链。
+/// Code Logic: 用户根恒在；`project-portable-store/*` 仅收录合法 id 目录。
+pub fn current_portable_store_roots() -> Vec<PathBuf> {
+    let Ok(data) = crate::config::data_dir() else {
+        return Vec::new();
+    };
+    list_portable_store_roots(&data)
+}
+
+/// 列出 data_dir 下全部 portable-store 根（用户 + 项目）。
+pub fn list_portable_store_roots(data_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![portable_store_root(data_dir)];
+    let projects = data_dir.join("project-portable-store");
+    let Ok(entries) = fs::read_dir(&projects) else {
+        return roots;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if validate_store_native_id(name).is_ok() {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+/// 确保指定 store 根布局存在。
 ///
 /// Business Logic: 迁移/附加前必须有 skills/commands；保留 mcp/ 以免打散遗留凭据文件。
 /// Code Logic: `create_dir_all` 三个子目录；不写 manifest（按需创建）；不写新 MCP JSON。
+pub fn ensure_store_layout(store_root: &Path) -> Result<PathBuf, AppError> {
+    fs::create_dir_all(store_root.join("skills"))?;
+    fs::create_dir_all(store_root.join("commands"))?;
+    fs::create_dir_all(store_root.join("mcp"))?;
+    Ok(store_root.to_path_buf())
+}
+
+/// 确保用户级 store 布局存在。
 pub fn ensure_portable_store_layout(data_dir: &Path) -> Result<PathBuf, AppError> {
-    let root = portable_store_root(data_dir);
-    fs::create_dir_all(root.join("skills"))?;
-    fs::create_dir_all(root.join("commands"))?;
-    fs::create_dir_all(root.join("mcp"))?;
-    Ok(root)
+    ensure_store_layout(&portable_store_root(data_dir))
 }
 
 /// Skill 真树路径：`portable-store/skills/<id>`。
@@ -188,6 +261,60 @@ mod tests {
             classify_store_link(&regular),
             StoreLinkClass::Regular
         ));
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn project_store_root_is_isolated_from_user_store() {
+        let (_tmp, data) = isolated_data_dir();
+        let user = portable_store_root(&data);
+        let project = portable_project_store_root(&data, "hub-abc");
+        assert_ne!(user, project);
+        assert!(!project.starts_with(&user.join("skills")));
+        let layout = ensure_store_layout(&project).expect("project layout");
+        assert!(layout.join("skills").is_dir());
+        assert_eq!(
+            portable_store_root_for_scope(
+                &data,
+                crate::agent_hub::models::ScopeKind::Project,
+                Some("hub-abc")
+            ),
+            project
+        );
+        assert_eq!(
+            portable_store_root_for_scope(&data, crate::agent_hub::models::ScopeKind::User, None),
+            user
+        );
+        assert!(try_portable_store_root_for_scope(
+            &data,
+            crate::agent_hub::models::ScopeKind::Project,
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn classify_follows_project_store_targets() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let root =
+            ensure_store_layout(&portable_project_store_root(&data, "hub-abc")).expect("layout");
+        let skill = store_skill_dir(&root, "foo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+
+        let native = data.join("proj").join("skills");
+        fs::create_dir_all(&native).unwrap();
+        let link = native.join("foo");
+        create_store_link(&skill, &link).expect("link");
+
+        match classify_store_link(&link) {
+            StoreLinkClass::StoreLink { store_id, .. } => {
+                assert_eq!(store_id, "skill:foo");
+            }
+            other => panic!("expected project store link, got {other:?}"),
+        }
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 

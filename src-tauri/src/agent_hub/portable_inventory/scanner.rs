@@ -31,8 +31,9 @@ use crate::agent_hub::portable_inventory::plugin_enablement::{
 };
 use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
 use crate::agent_hub::portable_store::{
-    classify_store_link, current_portable_store_root, store_command_file, store_id_for,
-    store_id_from_canonical, store_skill_dir, PortableStoreKind, StoreLinkClass,
+    classify_store_link, is_under_portable_store, store_command_file, store_id_for,
+    store_id_from_canonical, store_skill_dir, try_portable_store_root_for_scope, PortableStoreKind,
+    StoreLinkClass,
 };
 use crate::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
@@ -1565,7 +1566,7 @@ fn discovered_to_item(
             infer_parent_plugin_from_path(disc.origin.target, &scope.scope_id, &disc.origin.path)
         });
 
-    let (owned_by, store) = store_fact_for_discovery(disc);
+    let (owned_by, store) = store_fact_for_discovery(disc, scope);
     let actual_enabled = store_catalog_enabled(&store, actual_enabled_for(kind, disc));
     let (content_hash, tree_hash) = match kind {
         PortableAssetKind::Skill => (
@@ -1796,10 +1797,22 @@ fn leftover_duplicate_store_id(
 ///     native/legacyStandalone 软链算本 Agent 已附加。
 fn store_fact_for_discovery(
     disc: &DiscoveredPortableAsset,
+    scope: &PortableScanScope,
 ) -> (PortableAssetOwner, PortableStoreFactDto) {
     let path = &disc.origin.path;
+    let scope_store = store_root_for_scan_scope(scope);
     match classify_store_link(path) {
-        StoreLinkClass::StoreLink { store_id, .. } => {
+        StoreLinkClass::StoreLink {
+            store_id,
+            canonical,
+            ..
+        } => {
+            let belongs = scope_store
+                .as_ref()
+                .is_some_and(|root| is_under_portable_store(&canonical, root));
+            if !belongs {
+                return (disc.origin.owned_by, PortableStoreFactDto::default());
+            }
             let via = disc.origin.owned_by.as_hub_target();
             // Native 与 Codex 自有 legacy 根上的 store 软链都是本 Agent 附加；
             // 不得要求 native_output_candidate（legacyStandalone 恒为 false）。
@@ -1818,9 +1831,10 @@ fn store_fact_for_discovery(
             )
         }
         StoreLinkClass::Regular => {
-            if let (Ok(canonical), Some(store_root)) =
-                (std::fs::canonicalize(path), current_portable_store_root())
-            {
+            let Some(store_root) = scope_store else {
+                return (disc.origin.owned_by, PortableStoreFactDto::default());
+            };
+            if let Ok(canonical) = std::fs::canonicalize(path) {
                 if let Some(store_id) = store_id_from_canonical(&canonical, &store_root) {
                     return (
                         PortableAssetOwner::PortableStore,
@@ -1859,10 +1873,16 @@ fn store_fact_for_discovery(
     }
 }
 
-/// 把 store 目录里尚未出现在该 target 盘点中的资产补进列表。
+/// 当前扫描 scope 对应的仓库根；项目级不回退用户库。
+fn store_root_for_scan_scope(scope: &PortableScanScope) -> Option<PathBuf> {
+    let data = crate::config::data_dir().ok()?;
+    try_portable_store_root_for_scope(&data, scope.scope_kind, scope.project_id.as_deref())
+}
+
+/// 把对应 scope 的 store 目录里尚未出现在该 target 盘点中的资产补进列表。
 ///
-/// Business Logic: 卸下后真树仍在，UI 还要能附加/彻底删除。
-/// Code Logic: 扫描 portable-store/skills|commands，再走 discovered_to_item 去重。
+/// Business Logic: 卸下后真树仍在，UI 还要能附加/彻底删除。用户级扫用户库，项目级扫项目库。
+/// Code Logic: 扫描该 scope 的 portable-store/skills|commands，再走 discovered_to_item 去重。
 ///     Skill 列表查询与 adapter 一样只读 SKILL.md，目录树延迟到动作 preview；
 ///     完整扫描仍算 tree hash，与 `scan_portable_assets` 对齐。
 fn inject_store_catalog_items(
@@ -1874,7 +1894,7 @@ fn inject_store_catalog_items(
     seen: &mut BTreeMap<String, usize>,
     items: &mut Vec<PortableInventoryItemDto>,
 ) {
-    let Some(store_root) = current_portable_store_root() else {
+    let Some(store_root) = store_root_for_scan_scope(scope) else {
         return;
     };
     if !store_root.is_dir() {
@@ -4454,6 +4474,128 @@ enabled = ["native-only"]
         assert_eq!(
             hash1, hash2,
             "unattached store / leftover extra files must not change skill-page CAS hash"
+        );
+
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn project_scope_store_catalog_does_not_inject_user_store() {
+        use crate::agent_hub::portable_store::{
+            ensure_store_layout, portable_project_store_root, portable_store_root, store_skill_dir,
+        };
+        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
+
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+        let user_store = ensure_store_layout(&portable_store_root(&data)).expect("user layout");
+        write(
+            &store_skill_dir(&user_store, "user-only").join("SKILL.md"),
+            "---\nname: user-only\n---\n# User\n",
+        );
+        let project_store =
+            ensure_store_layout(&portable_project_store_root(&data, "hub-proj-1")).expect("proj");
+        write(
+            &store_skill_dir(&project_store, "proj-only").join("SKILL.md"),
+            "---\nname: proj-only\n---\n# Project\n",
+        );
+
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars: Default::default(),
+            path_entries: vec![],
+        };
+        let scopes = vec![PortableScanScope {
+            scope_id: "project:hub-proj-1".into(),
+            scope_kind: ScopeKind::Project,
+            project_id: Some("hub-proj-1".into()),
+            project_opted_in: true,
+            absolute_path: home.join("proj"),
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Skill),
+            scope_kind: Some(ScopeKind::Project),
+            local_project_id: None,
+        };
+        let (_targets, items) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+        let native_ids: Vec<_> = items.iter().map(|item| item.native_id.as_str()).collect();
+        assert!(
+            native_ids.contains(&"proj-only"),
+            "project store catalog missing: {native_ids:?}"
+        );
+        assert!(
+            !native_ids.contains(&"user-only"),
+            "user store leaked into project catalog: {native_ids:?}"
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.scope_kind == ScopeKind::Project));
+
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn project_scope_leftover_does_not_claim_user_store() {
+        use crate::agent_hub::portable_store::{
+            ensure_store_layout, portable_store_root, store_skill_dir,
+        };
+        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
+
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = tmp.path().join("data");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+        let body = "---\nname: twin\n---\n# Twin\n";
+        let user_store = ensure_store_layout(&portable_store_root(&data)).expect("user layout");
+        write(&store_skill_dir(&user_store, "twin").join("SKILL.md"), body);
+        let proj = home.join("proj");
+        write(&proj.join(".claude/skills/twin/SKILL.md"), body);
+
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars: Default::default(),
+            path_entries: vec![],
+        };
+        let scopes = vec![PortableScanScope {
+            scope_id: "project:hub-proj-1".into(),
+            scope_kind: ScopeKind::Project,
+            project_id: Some("hub-proj-1".into()),
+            project_opted_in: true,
+            absolute_path: proj,
+        }];
+        let query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Skill),
+            scope_kind: Some(ScopeKind::Project),
+            local_project_id: None,
+        };
+        let (_targets, items) =
+            scan_portable_inventory_facts_query(&env, &scopes, query).expect("scan");
+        let twin = items.iter().find(|item| item.native_id == "twin");
+        assert!(
+            twin.is_some(),
+            "project skill missing: {:?}",
+            items
+                .iter()
+                .map(|item| item.native_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            twin.unwrap().store.store_id.is_none(),
+            "user store leftover leaked: {:?}",
+            twin.unwrap().store
         );
 
         std::env::remove_var("CC_PARTNER_DATA_DIR");

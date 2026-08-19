@@ -5,7 +5,7 @@
  *   项目 Agent 与项目自动化共用标题栏入口且互斥；抽到独立 view 让 Workbench.tsx 保持 ≤1200 行。
  *
  * Code Logic（做什么）:
- *   渲染 workspaceHeader；ledger 仅隐藏触发按钮；项目 Agent 在终端全屏时隐藏。
+ *   渲染 workspaceHeader：title + 标语空隙 + ledger/项目 Agent/项目自动化。
  */
 
 import type { ReactElement } from 'react';
@@ -13,8 +13,10 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { ClaudeMdIcon, OrchestratorIcon } from '@/lib/icons';
 import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
+import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
 import type { WorkbenchProjectControllerResult } from './controllers/useWorkbenchProjectController';
+import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import styles from './Workbench.module.css';
 
 export interface WorkbenchWorkspaceHeaderProps {
@@ -44,6 +46,9 @@ export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): 
     onToggleAutomation,
   } = props;
   const { t } = useTranslation(['workbench']);
+  const { activeProject } = useWorkbenchProjects();
+  const bannerDeviceId =
+    activeProject?.kind === 'remote' ? activeProject.deviceId : undefined;
 
   return (
     <section className={styles.workspaceHeader}>
@@ -56,6 +61,10 @@ export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): 
           <p className={styles.workspacePath}>{workspaceLine}</p>
         </div>
       </div>
+      <WorkbenchBanner
+        deviceId={bannerDeviceId}
+        remoteWriteDisabled={projectCtrl.remoteWriteDisabled}
+      />
       <div className={styles.workspaceHeaderActions}>
         <AgentLedgerWorkbenchChrome
           showTrigger={!terminalFullscreen}

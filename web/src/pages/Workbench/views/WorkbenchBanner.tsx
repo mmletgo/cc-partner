@@ -1,13 +1,13 @@
 /**
- * WorkbenchBanner — 应用顶栏 owning-device 标语。
+ * WorkbenchBanner — 工作台顶栏 owning-device 标语。
  *
  * Business Logic（为什么需要）:
- *   用户要在工作台顶栏按整窗水平居中写一句设备标语（轻量 Markdown + emoji），
- *   本机项目写本机、远端项目写对端；离线只读。非工作台路由不展示。
+ *   用户要在工作台顶栏空隙里写一句设备标语（轻量 Markdown + emoji），
+ *   尽量靠近窗口中线但不盖住标题/按钮；本机项目写本机、远端项目写对端；离线只读。
  *
  * Code Logic（做什么）:
  *   单击预览进入 textarea；debounce / 失焦 / ⌘Enter 经 hook 写 owning device；
- *   Esc 丢草稿；ResizeObserver + 离屏测量二分字号。挂在 AppShell，不进工作台标题 flex。
+ *   Esc 丢草稿；ResizeObserver 夹紧空隙位置并二分字号。
  */
 
 import {
@@ -24,9 +24,11 @@ import {
   BANNER_LINE_HEIGHT,
   BANNER_MAX_CHARS,
   BANNER_MIN_FONT_PX,
+  BANNER_PREFERRED_MAX_PX,
   BANNER_SAVE_DEBOUNCE_MS,
   fitBannerFontSize,
   parseBannerMarkdown,
+  placeBannerInGap,
   type BannerInline,
 } from '../workbenchBanner';
 import { useWorkbenchBanner } from '../useWorkbenchBanner';
@@ -84,7 +86,7 @@ function renderBannerNodes(nodes: BannerInline[]): ReactElement[] {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   整窗居中的可编辑标语要独立成叶子，且不能膨胀 Workbench.tsx。
+ *   标题与按钮之间的空隙要变成可编辑标语：缩小后尽量靠窗口中线，且不能膨胀 Workbench.tsx。
  *
  * Code Logic（这个函数做什么）:
  *   预览/编辑两态；容器尺寸变化后重算字号。
@@ -106,6 +108,7 @@ export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement 
   const [draft, setDraft] = useState(markdown);
   const [editing, setEditing] = useState(false);
   const [fontPx, setFontPx] = useState(BANNER_MIN_FONT_PX);
+  const [slot, setSlot] = useState({ offset: 0, width: 0 });
   const draftRef = useRef(markdown);
   const savedRef = useRef(markdown);
 
@@ -139,6 +142,22 @@ export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement 
     },
     [persist],
   );
+
+  const placeInGap = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const rect = frame.getBoundingClientRect();
+    const preferred = Math.min(BANNER_PREFERRED_MAX_PX, window.innerWidth * 0.36);
+    const next = placeBannerInGap({
+      gapLeft: rect.left,
+      gapRight: rect.right,
+      viewportCenter: window.innerWidth / 2,
+      preferredMaxWidth: preferred,
+    });
+    setSlot((prev) =>
+      prev.offset === next.offset && prev.width === next.width ? prev : next,
+    );
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -179,16 +198,33 @@ export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement 
   }, []);
 
   useLayoutEffect(() => {
+    placeInGap();
+    const frame = frameRef.current;
+    window.addEventListener('resize', placeInGap);
+    if (!frame || typeof ResizeObserver === 'undefined') {
+      return () => window.removeEventListener('resize', placeInGap);
+    }
+    const observer = new ResizeObserver(() => {
+      placeInGap();
+    });
+    observer.observe(frame);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', placeInGap);
+    };
+  }, [placeInGap]);
+
+  useLayoutEffect(() => {
     if (editing) return;
     refit();
-    const frame = frameRef.current;
-    if (!frame || typeof ResizeObserver === 'undefined') return undefined;
+    const preview = previewRef.current;
+    if (!preview || typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(() => {
       refit();
     });
-    observer.observe(frame);
+    observer.observe(preview);
     return () => observer.disconnect();
-  }, [editing, markdown, refit]);
+  }, [editing, markdown, refit, slot.width]);
 
   useEffect(() => {
     if (!editing) return undefined;
@@ -283,6 +319,14 @@ export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement 
 
   return (
     <div ref={frameRef} className={styles.frame} data-testid="workbench-banner">
+      <div
+        className={styles.inner}
+        style={
+          slot.width > 0
+            ? { left: slot.offset, width: slot.width }
+            : { left: 0, right: 0 }
+        }
+      >
       {editing ? (
         <>
           <textarea
@@ -326,6 +370,7 @@ export function WorkbenchBanner(props: WorkbenchBannerProps = {}): ReactElement 
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

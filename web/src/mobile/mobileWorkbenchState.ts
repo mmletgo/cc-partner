@@ -12,7 +12,6 @@ export type MobileWorkbenchPanel =
   | 'files'
   | 'git'
   | 'worktrees'
-  | 'prompt'
   | 'transfer'
   | 'automation'
   | 'settings'
@@ -69,12 +68,42 @@ export interface MobileWorkbenchNavGroup {
  *
  * Code Logic（字段说明）:
  *   shellHeight/keyboardInset 为 CSS 像素；landscape 表示宽>高。
+ *   keyboardInset 是键盘占用高度，不等于页面上移量；上移量由 computeMobileKeyboardShift 另算。
  */
 export interface MobileViewportLayoutHints {
   shellHeight: number;
   keyboardInset: number;
   landscape: boolean;
   terminalMinHeight: number;
+}
+
+/**
+ * 移动端软键盘页面上移模式。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   终端输入需要整页让出键盘；其它输入只需要把焦点放到未遮挡可视区，不能一律顶满。
+ *
+ * Code Logic（联合形态）:
+ *   full=按键盘高度整页上移；focused=按焦点几何把输入放到可视区纵向中线附近。
+ */
+export type MobileKeyboardShiftMode = 'full' | 'focused';
+
+/**
+ * 计算软键盘上移量所需的焦点几何。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   非终端输入要把字段尽量放进未遮挡区域的纵向中间，几何必须可单测、不绑 DOM。
+ *
+ * Code Logic（字段说明）:
+ *   focusTop 是未上移坐标系中焦点顶边（layout viewport）；null 表示当前没有可编辑焦点。
+ */
+export interface MobileKeyboardShiftInput {
+  keyboardInset: number;
+  layoutViewportHeight: number;
+  focusTop: number | null;
+  focusHeight: number;
+  mode: MobileKeyboardShiftMode;
+  previousShift: number;
 }
 
 /** 必须绑定 active project 才有意义的面板（进入项目工作台后才出现在主导航）。 */
@@ -91,27 +120,27 @@ const MOBILE_PROJECT_BOUND_PANELS: readonly MobileWorkbenchPanel[] = [
 const MOBILE_GLOBAL_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
   { id: 'projects', panels: ['projects'] },
   { id: 'inbox', panels: ['attention'] },
-  { id: 'tools', panels: ['prompt', 'transfer'] },
+  { id: 'tools', panels: ['transfer'] },
   { id: 'system', panels: ['settings', 'provider'] },
 ];
 
 /**
- * 项目模式：项目内工具 + 底部全局快捷（待处理/Prompt/设置）。
+ * 项目模式：项目内工具 + 底部全局快捷（待处理/传输/设置）。
  * Provider 仅全局模式可达，避免项目工作台噪音。
+ * Prompt 优化不进主导航，只留在终端内浮层。
  */
 const MOBILE_PROJECT_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
   {
     id: 'work',
     panels: ['terminal', 'browser', 'files', 'git', 'worktrees', 'automation'],
   },
-  { id: 'shortcuts', panels: ['attention', 'prompt', 'transfer', 'settings'] },
+  { id: 'shortcuts', panels: ['attention', 'transfer', 'settings'] },
 ];
 
 /** 全量 panel 枚举（去重后），供测试与「存在性」合同使用。 */
 const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
   'projects',
   'attention',
-  'prompt',
   'transfer',
   'settings',
   'provider',
@@ -286,7 +315,7 @@ export function isMobileProjectBoundPanel(panel: MobileWorkbenchPanel): boolean 
  *
  * Code Logic（这个函数做什么）:
  *   无 active project → global；panel 为 projects/provider → global；
- *   其余（含 attention/prompt/transfer/settings 与项目绑定面板）在有项目时 → project。
+ *   其余（含 attention/transfer/settings 与项目绑定面板）在有项目时 → project。
  */
 export function resolveMobileNavMode(
   panel: MobileWorkbenchPanel,
@@ -382,10 +411,10 @@ export function computeMobileTerminalMinHeight(
  *   shell CSS 变量需要一次计算 keyboard inset、shell 高度与终端优先高度，避免组件内散落公式。
  *
  * Code Logic（这个函数做什么）:
- *   shellHeight = layoutViewportHeight：shell 保持全屏高度不压缩，软键盘弹出时改由 shell 整体上移
- *   （top = -keyboardInset）把内容平移到键盘上方，terminal 大小不变；keyboardInset =
- *   layoutViewportHeight - visualViewportHeight（依赖 visualViewport.resize），既驱动 shell 上移
- *   也作 data-keyboard-open 检测；terminalMinHeight 基于 layoutViewportHeight 计算。
+ *   shellHeight = layoutViewportHeight：shell 保持全屏高度不压缩；keyboardInset =
+ *   layoutViewportHeight - visualViewportHeight（依赖 visualViewport.resize），供
+ *   data-keyboard-open 与 computeMobileKeyboardShift 使用；实际 CSS top 上移量由
+ *   shift helper 按终端/焦点模式另算；terminalMinHeight 基于 layoutViewportHeight。
  */
 export function computeMobileViewportLayoutHints(
   layoutViewportWidth: number,
@@ -402,8 +431,7 @@ export function computeMobileViewportLayoutHints(
     vvHeight,
     visualViewportOffsetTop,
   );
-  // shell 保持全屏高度：软键盘弹出时由 shell 整体上移（top=-keyboardInset）而非压缩高度，
-  // terminal 大小不变；shell 上移量由 keyboardInset 驱动。
+  // shell 保持全屏高度：软键盘弹出时由 --mobile-keyboard-shift 整体上移而非压缩高度。
   const shellHeight = Math.max(0, Math.round(layoutViewportHeight));
   const landscape = layoutViewportWidth > layoutViewportHeight;
   // shell 全屏不压缩，terminalMinHeight 基于 layoutViewportHeight。
@@ -413,6 +441,118 @@ export function computeMobileViewportLayoutHints(
     0,
   );
   return { shellHeight, keyboardInset, landscape, terminalMinHeight };
+}
+
+/** 焦点与键盘边缘之间保留的最小间距，避免字段贴住键盘上沿。 */
+const MOBILE_KEYBOARD_FOCUS_MARGIN_PX = 8;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   xterm helper textarea 才是「终端输入态」；Prompt 优化 / 收藏搜索等弹层虽在终端页，
+ *   也必须走焦点居中，不能把整页顶满。
+ *
+ * Code Logic（这个函数做什么）:
+ *   class 含 xterm-helper-textarea，或 closest 命中该 class / .mobileTerminalViewport 内的
+ *   textarea 时返回 true。
+ */
+export function isMobileTerminalTypingTarget(
+  target: {
+    classList?: { contains(token: string): boolean };
+    closest?: (selector: string) => unknown;
+  } | null | undefined,
+): boolean {
+  if (!target) return false;
+  if (target.classList?.contains('xterm-helper-textarea')) return true;
+  if (typeof target.closest !== 'function') return false;
+  if (target.closest('.xterm-helper-textarea')) return true;
+  if (target.closest('textarea.xterm-helper-textarea')) return true;
+  return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   只有会唤起系统键盘的可编辑控件才需要按焦点计算上移；按钮/只读节点不应带动页面。
+ *
+ * Code Logic（这个函数做什么）:
+ *   INPUT/TEXTAREA/contentEditable，或 xterm helper textarea class，返回 true。
+ */
+export function isMobileEditableKeyboardTarget(
+  target: {
+    tagName?: string;
+    isContentEditable?: boolean;
+    classList?: { contains(token: string): boolean };
+  } | null | undefined,
+): boolean {
+  if (!target) return false;
+  const tag = (target.tagName ?? '').toUpperCase();
+  if (tag === 'TEXTAREA' || tag === 'INPUT') return true;
+  if (target.isContentEditable) return true;
+  return Boolean(target.classList?.contains('xterm-helper-textarea'));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终端输入要把 pane / extra keys 完整抬到键盘上方；其它输入只把焦点放到未遮挡可视区
+ *   的纵向中间。原始位置已在可视区上半时不得再往中间拽。
+ *
+ * Code Logic（这个函数做什么）:
+ *   full 模式返回 keyboardInset；focused 模式按未上移坐标系的焦点中心对准可视区中心，
+ *   并保证焦点底边不被键盘盖住；上移量夹在 [0, keyboardInset]；无焦点时保持 previousShift
+ *   直到键盘收起，避免 blur 与键盘动画不同步时整页回落。
+ */
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Dialog portal 不走 shell 的 `top` 上移；反推未上移坐标时必须用「作用在该焦点上」的位移，
+ *   不能把 shell 的 previousShift 加到尚未平移的弹层输入上。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若焦点在 dialog 内，从 inline transform 解析 translateY 像素；否则若在 shell 内返回 shellShift；
+ *   都不是则 0。
+ */
+export function resolveAppliedMobileKeyboardShift(input: {
+  dialogTransform: string | null;
+  insideShell: boolean;
+  shellShift: number;
+}): number {
+  if (input.dialogTransform) {
+    const match = /translateY\(\s*-?([\d.]+)px\s*\)/.exec(input.dialogTransform);
+    if (match) return Math.max(0, Number(match[1]));
+    return 0;
+  }
+  if (input.insideShell) return Math.max(0, Math.round(input.shellShift));
+  return 0;
+}
+
+export function computeMobileKeyboardShift(input: MobileKeyboardShiftInput): number {
+  const inset = Math.max(0, Math.round(input.keyboardInset));
+  if (inset <= 0) return 0;
+  if (input.mode === 'full') return inset;
+
+  const previous = Math.min(inset, Math.max(0, Math.round(input.previousShift)));
+  if (input.focusTop == null) return previous;
+
+  const layoutHeight = Math.max(0, input.layoutViewportHeight);
+  const visibleHeight = Math.max(0, layoutHeight - inset);
+  if (visibleHeight <= 0) return inset;
+
+  const focusTop = input.focusTop;
+  const focusHeight = Math.max(0, input.focusHeight);
+  const focusBottom = focusTop + focusHeight;
+  const focusCenter = focusTop + focusHeight / 2;
+  const visibleCenter = visibleHeight / 2;
+  const uncover = Math.max(0, focusBottom + MOBILE_KEYBOARD_FOCUS_MARGIN_PX - visibleHeight);
+
+  if (focusHeight >= visibleHeight) {
+    return Math.min(inset, Math.max(0, Math.round(focusTop)));
+  }
+
+  // 原始位置已在未遮挡区域上半：保持原位，只在会被键盘盖住时抬到刚好露出。
+  if (focusCenter <= visibleCenter) {
+    return Math.min(inset, Math.round(uncover));
+  }
+
+  const toCenter = focusCenter - visibleCenter;
+  return Math.min(inset, Math.max(uncover, Math.round(toCenter)));
 }
 
 /**

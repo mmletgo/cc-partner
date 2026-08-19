@@ -3,8 +3,8 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   用户在移动端终端工作时，经终端右下角悬浮按钮唤起 Prompt 优化输入，把原始 Prompt 交给本机
- *   Claude Code CLI 优化并流式写入当前终端，无需离开终端视图。与 MobilePromptPanel（nav panel）
- *   等价逻辑，但以 Dialog bottom sheet 形式悬浮在终端上下文，符合「终端内浮层」的交互预期。
+ *   Claude Code CLI 优化并流式写入当前终端，无需离开终端视图。移动端主导航不再提供独立
+ *   Prompt 优化面板，终端内 Dialog bottom sheet 是唯一入口。
  *
  * Code Logic（这个组件做什么）:
  *   - 共享 Dialog 原语渲染 bottom sheet（portal / Escape / backdrop / focus trap），禁止手写 modal。

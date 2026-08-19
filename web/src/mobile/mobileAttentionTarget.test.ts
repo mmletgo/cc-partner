@@ -10,8 +10,11 @@
 
 import { describe, expect, test } from 'vitest';
 
+import type { AttentionItem } from '@/lib/types';
 import {
+  filterMobileInboxAttentionItems,
   getMobileAttentionNavigationPanel,
+  isMobileHiddenAttentionItem,
   mapMobileAttentionTarget,
   resolveMobileAttentionMissingTargetPanel,
 } from './mobileAttentionTarget';
@@ -64,7 +67,7 @@ describe('mapMobileAttentionTarget', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   tmux 依赖条目必须进入 Settings 依赖区域，不复制依赖安装组件。
+   *   tmux 依赖条目无移动端权威界面，必须留在 Attention，不能打开依赖安装。
    *
    * Code Logic（这个测试做什么）:
    *   断言 settings/dependencies 映射为 settingsDependencies。
@@ -88,7 +91,7 @@ describe('mapMobileAttentionTarget', () => {
     expect(getMobileAttentionNavigationPanel(navigation)).toBe('terminal');
   });
 
-  test('maps settings dependencies to settings panel', () => {
+  test('maps settings dependencies back to attention (no mobile install surface)', () => {
     const navigation = mapMobileAttentionTarget({
       kind: 'settings',
       tab: 'dependencies',
@@ -96,10 +99,10 @@ describe('mapMobileAttentionTarget', () => {
 
     expect(navigation).toEqual({
       kind: 'settingsDependencies',
-      panel: 'settings',
+      panel: 'attention',
       tab: 'dependencies',
     });
-    expect(getMobileAttentionNavigationPanel(navigation)).toBe('settings');
+    expect(getMobileAttentionNavigationPanel(navigation)).toBe('attention');
   });
 
   test('maps agentHubAsset to attention panel (desktop-first Gate A)', () => {
@@ -134,5 +137,49 @@ describe('resolveMobileAttentionMissingTargetPanel', () => {
     expect(
       resolveMobileAttentionMissingTargetPanel({ status: 'found', entity: 'outbox' }),
     ).toBe('automation');
+  });
+});
+
+describe('filterMobileInboxAttentionItems', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   移动端不管理 tmux；Inbox 与 badge 必须剔除依赖条目，保留任务/终端类。
+   *
+   * Code Logic（这个测试做什么）:
+   *   混入 workbenchDependency 与 settings target，断言只留下 orchestrator 条目。
+   */
+  test('hides tmux dependency items and keeps task items', () => {
+    const task: AttentionItem = {
+      id: 'orchestrator:human-review:task-1',
+      category: 'decision',
+      sourceKind: 'orchestratorHumanReview',
+      title: 'Review',
+      summary: 'Need review',
+      updatedAt: '2026-07-11T10:00:00.000Z',
+      freshness: 'live',
+      cachedAt: null,
+      project: { id: 'proj-1', name: 'Demo', kind: 'local' },
+      device: null,
+      target: { kind: 'orchestratorTask', projectId: 'proj-1', taskId: 'task-1' },
+    };
+    const tmux: AttentionItem = {
+      id: 'workbench:dependency:tmux',
+      category: 'environment',
+      sourceKind: 'workbenchDependency',
+      title: 'tmux missing',
+      summary: 'Install tmux',
+      updatedAt: '2026-07-11T10:00:00.000Z',
+      freshness: 'live',
+      cachedAt: null,
+      project: null,
+      device: null,
+      target: { kind: 'settings', tab: 'dependencies' },
+    };
+
+    expect(isMobileHiddenAttentionItem(tmux)).toBe(true);
+    expect(isMobileHiddenAttentionItem(task)).toBe(false);
+    expect(filterMobileInboxAttentionItems([tmux, task]).map((item) => item.id)).toEqual([
+      'orchestrator:human-review:task-1',
+    ]);
   });
 });

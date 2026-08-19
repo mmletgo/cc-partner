@@ -12,6 +12,7 @@ import {
   clampBannerMarkdown,
   fitBannerFontSize,
   isSafeHttpUrl,
+  placeBannerInGap,
   parseBannerMarkdown,
   clearLegacyBannerSeed,
   peekLegacyBannerSeed,
@@ -150,5 +151,47 @@ describe('fitBannerFontSize', () => {
         measure: () => ({ width: 1, height: 1 }),
       }),
     ).toBe(BANNER_MIN_FONT_PX);
+  });
+});
+
+describe('placeBannerInGap', () => {
+  it('slides toward the window center when the gap is wider than the banner', () => {
+    const placed = placeBannerInGap({
+      gapLeft: 200,
+      gapRight: 1000,
+      viewportCenter: 600,
+      preferredMaxWidth: 200,
+    });
+    expect(placed).toEqual({ offset: 300, width: 200 });
+  });
+
+  it('left-aligns in the gap when the window center is to the left', () => {
+    const placed = placeBannerInGap({
+      gapLeft: 500,
+      gapRight: 900,
+      viewportCenter: 100,
+      preferredMaxWidth: 200,
+    });
+    expect(placed).toEqual({ offset: 0, width: 200 });
+  });
+
+  it('right-aligns in the gap when the window center is to the right', () => {
+    const placed = placeBannerInGap({
+      gapLeft: 100,
+      gapRight: 500,
+      viewportCenter: 800,
+      preferredMaxWidth: 200,
+    });
+    expect(placed).toEqual({ offset: 200, width: 200 });
+  });
+
+  it('shrinks to the gap instead of overflowing title or actions', () => {
+    const placed = placeBannerInGap({
+      gapLeft: 0,
+      gapRight: 120,
+      viewportCenter: 60,
+      preferredMaxWidth: 400,
+    });
+    expect(placed).toEqual({ offset: 0, width: 120 });
   });
 });

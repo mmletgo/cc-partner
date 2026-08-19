@@ -81,7 +81,7 @@ export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
 } as const;
 
 const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
-  // 基础键：取消 / 反向制表 / 制表 / 斜杠（Claude Code 提示符与补全常用）
+  // 基础键：取消 / 反向制表 / 斜杠（Claude Code 提示符与补全常用）
   { id: 'esc', kind: 'payload', label: 'Esc', ariaKey: 'esc', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.esc },
   {
     id: 'shift-tab',
@@ -90,7 +90,6 @@ const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
     ariaKey: 'shiftTab',
     payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.shiftTab,
   },
-  { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
   {
     id: 'slash',
     kind: 'payload',
@@ -127,6 +126,7 @@ const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
   { id: 'left', kind: 'payload', label: '←', ariaKey: 'left', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.left },
   { id: 'right', kind: 'payload', label: '→', ariaKey: 'right', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right },
   { id: 'enter', kind: 'payload', label: '⏎', ariaKey: 'enter', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter },
+  { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
   // Sticky 修饰键（Ctrl / Alt 武装后下一次输入自动消耗）
   { id: 'ctrl', kind: 'modifier', label: 'Ctrl', ariaKey: 'ctrl', modifier: 'ctrl' },
   { id: 'alt', kind: 'modifier', label: 'Alt', ariaKey: 'alt', modifier: 'alt' },

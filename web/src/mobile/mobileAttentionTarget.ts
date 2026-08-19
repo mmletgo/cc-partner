@@ -9,7 +9,7 @@
  *   纯函数把 AttentionTarget 映射为 MobileAttentionNavigation；并提供缺失目标回退与导航应用描述。
  */
 
-import type { AttentionTarget } from '@/lib/types';
+import type { AttentionItem, AttentionTarget } from '@/lib/types';
 import type { MobileWorkbenchPanel } from './mobileWorkbenchState';
 
 /**
@@ -19,7 +19,7 @@ import type { MobileWorkbenchPanel } from './mobileWorkbenchState';
  *   MobileWorkbench 需要统一消费 task/outbox/settings 三类跳转，避免组件内 switch 漂移。
  *
  * Code Logic（字段说明）:
- *   automationTask/automationOutbox 带 projectId 与实体 id；settingsDependencies 只切 Settings 依赖区。
+ *   automationTask/automationOutbox 带 projectId 与实体 id；settingsDependencies 无移动端权威界面，回 Attention。
  */
 export type MobileAttentionNavigation =
   | {
@@ -36,7 +36,7 @@ export type MobileAttentionNavigation =
     }
   | {
       kind: 'settingsDependencies';
-      panel: 'settings';
+      panel: 'attention';
       tab: 'dependencies';
     }
   | {
@@ -66,7 +66,8 @@ export type MobileAttentionNavigation =
  *   点击 Inbox 条目后，移动端必须把语义 target 变成现有 panel 导航，而不是 URL。
  *
  * Code Logic（这个函数做什么）:
- *   orchestratorTask/outbox/settings 保持；agentSession → terminal；experiment → automation。
+ *   orchestratorTask/outbox 保持；settings/tmux 无移动端权威界面 → attention；
+ *   agentSession → terminal；experiment → automation。
  */
 export function mapMobileAttentionTarget(target: AttentionTarget): MobileAttentionNavigation {
   switch (target.kind) {
@@ -87,7 +88,7 @@ export function mapMobileAttentionTarget(target: AttentionTarget): MobileAttenti
     case 'settings':
       return {
         kind: 'settingsDependencies',
-        panel: 'settings',
+        panel: 'attention',
         tab: 'dependencies',
       };
     case 'agentSession':
@@ -158,4 +159,29 @@ export function resolveMobileAttentionMissingTargetPanel(
   result: MobileAttentionFocusResult,
 ): MobileWorkbenchPanel {
   return result.status === 'missing' ? 'attention' : 'automation';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端不提供 tmux 依赖检测/安装；Inbox 不得展示这类条目，也不能让 badge 因它们亮起。
+ *
+ * Code Logic（这个函数做什么）:
+ *   workbenchDependency 或 settings/dependencies target 视为移动端隐藏。
+ */
+export function isMobileHiddenAttentionItem(item: AttentionItem): boolean {
+  if (item.sourceKind === 'workbenchDependency') return true;
+  return item.target.kind === 'settings';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   列表、空态、日历切分与导航 badge 必须共用同一份可见条目，避免只藏行仍显示数字。
+ *
+ * Code Logic（这个函数做什么）:
+ *   过滤掉 isMobileHiddenAttentionItem 为 true 的条目，保持原顺序。
+ */
+export function filterMobileInboxAttentionItems(
+  items: readonly AttentionItem[],
+): AttentionItem[] {
+  return items.filter((item) => !isMobileHiddenAttentionItem(item));
 }

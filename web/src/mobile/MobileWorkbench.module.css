@@ -4,13 +4,13 @@
 
 .shell {
   /*
-   * shell 高度保持全屏（不压缩）：软键盘弹出时整体上移 keyboardInset，把 terminal 与底部
-   * extra keys 一起平移到键盘上方（terminal 大小不变，顶部菜单会移出屏幕顶部，键盘收起后恢复）。
-   * keyboardInset = layoutViewportHeight - visualViewportHeight，由 visualViewport.resize 驱动。
+   * shell 高度保持全屏（不压缩）：软键盘弹出时按 --mobile-keyboard-shift 整体上移。
+   * 终端输入 shift=键盘高度，把 terminal 与 extra keys 抬到键盘上方；其它输入按焦点把字段
+   * 放到未遮挡可视区中线附近（已在上半则 shift=0）。
    * 注意：padding-bottom 只保留 safe-area，禁止再叠加 --mobile-keyboard-inset（会二次偏移）。
    */
   position: fixed;
-  top: calc(0px - var(--mobile-keyboard-inset, 0px));
+  top: calc(0px - var(--mobile-keyboard-shift, 0px));
   left: 0;
   right: 0;
   width: 100%;
@@ -1101,11 +1101,11 @@
   /*
    * 全屏是 fixed overlay，脱离文档流后不再跟随 shell 的 transform/top。
    * 必须与 shell 使用同一 keyboard 上移合同：height 保持 layout 全屏、
-   * top = -keyboardInset，把 pane 工具条/终端/extra keys 一起平移到键盘上方。
+   * top = -keyboardShift，把 pane 工具条/终端/extra keys 一起平移。
    * 禁止再用 --mobile-shell-offset-top（vv.offsetTop 在多数键盘场景为 0，无法让出键盘）。
    */
   position: fixed;
-  top: calc(0px - var(--mobile-keyboard-inset, 0px));
+  top: calc(0px - var(--mobile-keyboard-shift, 0px));
   left: 0;
   right: 0;
   bottom: auto;
@@ -1347,6 +1347,11 @@
   cursor: not-allowed;
   color: var(--muted);
   background: var(--surface-warm);
+}
+
+.mobileTerminalFab[data-dirty='true']:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .mobileTerminalExtraKeys {

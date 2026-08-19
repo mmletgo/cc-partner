@@ -605,7 +605,7 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await expect(page.getByTestId('agent-hub-shell')).toBeVisible();
     await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-scope-lock')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-scope-lock')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-tablist')).toBeVisible();
     await expect(page.getByTestId('agent-hub-toolbar')).toBeVisible();
     await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();

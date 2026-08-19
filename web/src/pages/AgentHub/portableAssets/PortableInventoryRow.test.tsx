@@ -138,6 +138,19 @@ describe('PortableInventoryRow', () => {
     }), 'disable');
   });
 
+  test('hideScope omits the user/project scope chip copy', () => {
+    render(
+      <PortableInventoryRow
+        item={item()}
+        actions={['disable']}
+        labels={labels}
+        hideScope
+      />,
+    );
+    expect(screen.queryByText('User')).toBeNull();
+    expect(screen.queryByText('Project')).toBeNull();
+  });
+
   test('keeps row actions as native buttons without nested button semantics', () => {
     const onAction = vi.fn();
     render(

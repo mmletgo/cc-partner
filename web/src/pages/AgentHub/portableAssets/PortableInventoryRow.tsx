@@ -72,6 +72,8 @@ export interface PortableInventoryRowProps {
    */
   catalogAgentChips?: PortableStoreAgentChip[];
   onToggleCatalogAgent?: (target: AgentTarget) => void;
+  /** 项目 Agent 已冻结项目身份，行内不再重复「用户/项目」范围。 */
+  hideScope?: boolean;
 }
 
 /** 仓库行上展示的 Agent 启用芯片（已由 presentation 算好）。 */
@@ -115,6 +117,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     onOpenOwner,
     catalogAgentChips,
     onToggleCatalogAgent,
+    hideScope = false,
   } = props;
   const actual = classifyPortableActualState(item);
   const problemWarnings = portableInventoryProblemWarnings(item);
@@ -178,7 +181,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           </div>
           {item.description ? <p className={styles.description}>{item.description}</p> : null}
           <div className={styles.metaLine}>
-            <span>{labels.scope[item.scopeKind]}</span>
+            {hideScope ? null : <span>{labels.scope[item.scopeKind]}</span>}
             <span>{labels.sourceOrigin[item.sourceOrigin]}</span>
             {item.version ? <span>{item.version}</span> : null}
           </div>

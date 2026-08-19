@@ -7,8 +7,12 @@ import {
   canSwitchMobilePane,
   closeMobileNav,
   computeMobileKeyboardInset,
+  computeMobileKeyboardShift,
   computeMobileTerminalMinHeight,
   computeMobileViewportLayoutHints,
+  isMobileEditableKeyboardTarget,
+  isMobileTerminalTypingTarget,
+  resolveAppliedMobileKeyboardShift,
   emptyMobileSessionRuntimeState,
   getMobileConnectionCachedAt,
   getMobileNavGroupIdForPanel,
@@ -172,7 +176,7 @@ describe('mobileWorkbenchState', () => {
   /**
    * Business Logic（为什么需要这个测试）:
    *   远端项目在移动端需要与本机项目一样进入终端、文件、Git、worktree 和自动化面板；
-   *   Prompt 为全局入口，无项目也可进入；无项目时项目绑定面板必须回落到 projects。
+   *   传输为全局入口，无项目也可进入；无项目时项目绑定面板必须回落到 projects。
    *
    * Code Logic（这个测试做什么）:
    *   构造 local/remote/null，断言 selectMobilePanelForProject 与 isMobileProjectBoundPanel。
@@ -186,17 +190,14 @@ describe('mobileWorkbenchState', () => {
     assertEqual(selectMobilePanelForProject(remoteProject, 'files'), 'files');
     assertEqual(selectMobilePanelForProject(remoteProject, 'git'), 'git');
     assertEqual(selectMobilePanelForProject(remoteProject, 'worktrees'), 'worktrees');
-    assertEqual(selectMobilePanelForProject(remoteProject, 'prompt'), 'prompt');
     assertEqual(selectMobilePanelForProject(remoteProject, 'projects'), 'projects');
     assertEqual(selectMobilePanelForProject(remoteProject, 'settings'), 'settings');
     assertEqual(selectMobilePanelForProject(remoteProject, 'automation'), 'automation');
     assertEqual(selectMobilePanelForProject(null, 'terminal'), 'projects');
     assertEqual(selectMobilePanelForProject(null, 'automation'), 'projects');
-    assertEqual(selectMobilePanelForProject(null, 'prompt'), 'prompt');
     assertEqual(selectMobilePanelForProject(null, 'transfer'), 'transfer');
     assertEqual(selectMobilePanelForProject(null, 'attention'), 'attention');
     assertEqual(isMobileProjectBoundPanel('terminal'), true);
-    assertEqual(isMobileProjectBoundPanel('prompt'), false);
     assertEqual(isMobileProjectBoundPanel('transfer'), false);
   });
 
@@ -215,7 +216,7 @@ describe('mobileWorkbenchState', () => {
     );
     assertArrayEqual(globalGroups[0]?.panels ?? [], ['projects']);
     assertArrayEqual(globalGroups[1]?.panels ?? [], ['attention']);
-    assertArrayEqual(globalGroups[2]?.panels ?? [], ['prompt', 'transfer']);
+    assertArrayEqual(globalGroups[2]?.panels ?? [], ['transfer']);
     assertArrayEqual(globalGroups[3]?.panels ?? [], ['settings', 'provider']);
 
     const projectGroups = getMobileWorkbenchNavGroups('project');
@@ -231,13 +232,12 @@ describe('mobileWorkbenchState', () => {
       'worktrees',
       'automation',
     ]);
-    assertArrayEqual(projectGroups[1]?.panels ?? [], ['attention', 'prompt', 'transfer', 'settings']);
+    assertArrayEqual(projectGroups[1]?.panels ?? [], ['attention', 'transfer', 'settings']);
 
     const flat = getMobileWorkbenchPanelOrder();
     assertArrayEqual(flat, [
       'projects',
       'attention',
-      'prompt',
       'transfer',
       'settings',
       'provider',
@@ -253,7 +253,6 @@ describe('mobileWorkbenchState', () => {
     assertEqual(getMobileNavGroupIdForPanel('git', 'project'), 'work');
     assertEqual(getMobileNavGroupIdForPanel('settings', 'global'), 'system');
     assertEqual(getMobileNavGroupIdForPanel('provider', 'global'), 'system');
-    assertEqual(getMobileNavGroupIdForPanel('prompt', 'global'), 'tools');
     assertEqual(getMobileNavGroupIdForPanel('transfer', 'global'), 'tools');
     assertEqual(getMobileNavGroupIdForPanel('transfer', 'project'), 'shortcuts');
     assertEqual(flat.filter((panel) => panel === 'transfer').length, 1);
@@ -318,7 +317,6 @@ describe('mobileWorkbenchState', () => {
     assertEqual(resolveMobileNavMode('terminal', false), 'global');
     assertEqual(resolveMobileNavMode('terminal', true), 'project');
     assertEqual(resolveMobileNavMode('attention', true), 'project');
-    assertEqual(resolveMobileNavMode('prompt', true), 'project');
     assertEqual(resolveMobileNavMode('transfer', true), 'project');
     assertEqual(resolveMobileNavMode('settings', true), 'project');
     assertEqual(resolveMobileNavMode('projects', true), 'global');
@@ -339,7 +337,7 @@ describe('mobileWorkbenchState', () => {
 
     const portrait = computeMobileViewportLayoutHints(390, 844, 500, 0);
     assertEqual(portrait.keyboardInset, 344);
-    // shell 保持全屏高度（不压缩）：键盘弹出时由 shell top=-keyboardInset 整体上移让出空间，
+    // shell 保持全屏高度（不压缩）：keyboardInset 只描述键盘占用，实际上移量由 shift helper 决定。
     // shellHeight 始终 = layoutViewportHeight，terminal 大小不变。
     assertEqual(portrait.shellHeight, 844);
     assertEqual(portrait.landscape, false);
@@ -361,6 +359,140 @@ describe('mobileWorkbenchState', () => {
       true,
     );
     assertEqual(landscape.terminalMinHeight, Math.max(160, Math.round(390 * 0.72)));
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   终端输入必须整页让出键盘；其它输入不能一律顶满，否则顶部字段会被顶出屏幕。
+   *
+   * Code Logic（这个测试做什么）:
+   *   覆盖 full/focused 模式、顶部原位、居中上移、键盘遮挡最小抬升、无焦点保持 previousShift。
+   */
+  test('keyboard shift keeps terminal full-lift and centers other focused inputs', () => {
+    const layoutHeight = 844;
+    const inset = 344;
+
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 40,
+        focusHeight: 36,
+        mode: 'full',
+        previousShift: 0,
+      }),
+      inset,
+    );
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: 0,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 700,
+        focusHeight: 36,
+        mode: 'full',
+        previousShift: 120,
+      }),
+      0,
+    );
+
+    // 原始位置在未遮挡区域上半：不上移。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 48,
+        focusHeight: 36,
+        mode: 'focused',
+        previousShift: 0,
+      }),
+      0,
+    );
+
+    // 焦点中心对准可视区中线：420+20-250=190。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 420,
+        focusHeight: 40,
+        mode: 'focused',
+        previousShift: 0,
+      }),
+      190,
+    );
+
+    // 底部字段：居中需要 550，封顶为键盘高度 344。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 780,
+        focusHeight: 40,
+        mode: 'focused',
+        previousShift: 0,
+      }),
+      344,
+    );
+
+    // 无焦点时保持上次上移，直到键盘收起。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: null,
+        focusHeight: 0,
+        mode: 'focused',
+        previousShift: 180,
+      }),
+      180,
+    );
+
+    assertEqual(isMobileTerminalTypingTarget(null), false);
+    assertEqual(
+      isMobileTerminalTypingTarget({
+        classList: { contains: (token: string) => token === 'xterm-helper-textarea' },
+      }),
+      true,
+    );
+    assertEqual(
+      isMobileTerminalTypingTarget({
+        classList: { contains: () => false },
+        closest: (selector: string) => (selector === '.xterm-helper-textarea' ? {} : null),
+      }),
+      true,
+    );
+    assertEqual(
+      isMobileEditableKeyboardTarget({ tagName: 'TEXTAREA' }),
+      true,
+    );
+    assertEqual(
+      isMobileEditableKeyboardTarget({ tagName: 'BUTTON' }),
+      false,
+    );
+    assertEqual(
+      resolveAppliedMobileKeyboardShift({
+        dialogTransform: 'translateY(-180px)',
+        insideShell: false,
+        shellShift: 344,
+      }),
+      180,
+    );
+    assertEqual(
+      resolveAppliedMobileKeyboardShift({
+        dialogTransform: null,
+        insideShell: true,
+        shellShift: 344,
+      }),
+      344,
+    );
+    assertEqual(
+      resolveAppliedMobileKeyboardShift({
+        dialogTransform: null,
+        insideShell: false,
+        shellShift: 344,
+      }),
+      0,
+    );
   });
 
   /**

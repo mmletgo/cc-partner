@@ -308,4 +308,80 @@ describe('MobileAttentionPanel', () => {
     fireEvent.click(screen.getByTestId('attention-show-earlier'));
     expect(screen.getByTestId('attention-item-orchestrator:blocked:old')).toBeTruthy();
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   移动端不提供 tmux 安装；Inbox 不得展示依赖条目，只剩依赖时应显示空态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   快照同时含 human-review 与 tmux 时只渲染任务；仅 tmux 时显示 empty。
+   */
+  test('hides tmux dependency items from the mobile inbox list', () => {
+    const snapshot: AttentionSnapshot = {
+      generatedAt: '2026-07-11T10:00:00.000Z',
+      counts: {
+        total: 2,
+        decision: 1,
+        blocked: 0,
+        environment: 1,
+        unreadTotal: 2,
+        unreadDecision: 1,
+        unreadBlocked: 0,
+        unreadEnvironment: 1,
+      },
+      items: [
+        buildItem(),
+        buildItem({
+          id: 'workbench:dependency:tmux',
+          category: 'environment',
+          sourceKind: 'workbenchDependency',
+          title: 'tmux missing',
+          summary: 'Install tmux to keep terminal context',
+          target: { kind: 'settings', tab: 'dependencies' },
+        }),
+      ],
+      myDeviceId: 'mobile-test',
+    };
+    mockAttentionValue = buildContext({ snapshot });
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} now={VIEW_NOW} />);
+
+    expect(screen.getByText('Review payment edge')).toBeTruthy();
+    expect(screen.queryByText('tmux missing')).toBeNull();
+    expect(screen.queryByText('当前没有阻塞工作的事项')).toBeNull();
+  });
+
+  test('shows empty state when inbox only contains tmux dependency items', () => {
+    const snapshot: AttentionSnapshot = {
+      generatedAt: '2026-07-11T10:00:00.000Z',
+      counts: {
+        total: 1,
+        decision: 0,
+        blocked: 0,
+        environment: 1,
+        unreadTotal: 1,
+        unreadDecision: 0,
+        unreadBlocked: 0,
+        unreadEnvironment: 1,
+      },
+      items: [
+        buildItem({
+          id: 'workbench:dependency:tmux',
+          category: 'environment',
+          sourceKind: 'workbenchDependency',
+          title: 'tmux missing',
+          summary: 'Install tmux to keep terminal context',
+          target: { kind: 'settings', tab: 'dependencies' },
+        }),
+      ],
+      myDeviceId: 'mobile-test',
+    };
+    mockAttentionValue = buildContext({ snapshot });
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} now={VIEW_NOW} />);
+
+    expect(screen.getByText('当前没有阻塞工作的事项')).toBeTruthy();
+    expect(screen.queryByText('tmux missing')).toBeNull();
+    expect(
+      (screen.getByTestId('mobile-attention-mark-all-read') as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
 });

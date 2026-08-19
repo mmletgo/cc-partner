@@ -207,24 +207,27 @@ describe('AgentHubShell', () => {
     });
   });
 
-  test('project scope lock shows frozen project label without device or project pickers', () => {
+  test('project scope lock shows frozen project label without scope copy or pickers', () => {
     renderShell({
       scopeLock: 'project',
       frozenProjectLabel: 'demo (Remote · peer-1)',
     });
-    expect(screen.getByTestId('agent-hub-scope-lock')).toBeTruthy();
-    expect(screen.getByTestId('agent-hub-scope-project-lock')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-scope-lock')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-scope-project-lock')).toBeNull();
+    expect(screen.queryByText('Scope: project')).toBeNull();
+    expect(screen.queryByText(/^Scope$/)).toBeNull();
     expect(screen.getByTestId('agent-hub-frozen-project').textContent).toContain('demo (Remote · peer-1)');
     expect(screen.queryByTestId('agent-hub-device-select')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-switcher')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
   });
 
-  test('scope lock shows local device selector and never a project picker', () => {
+  test('user shell shows device selector and hides scope copy', () => {
     renderShell();
-    expect(screen.getByTestId('agent-hub-scope-lock')).toBeTruthy();
-    expect(screen.getByTestId('agent-hub-scope-user-lock')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-device-select')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-scope-lock')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-scope-user-lock')).toBeNull();
+    expect(screen.queryByText('Scope: user')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-switcher')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-project')).toBeNull();

@@ -493,7 +493,6 @@
       "files": "Files",
       "git": "Git",
       "worktrees": "Worktrees",
-      "prompt": "Prompt",
       "transfer": "Transfer",
       "automation": "Automation",
       "settings": "Settings",
@@ -533,10 +532,6 @@
       "worktrees": {
         "title": "Worktrees",
         "label": "Waiting for a project"
-      },
-      "prompt": {
-        "title": "Prompt",
-        "label": "Waiting for input"
       },
       "transfer": {
         "title": "File Transfer",

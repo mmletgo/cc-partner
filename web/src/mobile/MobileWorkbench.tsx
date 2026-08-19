@@ -34,6 +34,7 @@ import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './components/MobileWorktreeTabs';
 import { useMobileWorktreeBarController } from './controllers/useMobileWorktreeBarController';
 import {
+  filterMobileInboxAttentionItems,
   mapMobileAttentionTarget,
   resolveMobileAttentionMissingTargetPanel,
   type MobileAttentionNavigation,
@@ -100,11 +101,6 @@ const MobileFilesPanel = lazy(() =>
 const MobileGitPanel = lazy(() =>
   import('./components/MobileGitPanel').then((module) => ({
     default: module.MobileGitPanel,
-  })),
-);
-const MobilePromptPanel = lazy(() =>
-  import('./components/MobilePromptPanel').then((module) => ({
-    default: module.MobilePromptPanel,
   })),
 );
 const MobileSettingsPanel = lazy(() =>
@@ -325,7 +321,9 @@ export function MobileWorkbench(): ReactElement {
   const { t } = useTranslation(['workbench', 'attention']);
   const { snapshot: attentionSnapshot, refresh: refreshAttention } = useAttention();
   useMarkNeedsInputAttentionOnSessionFocus(activeSession?.id ?? null, panel === 'terminal');
-  const attentionTotal = attentionSnapshot?.counts.total ?? null;
+  const attentionTotal = attentionSnapshot
+    ? filterMobileInboxAttentionItems(attentionSnapshot.items).length
+    : null;
   const projectDetailsLoading = projectDetailStatus === 'loading';
 
   const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
@@ -356,10 +354,6 @@ export function MobileWorkbench(): ReactElement {
     worktrees: {
       title: t('workbench:mobile.placeholders.worktrees.title'),
       label: t('workbench:mobile.placeholders.worktrees.label'),
-    },
-    prompt: {
-      title: t('workbench:mobile.placeholders.prompt.title'),
-      label: t('workbench:mobile.placeholders.prompt.label'),
     },
     transfer: {
       title: t('workbench:mobile.placeholders.transfer.title'),
@@ -1192,10 +1186,10 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   Attention 条目只导航到现有 Automation/Settings/Terminal，不在列表内执行副作用动作。
+   *   Attention 条目只导航到现有 Automation/Terminal，不在列表内执行副作用动作。
    *
    * Code Logic（这个函数做什么）:
-   *   mapMobileAttentionTarget 后：settings 切 settings；agent → terminal；task/outbox/experiment → automation。
+   *   mapMobileAttentionTarget 后：settings/tmux 留在 Attention；agent → terminal；task/outbox/experiment → automation。
    */
   const handleOpenAttentionItem = useCallback(
     async (item: AttentionItem): Promise<void> => {
@@ -1205,7 +1199,7 @@ export function MobileWorkbench(): ReactElement {
       if (navigation.kind === 'settingsDependencies') {
         setAttentionFocusTaskId(null);
         setAttentionFocusOutboxId(null);
-        setPanel('settings');
+        setPanel('attention');
         return;
       }
 
@@ -1456,10 +1450,6 @@ export function MobileWorkbench(): ReactElement {
           onRefreshWorktrees={refreshWorktrees}
         />
       </Suspense>
-    ) : panel === 'prompt' ? (
-      <Suspense fallback={heavyPanelFallback}>
-        <MobilePromptPanel worktree={activeWorktree} session={activeSession} />
-      </Suspense>
     ) : panel === 'automation' ? (
       <Suspense fallback={heavyPanelFallback}>
         <MobileAutomationPanel
@@ -1499,6 +1489,8 @@ export function MobileWorkbench(): ReactElement {
           onSessionsChange={handleSessionsChange}
           onActiveSessionChange={setActiveSession}
           onRefreshSessions={refreshSessions}
+          onWorktreeChange={handleWorktreeChange}
+          onRefreshWorktrees={refreshWorktrees}
         />
       </Suspense>
     ) : (

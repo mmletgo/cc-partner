@@ -111,8 +111,6 @@ beforeAll(async () => {
 
 afterEach(() => {
   cleanup();
-  projectsMock.activeProject = { name: 'demo-app' };
-  projectsMock.remoteWriteDisabled = false;
 });
 
 /**
@@ -122,10 +120,10 @@ afterEach(() => {
  * Code Logic（这个函数做什么）:
  *   用 MemoryRouter + I18nextProvider 挂载 AppShell。
  */
-function renderShell(initialEntry = '/'): void {
+function renderShell(): void {
   render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={[initialEntry]}>
+      <MemoryRouter initialEntries={['/']}>
         <AppShell>
           <div>main</div>
         </AppShell>
@@ -326,25 +324,5 @@ describe('AppShell grouped navigation', () => {
     expect(sidebarCss).toMatch(/\.content\s*\{[\s\S]*?overflow-y:\s*auto;/);
     // footer 保留在 flex 流内，侧栏自身不再整栏滚动以免盖住 footer
     expect(sidebarCss).toMatch(/\.sidebar\s*\{[\s\S]*?overflow:\s*hidden;/);
-  });
-
-  test('hides the daily banner outside Workbench and centers it on the workbench window', () => {
-    const css = readFileSync(
-      resolve(process.cwd(), 'src/components/layout/AppShell/AppShell.module.css'),
-      'utf8',
-    );
-    expect(css).toMatch(/\.bannerSlot\s*\{[\s\S]*?left:\s*50%;/);
-    expect(css).toMatch(/\.bannerSlot\s*\{[\s\S]*?transform:\s*translateX\(-50%\)/);
-    renderShell('/');
-    expect(screen.queryByTestId('app-banner-slot')).toBeNull();
-    expect(screen.queryByTestId('workbench-banner')).toBeNull();
-    cleanup();
-    renderShell('/workbench');
-    expect(screen.getByTestId('app-banner-slot')).toBeTruthy();
-    expect(screen.getByTestId('workbench-banner')).toBeTruthy();
-    cleanup();
-    projectsMock.activeProject = null;
-    renderShell('/workbench');
-    expect(screen.queryByTestId('app-banner-slot')).toBeNull();
   });
 });

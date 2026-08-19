@@ -4,7 +4,11 @@ import { useTranslation } from 'react-i18next';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { httpWorkbenchTransport } from '@/api/workbenchHttp';
+import {
+  createHttpOrchestratorClientRequestId,
+  httpWorkbenchTransport,
+  workbenchHttp,
+} from '@/api/workbenchHttp';
 import {
   useWorkbenchTerminalBufferStore,
   useWorkbenchTerminalBuffers,
@@ -13,7 +17,16 @@ import {
   MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
   type TerminalBufferDelta,
 } from '@/hooks/workbenchTerminalBuffer';
-import { ArrowRightIcon, EditIcon, MaximizeIcon, MinimizeIcon, PlusIcon, PromptsIcon, XIcon } from '@/lib/icons';
+import {
+  ArrowRightIcon,
+  CommitIcon,
+  EditIcon,
+  MaximizeIcon,
+  MinimizeIcon,
+  PlusIcon,
+  PromptsIcon,
+  XIcon,
+} from '@/lib/icons';
 import type { Prompt, WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   createTerminalLiveWriter,
@@ -37,6 +50,14 @@ import {
   updateMobileTerminalTouchScroll,
   type MobileTerminalTouchScrollState,
 } from '../mobileTerminalTouchScroll';
+import {
+  isMobileGitActionResponseCurrent,
+  isMobileMutationActionLocked,
+  pickMobileMutationOperationId,
+  type MobileGitActionContext,
+  type MobileMutationPhase,
+} from '../mobilePanelState';
+import { executeMobileGitCommit } from '../mobileGitCommit';
 import {
   canRunMobilePaneMutation,
   canSwitchMobilePane,
@@ -88,6 +109,13 @@ export interface MobileTerminalPanelProps {
   onSessionsChange: (next: WorkbenchSession[]) => void;
   onActiveSessionChange: (session: WorkbenchSession | null) => void;
   onRefreshSessions?: () => Promise<void> | void;
+  /** Commit 成功后把权威 worktree 写回父级。 */
+  onWorktreeChange?: (worktree: WorkbenchWorktree) => void;
+  /** unknown 对账确认成功后刷新 worktree 列表。 */
+  onRefreshWorktrees?: (options?: {
+    skipFileContextConfirm?: boolean;
+    expectedProjectId?: string;
+  }) => Promise<void> | void;
 }
 
 /**
@@ -168,6 +196,7 @@ function getErrorMessage(reason: unknown, fallback: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 active project/worktree/session 渲染 session tabs、xterm viewport 和 window/pane 控制按钮；
+ *   右侧 FAB 组顶部为 Git Commit 快捷键（与桌面 Git 历史 Commit 同口径，message=null）；
  *   首屏通过 HTTP replay 写入历史 buffer，后续只消费外部 terminal buffer store 增量，输入/resize/focus/split/close 全部调用 HTTP transport。
  */
 export function MobileTerminalPanel({
@@ -181,6 +210,8 @@ export function MobileTerminalPanel({
   onSessionsChange,
   onActiveSessionChange,
   onRefreshSessions,
+  onWorktreeChange,
+  onRefreshWorktrees,
 }: MobileTerminalPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const { resetBuffer, removeBuffer } = useWorkbenchTerminalBuffers();
@@ -194,6 +225,9 @@ export function MobileTerminalPanel({
   const [stickyModifier, setStickyModifier] = useState<MobileTerminalStickyModifier | null>(null);
   const [favoriteSheetOpen, setFavoriteSheetOpen] = useState<boolean>(false);
   const [promptOptimizerSheetOpen, setPromptOptimizerSheetOpen] = useState<boolean>(false);
+  const [commitPhase, setCommitPhase] = useState<MobileMutationPhase>('idle');
+  const commitOperationIdRef = useRef<string | null>(null);
+  const commitContextRef = useRef<MobileGitActionContext | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -246,6 +280,16 @@ export function MobileTerminalPanel({
   // 收藏 Prompt 快捷输入按钮需要写终端输入流：session running 且 input stream ready 才启用。
   const canOpenFavoriteQuickInput =
     canUsePaneActions && inputStreamState.status === 'ready';
+  const canCommitWorktree =
+    Boolean(project && worktree) &&
+    !busy &&
+    (actionBusy === null || actionBusy === 'commit') &&
+    (!isMobileMutationActionLocked(commitPhase) || commitPhase === 'unknown');
+  const commitBusy = actionBusy === 'commit';
+  const commitLabel = commitBusy
+    ? t('workbench:mobile.gitPanel.committing')
+    : t('workbench:worktrees.commit');
+  const worktreeDirty = worktree != null && !worktree.status.clean;
   const isTerminalFullscreen = terminalFullscreen && visibleSession !== null;
   const terminalChrome = getMobileTerminalChromeVisibility(isTerminalFullscreen);
   const TerminalFullscreenIcon = terminalChrome.exitFullscreen ? MinimizeIcon : MaximizeIcon;
@@ -258,6 +302,18 @@ export function MobileTerminalPanel({
       ? { sessionId, cols: persistedSessionCols, rows: persistedSessionRows }
       : null;
   }, [persistedSessionCols, persistedSessionRows, sessionId]);
+
+  // Business Logic: 切换项目/worktree 后不得把旧 commit unknown 锁带到新上下文。
+  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 phase */
+  useEffect(() => {
+    commitContextRef.current = project && worktree
+      ? { projectId: project.id, worktreeId: worktree.id }
+      : null;
+    setCommitPhase('idle');
+    commitOperationIdRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 id 驱动重置
+  }, [project?.id, worktree?.id]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     inputEnabledRef.current = Boolean(
@@ -344,6 +400,94 @@ export function MobileTerminalPanel({
     },
     [sendTerminalInput, sessionId],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   终端右侧需要与桌面 Git 历史 Commit 同口径的一键提交，不离开终端、不弹手写 message。
+   *
+   * Code Logic（这个函数做什么）:
+   *   稳定 clientOperationId + executeMobileGitCommit(message=null)；unknown 只对账不盲重放。
+   */
+  const handleCommitWorktree = useCallback(async (): Promise<void> => {
+    if (busy || !project || !worktree) return;
+    if (isMobileMutationActionLocked(commitPhase) && commitPhase !== 'unknown') return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    const clientOperationId = pickMobileMutationOperationId(
+      commitPhase,
+      commitOperationIdRef.current,
+      createHttpOrchestratorClientRequestId(),
+    );
+    commitOperationIdRef.current = clientOperationId;
+    setActionBusy('commit');
+    setCommitPhase('busy');
+    setPanelError(null);
+    try {
+      const outcome = await executeMobileGitCommit({
+        worktreeId: worktree.id,
+        clientOperationId,
+        reconcileOnly: commitPhase === 'unknown',
+        isCurrent: () =>
+          isMobileGitActionResponseCurrent(actionContext, commitContextRef.current),
+        git: workbenchHttp.git,
+      });
+      if (outcome.type === 'stale') return;
+      if (outcome.type === 'succeeded') {
+        commitOperationIdRef.current = null;
+        setCommitPhase('idle');
+        onWorktreeChange?.(outcome.worktree);
+        await onRefreshWorktrees?.();
+        return;
+      }
+      if (outcome.type === 'succeededRefresh') {
+        commitOperationIdRef.current = null;
+        setCommitPhase('idle');
+        await onRefreshWorktrees?.();
+        return;
+      }
+      if (outcome.type === 'failedHook') {
+        commitOperationIdRef.current = null;
+        setCommitPhase('idle');
+        const detail =
+          outcome.hookFailure.stderr.trim() || outcome.hookFailure.stdout.trim();
+        setPanelError(
+          detail
+            ? `${t('workbench:errors.commitWorktree')}: ${detail}`
+            : t('workbench:errors.commitWorktree'),
+        );
+        return;
+      }
+      if (outcome.type === 'failed') {
+        commitOperationIdRef.current = null;
+        setCommitPhase('idle');
+        setPanelError(t('workbench:errors.mutationFailed'));
+        return;
+      }
+      setCommitPhase('unknown');
+      setPanelError(t('workbench:errors.mutationUnknown'));
+    } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) return;
+      setCommitPhase('idle');
+      commitOperationIdRef.current = null;
+      setPanelError(
+        `${t('workbench:errors.commitWorktree')}: ${getErrorMessage(
+          reason,
+          t('workbench:errors.commitWorktree'),
+        )}`,
+      );
+    } finally {
+      if (isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) {
+        setActionBusy(null);
+      }
+    }
+  }, [
+    busy,
+    commitPhase,
+    onRefreshWorktrees,
+    onWorktreeChange,
+    project,
+    t,
+    worktree,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -837,7 +981,7 @@ export function MobileTerminalPanel({
      * Code Logic（这个函数做什么）:
      *   在 capture 阶段拦截单指 touchmove，读取 viewport 与 xterm rows 得到行高，
      *   交给 touch helper 累计像素并调用 terminal.scrollLines；滑动过程中不进入打字态。
-     *   轻点（未滚动）在 touchend 进入打字态并 focus，系统键盘才出现；shell 会随 visualViewport 上移。
+     *   轻点（未滚动）在 touchend 进入打字态并 focus，系统键盘才出现；终端输入会把 shell 按键盘高度整页上移。
      */
     let touchMoved = false;
     let suppressClickAfterScroll = false;
@@ -1521,6 +1665,18 @@ export function MobileTerminalPanel({
             <div className={styles.mobileTerminalViewport} ref={viewportRef} />
             {visibleSession ? (
               <div className={styles.mobileTerminalFabGroup}>
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileTerminalFab}
+                  disabled={!canCommitWorktree || commitBusy}
+                  data-dirty={worktreeDirty || undefined}
+                  aria-busy={commitBusy || undefined}
+                  aria-label={commitLabel}
+                  title={commitLabel}
+                  onPrimary={() => void handleCommitWorktree()}
+                >
+                  <CommitIcon size={18} aria-hidden="true" />
+                </PointerPrimaryButton>
                 <PointerPrimaryButton
                   type="button"
                   className={styles.mobileTerminalFab}

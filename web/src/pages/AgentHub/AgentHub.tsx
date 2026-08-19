@@ -694,6 +694,9 @@ export function AgentHubView(props: AgentHubViewProps) {
               controller={portableInventory}
               labels={portableInventoryLabels}
               onOpenOwner={openPortableOwner}
+              hideScope={
+                scopeLock === 'project' || hubContext.scope === 'project'
+              }
             />
           </div>
         ) : null}
