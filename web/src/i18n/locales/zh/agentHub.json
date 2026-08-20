@@ -23,7 +23,7 @@
     "aria": "Agent Hub 工作区",
     "userInstructions": "用户级指令",
     "projectInstructions": "项目级指令",
-    "projectInstructionsHint": "预览并启用项目级指令映射；确认前不会写入项目。",
+    "projectInstructionsHint": "直接编辑各 Agent 实际使用的项目级提示词文件。",
     "portableAssets": "Agent 资产",
     "syncImport": "同步与导入",
     "diagnostics": "兼容性与诊断",
@@ -155,6 +155,24 @@
         "emptyReviseDirection": "请先填写修改方向。",
         "reviseSaveFailed": "AI 已改写当前槽，但保存 Canonical 失败。请再点「保存三槽」。"
       }
+    },
+    "projectFiles": {
+      "title": "项目提示词文件",
+      "loading": "正在读取项目提示词文件…",
+      "save": "保存文件",
+      "unsaved": "未保存",
+      "missing": "项目中还没有这个文件。编辑后保存即可创建。",
+      "editorAria": "项目提示词文件编辑器",
+      "placeholder": "输入该 Agent 实际加载的项目级提示词…",
+      "pathLabel": "文件",
+      "filesAria": "该 Agent 会加载的项目提示词文件",
+      "truncated": "文件内容被截断，保存会覆盖磁盘上的完整文件。",
+      "sharedBy": "{{agents}} 共用此文件。改一处即可，不必按 Agent 各写一份。",
+      "exclusiveTo": "仅 {{agent}} 使用此文件。",
+      "agentSeparator": "、",
+      "loadFailed": "读取项目提示词文件失败。",
+      "saveFailed": "保存项目提示词文件失败。",
+      "contextSave": "保存文件并切换"
     }
   },
   "userInstructions": {

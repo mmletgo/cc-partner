@@ -32,7 +32,8 @@ use crate::agent_hub::user_instructions::{
     AdaptInstructionToOtherAgentsRequest, AnalyzeInstructionOriginalRequest,
     ApplyUserInstructionPlanRequest, ListUserInstructionSlotVersionsRequest,
     PreviewUserInstructionRequest, RestoreUserInstructionSlotRequest, ReviseInstructionSlotRequest,
-    SaveUserInstructionBlocksRequest,
+    ReadUserNativeInstructionFileRequest, SaveUserInstructionBlocksRequest,
+    WriteUserNativeInstructionFileRequest,
 };
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions
@@ -417,6 +418,42 @@ pub async fn agent_hub_user_instructions_save_blocks(
     Ok(Json(dto))
 }
 
+/// POST /api/agent-hub/user-instructions/read-native-file
+///
+/// Business Logic: 读取 owning device 上白名单内的用户级 AGENTS.md / CLAUDE.md / GEMINI.md。
+/// Code Logic: 拒绝嵌套 deviceId；本机 TargetHomes 白名单。
+pub async fn agent_hub_user_instructions_read_native_file(
+    State(_state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserNativeInstructionFileDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: ReadUserNativeInstructionFileRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("read-native-file body: {e}"), &ctx))?;
+    let dto = AgentHubService::read_user_native_instruction_file(req).map_err(|e| {
+        P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.read_native_file")
+    })?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-instructions/write-native-file
+///
+/// Business Logic: 用户保存真实配置目录文件；CAS 防覆盖。
+/// Code Logic: 拒绝嵌套 deviceId；白名单 + expectedHash。
+pub async fn agent_hub_user_instructions_write_native_file(
+    State(_state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::user_instructions::UserNativeInstructionFileDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let req: WriteUserNativeInstructionFileRequest = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("write-native-file body: {e}"), &ctx))?;
+    let dto = AgentHubService::write_user_native_instruction_file(req).map_err(|e| {
+        P2pError::from_app_error(e, &ctx, "agent_hub.user_instructions.write_native_file")
+    })?;
+    Ok(Json(dto))
+}
+
 /// POST /api/agent-hub/user-instructions/preview-setup
 pub async fn agent_hub_user_instructions_preview_setup(
     State(state): State<AppState>,
@@ -616,6 +653,8 @@ mod tests {
             agent_hub_user_instructions_revise as *const (),
             agent_hub_user_instructions_slot_versions as *const (),
             agent_hub_user_instructions_restore_slot_version as *const (),
+            agent_hub_user_instructions_read_native_file as *const (),
+            agent_hub_user_instructions_write_native_file as *const (),
         );
         assert_eq!(CAPABILITY_AGENT_HUB_V1, "agent-hub.v1");
         assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");

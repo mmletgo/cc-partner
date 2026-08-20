@@ -414,6 +414,8 @@ pub fn run() {
             agent_hub_cmd::agent_hub_list_assets,
             agent_hub_cmd::agent_hub_get_asset,
             agent_hub_cmd::agent_hub_inspect_user_instruction_workspace,
+            agent_hub_cmd::agent_hub_read_user_native_instruction_file,
+            agent_hub_cmd::agent_hub_write_user_native_instruction_file,
             agent_hub_cmd::agent_hub_preview_user_instruction_setup,
             agent_hub_cmd::agent_hub_preview_user_instruction_update,
             agent_hub_cmd::agent_hub_apply_user_instruction_plan,

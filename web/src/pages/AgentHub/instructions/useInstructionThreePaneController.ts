@@ -45,6 +45,7 @@ import {
   initialThreePaneFromDisk,
   joinBlocksForTarget,
   normalizeInstructionBlocks,
+  recomputePreview,
   replaceSlotText,
   resolveInstructionSlotText,
   resolveAdaptedSlotText,
@@ -56,6 +57,10 @@ import {
   type InstructionThreePaneState,
   type SyncBaseline,
 } from './instructionThreePane';
+import {
+  canonicalUserFileId,
+  nativeOriginalForAgent,
+} from '../userInstructions/userInstructionFiles';
 
 export type { InstructionBusyAction } from './instructionThreePane';
 
@@ -76,7 +81,7 @@ interface InstructionDraftLease {
 
 function instructionContextKey(context: AgentHubContext): string {
   const identity = getAgentHubDraftIdentity(context);
-  return `${identity.scope}\0${identity.deviceId ?? ''}\0${identity.projectKey ?? ''}\0${identity.agent}`;
+  return `${identity.scope}\0${identity.deviceId ?? ''}\0${identity.projectKey ?? ''}`;
 }
 
 export interface UseInstructionThreePaneControllerArgs {
@@ -109,6 +114,7 @@ export interface UseInstructionThreePaneControllerResult {
   busyAction: InstructionBusyAction | null;
   /** 当前三栏是否存在未持久化草稿；用于上下文切换保护。 */
   dirty: boolean;
+  shouldGuardContextChange: (next: AgentHubContext) => boolean;
   writeBlocked: boolean;
   writeBlockedReason: string | null;
   dualDirtyOpen: boolean;
@@ -179,32 +185,23 @@ function laneToMode(lane: InstructionLane): InstructionBlockDraft['mode'] {
 }
 
 /**
- * Business Logic: 从 workspace 抽出当前 agent 的生效路径与可展示/编辑正文。
- * Code Logic: path 优先 effective/active source，再 managedTargetPath；
- *   text 优先磁盘 source.content（原始栏真源），缺省时回退 canonical common+extension。
+ * Business Logic: 从 workspace 抽出当前 agent 配置目录里真实加载的原生文件。
+ * Code Logic: 只认 AGENTS.md / CLAUDE.md / GEMINI.md；Hub exclusive/override 不算原始栏。
+ *   正文优先磁盘 source.content，缺省时回退 canonical common+extension。
  */
 export function originalFromWorkspace(
   workspace: UserInstructionWorkspaceDto,
   agent: AgentTarget,
 ): { path: string | null; text: string; contentTruncated: boolean } {
-  const target = workspace.targets.find((item) => item.target === agent) ?? null;
-  const effective =
-    (target?.effectiveSourceId
-      ? target.sources.find((source) => source.sourceId === target.effectiveSourceId)
-      : null) ??
-    target?.sources.find((source) => source.active) ??
-    target?.sources.find((source) => source.exists && typeof source.content === 'string') ??
-    null;
-  const pathCandidate = effective?.path ?? target?.managedTargetPath ?? null;
-  const path =
-    pathCandidate && pathCandidate.trim().length > 0 ? pathCandidate : null;
+  const native = nativeOriginalForAgent(workspace, agent);
+  const path = native.path && native.path.trim().length > 0 ? native.path : null;
+  const source = native.source;
 
-  // 磁盘正文优先：打开即展示本机原始提示词，可直接编辑。
-  if (typeof effective?.content === 'string') {
+  if (typeof source?.content === 'string') {
     return {
       path,
-      text: effective.content,
-      contentTruncated: Boolean(effective.contentTruncated),
+      text: source.content,
+      contentTruncated: Boolean(source.contentTruncated),
     };
   }
 
@@ -361,6 +358,8 @@ export function useInstructionThreePaneController(
   /** context generation invalidates every inspect/save/preview/apply response. */
   const contextGenerationRef = useRef(0);
   const contextKeyRef = useRef(instructionContextKey(context));
+  const agentRef = useRef(agent);
+  const workspaceRef = useRef<UserInstructionWorkspaceDto | null>(null);
   /** CAS lease 只在首次 hydrate、放弃草稿或成功保存后迁移。 */
   const draftLeaseRef = useRef<InstructionDraftLease | null>(null);
   /** inventory snapshot 可随成功 refresh 前进；Canonical base revision 仍冻结在 lease。 */
@@ -391,7 +390,73 @@ export function useInstructionThreePaneController(
     stateRef.current = state;
   }, [state]);
 
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
   const dirty = state.blocksDirty || state.originalDirty;
+
+  /**
+   * Business Logic: 三槽草稿按 identity 守卫；切 Agent 时只有原始文件路径变了才拦截。
+   * Code Logic: 公共/适配/独有块在同一 canonical 里；原始栏按规范化绝对路径比较。
+   */
+  const shouldGuardContextChange = useCallback(
+    (next: AgentHubContext) => {
+      if (!state.blocksDirty && !state.originalDirty) return false;
+      if (
+        next.scope !== context.scope ||
+        next.deviceId !== context.deviceId ||
+        next.projectKey !== context.projectKey
+      ) {
+        return true;
+      }
+      if (next.tab !== 'instructions' && !next.adaptView) return true;
+      if (next.agent === context.agent) return false;
+      if (!state.originalDirty) return false;
+      const ws = workspaceRef.current;
+      if (!ws) return true;
+      const currentId = canonicalUserFileId(state.originalPath ?? '');
+      const nextId = canonicalUserFileId(nativeOriginalForAgent(ws, next.agent).path ?? '');
+      return currentId.length === 0 || currentId !== nextId;
+    },
+    [
+      context.agent,
+      context.deviceId,
+      context.projectKey,
+      context.scope,
+      state.blocksDirty,
+      state.originalDirty,
+      state.originalPath,
+    ],
+  );
+
+  const applyOriginalForAgent = useCallback((nextAgent: AgentTarget) => {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const current = stateRef.current;
+    if (current.originalDirty) {
+      const kept = recomputePreview(current, nextAgent);
+      stateRef.current = kept;
+      setState(kept);
+      return;
+    }
+    const { path, text } = originalFromWorkspace(ws, nextAgent);
+    const nextState = recomputePreview(
+      {
+        ...current,
+        originalPath: path,
+        originalText: text,
+        sourceDrift: false,
+      },
+      nextAgent,
+    );
+    stateRef.current = nextState;
+    setState(nextState);
+    const lease = draftLeaseRef.current;
+    if (lease) {
+      draftLeaseRef.current = { ...lease, originalPath: path, originalText: text };
+    }
+  }, []);
 
   /**
    * Business Logic: 用户确认放弃当前草稿后才能切换 scope/agent/project context。
@@ -747,6 +812,7 @@ export function useInstructionThreePaneController(
   useEffect(() => {
     const nextContextKey = instructionContextKey(context);
     const contextChanged = contextKeyRef.current !== nextContextKey;
+    const agentChanged = agentRef.current !== context.agent;
     const hasDirtyDraft = stateRef.current.blocksDirty || stateRef.current.originalDirty;
     if (contextChanged && hasDirtyDraft) {
       // 尚未确认的 context 只记录 pending key；旧 identity/lease 必须原封不动。
@@ -760,8 +826,17 @@ export function useInstructionThreePaneController(
       blockedContextKeyRef.current = null;
       setError(null);
     }
+    if (!contextChanged && agentChanged) {
+      agentRef.current = context.agent;
+      if (!enabled || contextUnsupported) return;
+      if (workspaceRef.current) {
+        applyOriginalForAgent(context.agent);
+        return;
+      }
+    }
     if (contextChanged) {
       contextKeyRef.current = nextContextKey;
+      agentRef.current = context.agent;
       contextGenerationRef.current += 1;
       // Invalidate an in-flight request before any new work is scheduled.
       loadSeqRef.current += 1;
@@ -814,6 +889,7 @@ export function useInstructionThreePaneController(
     contextCapability,
     contextUnavailableCode,
     contextUnsupported,
+    applyOriginalForAgent,
   ]);
 
   const currentTarget = useMemo(
@@ -1675,6 +1751,7 @@ export function useInstructionThreePaneController(
     actionBusy: busyAction !== null || refreshing,
     busyAction,
     dirty,
+    shouldGuardContextChange,
     writeBlocked,
     writeBlockedReason,
     dualDirtyOpen,

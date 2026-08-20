@@ -33,7 +33,8 @@ use crate::agent_hub::user_instructions::{
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
     PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
     SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto, UserInstructionPlanDto,
-    UserInstructionWorkspaceDto,
+    UserInstructionWorkspaceDto, UserNativeInstructionFileDto,
+    ReadUserNativeInstructionFileRequest, WriteUserNativeInstructionFileRequest,
 };
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
@@ -1220,6 +1221,35 @@ impl BackendControlClient {
         self.agent_hub_op(
             "agent_hub.inspect_user_instruction_workspace",
             merge_device_id(serde_json::json!({}), device_id)?,
+        )
+        .await
+    }
+
+    /// Business Logic: 读取各 CLI 配置目录里的真实 AGENTS.md / CLAUDE.md / GEMINI.md。
+    /// Code Logic: 透传 deviceId；owner 再决定本机或 P2P。
+    pub async fn agent_hub_read_user_native_instruction_file(
+        &self,
+        req: ReadUserNativeInstructionFileRequest,
+        device_id: Option<String>,
+    ) -> Result<UserNativeInstructionFileDto, AppError> {
+        self.agent_hub_op(
+            "agent_hub.read_user_native_instruction_file",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
+    }
+
+    /// Business Logic: 用户保存原生提示词文件是 mutation，必须阻断旧 sidecar。
+    /// Code Logic: 版本门闩后 CAS 写白名单路径。
+    pub async fn agent_hub_write_user_native_instruction_file(
+        &self,
+        req: WriteUserNativeInstructionFileRequest,
+        device_id: Option<String>,
+    ) -> Result<UserNativeInstructionFileDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op(
+            "agent_hub.write_user_native_instruction_file",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
         )
         .await
     }

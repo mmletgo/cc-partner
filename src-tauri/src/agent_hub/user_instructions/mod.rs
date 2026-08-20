@@ -9,6 +9,7 @@
 //!     apply 重新验证 revision/hash/ownership/support 后才允许进入投影。
 
 mod inventory;
+mod native_files;
 mod plan;
 mod slot_history;
 
@@ -71,6 +72,11 @@ pub struct ReviseInstructionSlotResult {
     pub variants: Option<BTreeMap<String, String>>,
 }
 
+pub use native_files::{
+    read_user_native_instruction_file, write_user_native_instruction_file,
+    ReadUserNativeInstructionFileRequest, UserNativeInstructionFileDto,
+    WriteUserNativeInstructionFileRequest,
+};
 pub use inventory::{
     inspect_user_instruction_workspace, inspect_user_instruction_workspace_with_env,
     list_user_instruction_slot_versions, restore_user_instruction_slot_version,

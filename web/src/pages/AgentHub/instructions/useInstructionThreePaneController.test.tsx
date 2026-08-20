@@ -331,6 +331,158 @@ describe('originalFromWorkspace', () => {
     expect(result.text).toContain('## Live disk');
     expect(result.text).not.toContain('## Shared rules');
   });
+
+  test('original pane prefers native CLAUDE.md over Hub exclusive files', () => {
+    const workspace = workspaceFixture({
+      targets: [
+        {
+          ...workspaceFixture().targets[0]!,
+          effectiveSourceId: 'claude-exclusive',
+          sources: [
+            {
+              sourceId: 'claude-exclusive',
+              path: '/home/user/.claude/cc-partner.exclusive.md',
+              role: 'native',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-ex',
+              modifiedAt: null,
+              ownership: 'hubManaged',
+              content: '## Exclusive only\n',
+              contentTruncated: false,
+            },
+            {
+              sourceId: 'claude-native',
+              path: '/home/user/.claude/CLAUDE.md',
+              role: 'native',
+              active: false,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-native',
+              modifiedAt: null,
+              ownership: 'hubManaged',
+              content: '## Native CLAUDE\n',
+              contentTruncated: false,
+            },
+          ],
+        },
+        workspaceFixture().targets[1]!,
+        workspaceFixture().targets[2]!,
+      ],
+    });
+    const result = originalFromWorkspace(workspace, 'claude');
+    expect(result.path).toBe('/home/user/.claude/CLAUDE.md');
+    expect(result.text).toBe('## Native CLAUDE\n');
+  });
+
+  test('Codex original prefers AGENTS.md over AGENTS.override.md', () => {
+    const workspace = workspaceFixture({
+      targets: [
+        workspaceFixture().targets[0]!,
+        {
+          ...workspaceFixture().targets[1]!,
+          effectiveSourceId: 'codex-override',
+          sources: [
+            {
+              sourceId: 'codex-override',
+              path: '/home/user/.codex/AGENTS.override.md',
+              role: 'override',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-ov',
+              modifiedAt: null,
+              ownership: 'hubManaged',
+              content: '## Override\n',
+              contentTruncated: false,
+            },
+            {
+              sourceId: 'codex-agents',
+              path: '/home/user/.codex/AGENTS.md',
+              role: 'native',
+              active: false,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-agents',
+              modifiedAt: null,
+              ownership: 'external',
+              content: '## Codex AGENTS\n',
+              contentTruncated: false,
+            },
+          ],
+        },
+        workspaceFixture().targets[2]!,
+      ],
+    });
+    const result = originalFromWorkspace(workspace, 'codex');
+    expect(result.path).toBe('/home/user/.codex/AGENTS.md');
+    expect(result.text).toBe('## Codex AGENTS\n');
+  });
+
+  test('Codex and OpenCode AGENTS.md are distinct files', () => {
+    const workspace = workspaceFixture({
+      targets: [
+        workspaceFixture().targets[0]!,
+        workspaceFixture().targets[1]!,
+        {
+          ...workspaceFixture().targets[2]!,
+          cli: { installed: true, version: '1.0', configRoot: '/home/user/.config/opencode' },
+          sources: [
+            {
+              sourceId: 'opencode-agents',
+              path: '/home/user/.config/opencode/AGENTS.md',
+              role: 'native',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-oc',
+              modifiedAt: null,
+              ownership: 'external',
+              content: '## OpenCode AGENTS\n',
+              contentTruncated: false,
+            },
+          ],
+          managedTargetPath: '/home/user/.config/opencode/AGENTS.md',
+        },
+      ],
+    });
+    expect(originalFromWorkspace(workspace, 'codex').path).toBe('/home/user/.codex/AGENTS.md');
+    expect(originalFromWorkspace(workspace, 'opencode').path).toBe(
+      '/home/user/.config/opencode/AGENTS.md',
+    );
+  });
+
+  test('OpenCode without AGENTS.md falls back to Claude CLAUDE.md', () => {
+    const workspace = workspaceFixture({
+      targets: [
+        workspaceFixture().targets[0]!,
+        workspaceFixture().targets[1]!,
+        {
+          ...workspaceFixture().targets[2]!,
+          cli: { installed: true, version: '1.0', configRoot: '/home/user/.config/opencode' },
+          sources: [
+            {
+              sourceId: 'opencode-fallback',
+              path: '/home/user/.claude/CLAUDE.md',
+              role: 'fallback',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-1',
+              modifiedAt: null,
+              ownership: 'external',
+              content: '## Shared Claude\n',
+              contentTruncated: false,
+            },
+          ],
+          managedTargetPath: null,
+        },
+      ],
+    });
+    expect(originalFromWorkspace(workspace, 'opencode').path).toBe('/home/user/.claude/CLAUDE.md');
+    expect(originalFromWorkspace(workspace, 'claude').path).toBe('/home/user/.claude/CLAUDE.md');
+  });
 });
 
 describe('useInstructionThreePaneController', () => {
@@ -836,7 +988,7 @@ describe('useInstructionThreePaneController', () => {
     expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledOnce();
   });
 
-  test('blocked context change keeps the old lease and can still save after returning', async () => {
+  test('blocked device change keeps the old lease and can still save after returning', async () => {
     const afterSave = workspaceFixture({
       inventorySnapshotHash: 'inventory-2',
       canonical: { ...workspaceFixture().canonical!, headRevisionId: 'rev-2' },
@@ -853,7 +1005,7 @@ describe('useInstructionThreePaneController', () => {
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
     act(() => result.current.editCurrentSlot('seed draft'));
-    rerender({ context: { ...baseContext, agent: 'codex' } });
+    rerender({ context: { ...baseContext, deviceId: 'peer-a' } });
     expect(result.current.error).toBe('AGENT_HUB_CONTEXT_CHANGE_HAS_UNSAVED_DRAFT');
     expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledOnce();
 
@@ -867,6 +1019,67 @@ describe('useInstructionThreePaneController', () => {
     expect(apiMocks.saveUserInstructionBlocks).toHaveBeenCalledWith(
       expect.objectContaining({ baseRevisionId: 'rev-1' }),
     );
+  });
+
+  test('dirty common slot survives switching agent without re-inspect', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
+    const { result, rerender } = renderHook(
+      (props: { context: AgentHubContext }) =>
+        useInstructionThreePaneController({ context: props.context, t }),
+      { initialProps: { context: baseContext } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.editCurrentSlot('shared draft'));
+    rerender({ context: { ...baseContext, agent: 'codex' } });
+    expect(result.current.error).toBeNull();
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledOnce();
+    expect(result.current.state.blocksDirty).toBe(true);
+    expect(result.current.shouldGuardContextChange({ ...baseContext, agent: 'codex' })).toBe(
+      false,
+    );
+    expect(result.current.state.originalPath).toBe('/home/user/.codex/AGENTS.md');
+  });
+
+  test('originalDirty guards agent switch only when native paths differ', async () => {
+    const workspace = workspaceFixture({
+      targets: [
+        workspaceFixture().targets[0]!,
+        workspaceFixture().targets[1]!,
+        {
+          ...workspaceFixture().targets[2]!,
+          cli: { installed: true, version: '1.0', configRoot: '/home/user/.config/opencode' },
+          sources: [
+            {
+              sourceId: 'opencode-fallback',
+              path: '/home/user/.claude/CLAUDE.md',
+              role: 'fallback',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-1',
+              modifiedAt: null,
+              ownership: 'external',
+            },
+          ],
+          managedTargetPath: null,
+        },
+      ],
+    });
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspace);
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.updateOriginal('edited original'));
+    expect(
+      result.current.shouldGuardContextChange({ ...baseContext, agent: 'codex' }),
+    ).toBe(true);
+    expect(
+      result.current.shouldGuardContextChange({ ...baseContext, agent: 'opencode' }),
+    ).toBe(false);
+    expect(
+      result.current.shouldGuardContextChange({ ...baseContext, tab: 'skill' }),
+    ).toBe(true);
   });
 
   test('editing while preview is pending prevents the old plan from opening', async () => {

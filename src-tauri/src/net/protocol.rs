@@ -397,7 +397,7 @@ pub const CAPABILITY_PORTABLE_PROJECT_V1: &str = "agent-hub.portable-project.v1"
 ///
 /// Code Logic（这个常量做什么）:
 ///     字符串常量 `agent-hub.user-instructions.v1`，列入 `server_protocol_info()`（字典序）；
-///     与 10 条 user-instructions 路由原子上线。
+///     与 12 条 user-instructions 路由原子上线。
 pub const CAPABILITY_USER_INSTRUCTIONS_V1: &str = "agent-hub.user-instructions.v1";
 
 /// 能力 token：移动端/对端切换 cc-switch provider（`/api/provider-manager/*`）。

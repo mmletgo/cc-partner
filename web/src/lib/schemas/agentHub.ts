@@ -68,6 +68,7 @@ import type {
   UserInstructionSourceRole,
   UserInstructionTargetDto,
   UserInstructionWorkspaceDto,
+  UserNativeInstructionFileDto,
 } from '../types/agentHub';
 import {
   arrayDecoder,
@@ -392,6 +393,17 @@ export const userInstructionWorkspaceDecoder: Decoder<UserInstructionWorkspaceDt
     targets: arrayDecoder(userInstructionTargetDecoder),
     inventorySnapshotHash: stringDecoder,
     refreshedAt: stringDecoder,
+  });
+
+/** 用户级原生提示词文件快照 decoder。 */
+export const userNativeInstructionFileDecoder: Decoder<UserNativeInstructionFileDto> =
+  objectDecoder('UserNativeInstructionFileDto', {
+    path: stringDecoder,
+    exists: booleanDecoder,
+    content: stringDecoder,
+    hash: nullableDecoder(stringDecoder),
+    truncated: booleanDecoder,
+    created: booleanDecoder,
   });
 
 /** User Instruction plan target change decoder。 */

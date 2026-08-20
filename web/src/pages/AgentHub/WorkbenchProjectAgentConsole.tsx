@@ -2,7 +2,7 @@
  * Workbench 项目 Agent 控制台：冻结当前项目并复用 Agent Hub 视图。
  *
  * Business Logic（为什么需要）:
- *   项目级指令/资产必须挂在当前 Workbench 项目上，而不是 Hub 里的 user|project 切换器。
+ *   项目级指令直接编辑各 Agent 实际加载的仓库根文件（多数共用 AGENTS.md）；
  *   资产随项目走，控制台不提供跨设备 Pull/Push。
  *   控制台复用同一套 Hub 视图与脏稿守卫，关闭前要确认未保存草稿。
  *
@@ -54,6 +54,7 @@ export const WorkbenchProjectAgentConsole = forwardRef(function WorkbenchProject
         hubContext={session.committedHubContext}
         onContextChange={session.onContextChange}
         instructionThreePane={session.instructionThreePane}
+        projectInstructionFiles={session.projectInstructionFiles}
         embedded
         scopeLock="project"
         unsavedFilesNotice={unsavedFilesNotice}

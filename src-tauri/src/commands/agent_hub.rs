@@ -33,8 +33,9 @@ use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectSta
 use crate::agent_hub::remote_client::{
     apply_user_instruction_plan_for_state, inspect_user_instruction_workspace_for_state,
     list_user_instruction_slot_versions_for_state, preview_user_instruction_setup_for_state,
-    preview_user_instruction_update_for_state, restore_user_instruction_slot_version_for_state,
-    save_user_instruction_blocks_for_state,
+    preview_user_instruction_update_for_state, read_user_native_instruction_file_for_state,
+    restore_user_instruction_slot_version_for_state, save_user_instruction_blocks_for_state,
+    write_user_native_instruction_file_for_state,
 };
 use crate::agent_hub::replication::pull::{
     apply_remote_project_portable_action, enable_remote_project,
@@ -64,8 +65,9 @@ use crate::agent_hub::user_instructions::{
     AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
     PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
-    SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto, UserInstructionPlanDto,
-    UserInstructionWorkspaceDto,
+    ReadUserNativeInstructionFileRequest, SaveUserInstructionBlocksRequest,
+    UserInstructionCanonicalDto, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    UserNativeInstructionFileDto, WriteUserNativeInstructionFileRequest,
 };
 use crate::backend::authority::RuntimeRole;
 #[cfg(test)]
@@ -141,6 +143,36 @@ pub async fn agent_hub_inspect_user_instruction_workspace(
             .agent_hub_inspect_user_instruction_workspace(device_id.clone()));
     }
     inspect_user_instruction_workspace_for_state(state.inner(), device_id.as_deref()).await
+}
+
+/// Business Logic: 读取各 CLI 配置目录里真实加载的 AGENTS.md / CLAUDE.md / GEMINI.md。
+/// Code Logic: deviceId 非空则 P2P；路径必须在 owner 白名单内。
+#[tauri::command]
+pub async fn agent_hub_read_user_native_instruction_file(
+    state: State<'_, AppState>,
+    request: ReadUserNativeInstructionFileRequest,
+    device_id: Option<String>,
+) -> Result<UserNativeInstructionFileDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_read_user_native_instruction_file(request, device_id.clone()));
+    }
+    read_user_native_instruction_file_for_state(state.inner(), device_id.as_deref(), request).await
+}
+
+/// Business Logic: 用户保存自己的原生提示词文件，CAS 防覆盖。
+/// Code Logic: deviceId 非空则 P2P；白名单路径 + expectedHash。
+#[tauri::command]
+pub async fn agent_hub_write_user_native_instruction_file(
+    state: State<'_, AppState>,
+    request: WriteUserNativeInstructionFileRequest,
+    device_id: Option<String>,
+) -> Result<UserNativeInstructionFileDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_write_user_native_instruction_file(request, device_id.clone()));
+    }
+    write_user_native_instruction_file_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
 /// Business Logic: 首次设置必须先生成绑定 revision/inventory/hash 的预览计划。
@@ -1834,6 +1866,8 @@ mod tests {
             "agent_hub.list_assets",
             "agent_hub.get_asset",
             "agent_hub.inspect_user_instruction_workspace",
+            "agent_hub.read_user_native_instruction_file",
+            "agent_hub.write_user_native_instruction_file",
             "agent_hub.preview_user_instruction_setup",
             "agent_hub.preview_user_instruction_update",
             "agent_hub.apply_user_instruction_plan",

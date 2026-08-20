@@ -30,6 +30,7 @@ import {
   userInstructionPlanDecoder,
   userInstructionSlotVersionListDecoder,
   userInstructionWorkspaceDecoder,
+  userNativeInstructionFileDecoder,
 } from '@/lib/schemas/agentHub';
 import { allHubTargets, isHubTarget } from '@/lib/agentCatalog';
 import type {
@@ -60,6 +61,9 @@ import type {
   UserInstructionTargetDto,
   UserInstructionTargetPreviewRequest,
   UserInstructionWorkspaceDto,
+  ReadUserNativeInstructionFileRequest,
+  UserNativeInstructionFileDto,
+  WriteUserNativeInstructionFileRequest,
 } from '@/lib/types/agentHub';
 import type {
   ListUserInstructionSlotVersionsRequest,
@@ -102,6 +106,8 @@ export const AGENT_HUB_COMMANDS = {
   getPluginPackageReport: 'agent_hub_get_plugin_package_report',
   previewPluginDelete: 'agent_hub_preview_plugin_delete',
   inspectUserInstructionWorkspace: 'agent_hub_inspect_user_instruction_workspace',
+  readUserNativeInstructionFile: 'agent_hub_read_user_native_instruction_file',
+  writeUserNativeInstructionFile: 'agent_hub_write_user_native_instruction_file',
   previewUserInstructionSetup: 'agent_hub_preview_user_instruction_setup',
   applyUserInstructionPlan: 'agent_hub_apply_user_instruction_plan',
   saveUserInstructionBlocks: 'agent_hub_save_user_instruction_blocks',
@@ -822,6 +828,51 @@ export const agentHubApi = {
         throw reason;
       }
       return inspectLegacyUserInstructionWorkspace();
+    }
+  },
+
+  /**
+   * Business Logic: 读取 owning device 上白名单内的用户级 AGENTS.md / CLAUDE.md / GEMINI.md。
+   * Code Logic: 用户级 deviceId 透传；路径必须绝对且在 owner 白名单。
+   */
+  readUserNativeInstructionFile: async (
+    request: ReadUserNativeInstructionFileRequest & AgentHubRequestContext,
+  ): Promise<UserNativeInstructionFileDto> => {
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
+    return invokeDecoded(
+      AGENT_HUB_COMMANDS.readUserNativeInstructionFile,
+      deviceId ? { request: body, deviceId } : { request: body },
+      userNativeInstructionFileDecoder,
+    );
+  },
+
+  /**
+   * Business Logic: 用户保存自己的原生提示词文件，CAS 防覆盖；不是 Hub L3 投影。
+   * Code Logic: 用户级 deviceId 透传；V2 unavailable 不得静默落到本机 home。
+   */
+  writeUserNativeInstructionFile: async (
+    request: WriteUserNativeInstructionFileRequest & AgentHubRequestContext,
+  ): Promise<UserNativeInstructionFileDto> => {
+    assertUserInstructionContext(request);
+    const deviceId = userInstructionDeviceIdArg(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.writeUserNativeInstructionFile,
+        deviceId ? { request: body, deviceId } : { request: body },
+        userNativeInstructionFileDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.writeUserNativeInstructionFile,
+      );
     }
   },
 

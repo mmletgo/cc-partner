@@ -227,6 +227,21 @@ describe('AgentHubShell', () => {
     expect(screen.queryByTestId('agent-hub-pull-reason')).toBeNull();
   });
 
+  test('project lock hides instruction lanes and keeps the agent switcher', () => {
+    renderShell({
+      scopeLock: 'project',
+      context: {
+        ...DEFAULT_AGENT_HUB_CONTEXT,
+        scope: 'project',
+        projectKey: 'wb-1',
+        tab: 'instructions',
+        instructionLane: 'common',
+      },
+    });
+    expect(screen.queryByTestId('agent-hub-lane-switcher')).toBeNull();
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
+  });
+
   test('project lock shows a single reload without Pull or Push', () => {
     const onReload = vi.fn();
     renderShell({

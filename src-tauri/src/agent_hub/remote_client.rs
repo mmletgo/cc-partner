@@ -14,9 +14,10 @@ use crate::agent_hub::user_instructions::{
     AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
     ListUserInstructionSlotVersionsRequest, PreviewUserInstructionRequest,
-    RestoreUserInstructionSlotRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
-    SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto, UserInstructionPlanDto,
-    UserInstructionWorkspaceDto,
+    ReadUserNativeInstructionFileRequest, RestoreUserInstructionSlotRequest,
+    ReviseInstructionSlotRequest, ReviseInstructionSlotResult, SaveUserInstructionBlocksRequest,
+    UserInstructionCanonicalDto, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    UserNativeInstructionFileDto, WriteUserNativeInstructionFileRequest,
 };
 use crate::commands::prompts::{content_version_to_dto, ContentVersionDto};
 use crate::error::AppError;
@@ -51,6 +52,10 @@ pub const USER_INSTRUCTIONS_SLOT_VERSIONS_PATH: &str =
     "/api/agent-hub/user-instructions/slot-versions";
 pub const USER_INSTRUCTIONS_RESTORE_SLOT_PATH: &str =
     "/api/agent-hub/user-instructions/restore-slot-version";
+pub const USER_INSTRUCTIONS_READ_NATIVE_FILE_PATH: &str =
+    "/api/agent-hub/user-instructions/read-native-file";
+pub const USER_INSTRUCTIONS_WRITE_NATIVE_FILE_PATH: &str =
+    "/api/agent-hub/user-instructions/write-native-file";
 
 /// 用户级三栏远端客户端。
 ///
@@ -120,6 +125,36 @@ impl RemoteAgentHubClient {
         self.post_json(
             base_url,
             USER_INSTRUCTIONS_SAVE_BLOCKS_PATH,
+            req,
+            PeerTimeoutClass::Mutation,
+        )
+        .await
+    }
+
+    /// POST 对端读取用户级原生提示词文件。
+    pub async fn read_native_file(
+        &self,
+        base_url: &str,
+        req: &ReadUserNativeInstructionFileRequest,
+    ) -> Result<UserNativeInstructionFileDto, AppError> {
+        self.post_json(
+            base_url,
+            USER_INSTRUCTIONS_READ_NATIVE_FILE_PATH,
+            req,
+            PeerTimeoutClass::Metadata,
+        )
+        .await
+    }
+
+    /// POST 对端 CAS 写入用户级原生提示词文件。
+    pub async fn write_native_file(
+        &self,
+        base_url: &str,
+        req: &WriteUserNativeInstructionFileRequest,
+    ) -> Result<UserNativeInstructionFileDto, AppError> {
+        self.post_json(
+            base_url,
+            USER_INSTRUCTIONS_WRITE_NATIVE_FILE_PATH,
             req,
             PeerTimeoutClass::Mutation,
         )
@@ -353,6 +388,32 @@ pub async fn save_user_instruction_blocks_for_state(
     AgentHubService::save_user_instruction_blocks(state, req).await
 }
 
+/// read-native-file：deviceId 非空则 P2P。
+pub async fn read_user_native_instruction_file_for_state(
+    state: &AppState,
+    device_id: Option<&str>,
+    req: ReadUserNativeInstructionFileRequest,
+) -> Result<UserNativeInstructionFileDto, AppError> {
+    if let Some(peer_id) = remote_user_instruction_device_id(state, device_id)? {
+        let (client, base_url) = RemoteAgentHubClient::open(state, &peer_id).await?;
+        return client.read_native_file(&base_url, &req).await;
+    }
+    AgentHubService::read_user_native_instruction_file(req)
+}
+
+/// write-native-file：deviceId 非空则 P2P。
+pub async fn write_user_native_instruction_file_for_state(
+    state: &AppState,
+    device_id: Option<&str>,
+    req: WriteUserNativeInstructionFileRequest,
+) -> Result<UserNativeInstructionFileDto, AppError> {
+    if let Some(peer_id) = remote_user_instruction_device_id(state, device_id)? {
+        let (client, base_url) = RemoteAgentHubClient::open(state, &peer_id).await?;
+        return client.write_native_file(&base_url, &req).await;
+    }
+    AgentHubService::write_user_native_instruction_file(req)
+}
+
 /// preview-setup：deviceId 非空则 P2P。
 pub async fn preview_user_instruction_setup_for_state(
     state: &AppState,
@@ -516,7 +577,7 @@ where
 mod tests {
     use super::*;
 
-    /// Business Logic: 脚手架路径必须与协议表 10 行一致。
+    /// Business Logic: 脚手架路径必须与协议表 12 行一致。
     #[test]
     fn user_instruction_paths_match_scaffold_rows() {
         assert_eq!(
@@ -558,6 +619,14 @@ mod tests {
         assert_eq!(
             USER_INSTRUCTIONS_RESTORE_SLOT_PATH,
             "/api/agent-hub/user-instructions/restore-slot-version"
+        );
+        assert_eq!(
+            USER_INSTRUCTIONS_READ_NATIVE_FILE_PATH,
+            "/api/agent-hub/user-instructions/read-native-file"
+        );
+        assert_eq!(
+            USER_INSTRUCTIONS_WRITE_NATIVE_FILE_PATH,
+            "/api/agent-hub/user-instructions/write-native-file"
         );
         assert_eq!(
             CAPABILITY_USER_INSTRUCTIONS_V1,

@@ -1005,6 +1005,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/agent-hub/user-instructions/restore-slot-version",
             post(agent_hub::agent_hub_user_instructions_restore_slot_version),
         )
+        .route(
+            "/api/agent-hub/user-instructions/read-native-file",
+            post(agent_hub::agent_hub_user_instructions_read_native_file),
+        )
+        .route(
+            "/api/agent-hub/user-instructions/write-native-file",
+            post(agent_hub::agent_hub_user_instructions_write_native_file),
+        )
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
         .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))

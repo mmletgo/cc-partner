@@ -8,8 +8,10 @@
  * Code Logic（这个组件做什么）:
  *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级只保留设备选择器与 Pull/Push，
  *   项目级不展示项目选择器、项目名或跨设备复制（资产随项目走），也不展示「范围 / 范围：项目」。
- *   当前 tab 可重读时工具栏只保留一个「刷新」（提示词三栏与资产列表同一入口）。
- *   公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。
+ *   用户级提示词展示三槽 lane；公共槽隐藏 Agent 切换。项目级提示词不展示三槽，
+ *   始终显示 Agent 切换（仓库根多数 Agent 共用一份 AGENTS.md）。
+ *   当前 tab 可重读时工具栏只保留一个「刷新」（提示词三栏、项目文件与资产列表同一入口）。
+ *   Skill/Command 仓库面隐藏 Agent 切换。
  *   复用共享 roving 索引合同，并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
 
@@ -128,8 +130,9 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
   const activeAssetLaneIndex = Math.max(0, ASSET_LANES.indexOf(context.assetLane));
   const activeAgentIndex = Math.max(0, AGENTS.indexOf(context.agent));
+  const showInstructionLanes = context.tab === 'instructions' && scopeLock !== 'project';
   const showAgentSwitcher =
-    !(context.tab === 'instructions' && context.instructionLane === 'common') &&
+    !(context.tab === 'instructions' && context.instructionLane === 'common' && scopeLock !== 'project') &&
     !(isPortableStoreTab(context.tab) && context.assetLane === 'store');
   const activeTabId = `agent-hub-tab-${context.tab}`;
   const capability = getAgentHubContextCapability(context);
@@ -287,7 +290,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </div>
         )}
 
-        {context.tab === 'instructions' ? (
+        {showInstructionLanes ? (
           <div className={styles.row}>
             <span className={styles.label}>{t('agentHub:shell.laneLabel')}</span>
             <div

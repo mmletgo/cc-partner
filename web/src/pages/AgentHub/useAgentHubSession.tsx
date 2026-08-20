@@ -3,7 +3,9 @@
  *
  * Business Logic（为什么需要）:
  *   页面与 Workbench 项目 Agent 共用同一套「未保存提示词不得默默丢掉」合同；
- *   关闭控制台、切 Agent、切 tab 都必须走 Stay / Save / Discard。
+ *   关闭控制台、切 tab / 设备 / 范围都必须走 Stay / Save / Discard。
+ *   用户级三槽切 Agent：公共/适配/独有草稿保留；原始栏按原生文件绝对路径守卫。
+ *   项目级原生文件按路径守卫：同一仓库 AGENTS.md 的 Agent 切换不弹窗。
  *
  * Code Logic（做什么）:
  *   以 controller.hubContext 为 requested；正文只消费 committed；dirty 时弹出同一 Dialog。
@@ -16,6 +18,10 @@ import {
   useInstructionThreePaneController,
   type UseInstructionThreePaneControllerResult,
 } from './instructions';
+import {
+  useProjectInstructionFilesController,
+  type UseProjectInstructionFilesControllerResult,
+} from './projectInstructions';
 import { peerAllowsUserInstructionThreePane } from './context/agentHubContext';
 import type { UseAgentHubControllerResult } from './useAgentHubController';
 import styles from './AgentHub.module.css';
@@ -29,6 +35,7 @@ export interface UseAgentHubSessionResult {
   committedHubContext: UseAgentHubControllerResult['hubContext'];
   onContextChange: (patch: Partial<UseAgentHubControllerResult['hubContext']>) => void;
   instructionThreePane: UseInstructionThreePaneControllerResult;
+  projectInstructionFiles: UseProjectInstructionFilesControllerResult;
   contextSwitchDialog: ReactElement;
   confirmClose: () => Promise<boolean>;
   isDirty: () => boolean;
@@ -67,23 +74,40 @@ export function useAgentHubSession(
       (committedHubContext.deviceId === null ||
         peerAllowsUserInstructionThreePane(selectedCommittedPeer)),
   });
+  const projectInstructionFiles = useProjectInstructionFilesController({
+    projectKey: committedHubContext.projectKey,
+    agent: committedHubContext.agent,
+    enabled: committedHubContext.scope === 'project' && committedHubContext.projectKey !== null,
+    active: committedHubContext.tab === 'instructions',
+    t,
+  });
 
   const committedFingerprint = JSON.stringify(committedHubContext);
   const requestedFingerprint = JSON.stringify(requestedHubContext);
+  const instructionsDirty = instructionThreePane.dirty || projectInstructionFiles.dirty;
 
   const isBusy =
     controller.actionBusy ||
     controller.portableActionBusy ||
     controller.portablePull.busy ||
     instructionThreePane.actionBusy ||
+    projectInstructionFiles.actionBusy ||
     controller.lanPushOpen ||
     controller.portablePullOpen ||
     controller.portableActionOpen;
 
+  const shouldGuardNextContext = useCallback(
+    (next: UseAgentHubControllerResult['hubContext']) => {
+      if (projectInstructionFiles.shouldGuardContextChange(next)) return true;
+      return instructionThreePane.shouldGuardContextChange(next);
+    },
+    [instructionThreePane, projectInstructionFiles],
+  );
+
   useEffect(() => {
     if (requestedFingerprint === committedFingerprint) return;
     const timeoutId = window.setTimeout(() => {
-      if (instructionThreePane.dirty) {
+      if (shouldGuardNextContext(requestedHubContext)) {
         navigateContext(committedHubContext);
         setPendingHubContext(requestedHubContext);
         return;
@@ -94,10 +118,10 @@ export function useAgentHubSession(
   }, [
     committedFingerprint,
     committedHubContext,
-    instructionThreePane.dirty,
     navigateContext,
     requestedHubContext,
     requestedFingerprint,
+    shouldGuardNextContext,
   ]);
 
   const onContextChange = useCallback(
@@ -109,7 +133,7 @@ export function useAgentHubSession(
       if (next.scope === 'user') next.projectKey = null;
       else next.deviceId = null;
       if (JSON.stringify(next) === committedFingerprint) return;
-      if (instructionThreePane.dirty) {
+      if (shouldGuardNextContext(next)) {
         setPendingHubContext(next);
         return;
       }
@@ -119,8 +143,8 @@ export function useAgentHubSession(
     [
       committedFingerprint,
       committedHubContext,
-      instructionThreePane.dirty,
       navigateContext,
+      shouldGuardNextContext,
     ],
   );
 
@@ -143,6 +167,7 @@ export function useAgentHubSession(
 
   const commitPendingContext = useCallback(() => {
     instructionThreePane.discardDraftForContextChange();
+    projectInstructionFiles.discardDraftForContextChange();
     if (closeRequested) {
       finishClose(true);
       return;
@@ -151,10 +176,19 @@ export function useAgentHubSession(
     setCommittedHubContext(pendingHubContext);
     navigateContext(pendingHubContext);
     setPendingHubContext(null);
-  }, [closeRequested, finishClose, instructionThreePane, navigateContext, pendingHubContext]);
+  }, [
+    closeRequested,
+    finishClose,
+    instructionThreePane,
+    navigateContext,
+    pendingHubContext,
+    projectInstructionFiles,
+  ]);
 
   const saveAndCommitPendingContext = useCallback(async () => {
-    const saved = await instructionThreePane.saveBlocks();
+    const saved = projectInstructionFiles.dirty
+      ? await projectInstructionFiles.saveAllDirty()
+      : await instructionThreePane.saveBlocks();
     if (!saved) return;
     if (closeRequested) {
       finishClose(true);
@@ -164,21 +198,38 @@ export function useAgentHubSession(
     setCommittedHubContext(pendingHubContext);
     navigateContext(pendingHubContext);
     setPendingHubContext(null);
-  }, [closeRequested, finishClose, instructionThreePane, navigateContext, pendingHubContext]);
+  }, [
+    closeRequested,
+    finishClose,
+    instructionThreePane,
+    navigateContext,
+    pendingHubContext,
+    projectInstructionFiles,
+  ]);
 
   const confirmClose = useCallback((): Promise<boolean> => {
     if (isBusy) return Promise.resolve(false);
-    if (!instructionThreePane.dirty) return Promise.resolve(true);
+    if (!instructionsDirty) return Promise.resolve(true);
     return new Promise((resolve) => {
       closeResolverRef.current = resolve;
       setCloseRequested(true);
     });
-  }, [instructionThreePane.dirty, isBusy]);
+  }, [instructionsDirty, isBusy]);
 
-  const isDirty = useCallback(
-    () => instructionThreePane.dirty,
-    [instructionThreePane.dirty],
-  );
+  const isDirty = useCallback(() => instructionsDirty, [instructionsDirty]);
+  const saveDisabled = projectInstructionFiles.dirty
+    ? projectInstructionFiles.actionBusy || !projectInstructionFiles.dirty
+    : instructionThreePane.actionBusy ||
+      !instructionThreePane.state.blocksDirty ||
+      instructionThreePane.state.externalDrift;
+  const saveLoading = projectInstructionFiles.dirty
+    ? projectInstructionFiles.busyAction === 'save'
+    : instructionThreePane.busyAction === 'save';
+  const discardDisabled =
+    instructionThreePane.actionBusy || projectInstructionFiles.actionBusy;
+  const saveLabel = projectInstructionFiles.dirty
+    ? controller.t('agentHub:instructions.projectFiles.contextSave')
+    : controller.t('agentHub:instructions.threePane.contextSave');
 
   const dialogOpen = pendingHubContext !== null || closeRequested;
   const contextSwitchDialog = (
@@ -208,21 +259,17 @@ export function useAgentHubSession(
           <Button
             variant="secondary"
             size="sm"
-            disabled={
-              instructionThreePane.actionBusy ||
-              !instructionThreePane.state.blocksDirty ||
-              instructionThreePane.state.externalDrift
-            }
-            loading={instructionThreePane.busyAction === 'save'}
+            disabled={saveDisabled}
+            loading={saveLoading}
             onClick={() => void saveAndCommitPendingContext()}
             data-testid="agent-hub-context-save"
           >
-            {controller.t('agentHub:instructions.threePane.contextSave')}
+            {saveLabel}
           </Button>
           <Button
             variant="danger"
             size="sm"
-            disabled={instructionThreePane.actionBusy}
+            disabled={discardDisabled}
             onClick={commitPendingContext}
             data-testid="agent-hub-context-discard"
           >
@@ -237,6 +284,7 @@ export function useAgentHubSession(
     committedHubContext,
     onContextChange,
     instructionThreePane,
+    projectInstructionFiles,
     contextSwitchDialog,
     confirmClose,
     isDirty,

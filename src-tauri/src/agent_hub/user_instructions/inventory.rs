@@ -686,6 +686,14 @@ fn add_declared_candidates(
         ],
         AgentTarget::Grok => vec![
             (
+                homes.grok.config_root.join("AGENTS.md"),
+                InstructionSourceRole::NativePrimary,
+            ),
+            (
+                homes.grok.config_root.join("CLAUDE.md"),
+                InstructionSourceRole::Fallback,
+            ),
+            (
                 homes
                     .grok
                     .config_root
@@ -735,6 +743,14 @@ fn add_declared_candidates(
             ),
         ],
         AgentTarget::Pi => vec![
+            (
+                homes.pi.config_root.join("AGENTS.md"),
+                InstructionSourceRole::NativePrimary,
+            ),
+            (
+                homes.pi.config_root.join("CLAUDE.md"),
+                InstructionSourceRole::Fallback,
+            ),
             (
                 homes.pi.config_root.join("cc-partner.adapted.md"),
                 InstructionSourceRole::ManagedProjection,
@@ -1262,6 +1278,9 @@ fn current_target_environment() -> TargetEnvironment {
         "OPENCODE_DISABLE_CLAUDE_CODE",
         "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT",
         "XDG_CONFIG_HOME",
+        "GROK_HOME",
+        "GEMINI_HOME",
+        "CURSOR_HOME",
         "HOME",
         "USERPROFILE",
     ];

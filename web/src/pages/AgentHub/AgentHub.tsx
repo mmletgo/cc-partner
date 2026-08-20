@@ -17,6 +17,11 @@ import {
   type UseInstructionThreePaneControllerResult,
 } from './instructions';
 import {
+  ProjectInstructionFilesView,
+  type ProjectInstructionFilesViewLabels,
+  type UseProjectInstructionFilesControllerResult,
+} from './projectInstructions';
+import {
   PortableAssetActionDialog,
   PortableInventoryView,
   PortablePullDrawer,
@@ -42,6 +47,7 @@ import styles from './AgentHub.module.css';
  */
 export type AgentHubViewProps = UseAgentHubControllerResult & {
   instructionThreePane?: UseInstructionThreePaneControllerResult | null;
+  projectInstructionFiles?: UseProjectInstructionFilesControllerResult | null;
   /** Workbench 嵌入时隐藏页面 H1，并使用铺满高度的布局。 */
   embedded?: boolean;
   /** 生产 Agent Hub 锁定 user；Workbench 项目 Agent 锁定 project。 */
@@ -77,10 +83,6 @@ export function AgentHubView(props: AgentHubViewProps) {
     openPortablePull,
     closePortablePull,
     portablePull,
-    preview,
-    previewProjectId,
-    runPreviewProject,
-    runEnableProject,
     actionError,
     actionBusy,
     setInstructionRefresh,
@@ -104,6 +106,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     writeBlocked,
     upgradeRequired,
     instructionThreePane,
+    projectInstructionFiles,
     embedded = false,
     scopeLock,
     unsavedFilesNotice,
@@ -178,6 +181,29 @@ export function AgentHubView(props: AgentHubViewProps) {
       slotHistoryAdapted: t('agentHub:instructions.threePane.slotHistoryAdapted'),
       slotHistoryTargetOnly: t('agentHub:instructions.threePane.slotHistoryTargetOnly'),
       slotHistoryCopied: t('agentHub:userInstructions.errors.slotVersionCopyEmpty'),
+    }),
+    [t],
+  );
+
+  const projectInstructionFilesLabels: ProjectInstructionFilesViewLabels = useMemo(
+    () => ({
+      title: t('agentHub:instructions.projectFiles.title'),
+      loading: t('agentHub:instructions.projectFiles.loading'),
+      retry: t('common:action.retry'),
+      save: t('agentHub:instructions.projectFiles.save'),
+      unsaved: t('agentHub:instructions.projectFiles.unsaved'),
+      missing: t('agentHub:instructions.projectFiles.missing'),
+      editorAria: t('agentHub:instructions.projectFiles.editorAria'),
+      placeholder: t('agentHub:instructions.projectFiles.placeholder'),
+      pathLabel: t('agentHub:instructions.projectFiles.pathLabel'),
+      filesAria: t('agentHub:instructions.projectFiles.filesAria'),
+      truncated: t('agentHub:instructions.projectFiles.truncated'),
+      sharedBy: (agents: string) =>
+        t('agentHub:instructions.projectFiles.sharedBy', { agents }),
+      exclusiveTo: (agent: string) =>
+        t('agentHub:instructions.projectFiles.exclusiveTo', { agent }),
+      agentSeparator: t('agentHub:instructions.projectFiles.agentSeparator'),
+      agentName: (agent) => t(`agentHub:targets.${agent}`),
     }),
     [t],
   );
@@ -336,11 +362,6 @@ export function AgentHubView(props: AgentHubViewProps) {
   const isRemoteContext =
     hubContext.deviceId !== null || hubContext.projectKey?.startsWith('remote:') === true;
   const isRemoteProject = hubContext.projectKey?.startsWith('remote:') === true;
-  const isLocalProject =
-    hubContext.scope === 'project' &&
-    hubContext.projectKey !== null &&
-    !hubContext.projectKey.startsWith('remote:');
-  const isProject = hubContext.scope === 'project' && hubContext.projectKey !== null;
   const selectedPeer =
     hubContext.deviceId === null
       ? null
@@ -350,17 +371,25 @@ export function AgentHubView(props: AgentHubViewProps) {
     hubContext.scope === 'user' &&
     hubContext.deviceId !== null &&
     peerAllowsUserInstructionThreePane(selectedPeer);
-  const showInstructionThreePane =
+  const showProjectInstructionFiles =
+    projectLocked &&
     hubContext.tab === 'instructions' &&
-    !isLocalProject &&
+    hubContext.projectKey !== null &&
+    Boolean(projectInstructionFiles);
+  const showInstructionThreePane =
+    !projectLocked &&
+    hubContext.tab === 'instructions' &&
+    hubContext.scope === 'user' &&
     Boolean(instructionThreePane) &&
     (!isRemoteContext || canMountRemoteUserThreePane);
   const canReloadCurrentTab =
-    (isAssetTab && (!isRemoteContext || isRemoteProject)) || showInstructionThreePane;
+    (isAssetTab && (!isRemoteContext || isRemoteProject)) ||
+    showInstructionThreePane ||
+    showProjectInstructionFiles;
 
   /**
    * Business Logic: 用户级壳层保留 Pull/Push；项目 Agent 资产随项目走，不提供跨设备复制。
-   *   提示词三栏与资产列表共用壳层「刷新」，不再另开「刷新库存」。
+   *   提示词三栏 / 项目文件与资产列表共用壳层「刷新」，不再另开「刷新库存」。
    * Code Logic: 跨 Agent 适配入口改到适配页保存旁按钮，壳层不再提供。
    */
   const shellActions = useMemo(
@@ -372,7 +401,11 @@ export function AgentHubView(props: AgentHubViewProps) {
             },
             reloadBusy:
               hubContext.tab === 'instructions'
-                ? Boolean(instructionThreePane?.refreshing)
+                ? Boolean(
+                    showProjectInstructionFiles
+                      ? projectInstructionFiles?.refreshing
+                      : instructionThreePane?.refreshing,
+                  )
                 : portableInventory.refreshing,
           }
         : {};
@@ -396,12 +429,14 @@ export function AgentHubView(props: AgentHubViewProps) {
     [
       canReloadCurrentTab,
       hubContext.tab,
-      instructionThreePane?.refreshing,
       openLanPushDialog,
       openPortablePull,
       portableInventory.refreshing,
+      projectInstructionFiles?.refreshing,
       projectLocked,
       reload,
+      showProjectInstructionFiles,
+      instructionThreePane?.refreshing,
     ],
   );
 
@@ -418,18 +453,23 @@ export function AgentHubView(props: AgentHubViewProps) {
   }, [instructionThreePane?.state]);
 
   /**
-   * Business Logic: 把三栏 refresh 注入 hub controller，供壳层刷新分发。
-   * Code Logic: mount/update 写 ref；卸载清空。
+   * Business Logic: 把当前提示词 refresh 注入 hub controller，供壳层刷新分发。
+   * Code Logic: 项目文件优先，其次用户级三栏；mount/update 写 ref；卸载清空。
    */
   useEffect(() => {
-    if (!instructionThreePane) {
-      setInstructionRefresh(null);
-      return;
+    if (projectLocked && projectInstructionFiles) {
+      const refresh = (): Promise<void> => projectInstructionFiles.refresh();
+      setInstructionRefresh(refresh);
+      return () => setInstructionRefresh(null);
     }
-    const refresh = (): Promise<void> => instructionThreePane.refresh();
-    setInstructionRefresh(refresh);
+    if (instructionThreePane) {
+      const refresh = (): Promise<void> => instructionThreePane.refresh();
+      setInstructionRefresh(refresh);
+      return () => setInstructionRefresh(null);
+    }
+    setInstructionRefresh(null);
     return () => setInstructionRefresh(null);
-  }, [instructionThreePane, setInstructionRefresh]);
+  }, [instructionThreePane, projectInstructionFiles, projectLocked, setInstructionRefresh]);
 
   // 按需加载：禁止整页 loading/error 闸门挡住 shell 与 portable tab
 
@@ -600,58 +640,20 @@ export function AgentHubView(props: AgentHubViewProps) {
           </StatusMessage>
         ) : null}
 
-        {hubContext.tab === 'instructions' && isProject ? (
-          <section className={styles.previewResult} data-testid="agent-hub-project-management">
-            <StatusMessage tone={preview?.optedIn ? 'success' : 'info'}>
-              {preview?.optedIn
-                ? t('agentHub:preview.projectEnabled')
-                : t('agentHub:preview.projectManageDescription')}
-            </StatusMessage>
-            <div className={styles.dialogActions}>
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={actionBusy}
-                onClick={() => void runPreviewProject()}
-              >
-                {t('agentHub:preview.run')}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={
-                  !preview ||
-                  previewProjectId !== hubContext.projectKey ||
-                  preview.optedIn === true
-                }
-                loading={actionBusy}
-                onClick={() => void runEnableProject()}
-              >
-                {t('agentHub:preview.enable')}
-              </Button>
-            </div>
-            {preview ? (
-              <div className={styles.metaBlock}>
-                <span>
-                  {t('agentHub:preview.hubProjectId')}: {preview.hubProjectId ?? '—'}
-                </span>
-                <span>
-                  {t('agentHub:preview.checkouts')}: {preview.checkouts?.length ?? 0}
-                </span>
-                <span>
-                  {t('agentHub:preview.plannedActions')}: {preview.plannedActions?.length ?? 0}
-                </span>
-                <span>{preview.noCommitNotice ?? t('agentHub:preview.noCommitDefault')}</span>
-              </div>
-            ) : null}
-          </section>
+        {showProjectInstructionFiles && projectInstructionFiles ? (
+          <ProjectInstructionFilesView
+            labels={projectInstructionFilesLabels}
+            controller={projectInstructionFiles}
+            agent={hubContext.agent}
+          />
         ) : null}
 
-        {hubContext.tab === 'instructions' && isRemoteContext && !canMountRemoteUserThreePane ? (
+        {hubContext.tab === 'instructions' &&
+        isRemoteContext &&
+        hubContext.scope === 'user' &&
+        !canMountRemoteUserThreePane ? (
           <StatusMessage tone="info" data-testid="agent-hub-remote-management">
-            {hubContext.scope === 'user'
-              ? t('agentHub:shell.remoteDeviceManageHint')
-              : t('agentHub:shell.remoteProjectManageHint')}
+            {t('agentHub:shell.remoteDeviceManageHint')}
           </StatusMessage>
         ) : null}
 
@@ -790,7 +792,7 @@ export function AgentHubView(props: AgentHubViewProps) {
 }
 
 /**
- * 页面入口：注入 hub controller 与提示词三栏 session（hooks 在 early return 前）。
+ * 页面入口：注入 hub controller 与提示词 session（hooks 在 early return 前）。
  */
 export function AgentHub() {
   const controller = useAgentHubController();

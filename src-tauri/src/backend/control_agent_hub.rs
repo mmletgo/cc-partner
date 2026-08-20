@@ -31,8 +31,9 @@ use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::remote_client::{
     apply_user_instruction_plan_for_state, inspect_user_instruction_workspace_for_state,
     list_user_instruction_slot_versions_for_state, preview_user_instruction_setup_for_state,
-    preview_user_instruction_update_for_state, restore_user_instruction_slot_version_for_state,
-    save_user_instruction_blocks_for_state, take_device_id,
+    preview_user_instruction_update_for_state, read_user_native_instruction_file_for_state,
+    restore_user_instruction_slot_version_for_state, save_user_instruction_blocks_for_state,
+    take_device_id, write_user_native_instruction_file_for_state,
 };
 use crate::agent_hub::replication::pull::{
     apply_remote_project_portable_action, enable_remote_project,
@@ -57,7 +58,8 @@ use crate::agent_hub::targets::TargetEnvironment;
 use crate::agent_hub::user_instructions::{
     AdaptInstructionToOtherAgentsRequest, AnalyzeInstructionOriginalRequest,
     ApplyUserInstructionPlanRequest, PreviewUserInstructionRequest, ReviseInstructionSlotRequest,
-    SaveUserInstructionBlocksRequest,
+    ReadUserNativeInstructionFileRequest, SaveUserInstructionBlocksRequest,
+    WriteUserNativeInstructionFileRequest,
 };
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
@@ -168,6 +170,29 @@ async fn dispatch_agent_hub_op(
             let device_id = take_device_id(&mut payload);
             let dto =
                 inspect_user_instruction_workspace_for_state(state, device_id.as_deref()).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.read_user_native_instruction_file" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let req: ReadUserNativeInstructionFileRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("read_user_native_instruction_file payload: {e}"))
+                })?;
+            let dto = read_user_native_instruction_file_for_state(state, device_id.as_deref(), req)
+                .await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.write_user_native_instruction_file" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let req: WriteUserNativeInstructionFileRequest = serde_json::from_value(payload)
+                .map_err(|e| {
+                    AppError::validation(format!("write_user_native_instruction_file payload: {e}"))
+                })?;
+            let dto =
+                write_user_native_instruction_file_for_state(state, device_id.as_deref(), req)
+                    .await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.preview_user_instruction_setup" => {
@@ -648,6 +673,7 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.preview_user_instruction_update"
             | "agent_hub.apply_user_instruction_plan"
             | "agent_hub.save_user_instruction_blocks"
+            | "agent_hub.write_user_native_instruction_file"
             | "agent_hub.restore_user_instruction_slot_version"
             | "agent_hub.analyze_instruction_original"
             | "agent_hub.adapt_instruction_to_other_agents"
@@ -828,6 +854,8 @@ mod tests {
             "agent_hub.list_assets",
             "agent_hub.get_asset",
             "agent_hub.inspect_user_instruction_workspace",
+            "agent_hub.read_user_native_instruction_file",
+            "agent_hub.write_user_native_instruction_file",
             "agent_hub.preview_user_instruction_setup",
             "agent_hub.preview_user_instruction_update",
             "agent_hub.apply_user_instruction_plan",
@@ -883,6 +911,12 @@ mod tests {
         assert!(is_mutation_op("agent_hub.preview_user_instruction_update"));
         assert!(is_mutation_op("agent_hub.apply_user_instruction_plan"));
         assert!(is_mutation_op("agent_hub.save_user_instruction_blocks"));
+        assert!(is_mutation_op(
+            "agent_hub.write_user_native_instruction_file"
+        ));
+        assert!(!is_mutation_op(
+            "agent_hub.read_user_native_instruction_file"
+        ));
         assert!(is_mutation_op(
             "agent_hub.restore_user_instruction_slot_version"
         ));

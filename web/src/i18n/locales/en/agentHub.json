@@ -23,7 +23,7 @@
     "aria": "Agent Hub workspaces",
     "userInstructions": "User instructions",
     "projectInstructions": "Project instructions",
-    "projectInstructionsHint": "Preview and enable project instruction mappings. Nothing is written before confirmation.",
+    "projectInstructionsHint": "Edit the project-level instruction files each agent actually loads.",
     "portableAssets": "Agent assets",
     "syncImport": "Sync and import",
     "diagnostics": "Compatibility and diagnostics",
@@ -155,6 +155,24 @@
         "emptyReviseDirection": "Enter a revision direction first.",
         "reviseSaveFailed": "Claude revised the slot, but saving Canonical failed. Click “Save slots” to retry."
       }
+    },
+    "projectFiles": {
+      "title": "Project instruction files",
+      "loading": "Reading project instruction files…",
+      "save": "Save file",
+      "unsaved": "Unsaved",
+      "missing": "This file is not in the project yet. Save your edits to create it.",
+      "editorAria": "Project instruction file editor",
+      "placeholder": "Edit the project-level instructions this agent actually loads…",
+      "pathLabel": "File",
+      "filesAria": "Project instruction files this agent loads",
+      "truncated": "This file was truncated. Saving will overwrite the full file on disk.",
+      "sharedBy": "{{agents}} share this file. Edit it once — do not maintain a copy per agent.",
+      "exclusiveTo": "Only {{agent}} uses this file.",
+      "agentSeparator": ", ",
+      "loadFailed": "Could not read the project instruction file.",
+      "saveFailed": "Could not save the project instruction file.",
+      "contextSave": "Save file and switch"
     }
   },
   "userInstructions": {

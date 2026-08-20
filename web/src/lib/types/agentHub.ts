@@ -160,6 +160,28 @@ export interface UserInstructionWorkspaceDto {
   refreshedAt: string;
 }
 
+/** 读取用户级原生提示词文件。 */
+export interface ReadUserNativeInstructionFileRequest {
+  path: string;
+}
+
+/** 写入用户级原生提示词文件。 */
+export interface WriteUserNativeInstructionFileRequest {
+  path: string;
+  content: string;
+  expectedHash: string | null;
+}
+
+/** 用户级原生提示词文件快照。 */
+export interface UserNativeInstructionFileDto {
+  path: string;
+  exists: boolean;
+  content: string;
+  hash: string | null;
+  truncated: boolean;
+  created: boolean;
+}
+
 /** 首次设置/日常更新中用户对 target 的明确选择（简写三态）。 */
 export type UserInstructionTargetSelectionMode = 'managed' | 'unmanaged' | 'inherit';
 

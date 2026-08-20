@@ -412,6 +412,24 @@ impl AgentHubService {
         crate::agent_hub::user_instructions::save_user_instruction_blocks(state, req).await
     }
 
+    /// Business Logic: 用户级提示词编辑真实配置目录文件，不是 Hub 三槽投影。
+    /// Code Logic: 白名单路径 + 有界读；不查 support manifest。
+    pub fn read_user_native_instruction_file(
+        req: crate::agent_hub::user_instructions::ReadUserNativeInstructionFileRequest,
+    ) -> Result<crate::agent_hub::user_instructions::UserNativeInstructionFileDto, AppError> {
+        let env = TargetEnvironment::from_process();
+        crate::agent_hub::user_instructions::read_user_native_instruction_file(&env, &req)
+    }
+
+    /// Business Logic: 用户保存自己的 AGENTS.md / CLAUDE.md / GEMINI.md。
+    /// Code Logic: 白名单路径 + CAS 原子写；不查 support manifest L3。
+    pub fn write_user_native_instruction_file(
+        req: crate::agent_hub::user_instructions::WriteUserNativeInstructionFileRequest,
+    ) -> Result<crate::agent_hub::user_instructions::UserNativeInstructionFileDto, AppError> {
+        let env = TargetEnvironment::from_process();
+        crate::agent_hub::user_instructions::write_user_native_instruction_file(&env, &req)
+    }
+
     /// Business Logic: 三槽历史列表只读查询。
     /// Code Logic: 委托 inventory 层 list_user_instruction_slot_versions。
     pub async fn list_user_instruction_slot_versions(

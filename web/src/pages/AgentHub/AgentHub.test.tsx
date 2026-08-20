@@ -17,6 +17,7 @@ import i18n from '@/i18n';
 import { AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY } from './context/agentHubContext';
 import { initialThreePaneFromDisk } from './instructions/instructionThreePane';
 import type { UseInstructionThreePaneControllerResult } from './instructions';
+import type { UseProjectInstructionFilesControllerResult } from './projectInstructions';
 import type { UseAgentHubControllerResult } from './useAgentHubController';
 import { AgentHubView, type AgentHubViewProps } from './AgentHub';
 
@@ -368,6 +369,7 @@ function stubThreePane(): UseInstructionThreePaneControllerResult {
     actionBusy: false,
     busyAction: null,
     dirty: false,
+    shouldGuardContextChange: () => false,
     writeBlocked: false,
     writeBlockedReason: null,
     dualDirtyOpen: false,
@@ -416,6 +418,58 @@ function stubThreePane(): UseInstructionThreePaneControllerResult {
   };
 }
 
+function stubProjectFiles(): UseProjectInstructionFilesControllerResult {
+  return {
+    files: [
+      {
+        spec: {
+          id: 'claude',
+          path: 'CLAUDE.md',
+          consumers: ['claude', 'grok', 'cursor', 'pi'],
+        },
+        diskPath: 'CLAUDE.md',
+        exists: true,
+        draft: '# project',
+        savedContent: '# project',
+        baseHash: 'hash',
+        truncated: false,
+        notice: null,
+        dirty: false,
+      },
+    ],
+    activeFile: {
+      spec: {
+        id: 'claude',
+        path: 'CLAUDE.md',
+        consumers: ['claude', 'grok', 'cursor', 'pi'],
+      },
+      diskPath: 'CLAUDE.md',
+      exists: true,
+      draft: '# project',
+      savedContent: '# project',
+      baseHash: 'hash',
+      truncated: false,
+      notice: null,
+      dirty: false,
+    },
+    activeFileId: 'claude',
+    loading: false,
+    refreshing: false,
+    error: null,
+    actionError: null,
+    actionBusy: false,
+    busyAction: null,
+    dirty: false,
+    selectFile: vi.fn(),
+    editActiveFile: vi.fn(),
+    saveActiveFile: vi.fn(async () => true),
+    saveAllDirty: vi.fn(async () => true),
+    refresh: vi.fn(async () => undefined),
+    discardDraftForContextChange: vi.fn(),
+    shouldGuardContextChange: vi.fn(() => false),
+  };
+}
+
 /**
  * Business Logic: i18n + view 统一挂载。
  * Code Logic: I18nextProvider 包装。
@@ -423,6 +477,7 @@ function stubThreePane(): UseInstructionThreePaneControllerResult {
 function renderView(props: Partial<AgentHubViewProps> = {}) {
   const {
     instructionThreePane,
+    projectInstructionFiles,
     embedded,
     scopeLock,
     unsavedFilesNotice,
@@ -434,6 +489,7 @@ function renderView(props: Partial<AgentHubViewProps> = {}) {
       <AgentHubView
         {...merged}
         instructionThreePane={instructionThreePane}
+        projectInstructionFiles={projectInstructionFiles}
         embedded={embedded}
         scopeLock={scopeLock}
         unsavedFilesNotice={unsavedFilesNotice}
@@ -501,6 +557,19 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('portable-filter-scope')).toBeNull();
   });
 
+  test('local user instructions mount three-pane and keep lane switcher', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        tab: 'instructions',
+      },
+      instructionThreePane: stubThreePane(),
+    });
+    expect(screen.getByTestId('instruction-three-pane')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-lane-switcher')).toBeTruthy();
+    expect(screen.queryByTestId('project-instruction-files')).toBeNull();
+  });
+
   test('instructions tab ignores stale legacy activeSection and never renders assets', () => {
     renderView({
       activeSection: 'assets',
@@ -514,9 +583,7 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('agent-hub-project-opt-in-guard')).toBeNull();
   });
 
-  test('local project instructions expose preview and explicit enable management', () => {
-    const runPreviewProject = vi.fn(async () => undefined);
-    const runEnableProject = vi.fn(async () => undefined);
+  test('local project instructions edit native files instead of three-pane or Hub enable', () => {
     renderView({
       hubContext: {
         ...buildProps().hubContext,
@@ -524,29 +591,18 @@ describe('AgentHub page characterization', () => {
         projectKey: 'wb-project-1',
         tab: 'instructions',
       },
-      previewProjectId: 'wb-project-1',
-      preview: {
-        projectId: 'wb-project-1',
-        hubProjectId: 'hub-project-1',
-        optedIn: false,
-        checkouts: [],
-        plannedActions: [],
-      },
-      runPreviewProject,
-      runEnableProject,
+      projectInstructionFiles: stubProjectFiles(),
     });
 
-    expect(screen.getByTestId('agent-hub-project-management')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Run preview' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Enable project' }));
-    expect(runPreviewProject).toHaveBeenCalledOnce();
-    expect(runEnableProject).toHaveBeenCalledOnce();
+    expect(screen.getByTestId('project-instruction-files')).toBeTruthy();
+    expect(screen.getByTestId('project-instruction-path').textContent).toBe('CLAUDE.md');
     expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
-    expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-project-management')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-lane-switcher')).toBeNull();
+    expect(screen.getByTestId('agent-hub-agent-switcher')).toBeTruthy();
     expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
     expect(screen.queryByTestId('agent-hub-action-push')).toBeNull();
-    expect(screen.queryByTestId('agent-hub-push-reason')).toBeNull();
-    expect(screen.queryByTestId('agent-hub-action-reload')).toBeNull();
+    expect(screen.getByTestId('agent-hub-action-reload')).toBeTruthy();
   });
 
   test('remote device keeps management task callout without rendering local inventory', () => {
@@ -619,7 +675,7 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
   });
 
-  test('remote project instructions keep hint and never mount three-pane', () => {
+  test('remote project instructions edit native files and never mount three-pane', () => {
     renderView({
       hubContext: {
         ...buildProps().hubContext,
@@ -637,9 +693,11 @@ describe('AgentHub page characterization', () => {
         },
       ],
       instructionThreePane: stubThreePane(),
+      projectInstructionFiles: stubProjectFiles(),
     });
-    expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
+    expect(screen.getByTestId('project-instruction-files')).toBeTruthy();
     expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-remote-management')).toBeNull();
   });
 
   test('URL migration notice is visible without exposing a legacy action', () => {
@@ -711,10 +769,11 @@ describe('AgentHub page characterization', () => {
         projectKey: 'wb-project-1',
         tab: 'instructions',
       },
-      instructionThreePane: stubThreePane(),
+      projectInstructionFiles: stubProjectFiles(),
     });
-    expect(screen.queryByTestId('agent-hub-action-reload')).toBeNull();
-    expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
+    expect(screen.getByTestId('agent-hub-action-reload')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-lane-switcher')).toBeNull();
 
     cleanup();
     const projectReload = vi.fn(async () => undefined);
