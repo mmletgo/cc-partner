@@ -1,5 +1,5 @@
 /* Settings 页面样式
- * 单列 1080px container（与 Health/Devices 一致），页内 tab 分组后每组 Card 垂直堆叠
+ * 铺满 AppShell 主区；页内 tab 分组后每组 Card 垂直堆叠
  * 颜色/间距/圆角/动效统一走 design token
  */
 
@@ -11,7 +11,9 @@
 }
 
 .container {
-  padding: var(--space-8) var(--space-8) var(--space-12);
+  width: 100%;
+  max-width: none;
+  padding: var(--space-8) var(--space-6) var(--space-12);
   display: flex;
   flex-direction: column;
   gap: var(--space-5);

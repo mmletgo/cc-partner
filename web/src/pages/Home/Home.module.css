@@ -11,7 +11,7 @@
 
 .container {
   width: 100%;
-  padding: 0 var(--space-10);
+  padding: 0 var(--space-6);
   box-sizing: border-box;
   display: flex;
   flex-direction: column;

@@ -15,11 +15,13 @@
 
 .container {
   display: flex;
-  width: min(100%, 1200px);
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
   flex-direction: column;
   padding: var(--space-6);
   gap: var(--space-5);
+  box-sizing: border-box;
 }
 
 .loading {

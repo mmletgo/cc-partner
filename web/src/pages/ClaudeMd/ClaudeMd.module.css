@@ -1,6 +1,6 @@
 /* ── 页面容器 ── */
 .page {
-  padding: var(--space-6) var(--space-8);
+  padding: var(--space-6);
   display: flex;
   flex-direction: column;
   height: 100%;
