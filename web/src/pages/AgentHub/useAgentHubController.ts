@@ -25,7 +25,6 @@ import {
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
-import { workbenchApi } from '@/api/workbench';
 import { isHubTarget } from '@/lib/agentCatalog';
 import type {
   AgentHubAdoptionPreview,
@@ -405,13 +404,6 @@ export interface UseAgentHubControllerResult {
     online: boolean;
     capabilities?: string[];
   }>;
-  /** 壳层可选择的本机/远端 Workbench 项目。 */
-  shellProjects: Array<{
-    key: string;
-    label: string;
-    remote: boolean;
-    deviceId: string | null;
-  }>;
   userInstructions: UseUserInstructionManagerResult;
   /** F2 inventory controller（URL 同步后的包装）。 */
   portableInventory: UsePortableInventoryControllerResult;
@@ -790,9 +782,6 @@ export function useAgentHubController(
   const [shellPeers, setShellPeers] = useState<
     Array<{ deviceId: string; name: string; online: boolean; capabilities?: string[] }>
   >([]);
-  const [shellProjects, setShellProjects] = useState<
-    Array<{ key: string; label: string; remote: boolean; deviceId: string | null }>
-  >([]);
   const [gitImportOpen, setGitImportOpen] = useState(false);
   const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
@@ -995,25 +984,6 @@ export function useAgentHubController(
       })
       .catch(() => {
         // 设备发现为 best-effort；失败不阻断本机 Agent Hub。
-      });
-    void workbenchApi.projects
-      .list()
-      .then((projects) => {
-        if (!mountedRef.current) return;
-        setShellProjects(
-          projects.map((project) => ({
-            key: project.id,
-            label:
-              project.kind === 'remote' && project.deviceName
-                ? `${project.name} · ${project.deviceName}`
-                : project.name,
-            remote: project.kind === 'remote',
-            deviceId: project.kind === 'remote' ? project.deviceId : null,
-          })),
-        );
-      })
-      .catch(() => {
-        // 项目列表为 best-effort；URL 中已选择的 identity 仍保留。
       });
     return () => {
       mountedRef.current = false;
@@ -2491,7 +2461,6 @@ export function useAgentHubController(
     contextMigrationNotice,
     onContextChange,
     shellPeers,
-    shellProjects,
     userInstructions,
     portableInventory,
     requestPortableAction,

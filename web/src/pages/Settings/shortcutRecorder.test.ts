@@ -3,6 +3,7 @@ import {
   formatShortcutForDisplay,
   getDefaultShortcutValue,
   resolveShortcutRecording,
+  shortcutHasConflictingCommandOrControl,
 } from './shortcutRecorder';
 
 /**
@@ -100,5 +101,36 @@ describe('shortcutRecorder', () => {
     assertEqual(formatShortcutForDisplay('<ctrl>'), 'Control');
     assertEqual(getDefaultShortcutValue('MacIntel'), '<cmd>+<shift>+s');
     assertEqual(getDefaultShortcutValue('Win32'), '<ctrl>+<shift>+s');
+
+    assertDeepEqual(
+      resolveShortcutRecording(
+        keyboardEvent({ key: 's', metaKey: true, ctrlKey: true }),
+      ),
+      { type: 'reject', reason: 'cmdCtrlConflict' },
+    );
+    assertDeepEqual(
+      resolveShortcutRecording(
+        keyboardEvent({ key: 's', metaKey: true, ctrlKey: true, shiftKey: true }),
+      ),
+      { type: 'reject', reason: 'cmdCtrlConflict' },
+    );
+    assertDeepEqual(
+      resolveShortcutRecording(keyboardEvent({ key: 'Control', metaKey: true, ctrlKey: true }), {
+        allowModifierOnly: true,
+      }),
+      { type: 'reject', reason: 'cmdCtrlConflict' },
+    );
+    if (shortcutHasConflictingCommandOrControl('<cmd>+<ctrl>+s') !== true) {
+      throw new Error('expected cmd+ctrl to conflict');
+    }
+    if (shortcutHasConflictingCommandOrControl('<cmd>+<cmd>+s') !== true) {
+      throw new Error('expected duplicate cmd to conflict');
+    }
+    if (shortcutHasConflictingCommandOrControl('<cmd>+<shift>+s') !== false) {
+      throw new Error('expected cmd+shift to be allowed');
+    }
+    if (shortcutHasConflictingCommandOrControl('<ctrl>') !== false) {
+      throw new Error('expected lone ctrl to be allowed');
+    }
   });
 });

@@ -9,7 +9,13 @@
  *   打开哪个就挂载哪个；项目 Agent 经 Suspense 懒加载。
  */
 
-import { lazy, Suspense, type ReactElement, type Ref } from 'react';
+import {
+  lazy,
+  Suspense,
+  useLayoutEffect,
+  type ReactElement,
+  type Ref,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { OrchestratorPanel } from '@/pages/Orchestrator';
 import type { WorkbenchProjectAgentConsoleHandle } from '@/pages/AgentHub/WorkbenchProjectAgentConsole';
@@ -58,6 +64,23 @@ export function WorkbenchProjectOverlayLayers(
   } = props;
   const { t } = useTranslation(['workbench']);
 
+  /**
+   * Business Logic: 项目 Agent 由懒加载块挂载，热更新经常留下「项目 {name}」旧节点。
+   * Code Logic: 打开控制台后观察层根，删掉冻结项目名行。
+   */
+  useLayoutEffect(() => {
+    if (!projectAgentOpen) return undefined;
+    const root = document.querySelector('[data-testid="workbench-project-agent-layer"]');
+    if (!root) return undefined;
+    const removeStaleProjectName = (): void => {
+      root.querySelector('[data-testid="agent-hub-frozen-project"]')?.remove();
+    };
+    removeStaleProjectName();
+    const observer = new MutationObserver(removeStaleProjectName);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [projectAgentOpen, project?.id]);
+
   if (automationOpen) {
     return (
       <div className={styles.automationLayer}>
@@ -96,16 +119,9 @@ export function WorkbenchProjectOverlayLayers(
             fallback={<p className={styles.automationDescription}>{t('workbench:projectAgent.loading')}</p>}
           >
             <WorkbenchProjectAgentConsole
+              key={project?.id ?? 'project-agent'}
               ref={projectAgentRef}
               projectKey={project?.id ?? ''}
-              frozenProjectLabel={
-                project?.kind === 'remote'
-                  ? t('workbench:projectAgent.remoteProject', {
-                      name: project.name,
-                      device: project.deviceName,
-                    })
-                  : (project?.name ?? '')
-              }
               unsavedFilesNotice={
                 unsavedFiles ? t('workbench:projectAgent.unsavedFilesNotice') : null
               }

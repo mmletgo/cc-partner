@@ -19,19 +19,18 @@ export type WorkbenchProjectAgentConsoleHandle = AgentHubSessionHandle;
 
 export interface WorkbenchProjectAgentConsoleProps {
   projectKey: string;
-  frozenProjectLabel: string;
   unsavedFilesNotice?: string | null;
 }
 
 /**
- * Business Logic: Workbench 只传入当前项目身份；控制台内部不得再切换项目或设备。
+ * Business Logic: Workbench 只传入当前项目身份；控制台内部不得再切换或列出项目。
  * Code Logic: host 冻结 projectKey；session 提供脏稿 Dialog 与 confirmClose。
  */
 export const WorkbenchProjectAgentConsole = forwardRef(function WorkbenchProjectAgentConsole(
   props: WorkbenchProjectAgentConsoleProps,
   ref: ForwardedRef<WorkbenchProjectAgentConsoleHandle>,
 ): ReactElement {
-  const { projectKey, frozenProjectLabel, unsavedFilesNotice } = props;
+  const { projectKey, unsavedFilesNotice } = props;
   const controller = useAgentHubController({
     kind: 'workbenchProject',
     projectKey,
@@ -56,7 +55,6 @@ export const WorkbenchProjectAgentConsole = forwardRef(function WorkbenchProject
         instructionThreePane={session.instructionThreePane}
         embedded
         scopeLock="project"
-        frozenProjectLabel={frozenProjectLabel}
         unsavedFilesNotice={unsavedFilesNotice}
       />
       {session.contextSwitchDialog}

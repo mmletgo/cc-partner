@@ -9,6 +9,7 @@
  * Code Logic（这个测试文件做什么）:
  *   mock configApi.update；renderHook 断言 general save 的 resolveSave* 行为。
  */
+import type { KeyboardEvent } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
 
@@ -251,5 +252,39 @@ describe('useSettingsFormSaves', () => {
     expect(result.current.isDirty).toBe(true);
     // form saves 不暴露 loadError 字段——失败不得冒充加载错误
     expect('loadError' in result.current).toBe(false);
+  });
+
+  test('Cmd+Ctrl 录制被拒绝且保持录制态', async () => {
+    const { result } = renderHook(() => useSettingsFormSaves());
+    await act(async () => {
+      result.current.applyResourceResults(buildReadyResults('Loaded'));
+    });
+
+    const blur = vi.fn();
+    const input = {
+      preventDefault() {},
+      stopPropagation() {},
+      currentTarget: { blur },
+      key: 's',
+      metaKey: true,
+      ctrlKey: true,
+      altKey: false,
+      shiftKey: false,
+    } as unknown as KeyboardEvent<HTMLInputElement>;
+
+    act(() => {
+      result.current.handleShortcutFocus('screenshot');
+    });
+    expect(result.current.recordingShortcutId).toBe('screenshot');
+
+    const before = result.current.state.shortcuts.find((s) => s.id === 'screenshot')?.value;
+    act(() => {
+      result.current.handleShortcutKeyDown(input, 'screenshot');
+    });
+
+    expect(result.current.shortcutRecordingRejectReason).toBe('cmdCtrlConflict');
+    expect(result.current.recordingShortcutId).toBe('screenshot');
+    expect(result.current.state.shortcuts.find((s) => s.id === 'screenshot')?.value).toBe(before);
+    expect(blur).not.toHaveBeenCalled();
   });
 });

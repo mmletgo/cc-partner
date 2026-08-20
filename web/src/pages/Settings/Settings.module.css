@@ -386,6 +386,10 @@
   color: var(--muted);
 }
 
+.shortcutHelperReject {
+  color: var(--danger);
+}
+
 .shortcutInput {
   width: 100%;
 }

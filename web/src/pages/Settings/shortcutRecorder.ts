@@ -6,11 +6,25 @@ export interface ShortcutKeyboardLike {
   shiftKey: boolean;
 }
 
+export type ShortcutRecordingRejectReason = 'cmdCtrlConflict';
+
 export type ShortcutRecordingResult =
   | { type: 'record'; value: string }
   | { type: 'clear'; value: '' }
   | { type: 'cancel' }
-  | { type: 'pending' };
+  | { type: 'pending' }
+  | { type: 'reject'; reason: ShortcutRecordingRejectReason };
+
+/** 后端都会折叠成 `CommandOrControl` 的 pynput 修饰键。 */
+const COMMAND_OR_CONTROL_PARTS = new Set([
+  '<cmd>',
+  '<cmd_l>',
+  '<cmd_r>',
+  '<win>',
+  '<ctrl>',
+  '<ctrl_l>',
+  '<ctrl_r>',
+]);
 
 export interface ShortcutRecordingOptions {
   allowModifierOnly?: boolean;
@@ -123,6 +137,24 @@ function shortcutModifierParts(event: ShortcutKeyboardLike): string[] {
 }
 
 /**
+ * 判断快捷键是否同时包含会被折叠成同一个修饰键的 Cmd/Win/Ctrl
+ *
+ * Business Logic（为什么需要）:
+ *   后端把 `<cmd>` / `<win>` / `<ctrl>` 都转成 `CommandOrControl`。
+ *   设置页若录下 Cmd+Ctrl+S，系统实际只注册成 Cmd+S，表现为快捷键无反应。
+ *
+ * Code Logic（做什么）:
+ *   拆分 pynput 片段，CommandOrControl 族修饰键出现超过一次则视为冲突。
+ */
+export function shortcutHasConflictingCommandOrControl(shortcut: string): boolean {
+  const count = shortcut
+    .split('+')
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => COMMAND_OR_CONTROL_PARTS.has(part)).length;
+  return count > 1;
+}
+
+/**
  * 解析一次快捷键录制按键
  *
  * Business Logic（为什么需要）:
@@ -133,7 +165,8 @@ function shortcutModifierParts(event: ShortcutKeyboardLike): string[] {
  *   将 KeyboardEvent 的修饰键和主键转换为后端可保存的 pynput 字符串；
  *   默认要求至少一个修饰键（截图等系统级快捷键）；
  *   allowBareKey=true 时允许无修饰键的单键（如纯 Tab），供窗口内浮层快捷键使用；
- *   修饰键单独按下且 allowModifierOnly=true 时记录单独修饰键。
+ *   修饰键单独按下且 allowModifierOnly=true 时记录单独修饰键；
+ *   Cmd 与 Ctrl 同时按下时拒绝录制（后端会折叠成同一个修饰键）。
  */
 export function resolveShortcutRecording(
   event: ShortcutKeyboardLike,
@@ -141,6 +174,10 @@ export function resolveShortcutRecording(
 ): ShortcutRecordingResult {
   if (event.key === 'Escape') return { type: 'cancel' };
   if (event.key === 'Backspace' || event.key === 'Delete') return { type: 'clear', value: '' };
+
+  if (event.metaKey && event.ctrlKey) {
+    return { type: 'reject', reason: 'cmdCtrlConflict' };
+  }
 
   if (options.allowModifierOnly && MODIFIER_KEYS.has(event.key)) {
     const value = MODIFIER_VALUE_BY_KEY[event.key];
@@ -153,7 +190,11 @@ export function resolveShortcutRecording(
   // 默认要求至少一个修饰键；allowBareKey 放行无修饰键的单键（如纯 Tab）
   if (modifiers.length === 0 && !options.allowBareKey) return { type: 'pending' };
 
-  return { type: 'record', value: [...modifiers, key].join('+') };
+  const value = [...modifiers, key].join('+');
+  if (shortcutHasConflictingCommandOrControl(value)) {
+    return { type: 'reject', reason: 'cmdCtrlConflict' };
+  }
+  return { type: 'record', value };
 }
 
 /**

@@ -778,7 +778,6 @@
     "open": "项目 Agent",
     "unsavedFilesNotice": "文件工作区有未保存的标签。项目 Agent 读取磁盘与 Hub，不会带上未保存的编辑。",
     "missingProject": "该项目不在当前工作台列表中，无法打开项目 Agent。",
-    "remoteProject": "{{name}}（远端 · {{device}}）",
     "loading": "正在打开项目 Agent…"
   },
   "workspaceSwitch": {

@@ -674,6 +674,11 @@
   background: var(--bg);
 }
 
+/* 项目身份已在标题路径行；覆盖懒加载壳层未刷新时残留的「项目 {name}」行。 */
+.automationLayer :global(div[data-testid='agent-hub-frozen-project']) {
+  display: none;
+}
+
 .automationHeader {
   min-width: 0;
   min-height: 64px;

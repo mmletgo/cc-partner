@@ -33,6 +33,7 @@
     "placeholder": "Click, then press a shortcut",
     "recording": "Press a new shortcut…",
     "recordingHelper": "Recording keys; Esc cancels, Delete clears.",
+    "recordingCmdCtrlRejected": "Cmd and Ctrl cannot be used together (they collapse to the same modifier). Use Cmd+Shift or keep only one of those keys.",
     "screenshot": {
       "label": "Screenshot shortcut",
       "helper": "Select an area and copy it to the clipboard."

@@ -6,7 +6,7 @@
 //!     需要“注册新 → 注销旧 → 持久化 → 失败补偿”的可测试事务。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - 格式转换与 `parse_shortcut`
+//!     - 格式转换与 `parse_shortcut`（Cmd+Ctrl 等会折叠的组合视为无法解析）
 //!     - `GlobalShortcutBackend` 抽象真实插件与测试 Fake
 //!     - `replace_screenshot_hotkey_os` / `compensate_screenshot_hotkey_os`
 
@@ -36,8 +36,33 @@ pub fn hotkey_pynput_to_plugin(hotkey: &str) -> String {
         .join("+")
 }
 
+/// `<cmd>` / `<win>` / `<ctrl>` 及其左右变体会折叠成同一个插件修饰键。
+const COMMAND_OR_CONTROL_PARTS: &[&str] = &[
+    "<cmd>", "<cmd_l>", "<cmd_r>", "<win>", "<ctrl>", "<ctrl_l>", "<ctrl_r>",
+];
+
+/// 判断 pynput 快捷键是否同时包含多个会折叠成 `CommandOrControl` 的修饰键。
+///
+/// Business Logic（为什么需要）:
+///     `<cmd>` 与 `<ctrl>` 都会转成 `CommandOrControl`。设置页若录下 Cmd+Ctrl+S，
+///     系统实际只注册成 Cmd+S，表现为快捷键无反应。
+///
+/// Code Logic（做什么）:
+///     按 `+` 拆片段；CommandOrControl 族修饰键出现超过一次则视为冲突。
+pub fn has_conflicting_command_or_control(hotkey_pynput: &str) -> bool {
+    let count = hotkey_pynput
+        .split('+')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| COMMAND_OR_CONTROL_PARTS.iter().any(|token| token == part))
+        .count();
+    count > 1
+}
+
 /// 把 pynput 格式快捷键解析成插件 `Shortcut`（解析失败返回 None）。
 pub fn parse_shortcut(hotkey_pynput: &str) -> Option<Shortcut> {
+    if has_conflicting_command_or_control(hotkey_pynput) {
+        return None;
+    }
     let plugin_fmt = hotkey_pynput_to_plugin(hotkey_pynput);
     plugin_fmt.parse::<Shortcut>().ok()
 }
@@ -275,6 +300,18 @@ mod tests {
             hotkey_pynput_to_plugin("<ctrl>+<alt>+s"),
             "CommandOrControl+Option+S"
         );
+    }
+
+    #[test]
+    fn rejects_cmd_plus_ctrl_as_unparseable() {
+        assert!(has_conflicting_command_or_control("<cmd>+<ctrl>+s"));
+        assert!(has_conflicting_command_or_control("<cmd>+<cmd>+s"));
+        assert!(has_conflicting_command_or_control("<win>+<ctrl>+a"));
+        assert!(!has_conflicting_command_or_control("<cmd>+<shift>+s"));
+        assert!(!has_conflicting_command_or_control("<ctrl>"));
+        assert!(!has_conflicting_command_or_control("<ctrl>+/"));
+        assert!(parse_shortcut("<cmd>+<ctrl>+s").is_none());
+        assert!(parse_shortcut("<cmd>+<shift>+s").is_some());
     }
 
     #[test]

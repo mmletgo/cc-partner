@@ -43,7 +43,6 @@ function buildProps(overrides: Partial<AgentHubShellProps> = {}): AgentHubShellP
       onPush: vi.fn(),
     },
     peers: [],
-    projects: [],
     children: <div data-testid="shell-slot">content</div>,
     ...overrides,
   };
@@ -207,16 +206,17 @@ describe('AgentHubShell', () => {
     });
   });
 
-  test('project scope lock shows frozen project label without scope copy or pickers', () => {
+  test('project scope lock hides project identity, device picker, and scope copy', () => {
     renderShell({
       scopeLock: 'project',
-      frozenProjectLabel: 'demo (Remote · peer-1)',
     });
     expect(screen.queryByTestId('agent-hub-scope-lock')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-project-lock')).toBeNull();
     expect(screen.queryByText('Scope: project')).toBeNull();
     expect(screen.queryByText(/^Scope$/)).toBeNull();
-    expect(screen.getByTestId('agent-hub-frozen-project').textContent).toContain('demo (Remote · peer-1)');
+    expect(screen.getByTestId('agent-hub-shell').getAttribute('data-scope-lock')).toBe('project');
+    expect(screen.queryByTestId('agent-hub-frozen-project')).toBeNull();
+    expect(screen.queryByText('Project')).toBeNull();
     expect(screen.queryByTestId('agent-hub-device-select')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-switcher')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
@@ -271,7 +271,7 @@ describe('AgentHubShell', () => {
     expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
-    expect(screen.getByTestId('agent-hub-frozen-project')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-frozen-project')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     expect(onPull).toHaveBeenCalledOnce();

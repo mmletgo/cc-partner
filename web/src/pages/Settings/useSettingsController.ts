@@ -14,6 +14,7 @@ import { useCallback, useMemo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+import type { ShortcutRecordingRejectReason } from './shortcutRecorder';
 import { useSearchParams } from 'react-router-dom';
 import { backendApi } from '@/api/backend';
 import { workbenchApi } from '@/api/workbench';
@@ -109,6 +110,7 @@ export interface UseSettingsControllerResult {
   choosingGamePluginDir: boolean;
   canResetCoreDefaults: boolean;
   recordingShortcutId: string | null;
+  shortcutRecordingRejectReason: ShortcutRecordingRejectReason | null;
   handleDeviceNameChange: (e: import('react').ChangeEvent<HTMLInputElement>) => void;
   handleReceiveDirChange: (e: import('react').ChangeEvent<HTMLInputElement>) => void;
   handleGamePluginDirChange: (e: import('react').ChangeEvent<HTMLInputElement>) => void;
@@ -489,6 +491,7 @@ export function useSettingsController(): UseSettingsControllerResult {
     choosingGamePluginDir: form.choosingGamePluginDir,
     canResetCoreDefaults: resources.canResetCoreDefaults,
     recordingShortcutId: form.recordingShortcutId,
+    shortcutRecordingRejectReason: form.shortcutRecordingRejectReason,
     handleDeviceNameChange: form.handleDeviceNameChange,
     handleReceiveDirChange: form.handleReceiveDirChange,
     handleGamePluginDirChange: form.handleGamePluginDirChange,

@@ -12,7 +12,7 @@ import type { ChangeEvent, KeyboardEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Dialog, Input } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, KeyboardIcon } from '@/lib/icons';
-import { formatShortcutForDisplay } from './shortcutRecorder';
+import { formatShortcutForDisplay, type ShortcutRecordingRejectReason } from './shortcutRecorder';
 import type { SettingsState } from './settingsState';
 import styles from './Settings.module.css';
 
@@ -36,6 +36,7 @@ export interface SettingsGeneralPanelProps {
   choosingGamePluginDir: boolean;
   canResetCoreDefaults: boolean;
   recordingShortcutId: string | null;
+  shortcutRecordingRejectReason: ShortcutRecordingRejectReason | null;
   onDeviceNameChange: (e: ChangeEvent<HTMLInputElement>) => void;
   onReceiveDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
   onGamePluginDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
@@ -101,6 +102,7 @@ export function SettingsGeneralPanel({
   choosingGamePluginDir,
   canResetCoreDefaults,
   recordingShortcutId,
+  shortcutRecordingRejectReason,
   onDeviceNameChange,
   onReceiveDirChange,
   onGamePluginDirChange,
@@ -212,10 +214,24 @@ export function SettingsGeneralPanel({
           <div key={s.id} className={styles.shortcutRow}>
             <div className={styles.shortcutText}>
               <span className={styles.shortcutLabel}>{label}</span>
-              <span className={styles.shortcutHelper}>
-                {isRecording
-                  ? t('settings:shortcut.recordingHelper')
-                  : t(`settings:${s.helperKey}`)}
+              <span
+                className={
+                  isRecording && shortcutRecordingRejectReason
+                    ? `${styles.shortcutHelper} ${styles.shortcutHelperReject}`
+                    : styles.shortcutHelper
+                }
+                role={isRecording && shortcutRecordingRejectReason ? 'alert' : undefined}
+                data-testid={
+                  isRecording && shortcutRecordingRejectReason
+                    ? 'shortcut-recording-reject'
+                    : undefined
+                }
+              >
+                {isRecording && shortcutRecordingRejectReason
+                  ? t('settings:shortcut.recordingCmdCtrlRejected')
+                  : isRecording
+                    ? t('settings:shortcut.recordingHelper')
+                    : t(`settings:${s.helperKey}`)}
               </span>
             </div>
             <div className={styles.shortcutInput}>

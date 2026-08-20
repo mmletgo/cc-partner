@@ -7,7 +7,8 @@
  *
  * Code Logic（这个组件做什么）:
  *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级只保留设备选择器，
- *   项目级只展示冻结项目名，不展示「范围 / 范围：项目」。公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。
+ *   项目级不展示项目选择器或项目名（身份已由 Workbench 冻结），也不展示「范围 / 范围：项目」。
+ *   公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。
  *   复用共享 roving 索引合同，并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
 
@@ -65,25 +66,14 @@ export interface AgentHubShellPeer {
   capabilities?: string[];
 }
 
-/** 壳层项目摘要；remote 项目仍保留其 Workbench shortcut id。 */
-export interface AgentHubShellProject {
-  key: string;
-  label: string;
-  remote: boolean;
-  deviceId?: string | null;
-}
-
 export interface AgentHubShellProps {
   context: AgentHubContext;
   onContextChange: (patch: Partial<AgentHubContext>) => void;
   actions: AgentHubShellActions;
   peers: AgentHubShellPeer[];
-  projects: AgentHubShellProject[];
   tabCounts?: AgentHubShellTabCounts | null;
   /** 生产路径锁定 user；Workbench 项目 Agent 锁定 project。不再提供 user|project 切换。 */
   scopeLock?: 'user' | 'project';
-  /** 项目锁定时展示的当前项目名（远端含设备）。 */
-  frozenProjectLabel?: string | null;
   children: ReactNode;
 }
 
@@ -118,7 +108,6 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
     actions,
     peers,
     tabCounts,
-    frozenProjectLabel,
     children,
   } = props;
   const scopeLock = props.scopeLock ?? (context.scope === 'project' ? 'project' : 'user');
@@ -163,13 +152,12 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
     onContextChange(patch);
   }
 
-  const frozenProjectText =
-    frozenProjectLabel?.trim() ||
-    context.projectKey ||
-    t('agentHub:shell.projectPlaceholder');
-
   return (
-    <div className={styles.shell} data-testid="agent-hub-shell">
+    <div
+      className={styles.shell}
+      data-testid="agent-hub-shell"
+      data-scope-lock={scopeLock}
+    >
       <div className={styles.chrome}>
         <div className={styles.rowBetween}>
           <div
@@ -249,12 +237,7 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
           </p>
         ) : null}
 
-        {scopeLock === 'project' ? (
-          <div className={styles.row} data-testid="agent-hub-frozen-project">
-            <span className={styles.label}>{t('agentHub:shell.projectLabel')}</span>
-            <span className={styles.frozenValue}>{frozenProjectText}</span>
-          </div>
-        ) : (
+        {scopeLock === 'project' ? null : (
           <div className={styles.row}>
             <label className={styles.cluster}>
               <span className={styles.label}>{t('agentHub:shell.deviceLabel')}</span>

@@ -191,6 +191,20 @@ describe('workbenchAutomationView', () => {
     "import('@/pages/AgentHub/WorkbenchProjectAgentConsole')",
     'Project Agent overlay lazy-loads Agent Hub so Workbench chunk stays small',
   );
+  assertNotContains(
+    workbenchOverlaySource,
+    'frozenProjectLabel',
+    'Project Agent overlay must not list or label the current project; Workbench already selected it',
+  );
+  const agentHubShellSource = readFileSync(
+    new URL('../AgentHub/shell/AgentHubShell.tsx', import.meta.url),
+    'utf8',
+  );
+  assertNotContains(
+    agentHubShellSource,
+    'agent-hub-frozen-project',
+    'Agent Hub shell must not render a frozen project name row; Workbench already shows the path',
+  );
   assertContains(
     workbenchSource,
     'const handleToggleProjectAgent = useCallback',

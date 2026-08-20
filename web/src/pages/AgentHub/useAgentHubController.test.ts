@@ -103,37 +103,6 @@ vi.mock('@/api/devices', () => ({
   },
 }));
 
-const workbenchProjectsListMock = vi.hoisted(() =>
-  vi.fn(async () => [
-    {
-      id: 'local-1',
-      name: 'Local Repo',
-      kind: 'local',
-      deviceId: 'self',
-      deviceName: 'This Mac',
-      path: '/tmp/local',
-      lastOpenedAt: '2026-08-08T00:00:00.000Z',
-    },
-    {
-      id: 'remote:dev-hk:inner',
-      name: 'Remote Repo',
-      kind: 'remote',
-      deviceId: 'dev-hk',
-      deviceName: 'HK Peer',
-      path: '/remote/repo',
-      lastOpenedAt: '2026-08-08T00:00:00.000Z',
-    },
-  ]),
-);
-
-vi.mock('@/api/workbench', () => ({
-  workbenchApi: {
-    projects: {
-      list: () => workbenchProjectsListMock(),
-    },
-  },
-}));
-
 import { useAgentHubController } from './useAgentHubController';
 import type {
   PortableAssetActionPlanDto,
@@ -314,26 +283,6 @@ describe('useAgentHubController', () => {
       },
       { id: 'peer-offline', name: 'Peer Offline', status: 'offline' as const, capabilities: [] },
     ]);
-    workbenchProjectsListMock.mockResolvedValue([
-      {
-        id: 'local-1',
-        name: 'Local Repo',
-        kind: 'local',
-        deviceId: 'self',
-        deviceName: 'This Mac',
-        path: '/tmp/local',
-        lastOpenedAt: '2026-08-08T00:00:00.000Z',
-      },
-      {
-        id: 'remote:dev-hk:inner',
-        name: 'Remote Repo',
-        kind: 'remote',
-        deviceId: 'dev-hk',
-        deviceName: 'HK Peer',
-        path: '/remote/repo',
-        lastOpenedAt: '2026-08-08T00:00:00.000Z',
-      },
-    ]);
     getStatus.mockResolvedValue(statusOk);
     listAssets.mockResolvedValue([assetSummary]);
     getAsset.mockResolvedValue(assetDetail);
@@ -397,11 +346,10 @@ describe('useAgentHubController', () => {
     });
   });
 
-  test('cold shell loads lightweight peer and project selectors without scanning assets', async () => {
+  test('cold shell loads lightweight peer selector without scanning assets or listing projects', async () => {
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(devicesListMock).toHaveBeenCalledOnce();
-    expect(workbenchProjectsListMock).toHaveBeenCalledOnce();
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
   });
 

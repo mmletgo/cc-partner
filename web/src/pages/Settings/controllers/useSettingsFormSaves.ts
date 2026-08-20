@@ -25,7 +25,10 @@ import {
   type SettingsResourceGroup,
   type SettingsResourceResults,
 } from '../settingsResources';
-import { resolveShortcutRecording } from '../shortcutRecorder';
+import {
+  resolveShortcutRecording,
+  type ShortcutRecordingRejectReason,
+} from '../shortcutRecorder';
 import {
   buildConfigUpdate,
   createPendingSettingsState,
@@ -83,6 +86,7 @@ export interface UseSettingsFormSavesResult {
   choosingDir: boolean;
   choosingGamePluginDir: boolean;
   recordingShortcutId: string | null;
+  shortcutRecordingRejectReason: ShortcutRecordingRejectReason | null;
   handleDeviceNameChange: (e: ChangeEvent<HTMLInputElement>) => void;
   handleReceiveDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
   handleGamePluginDirChange: (e: ChangeEvent<HTMLInputElement>) => void;
@@ -209,6 +213,8 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
   const [choosingDir, setChoosingDir] = useState(false);
   const [choosingGamePluginDir, setChoosingGamePluginDir] = useState(false);
   const [recordingShortcutId, setRecordingShortcutId] = useState<string | null>(null);
+  const [shortcutRecordingRejectReason, setShortcutRecordingRejectReason] =
+    useState<ShortcutRecordingRejectReason | null>(null);
 
   const generalEditVersionRef = useRef(0);
   const generalRequestSeqRef = useRef(0);
@@ -266,11 +272,13 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
   }, []);
 
   const handleShortcutFocus = useCallback((id: string) => {
+    setShortcutRecordingRejectReason(null);
     setRecordingShortcutId(id);
   }, []);
 
   const handleShortcutBlur = useCallback((id: string) => {
     setRecordingShortcutId((prev) => (prev === id ? null : prev));
+    setShortcutRecordingRejectReason(null);
   }, []);
 
   /**
@@ -285,6 +293,11 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
         allowBareKey: id === PROMPT_QUICK_INPUT_SHORTCUT_ID,
       });
       if (result.type === 'pending') return;
+      if (result.type === 'reject') {
+        setShortcutRecordingRejectReason(result.reason);
+        return;
+      }
+      setShortcutRecordingRejectReason(null);
       if (result.type === 'cancel') {
         setRecordingShortcutId(null);
         e.currentTarget.blur();
@@ -488,6 +501,7 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
     choosingDir,
     choosingGamePluginDir,
     recordingShortcutId,
+    shortcutRecordingRejectReason,
     handleDeviceNameChange,
     handleReceiveDirChange,
     handleGamePluginDirChange,

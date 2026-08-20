@@ -1363,6 +1363,10 @@ impl AppConfig {
                 cfg.health.ensure_reminders();
                 dirty = true;
             }
+            if migrate_collapsed_command_or_control_hotkeys(&mut cfg) {
+                tracing::info!("已将同时含 Cmd/Ctrl 的快捷键回退为平台默认值");
+                dirty = true;
+            }
             // macOS 迁移：旧配置中 <ctrl> 快捷键自动替换为 <cmd>（对照 config.py）
             if cfg!(target_os = "macos") && cfg.screenshot_hotkey.contains("<ctrl>") {
                 cfg.screenshot_hotkey = cfg.screenshot_hotkey.replace("<ctrl>", "<cmd>");
@@ -1445,15 +1449,46 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 ///     `parse_shortcut` 可能返回 None，不能因此阻断配置保存。
 ///
 /// Code Logic（这个函数做什么）:
-///     trim 后空串 → Validation；非空时优先 parse，失败也接受非空（插件运行时再判定）。
+///     trim 后空串 → Validation；Cmd+Ctrl 这类会折叠的组合 → Validation；
+///     其余非空时优先 parse，失败也接受（覆盖 `<ctrl>` 单键等插件相关格式）。
 fn validate_hotkey_field(field: &str, value: &str) -> Result<(), AppError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(AppError::validation(format!("{field} 不能为空")));
     }
+    if crate::hotkey::has_conflicting_command_or_control(trimmed) {
+        return Err(AppError::validation(format!(
+            "{field} 不能同时包含 Cmd 与 Ctrl（会折叠成同一个修饰键）: {trimmed}"
+        )));
+    }
     // 能 parse 最好；不能 parse 但非空时仍接受（覆盖单修饰键等插件相关格式）。
     let _ = crate::hotkey::parse_shortcut(trimmed);
     Ok(())
+}
+
+/// 把会折叠成同一个修饰键的 Cmd+Ctrl 快捷键回退为平台默认值。
+///
+/// Business Logic（为什么需要这个函数）:
+///     历史配置可能存了 `<cmd>+<ctrl>+s`；后端会把它注册成 Cmd+S，快捷键表现为无反应。
+///     加载时必须改成可注册的默认组合，避免设置页以外的保存路径继续带着坏值。
+///
+/// Code Logic（这个函数做什么）:
+///     三个 hotkey 字段各自检测 CommandOrControl 族修饰键是否出现超过一次，冲突则写回默认。
+fn migrate_collapsed_command_or_control_hotkeys(cfg: &mut AppConfig) -> bool {
+    let mut dirty = false;
+    if crate::hotkey::has_conflicting_command_or_control(&cfg.screenshot_hotkey) {
+        cfg.screenshot_hotkey = default_screenshot_hotkey();
+        dirty = true;
+    }
+    if crate::hotkey::has_conflicting_command_or_control(&cfg.prompt_optimizer_hotkey) {
+        cfg.prompt_optimizer_hotkey = default_prompt_optimizer_hotkey();
+        dirty = true;
+    }
+    if crate::hotkey::has_conflicting_command_or_control(&cfg.prompt_quick_input_hotkey) {
+        cfg.prompt_quick_input_hotkey = default_prompt_quick_input_hotkey();
+        dirty = true;
+    }
+    dirty
 }
 
 /// 校验充电额度数字范围。
@@ -2175,6 +2210,24 @@ mod tests {
         // 单修饰键 <ctrl> 在无插件上下文可能 parse 失败，但仍应允许落盘
         cfg.prompt_optimizer_hotkey = "<ctrl>".into();
         cfg.validate().expect("<ctrl> 非空应通过");
+        cfg.screenshot_hotkey = "<cmd>+<ctrl>+s".into();
+        let err = cfg.validate().expect_err("Cmd+Ctrl 应拒绝");
+        assert!(
+            err.to_string().contains("Cmd") && err.to_string().contains("Ctrl"),
+            "{err}"
+        );
+        cfg.screenshot_hotkey = default_screenshot_hotkey();
+        cfg.validate().expect("回退默认后应通过");
+    }
+
+    #[test]
+    fn migrate_collapses_cmd_ctrl_screenshot_hotkey_to_default() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/db.db");
+        cfg.screenshot_hotkey = "<cmd>+<ctrl>+s".into();
+        assert!(migrate_collapsed_command_or_control_hotkeys(&mut cfg));
+        assert_eq!(cfg.screenshot_hotkey, default_screenshot_hotkey());
+        assert!(!migrate_collapsed_command_or_control_hotkeys(&mut cfg));
     }
 
     #[test]

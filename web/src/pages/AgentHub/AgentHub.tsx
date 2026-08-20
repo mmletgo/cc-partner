@@ -46,8 +46,6 @@ export type AgentHubViewProps = UseAgentHubControllerResult & {
   embedded?: boolean;
   /** 生产 Agent Hub 锁定 user；Workbench 项目 Agent 锁定 project。 */
   scopeLock?: 'user' | 'project';
-  /** 项目锁定时展示的当前项目名。 */
-  frozenProjectLabel?: string | null;
   /** 文件工作区有未保存标签时的提示（可选）。 */
   unsavedFilesNotice?: string | null;
 };
@@ -63,7 +61,6 @@ export function AgentHubView(props: AgentHubViewProps) {
     contextMigrationNotice,
     onContextChange,
     shellPeers,
-    shellProjects,
     portableInventory,
     portableActionOpen,
     portableActionKind,
@@ -109,7 +106,6 @@ export function AgentHubView(props: AgentHubViewProps) {
     instructionThreePane,
     embedded = false,
     scopeLock,
-    frozenProjectLabel,
     unsavedFilesNotice,
   } = props;
 
@@ -503,10 +499,8 @@ export function AgentHubView(props: AgentHubViewProps) {
           onContextChange={onContextChange}
           actions={shellActions}
           peers={shellPeers}
-          projects={shellProjects}
           tabCounts={portableInventory.kindCounts}
           scopeLock={scopeLock ?? (hubContext.scope === 'project' ? 'project' : 'user')}
-          frozenProjectLabel={frozenProjectLabel}
         >
         {showInstructionThreePane && instructionThreePane ? (
           <InstructionThreePaneView

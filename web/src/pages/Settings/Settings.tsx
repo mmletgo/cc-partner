@@ -248,6 +248,7 @@ export function Settings(): ReactElement {
               choosingGamePluginDir={ctrl.choosingGamePluginDir}
               canResetCoreDefaults={ctrl.canResetCoreDefaults}
               recordingShortcutId={ctrl.recordingShortcutId}
+              shortcutRecordingRejectReason={ctrl.shortcutRecordingRejectReason}
               onDeviceNameChange={ctrl.handleDeviceNameChange}
               onReceiveDirChange={ctrl.handleReceiveDirChange}
               onGamePluginDirChange={ctrl.handleGamePluginDirChange}

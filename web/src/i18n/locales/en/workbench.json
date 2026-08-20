@@ -785,7 +785,6 @@
     "open": "Project Agent",
     "unsavedFilesNotice": "The files workspace has unsaved tabs. Project Agent reads Hub and disk, not unsaved editor buffers.",
     "missingProject": "This project is not in the current Workbench list, so Project Agent cannot open.",
-    "remoteProject": "{{name}} (Remote · {{device}})",
     "loading": "Opening Project Agent…"
   },
   "workspaceSwitch": {

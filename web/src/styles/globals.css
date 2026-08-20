@@ -24,6 +24,11 @@
   color: var(--fg-muted-readable);
 }
 
+/* 项目 Agent 不再列出当前项目名；选择器不依赖 CSS Module hash，以便盖住未刷新的懒加载块。 */
+div[data-testid='agent-hub-frozen-project'] {
+  display: none;
+}
+
 /* prefers-reduced-motion: 保留状态变化，取消位移/闪烁/shimmer 动效 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

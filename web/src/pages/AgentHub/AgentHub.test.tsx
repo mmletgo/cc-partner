@@ -92,7 +92,6 @@ function buildProps(
     contextMigrationNotice: null,
     onContextChange: vi.fn(),
     shellPeers: [],
-    shellProjects: [],
     userInstructions: {} as UseAgentHubControllerResult['userInstructions'],
     loading: false,
     refreshing: false,
