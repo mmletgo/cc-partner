@@ -421,11 +421,23 @@ function stubThreePane(): UseInstructionThreePaneControllerResult {
  * Code Logic: I18nextProvider 包装。
  */
 function renderView(props: Partial<AgentHubViewProps> = {}) {
-  const { instructionThreePane, ...controllerProps } = props;
+  const {
+    instructionThreePane,
+    embedded,
+    scopeLock,
+    unsavedFilesNotice,
+    ...controllerProps
+  } = props;
   const merged = buildProps(controllerProps);
   return render(
     <I18nextProvider i18n={i18n}>
-      <AgentHubView {...merged} instructionThreePane={instructionThreePane} />
+      <AgentHubView
+        {...merged}
+        instructionThreePane={instructionThreePane}
+        embedded={embedded}
+        scopeLock={scopeLock}
+        unsavedFilesNotice={unsavedFilesNotice}
+      />
     </I18nextProvider>,
   );
 }
@@ -443,7 +455,9 @@ describe('AgentHub page characterization', () => {
   });
 
   test('asset tab renders only portable inventory, even when legacy writer flags are injected', () => {
+    const reload = vi.fn(async () => undefined);
     renderView({
+      reload,
       activeSection: 'diagnostics',
       previewOpen: true,
       conflictDrawerOpen: true,
@@ -453,6 +467,10 @@ describe('AgentHub page characterization', () => {
     });
     expect(screen.getByTestId('agent-hub-page')).toBeTruthy();
     expect(screen.getByTestId('portable-inventory-workspace')).toBeTruthy();
+    expect(screen.queryByTestId('portable-inventory-refresh')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-reload')).toBeNull();
+    fireEvent.click(screen.getByTestId('agent-hub-action-reload'));
+    expect(reload).toHaveBeenCalledOnce();
     expect(screen.queryByTestId('agent-hub-filters')).toBeNull();
     expect(screen.queryByTestId('agent-hub-preview-dialog')).toBeNull();
     expect(screen.queryByTestId('agent-hub-conflict-drawer')).toBeNull();
@@ -524,6 +542,11 @@ describe('AgentHub page characterization', () => {
     expect(runPreviewProject).toHaveBeenCalledOnce();
     expect(runEnableProject).toHaveBeenCalledOnce();
     expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-push')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-push-reason')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-reload')).toBeNull();
   });
 
   test('remote device keeps management task callout without rendering local inventory', () => {
@@ -557,6 +580,8 @@ describe('AgentHub page characterization', () => {
     });
     expect(screen.getByTestId('instruction-three-pane')).toBeTruthy();
     expect(screen.queryByTestId('agent-hub-remote-management')).toBeNull();
+    expect(screen.getByTestId('agent-hub-action-reload')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-reload')).toBeNull();
   });
 
   test('online peer missing user-instructions capability keeps remote hint', () => {
@@ -659,5 +684,54 @@ describe('AgentHub page characterization', () => {
       instructionLane: 'exclusive',
     });
     expect(screen.queryByTestId('agent-hub-section-assets')).toBeNull();
+  });
+
+  test('shell reload is the only refresh control on three-pane and project-agent assets', () => {
+    const reload = vi.fn(async () => undefined);
+    renderView({
+      reload,
+      hubContext: {
+        ...buildProps().hubContext,
+        tab: 'instructions',
+        instructionLane: 'exclusive',
+      },
+      instructionThreePane: stubThreePane(),
+    });
+    fireEvent.click(screen.getByTestId('agent-hub-action-reload'));
+    expect(reload).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('portable-inventory-refresh')).toBeNull();
+
+    cleanup();
+    renderView({
+      embedded: true,
+      scopeLock: 'project',
+      hubContext: {
+        ...buildProps().hubContext,
+        scope: 'project',
+        projectKey: 'wb-project-1',
+        tab: 'instructions',
+      },
+      instructionThreePane: stubThreePane(),
+    });
+    expect(screen.queryByTestId('agent-hub-action-reload')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
+
+    cleanup();
+    const projectReload = vi.fn(async () => undefined);
+    renderView({
+      reload: projectReload,
+      embedded: true,
+      scopeLock: 'project',
+      hubContext: {
+        ...buildProps().hubContext,
+        scope: 'project',
+        projectKey: 'wb-project-1',
+        tab: 'skill',
+      },
+    });
+    fireEvent.click(screen.getByTestId('agent-hub-action-reload'));
+    expect(projectReload).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
+    expect(screen.queryByTestId('portable-inventory-refresh')).toBeNull();
   });
 });

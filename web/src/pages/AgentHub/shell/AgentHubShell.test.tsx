@@ -206,7 +206,7 @@ describe('AgentHubShell', () => {
     });
   });
 
-  test('project scope lock hides project identity, device picker, and scope copy', () => {
+  test('project scope lock hides project identity, copy actions, device picker, and scope copy', () => {
     renderShell({
       scopeLock: 'project',
     });
@@ -220,6 +220,27 @@ describe('AgentHubShell', () => {
     expect(screen.queryByTestId('agent-hub-device-select')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-switcher')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-push')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-push-reason')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-pull-reason')).toBeNull();
+  });
+
+  test('project lock shows a single reload without Pull or Push', () => {
+    const onReload = vi.fn();
+    renderShell({
+      scopeLock: 'project',
+      actions: {
+        onPull: vi.fn(),
+        onPush: vi.fn(),
+        onReload,
+      },
+    });
+    fireEvent.click(screen.getByTestId('agent-hub-action-reload'));
+    expect(onReload).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-push')).toBeNull();
   });
 
   test('user shell shows device selector and hides scope copy', () => {
@@ -256,7 +277,7 @@ describe('AgentHubShell', () => {
     expect(onPush).toHaveBeenCalledOnce();
   });
 
-  test('project context keeps management actions without Adapt toolbar button', () => {
+  test('project context hides Pull/Push because assets follow the project', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
     renderShell({
@@ -268,13 +289,12 @@ describe('AgentHubShell', () => {
       actions: { onPull, onPush },
     });
 
-    expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-push')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
     expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
     expect(screen.queryByTestId('agent-hub-frozen-project')).toBeNull();
     expect(screen.queryByTestId('agent-hub-project-select')).toBeNull();
-    fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
-    expect(onPull).toHaveBeenCalledOnce();
   });
 
   test('five tabs emit tab patch; skill selects skill', () => {

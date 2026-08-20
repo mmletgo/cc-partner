@@ -47,7 +47,6 @@ export interface PortableInventoryViewLabels extends PortableInventoryRowLabels 
   subtitle: string;
   loading: string;
   empty: string;
-  refresh: string;
   migrateAllToStore: string;
   confirmAllVersions: string;
   materializeAllEscapeLinks: string;
@@ -165,15 +164,6 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
           ) : null}
         </div>
         <div className={styles.portableHeroActions}>
-          <Button
-            variant="secondary"
-            size="sm"
-            loading={refreshing}
-            onClick={() => void refresh()}
-            data-testid="portable-inventory-refresh"
-          >
-            {labels.refresh}
-          </Button>
           {showMigrateAllToStore ? (
             <Button
               variant="secondary"

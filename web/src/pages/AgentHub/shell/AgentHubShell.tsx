@@ -6,8 +6,9 @@
  *   Shell 负责选择 owner，内容区和动作层再按能力证据决定只读、预览或写入。
  *
  * Code Logic（这个组件做什么）:
- *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级只保留设备选择器，
- *   项目级不展示项目选择器或项目名（身份已由 Workbench 冻结），也不展示「范围 / 范围：项目」。
+ *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级只保留设备选择器与 Pull/Push，
+ *   项目级不展示项目选择器、项目名或跨设备复制（资产随项目走），也不展示「范围 / 范围：项目」。
+ *   当前 tab 可重读时工具栏只保留一个「刷新」（提示词三栏与资产列表同一入口）。
  *   公共提示词槽与 Skill/Command 仓库面隐藏 Agent 切换。
  *   复用共享 roving 索引合同，并用关联 tabpanel 承载页面内容。无业务 API 调用。
  */
@@ -55,6 +56,9 @@ export interface AgentHubShellActions {
   onPush: () => void;
   pullDisabledReason?: string | null;
   pushDisabledReason?: string | null;
+  /** 当前 tab 可重读时提供；提示词三栏与资产列表共用这一入口。 */
+  onReload?: () => void;
+  reloadBusy?: boolean;
 }
 
 /** 壳层远端设备摘要。 */
@@ -117,6 +121,9 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const assetLaneRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const agentRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeTabIndex = Math.max(0, TABS.indexOf(context.tab));
+  const showCopyActions = scopeLock !== 'project';
+  const showReload = typeof actions.onReload === 'function';
+  const showToolbar = showCopyActions || showReload;
   const activeScopeIndex = scopeLock === 'project' ? 1 : 0;
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
   const activeAssetLaneIndex = Math.max(0, ASSET_LANES.indexOf(context.assetLane));
@@ -199,12 +206,26 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             })}
           </div>
 
+          {showToolbar ? (
           <div
             className={styles.cluster}
             role="toolbar"
             aria-label={t('agentHub:shell.toolbarAria')}
             data-testid="agent-hub-toolbar"
           >
+            {showReload ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={Boolean(actions.reloadBusy)}
+                onClick={() => actions.onReload?.()}
+                data-testid="agent-hub-action-reload"
+              >
+                {t('common:action.refresh')}
+              </Button>
+            ) : null}
+            {showCopyActions ? (
+              <>
             <Button
               variant="secondary"
               size="sm"
@@ -223,15 +244,18 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
             >
               {t('agentHub:shell.push')}
             </Button>
+              </>
+            ) : null}
           </div>
+          ) : null}
         </div>
 
-        {pullDisabledReason ? (
+        {showCopyActions && pullDisabledReason ? (
           <p className={styles.adaptHint} data-testid="agent-hub-pull-reason">
             {pullDisabledReason}
           </p>
         ) : null}
-        {pushDisabledReason ? (
+        {showCopyActions && pushDisabledReason ? (
           <p className={styles.adaptHint} data-testid="agent-hub-push-reason">
             {pushDisabledReason}
           </p>

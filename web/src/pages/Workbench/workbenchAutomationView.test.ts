@@ -206,6 +206,11 @@ describe('workbenchAutomationView', () => {
     'Agent Hub shell must not render a frozen project name row; Workbench already shows the path',
   );
   assertContains(
+    agentHubShellSource,
+    'showCopyActions = scopeLock !== \'project\'',
+    'Project Agent shell must hide Pull/Push; project assets already follow the project',
+  );
+  assertContains(
     workbenchSource,
     'const handleToggleProjectAgent = useCallback',
     'Project Agent toggle lives on the Workbench page, not as an 8th domain controller',

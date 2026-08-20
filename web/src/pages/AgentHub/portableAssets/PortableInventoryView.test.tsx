@@ -22,7 +22,6 @@ const labels: PortableInventoryViewLabels = {
   subtitle: 'Observed inventory',
   loading: 'Loading inventory',
   empty: 'No assets',
-  refresh: 'Refresh',
   migrateAllToStore: 'Migrate all to store',
   confirmAllVersions: 'Confirm all versions',
   materializeAllEscapeLinks: 'Replace all escape symlinks',
@@ -212,7 +211,7 @@ describe('PortableInventoryView', () => {
     expect(ctl.setFilters).toHaveBeenCalledWith({ actualState: 'problem' });
   });
 
-  test('migrate-all button sits under refresh, before confirm-all, and opens the batch action', () => {
+  test('migrate-all button sits before confirm-all and opens the batch action', () => {
     const nativeA = item({
       inventoryItemId: 'claude-skill-alpha',
       capabilities: {
@@ -245,10 +244,8 @@ describe('PortableInventoryView', () => {
       />,
     );
 
-    const refresh = screen.getByTestId('portable-inventory-refresh');
     const migrateAll = screen.getByTestId('portable-inventory-migrate-all-to-store');
     const confirmAll = screen.getByTestId('portable-inventory-confirm-all-versions');
-    expect(refresh.compareDocumentPosition(migrateAll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(migrateAll.compareDocumentPosition(confirmAll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect((migrateAll as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(migrateAll);
@@ -280,7 +277,7 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-inventory-confirm-all-versions')).toBeTruthy();
   });
 
-  test('confirm-all button sits under refresh and opens the batch action', () => {
+  test('confirm-all button opens the batch action', () => {
     const drifted = item({
       inventoryItemId: 'claude-skill-alpha',
       managementState: 'drifted',
@@ -314,9 +311,7 @@ describe('PortableInventoryView', () => {
       />,
     );
 
-    const refresh = screen.getByTestId('portable-inventory-refresh');
     const confirmAll = screen.getByTestId('portable-inventory-confirm-all-versions');
-    expect(refresh.compareDocumentPosition(confirmAll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect((confirmAll as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(confirmAll);
     expect(openConfirmAllCurrentVersions).toHaveBeenCalledTimes(1);

@@ -108,6 +108,9 @@ export function AgentHubView(props: AgentHubViewProps) {
     scopeLock,
     unsavedFilesNotice,
   } = props;
+  const resolvedScopeLock =
+    scopeLock ?? (hubContext.scope === 'project' ? 'project' : 'user');
+  const projectLocked = resolvedScopeLock === 'project';
 
   const instructionApplyHasFailure = Boolean(
     instructionThreePane?.applyResult?.targets.some((target) =>
@@ -194,7 +197,6 @@ export function AgentHubView(props: AgentHubViewProps) {
       empty: storeCatalog
         ? t('agentHub:portable.inventory.emptyStore')
         : t('agentHub:portable.inventory.empty'),
-      refresh: t('agentHub:portable.inventory.refresh'),
       migrateAllToStore: t('agentHub:portable.inventory.migrateAllToStore', {
         count: portableInventory.migratableToStoreItems.length,
       }),
@@ -330,45 +332,6 @@ export function AgentHubView(props: AgentHubViewProps) {
     [onContextChange],
   );
 
-  /**
-   * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉。
-   * Code Logic: 跨 Agent 适配入口改到适配页保存旁按钮，壳层不再提供。
-   */
-  const shellActions = useMemo(
-    () => {
-      const remoteProject =
-        hubContext.scope === 'project' && hubContext.projectKey?.startsWith('remote:');
-      const localProject =
-        hubContext.scope === 'project' && hubContext.projectKey && !remoteProject;
-      return {
-        onPull: openPortablePull,
-        onPush: openLanPushDialog,
-        pullDisabledReason: null,
-        pushDisabledReason: remoteProject
-          ? t('agentHub:shell.remoteProjectTaskUnavailable')
-          : localProject &&
-              (!preview?.hubProjectId ||
-                previewProjectId !== hubContext.projectKey ||
-                preview.optedIn !== true)
-            ? t('agentHub:shell.projectPushRequiresPreview')
-            : null,
-      };
-    },
-    [hubContext, openLanPushDialog, openPortablePull, preview, previewProjectId, t],
-  );
-
-  /**
-   * Business Logic: 适配页优先使用三栏当前 original / preview 正文。
-   * Code Logic: original 优先，其次合成 preview；皆空则交 controller inspect。
-   */
-  const adaptInitialMarkdown = useMemo(() => {
-    const state = instructionThreePane?.state;
-    if (!state) return null;
-    if (state.originalText.trim().length > 0) return state.originalText;
-    if (state.previewText.trim().length > 0) return state.previewText;
-    return null;
-  }, [instructionThreePane?.state]);
-
   const isAssetTab = isAssetKindTab(hubContext.tab);
   const isRemoteContext =
     hubContext.deviceId !== null || hubContext.projectKey?.startsWith('remote:') === true;
@@ -392,9 +355,70 @@ export function AgentHubView(props: AgentHubViewProps) {
     !isLocalProject &&
     Boolean(instructionThreePane) &&
     (!isRemoteContext || canMountRemoteUserThreePane);
+  const canReloadCurrentTab =
+    (isAssetTab && (!isRemoteContext || isRemoteProject)) || showInstructionThreePane;
 
   /**
-   * Business Logic: 把三栏 refresh 注入 hub controller，供 header reload 分发。
+   * Business Logic: 用户级壳层保留 Pull/Push；项目 Agent 资产随项目走，不提供跨设备复制。
+   *   提示词三栏与资产列表共用壳层「刷新」，不再另开「刷新库存」。
+   * Code Logic: 跨 Agent 适配入口改到适配页保存旁按钮，壳层不再提供。
+   */
+  const shellActions = useMemo(
+    () => {
+      const reloadAction = canReloadCurrentTab
+        ? {
+            onReload: () => {
+              void reload();
+            },
+            reloadBusy:
+              hubContext.tab === 'instructions'
+                ? Boolean(instructionThreePane?.refreshing)
+                : portableInventory.refreshing,
+          }
+        : {};
+      if (projectLocked) {
+        return {
+          onPull: () => undefined,
+          onPush: () => undefined,
+          pullDisabledReason: null,
+          pushDisabledReason: null,
+          ...reloadAction,
+        };
+      }
+      return {
+        onPull: openPortablePull,
+        onPush: openLanPushDialog,
+        pullDisabledReason: null,
+        pushDisabledReason: null,
+        ...reloadAction,
+      };
+    },
+    [
+      canReloadCurrentTab,
+      hubContext.tab,
+      instructionThreePane?.refreshing,
+      openLanPushDialog,
+      openPortablePull,
+      portableInventory.refreshing,
+      projectLocked,
+      reload,
+    ],
+  );
+
+  /**
+   * Business Logic: 适配页优先使用三栏当前 original / preview 正文。
+   * Code Logic: original 优先，其次合成 preview；皆空则交 controller inspect。
+   */
+  const adaptInitialMarkdown = useMemo(() => {
+    const state = instructionThreePane?.state;
+    if (!state) return null;
+    if (state.originalText.trim().length > 0) return state.originalText;
+    if (state.previewText.trim().length > 0) return state.previewText;
+    return null;
+  }, [instructionThreePane?.state]);
+
+  /**
+   * Business Logic: 把三栏 refresh 注入 hub controller，供壳层刷新分发。
    * Code Logic: mount/update 写 ref；卸载清空。
    */
   useEffect(() => {
@@ -442,42 +466,11 @@ export function AgentHubView(props: AgentHubViewProps) {
       data-embedded={embedded || undefined}
     >
       <div className={styles.container}>
-        {embedded ? (
-          <div className={styles.headerActions}>
-            <Button
-              variant="secondary"
-              size="sm"
-              loading={
-                hubContext.tab === 'instructions'
-                  ? Boolean(instructionThreePane?.refreshing)
-                  : portableInventory.refreshing
-              }
-              onClick={() => void reload()}
-              data-testid="agent-hub-reload"
-            >
-              {t('common:action.refresh')}
-            </Button>
-          </div>
-        ) : (
+        {embedded ? null : (
           <header className={styles.header}>
             <div className={styles.titleBlock}>
               <h1 className={styles.title}>{t('agentHub:title')}</h1>
               <p className={styles.subtitle}>{t('agentHub:subtitle')}</p>
-            </div>
-            <div className={styles.headerActions}>
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={
-                  hubContext.tab === 'instructions'
-                    ? Boolean(instructionThreePane?.refreshing)
-                    : portableInventory.refreshing
-                }
-                onClick={() => void reload()}
-                data-testid="agent-hub-reload"
-              >
-                {t('common:action.refresh')}
-              </Button>
             </div>
           </header>
         )}
@@ -500,7 +493,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           actions={shellActions}
           peers={shellPeers}
           tabCounts={portableInventory.kindCounts}
-          scopeLock={scopeLock ?? (hubContext.scope === 'project' ? 'project' : 'user')}
+          scopeLock={resolvedScopeLock}
         >
         {showInstructionThreePane && instructionThreePane ? (
           <InstructionThreePaneView
@@ -688,15 +681,14 @@ export function AgentHubView(props: AgentHubViewProps) {
               controller={portableInventory}
               labels={portableInventoryLabels}
               onOpenOwner={openPortableOwner}
-              hideScope={
-                scopeLock === 'project' || hubContext.scope === 'project'
-              }
+              hideScope={projectLocked}
             />
           </div>
         ) : null}
         </AgentHubShell>
       </div>
 
+      {projectLocked ? null : (
       <LanPushDialog
         open={lanPushOpen}
         busy={actionBusy}
@@ -716,6 +708,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         onStart={() => void runLanStart()}
         onClose={closeLanPushDialog}
       />
+      )}
 
       <PortableAssetActionDialog
         open={portableActionOpen}
@@ -752,6 +745,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         onClose={closePortableAction}
       />
 
+      {projectLocked ? null : (
       <PortablePullDrawer
         open={portablePullOpen}
         busy={portablePull.busy}
@@ -789,6 +783,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         }}
         onClose={closePortablePull}
       />
+      )}
 
     </div>
   );

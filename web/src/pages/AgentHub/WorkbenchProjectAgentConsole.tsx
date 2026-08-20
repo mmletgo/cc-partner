@@ -3,6 +3,7 @@
  *
  * Business Logic（为什么需要）:
  *   项目级指令/资产必须挂在当前 Workbench 项目上，而不是 Hub 里的 user|project 切换器。
+ *   资产随项目走，控制台不提供跨设备 Pull/Push。
  *   控制台复用同一套 Hub 视图与脏稿守卫，关闭前要确认未保存草稿。
  *
  * Code Logic（做什么）:
@@ -23,7 +24,7 @@ export interface WorkbenchProjectAgentConsoleProps {
 }
 
 /**
- * Business Logic: Workbench 只传入当前项目身份；控制台内部不得再切换或列出项目。
+ * Business Logic: Workbench 只传入当前项目身份；控制台内部不得再切换、列出项目或做跨设备 Pull/Push。
  * Code Logic: host 冻结 projectKey；session 提供脏稿 Dialog 与 confirmClose。
  */
 export const WorkbenchProjectAgentConsole = forwardRef(function WorkbenchProjectAgentConsole(
