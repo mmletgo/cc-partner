@@ -21,6 +21,7 @@ import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 const commitMock = vi.fn();
 const pushMock = vi.fn();
 const getMutationOperationMock = vi.fn();
+const repairHookFailureMock = vi.fn();
 const listCommitsMock = vi.fn();
 const listWorktreesMock = vi.fn();
 const refreshWorktreesMock = vi.fn(async () => undefined);
@@ -39,6 +40,7 @@ vi.mock('@/api/workbenchHttp', () => ({
       merge: vi.fn(),
       remove: vi.fn(),
       getMutationOperation: (...args: unknown[]) => getMutationOperationMock(...args),
+      repairHookFailure: (...args: unknown[]) => repairHookFailureMock(...args),
     },
   },
   httpWorkbenchTransport: {
@@ -109,6 +111,7 @@ beforeEach(() => {
   commitMock.mockReset();
   pushMock.mockReset();
   getMutationOperationMock.mockReset();
+  repairHookFailureMock.mockReset();
   listCommitsMock.mockReset();
   listWorktreesMock.mockReset();
   refreshWorktreesMock.mockClear();
@@ -307,6 +310,57 @@ describe('MobileGitPanel mutation reconciliation', () => {
       expect(refreshWorktreesMock).toHaveBeenCalled();
     });
     expect(getMutationOperationMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('status').textContent).toContain('提交成功');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   failedHook 必须露出「让 AI 修复」，不能只当普通错误文案。
+   *
+   * Code Logic（这个测试做什么）:
+   *   commit 返回 failedHook；断言修复卡片与 repairHookFailure 调用。
+   */
+  test('failedHook commit shows repair card and starts AI repair', async () => {
+    const hookFailure = {
+      stage: 'preCommit',
+      stdout: 'lint failed',
+      stderr: 'trailing whitespace',
+      exitCode: 1,
+    };
+    commitMock.mockResolvedValue({
+      kind: 'failedHook',
+      clientOperationId: 'op-hook',
+      hookFailure,
+    });
+    repairHookFailureMock.mockResolvedValue({
+      agentSessionId: 'agent-1',
+      terminalSessionId: 'term-repair',
+      worktreeId: 'wt-1',
+      projectId: 'project-1',
+    });
+    const onFocusRepairSession = vi.fn(async () => undefined);
+
+    renderPanel(
+      <MobileGitPanel
+        project={createProject()}
+        worktree={createWorktree()}
+        onMergeWorktree={async () => true}
+        onRefreshWorktrees={refreshWorktreesMock}
+        onWorktreeChange={onWorktreeChangeMock}
+        onFocusRepairSession={onFocusRepairSession}
+      />,
+    );
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+
+    await screen.findByTestId('mobile-hook-repair-card');
+    fireEvent.click(screen.getByRole('button', { name: '让 AI 修复' }));
+
+    await waitFor(() => {
+      expect(repairHookFailureMock).toHaveBeenCalledWith('wt-1', hookFailure);
+      expect(onFocusRepairSession).toHaveBeenCalledWith('term-repair');
+    });
+    expect(screen.getByRole('button', { name: '重试 commit' })).toBeTruthy();
   });
 });
 

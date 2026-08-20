@@ -303,6 +303,7 @@
       "canPushAllowed": "Can push",
       "canPushBlocked": "Cannot push",
       "committing": "Committing",
+      "commitSucceeded": "Commit succeeded",
       "pushing": "Pushing",
       "merging": "Merging",
       "commitMeta": "{{author}} · {{date}}",

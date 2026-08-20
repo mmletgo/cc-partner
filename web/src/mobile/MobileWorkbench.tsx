@@ -604,6 +604,42 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   钩子 AI 修复会新建绑定 worktree 的终端；移动端必须切到该 session 才能看到 agent。
+   *
+   * Code Logic（这个函数做什么）:
+   *   刷新 sessions 后选中 repair 返回的 sessionId，并进入 terminal 面板。
+   */
+  const handleFocusRepairSession = useCallback(async (sessionId: string): Promise<void> => {
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    const requestId = sessionsRequestIdRef.current + 1;
+    sessionsRequestIdRef.current = requestId;
+    try {
+      const nextSessions = await httpWorkbenchTransport.sessions.list(projectId);
+      if (sessionsRequestIdRef.current !== requestId) return;
+      if (activeProjectRef.current?.id !== projectId) return;
+      sessionsRef.current = nextSessions;
+      setSessions(nextSessions);
+      const session = nextSessions.find((item) => item.id === sessionId) ?? null;
+      if (session) {
+        const nextWorktree = session.worktreeId
+          ? worktrees.find((item) => item.id === session.worktreeId) ?? activeWorktreeRef.current
+          : activeWorktreeRef.current;
+        if (nextWorktree) {
+          activeWorktreeRef.current = nextWorktree;
+          setActiveWorktree(nextWorktree);
+        }
+        setActiveSession(session);
+      }
+      setPanel('terminal');
+    } catch (reason) {
+      if (sessionsRequestIdRef.current !== requestId) return;
+      setError(getErrorMessage(reason));
+    }
+  }, [activeProject, worktrees]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   Worktree 创建、删除、提交、推送或合并后，移动端所有面板都要重新读取后端权威 worktree 列表。
    *
    * Code Logic（这个函数做什么）:
@@ -1448,6 +1484,7 @@ export function MobileWorkbench(): ReactElement {
           onWorktreeChange={handleWorktreeChange}
           onMergeWorktree={handleMergeWorktree}
           onRefreshWorktrees={refreshWorktrees}
+          onFocusRepairSession={handleFocusRepairSession}
         />
       </Suspense>
     ) : panel === 'automation' ? (
@@ -1491,6 +1528,7 @@ export function MobileWorkbench(): ReactElement {
           onRefreshSessions={refreshSessions}
           onWorktreeChange={handleWorktreeChange}
           onRefreshWorktrees={refreshWorktrees}
+          onFocusRepairSession={handleFocusRepairSession}
         />
       </Suspense>
     ) : (

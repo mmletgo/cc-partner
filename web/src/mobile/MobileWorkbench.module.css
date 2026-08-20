@@ -1103,6 +1103,7 @@
    * 必须与 shell 使用同一 keyboard 上移合同：height 保持 layout 全屏、
    * top = -keyboardShift，把 pane 工具条/终端/extra keys 一起平移。
    * 禁止再用 --mobile-shell-offset-top（vv.offsetTop 在多数键盘场景为 0，无法让出键盘）。
+   * 三行：工具条 / 错误与钩子修复提示 / 终端表面。空提示行高度为 0。
    */
   position: fixed;
   top: calc(0px - var(--mobile-keyboard-shift, 0px));
@@ -1117,7 +1118,7 @@
   padding: calc(env(safe-area-inset-top) + var(--space-2)) var(--space-2)
     calc(env(safe-area-inset-bottom) + var(--space-2));
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   align-content: stretch;
   gap: var(--space-2);
   background: var(--bg);
@@ -1352,6 +1353,50 @@
 .mobileTerminalFab[data-dirty='true']:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+.mobileTerminalAlerts {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.mobileHookRepairCard {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+
+.mobileHookRepairHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.mobileHookRepairOutput {
+  margin: 0;
+  max-height: calc(var(--space-24) * 3);
+  overflow: auto;
+  padding: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  color: var(--fg);
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+}
+
+.mobileHookRepairActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .mobileTerminalExtraKeys {

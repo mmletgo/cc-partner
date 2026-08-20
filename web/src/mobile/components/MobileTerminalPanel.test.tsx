@@ -62,6 +62,8 @@ const terminalEvents = vi.hoisted(() => ({
   instances: [] as MockTerminalInstance[],
   commitCalls: [] as Array<{ worktreeId: string; message: string | null; clientOperationId: string }>,
   commitResult: null as unknown,
+  repairCalls: [] as Array<{ worktreeId: string; hookFailure: unknown }>,
+  repairResult: null as unknown,
 }));
 
 vi.mock('@xterm/xterm', () => {
@@ -154,6 +156,17 @@ vi.mock('@/api/workbenchHttp', () => ({
         );
       }),
       getMutationOperation: vi.fn(() => Promise.resolve(null)),
+      repairHookFailure: vi.fn((worktreeId: string, hookFailure: unknown) => {
+        terminalEvents.repairCalls.push({ worktreeId, hookFailure });
+        return Promise.resolve(
+          terminalEvents.repairResult ?? {
+            agentSessionId: 'agent-1',
+            terminalSessionId: 'term-repair',
+            worktreeId,
+            projectId: 'p1',
+          },
+        );
+      }),
     },
   },
   httpWorkbenchTransport: {
@@ -346,6 +359,8 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.scrollToLineCalls.length = 0;
     terminalEvents.commitCalls.length = 0;
     terminalEvents.commitResult = null;
+    terminalEvents.repairCalls.length = 0;
+    terminalEvents.repairResult = null;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
     global.ResizeObserver = class {
       observe(): void {}
@@ -950,6 +965,8 @@ describe('MobileTerminalPanel — commit FAB', () => {
     terminalEvents.replayPromise = null;
     terminalEvents.commitCalls.length = 0;
     terminalEvents.commitResult = null;
+    terminalEvents.repairCalls.length = 0;
+    terminalEvents.repairResult = null;
     global.ResizeObserver = class {
       observe(): void {}
       unobserve(): void {}
@@ -1075,5 +1092,91 @@ describe('MobileTerminalPanel — commit FAB', () => {
     await waitFor(() => {
       expect(onWorktreeChange).toHaveBeenCalledTimes(1);
     });
+    expect(screen.getByRole('status').textContent).toContain(
+      'workbench:mobile.gitPanel.commitSucceeded',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   终端 FAB 的 failedHook 必须露出「让 AI 修复」，与桌面 Git 历史一致。
+   *
+   * Code Logic（这个测试做什么）:
+   *   commit 返回 failedHook；点击修复按钮断言 repairHookFailure。
+   */
+  test('failedHook commit FAB shows repair card and starts AI repair', async () => {
+    const hookFailure = {
+      stage: 'preCommit' as const,
+      stdout: 'lint failed',
+      stderr: 'trailing whitespace',
+      exitCode: 1,
+    };
+    terminalEvents.commitResult = {
+      kind: 'failedHook',
+      clientOperationId: 'op-hook',
+      hookFailure,
+    };
+    const onFocusRepairSession = vi.fn(async () => undefined);
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onFocusRepairSession={onFocusRepairSession}
+        />
+      </BuffersProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
+    await screen.findByTestId('mobile-hook-repair-card');
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.hookRepair.runButton' }));
+
+    await waitFor(() => {
+      expect(terminalEvents.repairCalls).toEqual([{ worktreeId: 'wt-1', hookFailure }]);
+      expect(onFocusRepairSession).toHaveBeenCalledWith('term-repair');
+    });
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   全屏时用户仍要看到 commit 失败，不能把错误藏在已隐藏的外围 chrome 里。
+   *
+   * Code Logic（这个测试做什么）:
+   *   进入全屏后点 Commit，unknown 文案仍在 document 中。
+   */
+  test('keeps commit errors visible in fullscreen', async () => {
+    terminalEvents.commitResult = {
+      kind: 'unknown',
+      clientOperationId: 'op-terminal-1',
+      transportClass: 'timeout',
+    };
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.enterFullscreen' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
+
+    await screen.findByText('workbench:errors.mutationUnknown');
+    expect(document.querySelector('[data-fullscreen="true"]')).not.toBeNull();
   });
 });

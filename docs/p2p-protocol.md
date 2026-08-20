@@ -391,6 +391,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/worktrees/merge` | `routes/workbench.rs` | same as `/api/workbench/worktrees/merge` (feature merge or main collect-merge) | requires-idempotency-key | same ledger/envelope |
 | POST | `/api/mobile/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | requires-idempotency-key | same ledger/envelope |
 | POST | `/api/mobile/workbench/worktrees/mutation-operation` | `routes/workbench.rs` | none; reads durable ledger by `clientOperationId` | read-only | mobile ledger query for unknown envelope reconciliation |
+| POST | `/api/mobile/workbench/worktrees/repair-hook-failure` | `routes/workbench.rs` | starts a visible Claude agent to repair hook failure | no-transport-retry | mobile remote-aware wrapper around `repair_worktree_hook_failure_for_state`; capability `workbench.hook-repair.v1`; body camelCase `{worktreeId,hookFailure}` |
 | POST | `/api/mobile/workbench/git/commits` | `routes/workbench.rs` | none; `git log` read | read-only | — |
 | POST | `/api/mobile/workbench/files/list-dir` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/info` | `routes/workbench.rs` | none | read-only | — |

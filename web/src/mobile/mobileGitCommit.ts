@@ -64,7 +64,7 @@ async function reconcileMobileGitCommitUnknown(
   isCurrent: () => boolean,
   git: MobileGitCommitGitClient,
 ): Promise<MobileGitCommitOutcome> {
-  const ledger = await git.getMutationOperation(clientOperationId);
+  const ledger = await git.getMutationOperation(clientOperationId).catch(() => null);
   if (!isCurrent()) return { type: 'stale' };
   if (!ledger) return { type: 'unknown' };
   const confirmed = reconcileWorkbenchMutation(ledger.intent, ledger, {});

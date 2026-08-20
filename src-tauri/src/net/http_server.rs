@@ -1413,6 +1413,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::mobile_get_mutation_operation),
         )
         .route(
+            "/api/mobile/workbench/worktrees/repair-hook-failure",
+            post(workbench::mobile_repair_hook_failure),
+        )
+        .route(
             "/api/mobile/workbench/git/commits",
             post(workbench::mobile_list_git_commits),
         )

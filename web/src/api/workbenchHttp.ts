@@ -28,6 +28,8 @@ import type {
   WorkbenchSession,
   WorkbenchSessionReplay,
   WorkbenchWorktree,
+  WorkbenchHookFailure,
+  WorkbenchRepairHookFailureDto,
   Prompt,
 } from '@/lib/types';
 import type { Decoder } from '@/lib/runtimeSchema';
@@ -55,6 +57,7 @@ import {
   workbenchRemoveResultDecoder,
   workbenchActiveBridgeDevicesDecoder,
   workbenchActiveMappedProjectsDecoder,
+  workbenchRepairHookFailureDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
 import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
@@ -1355,5 +1358,25 @@ export const workbenchHttp = {
         },
       );
     },
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   移动端 failedHook 后「让 AI 修复」必须走与桌面相同的 owning-device 修复入口。
+     *
+     * Code Logic（这个函数做什么）:
+     *   longMutation POST repair-hook-failure；解码 agent/terminal session id。
+     */
+    repairHookFailure: (
+      worktreeId: string,
+      hookFailure: WorkbenchHookFailure,
+      policy?: HttpRequestPolicy,
+    ): Promise<WorkbenchRepairHookFailureDto> =>
+      postJson<WorkbenchRepairHookFailureDto>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/repair-hook-failure`,
+        { worktreeId, hookFailure },
+        {
+          policy: policy ?? { kind: 'longMutation' },
+          decoder: workbenchRepairHookFailureDecoder,
+        },
+      ),
   },
 } as const;

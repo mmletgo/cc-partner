@@ -234,4 +234,31 @@ describe('executeMobileGitCommit', () => {
 
     expect(outcome).toEqual({ type: 'failedHook', hookFailure });
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   ledger 查询失败不能当成可盲重放的新 mutation，只能保持 unknown。
+   *
+   * Code Logic（这个测试做什么）:
+   *   getMutationOperation reject → unknown，且不再 commit。
+   */
+  test('ledger query failure stays unknown', async () => {
+    const git = createGitClient({
+      commit: vi.fn(),
+      getMutationOperation: vi.fn(async () => {
+        throw new Error('timeout');
+      }),
+    });
+
+    const outcome = await executeMobileGitCommit({
+      worktreeId: 'wt-1',
+      clientOperationId: 'op-1',
+      reconcileOnly: true,
+      isCurrent: () => true,
+      git,
+    });
+
+    expect(git.commit).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ type: 'unknown' });
+  });
 });

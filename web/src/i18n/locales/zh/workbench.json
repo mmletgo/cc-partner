@@ -300,6 +300,7 @@
       "canPushAllowed": "可推送",
       "canPushBlocked": "不可推送",
       "committing": "提交中",
+      "commitSucceeded": "提交成功",
       "pushing": "推送中",
       "merging": "合并中",
       "commitMeta": "{{author}} · {{date}}",

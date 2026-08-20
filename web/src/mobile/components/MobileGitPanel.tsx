@@ -34,7 +34,10 @@ import {
   type MobileGitPanelAction,
   type MobileMutationPhase,
 } from '../mobilePanelState';
+import { executeMobileGitCommit } from '../mobileGitCommit';
+import type { MobileHookRepair } from '../mobileHookRepair';
 import { getMobileWorktreeStatusKind } from '../mobileWorkbenchState';
+import { MobileHookRepairCard } from './MobileHookRepairCard';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobileGitPanelProps {
@@ -47,6 +50,8 @@ export interface MobileGitPanelProps {
     skipFileContextConfirm?: boolean;
     expectedProjectId?: string;
   }) => Promise<void> | void;
+  /** 钩子 AI 修复启动后聚焦新终端并切到 terminal 面板。 */
+  onFocusRepairSession?: (sessionId: string) => Promise<void> | void;
 }
 
 /**
@@ -92,6 +97,7 @@ export function MobileGitPanel({
   onWorktreeChange,
   onMergeWorktree,
   onRefreshWorktrees,
+  onFocusRepairSession,
 }: MobileGitPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const [commits, setCommits] = useState<WorkbenchGitCommit[]>([]);
@@ -99,6 +105,8 @@ export function MobileGitPanel({
   const [actionBusy, setActionBusy] = useState<'commit' | 'push' | 'merge' | null>(null);
   const [mutationPhase, setMutationPhase] = useState<MobileMutationPhase>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [hookRepair, setHookRepair] = useState<MobileHookRepair | null>(null);
   const requestIdRef = useRef<number>(0);
   const currentContextRef = useRef<MobileGitActionContext | null>(null);
   const commitOperationIdRef = useRef<string | null>(null);
@@ -125,6 +133,8 @@ export function MobileGitPanel({
       : null;
     setMutationPhase('idle');
     setError(null);
+    setSuccess(null);
+    setHookRepair(null);
     setActionBusy(null);
     commitOperationIdRef.current = null;
     pushOperationIdRef.current = null;
@@ -298,6 +308,7 @@ export function MobileGitPanel({
     const actionContext = { projectId: project.id, worktreeId: worktree.id };
     setActionBusy(kind);
     setError(null);
+    setSuccess(null);
     try {
       const confirmed = await reconcileUnknownMutation(clientOperationId, actionContext);
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
@@ -349,71 +360,57 @@ export function MobileGitPanel({
     setActionBusy('commit');
     setMutationPhase('busy');
     setError(null);
+    setSuccess(null);
+    setHookRepair(null);
     try {
-      // unknown 相位只对账，不二次执行。
-      if (mutationPhase === 'unknown') {
-        const confirmed = await reconcileUnknownMutation(clientOperationId, actionContext);
-        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
-        const phase = resolveMobileMutationPhase('unknown', confirmed);
-        if (phase === 'confirmedSucceeded') {
-          commitOperationIdRef.current = null;
-          unknownKindRef.current = null;
-          setMutationPhase('idle');
-          setError(null);
-          await refreshAfterAction('commit', actionContext);
-        } else if (phase === 'confirmedFailed') {
-          commitOperationIdRef.current = null;
-          unknownKindRef.current = null;
-          setMutationPhase('idle');
-          setError(t('workbench:errors.mutationFailed'));
-        } else {
-          unknownKindRef.current = 'commit';
-          setMutationPhase('unknown');
-          setError(t('workbench:errors.mutationUnknown'));
-        }
-        return;
-      }
-
-      const envelope = await workbenchHttp.git.commit({
+      const outcome = await executeMobileGitCommit({
         worktreeId: worktree.id,
-        message: null,
         clientOperationId,
+        reconcileOnly: mutationPhase === 'unknown',
+        isCurrent: () =>
+          isMobileGitActionResponseCurrent(actionContext, currentContextRef.current),
+        git: workbenchHttp.git,
       });
-      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
-
-      if (isMutationSucceeded(envelope)) {
+      if (outcome.type === 'stale') return;
+      if (outcome.type === 'succeeded') {
         commitOperationIdRef.current = null;
         unknownKindRef.current = null;
         setMutationPhase('idle');
-        onWorktreeChange?.(envelope.value);
+        setSuccess(t('workbench:mobile.gitPanel.commitSucceeded'));
+        onWorktreeChange?.(outcome.worktree);
         await refreshAfterAction('commit', actionContext);
         return;
       }
-
-      if (isMutationUnknown(envelope)) {
-        const confirmed = await reconcileUnknownMutation(
-          envelope.clientOperationId,
-          actionContext,
-        );
-        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
-        const phase = resolveMobileMutationPhase('unknown', confirmed);
-        if (phase === 'confirmedSucceeded') {
-          commitOperationIdRef.current = null;
-          unknownKindRef.current = null;
-          setMutationPhase('idle');
-          setError(null);
-          await refreshAfterAction('commit', actionContext);
-        } else if (phase === 'confirmedFailed') {
-          commitOperationIdRef.current = null;
-          unknownKindRef.current = null;
-          setMutationPhase('idle');
-          setError(t('workbench:errors.mutationFailed'));
-        } else {
-          unknownKindRef.current = 'commit';
-          setMutationPhase('unknown');
-          setError(t('workbench:errors.mutationUnknown'));
-        }
+      if (outcome.type === 'succeededRefresh') {
+        commitOperationIdRef.current = null;
+        unknownKindRef.current = null;
+        setMutationPhase('idle');
+        setError(null);
+        setSuccess(t('workbench:mobile.gitPanel.commitSucceeded'));
+        await refreshAfterAction('commit', actionContext);
+        return;
       }
+      if (outcome.type === 'failedHook') {
+        commitOperationIdRef.current = null;
+        unknownKindRef.current = null;
+        setMutationPhase('idle');
+        setHookRepair({
+          kind: 'commit',
+          hookFailure: outcome.hookFailure,
+          clientOperationId,
+        });
+        return;
+      }
+      if (outcome.type === 'failed') {
+        commitOperationIdRef.current = null;
+        unknownKindRef.current = null;
+        setMutationPhase('idle');
+        setError(t('workbench:errors.mutationFailed'));
+        return;
+      }
+      unknownKindRef.current = 'commit';
+      setMutationPhase('unknown');
+      setError(t('workbench:errors.mutationUnknown'));
     } catch (reason) {
       if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
       setMutationPhase('idle');
@@ -430,11 +427,64 @@ export function MobileGitPanel({
     mutationPhase,
     onWorktreeChange,
     project,
-    reconcileUnknownMutation,
     refreshAfterAction,
     t,
     worktree,
   ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   failedHook 后用户点「让 AI 修复」时，在 owning device 启动可见 Claude agent。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调 workbenchHttp.git.repairHookFailure；成功后写入 terminalSessionId 并聚焦新终端。
+   */
+  const handleRepairHookFailure = useCallback(async (): Promise<void> => {
+    if (busy || !project || !worktree || !hookRepair) return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    setActionBusy('commit');
+    setError(null);
+    setSuccess(null);
+    try {
+      const repair = await workbenchHttp.git.repairHookFailure(
+        worktree.id,
+        hookRepair.hookFailure,
+      );
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      setHookRepair({ ...hookRepair, terminalSessionId: repair.terminalSessionId });
+      await onFocusRepairSession?.(repair.terminalSessionId);
+    } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      setError(`${t('workbench:errors.commitWorktree')}: ${getErrorMessage(reason)}`);
+    } finally {
+      if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        setActionBusy(null);
+      }
+    }
+  }, [busy, hookRepair, onFocusRepairSession, project, t, worktree]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户决定不修也不重试时，必须能清掉 stale failedHook 卡片。
+   *
+   * Code Logic（这个函数做什么）:
+   *   本地清空 hookRepair，不发起 IPC。
+   */
+  const handleDismissHookFailure = useCallback((): void => {
+    setHookRepair(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   AI 修复完成后用户手动重试 commit，必须 mint 新 operation id。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清空 hookRepair 后走 handleCommit。
+   */
+  const handleRetryAfterRepair = useCallback((): void => {
+    setHookRepair(null);
+    void handleCommit();
+  }, [handleCommit]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -457,6 +507,7 @@ export function MobileGitPanel({
     setActionBusy('push');
     setMutationPhase('busy');
     setError(null);
+    setSuccess(null);
     try {
       if (mutationPhase === 'unknown') {
         const confirmed = await reconcileUnknownMutation(clientOperationId, actionContext);
@@ -558,6 +609,7 @@ export function MobileGitPanel({
     setActionBusy('merge');
     setMutationPhase('busy');
     setError(null);
+    setSuccess(null);
     try {
       if (mutationPhase === 'unknown' && mergeOperationIdRef.current) {
         const confirmed = await reconcileUnknownMutation(
@@ -659,6 +711,11 @@ export function MobileGitPanel({
           {t('workbench:mobile.gitPanel.reconciling')}
         </StatusMessage>
       ) : null}
+      {success ? (
+        <StatusMessage tone="success" className={styles.panelState}>
+          {success}
+        </StatusMessage>
+      ) : null}
       {error ? (
         <StatusMessage
           tone="danger"
@@ -679,6 +736,15 @@ export function MobileGitPanel({
           <span>{t('workbench:mobile.projectPanel.error')}</span>
           <span>{error}</span>
         </StatusMessage>
+      ) : null}
+      {hookRepair ? (
+        <MobileHookRepairCard
+          hookRepair={hookRepair}
+          busy={actionBusy === 'commit' || busy}
+          onRepair={() => void handleRepairHookFailure()}
+          onRetry={handleRetryAfterRepair}
+          onDismiss={handleDismissHookFailure}
+        />
       ) : null}
 
       <section className={styles.mobileStatusCard} aria-label={t('workbench:mobile.gitPanel.statusAriaLabel')}>

@@ -36,11 +36,11 @@ use crate::commands::workbench::{
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
     owner_local_preflight_for_state, owner_local_safe_attach_for_state,
     paste_workbench_session_image_for_state, push_workbench_worktree_for_state,
-    remove_workbench_worktree_for_state, replay_workbench_session_for_state,
-    resize_workbench_session_for_state, resume_agent_session_for_state,
-    save_workbench_text_file_for_state, search_agent_sessions_for_state,
-    split_workbench_pane_for_state, switch_workbench_pane_for_state, zoom_workbench_pane_for_state,
-    WorkbenchMergeResultDto,
+    remove_workbench_worktree_for_state, repair_worktree_hook_failure_for_state,
+    replay_workbench_session_for_state, resize_workbench_session_for_state,
+    resume_agent_session_for_state, save_workbench_text_file_for_state,
+    search_agent_sessions_for_state, split_workbench_pane_for_state,
+    switch_workbench_pane_for_state, zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
 use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
@@ -1862,6 +1862,24 @@ pub async fn mobile_commit_worktree(
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.commit"))?;
     Ok(Json(envelope))
+}
+
+/// 手机端为本机或远端 worktree 启动钩子 AI 修复。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移动端 Git 面板与终端 Commit FAB 在 failedHook 后需要与桌面相同的「让 AI 修复」入口。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 worktreeId + hookFailure，委托 commands 层 remote-aware repair helper。
+pub async fn mobile_repair_hook_failure(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteRepairHookFailureReq>,
+) -> P2pResult<Json<crate::workbench::hook_repair::RepairHookFailureDto>> {
+    let dto = repair_worktree_hook_failure_for_state(&state, req.worktree_id, req.hook_failure)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.repair_hook_failure"))?;
+    Ok(Json(dto))
 }
 
 /// 手机端推送本机或远端 worktree。

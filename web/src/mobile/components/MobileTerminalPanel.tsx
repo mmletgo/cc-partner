@@ -9,6 +9,7 @@ import {
   httpWorkbenchTransport,
   workbenchHttp,
 } from '@/api/workbenchHttp';
+import { StatusMessage } from '@/components/primitives';
 import {
   useWorkbenchTerminalBufferStore,
   useWorkbenchTerminalBuffers,
@@ -88,6 +89,8 @@ import {
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 import { MobileFavoriteQuickInput } from './MobileFavoriteQuickInput';
 import { MobilePromptOptimizerSheet } from './MobilePromptOptimizerSheet';
+import { MobileHookRepairCard } from './MobileHookRepairCard';
+import type { MobileHookRepair } from '../mobileHookRepair';
 import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './MobileWorktreeTabs';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
 
@@ -116,6 +119,8 @@ export interface MobileTerminalPanelProps {
     skipFileContextConfirm?: boolean;
     expectedProjectId?: string;
   }) => Promise<void> | void;
+  /** 钩子 AI 修复启动后刷新并聚焦新终端。 */
+  onFocusRepairSession?: (sessionId: string) => Promise<void> | void;
 }
 
 /**
@@ -212,12 +217,14 @@ export function MobileTerminalPanel({
   onRefreshSessions,
   onWorktreeChange,
   onRefreshWorktrees,
+  onFocusRepairSession,
 }: MobileTerminalPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const { resetBuffer, removeBuffer } = useWorkbenchTerminalBuffers();
   const store = useWorkbenchTerminalBufferStore();
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
+  const [commitSuccess, setCommitSuccess] = useState<string | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
   const [inputStreamState, setInputStreamState] = useState<MobileTerminalInputStreamState>({
     status: 'connecting',
@@ -226,6 +233,7 @@ export function MobileTerminalPanel({
   const [favoriteSheetOpen, setFavoriteSheetOpen] = useState<boolean>(false);
   const [promptOptimizerSheetOpen, setPromptOptimizerSheetOpen] = useState<boolean>(false);
   const [commitPhase, setCommitPhase] = useState<MobileMutationPhase>('idle');
+  const [hookRepair, setHookRepair] = useState<MobileHookRepair | null>(null);
   const commitOperationIdRef = useRef<string | null>(null);
   const commitContextRef = useRef<MobileGitActionContext | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -310,6 +318,8 @@ export function MobileTerminalPanel({
       ? { projectId: project.id, worktreeId: worktree.id }
       : null;
     setCommitPhase('idle');
+    setHookRepair(null);
+    setCommitSuccess(null);
     commitOperationIdRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 id 驱动重置
   }, [project?.id, worktree?.id]);
@@ -421,6 +431,8 @@ export function MobileTerminalPanel({
     setActionBusy('commit');
     setCommitPhase('busy');
     setPanelError(null);
+    setCommitSuccess(null);
+    setHookRepair(null);
     try {
       const outcome = await executeMobileGitCommit({
         worktreeId: worktree.id,
@@ -434,6 +446,7 @@ export function MobileTerminalPanel({
       if (outcome.type === 'succeeded') {
         commitOperationIdRef.current = null;
         setCommitPhase('idle');
+        setCommitSuccess(t('workbench:mobile.gitPanel.commitSucceeded'));
         onWorktreeChange?.(outcome.worktree);
         await onRefreshWorktrees?.();
         return;
@@ -441,19 +454,18 @@ export function MobileTerminalPanel({
       if (outcome.type === 'succeededRefresh') {
         commitOperationIdRef.current = null;
         setCommitPhase('idle');
+        setCommitSuccess(t('workbench:mobile.gitPanel.commitSucceeded'));
         await onRefreshWorktrees?.();
         return;
       }
       if (outcome.type === 'failedHook') {
         commitOperationIdRef.current = null;
         setCommitPhase('idle');
-        const detail =
-          outcome.hookFailure.stderr.trim() || outcome.hookFailure.stdout.trim();
-        setPanelError(
-          detail
-            ? `${t('workbench:errors.commitWorktree')}: ${detail}`
-            : t('workbench:errors.commitWorktree'),
-        );
+        setHookRepair({
+          kind: 'commit',
+          hookFailure: outcome.hookFailure,
+          clientOperationId,
+        });
         return;
       }
       if (outcome.type === 'failed') {
@@ -488,6 +500,65 @@ export function MobileTerminalPanel({
     t,
     worktree,
   ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   终端 FAB 在 failedHook 后需要与桌面相同的「让 AI 修复」入口。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调 repairHookFailure；成功后写入 terminalSessionId 并聚焦新终端。
+   */
+  const handleRepairHookFailure = useCallback(async (): Promise<void> => {
+    if (busy || !project || !worktree || !hookRepair) return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    setActionBusy('commit');
+    setPanelError(null);
+    setCommitSuccess(null);
+    try {
+      const repair = await workbenchHttp.git.repairHookFailure(
+        worktree.id,
+        hookRepair.hookFailure,
+      );
+      if (!isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) return;
+      setHookRepair({ ...hookRepair, terminalSessionId: repair.terminalSessionId });
+      await onFocusRepairSession?.(repair.terminalSessionId);
+    } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) return;
+      setPanelError(
+        `${t('workbench:errors.commitWorktree')}: ${getErrorMessage(
+          reason,
+          t('workbench:errors.commitWorktree'),
+        )}`,
+      );
+    } finally {
+      if (isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) {
+        setActionBusy(null);
+      }
+    }
+  }, [busy, hookRepair, onFocusRepairSession, project, t, worktree]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户放弃当前钩子失败上下文时，不应再挡在终端上。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清空 hookRepair。
+   */
+  const handleDismissHookFailure = useCallback((): void => {
+    setHookRepair(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   AI 修复完成后用户从终端 FAB 重试 commit。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清空 hookRepair 后再次走 handleCommitWorktree。
+   */
+  const handleRetryAfterRepair = useCallback((): void => {
+    setHookRepair(null);
+    void handleCommitWorktree();
+  }, [handleCommitWorktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1643,12 +1714,28 @@ export function MobileTerminalPanel({
       {!isTerminalFullscreen && busy ? (
         <p className={styles.panelState}>{t('workbench:loading')}</p>
       ) : null}
-      {!isTerminalFullscreen && panelError ? (
-        <p className={styles.panelError}>
-          <span>{t('workbench:mobile.projectPanel.error')}</span>
-          <span>{panelError}</span>
-        </p>
-      ) : null}
+      <div className={styles.mobileTerminalAlerts}>
+        {commitSuccess ? (
+          <StatusMessage tone="success" className={styles.panelState}>
+            {commitSuccess}
+          </StatusMessage>
+        ) : null}
+        {panelError ? (
+          <p className={styles.panelError} role="alert">
+            <span>{t('workbench:mobile.projectPanel.error')}</span>
+            <span>{panelError}</span>
+          </p>
+        ) : null}
+        {hookRepair ? (
+          <MobileHookRepairCard
+            hookRepair={hookRepair}
+            busy={commitBusy || busy}
+            onRepair={() => void handleRepairHookFailure()}
+            onRetry={handleRetryAfterRepair}
+            onDismiss={handleDismissHookFailure}
+          />
+        ) : null}
+      </div>
 
       {terminalChrome.terminalSurface ? (
         <div
