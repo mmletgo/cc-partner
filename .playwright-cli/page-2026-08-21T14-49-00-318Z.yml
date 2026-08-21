@@ -1,0 +1,46 @@
+- generic [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - generic [ref=f2e4]:
+      - img "cc-partner" [ref=f2e5]
+      - strong [ref=f2e6]: cc-partner
+    - generic [ref=f2e7]: PUBLIC REPOSITORY · LOCAL-FIRST
+  - generic [ref=f2e10]:
+    - generic [ref=f2e11]:
+      - generic [ref=f2e12]: MULTI-AGENT PROJECT WORKBENCH
+      - heading "把 worktree、终端、文件和 Git 放在同一个工程现场" [level=1] [ref=f2e13]
+      - paragraph [ref=f2e14]: cc-partner 不替模型写代码。它负责管理 CLI Agent 周围那些仍然需要人维护的项目上下文、并行现场和交付证据。
+      - generic [ref=f2e15]:
+        - generic [ref=f2e16]:
+          - generic [ref=f2e17]: WORKTREE
+          - generic [ref=f2e18]: 每个 Agent 独立目录与分支；创建、状态、终端和合并集中管理。
+        - generic [ref=f2e19]:
+          - generic [ref=f2e20]: TAKEOVER
+          - generic [ref=f2e21]: 桌面、远端设备和手机进入同一个项目上下文。
+        - generic [ref=f2e22]:
+          - generic [ref=f2e23]: EVIDENCE
+          - generic [ref=f2e24]: 文件、Git、浏览器 smoke 与验证结果留在任务旁边。
+      - generic [ref=f2e25]:
+        - strong [ref=f2e26]: GitHub
+        - text: · github.com/mmletgo/cc-partner
+    - generic [ref=f2e27]:
+      - img "cc-partner Workbench 真实界面" [ref=f2e29]
+      - generic [ref=f2e30]: 真实产品界面 · 演示数据
+      - generic [ref=f2e31]:
+        - generic [ref=f2e32]:
+          - code [ref=f2e33]: "01"
+          - generic [ref=f2e34]: Project → Worktree
+        - generic [ref=f2e35]:
+          - code [ref=f2e36]: "02"
+          - generic [ref=f2e37]: Window → Pane
+        - generic [ref=f2e38]:
+          - code [ref=f2e39]: "03"
+          - generic [ref=f2e40]: Files + Git
+        - generic [ref=f2e41]:
+          - code [ref=f2e42]: "04"
+          - generic [ref=f2e43]: Browser + Evidence
+      - img "Mobile Workbench 真实界面" [ref=f2e45]
+  - generic [ref=f2e46]:
+    - generic [ref=f2e47]: macOS · Windows · Ubuntu / Linux
+    - generic [ref=f2e48]:
+      - strong [ref=f2e49]: 边界：
+      - text: LAN API 无身份校验，仅在可信局域网使用

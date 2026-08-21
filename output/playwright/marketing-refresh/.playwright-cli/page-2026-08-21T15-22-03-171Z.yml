@@ -1,0 +1,75 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 06 · CONFIGURATION DRIFT
+  - heading [level=1] [ref=e6]:
+    - text: 每个 Agent 一套规则，提示词和资产越用越
+    - emphasis [ref=e7]: 散
+  - generic [ref=e8]:
+    - generic [ref=e9]: "06"
+    - generic [ref=e10]:
+      - text: CLI CODING PAIN
+      - generic [ref=e11]: 项目指令复制多份，Skill / Command / MCP 放哪也要反复确认
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: AGENT HUB
+      - heading "统一管理 7 类 CLI Agent" [level=2] [ref=e15]
+      - paragraph [ref=e16]: 用户级、远端设备与项目级指令，按公共 / 适配 / 独有三槽组织。
+      - generic [ref=e17]:
+        - generic [ref=e18]: CLAUDE
+        - generic [ref=e19]: CODEX
+        - generic [ref=e20]: OPENCODE
+        - generic [ref=e21]: GEMINI
+        - generic [ref=e22]: GROK
+        - generic [ref=e23]: CURSOR
+        - generic [ref=e24]: PI
+      - generic [ref=e25]:
+        - generic [ref=e26]:
+          - code [ref=e27]: PUBLIC
+          - generic [ref=e28]: 团队公共约定
+          - generic [ref=e29]: SYNCED
+        - generic [ref=e30]:
+          - code [ref=e31]: ADAPTER
+          - generic [ref=e32]: Agent 适配说明
+          - generic [ref=e33]: READY
+        - generic [ref=e34]:
+          - code [ref=e35]: EXCLUSIVE
+          - generic [ref=e36]: 工具独有规则
+          - generic [ref=e37]: LOCAL
+      - generic [ref=e38]:
+        - text: PORTABLE ASSETS
+        - generic [ref=e39]:
+          - generic [ref=e40]: SKILL
+          - generic [ref=e41]: COMMAND
+          - generic [ref=e42]: AGENT
+          - generic [ref=e43]: MCP
+    - generic [ref=e44]:
+      - generic [ref=e45]: PROMPT LIBRARY
+      - heading "常用 Prompt 单独沉淀" [level=2] [ref=e46]
+      - paragraph [ref=e47]: 不再从聊天记录里翻找，常用内容有自己的可复用历史。
+      - generic [ref=e48]:
+        - generic [ref=e49]: 搜索标题或正文…
+        - generic [ref=e50]: ⌘ K
+      - generic [ref=e51]:
+        - generic [ref=e52]: REVIEW
+        - generic [ref=e53]: TEST
+        - generic [ref=e54]: REFACTOR
+      - generic [ref=e55]:
+        - text: 逐行审查 PR diff
+        - paragraph [ref=e56]: 按 Bug / 性能 / 风格分组，只输出可执行修改建议。
+        - generic [ref=e57]:
+          - generic [ref=e58]: COPY
+          - generic [ref=e59]: HISTORY
+          - generic [ref=e60]: RESTORE
+      - generic [ref=e61]:
+        - text: 为函数生成边界测试
+        - paragraph [ref=e62]: 保留标题、正文、标签与版本历史，可跨设备同步。
+        - generic [ref=e63]:
+          - generic [ref=e64]: TAG
+          - generic [ref=e65]: SEARCH
+          - generic [ref=e66]: SYNC
+    - generic [ref=e67]:
+      - strong [ref=e68]: 两套能力分开：
+      - text: Agent Hub 管“工具该遵守什么、有哪些资产”；Prompt 库管“这段常用提示词以后怎么复用”。
+  - generic [ref=e69]:
+    - generic [ref=e70]: 功能示意 · Agent Hub + Prompt Library
+    - generic [ref=e71]: 07 / 09

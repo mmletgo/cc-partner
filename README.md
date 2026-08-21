@@ -9,7 +9,8 @@
 <p align="center">
   <a href="#下载安装">下载安装</a> ·
   <a href="#为什么做-cc-partner">为什么需要它</a> ·
-  <a href="docs/media/cc-partner/cc-partner-tour.mp4">观看 14 秒有声短片</a>
+  <a href="#主要功能界面">查看真实界面</a> ·
+  <a href="#12-秒看懂-cc-partner">观看 12 秒无声演示</a>
 </p>
 
 cc-partner 是一款 **local-first 多设备项目工作台**。它不替模型写代码，而是把本机与局域网远端的项目、worktree、终端、文件、Git、浏览器预览和自动化任务放进同一条可见流程：**Agent 在推进，你随时知道它做到哪、卡在哪、接下来怎么交付。**
@@ -41,15 +42,44 @@ AI 已经能写很多代码，但真实工程里的时间仍然消耗在“代�
 
 除此之外，cc-partner 还把局域网文件传输、区域截图、Prompt 管理与优化、速记本、使用统计和健康提醒放在工作台周围。它们不是一堆孤立工具，而是为“让任务继续推进”服务。
 
-## 14 秒看懂工作流
+## 主要功能界面
 
-点击下方动图可打开带 BGM 与音效的高清 MP4：
+### Workbench：把 Agent 的真实工程过程放在一张桌面上
+
+项目、worktree、多个可见终端、当前会话状态与 Git 提交树同时在场。你不必再从窗口标题猜“哪个 Agent 在改哪个分支”，也不必等任务结束后才发现它卡在确认、报错或验证环节。
 
 <p align="center">
-  <a href="docs/media/cc-partner/cc-partner-tour.mp4">
-    <img src="docs/media/cc-partner/cc-partner-tour.gif" alt="cc-partner 产品工作流短片：本地工作台、项目上下文与手机接手" width="720" />
-  </a>
+  <img src="docs/media/cc-partner/cc-partner-workbench.png" alt="cc-partner Workbench：项目、worktree、可见终端、会话状态和 Git 提交树" width="100%" />
 </p>
+
+### Mobile Workbench：离开电脑，也能接手同一个项目
+
+<table>
+  <tr>
+    <td width="34%" align="center">
+      <img src="docs/media/cc-partner/cc-partner-mobile-workbench.png" alt="cc-partner Mobile Workbench：在手机上查看终端、文件、Git 与自动化" width="330" />
+    </td>
+    <td width="66%">
+      <strong>手机不是“只看状态”的监控页，而是同一条工作流的移动入口：</strong>
+      <ul>
+        <li>进入项目与 worktree，查看并接手真实终端会话</li>
+        <li>浏览、编辑和保存项目文件，继续处理 Git 进度</li>
+        <li>查看 Attention 与自动化任务，处理需要人工决定的阻塞</li>
+        <li>通过本机代理继续管理局域网远端设备上的项目</li>
+      </ul>
+    </td>
+  </tr>
+</table>
+
+<sub>界面截图使用确定性的演示项目、演示路径与演示会话，不包含真实用户数据。</sub>
+
+## 12 秒看懂 cc-partner
+
+这是一段完全无声的产品短片：先看见上下文切换的痛点，再看 Workbench 如何把 worktree、终端与 Git 证据收进一条可见流程，最后从手机继续接手同一个项目。
+
+<!-- GITHUB_ATTACHMENT_URL -->
+
+如果当前客户端没有显示播放器，也可以直接[下载无声 MP4](docs/media/cc-partner/cc-partner-tour.mp4)。
 
 ## 适合这些场景
 

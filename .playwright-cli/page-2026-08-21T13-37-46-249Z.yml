@@ -1,0 +1,33 @@
+- generic [active] [ref=f2e1]:
+  - text: 演示数据
+  - generic [ref=f2e2]:
+    - generic [ref=f2e3]:
+      - generic [ref=f2e4]: cc-partner
+      - generic [ref=f2e5]: ×
+      - generic [ref=f2e6]: 三代 GLM
+    - generic [ref=f2e7]: ONE PRODUCT, THREE GENERATIONS · 03
+    - heading "模型一代代更新， 同一个项目持续长出来" [level=1] [ref=f2e8]: 模型一代代更新，同一个项目持续长出来
+    - generic [ref=f2e9]:
+      - generic [ref=f2e10]:
+        - generic [ref=f2e11]: "5.1"
+        - generic [ref=f2e12]:
+          - code [ref=f2e13]: 2026 / 04
+          - generic [ref=f2e14]: GLM-5.1
+          - paragraph [ref=f2e15]: 开始参与 cc-partner 的需求、实现与迭代过程。
+      - generic [ref=f2e16]:
+        - generic [ref=f2e17]: "5.2"
+        - generic [ref=f2e18]:
+          - code [ref=f2e19]: 2026 / 06
+          - generic [ref=f2e20]: GLM-5.2
+          - paragraph [ref=f2e21]: 继续在同一真实仓库里推进功能、调试与文档。
+      - generic [ref=f2e22]:
+        - generic [ref=f2e23]: "5.3"
+        - generic [ref=f2e24]:
+          - code [ref=f2e25]: 2026 / 08
+          - generic [ref=f2e26]: GLM-5.3
+          - paragraph [ref=f2e27]: 开发过程延续，产品也继续围绕真实使用场景收口。
+    - generic [ref=f2e28]: 这不是版本横评，也不虚构一对一模块分工。只是记录：三代模型都参与过同一个开源项目的开发过程。
+    - generic [ref=f2e29]:
+      - generic [ref=f2e30]: 来源：Z.ai Release Notes · 开发经历为个人记录
+      - generic [ref=f2e31]: 03 / 05
+  - text: ✓ ✓ ✓ ✓

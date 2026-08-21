@@ -1,0 +1,60 @@
+- article [ref=f3e2]:
+  - generic [ref=f3e3]:
+    - generic [ref=f3e4]:
+      - img "cc-partner" [ref=f3e5]
+      - strong [ref=f3e6]: cc-partner 项目介绍
+    - generic [ref=f3e7]: AI 生成 / 润色内容截图
+  - heading "本地优先的多 Agent 项目工作台" [level=1] [ref=f3e8]
+  - paragraph [ref=f3e9]: cc-partner 不是新的 Coding Agent，也不替你选择模型。它处理的是 Claude Code、Codex、OpenCode 这类 CLI Agent 写代码之外的工程现场：项目、分支、终端、文件、验证与交付。
+  - generic [ref=f3e10]:
+    - heading [level=2] [ref=f3e11]:
+      - code [ref=f3e12]: 01 / WHY
+      - text: 为什么做它
+    - generic [ref=f3e13]:
+      - paragraph [ref=f3e14]:
+        - text: 多个 Agent 并行时，比较稳妥的做法是给每个任务独立的
+        - strong [ref=f3e15]: worktree + branch
+        - text: ，避免它们共用一个目录、Git index 和当前分支。但 worktree 一多，人就要维护创建、切换、状态、终端对应、提交、合并和清理。
+      - paragraph [ref=f3e16]: cc-partner 把这些操作放进 Workbench：项目下直接创建和切换 worktree，每个 worktree 管理自己的 terminal window / pane；旁边同步显示 Git 状态、文件和提交树，完成后可以 AI commit、一键合并并清理源 worktree。它减少并行执行时互相踩现场，但修改同一段代码时仍可能出现合并冲突。
+  - generic [ref=f3e17]:
+    - heading [level=2] [ref=f3e18]:
+      - code [ref=f3e19]: 02 / FEATURES
+      - text: 目前主要能力
+    - list [ref=f3e21]:
+      - listitem [ref=f3e22]:
+        - strong [ref=f3e23]: Workbench：
+        - text: 统一管理本机或局域网远端项目、worktree、多个终端、文件、Git 和浏览器预览。
+      - listitem [ref=f3e24]:
+        - strong [ref=f3e25]: 终端恢复：
+        - text: 安装 tmux 后，重启可重新 attach 原 window / pane；断线后 replay，并可搜索历史 session。
+      - listitem [ref=f3e26]:
+        - strong [ref=f3e27]: Mobile Workbench：
+        - text: 用手机进入同一个项目，查看并接手终端、文件、Git、worktree 和自动化。
+      - listitem [ref=f3e28]:
+        - strong [ref=f3e29]: 浏览器验证：
+        - text: 执行受控 smoke，保存 screenshot、console 错误、断言和 evidence。
+      - listitem [ref=f3e30]:
+        - strong [ref=f3e31]: Orchestrator：
+        - text: 专用 worktree + 可见 Runner；失败进入 Rework，需要决定时进入 Human Review。
+  - generic [ref=f3e32]:
+    - heading [level=2] [ref=f3e33]:
+      - code [ref=f3e34]: 03 / BOUNDARIES
+      - text: 实际使用边界
+    - list [ref=f3e36]:
+      - listitem [ref=f3e37]: 项目是 local-first，没有公网中转；远端和手机能力走局域网。
+      - listitem [ref=f3e38]: LAN 业务 API 没有调用者身份校验，只应在可信局域网使用。
+      - listitem [ref=f3e39]: 完整 window / pane 和重启恢复依赖 tmux；无 tmux 时回退普通 PTY。Windows 使用默认 WSL 发行版内的 tmux。
+      - listitem [ref=f3e40]: 公开 macOS 包目前为 ad-hoc 签名且未公证，第一次打开需按 README 操作。
+  - generic [ref=f3e41]:
+    - heading [level=2] [ref=f3e42]:
+      - code [ref=f3e43]: 04 / TRY IT
+      - text: 下载与反馈
+    - generic [ref=f3e44]:
+      - paragraph [ref=f3e45]: 目前提供 macOS、Windows、Ubuntu / Linux 安装包。源码、构建方式、测试范围和未完成的真机验证都放在仓库文档里。
+      - paragraph [ref=f3e46]:
+        - strong [ref=f3e47]: GitHub：
+        - text: github.com/mmletgo/cc-partner
+      - paragraph [ref=f3e48]: 项目仍在持续迭代，欢迎试用、提 Issue，也欢迎直接指出设计或实现里不合理的地方。
+  - generic [ref=f3e49]:
+    - generic [ref=f3e50]: "截图内容与 `linuxdo-post.md` 项目介绍源稿一致"
+    - generic [ref=f3e51]: AI ASSISTED COPY DISCLOSURE

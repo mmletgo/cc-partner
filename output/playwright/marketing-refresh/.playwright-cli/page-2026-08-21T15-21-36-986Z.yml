@@ -1,0 +1,46 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 01 · PARALLEL ISOLATION
+  - heading [level=1] [ref=e6]:
+    - text: 多 Agent 并行的秘诀，也会变成
+    - emphasis [ref=e7]: 管理负担
+  - generic [ref=e8]:
+    - generic [ref=e9]: "01"
+    - generic [ref=e10]:
+      - text: WHY WORKTREE
+      - generic [ref=e11]: 每个 Agent 一个 worktree：开发现场隔开了，创建、状态、合并却都要人管
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: CC-PARTNER SOLUTION
+      - heading "把 worktree 管理 UI 化" [level=2] [ref=e15]
+      - paragraph [ref=e16]: 每个 Agent 使用独立目录与分支，减少并行执行时互相踩现场；Workbench 负责把它们组织回来。
+      - generic [ref=e17]:
+        - generic [ref=e18]:
+          - generic [ref=e19]: AGENT A
+          - generic [ref=e20]: →
+          - generic [ref=e21]: feature/mobile
+        - generic [ref=e22]:
+          - generic [ref=e23]: AGENT B
+          - generic [ref=e24]: →
+          - generic [ref=e25]: fix/replay
+        - generic [ref=e26]:
+          - generic [ref=e27]: AGENT C
+          - generic [ref=e28]: →
+          - generic [ref=e29]: chore/docs
+      - generic [ref=e30]:
+        - generic [ref=e31]:
+          - generic [ref=e32]: CREATE
+          - generic [ref=e33]: 前缀创建快速切换
+        - generic [ref=e34]:
+          - generic [ref=e35]: OBSERVE
+          - generic [ref=e36]: 终端归属Git 状态
+        - generic [ref=e37]:
+          - generic [ref=e38]: DELIVER
+          - generic [ref=e39]: 提交合并清理现场
+      - paragraph [ref=e40]: 隔离降低运行时相互污染；改到同一段代码时，合并仍可能冲突。
+    - generic [ref=e41]:
+      - img "Workbench 的 worktree 与 Git 状态管理界面" [ref=e42]
+      - generic [ref=e43]: 真实界面 · 演示数据
+  - generic [ref=e44]:
+    - generic [ref=e45]: 隔离靠 worktree · 管理交给 Workbench
+    - generic [ref=e46]: 02 / 09

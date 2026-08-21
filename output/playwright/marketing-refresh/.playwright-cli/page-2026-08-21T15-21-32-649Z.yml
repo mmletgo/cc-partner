@@ -1,0 +1,20 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - strong [ref=e4]: cc-partner
+    - generic [ref=e5]: ×
+    - strong [ref=e6]: GLM
+  - generic [ref=e7]: CLI CODING, THE OTHER HALF · 01
+  - heading [level=1] [ref=e8]:
+    - text: CLI Agent 很会写代码，但真实项目还是会
+    - emphasis [ref=e9]: 散
+  - paragraph [ref=e10]: 用 Claude Code 这类终端 Agent 做真实工程后，我把最常遇到的 7 组痛点，做成了 cc-partner 里的完整开发工作流。
+  - generic [ref=e11]:
+    - generic [ref=e12]: GLM-5.1
+    - generic [ref=e14]: GLM-5.2
+    - generic [ref=e16]: GLM-5.3
+  - generic [ref=e17]:
+    - img "cc-partner Workbench" [ref=e18]
+    - generic [ref=e19]: 真实产品界面 · 演示数据
+  - generic [ref=e20]:
+    - generic [ref=e21]: 模型负责生成 · 工作台负责把过程收住
+    - generic [ref=e22]: 01 / 09

@@ -1,0 +1,30 @@
+- generic [active] [ref=f1e1]:
+  - text: 演示数据
+  - generic [ref=f1e2]:
+    - generic [ref=f1e3]: cc-partner
+    - generic [ref=f1e5]: THE REAL BOTTLENECK · 02
+    - heading "AI 会写代码以后， 真正浪费时间的是这些" [level=1] [ref=f1e6]: AI 会写代码以后，真正浪费时间的是这些
+    - generic [ref=f1e7]:
+      - generic [ref=f1e8]:
+        - generic [ref=f1e9]: "01"
+        - generic [ref=f1e10]:
+          - generic [ref=f1e11]: 项目上下文散在 5 个地方
+          - paragraph [ref=f1e12]: 终端、编辑器、worktree、Git 和任务记录各说各话，切一次窗口就丢一点上下文。
+      - generic [ref=f1e13]:
+        - generic [ref=f1e14]: "02"
+        - generic [ref=f1e15]:
+          - generic [ref=f1e16]: 长任务离开电脑就变成黑盒
+          - paragraph [ref=f1e17]: 模型是在继续跑、等确认，还是已经报错？回到桌前之前，你没有答案。
+      - generic [ref=f1e18]:
+        - generic [ref=f1e19]: "03"
+        - generic [ref=f1e20]:
+          - generic [ref=f1e21]: “生成了代码”不是“完成了交付”
+          - paragraph [ref=f1e22]: 测试有没有跑、证据在哪里、哪个分支可合并，最后仍靠人肉追问和补齐。
+    - generic [ref=f1e23]:
+      - text: cc-partner 想解决的不是“再做一个聊天框”，而是让
+      - emphasis [ref=f1e24]: Agent 的真实工程过程可见、可接手、可交付
+      - text: 。
+    - generic [ref=f1e25]:
+      - generic [ref=f1e26]: 本地优先 · 局域网协作
+      - generic [ref=f1e27]: 02 / 05
+  - text: ✓ ✓ ✓ ✓

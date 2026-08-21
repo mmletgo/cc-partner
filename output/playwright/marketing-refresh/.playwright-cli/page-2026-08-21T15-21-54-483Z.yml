@@ -1,0 +1,48 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 04 · DONE IS NOT DELIVERED
+  - heading [level=1] [ref=e6]:
+    - text: “代码生成了”，离“可以交付”还差
+    - emphasis [ref=e7]: 四步
+  - generic [ref=e8]:
+    - generic [ref=e9]: "04"
+    - generic [ref=e10]:
+      - text: CLI CODING PAIN
+      - generic [ref=e11]: 文件、测试、浏览器结果和 Git 证据散在不同地方
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - code [ref=e15]: FILES
+        - generic [ref=e16]: 检查真实改动
+        - text: 代码、Markdown、HTML 等直接围绕 worktree 打开。
+      - generic [ref=e17]:
+        - code [ref=e18]: GIT
+        - generic [ref=e19]: 确认分支与提交树
+        - text: clean / dirty / conflict 与提交 DAG 同屏。
+      - generic [ref=e20]:
+        - code [ref=e21]: BROWSER
+        - generic [ref=e22]: 执行受控 smoke
+        - text: 保存 screenshot、console 错误和断言结果。
+      - generic [ref=e23]:
+        - code [ref=e24]: EVIDENCE
+        - generic [ref=e25]: 证据跟着任务走
+        - text: 不是只保留一句“已经完成”。
+    - generic [ref=e26]:
+      - img "Workbench Git 与终端" [ref=e27]
+      - generic [ref=e28]: 真实界面 · 演示数据
+    - generic [ref=e29]:
+      - generic [ref=e30]:
+        - code [ref=e31]: "01"
+        - generic [ref=e32]: Diff 可读
+      - generic [ref=e33]:
+        - code [ref=e34]: "02"
+        - generic [ref=e35]: Test 有结果
+      - generic [ref=e36]:
+        - code [ref=e37]: "03"
+        - generic [ref=e38]: Browser 有截图
+      - generic [ref=e39]:
+        - code [ref=e40]: "04"
+        - generic [ref=e41]: Git 可追溯
+  - generic [ref=e42]:
+    - generic [ref=e43]: 从生成代码，到可验证的交付
+    - generic [ref=e44]: 05 / 09

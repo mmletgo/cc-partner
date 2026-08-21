@@ -1,0 +1,50 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 03 · LOST SESSION CONTEXT
+  - heading [level=1] [ref=e6]:
+    - text: 重启以后，最难找回的是
+    - emphasis [ref=e7]: 对话上下文
+  - generic [ref=e8]:
+    - generic [ref=e9]: "03"
+    - generic [ref=e10]:
+      - text: CLI CODING PAIN
+      - generic [ref=e11]: shell 能重开，但“刚才聊到哪”很难重建
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: demo@local $ coding-agent
+      - generic [ref=e15]: 读取项目指令与任务范围…
+      - generic [ref=e16]: ✓ 完成文件保存与 Git 状态联动
+      - generic [ref=e17]: ✓ npm test -- MobileWorkbench
+      - generic [ref=e18]: › 下一步：生成验证 evidence
+    - generic [ref=e19]:
+      - generic [ref=e20]:
+        - text: 搜索标题或对话内容…
+        - generic [ref=e21]: ⌘ K
+      - generic [ref=e22]: 当前 WORKTREE · 历史 SESSION
+      - generic [ref=e23]:
+        - code [ref=e24]: 最近使用
+        - text: Mobile Workbench 文件接手
+        - paragraph [ref=e25]: “完成保存与 Git 状态联动，下一步生成 evidence…”
+      - generic [ref=e26]:
+        - code [ref=e27]: 昨天
+        - text: 修复终端 replay
+        - paragraph [ref=e28]: “断线后按 ring buffer 补历史…”
+      - generic [ref=e29]:
+        - generic [ref=e30]: 预览后在新终端恢复
+        - generic [ref=e31]: ↵ RESUME
+    - generic [ref=e32]:
+      - generic [ref=e33]:
+        - code [ref=e34]: "01"
+        - generic [ref=e35]: tmux attach
+        - text: 应用重启后接回原 window / pane
+      - generic [ref=e36]:
+        - code [ref=e37]: "02"
+        - generic [ref=e38]: 断线 replay
+        - text: 事件 Gap 后补回终端历史
+      - generic [ref=e39]:
+        - code [ref=e40]: "03"
+        - generic [ref=e41]: ⌘K 搜索
+        - text: 按标题和对话内容预览、resume
+  - generic [ref=e42]:
+    - generic [ref=e43]: 功能示意 · 文案来自当前产品能力
+    - generic [ref=e44]: 04 / 09

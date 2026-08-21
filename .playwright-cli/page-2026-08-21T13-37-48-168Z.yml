@@ -1,0 +1,18 @@
+- generic [active] [ref=f3e1]:
+  - text: 演示数据
+  - generic [ref=f3e2]:
+    - generic [ref=f3e3]: cc-partner
+    - generic [ref=f3e5]: THE PRODUCT · 04
+    - heading "桌面看见完整流程， 手机接手同一个项目" [level=1] [ref=f3e6]: 桌面看见完整流程，手机接手同一个项目
+    - paragraph [ref=f3e7]: Workbench 把 worktree、终端、文件与 Git 放在一起；Mobile Workbench 让离开电脑后的任务仍然可见、可操作。
+    - generic [ref=f3e8]:
+      - img "cc-partner Workbench" [ref=f3e10]
+      - img "cc-partner Mobile Workbench" [ref=f3e12]
+      - generic [ref=f3e13]:
+        - generic [ref=f3e14]: ✓多 worktree / 多终端
+        - generic [ref=f3e15]: ✓文件与 Git 同屏
+        - generic [ref=f3e16]: ✓浏览器预览与验证
+        - generic [ref=f3e17]: ✓手机查看并接手
+    - generic [ref=f3e18]:
+      - generic [ref=f3e19]: 真实产品界面 · 演示项目数据
+      - generic [ref=f3e20]: 04 / 05

@@ -1,0 +1,71 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 07 · CONTEXT SWITCHES
+  - heading [level=1] [ref=e6]:
+    - text: 写代码之外的小事，也在不断
+    - emphasis [ref=e7]: 打断开发
+  - generic [ref=e8]:
+    - generic [ref=e9]: "07"
+    - generic [ref=e10]:
+      - text: CLI CODING PAIN
+      - generic [ref=e11]: 传文件、贴截图、记得休息、回看时间，又要切四个工具
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: "01"
+        - code [ref=e16]: LAN TRANSFER
+      - heading "局域网文件传输" [level=2] [ref=e17]
+      - paragraph [ref=e18]: 任意大小分块传输，SHA256 校验；双方能力匹配时断点续传。
+      - generic [ref=e19]:
+        - generic [ref=e20]: 选择设备
+        - generic [ref=e21]: →
+        - generic [ref=e22]: 分块发送
+        - generic [ref=e23]: →
+        - generic [ref=e24]: 完整校验
+    - generic [ref=e25]:
+      - generic [ref=e26]:
+        - generic [ref=e27]: "02"
+        - code [ref=e28]: REGION CAPTURE
+      - heading "区域截图" [level=2] [ref=e29]
+      - paragraph [ref=e30]: 全局快捷键框选，矩形/箭头标注、6 色与撤销；确认后 PNG 直进剪贴板。
+      - generic [ref=e31]:
+        - generic [ref=e32]: 框选
+        - generic [ref=e33]: →
+        - generic [ref=e34]: 标注
+        - generic [ref=e35]: →
+        - generic [ref=e36]: 粘贴给 Agent
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]: "03"
+        - code [ref=e40]: HEALTH
+      - heading "健康提醒" [level=2] [ref=e41]
+      - paragraph [ref=e42]: 久坐、喝水、全屏休息倒计时，支持免打扰、暂停、延迟与近 7 天习惯统计。
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - generic [ref=e45]: 45m
+          - generic [ref=e46]: 久坐阈值
+        - generic [ref=e47]:
+          - generic [ref=e48]: 1h
+          - generic [ref=e49]: 喝水间隔
+        - generic [ref=e50]:
+          - generic [ref=e51]: 7d
+          - generic [ref=e52]: 习惯趋势
+    - generic [ref=e53]:
+      - generic [ref=e54]:
+        - generic [ref=e55]: "04"
+        - code [ref=e56]: ACTIVITY
+      - heading "活动统计" [level=2] [ref=e57]
+      - paragraph [ref=e58]: 查看活跃/闲置分钟、应用与窗口排行，以及一天中 24 小时活跃分布。
+      - generic [ref=e59]:
+        - generic [ref=e60]:
+          - generic [ref=e61]: APP
+          - generic [ref=e62]: 应用排行
+        - generic [ref=e63]:
+          - generic [ref=e64]: WIN
+          - generic [ref=e65]: 窗口排行
+        - generic [ref=e66]:
+          - generic [ref=e67]: 24H
+          - generic [ref=e68]: 时段分布
+  - generic [ref=e69]:
+    - generic [ref=e70]: 功能示意 · 四个工具围绕同一条开发流程
+    - generic [ref=e71]: 08 / 09

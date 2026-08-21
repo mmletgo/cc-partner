@@ -1,0 +1,4 @@
+[    1419ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:51872/node_modules/.vite/deps/react-dom_client.js?v=b6511ac0:14337
+[    2387ms] [WARNING] WebSocket connection to 'ws://127.0.0.1:51872/api/mobile/workbench/terminal-input-stream' failed: WebSocket is closed before the connection is established. @ http://127.0.0.1:51872/src/mobile/mobileTerminalInputStream.ts:133
+[    2937ms] [WARNING] WebSocket connection to 'ws://127.0.0.1:51872/api/mobile/workbench/terminal-input-stream' failed: WebSocket is closed before the connection is established. @ http://127.0.0.1:51872/src/mobile/mobileTerminalInputStream.ts:133
+[ 1601814ms] [LOG] [vite] server connection lost. Polling for restart... @ http://127.0.0.1:51872/@vite/client:992

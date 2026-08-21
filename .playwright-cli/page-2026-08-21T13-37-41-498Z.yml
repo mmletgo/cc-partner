@@ -1,0 +1,20 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: cc-partner
+      - generic [ref=e5]: ×
+      - generic [ref=e6]: GLM
+    - generic [ref=e7]: BUILDING IN PUBLIC · 01
+    - heading "从 GLM-5.1 到 5.3， 我一直在做同一个 AI Coding 工作台" [level=1] [ref=e8]: 从 GLM-5.1 到 5.3，我一直在做同一个AI Coding 工作台
+    - paragraph [ref=e9]: 三代模型参与开发，主角是最后做出来的 cc-partner：让真实工程过程可见、可接手、可交付。
+    - generic [ref=e10]:
+      - generic [ref=e11]: GLM-5.1
+      - generic [ref=e13]: GLM-5.2
+      - generic [ref=e15]: GLM-5.3
+    - generic [ref=e16]:
+      - img "cc-partner Workbench" [ref=e17]
+      - text: 演示数据
+    - generic [ref=e18]:
+      - generic [ref=e19]: 真实产品界面 · 演示项目数据
+      - generic [ref=e20]: 01 / 05
+  - text: ✓ ✓ ✓ ✓

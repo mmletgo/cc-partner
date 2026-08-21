@@ -1,0 +1,34 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 02 · LONG TASK BLACK BOX
+  - heading [level=1] [ref=e6]:
+    - text: 长任务一离开电脑，马上变成
+    - emphasis [ref=e7]: 黑盒
+  - generic [ref=e8]:
+    - generic [ref=e9]: "02"
+    - generic [ref=e10]:
+      - text: CLI CODING PAIN
+      - generic [ref=e11]: 还在跑、等确认，还是已经报错？
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: CC-PARTNER SOLUTION
+        - heading "Mobile Workbench + Attention" [level=2] [ref=e16]
+        - paragraph [ref=e17]: 手机进入同一个项目，查看并接手终端、文件、Git 与自动化；需要人的阻塞集中投影。
+        - generic [ref=e18]:
+          - generic [ref=e19]:
+            - generic [ref=e21]: 需要确认命令回到真实终端处理
+            - code [ref=e22]: DECISION
+          - generic [ref=e23]:
+            - generic [ref=e25]: 验证失败导航到任务 evidence
+            - code [ref=e26]: BLOCKED
+          - generic [ref=e27]:
+            - generic [ref=e29]: 任务仍在运行手机继续查看输出
+            - code [ref=e30]: RUNNING
+      - paragraph [ref=e31]: LAN API 无调用者身份校验，只在可信局域网中使用。
+    - generic [ref=e32]:
+      - img "Mobile Workbench" [ref=e33]
+      - generic [ref=e34]: 真实界面 · 演示数据
+  - generic [ref=e35]:
+    - generic [ref=e36]: 手机不是监控页，而是桌面工作流的移动入口
+    - generic [ref=e37]: 03 / 09

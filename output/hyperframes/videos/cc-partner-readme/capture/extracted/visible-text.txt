@@ -1,0 +1,8 @@
+cc-partner
+给同时推进多个 AI 编码任务的人，一个能把工作收回来的地方。
+Project → Worktree → Terminal
+文件浏览
+Git 历史
+Mobile Workbench
+让 Agent 的真实工程过程可见、可接手、可交付。
+github.com/mmletgo/cc-partner

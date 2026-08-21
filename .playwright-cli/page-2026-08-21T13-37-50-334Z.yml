@@ -1,0 +1,32 @@
+- generic [active] [ref=f4e1]:
+  - text: 演示数据 ✓ ✓ ✓ ✓
+  - generic [ref=f4e2]:
+    - generic [ref=f4e3]: cc-partner
+    - generic [ref=f4e5]: VISIBLE → HANDOFF → DELIVER · 05
+    - heading "模型在变， 我想解决的问题没变" [level=1] [ref=f4e6]: 模型在变，我想解决的问题没变
+    - paragraph [ref=f4e7]: 让 Agent 的真实工程过程可见、可接手、可交付。
+    - generic [ref=f4e8]:
+      - generic [ref=f4e9]:
+        - code [ref=f4e10]: VISIBLE
+        - generic [ref=f4e11]: 过程持续可见
+        - paragraph [ref=f4e12]: 项目、worktree、终端、会话与阻塞都围绕真实工程组织。
+      - generic [ref=f4e13]:
+        - code [ref=f4e14]: HANDOFF
+        - generic [ref=f4e15]: 离开电脑也能接手
+        - paragraph [ref=f4e16]: 同一局域网内，用 Mobile Workbench 继续查看和操作。
+      - generic [ref=f4e17]:
+        - code [ref=f4e18]: TRACEABLE
+        - generic [ref=f4e19]: 改动保持可追溯
+        - paragraph [ref=f4e20]: 文件工作区、Git 提交树与验证 evidence 留在同一流程。
+      - generic [ref=f4e21]:
+        - code [ref=f4e22]: PORTABLE
+        - generic [ref=f4e23]: 多 CLI 资产统一管理
+        - paragraph [ref=f4e24]: 指令、Skill、Command、Agent 与 MCP 不再散落。
+    - generic [ref=f4e25]:
+      - text: OPEN SOURCE
+      - generic [ref=f4e26]: github.com/mmletgo/cc-partner
+      - paragraph [ref=f4e27]: local-first · macOS / Windows / Ubuntu
+    - paragraph [ref=f4e28]: cc-partner 不是 GLM 原生集成，也不提供模型服务；它是在使用 GLM-5.1、5.2、5.3 开发真实项目的过程中逐步做出来的工作台。LAN API 无调用者身份校验，仅在可信局域网使用。
+    - generic [ref=f4e29]:
+      - generic [ref=f4e30]: 产品为主 · 开发经历为线
+      - generic [ref=f4e31]: 05 / 05

@@ -1,0 +1,238 @@
+<template>
+  <style>
+    @font-face {
+      font-family: "CC Sans";
+      src: url("assets/fonts/CCSans.ttf");
+      font-style: normal;
+      font-weight: 400 800;
+    }
+    @font-face {
+      font-family: "CC Mono";
+      src: url("assets/fonts/JetBrainsMono-400.woff2") format("woff2");
+      font-style: normal;
+      font-weight: 400;
+    }
+    @font-face {
+      font-family: "CC Mono";
+      src: url("assets/fonts/JetBrainsMono-700.woff2") format("woff2");
+      font-style: normal;
+      font-weight: 700;
+    }
+
+    #root {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      color: #1b1917;
+      font-family: "CC Sans";
+    }
+    #f03-mobile-bg {
+      position: absolute;
+      inset: 0;
+      background: #f4f1e9;
+    }
+    #f03-mobile-arc {
+      position: absolute;
+      left: 90px;
+      top: 82px;
+      width: 1740px;
+      height: 760px;
+      border: 2px solid rgba(217, 213, 202, 0.9);
+      border-radius: 72px;
+    }
+    #f03-mobile-desktop {
+      position: absolute;
+      left: 92px;
+      top: 198px;
+      width: 930px;
+      height: 580px;
+      overflow: hidden;
+      border: 2px solid #d9d5ca;
+      border-radius: 26px;
+      background: #fffdf8;
+      box-shadow: 0 34px 90px rgba(40, 32, 24, 0.2);
+    }
+    #f03-mobile-desktop img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    #f03-mobile-desktop::after {
+      position: absolute;
+      inset: 0;
+      background: rgba(244, 241, 233, 0.24);
+      content: "";
+    }
+    #f03-mobile-phone {
+      position: absolute;
+      left: 1396px;
+      top: 84px;
+      z-index: 7;
+      width: 356px;
+      height: 770px;
+      padding: 10px;
+      overflow: hidden;
+      border: 3px solid #1b1917;
+      border-radius: 44px;
+      background: #1b1917;
+      box-shadow: 0 36px 96px rgba(40, 32, 24, 0.3);
+    }
+    #f03-mobile-phone img {
+      width: 100%;
+      height: 100%;
+      border-radius: 34px;
+      object-fit: cover;
+    }
+    #f03-mobile-path {
+      position: absolute;
+      left: 590px;
+      top: 704px;
+      z-index: 10;
+      width: 732px;
+      height: 70px;
+      display: flex;
+      align-items: center;
+      padding: 0 28px;
+      border: 2px solid #c96442;
+      border-radius: 999px;
+      background: #fffdf8;
+      box-shadow: 0 18px 42px rgba(40, 32, 24, 0.13);
+      color: #1b1917;
+      font: 700 22px/1 "CC Mono";
+    }
+    #f03-mobile-path::before {
+      width: 13px;
+      height: 13px;
+      margin-right: 16px;
+      border-radius: 50%;
+      background: #2a9d61;
+      content: "";
+    }
+    #f03-mobile-path-dot {
+      position: absolute;
+      left: 1254px;
+      top: 723px;
+      z-index: 12;
+      width: 32px;
+      height: 32px;
+      border: 8px solid #fffdf8;
+      border-radius: 50%;
+      background: #c96442;
+      box-shadow: 0 0 0 3px #c96442;
+    }
+    #f03-mobile-title {
+      position: absolute;
+      left: 92px;
+      top: 72px;
+      z-index: 12;
+      display: flex;
+      gap: 20px;
+      font-size: 68px;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: -0.06em;
+    }
+    #f03-mobile-title span:last-child { color: #c96442; }
+    #f03-mobile-tags {
+      position: absolute;
+      left: 1054px;
+      top: 246px;
+      z-index: 12;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .mobile-tag {
+      width: 260px;
+      padding: 15px 22px;
+      border: 2px solid #d9d5ca;
+      border-radius: 999px;
+      background: #fffdf8;
+      box-shadow: 0 14px 34px rgba(40, 32, 24, 0.1);
+      font-size: 25px;
+      font-weight: 800;
+    }
+    .mobile-tag::before {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 14px;
+      border-radius: 50%;
+      background: #c96442;
+      content: "";
+    }
+    #f03-mobile-cta {
+      position: absolute;
+      left: 92px;
+      top: 812px;
+      z-index: 12;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    #f03-mobile-cta img {
+      width: 54px;
+      height: 54px;
+      border-radius: 15px;
+      box-shadow: 0 12px 30px rgba(40, 32, 24, 0.17);
+    }
+    #f03-mobile-cta-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    #f03-mobile-cta-copy strong {
+      font-size: 27px;
+      line-height: 1;
+      font-weight: 800;
+    }
+    #f03-mobile-cta-copy span {
+      color: #6f6a63;
+      font: 700 18px/1.2 "CC Mono";
+    }
+  </style>
+
+  <div id="root" data-composition-id="03-mobile" data-start="0" data-duration="4" data-width="1920" data-height="1080">
+    <div id="f03-mobile-bg" class="clip" data-start="0" data-duration="4" data-track-index="0"></div>
+    <div id="f03-mobile-arc" class="clip" data-start="0" data-duration="4" data-track-index="1"></div>
+    <div id="f03-mobile-desktop" class="clip" data-start="0" data-duration="4" data-track-index="2"><img src="assets/workbench.png" alt="Desktop Workbench" /></div>
+    <div id="f03-mobile-path" class="clip" data-start="0" data-duration="4" data-track-index="4">/workspace/cc-partner-demo</div>
+    <div id="f03-mobile-path-dot" class="clip" data-start="0" data-duration="4" data-track-index="5"></div>
+    <div id="f03-mobile-phone" class="clip" data-start="0" data-duration="4" data-track-index="6"><img id="f03-mobile-phone-image" src="assets/mobile-workbench.png" alt="Mobile Workbench" /></div>
+
+    <div id="f03-mobile-title" class="clip" data-start="0" data-duration="4" data-track-index="7">
+      <span id="f03-mobile-title-1">离开电脑，</span><span id="f03-mobile-title-2">也能继续推进。</span>
+    </div>
+    <div id="f03-mobile-tags" class="clip" data-start="0" data-duration="4" data-track-index="8">
+      <div id="f03-mobile-tag-terminal" class="mobile-tag">终端会话</div>
+      <div id="f03-mobile-tag-files" class="mobile-tag">项目文件</div>
+      <div id="f03-mobile-tag-git" class="mobile-tag">Git 进度</div>
+      <div id="f03-mobile-tag-auto" class="mobile-tag">任务自动化</div>
+    </div>
+    <div id="f03-mobile-cta" class="clip" data-start="0" data-duration="4" data-track-index="9">
+      <img src="assets/cc-partner-icon.png" alt="cc-partner" />
+      <div id="f03-mobile-cta-copy"><strong>cc-partner</strong><span>github.com/mmletgo/cc-partner</span></div>
+    </div>
+  </div>
+
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#f03-mobile-desktop", { x: -56, scale: 0.95, opacity: 0 }, { x: 0, scale: 1, opacity: 1, duration: 0.56, ease: "power3.out" }, 0.02);
+    tl.fromTo("#f03-mobile-arc", { scaleX: 0.76, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.62, ease: "power2.out" }, 0.05);
+    tl.fromTo("#f03-mobile-path", { x: -76, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 0.24);
+    tl.fromTo("#f03-mobile-phone", { x: 148, scale: 0.92, opacity: 0 }, { x: 0, scale: 1, opacity: 1, duration: 0.68, ease: "power3.out" }, 0.72);
+    tl.fromTo("#f03-mobile-phone-image", { scale: 1 }, { scale: 1.025, duration: 3.2, ease: "none", transformOrigin: "50% 42%" }, 0.78);
+    tl.fromTo("#f03-mobile-path-dot", { x: -600, opacity: 0.45 }, { x: 0, opacity: 1, duration: 1.28, ease: "power2.inOut" }, 0.92);
+    tl.fromTo("#f03-mobile-title-1", { y: 42, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "power3.out" }, 2.36);
+    tl.fromTo("#f03-mobile-title-2", { y: 42, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "power3.out" }, 2.54);
+    tl.fromTo("#f03-mobile-tag-terminal", { x: 48, opacity: 0 }, { x: 0, opacity: 1, duration: 0.36, ease: "power2.out" }, 2.54);
+    tl.fromTo("#f03-mobile-tag-files", { x: 48, opacity: 0 }, { x: 0, opacity: 1, duration: 0.36, ease: "power2.out" }, 2.72);
+    tl.fromTo("#f03-mobile-tag-git", { x: 48, opacity: 0 }, { x: 0, opacity: 1, duration: 0.36, ease: "power2.out" }, 2.9);
+    tl.fromTo("#f03-mobile-tag-auto", { x: 48, opacity: 0 }, { x: 0, opacity: 1, duration: 0.36, ease: "power2.out" }, 3.08);
+    tl.fromTo("#f03-mobile-cta", { y: 30, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "power3.out" }, 3.34);
+    tl.to("#f03-mobile-phone", { y: -6, scale: 1.006, duration: 0.52, ease: "power1.out" }, 3.45);
+    window.__timelines["03-mobile"] = tl;
+  </script>
+</template>

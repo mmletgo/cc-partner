@@ -1,0 +1,65 @@
+- generic [ref=e2]:
+  - strong [ref=e4]: cc-partner
+  - generic [ref=e5]: PAIN 05 · HUMAN AS SCHEDULER
+  - heading [level=1] [ref=e6]:
+    - text: 并行 Agent 越多，人越像
+    - emphasis [ref=e7]: 全职调度器
+  - generic [ref=e8]:
+    - generic [ref=e9]: "05"
+    - generic [ref=e10]:
+      - text: CLI CODING PAIN
+      - generic [ref=e11]: 开 worktree、盯终端、返工、复核、合并都靠人记
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]: TODO
+        - generic [ref=e16]: "1"
+      - generic [ref=e17]:
+        - generic [ref=e18]: 补 Mobile 文件保存
+        - paragraph [ref=e19]: 验收标准与验证命令已绑定
+        - code [ref=e20]: READY
+    - generic [ref=e21]:
+      - generic [ref=e22]:
+        - generic [ref=e23]: IN PROGRESS
+        - generic [ref=e24]: "1"
+      - generic [ref=e25]:
+        - generic [ref=e26]: 完善终端 replay
+        - paragraph [ref=e27]: 专用 worktree + 可见 Runner
+        - code [ref=e28]: RUNNING
+    - generic [ref=e29]:
+      - generic [ref=e30]:
+        - generic [ref=e31]: REWORK
+        - generic [ref=e32]: "1"
+      - generic [ref=e33]:
+        - generic [ref=e34]: 修复浏览器 smoke
+        - paragraph [ref=e35]: 验证失败，复用原现场返工
+        - code [ref=e36]: FIX LOOP
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]: HUMAN REVIEW
+        - generic [ref=e40]: "1"
+      - generic [ref=e41]:
+        - generic [ref=e42]: 检查交付证据
+        - paragraph [ref=e43]: 等待人工决定 commit / merge
+        - code [ref=e44]: DECISION
+    - generic [ref=e45]:
+      - generic [ref=e46]:
+        - generic [ref=e47]: DONE
+        - generic [ref=e48]: "1"
+      - generic [ref=e49]:
+        - generic [ref=e50]: 更新项目文档
+        - paragraph [ref=e51]: 验证 evidence 已归档
+        - code [ref=e52]: VERIFIED
+  - generic [ref=e53]:
+    - generic [ref=e54]:
+      - text: 专用 worktree
+      - generic [ref=e55]: 每个任务有确定的分支与路径。
+    - generic [ref=e56]:
+      - text: Workbench 可见 Runner
+      - generic [ref=e57]: 自动化没有躲在不可见后台。
+    - generic [ref=e58]:
+      - text: Human Review
+      - generic [ref=e59]: 自动交付是显式开关，不默认越权。
+  - generic [ref=e60]:
+    - generic [ref=e61]: 功能示意 · Orchestrator 任务闭环
+    - generic [ref=e62]: 06 / 09
