@@ -933,9 +933,10 @@ pub(crate) async fn local_merge_workbench_worktree(
 ///     一键 merge 必须让长耗时与冲突写入远离真实主工作区，只保留短时、可核验的发布窗口。
 ///
 /// Code Logic（这个函数做什么）:
-///     按既有五阶段冻结 main/source OID；创建未入库的 detached integration worktree；在那里执行
-///     `merge --no-ff <source_oid>` 和 Claude 解冲突；严格校验双父后确认真实 main 未漂移并 ff-only 发布；
-///     任意失败 best-effort 清理隔离目录，只有发布成功后才删除源 worktree。
+///     按既有五阶段冻结 main/source OID；源已是主 HEAD 祖先时跳过隔离 merge 并 cleanup 源。
+///     否则创建未入库的 detached integration worktree，执行 `merge --no-ff <source_oid>` 和 Claude 解冲突；
+///     严格校验双父后确认真实 main 未漂移并 ff-only 发布；任意失败 best-effort 清理隔离目录，
+///     只有发布成功或已合入后才删除源 worktree。
 pub(crate) async fn local_merge_workbench_worktree_for_operation(
     state: &AppState,
     worktree_id: String,
@@ -951,7 +952,8 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation(
 ///     ledger 先于关闭终端持久化 main/source OID；执行阶段必须以该 intent 为权威，不能悄然重冻新 tip。
 ///
 /// Code Logic（这个函数做什么）:
-///     复用隔离 merge五阶段；若传入 expected_frozen，则在创建 integration worktree 前将现场快照与之精确比较。
+///     复用隔离 merge 五阶段；若传入 expected_frozen，则在创建 integration worktree 前将现场快照与之精确比较。
+///     冻结源 HEAD 已是冻结主 HEAD 祖先（含同一提交）时跳过隔离 merge，直接 cleanup 源 worktree。
 pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
     state: &AppState,
     worktree_id: String,
@@ -1115,179 +1117,65 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
             MERGE_STAGE_MERGE_MAIN,
         )?;
     }
-    let repo_root = stage_result(
-        workbench_git::repo_root(main_path).map(PathBuf::from),
+    let already_contained = stage_result(
+        workbench_git::source_already_contained_in_main(
+            main_path,
+            &frozen.main_oid,
+            &frozen.source_oid,
+        ),
         state,
         &project_id,
         &worktree_id,
         &mut stages,
         MERGE_STAGE_MERGE_MAIN,
     )?;
-    let integration_path = merge_integration_storage_path(state, &project_id, &operation_id);
-    tracing::info!(
-        project_id = %project_id,
-        worktree_id = %worktree_id,
-        stage = "integration_create",
-        "workbench merge stage"
-    );
-    if let Err(error) = workbench_git::create_detached_integration_worktree_outside(
-        &repo_root,
-        &integration_path,
-        &frozen.main_oid,
-        &[main_path, Path::new(&row.path)],
-    ) {
-        let _ = cleanup_merge_integration_best_effort(
-            &repo_root,
-            &integration_path,
-            &project_id,
-            &worktree_id,
+    if already_contained {
+        tracing::info!(
+            project_id = %project_id,
+            worktree_id = %worktree_id,
+            stage = "already_contained",
+            "workbench merge source already contained in main; skipping isolation"
         );
-        return Err(fail_merge_stage(
+        set_merge_stage(
             state,
             &project_id,
             &worktree_id,
             &mut stages,
             MERGE_STAGE_MERGE_MAIN,
-            error,
-        ));
-    }
-    let merge_outcome = match workbench_git::merge_commit_oid(&integration_path, &frozen.source_oid)
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let _ = cleanup_merge_integration_best_effort(
-                &repo_root,
-                &integration_path,
-                &project_id,
-                &worktree_id,
-            );
-            return Err(fail_merge_stage(
-                state,
-                &project_id,
-                &worktree_id,
-                &mut stages,
-                MERGE_STAGE_MERGE_MAIN,
-                error,
-            ));
-        }
-    };
-    let merge_result: Result<(), AppError> = match merge_outcome {
-        workbench_git::MergeBranchOutcome::Merged => {
-            set_merge_stage(
-                state,
-                &project_id,
-                &worktree_id,
-                &mut stages,
-                MERGE_STAGE_MERGE_MAIN,
-                "completed",
-                "隔离 integration merge 已生成候选提交",
-            );
-            set_merge_stage(
-                state,
-                &project_id,
-                &worktree_id,
-                &mut stages,
-                MERGE_STAGE_RESOLVE_CONFLICTS,
-                "skipped",
-                "merge 未产生冲突，跳过自动冲突解决",
-            );
-            Ok(())
-        }
-        workbench_git::MergeBranchOutcome::Conflicted => {
-            tracing::info!(
-                project_id = %project_id,
-                worktree_id = %worktree_id,
-                stage = "integration_conflict",
-                "workbench merge conflict detected"
-            );
-            set_merge_stage(
-                state,
-                &project_id,
-                &worktree_id,
-                &mut stages,
-                MERGE_STAGE_MERGE_MAIN,
-                "completed",
-                "隔离 merge 出现冲突，进入自动解决阶段",
-            );
-            set_merge_stage(
-                state,
-                &project_id,
-                &worktree_id,
-                &mut stages,
-                MERGE_STAGE_RESOLVE_CONFLICTS,
-                "running",
-                "正在调用 Claude Code 尝试解决 merge 冲突",
-            );
-            tracing::info!(
-                project_id = %project_id,
-                worktree_id = %worktree_id,
-                stage = "claude_start",
-                "workbench merge Claude resolution started"
-            );
-            match resolve_merge_conflicts_with_claude(state, &integration_path).await {
-                Ok(file_count) => {
-                    tracing::info!(
-                        project_id = %project_id,
-                        worktree_id = %worktree_id,
-                        stage = "claude_result",
-                        resolved_files = file_count,
-                        "workbench merge Claude resolution completed"
-                    );
-                    set_merge_stage(
-                        state,
-                        &project_id,
-                        &worktree_id,
-                        &mut stages,
-                        MERGE_STAGE_RESOLVE_CONFLICTS,
-                        "completed",
-                        "Claude Code 已在隔离目录解决冲突并完成 merge commit",
-                    );
-                    Ok(())
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        project_id = %project_id,
-                        worktree_id = %worktree_id,
-                        stage = "claude_failure",
-                        error = %error,
-                        "workbench merge Claude resolution failed"
-                    );
-                    Err(error)
-                }
-            }
-        }
-    };
-    if let Err(error) = merge_result {
-        let _ = workbench_git::abort_merge(&integration_path);
-        let _ = cleanup_merge_integration_best_effort(
-            &repo_root,
-            &integration_path,
-            &project_id,
-            &worktree_id,
+            "skipped",
+            "源提交已包含在主工作区，跳过隔离 merge",
         );
-        return Err(fail_merge_stage(
+        set_merge_stage(
             state,
             &project_id,
             &worktree_id,
             &mut stages,
             MERGE_STAGE_RESOLVE_CONFLICTS,
-            error,
-        ));
-    }
-
-    let merge_oid = match workbench_git::head_hash(&integration_path)
-        .and_then(|oid| oid.ok_or_else(|| AppError::generic("隔离 merge 未生成 HEAD")))
-        .and_then(|oid| {
-            workbench_git::verify_strict_merge_commit(
-                &integration_path,
-                &oid,
-                &frozen.main_oid,
-                &frozen.source_oid,
-            )?;
-            Ok(oid)
-        }) {
-        Ok(oid) => oid,
-        Err(error) => {
+            "skipped",
+            "源已合入，无需解决冲突",
+        );
+    } else {
+        let repo_root = stage_result(
+            workbench_git::repo_root(main_path).map(PathBuf::from),
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_MERGE_MAIN,
+        )?;
+        let integration_path = merge_integration_storage_path(state, &project_id, &operation_id);
+        tracing::info!(
+            project_id = %project_id,
+            worktree_id = %worktree_id,
+            stage = "integration_create",
+            "workbench merge stage"
+        );
+        if let Err(error) = workbench_git::create_detached_integration_worktree_outside(
+            &repo_root,
+            &integration_path,
+            &frozen.main_oid,
+            &[main_path, Path::new(&row.path)],
+        ) {
             let _ = cleanup_merge_integration_best_effort(
                 &repo_root,
                 &integration_path,
@@ -1303,71 +1191,227 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
                 error,
             ));
         }
-    };
-    tracing::info!(
-        project_id = %project_id,
-        worktree_id = %worktree_id,
-        stage = "publish",
-        "workbench merge publishing verified integration commit"
-    );
-    if let Err(error) =
-        workbench_git::verify_source_unchanged_for_publish(Path::new(&row.path), &frozen, &branch)
-    {
-        let _ = cleanup_merge_integration_best_effort(
+        let merge_outcome =
+            match workbench_git::merge_commit_oid(&integration_path, &frozen.source_oid) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let _ = cleanup_merge_integration_best_effort(
+                        &repo_root,
+                        &integration_path,
+                        &project_id,
+                        &worktree_id,
+                    );
+                    return Err(fail_merge_stage(
+                        state,
+                        &project_id,
+                        &worktree_id,
+                        &mut stages,
+                        MERGE_STAGE_MERGE_MAIN,
+                        error,
+                    ));
+                }
+            };
+        let merge_result: Result<(), AppError> = match merge_outcome {
+            workbench_git::MergeBranchOutcome::Merged => {
+                set_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_MERGE_MAIN,
+                    "completed",
+                    "隔离 integration merge 已生成候选提交",
+                );
+                set_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_RESOLVE_CONFLICTS,
+                    "skipped",
+                    "merge 未产生冲突，跳过自动冲突解决",
+                );
+                Ok(())
+            }
+            workbench_git::MergeBranchOutcome::Conflicted => {
+                tracing::info!(
+                    project_id = %project_id,
+                    worktree_id = %worktree_id,
+                    stage = "integration_conflict",
+                    "workbench merge conflict detected"
+                );
+                set_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_MERGE_MAIN,
+                    "completed",
+                    "隔离 merge 出现冲突，进入自动解决阶段",
+                );
+                set_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_RESOLVE_CONFLICTS,
+                    "running",
+                    "正在调用 Claude Code 尝试解决 merge 冲突",
+                );
+                tracing::info!(
+                    project_id = %project_id,
+                    worktree_id = %worktree_id,
+                    stage = "claude_start",
+                    "workbench merge Claude resolution started"
+                );
+                match resolve_merge_conflicts_with_claude(state, &integration_path).await {
+                    Ok(file_count) => {
+                        tracing::info!(
+                            project_id = %project_id,
+                            worktree_id = %worktree_id,
+                            stage = "claude_result",
+                            resolved_files = file_count,
+                            "workbench merge Claude resolution completed"
+                        );
+                        set_merge_stage(
+                            state,
+                            &project_id,
+                            &worktree_id,
+                            &mut stages,
+                            MERGE_STAGE_RESOLVE_CONFLICTS,
+                            "completed",
+                            "Claude Code 已在隔离目录解决冲突并完成 merge commit",
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            worktree_id = %worktree_id,
+                            stage = "claude_failure",
+                            error = %error,
+                            "workbench merge Claude resolution failed"
+                        );
+                        Err(error)
+                    }
+                }
+            }
+        };
+        if let Err(error) = merge_result {
+            let _ = workbench_git::abort_merge(&integration_path);
+            let _ = cleanup_merge_integration_best_effort(
+                &repo_root,
+                &integration_path,
+                &project_id,
+                &worktree_id,
+            );
+            return Err(fail_merge_stage(
+                state,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_RESOLVE_CONFLICTS,
+                error,
+            ));
+        }
+
+        let merge_oid = match workbench_git::head_hash(&integration_path)
+            .and_then(|oid| oid.ok_or_else(|| AppError::generic("隔离 merge 未生成 HEAD")))
+            .and_then(|oid| {
+                workbench_git::verify_strict_merge_commit(
+                    &integration_path,
+                    &oid,
+                    &frozen.main_oid,
+                    &frozen.source_oid,
+                )?;
+                Ok(oid)
+            }) {
+            Ok(oid) => oid,
+            Err(error) => {
+                let _ = cleanup_merge_integration_best_effort(
+                    &repo_root,
+                    &integration_path,
+                    &project_id,
+                    &worktree_id,
+                );
+                return Err(fail_merge_stage(
+                    state,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                    MERGE_STAGE_MERGE_MAIN,
+                    error,
+                ));
+            }
+        };
+        tracing::info!(
+            project_id = %project_id,
+            worktree_id = %worktree_id,
+            stage = "publish",
+            "workbench merge publishing verified integration commit"
+        );
+        if let Err(error) = workbench_git::verify_source_unchanged_for_publish(
+            Path::new(&row.path),
+            &frozen,
+            &branch,
+        ) {
+            let _ = cleanup_merge_integration_best_effort(
+                &repo_root,
+                &integration_path,
+                &project_id,
+                &worktree_id,
+            );
+            return Err(fail_merge_stage(
+                state,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_MERGE_MAIN,
+                error,
+            ));
+        }
+        if let Err(error) = workbench_git::publish_integration_merge(main_path, &frozen, &merge_oid)
+        {
+            let _ = cleanup_merge_integration_best_effort(
+                &repo_root,
+                &integration_path,
+                &project_id,
+                &worktree_id,
+            );
+            return Err(fail_merge_stage(
+                state,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_MERGE_MAIN,
+                error,
+            ));
+        }
+        if let Err(error) = cleanup_merge_integration_best_effort(
             &repo_root,
             &integration_path,
             &project_id,
             &worktree_id,
+        ) {
+            return Err(fail_merge_stage(
+                state,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+                MERGE_STAGE_MERGE_MAIN,
+                error,
+            ));
+        }
+        set_merge_stage(
+            state,
+            &project_id,
+            &worktree_id,
+            &mut stages,
+            MERGE_STAGE_MERGE_MAIN,
+            "completed",
+            "已安全发布隔离 merge commit 到主工作区",
         );
-        return Err(fail_merge_stage(
-            state,
-            &project_id,
-            &worktree_id,
-            &mut stages,
-            MERGE_STAGE_MERGE_MAIN,
-            error,
-        ));
     }
-    if let Err(error) = workbench_git::publish_integration_merge(main_path, &frozen, &merge_oid) {
-        let _ = cleanup_merge_integration_best_effort(
-            &repo_root,
-            &integration_path,
-            &project_id,
-            &worktree_id,
-        );
-        return Err(fail_merge_stage(
-            state,
-            &project_id,
-            &worktree_id,
-            &mut stages,
-            MERGE_STAGE_MERGE_MAIN,
-            error,
-        ));
-    }
-    if let Err(error) = cleanup_merge_integration_best_effort(
-        &repo_root,
-        &integration_path,
-        &project_id,
-        &worktree_id,
-    ) {
-        return Err(fail_merge_stage(
-            state,
-            &project_id,
-            &worktree_id,
-            &mut stages,
-            MERGE_STAGE_MERGE_MAIN,
-            error,
-        ));
-    }
-    set_merge_stage(
-        state,
-        &project_id,
-        &worktree_id,
-        &mut stages,
-        MERGE_STAGE_MERGE_MAIN,
-        "completed",
-        "已安全发布隔离 merge commit 到主工作区",
-    );
 
     set_merge_stage(
         state,
@@ -2224,6 +2268,7 @@ pub(crate) fn merge_ledger_state_needs_published_recovery(state: MutationState) 
 ///
 /// Code Logic（这个函数做什么）:
 ///     Merge：从持久 intent 读取冻结 main/source OID；在当前 main 历史中查找精确双父 merge commit；
+///     若冻结源 HEAD 已是冻结主 HEAD 祖先且当前 tip 仍包含冻结主 HEAD，亦视为已发布。
 ///     未发布则保持 unknown 且不重放 Claude；已发布则幂等清理确定性 integration 路径和残留源 worktree，
 ///     构造兼容五阶段结果并 mark_succeeded。
 ///     CollectMerge：home tip 已是冻结 home 的后代且包含全部 source oid 则视为已发布，checkout home、
@@ -2264,11 +2309,19 @@ pub(crate) async fn recover_pending_merge_after_publish(
     let project = get_project(state, project_id).await?;
     let main = ensure_main_worktree(state, &project).await?;
     let main_path = Path::new(&main.path);
-    let Some(_published_merge_oid) =
-        workbench_git::find_published_merge_commit(main_path, main_head, source_head)?
-    else {
-        return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
-    };
+    let already_contained =
+        workbench_git::source_already_contained_in_main(main_path, main_head, source_head)?;
+    if workbench_git::find_published_merge_commit(main_path, main_head, source_head)?.is_none() {
+        if !already_contained {
+            return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
+        }
+        let Some(tip) = workbench_git::head_hash(main_path)? else {
+            return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
+        };
+        if !workbench_git::is_ancestor(main_path, main_head, &tip)? {
+            return Ok(WorkbenchMutationEnvelopeDto::unknown(operation_id, None));
+        }
+    }
 
     let repo_root = PathBuf::from(workbench_git::repo_root(main_path)?);
     let integration_path = merge_integration_storage_path(state, project_id, operation_id);
@@ -2302,7 +2355,22 @@ pub(crate) async fn recover_pending_merge_after_publish(
         stage.status = "completed".to_string();
         stage.message = "owner 重启后已确认并收敛已发布 merge".to_string();
     }
-    if let Some(stage) = stages
+    if already_contained {
+        if let Some(stage) = stages
+            .iter_mut()
+            .find(|stage| stage.id == MERGE_STAGE_MERGE_MAIN)
+        {
+            stage.status = "skipped".to_string();
+            stage.message = "源提交已包含在主工作区，恢复路径跳过隔离 merge".to_string();
+        }
+        if let Some(stage) = stages
+            .iter_mut()
+            .find(|stage| stage.id == MERGE_STAGE_RESOLVE_CONFLICTS)
+        {
+            stage.status = "skipped".to_string();
+            stage.message = "源已合入，恢复路径无需 Claude Code".to_string();
+        }
+    } else if let Some(stage) = stages
         .iter_mut()
         .find(|stage| stage.id == MERGE_STAGE_RESOLVE_CONFLICTS)
     {
@@ -3456,8 +3524,10 @@ mod collect_merge_tests {
     };
     use crate::transfer::registry::TransferRegistry;
     use crate::updater::UpdateRuntime;
-    use crate::workbench::models::WorkbenchProjectRow;
-    use crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto;
+    use crate::workbench::models::{WorkbenchProjectRow, WorkbenchWorktreeRow};
+    use crate::workbench::operation_ledger::{
+        MutationIntent, MutationKind, WorkbenchMutationEnvelopeDto, WorkbenchMutationLedger,
+    };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3873,6 +3943,232 @@ mod collect_merge_tests {
             message.contains("没有可收集") || message.contains("可收集"),
             "expected no-collectible error, got {message}"
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     已合入源 worktree 的 merge 测试需要在主仓库旁登记一条功能分支工作区。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在主仓库 HEAD 上 `git worktree add -b feature/test`，不追加提交。
+    fn setup_already_contained_feature_worktree(root: &Path) -> (PathBuf, PathBuf) {
+        let repo = setup_main_only_repo(root);
+        let source = root.join("source");
+        git_cmd(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/test",
+                source.to_str().expect("source utf8"),
+            ],
+        );
+        (repo, source)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     命令层 merge 测试必须把功能 worktree 写入 SQLite，才能走非主 worktree 路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     upsert 一条 `wt-feature` / `feature/test` 非主 row，path 指向 source checkout。
+    async fn seed_feature_worktree(state: &AppState, source: &Path) {
+        state
+            .workbench_worktree_repo
+            .upsert(&WorkbenchWorktreeRow {
+                id: "wt-feature".to_string(),
+                project_id: COLLECT_PROJECT_ID.to_string(),
+                name: "feature/test".to_string(),
+                branch: Some("feature/test".to_string()),
+                base_branch: Some("main".to_string()),
+                path: source.to_string_lossy().into_owned(),
+                is_main: false,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     源 worktree 与主工作区停在同一提交时，merge 不能再走隔离 --no-ff（Git 已是最新，
+    ///     产物只有一个 parent）；应视为已合入并直接删除源工作区。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     主仓库与 feature/test 同 OID；调用 ledger merge；断言成功、mergeMain/resolve 跳过、
+    ///     主 HEAD 不变、源 path/row/分支均被清理。
+    #[tokio::test]
+    async fn merge_already_contained_same_oid_skips_isolation_and_cleans_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (repo, source) = setup_already_contained_feature_worktree(temp.path());
+        let frozen_main = workbench_git::head_hash(&repo).unwrap().expect("main head");
+        let state = build_collect_merge_state(temp.path(), &repo).await;
+        seed_feature_worktree(&state, &source).await;
+
+        let envelope = local_merge_workbench_worktree_with_ledger(
+            &state,
+            "wt-feature".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect("already-contained merge should succeed");
+        let WorkbenchMutationEnvelopeDto::Succeeded { value, .. } = envelope else {
+            panic!("expected succeeded envelope, got {envelope:?}");
+        };
+        assert!(value.ok);
+        let merge_main = value
+            .stages
+            .iter()
+            .find(|stage| stage.id == MERGE_STAGE_MERGE_MAIN)
+            .expect("mergeMain");
+        assert_eq!(merge_main.status, "skipped");
+        assert!(
+            merge_main.message.contains("已包含"),
+            "unexpected mergeMain message: {}",
+            merge_main.message
+        );
+        let resolve = value
+            .stages
+            .iter()
+            .find(|stage| stage.id == MERGE_STAGE_RESOLVE_CONFLICTS)
+            .expect("resolveConflicts");
+        assert_eq!(resolve.status, "skipped");
+        let cleanup = value
+            .stages
+            .iter()
+            .find(|stage| stage.id == MERGE_STAGE_CLEANUP)
+            .expect("cleanup");
+        assert_eq!(cleanup.status, "completed");
+
+        assert_eq!(
+            workbench_git::head_hash(&repo).unwrap().expect("head"),
+            frozen_main,
+            "main HEAD must stay put"
+        );
+        assert!(!source.exists(), "source worktree path must be removed");
+        assert!(
+            state
+                .workbench_worktree_repo
+                .get("wt-feature")
+                .await
+                .unwrap()
+                .is_none(),
+            "source sqlite row must be deleted"
+        );
+        assert!(
+            git_cmd(&repo, &["branch", "--list", "feature/test"])
+                .trim()
+                .is_empty(),
+            "source branch must be deleted"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     源提交是主 HEAD 的祖先（先前已合入、主分支又前进）时，同样不能造双父产物，
+    ///     也应跳过隔离 merge 并清理源 worktree。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     feature 先提交再合进 main，main 再前进一次；merge 源 worktree；断言跳过隔离并删除源。
+    #[tokio::test]
+    async fn merge_already_contained_ancestor_skips_isolation_and_cleans_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (repo, source) = setup_already_contained_feature_worktree(temp.path());
+        fs::write(source.join("feature.txt"), "feature\n").expect("feature file");
+        git_cmd(&source, &["add", "feature.txt"]);
+        git_cmd(&source, &["commit", "-m", "feature work"]);
+        git_cmd(
+            &repo,
+            &["merge", "--no-ff", "feature/test", "-m", "merge feature"],
+        );
+        fs::write(repo.join("later.txt"), "later\n").expect("later file");
+        git_cmd(&repo, &["add", "later.txt"]);
+        git_cmd(&repo, &["commit", "-m", "main later"]);
+        let frozen_main = workbench_git::head_hash(&repo)
+            .unwrap()
+            .expect("main head after later");
+
+        let state = build_collect_merge_state(temp.path(), &repo).await;
+        seed_feature_worktree(&state, &source).await;
+
+        let envelope = local_merge_workbench_worktree_with_ledger(
+            &state,
+            "wt-feature".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect("already-merged ancestor merge should succeed");
+        let WorkbenchMutationEnvelopeDto::Succeeded { value, .. } = envelope else {
+            panic!("expected succeeded envelope, got {envelope:?}");
+        };
+        assert!(value.ok);
+        let merge_main = value
+            .stages
+            .iter()
+            .find(|stage| stage.id == MERGE_STAGE_MERGE_MAIN)
+            .expect("mergeMain");
+        assert_eq!(merge_main.status, "skipped");
+        assert_eq!(
+            workbench_git::head_hash(&repo).unwrap().expect("head"),
+            frozen_main
+        );
+        assert!(!source.exists());
+        assert!(state
+            .workbench_worktree_repo
+            .get("wt-feature")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     已合入路径没有双父 merge commit；owner 在 cleanup 前重启时仍必须按冻结祖先关系
+    ///     收敛源 worktree，不能永远 unknown。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同 OID 源 worktree 上 claim+mark_running Merge ledger，调用 recover；
+    ///     断言 succeeded 且源被清理。
+    #[tokio::test]
+    async fn recover_already_contained_merge_cleans_source_without_two_parent_commit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (repo, source) = setup_already_contained_feature_worktree(temp.path());
+        let main_head = workbench_git::head_hash(&repo).unwrap().expect("main head");
+        let source_head = workbench_git::head_hash(&source)
+            .unwrap()
+            .expect("source head");
+        let state = build_collect_merge_state(temp.path(), &repo).await;
+        seed_feature_worktree(&state, &source).await;
+
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let ledger = WorkbenchMutationLedger::new(state.db.clone());
+        ledger.ensure_schema().await.unwrap();
+        let payload = canonical_merge_payload("wt-feature");
+        let payload_hash = hash_canonical_payload(&payload).unwrap();
+        let intent = MutationIntent::Merge {
+            project_id: COLLECT_PROJECT_ID.to_string(),
+            source_worktree_id: "wt-feature".to_string(),
+            source_head,
+            main_head,
+        };
+        ledger
+            .claim(&op_id, MutationKind::Merge, &payload_hash, &intent)
+            .await
+            .unwrap();
+        ledger.mark_running(&op_id).await.unwrap();
+
+        let envelope =
+            recover_pending_merge_after_publish(&state, &ledger, &op_id, "wt-feature", &intent)
+                .await
+                .expect("already-contained recovery should succeed");
+        let WorkbenchMutationEnvelopeDto::Succeeded { value, .. } = envelope else {
+            panic!("expected succeeded recovery, got {envelope:?}");
+        };
+        assert!(value.ok);
+        assert!(!source.exists());
+        assert!(state
+            .workbench_worktree_repo
+            .get("wt-feature")
+            .await
+            .unwrap()
+            .is_none());
     }
 }
 

@@ -803,6 +803,22 @@ pub fn is_ancestor(path: &Path, ancestor: &str, descendant: &str) -> Result<bool
     )))
 }
 
+/// 判断冻结源提交是否已经包含在冻结主 HEAD 中。
+///
+/// Business Logic（为什么需要这个函数）:
+///     源与主停在同一提交、或源已是主的祖先时，`git merge --no-ff` 只会 Already up to date，
+///     造不出双父产物；merge 按钮应视为已合入并直接清理源 worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     `is_ancestor(source_oid, main_oid)`，相等也返回 true。
+pub fn source_already_contained_in_main(
+    repo_path: &Path,
+    main_oid: &str,
+    source_oid: &str,
+) -> Result<bool, AppError> {
+    is_ancestor(repo_path, source_oid, main_oid)
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     merge 验证必须确认 first parent 仍是 merge 前的 pre_oid，并判断 reviewed_oid 是否为 parent。
 ///

@@ -22,7 +22,7 @@ cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终�
 
 - worktree 创建（`feature`/`fix`/`chore` 等前缀模板 + 后缀输入）、切换、移除；注入实时 `git status` 摘要（clean / dirty / conflict）
 - **AI commit**：不手写 commit message 时由 Claude Code 按 staged diff 与项目上下文自动生成并提交；无可提交改动时静默刷新状态
-- **一键合并**：功能 worktree 在隔离的临时 integration worktree 中 `--no-ff` 合并，冲突由 Claude CLI 自动解决（改动被强制限制在原冲突路径内），双父校验通过后才发布 main 并清理源分支；合并前自动关闭该 worktree 下所有终端
+- **一键合并**：功能 worktree 在隔离的临时 integration worktree 中 `--no-ff` 合并，冲突由 Claude CLI 自动解决（改动被强制限制在原冲突路径内），双父校验通过后才发布 main 并清理源分支；源提交已包含在主工作区（同一提交或已是祖先）时跳过隔离 merge，直接清理源 worktree；合并前自动关闭该 worktree 下所有终端
 - **主 worktree collect-merge**：在主工作区直接把散落的未使用本地分支收集合并进主分支，不关终端、不删主工作区
 - Git 提交树：`--topo-order` 提交 DAG 多 lane 图形，紧密相邻的提交行 + 本地/远端/tag badge
 
