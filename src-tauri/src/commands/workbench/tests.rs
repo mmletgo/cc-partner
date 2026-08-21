@@ -577,6 +577,7 @@ fn merge_progress_event_serializes_project_id_for_frontend_filtering() {
             id: MERGE_STAGE_CHECK_SOURCE.to_string(),
             status: "running".to_string(),
             message: "checking".to_string(),
+            activity: None,
         },
     };
 
@@ -585,6 +586,29 @@ fn merge_progress_event_serializes_project_id_for_frontend_filtering() {
     assert_eq!(value["projectId"], "project-1");
     assert_eq!(value["worktreeId"], "worktree-1");
     assert_eq!(value["stage"]["id"], MERGE_STAGE_CHECK_SOURCE);
+    assert!(value["stage"].get("activity").is_none());
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     解冲突运行中前端要在状态下一行展示 Claude Code 动向，事件必须带上 activity。
+///
+/// Code Logic（这个测试做什么）:
+///     序列化带 activity 的阶段，断言 camelCase JSON 包含该字段。
+#[test]
+fn merge_progress_event_serializes_claude_activity_line() {
+    let event = WorkbenchMergeProgressEvent {
+        project_id: "project-1".to_string(),
+        worktree_id: "worktree-1".to_string(),
+        stage: WorkbenchMergeStageDto {
+            id: MERGE_STAGE_RESOLVE_CONFLICTS.to_string(),
+            status: "running".to_string(),
+            message: "正在调用 Claude Code 尝试解决 merge 冲突".to_string(),
+            activity: Some("Read src/lib.rs".to_string()),
+        },
+    };
+
+    let value = serde_json::to_value(event).expect("serialize event");
+    assert_eq!(value["stage"]["activity"], "Read src/lib.rs");
 }
 
 /// Business Logic（为什么需要这个测试）:

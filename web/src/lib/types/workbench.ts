@@ -480,12 +480,14 @@ export type WorkbenchMergeStageId =
  *   一键合并会跨越检查、关闭终端、合并、AI 解冲突和清理，前端需要逐阶段展示进度。
  *
  * Code Logic（字段说明）:
- *   id/status 由后端阶段机产生；message 是后端给用户看的当前阶段说明或失败原因。
+ *   id/status 由后端阶段机产生；message 是后端给用户看的当前阶段说明或失败原因；
+ *   activity 仅 running 时出现，是 Claude Code 当前一行输出动向。
  */
 export interface WorkbenchMergeStage {
   id: WorkbenchMergeStageId;
   status: WorkbenchMergeStageStatus;
   message: string;
+  activity?: string;
 }
 
 /**

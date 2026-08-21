@@ -2137,6 +2137,38 @@ describe('useWorkbenchWorktreeGitController — merge-progress event filtering',
     );
   });
 
+  test('merge-progress activity is kept on the running resolveConflicts stage', async () => {
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-feat',
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: {
+        id: 'resolveConflicts',
+        status: 'running',
+        message: '正在调用 Claude Code 尝试解决 merge 冲突',
+        activity: 'Read src/lib.rs',
+      },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.mergeStages.find((stage) => stage.id === 'resolveConflicts')).toMatchObject(
+      {
+        status: 'running',
+        message: '正在调用 Claude Code 尝试解决 merge 冲突',
+        activity: 'Read src/lib.rs',
+      },
+    );
+  });
+
   test('does not register listener when canListenToTauriEvents returns false', async () => {
     renderController({
       activeProjectId: 'project-1',

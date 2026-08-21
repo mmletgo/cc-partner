@@ -1224,7 +1224,15 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
                 stage = "claude_start",
                 "workbench merge Claude resolution started"
             );
-            match resolve_merge_conflicts_with_claude(state, &integration_path).await {
+            match resolve_merge_conflicts_with_claude(
+                state,
+                &integration_path,
+                &project_id,
+                &worktree_id,
+                &mut stages,
+            )
+            .await
+            {
                 Ok(file_count) => {
                     tracing::info!(
                         project_id = %project_id,
@@ -2023,7 +2031,15 @@ async fn local_collect_merge_main_worktree(
                     "running",
                     "正在调用 Claude Code 尝试解决 collect-merge 冲突",
                 );
-                match resolve_merge_conflicts_with_claude(state, &integration_path).await {
+                match resolve_merge_conflicts_with_claude(
+                    state,
+                    &integration_path,
+                    &project_id,
+                    &worktree_id,
+                    &mut stages,
+                )
+                .await
+                {
                     Ok(_) => {
                         match verify_collect_merge_head(&integration_path, &prev_oid, &source.oid) {
                             Ok(new_head) => {
@@ -2555,6 +2571,7 @@ pub(crate) fn initial_merge_stages() -> Vec<WorkbenchMergeStageDto> {
             id: (*id).to_string(),
             status: "pending".to_string(),
             message: "等待执行".to_string(),
+            activity: None,
         })
         .collect()
 }
@@ -2580,6 +2597,51 @@ pub(crate) fn set_merge_stage(
         .expect("merge stage id 必须来自固定列表");
     stage.status = status.to_string();
     stage.message = message;
+    if status != "running" {
+        stage.activity = None;
+    }
+    emit_merge_stage_progress(state, project_id, worktree_id, stage);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     解冲突可能持续数分钟，用户需要在「正在调用 Claude Code」下面看到当前 CLI 动向。
+///
+/// Code Logic（这个函数做什么）:
+///     只更新 running 阶段的 activity 一行并 emit 进度；相同内容不重复广播。
+pub(crate) fn set_merge_stage_activity(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: &str,
+    stages: &mut [WorkbenchMergeStageDto],
+    stage_id: &str,
+    activity: &str,
+) {
+    let stage = stages
+        .iter_mut()
+        .find(|stage| stage.id == stage_id)
+        .expect("merge stage id 必须来自固定列表");
+    if stage.status != "running" {
+        return;
+    }
+    let next = activity.trim();
+    if next.is_empty() || stage.activity.as_deref() == Some(next) {
+        return;
+    }
+    stage.activity = Some(next.to_string());
+    emit_merge_stage_progress(state, project_id, worktree_id, stage);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     阶段状态和 CLI 动向都要通过同一条 merge-progress 通道到达桌面和远端/移动端。
+///
+/// Code Logic（这个函数做什么）:
+///     克隆当前 stage，publish 远端事件并 emit `workbench:merge-progress`。
+fn emit_merge_stage_progress(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: &str,
+    stage: &WorkbenchMergeStageDto,
+) {
     let event = WorkbenchMergeProgressEvent {
         project_id: project_id.to_string(),
         worktree_id: worktree_id.to_string(),
@@ -2771,9 +2833,13 @@ pub(crate) async fn cleanup_merged_worktree(
 /// Code Logic（这个函数做什么）:
 ///     校验未解决冲突路径，调用只开放文件读写工具的 Claude CLI 直接编辑隔离 worktree，确认所有原冲突文件
 ///     不再含 marker 且 Git index 无 unresolved entry 后 stage all，最后使用 Git 默认 merge message 完成 commit。
+///     CLI 运行期间把最新一行动向写回 resolveConflicts 阶段，idle 超时才中止。
 pub(crate) async fn resolve_merge_conflicts_with_claude(
     state: &AppState,
     integration_path: &Path,
+    project_id: &str,
+    worktree_id: &str,
+    stages: &mut [WorkbenchMergeStageDto],
 ) -> Result<usize, AppError> {
     let conflict_paths = workbench_git::unresolved_conflict_files(integration_path)?;
     if conflict_paths.is_empty() {
@@ -2798,8 +2864,18 @@ pub(crate) async fn resolve_merge_conflicts_with_claude(
         provider_dir.as_deref(),
         &instruction,
         integration_path,
-        MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS,
+        MERGE_CONFLICT_RESOLUTION_IDLE_TIMEOUT_SECS,
         "解决 merge 冲突",
+        |activity| {
+            set_merge_stage_activity(
+                state,
+                project_id,
+                worktree_id,
+                stages,
+                MERGE_STAGE_RESOLVE_CONFLICTS,
+                activity,
+            );
+        },
     )
     .await?;
     ensure_only_conflict_files_modified(integration_path, &conflict_paths)?;

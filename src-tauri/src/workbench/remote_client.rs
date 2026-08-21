@@ -91,7 +91,7 @@ const REMOTE_HEALTH_RETRY_BASE_DELAY: Duration = Duration::from_millis(400);
 ///     Workbench 既有目录浏览这类短读操作，也有创建 worktree、保存文件、commit/merge 等耗时远端操作。
 ///
 /// Code Logic（这个枚举做什么）:
-///     区分短请求、长请求和覆盖 Claude Code 子流程的超长请求，供每个 reqwest request 单独设置 timeout。
+///     区分短请求、长请求、覆盖 Claude Code 子流程的超长请求，以及等对端返回的 merge。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteRequestTimeoutKind {
     Short,
@@ -100,6 +100,8 @@ enum RemoteRequestTimeoutKind {
     /// health/capability 探测专用短超时，配合 `get_json_with_retry` 在跨境链路瞬时黑洞时
     /// 快速失败、把总探测窗口缩到合理范围（4 次 × 5s + 退避 ≈ 最坏 23s）。
     HealthProbe,
+    /// merge：HTTP 无墙钟，由对端 Claude CLI idle（连续 300s 无输出）结束。
+    UntilPeerReturns,
 }
 
 /// Workbench 远端 HTTP 客户端。
@@ -602,7 +604,7 @@ impl RemoteWorkbenchClient {
     ///     remote shortcut 的 Merge 按钮需要在项目所在设备关闭会话、merge 主工作区并清理 worktree。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST `{base_url}/api/workbench/worktrees/merge`，用 very-long timeout 返回对端 merge result JSON 供命令层映射 ID。
+    ///     POST `{base_url}/api/workbench/worktrees/merge`，HTTP 等到对端返回；对端 CLI idle 才结束。
     pub async fn merge_worktree(
         &self,
         base_url: &str,
@@ -1786,14 +1788,13 @@ impl RemoteWorkbenchClient {
             let base = origin_base_url(&url)?;
             self.ensure_expected_device_binding(&base).await?;
         }
-        let mut req = self
-            .client
-            .get(&url)
-            .header(
+        let mut req = apply_remote_timeout(
+            self.client.get(&url).header(
                 crate::net::request_context::REQUEST_ID_HEADER,
                 self.outbound_request_id(),
-            )
-            .timeout(remote_request_timeout(timeout_kind));
+            ),
+            timeout_kind,
+        );
         if let Some(device_id) = self.expected_device_id.as_deref() {
             req = req.header(
                 crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
@@ -1872,15 +1873,13 @@ impl RemoteWorkbenchClient {
             let base = origin_base_url(&url)?;
             self.ensure_expected_device_binding(&base).await?;
         }
-        let mut req = self
-            .client
-            .post(&url)
-            .json(body)
-            .header(
+        let mut req = apply_remote_timeout(
+            self.client.post(&url).json(body).header(
                 crate::net::request_context::REQUEST_ID_HEADER,
                 self.outbound_request_id(),
-            )
-            .timeout(remote_request_timeout(timeout_kind));
+            ),
+            timeout_kind,
+        );
         if let Some(device_id) = self.expected_device_id.as_deref() {
             req = req.header(
                 crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
@@ -1985,15 +1984,37 @@ impl Default for RemoteWorkbenchClient {
 ///     远端 Workbench 需要同时支持快速浏览和耗时写入，不能用单一 client-level timeout 限制所有接口。
 ///
 /// Code Logic（这个函数做什么）:
-///     将请求类别映射为具体 Duration，供每个 request builder 单独设置超时。
-fn remote_request_timeout(kind: RemoteRequestTimeoutKind) -> Duration {
+///     将请求类别映射为具体 Duration；UntilPeerReturns 为 None，不设 request timeout。
+fn remote_request_timeout(kind: RemoteRequestTimeoutKind) -> Option<Duration> {
     match kind {
-        RemoteRequestTimeoutKind::Short => Duration::from_secs(SHORT_REMOTE_WORKBENCH_TIMEOUT_SECS),
-        RemoteRequestTimeoutKind::Long => Duration::from_secs(LONG_REMOTE_WORKBENCH_TIMEOUT_SECS),
-        RemoteRequestTimeoutKind::VeryLong => {
-            Duration::from_secs(VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS)
+        RemoteRequestTimeoutKind::Short => {
+            Some(Duration::from_secs(SHORT_REMOTE_WORKBENCH_TIMEOUT_SECS))
         }
-        RemoteRequestTimeoutKind::HealthProbe => Duration::from_secs(HEALTH_PROBE_TIMEOUT_SECS),
+        RemoteRequestTimeoutKind::Long => {
+            Some(Duration::from_secs(LONG_REMOTE_WORKBENCH_TIMEOUT_SECS))
+        }
+        RemoteRequestTimeoutKind::VeryLong => {
+            Some(Duration::from_secs(VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS))
+        }
+        RemoteRequestTimeoutKind::HealthProbe => {
+            Some(Duration::from_secs(HEALTH_PROBE_TIMEOUT_SECS))
+        }
+        RemoteRequestTimeoutKind::UntilPeerReturns => None,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 不能套墙钟 timeout，其它请求仍要按类别设上限。
+///
+/// Code Logic（这个函数做什么）:
+///     UntilPeerReturns 原样返回 builder；其余调用 `.timeout(Duration)`。
+fn apply_remote_timeout(
+    request: reqwest::RequestBuilder,
+    kind: RemoteRequestTimeoutKind,
+) -> reqwest::RequestBuilder {
+    match remote_request_timeout(kind) {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
     }
 }
 
@@ -2007,12 +2028,12 @@ fn commit_worktree_timeout_kind() -> RemoteRequestTimeoutKind {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     远端 merge 冲突处理可能在对端运行 300s Claude Code 流程，本机 HTTP 客户端不能提前超时。
+///     远端 merge 冲突处理只要 Claude 还在输出就会继续；HTTP 墙钟会误杀仍在工作的对端。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回 merge-worktree 请求专用的超长 timeout 类别，供方法和测试复用。
+///     返回 UntilPeerReturns，请求不设 overall timeout，结束条件是对端 CLI idle 或 merge 完成。
 fn merge_worktree_timeout_kind() -> RemoteRequestTimeoutKind {
-    RemoteRequestTimeoutKind::VeryLong
+    RemoteRequestTimeoutKind::UntilPeerReturns
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2117,19 +2138,23 @@ mod tests {
     fn remote_request_timeout_separates_short_and_long_operations() {
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::Short),
-            Duration::from_secs(15)
+            Some(Duration::from_secs(15))
         );
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::Long),
-            Duration::from_secs(120)
+            Some(Duration::from_secs(120))
         );
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::VeryLong),
-            Duration::from_secs(420)
+            Some(Duration::from_secs(420))
         );
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::HealthProbe),
-            Duration::from_secs(5)
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            remote_request_timeout(RemoteRequestTimeoutKind::UntilPeerReturns),
+            None
         );
     }
 
@@ -2200,22 +2225,35 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     远端 commit/merge 会包住本机 180s commit message 与 300s merge 冲突处理流程，HTTP 超时不能先断开。
+    ///     远端 commit 会包住本机 180s commit message，HTTP 超时不能先断开。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     校验 commit/merge 的 timeout kind 均使用 very-long，且具体秒数覆盖本机长操作上限。
+    ///     校验 commit 使用 very-long，且具体秒数覆盖本机长操作上限。
     #[test]
-    fn commit_and_merge_use_very_long_timeout() {
+    fn commit_uses_very_long_timeout() {
         assert_eq!(
             commit_worktree_timeout_kind(),
             RemoteRequestTimeoutKind::VeryLong
         );
+        assert!(
+            remote_request_timeout(commit_worktree_timeout_kind())
+                .expect("commit has wall-clock timeout")
+                >= Duration::from_secs(180)
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     merge 冲突只要 Claude 还在输出就不该被 HTTP 墙钟掐断；对端 CLI idle 才是结束条件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     校验 merge 使用 UntilPeerReturns，请求级 timeout 为 None。
+    #[test]
+    fn merge_waits_until_peer_returns_without_http_wall_clock() {
         assert_eq!(
             merge_worktree_timeout_kind(),
-            RemoteRequestTimeoutKind::VeryLong
+            RemoteRequestTimeoutKind::UntilPeerReturns
         );
-        assert!(remote_request_timeout(commit_worktree_timeout_kind()) >= Duration::from_secs(180));
-        assert!(remote_request_timeout(merge_worktree_timeout_kind()) >= Duration::from_secs(300));
+        assert_eq!(remote_request_timeout(merge_worktree_timeout_kind()), None);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -2230,7 +2268,9 @@ mod tests {
             RemoteRequestTimeoutKind::VeryLong
         );
         assert!(
-            remote_request_timeout(prompt_optimizer_timeout_kind()) >= Duration::from_secs(180)
+            remote_request_timeout(prompt_optimizer_timeout_kind())
+                .expect("prompt optimizer has wall-clock timeout")
+                >= Duration::from_secs(180)
         );
     }
 

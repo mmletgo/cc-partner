@@ -21,6 +21,7 @@ use tokio::process::Command;
 const DEFAULT_CLAUDE_CLI: &str = "claude";
 const DEFAULT_CLAUDE_MODEL: &str = "sonnet";
 const MAX_ERROR_CHARS: usize = 500;
+const MAX_ACTIVITY_CHARS: usize = 160;
 const CLI_VERSION_TIMEOUT_SECS: u64 = 10;
 
 /// 归一化 Claude CLI 路径。
@@ -303,11 +304,14 @@ const EMPTY_MCP_CONFIG_JSON: &str = r#"{"mcpServers":{}}"#;
 ///     使用 print/non-persistent 项目上下文，只开放 Read/Edit/Write/Grep/Glob；dontAsk 模式下只预批准
 ///     integration 项目根内读写与只读搜索，不开放 Bash，精确文件范围由调用方在 CLI 返回后用 Git 验证。
 ///     `--strict-mcp-config` + 空 `mcpServers` 切断用户/项目 MCP，且满足 CLI record schema。
+///     stream-json + verbose 让调用方按行观察工具调用并做 idle timeout，而不是等整段 JSON。
 pub(crate) fn build_project_edit_headless_args(model: &str) -> Vec<String> {
     vec![
         "-p".to_string(),
         "--output-format".to_string(),
-        "json".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--include-partial-messages".to_string(),
         "--no-session-persistence".to_string(),
         "--strict-mcp-config".to_string(),
         "--mcp-config".to_string(),
@@ -428,6 +432,109 @@ fn text_delta_from_stream_event(value: &serde_json::Value) -> Option<&str> {
         return None;
     }
     delta.get("text").and_then(|item| item.as_str())
+}
+
+/// 从 Claude CLI stream-json 行提取一行可读动向。
+///
+/// Business Logic（为什么需要这个函数）:
+///     merge 冲突解决要在阶段条下展示 Claude Code 正在做什么，但不能把整段 JSON 事件甩给用户。
+///
+/// Code Logic（这个函数做什么）:
+///     优先取 assistant/tool_use 的工具名+路径/pattern；否则取 assistant 文本最后一行；
+///     thinking/result/其它元事件返回 None。空白行压成单行并截断。
+pub(crate) fn activity_line_from_stream_json(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    match value.get("type").and_then(|item| item.as_str())? {
+        "assistant" => activity_from_assistant(&value),
+        "stream_event" => activity_from_stream_event(&value),
+        _ => None,
+    }
+}
+
+/// 从 assistant 事件提取工具调用或最后一行文本。
+fn activity_from_assistant(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())?;
+    let mut last_tool = None;
+    let mut last_text = None;
+    for item in content {
+        match item.get("type").and_then(|kind| kind.as_str()) {
+            Some("tool_use") => {
+                if let Some(name) = item.get("name").and_then(|name| name.as_str()) {
+                    last_tool = Some(format_tool_activity(name, item.get("input")));
+                }
+            }
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(|text| text.as_str()) {
+                    last_text = text
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .next_back()
+                        .map(collapse_activity_line);
+                }
+            }
+            _ => {}
+        }
+    }
+    last_tool.or(last_text).filter(|line| !line.is_empty())
+}
+
+/// 从 stream_event 的 tool_use 起始块提取动向。
+fn activity_from_stream_event(value: &serde_json::Value) -> Option<String> {
+    let event = value.get("event")?;
+    if event.get("type").and_then(|item| item.as_str()) != Some("content_block_start") {
+        return None;
+    }
+    let block = event.get("content_block")?;
+    if block.get("type").and_then(|item| item.as_str()) != Some("tool_use") {
+        return None;
+    }
+    let name = block.get("name").and_then(|item| item.as_str())?;
+    Some(format_tool_activity(name, block.get("input"))).filter(|line| !line.is_empty())
+}
+
+/// 把工具名和关键参数压成一行动向。
+fn format_tool_activity(name: &str, input: Option<&serde_json::Value>) -> String {
+    let Some(input) = input else {
+        return collapse_activity_line(name);
+    };
+    let detail = match name {
+        "Grep" | "Glob" => input
+            .get("pattern")
+            .or_else(|| input.get("glob"))
+            .or_else(|| input.get("query"))
+            .or_else(|| input.get("path")),
+        _ => input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .or_else(|| input.get("pattern")),
+    }
+    .and_then(|item| item.as_str())
+    .unwrap_or("");
+    if detail.is_empty() {
+        collapse_activity_line(name)
+    } else {
+        collapse_activity_line(&format!("{name} {detail}"))
+    }
+}
+
+/// 把多空白/换行压成单行并截断，供阶段条一行展示。
+fn collapse_activity_line(raw: &str) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let truncated: String = chars.by_ref().take(MAX_ACTIVITY_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 /// 从 Claude CLI stream-json assistant 事件中提取文本。
@@ -563,20 +670,25 @@ where
 /// Business Logic（为什么需要这个函数）:
 ///     merge 冲突文件可能很大且很多，完整 JSON 回传会同时放大输入与输出并稳定触发超时；
 ///     integration worktree 已与真实 main/source 隔离，可让 Claude 在其中直接修改，随后由调用方严格验收。
+///     解决冲突只要 CLI 还在产出输出就应继续等；只有连续无输出才算卡住。
 ///
 /// Code Logic（这个函数做什么）:
-///     以受限项目编辑参数启动 CLI，通过 stdin 写 prompt，等待有界时间；成功只表示 CLI 正常退出，
-///     不信任其文本结果，冲突消除、路径范围、stage 与 commit 均由调用方验证。
-#[allow(clippy::too_many_arguments)] // cli/model/provider/prompt/cwd/timeout/label 语义独立
-pub(crate) async fn run_project_edit_with_cwd(
+///     以受限项目编辑参数启动 CLI，通过 stdin 写 prompt，按行读 stream-json；每行刷新 idle 计时，
+///     可解析出动向时回调 on_activity。成功只表示 CLI 正常退出，不信任其文本结果。
+#[allow(clippy::too_many_arguments)] // cli/model/provider/prompt/cwd/idle/label/on_activity 语义独立
+pub(crate) async fn run_project_edit_with_cwd<F>(
     cli_path: &str,
     model: &str,
     provider_config_dir: Option<&Path>,
     prompt: &str,
     working_directory: &Path,
-    timeout_secs: u64,
+    idle_timeout_secs: u64,
     task_label: &str,
-) -> Result<(), AppError> {
+    mut on_activity: F,
+) -> Result<(), AppError>
+where
+    F: FnMut(&str),
+{
     let cli = resolve_cli_path(cli_path);
     let mut cmd = Command::new(&cli);
     cmd.env("PATH", cli_command_path_env())
@@ -597,24 +709,58 @@ pub(crate) async fn run_project_edit_with_cwd(
             .await
             .map_err(|e| AppError::generic(format!("写入 Claude CLI prompt 失败: {e}")))?;
     }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::generic("Claude CLI stdout 不可用"))?;
+    let stderr_task = child.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes).await;
+            bytes
+        })
+    });
 
-    let output =
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-            .await
-        {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => return Err(AppError::generic(format!("等待 Claude CLI 输出失败: {e}"))),
+    let idle = Duration::from_secs(idle_timeout_secs);
+    let mut reader = BufReader::new(stdout).lines();
+    let mut last_activity = String::new();
+    loop {
+        let line = match tokio::time::timeout(idle, reader.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => return Err(AppError::generic(format!("读取 Claude CLI 输出失败: {e}"))),
             Err(_) => {
                 return Err(AppError::generic(format!(
-                    "Claude CLI {task_label}超时（{timeout_secs} 秒）"
+                    "Claude CLI {task_label}超时（{idle_timeout_secs} 秒无输出）"
                 )))
             }
         };
+        if let Some(activity) = activity_line_from_stream_json(&line) {
+            if activity != last_activity {
+                last_activity = activity.clone();
+                on_activity(&activity);
+            }
+        }
+    }
 
-    if !output.status.success() {
+    let status = match tokio::time::timeout(idle, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => return Err(AppError::generic(format!("等待 Claude CLI 输出失败: {e}"))),
+        Err(_) => {
+            return Err(AppError::generic(format!(
+                "Claude CLI {task_label}超时（{idle_timeout_secs} 秒无输出）"
+            )))
+        }
+    };
+    let stderr = match stderr_task {
+        Some(task) => task.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    if !status.success() {
         return Err(AppError::generic(format!(
             "Claude CLI {task_label}失败: {}",
-            failure_detail(&output.stderr, &output.stdout)
+            failure_detail(&stderr, &[])
         )));
     }
     Ok(())
@@ -907,6 +1053,48 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "Bash"));
         assert!(!args.iter().any(|arg| arg == "--json-schema"));
         assert!(!args.iter().any(|arg| arg == "--bare"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "stream-json"]));
+        assert!(args.iter().any(|arg| arg == "--verbose"));
+        assert!(args.iter().any(|arg| arg == "--include-partial-messages"));
+    }
+
+    #[test]
+    fn activity_line_from_stream_json_prefers_tool_use_path() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Inspecting conflict"},{"type":"tool_use","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#;
+        assert_eq!(
+            activity_line_from_stream_json(line).as_deref(),
+            Some("Read src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn activity_line_from_stream_json_uses_last_assistant_text_line() {
+        let line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first line\\nsecond line\\n\"}]}}";
+        assert_eq!(
+            activity_line_from_stream_json(line).as_deref(),
+            Some("second line")
+        );
+    }
+
+    #[test]
+    fn activity_line_from_stream_json_formats_grep_and_ignores_result() {
+        let grep = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{"pattern":"<<<<<<","path":"."}}]}}"#;
+        assert_eq!(
+            activity_line_from_stream_json(grep).as_deref(),
+            Some("Grep <<<<<<")
+        );
+        assert_eq!(
+            activity_line_from_stream_json(r#"{"type":"result","result":"done"}"#),
+            None
+        );
+        assert_eq!(
+            activity_line_from_stream_json(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"internal"}}}"#
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1132,5 +1320,83 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--verbose"));
         assert!(args.iter().any(|arg| arg == "--include-partial-messages"));
         assert!(!args.iter().any(|arg| arg == "--json-schema"));
+    }
+
+    #[cfg(unix)]
+    fn write_fake_claude_script(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-claude");
+        std::fs::write(&script, contents).expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (dir, script)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_edit_keeps_waiting_while_cli_keeps_emitting_output() {
+        let (_dir, script) = write_fake_claude_script(
+            r#"#!/bin/sh
+cat >/dev/null
+i=0
+while [ "$i" -lt 8 ]; do
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"f.rs"}}]}}'
+  sleep 0.3
+  i=$((i+1))
+done
+exit 0
+"#,
+        );
+        let cwd = tempfile::tempdir().expect("cwd");
+        let mut activities = Vec::new();
+        let started = std::time::Instant::now();
+        run_project_edit_with_cwd(
+            script.to_str().expect("utf8 path"),
+            "sonnet",
+            None,
+            "resolve",
+            cwd.path(),
+            1,
+            "解决 merge 冲突",
+            |line| activities.push(line.to_string()),
+        )
+        .await
+        .expect("ongoing output must not idle-timeout");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(1500));
+        assert!(
+            activities.iter().any(|line| line == "Read f.rs"),
+            "expected tool activity, got {activities:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_edit_idle_timeouts_after_silence() {
+        let (_dir, script) = write_fake_claude_script(
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"f.rs"}}]}}'
+sleep 3
+exit 0
+"#,
+        );
+        let cwd = tempfile::tempdir().expect("cwd");
+        let error = run_project_edit_with_cwd(
+            script.to_str().expect("utf8 path"),
+            "sonnet",
+            None,
+            "resolve",
+            cwd.path(),
+            1,
+            "解决 merge 冲突",
+            |_| {},
+        )
+        .await
+        .expect_err("silence longer than idle timeout must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("超时") && message.contains("无输出"),
+            "unexpected timeout message: {message}"
+        );
     }
 }

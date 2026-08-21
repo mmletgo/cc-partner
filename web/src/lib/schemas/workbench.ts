@@ -366,6 +366,7 @@ const workbenchMergeStageDecoder: Decoder<WorkbenchMergeStage> = objectDecoder(
     id: stringDecoder as Decoder<WorkbenchMergeStage['id']>,
     status: stringDecoder as Decoder<WorkbenchMergeStage['status']>,
     message: stringDecoder,
+    activity: optionalDecoder(stringDecoder),
   },
 );
 
