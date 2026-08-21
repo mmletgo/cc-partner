@@ -19,6 +19,10 @@ import {
   type TerminalBufferDelta,
 } from '@/hooks/workbenchTerminalBuffer';
 import {
+  getUnknownMutationClientOperationId,
+  isWorkbenchMutationUnknownError,
+} from '@/lib/asyncState/mutationOutcome';
+import {
   ArrowRightIcon,
   CommitIcon,
   EditIcon,
@@ -26,6 +30,7 @@ import {
   MinimizeIcon,
   PlusIcon,
   PromptsIcon,
+  SyncIcon,
   XIcon,
 } from '@/lib/icons';
 import type { Prompt, WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
@@ -53,6 +58,7 @@ import {
 } from '../mobileTerminalTouchScroll';
 import {
   isMobileGitActionResponseCurrent,
+  isMobileGitMergeResponseCurrent,
   isMobileMutationActionLocked,
   pickMobileMutationOperationId,
   type MobileGitActionContext,
@@ -61,6 +67,7 @@ import {
 import { executeMobileGitCommit } from '../mobileGitCommit';
 import {
   canRunMobilePaneMutation,
+  canShowMobileTerminalMergeFab,
   canSwitchMobilePane,
   emptyMobileSessionRuntimeState,
   getMobileCreatePaneDirection,
@@ -114,6 +121,8 @@ export interface MobileTerminalPanelProps {
   onRefreshSessions?: () => Promise<void> | void;
   /** Commit 成功后把权威 worktree 写回父级。 */
   onWorktreeChange?: (worktree: WorkbenchWorktree) => void;
+  /** 终端合并 FAB 复用父级与 Git 面板相同的 dirty guard / envelope merge。 */
+  onMergeWorktree?: (worktree: WorkbenchWorktree) => Promise<boolean>;
   /** unknown 对账确认成功后刷新 worktree 列表。 */
   onRefreshWorktrees?: (options?: {
     skipFileContextConfirm?: boolean;
@@ -201,7 +210,8 @@ function getErrorMessage(reason: unknown, fallback: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 active project/worktree/session 渲染 session tabs、xterm viewport 和 window/pane 控制按钮；
- *   右侧 FAB 组顶部为 Git Commit 快捷键（与桌面 Git 历史 Commit 同口径，message=null）；
+ *   右侧 FAB 组顶部为 Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）再 Git Commit
+ *   （与桌面 Git 历史同口径，Commit 的 message=null）；
  *   首屏通过 HTTP replay 写入历史 buffer，后续只消费外部 terminal buffer store 增量，输入/resize/focus/split/close 全部调用 HTTP transport。
  */
 export function MobileTerminalPanel({
@@ -216,6 +226,7 @@ export function MobileTerminalPanel({
   onActiveSessionChange,
   onRefreshSessions,
   onWorktreeChange,
+  onMergeWorktree,
   onRefreshWorktrees,
   onFocusRepairSession,
 }: MobileTerminalPanelProps): ReactElement {
@@ -233,8 +244,10 @@ export function MobileTerminalPanel({
   const [favoriteSheetOpen, setFavoriteSheetOpen] = useState<boolean>(false);
   const [promptOptimizerSheetOpen, setPromptOptimizerSheetOpen] = useState<boolean>(false);
   const [commitPhase, setCommitPhase] = useState<MobileMutationPhase>('idle');
+  const [mergePhase, setMergePhase] = useState<MobileMutationPhase>('idle');
   const [hookRepair, setHookRepair] = useState<MobileHookRepair | null>(null);
   const commitOperationIdRef = useRef<string | null>(null);
+  const mergeOperationIdRef = useRef<string | null>(null);
   const commitContextRef = useRef<MobileGitActionContext | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -292,11 +305,24 @@ export function MobileTerminalPanel({
     Boolean(project && worktree) &&
     !busy &&
     (actionBusy === null || actionBusy === 'commit') &&
-    (!isMobileMutationActionLocked(commitPhase) || commitPhase === 'unknown');
+    (!isMobileMutationActionLocked(commitPhase) || commitPhase === 'unknown') &&
+    !isMobileMutationActionLocked(mergePhase);
+  const showMergeFab = Boolean(onMergeWorktree) && canShowMobileTerminalMergeFab(worktree);
+  const mergeBusy = actionBusy === 'merge';
+  const canMergeWorktree =
+    showMergeFab &&
+    Boolean(project && worktree) &&
+    !busy &&
+    (actionBusy === null || actionBusy === 'merge') &&
+    !isMobileMutationActionLocked(commitPhase) &&
+    (!isMobileMutationActionLocked(mergePhase) || mergePhase === 'unknown');
   const commitBusy = actionBusy === 'commit';
   const commitLabel = commitBusy
     ? t('workbench:mobile.gitPanel.committing')
     : t('workbench:worktrees.commit');
+  const mergeLabel = mergeBusy
+    ? t('workbench:mobile.gitPanel.merging')
+    : t('workbench:worktrees.merge');
   const worktreeDirty = worktree != null && !worktree.status.clean;
   const isTerminalFullscreen = terminalFullscreen && visibleSession !== null;
   const terminalChrome = getMobileTerminalChromeVisibility(isTerminalFullscreen);
@@ -318,9 +344,11 @@ export function MobileTerminalPanel({
       ? { projectId: project.id, worktreeId: worktree.id }
       : null;
     setCommitPhase('idle');
+    setMergePhase('idle');
     setHookRepair(null);
     setCommitSuccess(null);
     commitOperationIdRef.current = null;
+    mergeOperationIdRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 id 驱动重置
   }, [project?.id, worktree?.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -496,6 +524,86 @@ export function MobileTerminalPanel({
     commitPhase,
     onRefreshWorktrees,
     onWorktreeChange,
+    project,
+    t,
+    worktree,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   终端右侧需要与桌面 Git 历史 Merge 同口径的一键合并，不离开终端。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托父级 dirty guard / envelope merge；unknown 只查询 ledger 对账，禁止新 ID 盲重放。
+   */
+  const handleMergeWorktree = useCallback(async (): Promise<void> => {
+    if (busy || !project || !worktree || !onMergeWorktree) return;
+    if (!canShowMobileTerminalMergeFab(worktree)) return;
+    if (isMobileMutationActionLocked(commitPhase)) return;
+    if (isMobileMutationActionLocked(mergePhase) && mergePhase !== 'unknown') return;
+    const actionContext = { projectId: project.id, worktreeId: worktree.id };
+    setActionBusy('merge');
+    setMergePhase('busy');
+    setPanelError(null);
+    setCommitSuccess(null);
+    try {
+      if (mergePhase === 'unknown' && mergeOperationIdRef.current) {
+        const ledger = await workbenchHttp.git
+          .getMutationOperation(mergeOperationIdRef.current)
+          .catch(() => null);
+        if (!isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) return;
+        if (ledger?.state === 'succeeded') {
+          mergeOperationIdRef.current = null;
+          setMergePhase('idle');
+          await onRefreshWorktrees?.({ expectedProjectId: actionContext.projectId });
+          return;
+        }
+        if (ledger?.state === 'failed') {
+          mergeOperationIdRef.current = null;
+          setMergePhase('idle');
+          setPanelError(t('workbench:errors.mutationFailed'));
+          return;
+        }
+        setMergePhase('unknown');
+        setPanelError(t('workbench:errors.mutationUnknown'));
+        return;
+      }
+
+      const didMerge = await onMergeWorktree(worktree);
+      if (!didMerge) {
+        setMergePhase('idle');
+        return;
+      }
+      if (!isMobileGitMergeResponseCurrent(actionContext, commitContextRef.current)) return;
+      mergeOperationIdRef.current = null;
+      setMergePhase('idle');
+    } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) return;
+      if (isWorkbenchMutationUnknownError(reason)) {
+        mergeOperationIdRef.current = getUnknownMutationClientOperationId(reason);
+        setMergePhase('unknown');
+        setPanelError(t('workbench:errors.mutationUnknown'));
+      } else {
+        setMergePhase('idle');
+        mergeOperationIdRef.current = null;
+        setPanelError(
+          `${t('workbench:errors.mergeWorktree')}: ${getErrorMessage(
+            reason,
+            t('workbench:errors.mergeWorktree'),
+          )}`,
+        );
+      }
+    } finally {
+      if (isMobileGitActionResponseCurrent(actionContext, commitContextRef.current)) {
+        setActionBusy(null);
+      }
+    }
+  }, [
+    busy,
+    commitPhase,
+    mergePhase,
+    onMergeWorktree,
+    onRefreshWorktrees,
     project,
     t,
     worktree,
@@ -1752,6 +1860,19 @@ export function MobileTerminalPanel({
             <div className={styles.mobileTerminalViewport} ref={viewportRef} />
             {visibleSession ? (
               <div className={styles.mobileTerminalFabGroup}>
+                {showMergeFab ? (
+                  <PointerPrimaryButton
+                    type="button"
+                    className={styles.mobileTerminalFab}
+                    disabled={!canMergeWorktree || mergeBusy}
+                    aria-busy={mergeBusy || undefined}
+                    aria-label={mergeLabel}
+                    title={mergeLabel}
+                    onPrimary={() => void handleMergeWorktree()}
+                  >
+                    <SyncIcon size={18} aria-hidden="true" />
+                  </PointerPrimaryButton>
+                ) : null}
                 <PointerPrimaryButton
                   type="button"
                   className={styles.mobileTerminalFab}

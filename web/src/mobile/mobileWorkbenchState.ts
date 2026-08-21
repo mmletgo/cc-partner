@@ -709,6 +709,23 @@ export function canRunMobileWorktreeDestructiveAction(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   移动端终端右下角合并 FAB 只应在非主工作区、非主分支或主工作区可 collect-merge 时出现，
+ *   避免在默认主分支主工作区误露出与桌面 Git 历史相同的合并入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   null 隐藏；非主 worktree 显示；主工作区在 canCollectMerge 或当前分支不等于 homeBranch 时显示。
+ */
+export function canShowMobileTerminalMergeFab(worktree: WorkbenchWorktree | null): boolean {
+  if (worktree == null) return false;
+  if (!worktree.isMain) return true;
+  if (worktree.canCollectMerge) return true;
+  const currentBranch = worktree.branch ?? worktree.status.branch;
+  const homeBranch = worktree.homeBranch;
+  return Boolean(currentBranch && homeBranch && currentBranch !== homeBranch);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   用户在移动端 Worktrees 面板点击工作区时，期望成功切换后直接进入对应 Workbench 操作现场。
  *
  * Code Logic（这个函数做什么）:
