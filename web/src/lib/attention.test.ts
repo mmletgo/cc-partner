@@ -13,6 +13,7 @@ import { describe, expect, test } from 'vitest';
 import {
   buildDesktopAttentionTargetUrl,
   collectUnreadAgentNeedsInputItemIds,
+  countUnreadAttentionItemsOnLocalDay,
   formatAttentionBadgeCount,
   getAttentionActionI18nKey,
   groupAttentionItems,
@@ -220,6 +221,34 @@ describe('partitionAttentionItemsByLocalDay', () => {
     const partition = partitionAttentionItemsByLocalDay([invalid], now);
     expect(partition.today).toHaveLength(1);
     expect(partition.earlier).toHaveLength(0);
+  });
+});
+
+describe('countUnreadAttentionItemsOnLocalDay', () => {
+  const now = new Date(2026, 7, 16, 15, 0, 0);
+
+  test('counts only unread items whose updatedAt falls on the local day', () => {
+    const todayUnread = buildItem({
+      id: 'today-unread',
+      updatedAt: new Date(2026, 7, 16, 9, 0, 0).toISOString(),
+    });
+    const todayRead = buildItem({
+      id: 'today-read',
+      updatedAt: new Date(2026, 7, 16, 11, 0, 0).toISOString(),
+      readAt: '2026-08-16T11:00:00.000Z',
+    });
+    const earlierUnread = buildItem({
+      id: 'earlier-unread',
+      updatedAt: new Date(2026, 7, 15, 18, 0, 0).toISOString(),
+    });
+    expect(
+      countUnreadAttentionItemsOnLocalDay([todayUnread, todayRead, earlierUnread], now),
+    ).toBe(1);
+  });
+
+  test('treats invalid timestamps as today so they still count when unread', () => {
+    const invalidUnread = buildItem({ id: 'invalid', updatedAt: 'not-a-date' });
+    expect(countUnreadAttentionItemsOnLocalDay([invalidUnread], now)).toBe(1);
   });
 });
 

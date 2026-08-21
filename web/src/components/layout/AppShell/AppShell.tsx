@@ -48,7 +48,10 @@ import {
 } from '../../../lib/icons';
 import { useAppVersion } from '../../../hooks/useAppVersion';
 import { useAttention } from '../../../hooks/useAttention';
-import { formatAttentionBadgeCount } from '../../../lib/attention';
+import {
+  countUnreadAttentionItemsOnLocalDay,
+  formatAttentionBadgeCount,
+} from '../../../lib/attention';
 import { Sidebar } from '../Sidebar';
 import { NavItem } from '../NavItem';
 import { ThemeToggle } from '../ThemeToggle';
@@ -122,7 +125,7 @@ export function AppShell({ children }: AppShellProps) {
   const version = useAppVersion();
   const { snapshot: attentionSnapshot } = useAttention();
   const attentionBadge = formatAttentionBadgeCount(
-    attentionSnapshot?.counts.unreadTotal ?? 0,
+    countUnreadAttentionItemsOnLocalDay(attentionSnapshot?.items ?? [], new Date()),
   );
   // 传入命名空间数组,让 react-i18next v17 的 t() 类型校验 ns:key 形式
   // (无参时 t() 只接受 defaultNS 即 common 的扁平 key,'nav:*' 会类型报错)

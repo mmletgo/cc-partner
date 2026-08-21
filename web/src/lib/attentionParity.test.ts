@@ -13,6 +13,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  countUnreadAttentionItemsOnLocalDay,
   formatAttentionBadgeCount,
   groupAttentionItems,
   protectAttentionItemOrder,
@@ -103,9 +104,11 @@ describe('attention desktop/mobile parity helpers', () => {
   test('same snapshot yields same badge total and group ordering', () => {
     const snapshot = buildParitySnapshot();
 
-    // 桌面侧栏与移动 nav 都只消费 formatAttentionBadgeCount(total)。
-    const desktopBadge = formatAttentionBadgeCount(snapshot.counts.total);
-    const mobileBadge = formatAttentionBadgeCount(snapshot.counts.total);
+    // 桌面侧栏与移动 nav 都消费当天未读 + formatAttentionBadgeCount。
+    const now = new Date(snapshot.items[0].updatedAt);
+    const todayUnread = countUnreadAttentionItemsOnLocalDay(snapshot.items, now);
+    const desktopBadge = formatAttentionBadgeCount(todayUnread);
+    const mobileBadge = formatAttentionBadgeCount(todayUnread);
     expect(desktopBadge).toBe('4');
     expect(mobileBadge).toBe(desktopBadge);
 

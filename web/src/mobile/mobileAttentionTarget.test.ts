@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from 'vitest';
 
+import { countUnreadAttentionItemsOnLocalDay } from '@/lib/attention';
 import type { AttentionItem } from '@/lib/types';
 import {
   filterMobileInboxAttentionItems,
@@ -182,4 +183,74 @@ describe('filterMobileInboxAttentionItems', () => {
       'orchestrator:human-review:task-1',
     ]);
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   移动导航 badge 必须与桌面一样只计当天未读，且继续剔除 tmux，避免更早事项把数字撑大。
+   *
+   * Code Logic（这个测试做什么）:
+   *   混入当天未读、当天已读、更早未读和 tmux，断言 badge 计数为 1。
+   */
+  test('mobile badge counts only today unread items after hiding tmux', () => {
+    const now = new Date(2026, 7, 16, 15, 0, 0);
+    const todayUnread: AttentionItem = {
+      ...taskFixture(),
+      id: 'today-unread',
+      updatedAt: new Date(2026, 7, 16, 9, 0, 0).toISOString(),
+    };
+    const todayRead: AttentionItem = {
+      ...taskFixture(),
+      id: 'today-read',
+      updatedAt: new Date(2026, 7, 16, 11, 0, 0).toISOString(),
+      readAt: '2026-08-16T03:00:00.000Z',
+    };
+    const earlierUnread: AttentionItem = {
+      ...taskFixture(),
+      id: 'earlier-unread',
+      updatedAt: new Date(2026, 7, 15, 18, 0, 0).toISOString(),
+    };
+    const tmuxToday: AttentionItem = {
+      id: 'workbench:dependency:tmux',
+      category: 'environment',
+      sourceKind: 'workbenchDependency',
+      title: 'tmux missing',
+      summary: 'Install tmux',
+      updatedAt: new Date(2026, 7, 16, 10, 0, 0).toISOString(),
+      freshness: 'live',
+      cachedAt: null,
+      project: null,
+      device: null,
+      target: { kind: 'settings', tab: 'dependencies' },
+    };
+
+    expect(
+      countUnreadAttentionItemsOnLocalDay(
+        filterMobileInboxAttentionItems([todayUnread, todayRead, earlierUnread, tmuxToday]),
+        now,
+      ),
+    ).toBe(1);
+  });
 });
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   badge 日切分测试需要一份合法任务条目，避免每个用例重复样板。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回可覆盖的 orchestrator human-review AttentionItem。
+ */
+function taskFixture(): AttentionItem {
+  return {
+    id: 'orchestrator:human-review:task-1',
+    category: 'decision',
+    sourceKind: 'orchestratorHumanReview',
+    title: 'Review',
+    summary: 'Need review',
+    updatedAt: '2026-07-11T10:00:00.000Z',
+    freshness: 'live',
+    cachedAt: null,
+    project: { id: 'proj-1', name: 'Demo', kind: 'local' },
+    device: null,
+    target: { kind: 'orchestratorTask', projectId: 'proj-1', taskId: 'task-1' },
+  };
+}

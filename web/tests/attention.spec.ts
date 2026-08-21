@@ -567,6 +567,25 @@ test.describe('Global Inbox attention', () => {
     await expect(attentionNav).toContainText('3');
   });
 
+  test('desktop sidebar badge counts only today unread items', async ({ page }) => {
+    const earlier = buildItem({
+      id: 'orchestrator:blocked:yesterday',
+      category: 'blocked',
+      sourceKind: 'orchestratorBlocked',
+      title: 'Old blocked',
+      summary: 'from earlier day',
+      updatedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+      target: { kind: 'orchestratorTask', projectId: 'proj-1', taskId: 'old' },
+    });
+    const snapshot = buildSnapshot([HUMAN_REVIEW, earlier]);
+    await openAttention(page, [snapshot]);
+
+    const attentionNav = page.locator('a[href="/attention"]');
+    await expect(attentionNav).toContainText('1');
+    await expect(page.getByTestId(`attention-item-${HUMAN_REVIEW.id}`)).toBeVisible();
+    await expect(page.getByTestId(`attention-item-${earlier.id}`)).toHaveCount(0);
+  });
+
   test('light and dark themes render inbox and keyboard focus-visible works', async ({
     page,
   }) => {

@@ -103,7 +103,7 @@ export interface AttentionItem {
  * Attention 分类计数。
  *
  * Business Logic（为什么需要这个类型）:
- *   前端 badge 用 unreadTotal；分组空态仍看 total 与三类计数。
+ *   列表分组空态看 total 与三类计数；导航 badge 由当天未读派生，不直接用 unreadTotal。
  *
  * Code Logic（字段说明）:
  *   total/decision/blocked/environment 含已读；unread_* 由本设备 read_set 派生。

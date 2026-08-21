@@ -77,7 +77,7 @@ export interface MobileWorkbenchShellProps {
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
   /** 项目工作台导航中的「返回项目列表」；未传则不渲染返回按钮。 */
   onBackToProjects?: () => void;
-  /** Attention 总数；0/null 不显示 badge，规则与桌面 formatAttentionBadgeCount 一致。 */
+  /** 当天未读 Attention 数；0/null 不显示 badge，规则与桌面 formatAttentionBadgeCount 一致。 */
   attentionTotal?: number | null;
   /** 弱网连接态；offline/reconnecting 时展示缓存时间。 */
   connectionState?: MobileConnectionState | null;

@@ -139,7 +139,8 @@ export const attentionItemDecoder: Decoder<AttentionItem> = objectDecoder('Atten
 
 /**
  * Business Logic（为什么需要这个 decoder）:
- *   badge 用 unreadTotal；旧后端缺 unread_* 时回落 0，避免 fail-closed 抹掉 Inbox。
+ *   counts 含 unreadTotal 供全量未读与乐观更新；导航 badge 另按当天未读派生。
+ *   旧后端缺 unread_* 时回落 0，避免 fail-closed 抹掉 Inbox。
  *
  * Code Logic（这个 decoder 做什么）:
  *   解码 total/decision/blocked/environment 与四类 unread；缺失 unread 注入 0。

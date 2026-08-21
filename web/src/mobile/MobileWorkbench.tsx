@@ -24,6 +24,7 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
+import { countUnreadAttentionItemsOnLocalDay } from '@/lib/attention';
 import {
   buildMergeRemoveAuthority,
   reconcileWorkbenchMutation,
@@ -340,7 +341,10 @@ export function MobileWorkbench(): ReactElement {
   const { snapshot: attentionSnapshot, refresh: refreshAttention } = useAttention();
   useMarkNeedsInputAttentionOnSessionFocus(activeSession?.id ?? null, panel === 'terminal');
   const attentionTotal = attentionSnapshot
-    ? filterMobileInboxAttentionItems(attentionSnapshot.items).length
+    ? countUnreadAttentionItemsOnLocalDay(
+        filterMobileInboxAttentionItems(attentionSnapshot.items),
+        new Date(),
+      )
     : null;
   const projectDetailsLoading = projectDetailStatus === 'loading';
 

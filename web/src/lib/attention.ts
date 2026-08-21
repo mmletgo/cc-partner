@@ -6,7 +6,7 @@
  *   避免页面各自拼装 badge 文案或 deep link 导致两端行为漂移。
  *
  * Code Logic（这个模块做什么）:
- *   提供无副作用纯函数：badge 文本、分组、排序保护、sourceKind→i18n key、
+ *   提供无副作用纯函数：badge 文本、当天未读计数、分组、排序保护、sourceKind→i18n key、
  *   语义 target→桌面 URL、切到等待输入终端时应收的 Inbox 条目。不发起网络请求，不依赖 React。
  */
 
@@ -324,6 +324,21 @@ export function partitionAttentionItemsByLocalDay(
     }
   }
   return { today, earlier };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   侧栏与移动导航 badge 必须与默认列表同口径，只提示当天还未处理的事项，
+ *   避免更早条目把数字撑大、和「今天」列表对不上。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先按本地日历日切出 today，再复用 countAttentionItems 取 unreadTotal。
+ */
+export function countUnreadAttentionItemsOnLocalDay(
+  items: readonly AttentionItem[],
+  now: Date,
+): number {
+  return countAttentionItems(partitionAttentionItemsByLocalDay(items, now).today).unreadTotal;
 }
 
 /**
