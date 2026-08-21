@@ -346,8 +346,20 @@ export function getMobileWorkbenchPanelOrder(): readonly MobileWorkbenchPanel[] 
  */
 export function getMobileWorkbenchNavGroups(
   mode: MobileWorkbenchNavMode = 'global',
+  options?: { automationEnabled?: boolean; browserEnabled?: boolean },
 ): readonly MobileWorkbenchNavGroup[] {
-  return mode === 'project' ? MOBILE_PROJECT_NAV_GROUPS : MOBILE_GLOBAL_NAV_GROUPS;
+  const groups = mode === 'project' ? MOBILE_PROJECT_NAV_GROUPS : MOBILE_GLOBAL_NAV_GROUPS;
+  if (options?.automationEnabled !== false && options?.browserEnabled !== false) {
+    return groups;
+  }
+  return groups.map((group) => ({
+    ...group,
+    panels: group.panels.filter((panel) => {
+      if (panel === 'automation' && options.automationEnabled === false) return false;
+      if (panel === 'browser' && options.browserEnabled === false) return false;
+      return true;
+    }),
+  }));
 }
 
 /**

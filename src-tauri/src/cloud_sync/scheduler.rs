@@ -92,5 +92,8 @@ fn current_interval(state: &AppState) -> u64 {
 /// 读取当前 config 的 enabled / auto 开关。
 fn current_flags(state: &AppState) -> (bool, bool) {
     let cfg = state.config.read().expect("config 读锁中毒");
-    (cfg.cloud_sync_enabled, cfg.cloud_sync_auto)
+    (
+        cfg.experimental_features.cloud_sync && cfg.cloud_sync_enabled,
+        cfg.cloud_sync_auto,
+    )
 }

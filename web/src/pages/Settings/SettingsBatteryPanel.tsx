@@ -1,5 +1,5 @@
 /**
- * SettingsBatteryPanel — Settings「充电模式」tab（自挂 hook）。
+ * SettingsBatteryPanel — 内测功能页嵌套的充电设置（自挂 hook）。
  *
  * Business Logic（为什么需要这个组件）:
  *   额度数字不进 Settings 11 端点合同；模式开关与 footer 共用权威快照。

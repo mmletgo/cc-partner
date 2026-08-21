@@ -50,8 +50,8 @@ test.describe('E2E-SETTINGS-001 Settings partial failure journey', () => {
     await expect(page.locator('#settings-panel-dependencies')).toBeVisible({
       timeout: 5_000,
     });
-    await page.getByRole('tab', { name: '自动化' }).click();
-    await expect(page.locator('#settings-panel-automation')).toBeVisible({
+    await page.getByRole('tab', { name: '内测功能' }).click();
+    await expect(page.locator('#settings-panel-experimental')).toBeVisible({
       timeout: 5_000,
     });
 
@@ -86,10 +86,10 @@ test.describe('E2E-SETTINGS-001 Settings partial failure journey', () => {
 
     // ── deep link automation ──
     await page.goto('/settings?tab=automation');
-    await expect(page.locator('#settings-panel-automation')).toBeVisible({
+    await expect(page.locator('#settings-panel-experimental')).toBeVisible({
       timeout: 10_000,
     });
-    await expect(page.getByRole('tab', { name: '自动化' })).toHaveAttribute(
+    await expect(page.getByRole('tab', { name: '内测功能' })).toHaveAttribute(
       'aria-selected',
       'true',
     );

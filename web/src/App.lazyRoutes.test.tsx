@@ -57,6 +57,7 @@ describe('App lazy routes contract', () => {
     expect(appSource).toMatch(/import\s*\{\s*WorkbenchProjectsProvider/);
     expect(appSource).toMatch(/import\s*\{\s*AttentionProvider/);
     expect(appSource).toMatch(/import\s*\{\s*ScratchpadAutosaveProvider/);
+    expect(appSource).toMatch(/import\s*\{\s*ExperimentalFeaturesProvider/);
   });
 
   test('DesignSystem dynamic import is gated by isDev helper', () => {

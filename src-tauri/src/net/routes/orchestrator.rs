@@ -512,14 +512,10 @@ async fn runtime_snapshot_for_state(
 /// Code Logic（这个函数做什么）:
 ///     从 context.config 读锁克隆 AppConfig.orchestrator，并包装为 `{config}` 响应。
 fn get_config_for_state(state: &OrchestratorRouteContext) -> RemoteOrchestratorConfigResp {
-    let config = state
-        .config
-        .read()
-        .expect("config 读锁中毒")
-        .orchestrator
-        .clone();
+    let cfg = state.config.read().expect("config 读锁中毒");
     RemoteOrchestratorConfigResp {
-        config: OrchestratorAutomationConfigDto::from(config),
+        config: OrchestratorAutomationConfigDto::from(cfg.orchestrator.clone()),
+        experimental_features: cfg.experimental_features.clone(),
     }
 }
 
@@ -1501,6 +1497,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         }
     }
 

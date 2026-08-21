@@ -1757,6 +1757,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
         let config_runtime = Arc::new(ConfigRuntime::new(config, store));

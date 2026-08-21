@@ -428,6 +428,9 @@ pub struct MobileWorkflowDocumentSaveReq {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOrchestratorConfigResp {
     pub config: OrchestratorAutomationConfigDto,
+    /// 内测功能总开关；缺字段/旧 peer 视为全关。
+    #[serde(default)]
+    pub experimental_features: crate::config::ExperimentalFeaturesConfig,
 }
 
 /// 远端项目刷新响应。
@@ -689,12 +692,14 @@ mod tests {
     fn config_response_serializes_as_camel_case() {
         let resp = RemoteOrchestratorConfigResp {
             config: OrchestratorAutomationConfig::default().into(),
+            experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         };
 
         let value = serde_json::to_value(resp).expect("serialize config response");
 
         assert_eq!(value["config"]["maxConcurrentTasks"], 1);
         assert_eq!(value["config"]["autoPushMain"], true);
+        assert_eq!(value["experimentalFeatures"]["automation"], false);
         assert!(value["config"].get("max_concurrent_tasks").is_none());
     }
 

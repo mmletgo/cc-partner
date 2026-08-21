@@ -1,7 +1,7 @@
 {
   "title": "设置",
   "eyebrow": "偏好设置",
-  "subtitle": "管理设备名、截图快捷键、云端同步与版本信息。",
+  "subtitle": "管理设备名、截图快捷键、局域网同步与版本信息。",
   "loading": "加载中…",
   "loadFailed": "加载失败：{{error}}",
   "tabsLabel": "设置分区",
@@ -13,7 +13,7 @@
     "activity": "活动统计",
     "sync": "同步",
     "ai": "AI",
-    "automation": "自动化",
+    "experimental": "内测功能",
     "about": "关于"
   },
   "basic": {
@@ -41,6 +41,32 @@
   "sync": {
     "enabled": "启用",
     "disabled": "禁用"
+  },
+  "experimental": {
+    "title": "内测功能",
+    "subtitle": "这些功能默认关闭。打开后才会出现对应入口；各项设置在本页底部用独立标签切换。关闭后入口立即隐藏，已保存的数据不会删除。",
+    "toggleFailed": "更新内测功能失败",
+    "settingsTabsLabel": "内测功能设置",
+    "battery": {
+      "label": "充电模式",
+      "helper": "在侧栏切换充电/无限，工作台按余额扣时。"
+    },
+    "game": {
+      "label": "游戏模式",
+      "helper": "在侧栏打开游戏大厅与记单词，并配置游戏插件目录。"
+    },
+    "browser": {
+      "label": "网页浏览",
+      "helper": "在工作台与手机端预览项目网页。"
+    },
+    "automation": {
+      "label": "项目自动化",
+      "helper": "在工作台与手机端管理编排任务。"
+    },
+    "cloudSync": {
+      "label": "云端同步",
+      "helper": "通过 GitHub 私有仓库跨网络同步。"
+    }
   },
   "cloudSync": {
     "title": "云端同步",

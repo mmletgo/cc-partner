@@ -10,7 +10,7 @@
  *   并持有 URL tab 真源；返回 shell 与各 panel 所需字段，不渲染 tab JSX 树。
  *   公共 export 面（SETTINGS_TABS、helpers、UseSettingsControllerResult）保持从本文件可导入。
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -24,11 +24,16 @@ import {
   type AppFlavor,
 } from '@/hooks/usePermissions';
 import { configApi } from '@/api/config';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import { pendingWrites } from '@/lib/pendingWrites';
+import type { ExperimentalFeaturesConfig } from '@/lib/types/settings';
 import type { PermissionEntryAction } from '@/lib/permissionEntries';
 import {
   installButtonMode,
+  parseExperimentalFeatureFromSearch,
   parseSettingsTabFromSearch,
+  EXPERIMENTAL_SETTINGS_TAB_IDS,
+  type ExperimentalFeatureId,
   type SettingsTabId,
 } from './settingsState';
 import type {
@@ -98,6 +103,14 @@ export interface UseSettingsControllerResult {
   setActiveTab: (tab: SettingsTabId) => void;
   handleTabKeyDown: (e: KeyboardEvent<HTMLButtonElement>, currentIndex: number) => void;
   tabs: typeof SETTINGS_TABS;
+  experimentalFeatures: ExperimentalFeaturesConfig;
+  experimentalFeature: ExperimentalFeatureId | null;
+  experimentalError: string | null;
+  handleToggleExperimentalFeature: (
+    id: ExperimentalFeatureId,
+    enabled: boolean,
+  ) => Promise<void>;
+  setExperimentalFeature: (id: ExperimentalFeatureId) => void;
 
   // general
   state: SettingsState;
@@ -276,6 +289,11 @@ export function useSettingsController(): UseSettingsControllerResult {
   const activeTab = parseSettingsTabFromSearch(
     searchParams.toString() ? `?${searchParams.toString()}` : '',
   );
+  const experimentalFeature = parseExperimentalFeatureFromSearch(
+    searchParams.toString() ? `?${searchParams.toString()}` : '',
+  );
+  const experimental = useExperimentalFeatures();
+  const [experimentalError, setExperimentalError] = useState<string | null>(null);
 
   const form = useSettingsFormSaves();
   const hydrator = useMemo(
@@ -305,6 +323,90 @@ export function useSettingsController(): UseSettingsControllerResult {
           } else {
             next.set('tab', tab);
           }
+          if (tab !== 'experimental') {
+            next.delete('feature');
+          }
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   旧 `?tab=battery|automation` 必须改写成内测功能页 + feature，避免书签落在已删除 tab。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   检测遗留 tab 名并 replace 为 experimental + feature。
+   */
+  useEffect(() => {
+    const rawTab = searchParams.get('tab');
+    if (rawTab !== 'battery' && rawTab !== 'automation') return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('tab', 'experimental');
+        next.set('feature', rawTab);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [searchParams, setSearchParams]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   内测开关即时落盘；失败必须回滚 Context 并由面板展示错误。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 Provider setFeature；成功后把 URL `feature=` 指到刚开启项（关闭则回退仍开启项）。
+   */
+  const handleToggleExperimentalFeature = useCallback(
+    async (id: ExperimentalFeatureId, enabled: boolean): Promise<void> => {
+      setExperimentalError(null);
+      try {
+        await experimental.setFeature(id, enabled);
+        setSearchParams(
+          (prev) => {
+            const next = new URLSearchParams(prev);
+            next.set('tab', 'experimental');
+            const nextFeatures = { ...experimental.features, [id]: enabled };
+            if (enabled) {
+              if ((EXPERIMENTAL_SETTINGS_TAB_IDS as readonly string[]).includes(id)) {
+                next.set('feature', id);
+              }
+              return next;
+            }
+            const remaining = EXPERIMENTAL_SETTINGS_TAB_IDS.find((fid) => nextFeatures[fid]);
+            if (remaining) next.set('feature', remaining);
+            else next.delete('feature');
+            return next;
+          },
+          { replace: true },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setExperimentalError(message || t('settings:experimental.toggleFailed'));
+      }
+    },
+    [experimental, setSearchParams, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   内测页底部设置 tab 必须以 URL `feature=` 为真源，才能和深链、开关切换共用同一选中态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写 tab=experimental 与 feature=id；replace 避免历史堆叠。
+   */
+  const setExperimentalFeature = useCallback(
+    (id: ExperimentalFeatureId) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set('tab', 'experimental');
+          next.set('feature', id);
           return next;
         },
         { replace: true },
@@ -481,6 +583,11 @@ export function useSettingsController(): UseSettingsControllerResult {
     setActiveTab,
     handleTabKeyDown,
     tabs: SETTINGS_TABS,
+    experimentalFeatures: experimental.features,
+    experimentalFeature,
+    experimentalError,
+    handleToggleExperimentalFeature,
+    setExperimentalFeature,
 
     state: form.state,
     isDirty: form.isDirty,

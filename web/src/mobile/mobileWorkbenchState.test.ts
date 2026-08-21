@@ -234,6 +234,14 @@ describe('mobileWorkbenchState', () => {
       'worktrees',
       'automation',
     ]);
+    assertArrayEqual(
+      getMobileWorkbenchNavGroups('project', { automationEnabled: false })[0]?.panels ?? [],
+      ['terminal', 'browser', 'files', 'git', 'worktrees'],
+    );
+    assertArrayEqual(
+      getMobileWorkbenchNavGroups('project', { browserEnabled: false })[0]?.panels ?? [],
+      ['terminal', 'files', 'git', 'worktrees', 'automation'],
+    );
     assertArrayEqual(projectGroups[1]?.panels ?? [], ['attention', 'transfer', 'settings']);
 
     const flat = getMobileWorkbenchPanelOrder();

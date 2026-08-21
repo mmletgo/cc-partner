@@ -37,6 +37,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { OrchestratorAgentAdapterCatalogItem } from '@/lib/types';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import { useAgentAdapterCatalog } from '@/pages/Orchestrator/controllers/useAgentAdapterCatalog';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import type { WorkbenchDeepLink } from '../workbenchDeepLink';
 import type { WorkbenchFileWorkspaceView } from '../workbenchFiles';
 
@@ -143,6 +144,17 @@ export function useWorkbenchAutomationController(
 
   // Shared fail-closed catalog (loaded on mount; console open only displays it).
   const agentAdapters = useAgentAdapterCatalog();
+  const { features: experimentalFeatures } = useExperimentalFeatures();
+
+  useEffect(() => {
+    if (!experimentalFeatures.automation && automationConsoleOpen) {
+      setAutomationConsoleOpen(false);
+    }
+  }, [
+    automationConsoleOpen,
+    experimentalFeatures.automation,
+    setAutomationConsoleOpen,
+  ]);
 
   // Business Logic: 与原 Workbench.tsx 行为一致——用 ref 记录当前 search 已应用到的
   // projectId/worktreeId/sessionId/path，防止同一段被重复应用；search 切换时整体重置为 null。
@@ -206,6 +218,7 @@ export function useWorkbenchAutomationController(
    *   view=automation 且 project 已对齐时 openAutomation；无 project 约束时也打开。
    */
   useEffect(() => {
+    if (!experimentalFeatures.automation) return;
     if (!isAutomationDeepLink) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     if (!automationConsoleOpen) {
@@ -217,6 +230,7 @@ export function useWorkbenchAutomationController(
     activeProjectId,
     automationConsoleOpen,
     deepLinkProjectId,
+    experimentalFeatures.automation,
     isAutomationDeepLink,
     requestWorkspaceView,
     setAutomationConsoleOpen,
@@ -341,10 +355,16 @@ export function useWorkbenchAutomationController(
    *   标记控制台为开，并请求把中心工作区切回 terminal（保证 Orchestrator 面板可见且不被文件/浏览器层遮挡）。
    */
   const openAutomation = useCallback((): void => {
+    if (!experimentalFeatures.automation) return;
     setProjectAgentConsoleOpen(false);
     setAutomationConsoleOpen(true);
     requestWorkspaceView('terminal');
-  }, [setAutomationConsoleOpen, setProjectAgentConsoleOpen, requestWorkspaceView]);
+  }, [
+    experimentalFeatures.automation,
+    setAutomationConsoleOpen,
+    setProjectAgentConsoleOpen,
+    requestWorkspaceView,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:

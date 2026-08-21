@@ -65,11 +65,16 @@ pub async fn report_battery_focus(
     state: State<'_, AppState>,
     req: ReportBatteryFocusReq,
 ) -> Result<BatterySnapshotDto, AppError> {
+    let experimental_battery = state
+        .config
+        .read()
+        .map(|cfg| cfg.experimental_features.battery)
+        .unwrap_or(false);
     let snap = battery::report_focus(
         &repo(&state),
         &battery_config(&state),
         &req.window_label,
-        req.consuming,
+        req.consuming && experimental_battery,
         now_ms(),
     )
     .await?;

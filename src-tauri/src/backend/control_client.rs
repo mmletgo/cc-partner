@@ -31,10 +31,10 @@ use crate::agent_hub::user_instructions::{
     AdaptInstructionToOtherAgentsRequest, AdaptInstructionToOtherAgentsResult,
     AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
-    SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto, UserInstructionPlanDto,
-    UserInstructionWorkspaceDto, UserNativeInstructionFileDto,
-    ReadUserNativeInstructionFileRequest, WriteUserNativeInstructionFileRequest,
+    PreviewUserInstructionRequest, ReadUserNativeInstructionFileRequest,
+    ReviseInstructionSlotRequest, ReviseInstructionSlotResult, SaveUserInstructionBlocksRequest,
+    UserInstructionCanonicalDto, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    UserNativeInstructionFileDto, WriteUserNativeInstructionFileRequest,
 };
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
@@ -3427,6 +3427,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = Arc::new(ConfigRuntime::with_owner(initial, store, owner.into()));

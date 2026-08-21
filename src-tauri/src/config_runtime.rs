@@ -405,6 +405,8 @@ pub struct ConfigSnapshot {
     pub orchestrator: OrchestratorAutomationConfig,
     pub github_trending: GithubTrendingConfig,
     pub internal_claude: crate::config::InternalClaudeConfig,
+    #[serde(default)]
+    pub experimental_features: crate::config::ExperimentalFeaturesConfig,
 }
 
 impl ConfigSnapshot {
@@ -441,6 +443,7 @@ impl ConfigSnapshot {
             orchestrator: config.orchestrator.clone(),
             github_trending: config.github_trending.clone(),
             internal_claude: config.internal_claude.clone(),
+            experimental_features: config.experimental_features.clone(),
         }
     }
 
@@ -473,6 +476,7 @@ impl ConfigSnapshot {
         cfg.orchestrator = self.orchestrator.clone();
         cfg.github_trending = self.github_trending.clone();
         cfg.internal_claude = self.internal_claude.clone();
+        cfg.experimental_features = self.experimental_features.clone();
     }
 }
 
@@ -656,6 +660,9 @@ pub struct RuntimeConfigPatch {
     pub github_trending: Option<GithubTrendingRuntimePatch>,
     #[serde(default)]
     pub internal_claude: Option<InternalClaudeRuntimePatch>,
+    /// 内测功能开关整表覆盖。
+    #[serde(default)]
+    pub experimental_features: Option<crate::config::ExperimentalFeaturesConfig>,
 }
 
 impl RuntimeConfigPatch {
@@ -733,6 +740,9 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref internal) = self.internal_claude {
             internal.apply_to(&mut cfg.internal_claude);
+        }
+        if let Some(ref features) = self.experimental_features {
+            cfg.experimental_features = features.clone();
         }
         Ok(())
     }
@@ -999,6 +1009,11 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
         "github_trending_ai_enabled": config.github_trending.ai_enabled,
         "github_trending_cache_ttl_hours": config.github_trending.cache_ttl_hours,
         "internal_claude_provider_id": config.internal_claude.provider_id,
+        "experimental_battery": config.experimental_features.battery,
+        "experimental_game": config.experimental_features.game,
+        "experimental_browser": config.experimental_features.browser,
+        "experimental_automation": config.experimental_features.automation,
+        "experimental_cloud_sync": config.experimental_features.cloud_sync,
     });
     let encoded = serde_json::to_vec(&payload).unwrap_or_default();
     let digest = Sha256::digest(&encoded);
@@ -1043,6 +1058,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         }
     }
 

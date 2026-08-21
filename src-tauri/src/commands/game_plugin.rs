@@ -13,6 +13,26 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   游戏模式是内测功能，默认关闭；未 opt-in 时大厅与入账命令不得扫描插件目录。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读 `experimental_features.game`；缺配置或读锁失败视为关闭。
+ */
+fn require_game_mode(state: &AppState) -> Result<(), AppError> {
+    let enabled = state
+        .config
+        .read()
+        .map(|cfg| cfg.experimental_features.game)
+        .unwrap_or(false);
+    if enabled {
+        Ok(())
+    } else {
+        Err(AppError::validation("内测功能「游戏模式」未开启"))
+    }
+}
+
 /// 插件列表 DTO。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +47,7 @@ pub struct GamePluginListDto {
 /// Code Logic: 读 config.game_plugin_dir，缺则创建，再扫描一级子目录。
 #[tauri::command]
 pub async fn list_game_plugins(state: State<'_, AppState>) -> Result<GamePluginListDto, AppError> {
+    require_game_mode(&state)?;
     let dir = state.config.read().unwrap().game_plugin_dir.clone();
     let games = crate::game_plugin::list_or_create(&PathBuf::from(&dir))?;
     Ok(GamePluginListDto { dir, games })
@@ -49,6 +70,7 @@ pub async fn credit_game_plugin(
     state: State<'_, AppState>,
     input: CreditGamePluginInput,
 ) -> Result<crate::battery::BatterySnapshotDto, AppError> {
+    require_game_mode(&state)?;
     let (dir, battery_cfg) = {
         let cfg = state.config.read().unwrap();
         (cfg.game_plugin_dir.clone(), cfg.battery.clone())

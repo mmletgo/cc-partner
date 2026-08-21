@@ -120,6 +120,7 @@ pub async fn start_browser_verification_for_state(
     state: &AppState,
     req: StartBrowserVerificationReq,
 ) -> Result<BrowserVerificationRun, AppError> {
+    crate::workbench::browser::require_experimental_browser(state)?;
     if req.preview_id.is_empty() || req.request_id.is_empty() {
         return Err(AppError::validation("validation_error"));
     }

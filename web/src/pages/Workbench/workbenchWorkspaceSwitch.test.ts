@@ -74,6 +74,10 @@ function assertSubstringOrder(source: string, before: string, after: string, mes
 describe('workbenchWorkspaceSwitch', () => {
   test('locks workspace switch reuse, file path tab labels and shared nav styles', async () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
+  const workspaceSwitchSlotSource = readFileSync(
+    new URL('./views/WorkbenchWorkspaceSwitchSlot.tsx', import.meta.url),
+    'utf8',
+  );
   const promptToolsSource = readFileSync(new URL('./WorkbenchPromptTools.tsx', import.meta.url), 'utf8');
   const paneToolsSource = readFileSync(
     new URL('../../components/domain/WorkbenchPaneTools/WorkbenchPaneTools.tsx', import.meta.url),
@@ -109,8 +113,8 @@ describe('workbenchWorkspaceSwitch', () => {
   // === 三元切换组件 ===
   assertContains(
     workbenchSource,
-    '<WorkbenchWorkspaceSwitch',
-    'workspace header renders WorkbenchWorkspaceSwitch',
+    '<WorkbenchWorkspaceSwitchSlot',
+    'workspace header renders WorkbenchWorkspaceSwitchSlot',
   );
   assertContains(
     workbenchSource,
@@ -128,38 +132,38 @@ describe('workbenchWorkspaceSwitch', () => {
     'switching to files also selects the project-folder inspector tab',
   );
   assertContains(
-    workbenchSource,
+    workspaceSwitchSlotSource,
     "id: 'terminal'",
     'switch exposes terminal option',
   );
   assertContains(
-    workbenchSource,
+    workspaceSwitchSlotSource,
     "id: 'browser'",
     'switch exposes browser option',
   );
   assertContains(
-    workbenchSource,
+    workspaceSwitchSlotSource,
     "id: 'files'",
     'switch exposes files option',
   );
   assertContains(
-    workbenchSource,
+    workspaceSwitchSlotSource,
     "label: t('workbench:workspaceSwitch.terminal')",
     'switch terminal option uses workspaceSwitch.terminal i18n',
   );
   assertContains(
-    workbenchSource,
+    workspaceSwitchSlotSource,
     "label: t('workbench:browserPreview.openWorkspace')",
     'switch browser option uses browserPreview.openWorkspace i18n',
   );
   assertContains(
-    workbenchSource,
+    workspaceSwitchSlotSource,
     "label: t('workbench:fileWorkspace.openFiles')",
     'switch files option uses fileWorkspace.openFiles i18n',
   );
   assertContains(
-    workbenchSource,
-    'disabled: !activeProject || !activeWorktree',
+    workspaceSwitchSlotSource,
+    'disabled: !canOpenBrowser',
     'browser option is disabled when no project/worktree',
   );
   assertNotContains(

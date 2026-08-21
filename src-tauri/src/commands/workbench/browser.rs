@@ -58,6 +58,7 @@ pub(crate) async fn create_workbench_browser_preview_for_state(
     worktree_id: Option<String>,
     target_url: String,
 ) -> Result<WorkbenchBrowserPreview, AppError> {
+    crate::workbench::browser::require_experimental_browser(state)?;
     let normalized_target_url = normalize_browser_target_url(&target_url)?;
     let project = get_project(state, &project_id).await?;
     let actual_http_port = state.actual_http_port.load(Ordering::SeqCst);

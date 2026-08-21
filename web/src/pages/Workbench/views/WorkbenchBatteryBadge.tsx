@@ -21,6 +21,7 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useBattery } from '@/hooks/useBattery';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import { formatBatteryTime, remainingMinutesFromMs } from '@/lib/batteryTime';
 import { InfinityIcon } from '@/lib/icons';
 import { BATTERY_WARN_MINUTES } from '@/lib/types/battery';
@@ -47,8 +48,9 @@ function clamp01(value: number): number {
  */
 export function WorkbenchBatteryBadge(): ReactElement | null {
   const { t } = useTranslation('battery');
+  const { features } = useExperimentalFeatures();
   const { snapshot } = useBattery();
-  if (!snapshot) return null;
+  if (!features.battery || !snapshot) return null;
 
   const timeLabel = formatBatteryTime(snapshot.remainingMs, t);
 

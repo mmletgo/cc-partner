@@ -64,8 +64,8 @@ use crate::agent_hub::user_instructions::{
     AdaptInstructionToOtherAgentsRequest, AdaptInstructionToOtherAgentsResult,
     AnalyzeInstructionOriginalRequest, AnalyzeInstructionOriginalResult,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, ReviseInstructionSlotRequest, ReviseInstructionSlotResult,
-    ReadUserNativeInstructionFileRequest, SaveUserInstructionBlocksRequest,
+    PreviewUserInstructionRequest, ReadUserNativeInstructionFileRequest,
+    ReviseInstructionSlotRequest, ReviseInstructionSlotResult, SaveUserInstructionBlocksRequest,
     UserInstructionCanonicalDto, UserInstructionPlanDto, UserInstructionWorkspaceDto,
     UserNativeInstructionFileDto, WriteUserNativeInstructionFileRequest,
 };

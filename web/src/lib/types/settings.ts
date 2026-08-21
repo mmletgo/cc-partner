@@ -23,7 +23,35 @@ export interface AppConfig {
   /** 工作台「收藏快捷输入」浮层触发快捷键（pynput 风格，默认 "<ctrl>+/"） */
   promptQuickInputHotkey: string;
   httpPort: number;
+  /** 内测功能 opt-in；缺字段视为全关。 */
+  experimentalFeatures: ExperimentalFeaturesConfig;
 }
+
+/**
+ * 内测功能总开关（默认全部关闭）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   充电 / 游戏 / 网页浏览 / 项目自动化 / 云端同步须用户在设置「内测功能」页显式打开后才暴露入口。
+ *
+ * Code Logic（字段说明）:
+ *   五个独立 bool，与后端 `ExperimentalFeaturesConfig` camelCase 对齐。
+ */
+export interface ExperimentalFeaturesConfig {
+  battery: boolean;
+  game: boolean;
+  browser: boolean;
+  automation: boolean;
+  cloudSync: boolean;
+}
+
+/** 内测功能缺省值：全部关闭。 */
+export const DEFAULT_EXPERIMENTAL_FEATURES: ExperimentalFeaturesConfig = {
+  battery: false,
+  game: false,
+  browser: false,
+  automation: false,
+  cloudSync: false,
+};
 
 export type WorkbenchDependencyState =
   | 'checking'

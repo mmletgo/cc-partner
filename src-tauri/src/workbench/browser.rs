@@ -23,6 +23,36 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   网页浏览是内测功能，默认关闭；入口隐藏后发现/预览/代理也必须 fail-closed。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读 `experimental_features.browser`；缺配置或读锁失败视为关闭。
+ */
+pub fn experimental_browser_enabled(state: &AppState) -> bool {
+    state
+        .config
+        .read()
+        .map(|cfg| cfg.experimental_features.browser)
+        .unwrap_or(false)
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Tauri / P2P / mobile 发现与创建 preview 在未 opt-in 时不得扫描端口或建会话。
+ *
+ * Code Logic（这个函数做什么）:
+ *   未开启则返回 validation，文案与游戏/云同步内测门禁一致。
+ */
+pub fn require_experimental_browser(state: &AppState) -> Result<(), AppError> {
+    if experimental_browser_enabled(state) {
+        Ok(())
+    } else {
+        Err(AppError::validation("内测功能「网页浏览」未开启"))
+    }
+}
+
 static DEV_URL_RE: OnceLock<Regex> = OnceLock::new();
 static HOST_PORT_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -80,6 +110,7 @@ pub async fn discover_workbench_browser_targets(
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<WorkbenchBrowserDiscovery, AppError> {
+    require_experimental_browser(state)?;
     let root = resolve_browser_worktree_root(state, &project_id, worktree_id.as_deref()).await?;
     let probe_client = loopback_probe_client();
     let remembered = remembered_browser_targets(

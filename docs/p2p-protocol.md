@@ -452,7 +452,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/experiments/cancel` | `routes/orchestrator.rs` | cancel group + non-terminal candidates | no-transport-retry | capability `orchestrator.experiments.v1`; refuses Delivering groups |
 | POST | `/api/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; reads owning-device local runtime snapshot | read-only | capability-gated by `orchestrator.runtime-snapshot.v1`; body snake_case `{project_id}` only; rejects remote shortcuts |
 | POST | `/api/mobile/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; remote-aware runtime snapshot for mobile browser | read-only | body camelCase `{projectId}`; reuses Tauri four-state helper; never exposes owner P2P base URL |
-| GET | `/api/orchestrator/config` | `routes/orchestrator.rs` | none | read-only | — |
+| GET | `/api/orchestrator/config` | `routes/orchestrator.rs` | none | read-only | response `{config, experimentalFeatures}`; `experimentalFeatures` defaults all-false; mobile uses the sibling to hide project-automation nav |
 
 ## Agent Hub portable pull contract (`agent-hub.portable-pull.v1`)
 

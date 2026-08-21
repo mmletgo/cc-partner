@@ -4,7 +4,8 @@
 //!     iframe 需要加载游戏 HTML/CSS/JS/图片，但不能让插件读出自己的文件夹。
 //!
 //! Code Logic（这个模块做什么）:
-//!     解析 `/<id>/<rel>`，用 resolve_game_asset 读字节并带 MIME。
+//!     解析 `/<id>/<rel>`，用 resolve_game_asset 读字节并带 MIME；
+//!     游戏模式未开启时一律 404。
 
 use crate::state::AppState;
 use std::path::PathBuf;
@@ -66,7 +67,13 @@ pub fn respond(app: &AppHandle, uri: &Uri) -> Response<Vec<u8>> {
     let Some(state) = app.try_state::<AppState>() else {
         return not_found();
     };
-    let root = PathBuf::from(state.config.read().unwrap().game_plugin_dir.clone());
+    let root = {
+        let cfg = state.config.read().unwrap();
+        if !cfg.experimental_features.game {
+            return not_found();
+        }
+        PathBuf::from(cfg.game_plugin_dir.clone())
+    };
     let path = uri.path().trim_start_matches('/');
     let mut parts = path.splitn(2, '/');
     let Some(id) = parts.next().filter(|s| !s.is_empty()) else {

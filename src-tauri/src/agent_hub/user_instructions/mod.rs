@@ -72,11 +72,6 @@ pub struct ReviseInstructionSlotResult {
     pub variants: Option<BTreeMap<String, String>>,
 }
 
-pub use native_files::{
-    read_user_native_instruction_file, write_user_native_instruction_file,
-    ReadUserNativeInstructionFileRequest, UserNativeInstructionFileDto,
-    WriteUserNativeInstructionFileRequest,
-};
 pub use inventory::{
     inspect_user_instruction_workspace, inspect_user_instruction_workspace_with_env,
     list_user_instruction_slot_versions, restore_user_instruction_slot_version,
@@ -87,6 +82,11 @@ pub use inventory::{
     UserInstructionManagementMode, UserInstructionOwnership, UserInstructionProjectionDto,
     UserInstructionProjectionState, UserInstructionSetupState, UserInstructionSourceDto,
     UserInstructionSourceRole, UserInstructionTargetDto, UserInstructionWorkspaceDto,
+};
+pub use native_files::{
+    read_user_native_instruction_file, write_user_native_instruction_file,
+    ReadUserNativeInstructionFileRequest, UserNativeInstructionFileDto,
+    WriteUserNativeInstructionFileRequest,
 };
 pub use plan::{
     apply_user_instruction_plan, preview_user_instruction_setup, preview_user_instruction_update,

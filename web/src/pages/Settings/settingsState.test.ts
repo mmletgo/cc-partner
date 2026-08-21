@@ -12,7 +12,9 @@ import {
   isSettingsStateDirty,
   isUpdateCheckDisabled,
   isUpdateDownloadDisabled,
+  parseExperimentalFeatureFromSearch,
   parseSettingsTabFromSearch,
+  resolveExperimentalSettingsTab,
   mergeActivityStatsSlice,
   mergeHealthReminderSlice,
   resetHealthReminderDefaults,
@@ -56,6 +58,13 @@ function configFixture(partial: Partial<AppConfig> = {}): AppConfig {
     promptOptimizerProvider: 'claude',
     promptQuickInputHotkey: '<ctrl>+/',
     httpPort: 0,
+    experimentalFeatures: {
+      battery: false,
+      game: false,
+      browser: false,
+      automation: false,
+      cloudSync: false,
+    },
     ...partial,
   };
 }
@@ -280,12 +289,64 @@ describe('settings tab deep link helpers', () => {
     }
   });
 
+  test('parses experimental feature from search and legacy tabs', () => {
+    if (parseExperimentalFeatureFromSearch('?tab=experimental&feature=cloudSync') !== 'cloudSync') {
+      throw new Error('expected cloudSync feature');
+    }
+    if (parseExperimentalFeatureFromSearch('?tab=battery') !== 'battery') {
+      throw new Error('expected legacy battery feature');
+    }
+    if (parseExperimentalFeatureFromSearch('?tab=automation') !== 'automation') {
+      throw new Error('expected legacy automation feature');
+    }
+    if (parseExperimentalFeatureFromSearch('?tab=sync') !== null) {
+      throw new Error('expected null feature on sync tab');
+    }
+  });
+
+  test('resolves nested experimental settings tab from enabled flags', () => {
+    const allOff = {
+      battery: false,
+      game: false,
+      browser: false,
+      automation: false,
+      cloudSync: false,
+    };
+    if (resolveExperimentalSettingsTab(allOff, 'battery') !== null) {
+      throw new Error('expected null when all features off');
+    }
+    const cloudOnly = { ...allOff, cloudSync: true };
+    if (resolveExperimentalSettingsTab(cloudOnly, null) !== 'cloudSync') {
+      throw new Error('expected first enabled cloudSync');
+    }
+    if (resolveExperimentalSettingsTab(cloudOnly, 'battery') !== 'cloudSync') {
+      throw new Error('expected fallback when requested feature is off');
+    }
+    const twoOn = { ...allOff, battery: true, cloudSync: true };
+    if (resolveExperimentalSettingsTab(twoOn, 'cloudSync') !== 'cloudSync') {
+      throw new Error('expected requested cloudSync when enabled');
+    }
+    if (resolveExperimentalSettingsTab(twoOn, null) !== 'battery') {
+      throw new Error('expected first enabled battery');
+    }
+    const browserOnly = { ...allOff, browser: true };
+    if (resolveExperimentalSettingsTab(browserOnly, 'browser') !== null) {
+      throw new Error('expected no settings tab for browser-only opt-in');
+    }
+  });
+
   test('parses tab from search including while remounted query changes', () => {
     if (parseSettingsTabFromSearch('?tab=dependencies') !== 'dependencies') {
       throw new Error('expected dependencies from search');
     }
-    if (parseSettingsTabFromSearch('?tab=automation') !== 'automation') {
-      throw new Error('expected automation from search');
+    if (parseSettingsTabFromSearch('?tab=automation') !== 'experimental') {
+      throw new Error('expected legacy automation tab to resolve to experimental');
+    }
+    if (parseSettingsTabFromSearch('?tab=battery') !== 'experimental') {
+      throw new Error('expected legacy battery tab to resolve to experimental');
+    }
+    if (parseSettingsTabFromSearch('?tab=experimental') !== 'experimental') {
+      throw new Error('expected experimental from search');
     }
     if (parseSettingsTabFromSearch('?tab=fleet') !== 'general') {
       throw new Error('expected retired fleet tab to fall back to general');

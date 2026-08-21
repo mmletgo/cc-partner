@@ -24,10 +24,16 @@ const validConfig = {
 };
 
 describe('config schemas', () => {
-  test('decodes app config', () => {
-    expect(appConfigDecoder.decode(validConfig).deviceId).toBe('d1');
-    expect(appConfigDecoder.decode(validConfig).gamePluginDir).toBe('/tmp/plugins');
+  test('defaults experimentalFeatures to all off when missing', () => {
+    expect(appConfigDecoder.decode(validConfig).experimentalFeatures).toEqual({
+      battery: false,
+      game: false,
+      browser: false,
+      automation: false,
+      cloudSync: false,
+    });
   });
+
 
   test('rejects missing gamePluginDir', () => {
     const { gamePluginDir: _omitted, ...rest } = validConfig;

@@ -18,10 +18,7 @@ import { WorkbenchBrowserWorkspace } from '@/components/domain/WorkbenchBrowserW
 import { WorkbenchDependencyNotice } from './views/WorkbenchDependencyNotice';
 import { WorkbenchFileWorkspace } from '@/components/domain/WorkbenchFileWorkspace';
 import { WorkbenchSessionSearch } from '@/components/domain/WorkbenchSessionSearch';
-import {
-  WorkbenchWorkspaceSwitch,
-  type WorkbenchWorkspaceSwitchValue,
-} from '@/components/domain/WorkbenchWorkspaceSwitch';
+import type { WorkbenchWorkspaceSwitchValue } from '@/components/domain/WorkbenchWorkspaceSwitch';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button, Dialog, StatusMessage } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
@@ -32,8 +29,9 @@ import {
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention, useMarkNeedsInputAttentionOnSessionFocus } from '@/hooks/useAttention';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import {
-  BrowserIcon, FileIcon, MaximizeIcon, MinimizeIcon, RefreshIcon, SearchIcon, TerminalIcon,
+  MaximizeIcon, MinimizeIcon, RefreshIcon, SearchIcon,
 } from '@/lib/icons';
 import { WorkbenchPaneTools } from '@/components/domain/WorkbenchPaneTools';
 import styles from './Workbench.module.css';
@@ -72,6 +70,7 @@ import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
 import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
 import { useWorkbenchWindowRole } from '@/hooks/useWorkbenchWindowRole';
 import { WorkbenchWorkspaceHeader } from './WorkbenchWorkspaceHeader';
+import { WorkbenchWorkspaceSwitchSlot } from './views/WorkbenchWorkspaceSwitchSlot';
 import { WorkbenchProjectOverlayLayers } from './WorkbenchProjectOverlayLayers';
 import type { WorkbenchProjectAgentConsoleHandle } from '@/pages/AgentHub/WorkbenchProjectAgentConsole';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
@@ -134,6 +133,7 @@ export function Workbench() {
   // Business Logic: workspaceView / automationConsoleOpen 是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
   // 仍由 Workbench.tsx 持有；文件域 controller 通过 requestWorkspaceView / requestHideAutomationConsole 回调表达意图。
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
+  const { features: experimentalFeatures } = useExperimentalFeatures();
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
   const [projectAgentConsoleOpen, setProjectAgentConsoleOpen] = useState<boolean>(false);
   const projectOverlayOpen = automationConsoleOpen || projectAgentConsoleOpen;
@@ -497,6 +497,7 @@ export function Workbench() {
     setBrowserTargetUrl,
     layoutSlotKey: restoreSlotKey,
     urlProjectId: workbenchDeepLink.projectId,
+    browserEnabled: experimentalFeatures.browser,
   });
 
   const notes = useWorkbenchProjectNotes({
@@ -615,6 +616,9 @@ export function Workbench() {
    */
   const handleWorkspaceViewChange = useCallback(
     (next: WorkbenchWorkspaceSwitchValue): void => {
+      if (next === 'browser' && !experimentalFeatures.browser) {
+        return;
+      }
       if (next !== 'terminal' && terminalFullscreen) {
         terminalController.handleExitTerminalFullscreen();
       }
@@ -623,7 +627,7 @@ export function Workbench() {
       }
       setWorkspaceView(next);
     },
-    [terminalController, terminalFullscreen],
+    [experimentalFeatures.browser, terminalController, terminalFullscreen],
   );
 
   // Business Logic: 文件域操作函数（toggle/select/open/activate/close/content-change/mode-change/
@@ -816,28 +820,11 @@ export function Workbench() {
               setPendingRemovalWorktreeId(worktreeId);
             }}
             workspaceSwitch={
-              <WorkbenchWorkspaceSwitch
-                ariaLabel={t('workbench:workspaceSwitch.ariaLabel')}
+              <WorkbenchWorkspaceSwitchSlot
                 value={workspaceView}
                 onChange={handleWorkspaceViewChange}
-                options={[
-                  {
-                    id: 'terminal',
-                    label: t('workbench:workspaceSwitch.terminal'),
-                    icon: <TerminalIcon />,
-                  },
-                  {
-                    id: 'browser',
-                    label: t('workbench:browserPreview.openWorkspace'),
-                    icon: <BrowserIcon />,
-                    disabled: !activeProject || !activeWorktree,
-                  },
-                  {
-                    id: 'files',
-                    label: t('workbench:fileWorkspace.openFiles'),
-                    icon: <FileIcon />,
-                  },
-                ]}
+                browserEnabled={experimentalFeatures.browser}
+                canOpenBrowser={Boolean(activeProject && activeWorktree)}
               />
             }
           />

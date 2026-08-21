@@ -78,6 +78,7 @@ pub(crate) async fn discover_workbench_browser_targets_for_state(
     project_id: String,
     worktree_id: Option<String>,
 ) -> Result<WorkbenchBrowserDiscovery, AppError> {
+    crate::workbench::browser::require_experimental_browser(state)?;
     let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
         let local_worktree_id = worktree_id.clone();

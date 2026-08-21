@@ -10,6 +10,7 @@
 
 import type {
   AppConfig,
+  ExperimentalFeaturesConfig,
   PermissionActionResult,
   PermissionsStatus,
   PromptOptimizerFillLanguage,
@@ -36,10 +37,46 @@ const promptOptimizerProviderDecoder: Decoder<PromptOptimizerProvider> = enumDec
 
 /**
  * Business Logic（为什么需要这个 decoder）:
+ *   旧后端缺 experimentalFeatures 时必须 fail-closed 全关，不能把残缺对象当成已开启。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   五开关各自 default false。
+ */
+export const experimentalFeaturesDecoder: Decoder<ExperimentalFeaturesConfig> = objectDecoder(
+  'ExperimentalFeaturesConfig',
+  {
+    battery: booleanDecoder,
+    game: booleanDecoder,
+    browser: booleanDecoder,
+    automation: booleanDecoder,
+    cloudSync: booleanDecoder,
+  },
+  {
+    defaults: {
+      battery: false,
+      game: false,
+      browser: false,
+      automation: false,
+      cloudSync: false,
+    },
+  },
+);
+
+const DEFAULT_EXPERIMENTAL_FEATURES: ExperimentalFeaturesConfig = {
+  battery: false,
+  game: false,
+  browser: false,
+  automation: false,
+  cloudSync: false,
+};
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
  *   基础偏好与快捷键配置是 Settings 核心资源。
  *
  * Code Logic（这个 decoder 做什么）:
- *   严格解码 deviceId/deviceName/receiveDir/hotkeys/port/fillLanguage。
+ *   严格解码 deviceId/deviceName/receiveDir/hotkeys/port/fillLanguage；
+ *   experimentalFeatures 缺省全关。
  */
 export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   deviceId: stringDecoder,
@@ -52,9 +89,11 @@ export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   promptOptimizerProvider: promptOptimizerProviderDecoder,
   promptQuickInputHotkey: stringDecoder,
   httpPort: numberDecoder,
+  experimentalFeatures: experimentalFeaturesDecoder,
 }, {
   defaults: {
     promptOptimizerProvider: 'claude',
+    experimentalFeatures: DEFAULT_EXPERIMENTAL_FEATURES,
   },
 });
 

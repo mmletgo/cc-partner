@@ -17,6 +17,7 @@ import { WorkbenchBanner } from './views/WorkbenchBanner';
 import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
 import type { WorkbenchProjectControllerResult } from './controllers/useWorkbenchProjectController';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import styles from './Workbench.module.css';
 
 export interface WorkbenchWorkspaceHeaderProps {
@@ -46,6 +47,7 @@ export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): 
     onToggleAutomation,
   } = props;
   const { t } = useTranslation(['workbench']);
+  const { features } = useExperimentalFeatures();
   const { activeProject } = useWorkbenchProjects();
   const bannerDeviceId =
     activeProject?.kind === 'remote' ? activeProject.deviceId : undefined;
@@ -98,20 +100,22 @@ export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): 
             {t('workbench:projectAgent.open')}
           </Button>
         )}
-        <Button
-          className={styles.projectAutomationButton}
-          variant="secondary"
-          size="sm"
-          icon={<OrchestratorIcon />}
-          title={t('workbench:projectAutomation.description')}
-          aria-label={t('workbench:projectAutomation.open')}
-          aria-pressed={automationOpen}
-          data-active={automationOpen || undefined}
-          disabled={!activeProjectId}
-          onClick={onToggleAutomation}
-        >
-          {t('workbench:projectAutomation.open')}
-        </Button>
+        {features.automation ? (
+          <Button
+            className={styles.projectAutomationButton}
+            variant="secondary"
+            size="sm"
+            icon={<OrchestratorIcon />}
+            title={t('workbench:projectAutomation.description')}
+            aria-label={t('workbench:projectAutomation.open')}
+            aria-pressed={automationOpen}
+            data-active={automationOpen || undefined}
+            disabled={!activeProjectId}
+            onClick={onToggleAutomation}
+          >
+            {t('workbench:projectAutomation.open')}
+          </Button>
+        ) : null}
       </div>
     </section>
   );

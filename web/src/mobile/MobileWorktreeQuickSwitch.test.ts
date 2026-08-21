@@ -37,6 +37,12 @@ function assertIncludes(rendered: string, expected: string, message: string): vo
   }
 }
 
+function assertNotIncludes(rendered: string, unexpected: string, message: string): void {
+  if (rendered.includes(unexpected)) {
+    throw new Error(`${message}: expected rendered markup not to include ${unexpected}`);
+  }
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   quick switch 关闭态应完全不渲染，测试需要直接比较 SSR 输出。
@@ -256,10 +262,10 @@ describe('MobileWorktreeQuickSwitch', () => {
         'feature/mobile',
         'worktree status pill should still render worktree name',
       );
-      assertIncludes(
+      assertNotIncludes(
         shellMarkup,
         '自动化',
-        'project-mode shell navigation should expose automation as a panel',
+        'project-mode shell navigation should hide automation until experimental flag is on',
       );
       assertIncludes(
         shellMarkup,

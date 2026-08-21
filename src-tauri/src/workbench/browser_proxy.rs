@@ -9,6 +9,7 @@
 
 use crate::net::routes::ApiError;
 use crate::state::AppState;
+use crate::workbench::browser::experimental_browser_enabled;
 use crate::workbench::browser_models::WorkbenchBrowserPreview;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
@@ -367,6 +368,9 @@ pub async fn proxy_workbench_browser_request(
     req: Request<Body>,
     route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
+    if !experimental_browser_enabled(&state) {
+        return Err(ApiError::not_found("内测功能「网页浏览」未开启"));
+    }
     let prefers_html = prefers_html_document(req.headers());
     // 会话查找 + Origin 最终裁决（null 仅 live session；非 null 必须同源）。
     let result = async {

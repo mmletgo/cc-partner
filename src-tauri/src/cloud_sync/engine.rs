@@ -324,6 +324,18 @@ pub async fn trigger_cloud_sync_with(
 ///     fetch/reset/import/export/commit/push；Rejected 重试一轮。
 async fn trigger_cloud_sync_locked(state: &AppState) -> CloudSyncResult {
     let now = chrono::Utc::now().to_rfc3339();
+    {
+        let cfg = state.config.read().expect("config 读锁中毒");
+        if !cfg.experimental_features.cloud_sync {
+            return CloudSyncResult {
+                ok: false,
+                pulled: 0,
+                pushed: 0,
+                note: "内测功能「云端同步」未开启".to_string(),
+                synced_at: now,
+            };
+        }
+    }
     let ok_note = |pulled: u64, pushed: u64| {
         let mut parts: Vec<String> = Vec::new();
         parts.push(format!("拉取更新 {pulled} 条"));

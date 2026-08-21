@@ -106,6 +106,7 @@ interface HookParams {
   dirtyEditor: boolean;
   layoutSlotKey?: string;
   urlProjectId?: string | null;
+  browserEnabled?: boolean;
 }
 
 interface HarnessReturn {
@@ -190,6 +191,7 @@ function makeHarness(params: HookParams): HarnessReturn {
       setBrowserTargetUrl,
       layoutSlotKey: params.layoutSlotKey,
       urlProjectId: params.urlProjectId,
+      browserEnabled: params.browserEnabled ?? true,
     }),
   );
 

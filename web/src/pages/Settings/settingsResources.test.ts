@@ -48,6 +48,13 @@ function appConfig(partial: Partial<AppConfig> = {}): AppConfig {
     promptOptimizerProvider: 'claude',
     promptQuickInputHotkey: '<ctrl>+/',
     httpPort: 0,
+    experimentalFeatures: {
+      battery: false,
+      game: false,
+      browser: false,
+      automation: false,
+      cloudSync: false,
+    },
     ...partial,
   };
 }

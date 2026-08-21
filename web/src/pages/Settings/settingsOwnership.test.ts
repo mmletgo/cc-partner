@@ -31,6 +31,8 @@ function readSettingsSource(relativePath: string): string {
 
 const generalPanel = readSettingsSource('SettingsGeneralPanel.tsx');
 const syncPanel = readSettingsSource('SettingsSyncPanel.tsx');
+const cloudSyncPanel = readSettingsSource('SettingsCloudSyncPanel.tsx');
+const experimentalPanel = readSettingsSource('SettingsExperimentalPanel.tsx');
 const depsPanel = readSettingsSource('SettingsDependenciesPanel.tsx');
 const aiPanel = readSettingsSource('SettingsAiPanel.tsx');
 const aboutPanel = readSettingsSource('SettingsAboutPanel.tsx');
@@ -40,6 +42,8 @@ const settingsShell = readSettingsSource('Settings.tsx');
 const PANEL_SOURCES: Array<{ name: string; source: string }> = [
   { name: 'SettingsGeneralPanel.tsx', source: generalPanel },
   { name: 'SettingsSyncPanel.tsx', source: syncPanel },
+  { name: 'SettingsCloudSyncPanel.tsx', source: cloudSyncPanel },
+  { name: 'SettingsExperimentalPanel.tsx', source: experimentalPanel },
   { name: 'SettingsDependenciesPanel.tsx', source: depsPanel },
   { name: 'SettingsAiPanel.tsx', source: aiPanel },
   { name: 'SettingsAboutPanel.tsx', source: aboutPanel },
@@ -49,7 +53,7 @@ describe('Settings panel ownership (no transport)', () => {
   test.each(PANEL_SOURCES)('$name must not import or call transport APIs', ({ name, source }) => {
     // SettingsSyncPanel 允许从 @/api/sync 导入类型与 pure helpers（isDeviceSucceeded 等），
     // 但禁止调用 syncApi / backupApi / invoke / 其它 transport 客户端。
-    if (name === 'SettingsSyncPanel.tsx') {
+    if (name === 'SettingsSyncPanel.tsx' || name === 'SettingsCloudSyncPanel.tsx') {
       expect(source).not.toMatch(/\binvoke\s*\(/);
       expect(source).not.toContain('configApi');
       expect(source).not.toContain('healthApi');
@@ -83,11 +87,8 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain("activeTab === 'sync'");
     expect(controller).not.toContain("activeTab === 'dependencies'");
     expect(controller).not.toContain("activeTab === 'health'");
-    expect(controller).not.toContain("activeTab === 'battery'");
+    expect(controller).not.toContain("activeTab === 'experimental'");
     expect(controller).not.toContain("activeTab === 'activity'");
-    expect(controller).not.toContain("activeTab === 'ai'");
-    expect(controller).not.toContain('<ActivityStatsPanel');
-    expect(controller).not.toContain("activeTab === 'automation'");
     expect(controller).not.toContain("activeTab === 'about'");
     expect(controller).not.toContain('settings-panel-');
     expect(controller).not.toContain('role="tabpanel"');
@@ -95,6 +96,7 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain('<SettingsSyncPanel');
     expect(controller).not.toContain('<SettingsDependenciesPanel');
     expect(controller).not.toContain('<SettingsAiPanel');
+    expect(controller).not.toContain('<SettingsExperimentalPanel');
     expect(controller).not.toContain('<SettingsBatteryPanel');
     expect(controller).not.toContain('<SettingsAboutPanel');
   });
@@ -130,7 +132,9 @@ describe('Settings shell composition', () => {
     expect(settingsShell).toContain('SettingsDependenciesPanel');
     expect(settingsShell).toContain('SettingsAiPanel');
     expect(settingsShell).not.toContain('SettingsFleetPanel');
-    expect(settingsShell).toContain('SettingsBatteryPanel');
+    expect(settingsShell).toContain('SettingsExperimentalPanel');
+    expect(settingsShell).not.toContain("activeTab === 'battery'");
+    expect(settingsShell).not.toContain("activeTab === 'automation'");
     expect(settingsShell).toContain('SettingsAboutPanel');
     expect(settingsShell).toContain('ActivityStatsPanel');
     expect(settingsShell).toContain("activeTab === 'activity'");

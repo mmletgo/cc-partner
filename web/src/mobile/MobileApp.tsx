@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { attentionHttpApi } from '@/api/attentionHttp';
 import { AttentionProvider } from '@/hooks/useAttention';
+import { ExperimentalFeaturesProvider } from '@/hooks/useExperimentalFeatures';
 import {
   createWorkbenchTerminalBufferStore,
   type WorkbenchTerminalBufferStore,
@@ -207,7 +208,9 @@ export function MobileApp(): ReactElement {
         loadSnapshot={loadAttentionSnapshot}
         mutations={attentionHttpApi}
       >
-        <MobileWorkbench />
+        <ExperimentalFeaturesProvider>
+          <MobileWorkbench />
+        </ExperimentalFeaturesProvider>
       </AttentionProvider>
     </WorkbenchTerminalBuffersContext.Provider>
   );

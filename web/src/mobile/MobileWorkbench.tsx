@@ -14,6 +14,7 @@ import {
 import { useAttention, useMarkNeedsInputAttentionOnSessionFocus } from '@/hooks/useAttention';
 import { useWorkbenchHttpEvents } from '@/hooks/useWorkbenchHttpEvents';
 import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import type {
   AttentionItem,
   MutationIntent,
@@ -174,6 +175,7 @@ function createMobileFilePanelContext(
  */
 export function MobileWorkbench(): ReactElement {
   const { store: terminalBufferStore, removeBuffer } = useWorkbenchTerminalBuffers();
+  const { features: experimentalFeatures } = useExperimentalFeatures();
   const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [activeProject, setActiveProject] = useState<WorkbenchProject | null>(null);
@@ -224,6 +226,21 @@ export function MobileWorkbench(): ReactElement {
   useEffect(() => {
     activeProjectIdRef.current = activeProject?.id ?? null;
   }, [activeProject?.id]);
+
+  useEffect(() => {
+    if (panel === 'automation' && !experimentalFeatures.automation) {
+      setPanel(activeProject ? 'terminal' : 'projects');
+      return;
+    }
+    if (panel === 'browser' && !experimentalFeatures.browser) {
+      setPanel(activeProject ? 'terminal' : 'projects');
+    }
+  }, [
+    activeProject,
+    experimentalFeatures.automation,
+    experimentalFeatures.browser,
+    panel,
+  ]);
 
   // sessions 列表变化时在 render 阶段播种 runtime（保留已有 agent 投影），避免 setState-in-effect
   const [seededSessions, setSeededSessions] = useState(sessions);

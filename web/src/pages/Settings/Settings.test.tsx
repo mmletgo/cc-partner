@@ -18,6 +18,7 @@ import {
   formatDiagnosticsForCopy,
 } from '@/api/runtimeDiagnostics';
 import { MemoryRouter } from 'react-router-dom';
+import { ExperimentalFeaturesProvider } from '@/hooks/useExperimentalFeatures';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -51,6 +52,13 @@ const appConfig = (partial: Partial<AppConfig> = {}): AppConfig => ({
   promptOptimizerProvider: 'claude',
   promptQuickInputHotkey: '<ctrl>+/',
   httpPort: 0,
+  experimentalFeatures: {
+    battery: false,
+    game: false,
+    browser: false,
+    automation: false,
+    cloudSync: false,
+  },
   ...partial,
 });
 
@@ -506,7 +514,13 @@ import { Settings } from './Settings';
  *   直接 render Settings。
  */
 function renderSettings(): ReturnType<typeof render> {
-  return render(<MemoryRouter><Settings /></MemoryRouter>);
+  return render(
+    <MemoryRouter>
+      <ExperimentalFeaturesProvider>
+        <Settings />
+      </ExperimentalFeaturesProvider>
+    </MemoryRouter>,
+  );
 }
 
 beforeEach(() => {
@@ -662,7 +676,12 @@ describe('Settings partial resource loading', () => {
       note: 'JSON 已同步；Agent Hub 备份未推送：刷新任务被跳过',
       syncedAt: '2026-08-21T00:00:00Z',
     });
-    searchParamsState.value = new URLSearchParams('tab=sync');
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    getConfig.mockResolvedValue(
+      appConfig({
+        experimentalFeatures: { battery: false, game: false, browser: false, automation: false, cloudSync: true },
+      }),
+    );
     renderSettings();
 
     fireEvent.click(
@@ -740,6 +759,102 @@ describe('Settings partial resource loading', () => {
   });
 });
 
+describe('Settings beta / experimental tab', () => {
+  test('lists opt-in switches, hides nested settings, and has no top-level battery/automation tabs', async () => {
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-panel-experimental')).toBeTruthy();
+    });
+    expect(screen.getByTestId('settings-experimental-toggle-battery')).toBeTruthy();
+    expect(screen.getByTestId('settings-experimental-toggle-game')).toBeTruthy();
+    expect(screen.getByTestId('settings-experimental-toggle-browser')).toBeTruthy();
+    expect(screen.getByTestId('settings-experimental-toggle-automation')).toBeTruthy();
+    expect(screen.getByTestId('settings-experimental-toggle-cloudSync')).toBeTruthy();
+    expect(screen.queryByTestId('settings-panel-battery')).toBeNull();
+    expect(screen.queryByTestId('settings-panel-automation')).toBeNull();
+    expect(screen.queryByTestId('settings-panel-cloud-sync')).toBeNull();
+    expect(screen.queryByLabelText('settings:basic.gamePluginDir')).toBeNull();
+    expect(screen.queryByTestId('settings-tab-battery')).toBeNull();
+    expect(screen.queryByTestId('settings-tab-automation')).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'settings:tabs.battery' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'settings:tabs.automation' })).toBeNull();
+    expect(screen.queryByTestId('settings-experimental-feature-tablist')).toBeNull();
+  });
+
+  test('enabling charging mode reveals nested battery settings tab', async () => {
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    updateConfig.mockImplementation(async (patch: { experimentalFeatures?: unknown }) =>
+      appConfig({
+        experimentalFeatures: patch.experimentalFeatures as AppConfig['experimentalFeatures'],
+      }),
+    );
+    renderSettings();
+
+    fireEvent.click(await screen.findByTestId('settings-experimental-toggle-battery'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-experimental-feature-tablist')).toBeTruthy();
+    });
+    expect(screen.getByTestId('settings-experimental-tab-battery')).toBeTruthy();
+    expect(screen.getByTestId('settings-panel-battery')).toBeTruthy();
+    expect(screen.queryByTestId('settings-panel-automation')).toBeNull();
+    expect(screen.queryByTestId('settings-panel-cloud-sync')).toBeNull();
+    expect(updateConfig).toHaveBeenCalledWith({
+      experimentalFeatures: {
+        battery: true,
+        game: false,
+        browser: false,
+        automation: false,
+        cloudSync: false,
+      },
+    });
+  });
+
+  test('enabling web browsing does not add a nested settings tab', async () => {
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    updateConfig.mockImplementation(async (patch: { experimentalFeatures?: unknown }) =>
+      appConfig({
+        experimentalFeatures: patch.experimentalFeatures as AppConfig['experimentalFeatures'],
+      }),
+    );
+    renderSettings();
+
+    fireEvent.click(await screen.findByTestId('settings-experimental-toggle-browser'));
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId('settings-experimental-feature-tablist')).toBeNull();
+    expect(screen.queryByTestId('settings-experimental-tab-browser')).toBeNull();
+  });
+
+  test('nested feature tabs show only the selected settings panel', async () => {
+    searchParamsState.value = new URLSearchParams('tab=experimental&feature=cloudSync');
+    getConfig.mockResolvedValue(
+      appConfig({
+        experimentalFeatures: { battery: true, game: false, browser: false, automation: true, cloudSync: true },
+      }),
+    );
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-experimental-feature-tablist')).toBeTruthy();
+    });
+    expect(screen.getByTestId('settings-panel-cloud-sync')).toBeTruthy();
+    expect(screen.queryByTestId('settings-panel-battery')).toBeNull();
+    expect(screen.queryByTestId('settings-panel-automation')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('settings-experimental-tab-battery'));
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-panel-battery')).toBeTruthy();
+    });
+    expect(screen.queryByTestId('settings-panel-cloud-sync')).toBeNull();
+    expect(screen.queryByTestId('settings-panel-automation')).toBeNull();
+  });
+});
+
 describe('Settings safe save preserves concurrent edits', () => {
   test('keeps edits typed while general settings save is pending', async () => {
     const save = deferred<AppConfig>();
@@ -786,7 +901,12 @@ describe('Settings safe save preserves concurrent edits', () => {
   test('keeps edits typed while cloud sync save is pending', async () => {
     const save = deferred<CloudSyncConfig>();
     updateCloudSyncConfig.mockImplementation(() => save.promise);
-    searchParamsState.value = new URLSearchParams('tab=sync');
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    getConfig.mockResolvedValue(
+      appConfig({
+        experimentalFeatures: { battery: false, game: false, browser: false, automation: false, cloudSync: true },
+      }),
+    );
     renderSettings();
 
     const repoUrl = (await screen.findByLabelText(
@@ -856,7 +976,12 @@ describe('Settings safe save preserves concurrent edits', () => {
   test('keeps edits typed while automation save is pending', async () => {
     const save = deferred<OrchestratorAutomationConfig>();
     updateAutomationConfig.mockImplementation(() => save.promise);
-    searchParamsState.value = new URLSearchParams('tab=automation');
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    getConfig.mockResolvedValue(
+      appConfig({
+        experimentalFeatures: { battery: false, game: false, browser: false, automation: true, cloudSync: false },
+      }),
+    );
     renderSettings();
 
     const commands = (await screen.findByLabelText(
@@ -879,7 +1004,12 @@ describe('Settings safe save preserves concurrent edits', () => {
     updateAutomationConfig.mockResolvedValue(
       automation({ notifyTaskDone: true, notifyHumanReview: false }),
     );
-    searchParamsState.value = new URLSearchParams('tab=automation');
+    searchParamsState.value = new URLSearchParams('tab=experimental');
+    getConfig.mockResolvedValue(
+      appConfig({
+        experimentalFeatures: { battery: false, game: false, browser: false, automation: true, cloudSync: false },
+      }),
+    );
     renderSettings();
 
     const taskDoneToggle = await screen.findByRole('switch', {
@@ -957,16 +1087,16 @@ describe('Settings narrow tablist deep-link a11y', () => {
       expect(screen.getByRole('tabpanel').id).toBe('settings-panel-about');
 
       // 切换到 automation 再 Arrow，验证 roving + 再次 scrollTo
-      fireEvent.click(screen.getByTestId('settings-tab-automation'));
+      fireEvent.click(screen.getByTestId('settings-tab-experimental'));
       await waitFor(() => {
         expect(
-          screen.getByRole('tab', { name: 'settings:tabs.automation' }).getAttribute(
+          screen.getByRole('tab', { name: 'settings:tabs.experimental' }).getAttribute(
             'aria-selected',
           ),
         ).toBe('true');
       });
-      const automationTab = screen.getByRole('tab', { name: 'settings:tabs.automation' });
-      fireEvent.keyDown(automationTab, { key: 'ArrowLeft' });
+      const experimentalTab = screen.getByRole('tab', { name: 'settings:tabs.experimental' });
+      fireEvent.keyDown(experimentalTab, { key: 'ArrowLeft' });
       await waitFor(() => {
         expect(setSearchParamsMock).toHaveBeenCalled();
       });

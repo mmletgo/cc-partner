@@ -1,7 +1,7 @@
 {
   "title": "Settings",
   "eyebrow": "Preferences",
-  "subtitle": "Manage device name, screenshot shortcut, cloud sync, and version info.",
+  "subtitle": "Manage device name, screenshot shortcut, LAN sync, and version info.",
   "loading": "Loading…",
   "loadFailed": "Failed to load: {{error}}",
   "tabsLabel": "Settings sections",
@@ -13,7 +13,7 @@
     "activity": "Activity",
     "sync": "Sync",
     "ai": "AI",
-    "automation": "Automation",
+    "experimental": "Beta",
     "about": "About"
   },
   "basic": {
@@ -41,6 +41,32 @@
   "sync": {
     "enabled": "On",
     "disabled": "Off"
+  },
+  "experimental": {
+    "title": "Beta features",
+    "subtitle": "These features are off by default. Turn one on to show its entry points. Settings for enabled features appear as tabs at the bottom of this page. Turning it off hides the entry immediately and does not delete saved data.",
+    "toggleFailed": "Failed to update beta features",
+    "settingsTabsLabel": "Beta feature settings",
+    "battery": {
+      "label": "Charging mode",
+      "helper": "Switch charging/unlimited in the sidebar and spend balance on the workbench."
+    },
+    "game": {
+      "label": "Game mode",
+      "helper": "Open the game hub and word flashcards from the sidebar, and configure the plugin folder."
+    },
+    "browser": {
+      "label": "Web browsing",
+      "helper": "Preview the project web page on the workbench and on mobile."
+    },
+    "automation": {
+      "label": "Project automation",
+      "helper": "Manage orchestration tasks on the desktop workbench and on mobile."
+    },
+    "cloudSync": {
+      "label": "Cloud sync",
+      "helper": "Sync across networks through a GitHub private repository."
+    }
   },
   "cloudSync": {
     "title": "Cloud sync",

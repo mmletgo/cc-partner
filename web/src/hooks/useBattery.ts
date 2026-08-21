@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 
 import { batteryApi } from '@/api/battery';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { readCurrentWindowLabel } from '@/hooks/useWorkbenchWindowRole';
 import type { BatteryCreditSource, BatteryMode, BatterySnapshot } from '@/lib/types/battery';
@@ -81,6 +82,8 @@ export interface UseBatteryResult {
  */
 export function useBattery(): UseBatteryResult {
   const location = useLocation();
+  const { features } = useExperimentalFeatures();
+  const batteryEnabled = features.battery;
   const windowLabelRef = useRef(readCurrentWindowLabel());
   const [snapshot, setSnapshot] = useState<BatterySnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -183,6 +186,14 @@ export function useBattery(): UseBatteryResult {
    *   计算 consuming；变化或每 1s 心跳 reportFocus。
    */
   useEffect(() => {
+    if (!batteryEnabled) {
+      if (lastConsuming.current) {
+        lastConsuming.current = false;
+        void batteryApi.reportFocus(windowLabelRef.current, false).catch(() => undefined);
+      }
+      return undefined;
+    }
+
     let cancelled = false;
 
     const compute = (): boolean => {
@@ -228,7 +239,7 @@ export function useBattery(): UseBatteryResult {
         void batteryApi.reportFocus(windowLabelRef.current, false).catch(() => undefined);
       }
     };
-  }, [applySnapshot, location.pathname]);
+  }, [applySnapshot, batteryEnabled, location.pathname]);
 
   /**
    * Business Logic（为什么需要这个函数）:

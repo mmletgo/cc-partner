@@ -24,6 +24,13 @@ export type TestAppConfig = {
   promptOptimizerFillLanguage: 'zh' | 'en';
   promptOptimizerProvider: 'claude' | 'grok';
   httpPort: number;
+  experimentalFeatures?: {
+    battery: boolean;
+    game: boolean;
+    browser: boolean;
+    automation: boolean;
+    cloudSync: boolean;
+  };
 };
 
 /**
@@ -45,6 +52,13 @@ export function makeAppConfig(partial: Partial<TestAppConfig> = {}): TestAppConf
     promptOptimizerFillLanguage: 'zh',
     promptOptimizerProvider: 'claude',
     httpPort: 62116,
+    experimentalFeatures: {
+      battery: false,
+      game: false,
+      browser: false,
+      automation: false,
+      cloudSync: false,
+    },
     ...partial,
   };
 }

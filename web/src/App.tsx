@@ -18,6 +18,7 @@ import { WorkbenchAgentHintsProvider } from './hooks/WorkbenchAgentHintsProvider
 import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
 import { AttentionProvider } from './hooks/useAttention';
+import { ExperimentalFeaturesProvider } from './hooks/useExperimentalFeatures';
 import { ScratchpadAutosaveProvider } from './hooks/ScratchpadAutosaveProvider';
 import { OperationalNotificationCoordinator } from './hooks/useOperationalNotifications';
 import { useWorkbenchWindowRole } from './hooks/useWorkbenchWindowRole';
@@ -603,11 +604,13 @@ export default function App() {
                         loadSnapshot={attentionApi.listSnapshot}
                         mutations={attentionApi}
                       >
-                        <ScratchpadAutosaveProvider>
-                          {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
-                          <MainWindowOperationalNotifications />
-                          <AppShell />
-                        </ScratchpadAutosaveProvider>
+                        <ExperimentalFeaturesProvider>
+                          <ScratchpadAutosaveProvider>
+                            {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
+                            <MainWindowOperationalNotifications />
+                            <AppShell />
+                          </ScratchpadAutosaveProvider>
+                        </ExperimentalFeaturesProvider>
                       </AttentionProvider>
                     </WorkbenchTerminalBuffersProvider>
                   </WorkbenchAgentHintsProvider>

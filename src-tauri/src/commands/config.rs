@@ -17,6 +17,7 @@ use crate::backend::control_client::BackendControlClient;
 use crate::config::parse_prompt_optimizer_provider;
 use crate::config::{
     default_preference_values, normalize_prompt_optimizer_fill_language, AppConfig,
+    ExperimentalFeaturesConfig,
 };
 #[cfg(test)]
 use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
@@ -46,6 +47,9 @@ pub struct ConfigDto {
     pub prompt_quick_input_hotkey: String,
     /// HTTP 端口（M1 未实际监听，暂返回配置值；M3 接入真实监听端口后更新）
     pub http_port: i64,
+    /// 内测功能 opt-in（缺字段 decoder 全关）。
+    #[serde(default)]
+    pub experimental_features: crate::config::ExperimentalFeaturesConfig,
 }
 
 /// 把磁盘/快照里的 provider 投影成前端 wire。
@@ -85,6 +89,7 @@ fn config_to_dto(cfg: &AppConfig) -> ConfigDto {
         prompt_optimizer_provider: config_provider_wire(&cfg.prompt_optimizer_provider),
         prompt_quick_input_hotkey: cfg.prompt_quick_input_hotkey.clone(),
         http_port: cfg.http_port,
+        experimental_features: cfg.experimental_features.clone(),
     }
 }
 
@@ -141,6 +146,7 @@ fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
         prompt_optimizer_provider: config_provider_wire(&snap.prompt_optimizer_provider),
         prompt_quick_input_hotkey: snap.prompt_quick_input_hotkey.clone(),
         http_port: snap.http_port,
+        experimental_features: snap.experimental_features.clone(),
     }
 }
 
@@ -161,6 +167,7 @@ fn build_preference_patch(
     prompt_optimizer_fill_language: Option<String>,
     prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
+    experimental_features: Option<ExperimentalFeaturesConfig>,
 ) -> RuntimeConfigPatch {
     RuntimeConfigPatch {
         device_name,
@@ -171,6 +178,7 @@ fn build_preference_patch(
         prompt_optimizer_fill_language,
         prompt_optimizer_provider,
         prompt_quick_input_hotkey,
+        experimental_features,
         ..Default::default()
     }
 }
@@ -193,6 +201,7 @@ async fn update_config_via_owner(
     prompt_optimizer_fill_language: Option<String>,
     prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
+    experimental_features: Option<ExperimentalFeaturesConfig>,
 ) -> Result<ConfigDto, AppError> {
     let client = BackendControlClient::from_control_file()?;
     let resp: ConfigUpdateResponse = client
@@ -205,6 +214,7 @@ async fn update_config_via_owner(
             prompt_optimizer_fill_language,
             prompt_optimizer_provider,
             prompt_quick_input_hotkey,
+            experimental_features,
         ))
         .await?;
     refresh_local_from_snapshot(state, &resp.snapshot)?;
@@ -233,6 +243,7 @@ async fn update_config_via_owner_with_hotkey(
     prompt_optimizer_fill_language: Option<String>,
     prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
+    experimental_features: Option<ExperimentalFeaturesConfig>,
 ) -> Result<ConfigDto, AppError> {
     let client = BackendControlClient::from_control_file()?;
     let resp = client
@@ -247,6 +258,7 @@ async fn update_config_via_owner_with_hotkey(
                 prompt_optimizer_fill_language,
                 prompt_optimizer_provider,
                 prompt_quick_input_hotkey,
+                experimental_features,
             ),
         )
         .await?;
@@ -284,6 +296,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
         prompt_optimizer_provider: crate::config::default_prompt_optimizer_provider(),
         prompt_quick_input_hotkey,
         http_port: cfg.http_port,
+        experimental_features: cfg.experimental_features.clone(),
     })
 }
 
@@ -472,6 +485,7 @@ pub async fn update_config(
     prompt_optimizer_fill_language: Option<String>,
     prompt_optimizer_provider: Option<String>,
     prompt_quick_input_hotkey: Option<String>,
+    experimental_features: Option<ExperimentalFeaturesConfig>,
 ) -> Result<ConfigDto, AppError> {
     if screenshot_hotkey.is_none() {
         return update_config_via_owner(
@@ -484,6 +498,7 @@ pub async fn update_config(
             prompt_optimizer_fill_language,
             prompt_optimizer_provider,
             prompt_quick_input_hotkey,
+            experimental_features,
         )
         .await;
     }
@@ -500,6 +515,7 @@ pub async fn update_config(
         prompt_optimizer_fill_language,
         prompt_optimizer_provider,
         prompt_quick_input_hotkey,
+        experimental_features,
     )
     .await
 }
@@ -567,6 +583,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: ExperimentalFeaturesConfig::default(),
         }
     }
 

@@ -36,8 +36,8 @@ export interface WorkbenchWorkspaceSwitchProps {
   value: WorkbenchWorkspaceSwitchValue;
   /** 用户点击非禁用段时回调；禁用段不会触发。 */
   onChange: (value: WorkbenchWorkspaceSwitchValue) => void;
-  /** 三段选项；顺序即视觉从左到右顺序。 */
-  options: [WorkbenchWorkspaceSwitchOption, WorkbenchWorkspaceSwitchOption, WorkbenchWorkspaceSwitchOption];
+  /** 2 或 3 段选项；网页浏览关闭时只有终端 / 文件。顺序即视觉从左到右。 */
+  options: readonly WorkbenchWorkspaceSwitchOption[];
   /** radiogroup 可访问名称；父级传 i18n 后。 */
   ariaLabel: string;
   /** 整组额外 className；用于父级控制边距。 */
@@ -83,7 +83,7 @@ export function WorkbenchWorkspaceSwitch(props: WorkbenchWorkspaceSwitchProps): 
       nextIndex = options.length - 1;
     }
     const next = options[nextIndex];
-    if (next.disabled) return;
+    if (!next || next.disabled) return;
     handleSelect(next);
   };
 

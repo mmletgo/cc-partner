@@ -84,41 +84,116 @@ export type SettingsTabId =
   | 'general'
   | 'dependencies'
   | 'health'
-  | 'battery'
   | 'activity'
   | 'sync'
   | 'ai'
-  | 'automation'
+  | 'experimental'
   | 'about';
+
+/** 内测功能页内嵌套功能 id。 */
+export type ExperimentalFeatureId =
+  | 'battery'
+  | 'game'
+  | 'browser'
+  | 'automation'
+  | 'cloudSync';
 
 /** 合法 Settings tab 集合。 */
 export const SETTINGS_TAB_IDS: readonly SettingsTabId[] = [
   'general',
   'dependencies',
   'health',
-  'battery',
   'activity',
   'sync',
   'ai',
-  'automation',
+  'experimental',
   'about',
 ] as const;
+
+const LEGACY_TAB_TO_FEATURE: Record<string, ExperimentalFeatureId> = {
+  battery: 'battery',
+  automation: 'automation',
+};
+
+/** 内测功能嵌套设置 tab 顺序（有独立设置的功能；网页浏览仅总开关）。 */
+export const EXPERIMENTAL_SETTINGS_TAB_IDS: readonly ExperimentalFeatureId[] = [
+  'battery',
+  'game',
+  'automation',
+  'cloudSync',
+];
+
+/** 内测功能总开关顺序（充电 / 游戏 / 网页浏览 / 自动化 / 云同步）。 */
+export const EXPERIMENTAL_FEATURE_IDS: readonly ExperimentalFeatureId[] = [
+  'battery',
+  'game',
+  'browser',
+  'automation',
+  'cloudSync',
+];
 
 /**
  * Business Logic（为什么需要这个函数）:
  *   Settings 深链与 Attention 跳转依赖 ?tab= 参数；未知值必须回退 general，避免空白面板。
+ *   旧 `battery` / `automation` tab 已迁入内测功能页，仍解析为 experimental。
  *
  * Code Logic（这个函数做什么）:
- *   校验 raw 是否为已知 SettingsTabId，否则返回 fallback（默认 general）。
+ *   校验 raw 是否为已知 SettingsTabId 或遗留实验 tab，否则返回 fallback（默认 general）。
  */
 export function resolveSettingsTabId(
   raw: string | null | undefined,
   fallback: SettingsTabId = 'general',
 ): SettingsTabId {
   if (!raw) return fallback;
+  if (raw in LEGACY_TAB_TO_FEATURE) return 'experimental';
   return (SETTINGS_TAB_IDS as readonly string[]).includes(raw)
     ? (raw as SettingsTabId)
     : fallback;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   内测功能页需要定位到充电/游戏/自动化/云同步区块；旧 `?tab=battery|automation` 必须落到对应功能。
+ *
+ * Code Logic（这个函数做什么）:
+ *   优先读 `feature=`；否则把遗留 tab 名映射为 ExperimentalFeatureId。
+ */
+export function parseExperimentalFeatureFromSearch(search: string): ExperimentalFeatureId | null {
+  const params = new URLSearchParams(
+    search === '' || search.startsWith('?') ? search : `?${search}`,
+  );
+  const feature = params.get('feature');
+  if (feature && (EXPERIMENTAL_FEATURE_IDS as readonly string[]).includes(feature)) {
+    return feature as ExperimentalFeatureId;
+  }
+  const tab = params.get('tab');
+  if (tab && tab in LEGACY_TAB_TO_FEATURE) {
+    return LEGACY_TAB_TO_FEATURE[tab] ?? null;
+  }
+  return null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   内测设置 tab 只列出已开启功能；深链 `feature=` 必须落在仍开启的功能上，否则回退第一个已开启项。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 EXPERIMENTAL_SETTINGS_TAB_IDS 过滤已开启且带设置的功能；requested 仍开启则用之，否则取首个。
+ */
+export function resolveExperimentalSettingsTab(
+  features: Record<ExperimentalFeatureId, boolean>,
+  requested: ExperimentalFeatureId | null,
+): ExperimentalFeatureId | null {
+  const enabled = EXPERIMENTAL_SETTINGS_TAB_IDS.filter((id) => features[id]);
+  if (enabled.length === 0) return null;
+  if (
+    requested &&
+    features[requested] &&
+    (EXPERIMENTAL_SETTINGS_TAB_IDS as readonly string[]).includes(requested)
+  ) {
+    return requested;
+  }
+  return enabled[0] ?? null;
 }
 
 /**

@@ -31,9 +31,9 @@ use crate::agent_hub::service::AgentHubService;
 use crate::agent_hub::user_instructions::{
     AdaptInstructionToOtherAgentsRequest, AnalyzeInstructionOriginalRequest,
     ApplyUserInstructionPlanRequest, ListUserInstructionSlotVersionsRequest,
-    PreviewUserInstructionRequest, RestoreUserInstructionSlotRequest, ReviseInstructionSlotRequest,
-    ReadUserNativeInstructionFileRequest, SaveUserInstructionBlocksRequest,
-    WriteUserNativeInstructionFileRequest,
+    PreviewUserInstructionRequest, ReadUserNativeInstructionFileRequest,
+    RestoreUserInstructionSlotRequest, ReviseInstructionSlotRequest,
+    SaveUserInstructionBlocksRequest, WriteUserNativeInstructionFileRequest,
 };
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions

@@ -1136,6 +1136,35 @@ pub struct ManualPeerConfig {
     pub port: u16,
 }
 
+/// 内测功能 opt-in 开关（默认全部关闭）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     充电模式、游戏大厅、网页浏览、项目自动化与 GitHub 云端同步默认不对用户暴露；
+///     用户须在设置「内测功能」页显式打开后，对应入口与调度才生效。
+///     旧 `config.json` 缺字段必须 fail-closed 为全关，不得因曾用过充电/云同步而自动打开。
+///
+/// Code Logic（这个结构做什么）:
+///     五个独立 bool；`#[serde(default)]` 保证缺字段/旧配置反序列化为 false。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalFeaturesConfig {
+    /// 充电模式（侧栏切换、工作台扣时与遮罩）。
+    #[serde(default)]
+    pub battery: bool,
+    /// 游戏大厅（侧栏入口与插件目录设置）。
+    #[serde(default)]
+    pub game: bool,
+    /// 工作台网页浏览（桌面三段切换与移动端 Browser 面板、preview/proxy）。
+    #[serde(default)]
+    pub browser: bool,
+    /// 项目自动化 / Orchestrator（工作台与移动端入口、scheduler dispatch）。
+    #[serde(default)]
+    pub automation: bool,
+    /// GitHub 私有仓库云端同步（设置卡片、手动/自动同步）。
+    #[serde(default)]
+    pub cloud_sync: bool,
+}
+
 /// 应用全局配置。字段命名与 Python `AppConfig` dataclass 一致（snake_case 用于磁盘持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -1207,6 +1236,9 @@ pub struct AppConfig {
     /// 默认空 = 仅 mDNS LAN 发现，不改默认信任边界。详见 `ManualPeerConfig`。
     #[serde(default)]
     pub manual_peers: Vec<ManualPeerConfig>,
+    /// 内测功能 opt-in。`#[serde(default)]` 兼容旧 config.json（缺字段 = 全关）。
+    #[serde(default)]
+    pub experimental_features: ExperimentalFeaturesConfig,
 }
 
 /// Multi-CLI Agent Hub 设备级配置。
@@ -1413,6 +1445,7 @@ impl AppConfig {
                 internal_claude: InternalClaudeConfig::default(),
                 agent_hub: AgentHubConfig::default(),
                 manual_peers: Vec::new(),
+                experimental_features: ExperimentalFeaturesConfig::default(),
             };
             store.save_atomic(&cfg)?;
             Ok(cfg)
@@ -1944,6 +1977,14 @@ mod tests {
         assert!(!cfg.orchestrator.enabled);
         assert_eq!(cfg.orchestrator.max_concurrent_tasks, 1);
         assert!(cfg.orchestrator.auto_commit);
+        assert!(
+            !cfg.experimental_features.battery
+                && !cfg.experimental_features.game
+                && !cfg.experimental_features.browser
+                && !cfg.experimental_features.automation
+                && !cfg.experimental_features.cloud_sync,
+            "旧 config 缺 experimental_features 时必须全关"
+        );
     }
 
     #[test]
@@ -1985,6 +2026,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: ExperimentalFeaturesConfig::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -2068,6 +2110,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            experimental_features: ExperimentalFeaturesConfig::default(),
         }
     }
 

@@ -56,6 +56,8 @@ export interface UseWorkspaceSafeRestoreParams {
   layoutSlotKey?: string;
   /** URL 指定项目时优先于 slot restore。 */
   urlProjectId?: string | null;
+  /** 网页浏览内测开关；关闭时不得恢复 browser 视图或创建 preview。 */
+  browserEnabled: boolean;
 }
 
 export interface UseWorkspaceSafeRestoreResult {
@@ -164,6 +166,7 @@ export function useWorkspaceSafeRestore(
     setBrowserTargetUrl,
     layoutSlotKey = 'desktop:auto',
     urlProjectId = null,
+    browserEnabled,
   } = params;
 
   const [restoreSummary, setRestoreSummary] = useState<WorkspaceRestoreSummary | null>(null);
@@ -229,16 +232,15 @@ export function useWorkspaceSafeRestore(
         const target: WorkbenchFileWorkspaceView = options.forceTerminalWorkspaceView
           ? 'terminal'
           : (view as WorkbenchFileWorkspaceView);
-        setWorkspaceView(target);
+        setWorkspaceView(target === 'browser' && !browserEnabled ? 'terminal' : target);
       },
       setInspectorTab: (tab: InspectorTab) => {
         setInspectorTab(fromLayoutInspectorTab(tab));
       },
       restoreBrowserTarget: async (url: string) => {
         if (!activeProjectIdRef.current) return;
-        if (options.forceTerminalWorkspaceView) {
-          // 初始 restore 必须停在终端：只回填上次 URL，不建 preview、不切 browser。
-          // 用户之后点「网页浏览」再走 discover 的自动打开规则。
+        if (options.forceTerminalWorkspaceView || !browserEnabled) {
+          // 初始 restore 或内测关闭：只回填上次 URL，不建 preview、不切 browser。
           setBrowserTargetUrl(url);
           return;
         }
@@ -263,7 +265,11 @@ export function useWorkspaceSafeRestore(
         if (snapshot.sessionId) await focusSession(snapshot.sessionId);
         // 回滚 previous 时同样保留原始 view,不应用 force-terminal 强制,
         // 避免异常路径误把 UI 锁在 terminal。
-        setWorkspaceView(snapshot.workspaceView as WorkbenchFileWorkspaceView);
+        setWorkspaceView(
+          snapshot.workspaceView === 'browser' && !browserEnabled
+            ? 'terminal'
+            : (snapshot.workspaceView as WorkbenchFileWorkspaceView),
+        );
         setBrowserTargetUrl(snapshot.browserTargetUrl);
       },
     }),
@@ -276,6 +282,7 @@ export function useWorkspaceSafeRestore(
       setBrowserTargetUrl,
       activeProjectIdRef,
       activeWorktreeIdRef,
+      browserEnabled,
     ],
   );
 

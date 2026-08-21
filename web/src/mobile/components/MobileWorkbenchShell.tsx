@@ -36,6 +36,7 @@ import {
   type MobileWorkbenchNavMode,
   type MobileWorkbenchPanel,
 } from '../mobileWorkbenchState';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import styles from '../MobileWorkbench.module.css';
 
 /** 窄屏导航 Drawer 的 aria-labelledby 目标 id（稳定字符串，避免 useId SSR 漂移）。 */
@@ -118,6 +119,7 @@ function MobilePanelNav({
   projectLabel,
 }: MobilePanelNavProps): ReactElement {
   const { t } = useTranslation(['workbench', 'attention']);
+  const { features } = useExperimentalFeatures();
   const labels: Record<MobileWorkbenchPanel, string> = {
     projects: t('workbench:mobile.nav.projects'),
     attention: t('workbench:mobile.nav.attention'),
@@ -164,7 +166,10 @@ function MobilePanelNav({
           </span>
         </button>
       ) : null}
-      {getMobileWorkbenchNavGroups(navMode).map((group) => {
+      {getMobileWorkbenchNavGroups(navMode, {
+        automationEnabled: features.automation,
+        browserEnabled: features.browser,
+      }).map((group) => {
         const titleId = MOBILE_NAV_GROUP_TITLE_IDS[group.id];
         return (
           <section

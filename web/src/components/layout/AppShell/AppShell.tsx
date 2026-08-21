@@ -57,6 +57,7 @@ import { BatteryModeToggle } from '../BatteryModeToggle';
 import { BatteryWorkbenchScrim } from '../BatteryWorkbenchScrim';
 import { BatteryCreditToast } from '../BatteryCreditToast';
 import { useBattery } from '@/hooks/useBattery';
+import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
 import { formatBatteryTime } from '@/lib/batteryTime';
 import { MobileAccessCard } from '@/components/domain/MobileAccessCard';
 import { PermissionStatusBadge } from '@/components/domain/PermissionStatusBadge';
@@ -127,6 +128,7 @@ export function AppShell({ children }: AppShellProps) {
   // (无参时 t() 只接受 defaultNS 即 common 的扁平 key,'nav:*' 会类型报错)
   const { t } = useTranslation(['common', 'nav', 'settings', 'wordgame']);
   const { t: tBattery } = useTranslation('battery');
+  const { features: experimentalFeatures } = useExperimentalFeatures();
   const [mobileAccessOpen, setMobileAccessOpen] = useState<boolean>(false);
   const [gameHubOpen, setGameHubOpen] = useState<boolean>(false);
   const location = useLocation();
@@ -138,7 +140,10 @@ export function AppShell({ children }: AppShellProps) {
   } = useBattery();
   const batteryDepleted =
     batterySnapshot?.mode === 'charging' && (batterySnapshot.remainingMs ?? 0) <= 0;
-  const showWorkbenchScrim = batteryDepleted && location.pathname.startsWith('/workbench');
+  const showWorkbenchScrim =
+    experimentalFeatures.battery &&
+    batteryDepleted &&
+    location.pathname.startsWith('/workbench');
   const handleBatteryToggle = useCallback((next: 'charging' | 'unlimited'): void => {
     void setBatteryMode(next);
   }, [setBatteryMode]);
@@ -198,6 +203,10 @@ export function AppShell({ children }: AppShellProps) {
     setGameHubOpen(false);
   }, []);
 
+  useEffect(() => {
+    if (!experimentalFeatures.game) setGameHubOpen(false);
+  }, [experimentalFeatures.game]);
+
   return (
     <div
       className={styles.layout}
@@ -209,13 +218,17 @@ export function AppShell({ children }: AppShellProps) {
           <div className={styles.footer} data-testid="battery-satellite-footer">
             <div className={styles.footerToggle}>
               <div className={styles.footerIconGroup}>
-                <BatteryModeToggle
-                  snapshot={batterySnapshot}
-                  onToggle={handleBatteryToggle}
-                />
-                <span className={styles.satelliteRemaining} aria-live="polite">
-                  {batteryRemainingLabel}
-                </span>
+                {experimentalFeatures.battery ? (
+                  <>
+                    <BatteryModeToggle
+                      snapshot={batterySnapshot}
+                      onToggle={handleBatteryToggle}
+                    />
+                    <span className={styles.satelliteRemaining} aria-live="polite">
+                      {batteryRemainingLabel}
+                    </span>
+                  </>
+                ) : null}
               </div>
             </div>
           </div>
@@ -224,17 +237,19 @@ export function AppShell({ children }: AppShellProps) {
             <span className={styles.footerVersionRow}>
               <span className={styles.footerVersion}>{`v${version ?? '—'}`}</span>
               <span className={styles.footerIconGroup}>
-                <button
-                  type="button"
-                  className={styles.footerIconButton}
-                  onClick={openGameHub}
-                  aria-haspopup="dialog"
-                  aria-expanded={gameHubOpen}
-                  aria-label={t('wordgame:gameButtonTitle')}
-                  title={t('wordgame:gameButtonTitle')}
-                >
-                  <GameIcon size={14} />
-                </button>
+                {experimentalFeatures.game ? (
+                  <button
+                    type="button"
+                    className={styles.footerIconButton}
+                    onClick={openGameHub}
+                    aria-haspopup="dialog"
+                    aria-expanded={gameHubOpen}
+                    aria-label={t('wordgame:gameButtonTitle')}
+                    title={t('wordgame:gameButtonTitle')}
+                  >
+                    <GameIcon size={14} />
+                  </button>
+                ) : null}
                 <button
                   ref={mobileAccessButtonRef}
                   type="button"
@@ -253,10 +268,12 @@ export function AppShell({ children }: AppShellProps) {
             <div className={styles.footerToggle}>
               <LanguageSwitcher />
               <div className={styles.footerIconGroup}>
-                <BatteryModeToggle
-                  snapshot={batterySnapshot}
-                  onToggle={handleBatteryToggle}
-                />
+                {experimentalFeatures.battery ? (
+                  <BatteryModeToggle
+                    snapshot={batterySnapshot}
+                    onToggle={handleBatteryToggle}
+                  />
+                ) : null}
                 <ThemeToggle />
                 <NavLink
                   to="/settings"
@@ -327,7 +344,9 @@ export function AppShell({ children }: AppShellProps) {
         {children ?? <Outlet />}
         <BatteryWorkbenchScrim visible={showWorkbenchScrim} onOpenGame={openGameHub} />
       </main>
-      <BatteryCreditToast toast={batteryToast} onDismiss={dismissBatteryToast} />
+      {experimentalFeatures.battery ? (
+        <BatteryCreditToast toast={batteryToast} onDismiss={dismissBatteryToast} />
+      ) : null}
       <Dialog
         open={mobileAccessOpen}
         titleId={MOBILE_ACCESS_TITLE_ID}
@@ -350,7 +369,7 @@ export function AppShell({ children }: AppShellProps) {
           <MobileAccessCard compact className={styles.mobileAccessCard} />
         </div>
       </Dialog>
-      {gameHubOpen ? (
+      {experimentalFeatures.game && gameHubOpen ? (
         <Suspense fallback={null}>
           <GameHubDialog open={gameHubOpen} onClose={closeGameHub} />
         </Suspense>

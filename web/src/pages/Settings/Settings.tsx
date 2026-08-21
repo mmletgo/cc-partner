@@ -8,8 +8,8 @@
  *
  * Code Logic（这个页面做什么）:
  *   - 调用 useSettingsController 获取全部编排状态/handler
- *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 充电模式 / 活动统计 / 同步 / AI / 自动化 / 关于
- *   - 组合 pure panels（General/Dependencies/Sync/Health/Battery/Activity/Automation/AI/About）
+ *   - 子 tab：常规 / 依赖环境 / 健康提醒 / 活动统计 / 同步 / AI / 内测功能 / 关于
+ *   - 组合 pure panels（General/Dependencies/Sync/Health/Activity/Experimental/AI/About）
  *   - loading / core loadError early return 保留在壳层（hooks 已在 controller 无条件执行）
  *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
@@ -17,7 +17,6 @@ import { useCallback, useEffect, useRef, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/primitives';
 import { openCodeBridgePreviewHref } from '@/lib/agentAdapterPresentation';
-import { AutomationSettingsPanel } from './AutomationSettingsPanel';
 import { HealthPanel } from './HealthPanel';
 import { ActivityStatsPanel } from './ActivityStatsPanel';
 import { SettingsGeneralPanel } from './SettingsGeneralPanel';
@@ -25,7 +24,7 @@ import { SettingsSyncPanel } from './SettingsSyncPanel';
 import { SettingsDependenciesPanel } from './SettingsDependenciesPanel';
 import { SettingsAiPanel } from './SettingsAiPanel';
 import { SettingsAboutPanel } from './SettingsAboutPanel';
-import { SettingsBatteryPanel } from './SettingsBatteryPanel';
+import { SettingsExperimentalPanel } from './SettingsExperimentalPanel';
 import { useSettingsController } from './useSettingsController';
 import styles from './Settings.module.css';
 
@@ -244,15 +243,12 @@ export function Settings(): ReactElement {
               saving={ctrl.saving}
               saveError={ctrl.saveError}
               choosingDir={ctrl.choosingDir}
-              choosingGamePluginDir={ctrl.choosingGamePluginDir}
               canResetCoreDefaults={ctrl.canResetCoreDefaults}
               recordingShortcutId={ctrl.recordingShortcutId}
               shortcutRecordingRejectReason={ctrl.shortcutRecordingRejectReason}
               onDeviceNameChange={ctrl.handleDeviceNameChange}
               onReceiveDirChange={ctrl.handleReceiveDirChange}
-              onGamePluginDirChange={ctrl.handleGamePluginDirChange}
               onChooseDir={() => void ctrl.handleChooseDir()}
-              onChooseGamePluginDir={() => void ctrl.handleChooseGamePluginDir()}
               onShortcutFocus={ctrl.handleShortcutFocus}
               onShortcutBlur={ctrl.handleShortcutBlur}
               onShortcutKeyDown={ctrl.handleShortcutKeyDown}
@@ -313,15 +309,68 @@ export function Settings(): ReactElement {
           </div>
         ) : null}
 
-        {ctrl.activeTab === 'battery' ? (
+        {ctrl.activeTab === 'experimental' ? (
           <div
-            id="settings-panel-battery"
+            id="settings-panel-experimental"
             className={styles.tabPanel}
             role="tabpanel"
-            aria-labelledby="settings-tab-battery"
-            data-testid="settings-panel-battery"
+            aria-labelledby="settings-tab-experimental"
+            data-testid="settings-panel-experimental"
           >
-            <SettingsBatteryPanel />
+            <SettingsExperimentalPanel
+              features={ctrl.experimentalFeatures}
+              highlightedFeature={ctrl.experimentalFeature}
+              featureError={ctrl.experimentalError}
+              onToggleFeature={(id, enabled) => {
+                void ctrl.handleToggleExperimentalFeature(id, enabled);
+              }}
+              onSelectFeatureTab={ctrl.setExperimentalFeature}
+              gamePluginDir={ctrl.state.gamePluginDir}
+              choosingGamePluginDir={ctrl.choosingGamePluginDir}
+              isDirty={ctrl.isDirty}
+              saving={ctrl.saving}
+              saveError={ctrl.saveError}
+              savedAt={ctrl.savedAt}
+              canResetCoreDefaults={ctrl.canResetCoreDefaults}
+              onGamePluginDirChange={ctrl.handleGamePluginDirChange}
+              onChooseGamePluginDir={() => void ctrl.handleChooseGamePluginDir()}
+              onResetDefaults={ctrl.handleResetDefaults}
+              onSave={() => void ctrl.handleSave()}
+              automationLoadError={ctrl.automationLoadError}
+              retryingAutomation={ctrl.retryingGroup === 'automation'}
+              onRetryAutomation={() => void ctrl.handleRetryResourceGroup('automation')}
+              automationForm={ctrl.automationForm}
+              defaultAutomationForm={ctrl.defaultAutomationForm}
+              automationDirty={ctrl.automationDirty}
+              savingAutomation={ctrl.savingAutomation}
+              automationError={ctrl.automationError}
+              automationSaved={ctrl.automationSaved}
+              onAutomationChange={ctrl.handleAutomationFormChange}
+              onResetAutomationDefaults={ctrl.handleResetAutomationDefaults}
+              onSaveAutomation={() => void ctrl.handleSaveAutomation()}
+              canResetAutomationDefaults={ctrl.canResetAutomationDefaults}
+              agentAdapters={ctrl.agentAdapters}
+              onOpenOpenCodeBridgePreview={handleOpenOpenCodeBridgePreview}
+              cloudSync={{
+                form: ctrl.cloudSyncForm,
+                cloudSync: ctrl.cloudSync,
+                syncResult: ctrl.syncResult,
+                testResult: ctrl.testResult,
+                cloudSyncError: ctrl.cloudSyncError,
+                testing: ctrl.testing,
+                applying: ctrl.applying,
+                syncing: ctrl.syncing,
+                loadError: ctrl.cloudSyncLoadError,
+                retrying: ctrl.retryingGroup === 'cloudSync',
+                canResetDefaults: ctrl.canResetCloudSyncDefaults,
+                onPatch: ctrl.patchCloudSyncForm,
+                onResetDefaults: ctrl.handleResetCloudSyncDefaults,
+                onTest: () => void ctrl.handleTestCloudSync(),
+                onApply: () => void ctrl.handleApplyCloudSync(),
+                onSyncNow: () => void ctrl.handleSyncNow(),
+                onRetryLoad: () => void ctrl.handleRetryResourceGroup('cloudSync'),
+              }}
+            />
           </div>
         ) : null}
 
@@ -390,17 +439,6 @@ export function Settings(): ReactElement {
             aria-labelledby="settings-tab-sync"
           >
             <SettingsSyncPanel
-              form={ctrl.cloudSyncForm}
-              cloudSync={ctrl.cloudSync}
-              syncResult={ctrl.syncResult}
-              testResult={ctrl.testResult}
-              cloudSyncError={ctrl.cloudSyncError}
-              testing={ctrl.testing}
-              applying={ctrl.applying}
-              syncing={ctrl.syncing}
-              loadError={ctrl.cloudSyncLoadError}
-              retrying={ctrl.retryingGroup === 'cloudSync'}
-              canResetDefaults={ctrl.canResetCloudSyncDefaults}
               lanSyncResult={ctrl.lanSyncResult}
               lanSyncing={ctrl.lanSyncing}
               lanSyncError={ctrl.lanSyncError}
@@ -421,13 +459,7 @@ export function Settings(): ReactElement {
               backupRollbackJobId={ctrl.backupRollbackJobId}
               backupRollbackDialogOpen={ctrl.backupRollbackDialogOpen}
               backupRollingBack={ctrl.backupRollingBack}
-              onPatch={ctrl.patchCloudSyncForm}
-              onResetDefaults={ctrl.handleResetCloudSyncDefaults}
-              onTest={() => void ctrl.handleTestCloudSync()}
-              onApply={() => void ctrl.handleApplyCloudSync()}
-              onSyncNow={() => void ctrl.handleSyncNow()}
               onLanSyncNow={() => void ctrl.handleLanSyncNow()}
-              onRetryLoad={() => void ctrl.handleRetryResourceGroup('cloudSync')}
               onBackupExport={() => void ctrl.handleBackupExport()}
               onBackupPickRestore={() => void ctrl.handleBackupPickRestore()}
               onBackupToggleDomain={ctrl.handleBackupToggleDomain}
@@ -468,50 +500,6 @@ export function Settings(): ReactElement {
               }
               retryingGithubTrending={ctrl.retryingGroup === 'githubTrending'}
             />
-          </div>
-        ) : null}
-
-        {ctrl.activeTab === 'automation' ? (
-          <div
-            id="settings-panel-automation"
-            className={styles.tabPanel}
-            role="tabpanel"
-            aria-labelledby="settings-tab-automation"
-          >
-            {ctrl.automationLoadError ? (
-              <div className={styles.resourceError} role="alert">
-                <span className={styles.updateError}>
-                  {t('settings:resource.loadFailed', {
-                    error: ctrl.automationLoadError.message,
-                  })}
-                </span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void ctrl.handleRetryResourceGroup('automation')}
-                  disabled={ctrl.retryingGroup === 'automation'}
-                >
-                  {ctrl.retryingGroup === 'automation'
-                    ? t('settings:resource.retrying')
-                    : t('settings:resource.retry')}
-                </Button>
-              </div>
-            ) : (
-              <AutomationSettingsPanel
-                form={ctrl.automationForm}
-                defaults={ctrl.defaultAutomationForm}
-                dirty={ctrl.automationDirty}
-                saving={ctrl.savingAutomation}
-                error={ctrl.automationError}
-                saved={ctrl.automationSaved}
-                onChange={ctrl.handleAutomationFormChange}
-                onResetDefaults={ctrl.handleResetAutomationDefaults}
-                onSave={() => void ctrl.handleSaveAutomation()}
-                canResetDefaults={ctrl.canResetAutomationDefaults}
-                agentAdapters={ctrl.agentAdapters}
-                onOpenOpenCodeBridgePreview={handleOpenOpenCodeBridgePreview}
-              />
-            )}
           </div>
         ) : null}
 

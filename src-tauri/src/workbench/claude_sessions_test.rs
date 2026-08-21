@@ -1556,6 +1556,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         internal_claude: crate::config::InternalClaudeConfig::default(),
         agent_hub: crate::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
+        experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
     };
     let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
         config.clone(),

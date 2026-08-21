@@ -148,6 +148,16 @@ export { workbenchTestState };
  *   invoke 走共享 handler + 调用日志；invokeDecoded 先 invoke 再 decoder.decode；
  *   ContractDecodeError 原样抛出；api.invoke / api.invokeDecoded 同步暴露。
  */
+vi.mock('@/hooks/useExperimentalFeatures', () => ({
+  useExperimentalFeatures: () => ({
+    features: { battery: true, game: true, browser: true, automation: true, cloudSync: true },
+    loaded: true,
+    setFeature: async () => undefined,
+    refresh: async () => undefined,
+  }),
+  ExperimentalFeaturesProvider: ({ children }: { children: unknown }) => children,
+}));
+
 vi.mock('@/api/client', async () => {
   const { ContractDecodeError } = await import('@/lib/runtimeSchema');
 
@@ -716,6 +726,7 @@ export function buildDefaultInvokeHandler(data: {
         };
       case 'get_config':
         return {
+          deviceId: 'device-1',
           deviceName: 'device',
           receiveDir: '',
           gamePluginDir: '',
@@ -723,6 +734,15 @@ export function buildDefaultInvokeHandler(data: {
           promptOptimizerHotkey: '<ctrl>',
           promptOptimizerFillLanguage: 'zh' satisfies PromptOptimizerFillLanguage,
           promptOptimizerProvider: 'claude',
+          promptQuickInputHotkey: '<ctrl>+/',
+          httpPort: 0,
+          experimentalFeatures: {
+            battery: true,
+            game: true,
+            browser: true,
+            automation: true,
+            cloudSync: true,
+          },
         };
       default:
         return { ok: true };

@@ -324,12 +324,13 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
         }
     }
 
-    let config = state
-        .config
-        .read()
-        .expect("config 读锁中毒")
-        .orchestrator
-        .clone();
+    let config = {
+        let cfg = state.config.read().expect("config 读锁中毒");
+        if !cfg.experimental_features.automation {
+            return Ok(0);
+        }
+        cfg.orchestrator.clone()
+    };
     let mut cursor = state.orchestrator_scheduler_telemetry.claim_scan_cursor();
     let tasks = claim_tasks_for_dispatch(
         state.orchestrator_repo.as_ref(),
