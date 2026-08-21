@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { createDefaultHealthReminders } from '@/lib/healthReminders';
 import type { AppConfig, CloudSyncConfig, GithubTrendingConfig, HealthConfig, VersionInfo } from '@/lib/types';
 import type { OrchestratorAutomationConfig } from '@/api/orchestratorConfig';
+import type { BackupInspectPreview } from '@/api/sync';
 import {
   findForbiddenDiagnosticsKeys,
   formatDiagnosticsForCopy,
@@ -239,7 +240,7 @@ const {
     ],
   })),
   createBackup: vi.fn(async () => ({ path: '/tmp/export.zip', formatVersion: 1 })),
-  inspectBackup: vi.fn(async () => ({
+  inspectBackup: vi.fn(async (): Promise<BackupInspectPreview> => ({
     formatVersion: 1,
     domainCounts: { prompts: 2, scratchpad: 1 },
     warnings: [],

@@ -95,7 +95,8 @@ pub(crate) async fn proxy_workbench_mutation_if_gui<T: DeserializeOwned>(
 }
 
 pub(crate) const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;
-pub(crate) const MERGE_CONFLICT_RESOLUTION_TIMEOUT_SECS: u64 = 300;
+pub(crate) const MERGE_CONFLICT_RESOLUTION_IDLE_TIMEOUT_SECS: u64 = 300;
+pub(crate) const MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS: u64 = 120;
 pub(crate) const MERGE_STAGE_CHECK_SOURCE: &str = "checkSource";
 pub(crate) const MERGE_STAGE_CLOSE_SESSIONS: &str = "closeSessions";
 pub(crate) const MERGE_STAGE_MERGE_MAIN: &str = "mergeMain";
@@ -139,15 +140,18 @@ pub struct WorkbenchMergeResultDto {
 /// Workbench merge 阶段 DTO。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     前端进度条需要知道当前阶段是等待、运行、完成、失败还是跳过。
+///     前端进度条需要知道当前阶段是等待、运行、完成、失败还是跳过；
+///     解冲突运行中还要展示 Claude Code 最新一行输出动向。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存 stage id、status 和用户可读 message，字段名与前端约定保持一致。
+///     保存 stage id、status 和用户可读 message；可选 activity 是当前 CLI 动向，缺失时不序列化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbenchMergeStageDto {
     pub(crate) id: String,
     pub(crate) status: String,
     pub(crate) message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activity: Option<String>,
 }
 
 /// Workbench merge 进度事件 payload。

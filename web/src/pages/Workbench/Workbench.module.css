@@ -1162,13 +1162,18 @@
   font-weight: var(--weight-semibold);
 }
 
-.mergeStageMessage {
+.mergeStageMessage,
+.mergeStageActivity {
   min-width: 0;
   overflow: hidden;
   color: var(--fg-muted-readable);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mergeStageActivity {
+  font-family: var(--font-mono);
 }
 
 .treePanel {

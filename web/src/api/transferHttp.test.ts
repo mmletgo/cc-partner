@@ -12,7 +12,6 @@
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
-  decodeMobileTransferDevice,
   decodeMobileTransferDevices,
   decodeMobileTransferTask,
   decodeMobileTransferTasks,
@@ -91,6 +90,38 @@ describe('transferHttp decode', () => {
     const tasks = decodeMobileTransferTasks([buildTaskPayload()]);
     expect(tasks[0]?.filePath).toBe('');
     expect(tasks[0]?.fileName).toBe('notes.txt');
+  });
+
+  test('accepts backend to_dto Option fields serialized as null', () => {
+    const task = decodeMobileTransferTask(
+      buildTaskPayload({
+        direction: 'receive',
+        status: 'completed',
+        progress: 1,
+        peerDeviceId: 'host-device',
+        peerDeviceName: null,
+        speed: null,
+        errorMessage: null,
+        completedAt: '2026-08-18T00:00:01.000Z',
+        transferredBytes: 12,
+        phase: 'completed',
+        failure: null,
+        attempt: 1,
+        logicalTransferId: 'task-1',
+        attemptId: 'task-1',
+        protocolTransferId: 'task-1',
+        clientOperationId: 'op-1',
+        operationPayloadHash: null,
+      }),
+    );
+
+    expect(task.id).toBe('task-1');
+    expect(task.filePath).toBe('');
+    expect(task.peerDeviceId).toBe('host-device');
+    expect(task.peerDeviceName).toBeUndefined();
+    expect(task.speed).toBeUndefined();
+    expect(task.errorMessage).toBeUndefined();
+    expect(task.completedAt).toBe('2026-08-18T00:00:01.000Z');
   });
 
   test('parseDownloadFileName keeps basename only', () => {

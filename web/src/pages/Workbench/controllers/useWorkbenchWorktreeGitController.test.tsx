@@ -1363,6 +1363,8 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     expect(setActive).toHaveBeenCalledWith('wt-main');
     expect(activeWorktreeState.value).toBe('wt-main');
     expect(result.current.worktreeBusy).toBeNull();
+    expect(bridge.loadSessions).toHaveBeenCalledWith(project.id);
+    expect(bridge.clearBuffersForWorktree).toHaveBeenCalledWith('wt-feat');
   });
 
   test('handleRemoveWorktree is no-op on main worktree', async () => {
@@ -2131,6 +2133,38 @@ describe('useWorkbenchWorktreeGitController — merge-progress event filtering',
       {
         status: 'running',
         message: 'resolving in background',
+      },
+    );
+  });
+
+  test('merge-progress activity is kept on the running resolveConflicts stage', async () => {
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-feat',
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    emitEvent('workbench:merge-progress', {
+      projectId: 'project-1',
+      worktreeId: 'wt-feat',
+      stage: {
+        id: 'resolveConflicts',
+        status: 'running',
+        message: '正在调用 Claude Code 尝试解决 merge 冲突',
+        activity: 'Read src/lib.rs',
+      },
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.mergeStages.find((stage) => stage.id === 'resolveConflicts')).toMatchObject(
+      {
+        status: 'running',
+        message: '正在调用 Claude Code 尝试解决 merge 冲突',
+        activity: 'Read src/lib.rs',
       },
     );
   });

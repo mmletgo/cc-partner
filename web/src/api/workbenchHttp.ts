@@ -96,25 +96,26 @@ export const HTTP_QUERY_RETRY_BACKOFF_BASE_MS = 250;
  *
  * Code Logic（字段说明）:
  *   kind 决定默认超时与是否允许自动重试；timeoutMs 覆盖默认；signal 为调用方取消。
+ *   untilComplete 无 overall timeout（merge 等对端 Claude idle 结束）。
  */
 export type HttpRequestPolicy = {
-  kind: 'query' | 'mutation' | 'longMutation' | 'eventStream';
+  kind: 'query' | 'mutation' | 'longMutation' | 'eventStream' | 'untilComplete';
   timeoutMs?: number;
   signal?: AbortSignal;
 };
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   各 kind 有稳定的默认 overall 预算；事件流不使用 overall timeout。
+ *   各 kind 有稳定的默认 overall 预算；事件流与 untilComplete（merge）不使用 overall timeout。
  *
  * Code Logic（这个函数做什么）:
- *   若 policy.timeoutMs 为正数则返回之；eventStream 返回 null；否则按 kind 取默认。
+ *   若 policy.timeoutMs 为正数则返回之；eventStream/untilComplete 返回 null；否则按 kind 取默认。
  */
 export function resolveHttpTimeoutMs(policy: HttpRequestPolicy): number | null {
   if (typeof policy.timeoutMs === 'number' && policy.timeoutMs > 0) {
     return policy.timeoutMs;
   }
-  if (policy.kind === 'eventStream') {
+  if (policy.kind === 'eventStream' || policy.kind === 'untilComplete') {
     return null;
   }
   if (policy.kind === 'query') {
@@ -1292,10 +1293,10 @@ export const workbenchHttp = {
     },
     /**
      * Business Logic（为什么需要这个函数）:
-     *   merge 是长操作，timeout/network 必须 unknown。
+     *   merge 是长操作，timeout/network 必须 unknown；对端 Claude 仍有输出时不得被 180s 墙钟掐断。
      *
      * Code Logic（这个函数做什么）:
-     *   longMutation POST merge + envelope decoder。
+     *   untilComplete POST merge + envelope decoder。
      */
     merge: (
       request: WorkbenchHttpGitMergeRequest,
@@ -1313,7 +1314,7 @@ export const workbenchHttp = {
           clientOperationId,
         },
         clientOperationId,
-        request.policy ?? { kind: 'longMutation' },
+        request.policy ?? { kind: 'untilComplete' },
         workbenchMergeResultDecoder,
       );
     },

@@ -2,9 +2,11 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   createHttpOrchestratorClientRequestId,
   getJson,
+  HTTP_LONG_MUTATION_TIMEOUT_MS,
   httpOrchestratorTransport,
   httpWorkbenchTransport,
   postJson,
+  resolveHttpTimeoutMs,
   workbenchHttp,
 } from './workbenchHttp';
 import { OrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
@@ -529,6 +531,39 @@ describe('workbenchHttp request policy transport', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 只要对端 Claude 仍在输出就不能被 mobile overall 180s 墙钟掐断。
+   *
+   * Code Logic（这个测试做什么）:
+   *   untilComplete 无 overall timeout；默认 merge policy 在 longMutation 预算后仍不 settle。
+   */
+  test('merge waits until peer returns without overall timeout', async () => {
+    expect(resolveHttpTimeoutMs({ kind: 'untilComplete' })).toBeNull();
+    expect(resolveHttpTimeoutMs({ kind: 'longMutation' })).toBe(HTTP_LONG_MUTATION_TIMEOUT_MS);
+
+    vi.useFakeTimers();
+    const mockFetch = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal('fetch', mockFetch);
+    let settled = false;
+    void workbenchHttp.git
+      .merge({
+        worktreeId: 'wt-1',
+        clientOperationId: 'op-merge',
+      })
+      .then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+    await vi.advanceTimersByTimeAsync(HTTP_LONG_MUTATION_TIMEOUT_MS);
+    expect(settled).toBe(false);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   /**

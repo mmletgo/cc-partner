@@ -1498,8 +1498,8 @@ export function useWorkbenchWorktreeGitController(
    *   unknown 对账并保留 same-id 锁；catch/finally 均 isSettledCurrent 守卫。
    *   用户确认由调用方通过共享 Dialog 原语完成，本函数不再持有同步 confirm 阻塞。
    *
-   *   注意：remove 不直接清理 terminal session/buffer；后端会在 remove_workbench_worktree 时关闭关联
-   *   session，随后页面通过 terminal-status 事件或下一次 loadSessions 同步状态。
+   *   后端会关闭该 worktree 下属 terminal window；成功后本函数经 terminalBridge
+   *   loadSessions + clearBuffersForWorktree 同步前端 tab/buffer，不得直接 mutate terminal state。
    */
   const handleRemoveWorktree = useCallback(async (worktreeId: string): Promise<void> => {
     if (!worktreeId) return;
@@ -1540,6 +1540,9 @@ export function useWorkbenchWorktreeGitController(
             const next = worktrees.find((worktree) => worktree.id !== worktreeId);
             setActiveWorktreeId(next?.id ?? null);
           }
+          await terminalBridge.loadSessions(projectId);
+          terminalBridge.clearBuffersForWorktree(worktreeId);
+          void refreshProjectSessionStats(projectId);
         } else if (confirmed === 'confirmedFailed') {
           clearUnknownMutationLockForKind('remove');
           setWorktreeError(translateError('removeWorktree'));
@@ -1573,6 +1576,9 @@ export function useWorkbenchWorktreeGitController(
         invalidateWorktreeListRequests(projectId);
         invalidateGitHistoryRequests(projectId, worktreeId);
         await loadWorktrees(projectId);
+        await terminalBridge.loadSessions(projectId);
+        terminalBridge.clearBuffersForWorktree(worktreeId);
+        void refreshProjectSessionStats(projectId);
         return;
       }
 
@@ -1592,6 +1598,9 @@ export function useWorkbenchWorktreeGitController(
             const next = worktrees.find((worktree) => worktree.id !== worktreeId);
             setActiveWorktreeId(next?.id ?? null);
           }
+          await terminalBridge.loadSessions(projectId);
+          terminalBridge.clearBuffersForWorktree(worktreeId);
+          void refreshProjectSessionStats(projectId);
         } else if (confirmed === 'confirmedFailed') {
           clearUnknownMutationLockForKind('remove');
           setWorktreeError(translateError('removeWorktree'));
@@ -1630,9 +1639,11 @@ export function useWorkbenchWorktreeGitController(
     markRequestFailure,
     confirmAction,
     reconcileUnknownMutation,
+    refreshProjectSessionStats,
     remoteWriteDisabled,
     resolveClientOperationId,
     setActiveWorktreeId,
+    terminalBridge,
     translateError,
     translateWorktreeMessage,
     unknownMutationLock,

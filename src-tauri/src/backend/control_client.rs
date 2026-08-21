@@ -216,22 +216,23 @@ fn workbench_control_path(op: &str) -> &'static str {
 /// Workbench control 超时选择。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     commit/merge/resume 等长操作不能用默认 15s mutation 超时。
+///     commit/resume 等长操作不能用默认 15s mutation 超时；merge 会跟随 Claude 输出，
+///     GUI→sidecar HTTP 不能用墙钟提前掐断。
 ///
 /// Code Logic（这个函数做什么）:
-///     长 Git/Claude 类 op 用 360s，其余用 MUTATE_TIMEOUT。
-fn workbench_control_timeout(op: &str) -> Duration {
+///     merge 返回 None（不设 request timeout）；其它长 Git/Claude op 用 360s，其余用 MUTATE_TIMEOUT。
+fn workbench_control_timeout(op: &str) -> Option<Duration> {
     match op {
+        "worktrees.merge" => None,
         "worktrees.commit"
-        | "worktrees.merge"
         | "worktrees.push"
         | "worktrees.create"
         | "claude.resume"
         | "files.open"
         | "files.save_text"
         | "agent_ledger.export_token_stats"
-        | "sessions.pasteImage" => Duration::from_secs(360),
-        _ => MUTATE_TIMEOUT,
+        | "sessions.pasteImage" => Some(Duration::from_secs(360)),
+        _ => Some(MUTATE_TIMEOUT),
     }
 }
 
@@ -1077,7 +1078,10 @@ impl BackendControlClient {
                 }
             },
         };
-        let resp: ControlWorkbenchResponseBody = match self.send_once(path, &body, timeout).await {
+        let resp: ControlWorkbenchResponseBody = match self
+            .send_once_with_optional_timeout(path, &body, timeout)
+            .await
+        {
             ControlCallOutcome::Ok(v) => v,
             ControlCallOutcome::Failed(e) => return Err(MutationControlError::Failed(e)),
             ControlCallOutcome::Uncertain(e) => {
@@ -3004,8 +3008,28 @@ impl BackendControlClient {
         body: &impl Serialize,
         timeout: Duration,
     ) -> ControlCallOutcome<T> {
+        self.send_once_with_optional_timeout(path, body, Some(timeout))
+            .await
+    }
+
+    /// 发送一次 control POST，timeout=None 时不设墙钟。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     merge 必须等到 sidecar 对端 Claude 结束；其它 mutation 仍要有界超时。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST control 路径；可选 `.timeout`；连接失败 Failed，超时/坏响应 Uncertain。
+    async fn send_once_with_optional_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+        timeout: Option<Duration>,
+    ) -> ControlCallOutcome<T> {
         let url = format!("http://127.0.0.1:{}/api/backend/control/{path}", self.port);
-        let request = self.http.post(&url).timeout(timeout).json(body);
+        let mut request = self.http.post(&url).json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         let response = match request.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -3680,11 +3704,25 @@ mod tests {
     fn workbench_control_timeout_extends_token_stats_export() {
         assert_eq!(
             workbench_control_timeout("agent_ledger.export_token_stats"),
-            Duration::from_secs(360)
+            Some(Duration::from_secs(360))
         );
         assert_eq!(
             workbench_control_timeout("agent_ledger.summarize"),
-            MUTATE_TIMEOUT
+            Some(MUTATE_TIMEOUT)
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI→sidecar 的 merge 会包住 Claude 解冲突；墙钟 360s 会在 CLI 仍有输出时误报超时。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     merge 无 control HTTP 超时；commit 仍保留 360s 覆盖 commit message。
+    #[test]
+    fn workbench_control_timeout_lets_merge_wait_for_peer() {
+        assert_eq!(workbench_control_timeout("worktrees.merge"), None);
+        assert_eq!(
+            workbench_control_timeout("worktrees.commit"),
+            Some(Duration::from_secs(360))
         );
     }
 

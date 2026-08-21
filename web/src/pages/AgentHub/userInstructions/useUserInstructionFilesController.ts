@@ -182,7 +182,7 @@ export function useUserInstructionFilesController(
               savedContent: source.content,
               baseHash: source.hash,
               truncated: Boolean(source.contentTruncated),
-              notice: source.reasonCode,
+              notice: source.reasonCode ?? null,
             };
             continue;
           }
@@ -272,6 +272,7 @@ export function useUserInstructionFilesController(
 
   useEffect(() => {
     if (resolvedActiveId && resolvedActiveId !== activeFileId) {
+      /* eslint-disable-next-line react-hooks/set-state-in-effect -- 解析后的可见文件 id 写回选中态，避免 Agent 切换后停留在不可见文件。 */
       setActiveFileId(resolvedActiveId);
     }
   }, [activeFileId, resolvedActiveId]);

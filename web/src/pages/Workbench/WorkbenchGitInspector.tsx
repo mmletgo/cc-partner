@@ -360,6 +360,14 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
                 <span className={styles.mergeStageMessage}>
                   {stage.message || mergeStageFallbackMessage(stage)}
                 </span>
+                {stage.status === 'running' && stage.activity ? (
+                  <span
+                    className={styles.mergeStageActivity}
+                    data-testid="workbench-merge-stage-activity"
+                  >
+                    {stage.activity}
+                  </span>
+                ) : null}
               </div>
             </div>
           ))}

@@ -218,4 +218,41 @@ describe('WorkbenchGitInspector merge stage dismiss', () => {
 
     expect(screen.queryByTestId('workbench-merge-stages-dismiss')).toBeNull();
   });
+
+  test('shows one Claude Code activity line under a running resolveConflicts status', () => {
+    const mergeStages: WorkbenchMergeStage[] = [
+      { id: 'checkSource', status: 'completed', message: '源 worktree 已确认干净' },
+      { id: 'closeSessions', status: 'completed', message: '已关闭终端' },
+      { id: 'mergeMain', status: 'completed', message: '隔离 merge 出现冲突，进入自动解决阶段' },
+      {
+        id: 'resolveConflicts',
+        status: 'running',
+        message: '正在调用 Claude Code 尝试解决 merge 冲突',
+        activity: 'Read src/lib.rs',
+      },
+      { id: 'cleanup', status: 'pending', message: '' },
+    ];
+
+    renderGitInspector({ mergeStages });
+
+    expect(screen.getByText('正在调用 Claude Code 尝试解决 merge 冲突')).toBeTruthy();
+    const activity = screen.getByTestId('workbench-merge-stage-activity');
+    expect(activity.textContent).toBe('Read src/lib.rs');
+    expect(activity.closest('[data-status="running"]')).toBeTruthy();
+  });
+
+  test('does not show activity after resolveConflicts leaves running', () => {
+    const mergeStages: WorkbenchMergeStage[] = [
+      {
+        id: 'resolveConflicts',
+        status: 'completed',
+        message: 'Claude Code 已在隔离目录解决冲突并完成 merge commit',
+        activity: 'Read src/lib.rs',
+      },
+    ];
+
+    renderGitInspector({ mergeStages });
+
+    expect(screen.queryByTestId('workbench-merge-stage-activity')).toBeNull();
+  });
 });

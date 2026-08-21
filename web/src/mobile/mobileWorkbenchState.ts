@@ -805,6 +805,24 @@ export function pruneMobileSessionsForClosedWorktree(
   return sessions.filter((session) => session.worktreeId !== closedWorktreeId);
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   worktree 列表更新后，已不在列表里的 worktree 窗口必须从本机 session 列表摘掉，
+ *   否则切到回落工作区时会选中已关闭窗口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   保留 worktreeId 为空或仍属于当前 worktree 列表的 session。
+ */
+export function pruneMobileSessionsNotInWorktrees(
+  sessions: WorkbenchSession[],
+  worktrees: WorkbenchWorktree[],
+): WorkbenchSession[] {
+  const worktreeIds = new Set(worktrees.map((worktree) => worktree.id));
+  return sessions.filter(
+    (session) => session.worktreeId == null || worktreeIds.has(session.worktreeId),
+  );
+}
+
 /** 移动端已知 session 元数据更新结果。 */
 export interface MobileKnownSessionUpdateResult {
   sessions: WorkbenchSession[];
