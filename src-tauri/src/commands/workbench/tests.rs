@@ -8,10 +8,12 @@ use super::git::{
     content_has_conflict_markers, ensure_only_conflict_files_modified,
     map_remote_merge_result_value, merge_ledger_state_needs_published_recovery,
     safe_merge_resolution_path, validate_merge_conflict_files_for_agent,
-    validate_merge_resolution_path, workbench_commit_message_schema,
+    validate_merge_resolution_path, with_merge_non_claude_blocking_secs,
+    with_merge_non_claude_timeout_secs, workbench_commit_message_schema,
 };
 use super::sessions::should_attempt_session_zoom;
 use super::*;
+use crate::error::AppError;
 use crate::models::device::Device;
 use crate::workbench::git as workbench_git;
 use crate::workbench::models::{
@@ -609,6 +611,57 @@ fn merge_progress_event_serializes_claude_activity_line() {
 
     let value = serde_json::to_value(event).expect("serialize event");
     assert_eq!(value["stage"]["activity"], "Read src/lib.rs");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     关终端、隔离 git merge、发布和 cleanup 卡住时不能无限占用 merge HTTP。
+///
+/// Code Logic（这个测试做什么）:
+///     断言非 Claude 阶段上限为 120 秒，且短于 Claude idle 300 秒。
+#[test]
+fn merge_non_claude_stage_timeout_is_shorter_than_claude_idle() {
+    assert_eq!(MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS, 120);
+    assert!(MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS < MERGE_CONFLICT_RESOLUTION_IDLE_TIMEOUT_SECS);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     异步非 Claude 阶段（关终端）若挂住，必须在上限内失败并带阶段名。
+///
+/// Code Logic（这个测试做什么）:
+///     1 秒上限包住 5 秒 sleep，断言 timeout 且耗时明显小于 5 秒。
+#[tokio::test]
+async fn non_claude_merge_stage_times_out_when_async_work_hangs() {
+    let started = std::time::Instant::now();
+    let error = with_merge_non_claude_timeout_secs("关闭终端窗口", 1, async {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .expect_err("hung closeSessions must time out");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    let message = error.to_string();
+    assert!(message.contains("关闭终端窗口"), "{message}");
+    assert!(message.contains("超时"), "{message}");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     阻塞 Git 调用卡住时也要能在上限返回，不能占住 async runtime 直到 git 自己结束。
+///
+/// Code Logic（这个测试做什么）:
+///     spawn_blocking 里 sleep 5 秒，1 秒上限必须先失败。
+#[tokio::test]
+async fn non_claude_merge_stage_times_out_when_blocking_git_hangs() {
+    let started = std::time::Instant::now();
+    let error = with_merge_non_claude_blocking_secs("隔离 merge", 1, || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        Ok(())
+    })
+    .await
+    .expect_err("hung git merge must time out");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    let message = error.to_string();
+    assert!(message.contains("隔离 merge"), "{message}");
+    assert!(message.contains("超时"), "{message}");
 }
 
 /// Business Logic（为什么需要这个测试）:

@@ -96,6 +96,7 @@ pub(crate) async fn proxy_workbench_mutation_if_gui<T: DeserializeOwned>(
 
 pub(crate) const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;
 pub(crate) const MERGE_CONFLICT_RESOLUTION_IDLE_TIMEOUT_SECS: u64 = 300;
+pub(crate) const MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS: u64 = 120;
 pub(crate) const MERGE_STAGE_CHECK_SOURCE: &str = "checkSource";
 pub(crate) const MERGE_STAGE_CLOSE_SESSIONS: &str = "closeSessions";
 pub(crate) const MERGE_STAGE_MERGE_MAIN: &str = "mergeMain";

@@ -40,7 +40,9 @@ use crate::workbench::{
     sqlite_preview,
 };
 use serde_json::{json, Value};
+use std::future::Future;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use tauri::State;
 
 use super::common::*;
@@ -1002,8 +1004,13 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         &mut stages,
         MERGE_STAGE_CHECK_SOURCE,
     )?;
+    let source_path = PathBuf::from(&row.path);
     let source_status = stage_result(
-        workbench_git::status(Path::new(&row.path)),
+        with_merge_non_claude_blocking("检查源 worktree", {
+            let path = source_path.clone();
+            move || workbench_git::status(&path)
+        })
+        .await,
         state,
         &project_id,
         &worktree_id,
@@ -1052,7 +1059,11 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         "正在关闭该 worktree 下的终端窗口",
     );
     let closed_sessions = stage_result(
-        close_sessions_for_worktree(state, &row.project_id, &row.id).await,
+        with_merge_non_claude_timeout(
+            "关闭终端窗口",
+            close_sessions_for_worktree(state, &row.project_id, &row.id),
+        )
+        .await,
         state,
         &project_id,
         &worktree_id,
@@ -1078,9 +1089,14 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         "running",
         "正在隔离 integration worktree 合并冻结的源提交",
     );
-    let main_path = Path::new(&main.path);
+    let main_path_buf = PathBuf::from(&main.path);
+    let main_path = main_path_buf.as_path();
     let main_status = stage_result(
-        workbench_git::status(main_path),
+        with_merge_non_claude_blocking("检查主工作区", {
+            let path = main_path_buf.clone();
+            move || workbench_git::status(&path)
+        })
+        .await,
         state,
         &project_id,
         &worktree_id,
@@ -1098,7 +1114,12 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         ));
     }
     let frozen = stage_result(
-        workbench_git::freeze_workbench_merge(main_path, Path::new(&row.path)),
+        with_merge_non_claude_blocking("冻结 merge 输入", {
+            let main_path = main_path_buf.clone();
+            let source_path = source_path.clone();
+            move || workbench_git::freeze_workbench_merge(&main_path, &source_path)
+        })
+        .await,
         state,
         &project_id,
         &worktree_id,
@@ -1130,12 +1151,23 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         stage = "integration_create",
         "workbench merge stage"
     );
-    if let Err(error) = workbench_git::create_detached_integration_worktree_outside(
-        &repo_root,
-        &integration_path,
-        &frozen.main_oid,
-        &[main_path, Path::new(&row.path)],
-    ) {
+    if let Err(error) = with_merge_non_claude_blocking("创建隔离 worktree", {
+        let repo_root = repo_root.clone();
+        let integration_path = integration_path.clone();
+        let main_oid = frozen.main_oid.clone();
+        let main_path = main_path_buf.clone();
+        let source_path = source_path.clone();
+        move || {
+            workbench_git::create_detached_integration_worktree_outside(
+                &repo_root,
+                &integration_path,
+                &main_oid,
+                &[&main_path, &source_path],
+            )
+        }
+    })
+    .await
+    {
         let _ = cleanup_merge_integration_best_effort(
             &repo_root,
             &integration_path,
@@ -1151,7 +1183,12 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
             error,
         ));
     }
-    let merge_outcome = match workbench_git::merge_commit_oid(&integration_path, &frozen.source_oid)
+    let merge_outcome = match with_merge_non_claude_blocking("隔离 merge", {
+        let integration_path = integration_path.clone();
+        let source_oid = frozen.source_oid.clone();
+        move || workbench_git::merge_commit_oid(&integration_path, &source_oid)
+    })
+    .await
     {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1283,9 +1320,12 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         ));
     }
 
-    let merge_oid = match workbench_git::head_hash(&integration_path)
-        .and_then(|oid| oid.ok_or_else(|| AppError::generic("隔离 merge 未生成 HEAD")))
-        .and_then(|oid| {
+    let merge_oid = match with_merge_non_claude_blocking("校验隔离 merge 提交", {
+        let integration_path = integration_path.clone();
+        let frozen = frozen.clone();
+        move || {
+            let oid = workbench_git::head_hash(&integration_path)?
+                .ok_or_else(|| AppError::generic("隔离 merge 未生成 HEAD"))?;
             workbench_git::verify_strict_merge_commit(
                 &integration_path,
                 &oid,
@@ -1293,7 +1333,10 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
                 &frozen.source_oid,
             )?;
             Ok(oid)
-        }) {
+        }
+    })
+    .await
+    {
         Ok(oid) => oid,
         Err(error) => {
             let _ = cleanup_merge_integration_best_effort(
@@ -1318,8 +1361,13 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         stage = "publish",
         "workbench merge publishing verified integration commit"
     );
-    if let Err(error) =
-        workbench_git::verify_source_unchanged_for_publish(Path::new(&row.path), &frozen, &branch)
+    if let Err(error) = with_merge_non_claude_blocking("校验源 worktree 未漂移", {
+        let source_path = source_path.clone();
+        let frozen = frozen.clone();
+        let branch = branch.clone();
+        move || workbench_git::verify_source_unchanged_for_publish(&source_path, &frozen, &branch)
+    })
+    .await
     {
         let _ = cleanup_merge_integration_best_effort(
             &repo_root,
@@ -1336,7 +1384,14 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
             error,
         ));
     }
-    if let Err(error) = workbench_git::publish_integration_merge(main_path, &frozen, &merge_oid) {
+    if let Err(error) = with_merge_non_claude_blocking("发布 merge 到主工作区", {
+        let main_path = main_path_buf.clone();
+        let frozen = frozen.clone();
+        let merge_oid = merge_oid.clone();
+        move || workbench_git::publish_integration_merge(&main_path, &frozen, &merge_oid)
+    })
+    .await
+    {
         let _ = cleanup_merge_integration_best_effort(
             &repo_root,
             &integration_path,
@@ -1352,12 +1407,22 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
             error,
         ));
     }
-    if let Err(error) = cleanup_merge_integration_best_effort(
-        &repo_root,
-        &integration_path,
-        &project_id,
-        &worktree_id,
-    ) {
+    if let Err(error) = with_merge_non_claude_blocking("回收隔离 worktree", {
+        let repo_root = repo_root.clone();
+        let integration_path = integration_path.clone();
+        let project_id = project_id.clone();
+        let worktree_id = worktree_id.clone();
+        move || {
+            cleanup_merge_integration_best_effort(
+                &repo_root,
+                &integration_path,
+                &project_id,
+                &worktree_id,
+            )
+        }
+    })
+    .await
+    {
         return Err(fail_merge_stage(
             state,
             &project_id,
@@ -1387,7 +1452,11 @@ pub(crate) async fn local_merge_workbench_worktree_for_operation_with_frozen(
         "正在删除 worktree 元数据、磁盘工作区和已合并分支",
     );
     let source_cleaned = stage_result(
-        cleanup_published_source_if_unchanged(state, &project, &row, &frozen).await,
+        with_merge_non_claude_timeout(
+            "清理已合并 worktree",
+            cleanup_published_source_if_unchanged(state, &project, &row, &frozen),
+        )
+        .await,
         state,
         &project_id,
         &worktree_id,
@@ -1886,7 +1955,11 @@ async fn local_collect_merge_main_worktree(
         ));
     }
     let frozen = stage_result(
-        freeze_collect_merge_sources(&live_path),
+        with_merge_non_claude_blocking("检查可收集分支", {
+            let live_path = live_path.clone();
+            move || freeze_collect_merge_sources(&live_path)
+        })
+        .await,
         state,
         &project_id,
         &worktree_id,
@@ -1945,12 +2018,22 @@ async fn local_collect_merge_main_worktree(
         MERGE_STAGE_MERGE_MAIN,
     )?;
     let integration_path = merge_integration_storage_path(state, &project_id, operation_id);
-    if let Err(error) = workbench_git::create_detached_integration_worktree_outside(
-        &repo_root,
-        &integration_path,
-        &frozen.home_oid,
-        &[&live_path],
-    ) {
+    if let Err(error) = with_merge_non_claude_blocking("创建隔离 collect-merge worktree", {
+        let repo_root = repo_root.clone();
+        let integration_path = integration_path.clone();
+        let home_oid = frozen.home_oid.clone();
+        let live_path = live_path.clone();
+        move || {
+            workbench_git::create_detached_integration_worktree_outside(
+                &repo_root,
+                &integration_path,
+                &home_oid,
+                &[&live_path],
+            )
+        }
+    })
+    .await
+    {
         let _ = cleanup_merge_integration_best_effort(
             &repo_root,
             &integration_path,
@@ -1970,7 +2053,13 @@ async fn local_collect_merge_main_worktree(
     let mut prev_oid = frozen.home_oid.clone();
     let mut had_conflict = false;
     for source in &frozen.sources {
-        let merge_outcome = match workbench_git::merge_commit_oid(&integration_path, &source.oid) {
+        let merge_outcome = match with_merge_non_claude_blocking("隔离 collect-merge", {
+            let integration_path = integration_path.clone();
+            let source_oid = source.oid.clone();
+            move || workbench_git::merge_commit_oid(&integration_path, &source_oid)
+        })
+        .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 let _ = cleanup_merge_integration_best_effort(
@@ -1991,7 +2080,14 @@ async fn local_collect_merge_main_worktree(
         };
         match merge_outcome {
             workbench_git::MergeBranchOutcome::Merged => {
-                match verify_collect_merge_head(&integration_path, &prev_oid, &source.oid) {
+                match with_merge_non_claude_blocking("校验 collect-merge HEAD", {
+                    let integration_path = integration_path.clone();
+                    let prev_oid = prev_oid.clone();
+                    let source_oid = source.oid.clone();
+                    move || verify_collect_merge_head(&integration_path, &prev_oid, &source_oid)
+                })
+                .await
+                {
                     Ok(new_head) => prev_oid = new_head,
                     Err(error) => {
                         let _ = cleanup_merge_integration_best_effort(
@@ -2041,7 +2137,16 @@ async fn local_collect_merge_main_worktree(
                 .await
                 {
                     Ok(_) => {
-                        match verify_collect_merge_head(&integration_path, &prev_oid, &source.oid) {
+                        match with_merge_non_claude_blocking("校验 collect-merge HEAD", {
+                            let integration_path = integration_path.clone();
+                            let prev_oid = prev_oid.clone();
+                            let source_oid = source.oid.clone();
+                            move || {
+                                verify_collect_merge_head(&integration_path, &prev_oid, &source_oid)
+                            }
+                        })
+                        .await
+                        {
                             Ok(new_head) => {
                                 prev_oid = new_head;
                                 set_merge_stage(
@@ -2125,12 +2230,22 @@ async fn local_collect_merge_main_worktree(
         "running",
         "正在把 collect-merge 发布到 home 并清理源分支",
     );
-    if let Err(error) = workbench_git::publish_collect_merge_to_home(
-        &live_path,
-        &frozen.home_branch,
-        &frozen.home_oid,
-        &prev_oid,
-    ) {
+    if let Err(error) = with_merge_non_claude_blocking("发布 collect-merge 到 home", {
+        let live_path = live_path.clone();
+        let home_branch = frozen.home_branch.clone();
+        let home_oid = frozen.home_oid.clone();
+        let prev_oid = prev_oid.clone();
+        move || {
+            workbench_git::publish_collect_merge_to_home(
+                &live_path,
+                &home_branch,
+                &home_oid,
+                &prev_oid,
+            )
+        }
+    })
+    .await
+    {
         let _ = cleanup_merge_integration_best_effort(
             &repo_root,
             &integration_path,
@@ -2151,8 +2266,12 @@ async fn local_collect_merge_main_worktree(
         .iter()
         .map(|source| source.name.clone())
         .collect::<Vec<_>>();
-    if let Err(error) =
-        workbench_git::delete_local_branches_if_unoccupied(&live_path, &source_names)
+    if let Err(error) = with_merge_non_claude_blocking("删除已收集源分支", {
+        let live_path = live_path.clone();
+        let source_names = source_names.clone();
+        move || workbench_git::delete_local_branches_if_unoccupied(&live_path, &source_names)
+    })
+    .await
     {
         let _ = cleanup_merge_integration_best_effort(
             &repo_root,
@@ -2169,12 +2288,22 @@ async fn local_collect_merge_main_worktree(
             error,
         ));
     }
-    if let Err(error) = cleanup_merge_integration_best_effort(
-        &repo_root,
-        &integration_path,
-        &project_id,
-        &worktree_id,
-    ) {
+    if let Err(error) = with_merge_non_claude_blocking("回收隔离 collect-merge worktree", {
+        let repo_root = repo_root.clone();
+        let integration_path = integration_path.clone();
+        let project_id = project_id.clone();
+        let worktree_id = worktree_id.clone();
+        move || {
+            cleanup_merge_integration_best_effort(
+                &repo_root,
+                &integration_path,
+                &project_id,
+                &worktree_id,
+            )
+        }
+    })
+    .await
+    {
         return Err(fail_merge_stage(
             state,
             &project_id,
@@ -2574,6 +2703,72 @@ pub(crate) fn initial_merge_stages() -> Vec<WorkbenchMergeStageDto> {
             activity: None,
         })
         .collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     关终端、git worktree add/merge/publish/cleanup 卡住时必须在有限时间内失败，
+///     不能因为 HTTP 已改为等对端返回就无限挂起；Claude 解冲突仍走 idle timeout。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `tokio::time::timeout` 包住 future；超时返回带阶段名的 Timeout 错误。
+pub(crate) async fn with_merge_non_claude_timeout<T>(
+    label: &str,
+    fut: impl Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    with_merge_non_claude_timeout_secs(label, MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS, fut).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测需要 1 秒上限证明卡住会失败，生产路径使用 120 秒常量。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `with_merge_non_claude_timeout` 相同，timeout 秒数由调用方注入。
+pub(crate) async fn with_merge_non_claude_timeout_secs<T>(
+    label: &str,
+    timeout_secs: u64,
+    fut: impl Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), fut).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::timeout(format!(
+            "{label}超时（{timeout_secs} 秒）"
+        ))),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     隔离 merge 的 Git 调用是阻塞 `std::process::Command`，直接 timeout 无法在进程挂住时返回。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn_blocking 执行闭包，再套非 Claude 阶段墙钟；超时后 JoinHandle 丢弃，后台线程可能仍在跑。
+pub(crate) async fn with_merge_non_claude_blocking<T, F>(label: &str, f: F) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, AppError> + Send + 'static,
+{
+    with_merge_non_claude_blocking_secs(label, MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS, f).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测需要短上限覆盖 spawn_blocking 卡住的 Git 调用。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `with_merge_non_claude_blocking` 相同，timeout 秒数由调用方注入。
+pub(crate) async fn with_merge_non_claude_blocking_secs<T, F>(
+    label: &str,
+    timeout_secs: u64,
+    f: F,
+) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, AppError> + Send + 'static,
+{
+    with_merge_non_claude_timeout_secs(label, timeout_secs, async move {
+        tokio::task::spawn_blocking(f)
+            .await
+            .map_err(|e| AppError::generic(format!("{label}任务中断: {e}")))?
+    })
+    .await
 }
 
 /// Business Logic（为什么需要这个函数）:
