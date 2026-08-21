@@ -24,6 +24,7 @@ import type {
 import {
   arrayDecoder,
   booleanDecoder,
+  defineDecoder,
   enumDecoder,
   literalDecoder,
   nullableDecoder,
@@ -47,6 +48,21 @@ const statusDecoder: Decoder<TransferStatus> = enumDecoder('TransferStatus', [
   'failed',
   'cancelled',
 ] as const);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Rust `Option` 经 serde_json 序列化为缺省或 `null`；TS 可选字段是 undefined，
+ *   不能把 JSON null 当成非法 string/number 导致 list/complete 整表失败。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   null 与 undefined 都收敛为 undefined，其余委托 inner。
+ */
+function serdeOptionDecoder<T>(inner: Decoder<T>): Decoder<T | undefined> {
+  return defineDecoder(`serdeOption(${inner.name})`, (value, path) => {
+    if (value === undefined || value === null) return undefined;
+    return inner.decode(value, path);
+  });
+}
 
 /**
  * Business Logic（为什么需要这个 decoder）:
@@ -123,7 +139,7 @@ export const transferOperationStatusDecoder: Decoder<TransferOperationStatus> = 
  *
  * Code Logic（这个 decoder 做什么）:
  *   必填核心字段；可选 peer/speed/error/completedAt/recovery；
- *   phase/failure 存在时严格闭集解码（含 null failure）。
+ *   serde Option 的 JSON null 收敛为 undefined；phase/failure 存在时严格闭集（含 null failure）。
  */
 export const transferTaskDecoder: Decoder<TransferTask> = objectDecoder('TransferTask', {
   id: stringDecoder,
@@ -133,14 +149,14 @@ export const transferTaskDecoder: Decoder<TransferTask> = objectDecoder('Transfe
   direction: directionDecoder,
   status: statusDecoder,
   progress: numberDecoder,
-  peerDeviceId: optionalDecoder(stringDecoder),
-  peerDeviceName: optionalDecoder(stringDecoder),
-  speed: optionalDecoder(numberDecoder),
-  errorMessage: optionalDecoder(stringDecoder),
+  peerDeviceId: serdeOptionDecoder(stringDecoder),
+  peerDeviceName: serdeOptionDecoder(stringDecoder),
+  speed: serdeOptionDecoder(numberDecoder),
+  errorMessage: serdeOptionDecoder(stringDecoder),
   startedAt: stringDecoder,
-  completedAt: optionalDecoder(stringDecoder),
-  transferredBytes: optionalDecoder(numberDecoder),
-  phase: optionalDecoder(transferPhaseDecoder),
+  completedAt: serdeOptionDecoder(stringDecoder),
+  transferredBytes: serdeOptionDecoder(numberDecoder),
+  phase: serdeOptionDecoder(transferPhaseDecoder),
   failure: optionalDecoder(nullableDecoder(transferFailureDecoder)),
   attempt: optionalDecoder(numberDecoder),
   logicalTransferId: optionalDecoder(stringDecoder),

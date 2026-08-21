@@ -1363,6 +1363,8 @@ describe('useWorkbenchWorktreeGitController — remove', () => {
     expect(setActive).toHaveBeenCalledWith('wt-main');
     expect(activeWorktreeState.value).toBe('wt-main');
     expect(result.current.worktreeBusy).toBeNull();
+    expect(bridge.loadSessions).toHaveBeenCalledWith(project.id);
+    expect(bridge.clearBuffersForWorktree).toHaveBeenCalledWith('wt-feat');
   });
 
   test('handleRemoveWorktree is no-op on main worktree', async () => {

@@ -53,6 +53,7 @@ import {
   markMobileConnectionOnline,
   mergeMobileSessionsWithRuntime,
   pruneMobileSessionsForClosedWorktree,
+  pruneMobileSessionsNotInWorktrees,
   seedMobileSessionRuntimeFromSessions,
   selectMobilePanelForProject,
   selectMobileWorktreeWorkspacePanel,
@@ -963,8 +964,21 @@ export function MobileWorkbench(): ReactElement {
     ) {
       return;
     }
+    const remainingSessions = pruneMobileSessionsNotInWorktrees(
+      sessionsRef.current,
+      nextWorktrees,
+    );
+    if (remainingSessions.length !== sessionsRef.current.length) {
+      for (const session of sessionsRef.current) {
+        if (!remainingSessions.some((item) => item.id === session.id)) {
+          removeBuffer(session.id);
+        }
+      }
+      sessionsRef.current = remainingSessions;
+      setSessions(remainingSessions);
+    }
     setWorktrees(nextWorktrees);
-  }, []);
+  }, [removeBuffer]);
 
   /**
    * Business Logic（为什么需要这个函数）:

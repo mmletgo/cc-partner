@@ -10,6 +10,10 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AgentHubAssetDetail, AgentHubAssetSummary, AgentHubStatus } from '@/lib/types/agentHub';
+import type { Device } from '@/lib/types/core';
+
+/** list_devices 测试夹具：只需 id/name/status，并允许可选 capabilities。 */
+type DeviceListFixture = Pick<Device, 'id' | 'name' | 'status'> & Partial<Pick<Device, 'capabilities'>>;
 
 const getStatus = vi.fn();
 const listAssets = vi.fn();
@@ -91,9 +95,9 @@ vi.mock('@/api/portableInventory', () => ({
 }));
 
 const devicesListMock = vi.hoisted(() =>
-  vi.fn(async () => [
-    { id: 'peer-online', name: 'Peer Online', status: 'online' as const },
-    { id: 'peer-offline', name: 'Peer Offline', status: 'offline' as const },
+  vi.fn(async (): Promise<DeviceListFixture[]> => [
+    { id: 'peer-online', name: 'Peer Online', status: 'online', capabilities: [] },
+    { id: 'peer-offline', name: 'Peer Offline', status: 'offline', capabilities: [] },
   ]),
 );
 

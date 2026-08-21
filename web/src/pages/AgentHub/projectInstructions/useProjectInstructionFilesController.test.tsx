@@ -83,7 +83,7 @@ describe('useProjectInstructionFilesController', () => {
           active: true,
           t,
         }),
-      { initialProps: 'codex' as const },
+      { initialProps: 'codex' as 'codex' | 'opencode' },
     );
 
     await waitFor(() => {

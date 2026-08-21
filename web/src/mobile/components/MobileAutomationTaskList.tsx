@@ -104,7 +104,7 @@ function MobileBlockGroup(props: {
 }): ReactElement {
   const { item, expanded, selectedTaskId, unknownLabel, onToggle, onSelectTaskView, onOpenAppend, onReorderBlock } =
     props;
-  const { t } = useTranslation(['workbench']);
+  const { t } = useTranslation(['workbench', 'orchestrator']);
   const canReorder = canReorderBlock(item.members);
   const canAppend = canAppendToBlock(item.members);
 

@@ -173,6 +173,11 @@
       "loadFailed": "Could not read the project instruction file.",
       "saveFailed": "Could not save the project instruction file.",
       "contextSave": "Save file and switch"
+    },
+    "userFiles": {
+      "loadFailed": "Could not read the user instruction file.",
+      "truncated": "This file was truncated. Saving will overwrite the full file on disk.",
+      "saveFailed": "Could not save the user instruction file."
     }
   },
   "userInstructions": {

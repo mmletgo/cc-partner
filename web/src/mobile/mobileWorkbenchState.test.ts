@@ -38,6 +38,7 @@ import {
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
   pruneMobileSessionsForClosedWorktree,
+  pruneMobileSessionsNotInWorktrees,
   selectMobilePanel,
   shouldRefreshMobilePanelOnReconnect,
   shouldShowMobileWorktreeStrip,
@@ -856,6 +857,34 @@ describe('mobileWorkbenchState', () => {
       pruneMobileSessionsForClosedWorktree([featureRunning], 'wt-feature'),
       'main',
     ), null);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   remove worktree 成功后列表不再含该工作区；切 active 前必须按剩余 worktree 摘掉下属窗口。
+   *
+   * Code Logic（这个测试做什么）:
+   *   功能 + 主 session 对只含主 worktree 的列表 prune，断言只剩主窗口。
+   */
+  test('pruneMobileSessionsNotInWorktrees drops windows of removed worktrees', () => {
+    const featureRunning = createSession({
+      id: 'feature-running',
+      name: 'feature',
+      worktreeId: 'wt-feature',
+      status: 'running',
+    });
+    const mainStopped = createSession({
+      id: 'main-stopped',
+      name: 'main',
+      worktreeId: 'main',
+      status: 'disconnected',
+    });
+    const remaining = pruneMobileSessionsNotInWorktrees(
+      [featureRunning, mainStopped],
+      [createWorktree({ id: 'main', name: 'main', isMain: true })],
+    );
+    assertEqual(remaining.length, 1);
+    assertEqual(remaining[0]?.id ?? null, 'main-stopped');
   });
 
   /**

@@ -317,7 +317,7 @@ export function SettingsExperimentalPanel(
                       {t('settings:action.resetDefault')}
                     </Button>
                     <Button variant="primary" size="md" onClick={onSave} disabled={saving}>
-                      {saving ? t('settings:action.saving') : t('settings:action.apply')}
+                      {saving ? t('settings:action.applying') : t('settings:action.apply')}
                     </Button>
                   </div>
                 </Card.Body>

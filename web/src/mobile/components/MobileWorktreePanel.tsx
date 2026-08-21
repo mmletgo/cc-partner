@@ -643,6 +643,7 @@ export function MobileWorktreePanel({
             skipFileContextConfirm: activeWorktreeId === worktree.id,
             expectedProjectId: worktree.projectId,
           });
+          await onRefreshSessions?.();
         } else {
           setMutationPhase('idle');
           removeOperationIdRef.current = null;
@@ -681,6 +682,7 @@ export function MobileWorktreePanel({
       onBeginWorktreeOperation,
       onConfirmActiveWorktreeChange,
       onIsWorktreeActive,
+      onRefreshSessions,
       onRefreshWorktrees,
       onWorktreesChange,
       reconcileUnknownMutation,

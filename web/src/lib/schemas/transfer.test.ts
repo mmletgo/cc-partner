@@ -112,6 +112,25 @@ describe('transfer schemas', () => {
     expect(transferTaskDecoder.decode({ ...validTask, failure: null }).failure).toBeNull();
   });
 
+  test('accepts serde Option fields serialized as null', () => {
+    const decoded = transferTaskDecoder.decode({
+      ...validTask,
+      peerDeviceId: 'peer-1',
+      peerDeviceName: null,
+      speed: null,
+      errorMessage: null,
+      completedAt: null,
+      phase: 'queued',
+      failure: null,
+      operationPayloadHash: null,
+    });
+    expect(decoded.peerDeviceId).toBe('peer-1');
+    expect(decoded.peerDeviceName).toBeUndefined();
+    expect(decoded.speed).toBeUndefined();
+    expect(decoded.errorMessage).toBeUndefined();
+    expect(decoded.completedAt).toBeUndefined();
+  });
+
   test('send accepted must be literal true', () => {
     expect(() =>
       sendTransferResultDecoder.decode({

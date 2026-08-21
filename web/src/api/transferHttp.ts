@@ -13,22 +13,18 @@
 import {
   cancelTransferResultDecoder,
   transferOperationStatusDecoder,
+  transferTaskDecoder,
 } from '@/lib/schemas/transfer';
 import type {
   CancelTransferResult,
   Device,
-  TransferDirection,
-  TransferFailure,
   TransferOperationStatus,
-  TransferPhase,
-  TransferStatus,
   TransferTask,
 } from '@/lib/types';
 import {
   arrayDecoder,
   booleanDecoder,
   enumDecoder,
-  nullableDecoder,
   numberDecoder,
   objectDecoder,
   optionalDecoder,
@@ -121,78 +117,6 @@ const mobileTransferDeviceDtoDecoder = objectDecoder('MobileTransferDeviceDto', 
   online: optionalDecoder(booleanDecoder),
 });
 
-const directionDecoder: Decoder<TransferDirection> = enumDecoder('TransferDirection', [
-  'send',
-  'receive',
-] as const);
-
-const statusDecoder: Decoder<TransferStatus> = enumDecoder('TransferStatus', [
-  'pending',
-  'transferring',
-  'completed',
-  'failed',
-  'cancelled',
-] as const);
-
-const phaseDecoder: Decoder<TransferPhase> = enumDecoder('TransferPhase', [
-  'queued',
-  'connecting',
-  'transferring',
-  'finalizing',
-  'completed',
-  'cancelled',
-  'failed',
-] as const);
-
-const failureDecoder: Decoder<TransferFailure> = objectDecoder('TransferFailure', {
-  stage: enumDecoder('TransferFailureStage', [
-    'connect',
-    'transfer',
-    'finalize',
-    'source',
-    'protocol',
-    'local',
-    'unknown',
-  ] as const),
-  code: stringDecoder,
-  retryable: booleanDecoder,
-  message: stringDecoder,
-});
-
-/**
- * 移动端任务 DTO：filePath 可选，解码后一律清空。
- *
- * Business Logic（为什么需要这个 decoder）:
- *   主机 path 不得进入手机 UI；后端契约也不返回 path。
- *
- * Code Logic（这个 decoder 做什么）:
- *   与桌面 TransferTask 同形，但 filePath 可缺省；随后 strip 成空串。
- */
-const mobileTransferTaskDtoDecoder = objectDecoder('MobileTransferTask', {
-  id: stringDecoder,
-  fileName: stringDecoder,
-  filePath: optionalDecoder(stringDecoder),
-  fileSize: numberDecoder,
-  direction: directionDecoder,
-  status: statusDecoder,
-  progress: numberDecoder,
-  peerDeviceId: optionalDecoder(stringDecoder),
-  peerDeviceName: optionalDecoder(stringDecoder),
-  speed: optionalDecoder(numberDecoder),
-  errorMessage: optionalDecoder(stringDecoder),
-  startedAt: stringDecoder,
-  completedAt: optionalDecoder(stringDecoder),
-  transferredBytes: optionalDecoder(numberDecoder),
-  phase: optionalDecoder(phaseDecoder),
-  failure: optionalDecoder(nullableDecoder(failureDecoder)),
-  attempt: optionalDecoder(numberDecoder),
-  logicalTransferId: optionalDecoder(stringDecoder),
-  attemptId: optionalDecoder(stringDecoder),
-  protocolTransferId: optionalDecoder(stringDecoder),
-  clientOperationId: optionalDecoder(nullableDecoder(stringDecoder)),
-  operationPayloadHash: optionalDecoder(nullableDecoder(stringDecoder)),
-});
-
 const mobileUploadInitDecoder: Decoder<MobileUploadInitResult> = objectDecoder(
   'MobileUploadInitResult',
   {
@@ -251,10 +175,15 @@ export function decodeMobileTransferDevices(raw: unknown): MobileTransferDevice[
  *   任务卡只展示 basename；即便后端误带 path 也不得进入 React state。
  *
  * Code Logic（这个函数做什么）:
- *   解码任务并把 filePath 固定成空串。
+ *   复用桌面 TransferTask decoder（接受 serde Option 的 JSON null）；
+ *   解码前把 filePath 固定成空串，避免主机 path 进入 React state。
  */
 export function decodeMobileTransferTask(raw: unknown): TransferTask {
-  const dto = mobileTransferTaskDtoDecoder.decode(raw, '$');
+  const source =
+    raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>), filePath: '' }
+      : raw;
+  const dto = transferTaskDecoder.decode(source, '$');
   return {
     ...dto,
     filePath: '',

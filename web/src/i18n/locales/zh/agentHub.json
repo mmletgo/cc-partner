@@ -173,6 +173,11 @@
       "loadFailed": "读取项目提示词文件失败。",
       "saveFailed": "保存项目提示词文件失败。",
       "contextSave": "保存文件并切换"
+    },
+    "userFiles": {
+      "loadFailed": "读取用户提示词文件失败。",
+      "truncated": "文件内容被截断，保存会覆盖磁盘上的完整文件。",
+      "saveFailed": "保存用户提示词文件失败。"
     }
   },
   "userInstructions": {

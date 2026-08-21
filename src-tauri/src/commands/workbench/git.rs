@@ -2990,7 +2990,8 @@ pub(crate) fn content_has_conflict_markers(content: &str) -> bool {
 ///     已合并或废弃的功能 worktree 应能从 Workbench 清理，避免工作区列表膨胀。
 ///
 /// Code Logic（这个函数做什么）:
-///     阻止删除主 worktree 和仍有关联 terminal window 的 worktree；随后执行 git worktree remove 并删除元数据。
+///     阻止删除主 worktree；先在 project closing barrier 下关闭该 worktree 的全部 terminal window，
+///     再执行 git worktree remove 并删除元数据。
 pub(crate) async fn local_remove_workbench_worktree(
     state: &AppState,
     worktree_id: String,
@@ -3049,41 +3050,81 @@ pub(crate) async fn local_remove_workbench_worktree_with_ledger(
     let wt_for_exec = worktree_id.clone();
     let row_for_exec = row.clone();
     run_claimed_mutation(&ledger, &op_id, claim, move || async move {
-        let sessions = state_for_exec
-            .workbench_session_repo
-            .list(Some(&row_for_exec.project_id))
-            .await?;
-        if sessions
-            .iter()
-            .any(|session| session.worktree_id.as_deref() == Some(&wt_for_exec))
+        let project_id = row_for_exec.project_id.clone();
+        let project_barrier = state_for_exec
+            .workbench_sessions
+            .begin_project_closing_barrier(&project_id);
+        if !state_for_exec
+            .workbench_sessions
+            .wait_project_op_leases_drained(&project_id)
         {
-            return Err(AppError::generic("请先关闭该 worktree 下的终端窗口"));
+            tracing::warn!(
+                project_id = %project_id,
+                worktree_id = %wt_for_exec,
+                "project op leases still in-flight before remove; retaining project barrier"
+            );
+            return Err(AppError::unavailable(
+                "project_op_lease_drain_timeout".to_string(),
+            ));
         }
-        let project = get_project(&state_for_exec, &row_for_exec.project_id).await?;
+        // 与 merge 同源：barrier 下 close 两次，拦截 close→delete 窗口内的并发 create。
+        close_sessions_for_worktree(&state_for_exec, &project_id, &wt_for_exec).await?;
+        close_sessions_for_worktree(&state_for_exec, &project_id, &wt_for_exec).await?;
+        state_for_exec
+            .workbench_session_repo
+            .delete_by_worktree(&project_id, &wt_for_exec)
+            .await?;
+
+        let project = get_project(&state_for_exec, &project_id).await?;
         let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
-        workbench_git::remove_worktree(
+        if let Err(error) = workbench_git::remove_worktree(
             Path::new(&repo_root),
             Path::new(&row_for_exec.path),
             force_flag,
-        )?;
+        ) {
+            // git remove 失败时 worktree 仍在，必须释放 barrier，否则无法再开窗口。
+            if state_for_exec
+                .workbench_sessions
+                .wait_project_op_leases_drained(&project_id)
+            {
+                state_for_exec
+                    .workbench_sessions
+                    .finish_project_closing_barrier(&project_id, project_barrier);
+            }
+            return Err(error);
+        }
         state_for_exec
             .workbench_worktree_repo
             .delete(&wt_for_exec)
             .await?;
         // 删除后 refresh：对应 binding 标记 detached，不 tombstone Hub 资产。
-        if let Err(err) = crate::agent_hub::project_scope::refresh_checkout_bindings(
-            &state_for_exec,
-            &row_for_exec.project_id,
-        )
-        .await
+        if let Err(err) =
+            crate::agent_hub::project_scope::refresh_checkout_bindings(&state_for_exec, &project_id)
+                .await
         {
             tracing::debug!(
-                project_id = %row_for_exec.project_id,
+                project_id = %project_id,
                 worktree_id = %wt_for_exec,
                 error = %err,
                 "agent_hub refresh_checkout_bindings after remove worktree failed"
             );
         }
+        if !state_for_exec
+            .workbench_sessions
+            .wait_project_op_leases_drained(&project_id)
+        {
+            tracing::warn!(
+                project_id = %project_id,
+                worktree_id = %wt_for_exec,
+                "project op leases still in-flight after remove; retaining project barrier"
+            );
+            return Err(AppError::unavailable(
+                "project_op_lease_drain_timeout".to_string(),
+            ));
+        }
+        state_for_exec
+            .workbench_sessions
+            .finish_project_closing_barrier(&project_id, project_barrier);
         Ok(serde_json::json!({ "ok": true, "worktreeId": wt_for_exec }))
     })
     .await
@@ -3872,6 +3913,147 @@ mod collect_merge_tests {
         assert!(
             message.contains("没有可收集") || message.contains("可收集"),
             "expected no-collectible error, got {message}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户关闭非主 worktree 时，不应再被要求手动关掉下属 terminal window；
+    ///     后端必须级联关闭该 worktree 的窗口，且不得误关同项目其他工作区。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真实 git linked worktree + 功能/主各一条 raw session；调用 ledger remove；
+    ///     断言 envelope 成功、功能 session 删除、主 session 保留、worktree 目录与 row 消失。
+    #[tokio::test]
+    async fn remove_worktree_closes_bound_terminal_windows() {
+        use crate::workbench::models::WorkbenchSessionRow;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = setup_main_only_repo(temp.path());
+        let feature_path = temp.path().join("feature-wt");
+        git_cmd(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/remove-sessions",
+                &feature_path.to_string_lossy(),
+            ],
+        );
+        let state = build_collect_merge_state(temp.path(), &repo).await;
+        const FEATURE_WORKTREE_ID: &str = "wt-feat-remove";
+        state
+            .workbench_worktree_repo
+            .upsert(&WorkbenchWorktreeRow {
+                id: FEATURE_WORKTREE_ID.to_string(),
+                project_id: COLLECT_PROJECT_ID.to_string(),
+                name: "feature".to_string(),
+                branch: Some("feature/remove-sessions".to_string()),
+                base_branch: Some("main".to_string()),
+                path: feature_path.to_string_lossy().to_string(),
+                is_main: false,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let feature_session = WorkbenchSessionRow {
+            id: "sess-feat".to_string(),
+            project_id: COLLECT_PROJECT_ID.to_string(),
+            worktree_id: Some(FEATURE_WORKTREE_ID.to_string()),
+            name: "feature-window".to_string(),
+            name_source: "default".to_string(),
+            command: "/bin/sh".to_string(),
+            cwd: feature_path.to_string_lossy().to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".to_string(),
+            exited_at: None,
+            exit_code: None,
+            // 缺 backend_id 的 tmux 元数据：close 可删 row，无需 live PTY/tmux。
+            backend: "tmux".to_string(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        };
+        let main_session = WorkbenchSessionRow {
+            id: "sess-main".to_string(),
+            project_id: COLLECT_PROJECT_ID.to_string(),
+            worktree_id: Some(main_worktree_id(COLLECT_PROJECT_ID)),
+            name: "main-window".to_string(),
+            name_source: "default".to_string(),
+            command: "/bin/sh".to_string(),
+            cwd: repo.to_string_lossy().to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".to_string(),
+            exited_at: None,
+            exit_code: None,
+            backend: "tmux".to_string(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        };
+        state
+            .workbench_session_repo
+            .upsert(&feature_session)
+            .await
+            .unwrap();
+        state
+            .workbench_session_repo
+            .upsert(&main_session)
+            .await
+            .unwrap();
+
+        let envelope = local_remove_workbench_worktree_with_ledger(
+            &state,
+            FEATURE_WORKTREE_ID.to_string(),
+            Some(false),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect("remove should close bound windows instead of rejecting");
+        let WorkbenchMutationEnvelopeDto::Succeeded { value, .. } = envelope else {
+            panic!("expected succeeded envelope, got {envelope:?}");
+        };
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(value["worktreeId"], serde_json::json!(FEATURE_WORKTREE_ID));
+
+        assert!(
+            state
+                .workbench_session_repo
+                .get("sess-feat")
+                .await
+                .unwrap()
+                .is_none(),
+            "feature worktree window must be closed"
+        );
+        assert!(
+            state
+                .workbench_session_repo
+                .get("sess-main")
+                .await
+                .unwrap()
+                .is_some(),
+            "other worktree windows must stay"
+        );
+        assert!(
+            state
+                .workbench_worktree_repo
+                .get(FEATURE_WORKTREE_ID)
+                .await
+                .unwrap()
+                .is_none(),
+            "removed worktree row must be deleted"
+        );
+        assert!(
+            !feature_path.exists(),
+            "git worktree directory must be removed"
         );
     }
 }
