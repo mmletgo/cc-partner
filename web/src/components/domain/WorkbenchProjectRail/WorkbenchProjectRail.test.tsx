@@ -304,7 +304,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
     );
 
     expect(screen.queryByLabelText(/需要处理/)).toBeNull();
-    // Fleet 详情入口已迁到 Settings?tab=fleet；异常数字 badge 已移除（右上角等待/已停止数字点覆盖该信号）
+    // 异常数字 badge 已移除（右上角等待/已停止数字点覆盖该信号）；不再渲染 Fleet 详情入口
     expect(screen.queryByRole('link', { name: /Fleet|局域网 Agent Fleet/ })).toBeNull();
 
     fleetMockState.projectSummaries = {

@@ -1,12 +1,12 @@
 /**
- * E2E-AGENT-LEDGER-001 — Agent Metadata Ledger drawer / Fleet activity / clear（L1 mock）。
+ * E2E-AGENT-LEDGER-001 — Agent Metadata Ledger drawer / clear（L1 mock）。
  *
  * Business Logic（为什么需要这个套件）:
- *   验证本机历史 drawer 对 null usage 显示「未提供」、Fleet 展示 activity、Settings 清除确认。
+ *   验证本机历史 drawer 对 null usage 显示「未提供」、Settings 清除确认。
  *   L1 不宣称真实 SQLite/P2P multi-host。
  *
  * Code Logic（这个套件做什么）:
- *   mock invoke：list/summarize/clear + lan fleet；打开 workbench 历史与 settings 清除。
+ *   mock invoke：list/summarize/clear；打开 workbench 历史与 settings 清除。
  */
 
 import { expect, test } from './fixtures';
@@ -20,10 +20,10 @@ const TS = '2026-07-15T12:00:00.000Z';
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Ledger E2E 需要 local project 与 mock ledger/fleet 命令。
+ *   Ledger E2E 需要 local project 与 mock ledger 命令。
  *
  * Code Logic（这个函数做什么）:
- *   registerAppShellCommands + list/summarize/clear/lan fleet handlers（覆盖 shell 默认空值）。
+ *   registerAppShellCommands + list/summarize/clear handlers（覆盖 shell 默认空值）。
  */
 async function installLedgerBackend(
   page: import('@playwright/test').Page,
@@ -123,64 +123,6 @@ async function installLedgerBackend(
   });
 
   harness.command('clear_agent_ledger', { kind: 'resolve', value: 1 });
-
-  harness.command('get_workbench_lan_fleet', {
-    kind: 'resolve',
-    value: {
-      generatedAt: TS,
-      truncated: false,
-      devices: [
-        {
-          deviceId: 'device-local',
-          deviceName: 'Local',
-          reachability: 'live',
-          freshness: 'live',
-          schedulerSlotsUsed: 0,
-          schedulerSlotsMax: 2,
-          errorCode: null,
-          capturedAt: TS,
-          projects: [
-            {
-              projectId: 'proj-local-1',
-              displayName: 'Ledger Project',
-              projectKind: 'local',
-              agentCounts: {
-                launching: 0,
-                working: 0,
-                needsInput: 0,
-                idle: 0,
-                completed: 0,
-                failed: 0,
-                disconnected: 0,
-              },
-              attentionCount: 0,
-              terminalCount: 0,
-              gitState: 'clean',
-              browserState: 'absent',
-              orchestratorRunning: 0,
-              orchestratorRetrying: 0,
-              lastActivityAt: TS,
-              agentActivityStatus: 'live',
-              agentActivity: {
-                window: '7d',
-                projectId: 'proj-local-1',
-                sessions: 1,
-                completed: 1,
-                failed: 0,
-                cancelled: 0,
-                disconnected: 0,
-                durationMs: 1000,
-                inputTokens: null,
-                outputTokens: null,
-                costByCurrency: [],
-                usageCoverage: 'unavailable',
-              },
-            },
-          ],
-        },
-      ],
-    },
-  });
 }
 
 test.describe('agent metadata ledger', () => {
@@ -213,23 +155,6 @@ test.describe('agent metadata ledger', () => {
       await expect(page.getByRole('dialog')).toBeVisible();
       await page.getByRole('button', { name: /确认清除|Clear$/i }).click();
       await expect(page.getByText(/已清除|Cleared/i)).toBeVisible({ timeout: 5_000 });
-    }
-  });
-
-  test('fleet shows agent activity without fabricating zero tokens', async ({
-    page,
-    backendHarness,
-  }) => {
-    await installLedgerBackend(page, backendHarness);
-    await page.goto('/settings?tab=fleet');
-    await expect(page.getByText(/局域网 Agent Fleet|LAN Agent Fleet/i)).toBeVisible({
-      timeout: 15_000,
-    });
-    const activity = page.getByTestId('fleet-agent-activity-proj-local-1');
-    if (await activity.count()) {
-      await expect(activity).toBeVisible();
-      const text = await activity.innerText();
-      expect(text.toLowerCase()).not.toContain('0 tokens');
     }
   });
 });

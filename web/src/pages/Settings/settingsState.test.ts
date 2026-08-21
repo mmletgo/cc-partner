@@ -287,8 +287,8 @@ describe('settings tab deep link helpers', () => {
     if (parseSettingsTabFromSearch('?tab=automation') !== 'automation') {
       throw new Error('expected automation from search');
     }
-    if (parseSettingsTabFromSearch('?tab=fleet') !== 'fleet') {
-      throw new Error('expected fleet from search');
+    if (parseSettingsTabFromSearch('?tab=fleet') !== 'general') {
+      throw new Error('expected retired fleet tab to fall back to general');
     }
     if (parseSettingsTabFromSearch('?tab=activity') !== 'activity') {
       throw new Error('expected activity from search');

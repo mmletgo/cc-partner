@@ -28,7 +28,6 @@ export const SETTINGS_TABS: SettingsTab[] = [
   { id: 'sync', labelKey: 'sync' },
   { id: 'ai', labelKey: 'ai' },
   { id: 'automation', labelKey: 'automation' },
-  { id: 'fleet', labelKey: 'fleet' },
   { id: 'about', labelKey: 'about' },
 ];
 

@@ -623,7 +623,7 @@ export default function App() {
             <Route path="/workbench" element={<ShellRoute><Workbench /></ShellRoute>} />
             <Route
               path="/workbench/fleet"
-              element={<Navigate to="/settings?tab=fleet" replace />}
+              element={<Navigate to="/workbench" replace />}
             />
             <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
             <Route path="/prompt-optimizer" element={<Navigate to="/workbench" replace />} />

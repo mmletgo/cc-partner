@@ -14,7 +14,6 @@
     "sync": "Sync",
     "ai": "AI",
     "automation": "Automation",
-    "fleet": "Fleet",
     "about": "About"
   },
   "basic": {
@@ -129,8 +128,8 @@
   },
   "promptOptimizerSettings": {
     "hotkey": {
-      "label": "Open shortcut",
-      "helper": "Defaults to tapping Control. It triggers only when Control is pressed and released by itself, so terminal chords such as Control+C still pass through."
+      "label": "Prompt optimizer shortcut",
+      "helper": "Opens the Prompt optimizer overlay in a Workbench terminal. Defaults to tapping Control. It triggers only when Control is pressed and released by itself, so terminal chords such as Control+C still pass through."
     }
   },
   "promptQuickInputSettings": {

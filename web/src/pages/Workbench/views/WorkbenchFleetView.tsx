@@ -28,14 +28,14 @@ export interface WorkbenchFleetViewProps {
   onRefresh?: () => void;
   /**
    * 是否显示「返回工作台」链接。
-   * Settings 嵌入时为 false；独立页/兼容场景可开。
+   * 独立页/兼容场景可开；嵌入其它壳层时为 false。
    */
   showWorkbenchLink?: boolean;
 }
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   Fleet 是跨项目只读聚合入口（现挂 Settings Fleet tab）。
+ *   Fleet 是跨项目只读聚合视图（侧栏 / Mobile 消费摘要；本组件为详情展示）。
  *
  * Code Logic（这个组件做什么）:
  *   列表 devices → projects；仅 Link 导航，无 mutation 按钮。

@@ -89,7 +89,6 @@ export type SettingsTabId =
   | 'sync'
   | 'ai'
   | 'automation'
-  | 'fleet'
   | 'about';
 
 /** 合法 Settings tab 集合。 */
@@ -102,7 +101,6 @@ export const SETTINGS_TAB_IDS: readonly SettingsTabId[] = [
   'sync',
   'ai',
   'automation',
-  'fleet',
   'about',
 ] as const;
 

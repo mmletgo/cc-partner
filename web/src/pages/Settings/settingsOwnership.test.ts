@@ -88,7 +88,6 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain("activeTab === 'ai'");
     expect(controller).not.toContain('<ActivityStatsPanel');
     expect(controller).not.toContain("activeTab === 'automation'");
-    expect(controller).not.toContain("activeTab === 'fleet'");
     expect(controller).not.toContain("activeTab === 'about'");
     expect(controller).not.toContain('settings-panel-');
     expect(controller).not.toContain('role="tabpanel"');
@@ -96,7 +95,6 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain('<SettingsSyncPanel');
     expect(controller).not.toContain('<SettingsDependenciesPanel');
     expect(controller).not.toContain('<SettingsAiPanel');
-    expect(controller).not.toContain('<SettingsFleetPanel');
     expect(controller).not.toContain('<SettingsBatteryPanel');
     expect(controller).not.toContain('<SettingsAboutPanel');
   });
@@ -131,7 +129,7 @@ describe('Settings shell composition', () => {
     expect(settingsShell).toContain('SettingsSyncPanel');
     expect(settingsShell).toContain('SettingsDependenciesPanel');
     expect(settingsShell).toContain('SettingsAiPanel');
-    expect(settingsShell).toContain('SettingsFleetPanel');
+    expect(settingsShell).not.toContain('SettingsFleetPanel');
     expect(settingsShell).toContain('SettingsBatteryPanel');
     expect(settingsShell).toContain('SettingsAboutPanel');
     expect(settingsShell).toContain('ActivityStatsPanel');

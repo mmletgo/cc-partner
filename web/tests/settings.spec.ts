@@ -41,6 +41,9 @@ test.describe('E2E-SETTINGS-001 Settings partial failure journey', () => {
     const nameField = page.locator('#settings-device-name');
     await expect(nameField).toBeVisible({ timeout: 10_000 });
     await expect(nameField).toHaveValue('Original Device');
+    await expect(page.getByText('Prompt 优化快捷键', { exact: true })).toBeVisible();
+    await expect(page.getByText(/在工作台终端唤出 Prompt 优化浮层/)).toBeVisible();
+    await expect(page.getByText('收藏快捷输入快捷键', { exact: true })).toBeVisible();
 
     // 其它 tab 仍可切换（dependencies / automation）——非 core github 失败不得整页死
     await page.getByRole('tab', { name: '依赖环境' }).click();

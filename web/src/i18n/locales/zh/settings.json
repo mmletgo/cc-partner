@@ -14,7 +14,6 @@
     "sync": "同步",
     "ai": "AI",
     "automation": "自动化",
-    "fleet": "Fleet",
     "about": "关于"
   },
   "basic": {
@@ -129,8 +128,8 @@
   },
   "promptOptimizerSettings": {
     "hotkey": {
-      "label": "唤起快捷键",
-      "helper": "默认轻按 Control。只有单独按下并松开 Control 才触发，Control+C 等终端组合键不会触发。"
+      "label": "Prompt 优化快捷键",
+      "helper": "在工作台终端唤出 Prompt 优化浮层。默认轻按 Control；只有单独按下并松开 Control 才触发，Control+C 等终端组合键不会触发。"
     }
   },
   "promptQuickInputSettings": {
