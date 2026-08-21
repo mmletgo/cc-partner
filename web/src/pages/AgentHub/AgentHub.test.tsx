@@ -744,6 +744,99 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('agent-hub-section-assets')).toBeNull();
   });
 
+  test('local user toolbar mounts Git restore and wires inspect, preview, mapping, and confirm', () => {
+    const openGitImportDrawer = vi.fn();
+    const runGitInspect = vi.fn(async () => undefined);
+    const runGitPreview = vi.fn(async () => undefined);
+    const runGitConfirmMapping = vi.fn(async () => undefined);
+    const runGitConfirmImport = vi.fn(async () => undefined);
+    renderView({
+      gitImportOpen: true,
+      openGitImportDrawer,
+      runGitInspect,
+      runGitPreview,
+      runGitConfirmMapping,
+      runGitConfirmImport,
+      gitSelectedLaneDeviceId: 'device-b',
+      gitMappingDrafts: { 'hub-project': 'workbench-project' },
+      gitPreview: {
+        laneDeviceId: 'device-b',
+        snapshotId: 'snapshot-1',
+        snapshotHash: 'hashhashhash',
+        sourceReplicaId: 'device-b',
+        assetCount: 1,
+        revisionCount: 1,
+        changeCounts: {
+          added: 1,
+          modified: 0,
+          deleted: 0,
+          conflict: 0,
+          unchanged: 0,
+          credentialBearing: 0,
+        },
+        assets: [
+          {
+            assetId: 'asset-git',
+            kind: 'skill',
+            logicalKey: 'skill/git',
+            displayName: 'Git skill',
+            changeKind: 'added',
+            hasCredential: false,
+            remoteDeleted: false,
+          },
+        ],
+        projectCandidates: [
+          {
+            hubProjectId: 'hub-project',
+            candidateKind: 'hubProjectId',
+            candidateExternalId: 'hub-project',
+          },
+        ],
+        resolvedMappings: [],
+        plaintextBackupDisclosure: 'plaintext disclosure',
+        hasCredentialBearingAssets: false,
+      },
+    });
+
+    fireEvent.click(screen.getByTestId('agent-hub-action-git-import'));
+    expect(openGitImportDrawer).toHaveBeenCalledOnce();
+    expect(screen.getByTestId('git-import-drawer')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('git-import-inspect-btn'));
+    fireEvent.click(screen.getByTestId('git-import-preview-btn'));
+    fireEvent.click(screen.getByTestId('git-import-map-confirm-hub-project'));
+    fireEvent.click(screen.getByTestId('git-import-confirm-btn'));
+    expect(runGitInspect).toHaveBeenCalledOnce();
+    expect(runGitPreview).toHaveBeenCalledOnce();
+    expect(runGitConfirmMapping).toHaveBeenCalledWith('hub-project');
+    expect(runGitConfirmImport).toHaveBeenCalledOnce();
+  });
+
+  test('peer and project contexts do not mount Git restore production UI', () => {
+    renderView({
+      gitImportOpen: true,
+      hubContext: {
+        ...buildProps().hubContext,
+        deviceId: 'peer-a',
+      },
+    });
+    expect(screen.queryByTestId('agent-hub-action-git-import')).toBeNull();
+    expect(screen.queryByTestId('git-import-drawer')).toBeNull();
+
+    cleanup();
+    renderView({
+      gitImportOpen: true,
+      embedded: true,
+      scopeLock: 'project',
+      hubContext: {
+        ...buildProps().hubContext,
+        scope: 'project',
+        projectKey: 'workbench-project',
+      },
+    });
+    expect(screen.queryByTestId('agent-hub-action-git-import')).toBeNull();
+    expect(screen.queryByTestId('git-import-drawer')).toBeNull();
+  });
+
   test('shell reload is the only refresh control on three-pane and project-agent assets', () => {
     const reload = vi.fn(async () => undefined);
     renderView({

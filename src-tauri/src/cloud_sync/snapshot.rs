@@ -6,29 +6,26 @@
 //!     工作区结构（workdir 下）：
 //!       - prompts/<id>.json        → PromptRow（含 deleted，照写以传播软删除）
 //!       - claude_history/<id>.json → ClaudeHistoryRow（含 deleted）
-//!       - ssh_targets/<host>.json → SshTargetRow（含 deleted）
 //!       - scratchpad/<hex(id)>.json  → ScratchpadRow（多页面，含 deleted）
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `id_to_filename` / `filename_to_id`：id → 安全文件名的可逆映射（hex 编码，
 //!       对任意 id round-trip 一致，规避 Windows 非法字符 / 路径分隔符问题）。
 //!     - `import_to_db`：扫描工作区 JSON → merge_* 进本地（仅变化才落库）→ 返回统计。
-//!     - `export_from_db`：清空 prompts/ 与 claude_history/ 与 ssh_targets/ → 本地全量写回 → 返回统计。
+//!     - `export_from_db`：清空 prompts/、claude_history/、scratchpad/ → 本地全量写回 → 返回统计。
 //!
-//! CLAUDE.md 不参与云端自动同步；它只由 CLAUDE.md 页面用户主动推送。
-//! 复用既有 merge_prompt / merge_cc_history / merge_ssh_target，冲突解决与局域网同步完全一致。
+//! SSH 目标与 CLAUDE.md 均不参与云端自动同步；仓库中的旧目录保持原样且不会导入。
+//! 复用既有 merge_prompt / merge_cc_history，冲突解决与局域网同步完全一致。
 
 use crate::cc::merger::merge_cc_history;
 use crate::cc::models::ClaudeHistoryRow;
 use crate::error::AppError;
 use crate::models::prompt::PromptRow;
 use crate::models::scratchpad::{ScratchpadRow, SCRATCHPAD_ID};
-use crate::models::ssh_target::SshTargetRow;
 use crate::state::AppState;
 use crate::storage::ScratchpadRepo;
 use crate::sync::merger::merge_prompt;
 use crate::sync::scratchpad::{merge_scratchpad, scratchpad_changed};
-use crate::sync::ssh_target::merge_ssh_target;
 use std::fs;
 use std::path::Path;
 
@@ -36,8 +33,6 @@ use std::path::Path;
 const PROMPTS_DIR: &str = "prompts";
 /// 工作区下 CC 历史目录名。
 const CC_HISTORY_DIR: &str = "claude_history";
-/// 工作区下 SSH 目标目录名。
-const SSH_TARGETS_DIR: &str = "ssh_targets";
 /// 工作区下速记本目录名。
 const SCRATCHPAD_DIR: &str = "scratchpad";
 
@@ -96,19 +91,19 @@ pub struct ImportStats {
     pub prompts: u64,
     /// CC 历史实际合并产生变化的条数。
     pub cc_history: u64,
-    /// SSH 目标实际合并产生变化的条数。
+    /// 已退役兼容字段：SSH 目标不再从云端导入，恒为 0。
     pub ssh_targets: u64,
     /// 速记本实际合并产生变化的页面数。
     pub scratchpad: u64,
 }
 
 impl ImportStats {
-    /// prompts + cc_history + ssh_targets + scratchpad 的总导入条数。
+    /// prompts + cc_history + scratchpad 的总导入条数。
     ///
     /// Business Logic: engine 统计 pulled 条数时需包含所有自动云同步资源，避免新增类型漏计。
-    /// Code Logic: 四字段相加。CLAUDE.md 仍不参与自动云同步。
+    /// Code Logic: 三个活跃字段相加；退役的 ssh_targets 不计入。
     pub fn total(&self) -> u64 {
-        self.prompts + self.cc_history + self.ssh_targets + self.scratchpad
+        self.prompts + self.cc_history + self.scratchpad
     }
 }
 
@@ -119,20 +114,20 @@ pub struct ExportStats {
     pub prompts: u64,
     /// CC 历史写出文件数（含 deleted）。
     pub cc_history: u64,
-    /// SSH 目标写出文件数（含 deleted）。
+    /// 已退役兼容字段：SSH 目标不再写出，恒为 0。
     pub ssh_targets: u64,
     /// 速记本写出文件数（含 deleted 页面）。
     pub scratchpad: u64,
 }
 
 impl ExportStats {
-    /// prompts + cc_history + ssh_targets + scratchpad 的总写出数。
+    /// prompts + cc_history + scratchpad 的总写出数。
     ///
     /// Business Logic: engine 统计 pushed 条数时需对多类型条目求和，集中在此避免散落的
     ///     `last_export.prompts + last_export.cc_history` 漏加新类型。
-    /// Code Logic: 四字段相加。CLAUDE.md 不参与云端自动同步。
+    /// Code Logic: 三个活跃字段相加；退役的 ssh_targets 不计入。
     pub fn total(&self) -> u64 {
-        self.prompts + self.cc_history + self.ssh_targets + self.scratchpad
+        self.prompts + self.cc_history + self.scratchpad
     }
 }
 
@@ -197,20 +192,6 @@ fn cc_history_changed(merged: &ClaudeHistoryRow, local: &ClaudeHistoryRow) -> bo
         || merged.deleted != local.deleted
 }
 
-/// 判断两条 SshTargetRow 是否在同步相关字段上有差异。
-///
-/// Business Logic: import 合并后只有当结果在同步相关字段（向量时钟/时间戳/可编辑内容/软删除）
-///     上与本地不同才需落库，省 IO。字段集与局域网 ssh_target_sync_with_peer 的差异判定一致。
-/// Code Logic: 逐字段 != 比对（含 port/label 等 SSH 特有可编辑字段）。
-fn ssh_target_changed(merged: &SshTargetRow, local: &SshTargetRow) -> bool {
-    merged.vector_clock != local.vector_clock
-        || merged.updated_at != local.updated_at
-        || merged.username != local.username
-        || merged.port != local.port
-        || merged.label != local.label
-        || merged.deleted != local.deleted
-}
-
 /// 读取并解析单个 JSON 文件，失败时记录 warn 并返回 None。
 ///
 /// Business Logic: cloud import 不能因单个损坏 JSON 中断整次同步，保持与其他资源导入容错一致。
@@ -242,15 +223,14 @@ fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 ///
 /// Business Logic: pull 后工作区有远端版本，需逐条与本地合并，使本地吸收远端变化，
 ///     供后续 export 写回统一版本。仅当合并结果与本地有差异时才 bulk_upsert（省 IO）。
-///     CLAUDE.md 不参与云端自动同步，避免 GitHub 自动同步覆盖用户本机配置。
+///     SSH 目标与 CLAUDE.md 不参与云端自动同步；旧目录既不扫描也不删除。
 ///
 /// Code Logic:
 /// 1. 扫 prompts/*.json 反解 id → PromptRow，逐条本地 get：None 直接收，Some 则 merge_prompt，
 ///    仅 prompt_changed 才收集；批量 bulk_upsert；
 /// 2. claude_history/*.json：merge_cc_history，变化才 bulk_upsert；
-/// 3. ssh_targets/*.json：merge_ssh_target，变化才 bulk_upsert（host 为主键，文件名 hex 还原）；
-/// 4. scratchpad/*.json：按文件名还原 id，merge_scratchpad，变化才 upsert；兼容旧 scratchpad/scratchpad.json；
-/// 5. 返回 ImportStats。
+/// 3. scratchpad/*.json：按文件名还原 id，merge_scratchpad，变化才 upsert；兼容旧 scratchpad/scratchpad.json；
+/// 4. 返回 ImportStats。
 pub async fn import_to_db(state: &AppState, workdir: &Path) -> Result<ImportStats, AppError> {
     let mut stats = ImportStats::default();
 
@@ -370,69 +350,6 @@ pub async fn import_to_db(state: &AppState, workdir: &Path) -> Result<ImportStat
         }
     }
 
-    // 3. SSH 目标 import（host 为主键，文件名 hex 还原）
-    let ssh_dir = workdir.join(SSH_TARGETS_DIR);
-    if ssh_dir.is_dir() {
-        let mut to_upsert: Vec<SshTargetRow> = Vec::new();
-        for entry in fs::read_dir(&ssh_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let host = filename_to_id(stem);
-            let text = match fs::read_to_string(&path) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(
-                        "cloud_sync import: 读取 {} 失败（跳过）: {e}",
-                        path.display()
-                    );
-                    continue;
-                }
-            };
-            let remote: SshTargetRow = match serde_json::from_str(&text) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        "cloud_sync import: 解析 {} 失败（跳过）: {e}",
-                        path.display()
-                    );
-                    continue;
-                }
-            };
-            // 文件名还原的 host 与文件内容 host 应一致；以还原 host 为准做本地查找
-            let lookup_host = if remote.host == host {
-                host.clone()
-            } else {
-                host
-            };
-            match state.ssh_target_repo.get(&lookup_host).await? {
-                None => {
-                    // 本地没有 → 直接接收远端版本（确保 host 用还原值）
-                    let mut r = remote;
-                    r.host = lookup_host;
-                    to_upsert.push(r);
-                }
-                Some(local) => {
-                    let merged = merge_ssh_target(&local, &remote);
-                    if ssh_target_changed(&merged, &local) {
-                        to_upsert.push(merged);
-                    }
-                }
-            }
-        }
-        if !to_upsert.is_empty() {
-            let n = to_upsert.len() as u64;
-            state.ssh_target_repo.bulk_upsert(&to_upsert).await?;
-            stats.ssh_targets = n;
-        }
-    }
-
     stats.scratchpad =
         import_scratchpad_dir(&state.scratchpad_repo, &workdir.join(SCRATCHPAD_DIR)).await?;
 
@@ -442,34 +359,24 @@ pub async fn import_to_db(state: &AppState, workdir: &Path) -> Result<ImportStat
 /// 把本地权威数据 export 写回工作区（覆盖式，含软删除）。
 ///
 /// Business Logic: import 合并后本地是最新权威，需完整写回工作区供 commit/push。
-///     每次全量覆盖（先清空 prompts/、claude_history/、ssh_targets/、scratchpad/ 目录内容，保留目录本身），
+///     每次全量覆盖（先清空 prompts/、claude_history/、scratchpad/ 目录内容，保留目录本身），
 ///     确保工作区与本地一一对应，不会残留本地已删除但远端曾有的文件。
-///     CLAUDE.md 不参与云端自动同步，工作区内旧 claude_md 文件会保持原样但被本流程忽略。
+///     SSH 与 CLAUDE.md 不参与云端自动同步，工作区内旧目录会保持原样但被本流程忽略。
 ///
 /// Code Logic:
-/// 1. 清空 prompts/、claude_history/、ssh_targets/、scratchpad/ 目录内容（保留目录）；
+/// 1. 清空 prompts/、claude_history/、scratchpad/ 目录内容（保留目录）；
 /// 2. prompt_repo.get_all_for_sync() 全量（含 deleted）逐条写 prompts/<id_to_filename>.json；
 /// 3. cc_history 全量写 claude_history/<id_to_filename>.json；
-/// 4. ssh_targets 全量写 ssh_targets/<id_to_filename(host)>.json；
-/// 5. scratchpad 全量写 scratchpad/<hex(id)>.json；
-/// 6. 返回 ExportStats。
+/// 4. scratchpad 全量写 scratchpad/<hex(id)>.json；
+/// 5. 返回 ExportStats。
 pub async fn export_from_db(state: &AppState, workdir: &Path) -> Result<ExportStats, AppError> {
     let mut stats = ExportStats::default();
 
     let prompts_dir = workdir.join(PROMPTS_DIR);
     let cc_dir = workdir.join(CC_HISTORY_DIR);
-    let ssh_dir = workdir.join(SSH_TARGETS_DIR);
     let scratchpad_dir = workdir.join(SCRATCHPAD_DIR);
 
-    // 确保目录存在 + 清空 prompts 与 cc 历史与 ssh_targets 与 scratchpad（保留目录）
-    fs::create_dir_all(&prompts_dir)?;
-    fs::create_dir_all(&cc_dir)?;
-    fs::create_dir_all(&ssh_dir)?;
-    fs::create_dir_all(&scratchpad_dir)?;
-    clear_dir_contents(&prompts_dir)?;
-    clear_dir_contents(&cc_dir)?;
-    clear_dir_contents(&ssh_dir)?;
-    clear_dir_contents(&scratchpad_dir)?;
+    prepare_export_directories(workdir)?;
 
     // prompts 全量写出（含 deleted）
     let all_prompts = state.prompt_repo.get_all_for_sync().await?;
@@ -491,19 +398,26 @@ pub async fn export_from_db(state: &AppState, workdir: &Path) -> Result<ExportSt
     }
     stats.cc_history = all_cc.len() as u64;
 
-    // SSH 目标全量写出（含 deleted，host 为主键）
-    let all_ssh = state.ssh_target_repo.get_all_for_sync().await?;
-    for s in &all_ssh {
-        let fname = format!("{}.json", id_to_filename(&s.host));
-        let path = ssh_dir.join(&fname);
-        let text = serde_json::to_string_pretty(s)?;
-        fs::write(&path, text)?;
-    }
-    stats.ssh_targets = all_ssh.len() as u64;
-
     stats.scratchpad = export_scratchpad_dir(&state.scratchpad_repo, &scratchpad_dir).await?;
 
     Ok(stats)
+}
+
+/// 创建并清空当前仍参与自动云同步的工作区目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     覆盖导出只能清理活跃域；旧 `ssh_targets/` 与 `claude_md/` 可能仍被旧版本使用，
+///     新版本必须保留这些仓库文件且不得产生删除提交。
+///
+/// Code Logic（这个函数做什么）:
+///     仅创建并清空 prompts、claude_history、scratchpad 三个目录。
+fn prepare_export_directories(workdir: &Path) -> Result<(), AppError> {
+    for name in [PROMPTS_DIR, CC_HISTORY_DIR, SCRATCHPAD_DIR] {
+        let dir = workdir.join(name);
+        fs::create_dir_all(&dir)?;
+        clear_dir_contents(&dir)?;
+    }
+    Ok(())
 }
 
 /// 清空目录内的所有文件/子目录，但保留目录本身。
@@ -730,7 +644,6 @@ mod tests {
     fn sync_dir_constants_stable() {
         assert_eq!(PROMPTS_DIR, "prompts");
         assert_eq!(CC_HISTORY_DIR, "claude_history");
-        assert_eq!(SSH_TARGETS_DIR, "ssh_targets");
         assert_eq!(SCRATCHPAD_DIR, "scratchpad");
     }
 
@@ -743,7 +656,7 @@ mod tests {
             scratchpad: 1,
         };
 
-        assert_eq!(stats.total(), 7);
+        assert_eq!(stats.total(), 4);
     }
 
     #[test]
@@ -756,7 +669,28 @@ mod tests {
         };
 
         assert_eq!(stats.scratchpad, 1);
-        assert_eq!(stats.total(), 7);
+        assert_eq!(stats.total(), 4);
+    }
+
+    /// 自动导出清理不得触碰旧 SSH/CLAUDE.md 云端目录。
+    #[test]
+    fn prepare_export_directories_preserves_retired_domain_files() {
+        let workdir = temp_dir("preserve-retired-domains");
+        let ssh_file = workdir.join("ssh_targets/legacy.json");
+        let claude_file = workdir.join("claude_md/claude_md.json");
+        std::fs::create_dir_all(ssh_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(claude_file.parent().unwrap()).unwrap();
+        std::fs::write(&ssh_file, "legacy ssh").unwrap();
+        std::fs::write(&claude_file, "legacy claude").unwrap();
+        std::fs::create_dir_all(workdir.join(PROMPTS_DIR)).unwrap();
+        std::fs::write(workdir.join(PROMPTS_DIR).join("stale.json"), "{}").unwrap();
+
+        prepare_export_directories(&workdir).unwrap();
+
+        assert!(ssh_file.is_file());
+        assert!(claude_file.is_file());
+        assert!(!workdir.join(PROMPTS_DIR).join("stale.json").exists());
+        let _ = std::fs::remove_dir_all(workdir);
     }
 
     /// 旧云同步单文件 scratchpad/scratchpad.json 仍可导入为默认页。

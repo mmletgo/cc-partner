@@ -6,7 +6,8 @@
  *   Shell 负责选择 owner，内容区和动作层再按能力证据决定只读、预览或写入。
  *
  * Code Logic（这个组件做什么）:
- *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级只保留设备选择器与 Pull/Push，
+ *   渲染受控 tablist、提示词槽或存放面、Agent radiogroup；用户级保留设备选择器与 Pull/Push，
+ *   本机用户级额外提供经确认的 Git 恢复入口；
  *   项目级不展示项目选择器、项目名或跨设备复制（资产随项目走），也不展示「范围 / 范围：项目」。
  *   用户级提示词展示三槽 lane；公共槽隐藏 Agent 切换。项目级提示词不展示三槽，
  *   始终显示 Agent 切换（仓库根多数 Agent 共用一份 AGENTS.md）。
@@ -56,6 +57,8 @@ export type AgentHubShellTabCounts = Partial<
 export interface AgentHubShellActions {
   onPull: () => void;
   onPush: () => void;
+  /** 仅本机用户级上下文提供；从 Git device lane 走 inspect → preview → confirm 恢复。 */
+  onGitImport?: () => void;
   pullDisabledReason?: string | null;
   pushDisabledReason?: string | null;
   /** 当前 tab 可重读时提供；提示词三栏与资产列表共用这一入口。 */
@@ -124,8 +127,13 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
   const agentRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeTabIndex = Math.max(0, TABS.indexOf(context.tab));
   const showCopyActions = scopeLock !== 'project';
+  const showGitImport =
+    showCopyActions &&
+    context.scope === 'user' &&
+    context.deviceId === null &&
+    typeof actions.onGitImport === 'function';
   const showReload = typeof actions.onReload === 'function';
-  const showToolbar = showCopyActions || showReload;
+  const showToolbar = showCopyActions || showReload || showGitImport;
   const activeScopeIndex = scopeLock === 'project' ? 1 : 0;
   const activeLaneIndex = Math.max(0, LANES.indexOf(context.instructionLane));
   const activeAssetLaneIndex = Math.max(0, ASSET_LANES.indexOf(context.assetLane));
@@ -248,6 +256,16 @@ export function AgentHubShell(props: AgentHubShellProps): ReactElement {
               {t('agentHub:shell.push')}
             </Button>
               </>
+            ) : null}
+            {showGitImport ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => actions.onGitImport?.()}
+                data-testid="agent-hub-action-git-import"
+              >
+                {t('agentHub:gitImport.open')}
+              </Button>
             ) : null}
           </div>
           ) : null}

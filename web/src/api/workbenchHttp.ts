@@ -302,31 +302,44 @@ interface HttpOrchestratorEvidenceListResponse {
 
 const MOBILE_WORKBENCH_API_PREFIX = '/api/mobile/workbench';
 
+/** HTTP 非 2xx 解析结果：展示文案 + 可选稳定信封 code。 */
+interface HttpErrorPayload {
+  message: string;
+  code?: string;
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
- *   HTTP Workbench route 失败时，移动端页面需要展示后端返回的可读错误，而不是笼统的 fetch status。
+ *   HTTP Workbench route 失败时，移动端页面需要展示后端返回的可读错误，而不是笼统的 fetch status；
+ *   同时必须透传信封里的稳定 code，让 resize/replay 能按 not_found 分类，而不是解析中文 message。
  *
  * Code Logic（这个函数做什么）:
- *   读取响应文本，优先解析 JSON 中的 error/message 字段；否则回退到文本、statusText 或 HTTP 状态码。
+ *   读取响应文本，优先解析 JSON 中的 error/message 与 string code；否则回退到文本、statusText 或 HTTP 状态码。
  */
-async function readHttpErrorMessage(response: Response): Promise<string> {
+async function readHttpErrorPayload(response: Response): Promise<HttpErrorPayload> {
   const fallback = response.statusText || `HTTP ${response.status}`;
   const text = await response.text().catch(() => '');
   const trimmed = text.trim();
-  if (!trimmed) return fallback;
+  if (!trimmed) return { message: fallback };
 
   try {
     const parsed: unknown = JSON.parse(trimmed);
     if (parsed && typeof parsed === 'object') {
       const record = parsed as Record<string, unknown>;
       const message = record.error ?? record.message;
-      if (typeof message === 'string' && message.trim()) return message;
+      const code = typeof record.code === 'string' && record.code.trim()
+        ? record.code
+        : undefined;
+      if (typeof message === 'string' && message.trim()) {
+        return { message, code };
+      }
+      return { message: trimmed, code };
     }
   } catch {
-    return trimmed;
+    return { message: trimmed };
   }
 
-  return trimmed;
+  return { message: trimmed };
 }
 
 /**
@@ -339,9 +352,9 @@ async function readHttpErrorMessage(response: Response): Promise<string> {
  */
 async function parseJsonResponse<T>(response: Response, decoder?: Decoder<T>): Promise<T> {
   if (!response.ok) {
-    const message = await readHttpErrorMessage(response);
+    const payload = await readHttpErrorPayload(response);
     // HTTP 非 2xx 是协议/业务失败：用 protocol，禁止 hook 因 message 含“连接”误判 offline。
-    throw new OrchestratorRuntimeTransportError(message, 'protocol');
+    throw new OrchestratorRuntimeTransportError(payload.message, 'protocol', payload.code);
   }
   let raw: unknown;
   try {

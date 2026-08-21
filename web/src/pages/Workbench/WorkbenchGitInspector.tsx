@@ -8,14 +8,14 @@
  * Code Logic（这个组件做什么）:
  *   - 内部封装 gitGraphColorStyle / gitGraphWidth / gitGraphX 与 GIT_GRAPH_* 常量（随 Git 检查器一起从页面迁出）；
  *   - 参考 VS Code Source Control Graph 的紧凑泳道语法，渲染连续 lane、HEAD/merge 节点和内联 ref badge；
- *   - 渲染刷新/commit/push/merge 按钮、merge stage panel 和带 lane 颜色的 commit graph SVG；
+ *   - 渲染刷新/commit/push/merge 按钮、merge stage panel（失败后可关闭）和带 lane 颜色的 commit graph SVG；
  *   - 暴露 WorkbenchGitInspectorProps 类型，所有数据均来自 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享。
  */
 import * as React from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
-import { EditIcon, SyncIcon, UploadIcon } from '@/lib/icons';
+import { EditIcon, SyncIcon, UploadIcon, XIcon } from '@/lib/icons';
 import type {
   WorkbenchGitCommit,
   WorkbenchMergeStage,
@@ -29,6 +29,7 @@ import {
   canMergeWorktree,
   canPushWorktree,
   formatCommitRelativeTime,
+  canDismissFailedMergeStages,
   formatWorkbenchMergeStages,
   hasGitHistory,
   worktreeChangeCount,
@@ -160,6 +161,11 @@ export interface WorkbenchGitInspectorProps {
   handleDismissHookFailure: () => Promise<void>;
   handleRetryAfterRepair: () => Promise<void>;
   mergeStages: WorkbenchMergeStage[];
+  /**
+   * 合并失败后关闭阶段条：纯本地动作，取消自动隐藏计时器并清空当前项目的 merge 进度快照。
+   * 进行中的 merge 不展示关闭按钮，避免用户误关进度。
+   */
+  clearMergeStagePanel: () => void;
   loadGitHistory: () => Promise<void>;
   handleCommitWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
@@ -172,7 +178,7 @@ export interface WorkbenchGitInspectorProps {
  *   merge stage panel 集中渲染。该组件由 WorkbenchInspector 在 history tab 时挂载；接收 controller 派生的 props。
  *
  * Code Logic（这个组件做什么）:
- *   渲染刷新/commit/push/merge 按钮 + merge stage panel + commit graph SVG；不持有状态、不调用 workbenchApi。
+ *   渲染刷新/commit/push/merge 按钮 + merge stage panel（失败可关闭）+ commit graph SVG；不持有状态、不调用 workbenchApi。
  */
 export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
   const { t } = useTranslation(['workbench']);
@@ -191,6 +197,7 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
     handleDismissHookFailure,
     handleRetryAfterRepair,
     mergeStages,
+    clearMergeStagePanel,
     loadGitHistory,
     handleCommitWorktree,
     handlePushWorktree,
@@ -201,6 +208,7 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
   const gitGraphRows: WorkbenchGitGraphRow[] = buildGitGraphRows(gitCommits);
   const renderedMergeStages =
     mergeStages.length > 0 ? formatWorkbenchMergeStages(mergeStages) : [];
+  const canDismissMergeStages = canDismissFailedMergeStages(renderedMergeStages);
   const activeWorktreeTone = activeWorktree ? worktreeStatusTone(activeWorktree) : 'neutral';
   const activeWorktreePillTone = activeWorktreeTone === 'warning' ? 'warn' : activeWorktreeTone;
   const activeWorktreeChangedCount = worktreeChangeCount(activeWorktree);
@@ -317,7 +325,27 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
       </div>
 
       {renderedMergeStages.length > 0 ? (
-        <div className={styles.mergeStagePanel} role="status" aria-live="polite">
+        <div
+          className={styles.mergeStagePanel}
+          data-dismissible={canDismissMergeStages ? 'true' : undefined}
+          role={canDismissMergeStages ? 'alert' : 'status'}
+          aria-live={canDismissMergeStages ? 'assertive' : 'polite'}
+        >
+          {canDismissMergeStages ? (
+            <div className={styles.mergeStageToolbar}>
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<XIcon />}
+                title={t('workbench:mergeStages.dismissAria')}
+                aria-label={t('workbench:mergeStages.dismissAria')}
+                onClick={clearMergeStagePanel}
+                data-testid="workbench-merge-stages-dismiss"
+              >
+                {t('workbench:mergeStages.dismiss')}
+              </Button>
+            </div>
+          ) : null}
           {renderedMergeStages.map((stage) => (
             <div
               key={stage.id}

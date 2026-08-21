@@ -551,8 +551,8 @@
     "reportAria": "Push results per peer"
   },
   "gitImport": {
-    "title": "Git Import",
-    "open": "Git Import",
+    "title": "Restore from Git",
+    "open": "Restore from Git",
     "hint": "Inspect remote device lanes, preview changes, map projects, then confirm. Nothing is imported automatically.",
     "stepInspect": "1. Inspect lanes",
     "inspectAction": "Inspect lanes",

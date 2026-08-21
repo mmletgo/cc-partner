@@ -778,6 +778,21 @@ export function selectPreferredMobileSession(
   );
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   功能 worktree merge/remove 会关闭该 worktree 下的终端。切到 main 前必须从本地列表摘掉这些 session，
+ *   否则 selectPreferredMobileSession 会回落到已关闭的功能分支窗口，后续 resize 打到不存在的会话。
+ *
+ * Code Logic（这个函数做什么）:
+ *   过滤掉 worktreeId 等于已关闭 worktree 的 session；其它项保持原顺序。
+ */
+export function pruneMobileSessionsForClosedWorktree(
+  sessions: WorkbenchSession[],
+  closedWorktreeId: string,
+): WorkbenchSession[] {
+  return sessions.filter((session) => session.worktreeId !== closedWorktreeId);
+}
+
 /** 移动端已知 session 元数据更新结果。 */
 export interface MobileKnownSessionUpdateResult {
   sessions: WorkbenchSession[];

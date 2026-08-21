@@ -55,7 +55,7 @@
     },
     "enabled": {
       "label": "启用云端同步",
-      "helper": "将 Prompt、Prompt 历史与 SSH 配置同步到 GitHub 仓库；CLAUDE.md 仅支持手动推送。"
+      "helper": "自动同步 Prompt、Prompt 历史与速记本；Agent Hub 指令和资产会自动备份，恢复时需在 Agent Hub 中确认导入。"
     },
     "auto": {
       "label": "自动定时同步",
@@ -387,7 +387,7 @@
   },
   "lanSync": {
     "title": "局域网同步",
-    "subtitle": "与在线设备同步 Prompt、SSH 目标与速记本。只统计全成功设备。",
+    "subtitle": "与在线设备同步 Prompt 与速记本。只统计全成功设备。",
     "syncNow": "立即同步局域网",
     "syncing": "局域网同步中…",
     "lastRun": "最近一次局域网同步",
@@ -402,7 +402,6 @@
     },
     "domain": {
       "prompt": "Prompt",
-      "ssh_target": "SSH 目标",
       "scratchpad": "速记本"
     },
     "counts": "拉取 {{pulled}} · 推送 {{pushed}} · 未变 {{unchanged}}",
@@ -445,9 +444,9 @@
       "prompts": "Prompt",
       "ccHistory": "Prompt 历史",
       "scratchpad": "速记本",
-      "sshTargets": "SSH 目标",
-      "claudeMd": "CLAUDE.md",
-      "deletionFloors": "删除水位"
+      "deletionFloors": "删除水位",
+      "sshTargets": "SSH 目标（旧备份）",
+      "claudeMd": "CLAUDE.md（旧备份）"
     },
     "jobStatus": "状态 {{status}}",
     "jobMode": "模式 {{mode}}",

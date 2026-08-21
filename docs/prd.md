@@ -2,7 +2,7 @@
 
 ## 1. 产品概述
 
-cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用于在局域网环境下协作使用多种 CLI Agent（Claude Code、Codex、OpenCode、Grok Build、Gemini CLI）。
+cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用于在局域网环境下协作使用多种 CLI Agent（Claude Code、Codex、OpenCode、Grok Build、Gemini CLI、Cursor CLI、Pi）。
 
 ### 1.1 目标用户
 使用一种或多种 CLI Agent 进行开发的程序员，拥有多台局域网设备。
@@ -12,7 +12,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 一键区域截图并粘贴到当前 CLI Agent 终端
 - 集中管理常用 Prompt，跨设备同步
 - 浏览、搜索、复用和跨设备同步各 CLI Agent 的历史用户 Prompt
-- 通过 Agent Hub 管理本机/远端/项目级多 CLI 指令与可移植资产（Claude / Codex / OpenCode / Grok Build / Gemini CLI）；旧「CLAUDE.md」编辑/推送页面已下线，后端 `claude_md` 推送路由与云同步域保留
+- 通过 Agent Hub 管理本机/远端/项目级多 CLI 指令与可移植资产（Claude / Codex / OpenCode / Grok Build / Gemini CLI / Cursor CLI / Pi）；旧「CLAUDE.md」编辑/推送页面已下线，N/N+1 控制与 P2P 路由仅作兼容
 - 使用多页面速记本记录临时文本，并在局域网与 GitHub 间同步
 - 在项目文件夹维度管理 Git worktree、多个普通终端 window/pane，并直接操作当前工作区文件树
 - 通过局域网 `/mobile` 入口在手机浏览器操作 Workbench 项目、worktree、终端、文件、Git 和项目级自动化任务（无访问 token）
@@ -120,7 +120,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode / Grok Build / Gemini CLI 指令和可移植资产。Grok 的公共指令复用已有 `AGENTS.md`/`CLAUDE.md`，专属槽写入 `.grok/rules/cc-partner.*.md`；Gemini 公共指令写入 `GEMINI.md`。Plugin 跨这五端默认 residual。完整身份与能力矩阵见 `docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`。用户级选中在线对端且对端宣告 `agent-hub.user-instructions.v1` 时，三栏 inspect/save/CAS/写入原始文件/analyze/adapt/revise/slot history 代理到 owning device 的 user home（owner 跑本机 HeadlessCompletion，拒绝嵌套 `deviceId`）；缺 capability 或离线保留 hint，禁止静默回落控制端 `~/.claude`。Same-agent Pull 与 Snapshot Push 仍保留为跨设备复制工具，不再是用户级远端的唯一生产路径。本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，任意可达主机可改对端用户指令文件——与 portable apply / 终端写入同级；project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存；提示词页面已经展示将写入的合成内容与原始文件，用户点击“写入原始文件”后，后端内部生成 expected-hash 一次性 plan 并直接原子写入，不再重复弹出预览确认。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的后台自动投影与 portable mutation 保持 scan-only，跨 Agent 仅开放本机已有的 bounded selective preview（对端不扩大 apply/full）。
+**描述**：Agent Hub 以 `/agent-hub` 为唯一生产入口，在同一 Shell 中管理**本机用户级、局域网远端设备与项目级** Claude / Codex / OpenCode / Grok Build / Gemini CLI / Cursor CLI / Pi 指令和可移植资产。Grok 的公共指令复用已有 `AGENTS.md`/`CLAUDE.md`，专属槽写入 `.grok/rules/cc-partner.*.md`；Gemini 公共指令写入 `GEMINI.md`。Cursor/Pi 已进入身份目录，但 Prompt 历史磁盘合同尚未固化，当前不提供 collector、不得猜路径扫盘。Plugin 跨已登记 target 默认 residual。完整身份与能力矩阵见 `docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`。用户级选中在线对端且对端宣告 `agent-hub.user-instructions.v1` 时，三栏 inspect/save/CAS/写入原始文件/analyze/adapt/revise/slot history 代理到 owning device 的 user home（owner 跑本机 HeadlessCompletion，拒绝嵌套 `deviceId`）；缺 capability 或离线保留 hint，禁止静默回落控制端 `~/.claude`。Same-agent Pull 与 Snapshot Push 仍保留为跨设备复制工具，不再是用户级远端的唯一生产路径。本机项目必须先由 Workbench 项目 id 精确解析为唯一 Hub project id，再进行 opt-in、库存扫描、预览和 Apply，禁止退化为“扫描全部已映射项目”。远端项目 shortcut 通过既有 Workbench `projects/open` 在 owning peer 解析成真实 local project id；portable inventory 与 preview/apply/get 均在 owning peer 执行并绑定精确项目快照。项目级 Pull 支持远端项目作为源、本机已 opt-in 项目作为目标，也支持把 peer user scope 资产 Pull 到本机项目；计划同时冻结源/目标项目身份与过滤快照，目标 scope 使用本机 Hub project id 重映射。LAN 仍无调用者身份校验，任意可达主机可改对端用户指令文件——与 portable apply / 终端写入同级；project id、expected-device、snapshot/hash 仅保证请求不会串设备或串项目，不是安全授权。Hub Canonical 指令块可按 revision CAS 保存；提示词页面已经展示将写入的合成内容与原始文件，用户点击“写入原始文件”后，后端内部生成 expected-hash 一次性 plan 并直接原子写入，不再重复弹出预览确认。旧 `/claude-md`、`/claude-code`、`section`、`assetId/conflictId` 深链只做一次性 URL 规范化，不恢复 legacy matrix。Gate B–D 已实现的领域库与协议继续保留；未获真实 CLI L3 认证的后台自动投影与 portable mutation 保持 scan-only，跨 Agent 仅开放本机已有的 bounded selective preview（对端不扩大 apply/full）。
 
 **2026-08-10 安全纠正（当前权威行为）**：
 - Shell 是 Agent、范围和主 Tab 的唯一上下文真源；主界面只有 Agent 指令、Skill、命令、MCP、Plugin，observed inventory 是资产唯一真源。
@@ -223,21 +223,22 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.7 局域网跨设备同步
 
-**描述**：Prompt、Claude Code 历史、速记本页面和 SSH 连接目标在所有连接的设备间同步。
+**描述**：Prompt、Claude Code 历史和速记本页面在所有连接的设备间主动同步。
 
 **功能点**：
-- 新设备上线时自动拉取/推送 Prompt，并在同一轮同步中合并 Claude Code 历史、速记本页面和 SSH 连接目标
+- 新设备上线时自动拉取/推送 Prompt，并在同一轮同步中合并 Claude Code 历史和速记本页面
 - Prompt 本地修改后自动同步到对端（500ms 防抖）
 - 定时触发全局同步（每 30 秒）
 - 各类同步数据均使用向量时钟追踪版本，避免丢失更新
 - 并发冲突采用 Last-Writer-Wins 策略，时间戳相等时按设备 ID 稳定决策；并发且正文不同时额外保留 conflict copy（见 2.3 / 2.9）
 - 软删除数据需要参与同步传播，避免刷新或同步后复活；tombstone 仅在 age≥30 天且近 90 天活跃 peer 均已 ack `delete_epoch` 后压缩为 deletion floor
-- Prompt / SSH 目标 / Scratchpad 使用 typed 同步结果：`Succeeded` / `Partial` / `Unreachable` / `ProtocolError` / `ResourceLimit`；网络、HTTP、JSON、413 与部分失败**不得**折叠为空成功；仅全部领域 `Succeeded` 的设备计入 `synced` / `succeeded_devices`
-- 对端宣告 `sync.manifest.v2` 时，三域走有界 manifest-page / items / push-batch：完整拉完排序 manifest 后再算计划；manifest 精确相等时零正文交换；未完整结束的 manifest 流不得推进 delete ack
+- Prompt / Scratchpad 使用 typed 同步结果：`Succeeded` / `Partial` / `Unreachable` / `ProtocolError` / `ResourceLimit`；网络、HTTP、JSON、413 与部分失败**不得**折叠为空成功；仅全部主动领域 `Succeeded` 的设备计入 `synced` / `succeeded_devices`
+- 对端宣告 `sync.manifest.v2` 时，主动内容域走有界 manifest-page / items / push-batch：完整拉完排序 manifest 后再算计划；manifest 精确相等时零正文交换；未完整结束的 manifest 流不得推进 delete ack
 - 混合版本：v2 客户端对未宣告能力的对端使用 typed legacy pull/push（失败仍 typed）；legacy 客户端继续使用仍挂载的 legacy 路由；不得因 404/空 body 伪造成功空集
 - Claude Code 历史在两端均支持分页能力时按有界分页协议交换；任一端缺少该能力时自动回退完整 pull/push，混合版本仍可完成合并（独立于 `sync.manifest.v2`）
 - 全局同步不传输普通文件，不同步 Workbench 工作区文件副本；文件传输和 Workbench 远端代理走独立通道
-- `CLAUDE.md` 不进入普通全局自动同步，仅支持主动推送；旧「CLAUDE.md」页面推送 UI 已下线，后端 `claude_md` 推送路由保留
+- SSH 目标不再由本机 `trigger_sync` 发起；N/N+1 接收表与 `/api/ssh-target/sync/*` 路由继续保留
+- `CLAUDE.md` 不进入普通全局自动同步；旧 GUI 推送返回 gone，N/N+1 control/P2P 入站路由继续保留
 
 ### 2.8 GitHub 私有仓库云端同步
 
@@ -246,11 +247,12 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **功能点**：
 - 设置页同步 tab 配置私有仓库 URL、分支、启用状态、自动同步开关和同步间隔
 - 支持测试 Git 连通性、手动触发同步和后台定时自动同步
-- 同步范围包含 Prompt、Claude Code 历史、SSH 连接目标和 Scratchpad 多页面数据
+- JSON 自动合并范围仅包含 Prompt、Claude Code 历史和 Scratchpad 多页面数据
 - 同步导入时按各业务对象的向量时钟和 LWW 规则与本机 SQLite 合并
 - 同步导出时把当前本机数据快照写成 JSON 文件并提交到配置分支
 - 软删除记录也写入云端快照，用于跨设备传播删除语义
-- `CLAUDE.md` 不参与普通云端自动同步导入/导出，仅主动推送本机版本到云端；旧「CLAUDE.md」页面推送 UI 已下线，后端推送路由保留
+- SSH 目标与 `CLAUDE.md` 均不参与云端导入/导出；仓库内旧 `ssh_targets/`、`claude_md/` 文件保持原样，不清理、不导入
+- 手动「立即同步」在 JSON 成功后刷新 Agent Hub device lane；Hub 推送失败时结果明确显示“JSON 已同步、Agent Hub 备份未推上”，不得报告完整成功
 - 云端同步不管理 Git 认证，复用用户本机 git 凭证、SSH key 或 credential helper
 
 ### 2.9 速记本
@@ -272,11 +274,12 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.10 SSH 连接目标管理
 
-**描述**：SSH 连接目标（host/username/port/label）作为后端跨设备同步域之一持续运行；前端「设备 / SSH 连接目标」管理页面已下线，不再提供连接目标列表的展示与行内编辑、ssh 命令复制与三端配置指南 UI。
+**描述**：SSH 连接目标（host/username/port/label）已退出产品同步面；前端管理页已下线，本机不再从 LAN `trigger_sync`、GitHub 云同步或新备份包主动导入/导出该域。
 
 **功能点**：
-- 连接目标配置（host/username/port/label）基于向量时钟跨设备同步；模型不含私钥/凭据材料
-- SSH 目标同步结果为 typed domain outcome，纳入全局 `trigger_sync` 设备报告；失败不得折叠为空成功
+- N/N+1 兼容期继续保留 `ssh_targets` 表、向量时钟模型与 `/api/ssh-target/sync/*` 接收路由，旧对端入站数据仍可落库
+- 新备份包不含 `sshTargets/items.json`，但恢复解码器继续接受旧包
+- 不删除用户私有同步仓库中已有的 `ssh_targets/` 文件
 
 ### 2.11 健康提醒
 
@@ -343,7 +346,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 常规 / 同步 / AI 页签的恢复默认按钮始终可点击；常规恢复为后端按当前设备环境生成的默认设备名、默认接收目录和平台默认截图快捷键，同步和 AI 分别恢复为后端定义的云端同步默认配置与 Claude CLI/AI 默认配置
 - 同步、AI 和关于页签分别管理云端同步、Claude CLI/AI 能力和应用更新；AI 页签中的 CLI 路径与模型供 GitHub 项目解说和 Prompt 优化共用，启用开关与缓存时长仅作用于 GitHub 项目解说；AI 页签同时管理 Workbench Prompt 优化浮层快捷键与自动填入语言，默认轻按 Control、默认填入中文优化版；同步和 AI 的恢复默认只重置表单，仍需用户点击“应用配置”持久化
 - 同步 tab 局域网卡片展示每设备/领域的 `succeeded` / `partial` / `unreachable` / `protocol` / `resource-limit` 与 pulled/pushed/unchanged；仅全成功设备计入成功计数
-- 同步 tab 提供“导出数据 / 从备份恢复”：经 sidecar owner control 路由生成可校验 ZIP 备份；导出不含项目源码、终端 transcript、SSH 私钥、token、凭据 URL、lifecycle control token；配置仅导出只读 report，恢复时永不写回
+- 同步 tab 提供“导出数据 / 从备份恢复”：经 sidecar owner control 路由生成可校验 ZIP 备份；新包不含 SSH 目标或 legacy CLAUDE.md，且不含项目源码、终端 transcript、SSH 私钥、token、凭据 URL、lifecycle control token；配置仅导出只读 report，恢复时永不写回；旧包的 SSH/CLAUDE.md 恢复解码继续保留
 - 恢复前必须 inspect 预览（流式限制：archive ≤2 GiB、条目 ≤100k、单 entry ≤64 MiB、总解压 ≤4 GiB；拒绝 zip-slip / 符号链接 / 未知 formatVersion / 哈希失败）；用户确认后进入 exclusive maintenance gate，先创建恢复前备份（保留 7 天且最多 3 份，仅新备份完整落盘后清理旧份），再单事务 apply；失败整批回滚，并可一键 rollback 到恢复前备份
 - 充电模式 tab（`/settings?tab=battery`，位于健康提醒与活动统计之间）：切换充电/无限、展示剩余时间与今日已充/已用、调整闪卡充入分钟与日上限、余额上限、查看流水。健康习惯额度在健康提醒模板上配置。模式与余额以本机 SQLite 为权威，闪卡/余额上限走 `config.json` 的 `battery` 字段；健康字段暂留作旧模板回退
 

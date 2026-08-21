@@ -6,7 +6,7 @@
 //!     → commit → push。push 被拒（多设备并发）时 fetch+reset+import+
 //!     export+commit+push 再来一轮（最多 1 次重试 = 总共 2 轮）即可收敛。
 //!     本地 SQLite + 向量时钟是权威源，git 只做传输，冲突解决完全复用 merge_*。
-//!     CLAUDE.md 不参与云端自动同步，只由 CLAUDE.md 页面用户主动推送。
+//!     SSH 与 CLAUDE.md 均不参与产品云端同步；旧 CLAUDE.md control 路径仅供 N/N+1 入站兼容。
 //!     所有正式工作区写流程经 CloudSyncRuntime 单飞，避免并发 reset/export 踩踏。
 //!
 //! Code Logic（这个模块做什么）:
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// GitHub 工作区中 CLAUDE.md 单例目录名（仅用于用户主动推送，不参与 cloud auto sync）。
+/// GitHub 工作区中 CLAUDE.md 单例目录名（仅用于 N/N+1 control 入站兼容）。
 const CLAUDE_MD_DIR: &str = "claude_md";
 /// GitHub 工作区中 CLAUDE.md 单例文件名。
 const CLAUDE_MD_FILE: &str = "claude_md.json";
@@ -113,11 +113,10 @@ pub fn cloud_sync_workdir() -> PathBuf {
         .join("cloud-sync")
 }
 
-/// 将本机 CLAUDE.md 版本主动推送到 GitHub 云端。
+/// 将 legacy CLAUDE.md 版本推送到 GitHub 云端。
 ///
-/// Business Logic: CLAUDE.md 不参与 cloud auto sync；用户在 CLAUDE.md 页面点击推送时，
-///     GitHub 云端也必须被更新为触发设备的版本。这里不 import/merge 远端 CLAUDE.md，
-///     只在远端最新工作树上覆盖写入本机 CLAUDE.md 快照并 push。
+/// Business Logic: 当前产品入口已迁 Agent Hub，不再调用本函数。N/N+1 的 owner control
+///     路由仍可接收旧 GUI 请求；这里不 import/merge 远端 CLAUDE.md，只覆盖旧快照并 push。
 ///     与完整 sync 共享 CloudSyncRuntime 门闸，避免并发写同一工作区。
 ///
 /// Code Logic: 未配置 repo_url 则跳过（无需取锁）；否则经
@@ -223,12 +222,63 @@ fn write_claude_md_snapshot(workdir: &Path, row: &ClaudeMdRow) -> Result<(), App
     Ok(())
 }
 
-/// 触发一次完整的云端同步（默认手动策略 Wait 300s）。
+/// 触发一次手动云端同步，并在 JSON 成功后强制刷新 Agent Hub Git pending。
 ///
-/// Business Logic: 前端「立即同步」按钮调用；与 scheduler 共享同一 gate。
-/// Code Logic: 委托 `trigger_cloud_sync_with(Manual, Wait{300s})`。
+/// Business Logic: 前端「立即同步」按钮调用；JSON 与 Hub 使用同一 gate 但顺序执行。
+///     Hub 刷新失败必须把整次手动结果标为失败并在 note 明示 JSON 已完成，不能谎报全成功。
+/// Code Logic: 先委托 `trigger_cloud_sync_with(Manual, Wait{300s})`；成功后 force flush Hub pending。
 pub async fn trigger_cloud_sync(state: &AppState) -> CloudSyncResult {
-    trigger_cloud_sync_with(state, CloudSyncTrigger::Manual, wait_policy()).await
+    let mut result = trigger_cloud_sync_with(state, CloudSyncTrigger::Manual, wait_policy()).await;
+    if !result.ok {
+        return result;
+    }
+
+    let flush = state
+        .agent_hub_git_runtime
+        .flush_pending(state, true, wait_policy())
+        .await;
+    apply_agent_hub_flush_result(&mut result, flush);
+    result
+}
+
+/// 把 Agent Hub Git flush 结果合并进手动 Cloud Sync 结果。
+///
+/// Business Logic（为什么需要这个函数）:
+///     JSON 快照成功后 Hub lane 仍可能失败并进入 pending；Settings 必须看到“JSON 已同步、
+///     Hub 未推上”，而不是完整成功。
+///
+/// Code Logic（这个函数做什么）:
+///     Pushed/Noop/Idle 维持成功；FailedPending、跳过类或错误把 ok 改为 false，并追加明确 note。
+fn apply_agent_hub_flush_result(
+    result: &mut CloudSyncResult,
+    flush: Result<crate::agent_hub::git::runtime::AgentHubGitFlushOutcome, AppError>,
+) {
+    use crate::agent_hub::git::runtime::AgentHubGitFlushOutcome;
+
+    let failure = match flush {
+        Ok(
+            AgentHubGitFlushOutcome::Idle
+            | AgentHubGitFlushOutcome::NoopSameHash
+            | AgentHubGitFlushOutcome::Pushed,
+        ) => None,
+        Ok(AgentHubGitFlushOutcome::FailedPending) => {
+            Some("Agent Hub 备份推送失败，已保留待重试任务".to_string())
+        }
+        Ok(AgentHubGitFlushOutcome::SkippedNoRepo) => {
+            Some("Agent Hub 备份未推送：云端仓库不可用".to_string())
+        }
+        Ok(
+            AgentHubGitFlushOutcome::SkippedBusy
+            | AgentHubGitFlushOutcome::SkippedDebounce
+            | AgentHubGitFlushOutcome::SkippedBackoff,
+        ) => Some("Agent Hub 备份未推送：刷新任务被跳过".to_string()),
+        Err(error) => Some(format!("Agent Hub 备份未推送：{error}")),
+    };
+
+    if let Some(failure) = failure {
+        result.ok = false;
+        result.note = format!("JSON 已同步；{failure}");
+    }
 }
 
 /// 按指定 trigger/policy 触发完整云端同步。
@@ -755,6 +805,50 @@ mod tests {
         Reset(String),
         Write(String),
         End(String),
+    }
+
+    /// Hub pending 失败必须把已成功的 JSON 同步降级为部分失败说明。
+    #[test]
+    fn hub_flush_failure_is_surfaced_in_cloud_sync_result() {
+        let mut result = CloudSyncResult {
+            ok: true,
+            pulled: 2,
+            pushed: 3,
+            note: "同步成功".into(),
+            synced_at: "2026-08-21T00:00:00Z".into(),
+        };
+
+        apply_agent_hub_flush_result(
+            &mut result,
+            Ok(crate::agent_hub::git::runtime::AgentHubGitFlushOutcome::FailedPending),
+        );
+
+        assert!(!result.ok);
+        assert_eq!(result.pulled, 2);
+        assert_eq!(result.pushed, 3);
+        assert!(result.note.contains("JSON 已同步"));
+        assert!(result.note.contains("Agent Hub"));
+        assert!(result.note.contains("待重试"));
+    }
+
+    /// Hub 已推送时不得改变 JSON 同步成功结果。
+    #[test]
+    fn hub_flush_success_keeps_cloud_sync_success() {
+        let mut result = CloudSyncResult {
+            ok: true,
+            pulled: 1,
+            pushed: 1,
+            note: "同步成功".into(),
+            synced_at: "2026-08-21T00:00:00Z".into(),
+        };
+
+        apply_agent_hub_flush_result(
+            &mut result,
+            Ok(crate::agent_hub::git::runtime::AgentHubGitFlushOutcome::Pushed),
+        );
+
+        assert!(result.ok);
+        assert_eq!(result.note, "同步成功");
     }
 
     /// Business Logic: 手动 sync 与 CLAUDE.md push 不得在同一 workdir 交错 reset/write。

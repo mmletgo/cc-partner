@@ -10,7 +10,8 @@
 //! Code Logic（这个模块做什么）:
 //!     - `ClaudeHistoryRow`：snake_case，直接映射 claude_history 表一行，
 //!       vector_clock 为 HashMap<String,u64>，datetime 用 String 透传；
-//!       `source` 为 claude|codex|opencode，缺省 `claude` 兼容旧数据。
+//!       `source` 为 claude|codex|opencode|grok|gemini，缺省 `claude` 兼容旧数据；
+//!       cursor/pi token 仅为 catalog 预留，本模块没有对应采集器。
 //!     - `ClaudeHistoryDto`：camelCase，给前端单条详情/列表用。
 //!     - `CcProjectDto`：camelCase，按 project_path 聚合的 count + lastOccurredAt。
 //!     - `CcSyncSummary`：snake_case，同步 manifest 页摘要 `{id, vector_clock}`。
@@ -67,7 +68,8 @@ pub struct ClaudeHistoryRow {
     pub updated_at: String,
     /// 软删除标记
     pub deleted: bool,
-    /// 采集来源：`claude` | `codex` | `opencode`；旧数据缺字段默认 claude
+    /// 采集来源：`claude` | `codex` | `opencode` | `grok` | `gemini`；
+    /// `cursor` / `pi` 仅预留且当前无 collector；旧数据缺字段默认 claude
     #[serde(default = "default_source_claude")]
     pub source: String,
 }
@@ -91,7 +93,8 @@ pub struct ClaudeHistoryDto {
     pub created_at: String,
     pub updated_at: String,
     pub deleted: bool,
-    /// 采集来源：`claude` | `codex` | `opencode`
+    /// 采集来源：`claude` | `codex` | `opencode` | `grok` | `gemini`；
+    /// `cursor` / `pi` 仅预留且当前无 collector
     #[serde(default = "default_source_claude")]
     pub source: String,
 }

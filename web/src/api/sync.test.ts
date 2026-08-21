@@ -19,7 +19,9 @@ vi.mock('./client', () => ({
 }));
 
 import {
+  BACKUP_RESTORE_DOMAINS,
   backupApi,
+  getBackupRestoreDomains,
   isDeviceSucceeded,
   isDomainSucceeded,
   succeededCounts,
@@ -91,6 +93,24 @@ describe('syncApi', () => {
 describe('backupApi', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+  });
+
+  test('restore domains exclude retired SSH and CLAUDE.md product surfaces', () => {
+    expect(BACKUP_RESTORE_DOMAINS).toEqual([
+      'prompts',
+      'ccHistory',
+      'scratchpad',
+      'deletionFloors',
+    ]);
+    expect(BACKUP_RESTORE_DOMAINS).not.toContain('sshTargets');
+    expect(BACKUP_RESTORE_DOMAINS).not.toContain('claudeMd');
+  });
+
+  test('legacy restore domains appear only when an old archive declares them', () => {
+    expect(getBackupRestoreDomains({ prompts: 1 })).toEqual(BACKUP_RESTORE_DOMAINS);
+    expect(
+      getBackupRestoreDomains({ prompts: 1, sshTargets: 1, claudeMd: 1 }),
+    ).toEqual([...BACKUP_RESTORE_DOMAINS, 'sshTargets', 'claudeMd']);
   });
 
   test('create invokes create_backup with destPath', async () => {

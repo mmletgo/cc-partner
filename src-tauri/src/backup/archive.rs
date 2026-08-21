@@ -1,8 +1,9 @@
 //! backup/archive.rs — 可验证导出 ZIP 与流式安全校验
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     用户导出 Prompt/CC History/Scratchpad/SSH/CLAUDE.md/deletion floors/配置 report，
+//!     用户导出 Prompt/CC History/Scratchpad/deletion floors/配置 report，
 //!     排除项目源码、终端 transcript、私钥、token 与 lifecycle control token；
+//!     新包不再写 SSH/CLAUDE.md，但 inspect/restore 仍兼容旧包；
 //!     恢复前必须流式校验体积/路径/哈希，拒绝 zip-slip 与符号链接。
 //!
 //! Code Logic（这个模块做什么）:
@@ -97,8 +98,6 @@ pub async fn create_export_archive(
     let prompts = state.prompt_repo.get_all_for_sync().await?;
     let cc_history = state.cc_history_repo.get_all_for_sync().await?;
     let scratchpad = state.scratchpad_repo.get_all_for_sync().await?;
-    let ssh_targets = state.ssh_target_repo.get_all_for_sync().await?;
-    let claude_md = state.claude_md_repo.get().await?;
     let floors = export_deletion_floors(&state.db).await?;
     let content_versions = export_content_versions(&state.db).await?;
 
@@ -116,14 +115,6 @@ pub async fn create_export_archive(
     files_payload.insert(
         format!("{DOMAIN_SCRATCHPAD}/items.json"),
         serde_json::to_vec_pretty(&scratchpad)?,
-    );
-    files_payload.insert(
-        format!("{DOMAIN_SSH_TARGETS}/items.json"),
-        serde_json::to_vec_pretty(&ssh_targets)?,
-    );
-    files_payload.insert(
-        format!("{DOMAIN_CLAUDE_MD}/item.json"),
-        serde_json::to_vec_pretty(&claude_md)?,
     );
     files_payload.insert(
         format!("{DOMAIN_DELETION_FLOORS}/items.json"),
@@ -147,16 +138,7 @@ pub async fn create_export_archive(
         format_version: FORMAT_VERSION,
         created_at,
         device_id,
-        domains: vec![
-            DOMAIN_PROMPTS.into(),
-            DOMAIN_CC_HISTORY.into(),
-            DOMAIN_SCRATCHPAD.into(),
-            DOMAIN_SSH_TARGETS.into(),
-            DOMAIN_CLAUDE_MD.into(),
-            DOMAIN_DELETION_FLOORS.into(),
-            DOMAIN_CONTENT_VERSIONS.into(),
-            DOMAIN_CONFIG_REPORT.into(),
-        ],
+        domains: new_export_domains(),
         files: file_hashes.clone(),
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -197,6 +179,25 @@ pub async fn create_export_archive(
         let _ = fs::set_permissions(dest, fs::Permissions::from_mode(0o600));
     }
     Ok(final_manifest)
+}
+
+/// 返回当前版本新建备份包的领域列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     SSH 目标与 legacy CLAUDE.md 已退出产品备份面；新包不得再次写出敏感连接配置或
+///     已迁移到 Agent Hub 的旧指令单例，同时旧包恢复解码仍需保留。
+///
+/// Code Logic（这个函数做什么）:
+///     只列出当前仍可新导出的领域，稳定 manifest 顺序。
+fn new_export_domains() -> Vec<String> {
+    vec![
+        DOMAIN_PROMPTS.into(),
+        DOMAIN_CC_HISTORY.into(),
+        DOMAIN_SCRATCHPAD.into(),
+        DOMAIN_DELETION_FLOORS.into(),
+        DOMAIN_CONTENT_VERSIONS.into(),
+        DOMAIN_CONFIG_REPORT.into(),
+    ]
 }
 
 /// 导出全部 deletion floors（三域）。
@@ -402,20 +403,33 @@ pub fn inspect_archive_streaming(
         &mut domain_counts,
         &mut warnings,
     );
-    count_domain(
-        &computed_hashes,
-        DOMAIN_SSH_TARGETS,
-        "sshTargets/items.json",
-        &mut domain_counts,
-        &mut warnings,
-    );
-    count_domain(
-        &computed_hashes,
-        DOMAIN_CLAUDE_MD,
-        "claudeMd/item.json",
-        &mut domain_counts,
-        &mut warnings,
-    );
+    // 退役域只在旧 manifest 明确声明时检查；新包主动省略，不应产生“缺失”警告。
+    if manifest
+        .domains
+        .iter()
+        .any(|domain| domain == DOMAIN_SSH_TARGETS)
+    {
+        count_domain(
+            &computed_hashes,
+            DOMAIN_SSH_TARGETS,
+            "sshTargets/items.json",
+            &mut domain_counts,
+            &mut warnings,
+        );
+    }
+    if manifest
+        .domains
+        .iter()
+        .any(|domain| domain == DOMAIN_CLAUDE_MD)
+    {
+        count_domain(
+            &computed_hashes,
+            DOMAIN_CLAUDE_MD,
+            "claudeMd/item.json",
+            &mut domain_counts,
+            &mut warnings,
+        );
+    }
     count_domain(
         &computed_hashes,
         DOMAIN_DELETION_FLOORS,
@@ -699,6 +713,16 @@ mod tests {
     fn absolute_and_symlink_guards() {
         assert!(validate_entry_name("C:\\windows").is_err());
         // symlink 检测依赖 unix_mode；无 mode 时 false — 单独路径测试足够
+    }
+
+    /// 新备份 manifest 不得声明已退役的 SSH/CLAUDE.md 领域。
+    #[test]
+    fn new_export_domains_omit_retired_domains() {
+        let domains = new_export_domains();
+        assert!(!domains.iter().any(|domain| domain == DOMAIN_SSH_TARGETS));
+        assert!(!domains.iter().any(|domain| domain == DOMAIN_CLAUDE_MD));
+        assert!(domains.iter().any(|domain| domain == DOMAIN_PROMPTS));
+        assert!(domains.iter().any(|domain| domain == DOMAIN_SCRATCHPAD));
     }
 
     #[test]

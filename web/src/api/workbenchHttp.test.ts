@@ -704,4 +704,29 @@ describe('workbenchHttp request policy transport', () => {
       }),
     ).rejects.toMatchObject({ kind: 'decode' });
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   移动端 merge 关闭会话后 resize 会打到 404；必须透传信封 code，UI 才能按 not_found 吞掉，而不是解析中文。
+   *
+   * Code Logic（这个测试做什么）:
+   *   mock 404 `{ error, code: not_found }`，断言 sessions.resize reject 带 kind=protocol 与 code=not_found。
+   */
+  test('protocol errors attach stable code from the JSON envelope', async () => {
+    const mockFetch = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      text: async () => JSON.stringify({ error: '工作台会话不存在', code: 'not_found' }),
+    } as Response));
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      httpWorkbenchTransport.sessions.resize('gone-session', 80, 24),
+    ).rejects.toMatchObject({
+      kind: 'protocol',
+      code: 'not_found',
+      message: '工作台会话不存在',
+    });
+  });
 });

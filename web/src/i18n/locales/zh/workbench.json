@@ -624,7 +624,9 @@
     },
     "messages": {
       "checkSource": "正在检查当前 worktree 是否有未提交代码"
-    }
+    },
+    "dismiss": "关闭",
+    "dismissAria": "关闭合并进度"
   },
   "paneActions": "Pane 操作",
   "promptOptimizer": {

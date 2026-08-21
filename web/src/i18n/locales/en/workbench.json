@@ -631,7 +631,9 @@
     },
     "messages": {
       "checkSource": "Checking whether the current worktree has uncommitted changes"
-    }
+    },
+    "dismiss": "Dismiss",
+    "dismissAria": "Dismiss merge progress"
   },
   "paneActions": "Pane actions",
   "promptOptimizer": {

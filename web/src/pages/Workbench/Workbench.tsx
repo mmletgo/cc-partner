@@ -296,6 +296,7 @@ export function Workbench() {
     handleRepairHookFailure,
     handleDismissHookFailure,
     handleRetryAfterRepair,
+    clearMergeStagePanel,
   } = worktreeGitController;
   // 业务逻辑：文件工作区域（目录树 + tab + dirty/save/format + create/rename/delete/copy）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/handler/effect；controller 接收窄 API/回调，不复制邻接域 state。
@@ -1178,7 +1179,7 @@ export function Workbench() {
             gitHistoryLoading,
             gitHistoryError, worktreeBusy, unknownMutationLock,
             hookRepair, handleRepairHookFailure, handleDismissHookFailure, handleRetryAfterRepair,
-            mergeStages, loadGitHistory,
+            mergeStages, clearMergeStagePanel, loadGitHistory,
             handleCommitWorktree, handlePushWorktree, handleMergeWorktree,
           }}
           notesInspector={{ activeProjectId, ...notes }}

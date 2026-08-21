@@ -55,7 +55,7 @@
     },
     "enabled": {
       "label": "Enable cloud sync",
-      "helper": "Sync Prompts, Prompt history, and SSH settings to the GitHub repository. CLAUDE.md is manual push only."
+      "helper": "Automatically sync Prompts, Prompt history, and Scratchpad. Agent Hub instructions and assets are backed up automatically and require confirmed import in Agent Hub to restore."
     },
     "auto": {
       "label": "Auto sync on a schedule",
@@ -387,7 +387,7 @@
   },
   "lanSync": {
     "title": "LAN sync",
-    "subtitle": "Sync Prompt, SSH targets, and Scratchpad with online peers. Only fully successful devices count.",
+    "subtitle": "Sync Prompt and Scratchpad with online peers. Only fully successful devices count.",
     "syncNow": "Sync LAN now",
     "syncing": "Syncing LAN…",
     "lastRun": "Last LAN sync",
@@ -402,7 +402,6 @@
     },
     "domain": {
       "prompt": "Prompt",
-      "ssh_target": "SSH targets",
       "scratchpad": "Scratchpad"
     },
     "counts": "pulled {{pulled}} · pushed {{pushed}} · unchanged {{unchanged}}",
@@ -445,9 +444,9 @@
       "prompts": "Prompt",
       "ccHistory": "Prompt history",
       "scratchpad": "Scratchpad",
-      "sshTargets": "SSH targets",
-      "claudeMd": "CLAUDE.md",
-      "deletionFloors": "Deletion floors"
+      "deletionFloors": "Deletion floors",
+      "sshTargets": "SSH targets (legacy backup)",
+      "claudeMd": "CLAUDE.md (legacy backup)"
     },
     "jobStatus": "Status {{status}}",
     "jobMode": "Mode {{mode}}",

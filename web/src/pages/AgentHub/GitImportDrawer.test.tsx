@@ -22,6 +22,7 @@ describe('GitImportDrawer', () => {
     const onConfirmMapping = vi.fn();
     const onConfirmImport = vi.fn();
     const onMappingDraftChange = vi.fn();
+    const onToggleAsset = vi.fn();
 
     render(
       <GitImportDrawer
@@ -98,7 +99,7 @@ describe('GitImportDrawer', () => {
         onInspect={onInspect}
         onSelectLane={onSelectLane}
         onPreview={onPreview}
-        onToggleAsset={vi.fn()}
+        onToggleAsset={onToggleAsset}
         onMappingDraftChange={onMappingDraftChange}
         onConfirmMapping={onConfirmMapping}
         onConfirmImport={onConfirmImport}
@@ -121,8 +122,15 @@ describe('GitImportDrawer', () => {
     expect(onSelectLane).toHaveBeenCalledWith('device-b');
     fireEvent.click(screen.getByTestId('git-import-preview-btn'));
     expect(onPreview).toHaveBeenCalled();
+    expect((screen.getByTestId('git-import-asset-a1') as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByTestId('git-import-asset-a1'));
+    expect(onToggleAsset).toHaveBeenCalledWith('a1');
 
     // mapping required before write; confirm mapping explicit
+    fireEvent.change(screen.getByTestId('git-import-map-hub-x'), {
+      target: { value: 'wb-other' },
+    });
+    expect(onMappingDraftChange).toHaveBeenCalledWith('hub-x', 'wb-other');
     fireEvent.click(screen.getByTestId('git-import-map-confirm-hub-x'));
     expect(onConfirmMapping).toHaveBeenCalledWith('hub-x');
     expect(screen.getByText(/mapThenOptIn/)).toBeTruthy();

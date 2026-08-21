@@ -102,7 +102,7 @@ export const syncApi = {
   /**
    * 触发局域网全领域同步，返回 per-device/domain 真值。
    *
-   * Business Logic: Settings / Prompt / SSH / Scratchpad 共用。
+   * Business Logic: Settings 触发 Prompt 与速记本局域网同步。
    * Code Logic: invoke trigger_sync。
    */
   trigger: () => invoke<SyncRunResult>('trigger_sync'),
@@ -165,12 +165,35 @@ export const BACKUP_RESTORE_DOMAINS = [
   'prompts',
   'ccHistory',
   'scratchpad',
-  'sshTargets',
-  'claudeMd',
   'deletionFloors',
 ] as const;
 
-export type BackupRestoreDomain = (typeof BACKUP_RESTORE_DOMAINS)[number];
+/** 仅供旧备份包显式恢复的退役领域；新包不得导出。 */
+export const LEGACY_BACKUP_RESTORE_DOMAINS = ['sshTargets', 'claudeMd'] as const;
+
+export type BackupRestoreDomain =
+  | (typeof BACKUP_RESTORE_DOMAINS)[number]
+  | (typeof LEGACY_BACKUP_RESTORE_DOMAINS)[number];
+
+/**
+ * 返回当前备份预览可展示的恢复领域。
+ *
+ * Business Logic（为什么需要）:
+ * 新备份不再包含 SSH/CLAUDE.md，但用户仍需能从明确包含这些领域的旧包中选择恢复。
+ *
+ * Code Logic（做什么）:
+ * 始终返回当前产品领域；仅当 inspect 的 domainCounts 明确列出退役领域时追加兼容选项。
+ */
+export function getBackupRestoreDomains(
+  domainCounts: Record<string, number>,
+): BackupRestoreDomain[] {
+  return [
+    ...BACKUP_RESTORE_DOMAINS,
+    ...LEGACY_BACKUP_RESTORE_DOMAINS.filter((domain) =>
+      Object.prototype.hasOwnProperty.call(domainCounts, domain),
+    ),
+  ];
+}
 
 export const backupApi = {
   /**

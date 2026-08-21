@@ -2,7 +2,7 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     用户触发局域网同步时，不能再把“部分失败/不可达”记成成功设备。Settings 需要看到
-//!     每台设备、每个领域（prompt/ssh_target/scratchpad）的 typed 结果与 pulled/pushed/unchanged。
+//!     每台设备、每个主动领域（prompt/scratchpad）的 typed 结果与 pulled/pushed/unchanged。
 //!
 //! Code Logic（这个模块做什么）:
 //!     1. 对设备快照做 `buffer_unordered(4)` 并发同步，结果按 device_id 排序；
@@ -11,7 +11,6 @@
 //!     4. 仅全领域 Succeeded 的设备计入 `succeeded_devices`/`synced`。
 
 use crate::error::AppError;
-use crate::models::claude_md::ClaudeMdRow;
 use crate::models::prompt::PromptRow;
 use crate::net::peer_client::PeerCallError;
 use crate::net::protocol::{CAPABILITY_ATTENTION_READ_V1, CAPABILITY_SYNC_MANIFEST_V2};
@@ -31,6 +30,7 @@ use uuid::Uuid;
 /// 领域名常量：Prompt。
 pub const DOMAIN_PROMPT: &str = "prompt";
 /// 领域名常量：SSH 目标。
+#[allow(dead_code)] // N/N+1 路由与旧客户端仍使用稳定 token，本机不再主动发起
 pub const DOMAIN_SSH_TARGET: &str = "ssh_target";
 /// 领域名常量：速记本。
 pub const DOMAIN_SCRATCHPAD: &str = "scratchpad";
@@ -60,7 +60,7 @@ pub enum DeviceSyncStatus {
 /// Code Logic: domain 为稳定 token；outcome 为 §4.1 typed 结果。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DomainSyncReport {
-    /// 领域 token：`prompt` / `ssh_target` / `scratchpad`
+    /// 领域 token：主动同步报告使用 `prompt` / `scratchpad`；`ssh_target` 仅供兼容路由。
     pub domain: String,
     /// 该领域终态
     pub outcome: SyncDomainOutcome,
@@ -78,7 +78,7 @@ pub struct DeviceSyncReport {
     pub device_name: String,
     /// 设备聚合状态
     pub status: DeviceSyncStatus,
-    /// 各领域明细（固定顺序 prompt → ssh_target → scratchpad）
+    /// 各主动领域明细（固定顺序 prompt → scratchpad）
     pub domains: Vec<DomainSyncReport>,
 }
 
@@ -97,17 +97,6 @@ pub struct SyncRunResult {
     /// 参与同步的设备报告（按 device_id 升序）
     pub devices: Vec<DeviceSyncReport>,
     /// 人类可读摘要
-    pub note: String,
-}
-
-/// 旧版返回结构（CLAUDE.md 推送等仍用简单计数）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SyncResult {
-    /// 是否已接受
-    pub accepted: bool,
-    /// 成功对端数
-    pub synced: u64,
-    /// 备注
     pub note: String,
 }
 
@@ -231,10 +220,10 @@ pub fn peer_error_to_domain_outcome(error: &PeerCallError) -> SyncDomainOutcome 
     }
 }
 
-/// 构造不可达设备报告（health 失败时三领域同为 Unreachable）。
+/// 构造不可达设备报告（health 失败时两个主动领域同为 Unreachable）。
 ///
 /// Business Logic: health 失败后不应继续领域交换，且不得计成功。
-/// Code Logic: 三个领域同一 Unreachable outcome + 设备 status Unreachable。
+/// Code Logic: Prompt 与 Scratchpad 使用同一 Unreachable outcome + 设备 status Unreachable。
 pub fn unreachable_device_report(
     device_id: impl Into<String>,
     device_name: impl Into<String>,
@@ -244,10 +233,6 @@ pub fn unreachable_device_report(
     let domains = vec![
         DomainSyncReport {
             domain: DOMAIN_PROMPT.to_string(),
-            outcome: outcome.clone(),
-        },
-        DomainSyncReport {
-            domain: DOMAIN_SSH_TARGET.to_string(),
             outcome: outcome.clone(),
         },
         DomainSyncReport {
@@ -429,10 +414,11 @@ pub async fn run_tombstone_gc_best_effort(state: &AppState) -> Result<usize, App
     Ok(result.deleted)
 }
 
-/// 与单设备同步三个领域，并附加 CC 历史（不计 domain 报告）。
+/// 与单设备同步两个主动领域，并附加 CC 历史（不计 domain 报告）。
 ///
 /// Business Logic: 一次 health/capability 复用；v2 与 legacy 分支；CC 历史仍独立 warn。
-/// Code Logic: 一次 health_info → supports v2 → 顺序跑 prompt/ssh/scratchpad + 复用 protocol 的 CC → 聚合。
+///     SSH 目标保留接收路由，但本机不再从全局 trigger_sync 主动发起。
+/// Code Logic: 一次 health_info → supports v2 → 顺序跑 prompt/scratchpad + 复用 protocol 的 CC → 聚合。
 async fn sync_device_with_domains(
     state: &AppState,
     device: crate::models::device::Device,
@@ -456,9 +442,6 @@ async fn sync_device_with_domains(
     let supports_v2 = protocol.supports(CAPABILITY_SYNC_MANIFEST_V2);
     // 一次 health 复用：capability/protocol 传入各领域（含 CC），领域内不再重复 health。
     let prompt_outcome = prompt_sync_with_peer(state, &device, &base_url, supports_v2).await;
-    let ssh_outcome =
-        crate::sync::ssh_target::ssh_target_sync_with_peer(state, &device, &base_url, supports_v2)
-            .await;
     let scratchpad_outcome =
         crate::sync::scratchpad::scratchpad_sync_with_peer(state, &device, &base_url, supports_v2)
             .await;
@@ -479,10 +462,6 @@ async fn sync_device_with_domains(
         DomainSyncReport {
             domain: DOMAIN_PROMPT.to_string(),
             outcome: prompt_outcome,
-        },
-        DomainSyncReport {
-            domain: DOMAIN_SSH_TARGET.to_string(),
-            outcome: ssh_outcome,
         },
         DomainSyncReport {
             domain: DOMAIN_SCRATCHPAD.to_string(),
@@ -897,57 +876,6 @@ pub fn incomplete_items_outcome(missing_ids: &[String], applied: u32) -> Option<
     }
 }
 
-/// 将本机 CLAUDE.md 版本推送给所有在线对端，不执行远端 pull。
-///
-/// Business Logic: CLAUDE.md 页手动推送，不先 pull 覆盖本机。
-/// Code Logic: health + push；失败仅跳过，返回简单 SyncResult。
-pub async fn push_claude_md_to_peers(state: &AppState, row: &ClaudeMdRow) -> SyncResult {
-    let devices: Vec<crate::models::device::Device> = {
-        let guard = state.devices.read().expect("devices 读锁中毒");
-        guard.values().cloned().collect()
-    };
-
-    if devices.is_empty() {
-        tracing::debug!("没有在线设备，跳过 CLAUDE.md 推送");
-        return SyncResult {
-            accepted: true,
-            synced: 0,
-            note: "没有在线设备".to_string(),
-        };
-    }
-
-    tracing::info!("开始向 {} 个设备推送 CLAUDE.md", devices.len());
-
-    let mut pushed_count: u64 = 0;
-    for device in devices {
-        let base_url = device.base_url();
-        if !state.peer_client.health(&device.host, device.port).await {
-            tracing::debug!("设备 {} 不可达，跳过 CLAUDE.md 推送", device.name);
-            continue;
-        }
-
-        match state.peer_client.claude_md_push(&base_url, row).await {
-            Ok(accepted) => {
-                pushed_count += 1;
-                tracing::info!(
-                    "向 {} 推送 CLAUDE.md 完成，accepted={}",
-                    device.name,
-                    accepted
-                );
-            }
-            Err(e) => {
-                tracing::warn!("向 {} 推送 CLAUDE.md 失败: {e}", device.name);
-            }
-        }
-    }
-
-    SyncResult {
-        accepted: true,
-        synced: pushed_count,
-        note: format!("已向 {pushed_count} 个设备推送 CLAUDE.md"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     //! engine 聚合与真值计数测试（无网络）。
@@ -1042,7 +970,7 @@ mod tests {
     /// 模拟某一领域失败后的整设备聚合（brief 中的 run_with_domain_failure）。
     ///
     /// Business Logic: 单领域失败时设备必须 Partial 且 succeeded_devices=0。
-    /// Code Logic: prompt/ssh 成功，指定 domain 失败，再 build_sync_run_result。
+    /// Code Logic: prompt/scratchpad 中指定 domain 失败，再 build_sync_run_result。
     async fn run_with_domain_failure(failed_domain: &str) -> SyncRunResult {
         let fail = SyncDomainOutcome::ProtocolError {
             code: "injected_domain_failure".to_string(),
@@ -1052,11 +980,6 @@ mod tests {
                 fail_domain(DOMAIN_PROMPT, fail.clone())
             } else {
                 ok_domain(DOMAIN_PROMPT)
-            },
-            if failed_domain == DOMAIN_SSH_TARGET {
-                fail_domain(DOMAIN_SSH_TARGET, fail.clone())
-            } else {
-                ok_domain(DOMAIN_SSH_TARGET)
             },
             if failed_domain == DOMAIN_SCRATCHPAD {
                 fail_domain(DOMAIN_SCRATCHPAD, fail)
@@ -1075,7 +998,7 @@ mod tests {
         assert_eq!(result.synced, 0);
         assert_eq!(result.devices[0].status, DeviceSyncStatus::Partial);
         assert!(!domain_outcome_is_success(
-            &result.devices[0].domains[2].outcome
+            &result.devices[0].domains[1].outcome
         ));
     }
 
@@ -1084,11 +1007,7 @@ mod tests {
         let device = device_report_from_domains(
             "dev-a",
             "A",
-            vec![
-                ok_domain(DOMAIN_PROMPT),
-                ok_domain(DOMAIN_SSH_TARGET),
-                ok_domain(DOMAIN_SCRATCHPAD),
-            ],
+            vec![ok_domain(DOMAIN_PROMPT), ok_domain(DOMAIN_SCRATCHPAD)],
         );
         assert_eq!(device.status, DeviceSyncStatus::Succeeded);
         let result = build_sync_run_result(vec![device]);
@@ -1106,7 +1025,6 @@ mod tests {
             "C",
             vec![
                 fail_domain(DOMAIN_PROMPT, outcome.clone()),
-                fail_domain(DOMAIN_SSH_TARGET, outcome.clone()),
                 fail_domain(DOMAIN_SCRATCHPAD, outcome),
             ],
         );
@@ -1119,20 +1037,12 @@ mod tests {
         let d2 = device_report_from_domains(
             "z-dev",
             "Z",
-            vec![
-                ok_domain(DOMAIN_PROMPT),
-                ok_domain(DOMAIN_SSH_TARGET),
-                ok_domain(DOMAIN_SCRATCHPAD),
-            ],
+            vec![ok_domain(DOMAIN_PROMPT), ok_domain(DOMAIN_SCRATCHPAD)],
         );
         let d1 = device_report_from_domains(
             "a-dev",
             "A",
-            vec![
-                ok_domain(DOMAIN_PROMPT),
-                ok_domain(DOMAIN_SSH_TARGET),
-                ok_domain(DOMAIN_SCRATCHPAD),
-            ],
+            vec![ok_domain(DOMAIN_PROMPT), ok_domain(DOMAIN_SCRATCHPAD)],
         );
         let result = build_sync_run_result(vec![d2, d1]);
         assert_eq!(result.devices[0].device_id, "a-dev");
@@ -1148,13 +1058,12 @@ mod tests {
             vec![
                 ok_domain(DOMAIN_PROMPT),
                 fail_domain(
-                    DOMAIN_SSH_TARGET,
+                    DOMAIN_SCRATCHPAD,
                     SyncDomainOutcome::Partial {
                         applied: 1,
                         failed: vec![],
                     },
                 ),
-                ok_domain(DOMAIN_SCRATCHPAD),
             ],
         );
         assert_eq!(partial.status, DeviceSyncStatus::Partial);
@@ -1185,26 +1094,21 @@ mod tests {
         }
     }
 
-    /// health 复用：同一 PeerProtocolInfo 布尔应驱动三领域同一分支，不要求重复 health。
+    /// health 复用：同一 PeerProtocolInfo 布尔应驱动两个主动领域同一分支，不要求重复 health。
     ///
     /// Business Logic: 任务要求 one health/capability fetch per device。
     /// Code Logic: 纯函数验证 supports_v2 输入在聚合路径中被一致使用（由同步入口保证）。
     #[test]
     fn health_capability_flag_is_reused_across_domain_reports() {
-        // 构造“capability 已判定”后的三领域成功报告，模拟复用后的结果形状
+        // 构造“capability 已判定”后的两个主动领域成功报告，模拟复用后的结果形状
         let device = device_report_from_domains(
             "cap-dev",
             "Cap",
-            vec![
-                ok_domain(DOMAIN_PROMPT),
-                ok_domain(DOMAIN_SSH_TARGET),
-                ok_domain(DOMAIN_SCRATCHPAD),
-            ],
+            vec![ok_domain(DOMAIN_PROMPT), ok_domain(DOMAIN_SCRATCHPAD)],
         );
-        assert_eq!(device.domains.len(), 3);
+        assert_eq!(device.domains.len(), 2);
         assert_eq!(device.domains[0].domain, DOMAIN_PROMPT);
-        assert_eq!(device.domains[1].domain, DOMAIN_SSH_TARGET);
-        assert_eq!(device.domains[2].domain, DOMAIN_SCRATCHPAD);
+        assert_eq!(device.domains[1].domain, DOMAIN_SCRATCHPAD);
         assert_eq!(device.status, DeviceSyncStatus::Succeeded);
     }
 
@@ -1273,23 +1177,22 @@ mod tests {
         }
     }
 
-    /// 模拟 `sync_device_with_domains` 的 health 复用编排：一次 health，prompt/ssh/scratchpad/cc 共用。
+    /// 模拟 `sync_device_with_domains` 的 health 复用编排：一次 health，prompt/scratchpad/cc 共用。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     把「每设备一次 health」固化为可测的编排 helper，防止 CC 路径回退二次 probe。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     health_info 一次 → 四个领域均以同一 protocol 调用，不再 health。
+    ///     health_info 一次 → 三条主动链路均以同一 protocol 调用，不再 health。
     async fn sync_all_domains(peer: &CountingPeer) {
         let protocol = peer.health_info().await;
         peer.sync_domain_with_protocol(&protocol).await; // prompt
-        peer.sync_domain_with_protocol(&protocol).await; // ssh
         peer.sync_domain_with_protocol(&protocol).await; // scratchpad
         peer.sync_domain_with_protocol(&protocol).await; // cc (using_protocol)
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     同设备跨 prompt/ssh/scratchpad/cc 同步不得重复 health，否则放大尾延迟。
+    ///     同设备跨 prompt/scratchpad/cc 同步不得重复 health，否则放大尾延迟。
     ///
     /// Code Logic（这个测试做什么）:
     ///     CountingPeer 编排 sync_all_domains，断言 health_calls == 1。

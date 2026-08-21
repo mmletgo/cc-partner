@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode, type ReactElement, type ReactNode } from 'react';
 
+import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
 import { MobileTerminalPanel } from './MobileTerminalPanel';
 import { WorkbenchTerminalBuffersContext } from '@/hooks/workbenchTerminalBuffersContext';
 import type { WorkbenchTerminalBuffersContextValue } from '@/hooks/workbenchTerminalBuffersContext';
@@ -56,6 +57,7 @@ const terminalEvents = vi.hoisted(() => ({
   hydrationPromise: null as Promise<WorkbenchSessionReplay | null> | null,
   hydrateCalls: [] as string[],
   resizeCalls: [] as Array<{ sessionId: string; cols: number; rows: number }>,
+  resizeError: null as unknown,
   pasteImageCalls: [] as Array<{ sessionId: string; dataUrl: string }>,
   resetCalls: [] as Array<{ instance: number }>,
   scrollToLineCalls: [] as Array<{ instance: number; line: number }>,
@@ -182,6 +184,9 @@ vi.mock('@/api/workbenchHttp', () => ({
       zoomPane: vi.fn(() => Promise.resolve()),
       resize: vi.fn((sessionId: string, cols: number, rows: number) => {
         terminalEvents.resizeCalls.push({ sessionId, cols, rows });
+        if (terminalEvents.resizeError) {
+          return Promise.reject(terminalEvents.resizeError);
+        }
         return Promise.resolve();
       }),
       pasteImage: vi.fn((sessionId: string, dataUrl: string) => {
@@ -355,6 +360,7 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.hydrationPromise = null;
     terminalEvents.hydrateCalls.length = 0;
     terminalEvents.resizeCalls.length = 0;
+    terminalEvents.resizeError = null;
     terminalEvents.pasteImageCalls.length = 0;
     terminalEvents.resetCalls.length = 0;
     terminalEvents.scrollToLineCalls.length = 0;
@@ -438,6 +444,57 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
         { sessionId: 's1', cols: 80, rows: 24 },
       ]);
     });
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 关闭会话后 ResizeObserver 仍可能 resize 旧 sessionId；not_found 是预期拆卸，不得投影加载失败。
+   *
+   * Code Logic（这个测试做什么）:
+   *   持久化尺寸与 fit 不一致以触发 resize；reject `{ code: not_found }`，断言没有 role=alert。
+   */
+  test('resize not_found after a closed session does not project an alert', async () => {
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.resizeError = new OrchestratorRuntimeTransportError(
+      '工作台会话不存在',
+      'protocol',
+      'not_found',
+    );
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = { ...buildSession(), cols: 79, rows: 23 };
+
+    render(
+      <StrictMode>
+        <BuffersProvider store={store}>
+          <MobileTerminalPanel
+            project={buildProject()}
+            worktree={null}
+            sessions={[session]}
+            activeSession={session}
+            busy={false}
+            onSessionsChange={() => undefined}
+            onActiveSessionChange={() => undefined}
+          />
+        </BuffersProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(terminalEvents.resizeCalls).toEqual([
+        { sessionId: 's1', cols: 80, rows: 24 },
+      ]);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   afterEach(() => {
@@ -1195,6 +1252,8 @@ describe('MobileTerminalPanel — merge FAB', () => {
       ownerInstanceId: 'owner-1',
     };
     terminalEvents.replayPromise = null;
+    terminalEvents.resizeCalls.length = 0;
+    terminalEvents.resizeError = null;
     global.ResizeObserver = class {
       observe(): void {}
       unobserve(): void {}
@@ -1388,6 +1447,45 @@ describe('MobileTerminalPanel — merge FAB', () => {
         (screen.getByRole('button', { name: 'workbench:worktrees.merge' }) as HTMLButtonElement)
           .getAttribute('aria-busy'),
       ).toBeNull();
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 成功会关闭源 worktree 会话；即便随后切到 main 使 merge context 过期，终端也必须刷新权威列表。
+   *
+   * Code Logic（这个测试做什么）:
+   *   点击 merge FAB 且 onMergeWorktree 返回 true，断言 onRefreshSessions 被调用，且没有 role=alert。
+   */
+  test('successful merge FAB refreshes sessions without projecting an error', async () => {
+    const worktree = buildWorktree({
+      id: 'wt-feature',
+      name: 'feature/mobile',
+      isMain: false,
+    });
+    const session = buildSession({ worktreeId: 'wt-feature' });
+    const onRefreshSessions = vi.fn(async () => undefined);
+
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={worktree}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onMergeWorktree={async () => true}
+          onRefreshSessions={onRefreshSessions}
+        />
+      </BuffersProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.merge' }));
+    await waitFor(() => {
+      expect(onRefreshSessions).toHaveBeenCalledTimes(1);
     });
     expect(screen.queryByRole('alert')).toBeNull();
   });

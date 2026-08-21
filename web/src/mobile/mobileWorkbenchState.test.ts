@@ -37,6 +37,7 @@ import {
   selectMobilePanelForProject,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
+  pruneMobileSessionsForClosedWorktree,
   selectMobilePanel,
   shouldRefreshMobilePanelOnReconnect,
   shouldShowMobileWorktreeStrip,
@@ -808,6 +809,45 @@ describe('mobileWorkbenchState', () => {
     assertEqual(selectPreferredMobileSession([stopped, running], 'main')?.id ?? null, 'running');
     assertEqual(selectPreferredMobileSession([stopped], 'main')?.id ?? null, 'stopped');
     assertEqual(selectPreferredMobileSession([], 'main'), null);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   merge 关闭源 worktree 终端后，切到 main 前必须摘掉已关闭 session，避免回落到僵尸窗口。
+   *
+   * Code Logic（这个测试做什么）:
+   *   功能 worktree running session + main disconnected session；prune 后断言只剩 main，且 preferred 不再是功能窗口。
+   */
+  test('pruneMobileSessionsForClosedWorktree drops source sessions before preferred select', () => {
+    const featureRunning = createSession({
+      id: 'feature-running',
+      name: 'feature',
+      worktreeId: 'wt-feature',
+      status: 'running',
+    });
+    const mainStopped = createSession({
+      id: 'main-stopped',
+      name: 'main',
+      worktreeId: 'main',
+      status: 'disconnected',
+    });
+
+    const remaining = pruneMobileSessionsForClosedWorktree(
+      [featureRunning, mainStopped],
+      'wt-feature',
+    );
+    assertEqual(remaining.length, 1);
+    assertEqual(remaining[0]?.id ?? null, 'main-stopped');
+    // 主工作区尚无窗口时，未 prune 会回落到已关闭的功能 worktree running 窗口。
+    assertEqual(
+      selectPreferredMobileSession([featureRunning], 'main')?.id ?? null,
+      'feature-running',
+    );
+    assertEqual(selectPreferredMobileSession(remaining, 'main')?.id ?? null, 'main-stopped');
+    assertEqual(selectPreferredMobileSession(
+      pruneMobileSessionsForClosedWorktree([featureRunning], 'wt-feature'),
+      'main',
+    ), null);
   });
 
   /**

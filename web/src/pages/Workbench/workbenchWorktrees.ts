@@ -265,6 +265,21 @@ export function shouldAutoDismissMergeStages(stages: WorkbenchMergeStage[]): boo
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   合并失败后阶段条会长期占着 Git 历史区域；用户看完错误后必须能关掉，但不能在仍 running 时误关进度。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 canonical 阶段判断：至少有一个 failed，且没有任何 running 时才允许关闭。
+ */
+export function canDismissFailedMergeStages(stages: WorkbenchMergeStage[]): boolean {
+  const formatted = formatWorkbenchMergeStages(stages);
+  return (
+    formatted.some((stage) => stage.status === 'failed') &&
+    formatted.every((stage) => stage.status !== 'running')
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   移除 worktree 是生命周期管理动作，不能对主工作区、busy 或 sibling unknown 锁开放。
  *
  * Code Logic（这个函数做什么）:

@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
+import { GitImportDrawer } from './GitImportDrawer';
 import { LanPushDialog } from './LanPushDialog';
 import {
   InstructionThreePaneView,
@@ -102,6 +103,24 @@ export function AgentHubView(props: AgentHubViewProps) {
     lanReport,
     runLanPreview,
     runLanStart,
+    gitImportOpen,
+    openGitImportDrawer,
+    closeGitImportDrawer,
+    gitInspectReport,
+    gitSelectedLaneDeviceId,
+    selectGitLane,
+    gitPreview,
+    gitSelectedAssetIds,
+    gitAssetSelectionExplicit,
+    toggleGitAsset,
+    gitMappingDrafts,
+    setGitMappingDraft,
+    gitConfirmOutcome,
+    gitLastMapping,
+    runGitInspect,
+    runGitPreview,
+    runGitConfirmMapping,
+    runGitConfirmImport,
     reload,
     writeBlocked,
     upgradeRequired,
@@ -362,6 +381,8 @@ export function AgentHubView(props: AgentHubViewProps) {
   const isRemoteContext =
     hubContext.deviceId !== null || hubContext.projectKey?.startsWith('remote:') === true;
   const isRemoteProject = hubContext.projectKey?.startsWith('remote:') === true;
+  const canUseGitImport =
+    !projectLocked && hubContext.scope === 'user' && hubContext.deviceId === null;
   const selectedPeer =
     hubContext.deviceId === null
       ? null
@@ -421,6 +442,7 @@ export function AgentHubView(props: AgentHubViewProps) {
       return {
         onPull: openPortablePull,
         onPush: openLanPushDialog,
+        ...(canUseGitImport ? { onGitImport: openGitImportDrawer } : {}),
         pullDisabledReason: null,
         pushDisabledReason: null,
         ...reloadAction,
@@ -428,7 +450,9 @@ export function AgentHubView(props: AgentHubViewProps) {
     },
     [
       canReloadCurrentTab,
+      canUseGitImport,
       hubContext.tab,
+      openGitImportDrawer,
       openLanPushDialog,
       openPortablePull,
       portableInventory.refreshing,
@@ -711,6 +735,38 @@ export function AgentHubView(props: AgentHubViewProps) {
         onClose={closeLanPushDialog}
       />
       )}
+
+      {canUseGitImport ? (
+        <GitImportDrawer
+          open={gitImportOpen}
+          busy={actionBusy}
+          error={actionError}
+          inspectReport={gitInspectReport}
+          selectedLaneDeviceId={gitSelectedLaneDeviceId}
+          preview={gitPreview}
+          selectedAssetIds={gitSelectedAssetIds}
+          hasExplicitAssetSelection={gitAssetSelectionExplicit}
+          mappingDrafts={gitMappingDrafts}
+          confirmOutcome={gitConfirmOutcome}
+          lastMapping={gitLastMapping}
+          onInspect={() => {
+            void runGitInspect();
+          }}
+          onSelectLane={selectGitLane}
+          onPreview={() => {
+            void runGitPreview();
+          }}
+          onToggleAsset={toggleGitAsset}
+          onMappingDraftChange={setGitMappingDraft}
+          onConfirmMapping={(hubProjectId) => {
+            void runGitConfirmMapping(hubProjectId);
+          }}
+          onConfirmImport={() => {
+            void runGitConfirmImport();
+          }}
+          onClose={closeGitImportDrawer}
+        />
+      ) : null}
 
       <PortableAssetActionDialog
         open={portableActionOpen}

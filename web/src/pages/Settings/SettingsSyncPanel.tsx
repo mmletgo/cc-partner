@@ -28,7 +28,7 @@ import type {
   SyncRunResult,
 } from '@/api/sync';
 import {
-  BACKUP_RESTORE_DOMAINS,
+  getBackupRestoreDomains,
   isDeviceSucceeded,
   succeededCounts,
 } from '@/api/sync';
@@ -388,7 +388,7 @@ export function SettingsSyncPanel({
         <div className={styles.field}>
           <span className={styles.label}>{t('settings:backup.selectDomains')}</span>
           <div className={styles.toggleList}>
-            {BACKUP_RESTORE_DOMAINS.map((domain) => {
+            {getBackupRestoreDomains(backupInspect.domainCounts).map((domain) => {
               const checked = backupSelectedDomains.includes(domain);
               return (
                 <button

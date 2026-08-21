@@ -209,6 +209,11 @@ describe('AgentHubShell', () => {
   test('project scope lock hides project identity, copy actions, device picker, and scope copy', () => {
     renderShell({
       scopeLock: 'project',
+      actions: {
+        onPull: vi.fn(),
+        onPush: vi.fn(),
+        onGitImport: vi.fn(),
+      },
     });
     expect(screen.queryByTestId('agent-hub-scope-lock')).toBeNull();
     expect(screen.queryByTestId('agent-hub-scope-project-lock')).toBeNull();
@@ -223,6 +228,7 @@ describe('AgentHubShell', () => {
     expect(screen.queryByTestId('agent-hub-toolbar')).toBeNull();
     expect(screen.queryByTestId('agent-hub-action-pull')).toBeNull();
     expect(screen.queryByTestId('agent-hub-action-push')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-git-import')).toBeNull();
     expect(screen.queryByTestId('agent-hub-push-reason')).toBeNull();
     expect(screen.queryByTestId('agent-hub-pull-reason')).toBeNull();
   });
@@ -280,12 +286,14 @@ describe('AgentHubShell', () => {
       actions: {
         onPull,
         onPush,
+        onGitImport: vi.fn(),
       },
     });
 
     expect((screen.getByTestId('agent-hub-action-pull') as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId('agent-hub-action-push') as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-action-git-import')).toBeNull();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
     expect(onPull).toHaveBeenCalledOnce();
@@ -366,14 +374,17 @@ describe('AgentHubShell', () => {
   test('toolbar pull/push invoke action callbacks and Adapt is absent', () => {
     const onPull = vi.fn();
     const onPush = vi.fn();
+    const onGitImport = vi.fn();
     renderShell({
-      actions: { onPull, onPush },
+      actions: { onPull, onPush, onGitImport },
     });
 
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
+    fireEvent.click(screen.getByTestId('agent-hub-action-git-import'));
     expect(onPull).toHaveBeenCalled();
     expect(onPush).toHaveBeenCalled();
+    expect(onGitImport).toHaveBeenCalledOnce();
     expect(screen.queryByTestId('agent-hub-action-adapt')).toBeNull();
   });
 

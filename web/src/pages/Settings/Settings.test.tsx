@@ -122,6 +122,7 @@ const updateCloudSyncConfig = vi.fn();
 const updateGithubTrendingConfig = vi.fn();
 const updateHealthConfig = vi.fn();
 const updateAutomationConfig = vi.fn();
+const triggerCloudSync = vi.fn();
 const getDownloadStatus = vi.fn(async () => ({
   status: 'idle' as const,
   progress: 0,
@@ -149,7 +150,7 @@ vi.mock('@/api/config', () => ({
     permissions: vi.fn(),
     requestPermission: vi.fn(),
     updateCloudSyncConfig: (...args: unknown[]) => updateCloudSyncConfig(...args),
-    triggerCloudSync: vi.fn(),
+    triggerCloudSync: () => triggerCloudSync(),
     testCloudSync: vi.fn(),
   },
 }));
@@ -201,10 +202,6 @@ const {
           {
             domain: 'prompt',
             outcome: { kind: 'succeeded', pulled: 1, pushed: 0, unchanged: 0 },
-          },
-          {
-            domain: 'ssh_target',
-            outcome: { kind: 'succeeded', pulled: 0, pushed: 0, unchanged: 1 },
           },
           {
             domain: 'scratchpad',
@@ -444,6 +441,7 @@ vi.mock('@/components/domain', () => {
 const stableT = vi.hoisted(() => {
   const t = (key: string, opts?: Record<string, unknown>) => {
     if (opts && 'error' in (opts ?? {})) return `${key}:${String(opts.error)}`;
+    if (opts && 'note' in (opts ?? {})) return `${key}:${String(opts.note)}`;
     if (opts && 'time' in (opts ?? {})) return `${key}:${String(opts.time)}`;
     return key;
   };
@@ -530,6 +528,7 @@ beforeEach(() => {
   updateGithubTrendingConfig.mockReset();
   updateHealthConfig.mockReset();
   updateAutomationConfig.mockReset();
+  triggerCloudSync.mockReset();
   getRuntimeDiagnostics.mockResolvedValue(runtimeDiagnosticsFixture);
   openBackendLogDir.mockResolvedValue(undefined);
   Object.assign(navigator, {
@@ -652,6 +651,28 @@ describe('Settings partial resource loading', () => {
 
     const scratch = screen.getByTestId('lan-sync-domain-peer-1-scratchpad');
     expect(scratch.getAttribute('data-kind')).toBe('unreachable');
+    expect(screen.queryByTestId('lan-sync-domain-peer-1-ssh_target')).toBeNull();
+  });
+
+  test('Hub flush failure is shown as failed cloud sync with partial-success note', async () => {
+    triggerCloudSync.mockResolvedValue({
+      ok: false,
+      pulled: 2,
+      pushed: 3,
+      note: 'JSON 已同步；Agent Hub 备份未推送：刷新任务被跳过',
+      syncedAt: '2026-08-21T00:00:00Z',
+    });
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'settings:cloudSync.syncNow' }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/JSON 已同步；Agent Hub 备份未推送/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/settings:cloudSync\.syncSuccess/)).toBeNull();
   });
 
   test('backup export calls create with picked path and shows success', async () => {
@@ -692,6 +713,30 @@ describe('Settings partial resource loading', () => {
       expect(screen.getByTestId('backup-domain-prompts')).toBeTruthy();
       expect(screen.getByTestId('backup-restore-confirm')).toBeTruthy();
     });
+  });
+
+  test('old backup preview exposes legacy SSH and CLAUDE.md restore choices', async () => {
+    inspectBackup.mockResolvedValueOnce({
+      formatVersion: 1,
+      domainCounts: { prompts: 2, sshTargets: 1, claudeMd: 1 },
+      warnings: [],
+      conflictsEstimate: 0,
+    });
+    searchParamsState.value = new URLSearchParams('tab=sync');
+    renderSettings();
+
+    fireEvent.click(await screen.findByTestId('backup-restore-pick'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('backup-domain-sshTargets')).toBeTruthy();
+      expect(screen.getByTestId('backup-domain-claudeMd')).toBeTruthy();
+    });
+    expect(screen.getByTestId('backup-domain-sshTargets').getAttribute('aria-checked')).toBe(
+      'false',
+    );
+    expect(screen.getByTestId('backup-domain-claudeMd').getAttribute('aria-checked')).toBe(
+      'false',
+    );
   });
 });
 

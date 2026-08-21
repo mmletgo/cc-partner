@@ -41,18 +41,23 @@ export type OrchestratorRuntimeTransportKind =
  */
 export class OrchestratorRuntimeTransportError extends Error {
   readonly kind: OrchestratorRuntimeTransportKind;
+  /** P2P/HTTP 信封的稳定 code token（如 not_found）；仅协议失败时可选携带。 */
+  readonly code?: string;
 
   /**
    * Business Logic（为什么需要这个构造）:
    *   adapter 在 Tauri reject / fetch 失败时需要带 kind 抛出。
    *
    * Code Logic（这个函数做什么）:
-   *   设置 message、kind 与 name，便于调试与 instanceof 检测。
+   *   设置 message、kind 与 name，便于调试与 instanceof 检测；可选透传信封 code。
    */
-  constructor(message: string, kind: OrchestratorRuntimeTransportKind) {
+  constructor(message: string, kind: OrchestratorRuntimeTransportKind, code?: string) {
     super(message);
     this.name = 'OrchestratorRuntimeTransportError';
     this.kind = kind;
+    if (code) {
+      this.code = code;
+    }
   }
 }
 

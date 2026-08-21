@@ -4,18 +4,20 @@
  *
  * Business Logic（为什么需要这个测试）:
  *   Git 历史采用类似 VS Code Source Control Graph 的紧凑连续泳道后，必须稳定区分 HEAD、merge 与普通提交，
- *   同时保留本地/远端 ref 和可读的提交元信息。
+ *   同时保留本地/远端 ref 和可读的提交元信息；合并失败后阶段条必须提供关闭出口。
  *
  * Code Logic（这个测试做什么）:
- *   渲染包含 merge + 双泳道的四条提交，断言行数、节点形态、SVG 泳道、ref 标签与作者/hash 元数据。
+ *   渲染包含 merge + 双泳道的四条提交，断言行数、节点形态、SVG 泳道、ref 标签与作者/hash 元数据；
+ *   另覆盖失败阶段条的关闭按钮显隐与点击回调。
  */
 
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
-import type { WorkbenchGitCommit, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchGitCommit, WorkbenchMergeStage, WorkbenchWorktree } from '@/lib/types';
 import { WorkbenchGitInspector } from './WorkbenchGitInspector';
+import type { WorkbenchGitInspectorProps } from './WorkbenchGitInspector';
 
 const NOW = '2026-08-13T08:00:00.000Z';
 
@@ -128,31 +130,46 @@ function makeCommits(): WorkbenchGitCommit[] {
   ];
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   图呈现与失败关闭按钮测试共享同一套 inspector props，避免漏传新增必填回调。
+ *
+ * Code Logic（这个函数做什么）:
+ *   填入默认 Git inspector props，再用 overrides 覆盖 mergeStages / 回调。
+ */
+function renderGitInspector(
+  overrides: Partial<WorkbenchGitInspectorProps> = {},
+): ReturnType<typeof render> {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <WorkbenchGitInspector
+        activeProjectId="project"
+        activeWorktree={makeWorktree()}
+        remoteWriteDisabled={false}
+        gitCommits={makeCommits()}
+        gitHistoryLoading={false}
+        gitHistoryError={null}
+        worktreeBusy={null}
+        unknownMutationLock={null}
+        hookRepair={null}
+        handleRepairHookFailure={vi.fn(async () => undefined)}
+        handleDismissHookFailure={vi.fn(async () => undefined)}
+        handleRetryAfterRepair={vi.fn(async () => undefined)}
+        mergeStages={[]}
+        clearMergeStagePanel={vi.fn()}
+        loadGitHistory={vi.fn(async () => undefined)}
+        handleCommitWorktree={vi.fn(async () => undefined)}
+        handlePushWorktree={vi.fn(async () => undefined)}
+        handleMergeWorktree={vi.fn(async () => undefined)}
+        {...overrides}
+      />
+    </I18nextProvider>,
+  );
+}
+
 describe('WorkbenchGitInspector graph presentation', () => {
   test('renders compact continuous lanes with distinct HEAD/merge node and inline refs', () => {
-    const { container } = render(
-      <I18nextProvider i18n={i18n}>
-        <WorkbenchGitInspector
-          activeProjectId="project"
-          activeWorktree={makeWorktree()}
-          remoteWriteDisabled={false}
-          gitCommits={makeCommits()}
-          gitHistoryLoading={false}
-          gitHistoryError={null}
-          worktreeBusy={null}
-          unknownMutationLock={null}
-          hookRepair={null}
-          handleRepairHookFailure={vi.fn(async () => undefined)}
-          handleDismissHookFailure={vi.fn(async () => undefined)}
-          handleRetryAfterRepair={vi.fn(async () => undefined)}
-          mergeStages={[]}
-          loadGitHistory={vi.fn(async () => undefined)}
-          handleCommitWorktree={vi.fn(async () => undefined)}
-          handlePushWorktree={vi.fn(async () => undefined)}
-          handleMergeWorktree={vi.fn(async () => undefined)}
-        />
-      </I18nextProvider>,
-    );
+    const { container } = renderGitInspector();
 
     const rows = screen.getAllByTestId('git-history-row');
     expect(rows).toHaveLength(4);
@@ -165,5 +182,40 @@ describe('WorkbenchGitInspector graph presentation', () => {
     expect(screen.getByTitle('refs/remotes/origin/feature')).toBeTruthy();
     expect(screen.getByText('Bob')).toBeTruthy();
     expect(screen.getByText('c3d4e5f')).toBeTruthy();
+  });
+});
+
+describe('WorkbenchGitInspector merge stage dismiss', () => {
+  test('shows dismiss control after mergeMain fails and later stages stay pending', () => {
+    const onDismiss = vi.fn();
+    const mergeStages: WorkbenchMergeStage[] = [
+      { id: 'checkSource', status: 'completed', message: '源 worktree 已确认干净' },
+      { id: 'closeSessions', status: 'completed', message: '已关闭 1 个终端窗口' },
+      {
+        id: 'mergeMain',
+        status: 'failed',
+        message: '主工作区有未提交改动，请先提交或清理后再合并',
+      },
+      { id: 'resolveConflicts', status: 'pending', message: '' },
+      { id: 'cleanup', status: 'pending', message: '' },
+    ];
+
+    renderGitInspector({ mergeStages, clearMergeStagePanel: onDismiss });
+
+    const dismiss = screen.getByTestId('workbench-merge-stages-dismiss');
+    expect(dismiss).toBeTruthy();
+    fireEvent.click(dismiss);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  test('hides dismiss control while a merge stage is still running', () => {
+    const mergeStages: WorkbenchMergeStage[] = [
+      { id: 'checkSource', status: 'completed', message: '源 worktree 已确认干净' },
+      { id: 'closeSessions', status: 'running', message: '正在关闭终端' },
+    ];
+
+    renderGitInspector({ mergeStages });
+
+    expect(screen.queryByTestId('workbench-merge-stages-dismiss')).toBeNull();
   });
 });

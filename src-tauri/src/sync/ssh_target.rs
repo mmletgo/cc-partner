@@ -139,6 +139,7 @@ use uuid::Uuid;
 ///
 /// Business Logic: v2 planner 需要与服务端一致的 content_hash。
 /// Code Logic: username/port/label 固定分隔后 SHA-256。
+#[allow(dead_code)] // N/N+1 出站实现保留，但当前 trigger_sync 不再调用
 pub fn ssh_to_summary(row: &SshTargetRow) -> SyncSummary<String> {
     let label = row.label.as_deref().unwrap_or("");
     let port = row.port.to_string();
@@ -165,6 +166,7 @@ pub fn ssh_to_summary(row: &SshTargetRow) -> SyncSummary<String> {
 /// Business Logic: 失败不得伪装成功；支持 v2 时走 plan，否则 typed legacy。
 /// Code Logic: supports_v2 分支；不重复 health（由 engine 注入 base_url/capability）。
 ///     Peer 出站超时由 `PeerTimeoutClass` 在 peer_client helper 侧分类（Metadata/Mutation）。
+#[allow(dead_code)] // N/N+1 出站实现保留，但当前 trigger_sync 不再调用
 pub async fn ssh_target_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,
@@ -179,6 +181,7 @@ pub async fn ssh_target_sync_with_peer(
 }
 
 /// SSH v2 plan 路径。
+#[allow(dead_code)] // 由保留的 N/N+1 出站入口调用
 async fn ssh_sync_v2(
     state: &AppState,
     device: &crate::models::device::Device,
@@ -342,6 +345,7 @@ async fn ssh_sync_v2(
 ///
 /// Business Logic: 旧对端无 v2 时仍可同步；本地 apply 必须保留 conflict 副本。
 /// Code Logic: pull_result → apply_ssh_pull_items → push_result。
+#[allow(dead_code)] // 由保留的 N/N+1 出站入口调用
 async fn ssh_sync_legacy_typed(
     state: &AppState,
     device: &crate::models::device::Device,

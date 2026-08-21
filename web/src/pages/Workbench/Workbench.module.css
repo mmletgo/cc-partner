@@ -1105,6 +1105,15 @@
   background: var(--surface);
 }
 
+.mergeStagePanel[data-dismissible='true'] {
+  border-color: var(--danger-soft);
+}
+
+.mergeStageToolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .mergeStageItem {
   min-width: 0;
   display: grid;

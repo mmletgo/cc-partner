@@ -13,6 +13,7 @@ import {
   canRemoveWorktree,
   createWorktreeWithTerminalWindow,
   formatWorkbenchMergeStages,
+  canDismissFailedMergeStages,
   shouldAutoDismissMergeStages,
   formatCommitRelativeTime,
   hasGitHistory,
@@ -499,6 +500,40 @@ function testShouldAutoDismissMergeStages(): void {
   }
 }
 
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   主工作区脏导致 mergeMain 失败时，后续阶段会停在 pending；用户必须能关掉阶段条，但不能在仍 running 时关掉。
+ *
+ * Code Logic（这个测试做什么）:
+ *   断言 failed+pending 可关闭，running 或纯成功不可关闭。
+ */
+function testCanDismissFailedMergeStages(): void {
+  if (!canDismissFailedMergeStages([
+    { id: 'checkSource', status: 'completed', message: '' },
+    { id: 'closeSessions', status: 'completed', message: '' },
+    { id: 'mergeMain', status: 'failed', message: '主工作区有未提交改动，请先提交或清理后再合并' },
+    { id: 'resolveConflicts', status: 'pending', message: '' },
+    { id: 'cleanup', status: 'pending', message: '' },
+  ])) {
+    throw new Error('expected failed merge with pending later stages to be dismissible');
+  }
+
+  if (canDismissFailedMergeStages([
+    { id: 'checkSource', status: 'completed', message: '' },
+    { id: 'mergeMain', status: 'failed', message: 'conflict remains' },
+    { id: 'cleanup', status: 'running', message: 'cleaning' },
+  ])) {
+    throw new Error('expected running merge stages not to be dismissible');
+  }
+
+  if (canDismissFailedMergeStages([
+    { id: 'checkSource', status: 'completed', message: '' },
+    { id: 'cleanup', status: 'completed', message: '' },
+  ])) {
+    throw new Error('expected successful merge stages not to show a dismiss control');
+  }
+}
+
 describe('workbenchWorktrees', () => {
   test('helpers cover sessions, root path, status, branch names, history graph and merge stages', async () => {
     testSessionsForWorktree();
@@ -517,5 +552,6 @@ describe('workbenchWorktrees', () => {
     testBuildGitGraphRowsForMergeHistory();
     testFormatWorkbenchMergeStages();
     testShouldAutoDismissMergeStages();
+    testCanDismissFailedMergeStages();
   });
 });

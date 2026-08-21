@@ -51,6 +51,7 @@ import {
   markMobileConnectionOffline,
   markMobileConnectionOnline,
   mergeMobileSessionsWithRuntime,
+  pruneMobileSessionsForClosedWorktree,
   seedMobileSessionRuntimeFromSessions,
   selectMobilePanelForProject,
   selectMobileWorktreeWorkspacePanel,
@@ -172,7 +173,7 @@ function createMobileFilePanelContext(
  *   管理 active panel/project/worktree/session 状态；local/remote 项目都通过 HTTP transport 拉取 worktree/session，后端按项目类型决定是否代理。
  */
 export function MobileWorkbench(): ReactElement {
-  const { store: terminalBufferStore } = useWorkbenchTerminalBuffers();
+  const { store: terminalBufferStore, removeBuffer } = useWorkbenchTerminalBuffers();
   const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [activeProject, setActiveProject] = useState<WorkbenchProject | null>(null);
@@ -577,7 +578,7 @@ export function MobileWorkbench(): ReactElement {
   const refreshSessions = useCallback(async (): Promise<void> => {
     if (!activeProject) return;
     const projectId = activeProject.id;
-    const worktreeId = activeWorktree?.id ?? null;
+    const worktreeId = activeWorktreeRef.current?.id ?? null;
     const requestId = sessionsRequestIdRef.current + 1;
     sessionsRequestIdRef.current = requestId;
 
@@ -600,7 +601,7 @@ export function MobileWorkbench(): ReactElement {
       if (sessionsRequestIdRef.current !== requestId) return;
       setError(getErrorMessage(reason));
     }
-  }, [activeProject, activeWorktree?.id]);
+  }, [activeProject]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1157,6 +1158,19 @@ export function MobileWorkbench(): ReactElement {
             if (activeProjectRef.current?.id !== operationProjectId) return;
             const appliedState = getMobileWorktreeMergeAppliedState(plan);
             const sourceBecameActive = activeWorktreeRef.current?.id === sourceWorktree.id;
+            if (!sourceWorktree.isMain) {
+              const remaining = pruneMobileSessionsForClosedWorktree(
+                sessionsRef.current,
+                sourceWorktree.id,
+              );
+              for (const session of sessionsRef.current) {
+                if (session.worktreeId === sourceWorktree.id) {
+                  removeBuffer(session.id);
+                }
+              }
+              sessionsRef.current = remaining;
+              setSessions(remaining);
+            }
             setWorktrees(appliedState.nextWorktrees);
             // collect-merge 留在主工作区，不能当成“源 worktree 被删”清掉 Files 草稿。
             if (
@@ -1170,9 +1184,13 @@ export function MobileWorkbench(): ReactElement {
               skipFileContextConfirm: plan.requiresActivePreflight || sourceBecameActive,
               expectedProjectId: operationProjectId ?? undefined,
             });
+            await refreshSessions();
           },
         });
         return result === 'applied';
+      } catch (reason) {
+        await refreshSessions().catch(() => undefined);
+        throw reason;
       } finally {
         endWorktreeOperation();
       }
@@ -1182,7 +1200,9 @@ export function MobileWorkbench(): ReactElement {
       discardConfirmedFileContextSwitch,
       handleConfirmActiveWorktreeChange,
       projectDetailsLoading,
+      refreshSessions,
       refreshWorktrees,
+      removeBuffer,
       setActiveWorktreeWithSession,
       t,
       worktrees,

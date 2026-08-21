@@ -551,8 +551,8 @@
     "reportAria": "各对端 push 结果"
   },
   "gitImport": {
-    "title": "Git 导入",
-    "open": "Git 导入",
+    "title": "从 Git 恢复",
+    "open": "从 Git 恢复",
     "hint": "先检查远端 device lane，再预览变更、映射项目，最后确认。不会自动导入。",
     "stepInspect": "1. 检查 lane",
     "inspectAction": "检查 lane",

@@ -15,6 +15,7 @@ import {
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
 import {
+  classifyTerminalReplayError,
   MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
   type TerminalBufferDelta,
 } from '@/hooks/workbenchTerminalBuffer';
@@ -105,6 +106,18 @@ const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 const DEFAULT_TERMINAL_SIZE = { cols: 80, rows: 24 };
 const SCROLLBACK_HYDRATION_TIMEOUT_MS = 10_000;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   merge 会先关闭源 worktree 终端；xterm ResizeObserver / 在途 replay 随后打到已删除 session，
+ *   这是预期拆卸，不能当成「加载失败」投影给用户。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用 classifyTerminalReplayError 识别稳定 not_found / session_not_found code；不解析中文 message。
+ */
+function isExpectedClosedSessionError(reason: unknown): boolean {
+  return classifyTerminalReplayError(reason) === 'not_found';
+}
 
 export interface MobileTerminalPanelProps {
   project: WorkbenchProject | null;
@@ -345,6 +358,8 @@ export function MobileTerminalPanel({
       : null;
     setCommitPhase('idle');
     setMergePhase('idle');
+    setActionBusy(null);
+    setPanelError(null);
     setHookRepair(null);
     setCommitSuccess(null);
     commitOperationIdRef.current = null;
@@ -556,6 +571,7 @@ export function MobileTerminalPanel({
           mergeOperationIdRef.current = null;
           setMergePhase('idle');
           await onRefreshWorktrees?.({ expectedProjectId: actionContext.projectId });
+          await onRefreshSessions?.();
           return;
         }
         if (ledger?.state === 'failed') {
@@ -574,6 +590,8 @@ export function MobileTerminalPanel({
         setMergePhase('idle');
         return;
       }
+      // merge 会关闭源 worktree 会话；即便随后切到 main 使 merge context 过期，也必须刷新权威列表。
+      await onRefreshSessions?.();
       if (!isMobileGitMergeResponseCurrent(actionContext, commitContextRef.current)) return;
       mergeOperationIdRef.current = null;
       setMergePhase('idle');
@@ -603,6 +621,7 @@ export function MobileTerminalPanel({
     commitPhase,
     mergePhase,
     onMergeWorktree,
+    onRefreshSessions,
     onRefreshWorktrees,
     project,
     t,
@@ -1023,6 +1042,7 @@ export function MobileTerminalPanel({
             return;
           }
           clearScrollbackHydration();
+          if (isExpectedClosedSessionError(reason)) return;
           setPanelError(
             `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
               reason,
@@ -1073,6 +1093,7 @@ export function MobileTerminalPanel({
         lastResizeRef.current = { sessionId, cols, rows };
         void httpWorkbenchTransport.sessions.resize(sessionId, cols, rows).catch((reason) => {
           if (disposed) return;
+          if (isExpectedClosedSessionError(reason)) return;
           setPanelError(
             `${t('workbench:mobile.terminalPanel.errors.resize')}: ${getErrorMessage(
               reason,
@@ -1392,6 +1413,7 @@ export function MobileTerminalPanel({
         unsubscribeHeldLive();
         replayReadyRef.current = true;
         startHydrationRequest();
+        if (isExpectedClosedSessionError(reason)) return;
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
             reason,
