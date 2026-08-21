@@ -213,6 +213,7 @@ vi.mock('../mobileTerminalInputStream', () => ({
 vi.mock('@/lib/icons', () => ({
   ArrowRightIcon: (): null => null,
   CommitIcon: (): null => null,
+  SyncIcon: (): null => null,
   EditIcon: (): null => null,
   MaximizeIcon: (): null => null,
   MinimizeIcon: (): null => null,
@@ -1178,5 +1179,216 @@ describe('MobileTerminalPanel — commit FAB', () => {
 
     await screen.findByText('workbench:errors.mutationUnknown');
     expect(document.querySelector('[data-fullscreen="true"]')).not.toBeNull();
+  });
+});
+
+describe('MobileTerminalPanel — merge FAB', () => {
+  beforeEach(() => {
+    terminalEvents.clearCalls.length = 0;
+    terminalEvents.writeCalls.length = 0;
+    terminalEvents.instances.length = 0;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.replayPromise = null;
+    global.ResizeObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   主工作区主分支没有可收集分支时，终端不应露出合并入口，避免误触发 collect-merge。
+   *
+   * Code Logic（这个测试做什么）:
+   *   默认 main worktree 断言没有 merge FAB。
+   */
+  test('hides merge FAB on main worktree without canCollectMerge', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onMergeWorktree={async () => true}
+        />
+      </BuffersProvider>,
+    );
+
+    expect(screen.queryByRole('button', { name: 'workbench:worktrees.merge' })).toBeNull();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   功能 worktree 需要在提交按钮正上方提供与桌面 Git 历史相同的合并入口。
+   *
+   * Code Logic（这个测试做什么）:
+   *   非主 worktree 断言 merge FAB 存在，且在 FAB 组内位于 Commit 之前。
+   */
+  test('renders merge FAB above the commit button on a feature worktree', () => {
+    const session = buildSession({ worktreeId: 'wt-feature' });
+    const worktree = buildWorktree({
+      id: 'wt-feature',
+      name: 'feature/mobile',
+      branch: 'feature/mobile',
+      isMain: false,
+    });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={worktree}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onMergeWorktree={async () => true}
+        />
+      </BuffersProvider>,
+    );
+
+    const merge = screen.getByRole('button', { name: 'workbench:worktrees.merge' });
+    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    const group = merge.parentElement;
+    expect(group).not.toBeNull();
+    expect(group).toBe(commit.parentElement);
+    const labels = Array.from(group?.querySelectorAll('button') ?? []).map((button) =>
+      button.getAttribute('aria-label'),
+    );
+    expect(labels.indexOf('workbench:worktrees.merge')).toBeLessThan(
+      labels.indexOf('workbench:worktrees.commit'),
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   主工作区切到非主分支时也应露出合并，与「非主分支或非主工作区」的入口条件一致。
+   *
+   * Code Logic（这个测试做什么）:
+   *   isMain 且 branch !== homeBranch 时断言 merge FAB 存在。
+   */
+  test('renders merge FAB on main worktree when current branch is not home', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree({
+            branch: 'feature/local',
+            homeBranch: 'main',
+            status: {
+              branch: 'feature/local',
+              changed: 0,
+              ahead: 0,
+              behind: 0,
+              conflicts: 0,
+              clean: true,
+              canPush: false,
+            },
+          })}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onMergeWorktree={async () => true}
+        />
+      </BuffersProvider>,
+    );
+
+    expect(screen.getByRole('button', { name: 'workbench:worktrees.merge' })).toBeTruthy();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   终端合并必须复用父级与 Git 面板相同的 dirty guard / envelope merge，而不是另走一套 API。
+   *
+   * Code Logic（这个测试做什么）:
+   *   点击 merge FAB，断言 onMergeWorktree 收到当前 worktree。
+   */
+  test('clicking merge FAB delegates to onMergeWorktree', async () => {
+    const worktree = buildWorktree({
+      id: 'wt-feature',
+      name: 'feature/mobile',
+      branch: 'feature/mobile',
+      isMain: false,
+    });
+    const onMergeWorktree = vi.fn(async () => true);
+    const session = buildSession({ worktreeId: 'wt-feature' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={worktree}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onMergeWorktree={onMergeWorktree}
+        />
+      </BuffersProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.merge' }));
+    await waitFor(() => {
+      expect(onMergeWorktree).toHaveBeenCalledTimes(1);
+    });
+    expect(onMergeWorktree).toHaveBeenCalledWith(worktree);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   用户取消确认后不得把取消当成失败投影到终端错误区。
+   *
+   * Code Logic（这个测试做什么）:
+   *   onMergeWorktree 返回 false，断言没有 role=alert。
+   */
+  test('cancelled merge FAB does not project an error', async () => {
+    const worktree = buildWorktree({
+      id: 'wt-feature',
+      name: 'feature/mobile',
+      isMain: false,
+    });
+    const session = buildSession({ worktreeId: 'wt-feature' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={worktree}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+          onMergeWorktree={async () => false}
+        />
+      </BuffersProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.merge' }));
+    await waitFor(() => {
+      expect(
+        (screen.getByRole('button', { name: 'workbench:worktrees.merge' }) as HTMLButtonElement)
+          .getAttribute('aria-busy'),
+      ).toBeNull();
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

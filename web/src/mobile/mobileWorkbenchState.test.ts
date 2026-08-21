@@ -4,6 +4,7 @@ import {
   canSelectMobileProject,
   canRunMobilePaneMutation,
   canRunMobileWorktreeDestructiveAction,
+  canShowMobileTerminalMergeFab,
   canSwitchMobilePane,
   closeMobileNav,
   computeMobileKeyboardInset,
@@ -661,6 +662,45 @@ describe('mobileWorkbenchState', () => {
     assertEqual(canRunMobileWorktreeDestructiveAction(main, false), false);
     assertEqual(canRunMobileWorktreeDestructiveAction(feature, true), false);
     assertEqual(canRunMobileWorktreeDestructiveAction(feature, false), true);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   终端右下角合并 FAB 只应在可合并场景出现：非主工作区、非主分支，或主工作区可 collect-merge。
+   *
+   * Code Logic（这个测试做什么）:
+   *   覆盖 null、主工作区主分支、主工作区非主分支、主工作区 canCollectMerge、功能 worktree。
+   */
+  test('terminal merge FAB appears on non-main worktree or non-home branch', () => {
+    const mainHome = createWorktree({
+      id: 'main',
+      name: 'main',
+      isMain: true,
+      branch: 'main',
+      homeBranch: 'main',
+    });
+    const mainFeatureBranch = createWorktree({
+      id: 'main',
+      name: 'main',
+      isMain: true,
+      branch: 'feature/local',
+      homeBranch: 'main',
+    });
+    const mainCollect = createWorktree({
+      id: 'main',
+      name: 'main',
+      isMain: true,
+      branch: 'main',
+      homeBranch: 'main',
+      canCollectMerge: true,
+    });
+    const feature = createWorktree({ id: 'feature', name: 'feature/mobile', isMain: false });
+
+    assertEqual(canShowMobileTerminalMergeFab(null), false);
+    assertEqual(canShowMobileTerminalMergeFab(mainHome), false);
+    assertEqual(canShowMobileTerminalMergeFab(mainFeatureBranch), true);
+    assertEqual(canShowMobileTerminalMergeFab(mainCollect), true);
+    assertEqual(canShowMobileTerminalMergeFab(feature), true);
   });
 
   /**

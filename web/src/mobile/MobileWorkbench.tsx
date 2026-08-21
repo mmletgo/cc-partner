@@ -1527,6 +1527,7 @@ export function MobileWorkbench(): ReactElement {
           onActiveSessionChange={setActiveSession}
           onRefreshSessions={refreshSessions}
           onWorktreeChange={handleWorktreeChange}
+          onMergeWorktree={handleMergeWorktree}
           onRefreshWorktrees={refreshWorktrees}
           onFocusRepairSession={handleFocusRepairSession}
         />
