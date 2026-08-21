@@ -1,14 +1,74 @@
 # cc-partner
 
-**Local-first 多设备项目工作台** — 在本机与局域网内，用桌面端、手机浏览器与无头后端一起推进同一份代码与自动化任务。
+<p align="center">
+  <img src="docs/media/cc-partner/cc-partner-hero.png" alt="cc-partner：把散落的 AI 编码工作收进一个本地工作台" width="100%" />
+</p>
 
-cc-partner 以 **Workbench** 为核心：本机与远端项目、worktree、终端、文件与 Git 在同一界面协作；手机可打开 Mobile Workbench；Orchestrator 负责自动编排并让执行过程可见；无 GUI 机器可用 headless 后端接入同一局域网。文件传输、截图、Prompt、草稿本与健康提醒是围绕工作台的配套能力，而不是产品主叙事。
+<p align="center"><strong>给同时推进多个 AI 编码任务的人，一个能把工作收回来的地方。</strong></p>
 
-**固定局域网语义（无调用者身份校验）**：业务 API 不对 peer 做账号/配对/token 鉴权；合法 loopback/LAN 地址范围内的任何可达设备均可读取、写入和执行。系统不验证调用者身份。产品只有这一种局域网行为，不提供可切换的暴露/只读模式或逐设备权限。
+<p align="center">
+  <a href="#下载安装">下载安装</a> ·
+  <a href="#为什么做-cc-partner">为什么需要它</a> ·
+  <a href="docs/media/cc-partner/cc-partner-tour.mp4">观看 14 秒有声短片</a>
+</p>
 
-**核心体验入口**：`/` 仍是 GitHub Trending（探索）；“继续工作”进 `/workbench`。GUI 首次启动 LAN listener 前会展示本机地址候选、首选端口 62116（占用递增）、mDNS UDP 5353 与无身份校验风险并要求确认。侧栏按 Explore/Work/Knowledge/System 分组；普通小字对比度 ≥4.5:1。
+cc-partner 是一款 **local-first 多设备项目工作台**。它不替模型写代码，而是把本机与局域网远端的项目、worktree、终端、文件、Git、浏览器预览和自动化任务放进同一条可见流程：**Agent 在推进，你随时知道它做到哪、卡在哪、接下来怎么交付。**
 
-## 功能一览
+## 为什么做 cc-partner
+
+AI 已经能写很多代码，但真实工程里的时间仍然消耗在“代码生成之外”：
+
+- **上下文散了**：项目在编辑器，Agent 在终端，分支在 worktree，状态在 Git，任务记录又在别处。切一次窗口，就丢一点上下文。
+- **离开电脑就变成黑盒**：长任务是在继续跑、等确认，还是已经报错？回到桌前之前，你通常没有答案。
+- **远端机器很难接手**：项目跑在另一台 Mac、Windows 或 Linux 设备上时，终端、文件、Git 和预览常常要各开一套入口。
+- **“生成了代码”不等于“完成了交付”**：测试有没有跑、证据在哪里、哪个分支可合并，最后仍靠人肉追问和补齐。
+
+> cc-partner 想解决的不是“再做一个聊天框”，而是让 **Agent 的真实工程过程可见、可接手、可交付**。
+
+<p align="center">
+  <img src="docs/media/cc-partner/cc-partner-workflow.png" alt="cc-partner 将 AI 编码的上下文、远程接手和交付证据收进一个项目级工作台" width="100%" />
+</p>
+
+## 一个项目，从开始到交付
+
+| 你正在做什么 | cc-partner 帮你收住什么 |
+|---|---|
+| 让多个 Agent 并行改代码 | 用 **Project → Worktree → Window → Pane** 建立清晰边界，终端和分支状态不再靠记忆 |
+| 跑一个需要很久的任务 | 在 Workbench 持续看见终端、会话与阻塞；离开电脑后用 **Mobile Workbench** 继续查看和接手 |
+| 管理本机和远端项目 | 通过局域网把远端设备的终端、文件、Git、浏览器预览和自动化代理进同一界面 |
+| 判断任务是否真的完成 | Orchestrator 保存验证 evidence，串起修复、复核、commit、push 与 merge 的交付闭环 |
+| 在不同 CLI Agent 之间切换 | Agent Hub 统一管理 Claude / Codex / OpenCode 的指令、Skill、Command、Agent 与 MCP 资产 |
+
+除此之外，cc-partner 还把局域网文件传输、区域截图、Prompt 管理与优化、速记本、使用统计和健康提醒放在工作台周围。它们不是一堆孤立工具，而是为“让任务继续推进”服务。
+
+## 14 秒看懂工作流
+
+点击下方动图可打开带 BGM 与音效的高清 MP4：
+
+<p align="center">
+  <a href="docs/media/cc-partner/cc-partner-tour.mp4">
+    <img src="docs/media/cc-partner/cc-partner-tour.gif" alt="cc-partner 产品工作流短片：本地工作台、项目上下文与手机接手" width="720" />
+  </a>
+</p>
+
+## 适合这些场景
+
+- 你同时维护多个仓库、分支或 worktree，已经不想再靠窗口标题辨认上下文。
+- 你让 Claude、Codex、OpenCode 等 CLI Agent 跑真实工程任务，希望过程始终可见。
+- 你有家中 Mac mini、办公室工作站或其他局域网设备，想从一台电脑甚至手机接手。
+- 你在意的不只是“代码写出来”，还包括测试、证据、提交、合并和交付是否闭环。
+- 你偏好本地数据和局域网协作，不希望把项目控制面依赖在公网中转服务上。
+
+## 使用前必须知道
+
+> [!WARNING]
+> **cc-partner 的局域网业务 API 没有调用者身份校验。**合法 loopback/LAN 地址范围内的任何可达设备都可以读取、写入和执行；系统不验证账号、配对或 token。请只在你信任的局域网内使用，并自行通过路由器、防火墙和网络隔离控制可达范围。
+
+GUI 首次启动 LAN listener 前会展示本机地址候选、首选 TCP 端口 `62116`（占用时递增）、mDNS UDP `5353` 与上述风险，并要求明确确认。产品只有这一种局域网行为，不提供可切换的暴露/只读模式或逐设备权限。
+
+**核心体验入口**：`/` 是 GitHub Trending（探索）页，“继续工作”进入 `/workbench`；侧栏按 Explore / Work / Knowledge / System 分组。
+
+## 完整功能清单
 
 ### 1. Workbench 项目工作台（核心）
 
