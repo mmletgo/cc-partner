@@ -97,8 +97,23 @@ pub(crate) fn cli_command_path_env() -> OsString {
 }
 
 fn cli_command_path_env_with(home: Option<&Path>, path_env: Option<&std::ffi::OsStr>) -> OsString {
+    std::env::join_paths(gui_cli_search_dirs(home, path_env))
+        .unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
+}
+
+/// GUI/sidecar 探测与 spawn CLI 共用的搜索目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Agent Hub 库存 probe 与 Prompt 优化必须在打包态稀疏 PATH 下找到
+///     `~/.local/bin` 里的 Claude/Codex；目录清单只能有一份。
+///
+/// Code Logic（这个函数做什么）:
+///     用户常见安装目录 + 传入 PATH + 系统基础路径，去重保序。
+pub(crate) fn gui_cli_search_dirs(
+    home: Option<&Path>,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
     let mut dirs = cli_search_dirs(home, path_env);
-    // 保证系统基础路径始终存在，避免完全覆盖 PATH 后丢 /usr/bin。
     for system in [
         PathBuf::from("/usr/local/bin"),
         PathBuf::from("/usr/bin"),
@@ -110,7 +125,7 @@ fn cli_command_path_env_with(home: Option<&Path>, path_env: Option<&std::ffi::Os
             dirs.push(system);
         }
     }
-    std::env::join_paths(dirs).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
+    dirs
 }
 
 /// 常见 Claude CLI 安装目录 + 当前 PATH 条目。

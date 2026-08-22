@@ -54,7 +54,8 @@ impl TargetEnvironment {
     /// 从当前 process env 构造（生产 IPC / owner 路径）。
     ///
     /// Business Logic: 跨 Agent 手动同步与 portable inventory 共用同一解析语义。
-    /// Code Logic: 拷贝关键覆盖键 + PATH 分片 + home。
+    ///     打包 GUI 的 PATH 不含用户 shell 目录，必须叠常见 CLI 安装路径。
+    /// Code Logic: 拷贝关键覆盖键 + `gui_augmented_path_entries` + home。
     pub fn from_process() -> Self {
         use std::collections::BTreeMap;
         use std::env;
@@ -76,15 +77,30 @@ impl TargetEnvironment {
                 }
             }
         }
-        let path_entries = env::var_os("PATH")
-            .map(|p| env::split_paths(&p).collect())
-            .unwrap_or_default();
+        let path_entries = gui_augmented_path_entries(&home, env::var_os("PATH").as_deref());
         Self {
             home,
             vars,
             path_entries,
         }
     }
+}
+
+/// 构造 GUI/sidecar 探测 CLI 用的 PATH 条目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打包后的 Tauri/launchd 进程只继承系统 PATH，通常不含用户 shell 里的
+///     `~/.local/bin`。Agent Hub 若按裸 PATH 探测，会把已安装的 Claude 标成
+///     `cli_version_unknown`，Plugin/MCP 启停按钮全部消失。Prompt 优化已经
+///     用同一套目录增强 PATH，库存探测必须对齐。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 `claude_cli` 的常见安装目录 + 传入 PATH + 系统基础路径；去重保序。
+pub(crate) fn gui_augmented_path_entries(
+    home: &Path,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    crate::claude_cli::gui_cli_search_dirs(Some(home), path_env)
 }
 
 /// 单 target 配置根（及可选兼容 Skill 根）。
@@ -722,6 +738,31 @@ mod tests {
             fs::canonicalize(&first).unwrap()
         );
         assert!(resolve_first_executable(["missing-a", "missing-b"], &env).is_none());
+    }
+
+    #[test]
+    fn gui_augmented_path_entries_find_claude_in_user_local_bin_when_path_is_sparse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let local_bin = home.join(".local").join("bin");
+        fs::create_dir_all(&local_bin).expect("mkdir");
+        let fake_cli = local_bin.join("claude");
+        fs::write(&fake_cli, b"#!/bin/sh\necho '2.1.207 (Claude Code)'\n").expect("write");
+        let mut perms = fs::metadata(&fake_cli).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_cli, perms).unwrap();
+
+        let entries = gui_augmented_path_entries(home, Some(std::ffi::OsStr::new("/usr/bin:/bin")));
+        let env = TargetEnvironment {
+            home: home.to_path_buf(),
+            vars: BTreeMap::new(),
+            path_entries: entries,
+        };
+        let resolved = resolve_executable("claude", &env).expect("应解析到 ~/.local/bin/claude");
+        assert_eq!(
+            fs::canonicalize(&resolved).unwrap(),
+            fs::canonicalize(&fake_cli).unwrap()
+        );
     }
 
     #[test]

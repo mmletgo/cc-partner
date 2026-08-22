@@ -2481,9 +2481,10 @@ fn current_target_environment() -> TargetEnvironment {
             }
         }
     }
-    let path_entries = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
+    let path_entries = crate::agent_hub::targets::paths::gui_augmented_path_entries(
+        &home,
+        std::env::var_os("PATH").as_deref(),
+    );
     TargetEnvironment {
         home,
         vars,
@@ -2716,6 +2717,106 @@ enabled = false
             PortableInventoryMutationCapability::Blocked
         );
         assert_eq!(target.reason_code.as_deref(), Some("cli_version_unknown"));
+    }
+
+    #[test]
+    fn sparse_gui_path_still_exposes_claude_plugin_and_mcp_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let local_bin = home.join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let fake_cli = local_bin.join("claude");
+        write(&fake_cli, "#!/bin/sh\necho '2.1.207 (Claude Code)'\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_cli).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_cli, perms).unwrap();
+        }
+        write(
+            &home.join(".claude/plugins/demo-plugin/.claude-plugin/plugin.json"),
+            r#"{"name":"demo-plugin","version":"1.0.0"}"#,
+        );
+        write(
+            &home.join(".claude/.claude.json"),
+            r#"{
+  "mcpServers": {
+    "good-api": {
+      "command": "uvx",
+      "args": ["srv"],
+      "enabled": true
+    }
+  }
+}"#,
+        );
+
+        let mut vars = Map::new();
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            home.join(".claude").to_string_lossy().into(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: crate::agent_hub::targets::paths::gui_augmented_path_entries(
+                &home,
+                Some(std::ffi::OsStr::new("/usr/bin:/bin")),
+            ),
+        };
+        let scopes = [PortableScanScope {
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            absolute_path: home.clone(),
+        }];
+
+        let plugin_query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Plugin),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (plugin_targets, plugin_items) =
+            scan_portable_inventory_facts_query(&env, &scopes, plugin_query).expect("plugin scan");
+        let claude_target = plugin_targets
+            .iter()
+            .find(|t| t.target == AgentTarget::Claude)
+            .expect("claude target");
+        assert_eq!(
+            claude_target.mutation_capability,
+            PortableInventoryMutationCapability::Supported,
+            "GUI 稀疏 PATH 仍应认证 ~/.local/bin/claude；got reason={:?}",
+            claude_target.reason_code
+        );
+        let plugin = plugin_items
+            .iter()
+            .find(|i| i.native_id.contains("demo-plugin"))
+            .expect("demo plugin");
+        assert_eq!(plugin.actual_enabled, Some(true));
+        assert!(
+            plugin.capabilities.can_disable,
+            "Claude plugin must expose disable when CLI is only in ~/.local/bin"
+        );
+
+        let mcp_query = PortableInventoryQuery {
+            target: Some(AgentTarget::Claude),
+            kind: Some(PortableAssetKind::Mcp),
+            scope_kind: Some(ScopeKind::User),
+            local_project_id: None,
+        };
+        let (_mcp_targets, mcp_items) =
+            scan_portable_inventory_facts_query(&env, &scopes, mcp_query).expect("mcp scan");
+        let mcp = mcp_items
+            .iter()
+            .find(|i| i.native_id == "good-api")
+            .expect("mcp");
+        assert_eq!(mcp.actual_enabled, Some(true));
+        assert!(
+            mcp.capabilities.can_disable,
+            "Claude MCP must expose disable when CLI is only in ~/.local/bin"
+        );
     }
 
     #[test]

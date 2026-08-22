@@ -87,8 +87,15 @@ impl ProcessRunner for RealProcessRunner {
         &self,
         spec: &crate::agent_hub::packages::activator::ProcessSpec,
     ) -> Result<crate::agent_hub::packages::activator::ProcessOutcome, AppError> {
-        let mut cmd = std::process::Command::new(&spec.program);
+        let env = crate::agent_hub::targets::paths::TargetEnvironment::from_process();
+        let program = spec
+            .program
+            .to_str()
+            .and_then(|name| crate::agent_hub::targets::paths::resolve_executable(name, &env))
+            .unwrap_or_else(|| spec.program.clone());
+        let mut cmd = std::process::Command::new(&program);
         cmd.args(&spec.args);
+        cmd.env("PATH", crate::claude_cli::cli_command_path_env());
         if let Some(cwd) = spec.cwd.as_ref() {
             cmd.current_dir(cwd);
         }

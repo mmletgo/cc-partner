@@ -1292,9 +1292,10 @@ fn current_target_environment() -> TargetEnvironment {
             }
         }
     }
-    let path_entries = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
-        .unwrap_or_default();
+    let path_entries = crate::agent_hub::targets::paths::gui_augmented_path_entries(
+        &home,
+        std::env::var_os("PATH").as_deref(),
+    );
     TargetEnvironment {
         home,
         vars,
