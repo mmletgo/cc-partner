@@ -157,11 +157,15 @@ export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): b
 /**
  * Business Logic: 借用徽标要落到具体所有者文案（Claude / 共享 ~/.agents）。
  *   仓库真树本身不是「来自谁」；经其他 Agent 路径加载时用 loadedViaTarget。
- * Code Logic: loadedViaTarget 优先；否则 ownedBy；portableStore 仅作兜底。
+ *   `~/.agents` 是共享根，Claude 并不加载，即使后端误填 loadedViaTarget=claude。
+ * Code Logic: 路径含 `/.agents/` 固定 sharedAgents；否则 loadedViaTarget 优先；
+ *   ownedBy；portableStore 兜底。
  */
 export function portableBorrowedOwnerLabelKey(
   item: PortableInventoryItemDto,
 ): PortableBorrowedOwnerLabelKey {
+  const path = (item.sourcePath ?? '').replace(/\\/g, '/');
+  if (path.includes('/.agents/')) return 'sharedAgents';
   const via = item.store?.loadedViaTarget;
   if (via && isHubTarget(via)) return via;
   if (item.ownedBy === 'sharedAgents' || item.ownedBy === 'unknown') {

@@ -2040,9 +2040,14 @@ fn annotate_store_loaded_via_other_path(items: &mut [PortableInventoryItemDto]) 
         {
             item.store.store_attached = false;
             item.store.loaded_via_other_path = true;
-            if item.store.loaded_via_target.is_none() {
-                item.store.loaded_via_target =
-                    item.owned_by.as_hub_target().or(Some(AgentTarget::Claude));
+            let agents_shared = item
+                .source_path
+                .as_deref()
+                .is_some_and(|p| p.replace('\\', "/").contains("/.agents/"));
+            if agents_shared {
+                item.store.loaded_via_target = None;
+            } else if item.store.loaded_via_target.is_none() {
+                item.store.loaded_via_target = infer_store_loaded_via_target(item);
             }
             if !item
                 .warnings
@@ -2053,6 +2058,47 @@ fn annotate_store_loaded_via_other_path(items: &mut [PortableInventoryItemDto]) 
             }
         }
     }
+}
+
+/// 从观测路径推断「仍被谁的目录加载」；禁止在不知道时默认 Claude。
+///
+/// Business Logic: Grok 会扫 `~/.agents` 与 `~/.claude/skills`。前者是共享根，
+///     Claude 并不加载；默认 Claude 会让 superpowers 这类包谎称「来自 Claude Code」。
+/// Code Logic: 有 Hub ownedBy 且不是当前 target 则用之；否则看 source_path。
+///     `/.agents/` → None（共享根）；`/.claude/` → Claude；其它配置根同理。
+fn infer_store_loaded_via_target(item: &PortableInventoryItemDto) -> Option<AgentTarget> {
+    let path = item.source_path.as_deref().map(|p| p.replace('\\', "/"));
+    if path.as_deref().is_some_and(|p| p.contains("/.agents/")) {
+        return None;
+    }
+    if let Some(owner) = item.owned_by.as_hub_target() {
+        if owner != item.target {
+            return Some(owner);
+        }
+    }
+    let path = path?;
+    if path.contains("/.claude/") {
+        return Some(AgentTarget::Claude);
+    }
+    if path.contains("/.codex/") {
+        return Some(AgentTarget::Codex);
+    }
+    if path.contains("/.grok/") {
+        return Some(AgentTarget::Grok);
+    }
+    if path.contains("/.gemini/") {
+        return Some(AgentTarget::Gemini);
+    }
+    if path.contains("/.cursor/") {
+        return Some(AgentTarget::Cursor);
+    }
+    if path.contains("/.pi/") || path.contains("/.pi-coding/") {
+        return Some(AgentTarget::Pi);
+    }
+    if path.contains("/.config/opencode/") || path.contains("/.opencode/") {
+        return Some(AgentTarget::OpenCode);
+    }
+    None
 }
 
 fn origin_to_inventory_origin(
@@ -4642,7 +4688,7 @@ enabled = ["native-only"]
     }
 
     #[test]
-    fn grok_unattached_store_keeps_loaded_via_claude_hint() {
+    fn grok_unattached_store_does_not_default_loaded_via_to_claude() {
         let claude = store_item(AgentTarget::Claude, PortableOriginKind::Native, true, false);
         let mut grok = store_item(
             AgentTarget::Grok,
@@ -4657,11 +4703,44 @@ enabled = ["native-only"]
         grok = items.remove(1);
         assert!(!grok.store.store_attached);
         assert!(grok.store.loaded_via_other_path);
-        assert_eq!(grok.store.loaded_via_target, Some(AgentTarget::Claude));
+        assert_eq!(grok.store.loaded_via_target, None);
         assert!(grok
             .warnings
             .iter()
             .any(|w| w == "store_loaded_via_other_path"));
+    }
+
+    #[test]
+    fn grok_claude_compat_path_still_hints_claude() {
+        let mut grok = store_item(
+            AgentTarget::Grok,
+            PortableOriginKind::Compatibility,
+            false,
+            false,
+        );
+        grok.source_path = Some("/home/.claude/skills/foo".into());
+        let mut items = vec![grok];
+        annotate_store_loaded_via_other_path(&mut items);
+        assert_eq!(items[0].store.loaded_via_target, Some(AgentTarget::Claude));
+    }
+
+    #[test]
+    fn grok_agents_path_is_shared_not_claude() {
+        let mut grok = store_item(
+            AgentTarget::Grok,
+            PortableOriginKind::Compatibility,
+            false,
+            false,
+        );
+        grok.source_path = Some("/home/.agents/skills/superpowers/using-superpowers".into());
+        grok.store.loaded_via_target = Some(AgentTarget::Claude);
+        let mut items = vec![grok];
+        annotate_store_loaded_via_other_path(&mut items);
+        assert_eq!(
+            items[0].store.loaded_via_target, None,
+            "~/.agents is shared; Claude does not load it"
+        );
+        assert!(items[0].store.loaded_via_other_path);
     }
 
     #[test]

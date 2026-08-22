@@ -1440,4 +1440,33 @@ describe('portableInventoryPresentation ownership partition', () => {
     expect(portableBorrowedOwnerLabelKey(shared)).toBe('sharedAgents');
     expect(isPortableBorrowedRuntimeItem(legacy)).toBe(false);
   });
+
+  test('Grok nested skill in ~/.agents is shared, not Claude, even if via is claude', () => {
+    const nested = makeItem({
+      inventoryItemId: 'grok-skill-using-superpowers',
+      kind: 'skill',
+      nativeId: 'using-superpowers',
+      displayName: 'using-superpowers',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/using-superpowers',
+      warnings: ['nested_skill_package', 'store_loaded_via_other_path'],
+      store: {
+        storeId: 'skill:superpowers',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(nested)).toBe(true);
+    expect(portableBorrowedOwnerLabelKey(nested)).toBe('sharedAgents');
+    expect(portableBorrowedOwnerJumpTarget(nested)).toBeNull();
+  });
 });
