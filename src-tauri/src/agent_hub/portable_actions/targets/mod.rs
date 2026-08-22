@@ -99,6 +99,39 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
     }
 }
 
+/// 判断 Enable/Disable 是否只改 viewing 配置文件、不 spawn CLI。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Grok Plugin 与 Grok/Gemini/Cursor/OpenCode MCP 的启停只写本机 viewing 文件；
+///     CLI 未安装或 mutation 未认证时仍须允许用户开关。Claude Plugin 必须继续走 CLI 门禁。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当 action 为 Enable 或 Disable，且 (Grok, Plugin) 或
+///     (Grok|Gemini|Cursor|OpenCode, Mcp) 时返回 true；Uninstall / Skill / Command / Pi / Claude 均为 false。
+pub fn is_file_only_viewing_toggle(
+    target: AgentTarget,
+    kind: PortableAssetKind,
+    action: PortableAssetActionKind,
+) -> bool {
+    if !matches!(
+        action,
+        PortableAssetActionKind::Enable | PortableAssetActionKind::Disable
+    ) {
+        return false;
+    }
+    matches!(
+        (target, kind),
+        (AgentTarget::Grok, PortableAssetKind::Plugin)
+            | (
+                AgentTarget::Grok
+                    | AgentTarget::Gemini
+                    | AgentTarget::Cursor
+                    | AgentTarget::OpenCode,
+                PortableAssetKind::Mcp
+            )
+    )
+}
+
 /// 判断本机直管执行器是否真实覆盖指定动作。
 ///
 /// Business Logic（为什么需要）:
@@ -106,9 +139,11 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
 ///     就把实现存在误当成运行时已认证；allowlist 只描述 adapter 覆盖面，最终写入仍须
 ///     通过 support manifest 的逐动作 capability 门禁。
 ///     仓库软链附加/卸下只改本机文件，不 spawn CLI，OpenCode 等未认证 target 也必须能卸下。
+///     Grok Plugin 与未认证 native MCP 的 viewing 启停同样只改文件，不得被 CLI 闸门挡住。
 ///
 /// Code Logic（做什么）:
 ///     Skill/Command 的 store attach/detach/migrate/destroy 对全部 target 开放；
+///     file-only viewing Enable/Disable 对 Grok Plugin 与 Grok/Gemini/Cursor/OpenCode MCP 开放；
 ///     Claude 与 Codex 另覆盖四类 enable/disable/uninstall；
 ///     MCP/Plugin 排除 store 动作；Adopt / InstallToSourceTarget 仍 fail-closed。
 pub fn supports_direct_local_action(
@@ -118,6 +153,9 @@ pub fn supports_direct_local_action(
 ) -> bool {
     if action.is_portable_store_action() {
         return kind.supports_portable_store();
+    }
+    if is_file_only_viewing_toggle(target, kind, action) {
+        return true;
     }
     matches!(target, AgentTarget::Claude | AgentTarget::Codex)
         && matches!(
@@ -240,11 +278,19 @@ mod direct_action_support_tests {
                     kind,
                     action
                 ));
-                assert!(!supports_direct_local_action(
-                    AgentTarget::OpenCode,
-                    kind,
-                    action
-                ));
+                if is_file_only_viewing_toggle(AgentTarget::OpenCode, kind, action) {
+                    assert!(supports_direct_local_action(
+                        AgentTarget::OpenCode,
+                        kind,
+                        action
+                    ));
+                } else {
+                    assert!(!supports_direct_local_action(
+                        AgentTarget::OpenCode,
+                        kind,
+                        action
+                    ));
+                }
             }
             assert!(!supports_direct_local_action(
                 AgentTarget::Claude,
@@ -303,6 +349,40 @@ mod direct_action_support_tests {
             AgentTarget::Grok,
             PortableAssetKind::Skill,
             PortableAssetActionKind::MaterializeEscapeLink,
+        ));
+    }
+
+    #[test]
+    fn file_only_viewing_toggle_is_grok_plugin_and_uncertified_native_mcp() {
+        assert!(is_file_only_viewing_toggle(
+            AgentTarget::Grok,
+            PortableAssetKind::Plugin,
+            PortableAssetActionKind::Disable,
+        ));
+        assert!(supports_direct_local_action(
+            AgentTarget::Grok,
+            PortableAssetKind::Plugin,
+            PortableAssetActionKind::Disable,
+        ));
+        assert!(is_file_only_viewing_toggle(
+            AgentTarget::Gemini,
+            PortableAssetKind::Mcp,
+            PortableAssetActionKind::Enable,
+        ));
+        assert!(!is_file_only_viewing_toggle(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            PortableAssetActionKind::Disable,
+        ));
+        assert!(!is_file_only_viewing_toggle(
+            AgentTarget::Grok,
+            PortableAssetKind::Mcp,
+            PortableAssetActionKind::Uninstall,
+        ));
+        assert!(!supports_direct_local_action(
+            AgentTarget::Grok,
+            PortableAssetKind::Plugin,
+            PortableAssetActionKind::Uninstall,
         ));
     }
 }

@@ -356,7 +356,13 @@ async fn build_change(
         }
     }
 
+    let file_only = crate::agent_hub::portable_actions::targets::is_file_only_viewing_toggle(
+        item.target,
+        item.kind,
+        request.action,
+    );
     let apply_target_cli_gates = !(request.action.bypasses_target_cli_gates()
+        || file_only
         || (borrowed && target_dto.map(|t| t.target) != Some(mutation_target)));
     if apply_target_cli_gates {
         if let Some(t) = target_dto {
@@ -923,6 +929,186 @@ args = ["mcp"]
         assert!(!reasons
             .iter()
             .any(|reason| reason == "PORTABLE_ASSET_ACTION_DEACTIVATE_PACKAGE_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn grok_plugin_disable_not_blocked_when_cli_mutation_is_blocked() {
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Grok,
+                "user",
+                "/grok/plugins/demo",
+                "demo@local",
+            ),
+            target: AgentTarget::Grok,
+            loaded_by: AgentTarget::Grok,
+            owned_by: PortableAssetOwner::Grok,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
+            kind: PortableAssetKind::Plugin,
+            native_id: "demo@local".into(),
+            display_name: "demo".into(),
+            description: None,
+            version: Some("1.0.0".into()),
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some("/grok/plugins/demo".into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("content".into()),
+            tree_hash: Some("tree".into()),
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: true,
+                can_disable: true,
+                can_uninstall: false,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
+                can_confirm_current_version: false,
+                can_materialize_escape_link: false,
+                reason_code: None,
+                evidence_ids: vec![],
+            },
+            warnings: vec![],
+            mcp_credential: None,
+            store: Default::default(),
+        };
+        let target = PortableInventoryTargetDto {
+            target: AgentTarget::Grok,
+            installed: false,
+            version: None,
+            executable: None,
+            config_root: "/cfg/grok".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Blocked,
+            reason_code: Some("cli_version_unknown".into()),
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+
+        let (change, reasons) =
+            build_change(&item, Some(&target), AgentTarget::Grok, false, &request)
+                .await
+                .expect("build grok plugin disable");
+        assert_eq!(change.operation, PortableAssetPlanOperation::Disable);
+        assert!(!reasons.iter().any(|reason| {
+            reason == "PORTABLE_ASSET_ACTION_MUTATION_BLOCKED"
+                || reason == "PORTABLE_ASSET_ACTION_CLI_NOT_INSTALLED"
+        }));
+        assert!(!change.blocking_reasons.iter().any(|reason| {
+            reason == "PORTABLE_ASSET_ACTION_MUTATION_BLOCKED"
+                || reason == "PORTABLE_ASSET_ACTION_CLI_NOT_INSTALLED"
+        }));
+    }
+
+    #[tokio::test]
+    async fn claude_plugin_disable_still_blocked_when_cli_unknown() {
+        let item = PortableInventoryItemDto {
+            inventory_item_id: inventory_item_id(
+                AgentTarget::Claude,
+                "user",
+                "/plugins/demo",
+                "demo@local",
+            ),
+            target: AgentTarget::Claude,
+            loaded_by: AgentTarget::Claude,
+            owned_by: PortableAssetOwner::Claude,
+            origin_kind: PortableOriginKind::Native,
+            native_output_candidate: true,
+            kind: PortableAssetKind::Plugin,
+            native_id: "demo@local".into(),
+            display_name: "demo".into(),
+            description: None,
+            version: Some("1.0.0".into()),
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some("/plugins/demo".into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("content".into()),
+            tree_hash: Some("tree".into()),
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto {
+                can_enable: true,
+                can_disable: true,
+                can_uninstall: false,
+                can_adopt: false,
+                can_install_to_source_target: false,
+                can_migrate_to_store: false,
+                can_attach: false,
+                can_detach: false,
+                can_destroy_store: false,
+                can_confirm_current_version: false,
+                can_materialize_escape_link: false,
+                reason_code: None,
+                evidence_ids: vec![],
+            },
+            warnings: vec![],
+            mcp_credential: None,
+            store: Default::default(),
+        };
+        let target = PortableInventoryTargetDto {
+            target: AgentTarget::Claude,
+            installed: false,
+            version: None,
+            executable: None,
+            config_root: "/cfg/claude".into(),
+            scan_capability: PortableInventoryScanCapability::Supported,
+            mutation_capability: PortableInventoryMutationCapability::Blocked,
+            reason_code: Some("cli_version_unknown".into()),
+            evidence_ids: vec![],
+        };
+        let request = PreviewPortableAssetActionRequest {
+            inventory_snapshot_hash: "hash".into(),
+            inventory_query: Default::default(),
+            inventory_item_ids: vec![item.inventory_item_id.clone()],
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            expected_canonical_revision_id: None,
+        };
+
+        let (change, reasons) =
+            build_change(&item, Some(&target), AgentTarget::Claude, false, &request)
+                .await
+                .expect("build claude plugin disable");
+        assert_eq!(change.operation, PortableAssetPlanOperation::Disable);
+        assert!(reasons.iter().any(|reason| {
+            reason == "PORTABLE_ASSET_ACTION_MUTATION_BLOCKED"
+                || reason == "PORTABLE_ASSET_ACTION_CLI_NOT_INSTALLED"
+        }));
+        assert!(change.blocking_reasons.iter().any(|reason| {
+            reason == "PORTABLE_ASSET_ACTION_MUTATION_BLOCKED"
+                || reason == "PORTABLE_ASSET_ACTION_CLI_NOT_INSTALLED"
+        }));
     }
 
     #[tokio::test]
