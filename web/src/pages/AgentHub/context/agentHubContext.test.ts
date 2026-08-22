@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from 'vitest';
 import {
+  AGENT_HUB_PORTABLE_USER_CAPABILITY,
   AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY,
   getAgentHubContextCapability,
   getAgentHubDraftIdentity,
@@ -14,6 +15,7 @@ import {
   parseAgentHubContext,
   parseWorkbenchHostedAgentHubContext,
   peerAllowsUserInstructionThreePane,
+  peerAllowsUserPortableInventory,
   portableInventoryTargetForHubContext,
   writeAgentHubContext,
   writeWorkbenchHostedAgentHubContext,
@@ -359,6 +361,23 @@ describe('Agent Hub context capability', () => {
       peerAllowsUserInstructionThreePane({
         online: true,
         capabilities: [AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY],
+      }),
+    ).toBe(true);
+  });
+
+  test('peerAllowsUserPortableInventory requires online plus capability token', () => {
+    expect(peerAllowsUserPortableInventory(null)).toBe(false);
+    expect(
+      peerAllowsUserPortableInventory({
+        online: false,
+        capabilities: [AGENT_HUB_PORTABLE_USER_CAPABILITY],
+      }),
+    ).toBe(false);
+    expect(peerAllowsUserPortableInventory({ online: true, capabilities: [] })).toBe(false);
+    expect(
+      peerAllowsUserPortableInventory({
+        online: true,
+        capabilities: [AGENT_HUB_PORTABLE_USER_CAPABILITY],
       }),
     ).toBe(true);
   });

@@ -31,8 +31,10 @@ use crate::agent_hub::portable_inventory::{PortableInventoryQuery, PortableInven
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::remote_client::{
-    apply_user_instruction_plan_for_state, inspect_user_instruction_workspace_for_state,
-    list_user_instruction_slot_versions_for_state, preview_user_instruction_setup_for_state,
+    apply_portable_asset_action_for_state, apply_user_instruction_plan_for_state,
+    get_portable_asset_action_for_state, inspect_portable_inventory_for_state,
+    inspect_user_instruction_workspace_for_state, list_user_instruction_slot_versions_for_state,
+    preview_portable_asset_action_for_state, preview_user_instruction_setup_for_state,
     preview_user_instruction_update_for_state, read_user_native_instruction_file_for_state,
     restore_user_instruction_slot_version_for_state, save_user_instruction_blocks_for_state,
     write_user_native_instruction_file_for_state,
@@ -651,61 +653,66 @@ pub async fn agent_hub_confirm_project_mapping(
     confirm_project_mapping_for_state(state.inner(), request).await
 }
 
-/// Business Logic: 本机 portable inventory 是实际状态真相（只读）。
-/// Code Logic: owner PortableService / GuiClient control query。
+/// Business Logic: portable inventory 是实际状态真相（只读）；deviceId 非空则对端 user scope。
+/// Code Logic: owner for_state / GuiClient control query。
 #[tauri::command]
 pub async fn agent_hub_inspect_portable_inventory(
     state: State<'_, AppState>,
     request: Option<PortableInventoryQuery>,
+    device_id: Option<String>,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     let query = request.unwrap_or_default();
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_inspect_portable_inventory(query));
+            .agent_hub_inspect_portable_inventory(query, device_id.clone()));
     }
-    PortableService::inspect_portable_inventory_query(state.inner(), query).await
+    inspect_portable_inventory_for_state(state.inner(), device_id.as_deref(), query).await
 }
 
-/// Business Logic: apply 前必须生成绑定 inventory hash 的短期 plan。
+/// Business Logic: apply 前必须生成绑定 inventory hash 的短期 plan；deviceId 非空则对端。
 /// Code Logic: v3 写兼容；owner preview / GuiClient control。
 #[tauri::command]
 pub async fn agent_hub_preview_portable_asset_action(
     state: State<'_, AppState>,
     request: PreviewPortableAssetActionRequest,
+    device_id: Option<String>,
 ) -> Result<PortableAssetActionPlanDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_preview_portable_asset_action(request));
+            .agent_hub_preview_portable_asset_action(request, device_id.clone()));
     }
-    PortableService::preview_portable_asset_action(state.inner(), request).await
+    preview_portable_asset_action_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
-/// Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放。
+/// Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放；deviceId 非空则对端。
 /// Code Logic: v3 mutation；owner apply / GuiClient 长超时 control。
 #[tauri::command]
 pub async fn agent_hub_apply_portable_asset_action(
     state: State<'_, AppState>,
     request: ApplyPortableAssetActionRequest,
+    device_id: Option<String>,
 ) -> Result<PortableAssetActionResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_apply_portable_asset_action(request));
+            .agent_hub_apply_portable_asset_action(request, device_id.clone()));
     }
-    PortableService::apply_portable_asset_action(state.inner(), request).await
+    apply_portable_asset_action_for_state(state.inner(), device_id.as_deref(), request).await
 }
 
-/// Business Logic: 对账 apply 结果（含 outcomeUnknown）。
+/// Business Logic: 对账 apply 结果（含 outcomeUnknown）；deviceId 非空则对端。
 /// Code Logic: owner get / GuiClient control query。
 #[tauri::command]
 pub async fn agent_hub_get_portable_asset_action(
     state: State<'_, AppState>,
     client_request_id: String,
+    device_id: Option<String>,
 ) -> Result<PortableAssetActionResultDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return proxy_agent_hub!(state, |client| client
-            .agent_hub_get_portable_asset_action(&client_request_id));
+            .agent_hub_get_portable_asset_action(&client_request_id, device_id.clone()));
     }
-    PortableService::get_portable_asset_action(state.inner(), &client_request_id).await
+    get_portable_asset_action_for_state(state.inner(), device_id.as_deref(), &client_request_id)
+        .await
 }
 
 /// Business Logic: 读取 remote shortcut owning peer 的精确项目库存。
@@ -1796,16 +1803,16 @@ mod tests {
         ] {
             assert!(src.contains(sig), "missing command signature {sig}");
         }
-        // HeadlessOwner → PortableService；GuiClient → control client
-        assert!(src.contains("PortableService::inspect_portable_inventory"));
-        assert!(src.contains("PortableService::preview_portable_asset_action"));
-        assert!(src.contains("PortableService::apply_portable_asset_action"));
-        assert!(src.contains("PortableService::get_portable_asset_action"));
+        // HeadlessOwner → for_state（本机或 P2P）；GuiClient → control client
+        assert!(src.contains("inspect_portable_inventory_for_state"));
+        assert!(src.contains("preview_portable_asset_action_for_state"));
+        assert!(src.contains("apply_portable_asset_action_for_state"));
+        assert!(src.contains("get_portable_asset_action_for_state"));
         assert!(src.contains("PortableService::list_remote_portable_inventory"));
         assert!(src.contains("PortableService::preview_portable_pull"));
         assert!(src.contains("PortableService::apply_portable_pull"));
         assert!(src.contains("PortableService::get_portable_pull"));
-        assert!(src.contains(".agent_hub_inspect_portable_inventory()"));
+        assert!(src.contains(".agent_hub_inspect_portable_inventory(query, device_id.clone())"));
         assert!(src.contains(".agent_hub_preview_portable_asset_action("));
         assert!(src.contains(".agent_hub_apply_portable_asset_action("));
         assert!(src.contains(".agent_hub_get_portable_asset_action("));

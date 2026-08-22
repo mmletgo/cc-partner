@@ -1,13 +1,22 @@
-//! agent_hub/remote_client.rs — 用户级三栏指令的 owning-device P2P 客户端。
+//! agent_hub/remote_client.rs — 用户级三栏指令与用户级 portable 的 owning-device P2P 客户端。
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     控制端选中对端设备后，inspect/save/CAS/写入原始文件/analyze·adapt·revise/槽历史
-//!     必须在 owning device 的用户目录执行，禁止静默回落本机 `~/.claude`。
+//!     以及 skill/command/plugin/mcp 主列表 inspect/preview/apply 必须在 owning device
+//!     的用户目录执行，禁止静默回落本机 `~/.claude`。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `RemoteAgentHubClient` 对 `agent-hub.user-instructions.v1` 路由发 POST；
-//!     缺 capability → `capability_unsupported`；`remote:` deviceId 视为递归并拒绝。
+//!     `RemoteAgentHubClient` 对 `agent-hub.user-instructions.v1` 与
+//!     `agent-hub.portable-user.v1` 路由发 POST；缺 capability → `capability_unsupported`；
+//!     `remote:` deviceId 视为递归并拒绝。
 
+use crate::agent_hub::models::ScopeKind;
+use crate::agent_hub::portable_actions::{
+    ApplyPortableAssetActionRequest, PortableAssetActionPlanDto, PortableAssetActionResultDto,
+    PreviewPortableAssetActionRequest,
+};
+use crate::agent_hub::portable_inventory::{PortableInventoryQuery, PortableInventorySnapshotDto};
+use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::service::AgentHubService;
 use crate::agent_hub::user_instructions::{
     AdaptInstructionToOtherAgentsRequest, AdaptInstructionToOtherAgentsResult,
@@ -26,7 +35,7 @@ use crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::{peer_call_error_to_app_error, PeerCallError};
 use crate::net::peer_timeout::PeerTimeoutClass;
-use crate::net::protocol::CAPABILITY_USER_INSTRUCTIONS_V1;
+use crate::net::protocol::{CAPABILITY_PORTABLE_USER_V1, CAPABILITY_USER_INSTRUCTIONS_V1};
 use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
 use serde::de::DeserializeOwned;
@@ -56,6 +65,17 @@ pub const USER_INSTRUCTIONS_READ_NATIVE_FILE_PATH: &str =
     "/api/agent-hub/user-instructions/read-native-file";
 pub const USER_INSTRUCTIONS_WRITE_NATIVE_FILE_PATH: &str =
     "/api/agent-hub/user-instructions/write-native-file";
+
+/// 用户级 portable 主列表 P2P 路径（与 `docs/p2p-protocol.md` 脚手架行一致）。
+pub const PORTABLE_USER_INVENTORY_PATH: &str = "/api/agent-hub/portable/user/inventory";
+pub const PORTABLE_USER_ACTION_PREVIEW_PATH: &str = "/api/agent-hub/portable/user/action/preview";
+pub const PORTABLE_USER_ACTION_APPLY_PATH: &str = "/api/agent-hub/portable/user/action/apply";
+pub const PORTABLE_USER_ACTION_GET_PATH: &str = "/api/agent-hub/portable/user/action/get";
+
+/// 对端用户级库存扫描预算（对齐本机 portable inspect 30s）。
+const PORTABLE_USER_INVENTORY_PEER_TIMEOUT: Duration = Duration::from_secs(30);
+/// 对端用户级 apply（写盘 + rescan）预算，对齐本机 360s。
+const PORTABLE_USER_APPLY_PEER_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// 用户级三栏远端客户端。
 ///
@@ -90,19 +110,36 @@ impl RemoteAgentHubClient {
         })
     }
 
-    /// 解析设备并确认 `agent-hub.user-instructions.v1`。
+    /// 解析设备并确认指定 capability。
     ///
     /// Business Logic: 缺 capability 必须 fail-closed，不得回落本机 home。
     /// Code Logic: devices 表取 base_url → require_capability。
-    pub async fn open(state: &AppState, device_id: &str) -> Result<(Self, String), AppError> {
+    pub async fn open_with_capability(
+        state: &AppState,
+        device_id: &str,
+        capability: &'static str,
+    ) -> Result<(Self, String), AppError> {
         let client = Self::connect(device_id)?;
         let base_url = resolve_device_base_url(state, &client.expected_device_id)?;
         client
             .peer
-            .require_capability(&base_url, CAPABILITY_USER_INSTRUCTIONS_V1)
+            .require_capability(&base_url, capability)
             .await
             .map_err(user_instruction_peer_err)?;
         Ok((client, base_url))
+    }
+
+    /// 解析设备并确认 `agent-hub.user-instructions.v1`。
+    pub async fn open(state: &AppState, device_id: &str) -> Result<(Self, String), AppError> {
+        Self::open_with_capability(state, device_id, CAPABILITY_USER_INSTRUCTIONS_V1).await
+    }
+
+    /// 解析设备并确认 `agent-hub.portable-user.v1`。
+    pub async fn open_portable_user(
+        state: &AppState,
+        device_id: &str,
+    ) -> Result<(Self, String), AppError> {
+        Self::open_with_capability(state, device_id, CAPABILITY_PORTABLE_USER_V1).await
     }
 
     /// POST 对端 inspect（空 body）。
@@ -277,6 +314,66 @@ impl RemoteAgentHubClient {
             USER_INSTRUCTIONS_RESTORE_SLOT_PATH,
             req,
             PeerTimeoutClass::Mutation,
+        )
+        .await
+    }
+
+    /// POST 对端用户级 portable inventory。
+    pub async fn inspect_portable(
+        &self,
+        base_url: &str,
+        query: &PortableInventoryQuery,
+    ) -> Result<PortableInventorySnapshotDto, AppError> {
+        self.post_json_long(
+            base_url,
+            PORTABLE_USER_INVENTORY_PATH,
+            query,
+            PORTABLE_USER_INVENTORY_PEER_TIMEOUT,
+        )
+        .await
+    }
+
+    /// POST 对端用户级 portable action preview。
+    pub async fn preview_portable_action(
+        &self,
+        base_url: &str,
+        req: &PreviewPortableAssetActionRequest,
+    ) -> Result<PortableAssetActionPlanDto, AppError> {
+        self.post_json(
+            base_url,
+            PORTABLE_USER_ACTION_PREVIEW_PATH,
+            req,
+            PeerTimeoutClass::Mutation,
+        )
+        .await
+    }
+
+    /// POST 对端用户级 portable action apply。
+    pub async fn apply_portable_action(
+        &self,
+        base_url: &str,
+        req: &ApplyPortableAssetActionRequest,
+    ) -> Result<PortableAssetActionResultDto, AppError> {
+        self.post_json_long(
+            base_url,
+            PORTABLE_USER_ACTION_APPLY_PATH,
+            req,
+            PORTABLE_USER_APPLY_PEER_TIMEOUT,
+        )
+        .await
+    }
+
+    /// POST 对端用户级 portable action get。
+    pub async fn get_portable_action(
+        &self,
+        base_url: &str,
+        client_request_id: &str,
+    ) -> Result<PortableAssetActionResultDto, AppError> {
+        self.post_json(
+            base_url,
+            PORTABLE_USER_ACTION_GET_PATH,
+            &serde_json::json!({ "clientRequestId": client_request_id }),
+            PeerTimeoutClass::Metadata,
         )
         .await
     }
@@ -523,6 +620,82 @@ pub async fn revise_instruction_slot_for_device(
     local.await
 }
 
+/// 用户级远端 portable 不得夹带 project 身份。
+///
+/// Business Logic: 主列表切远端设备只管理对端 user scope；项目库存走 portable-project。
+/// Code Logic: project scope / localProjectId → `local_user_scope_required`；其余强制 user。
+pub fn require_user_portable_query(query: &mut PortableInventoryQuery) -> Result<(), AppError> {
+    if query.scope_kind == Some(ScopeKind::Project)
+        || query
+            .local_project_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(AppError::validation(
+            "local_user_scope_required".to_string(),
+        ));
+    }
+    query.scope_kind = Some(ScopeKind::User);
+    query.local_project_id = None;
+    Ok(())
+}
+
+/// inspect portable：deviceId 非空则 P2P 用户级库存，否则本机。
+pub async fn inspect_portable_inventory_for_state(
+    state: &AppState,
+    device_id: Option<&str>,
+    mut query: PortableInventoryQuery,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    if let Some(peer_id) = remote_user_instruction_device_id(state, device_id)? {
+        require_user_portable_query(&mut query)?;
+        let (client, base_url) = RemoteAgentHubClient::open_portable_user(state, &peer_id).await?;
+        return client.inspect_portable(&base_url, &query).await;
+    }
+    PortableService::inspect_portable_inventory_query(state, query).await
+}
+
+/// preview portable action：deviceId 非空则 P2P。
+pub async fn preview_portable_asset_action_for_state(
+    state: &AppState,
+    device_id: Option<&str>,
+    mut request: PreviewPortableAssetActionRequest,
+) -> Result<PortableAssetActionPlanDto, AppError> {
+    if let Some(peer_id) = remote_user_instruction_device_id(state, device_id)? {
+        require_user_portable_query(&mut request.inventory_query)?;
+        let (client, base_url) = RemoteAgentHubClient::open_portable_user(state, &peer_id).await?;
+        return client.preview_portable_action(&base_url, &request).await;
+    }
+    PortableService::preview_portable_asset_action(state, request).await
+}
+
+/// apply portable action：deviceId 非空则 P2P。
+pub async fn apply_portable_asset_action_for_state(
+    state: &AppState,
+    device_id: Option<&str>,
+    request: ApplyPortableAssetActionRequest,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    if let Some(peer_id) = remote_user_instruction_device_id(state, device_id)? {
+        let (client, base_url) = RemoteAgentHubClient::open_portable_user(state, &peer_id).await?;
+        return client.apply_portable_action(&base_url, &request).await;
+    }
+    PortableService::apply_portable_asset_action(state, request).await
+}
+
+/// get portable action：deviceId 非空则 P2P。
+pub async fn get_portable_asset_action_for_state(
+    state: &AppState,
+    device_id: Option<&str>,
+    client_request_id: &str,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    if let Some(peer_id) = remote_user_instruction_device_id(state, device_id)? {
+        let (client, base_url) = RemoteAgentHubClient::open_portable_user(state, &peer_id).await?;
+        return client
+            .get_portable_action(&base_url, client_request_id)
+            .await;
+    }
+    PortableService::get_portable_asset_action(state, client_request_id).await
+}
+
 fn resolve_device_base_url(state: &AppState, device_id: &str) -> Result<String, AppError> {
     let devices = state.devices.read().expect("devices lock");
     devices
@@ -632,6 +805,51 @@ mod tests {
             CAPABILITY_USER_INSTRUCTIONS_V1,
             "agent-hub.user-instructions.v1"
         );
+    }
+
+    /// Business Logic: 用户级 portable 路径与能力 token 必须与协议表同行。
+    #[test]
+    fn portable_user_paths_match_scaffold_rows() {
+        assert_eq!(
+            PORTABLE_USER_INVENTORY_PATH,
+            "/api/agent-hub/portable/user/inventory"
+        );
+        assert_eq!(
+            PORTABLE_USER_ACTION_PREVIEW_PATH,
+            "/api/agent-hub/portable/user/action/preview"
+        );
+        assert_eq!(
+            PORTABLE_USER_ACTION_APPLY_PATH,
+            "/api/agent-hub/portable/user/action/apply"
+        );
+        assert_eq!(
+            PORTABLE_USER_ACTION_GET_PATH,
+            "/api/agent-hub/portable/user/action/get"
+        );
+        assert_eq!(CAPABILITY_PORTABLE_USER_V1, "agent-hub.portable-user.v1");
+    }
+
+    /// Business Logic: 远端设备主列表不得夹带项目身份后静默扫 user。
+    #[test]
+    fn require_user_portable_query_rejects_project_and_forces_user() {
+        let mut query = PortableInventoryQuery {
+            target: None,
+            kind: None,
+            scope_kind: None,
+            local_project_id: None,
+        };
+        require_user_portable_query(&mut query).expect("user query");
+        assert_eq!(query.scope_kind, Some(ScopeKind::User));
+        assert!(query.local_project_id.is_none());
+
+        let mut project = PortableInventoryQuery {
+            target: None,
+            kind: None,
+            scope_kind: Some(ScopeKind::Project),
+            local_project_id: Some("wb-1".into()),
+        };
+        let err = require_user_portable_query(&mut project).expect_err("project");
+        assert_eq!(err.to_string(), "local_user_scope_required");
     }
 
     /// Business Logic: `remote:` 是项目 shortcut，用户级路由不得把它当 deviceId 再代理。

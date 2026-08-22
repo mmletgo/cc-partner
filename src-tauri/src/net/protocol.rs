@@ -387,6 +387,18 @@ pub const CAPABILITY_PORTABLE_PULL_V1: &str = "agent-hub.portable-pull.v1";
 ///     与 project inventory/action 路由及 project-aware Pull body 原子发布。
 pub const CAPABILITY_PORTABLE_PROJECT_V1: &str = "agent-hub.portable-project.v1";
 
+/// 能力 token：Agent Hub 用户级 portable inventory / action（对端就地管理）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端选中对端设备后，skill/command/plugin/mcp 主列表必须在 owning device
+///     用户目录 inspect/preview/apply；旧 peer 缺失时 fail-closed 为 unsupported，
+///     不得静默扫控制端本机库存。该 token 仅是协议协商，不是 LAN 鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     与四条 `/api/agent-hub/portable/user/*` 路由原子上线；字典序在
+///     `portable-pull` 之后、`user-instructions` 之前。
+pub const CAPABILITY_PORTABLE_USER_V1: &str = "agent-hub.portable-user.v1";
+
 /// 能力 token：v1 Agent Hub 用户级三栏 inspect/save/CAS/AI/槽历史
 /// （`POST /api/agent-hub/user-instructions/*`）。
 ///
@@ -463,9 +475,10 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
-            // 字典序：portable-project < portable-pull < user-instructions < v1
+            // 字典序：portable-project < portable-pull < portable-user < user-instructions < v1
             CAPABILITY_PORTABLE_PROJECT_V1.to_string(),
             CAPABILITY_PORTABLE_PULL_V1.to_string(),
+            CAPABILITY_PORTABLE_USER_V1.to_string(),
             CAPABILITY_USER_INSTRUCTIONS_V1.to_string(),
             CAPABILITY_AGENT_HUB_V1.to_string(),
             CAPABILITY_ATTENTION_READ_V1.to_string(),
@@ -646,6 +659,7 @@ mod tests {
             vec![
                 "agent-hub.portable-project.v1".to_string(),
                 "agent-hub.portable-pull.v1".to_string(),
+                "agent-hub.portable-user.v1".to_string(),
                 "agent-hub.user-instructions.v1".to_string(),
                 "agent-hub.v1".to_string(),
                 "attention.read.v1".to_string(),
@@ -684,6 +698,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PULL_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
+        assert!(info.supports(CAPABILITY_PORTABLE_USER_V1));
         assert!(info.supports(CAPABILITY_USER_INSTRUCTIONS_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_READ_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));

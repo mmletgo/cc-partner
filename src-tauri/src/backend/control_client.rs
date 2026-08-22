@@ -1637,55 +1637,65 @@ impl BackendControlClient {
             .await
     }
 
-    /// Business Logic: GuiClient 读取 sidecar owner 的本机 portable inventory（只读）。
+    /// Business Logic: GuiClient 读取 sidecar owner 的 portable inventory（只读）；deviceId 透传到 owner。
     /// Code Logic: agent_hub.inspect_portable_inventory；PORTABLE_INVENTORY_TIMEOUT。
     pub async fn agent_hub_inspect_portable_inventory(
         &self,
         query: crate::agent_hub::PortableInventoryQuery,
+        device_id: Option<String>,
     ) -> Result<crate::agent_hub::PortableInventorySnapshotDto, AppError> {
         self.agent_hub_op_with_timeout(
             "agent_hub.inspect_portable_inventory",
-            query,
+            merge_device_id(serde_json::to_value(query)?, device_id)?,
             portable_control_read_timeout("agent_hub.inspect_portable_inventory"),
         )
         .await
     }
 
     /// Business Logic: preview 属 v3 mutation 合同，旧 sidecar 不得静默降级。
-    /// Code Logic: 写兼容门闩 + agent_hub.preview_portable_asset_action。
+    /// Code Logic: 写兼容门闩 + agent_hub.preview_portable_asset_action；deviceId 供 owner 路由。
     pub async fn agent_hub_preview_portable_asset_action(
         &self,
         req: crate::agent_hub::PreviewPortableAssetActionRequest,
+        device_id: Option<String>,
     ) -> Result<crate::agent_hub::PortableAssetActionPlanDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.preview_portable_asset_action", req)
-            .await
+        self.agent_hub_op(
+            "agent_hub.preview_portable_asset_action",
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
+        )
+        .await
     }
 
     /// Business Logic: apply 是长 mutation（目标文件 + rescan），需长超时。
-    /// Code Logic: 写兼容门闩 + agent_hub_op_with_timeout 360s。
+    /// Code Logic: 写兼容门闩 + agent_hub_op_with_timeout 360s；deviceId 供 owner 路由。
     pub async fn agent_hub_apply_portable_asset_action(
         &self,
         req: crate::agent_hub::ApplyPortableAssetActionRequest,
+        device_id: Option<String>,
     ) -> Result<crate::agent_hub::PortableAssetActionResultDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
         self.agent_hub_op_with_timeout(
             "agent_hub.apply_portable_asset_action",
-            req,
+            merge_device_id(serde_json::to_value(req)?, device_id)?,
             Duration::from_secs(360),
         )
         .await
     }
 
     /// Business Logic: 按 clientRequestId 对账 apply 结果（只读）。
-    /// Code Logic: agent_hub.get_portable_asset_action；QUERY_TIMEOUT。
+    /// Code Logic: agent_hub.get_portable_asset_action；QUERY_TIMEOUT；deviceId 供 owner 路由。
     pub async fn agent_hub_get_portable_asset_action(
         &self,
         client_request_id: &str,
+        device_id: Option<String>,
     ) -> Result<crate::agent_hub::PortableAssetActionResultDto, AppError> {
         self.agent_hub_op_with_timeout(
             "agent_hub.get_portable_asset_action",
-            serde_json::json!({ "clientRequestId": client_request_id }),
+            merge_device_id(
+                serde_json::json!({ "clientRequestId": client_request_id }),
+                device_id,
+            )?,
             portable_control_read_timeout("agent_hub.get_portable_asset_action"),
         )
         .await

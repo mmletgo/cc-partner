@@ -29,8 +29,10 @@ use crate::agent_hub::portable_actions::{
 use crate::agent_hub::portable_inventory::PortableInventoryQuery;
 use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::remote_client::{
-    apply_user_instruction_plan_for_state, inspect_user_instruction_workspace_for_state,
-    list_user_instruction_slot_versions_for_state, preview_user_instruction_setup_for_state,
+    apply_portable_asset_action_for_state, apply_user_instruction_plan_for_state,
+    get_portable_asset_action_for_state, inspect_portable_inventory_for_state,
+    inspect_user_instruction_workspace_for_state, list_user_instruction_slot_versions_for_state,
+    preview_portable_asset_action_for_state, preview_user_instruction_setup_for_state,
     preview_user_instruction_update_for_state, read_user_native_instruction_file_for_state,
     restore_user_instruction_slot_version_for_state, save_user_instruction_blocks_for_state,
     take_device_id, write_user_native_instruction_file_for_state,
@@ -511,31 +513,52 @@ async fn dispatch_agent_hub_op(
             )?)
         }
         "agent_hub.inspect_portable_inventory" => {
-            let query: PortableInventoryQuery = serde_json::from_value(payload).map_err(|e| {
-                AppError::validation(format!("inspect_portable_inventory payload: {e}"))
-            })?;
-            let dto = PortableService::inspect_portable_inventory_query(state, query).await?;
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
+            let query: PortableInventoryQuery =
+                if payload.as_object().is_some_and(|obj| obj.is_empty()) || payload.is_null() {
+                    PortableInventoryQuery::default()
+                } else {
+                    serde_json::from_value(payload).map_err(|e| {
+                        AppError::validation(format!("inspect_portable_inventory payload: {e}"))
+                    })?
+                };
+            let dto =
+                inspect_portable_inventory_for_state(state, device_id.as_deref(), query).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.preview_portable_asset_action" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: PreviewPortableAssetActionRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!("preview_portable_asset_action payload: {e}"))
                 })?;
-            let dto = PortableService::preview_portable_asset_action(state, req).await?;
+            let dto =
+                preview_portable_asset_action_for_state(state, device_id.as_deref(), req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.apply_portable_asset_action" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let req: ApplyPortableAssetActionRequest =
                 serde_json::from_value(payload).map_err(|e| {
                     AppError::validation(format!("apply_portable_asset_action payload: {e}"))
                 })?;
-            let dto = PortableService::apply_portable_asset_action(state, req).await?;
+            let dto =
+                apply_portable_asset_action_for_state(state, device_id.as_deref(), req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.get_portable_asset_action" => {
+            let mut payload = payload;
+            let device_id = take_device_id(&mut payload);
             let client_request_id = required_string(&payload, "clientRequestId")?;
-            let dto = PortableService::get_portable_asset_action(state, &client_request_id).await?;
+            let dto = get_portable_asset_action_for_state(
+                state,
+                device_id.as_deref(),
+                &client_request_id,
+            )
+            .await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.inspect_remote_project_portable_inventory" => {

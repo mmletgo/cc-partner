@@ -964,6 +964,23 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/agent-hub/portable/project/action/get",
             post(agent_hub::agent_hub_portable_project_action_get),
         )
+        // Agent Hub 用户级 portable 主列表（capability agent-hub.portable-user.v1）；owner 只跑本机 user scope。
+        .route(
+            "/api/agent-hub/portable/user/inventory",
+            post(agent_hub::agent_hub_portable_user_inventory),
+        )
+        .route(
+            "/api/agent-hub/portable/user/action/preview",
+            post(agent_hub::agent_hub_portable_user_action_preview),
+        )
+        .route(
+            "/api/agent-hub/portable/user/action/apply",
+            post(agent_hub::agent_hub_portable_user_action_apply),
+        )
+        .route(
+            "/api/agent-hub/portable/user/action/get",
+            post(agent_hub::agent_hub_portable_user_action_get),
+        )
         // Agent Hub 用户级三栏（capability agent-hub.user-instructions.v1）；owner 只跑本机，拒绝递归。
         .route(
             "/api/agent-hub/user-instructions/inspect",

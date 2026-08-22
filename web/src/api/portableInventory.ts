@@ -94,6 +94,11 @@ export function assertLocalAgentHubContext(context?: AgentHubRequestContext | nu
  * Business Logic: 用户级保持无参兼容；项目级携带本机 Workbench id，由 Rust 精确解析。
  * Code Logic: peer 已由 assert 拦截；projectRef 不直接充当 Hub identity。
  */
+function peerDeviceIdArg(context?: AgentHubRequestContext | null): string | undefined {
+  const deviceId = context?.deviceId?.trim() ?? '';
+  return deviceId.length > 0 ? deviceId : undefined;
+}
+
 function localInspectInvokeArgs(
   context?: PortableInventoryRequestContext | null,
 ): Record<string, unknown> | undefined {
@@ -108,6 +113,19 @@ function localInspectInvokeArgs(
       : {}),
   };
   return Object.keys(request).length > 0 ? { request } : undefined;
+}
+
+/**
+ * Business Logic: 用户级 peer 把 deviceId 放到 invoke 顶层，owner 再 P2P；本机保持旧形态。
+ * Code Logic: 无 deviceId 时沿用 `{ request }` / undefined。
+ */
+function inspectInvokeArgs(
+  context?: PortableInventoryRequestContext | null,
+): Record<string, unknown> | undefined {
+  const requestArgs = localInspectInvokeArgs(context);
+  const deviceId = peerDeviceIdArg(context);
+  if (!deviceId) return requestArgs;
+  return { ...(requestArgs ?? {}), deviceId };
 }
 
 /**
@@ -139,8 +157,8 @@ export const PORTABLE_INVENTORY_COMMANDS = {
  */
 export const portableAssetApi: PortableAssetApi = {
   /**
-   * Business Logic: 本机 inventory 是 actual 状态真源（只读）；peer 上下文 fail-closed。
-   * Code Logic: assertLocal → agent_hub_inspect_portable_inventory（可选精确过滤）。
+   * Business Logic: inventory 是 actual 状态真源（只读）；用户级 deviceId 走 owning peer，禁止回落本机。
+   * Code Logic: remote project 命令 / 本机或顶层 deviceId inspect。
    */
   inspect(context?: PortableInventoryRequestContext): Promise<PortableInventorySnapshotDto> {
     const projectRef = context?.projectRef?.trim() ?? '';
@@ -162,17 +180,16 @@ export const portableAssetApi: PortableAssetApi = {
         portableInventorySnapshotDecoder,
       );
     }
-    assertLocalAgentHubContext(context);
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.inspect,
-      localInspectInvokeArgs(context),
+      inspectInvokeArgs(context),
       portableInventorySnapshotDecoder,
     );
   },
 
   /**
-   * Business Logic: apply 前必须绑定 inventory hash 的短期 plan；peer 禁止冒充本机 preview。
-   * Code Logic: assertLocal → strip context → agent_hub_preview_portable_asset_action。
+   * Business Logic: apply 前必须绑定 inventory hash 的短期 plan；用户级 deviceId 走 owning peer。
+   * Code Logic: remote project 命令 / 本机或顶层 deviceId preview。
    */
   previewAction(
     request: PreviewPortableAssetActionRequest,
@@ -188,32 +205,33 @@ export const portableAssetApi: PortableAssetApi = {
         portableAssetActionPlanDecoder,
       );
     }
-    assertLocalAgentHubContext(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
-    void _projectRef;
+    const deviceId = peerDeviceIdArg(request);
+    const payload = {
+      request: {
+        ...body,
+        ...(_projectRef && !isRemoteProjectRef(_projectRef)
+          ? {
+              inventoryQuery: {
+                ...body.inventoryQuery,
+                localProjectId: _projectRef,
+              },
+            }
+          : {}),
+      },
+      ...(deviceId ? { deviceId } : {}),
+    };
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.previewAction,
-      {
-        request: {
-          ...body,
-          ...(_projectRef && !isRemoteProjectRef(_projectRef)
-            ? {
-                inventoryQuery: {
-                  ...body.inventoryQuery,
-                  localProjectId: _projectRef,
-                },
-              }
-            : {}),
-        },
-      },
+      payload,
       portableAssetActionPlanDecoder,
     );
   },
 
   /**
-   * Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放；peer 禁止静默本机写。
-   * Code Logic: assertLocal → strip context → agent_hub_apply_portable_asset_action。
+   * Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放；用户级 deviceId 走 owning peer。
+   * Code Logic: remote project 命令 / 本机或顶层 deviceId apply。
    */
   applyAction(request: ApplyPortableAssetActionRequest): Promise<PortableAssetActionResultDto> {
     const projectRef = request.projectRef?.trim() ?? '';
@@ -227,13 +245,13 @@ export const portableAssetApi: PortableAssetApi = {
         portableAssetActionResultDecoder,
       );
     }
-    assertLocalAgentHubContext(request);
     const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
     void _deviceId;
     void _projectRef;
+    const deviceId = peerDeviceIdArg(request);
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.applyAction,
-      { request: body },
+      deviceId ? { request: body, deviceId } : { request: body },
       portableAssetActionResultDecoder,
     );
   },
@@ -254,9 +272,10 @@ export const portableAssetApi: PortableAssetApi = {
         portableAssetActionResultDecoder,
       );
     }
+    const deviceId = peerDeviceIdArg(context);
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.getAction,
-      { clientRequestId },
+      deviceId ? { clientRequestId, deviceId } : { clientRequestId },
       portableAssetActionResultDecoder,
     );
   },

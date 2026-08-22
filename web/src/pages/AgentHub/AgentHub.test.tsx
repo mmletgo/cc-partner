@@ -14,7 +14,10 @@ import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
-import { AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY } from './context/agentHubContext';
+import {
+  AGENT_HUB_PORTABLE_USER_CAPABILITY,
+  AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY,
+} from './context/agentHubContext';
 import { initialThreePaneFromDisk } from './instructions/instructionThreePane';
 import type { UseInstructionThreePaneControllerResult } from './instructions';
 import type { UseProjectInstructionFilesControllerResult } from './projectInstructions';
@@ -615,6 +618,28 @@ describe('AgentHub page characterization', () => {
     });
     expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
     expect(screen.queryByTestId('portable-inventory-workspace')).toBeNull();
+  });
+
+  test('online peer with portable-user capability mounts remote inventory', () => {
+    renderView({
+      hubContext: {
+        ...buildProps().hubContext,
+        deviceId: 'peer-a',
+        tab: 'skill',
+      },
+      shellPeers: [
+        {
+          deviceId: 'peer-a',
+          name: 'Peer A',
+          online: true,
+          capabilities: [AGENT_HUB_PORTABLE_USER_CAPABILITY],
+        },
+      ],
+    });
+    expect(screen.getByTestId('agent-hub-remote-live')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-assets-section')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hub-remote-management')).toBeNull();
+    expect(screen.getByTestId('agent-hub-action-reload')).toBeTruthy();
   });
 
   test('online peer with user-instructions capability mounts three-pane', () => {

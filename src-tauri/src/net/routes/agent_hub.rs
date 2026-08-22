@@ -40,7 +40,7 @@ use crate::net::error_response::{P2pError, P2pResult};
 #[cfg(test)]
 use crate::net::protocol::{
     CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PROJECT_V1, CAPABILITY_PORTABLE_PULL_V1,
-    CAPABILITY_USER_INSTRUCTIONS_V1,
+    CAPABILITY_PORTABLE_USER_V1, CAPABILITY_USER_INSTRUCTIONS_V1,
 };
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
@@ -363,6 +363,98 @@ pub async fn agent_hub_portable_project_action_get(
     Ok(Json(dto))
 }
 
+/// 用户级 portable 路由强制 user scope，拒绝项目身份。
+fn require_user_portable_inventory_query(
+    query: &mut PortableInventoryQuery,
+    ctx: &P2pRequestContext,
+) -> Result<(), P2pError> {
+    crate::agent_hub::remote_client::require_user_portable_query(query)
+        .map_err(|e| P2pError::from_app_error(e, ctx, "agent_hub.portable.user"))
+}
+
+/// POST /api/agent-hub/portable/user/inventory
+///
+/// Business Logic: owning peer 返回本机用户级完整库存；LAN 通道不做身份鉴权。
+pub async fn agent_hub_portable_user_inventory(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(mut body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::portable_inventory::PortableInventorySnapshotDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("deviceId");
+    }
+    let mut query: PortableInventoryQuery =
+        if body.as_object().is_some_and(|o| o.is_empty()) || body.is_null() {
+            PortableInventoryQuery::default()
+        } else {
+            serde_json::from_value(body).map_err(|e| {
+                P2pError::validation(format!("portable user inventory payload: {e}"), &ctx)
+            })?
+        };
+    require_user_portable_inventory_query(&mut query, &ctx)?;
+    let dto = inspect_portable_inventory_query(&state, query)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.user.inventory"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/user/action/preview
+pub async fn agent_hub_portable_user_action_preview(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(mut body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::portable_actions::PortableAssetActionPlanDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("deviceId");
+    }
+    let mut req: PreviewPortableAssetActionRequest = serde_json::from_value(body).map_err(|e| {
+        P2pError::validation(format!("portable user action preview payload: {e}"), &ctx)
+    })?;
+    require_user_portable_inventory_query(&mut req.inventory_query, &ctx)?;
+    let dto = PortableService::preview_portable_asset_action(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.user.action.preview"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/user/action/apply
+pub async fn agent_hub_portable_user_action_apply(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(mut body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::portable_actions::PortableAssetActionResultDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("deviceId");
+    }
+    let req: ApplyPortableAssetActionRequest = serde_json::from_value(body).map_err(|e| {
+        P2pError::validation(format!("portable user action apply payload: {e}"), &ctx)
+    })?;
+    let dto = PortableService::apply_portable_asset_action(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.user.action.apply"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/user/action/get
+pub async fn agent_hub_portable_user_action_get(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<crate::agent_hub::portable_actions::PortableAssetActionResultDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let client_request_id = body
+        .get("clientRequestId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| P2pError::validation("clientRequestId required", &ctx))?;
+    let dto = PortableService::get_portable_asset_action(&state, client_request_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.user.action.get"))?;
+    Ok(Json(dto))
+}
+
 /// P2P 用户级路由拒绝嵌套 deviceId，避免 owner 再代理。
 ///
 /// Business Logic: owning peer 只执行本机用户目录；`remote:` / 再转发是递归。
@@ -624,6 +716,11 @@ mod tests {
         );
         assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
         assert!(
+            info.supports(CAPABILITY_PORTABLE_USER_V1),
+            "server_protocol_info 必须宣告 agent-hub.portable-user.v1，实际: {:?}",
+            info.capabilities
+        );
+        assert!(
             info.supports(CAPABILITY_USER_INSTRUCTIONS_V1),
             "server_protocol_info 必须宣告 agent-hub.user-instructions.v1，实际: {:?}",
             info.capabilities
@@ -643,6 +740,10 @@ mod tests {
             agent_hub_portable_project_action_preview as *const (),
             agent_hub_portable_project_action_apply as *const (),
             agent_hub_portable_project_action_get as *const (),
+            agent_hub_portable_user_inventory as *const (),
+            agent_hub_portable_user_action_preview as *const (),
+            agent_hub_portable_user_action_apply as *const (),
+            agent_hub_portable_user_action_get as *const (),
             agent_hub_user_instructions_inspect as *const (),
             agent_hub_user_instructions_save_blocks as *const (),
             agent_hub_user_instructions_preview_setup as *const (),
@@ -662,6 +763,7 @@ mod tests {
             CAPABILITY_PORTABLE_PROJECT_V1,
             "agent-hub.portable-project.v1"
         );
+        assert_eq!(CAPABILITY_PORTABLE_USER_V1, "agent-hub.portable-user.v1");
         assert_eq!(
             CAPABILITY_USER_INSTRUCTIONS_V1,
             "agent-hub.user-instructions.v1"
@@ -684,6 +786,23 @@ mod tests {
         assert_eq!(err.envelope().code, "validation_error");
         assert!(err.envelope().error.contains("local_user_scope_required"));
         assert!(reject_nested_user_instruction_device_id(&serde_json::json!({}), &ctx).is_ok());
+    }
+
+    /// Business Logic: 用户级 portable 路由不得接受项目身份后回落扫描。
+    #[test]
+    fn portable_user_query_rejects_project_scope() {
+        let ctx = crate::net::request_context::P2pRequestContext {
+            request_id: "req-user-portable".into(),
+        };
+        let mut query = PortableInventoryQuery {
+            target: None,
+            kind: None,
+            scope_kind: Some(crate::agent_hub::models::ScopeKind::Project),
+            local_project_id: Some("wb-1".into()),
+        };
+        let err = require_user_portable_inventory_query(&mut query, &ctx).unwrap_err();
+        assert_eq!(err.envelope().code, "validation_error");
+        assert!(err.envelope().error.contains("local_user_scope_required"));
     }
 
     /// Business Logic: portable inventory 不得声明为鉴权。

@@ -385,6 +385,26 @@ describe('useAgentHubController', () => {
     expect(listAssets).not.toHaveBeenCalled();
   });
 
+  test('tab=skill with portable-user capability inspects peer inventory (T4)', async () => {
+    searchParamsMock.current = new URLSearchParams('tab=skill&deviceId=peer-online');
+    devicesListMock.mockResolvedValue([
+      {
+        id: 'peer-online',
+        name: 'Peer Online',
+        status: 'online' as const,
+        capabilities: ['agent-hub.portable-user.v1'],
+      },
+    ]);
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(portableApiMocks.inspect).toHaveBeenCalled());
+    expect(result.current.hubContext.deviceId).toBe('peer-online');
+    expect(portableApiMocks.inspect).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: 'peer-online' }),
+    );
+    expect(listAssets).not.toHaveBeenCalled();
+  });
+
   test('switching command → instructions is not stuck by portable filter URL sync', async () => {
     // 真实 RR：setSearchParams 后 searchParams 同步更新，触发 re-parse。
     setSearchParamsMock.mockImplementation((updater: unknown) => {

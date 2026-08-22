@@ -77,6 +77,9 @@ export type AgentHubContextCapability = 'direct' | 'remote' | 'project' | 'unsup
 /** 用户级三栏 P2P 能力 token（与 health capabilities 精确匹配）。 */
 export const AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY = 'agent-hub.user-instructions.v1';
 
+/** 用户级 portable 主列表 P2P 能力 token（与 health capabilities 精确匹配）。 */
+export const AGENT_HUB_PORTABLE_USER_CAPABILITY = 'agent-hub.portable-user.v1';
+
 /**
  * Business Logic: 远端用户级三栏只在对端在线且宣告 user-instructions 时挂载，缺能力保持 hint。
  * Code Logic: online + capabilities 精确包含 token；views 不得 import @/api。
@@ -86,6 +89,17 @@ export function peerAllowsUserInstructionThreePane(
 ): boolean {
   if (!peer?.online) return false;
   return (peer.capabilities ?? []).includes(AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY);
+}
+
+/**
+ * Business Logic: 远端用户级 skill/command/plugin/mcp 主列表只在对端在线且宣告 portable-user 时挂载。
+ * Code Logic: online + capabilities 精确包含 token；缺能力保持 Pull/Push hint。
+ */
+export function peerAllowsUserPortableInventory(
+  peer: { online: boolean; capabilities?: readonly string[] | null } | null | undefined,
+): boolean {
+  if (!peer?.online) return false;
+  return (peer.capabilities ?? []).includes(AGENT_HUB_PORTABLE_USER_CAPABILITY);
 }
 
 /** 草稿所属身份；lane 不在其中，因为同一 Agent 的三槽共享一个 Canonical 文档。 */

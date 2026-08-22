@@ -33,7 +33,11 @@ import { allHubTargets } from '@/lib/agentCatalog';
 import type { PortableInventoryItemDto } from '@/lib/types/portableInventory';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
-import { isPortableStoreTab, peerAllowsUserInstructionThreePane } from './context/agentHubContext';
+import {
+  isPortableStoreTab,
+  peerAllowsUserInstructionThreePane,
+  peerAllowsUserPortableInventory,
+} from './context/agentHubContext';
 import {
   isAssetKindTab,
   useAgentHubController,
@@ -392,6 +396,11 @@ export function AgentHubView(props: AgentHubViewProps) {
     hubContext.scope === 'user' &&
     hubContext.deviceId !== null &&
     peerAllowsUserInstructionThreePane(selectedPeer);
+  /** 用户级对端在线且宣告 portable-user 才挂资产主列表。 */
+  const canMountRemoteUserPortable =
+    hubContext.scope === 'user' &&
+    hubContext.deviceId !== null &&
+    peerAllowsUserPortableInventory(selectedPeer);
   const showProjectInstructionFiles =
     projectLocked &&
     hubContext.tab === 'instructions' &&
@@ -403,8 +412,10 @@ export function AgentHubView(props: AgentHubViewProps) {
     hubContext.scope === 'user' &&
     Boolean(instructionThreePane) &&
     (!isRemoteContext || canMountRemoteUserThreePane);
+  const showRemoteUserPortable =
+    isAssetTab && canMountRemoteUserPortable;
   const canReloadCurrentTab =
-    (isAssetTab && (!isRemoteContext || isRemoteProject)) ||
+    (isAssetTab && (!isRemoteContext || isRemoteProject || canMountRemoteUserPortable)) ||
     showInstructionThreePane ||
     showProjectInstructionFiles;
 
@@ -693,7 +704,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           </StatusMessage>
         ) : null}
 
-        {isAssetTab && isRemoteContext && !isRemoteProject ? (
+        {isAssetTab && isRemoteContext && !isRemoteProject && !showRemoteUserPortable ? (
           <StatusMessage tone="info" data-testid="agent-hub-remote-management">
             {hubContext.scope === 'user'
               ? t('agentHub:shell.remoteDeviceManageHint')
@@ -701,7 +712,13 @@ export function AgentHubView(props: AgentHubViewProps) {
           </StatusMessage>
         ) : null}
 
-        {isAssetTab && (!isRemoteContext || isRemoteProject) ? (
+        {isAssetTab && showRemoteUserPortable ? (
+          <StatusMessage tone="info" data-testid="agent-hub-remote-live">
+            {t('agentHub:shell.remoteDeviceLiveHint')}
+          </StatusMessage>
+        ) : null}
+
+        {isAssetTab && (!isRemoteContext || isRemoteProject || showRemoteUserPortable) ? (
           <div data-testid="agent-hub-assets-section">
             <PortableInventoryView
               controller={portableInventory}

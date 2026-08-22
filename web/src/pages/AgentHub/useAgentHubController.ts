@@ -77,6 +77,7 @@ import {
   isPortableStoreTab,
   portableInventoryTargetForHubContext,
   normalizeAgentHubContext,
+  peerAllowsUserPortableInventory,
   type AgentHubContext,
   type AgentHubTab,
   type AgentHubScope,
@@ -621,6 +622,16 @@ export function useAgentHubController(
     [hubContext.scope, hubContext.deviceId, hubContext.projectKey],
   );
   const userInstructions = useUserInstructionManager(t);
+  const [shellPeers, setShellPeers] = useState<
+    Array<{ deviceId: string; name: string; online: boolean; capabilities?: string[] }>
+  >([]);
+  const selectedPeer = useMemo(
+    () =>
+      hubContext.deviceId === null
+        ? null
+        : shellPeers.find((peer) => peer.deviceId === hubContext.deviceId) ?? null,
+    [hubContext.deviceId, shellPeers],
+  );
   const [portablePullOpen, setPortablePullOpen] = useState(false);
   /**
    * Business Logic: 仅资产 tab / deep link / Pull 打开时拉 portable inventory。
@@ -654,7 +665,7 @@ export function useAgentHubController(
     ...inventoryRequestContext,
     enabled:
       portableLaneActive &&
-      hubContext.deviceId === null &&
+      (hubContext.deviceId === null || peerAllowsUserPortableInventory(selectedPeer)) &&
       (hubContext.scope !== 'project' || hubContext.projectKey !== null),
     initialFilters: {
       target: portableInventoryTargetForHubContext(hubContext),
@@ -779,9 +790,6 @@ export function useAgentHubController(
   const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
   const [lanPreviewFingerprint, setLanPreviewFingerprint] = useState<string | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
-  const [shellPeers, setShellPeers] = useState<
-    Array<{ deviceId: string; name: string; online: boolean; capabilities?: string[] }>
-  >([]);
   const [gitImportOpen, setGitImportOpen] = useState(false);
   const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
