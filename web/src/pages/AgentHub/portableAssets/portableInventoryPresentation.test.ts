@@ -1293,7 +1293,7 @@ describe('portableInventoryPresentation row actions', () => {
         canDetach: true,
       },
     });
-    expect(isPortableBorrowedRuntimeItem(attachedOnViewer)).toBe(true);
+    expect(isPortableBorrowedRuntimeItem(attachedOnViewer)).toBe(false);
     expect(canOfferPortableDetach(attachedOnViewer)).toBe(true);
     expect(resolvePortableRowActions(attachedOnViewer, healthyCtx)).toContain('detach');
   });
@@ -1467,6 +1467,39 @@ describe('portableInventoryPresentation ownership partition', () => {
     });
     expect(isPortableBorrowedRuntimeItem(nested)).toBe(true);
     expect(portableBorrowedOwnerLabelKey(nested)).toBe('sharedAgents');
-    expect(portableBorrowedOwnerJumpTarget(nested)).toBeNull();
+    expect(portableBorrowedOwnerJumpTarget(nested)).toBe('codex');
+  });
+
+  test('Grok store-attached ~/.agents pack is installed and can detach', () => {
+    const attached = makeItem({
+      inventoryItemId: 'grok-skill-using-superpowers-attached',
+      kind: 'skill',
+      nativeId: 'using-superpowers',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/using-superpowers',
+      store: {
+        storeId: 'skill:superpowers',
+        storeAttached: true,
+        loadedViaOtherPath: false,
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(attached)).toBe(false);
+    expect(canOfferPortableDetach(attached)).toBe(true);
+    expect(
+      resolvePortableRowActions(attached, { ...healthyCtx, assetLane: 'equipped' }),
+    ).toEqual(['detach']);
+    expect(
+      resolvePortableRowActions(attached, { ...healthyCtx, assetLane: 'store' }),
+    ).toEqual(['detach', 'destroyStore']);
   });
 });

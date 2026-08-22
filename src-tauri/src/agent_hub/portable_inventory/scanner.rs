@@ -1861,10 +1861,11 @@ fn store_fact_for_discovery(
             let via = disc.origin.owned_by.as_hub_target();
             // Native 与 Codex 自有 legacy 根上的 store 软链都是本 Agent 附加；
             // 不得要求 native_output_candidate（legacyStandalone 恒为 false）。
+            // Grok 等把 ~/.agents 当运行时根：包根软链也算已附加，才能在本 Agent 卸下/删除。
             let store_attached = matches!(
                 disc.origin.origin_kind,
                 PortableOriginKind::Native | PortableOriginKind::LegacyStandalone
-            );
+            ) || is_shared_agents_runtime_path(&disc.origin.path);
             (
                 PortableAssetOwner::PortableStore,
                 PortableStoreFactDto {
@@ -1896,7 +1897,7 @@ fn store_fact_for_discovery(
                     let attached = matches!(
                         disc.origin.origin_kind,
                         PortableOriginKind::Native | PortableOriginKind::LegacyStandalone
-                    );
+                    ) || is_shared_agents_runtime_path(&disc.origin.path);
                     return (
                         PortableAssetOwner::PortableStore,
                         PortableStoreFactDto {
@@ -2058,6 +2059,13 @@ fn annotate_store_loaded_via_other_path(items: &mut [PortableInventoryItemDto]) 
             }
         }
     }
+}
+
+/// `~/.agents` 是 Codex 的技能安装根，也是 Grok/Cursor/Gemini 等官方会加载的共享根。
+fn is_shared_agents_runtime_path(path: &std::path::Path) -> bool {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .contains("/.agents/")
 }
 
 /// 从观测路径推断「仍被谁的目录加载」；禁止在不知道时默认 Claude。
@@ -2287,6 +2295,7 @@ fn item_capabilities(
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Attach);
     let borrowed_store_runtime = borrowed
         && store.store_id.is_some()
+        && !store.store_attached
         && (store.loaded_via_other_path || origin_kind == PortableOriginKind::Compatibility);
     // Skill/Command 生命周期改走仓库：迁入 / 附加 / 卸下 / 彻底删除。
     // 启停与卸载只留给 Plugin（viewing 开关）和 MCP（各家配置 leaf）。
@@ -2340,9 +2349,7 @@ fn item_capabilities(
             && store.store_id.is_some()
             && store.store_attached
             && !borrowed_store_runtime,
-        can_destroy_store: store_write
-            && store.store_id.is_some()
-            && !(borrowed && origin_kind == PortableOriginKind::Compatibility),
+        can_destroy_store: store_write && store.store_id.is_some() && !borrowed_store_runtime,
         can_confirm_current_version: false,
         can_materialize_escape_link: false,
         reason_code: reason,

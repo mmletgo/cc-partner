@@ -146,6 +146,7 @@ export function isPortablePluginComponent(item: PortableInventoryItemDto): boole
  */
 export function isPortableBorrowedRuntimeItem(item: PortableInventoryItemDto): boolean {
   if (item.ownedBy === 'portableStore') {
+    if (item.store?.storeAttached === true) return false;
     return Boolean(item.store?.loadedViaOtherPath) || item.originKind === 'compatibility';
   }
   if (item.originKind === 'compatibility') return true;
@@ -183,6 +184,8 @@ export function portableBorrowedOwnerLabelKey(
 export function portableBorrowedOwnerJumpTarget(
   item: PortableInventoryItemDto,
 ): AgentTarget | null {
+  const path = (item.sourcePath ?? '').replace(/\\/g, '/');
+  if (path.includes('/.agents/')) return 'codex';
   const key = portableBorrowedOwnerLabelKey(item);
   return isHubTarget(key) ? key : null;
 }
@@ -251,6 +254,7 @@ export function canOfferPortableMigrateToStore(item: PortableInventoryItemDto): 
 export function canOfferPortableDestroyStore(item: PortableInventoryItemDto): boolean {
   if (!isPortableStoreAssetKind(item.kind)) return false;
   if (!item.capabilities.canDestroyStore) return false;
+  if (item.store?.storeAttached === true) return true;
   if (item.originKind === 'compatibility' || item.store?.loadedViaOtherPath) return false;
   return true;
 }

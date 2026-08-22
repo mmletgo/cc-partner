@@ -21,6 +21,7 @@ import {
   classifyPortableActualState,
   isPortableBorrowedRuntimeItem,
   needsPortableEnsureManagedRefresh,
+  portableBorrowedOwnerJumpTarget,
   portableBorrowedOwnerLabelKey,
   portableInventoryProblemWarnings,
   type PortableActualStateClass,
@@ -124,6 +125,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
   const disabledVisual = actual === 'disabled';
   const borrowed = isPortableBorrowedRuntimeItem(item);
   const borrowedOwnerKey = borrowed ? portableBorrowedOwnerLabelKey(item) : null;
+  const ownerJumpTarget = borrowed ? portableBorrowedOwnerJumpTarget(item) : null;
   const showRefreshHint =
     !borrowed &&
     needsPortableEnsureManagedRefresh(item) &&
@@ -131,7 +133,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
   // 借用行保留所有者徽章与「在所有者中打开」，同时按 capability 渲染启停/卸载。
   const rowActions = actions ?? (primaryAction ? [primaryAction] : []);
   const handleAction = onAction ?? onPrimaryAction;
-  const showOwnerJump = borrowed && Boolean(onOpenOwner);
+  const showOwnerJump = Boolean(onOpenOwner && ownerJumpTarget);
   const showMutations = rowActions.length > 0 && Boolean(handleAction);
   const showCatalogChips = Boolean(catalogAgentChips && catalogAgentChips.length > 0);
 

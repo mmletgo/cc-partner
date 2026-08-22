@@ -363,4 +363,50 @@ describe('PortableInventoryRow', () => {
       true,
     );
   });
+
+  test('does not render owner jump when there is no Hub owner to open', () => {
+    render(
+      <PortableInventoryRow
+        item={item({
+          inventoryItemId: 'grok-skill-store-only',
+          target: 'grok',
+          originKind: 'compatibility',
+          ownedBy: 'portableStore',
+          sourcePath: '/data/portable-store/skills/foo',
+          store: {
+            storeId: 'skill:foo',
+            storeAttached: false,
+            loadedViaOtherPath: true,
+          },
+        })}
+        labels={labels}
+        onOpenOwner={() => undefined}
+      />,
+    );
+    expect(screen.queryByTestId('portable-row-open-owner')).toBeNull();
+  });
+
+  test('shared ~/.agents jump still opens owner (Codex)', () => {
+    const onOpenOwner = vi.fn();
+    render(
+      <PortableInventoryRow
+        item={item({
+          inventoryItemId: 'grok-skill-agents',
+          target: 'grok',
+          originKind: 'compatibility',
+          ownedBy: 'portableStore',
+          sourcePath: '/home/.agents/skills/superpowers/using-superpowers',
+          store: {
+            storeId: 'skill:superpowers',
+            storeAttached: false,
+            loadedViaOtherPath: true,
+          },
+        })}
+        labels={labels}
+        onOpenOwner={onOpenOwner}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('portable-row-open-owner'));
+    expect(onOpenOwner).toHaveBeenCalledTimes(1);
+  });
 });

@@ -370,7 +370,7 @@ export function AgentHubView(props: AgentHubViewProps) {
 
   /**
    * Business Logic: 借用项可在当前列表启停/卸载；也可切到实际加载源 Agent。
-   * Code Logic: Hub target（含经 Claude 加载的仓库项）切 agent；sharedAgents/unknown 保持当前列表。
+   * Code Logic: Hub target 切 agent；`~/.agents` 写盘走 Codex；无 jump target 不渲染按钮。
    */
   const openPortableOwner = useCallback(
     (item: PortableInventoryItemDto) => {
