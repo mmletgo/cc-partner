@@ -221,7 +221,7 @@ Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local
 
 四类资产**并不都通用**。接入新身份时按合同选挂载方式，禁止为对称去软链 Plugin 包。
 
-权威实现：`src-tauri/src/agent_hub/portable_store/`。真树只在 `<data_dir>/portable-store/`（跟 `CC_PARTNER_DATA_DIR`），**不是** `~/.agents`。Grok / Cursor / Gemini / OpenCode / Pi 运行时可能**读取** `~/.agents/skills`，但那是借用扫描根，不能当 store 真树。Claude **不**把 `~/.agents` 当技能库。`ownedBy: portableStore`。scanner 只跟随 canonicalize 落在 store 内的软链；逃逸 fail-closed。
+权威实现：`src-tauri/src/agent_hub/portable_store/`。真树只在 `<data_dir>/portable-store/`（跟 `CC_PARTNER_DATA_DIR`），**不是** `~/.agents`。Grok / Cursor / Gemini / OpenCode / Pi 运行时可能**读取** `~/.agents/skills`，但那是借用扫描根，不能当 store 真树。Claude **不**把 `~/.agents` 当技能库。`ownedBy: portableStore`。scanner 只跟随 canonicalize 落在 store 内的软链；逃逸 fail-closed。无根 `SKILL.md` 的 skill 包（如 `superpowers/`）展开成带清单的子项（一层子目录 + 可选 `skills/`），`native_id` 用子项目录名；store 软链与启停仍按**包根** `skill:<包>`。
 
 | 资产 | 真树 | 附加到该 Agent | 从此 Agent 卸下 | 本机彻底删除 |
 |------|------|----------------|-----------------|--------------|

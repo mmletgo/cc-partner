@@ -9,9 +9,10 @@
 
 use super::{current_portable_store_roots, store_id_from_canonical, PortableStoreKind};
 use crate::error::AppError;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 /// 路径相对 portable-store 的分类。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +86,38 @@ pub fn classify_store_link(path: &Path) -> StoreLinkClass {
         };
     }
     StoreLinkClass::EscapeLink
+}
+
+/// 沿父目录查找最近的 store 软链（嵌套 skill 包成员的父节点才是链）。
+///
+/// Business Logic: `superpowers/using-superpowers` 这类无根 SKILL.md 的子项，
+///     软链挂在包根；只看子目录会把已附加包误判成普通目录。
+/// Code Logic: 路径自身非 Regular 则原样返回；否则最多向上 4 层找 StoreLink。
+pub fn classify_store_link_with_ancestors(path: &Path) -> StoreLinkClass {
+    let self_class = classify_store_link(path);
+    if !matches!(self_class, StoreLinkClass::Regular) {
+        return self_class;
+    }
+    let mut current = path.parent();
+    for _ in 0..4 {
+        let Some(parent) = current else {
+            break;
+        };
+        if let StoreLinkClass::StoreLink {
+            store_id,
+            canonical,
+            kind,
+        } = classify_store_link(parent)
+        {
+            return StoreLinkClass::StoreLink {
+                store_id,
+                canonical,
+                kind,
+            };
+        }
+        current = parent.parent();
+    }
+    self_class
 }
 
 /// 在 `link_path` 创建指向 `store_target` 的软链。

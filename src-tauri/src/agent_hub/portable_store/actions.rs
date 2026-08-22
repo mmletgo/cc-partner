@@ -8,25 +8,32 @@
 //!     建/拆软链；destroy 清各 Agent native 根与 `~/.agents` 上仍指向真树的软链。
 
 use super::{
-    attach_store_link, classify_store_link, current_portable_store_root, ensure_store_layout,
-    migrate_native_into_store, remove_manifest_attachment, remove_manifest_entry,
-    restore_escape_into_store, store_command_file, store_id_for, store_skill_dir,
-    try_portable_store_root_for_scope, unlink_if_store_link, upsert_manifest_entry,
-    ManifestAttachment, PortableStoreKind, StoreLinkClass,
+    attach_store_link, classify_store_link, classify_store_link_with_ancestors,
+    current_portable_store_root, ensure_store_layout, migrate_native_into_store,
+    remove_manifest_attachment, remove_manifest_entry, restore_escape_into_store,
+    store_command_file, store_id_for, store_skill_dir, try_portable_store_root_for_scope,
+    unlink_if_store_link, upsert_manifest_entry, validate_store_native_id, ManifestAttachment,
+    PortableStoreKind, StoreLinkClass,
 };
-use crate::agent_hub::models::{AgentTarget, ScopeKind};
-use crate::agent_hub::object_store::sha256_hex;
-use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
-use crate::agent_hub::portable_actions::targets::TargetActionRawOutcome;
-use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
-use crate::agent_hub::targets::paths::{TargetEnvironment, TargetPathResolver};
-use crate::agent_hub::targets::portable::{hash_skill_directory, parse_simple_frontmatter};
-use crate::error::AppError;
-use std::cmp::Ordering;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::{
+    agent_hub::{
+        models::{AgentTarget, ScopeKind},
+        object_store::sha256_hex,
+        portable_actions::{models::PortableAssetActionKind, targets::TargetActionRawOutcome},
+        portable_inventory::{PortableAssetKind, PortableInventoryItemDto},
+        targets::{
+            paths::{TargetEnvironment, TargetPathResolver},
+            portable::{hash_skill_directory, parse_simple_frontmatter},
+        },
+    },
+    error::AppError,
+};
+use std::{
+    cmp::Ordering,
+    fs, io,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// 已观测到的仓库软链优先于按 config_root 拼出的 native 挂载点。
 ///
@@ -79,8 +86,11 @@ pub fn execute_skill_or_command_store(
             });
         }
     };
+    let store_native_id = skill_package_native_id(store_kind, native_id, item);
+    let native_path_buf = remap_nested_skill_mount(native_path, native_id, &store_native_id);
+    let native_path = native_path_buf.as_path();
     let store_target = match store_kind {
-        PortableStoreKind::Skill => store_skill_dir(&store_root, native_id),
+        PortableStoreKind::Skill => store_skill_dir(&store_root, &store_native_id),
         PortableStoreKind::Command => store_command_file(&store_root, native_id),
         PortableStoreKind::Mcp => {
             return Ok(TargetActionRawOutcome::Failed {
@@ -91,7 +101,7 @@ pub fn execute_skill_or_command_store(
     };
     let store_id = item
         .and_then(|i| i.store.store_id.clone())
-        .unwrap_or_else(|| store_id_for(store_kind, native_id));
+        .unwrap_or_else(|| store_id_for(store_kind, &store_native_id));
 
     match action {
         PortableAssetActionKind::Enable | PortableAssetActionKind::Attach => {
@@ -105,7 +115,7 @@ pub fn execute_skill_or_command_store(
             let _ = upsert_manifest_entry(
                 &store_root,
                 store_kind,
-                native_id,
+                &store_native_id,
                 item.and_then(|i| i.content_hash.clone()),
                 Some(ManifestAttachment {
                     target: viewing,
@@ -185,7 +195,7 @@ pub fn execute_skill_or_command_store(
             let _ = upsert_manifest_entry(
                 &store_root,
                 store_kind,
-                native_id,
+                &store_native_id,
                 content_hash,
                 Some(ManifestAttachment {
                     target: viewing,
@@ -196,7 +206,7 @@ pub fn execute_skill_or_command_store(
         }
         PortableAssetActionKind::DestroyStore => {
             let _ = unlink_if_store_link(native_path);
-            destroy_remaining_skill_command_links(store_kind, native_id, &store_target);
+            destroy_remaining_skill_command_links(store_kind, &store_native_id, &store_target);
             if store_target.is_dir() {
                 fs::remove_dir_all(&store_target)?;
             } else if store_target.is_file() {
@@ -253,7 +263,7 @@ pub fn execute_skill_or_command_store(
             let _ = upsert_manifest_entry(
                 &store_root,
                 store_kind,
-                native_id,
+                &store_native_id,
                 content_hash,
                 Some(ManifestAttachment {
                     target: viewing,
@@ -462,7 +472,61 @@ pub fn should_use_store_semantics(
     if item.and_then(|i| i.store.store_id.as_ref()).is_some() {
         return true;
     }
-    path.is_some_and(|p| matches!(classify_store_link(p), StoreLinkClass::StoreLink { .. }))
+    path.is_some_and(|p| {
+        matches!(
+            classify_store_link_with_ancestors(p),
+            StoreLinkClass::StoreLink { .. }
+        )
+    })
+}
+
+/// 嵌套 skill 包成员的仓库 id 是包名，不是子项名。
+///
+/// Business Logic: 启停/卸下必须动包根软链与 `portable-store/skills/<包>`，
+///     不能按子项名去找不存在的 `skills/<子项>`。
+/// Code Logic: storeId `skill:<包>` 且与 native_id 不同时用包名。
+fn skill_package_native_id(
+    kind: PortableStoreKind,
+    native_id: &str,
+    item: Option<&PortableInventoryItemDto>,
+) -> String {
+    if kind != PortableStoreKind::Skill {
+        return native_id.to_string();
+    }
+    let Some(store_id) = item.and_then(|i| i.store.store_id.as_deref()) else {
+        return native_id.to_string();
+    };
+    let Some(package_id) = store_id.strip_prefix("skill:") else {
+        return native_id.to_string();
+    };
+    if package_id != native_id && validate_store_native_id(package_id).is_ok() {
+        package_id.to_string()
+    } else {
+        native_id.to_string()
+    }
+}
+
+/// 把子项路径改写到包根挂载点。
+///
+/// Business Logic: 附加/卸下挂在 `skills/<包>`，不是 `skills/<子项>`。
+/// Code Logic: 向上找到包名目录；否则把最后一段换成包名（Enable 拼出的 native 根）。
+fn remap_nested_skill_mount(path: &Path, item_native_id: &str, package_id: &str) -> PathBuf {
+    if package_id == item_native_id {
+        return path.to_path_buf();
+    }
+    if path.file_name().and_then(|s| s.to_str()) == Some(package_id) {
+        return path.to_path_buf();
+    }
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent.file_name().and_then(|s| s.to_str()) == Some(package_id) {
+            return parent.to_path_buf();
+        }
+        current = parent.parent();
+    }
+    path.parent()
+        .map(|parent| parent.join(package_id))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn destroy_remaining_skill_command_links(
@@ -515,4 +579,91 @@ fn destroy_remaining_skill_command_links(
         }
     }
     let _ = current_portable_store_root();
+}
+
+#[cfg(test)]
+mod nested_skill_package_tests {
+    use super::*;
+    use crate::agent_hub::{
+        portable_inventory::PortableStoreFactDto,
+        targets::{portable::PortableAssetOwner, PortableOriginKind},
+    };
+
+    fn store_item(native_id: &str, store_id: &str) -> PortableInventoryItemDto {
+        use crate::agent_hub::portable_inventory::{
+            PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
+            PortableInventorySourceOrigin,
+        };
+        PortableInventoryItemDto {
+            inventory_item_id: format!("id-{native_id}"),
+            target: AgentTarget::Grok,
+            loaded_by: AgentTarget::Grok,
+            owned_by: PortableAssetOwner::PortableStore,
+            origin_kind: PortableOriginKind::Compatibility,
+            native_output_candidate: false,
+            kind: PortableAssetKind::Skill,
+            native_id: native_id.into(),
+            display_name: native_id.into(),
+            description: None,
+            version: None,
+            scope_id: "user".into(),
+            scope_kind: ScopeKind::User,
+            project_id: None,
+            project_opted_in: true,
+            source_path: Some(format!("/home/.agents/skills/superpowers/{native_id}")),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: None,
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto::default(),
+            warnings: vec!["nested_skill_package".into()],
+            mcp_credential: None,
+            store: PortableStoreFactDto {
+                store_id: Some(store_id.into()),
+                store_attached: false,
+                loaded_via_other_path: true,
+                loaded_via_target: Some(AgentTarget::Codex),
+            },
+        }
+    }
+
+    #[test]
+    fn nested_child_uses_package_store_id_and_mount() {
+        let item = store_item("using-superpowers", "skill:superpowers");
+        assert_eq!(
+            skill_package_native_id(PortableStoreKind::Skill, "using-superpowers", Some(&item)),
+            "superpowers"
+        );
+        let child = PathBuf::from("/home/.agents/skills/superpowers/using-superpowers");
+        assert_eq!(
+            remap_nested_skill_mount(&child, "using-superpowers", "superpowers"),
+            PathBuf::from("/home/.agents/skills/superpowers")
+        );
+        let constructed = PathBuf::from("/home/.grok/skills/using-superpowers");
+        assert_eq!(
+            remap_nested_skill_mount(&constructed, "using-superpowers", "superpowers"),
+            PathBuf::from("/home/.grok/skills/superpowers")
+        );
+    }
+
+    #[test]
+    fn flat_skill_keeps_its_own_native_id() {
+        let item = store_item("media-use", "skill:media-use");
+        assert_eq!(
+            skill_package_native_id(PortableStoreKind::Skill, "media-use", Some(&item)),
+            "media-use"
+        );
+        let path = PathBuf::from("/home/.grok/skills/media-use");
+        assert_eq!(
+            remap_nested_skill_mount(&path, "media-use", "media-use"),
+            path
+        );
+    }
 }

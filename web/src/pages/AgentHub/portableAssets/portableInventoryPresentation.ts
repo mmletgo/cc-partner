@@ -109,6 +109,8 @@ const PORTABILITY_ADVISORY_CODES: ReadonlySet<string> = new Set([
   'plugin_has_components',
   'store_loaded_via_other_path',
   'borrowed_runtime_origin',
+  // 无根 SKILL.md 的包展开成子项：提示来源，不是损坏。
+  'nested_skill_package',
   // Codex 缓存包未写入 `[plugins."id@market"]`：等同未启用，不是损坏。
   'codex_plugin_not_in_config',
 ]);

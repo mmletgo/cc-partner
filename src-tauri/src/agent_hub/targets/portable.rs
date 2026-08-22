@@ -9,21 +9,28 @@
 //!     定义 `DiscoveredPortableAsset` / origin / 渲染上下文与投影 DTO；提供 frontmatter 解析、
 //!     Skill 树 hash、Markdown Command/Agent 解析、MCP JSON/TOML 解析与共享目录扫描 helper。
 
-use crate::agent_hub::assets::{
-    CommandArgument, McpTransport, PortabilityDiagnostic, PortableAgent, PortableAssetPayload,
-    PortableCommand, PortableMcpServer, PortableSkill, CODE_UNKNOWN_SOURCE_FIELD,
+use crate::{
+    agent_hub::{
+        assets::{
+            CommandArgument, McpTransport, PortabilityDiagnostic, PortableAgent,
+            PortableAssetPayload, PortableCommand, PortableMcpServer, PortableSkill,
+            CODE_UNKNOWN_SOURCE_FIELD,
+        },
+        config_patch::value_content_hash,
+        models::{AgentTarget, AssetKind, ScopeKind},
+        object_store::{sha256_hex, TreeEntry, TreeEntryType, TreeManifest},
+        portable_store::{classify_store_link, classify_store_link_with_ancestors, StoreLinkClass},
+    },
+    error::AppError,
 };
-use crate::agent_hub::config_patch::value_content_hash;
-use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
-use crate::agent_hub::object_store::{sha256_hex, TreeEntry, TreeEntryType, TreeManifest};
-use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
-use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 /// 单测串行化 `CC_PARTNER_DATA_DIR` 覆盖，避免跨 adapter 并行污染。
 #[cfg(test)]
@@ -751,7 +758,10 @@ fn relative_posix(root: &Path, path: &Path) -> String {
 /// 扫描含 SKILL.md 的子目录为 Skill 发现。
 ///
 /// Business Logic: 每个子目录是独立 origin；同名目录在不同根上保持分离。
-/// Code Logic: read_dir → 有 SKILL.md 则 parse + hash。
+///     无根 SKILL.md 的 skill 包（如 superpowers）展开成带 SKILL.md 的子项，
+///     这样 Grok 等会递归加载的嵌套 skill 会出现在 Hub 列表。
+/// Code Logic: read_dir → 有 SKILL.md 则 parse + hash；否则展开一层子目录
+///     及可选的 `skills/` 子目录。
 pub fn scan_skill_dirs(
     target: AgentTarget,
     scope_kind: ScopeKind,
@@ -806,89 +816,207 @@ fn scan_skill_dirs_with_mode(
         if !path.is_dir() {
             continue;
         }
-        let skill_md = path.join("SKILL.md");
-        if !skill_md.is_file() {
+        if path.join("SKILL.md").is_file() {
+            if let Some(asset) = discover_skill_at_path(
+                target,
+                scope_kind,
+                origin_kind,
+                path,
+                defer_tree_hash,
+                Vec::new(),
+            ) {
+                out.push(asset);
+            }
             continue;
         }
-        let skill_bytes = match fs::read(&skill_md) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::debug!(
-                    target = "agent_hub.portable",
-                    %error,
-                    path = %skill_md.display(),
-                    "skip unreadable skill manifest"
-                );
-                continue;
-            }
-        };
-        let text = String::from_utf8(skill_bytes.clone()).unwrap_or_default();
-        let (fields, _order, _body) = parse_simple_frontmatter(&text);
-        let dir_name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("skill")
-            .to_string();
-        let name = fields
-            .get("name")
-            .cloned()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| dir_name.clone());
-        let description = fields.get("description").cloned().unwrap_or_default();
-        let (skill_hash, tree_hash, payload_tree_hash, mut diags) = if defer_tree_hash {
-            let skill_hash = sha256_hex(&skill_bytes);
-            (
-                skill_hash.clone(),
-                None,
-                format!("deferred:{skill_hash}"),
-                Vec::new(),
-            )
-        } else {
-            let (skill_hash, tree_hash, _manifest, diagnostics) =
-                match hash_skill_directory_cached(&path) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::debug!(
-                            target = "agent_hub.portable",
-                            error = %e,
-                            "skip skill dir without valid tree"
-                        );
-                        continue;
-                    }
-                };
-            (skill_hash, Some(tree_hash.clone()), tree_hash, diagnostics)
-        };
-        let (extensions, field_diags) =
-            unknown_fields_extension(target, &fields, KNOWN_SKILL_KEYS, "/frontmatter");
-        diags.extend(field_diags);
-        let payload = PortableAssetPayload::Skill(PortableSkill {
-            name: name.clone(),
-            description,
-            skill_markdown_hash: skill_hash.clone(),
-            tree_manifest_hash: payload_tree_hash,
-            target_extensions: extensions,
-        });
-        out.push(DiscoveredPortableAsset {
-            kind: AssetKind::Skill,
-            semantic_name: name.clone(),
+        out.extend(expand_skill_package_without_root_manifest(
+            target,
             scope_kind,
-            payload,
-            origin: PortableAssetOrigin {
-                target,
-                owned_by: store_or_target_owner(target, &path),
-                path,
-                origin_kind,
-                native_id: dir_name,
-                content_hash: skill_hash,
-                tree_hash,
-                status: PortableDiscoveryStatus::Active,
-                native_output_candidate: origin_kind.is_native_output_candidate(),
-                parent_plugin_id: None,
-            },
-            diagnostics: diags,
-        });
+            origin_kind,
+            &path,
+            defer_tree_hash,
+        )?);
     }
     Ok(out)
+}
+
+/// 无根 SKILL.md 的包：把带清单的直接子目录（及可选 `skills/`）展开成独立 Skill。
+///
+/// Business Logic: Grok 等会递归加载 `.agents/skills/<包>/<子项>`；Hub 只扫一层会漏掉整包。
+/// Code Logic: 不递归超过一层 + `skills/`；点目录跳过；有 SKILL.md 才产出。
+fn expand_skill_package_without_root_manifest(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    origin_kind: PortableOriginKind,
+    package: &Path,
+    defer_tree_hash: bool,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let package_name = package
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("skill");
+    let mut out = Vec::new();
+    for child in nested_skill_candidate_dirs(package)? {
+        if !child.join("SKILL.md").is_file() {
+            continue;
+        }
+        let extra = vec![PortabilityDiagnostic::new(
+            "nested_skill_package",
+            "/origin/package",
+            format!("skill package {package_name}"),
+        )];
+        if let Some(asset) = discover_skill_at_path(
+            target,
+            scope_kind,
+            origin_kind,
+            child,
+            defer_tree_hash,
+            extra,
+        ) {
+            out.push(asset);
+        }
+    }
+    Ok(out)
+}
+
+/// 收集 skill 包内可作为子项的目录：直接子目录 + 无清单的 `skills/` 子目录。
+fn nested_skill_candidate_dirs(package: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut out = Vec::new();
+    let mut skills_subdir: Option<PathBuf> = None;
+    for child in sorted_dir_children(package)? {
+        let name = child
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if name.starts_with('.') || !is_scanable_skill_dir(&child) {
+            continue;
+        }
+        if name == "skills" && !child.join("SKILL.md").is_file() {
+            skills_subdir = Some(child);
+            continue;
+        }
+        out.push(child);
+    }
+    if let Some(skills) = skills_subdir {
+        for grandchild in sorted_dir_children(&skills)? {
+            let name = grandchild
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if name.starts_with('.') || !is_scanable_skill_dir(&grandchild) {
+                continue;
+            }
+            out.push(grandchild);
+        }
+    }
+    Ok(out)
+}
+
+fn sorted_dir_children(dir: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    Ok(entries.into_iter().map(|e| e.path()).collect())
+}
+
+fn is_scanable_skill_dir(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return matches!(classify_store_link(path), StoreLinkClass::StoreLink { .. })
+            && path.is_dir();
+    }
+    meta.is_dir()
+}
+
+/// 把含 SKILL.md 的目录解析成一条发现记录。
+fn discover_skill_at_path(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    origin_kind: PortableOriginKind,
+    path: PathBuf,
+    defer_tree_hash: bool,
+    extra_diags: Vec<PortabilityDiagnostic>,
+) -> Option<DiscoveredPortableAsset> {
+    let skill_md = path.join("SKILL.md");
+    let skill_bytes = match fs::read(&skill_md) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(
+                target = "agent_hub.portable",
+                %error,
+                path = %skill_md.display(),
+                "skip unreadable skill manifest"
+            );
+            return None;
+        }
+    };
+    let text = String::from_utf8(skill_bytes.clone()).unwrap_or_default();
+    let (fields, _order, _body) = parse_simple_frontmatter(&text);
+    let dir_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("skill")
+        .to_string();
+    let name = fields
+        .get("name")
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| dir_name.clone());
+    let description = fields.get("description").cloned().unwrap_or_default();
+    let (skill_hash, tree_hash, payload_tree_hash, mut diags) = if defer_tree_hash {
+        let skill_hash = sha256_hex(&skill_bytes);
+        (
+            skill_hash.clone(),
+            None,
+            format!("deferred:{skill_hash}"),
+            extra_diags,
+        )
+    } else {
+        let (skill_hash, tree_hash, _manifest, mut diagnostics) =
+            match hash_skill_directory_cached(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!(
+                        target = "agent_hub.portable",
+                        error = %e,
+                        "skip skill dir without valid tree"
+                    );
+                    return None;
+                }
+            };
+        diagnostics.extend(extra_diags);
+        (skill_hash, Some(tree_hash.clone()), tree_hash, diagnostics)
+    };
+    let (extensions, field_diags) =
+        unknown_fields_extension(target, &fields, KNOWN_SKILL_KEYS, "/frontmatter");
+    diags.extend(field_diags);
+    let payload = PortableAssetPayload::Skill(PortableSkill {
+        name: name.clone(),
+        description,
+        skill_markdown_hash: skill_hash.clone(),
+        tree_manifest_hash: payload_tree_hash,
+        target_extensions: extensions,
+    });
+    Some(DiscoveredPortableAsset {
+        kind: AssetKind::Skill,
+        semantic_name: name,
+        scope_kind,
+        payload,
+        origin: PortableAssetOrigin {
+            target,
+            owned_by: store_or_target_owner(target, &path),
+            path,
+            origin_kind,
+            native_id: dir_name,
+            content_hash: skill_hash,
+            tree_hash,
+            status: PortableDiscoveryStatus::Active,
+            native_output_candidate: origin_kind.is_native_output_candidate(),
+            parent_plugin_id: None,
+        },
+        diagnostics: diags,
+    })
 }
 
 /// 扫描 `*.md` 目录为 Command。
@@ -987,7 +1115,10 @@ pub fn scan_command_markdown_dir(
 /// Business Logic: 真树属于 Hub store，不能再标成 Claude/Grok 私有副本。
 /// Code Logic: `classify_store_link` 命中 StoreLink → PortableStore。
 fn store_or_target_owner(target: AgentTarget, path: &Path) -> PortableAssetOwner {
-    if matches!(classify_store_link(path), StoreLinkClass::StoreLink { .. }) {
+    if matches!(
+        classify_store_link_with_ancestors(path),
+        StoreLinkClass::StoreLink { .. }
+    ) {
         PortableAssetOwner::PortableStore
     } else {
         PortableAssetOwner::from_target(target)
@@ -2594,6 +2725,127 @@ enabled = true
             "escape identity must not follow the target SKILL.md"
         );
         assert!(hash_skill_directory(&native_root.join("evil")).is_err());
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn skill_scan_expands_package_without_root_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        write(
+            &root.join("superpowers/using-superpowers/SKILL.md"),
+            "---\nname: using-superpowers\ndescription: Start here\n---\n# Use\n",
+        );
+        write(
+            &root.join("superpowers/brainstorming/SKILL.md"),
+            "---\nname: brainstorming\n---\n# Brainstorm\n",
+        );
+        write(&root.join("superpowers/README.md"), "# pack\n");
+        write(
+            &root.join("flat/SKILL.md"),
+            "---\nname: flat\n---\n# Flat\n",
+        );
+        write(
+            &root.join("nested-root/SKILL.md"),
+            "---\nname: nested-root\n---\n# Root\n",
+        );
+        write(
+            &root.join("nested-root/child/SKILL.md"),
+            "---\nname: hidden-child\n---\n# Child\n",
+        );
+
+        let found = scan_skill_dirs(
+            AgentTarget::Grok,
+            ScopeKind::User,
+            &root,
+            PortableOriginKind::Compatibility,
+        )
+        .unwrap();
+        let names: Vec<&str> = found.iter().map(|a| a.origin.native_id.as_str()).collect();
+        assert!(names.contains(&"using-superpowers"));
+        assert!(names.contains(&"brainstorming"));
+        assert!(names.contains(&"flat"));
+        assert!(names.contains(&"nested-root"));
+        assert!(
+            !names.contains(&"superpowers"),
+            "package without SKILL.md must not appear as itself"
+        );
+        assert!(
+            !names.contains(&"hidden-child"),
+            "package with root SKILL.md must not expand children"
+        );
+        let nested = found
+            .iter()
+            .find(|a| a.origin.native_id == "using-superpowers")
+            .expect("nested skill");
+        assert_eq!(nested.semantic_name, "using-superpowers");
+        assert!(nested
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "nested_skill_package"));
+        assert!(nested
+            .origin
+            .path
+            .ends_with("superpowers/using-superpowers"));
+    }
+
+    #[test]
+    fn skill_scan_expands_skills_subdirectory_inside_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        write(
+            &root.join("pack/skills/review/SKILL.md"),
+            "---\nname: review\n---\n# Review\n",
+        );
+        write(&root.join("pack/docs/notes.md"), "not a skill\n");
+        let found = scan_skill_dirs(
+            AgentTarget::Grok,
+            ScopeKind::User,
+            &root,
+            PortableOriginKind::LegacyStandalone,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].origin.native_id, "review");
+        assert!(found[0].origin.path.ends_with("pack/skills/review"));
+    }
+
+    #[test]
+    fn skill_scan_follows_store_symlink_package_without_root_manifest() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let store = crate::agent_hub::portable_store::ensure_portable_store_layout(&data).unwrap();
+        let package = crate::agent_hub::portable_store::store_skill_dir(&store, "superpowers");
+        write(
+            &package.join("using-superpowers/SKILL.md"),
+            "---\nname: using-superpowers\n---\n# Use\n",
+        );
+        let native_root = dir.path().join("skills");
+        fs::create_dir_all(&native_root).unwrap();
+        crate::agent_hub::portable_store::create_store_link(
+            &package,
+            &native_root.join("superpowers"),
+        )
+        .unwrap();
+        let found = scan_skill_dirs(
+            AgentTarget::Grok,
+            ScopeKind::User,
+            &native_root,
+            PortableOriginKind::Compatibility,
+        )
+        .unwrap();
+        let nested = found
+            .iter()
+            .find(|a| a.origin.native_id == "using-superpowers")
+            .expect("nested store skill");
+        assert_eq!(nested.origin.owned_by, PortableAssetOwner::PortableStore);
+        assert!(nested
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "nested_skill_package"));
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 }

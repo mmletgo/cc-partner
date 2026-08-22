@@ -608,6 +608,38 @@ describe('portableInventoryPresentation filters', () => {
     expect(classifyPortableActualState(healthyWithNotes)).toBe('enabled');
   });
 
+  test('nested skill package members are visible and not health problems', () => {
+    const nested = makeItem({
+      inventoryItemId: 'grok-skill-using-superpowers',
+      kind: 'skill',
+      nativeId: 'using-superpowers',
+      displayName: 'using-superpowers',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/using-superpowers',
+      warnings: ['nested_skill_package', 'store_loaded_via_other_path'],
+      store: {
+        storeId: 'skill:superpowers',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'codex',
+      },
+    });
+
+    expect(isPortableInventoryProblem(nested)).toBe(false);
+    expect(classifyPortableActualState(nested)).toBe('enabled');
+    expect(
+      matchesPortableInventoryItem(nested, {
+        ...DEFAULT_PORTABLE_INVENTORY_FILTERS,
+        target: 'grok',
+        kind: 'skill',
+        actualState: 'enabled',
+        assetLane: 'equipped',
+      }),
+    ).toBe(true);
+  });
+
   test('runtime load via another agent is not a health problem', () => {
     const borrowedViaOther = makeItem({
       inventoryItemId: 'grok-skill-via-claude',

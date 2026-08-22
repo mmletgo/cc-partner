@@ -10,52 +10,63 @@
 //!     将 `DiscoveredPortableAsset` 转为 `PortableInventoryItemDto`；
 //!     inspect：scan → ensure_managed（ledger）→ reconcile；unopted 项目只读 mutation 能力。
 
-use crate::agent_hub::assets::{McpTransport, PortableAssetPayload};
-use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
-use crate::agent_hub::object_store::sha256_hex;
-use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
-use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
-use crate::agent_hub::portable_actions::targets::{
-    has_direct_local_actions, is_file_only_viewing_toggle, supports_direct_local_action,
+use crate::{
+    agent_hub::{
+        assets::{McpTransport, PortableAssetPayload},
+        models::{AgentTarget, AssetKind, ScopeKind},
+        object_store::sha256_hex,
+        plugins::decompose::discover_plugin_source_for_target,
+        portable_actions::{
+            models::PortableAssetActionKind,
+            targets::{
+                has_direct_local_actions, is_file_only_viewing_toggle, supports_direct_local_action,
+            },
+        },
+        portable_inventory::{
+            ensure_managed::ensure_discovered_portable_items_managed,
+            models::{
+                inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
+                PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
+                PortableInventoryManagementState, PortableInventoryMutationCapability,
+                PortableInventoryQuery, PortableInventoryScanCapability,
+                PortableInventorySnapshotDto, PortableInventorySourceOrigin,
+                PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableStoreFactDto,
+            },
+            plugin_enablement::{plugin_actual_enabled, ViewingPluginEnablement},
+            reconcile::reconcile_portable_inventory,
+        },
+        portable_store::{
+            classify_store_link_with_ancestors, is_under_portable_store, store_command_file,
+            store_id_for, store_id_from_canonical, store_skill_dir,
+            try_portable_store_root_for_scope, validate_store_native_id, PortableStoreKind,
+            StoreLinkClass,
+        },
+        support::{
+            builtin_support_manifest, evaluate_target_support, find_target_record,
+            CapabilitySupport, EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
+        },
+        targets::{
+            portable::{
+                is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
+                DiscoveredPortableAsset, PortableAssetOwner, PortableDiscoveryStatus,
+                PortableOriginKind,
+            },
+            AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
+            CursorInstructionAdapter, GeminiInstructionAdapter, GrokInstructionAdapter,
+            LocalScopeMapping, OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment,
+            TargetPathResolver, TargetProbe,
+        },
+    },
+    error::AppError,
+    state::AppState,
 };
-use crate::agent_hub::portable_inventory::ensure_managed::ensure_discovered_portable_items_managed;
-use crate::agent_hub::portable_inventory::models::{
-    inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
-    PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
-    PortableInventoryManagementState, PortableInventoryMutationCapability, PortableInventoryQuery,
-    PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
-    PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableStoreFactDto,
-};
-use crate::agent_hub::portable_inventory::plugin_enablement::{
-    plugin_actual_enabled, ViewingPluginEnablement,
-};
-use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
-use crate::agent_hub::portable_store::{
-    classify_store_link, is_under_portable_store, store_command_file, store_id_for,
-    store_id_from_canonical, store_skill_dir, try_portable_store_root_for_scope, PortableStoreKind,
-    StoreLinkClass,
-};
-use crate::agent_hub::support::{
-    builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
-    EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
-};
-use crate::agent_hub::targets::portable::{
-    is_borrowed_runtime_origin, mutation_target_for_action, mutation_target_for_origin,
-    DiscoveredPortableAsset, PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind,
-};
-use crate::agent_hub::targets::{
-    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
-    GeminiInstructionAdapter, GrokInstructionAdapter, LocalScopeMapping,
-    OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment, TargetPathResolver,
-    TargetProbe,
-};
-use crate::error::AppError;
-use crate::state::AppState;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 /// 扫描用 scope 输入（显式注入路径与 opt-in；不猜测）。
 ///
@@ -1772,22 +1783,56 @@ fn leftover_duplicate_store_id(
         PortableStoreKind::Command => store_command_file(store_root, &disc.origin.native_id),
         PortableStoreKind::Mcp => return None,
     };
-    if !store_target.exists() {
-        return None;
-    }
-    let same = match store_kind {
+    let first_level_same = match store_kind {
         PortableStoreKind::Skill => {
             let store_md = store_target.join("SKILL.md");
-            let store_hash = fs::read(&store_md).ok().map(|bytes| sha256_hex(&bytes));
-            store_hash.is_some_and(|hash| hash == disc.origin.content_hash)
+            fs::read(&store_md)
+                .ok()
+                .is_some_and(|bytes| sha256_hex(&bytes) == disc.origin.content_hash)
         }
-        PortableStoreKind::Command => {
-            let store_hash = fs::read(&store_target).ok().map(|bytes| sha256_hex(&bytes));
-            store_hash.is_some_and(|hash| hash == disc.origin.content_hash)
-        }
+        PortableStoreKind::Command => fs::read(&store_target)
+            .ok()
+            .is_some_and(|bytes| sha256_hex(&bytes) == disc.origin.content_hash),
         PortableStoreKind::Mcp => false,
     };
-    same.then(|| store_id_for(store_kind, &disc.origin.native_id))
+    if first_level_same {
+        return Some(store_id_for(store_kind, &disc.origin.native_id));
+    }
+    leftover_nested_package_id(disc, store_root)
+        .map(|package_id| store_id_for(PortableStoreKind::Skill, &package_id))
+}
+
+fn leftover_nested_package_id(disc: &DiscoveredPortableAsset, store_root: &Path) -> Option<String> {
+    if disc.kind != AssetKind::Skill {
+        return None;
+    }
+    let parent = disc.origin.path.parent()?;
+    let parent_name = parent.file_name()?.to_str()?;
+    if parent_name.starts_with('.') {
+        return None;
+    }
+    let (package_id, nested) = if parent_name == "skills" {
+        let package_id = parent.parent()?.file_name()?.to_str()?;
+        (
+            package_id,
+            store_skill_dir(store_root, package_id)
+                .join("skills")
+                .join(&disc.origin.native_id),
+        )
+    } else {
+        (
+            parent_name,
+            store_skill_dir(store_root, parent_name).join(&disc.origin.native_id),
+        )
+    };
+    if package_id.starts_with('.') {
+        return None;
+    }
+    validate_store_native_id(package_id).ok()?;
+    let store_hash = fs::read(nested.join("SKILL.md"))
+        .ok()
+        .map(|bytes| sha256_hex(&bytes))?;
+    (store_hash == disc.origin.content_hash).then(|| package_id.to_string())
 }
 
 /// 从发现路径推导 store 事实与所有者。
@@ -1801,7 +1846,7 @@ fn store_fact_for_discovery(
 ) -> (PortableAssetOwner, PortableStoreFactDto) {
     let path = &disc.origin.path;
     let scope_store = store_root_for_scan_scope(scope);
-    match classify_store_link(path) {
+    match classify_store_link_with_ancestors(path) {
         StoreLinkClass::StoreLink {
             store_id,
             canonical,
@@ -2515,14 +2560,19 @@ fn current_target_environment() -> TargetEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::portable_inventory::plugin_enablement::{
-        parse_claude_plugin_enablement_from_settings, parse_codex_plugin_enablement_from_toml,
-    };
-    use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory_with_facts;
-    use crate::agent_hub::targets::{
-        AdapterSupportLevel, ClaudeInstructionAdapter, CodexInstructionAdapter,
-        CursorInstructionAdapter, GeminiInstructionAdapter, GrokInstructionAdapter,
-        OpenCodeInstructionAdapter, PiInstructionAdapter,
+    use crate::agent_hub::{
+        portable_inventory::{
+            plugin_enablement::{
+                parse_claude_plugin_enablement_from_settings,
+                parse_codex_plugin_enablement_from_toml,
+            },
+            reconcile::reconcile_portable_inventory_with_facts,
+        },
+        targets::{
+            AdapterSupportLevel, ClaudeInstructionAdapter, CodexInstructionAdapter,
+            CursorInstructionAdapter, GeminiInstructionAdapter, GrokInstructionAdapter,
+            OpenCodeInstructionAdapter, PiInstructionAdapter,
+        },
     };
     use std::collections::BTreeMap as Map;
 
@@ -4592,10 +4642,10 @@ enabled = ["native-only"]
     /// Code Logic: kind=skill 延迟 tree hash；两次扫描中间改 sibling/leftover 日志后 hash 不变。
     #[test]
     fn skill_query_hash_ignores_unattached_store_tree_churn() {
-        use crate::agent_hub::portable_store::{
-            create_store_link, ensure_portable_store_layout, store_skill_dir,
+        use crate::agent_hub::{
+            portable_store::{create_store_link, ensure_portable_store_layout, store_skill_dir},
+            targets::portable::DATA_DIR_ENV_LOCK,
         };
-        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
 
         let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -4700,10 +4750,13 @@ enabled = ["native-only"]
 
     #[test]
     fn project_scope_store_catalog_does_not_inject_user_store() {
-        use crate::agent_hub::portable_store::{
-            ensure_store_layout, portable_project_store_root, portable_store_root, store_skill_dir,
+        use crate::agent_hub::{
+            portable_store::{
+                ensure_store_layout, portable_project_store_root, portable_store_root,
+                store_skill_dir,
+            },
+            targets::portable::DATA_DIR_ENV_LOCK,
         };
-        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
 
         let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -4763,10 +4816,10 @@ enabled = ["native-only"]
 
     #[test]
     fn project_scope_leftover_does_not_claim_user_store() {
-        use crate::agent_hub::portable_store::{
-            ensure_store_layout, portable_store_root, store_skill_dir,
+        use crate::agent_hub::{
+            portable_store::{ensure_store_layout, portable_store_root, store_skill_dir},
+            targets::portable::DATA_DIR_ENV_LOCK,
         };
-        use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
 
         let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();

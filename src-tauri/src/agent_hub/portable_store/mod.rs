@@ -24,14 +24,16 @@ pub use manifest::{
     PortableStoreManifestEntry,
 };
 pub use symlink::{
-    attach_store_link, classify_store_link, create_store_link, is_under_portable_store,
-    restore_escape_into_store, unlink_if_store_link, unlink_store_link, StoreLinkClass,
+    attach_store_link, classify_store_link, classify_store_link_with_ancestors, create_store_link,
+    is_under_portable_store, restore_escape_into_store, unlink_if_store_link, unlink_store_link,
+    StoreLinkClass,
 };
 
-use crate::agent_hub::models::ScopeKind;
-use crate::error::AppError;
-use std::fs;
-use std::path::{Path, PathBuf};
+use crate::{agent_hub::models::ScopeKind, error::AppError};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub use symlink::migrate_native_into_store;
 
@@ -526,10 +528,13 @@ mod tests {
         native_id: &str,
         source_path: &Path,
     ) -> crate::agent_hub::portable_inventory::PortableInventoryItemDto {
-        use crate::agent_hub::models::ScopeKind;
-        use crate::agent_hub::portable_inventory::{
-            PortableAssetOwner, PortableInventoryItemCapabilitiesDto,
-            PortableInventoryManagementState, PortableInventorySourceOrigin, PortableOriginKind,
+        use crate::agent_hub::{
+            models::ScopeKind,
+            portable_inventory::{
+                PortableAssetOwner, PortableInventoryItemCapabilitiesDto,
+                PortableInventoryManagementState, PortableInventorySourceOrigin,
+                PortableOriginKind,
+            },
         };
         crate::agent_hub::portable_inventory::PortableInventoryItemDto {
             inventory_item_id: format!("id-{native_id}"),
