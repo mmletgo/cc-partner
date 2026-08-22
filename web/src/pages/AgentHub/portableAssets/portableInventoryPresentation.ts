@@ -295,6 +295,36 @@ export function portableStoreCatalogGroupKey(item: PortableInventoryItemDto): st
 }
 
 /**
+ * Business Logic: 无根 SKILL.md 的包在仓库里应显示包名（superpowers），
+ *   不能用某一个子 skill 的名字冒充整包。
+ * Code Logic: storeId `skill:<包>` 且 nativeId 不是包名 → 用包名。
+ */
+export function portableStoreCatalogDisplayName(item: PortableInventoryItemDto): string {
+  const packageName = portableStorePackageName(item);
+  if (packageName && packageName !== item.nativeId) return packageName;
+  return item.displayName;
+}
+
+/**
+ * Business Logic: 子 skill 行不能单独拆包根软链，否则卸一个等于卸整包。
+ * Code Logic: storeId `skill:<包>` 且 nativeId ≠ 包名。
+ */
+export function isNestedStoreSkillMember(item: PortableInventoryItemDto): boolean {
+  if (item.kind !== 'skill') return false;
+  const packageName = portableStorePackageName(item);
+  return Boolean(packageName && packageName !== item.nativeId);
+}
+
+function portableStorePackageName(item: PortableInventoryItemDto): string | null {
+  const storeId = item.store?.storeId?.trim() ?? '';
+  if (storeId.startsWith('skill:')) {
+    const name = storeId.slice('skill:'.length).trim();
+    return name || null;
+  }
+  return null;
+}
+
+/**
  * Business Logic: 同一 Agent 可能同时有本机软链、兼容路径扫描和未附加注入；芯片要看真正生效的那条。
  * Code Logic: 本机已附加 > 运行时借用/经其他路径加载 > 未附加目录项。
  */
@@ -327,7 +357,7 @@ export function groupPortableStoreCatalog(
     if (!existing) {
       groups.set(key, {
         key,
-        displayName: item.displayName,
+        displayName: portableStoreCatalogDisplayName(item),
         representative: item,
         byTarget: { [item.target]: item },
       });
@@ -338,7 +368,7 @@ export function groupPortableStoreCatalog(
       item,
     );
     existing.representative = preferPortableStoreGroupItem(existing.representative, item);
-    existing.displayName = existing.representative.displayName;
+    existing.displayName = portableStoreCatalogDisplayName(existing.representative);
   }
   return [...groups.values()];
 }
@@ -648,8 +678,9 @@ export function resolvePortableRowActions(
   const storeKind = isPortableStoreAssetKind(item.kind);
   if (storeKind) {
     if (canOfferPortableMigrateToStore(item)) actions.push('migrateToStore');
-    if (canOfferPortableAttach(item)) actions.push('attach');
-    if (canOfferPortableDetach(item)) actions.push('detach');
+    const nestedMember = isNestedStoreSkillMember(item);
+    if (canOfferPortableAttach(item) && !nestedMember) actions.push('attach');
+    if (canOfferPortableDetach(item) && !nestedMember) actions.push('detach');
     if (context.assetLane !== 'equipped' && canOfferPortableDestroyStore(item)) {
       actions.push('destroyStore');
     }

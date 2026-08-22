@@ -31,6 +31,8 @@ import {
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
   groupPortableStoreCatalog,
+  isNestedStoreSkillMember,
+  portableStoreCatalogDisplayName,
   portableStoreAgentChipState,
   portableStoreAgentChipStates,
   matchesPortableStoreCatalogGroup,
@@ -1494,12 +1496,16 @@ describe('portableInventoryPresentation ownership partition', () => {
       },
     });
     expect(isPortableBorrowedRuntimeItem(attached)).toBe(false);
+    expect(isNestedStoreSkillMember(attached)).toBe(true);
     expect(canOfferPortableDetach(attached)).toBe(true);
+    expect(portableStoreCatalogDisplayName(attached)).toBe('superpowers');
     expect(
       resolvePortableRowActions(attached, { ...healthyCtx, assetLane: 'equipped' }),
-    ).toEqual(['detach']);
+    ).toEqual([]);
     expect(
       resolvePortableRowActions(attached, { ...healthyCtx, assetLane: 'store' }),
-    ).toEqual(['detach', 'destroyStore']);
+    ).toEqual(['destroyStore']);
+    const grouped = groupPortableStoreCatalog([attached]);
+    expect(grouped[0]?.displayName).toBe('superpowers');
   });
 });

@@ -210,6 +210,23 @@ fn mutation_target_for_item_action(
     fallback
 }
 
+fn nested_store_skill_package_name(item: &PortableInventoryItemDto) -> Option<&str> {
+    let store_id = item.store.store_id.as_deref()?;
+    let package = store_id.strip_prefix("skill:")?;
+    if item.kind == PortableAssetKind::Skill
+        && !package.is_empty()
+        && package != item.native_id.as_str()
+    {
+        Some(package)
+    } else {
+        None
+    }
+}
+
+fn is_nested_store_skill_package_member(item: &PortableInventoryItemDto) -> bool {
+    nested_store_skill_package_name(item).is_some()
+}
+
 /// MCP/Plugin 不得走 store attach/migrate/destroy。
 fn portable_store_kind_block(
     kind: PortableAssetKind,
@@ -636,6 +653,23 @@ async fn build_change(
     let mut warnings = item.warnings.clone();
     if borrowed && !warnings.iter().any(|w| w == "borrowed_runtime_origin") {
         warnings.push("borrowed_runtime_origin".into());
+    }
+    if is_nested_store_skill_package_member(item)
+        && matches!(
+            request.action,
+            PortableAssetActionKind::Attach
+                | PortableAssetActionKind::Detach
+                | PortableAssetActionKind::Disable
+                | PortableAssetActionKind::Uninstall
+                | PortableAssetActionKind::DestroyStore
+        )
+    {
+        if let Some(package) = nested_store_skill_package_name(item) {
+            let token = format!("nested_skill_package:{package}");
+            if !warnings.iter().any(|w| w == &token) {
+                warnings.push(token);
+            }
+        }
     }
 
     let change = PortableAssetActionChangeDto {
