@@ -209,8 +209,60 @@ fn nvm_default_bin(home: &Path) -> Option<PathBuf> {
             name = trimmed.to_string();
         }
     }
-    let bin = nvm.join("versions").join("node").join(&name).join("bin");
-    bin.is_dir().then_some(bin)
+    nvm_installed_node_bin(&nvm, &name)
+}
+
+/// 把 nvm 别名（`22` / `v22.19.0`）对到已安装的 `versions/node/<ver>/bin`。
+fn nvm_installed_node_bin(nvm: &Path, spec: &str) -> Option<PathBuf> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let versions = nvm.join("versions").join("node");
+    for candidate in [spec.to_string(), format!("v{spec}")] {
+        let bin = versions.join(&candidate).join("bin");
+        if bin.is_dir() {
+            return Some(bin);
+        }
+    }
+    let want = spec.trim_start_matches('v');
+    let mut matches: Vec<(String, PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&versions) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let stripped = name.trim_start_matches('v');
+        if stripped == want || stripped.starts_with(&format!("{want}.")) {
+            let bin = entry.path().join("bin");
+            if bin.is_dir() {
+                matches.push((stripped.to_string(), bin));
+            }
+        }
+    }
+    matches.sort_by(|a, b| cmp_dotted_version(&a.0, &b.0));
+    matches.pop().map(|(_, bin)| bin)
+}
+
+fn cmp_dotted_version(left: &str, right: &str) -> std::cmp::Ordering {
+    let parse = |raw: &str| {
+        raw.split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let left = parse(left);
+    let right = parse(right);
+    let len = left.len().max(right.len());
+    for i in 0..len {
+        let a = left.get(i).copied().unwrap_or(0);
+        let b = right.get(i).copied().unwrap_or(0);
+        match a.cmp(&b) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 /// 在目录中查找可执行的 CLI 文件（Windows 额外尝试 .exe/.cmd/.bat）。
@@ -1271,11 +1323,8 @@ mod tests {
             .join("bin");
         std::fs::create_dir_all(&nvm_bin).expect("mkdir nvm");
         std::fs::create_dir_all(home.join(".nvm").join("alias")).expect("mkdir alias");
-        std::fs::write(
-            home.join(".nvm").join("alias").join("default"),
-            "v22.19.0\n",
-        )
-        .expect("write alias");
+        std::fs::write(home.join(".nvm").join("alias").join("default"), "22\n")
+            .expect("write alias");
         let fake_cli = nvm_bin.join("codex");
         std::fs::write(&fake_cli, b"#!/bin/sh\necho 0.147.0\n").expect("write fake cli");
         #[cfg(unix)]
