@@ -1119,12 +1119,104 @@ fn apply_claude_ide_isolation_env(command: &mut CommandBuilder) {
     command.env_remove(CLAUDE_CODE_SSE_PORT_ENV);
 }
 
+/// 判断 locale 字符串的 codeset 是否为 UTF-8。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Dock/Finder 拉起的发行版 GUI 经常是空/`C`/`POSIX` locale；Claude 等 TUI 用 libc `wcwidth`
+///     量宽，非 UTF-8 下中文和图标宽度为 -1，会被画成 `_`。必须识别“已经是 UTF-8”以免误覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后取最后一个 `.` 后的 codeset（忽略 `@modifier`），大小写不敏感匹配 `UTF-8`/`UTF8`。
+fn is_utf8_locale_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    let codeset = upper
+        .rsplit_once('.')
+        .map(|(_, tail)| tail)
+        .unwrap_or(upper.as_str());
+    let codeset = codeset
+        .split_once('@')
+        .map(|(head, _)| head)
+        .unwrap_or(codeset);
+    matches!(codeset, "UTF-8" | "UTF8")
+}
+
+/// 发行版 GUI 无 locale 时使用的 UTF-8 回退。
+///
+/// Business Logic（为什么需要这个函数）:
+///     macOS 发行版 `.app` 经 LaunchServices 启动时通常没有 `LANG`；必须选一个本机一定存在的 UTF-8 locale。
+///
+/// Code Logic（这个函数做什么）:
+///     macOS 用 `en_US.UTF-8`（系统预装）；Linux/Windows 用 `C.UTF-8`。
+fn default_workbench_utf8_locale() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "en_US.UTF-8"
+    } else {
+        "C.UTF-8"
+    }
+}
+
+/// 解析工作台 PTY/tmux pane 应使用的 UTF-8 locale。
+///
+/// Business Logic（为什么需要这个函数）:
+///     开发版从已有 UTF-8 shell 继承 locale 时不应改掉用户的 `zh_CN.UTF-8`；
+///     发行版空/`C` locale 必须换成 UTF-8，否则 Claude 状态栏中文和图标会变成 `_`。
+///
+/// Code Logic（这个函数做什么）:
+///     按 `LC_ALL` → `LC_CTYPE` → `LANG` 取第一条 UTF-8 值；否则回退 `default_workbench_utf8_locale`。
+fn workbench_utf8_locale() -> String {
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            if is_utf8_locale_value(&value) {
+                return value;
+            }
+        }
+    }
+    default_workbench_utf8_locale().to_string()
+}
+
+/// 把 UTF-8 locale 写进 PTY CommandBuilder。
+///
+/// Business Logic（为什么需要这个函数）:
+///     只设 `TERM` 不够：Claude/Ink 还看 `LANG`/`LC_CTYPE` 决定是否输出 Unicode。
+///
+/// Code Logic（这个函数做什么）:
+///     同步写入 `LANG`、`LC_CTYPE`、`LC_ALL`，避免父进程残留的 `LC_ALL=C` 盖过 `LANG`。
+fn apply_workbench_utf8_locale_env(command: &mut CommandBuilder) {
+    let locale = workbench_utf8_locale();
+    command.env("LANG", &locale);
+    command.env("LC_CTYPE", &locale);
+    command.env("LC_ALL", &locale);
+}
+
+/// tmux `new-session` / `new-window` / `split-window` 的 UTF-8 locale `-e` 参数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     attach 客户端 env 不会进入已有 pane；pane 内 shell/Claude 只继承创建时的 `-e`。
+///
+/// Code Logic（这个函数做什么）:
+///     返回交错的 `-e` / `LANG=` / `LC_CTYPE=` / `LC_ALL=`。
+fn tmux_utf8_locale_env_args() -> Vec<String> {
+    let locale = workbench_utf8_locale();
+    let mut args = Vec::with_capacity(6);
+    for key in ["LANG", "LC_CTYPE", "LC_ALL"] {
+        args.push("-e".to_string());
+        args.push(format!("{key}={locale}"));
+    }
+    args
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     cc-partner 是 GUI 应用，父进程可能没有真实终端环境或继承 `TERM=dumb`，会破坏 tmux 客户端协商；
+///     发行版 Dock 启动时还经常没有 UTF-8 locale，TUI 会把中文/图标画成 `_`；
 ///     Agent adapter 还需要稳定非敏感 ID 环境变量；Workbench agent 必须强制不连 IDE。
 ///
 /// Code Logic（这个函数做什么）:
-///     设置 xterm TERM/COLORTERM/TERM_PROGRAM、Claude IDE 隔离 env，以及可选的四条 `CC_PARTNER_*_ID`（无 token）。
+///     设置 xterm TERM/COLORTERM/TERM_PROGRAM、UTF-8 LANG/LC_*、Claude IDE 隔离 env，
+///     以及可选的四条 `CC_PARTNER_*_ID`（无 token）。
 fn apply_workbench_terminal_env(
     command: &mut CommandBuilder,
     agent_ctx: Option<&TerminalAgentContextIds>,
@@ -1132,6 +1224,7 @@ fn apply_workbench_terminal_env(
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "cc-partner");
+    apply_workbench_utf8_locale_env(command);
     apply_claude_ide_isolation_env(command);
     if let Some(ctx) = agent_ctx {
         apply_agent_context_env(command, ctx);
@@ -1883,6 +1976,7 @@ fn create_tmux_window(
     }
     // 无论是否有 agent_ctx，都必须注入 IDE 隔离 env（claude 在 pane 内启动时不连 VS Code）。
     // 有 agent_ctx 时由 tmux_agent_context_env_args 一并带上；无 ctx 时单独 -e。
+    // UTF-8 locale 必须走 -e：attach 客户端 env 不会进入 pane，发行版 GUI 空 locale 会让 Claude 把中文/图标画成 `_`。
     if let Some(ctx) = agent_ctx {
         for arg in tmux_agent_context_env_args(ctx) {
             command.arg(arg);
@@ -1890,6 +1984,9 @@ fn create_tmux_window(
     } else {
         command.arg("-e");
         command.arg(format!("{CLAUDE_CODE_AUTO_CONNECT_IDE_ENV}=false"));
+    }
+    for arg in tmux_utf8_locale_env_args() {
+        command.arg(arg);
     }
     if let Some(shell_command) = tmux.shell_command_for_new_session(shell_command) {
         command.arg(shell_command);
@@ -2315,12 +2412,12 @@ pub fn pane_count_for_row(row: &WorkbenchSessionRow) -> usize {
 
 /// Business Logic（为什么需要这个函数）:
 ///     分屏按钮创建的新 pane 必须从项目根目录启动，避免继承当前 pane 中用户 cd 后的位置；
-///     同时强制 Claude 不连 IDE（与 new-window 路径一致）。
+///     同时强制 Claude 不连 IDE，并注入 UTF-8 locale（与 new-window 路径一致）。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 `tmux split-window <direction> -t <target> -c <cwd> -e CLAUDE_CODE_AUTO_CONNECT_IDE=false`。
+///     构造 `tmux split-window <direction> -t <target> -c <cwd> -e IDE=false -e LANG/LC_*`。
 fn tmux_split_window_args(direction: PaneSplitDirection, target: &str, cwd: &str) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "split-window".to_string(),
         direction.tmux_flag().to_string(),
         "-t".to_string(),
@@ -2329,7 +2426,9 @@ fn tmux_split_window_args(direction: PaneSplitDirection, target: &str, cwd: &str
         cwd.to_string(),
         "-e".to_string(),
         format!("{CLAUDE_CODE_AUTO_CONNECT_IDE_ENV}=false"),
-    ]
+    ];
+    args.extend(tmux_utf8_locale_env_args());
+    args
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -8282,6 +8381,41 @@ mod tests {
                 .and_then(|value| value.to_str()),
             Some("truecolor")
         );
+        let lang = command
+            .get_env("LANG")
+            .and_then(|value| value.to_str())
+            .expect("LANG");
+        assert!(
+            is_utf8_locale_value(lang),
+            "PTY LANG must be UTF-8, got {lang}"
+        );
+        assert_eq!(
+            command.get_env("LC_CTYPE").and_then(|value| value.to_str()),
+            Some(lang)
+        );
+        assert_eq!(
+            command.get_env("LC_ALL").and_then(|value| value.to_str()),
+            Some(lang)
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     发行版 GUI 空/`C` locale 会让 Claude 把中文和图标替换成 `_`；解析必须只接受 UTF-8 codeset。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖常见 UTF-8 写法与 C/POSIX/ISO-8859 拒绝路径。
+    #[test]
+    fn utf8_locale_value_accepts_codeset_and_rejects_c_posix() {
+        assert!(is_utf8_locale_value("en_US.UTF-8"));
+        assert!(is_utf8_locale_value("zh_CN.utf8"));
+        assert!(is_utf8_locale_value("C.UTF-8"));
+        assert!(is_utf8_locale_value("UTF-8"));
+        assert!(is_utf8_locale_value("en_US.UTF-8@euro"));
+        assert!(!is_utf8_locale_value(""));
+        assert!(!is_utf8_locale_value("C"));
+        assert!(!is_utf8_locale_value("POSIX"));
+        assert!(!is_utf8_locale_value("en_US"));
+        assert!(!is_utf8_locale_value("en_US.ISO8859-1"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -8918,19 +9052,22 @@ mod tests {
             "/Users/hans/project",
         );
 
-        assert_eq!(
-            args,
-            vec![
-                "split-window",
-                "-h",
-                "-t",
-                "cc-partner-project-p1:@2",
-                "-c",
-                "/Users/hans/project",
-                "-e",
-                "CLAUDE_CODE_AUTO_CONNECT_IDE=false",
-            ]
-        );
+        let locale = workbench_utf8_locale();
+        let mut expected = vec![
+            "split-window".to_string(),
+            "-h".to_string(),
+            "-t".to_string(),
+            "cc-partner-project-p1:@2".to_string(),
+            "-c".to_string(),
+            "/Users/hans/project".to_string(),
+            "-e".to_string(),
+            "CLAUDE_CODE_AUTO_CONNECT_IDE=false".to_string(),
+        ];
+        expected.extend(tmux_utf8_locale_env_args());
+        assert_eq!(args, expected);
+        assert!(is_utf8_locale_value(&locale));
+        assert!(args.iter().any(|arg| arg == &format!("LANG={locale}")));
+        assert!(args.iter().any(|arg| arg == &format!("LC_ALL={locale}")));
     }
 
     /// Business Logic（为什么需要这个测试）:
