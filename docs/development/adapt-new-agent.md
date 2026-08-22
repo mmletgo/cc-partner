@@ -14,7 +14,7 @@
 4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本；§3.12「解引软链」把 native 路径上的逃逸软链换成真实副本（不 spawn CLI、不 remap、不删源树），两者无 L3 也必须能 apply。Grok Plugin 的 `[plugins] enabled/disabled` 与 Grok/Gemini/Cursor/OpenCode **自身** MCP 的 `enabled` 是 viewing 配置 patch：不 spawn CLI，不要求 L3 `activatePackage`。借用 MCP 不得 Enable/Disable/Uninstall。
 5. **Plugin 开关跟当前查看的 Agent，不跟所有者。** Claude `enabledPlugins=false` 不得让 Codex / Grok / OpenCode / Gemini / Cursor / Pi 的同一包显示为已关。Enable/Disable 只写 viewing 标记；Plugin Uninstall 仍改所有者磁盘。详见 §3.9。
 6. **Skill / Command 本机一份在 portable-store，不在 `~/.agents`。** MCP **不进仓库**：启停/卸载走当前（或 owner）配置 leaf，跨 Agent 用已有 Pull，不要 `migrateToStore` / `attach` / `detach` / `destroyStore`。附加只在该 Agent **自己的 native 根**建软链；卸下只拆 viewing 的链。会扫 Claude / `.agents` / Codex 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改所有者磁盘。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。借用芯片必须跟该 CLI **官方会加载的目录**走，禁止抄别家扫描表。详见 §3.10、§3.13。
-7. **漂移「确认当前版本」只改 Hub 账本。** CLI 自己更新 Skill/Command/Plugin/MCP 后，用户可以把当前磁盘记为一致基准。禁止把这条动作绑到 `supports_direct_local_action`、CLI mutation 门禁或另一家 executor。按钮文案是「确认当前版本」/ `Confirm current version`，不要写成「接受磁盘」或「重记哈希」。详见 §3.11。
+7. **漂移「确认当前版本」只改 Hub 账本。** Hub 投影/store 物化过的 Plugin/MCP/已附加 Skill·Command，磁盘哈希分叉后用户可以把当前文件记为一致基准。Hub 从未写过的独立 Skill/Command 刷新库存即跟随磁盘，不必确认。禁止把这条动作绑到 `supports_direct_local_action`、CLI mutation 门禁或另一家 executor。按钮文案是「确认当前版本」/ `Confirm current version`，不要写成「接受磁盘」或「重记哈希」。详见 §3.11。
 8. **逃逸软链「解引软链」是布局修复，不是迁入仓库。** `store_symlink_escape` / `source_blocked` 的 Skill/Command 必须能在 Hub 内把 native 路径换成真实副本：复制目标树、只拆这条软链、保留原目标。禁止 remap 到另一家 CLI，禁止绑 `supports_direct_local_action`，禁止删除 `~/.agents` 源，禁止顺手 `migrateToStore`。文案「解引软链」/ `Replace symlink with a copy`。详见 §3.12。
 9. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
 10. **可执行名 ≠ 产品名**。只启动官方 CLI（Cursor 是 `agent`），禁止拉起 GUI。
@@ -253,7 +253,9 @@ Grok（以及任何会扫 Claude / `.agents` 根的后来者）：
 
 ### 3.11 Portable 一致性：确认当前版本
 
-资产会在磁盘上更新（CLI/plugin 升级、手改 `SKILL.md`、别的工具改 MCP leaf）。Hub 第一次 `ensure_managed` 记下的 `rendered_hash` 就会和当前 scan hash 分叉，库存标 **漂移**。刷新库存只清**假漂移**（哈希其实已经对齐、status 还钉在 Drift）。真更新必须由用户点 **确认当前版本**。
+Hub 投影或 portable-store 物化过的资产会在磁盘上更新（CLI/plugin 升级、手改、别的工具改 MCP leaf）。`rendered_hash` 与当前 scan hash 分叉时库存标 **漂移**。刷新库存只清**假漂移**（哈希其实已经对齐、status 还钉在 Drift）。这类真更新必须由用户点 **确认当前版本**。
+
+Hub 从未写过的独立 Skill/Command（`~/.claude/skills`、`~/.agents/skills` 等上游 CLI 自更新目录）刷新时 **跟随磁盘**：`ensure_managed` 把 `rendered_hash` / `observed_external_hash` 对齐到当前观测值并标 `Synced`，不标漂移、不弹确认。store 附加、物化包路径、Plugin、MCP 不走这条。
 
 权威实现：`portable_actions` 的 `ConfirmCurrentVersion` / wire `confirmCurrentVersion`；`is_hub_ledger_only()`。apply 只 `upsert_materialization`：把 viewing target 的 `rendered_hash` 与 `observed_external_hash` 写成当前 `content_hash`（否则 `tree_hash`），`status=Synced`。**不写 Agent 磁盘、不 spawn CLI、不跟随任意 symlink。** 对账按 **当前查看 Agent** 的 materialization 行，不改 owner、不改另一家账本。
 
@@ -269,6 +271,7 @@ Grok（以及任何会扫 Claude / `.agents` 根的后来者）：
 - **不是** 指令三栏 `externalDrift`（那是用户级指令投影）。
 - **不是** store attach/detach/migrate/destroy（那些才写 native 根 / leaf，无 L3 仍 blocked）。
 - Enable/Disable 同字节 MOVE 不是漂移。假漂移：刷新即可，不要逼用户点确认。
+- Hub 从未写过的独立 Skill/Command：刷新跟随磁盘，不要当成漂移去确认。
 - `canConfirmCurrentVersion` 在 reconcile 之后才置位，scanner 默认 false。Plugin store 动作仍不支持；确认当前版本**可以**用于 Plugin（包字节可变）。
 
 穷尽 match：Rust `PortableAssetActionKind` / `PortableAssetPlanOperation`；前端 type + decoder + `agentHub.json` 中英键；行内动作优先这条。planner 必须对 drift **豁免**本动作（其它 mutation 仍 `SOURCE_DRIFTED`）。库存页「刷新库存」下方提供 **全部迁入仓库**（仅 Skill/Command）与 **全部确认版本**：前者一次 preview/apply 当前 Agent、当前类别快照里所有 `canMigrateToStore` 项（移入便携仓库并留下软链）；后者一次确认所有 `canConfirmCurrentVersion` 项。两者都不受搜索/一致性筛选裁切；Plugin component 除外。

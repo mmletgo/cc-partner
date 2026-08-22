@@ -8,6 +8,7 @@
 //! Code Logic（这个模块做什么）:
 //!     对可管理 discovered items：ensure scope → asset → binding → materialization；
 //!     已存在 binding 的 desired 意图保留；ExternalCollision/Blocked 不覆盖；
+//!     独立 Skill/Command（磁盘权威）哈希分叉时跟随 observed，不钉 Drift；
 //!     幂等可重复调用；失败项标 `unsupported` + reason。
 
 use crate::agent_hub::models::{
@@ -16,7 +17,8 @@ use crate::agent_hub::models::{
     ScopeKind, ScopeNode, TargetBinding,
 };
 use crate::agent_hub::portable_inventory::models::{
-    PortableInventoryItemDto, PortableInventoryManagementState, PortableInventorySourceOrigin,
+    PortableAssetKind, PortableInventoryItemDto, PortableInventoryManagementState,
+    PortableInventorySourceOrigin,
 };
 use crate::error::AppError;
 use crate::storage::AgentHubRepo;
@@ -168,6 +170,41 @@ impl EnsureManagedFacts {
             materializations,
         })
     }
+}
+
+/// 磁盘是否是这份 portable 资产的内容权威（Hub 从未写过这些字节）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     HyperFrames 等上游 CLI 会覆盖 `~/.claude/skills` / `~/.agents/skills`。
+///     这些文件 Hub 从未投影；哈希分叉不应逼用户确认版本。
+///     portable-store / 物化包 / MCP / Plugin 仍由 Hub 对账。
+///
+/// Code Logic（这个函数做什么）:
+///     Skill/Command 且未挂 store、路径也不在 Hub 仓库/物化根 → true。
+///     Plugin/MCP 或 store 附加/仓库路径 → false。
+fn disk_is_portable_content_authority(item: &PortableInventoryItemDto) -> bool {
+    match item.kind {
+        PortableAssetKind::Skill | PortableAssetKind::Command => {
+            !item.store.store_attached && !hub_owned_content_path(item.source_path.as_deref())
+        }
+        PortableAssetKind::Plugin | PortableAssetKind::Mcp => false,
+    }
+}
+
+/// 路径是否落在 Hub 自有仓库或物化包下。
+///
+/// Business Logic: store 软链的 native 根可能仍是 `~/.claude/skills`；真树路径才算 Hub 产物。
+/// Code Logic: 正斜杠归一后匹配 portable-store / project-portable-store / materialized-packages。
+fn hub_owned_content_path(path: Option<&str>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let norm = path.replace('\\', "/").to_ascii_lowercase();
+    norm.contains("/portable-store/")
+        || norm.contains("/project-portable-store/")
+        || norm.contains("/agent-hub/materialized-packages/")
+        || norm.ends_with("/portable-store")
+        || norm.ends_with("/project-portable-store")
 }
 
 /// 是否应进入 ensure（已 blocked/unsupported 不碰；无 identity 跳过）。
@@ -376,6 +413,23 @@ async fn ensure_one_item(
             } else if mat.status == MaterializationStatus::Detached {
                 // 再次发现（含版本路径滚动）：重新纳入管理，用当前 observed 重基准。
                 // 不得拿陈旧 rendered 与新 path hash 比出假 Drift。
+                (
+                    MaterializationStatus::Synced,
+                    observed.clone(),
+                    mat.last_projected_revision_id.clone(),
+                    None,
+                )
+            } else if disk_is_portable_content_authority(item)
+                && matches!(
+                    mat.status,
+                    MaterializationStatus::Pending
+                        | MaterializationStatus::Synced
+                        | MaterializationStatus::ActivationRequired
+                        | MaterializationStatus::Drift
+                )
+            {
+                // Hub 没写过这份 Skill/Command：磁盘（上游 CLI / 手改）是权威。
+                // 刷新即跟随当前 hash，避免 HyperFrames 一类自更新包反复「确认当前版本」。
                 (
                     MaterializationStatus::Synced,
                     observed.clone(),
@@ -679,6 +733,33 @@ mod tests {
             mcp_credential: None,
             store: Default::default(),
         }
+    }
+
+    #[test]
+    fn disk_authority_covers_standalone_skill_command_not_store_or_mcp() {
+        let home = PathBuf::from("/tmp/h");
+        let skill = sample_item(&home, "hyperframes", "h");
+        assert!(disk_is_portable_content_authority(&skill));
+
+        let mut command = sample_item(&home, "foo", "h");
+        command.kind = PortableAssetKind::Command;
+        assert!(disk_is_portable_content_authority(&command));
+
+        let mut attached = sample_item(&home, "grilling", "h");
+        attached.store.store_attached = true;
+        assert!(!disk_is_portable_content_authority(&attached));
+
+        let mut store_path = sample_item(&home, "review", "h");
+        store_path.source_path = Some("/data/portable-store/skills/review".into());
+        assert!(!disk_is_portable_content_authority(&store_path));
+
+        let mut mcp = sample_item(&home, "github", "h");
+        mcp.kind = PortableAssetKind::Mcp;
+        assert!(!disk_is_portable_content_authority(&mcp));
+
+        let mut plugin = sample_item(&home, "browser", "h");
+        plugin.kind = PortableAssetKind::Plugin;
+        assert!(!disk_is_portable_content_authority(&plugin));
     }
 
     fn sample_target() -> PortableInventoryTargetDto {
@@ -1125,5 +1206,89 @@ mod tests {
             Some(new_path.display().to_string().as_str())
         );
         assert_eq!(mat2.observed_external_hash.as_deref(), Some("hash-v2"));
+    }
+
+    /// Hub 没写过的独立 Skill：上游覆盖后刷新跟随磁盘，不得标 Drift。
+    #[tokio::test]
+    async fn ensure_managed_follows_disk_when_standalone_skill_hash_changes() {
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        write_skill(&home.join(".claude/skills"), "hyperframes", "v1");
+        let repo = open_repo(&root.path().join("data.db")).await;
+
+        let mut first = vec![sample_item(&home, "hyperframes", "hash-v1")];
+        let report = ensure_discovered_portable_items_managed(&repo, &mut first).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+
+        let mut second = vec![sample_item(&home, "hyperframes", "hash-v2")];
+        let report2 = ensure_discovered_portable_items_managed(&repo, &mut second).await;
+        assert!(report2.failures.is_empty(), "{:?}", report2.failures);
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats.first().expect("mat");
+        assert_eq!(mat.status, MaterializationStatus::Synced);
+        assert_eq!(mat.rendered_hash.as_deref(), Some("hash-v2"));
+        assert_eq!(mat.observed_external_hash.as_deref(), Some("hash-v2"));
+        assert_eq!(mat.last_error, None);
+
+        let snap = reconcile_portable_inventory(&repo, vec![sample_target()], second)
+            .await
+            .expect("reconcile");
+        assert_eq!(
+            snap.items[0].management_state,
+            PortableInventoryManagementState::HubManaged
+        );
+        assert!(!snap.items[0].capabilities.can_confirm_current_version);
+    }
+
+    /// portable-store 真树由 Hub 持有：哈希分叉仍标 Drift。
+    #[tokio::test]
+    async fn ensure_managed_marks_drift_when_store_attached_skill_hash_changes() {
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        write_skill(&home.join(".claude/skills"), "grilling", "v1");
+        let repo = open_repo(&root.path().join("data.db")).await;
+
+        let mut first_item = sample_item(&home, "grilling", "hash-v1");
+        first_item.store.store_attached = true;
+        let report = ensure_discovered_portable_items_managed(&repo, &mut [first_item]).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+
+        let mut second_item = sample_item(&home, "grilling", "hash-v2");
+        second_item.store.store_attached = true;
+        let report2 = ensure_discovered_portable_items_managed(&repo, &mut [second_item]).await;
+        assert!(report2.failures.is_empty(), "{:?}", report2.failures);
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats.first().expect("mat");
+        assert_eq!(mat.status, MaterializationStatus::Drift);
+        assert_eq!(mat.rendered_hash.as_deref(), Some("hash-v1"));
+        assert_eq!(mat.observed_external_hash.as_deref(), Some("hash-v2"));
+    }
+
+    /// MCP 配置叶仍由 Hub 对账：哈希分叉保持 Drift。
+    #[tokio::test]
+    async fn ensure_managed_marks_drift_when_mcp_leaf_hash_changes() {
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        let repo = open_repo(&root.path().join("data.db")).await;
+
+        let mut first_item = sample_item(&home, "github", "leaf-v1");
+        first_item.kind = PortableAssetKind::Mcp;
+        first_item.tree_hash = None;
+        let report = ensure_discovered_portable_items_managed(&repo, &mut [first_item]).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+
+        let mut second_item = sample_item(&home, "github", "leaf-v2");
+        second_item.kind = PortableAssetKind::Mcp;
+        second_item.tree_hash = None;
+        let report2 = ensure_discovered_portable_items_managed(&repo, &mut [second_item]).await;
+        assert!(report2.failures.is_empty(), "{:?}", report2.failures);
+
+        let mats = repo.list_materializations().await.unwrap();
+        let mat = mats.first().expect("mat");
+        assert_eq!(mat.status, MaterializationStatus::Drift);
+        assert_eq!(mat.rendered_hash.as_deref(), Some("leaf-v1"));
+        assert_eq!(mat.observed_external_hash.as_deref(), Some("leaf-v2"));
     }
 }
