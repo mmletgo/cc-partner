@@ -635,7 +635,7 @@
       "refresh": "Refresh",
       "migrateAllToStore": "Migrate all to store ({{count}})",
       "confirmAllVersions": "Confirm all versions ({{count}})",
-      "materializeAllEscapeLinks": "Replace all escape symlinks ({{count}})",
+      "materializeAllEscapeLinks": "Restore all into store ({{count}})",
       "retry": "Retry",
       "staleBanner": "Inventory is stale. Mutations are blocked until a successful refresh.",
       "searchPlaceholder": "Search name, native id, or path",
@@ -732,7 +732,7 @@
       "destroyStore": "Destroy store copy",
       "migrateToStore": "Migrate to store",
       "confirmCurrentVersion": "Confirm current version",
-      "materializeEscapeLink": "Replace symlink with a copy"
+      "materializeEscapeLink": "Restore into store"
     },
     "management": {
       "hubManaged": "Consistent",
@@ -778,8 +778,8 @@
       "confirmCurrentVersionHint": "Files on disk may have been updated. Confirming records the current files as Hub's consistent baseline and does not rewrite disk.",
       "confirmAllCurrentVersionHint": "Records {{count}} drifted assets for this Agent and category as Hub's consistent baseline and does not rewrite disk.",
       "migrateAllToStoreHint": "Migrates {{count}} native Skill/Command assets for this Agent and category into the store and leaves a symlink at the original path. If the same name already exists with different content, the newer version is kept and the older tree is deleted.",
-      "materializeEscapeLinkHint": "Replaces the escape symlink at this Agent's native path with a real copy, keeps the original target, and does not migrate into the store or delete ~/.agents sources.",
-      "materializeAllEscapeLinksHint": "Replaces {{count}} escape symlinks for this Agent and category with real copies, keeps the original targets, and does not migrate into the store."
+      "materializeEscapeLinkHint": "Copies the escape symlink target into the shared store and replaces this Agent's native path with a store symlink. Keeps the original target and does not delete ~/.agents sources.",
+      "materializeAllEscapeLinksHint": "Copies {{count}} escape symlink targets into the shared store and replaces each Agent native path with a store symlink. Keeps the original targets and does not delete ~/.agents sources."
     }
   },
   "portablePull": {

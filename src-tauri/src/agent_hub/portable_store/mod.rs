@@ -25,7 +25,7 @@ pub use manifest::{
 };
 pub use symlink::{
     attach_store_link, classify_store_link, create_store_link, is_under_portable_store,
-    materialize_escape_link, unlink_if_store_link, unlink_store_link, StoreLinkClass,
+    restore_escape_into_store, unlink_if_store_link, unlink_store_link, StoreLinkClass,
 };
 
 use crate::agent_hub::models::ScopeKind;
@@ -662,6 +662,48 @@ mod tests {
             }
             other => panic!("expected SOURCE_MISSING, got {other:?}"),
         }
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
+    }
+
+    #[test]
+    fn restore_escape_copies_source_into_store_and_relinks_native() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, data) = isolated_data_dir();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let real = data.join("agents").join("skills").join("escape-skill");
+        fs::create_dir_all(real.join("nested")).unwrap();
+        fs::write(real.join("SKILL.md"), "---\nname: escape-skill\n---\nbody").unwrap();
+        fs::write(real.join("nested/data.txt"), "payload").unwrap();
+        let native = data.join("claude").join("skills").join("escape-skill");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &native).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &native).unwrap();
+        let outcome = crate::agent_hub::portable_store::execute_skill_or_command_store(
+            crate::agent_hub::models::AgentTarget::Claude,
+            crate::agent_hub::portable_actions::models::PortableAssetActionKind::MaterializeEscapeLink,
+            crate::agent_hub::portable_inventory::PortableAssetKind::Skill,
+            "escape-skill",
+            &native,
+            None,
+        )
+        .expect("restore");
+        assert_eq!(
+            outcome,
+            crate::agent_hub::portable_actions::targets::TargetActionRawOutcome::Applied
+        );
+        assert!(fs::symlink_metadata(&native)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let store_tree = store_skill_dir(&portable_store_root(&data), "escape-skill");
+        assert!(store_tree.join("SKILL.md").is_file());
+        assert!(real.join("SKILL.md").is_file(), "source must remain");
+        assert_eq!(
+            fs::canonicalize(&native).unwrap(),
+            fs::canonicalize(&store_tree).unwrap()
+        );
         std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 }

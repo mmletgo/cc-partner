@@ -635,7 +635,7 @@
       "refresh": "刷新",
       "migrateAllToStore": "全部迁入仓库（{{count}}）",
       "confirmAllVersions": "全部确认版本（{{count}}）",
-      "materializeAllEscapeLinks": "全部解引软链（{{count}}）",
+      "materializeAllEscapeLinks": "全部恢复为仓库资产（{{count}}）",
       "retry": "重试",
       "staleBanner": "库存已过期。在成功刷新前禁止变更。",
       "searchPlaceholder": "搜索名称、native id 或路径",
@@ -732,7 +732,7 @@
       "destroyStore": "彻底删除仓库副本",
       "migrateToStore": "迁入仓库",
       "confirmCurrentVersion": "确认当前版本",
-      "materializeEscapeLink": "解引软链"
+      "materializeEscapeLink": "恢复为仓库资产"
     },
     "management": {
       "hubManaged": "一致",
@@ -778,8 +778,8 @@
       "confirmCurrentVersionHint": "磁盘上的文件可能已更新。确认后 Hub 只把当前文件记为一致基准，不会改写磁盘。",
       "confirmAllCurrentVersionHint": "将把当前 Agent、当前类别中 {{count}} 项已漂移资产记为一致基准，不会改写磁盘。",
       "migrateAllToStoreHint": "将把当前 Agent、当前类别中 {{count}} 项原生 Skill/Command 迁入仓库，并在原路径留下软链。同名不同内容时保留版本较新的一份，旧的直接删除。",
-      "materializeEscapeLinkHint": "会把当前 Agent 原生路径上的逃逸软链替换为真实副本，保留原来的目标目录，不会迁入仓库，也不会删除 ~/.agents 源。",
-      "materializeAllEscapeLinksHint": "将把当前 Agent、当前类别中 {{count}} 项逃逸软链替换为真实副本，保留原来的目标目录，不会迁入仓库。"
+      "materializeEscapeLinkHint": "会把逃逸软链的目标复制进共享仓库，并在当前 Agent 原生目录挂上指向仓库的软链。原来的目标目录保留，不会删除 ~/.agents 源。",
+      "materializeAllEscapeLinksHint": "将把当前 Agent、当前类别中 {{count}} 项逃逸软链复制进共享仓库，并在各原生目录挂上指向仓库的软链。原来的目标目录保留，不会删除 ~/.agents 源。"
     }
   },
   "portablePull": {

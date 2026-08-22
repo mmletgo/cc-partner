@@ -42,7 +42,7 @@ pub enum PortableAssetActionKind {
     MigrateToStore,
     /// 把当前磁盘内容记为一致基准（只改 Hub 账本，不改文件）
     ConfirmCurrentVersion,
-    /// 把 native 路径上的逃逸软链替换为真实副本（不删源树、不迁入 store）
+    /// 把逃逸软链的源树复制进仓库，并在 native 路径挂正规 store 软链（不删源树）
     MaterializeEscapeLink,
 }
 
@@ -75,9 +75,9 @@ impl PortableAssetActionKind {
         matches!(self, Self::ConfirmCurrentVersion)
     }
 
-    /// 是否为逃逸软链解引（改 native 路径，但不走 CLI / store / 直管 allowlist）。
+    /// 是否为逃逸软链恢复（改 native 路径与仓库真树，但不走 CLI / 直管 allowlist）。
     ///
-    /// Business Logic: Hub 扫描 fail-closed 后用户必须能就地恢复；不得 remap 到另一家 CLI。
+    /// Business Logic: Hub 扫描 fail-closed 后用户必须能恢复成仓库资产；不得 remap 到另一家 CLI。
     /// Code Logic: `materializeEscapeLink` 为真。
     pub fn is_escape_link_repair(self) -> bool {
         matches!(self, Self::MaterializeEscapeLink)
@@ -85,7 +85,7 @@ impl PortableAssetActionKind {
 
     /// 是否跳过 target CLI / 直管 allowlist 门禁。
     ///
-    /// Business Logic: 确认版本只改账本；解引软链与仓库软链附加/卸下只改本机文件，
+    /// Business Logic: 确认版本只改账本；逃逸软链恢复与仓库软链附加/卸下只改本机文件，
     ///     都不能被 OpenCode 等无 L3 写入挡住。
     /// Code Logic: ledger-only、escape-link repair 或 portable-store 动作。
     pub fn bypasses_target_cli_gates(self) -> bool {
@@ -196,7 +196,7 @@ pub enum PortableAssetPlanOperation {
     MigrateToStore,
     /// 确认当前版本（重记账本哈希）
     ConfirmCurrentVersion,
-    /// 把逃逸软链解引为真实副本
+    /// 把逃逸软链恢复为仓库真树 + native 正规软链
     MaterializeEscapeLink,
 }
 

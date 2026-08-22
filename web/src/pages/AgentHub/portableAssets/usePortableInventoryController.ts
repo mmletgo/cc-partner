@@ -100,9 +100,9 @@ export interface UsePortableInventoryControllerResult {
   migratableToStoreItems: PortableInventoryItemDto[];
   /** 一键把当前类别、当前 Agent 的可迁入项移入仓库并留下软链。 */
   openMigrateAllToStore: () => void;
-  /** 当前快照里可「解引软链」的 Skill/Command。 */
+  /** 当前快照里可「恢复为仓库资产」的逃逸软链 Skill/Command。 */
   materializableEscapeLinkItems: PortableInventoryItemDto[];
-  /** 一键把当前类别、当前 Agent 的逃逸软链替换为真实副本。 */
+  /** 一键把当前类别、当前 Agent 的逃逸软链复制进仓库并挂正规软链。 */
   openMaterializeAllEscapeLinks: () => void;
   clearPendingAction: () => void;
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
@@ -451,7 +451,7 @@ export function usePortableInventoryController(
   );
 
   /**
-   * Business Logic: 一键把当前 Agent、当前类别快照里全部逃逸软链解引为真实副本。
+   * Business Logic: 一键把当前 Agent、当前类别快照里全部逃逸软链复制进仓库并挂正规软链。
    * Code Logic: 空集或 mutation 门闩时清 pending；否则打开 materializeEscapeLink 批量 dialog。
    */
   const openMaterializeAllEscapeLinks = useCallback(() => {

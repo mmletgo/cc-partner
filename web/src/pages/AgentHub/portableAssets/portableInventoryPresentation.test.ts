@@ -22,6 +22,7 @@ import {
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
   filterPortableInventoryItems,
   isPortableBorrowedRuntimeItem,
+  isPortableEscapeLinkItem,
   isPortableInventoryProblem,
   isPortableItemReadOnly,
   listConfirmableCurrentVersionItems,
@@ -420,6 +421,37 @@ describe('portableInventoryPresentation filters', () => {
         filters({ kind: 'skill', assetLane: 'equipped' }),
       ).map((item) => item.inventoryItemId),
     ).toEqual(['claude-skill-native', 'claude-skill-attached']);
+
+    const escaped = makeItem({
+      inventoryItemId: 'claude-skill-escape',
+      kind: 'skill',
+      nativeId: 'huashu-design',
+      actualEnabled: false,
+      managementState: 'unsupported',
+      warnings: ['store_symlink_escape', 'source_blocked'],
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canMaterializeEscapeLink: true,
+        reasonCode: 'source_blocked',
+      },
+    });
+    expect(isPortableEscapeLinkItem(escaped)).toBe(true);
+    expect(classifyPortableActualState(escaped)).toBe('problem');
+    expect(
+      filterPortableInventoryItems(
+        [native, disabledNative, escaped, attached],
+        filters({ kind: 'skill', assetLane: 'equipped' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-native', 'claude-skill-escape', 'claude-skill-attached']);
+    expect(
+      filterPortableInventoryItems(
+        [escaped],
+        filters({ kind: 'skill', actualState: 'problem', assetLane: 'equipped' }),
+      ).map((item) => item.inventoryItemId),
+    ).toEqual(['claude-skill-escape']);
 
     expect(
       filterPortableInventoryItems(

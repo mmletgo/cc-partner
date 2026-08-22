@@ -217,6 +217,16 @@ export function isPortableStoreAssetKind(kind: PortableAssetKind): boolean {
 }
 
 /**
+ * Business Logic: 逃逸软链不是「已禁用」，必须作为已装备问题行可见，才能一键恢复进仓库。
+ * Code Logic: Skill/Command 上 canMaterializeEscapeLink 或 `store_symlink_escape` warning。
+ */
+export function isPortableEscapeLinkItem(item: PortableInventoryItemDto): boolean {
+  if (!isPortableStoreAssetKind(item.kind)) return false;
+  if (item.capabilities.canMaterializeEscapeLink) return true;
+  return item.warnings.includes('store_symlink_escape');
+}
+
+/**
  * Business Logic: 只有本 Agent 自己的 native / Codex ~/.agents（legacyStandalone）能迁入仓库。
  *   Grok/Pi 等运行时从其他 Agent 加载的 compatibility 项不得出现「迁入仓库」。
  * Code Logic: 后端 canMigrateToStore 再加 originKind 闸，capability 泄漏也不会露出按钮。
@@ -488,7 +498,7 @@ export function matchesPortableInventoryItem(
       !isPortableBorrowedRuntimeItem(item)
     ) {
       return false;
-    } else if (item.actualEnabled === false) {
+    } else if (item.actualEnabled === false && !isPortableEscapeLinkItem(item)) {
       return false;
     }
   }
@@ -686,7 +696,7 @@ export function listMigratableToStoreItems(
 }
 
 /**
- * Business Logic: 「全部解引软链」覆盖当前 Agent、当前类别快照里所有逃逸项，
+ * Business Logic: 「全部恢复为仓库资产」覆盖当前 Agent、当前类别快照里所有逃逸项，
  *   不受搜索/一致性筛选裁切；仅 Skill/Command；Plugin component 不进批量。
  * Code Logic: 复用行动作同一组 stale/lock/readOnly 门闩与 canMaterializeEscapeLink。
  */

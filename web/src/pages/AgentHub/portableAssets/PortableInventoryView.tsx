@@ -116,7 +116,8 @@ export function PortableInventoryView(props: PortableInventoryViewProps): JSX.El
     refreshing ||
     stale ||
     mutationBlocked;
-  const showMaterializeAllEscapeLinks = isPortableStoreAssetKind(filters.kind);
+  const showMaterializeAllEscapeLinks =
+    isPortableStoreAssetKind(filters.kind) && filters.assetLane !== 'store';
   const materializeAllCount = materializableEscapeLinkItems.length;
   const materializeAllDisabled =
     materializeAllCount === 0 ||

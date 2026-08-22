@@ -10,9 +10,9 @@
 use super::{
     attach_store_link, classify_store_link, current_portable_store_root, ensure_store_layout,
     migrate_native_into_store, remove_manifest_attachment, remove_manifest_entry,
-    store_command_file, store_id_for, store_skill_dir, try_portable_store_root_for_scope,
-    unlink_if_store_link, upsert_manifest_entry, ManifestAttachment, PortableStoreKind,
-    StoreLinkClass,
+    restore_escape_into_store, store_command_file, store_id_for, store_skill_dir,
+    try_portable_store_root_for_scope, unlink_if_store_link, upsert_manifest_entry,
+    ManifestAttachment, PortableStoreKind, StoreLinkClass,
 };
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
@@ -203,6 +203,63 @@ pub fn execute_skill_or_command_store(
                 fs::remove_file(&store_target)?;
             }
             let _ = remove_manifest_entry(&store_root, &store_id);
+            Ok(TargetActionRawOutcome::Applied)
+        }
+        PortableAssetActionKind::MaterializeEscapeLink => {
+            match classify_store_link(native_path) {
+                StoreLinkClass::StoreLink { .. } => {
+                    return Ok(TargetActionRawOutcome::Failed {
+                        code: "PORTABLE_STORE_REFUSE_MATERIALIZE_STORE_LINK".into(),
+                        message: "refusing to replace a store link".into(),
+                    });
+                }
+                StoreLinkClass::Regular => return Ok(TargetActionRawOutcome::Skipped),
+                StoreLinkClass::EscapeLink => {}
+            }
+            let home = dirs::home_dir();
+            let source = super::symlink::resolve_escape_source(
+                native_path,
+                Some(&data_dir),
+                home.as_deref(),
+            )?;
+            if source == native_path {
+                return Ok(TargetActionRawOutcome::Failed {
+                    code: "PORTABLE_STORE_MATERIALIZE_SOURCE_IS_NATIVE".into(),
+                    message: "escape source resolved to the native path".into(),
+                });
+            }
+            let native_won = if store_target.exists() {
+                match resolve_migrate_name_conflict(&source, &store_target, kind)? {
+                    MigrateNameConflict::SameContent | MigrateNameConflict::KeepStore => false,
+                    MigrateNameConflict::KeepNative => {
+                        remove_real_tree(&store_target)?;
+                        true
+                    }
+                }
+            } else {
+                true
+            };
+            restore_escape_into_store(
+                native_path,
+                &store_target,
+                Some(&data_dir),
+                home.as_deref(),
+            )?;
+            let content_hash = if native_won {
+                item.and_then(|i| i.content_hash.clone())
+            } else {
+                None
+            };
+            let _ = upsert_manifest_entry(
+                &store_root,
+                store_kind,
+                native_id,
+                content_hash,
+                Some(ManifestAttachment {
+                    target: viewing,
+                    path: native_path.display().to_string(),
+                }),
+            );
             Ok(TargetActionRawOutcome::Applied)
         }
         _ => Ok(TargetActionRawOutcome::Failed {

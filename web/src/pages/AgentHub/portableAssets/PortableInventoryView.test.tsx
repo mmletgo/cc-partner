@@ -277,6 +277,52 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-inventory-confirm-all-versions')).toBeTruthy();
   });
 
+  test('shows restore-all escape links on equipped and hides it on store lane', () => {
+    const escaped = item({
+      inventoryItemId: 'claude-skill-escape',
+      actualEnabled: false,
+      managementState: 'unsupported',
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canMaterializeEscapeLink: true,
+        reasonCode: 'source_blocked',
+        evidenceIds: [],
+      },
+    });
+    const { rerender } = render(
+      <PortableInventoryView
+        controller={controller({
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [escaped],
+          },
+          visibleItems: [escaped],
+          materializableEscapeLinkItems: [escaped],
+        })}
+        labels={labels}
+      />,
+    );
+    expect(screen.getByTestId('portable-inventory-materialize-all-escape-links')).toBeTruthy();
+
+    rerender(
+      <PortableInventoryView
+        controller={controller({
+          filters: { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, assetLane: 'store' },
+          materializableEscapeLinkItems: [escaped],
+        })}
+        labels={labels}
+      />,
+    );
+    expect(screen.queryByTestId('portable-inventory-materialize-all-escape-links')).toBeNull();
+  });
+
   test('confirm-all button opens the batch action', () => {
     const drifted = item({
       inventoryItemId: 'claude-skill-alpha',

@@ -410,7 +410,7 @@ async fn execute_claimed_plan(
             continue;
         }
         if plan.action.is_escape_link_repair() {
-            let outcome = materialize_escape_link_change(change);
+            let outcome = materialize_escape_link_change(change, pre.as_ref());
             raw_results.push((change.inventory_item_id.clone(), outcome, pre));
             continue;
         }
@@ -765,26 +765,27 @@ fn reconcile_item(
                 }
                 PortableAssetActionKind::MaterializeEscapeLink => {
                     if post.is_some_and(|p| {
-                        !p.warnings.iter().any(|warning| {
-                            warning == "store_symlink_escape" || warning == "source_blocked"
-                        })
+                        p.store.store_attached
+                            && !p.warnings.iter().any(|warning| {
+                                warning == "store_symlink_escape" || warning == "source_blocked"
+                            })
                     }) {
                         (
                             PortableAssetActionItemState::Succeeded,
                             None,
-                            Some("escape link replaced with a local copy".into()),
+                            Some("escape link restored into store".into()),
                         )
                     } else if post.is_none() {
                         (
                             PortableAssetActionItemState::Failed,
                             Some("PORTABLE_ASSET_ACTION_RESCAN_MISSING".into()),
-                            Some("item missing after materialize escape link".into()),
+                            Some("item missing after restore escape link".into()),
                         )
                     } else {
                         (
                             PortableAssetActionItemState::Failed,
                             Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
-                            Some("item still escaped after materialize".into()),
+                            Some("expected storeAttached=true after escape restore".into()),
                         )
                     }
                 }
@@ -971,21 +972,35 @@ async fn resolve_post_inventory(
     inspect_portable_inventory_force_query(state, query).await
 }
 
-/// 把 native 路径上的逃逸软链替换为真实副本。
+/// 把 native 路径上的逃逸软链恢复为仓库真树 + 正规 store 软链。
 ///
-/// Business Logic: 不删源树、不建 store 软链、不 spawn CLI；Grok 等无 L3 身份也必须能修。
-/// Code Logic: 读 change.path，调用 portable_store::materialize_escape_link。
+/// Business Logic: 不删源树、不 spawn CLI；Grok 等无 L3 身份也必须能修。
+/// Code Logic: 读 change.path / pre.native_id，走 execute_skill_or_command_store。
 fn materialize_escape_link_change(
     change: &super::models::PortableAssetActionChangeDto,
+    pre: Option<&PortableInventoryItemDto>,
 ) -> TargetActionRawOutcome {
-    let Some(path) = change.path.as_deref() else {
+    let Some(item) = pre else {
         return TargetActionRawOutcome::Failed {
-            code: "PORTABLE_ASSET_ACTION_SOURCE_MISSING".into(),
-            message: "native path missing for materialize escape link".into(),
+            code: "PORTABLE_ASSET_ACTION_ITEM_NOT_FOUND".into(),
+            message: "live inventory item missing before escape restore".into(),
         };
     };
-    match crate::agent_hub::portable_store::materialize_escape_link(std::path::Path::new(path)) {
-        Ok(()) => TargetActionRawOutcome::Applied,
+    let Some(path) = change.path.as_deref().or(item.source_path.as_deref()) else {
+        return TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_SOURCE_MISSING".into(),
+            message: "native path missing for restore escape link".into(),
+        };
+    };
+    match crate::agent_hub::portable_store::execute_skill_or_command_store(
+        change.target,
+        PortableAssetActionKind::MaterializeEscapeLink,
+        change.kind,
+        &item.native_id,
+        std::path::Path::new(path),
+        Some(item),
+    ) {
+        Ok(outcome) => outcome,
         Err(error) => {
             let code = error.to_string();
             let stable = if code.contains("PORTABLE_STORE_ESCAPE_TARGET_MISSING") {
@@ -994,6 +1009,8 @@ fn materialize_escape_link_change(
                 "PORTABLE_STORE_REFUSE_MATERIALIZE_STORE_LINK"
             } else if code.contains("PORTABLE_STORE_LINK_MISSING") {
                 "PORTABLE_STORE_LINK_MISSING"
+            } else if code.contains("PORTABLE_STORE_MATERIALIZE_SOURCE_IS_NATIVE") {
+                "PORTABLE_STORE_MATERIALIZE_SOURCE_IS_NATIVE"
             } else {
                 "PORTABLE_ASSET_ACTION_MATERIALIZE_FAILED"
             };
@@ -1584,11 +1601,17 @@ mod tests {
         assert_eq!(mat.status, MaterializationStatus::Synced);
     }
 
-    /// Business Logic: 解引逃逸软链复制到 native 路径，不删源树、不 spawn CLI。
+    /// Business Logic: 逃逸软链恢复进仓库并挂正规软链，不删源树、不 spawn CLI。
     #[tokio::test]
-    async fn materialize_escape_link_copies_tree_without_cli() {
+    async fn materialize_escape_link_restores_into_store_without_cli() {
+        let _guard = crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = test_repo().await;
         let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
         let real = dir.path().join("agents/skills/grilling");
         std::fs::create_dir_all(real.join("nested")).unwrap();
         std::fs::write(real.join("SKILL.md"), "---\nname: grilling\n---\nbody\n").unwrap();
@@ -1635,6 +1658,12 @@ mod tests {
         post_item.capabilities.can_materialize_escape_link = false;
         post_item.capabilities.reason_code = None;
         post_item.management_state = PortableInventoryManagementState::Unmanaged;
+        post_item.store = PortableStoreFactDto {
+            store_id: Some("skill:grilling".into()),
+            store_attached: true,
+            loaded_via_other_path: false,
+            loaded_via_target: None,
+        };
         let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
         let runner = Arc::new(FakeProcessRunner::new());
         let deps = PortableActionExecutorDeps {
@@ -1643,7 +1672,7 @@ mod tests {
             env: None,
             pre_inventory: Some(snap),
             claude_config_dir: None,
-            data_dir: None,
+            data_dir: Some(data.clone()),
             rescan_override: Some(post),
         };
         let result = apply_portable_asset_action_with(
@@ -1663,9 +1692,25 @@ mod tests {
             result.items[0].error_code
         );
         assert!(runner.calls().is_empty(), "repair must not spawn CLI");
-        assert!(!link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert!(link.join("SKILL.md").is_file());
-        assert!(real.join("SKILL.md").is_file());
+        assert!(
+            link.symlink_metadata().unwrap().file_type().is_symlink(),
+            "native must become a store symlink"
+        );
+        let store_tree = crate::agent_hub::portable_store::store_skill_dir(
+            &crate::agent_hub::portable_store::portable_store_root(&data),
+            "grilling",
+        );
+        assert!(store_tree.join("SKILL.md").is_file());
+        assert!(store_tree.join("nested/data.txt").is_file());
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "original target must remain"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&store_tree).unwrap()
+        );
+        std::env::remove_var("CC_PARTNER_DATA_DIR");
     }
 
     /// Business Logic: Claude Plugin enable 必须带 --scope user argv。
