@@ -16,6 +16,7 @@ import type {
   PortableInventoryManagementState,
 } from '@/lib/types/portableInventory';
 import {
+  canOfferPortableDetach,
   classifyPortableActualState,
   countPortableItemsByKind,
   DEFAULT_PORTABLE_INVENTORY_FILTERS,
@@ -972,6 +973,54 @@ describe('portableInventoryPresentation row actions', () => {
     expect(resolvePortablePrimaryAction(plugin, healthyCtx)).toBe('disable');
   });
 
+  test('borrowed plugin still exposes viewing enable/disable when capabilities allow', () => {
+    const borrowedPlugin = makeItem({
+      inventoryItemId: 'grok-plugin-from-claude',
+      kind: 'plugin',
+      nativeId: 'superpowers',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      actualEnabled: true,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: false,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(borrowedPlugin)).toBe(true);
+    expect(resolvePortableRowActions(borrowedPlugin, healthyCtx)).toEqual(['disable']);
+    expect(resolvePortablePrimaryAction(borrowedPlugin, healthyCtx)).toBe('disable');
+  });
+
+  test('borrowed MCP does not expose owner enable/disable/uninstall even if capabilities leaked', () => {
+    const borrowedMcp = makeItem({
+      inventoryItemId: 'grok-mcp-from-claude',
+      kind: 'mcp',
+      nativeId: 'from-claude-mcp',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      loadedBy: 'grok',
+      sourceOrigin: 'nativeConfig',
+      actualEnabled: true,
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(borrowedMcp)).toBe(true);
+    expect(resolvePortableRowActions(borrowedMcp, healthyCtx)).toEqual([]);
+    expect(resolvePortableRowActions(borrowedMcp, healthyCtx)).not.toContain('enable');
+    expect(resolvePortableRowActions(borrowedMcp, healthyCtx)).not.toContain('disable');
+    expect(resolvePortableRowActions(borrowedMcp, healthyCtx)).not.toContain('uninstall');
+    expect(resolvePortablePrimaryAction(borrowedMcp, healthyCtx)).toBeNull();
+  });
+
   test('drifted item exposes confirm current version first', () => {
     const drifted = makeItem({
       inventoryItemId: 'claude-skill-updated',
@@ -1096,7 +1145,7 @@ describe('portableInventoryPresentation row actions', () => {
     ).toEqual(['claude-skill-a', 'claude-command-b']);
   });
 
-  test('store item loaded via other path is borrowed and offers detach, not attach', () => {
+  test('store item loaded via other path is borrowed and does not offer detach or attach', () => {
     const grokHint = makeItem({
       inventoryItemId: 'grok-skill-via-claude',
       kind: 'skill',
@@ -1124,8 +1173,65 @@ describe('portableInventoryPresentation row actions', () => {
     expect(isPortableBorrowedRuntimeItem(grokHint)).toBe(true);
     expect(portableBorrowedOwnerLabelKey(grokHint)).toBe('claude');
     expect(portableBorrowedOwnerJumpTarget(grokHint)).toBe('claude');
-    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual(['detach']);
-    expect(resolvePortablePrimaryAction(grokHint, healthyCtx)).toBe('detach');
+    expect(canOfferPortableDetach(grokHint)).toBe(false);
+    expect(resolvePortableRowActions(grokHint, healthyCtx)).toEqual([]);
+    expect(resolvePortablePrimaryAction(grokHint, healthyCtx)).toBeNull();
+  });
+
+  test('borrowed store skill loaded via other path does not offer detach', () => {
+    const item = makeItem({
+      inventoryItemId: 'grok-skill-via-claude-leaked-detach',
+      kind: 'skill',
+      nativeId: 'via-claude-leaked-detach',
+      originKind: 'compatibility',
+      ownedBy: 'claude',
+      target: 'grok',
+      loadedBy: 'grok',
+      nativeOutputCandidate: false,
+      store: {
+        storeId: 'skill:x',
+        storeAttached: false,
+        loadedViaOtherPath: true,
+        loadedViaTarget: 'claude',
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canDetach: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(item)).toBe(true);
+    expect(canOfferPortableDetach(item)).toBe(false);
+    expect(resolvePortableRowActions(item, healthyCtx)).not.toContain('detach');
+    expect(resolvePortablePrimaryAction(item, healthyCtx)).not.toBe('detach');
+  });
+
+  test('borrowed runtime still offers detach when this viewing agent has storeAttached', () => {
+    const attachedOnViewer = makeItem({
+      inventoryItemId: 'grok-skill-own-link',
+      kind: 'skill',
+      nativeId: 'own-link',
+      target: 'grok',
+      originKind: 'compatibility',
+      ownedBy: 'portableStore',
+      store: {
+        storeId: 'skill:own-link',
+        storeAttached: true,
+        loadedViaOtherPath: false,
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canDetach: true,
+      },
+    });
+    expect(isPortableBorrowedRuntimeItem(attachedOnViewer)).toBe(true);
+    expect(canOfferPortableDetach(attachedOnViewer)).toBe(true);
+    expect(resolvePortableRowActions(attachedOnViewer, healthyCtx)).toContain('detach');
   });
 });
 

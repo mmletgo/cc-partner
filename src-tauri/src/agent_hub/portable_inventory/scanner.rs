@@ -2199,10 +2199,15 @@ fn item_capabilities(
         && (store.loaded_via_other_path || origin_kind == PortableOriginKind::Compatibility);
     // Skill/Command 生命周期改走仓库：迁入 / 附加 / 卸下 / 彻底删除。
     // 启停与卸载只留给 Plugin（viewing 开关）和 MCP（各家配置 leaf）。
-    let can_toggle_enable =
+    let mut can_toggle_enable =
         !store_kind && can_enable_mutation && enable_semantics && actual_enabled.is_some();
-    let can_toggle_disable =
+    let mut can_toggle_disable =
         !store_kind && can_disable_mutation && enable_semantics && actual_enabled.is_some();
+    // 借用 MCP 仍是所有者配置 leaf；不得在借用视图上启停/卸载，以免改写所有者 Claude 配置。
+    if borrowed && kind == PortableAssetKind::Mcp {
+        can_toggle_enable = false;
+        can_toggle_disable = false;
+    }
     let can_enable = can_toggle_enable
         && actual_enabled == Some(false)
         && supports_direct_local_action(enablement_target, kind, PortableAssetActionKind::Enable);
@@ -2214,6 +2219,7 @@ fn item_capabilities(
         can_disable,
         can_uninstall: !store_kind
             && can_uninstall_mutation
+            && !(borrowed && kind == PortableAssetKind::Mcp)
             && supports_direct_local_action(
                 uninstall_target,
                 kind,
@@ -2234,14 +2240,15 @@ fn item_capabilities(
             )
             && !(borrowed && origin_kind != PortableOriginKind::LegacyStandalone),
         // 运行时从其他 Agent 加载的仓库项已经在用源软链，不必再给当前 Agent 附加一份；
-        // 卸下则拆源 Agent 上的软链（Claude 等），让所有读取该配置的 Agent 同步卸下。
+        // 借用项也不得卸下，避免拆掉源 Agent 上的软链。
         can_attach: store_write
             && store.store_id.is_some()
             && !store.store_attached
             && !borrowed_store_runtime,
         can_detach: store_write
             && store.store_id.is_some()
-            && (store.store_attached || borrowed_store_runtime),
+            && store.store_attached
+            && !borrowed_store_runtime,
         can_destroy_store: store_write
             && store.store_id.is_some()
             && !(borrowed && origin_kind == PortableOriginKind::Compatibility),
@@ -3426,7 +3433,62 @@ enabled = false
     }
 
     #[test]
-    fn grok_borrowed_store_skill_can_detach_source_but_not_attach_or_migrate() {
+    fn borrowed_mcp_exposes_no_owner_toggles() {
+        let caps = item_capabilities(
+            AgentTarget::Claude,
+            AgentTarget::Claude,
+            PortableAssetKind::Mcp,
+            Some(true),
+            true,
+            true,
+            true,
+            true,
+            None,
+            true,
+            PortableOriginKind::Compatibility,
+            false,
+            &PortableStoreFactDto::default(),
+            PortableAssetKind::Mcp,
+        );
+        assert!(!caps.can_enable);
+        assert!(!caps.can_disable);
+        assert!(!caps.can_uninstall);
+        assert_eq!(caps.reason_code.as_deref(), Some("borrowed_runtime_origin"));
+    }
+
+    #[test]
+    fn borrowed_store_skill_via_other_path_cannot_detach() {
+        let store = PortableStoreFactDto {
+            store_id: Some("skill:media-use".into()),
+            store_attached: false,
+            loaded_via_other_path: true,
+            loaded_via_target: Some(AgentTarget::Claude),
+        };
+        let caps = item_capabilities(
+            AgentTarget::Grok,
+            AgentTarget::Grok,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            true,
+            true,
+            None,
+            true,
+            PortableOriginKind::Compatibility,
+            false,
+            &store,
+            PortableAssetKind::Skill,
+        );
+        assert!(
+            !caps.can_detach,
+            "借用经其他 Agent 软链加载的 Skill 不得拆源链"
+        );
+        assert!(!caps.can_attach);
+    }
+
+    #[test]
+    fn grok_borrowed_store_skill_cannot_detach_source_or_attach_or_migrate() {
         let store = PortableStoreFactDto {
             store_id: Some("skill:media-use".into()),
             store_attached: false,
@@ -3455,8 +3517,8 @@ enabled = false
             "borrowed runtime view must not attach a second native symlink"
         );
         assert!(
-            caps.can_detach,
-            "borrowed store skill must expose 从此 Agent 卸下 against the source link"
+            !caps.can_detach,
+            "借用经其他 Agent 软链加载的 Skill 不得拆源链"
         );
         assert!(
             !caps.can_destroy_store,

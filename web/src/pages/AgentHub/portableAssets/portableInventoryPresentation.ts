@@ -251,12 +251,18 @@ export function canOfferPortableAttach(item: PortableInventoryItemDto): boolean 
 }
 
 /**
- * Business Logic: 本 Agent 已附加，或借用视图卸下源 Agent 软链，都可以「从此 Agent 卸下」。
- * Code Logic: 信任后端 canDetach；借用项由扫描器打开该旗标。
+ * Business Logic: 本 Agent 自己挂了软链才可「从此 Agent 卸下」。
+ *   借用且无本机链（loadedViaOtherPath / compatibility）不得拆源 Agent 软链。
+ * Code Logic: 先看 canDetach；borrowed runtime 且 storeAttached 不为 true 一律 false
+ *   （capability 泄漏也不露按钮）。本 Agent storeAttached 时不隐藏。
  */
 export function canOfferPortableDetach(item: PortableInventoryItemDto): boolean {
   if (!isPortableStoreAssetKind(item.kind)) return false;
-  return Boolean(item.capabilities.canDetach);
+  if (!item.capabilities.canDetach) return false;
+  if (isPortableBorrowedRuntimeItem(item) && item.store?.storeAttached !== true) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -575,8 +581,9 @@ export function resolvePortablePrimaryAction(
     if (canOfferPortableMigrateToStore(item)) return 'migrateToStore';
     return null;
   }
-  if (item.actualEnabled === true && caps.canDisable) return 'disable';
-  if (item.actualEnabled === false && caps.canEnable) return 'enable';
+  const borrowedMcp = item.kind === 'mcp' && isPortableBorrowedRuntimeItem(item);
+  if (!borrowedMcp && item.actualEnabled === true && caps.canDisable) return 'disable';
+  if (!borrowedMcp && item.actualEnabled === false && caps.canEnable) return 'enable';
   if (item.actualEnabled === null || item.actualEnabled === undefined) {
     if (caps.canInstallToSourceTarget) return 'installToSourceTarget';
   }
@@ -589,12 +596,15 @@ export function resolvePortablePrimaryAction(
 /**
  * Business Logic: 列表行同时暴露仓库或启停动作，无需详情侧栏。
  *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下；彻底删除仓库项只在仓库页。
- *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/附加/销毁，可卸下源软链。
- *   Plugin/MCP：仍走 enable/disable/uninstall。借用项同样按 capability 暴露动作。
+ *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/附加/销毁，
+ *   也不得卸下源软链（仅本 Agent storeAttached 时可 detach）。
+ *   Plugin：仍走 enable/disable/uninstall；借用 Plugin 按 capability 暴露 viewing 开关。
+ *   MCP：自身走 enable/disable/uninstall；借用 MCP 不得暴露所有者启停/卸载。
  *   发现即管理后 **永不** 返回 adopt 作为行内动作；与 resolvePortablePrimaryAction 同样的安全门闩。
  *
  * Code Logic: 复用 stale/mutationBlocked/locked/readOnly/unsupported/unmanaged 判定，
  *   Skill/Command 只累加 store 动作；其余 kind 按 enable/disable → install → uninstall。
+ *   borrowed MCP 跳过 enable/disable/uninstall（即使 capability 泄漏）。
  *   返回的数组可能为空（无任何 mutation 资格）或含多项；调用方按顺序渲染按钮。
  */
 export function resolvePortableRowActions(
@@ -625,10 +635,11 @@ export function resolvePortableRowActions(
     }
     return actions;
   }
-  if (item.actualEnabled !== true && caps.canEnable) {
+  const borrowedMcp = item.kind === 'mcp' && isPortableBorrowedRuntimeItem(item);
+  if (!borrowedMcp && item.actualEnabled !== true && caps.canEnable) {
     actions.push('enable');
   }
-  if (item.actualEnabled !== false && caps.canDisable) {
+  if (!borrowedMcp && item.actualEnabled !== false && caps.canDisable) {
     actions.push('disable');
   }
   if (
@@ -637,7 +648,7 @@ export function resolvePortableRowActions(
   ) {
     actions.push('installToSourceTarget');
   }
-  if (caps.canUninstall) {
+  if (!borrowedMcp && caps.canUninstall) {
     actions.push('uninstall');
   }
   return actions;

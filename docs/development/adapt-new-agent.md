@@ -11,7 +11,7 @@
 1. **一份身份表**。Hub / Runtime / 会话搜索 / Prompt 历史 / 用量 / headless 只投影 `agent_catalog`，禁止再按功能面复制枚举。
 2. **未知 token fail-closed**。parse / decoder 失败，禁止静默映射 Claude。
 3. **能做的做实，不能做的仍要露脸**。新身份必须出现在壳层切换器；做不到的面用 scan-only / blocked / residual / unavailable / 缺席，禁止从 UI 藏掉。
-4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本；§3.12「解引软链」把 native 路径上的逃逸软链换成真实副本（不 spawn CLI、不 remap、不删源树），两者无 L3 也必须能 apply。
+4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本；§3.12「解引软链」把 native 路径上的逃逸软链换成真实副本（不 spawn CLI、不 remap、不删源树），两者无 L3 也必须能 apply。Grok Plugin 的 `[plugins] enabled/disabled` 与 Grok/Gemini/Cursor/OpenCode **自身** MCP 的 `enabled` 是 viewing 配置 patch：不 spawn CLI，不要求 L3 `activatePackage`。借用 MCP 不得 Enable/Disable/Uninstall。
 5. **Plugin 开关跟当前查看的 Agent，不跟所有者。** Claude `enabledPlugins=false` 不得让 Codex / Grok / OpenCode / Gemini / Cursor / Pi 的同一包显示为已关。Enable/Disable 只写 viewing 标记；Plugin Uninstall 仍改所有者磁盘。详见 §3.9。
 6. **Skill / Command 本机一份在 portable-store，不在 `~/.agents`。** MCP **不进仓库**：启停/卸载走当前（或 owner）配置 leaf，跨 Agent 用已有 Pull，不要 `migrateToStore` / `attach` / `detach` / `destroyStore`。附加只在该 Agent **自己的 native 根**建软链；卸下只拆 viewing 的链。会扫 Claude / `.agents` / Codex 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改所有者磁盘。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。借用芯片必须跟该 CLI **官方会加载的目录**走，禁止抄别家扫描表。详见 §3.10、§3.13。
 7. **漂移「确认当前版本」只改 Hub 账本。** CLI 自己更新 Skill/Command/Plugin/MCP 后，用户可以把当前磁盘记为一致基准。禁止把这条动作绑到 `supports_direct_local_action`、CLI mutation 门禁或另一家 executor。按钮文案是「确认当前版本」/ `Confirm current version`，不要写成「接受磁盘」或「重记哈希」。详见 §3.11。
@@ -191,7 +191,7 @@ Skill / Command / MCP 一旦进入 portable-store，启停是 **viewing 附加**
 |----------------|----------|---------------|-----------------|
 | Claude | `~/.claude/settings.json` → `enabledPlugins`（优先完整 `id@marketplace`） | 已安装且表中无键 → **开** | 查看 Claude 时走 Claude 表 |
 | Codex | `config.toml` → `[plugins."id@market"] enabled` | 表非空且未登记 → **关** + `codex_plugin_not_in_config` | **开**（不得把 native 白名单套到借用包） |
-| Grok | `config.toml` → `[plugins] enabled = […]` / `disabled = […]` | `enabled` 非空则当白名单 | 只认 `disabled`；**不要**把 Claude `enabledPlugins` 或 Grok `enabled` 白名单当成借用包已关 |
+| Grok | `config.toml` → `[plugins] enabled = […]` / `disabled = […]`（Hub **可以**写这两个数组，纯文件 patch，不 spawn CLI） | `enabled` 非空则当白名单 | 只认 `disabled`；**不要**把 Claude `enabledPlugins` 或 Grok `enabled` 白名单当成借用包已关 |
 | OpenCode / Gemini / Cursor / Pi | 无独立 Hub 可读开关 | 目录存在 → **开** | 永不读 Claude / Codex / Grok 的开关文件 |
 
 写盘分流（`targets/portable.rs::mutation_target_for_action`）：
@@ -201,7 +201,7 @@ Skill / Command / MCP 一旦进入 portable-store，启停是 **viewing 附加**
 - 未进 store 的 Skill / Command / MCP 启停卸载 → **owner**（`SharedAgents` → Codex）
 - 已进 store 的 Skill / Command / MCP → **viewing** 的 native 根（建/拆链或 leaf）；`destroyStore` 才动真树
 
-Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local_action`）目前只有 **Claude | Codex**。Grok / OpenCode / Gemini / Cursor / Pi 的 `activatePackage` / `deactivatePackage` 在 support-manifest 里仍是 `blocked`：列表里不得出现可点的 Enable/Disable，更不得 remap 到 `claude plugin …`。Grok 短名 `grok plugin disable superpowers` 会碰到 native 安装与 Claude cache 同名，未认证前禁止从 Hub 去调。漂移「确认当前版本」不是这条 allowlist 上的动作，见 §3.11。
+Direct-local allowlist（`portable_actions/targets/mod.rs::supports_direct_local_action`）目前只有 **Claude | Codex** 的 CLI 路径。Grok Plugin 的 `[plugins] enabled/disabled` 与 Grok/Gemini/Cursor/OpenCode **自身** MCP 的 `enabled` 是 viewing 配置 patch，Hub **可以**写这些数组/字段（不 spawn CLI、不要求 L3 `activatePackage`）。仍禁止 remap 到 `claude plugin …`，也禁止未认证的 `grok plugin` CLI（短名 `grok plugin disable superpowers` 会碰到 native 安装与 Claude cache 同名）。借用 MCP 不得 Enable/Disable/Uninstall。漂移「确认当前版本」不是这条 allowlist 上的动作，见 §3.11。
 
 盘点范围：
 
