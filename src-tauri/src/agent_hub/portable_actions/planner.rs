@@ -1148,7 +1148,7 @@ args = ["mcp"]
             materialization_status: None,
             capabilities: PortableInventoryItemCapabilitiesDto {
                 can_enable: false,
-                can_disable: false,
+                can_disable: true,
                 can_uninstall: true,
                 can_adopt: false,
                 can_install_to_source_target: false,

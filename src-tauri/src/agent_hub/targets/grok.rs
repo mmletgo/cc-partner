@@ -657,8 +657,12 @@ enabled = ["native-plugin"]
             "Claude closing the plugin must not close it on Grok"
         );
         assert!(
-            !claude_plugin.capabilities.can_disable,
-            "plugin enable/disable follows Grok flags; Grok has no direct executor"
+            !claude_plugin.capabilities.can_enable,
+            "already enabled on Grok: Enable and Disable are exclusive"
+        );
+        assert!(
+            claude_plugin.capabilities.can_disable,
+            "Grok borrowed plugin disable writes Grok [plugins] flags, not Claude enabledPlugins"
         );
         assert!(claude_plugin.capabilities.can_uninstall);
         assert_eq!(

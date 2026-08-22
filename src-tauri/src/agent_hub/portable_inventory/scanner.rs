@@ -3055,6 +3055,51 @@ enabled = false
     }
 
     #[test]
+    fn file_only_grok_borrowed_plugin_toggle_survives_blocked_cli() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Grok,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::ScanOnly {
+                reasons: vec!["cli_version_unknown".into()],
+            },
+            capabilities: BTreeMap::from([
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: false,
+            reasons: vec!["cli_version_unknown".into()],
+        };
+        let (can_enable, can_disable, can_uninstall, enablement, owner) = mutation_gates_for_origin(
+            AgentTarget::Grok,
+            PortableAssetOwner::Claude,
+            false,
+            PortableOriginKind::Compatibility,
+            PortableAssetKind::Plugin,
+            &evaluated,
+            true,
+        );
+        assert!(
+            can_enable && can_disable,
+            "Grok borrowed plugin enable/disable is a file toggle on viewing flags"
+        );
+        assert_eq!(enablement, AgentTarget::Grok);
+        assert_eq!(owner, AgentTarget::Claude);
+        assert!(
+            can_uninstall,
+            "borrowed plugin uninstall still goes to Claude owner allowlist"
+        );
+    }
+
+    #[test]
     fn partial_manifest_render_only_keeps_non_plugin_actions_available() {
         let evaluated = EvaluatedTargetSupport {
             target: AgentTarget::Claude,
