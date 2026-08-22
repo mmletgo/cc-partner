@@ -424,18 +424,39 @@ fn fs_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     同步 `Command` 调 `--version`（无 shell）；成功时取 stdout 首行非空文本；
-///     超时/非零/空输出返回 None。不修改 process env。
+///     超时/非零/空输出返回 None。可选注入 PATH，供 `#!/usr/bin/env node` 包装脚本找到 node。
 pub fn probe_cli_version(executable: &Path) -> Option<String> {
-    static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedCliProbe>>> = OnceLock::new();
+    probe_cli_version_with_search_path(executable, &[])
+}
+
+/// 用库存探测环境的 PATH 跑 `--version`。
+///
+/// Business Logic: systemd/GUI 稀疏 PATH 找不到 nvm 里的 `node`，Codex 包装脚本
+///     会 `env: node: 没有那个文件或目录`，被误判成未安装。
+pub fn probe_cli_version_in_env(executable: &Path, env: &TargetEnvironment) -> Option<String> {
+    probe_cli_version_with_search_path(executable, &env.path_entries)
+}
+
+fn probe_cli_version_with_search_path(
+    executable: &Path,
+    path_entries: &[PathBuf],
+) -> Option<String> {
+    static CACHE: OnceLock<Mutex<BTreeMap<(PathBuf, String), CachedCliProbe>>> = OnceLock::new();
     let key = executable
         .canonicalize()
         .unwrap_or_else(|_| executable.to_path_buf());
+    let path_fingerprint = path_entries
+        .iter()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cache_key = (key.clone(), path_fingerprint);
     let metadata_fingerprint = executable_metadata_fingerprint(&key);
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Some(hit) = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&key)
+        .get(&cache_key)
         .filter(|entry| {
             entry.metadata_fingerprint == metadata_fingerprint
                 && entry.cached_at.elapsed()
@@ -449,15 +470,15 @@ pub fn probe_cli_version(executable: &Path) -> Option<String> {
     {
         return hit.version;
     }
-    let version = probe_cli_version_uncached(&key);
+    let version = probe_cli_version_uncached(&key, path_entries);
     let mut guard = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.len() >= 64 && !guard.contains_key(&key) {
+    if guard.len() >= 64 && !guard.contains_key(&cache_key) {
         guard.clear();
     }
     guard.insert(
-        key,
+        cache_key,
         CachedCliProbe {
             metadata_fingerprint,
             version: version.clone(),
@@ -501,13 +522,17 @@ fn executable_metadata_fingerprint(executable: &Path) -> String {
     format!("{}:{modified_ns}:{platform}", metadata.len())
 }
 
-fn probe_cli_version_uncached(executable: &Path) -> Option<String> {
+fn probe_cli_version_uncached(executable: &Path, path_entries: &[PathBuf]) -> Option<String> {
     let mut cmd = Command::new(executable);
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 不继承测试注入之外的 PATH 语义：直接用绝对 executable。
+    if !path_entries.is_empty() {
+        if let Ok(path) = std::env::join_paths(path_entries) {
+            cmd.env("PATH", path);
+        }
+    }
     let output = match run_command_with_timeout(cmd, Duration::from_secs(5)) {
         Ok(out) => out,
         Err(_) => return None,
@@ -775,6 +800,34 @@ mod tests {
         fs::set_permissions(&bin, perms).unwrap();
         let version = probe_cli_version(&bin).expect("version");
         assert!(version.contains("9.8.7"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_cli_version_in_env_injects_path_for_wrappers() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("user-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let marker = bin.join("marker-tool");
+        fs::write(&marker, b"#!/bin/sh\nexit 0\n").unwrap();
+        let wrapper = bin.join("codex");
+        fs::write(
+            &wrapper,
+            b"#!/bin/sh\ncommand -v marker-tool >/dev/null || exit 1\necho 'codex-cli 0.147.0'\n",
+        )
+        .unwrap();
+        for path in [&marker, &wrapper] {
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
+        assert!(
+            probe_cli_version(&wrapper).is_none(),
+            "sparse process PATH must not find marker-tool"
+        );
+        let env = env_with("/tmp/home", &[], vec![bin]);
+        let version = probe_cli_version_in_env(&wrapper, &env).expect("version with injected PATH");
+        assert!(version.contains("0.147.0"));
     }
 
     #[cfg(unix)]

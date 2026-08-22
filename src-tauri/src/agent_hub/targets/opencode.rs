@@ -11,7 +11,7 @@
 //!     render 指令 prelude 与 portable 投影。
 
 use super::paths::{
-    is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+    is_non_empty_utf8_file, probe_cli_version_in_env, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
     merge_discoveries, parse_json_or_jsonc, parse_mcp_servers_json_map, render_portable_payload,
@@ -55,7 +55,9 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
     fn probe(&self, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
         let homes = TargetPathResolver::resolve_all(env);
         let executable = resolve_executable("opencode", env);
-        let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+        let version = executable
+            .as_ref()
+            .and_then(|p| probe_cli_version_in_env(p, env));
         Ok(build_probe(
             AgentTarget::OpenCode,
             executable,

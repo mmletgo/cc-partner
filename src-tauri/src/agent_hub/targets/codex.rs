@@ -10,7 +10,7 @@
 //!     扫描 portable MCP/agents + legacy skills；render 输出。
 
 use super::paths::{
-    is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+    is_non_empty_utf8_file, probe_cli_version_in_env, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
     merge_discoveries, parse_codex_agents_toml, parse_codex_mcp_toml, render_portable_payload,
@@ -57,7 +57,9 @@ impl AssetAdapter for CodexInstructionAdapter {
     fn probe(&self, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
         let homes = TargetPathResolver::resolve_all(env);
         let executable = resolve_executable("codex", env);
-        let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+        let version = executable
+            .as_ref()
+            .and_then(|p| probe_cli_version_in_env(p, env));
         Ok(build_probe(
             AgentTarget::Codex,
             executable,

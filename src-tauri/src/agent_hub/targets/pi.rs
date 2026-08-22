@@ -14,7 +14,7 @@
 //!     以及 settings 点名后的 `~/.claude/skills` / Codex skills；render 落到 `.pi/`。
 
 use super::paths::{
-    is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+    is_non_empty_utf8_file, probe_cli_version_in_env, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
     render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
@@ -78,7 +78,9 @@ impl AssetAdapter for PiInstructionAdapter {
     fn probe(&self, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
         let homes = TargetPathResolver::resolve_all(env);
         let executable = resolve_executable("pi", env);
-        let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+        let version = executable
+            .as_ref()
+            .and_then(|p| probe_cli_version_in_env(p, env));
         Ok(build_probe(
             AgentTarget::Pi,
             executable,

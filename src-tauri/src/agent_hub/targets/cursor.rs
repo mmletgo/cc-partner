@@ -14,7 +14,7 @@
 //!     兼容 skills；render 落到 `.cursor/rules/` 并包裹 YAML frontmatter。
 
 use super::paths::{
-    is_non_empty_utf8_file, probe_cli_version, resolve_first_executable, TargetPathResolver,
+    is_non_empty_utf8_file, probe_cli_version_in_env, resolve_first_executable, TargetPathResolver,
 };
 use super::portable::{
     render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
@@ -86,7 +86,9 @@ impl AssetAdapter for CursorInstructionAdapter {
         let homes = TargetPathResolver::resolve_all(env);
         let names = cursor_command_names();
         let executable = resolve_first_executable(names.iter().map(String::as_str), env);
-        let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+        let version = executable
+            .as_ref()
+            .and_then(|p| probe_cli_version_in_env(p, env));
         Ok(build_probe(
             AgentTarget::Cursor,
             executable,

@@ -9,7 +9,9 @@
 //!     实现 `AssetAdapter`：probe `claude` 可执行文件与 CLAUDE_CONFIG_DIR；
 //!     scan 指令 + portable 资产；render 指令与 portable 投影。
 
-use super::paths::{probe_cli_version, read_utf8_file, resolve_executable, TargetPathResolver};
+use super::paths::{
+    probe_cli_version_in_env, read_utf8_file, resolve_executable, TargetPathResolver,
+};
 use super::portable::{
     claude_user_mcp_config_path, merge_discoveries, parse_json_or_jsonc,
     parse_mcp_servers_json_map, render_portable_payload, scan_agent_markdown_dir,
@@ -51,7 +53,9 @@ impl AssetAdapter for ClaudeInstructionAdapter {
     fn probe(&self, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
         let homes = TargetPathResolver::resolve_all(env);
         let executable = resolve_executable("claude", env);
-        let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+        let version = executable
+            .as_ref()
+            .and_then(|p| probe_cli_version_in_env(p, env));
         Ok(build_probe(
             AgentTarget::Claude,
             executable,

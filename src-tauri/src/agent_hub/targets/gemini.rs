@@ -9,7 +9,7 @@
 //!     runtime-discovery 表扫 `.gemini` native 与 `{home,project}/.agents/skills`。
 
 use super::paths::{
-    is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+    is_non_empty_utf8_file, probe_cli_version_in_env, resolve_executable, TargetPathResolver,
 };
 use super::portable::{
     render_portable_payload, AssetRenderContext, DiscoveredPortableAsset, TargetAssetProjection,
@@ -75,7 +75,9 @@ impl AssetAdapter for GeminiInstructionAdapter {
     fn probe(&self, env: &TargetEnvironment) -> Result<TargetProbe, AppError> {
         let homes = TargetPathResolver::resolve_all(env);
         let executable = resolve_executable("gemini", env);
-        let version = executable.as_ref().and_then(|p| probe_cli_version(p));
+        let version = executable
+            .as_ref()
+            .and_then(|p| probe_cli_version_in_env(p, env));
         Ok(build_probe(
             AgentTarget::Gemini,
             executable,

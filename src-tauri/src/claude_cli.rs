@@ -105,10 +105,11 @@ fn cli_command_path_env_with(home: Option<&Path>, path_env: Option<&std::ffi::Os
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Agent Hub 库存 probe 与 Prompt 优化必须在打包态稀疏 PATH 下找到
-///     `~/.local/bin` 里的 Claude/Codex；目录清单只能有一份。
+///     `~/.local/bin` 以及 nvm/fnm/volta/asdf 当前 bin 里的 Claude/Codex；
+///     目录清单只能有一份。
 ///
 /// Code Logic（这个函数做什么）:
-///     用户常见安装目录 + 传入 PATH + 系统基础路径，去重保序。
+///     用户常见安装目录 + Node 版本管理器当前 bin + 传入 PATH + 系统基础路径，去重保序。
 pub(crate) fn gui_cli_search_dirs(
     home: Option<&Path>,
     path_env: Option<&std::ffi::OsStr>,
@@ -132,25 +133,84 @@ pub(crate) fn gui_cli_search_dirs(
 fn cli_search_dirs(home: Option<&Path>, path_env: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = home {
-        dirs.push(home.join(".local").join("bin"));
-        dirs.push(home.join(".claude").join("local"));
-        dirs.push(home.join(".claude").join("bin"));
+        push_unique_dir(&mut dirs, home.join(".local").join("bin"));
+        push_unique_dir(&mut dirs, home.join(".claude").join("local"));
+        push_unique_dir(&mut dirs, home.join(".claude").join("bin"));
+        for manager_bin in node_version_manager_bins(home) {
+            push_unique_dir(&mut dirs, manager_bin);
+        }
         #[cfg(windows)]
         {
-            dirs.push(home.join("AppData").join("Local").join("Claude"));
-            dirs.push(home.join("AppData").join("Roaming").join("npm"));
+            push_unique_dir(&mut dirs, home.join("AppData").join("Local").join("Claude"));
+            push_unique_dir(&mut dirs, home.join("AppData").join("Roaming").join("npm"));
         }
     }
-    dirs.push(PathBuf::from("/opt/homebrew/bin"));
-    dirs.push(PathBuf::from("/usr/local/bin"));
+    push_unique_dir(&mut dirs, PathBuf::from("/opt/homebrew/bin"));
+    push_unique_dir(&mut dirs, PathBuf::from("/usr/local/bin"));
     if let Some(path_env) = path_env {
         for entry in std::env::split_paths(path_env) {
-            if !entry.as_os_str().is_empty() && !dirs.iter().any(|d| d == &entry) {
-                dirs.push(entry);
-            }
+            push_unique_dir(&mut dirs, entry);
         }
     }
     dirs
+}
+
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if dir.as_os_str().is_empty() {
+        return;
+    }
+    if !dirs.iter().any(|existing| existing == &dir) {
+        dirs.push(dir);
+    }
+}
+
+/// nvm / fnm / volta / asdf 的当前 bin。只收录存在的目录，不扫全部历史 Node 版本。
+fn node_version_manager_bins(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(nvm) = nvm_default_bin(home) {
+        dirs.push(nvm);
+    }
+    for dir in [
+        home.join(".local")
+            .join("share")
+            .join("fnm")
+            .join("aliases")
+            .join("default")
+            .join("bin"),
+        home.join(".fnm")
+            .join("aliases")
+            .join("default")
+            .join("bin"),
+        home.join(".volta").join("bin"),
+        home.join(".asdf").join("shims"),
+    ] {
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// 解析 nvm 默认 Node 的 bin（`~/.nvm/current` 或 `alias/default` → `versions/node/<ver>/bin`）。
+fn nvm_default_bin(home: &Path) -> Option<PathBuf> {
+    let nvm = home.join(".nvm");
+    let current_bin = nvm.join("current").join("bin");
+    if current_bin.is_dir() {
+        return Some(current_bin);
+    }
+    let mut name = std::fs::read_to_string(nvm.join("alias").join("default")).ok()?;
+    name = name.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    if let Ok(next) = std::fs::read_to_string(nvm.join("alias").join(&name)) {
+        let trimmed = next.trim();
+        if !trimmed.is_empty() {
+            name = trimmed.to_string();
+        }
+    }
+    let bin = nvm.join("versions").join("node").join(&name).join("bin");
+    bin.is_dir().then_some(bin)
 }
 
 /// 在目录中查找可执行的 CLI 文件（Windows 额外尝试 .exe/.cmd/.bat）。
@@ -1197,6 +1257,47 @@ mod tests {
             "增强 PATH 应包含 ~/.local/bin: {joined}"
         );
         assert!(joined.contains("/usr/bin"), "增强 PATH 应保留系统路径");
+    }
+
+    #[test]
+    fn sparse_path_includes_nvm_default_bin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        let nvm_bin = home
+            .join(".nvm")
+            .join("versions")
+            .join("node")
+            .join("v22.19.0")
+            .join("bin");
+        std::fs::create_dir_all(&nvm_bin).expect("mkdir nvm");
+        std::fs::create_dir_all(home.join(".nvm").join("alias")).expect("mkdir alias");
+        std::fs::write(
+            home.join(".nvm").join("alias").join("default"),
+            "v22.19.0\n",
+        )
+        .expect("write alias");
+        let fake_cli = nvm_bin.join("codex");
+        std::fs::write(&fake_cli, b"#!/bin/sh\necho 0.147.0\n").expect("write fake cli");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_cli, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let sparse_path = std::ffi::OsString::from("/usr/bin:/bin");
+        let resolved =
+            resolve_cli_path_with_search("codex", Some(home), Some(sparse_path.as_os_str()));
+        assert_eq!(
+            Path::new(&resolved),
+            fake_cli.as_path(),
+            "稀疏 PATH 应解析到 nvm default bin 里的 codex"
+        );
+        let path_env = cli_command_path_env_with(Some(home), Some(sparse_path.as_os_str()));
+        let joined = path_env.to_string_lossy();
+        assert!(
+            joined.contains(nvm_bin.to_string_lossy().as_ref()),
+            "增强 PATH 应包含 nvm default bin: {joined}"
+        );
     }
 
     #[test]

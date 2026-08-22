@@ -16,7 +16,7 @@ use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
 use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
 use crate::agent_hub::portable_actions::targets::{
-    has_direct_local_actions, supports_direct_local_action,
+    has_direct_local_actions, is_file_only_viewing_toggle, supports_direct_local_action,
 };
 use crate::agent_hub::portable_inventory::ensure_managed::ensure_discovered_portable_items_managed;
 use crate::agent_hub::portable_inventory::models::{
@@ -2367,21 +2367,21 @@ fn mutation_gates_for_origin(
     } else {
         (
             can_mutate_scope
-                && action_capability_supported(
+                && file_or_certified_action(
                     evaluated,
                     viewing,
                     kind,
                     PortableAssetActionKind::Enable,
                 ),
             can_mutate_scope
-                && action_capability_supported(
+                && file_or_certified_action(
                     evaluated,
                     viewing,
                     kind,
                     PortableAssetActionKind::Disable,
                 ),
             can_mutate_scope
-                && action_capability_supported(
+                && file_or_certified_action(
                     evaluated,
                     viewing,
                     kind,
@@ -2391,6 +2391,19 @@ fn mutation_gates_for_origin(
             owner_target,
         )
     }
+}
+
+/// 纯文件 viewing 开关不走 Activate/Deactivate 认证；其余仍要 support manifest。
+fn file_or_certified_action(
+    evaluated: &EvaluatedTargetSupport,
+    target: AgentTarget,
+    kind: PortableAssetKind,
+    action: PortableAssetActionKind,
+) -> bool {
+    if is_file_only_viewing_toggle(target, kind, action) {
+        return supports_direct_local_action(target, kind, action);
+    }
+    action_capability_supported(evaluated, target, kind, action)
 }
 
 fn mcp_credential_fact(disc: &DiscoveredPortableAsset) -> PortableMcpCredentialFactDto {
@@ -2945,6 +2958,49 @@ enabled = false
         assert_eq!(
             capabilities.reason_code.as_deref(),
             Some("deactivate_package_not_supported")
+        );
+    }
+
+    #[test]
+    fn file_only_codex_plugin_toggle_survives_blocked_cli() {
+        let evaluated = EvaluatedTargetSupport {
+            target: AgentTarget::Codex,
+            mode: crate::agent_hub::support::EvaluatedSupportMode::ScanOnly {
+                reasons: vec!["cli_version_unknown".into()],
+            },
+            capabilities: BTreeMap::from([
+                (
+                    TargetCapability::ActivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+                (
+                    TargetCapability::DeactivatePackage,
+                    CapabilitySupport::Blocked,
+                ),
+                (
+                    TargetCapability::RenderPortableAssets,
+                    CapabilitySupport::Blocked,
+                ),
+            ]),
+            write_allowed: false,
+            reasons: vec!["cli_version_unknown".into()],
+        };
+        let (can_enable, can_disable, can_uninstall, _, _) = mutation_gates_for_origin(
+            AgentTarget::Codex,
+            PortableAssetOwner::Codex,
+            true,
+            PortableOriginKind::Native,
+            PortableAssetKind::Plugin,
+            &evaluated,
+            true,
+        );
+        assert!(
+            can_enable && can_disable,
+            "Codex plugin enable/disable is a file toggle and must not wait for CLI probe"
+        );
+        assert!(
+            !can_uninstall,
+            "Codex plugin uninstall still requires DeactivatePackage"
         );
     }
 
