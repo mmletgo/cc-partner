@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// 单文件正文上限（与 inspect canonical 一致）。
-const MAX_NATIVE_FILE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_NATIVE_FILE_BYTES: usize = 256 * 1024;
 
 /// 读取用户级原生提示词文件请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -83,12 +83,12 @@ pub use inventory::{
     UserInstructionProjectionState, UserInstructionSetupState, UserInstructionSourceDto,
     UserInstructionSourceRole, UserInstructionTargetDto, UserInstructionWorkspaceDto,
 };
-pub(crate) use native_files::user_level_mirror_native_paths;
 pub use native_files::{
     read_user_native_instruction_file, write_user_native_instruction_file,
     ReadUserNativeInstructionFileRequest, UserNativeInstructionFileDto,
     WriteUserNativeInstructionFileRequest,
 };
+pub(crate) use native_files::{user_level_mirror_native_paths, MAX_NATIVE_FILE_BYTES};
 pub use plan::{
     apply_user_instruction_plan, preview_user_instruction_setup, preview_user_instruction_update,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,

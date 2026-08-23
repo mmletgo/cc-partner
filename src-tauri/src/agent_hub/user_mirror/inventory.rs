@@ -22,7 +22,7 @@ use crate::agent_hub::snapshot::canonical_json::canonicalize_value;
 use crate::agent_hub::targets::{TargetEnvironment, TargetPathResolver};
 use crate::agent_hub::user_instructions::{
     extract_slot_text, inspect_user_instruction_workspace_with_env, user_level_mirror_native_paths,
-    InstructionSlotKey, UserInstructionCanonicalDto,
+    InstructionSlotKey, UserInstructionCanonicalDto, MAX_NATIVE_FILE_BYTES,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -59,6 +59,7 @@ async fn build_local_user_mirror_inventory_with_env(
     let workspace = inspect_user_instruction_workspace_with_env(state, env).await?;
     let homes = TargetPathResolver::resolve_all(env);
     let native_specs = user_level_mirror_native_paths(&homes);
+    let home_path = env.home.to_string_lossy();
     let mut agents = Vec::new();
     for target in crate::agent_catalog::all_hub_targets() {
         let snapshot = inspect_portable_inventory_with_env_query(
@@ -76,7 +77,7 @@ async fn build_local_user_mirror_inventory_with_env(
             .items
             .iter()
             .filter(|item| item.target == target && item.scope_kind == ScopeKind::User)
-            .map(map_portable_item)
+            .map(|item| map_portable_item(item, home_path.as_ref()))
             .collect();
         let native_files = native_specs
             .iter()
@@ -149,8 +150,9 @@ fn hash_nonempty_text(text: &str) -> Option<String> {
 
 /// 白名单文件的元数据事实（无路径）。
 ///
-/// Business Logic: 缺失文件仍要占位，preview 才能对号清空。
-/// Code Logic: 非文件 → exists=false/size=0；可读则 hash 全文。
+/// Business Logic: 缺失文件仍要占位，preview 才能对号清空；超大文件不得整文件入内存。
+/// Code Logic: 非文件 → exists=false/size=0；metadata 超 `MAX_NATIVE_FILE_BYTES` 则
+///     exists=true、hash=None、size=实际长度且不读正文；否则有界读后哈希。
 fn native_file_fact(logical_id: String, path: &Path) -> UserMirrorNativeFileFactDto {
     if !path.is_file() {
         return UserMirrorNativeFileFactDto {
@@ -160,10 +162,26 @@ fn native_file_fact(logical_id: String, path: &Path) -> UserMirrorNativeFileFact
             size: 0,
         };
     }
+    let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let cap = MAX_NATIVE_FILE_BYTES as u64;
+    if size > cap {
+        return UserMirrorNativeFileFactDto {
+            logical_id,
+            content_hash: None,
+            exists: true,
+            size,
+        };
+    }
     match fs::read(path) {
-        Ok(bytes) => UserMirrorNativeFileFactDto {
+        Ok(bytes) if (bytes.len() as u64) <= cap => UserMirrorNativeFileFactDto {
             logical_id,
             content_hash: Some(sha256_hex(&bytes)),
+            exists: true,
+            size: bytes.len() as u64,
+        },
+        Ok(bytes) => UserMirrorNativeFileFactDto {
+            logical_id,
+            content_hash: None,
             exists: true,
             size: bytes.len() as u64,
         },
@@ -171,7 +189,7 @@ fn native_file_fact(logical_id: String, path: &Path) -> UserMirrorNativeFileFact
             logical_id,
             content_hash: None,
             exists: true,
-            size: fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+            size,
         },
     }
 }
@@ -179,8 +197,11 @@ fn native_file_fact(logical_id: String, path: &Path) -> UserMirrorNativeFileFact
 /// portable 库存项映射为镜像 DTO；MCP 只保留 present/hash。
 ///
 /// Business Logic: inventory/UI 不得回显 env/token/path。
-/// Code Logic: 拷贝 kind/nativeId/hashes/warnings；凭据字段只抄 fact。
-fn map_portable_item(item: &PortableInventoryItemDto) -> UserMirrorPortableItemDto {
+/// Code Logic: 拷贝 kind/nativeId/hashes；warnings 丢掉含 home 绝对路径的条目；凭据只抄 fact。
+fn map_portable_item(
+    item: &PortableInventoryItemDto,
+    home_path: &str,
+) -> UserMirrorPortableItemDto {
     UserMirrorPortableItemDto {
         kind: item.kind,
         native_id: item.native_id.clone(),
@@ -194,7 +215,12 @@ fn map_portable_item(item: &PortableInventoryItemDto) -> UserMirrorPortableItemD
                 hash: credential.hash.clone(),
             }
         }),
-        warnings: item.warnings.clone(),
+        warnings: item
+            .warnings
+            .iter()
+            .filter(|warning| home_path.is_empty() || !warning.contains(home_path))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -417,6 +443,44 @@ mod tests {
                 .iter()
                 .any(|f| { f.logical_id == "codex.slot.exclusive" && f.exists && f.size > 0 }),
             "Codex AGENTS.override.md must appear as codex.slot.exclusive"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超大原生文件不得整文件读入内存；inventory 对该文件 fail-closed，不得拖垮整次扫描。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入超过 256 KiB 的 CLAUDE.md；断言 exists=true、无 content_hash、size 为实际长度。
+    #[tokio::test]
+    async fn oversized_native_file_is_listed_without_hash_or_full_read() {
+        let env = seed_user_mirror_homes().await;
+        let oversized = super::MAX_NATIVE_FILE_BYTES + 1;
+        let path = env.claude_home.join("CLAUDE.md");
+        fs::write(&path, vec![b'A'; oversized]).expect("write oversized");
+
+        let dto = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let claude = dto
+            .agents
+            .iter()
+            .find(|a| a.target == AgentTarget::Claude)
+            .expect("claude");
+        let file = claude
+            .native_files
+            .iter()
+            .find(|f| f.logical_id == "claude.native.CLAUDE.md")
+            .expect("claude native file");
+        assert!(file.exists);
+        assert!(
+            file.content_hash.is_none(),
+            "oversized native file must not be hashed"
+        );
+        assert_eq!(file.size, oversized as u64);
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(
+            !json.contains(&"A".repeat(64)),
+            "inventory JSON must not embed oversized native body"
         );
     }
 }
