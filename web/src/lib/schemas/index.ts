@@ -19,6 +19,7 @@ export * from './agentLedger';
 export * from './agentHub';
 export * from './core';
 export * from './portableInventory';
+export * from './userMirror';
 export * from './providerManager';
 // tokenStats 与 agentLedger 共享一组基础枚举与 decoder（如 nonNegativeIntDecoder、
 // currencyAmountDecoder、agentLedgerSummaryDecoder 双方各自维护更窄/更宽的 shape）；
