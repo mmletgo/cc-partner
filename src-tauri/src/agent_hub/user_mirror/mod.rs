@@ -5,7 +5,9 @@
 //!     本模块先落地 wire 合同（能力 token 之外的 DTO / 错误码），后续 inventory/apply 复用同一形状。
 //!
 //! Code Logic（这个模块做什么）:
-//!     当前只导出 `models` 中的 DTO、TTL/上限与稳定错误码；不扫描磁盘、不挂 LAN 路由。
+//!     导出 DTO/错误码，以及本机全 Agent 用户级 inventory 扫描。
+mod inventory;
 mod models;
 
+pub use inventory::build_local_user_mirror_inventory;
 pub use models::*;
