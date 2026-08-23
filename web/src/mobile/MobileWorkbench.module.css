@@ -1364,7 +1364,7 @@
   min-width: 0;
   font-size: var(--text-xs);
   line-height: var(--leading-tight);
-  color: var(--muted);
+  color: var(--fg-muted-readable);
 }
 
 .mobileTerminalSelectionAction {
