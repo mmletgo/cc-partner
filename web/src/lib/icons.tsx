@@ -67,6 +67,21 @@ export const CopyIcon = ({ size, ...rest }: IconProps) => (
   </svg>
 );
 
+/**
+ * Business Logic（为什么需要）:
+ *   移动端终端把剪贴板图片粘贴进 Agent TUI 时，按钮需要与复制文字明显区分。
+ *
+ * Code Logic（做什么）:
+ *   渲染圆角相框、山形折线与小太阳圆的 16x16 stroke SVG。
+ */
+export const ImageIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <rect x="2" y="3" width="12" height="10" rx="1.5" />
+    <path d="M2 11.5 5.5 7.5 8 10 11.5 6.5 14 11.5" />
+    <circle cx="11.2" cy="5.8" r="1.1" />
+  </svg>
+);
+
 export const CheckIcon = ({ size, ...rest }: IconProps) => (
   <svg {...baseProps(size)} {...rest}>
     <path d="M3 8.5 6.5 12 13 4.5" />

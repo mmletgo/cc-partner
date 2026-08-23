@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactElement } from 'react';
+import type { ChangeEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
@@ -27,6 +27,7 @@ import {
   ArrowRightIcon,
   CommitIcon,
   EditIcon,
+  ImageIcon,
   MaximizeIcon,
   MinimizeIcon,
   PlusIcon,
@@ -40,6 +41,7 @@ import {
   type TerminalLiveWriter,
 } from '@/pages/Workbench/terminalLiveWriter';
 import { scrollTerminalBufferLines } from '@/pages/Workbench/terminalWheel';
+import { installWorkbenchTerminalSelectionOverrides } from '@/pages/Workbench/terminalSelectionOverrides';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
   clipboardEventImageFile,
@@ -88,12 +90,30 @@ import {
   enterMobileTerminalTypingMode,
   findMobileTerminalHelperTextarea,
   leaveMobileTerminalTypingMode,
+  MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS,
   MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
   resolveMobileTerminalExtraKeyPress,
   toggleStickyModifier,
   type MobileTerminalExtraKeyDef,
   type MobileTerminalStickyModifier,
 } from '../mobileTerminalExtraKeys';
+import { writeClipboardText } from '../mobileClipboard';
+import {
+  beginPress,
+  cellsToXtermSelect,
+  countSelectedLines,
+  dragSelecting,
+  edgeScrollDelta,
+  MOBILE_TERMINAL_SELECT_MOVE_PX,
+  noteMove,
+  pointerToCell,
+  resetGesture,
+  shouldBecomeScrolling,
+  shouldEnterSelecting,
+  startSelecting,
+  travelPx,
+  type MobileTerminalGestureState,
+} from '../mobileTerminalSelection';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 import { MobileFavoriteQuickInput } from './MobileFavoriteQuickInput';
 import { MobilePromptOptimizerSheet } from './MobilePromptOptimizerSheet';
@@ -223,8 +243,8 @@ function getErrorMessage(reason: unknown, fallback: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 active project/worktree/session 渲染 session tabs、xterm viewport 和 window/pane 控制按钮；
- *   右侧 FAB 组顶部为 Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）再 Git Commit
- *   （与桌面 Git 历史同口径，Commit 的 message=null）；
+ *   右侧 FAB 组顶部为图片粘贴，再 Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）再 Git Commit
+ *   （与桌面 Git 历史同口径，Commit 的 message=null），然后 Prompt 优化与收藏 Prompt；
  *   首屏通过 HTTP replay 写入历史 buffer，后续只消费外部 terminal buffer store 增量，输入/resize/focus/split/close 全部调用 HTTP transport。
  */
 export function MobileTerminalPanel({
@@ -259,6 +279,11 @@ export function MobileTerminalPanel({
   const [commitPhase, setCommitPhase] = useState<MobileMutationPhase>('idle');
   const [mergePhase, setMergePhase] = useState<MobileMutationPhase>('idle');
   const [hookRepair, setHookRepair] = useState<MobileHookRepair | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedLineCount, setSelectedLineCount] = useState(1);
+  const [selectionEmpty, setSelectionEmpty] = useState(true);
+  const [selectionCopied, setSelectionCopied] = useState<string | null>(null);
+  const [pasteImageBusy, setPasteImageBusy] = useState(false);
   const commitOperationIdRef = useRef<string | null>(null);
   const mergeOperationIdRef = useRef<string | null>(null);
   const commitContextRef = useRef<MobileGitActionContext | null>(null);
@@ -280,6 +305,11 @@ export function MobileTerminalPanel({
   } | null>(null);
   const lastFocusedSessionIdRef = useRef<string | null>(null);
   const touchScrollStateRef = useRef<MobileTerminalTouchScrollState | null>(null);
+  const gestureRef = useRef<MobileTerminalGestureState>(resetGesture());
+  const selectingRef = useRef(false);
+  const longPressTimerRef = useRef<number | null>(null);
+  const pasteImageInputRef = useRef<HTMLInputElement | null>(null);
+  const pasteImageBusyRef = useRef(false);
   const inputStreamRef = useRef<MobileTerminalInputStream | null>(null);
   const hydratedScrollbackSessionRef = useRef<string | null>(null);
   const activeAgentIdentityRef = useRef<string | null>(null);
@@ -314,6 +344,11 @@ export function MobileTerminalPanel({
   // 收藏 Prompt 快捷输入按钮需要写终端输入流：session running 且 input stream ready 才启用。
   const canOpenFavoriteQuickInput =
     canUsePaneActions && inputStreamState.status === 'ready';
+  const canPasteImage =
+    Boolean(sessionId) &&
+    visibleSession?.status === 'running' &&
+    !busy &&
+    inputStreamState.status === 'ready';
   const canCommitWorktree =
     Boolean(project && worktree) &&
     !busy &&
@@ -362,6 +397,7 @@ export function MobileTerminalPanel({
     setPanelError(null);
     setHookRepair(null);
     setCommitSuccess(null);
+    setSelectionCopied(null);
     commitOperationIdRef.current = null;
     mergeOperationIdRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 id 驱动重置
@@ -435,6 +471,88 @@ export function MobileTerminalPanel({
       }
     },
     [sessionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   复制成功、取消、Esc 或换 session 时必须退出划选，避免底栏残留并挡住后续滚动。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清长按 timer、复位手势 ref、clearSelection，并把 selecting 置 false。
+   */
+  const exitSelecting = useCallback((): void => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    gestureRef.current = resetGesture();
+    selectingRef.current = false;
+    setSelecting(false);
+    setSelectionEmpty(true);
+    terminalRef.current?.clearSelection();
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   底栏复制要把 xterm 选区写入手机剪贴板，且不得写 PTY；失败时必须留在划选以便重试。
+   *
+   * Code Logic（这个函数做什么）:
+   *   空选区直接返回；writeClipboardText 成功则短暂成功提示并 exitSelecting，失败写入 panelError。
+   */
+  const handleCopySelection = useCallback(async (): Promise<void> => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const text = terminal.getSelection();
+    if (text.length === 0) return;
+    const result = await writeClipboardText(text);
+    if (result.ok) {
+      setPanelError(null);
+      setSelectionCopied(t('workbench:mobile.terminalPanel.selection.copied'));
+      exitSelecting();
+      return;
+    }
+    setPanelError(t('workbench:mobile.terminalPanel.selection.copyFailed'));
+  }, [exitSelecting, t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   相册选出图片后必须立刻走现有 paste-image 通道，不能预览或把图塞进输入帧。
+   *
+   * Code Logic（这个函数做什么）:
+   *   读 file input 的首个文件并清空 value；busy/会话不可写时忽略；fileToPngDataUrl 后 pasteImage。
+   */
+  const handlePasteImageFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>): void => {
+      const file = event.target.files?.[0] ?? null;
+      event.target.value = '';
+      if (
+        !file ||
+        !sessionId ||
+        pasteImageBusyRef.current ||
+        visibleSession?.status !== 'running' ||
+        busy ||
+        inputStreamState.status !== 'ready'
+      ) {
+        return;
+      }
+      pasteImageBusyRef.current = true;
+      setPasteImageBusy(true);
+      void fileToPngDataUrl(file)
+        .then((dataUrl) => httpWorkbenchTransport.sessions.pasteImage(sessionId, dataUrl))
+        .catch((reason) => {
+          setPanelError(
+            `${t('workbench:errors.pasteImage')}: ${getErrorMessage(
+              reason,
+              t('workbench:errors.pasteImage'),
+            )}`,
+          );
+        })
+        .finally(() => {
+          pasteImageBusyRef.current = false;
+          setPasteImageBusy(false);
+        });
+    },
+    [busy, inputStreamState.status, sessionId, t, visibleSession?.status],
   );
 
   /**
@@ -696,6 +814,10 @@ export function MobileTerminalPanel({
    */
   const handleExtraKeyPress = useCallback(
     (key: MobileTerminalExtraKeyDef): void => {
+      if (key.id === 'esc' && selectingRef.current) {
+        exitSelecting();
+        return;
+      }
       // 按 extra key 只发送按键，不 blur 终端 helper textarea：避免输入态下打乱 xterm 输入追踪
       // （已输入内容被重复发送）。焦点保持在终端，软键盘由用户点击终端外区域收起。
       const action = resolveMobileTerminalExtraKeyPress(key);
@@ -709,7 +831,7 @@ export function MobileTerminalPanel({
         return;
       }
     },
-    [armStickyModifier, sendTerminalInput],
+    [armStickyModifier, exitSelecting, sendTerminalInput],
   );
 
   // 终端输入常驻 WebSocket 在面板挂载时建立一次(依赖 [])。StrictMode(dev)会双调用本 effect:
@@ -847,7 +969,7 @@ export function MobileTerminalPanel({
 
   useEffect(() => {
     const viewport = viewportRef.current;
-    if (!viewport || !sessionId || visibleSession?.status !== 'running') return undefined;
+    if (!viewport || !sessionId) return undefined;
 
     const terminal = new Terminal(workbenchTerminalOptions());
     const fit = new FitAddon();
@@ -872,6 +994,7 @@ export function MobileTerminalPanel({
     hydratedScrollbackSessionRef.current = null;
     terminal.loadAddon(fit);
     terminal.open(viewport);
+    const restoreSelectionOverrides = installWorkbenchTerminalSelectionOverrides(terminal);
     terminalRef.current = terminal;
     // 后端把同尺寸 resize 也视为“强制重绘”，会通过 rows 抖动让 Claude TUI 的末屏再次
     // 落入 tmux history。以持久化尺寸作为本 xterm 的已上报基线，首次 fit 相同就不回传。
@@ -1177,15 +1300,98 @@ export function MobileTerminalPanel({
      * Business Logic（为什么需要这个函数）:
      *   终端区域的移动端滑动必须留在 xterm 内部，否则浏览器会把它当页面滚动并显示/隐藏地址栏。
      *   xterm 原生 .xterm-viewport 仍是 overflow scroll，canvas 上的 touch 默认会先驱动它。
+     *   长按约 400ms 且几乎未移动则进入自管划选，不能弹软键盘或把长按交给 helper textarea。
      *
      * Code Logic（这个函数做什么）:
-     *   在 capture 阶段拦截单指 touchmove，读取 viewport 与 xterm rows 得到行高，
-     *   交给 touch helper 累计像素并调用 terminal.scrollLines；滑动过程中不进入打字态。
-     *   轻点（未滚动）在 touchend 进入打字态并 focus，系统键盘才出现；终端输入会把 shell 按键盘高度整页上移。
+     *   在 capture 阶段拦截单指手势：pressPending 超 8px 走原 scrollLines/SGR；定时器命中则
+     *   startSelecting + terminal.select；划选中只按边缘增量滚历史。轻点才进入打字态。
      */
     let touchMoved = false;
     let suppressClickAfterScroll = false;
     let touchStartY = 0;
+    let lastClientX = 0;
+    let lastClientY = 0;
+    let reanchorPending = false;
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   长按计时必须能被滚动、抬手和卸终端打断，否则会在滑动后误进划选。
+     *
+     * Code Logic（这个函数做什么）:
+     *   若 longPressTimerRef 有值则 clearTimeout 并置 null。
+     */
+    const clearLongPressTimer = (): void => {
+      if (longPressTimerRef.current !== null) {
+        window.clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   划选高亮必须跟着手指锚点/焦点走 xterm 画布选区，底栏也要同步行数与空选禁用。
+     *
+     * Code Logic（这个函数做什么）:
+     *   仅 selecting 且有 anchor/focus 时 cellsToXtermSelect 后 terminal.select，并写入行数/空选 state。
+     */
+    const applySelectFromGesture = (): void => {
+      const state = gestureRef.current;
+      if (state.phase !== 'selecting' || !state.anchor || !state.focus) return;
+      const range = cellsToXtermSelect(state.anchor, state.focus, terminal.cols);
+      terminal.select(range.column, range.row, range.length);
+      setSelectedLineCount(countSelectedLines(state.anchor, state.focus));
+      setSelectionEmpty(terminal.getSelection().length === 0);
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   长按成立或再按重锚时要立刻进入划选：收起软键盘、钉住格子、抑制随后的 click。
+     *
+     * Code Logic（这个函数做什么）:
+     *   startSelecting(pointerToCell)，leaveMobileTerminalTypingMode，applySelect，set selecting。
+     */
+    const enterSelectingAtPointer = (clientX: number, clientY: number): void => {
+      if (disposed) return;
+      const rect = viewport.getBoundingClientRect();
+      const cell = pointerToCell(
+        clientX,
+        clientY,
+        rect,
+        terminal.cols,
+        terminal.rows,
+        terminal.buffer.active.viewportY,
+      );
+      gestureRef.current = startSelecting(gestureRef.current, cell);
+      selectingRef.current = true;
+      setSelecting(true);
+      setSelectionCopied(null);
+      leaveMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport), null);
+      applySelectFromGesture();
+      suppressClickAfterScroll = true;
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   长按判定与 extra keys `/` 共用 400ms，才能让用户用同一套肌肉记忆进入划选或重锚。
+     *
+     * Code Logic（这个函数做什么）:
+     *   清旧 timer 后 setTimeout；到期且 travel 仍应进选区时 enterSelectingAtPointer。
+     */
+    const armLongPressTimer = (): void => {
+      clearLongPressTimer();
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTimerRef.current = null;
+        if (disposed) return;
+        const state = gestureRef.current;
+        const travel = travelPx(state.originX, state.originY, lastClientX, lastClientY);
+        if (!shouldEnterSelecting(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS, travel)) {
+          return;
+        }
+        enterSelectingAtPointer(lastClientX, lastClientY);
+        reanchorPending = false;
+      }, MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS);
+    };
+
     const handleTouchMove = (event: TouchEvent): void => {
       if (event.touches.length !== 1) {
         touchScrollStateRef.current = null;
@@ -1197,9 +1403,49 @@ export function MobileTerminalPanel({
       }
       event.stopPropagation();
       const touch = event.touches[0];
-      if (Math.abs(touch.clientY - touchStartY) > 8) {
+      lastClientX = touch.clientX;
+      lastClientY = touch.clientY;
+      if (selectingRef.current) {
+        const travel = travelPx(
+          gestureRef.current.originX,
+          gestureRef.current.originY,
+          touch.clientX,
+          touch.clientY,
+        );
+        if (reanchorPending) {
+          if (!shouldBecomeScrolling(travel)) {
+            return;
+          }
+          reanchorPending = false;
+          clearLongPressTimer();
+        }
+        const rect = viewport.getBoundingClientRect();
+        const delta = edgeScrollDelta(touch.clientY, rect, terminal.rows);
+        if (delta !== 0) {
+          scrollTerminalBufferLines(terminal, delta);
+        }
+        const cell = pointerToCell(
+          touch.clientX,
+          touch.clientY,
+          rect,
+          terminal.cols,
+          terminal.rows,
+          terminal.buffer.active.viewportY,
+        );
+        gestureRef.current = dragSelecting(gestureRef.current, cell);
+        applySelectFromGesture();
+        suppressClickAfterScroll = true;
+        return;
+      }
+      if (Math.abs(touch.clientY - touchStartY) > MOBILE_TERMINAL_SELECT_MOVE_PX) {
         touchMoved = true;
       }
+      const nextGesture = noteMove(gestureRef.current, touch.clientX, touch.clientY);
+      gestureRef.current = nextGesture;
+      if (nextGesture.phase !== 'scrolling') {
+        return;
+      }
+      clearLongPressTimer();
       const baseState =
         touchScrollStateRef.current ?? beginMobileTerminalTouchScroll(touch.clientY);
       const fallbackLineHeight =
@@ -1261,11 +1507,30 @@ export function MobileTerminalPanel({
     const handleTouchStart = (event: TouchEvent): void => {
       touchMoved = false;
       suppressClickAfterScroll = false;
-      touchStartY = event.touches.length === 1 ? event.touches[0].clientY : 0;
-      touchScrollStateRef.current =
-        event.touches.length === 1
-          ? beginMobileTerminalTouchScroll(event.touches[0].clientY)
-          : null;
+      const touch = event.touches.length === 1 ? event.touches[0] : null;
+      touchStartY = touch?.clientY ?? 0;
+      lastClientX = touch?.clientX ?? 0;
+      lastClientY = touch?.clientY ?? 0;
+      if (!touch) {
+        clearLongPressTimer();
+        touchScrollStateRef.current = null;
+        return;
+      }
+      if (selectingRef.current) {
+        reanchorPending = true;
+        gestureRef.current = {
+          ...gestureRef.current,
+          originX: touch.clientX,
+          originY: touch.clientY,
+        };
+        armLongPressTimer();
+        touchScrollStateRef.current = null;
+        return;
+      }
+      reanchorPending = false;
+      gestureRef.current = beginPress(touch.clientX, touch.clientY);
+      armLongPressTimer();
+      touchScrollStateRef.current = beginMobileTerminalTouchScroll(touch.clientY);
     };
     /**
      * Business Logic（为什么需要这个函数）:
@@ -1275,7 +1540,7 @@ export function MobileTerminalPanel({
      *   去掉 helper readonly/inputmode 并 terminal.focus()。
      */
     const enterTypingFromUserGesture = (): void => {
-      if (disposed) return;
+      if (disposed || selectingRef.current) return;
       enterMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport));
       try {
         terminal.focus();
@@ -1284,10 +1549,17 @@ export function MobileTerminalPanel({
       }
     };
     const handleTouchEnd = (): void => {
-      const wasScroll = touchMoved;
+      const wasScroll = touchMoved || gestureRef.current.phase === 'scrolling';
       touchScrollStateRef.current = null;
       touchMoved = false;
-      // 滑动只滚动；随后合成 click 也必须抑制，避免滚完又弹键盘。
+      clearLongPressTimer();
+      reanchorPending = false;
+      // 划选抬手必须留在选区；滑动只滚动；随后合成 click 也必须抑制，避免滚完又弹键盘。
+      if (selectingRef.current) {
+        suppressClickAfterScroll = true;
+        return;
+      }
+      gestureRef.current = resetGesture();
       if (wasScroll) {
         suppressClickAfterScroll = true;
         return;
@@ -1295,20 +1567,35 @@ export function MobileTerminalPanel({
       enterTypingFromUserGesture();
     };
     const handleTouchCancel = (): void => {
+      clearLongPressTimer();
+      reanchorPending = false;
       touchScrollStateRef.current = null;
       touchMoved = false;
       suppressClickAfterScroll = true;
+      if (!selectingRef.current) {
+        gestureRef.current = resetGesture();
+      }
       if (scrollbackHydrationPending) {
         hydrationAutoScrollCancelled = true;
       }
     };
     const handleViewportClick = (): void => {
-      if (suppressClickAfterScroll) {
+      if (suppressClickAfterScroll || selectingRef.current) {
         suppressClickAfterScroll = false;
         return;
       }
       // 桌面/无 touch 调试；手机轻点与 touchend 幂等。
       enterTypingFromUserGesture();
+    };
+    /**
+     * Business Logic（为什么需要这个监听器）:
+     *   系统长按菜单/选区手柄会抢走自管划选，必须在 capture 阶段吞掉 contextmenu。
+     *
+     * Code Logic（这个监听器做什么）:
+     *   preventDefault，不改其它状态。
+     */
+    const handleContextMenu = (event: Event): void => {
+      event.preventDefault();
     };
     // capture=true：在 canvas / .xterm-viewport 自己消费 touch 前先接管手势。
     const touchListenerOptions: AddEventListenerOptions = { capture: true };
@@ -1329,6 +1616,7 @@ export function MobileTerminalPanel({
       passive: true,
     });
     viewport.addEventListener('click', handleViewportClick);
+    viewport.addEventListener('contextmenu', handleContextMenu, true);
 
     const observer = new ResizeObserver(() => {
       if (resizeTimerRef.current !== null) {
@@ -1424,6 +1712,12 @@ export function MobileTerminalPanel({
 
     return () => {
       disposed = true;
+      clearLongPressTimer();
+      restoreSelectionOverrides();
+      selectingRef.current = false;
+      gestureRef.current = resetGesture();
+      setSelecting(false);
+      setSelectionEmpty(true);
       clearScrollbackHydration(true);
       observer.disconnect();
       dataDisposable.dispose();
@@ -1432,6 +1726,7 @@ export function MobileTerminalPanel({
       viewport.removeEventListener('touchend', handleTouchEnd, touchListenerOptions);
       viewport.removeEventListener('touchcancel', handleTouchCancel, touchListenerOptions);
       viewport.removeEventListener('click', handleViewportClick);
+      viewport.removeEventListener('contextmenu', handleContextMenu, true);
       viewport.removeEventListener('paste', handlePaste, true);
       touchScrollStateRef.current = null;
       if (resizeTimerRef.current !== null) {
@@ -1850,6 +2145,11 @@ export function MobileTerminalPanel({
             {commitSuccess}
           </StatusMessage>
         ) : null}
+        {selectionCopied ? (
+          <StatusMessage tone="success" className={styles.panelState}>
+            {selectionCopied}
+          </StatusMessage>
+        ) : null}
         {panelError ? (
           <p className={styles.panelError} role="alert">
             <span>{t('workbench:mobile.projectPanel.error')}</span>
@@ -1880,8 +2180,58 @@ export function MobileTerminalPanel({
             aria-hidden={!visibleSession}
           >
             <div className={styles.mobileTerminalViewport} ref={viewportRef} />
+            {selecting ? (
+              <div
+                className={styles.mobileTerminalSelectionBar}
+                role="toolbar"
+                aria-label={t('workbench:mobile.terminalPanel.selection.barAriaLabel')}
+              >
+                <span className={styles.mobileTerminalSelectionMeta}>
+                  {t('workbench:mobile.terminalPanel.selection.selectedLines', {
+                    count: selectedLineCount,
+                  })}
+                </span>
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileTerminalSelectionAction}
+                  disabled={selectionEmpty}
+                  aria-label={t('workbench:mobile.terminalPanel.selection.copy')}
+                  onPrimary={() => void handleCopySelection()}
+                >
+                  {t('workbench:mobile.terminalPanel.selection.copy')}
+                </PointerPrimaryButton>
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileTerminalSelectionAction}
+                  aria-label={t('workbench:mobile.terminalPanel.selection.cancel')}
+                  onPrimary={exitSelecting}
+                >
+                  {t('workbench:mobile.terminalPanel.selection.cancel')}
+                </PointerPrimaryButton>
+              </div>
+            ) : null}
             {visibleSession ? (
               <div className={styles.mobileTerminalFabGroup}>
+                <input
+                  ref={pasteImageInputRef}
+                  type="file"
+                  accept="image/*"
+                  className={styles.mobileTerminalPasteImageInput}
+                  tabIndex={-1}
+                  aria-hidden="true"
+                  onChange={handlePasteImageFileChange}
+                />
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileTerminalFab}
+                  disabled={!canPasteImage || pasteImageBusy}
+                  aria-busy={pasteImageBusy || undefined}
+                  aria-label={t('workbench:mobile.terminalPanel.pasteImageButton')}
+                  title={t('workbench:mobile.terminalPanel.pasteImageButton')}
+                  onPrimary={() => pasteImageInputRef.current?.click()}
+                >
+                  <ImageIcon size={18} aria-hidden="true" />
+                </PointerPrimaryButton>
                 {showMergeFab ? (
                   <PointerPrimaryButton
                     type="button"

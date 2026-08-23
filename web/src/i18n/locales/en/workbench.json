@@ -261,6 +261,16 @@
         "cdUp": "Insert cd ..",
         "lsLa": "Insert ls -la",
         "clearSnippet": "Insert clear"
+      },
+      "pasteImageButton": "Paste image",
+      "selection": {
+        "barAriaLabel": "Terminal selection",
+        "selectedLines": "{{count}} line selected",
+        "selectedLines_other": "{{count}} lines selected",
+        "copy": "Copy",
+        "cancel": "Cancel",
+        "copied": "Copied",
+        "copyFailed": "Copy failed"
       }
     },
     "filesPanel": {
