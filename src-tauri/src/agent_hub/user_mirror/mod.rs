@@ -7,12 +7,14 @@
 //! Code Logic（这个模块做什么）:
 //!     导出 DTO/错误码、本机全 Agent 用户级 inventory 扫描、源端 CAS selection 冻结，
 //!     源/目标 inventory 的 replace-plus-delete preview diff、dest 写盘 apply，
-//!     preview plan ledger 与 get() 幂等对账，以及 dest Push 接收（prepare/objects/commit）。
+//!     preview plan ledger 与 get() 幂等对账，dest Push 接收（prepare/objects/commit），
+//!     以及源侧 multi-peer Push sender（新 user-mirror 路由，不回落旧 push/prepare）。
 mod apply;
 mod inventory;
 mod ledger;
 mod models;
 mod preview;
+mod push;
 mod receive;
 mod selection;
 mod service;

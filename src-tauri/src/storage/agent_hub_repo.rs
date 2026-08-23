@@ -3511,6 +3511,39 @@ impl AgentHubRepo {
         .await
     }
 
+    /// dest prepare 幂等写入源侧 preview plan。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Push commit 必须在 dest owner claim plan；重放 prepare 不得因 token 冲突失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `INSERT OR IGNORE` 同 `plan_token`，不覆盖已 claim/consumed 行。
+    pub async fn ensure_user_mirror_plan(
+        &self,
+        record: UserMirrorPlanRecord,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_user_mirror_plans (
+                    plan_token, expires_at, plan_json, client_request_id,
+                    claimed_at, consumed_at, result_json, created_at
+                 ) VALUES (?,?,?,?,?,?,?,?)",
+            )
+            .bind(&record.plan_token)
+            .bind(&record.expires_at)
+            .bind(&record.plan_json)
+            .bind(record.client_request_id.as_deref())
+            .bind(record.claimed_at.as_deref())
+            .bind(record.consumed_at.as_deref())
+            .bind(record.result_json.as_deref())
+            .bind(&record.created_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// 按 plan_token 读取用户级镜像 plan。
     pub async fn get_user_mirror_plan(
         &self,
@@ -5951,6 +5984,7 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         transfer_id TEXT,
         missing_object_count INTEGER NOT NULL DEFAULT 0,
         transferred_object_count INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL DEFAULT 'push',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (request_id, peer_device_id)
@@ -6148,6 +6182,16 @@ async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
         sqlx::query("ALTER TABLE agent_hub_push_requests ADD COLUMN staging_cleaned_at TEXT")
             .execute(pool)
             .await?;
+    }
+
+    let source_target_cols = table_column_names(pool, "agent_hub_source_push_targets").await?;
+    if !source_target_cols.iter().any(|c| c == "kind") {
+        sqlx::query(
+            "ALTER TABLE agent_hub_source_push_targets
+             ADD COLUMN kind TEXT NOT NULL DEFAULT 'push'",
+        )
+        .execute(pool)
+        .await?;
     }
 
     // Preview/apply 的原子 claim 在早期 schema 之后加入。CREATE TABLE IF NOT EXISTS

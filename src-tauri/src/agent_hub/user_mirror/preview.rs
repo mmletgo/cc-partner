@@ -62,6 +62,7 @@ pub fn diff_inventories(
         has_credential_bearing_assets: source.credential_bearing_count > 0,
         agents,
         blocking_reasons: Vec::new(),
+        peer_device_ids: Vec::new(),
     }
 }
 

@@ -8,7 +8,10 @@
 //!     复用 receiver staging（`incoming/user-mirror/` + ledger 键前缀 `user-mirror/`）；
 //!     commit 收集 verified 对象后调用 `apply_user_mirror`。
 
-use super::models::{ApplyUserMirrorRequest, UserMirrorInventoryDto, UserMirrorResultDto};
+use super::ledger::UserMirrorPlanRecord;
+use super::models::{
+    ApplyUserMirrorRequest, UserMirrorInventoryDto, UserMirrorPlanDto, UserMirrorResultDto,
+};
 use super::selection::UserMirrorObjectBinding;
 use super::service::apply_user_mirror;
 use crate::agent_hub::object_store::ObjectStore;
@@ -65,6 +68,8 @@ pub struct PrepareUserMirrorRequest {
     pub plan_token: String,
     #[serde(default)]
     pub item_bindings: Vec<UserMirrorObjectBinding>,
+    /// 源侧 preview plan；dest 落库后 commit 才能 claim apply。
+    pub plan: UserMirrorPlanDto,
 }
 
 /// dest commit 请求。
@@ -165,11 +170,17 @@ pub async fn prepare_user_mirror(
     state: &AppState,
     req: PrepareUserMirrorRequest,
 ) -> Result<PreparePushResponse, AppError> {
-    if req.plan_token.trim().is_empty() {
+    if req.plan_token.trim().is_empty() || req.plan.plan_token.trim().is_empty() {
         return Err(AppError::validation(
             super::models::USER_MIRROR_PREVIEW_REQUIRED.to_string(),
         ));
     }
+    if req.plan.plan_token.trim() != req.plan_token.trim() {
+        return Err(AppError::conflict(
+            "agent_hub_user_mirror_plan_token_mismatch".to_string(),
+        ));
+    }
+    persist_dest_plan(state, &req.plan).await?;
     let data_dir = crate::config::data_dir()?;
     let objects = ObjectStore::open(&data_dir)?;
     let ledger =
@@ -338,4 +349,24 @@ pub async fn commit_user_mirror(
         status: "committed".into(),
         result,
     })
+}
+
+/// dest 落 preview plan，供 commit 的 dest apply claim。
+///
+/// Business Logic: Push apply 永远在 dest owning process；源侧 plan 必须拷到 dest ledger。
+/// Code Logic: INSERT OR IGNORE 同 token，幂等重放 prepare。
+async fn persist_dest_plan(state: &AppState, plan: &UserMirrorPlanDto) -> Result<(), AppError> {
+    state
+        .agent_hub_repo
+        .ensure_user_mirror_plan(UserMirrorPlanRecord {
+            plan_token: plan.plan_token.clone(),
+            expires_at: plan.expires_at.clone(),
+            plan_json: serde_json::to_string(plan)?,
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
 }

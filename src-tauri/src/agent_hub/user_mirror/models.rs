@@ -245,6 +245,9 @@ pub struct UserMirrorPlanDto {
     pub has_credential_bearing_assets: bool,
     pub agents: Vec<UserMirrorAgentPlanDto>,
     pub blocking_reasons: Vec<String>,
+    /// Push 所选对端；空则 apply 回落到 `destination_device_id`。
+    #[serde(default)]
+    pub peer_device_ids: Vec<String>,
 }
 
 /// 应用已预览镜像的请求。

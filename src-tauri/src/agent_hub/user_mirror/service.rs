@@ -304,33 +304,43 @@ impl UserMirrorService {
                 .await
             }
             UserMirrorDirection::Push => {
-                let dest_device_id = request
-                    .peer_device_ids
-                    .iter()
-                    .map(|id| id.trim())
-                    .find(|id| !id.is_empty())
-                    .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?
-                    .to_string();
+                let peer_ids: Vec<String> = {
+                    let mut seen = std::collections::BTreeSet::new();
+                    let mut ids = Vec::new();
+                    for id in &request.peer_device_ids {
+                        let trimmed = id.trim();
+                        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+                            continue;
+                        }
+                        ids.push(trimmed.to_string());
+                    }
+                    ids
+                };
+                let dest_device_id = peer_ids
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?;
                 let source =
                     build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
                 let dest = load_source_inventory(state, &dest_device_id).await?;
-                preview_from_two_inventories(
-                    state,
+                let mut plan = build_preview_from_two_inventories(
                     &source,
                     &dest,
                     state.device_id.as_str(),
                     &dest_device_id,
                     UserMirrorDirection::Push,
-                )
-                .await
+                );
+                plan.peer_device_ids = peer_ids;
+                persist_plan(state, &plan).await?;
+                Ok(plan)
             }
         }
     }
 
-    /// 应用已预览镜像（Pull 本机写盘；Push sender 由后续 task 接入）。
+    /// 应用已预览镜像（Pull 本机写盘；Push 源侧 freeze 后对每 peer dest commit）。
     ///
     /// Business Logic: 同 clientRequestId 幂等；GUI 不得把 apply 打到 LAN。
-    /// Code Logic: 读 plan 方向；Pull 收集源 objects 后调 dest apply。
+    /// Code Logic: 读 plan 方向；Pull 收集源 objects 后调 dest apply；Push 走 sender。
     pub async fn apply_user_mirror(
         state: &AppState,
         request: ApplyUserMirrorRequest,
@@ -349,9 +359,7 @@ impl UserMirrorService {
                 let (objects, bindings) = collect_source_objects(state, &plan).await?;
                 apply_user_mirror(state, request, &objects, &bindings).await
             }
-            UserMirrorDirection::Push => Err(AppError::unavailable(
-                "user_mirror_push_sender_not_wired".to_string(),
-            )),
+            UserMirrorDirection::Push => super::push::apply_push_user_mirror(state, request).await,
         }
     }
 

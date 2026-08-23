@@ -10,7 +10,9 @@
 //!     纯投影 helper 供单测与 collect 共用。
 
 use crate::agent_hub::models::{AgentHubConflict, Materialization, MaterializationStatus};
-use crate::agent_hub::replication::sender::{list_failed_source_push_targets, SourcePushTargetRow};
+use crate::agent_hub::replication::sender::{
+    list_failed_source_push_targets, SourcePushTargetRow, SOURCE_PUSH_KIND_USER_MIRROR,
+};
 use crate::attention::models::{
     AttentionCategory, AttentionDeviceRef, AttentionFreshness, AttentionItemDto,
     AttentionSourceKind, AttentionTargetDto,
@@ -106,10 +108,11 @@ pub fn project_agent_hub_rows(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     源侧 push 失败需进 Inbox，只展示 peer 标签/计数/错误码，禁止 payload。
+///     源侧 push / 用户级镜像失败需进 Inbox，只展示 peer 标签与错误码，禁止 payload。
 ///
 /// Code Logic（这个函数做什么）:
-///     稳定 ID `agent-hub:push-failed:<requestId>:<peerId>`；category=Blocked。
+///     `kind=user_mirror` → `agent-hub:mirror-failed:<requestId>:<peerId>`；
+///     否则 `agent-hub:push-failed:<requestId>:<peerId>`。
 pub fn project_source_push_failures(rows: &[SourcePushTargetRow]) -> Vec<AttentionItemDto> {
     rows.iter().map(project_source_push_failure_item).collect()
 }
@@ -118,7 +121,7 @@ pub fn project_source_push_failures(rows: &[SourcePushTargetRow]) -> Vec<Attenti
 ///     单条失败 target 映射为 blocked 条目。
 ///
 /// Code Logic（这个函数做什么）:
-///     summary 含 peer label、missing/transferred 计数与 error_code；无 envelope/正文。
+///     镜像 summary 仅 peer label + error_code；旧 push 另含 missing/transferred 计数。
 pub fn project_source_push_failure_item(row: &SourcePushTargetRow) -> AttentionItemDto {
     let code = row
         .error_code
@@ -126,20 +129,36 @@ pub fn project_source_push_failure_item(row: &SourcePushTargetRow) -> AttentionI
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("unknown");
+    let is_mirror = row.kind.trim() == SOURCE_PUSH_KIND_USER_MIRROR;
     // 永不包含 payload / envelope / object bytes
-    let summary = format!(
-        "推送到 {} 失败（missing={} transferred={} code={}）",
-        row.peer_label, row.missing_object_count, row.transferred_object_count, code
-    );
+    let (id, title, summary) = if is_mirror {
+        (
+            format!(
+                "agent-hub:mirror-failed:{}:{}",
+                row.request_id, row.peer_device_id
+            ),
+            "Agent Hub 用户级镜像失败".to_string(),
+            format!("镜像到 {} 失败（code={}）", row.peer_label, code),
+        )
+    } else {
+        (
+            format!(
+                "agent-hub:push-failed:{}:{}",
+                row.request_id, row.peer_device_id
+            ),
+            "Agent Hub 局域网推送失败".to_string(),
+            format!(
+                "推送到 {} 失败（missing={} transferred={} code={}）",
+                row.peer_label, row.missing_object_count, row.transferred_object_count, code
+            ),
+        )
+    };
     AttentionItemDto {
-        id: format!(
-            "agent-hub:push-failed:{}:{}",
-            row.request_id, row.peer_device_id
-        ),
+        id,
         category: AttentionCategory::Blocked,
         // 复用 projection blocked kind（v1+v2 均展示）；导航到 Agent Hub 资产首页。
         source_kind: AttentionSourceKind::AgentHubProjectionBlocked,
-        title: "Agent Hub 局域网推送失败".to_string(),
+        title,
         summary,
         updated_at: row.updated_at.clone(),
         freshness: AttentionFreshness::Live,
@@ -416,6 +435,7 @@ mod tests {
             transfer_id: None,
             missing_object_count: 3,
             transferred_object_count: 1,
+            kind: "push".into(),
             created_at: "2026-07-29T00:00:00Z".into(),
             updated_at: "2026-07-29T01:00:00Z".into(),
         };
@@ -431,6 +451,41 @@ mod tests {
         assert!(!item.summary.to_lowercase().contains("envelope"));
         assert!(!item.summary.contains("token="));
         assert!(item.device.as_ref().unwrap().name == "Mac Mini");
+    }
+
+    /// Business Logic: 用户级镜像失败 Attention 仅 peer label + error code，无 payload。
+    /// Code Logic: 稳定 ID `agent-hub:mirror-failed:<requestId>:<peerId>`。
+    #[test]
+    fn project_user_mirror_failure_uses_label_and_code_never_payload() {
+        use crate::agent_hub::replication::sender::{
+            SourcePushTargetRow, TargetPushStatus, SOURCE_PUSH_KIND_USER_MIRROR,
+        };
+        let row = SourcePushTargetRow {
+            request_id: "req-m".into(),
+            peer_device_id: "peer-y".into(),
+            peer_label: "Laptop".into(),
+            client_request_id: "req-m:peer-y".into(),
+            status: TargetPushStatus::Failed,
+            retryable: false,
+            error_code: Some("USER_MIRROR_CAPABILITY_UNSUPPORTED".into()),
+            transfer_id: None,
+            missing_object_count: 9,
+            transferred_object_count: 4,
+            kind: SOURCE_PUSH_KIND_USER_MIRROR.into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T01:00:00Z".into(),
+        };
+        let item = project_source_push_failure_item(&row);
+        assert_eq!(item.id, "agent-hub:mirror-failed:req-m:peer-y");
+        assert_eq!(item.category, AttentionCategory::Blocked);
+        assert!(item.summary.contains("Laptop"));
+        assert!(item.summary.contains("USER_MIRROR_CAPABILITY_UNSUPPORTED"));
+        assert!(!item.summary.contains("missing="));
+        assert!(!item.summary.contains("transferred="));
+        assert!(!item.summary.to_lowercase().contains("payload"));
+        assert!(!item.summary.to_lowercase().contains("envelope"));
+        assert!(!item.summary.contains("token="));
+        assert_eq!(item.device.as_ref().unwrap().name, "Laptop");
     }
 
     /// Business Logic（为什么需要这个测试）:
