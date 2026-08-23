@@ -269,8 +269,8 @@ mod tests {
     ///     镜像 inventory 必须覆盖 catalog 全部 Hub Agent，且不得把 MCP 明文或 home 路径送上 LAN。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     隔离 HOME 写入 Claude 原生文件、hello skill 与带 TOKEN 的 MCP；断言全 target、脱敏、
-    ///     Claude 原生/技能事实。
+    ///     隔离 HOME 写入 Claude 原生文件、hello skill 与 `~/.claude.json` 带 TOKEN 的 MCP；
+    ///     断言全 target、脱敏、凭据条数与 Claude 原生/技能事实。
     #[tokio::test]
     async fn build_local_user_mirror_inventory_covers_all_hub_targets_and_redacts_secrets() {
         let env = seed_user_mirror_homes().await;
@@ -280,8 +280,8 @@ mod tests {
             "---\nname: hello\ndescription: d\n---\n",
         );
         write(
-            env.claude_home.join(".claude.json").as_path(),
-            r#"{"mcpServers":{"s":{"env":{"TOKEN":"plain-secret-xyz"}}}}"#,
+            env.home.join(".claude.json").as_path(),
+            r#"{"mcpServers":{"s":{"command":"uvx","args":["srv"],"env":{"TOKEN":"plain-secret-xyz"},"enabled":true}}}"#,
         );
 
         let dto = build_local_user_mirror_inventory(&env.app_state, "dev-a")
@@ -307,6 +307,20 @@ mod tests {
             .items
             .iter()
             .any(|i| i.kind == PortableAssetKind::Skill && i.native_id == "hello"));
+        assert!(
+            dto.credential_bearing_count > 0,
+            "MCP env TOKEN must count as credential-bearing"
+        );
+        assert!(
+            claude.items.iter().any(|i| {
+                i.kind == PortableAssetKind::Mcp
+                    && i.native_id == "s"
+                    && i.mcp_credential
+                        .as_ref()
+                        .is_some_and(|credential| credential.present)
+            }),
+            "Claude MCP server s must be scanned with present credential fact"
+        );
         let opencode = dto
             .agents
             .iter()
@@ -374,5 +388,35 @@ mod tests {
             .native_files
             .iter()
             .any(|f| f.logical_id == "cursor.slot.exclusive"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Codex 独有槽物化到 `AGENTS.override.md`；镜像必须按 logical_id 收录，不能只扫 AGENTS.md。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入 `~/.codex/AGENTS.override.md`，断言 Codex native_files 含 `codex.slot.exclusive` 且 exists。
+    #[tokio::test]
+    async fn codex_override_md_is_listed_as_slot_exclusive() {
+        let env = seed_user_mirror_homes().await;
+        write(
+            env.home.join(".codex/AGENTS.override.md").as_path(),
+            "# exclusive override\n",
+        );
+
+        let dto = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let codex = dto
+            .agents
+            .iter()
+            .find(|a| a.target == AgentTarget::Codex)
+            .expect("codex agent");
+        assert!(
+            codex
+                .native_files
+                .iter()
+                .any(|f| { f.logical_id == "codex.slot.exclusive" && f.exists && f.size > 0 }),
+            "Codex AGENTS.override.md must appear as codex.slot.exclusive"
+        );
     }
 }

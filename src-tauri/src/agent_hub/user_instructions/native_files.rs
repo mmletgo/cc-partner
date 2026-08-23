@@ -153,7 +153,8 @@ pub(crate) fn slot_logical_id(target: AgentTarget, slot: &str) -> String {
 /// Business Logic: 禁止把 OpenCode fallback 写成 Claude `CLAUDE.md`，禁止把仓库根
 ///     `AGENTS.md` 收进 Grok/Cursor 用户级 inventory。
 /// Code Logic: `declared_native_paths` 按 config_root 归属 target；再追加各 adapter
-///     已物化的 `{target}.slot.adapted|exclusive`。Cursor 无用户级 AGENTS.md。
+///     已物化的 `{target}.slot.adapted|exclusive`（含 Codex `AGENTS.override.md`）。
+///     Cursor 无用户级 AGENTS.md。
 pub(crate) fn user_level_mirror_native_paths(
     homes: &TargetHomes,
 ) -> Vec<(AgentTarget, String, PathBuf)> {
@@ -181,6 +182,11 @@ pub(crate) fn user_level_mirror_native_paths(
         })
         .collect();
     out.extend([
+        (
+            AgentTarget::Codex,
+            slot_logical_id(AgentTarget::Codex, "exclusive"),
+            homes.codex.config_root.join("AGENTS.override.md"),
+        ),
         (
             AgentTarget::Grok,
             slot_logical_id(AgentTarget::Grok, "adapted"),
