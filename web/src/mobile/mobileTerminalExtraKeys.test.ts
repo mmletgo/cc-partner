@@ -274,17 +274,25 @@ describe('mobileTerminalExtraKeys', () => {
     assertEqual(flakyHelper.value, '', 'value cleared despite selection error');
   });
 
-  test('slash key exposes rewind/resume/compact popup snippets without auto-enter', () => {
+  test('slash key exposes clear/rewind/resume/compact popup snippets without auto-enter', () => {
     const slash = getMobileTerminalExtraKeys().find((key) => key.id === 'slash');
     assertTrue(slash != null, 'slash key exists');
     const popupIds = (slash?.popup ?? []).map((item) => item.id);
-    assertEqual(popupIds.join(','), 'slash-rewind,slash-resume,slash-compact', 'popup nearest-first');
+    assertEqual(
+      popupIds.join(','),
+      'slash-clear,slash-rewind,slash-resume,slash-compact',
+      'popup nearest-first',
+    );
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashClear, '/clear', 'clear payload');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashRewind, '/rewind', 'rewind payload');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashResume, '/resume', 'resume payload');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashCompact, '/compact', 'compact payload');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashClear.includes('\r'), 'clear no CR');
     assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashRewind.includes('\r'), 'rewind no CR');
     assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashResume.includes('\n'), 'resume no LF');
     assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashCompact.endsWith('\r'), 'compact no auto-enter');
+    const clear = slash?.popup?.find((item) => item.id === 'slash-clear');
+    assertEqual(clear?.payload, '/clear', 'clear item payload');
     const rewind = slash?.popup?.find((item) => item.id === 'slash-rewind');
     assertEqual(rewind?.payload, '/rewind', 'rewind item payload');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS, 400, 'long-press delay');

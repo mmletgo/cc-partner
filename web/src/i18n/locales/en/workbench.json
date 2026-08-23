@@ -242,6 +242,7 @@
         "ctrl": "Control modifier",
         "alt": "Alt modifier",
         "slash": "Slash",
+        "slashClear": "Insert /clear",
         "slashRewind": "Insert /rewind",
         "slashResume": "Insert /resume",
         "slashCompact": "Insert /compact",

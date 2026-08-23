@@ -239,6 +239,7 @@
         "ctrl": "Ctrl 修饰键",
         "alt": "Alt 修饰键",
         "slash": "斜杠 /",
+        "slashClear": "插入 /clear",
         "slashRewind": "插入 /rewind",
         "slashResume": "插入 /resume",
         "slashCompact": "插入 /compact",

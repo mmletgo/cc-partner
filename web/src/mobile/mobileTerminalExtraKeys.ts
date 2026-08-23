@@ -60,6 +60,7 @@ export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
   // 终端 Enter 发送 CR（回车）；Claude Code 用它确认 / 发送消息。
   enter: '\r',
   slash: '/',
+  slashClear: '/clear',
   slashRewind: '/rewind',
   slashResume: '/resume',
   slashCompact: '/compact',
@@ -97,6 +98,13 @@ const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
     ariaKey: 'slash',
     payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slash,
     popup: [
+      {
+        id: 'slash-clear',
+        kind: 'payload',
+        label: '/clear',
+        ariaKey: 'slashClear',
+        payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slashClear,
+      },
       {
         id: 'slash-rewind',
         kind: 'payload',

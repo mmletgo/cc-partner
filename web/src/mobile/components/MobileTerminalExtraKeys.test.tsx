@@ -129,7 +129,7 @@ describe('MobileTerminalExtraKeys', () => {
     vi.useRealTimers();
   });
 
-  test('slash 长按弹出三项；滑到 /rewind 松手插入该命令', () => {
+  test('slash 长按弹出四项；滑到 /rewind 松手插入该命令', () => {
     vi.useFakeTimers();
     const onKeyPress = vi.fn();
     const { slash } = renderExtraKeys(onKeyPress);
@@ -140,9 +140,11 @@ describe('MobileTerminalExtraKeys', () => {
       vi.advanceTimersByTime(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS);
     });
 
+    const clear = document.querySelector('[data-popup-item-id="slash-clear"]');
     const rewind = document.querySelector('[data-popup-item-id="slash-rewind"]');
     const resume = document.querySelector('[data-popup-item-id="slash-resume"]');
     const compact = document.querySelector('[data-popup-item-id="slash-compact"]');
+    expect(clear).toBeTruthy();
     expect(rewind).toBeTruthy();
     expect(resume).toBeTruthy();
     expect(compact).toBeTruthy();
@@ -155,6 +157,31 @@ describe('MobileTerminalExtraKeys', () => {
     expect(onKeyPress.mock.calls[0]?.[0]?.id).toBe('slash-rewind');
     expect(onKeyPress.mock.calls[0]?.[0]?.payload).toBe('/rewind');
     expect(document.querySelector('[data-popup-item-id="slash-rewind"]')).toBeNull();
+    vi.useRealTimers();
+  });
+
+  test('slash 长按滑到最底部 /clear 松手插入该命令', () => {
+    vi.useFakeTimers();
+    const onKeyPress = vi.fn();
+    const { slash } = renderExtraKeys(onKeyPress);
+    mockRect(slash, { left: 100, top: 400, width: 48, height: 48 });
+
+    fireEvent.pointerDown(slash, { pointerId: 1, clientX: 120, clientY: 420 });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS);
+    });
+
+    const clear = document.querySelector('[data-popup-item-id="slash-clear"]');
+    expect(clear).toBeTruthy();
+    if (!clear) throw new Error('clear popup missing');
+    mockRect(clear, { left: 80, top: 348, width: 88, height: 48 });
+
+    fireEvent.pointerMove(slash, { pointerId: 1, clientX: 120, clientY: 370 });
+    fireEvent.pointerUp(slash, { pointerId: 1, clientX: 120, clientY: 370 });
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
+    expect(onKeyPress.mock.calls[0]?.[0]?.id).toBe('slash-clear');
+    expect(onKeyPress.mock.calls[0]?.[0]?.payload).toBe('/clear');
+    expect(document.querySelector('[data-popup-item-id="slash-clear"]')).toBeNull();
     vi.useRealTimers();
   });
 

@@ -56,6 +56,8 @@ function extraKeyAriaLabel(
       return t('workbench:mobile.terminalPanel.extraKeys.alt');
     case 'slash':
       return t('workbench:mobile.terminalPanel.extraKeys.slash');
+    case 'slashClear':
+      return t('workbench:mobile.terminalPanel.extraKeys.slashClear');
     case 'slashRewind':
       return t('workbench:mobile.terminalPanel.extraKeys.slashRewind');
     case 'slashResume':
@@ -110,7 +112,7 @@ interface ExtraKeyPopupButtonProps {
  * ExtraKeyPopupButton（带长按弹出层的 extra key）
  *
  * Business Logic（为什么需要这个组件）:
- *   `/` 短按插入斜杠；长按后在键上方滑选 `/rewind` `/resume` `/compact`。
+ *   `/` 短按插入斜杠；长按后在键上方滑选 `/clear` `/rewind` `/resume` `/compact`。
  *   必须与 PointerPrimaryButton 的「按下即发」分开，否则长按无法成立。
  *
  * Code Logic（这个组件做什么）:
