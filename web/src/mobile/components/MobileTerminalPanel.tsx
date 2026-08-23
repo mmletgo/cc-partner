@@ -2179,7 +2179,7 @@ export function MobileTerminalPanel({
     );
   }, []);
 
-  const terminalFabActions: Array<{
+  type TerminalFabAction = {
     key: 'paste' | 'merge' | 'commit' | 'optimizer' | 'favorite';
     visible: boolean;
     label: string;
@@ -2187,7 +2187,8 @@ export function MobileTerminalPanel({
     busy: boolean;
     dirty: boolean;
     icon: ReactNode;
-  }> = [
+  };
+  const allTerminalFabActions: TerminalFabAction[] = [
     {
       key: 'paste',
       visible: true,
@@ -2233,7 +2234,8 @@ export function MobileTerminalPanel({
       dirty: false,
       icon: <PromptsIcon size={18} aria-hidden="true" />,
     },
-  ].filter((item) => item.visible);
+  ];
+  const terminalFabActions = allTerminalFabActions.filter((item) => item.visible);
   const terminalFabArcPath = computeMobileTerminalFabArcPath(terminalFabActions.length);
 
   const terminalBody = !project ? (

@@ -124,8 +124,11 @@ describe('MobileTerminalInputStream', () => {
   test('后台断线不立即重连，回到前台才重建输入流', () => {
     const sockets: FakeWebSocket[] = [];
     let visible = false;
-    let resumeHandler: ((detail: { persistedPageshow: boolean; hidden?: boolean }) => void) | null =
-      null;
+    const resume = {
+      handler: undefined as
+        | ((detail: { persistedPageshow: boolean; hidden?: boolean }) => void)
+        | undefined,
+    };
     const stream = new MobileTerminalInputStream({
       createWebSocket: () => {
         const next = new FakeWebSocket();
@@ -134,9 +137,9 @@ describe('MobileTerminalInputStream', () => {
       },
       isDocumentVisible: () => visible,
       subscribeResume: (handler) => {
-        resumeHandler = handler;
+        resume.handler = handler;
         return () => {
-          resumeHandler = null;
+          resume.handler = undefined;
         };
       },
       onStateChange: () => undefined,
@@ -149,7 +152,7 @@ describe('MobileTerminalInputStream', () => {
     expect(() => stream.enqueue('session-1', 'later')).toThrow('尚未就绪');
 
     visible = true;
-    resumeHandler?.({ persistedPageshow: false });
+    resume.handler?.({ persistedPageshow: false });
 
     expect(sockets).toHaveLength(2);
     sockets[1]?.open();
@@ -164,8 +167,11 @@ describe('MobileTerminalInputStream', () => {
 
   test('前台恢复时即使旧 socket 仍显示 OPEN 也会重建半开连接', () => {
     const sockets: FakeWebSocket[] = [];
-    let resumeHandler: ((detail: { persistedPageshow: boolean; hidden?: boolean }) => void) | null =
-      null;
+    const resume = {
+      handler: undefined as
+        | ((detail: { persistedPageshow: boolean; hidden?: boolean }) => void)
+        | undefined,
+    };
     const stream = new MobileTerminalInputStream({
       createWebSocket: () => {
         const next = new FakeWebSocket();
@@ -174,9 +180,9 @@ describe('MobileTerminalInputStream', () => {
       },
       isDocumentVisible: () => true,
       subscribeResume: (handler) => {
-        resumeHandler = handler;
+        resume.handler = handler;
         return () => {
-          resumeHandler = null;
+          resume.handler = undefined;
         };
       },
       onStateChange: () => undefined,
@@ -185,7 +191,7 @@ describe('MobileTerminalInputStream', () => {
     sockets[0]?.receive({ type: 'ready', deviceId: 'device-1' });
     expect(sockets[0]?.readyState).toBe(FakeWebSocket.OPEN);
 
-    resumeHandler?.({ persistedPageshow: false });
+    resume.handler?.({ persistedPageshow: false });
 
     expect(sockets).toHaveLength(2);
     stream.close();

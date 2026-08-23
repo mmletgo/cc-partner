@@ -1435,7 +1435,7 @@ describe('MobileTerminalPanel — FAB menu', () => {
     expect(item).not.toBeNull();
     expect(item?.querySelectorAll('button')).toHaveLength(1);
     expect(item?.textContent).toContain('workbench:worktrees.commit');
-    expect(commit.contains(item?.querySelector('span'))).toBe(false);
+    expect(commit.contains(item?.querySelector('span') ?? null)).toBe(false);
   });
 
   /**
