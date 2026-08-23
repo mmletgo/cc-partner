@@ -5,6 +5,8 @@ import {
   canRunMobilePaneMutation,
   canRunMobileWorktreeDestructiveAction,
   canShowMobileTerminalMergeFab,
+  computeMobileTerminalFabArc,
+  computeMobileTerminalFabArcPath,
   canSwitchMobilePane,
   closeMobileNav,
   computeMobileKeyboardInset,
@@ -711,6 +713,47 @@ describe('mobileWorkbenchState', () => {
     assertEqual(canShowMobileTerminalMergeFab(mainFeatureBranch), true);
     assertEqual(canShowMobileTerminalMergeFab(mainCollect), true);
     assertEqual(canShowMobileTerminalMergeFab(feature), true);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   四个常驻动作必须落在左上 90° 弧上，第一个在正上方。
+   *
+   * Code Logic（这个测试做什么）:
+   *   count=4 时断言角度 270/240/210/180，以及进出场 delay 倒序。
+   */
+  test('places four terminal FAB actions on a 90-degree upper-left arc', () => {
+    const poses = [0, 1, 2, 3].map((index) => computeMobileTerminalFabArc(index, 4));
+    assertEqual(poses[0]?.angleDeg, 270);
+    assertEqual(poses[1]?.angleDeg, 240);
+    assertEqual(poses[2]?.angleDeg, 210);
+    assertEqual(poses[3]?.angleDeg, 180);
+    assertEqual(poses[0]?.delayOpenMs, 0);
+    assertEqual(poses[3]?.delayOpenMs, 120);
+    assertEqual(poses[0]?.delayCloseMs, 120);
+    assertEqual(poses[3]?.delayCloseMs, 0);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   露出 Merge 后变成五个动作，弧要加宽以免图标叠在一起。
+   *
+   * Code Logic（这个测试做什么）:
+   *   count=5 时断言 120° 扫角终点为 150°。
+   */
+  test('widens the FAB arc to 120 degrees when merge is present', () => {
+    const first = computeMobileTerminalFabArc(0, 5);
+    const last = computeMobileTerminalFabArc(4, 5);
+    assertEqual(first.angleDeg, 270);
+    assertEqual(last.angleDeg, 150);
+    assertEqual(
+      computeMobileTerminalFabArcPath(4),
+      'M 0 -1 A 1 1 0 0 1 -1.0000 0.0000',
+    );
+    assertEqual(
+      computeMobileTerminalFabArcPath(5),
+      `M 0 -1 A 1 1 0 0 1 ${Math.cos((150 * Math.PI) / 180).toFixed(4)} ${Math.sin((150 * Math.PI) / 180).toFixed(4)}`,
+    );
   });
 
   /**

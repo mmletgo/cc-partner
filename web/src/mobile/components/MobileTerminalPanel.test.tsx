@@ -1143,19 +1143,19 @@ describe('MobileTerminalPanel — FAB menu', () => {
 
     const trigger = screen.getByRole('button', { name: FAB_MENU_CLOSE_LABEL });
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    const group = screen.getByRole('group', {
+      name: 'workbench:mobile.terminalPanel.fabMenu.actionsAriaLabel',
+    });
+    expect(group.getAttribute('data-layout')).toBe('radial');
     const paste = screen.getByRole('button', {
       name: 'workbench:mobile.terminalPanel.pasteImageButton',
     });
-    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
-    const optimizer = screen.getByRole('button', { name: 'workbench:promptOptimizer.open' });
-    const favorite = screen.getByRole('button', {
+    screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    screen.getByRole('button', { name: 'workbench:promptOptimizer.open' });
+    screen.getByRole('button', {
       name: 'workbench:mobile.favoriteQuickInput.openButton',
     });
-    const group = paste.parentElement;
-    expect(group).toBe(commit.parentElement);
-    expect(group).toBe(optimizer.parentElement);
-    expect(group).toBe(favorite.parentElement);
-    const labels = Array.from(group?.querySelectorAll('button') ?? []).map((button) =>
+    const labels = Array.from(group.querySelectorAll('button')).map((button) =>
       button.getAttribute('aria-label'),
     );
     expect(labels).toEqual([
@@ -1164,10 +1164,18 @@ describe('MobileTerminalPanel — FAB menu', () => {
       'workbench:promptOptimizer.open',
       'workbench:mobile.favoriteQuickInput.openButton',
     ]);
-    expect(paste.textContent).toBe('workbench:mobile.terminalPanel.pasteImageButton');
-    expect(commit.textContent).toBe('workbench:worktrees.commit');
-    expect(optimizer.textContent).toBe('workbench:promptOptimizer.open');
-    expect(favorite.textContent).toBe('workbench:mobile.favoriteQuickInput.openButton');
+    expect(
+      Array.from(group.querySelectorAll('[data-fab-index]')).map((item) =>
+        Number(item.getAttribute('data-fab-angle')),
+      ),
+    ).toEqual([270, 240, 210, 180]);
+    expect(screen.getByText('workbench:mobile.terminalPanel.pasteImageButton')).toBeTruthy();
+    expect(screen.getByText('workbench:worktrees.commit')).toBeTruthy();
+    expect(screen.getByText('workbench:promptOptimizer.open')).toBeTruthy();
+    expect(screen.getByText('workbench:mobile.favoriteQuickInput.openButton')).toBeTruthy();
+    expect(paste.contains(screen.getByText('workbench:mobile.terminalPanel.pasteImageButton'))).toBe(
+      false,
+    );
     expect(trigger.textContent).toBe('');
   });
 
@@ -1294,10 +1302,10 @@ describe('MobileTerminalPanel — commit FAB', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   展开后的终端操作组必须把 Commit 放在 Prompt 优化上方，方便在不离开终端时提交。
+   *   展开后的终端操作组必须把 Commit 放在 Prompt 优化之前，方便在不离开终端时提交。
    *
    * Code Logic（这个测试做什么）:
-   *   有 worktree 时断言 Commit 按钮存在，且在 FAB 组内位于优化 Prompt 之前。
+   *   有 worktree 时断言 Commit 按钮存在，且在环形 FAB 组内位于优化 Prompt 之前。
    */
   test('renders commit FAB above the prompt optimizer button', () => {
     const session = buildSession({ worktreeId: 'wt-1' });
@@ -1316,13 +1324,10 @@ describe('MobileTerminalPanel — commit FAB', () => {
     );
 
     openTerminalFabMenu();
-    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
-    const optimizer = screen.getByRole('button', { name: 'workbench:promptOptimizer.open' });
-    screen.getByRole('button', { name: 'workbench:mobile.favoriteQuickInput.openButton' });
-    const group = commit.parentElement;
-    expect(group).not.toBeNull();
-    expect(group).toBe(optimizer.parentElement);
-    const labels = Array.from(group?.querySelectorAll('button') ?? []).map((button) =>
+    const group = screen.getByRole('group', {
+      name: 'workbench:mobile.terminalPanel.fabMenu.actionsAriaLabel',
+    });
+    const labels = Array.from(group.querySelectorAll('button')).map((button) =>
       button.getAttribute('aria-label'),
     );
     expect(labels.indexOf('workbench:worktrees.commit')).toBeLessThan(
@@ -1585,18 +1590,23 @@ describe('MobileTerminalPanel — merge FAB', () => {
     );
 
     openTerminalFabMenu();
-    const merge = screen.getByRole('button', { name: 'workbench:worktrees.merge' });
-    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
-    expect(merge.textContent).toBe('workbench:worktrees.merge');
-    const group = merge.parentElement;
-    expect(group).not.toBeNull();
-    expect(group).toBe(commit.parentElement);
-    const labels = Array.from(group?.querySelectorAll('button') ?? []).map((button) =>
+    const group = screen.getByRole('group', {
+      name: 'workbench:mobile.terminalPanel.fabMenu.actionsAriaLabel',
+    });
+    expect(screen.getByRole('button', { name: 'workbench:worktrees.merge' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'workbench:worktrees.commit' })).toBeTruthy();
+    expect(screen.getByText('workbench:worktrees.merge')).toBeTruthy();
+    const labels = Array.from(group.querySelectorAll('button')).map((button) =>
       button.getAttribute('aria-label'),
     );
     expect(labels.indexOf('workbench:worktrees.merge')).toBeLessThan(
       labels.indexOf('workbench:worktrees.commit'),
     );
+    expect(
+      Array.from(group.querySelectorAll('[data-fab-index]')).map((item) =>
+        Number(item.getAttribute('data-fab-angle')),
+      ),
+    ).toEqual([270, 240, 210, 180, 150]);
   });
 
   /**

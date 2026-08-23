@@ -36,6 +36,11 @@ const RUNTIME_STRUCTURAL_ALLOWLIST = new Set([
   'mobile-keyboard-inset',
   'mobile-keyboard-shift',
   'mobile-terminal-min-height',
+  // Mobile terminal FAB radial layout (inline --fab-angle / delay; CSS --fab-radius)
+  'fab-angle',
+  'fab-radius',
+  'fab-delay-open',
+  'fab-delay-close',
 ]);
 
 /**
