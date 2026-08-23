@@ -258,6 +258,15 @@
         "cdUp": "插入 cd ..",
         "lsLa": "插入 ls -la",
         "clearSnippet": "插入 clear"
+      },
+      "pasteImageButton": "粘贴图片",
+      "selection": {
+        "barAriaLabel": "终端选区",
+        "selectedLines": "已选 {{count}} 行",
+        "copy": "复制",
+        "cancel": "取消",
+        "copied": "已复制",
+        "copyFailed": "复制失败"
       }
     },
     "filesPanel": {
