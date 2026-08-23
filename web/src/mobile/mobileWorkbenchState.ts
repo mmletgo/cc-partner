@@ -737,6 +737,58 @@ export function canShowMobileTerminalMergeFab(worktree: WorkbenchWorktree | null
 }
 
 /**
+ * 移动端终端 FAB 环形展开位姿。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   右下角折叠钮点开后，动作要沿左上象限散开，避免再叠成一列挡住终端。
+ *
+ * Code Logic（字段说明）:
+ *   angleDeg 为 CSS 角（180=左，270=上）；delayOpenMs / delayCloseMs 供错开进出场。
+ */
+export interface MobileTerminalFabArcPose {
+  angleDeg: number;
+  delayOpenMs: number;
+  delayCloseMs: number;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   4 个常驻动作与可选 Merge 共用一条左上弧，数量变化时仍要保持按钮间距。
+ *
+ * Code Logic（这个函数做什么）:
+ *   index 0 在正上方，沿顺时针扫向左（4 个扫 90°，5 个扫 120°）；进出场 delay 互为倒序。
+ */
+export function computeMobileTerminalFabArc(
+  index: number,
+  count: number,
+): MobileTerminalFabArcPose {
+  const safeCount = Math.max(1, count);
+  const clampedIndex = Math.min(Math.max(0, index), safeCount - 1);
+  const sweepDeg = safeCount <= 4 ? 90 : 120;
+  const t = safeCount === 1 ? 0 : clampedIndex / (safeCount - 1);
+  const staggerMs = 40;
+  return {
+    angleDeg: 270 - sweepDeg * t,
+    delayOpenMs: clampedIndex * staggerMs,
+    delayCloseMs: (safeCount - 1 - clampedIndex) * staggerMs,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   环形轨道 SVG 需要与按钮同一条弧，4/5 个动作对应不同终点。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回单位圆 path：从 (0,-1) 扫到终点；sweep-flag=1 为屏幕坐标系顺时针。
+ */
+export function computeMobileTerminalFabArcPath(count: number): string {
+  const sweepDeg = count <= 4 ? 90 : 120;
+  const endDeg = 270 - sweepDeg;
+  const endRad = (endDeg * Math.PI) / 180;
+  return `M 0 -1 A 1 1 0 0 1 ${Math.cos(endRad).toFixed(4)} ${Math.sin(endRad).toFixed(4)}`;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   用户在移动端 Worktrees 面板点击工作区时，期望成功切换后直接进入对应 Workbench 操作现场。
  *

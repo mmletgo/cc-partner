@@ -1333,35 +1333,122 @@
   background: color-mix(in oklab, var(--bg) 45%, transparent);
   cursor: pointer;
   touch-action: manipulation;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-base) var(--ease-standard);
+}
+
+.mobileTerminalFabBackdrop[data-open='true'] {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .mobileTerminalFabGroup {
   position: absolute;
   right: var(--space-2);
   bottom: var(--space-2);
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-2);
   z-index: 5;
 }
 
 .mobileTerminalFabActions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-2);
+  --fab-radius: calc(var(--space-8) * 3.5);
+  position: absolute;
+  right: calc(var(--space-8) * 0.75);
+  bottom: calc(var(--space-8) * 0.75);
+  width: 0;
+  height: 0;
+  pointer-events: none;
 }
 
-.mobileTerminalFabLabeled {
-  width: auto;
-  min-width: calc(var(--space-8) * 1.5);
-  padding: 0 var(--space-3);
+.mobileTerminalFabActions[data-count='5'] {
+  --fab-radius: calc(var(--space-8) * 4.5);
+}
+
+.mobileTerminalFabActions[data-open='true'] {
+  pointer-events: auto;
+}
+
+.mobileTerminalFabRing {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: calc(var(--fab-radius) * 2);
+  height: calc(var(--fab-radius) * 2);
+  transform: translate(50%, 50%);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.mobileTerminalFabRing path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 0.035;
+  stroke-linecap: round;
+  opacity: 0;
+  stroke-dasharray: 2.2;
+  stroke-dashoffset: 2.2;
+  transition:
+    opacity var(--motion-base) var(--ease-standard),
+    stroke-dashoffset var(--motion-slow) var(--ease-emphasized);
+}
+
+.mobileTerminalFabActions[data-open='true'] .mobileTerminalFabRing path {
+  opacity: 0.45;
+  stroke-dashoffset: 0;
+}
+
+.mobileTerminalFabAction {
+  position: absolute;
+  right: calc(var(--space-8) * -0.75);
+  bottom: calc(var(--space-8) * -0.75);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
   gap: var(--space-2);
+  transform: scale(0.35);
+  opacity: 0;
+  transform-origin: calc(100% - var(--space-8) * 0.75) 50%;
+  pointer-events: none;
+  transition:
+    transform var(--motion-slow) var(--ease-emphasized),
+    opacity var(--motion-base) var(--ease-standard);
+  transition-delay: var(--fab-delay-close, 0ms);
+}
+
+.mobileTerminalFabActions[data-open='true'] .mobileTerminalFabAction {
+  transform: translate(
+    calc(cos(var(--fab-angle)) * var(--fab-radius)),
+    calc(sin(var(--fab-angle)) * var(--fab-radius))
+  )
+    scale(1);
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: var(--fab-delay-open, 0ms);
+}
+
+.mobileTerminalFabLabel {
+  padding: var(--space-1) var(--space-3);
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
   white-space: nowrap;
+  box-shadow: var(--shadow-xs);
+  opacity: 0;
+  transform: translateX(var(--space-2));
+  transition:
+    opacity var(--motion-base) var(--ease-standard),
+    transform var(--motion-base) var(--ease-standard);
+  transition-delay: var(--fab-delay-close, 0ms);
+}
+
+.mobileTerminalFabActions[data-open='true'] .mobileTerminalFabLabel {
+  opacity: 1;
+  transform: translateX(0);
+  transition-delay: calc(var(--fab-delay-open, 0ms) + var(--motion-fast));
 }
 
 .mobileTerminalPasteImageInput {
@@ -1427,6 +1514,7 @@
 }
 
 .mobileTerminalFab {
+  flex: 0 0 auto;
   width: calc(var(--space-8) * 1.5);
   height: calc(var(--space-8) * 1.5);
   display: inline-flex;
@@ -1435,7 +1523,8 @@
   color: var(--fg);
   background: var(--surface);
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-sm);
   touch-action: manipulation;
   user-select: none;
   transition: all var(--motion-fast) var(--ease-standard);
@@ -1453,6 +1542,8 @@
 }
 
 .mobileTerminalFab[data-trigger='true'] {
+  position: relative;
+  z-index: 1;
   color: var(--accent-on);
   background: var(--accent);
   border-color: var(--accent);
@@ -1462,6 +1553,7 @@
   color: var(--fg);
   background: var(--surface);
   border-color: var(--border-soft);
+  transform: rotate(90deg);
 }
 
 .mobileTerminalAlerts {
