@@ -67,6 +67,11 @@ import {
   type UsePortablePullControllerResult,
 } from './portableAssets';
 import {
+  useUserMirrorController,
+  type UseUserMirrorControllerResult,
+} from './userMirror/useUserMirrorController';
+import type { UserMirrorDirection } from '@/lib/types/userMirror';
+import {
   parseAgentHubContext,
   writeAgentHubContext,
   parseWorkbenchHostedAgentHubContext,
@@ -421,11 +426,17 @@ export interface UseAgentHubControllerResult {
   confirmPortableAction: (planToken: string, clientRequestId: string) => Promise<void>;
   reconcilePortableAction: (clientRequestId: string) => Promise<void>;
   closePortableAction: () => void;
-  /** F4 same-agent Pull。 */
+  /** F4 same-agent Pull（生产入口已改为 userMirror；保留供既有测试）。 */
   portablePullOpen: boolean;
   openPortablePull: () => void;
   closePortablePull: () => void;
   portablePull: UsePortablePullControllerResult;
+  /** 用户级全 Agent 镜像 Pull/Push。 */
+  userMirrorOpen: boolean;
+  openUserMirrorPull: () => void;
+  openUserMirrorPush: () => void;
+  closeUserMirror: () => void;
+  userMirror: UseUserMirrorControllerResult;
   /** 当前 lane 是否忙碌（header refresh 绑定）；legacy 未加载时为 false。 */
   loading: boolean;
   refreshing: boolean;
@@ -698,6 +709,18 @@ export function useAgentHubController(
       !hubContext.projectKey.startsWith('remote:')
         ? hubContext.projectKey
         : null,
+  });
+  const [userMirrorOpen, setUserMirrorOpen] = useState(false);
+  const [userMirrorDirection, setUserMirrorDirection] = useState<UserMirrorDirection>('pull');
+  /**
+   * Business Logic: 壳层 Pull/Push 打开用户级镜像对话框，预填当前 peer。
+   * Code Logic: 仅用户级；项目锁由视图 no-op。
+   */
+  const userMirror = useUserMirrorController({
+    open: userMirrorOpen,
+    direction: userMirrorDirection,
+    initialSourceDeviceId:
+      hubContext.deviceId ?? remoteProjectDeviceId(hubContext.projectKey),
   });
   const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() =>
     resolveInitialSection(
@@ -2458,6 +2481,21 @@ export function useAgentHubController(
     setPortablePullOpen(false);
   }, [portablePull.busy]);
 
+  const openUserMirrorPull = useCallback(() => {
+    setUserMirrorDirection('pull');
+    setUserMirrorOpen(true);
+  }, []);
+
+  const openUserMirrorPush = useCallback(() => {
+    setUserMirrorDirection('push');
+    setUserMirrorOpen(true);
+  }, []);
+
+  const closeUserMirror = useCallback(() => {
+    if (userMirror.busy) return;
+    setUserMirrorOpen(false);
+  }, [userMirror.busy]);
+
   const writeBlocked = Boolean(status && !status.writeCompatible);
   const upgradeRequired = writeBlocked;
 
@@ -2487,6 +2525,11 @@ export function useAgentHubController(
     openPortablePull,
     closePortablePull,
     portablePull,
+    userMirrorOpen,
+    openUserMirrorPull,
+    openUserMirrorPush,
+    closeUserMirror,
+    userMirror,
     loading,
     refreshing,
     stale,

@@ -423,6 +423,18 @@ function registerInteractionBase(
     kind: 'reject',
     error: { code: 'NOT_USED', message: 'not used' },
   });
+  harness.command('agent_hub_preview_user_mirror', {
+    kind: 'reject',
+    error: { code: 'NOT_USED', message: 'user-mirror not exercised in interaction e2e' },
+  });
+  harness.command('agent_hub_apply_user_mirror', {
+    kind: 'reject',
+    error: { code: 'NOT_USED', message: 'user-mirror not exercised in interaction e2e' },
+  });
+  harness.command('agent_hub_get_user_mirror', {
+    kind: 'reject',
+    error: { code: 'NOT_USED', message: 'user-mirror not exercised in interaction e2e' },
+  });
   harness.command('agent_hub_preview_project', {
     kind: 'resolve',
     value: {
@@ -450,7 +462,11 @@ function registerInteractionBase(
         address: '192.168.1.10',
         port: 62116,
         online: true,
-        capabilities: ['agent-hub.v1', 'agent-hub.portable-pull.v1'],
+        capabilities: [
+          'agent-hub.v1',
+          'agent-hub.portable-pull.v1',
+          'agent-hub.user-mirror.v1',
+        ],
         protoVersion: 1,
       },
       {

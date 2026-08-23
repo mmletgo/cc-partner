@@ -40,6 +40,7 @@ const DOMAIN_MODULES = [
   'orchestrator.ts',
   'attention.ts',
   'portableInventory.ts',
+  'userMirror.ts',
   'index.ts',
 ] as const;
 
