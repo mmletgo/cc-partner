@@ -35,6 +35,15 @@ use uuid::Uuid;
 /// LAN Hub chunk 硬上限（8 MiB），与 SnapshotLimits 一致。
 pub const AGENT_HUB_MAX_CHUNK_BYTES: usize = DEFAULT_MAX_CHUNK_BYTES as usize;
 
+/// Dest user-mirror staging 子目录（与旧 push incoming 隔离）。
+pub const USER_MIRROR_STAGING_PREFIX: &str = "user-mirror";
+
+/// user-mirror transfer_id 前缀（路径安全，不含 `/`）。
+pub const USER_MIRROR_TRANSFER_ID_PREFIX: &str = "umirror-";
+
+/// Ledger 幂等键前缀，避免与旧 push `(sourceDeviceId, clientRequestId)` 混用。
+pub const USER_MIRROR_LEDGER_KEY_PREFIX: &str = "user-mirror/";
+
 /// prepare 请求体。
 ///
 /// Business Logic: envelope + 幂等键 + selectionHash；sourceDeviceId/clientRequestId 非认证。
@@ -118,9 +127,18 @@ pub fn incoming_root(data_dir: &Path) -> PathBuf {
 }
 
 /// transfer staging 目录。
+///
+/// Business Logic: user-mirror 前缀目录与旧 push incoming 隔离，避免混用明文对象。
+/// Code Logic: `umirror-*` → `incoming/user-mirror/<id>`，其余仍 `incoming/<id>`。
 fn transfer_dir(data_dir: &Path, transfer_id: &str) -> Result<PathBuf, AppError> {
     validate_transfer_id(transfer_id)?;
-    Ok(incoming_root(data_dir).join(transfer_id))
+    if transfer_id.starts_with(USER_MIRROR_TRANSFER_ID_PREFIX) {
+        Ok(incoming_root(data_dir)
+            .join(USER_MIRROR_STAGING_PREFIX)
+            .join(transfer_id))
+    } else {
+        Ok(incoming_root(data_dir).join(transfer_id))
+    }
 }
 
 /// object staging 文件路径（不预 join CAS objects）。
@@ -191,11 +209,26 @@ async fn cas_has_blob(store: &ObjectStore, hash: &str) -> bool {
 ///     validate_snapshot → hash_selection 比对 → ledger get 或
 ///     insert_prepared_with_objects（同 TX）→ 冲突 re-read → build_prepare_response。
 pub async fn prepare_push(
+    repo: &AgentHubRepo,
+    objects: &ObjectStore,
+    ledger: &ReplicationLedger,
+    data_dir: &Path,
+    req: PreparePushRequest,
+) -> Result<PreparePushResponse, AppError> {
+    prepare_push_with_transfer_prefix(repo, objects, ledger, data_dir, req, "").await
+}
+
+/// prepare，允许为 user-mirror 指定 transfer_id 前缀。
+///
+/// Business Logic: dest 镜像接收必须生成 `umirror-*` transfer，才能落到独立 staging 前缀。
+/// Code Logic: 非空 prefix 时 `transfer_id = prefix + uuid`；空 prefix 保持旧 push UUID。
+pub async fn prepare_push_with_transfer_prefix(
     _repo: &AgentHubRepo,
     objects: &ObjectStore,
     ledger: &ReplicationLedger,
     data_dir: &Path,
     req: PreparePushRequest,
+    transfer_id_prefix: &str,
 ) -> Result<PreparePushResponse, AppError> {
     let source = req.source_device_id.trim();
     let client_req = req.client_request_id.trim();
@@ -269,7 +302,11 @@ pub async fn prepare_push(
     }
 
     // ── 新建 prepared ──────────────────────────────────────────────────
-    let transfer_id = Uuid::new_v4().to_string();
+    let transfer_id = if transfer_id_prefix.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        format!("{transfer_id_prefix}{}", Uuid::new_v4())
+    };
     let dir = transfer_dir(data_dir, &transfer_id)?;
     ensure_private_dir(&dir)?;
     // 保存 envelope 到 staging 便于诊断（非权威；ledger 有 envelope_json）
@@ -690,44 +727,8 @@ pub async fn commit_push(
     }
 
     // 收集全部 object bytes（CAS 或 staging verified）——仅读，无 ledger/import 写
-    let mut object_bytes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let obj_rows = ledger.list_objects(transfer_id).await?;
-    let declared: BTreeSet<String> = envelope.objects.iter().map(|o| o.hash.clone()).collect();
-
-    for desc in &envelope.objects {
-        if let Ok(bytes) = objects.get_blob(&desc.hash).await {
-            object_bytes.insert(desc.hash.clone(), bytes);
-            continue;
-        }
-        let progress = obj_rows.iter().find(|o| o.object_hash == desc.hash);
-        let Some(p) = progress else {
-            return Err(AppError::validation(format!(
-                "agent_hub_push_commit_object_missing:{}",
-                desc.hash
-            )));
-        };
-        if !p.verified {
-            return Err(AppError::validation(format!(
-                "agent_hub_push_commit_object_unverified:{}",
-                desc.hash
-            )));
-        }
-        let path = object_staging_path(data_dir, transfer_id, &desc.hash)?;
-        let bytes = std::fs::read(&path).map_err(|e| {
-            AppError::validation(format!(
-                "agent_hub_push_commit_staging_read:{}:{e}",
-                desc.hash
-            ))
-        })?;
-        let actual = sha256_hex(&bytes);
-        if actual != desc.hash {
-            return Err(AppError::validation(
-                "agent_hub_push_commit_staging_hash_mismatch".to_string(),
-            ));
-        }
-        object_bytes.insert(desc.hash.clone(), bytes);
-    }
-    let _ = declared;
+    let object_bytes =
+        collect_verified_object_bytes(objects, ledger, data_dir, transfer_id, &envelope).await?;
 
     // Phase A CAS 写 object store + plan 均在 import TX 外完成（max_connections=1 禁止 TX 内再读 pool）
     let validated = ValidatedSnapshot::from_parts(envelope, object_bytes, Some(limits))?;
@@ -833,11 +834,63 @@ pub async fn commit_push(
     })
 }
 
+/// 从 CAS 或已 verified staging 收集 envelope 内全部 object 字节。
+///
+/// Business Logic: dest user-mirror commit 需要同一套对象校验，但随后走 apply 而非 SnapshotImporter。
+/// Code Logic: 优先 ObjectStore；否则要求 ledger verified 且 staging SHA 匹配。
+pub async fn collect_verified_object_bytes(
+    objects: &ObjectStore,
+    ledger: &ReplicationLedger,
+    data_dir: &Path,
+    transfer_id: &str,
+    envelope: &SnapshotEnvelopeV1,
+) -> Result<BTreeMap<String, Vec<u8>>, AppError> {
+    let mut object_bytes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let obj_rows = ledger.list_objects(transfer_id).await?;
+    let declared: BTreeSet<String> = envelope.objects.iter().map(|o| o.hash.clone()).collect();
+
+    for desc in &envelope.objects {
+        if let Ok(bytes) = objects.get_blob(&desc.hash).await {
+            object_bytes.insert(desc.hash.clone(), bytes);
+            continue;
+        }
+        let progress = obj_rows.iter().find(|o| o.object_hash == desc.hash);
+        let Some(p) = progress else {
+            return Err(AppError::validation(format!(
+                "agent_hub_push_commit_object_missing:{}",
+                desc.hash
+            )));
+        };
+        if !p.verified {
+            return Err(AppError::validation(format!(
+                "agent_hub_push_commit_object_unverified:{}",
+                desc.hash
+            )));
+        }
+        let path = object_staging_path(data_dir, transfer_id, &desc.hash)?;
+        let bytes = std::fs::read(&path).map_err(|e| {
+            AppError::validation(format!(
+                "agent_hub_push_commit_staging_read:{}:{e}",
+                desc.hash
+            ))
+        })?;
+        let actual = sha256_hex(&bytes);
+        if actual != desc.hash {
+            return Err(AppError::validation(
+                "agent_hub_push_commit_staging_hash_mismatch".to_string(),
+            ));
+        }
+        object_bytes.insert(desc.hash.clone(), bytes);
+    }
+    let _ = declared;
+    Ok(object_bytes)
+}
+
 /// 幂等删除 transfer staging 目录。
 ///
 /// Business Logic: committed 后不得永久保留 incoming 明文/重复 CAS 数据。
-/// Code Logic: remove_dir_all(incoming/<transferId>)。
-fn cleanup_transfer_staging(data_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
+/// Code Logic: remove_dir_all(incoming/<transferId> 或 incoming/user-mirror/<transferId>)。
+pub fn cleanup_transfer_staging(data_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
     let dir = transfer_dir(data_dir, transfer_id)?;
     if dir.is_dir() {
         std::fs::remove_dir_all(&dir)
@@ -1441,5 +1494,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.transfer_id, first.transfer_id);
+    }
+
+    /// Business Logic: user-mirror staging 不得混入旧 push incoming 目录。
+    /// Code Logic: `umirror-*` 落在 `incoming/user-mirror/`；普通 id 仍在 `incoming/`。
+    #[test]
+    fn user_mirror_transfer_id_stages_under_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mirror_id = format!("{USER_MIRROR_TRANSFER_ID_PREFIX}{}", Uuid::new_v4());
+        let mirror_dir = transfer_dir(tmp.path(), &mirror_id).unwrap();
+        assert!(
+            mirror_dir.ends_with(
+                std::path::Path::new("agent-hub")
+                    .join("replication")
+                    .join("incoming")
+                    .join(USER_MIRROR_STAGING_PREFIX)
+                    .join(&mirror_id)
+            ),
+            "user-mirror staging path = {mirror_dir:?}"
+        );
+        let push_id = uuid::Uuid::new_v4().to_string();
+        let push_dir = transfer_dir(tmp.path(), &push_id).unwrap();
+        assert!(
+            !push_dir
+                .to_string_lossy()
+                .contains(&format!("/{USER_MIRROR_STAGING_PREFIX}/")),
+            "old push staging must not use user-mirror prefix: {push_dir:?}"
+        );
     }
 }

@@ -5,8 +5,8 @@
 //!     sourceDeviceId / clientRequestId / expected-device header 是绑定/幂等标签，**不是**身份认证。
 //!
 //! Code Logic（这个模块做什么）:
-//!     POST prepare / PUT objects / POST commit；body limit 与 P2pError 信封；
-//!     业务委托 `agent_hub::replication::receiver`。
+//!     POST prepare / PUT objects / POST commit 与 user-mirror 六路由；body limit 与 P2pError 信封；
+//!     业务委托 `agent_hub::replication::receiver` / `agent_hub::user_mirror`。
 
 use crate::agent_hub::models::ScopeKind;
 use crate::agent_hub::object_store::ObjectStore;
@@ -35,12 +35,18 @@ use crate::agent_hub::user_instructions::{
     RestoreUserInstructionSlotRequest, ReviseInstructionSlotRequest,
     SaveUserInstructionBlocksRequest, WriteUserNativeInstructionFileRequest,
 };
+use crate::agent_hub::user_mirror::{
+    build_local_user_mirror_inventory, commit_user_mirror, freeze_user_mirror_selection,
+    prepare_user_mirror, put_user_mirror_object, source_read_user_mirror_object_chunk,
+    CommitUserMirrorRequest, PrepareUserMirrorRequest, UserMirrorInventoryDto,
+    UserMirrorSelectionQuery, UserMirrorSelectionResponse,
+};
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions
 #[cfg(test)]
 use crate::net::protocol::{
     CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PROJECT_V1, CAPABILITY_PORTABLE_PULL_V1,
-    CAPABILITY_PORTABLE_USER_V1, CAPABILITY_USER_INSTRUCTIONS_V1,
+    CAPABILITY_PORTABLE_USER_V1, CAPABILITY_USER_INSTRUCTIONS_V1, CAPABILITY_USER_MIRROR_V1,
 };
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
@@ -663,6 +669,147 @@ pub async fn agent_hub_user_instructions_slot_versions(
     ))
 }
 
+/// POST /api/agent-hub/user-mirror/inventory
+///
+/// Business Logic: 源端返回全 Agent 用户级 metadata inventory（无 path / secret / env）。
+/// Code Logic: 拒绝嵌套 deviceId；`build_local_user_mirror_inventory`。
+pub async fn agent_hub_user_mirror_inventory(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<UserMirrorInventoryDto>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let dto = build_local_user_mirror_inventory(&state, state.device_id.as_str())
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.inventory"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/user-mirror/selection
+///
+/// Business Logic: 按 inventory 冻结 SnapshotEnvelope/CAS；源端不得 adoption。
+/// Code Logic: `freeze_user_mirror_selection`；返回 transferId + envelope + bindings。
+pub async fn agent_hub_user_mirror_selection(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<serde_json::Value>,
+) -> P2pResult<Json<UserMirrorSelectionResponse>> {
+    reject_nested_user_instruction_device_id(&body, &ctx)?;
+    let query: UserMirrorSelectionQuery = serde_json::from_value(body)
+        .map_err(|e| P2pError::validation(format!("user-mirror selection body: {e}"), &ctx))?;
+    let built = freeze_user_mirror_selection(&state, &query.inventory)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
+    let missing_object_hashes: Vec<String> = built
+        .envelope
+        .objects
+        .iter()
+        .map(|object| object.hash.clone())
+        .collect();
+    Ok(Json(UserMirrorSelectionResponse {
+        transfer_id: built.transfer_id,
+        envelope: built.envelope,
+        item_bindings: built.item_bindings,
+        missing_object_hashes,
+    }))
+}
+
+/// GET /api/agent-hub/user-mirror/objects/:transferId/:objectHash?offset=
+///
+/// Business Logic: 分块 ≤8MiB，offset 续传；application/octet-stream。
+/// Code Logic: `source_read_user_mirror_object_chunk` → raw bytes。
+pub async fn agent_hub_user_mirror_object(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Path((transfer_id, object_hash)): Path<(String, String)>,
+    Query(query): Query<PutObjectQuery>,
+) -> Result<Response, P2pError> {
+    let bytes = source_read_user_mirror_object_chunk(&transfer_id, &object_hash, query.offset)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.object"))?;
+    if bytes.len() > PORTABLE_PULL_MAX_CHUNK_BYTES {
+        return Err(P2pError::validation(
+            format!(
+                "agent_hub_user_mirror_chunk_too_large:actual={}:limit={PORTABLE_PULL_MAX_CHUNK_BYTES}",
+                bytes.len()
+            ),
+            &ctx,
+        ));
+    }
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        Bytes::from(bytes),
+    )
+        .into_response())
+}
+
+/// POST /api/agent-hub/user-mirror/prepare
+///
+/// Business Logic: dest 登记 envelope 与独立 user-mirror staging；幂等标签非认证。
+/// Code Logic: `prepare_user_mirror`。
+pub async fn agent_hub_user_mirror_prepare(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<PrepareUserMirrorRequest>,
+) -> P2pResult<Json<crate::agent_hub::replication::receiver::PreparePushResponse>> {
+    let resp = prepare_user_mirror(&state, body)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.prepare"))?;
+    Ok(Json(resp))
+}
+
+/// PUT /api/agent-hub/user-mirror/:transferId/objects/:objectHash?offset=
+///
+/// Business Logic: application/octet-stream chunk ≤8 MiB；写入 user-mirror staging。
+/// Code Logic: `put_user_mirror_object`。
+pub async fn agent_hub_user_mirror_put_object(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Path((transfer_id, object_hash)): Path<(String, String)>,
+    Query(query): Query<PutObjectQuery>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> P2pResult<Json<crate::agent_hub::replication::receiver::PutObjectResponse>> {
+    let _ = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    if body.len() > AGENT_HUB_MAX_CHUNK_BYTES {
+        return Err(P2pError::validation(
+            format!(
+                "agent_hub_user_mirror_chunk_too_large:actual={}:limit={AGENT_HUB_MAX_CHUNK_BYTES}",
+                body.len()
+            ),
+            &ctx,
+        ));
+    }
+    let resp = put_user_mirror_object(
+        &state,
+        &transfer_id,
+        &object_hash,
+        query.offset,
+        &body,
+        query.chunk_sha256.as_deref(),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.object"))?;
+    Ok(Json(resp))
+}
+
+/// POST /api/agent-hub/user-mirror/:transferId/commit
+///
+/// Business Logic: 全部 object verified 后 dest apply（原生写盘+portable extras），不是只 import canonical。
+/// Code Logic: `commit_user_mirror` → `apply_user_mirror`。
+pub async fn agent_hub_user_mirror_commit(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Path(transfer_id): Path<String>,
+    Json(body): Json<CommitUserMirrorRequest>,
+) -> P2pResult<Json<crate::agent_hub::user_mirror::CommitUserMirrorResponse>> {
+    let resp = commit_user_mirror(&state, &transfer_id, body)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.commit"))?;
+    Ok(Json(resp))
+}
+
 /// POST /api/agent-hub/user-instructions/restore-slot-version
 pub async fn agent_hub_user_instructions_restore_slot_version(
     State(state): State<AppState>,
@@ -699,8 +846,8 @@ mod tests {
     use crate::storage::AgentHubRepo;
     use std::collections::BTreeMap;
 
-    /// Business Logic: 能力 token 必须与 push/portable 路由同 build 宣告。
-    /// Code Logic: server_protocol_info supports agent-hub.v1 + portable-pull.v1；handler 符号存在。
+    /// Business Logic: 能力 token 必须与 push/portable/user-mirror 路由同 build 宣告。
+    /// Code Logic: server_protocol_info supports agent-hub.v1 + portable-pull.v1 + user-mirror.v1；handler 符号存在。
     #[test]
     fn capability_and_handlers_are_atomic() {
         let info = server_protocol_info();
@@ -723,6 +870,11 @@ mod tests {
         assert!(
             info.supports(CAPABILITY_USER_INSTRUCTIONS_V1),
             "server_protocol_info 必须宣告 agent-hub.user-instructions.v1，实际: {:?}",
+            info.capabilities
+        );
+        assert!(
+            info.supports(CAPABILITY_USER_MIRROR_V1),
+            "server_protocol_info 必须宣告 agent-hub.user-mirror.v1，实际: {:?}",
             info.capabilities
         );
         // 引用 handler，防止 capability 宣告而路由未接线被优化掉
@@ -756,6 +908,13 @@ mod tests {
             agent_hub_user_instructions_restore_slot_version as *const (),
             agent_hub_user_instructions_read_native_file as *const (),
             agent_hub_user_instructions_write_native_file as *const (),
+            agent_hub_user_mirror_inventory as *const (),
+            agent_hub_user_mirror_selection as *const (),
+            agent_hub_user_mirror_object as *const (),
+            agent_hub_user_mirror_prepare as *const (),
+            agent_hub_user_mirror_put_object as *const (),
+            agent_hub_user_mirror_commit as *const (),
+            crate::agent_hub::user_mirror::apply_user_mirror as *const (),
         );
         assert_eq!(CAPABILITY_AGENT_HUB_V1, "agent-hub.v1");
         assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");
@@ -768,8 +927,19 @@ mod tests {
             CAPABILITY_USER_INSTRUCTIONS_V1,
             "agent-hub.user-instructions.v1"
         );
+        assert_eq!(CAPABILITY_USER_MIRROR_V1, "agent-hub.user-mirror.v1");
         // 能力列表字典序应包含 token
         assert!(info.capabilities.windows(2).all(|w| w[0] <= w[1]));
+        let caps = &info.capabilities;
+        let ui = caps
+            .iter()
+            .position(|c| c == CAPABILITY_USER_INSTRUCTIONS_V1);
+        let um = caps.iter().position(|c| c == CAPABILITY_USER_MIRROR_V1);
+        let v1 = caps.iter().position(|c| c == CAPABILITY_AGENT_HUB_V1);
+        assert!(
+            ui < um && um < v1,
+            "dictionary order: user-instructions < user-mirror < v1"
+        );
     }
 
     /// Business Logic: owner 用户级路由不得再按 deviceId 转发。
@@ -818,6 +988,35 @@ mod tests {
         // sourceDeviceId / clientRequestId 文档语义：幂等标签
         let note = "sourceDeviceId and clientRequestId are idempotency labels, not authentication";
         assert!(note.contains("not authentication"));
+    }
+
+    /// Business Logic: 用户级镜像六路由同样不是鉴权；commit 必须含原生写盘。
+    #[test]
+    fn user_mirror_docs_do_not_claim_authentication_and_commit_applies_native() {
+        let note = "user-mirror uses expected-device and clientRequestId as binding/idempotency labels, not authentication; dest commit calls apply_user_mirror (instructions+portable+extras), not only SnapshotImporter::commit_import";
+        assert!(note.contains("not authentication"));
+        assert!(note.contains("apply_user_mirror"));
+        assert!(note.contains("not only SnapshotImporter"));
+    }
+
+    /// Business Logic: inventory 不得把 path / secret / env 泄漏到 LAN JSON。
+    #[test]
+    fn user_mirror_inventory_wire_is_metadata_only() {
+        let dto = crate::agent_hub::user_mirror::UserMirrorInventoryDto {
+            source_device_id: "dev-a".into(),
+            inventory_snapshot_hash: "a".repeat(64),
+            refreshed_at: "2026-08-23T00:00:00Z".into(),
+            agents: vec![],
+            credential_bearing_count: 0,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(!json.contains("sourcePath"));
+        assert!(!json.contains("source_path"));
+        let lower = json.to_ascii_lowercase();
+        assert!(!lower.contains("api_key"));
+        assert!(!lower.contains("authorization"));
+        assert!(!lower.contains("/users/"));
+        assert!(!lower.contains("\"env\""));
     }
 
     fn sample_envelope() -> (SnapshotEnvelopeV1, Vec<u8>) {

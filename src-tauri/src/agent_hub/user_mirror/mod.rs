@@ -7,12 +7,13 @@
 //! Code Logic（这个模块做什么）:
 //!     导出 DTO/错误码、本机全 Agent 用户级 inventory 扫描、源端 CAS selection 冻结，
 //!     源/目标 inventory 的 replace-plus-delete preview diff、dest 写盘 apply，
-//!     以及 preview plan ledger 与 get() 幂等对账。
+//!     preview plan ledger 与 get() 幂等对账，以及 dest Push 接收（prepare/objects/commit）。
 mod apply;
 mod inventory;
 mod ledger;
 mod models;
 mod preview;
+mod receive;
 mod selection;
 mod service;
 
@@ -21,6 +22,11 @@ pub use inventory::build_local_user_mirror_inventory;
 pub use ledger::{UserMirrorClaim, UserMirrorPlanRecord};
 pub use models::*;
 pub use preview::{diff_inventories, preview_from_two_inventories};
+pub use receive::{
+    commit_user_mirror, prepare_user_mirror, put_user_mirror_object, CommitUserMirrorRequest,
+    CommitUserMirrorResponse, PrepareUserMirrorRequest, UserMirrorSelectionQuery,
+    UserMirrorSelectionResponse,
+};
 pub use selection::{
     freeze_user_mirror_selection, source_read_user_mirror_object_chunk, BuiltUserMirrorSelection,
     UserMirrorObjectBinding,
