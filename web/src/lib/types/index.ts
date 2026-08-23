@@ -17,6 +17,7 @@ export * from './agentRuntime';
 export * from './agentLedger';
 export * from './agentHub';
 export * from './portableInventory';
+export * from './userMirror';
 export * from './lanFleet';
 export * from './providerManager';
 export * from './wordgame';

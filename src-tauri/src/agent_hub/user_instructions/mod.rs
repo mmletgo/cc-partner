@@ -88,6 +88,7 @@ pub use native_files::{
     ReadUserNativeInstructionFileRequest, UserNativeInstructionFileDto,
     WriteUserNativeInstructionFileRequest,
 };
+pub(crate) use native_files::{user_level_mirror_native_paths, MAX_NATIVE_FILE_BYTES};
 pub use plan::{
     apply_user_instruction_plan, preview_user_instruction_setup, preview_user_instruction_update,
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,

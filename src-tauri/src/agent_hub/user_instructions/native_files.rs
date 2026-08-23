@@ -9,15 +9,20 @@
 //! Code Logic（这个模块做什么）:
 //!     按 TargetHomes 白名单解析路径；有界读 UTF-8；CAS 原子写。不查 support manifest L3。
 
+use crate::agent_hub::models::AgentTarget;
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::projection::{AtomicProjectionWriter, AtomicWriteOutcome, FileWriteRequest};
+use crate::agent_hub::targets::cursor::{CURSOR_ADAPTED_FILE, CURSOR_EXCLUSIVE_FILE};
+use crate::agent_hub::targets::gemini::{GEMINI_ADAPTED_FILE, GEMINI_EXCLUSIVE_FILE};
+use crate::agent_hub::targets::grok::{GROK_ADAPTED_FILE, GROK_EXCLUSIVE_FILE};
+use crate::agent_hub::targets::pi::{PI_ADAPTED_FILE, PI_EXCLUSIVE_FILE};
 use crate::agent_hub::targets::{TargetEnvironment, TargetHomes, TargetPathResolver};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// 单文件正文上限（与 inspect canonical 一致）。
-const MAX_NATIVE_FILE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_NATIVE_FILE_BYTES: usize = 256 * 1024;
 
 /// 读取用户级原生提示词文件请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +130,117 @@ fn declared_native_paths(homes: &TargetHomes) -> Vec<PathBuf> {
         homes.pi.config_root.join("AGENTS.md"),
         homes.pi.config_root.join("CLAUDE.md"),
     ]
+}
+
+/// 原生用户级文件的稳定逻辑 id。
+///
+/// Business Logic: LAN inventory 用逻辑 id 对号入座，禁止把绝对路径送出本机。
+/// Code Logic: `{target}.native.{file_name}`，例如 `claude.native.CLAUDE.md`。
+pub(crate) fn native_logical_id(target: AgentTarget, file_name: &str) -> String {
+    format!("{}.native.{file_name}", target.as_str())
+}
+
+/// 已物化 adapted/exclusive 槽文件的稳定逻辑 id。
+///
+/// Business Logic: Cursor/Grok 等不写仓库 AGENTS.md，镜像只覆盖其槽落点。
+/// Code Logic: `{target}.slot.{adapted|exclusive}`。
+pub(crate) fn slot_logical_id(target: AgentTarget, slot: &str) -> String {
+    format!("{}.slot.{slot}", target.as_str())
+}
+
+/// 用户级镜像可扫描的白名单文件（原生文档 + 已物化 adapted/exclusive）。
+///
+/// Business Logic: 禁止把 OpenCode fallback 写成 Claude `CLAUDE.md`，禁止把仓库根
+///     `AGENTS.md` 收进 Grok/Cursor 用户级 inventory。
+/// Code Logic: `declared_native_paths` 按 config_root 归属 target；再追加各 adapter
+///     已物化的 `{target}.slot.adapted|exclusive`（含 Codex `AGENTS.override.md`）。
+///     Cursor 无用户级 AGENTS.md。
+pub(crate) fn user_level_mirror_native_paths(
+    homes: &TargetHomes,
+) -> Vec<(AgentTarget, String, PathBuf)> {
+    let mut out: Vec<(AgentTarget, String, PathBuf)> = declared_native_paths(homes)
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_string();
+            let parent = path.parent()?;
+            let target = if parent == homes.claude.config_root {
+                AgentTarget::Claude
+            } else if parent == homes.codex.config_root {
+                AgentTarget::Codex
+            } else if parent == homes.opencode.config_root {
+                AgentTarget::OpenCode
+            } else if parent == homes.gemini.config_root {
+                AgentTarget::Gemini
+            } else if parent == homes.grok.config_root {
+                AgentTarget::Grok
+            } else if parent == homes.pi.config_root {
+                AgentTarget::Pi
+            } else {
+                return None;
+            };
+            Some((target, native_logical_id(target, &name), path))
+        })
+        .collect();
+    out.extend([
+        (
+            AgentTarget::Codex,
+            slot_logical_id(AgentTarget::Codex, "exclusive"),
+            homes.codex.config_root.join("AGENTS.override.md"),
+        ),
+        (
+            AgentTarget::Grok,
+            slot_logical_id(AgentTarget::Grok, "adapted"),
+            homes.grok.config_root.join("rules").join(GROK_ADAPTED_FILE),
+        ),
+        (
+            AgentTarget::Grok,
+            slot_logical_id(AgentTarget::Grok, "exclusive"),
+            homes
+                .grok
+                .config_root
+                .join("rules")
+                .join(GROK_EXCLUSIVE_FILE),
+        ),
+        (
+            AgentTarget::Gemini,
+            slot_logical_id(AgentTarget::Gemini, "adapted"),
+            homes.gemini.config_root.join(GEMINI_ADAPTED_FILE),
+        ),
+        (
+            AgentTarget::Gemini,
+            slot_logical_id(AgentTarget::Gemini, "exclusive"),
+            homes.gemini.config_root.join(GEMINI_EXCLUSIVE_FILE),
+        ),
+        (
+            AgentTarget::Cursor,
+            slot_logical_id(AgentTarget::Cursor, "adapted"),
+            homes
+                .cursor
+                .config_root
+                .join("rules")
+                .join(CURSOR_ADAPTED_FILE),
+        ),
+        (
+            AgentTarget::Cursor,
+            slot_logical_id(AgentTarget::Cursor, "exclusive"),
+            homes
+                .cursor
+                .config_root
+                .join("rules")
+                .join(CURSOR_EXCLUSIVE_FILE),
+        ),
+        (
+            AgentTarget::Pi,
+            slot_logical_id(AgentTarget::Pi, "adapted"),
+            homes.pi.config_root.join(PI_ADAPTED_FILE),
+        ),
+        (
+            AgentTarget::Pi,
+            slot_logical_id(AgentTarget::Pi, "exclusive"),
+            homes.pi.config_root.join(PI_EXCLUSIVE_FILE),
+        ),
+    ]);
+    out
 }
 
 /// 把请求路径解析到白名单候选（允许大小写不敏感文件名）。

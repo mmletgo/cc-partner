@@ -22,11 +22,12 @@ static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLoc
 /// Agent Hub control API 主版本（写入控制文件 `agentHubApiVersion`）。
 ///
 /// Business Logic（为什么需要这个常量）:
-///     GUI 与 backend 通过版本握手决定写路径是否可用；v1 是 Gate A 首个写兼容主版本。
+///     GUI 与 backend 通过版本握手决定写路径是否可用；v5 承载用户级镜像写盘，
+///     旧 GUI 不得对 new sidecar 发起镜像，新 GUI 不得把镜像交给 v4 sidecar。
 ///
 /// Code Logic（这个常量做什么）:
 ///     新建控制文件时填入；缺失/0 视为旧 backend，突变需 `upgradeRequired`。
-pub const AGENT_HUB_API_VERSION: u32 = 4;
+pub const AGENT_HUB_API_VERSION: u32 = 5;
 
 /// `/api/health` 响应中后端状态检查需要的字段。
 ///
@@ -717,6 +718,17 @@ mod tests {
         assert_eq!(value["controlSchemaVersion"], 2);
         assert_eq!(value["ownerInstanceId"], "owner-a");
         assert_eq!(value["agentHubApiVersion"], AGENT_HUB_API_VERSION);
+        assert_eq!(AGENT_HUB_API_VERSION, 5);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     v5 承载用户级镜像写盘；新旧 GUI/sidecar 必须因 major 不匹配而拒绝镜像 mutation。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 `AGENT_HUB_API_VERSION == 5`。
+    #[test]
+    fn agent_hub_api_version_is_v5_for_user_mirror() {
+        assert_eq!(AGENT_HUB_API_VERSION, 5);
     }
 
     /// 验证 legacy 控制文件可反序列化但被分类为 needs_restart，不可作权威。

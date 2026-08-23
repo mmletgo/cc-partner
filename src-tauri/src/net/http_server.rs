@@ -1030,6 +1030,38 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/agent-hub/user-instructions/write-native-file",
             post(agent_hub::agent_hub_user_instructions_write_native_file),
         )
+        // Agent Hub 用户级镜像（capability agent-hub.user-mirror.v1，六路由原子上线）
+        // inventory/selection 仅 metadata/manifest；objects chunk ≤8 MiB；
+        // dest prepare/objects 独立 staging 前缀 user-mirror/；commit 含原生写盘（非只 SnapshotImporter）。
+        // expected-device / clientRequestId 仅为绑定与幂等，不是身份认证。
+        .route(
+            "/api/agent-hub/user-mirror/inventory",
+            post(agent_hub::agent_hub_user_mirror_inventory),
+        )
+        .route(
+            "/api/agent-hub/user-mirror/selection",
+            post(agent_hub::agent_hub_user_mirror_selection)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/agent-hub/user-mirror/objects/:transferId/:objectHash",
+            get(agent_hub::agent_hub_user_mirror_object),
+        )
+        .route(
+            "/api/agent-hub/user-mirror/prepare",
+            post(agent_hub::agent_hub_user_mirror_prepare)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/agent-hub/user-mirror/:transferId/objects/:objectHash",
+            put(agent_hub::agent_hub_user_mirror_put_object).layer(DefaultBodyLimit::max(
+                crate::agent_hub::replication::receiver::AGENT_HUB_MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/api/agent-hub/user-mirror/:transferId/commit",
+            post(agent_hub::agent_hub_user_mirror_commit),
+        )
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
         .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))

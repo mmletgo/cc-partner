@@ -63,6 +63,9 @@ use crate::agent_hub::user_instructions::{
     ReadUserNativeInstructionFileRequest, ReviseInstructionSlotRequest,
     SaveUserInstructionBlocksRequest, WriteUserNativeInstructionFileRequest,
 };
+use crate::agent_hub::user_mirror::{
+    ApplyUserMirrorRequest, PreviewUserMirrorRequest, UserMirrorService,
+};
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
 use crate::error::AppError;
@@ -626,6 +629,23 @@ async fn dispatch_agent_hub_op(
             let dto = PortableService::get_portable_pull(state, &client_request_id).await?;
             Ok(serde_json::to_value(dto)?)
         }
+        "agent_hub.preview_user_mirror" => {
+            let req: PreviewUserMirrorRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("preview_user_mirror payload: {e}")))?;
+            let dto = UserMirrorService::preview_user_mirror(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.apply_user_mirror" => {
+            let req: ApplyUserMirrorRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("apply_user_mirror payload: {e}")))?;
+            let dto = UserMirrorService::apply_user_mirror(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.get_user_mirror" => {
+            let client_request_id = required_string(&payload, "clientRequestId")?;
+            let dto = UserMirrorService::get_user_mirror(state, &client_request_id).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
         "agent_hub.preview_cross_agent_instruction" => {
             let req: PreviewCrossAgentInstructionRequest = serde_json::from_value(payload)
                 .map_err(|e| {
@@ -721,6 +741,8 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.apply_remote_project_portable_action"
             | "agent_hub.preview_portable_pull"
             | "agent_hub.apply_portable_pull"
+            | "agent_hub.preview_user_mirror"
+            | "agent_hub.apply_user_mirror"
             | "agent_hub.preview_cross_agent_instruction"
             | "agent_hub.apply_cross_agent_instruction"
             | "agent_hub.preview_cross_agent_full"
@@ -916,6 +938,9 @@ mod tests {
             "agent_hub.preview_portable_pull",
             "agent_hub.apply_portable_pull",
             "agent_hub.get_portable_pull",
+            "agent_hub.preview_user_mirror",
+            "agent_hub.apply_user_mirror",
+            "agent_hub.get_user_mirror",
             "agent_hub.preview_cross_agent_instruction",
             "agent_hub.apply_cross_agent_instruction",
             "agent_hub.preview_cross_agent_full",
@@ -964,6 +989,9 @@ mod tests {
         assert!(is_mutation_op("agent_hub.apply_portable_asset_action"));
         assert!(is_mutation_op("agent_hub.preview_portable_pull"));
         assert!(is_mutation_op("agent_hub.apply_portable_pull"));
+        assert!(is_mutation_op("agent_hub.preview_user_mirror"));
+        assert!(is_mutation_op("agent_hub.apply_user_mirror"));
+        assert!(!is_mutation_op("agent_hub.get_user_mirror"));
         assert!(is_mutation_op("agent_hub.preview_cross_agent_instruction"));
         assert!(is_mutation_op("agent_hub.apply_cross_agent_instruction"));
         assert!(is_mutation_op("agent_hub.preview_cross_agent_full"));
@@ -982,6 +1010,7 @@ mod tests {
         assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
         assert!(!is_mutation_op("agent_hub.list_remote_portable_inventory"));
         assert!(!is_mutation_op("agent_hub.get_portable_pull"));
+        assert!(!is_mutation_op("agent_hub.get_user_mirror"));
     }
 
     /// Business Logic: 仓库全 Agent inspect 不得被 1 MiB 元数据上限拒绝。
@@ -1086,5 +1115,39 @@ mod tests {
         assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
         assert!(!is_mutation_op("agent_hub.list_remote_portable_inventory"));
         assert!(!is_mutation_op("agent_hub.get_portable_pull"));
+    }
+
+    /// Business Logic: 用户级镜像 preview/apply 走 owner 门面；get 只读对账。
+    /// Code Logic: 生产 match arm + UserMirrorService 调用，且 mutation 分类正确。
+    #[test]
+    fn user_mirror_ops_are_dispatched_and_classified() {
+        let src = include_str!("control_agent_hub.rs");
+        assert!(
+            src.contains("\"agent_hub.preview_user_mirror\" =>"),
+            "missing dispatch arm for preview user mirror"
+        );
+        assert!(
+            src.contains("\"agent_hub.apply_user_mirror\" =>"),
+            "missing dispatch arm for apply user mirror"
+        );
+        assert!(
+            src.contains("\"agent_hub.get_user_mirror\" =>"),
+            "missing dispatch arm for get user mirror"
+        );
+        assert!(
+            src.contains("UserMirrorService::preview_user_mirror(state, req)"),
+            "missing UserMirrorService preview call"
+        );
+        assert!(
+            src.contains("UserMirrorService::apply_user_mirror(state, req)"),
+            "missing UserMirrorService apply call"
+        );
+        assert!(
+            src.contains("UserMirrorService::get_user_mirror(state, &client_request_id)"),
+            "missing UserMirrorService get call"
+        );
+        assert!(is_mutation_op("agent_hub.preview_user_mirror"));
+        assert!(is_mutation_op("agent_hub.apply_user_mirror"));
+        assert!(!is_mutation_op("agent_hub.get_user_mirror"));
     }
 }

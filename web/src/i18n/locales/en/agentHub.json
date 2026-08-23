@@ -75,8 +75,8 @@
     "projectPullUnavailable": "Select and enable one exact project first. Project Pull never falls back to user scope or all projects.",
     "projectPushRequiresPreview": "Preview and enable this project from Instructions first so Push can use its unique Hub project ID.",
     "remoteProjectTaskUnavailable": "Remote-project Push must still be initiated on the source device. Direct management and Pull are available here.",
-    "remoteDeviceManageHint": "You are managing a remote device. If it does not advertise user-level asset inventory, Pull assets from it or Push local Hub assets to it.",
-    "remoteDeviceLiveHint": "You are viewing and managing user-level assets on the remote device. Enable, disable, and uninstall write the peer disk. Pull / Push remain available for copies.",
+    "remoteDeviceManageHint": "You are managing a remote device. If it does not advertise user-level asset inventory, Pull to mirror its user-scope content here, or Push to mirror this device onto it.",
+    "remoteDeviceLiveHint": "You are viewing and managing user-level assets on the remote device. Enable, disable, and uninstall write the peer disk. Pull / Push remain available for user-scope mirroring.",
     "remoteProjectManageHint": "A remote project is selected. Inventory, project enablement, and asset actions run on the owning device.",
     "peerPullOnly": "Remote user-level context is Pull-only. Push and Adapt stay unavailable.",
     "contextUnsupported": "This context is unavailable because it cannot be bound to one exact project or owner. Return to this device at user scope.",
@@ -934,5 +934,31 @@
       "previewRequired": "Run adaptation preview before apply.",
       "noApplicable": "No destination can be written safely from this preview."
     }
+  },
+  "userMirror": {
+    "pullTitle": "Mirror from peer (user scope)",
+    "pushTitle": "Mirror to peers (user scope)",
+    "pullHint": "Mirror every registered Agent's user-scope instructions and assets from the selected peer onto this device. Same-named Agents match in place; native files will be overwritten and extra user-scope assets on this device will be removed.",
+    "pushHint": "Mirror every registered Agent's user-scope instructions and assets from this device onto the selected peers. Same-named Agents match in place; native files will be overwritten and extra user-scope assets on the destination will be removed.",
+    "lanNoAuthRisk": "Any device on the reachable network can read, write, and execute. The system does not verify caller identity.",
+    "peers": "Peers",
+    "peersAria": "Select LAN peers",
+    "sourceDevice": "Source device",
+    "sourceDeviceAria": "Select source device",
+    "noPeers": "No online peers discovered.",
+    "previewAction": "Preview mirror",
+    "applyAction": "Apply mirror",
+    "reconcileAction": "Reconcile",
+    "confirmOverwrite": "Overwrite native files and delete extra user-scope assets on the destination",
+    "confirmAria": "Confirm overwrite and deletion of extra user-scope assets",
+    "credentials": "{{count}} credential-bearing items",
+    "agentCounts": "writes {{writes}} · upserts {{upserts}} · deletes {{deletes}} · disables {{disables}}",
+    "planTitle": "Preview plan",
+    "resultTitle": "Result",
+    "reportTitle": "Per-peer report",
+    "reportAria": "Mirror results per peer",
+    "partial": "Some agents failed or the outcome is unknown. Successful items are kept. Reconcile, then run the mirror again if needed.",
+    "stale": "This preview expired or inventories drifted. Preview again.",
+    "previewRequired": "Preview this mirror before applying."
   }
 }

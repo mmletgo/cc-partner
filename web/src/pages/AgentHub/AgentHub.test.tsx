@@ -350,6 +350,31 @@ function buildProps(
       selectVisible: vi.fn(),
       clearSelection: vi.fn(),
     } as UseAgentHubControllerResult['portablePull'],
+    userMirrorOpen: false,
+    openUserMirrorPull: vi.fn(),
+    openUserMirrorPush: vi.fn(),
+    closeUserMirror: vi.fn(),
+    userMirror: {
+      direction: 'pull',
+      devices: [],
+      sourceDeviceId: '',
+      selectedPeerIds: [],
+      plan: null,
+      result: null,
+      clientRequestId: null,
+      confirmed: false,
+      busy: false,
+      error: null,
+      stale: false,
+      canApply: false,
+      canReconcile: false,
+      preview: vi.fn(async () => undefined),
+      apply: vi.fn(async () => undefined),
+      reconcile: vi.fn(async () => undefined),
+      selectSourceDevice: vi.fn(),
+      togglePeer: vi.fn(),
+      setConfirmed: vi.fn(),
+    } as UseAgentHubControllerResult['userMirror'],
     writeBlocked: false,
     upgradeRequired: false,
     ...overrides,
@@ -508,6 +533,8 @@ describe('AgentHub page characterization', () => {
     const adoptionSource = readFileSync(resolve(pageDir, './AssetAdoptionDialog.tsx'), 'utf8');
     const cellSource = readFileSync(resolve(pageDir, './TargetStatusCell.tsx'), 'utf8');
     expect(source).not.toMatch(/from\s+['"]@\/api\//);
+    expect(source).not.toMatch(/PortablePullDrawer/);
+    expect(source).not.toMatch(/LanPushDialog/);
     expect(drawerSource).not.toMatch(/from\s+['"]@\/api\//);
     expect(adoptionSource).not.toMatch(/from\s+['"]@\/api\//);
     expect(cellSource).not.toMatch(/from\s+['"]@\/api\//);
@@ -735,12 +762,12 @@ describe('AgentHub page characterization', () => {
 
   test('shell tabs expose assets workspace, reset lane, and toolbar opens pull/push controls', () => {
     const onContextChange = vi.fn();
-    const openPortablePull = vi.fn();
-    const openLanPushDialog = vi.fn();
+    const openUserMirrorPull = vi.fn();
+    const openUserMirrorPush = vi.fn();
     renderView({
       onContextChange,
-      openPortablePull,
-      openLanPushDialog,
+      openUserMirrorPull,
+      openUserMirrorPush,
       activeSection: 'assets',
       hubContext: {
         agent: 'claude',
@@ -758,9 +785,9 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('agent-hub-action-pull')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-action-push')).toBeTruthy();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
-    expect(openPortablePull).toHaveBeenCalled();
+    expect(openUserMirrorPull).toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('agent-hub-action-push'));
-    expect(openLanPushDialog).toHaveBeenCalled();
+    expect(openUserMirrorPush).toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
     expect(onContextChange).toHaveBeenCalledWith({
       tab: 'skill',

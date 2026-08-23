@@ -319,15 +319,15 @@ fn ensure_selection_bytes_budget(current: u64, next: u64) -> Result<(), AppError
 
 /// 打包后的 payload 字节与诊断。
 #[derive(Debug)]
-struct PackedItem {
-    bytes: Vec<u8>,
-    credential_bearing: bool,
-    legacy_lossy: bool,
-    warnings: Vec<String>,
+pub(crate) struct PackedItem {
+    pub bytes: Vec<u8>,
+    pub credential_bearing: bool,
+    pub legacy_lossy: bool,
+    pub warnings: Vec<String>,
 }
 
 /// 打包 Plugin：单文件原文；目录必须有 CAS treeManifestHash 指针（禁止 hash-list 假成功）。
-fn pack_plugin_item(
+pub(crate) fn pack_plugin_item(
     item: &PortableInventoryItemDto,
     cas_tree_hash: Option<&str>,
 ) -> Result<PackedItem, AppError> {
@@ -385,7 +385,7 @@ fn pack_plugin_item(
 }
 
 /// 将 inventory 项读为 canonical payload 字节。
-fn pack_inventory_item(item: &PortableInventoryItemDto) -> Result<PackedItem, AppError> {
+pub(crate) fn pack_inventory_item(item: &PortableInventoryItemDto) -> Result<PackedItem, AppError> {
     let mut warnings = item.warnings.clone();
     let path = item
         .source_path

@@ -66,6 +66,16 @@ pub fn clear_persist_outcome_fault() {
 /// 源侧目标并发上限。
 pub const MAX_TARGET_PARALLELISM: usize = 3;
 
+/// 旧 SnapshotEnvelope push 失败行。
+pub const SOURCE_PUSH_KIND_PUSH: &str = "push";
+
+/// 用户级镜像 Push 失败行（Attention `agent-hub:mirror-failed:`）。
+pub const SOURCE_PUSH_KIND_USER_MIRROR: &str = "user_mirror";
+
+fn default_source_push_kind() -> String {
+    SOURCE_PUSH_KIND_PUSH.to_string()
+}
+
 /// 单 object chunk 长超时预算（大 blob 流式传输）。
 const OBJECT_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -217,6 +227,9 @@ pub struct SourcePushTargetRow {
     pub transfer_id: Option<String>,
     pub missing_object_count: u32,
     pub transferred_object_count: u32,
+    /// `push`（旧 SnapshotEnvelope）或 `user_mirror`。
+    #[serde(default = "default_source_push_kind")]
+    pub kind: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -481,7 +494,7 @@ impl AgentHubPushSender {
         let rows = sqlx::query(
             "SELECT request_id, peer_device_id, peer_label, client_request_id, status, retryable,
                     error_code, transfer_id, missing_object_count, transferred_object_count,
-                    created_at, updated_at
+                    kind, created_at, updated_at
              FROM agent_hub_source_push_targets
              WHERE status = 'failed'
              ORDER BY updated_at DESC
@@ -975,7 +988,7 @@ impl AgentHubPushSender {
         let row = sqlx::query(
             "SELECT request_id, peer_device_id, peer_label, client_request_id, status, retryable,
                     error_code, transfer_id, missing_object_count, transferred_object_count,
-                    created_at, updated_at
+                    kind, created_at, updated_at
              FROM agent_hub_source_push_targets
              WHERE request_id = ? AND peer_device_id = ?",
         )
@@ -990,7 +1003,7 @@ impl AgentHubPushSender {
         let rows = sqlx::query(
             "SELECT request_id, peer_device_id, peer_label, client_request_id, status, retryable,
                     error_code, transfer_id, missing_object_count, transferred_object_count,
-                    created_at, updated_at
+                    kind, created_at, updated_at
              FROM agent_hub_source_push_targets
              WHERE request_id = ?
              ORDER BY peer_device_id ASC",
@@ -1181,6 +1194,11 @@ fn row_to_target(r: sqlx::sqlite::SqliteRow) -> Result<SourcePushTargetRow, AppE
         transfer_id: r.get("transfer_id"),
         missing_object_count: r.get::<i64, _>("missing_object_count") as u32,
         transferred_object_count: r.get::<i64, _>("transferred_object_count") as u32,
+        kind: r
+            .try_get::<String, _>("kind")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| SOURCE_PUSH_KIND_PUSH.to_string()),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     })

@@ -107,6 +107,19 @@ vi.mock('@/api/devices', () => ({
   },
 }));
 
+vi.mock('@/api/userMirror', () => ({
+  userMirrorApi: {
+    preview: vi.fn(),
+    apply: vi.fn(),
+    get: vi.fn(),
+  },
+  USER_MIRROR_COMMANDS: {
+    preview: 'agent_hub_preview_user_mirror',
+    apply: 'agent_hub_apply_user_mirror',
+    get: 'agent_hub_get_user_mirror',
+  },
+}));
+
 import { useAgentHubController } from './useAgentHubController';
 import type {
   PortableAssetActionPlanDto,
@@ -563,6 +576,18 @@ describe('useAgentHubController', () => {
     expect(listAssets).not.toHaveBeenCalled();
     expect(getStatus).not.toHaveBeenCalled();
     expect(portableApiMocks.inspect).not.toHaveBeenCalled();
+  });
+
+  test('openUserMirrorPull opens the user-scope mirror dialog without portable pull', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.openUserMirrorPull();
+    });
+    expect(result.current.userMirrorOpen).toBe(true);
+    expect(result.current.userMirror.direction).toBe('pull');
+    expect(result.current.portablePullOpen).toBe(false);
+    expect(result.current.lanPushOpen).toBe(false);
   });
 
   test('openPortablePull uses the selected peer and same-agent source (toolbar pull)', async () => {

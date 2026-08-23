@@ -41,6 +41,11 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-AGENT-HUB-INSTR-3PANE-001` | `web/tests/agent-hub-interaction.spec.ts` | Instruction three-pane lane layouts (common/adapted/exclusive) + analyze original + AI revise calls Claude then saves canonical (mock only) |
 | `E2E-AGENT-HUB-DISCOVER-MANAGED-001` | `web/tests/agent-hub-interaction.spec.ts` | Portable inventory: no primary Adopt CTA (mock only) |
 | `E2E-AGENT-HUB-ADAPT-FULL-001` | `web/tests/agent-hub-interaction.spec.ts` | Cross-agent full mode forced preview gate (stub generator; mock only) |
+| `E2E-AGENT-HUB-USER-MIRROR-001` | `web/tests/agent-hub-user-mirror.spec.ts` | Agent Hub user-scope all-agent mirror Pull/Push dialogs: no item checkbox / mode radio, preview+confirm gate, stale plan disables apply (mock only) |
+| `L2-AGENT-HUB-USER-MIRROR-001` | `src-tauri/tests/agent_hub_user_mirror_smoke.rs` | Dual isolated data_dir full user-mirror + frozen capability gate |
+| `L2-AGENT-HUB-USER-MIRROR-002` | `src-tauri/tests/agent_hub_user_mirror_smoke.rs` | Partial no-rollback + same `clientRequestId` replay |
+| `L2-AGENT-HUB-USER-MIRROR-003` | `src-tauri/tests/agent_hub_user_mirror_smoke.rs` | Dest extras: Skill detach / Plugin disable / MCP key delete |
+| `L3-AGENT-HUB-USER-MIRROR-001` | dual-host manual | Real multi-host mDNS `agent-hub.user-mirror.v1` all-agent mirror — **NOT VERIFIED** |
 | `L2-AGENT-HUB-B-001` | `src-tauri/tests/agent_hub_gate_b_smoke.rs` | Portable discovery / targetOnly isolation / unmanaged config / adoption recovery / credential redaction |
 | `L2-AGENT-HUB-ENSURE-MANAGED-001` | `src-tauri/src/agent_hub/portable_inventory/ensure_managed.rs` | ensure_managed ledger promote without adopt; failure isolation |
 | `L2-AGENT-HUB-PORTABLE-PARITY-001` | `src-tauri/tests/agent_hub_portable_inventory_smoke.rs` | Isolated HOME/data_dir 3×4 inventory + enable/disable/uninstall preview→apply→rescan, MCP secret privacy, unopted no-write, action request replay |
@@ -72,6 +77,10 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-AGENT-HUB-PORTABLE-PARITY-001` | L2 | `src-tauri/tests/agent_hub_portable_inventory_smoke.rs` — isolated HOME/data_dir portable inventory + local actions (3×4 scan, FakeProcessRunner enable/disable/uninstall, MCP credential fact present/hash only, unopted project no-write, `clientRequestId` action replay). **Does not** certify real product CLI installs |
 | `L2-AGENT-HUB-ENSURE-MANAGED-001` | L2 | `cargo test --locked ensure_managed` — discover-as-managed ledger promote without adopt; per-item failure isolation. **Does not** certify real product CLI installs |
 | `L2-AGENT-HUB-PORTABLE-PULL-001` | L2 | `src-tauri/tests/agent_hub_portable_pull_smoke.rs` — library-level dual isolated data_dir + frozen loopback peer for `agent-hub.portable-pull.v1` inventory/selection/objects, metadata-only DTO, cross-target fail-before-transfer, 8 MiB chunk resume, install-mode wire tokens. **Does not** certify dual-host mDNS or full dest apply via devices table |
+| `L2-AGENT-HUB-USER-MIRROR-001` | L2 | `src-tauri/tests/agent_hub_user_mirror_smoke.rs` — dual isolated data_dir user-scope all-agent mirror: native instruction bytes, dest extra skill gone, Grok does not write repo `AGENTS.md`, MCP secrets absent from DTO, missing capability hits zero legacy pull/push routes. **Does not** certify dual-host mDNS |
+| `L2-AGENT-HUB-USER-MIRROR-002` | L2 | Same smoke file: dest write failure → `partial=true`, succeeded agents retained, same `clientRequestId` replays. **Does not** roll back successful agents |
+| `L2-AGENT-HUB-USER-MIRROR-003` | L2 | Same smoke file dest extras: Skill detach (no `~/.agents` destroyStore), Plugin disable not uninstall, extra MCP server key deleted |
+| `L3-AGENT-HUB-USER-MIRROR-001` | L3 | Dual-host mDNS `agent-hub.user-mirror.v1` user-scope all-agent Pull/Push with native writes — **NOT VERIFIED** |
 | `L2-AGENT-HUB-C-001` | L2 | `src-tauri/tests/agent_hub_replication_smoke.rs` — isolated dual-data_dir source-push contracts (chunk resume, idempotency, credential plaintext in CAS + absent from logs, projection failure does not roll back). **Does not** certify dual-host mDNS |
 | `L2-AGENT-HUB-C-GIT-001` | L2 | Same smoke file Git path: export lane archive → third env inspect/confirm; unmapped projects importable without auto path/opt-in. **Never** auto Git import |
 | `L2-AGENT-HUB-D-PLUGIN-001` | L2 | `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` — mixed Plugin portable + targetOnly Hook + residual projection, natural ActivationPlan.activation_required merge (not force-flag-only), ownership-aware delete. **Does not** certify real CLI marketplace installs |
@@ -272,6 +281,22 @@ Evidence IDs:
 - Protocol: capability `agent-hub.portable-pull.v1` + routes in `docs/p2p-protocol.md`
 - L3 product CLI / dual-host mDNS / packaged GUI remain **NOT VERIFIED** (do not flip from L2)
 
+### Agent Hub user-mirror (user-scope all-agent Pull/Push)
+
+User-scope Pull/Push is a full catalog mirror (`agent-hub.user-mirror.v1`, `AGENT_HUB_API_VERSION=5`), not item checkboxes. Spec: [`2026-08-23-agent-hub-user-mirror-design.md`](../superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md).
+
+```bash
+cd src-tauri && cargo test --locked --test agent_hub_user_mirror_smoke -- --nocapture --test-threads=1
+cd web && npm run test:e2e -- agent-hub-user-mirror.spec.ts
+```
+
+Evidence IDs:
+- `L2-AGENT-HUB-USER-MIRROR-001` — dual isolated data_dir full mirror + frozen capability gate (PASS when smoke suite green; not dual-host mDNS)
+- `L2-AGENT-HUB-USER-MIRROR-002` — partial no-rollback + same `clientRequestId` replay
+- `L2-AGENT-HUB-USER-MIRROR-003` — dest extras Skill detach / Plugin disable / MCP key delete
+- `E2E-AGENT-HUB-USER-MIRROR-001` — `web/tests/agent-hub-user-mirror.spec.ts` (PASS when e2e green; mock-only, not real multi-host)
+- `L3-AGENT-HUB-USER-MIRROR-001` — dual-host mDNS user-mirror native writes; remains **NOT VERIFIED** until real-device certification
+
 ### Agent Hub Gate D verification (Plugin + OpenCode runtime)
 
 ```bash
@@ -388,6 +413,7 @@ git diff --check
 - `L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` — real pinned OpenCode TUI + provider credentials
 - `L3-AGENT-HUB-B-CLI-001` — real Claude/Codex/OpenCode exact-version product writes (`agent_hub_cli_contract` ignored harness)
 - `L3-AGENT-HUB-C-LAN-001` — dual-host mDNS `agent-hub.v1` source-push + Git confirm
+- `L3-AGENT-HUB-USER-MIRROR-001` — dual-host mDNS `agent-hub.user-mirror.v1` user-scope all-agent mirror with native writes
 - `L3-AGENT-HUB-CLAUDE-001` / `L3-AGENT-HUB-CODEX-001` / `L3-AGENT-HUB-OPENCODE-001` (install-path family) — real multi-CLI product installs
 - Packaged desktop GUI / multi-platform Agent Hub matrix; marketplace activation side effects; N+2 legacy route/table deletion (migration evidence still locked)
 

@@ -4,20 +4,21 @@
 >
 > 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
 >
-> 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。Plugin 启用标记跟 viewing Agent（§3.9，`plugin_enablement.rs`）。Skill/Command 本机一份在 `<data_dir>/portable-store/`（§3.10，`portable_store/`）；MCP 仍是各家配置 native leaf，跨 Agent 走已有 Pull。漂移项「确认当前版本」只改 Hub 账本（§3.11）。逃逸软链「恢复为仓库资产」把源树复制进 store、在 native 路径挂正规软链，不删源树（§3.12）。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
+> 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。Plugin 启用标记跟 viewing Agent（§3.9，`plugin_enablement.rs`）。Skill/Command 本机一份在 `<data_dir>/portable-store/`（§3.10，`portable_store/`）；MCP 仍是各家配置 native leaf，跨 Agent 走已有 Pull。漂移项「确认当前版本」只改 Hub 账本（§3.11）。逃逸软链「恢复为仓库资产」把源树复制进 store、在 native 路径挂正规软链，不删源树（§3.12）。用户发起的 user-mirror 可写该身份用户级白名单文件与 MCP leaf / viewing Disable，不 spawn 未认证 CLI；新身份必须进入 `all_hub_targets()`，否则镜像缺席要显式失败而不是跳过。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
 
 ## 0. 硬规则（写代码前先接受）
 
 1. **一份身份表**。Hub / Runtime / 会话搜索 / Prompt 历史 / 用量 / headless 只投影 `agent_catalog`，禁止再按功能面复制枚举。
 2. **未知 token fail-closed**。parse / decoder 失败，禁止静默映射 Claude。
 3. **能做的做实，不能做的仍要露脸**。新身份必须出现在壳层切换器；做不到的面用 scan-only / blocked / residual / unavailable / 缺席，禁止从 UI 藏掉。
-4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本；§3.12「恢复为仓库资产」把逃逸目标复制进 store 并在 native 路径挂正规软链（不 spawn CLI、不 remap、不删源树），两者无 L3 也必须能 apply。Grok/Codex Plugin 的 viewing 启停，以及 Grok/Gemini/Cursor/OpenCode/Codex **自身** MCP 的 `enabled`，是配置文件 patch：不 spawn CLI，不要求 L3 `activatePackage`。Codex Plugin **卸载**仍要 DeactivatePackage。探测 CLI 时 PATH 必须覆盖 nvm/fnm/volta/asdf 当前 bin，并用同一 PATH 跑 `--version`（`#!/usr/bin/env node` 包装脚本才能找到 node）。借用 MCP 不得 Enable/Disable/Uninstall。
+4. **无 L3 evidence 不写原生文件**。`support-manifest.json` 默认 `renderInstruction` / portable 写 / activate / deactivate = `blocked`。扫描可以 `readOnly`。没有已认证 executor 时，**禁止**把 Enable/Disable 映射到另一家的 CLI（例如在 Grok 列表里跑 `claude plugin disable`）。**例外**：§3.11「确认当前版本」只写 Hub SQLite 账本；§3.12「恢复为仓库资产」把逃逸目标复制进 store 并在 native 路径挂正规软链（不 spawn CLI、不 remap、不删源树）；用户发起的 user-mirror（`agent-hub.user-mirror.v1`）允许写该身份用户级白名单原生提示词文件、MCP 配置 leaf 与 Plugin viewing Disable，不 spawn 未认证 CLI、不 remap 到另一家 executor。三者无 L3 `activatePackage` 也必须能 apply。Grok/Codex Plugin 的 viewing 启停，以及 Grok/Gemini/Cursor/OpenCode/Codex **自身** MCP 的 `enabled`，是配置文件 patch：不 spawn CLI，不要求 L3 `activatePackage`。Codex Plugin **卸载**仍要 DeactivatePackage。探测 CLI 时 PATH 必须覆盖 nvm/fnm/volta/asdf 当前 bin，并用同一 PATH 跑 `--version`（`#!/usr/bin/env node` 包装脚本才能找到 node）。借用 MCP 不得 Enable/Disable/Uninstall。
 5. **Plugin 开关跟当前查看的 Agent，不跟所有者。** Claude `enabledPlugins=false` 不得让 Codex / Grok / OpenCode / Gemini / Cursor / Pi 的同一包显示为已关。Enable/Disable 只写 viewing 标记；Plugin Uninstall 仍改所有者磁盘。详见 §3.9。
 6. **Skill / Command 本机一份在 portable-store，不在 `~/.agents`。** MCP **不进仓库**：启停/卸载走当前（或 owner）配置 leaf，跨 Agent 用已有 Pull，不要 `migrateToStore` / `attach` / `detach` / `destroyStore`。附加只在该 Agent **自己的 native 根**建软链；卸下只拆 viewing 的链。会扫 Claude / `.agents` / Codex 路径时，只提示「仍被其他路径加载」，禁止为列表干净去改所有者磁盘。store 软链禁用 **不得 MOVE 真树**。无 L3 不得给新 Agent apply attach/detach/migrate/destroy。借用芯片必须跟该 CLI **官方会加载的目录**走，禁止抄别家扫描表。详见 §3.10、§3.13。
 7. **漂移「确认当前版本」只改 Hub 账本。** Hub 投影/store 物化过的 Plugin/MCP/已附加 Skill·Command，磁盘哈希分叉后用户可以把当前文件记为一致基准。Hub 从未写过的独立 Skill/Command 刷新库存即跟随磁盘，不必确认。禁止把这条动作绑到 `supports_direct_local_action`、CLI mutation 门禁或另一家 executor。按钮文案是「确认当前版本」/ `Confirm current version`，不要写成「接受磁盘」或「重记哈希」。详见 §3.11。
 8. **逃逸软链「恢复为仓库资产」是布局修复：复制进仓库并挂正规软链。** `store_symlink_escape` / `source_blocked` 的 Skill/Command 必须能在已装备列表以问题行出现，并一键把逃逸目标复制进 `<data_dir>/portable-store/`，再把 native 路径换成指向仓库的软链。禁止 remap 到另一家 CLI，禁止绑 `supports_direct_local_action`，禁止删除 `~/.agents` 源。不是 `migrateToStore`（那条是把 native 真树 rename 进仓库）。文案「恢复为仓库资产」/ `Restore into store`。详见 §3.12。
 9. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
 10. **可执行名 ≠ 产品名**。只启动官方 CLI（Cursor 是 `agent`），禁止拉起 GUI。
+11. **新身份必须进入 `all_hub_targets()`。** 用户级镜像一次处理 catalog 全部 Hub Agent；缺席不得静默跳过，必须显式失败（unavailable / fail-closed）。禁止只镜像 Claude/Codex/OpenCode 子集而把后来者当不存在。见 [`2026-08-23-agent-hub-user-mirror-design.md`](../superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md)。
 
 ## 1. 先锁身份（未锁完禁止开写）
 
@@ -384,9 +385,12 @@ rg -n "confirmCurrentVersion" web/src
 # 逃逸软链恢复是否漏穷尽臂 / 是否被误绑成 CLI 或删除源树
 rg -n "MaterializeEscapeLink|materializeEscapeLink|is_escape_link_repair|restore_escape_into_store" src-tauri/src/agent_hub
 rg -n "materializeEscapeLink|isPortableEscapeLinkItem" web/src
+
+# user-mirror 是否漏新身份 / 是否静默跳过
+rg -n "all_hub_targets" src-tauri/src/agent_hub/user_mirror src-tauri/src/agent_catalog
 ```
 
-文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。不要写「关掉 Claude plugin 等于关掉所有 Agent」。不要写「`~/.agents` 就是全 Agent 统一库」。不要把「确认当前版本」写成会改写磁盘或需要 L3。不要把「恢复为仓库资产」写成会删除源树或把 native 真树 rename 进仓库。
+文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。不要写「关掉 Claude plugin 等于关掉所有 Agent」。不要写「`~/.agents` 就是全 Agent 统一库」。不要把「确认当前版本」写成会改写磁盘或需要 L3。不要把「恢复为仓库资产」写成会删除源树或把 native 真树 rename 进仓库。用户发起的 user-mirror 可以写该身份用户级白名单文件 / MCP leaf / viewing Disable，但不得 spawn 未认证 CLI；新身份缺席 `all_hub_targets` 必须 fail-closed，不得跳过。
 
 ## 5. 能力状态怎么填
 

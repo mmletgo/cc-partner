@@ -36,5 +36,6 @@ pub use receiver::{
 pub use sender::{
     get_push_report_for_state, list_failed_source_push_targets, push_selection_for_state,
     AgentHubPushSender, MultiTargetPushReport, PushAgentHubSelectionRequest, SourcePushTargetRow,
-    TargetPushOutcome, TargetPushStatus, MAX_TARGET_PARALLELISM,
+    TargetPushOutcome, TargetPushStatus, MAX_TARGET_PARALLELISM, SOURCE_PUSH_KIND_PUSH,
+    SOURCE_PUSH_KIND_USER_MIRROR,
 };
