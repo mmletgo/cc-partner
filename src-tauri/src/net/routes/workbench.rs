@@ -18,24 +18,27 @@ use crate::commands::workbench::{
     create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
     focus_workbench_session_for_state, get_agent_session_preview_for_state,
     get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
-    hydrate_workbench_session_scrollback_for_state, list_workbench_dir_for_state,
-    list_workbench_git_commits_for_state, list_workbench_sessions_for_state,
-    list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
-    local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
-    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
-    local_focus_workbench_session, local_get_workbench_banner, local_get_workbench_path_info,
-    local_get_workbench_project_note, local_get_workbench_worktree, local_list_workbench_dir,
-    local_list_workbench_git_commits, local_list_workbench_sessions,
-    local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
-    local_paste_workbench_session_image, local_preview_workbench_html_asset,
-    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
-    local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
-    local_save_workbench_banner, local_save_workbench_project_note, local_save_workbench_text_file,
+    get_workbench_remote_path_info_for_state, hydrate_workbench_session_scrollback_for_state,
+    list_workbench_dir_for_state, list_workbench_git_commits_for_state,
+    list_workbench_remote_dir_for_state, list_workbench_remote_roots_for_state,
+    list_workbench_sessions_for_state, list_workbench_worktrees_for_state,
+    local_close_workbench_pane, local_close_workbench_session, local_commit_workbench_worktree,
+    local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
+    local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
+    local_get_workbench_banner, local_get_workbench_path_info, local_get_workbench_project_note,
+    local_get_workbench_worktree, local_list_workbench_dir, local_list_workbench_git_commits,
+    local_list_workbench_sessions, local_list_workbench_worktrees, local_merge_workbench_worktree,
+    local_open_workbench_file, local_paste_workbench_session_image,
+    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
+    local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
+    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_banner,
+    local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
     local_write_workbench_session_input, local_zoom_workbench_pane,
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
-    owner_local_preflight_for_state, owner_local_safe_attach_for_state,
-    paste_workbench_session_image_for_state, push_workbench_worktree_for_state,
+    open_workbench_remote_project_for_state, owner_local_preflight_for_state,
+    owner_local_safe_attach_for_state, paste_workbench_session_image_for_state,
+    push_workbench_worktree_for_state, remove_workbench_project_for_state,
     remove_workbench_worktree_for_state, repair_worktree_hook_failure_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
     resume_agent_session_for_state, save_workbench_text_file_for_state,
@@ -166,6 +169,70 @@ fn validate_remote_path(path: String) -> Result<String, AppError> {
         return Err(AppError::validation("路径不能为空"));
     }
     Ok(path)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     局域网目录浏览必须带对端 deviceId，空串不能当成发现列表里的设备。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后为空返回校验错误。
+fn validate_device_id(device_id: String) -> Result<String, AppError> {
+    if device_id.trim().is_empty() {
+        return Err(AppError::validation("设备 ID 不能为空"));
+    }
+    Ok(device_id)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     移除最近项目必须带 projectId，空串不能误删。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后为空返回校验错误。
+fn validate_project_id(project_id: String) -> Result<String, AppError> {
+    if project_id.trim().is_empty() {
+        return Err(AppError::validation("项目 ID 不能为空"));
+    }
+    Ok(project_id)
+}
+
+/// 手机端列出局域网对端根目录时的请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     roots 只需对端 deviceId。
+///
+/// Code Logic（这个结构体做什么）:
+///     反序列化 camelCase `{deviceId}`。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDeviceReq {
+    pub device_id: String,
+}
+
+/// 手机端浏览局域网设备目录时的请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     二级代理需要同时知道对端设备与路径。
+///
+/// Code Logic（这个结构体做什么）:
+///     反序列化 camelCase `{deviceId, path}`。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDevicePathReq {
+    pub device_id: String,
+    pub path: String,
+}
+
+/// 手机端移除最近项目请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     移除只需要主机上的 projectId。
+///
+/// Code Logic（这个结构体做什么）:
+///     反序列化 camelCase `{projectId}`。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProjectIdReq {
+    pub project_id: String,
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1793,6 +1860,159 @@ pub async fn mobile_open_project(
     Ok(Json(project))
 }
 
+/// 手机端列出主机可浏览的目录根入口。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机浏览器没有系统目录框，添加本机项目需要先看到主机常用根目录。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 P2P `remote_roots` helper，返回 camelCase 根目录 DTO。
+pub async fn mobile_fs_roots() -> P2pResult<Json<Vec<WorkbenchRemoteRootDto>>> {
+    Ok(Json(remote_directory::remote_roots()))
+}
+
+/// 手机端列出主机某个目录的一级条目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     添加本机项目时需要逐层浏览主机文件系统。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 path 后调用 `list_remote_directory`。
+pub async fn mobile_fs_list_dir(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemotePathReq>,
+) -> P2pResult<Json<Vec<WorkbenchRemoteDirectoryEntryDto>>> {
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.list"))?;
+    let entries = remote_directory::list_remote_directory(Path::new(&path))
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.list"))?;
+    Ok(Json(entries))
+}
+
+/// 手机端读取主机路径信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打开本机目录前需要知道它是否可读、是否像 Git 项目。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 path 后调用 `remote_path_info`。
+pub async fn mobile_fs_path_info(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemotePathReq>,
+) -> P2pResult<Json<WorkbenchRemotePathInfoDto>> {
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.info"))?;
+    let info = remote_directory::remote_path_info(Path::new(&path))
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.info"))?;
+    Ok(Json(info))
+}
+
+/// 手机端列出局域网对端可浏览根目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     添加局域网项目时先看到对端常用根目录，由主机二级代理。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 deviceId 后调用 owner `list_workbench_remote_roots_for_state`。
+pub async fn mobile_remote_roots(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteDeviceReq>,
+) -> P2pResult<Json<Vec<WorkbenchRemoteRootDto>>> {
+    let device_id = validate_device_id(req.device_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.roots"))?;
+    let roots = list_workbench_remote_roots_for_state(&state, &device_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.roots"))?;
+    Ok(Json(roots))
+}
+
+/// 手机端列出局域网对端一级目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     二级代理浏览对端目录直到用户选中项目文件夹。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 deviceId/path 后调用 owner `list_workbench_remote_dir_for_state`。
+pub async fn mobile_remote_list_dir(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteDevicePathReq>,
+) -> P2pResult<Json<Vec<WorkbenchRemoteDirectoryEntryDto>>> {
+    let device_id = validate_device_id(req.device_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.list"))?;
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.list"))?;
+    let entries = list_workbench_remote_dir_for_state(&state, &device_id, &path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.list"))?;
+    Ok(Json(entries))
+}
+
+/// 手机端读取局域网对端路径信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打开对端目录前需要可读性和 Git 探测结果。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 deviceId/path 后调用 owner `get_workbench_remote_path_info_for_state`。
+pub async fn mobile_remote_path_info(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteDevicePathReq>,
+) -> P2pResult<Json<WorkbenchRemotePathInfoDto>> {
+    let device_id = validate_device_id(req.device_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.info"))?;
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.info"))?;
+    let info = get_workbench_remote_path_info_for_state(&state, &device_id, &path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.info"))?;
+    Ok(Json(info))
+}
+
+/// 手机端打开局域网对端目录并写入主机 remote shortcut。
+///
+/// Business Logic（为什么需要这个函数）:
+///     选中对端项目后，主机需要保存 shortcut，后续 Workbench 操作继续二级代理。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 deviceId/path 后调用 owner `open_workbench_remote_project_for_state`。
+pub async fn mobile_open_remote_project(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteDevicePathReq>,
+) -> P2pResult<Json<WorkbenchProjectDto>> {
+    let device_id = validate_device_id(req.device_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.open"))?;
+    let path = validate_remote_path(req.path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.open"))?;
+    let project = open_workbench_remote_project_for_state(&state, &device_id, &path)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.open"))?;
+    Ok(Json(project))
+}
+
+/// 手机端从最近项目列表移除记录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户可从手机拿掉项目记录，但不删除磁盘文件。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 projectId 后调用 owner `remove_workbench_project_for_state`。
+pub async fn mobile_remove_project(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteProjectIdReq>,
+) -> P2pResult<Json<serde_json::Value>> {
+    let project_id = validate_project_id(req.project_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.projects.remove"))?;
+    let result = remove_workbench_project_for_state(&state, &project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.projects.remove"))?;
+    Ok(Json(result))
+}
+
 /// 手机端列出本机或远端项目的 worktree。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2755,6 +2975,66 @@ mod tests {
 
         assert_eq!(error.envelope().error, "路径不能为空");
         assert_eq!(error.envelope().code, "validation_error");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     手机浏览主机目录与 P2P 对端浏览共用空路径拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用 mobile fs list/info handler，断言空白 path 映射 validation_error。
+    #[tokio::test]
+    async fn mobile_fs_list_and_info_reject_blank_path() {
+        let ctx = P2pRequestContext {
+            request_id: "req-mobile-fs".to_string(),
+        };
+        let list_error = mobile_fs_list_dir(
+            Extension(ctx.clone()),
+            Json(RemotePathReq {
+                path: "   ".to_string(),
+            }),
+        )
+        .await
+        .expect_err("blank host path should be rejected");
+        assert_eq!(list_error.envelope().error, "路径不能为空");
+        assert_eq!(list_error.envelope().code, "validation_error");
+
+        let info_error = mobile_fs_path_info(
+            Extension(ctx),
+            Json(RemotePathReq {
+                path: "\n".to_string(),
+            }),
+        )
+        .await
+        .expect_err("blank host path info should be rejected");
+        assert_eq!(info_error.envelope().error, "路径不能为空");
+        assert_eq!(info_error.envelope().code, "validation_error");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     局域网浏览必须同时拒绝空 deviceId 与空 path，避免误打本机目录。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     校验 helper 与 JSON 字段名（camelCase deviceId/projectId）。
+    #[test]
+    fn mobile_remote_and_remove_requests_use_camel_case_and_reject_blank_ids() {
+        let device: RemoteDeviceReq = serde_json::from_value(serde_json::json!({
+            "deviceId": "office"
+        }))
+        .unwrap();
+        assert_eq!(device.device_id, "office");
+        let path_req: RemoteDevicePathReq = serde_json::from_value(serde_json::json!({
+            "deviceId": "office",
+            "path": "/Users/dev"
+        }))
+        .unwrap();
+        assert_eq!(path_req.path, "/Users/dev");
+        let remove_req: RemoteProjectIdReq = serde_json::from_value(serde_json::json!({
+            "projectId": "p1"
+        }))
+        .unwrap();
+        assert_eq!(remove_req.project_id, "p1");
+        assert!(validate_device_id("  ".to_string()).is_err());
+        assert!(validate_project_id("".to_string()).is_err());
     }
 
     /// Business Logic（为什么需要这个测试）:

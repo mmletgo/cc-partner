@@ -24,6 +24,9 @@ import type {
   WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
+  WorkbenchRemoteDirectoryEntry,
+  WorkbenchRemotePathInfo,
+  WorkbenchRemoteRoot,
   WorkbenchSaveTextResult,
   WorkbenchSession,
   WorkbenchSessionReplay,
@@ -33,7 +36,7 @@ import type {
   Prompt,
 } from '@/lib/types';
 import type { Decoder } from '@/lib/runtimeSchema';
-import { arrayDecoder, ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
+import { ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
 import {
   orchestratorRemoteOutboxItemDecoder,
   orchestratorRuntimeSnapshotDecoder,
@@ -46,6 +49,10 @@ import {
   workbenchPathInfoDecoder,
   workbenchProjectsDecoder,
   workbenchProjectDecoder,
+  workbenchProjectRemoveResultDecoder,
+  workbenchRemoteDirectoryEntriesDecoder,
+  workbenchRemotePathInfoDecoder,
+  workbenchRemoteRootsDecoder,
   workbenchSaveTextResultDecoder,
   workbenchSessionsDecoder,
   workbenchSessionDecoder,
@@ -1217,6 +1224,66 @@ async function postWorkbenchMutationEnvelope<T>(
  *   POST `/api/mobile/workbench/worktrees/{commit,push,merge,remove}`，decoder envelope，catch 仅 timeout/network。
  */
 export const workbenchHttp = {
+  projects: {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   移动端从最近列表移除项目记录，不得猜 desktop invoke。
+     *
+     * Code Logic（这个函数做什么）:
+     *   POST `/api/mobile/workbench/projects/remove` `{projectId}`。
+     */
+    remove: (projectId: string) =>
+      postJson<{ ok: boolean; projectId: string }>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/projects/remove`,
+        { projectId },
+        { policy: { kind: 'mutation' }, decoder: workbenchProjectRemoveResultDecoder },
+      ),
+  },
+  fs: {
+    roots: () =>
+      getJson<WorkbenchRemoteRoot[]>(`${MOBILE_WORKBENCH_API_PREFIX}/fs/roots`, {
+        policy: { kind: 'query' },
+        decoder: workbenchRemoteRootsDecoder,
+      }),
+    listDir: (path: string) =>
+      postJson<WorkbenchRemoteDirectoryEntry[]>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/fs/list`,
+        { path },
+        { policy: { kind: 'query' }, decoder: workbenchRemoteDirectoryEntriesDecoder },
+      ),
+    info: (path: string) =>
+      postJson<WorkbenchRemotePathInfo>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/fs/info`,
+        { path },
+        { policy: { kind: 'query' }, decoder: workbenchRemotePathInfoDecoder },
+      ),
+  },
+  remote: {
+    roots: (deviceId: string) =>
+      postJson<WorkbenchRemoteRoot[]>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/remote/roots`,
+        { deviceId },
+        { policy: { kind: 'query' }, decoder: workbenchRemoteRootsDecoder },
+      ),
+    listDir: (deviceId: string, path: string) =>
+      postJson<WorkbenchRemoteDirectoryEntry[]>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/remote/list`,
+        { deviceId, path },
+        { policy: { kind: 'query' }, decoder: workbenchRemoteDirectoryEntriesDecoder },
+      ),
+    info: (deviceId: string, path: string) =>
+      postJson<WorkbenchRemotePathInfo>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/remote/info`,
+        { deviceId, path },
+        { policy: { kind: 'query' }, decoder: workbenchRemotePathInfoDecoder },
+      ),
+    openProject: (deviceId: string, path: string) =>
+      postJson<WorkbenchProject>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/remote/open`,
+        { deviceId, path },
+        { policy: { kind: 'mutation' }, decoder: workbenchProjectDecoder },
+      ),
+  },
   bridges: {
     /**
      * Business Logic（为什么需要这个函数）:

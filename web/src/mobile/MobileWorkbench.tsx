@@ -31,7 +31,13 @@ import {
 } from '@/lib/workbenchMutationReconciliation';
 import type { MobileAutomationExecutionContext } from './components/MobileAutomationPanel';
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
+import { Button, Dialog } from '@/components/primitives';
+import { upsertWorkbenchProjectInPlace } from '@/lib/workbenchRemoteProjects';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
+import {
+  MobileProjectPicker,
+  type MobileProjectPickerKind,
+} from './components/MobileProjectPicker';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import { MobileWorktreeTabs, type MobileWorktreeTabsProps } from './components/MobileWorktreeTabs';
 import { useMobileWorktreeBarController } from './controllers/useMobileWorktreeBarController';
@@ -224,6 +230,9 @@ export function MobileWorkbench(): ReactElement {
   const [transferPanelMounted, setTransferPanelMounted] = useState<boolean>(
     () => getInitialMobileWorkbenchPanel() === 'transfer',
   );
+  const [pickerKind, setPickerKind] = useState<MobileProjectPickerKind | null>(null);
+  const [pendingRemove, setPendingRemove] = useState<WorkbenchProject | null>(null);
+  const [removingProject, setRemovingProject] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [attentionNotice, setAttentionNotice] = useState<string | null>(null);
   const [attentionFocusTaskId, setAttentionFocusTaskId] = useState<string | null>(null);
@@ -845,6 +854,63 @@ export function MobileWorkbench(): ReactElement {
   const handleRefreshProjects = useCallback((): void => {
     void loadProjects();
   }, [loadProjects]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   添加成功后要把新项目写入列表并进入工作台，避免用户再点一次。
+   *
+   * Code Logic（这个函数做什么）:
+   *   upsert 列表、关闭 picker，再走 selectProject。
+   */
+  const handleProjectOpened = useCallback(
+    (project: WorkbenchProject): void => {
+      setPickerKind(null);
+      setProjects((current) => upsertWorkbenchProjectInPlace(current, project));
+      void selectProject(project);
+    },
+    [selectProject],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移除只删最近记录；若移除的是当前项目，必须离开工作台回到列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   确认后调用 projects.remove；成功则过滤列表，必要时清空 active 上下文。
+   */
+  const handleConfirmRemoveProject = useCallback(async (): Promise<void> => {
+    if (!pendingRemove || removingProject) return;
+    if (pendingRemove.id === activeProject?.id) {
+      if (!confirmFileContextSwitch(null)) return;
+    }
+    setRemovingProject(true);
+    try {
+      await workbenchHttp.projects.remove(pendingRemove.id);
+      const removedId = pendingRemove.id;
+      setPendingRemove(null);
+      setProjects((current) => current.filter((item) => item.id !== removedId));
+      if (activeProjectRef.current?.id === removedId) {
+        setActiveProject(null);
+        setWorktrees([]);
+        setActiveWorktreeWithSession(null);
+        sessionsRef.current = [];
+        setSessions([]);
+        setProjectDetailStatus('idle');
+        setPanel('projects');
+      }
+    } catch (reason) {
+      setError(getErrorMessage(reason) || t('workbench:mobile.projectPanel.removeFailed'));
+    } finally {
+      setRemovingProject(false);
+    }
+  }, [
+    activeProject?.id,
+    confirmFileContextSwitch,
+    pendingRemove,
+    removingProject,
+    setActiveWorktreeWithSession,
+    t,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1577,6 +1643,9 @@ export function MobileWorkbench(): ReactElement {
             void selectProject(project);
           }}
           onRefresh={handleRefreshProjects}
+          onAddLocal={() => setPickerKind('local')}
+          onAddRemote={() => setPickerKind('lan')}
+          onRemoveRequest={setPendingRemove}
         />
         {projectDetailRetry}
       </>
@@ -1709,6 +1778,51 @@ export function MobileWorkbench(): ReactElement {
       }
     >
       {panelContent}
+      <MobileProjectPicker
+        open={pickerKind !== null}
+        kind={pickerKind ?? 'local'}
+        onClose={() => setPickerKind(null)}
+        onProjectOpened={handleProjectOpened}
+      />
+      <Dialog
+        open={pendingRemove !== null}
+        titleId="mobile-project-remove-title"
+        closeOnEscape={!removingProject}
+        closeOnBackdrop={!removingProject}
+        onClose={() => {
+          if (removingProject) return;
+          setPendingRemove(null);
+        }}
+        className={styles.removeDialog}
+      >
+        <h2 id="mobile-project-remove-title">{t('workbench:mobile.projectPanel.removeConfirmTitle')}</h2>
+        <p>
+          {t('workbench:mobile.projectPanel.removeConfirmBody', {
+            name: pendingRemove?.name ?? '',
+          })}
+        </p>
+        <div className={styles.removeDialogActions}>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={removingProject}
+            onClick={() => setPendingRemove(null)}
+          >
+            {t('workbench:worktrees.removeConfirmDialog.cancel')}
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            loading={removingProject}
+            disabled={removingProject || !pendingRemove}
+            onClick={() => {
+              void handleConfirmRemoveProject();
+            }}
+          >
+            {t('workbench:mobile.projectPanel.remove')}
+          </Button>
+        </div>
+      </Dialog>
       {filesPanelMounted ? (
         <div hidden={panel !== 'files'}>
           <Suspense fallback={heavyPanelFallback}>

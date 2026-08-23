@@ -162,6 +162,32 @@ export function canOpenRemoteProjectSelection(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   手机添加本机项目没有 deviceId，打开前仍必须确认当前选中路径是可读目录。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验 path/pathInfo 一致、路径是可读目录，并且没有路径信息或打开请求在途。
+ */
+export function canOpenHostProjectSelection(
+  selectedPath: string | null,
+  pathInfo: WorkbenchRemotePathInfo | null,
+  pathInfoPath: string | null,
+  pathInfoLoading: boolean,
+  openBusy: boolean,
+): boolean {
+  return Boolean(
+    selectedPath &&
+      pathInfo &&
+      pathInfoPath === selectedPath &&
+      pathInfo.path === selectedPath &&
+      pathInfo.kind === 'dir' &&
+      pathInfo.readable &&
+      !pathInfoLoading &&
+      !openBusy,
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   远端设备掉线时，前端需要识别它来展示离线提示并禁用远端写操作；
  *   优先 typed 故障码，中文固定文案仅作 backend legacy 回退。
  *

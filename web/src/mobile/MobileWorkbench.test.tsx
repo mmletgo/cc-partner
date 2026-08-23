@@ -30,10 +30,25 @@ vi.mock('@/api/workbenchHttp', () => ({
       remove: vi.fn(),
       getMutationOperation: vi.fn(),
     },
+    projects: {
+      remove: vi.fn(),
+    },
+    fs: {
+      roots: vi.fn(async () => []),
+      listDir: vi.fn(async () => []),
+      info: vi.fn(),
+    },
+    remote: {
+      roots: vi.fn(async () => []),
+      listDir: vi.fn(async () => []),
+      info: vi.fn(),
+      openProject: vi.fn(),
+    },
   },
   httpWorkbenchTransport: {
     projects: {
       list: (...args: unknown[]) => listProjectsMock(...args),
+      open: vi.fn(),
     },
     worktrees: {
       list: (...args: unknown[]) => listWorktreesMock(...args),

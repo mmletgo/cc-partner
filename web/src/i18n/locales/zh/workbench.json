@@ -197,7 +197,29 @@
       "error": "加载失败",
       "unsupportedProjectKind": "手机端暂不支持打开该项目类型",
       "reload": "重新加载项目",
-      "detailError": "项目详情加载失败"
+      "detailError": "项目详情加载失败",
+      "addLocal": "添加本机项目",
+      "addRemote": "选择局域网项目",
+      "moreActions": "项目操作",
+      "remove": "移除",
+      "removeConfirmTitle": "移除项目",
+      "removeConfirmBody": "从最近列表移除「{{name}}」？磁盘上的文件不会删除。",
+      "removeFailed": "移除项目失败",
+      "pickerLocalTitle": "本机目录",
+      "pickerRemoteTitle": "局域网项目",
+      "pickerDevicesTitle": "在线设备",
+      "pickerOpen": "打开此文件夹",
+      "pickerCancel": "取消",
+      "pickerParent": "上一级",
+      "pickerEmptyDevices": "没有在线的局域网设备",
+      "pickerEmptyDir": "这个目录是空的",
+      "pickerGit": "含 .git",
+      "errors": {
+        "devices": "无法加载设备列表",
+        "roots": "无法加载根目录",
+        "dir": "无法读取目录",
+        "open": "无法打开项目"
+      }
     },
     "browser": {
       "title": "移动端项目预览"

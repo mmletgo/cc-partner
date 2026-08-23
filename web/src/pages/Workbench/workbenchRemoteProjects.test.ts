@@ -5,6 +5,7 @@ import type {
   WorkbenchRemotePathInfo,
 } from '../../lib/types';
 import {
+  canOpenHostProjectSelection,
   canOpenRemoteProjectSelection,
   isRemoteWorkbenchOfflineError,
   isRemoteWorkbenchProjectOffline,
@@ -177,6 +178,49 @@ function testCanOpenRemoteProjectSelectionRequiresCurrentReadableDirectory(): vo
 
 /**
  * Business Logic（为什么需要这个测试）:
+ *   手机添加本机项目没有 deviceId，打开门闩必须只校验当前可读目录。
+ *
+ * Code Logic（这个测试做什么）:
+ *   对 canOpenHostProjectSelection 覆盖可读目录、stale path、文件、不可读、loading、openBusy。
+ */
+function testCanOpenHostProjectSelectionRequiresCurrentReadableDirectory(): void {
+  const info: WorkbenchRemotePathInfo = {
+    name: 'app',
+    path: '/Users/hans/app',
+    kind: 'dir',
+    readable: true,
+    isGitRepo: true,
+    suggestedProjectName: 'app',
+  };
+
+  assert(
+    canOpenHostProjectSelection('/Users/hans/app', info, '/Users/hans/app', false, false),
+    'current readable host directory should be openable',
+  );
+  assert(
+    !canOpenHostProjectSelection('/Users/hans/other', info, '/Users/hans/app', false, false),
+    'stale host path info should block open',
+  );
+  assert(
+    !canOpenHostProjectSelection('/Users/hans/app', { ...info, kind: 'file' }, '/Users/hans/app', false, false),
+    'host file path should block open',
+  );
+  assert(
+    !canOpenHostProjectSelection('/Users/hans/app', { ...info, readable: false }, '/Users/hans/app', false, false),
+    'unreadable host directory should block open',
+  );
+  assert(
+    !canOpenHostProjectSelection('/Users/hans/app', info, '/Users/hans/app', true, false),
+    'pending host path info should block open',
+  );
+  assert(
+    !canOpenHostProjectSelection('/Users/hans/app', info, '/Users/hans/app', false, true),
+    'in-flight host open should block open',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个测试）:
  *   远端设备离线后，Workbench 只应禁用当前离线远端项目的写操作，不应影响本机项目或其他远端项目。
  *
  * Code Logic（这个测试做什么）:
@@ -276,6 +320,7 @@ describe('workbenchRemoteProjects', () => {
     testRemoteParentPathHandlesUnixAndWindowsPaths();
     testSortRemoteDirectoryEntriesPutsDirsBeforeFiles();
     testCanOpenRemoteProjectSelectionRequiresCurrentReadableDirectory();
+    testCanOpenHostProjectSelectionRequiresCurrentReadableDirectory();
     testRemoteOfflineStateOnlyMatchesCurrentRemoteProject();
     testMoveProjectIdBeforeAndAfter();
     testOrderProjectsByIds();
