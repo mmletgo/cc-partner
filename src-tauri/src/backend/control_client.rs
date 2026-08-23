@@ -80,6 +80,8 @@ const CLOUD_SYNC_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 const BACKUP_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 /// Orchestrator deliver 超时（git commit/push/merge 可能很长）。
 const ORCHESTRATOR_DELIVER_TIMEOUT: Duration = Duration::from_secs(360);
+/// 用户级镜像 apply：全 Agent 写盘 + 对端 objects，墙钟 900s。
+const USER_MIRROR_APPLY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// 选择 portable read control 操作的响应预算。
 ///
@@ -1801,6 +1803,46 @@ impl BackendControlClient {
             "agent_hub.get_portable_pull",
             serde_json::json!({ "clientRequestId": client_request_id }),
             portable_control_read_timeout("agent_hub.get_portable_pull"),
+        )
+        .await
+    }
+
+    /// Business Logic: 用户级镜像 preview 写 plan，旧 sidecar 不得静默降级。
+    /// Code Logic: 写兼容门闩 + agent_hub.preview_user_mirror。
+    pub async fn agent_hub_preview_user_mirror(
+        &self,
+        req: crate::agent_hub::user_mirror::PreviewUserMirrorRequest,
+    ) -> Result<crate::agent_hub::user_mirror::UserMirrorPlanDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_user_mirror", req)
+            .await
+    }
+
+    /// Business Logic: apply 是全 Agent 写盘长 mutation（墙钟 900s）。
+    /// Code Logic: 写兼容门闩 + agent_hub_op_with_timeout 900s。
+    pub async fn agent_hub_apply_user_mirror(
+        &self,
+        req: crate::agent_hub::user_mirror::ApplyUserMirrorRequest,
+    ) -> Result<crate::agent_hub::user_mirror::UserMirrorResultDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op_with_timeout(
+            "agent_hub.apply_user_mirror",
+            req,
+            USER_MIRROR_APPLY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Business Logic: 按 clientRequestId 对账镜像结果（只读）。
+    /// Code Logic: agent_hub.get_user_mirror；QUERY_TIMEOUT。
+    pub async fn agent_hub_get_user_mirror(
+        &self,
+        client_request_id: &str,
+    ) -> Result<crate::agent_hub::user_mirror::UserMirrorResultDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.get_user_mirror",
+            serde_json::json!({ "clientRequestId": client_request_id }),
+            QUERY_TIMEOUT,
         )
         .await
     }
@@ -4085,6 +4127,9 @@ mod tests {
             "pub async fn agent_hub_preview_portable_pull(",
             "pub async fn agent_hub_apply_portable_pull(",
             "pub async fn agent_hub_get_portable_pull(",
+            "pub async fn agent_hub_preview_user_mirror(",
+            "pub async fn agent_hub_apply_user_mirror(",
+            "pub async fn agent_hub_get_user_mirror(",
         ] {
             assert!(src.contains(sig), "missing client method {sig}");
         }
@@ -4096,6 +4141,9 @@ mod tests {
         assert!(src.contains("\"agent_hub.preview_portable_pull\""));
         assert!(src.contains("\"agent_hub.apply_portable_pull\""));
         assert!(src.contains("\"agent_hub.get_portable_pull\""));
+        assert!(src.contains("\"agent_hub.preview_user_mirror\""));
+        assert!(src.contains("\"agent_hub.apply_user_mirror\""));
+        assert!(src.contains("\"agent_hub.get_user_mirror\""));
         assert_eq!(PORTABLE_INVENTORY_TIMEOUT, Duration::from_secs(30));
         assert!(PORTABLE_INVENTORY_TIMEOUT > QUERY_TIMEOUT);
         assert_eq!(
@@ -4123,6 +4171,17 @@ mod tests {
             src.contains("\"agent_hub.apply_portable_pull\"")
                 && src.contains("Duration::from_secs(360)"),
             "apply pull should use long-mutation timeout"
+        );
+        assert_eq!(USER_MIRROR_APPLY_TIMEOUT, Duration::from_secs(900));
+        assert!(
+            src.contains("\"agent_hub.apply_user_mirror\"")
+                && src.contains("USER_MIRROR_APPLY_TIMEOUT"),
+            "apply user-mirror should use 900s long-mutation timeout"
+        );
+        let forbidden_peer_path = concat!("/api/agent-hub", "/user-mirror");
+        assert!(
+            !src.contains(forbidden_peer_path),
+            "control client 不得直连 peer HTTP"
         );
         assert_eq!(crate::backend::control::AGENT_HUB_API_VERSION, 5);
     }

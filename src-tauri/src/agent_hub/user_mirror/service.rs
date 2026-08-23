@@ -9,19 +9,33 @@
 //!     get 按 client_request_id 读 result 或拼 outcomeUnknown。本地 Pull 可用两份 AppState。
 
 use super::apply::apply_user_mirror_instructions_with_env;
-use super::inventory::build_local_user_mirror_inventory_with_env;
+use super::inventory::{
+    build_local_user_mirror_inventory, build_local_user_mirror_inventory_with_env,
+};
 use super::ledger::{UserMirrorClaim, UserMirrorPlanRecord};
 use super::models::{
     ApplyUserMirrorRequest, PreviewUserMirrorRequest, UserMirrorAgentResultDto,
     UserMirrorDirection, UserMirrorInventoryDto, UserMirrorItemState, UserMirrorPlanDto,
-    UserMirrorResultDto, USER_MIRROR_PREVIEW_REQUIRED, USER_MIRROR_STALE,
+    UserMirrorResultDto, USER_MIRROR_CAPABILITY_UNSUPPORTED, USER_MIRROR_DEST_MAX_TOTAL_BYTES,
+    USER_MIRROR_PEER_OFFLINE, USER_MIRROR_PREVIEW_REQUIRED, USER_MIRROR_STALE,
+    USER_MIRROR_TRANSFER_LIMIT,
 };
 use super::preview::preview_from_two_inventories as build_preview_from_two_inventories;
-use super::selection::UserMirrorObjectBinding;
+use super::receive::{UserMirrorSelectionQuery, UserMirrorSelectionResponse};
+use super::selection::{freeze_user_mirror_selection, UserMirrorObjectBinding};
+use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::targets::TargetEnvironment;
 use crate::error::AppError;
+use crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER;
+use crate::net::peer_client::PeerClient;
+use crate::net::peer_error::PeerCallError;
+use crate::net::peer_timeout::PeerTimeoutClass;
+use crate::net::protocol::CAPABILITY_USER_MIRROR_V1;
+use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
 use chrono::Utc;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// 用两份已构建 inventory 生成 preview 并写入 dest 端 plan ledger。
@@ -248,6 +262,357 @@ pub async fn get_user_mirror(
     ))
 }
 
+/// Owner 面用户级镜像门面（Tauri / control 共用，禁止 GUI 直连 peer）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     桌面 invoke 与 loopback control 必须走同一套 preview/apply/get；
+///     Pull 的 apply 只在本机 dest owner 执行，对端 HTTP 由 sidecar 发起。
+///
+/// Code Logic（这个结构体做什么）:
+///     纯静态方法命名空间；preview 拉源 inventory 后落 plan，apply Pull 拉 objects 后写盘。
+pub struct UserMirrorService;
+
+impl UserMirrorService {
+    /// 预览用户级镜像并在本机 owner 落 plan。
+    ///
+    /// Business Logic: Pull 选一台源设备；Push 以本机为源、对端为 dest 做 diff。
+    /// Code Logic: 缺能力 fail-closed；写 plan ledger。
+    pub async fn preview_user_mirror(
+        state: &AppState,
+        request: PreviewUserMirrorRequest,
+    ) -> Result<UserMirrorPlanDto, AppError> {
+        match request.direction {
+            UserMirrorDirection::Pull => {
+                let source_device_id = request
+                    .source_device_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?
+                    .to_string();
+                let source = load_source_inventory(state, &source_device_id).await?;
+                let dest =
+                    build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
+                preview_from_two_inventories(
+                    state,
+                    &source,
+                    &dest,
+                    &source_device_id,
+                    state.device_id.as_str(),
+                    UserMirrorDirection::Pull,
+                )
+                .await
+            }
+            UserMirrorDirection::Push => {
+                let dest_device_id = request
+                    .peer_device_ids
+                    .iter()
+                    .map(|id| id.trim())
+                    .find(|id| !id.is_empty())
+                    .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?
+                    .to_string();
+                let source =
+                    build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
+                let dest = load_source_inventory(state, &dest_device_id).await?;
+                preview_from_two_inventories(
+                    state,
+                    &source,
+                    &dest,
+                    state.device_id.as_str(),
+                    &dest_device_id,
+                    UserMirrorDirection::Push,
+                )
+                .await
+            }
+        }
+    }
+
+    /// 应用已预览镜像（Pull 本机写盘；Push sender 由后续 task 接入）。
+    ///
+    /// Business Logic: 同 clientRequestId 幂等；GUI 不得把 apply 打到 LAN。
+    /// Code Logic: 读 plan 方向；Pull 收集源 objects 后调 dest apply。
+    pub async fn apply_user_mirror(
+        state: &AppState,
+        request: ApplyUserMirrorRequest,
+    ) -> Result<UserMirrorResultDto, AppError> {
+        if request.plan_token.trim().is_empty() || request.client_request_id.trim().is_empty() {
+            return Err(AppError::validation(USER_MIRROR_PREVIEW_REQUIRED));
+        }
+        let row = state
+            .agent_hub_repo
+            .get_user_mirror_plan(&request.plan_token)
+            .await?
+            .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?;
+        let plan = parse_plan(&row.plan_json)?;
+        match plan.direction {
+            UserMirrorDirection::Pull => {
+                let (objects, bindings) = collect_source_objects(state, &plan).await?;
+                apply_user_mirror(state, request, &objects, &bindings).await
+            }
+            UserMirrorDirection::Push => Err(AppError::unavailable(
+                "user_mirror_push_sender_not_wired".to_string(),
+            )),
+        }
+    }
+
+    /// 按 clientRequestId 对账镜像结果。
+    ///
+    /// Business Logic: 未完成必须 outcomeUnknown，不得标成功。
+    /// Code Logic: 委托 `get_user_mirror`。
+    pub async fn get_user_mirror(
+        state: &AppState,
+        client_request_id: &str,
+    ) -> Result<UserMirrorResultDto, AppError> {
+        get_user_mirror(state, client_request_id).await
+    }
+}
+
+/// 读取源端 inventory：本机直扫，对端经 user-mirror inventory 路由。
+async fn load_source_inventory(
+    state: &AppState,
+    device_id: &str,
+) -> Result<UserMirrorInventoryDto, AppError> {
+    if device_id == state.device_id.as_str() {
+        return build_local_user_mirror_inventory(state, device_id).await;
+    }
+    fetch_peer_user_mirror_inventory(state, device_id).await
+}
+
+/// Pull apply 前收集源 CAS 对象（本机 freeze 或对端 selection+objects）。
+async fn collect_source_objects(
+    state: &AppState,
+    plan: &UserMirrorPlanDto,
+) -> Result<(BTreeMap<String, Vec<u8>>, Vec<UserMirrorObjectBinding>), AppError> {
+    let inventory = load_source_inventory(state, &plan.source_device_id).await?;
+    if inventory.inventory_snapshot_hash != plan.remote_inventory_snapshot_hash {
+        return Err(AppError::conflict(USER_MIRROR_STALE));
+    }
+    if plan.source_device_id == state.device_id.as_str() {
+        let built = freeze_user_mirror_selection(state, &inventory).await?;
+        return Ok((built.object_bytes, built.item_bindings));
+    }
+    let (base_url, expected) = resolve_online_peer(state, &plan.source_device_id)?;
+    let peer = PeerClient::new();
+    let health = peer
+        .require_capability(&base_url, CAPABILITY_USER_MIRROR_V1)
+        .await
+        .map_err(map_user_mirror_peer_err)?;
+    ensure_health_device_id(&health.device_id, &expected)?;
+    let selection: UserMirrorSelectionResponse = post_json_bound(
+        &peer,
+        &base_url,
+        "/api/agent-hub/user-mirror/selection",
+        &UserMirrorSelectionQuery { inventory },
+        &expected,
+        PeerTimeoutClass::Metadata,
+    )
+    .await
+    .map_err(map_user_mirror_peer_err)?;
+    let hashes: Vec<String> = selection
+        .envelope
+        .objects
+        .iter()
+        .map(|object| object.hash.clone())
+        .collect();
+    let objects =
+        download_user_mirror_objects(&peer, &base_url, &expected, &selection.transfer_id, &hashes)
+            .await?;
+    Ok((objects, selection.item_bindings))
+}
+
+/// 对端 metadata inventory（无 path / secret）。
+async fn fetch_peer_user_mirror_inventory(
+    state: &AppState,
+    device_id: &str,
+) -> Result<UserMirrorInventoryDto, AppError> {
+    let (base_url, expected) = resolve_online_peer(state, device_id)?;
+    let peer = PeerClient::new();
+    let health = peer
+        .require_capability(&base_url, CAPABILITY_USER_MIRROR_V1)
+        .await
+        .map_err(map_user_mirror_peer_err)?;
+    ensure_health_device_id(&health.device_id, &expected)?;
+    post_json_bound(
+        &peer,
+        &base_url,
+        "/api/agent-hub/user-mirror/inventory",
+        &serde_json::json!({}),
+        &expected,
+        PeerTimeoutClass::Metadata,
+    )
+    .await
+    .map_err(map_user_mirror_peer_err)
+}
+
+fn resolve_online_peer(state: &AppState, device_id: &str) -> Result<(String, String), AppError> {
+    let devices = state.devices.read().expect("devices lock");
+    let device = devices
+        .get(device_id)
+        .ok_or_else(|| AppError::unavailable(USER_MIRROR_PEER_OFFLINE.to_string()))?;
+    if !device.online {
+        return Err(AppError::unavailable(USER_MIRROR_PEER_OFFLINE.to_string()));
+    }
+    Ok((device.base_url(), device.id.clone()))
+}
+
+fn ensure_health_device_id(actual: &str, expected: &str) -> Result<(), AppError> {
+    if actual.trim() == expected {
+        return Ok(());
+    }
+    Err(AppError::unavailable(USER_MIRROR_PEER_OFFLINE.to_string()))
+}
+
+fn map_user_mirror_peer_err(error: PeerCallError) -> AppError {
+    match error {
+        PeerCallError::Unsupported { .. } => {
+            AppError::unavailable(USER_MIRROR_CAPABILITY_UNSUPPORTED.to_string())
+        }
+        PeerCallError::Network { .. } => {
+            AppError::unavailable(USER_MIRROR_PEER_OFFLINE.to_string())
+        }
+        PeerCallError::Remote { message, .. } => AppError::generic(message),
+        PeerCallError::InvalidResponse { .. } => {
+            AppError::generic("USER_MIRROR_INVALID_RESPONSE".to_string())
+        }
+    }
+}
+
+async fn download_user_mirror_objects(
+    peer: &PeerClient,
+    base_url: &str,
+    expected_device_id: &str,
+    transfer_id: &str,
+    hashes: &[String],
+) -> Result<BTreeMap<String, Vec<u8>>, AppError> {
+    let mut collected = BTreeMap::new();
+    let mut total = 0u64;
+    for hash in hashes {
+        let mut offset = 0u64;
+        let mut buf = Vec::new();
+        loop {
+            let chunk = get_object_chunk(
+                peer,
+                base_url,
+                expected_device_id,
+                transfer_id,
+                hash,
+                offset,
+            )
+            .await?;
+            if chunk.is_empty() {
+                break;
+            }
+            if chunk.len() > 8 * 1024 * 1024 {
+                return Err(AppError::validation(USER_MIRROR_TRANSFER_LIMIT.to_string()));
+            }
+            let next = total
+                .saturating_add(buf.len() as u64)
+                .saturating_add(chunk.len() as u64);
+            if next > USER_MIRROR_DEST_MAX_TOTAL_BYTES {
+                return Err(AppError::validation(USER_MIRROR_TRANSFER_LIMIT.to_string()));
+            }
+            offset = offset.saturating_add(chunk.len() as u64);
+            buf.extend_from_slice(&chunk);
+        }
+        if sha256_hex(&buf) != *hash {
+            return Err(AppError::validation(format!(
+                "USER_MIRROR_OBJECT_HASH_MISMATCH:{hash}"
+            )));
+        }
+        total = total.saturating_add(buf.len() as u64);
+        collected.insert(hash.clone(), buf);
+    }
+    Ok(collected)
+}
+
+async fn get_object_chunk(
+    peer: &PeerClient,
+    base_url: &str,
+    expected_device_id: &str,
+    transfer_id: &str,
+    object_hash: &str,
+    offset: u64,
+) -> Result<Vec<u8>, AppError> {
+    let path =
+        format!("/api/agent-hub/user-mirror/objects/{transfer_id}/{object_hash}?offset={offset}");
+    get_bytes_bound(
+        peer,
+        base_url,
+        &path,
+        expected_device_id,
+        PeerTimeoutClass::Mutation,
+    )
+    .await
+    .map_err(map_user_mirror_peer_err)
+}
+
+async fn post_json_bound<T, B>(
+    peer: &PeerClient,
+    base_url: &str,
+    path: &str,
+    body: &B,
+    expected_device_id: &str,
+    class: PeerTimeoutClass,
+) -> Result<T, PeerCallError>
+where
+    T: DeserializeOwned,
+    B: Serialize + ?Sized,
+{
+    let url = format!("{base_url}{path}");
+    let resp = peer
+        .http_client()
+        .post(&url)
+        .timeout(class.timeout())
+        .header(REQUEST_ID_HEADER, new_request_id())
+        .header(EXPECTED_DEVICE_ID_HEADER.as_str(), expected_device_id)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| PeerCallError::Network {
+            url: url.clone(),
+            source: e,
+        })?;
+    crate::net::peer_error::parse_peer_response::<T>(resp, &url).await
+}
+
+async fn get_bytes_bound(
+    peer: &PeerClient,
+    base_url: &str,
+    path: &str,
+    expected_device_id: &str,
+    class: PeerTimeoutClass,
+) -> Result<Vec<u8>, PeerCallError> {
+    let url = format!("{base_url}{path}");
+    let resp = peer
+        .http_client()
+        .get(&url)
+        .timeout(class.timeout())
+        .header(REQUEST_ID_HEADER, new_request_id())
+        .header(EXPECTED_DEVICE_ID_HEADER.as_str(), expected_device_id)
+        .send()
+        .await
+        .map_err(|e| PeerCallError::Network {
+            url: url.clone(),
+            source: e,
+        })?;
+    if !resp.status().is_success() {
+        return Err(PeerCallError::Remote {
+            url,
+            status: resp.status().as_u16(),
+            code: "user_mirror_object".into(),
+            message: format!("object chunk http {}", resp.status()),
+            request_id: String::new(),
+            retryable: false,
+            legacy: false,
+            details: serde_json::json!({}),
+        });
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| PeerCallError::Network { url, source: e })
+}
+
 /// 把 preview DTO 插入 dest `agent_hub_user_mirror_plans`。
 async fn persist_plan(dest_state: &AppState, plan: &UserMirrorPlanDto) -> Result<(), AppError> {
     dest_state
@@ -367,7 +732,7 @@ fn failed_apply_result(
 mod tests {
     use super::{
         apply_user_mirror_with_env, get_user_mirror, preview_from_two_inventories,
-        preview_user_mirror_with_envs,
+        preview_user_mirror_with_envs, UserMirrorService,
     };
     use crate::agent_hub::targets::TargetEnvironment;
     use crate::agent_hub::user_mirror::inventory::build_local_user_mirror_inventory_with_env;
@@ -383,6 +748,17 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    /// Business Logic: control/Tauri 共用 UserMirrorService 三入口。
+    /// Code Logic: 结构体 + impl 方法签名存在。
+    #[test]
+    fn owner_user_mirror_service_exposes_preview_apply_get() {
+        let src = include_str!("service.rs");
+        let name = "UserMirrorService";
+        assert!(src.contains(&format!("pub struct {name};")));
+        assert!(src.contains(&format!("impl {name} {{")));
+        let _ = std::any::type_name::<UserMirrorService>();
+    }
 
     struct DualEnv {
         _tmp: tempfile::TempDir,

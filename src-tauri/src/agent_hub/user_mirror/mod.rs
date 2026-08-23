@@ -31,4 +31,4 @@ pub use selection::{
     freeze_user_mirror_selection, source_read_user_mirror_object_chunk, BuiltUserMirrorSelection,
     UserMirrorObjectBinding,
 };
-pub use service::{apply_user_mirror, get_user_mirror, preview_user_mirror};
+pub use service::{apply_user_mirror, get_user_mirror, preview_user_mirror, UserMirrorService};

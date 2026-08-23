@@ -71,6 +71,10 @@ use crate::agent_hub::user_instructions::{
     UserInstructionCanonicalDto, UserInstructionPlanDto, UserInstructionWorkspaceDto,
     UserNativeInstructionFileDto, WriteUserNativeInstructionFileRequest,
 };
+use crate::agent_hub::user_mirror::{
+    ApplyUserMirrorRequest, PreviewUserMirrorRequest, UserMirrorPlanDto, UserMirrorResultDto,
+    UserMirrorService,
+};
 use crate::backend::authority::RuntimeRole;
 #[cfg(test)]
 use crate::backend::control::AGENT_HUB_API_VERSION;
@@ -821,6 +825,47 @@ pub async fn agent_hub_get_portable_pull(
             .agent_hub_get_portable_pull(&client_request_id));
     }
     PortableService::get_portable_pull(state.inner(), &client_request_id).await
+}
+
+/// Business Logic: apply 前必须生成用户级镜像 plan（写 plan ledger）。
+/// Code Logic: v5 写兼容；owner UserMirrorService / GuiClient control。
+#[tauri::command]
+pub async fn agent_hub_preview_user_mirror(
+    state: State<'_, AppState>,
+    request: PreviewUserMirrorRequest,
+) -> Result<UserMirrorPlanDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_preview_user_mirror(request));
+    }
+    UserMirrorService::preview_user_mirror(state.inner(), request).await
+}
+
+/// Business Logic: 用户确认后全 Agent 镜像写盘；同 clientRequestId 幂等。
+/// Code Logic: v5 mutation；owner apply / GuiClient 900s control。
+#[tauri::command]
+pub async fn agent_hub_apply_user_mirror(
+    state: State<'_, AppState>,
+    request: ApplyUserMirrorRequest,
+) -> Result<UserMirrorResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client.agent_hub_apply_user_mirror(request));
+    }
+    UserMirrorService::apply_user_mirror(state.inner(), request).await
+}
+
+/// Business Logic: 对账镜像结果（含 partial / outcomeUnknown）。
+/// Code Logic: owner get / GuiClient control query。
+#[tauri::command]
+pub async fn agent_hub_get_user_mirror(
+    state: State<'_, AppState>,
+    client_request_id: String,
+) -> Result<UserMirrorResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return proxy_agent_hub!(state, |client| client
+            .agent_hub_get_user_mirror(&client_request_id));
+    }
+    UserMirrorService::get_user_mirror(state.inner(), &client_request_id).await
 }
 
 /// Business Logic: 同机跨 Agent 指令适配预览（手动，非后台）。
@@ -1774,6 +1819,9 @@ mod tests {
             "agent_hub_preview_portable_pull",
             "agent_hub_apply_portable_pull",
             "agent_hub_get_portable_pull",
+            "agent_hub_preview_user_mirror",
+            "agent_hub_apply_user_mirror",
+            "agent_hub_get_user_mirror",
         ] {
             assert!(src.contains(name), "missing command {name}");
         }
@@ -1821,6 +1869,44 @@ mod tests {
         assert!(src.contains(".agent_hub_apply_portable_pull("));
         assert!(src.contains(".agent_hub_get_portable_pull("));
         assert!(src.contains("require_agent_hub_write_compatibility"));
+    }
+
+    /// Business Logic: 用户级镜像走 GuiClient control 代理，owner 调 UserMirrorService。
+    /// Code Logic: 生产 fn 签名 + proxy_agent_hub + UserMirrorService；GUI 源码不得直连 peer HTTP。
+    #[test]
+    fn user_mirror_commands_authority_and_gui_must_not_call_peer_http() {
+        let src = include_str!("agent_hub.rs");
+        for sig in [
+            "pub async fn agent_hub_preview_user_mirror(",
+            "pub async fn agent_hub_apply_user_mirror(",
+            "pub async fn agent_hub_get_user_mirror(",
+        ] {
+            assert!(src.contains(sig), "missing command signature {sig}");
+        }
+        assert!(src.contains("UserMirrorService::preview_user_mirror(state.inner(), request)"));
+        assert!(src.contains("UserMirrorService::apply_user_mirror(state.inner(), request)"));
+        assert!(
+            src.contains("UserMirrorService::get_user_mirror(state.inner(), &client_request_id)")
+        );
+        assert!(src.contains(".agent_hub_preview_user_mirror(request)"));
+        assert!(src.contains(".agent_hub_apply_user_mirror(request)"));
+        assert!(src.contains(".agent_hub_get_user_mirror(&client_request_id)"));
+        let forbidden_peer_path = concat!("/api/agent-hub", "/user-mirror");
+        assert!(
+            !src.contains(forbidden_peer_path),
+            "GUI command 层不得直连 peer HTTP"
+        );
+        let lib_src = include_str!("../lib.rs");
+        for name in [
+            "agent_hub_cmd::agent_hub_preview_user_mirror",
+            "agent_hub_cmd::agent_hub_apply_user_mirror",
+            "agent_hub_cmd::agent_hub_get_user_mirror",
+        ] {
+            assert!(
+                lib_src.contains(name),
+                "lib.rs generate_handler 必须包含 {name}"
+            );
+        }
     }
 
     /// Business Logic: 旧 backend agentHubApiVersion 必须阻断 mutation。
@@ -1906,6 +1992,9 @@ mod tests {
             "agent_hub.preview_portable_pull",
             "agent_hub.apply_portable_pull",
             "agent_hub.get_portable_pull",
+            "agent_hub.preview_user_mirror",
+            "agent_hub.apply_user_mirror",
+            "agent_hub.get_user_mirror",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
