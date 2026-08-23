@@ -107,13 +107,18 @@ pub(crate) async fn discover_workbench_browser_targets_for_state(
 ///     本机 Tauri 命令和远端 HTTP open-project 路由都需要在执行设备上创建或复用本地项目记录。
 ///
 /// Code Logic（这个函数做什么）:
-///     canonicalize 输入路径并要求是目录；同路径已有记录则复用 id/created_at，只更新时间；
-///     新路径生成 UUID 项目 id，kind 固定为 local，设备信息来自 AppState/config。
+///     canonicalize 输入路径并要求是目录；空目录（可忽略系统垃圾文件）先 git init；
+///     同路径已有记录则复用 id/created_at，只更新时间；新路径生成 UUID，kind 固定 local。
 pub async fn add_local_workbench_project_from_path(
     state: &AppState,
     path: String,
 ) -> Result<WorkbenchProjectDto, AppError> {
-    let root = run_blocking_fs(move || projects::canonical_project_root(&path)).await?;
+    let root = run_blocking_fs(move || {
+        let root = projects::canonical_project_root(&path)?;
+        crate::workbench::remote_directory::git_init_if_empty(&root)?;
+        Ok(root)
+    })
+    .await?;
     let canonical_path = root.to_string_lossy().to_string();
     let existing = state
         .workbench_project_repo
@@ -390,6 +395,160 @@ pub async fn open_workbench_remote_project(
         return Ok(v);
     }
     open_workbench_remote_project_for_state(state.inner(), &device_id, &path).await
+}
+
+/// 列出本机可浏览根目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面添加本机项目改为应用内浏览，需要与手机/远端同一套 roots。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理 control op；owner 返回 `remote_roots()`。
+#[tauri::command]
+pub async fn list_workbench_fs_roots(
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkbenchRemoteRootDto>, AppError> {
+    if let Some(v) =
+        proxy_workbench_if_gui(state.inner(), "projects.fs_roots", serde_json::json!({})).await?
+    {
+        return Ok(v);
+    }
+    Ok(crate::workbench::remote_directory::remote_roots())
+}
+
+/// 列出本机某个目录的一级条目。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机应用内选择器需要逐层浏览。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理；owner 在 blocking pool 调 `list_remote_directory`。
+#[tauri::command]
+pub async fn list_workbench_fs_dir(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<WorkbenchRemoteDirectoryEntryDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.fs_list_dir",
+        serde_json::json!({ "path": path.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    run_blocking_fs(move || {
+        crate::workbench::remote_directory::list_remote_directory(std::path::Path::new(&path))
+    })
+    .await
+}
+
+/// 读取本机路径信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打开本机目录前需要可读性与 Git 探测。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理；owner blocking `remote_path_info`。
+#[tauri::command]
+pub async fn get_workbench_fs_path_info(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.fs_path_info",
+        serde_json::json!({ "path": path.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    run_blocking_fs(move || {
+        crate::workbench::remote_directory::remote_path_info(std::path::Path::new(&path))
+    })
+    .await
+}
+
+/// 在本机浏览层父目录新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面本机选择器需要在当前目录 mkdir，不写项目记录。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理；owner blocking `create_browse_dir`。
+#[tauri::command]
+pub async fn create_workbench_fs_dir(
+    state: State<'_, AppState>,
+    parent_path: String,
+    name: String,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.fs_create_dir",
+        serde_json::json!({ "parentPath": parent_path.clone(), "name": name.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    run_blocking_fs(move || {
+        crate::workbench::remote_directory::create_browse_dir(
+            std::path::Path::new(&parent_path),
+            &name,
+        )
+    })
+    .await
+}
+
+/// owner 路径：在局域网对端浏览层新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 invoke 与 mobile 两跳必须共用对端 `fs/create-dir`。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 device base URL，调用 RemoteWorkbenchClient::create_browse_dir。
+pub(crate) async fn create_workbench_remote_fs_dir_for_state(
+    state: &AppState,
+    device_id: &str,
+    parent_path: &str,
+    name: &str,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    let base_url = device_base_url(state, device_id)?;
+    RemoteWorkbenchClient::new()
+        .with_expected_device_id(device_id)
+        .create_browse_dir(&base_url, parent_path, name)
+        .await
+}
+
+/// 在局域网对端浏览层新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面远端选择器在当前对端目录 mkdir。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理；owner 走 `create_workbench_remote_fs_dir_for_state`。
+#[tauri::command]
+pub async fn create_workbench_remote_fs_dir(
+    state: State<'_, AppState>,
+    device_id: String,
+    parent_path: String,
+    name: String,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remote_create_dir",
+        serde_json::json!({
+            "deviceId": device_id.clone(),
+            "parentPath": parent_path.clone(),
+            "name": name.clone()
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    create_workbench_remote_fs_dir_for_state(state.inner(), &device_id, &parent_path, &name).await
 }
 
 /// owner 路径：从最近项目移除记录。

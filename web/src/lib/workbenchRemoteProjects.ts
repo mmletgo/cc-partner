@@ -8,6 +8,38 @@ import type {
 /** 后端固定中文离线文案（legacy 兼容，优先仍走 typed NETWORK_OFFLINE）。 */
 const REMOTE_WORKBENCH_OFFLINE_ERROR = '远端设备不在线';
 
+/** 对端浏览层 mkdir 能力 token，与 `workbench.fs.create-dir.v1` 精确匹配。 */
+export const WORKBENCH_FS_CREATE_DIR_CAPABILITY = 'workbench.fs.create-dir.v1';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   选择器在发 mkdir 前应拦掉明显非法名称，避免无意义请求。
+ *
+ * Code Logic（这个函数做什么）:
+ *   拒绝空、`.`/`..`、含 `/` 或 `\`；最终以后端校验为准。
+ */
+export function isValidBrowseChildName(name: string): boolean {
+  const trimmed = name.trim();
+  return (
+    trimmed.length > 0 &&
+    trimmed !== '.' &&
+    trimmed !== '..' &&
+    !trimmed.includes('/') &&
+    !trimmed.includes('\\')
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   旧对端没有浏览层 mkdir；缺能力时应隐藏「新建文件夹」，不得回落项目内 create-dir。
+ *
+ * Code Logic（这个函数做什么）:
+ *   capabilities 精确包含 `workbench.fs.create-dir.v1` 才为 true。
+ */
+export function peerSupportsBrowseMkdir(capabilities: string[] | undefined): boolean {
+  return Array.isArray(capabilities) && capabilities.includes(WORKBENCH_FS_CREATE_DIR_CAPABILITY);
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   侧栏项目列表是用户的空间记忆锚点：选中或重新打开已有项目时不得把它挪到顶部，

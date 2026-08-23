@@ -79,4 +79,28 @@ describe('mobileProjectPickerReducer', () => {
     });
     expect(blocked.selectedDeviceId).toBeNull();
   });
+
+  test('createSucceeded path is selected without opening', () => {
+    const browsing = mobileProjectPickerReducer(initialMobileProjectPickerState, {
+      type: 'openLocal',
+    });
+    const atParent = mobileProjectPickerReducer(browsing, {
+      type: 'pathBrowsed',
+      path: '/Users/hans/web_project',
+    });
+    const started = mobileProjectPickerReducer(atParent, { type: 'createStarted' });
+    expect(started.createBusy).toBe(true);
+    const blocked = mobileProjectPickerReducer(started, {
+      type: 'pathBrowsed',
+      path: '/Users/hans/other',
+    });
+    expect(blocked.currentPath).toBe('/Users/hans/web_project');
+    const finished = mobileProjectPickerReducer(started, { type: 'createFinished' });
+    const selected = mobileProjectPickerReducer(finished, {
+      type: 'pathBrowsed',
+      path: '/Users/hans/web_project/new-studio',
+    });
+    expect(selected.selectedPath).toBe('/Users/hans/web_project/new-studio');
+    expect(selected.openBusy).toBe(false);
+  });
 });

@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use crate::error::AppError;
+use crate::workbench::fs::validate_child_name;
 use crate::workbench::models::{
     WorkbenchRemoteDirectoryEntryDto, WorkbenchRemotePathInfoDto, WorkbenchRemoteRootDto,
 };
@@ -17,6 +18,10 @@ use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// 打开为空目录时 `git init` 可忽略的系统垃圾文件名（精确匹配）。
+const GIT_INIT_IGNORE_NAMES: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini", ".localized"];
 
 /// Business Logic（为什么需要这个函数）:
 ///     远端目录浏览和路径详情都需要向前端展示可读的修改时间。
@@ -213,10 +218,93 @@ pub fn remote_path_info(path: &Path) -> Result<WorkbenchRemotePathInfoDto, AppEr
     })
 }
 
+/// 在浏览层父目录下新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     添加项目前用户要在本机或对端指定目录里先建空文件夹；不能走项目内 `files/create-dir`。
+///
+/// Code Logic（这个函数做什么）:
+///     校验单段名称，canonicalize 父目录且必须是文件夹，目标已存在则拒绝，`create_dir` 一层后返回 path info。
+pub fn create_browse_dir(
+    parent: &Path,
+    name: &str,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    validate_child_name(name)?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|error| AppError::generic(format!("父路径不可访问: {error}")))?;
+    if !parent.is_dir() {
+        return Err(AppError::generic("父路径必须是文件夹"));
+    }
+    let target = parent.join(name);
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(AppError::generic("目标路径已存在"));
+    }
+    fs::create_dir(&target)
+        .map_err(|error| AppError::generic(format!("创建文件夹失败: {error}")))?;
+    remote_path_info(&target)
+}
+
+/// 判断目录在打开为项目时是否应 `git init`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     空目录（可忽略系统垃圾文件）打开时要变成 Git 仓库；已有内容或已有 `.git` 不能覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     `.git` 存在则 false；否则一级子项名称必须都属于垃圾集合。
+pub fn dir_is_empty_for_git_init(path: &Path) -> bool {
+    if path.join(".git").exists() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        if !GIT_INIT_IGNORE_NAMES.contains(&name) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 空目录则在该路径执行 `git init`（不提交、不写 README）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打开为项目时，看起来为空的目录应成为可立即 commit 的空仓库。
+///
+/// Code Logic（这个函数做什么）:
+///     非空直接 Ok；否则 `git init` 于 canonical cwd，失败返回「无法初始化 Git 仓库」。
+pub fn git_init_if_empty(path: &Path) -> Result<(), AppError> {
+    if !dir_is_empty_for_git_init(path) {
+        return Ok(());
+    }
+    let output = Command::new("git")
+        .arg("init")
+        .current_dir(path)
+        .output()
+        .map_err(|error| AppError::generic(format!("无法初始化 Git 仓库: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err(AppError::generic("无法初始化 Git 仓库"));
+        }
+        return Err(AppError::generic(format!("无法初始化 Git 仓库: {stderr}")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use tempfile::TempDir;
 
     /// Business Logic（为什么需要这个测试）:
@@ -251,5 +339,81 @@ mod tests {
         assert_eq!(entries[0].name, "src");
         assert_eq!(entries[0].kind, "dir");
         assert_eq!(entries[1].name, "README.md");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     浏览层只能建一层合法名称，不能覆盖已有路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     成功创建、拒绝分隔符/`.`/`..`/已存在目标，以及父路径不是目录。
+    #[test]
+    fn create_browse_dir_accepts_one_level_and_rejects_bad_names() {
+        let temp = TempDir::new().unwrap();
+        let created = create_browse_dir(temp.path(), "new-studio").unwrap();
+        assert_eq!(created.kind, "dir");
+        assert!(!created.is_git_repo);
+        assert!(temp.path().join("new-studio").is_dir());
+
+        assert!(create_browse_dir(temp.path(), "nested/dir").is_err());
+        assert!(create_browse_dir(temp.path(), "..").is_err());
+        assert!(create_browse_dir(temp.path(), ".").is_err());
+        assert!(create_browse_dir(temp.path(), "new-studio").is_err());
+
+        let file = temp.path().join("notes.txt");
+        fs::write(&file, "x").unwrap();
+        assert!(create_browse_dir(&file, "child").is_err());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     打开项目时的空目录判定必须忽略系统垃圾文件，且不得把已有仓库或真实内容当成空。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖真空、仅垃圾文件、`.git`、普通文件和子目录。
+    #[test]
+    fn dir_is_empty_for_git_init_ignores_junk_only() {
+        let temp = TempDir::new().unwrap();
+        assert!(dir_is_empty_for_git_init(temp.path()));
+
+        fs::write(temp.path().join(".DS_Store"), []).unwrap();
+        assert!(dir_is_empty_for_git_init(temp.path()));
+
+        fs::write(temp.path().join("README.md"), "hi").unwrap();
+        assert!(!dir_is_empty_for_git_init(temp.path()));
+
+        let gitty = TempDir::new().unwrap();
+        fs::create_dir(gitty.path().join(".git")).unwrap();
+        assert!(!dir_is_empty_for_git_init(gitty.path()));
+
+        let nested = TempDir::new().unwrap();
+        fs::create_dir(nested.path().join("src")).unwrap();
+        assert!(!dir_is_empty_for_git_init(nested.path()));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     空目录打开时应 git init 且不提交；非空目录不得误建 `.git`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真空目录 init 后存在 `.git` 且 `git status` 无提交；有文件的目录 init 是 no-op。
+    #[test]
+    fn git_init_if_empty_inits_vacant_dir_only() {
+        let empty = TempDir::new().unwrap();
+        git_init_if_empty(empty.path()).unwrap();
+        assert!(empty.path().join(".git").exists());
+        let log = Command::new("git")
+            .args([
+                "-C",
+                empty.path().to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(!log.status.success(), "empty init must not create a commit");
+
+        let filled = TempDir::new().unwrap();
+        fs::write(filled.path().join("a.txt"), "a").unwrap();
+        git_init_if_empty(filled.path()).unwrap();
+        assert!(!filled.path().join(".git").exists());
     }
 }

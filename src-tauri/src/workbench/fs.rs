@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Code Logic（这个函数做什么）:
 ///     拒绝空名、路径分隔符、`.` 和 `..`。
-fn validate_child_name(name: &str) -> Result<(), AppError> {
+pub(crate) fn validate_child_name(name: &str) -> Result<(), AppError> {
     if name.trim().is_empty()
         || name.contains('/')
         || name.contains('\\')

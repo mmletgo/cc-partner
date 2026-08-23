@@ -99,21 +99,29 @@ pub use git::{
 };
 
 pub use projects::{
-    __cmd__add_workbench_project, __cmd__get_workbench_launch_summary,
-    __cmd__get_workbench_remote_path_info, __cmd__list_workbench_projects,
+    __cmd__add_workbench_project, __cmd__create_workbench_fs_dir,
+    __cmd__create_workbench_remote_fs_dir, __cmd__get_workbench_fs_path_info,
+    __cmd__get_workbench_launch_summary, __cmd__get_workbench_remote_path_info,
+    __cmd__list_workbench_fs_dir, __cmd__list_workbench_fs_roots, __cmd__list_workbench_projects,
     __cmd__list_workbench_remote_dir, __cmd__list_workbench_remote_roots,
     __cmd__open_workbench_remote_project, __cmd__remove_workbench_project,
     __cmd__reorder_workbench_projects, __cmd__touch_workbench_project,
-    __tauri_command_name_add_workbench_project, __tauri_command_name_get_workbench_launch_summary,
+    __tauri_command_name_add_workbench_project, __tauri_command_name_create_workbench_fs_dir,
+    __tauri_command_name_create_workbench_remote_fs_dir,
+    __tauri_command_name_get_workbench_fs_path_info,
+    __tauri_command_name_get_workbench_launch_summary,
     __tauri_command_name_get_workbench_remote_path_info,
+    __tauri_command_name_list_workbench_fs_dir, __tauri_command_name_list_workbench_fs_roots,
     __tauri_command_name_list_workbench_projects, __tauri_command_name_list_workbench_remote_dir,
     __tauri_command_name_list_workbench_remote_roots,
     __tauri_command_name_open_workbench_remote_project,
     __tauri_command_name_remove_workbench_project, __tauri_command_name_reorder_workbench_projects,
-    __tauri_command_name_touch_workbench_project, add_workbench_project,
-    get_workbench_launch_summary, get_workbench_remote_path_info, list_workbench_projects,
-    list_workbench_remote_dir, list_workbench_remote_roots, open_workbench_remote_project,
-    remove_workbench_project, reorder_workbench_projects, touch_workbench_project,
+    __tauri_command_name_touch_workbench_project, add_workbench_project, create_workbench_fs_dir,
+    create_workbench_remote_fs_dir, get_workbench_fs_path_info, get_workbench_launch_summary,
+    get_workbench_remote_path_info, list_workbench_fs_dir, list_workbench_fs_roots,
+    list_workbench_projects, list_workbench_remote_dir, list_workbench_remote_roots,
+    open_workbench_remote_project, remove_workbench_project, reorder_workbench_projects,
+    touch_workbench_project,
 };
 // control_workbench 经 crate::commands::workbench:: 路径访问 pub(crate) helper
 pub(crate) use projects::reorder_workbench_projects_for_state;
@@ -226,7 +234,8 @@ pub(crate) use common::{
     ensure_main_worktree, ensure_remote_event_bridge_for_project_mapping,
     ensure_remote_project_context, get_project, local_project_id_for_remote_inner_project,
     map_remote_session_dtos_with_project, now_iso, proxy_workbench_if_gui, remote_inner_session_id,
-    remote_inner_worktree_id, remove_local_workbench_project_with_barrier, WorkbenchMergeResultDto,
+    remote_inner_worktree_id, remove_local_workbench_project_with_barrier, run_blocking_fs,
+    WorkbenchMergeResultDto,
 };
 
 pub(crate) use files::{
@@ -249,11 +258,11 @@ pub(crate) use git::{
 };
 
 pub(crate) use projects::{
-    discover_workbench_browser_targets_for_state, get_workbench_remote_path_info_for_state,
-    list_workbench_remote_dir_for_state, list_workbench_remote_roots_for_state,
-    list_workbench_worktrees_for_state, local_get_workbench_worktree,
-    local_list_workbench_worktrees, open_workbench_remote_project_for_state,
-    remove_workbench_project_for_state,
+    create_workbench_remote_fs_dir_for_state, discover_workbench_browser_targets_for_state,
+    get_workbench_remote_path_info_for_state, list_workbench_remote_dir_for_state,
+    list_workbench_remote_roots_for_state, list_workbench_worktrees_for_state,
+    local_get_workbench_worktree, local_list_workbench_worktrees,
+    open_workbench_remote_project_for_state, remove_workbench_project_for_state,
 };
 
 pub(crate) use sessions::{

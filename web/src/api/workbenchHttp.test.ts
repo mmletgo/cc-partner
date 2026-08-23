@@ -131,6 +131,16 @@ function mockSuccessBodyForUrl(url: string): unknown {
   if (url.includes('/fs/roots') || url.includes('/remote/roots') || url.includes('/fs/list') || url.includes('/remote/list')) {
     return [];
   }
+  if (url.includes('/fs/create-dir') || url.includes('/remote/create-dir')) {
+    return {
+      name: 'new-studio',
+      path: '/tmp/new-studio',
+      kind: 'dir',
+      readable: true,
+      isGitRepo: false,
+      suggestedProjectName: 'new-studio',
+    };
+  }
   if (url.includes('/fs/info') || url.includes('/remote/info')) {
     return {
       name: 'app',
@@ -476,10 +486,12 @@ describe('workbenchHttp project admin', () => {
       await workbenchHttp.fs.roots();
       await workbenchHttp.fs.listDir('/tmp');
       await workbenchHttp.fs.info('/tmp/app');
+      await workbenchHttp.fs.createDir('/tmp', 'new-studio');
       await workbenchHttp.remote.roots('office');
       await workbenchHttp.remote.listDir('office', '/Users/dev');
       await workbenchHttp.remote.info('office', '/Users/dev/studio');
       await workbenchHttp.remote.openProject('office', '/Users/dev/studio');
+      await workbenchHttp.remote.createDir('office', '/Users/dev', 'studio');
       await workbenchHttp.projects.remove('p1');
       assert(capturedUrls[0] === '/api/mobile/workbench/fs/roots', 'host roots should use mobile fs roots');
       assert(
@@ -493,31 +505,43 @@ describe('workbenchHttp project admin', () => {
         'host info should send path',
       );
       assert(
-        capturedUrls[3] === '/api/mobile/workbench/remote/roots' &&
-          JSON.stringify(capturedBodies[3]) === JSON.stringify({ deviceId: 'office' }),
+        capturedUrls[3] === '/api/mobile/workbench/fs/create-dir' &&
+          JSON.stringify(capturedBodies[3]) ===
+            JSON.stringify({ parentPath: '/tmp', name: 'new-studio' }),
+        'host create-dir should send parentPath and name',
+      );
+      assert(
+        capturedUrls[4] === '/api/mobile/workbench/remote/roots' &&
+          JSON.stringify(capturedBodies[4]) === JSON.stringify({ deviceId: 'office' }),
         'lan roots should send deviceId',
       );
       assert(
-        capturedUrls[4] === '/api/mobile/workbench/remote/list' &&
-          JSON.stringify(capturedBodies[4]) ===
+        capturedUrls[5] === '/api/mobile/workbench/remote/list' &&
+          JSON.stringify(capturedBodies[5]) ===
             JSON.stringify({ deviceId: 'office', path: '/Users/dev' }),
         'lan list should send deviceId and path',
       );
       assert(
-        capturedUrls[5] === '/api/mobile/workbench/remote/info' &&
-          JSON.stringify(capturedBodies[5]) ===
+        capturedUrls[6] === '/api/mobile/workbench/remote/info' &&
+          JSON.stringify(capturedBodies[6]) ===
             JSON.stringify({ deviceId: 'office', path: '/Users/dev/studio' }),
         'lan info should send deviceId and path',
       );
       assert(
-        capturedUrls[6] === '/api/mobile/workbench/remote/open' &&
-          JSON.stringify(capturedBodies[6]) ===
+        capturedUrls[7] === '/api/mobile/workbench/remote/open' &&
+          JSON.stringify(capturedBodies[7]) ===
             JSON.stringify({ deviceId: 'office', path: '/Users/dev/studio' }),
         'lan open should send deviceId and path',
       );
       assert(
-        capturedUrls[7] === '/api/mobile/workbench/projects/remove' &&
-          JSON.stringify(capturedBodies[7]) === JSON.stringify({ projectId: 'p1' }),
+        capturedUrls[8] === '/api/mobile/workbench/remote/create-dir' &&
+          JSON.stringify(capturedBodies[8]) ===
+            JSON.stringify({ deviceId: 'office', parentPath: '/Users/dev', name: 'studio' }),
+        'lan create-dir should send deviceId parentPath and name',
+      );
+      assert(
+        capturedUrls[9] === '/api/mobile/workbench/projects/remove' &&
+          JSON.stringify(capturedBodies[9]) === JSON.stringify({ projectId: 'p1' }),
         'remove should send projectId',
       );
     } finally {

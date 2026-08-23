@@ -40,7 +40,7 @@ export type WorkbenchLaunchSurfaceMode = 'empty' | 'continue';
  * onConnectRemote 由表面层注入为「打开 picker」，页面层只提供本机添加与 tmux 检查。
  */
 export interface WorkbenchEmptyStateActions {
-  /** 添加本机项目（复用 projects context 的 chooseAndAddProject）。 */
+  /** 打开本机应用内目录选择器。 */
   onAddLocal: () => void;
   /** 打开远端项目选择器（由 LaunchSurface 注入 open-picker 回调）。 */
   onConnectRemote: () => void;
@@ -48,11 +48,13 @@ export interface WorkbenchEmptyStateActions {
   onCheckTmux: () => void;
 }
 
-/** 页面层注入的空态动作（不含远端 picker 打开，picker 由 LaunchSurface 托管）。 */
+/** 页面层注入的空态动作（本机/远端 picker 由 LaunchSurface 托管）。 */
 export type WorkbenchEmptyStatePageActions = Pick<
   WorkbenchEmptyStateActions,
-  'onAddLocal' | 'onCheckTmux'
->;
+  'onCheckTmux'
+> & {
+  onAddLocal?: () => void;
+};
 
 export interface WorkbenchLaunchSurfaceProps {
   mode: WorkbenchLaunchSurfaceMode;
@@ -201,7 +203,7 @@ export function WorkbenchLaunchSurface({
 }: WorkbenchLaunchSurfaceProps): ReactElement {
   const { t } = useTranslation(['workbench', 'attention']);
   const navigate = useNavigate();
-  const { chooseAndAddProject, openRemoteProject, selectProject, projects } =
+  const { openRemoteProject, selectProject, projects } =
     useWorkbenchProjects();
   const { check: checkDependency } = useWorkbenchDependency();
   const attention = useAttention();
@@ -209,17 +211,30 @@ export function WorkbenchLaunchSurface({
   const addLocalButtonRef = useRef<HTMLButtonElement>(null);
   const [remotePickerOpen, setRemotePickerOpen] = useState(false);
   const [remoteOpenBusy, setRemoteOpenBusy] = useState(false);
+  const [localPickerOpen, setLocalPickerOpen] = useState(false);
+  const [localOpenBusy, setLocalOpenBusy] = useState(false);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   继续工作 section 空态仍需要「添加本机项目」快捷入口。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 chooseAndAddProject；成功后由 projects context 选中项目。
+   *   打开本机应用内目录选择器。
    */
   const handleAddLocal = useCallback(() => {
-    void chooseAndAddProject();
-  }, [chooseAndAddProject]);
+    setLocalOpenBusy(false);
+    setLocalPickerOpen(true);
+  }, []);
+
+  const closeLocalPicker = useCallback(
+    (options?: { force?: boolean }) => {
+      if (localOpenBusy && !options?.force) return;
+      setLocalPickerOpen(false);
+      setLocalOpenBusy(false);
+      window.setTimeout(() => addLocalButtonRef.current?.focus(), 0);
+    },
+    [localOpenBusy],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -336,6 +351,28 @@ export function WorkbenchLaunchSurface({
             onOpenBusyChange={setRemoteOpenBusy}
             onProjectOpened={() => {
               closeRemotePicker({ force: true });
+            }}
+          />
+        </Dialog>
+        <Dialog
+          open={localPickerOpen}
+          titleId="workbench-launch-local-picker-title"
+          onClose={() => {
+            closeLocalPicker();
+          }}
+          closeOnEscape={!localOpenBusy}
+          closeOnBackdrop={!localOpenBusy}
+          className={styles.launchRemoteDialog}
+        >
+          <h2 id="workbench-launch-local-picker-title" className="sr-only">
+            {t('workbench:remoteProjectPicker.localTitle')}
+          </h2>
+          <WorkbenchRemoteProjectPicker
+            source="local"
+            onCancel={closeLocalPicker}
+            onOpenBusyChange={setLocalOpenBusy}
+            onProjectOpened={() => {
+              closeLocalPicker({ force: true });
             }}
           />
         </Dialog>
@@ -515,6 +552,28 @@ export function WorkbenchLaunchSurface({
           onOpenBusyChange={setRemoteOpenBusy}
           onProjectOpened={() => {
             closeRemotePicker({ force: true });
+          }}
+        />
+      </Dialog>
+      <Dialog
+        open={localPickerOpen}
+        titleId="workbench-launch-local-picker-title-continue"
+        onClose={() => {
+          closeLocalPicker();
+        }}
+        closeOnEscape={!localOpenBusy}
+        closeOnBackdrop={!localOpenBusy}
+        className={styles.launchRemoteDialog}
+      >
+        <h2 id="workbench-launch-local-picker-title-continue" className="sr-only">
+          {t('workbench:remoteProjectPicker.localTitle')}
+        </h2>
+        <WorkbenchRemoteProjectPicker
+          source="local"
+          onCancel={closeLocalPicker}
+          onOpenBusyChange={setLocalOpenBusy}
+          onProjectOpened={() => {
+            closeLocalPicker({ force: true });
           }}
         />
       </Dialog>

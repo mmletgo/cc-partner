@@ -150,6 +150,7 @@ advertised capabilities are:
 - `workbench.browser-verification.v1` — owner-side browser verification (`POST /api/workbench/browser-verification/{create,get,cancel,artifact}`); token and routes ship atomically; start accepts only live `previewId` (no target URL/CDP); fixed LAN remains unauthenticated
 - `workbench.banner.v1` — owning-device Workbench banner singleton (`POST /api/workbench/banner/{get,save}`); no project id; missing capability is unsupported, never silent localStorage write
 - `workbench.dependency-install.v1` — owning-device tmux install/cancel (`POST /api/workbench/dependency/{install,cancel}`); status (`POST /api/workbench/dependency/status`) is best-effort even when the token is absent so a peer that already has tmux is not reported as missing; missing route/token maps to unsupported (Workbench does not occupy the terminal), never pretends ready; headless can spawn_install; sudo without TTY fails closed
+- `workbench.fs.create-dir.v1` — owning-device browse-layer mkdir (`POST /api/workbench/fs/create-dir`); body camelCase `{parentPath,name}` creates one child directory outside any project; missing capability hides New Folder / unsupported; never falls back to project-scoped `files/create-dir`; protocol negotiation only (not auth)
 - `workbench.hook-repair.v1` — owning-device hook-failure AI repair (`POST /api/workbench/worktrees/repair-hook-failure`); owner runs `repair_local_worktree_hook_failure`; controller remaps session ids; missing capability is unsupported
 - `workbench.mutation-outcome.v1` — Workbench Git mutation envelope (`succeeded|unknown`) + durable operation ledger query (`POST /api/workbench/worktrees/mutation-operation`); token ships with commit/push/merge/remove envelope responses
 - `workbench.project-notes.v1` — owning-device project notes (`POST /api/workbench/notes/{get,save}`) keyed by inner local project id; controller remaps returned `projectId`; rejects `remote:`; missing capability is unsupported, never silent shortcut write
@@ -328,6 +329,7 @@ the router so the inventory check matches exactly.
 | GET | `/api/workbench/fs/roots` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/fs/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/fs/info` | `routes/workbench.rs` | none | read-only | — |
+| POST | `/api/workbench/fs/create-dir` | `routes/workbench.rs` | creates one directory under an absolute parent path | requires-idempotency-key | capability `workbench.fs.create-dir.v1`; body camelCase `{parentPath,name}`; no dedupe key yet; clients MUST NOT auto-retry; distinct from project-scoped `files/create-dir` |
 | GET | `/api/workbench/projects/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | `add_workbench_project` reuses the same project id for the same path and only refreshes timestamps |
 | POST | `/api/workbench/worktrees/list` | `routes/workbench.rs` | none (reconciles existing worktrees into SQLite) | read-only | — |
@@ -402,10 +404,12 @@ the router so the inventory check matches exactly.
 | GET | `/api/mobile/workbench/fs/roots` | `routes/workbench.rs` | none; lists host browse roots | read-only | same helper as P2P `/api/workbench/fs/roots` |
 | POST | `/api/mobile/workbench/fs/list` | `routes/workbench.rs` | none; lists one host directory | read-only | body `{path}`; blank path → 400 |
 | POST | `/api/mobile/workbench/fs/info` | `routes/workbench.rs` | none; host path metadata | read-only | body `{path}`; blank path → 400 |
+| POST | `/api/mobile/workbench/fs/create-dir` | `routes/workbench.rs` | creates one directory on the `/mobile` host | requires-idempotency-key | body `{parentPath,name}`; same helper as P2P `fs/create-dir`; no auto-retry |
 | POST | `/api/mobile/workbench/remote/roots` | `routes/workbench.rs` | none; lists peer browse roots via host two-hop | read-only | body `{deviceId}`; blank deviceId → 400 |
 | POST | `/api/mobile/workbench/remote/list` | `routes/workbench.rs` | none; lists one peer directory via host two-hop | read-only | body `{deviceId,path}` |
 | POST | `/api/mobile/workbench/remote/info` | `routes/workbench.rs` | none; peer path metadata via host two-hop | read-only | body `{deviceId,path}` |
 | POST | `/api/mobile/workbench/remote/open` | `routes/workbench.rs` | opens peer local project then upserts host remote shortcut | naturally-idempotent | same stable `remote:<deviceId>:<path>` shortcut id as desktop |
+| POST | `/api/mobile/workbench/remote/create-dir` | `routes/workbench.rs` | creates one directory on a peer via host two-hop | requires-idempotency-key | body `{deviceId,parentPath,name}`; host calls peer `POST /api/workbench/fs/create-dir`; no auto-retry |
 | POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
 | POST | `/api/mobile/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | mobile shares the same `clientOperationId` ledger/envelope as P2P commit |

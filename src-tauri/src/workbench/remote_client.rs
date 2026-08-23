@@ -265,6 +265,28 @@ impl RemoteWorkbenchClient {
         .await
     }
 
+    /// 在远端浏览层父目录新建一层文件夹。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本机/手机选择器在对端当前目录 mkdir，不能走项目内 files/create-dir。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/fs/create-dir`，body `{parentPath,name}`，解析 path info。
+    pub async fn create_browse_dir(
+        &self,
+        base_url: &str,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+        let body = serde_json::json!({ "parentPath": parent_path, "name": name });
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/fs/create-dir"),
+            &body,
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
     /// 在远端设备打开项目。
     ///
     /// Business Logic（为什么需要这个函数）:

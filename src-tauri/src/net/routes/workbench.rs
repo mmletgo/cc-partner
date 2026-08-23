@@ -14,25 +14,25 @@ use crate::commands::prompt_optimizer::{
 use crate::commands::workbench::{
     add_local_workbench_project_from_path, close_workbench_pane_for_state,
     close_workbench_session_for_state, commit_workbench_worktree_for_state,
-    create_workbench_browser_preview_for_state, create_workbench_session_for_state,
-    create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
-    focus_workbench_session_for_state, get_agent_session_preview_for_state,
-    get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
-    get_workbench_remote_path_info_for_state, hydrate_workbench_session_scrollback_for_state,
-    list_workbench_dir_for_state, list_workbench_git_commits_for_state,
-    list_workbench_remote_dir_for_state, list_workbench_remote_roots_for_state,
-    list_workbench_sessions_for_state, list_workbench_worktrees_for_state,
-    local_close_workbench_pane, local_close_workbench_session, local_commit_workbench_worktree,
-    local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
-    local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
-    local_get_workbench_banner, local_get_workbench_path_info, local_get_workbench_project_note,
-    local_get_workbench_worktree, local_list_workbench_dir, local_list_workbench_git_commits,
-    local_list_workbench_sessions, local_list_workbench_worktrees, local_merge_workbench_worktree,
-    local_open_workbench_file, local_paste_workbench_session_image,
-    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
-    local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
-    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_banner,
-    local_save_workbench_project_note, local_save_workbench_text_file,
+    create_workbench_browser_preview_for_state, create_workbench_remote_fs_dir_for_state,
+    create_workbench_session_for_state, create_workbench_worktree_for_state,
+    discover_workbench_browser_targets_for_state, focus_workbench_session_for_state,
+    get_agent_session_preview_for_state, get_focused_workbench_session_for_state,
+    get_workbench_path_info_for_state, get_workbench_remote_path_info_for_state,
+    hydrate_workbench_session_scrollback_for_state, list_workbench_dir_for_state,
+    list_workbench_git_commits_for_state, list_workbench_remote_dir_for_state,
+    list_workbench_remote_roots_for_state, list_workbench_sessions_for_state,
+    list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
+    local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
+    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
+    local_focus_workbench_session, local_get_workbench_banner, local_get_workbench_path_info,
+    local_get_workbench_project_note, local_get_workbench_worktree, local_list_workbench_dir,
+    local_list_workbench_git_commits, local_list_workbench_sessions,
+    local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
+    local_paste_workbench_session_image, local_preview_workbench_html_asset,
+    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
+    local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
+    local_save_workbench_banner, local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
     local_write_workbench_session_input, local_zoom_workbench_pane,
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
@@ -158,6 +158,35 @@ pub struct RemotePathReq {
     pub path: String,
 }
 
+/// 浏览层新建一层目录的请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     项目外 mkdir 只需要父目录绝对路径和单段名称，不能带 projectId。
+///
+/// Code Logic（这个结构体做什么）:
+///     反序列化 camelCase `{parentPath, name}`。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseCreateDirReq {
+    pub parent_path: String,
+    pub name: String,
+}
+
+/// 手机经主机二级代理在对端新建目录的请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     两跳 mkdir 需要 deviceId + 父路径 + 名称。
+///
+/// Code Logic（这个结构体做什么）:
+///     反序列化 camelCase `{deviceId, parentPath, name}`。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDeviceCreateDirReq {
+    pub device_id: String,
+    pub parent_path: String,
+    pub name: String,
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     所有远端路径类接口都必须拒绝空输入，避免误把空串解释为当前工作目录。
 ///
@@ -169,6 +198,18 @@ fn validate_remote_path(path: String) -> Result<String, AppError> {
         return Err(AppError::validation("路径不能为空"));
     }
     Ok(path)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     浏览层 mkdir 的名称不能为空，空串不能当成合法文件夹名。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后为空返回校验错误。
+fn validate_browse_child_name(name: String) -> Result<String, AppError> {
+    if name.trim().is_empty() {
+        return Err(AppError::validation("名称不能为空"));
+    }
+    Ok(name)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -344,6 +385,26 @@ pub async fn remote_path_info(
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.info"))?;
     let info = remote_directory::remote_path_info(Path::new(&path))
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.info"))?;
+    Ok(Json(info))
+}
+
+/// 在浏览层父目录新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     对端/本机添加项目前需要在当前浏览目录建空文件夹，不能走项目内 files/create-dir。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 parentPath/name 后调用 `create_browse_dir`，返回新目录 path info。
+pub async fn create_browse_dir(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<BrowseCreateDirReq>,
+) -> P2pResult<Json<WorkbenchRemotePathInfoDto>> {
+    let parent_path = validate_remote_path(req.parent_path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.create_dir"))?;
+    let name = validate_browse_child_name(req.name)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.create_dir"))?;
+    let info = remote_directory::create_browse_dir(Path::new(&parent_path), &name)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fs.create_dir"))?;
     Ok(Json(info))
 }
 
@@ -1907,6 +1968,26 @@ pub async fn mobile_fs_path_info(
     Ok(Json(info))
 }
 
+/// 手机端在主机当前浏览目录新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机添加本机项目时需要在主机目录里新建空文件夹。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 parentPath/name 后复用 `create_browse_dir`。
+pub async fn mobile_fs_create_dir(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<BrowseCreateDirReq>,
+) -> P2pResult<Json<WorkbenchRemotePathInfoDto>> {
+    let parent_path = validate_remote_path(req.parent_path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.create_dir"))?;
+    let name = validate_browse_child_name(req.name)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.create_dir"))?;
+    let info = remote_directory::create_browse_dir(Path::new(&parent_path), &name)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.fs.create_dir"))?;
+    Ok(Json(info))
+}
+
 /// 手机端列出局域网对端可浏览根目录。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1991,6 +2072,30 @@ pub async fn mobile_open_remote_project(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.open"))?;
     Ok(Json(project))
+}
+
+/// 手机端经主机在局域网对端新建一层文件夹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机选对端目录时需要两跳 mkdir，不能假定浏览器能直连对端。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 deviceId/parentPath/name 后调用 owner `create_workbench_remote_fs_dir_for_state`。
+pub async fn mobile_remote_create_dir(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteDeviceCreateDirReq>,
+) -> P2pResult<Json<WorkbenchRemotePathInfoDto>> {
+    let device_id = validate_device_id(req.device_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.create_dir"))?;
+    let parent_path = validate_remote_path(req.parent_path)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.create_dir"))?;
+    let name = validate_browse_child_name(req.name)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.create_dir"))?;
+    let info = create_workbench_remote_fs_dir_for_state(&state, &device_id, &parent_path, &name)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.remote.create_dir"))?;
+    Ok(Json(info))
 }
 
 /// 手机端从最近项目列表移除记录。
@@ -3008,6 +3113,41 @@ mod tests {
         .expect_err("blank host path info should be rejected");
         assert_eq!(info_error.envelope().error, "路径不能为空");
         assert_eq!(info_error.envelope().code, "validation_error");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     浏览层 mkdir 必须拒绝空父路径和空名称，避免误建到 cwd。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 P2P 与 mobile create-dir handler，断言 validation_error。
+    #[tokio::test]
+    async fn browse_create_dir_rejects_blank_parent_and_name() {
+        let ctx = P2pRequestContext {
+            request_id: "req-mkdir".to_string(),
+        };
+        let parent_error = create_browse_dir(
+            Extension(ctx.clone()),
+            Json(BrowseCreateDirReq {
+                parent_path: "  ".to_string(),
+                name: "ok".to_string(),
+            }),
+        )
+        .await
+        .expect_err("blank parent should be rejected");
+        assert_eq!(parent_error.envelope().error, "路径不能为空");
+        assert_eq!(parent_error.envelope().code, "validation_error");
+
+        let name_error = mobile_fs_create_dir(
+            Extension(ctx),
+            Json(BrowseCreateDirReq {
+                parent_path: "/tmp".to_string(),
+                name: "\n".to_string(),
+            }),
+        )
+        .await
+        .expect_err("blank name should be rejected");
+        assert_eq!(name_error.envelope().error, "名称不能为空");
+        assert_eq!(name_error.envelope().code, "validation_error");
     }
 
     /// Business Logic（为什么需要这个测试）:

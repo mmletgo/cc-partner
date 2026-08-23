@@ -1257,6 +1257,12 @@ export const workbenchHttp = {
         { path },
         { policy: { kind: 'query' }, decoder: workbenchRemotePathInfoDecoder },
       ),
+    createDir: (parentPath: string, name: string) =>
+      postJson<WorkbenchRemotePathInfo>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/fs/create-dir`,
+        { parentPath, name },
+        { policy: { kind: 'mutation' }, decoder: workbenchRemotePathInfoDecoder },
+      ),
   },
   remote: {
     roots: (deviceId: string) =>
@@ -1282,6 +1288,12 @@ export const workbenchHttp = {
         `${MOBILE_WORKBENCH_API_PREFIX}/remote/open`,
         { deviceId, path },
         { policy: { kind: 'mutation' }, decoder: workbenchProjectDecoder },
+      ),
+    createDir: (deviceId: string, parentPath: string, name: string) =>
+      postJson<WorkbenchRemotePathInfo>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/remote/create-dir`,
+        { deviceId, parentPath, name },
+        { policy: { kind: 'mutation' }, decoder: workbenchRemotePathInfoDecoder },
       ),
   },
   bridges: {

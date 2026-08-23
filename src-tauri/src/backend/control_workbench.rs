@@ -220,6 +220,53 @@ async fn dispatch_workbench_op(
             let item = open_remote_project(state, device_id, path).await?;
             Ok(serde_json::to_value(item)?)
         }
+        "projects.fs_roots" => {
+            let items = crate::workbench::remote_directory::remote_roots();
+            Ok(serde_json::to_value(items)?)
+        }
+        "projects.fs_list_dir" => {
+            let path = required_string(&payload, "path")?;
+            let items = workbench::run_blocking_fs(move || {
+                crate::workbench::remote_directory::list_remote_directory(std::path::Path::new(
+                    &path,
+                ))
+            })
+            .await?;
+            Ok(serde_json::to_value(items)?)
+        }
+        "projects.fs_path_info" => {
+            let path = required_string(&payload, "path")?;
+            let info = workbench::run_blocking_fs(move || {
+                crate::workbench::remote_directory::remote_path_info(std::path::Path::new(&path))
+            })
+            .await?;
+            Ok(serde_json::to_value(info)?)
+        }
+        "projects.fs_create_dir" => {
+            let parent_path = required_string(&payload, "parentPath")?;
+            let name = required_string(&payload, "name")?;
+            let info = workbench::run_blocking_fs(move || {
+                crate::workbench::remote_directory::create_browse_dir(
+                    std::path::Path::new(&parent_path),
+                    &name,
+                )
+            })
+            .await?;
+            Ok(serde_json::to_value(info)?)
+        }
+        "projects.remote_create_dir" => {
+            let device_id = required_string(&payload, "deviceId")?;
+            let parent_path = required_string(&payload, "parentPath")?;
+            let name = required_string(&payload, "name")?;
+            let info = workbench::create_workbench_remote_fs_dir_for_state(
+                state,
+                &device_id,
+                &parent_path,
+                &name,
+            )
+            .await?;
+            Ok(serde_json::to_value(info)?)
+        }
 
         // ---- worktrees / git ----
         "worktrees.list" => {

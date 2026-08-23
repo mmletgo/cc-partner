@@ -305,7 +305,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells；legacy matrix 兼容） |
 | WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口） |
-| WorkbenchRemoteProjectPicker | onProjectOpened, onCancel, openProject | Workbench 局域网远端项目目录选择器 |
+| WorkbenchRemoteProjectPicker | source local\|remote, onProjectOpened, onCancel, openProject | Workbench 本机/局域网应用内目录选择器（可新建一层文件夹后确认打开） |
 | WorkbenchDependencyCard | compact, className, source?, deviceName?, remoteWriteDisabled? | Workbench tmux 依赖状态与安装引导卡片；远端项目传入对端 source + 设备名，确认框展示对端 argv；Settings 仍用本机 Context |
 | WorkbenchCodeEditor | value, language, readOnly, onChange | Workbench 代码/源码文件的 CodeMirror 编辑器 |
 | WorkbenchMarkdownEditor | value, mode, onModeChange, onChange | Workbench Markdown WYSIWYG/source/split 编辑器 |
@@ -506,7 +506,7 @@ git tag v<版本号> && git push origin v<版本号>  # 公开发布 macOS arm64
 | Tauri `#[tauri::command]` 注册与领域语义 | `src-tauri/src/commands/*` + `src-tauri/AGENTS.md` 各领域节 |
 | 前端 invoke / HTTP 封装 | `web/src/api/*` + `web/AGENTS.md` |
 | P2P `/api/*` 路由、retry class、幂等键 | `docs/p2p-protocol.md` + `node scripts/check-p2p-route-inventory.mjs` + `src-tauri/AGENTS.md`「P2P 协议…」 |
-| Health 能力 token | `server_protocol_info()` 字典序全集；本轮新增含 `agent-hub.portable-user.v1` · `agent-hub.user-instructions.v1` · `agent-hub.user-mirror.v1` · `orchestrator.complete-agent-run.v1` · `orchestrator.move-workflow-state.v1` · `workbench.banner.v1` · `workbench.dependency-install.v1` · `workbench.hook-repair.v1` · `workbench.project-notes.v1`（权威清单见 `docs/p2p-protocol.md`） |
+| Health 能力 token | `server_protocol_info()` 字典序全集；本轮新增含 `agent-hub.portable-user.v1` · `agent-hub.user-instructions.v1` · `agent-hub.user-mirror.v1` · `orchestrator.complete-agent-run.v1` · `orchestrator.move-workflow-state.v1` · `workbench.banner.v1` · `workbench.dependency-install.v1` · `workbench.fs.create-dir.v1` · `workbench.hook-repair.v1` · `workbench.project-notes.v1`（权威清单见 `docs/p2p-protocol.md`） |
 
 ### 8.3 添加新能力
 

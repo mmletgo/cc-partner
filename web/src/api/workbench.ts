@@ -24,6 +24,7 @@ import {
   workbenchBannerDecoder,
   workbenchProjectNoteDecoder,
   workbenchProjectsDecoder,
+  workbenchRemotePathInfoDecoder,
   workbenchRemoveResultDecoder,
   workbenchRepairHookFailureDecoder,
   workbenchSaveTextResultDecoder,
@@ -149,6 +150,38 @@ export const workbenchApi = {
      */
     openProject: (deviceId: string, path: string) =>
       invokeDecoded('open_workbench_remote_project', { deviceId, path }, workbenchProjectDecoder),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   远端选择器在当前浏览目录新建一层文件夹。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke create_workbench_remote_fs_dir。
+     */
+    createDir: (deviceId: string, parentPath: string, name: string) =>
+      invokeDecoded(
+        'create_workbench_remote_fs_dir',
+        { deviceId, parentPath, name },
+        workbenchRemotePathInfoDecoder,
+      ),
+  },
+
+  /**
+   * Business Logic（为什么需要这个分组）:
+   *   桌面添加本机项目改为应用内浏览，roots/list/info/mkdir 与远端选择器同形。
+   */
+  fs: {
+    roots: () => invoke<WorkbenchRemoteRoot[]>('list_workbench_fs_roots'),
+    listDir: (path: string) =>
+      invoke<WorkbenchRemoteDirectoryEntry[]>('list_workbench_fs_dir', { path }),
+    info: (path: string) =>
+      invokeDecoded('get_workbench_fs_path_info', { path }, workbenchRemotePathInfoDecoder),
+    createDir: (parentPath: string, name: string) =>
+      invokeDecoded(
+        'create_workbench_fs_dir',
+        { parentPath, name },
+        workbenchRemotePathInfoDecoder,
+      ),
   },
 
   worktrees: {

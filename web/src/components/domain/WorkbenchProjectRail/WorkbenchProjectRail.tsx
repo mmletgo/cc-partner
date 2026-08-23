@@ -7,7 +7,7 @@
  *
  * Code Logic（这个组件做什么）:
  *   渲染设置菜单项下方的项目列表、window/pane 统计、本机/远端添加入口和项目移除操作；
- *   空态直接暴露 chooseAndAddProject / 远端选择器（复用既有回调，不新增项目 API）；
+ *   空态打开本机/远端应用内目录选择器；
  *   点击项目后选择项目并跳转 `/workbench`，保持 deep link 语义。
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  */
@@ -52,6 +52,8 @@ export function WorkbenchProjectRail() {
   const [sourcePickerOpen, setSourcePickerOpen] = useState<boolean>(false);
   const [remotePickerOpen, setRemotePickerOpen] = useState<boolean>(false);
   const [remoteOpenBusy, setRemoteOpenBusy] = useState<boolean>(false);
+  const [localPickerOpen, setLocalPickerOpen] = useState<boolean>(false);
+  const [localOpenBusy, setLocalOpenBusy] = useState<boolean>(false);
   const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
   const [dropIndicator, setDropIndicator] = useState<{
     projectId: string;
@@ -75,7 +77,6 @@ export function WorkbenchProjectRail() {
     projectError,
     projectSessionStats,
     loadProjects,
-    chooseAndAddProject,
     openRemoteProject,
     selectProject,
     removeProject,
@@ -180,14 +181,20 @@ export function WorkbenchProjectRail() {
    *   本机项目 CTA（空态按钮与来源弹层）共用同一添加流程。
    *
    * Code Logic（这个函数做什么）:
-   *   关闭来源弹层后调用 chooseAndAddProject；成功则导航 /workbench。
+   *   关闭来源弹层后打开本机应用内选择器。
    */
   const handleAddLocalProject = useCallback(() => {
     setSourcePickerOpen(false);
-    void chooseAndAddProject().then((project) => {
-      if (project) navigate('/workbench');
-    });
-  }, [chooseAndAddProject, navigate]);
+    setLocalOpenBusy(false);
+    setLocalPickerOpen(true);
+  }, []);
+
+  const closeLocalPicker = useCallback((options?: { force?: boolean }) => {
+    if (localOpenBusy && !options?.force) return;
+    setLocalPickerOpen(false);
+    setLocalOpenBusy(false);
+    window.setTimeout(() => addProjectButtonRef.current?.focus(), 0);
+  }, [localOpenBusy]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -727,6 +734,30 @@ export function WorkbenchProjectRail() {
           onOpenBusyChange={setRemoteOpenBusy}
           onProjectOpened={() => {
             closeRemotePicker({ force: true });
+            navigate('/workbench');
+          }}
+        />
+      </Dialog>
+
+      <Dialog
+        open={localPickerOpen}
+        titleId="workbench-local-picker-title"
+        onClose={() => {
+          closeLocalPicker();
+        }}
+        closeOnEscape={!localOpenBusy}
+        closeOnBackdrop={!localOpenBusy}
+        className={styles.modalDialog}
+      >
+        <h2 id="workbench-local-picker-title" className="sr-only">
+          {t('workbench:remoteProjectPicker.localTitle')}
+        </h2>
+        <WorkbenchRemoteProjectPicker
+          source="local"
+          onCancel={closeLocalPicker}
+          onOpenBusyChange={setLocalOpenBusy}
+          onProjectOpened={() => {
+            closeLocalPicker({ force: true });
             navigate('/workbench');
           }}
         />

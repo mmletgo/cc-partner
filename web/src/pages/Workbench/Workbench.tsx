@@ -95,7 +95,6 @@ export function Workbench() {
     projectsLoading,
     selectProject,
     refreshProjectSessionStats,
-    chooseAndAddProject,
     currentWindowLabel,
     occupancy,
   } = useWorkbenchProjects();
@@ -710,9 +709,7 @@ export function Workbench() {
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
   } as CSSProperties;
 
-  const handleEmptyAddLocal = useCallback(() => {
-    void chooseAndAddProject();
-  }, [chooseAndAddProject]);
+
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -748,7 +745,6 @@ export function Workbench() {
           void refreshLaunchSummary();
         }}
         emptyActions={{
-          onAddLocal: handleEmptyAddLocal,
           onCheckTmux: handleEmptyCheckTmux,
         }}
       />

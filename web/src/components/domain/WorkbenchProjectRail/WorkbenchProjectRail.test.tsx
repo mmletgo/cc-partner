@@ -192,7 +192,7 @@ describe('WorkbenchProjectRail discovery IA', () => {
     expect(remoteCta).toBeTruthy();
 
     fireEvent.click(localCta);
-    expect(ctx.chooseAndAddProject).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('dialog', { name: '打开本机项目' })).toBeTruthy();
 
     fireEvent.click(remoteCta);
     expect(screen.getByRole('dialog', { name: '打开远端项目' })).toBeTruthy();

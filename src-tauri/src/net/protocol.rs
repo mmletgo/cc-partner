@@ -342,6 +342,18 @@ pub const CAPABILITY_WORKBENCH_BANNER_V1: &str = "workbench.banner.v1";
 ///     字符串常量，列入 `server_protocol_info()`；与 dependency 路由原子上线。
 pub const CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1: &str = "workbench.dependency-install.v1";
 
+/// 能力 token：v1 Workbench 浏览层建目录
+/// （`POST /api/workbench/fs/create-dir`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端/手机在对端当前浏览目录新建文件夹前必须确认对端已实现项目外 mkdir；
+///     旧 peer 缺失时隐藏入口或 unsupported，不得回落项目内 `files/create-dir`。
+///     本 token 只做协议协商，不是 LAN 鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 `fs/create-dir` 路由原子上线。
+pub const CAPABILITY_WORKBENCH_FS_CREATE_DIR_V1: &str = "workbench.fs.create-dir.v1";
+
 /// 能力 token：v1 Workbench 钩子失败 AI 修复
 /// （`POST /api/workbench/worktrees/repair-hook-failure`）。
 ///
@@ -512,6 +524,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_BANNER_V1.to_string(),
             CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1.to_string(),
             CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1.to_string(),
+            CAPABILITY_WORKBENCH_FS_CREATE_DIR_V1.to_string(),
             CAPABILITY_WORKBENCH_HOOK_REPAIR_V1.to_string(),
             CAPABILITY_WORKBENCH_LAN_FLEET_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
@@ -694,6 +707,7 @@ mod tests {
                 "workbench.banner.v1".to_string(),
                 "workbench.browser-verification.v1".to_string(),
                 "workbench.dependency-install.v1".to_string(),
+                "workbench.fs.create-dir.v1".to_string(),
                 "workbench.hook-repair.v1".to_string(),
                 "workbench.lan-fleet.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
@@ -724,6 +738,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_WORKBENCH_BANNER_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_FS_CREATE_DIR_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_HOOK_REPAIR_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_LAN_FLEET_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_PROJECT_NOTES_V1));

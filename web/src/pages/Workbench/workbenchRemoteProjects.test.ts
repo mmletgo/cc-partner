@@ -7,6 +7,9 @@ import type {
 import {
   canOpenHostProjectSelection,
   canOpenRemoteProjectSelection,
+  isValidBrowseChildName,
+  peerSupportsBrowseMkdir,
+  WORKBENCH_FS_CREATE_DIR_CAPABILITY,
   isRemoteWorkbenchOfflineError,
   isRemoteWorkbenchProjectOffline,
   remoteParentPath,
@@ -313,6 +316,32 @@ function testOrderProjectsByIds(): void {
   assert(ordered.map((p) => p.id).join(',') === 'c,a,b', 'ordered ids first then remainder');
 }
 
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   浏览层 mkdir 前端预检必须与后端单段名称规则对齐。
+ */
+function testIsValidBrowseChildName(): void {
+  assert(isValidBrowseChildName('new-studio'), 'plain name should pass');
+  assert(!isValidBrowseChildName(''), 'empty should fail');
+  assert(!isValidBrowseChildName('.'), 'dot should fail');
+  assert(!isValidBrowseChildName('..'), 'dotdot should fail');
+  assert(!isValidBrowseChildName('a/b'), 'slash should fail');
+  assert(!isValidBrowseChildName('a\\b'), 'backslash should fail');
+}
+
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   旧对端缺 token 时不得展示新建文件夹。
+ */
+function testPeerSupportsBrowseMkdir(): void {
+  assert(!peerSupportsBrowseMkdir(undefined), 'missing list is unsupported');
+  assert(!peerSupportsBrowseMkdir([]), 'empty list is unsupported');
+  assert(
+    peerSupportsBrowseMkdir([WORKBENCH_FS_CREATE_DIR_CAPABILITY]),
+    'exact token should enable mkdir',
+  );
+}
+
 
 describe('workbenchRemoteProjects', () => {
   test('upsert, parent path, sort, open gate and offline detection helpers', async () => {
@@ -324,5 +353,7 @@ describe('workbenchRemoteProjects', () => {
     testRemoteOfflineStateOnlyMatchesCurrentRemoteProject();
     testMoveProjectIdBeforeAndAfter();
     testOrderProjectsByIds();
+    testIsValidBrowseChildName();
+    testPeerSupportsBrowseMkdir();
   });
 });

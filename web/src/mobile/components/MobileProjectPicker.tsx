@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { transferHttp } from '@/api/transferHttp';
 import { httpWorkbenchTransport, workbenchHttp } from '@/api/workbenchHttp';
-import { Button, Drawer } from '@/components/primitives';
+import { Button, Dialog, Drawer, Input } from '@/components/primitives';
 import {
   canOpenHostProjectSelection,
   canOpenRemoteProjectSelection,
+  isValidBrowseChildName,
+  peerSupportsBrowseMkdir,
   remoteParentPath,
   sortRemoteDirectoryEntries,
 } from '@/lib/workbenchRemoteProjects';
@@ -85,8 +87,13 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
     pathInfoPath,
     pathInfoLoading,
     openBusy,
+    createBusy,
+    createError,
     error,
   } = state;
+  const pickerBusy = openBusy || createBusy;
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createName, setCreateName] = useState('');
   const sortedEntries = sortRemoteDirectoryEntries(entries);
   const parentPath = currentPath ? remoteParentPath(currentPath) : null;
   const canOpen =
@@ -96,7 +103,7 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
           pathInfo,
           pathInfoPath,
           pathInfoLoading,
-          openBusy,
+          pickerBusy,
         )
       : canOpenRemoteProjectSelection(
           selectedDeviceId,
@@ -104,8 +111,15 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
           pathInfo,
           selectedDeviceId,
           pathInfoLoading,
-          openBusy,
+          pickerBusy,
         );
+  const selectedLanDevice = devices.find((device) => device.id === selectedDeviceId);
+  const browsing = kind === 'local' || mode === 'lan-browse';
+  const canCreateFolder =
+    browsing &&
+    Boolean(currentPath) &&
+    !pickerBusy &&
+    (kind === 'local' || peerSupportsBrowseMkdir(selectedLanDevice?.capabilities));
   const title =
     kind === 'local'
       ? t('workbench:mobile.projectPanel.pickerLocalTitle')
@@ -231,9 +245,31 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
   }, [kind, mode, open, selectedDeviceId, selectedPath]);
 
   const handleClose = useCallback(() => {
-    if (openBusy) return;
+    if (pickerBusy) return;
     onClose();
-  }, [onClose, openBusy]);
+  }, [onClose, pickerBusy]);
+
+  const handleCreateFolder = useCallback(async () => {
+    const name = createName.trim();
+    if (!currentPath || !isValidBrowseChildName(name) || pickerBusy) return;
+    if (kind === 'lan' && !selectedDeviceId) return;
+    dispatch({ type: 'createStarted' });
+    try {
+      const created =
+        kind === 'local'
+          ? await workbenchHttp.fs.createDir(currentPath, name)
+          : await workbenchHttp.remote.createDir(selectedDeviceId as string, currentPath, name);
+      dispatch({ type: 'createFinished' });
+      dispatch({ type: 'pathBrowsed', path: created.path });
+      setCreateDialogOpen(false);
+      setCreateName('');
+    } catch (createErr: unknown) {
+      dispatch({
+        type: 'createFailed',
+        error: errorMessage(createErr, t('workbench:mobile.projectPanel.errors.create')),
+      });
+    }
+  }, [createName, currentPath, kind, pickerBusy, selectedDeviceId, t]);
 
   const handleOpen = useCallback(async () => {
     if (!canOpen || !selectedPath) return;
@@ -260,15 +296,15 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
       open={open}
       titleId="mobile-project-picker-title"
       side="right"
-      closeOnEscape={!openBusy}
-      closeOnBackdrop={!openBusy}
+      closeOnEscape={!pickerBusy}
+      closeOnBackdrop={!pickerBusy}
       onClose={handleClose}
       initialFocusRef={closeButtonRef}
       className={styles.pickerDrawer}
     >
       <div className={styles.pickerHeader}>
         <h2 id="mobile-project-picker-title">{title}</h2>
-        <Button ref={closeButtonRef} variant="ghost" size="sm" disabled={openBusy} onClick={handleClose}>
+        <Button ref={closeButtonRef} variant="ghost" size="sm" disabled={pickerBusy} onClick={handleClose}>
           {t('workbench:mobile.projectPanel.pickerCancel')}
         </Button>
       </div>
@@ -287,7 +323,7 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
                 key={device.id}
                 type="button"
                 className={styles.mobileListItem}
-                disabled={openBusy}
+                disabled={pickerBusy}
                 onClick={() => dispatch({ type: 'deviceSelected', deviceId: device.id })}
               >
                 <strong className={styles.mobileListTitle}>{device.name}</strong>
@@ -302,7 +338,7 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
             <Button
               variant="ghost"
               size="sm"
-              disabled={!parentPath || openBusy}
+              disabled={!parentPath || pickerBusy}
               onClick={() => {
                 if (parentPath) dispatch({ type: 'pathBrowsed', path: parentPath });
               }}
@@ -320,7 +356,7 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
                   key={entry.path}
                   type="button"
                   className={styles.mobileListItem}
-                  disabled={!dir || openBusy}
+                  disabled={!dir || pickerBusy}
                   onClick={() => {
                     if (!dir) return;
                     dispatch({ type: 'pathBrowsed', path: entry.path });
@@ -343,11 +379,55 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
       </div>
       {showBrowser ? (
         <div className={styles.pickerFooter}>
+          {canCreateFolder ? (
+            <Button
+              variant="secondary"
+              disabled={pickerBusy}
+              onClick={() => {
+                setCreateName('');
+                setCreateDialogOpen(true);
+              }}
+            >
+              {t('workbench:mobile.projectPanel.createFolder')}
+            </Button>
+          ) : null}
           <Button variant="primary" disabled={!canOpen} loading={openBusy} onClick={() => void handleOpen()}>
             {t('workbench:mobile.projectPanel.pickerOpen')}
           </Button>
         </div>
       ) : null}
+      <Dialog
+        open={createDialogOpen}
+        titleId="mobile-browse-create-dir-title"
+        onClose={() => {
+          if (createBusy) return;
+          setCreateDialogOpen(false);
+        }}
+        closeOnEscape={!createBusy}
+        closeOnBackdrop={!createBusy}
+      >
+        <h2 id="mobile-browse-create-dir-title">{t('workbench:mobile.projectPanel.createFolder')}</h2>
+        <Input
+          value={createName}
+          onChange={(event) => setCreateName(event.target.value)}
+          placeholder={t('workbench:mobile.projectPanel.createFolderPlaceholder')}
+          disabled={createBusy}
+        />
+        {createError ? <p className={styles.panelError}>{createError}</p> : null}
+        <div className={styles.pickerFooter}>
+          <Button variant="ghost" disabled={createBusy} onClick={() => setCreateDialogOpen(false)}>
+            {t('workbench:mobile.projectPanel.pickerCancel')}
+          </Button>
+          <Button
+            variant="primary"
+            loading={createBusy}
+            disabled={!isValidBrowseChildName(createName) || createBusy}
+            onClick={() => void handleCreateFolder()}
+          >
+            {t('workbench:mobile.projectPanel.createFolderConfirm')}
+          </Button>
+        </div>
+      </Dialog>
     </Drawer>
   );
 }

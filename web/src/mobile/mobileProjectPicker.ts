@@ -22,6 +22,8 @@ export interface MobileProjectPickerState {
   pathInfoPath: string | null;
   pathInfoLoading: boolean;
   openBusy: boolean;
+  createBusy: boolean;
+  createError: string | null;
   error: string | null;
 }
 
@@ -46,7 +48,10 @@ export type MobileProjectPickerAction =
   | { type: 'pathInfoFailed'; path: string }
   | { type: 'openStarted' }
   | { type: 'openFinished' }
-  | { type: 'openFailed'; error: string };
+  | { type: 'openFailed'; error: string }
+  | { type: 'createStarted' }
+  | { type: 'createFinished' }
+  | { type: 'createFailed'; error: string };
 
 export const initialMobileProjectPickerState: MobileProjectPickerState = {
   mode: 'closed',
@@ -63,6 +68,8 @@ export const initialMobileProjectPickerState: MobileProjectPickerState = {
   pathInfoPath: null,
   pathInfoLoading: false,
   openBusy: false,
+  createBusy: false,
+  createError: null,
   error: null,
 };
 
@@ -122,7 +129,7 @@ export function mobileProjectPickerReducer(
         devicesLoading: true,
       };
     case 'close':
-      if (state.openBusy) return state;
+      if (state.openBusy || state.createBusy) return state;
       return { ...initialMobileProjectPickerState };
     case 'devicesLoading':
       return { ...state, devicesLoading: true, error: null };
@@ -135,7 +142,7 @@ export function mobileProjectPickerReducer(
     case 'devicesFailed':
       return { ...state, devicesLoading: false, error: action.error };
     case 'deviceSelected':
-      if (state.openBusy) return state;
+      if (state.openBusy || state.createBusy) return state;
       return {
         ...state,
         mode: 'lan-browse',
@@ -175,7 +182,7 @@ export function mobileProjectPickerReducer(
     case 'rootsFailed':
       return { ...state, rootsLoading: false, error: action.error };
     case 'pathBrowsed':
-      if (state.openBusy) return state;
+      if (state.openBusy || state.createBusy) return state;
       return {
         ...state,
         currentPath: action.path,
@@ -193,7 +200,7 @@ export function mobileProjectPickerReducer(
     case 'entriesFailed':
       return { ...state, entriesLoading: false, error: action.error };
     case 'entrySelected':
-      if (state.openBusy) return state;
+      if (state.openBusy || state.createBusy) return state;
       return {
         ...state,
         selectedPath: action.path,
@@ -226,6 +233,12 @@ export function mobileProjectPickerReducer(
       return { ...state, openBusy: false };
     case 'openFailed':
       return { ...state, openBusy: false, error: action.error };
+    case 'createStarted':
+      return { ...state, createBusy: true, createError: null, error: null };
+    case 'createFinished':
+      return { ...state, createBusy: false, createError: null };
+    case 'createFailed':
+      return { ...state, createBusy: false, createError: action.error };
     default:
       return state;
   }

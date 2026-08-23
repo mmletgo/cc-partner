@@ -115,11 +115,17 @@
     "readable": "Readable",
     "notReadable": "Not readable",
     "openProject": "Open project",
+    "localTitle": "Open local project",
+    "localSubtitle": "Browse this computer. You can create a folder, then open it as a project.",
+    "createFolder": "New folder",
+    "createFolderPlaceholder": "Folder name",
+    "createFolderConfirm": "Create",
     "errors": {
       "devices": "Failed to load online devices",
       "roots": "Failed to load remote roots",
       "dir": "Failed to load remote folder",
-      "open": "Failed to open remote project"
+      "open": "Failed to open remote project",
+      "create": "Failed to create folder"
     }
   },
   "projectWindowCount": "{{count}} window",
@@ -216,11 +222,15 @@
       "pickerEmptyDevices": "No online LAN devices",
       "pickerEmptyDir": "This folder is empty",
       "pickerGit": "Has .git",
+      "createFolder": "New folder",
+      "createFolderPlaceholder": "Folder name",
+      "createFolderConfirm": "Create",
       "errors": {
         "devices": "Could not load devices",
         "roots": "Could not load roots",
         "dir": "Could not read folder",
-        "open": "Could not open project"
+        "open": "Could not open project",
+        "create": "Could not create folder"
       }
     },
     "browser": {

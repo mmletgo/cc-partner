@@ -1,18 +1,18 @@
 /**
- * WorkbenchRemoteProjectPicker（局域网远端项目选择器）
+ * WorkbenchRemoteProjectPicker（本机 / 局域网项目目录选择器）
  *
  * Business Logic（为什么需要这个组件）:
- *   Workbench 需要允许用户直接从在线局域网设备选择项目文件夹，不要求该项目先被远端 Workbench 预添加。
+ *   Workbench 添加本机或局域网项目都走应用内目录浏览；可在当前目录新建一层文件夹后确认打开。
  *
  * Code Logic（这个组件做什么）:
- *   加载在线设备、远端可浏览根目录和当前目录项；用户选择目录后调用 openProject，并把打开的项目回传给父组件。
+ *   source=local 浏览本机 fs；source=remote 先选在线设备再浏览对端。新建成功后选中新目录，打开才登记项目。
  */
 
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { devicesApi } from '@/api/devices';
 import { workbenchApi } from '@/api/workbench';
-import { Button, Card, Pill, StatusDot } from '@/components/primitives';
+import { Button, Card, Dialog, Input, Pill, StatusDot } from '@/components/primitives';
 import type {
   Device,
   WorkbenchProject,
@@ -22,21 +22,28 @@ import type {
 } from '@/lib/types';
 import { ChevronRightIcon, FileIcon, FolderIcon, XIcon } from '@/lib/icons';
 import {
+  canOpenHostProjectSelection,
   canOpenRemoteProjectSelection,
+  isValidBrowseChildName,
+  peerSupportsBrowseMkdir,
   remoteParentPath,
   sortRemoteDirectoryEntries,
 } from '@/lib/workbenchRemoteProjects';
 import styles from './WorkbenchRemoteProjectPicker.module.css';
+
+export type WorkbenchProjectPickerSource = 'local' | 'remote';
 
 export interface WorkbenchRemoteProjectPickerProps {
   /** 打开成功后的项目 DTO 回调。 */
   onProjectOpened: (project: WorkbenchProject) => void;
   /** 关闭选择器。 */
   onCancel: () => void;
-  /** 远端打开请求 pending 状态变化回调，供父级阻止关闭弹窗。 */
+  /** 打开或新建请求 pending 状态变化回调，供父级阻止关闭弹窗。 */
   onOpenBusyChange?: (openBusy: boolean) => void;
   /** 可注入的打开实现；默认直接调用 workbenchApi.remote.openProject。 */
   openProject?: (deviceId: string, path: string) => Promise<WorkbenchProject | null>;
+  /** local=本机应用内浏览；remote=局域网设备。默认 remote。 */
+  source?: WorkbenchProjectPickerSource;
 }
 
 /**
@@ -77,6 +84,8 @@ interface RemoteProjectPickerState {
   pathInfoDeviceId: string | null;
   pathInfoLoading: boolean;
   openBusy: boolean;
+  createBusy: boolean;
+  createError: string | null;
   error: string | null;
 }
 
@@ -99,7 +108,10 @@ type RemoteProjectPickerAction =
   | { type: 'pathInfoFailed'; deviceId: string; path: string }
   | { type: 'openStarted' }
   | { type: 'openFinished' }
-  | { type: 'openFailed'; error: string };
+  | { type: 'openFailed'; error: string }
+  | { type: 'createStarted' }
+  | { type: 'createFinished' }
+  | { type: 'createFailed'; error: string };
 
 const initialPickerState: RemoteProjectPickerState = {
   devices: [],
@@ -115,6 +127,8 @@ const initialPickerState: RemoteProjectPickerState = {
   pathInfoDeviceId: null,
   pathInfoLoading: false,
   openBusy: false,
+  createBusy: false,
+  createError: null,
   error: null,
 };
 
@@ -125,6 +139,10 @@ const initialPickerState: RemoteProjectPickerState = {
  * Code Logic（这个函数做什么）:
  *   用 reducer 串联加载、选择、浏览和打开状态；每次切换 device/path 都清理不再匹配的下游数据。
  */
+function isPickerBusy(state: RemoteProjectPickerState): boolean {
+  return state.openBusy || state.createBusy;
+}
+
 function remoteProjectPickerReducer(
   state: RemoteProjectPickerState,
   action: RemoteProjectPickerAction,
@@ -155,7 +173,7 @@ function remoteProjectPickerReducer(
     case 'devicesFailed':
       return { ...state, devicesLoading: false, error: action.error };
     case 'deviceSelected':
-      if (state.openBusy) return state;
+      if (isPickerBusy(state)) return state;
       return {
         ...state,
         selectedDeviceId: action.deviceId,
@@ -199,7 +217,7 @@ function remoteProjectPickerReducer(
       return { ...state, rootsLoading: false, error: action.error };
     case 'rootSelected':
     case 'entryBrowsed':
-      if (state.openBusy) return state;
+      if (isPickerBusy(state)) return state;
       return {
         ...state,
         currentPath: action.path,
@@ -217,7 +235,7 @@ function remoteProjectPickerReducer(
     case 'entriesFailed':
       return { ...state, entriesLoading: false, error: action.error };
     case 'entrySelected':
-      if (state.openBusy) return state;
+      if (isPickerBusy(state)) return state;
       return {
         ...state,
         selectedPath: action.path,
@@ -234,7 +252,10 @@ function remoteProjectPickerReducer(
         pathInfoLoading: true,
       };
     case 'pathInfoLoaded':
-      if (state.selectedDeviceId !== action.deviceId || state.selectedPath !== action.path) {
+      if (state.selectedPath !== action.path) {
+        return state;
+      }
+      if (action.deviceId !== 'local' && state.selectedDeviceId !== action.deviceId) {
         return state;
       }
       return {
@@ -244,7 +265,10 @@ function remoteProjectPickerReducer(
         pathInfoLoading: false,
       };
     case 'pathInfoFailed':
-      if (state.selectedDeviceId !== action.deviceId || state.selectedPath !== action.path) {
+      if (state.selectedPath !== action.path) {
+        return state;
+      }
+      if (action.deviceId !== 'local' && state.selectedDeviceId !== action.deviceId) {
         return state;
       }
       return { ...state, pathInfo: null, pathInfoDeviceId: action.deviceId, pathInfoLoading: false };
@@ -254,6 +278,12 @@ function remoteProjectPickerReducer(
       return { ...state, openBusy: false };
     case 'openFailed':
       return { ...state, openBusy: false, error: action.error };
+    case 'createStarted':
+      return { ...state, createBusy: true, createError: null, error: null };
+    case 'createFinished':
+      return { ...state, createBusy: false, createError: null };
+    case 'createFailed':
+      return { ...state, createBusy: false, createError: action.error };
     default:
       return state;
   }
@@ -287,7 +317,8 @@ function deferEffect(work: () => void | (() => void)): () => void {
  *   使用 devicesApi 与 workbenchApi.remote 分层加载设备、根目录、目录项和路径信息，打开成功后调用 onProjectOpened。
  */
 export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPickerProps) {
-  const { onProjectOpened, onCancel, onOpenBusyChange, openProject } = props;
+  const { onProjectOpened, onCancel, onOpenBusyChange, openProject, source = 'remote' } = props;
+  const isLocal = source === 'local';
   const { t } = useTranslation(['workbench']);
   const [state, dispatch] = useReducer(remoteProjectPickerReducer, initialPickerState);
   const selectionRef = useRef<{ deviceId: string | null; path: string | null }>({
@@ -309,8 +340,13 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
     pathInfoDeviceId,
     pathInfoLoading,
     openBusy,
+    createBusy,
+    createError,
     error,
   } = state;
+  const pickerBusy = openBusy || createBusy;
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createName, setCreateName] = useState('');
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
@@ -318,23 +354,35 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
   );
   const sortedEntries = useMemo(() => sortRemoteDirectoryEntries(entries), [entries]);
   const parentPath = useMemo(() => (currentPath ? remoteParentPath(currentPath) : null), [currentPath]);
-  const canOpenSelectedPath = canOpenRemoteProjectSelection(
-    selectedDeviceId,
-    selectedPath,
-    pathInfo,
-    pathInfoDeviceId,
-    pathInfoLoading,
-    openBusy,
-  );
+  const canOpenSelectedPath = isLocal
+    ? canOpenHostProjectSelection(
+        selectedPath,
+        pathInfo,
+        pathInfoDeviceId === 'local' ? selectedPath : pathInfoDeviceId,
+        pathInfoLoading,
+        pickerBusy,
+      )
+    : canOpenRemoteProjectSelection(
+        selectedDeviceId,
+        selectedPath,
+        pathInfo,
+        pathInfoDeviceId,
+        pathInfoLoading,
+        pickerBusy,
+      );
+  const canCreateFolder =
+    Boolean(currentPath) &&
+    !pickerBusy &&
+    (isLocal || peerSupportsBrowseMkdir(selectedDevice?.capabilities));
   const effectiveOpenProject = useCallback(
     (deviceId: string, path: string) =>
       openProject ? openProject(deviceId, path) : workbenchApi.remote.openProject(deviceId, path),
     [openProject],
   );
   const handleCancel = useCallback(() => {
-    if (openBusy) return;
+    if (pickerBusy) return;
     onCancel();
-  }, [onCancel, openBusy]);
+  }, [onCancel, pickerBusy]);
 
   useEffect(() => {
     selectionRef.current = { deviceId: selectedDeviceId, path: selectedPath };
@@ -342,6 +390,10 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
 
   useEffect(() => {
     return deferEffect(() => {
+      if (isLocal) {
+        dispatch({ type: 'devicesLoaded', devices: [] });
+        return;
+      }
       let cancelled = false;
       dispatch({ type: 'devicesLoading' });
       void devicesApi
@@ -365,15 +417,17 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
         cancelled = true;
       };
     });
-  }, [t]);
+  }, [isLocal, t]);
 
   useEffect(() => {
     return deferEffect(() => {
-      if (!selectedDeviceId) return;
+      if (!isLocal && !selectedDeviceId) return;
       let cancelled = false;
       dispatch({ type: 'rootsLoading' });
-      void workbenchApi.remote
-        .roots(selectedDeviceId)
+      const request = isLocal
+        ? workbenchApi.fs.roots()
+        : workbenchApi.remote.roots(selectedDeviceId as string);
+      void request
         .then((list) => {
           if (!cancelled) dispatch({ type: 'rootsLoaded', roots: list });
         })
@@ -389,15 +443,18 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
         cancelled = true;
       };
     });
-  }, [selectedDeviceId, t]);
+  }, [isLocal, selectedDeviceId, t]);
 
   useEffect(() => {
     return deferEffect(() => {
-      if (!selectedDeviceId || !currentPath) return;
+      if (!currentPath) return;
+      if (!isLocal && !selectedDeviceId) return;
       let cancelled = false;
       dispatch({ type: 'entriesLoading' });
-      void workbenchApi.remote
-        .listDir(selectedDeviceId, currentPath)
+      const request = isLocal
+        ? workbenchApi.fs.listDir(currentPath)
+        : workbenchApi.remote.listDir(selectedDeviceId as string, currentPath);
+      void request
         .then((list) => {
           if (!cancelled) dispatch({ type: 'entriesLoaded', entries: list });
         })
@@ -413,17 +470,18 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
         cancelled = true;
       };
     });
-  }, [currentPath, selectedDeviceId, t]);
+  }, [currentPath, isLocal, selectedDeviceId, t]);
 
   useEffect(() => {
     return deferEffect(() => {
-      if (!selectedDeviceId || !selectedPath) return;
-      const deviceId = selectedDeviceId;
+      if (!selectedPath) return;
+      if (!isLocal && !selectedDeviceId) return;
+      const deviceId = isLocal ? 'local' : (selectedDeviceId as string);
       const path = selectedPath;
       let cancelled = false;
       dispatch({ type: 'pathInfoLoading', deviceId, path });
-      void workbenchApi.remote
-        .info(deviceId, path)
+      const request = isLocal ? workbenchApi.fs.info(path) : workbenchApi.remote.info(deviceId, path);
+      void request
         .then((info) => {
           if (!cancelled) dispatch({ type: 'pathInfoLoaded', deviceId, path, info });
         })
@@ -434,7 +492,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
         cancelled = true;
       };
     });
-  }, [selectedDeviceId, selectedPath]);
+  }, [isLocal, selectedDeviceId, selectedPath]);
 
   const handleDeviceSelect = useCallback((deviceId: string) => {
     dispatch({ type: 'deviceSelected', deviceId });
@@ -454,7 +512,8 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
   }, []);
 
   const handleOpenProject = useCallback(async () => {
-    if (!canOpenSelectedPath || !selectedDeviceId || !selectedPath) return;
+    if (!canOpenSelectedPath || !selectedPath) return;
+    if (!isLocal && !selectedDeviceId) return;
     const requestSeq = openRequestSeqRef.current + 1;
     openRequestSeqRef.current = requestSeq;
     const requestDeviceId = selectedDeviceId;
@@ -463,12 +522,14 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
     try {
       onOpenBusyChange?.(true);
       dispatch({ type: 'openStarted' });
-      const project = await effectiveOpenProject(requestDeviceId, requestPath);
+      const project = isLocal
+        ? await workbenchApi.projects.add(requestPath)
+        : await effectiveOpenProject(requestDeviceId as string, requestPath);
       const currentSelection = selectionRef.current;
       const isCurrentRequest =
         openRequestSeqRef.current === requestSeq &&
-        currentSelection.deviceId === requestDeviceId &&
-        currentSelection.path === requestPath;
+        currentSelection.path === requestPath &&
+        (isLocal || currentSelection.deviceId === requestDeviceId);
       if (project && isCurrentRequest) {
         shouldFinishRequest = false;
         dispatch({ type: 'openFinished' });
@@ -492,6 +553,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
   }, [
     canOpenSelectedPath,
     effectiveOpenProject,
+    isLocal,
     onOpenBusyChange,
     onProjectOpened,
     selectedDeviceId,
@@ -499,19 +561,67 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
     t,
   ]);
 
+  const handleCreateFolder = useCallback(async () => {
+    const name = createName.trim();
+    if (!currentPath || !isValidBrowseChildName(name) || pickerBusy) return;
+    if (!isLocal && !selectedDeviceId) return;
+    dispatch({ type: 'createStarted' });
+    onOpenBusyChange?.(true);
+    try {
+      const created = isLocal
+        ? await workbenchApi.fs.createDir(currentPath, name)
+        : await workbenchApi.remote.createDir(selectedDeviceId as string, currentPath, name);
+      const list = isLocal
+        ? await workbenchApi.fs.listDir(currentPath)
+        : await workbenchApi.remote.listDir(selectedDeviceId as string, currentPath);
+      dispatch({ type: 'createFinished' });
+      dispatch({ type: 'entriesLoaded', entries: list });
+      dispatch({ type: 'entrySelected', path: created.path });
+      setCreateDialogOpen(false);
+      setCreateName('');
+    } catch (createErr: unknown) {
+      dispatch({
+        type: 'createFailed',
+        error: errorMessage(createErr, t('workbench:remoteProjectPicker.errors.create')),
+      });
+    } finally {
+      onOpenBusyChange?.(false);
+    }
+  }, [
+    createName,
+    currentPath,
+    isLocal,
+    onOpenBusyChange,
+    pickerBusy,
+    selectedDeviceId,
+    t,
+  ]);
+
   return (
     <Card className={styles.picker} variant="elevated" padding="none">
       <Card.Header className={styles.header} padding="md">
         <div className={styles.heading}>
-          <h2>{t('workbench:remoteProjectPicker.title')}</h2>
-          <p>{t('workbench:remoteProjectPicker.subtitle')}</p>
+          <h2>
+            {t(
+              isLocal
+                ? 'workbench:remoteProjectPicker.localTitle'
+                : 'workbench:remoteProjectPicker.title',
+            )}
+          </h2>
+          <p>
+            {t(
+              isLocal
+                ? 'workbench:remoteProjectPicker.localSubtitle'
+                : 'workbench:remoteProjectPicker.subtitle',
+            )}
+          </p>
         </div>
         <Button
           variant="icon"
           icon={<XIcon />}
           title={t('workbench:remoteProjectPicker.close')}
           aria-label={t('workbench:remoteProjectPicker.close')}
-          disabled={openBusy}
+          disabled={pickerBusy}
           onClick={handleCancel}
         />
       </Card.Header>
@@ -519,6 +629,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
       <Card.Body className={styles.body} padding="md">
         {error ? <div className={styles.errorBox}>{error}</div> : null}
 
+        {isLocal ? null : (
         <section
           className={`${styles.section} ${styles.devicesSection}`}
           aria-label={t('workbench:remoteProjectPicker.devices')}
@@ -537,7 +648,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
                 type="button"
                 className={styles.deviceButton}
                 data-active={device.id === selectedDeviceId || undefined}
-                disabled={openBusy}
+                disabled={pickerBusy}
                 onClick={() => handleDeviceSelect(device.id)}
               >
                 <StatusDot status={device.status} size="sm" />
@@ -547,6 +658,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
             ))}
           </div>
         </section>
+        )}
 
         <section
           className={`${styles.section} ${styles.rootsSection}`}
@@ -557,7 +669,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
             {rootsLoading ? <Pill tone="neutral">{t('workbench:loading')}</Pill> : null}
           </div>
           <div className={styles.rootList}>
-            {!rootsLoading && selectedDevice && roots.length === 0 ? (
+            {!rootsLoading && (isLocal || selectedDevice) && roots.length === 0 ? (
               <div className={styles.empty}>{t('workbench:remoteProjectPicker.noRoots')}</div>
             ) : null}
             {roots.map((root) => (
@@ -566,7 +678,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
                 type="button"
                 className={styles.rootButton}
                 data-active={root.path === currentPath || undefined}
-                disabled={openBusy}
+                disabled={pickerBusy}
                 onClick={() => handleRootSelect(root.path)}
               >
                 <FolderIcon />
@@ -584,7 +696,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
             <Button
               variant="ghost"
               size="sm"
-              disabled={!parentPath || openBusy}
+              disabled={!parentPath || pickerBusy}
               onClick={() => {
                 if (parentPath) handleEntryBrowse(parentPath);
               }}
@@ -611,7 +723,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
                   <button
                     type="button"
                     className={styles.entrySelect}
-                    disabled={!isDirectory || openBusy}
+                    disabled={!isDirectory || pickerBusy}
                     onClick={() => handleEntrySelect(entry)}
                   >
                     {isDirectory ? <FolderIcon /> : <FileIcon />}
@@ -627,7 +739,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
                       icon={<ChevronRightIcon />}
                       title={t('workbench:remoteProjectPicker.browse')}
                       aria-label={t('workbench:remoteProjectPicker.browse')}
-                      disabled={openBusy}
+                      disabled={pickerBusy}
                       onClick={() => handleEntryBrowse(entry.path)}
                     />
                   ) : null}
@@ -656,9 +768,21 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
       </Card.Body>
 
       <Card.Footer className={styles.footer} padding="md">
-        <Button variant="ghost" disabled={openBusy} onClick={handleCancel}>
+        <Button variant="ghost" disabled={pickerBusy} onClick={handleCancel}>
           {t('workbench:remoteProjectPicker.close')}
         </Button>
+        {canCreateFolder ? (
+          <Button
+            variant="secondary"
+            disabled={pickerBusy}
+            onClick={() => {
+              setCreateName('');
+              setCreateDialogOpen(true);
+            }}
+          >
+            {t('workbench:remoteProjectPicker.createFolder')}
+          </Button>
+        ) : null}
         <Button
           variant="primary"
           loading={openBusy}
@@ -668,6 +792,42 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
           {t('workbench:remoteProjectPicker.openProject')}
         </Button>
       </Card.Footer>
+      <Dialog
+        open={createDialogOpen}
+        titleId="workbench-browse-create-dir-title"
+        onClose={() => {
+          if (createBusy) return;
+          setCreateDialogOpen(false);
+        }}
+        closeOnEscape={!createBusy}
+        closeOnBackdrop={!createBusy}
+      >
+        <h2 id="workbench-browse-create-dir-title">{t('workbench:remoteProjectPicker.createFolder')}</h2>
+        <Input
+          value={createName}
+          onChange={(event) => setCreateName(event.target.value)}
+          placeholder={t('workbench:remoteProjectPicker.createFolderPlaceholder')}
+          disabled={createBusy}
+        />
+        {createError ? <p className={styles.errorBox}>{createError}</p> : null}
+        <div className={styles.footer} style={{ marginTop: 'var(--space-4)' }}>
+          <Button
+            variant="ghost"
+            disabled={createBusy}
+            onClick={() => setCreateDialogOpen(false)}
+          >
+            {t('workbench:remoteProjectPicker.close')}
+          </Button>
+          <Button
+            variant="primary"
+            loading={createBusy}
+            disabled={!isValidBrowseChildName(createName) || createBusy}
+            onClick={() => void handleCreateFolder()}
+          >
+            {t('workbench:remoteProjectPicker.createFolderConfirm')}
+          </Button>
+        </div>
+      </Dialog>
     </Card>
   );
 }

@@ -1173,6 +1173,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route("/api/workbench/fs/list", post(workbench::remote_list_dir))
         .route("/api/workbench/fs/info", post(workbench::remote_path_info))
         .route(
+            "/api/workbench/fs/create-dir",
+            post(workbench::create_browse_dir),
+        )
+        .route(
             "/api/workbench/projects/list",
             get(workbench::list_projects),
         )
@@ -1458,6 +1462,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::mobile_fs_path_info),
         )
         .route(
+            "/api/mobile/workbench/fs/create-dir",
+            post(workbench::mobile_fs_create_dir),
+        )
+        .route(
             "/api/mobile/workbench/remote/roots",
             post(workbench::mobile_remote_roots),
         )
@@ -1472,6 +1480,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/workbench/remote/open",
             post(workbench::mobile_open_remote_project),
+        )
+        .route(
+            "/api/mobile/workbench/remote/create-dir",
+            post(workbench::mobile_remote_create_dir),
         )
         .route(
             "/api/mobile/workbench/worktrees/list",
