@@ -1911,10 +1911,10 @@ mod tests {
         }
     }
 
-    /// Business Logic: Agent Hub API major 必须升到 v3 才承载 portable mutation。
-    /// Code Logic: 常量 == 3。
+    /// Business Logic: Agent Hub API major 必须升到 v5 才承载用户级镜像写盘。
+    /// Code Logic: 常量 == 5。
     #[test]
-    fn agent_hub_api_version_is_v4_for_scan_only_write_policy() {
-        assert_eq!(AGENT_HUB_API_VERSION, 4);
+    fn agent_hub_api_version_is_v5_for_user_mirror() {
+        assert_eq!(AGENT_HUB_API_VERSION, 5);
     }
 }

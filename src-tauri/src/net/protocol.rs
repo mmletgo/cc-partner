@@ -412,6 +412,14 @@ pub const CAPABILITY_PORTABLE_USER_V1: &str = "agent-hub.portable-user.v1";
 ///     与 12 条 user-instructions 路由原子上线。
 pub const CAPABILITY_USER_INSTRUCTIONS_V1: &str = "agent-hub.user-instructions.v1";
 
+/// 能力 token：用户级全 Agent 镜像 Pull/Push。
+///
+/// Business Logic: 客户端在 inventory/selection/objects 或 dest commit 前必须确认对端
+///     已挂载镜像路由；缺失时整次失败，禁止回落逐项 portable-pull / agent-hub.v1 push。
+///     expected-device / clientRequestId 不是身份认证。
+/// Code Logic: `agent-hub.user-mirror.v1`，与六条 user-mirror 路由同 build 宣告。
+pub const CAPABILITY_USER_MIRROR_V1: &str = "agent-hub.user-mirror.v1";
+
 /// 能力 token：移动端/对端切换 cc-switch provider（`/api/provider-manager/*`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -475,11 +483,12 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
-            // 字典序：portable-project < portable-pull < portable-user < user-instructions < v1
+            // 字典序：portable-project < portable-pull < portable-user < user-instructions < user-mirror < v1
             CAPABILITY_PORTABLE_PROJECT_V1.to_string(),
             CAPABILITY_PORTABLE_PULL_V1.to_string(),
             CAPABILITY_PORTABLE_USER_V1.to_string(),
             CAPABILITY_USER_INSTRUCTIONS_V1.to_string(),
+            CAPABILITY_USER_MIRROR_V1.to_string(),
             CAPABILITY_AGENT_HUB_V1.to_string(),
             CAPABILITY_ATTENTION_READ_V1.to_string(),
             CAPABILITY_ATTENTION_V1.to_string(),
@@ -661,6 +670,7 @@ mod tests {
                 "agent-hub.portable-pull.v1".to_string(),
                 "agent-hub.portable-user.v1".to_string(),
                 "agent-hub.user-instructions.v1".to_string(),
+                "agent-hub.user-mirror.v1".to_string(),
                 "agent-hub.v1".to_string(),
                 "attention.read.v1".to_string(),
                 "attention.v1".to_string(),
@@ -700,6 +710,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_PORTABLE_PROJECT_V1));
         assert!(info.supports(CAPABILITY_PORTABLE_USER_V1));
         assert!(info.supports(CAPABILITY_USER_INSTRUCTIONS_V1));
+        assert!(info.supports(CAPABILITY_USER_MIRROR_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_READ_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
@@ -775,5 +786,37 @@ mod tests {
         };
         assert!(!legacy.supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
         assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户级镜像不得回落旧逐项 Pull/Push；health 必须宣告 `agent-hub.user-mirror.v1`，
+    ///     且字典序夹在 `user-instructions.v1` 与 `agent-hub.v1` 之间，避免混排导致协商漏检。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 supports(user-mirror.v1)，并核对三个 token 在 capabilities 中的相对位置。
+    #[test]
+    fn server_protocol_info_declares_user_mirror_v1_in_dictionary_order() {
+        let info = server_protocol_info();
+        assert!(info.supports(CAPABILITY_USER_MIRROR_V1));
+        let caps = info.capabilities;
+        let ui = caps
+            .iter()
+            .position(|c| c == CAPABILITY_USER_INSTRUCTIONS_V1);
+        let um = caps.iter().position(|c| c == CAPABILITY_USER_MIRROR_V1);
+        let v1 = caps.iter().position(|c| c == CAPABILITY_AGENT_HUB_V1);
+        assert!(
+            ui < um && um < v1,
+            "dictionary order: user-instructions < user-mirror < v1"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     客户端按精确字符串协商能力；token 改名会导致新 GUI 把旧 sidecar 当成已支持镜像。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 `CAPABILITY_USER_MIRROR_V1` 字面量为 `agent-hub.user-mirror.v1`。
+    #[test]
+    fn user_mirror_capability_token_is_stable() {
+        assert_eq!(CAPABILITY_USER_MIRROR_V1, "agent-hub.user-mirror.v1");
     }
 }

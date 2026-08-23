@@ -61,6 +61,7 @@ pub mod snapshot;
 pub mod support;
 pub mod targets;
 pub mod user_instructions;
+pub mod user_mirror;
 
 pub use assets::{
     canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, CommandArgument,
