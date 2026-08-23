@@ -194,13 +194,31 @@ pub async fn add_workbench_project(
     add_local_workbench_project_from_path(&state, path).await
 }
 
+/// owner 路径：列出远端设备可浏览根目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 invoke、control 与 mobile HTTP 必须共用同一套对端 roots 调用。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 device base URL，调用 RemoteWorkbenchClient::roots。
+pub(crate) async fn list_workbench_remote_roots_for_state(
+    state: &AppState,
+    device_id: &str,
+) -> Result<Vec<WorkbenchRemoteRootDto>, AppError> {
+    let base_url = device_base_url(state, device_id)?;
+    RemoteWorkbenchClient::new()
+        .with_expected_device_id(device_id)
+        .roots(&base_url)
+        .await
+}
+
 /// 列出远端设备可浏览的根目录。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户从局域网设备添加项目时，需要先选择远端设备上的常用目录入口。
 ///
 /// Code Logic（这个函数做什么）:
-///     根据 deviceId 解析 base URL，调用远端 Workbench client 的 roots 接口并返回 DTO 列表。
+///     GUI 代理 control op；owner 走 `list_workbench_remote_roots_for_state`。
 #[tauri::command]
 pub async fn list_workbench_remote_roots(
     state: State<'_, AppState>,
@@ -215,10 +233,25 @@ pub async fn list_workbench_remote_roots(
     {
         return Ok(v);
     }
-    let base_url = device_base_url(&state, &device_id)?;
+    list_workbench_remote_roots_for_state(state.inner(), &device_id).await
+}
+
+/// owner 路径：列出远端一级目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mobile HTTP 与桌面 invoke 必须走同一套对端 list-dir。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 device base URL，调用 RemoteWorkbenchClient::list_dir。
+pub(crate) async fn list_workbench_remote_dir_for_state(
+    state: &AppState,
+    device_id: &str,
+    path: &str,
+) -> Result<Vec<WorkbenchRemoteDirectoryEntryDto>, AppError> {
+    let base_url = device_base_url(state, device_id)?;
     RemoteWorkbenchClient::new()
-        .with_expected_device_id(&device_id)
-        .roots(&base_url)
+        .with_expected_device_id(device_id)
+        .list_dir(&base_url, path)
         .await
 }
 
@@ -228,7 +261,7 @@ pub async fn list_workbench_remote_roots(
 ///     远端项目选择器需要逐层浏览对端文件系统，直到用户选中目标项目目录。
 ///
 /// Code Logic（这个函数做什么）:
-///     根据 deviceId 解析 base URL，POST path 到远端 list-dir 接口并返回目录条目 DTO。
+///     GUI 代理 control op；owner 走 `list_workbench_remote_dir_for_state`。
 #[tauri::command]
 pub async fn list_workbench_remote_dir(
     state: State<'_, AppState>,
@@ -244,10 +277,25 @@ pub async fn list_workbench_remote_dir(
     {
         return Ok(v);
     }
-    let base_url = device_base_url(&state, &device_id)?;
+    list_workbench_remote_dir_for_state(state.inner(), &device_id, &path).await
+}
+
+/// owner 路径：读取远端路径信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mobile HTTP 与桌面 invoke 必须走同一套对端 path-info。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 device base URL，调用 RemoteWorkbenchClient::path_info。
+pub(crate) async fn get_workbench_remote_path_info_for_state(
+    state: &AppState,
+    device_id: &str,
+    path: &str,
+) -> Result<WorkbenchRemotePathInfoDto, AppError> {
+    let base_url = device_base_url(state, device_id)?;
     RemoteWorkbenchClient::new()
-        .with_expected_device_id(&device_id)
-        .list_dir(&base_url, &path)
+        .with_expected_device_id(device_id)
+        .path_info(&base_url, path)
         .await
 }
 
@@ -257,7 +305,7 @@ pub async fn list_workbench_remote_dir(
 ///     用户选中远端路径时，前端需要展示是否可读、是否为 Git 仓库以及建议项目名。
 ///
 /// Code Logic（这个函数做什么）:
-///     根据 deviceId 解析 base URL，POST path 到远端 info 接口并返回路径信息 DTO。
+///     GUI 代理 control op；owner 走 `get_workbench_remote_path_info_for_state`。
 #[tauri::command]
 pub async fn get_workbench_remote_path_info(
     state: State<'_, AppState>,
@@ -273,46 +321,32 @@ pub async fn get_workbench_remote_path_info(
     {
         return Ok(v);
     }
-    let base_url = device_base_url(&state, &device_id)?;
-    RemoteWorkbenchClient::new()
-        .with_expected_device_id(&device_id)
-        .path_info(&base_url, &path)
-        .await
+    get_workbench_remote_path_info_for_state(state.inner(), &device_id, &path).await
 }
 
-/// 打开远端项目并保存本地快捷方式。
+/// owner 路径：打开远端项目并写入本机 shortcut。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户在本机选择另一台设备上的项目目录后，需要在本机最近项目列表中出现一个 remote 项目入口。
+///     mobile HTTP 与桌面 invoke 必须共用 shortcut upsert，避免两套 id 规则。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 deviceId → 调远端 open-project → 用远端规范路径构造稳定 remote 项目 row → upsert 本地 SQLite。
-#[tauri::command]
-pub async fn open_workbench_remote_project(
-    state: State<'_, AppState>,
-    device_id: String,
-    path: String,
+///     解析 device → 对端 open-project → 稳定 remote id upsert + prepend_order_id。
+pub(crate) async fn open_workbench_remote_project_for_state(
+    state: &AppState,
+    device_id: &str,
+    path: &str,
 ) -> Result<WorkbenchProjectDto, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
-        state.inner(),
-        "projects.remote_open",
-        serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() }),
-    )
-    .await?
-    {
-        return Ok(v);
-    }
-    let base_url = device_base_url(&state, &device_id)?;
-    let current_device_name = device_name_from_state(&state, &device_id);
+    let base_url = device_base_url(state, device_id)?;
+    let current_device_name = device_name_from_state(state, device_id);
     let remote = RemoteWorkbenchClient::new()
-        .with_expected_device_id(&device_id)
-        .open_project(&base_url, &path)
+        .with_expected_device_id(device_id)
+        .open_project(&base_url, path)
         .await?;
-    let remote_id = remote_project_id(&device_id, &remote.path);
+    let remote_id = remote_project_id(device_id, &remote.path);
     let existing = state.workbench_project_repo.get(&remote_id).await?;
     let now = now_iso();
     let row = build_remote_project_shortcut_row(
-        &device_id,
+        device_id,
         current_device_name.as_deref(),
         &remote,
         existing.as_ref(),
@@ -333,15 +367,80 @@ pub async fn open_workbench_remote_project(
     Ok(row.to_dto())
 }
 
+/// 打开远端项目并保存本地快捷方式。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在本机选择另一台设备上的项目目录后，需要在本机最近项目列表中出现一个 remote 项目入口。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理 control op；owner 走 `open_workbench_remote_project_for_state`。
+#[tauri::command]
+pub async fn open_workbench_remote_project(
+    state: State<'_, AppState>,
+    device_id: String,
+    path: String,
+) -> Result<WorkbenchProjectDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.remote_open",
+        serde_json::json!({ "deviceId": device_id.clone(), "path": path.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    open_workbench_remote_project_for_state(state.inner(), &device_id, &path).await
+}
+
+/// owner 路径：从最近项目移除记录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面、control 与 mobile HTTP 必须共用 dispose + barrier，避免幽灵 session 索引写回。
+///
+/// Code Logic（这个函数做什么）:
+///     dispose Claude session 索引 watcher，再 `remove_local_workbench_project_with_barrier`，
+///     并 best-effort 删顺序文档中的 id。
+pub(crate) async fn remove_workbench_project_for_state(
+    state: &AppState,
+    project_id: &str,
+) -> Result<serde_json::Value, AppError> {
+    let project = get_project(state, project_id).await?;
+    let worktree_rows = state
+        .workbench_worktree_repo
+        .list_by_project(project_id)
+        .await?;
+    let mut session_index_paths: Vec<std::path::PathBuf> =
+        vec![std::path::PathBuf::from(&project.path)];
+    for row in &worktree_rows {
+        session_index_paths.push(std::path::PathBuf::from(&row.path));
+    }
+    crate::workbench::claude_sessions::dispose_session_indexes_for_worktree_paths(
+        state,
+        &session_index_paths,
+    );
+
+    let result = remove_local_workbench_project_with_barrier(state, project_id).await?;
+    if let Err(err) = state
+        .workbench_project_repo
+        .remove_order_id(project_id, &now_iso(), state.device_id.as_str())
+        .await
+    {
+        tracing::warn!(
+            project_id = %project_id,
+            error = %err,
+            "remove workbench project order id failed"
+        );
+    }
+    Ok(result)
+}
+
 /// 从工作台最近项目中移除记录。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户可从工作台列表移除项目，但这不应删除磁盘上的真实项目文件夹。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 dispose 项目/worktree 对应的 Claude session 索引 watcher runtime，再委托
-///     `remove_local_workbench_project_with_barrier`（R26 M1：project barrier 覆盖
-///     snapshot→bulk delete，desktop/control 共用）。
+///     GUI 代理 control op；owner 走 `remove_workbench_project_for_state`。
 #[tauri::command]
 pub async fn remove_workbench_project(
     state: State<'_, AppState>,
@@ -356,35 +455,7 @@ pub async fn remove_workbench_project(
     {
         return Ok(v);
     }
-    let project = get_project(&state, &project_id).await?;
-    let worktree_rows = state
-        .workbench_worktree_repo
-        .list_by_project(&project_id)
-        .await?;
-    let mut session_index_paths: Vec<std::path::PathBuf> =
-        vec![std::path::PathBuf::from(&project.path)];
-    for row in &worktree_rows {
-        session_index_paths.push(std::path::PathBuf::from(&row.path));
-    }
-    // 先停 watcher/cancel pending，再删 DB，避免幽灵重扫写回已移除项目索引。
-    crate::workbench::claude_sessions::dispose_session_indexes_for_worktree_paths(
-        state.inner(),
-        &session_index_paths,
-    );
-
-    let result = remove_local_workbench_project_with_barrier(state.inner(), &project_id).await?;
-    if let Err(err) = state
-        .workbench_project_repo
-        .remove_order_id(&project_id, &now_iso(), state.device_id.as_str())
-        .await
-    {
-        tracing::warn!(
-            project_id = %project_id,
-            error = %err,
-            "remove workbench project order id failed"
-        );
-    }
-    Ok(result)
+    remove_workbench_project_for_state(state.inner(), &project_id).await
 }
 
 /// 拖拽重排工作台项目列表顺序。

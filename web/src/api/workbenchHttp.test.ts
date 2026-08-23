@@ -128,6 +128,35 @@ function mockSuccessBodyForUrl(url: string): unknown {
   if (url.includes('/tasks/complete-prompt')) {
     return { title: 't', goal: 'g', acceptanceCriteria: 'a' };
   }
+  if (url.includes('/fs/roots') || url.includes('/remote/roots') || url.includes('/fs/list') || url.includes('/remote/list')) {
+    return [];
+  }
+  if (url.includes('/fs/info') || url.includes('/remote/info')) {
+    return {
+      name: 'app',
+      path: '/tmp/app',
+      kind: 'dir',
+      readable: true,
+      isGitRepo: true,
+      suggestedProjectName: 'app',
+    };
+  }
+  if (url.includes('/projects/open') || url.includes('/remote/open')) {
+    return {
+      id: 'p1',
+      name: 'app',
+      kind: 'local',
+      deviceId: 'self',
+      deviceName: 'Mac',
+      path: '/tmp/app',
+      lastOpenedAt: '2026-08-24T00:00:00.000Z',
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    };
+  }
+  if (url.includes('/projects/remove')) {
+    return { ok: true, projectId: 'p1' };
+  }
   return { ok: true, sessionId: 'session-1' };
 }
 
@@ -428,6 +457,74 @@ describe('workbenchHttp', () => {
   });
 });
 
+
+describe('workbenchHttp project admin', () => {
+  test('sends host fs, lan remote, and project remove routes', async () => {
+    const capturedBodies: unknown[] = [];
+    const capturedUrls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      capturedUrls.push(url);
+      capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as unknown);
+      return {
+        ok: true,
+        json: async () => mockSuccessBodyForUrl(url),
+      } as Response;
+    };
+    try {
+      await workbenchHttp.fs.roots();
+      await workbenchHttp.fs.listDir('/tmp');
+      await workbenchHttp.fs.info('/tmp/app');
+      await workbenchHttp.remote.roots('office');
+      await workbenchHttp.remote.listDir('office', '/Users/dev');
+      await workbenchHttp.remote.info('office', '/Users/dev/studio');
+      await workbenchHttp.remote.openProject('office', '/Users/dev/studio');
+      await workbenchHttp.projects.remove('p1');
+      assert(capturedUrls[0] === '/api/mobile/workbench/fs/roots', 'host roots should use mobile fs roots');
+      assert(
+        capturedUrls[1] === '/api/mobile/workbench/fs/list' &&
+          JSON.stringify(capturedBodies[1]) === JSON.stringify({ path: '/tmp' }),
+        'host list should send path',
+      );
+      assert(
+        capturedUrls[2] === '/api/mobile/workbench/fs/info' &&
+          JSON.stringify(capturedBodies[2]) === JSON.stringify({ path: '/tmp/app' }),
+        'host info should send path',
+      );
+      assert(
+        capturedUrls[3] === '/api/mobile/workbench/remote/roots' &&
+          JSON.stringify(capturedBodies[3]) === JSON.stringify({ deviceId: 'office' }),
+        'lan roots should send deviceId',
+      );
+      assert(
+        capturedUrls[4] === '/api/mobile/workbench/remote/list' &&
+          JSON.stringify(capturedBodies[4]) ===
+            JSON.stringify({ deviceId: 'office', path: '/Users/dev' }),
+        'lan list should send deviceId and path',
+      );
+      assert(
+        capturedUrls[5] === '/api/mobile/workbench/remote/info' &&
+          JSON.stringify(capturedBodies[5]) ===
+            JSON.stringify({ deviceId: 'office', path: '/Users/dev/studio' }),
+        'lan info should send deviceId and path',
+      );
+      assert(
+        capturedUrls[6] === '/api/mobile/workbench/remote/open' &&
+          JSON.stringify(capturedBodies[6]) ===
+            JSON.stringify({ deviceId: 'office', path: '/Users/dev/studio' }),
+        'lan open should send deviceId and path',
+      );
+      assert(
+        capturedUrls[7] === '/api/mobile/workbench/projects/remove' &&
+          JSON.stringify(capturedBodies[7]) === JSON.stringify({ projectId: 'p1' }),
+        'remove should send projectId',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
 
 describe('workbenchHttp createView idempotency', () => {
   /**

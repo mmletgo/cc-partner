@@ -1442,6 +1442,38 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::mobile_open_project),
         )
         .route(
+            "/api/mobile/workbench/projects/remove",
+            post(workbench::mobile_remove_project),
+        )
+        .route(
+            "/api/mobile/workbench/fs/roots",
+            get(workbench::mobile_fs_roots),
+        )
+        .route(
+            "/api/mobile/workbench/fs/list",
+            post(workbench::mobile_fs_list_dir),
+        )
+        .route(
+            "/api/mobile/workbench/fs/info",
+            post(workbench::mobile_fs_path_info),
+        )
+        .route(
+            "/api/mobile/workbench/remote/roots",
+            post(workbench::mobile_remote_roots),
+        )
+        .route(
+            "/api/mobile/workbench/remote/list",
+            post(workbench::mobile_remote_list_dir),
+        )
+        .route(
+            "/api/mobile/workbench/remote/info",
+            post(workbench::mobile_remote_path_info),
+        )
+        .route(
+            "/api/mobile/workbench/remote/open",
+            post(workbench::mobile_open_remote_project),
+        )
+        .route(
             "/api/mobile/workbench/worktrees/list",
             post(workbench::mobile_list_worktrees),
         )

@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WorkbenchProject } from '@/lib/types';
+import { MoreIcon } from '@/lib/icons';
 import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
 import { fleetExceptionCount } from '@/lib/types/lanFleet';
 import { canSelectMobileProject } from '../mobileWorkbenchState';
@@ -13,16 +14,19 @@ export interface MobileProjectPanelProps {
   error: string | null;
   onSelect: (project: WorkbenchProject) => void;
   onRefresh: () => void;
+  onAddLocal: () => void;
+  onAddRemote: () => void;
+  onRemoveRequest: (project: WorkbenchProject) => void;
 }
 
 /**
  * MobileProjectPanel（移动端项目选择面板）
  *
  * Business Logic（为什么需要这个组件）:
- *   手机进入 `/mobile` 后需要先选择最近 Workbench 项目；本机项目进入完整工作台，远端快捷方式进入自动化代理链路。
+ *   手机进入 `/mobile` 后需要选择、添加或移除 Workbench 项目；本机项目进入完整工作台，远端快捷方式走二级代理。
  *
  * Code Logic（这个组件做什么）:
- *   渲染最近项目列表、刷新入口、加载态、错误态和空态；local/remote 项目点击后把 DTO 交给父组件，未知类型保持可聚焦并用 aria-disabled 展示提示。
+ *   渲染添加本机/局域网入口、最近项目列表、刷新、加载/错误/空态；行尾 ⋯ 触发移除请求，不直接删。
  */
 export function MobileProjectPanel({
   projects,
@@ -31,12 +35,14 @@ export function MobileProjectPanel({
   error,
   onSelect,
   onRefresh,
+  onAddLocal,
+  onAddRemote,
+  onRemoveRequest,
 }: MobileProjectPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const shouldShowEmpty = !loading && !error && projects.length === 0;
   const { snapshot: fleetSnapshot, projectSummaries } = useLanAgentFleet({ enabled: true });
 
-  // 汇总异常 Agent（低噪音：仅 needsInput/failed）
   let exceptionTotal = 0;
   for (const summary of Object.values(projectSummaries)) {
     exceptionTotal += fleetExceptionCount(summary.agentCounts);
@@ -57,6 +63,20 @@ export function MobileProjectPanel({
           onClick={onRefresh}
         >
           {t('workbench:refresh')}
+        </button>
+      </div>
+
+      <div className={styles.projectAddRow}>
+        <button type="button" className={styles.primaryButton} disabled={loading} onClick={onAddLocal}>
+          {t('workbench:mobile.projectPanel.addLocal')}
+        </button>
+        <button
+          type="button"
+          className={styles.secondaryButton}
+          disabled={loading}
+          onClick={onAddRemote}
+        >
+          {t('workbench:mobile.projectPanel.addRemote')}
         </button>
       </div>
 
@@ -98,47 +118,59 @@ export function MobileProjectPanel({
                 : project.kind;
 
           return (
-            <button
+            <div
               key={project.id}
-              type="button"
-              className={`${styles.mobileListItem} ${
+              className={`${styles.mobileListItemRow} ${
                 isActive ? styles.mobileListItemActive : ''
               } ${canSelect ? '' : styles.mobileListItemDisabled}`}
-              aria-pressed={isActive}
-              aria-disabled={!canSelect}
-              aria-describedby={canSelect ? undefined : unsupportedNoticeId}
-              onClick={(event) => {
-                if (!canSelect) {
-                  event.preventDefault();
-                  return;
-                }
-                onSelect(project);
-              }}
-              onKeyDown={(event) => {
-                if (canSelect) return;
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                }
-              }}
             >
-              <span className={styles.mobileListTitleRow}>
-                <strong className={styles.mobileListTitle}>{project.name}</strong>
-                <span
-                  className={`${styles.mobileBadge} ${
-                    project.kind === 'remote' ? styles.mobileBadgeAccent : ''
-                  }`}
-                >
-                  {kindLabel}
+              <button
+                type="button"
+                className={styles.mobileListItemButton}
+                aria-pressed={isActive}
+                aria-disabled={!canSelect}
+                aria-describedby={canSelect ? undefined : unsupportedNoticeId}
+                onClick={(event) => {
+                  if (!canSelect) {
+                    event.preventDefault();
+                    return;
+                  }
+                  onSelect(project);
+                }}
+                onKeyDown={(event) => {
+                  if (canSelect) return;
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                  }
+                }}
+              >
+                <span className={styles.mobileListTitleRow}>
+                  <strong className={styles.mobileListTitle}>{project.name}</strong>
+                  <span
+                    className={`${styles.mobileBadge} ${
+                      project.kind === 'remote' ? styles.mobileBadgeAccent : ''
+                    }`}
+                  >
+                    {kindLabel}
+                  </span>
                 </span>
-              </span>
-              <span className={styles.mobileListPath}>{project.path}</span>
-              <span className={styles.mobileListMeta}>{project.deviceName}</span>
-              {canSelect ? null : (
-                <span id={unsupportedNoticeId} className={styles.mobileListNotice}>
-                  {t('workbench:mobile.projectPanel.unsupportedProjectKind')}
-                </span>
-              )}
-            </button>
+                <span className={styles.mobileListPath}>{project.path}</span>
+                <span className={styles.mobileListMeta}>{project.deviceName}</span>
+                {canSelect ? null : (
+                  <span id={unsupportedNoticeId} className={styles.mobileListNotice}>
+                    {t('workbench:mobile.projectPanel.unsupportedProjectKind')}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                className={styles.moreButton}
+                aria-label={t('workbench:mobile.projectPanel.moreActions')}
+                onClick={() => onRemoveRequest(project)}
+              >
+                <MoreIcon />
+              </button>
+            </div>
           );
         })}
       </div>

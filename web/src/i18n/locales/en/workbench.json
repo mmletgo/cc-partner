@@ -199,7 +199,29 @@
       "error": "Load failed",
       "unsupportedProjectKind": "This project type is not supported on mobile yet",
       "reload": "Reload project",
-      "detailError": "Failed to load project details"
+      "detailError": "Failed to load project details",
+      "addLocal": "Add local project",
+      "addRemote": "Choose LAN project",
+      "moreActions": "Project actions",
+      "remove": "Remove",
+      "removeConfirmTitle": "Remove project",
+      "removeConfirmBody": "Remove “{{name}}” from the recent list? Files on disk are not deleted.",
+      "removeFailed": "Failed to remove project",
+      "pickerLocalTitle": "This computer",
+      "pickerRemoteTitle": "LAN project",
+      "pickerDevicesTitle": "Online devices",
+      "pickerOpen": "Open this folder",
+      "pickerCancel": "Cancel",
+      "pickerParent": "Up",
+      "pickerEmptyDevices": "No online LAN devices",
+      "pickerEmptyDir": "This folder is empty",
+      "pickerGit": "Has .git",
+      "errors": {
+        "devices": "Could not load devices",
+        "roots": "Could not load roots",
+        "dir": "Could not read folder",
+        "open": "Could not open project"
+      }
     },
     "browser": {
       "title": "Mobile project preview"

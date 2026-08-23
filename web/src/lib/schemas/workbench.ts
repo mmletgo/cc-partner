@@ -33,6 +33,9 @@ import type {
   WorkbenchBanner,
   WorkbenchProject,
   WorkbenchProjectNote,
+  WorkbenchRemoteDirectoryEntry,
+  WorkbenchRemotePathInfo,
+  WorkbenchRemoteRoot,
   WorkbenchSaveTextResult,
   WorkbenchSession,
   WorkbenchSessionReplay,
@@ -88,6 +91,70 @@ export const workbenchProjectDecoder: Decoder<WorkbenchProject> = objectDecoder(
 /** 项目列表 decoder。 */
 export const workbenchProjectsDecoder: Decoder<WorkbenchProject[]> =
   arrayDecoder(workbenchProjectDecoder);
+
+/** 项目记录移除结果 decoder。 */
+export const workbenchProjectRemoveResultDecoder: Decoder<{ ok: boolean; projectId: string }> =
+  objectDecoder('WorkbenchProjectRemoveResult', {
+    ok: booleanDecoder,
+    projectId: stringDecoder,
+  });
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   移动端目录浏览根入口损坏不得当成可打开路径。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 label/path/kind。
+ */
+export const workbenchRemoteRootDecoder: Decoder<WorkbenchRemoteRoot> = objectDecoder(
+  'WorkbenchRemoteRoot',
+  {
+    label: stringDecoder,
+    path: stringDecoder,
+    kind: stringDecoder,
+  },
+);
+
+export const workbenchRemoteRootsDecoder: Decoder<WorkbenchRemoteRoot[]> =
+  arrayDecoder(workbenchRemoteRootDecoder);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   目录项损坏不得让用户打开文件当项目。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 name/path/kind/modifiedAt/isGitRepo。
+ */
+export const workbenchRemoteDirectoryEntryDecoder: Decoder<WorkbenchRemoteDirectoryEntry> =
+  objectDecoder('WorkbenchRemoteDirectoryEntry', {
+    name: stringDecoder,
+    path: stringDecoder,
+    kind: stringDecoder,
+    modifiedAt: nullableDecoder(stringDecoder),
+    isGitRepo: booleanDecoder,
+  });
+
+export const workbenchRemoteDirectoryEntriesDecoder: Decoder<WorkbenchRemoteDirectoryEntry[]> =
+  arrayDecoder(workbenchRemoteDirectoryEntryDecoder);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   路径信息损坏不得把不可读路径打开成项目。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 name/path/kind/readable/isGitRepo/suggestedProjectName。
+ */
+export const workbenchRemotePathInfoDecoder: Decoder<WorkbenchRemotePathInfo> = objectDecoder(
+  'WorkbenchRemotePathInfo',
+  {
+    name: stringDecoder,
+    path: stringDecoder,
+    kind: stringDecoder,
+    readable: booleanDecoder,
+    isGitRepo: booleanDecoder,
+    suggestedProjectName: stringDecoder,
+  },
+);
 
 /**
  * Business Logic（为什么需要这个 decoder）:

@@ -249,8 +249,11 @@ pub(crate) use git::{
 };
 
 pub(crate) use projects::{
-    discover_workbench_browser_targets_for_state, list_workbench_worktrees_for_state,
-    local_get_workbench_worktree, local_list_workbench_worktrees,
+    discover_workbench_browser_targets_for_state, get_workbench_remote_path_info_for_state,
+    list_workbench_remote_dir_for_state, list_workbench_remote_roots_for_state,
+    list_workbench_worktrees_for_state, local_get_workbench_worktree,
+    local_list_workbench_worktrees, open_workbench_remote_project_for_state,
+    remove_workbench_project_for_state,
 };
 
 pub(crate) use sessions::{

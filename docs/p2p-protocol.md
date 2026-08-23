@@ -398,6 +398,14 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/bridges/active-devices` | `routes/workbench.rs` | none; returns sorted unfinished remote event bridge device ids | read-only | body `{}` ignored; camelCase `{deviceIds}` for Mobile Gap inventory fail-closed subset |
 | POST | `/api/mobile/workbench/bridges/active-mapped-projects` | `routes/workbench.rs` | none; returns sorted local shortcut project ids mapped on unfinished bridges | read-only | body `{}` ignored; camelCase `{localProjectIds}` for Mobile Gap inventory project-level fail-closed subset (R42 M2; empty skips all remotes) |
 | POST | `/api/mobile/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | reuses same project id for same path |
+| POST | `/api/mobile/workbench/projects/remove` | `routes/workbench.rs` | deletes host Workbench project row and related sessions/worktrees metadata; does not delete disk files | no-transport-retry | missing project is NotFound; clients must not auto-retry |
+| GET | `/api/mobile/workbench/fs/roots` | `routes/workbench.rs` | none; lists host browse roots | read-only | same helper as P2P `/api/workbench/fs/roots` |
+| POST | `/api/mobile/workbench/fs/list` | `routes/workbench.rs` | none; lists one host directory | read-only | body `{path}`; blank path → 400 |
+| POST | `/api/mobile/workbench/fs/info` | `routes/workbench.rs` | none; host path metadata | read-only | body `{path}`; blank path → 400 |
+| POST | `/api/mobile/workbench/remote/roots` | `routes/workbench.rs` | none; lists peer browse roots via host two-hop | read-only | body `{deviceId}`; blank deviceId → 400 |
+| POST | `/api/mobile/workbench/remote/list` | `routes/workbench.rs` | none; lists one peer directory via host two-hop | read-only | body `{deviceId,path}` |
+| POST | `/api/mobile/workbench/remote/info` | `routes/workbench.rs` | none; peer path metadata via host two-hop | read-only | body `{deviceId,path}` |
+| POST | `/api/mobile/workbench/remote/open` | `routes/workbench.rs` | opens peer local project then upserts host remote shortcut | naturally-idempotent | same stable `remote:<deviceId>:<path>` shortcut id as desktop |
 | POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
 | POST | `/api/mobile/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | mobile shares the same `clientOperationId` ledger/envelope as P2P commit |
