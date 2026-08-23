@@ -5,9 +5,14 @@
 //!     本模块先落地 wire 合同（能力 token 之外的 DTO / 错误码），后续 inventory/apply 复用同一形状。
 //!
 //! Code Logic（这个模块做什么）:
-//!     导出 DTO/错误码，以及本机全 Agent 用户级 inventory 扫描。
+//!     导出 DTO/错误码、本机全 Agent 用户级 inventory 扫描，以及源端 CAS selection 冻结。
 mod inventory;
 mod models;
+mod selection;
 
 pub use inventory::build_local_user_mirror_inventory;
 pub use models::*;
+pub use selection::{
+    freeze_user_mirror_selection, source_read_user_mirror_object_chunk, BuiltUserMirrorSelection,
+    UserMirrorObjectBinding,
+};
