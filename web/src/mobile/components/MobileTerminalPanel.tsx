@@ -30,6 +30,7 @@ import {
   ImageIcon,
   MaximizeIcon,
   MinimizeIcon,
+  MoreIcon,
   PlusIcon,
   PromptsIcon,
   SyncIcon,
@@ -243,8 +244,8 @@ function getErrorMessage(reason: unknown, fallback: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 active project/worktree/session 渲染 session tabs、xterm viewport 和 window/pane 控制按钮；
- *   右侧 FAB 组顶部为图片粘贴，再 Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）再 Git Commit
- *   （与桌面 Git 历史同口径，Commit 的 message=null），然后 Prompt 优化与收藏 Prompt；
+ *   右下角默认一个折叠 FAB，点开后自上而下为图片粘贴、Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）、
+ *   Git Commit（与桌面 Git 历史同口径，message=null）、Prompt 优化与收藏 Prompt；再点触发钮、点遮罩或选完动作后收起；
  *   首屏通过 HTTP replay 写入历史 buffer，后续只消费外部 terminal buffer store 增量，输入/resize/focus/split/close 全部调用 HTTP transport。
  */
 export function MobileTerminalPanel({
@@ -284,6 +285,7 @@ export function MobileTerminalPanel({
   const [selectionEmpty, setSelectionEmpty] = useState(true);
   const [selectionCopied, setSelectionCopied] = useState<string | null>(null);
   const [pasteImageBusy, setPasteImageBusy] = useState(false);
+  const [fabMenuOpen, setFabMenuOpen] = useState(false);
   const commitOperationIdRef = useRef<string | null>(null);
   const mergeOperationIdRef = useRef<string | null>(null);
   const commitContextRef = useRef<MobileGitActionContext | null>(null);
@@ -398,11 +400,29 @@ export function MobileTerminalPanel({
     setHookRepair(null);
     setCommitSuccess(null);
     setSelectionCopied(null);
+    setFabMenuOpen(false);
     commitOperationIdRef.current = null;
     mergeOperationIdRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 id 驱动重置
   }, [project?.id, worktree?.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* eslint-disable react-hooks/set-state-in-effect -- 切 session 必须收起 FAB，避免动作打到新窗口 */
+  useEffect(() => {
+    setFabMenuOpen(false);
+  }, [sessionId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    if (!fabMenuOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setFabMenuOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [fabMenuOpen]);
 
   useEffect(() => {
     inputEnabledRef.current = Boolean(
@@ -2221,61 +2241,110 @@ export function MobileTerminalPanel({
                   aria-hidden="true"
                   onChange={handlePasteImageFileChange}
                 />
-                <PointerPrimaryButton
-                  type="button"
-                  className={styles.mobileTerminalFab}
-                  disabled={!canPasteImage || pasteImageBusy}
-                  aria-busy={pasteImageBusy || undefined}
-                  aria-label={t('workbench:mobile.terminalPanel.pasteImageButton')}
-                  title={t('workbench:mobile.terminalPanel.pasteImageButton')}
-                  onPrimary={() => pasteImageInputRef.current?.click()}
-                >
-                  <ImageIcon size={18} aria-hidden="true" />
-                </PointerPrimaryButton>
-                {showMergeFab ? (
-                  <PointerPrimaryButton
-                    type="button"
-                    className={styles.mobileTerminalFab}
-                    disabled={!canMergeWorktree || mergeBusy}
-                    aria-busy={mergeBusy || undefined}
-                    aria-label={mergeLabel}
-                    title={mergeLabel}
-                    onPrimary={() => void handleMergeWorktree()}
+                {fabMenuOpen ? (
+                  <div
+                    id="mobile-terminal-fab-actions"
+                    className={styles.mobileTerminalFabActions}
+                    role="group"
+                    aria-label={t('workbench:mobile.terminalPanel.fabMenu.actionsAriaLabel')}
                   >
-                    <SyncIcon size={18} aria-hidden="true" />
-                  </PointerPrimaryButton>
+                    <PointerPrimaryButton
+                      type="button"
+                      className={styles.mobileTerminalFab}
+                      disabled={!canPasteImage || pasteImageBusy}
+                      aria-busy={pasteImageBusy || undefined}
+                      aria-label={t('workbench:mobile.terminalPanel.pasteImageButton')}
+                      title={t('workbench:mobile.terminalPanel.pasteImageButton')}
+                      onPrimary={() => {
+                        setFabMenuOpen(false);
+                        pasteImageInputRef.current?.click();
+                      }}
+                    >
+                      <ImageIcon size={18} aria-hidden="true" />
+                    </PointerPrimaryButton>
+                    {showMergeFab ? (
+                      <PointerPrimaryButton
+                        type="button"
+                        className={styles.mobileTerminalFab}
+                        disabled={!canMergeWorktree || mergeBusy}
+                        aria-busy={mergeBusy || undefined}
+                        aria-label={mergeLabel}
+                        title={mergeLabel}
+                        onPrimary={() => {
+                          setFabMenuOpen(false);
+                          void handleMergeWorktree();
+                        }}
+                      >
+                        <SyncIcon size={18} aria-hidden="true" />
+                      </PointerPrimaryButton>
+                    ) : null}
+                    <PointerPrimaryButton
+                      type="button"
+                      className={styles.mobileTerminalFab}
+                      disabled={!canCommitWorktree || commitBusy}
+                      data-dirty={worktreeDirty || undefined}
+                      aria-busy={commitBusy || undefined}
+                      aria-label={commitLabel}
+                      title={commitLabel}
+                      onPrimary={() => {
+                        setFabMenuOpen(false);
+                        void handleCommitWorktree();
+                      }}
+                    >
+                      <CommitIcon size={18} aria-hidden="true" />
+                    </PointerPrimaryButton>
+                    <PointerPrimaryButton
+                      type="button"
+                      className={styles.mobileTerminalFab}
+                      disabled={!canOpenFavoriteQuickInput}
+                      aria-label={t('workbench:promptOptimizer.open')}
+                      title={t('workbench:promptOptimizer.open')}
+                      onPrimary={() => {
+                        setFabMenuOpen(false);
+                        setPromptOptimizerSheetOpen(true);
+                      }}
+                    >
+                      <EditIcon size={18} aria-hidden="true" />
+                    </PointerPrimaryButton>
+                    <PointerPrimaryButton
+                      type="button"
+                      className={styles.mobileTerminalFab}
+                      disabled={!canOpenFavoriteQuickInput}
+                      aria-label={t('workbench:mobile.favoriteQuickInput.openButton')}
+                      title={t('workbench:mobile.favoriteQuickInput.openButton')}
+                      onPrimary={() => {
+                        setFabMenuOpen(false);
+                        setFavoriteSheetOpen(true);
+                      }}
+                    >
+                      <PromptsIcon size={18} aria-hidden="true" />
+                    </PointerPrimaryButton>
+                  </div>
                 ) : null}
                 <PointerPrimaryButton
                   type="button"
                   className={styles.mobileTerminalFab}
-                  disabled={!canCommitWorktree || commitBusy}
-                  data-dirty={worktreeDirty || undefined}
-                  aria-busy={commitBusy || undefined}
-                  aria-label={commitLabel}
-                  title={commitLabel}
-                  onPrimary={() => void handleCommitWorktree()}
+                  data-trigger="true"
+                  data-open={fabMenuOpen || undefined}
+                  aria-expanded={fabMenuOpen}
+                  aria-controls={fabMenuOpen ? 'mobile-terminal-fab-actions' : undefined}
+                  aria-label={
+                    fabMenuOpen
+                      ? t('workbench:mobile.terminalPanel.fabMenu.close')
+                      : t('workbench:mobile.terminalPanel.fabMenu.open')
+                  }
+                  title={
+                    fabMenuOpen
+                      ? t('workbench:mobile.terminalPanel.fabMenu.close')
+                      : t('workbench:mobile.terminalPanel.fabMenu.open')
+                  }
+                  onPrimary={() => setFabMenuOpen((open) => !open)}
                 >
-                  <CommitIcon size={18} aria-hidden="true" />
-                </PointerPrimaryButton>
-                <PointerPrimaryButton
-                  type="button"
-                  className={styles.mobileTerminalFab}
-                  disabled={!canOpenFavoriteQuickInput}
-                  aria-label={t('workbench:promptOptimizer.open')}
-                  title={t('workbench:promptOptimizer.open')}
-                  onPrimary={() => setPromptOptimizerSheetOpen(true)}
-                >
-                  <EditIcon size={18} aria-hidden="true" />
-                </PointerPrimaryButton>
-                <PointerPrimaryButton
-                  type="button"
-                  className={styles.mobileTerminalFab}
-                  disabled={!canOpenFavoriteQuickInput}
-                  aria-label={t('workbench:mobile.favoriteQuickInput.openButton')}
-                  title={t('workbench:mobile.favoriteQuickInput.openButton')}
-                  onPrimary={() => setFavoriteSheetOpen(true)}
-                >
-                  <PromptsIcon size={18} aria-hidden="true" />
+                  {fabMenuOpen ? (
+                    <XIcon size={18} aria-hidden="true" />
+                  ) : (
+                    <MoreIcon size={18} aria-hidden="true" />
+                  )}
                 </PointerPrimaryButton>
               </div>
             ) : null}
@@ -2290,6 +2359,15 @@ export function MobileTerminalPanel({
               }
               stickyModifier={stickyModifier}
               onKeyPress={handleExtraKeyPress}
+            />
+          ) : null}
+          {visibleSession && fabMenuOpen ? (
+            <button
+              type="button"
+              className={styles.mobileTerminalFabBackdrop}
+              data-testid="mobile-terminal-fab-backdrop"
+              aria-label={t('workbench:mobile.terminalPanel.fabMenu.dismiss')}
+              onClick={() => setFabMenuOpen(false)}
             />
           ) : null}
         </div>
