@@ -35,6 +35,7 @@ import {
   type MobileMutationPhase,
 } from '../mobilePanelState';
 import { executeMobileGitCommit } from '../mobileGitCommit';
+import { useAutoDismissedStatus } from '../mobileTransientStatus';
 import type { MobileHookRepair } from '../mobileHookRepair';
 import { getMobileWorktreeStatusKind } from '../mobileWorkbenchState';
 import { MobileHookRepairCard } from './MobileHookRepairCard';
@@ -113,6 +114,7 @@ export function MobileGitPanel({
   const pushOperationIdRef = useRef<string | null>(null);
   const mergeOperationIdRef = useRef<string | null>(null);
   const unknownKindRef = useRef<'commit' | 'push' | 'merge' | null>(null);
+  useAutoDismissedStatus(success, setSuccess);
   const statusLabel = useMemo(() => {
     if (!worktree) return t('workbench:mobile.gitPanel.noWorktree');
     const statusKind = getMobileWorktreeStatusKind(worktree);

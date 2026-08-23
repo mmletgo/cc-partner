@@ -20,6 +20,7 @@ import { Dialog } from '@/components/primitives';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import { useLanguage } from '@/hooks/useLanguage';
 import type { WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { useAutoDismissedStatus } from '../mobileTransientStatus';
 import styles from '../MobileWorkbench.module.css';
 
 export interface MobilePromptOptimizerSheetProps {
@@ -54,6 +55,7 @@ export function MobilePromptOptimizerSheet({
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  useAutoDismissedStatus(status, setStatus);
   const trimmedPrompt = rawPrompt.trim();
   const canSubmit = Boolean(worktree && session && trimmedPrompt && !submitting);
 

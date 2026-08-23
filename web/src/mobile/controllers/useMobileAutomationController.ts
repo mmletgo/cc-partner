@@ -52,6 +52,7 @@ import {
   selectMobileRuntimeDisplayForProject,
   type OwnedMobileRuntimeDisplayState,
 } from '../mobileRuntimeSnapshotStore';
+import { useAutoDismissedStatus } from '../mobileTransientStatus';
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -580,6 +581,7 @@ export function useMobileAutomationController({
   const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  useAutoDismissedStatus(status, setStatus);
   const [runtimeDisplayState, setRuntimeDisplay] = useState<OwnedMobileRuntimeDisplayState>(
     () => emptyMobileRuntimeDisplayState(false),
   );

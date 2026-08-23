@@ -12,6 +12,14 @@ import {
   computeMobileKeyboardInset,
   computeMobileKeyboardShift,
   computeMobileTerminalMinHeight,
+  isMobileKeyboardAnchorVisibleAfterLift,
+  MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT,
+  notifyMobileKeyboardAnchorChanged,
+  readDocumentMobileKeyboardShiftPx,
+  readStampedMobileKeyboardAnchorTop,
+  resolveUnshiftedMobileKeyboardAnchorTop,
+  stampMobileKeyboardAnchorTop,
+  clearMobileKeyboardAnchorTop,
   computeMobileViewportLayoutHints,
   isMobileEditableKeyboardTarget,
   isMobileTerminalTypingTarget,
@@ -376,15 +384,17 @@ describe('mobileWorkbenchState', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   终端输入必须整页让出键盘；其它输入不能一律顶满，否则顶部字段会被顶出屏幕。
+   *   终端输入不能一律整页上移：只有点击位置在顶页后仍可见才抬升，否则键盘遮底。
+   *   其它输入不能一律顶满，否则顶部字段会被顶出屏幕。
    *
    * Code Logic（这个测试做什么）:
-   *   覆盖 full/focused 模式、顶部原位、居中上移、键盘遮挡最小抬升、无焦点保持 previousShift。
+   *   覆盖 full 模式 lift/overlay、focused 顶部原位/居中上移/键盘遮挡最小抬升、无焦点保持 previousShift。
    */
-  test('keyboard shift keeps terminal full-lift and centers other focused inputs', () => {
+  test('keyboard shift lifts only when the input anchor stays visible', () => {
     const layoutHeight = 844;
     const inset = 344;
 
+    // 顶部点击：整页上移后会离开可视区，键盘应遮底而不是顶页。
     assertEqual(
       computeMobileKeyboardShift({
         keyboardInset: inset,
@@ -394,7 +404,43 @@ describe('mobileWorkbenchState', () => {
         mode: 'full',
         previousShift: 0,
       }),
+      0,
+    );
+    // 中下部点击：顶页后仍在未遮挡区内，才按键盘高度整页上移。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 420,
+        focusHeight: 36,
+        mode: 'full',
+        previousShift: 0,
+      }),
       inset,
+    );
+    // 底部点击（常见 prompt）：顶页后仍可见。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: 780,
+        focusHeight: 40,
+        mode: 'full',
+        previousShift: 0,
+      }),
+      inset,
+    );
+    // 无焦点时保持上次上移，避免 blur 与键盘动画不同步时整页回落。
+    assertEqual(
+      computeMobileKeyboardShift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        focusTop: null,
+        focusHeight: 0,
+        mode: 'full',
+        previousShift: 180,
+      }),
+      180,
     );
     assertEqual(
       computeMobileKeyboardShift({
@@ -506,6 +552,50 @@ describe('mobileWorkbenchState', () => {
       }),
       0,
     );
+
+    assertEqual(
+      isMobileKeyboardAnchorVisibleAfterLift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        anchorTop: 40,
+        anchorHeight: 36,
+      }),
+      false,
+    );
+    assertEqual(
+      isMobileKeyboardAnchorVisibleAfterLift({
+        keyboardInset: inset,
+        layoutViewportHeight: layoutHeight,
+        anchorTop: 420,
+        anchorHeight: 36,
+      }),
+      true,
+    );
+    assertEqual(resolveUnshiftedMobileKeyboardAnchorTop(100, 344), 444);
+    assertEqual(readDocumentMobileKeyboardShiftPx('180px'), 180);
+    assertEqual(readDocumentMobileKeyboardShiftPx(''), 0);
+
+    const stamped: { attrs: Map<string, string> } = { attrs: new Map() };
+    const target = {
+      setAttribute: (name: string, value: string) => {
+        stamped.attrs.set(name, value);
+      },
+      getAttribute: (name: string) => stamped.attrs.get(name) ?? null,
+      removeAttribute: (name: string) => {
+        stamped.attrs.delete(name);
+      },
+    };
+    stampMobileKeyboardAnchorTop(target, 420.4);
+    assertEqual(readStampedMobileKeyboardAnchorTop(target), 420);
+    clearMobileKeyboardAnchorTop(target);
+    assertEqual(readStampedMobileKeyboardAnchorTop(target), null);
+
+    let notified = 0;
+    notifyMobileKeyboardAnchorChanged((event) => {
+      notified += 1;
+      assertEqual(event.type, MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT);
+    });
+    assertEqual(notified, 1);
   });
 
   /**

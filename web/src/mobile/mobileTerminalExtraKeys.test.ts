@@ -220,9 +220,11 @@ describe('mobileTerminalExtraKeys', () => {
       },
     };
 
+    attrs.set('data-mobile-keyboard-anchor-top', '420');
     assertTrue(leaveMobileTerminalTypingMode(helper, null), 'leave applies helper attrs');
     assertEqual(attrs.get('readonly'), 'true', 'readonly set');
     assertEqual(attrs.get('inputmode'), 'none', 'inputmode none');
+    assertEqual(attrs.has('data-mobile-keyboard-anchor-top'), false, 'leave clears tap anchor');
     assertEqual(blurred, 1, 'leave blurs helper');
 
     assertTrue(enterMobileTerminalTypingMode(helper), 'enter clears attrs');

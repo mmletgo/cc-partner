@@ -53,6 +53,14 @@ import {
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
 import {
+  beginMobileTerminalResumePin,
+  isMobileTerminalResumePinned,
+  isMobileTerminalResumeVisible,
+  scrollMobileTerminalToLatest,
+  shouldFollowMobileTerminalToLatest,
+  type MobileTerminalResumePin,
+} from '../mobileTerminalResumeFollow';
+import {
   beginMobileTerminalTouchScroll,
   encodeMobileTerminalWheelReports,
   mobileTerminalTouchLineHeight,
@@ -69,6 +77,7 @@ import {
   type MobileMutationPhase,
 } from '../mobilePanelState';
 import { executeMobileGitCommit } from '../mobileGitCommit';
+import { useAutoDismissedStatus } from '../mobileTransientStatus';
 import {
   canRunMobilePaneMutation,
   canShowMobileTerminalMergeFab,
@@ -79,7 +88,11 @@ import {
   getMobileCreatePaneDirection,
   getMobileTerminalChromeVisibility,
   mobileAgentForSession,
+  notifyMobileKeyboardAnchorChanged,
+  readDocumentMobileKeyboardShiftPx,
+  resolveUnshiftedMobileKeyboardAnchorTop,
   selectPreferredMobileSession,
+  stampMobileKeyboardAnchorTop,
   type MobileSessionRuntimeState,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
@@ -318,6 +331,8 @@ export function MobileTerminalPanel({
   const inputStreamRef = useRef<MobileTerminalInputStream | null>(null);
   const hydratedScrollbackSessionRef = useRef<string | null>(null);
   const activeAgentIdentityRef = useRef<string | null>(null);
+  useAutoDismissedStatus(commitSuccess, setCommitSuccess);
+  useAutoDismissedStatus(selectionCopied, setSelectionCopied);
 
   const scopedSessions = useMemo(
     () =>
@@ -1009,6 +1024,8 @@ export function MobileTerminalPanel({
     let hydrationRequestToken = 0;
     let hydrationAbortController: AbortController | null = null;
     let hydrationTimeout: number | null = null;
+    let resumePin: MobileTerminalResumePin | null = null;
+    let resumeRaf: number | null = null;
     replayRequestIdRef.current = requestId;
     replayReadyRef.current = false;
     replayGateRef.current = false;
@@ -1481,6 +1498,7 @@ export function MobileTerminalPanel({
       touchScrollStateRef.current = result.state;
       if (result.lines === 0) return;
       touchMoved = true;
+      resumePin = null;
       // 未权威 hydration 时不能信任 baseY（可能是末屏重绘污染）；mouse mode=none 先抓 tmux history。
       // 已 hydration 的 normal buffer 用绝对 scrollToLine；已协商 mouse 时才发 SGR 64/65。
       const activeBuffer = terminal.buffer.active;
@@ -1560,11 +1578,20 @@ export function MobileTerminalPanel({
      *   系统键盘只应在用户明确点击终端输入区后出现；滑动滚动不得弹出键盘。
      *
      * Code Logic（这个函数做什么）:
-     *   去掉 helper readonly/inputmode 并 terminal.focus()。
+     *   去掉 helper readonly/inputmode，写入点击锚点并通知 shell 重算键盘上移，再 terminal.focus()。
      */
-    const enterTypingFromUserGesture = (): void => {
+    const enterTypingFromUserGesture = (clientY: number): void => {
       if (disposed || selectingRef.current) return;
-      enterMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport));
+      const helper = findMobileTerminalHelperTextarea(viewport);
+      enterMobileTerminalTypingMode(helper);
+      const appliedShift = readDocumentMobileKeyboardShiftPx(
+        getComputedStyle(document.documentElement).getPropertyValue('--mobile-keyboard-shift'),
+      );
+      stampMobileKeyboardAnchorTop(
+        helper,
+        resolveUnshiftedMobileKeyboardAnchorTop(clientY, appliedShift),
+      );
+      notifyMobileKeyboardAnchorChanged();
       try {
         terminal.focus();
       } catch {
@@ -1587,7 +1614,7 @@ export function MobileTerminalPanel({
         suppressClickAfterScroll = true;
         return;
       }
-      enterTypingFromUserGesture();
+      enterTypingFromUserGesture(lastClientY);
     };
     const handleTouchCancel = (): void => {
       clearLongPressTimer();
@@ -1602,13 +1629,13 @@ export function MobileTerminalPanel({
         hydrationAutoScrollCancelled = true;
       }
     };
-    const handleViewportClick = (): void => {
+    const handleViewportClick = (event: MouseEvent): void => {
       if (suppressClickAfterScroll || selectingRef.current) {
         suppressClickAfterScroll = false;
         return;
       }
       // 桌面/无 touch 调试；手机轻点与 touchend 幂等。
-      enterTypingFromUserGesture();
+      enterTypingFromUserGesture(event.clientY);
     };
     /**
      * Business Logic（为什么需要这个监听器）:
@@ -1649,6 +1676,59 @@ export function MobileTerminalPanel({
     });
     observer.observe(viewport);
     resizeTerminal();
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   回到前台时必须把视口钉在最新输出；划选复制中途不能抢滚动。
+     *
+     * Code Logic（这个函数做什么）:
+     *   可见、未划选且无选区时用绝对 scrollToLine(baseY) 跟到底。
+     */
+    const followLatestIfAllowed = (): void => {
+      if (disposed || terminalRef.current !== terminal) return;
+      if (
+        !shouldFollowMobileTerminalToLatest({
+          visible: isMobileTerminalResumeVisible(document.visibilityState),
+          selecting: selectingRef.current,
+          hasSelection: terminal.getSelection().length > 0,
+        })
+      ) {
+        return;
+      }
+      scrollMobileTerminalToLatest(terminal);
+      // xterm 6 DOM renderer 在 selection 失效时重建全部行；空选区不改变用户状态。
+      terminal.clearSelection();
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   后台冻结后首帧 buffer 可能仍旧，事件流重连还会再灌一段 catch-up，需要 pin + 双 rAF。
+     *
+     * Code Logic（这个函数做什么）:
+     *   仅在 document 可见时开启 pin 窗口，合并同一帧请求，下一帧后再跟到底。
+     */
+    const scheduleResumeFollow = (): void => {
+      if (disposed) return;
+      if (!isMobileTerminalResumeVisible(document.visibilityState)) return;
+      if (selectingRef.current) return;
+      resumePin = beginMobileTerminalResumePin(Date.now());
+      if (resumeRaf !== null) {
+        window.cancelAnimationFrame(resumeRaf);
+      }
+      resumeRaf = window.requestAnimationFrame(() => {
+        resumeRaf = window.requestAnimationFrame(() => {
+          resumeRaf = null;
+          followLatestIfAllowed();
+        });
+      });
+    };
+
+    document.addEventListener('visibilitychange', scheduleResumeFollow);
+    window.addEventListener('pageshow', scheduleResumeFollow);
+    const unsubscribeResumeLive = store.subscribeLive(sessionId, () => {
+      if (!isMobileTerminalResumePinned(resumePin, Date.now())) return;
+      followLatestIfAllowed();
+    });
 
     // 必须先于 live writer 注册：historyHydration reset 先把本地 alternate/RIS 恢复成 normal，
     // writer 随后才 clear + replay 完整快照；该 reset 不会写入 tmux/Claude。
@@ -1744,6 +1824,13 @@ export function MobileTerminalPanel({
       clearScrollbackHydration(true);
       observer.disconnect();
       dataDisposable.dispose();
+      document.removeEventListener('visibilitychange', scheduleResumeFollow);
+      window.removeEventListener('pageshow', scheduleResumeFollow);
+      if (resumeRaf !== null) {
+        window.cancelAnimationFrame(resumeRaf);
+        resumeRaf = null;
+      }
+      unsubscribeResumeLive();
       viewport.removeEventListener('touchstart', handleTouchStart, touchListenerOptions);
       viewport.removeEventListener('touchmove', handleTouchMove, touchListenerOptions);
       viewport.removeEventListener('touchend', handleTouchEnd, touchListenerOptions);
@@ -2174,7 +2261,10 @@ export function MobileTerminalPanel({
       data-fullscreen={isTerminalFullscreen || undefined}
     >
       {terminalChrome.worktreeStrip && worktreeBar ? (
-        <div className={styles.mobileTerminalWorktreeSlot}>
+        <div
+          className={styles.mobileTerminalWorktreeSlot}
+          onPointerDownCapture={dismissTerminalSoftKeyboard}
+        >
           <MobileWorktreeTabs {...worktreeBar} />
         </div>
       ) : null}
@@ -2188,6 +2278,7 @@ export function MobileTerminalPanel({
             className={styles.mobileTerminalTabs}
             role="tablist"
             aria-label={t('workbench:mobile.terminalPanel.tabsAriaLabel')}
+            onPointerDownCapture={dismissTerminalSoftKeyboard}
           >
             {scopedSessions.map((session) => {
               const isActive = session.id === visibleSession?.id;
@@ -2243,6 +2334,7 @@ export function MobileTerminalPanel({
           <div
             className={styles.mobileTerminalActions}
             aria-label={t('workbench:mobile.terminalPanel.actionsAriaLabel')}
+            onPointerDownCapture={dismissTerminalSoftKeyboard}
           >
             <PointerPrimaryButton
               type="button"
@@ -2345,6 +2437,7 @@ export function MobileTerminalPanel({
                 className={styles.mobileTerminalSelectionBar}
                 role="toolbar"
                 aria-label={t('workbench:mobile.terminalPanel.selection.barAriaLabel')}
+                onPointerDownCapture={dismissTerminalSoftKeyboard}
               >
                 <span className={styles.mobileTerminalSelectionMeta}>
                   {t('workbench:mobile.terminalPanel.selection.selectedLines', {

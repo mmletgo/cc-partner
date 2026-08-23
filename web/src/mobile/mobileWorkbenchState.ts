@@ -64,7 +64,7 @@ export interface MobileWorkbenchNavGroup {
  * 软键盘/viewport 派生的 shell 尺寸提示。
  *
  * Business Logic（为什么需要这个接口）:
- *   软键盘弹出时 visualViewport 变矮，shell 与终端需压缩高度并保留顶部菜单可见。
+ *   软键盘弹出时 visualViewport 变矮；shell 保持全屏高度，由 shift 决定是否上移让出键盘。
  *
  * Code Logic（字段说明）:
  *   shellHeight/keyboardInset 为 CSS 像素；landscape 表示宽>高。
@@ -81,12 +81,20 @@ export interface MobileViewportLayoutHints {
  * 移动端软键盘页面上移模式。
  *
  * Business Logic（为什么需要这个类型）:
- *   终端输入需要整页让出键盘；其它输入只需要把焦点放到未遮挡可视区，不能一律顶满。
+ *   终端输入不能一律顶满：只有点击位置顶页后仍可见才整页让出键盘；其它输入只需要把焦点
+ *   放到未遮挡可视区。
  *
  * Code Logic（联合形态）:
- *   full=按键盘高度整页上移；focused=按焦点几何把输入放到可视区纵向中线附近。
+ *   full=点击锚点顶页后仍可见才按键盘高度上移，否则 overlay；focused=按焦点几何把输入放到
+ *   可视区纵向中线附近。
  */
 export type MobileKeyboardShiftMode = 'full' | 'focused';
+
+/** 终端点击进入输入态时，把未上移坐标系的锚点写在 helper textarea 上。 */
+export const MOBILE_KEYBOARD_ANCHOR_TOP_ATTR = 'data-mobile-keyboard-anchor-top';
+
+/** 点击锚点变化后通知 shell 重算 shift；键盘已打开时没有 resize/focusin。 */
+export const MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT = 'cp-mobile-keyboard-anchor-change';
 
 /**
  * 计算软键盘上移量所需的焦点几何。
@@ -504,16 +512,6 @@ export function isMobileEditableKeyboardTarget(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端输入要把 pane / extra keys 完整抬到键盘上方；其它输入只把焦点放到未遮挡可视区
- *   的纵向中间。原始位置已在可视区上半时不得再往中间拽。
- *
- * Code Logic（这个函数做什么）:
- *   full 模式返回 keyboardInset；focused 模式按未上移坐标系的焦点中心对准可视区中心，
- *   并保证焦点底边不被键盘盖住；上移量夹在 [0, keyboardInset]；无焦点时保持 previousShift
- *   直到键盘收起，避免 blur 与键盘动画不同步时整页回落。
- */
-/**
- * Business Logic（为什么需要这个函数）:
  *   Dialog portal 不走 shell 的 `top` 上移；反推未上移坐标时必须用「作用在该焦点上」的位移，
  *   不能把 shell 的 previousShift 加到尚未平移的弹层输入上。
  *
@@ -535,10 +533,147 @@ export function resolveAppliedMobileKeyboardShift(input: {
   return 0;
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   判断「整页按键盘高度上移后，进入输入态的位置是否还在未遮挡可视区内」。
+ *
+ * Code Logic（这个函数做什么）:
+ *   锚点平移 inset 后，顶底边都落在 [0, layoutHeight - inset] 内则可见。
+ */
+export function isMobileKeyboardAnchorVisibleAfterLift(input: {
+  keyboardInset: number;
+  layoutViewportHeight: number;
+  anchorTop: number;
+  anchorHeight: number;
+}): boolean {
+  const inset = Math.max(0, Math.round(input.keyboardInset));
+  const layoutHeight = Math.max(0, input.layoutViewportHeight);
+  const visibleHeight = Math.max(0, layoutHeight - inset);
+  if (visibleHeight <= 0) return false;
+  const shiftedTop = input.anchorTop - inset;
+  const shiftedBottom = shiftedTop + Math.max(0, input.anchorHeight);
+  return shiftedTop >= 0 && shiftedBottom <= visibleHeight;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   点击发生在可能已上移的视口里，计算 shift 必须用未上移坐标系。
+ *
+ * Code Logic（这个函数做什么）:
+ *   clientY + 当前已应用 shift，四舍五入为 CSS 像素。
+ */
+export function resolveUnshiftedMobileKeyboardAnchorTop(
+  clientY: number,
+  appliedShift: number,
+): number {
+  return Math.round(clientY + Math.max(0, appliedShift));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终端面板读取 shell 写在 documentElement 上的上移量，才能把点击坐标还原成未上移锚点。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析 CSS 像素字符串；非法值当 0。
+ */
+export function readDocumentMobileKeyboardShiftPx(raw: string): number {
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   xterm helper textarea 在光标处，不能代表用户点击进入输入态的位置。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把未上移锚点写入 data-mobile-keyboard-anchor-top。
+ */
+export function stampMobileKeyboardAnchorTop(
+  target: { setAttribute(name: string, value: string): void } | null | undefined,
+  unshiftedTop: number,
+): void {
+  if (!target) return;
+  target.setAttribute(MOBILE_KEYBOARD_ANCHOR_TOP_ATTR, String(Math.round(unshiftedTop)));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   shell 计算 shift 时优先用点击锚点，而不是 helper textarea 的光标矩形。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读 data-mobile-keyboard-anchor-top；缺失或非数字返回 null。
+ */
+export function readStampedMobileKeyboardAnchorTop(
+  target: {
+    getAttribute?: (name: string) => string | null;
+    dataset?: { mobileKeyboardAnchorTop?: string };
+  } | null | undefined,
+): number | null {
+  if (!target) return null;
+  const raw =
+    target.getAttribute?.(MOBILE_KEYBOARD_ANCHOR_TOP_ATTR) ??
+    target.dataset?.mobileKeyboardAnchorTop ??
+    null;
+  if (raw == null || raw === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   离开输入态后点击锚点失效，避免下次焦点误用旧坐标。
+ *
+ * Code Logic（这个函数做什么）:
+ *   移除 data-mobile-keyboard-anchor-top。
+ */
+export function clearMobileKeyboardAnchorTop(
+  target: { removeAttribute(name: string): void } | null | undefined,
+): void {
+  target?.removeAttribute(MOBILE_KEYBOARD_ANCHOR_TOP_ATTR);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   键盘已经打开时再点终端，visualViewport 与 focus 都不变，shell 不会重算上移量。
+ *
+ * Code Logic（这个函数做什么）:
+ *   向 window 派发 cp-mobile-keyboard-anchor-change。
+ */
+export function notifyMobileKeyboardAnchorChanged(
+  dispatch: (event: Event) => void = (event) => window.dispatchEvent(event),
+): void {
+  dispatch(new Event(MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终端输入只有点击位置在整页上移后仍可见才抬升；其它输入只把焦点放到未遮挡可视区
+ *   的纵向中间。原始位置已在可视区上半时不得再往中间拽。
+ *
+ * Code Logic（这个函数做什么）:
+ *   full 模式：锚点顶页后仍完全落在未遮挡区则返回 keyboardInset，否则 0（键盘遮底）；
+ *   focused 模式按未上移坐标系的焦点中心对准可视区中心，并保证焦点底边不被键盘盖住；
+ *   上移量夹在 [0, keyboardInset]；无焦点时保持 previousShift 直到键盘收起，避免 blur
+ *   与键盘动画不同步时整页回落。
+ */
 export function computeMobileKeyboardShift(input: MobileKeyboardShiftInput): number {
   const inset = Math.max(0, Math.round(input.keyboardInset));
   if (inset <= 0) return 0;
-  if (input.mode === 'full') return inset;
+  if (input.mode === 'full') {
+    const previous = Math.min(inset, Math.max(0, Math.round(input.previousShift)));
+    if (input.focusTop == null) return previous;
+    if (
+      isMobileKeyboardAnchorVisibleAfterLift({
+        keyboardInset: inset,
+        layoutViewportHeight: input.layoutViewportHeight,
+        anchorTop: input.focusTop,
+        anchorHeight: input.focusHeight,
+      })
+    ) {
+      return inset;
+    }
+    return 0;
+  }
 
   const previous = Math.min(inset, Math.max(0, Math.round(input.previousShift)));
   if (input.focusTop == null) return previous;

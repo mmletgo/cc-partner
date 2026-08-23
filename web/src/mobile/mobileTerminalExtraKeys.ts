@@ -491,8 +491,8 @@ export function enterMobileTerminalTypingMode(
  *   按 extra keys 或初始化终端时必须离开打字态：系统键盘不得因快捷键重现。
  *
  * Code Logic（这个函数做什么）:
- *   对 helper textarea 设 readonly + inputmode=none 并 blur；再 blur 当前可编辑 activeElement。
- *   返回是否至少执行了 helper 或 activeElement 其中一侧的 dismiss。
+ *   对 helper textarea 设 readonly + inputmode=none、清点击锚点并 blur；再 blur 当前可编辑
+ *   activeElement。返回是否至少执行了 helper 或 activeElement 其中一侧的 dismiss。
  */
 export function leaveMobileTerminalTypingMode(
   helperTextarea: MobileTerminalHelperTextarea | null | undefined,
@@ -502,6 +502,7 @@ export function leaveMobileTerminalTypingMode(
   if (helperTextarea) {
     helperTextarea.setAttribute('readonly', 'true');
     helperTextarea.setAttribute('inputmode', 'none');
+    helperTextarea.removeAttribute('data-mobile-keyboard-anchor-top');
     helperTextarea.blur();
     touched = true;
   }

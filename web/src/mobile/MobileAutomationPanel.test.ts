@@ -91,6 +91,11 @@ describe('MobileAutomationPanel', () => {
       'httpOrchestratorTransport',
       'controller should own orchestrator transport calls',
     );
+    assertContains(
+      controllerSource,
+      'useAutoDismissedStatus(status, setStatus)',
+      'created-task status must auto-dismiss via useAutoDismissedStatus',
+    );
     assertNotContains(
       controllerSource,
       'getReviewDiff',

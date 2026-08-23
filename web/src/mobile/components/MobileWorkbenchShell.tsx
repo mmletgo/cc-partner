@@ -27,6 +27,8 @@ import {
   getMobileWorkbenchNavGroups,
   isMobileEditableKeyboardTarget,
   isMobileTerminalTypingTarget,
+  MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT,
+  readStampedMobileKeyboardAnchorTop,
   resolveAppliedMobileKeyboardShift,
   openMobileNav,
   resolveMobileNavMode,
@@ -323,11 +325,12 @@ export function MobileWorkbenchShell({
 
   /**
    * Business Logic（为什么需要这个 effect）:
-   *   软键盘弹出时 layout viewport 通常不变但 visualViewport 变矮；终端输入要把 shell /
-   *   全屏 overlay 整体顶到键盘上方，其它输入只把焦点抬到未遮挡可视区中线附近。
+   *   软键盘弹出时 layout viewport 通常不变但 visualViewport 变矮；终端输入仅当点击位置
+   *   顶页后仍可见才把 shell / 全屏 overlay 上移，否则键盘遮底；其它输入只把焦点抬到
+   *   未遮挡可视区中线附近。
    *
    * Code Logic（这个 effect 做什么）:
-   *   监听 visualViewport resize/scroll、window resize 与 focusin/focusout；写入
+   *   监听 visualViewport resize/scroll、window resize、锚点变化与 focusin/focusout；写入
    *   --mobile-shell-height / --mobile-keyboard-inset / --mobile-keyboard-shift /
    *   --mobile-terminal-min-height 与 data-keyboard-open；弹层 portal 同步 transform。
    */
@@ -376,16 +379,23 @@ export function MobileWorkbenchShell({
       let focusTop: number | null = null;
       let focusHeight = 0;
       if (editable && active instanceof HTMLElement) {
-        const rect = active.getBoundingClientRect();
-        const dialogRoot = active.closest('[data-dialog-root]');
-        const appliedShift = resolveAppliedMobileKeyboardShift({
-          dialogTransform:
-            dialogRoot instanceof HTMLElement ? dialogRoot.style.transform || null : null,
-          insideShell: root.contains(active),
-          shellShift: shiftRef.current,
-        });
-        focusTop = rect.top + appliedShift;
-        focusHeight = rect.height;
+        const stampedTop = readStampedMobileKeyboardAnchorTop(active);
+        if (stampedTop != null) {
+          // 终端点击锚点：代表进入输入态的位置，而不是光标处的 helper textarea。
+          focusTop = stampedTop;
+          focusHeight = 0;
+        } else {
+          const rect = active.getBoundingClientRect();
+          const dialogRoot = active.closest('[data-dialog-root]');
+          const appliedShift = resolveAppliedMobileKeyboardShift({
+            dialogTransform:
+              dialogRoot instanceof HTMLElement ? dialogRoot.style.transform || null : null,
+            insideShell: root.contains(active),
+            shellShift: shiftRef.current,
+          });
+          focusTop = rect.top + appliedShift;
+          focusHeight = rect.height;
+        }
       }
       const shift = computeMobileKeyboardShift({
         keyboardInset: hints.keyboardInset,
@@ -423,12 +433,14 @@ export function MobileWorkbenchShell({
     vv?.addEventListener('resize', applyViewportHints);
     vv?.addEventListener('scroll', applyViewportHints);
     window.addEventListener('resize', applyViewportHints);
+    window.addEventListener(MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT, applyViewportHints);
     document.addEventListener('focusin', applyViewportHints);
     document.addEventListener('focusout', handleFocusOut);
     return () => {
       vv?.removeEventListener('resize', applyViewportHints);
       vv?.removeEventListener('scroll', applyViewportHints);
       window.removeEventListener('resize', applyViewportHints);
+      window.removeEventListener(MOBILE_KEYBOARD_ANCHOR_CHANGE_EVENT, applyViewportHints);
       document.removeEventListener('focusin', applyViewportHints);
       document.removeEventListener('focusout', handleFocusOut);
       document.documentElement.style.removeProperty('--mobile-keyboard-shift');

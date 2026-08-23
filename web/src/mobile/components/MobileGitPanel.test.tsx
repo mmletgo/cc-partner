@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import type { ReactElement } from 'react';
 
@@ -53,6 +53,7 @@ vi.mock('@/api/workbenchHttp', () => ({
   },
 }));
 
+import { MOBILE_TRANSIENT_STATUS_MS } from '../mobileTransientStatus';
 import { MobileGitPanel } from './MobileGitPanel';
 
 /**
@@ -122,6 +123,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 /**
@@ -311,6 +313,42 @@ describe('MobileGitPanel mutation reconciliation', () => {
     });
     expect(getMutationOperationMock).not.toHaveBeenCalled();
     expect(screen.getByRole('status').textContent).toContain('提交成功');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   提交成功只是短暂确认，不能一直钉在 Git 面板上。
+   *
+   * Code Logic（这个测试做什么）:
+   *   commit 成功后立刻能看到「提交成功」；推进 MOBILE_TRANSIENT_STATUS_MS 后文案消失。
+   */
+  test('succeeded commit status auto-dismisses', async () => {
+    const next = createWorktree();
+    next.status = { ...next.status, clean: true, changed: 0 };
+    commitMock.mockResolvedValue({
+      kind: 'succeeded',
+      value: next,
+      clientOperationId: 'op-dismiss',
+    });
+
+    renderPanel();
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('status').textContent).toContain('提交成功');
+
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TRANSIENT_STATUS_MS - 1);
+    });
+    expect(screen.getByRole('status').textContent).toContain('提交成功');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.queryByText('提交成功')).toBeNull();
   });
 
   /**

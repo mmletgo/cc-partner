@@ -21,6 +21,7 @@ import { StrictMode, type ReactElement, type ReactNode } from 'react';
 
 import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
 import { MobileTerminalPanel } from './MobileTerminalPanel';
+import { MOBILE_TRANSIENT_STATUS_MS } from '../mobileTransientStatus';
 import * as extraKeys from '../mobileTerminalExtraKeys';
 import { WorkbenchTerminalBuffersContext } from '@/hooks/workbenchTerminalBuffersContext';
 import type { WorkbenchTerminalBuffersContextValue } from '@/hooks/workbenchTerminalBuffersContext';
@@ -32,6 +33,8 @@ import type {
   WorkbenchSessionReplay,
   WorkbenchWorktree,
 } from '@/lib/types';
+import { DEFAULT_WORKTREE_BRANCH_PREFIX } from '@/lib/workbenchWorktreeBranches';
+import type { MobileWorktreeTabsProps } from './MobileWorktreeTabs';
 
 interface MockTerminalInstance {
   write: (data: string, cb?: () => void) => void;
@@ -216,6 +219,30 @@ vi.mock('@/api/workbenchHttp', () => ({
         terminalEvents.pasteImageCalls.push({ sessionId, dataUrl });
         return Promise.resolve({ ok: true, sessionId });
       }),
+      splitPane: vi.fn(() => Promise.resolve({ ok: true, sessionId: 's1', direction: 'down' })),
+      switchPane: vi.fn(() => Promise.resolve({ ok: true, sessionId: 's1' })),
+      closePane: vi.fn(() =>
+        Promise.resolve({ ok: true, sessionId: 's1', closedWindow: false }),
+      ),
+      create: vi.fn(() =>
+        Promise.resolve({
+          id: 's-new',
+          projectId: 'p1',
+          worktreeId: 'wt-1',
+          name: 'new',
+          command: 'bash',
+          cwd: '/p',
+          status: 'running',
+          cols: 80,
+          rows: 24,
+          startedAt: '',
+          exitedAt: null,
+          exitCode: null,
+          supportsPanes: false,
+          paneCount: 1,
+        }),
+      ),
+      close: vi.fn(() => Promise.resolve({ ok: true, sessionId: 's1' })),
     },
   },
 }));
@@ -312,6 +339,41 @@ function buildWorktree(overrides: Partial<WorkbenchWorktree> = {}): WorkbenchWor
     },
     createdAt: '',
     updatedAt: '',
+    ...overrides,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   窗口 tab / worktree 条误弹键盘回归需要一条可点的 worktree strip。
+ *
+ * Code Logic（这个函数做什么）:
+ *   主工作区 + 可删除 feature 工作区，并填齐 MobileWorktreeTabs 回调。
+ */
+function buildWorktreeBar(
+  overrides: Partial<MobileWorktreeTabsProps> = {},
+): MobileWorktreeTabsProps {
+  return {
+    worktrees: [
+      buildWorktree({ isMain: true }),
+      buildWorktree({ id: 'wt-feature', name: 'feature', branch: 'feature/x', isMain: false }),
+    ],
+    activeWorktreeId: 'wt-1',
+    projectId: 'p1',
+    createOpen: false,
+    createPrefix: DEFAULT_WORKTREE_BRANCH_PREFIX,
+    createSuffix: '',
+    pendingRemoval: null,
+    error: null,
+    onSelect: () => undefined,
+    onOpenCreate: () => undefined,
+    onCancelCreate: () => undefined,
+    onPrefixChange: () => undefined,
+    onSuffixChange: () => undefined,
+    onCreate: () => undefined,
+    onRequestRemove: () => undefined,
+    onCancelRemove: () => undefined,
+    onConfirmRemove: () => undefined,
     ...overrides,
   };
 }
@@ -1149,6 +1211,163 @@ describe('MobileTerminalPanel — FAB menu', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
+   *   软键盘是否顶页取决于进入输入态的点击位置，必须把未上移坐标打到 helper textarea。
+   *
+   * Code Logic（这个测试做什么）:
+   *   在 viewport 放入 xterm helper textarea，轻点 clientY=420 后断言锚点属性。
+   */
+  test('tapping the terminal stamps the keyboard anchor on the helper textarea', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+    const helper = document.createElement('textarea');
+    helper.className = 'xterm-helper-textarea';
+    viewport.appendChild(helper);
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 420);
+      dispatchSingleTouch(viewport, 'touchend', 420);
+    });
+
+    expect(helper.getAttribute('data-mobile-keyboard-anchor-top')).toBe('420');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   pane 工具条（新增/切换/关闭/全屏）都走 PointerPrimaryButton，preventDefault
+   *   会把焦点留在 helper textarea，手机一点就会弹出系统键盘。
+   *
+   * Code Logic（这个测试做什么）:
+   *   多 pane session 下逐个 pointerDown 四个动作钮，每次都断言离开打字态。
+   */
+  test('tapping pane toolbar actions leaves typing mode so the soft keyboard does not open', () => {
+    const leaveTyping = vi.spyOn(extraKeys, 'leaveMobileTerminalTypingMode');
+    const session = buildSession({
+      worktreeId: 'wt-1',
+      supportsPanes: true,
+      paneCount: 2,
+    });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    const actionNames = [
+      'workbench:mobile.terminalPanel.addPane',
+      'workbench:mobile.terminalPanel.switchPane',
+      'workbench:mobile.terminalPanel.closePane',
+      'workbench:mobile.terminalPanel.enterFullscreen',
+    ];
+    for (const name of actionNames) {
+      leaveTyping.mockClear();
+      fireEvent.pointerDown(screen.getByRole('button', { name }));
+      expect(leaveTyping, name).toHaveBeenCalled();
+    }
+    leaveTyping.mockRestore();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   窗口 tab（选窗口/关窗口/新建）同样 preventDefault 留住 helper 焦点，会误弹系统键盘。
+   *
+   * Code Logic（这个测试做什么）:
+   *   pointerDown 三个窗口控件，每次都断言离开打字态。
+   */
+  test('tapping window tabs leaves typing mode so the soft keyboard does not open', () => {
+    const leaveTyping = vi.spyOn(extraKeys, 'leaveMobileTerminalTypingMode');
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    const targets = [
+      screen.getByRole('tab'),
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.closeWindow' }),
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.newWindow' }),
+    ];
+    for (const target of targets) {
+      leaveTyping.mockClear();
+      fireEvent.pointerDown(target);
+      expect(leaveTyping).toHaveBeenCalled();
+    }
+    leaveTyping.mockRestore();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   终端页 worktree 条（切换/关闭/新建）在窗口 tab 上方，同样会把焦点留在 helper textarea。
+   *
+   * Code Logic（这个测试做什么）:
+   *   传入 worktreeBar 后 pointerDown chip、删除、新建，每次都断言离开打字态。
+   */
+  test('tapping terminal worktree strip leaves typing mode so the soft keyboard does not open', () => {
+    const leaveTyping = vi.spyOn(extraKeys, 'leaveMobileTerminalTypingMode');
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          worktreeBar={buildWorktreeBar()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    const targets = [
+      screen.getByTestId('mobile-worktree-tabs').querySelector('button[data-mobile-worktree-chip]'),
+      screen.getByTestId('mobile-worktree-remove-wt-feature'),
+      screen.getByTestId('mobile-worktree-create'),
+    ];
+    for (const target of targets) {
+      if (!(target instanceof HTMLElement)) {
+        throw new Error('expected worktree strip control');
+      }
+      leaveTyping.mockClear();
+      fireEvent.pointerDown(target);
+      expect(leaveTyping).toHaveBeenCalled();
+    }
+    leaveTyping.mockRestore();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
    *   还没开终端窗口时也要能提交/看操作入口，不能把 FAB 藏进「无 session」空态。
    *
    * Code Logic（这个测试做什么）:
@@ -1401,6 +1620,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
   });
 
   /**
@@ -1520,6 +1740,59 @@ describe('MobileTerminalPanel — commit FAB', () => {
     expect(screen.getByRole('status').textContent).toContain(
       'workbench:mobile.gitPanel.commitSucceeded',
     );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   提交成功只是短暂确认，不能一直钉在终端上挡住后续操作。
+   *
+   * Code Logic（这个测试做什么）:
+   *   Commit 成功后立刻能看到 status；推进 MOBILE_TRANSIENT_STATUS_MS 后文案消失。
+   */
+  test('commit success status auto-dismisses', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const worktree = buildWorktree();
+    terminalEvents.commitResult = {
+      kind: 'succeeded',
+      value: { ...worktree, status: { ...worktree.status, clean: true, changed: 0 } },
+      clientOperationId: 'op-terminal-dismiss',
+    };
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={worktree}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    openTerminalFabMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('status').textContent).toContain(
+      'workbench:mobile.gitPanel.commitSucceeded',
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TRANSIENT_STATUS_MS - 1);
+    });
+    expect(screen.getByRole('status').textContent).toContain(
+      'workbench:mobile.gitPanel.commitSucceeded',
+    );
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(
+      screen.queryByText('workbench:mobile.gitPanel.commitSucceeded'),
+    ).toBeNull();
   });
 
   /**
@@ -1960,6 +2233,37 @@ describe('MobileTerminalPanel — copy selection and paste image', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
+   *   划选底栏叠在 xterm 上；PointerPrimaryButton preventDefault 可能把 tap 当成继续编辑 helper。
+   *
+   * Code Logic（这个测试做什么）:
+   *   长按出底栏后清掉 leaveTyping，pointerDown 复制/取消，断言再次离开打字态。
+   */
+  test('tapping selection bar actions leaves typing mode so the soft keyboard does not open', () => {
+    const leaveTyping = vi.spyOn(extraKeys, 'leaveMobileTerminalTypingMode');
+    renderPanel();
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 40);
+      vi.advanceTimersByTime(400);
+    });
+    leaveTyping.mockClear();
+
+    fireEvent.pointerDown(
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.selection.copy' }),
+    );
+    expect(leaveTyping).toHaveBeenCalled();
+    leaveTyping.mockClear();
+    fireEvent.pointerDown(
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.selection.cancel' }),
+    );
+    expect(leaveTyping).toHaveBeenCalled();
+    leaveTyping.mockRestore();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
    *   位移超过 8px 必须走原有滚动而不是选区，避免把回看历史误当成划选。
    *
    * Code Logic（这个测试做什么）:
@@ -2097,3 +2401,154 @@ describe('MobileTerminalPanel — copy selection and paste image', () => {
   });
 });
 
+
+describe('MobileTerminalPanel — resume from background follows latest output', () => {
+  let store: WorkbenchTerminalBufferStore;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   jsdom 默认 visibilityState 固定，测试需要模拟 hidden/visible 切换。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 configurable getter 覆盖 document.visibilityState，并派发 visibilitychange。
+   */
+  function setVisibilityState(state: DocumentVisibilityState): void {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => state,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  beforeEach(() => {
+    terminalEvents.clearCalls.length = 0;
+    terminalEvents.writeCalls.length = 0;
+    terminalEvents.instances.length = 0;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: `${'history line\n'.repeat(50)}ready\n`,
+      truncated: false,
+      lastSeq: 100,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.replayPromise = null;
+    terminalEvents.hydrationResult = null;
+    terminalEvents.hydrationPromise = null;
+    terminalEvents.hydrateCalls.length = 0;
+    terminalEvents.resizeCalls.length = 0;
+    terminalEvents.resizeError = null;
+    terminalEvents.pasteImageCalls.length = 0;
+    terminalEvents.resetCalls.length = 0;
+    terminalEvents.scrollToLineCalls.length = 0;
+    terminalEvents.commitCalls.length = 0;
+    terminalEvents.commitResult = null;
+    terminalEvents.repairCalls.length = 0;
+    terminalEvents.repairResult = null;
+    terminalEvents.clipboardWrites.length = 0;
+    global.ResizeObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+    store = createWorkbenchTerminalBufferStore();
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+  });
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   恢复滚动用例都要先等到 replay 写入，再把视口故意停在历史中间。
+   *
+   * Code Logic（这个函数做什么）:
+   *   渲染面板，等待 write，再把 mock buffer 的 viewportY 调离 baseY。
+   */
+  async function renderScrolledAway(): Promise<MockTerminalInstance> {
+    const session = buildSession();
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+    await waitFor(() => {
+      expect(terminalEvents.writeCalls.some((call) => call.data.includes('ready'))).toBe(true);
+    });
+    const terminal = latestMockTerminal();
+    terminal.buffer.active.baseY = 80;
+    terminal.buffer.active.viewportY = 12;
+    terminalEvents.scrollToLineCalls.length = 0;
+    return terminal;
+  }
+
+  test('visibilitychange to visible scrolls the terminal to the latest line', async () => {
+    const terminal = await renderScrolledAway();
+
+    act(() => {
+      setVisibilityState('hidden');
+    });
+    expect(terminalEvents.scrollToLineCalls).toEqual([]);
+    expect(terminal.buffer.active.viewportY).toBe(12);
+
+    act(() => {
+      setVisibilityState('visible');
+    });
+
+    await waitFor(() => {
+      expect(terminal.buffer.active.viewportY).toBe(80);
+    });
+    expect(terminalEvents.scrollToLineCalls.some((call) => call.line === 80)).toBe(true);
+  });
+
+  test('pageshow also scrolls the terminal to the latest line', async () => {
+    const terminal = await renderScrolledAway();
+
+    act(() => {
+      window.dispatchEvent(new Event('pageshow'));
+    });
+
+    await waitFor(() => {
+      expect(terminal.buffer.active.viewportY).toBe(80);
+    });
+    expect(terminalEvents.scrollToLineCalls.some((call) => call.line === 80)).toBe(true);
+  });
+
+  test('live catch-up after resume keeps following the latest line', async () => {
+    const terminal = await renderScrolledAway();
+
+    act(() => {
+      setVisibilityState('hidden');
+      setVisibilityState('visible');
+    });
+    await waitFor(() => {
+      expect(terminal.buffer.active.viewportY).toBe(80);
+    });
+
+    act(() => {
+      terminal.buffer.active.baseY = 96;
+      terminal.buffer.active.viewportY = 80;
+      store.append('s1', 'catch-up-after-resume\n', 101, 'owner-1');
+    });
+
+    await waitFor(() => {
+      expect(terminal.buffer.active.viewportY).toBe(96);
+    });
+  });
+});
