@@ -14,7 +14,7 @@
 - **Prompt 优化** — 调用本机 Claude Code CLI 生成优化版 Prompt（结果语言跟随当前界面语种）
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
-- **Agent Hub** — `/agent-hub` 统一管理 Claude/Codex/OpenCode/Grok Build/Gemini CLI/Cursor CLI/Pi 用户级与项目级指令（公共/适配/独有三槽 + AI 辅助修订）与 Skill/Command/Agent/MCP 可移植资产；身份目录见 `src-tauri/src/agent_catalog`
+- **Agent Hub** — `/agent-hub` 统一管理 Claude/Codex/OpenCode/Grok Build/Gemini CLI/Cursor CLI/Pi 用户级与项目级指令（公共/适配/独有三槽 + AI 辅助修订）与 Skill/Command/Agent/MCP 可移植资产；用户级 Pull/Push = 全 Agent 镜像，见 [`docs/superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md`](docs/superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md)；身份目录见 `src-tauri/src/agent_catalog`
 - **移动端 Workbench** — 局域网内通过 `/mobile` 手机浏览器远程操作 Workbench（无调用者身份校验；同一可达网络任意设备可读写执行）；本机可作为手机到远端设备的二级代理，统一管理远端项目的 worktree、终端、文件、Git、Prompt 优化和项目自动化，桌面端展示访问链接、二维码与固定风险提示
 - **Orchestrator 自动编排器** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付，桌面端作为 Workbench 自动化工作区展示
 - **独立后端 CLI** — 远端设备可执行 `cc-partner-backend start|status|doctor|stop|supervise` 启动或运维 P2P/Workbench/Orchestrator 远端支持，无需打开 GUI
@@ -506,7 +506,7 @@ git tag v<版本号> && git push origin v<版本号>  # 公开发布 macOS arm64
 | Tauri `#[tauri::command]` 注册与领域语义 | `src-tauri/src/commands/*` + `src-tauri/AGENTS.md` 各领域节 |
 | 前端 invoke / HTTP 封装 | `web/src/api/*` + `web/AGENTS.md` |
 | P2P `/api/*` 路由、retry class、幂等键 | `docs/p2p-protocol.md` + `node scripts/check-p2p-route-inventory.mjs` + `src-tauri/AGENTS.md`「P2P 协议…」 |
-| Health 能力 token | `server_protocol_info()` 字典序全集；本轮新增含 `agent-hub.portable-user.v1` · `agent-hub.user-instructions.v1` · `orchestrator.complete-agent-run.v1` · `orchestrator.move-workflow-state.v1` · `workbench.banner.v1` · `workbench.dependency-install.v1` · `workbench.hook-repair.v1` · `workbench.project-notes.v1`（权威清单见 `docs/p2p-protocol.md`） |
+| Health 能力 token | `server_protocol_info()` 字典序全集；本轮新增含 `agent-hub.portable-user.v1` · `agent-hub.user-instructions.v1` · `agent-hub.user-mirror.v1` · `orchestrator.complete-agent-run.v1` · `orchestrator.move-workflow-state.v1` · `workbench.banner.v1` · `workbench.dependency-install.v1` · `workbench.hook-repair.v1` · `workbench.project-notes.v1`（权威清单见 `docs/p2p-protocol.md`） |
 
 ### 8.3 添加新能力
 
