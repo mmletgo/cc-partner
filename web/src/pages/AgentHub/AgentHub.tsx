@@ -11,7 +11,6 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
 import { GitImportDrawer } from './GitImportDrawer';
-import { LanPushDialog } from './LanPushDialog';
 import {
   InstructionThreePaneView,
   type InstructionThreePaneViewLabels,
@@ -25,10 +24,10 @@ import {
 import {
   PortableAssetActionDialog,
   PortableInventoryView,
-  PortablePullDrawer,
   portableBorrowedOwnerJumpTarget,
   type PortableInventoryViewLabels,
 } from './portableAssets';
+import { UserMirrorDialog } from './userMirror/UserMirrorDialog';
 import { allHubTargets } from '@/lib/agentCatalog';
 import type { PortableInventoryItemDto } from '@/lib/types/portableInventory';
 import { AgentHubShell } from './shell';
@@ -84,29 +83,14 @@ export function AgentHubView(props: AgentHubViewProps) {
     confirmPortableAction,
     reconcilePortableAction,
     closePortableAction,
-    portablePullOpen,
-    openPortablePull,
-    closePortablePull,
-    portablePull,
+    openUserMirrorPull,
+    openUserMirrorPush,
+    closeUserMirror,
+    userMirrorOpen,
+    userMirror,
     actionError,
     actionBusy,
     setInstructionRefresh,
-    openLanPushDialog,
-    closeLanPushDialog,
-    lanPushOpen,
-    lanPeers,
-    lanSelectedPeerIds,
-    toggleLanPeer,
-    lanMode,
-    setLanMode,
-    lanAssetIdsText,
-    setLanAssetIdsText,
-    lanHubProjectIdsText,
-    setLanHubProjectIdsText,
-    lanPreview,
-    lanReport,
-    runLanPreview,
-    runLanStart,
     gitImportOpen,
     openGitImportDrawer,
     closeGitImportDrawer,
@@ -451,8 +435,8 @@ export function AgentHubView(props: AgentHubViewProps) {
         };
       }
       return {
-        onPull: openPortablePull,
-        onPush: openLanPushDialog,
+        onPull: openUserMirrorPull,
+        onPush: openUserMirrorPush,
         ...(canUseGitImport ? { onGitImport: openGitImportDrawer } : {}),
         pullDisabledReason: null,
         pushDisabledReason: null,
@@ -464,8 +448,8 @@ export function AgentHubView(props: AgentHubViewProps) {
       canUseGitImport,
       hubContext.tab,
       openGitImportDrawer,
-      openLanPushDialog,
-      openPortablePull,
+      openUserMirrorPull,
+      openUserMirrorPush,
       portableInventory.refreshing,
       projectInstructionFiles?.refreshing,
       projectLocked,
@@ -732,24 +716,36 @@ export function AgentHubView(props: AgentHubViewProps) {
       </div>
 
       {projectLocked ? null : (
-      <LanPushDialog
-        open={lanPushOpen}
-        busy={actionBusy}
-        error={actionError}
-        peers={lanPeers}
-        selectedPeerIds={lanSelectedPeerIds}
-        onTogglePeer={toggleLanPeer}
-        mode={lanMode}
-        onModeChange={setLanMode}
-        assetIdsText={lanAssetIdsText}
-        onAssetIdsTextChange={setLanAssetIdsText}
-        hubProjectIdsText={lanHubProjectIdsText}
-        onHubProjectIdsTextChange={setLanHubProjectIdsText}
-        preview={lanPreview}
-        report={lanReport}
-        onPreview={() => void runLanPreview()}
-        onStart={() => void runLanStart()}
-        onClose={closeLanPushDialog}
+      <UserMirrorDialog
+        open={userMirrorOpen}
+        direction={userMirror.direction}
+        busy={userMirror.busy}
+        error={userMirror.error}
+        stale={userMirror.stale}
+        devices={userMirror.devices.map((device) => ({
+          deviceId: device.id,
+          name: device.name,
+        }))}
+        sourceDeviceId={userMirror.sourceDeviceId}
+        selectedPeerIds={userMirror.selectedPeerIds}
+        plan={userMirror.plan}
+        result={userMirror.result}
+        confirmed={userMirror.confirmed}
+        canApply={userMirror.canApply}
+        canReconcile={userMirror.canReconcile}
+        onSelectSourceDevice={(deviceId) => userMirror.selectSourceDevice(deviceId)}
+        onTogglePeer={(deviceId) => userMirror.togglePeer(deviceId)}
+        onConfirmChange={(value) => userMirror.setConfirmed(value)}
+        onPreview={() => {
+          void userMirror.preview();
+        }}
+        onApply={() => {
+          void userMirror.apply();
+        }}
+        onReconcile={() => {
+          void userMirror.reconcile();
+        }}
+        onClose={closeUserMirror}
       />
       )}
 
@@ -820,45 +816,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         onClose={closePortableAction}
       />
 
-      {projectLocked ? null : (
-      <PortablePullDrawer
-        open={portablePullOpen}
-        busy={portablePull.busy}
-        error={portablePull.error}
-        devices={portablePull.devices}
-        selectedDeviceId={portablePull.selectedDeviceId}
-        sourceTarget={portablePull.sourceTarget}
-        remoteInventory={portablePull.remoteInventory}
-        visibleItems={portablePull.visibleItems}
-        selectedItemIds={portablePull.selectedItemIds}
-        filters={portablePull.filters}
-        conflictPolicy={portablePull.conflictPolicy}
-        plan={portablePull.plan}
-        result={portablePull.result}
-        mutationBlocked={portablePull.mutationBlocked}
-        canApply={portablePull.canApply}
-        canReconcile={portablePull.canReconcile}
-        onSelectDevice={(deviceId) => portablePull.selectDevice(deviceId)}
-        onSelectSourceTarget={(target) => portablePull.selectSourceTarget(target)}
-        onSetFilters={(filters) => portablePull.setFilters(filters)}
-        onToggleItem={(id) => portablePull.toggleItem(id)}
-        onSelectVisible={() => portablePull.selectVisible()}
-        onSetConflictPolicy={(policy) => portablePull.setConflictPolicy(policy)}
-        onLoadInventory={() => {
-          void portablePull.loadInventory();
-        }}
-        onPreview={() => {
-          void portablePull.preview();
-        }}
-        onApply={() => {
-          void portablePull.apply();
-        }}
-        onReconcile={() => {
-          void portablePull.reconcile();
-        }}
-        onClose={closePortablePull}
-      />
-      )}
+
 
     </div>
   );

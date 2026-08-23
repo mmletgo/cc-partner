@@ -75,8 +75,8 @@
     "projectPullUnavailable": "请先选择并启用一个明确项目；项目级 Pull 不会回退到用户级或全部项目。",
     "projectPushRequiresPreview": "请先在“指令”页预览并启用该项目，取得唯一 Hub 项目 ID 后再 Push。",
     "remoteProjectTaskUnavailable": "远端项目 Push 仍需在来源设备上发起；可使用当前项目的直接管理或 Pull。",
-    "remoteDeviceManageHint": "正在管理远端设备。对端未提供用户级资产库存能力时，可使用 Pull 从该设备拉取资产，或使用 Push 向该设备发送本机 Hub 资产。",
-    "remoteDeviceLiveHint": "正在查看并对端设备上的用户级资产进行管理。启停与卸载会直接写对端磁盘。Pull / Push 仍可用于复制。",
+    "remoteDeviceManageHint": "正在管理远端设备。对端未提供用户级资产库存能力时，可使用 Pull 从该设备镜像用户级内容，或使用 Push 向该设备镜像本机用户级内容。",
+    "remoteDeviceLiveHint": "正在查看并对端设备上的用户级资产进行管理。启停与卸载会直接写对端磁盘。Pull / Push 仍可用于用户级镜像。",
     "remoteProjectManageHint": "已选择远端项目；库存、项目启用与资产动作会直接在来源设备上执行。",
     "peerPullOnly": "远端用户级上下文只允许 Pull；Push 与跨 Agent 适配保持关闭。",
     "contextUnsupported": "该上下文无法精确绑定到单一项目或 owner，暂不可用。请返回本机用户级。",
@@ -934,5 +934,31 @@
       "previewRequired": "请先生成适配预览，再确认写入。",
       "noApplicable": "当前预览下没有可安全写入的目标。"
     }
+  },
+  "userMirror": {
+    "pullTitle": "从对端镜像（用户级）",
+    "pushTitle": "镜像到对端（用户级）",
+    "pullHint": "将所选对端的全部已登记 Agent 用户级指令与资产镜像到本机。同类 Agent 对号入座；将覆盖原生文件并删除本机多出的用户级资产。",
+    "pushHint": "将本机全部已登记 Agent 用户级指令与资产镜像到所选对端。同类 Agent 对号入座；将覆盖原生文件并删除对端多出的用户级资产。",
+    "lanNoAuthRisk": "同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。",
+    "peers": "对端",
+    "peersAria": "选择局域网对端",
+    "sourceDevice": "源设备",
+    "sourceDeviceAria": "选择源设备",
+    "noPeers": "未发现在线对端。",
+    "previewAction": "预览镜像",
+    "applyAction": "应用镜像",
+    "reconcileAction": "核对",
+    "confirmOverwrite": "将覆盖原生文件并删除目标多出的用户级资产",
+    "confirmAria": "确认覆盖并删除多余用户级资产",
+    "credentials": "含凭据 {{count}} 项",
+    "agentCounts": "写入 {{writes}} · 新增/替换 {{upserts}} · 删除 {{deletes}} · 停用 {{disables}}",
+    "planTitle": "预览计划",
+    "resultTitle": "结果",
+    "reportTitle": "按对端报告",
+    "reportAria": "各对端镜像结果",
+    "partial": "部分 Agent 失败或结果未知，已成功项不会撤回。可核对后再跑一次镜像。",
+    "stale": "预览已过期或两侧库存已变化，请重新预览。",
+    "previewRequired": "请先预览这次镜像，再应用。"
   }
 }

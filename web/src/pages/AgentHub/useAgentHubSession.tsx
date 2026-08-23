@@ -90,10 +90,12 @@ export function useAgentHubSession(
     controller.actionBusy ||
     controller.portableActionBusy ||
     controller.portablePull.busy ||
+    controller.userMirror.busy ||
     instructionThreePane.actionBusy ||
     projectInstructionFiles.actionBusy ||
     controller.lanPushOpen ||
     controller.portablePullOpen ||
+    controller.userMirrorOpen ||
     controller.portableActionOpen;
 
   const shouldGuardNextContext = useCallback(
