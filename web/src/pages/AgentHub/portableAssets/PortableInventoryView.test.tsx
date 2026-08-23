@@ -576,4 +576,78 @@ describe('PortableInventoryView', () => {
     expect(screen.getByTestId('portable-row-action-detach-claude-skill-alpha')).toBeTruthy();
     expect(screen.queryByTestId('portable-row-action-destroyStore-claude-skill-alpha')).toBeNull();
   });
+
+  test('equipped nested store members render as one pack row with detach and destroy', () => {
+    const usingSuperpowers = item({
+      inventoryItemId: 'grok-skill-using-superpowers',
+      target: 'grok',
+      nativeId: 'using-superpowers',
+      displayName: 'using-superpowers',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/using-superpowers',
+      warnings: ['nested_skill_package'],
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canDetach: true,
+        canDestroyStore: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+      store: { storeId: 'skill:superpowers', storeAttached: true },
+    });
+    const brainstorming = item({
+      inventoryItemId: 'grok-skill-brainstorming',
+      target: 'grok',
+      nativeId: 'brainstorming',
+      displayName: 'brainstorming',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/brainstorming',
+      warnings: ['nested_skill_package'],
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        canDetach: true,
+        canDestroyStore: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+      store: { storeId: 'skill:superpowers', storeAttached: true },
+    });
+    render(
+      <PortableInventoryView
+        controller={controller({
+          visibleItems: [usingSuperpowers, brainstorming],
+          snapshot: {
+            inventorySnapshotHash: 'snap-1',
+            refreshedAt: '2026-08-07T12:00:00.000Z',
+            stale: false,
+            targets: [],
+            items: [usingSuperpowers, brainstorming],
+          },
+          getRowActions: () => ['detach', 'destroyStore'],
+        })}
+        labels={labels}
+      />,
+    );
+
+    expect(screen.getByText('superpowers')).toBeTruthy();
+    expect(screen.queryByText('using-superpowers')).toBeNull();
+    expect(screen.getByText('brainstorming · using-superpowers')).toBeTruthy();
+    expect(
+      screen.getByTestId('portable-row-action-detach-grok-skill-using-superpowers'),
+    ).toBeTruthy();
+    expect(
+      screen.getByTestId('portable-row-action-destroyStore-grok-skill-using-superpowers'),
+    ).toBeTruthy();
+    expect(screen.queryByTestId('portable-inventory-row-grok-skill-brainstorming')).toBeNull();
+  });
 });

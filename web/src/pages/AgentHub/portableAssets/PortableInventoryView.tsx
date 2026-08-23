@@ -17,6 +17,8 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   isPortableStoreAssetKind,
+  isNestedSkillPackageDisplayItem,
+  groupEquippedPortableItems,
   groupPortableStoreCatalog,
   matchesPortableStoreCatalogGroup,
   portableStoreAgentChipStates,
@@ -298,8 +300,8 @@ interface InventoryGroupRenderProps {
 
 /**
  * Business Logic: 已装备拆「已安装在此」与「运行时借用」；仓库按 Skill/Command 去重并展示各 Agent 启用芯片。
- *   已装备不渲染彻底删除仓库副本；该动作只留在仓库页。
- * Code Logic: 两边都空才 empty；已装备仅借用时附 emptyRuntimeHint；equipped 行过滤 destroyStore。
+ *   已装备默认不渲染彻底删除仓库副本；无根 SKILL.md 整包展示行例外（卸下/删除都按包）。
+ * Code Logic: 先按 store 包折叠 nested 子 skill，再分区；普通 equipped 行过滤 destroyStore。
  */
 function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
   const {
@@ -318,12 +320,15 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
     item: PortableInventoryItemDto,
     extra?: Pick<Parameters<typeof PortableInventoryRow>[0], 'onOpenOwner'>,
   ): JSX.Element {
+    const keepEquippedDestroy = isNestedSkillPackageDisplayItem(item);
     return (
       <PortableInventoryRow
         key={item.inventoryItemId}
         item={item}
         busy={lockedItemIds.has(item.inventoryItemId)}
-        actions={getRowActions(item).filter((action) => action !== 'destroyStore')}
+        actions={getRowActions(item).filter(
+          (action) => action !== 'destroyStore' || keepEquippedDestroy,
+        )}
         labels={labels}
         onAction={(selected, action) => openAction(selected.inventoryItemId, action)}
         onOpenOwner={extra?.onOpenOwner}
@@ -367,7 +372,7 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
           return (
             <PortableInventoryRow
               key={group.key}
-              item={item}
+              item={{ ...item, displayName: group.displayName }}
               busy={lockedItemIds.has(item.inventoryItemId) || chips.some((chip) => chip.busy)}
               actions={actions}
               labels={labels}
@@ -388,7 +393,9 @@ function renderInventoryGroups(props: InventoryGroupRenderProps): JSX.Element {
     );
   }
 
-  const { installed, borrowed } = partitionPortableInventoryItems(visibleItems);
+  const { installed, borrowed } = partitionPortableInventoryItems(
+    groupEquippedPortableItems(visibleItems),
+  );
   if (installed.length === 0 && borrowed.length === 0) {
     return (
       <p className={styles.empty} data-testid="portable-inventory-empty">

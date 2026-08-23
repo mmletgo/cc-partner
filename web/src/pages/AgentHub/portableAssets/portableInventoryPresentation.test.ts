@@ -31,6 +31,8 @@ import {
   matchesPortableInventoryItem,
   needsPortableEnsureManagedRefresh,
   groupPortableStoreCatalog,
+  groupEquippedPortableItems,
+  isNestedSkillPackageDisplayItem,
   isNestedStoreSkillMember,
   portableStoreCatalogDisplayName,
   portableStoreAgentChipState,
@@ -1507,5 +1509,80 @@ describe('portableInventoryPresentation ownership partition', () => {
     ).toEqual(['destroyStore']);
     const grouped = groupPortableStoreCatalog([attached]);
     expect(grouped[0]?.displayName).toBe('superpowers');
+  });
+
+  test('equipped nested store members collapse into one pack row with detach and destroy', () => {
+    const usingSuperpowers = makeItem({
+      inventoryItemId: 'grok-skill-using-superpowers-attached',
+      kind: 'skill',
+      nativeId: 'using-superpowers',
+      displayName: 'using-superpowers',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/using-superpowers',
+      warnings: ['nested_skill_package'],
+      store: {
+        storeId: 'skill:superpowers',
+        storeAttached: true,
+        loadedViaOtherPath: false,
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    const brainstorming = makeItem({
+      inventoryItemId: 'grok-skill-brainstorming-attached',
+      kind: 'skill',
+      nativeId: 'brainstorming',
+      displayName: 'brainstorming',
+      target: 'grok',
+      ownedBy: 'portableStore',
+      originKind: 'compatibility',
+      sourcePath: '/home/.agents/skills/superpowers/brainstorming',
+      warnings: ['nested_skill_package'],
+      store: {
+        storeId: 'skill:superpowers',
+        storeAttached: true,
+        loadedViaOtherPath: false,
+      },
+      capabilities: {
+        ...baseCapabilities,
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canDetach: true,
+        canDestroyStore: true,
+      },
+    });
+    const standalone = makeItem({
+      inventoryItemId: 'grok-skill-other',
+      kind: 'skill',
+      nativeId: 'other',
+      displayName: 'Other Skill',
+      target: 'grok',
+    });
+    const grouped = groupEquippedPortableItems([
+      usingSuperpowers,
+      standalone,
+      brainstorming,
+    ]);
+    expect(grouped).toHaveLength(2);
+    const pack = grouped[0];
+    expect(pack?.displayName).toBe('superpowers');
+    expect(pack?.nativeId).toBe('superpowers');
+    expect(pack?.sourcePath).toBe('/home/.agents/skills/superpowers');
+    expect(pack?.description).toBe('brainstorming · using-superpowers');
+    expect(isNestedSkillPackageDisplayItem(pack!)).toBe(true);
+    expect(isNestedStoreSkillMember(pack!)).toBe(false);
+    expect(
+      resolvePortableRowActions(pack!, { ...healthyCtx, assetLane: 'equipped' }),
+    ).toEqual(['detach', 'destroyStore']);
+    expect(grouped[1]?.inventoryItemId).toBe('grok-skill-other');
   });
 });

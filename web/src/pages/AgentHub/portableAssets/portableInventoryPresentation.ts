@@ -41,8 +41,8 @@ export interface PortablePrimaryActionContext {
   mutationBlocked: boolean;
   lockedItemIds: ReadonlySet<string>;
   /**
-   * 当前 Skill/Command 存放面。已装备不暴露 destroyStore（删真树只在仓库页）。
-   * 缺省视为非 equipped，保持旧调用方仍能测到 destroyStore。
+   * 当前 Skill/Command 存放面。已装备默认不暴露 destroyStore（删真树只在仓库页），
+   * 无根 SKILL.md 的整包展示行例外。缺省视为非 equipped，保持旧调用方仍能测到 destroyStore。
    */
   assetLane?: PortableAssetLane;
 }
@@ -315,6 +315,19 @@ export function isNestedStoreSkillMember(item: PortableInventoryItemDto): boolea
   return Boolean(packageName && packageName !== item.nativeId);
 }
 
+/**
+ * Business Logic: 已装备把无根 SKILL.md 的包合成一行后，行上的 nativeId 就是包名，
+ *   仍靠 nested_skill_package 提示区分「真·单 skill」与「展开包的展示行」。
+ * Code Logic: storeId 包名 === nativeId，且仍带 nested_skill_package。
+ */
+export function isNestedSkillPackageDisplayItem(item: PortableInventoryItemDto): boolean {
+  if (item.kind !== 'skill') return false;
+  const packageName = portableStorePackageName(item);
+  return Boolean(
+    packageName && packageName === item.nativeId && item.warnings.includes('nested_skill_package'),
+  );
+}
+
 function portableStorePackageName(item: PortableInventoryItemDto): string | null {
   const storeId = item.store?.storeId?.trim() ?? '';
   if (storeId.startsWith('skill:')) {
@@ -322,6 +335,81 @@ function portableStorePackageName(item: PortableInventoryItemDto): string | null
     return name || null;
   }
   return null;
+}
+
+function equippedNestedStorePackKey(item: PortableInventoryItemDto): string | null {
+  if (!isNestedStoreSkillMember(item)) return null;
+  return `${item.store?.storeId}:${item.target}:${item.scopeKind}:${item.scopeId}`;
+}
+
+/**
+ * Business Logic: 包行的路径应指向包根（~/.agents/skills/superpowers），而不是某一个子 skill。
+ * Code Logic: 截到最后一次 `/<包名>/`。
+ */
+function nestedSkillPackageRootPath(item: PortableInventoryItemDto): string | null {
+  const raw = item.sourcePath;
+  if (!raw) return null;
+  const path = raw.replace(/\\/g, '/');
+  const packageName = portableStorePackageName(item);
+  if (!packageName) return raw;
+  const needle = `/${packageName}/`;
+  const index = path.lastIndexOf(needle);
+  if (index >= 0) return path.slice(0, index + packageName.length + 1);
+  return raw;
+}
+
+/**
+ * Business Logic: 已装备把同一仓库包的子 skill 合成一行，生命周期按整包卸下/删除。
+ * Code Logic: 优先已附加成员；displayName/nativeId 改为包名，描述列出子项。
+ */
+export function asEquippedNestedStorePackItem(
+  members: readonly PortableInventoryItemDto[],
+): PortableInventoryItemDto {
+  const preferred =
+    members.find((item) => item.store?.storeAttached === true) ?? members[0];
+  if (!preferred) {
+    throw new Error('asEquippedNestedStorePackItem requires at least one member');
+  }
+  const packageName = portableStorePackageName(preferred) ?? preferred.displayName;
+  const memberNames = [
+    ...new Set(members.map((item) => item.displayName.trim()).filter(Boolean)),
+  ].sort((left, right) => left.localeCompare(right));
+  const warnings = preferred.warnings.includes('nested_skill_package')
+    ? preferred.warnings
+    : [...preferred.warnings, 'nested_skill_package'];
+  return {
+    ...preferred,
+    nativeId: packageName,
+    displayName: packageName,
+    description: memberNames.join(' · ') || preferred.description,
+    sourcePath: nestedSkillPackageRootPath(preferred),
+    warnings,
+  };
+}
+
+/**
+ * Business Logic: 已装备不再把 superpowers 的每个子 skill 当成独立行。
+ * Code Logic: 按 storeId+target+scope 折叠 nested 成员；其它项原样保留、保持输入顺序。
+ */
+export function groupEquippedPortableItems(
+  items: readonly PortableInventoryItemDto[],
+): PortableInventoryItemDto[] {
+  const seenPacks = new Set<string>();
+  const result: PortableInventoryItemDto[] = [];
+  for (const item of items) {
+    const key = equippedNestedStorePackKey(item);
+    if (!key) {
+      result.push(item);
+      continue;
+    }
+    if (seenPacks.has(key)) continue;
+    seenPacks.add(key);
+    const members = items.filter(
+      (candidate) => equippedNestedStorePackKey(candidate) === key,
+    );
+    result.push(asEquippedNestedStorePackItem(members));
+  }
+  return result;
 }
 
 /**
@@ -645,7 +733,8 @@ export function resolvePortablePrimaryAction(
 
 /**
  * Business Logic: 列表行同时暴露仓库或启停动作，无需详情侧栏。
- *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下；彻底删除仓库项只在仓库页。
+ *   Skill/Command：迁入仓库 / 附加 / 从此 Agent 卸下；彻底删除仓库项默认只在仓库页。
+ *   无根 SKILL.md 的整包展示行在已装备也暴露卸下与彻底删除（子 skill 行仍不给拆链）。
  *   运行时从其他 Agent 加载的 compatibility Skill/Command 不出现迁入/附加/销毁，
  *   也不得卸下源软链（仅本 Agent storeAttached 时可 detach）。
  *   Plugin：仍走 enable/disable/uninstall；借用 Plugin 按 capability 暴露 viewing 开关。
@@ -681,7 +770,12 @@ export function resolvePortableRowActions(
     const nestedMember = isNestedStoreSkillMember(item);
     if (canOfferPortableAttach(item) && !nestedMember) actions.push('attach');
     if (canOfferPortableDetach(item) && !nestedMember) actions.push('detach');
-    if (context.assetLane !== 'equipped' && canOfferPortableDestroyStore(item)) {
+    const equippedNestedPack =
+      context.assetLane === 'equipped' && isNestedSkillPackageDisplayItem(item);
+    if (
+      canOfferPortableDestroyStore(item) &&
+      (context.assetLane !== 'equipped' || equippedNestedPack)
+    ) {
       actions.push('destroyStore');
     }
     return actions;
