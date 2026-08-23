@@ -246,6 +246,7 @@ vi.mock('@/lib/icons', () => ({
   ImageIcon: (): null => null,
   MaximizeIcon: (): null => null,
   MinimizeIcon: (): null => null,
+  MoreIcon: (): null => null,
   PlusIcon: (): null => null,
   PromptsIcon: (): null => null,
   RefreshIcon: (): null => null,
@@ -372,6 +373,25 @@ function dispatchSingleTouch(
         : [{ clientX, clientY }],
   });
   element.dispatchEvent(event);
+}
+
+const FAB_MENU_OPEN_LABEL = 'workbench:mobile.terminalPanel.fabMenu.open';
+const FAB_MENU_CLOSE_LABEL = 'workbench:mobile.terminalPanel.fabMenu.close';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   终端右下角动作默认收进一个折叠按钮，测试要点具体 FAB 必须先展开。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若菜单已收起则点击展开按钮；已展开则保持原状。
+ */
+function openTerminalFabMenu(): void {
+  const trigger = screen.queryByRole('button', { name: FAB_MENU_OPEN_LABEL });
+  if (!trigger) {
+    expect(screen.getByRole('button', { name: FAB_MENU_CLOSE_LABEL })).toBeTruthy();
+    return;
+  }
+  fireEvent.click(trigger);
 }
 
 describe('MobileTerminalPanel — refresh scrollback', () => {
@@ -1034,6 +1054,216 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
   });
 });
 
+describe('MobileTerminalPanel — FAB menu', () => {
+  beforeEach(() => {
+    terminalEvents.clearCalls.length = 0;
+    terminalEvents.writeCalls.length = 0;
+    terminalEvents.instances.length = 0;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.replayPromise = null;
+    global.ResizeObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   四个常驻动作叠在终端右下角会挡输出；默认应收成一个按钮。
+   *
+   * Code Logic（这个测试做什么）:
+   *   有 session 时只暴露展开按钮，贴图/Commit/优化/收藏不在可访问树。
+   */
+  test('collapses terminal actions behind a single trigger by default', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    expect(screen.getByRole('button', { name: FAB_MENU_OPEN_LABEL })).toBeTruthy();
+    expect(
+      screen.queryByRole('button', { name: 'workbench:mobile.terminalPanel.pasteImageButton' }),
+    ).toBeNull();
+    expect(screen.queryByRole('button', { name: 'workbench:worktrees.commit' })).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'workbench:promptOptimizer.open' }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('button', {
+        name: 'workbench:mobile.favoriteQuickInput.openButton',
+      }),
+    ).toBeNull();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   用户点开后仍要一次触达原来的四个动作，顺序与展开前的 FAB 组一致。
+   *
+   * Code Logic（这个测试做什么）:
+   *   点击展开后断言四按钮可访问，且贴图 → Commit → 优化 → 收藏。
+   */
+  test('expands paste, commit, optimizer and favorite actions in order', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    openTerminalFabMenu();
+
+    const trigger = screen.getByRole('button', { name: FAB_MENU_CLOSE_LABEL });
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    const paste = screen.getByRole('button', {
+      name: 'workbench:mobile.terminalPanel.pasteImageButton',
+    });
+    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    const optimizer = screen.getByRole('button', { name: 'workbench:promptOptimizer.open' });
+    const favorite = screen.getByRole('button', {
+      name: 'workbench:mobile.favoriteQuickInput.openButton',
+    });
+    const group = paste.parentElement;
+    expect(group).toBe(commit.parentElement);
+    expect(group).toBe(optimizer.parentElement);
+    expect(group).toBe(favorite.parentElement);
+    const labels = Array.from(group?.querySelectorAll('button') ?? []).map((button) =>
+      button.getAttribute('aria-label'),
+    );
+    expect(labels).toEqual([
+      'workbench:mobile.terminalPanel.pasteImageButton',
+      'workbench:worktrees.commit',
+      'workbench:promptOptimizer.open',
+      'workbench:mobile.favoriteQuickInput.openButton',
+    ]);
+    expect(paste.textContent).toBe('workbench:mobile.terminalPanel.pasteImageButton');
+    expect(commit.textContent).toBe('workbench:worktrees.commit');
+    expect(optimizer.textContent).toBe('workbench:promptOptimizer.open');
+    expect(favorite.textContent).toBe('workbench:mobile.favoriteQuickInput.openButton');
+    expect(trigger.textContent).toBe('');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   再次点触发按钮应收回动作，把终端输出区还回去。
+   *
+   * Code Logic（这个测试做什么）:
+   *   展开后再点关闭，动作按钮离开可访问树。
+   */
+  test('collapses actions when the trigger is clicked again', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    openTerminalFabMenu();
+    fireEvent.click(screen.getByRole('button', { name: FAB_MENU_CLOSE_LABEL }));
+
+    expect(screen.getByRole('button', { name: FAB_MENU_OPEN_LABEL })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'workbench:worktrees.commit' })).toBeNull();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   点空白处应收起，避免挡住继续看终端。
+   *
+   * Code Logic（这个测试做什么）:
+   *   展开后点击 backdrop，动作按钮消失。
+   */
+  test('collapses actions when the backdrop is pressed', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    openTerminalFabMenu();
+    fireEvent.click(screen.getByTestId('mobile-terminal-fab-backdrop'));
+
+    expect(screen.getByRole('button', { name: FAB_MENU_OPEN_LABEL })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'workbench:worktrees.commit' })).toBeNull();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   选完一个动作后菜单应收起，不要继续挡输出。
+   *
+   * Code Logic（这个测试做什么）:
+   *   展开后点贴图，Commit 按钮离开可访问树。
+   */
+  test('collapses actions after an action is chosen', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    openTerminalFabMenu();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.pasteImageButton' }),
+    );
+
+    expect(screen.getByRole('button', { name: FAB_MENU_OPEN_LABEL })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'workbench:worktrees.commit' })).toBeNull();
+  });
+});
+
 describe('MobileTerminalPanel — commit FAB', () => {
   beforeEach(() => {
     terminalEvents.clearCalls.length = 0;
@@ -1064,7 +1294,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   终端右侧悬浮按钮组必须把 Commit 放在 Prompt 优化上方，方便在不离开终端时提交。
+   *   展开后的终端操作组必须把 Commit 放在 Prompt 优化上方，方便在不离开终端时提交。
    *
    * Code Logic（这个测试做什么）:
    *   有 worktree 时断言 Commit 按钮存在，且在 FAB 组内位于优化 Prompt 之前。
@@ -1085,6 +1315,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
     const optimizer = screen.getByRole('button', { name: 'workbench:promptOptimizer.open' });
     screen.getByRole('button', { name: 'workbench:mobile.favoriteQuickInput.openButton' });
@@ -1125,6 +1356,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     expect(
       (screen.getByRole('button', { name: 'workbench:worktrees.commit' }) as HTMLButtonElement)
         .disabled,
@@ -1162,6 +1394,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
 
     await waitFor(() => {
@@ -1217,6 +1450,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
     await screen.findByTestId('mobile-hook-repair-card');
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.hookRepair.runButton' }));
@@ -1258,6 +1492,7 @@ describe('MobileTerminalPanel — commit FAB', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.enterFullscreen' }),
     );
+    openTerminalFabMenu();
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.commit' }));
 
     await screen.findByText('workbench:errors.mutationUnknown');
@@ -1315,6 +1550,7 @@ describe('MobileTerminalPanel — merge FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     expect(screen.queryByRole('button', { name: 'workbench:worktrees.merge' })).toBeNull();
   });
 
@@ -1348,8 +1584,10 @@ describe('MobileTerminalPanel — merge FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     const merge = screen.getByRole('button', { name: 'workbench:worktrees.merge' });
     const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    expect(merge.textContent).toBe('workbench:worktrees.merge');
     const group = merge.parentElement;
     expect(group).not.toBeNull();
     expect(group).toBe(commit.parentElement);
@@ -1397,6 +1635,7 @@ describe('MobileTerminalPanel — merge FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     expect(screen.getByRole('button', { name: 'workbench:worktrees.merge' })).toBeTruthy();
   });
 
@@ -1431,6 +1670,7 @@ describe('MobileTerminalPanel — merge FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.merge' }));
     await waitFor(() => {
       expect(onMergeWorktree).toHaveBeenCalledTimes(1);
@@ -1452,6 +1692,7 @@ describe('MobileTerminalPanel — merge FAB', () => {
       isMain: false,
     });
     const session = buildSession({ worktreeId: 'wt-feature' });
+    const onMergeWorktree = vi.fn(async () => false);
     render(
       <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
         <MobileTerminalPanel
@@ -1462,17 +1703,15 @@ describe('MobileTerminalPanel — merge FAB', () => {
           busy={false}
           onSessionsChange={() => undefined}
           onActiveSessionChange={() => undefined}
-          onMergeWorktree={async () => false}
+          onMergeWorktree={onMergeWorktree}
         />
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.merge' }));
     await waitFor(() => {
-      expect(
-        (screen.getByRole('button', { name: 'workbench:worktrees.merge' }) as HTMLButtonElement)
-          .getAttribute('aria-busy'),
-      ).toBeNull();
+      expect(onMergeWorktree).toHaveBeenCalledTimes(1);
     });
     expect(screen.queryByRole('alert')).toBeNull();
   });
@@ -1509,6 +1748,7 @@ describe('MobileTerminalPanel — merge FAB', () => {
       </BuffersProvider>,
     );
 
+    openTerminalFabMenu();
     fireEvent.click(screen.getByRole('button', { name: 'workbench:worktrees.merge' }));
     await waitFor(() => {
       expect(onRefreshSessions).toHaveBeenCalledTimes(1);
@@ -1668,6 +1908,7 @@ describe('MobileTerminalPanel — copy selection and paste image', () => {
    */
   test('stopped session can long-press copy while paste-image FAB is disabled', async () => {
     renderPanel({ status: 'stopped' });
+    openTerminalFabMenu();
     const pasteImage = screen.getByRole('button', {
       name: 'workbench:mobile.terminalPanel.pasteImageButton',
     }) as HTMLButtonElement;
@@ -1735,6 +1976,7 @@ describe('MobileTerminalPanel — copy selection and paste image', () => {
    */
   test('running ready session keeps paste-image FAB enabled', () => {
     renderPanel();
+    openTerminalFabMenu();
     const pasteImage = screen.getByRole('button', {
       name: 'workbench:mobile.terminalPanel.pasteImageButton',
     }) as HTMLButtonElement;

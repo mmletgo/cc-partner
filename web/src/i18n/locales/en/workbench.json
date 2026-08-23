@@ -263,6 +263,12 @@
         "clearSnippet": "Insert clear"
       },
       "pasteImageButton": "Paste image",
+      "fabMenu": {
+        "open": "Open terminal actions",
+        "close": "Close terminal actions",
+        "dismiss": "Dismiss terminal actions",
+        "actionsAriaLabel": "Terminal actions"
+      },
       "selection": {
         "barAriaLabel": "Terminal selection",
         "selectedLines": "{{count}} line selected",

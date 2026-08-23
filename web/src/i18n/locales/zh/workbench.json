@@ -260,6 +260,12 @@
         "clearSnippet": "插入 clear"
       },
       "pasteImageButton": "粘贴图片",
+      "fabMenu": {
+        "open": "展开终端操作",
+        "close": "收起终端操作",
+        "dismiss": "关闭终端操作",
+        "actionsAriaLabel": "终端操作"
+      },
       "selection": {
         "barAriaLabel": "终端选区",
         "selectedLines": "已选 {{count}} 行",
