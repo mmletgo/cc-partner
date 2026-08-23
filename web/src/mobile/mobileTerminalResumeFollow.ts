@@ -9,8 +9,8 @@
  *   纯判定与绝对 scrollToLine(baseY)；pin 窗口覆盖断线重连 catch-up，用户手势滚动则取消。
  */
 
-/** 恢复可见后继续跟随 live catch-up 的时长（覆盖 2s 事件流重连 + 首批写入）。 */
-export const MOBILE_TERMINAL_RESUME_FOLLOW_MS = 3_000;
+/** 恢复可见后继续跟随 live catch-up 的时长（覆盖立刻重连 + Gap 首批写入）。 */
+export const MOBILE_TERMINAL_RESUME_FOLLOW_MS = 8_000;
 
 export interface MobileTerminalResumePin {
   untilMs: number;

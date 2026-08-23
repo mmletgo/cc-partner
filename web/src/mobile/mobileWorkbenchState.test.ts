@@ -614,7 +614,7 @@ describe('mobileWorkbenchState', () => {
    *   移动端打开 `/mobile` 时应直接展示项目列表，让用户先选择要操作的项目。
    *
    * Code Logic（这个测试做什么）:
-   *   调用默认面板 helper，断言初始面板为 projects。
+   *   调用默认面板 helper，断言空 search / 无 window 时初始面板为 projects。
    */
   test('initial mobile workbench panel defaults to projects', () => {
     assertEqual(getInitialMobileWorkbenchPanel(), 'projects');

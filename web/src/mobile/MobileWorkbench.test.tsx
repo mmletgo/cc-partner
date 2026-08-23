@@ -255,6 +255,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  window.history.replaceState(null, '', '/mobile');
   listProjectsMock.mockReset();
   listWorktreesMock.mockReset();
   listSessionsMock.mockReset();
@@ -272,6 +273,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState(null, '', '/mobile');
 });
 
 /**
@@ -406,3 +408,62 @@ describe('MobileWorkbench project retry and connection', () => {
     expect(screen.getByTestId('mobile-worktree-tabs').textContent).toMatch(/main/);
   });
 });
+
+describe('MobileWorkbench location restore', () => {
+  test('refreshing a terminal workbench URL reopens that project instead of the list', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/mobile?projectId=p1&panel=terminal&worktreeId=p1%3Amain&sessionId=p1%3As1',
+    );
+    renderWorkbench();
+
+    await waitFor(() => {
+      expect(listWorktreesMock).toHaveBeenCalledWith('p1');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
+    });
+    expect(screen.queryByRole('heading', { name: '项目' })).toBeNull();
+    expect(window.location.search).toContain('projectId=p1');
+  });
+
+  test('opening a project writes the workbench into the URL', async () => {
+    renderWorkbench();
+    await openProject('Project p1');
+    await waitFor(() => {
+      expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
+    });
+    expect(window.location.search).toContain('projectId=p1');
+    expect(window.location.search).toContain('panel=terminal');
+    expect(window.location.search).toContain('worktreeId=p1%3Amain');
+    expect(window.location.search).toContain('sessionId=p1%3As1');
+  });
+
+  test('returning to the project list clears workbench query params', async () => {
+    renderWorkbench();
+    await openProject('Project p1');
+    await waitFor(() => {
+      expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getAllByTestId('mobile-nav-back-to-projects')[0]!);
+
+    await waitFor(() => {
+      expect(window.location.search).toBe('');
+    });
+    expect(screen.getByRole('heading', { name: '项目' })).toBeTruthy();
+  });
+
+  test('unknown projectId in the URL stays on the project list', async () => {
+    window.history.replaceState(null, '', '/mobile?projectId=missing&panel=terminal');
+    renderWorkbench();
+
+    await screen.findByRole('heading', { name: '项目' });
+    expect(listWorktreesMock).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(window.location.search).toBe('');
+    });
+  });
+});
+

@@ -82,24 +82,131 @@ describe('MobileTerminalInputStream', () => {
     ]);
   });
 
-  test('存在未 ACK 输入时断线封锁且不重放', () => {
-    const socket = new FakeWebSocket();
+  test('存在未 ACK 输入时断线封锁且不重放，前台恢复后可发新输入', () => {
+    const sockets: FakeWebSocket[] = [];
     const states: MobileTerminalInputStreamState[] = [];
     const stream = new MobileTerminalInputStream({
-      createWebSocket: () => socket as unknown as WebSocket,
+      createWebSocket: () => {
+        const next = new FakeWebSocket();
+        sockets.push(next);
+        return next as unknown as WebSocket;
+      },
       createId: () => 'stable-id',
+      isDocumentVisible: () => true,
       onStateChange: (state) => states.push(state),
     });
-    socket.open();
-    socket.receive({ type: 'ready', deviceId: 'device-1' });
+    sockets[0]?.open();
+    sockets[0]?.receive({ type: 'ready', deviceId: 'device-1' });
     stream.enqueue('session-1', 'unknown');
-    const sentBeforeClose = socket.sent.length;
+    const sentBeforeClose = sockets[0]?.sent.length ?? 0;
 
-    socket.close();
+    sockets[0]?.close();
 
-    expect(states.at(-1)?.status).toBe('blocked');
-    expect(socket.sent).toHaveLength(sentBeforeClose);
+    expect(states.some((state) => state.status === 'blocked')).toBe(true);
+    expect(sockets[0]?.sent).toHaveLength(sentBeforeClose);
+    expect(sockets).toHaveLength(2);
     expect(() => stream.enqueue('session-1', 'later')).toThrow('尚未就绪');
+
+    sockets[1]?.open();
+    sockets[1]?.receive({ type: 'ready', deviceId: 'device-1' });
+    stream.enqueue('session-1', 'later');
+
+    expect(sockets[0]?.sent).toHaveLength(sentBeforeClose);
+    expect(JSON.parse(sockets[1]?.sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'input',
+      sessionId: 'session-1',
+      seq: 1,
+      data: 'later',
+    });
+    stream.close();
+  });
+
+  test('后台断线不立即重连，回到前台才重建输入流', () => {
+    const sockets: FakeWebSocket[] = [];
+    let visible = false;
+    let resumeHandler: ((detail: { persistedPageshow: boolean; hidden?: boolean }) => void) | null =
+      null;
+    const stream = new MobileTerminalInputStream({
+      createWebSocket: () => {
+        const next = new FakeWebSocket();
+        sockets.push(next);
+        return next as unknown as WebSocket;
+      },
+      isDocumentVisible: () => visible,
+      subscribeResume: (handler) => {
+        resumeHandler = handler;
+        return () => {
+          resumeHandler = null;
+        };
+      },
+      onStateChange: () => undefined,
+    });
+    sockets[0]?.open();
+    sockets[0]?.receive({ type: 'ready', deviceId: 'device-1' });
+    sockets[0]?.close();
+
+    expect(sockets).toHaveLength(1);
+    expect(() => stream.enqueue('session-1', 'later')).toThrow('尚未就绪');
+
+    visible = true;
+    resumeHandler?.({ persistedPageshow: false });
+
+    expect(sockets).toHaveLength(2);
+    sockets[1]?.open();
+    sockets[1]?.receive({ type: 'ready', deviceId: 'device-1' });
+    stream.enqueue('session-1', 'after-resume');
+    expect(JSON.parse(sockets[1]?.sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'input',
+      data: 'after-resume',
+    });
+    stream.close();
+  });
+
+  test('前台恢复时即使旧 socket 仍显示 OPEN 也会重建半开连接', () => {
+    const sockets: FakeWebSocket[] = [];
+    let resumeHandler: ((detail: { persistedPageshow: boolean; hidden?: boolean }) => void) | null =
+      null;
+    const stream = new MobileTerminalInputStream({
+      createWebSocket: () => {
+        const next = new FakeWebSocket();
+        sockets.push(next);
+        return next as unknown as WebSocket;
+      },
+      isDocumentVisible: () => true,
+      subscribeResume: (handler) => {
+        resumeHandler = handler;
+        return () => {
+          resumeHandler = null;
+        };
+      },
+      onStateChange: () => undefined,
+    });
+    sockets[0]?.open();
+    sockets[0]?.receive({ type: 'ready', deviceId: 'device-1' });
+    expect(sockets[0]?.readyState).toBe(FakeWebSocket.OPEN);
+
+    resumeHandler?.({ persistedPageshow: false });
+
+    expect(sockets).toHaveLength(2);
+    stream.close();
+  });
+
+  test('组件 dispose 的 close 不会自动重连', () => {
+    const sockets: FakeWebSocket[] = [];
+    const stream = new MobileTerminalInputStream({
+      createWebSocket: () => {
+        const next = new FakeWebSocket();
+        sockets.push(next);
+        return next as unknown as WebSocket;
+      },
+      isDocumentVisible: () => true,
+      onStateChange: () => undefined,
+    });
+    sockets[0]?.open();
+    sockets[0]?.receive({ type: 'ready', deviceId: 'device-1' });
+    stream.close();
+
+    expect(sockets).toHaveLength(1);
   });
 
   test('握手前连接被中止触发 error 时报告 blocked(dev StrictMode cleanup 场景)', () => {

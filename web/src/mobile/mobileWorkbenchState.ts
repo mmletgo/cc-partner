@@ -3,6 +3,7 @@ import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
 import type { AgentPhase, AgentSessionProjection } from '@/lib/types/agentRuntime';
 import { toAgentSessionProjection } from '@/lib/agentRuntimeState';
 import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
+import { parseMobileWorkbenchLocation } from './mobileWorkbenchLocation';
 
 export type MobileWorkbenchPanel =
   | 'projects'
@@ -297,13 +298,14 @@ export function getMobileConnectionCachedAt(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端打开 `/mobile` 时应先展示最近项目列表，让用户明确选择要操作的项目。
+ *   无 query 的 `/mobile` 仍先展示项目列表；刷新时若 URL 带 projectId/panel 则直接回到该工作台。
  *
  * Code Logic（这个函数做什么）:
- *   返回移动端 Workbench 的初始面板，当前固定为 projects。
+ *   无 window 或空 search 返回 projects；否则解析 location.search 的 panel。
  */
 export function getInitialMobileWorkbenchPanel(): MobileWorkbenchPanel {
-  return 'projects';
+  if (typeof window === 'undefined') return 'projects';
+  return parseMobileWorkbenchLocation(window.location.search).panel;
 }
 
 /**

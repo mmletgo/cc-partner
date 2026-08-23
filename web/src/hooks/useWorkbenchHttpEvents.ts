@@ -31,6 +31,7 @@ import {
   listActiveMappedProjectsHttp,
 } from '@/api/workbenchHttp';
 import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
+import { shouldReconnectOnDocumentResume } from '@/lib/documentResumeReconnect';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /** 断线后重连延迟（毫秒）。 */
@@ -1022,6 +1023,8 @@ export function consumeWorkbenchHttpEvent(
  *   业务帧推进 stream cursor；Gap 暂停 live、resync running sessions、投影 listed status/session、
  *   按结果推进/保留 cursor 后 abort 重连；
  *   业务帧与 heartbeat 均重置 35s watchdog；watchdog 仅 abort child 并在 lifecycle 仍活跃时重连。
+ *   回到前台（visibilitychange visible / pageshow / online）立刻 abort 半开连接并以 after 游标重连，
+ *   不依赖被浏览器冻结的 setTimeout watchdog。
  */
 export function useWorkbenchHttpEvents({
   store,
@@ -1066,6 +1069,13 @@ export function useWorkbenchHttpEvents({
     let stopped = false;
     let reconnectTimer: number | null = null;
     let activeConnectionController: AbortController | null = null;
+    /** 每次立刻重连抬高；被取代的 hung reader 不得再消费帧或 scheduleReconnect。 */
+    let connectGeneration = 0;
+    /** 已收到过完整 NDJSON 帧，前台恢复才强制重连。 */
+    let established = false;
+    /** 见过 hidden：首帧尚未到达就被冻结时也要重连。 */
+    let wasBackgrounded = false;
+    let lastReconnectAtMs: number | null = null;
     /** 已提交 live cursor；Gap incomplete 时作 recovery，禁止 brand-new None。 */
     let streamCursor: WorkbenchHttpStreamCursor | null = null;
     /**
@@ -1091,6 +1101,49 @@ export function useWorkbenchHttpEvents({
 
     /**
      * Business Logic（为什么需要这个函数）:
+     *   后台冻结后半开 fetch 的 reader.read() 可能永不返回，必须立刻换新连接做 catch-up。
+     *
+     * Code Logic（这个函数做什么）:
+     *   清延迟重连、抬 generation、abort 当前 child，立即 connect。
+     */
+    function reconnectNow(): void {
+      if (stopped || lifecycleController.signal.aborted) return;
+      lastReconnectAtMs = Date.now();
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      connectGeneration += 1;
+      activeConnectionController?.abort();
+      void connect();
+    }
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   visibilitychange / pageshow / online 都可能表示页面从冻结恢复。
+     *
+     * Code Logic（这个函数做什么）:
+     *   用 shouldReconnectOnDocumentResume 判定后 reconnectNow。
+     */
+    function attemptResume(persistedPageshow: boolean): void {
+      if (
+        !shouldReconnectOnDocumentResume({
+          visible: document.visibilityState === 'visible',
+          persistedPageshow,
+          hasEstablishedSession: established,
+          wasBackgrounded,
+          nowMs: Date.now(),
+          lastReconnectAtMs,
+        })
+      ) {
+        return;
+      }
+      wasBackgrounded = false;
+      reconnectNow();
+    }
+
+    /**
+     * Business Logic（为什么需要这个函数）:
      *   移动端 Workbench 需要把同源 NDJSON 事件流持续转成终端 buffer 增量，并在 Gap 时权威恢复。
      *
      * Code Logic（这个函数做什么）:
@@ -1101,6 +1154,7 @@ export function useWorkbenchHttpEvents({
      */
     async function connect(): Promise<void> {
       if (stopped || lifecycleController.signal.aborted) return;
+      const myGeneration = connectGeneration;
 
       // R32 M1：recovery 未完成且 cursor 无效时，禁止 brand-new fetch；延后重试。
       if (!canOpenWorkbenchEventsRequest(streamCursor, recoveryPending)) {
@@ -1218,13 +1272,17 @@ export function useWorkbenchHttpEvents({
 
         const reader = response.body.getReader();
         while (!stopped && !lifecycleController.signal.aborted && !livePaused) {
+          if (myGeneration !== connectGeneration) break;
           const { done, value } = await reader.read();
+          if (myGeneration !== connectGeneration) break;
           if (done) break;
           if (!value) continue;
           const chunk = decoder.decode(value, { stream: true });
           const frames = parseWorkbenchNdjsonFrames(parserState, chunk);
           for (const frame of frames) {
+            if (myGeneration !== connectGeneration) break;
             // 业务帧 / heartbeat / gap / ignored 都重置 watchdog（仍是合法 NDJSON 行）。
+            established = true;
             resetWatchdog();
             if (livePaused) break;
             if (frame.kind === 'gap') {
@@ -1318,13 +1376,52 @@ export function useWorkbenchHttpEvents({
         if (activeConnectionController === connectionController) {
           activeConnectionController = null;
         }
-        if (!lifecycleController.signal.aborted && !stopped) {
+        if (
+          myGeneration === connectGeneration &&
+          !lifecycleController.signal.aborted &&
+          !stopped
+        ) {
           scheduleReconnect();
         }
       }
     }
 
     void connect();
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   仅在页面真正可见时强制重连；hidden 时的 visibilitychange 必须忽略。
+     *
+     * Code Logic（这个函数做什么）:
+     *   visible 时 attemptResume(false)。
+     */
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') {
+        wasBackgrounded = true;
+        return;
+      }
+      if (document.visibilityState === 'visible') {
+        attemptResume(false);
+      }
+    };
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   bfcache 恢复不会卸载 React，旧 fetch/WebSocket 已死，必须当 persisted 强制重连。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取 PageTransitionEvent.persisted 后 attemptResume。
+     */
+    const onPageShow = (event: Event): void => {
+      const persisted =
+        'persisted' in event && Boolean((event as PageTransitionEvent).persisted);
+      attemptResume(persisted);
+    };
+    const onOnline = (): void => {
+      attemptResume(false);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('online', onOnline);
 
     return () => {
       stopped = true;
@@ -1333,6 +1430,9 @@ export function useWorkbenchHttpEvents({
         window.clearTimeout(reconnectTimer);
       }
       activeConnectionController?.abort();
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('online', onOnline);
     };
   }, [enabled, reconnectDelayMs, store, terminalSessionId, watchdogMs]);
 }

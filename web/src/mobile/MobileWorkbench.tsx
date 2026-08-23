@@ -59,7 +59,6 @@ import {
   selectMobilePanelForProject,
   selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
-  selectPreferredMobileWorktree,
   shouldRefreshMobilePanelOnReconnect,
   shouldShowMobileWorktreeStrip,
   shouldSkipMobileProjectReload,
@@ -68,6 +67,12 @@ import {
   type MobileSessionRuntimeState,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
+import {
+  parseMobileWorkbenchLocation,
+  resolveMobileWorkbenchLocation,
+  resolveRestoredMobileWorkspace,
+  syncMobileWorkbenchLocationToHistory,
+} from './mobileWorkbenchLocation';
 import {
   getMobileWorktreeMergeAppliedState,
   runMobileWorktreeMergeFlow,
@@ -189,9 +194,15 @@ export function MobileWorkbench(): ReactElement {
   );
   const [activeSession, setActiveSession] = useState<WorkbenchSession | null>(null);
   const [projectsLoading, setProjectsLoading] = useState<boolean>(false);
+  const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
   const [projectDetailStatus, setProjectDetailStatus] =
     useState<MobileProjectDetailStatus>('idle');
   const [connectionState, setConnectionState] = useState<MobileConnectionState | null>(null);
+  const [locationReady, setLocationReady] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return parseMobileWorkbenchLocation(window.location.search).projectId == null;
+  });
+  const locationRestoreStartedRef = useRef<boolean>(false);
   const [worktreeOperationBusy, setWorktreeOperationBusy] = useState<boolean>(false);
   /**
    * @deprecated quick switch sheet 暂未挂载（移动端 worktree 切换已迁移到 shell 固定 `MobileWorktreeTabs`），
@@ -229,6 +240,7 @@ export function MobileWorkbench(): ReactElement {
     activeProjectIdRef.current = activeProject?.id ?? null;
   }, [activeProject?.id]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- 内测功能关闭时必须把不可用 panel 收回到 terminal/projects */
   useEffect(() => {
     if (panel === 'automation' && !experimentalFeatures.automation) {
       setPanel(activeProject ? 'terminal' : 'projects');
@@ -243,6 +255,7 @@ export function MobileWorkbench(): ReactElement {
     experimentalFeatures.browser,
     panel,
   ]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // sessions 列表变化时在 render 阶段播种 runtime（保留已有 agent 投影），避免 setState-in-effect
   const [seededSessions, setSeededSessions] = useState(sessions);
@@ -586,6 +599,7 @@ export function MobileWorkbench(): ReactElement {
     } finally {
       if (projectsRequestIdRef.current === requestId) {
         setProjectsLoading(false);
+        setProjectsLoaded(true);
       }
     }
   }, [noteConnectionOutcome]);
@@ -714,7 +728,12 @@ export function MobileWorkbench(): ReactElement {
    */
   const selectProject = useCallback(async (
     project: WorkbenchProject,
-    options: { nextPanel?: MobileWorkbenchPanel; forceReload?: boolean } = {},
+    options: {
+      nextPanel?: MobileWorkbenchPanel;
+      forceReload?: boolean;
+      worktreeId?: string | null;
+      sessionId?: string | null;
+    } = {},
   ): Promise<boolean> => {
     const nextPanel = options.nextPanel ?? 'terminal';
     if (!canSelectMobileProject(project)) {
@@ -769,18 +788,19 @@ export function MobileWorkbench(): ReactElement {
       if (abortController.signal.aborted) return false;
       if (projectDetailsRequestIdRef.current !== requestId) return false;
 
-      const nextActiveWorktree = selectPreferredMobileWorktree(nextWorktrees);
-      const nextActiveSession = selectPreferredMobileSession(
+      const restored = resolveRestoredMobileWorkspace(
+        nextWorktrees,
         nextSessions,
-        nextActiveWorktree?.id ?? null,
+        options.worktreeId ?? null,
+        options.sessionId ?? null,
       );
 
       setWorktrees(nextWorktrees);
-      activeWorktreeRef.current = nextActiveWorktree;
-      setActiveWorktree(nextActiveWorktree);
+      activeWorktreeRef.current = restored.worktree;
+      setActiveWorktree(restored.worktree);
       sessionsRef.current = nextSessions;
       setSessions(nextSessions);
-      setActiveSession(nextActiveSession);
+      setActiveSession(restored.session);
       setPanel(nextPanel);
       setProjectDetailStatus('ready');
       noteConnectionOutcome(true);
@@ -1381,6 +1401,67 @@ export function MobileWorkbench(): ReactElement {
       sessionsRequestIdRef.current += 1;
     };
   }, [loadProjects]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   刷新或从后台被杀掉后，URL 里的 projectId 必须自动打开原来的工作台，不能停在项目列表。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   等首次 projects.list 完成后按 query 选项目；找不到则回落列表并允许写回空 URL。
+   */
+  useEffect(() => {
+    if (locationRestoreStartedRef.current) return;
+    if (!projectsLoaded) return;
+    locationRestoreStartedRef.current = true;
+    if (typeof window === 'undefined') {
+      setLocationReady(true);
+      return;
+    }
+    const intended = parseMobileWorkbenchLocation(window.location.search);
+    const project = intended.projectId
+      ? projects.find((item) => item.id === intended.projectId) ?? null
+      : null;
+    if (!project || !canSelectMobileProject(project)) {
+      if (intended.projectId) {
+        setPanel('projects');
+      }
+      setLocationReady(true);
+      return;
+    }
+    void selectProject(project, {
+      nextPanel: intended.panel,
+      worktreeId: intended.worktreeId,
+      sessionId: intended.sessionId,
+    }).finally(() => {
+      setLocationReady(true);
+    });
+  }, [projects, projectsLoaded, selectProject]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   当前工作台必须写进地址栏，刷新才能回到同一项目/面板/终端窗口。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   locationReady 后把 panel/project/worktree/session replaceState 进当前 pathname。
+   */
+  useEffect(() => {
+    if (!locationReady || typeof window === 'undefined') return;
+    const next = resolveMobileWorkbenchLocation({
+      panel,
+      projectId: activeProject?.id ?? null,
+      worktreeId: activeWorktree?.id ?? null,
+      sessionId: activeSession?.id ?? null,
+    });
+    syncMobileWorkbenchLocationToHistory(next, window.location.href, (url) => {
+      window.history.replaceState(window.history.state, '', url);
+    });
+  }, [
+    locationReady,
+    panel,
+    activeProject?.id,
+    activeWorktree?.id,
+    activeSession?.id,
+  ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**

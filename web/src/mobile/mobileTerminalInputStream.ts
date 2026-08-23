@@ -1,3 +1,5 @@
+import { shouldReconnectOnDocumentResume } from '@/lib/documentResumeReconnect';
+
 export const TERMINAL_INPUT_SUBPROTOCOL = 'cc-partner.terminal-input.v1';
 
 export type MobileTerminalInputStreamState =
@@ -23,6 +25,16 @@ export interface MobileTerminalInputStreamOptions {
   onStateChange: (state: MobileTerminalInputStreamState) => void;
   createWebSocket?: (url: string, protocols: string | string[]) => WebSocket;
   createId?: () => string;
+  /** 测试注入：当前文档是否可见。默认读 document.visibilityState。 */
+  isDocumentVisible?: () => boolean;
+  /**
+   * 测试注入：订阅前台恢复。默认监听 visibilitychange / pageshow / online。
+   * handler 收到 persistedPageshow 时表示 bfcache 恢复。
+   */
+  subscribeResume?: (
+    handler: (detail: { persistedPageshow: boolean; hidden?: boolean }) => void,
+  ) => () => void;
+  now?: () => number;
 }
 
 /**
@@ -57,6 +69,45 @@ export function createMobileTerminalInputId(): string {
 }
 
 /**
+ * 默认订阅页面从后台回到前台。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   iOS/Android 浏览器冻结页面后 WebSocket 半开；回到前台必须主动重建输入流。
+ *
+ * Code Logic（这个函数做什么）:
+ *   监听 visibilitychange（仅 visible）、pageshow（带 persisted）与 online。
+ */
+function subscribeDocumentResume(
+  handler: (detail: { persistedPageshow: boolean; hidden?: boolean }) => void,
+): () => void {
+  const onVisibility = (): void => {
+    if (document.visibilityState === 'hidden') {
+      handler({ persistedPageshow: false, hidden: true });
+      return;
+    }
+    if (document.visibilityState === 'visible') {
+      handler({ persistedPageshow: false });
+    }
+  };
+  const onPageShow = (event: Event): void => {
+    const persisted =
+      'persisted' in event && Boolean((event as PageTransitionEvent).persisted);
+    handler({ persistedPageshow: persisted });
+  };
+  const onOnline = (): void => {
+    handler({ persistedPageshow: false });
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pageshow', onPageShow);
+  window.addEventListener('online', onOnline);
+  return () => {
+    document.removeEventListener('visibilitychange', onVisibility);
+    window.removeEventListener('pageshow', onPageShow);
+    window.removeEventListener('online', onOnline);
+  };
+}
+
+/**
  * 移动端终端输入常驻连接。
  *
  * Business Logic（为什么需要这个类）:
@@ -64,51 +115,151 @@ export function createMobileTerminalInputId(): string {
  *
  * Code Logic（这个类做什么）:
  *   维护单 WebSocket、per-session lane/seq/outstanding；ready 后同步发送输入，ACK 仅用于确认，
- *   不阻塞后续帧。连接中断时封锁所有存在 outstanding 的 lane 并清空状态。
+ *   不阻塞后续帧。连接中断时封锁 outstanding 且不重放；前台恢复或意外 close 时重建 socket。
  */
 export class MobileTerminalInputStream {
-  private readonly socket: WebSocket;
+  private socket: WebSocket;
+  private socketGeneration = 0;
   private readonly lanes = new Map<string, InputLane>();
   private state: MobileTerminalInputStreamState = { status: 'connecting' };
   private readonly createId: () => string;
+  private readonly createSocket: (url: string, protocols: string | string[]) => WebSocket;
+  private readonly onStateChange: (state: MobileTerminalInputStreamState) => void;
+  private readonly isDocumentVisible: () => boolean;
+  private readonly now: () => number;
+  private readonly unsubscribeResume: () => void;
+  private disposed = false;
+  private everReady = false;
+  private wasBackgrounded = false;
+  private lastReconnectAtMs: number | null = null;
 
   public constructor(options: MobileTerminalInputStreamOptions) {
+    this.createId = options.createId ?? createMobileTerminalInputId;
+    this.createSocket =
+      options.createWebSocket ?? ((socketUrl, protocols) => new WebSocket(socketUrl, protocols));
+    this.onStateChange = options.onStateChange;
+    this.isDocumentVisible =
+      options.isDocumentVisible ?? (() => document.visibilityState === 'visible');
+    this.now = options.now ?? (() => Date.now());
+    this.socket = this.openSocket();
+    this.publish(this.state);
+    const subscribeResume = options.subscribeResume ?? subscribeDocumentResume;
+    this.unsubscribeResume = subscribeResume((detail) => {
+      if (detail.hidden) {
+        this.wasBackgrounded = true;
+        return;
+      }
+      this.attemptResume(detail.persistedPageshow);
+    });
+  }
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   状态变化必须同步给面板，才能禁用输入并在 ready 后清掉断线错误。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 this.state 并回调 onStateChange。
+   */
+  private publish(next: MobileTerminalInputStreamState): void {
+    this.state = next;
+    this.onStateChange(next);
+  }
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   新建或替换 socket 时必须绑定当前 generation，避免旧 close/error 污染新连接。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用工厂创建 WebSocket，注册 open/message/close/error；返回新 socket。
+   */
+  private openSocket(): WebSocket {
     const url = new URL('/api/mobile/workbench/terminal-input-stream', window.location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.createId = options.createId ?? createMobileTerminalInputId;
-    const createSocket = options.createWebSocket ?? ((socketUrl, protocols) => new WebSocket(socketUrl, protocols));
-    this.socket = createSocket(url.toString(), TERMINAL_INPUT_SUBPROTOCOL);
-    const publish = (next: MobileTerminalInputStreamState): void => {
-      this.state = next;
-      options.onStateChange(next);
-    };
-    publish(this.state);
-    this.socket.addEventListener('open', () => {
+    const generation = this.socketGeneration;
+    const socket = this.createSocket(url.toString(), TERMINAL_INPUT_SUBPROTOCOL);
+    socket.addEventListener('open', () => {
+      if (this.disposed || generation !== this.socketGeneration) return;
       try {
-        this.socket.send(JSON.stringify({ type: 'hello', clientId: `mobile-${this.createId()}` }));
+        socket.send(JSON.stringify({ type: 'hello', clientId: `mobile-${this.createId()}` }));
       } catch {
-        publish({ status: 'blocked', message: '终端输入连接初始化失败' });
+        this.publish({ status: 'blocked', message: '终端输入连接初始化失败' });
       }
     });
-    this.socket.addEventListener('message', (event: MessageEvent<string>) => {
-      this.handleMessage(event.data, publish);
+    socket.addEventListener('message', (event: MessageEvent<string>) => {
+      if (this.disposed || generation !== this.socketGeneration) return;
+      this.handleMessage(event.data);
     });
-    this.socket.addEventListener('close', () => {
+    socket.addEventListener('close', () => {
+      if (this.disposed || generation !== this.socketGeneration) return;
       const uncertain = [...this.lanes.values()].some((lane) => lane.outstanding.size > 0);
       this.lanes.forEach((lane) => {
         lane.blocked = true;
         lane.outstanding.clear();
         lane.outstandingBytes = 0;
       });
-      publish(
+      this.publish(
         uncertain
           ? { status: 'blocked', message: '输入连接已断开；未确认输入不会自动重放' }
           : { status: 'closed' },
       );
+      if (this.isDocumentVisible()) {
+        this.reconnect();
+      }
     });
-    this.socket.addEventListener('error', () => {
-      publish({ status: 'blocked', message: '终端输入连接失败' });
+    socket.addEventListener('error', () => {
+      if (this.disposed || generation !== this.socketGeneration) return;
+      this.publish({ status: 'blocked', message: '终端输入连接失败' });
     });
+    return socket;
+  }
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   页面从后台回到前台时，即使旧 socket 仍显示 OPEN 也可能是半开连接，必须重建。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 shouldReconnectOnDocumentResume 判定后调用 reconnect。
+   */
+  private attemptResume(persistedPageshow: boolean): void {
+    if (this.disposed) return;
+    if (
+      !shouldReconnectOnDocumentResume({
+        visible: this.isDocumentVisible(),
+        persistedPageshow,
+        hasEstablishedSession: this.everReady,
+        wasBackgrounded: this.wasBackgrounded,
+        nowMs: this.now(),
+        lastReconnectAtMs: this.lastReconnectAtMs,
+      })
+    ) {
+      return;
+    }
+    this.wasBackgrounded = false;
+    this.reconnect();
+  }
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   重建输入通道，让用户继续键入；已发送未 ACK 的帧结果未知，不得重放。
+   *
+   * Code Logic（这个函数做什么）:
+   *   抬 generation、清空 lane、打开新 socket，再关闭仍未关闭的旧 socket。
+   */
+  private reconnect(): void {
+    if (this.disposed) return;
+    this.lastReconnectAtMs = this.now();
+    const replacing = this.socket;
+    this.socketGeneration += 1;
+    this.lanes.clear();
+    this.socket = this.openSocket();
+    this.publish({ status: 'connecting' });
+    if (replacing.readyState === WebSocket.CONNECTING || replacing.readyState === WebSocket.OPEN) {
+      try {
+        replacing.close(1000, 'replaced');
+      } catch {
+        // 旧 socket 可能已被浏览器关闭。
+      }
+    }
   }
 
   /**
@@ -155,26 +306,30 @@ export class MobileTerminalInputStream {
     }));
   }
 
-  /** 关闭连接并丢弃所有本地状态；不会重放 outstanding。 */
+  /** 关闭连接并丢弃所有本地状态；不会重放 outstanding，也不会自动重连。 */
   public close(): void {
+    this.disposed = true;
+    this.unsubscribeResume();
     this.lanes.clear();
-    this.socket.close(1000, 'component disposed');
+    try {
+      this.socket.close(1000, 'component disposed');
+    } catch {
+      // 组件卸载时 socket 可能已经关闭。
+    }
   }
 
-  private handleMessage(
-    raw: string,
-    publish: (state: MobileTerminalInputStreamState) => void,
-  ): void {
+  private handleMessage(raw: string): void {
     let message: unknown;
     try {
       message = JSON.parse(raw);
     } catch {
-      publish({ status: 'blocked', message: '终端输入响应格式无效' });
+      this.publish({ status: 'blocked', message: '终端输入响应格式无效' });
       return;
     }
     if (!isRecord(message) || typeof message.type !== 'string') return;
     if (message.type === 'ready') {
-      publish({ status: 'ready' });
+      this.everReady = true;
+      this.publish({ status: 'ready' });
       return;
     }
     if (message.type === 'ack' && typeof message.sessionId === 'string' && typeof message.seq === 'number') {
@@ -196,7 +351,7 @@ export class MobileTerminalInputStream {
           lane.outstandingBytes = 0;
         }
       }
-      publish({
+      this.publish({
         status: 'blocked',
         message: typeof message.message === 'string' ? message.message : '终端输入被后端拒绝',
       });
