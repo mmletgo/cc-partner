@@ -51,7 +51,7 @@ pub async fn build_local_user_mirror_inventory(
 ///
 /// Business Logic: 隔离 HOME 必须与生产走同一白名单与 user-scope 过滤。
 /// Code Logic: workspace 一次；catalog 顺序逐 target 扫 portable + 原生文件。
-async fn build_local_user_mirror_inventory_with_env(
+pub(crate) async fn build_local_user_mirror_inventory_with_env(
     state: &AppState,
     device_id: &str,
     env: &TargetEnvironment,

@@ -178,7 +178,7 @@ pub async fn freeze_user_mirror_selection(
 ///
 /// Business Logic: 隔离 HOME 必须与生产走同一白名单，且不得触发 adopt。
 /// Code Logic: 扫原生路径 + user-scope portable → 写入 CAS → 组装 envelope / staging。
-async fn freeze_user_mirror_selection_with_env(
+pub(crate) async fn freeze_user_mirror_selection_with_env(
     state: &AppState,
     inventory: &UserMirrorInventoryDto,
     env: &TargetEnvironment,

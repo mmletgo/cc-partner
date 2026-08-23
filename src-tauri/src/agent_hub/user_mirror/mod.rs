@@ -6,12 +6,14 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     导出 DTO/错误码、本机全 Agent 用户级 inventory 扫描、源端 CAS selection 冻结，
-//!     以及源/目标 inventory 的 replace-plus-delete preview diff。
+//!     源/目标 inventory 的 replace-plus-delete preview diff，以及 dest 指令槽/原生文件 apply。
+mod apply;
 mod inventory;
 mod models;
 mod preview;
 mod selection;
 
+pub use apply::apply_user_mirror_instructions;
 pub use inventory::build_local_user_mirror_inventory;
 pub use models::*;
 pub use preview::{diff_inventories, preview_from_two_inventories};
