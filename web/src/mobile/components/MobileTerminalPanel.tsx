@@ -2072,6 +2072,26 @@ export function MobileTerminalPanel({
     setFavoriteSheetOpen(true);
   }, []);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   FAB 叠在 xterm 上。PointerPrimaryButton 为了不丢终端焦点会 preventDefault，
+   *   手机就会把这次 tap 当成继续编辑 helper textarea，弹出系统键盘。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对当前 viewport 的 helper textarea 设 readonly + inputmode=none 并 blur，
+   *   同时 blur 当前可编辑 activeElement。
+   */
+  const dismissTerminalSoftKeyboard = useCallback((): void => {
+    const active =
+      typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    leaveMobileTerminalTypingMode(
+      findMobileTerminalHelperTextarea(viewportRef.current),
+      active,
+    );
+  }, []);
+
   const terminalFabActions: Array<{
     key: 'paste' | 'merge' | 'commit' | 'optimizer' | 'favorite';
     visible: boolean;
@@ -2364,7 +2384,13 @@ export function MobileTerminalPanel({
             />
           ) : null}
           {project ? (
-            <div className={styles.mobileTerminalFabGroup}>
+            <div
+              className={styles.mobileTerminalFabGroup}
+              onPointerDownCapture={(event) => {
+                event.preventDefault();
+                dismissTerminalSoftKeyboard();
+              }}
+            >
                 <input
                   ref={pasteImageInputRef}
                   type="file"
@@ -2467,6 +2493,7 @@ export function MobileTerminalPanel({
               tabIndex={fabMenuOpen ? 0 : -1}
               aria-hidden={!fabMenuOpen}
               aria-label={t('workbench:mobile.terminalPanel.fabMenu.dismiss')}
+              onPointerDown={dismissTerminalSoftKeyboard}
               onClick={() => setFabMenuOpen(false)}
             />
           ) : null}

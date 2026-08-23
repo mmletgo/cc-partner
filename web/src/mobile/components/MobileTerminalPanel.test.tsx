@@ -1118,6 +1118,37 @@ describe('MobileTerminalPanel — FAB menu', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
+   *   FAB 叠在 xterm 上；PointerPrimaryButton preventDefault 会把焦点留在 helper textarea，
+   *   手机一点折叠钮就会弹出系统键盘。必须在 pointerDown 离开打字态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   渲染后清掉挂载时的 leaveTyping 调用，pointerDown 触发钮，断言再次调用 leaveMobileTerminalTypingMode。
+   */
+  test('tapping the FAB trigger leaves typing mode so the soft keyboard does not open', () => {
+    const leaveTyping = vi.spyOn(extraKeys, 'leaveMobileTerminalTypingMode');
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+    leaveTyping.mockClear();
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: FAB_MENU_OPEN_LABEL }));
+
+    expect(leaveTyping).toHaveBeenCalled();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
    *   还没开终端窗口时也要能提交/看操作入口，不能把 FAB 藏进「无 session」空态。
    *
    * Code Logic（这个测试做什么）:
