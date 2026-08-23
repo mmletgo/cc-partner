@@ -32,13 +32,24 @@ export interface MobileTerminalExtraKeyDef {
    * 弹出项本身不再嵌套 popup。
    */
   popup?: MobileTerminalExtraKeyDef[];
+  /**
+   * 为 true 时，pointer 按住会在首次发送后再按间隔连发（方向键）。
+   * 与 popup 互斥：带弹出层的键不连发。
+   */
+  repeatable?: boolean;
 }
 
 /** sticky 武装后无后续输入的自动解除时长（毫秒）。 */
 export const MOBILE_TERMINAL_STICKY_TIMEOUT_MS = 3000;
 
-/** `/` 等带 popup 的键：短按抬手阈值；超过则打开弹出层。 */
+/** `/` 等带 popup 的键：短按抬手阈值；超过则打开弹出层。方向键连发初始延迟复用该值。 */
 export const MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS = 400;
+
+/** 方向键：按下立即发送后，再按住这么久才开始连发。 */
+export const MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS = MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS;
+
+/** 方向键连发间隔（毫秒）。 */
+export const MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS = 80;
 
 /** hit-test / hover 表示手指仍停在主键（trigger）上。 */
 export const EXTRA_KEY_POPUP_TRIGGER_HIT_ID = 'trigger';
@@ -128,11 +139,11 @@ const MOBILE_TERMINAL_EXTRA_KEYS: MobileTerminalExtraKeyDef[] = [
       },
     ],
   },
-  // 方向键
-  { id: 'up', kind: 'payload', label: '↑', ariaKey: 'up', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up },
-  { id: 'down', kind: 'payload', label: '↓', ariaKey: 'down', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down },
-  { id: 'left', kind: 'payload', label: '←', ariaKey: 'left', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.left },
-  { id: 'right', kind: 'payload', label: '→', ariaKey: 'right', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right },
+  // 方向键（按住连发，便于移动光标 / 翻历史）
+  { id: 'up', kind: 'payload', label: '↑', ariaKey: 'up', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up, repeatable: true },
+  { id: 'down', kind: 'payload', label: '↓', ariaKey: 'down', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down, repeatable: true },
+  { id: 'left', kind: 'payload', label: '←', ariaKey: 'left', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.left, repeatable: true },
+  { id: 'right', kind: 'payload', label: '→', ariaKey: 'right', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right, repeatable: true },
   { id: 'enter', kind: 'payload', label: '⏎', ariaKey: 'enter', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter },
   { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
   // Sticky 修饰键（Ctrl / Alt 武装后下一次输入自动消耗）
@@ -413,6 +424,17 @@ export function selectExtraKeyPopupItem(
  */
 export function extraKeyHasPopup(key: MobileTerminalExtraKeyDef): boolean {
   return Array.isArray(key.popup) && key.popup.length > 0;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   UI 需要判断某键是否走按住连发，而不是单击即结束。
+ *
+ * Code Logic（这个函数做什么）:
+ *   repeatable 严格为 true 才连发；popup 键即使误标也不在此函数里排除，由渲染分支优先走 popup。
+ */
+export function extraKeyIsRepeatable(key: MobileTerminalExtraKeyDef): boolean {
+  return key.repeatable === true;
 }
 
 /**

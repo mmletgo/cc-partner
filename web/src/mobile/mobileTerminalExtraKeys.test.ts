@@ -10,12 +10,15 @@ import {
   encodeCtrlKeyInput,
   enterMobileTerminalTypingMode,
   EXTRA_KEY_POPUP_TRIGGER_HIT_ID,
+  extraKeyIsRepeatable,
   getMobileTerminalExtraKeys,
   hitTestExtraKeyPopup,
   hoverExtraKeyPopup,
   leaveMobileTerminalTypingMode,
   MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS,
   MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS,
+  MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS,
+  MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS,
   MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
   resolveExtraKeyPopupPointerUp,
   resolveMobileTerminalExtraKeyPress,
@@ -179,6 +182,25 @@ describe('mobileTerminalExtraKeys', () => {
 
   test('sticky timeout constant is 3 seconds', () => {
     assertEqual(MOBILE_TERMINAL_STICKY_TIMEOUT_MS, 3000, 'sticky timeout');
+  });
+
+  test('only arrow extra keys are repeatable, with 400ms delay and 80ms interval', () => {
+    assertEqual(
+      MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS,
+      MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS,
+      'repeat delay matches long-press',
+    );
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS, 80, 'repeat interval');
+
+    const keys = getMobileTerminalExtraKeys();
+    const repeatableIds = keys.filter(extraKeyIsRepeatable).map((key) => key.id);
+    assertEqual(repeatableIds.join(','), 'up,down,left,right', 'only arrows repeat');
+
+    for (const key of keys) {
+      const expectRepeat = key.id === 'up' || key.id === 'down' || key.id === 'left' || key.id === 'right';
+      assertEqual(extraKeyIsRepeatable(key), expectRepeat, `${key.id} repeatable`);
+      assertEqual(Boolean(key.repeatable), expectRepeat, `${key.id} repeatable flag`);
+    }
   });
 
   test('dismissMobileTerminalSoftKeyboard blurs xterm textarea but ignores non-editable focus', () => {

@@ -12,13 +12,17 @@
  */
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 
 import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 function renderButton(
   onPrimary: () => void,
-  props: { disabled?: boolean; beforePointerDown?: () => void } = {},
+  props: {
+    disabled?: boolean;
+    beforePointerDown?: () => void;
+    repeat?: { delayMs: number; intervalMs: number };
+  } = {},
 ): HTMLButtonElement {
   const { container } = render(
     <PointerPrimaryButton onPrimary={onPrimary} {...props}>
@@ -32,6 +36,7 @@ function renderButton(
 
 describe('PointerPrimaryButton', () => {
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
   });
 
@@ -80,5 +85,72 @@ describe('PointerPrimaryButton', () => {
     fireEvent.pointerDown(button);
     fireEvent.click(button);
     expect(onPrimary).not.toHaveBeenCalled();
+  });
+
+  test('repeat：按下立刻触发一次，超过 delay 后按 interval 连发，松手停止', () => {
+    vi.useFakeTimers();
+    const onPrimary = vi.fn();
+    const button = renderButton(onPrimary, { repeat: { delayMs: 400, intervalMs: 80 } });
+
+    fireEvent.pointerDown(button, { pointerId: 1 });
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(399);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(3);
+
+    fireEvent.pointerUp(button, { pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(3);
+  });
+
+  test('repeat：pointerCancel 在 delay 内取消连发，只保留按下那一次', () => {
+    vi.useFakeTimers();
+    const onPrimary = vi.fn();
+    const button = renderButton(onPrimary, { repeat: { delayMs: 400, intervalMs: 80 } });
+
+    fireEvent.pointerDown(button, { pointerId: 1 });
+    fireEvent.pointerCancel(button, { pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+  });
+
+  test('无 repeat 配置时按住不连发', () => {
+    vi.useFakeTimers();
+    const onPrimary = vi.fn();
+    const button = renderButton(onPrimary);
+
+    fireEvent.pointerDown(button, { pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+  });
+
+  test('repeat：仅 click 兜底不启动连发', () => {
+    vi.useFakeTimers();
+    const onPrimary = vi.fn();
+    const button = renderButton(onPrimary, { repeat: { delayMs: 400, intervalMs: 80 } });
+
+    fireEvent.click(button);
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    expect(onPrimary).toHaveBeenCalledTimes(1);
   });
 });

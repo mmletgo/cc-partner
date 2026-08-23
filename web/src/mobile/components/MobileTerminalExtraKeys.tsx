@@ -8,12 +8,15 @@ import {
   beginExtraKeyPopupPress,
   cancelExtraKeyPopupPress,
   extraKeyHasPopup,
+  extraKeyIsRepeatable,
   EXTRA_KEY_POPUP_TRIGGER_HIT_ID,
   getMobileTerminalExtraKeys,
   hitTestExtraKeyPopup,
   hoverExtraKeyPopup,
   IDLE_EXTRA_KEY_POPUP_PRESS,
   MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS,
+  MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS,
+  MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS,
   resolveExtraKeyPopupPointerUp,
   selectExtraKeyPopupItem,
   type ExtraKeyPopupHitRect,
@@ -336,6 +339,7 @@ function ExtraKeyPopupButton({
  * Code Logic（这个组件做什么）:
  *   纯展示：渲染所有键（按扁平顺序）于横向可滚动容器，modifier 显示 aria-pressed；
  *   无 popup 的键 pointerdown 经 PointerPrimaryButton 触发 onKeyPress；
+ *   方向键额外开启按住连发（按下立刻发送，超过 delay 后按 interval 重复）；
  *   带 popup 的键走 ExtraKeyPopupButton 长按滑动；preventDefault 阻止按钮抢焦。
  */
 export function MobileTerminalExtraKeys({
@@ -369,6 +373,7 @@ export function MobileTerminalExtraKeys({
             />
           );
         }
+        const repeatable = extraKeyIsRepeatable(key);
         return (
           <PointerPrimaryButton
             key={key.id}
@@ -377,10 +382,19 @@ export function MobileTerminalExtraKeys({
             data-key-id={key.id}
             data-kind={key.kind}
             data-pressed={pressed || undefined}
+            data-repeatable={repeatable || undefined}
             aria-label={ariaLabel}
             aria-pressed={key.kind === 'modifier' ? pressed : undefined}
             title={ariaLabel}
             disabled={disabled}
+            repeat={
+              repeatable
+                ? {
+                    delayMs: MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS,
+                    intervalMs: MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS,
+                  }
+                : undefined
+            }
             onPrimary={() => onKeyPress(key)}
           >
             <span aria-hidden="true">{key.label}</span>

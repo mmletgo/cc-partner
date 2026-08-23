@@ -1678,6 +1678,10 @@
   touch-action: none;
 }
 
+.mobileTerminalExtraKey[data-repeatable='true'] {
+  touch-action: none;
+}
+
 .mobileTerminalExtraKey[data-has-popup='true']::after {
   content: '';
   position: absolute;

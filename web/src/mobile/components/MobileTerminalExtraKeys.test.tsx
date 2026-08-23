@@ -17,13 +17,22 @@ import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
 import type { MobileTerminalExtraKeyDef } from '../mobileTerminalExtraKeys';
-import { MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS } from '../mobileTerminalExtraKeys';
+import {
+  MOBILE_TERMINAL_EXTRA_KEY_LONG_PRESS_MS,
+  MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS,
+  MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS,
+} from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 
 function renderExtraKeys(
   onKeyPress: (key: MobileTerminalExtraKeyDef) => void,
   disabled = false,
-): { container: HTMLElement; esc: HTMLButtonElement; slash: HTMLButtonElement } {
+): {
+  container: HTMLElement;
+  esc: HTMLButtonElement;
+  slash: HTMLButtonElement;
+  up: HTMLButtonElement;
+} {
   const { container } = render(
     <I18nextProvider i18n={i18n}>
       <MobileTerminalExtraKeys
@@ -35,9 +44,11 @@ function renderExtraKeys(
   );
   const esc = container.querySelector('[data-key-id="esc"]') as HTMLButtonElement | null;
   const slash = container.querySelector('[data-key-id="slash"]') as HTMLButtonElement | null;
+  const up = container.querySelector('[data-key-id="up"]') as HTMLButtonElement | null;
   if (!esc) throw new Error('esc button not rendered');
   if (!slash) throw new Error('slash button not rendered');
-  return { container, esc, slash };
+  if (!up) throw new Error('up button not rendered');
+  return { container, esc, slash, up };
 }
 
 function mockRect(
@@ -205,5 +216,49 @@ describe('MobileTerminalExtraKeys', () => {
     expect(onKeyPress).not.toHaveBeenCalled();
     expect(document.querySelector('[data-popup-item-id="slash-rewind"]')).toBeNull();
     vi.useRealTimers();
+  });
+
+  test('方向键按下立刻发送，按住超过 delay 后按 interval 连发，松手停止', () => {
+    vi.useFakeTimers();
+    const onKeyPress = vi.fn();
+    const { up } = renderExtraKeys(onKeyPress);
+
+    fireEvent.pointerDown(up, { pointerId: 1 });
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
+    expect(onKeyPress.mock.calls[0]?.[0]?.id).toBe('up');
+
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TERMINAL_EXTRA_KEY_REPEAT_DELAY_MS - 1);
+    });
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onKeyPress).toHaveBeenCalledTimes(2);
+    expect(onKeyPress.mock.calls[1]?.[0]?.id).toBe('up');
+
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_TERMINAL_EXTRA_KEY_REPEAT_INTERVAL_MS);
+    });
+    expect(onKeyPress).toHaveBeenCalledTimes(3);
+
+    fireEvent.pointerUp(up, { pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(onKeyPress).toHaveBeenCalledTimes(3);
+  });
+
+  test('非方向键按住不连发', () => {
+    vi.useFakeTimers();
+    const onKeyPress = vi.fn();
+    const { esc } = renderExtraKeys(onKeyPress);
+
+    fireEvent.pointerDown(esc, { pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(onKeyPress).toHaveBeenCalledTimes(1);
   });
 });
