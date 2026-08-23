@@ -1345,6 +1345,8 @@
 
 .mobileTerminalFabGroup {
   position: absolute;
+  grid-column: 1;
+  grid-row: 1;
   right: var(--space-2);
   bottom: var(--space-2);
   z-index: 5;
@@ -1352,6 +1354,7 @@
 
 .mobileTerminalFabActions {
   --fab-radius: calc(var(--space-8) * 3.5);
+  --fab-label-offset: calc(var(--space-8) * 2);
   position: absolute;
   right: calc(var(--space-8) * 0.75);
   bottom: calc(var(--space-8) * 0.75);
@@ -1401,13 +1404,11 @@
   position: absolute;
   right: calc(var(--space-8) * -0.75);
   bottom: calc(var(--space-8) * -0.75);
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-2);
+  width: calc(var(--space-8) * 1.5);
+  height: calc(var(--space-8) * 1.5);
   transform: scale(0.35);
   opacity: 0;
-  transform-origin: calc(100% - var(--space-8) * 0.75) 50%;
+  transform-origin: center;
   pointer-events: none;
   transition:
     transform var(--motion-slow) var(--ease-emphasized),
@@ -1426,7 +1427,15 @@
   transition-delay: var(--fab-delay-open, 0ms);
 }
 
+.mobileTerminalFabAction .mobileTerminalFab {
+  width: 100%;
+  height: 100%;
+}
+
 .mobileTerminalFabLabel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
   padding: var(--space-1) var(--space-3);
   color: var(--fg);
   background: var(--surface);
@@ -1437,17 +1446,19 @@
   line-height: var(--leading-tight);
   white-space: nowrap;
   box-shadow: var(--shadow-xs);
+  pointer-events: none;
   opacity: 0;
-  transform: translateX(var(--space-2));
-  transition:
-    opacity var(--motion-base) var(--ease-standard),
-    transform var(--motion-base) var(--ease-standard);
+  transform: translate(-50%, -50%)
+    translate(
+      calc(cos(var(--fab-angle)) * var(--fab-label-offset)),
+      calc(sin(var(--fab-angle)) * var(--fab-label-offset))
+    );
+  transition: opacity var(--motion-base) var(--ease-standard);
   transition-delay: var(--fab-delay-close, 0ms);
 }
 
 .mobileTerminalFabActions[data-open='true'] .mobileTerminalFabLabel {
   opacity: 1;
-  transform: translateX(0);
   transition-delay: calc(var(--fab-delay-open, 0ms) + var(--motion-fast));
 }
 

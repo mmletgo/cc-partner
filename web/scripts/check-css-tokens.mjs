@@ -41,6 +41,7 @@ const RUNTIME_STRUCTURAL_ALLOWLIST = new Set([
   'fab-radius',
   'fab-delay-open',
   'fab-delay-close',
+  'fab-label-offset',
 ]);
 
 /**

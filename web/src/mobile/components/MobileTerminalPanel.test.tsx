@@ -1118,6 +1118,78 @@ describe('MobileTerminalPanel — FAB menu', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
+   *   还没开终端窗口时也要能提交/看操作入口，不能把 FAB 藏进「无 session」空态。
+   *
+   * Code Logic（这个测试做什么）:
+   *   sessions 为空时仍有展开按钮；点开后贴图/优化禁用，Commit 仍可点。
+   */
+  test('shows FAB trigger when the project has no terminal session', () => {
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[]}
+          activeSession={null}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    expect(screen.getByText('workbench:mobile.terminalPanel.noSession')).toBeTruthy();
+    expect(screen.getByRole('button', { name: FAB_MENU_OPEN_LABEL })).toBeTruthy();
+    openTerminalFabMenu();
+    expect(
+      (screen.getByRole('button', {
+        name: 'workbench:mobile.terminalPanel.pasteImageButton',
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole('button', { name: 'workbench:promptOptimizer.open' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole('button', { name: 'workbench:worktrees.commit' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   文案必须跟自己的圆钮绑在同一个弧点上，不能再跟 flex 拉伸后的整条一起漂。
+   *
+   * Code Logic（这个测试做什么）:
+   *   展开后每个动作的 label 与 button 同属 data-fab-index 节点，且该节点只有一个 button。
+   */
+  test('keeps each action label in the same radial item as its button', () => {
+    const session = buildSession({ worktreeId: 'wt-1' });
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={buildWorktree()}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    openTerminalFabMenu();
+    const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    const item = commit.closest('[data-fab-index]');
+    expect(item).not.toBeNull();
+    expect(item?.querySelectorAll('button')).toHaveLength(1);
+    expect(item?.textContent).toContain('workbench:worktrees.commit');
+    expect(commit.contains(item?.querySelector('span'))).toBe(false);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
    *   用户点开后仍要一次触达原来的四个动作，顺序与展开前的 FAB 组一致。
    *
    * Code Logic（这个测试做什么）:

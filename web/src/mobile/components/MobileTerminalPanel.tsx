@@ -246,8 +246,9 @@ function getErrorMessage(reason: unknown, fallback: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 active project/worktree/session 渲染 session tabs、xterm viewport 和 window/pane 控制按钮；
- *   右下角默认一个折叠 FAB，点开后沿左上象限环形展开带文字标签的图片粘贴、Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）、
- *   Git Commit（与桌面 Git 历史同口径，message=null）、Prompt 优化与收藏 Prompt；再点触发钮、点遮罩或选完动作后收起；
+ *   右下角默认一个折叠 FAB（有项目即可，不要求已开终端窗口），点开后沿左上象限环形展开；圆钮在弧上、文字标签沿同角度外侧对齐。
+ *   动作为图片粘贴、Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）、Git Commit（与桌面 Git 历史同口径，message=null）、
+ *   Prompt 优化与收藏 Prompt；无 session 时贴图/优化/收藏禁用。再点触发钮、点遮罩或选完动作后收起；
  *   首屏通过 HTTP replay 写入历史 buffer，后续只消费外部 terminal buffer store 增量，输入/resize/focus/split/close 全部调用 HTTP transport。
  */
 export function MobileTerminalPanel({
@@ -2349,8 +2350,21 @@ export function MobileTerminalPanel({
                 </PointerPrimaryButton>
               </div>
             ) : null}
-            {visibleSession ? (
-              <div className={styles.mobileTerminalFabGroup}>
+          </div>
+          {visibleSession ? (
+            <MobileTerminalExtraKeys
+              disabled={
+                !sessionId ||
+                visibleSession.status !== 'running' ||
+                busy ||
+                inputStreamState.status !== 'ready'
+              }
+              stickyModifier={stickyModifier}
+              onKeyPress={handleExtraKeyPress}
+            />
+          ) : null}
+          {project ? (
+            <div className={styles.mobileTerminalFabGroup}>
                 <input
                   ref={pasteImageInputRef}
                   type="file"
@@ -2442,22 +2456,9 @@ export function MobileTerminalPanel({
                     <MoreIcon size={18} aria-hidden="true" />
                   )}
                 </PointerPrimaryButton>
-              </div>
-            ) : null}
-          </div>
-          {visibleSession ? (
-            <MobileTerminalExtraKeys
-              disabled={
-                !sessionId ||
-                visibleSession.status !== 'running' ||
-                busy ||
-                inputStreamState.status !== 'ready'
-              }
-              stickyModifier={stickyModifier}
-              onKeyPress={handleExtraKeyPress}
-            />
+            </div>
           ) : null}
-          {visibleSession ? (
+          {project ? (
             <button
               type="button"
               className={styles.mobileTerminalFabBackdrop}
