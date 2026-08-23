@@ -21,6 +21,7 @@ import { StrictMode, type ReactElement, type ReactNode } from 'react';
 
 import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
 import { MobileTerminalPanel } from './MobileTerminalPanel';
+import * as extraKeys from '../mobileTerminalExtraKeys';
 import { WorkbenchTerminalBuffersContext } from '@/hooks/workbenchTerminalBuffersContext';
 import type { WorkbenchTerminalBuffersContextValue } from '@/hooks/workbenchTerminalBuffersContext';
 import { createWorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffer';
@@ -37,6 +38,10 @@ interface MockTerminalInstance {
   clear: () => void;
   reset: () => void;
   scrollToLine: (line: number) => void;
+  scrollLines: (amount: number) => void;
+  select: (column: number, row: number, length: number) => void;
+  getSelection: () => string;
+  clearSelection: () => void;
   buffer: {
     active: {
       type: 'normal' | 'alternate';
@@ -66,6 +71,14 @@ const terminalEvents = vi.hoisted(() => ({
   commitResult: null as unknown,
   repairCalls: [] as Array<{ worktreeId: string; hookFailure: unknown }>,
   repairResult: null as unknown,
+  clipboardWrites: [] as string[],
+}));
+
+vi.mock('../mobileClipboard', () => ({
+  writeClipboardText: vi.fn((text: string) => {
+    terminalEvents.clipboardWrites.push(text);
+    return Promise.resolve({ ok: true, method: 'clipboard' });
+  }),
 }));
 
 vi.mock('@xterm/xterm', () => {
@@ -84,6 +97,7 @@ vi.mock('@xterm/xterm', () => {
       };
       modes = { mouseTrackingMode: 'none' as 'none' | 'vt200' };
       openedElement: HTMLElement | null = null;
+      private selectionText = '';
       private readonly instance: number;
       constructor() {
         this.instance = instanceCount++;
@@ -111,6 +125,15 @@ vi.mock('@xterm/xterm', () => {
         this.buffer.active.viewportY = 0;
       }
       scrollLines(): void {}
+      select(): void {
+        this.selectionText = 'copy-me';
+      }
+      getSelection(): string {
+        return this.selectionText;
+      }
+      clearSelection(): void {
+        this.selectionText = '';
+      }
       scrollToLine(line: number): void {
         this.buffer.active.viewportY = line;
         terminalEvents.scrollToLineCalls.push({ instance: this.instance, line });
@@ -220,6 +243,7 @@ vi.mock('@/lib/icons', () => ({
   CommitIcon: (): null => null,
   SyncIcon: (): null => null,
   EditIcon: (): null => null,
+  ImageIcon: (): null => null,
   MaximizeIcon: (): null => null,
   MinimizeIcon: (): null => null,
   PlusIcon: (): null => null,
@@ -337,6 +361,7 @@ function dispatchSingleTouch(
   element: HTMLElement,
   type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
   clientY: number,
+  clientX = 12,
 ): void {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(event, 'touches', {
@@ -344,7 +369,7 @@ function dispatchSingleTouch(
     value:
       type === 'touchend' || type === 'touchcancel'
         ? []
-        : [{ clientX: 12, clientY }],
+        : [{ clientX, clientY }],
   });
   element.dispatchEvent(event);
 }
@@ -368,6 +393,7 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.commitResult = null;
     terminalEvents.repairCalls.length = 0;
     terminalEvents.repairResult = null;
+    terminalEvents.clipboardWrites.length = 0;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
     global.ResizeObserver = class {
       observe(): void {}
@@ -1490,3 +1516,229 @@ describe('MobileTerminalPanel — merge FAB', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+describe('MobileTerminalPanel — copy selection and paste image', () => {
+  beforeEach(() => {
+    terminalEvents.clearCalls.length = 0;
+    terminalEvents.writeCalls.length = 0;
+    terminalEvents.instances.length = 0;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+    terminalEvents.replayPromise = null;
+    terminalEvents.hydrationResult = null;
+    terminalEvents.hydrationPromise = null;
+    terminalEvents.hydrateCalls.length = 0;
+    terminalEvents.pasteImageCalls.length = 0;
+    terminalEvents.clipboardWrites.length = 0;
+    global.ResizeObserver = class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   选区与贴图回归共用同一套终端面板挂载，避免每条用例重复 Provider 样板。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用默认 running session（可覆盖）渲染 MobileTerminalPanel 并返回 session。
+   */
+  function renderPanel(sessionOverrides: Partial<WorkbenchSession> = {}): WorkbenchSession {
+    const session = buildSession(sessionOverrides);
+    render(
+      <BuffersProvider store={createWorkbenchTerminalBufferStore()}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+    return session;
+  }
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   长按约 400ms 且几乎未移动必须进入自管选区，不能弹软键盘。
+   *
+   * Code Logic（这个测试做什么）:
+   *   fake timer 推进 400ms 后断言选区底栏出现，且 enterMobileTerminalTypingMode 未被调用。
+   */
+  test('long-press shows selection bar and does not enter typing', () => {
+    renderPanel();
+    const enterTyping = vi.spyOn(extraKeys, 'enterMobileTerminalTypingMode');
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 40);
+      vi.advanceTimersByTime(400);
+    });
+
+    expect(
+      screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.selection.copy' }),
+    ).not.toBeNull();
+    expect(
+      screen.getByLabelText('workbench:mobile.terminalPanel.selection.barAriaLabel'),
+    ).not.toBeNull();
+    expect(enterTyping).not.toHaveBeenCalled();
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchend', 40);
+    });
+    expect(enterTyping).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   位移超过 8px 必须走原有滚动而不是选区，避免把回看历史误当成划选。
+   *
+   * Code Logic（这个测试做什么）:
+   *   replay 就绪后 touchmove 40px，断言无选区底栏且触发 hydrateScrollback。
+   */
+  test('move beyond 8px before 400ms scrolls and does not show selection bar', async () => {
+    renderPanel();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 100);
+      dispatchSingleTouch(viewport, 'touchmove', 140);
+      vi.advanceTimersByTime(400);
+    });
+
+    expect(
+      screen.queryByRole('button', { name: 'workbench:mobile.terminalPanel.selection.copy' }),
+    ).toBeNull();
+    expect(terminalEvents.hydrateCalls).toEqual(['s1']);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   底栏复制必须把 xterm getSelection 原文写入剪贴板 helper，而不是 PTY。
+   *
+   * Code Logic（这个测试做什么）:
+   *   长按后点复制，断言 writeClipboardText 收到 mock getSelection 的 copy-me。
+   */
+  test('copy button writes getSelection text to clipboard helper', async () => {
+    renderPanel();
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 40);
+      vi.advanceTimersByTime(400);
+    });
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'workbench:mobile.terminalPanel.selection.copy' }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(terminalEvents.clipboardWrites).toEqual(['copy-me']);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   选区复制只读本地 buffer，会话已停仍应能长按复制；贴图会写 PTY，必须禁用。
+   *
+   * Code Logic（这个测试做什么）:
+   *   status=stopped 时长按出现复制按钮且可写入剪贴板，贴图 FAB disabled。
+   */
+  test('stopped session can long-press copy while paste-image FAB is disabled', async () => {
+    renderPanel({ status: 'stopped' });
+    const pasteImage = screen.getByRole('button', {
+      name: 'workbench:mobile.terminalPanel.pasteImageButton',
+    }) as HTMLButtonElement;
+    expect(pasteImage.disabled).toBe(true);
+
+    const viewport = latestMockTerminal().openedElement;
+    if (!viewport) throw new Error('expected xterm viewport');
+
+    act(() => {
+      dispatchSingleTouch(viewport, 'touchstart', 40);
+      vi.advanceTimersByTime(400);
+    });
+
+    const copy = screen.getByRole('button', {
+      name: 'workbench:mobile.terminalPanel.selection.copy',
+    });
+    await act(async () => {
+      fireEvent.click(copy);
+      await Promise.resolve();
+    });
+    expect(terminalEvents.clipboardWrites).toEqual(['copy-me']);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   贴图主入口是相册 file input，必须 accept=image/* 且不得带 capture，选完立刻 paste-image。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言隐藏 input 属性，change 一个 PNG File 后 pasteImage 收到 PNG data URL。
+   */
+  test('paste-image FAB file input has accept=image/* without capture and posts pasteImage', async () => {
+    renderPanel();
+    vi.useRealTimers();
+    const input = document.querySelector(
+      'input[type="file"][accept="image/*"]',
+    ) as HTMLInputElement | null;
+    if (!input) throw new Error('expected paste-image file input');
+    expect(input.hasAttribute('capture')).toBe(false);
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' });
+    Object.defineProperty(input, 'files', {
+      configurable: true,
+      value: [file],
+    });
+    await act(async () => {
+      fireEvent.change(input);
+    });
+
+    await waitFor(() => {
+      expect(terminalEvents.pasteImageCalls).toEqual([
+        {
+          sessionId: 's1',
+          dataUrl: expect.stringMatching(/^data:image\/png;base64,/),
+        },
+      ]);
+    });
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   running + 输入流 ready 时贴图 FAB 必须可点，否则相册入口形同虚设。
+   *
+   * Code Logic（这个测试做什么）:
+   *   默认 running session 断言 pasteImageButton 按钮未 disabled。
+   */
+  test('running ready session keeps paste-image FAB enabled', () => {
+    renderPanel();
+    const pasteImage = screen.getByRole('button', {
+      name: 'workbench:mobile.terminalPanel.pasteImageButton',
+    }) as HTMLButtonElement;
+    expect(pasteImage.disabled).toBe(false);
+  });
+});
+
