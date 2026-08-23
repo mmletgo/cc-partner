@@ -244,7 +244,7 @@ function getErrorMessage(reason: unknown, fallback: string): string {
  *
  * Code Logic（这个组件做什么）:
  *   按 active project/worktree/session 渲染 session tabs、xterm viewport 和 window/pane 控制按钮；
- *   右下角默认一个折叠 FAB，点开后自上而下为图片粘贴、Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）、
+ *   右下角默认一个折叠 FAB，点开后自上而下为带文字标签的图片粘贴、Merge（仅非主工作区/非主分支或主工作区 canCollectMerge）、
  *   Git Commit（与桌面 Git 历史同口径，message=null）、Prompt 优化与收藏 Prompt；再点触发钮、点遮罩或选完动作后收起；
  *   首屏通过 HTTP replay 写入历史 buffer，后续只消费外部 terminal buffer store 增量，输入/resize/focus/split/close 全部调用 HTTP transport。
  */
@@ -2250,7 +2250,7 @@ export function MobileTerminalPanel({
                   >
                     <PointerPrimaryButton
                       type="button"
-                      className={styles.mobileTerminalFab}
+                      className={`${styles.mobileTerminalFab} ${styles.mobileTerminalFabLabeled}`}
                       disabled={!canPasteImage || pasteImageBusy}
                       aria-busy={pasteImageBusy || undefined}
                       aria-label={t('workbench:mobile.terminalPanel.pasteImageButton')}
@@ -2261,11 +2261,12 @@ export function MobileTerminalPanel({
                       }}
                     >
                       <ImageIcon size={18} aria-hidden="true" />
+                      <span>{t('workbench:mobile.terminalPanel.pasteImageButton')}</span>
                     </PointerPrimaryButton>
                     {showMergeFab ? (
                       <PointerPrimaryButton
                         type="button"
-                        className={styles.mobileTerminalFab}
+                        className={`${styles.mobileTerminalFab} ${styles.mobileTerminalFabLabeled}`}
                         disabled={!canMergeWorktree || mergeBusy}
                         aria-busy={mergeBusy || undefined}
                         aria-label={mergeLabel}
@@ -2276,11 +2277,12 @@ export function MobileTerminalPanel({
                         }}
                       >
                         <SyncIcon size={18} aria-hidden="true" />
+                        <span>{mergeLabel}</span>
                       </PointerPrimaryButton>
                     ) : null}
                     <PointerPrimaryButton
                       type="button"
-                      className={styles.mobileTerminalFab}
+                      className={`${styles.mobileTerminalFab} ${styles.mobileTerminalFabLabeled}`}
                       disabled={!canCommitWorktree || commitBusy}
                       data-dirty={worktreeDirty || undefined}
                       aria-busy={commitBusy || undefined}
@@ -2292,10 +2294,11 @@ export function MobileTerminalPanel({
                       }}
                     >
                       <CommitIcon size={18} aria-hidden="true" />
+                      <span>{commitLabel}</span>
                     </PointerPrimaryButton>
                     <PointerPrimaryButton
                       type="button"
-                      className={styles.mobileTerminalFab}
+                      className={`${styles.mobileTerminalFab} ${styles.mobileTerminalFabLabeled}`}
                       disabled={!canOpenFavoriteQuickInput}
                       aria-label={t('workbench:promptOptimizer.open')}
                       title={t('workbench:promptOptimizer.open')}
@@ -2305,10 +2308,11 @@ export function MobileTerminalPanel({
                       }}
                     >
                       <EditIcon size={18} aria-hidden="true" />
+                      <span>{t('workbench:promptOptimizer.open')}</span>
                     </PointerPrimaryButton>
                     <PointerPrimaryButton
                       type="button"
-                      className={styles.mobileTerminalFab}
+                      className={`${styles.mobileTerminalFab} ${styles.mobileTerminalFabLabeled}`}
                       disabled={!canOpenFavoriteQuickInput}
                       aria-label={t('workbench:mobile.favoriteQuickInput.openButton')}
                       title={t('workbench:mobile.favoriteQuickInput.openButton')}
@@ -2318,6 +2322,7 @@ export function MobileTerminalPanel({
                       }}
                     >
                       <PromptsIcon size={18} aria-hidden="true" />
+                      <span>{t('workbench:mobile.favoriteQuickInput.openButton')}</span>
                     </PointerPrimaryButton>
                   </div>
                 ) : null}

@@ -1164,6 +1164,11 @@ describe('MobileTerminalPanel — FAB menu', () => {
       'workbench:promptOptimizer.open',
       'workbench:mobile.favoriteQuickInput.openButton',
     ]);
+    expect(paste.textContent).toBe('workbench:mobile.terminalPanel.pasteImageButton');
+    expect(commit.textContent).toBe('workbench:worktrees.commit');
+    expect(optimizer.textContent).toBe('workbench:promptOptimizer.open');
+    expect(favorite.textContent).toBe('workbench:mobile.favoriteQuickInput.openButton');
+    expect(trigger.textContent).toBe('');
   });
 
   /**
@@ -1582,6 +1587,7 @@ describe('MobileTerminalPanel — merge FAB', () => {
     openTerminalFabMenu();
     const merge = screen.getByRole('button', { name: 'workbench:worktrees.merge' });
     const commit = screen.getByRole('button', { name: 'workbench:worktrees.commit' });
+    expect(merge.textContent).toBe('workbench:worktrees.merge');
     const group = merge.parentElement;
     expect(group).not.toBeNull();
     expect(group).toBe(commit.parentElement);
