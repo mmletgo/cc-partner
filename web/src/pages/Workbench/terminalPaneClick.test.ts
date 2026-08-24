@@ -53,6 +53,7 @@ describe('shouldSelectPaneOnClick', () => {
     hasSelection: false,
     atBottom: true,
     writeEnabled: true,
+    mouseTrackingActive: false,
   };
 
   /**
@@ -94,5 +95,13 @@ describe('shouldSelectPaneOnClick', () => {
    */
   it('rejects clicks when writes are disabled', () => {
     expect(shouldSelectPaneOnClick({ ...base, writeEnabled: false })).toBeNull();
+  });
+
+  /**
+   * Business Logic: Grok/Claude 等 TUI 开启 mouse tracking 后，点击属于应用按钮，
+   * 不得再被当成 tmux 切分栏，否则 SGR 与 select-pane 互抢。
+   */
+  it('rejects clicks while TUI mouse tracking is active', () => {
+    expect(shouldSelectPaneOnClick({ ...base, mouseTrackingActive: true })).toBeNull();
   });
 });

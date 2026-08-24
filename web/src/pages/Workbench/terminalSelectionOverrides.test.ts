@@ -1,6 +1,35 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { Terminal } from '@xterm/xterm';
-import { installWorkbenchTerminalSelectionOverrides } from './terminalSelectionOverrides';
+import {
+  installWorkbenchTerminalSelectionOverrides,
+  shouldForceWorkbenchTerminalSelection,
+} from './terminalSelectionOverrides';
+
+describe('shouldForceWorkbenchTerminalSelection', () => {
+  test('lets ordinary clicks reach TUI mouse tracking', () => {
+    const original = vi.fn((event: MouseEvent) => {
+      void event;
+      return false;
+    });
+    expect(
+      shouldForceWorkbenchTerminalSelection({ shiftKey: false } as MouseEvent, original),
+    ).toBe(false);
+    expect(original).toHaveBeenCalledTimes(1);
+  });
+
+  test('forces selection for Shift or the original Option gesture', () => {
+    const original = vi.fn((event: MouseEvent) => Boolean(event.altKey));
+    expect(
+      shouldForceWorkbenchTerminalSelection({ shiftKey: true, altKey: false } as MouseEvent, original),
+    ).toBe(true);
+    expect(
+      shouldForceWorkbenchTerminalSelection({ shiftKey: false, altKey: true } as MouseEvent, original),
+    ).toBe(true);
+    expect(
+      shouldForceWorkbenchTerminalSelection({ shiftKey: false, altKey: false } as MouseEvent, original),
+    ).toBe(false);
+  });
+});
 
 describe('installWorkbenchTerminalSelectionOverrides', () => {
   test('no-ops safely when terminal has no internal selection service', () => {
@@ -9,15 +38,11 @@ describe('installWorkbenchTerminalSelectionOverrides', () => {
     expect(() => restore()).not.toThrow();
   });
 
-  test('forces selection and ignores mouse-mode disable so copy selection survives', () => {
-    // Business Logic: Claude/TUI mouse tracking 必须不能清掉/禁止 xterm 文本选区。
+  test('keeps copy selection available without swallowing TUI clicks', () => {
+    // Business Logic: mouse-mode CSI 不得清选区；普通点击必须仍能发 mouse report。
     const enable = vi.fn();
     const originalDisable = vi.fn();
-    // Production signature is (event: MouseEvent) => boolean; restore must keep it.
-    const originalShouldForce = vi.fn((event: MouseEvent) => {
-      void event;
-      return false;
-    });
+    const originalShouldForce = vi.fn((event: MouseEvent) => Boolean(event.altKey));
     const service = {
       shouldForceSelection: originalShouldForce,
       disable: originalDisable,
@@ -30,14 +55,20 @@ describe('installWorkbenchTerminalSelectionOverrides', () => {
     const restore = installWorkbenchTerminalSelectionOverrides(terminal);
 
     expect(enable).toHaveBeenCalledTimes(1);
-    expect(service.shouldForceSelection({ altKey: false } as MouseEvent)).toBe(true);
+    expect(service.shouldForceSelection({ altKey: false, shiftKey: false } as MouseEvent)).toBe(
+      false,
+    );
+    expect(service.shouldForceSelection({ altKey: true, shiftKey: false } as MouseEvent)).toBe(true);
+    expect(service.shouldForceSelection({ altKey: false, shiftKey: true } as MouseEvent)).toBe(true);
 
     service.disable();
     expect(originalDisable).not.toHaveBeenCalled();
 
     restore();
-    // restore 后回到原始签名（需要 event）；再测禁用路径。
-    expect(service.shouldForceSelection({ altKey: false } as MouseEvent)).toBe(false);
+    expect(service.shouldForceSelection({ altKey: false, shiftKey: false } as MouseEvent)).toBe(
+      false,
+    );
+    expect(service.shouldForceSelection({ altKey: true, shiftKey: false } as MouseEvent)).toBe(true);
     service.disable();
     expect(originalDisable).toHaveBeenCalledTimes(1);
   });

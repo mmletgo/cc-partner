@@ -454,7 +454,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   只有“未拖拽、无选区、视口在底部、允许写”的左键点击才代表用户想切换分栏。
+     *   只有“未拖拽、无选区、视口在底部、允许写、TUI 未接管鼠标”的左键点击才代表用户想切换分栏。
+     *   TUI mouse tracking 开启时必须把点击留给 xterm SGR，不得抢去 select-pane。
      *   其余情况一律让原生 xterm / 浏览器文本选中行为接管。
      *   误触发 select-pane 会让后端/tmux 重绘并清掉 xterm 选区，导致“选中立刻消失、无法复制”。
      *
@@ -493,6 +494,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
           atBottom,
           writeEnabled: inputEnabledRef.current,
           pointerTravelPx,
+          mouseTrackingActive: terminal.modes.mouseTrackingMode !== 'none',
         });
         if (cell) callback(sessionId, cell.col, cell.row);
       }, 0);

@@ -48,6 +48,11 @@ export interface TerminalPaneClickInput {
    * 即使落在同一字符格，拖出超过阈值也视为“拖拽选字”，不得切分栏。
    */
   pointerTravelPx?: number;
+  /**
+   * TUI 已协商 mouse tracking 时，点击必须交给应用（按钮/菜单），
+   * 不得再抢去 tmux select-pane，否则 Grok/Claude 点按会变成切分栏或被重绘吃掉。
+   */
+  mouseTrackingActive: boolean;
 }
 
 /**
@@ -100,15 +105,17 @@ export function isSameTerminalCell(a: TerminalCell | null, b: TerminalCell | nul
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   只有“未拖拽、无选区、视口在底部、允许写”的左键点击才代表用户想切换分栏。
+ *   只有“未拖拽、无选区、视口在底部、允许写、TUI 未接管鼠标”的左键点击才代表用户想切换分栏。
  *   视口滚上去看历史时，屏幕行不再对应 tmux 当前屏幕，坐标会命中错误 pane，必须拒绝。
  *   拖选文字后若误触发 select-pane，tmux/PTY 重绘或 mouse-mode 切换会立刻清掉 xterm 选区，导致无法复制。
+ *   mouse tracking 开启时点击属于 TUI 按钮，必须让 SGR 到达 PTY，而不是 select-pane。
  *
  * Code Logic（这个函数做什么）:
- *   逐条检查 writeEnabled / atBottom / !hasSelection / 像素位移阈值 / down 与 up 同格；
+ *   逐条检查 !mouseTrackingActive / writeEnabled / atBottom / !hasSelection / 像素位移阈值 / down 与 up 同格；
  *   全部满足才返回该字符格，否则返回 null。
  */
 export function shouldSelectPaneOnClick(input: TerminalPaneClickInput): TerminalCell | null {
+  if (input.mouseTrackingActive) return null;
   if (!input.writeEnabled) return null;
   if (!input.atBottom) return null;
   if (input.hasSelection) return null;
