@@ -498,6 +498,9 @@ fn upsert_skill_or_command(
     objects: &BTreeMap<String, Vec<u8>>,
     bindings: &[UserMirrorObjectBinding],
 ) -> Result<(), AppError> {
+    if portable_binding_is_blocked(bindings, target, change.kind, &change.native_id) {
+        return Ok(());
+    }
     let bytes = portable_object_bytes(target, change.kind, &change.native_id, objects, bindings)?;
     let data_dir = crate::config::data_dir()?;
     let store_root = ensure_portable_store_layout(&data_dir)?;
@@ -539,6 +542,9 @@ fn upsert_plugin(
     objects: &BTreeMap<String, Vec<u8>>,
     bindings: &[UserMirrorObjectBinding],
 ) -> Result<(), AppError> {
+    if portable_binding_is_blocked(bindings, target, change.kind, &change.native_id) {
+        return Ok(());
+    }
     let bytes = portable_object_bytes(target, change.kind, &change.native_id, objects, bindings)?;
     let dest_dir = plugin_package_dir(homes, target, &change.native_id);
     if let Some(tree_hash) = plugin_tree_hash(&bytes) {
@@ -818,6 +824,17 @@ fn portable_object_bytes(
         .get(&binding.object_hash)
         .cloned()
         .ok_or_else(|| AppError::not_found(format!("USER_MIRROR_OBJECT_NOT_FOUND:{native_id}")))
+}
+
+/// 源端跳过的逃逸软链 / source_blocked：dest 不得因此把整个 Agent 标失败。
+fn portable_binding_is_blocked(
+    bindings: &[UserMirrorObjectBinding],
+    target: AgentTarget,
+    kind: PortableAssetKind,
+    native_id: &str,
+) -> bool {
+    portable_binding(bindings, target, kind, native_id)
+        .is_some_and(|binding| binding.blocked || binding.object_hash.is_empty())
 }
 
 fn portable_binding<'a>(
@@ -1651,6 +1668,59 @@ mod tests {
         assert!(
             keep_body.contains("KEEP-SKILL-BODY"),
             "source keep skill body must land on dest native root, got {keep_body:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     源端逃逸软链 Skill 跳过后，dest 仍应成功写入可打包的 Skill。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源 keep + store 外 escaped 软链；apply 后 Claude succeeded，keep 落地，escaped 不跟到 dest。
+    #[tokio::test]
+    async fn apply_skips_blocked_escape_skill_and_still_upserts_other_skills() {
+        let env = seed_dual_env().await;
+        write(
+            env.source_home
+                .join(".claude/skills/keep/SKILL.md")
+                .as_path(),
+            "---\nname: keep\ndescription: keep skill\n---\nKEEP-SKILL-BODY\n",
+        );
+        let outside = env.source_home.join("outside-escape/SKILL.md");
+        write(
+            &outside,
+            "---\nname: escaped\ndescription: outside store\n---\nESCAPE-BODY\n",
+        );
+        let link = env.source_home.join(".claude/skills/escaped");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.parent().expect("parent"), &link)
+                .expect("escape symlink");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = link;
+            return;
+        }
+
+        let (_, built, results) = run_apply_mirror(&env).await;
+        assert_eq!(
+            claude_result(&results).state,
+            UserMirrorItemState::Succeeded,
+            "{results:?}"
+        );
+        assert!(built.item_bindings.iter().any(|binding| {
+            binding.kind == Some(PortableAssetKind::Skill)
+                && binding.native_id.as_deref() == Some("escaped")
+                && binding.blocked
+        }));
+        let skills = rescan_dest_claude_items(&env, PortableAssetKind::Skill).await;
+        assert!(
+            skills.iter().any(|item| item.native_id == "keep"),
+            "keep skill must still land: {skills:?}"
+        );
+        assert!(
+            !skills.iter().any(|item| item.native_id == "escaped"),
+            "escape skill must not be followed onto dest: {skills:?}"
         );
     }
 

@@ -20,6 +20,7 @@ use crate::agent_hub::portable_inventory::{
     inspect_portable_inventory_with_env_query, PortableAssetKind, PortableInventoryItemDto,
     PortableInventoryQuery,
 };
+use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
 use crate::agent_hub::service::instruction_document_from_block_dtos;
 use crate::agent_hub::snapshot::envelope::{
     compute_snapshot_hash, SnapshotAsset, SnapshotEnvelopeV1, SnapshotLineage,
@@ -399,12 +400,18 @@ async fn freeze_portable_items(
 /// 冻结单条 portable 资产。
 ///
 /// Business Logic: Skill/Plugin 目录树与 MCP 凭据必须进 CAS；legacyLossy 不得当真凭据。
+///     逃逸软链 / source_blocked 与 portable planner 一样跳过，不得让整次冻结失败。
 /// Code Logic: 先 put_tree；再 pack payload；占位凭据只记 blocked binding。
 async fn freeze_one_portable(
     acc: &mut FreezeAcc,
     target: AgentTarget,
     item: &PortableInventoryItemDto,
 ) -> Result<(), AppError> {
+    if portable_item_is_blocked_source(item) {
+        push_blocked_portable(acc, target, item);
+        return Ok(());
+    }
+
     let mut tree_hash: Option<String> = None;
     if matches!(
         item.kind,
@@ -427,7 +434,14 @@ async fn freeze_one_portable(
     let packed = if item.kind == PortableAssetKind::Plugin {
         pack_plugin_item(item, tree_hash.as_deref())?
     } else {
-        pack_inventory_item(item)?
+        match pack_inventory_item(item) {
+            Ok(packed) => packed,
+            Err(err) if pack_error_is_blocked_source(&err) => {
+                push_blocked_portable(acc, target, item);
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
     };
     let legacy_lossy = packed.legacy_lossy || bytes_are_legacy_lossy(&packed.bytes);
     if legacy_lossy {
@@ -456,6 +470,49 @@ async fn freeze_one_portable(
         false,
     );
     Ok(())
+}
+
+/// 逃逸软链 / source_blocked 不得跟随哈希，也不得拖垮整次冻结。
+///
+/// Business Logic: 与 portable planner 同一条 fail-closed 边界；镜像仍可处理其余资产。
+/// Code Logic: warning 码或 native 根 `EscapeLink` 即跳过。
+fn portable_item_is_blocked_source(item: &PortableInventoryItemDto) -> bool {
+    if item.warnings.iter().any(|warning| {
+        warning == "store_symlink_escape"
+            || warning == "source_blocked"
+            || warning.contains("store_symlink_escape")
+    }) {
+        return true;
+    }
+    item.source_path.as_deref().is_some_and(|path| {
+        matches!(
+            classify_store_link(Path::new(path)),
+            StoreLinkClass::EscapeLink
+        )
+    })
+}
+
+/// `pack_inventory_item` 把目录逃逸包装成 `PORTABLE_PULL_SKILL_HASH:...`。
+fn pack_error_is_blocked_source(error: &AppError) -> bool {
+    let text = error.to_string();
+    text.contains("agent_hub_portable_skill_tree_symlink_escape")
+        || text.contains("store_symlink_escape")
+}
+
+/// 记一条不得写盘的 portable binding，不进 CAS。
+fn push_blocked_portable(
+    acc: &mut FreezeAcc,
+    target: AgentTarget,
+    item: &PortableInventoryItemDto,
+) {
+    acc.bindings.push(UserMirrorObjectBinding {
+        target,
+        logical_id: None,
+        kind: Some(item.kind),
+        native_id: Some(item.native_id.clone()),
+        object_hash: String::new(),
+        blocked: true,
+    });
 }
 
 /// Skill/Plugin 目录根：文件则取其父目录。
@@ -882,5 +939,52 @@ mod tests {
         );
         let json = serde_json::to_string(&built.envelope).unwrap();
         assert!(!json.contains(LEGACY_LOSSY_PLACEHOLDER));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     一条逃逸软链 Skill 不得让整次用户级冻结失败，否则其余 Agent 资产也无法镜像。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真树 hello 与指向 store 外的 escaped 并存；冻结成功，escaped blocked，hello 仍进 CAS。
+    #[tokio::test]
+    async fn freeze_skips_escape_symlink_skill_without_failing_selection() {
+        let env = seed_user_mirror_homes().await;
+        seed_claude_native_skill_and_mcp(&env);
+        let outside = env.home.join("outside-escape/SKILL.md");
+        write(
+            &outside,
+            "---\nname: escaped\ndescription: outside store\n---\n",
+        );
+        let link = env.claude_home.join("skills/escaped");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.parent().expect("parent"), &link)
+                .expect("escape symlink");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = link;
+            return;
+        }
+
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let built = freeze_user_mirror_selection(&env.app_state, &inventory)
+            .await
+            .expect("escape skill must not abort freeze");
+        let escaped = built.item_bindings.iter().find(|binding| {
+            binding.kind == Some(PortableAssetKind::Skill)
+                && binding.native_id.as_deref() == Some("escaped")
+        });
+        assert!(
+            escaped.is_some_and(|binding| binding.blocked && binding.object_hash.is_empty()),
+            "escaped skill must be blocked without CAS object: {escaped:?}"
+        );
+        assert!(built.item_bindings.iter().any(|binding| {
+            binding.kind == Some(PortableAssetKind::Skill)
+                && binding.native_id.as_deref() == Some("hello")
+                && !binding.blocked
+        }));
     }
 }
