@@ -37,6 +37,10 @@ use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// 对端全 Agent inventory 扫描预算：两侧均可接近 portable 的 30s，再加 LAN 余量。
+const USER_MIRROR_PEER_INVENTORY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 用两份已构建 inventory 生成 preview 并写入 dest 端 plan ledger。
 ///
@@ -412,7 +416,7 @@ async fn collect_source_objects(
         "/api/agent-hub/user-mirror/selection",
         &UserMirrorSelectionQuery { inventory },
         &expected,
-        PeerTimeoutClass::Metadata,
+        PeerTimeoutClass::Metadata.timeout(),
     )
     .await
     .map_err(map_user_mirror_peer_err)?;
@@ -446,7 +450,7 @@ async fn fetch_peer_user_mirror_inventory(
         "/api/agent-hub/user-mirror/inventory",
         &serde_json::json!({}),
         &expected,
-        PeerTimeoutClass::Metadata,
+        PeerTimeoutClass::long_running(USER_MIRROR_PEER_INVENTORY_TIMEOUT),
     )
     .await
     .map_err(map_user_mirror_peer_err)
@@ -560,7 +564,7 @@ async fn post_json_bound<T, B>(
     path: &str,
     body: &B,
     expected_device_id: &str,
-    class: PeerTimeoutClass,
+    timeout: Duration,
 ) -> Result<T, PeerCallError>
 where
     T: DeserializeOwned,
@@ -570,7 +574,7 @@ where
     let resp = peer
         .http_client()
         .post(&url)
-        .timeout(class.timeout())
+        .timeout(timeout)
         .header(REQUEST_ID_HEADER, new_request_id())
         .header(EXPECTED_DEVICE_ID_HEADER.as_str(), expected_device_id)
         .json(body)
@@ -766,6 +770,21 @@ mod tests {
         assert!(src.contains(&format!("pub struct {name};")));
         assert!(src.contains(&format!("impl {name} {{")));
         let _ = std::any::type_name::<UserMirrorService>();
+    }
+
+    /// Business Logic: 对端 inventory 是全 Agent 扫描，不能套 10s metadata。
+    /// Code Logic: inventory POST 使用 60s long_running；selection 仍走 metadata。
+    #[test]
+    fn peer_inventory_uses_long_running_budget() {
+        use super::USER_MIRROR_PEER_INVENTORY_TIMEOUT;
+        use crate::net::peer_timeout::PeerTimeoutClass;
+        use std::time::Duration;
+        let src = include_str!("service.rs");
+        assert_eq!(USER_MIRROR_PEER_INVENTORY_TIMEOUT, Duration::from_secs(60));
+        assert!(USER_MIRROR_PEER_INVENTORY_TIMEOUT > PeerTimeoutClass::Metadata.timeout());
+        assert!(src.contains("/api/agent-hub/user-mirror/inventory"));
+        assert!(src.contains("long_running(USER_MIRROR_PEER_INVENTORY_TIMEOUT)"));
+        assert!(src.contains("PeerTimeoutClass::Metadata.timeout()"));
     }
 
     struct DualEnv {

@@ -80,6 +80,9 @@ const CLOUD_SYNC_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 const BACKUP_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 /// Orchestrator deliver 超时（git commit/push/merge 可能很长）。
 const ORCHESTRATOR_DELIVER_TIMEOUT: Duration = Duration::from_secs(360);
+/// 用户级镜像 preview：本机全 Agent 扫描 + 对端 inventory，墙钟 120s。
+/// 不得套用 15s MUTATE_TIMEOUT：两侧 inventory 各自可接近 portable 的 30s 扫描预算。
+const USER_MIRROR_PREVIEW_TIMEOUT: Duration = Duration::from_secs(120);
 /// 用户级镜像 apply：全 Agent 写盘 + 对端 objects，墙钟 900s。
 const USER_MIRROR_APPLY_TIMEOUT: Duration = Duration::from_secs(900);
 
@@ -1808,14 +1811,18 @@ impl BackendControlClient {
     }
 
     /// Business Logic: 用户级镜像 preview 写 plan，旧 sidecar 不得静默降级。
-    /// Code Logic: 写兼容门闩 + agent_hub.preview_user_mirror。
+    /// Code Logic: 写兼容门闩 + agent_hub_op_with_timeout 120s（本机扫描 + 对端 inventory）。
     pub async fn agent_hub_preview_user_mirror(
         &self,
         req: crate::agent_hub::user_mirror::PreviewUserMirrorRequest,
     ) -> Result<crate::agent_hub::user_mirror::UserMirrorPlanDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
-        self.agent_hub_op("agent_hub.preview_user_mirror", req)
-            .await
+        self.agent_hub_op_with_timeout(
+            "agent_hub.preview_user_mirror",
+            req,
+            USER_MIRROR_PREVIEW_TIMEOUT,
+        )
+        .await
     }
 
     /// Business Logic: apply 是全 Agent 写盘长 mutation（墙钟 900s）。
@@ -4171,6 +4178,13 @@ mod tests {
             src.contains("\"agent_hub.apply_portable_pull\"")
                 && src.contains("Duration::from_secs(360)"),
             "apply pull should use long-mutation timeout"
+        );
+        assert_eq!(USER_MIRROR_PREVIEW_TIMEOUT, Duration::from_secs(120));
+        assert!(USER_MIRROR_PREVIEW_TIMEOUT > MUTATE_TIMEOUT);
+        assert!(
+            src.contains("\"agent_hub.preview_user_mirror\"")
+                && src.contains("USER_MIRROR_PREVIEW_TIMEOUT"),
+            "preview user-mirror should use 120s inventory timeout, not MUTATE_TIMEOUT"
         );
         assert_eq!(USER_MIRROR_APPLY_TIMEOUT, Duration::from_secs(900));
         assert!(
