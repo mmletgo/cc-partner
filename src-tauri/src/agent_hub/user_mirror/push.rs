@@ -485,11 +485,17 @@ fn map_peer_error_code(err: &PeerCallError) -> String {
                 "USER_MIRROR_INVALID_RESPONSE".to_string()
             }
         }
-        PeerCallError::Remote { code, .. } => {
-            if code.trim().is_empty() {
+        PeerCallError::Remote { code, message, .. } => {
+            let code = code.trim();
+            let message = message.trim();
+            if message.is_empty() && code.is_empty() {
                 "USER_MIRROR_REMOTE".to_string()
+            } else if message.is_empty() || message == code {
+                code.to_string()
+            } else if code.is_empty() {
+                message.to_string()
             } else {
-                code.clone()
+                format!("{code}:{message}")
             }
         }
     }
@@ -727,8 +733,10 @@ async fn persist_target_outcome(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_push_user_mirror, USER_MIRROR_CAPABILITY_UNSUPPORTED, USER_MIRROR_DEVICE_ID_MISMATCH,
+        apply_push_user_mirror, map_peer_error_code, USER_MIRROR_CAPABILITY_UNSUPPORTED,
+        USER_MIRROR_DEVICE_ID_MISMATCH,
     };
+    use crate::net::peer_error::PeerCallError;
     use crate::agent_hub::replication::receiver::{PreparePushResponse, PutObjectResponse};
     use crate::agent_hub::replication::sender::{
         list_failed_source_push_targets, SOURCE_PUSH_KIND_USER_MIRROR,
@@ -1189,5 +1197,31 @@ mod tests {
         assert_eq!(fs::read_to_string(&dest_fail).unwrap(), "OLD-FAIL");
         h_ok.abort();
         h_bad.abort();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对端 prepare 的 `code=validation_error` 必须带上信封诊断，不能只剩分类 token。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 Remote 信封；断言 mapped code 含 manifest/referential 细节。
+    #[test]
+    fn map_peer_error_code_keeps_remote_validation_message() {
+        let err = PeerCallError::Remote {
+            url: "http://peer/api/agent-hub/user-mirror/prepare".into(),
+            status: 400,
+            code: "validation_error".into(),
+            message:
+                "agent_hub_push_invalid_manifest:snapshot_referential:revision_unknown_tree:hash_len=64"
+                    .into(),
+            request_id: "req".into(),
+            retryable: false,
+            legacy: false,
+            details: serde_json::json!({}),
+        };
+        let mapped = map_peer_error_code(&err);
+        assert!(
+            mapped.contains("validation_error") && mapped.contains("revision_unknown_tree"),
+            "{mapped}"
+        );
     }
 }

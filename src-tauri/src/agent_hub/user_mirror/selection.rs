@@ -23,9 +23,9 @@ use crate::agent_hub::portable_inventory::{
 use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
 use crate::agent_hub::service::instruction_document_from_block_dtos;
 use crate::agent_hub::snapshot::envelope::{
-    compute_snapshot_hash, SnapshotAsset, SnapshotEnvelopeV1, SnapshotLineage,
-    SnapshotObjectDescriptor, SnapshotRevision, SnapshotSelection, CANONICALIZATION_NAME,
-    FORMAT_NAME, FORMAT_VERSION,
+    compute_snapshot_hash, default_snapshot_limits, validate_snapshot, SnapshotAsset,
+    SnapshotEnvelopeV1, SnapshotLineage, SnapshotObjectDescriptor, SnapshotRevision,
+    SnapshotSelection, CANONICALIZATION_NAME, FORMAT_NAME, FORMAT_VERSION,
 };
 use crate::agent_hub::snapshot::portable_builder::{
     bytes_are_legacy_lossy, pack_inventory_item, pack_plugin_item,
@@ -457,6 +457,13 @@ async fn freeze_one_portable(
     }
 
     let hash = record_bytes(acc, packed.bytes, false).await?;
+    let recorded_tree = tree_hash
+        .filter(|hash| acc.seen.contains(hash))
+        .or_else(|| {
+            item.tree_hash
+                .clone()
+                .filter(|hash| acc.seen.contains(hash))
+        });
     push_asset(
         acc,
         target,
@@ -466,7 +473,7 @@ async fn freeze_one_portable(
         item.kind.to_asset_kind(),
         item.source_origin.default_origin_namespace(),
         hash,
-        tree_hash.or_else(|| item.tree_hash.clone()),
+        recorded_tree,
         false,
     );
     Ok(())
@@ -535,18 +542,15 @@ fn portable_tree_dir(item: &PortableInventoryItemDto) -> Option<PathBuf> {
 async fn record_tree_from_directory(acc: &mut FreezeAcc, dir: &Path) -> Result<String, AppError> {
     let put = acc.store.put_tree_from_directory(dir).await?;
     let tree_hash = put.object.hash.clone();
-    if let Ok(manifest_bytes) = acc.store.get_blob(&tree_hash).await {
-        record_bytes(acc, manifest_bytes, true).await?;
-    }
-    if let Ok(manifest) = acc.store.get_tree(&tree_hash).await {
-        for entry in manifest.entries {
-            if acc.seen.contains(&entry.blob_hash) {
-                continue;
-            }
-            if let Ok(bytes) = acc.store.get_blob(&entry.blob_hash).await {
-                record_bytes(acc, bytes, true).await?;
-            }
+    let manifest_bytes = acc.store.get_blob(&tree_hash).await?;
+    record_bytes(acc, manifest_bytes, true).await?;
+    let manifest = acc.store.get_tree(&tree_hash).await?;
+    for entry in manifest.entries {
+        if acc.seen.contains(&entry.blob_hash) {
+            continue;
         }
+        let bytes = acc.store.get_blob(&entry.blob_hash).await?;
+        record_bytes(acc, bytes, true).await?;
     }
     Ok(tree_hash)
 }
@@ -693,6 +697,10 @@ fn finish_envelope(
     };
     envelope.snapshot_hash = compute_snapshot_hash(&envelope)
         .map_err(|err| AppError::generic(format!("user_mirror snapshot hash: {err}")))?;
+    let envelope_json = serde_json::to_string(&envelope).map_err(AppError::from)?;
+    validate_snapshot(&envelope_json, &default_snapshot_limits()).map_err(|err| {
+        AppError::validation(format!("USER_MIRROR_INVALID_ENVELOPE:{err}"))
+    })?;
     Ok(envelope)
 }
 
@@ -986,5 +994,19 @@ mod tests {
                 && binding.native_id.as_deref() == Some("hello")
                 && !binding.blocked
         }));
+        let object_hashes: std::collections::HashSet<_> = built
+            .envelope
+            .objects
+            .iter()
+            .map(|object| object.hash.as_str())
+            .collect();
+        for revision in &built.envelope.revisions {
+            if let Some(tree) = revision.tree_manifest_hash.as_deref() {
+                assert!(
+                    object_hashes.contains(tree),
+                    "tree hash must be in envelope objects: {tree}"
+                );
+            }
+        }
     }
 }
