@@ -15,7 +15,8 @@ use super::models::{
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::portable_inventory::{
-    inspect_portable_inventory_with_env_query, PortableInventoryItemDto, PortableInventoryQuery,
+    inspect_portable_inventory_with_env_query, PortableAssetKind, PortableInventoryItemDto,
+    PortableInventoryQuery,
 };
 use crate::agent_hub::service::instruction_document_from_block_dtos;
 use crate::agent_hub::snapshot::canonical_json::canonicalize_value;
@@ -27,6 +28,7 @@ use crate::agent_hub::user_instructions::{
 use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -73,12 +75,15 @@ pub(crate) async fn build_local_user_mirror_inventory_with_env(
             },
         )
         .await?;
-        let items = snapshot
-            .items
-            .iter()
-            .filter(|item| item.target == target && item.scope_kind == ScopeKind::User)
-            .map(|item| map_portable_item(item, home_path.as_ref()))
-            .collect();
+        let items = dedup_user_mirror_portable_items(
+            snapshot
+                .items
+                .iter()
+                .filter(|item| item.target == target && item.scope_kind == ScopeKind::User),
+        )
+        .into_iter()
+        .map(|item| map_portable_item(&item, home_path.as_ref()))
+        .collect();
         let native_files = native_specs
             .iter()
             .filter(|(spec_target, _, _)| *spec_target == target)
@@ -192,6 +197,51 @@ fn native_file_fact(logical_id: String, path: &Path) -> UserMirrorNativeFileFact
             size,
         },
     }
+}
+
+/// 同一 Agent 下 `(kind, nativeId)` 只保留一条，避免冻结信封重复 asset id。
+///
+/// Business Logic: dest apply 按 native_id 对号入座；同名独立命令与 plugin 组件不能各写一份。
+/// Code Logic: 优先非逃逸/非 blocked，再优先 store_attached，否则保留先见到的。
+fn dedup_user_mirror_portable_items<'a>(
+    items: impl Iterator<Item = &'a PortableInventoryItemDto>,
+) -> Vec<PortableInventoryItemDto> {
+    let mut by_key: BTreeMap<(PortableAssetKind, String), PortableInventoryItemDto> =
+        BTreeMap::new();
+    for item in items {
+        let key = (item.kind, item.native_id.clone());
+        match by_key.get(&key) {
+            Some(existing) if portable_item_outranks(existing, item) => {}
+            _ => {
+                by_key.insert(key, item.clone());
+            }
+        }
+    }
+    by_key.into_values().collect()
+}
+
+fn portable_item_is_blocked_source(item: &PortableInventoryItemDto) -> bool {
+    item.warnings.iter().any(|warning| {
+        warning == "store_symlink_escape"
+            || warning == "source_blocked"
+            || warning.contains("store_symlink_escape")
+    })
+}
+
+/// `keep` 是否优于 `other`（true 则不替换）。
+fn portable_item_outranks(
+    keep: &PortableInventoryItemDto,
+    other: &PortableInventoryItemDto,
+) -> bool {
+    let keep_blocked = portable_item_is_blocked_source(keep);
+    let other_blocked = portable_item_is_blocked_source(other);
+    if keep_blocked != other_blocked {
+        return !keep_blocked;
+    }
+    if keep.store.store_attached != other.store.store_attached {
+        return keep.store.store_attached;
+    }
+    true
 }
 
 /// portable 库存项映射为镜像 DTO；MCP 只保留 present/hash。
@@ -481,6 +531,50 @@ mod tests {
         assert!(
             !json.contains(&"A".repeat(64)),
             "inventory JSON must not embed oversized native body"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同名独立命令与 plugin 组件在 dest 只有一个 native_id 槽，inventory 不得各列一次。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入 `commands/dup.md` 与 plugin 内同名命令；Claude items 里 command/dup 至多一条。
+    #[tokio::test]
+    async fn inventory_dedups_same_native_id_across_standalone_and_plugin() {
+        let env = seed_user_mirror_homes().await;
+        write(
+            env.claude_home.join("commands/dup.md").as_path(),
+            "---\nname: dup\n---\nstandalone\n",
+        );
+        write(
+            env.claude_home
+                .join("plugins/demo/.claude-plugin/plugin.json")
+                .as_path(),
+            r#"{"name":"demo","version":"1.0.0"}"#,
+        );
+        write(
+            env.claude_home
+                .join("plugins/demo/commands/dup.md")
+                .as_path(),
+            "---\nname: dup\n---\nplugin\n",
+        );
+        let dto = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let claude = dto
+            .agents
+            .iter()
+            .find(|agent| agent.target == AgentTarget::Claude)
+            .expect("claude");
+        let dups = claude
+            .items
+            .iter()
+            .filter(|item| item.kind == PortableAssetKind::Command && item.native_id == "dup")
+            .count();
+        assert!(
+            dups <= 1,
+            "same command native_id must appear once, got {dups}: {:?}",
+            claude.items
         );
     }
 }

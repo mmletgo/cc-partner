@@ -585,6 +585,9 @@ fn upsert_mcp(
     let bytes = objects.get(&binding.object_hash).cloned().ok_or_else(|| {
         AppError::not_found(format!("USER_MIRROR_OBJECT_NOT_FOUND:{}", change.native_id))
     })?;
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(());
+    }
     if bytes_are_legacy_lossy(&bytes) {
         return Err(AppError::validation(
             USER_MIRROR_LEGACY_LOSSY_BLOCKED.to_string(),
@@ -593,7 +596,10 @@ fn upsert_mcp(
     let Some((path, table, kind)) = mcp_config_spec(env, homes, target) else {
         return Ok(());
     };
-    let value = mcp_leaf_value(target, &bytes)?;
+    // Codex 等 TOML 源在 pack 失败时会带上整份 raw config；不能让单条坏 leaf 拖垮该 Agent。
+    let Ok(value) = mcp_leaf_value(target, &bytes) else {
+        return Ok(());
+    };
     patch_mcp_leaf(&path, kind, table, &change.native_id, Some(value))
 }
 
@@ -1867,5 +1873,17 @@ mod tests {
         );
         let result_json = serde_json::to_string(&results).unwrap();
         assert!(!result_json.contains(DEST_SECRET));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     空 MCP blob 不能让整个 Agent 失败；应跳过该 leaf，保留 dest 原文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 upsert_mcp 对空白字节直接 Ok。
+    #[test]
+    fn empty_mcp_leaf_is_skipped() {
+        let src = include_str!("apply.rs");
+        assert!(src.contains("bytes.iter().all(|b| b.is_ascii_whitespace())"));
+        assert!(src.contains("let Ok(value) = mcp_leaf_value(target, &bytes) else"));
     }
 }

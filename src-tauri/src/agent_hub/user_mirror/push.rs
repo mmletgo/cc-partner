@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     claim 源 plan → 校验 inventory → freeze 一次 → 每 peer 并发 ≤3：
 //!     health 要求 `agent-hub.user-mirror.v1` + `device.request-binding.v1` 且
-//!     `health.device_id == peer_id` → prepare → PUT missing → commit。
+//!     `health.device_id == peer_id` → prepare → PUT missing（并发）→ commit。
 //!     单 peer 失败写入 `kind=user_mirror` 源侧失败表，不回滚其它 peer。
 
 use super::inventory::build_local_user_mirror_inventory;
@@ -48,6 +48,8 @@ use std::time::Duration;
 const USER_MIRROR_DEVICE_ID_MISMATCH: &str = "USER_MIRROR_DEVICE_ID_MISMATCH";
 
 const OBJECT_CHUNK_TIMEOUT: Duration = Duration::from_secs(120);
+/// 单 peer 对象 PUT 并发。串行 1 万对象在 overlay RTT 下会打满 apply 墙钟。
+const OBJECT_PUT_PARALLELISM: usize = 16;
 
 /// 源侧 Push：freeze 一次并对每个 peer dest-apply。
 ///
@@ -307,24 +309,37 @@ async fn push_one_peer(args: PushOnePeerArgs<'_>) -> PeerPushOutcome {
     }
 
     let mut transferred = 0u32;
-    for object_hash in &missing {
-        let Some(bytes) = built.object_bytes.get(object_hash) else {
-            return fail("USER_MIRROR_OBJECT_BYTES_MISSING");
-        };
-        if let Err(err) = stream_object(
-            peer_client,
-            &base_url,
-            peer_id,
-            &transfer_id,
-            object_hash,
-            bytes,
-        )
-        .await
-        {
-            return fail(&map_peer_error_code(&err));
+    let mut puts = stream::iter(missing.iter().cloned())
+        .map(|object_hash| {
+            let bytes = built.object_bytes.get(&object_hash).cloned();
+            let peer_client = peer_client.clone();
+            let base_url = base_url.clone();
+            let peer_id = peer_id.to_string();
+            let transfer_id = transfer_id.clone();
+            async move {
+                let Some(bytes) = bytes else {
+                    return Err("USER_MIRROR_OBJECT_BYTES_MISSING".to_string());
+                };
+                stream_object(
+                    &peer_client,
+                    &base_url,
+                    &peer_id,
+                    &transfer_id,
+                    &object_hash,
+                    &bytes,
+                )
+                .await
+                .map_err(|err| map_peer_error_code(&err))
+            }
+        })
+        .buffer_unordered(OBJECT_PUT_PARALLELISM);
+    while let Some(item) = puts.next().await {
+        match item {
+            Ok(()) => transferred += 1,
+            Err(code) => return fail(&code),
         }
-        transferred += 1;
     }
+    drop(puts);
 
     let commit_body = CommitUserMirrorRequest {
         source_device_id: source_device_id.to_string(),
@@ -389,6 +404,21 @@ async fn stream_object(
     bytes: &[u8],
 ) -> Result<(), PeerCallError> {
     let total = bytes.len() as u64;
+    // 空文件 blob 的 SHA 仍在 envelope.objects 里；不 PUT 则 dest commit 报 unverified。
+    if total == 0 {
+        let chunk_sha = sha256_hex(&[]);
+        let url = format!(
+            "{base_url}/api/agent-hub/user-mirror/{transfer_id}/objects/{object_hash}?offset=0&chunkSha256={chunk_sha}"
+        );
+        let resp: PutObjectResponse = put_bytes_bound(peer, &url, peer_id, Vec::new()).await?;
+        if !resp.verified {
+            return Err(PeerCallError::InvalidResponse {
+                url,
+                reason: "user_mirror_empty_object_unverified".to_string(),
+            });
+        }
+        return Ok(());
+    }
     let mut offset: u64 = 0;
     while offset < total {
         let end = std::cmp::min(offset as usize + AGENT_HUB_MAX_CHUNK_BYTES, bytes.len());
@@ -1197,6 +1227,33 @@ mod tests {
         assert_eq!(fs::read_to_string(&dest_fail).unwrap(), "OLD-FAIL");
         h_ok.abort();
         h_bad.abort();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     全量 user-mirror 对象数可达四位；串行 PUT 会在 overlay RTT 下打满 apply 墙钟。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 missing object 走 `buffer_unordered(OBJECT_PUT_PARALLELISM)` 且并发为 16。
+    #[test]
+    fn object_puts_are_parallel() {
+        let src = include_str!("push.rs");
+        assert!(src.contains("buffer_unordered(OBJECT_PUT_PARALLELISM)"));
+        assert!(
+            src.contains("const OBJECT_PUT_PARALLELISM: usize = 16"),
+            "object put parallelism must stay high enough for full-home mirrors"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Skill 树里的空文件会进入 envelope；漏传空 blob 会让对端 commit 全员失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 `stream_object` 对 0 字节对象仍 PUT offset=0。
+    #[test]
+    fn empty_object_is_put_once() {
+        let src = include_str!("push.rs");
+        assert!(src.contains("user_mirror_empty_object_unverified"));
+        assert!(src.contains("if total == 0"));
     }
 
     /// Business Logic（为什么需要这个测试）:

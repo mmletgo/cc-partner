@@ -862,6 +862,11 @@ pub async fn collect_verified_object_bytes(
             )));
         };
         if !p.verified {
+            // 空文件 blob 源端旧 PUT 循环会漏传；0 字节 SHA 可就地合成。
+            if desc.size == "0" && desc.hash == sha256_hex(&[]) {
+                object_bytes.insert(desc.hash.clone(), Vec::new());
+                continue;
+            }
             return Err(AppError::validation(format!(
                 "agent_hub_push_commit_object_unverified:{}",
                 desc.hash

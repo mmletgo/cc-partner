@@ -39,7 +39,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -383,12 +383,14 @@ async fn freeze_portable_items(
         }
         live.insert((item.target, item.kind, item.native_id.clone()), item);
     }
+    let mut frozen: HashSet<(AgentTarget, PortableAssetKind, String)> = HashSet::new();
     for agent in &inventory.agents {
         for listed in &agent.items {
-            let Some(item) = live
-                .get(&(agent.target, listed.kind, listed.native_id.clone()))
-                .cloned()
-            else {
+            let key = (agent.target, listed.kind, listed.native_id.clone());
+            if !frozen.insert(key.clone()) {
+                continue;
+            }
+            let Some(item) = live.get(&key).cloned() else {
                 continue;
             };
             freeze_one_portable(acc, agent.target, &item).await?;
@@ -607,6 +609,24 @@ fn push_asset(
         logical_key
     );
     let asset_id = stable_asset_id(&material);
+    if acc.assets.iter().any(|asset| asset.id == asset_id) {
+        if !acc.bindings.iter().any(|binding| {
+            binding.target == target
+                && binding.logical_id.as_deref() == logical_id
+                && binding.kind == kind
+                && binding.native_id.as_deref() == native_id
+        }) {
+            acc.bindings.push(UserMirrorObjectBinding {
+                target,
+                logical_id: logical_id.map(str::to_string),
+                kind,
+                native_id: native_id.map(str::to_string),
+                object_hash: payload_hash,
+                blocked,
+            });
+        }
+        return;
+    }
     let rev_id = Uuid::now_v7().to_string();
     acc.assets.push(SnapshotAsset {
         id: asset_id.clone(),
@@ -1008,5 +1028,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同名 portable 被 inventory 列两次时，冻结不得生成重复 asset id。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     把 hello skill 在 inventory 里复制一条后再冻结；信封必须通过 validate。
+    #[tokio::test]
+    async fn freeze_dedups_duplicate_listed_portable_native_ids() {
+        let env = seed_user_mirror_homes().await;
+        seed_claude_native_skill_and_mcp(&env);
+        let mut inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let claude = inventory
+            .agents
+            .iter_mut()
+            .find(|agent| agent.target == AgentTarget::Claude)
+            .expect("claude");
+        let hello = claude
+            .items
+            .iter()
+            .find(|item| item.kind == PortableAssetKind::Skill && item.native_id == "hello")
+            .cloned()
+            .expect("hello listed");
+        claude.items.push(hello);
+        freeze_user_mirror_selection(&env.app_state, &inventory)
+            .await
+            .expect("duplicate listed native_id must not invalidate envelope");
     }
 }
