@@ -974,10 +974,13 @@ pub fn windows_detached_creation_flags() -> u32 {
 ///
 /// Code Logic（这个函数做什么）:
 ///     设置 DETACHED_PROCESS 与 CREATE_NEW_PROCESS_GROUP creation flags（经可测 seam 计算）。
+///     inherit_handles(false)：避免 serve 继承 start 的 stdout pipe，导致 smoke drain 永远等不到 EOF。
 #[cfg(windows)]
 fn configure_detached_child(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-    command.creation_flags(windows_detached_creation_flags());
+    command
+        .creation_flags(windows_detached_creation_flags())
+        .inherit_handles(false);
 }
 
 /// 配置其它平台 serve 子进程脱离父进程。

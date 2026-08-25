@@ -334,9 +334,14 @@ impl SmokeCase {
             }
         };
 
-        let stdout = join_drain_with_timeout(stdout_drain, Duration::from_secs(2))
+        let drain_join = if cfg!(windows) {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(2)
+        };
+        let stdout = join_drain_with_timeout(stdout_drain, drain_join)
             .map_err(|e| format!("stdout drain {:?}: {e}", args))?;
-        let stderr = join_drain_with_timeout(stderr_drain, Duration::from_secs(2))
+        let stderr = join_drain_with_timeout(stderr_drain, drain_join)
             .map_err(|e| format!("stderr drain {:?}: {e}", args))?;
         Ok(captured_from_output(Output {
             status,

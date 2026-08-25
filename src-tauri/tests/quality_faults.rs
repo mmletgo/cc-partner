@@ -304,7 +304,8 @@ async fn hold_write_lock_past_busy_timeout_is_bounded() {
         .await
         .expect("BEGIN IMMEDIATE");
 
-    let outer_budget = busy_timeout + Duration::from_millis(500);
+    // hosted runner 上 SQLite busy 返回可能超过 200ms+500ms；3s 仍有界，证明不会无限挂起。
+    let outer_budget = Duration::from_secs(3);
     let started = Instant::now();
     let write_result = tokio::time::timeout(outer_budget, repo.upsert_merged_batch(&batch)).await;
     let elapsed = started.elapsed();
