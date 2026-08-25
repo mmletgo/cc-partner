@@ -44,12 +44,12 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 编译期烟测：manifest 可解析且含三 target。
+/// 编译期烟测：manifest 可解析且含全部 Hub target。
 ///
 /// Business Logic: 非 ignored 路径保证 harness 与二进制一并编译。
 /// Code Logic: builtin_support_manifest + target 集合。
 #[test]
-fn support_manifest_compiles_and_lists_three_targets() {
+fn support_manifest_compiles_and_lists_hub_targets() {
     assert!(
         SUPPORT_MANIFEST_JSON.contains("schemaVersion"),
         "embedded manifest missing schemaVersion"
@@ -58,7 +58,10 @@ fn support_manifest_compiles_and_lists_three_targets() {
     assert_eq!(manifest.schema_version, 1);
     let mut names: Vec<&str> = manifest.targets.iter().map(|t| t.target.as_str()).collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["claude", "codex", "opencode"]);
+    assert_eq!(
+        names,
+        vec!["claude", "codex", "cursor", "gemini", "grok", "opencode", "pi"]
+    );
 }
 
 /// 编译期烟测：claude/codex 在 macOS phase-1 pin 认证后 portable 写能力已打开；
