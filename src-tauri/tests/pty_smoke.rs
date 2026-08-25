@@ -12,6 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// PTY 读写与子进程退出的统一超时。
 const PTY_SMOKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// xterm DSR「光标位置」查询；Windows ConPTY 在 TERM=xterm-256color 时启动就会发。
+const CSI_CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+/// 合法 CPR 应答。行/列只要在窗口内即可，ConPTY 只要求格式正确才会继续读 stdin。
+const CSI_CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
 
 /// 平台 shell 描述：可执行文件 + 固定前缀参数。
 ///
@@ -328,18 +332,72 @@ impl PtyOutputDrain {
     }
 }
 
+/// 统计缓冲里尚未处理的 CSI 6n 次数，供应答去重。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Windows ConPTY 可能连发多次光标查询；重复应答无害，漏应答会让 cmd 永久等 CPR。
+///
+/// Code Logic（这个函数做什么）:
+///     滑窗统计 `\x1b[6n` 出现次数。
+fn count_csi_cursor_position_queries(buf: &[u8]) -> usize {
+    buf.windows(CSI_CURSOR_POSITION_QUERY.len())
+        .filter(|window| *window == CSI_CURSOR_POSITION_QUERY)
+        .count()
+}
+
+/// 把 ConPTY/xterm 的 DSR 查询答成 CPR，避免 shell 卡在启动握手。
+///
+/// Business Logic（为什么需要这个结构）:
+///     工作台前端 xterm.js 会自动回 `\x1b[6n`；smoke 是 raw PTY master，必须自己扮终端。
+///
+/// Code Logic（这个结构做什么）:
+///     按 drain 快照里未应答的 CSI 6n 次数，向 slave 写 `\x1b[1;1R`。
+struct CursorPositionResponder {
+    answered: usize,
+}
+
+impl CursorPositionResponder {
+    /// Business Logic（为什么需要这个函数）:
+    ///     每个 PTY 会话独立计数，避免跨测试串应答。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     answered 从 0 起。
+    fn new() -> Self {
+        Self { answered: 0 }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     查询可能在写入 echo 脚本前或后到达，主循环每次 poll 都要补应答。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对每个未应答的 CSI 6n 写一次 CPR 并 flush；写失败即停，留给上层超时诊断。
+    fn pump(&mut self, drain: &PtyOutputDrain, writer: &mut dyn Write) {
+        let seen = count_csi_cursor_position_queries(&drain.snapshot());
+        while self.answered < seen {
+            if writer.write_all(CSI_CURSOR_POSITION_REPORT).is_err() {
+                return;
+            }
+            let _ = writer.flush();
+            self.answered += 1;
+        }
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     必须在有界时间内看到独立成行 marker，否则 smoke 失败并附原始输出。
 ///
 /// Code Logic（这个函数做什么）:
-///     轮询 drain 快照直到 standalone marker 出现或超时。
+///     每次 poll 先应答未处理的 CSI 6n，再检查 standalone marker；超时返回 drain 快照。
 fn wait_for_standalone_marker(
     drain: &PtyOutputDrain,
     marker: &str,
     timeout: Duration,
+    writer: &mut dyn Write,
+    responder: &mut CursorPositionResponder,
 ) -> Result<Vec<u8>, (Vec<u8>, String)> {
     let deadline = Instant::now() + timeout;
     loop {
+        responder.pump(drain, writer);
         let buf = drain.snapshot();
         if output_contains_standalone_marker(&buf, marker) {
             return Ok(buf);
@@ -362,14 +420,17 @@ fn wait_for_standalone_marker(
 ///     子进程必须在有界时间内以 0 退出，否则 smoke 失败并带诊断。
 ///
 /// Code Logic（这个函数做什么）:
-///     轮询 try_wait；超时 force_reap 并附上 drain 快照。
+///     轮询 try_wait；每次 poll 继续应答 CSI 6n；超时 force_reap 并附上 drain 快照。
 fn wait_child_exit_zero(
     child: &mut Box<dyn portable_pty::Child + Send + Sync>,
     drain: &PtyOutputDrain,
     timeout: Duration,
+    writer: &mut dyn Write,
+    responder: &mut CursorPositionResponder,
 ) -> Result<Vec<u8>, String> {
     let deadline = Instant::now() + timeout;
     loop {
+        responder.pump(drain, writer);
         match child.try_wait() {
             Ok(Some(status)) => {
                 let code = status.exit_code();
@@ -493,6 +554,32 @@ fn marker_and_newline_helpers_are_stable() {
         real_output,
         "__CC_PARTNER_abc123__"
     ));
+    // Windows ConPTY 启动握手前缀不得挡住独立成行 marker。
+    let with_dsr = b"\x1b[6n\r\n__CC_PARTNER_abc123__\r\n";
+    assert!(output_contains_standalone_marker(
+        with_dsr,
+        "__CC_PARTNER_abc123__"
+    ));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     CSI 6n 计数是 Windows PTY 应答去重的契约，漏计会让 cmd 卡死，多计会灌多余 CPR。
+///
+/// Code Logic（这个测试做什么）:
+///     覆盖空缓冲、单次、夹杂文本的两次查询，以及易混的 CSI 5n。
+#[test]
+fn csi_cursor_position_query_count_is_exact() {
+    assert_eq!(count_csi_cursor_position_queries(b""), 0);
+    assert_eq!(count_csi_cursor_position_queries(b"\x1b[6n"), 1);
+    assert_eq!(
+        count_csi_cursor_position_queries(b"hello\x1b[6nworld\x1b[6n"),
+        2
+    );
+    assert_eq!(count_csi_cursor_position_queries(b"\x1b[5n"), 0);
+    assert_eq!(
+        count_csi_cursor_position_queries(CSI_CURSOR_POSITION_REPORT),
+        0
+    );
 }
 
 /// Business Logic（为什么需要这个测试）:
@@ -604,9 +691,26 @@ fn native_pty_echo_token_and_exit_zero() {
     };
     // 单 reader 全程 drain，避免停止读后 PTY 缓冲堵死 shell。
     let drain = PtyOutputDrain::start(reader);
+    let mut responder = CursorPositionResponder::new();
 
-    // 给 shell 一点启动时间，再写入受控脚本。
-    thread::sleep(Duration::from_millis(200));
+    // Windows ConPTY 常在首包就发 CSI 6n 并阻塞读 stdin；先应答再写 echo。
+    // Unix 通常无此查询：等到短窗口结束再写，行为与原先 200ms 启动等待一致。
+    let prewrite = if cfg!(windows) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_millis(200)
+    };
+    let prewrite_deadline = Instant::now() + prewrite;
+    loop {
+        responder.pump(&drain, &mut writer);
+        if cfg!(windows) && responder.answered > 0 {
+            break;
+        }
+        if Instant::now() >= prewrite_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
     if let Err(err) = writer.write_all(input.as_bytes()) {
         drop(writer);
         let snap = drain.snapshot();
@@ -618,7 +722,13 @@ fn native_pty_echo_token_and_exit_zero() {
     }
     let _ = writer.flush();
 
-    if let Err((buf, msg)) = wait_for_standalone_marker(&drain, &marker, PTY_SMOKE_TIMEOUT) {
+    if let Err((buf, msg)) = wait_for_standalone_marker(
+        &drain,
+        &marker,
+        PTY_SMOKE_TIMEOUT,
+        &mut writer,
+        &mut responder,
+    ) {
         drop(writer);
         // Drop 守卫会 force_reap；此处先落盘诊断再 panic。
         persist_pty_failure_diagnostics(&format!("marker_timeout: {msg}"), &marker, &buf);
@@ -629,7 +739,13 @@ fn native_pty_echo_token_and_exit_zero() {
     }
 
     // 保持 writer 直到 exit 完成，避免交互式 shell 在处理 exit 前收到 stdin EOF。
-    let output = match wait_child_exit_zero(child_guard.child_mut(), &drain, PTY_SMOKE_TIMEOUT) {
+    let output = match wait_child_exit_zero(
+        child_guard.child_mut(),
+        &drain,
+        PTY_SMOKE_TIMEOUT,
+        &mut writer,
+        &mut responder,
+    ) {
         Ok(buf) => {
             drop(writer);
             child_guard.disarm();
