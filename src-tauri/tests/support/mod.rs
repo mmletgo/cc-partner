@@ -5,10 +5,11 @@
 
 use serde::Deserialize;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -269,24 +270,8 @@ impl SmokeCase {
             .spawn()
             .map_err(|e| format!("spawn {:?} 失败: {e}", args))?;
         let child_pid = child.id();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let stdout_drain = thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = stdout {
-                use std::io::Read;
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        });
-        let stderr_drain = thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = stderr {
-                use std::io::Read;
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        });
+        let (stdout_drain, stdout_buf) = spawn_pipe_drain(child.stdout.take());
+        let (stderr_drain, stderr_buf) = spawn_pipe_drain(child.stderr.take());
 
         let deadline = Instant::now() + self.op_timeout;
         let status = loop {
@@ -302,10 +287,10 @@ impl SmokeCase {
                             child_pid,
                             args,
                         )?;
-                        let stdout = join_drain_with_timeout(stdout_drain, Duration::from_secs(1))
-                            .unwrap_or_default();
-                        let stderr = join_drain_with_timeout(stderr_drain, Duration::from_secs(1))
-                            .unwrap_or_default();
+                        let stdout =
+                            take_drain_buf(stdout_drain, stdout_buf, Duration::from_secs(1));
+                        let stderr =
+                            take_drain_buf(stderr_drain, stderr_buf, Duration::from_secs(1));
                         let captured = captured_from_output(Output {
                             status,
                             stdout,
@@ -334,15 +319,10 @@ impl SmokeCase {
             }
         };
 
-        let drain_join = if cfg!(windows) {
-            Duration::from_secs(10)
-        } else {
-            Duration::from_secs(2)
-        };
-        let stdout = join_drain_with_timeout(stdout_drain, drain_join)
-            .map_err(|e| format!("stdout drain {:?}: {e}", args))?;
-        let stderr = join_drain_with_timeout(stderr_drain, drain_join)
-            .map_err(|e| format!("stderr drain {:?}: {e}", args))?;
+        // Windows 上 detached serve 可能继承 start 的 stdout 写句柄，read_to_end 等不到 EOF。
+        // 进程已退出时取已缓冲字节，超时不再当失败（否则会拖到 job 12m）。
+        let stdout = take_drain_buf(stdout_drain, stdout_buf, Duration::from_secs(2));
+        let stderr = take_drain_buf(stderr_drain, stderr_buf, Duration::from_secs(2));
         Ok(captured_from_output(Output {
             status,
             stdout,
@@ -898,26 +878,58 @@ fn reap_child_with_timeout(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     stdout/stderr drain 线程在子进程被 kill 后通常会很快结束，但仍需有界 join，
-///     防止极端 pipe 状态让 smoke 永久卡住。
+///     把子进程 stdout/stderr 增量写入共享缓冲，超时后仍能拿到已读字节。
 ///
 /// Code Logic（这个函数做什么）:
-///     轮询 `JoinHandle::is_finished`；完成后 join 取 Vec；超时返回 Err。
-fn join_drain_with_timeout(
-    handle: thread::JoinHandle<Vec<u8>>,
+///     侧线程循环 `read`；EOF/错误结束。共享 `Arc<Mutex<Vec<u8>>>` 给主线程超时取走。
+fn spawn_pipe_drain<T: Read + Send + 'static>(
+    pipe: Option<T>,
+) -> (thread::JoinHandle<()>, Arc<Mutex<Vec<u8>>>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let thread_buf = buf.clone();
+    let handle = thread::spawn(move || {
+        if let Some(mut pipe) = pipe {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match pipe.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => thread_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&tmp[..n]),
+                }
+            }
+        }
+    });
+    (handle, buf)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     stdout/stderr drain 在子进程退出后通常很快结束，但仍需有界 join；
+///     Windows detached serve 可能占着写句柄，不能把超时当成整次 CLI 失败。
+///
+/// Code Logic（这个函数做什么）:
+///     轮询 `JoinHandle::is_finished`；完成后 join；超时 forget handle 并返回已缓冲字节。
+fn take_drain_buf(
+    handle: thread::JoinHandle<()>,
+    buf: Arc<Mutex<Vec<u8>>>,
     timeout: Duration,
-) -> Result<Vec<u8>, String> {
+) -> Vec<u8> {
     let deadline = Instant::now() + timeout;
     while !handle.is_finished() {
         if Instant::now() >= deadline {
-            // 无法安全 abort 标准库线程；超时后丢弃 handle（detach）并返回空缓冲诊断。
-            // 调用方用 unwrap_or_default 时得到空输出；此处返回 Err 让上层决定。
             std::mem::forget(handle);
-            return Err(format!("drain 线程在 {timeout:?} 内未结束"));
+            return buf
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_else(|e| e.into_inner().clone());
         }
         thread::sleep(Duration::from_millis(10));
     }
-    handle.join().map_err(|_| "drain 线程 panic".to_string())
+    let _ = handle.join();
+    buf.lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1034,15 +1046,7 @@ fn run_signal_command_bounded(
 #[cfg(windows)]
 fn spawn_and_collect_output_bounded(mut command: Command, timeout: Duration) -> io::Result<Output> {
     let mut child = command.spawn()?;
-    let stdout = child.stdout.take();
-    let drain = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout {
-            use std::io::Read;
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let (drain, stdout_buf) = spawn_pipe_drain(child.stdout.take());
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -1053,8 +1057,8 @@ fn spawn_and_collect_output_bounded(mut command: Command, timeout: Duration) -> 
                     let grace = Instant::now() + Duration::from_millis(200);
                     while Instant::now() < grace {
                         if let Ok(Some(status)) = child.try_wait() {
-                            let stdout = join_drain_with_timeout(drain, Duration::from_millis(200))
-                                .unwrap_or_default();
+                            let stdout =
+                                take_drain_buf(drain, stdout_buf, Duration::from_millis(200));
                             return Ok(Output {
                                 status,
                                 stdout,
@@ -1072,7 +1076,7 @@ fn spawn_and_collect_output_bounded(mut command: Command, timeout: Duration) -> 
             Err(err) => return Err(err),
         }
     };
-    let stdout = join_drain_with_timeout(drain, Duration::from_secs(1)).unwrap_or_default();
+    let stdout = take_drain_buf(drain, stdout_buf, Duration::from_secs(1));
     Ok(Output {
         status,
         stdout,
