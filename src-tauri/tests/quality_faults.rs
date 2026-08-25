@@ -885,6 +885,7 @@ async fn setup_agent_hub_projection() -> (ProjectionScheduler, AgentHubRepo, tem
     let repo = AgentHubRepo::new(pool);
     let store = AgentHubObjectStore::open(dir.path()).expect("object store");
     let sched = ProjectionScheduler::new(repo.clone(), store);
+    sched.inject_support_bypass(true).await;
     (sched, repo, dir)
 }
 
