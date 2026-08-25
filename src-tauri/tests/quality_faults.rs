@@ -192,13 +192,15 @@ fn sample_scratchpad_row(id: &str, title: &str, content: &str) -> ScratchpadRow 
 ///
 /// Code Logic（这个函数做什么）:
 ///     在 temp 根下生成 device/path/hotkey 等合法字段，与 config_runtime 单测样本对齐。
+///     `game_plugin_dir` 必须跟 receive_dir/db_path 一样落在 data_dir 下的绝对路径：
+///     Unix `/tmp/plugins` 在 Windows 上 `Path::is_absolute` 为 false，validate 会先于故障注入失败。
 fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
     AppConfig {
         device_id: "settings-l2-device".into(),
         device_name: device_name.into(),
         http_port: 0,
         receive_dir: data_dir.join("recv").to_string_lossy().to_string(),
-        game_plugin_dir: "/tmp/plugins".into(),
+        game_plugin_dir: data_dir.join("plugins").to_string_lossy().to_string(),
         db_path: data_dir.join("data.db").to_string_lossy().to_string(),
         screenshot_hotkey: "<ctrl>+<shift>+s".into(),
         prompt_optimizer_hotkey: "<ctrl>".into(),
