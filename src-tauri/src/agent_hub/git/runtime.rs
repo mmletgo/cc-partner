@@ -1338,7 +1338,19 @@ mod tests {
                     .join("snapshot.json"),
                 r#"{"old":"b"}"#,
             );
-            run_git(&seed, &["add", "-A"]);
+            let device_a_snap = format!("{AGENT_HUB_GIT_ROOT}/devices/{DEVICE_A}/snapshot.json");
+            let device_b_snap = format!("{AGENT_HUB_GIT_ROOT}/devices/{DEVICE_B}/snapshot.json");
+            run_git(
+                &seed,
+                &[
+                    "add",
+                    "-f",
+                    "--",
+                    "prompts/p1.json",
+                    &device_a_snap,
+                    &device_b_snap,
+                ],
+            );
             run_git(&seed, &["commit", "-m", "seed"]);
             run_git(&seed, &["branch", "-M", "main"]);
             run_git(&seed, &["push", "-u", "origin", "main"]);
@@ -1349,6 +1361,14 @@ mod tests {
             );
             run_git(&workdir, &["config", "user.name", "cc-partner"]);
             run_git(&workdir, &["config", "user.email", "cc-partner@local"]);
+            assert!(
+                workdir
+                    .join(AGENT_HUB_GIT_ROOT)
+                    .join("devices")
+                    .join(DEVICE_B)
+                    .is_dir(),
+                "seed clone must contain device-b lane"
+            );
             Self {
                 _root: root,
                 _remote: remote,

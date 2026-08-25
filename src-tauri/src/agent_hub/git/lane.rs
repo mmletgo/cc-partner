@@ -78,8 +78,8 @@ pub fn inventory_agent_hub_device_lanes(workdir: &Path) -> Result<Vec<String>, A
     let mut ids = Vec::new();
     for entry in fs::read_dir(&devices).map_err(AppError::from)? {
         let entry = entry.map_err(AppError::from)?;
-        let ft = entry.file_type().map_err(AppError::from)?;
-        if !ft.is_dir() {
+        let meta = entry.metadata().map_err(AppError::from)?;
+        if !meta.is_dir() {
             continue;
         }
         let name = entry.file_name();
