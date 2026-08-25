@@ -557,6 +557,7 @@ async fn gate_a_library_opt_in_compile_enqueue_converges_shared_body_with_prelud
     let repo = AgentHubRepo::new(pool);
     let store = AgentHubObjectStore::open(&env.objects_root).expect("store");
     let sched = ProjectionScheduler::new(repo.clone(), store);
+    sched.inject_support_bypass(true).await;
 
     let hub_project_id = format!("hub-proj-{}", unique_suffix());
     repo.upsert_project_mapping(UpsertAgentHubProjectMapping {
@@ -1020,14 +1021,10 @@ async fn gate_a_migration_seeds_target_only_absent_and_is_idempotent() {
         .list_target_bindings_for_asset(&first.asset_id)
         .await
         .expect("bindings");
-    assert_eq!(bindings.len(), 3, "claude/codex/opencode bindings");
-    for binding in &bindings {
-        assert_eq!(
-            binding.desired_presence,
-            DesiredPresence::Absent,
-            "projection bindings start absent until confirmation"
-        );
-    }
+    assert!(
+        bindings.is_empty(),
+        "V2 migration must not seed unmanaged absent bindings, got {bindings:?}"
+    );
 
     let second = migrate_user_claude_md_state_with(
         &migration_deps(&agent_hub, &claude_md, &data_dir),
