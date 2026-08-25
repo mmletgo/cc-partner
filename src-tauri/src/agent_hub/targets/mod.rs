@@ -443,9 +443,11 @@ mod tests {
     use crate::agent_hub::models::ScopeKind;
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
+    #[cfg(unix)]
     fn write_exec(path: &Path, script: &str) {
         fs::write(path, script).unwrap();
         let mut perms = fs::metadata(path).unwrap().permissions();
@@ -468,6 +470,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn probe_marks_unknown_version_scan_only() {
         let dir = tempfile::tempdir().unwrap();

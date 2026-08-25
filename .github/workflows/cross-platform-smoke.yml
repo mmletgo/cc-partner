@@ -64,7 +64,7 @@ jobs:
   smoke:
     name: smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -99,7 +99,8 @@ jobs:
           echo "runner.temp=${{ runner.temp }}"
           echo "os=${{ matrix.os }}"
 
-      # 每个 cargo 步骤 timeout-minutes 必须小于 job 30m，给 always() cleanup/artifact 留余量。
+      # 每个 cargo 步骤 timeout-minutes 必须小于 job 45m，给 always() cleanup/artifact 留余量。
+      # 冷缓存下 lib test 编译可能超过 12m（首次 macos-latest 在编译 app 时被杀掉）。
       - name: Rust format check
         id: fmt
         working-directory: src-tauri
@@ -122,7 +123,7 @@ jobs:
         id: unit
         working-directory: src-tauri
         shell: bash
-        timeout-minutes: 12
+        timeout-minutes: 20
         run: |
           set -euo pipefail
           {

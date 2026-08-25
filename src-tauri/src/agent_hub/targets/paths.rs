@@ -644,6 +644,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn env_with(
@@ -726,6 +727,7 @@ mod tests {
         assert_eq!(homes.pi.config_root, PathBuf::from("/tmp/home/.pi/agent"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_executable_uses_path_entries_without_process_env() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -744,6 +746,7 @@ mod tests {
         assert!(resolve_executable("missing-cli", &env).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_first_executable_prefers_earlier_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -765,6 +768,7 @@ mod tests {
         assert!(resolve_first_executable(["missing-a", "missing-b"], &env).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn gui_augmented_path_entries_find_claude_in_user_local_bin_when_path_is_sparse() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -790,6 +794,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn probe_cli_version_parses_stdout() {
         let dir = tempfile::tempdir().expect("tempdir");

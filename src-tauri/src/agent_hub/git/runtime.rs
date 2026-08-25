@@ -2261,8 +2261,15 @@ mod tests {
             if ty.is_dir() {
                 copy_dir_all(&from, &to)?;
             } else if ty.is_symlink() {
-                let target = std::fs::read_link(&from)?;
-                std::os::unix::fs::symlink(&target, &to)?;
+                #[cfg(unix)]
+                {
+                    let target = std::fs::read_link(&from)?;
+                    std::os::unix::fs::symlink(&target, &to)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::copy(&from, &to)?;
+                }
             } else {
                 std::fs::copy(&from, &to)?;
             }

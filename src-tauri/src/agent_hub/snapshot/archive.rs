@@ -553,6 +553,7 @@ mod tests {
     use crate::storage::agent_hub_repo::AgentHubRepo;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::collections::BTreeMap as Map;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::str::FromStr;
 
