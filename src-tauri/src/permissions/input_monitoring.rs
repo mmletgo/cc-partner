@@ -36,6 +36,7 @@ impl From<InputMonitoringState> for InputMonitoringPermissionState {
 /// 把公开 IOHID 返回值映射为产品四态。
 ///
 /// 未知系统值返回 `Unavailable`，不猜测、不假绿；是否固定签名不参与可用性判断。
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn state_from_raw(raw: u32) -> InputMonitoringState {
     match raw {
         0 => InputMonitoringState::Granted,
@@ -46,6 +47,7 @@ pub(crate) fn state_from_raw(raw: u32) -> InputMonitoringState {
 }
 
 /// 输入监控 Request 路径本次真正执行的操作。
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InputMonitoringOperation {
@@ -56,6 +58,7 @@ pub enum InputMonitoringOperation {
 }
 
 /// 输入监控显式 Request 的前后状态。
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InputMonitoringRequestResult {
@@ -66,6 +69,7 @@ pub struct InputMonitoringRequestResult {
 
 /// 隔离公开 IOHID / CoreGraphics ListenEvent 系统调用，便于用纯内存 provider 验证
 /// 状态机而不触碰宿主 TCC。
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) trait InputMonitoringAccessProvider {
     fn check(&self) -> u32;
     fn preflight_listen_event(&self) -> bool {
@@ -82,6 +86,7 @@ pub(crate) trait InputMonitoringAccessProvider {
 }
 
 /// 使用指定 provider 查询输入监控状态，不产生系统副作用。
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn check_with_provider<P: InputMonitoringAccessProvider>(
     provider: &P,
 ) -> InputMonitoringPermissionState {
@@ -100,6 +105,7 @@ pub(crate) fn check_with_provider<P: InputMonitoringAccessProvider>(
 /// 仅 `NotDetermined` 调 Request；依次调用 CoreGraphics 与 IOHID 两条公开 ListenEvent
 /// 请求路径。Denied/Granted/Unavailable 都是无副作用 noop。固定签名与 ad-hoc 构建
 /// 共用该状态机；未自动登记时由前端引导用户在系统设置中手动添加当前 `.app`。
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn request_with_provider<P: InputMonitoringAccessProvider>(
     provider: &P,
 ) -> InputMonitoringRequestResult {
@@ -192,15 +198,6 @@ pub fn check_input_monitoring_state() -> InputMonitoringPermissionState {
 #[cfg(target_os = "macos")]
 pub fn request_input_monitoring_access() -> InputMonitoringRequestResult {
     request_with_provider(&SystemInputMonitoringProvider)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn request_input_monitoring_access() -> InputMonitoringRequestResult {
-    InputMonitoringRequestResult {
-        operation: InputMonitoringOperation::Noop,
-        before: InputMonitoringState::Granted,
-        after: InputMonitoringState::Granted,
-    }
 }
 
 #[cfg(test)]

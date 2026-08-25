@@ -104,6 +104,7 @@ pub struct PermissionActionResult {
 }
 
 /// 从最小 plist XML 中解析 CFBundleIdentifier。
+#[cfg(any(test, target_os = "macos"))]
 fn parse_cfbundle_identifier_plist_xml(xml: &str) -> Option<String> {
     const KEY: &str = "CFBundleIdentifier";
     let key_pos = xml.find(KEY)?;
@@ -225,6 +226,7 @@ pub fn check_screen_capture_access() -> bool {
 }
 
 /// 查询输入监控是否已授权；兼容健康采样现有布尔判据。
+#[cfg(target_os = "macos")]
 pub fn check_input_monitoring_access() -> bool {
     input_monitoring::check_input_monitoring_state().granted
 }

@@ -27,6 +27,7 @@ use tokio::process::Command;
 
 const PROBE_TIMEOUT_SECS: u64 = 4;
 const SWITCH_TIMEOUT_SECS: u64 = 45;
+#[cfg(target_os = "macos")]
 const BREW_INSTALL_TIMEOUT_SECS: u64 = 300;
 /// CLI `--help` 中必然出现的子命令 token（GUI 二进制不会有）。
 const CLI_HELP_MARKERS: &[&str] = &["provider", "use", "sessions"];
@@ -344,6 +345,7 @@ fn read_app_version(app: &Path) -> Option<String> {
 }
 
 /// 从 XML plist 文本中提取某个 `<key>` 后紧跟的 `<string>` 值。
+#[cfg(any(test, target_os = "macos"))]
 fn extract_plist_version(text: &str, key: &str) -> Option<String> {
     let idx = text.find(key)?;
     let after = &text[idx + key.len()..];
@@ -359,10 +361,12 @@ fn extract_plist_version(text: &str, key: &str) -> Option<String> {
 }
 
 /// 比较版本字符串的主版本号是否不同。
+#[cfg(any(test, target_os = "macos"))]
 fn major_version_differs(a: &str, b: &str) -> bool {
     major_of(a) != major_of(b)
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn major_of(v: &str) -> String {
     let v = v.trim();
     let start = v.find(|c: char| c.is_ascii_digit()).unwrap_or(v.len());
