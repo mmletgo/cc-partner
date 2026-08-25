@@ -3296,62 +3296,56 @@ mod tests {
     ///     Windows 上父进程派生持管道后代后立即退出时，deadline 后必须能通过 Job 终止后代。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     仅 Windows：CREATE_SUSPENDED 起 powershell wrapper → Assign → Resume；
-    ///     wrapper 写 ready 信号文件（含真实后代 PID）后立刻退出，后代继续 sleep；
-    ///     断言 ready 时后代存活，TerminateJobObject 后后代退出。使用 NUL 而非 /dev/null。
+    ///     仅 Windows：CREATE_SUSPENDED 起 `cmd /C ping`（避免 powershell 冷启动），
+    ///     Assign → Resume；等 Job 出现非根 PID 后 `Child::kill` 只杀 cmd 根，
+    ///     断言 ping 仍存活，TerminateJobObject 后退出。使用 NUL 而非 /dev/null。
     #[cfg(windows)]
     #[test]
     fn windows_job_kills_descendants_after_root_exits() {
         use std::os::windows::process::CommandExt;
-        use std::path::PathBuf;
-
-        let ready_path: PathBuf =
-            std::env::temp_dir().join(format!("cc-partner-job-ready-{}.txt", std::process::id()));
-        let _ = std::fs::remove_file(&ready_path);
-        let ready_str = ready_path.to_string_lossy().replace('\'', "''");
-
-        // wrapper：启动长 sleep 后代，把后代 PID 写入 ready 文件，然后立刻 exit。
-        // 必须在 Assign 之后 Resume 才运行，否则后代可能逃逸 Job。
-        let script = format!(
-            "$p = Start-Process -FilePath 'ping.exe' -ArgumentList '-n','60','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{ready}' -Value $p.Id -Encoding ascii; exit 0",
-            ready = ready_str
-        );
 
         let job = WindowsProbeJob::create().expect("create empty job");
-        let mut command = StdCommand::new("powershell");
+        let mut command = StdCommand::new("cmd");
         command
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .args(["/C", "ping.exe -n 60 127.0.0.1"])
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .creation_flags(CREATE_SUSPENDED);
-        let mut child = command.spawn().expect("spawn suspended powershell wrapper");
+        let mut child = command.spawn().expect("spawn suspended cmd wrapper");
+        let root_pid = child.id();
         job.assign_child(&child)
             .expect("assign suspended root to job");
-        resume_suspended_process(child.id()).expect("resume after assign");
+        resume_suspended_process(root_pid).expect("resume after assign");
 
-        // hosted windows-latest 上 powershell 冷启动经常超过 5s。
-        let wait_ready = Instant::now() + Duration::from_secs(20);
-        let descendant_pid: u32 = loop {
-            if let Ok(content) = std::fs::read_to_string(&ready_path) {
-                let trimmed = content.trim();
-                if let Ok(pid) = trimmed.parse::<u32>() {
-                    break pid;
-                }
+        let wait_desc = Instant::now() + Duration::from_secs(10);
+        let descendant_pid = loop {
+            let live: Vec<u32> = job_assigned_pids(&job)
+                .into_iter()
+                .filter(|pid| *pid != root_pid && windows_pid_is_alive(*pid))
+                .collect();
+            if let Some(pid) = live.first().copied() {
+                break pid;
             }
             assert!(
-                Instant::now() < wait_ready,
-                "wrapper 未在时限内写出 ready 信号/后代 PID"
+                Instant::now() < wait_desc,
+                "cmd 未在时限内派生 Job 内后代; job_pids={:?}",
+                job_assigned_pids(&job)
             );
             std::thread::sleep(Duration::from_millis(20));
         };
 
-        // 根应很快退出；后代此时仍应存活。
-        let wait_root = Instant::now() + Duration::from_secs(20);
+        // 只杀根进程：Windows 默认不连坐子女，模拟 wrapper 先退出、后代仍占管道。
+        let _ = child.kill();
+        let wait_root = Instant::now() + Duration::from_secs(5);
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => {
-                    assert!(Instant::now() < wait_root, "powershell 根进程未及时退出");
+                    assert!(
+                        Instant::now() < wait_root,
+                        "cmd 根进程未被 kill 回收; descendant={descendant_pid}"
+                    );
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 Err(err) => panic!("try_wait wrapper failed: {err}"),
@@ -3359,12 +3353,11 @@ mod tests {
         }
         assert!(
             windows_pid_is_alive(descendant_pid),
-            "ready 后、Terminate 前后代 PID {descendant_pid} 应仍存活"
+            "根退出后、Terminate 前后代 PID {descendant_pid} 应仍存活"
         );
 
         let started = Instant::now();
         job.terminate().expect("TerminateJobObject after root exit");
-        // 轮询确认后代被 Job 杀掉。
         let kill_deadline = Instant::now() + Duration::from_secs(3);
         loop {
             if !windows_pid_is_alive(descendant_pid) {
@@ -3381,7 +3374,65 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "job 杀树过长: {elapsed:?}"
         );
-        let _ = std::fs::remove_file(&ready_path);
+    }
+
+    /// 读取 Job 内当前进程 PID 列表，供杀树回归断言。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     cmd wrapper 退出后不能再靠 stdout 拿后代 PID，必须问 Job 自己还绑着谁。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     QueryInformationJobObject(JobObjectBasicProcessIdList)；失败返回空列表。
+    #[cfg(windows)]
+    fn job_assigned_pids(job: &WindowsProbeJob) -> Vec<u32> {
+        use std::os::windows::io::AsRawHandle;
+
+        type BOOL = i32;
+        type DWORD = u32;
+        type HANDLE = *mut core::ffi::c_void;
+        const JOB_OBJECT_BASIC_PROCESS_ID_LIST: i32 = 3;
+
+        #[repr(C)]
+        struct JobObjectBasicProcessIdList {
+            number_of_assigned_processes: DWORD,
+            number_of_process_ids_in_list: DWORD,
+            process_id_list: [usize; 16],
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn QueryInformationJobObject(
+                h_job: HANDLE,
+                job_object_information_class: i32,
+                lp_job_object_information: *mut core::ffi::c_void,
+                cb_job_object_information_length: DWORD,
+                lp_return_length: *mut DWORD,
+            ) -> BOOL;
+        }
+
+        let mut info = JobObjectBasicProcessIdList {
+            number_of_assigned_processes: 0,
+            number_of_process_ids_in_list: 0,
+            process_id_list: [0; 16],
+        };
+        let mut ret_len: DWORD = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.handle.as_raw_handle() as HANDLE,
+                JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+                (&mut info as *mut JobObjectBasicProcessIdList).cast(),
+                std::mem::size_of::<JobObjectBasicProcessIdList>() as DWORD,
+                &mut ret_len,
+            )
+        };
+        if ok == 0 {
+            return Vec::new();
+        }
+        let n = (info.number_of_process_ids_in_list as usize).min(16);
+        info.process_id_list[..n]
+            .iter()
+            .map(|id| *id as u32)
+            .collect()
     }
 
     /// Business Logic（为什么需要这个函数）:
