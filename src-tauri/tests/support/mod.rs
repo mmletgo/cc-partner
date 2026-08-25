@@ -882,7 +882,7 @@ fn reap_child_with_timeout(
 ///
 /// Code Logic（这个函数做什么）:
 ///     侧线程循环 `read`；EOF/错误结束。共享 `Arc<Mutex<Vec<u8>>>` 给主线程超时取走。
-fn spawn_pipe_drain<T: Read + Send + 'static>(
+pub fn spawn_pipe_drain<T: Read + Send + 'static>(
     pipe: Option<T>,
 ) -> (thread::JoinHandle<()>, Arc<Mutex<Vec<u8>>>) {
     let buf = Arc::new(Mutex::new(Vec::new()));
@@ -910,7 +910,7 @@ fn spawn_pipe_drain<T: Read + Send + 'static>(
 ///
 /// Code Logic（这个函数做什么）:
 ///     轮询 `JoinHandle::is_finished`；完成后 join；超时 forget handle 并返回已缓冲字节。
-fn take_drain_buf(
+pub fn take_drain_buf(
     handle: thread::JoinHandle<()>,
     buf: Arc<Mutex<Vec<u8>>>,
     timeout: Duration,

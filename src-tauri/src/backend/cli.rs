@@ -974,11 +974,47 @@ pub fn windows_detached_creation_flags() -> u32 {
 ///
 /// Code Logic（这个函数做什么）:
 ///     设置 DETACHED_PROCESS 与 CREATE_NEW_PROCESS_GROUP creation flags（经可测 seam 计算）。
-///     不调用 `inherit_handles`：该 API 在 stable 上仍是 unstable feature。
+///     spawn 前清掉当前进程 stdio 的 HANDLE_FLAG_INHERIT：Rust stable 的
+///     `inherit_handles(false)` 仍是 unstable，不调；否则 serve 会复制 start 的
+///     stdout 写句柄，调用方 `read_to_end` 永远等不到 EOF。
 #[cfg(windows)]
 fn configure_detached_child(command: &mut Command) {
     use std::os::windows::process::CommandExt;
+    disable_stdio_handle_inheritance();
     command.creation_flags(windows_detached_creation_flags());
+}
+
+/// 禁止当前进程的 stdin/stdout/stderr 被后续 CreateProcess 默认继承。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `start` 的 stdout 常常被 CI/脚本 pipe；若 serve 再拿到同一写句柄，
+///     `start` 退出后管道仍有 writer，父进程会卡在 drain。
+///
+/// Code Logic（这个函数做什么）:
+///     GetStdHandle + SetHandleInformation(HANDLE_FLAG_INHERIT=0)。
+///     显式传给 child 的 Stdio::null() 仍经 STARTF_USESTDHANDLES 生效。
+#[cfg(windows)]
+fn disable_stdio_handle_inheritance() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n_std_handle: i32) -> isize;
+        fn SetHandleInformation(handle: isize, mask: u32, flags: u32) -> i32;
+    }
+    const STD_INPUT_HANDLE: i32 = -10;
+    const STD_OUTPUT_HANDLE: i32 = -11;
+    const STD_ERROR_HANDLE: i32 = -12;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    const INVALID_HANDLE_VALUE: isize = -1;
+    // SAFETY: 只改本进程标准句柄的 inherit 标志，不关闭、不跨线程转移所有权。
+    unsafe {
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = GetStdHandle(id);
+            if handle == 0 || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            let _ = SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+        }
+    }
 }
 
 /// 配置其它平台 serve 子进程脱离父进程。

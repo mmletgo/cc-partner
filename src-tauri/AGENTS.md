@@ -570,7 +570,8 @@ Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runne
 - **duplicate start / concurrent serve**：不创建第二 backend 实例，报告既有实例（含并发双重 start：data_dir 级 start 锁；并发直接 serve：data_dir 级 serve 生命周期锁；control pid/port 稳定且失败方最终退出，teardown 可完整回收）
 - **stale control recovery**：死 PID + 未占用端口时 `status` 识别 stale；后续 `start` 恢复，且不触碰其它 case 的 control/PID
 - **data_dir 隔离**：`config::data_dir()` 认合法绝对 `CC_PARTNER_DATA_DIR`；`load()` 拒绝/纠正逃逸隔离根的 `db_path`；smoke harness 为每 case 注入独立 data 子目录，config/control/db/log 全部落在隔离根，**不触碰** runner/用户真实 `~/.cc-partner`
-- **硬超时**：smoke `run_cli` 对每个 CLI 子进程有 `op_timeout` 硬超时；保留 Child 句柄，侧线程 drain stdout/stderr，超时用 `Child::kill` + 有界 `try_wait` reap（kill/taskkill/probe 也禁止无界 `Command::status()`/`output()`）；workflow 每个 cargo step 有 `timeout-minutes` 且小于 job 30m，保证 `always()` cleanup/artifact 有机会执行
+- **硬超时**：smoke `run_cli` / 并发 `wait_child_output` 对每个 CLI 子进程有 `op_timeout` 硬超时；保留 Child 句柄，侧线程 drain stdout/stderr，超时用 `Child::kill` + 有界 `try_wait` reap（kill/taskkill/probe 也禁止无界 `Command::status()`/`output()`）；**进程已退出后禁止无界 `read_to_end`**（Windows 上 detached `serve` 一旦占着 stdout 写句柄，EOF 永不来）；workflow 每个 cargo step 有 `timeout-minutes` 且小于 job 45m，保证 `always()` cleanup/artifact 有机会执行
+- **Windows `start` 句柄继承**：`configure_detached_child` spawn 前 `SetHandleInformation(HANDLE_FLAG_INHERIT=0)` 清掉当前进程 stdio 继承位，避免 `serve` 复制 `start` 的 pipe 写句柄；**禁止** `CommandExt::inherit_handles`（stable 上仍是 unstable feature）
 - **平台路径/进程语义单测**：`backend::control::tests`、`backend::cli::tests`、`workbench::sessions::tests`
 - **日志轮转 / 脱敏单测**：`backend::logging::tests`（5 MiB 语义用小 fixture 强制 close/rename/reopen；history 上限 3 且无 `.4`；Unix 目录 0700/文件 0600；Windows close-before-rename 与可读写；敌意字段脱敏）
 - **doctor 单测**：`backend::doctor::tests`（healthy/degraded/unhealthy、隐私归一化、有界 probe fixture）
@@ -642,7 +643,7 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
   - `push` → `master`，同一路径过滤
   - `schedule`：`23 18 * * *`（每日 UTC 18:23，**无**路径过滤，完整矩阵兜底）
   - `workflow_dispatch` 手动
-- **陷阱**：workflow / job 的 `env` mapping 禁止 `runner.*`（GitHub 静态校验会整文件失败 → 0-job，workflow 名退化成文件路径）。隔离根在 Prepare 步骤写入 `GITHUB_ENV`。
+- **陷阱**：workflow / job 的 `env` mapping 禁止 `runner.*`（GitHub 静态校验会整文件失败 → 0-job，workflow 名退化成文件路径）。隔离根在 Prepare 步骤写入 `GITHUB_ENV`。Windows `start` 禁止 `inherit_handles`；stdio inherit 用 `SetHandleInformation`，harness drain 必须有界。
 - **矩阵**：`macos-latest` + `windows-latest`；`fail-fast: false`（单平台失败不取消另一平台）；**无 `continue-on-error`**，required checks 失败即阻断
 - **约束**：每 job/cargo/子进程有 timeout；隔离目录写数据；job summary 必须显式列出 NOT VERIFIED 能力与 doctor/privacy 契约；缺少可选环境时写明 skip reason 并进 summary，禁止静默 skip
 

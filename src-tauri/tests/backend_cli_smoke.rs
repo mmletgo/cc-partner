@@ -9,7 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use support::{
     captured_from_output, dead_pid, ensure_platform_supported, process_is_alive, read_control_file,
-    unused_local_port, write_control_file, CapturedCli, ControlFileJson, SmokeCase,
+    spawn_pipe_drain, take_drain_buf, unused_local_port, write_control_file, CapturedCli,
+    ControlFileJson, SmokeCase,
 };
 
 /// Business Logic（为什么需要这个函数）:
@@ -479,31 +480,26 @@ fn concurrent_duplicate_start_only_one_backend_survives() {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     并发 start smoke 需要同时等待两个 CLI 子进程，且每个都有 deadline。
+///     Windows 上 detached serve 可能占着 stdout 写句柄，禁止进程退出后无界 read_to_end。
 ///
 /// Code Logic（这个函数做什么）:
-///     轮询 try_wait；超时 kill+有界 reap；成功后 read_to_end stdout/stderr 组装 Output。
+///     一开始就侧线程增量 drain；轮询 try_wait；超时 kill+有界 reap；
+///     随后 take_drain_buf 取已缓冲字节，绝不无限等 EOF。
 fn wait_child_output(
     child: &mut std::process::Child,
     deadline: Instant,
     label: &str,
     case: &mut SmokeCase,
 ) -> std::process::Output {
-    use std::io::Read;
+    let (stdout_drain, stdout_buf) = spawn_pipe_drain(child.stdout.take());
+    let (stderr_drain, stderr_buf) = spawn_pipe_drain(child.stderr.take());
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr);
-                }
                 return std::process::Output {
                     status,
-                    stdout,
-                    stderr,
+                    stdout: take_drain_buf(stdout_drain, stdout_buf, Duration::from_secs(2)),
+                    stderr: take_drain_buf(stderr_drain, stderr_buf, Duration::from_secs(2)),
                 };
             }
             Ok(None) => {
@@ -513,18 +509,18 @@ fn wait_child_output(
                     while Instant::now() < reap_deadline {
                         match child.try_wait() {
                             Ok(Some(status)) => {
-                                let mut stdout = Vec::new();
-                                let mut stderr = Vec::new();
-                                if let Some(mut out) = child.stdout.take() {
-                                    let _ = out.read_to_end(&mut stdout);
-                                }
-                                if let Some(mut err) = child.stderr.take() {
-                                    let _ = err.read_to_end(&mut stderr);
-                                }
                                 return std::process::Output {
                                     status,
-                                    stdout,
-                                    stderr,
+                                    stdout: take_drain_buf(
+                                        stdout_drain,
+                                        stdout_buf,
+                                        Duration::from_secs(1),
+                                    ),
+                                    stderr: take_drain_buf(
+                                        stderr_drain,
+                                        stderr_buf,
+                                        Duration::from_secs(1),
+                                    ),
                                 };
                             }
                             Ok(None) => thread::sleep(Duration::from_millis(20)),
