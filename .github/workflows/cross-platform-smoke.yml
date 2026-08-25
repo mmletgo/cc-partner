@@ -100,7 +100,7 @@ jobs:
           echo "os=${{ matrix.os }}"
 
       # 每个 cargo 步骤 timeout-minutes 必须小于 job 45m，给 always() cleanup/artifact 留余量。
-      # 冷缓存下 lib test 编译可能超过 12m（首次 macos-latest 在编译 app 时被杀掉）。
+      # 冷缓存下 lib test 编译可能超过 12m；unit 曾在 macos-latest 编译+跑测贴到 20m 被杀。
       - name: Rust format check
         id: fmt
         working-directory: src-tauri
@@ -123,7 +123,7 @@ jobs:
         id: unit
         working-directory: src-tauri
         shell: bash
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           set -euo pipefail
           {
