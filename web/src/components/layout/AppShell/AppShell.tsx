@@ -206,9 +206,7 @@ export function AppShell({ children }: AppShellProps) {
     setGameHubOpen(false);
   }, []);
 
-  useEffect(() => {
-    if (!experimentalFeatures.game) setGameHubOpen(false);
-  }, [experimentalFeatures.game]);
+  const gameHubVisible = experimentalFeatures.game && gameHubOpen;
 
   return (
     <div
@@ -246,7 +244,7 @@ export function AppShell({ children }: AppShellProps) {
                     className={styles.footerIconButton}
                     onClick={openGameHub}
                     aria-haspopup="dialog"
-                    aria-expanded={gameHubOpen}
+                    aria-expanded={gameHubVisible}
                     aria-label={t('wordgame:gameButtonTitle')}
                     title={t('wordgame:gameButtonTitle')}
                   >
@@ -372,9 +370,9 @@ export function AppShell({ children }: AppShellProps) {
           <MobileAccessCard compact className={styles.mobileAccessCard} />
         </div>
       </Dialog>
-      {experimentalFeatures.game && gameHubOpen ? (
+      {gameHubVisible ? (
         <Suspense fallback={null}>
-          <GameHubDialog open={gameHubOpen} onClose={closeGameHub} />
+          <GameHubDialog open={gameHubVisible} onClose={closeGameHub} />
         </Suspense>
       ) : null}
       {/* 应用内健康 toast 已停用（改用系统通知 + 全屏遮罩），代码保留以便恢复（先测试）：

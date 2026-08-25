@@ -23,7 +23,9 @@ import { I18nextProvider } from 'react-i18next';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { ExperimentalFeaturesProvider } from '@/hooks/useExperimentalFeatures';
 import i18n from '@/i18n';
+import { DEFAULT_EXPERIMENTAL_FEATURES } from '@/lib/types/settings';
 
 vi.mock('../../../hooks/useAppVersion', () => ({
   useAppVersion: () => '0.0.0-test',
@@ -122,13 +124,21 @@ afterEach(() => {
  */
 function renderShell(): void {
   render(
-    <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={['/']}>
-        <AppShell>
-          <div>main</div>
-        </AppShell>
-      </MemoryRouter>
-    </I18nextProvider>,
+    <ExperimentalFeaturesProvider
+      initialFeatures={{
+        ...DEFAULT_EXPERIMENTAL_FEATURES,
+        battery: true,
+        game: true,
+      }}
+    >
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter initialEntries={['/']}>
+          <AppShell>
+            <div>main</div>
+          </AppShell>
+        </MemoryRouter>
+      </I18nextProvider>
+    </ExperimentalFeaturesProvider>,
   );
 }
 

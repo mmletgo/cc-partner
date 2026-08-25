@@ -16,7 +16,10 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
 
+import { ExperimentalFeaturesProvider } from '@/hooks/useExperimentalFeatures';
+import { DEFAULT_EXPERIMENTAL_FEATURES } from '@/lib/types/settings';
 import { useWorkbenchAutomationController } from './useWorkbenchAutomationController';
 import type { WorkbenchAutomationControllerParams } from './useWorkbenchAutomationController';
 import type { WorkbenchDeepLink } from '../workbenchDeepLink';
@@ -143,9 +146,19 @@ function buildHarness(overrides: HarnessOverrides = {}): WorkbenchAutomationCont
 }
 
 function renderController(params: WorkbenchAutomationControllerParams) {
-  return renderHook((props: WorkbenchAutomationControllerParams) => useWorkbenchAutomationController(props), {
-    initialProps: params,
-  });
+  return renderHook(
+    (props: WorkbenchAutomationControllerParams) => useWorkbenchAutomationController(props),
+    {
+      initialProps: params,
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <ExperimentalFeaturesProvider
+          initialFeatures={{ ...DEFAULT_EXPERIMENTAL_FEATURES, automation: true }}
+        >
+          {children}
+        </ExperimentalFeaturesProvider>
+      ),
+    },
+  );
 }
 
 /** 等待所有 pending microtask 落地（queueMicrotask / Promise.then）。 */

@@ -264,10 +264,13 @@ describe('workbenchAgentHints', () => {
       version: i + 1,
       endedAt: new Date(now - 1000).toISOString(),
     }));
-    const parsed = loadPersistedHintExtras({
-      [ACKED_COMPLETED_STORAGE_KEY]: '[]',
-      [SEEN_COMPLETED_STORAGE_KEY]: serializeSeenCompleted([...edges, ...overflow]),
-    });
+    const parsed = loadPersistedHintExtras(
+      {
+        [ACKED_COMPLETED_STORAGE_KEY]: '[]',
+        [SEEN_COMPLETED_STORAGE_KEY]: serializeSeenCompleted([...edges, ...overflow]),
+      },
+      now,
+    );
     expect(parsed.seenCompleted.length).toBeLessThanOrEqual(SEEN_COMPLETED_CAP);
     expect(parsed.seenCompleted.some((edge: SeenCompletedEdge) => edge.agentSessionId === 'old')).toBe(false);
 

@@ -25,7 +25,6 @@ import type {
   PrepareAgentDowngradeResult,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
-  OrchestratorTaskBlockCreated,
   OrchestratorTaskView,
   OrchestratorWorkflowState,
   WorkflowDocument,

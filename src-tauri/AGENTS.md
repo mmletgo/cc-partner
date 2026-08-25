@@ -639,6 +639,7 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 - **Workflow name**：`Cross-Platform Smoke`（`.github/workflows/cross-platform-smoke.yml`）
 - **触发**：
   - `pull_request` → `master`，路径过滤：`src-tauri/**`、`web/src/pages/Workbench/**`、`web/src/hooks/workbench*`、`scripts/**`、`.github/workflows/**`、`web/package-lock.json`（只降无关变更成本）
+  - `push` → `master`，同一路径过滤（ruleset 要求本 workflow 在 master push 出结论；`on` 不含 push 时 GitHub 会建 0-job 失败 run）
   - `schedule`：`23 18 * * *`（每日 UTC 18:23，**无**路径过滤，完整矩阵兜底）
   - `workflow_dispatch` 手动
 - **矩阵**：`macos-latest` + `windows-latest`；`fail-fast: false`（单平台失败不取消另一平台）；**无 `continue-on-error`**，required checks 失败即阻断

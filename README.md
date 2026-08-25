@@ -447,7 +447,7 @@ cd web && npm install && ./node_modules/.bin/tauri build
 ### CI
 
 - **质量门禁** [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：PR / `master` 推送（文档路径在 push 时可忽略）
-- **跨平台 smoke** [`.github/workflows/cross-platform-smoke.yml`](.github/workflows/cross-platform-smoke.yml)：路径过滤 PR + 定时；见上文未覆盖项
+- **跨平台 smoke** [`.github/workflows/cross-platform-smoke.yml`](.github/workflows/cross-platform-smoke.yml)：路径过滤 PR / `master` push + 定时；见上文未覆盖项
 - **发版** [`.github/workflows/release-tauri.yml`](.github/workflows/release-tauri.yml)：推送 `v*` tag
 
 ### 发版流程

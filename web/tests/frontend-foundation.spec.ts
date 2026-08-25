@@ -646,6 +646,26 @@ test.describe('frontend foundation smoke', () => {
             };
           }
           if (cmd === 'get_version') return { version: '0.0.0-test', buildDate: '2026-07-14' };
+          if (cmd === 'get_config' || cmd === 'get_default_config') {
+            return {
+              deviceId: 'device-1',
+              deviceName: 'Hans-Mac',
+              receiveDir: '/tmp/files',
+              gamePluginDir: '/tmp/game-plugins',
+              screenshotHotkey: '<cmd>+<shift>+s',
+              promptOptimizerHotkey: '<ctrl>',
+              promptQuickInputHotkey: '<ctrl>+/',
+              promptOptimizerFillLanguage: 'zh',
+              httpPort: 0,
+              experimentalFeatures: {
+                battery: false,
+                game: false,
+                browser: false,
+                automation: false,
+                cloudSync: false,
+              },
+            };
+          }
           if (cmd === 'list_workbench_projects') return [];
           if (cmd === 'list_workbench_sessions') return [];
           if (cmd === 'list_workbench_window_occupancy') return [];

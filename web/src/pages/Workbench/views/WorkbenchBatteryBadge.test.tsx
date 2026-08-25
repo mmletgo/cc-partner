@@ -18,8 +18,10 @@ import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 
+import { ExperimentalFeaturesProvider } from '@/hooks/useExperimentalFeatures';
 import i18n from '@/i18n';
 import type { BatterySnapshot } from '@/lib/types/battery';
+import { DEFAULT_EXPERIMENTAL_FEATURES } from '@/lib/types/settings';
 
 const batteryMock = vi.hoisted(() => ({
   snapshot: null as BatterySnapshot | null,
@@ -67,9 +69,13 @@ function makeSnapshot(overrides: Partial<BatterySnapshot>): BatterySnapshot {
  */
 function renderBadge() {
   return render(
-    <I18nextProvider i18n={i18n}>
-      <WorkbenchBatteryBadge />
-    </I18nextProvider>,
+    <ExperimentalFeaturesProvider
+      initialFeatures={{ ...DEFAULT_EXPERIMENTAL_FEATURES, battery: true }}
+    >
+      <I18nextProvider i18n={i18n}>
+        <WorkbenchBatteryBadge />
+      </I18nextProvider>
+    </ExperimentalFeaturesProvider>,
   );
 }
 

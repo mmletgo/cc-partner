@@ -15,6 +15,7 @@
 
 import { expect, test } from './fixtures';
 import type { PlaywrightBackendHarness } from './support/backendHarness';
+import { makeAppConfig } from './support/appBootstrap';
 
 const TS = '2026-07-14T00:00:00.000Z';
 
@@ -215,6 +216,21 @@ function registerMobileRoutes(
       ],
       http_port: 62116,
     },
+  });
+  const experimentalFeatures = {
+    battery: false,
+    game: false,
+    browser: false,
+    automation: true,
+    cloudSync: false,
+  };
+  harness.command('get_config', {
+    kind: 'resolve',
+    value: makeAppConfig({ experimentalFeatures }),
+  });
+  harness.route('GET', '/api/orchestrator/config', {
+    kind: 'resolve',
+    value: { experimentalFeatures },
   });
   harness.route('GET', '/api/mobile/attention', {
     kind: 'resolve',

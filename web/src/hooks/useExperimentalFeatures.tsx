@@ -116,6 +116,7 @@ export function ExperimentalFeaturesProvider({
 
   useEffect(() => {
     if (initialFeatures !== undefined) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 无注入 initialFeatures 时挂载拉取 get_config
     void refresh();
   }, [initialFeatures, refresh]);
 
@@ -154,6 +155,7 @@ export function ExperimentalFeaturesProvider({
  * Code Logic（这个 hook 做什么）:
  *   有 Context 则返回；否则返回全关 no-op。
  */
+// eslint-disable-next-line react-refresh/only-export-components -- Provider 与 hook 同入口，避免每个消费方再加一行 import
 export function useExperimentalFeatures(): ExperimentalFeaturesContextValue {
   return useContext(ExperimentalFeaturesContext) ?? FAIL_CLOSED;
 }

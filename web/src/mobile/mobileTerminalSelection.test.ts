@@ -30,10 +30,6 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
   }
 }
 
-function assertTrue(value: boolean, message: string): void {
-  if (!value) throw new Error(message);
-}
-
 /**
  * Business Logic（为什么需要这个函数）:
  *   手势状态与单元格坐标是对象；需要字段级比较，不能只做引用相等。

@@ -179,7 +179,7 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
 
 describe('WorkbenchProjectRail discovery IA', () => {
   test('renders section heading and empty explanation with local/remote CTAs', () => {
-    const ctx = renderRail({ projects: [] });
+    renderRail({ projects: [] });
 
     expect(screen.getByRole('heading', { name: '工作台项目' })).toBeTruthy();
     expect(

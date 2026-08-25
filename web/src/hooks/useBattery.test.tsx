@@ -67,7 +67,7 @@ describe('useBattery', () => {
     setModeApi.mockResolvedValue({ ...chargingSnap, mode: 'unlimited' });
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
-      value: 'hidden',
+      value: 'visible',
     });
     vi.spyOn(document, 'hasFocus').mockReturnValue(false);
   });

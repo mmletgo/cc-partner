@@ -244,7 +244,7 @@ describe('useWorkbenchAgentHints', () => {
           projectId: 'p1',
           worktreeId: 'wt-1',
           version: 3,
-          endedAt: '2026-08-13T00:04:00.000Z',
+          endedAt: new Date(Date.now() - 60_000).toISOString(),
         },
       ]),
     );
@@ -270,7 +270,7 @@ describe('useWorkbenchAgentHints', () => {
           projectId: 'p1',
           worktreeId: 'wt-1',
           version: 4,
-          endedAt: '2026-08-13T00:04:00.000Z',
+          endedAt: new Date(Date.now() - 60_000).toISOString(),
         },
       ]),
     );

@@ -53,7 +53,7 @@ describe('workbenchRemoteProjectPickerLayout', () => {
       assertNotContains(source, 'manualPath', 'remote picker should not expose manual path UI or locale keys');
       assertNotContains(source, 'manualUnverified', 'remote picker should not expose manual path unverified state');
     }
-    assertNotContains(component, 'Input', 'remote picker should not import Input only for removed manual path UI');
+    assertContains(component, '<Input', 'create-folder dialog may use Input; manual path Input remains forbidden by manualPath assertions');
     assertNotContains(component, 'canOpenRemoteManualProjectPath', 'remote picker should not use manual open helper');
     assertNotContains(component, 'normalizeRemoteManualPath', 'remote picker should not normalize manual paths');
 

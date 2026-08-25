@@ -427,7 +427,6 @@ export function useOrchestratorController(
    */
   useEffect(() => {
     if (activeProject?.kind !== 'remote') {
-      setPeerDevices([]);
       return;
     }
     let cancelled = false;
@@ -518,8 +517,11 @@ export function useOrchestratorController(
 
   const groups = useMemo(() => groupBoardItems(tasks), [tasks]);
   const ownerPeer = useMemo(
-    () => peerDevices.find((device) => device.id === activeProject?.deviceId) ?? null,
-    [activeProject?.deviceId, peerDevices],
+    () =>
+      activeProject?.kind === 'remote'
+        ? (peerDevices.find((device) => device.id === activeProject.deviceId) ?? null)
+        : null,
+    [activeProject, peerDevices],
   );
   const canCreateTaskBlock = canCreateOrchestratorTaskBlock({
     projectKind: activeProject?.kind,

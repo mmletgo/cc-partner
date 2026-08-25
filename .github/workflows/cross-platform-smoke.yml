@@ -36,6 +36,16 @@ on:
       - 'scripts/**'
       - '.github/workflows/**'
       - 'web/package-lock.json'
+  # 仓库 ruleset 要求本 workflow 在 master push 上出结论；on 不含 push 时 GitHub 会建 0-job 失败 run。
+  push:
+    branches: [master]
+    paths:
+      - 'src-tauri/**'
+      - 'web/src/pages/Workbench/**'
+      - 'web/src/hooks/workbench*'
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - 'web/package-lock.json'
   # 每日 UTC 18:23 完整矩阵（不依赖本地夏令时）
   schedule:
     - cron: '23 18 * * *'
