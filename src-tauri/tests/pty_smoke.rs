@@ -124,16 +124,89 @@ fn build_echo_exit_input(token: &str) -> String {
     }
 }
 
+/// 去掉 CSI/OSC/简单 ESC，让 marker 扫描看到 ConPTY 真正打印的文本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Windows ConPTY 会在 echo 输出前后夹 hide-cursor / CUP / OSC 标题，
+///     直接按字节切行会把 marker 和提示符粘在同一“行”上。
+///
+/// Code Logic（这个函数做什么）:
+///     ESC [ … 终字节(0x40–0x7E)、ESC ] … BEL/ST、其它 ESC+1 字节一律丢弃。
+fn strip_terminal_control_sequences(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            if bytes[i] != 0x07 {
+                out.push(bytes[i]);
+            }
+            i += 1;
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        match bytes[i + 1] {
+            b'[' => {
+                i += 2;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    i += 1;
+                    if (0x40..=0x7e).contains(&b) {
+                        break;
+                    }
+                }
+            }
+            b']' => {
+                i += 2;
+                while i < bytes.len() {
+                    if bytes[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => i += 2,
+        }
+    }
+    out
+}
+
+/// 一行是否是 echo 的结果行（不是 `echo MARKER` 命令回显）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ConPTY 可能用 CUP 把下一行提示符叠到 marker 后面，整行不等于 marker，
+///     但仍是真正的 echo 输出。
+///
+/// Code Logic（这个函数做什么）:
+///     去尾空白后整行等于 marker，或 marker 出现在行首（前面只有空白）。
+fn line_is_echo_result_marker(line: &str, marker: &str) -> bool {
+    let trimmed = line.trim_end_matches([' ', '\t']);
+    if trimmed == marker {
+        return true;
+    }
+    let Some(idx) = trimmed.find(marker) else {
+        return false;
+    };
+    trimmed[..idx].chars().all(|c| c == ' ' || c == '\t')
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     交互式 shell 会回显输入行，`printf '...marker...'` 命令本身就包含 marker 子串，
 ///     若用 contains 会在命令回显阶段误判成功并提前结束读循环。
 ///
 /// Code Logic（这个函数做什么）:
-///     按 `\n`/`\r` 切行后，只有整行（trim 尾部空白）等于 marker 才算命中。
+///     先剥 CSI/OSC，再按 `\n`/`\r` 切行；命中 echo 结果行（行首 marker）才算成功。
 fn output_contains_standalone_marker(buf: &[u8], marker: &str) -> bool {
-    let text = String::from_utf8_lossy(buf);
+    let stripped = strip_terminal_control_sequences(buf);
+    let text = String::from_utf8_lossy(&stripped);
     text.split(['\n', '\r'])
-        .any(|line| line.trim_end_matches([' ', '\t']) == marker)
+        .any(|line| line_is_echo_result_marker(line, marker))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -560,6 +633,35 @@ fn marker_and_newline_helpers_are_stable() {
         with_dsr,
         "__CC_PARTNER_abc123__"
     ));
+    // cmd 回显的 `echo MARKER` 不得算成功。
+    let cmd_echo = b"C:\\Users\\runneradmin>echo __CC_PARTNER_abc123__\r\n";
+    assert!(!output_contains_standalone_marker(
+        cmd_echo,
+        "__CC_PARTNER_abc123__"
+    ));
+    // windows-latest ConPTY：hide-cursor + marker + CUP 叠上下一提示符。
+    let conpty_glued =
+        b"\x1b[?25l__CC_PARTNER_abc123__\x1b[7;1HC:\\Users\\runneradmin>exit /b 0\r\n";
+    assert!(output_contains_standalone_marker(
+        conpty_glued,
+        "__CC_PARTNER_abc123__"
+    ));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     必须按 hosted Windows ConPTY 的真实转义序列识别 echo 结果，避免再把成功当超时。
+///
+/// Code Logic（这个测试做什么）:
+///     用 run 32871817645 的输出片段断言：命令回显不算，CUP 粘贴的结果行算。
+#[test]
+fn windows_conpty_glued_marker_is_detected() {
+    let marker = "__CC_PARTNER_18cf1a46574f627c1838__";
+    let output = b"\x1b[6n\x1b[?9001h\x1b[?1004h\x1b[m\x1b]0;C:\\Windows\\system32\\cmd.exe\x07\x1b[?25hMicrosoft Windows [Version 10.0.26100.33296]\r\n(c) Microsoft Corporation. All rights reserved.\r\n\x1b]0;Administrator: C:\\Windows\\system32\\cmd.exe\x07\r\nC:\\Users\\runneradmin>echo __CC_PARTNER_18cf1a46574f627c1838__\r\n\x1b[?25l__CC_PARTNER_18cf1a46574f627c1838__\x1b[7;1HC:\\Users\\runneradmin>exit /b 0\r\n\x1b]0;C:\\Windows\\system32\\cmd.exe\x07\x1b[?25h";
+    assert!(
+        output_contains_standalone_marker(output, marker),
+        "stripped={}",
+        escape_bytes_for_diagnostic(&strip_terminal_control_sequences(output))
+    );
 }
 
 /// Business Logic（为什么需要这个测试）:
