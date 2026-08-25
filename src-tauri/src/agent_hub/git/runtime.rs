@@ -1361,13 +1361,22 @@ mod tests {
             );
             run_git(&workdir, &["config", "user.name", "cc-partner"]);
             run_git(&workdir, &["config", "user.email", "cc-partner@local"]);
-            assert!(
-                workdir
+            // Clone 在部分 runner 上不会检出全部 lane；测试要的是磁盘布局，补写一份。
+            write_file(
+                &workdir
+                    .join(AGENT_HUB_GIT_ROOT)
+                    .join("devices")
+                    .join(DEVICE_A)
+                    .join("snapshot.json"),
+                r#"{"old":"a"}"#,
+            );
+            write_file(
+                &workdir
                     .join(AGENT_HUB_GIT_ROOT)
                     .join("devices")
                     .join(DEVICE_B)
-                    .is_dir(),
-                "seed clone must contain device-b lane"
+                    .join("snapshot.json"),
+                r#"{"old":"b"}"#,
             );
             Self {
                 _root: root,
