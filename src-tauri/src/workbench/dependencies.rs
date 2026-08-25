@@ -3329,8 +3329,8 @@ mod tests {
             .expect("assign suspended root to job");
         resume_suspended_process(child.id()).expect("resume after assign");
 
-        // 等待 ready 信号并解析真实后代 PID。
-        let wait_ready = Instant::now() + Duration::from_secs(5);
+        // hosted windows-latest 上 powershell 冷启动经常超过 5s。
+        let wait_ready = Instant::now() + Duration::from_secs(20);
         let descendant_pid: u32 = loop {
             if let Ok(content) = std::fs::read_to_string(&ready_path) {
                 let trimmed = content.trim();
@@ -3346,7 +3346,7 @@ mod tests {
         };
 
         // 根应很快退出；后代此时仍应存活。
-        let wait_root = Instant::now() + Duration::from_secs(5);
+        let wait_root = Instant::now() + Duration::from_secs(20);
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
