@@ -1623,7 +1623,6 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&real, &link).unwrap();
-
         let mut item = sample_item(
             AgentTarget::Claude,
             PortableAssetKind::Skill,
