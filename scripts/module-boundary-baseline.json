@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-15T12:47:42.528Z",
+  "generatedAt": "2026-08-25T06:54:30.333Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -16,29 +16,156 @@
     }
   },
   "files": {
+    "src-tauri/src/agent_hub/portable_actions/executor.rs": {
+      "lines": 2829
+    },
+    "src-tauri/src/agent_hub/portable_inventory/scanner.rs": {
+      "lines": 5006,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
+    },
+    "src-tauri/src/agent_hub/replication/pull.rs": {
+      "lines": 3912
+    },
+    "src-tauri/src/agent_hub/service.rs": {
+      "lines": 3412
+    },
+    "src-tauri/src/agent_hub/snapshot/importer.rs": {
+      "lines": 2884
+    },
+    "src-tauri/src/agent_hub/targets/portable.rs": {
+      "lines": 2851
+    },
+    "src-tauri/src/backend/control_client.rs": {
+      "lines": 4202
+    },
     "src-tauri/src/backend/logging.rs": {
       "lines": 2502
     },
+    "src-tauri/src/commands/workbench/common.rs": {
+      "lines": 2568
+    },
+    "src-tauri/src/commands/workbench/git.rs": {
+      "lines": 4653
+    },
+    "src-tauri/src/net/http_server.rs": {
+      "lines": 2539
+    },
     "src-tauri/src/net/peer_client.rs": {
-      "lines": 3014
+      "lines": 3110
+    },
+    "src-tauri/src/net/routes/orchestrator.rs": {
+      "lines": 2617
+    },
+    "src-tauri/src/net/routes/workbench.rs": {
+      "lines": 3569
+    },
+    "src-tauri/src/orchestrator/delivery.rs": {
+      "lines": 3034
+    },
+    "src-tauri/src/orchestrator/remote_client.rs": {
+      "lines": 2866
+    },
+    "src-tauri/src/storage/agent_hub_repo.rs": {
+      "lines": 9699,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
     },
     "src-tauri/src/workbench/dependencies.rs": {
-      "lines": 3457
+      "lines": 3544
+    },
+    "src-tauri/src/workbench/git.rs": {
+      "lines": 4811
+    },
+    "src-tauri/src/workbench/remote_client.rs": {
+      "lines": 3277
+    },
+    "src-tauri/src/workbench/remote_events.rs": {
+      "lines": 4804
     },
     "src-tauri/src/workbench/sessions.rs": {
-      "lines": 3147
+      "lines": 11828,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
+    },
+    "web/src/api/agentHub.ts": {
+      "lines": 1293
+    },
+    "web/src/api/workbench.ts": {
+      "lines": 1081
     },
     "web/src/api/workbenchHttp.ts": {
-      "lines": 1162
+      "lines": 1475
+    },
+    "web/src/hooks/useWorkbenchHttpEvents.ts": {
+      "lines": 1438
+    },
+    "web/src/hooks/useWorkbenchTerminalBuffers.tsx": {
+      "lines": 1108
+    },
+    "web/src/hooks/workbenchTerminalBuffer.ts": {
+      "lines": 1347
+    },
+    "web/src/lib/types/workbench.ts": {
+      "lines": 1014
+    },
+    "web/src/mobile/components/MobileTerminalPanel.tsx": {
+      "lines": 2610,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
     },
     "web/src/mobile/controllers/useMobileAutomationController.ts": {
-      "lines": 1371
+      "lines": 1692,
+      "exception": {
+        "owner": "frontend-mobile",
+        "reason": "Mobile automation controller residual after view split; further domain split deferred",
+        "expiresAt": "2026-11-23"
+      }
     },
     "web/src/mobile/MobileWorkbench.tsx": {
-      "lines": 1265
+      "lines": 1847,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
+    },
+    "web/src/mobile/mobileWorkbenchState.ts": {
+      "lines": 1261
+    },
+    "web/src/pages/AgentHub/instructions/instructionThreePane.ts": {
+      "lines": 1071
+    },
+    "web/src/pages/AgentHub/instructions/useInstructionThreePaneController.ts": {
+      "lines": 1804,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
+    },
+    "web/src/pages/AgentHub/useAgentHubController.ts": {
+      "lines": 2636,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
     },
     "web/src/pages/Orchestrator/controllers/useOrchestratorController.ts": {
-      "lines": 1927,
+      "lines": 2463,
       "exception": {
         "owner": "frontend-orchestrator",
         "reason": "Orchestrator controller residual; keep no-growth until Task 8 board decomposition",
@@ -46,19 +173,32 @@
       }
     },
     "web/src/pages/Prompts/Prompts.tsx": {
-      "lines": 1127
+      "lines": 1198
     },
     "web/src/pages/Scratchpad/Scratchpad.tsx": {
       "lines": 1005
     },
     "web/src/pages/Workbench/controllers/useWorkbenchFileController.ts": {
-      "lines": 1473
+      "lines": 1478
+    },
+    "web/src/pages/Workbench/controllers/useWorkbenchTerminalController.ts": {
+      "lines": 1545,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
     },
     "web/src/pages/Workbench/controllers/useWorkbenchWorktreeGitController.ts": {
-      "lines": 1396
+      "lines": 1733,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-11-23"
+      }
     },
     "web/src/pages/Workbench/Workbench.tsx": {
-      "lines": 1109
+      "lines": 1182
     }
   }
 }
