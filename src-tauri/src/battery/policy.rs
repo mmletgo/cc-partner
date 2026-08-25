@@ -103,7 +103,16 @@ pub fn daily_reset_boundary_in<Tz: TimeZone>(now_ts: i64, tz: &Tz) -> Option<i64
 /// Code Logic（这个函数做什么）:
 ///     `last_daily_reset_at < boundary(now)` → `Some(boundary)`；边界解析失败 → None（本轮跳过）。
 pub fn evaluate_daily_reset(last_daily_reset_at: i64, now_ts: i64) -> Option<i64> {
-    let boundary = daily_reset_boundary_in(now_ts, &Local)?;
+    evaluate_daily_reset_in(last_daily_reset_at, now_ts, &Local)
+}
+
+/// 与 `evaluate_daily_reset` 相同，但边界按给定时区计算（单测固定 CST，避免宿主 TZ）。
+pub fn evaluate_daily_reset_in<Tz: TimeZone>(
+    last_daily_reset_at: i64,
+    now_ts: i64,
+    tz: &Tz,
+) -> Option<i64> {
+    let boundary = daily_reset_boundary_in(now_ts, tz)?;
     (last_daily_reset_at < boundary).then_some(boundary)
 }
 
@@ -237,10 +246,11 @@ mod tests {
 
         #[test]
         fn evaluate_due_when_last_reset_behind_boundary() {
-            let boundary = daily_reset_boundary_in(at(15, 0, 0), &cst()).unwrap();
-            assert_eq!(evaluate_daily_reset(0, at(15, 0, 0)), Some(boundary));
+            let now = at(15, 0, 0);
+            let boundary = daily_reset_boundary_in(now, &cst()).unwrap();
+            assert_eq!(evaluate_daily_reset_in(0, now, &cst()), Some(boundary));
             assert_eq!(
-                evaluate_daily_reset(boundary - 1, at(15, 0, 0)),
+                evaluate_daily_reset_in(boundary - 1, now, &cst()),
                 Some(boundary)
             );
         }
@@ -249,8 +259,14 @@ mod tests {
         fn evaluate_not_due_within_same_period() {
             let boundary = daily_reset_boundary_in(at(15, 0, 0), &cst()).unwrap();
             // 当天 8 点后已重置过 → 同周期内不再触发。
-            assert_eq!(evaluate_daily_reset(boundary, at(15, 0, 0)), None);
-            assert_eq!(evaluate_daily_reset(boundary + 60, at(15, 1, 0)), None);
+            assert_eq!(
+                evaluate_daily_reset_in(boundary, at(15, 0, 0), &cst()),
+                None
+            );
+            assert_eq!(
+                evaluate_daily_reset_in(boundary + 60, at(15, 1, 0), &cst()),
+                None
+            );
         }
 
         #[test]
@@ -260,8 +276,14 @@ mod tests {
                 .unwrap()
                 .timestamp();
             // 昨天已重置 → 今晨 0:30 未到期；从未重置（0）→ 应补昨日边界。
-            assert_eq!(evaluate_daily_reset(yesterday_eight, at(0, 30, 0)), None);
-            assert_eq!(evaluate_daily_reset(0, at(0, 30, 0)), Some(yesterday_eight));
+            assert_eq!(
+                evaluate_daily_reset_in(yesterday_eight, at(0, 30, 0), &cst()),
+                None
+            );
+            assert_eq!(
+                evaluate_daily_reset_in(0, at(0, 30, 0), &cst()),
+                Some(yesterday_eight)
+            );
         }
     }
 }

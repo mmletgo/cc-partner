@@ -796,7 +796,7 @@ mod tests {
     /// Business Logic: 保证 publish 端和 parse 端用同一套约定（key/格式），避免“自己宣告的对端读不懂”。
     ///     caps value 不带 `caps=` 前缀（前缀由 TXT key 提供），parse 端直接拿 value 走切分即可。
     /// Code Logic: 构造 ServiceInfo（advertise），手动从其 TXT 取 proto/caps 走解析函数，
-    ///             断言还原出 proto_version=1 且 capabilities 包含 errors.envelope.v1。
+    ///             断言还原出 proto_version=1 且 caps 与 encode_mdns_capabilities 一致。
     #[test]
     fn mdns_proto_caps_round_trip_through_publish_and_parse() {
         let plan = DiscoveryStartPlan::new(true, false);
@@ -818,7 +818,13 @@ mod tests {
         let capabilities = parse_caps_hint(Some(caps_raw));
 
         assert_eq!(proto_version, PROTOCOL_VERSION_V1);
-        assert!(capabilities.contains(&"errors.envelope.v1".to_string()));
+        let expected =
+            encode_mdns_capabilities(&server_protocol_info().capabilities, MAX_CAPS_TXT_BYTES);
+        assert_eq!(capabilities, parse_caps_hint(Some(&expected)));
+        assert!(
+            capabilities.iter().any(|c| c.starts_with("agent-hub.")),
+            "bounded caps TXT must still advertise an agent-hub token; got {capabilities:?}"
+        );
     }
 
     /// 验证移动端候选接口黑名单覆盖虚拟网卡与 loopback。

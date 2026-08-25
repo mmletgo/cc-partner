@@ -4339,8 +4339,8 @@ enabled = ["native-only"]
             "Claude enabledPlugins=false must not mark Grok inventory disabled"
         );
         assert!(
-            !superpowers.capabilities.can_disable,
-            "Grok has no plugin enable/disable executor; must not remap to Claude CLI"
+            superpowers.capabilities.can_disable,
+            "Grok plugin disable is a file-only viewing toggle, not a Claude CLI remap"
         );
         let native = items
             .iter()

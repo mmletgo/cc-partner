@@ -188,7 +188,7 @@ impl AdoptionEngine {
         let (content_hash, tree_hash, _manifest, diags) = hash_skill_directory(path)?;
         let unknown = diags
             .into_iter()
-            .filter(|d| d.code == CODE_UNKNOWN_SOURCE_FIELD)
+            .filter(|d| d.code == CODE_UNKNOWN_SOURCE_FIELD || d.code == "store_symlink_escape")
             .collect::<Vec<_>>();
         let name = request.discovered.semantic_name.clone();
         let alias = format!("cc-partner__{}", sanitize_name(&name));

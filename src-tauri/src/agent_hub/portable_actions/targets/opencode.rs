@@ -682,6 +682,9 @@ mod tests {
     /// Code Logic: 在 opencode skills 根建 store 软链，Detach 后只剩仓库真树。
     #[test]
     fn detach_store_skill_unlinks_opencode_native_without_cli() {
+        let _guard = crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         let oc = tmp.path().join("opencode");
