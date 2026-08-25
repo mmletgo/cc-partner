@@ -21,7 +21,7 @@
 #
 # 约束：
 #   - 无 continue-on-error；fail-fast: false（单平台失败不取消另一平台）
-#   - 隔离目录：CC_PARTNER_SMOKE_ROOT=${{ runner.temp }}/cc-partner-smoke
+#   - 隔离目录：CC_PARTNER_SMOKE_ROOT 在 Prepare 步骤写入 GITHUB_ENV（runner 临时目录）
 #   - 失败上传 smoke 目录 + cargo 日志，保留 7 天
 
 name: Cross-Platform Smoke
@@ -65,10 +65,6 @@ jobs:
     name: smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    env:
-      # 所有 smoke case 写到 runner 临时目录，不触碰 ~/.cc-partner。
-      # runner.* 只能用在 job/step；写在 workflow 顶层 env 会整文件解析失败（0-job）。
-      CC_PARTNER_SMOKE_ROOT: ${{ runner.temp }}/cc-partner-smoke
     strategy:
       fail-fast: false
       matrix:
@@ -90,13 +86,16 @@ jobs:
           # 按平台 + managed browser runtime 版本隔离缓存
           shared-key: smoke-${{ matrix.os }}-browser-runtime-150.0.7871.114
 
+      # runner 上下文不能出现在 workflow/job 的 env mapping（GitHub 静态校验会 0-job）。
+      # 在 step run 里解析 runner.temp，再经 GITHUB_ENV 传给后续步骤。
       - name: Prepare smoke root and log dirs
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${CC_PARTNER_SMOKE_ROOT}"
-          mkdir -p "${{ runner.temp }}/cargo-logs"
-          echo "CC_PARTNER_SMOKE_ROOT=${CC_PARTNER_SMOKE_ROOT}"
+          SMOKE_ROOT="${{ runner.temp }}/cc-partner-smoke"
+          echo "CC_PARTNER_SMOKE_ROOT=${SMOKE_ROOT}" >> "${GITHUB_ENV}"
+          mkdir -p "${SMOKE_ROOT}" "${{ runner.temp }}/cargo-logs"
+          echo "CC_PARTNER_SMOKE_ROOT=${SMOKE_ROOT}"
           echo "runner.temp=${{ runner.temp }}"
           echo "os=${{ matrix.os }}"
 
@@ -154,7 +153,6 @@ jobs:
         id: tx_runtime_smoke
         shell: bash
         env:
-          CC_PARTNER_SMOKE_ROOT: ${{ runner.temp }}/cc-partner-smoke
           RUST_BACKTRACE: '1'
         run: |
           set -euo pipefail

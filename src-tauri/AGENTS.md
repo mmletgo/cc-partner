@@ -642,7 +642,7 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
   - `push` → `master`，同一路径过滤
   - `schedule`：`23 18 * * *`（每日 UTC 18:23，**无**路径过滤，完整矩阵兜底）
   - `workflow_dispatch` 手动
-- **陷阱**：workflow 顶层 `env` 禁止 `runner.*`（GitHub 会整文件解析失败 → 0-job，workflow 名退化成文件路径）。`CC_PARTNER_SMOKE_ROOT=${{ runner.temp }}/cc-partner-smoke` 必须写在 job `env`。
+- **陷阱**：workflow / job 的 `env` mapping 禁止 `runner.*`（GitHub 静态校验会整文件失败 → 0-job，workflow 名退化成文件路径）。隔离根在 Prepare 步骤写入 `GITHUB_ENV`。
 - **矩阵**：`macos-latest` + `windows-latest`；`fail-fast: false`（单平台失败不取消另一平台）；**无 `continue-on-error`**，required checks 失败即阻断
 - **约束**：每 job/cargo/子进程有 timeout；隔离目录写数据；job summary 必须显式列出 NOT VERIFIED 能力与 doctor/privacy 契约；缺少可选环境时写明 skip reason 并进 summary，禁止静默 skip
 
