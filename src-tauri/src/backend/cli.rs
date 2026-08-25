@@ -22,6 +22,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -909,12 +910,13 @@ fn process_is_alive(pid: u32) -> bool {
 ///     会把 control/db 写回真实 `~/.cc-partner`，破坏隔离并污染用户数据。
 ///
 /// Code Logic（这个函数做什么）:
-///     若当前进程设置了 `CC_PARTNER_DATA_DIR`，显式写入 child Command 的 env；
+///     若当前进程设置了 `CC_PARTNER_DATA_DIR`，显式写入 child Command 的 env 并返回该值；
 ///     未设置则不改动（子进程默认继承父环境，保持生产行为）。
-fn inherit_data_dir_env(command: &mut Command) {
-    if let Some(value) = std::env::var_os("CC_PARTNER_DATA_DIR") {
-        command.env("CC_PARTNER_DATA_DIR", value);
-    }
+///     返回注入值供测试断言；Windows 上 `Command` Debug 不含 env，不能靠 Debug 字符串检查。
+fn inherit_data_dir_env(command: &mut Command) -> Option<OsString> {
+    let value = std::env::var_os("CC_PARTNER_DATA_DIR")?;
+    command.env("CC_PARTNER_DATA_DIR", &value);
+    Some(value)
 }
 
 /// 配置 Unix serve 子进程脱离父会话。
@@ -1126,11 +1128,11 @@ mod tests {
     ///     detach 后 serve 必须与父进程共用同一隔离数据根，否则 control 文件会写回用户 home。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     设置环境变量后构造 Command，调用 inherit helper，断言 env 中含有该键值；
-    ///     Drop 守卫保证 panic 后仍恢复环境。
+    ///     设置环境变量后构造 Command，调用 inherit helper，断言返回注入值；
+    ///     Drop 守卫保证 panic 后仍恢复环境。不依赖 Command Debug（Windows 上不含 env）。
     #[test]
     fn start_inherits_data_dir_env_for_detached_serve() {
-        use std::ffi::OsString;
+        use std::ffi::{OsStr, OsString};
         use std::sync::{Mutex, MutexGuard, OnceLock};
 
         struct EnvGuard {
@@ -1159,12 +1161,11 @@ mod tests {
         };
 
         let mut command = std::process::Command::new("true");
-        super::inherit_data_dir_env(&mut command);
-        // Command 不公开 env 查询 API；通过 debug 字符串粗检 env 注入（平台无关）。
-        let debug = format!("{command:?}");
-        assert!(
-            debug.contains("CC_PARTNER_DATA_DIR") && debug.contains("cc-partner-isolated"),
-            "start 子进程应继承数据目录 override，实际 Command: {debug}"
+        let inherited = super::inherit_data_dir_env(&mut command);
+        assert_eq!(
+            inherited.as_deref(),
+            Some(OsStr::new("/tmp/cc-partner-isolated")),
+            "start 子进程应继承数据目录 override"
         );
     }
 
