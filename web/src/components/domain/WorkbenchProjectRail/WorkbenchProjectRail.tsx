@@ -87,7 +87,7 @@ export function WorkbenchProjectRail() {
   } = useWorkbenchProjects();
   const occupancyByProject = useMemo(() => {
     const map = new Map<string, string>();
-    for (const row of occupancy) map.set(row.projectId, row.windowLabel);
+    for (const row of occupancy ?? []) map.set(row.projectId, row.windowLabel);
     return map;
   }, [occupancy]);
 

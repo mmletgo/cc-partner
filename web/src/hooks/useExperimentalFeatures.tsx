@@ -60,6 +60,15 @@ async function loadExperimentalFeatures(): Promise<ExperimentalFeaturesConfig> {
     const cfg = await configApi.get();
     return cfg.experimentalFeatures ?? DEFAULT_EXPERIMENTAL_FEATURES;
   } catch {
+    // 桌面有 Tauri internals 时 get_config 失败应 fail-closed，不要再打同源 HTTP
+    // （E2E/缺命令时浏览器会把 404 记成 console.error）。
+    if (typeof window !== 'undefined') {
+      const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: unknown } })
+        .__TAURI_INTERNALS__;
+      if (typeof internals?.invoke === 'function') {
+        return DEFAULT_EXPERIMENTAL_FEATURES;
+      }
+    }
     try {
       const { getJson } = await import('@/api/workbenchHttp');
       const resp = await getJson<{ experimentalFeatures?: unknown }>(

@@ -38,6 +38,7 @@ const MATRIX_REL = 'docs/development/quality-matrix.json';
 const SNAPSHOT_DIR_REL = 'src-tauri/tests/support/agent_hub_l3_snapshots';
 
 const REQUIRED_TARGETS = ['claude', 'codex', 'opencode'];
+const KNOWN_TARGETS = ['claude', 'codex', 'opencode', 'grok', 'gemini', 'cursor', 'pi'];
 
 /** Supported* 族：需要 quality-matrix evidence。 */
 const SUPPORTED_FAMILY = new Set([
@@ -252,7 +253,7 @@ export function validateSupportManifest(manifest, options = {}) {
       continue;
     }
     const target = String(record.target ?? '');
-    if (!REQUIRED_TARGETS.includes(target)) {
+    if (!KNOWN_TARGETS.includes(target)) {
       errors.push(`target_unknown:${target || `<index ${index}>`}`);
     }
     seen.set(target, (seen.get(target) ?? 0) + 1);

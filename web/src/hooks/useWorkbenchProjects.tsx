@@ -153,7 +153,8 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
 
   const refreshOccupancy = useCallback(async () => {
     try {
-      setOccupancy(await workbenchApi.windows.listOccupancy());
+      const next = await workbenchApi.windows.listOccupancy();
+      setOccupancy(Array.isArray(next) ? next : []);
     } catch {
       // occupancy 只辅助 Rail 标记；失败保留上一帧。
     }

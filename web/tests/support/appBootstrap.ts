@@ -552,6 +552,7 @@ export function registerAppShellCommands(
       durationMs: 0,
       inputTokens: null,
       outputTokens: null,
+      cacheReadTokens: null,
       costByCurrency: [],
       usageCoverage: 'unavailable',
     },

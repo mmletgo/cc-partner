@@ -225,6 +225,10 @@ function makePortableInventorySnapshot() {
         sourcePath: '/tmp/claude/skill/managed-skill',
         sourceOrigin: 'standalone',
         parentPluginInventoryItemId: null,
+        loadedBy: 'claude',
+        ownedBy: 'claude',
+        originKind: 'native',
+        nativeOutputCandidate: true,
         actualEnabled: true,
         contentHash: 'hash-managed',
         treeHash: 'tree-managed',
@@ -260,6 +264,10 @@ function makePortableInventorySnapshot() {
         sourcePath: '/tmp/claude/skill/orphan-skill',
         sourceOrigin: 'standalone',
         parentPluginInventoryItemId: null,
+        loadedBy: 'claude',
+        ownedBy: 'claude',
+        originKind: 'native',
+        nativeOutputCandidate: true,
         actualEnabled: true,
         contentHash: 'hash-orphan',
         treeHash: null,
@@ -619,21 +627,21 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-shell')).toBeVisible();
-    await expect(page.getByTestId('agent-hub-agent-switcher')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-lane-switcher')).toBeVisible();
     await expect(page.getByTestId('agent-hub-scope-lock')).toHaveCount(0);
     await expect(page.getByTestId('agent-hub-tablist')).toBeVisible();
     await expect(page.getByTestId('agent-hub-toolbar')).toBeVisible();
     await expect(page.getByTestId('agent-hub-device-select')).toBeVisible();
     await expect(page.getByTestId('agent-hub-project-select')).toHaveCount(0);
-    await expect(page.getByTestId('agent-hub-lane-common')).toHaveAttribute(
+    await expect(page.getByTestId('agent-hub-lane-exclusive')).toHaveAttribute(
       'aria-checked',
       'true',
     );
-    await expect(page.getByTestId('agent-hub-lane-common')).toHaveAttribute('tabindex', '0');
+    await expect(page.getByTestId('agent-hub-lane-exclusive')).toHaveAttribute('tabindex', '0');
 
-    // lane radiogroup：方向键移动焦点并同步选择。
-    await page.getByTestId('agent-hub-lane-common').focus();
+    // lane radiogroup：默认独有，方向键移动焦点并同步选择。
+    await page.getByTestId('agent-hub-lane-exclusive').focus();
     await page.keyboard.press('ArrowRight');
     await expect(page.getByTestId('agent-hub-lane-adapted')).toBeFocused();
     await expect(page.getByTestId('agent-hub-lane-adapted')).toHaveAttribute(
@@ -646,8 +654,8 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
     await page.getByTestId('agent-hub-agent-claude').focus();
     await page.keyboard.press('End');
-    await expect(page.getByTestId('agent-hub-agent-opencode')).toBeFocused();
-    await expect(page.getByTestId('agent-hub-agent-opencode')).toHaveAttribute(
+    await expect(page.getByTestId('agent-hub-agent-pi')).toBeFocused();
+    await expect(page.getByTestId('agent-hub-agent-pi')).toHaveAttribute(
       'aria-checked',
       'true',
     );
@@ -718,7 +726,23 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
       'agent-hub-lane-common',
     ]);
 
-    // 默认公共槽：单列；隐藏 Agent 与 rescan/sync。
+    // 默认独有槽：三列 + 分析拆解 + Agent 切换。
+    await expect(page.getByTestId('instruction-panes-exclusive')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-preview')).toBeVisible();
+    await expect(page.getByTestId('instruction-pane-original')).toBeVisible();
+    await expect(page.getByTestId('instruction-analyze-decompose')).toBeVisible();
+    await expect(
+      page.getByTestId('instruction-pane-original').getByTestId('instruction-analyze-decompose'),
+    ).toBeVisible();
+    await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
+    await expect(page.getByTestId('instruction-original-textarea')).toHaveValue(
+      /Always run tests before commit/,
+    );
+
+    // 公共槽：单列；隐藏 Agent 与 rescan/sync。
+    await page.getByTestId('agent-hub-lane-common').click();
+    await expect(page).toHaveURL(/lane=common/);
     await expect(page.getByTestId('instruction-panes-common')).toBeVisible();
     await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
     await expect(page.getByTestId('instruction-slot-textarea')).toBeVisible();
@@ -744,21 +768,6 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction lane layouts', () => {
     await page.getByTestId('agent-hub-agent-codex').click();
     await expect(page).toHaveURL(/agent=codex/);
     await expect(page.getByTestId('instruction-adapted-textarea')).toBeVisible();
-
-    // 独有槽：三列 + 分析拆解
-    await page.getByTestId('agent-hub-lane-exclusive').click();
-    await expect(page).toHaveURL(/lane=exclusive/);
-    await expect(page.getByTestId('instruction-panes-exclusive')).toBeVisible();
-    await expect(page.getByTestId('instruction-pane-blocks')).toBeVisible();
-    await expect(page.getByTestId('instruction-pane-preview')).toBeVisible();
-    await expect(page.getByTestId('instruction-pane-original')).toBeVisible();
-    await expect(page.getByTestId('instruction-analyze-decompose')).toBeVisible();
-    await expect(
-      page.getByTestId('instruction-pane-original').getByTestId('instruction-analyze-decompose'),
-    ).toBeVisible();
-    await expect(page.getByTestId('instruction-original-textarea')).toHaveValue(
-      /Always run tests before commit/,
-    );
   });
 
   test('common lane AI revise calls Claude then saves canonical', async ({
@@ -906,7 +915,12 @@ test.describe('E2E-AGENT-HUB-ADAPT-PREVIEW-001 selective preview-only', () => {
     await expect(page.getByTestId('cross-agent-adapt-full-plan')).toHaveCount(0);
 
     await expect(page.getByTestId('cross-agent-adapt-dest-codex')).toBeChecked();
-    await page.getByTestId('cross-agent-adapt-dest-opencode').uncheck();
+    for (const dest of ['opencode', 'grok', 'gemini', 'cursor', 'pi'] as const) {
+      const box = page.getByTestId(`cross-agent-adapt-dest-${dest}`);
+      if (await box.count()) {
+        await box.uncheck();
+      }
+    }
     await page.getByTestId('cross-agent-adapt-scope-confirm').check();
     await page
       .getByTestId('cross-agent-adapt-markdown')

@@ -94,6 +94,7 @@ async function installLedgerBackend(
           outputTokens: null,
           cacheReadTokens: null,
           cacheWriteTokens: null,
+          terminalTitle: null,
           costMinorUnits: null,
           costCurrency: null,
           createdAt: TS,
@@ -117,6 +118,7 @@ async function installLedgerBackend(
       durationMs: 1000,
       inputTokens: null,
       outputTokens: null,
+      cacheReadTokens: null,
       costByCurrency: [],
       usageCoverage: 'unavailable',
     },
@@ -139,8 +141,7 @@ test.describe('agent metadata ledger', () => {
     await projectBtn.click();
     await expect(page.getByTestId('workbench-inspector')).toBeVisible({ timeout: 15_000 });
 
-    // 打开历史：工具栏按钮 aria-label
-    const historyBtn = page.getByRole('button', { name: /Agent 历史|Agent history/i });
+    const historyBtn = page.getByTestId('agent-usage-stats-open');
     await expect(historyBtn).toBeVisible({ timeout: 10_000 });
     await historyBtn.click();
     await expect(page.getByRole('dialog')).toBeVisible();
