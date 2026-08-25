@@ -240,7 +240,6 @@ fn user_scopes(home: &FsPath) -> Vec<PortableScanScope> {
     ]
 }
 
-/// SAFETY: --test-threads=1
 fn activate_owner(data_dir: &FsPath, home: &FsPath, device_id: &str) {
     std::env::set_var("CC_PARTNER_DATA_DIR", data_dir);
     std::env::set_var("HOME", home);
@@ -415,6 +414,19 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
                 assert_eq!(&c0[2..], &c1[..], "offset resume");
             }
             assert!(c0.len() <= PORTABLE_PULL_MAX_CHUNK_BYTES);
+            let mut assembled = Vec::new();
+            let mut offset = 0u64;
+            while offset < c0.len() as u64 {
+                let chunk =
+                    source_read_object_chunk(&selection.transfer_id, &obj.hash, offset).unwrap();
+                if chunk.is_empty() {
+                    break;
+                }
+                let n = chunk.len().min(3);
+                assembled.extend_from_slice(&chunk[..n]);
+                offset += n as u64;
+            }
+            assert_eq!(assembled, c0, "interrupt resume {target:?}");
         }
         inv_map.insert(target.as_str().into(), inv);
         sel_map.insert(target.as_str().into(), selection);
@@ -565,44 +577,5 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
     println!(
         "{EVIDENCE}: source inventory/selection/objects + mismatch fail-before-transfer certified"
     );
-}
-
-#[tokio::test]
-async fn l2_agent_hub_portable_pull_001_chunk_interrupt_resume() {
-    let dual = setup_dual_env();
-    seed_source_home(&dual.source_home);
-    activate_owner(&dual.source_data, &dual.source_home, SOURCE_DEVICE);
-    let state_a = build_app_state(Arc::new(HeadlessBackendUi::new(dual.source_data.clone())))
-        .await
-        .expect("state");
-
-    let inv = build_remote_inventory_for_target(&state_a, AgentTarget::Claude, None)
-        .await
-        .unwrap();
-    let ids: Vec<_> = inv
-        .items
-        .iter()
-        .filter(|i| i.kind == PortableAssetKind::Skill)
-        .take(1)
-        .map(|i| i.inventory_item_id.clone())
-        .collect();
-    assert!(!ids.is_empty());
-    let sel = source_prepare_selection(&state_a, AgentTarget::Claude, None, ids)
-        .await
-        .unwrap();
-    let obj = sel.envelope.objects.first().expect("object");
-    let full = source_read_object_chunk(&sel.transfer_id, &obj.hash, 0).unwrap();
-    let mut assembled = Vec::new();
-    let mut offset = 0u64;
-    while offset < full.len() as u64 {
-        let chunk = source_read_object_chunk(&sel.transfer_id, &obj.hash, offset).unwrap();
-        if chunk.is_empty() {
-            break;
-        }
-        let n = chunk.len().min(3);
-        assembled.extend_from_slice(&chunk[..n]);
-        offset += n as u64;
-    }
-    assert_eq!(assembled, full);
     const _: () = assert!(PORTABLE_PULL_MAX_CHUNK_BYTES >= 8 * 1024 * 1024);
 }

@@ -119,7 +119,10 @@ jobs:
 
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test --locked
+        run: |
+          cargo test --locked --lib
+          cargo test --locked --bins -- --test-threads=1
+          cargo test --locked --tests -- --test-threads=1
 
       # Gate B Task 4：从 support-manifest 读取 pinned min/current 版本。
       # 无 reproducible installer 的 target 保持 write=Blocked，本 job 只打印版本并确认
