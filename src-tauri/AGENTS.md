@@ -639,9 +639,10 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 - **Workflow name**：`Cross-Platform Smoke`（`.github/workflows/cross-platform-smoke.yml`）
 - **触发**：
   - `pull_request` → `master`，路径过滤：`src-tauri/**`、`web/src/pages/Workbench/**`、`web/src/hooks/workbench*`、`scripts/**`、`.github/workflows/**`、`web/package-lock.json`（只降无关变更成本）
-  - `push` → `master`，同一路径过滤（ruleset 要求本 workflow 在 master push 出结论；`on` 不含 push 时 GitHub 会建 0-job 失败 run）
+  - `push` → `master`，同一路径过滤
   - `schedule`：`23 18 * * *`（每日 UTC 18:23，**无**路径过滤，完整矩阵兜底）
   - `workflow_dispatch` 手动
+- **陷阱**：workflow 顶层 `env` 禁止 `runner.*`（GitHub 会整文件解析失败 → 0-job，workflow 名退化成文件路径）。`CC_PARTNER_SMOKE_ROOT=${{ runner.temp }}/cc-partner-smoke` 必须写在 job `env`。
 - **矩阵**：`macos-latest` + `windows-latest`；`fail-fast: false`（单平台失败不取消另一平台）；**无 `continue-on-error`**，required checks 失败即阻断
 - **约束**：每 job/cargo/子进程有 timeout；隔离目录写数据；job summary 必须显式列出 NOT VERIFIED 能力与 doctor/privacy 契约；缺少可选环境时写明 skip reason 并进 summary，禁止静默 skip
 

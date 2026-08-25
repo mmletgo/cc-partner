@@ -36,7 +36,7 @@ on:
       - 'scripts/**'
       - '.github/workflows/**'
       - 'web/package-lock.json'
-  # 仓库 ruleset 要求本 workflow 在 master push 上出结论；on 不含 push 时 GitHub 会建 0-job 失败 run。
+  # 相关路径落地 master 时跑矩阵（与 PR 同过滤）；schedule 覆盖无路径命中的日子。
   push:
     branches: [master]
     paths:
@@ -59,14 +59,16 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
-  # 所有 smoke case 写到 runner 临时目录，不触碰 ~/.cc-partner
-  CC_PARTNER_SMOKE_ROOT: ${{ runner.temp }}/cc-partner-smoke
 
 jobs:
   smoke:
     name: smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # 所有 smoke case 写到 runner 临时目录，不触碰 ~/.cc-partner。
+      # runner.* 只能用在 job/step；写在 workflow 顶层 env 会整文件解析失败（0-job）。
+      CC_PARTNER_SMOKE_ROOT: ${{ runner.temp }}/cc-partner-smoke
     strategy:
       fail-fast: false
       matrix:
