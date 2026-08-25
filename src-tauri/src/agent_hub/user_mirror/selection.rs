@@ -718,9 +718,8 @@ fn finish_envelope(
     envelope.snapshot_hash = compute_snapshot_hash(&envelope)
         .map_err(|err| AppError::generic(format!("user_mirror snapshot hash: {err}")))?;
     let envelope_json = serde_json::to_string(&envelope).map_err(AppError::from)?;
-    validate_snapshot(&envelope_json, &default_snapshot_limits()).map_err(|err| {
-        AppError::validation(format!("USER_MIRROR_INVALID_ENVELOPE:{err}"))
-    })?;
+    validate_snapshot(&envelope_json, &default_snapshot_limits())
+        .map_err(|err| AppError::validation(format!("USER_MIRROR_INVALID_ENVELOPE:{err}")))?;
     Ok(envelope)
 }
 

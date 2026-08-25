@@ -766,7 +766,6 @@ mod tests {
         apply_push_user_mirror, map_peer_error_code, USER_MIRROR_CAPABILITY_UNSUPPORTED,
         USER_MIRROR_DEVICE_ID_MISMATCH,
     };
-    use crate::net::peer_error::PeerCallError;
     use crate::agent_hub::replication::receiver::{PreparePushResponse, PutObjectResponse};
     use crate::agent_hub::replication::sender::{
         list_failed_source_push_targets, SOURCE_PUSH_KIND_USER_MIRROR,
@@ -785,6 +784,7 @@ mod tests {
     use crate::backend::ui::RecordingBackendUi;
     use crate::config::{install_data_dir_env, install_env_var};
     use crate::models::device::Device;
+    use crate::net::peer_error::PeerCallError;
     use crate::net::protocol::{CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_USER_MIRROR_V1};
     use crate::state::AppState;
     use axum::extract::Query;
