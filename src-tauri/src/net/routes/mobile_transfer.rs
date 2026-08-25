@@ -507,6 +507,7 @@ async fn upload_chunk_for_state(
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&payload)?;
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(data)?;
@@ -580,9 +581,8 @@ async fn upload_complete_for_state(
                 meta.client_operation_id.clone(),
             )
             .await
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = mark_failed(&dir, &mut meta);
-                e
             })?;
             meta.status = UploadMetaStatus::HandedOff;
             meta.task_id = Some(transfer_id.clone());

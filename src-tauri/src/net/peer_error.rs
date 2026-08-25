@@ -103,9 +103,15 @@ pub enum PeerCallError {
         ///
         /// Business Logic（Finding 3）: `details.domain_code` 让多跳代理/客户端做细粒度路由，
         ///     例如区分 `transfer.chunk` 与 `transfer.init` 的失败，即使二者都映射到同一 code token。
-        details: serde_json::Value,
+        ///     装箱以压低 `PeerCallError` 变体体积，避免 clippy `result_large_err`。
+        details: Box<serde_json::Value>,
     },
 }
+
+const _: () = assert!(
+    std::mem::size_of::<PeerCallError>() <= 128,
+    "PeerCallError 必须保持 ≤128 字节，否则 clippy result_large_err 会在所有返回它的函数上失败"
+);
 
 impl PeerCallError {
     /// 返回 `Remote` 变体的 code（业务决策入口）；其它变体返回 None。
@@ -147,7 +153,7 @@ impl PeerCallError {
     ///     调用方自行取 `domain_code`/`fields` 等子字段。
     pub fn remote_details(&self) -> Option<&serde_json::Value> {
         match self {
-            PeerCallError::Remote { details, .. } => Some(details),
+            PeerCallError::Remote { details, .. } => Some(details.as_ref()),
             _ => None,
         }
     }
@@ -177,10 +183,6 @@ impl PeerCallError {
 ///         否则产出 `Remote { code, legacy: false, ... }`。
 ///       - v0（legacy）：合成 code=`legacy.remote_error`、retryable=false、request_id 取自 header。
 ///     - 非 2xx 且 body 无法解析（含空 body）：→ `InvalidResponse`，与业务错误明确区分。
-/// `PeerCallError::Remote` 因携带 `details: serde_json::Value`（保留对端结构化错误元数据用于
-/// 多跳代理细粒度路由，Finding 3）使变体超过 clippy 默认的 128 字节阈值。错误路径非热路径，
-/// 透传结构化 details 的价值大于 Result 体积，故此处允许 `result_large_err`。
-#[allow(clippy::result_large_err)]
 pub fn parse_peer_response_parts<T: DeserializeOwned>(
     status: u16,
     header_request_id: Option<&str>,
@@ -219,7 +221,7 @@ pub fn parse_peer_response_parts<T: DeserializeOwned>(
             request_id: header_request_id.unwrap_or("").to_string(),
             retryable: false,
             legacy: true,
-            details: serde_json::Value::Object(serde_json::Map::new()),
+            details: Box::new(serde_json::Value::Object(serde_json::Map::new())),
         });
     }
 
@@ -248,7 +250,7 @@ pub fn parse_peer_response_parts<T: DeserializeOwned>(
         retryable: parsed.retryable,
         legacy: false,
         // Finding 3: 原样保留对端 details（含 domain_code），供多跳代理/客户端细粒度路由。
-        details: parsed.details,
+        details: Box::new(parsed.details),
     })
 }
 
@@ -330,7 +332,7 @@ pub fn peer_call_error_to_app_error(error: PeerCallError, client_label: &str) ->
                     status,
                     retryable,
                     request_id,
-                    details,
+                    details: *details,
                 },
             )
         }
@@ -710,7 +712,7 @@ mod tests {
                 request_id: "r".to_string(),
                 retryable: true,
                 legacy: false,
-                details: serde_json::Value::Object(serde_json::Map::new()),
+                details: Box::new(serde_json::Value::Object(serde_json::Map::new())),
             }
         );
         assert!(remote.contains("503"));

@@ -2517,7 +2517,7 @@ async fn get_bytes_bound(
             request_id: String::new(),
             retryable: false,
             legacy: false,
-            details: serde_json::json!({}),
+            details: Box::new(serde_json::json!({})),
         });
     }
     // Reject oversize Content-Length before buffering; stream-read with hard cap.
@@ -2531,11 +2531,11 @@ async fn get_bytes_bound(
                 request_id: String::new(),
                 retryable: false,
                 legacy: false,
-                details: serde_json::json!({
+                details: Box::new(serde_json::json!({
                     "reason": "chunk_body_oversize",
                     "contentLength": len,
                     "max": PORTABLE_PULL_MAX_CHUNK_BYTES,
-                }),
+                })),
             });
         }
     }
@@ -2565,10 +2565,10 @@ async fn read_response_body_capped(
                 request_id: String::new(),
                 retryable: false,
                 legacy: false,
-                details: serde_json::json!({
+                details: Box::new(serde_json::json!({
                     "reason": "chunk_body_oversize",
                     "max": max_bytes,
-                }),
+                })),
             });
         }
         out.extend_from_slice(&chunk);

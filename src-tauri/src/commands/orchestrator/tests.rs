@@ -1002,7 +1002,7 @@ fn remote_runtime_snapshot_maps_invalid_and_remote_peer_errors_to_unavailable() 
             request_id: "req-1".to_string(),
             retryable: true,
             legacy: false,
-            details: serde_json::json!({}),
+            details: Box::new(serde_json::json!({})),
         },
     );
 

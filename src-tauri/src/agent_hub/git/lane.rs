@@ -165,7 +165,7 @@ pub fn directory_content_fingerprint(root: &Path) -> Result<String, AppError> {
         hasher.update(rel.as_bytes());
         hasher.update([0]);
         hasher.update(hash.as_bytes());
-        hasher.update([b'\n']);
+        hasher.update(*b"\n");
     }
     Ok(sha256_hex(&hasher.finalize()))
 }

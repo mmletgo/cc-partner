@@ -272,7 +272,7 @@ mod tests {
         let user = portable_store_root(&data);
         let project = portable_project_store_root(&data, "hub-abc");
         assert_ne!(user, project);
-        assert!(!project.starts_with(&user.join("skills")));
+        assert!(!project.starts_with(user.join("skills")));
         let layout = ensure_store_layout(&project).expect("project layout");
         assert!(layout.join("skills").is_dir());
         assert_eq!(

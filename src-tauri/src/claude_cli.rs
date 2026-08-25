@@ -602,8 +602,8 @@ fn activity_from_assistant(value: &serde_json::Value) -> Option<String> {
                     last_text = text
                         .lines()
                         .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .next_back()
+                        .rev()
+                        .find(|line| !line.is_empty())
                         .map(collapse_activity_line);
                 }
             }

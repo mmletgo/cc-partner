@@ -1081,8 +1081,6 @@ fn remote_error_to_app_error(error: PeerCallError) -> AppError {
 /// Code Logic（这个函数做什么）:
 ///     校验 `project_id == requested`、`project_kind == "local"`、`remote_status == "local"`；
 ///     任一不满足返回 `PeerCallError::InvalidResponse`，由 command 层映射 unavailable。
-// PeerCallError::Remote 变体较大；本 helper 仅返回 InvalidResponse，允许 Result large_err。
-#[allow(clippy::result_large_err)]
 fn validate_owner_runtime_snapshot(
     snapshot: &OrchestratorRuntimeSnapshotDto,
     requested_project_id: &str,
@@ -1334,7 +1332,7 @@ mod tests {
             request_id: "hdr-1".to_string(),
             retryable: false,
             legacy: true,
-            details: serde_json::Value::Object(serde_json::Map::new()),
+            details: Box::new(serde_json::Value::Object(serde_json::Map::new())),
         };
         let app = peer_call_error_to_app_error(err, "远端 Orchestrator");
         assert_eq!(app.classify(), AppErrorCategory::Internal);

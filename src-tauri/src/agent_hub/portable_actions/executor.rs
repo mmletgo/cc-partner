@@ -1603,6 +1603,7 @@ mod tests {
 
     /// Business Logic: 逃逸软链恢复进仓库并挂正规软链，不删源树、不 spawn CLI。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn materialize_escape_link_restores_into_store_without_cli() {
         let _guard = crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK
             .lock()

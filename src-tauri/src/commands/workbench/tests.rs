@@ -621,7 +621,9 @@ fn merge_progress_event_serializes_claude_activity_line() {
 #[test]
 fn merge_non_claude_stage_timeout_is_shorter_than_claude_idle() {
     assert_eq!(MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS, 120);
-    assert!(MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS < MERGE_CONFLICT_RESOLUTION_IDLE_TIMEOUT_SECS);
+    const _: () = {
+        assert!(MERGE_NON_CLAUDE_STAGE_TIMEOUT_SECS < MERGE_CONFLICT_RESOLUTION_IDLE_TIMEOUT_SECS);
+    };
 }
 
 /// Business Logic（为什么需要这个测试）:

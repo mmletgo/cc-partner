@@ -268,9 +268,9 @@ fn persist_plan_record(plan: &UserMirrorPlanDto) -> UserMirrorPlanRecord {
     }
 }
 
-fn claude_agent<'a>(
-    inventory: &'a UserMirrorInventoryDto,
-) -> &'a app_lib::agent_hub::user_mirror::UserMirrorAgentInventoryDto {
+fn claude_agent(
+    inventory: &UserMirrorInventoryDto,
+) -> &app_lib::agent_hub::user_mirror::UserMirrorAgentInventoryDto {
     inventory
         .agents
         .iter()

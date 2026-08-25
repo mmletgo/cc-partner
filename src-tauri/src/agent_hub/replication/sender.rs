@@ -1474,7 +1474,7 @@ mod tests {
             request_id: "r".into(),
             retryable: false,
             legacy: false,
-            details: json!({}),
+            details: Box::new(json!({})),
         };
         let o = classify_peer_error("p", "Peer", "cr", err, None);
         assert!(!o.retryable);

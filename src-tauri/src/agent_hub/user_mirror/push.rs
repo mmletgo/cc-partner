@@ -1273,7 +1273,7 @@ mod tests {
             request_id: "req".into(),
             retryable: false,
             legacy: false,
-            details: serde_json::json!({}),
+            details: Box::new(serde_json::json!({})),
         };
         let mapped = map_peer_error_code(&err);
         assert!(

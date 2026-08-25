@@ -616,7 +616,7 @@ async fn get_bytes_bound(
             request_id: String::new(),
             retryable: false,
             legacy: false,
-            details: serde_json::json!({}),
+            details: Box::new(serde_json::json!({})),
         });
     }
     resp.bytes()

@@ -185,7 +185,7 @@ fn classify_prompt(line: &str) -> Option<ClassifiedPrompt> {
     let session_id = parsed
         .session_id
         .clone()
-        .unwrap_or_else(|| format!("unknown-{}", &timestamp));
+        .unwrap_or_else(|| format!("unknown-{timestamp}"));
     Some(ClassifiedPrompt {
         extracted: Extracted {
             uuid,

@@ -417,6 +417,7 @@ async fn insert_task_in_tx(
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 Draft row，再按 action 覆盖 split state；Start 仅 index=0。
+#[allow(clippy::too_many_arguments)]
 fn member_row_for_action(
     project_id: &str,
     draft: &BlockMemberDraft,

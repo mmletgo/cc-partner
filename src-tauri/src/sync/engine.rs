@@ -1084,7 +1084,7 @@ mod tests {
             request_id: "r".into(),
             retryable: false,
             legacy: false,
-            details: serde_json::json!({}),
+            details: Box::new(serde_json::json!({})),
         };
         match peer_error_to_domain_outcome(&err) {
             SyncDomainOutcome::ResourceLimit { limit } => {
