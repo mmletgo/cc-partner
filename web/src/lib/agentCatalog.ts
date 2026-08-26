@@ -16,6 +16,12 @@ import type { CcHistorySource } from '@/lib/types/core';
 /** 产品级 Agent 身份。 */
 export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor' | 'pi';
 
+/** owning device 无图形剪贴板时 Workbench 贴图的 PTY 注入语法。 */
+export type HeadlessImagePasteKind =
+  | 'atFileMention'
+  | 'bracketedPathPaste'
+  | 'typedAbsolutePath';
+
 /** 会话搜索 source（与 history source 当前同形）。 */
 export type SessionSearchSource =
   | 'claude'
@@ -38,6 +44,8 @@ export interface AgentIdentity {
   hasUsage: boolean;
   hasHeadless: boolean;
   executableNames: readonly string[];
+  /** 无图形剪贴板时的贴图注入；与 Rust `headless_image_paste` 对齐。 */
+  headlessImagePaste: HeadlessImagePasteKind;
 }
 
 const IDENTITIES: readonly AgentIdentity[] = [
@@ -52,6 +60,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['claude'],
+    headlessImagePaste: 'atFileMention',
   },
   {
     id: 'codex',
@@ -64,6 +73,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: false,
     executableNames: ['codex'],
+    headlessImagePaste: 'bracketedPathPaste',
   },
   {
     id: 'opencode',
@@ -76,6 +86,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: false,
     executableNames: ['opencode'],
+    headlessImagePaste: 'atFileMention',
   },
   {
     id: 'grok',
@@ -88,6 +99,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['grok'],
+    headlessImagePaste: 'atFileMention',
   },
   {
     id: 'gemini',
@@ -100,6 +112,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['gemini'],
+    headlessImagePaste: 'atFileMention',
   },
   {
     id: 'cursor',
@@ -112,6 +125,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['agent'],
+    headlessImagePaste: 'atFileMention',
   },
   {
     id: 'pi',
@@ -124,6 +138,7 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasUsage: true,
     hasHeadless: true,
     executableNames: ['pi'],
+    headlessImagePaste: 'typedAbsolutePath',
   },
 ];
 

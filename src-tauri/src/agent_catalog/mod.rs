@@ -31,6 +31,24 @@ pub enum AgentId {
     Pi,
 }
 
+/// owning device 没有图形剪贴板时，Workbench 贴图往 PTY 注入的语法。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Agent TUI 在无 X11/Wayland 时不能读 OS 剪贴板；各 CLI 吃图的合同不同，
+///     禁止一律打 `@路径` 或一律 Ctrl+V。
+///
+/// Code Logic（这个枚举做什么）:
+///     身份表必填；未知进程回退 `AtFileMention`（当前多数 TUI 的文件引用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessImagePasteKind {
+    /// 键入 `@/abs/path `（Claude / OpenCode / Grok / Gemini / Cursor）。
+    AtFileMention,
+    /// 发送 bracketed paste 的绝对路径（Codex 把 pasted image path 转成附件）。
+    BracketedPathPaste,
+    /// 键入前导空格 + 绝对路径（Pi 原生 compose 是把路径插入编辑器）。
+    TypedAbsolutePath,
+}
+
 /// 一条身份登记。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentIdentity {
@@ -54,6 +72,8 @@ pub struct AgentIdentity {
     pub has_headless: bool,
     /// probe 可执行名
     pub executable_names: &'static [&'static str],
+    /// 无图形剪贴板时的贴图注入语法（Workbench paste-image）
+    pub headless_image_paste: HeadlessImagePasteKind,
 }
 
 const IDENTITIES: &[AgentIdentity] = &[
@@ -68,6 +88,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: true,
         executable_names: &["claude"],
+        headless_image_paste: HeadlessImagePasteKind::AtFileMention,
     },
     AgentIdentity {
         id: AgentId::Codex,
@@ -80,6 +101,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: false,
         executable_names: &["codex"],
+        headless_image_paste: HeadlessImagePasteKind::BracketedPathPaste,
     },
     AgentIdentity {
         id: AgentId::OpenCode,
@@ -92,6 +114,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: false,
         executable_names: &["opencode"],
+        headless_image_paste: HeadlessImagePasteKind::AtFileMention,
     },
     AgentIdentity {
         id: AgentId::Grok,
@@ -104,6 +127,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: true,
         executable_names: &["grok"],
+        headless_image_paste: HeadlessImagePasteKind::AtFileMention,
     },
     AgentIdentity {
         id: AgentId::Gemini,
@@ -116,6 +140,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: true,
         executable_names: &["gemini"],
+        headless_image_paste: HeadlessImagePasteKind::AtFileMention,
     },
     AgentIdentity {
         id: AgentId::Cursor,
@@ -128,6 +153,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: true,
         executable_names: &["cursor-agent", "agent"],
+        headless_image_paste: HeadlessImagePasteKind::AtFileMention,
     },
     AgentIdentity {
         id: AgentId::Pi,
@@ -140,6 +166,7 @@ const IDENTITIES: &[AgentIdentity] = &[
         has_usage: true,
         has_headless: true,
         executable_names: &["pi"],
+        headless_image_paste: HeadlessImagePasteKind::TypedAbsolutePath,
     },
 ];
 
@@ -188,6 +215,49 @@ pub fn identity_by_runtime(provider: AgentProviderId) -> Option<&'static AgentId
     IDENTITIES
         .iter()
         .find(|row| row.runtime_provider == Some(provider))
+}
+
+/// 按进程 basename 反查身份。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Workbench 贴图要认 tmux `pane_current_command`；未知命令不得静默映射 Claude。
+///
+/// Code Logic（这个函数做什么）:
+///     取路径 basename（去掉 `.exe`），忽略大小写精确匹配 `executable_names`；
+///     多名命中时取更长的名字（`cursor-agent` 优先于 `agent`）。
+pub fn identity_by_executable_name(command: &str) -> Option<&'static AgentIdentity> {
+    let base = std::path::Path::new(command.trim())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command.trim());
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".EXE"))
+        .unwrap_or(base);
+    if base.is_empty() {
+        return None;
+    }
+    let mut best: Option<(&'static AgentIdentity, usize)> = None;
+    for row in IDENTITIES {
+        for name in row.executable_names {
+            if base.eq_ignore_ascii_case(name) && best.map(|(_, n)| n).unwrap_or(0) < name.len() {
+                best = Some((row, name.len()));
+            }
+        }
+    }
+    best.map(|(row, _)| row)
+}
+
+/// 无图形剪贴板时的贴图语法；未知 Agent 回退 `@路径`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     探测失败时仍要把图交给正在跑的 TUI；当前 5/7 身份用 `@路径`，作为 fail-open 默认。
+///
+/// Code Logic（这个函数做什么）:
+///     Some(id) 读身份表；None → `AtFileMention`。
+pub fn headless_image_paste_kind(id: Option<AgentId>) -> HeadlessImagePasteKind {
+    id.map(|agent| agent.identity().headless_image_paste)
+        .unwrap_or(HeadlessImagePasteKind::AtFileMention)
 }
 
 /// 是否为已登记 session source。
@@ -277,5 +347,70 @@ mod tests {
             assert_eq!(AgentId::parse(row.wire), Some(row.id));
             assert_eq!(row.id.as_str(), row.wire);
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     无显示贴图必须按官方合同分语法，不能把 Codex/Pi 当成 Claude 的 `@路径`。
+    #[test]
+    fn headless_image_paste_kinds_match_research() {
+        use HeadlessImagePasteKind::*;
+        assert_eq!(
+            AgentId::Claude.identity().headless_image_paste,
+            AtFileMention
+        );
+        assert_eq!(
+            AgentId::Codex.identity().headless_image_paste,
+            BracketedPathPaste
+        );
+        assert_eq!(
+            AgentId::OpenCode.identity().headless_image_paste,
+            AtFileMention
+        );
+        assert_eq!(AgentId::Grok.identity().headless_image_paste, AtFileMention);
+        assert_eq!(
+            AgentId::Gemini.identity().headless_image_paste,
+            AtFileMention
+        );
+        assert_eq!(
+            AgentId::Cursor.identity().headless_image_paste,
+            AtFileMention
+        );
+        assert_eq!(
+            AgentId::Pi.identity().headless_image_paste,
+            TypedAbsolutePath
+        );
+        assert_eq!(
+            headless_image_paste_kind(None),
+            HeadlessImagePasteKind::AtFileMention
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     tmux pane_current_command 是探测当前 TUI 的信号；node 包装不得误认，agent 归 Cursor。
+    #[test]
+    fn identity_by_executable_name_matches_basename() {
+        assert_eq!(
+            identity_by_executable_name("claude").map(|r| r.id),
+            Some(AgentId::Claude)
+        );
+        assert_eq!(
+            identity_by_executable_name("/usr/bin/codex").map(|r| r.id),
+            Some(AgentId::Codex)
+        );
+        assert_eq!(
+            identity_by_executable_name("claude.exe").map(|r| r.id),
+            Some(AgentId::Claude)
+        );
+        assert_eq!(
+            identity_by_executable_name("cursor-agent").map(|r| r.id),
+            Some(AgentId::Cursor)
+        );
+        assert_eq!(
+            identity_by_executable_name("agent").map(|r| r.id),
+            Some(AgentId::Cursor)
+        );
+        assert!(identity_by_executable_name("node").is_none());
+        assert!(identity_by_executable_name("bash").is_none());
+        assert!(identity_by_executable_name("").is_none());
     }
 }

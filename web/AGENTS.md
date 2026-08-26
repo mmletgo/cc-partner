@@ -2,7 +2,7 @@
 
 > 根层概览、组件清单、token/复用规范见仓库根 `AGENTS.md`。后端协议/端口/CLI 见 `src-tauri/AGENTS.md`。跨平台 CI / smoke 矩阵见 [`docs/development/testing.md`](../docs/development/testing.md)。同目录 `CLAUDE.md` 是指向本文件的软链。
 
-交互式终端输入固定走 `cc-partner.terminal-input.v1` 常驻 WebSocket：桌面 invoke 只等待 GUI Rust 有界队列接纳，mobile 连接同源 `/api/mobile/workbench/terminal-input-stream`，peer 数据阶段不得逐帧 health/HTTP。ACK 仅确认 PTY write+flush，不作为下一帧发送闸门；断线未 ACK 输入不得自动重放，也不得回退 `/sessions/write`。输出继续使用 NDJSON/replay/gap。Agent TUI 图片粘贴（Claude Code / Grok 等从 OS 剪贴板读图）不走该 32 KiB 输入帧：桌面拦截 paste / Ctrl+V 后 `paste_workbench_session_image` / `read_clipboard_image`；mobile 主入口是终端折叠 FAB 展开后的相册，浏览器 paste 仍为隐藏通道，均 `POST /api/mobile/workbench/sessions/paste-image`，由 owning device 写系统剪贴板再注入 Ctrl+V。`/mobile` 终端长按进入自管选区复制（屏蔽系统 loupe），不得把长按交给 xterm helper textarea。
+交互式终端输入固定走 `cc-partner.terminal-input.v1` 常驻 WebSocket：桌面 invoke 只等待 GUI Rust 有界队列接纳，mobile 连接同源 `/api/mobile/workbench/terminal-input-stream`，peer 数据阶段不得逐帧 health/HTTP。ACK 仅确认 PTY write+flush，不作为下一帧发送闸门；断线未 ACK 输入不得自动重放，也不得回退 `/sessions/write`。输出继续使用 NDJSON/replay/gap。Agent TUI 图片粘贴（Claude Code / Grok 等从 OS 剪贴板读图）不走该 32 KiB 输入帧：桌面拦截 paste / Ctrl+V 后 `paste_workbench_session_image` / `read_clipboard_image`；mobile 主入口是终端折叠 FAB 展开后的相册，浏览器 paste 仍为隐藏通道，均 `POST /api/mobile/workbench/sessions/paste-image`，由 owning device 写系统剪贴板再注入 Ctrl+V（无 X11/Wayland 时 owner 改为临时 PNG，并按身份表 `headlessImagePaste` 注入该 Agent 的路径语法）。`/mobile` 终端长按进入自管选区复制（屏蔽系统 loupe），不得把长按交给 xterm helper textarea。
 
 ## 概述
 

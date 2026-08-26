@@ -2340,6 +2340,38 @@ fn tmux_window_target_for_row(row: &WorkbenchSessionRow) -> Result<String, AppEr
     Ok(tmux_window_target(session_name, window_id))
 }
 
+/// 查询 tmux window 活动 pane 的 `pane_current_command`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在普通 shell 里启动 `claude`/`codex`/`grok` 时，runtime 表可能还没有行。
+///
+/// Code Logic（这个函数做什么）:
+///     running + tmux 才查询；trim 后空串视为 None。
+fn tmux_active_pane_current_command(row: &WorkbenchSessionRow) -> Option<String> {
+    if row.status != "running" || row.backend != TMUX_BACKEND {
+        return None;
+    }
+    let tmux = available_tmux_command()?;
+    let target = tmux_window_target_for_row(row).ok()?;
+    let output = run_tmux_command(
+        &tmux,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{pane_current_command}",
+        ],
+    )
+    .ok()?;
+    let command = output.trim();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command.to_string())
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     从旧版本升级来的 tmux row 可能只有 per-tab session，没有 window id，需要迁移到真实 window 模型。
 ///
@@ -5633,6 +5665,20 @@ impl WorkbenchSessionRegistry {
             }
             SessionProcess::Fake => Ok(()),
         }
+    }
+
+    /// 读取当前 tmux 活动 pane 的进程名。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     无图形剪贴板贴图要按正在跑的 CLI 选注入语法；runtime 行可能还没绑上。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     running tmux session 对 window target `display-message -p #{pane_current_command}`；
+    ///     非 tmux / 失败返回 None。
+    pub fn active_pane_command(&self, session_id: &str) -> Option<String> {
+        let handle = self.get_handle(session_id).ok()?;
+        let row = handle.lock().ok()?.row.clone();
+        tmux_active_pane_current_command(&row)
     }
 
     /// Business Logic（为什么需要这个函数）:

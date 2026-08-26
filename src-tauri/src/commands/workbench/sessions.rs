@@ -6,8 +6,12 @@
 //! Code Logic（这个模块做什么）:
 //!     命令与 pub(crate) helper。
 
+use crate::agent_catalog::{
+    headless_image_paste_kind, identity_by_executable_name, identity_by_runtime, AgentId,
+};
 use crate::claude_cli;
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::types::AgentProviderId;
 use crate::state::AppState;
 use crate::workbench::agent_session_search::{
     build_resume_command, check_agent_cli_available, preview_codex_session,
@@ -516,41 +520,82 @@ pub(crate) async fn write_workbench_session_input_for_state(
     local_write_workbench_session_input(state, session_id, data).await
 }
 
-/// Agent TUI（Claude Code / Grok 等）识别图片粘贴的 C0 SYN / Ctrl+V 字节。
-const TERMINAL_IMAGE_PASTE_KEY: &str = "\u{0016}";
-
-/// 把图片写入本机会话所在设备的剪贴板，再向 PTY 发送 Ctrl+V。
+/// 把图片写入本机会话所在设备，再注入 Agent TUI 能消费的输入。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Agent 从 **CLI 所在机器** 的 OS 剪贴板读图。本机会话写本机 pasteboard；调用方保证
-///     session 属于本机。图片不得走 32 KiB 终端输入 WebSocket。
+///     Agent 从 **CLI 所在机器** 读图。有图形剪贴板时写 pasteboard 再发 Ctrl+V；
+///     SSH/headless Linux 没有 X11/Wayland 时改为临时 PNG，并按身份表注入该 CLI 的路径语法。
+///     调用方保证 session 属于本机。图片不得走 32 KiB 终端输入 WebSocket。
 ///
 /// Code Logic（这个函数做什么）:
-///     spawn_blocking 写剪贴板，成功后 `write_input("\x16")`。
+///     spawn_blocking 跑 `prepare_agent_image_paste`；按计划 `write_input` Ctrl+V 或文件 mention。
 pub(crate) async fn local_paste_workbench_session_image(
     state: &AppState,
     session_id: String,
     data_url: String,
 ) -> Result<serde_json::Value, AppError> {
     state.runtime_role.require_owner()?;
-    crate::screenshot::capture::decode_image_data_url_to_rgba(&data_url)?;
-    let data_url_for_clipboard = data_url;
-    tokio::task::spawn_blocking(move || {
-        crate::screenshot::capture::save_clipboard_from_image_data_url(&data_url_for_clipboard)
+    let kind = resolve_headless_image_paste_kind(state, &session_id).await;
+    let data_dir = crate::config::data_dir()?;
+    let plan = tokio::task::spawn_blocking(move || {
+        crate::screenshot::clipboard::prepare_agent_image_paste(&data_url, &data_dir, kind)
     })
     .await
     .map_err(|e| AppError::generic(format!("写入剪贴板任务失败: {e}")))??;
-    state
-        .workbench_sessions
-        .write_input(&session_id, TERMINAL_IMAGE_PASTE_KEY)?;
+    let input = crate::screenshot::clipboard::agent_image_paste_input(&plan);
+    state.workbench_sessions.write_input(&session_id, &input)?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+/// 解析当前终端正在跑的 Agent，得到无图形剪贴板时的注入语法。
+///
+/// Business Logic（为什么需要这个函数）:
+///     SSH/headless 回退不能一律 `@路径`：Codex 要 bracketed path paste，Pi 要绝对路径。
+///
+/// Code Logic（这个函数做什么）:
+///     先读 terminal 上 active Agent runtime 的 provider；再读 tmux 活动 pane 命令；
+///     都认不出则 `AtFileMention`。
+async fn resolve_headless_image_paste_kind(
+    state: &AppState,
+    session_id: &str,
+) -> crate::agent_catalog::HeadlessImagePasteKind {
+    headless_image_paste_kind(detect_session_agent(state, session_id).await)
+}
+
+/// 探测 Workbench 终端里正在跑的产品 Agent。
+///
+/// Business Logic（为什么需要这个函数）:
+///     贴图回退必须按 CLI 合同编码；认不出不得假装是 Claude。
+///
+/// Code Logic（这个函数做什么）:
+///     `get_active_for_terminal` → `identity_by_runtime`；否则 tmux `pane_current_command`
+///     → `identity_by_executable_name`；都没有则 None。
+async fn detect_session_agent(state: &AppState, session_id: &str) -> Option<AgentId> {
+    if let Ok(Some(runtime)) = state
+        .workbench_agent_session_repo
+        .get_active_for_terminal(session_id)
+        .await
+    {
+        if let Ok(provider) = AgentProviderId::parse(&runtime.provider_id) {
+            if let Some(row) = identity_by_runtime(provider) {
+                return Some(row.id);
+            }
+        }
+    }
+    if let Some(command) = state.workbench_sessions.active_pane_command(session_id) {
+        if let Some(row) = identity_by_executable_name(&command) {
+            return Some(row.id);
+        }
+    }
+    None
 }
 
 /// 把图片粘贴到本机或远端终端会话的 Agent TUI。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     远端项目的 Claude/Grok 跑在 owning device 上；本机 Ctrl+V 只会让对端读空剪贴板。
-///     必须把图片字节送到 owning device 写其剪贴板，再发同一个 Ctrl+V。
+///     必须把图片字节送到 owning device：有图形剪贴板则写 pasteboard + Ctrl+V，
+///     否则 owner 落临时 PNG 并注入 `@路径`。
 ///
 /// Code Logic（这个函数做什么）:
 ///     remote sessionId 解析后 POST paste-image；local 调用本地 helper。

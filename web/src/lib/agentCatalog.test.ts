@@ -64,4 +64,19 @@ describe('agentCatalog', () => {
     expect(identityByRuntime('cursorCliVisible')?.id).toBe('cursor');
     expect(identityByRuntime('piVisible')?.id).toBe('pi');
   });
+
+  it('registers headless image paste kinds for every identity', () => {
+    const byId = Object.fromEntries(
+      allAgentIdentities().map((row) => [row.id, row.headlessImagePaste]),
+    );
+    expect(byId).toEqual({
+      claude: 'atFileMention',
+      codex: 'bracketedPathPaste',
+      opencode: 'atFileMention',
+      grok: 'atFileMention',
+      gemini: 'atFileMention',
+      cursor: 'atFileMention',
+      pi: 'typedAbsolutePath',
+    });
+  });
 });

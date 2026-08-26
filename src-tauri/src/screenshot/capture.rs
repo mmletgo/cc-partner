@@ -10,13 +10,15 @@
 //!     - `clamp_crop_rect(...)`：逻辑坐标 ×dpr → 物理像素 rect，clamp 到帧边界（纯函数，单测覆盖）。
 //!     - `capture_region(...)`：抓屏 + clamp_crop_rect + crop_imm，返回选区 RgbaImage。
 //!     - `region_to_png_base64(...)`：capture_region → PNG → base64 data URL（前端 canvas 背景）。
-//!     - `save_clipboard_from_png(data_url)`：剥 data URL 前缀 → base64 解码 → image 解码 → arboard 写剪贴板。
+//!     - `save_clipboard_from_png(data_url)`：剥 data URL 前缀 → 解码 → `clipboard::write_os_clipboard_image`。
 //!     - `decode_image_data_url_to_rgba` / `read_clipboard_image_png_data_url`：终端图片粘贴读写剪贴板。
 
 use std::io::Cursor;
 
-use arboard::{Clipboard, ImageData};
+use arboard::Clipboard;
 use image::{DynamicImage, ImageFormat, RgbaImage};
+
+use crate::screenshot::clipboard::{write_os_clipboard_image, ClipboardWriteFailure};
 use xcap::Monitor;
 
 /// 终端/截图写入剪贴板的解码后图片上限（8 MiB）。
@@ -160,7 +162,7 @@ pub fn decode_image_data_url_to_rgba(data_url: &str) -> Result<(usize, usize, Ve
 ///
 /// Business Logic: 用户点「确认」后，前端把「桌面选区 + 标注」合成的 PNG 传过来写剪贴板，
 ///     可直接粘贴到 Claude Code。终端远端粘贴也复用同一写入路径。
-/// Code Logic: 解码 data URL → RGBA → `arboard::ImageData` → `Clipboard::new()?.set_image(...)`。
+/// Code Logic: 解码 data URL → RGBA → 经 `clipboard::write_os_clipboard_image` 写系统剪贴板。
 pub fn save_clipboard_from_png(data_url: &str) -> Result<(), AppError> {
     save_clipboard_from_image_data_url(data_url)
 }
@@ -168,21 +170,20 @@ pub fn save_clipboard_from_png(data_url: &str) -> Result<(), AppError> {
 /// 把任意受支持的图片 data URL 写入系统剪贴板。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Claude Code / Grok 等 Agent TUI 从 **本机** 剪贴板读图；远端会话必须先把图写到 owning device。
+///     区域截图确认与无回退的调用方需要「写失败就报错」；Agent 贴图走 `prepare_agent_image_paste`。
 ///
 /// Code Logic（这个函数做什么）:
-///     解码 RGBA 后 `Clipboard::set_image`。
+///     委托 `write_os_clipboard_image`；显示服务器不可用时返回明确错误。
 pub fn save_clipboard_from_image_data_url(data_url: &str) -> Result<(), AppError> {
-    let (width, height, raw) = decode_image_data_url_to_rgba(data_url)?;
-    let img_data = ImageData {
-        width,
-        height,
-        bytes: raw.into(),
-    };
-    let mut cb = Clipboard::new().map_err(|e| AppError::Bad(format!("打开剪贴板失败: {e}")))?;
-    cb.set_image(img_data)
-        .map_err(|e| AppError::Bad(format!("写入剪贴板失败: {e}")))?;
-    Ok(())
+    match write_os_clipboard_image(data_url) {
+        Ok(()) => Ok(()),
+        Err(ClipboardWriteFailure::DisplayUnavailable) => Err(AppError::Bad(
+            "打开剪贴板失败: 当前环境没有可用的图形剪贴板（X11/Wayland）".into(),
+        )),
+        Err(ClipboardWriteFailure::Other(msg)) => {
+            Err(AppError::Bad(format!("打开剪贴板失败: {msg}")))
+        }
+    }
 }
 
 /// 读取系统剪贴板中的图片并编码为 PNG data URL。

@@ -45,6 +45,7 @@
 | 用量抽取 | 有稳定字段才实现 | `has_usage: true`，extract 返回 `None` |
 | Prompt 历史 | 有用户输入文件才加 collector | `history_source` 可登记；无 collector 则筛选为空 |
 | Headless / 优化器 | catalog 位 ≠ 设置里可选 | `has_headless: true`，优化器仍只开 claude+grok |
+| 无图形剪贴板贴图 | `HeadlessImagePasteKind`；必须有该 CLI 官方或源码合同，禁止抄 Claude 的 `@路径` | 见 §3.14；Codex=`bracketedPathPaste`，Pi=`typedAbsolutePath`，其余现身份=`atFileMention` |
 | Plugin / marketplace | 原生 plugin 根、**本 Agent 的开关文件**、是否真会加载其他 Agent 的 registry | 只扫自己的目录；**不要**抄 Grok 去列 Claude `installed_plugins.json`，除非该 CLI 运行时确实加载。跨 Agent 翻译仍 residual |
 | portable-store 挂载点 | native skills / commands；MCP 仍是该 Agent 配置 leaf（不进仓库）；是否扫其他 Agent 根 | Skill=`~/.cursor/skills`；Command=`~/.cursor/commands`；MCP=`mcp.json` `mcpServers`（native leaf + Pull）。会扫 Claude / Codex / `.agents` 则必须处理 Skill/Command 的 `loadedViaOtherPath` 与仓库行 **暗淡芯片**（§3.13）。无 L3 → apply attach/detach/migrate/destroy blocked |
 | 漂移确认当前版本 | Hub 账本对齐，不写该 CLI | 必须能 preview+apply；无 L3 也不得 `MUTATION_BLOCKED`。文案「确认当前版本」 |
@@ -82,9 +83,9 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 
 | 位置 | 做什么 |
 |------|--------|
-| `src-tauri/src/agent_catalog/mod.rs` | 加 `AgentId` variant + `IDENTITIES` 行；更新 `catalog_registers_*` 单测长度 |
-| `web/src/lib/agentCatalog.ts` | 同步一行；`headlessOptimizerProviders()` 仍白名单已实现的优化器，不要只看 `hasHeadless` |
-| `web/src/lib/agentCatalog.test.ts` | hub / session / history 列表断言 |
+| `src-tauri/src/agent_catalog/mod.rs` | 加 `AgentId` variant + `IDENTITIES` 行（含 `headless_image_paste`）；更新 `catalog_registers_*` 与 `headless_image_paste_kinds_match_research` |
+| `web/src/lib/agentCatalog.ts` | 同步一行（含 `headlessImagePaste`）；`headlessOptimizerProviders()` 仍白名单已实现的优化器，不要只看 `hasHeadless` |
+| `web/src/lib/agentCatalog.test.ts` | hub / session / history 列表断言 + 每身份 `headlessImagePaste` |
 
 投影缺省语义：
 
@@ -344,6 +345,44 @@ Scanner 对 canonicalize 落在 `portable-store/` 外的 Skill/Command 根软链
 6. 单测至少：native 不是 compatibility；会加载的兼容根能发现且 `ownedBy` 正确；不会加载的根保持缺席；门控开/关各一条。
 7. 仓库芯片：源 Agent 附加后，只有扫描表包含该挂载路径的 Agent 才应变暗淡。
 
+### 3.14 Workbench 无图形剪贴板贴图
+
+有图形剪贴板时所有 Agent 共用合同：owning device 写 OS 剪贴板，再向 PTY 注入 Ctrl+V（`\x16`）。Linux 无可达 X11/Wayland（SSH / headless / 过期 `DISPLAY=localhost:10.0`）时 **禁止** 再发 Ctrl+V，也 **禁止** 一律打 Claude 的 `@路径`。
+
+必须在身份表填 `headless_image_paste` / `headlessImagePaste`，取值只允许：
+
+| kind | PTY 注入 | 何时用 |
+|------|----------|--------|
+| `atFileMention` | `@/abs/path ` | TUI 把 `@` 当文件/图片引用（Claude、OpenCode、Grok、Gemini、Cursor） |
+| `bracketedPathPaste` | CSI `200~` + 绝对路径 + `201~` | TUI 把 **pasted 图片文件路径** 转成附件（Codex `normalize_pasted_path`） |
+| `typedAbsolutePath` | ` /abs/path ` | TUI 原生是把路径插入编辑器，由 read 工具读图（Pi） |
+
+探测顺序（`detect_session_agent`）：
+
+1. 该 terminal 的 active Agent runtime `provider_id` → `identity_by_runtime`（genericTerminal 得到 None）
+2. tmux 活动 pane `#{pane_current_command}` → `identity_by_executable_name`（basename，去 `.exe`，更长名字优先，故 `cursor-agent` 赢过 `agent`）
+3. 都认不出 → `AtFileMention`（当前多数身份；**新身份不得依赖这个默认**，必须自己填表）
+
+接入核对：
+
+1. 读该 CLI 官方键盘/贴图文档或 TUI 源码：Ctrl+V 读剪贴板？`@path`？路径 paste？插入裸路径？
+2. 无显示时选上表一种；没有合同就先不要宣称支持，不要抄 Claude。
+3. Rust / TS 身份表同一行必须填 `headless_image_paste`；`headless_image_paste_kinds_match_research` 与前端 `registers headless image paste kinds` 必须加断言。
+4. `identity_by_executable_name` 覆盖该 CLI 的 `executable_names`（含 Windows `.exe`）。
+5. 禁止在 `screenshot/clipboard.rs` 再写死 `claude` 字符串或第二种 `@` 语法。
+
+现身份调研摘要（2026-08-26）：
+
+| Agent | 有显示 | 无显示注入 | 依据 |
+|-------|--------|------------|------|
+| Claude | Ctrl+V | `@/abs/path ` | 官方 `@` 文件引用；prompt 里写路径也可读图 |
+| Codex | Ctrl+V / Win Alt+V | bracketed 绝对路径 | TUI `normalize_pasted_path` 把 pasted image path 变成附件；`@` 不是这条路径 |
+| OpenCode | Ctrl+V（wl-paste/xclip） | `@/abs/path ` | TUI `@file` 引用；社区贴图也走 `@` |
+| Grok | Ctrl+V | `@/abs/path ` | 官方 `@` 附加文件；复制文件再粘贴走路径 |
+| Gemini | Ctrl+V / Win Alt+V | `@/abs/path ` | 官方 `@` 可引用图片；pasted path 会加 `@` |
+| Cursor CLI | Ctrl+V（macOS） | `@/abs/path ` | `@` 与 prompt 内路径；headless 文档写「prompt 里放路径」 |
+| Pi | Ctrl+V（写临时文件再插入路径） | ` /abs/path ` | 官方 compose：粘贴/拖放变成路径，模型 `read`；`@` 是自动完成不是贴图合同 |
+
 ## 4. 编译器抓不到的漏网（必须 grep）
 
 `cargo check` 能抓住 Rust 穷尽 match。下面这些 **不会** 报非穷尽，接入后要搜一遍旧的「最后一家」：
@@ -388,6 +427,10 @@ rg -n "materializeEscapeLink|isPortableEscapeLinkItem" web/src
 
 # user-mirror 是否漏新身份 / 是否静默跳过
 rg -n "all_hub_targets" src-tauri/src/agent_hub/user_mirror src-tauri/src/agent_catalog
+
+# 无图形贴图是否漏身份 / 是否写死 Claude @路径
+rg -n "headless_image_paste|headlessImagePaste" src-tauri/src/agent_catalog web/src/lib/agentCatalog.ts
+rg -n "AtFileMention|BracketedPathPaste|TypedAbsolutePath" src-tauri/src/agent_catalog src-tauri/src/screenshot
 ```
 
 文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。不要写「关掉 Claude plugin 等于关掉所有 Agent」。不要写「`~/.agents` 就是全 Agent 统一库」。不要把「确认当前版本」写成会改写磁盘或需要 L3。不要把「恢复为仓库资产」写成会删除源树或把 native 真树 rename 进仓库。用户发起的 user-mirror 可以写该身份用户级白名单文件 / MCP leaf / viewing Disable，但不得 spawn 未认证 CLI；新身份缺席 `all_hub_targets` 必须 fail-closed，不得跳过。
