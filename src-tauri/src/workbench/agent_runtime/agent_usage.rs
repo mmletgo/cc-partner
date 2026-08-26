@@ -6,7 +6,7 @@
 //!     runtime 进入终态时应提取这些数据补记 Ledger，让 UI 不再显示「未提供」。
 //!
 //! Code Logic（这个模块做什么）:
-//!     五个纯函数提取器（root 可注入便于测试）+ 统一入口 `extract_provider_usage`：
+//!     七个纯函数提取器（root 可注入便于测试）+ 统一入口 `extract_provider_usage`：
 //!     - Claude：`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`，按 message.id
 //!       去重（stop_reason 优先 / output_tokens 更大者）后求和 billed tokens；
 //!       `context_length` 取末条主链占用（input+cache），compact_boundary 后取压缩后占用；
@@ -19,6 +19,9 @@
 //!       input/output/cache 与 context 字段；缺字段保持 None，对不上返回 None。
 //!     - Gemini：`~/.gemini/tmp/*/chats/*.json` 仅当能稳定读到 input/output/cached
 //!       时返回 Some，否则 None。
+//!     - Cursor CLI：`~/.cursor/chats/<hash>/<chatId>/` 内 jsonl/json（不含 IDE transcripts）；
+//!       无 token 字段返回 None。
+//!     - Pi：`~/.pi/agent/sessions/**/*.jsonl` 累加 assistant `usage`；`totalTokens` 作 occupancy。
 //!     所有提取有界、宽松解析，失败一律返回 None，不 panic；禁止把缺失写成 0。
 
 use crate::workbench::agent_ledger::ReliableUsageSnapshot;
@@ -45,6 +48,12 @@ const MAX_GROK_SESSION_DIRS: usize = 10_000;
 const MAX_GEMINI_PROJECT_DIRS: usize = 10_000;
 /// Gemini chats 下最多检查的 json 文件数。
 const MAX_GEMINI_CHAT_FILES: usize = 10_000;
+/// Cursor CLI chats 下最多检查的 project-hash 目录数。
+const MAX_CURSOR_CHAT_GROUPS: usize = 10_000;
+/// Cursor CLI chats 下最多检查的 chat 目录数。
+const MAX_CURSOR_CHAT_DIRS: usize = 10_000;
+/// Pi sessions 树最多走访的目录/文件数。
+const MAX_PI_WALK_ENTRIES: usize = 10_000;
 
 /// 校验 native session id 可安全拼进文件路径：非空、无路径分隔符、无 `..`。
 ///
@@ -1196,6 +1205,7 @@ fn read_loose_usage(value: &Value) -> LooseUsageFields {
             value,
             &[
                 "cache_write",
+                "cacheWrite",
                 "cache_write_tokens",
                 "cacheWriteTokens",
                 "cache_creation_input_tokens",
@@ -1239,8 +1249,13 @@ fn read_loose_usage(value: &Value) -> LooseUsageFields {
         cost_usd: value
             .get("costUSD")
             .or_else(|| value.get("cost_usd"))
-            .or_else(|| value.get("cost"))
-            .and_then(Value::as_f64),
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                value.get("cost").and_then(|cost| {
+                    cost.as_f64()
+                        .or_else(|| cost.get("total").and_then(Value::as_f64))
+                })
+            }),
         first_token_avg_ms: json_token_u64(
             value,
             &[
@@ -1274,6 +1289,7 @@ fn read_loose_usage(value: &Value) -> LooseUsageFields {
             &[
                 "cached",
                 "cache_read",
+                "cacheRead",
                 "cache_read_tokens",
                 "cacheReadTokens",
                 "cached_input_tokens",
@@ -1419,15 +1435,21 @@ fn parse_grok_signals(path: &Path) -> Option<ReliableUsageSnapshot> {
 // E. Gemini
 // ---------------------------------------------------------------------------
 
-/// 解析 Gemini 配置根：注入路径或 `~/.gemini`。
+/// 解析 Gemini 配置根：注入路径 / `GEMINI_HOME` / `~/.gemini`。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     测试注入临时根；生产读用户主目录下的 Gemini CLI 数据。
+///     测试注入临时根；生产读用户主目录或 `GEMINI_HOME`。
 ///
 /// Code Logic（这个函数做什么）:
-///     非空注入优先，否则 `home/.gemini`。
+///     非空注入优先，其次非空 `GEMINI_HOME`，否则 `home/.gemini`。
 fn resolve_gemini_home(injected: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(p) = injected {
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(raw) = std::env::var("GEMINI_HOME") {
+        let p = PathBuf::from(raw.trim());
         if !p.as_os_str().is_empty() {
             return Some(p);
         }
@@ -1588,6 +1610,358 @@ fn collect_gemini_usage(value: &Value) -> Option<LooseUsageFields> {
 }
 
 // ---------------------------------------------------------------------------
+// E2. Cursor CLI
+// ---------------------------------------------------------------------------
+
+/// 解析 Cursor CLI 配置根：注入路径 / `CURSOR_HOME` / `~/.cursor`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     测试注入临时根；生产与 Hub 一样认 `CURSOR_HOME`。
+///
+/// Code Logic（这个函数做什么）:
+///     非空注入优先，其次非空 `CURSOR_HOME`，否则 `home/.cursor`。
+fn resolve_cursor_home(injected: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = injected {
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(raw) = std::env::var("CURSOR_HOME") {
+        let p = PathBuf::from(raw.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".cursor"))
+}
+
+/// 从 Cursor CLI chat 目录提取可靠 usage。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Cursor CLI 会话在 `~/.cursor/chats/<hash>/<chatId>/`；目前常见只有 `meta.json`
+///     （cwd，无 token）。有 jsonl/json 带 usage 才抽取；禁止扫 IDE `agent-transcripts`。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 native id 后有界查找 chat 目录，解析目录内会话文件；无 token 维返回 None。
+pub(crate) fn extract_cursor_usage(
+    cursor_home: Option<PathBuf>,
+    native_session_id: &str,
+) -> Option<ReliableUsageSnapshot> {
+    if !is_safe_native_id(native_session_id) {
+        return None;
+    }
+    let root = resolve_cursor_home(cursor_home)?;
+    let dir = find_cursor_chat_dir(&root.join("chats"), native_session_id)?;
+    parse_cursor_chat_dir(&dir)
+}
+
+/// 在 `chats/<group>/<chatId>/` 有界查找匹配 native id 的目录。
+fn find_cursor_chat_dir(chats: &Path, native_session_id: &str) -> Option<PathBuf> {
+    let groups = fs::read_dir(chats).ok()?;
+    let mut checked = 0usize;
+    for (i, group) in groups.enumerate() {
+        if i >= MAX_CURSOR_CHAT_GROUPS {
+            break;
+        }
+        let Ok(group) = group else { continue };
+        if !group.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let direct = group.path().join(native_session_id);
+        if direct.is_dir() {
+            return Some(direct);
+        }
+        let Ok(entries) = fs::read_dir(group.path()) else {
+            continue;
+        };
+        for entry in entries {
+            if checked >= MAX_CURSOR_CHAT_DIRS {
+                return None;
+            }
+            checked += 1;
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if entry.file_name().to_str() == Some(native_session_id) {
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
+/// 定位 Cursor chat 目录里带 usage 的文件（供 live path cache）。
+fn find_cursor_usage_file(chats: &Path, native_session_id: &str) -> Option<PathBuf> {
+    let dir = find_cursor_chat_dir(chats, native_session_id)?;
+    cursor_usage_file_in_dir(&dir)
+}
+
+fn cursor_usage_file_in_dir(dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name()?.to_str()?;
+        if name == "meta.json" {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext != Some("json") && ext != Some("jsonl") {
+            continue;
+        }
+        return Some(path);
+    }
+    None
+}
+
+/// 解析 Cursor CLI chat 目录：jsonl 逐行、json 整文件宽松抽取。
+fn parse_cursor_chat_dir(dir: &Path) -> Option<ReliableUsageSnapshot> {
+    let mut acc = LooseUsageFields::default();
+    let mut any = false;
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "meta.json" {
+            continue;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("jsonl") => {
+                if let Some(part) = parse_jsonl_loose_usage(&path) {
+                    acc.add_assign(&part);
+                    any = true;
+                }
+            }
+            Some("json") => {
+                if let Some(value) = read_json_object(&path) {
+                    if let Some(part) = collect_gemini_usage(&value) {
+                        acc.add_assign(&part);
+                        any = true;
+                    } else {
+                        let part = read_loose_usage(&value);
+                        if part.has_token_dim() {
+                            acc.fill_missing_from(&part);
+                            any = true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    any.then(|| acc.into_snapshot())
+}
+
+fn parse_cursor_usage_from_path(path: &Path) -> Option<ReliableUsageSnapshot> {
+    if path.is_dir() {
+        return parse_cursor_chat_dir(path);
+    }
+    if let Some(parent) = path.parent() {
+        if parent.is_dir() {
+            return parse_cursor_chat_dir(parent);
+        }
+    }
+    None
+}
+
+/// 从 JSONL 逐行宽松累加 usage（Cursor / 未知布局复用）。
+fn parse_jsonl_loose_usage(path: &Path) -> Option<LooseUsageFields> {
+    let mut file = fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if meta.len() > MAX_JSONL_FILE_BYTES {
+        return None;
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    let mut acc = LooseUsageFields::default();
+    let mut any = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.len() > MAX_JSONL_LINE_BYTES {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let part = value
+            .get("usage")
+            .or_else(|| value.pointer("/message/usage"))
+            .map(read_loose_usage)
+            .unwrap_or_else(|| read_loose_usage(&value));
+        if part.has_token_dim() {
+            acc.add_assign(&part);
+            any = true;
+        }
+    }
+    any.then_some(acc)
+}
+
+// ---------------------------------------------------------------------------
+// E3. Pi
+// ---------------------------------------------------------------------------
+
+/// 解析 Pi 配置根：注入路径或 `~/.pi/agent`（无 PI_HOME）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     官方目录固定 `~/.pi/agent`；测试注入临时根。禁止臆造覆盖 env。
+///
+/// Code Logic（这个函数做什么）:
+///     非空注入优先，否则 `home/.pi/agent`。
+fn resolve_pi_home(injected: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = injected {
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".pi").join("agent"))
+}
+
+/// 从 Pi session JSONL 提取可靠 usage。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Pi assistant 消息带 `usage.input/output/cacheRead/cacheWrite/totalTokens/cost.total`；
+///     按轮次求和 billed tokens，occupancy 取末条 `totalTokens`。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 native id 后有界查找 jsonl；无 token 维返回 None。
+pub(crate) fn extract_pi_usage(
+    pi_home: Option<PathBuf>,
+    native_session_id: &str,
+) -> Option<ReliableUsageSnapshot> {
+    if !is_safe_native_id(native_session_id) {
+        return None;
+    }
+    let root = resolve_pi_home(pi_home)?;
+    let target = find_pi_session_file(&root.join("sessions"), native_session_id)?;
+    parse_pi_jsonl(&target, native_session_id)
+}
+
+/// 在 `sessions` 树按文件名或头部 id 有界查找 jsonl。
+fn find_pi_session_file(sessions: &Path, native_session_id: &str) -> Option<PathBuf> {
+    if !sessions.is_dir() {
+        return None;
+    }
+    let mut stack = vec![sessions.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > MAX_PI_WALK_ENTRIES {
+                return None;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.contains(native_session_id) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// 解析 Pi JSONL：累加 assistant usage，末条 totalTokens 作 occupancy。
+fn parse_pi_jsonl(path: &Path, expected_session: &str) -> Option<ReliableUsageSnapshot> {
+    let mut file = fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if meta.len() > MAX_JSONL_FILE_BYTES {
+        return None;
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    let mut acc = LooseUsageFields::default();
+    let mut any = false;
+    let mut last_occupancy: Option<u64> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.len() > MAX_JSONL_LINE_BYTES {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(sid) = value
+            .get("id")
+            .or_else(|| value.get("sessionId"))
+            .and_then(Value::as_str)
+        {
+            let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
+            if matches!(ty, "session" | "session_info" | "header")
+                && sid != expected_session
+                && !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(expected_session))
+            {
+                return None;
+            }
+        }
+        let role = value
+            .pointer("/message/role")
+            .or_else(|| value.get("role"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if role == "user" {
+            continue;
+        }
+        let Some(usage_src) = value
+            .pointer("/message/usage")
+            .or_else(|| value.pointer("/message/message/usage"))
+            .or_else(|| value.get("usage"))
+        else {
+            continue;
+        };
+        let mut part = read_loose_usage(usage_src);
+        if part.context_length.is_none() {
+            part.context_length = json_token_u64(usage_src, &["totalTokens", "total_tokens"]);
+        }
+        if part.model_id.is_none() {
+            part.model_id = value
+                .pointer("/message/model")
+                .or_else(|| value.get("model"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+        if part.has_token_dim() {
+            if part.context_length.is_some() {
+                last_occupancy = part.context_length;
+            }
+            // billed tokens 按轮次加总；occupancy 不能加总。
+            let occupancy = part.context_length.take();
+            acc.add_assign(&part);
+            if occupancy.is_some() {
+                acc.context_length = occupancy;
+            }
+            any = true;
+        }
+    }
+    if !any {
+        return None;
+    }
+    if last_occupancy.is_some() {
+        acc.context_length = last_occupancy;
+    }
+    Some(acc.into_snapshot())
+}
+
+// ---------------------------------------------------------------------------
 // F. 统一入口
 // ---------------------------------------------------------------------------
 
@@ -1598,7 +1972,7 @@ fn collect_gemini_usage(value: &Value) -> Option<LooseUsageFields> {
 ///     还认 catalog 短码；漏掉任一别名会导致该 provider 永远抽不到 tokens。
 ///
 /// Code Logic（这个函数做什么）:
-///     接受 Claude / Codex / OpenCode / Grok / Gemini 的稳定 id 与历史别名。
+///     接受 Claude / Codex / OpenCode / Grok / Gemini / Cursor / Pi 的稳定 id 与历史别名。
 pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
     matches!(
         provider_id,
@@ -1626,7 +2000,8 @@ pub fn is_usage_extractable_provider(provider_id: &str) -> bool {
 /// Code Logic（这个模块做什么）:
 ///     claudeCodeVisible → Claude jsonl；codex/codexVisible → rollout jsonl；
 ///     opencode/openCodeVisible → SQLite；grokBuildVisible/grok → signals.json；
-///     geminiCliVisible/gemini → chat JSON；其他 provider 返回 None。
+///     geminiCliVisible/gemini → chat JSON；cursorCliVisible/cursor → chats 目录；
+///     piVisible/pi → session jsonl；其他 provider 返回 None。
 pub fn extract_provider_usage(
     provider_id: &str,
     native_session_id: &str,
@@ -1640,6 +2015,8 @@ pub fn extract_provider_usage(
         "opencode" | "openCodeVisible" => extract_opencode_usage(None, native_session_id),
         "grokBuildVisible" | "grok" => extract_grok_usage(None, native_session_id),
         "geminiCliVisible" | "gemini" => extract_gemini_usage(None, native_session_id),
+        "cursorCliVisible" | "cursor" => extract_cursor_usage(None, native_session_id),
+        "piVisible" | "pi" => extract_pi_usage(None, native_session_id),
         _ => None,
     }
 }
@@ -1673,6 +2050,12 @@ pub(crate) fn locate_provider_session_file(
         "geminiCliVisible" | "gemini" => {
             find_gemini_chat_file(&resolve_gemini_home(None)?, native_session_id)
         }
+        "cursorCliVisible" | "cursor" => {
+            find_cursor_usage_file(&resolve_cursor_home(None)?.join("chats"), native_session_id)
+        }
+        "piVisible" | "pi" => {
+            find_pi_session_file(&resolve_pi_home(None)?.join("sessions"), native_session_id)
+        }
         _ => None,
     }
 }
@@ -1695,6 +2078,8 @@ pub(crate) fn extract_provider_usage_from_path(
         "opencode" | "openCodeVisible" => extract_opencode_usage(None, native_session_id),
         "grokBuildVisible" | "grok" => parse_grok_signals(path),
         "geminiCliVisible" | "gemini" => parse_gemini_chat(path, native_session_id),
+        "cursorCliVisible" | "cursor" => parse_cursor_usage_from_path(path),
+        "piVisible" | "pi" => parse_pi_jsonl(path, native_session_id),
         _ => None,
     }
 }
@@ -2119,6 +2504,10 @@ mod tests {
         assert!(is_usage_extractable_provider("grok"));
         assert!(is_usage_extractable_provider("geminiCliVisible"));
         assert!(is_usage_extractable_provider("gemini"));
+        assert!(is_usage_extractable_provider("cursorCliVisible"));
+        assert!(is_usage_extractable_provider("cursor"));
+        assert!(is_usage_extractable_provider("piVisible"));
+        assert!(is_usage_extractable_provider("pi"));
         assert!(!is_usage_extractable_provider("genericTerminal"));
     }
 
@@ -2218,5 +2607,136 @@ mod tests {
         .unwrap();
         assert!(extract_gemini_usage(Some(tmp.path().to_path_buf()), "sess-g").is_none());
         assert!(extract_gemini_usage(Some(tmp.path().to_path_buf()), "../x").is_none());
+    }
+
+    /// Grok 真实 signals.json 只有 context/TTFT/model，没有 billed input/output。
+    #[test]
+    fn grok_real_signals_extracts_context_without_billed_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("sessions/encoded-cwd/sess-real");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("signals.json"),
+            serde_json::json!({
+                "contextTokensUsed": 324271,
+                "contextWindowTokens": 500000,
+                "contextWindowUsage": 0.648,
+                "primaryModelId": "grok-4.6",
+                "modelsUsed": ["grok-4.6"],
+                "avgTimeToFirstTokenMs": 1629
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let snap = extract_grok_usage(Some(tmp.path().to_path_buf()), "sess-real").unwrap();
+        assert!(snap.input_tokens.is_none());
+        assert!(snap.output_tokens.is_none());
+        assert!(snap.cache_read_tokens.is_none());
+        assert_eq!(snap.model_id.as_deref(), Some("grok-4.6"));
+        assert_eq!(snap.context_length, Some(324271));
+        assert_eq!(snap.context_window, Some(500000));
+        assert_eq!(snap.first_token_avg_ms, Some(1629));
+    }
+
+    /// Cursor：只有 meta.json 无 token → None；jsonl usage 可抽取。
+    #[test]
+    fn cursor_meta_only_returns_none_jsonl_extracts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chat = tmp.path().join("chats/hash/chat-1");
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::write(
+            chat.join("meta.json"),
+            serde_json::json!({"cwd": "/tmp/p", "hasConversation": true}).to_string(),
+        )
+        .unwrap();
+        assert!(extract_cursor_usage(Some(tmp.path().to_path_buf()), "chat-1").is_none());
+
+        std::fs::write(
+            chat.join("events.jsonl"),
+            serde_json::json!({
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 7,
+                    "cacheRead": 2
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let snap = extract_cursor_usage(Some(tmp.path().to_path_buf()), "chat-1").unwrap();
+        assert_eq!(snap.input_tokens, Some(4));
+        assert_eq!(snap.output_tokens, Some(7));
+        assert_eq!(snap.cache_read_tokens, Some(2));
+        assert!(extract_cursor_usage(Some(tmp.path().to_path_buf()), "../x").is_none());
+    }
+
+    /// Pi：累加 assistant usage；user 行忽略；totalTokens 作 occupancy。
+    #[test]
+    fn pi_jsonl_sums_assistant_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions/--tmp-p--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let id = "11111111-2222-3333-4444-555555555555";
+        let path = sessions.join(format!("2026-08-26T00-00-00_{id}.jsonl"));
+        let lines = [
+            serde_json::json!({
+                "type": "session",
+                "id": id,
+                "cwd": "/tmp/p"
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "message",
+                "id": "u1",
+                "message": {"role": "user", "content": "hi"}
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "message",
+                "id": "a1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-5",
+                    "usage": {
+                        "input": 10,
+                        "output": 2,
+                        "cacheRead": 5,
+                        "cacheWrite": 1,
+                        "totalTokens": 17,
+                        "cost": {"total": 0.05}
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "message",
+                "id": "a2",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-5",
+                    "usage": {
+                        "input": 20,
+                        "output": 3,
+                        "cacheRead": 8,
+                        "cacheWrite": 0,
+                        "totalTokens": 31,
+                        "cost": {"total": 0.07}
+                    }
+                }
+            })
+            .to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let snap = extract_pi_usage(Some(tmp.path().to_path_buf()), id).unwrap();
+        assert_eq!(snap.input_tokens, Some(30));
+        assert_eq!(snap.output_tokens, Some(5));
+        assert_eq!(snap.cache_read_tokens, Some(13));
+        assert_eq!(snap.cache_write_tokens, Some(1));
+        assert_eq!(snap.context_length, Some(31));
+        assert_eq!(snap.model_id.as_deref(), Some("claude-opus-4-5"));
+        assert_eq!(snap.cost_major.as_deref(), Some("0.12"));
+        assert!(extract_pi_usage(Some(tmp.path().to_path_buf()), "../x").is_none());
     }
 }

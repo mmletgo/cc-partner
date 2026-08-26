@@ -276,15 +276,19 @@ pub fn matching_terminals_for_cwd(
 /// 把 auto-title 来源映射到 Agent runtime provider token。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Claude/Codex/OpenCode 标题绑定是普通终端能被感知的可靠信号；未知源不得建行。
+///     标题/会话文件绑定是普通终端能被感知的可靠信号；未知源不得建行。
 ///
 /// Code Logic（这个函数做什么）:
-///     精确匹配三个生产 source_label；其它返回 None。
+///     精确匹配已适配 7 个 Agent 的生产 source_label；其它返回 None。
 pub fn provider_id_from_auto_title_source(source_label: &str) -> Option<&'static str> {
     match source_label {
         "claude.ai-title" => Some("claudeCodeVisible"),
         "codex.thread_name" => Some("codexVisible"),
         "opencode.session.title" => Some("openCodeVisible"),
+        "grok.session.title" => Some("grokBuildVisible"),
+        "gemini.session.title" => Some("geminiCliVisible"),
+        "cursor.session.title" => Some("cursorCliVisible"),
+        "pi.session.title" => Some("piVisible"),
         _ => None,
     }
 }
@@ -366,11 +370,12 @@ fn schedule_ensure_interactive_agent(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Claude / Codex / OpenCode 共用：绑定 terminal 后做 first-pane 门禁与 auto rename。
+///     七个已适配 Agent 共用：先绑定 native_session_id（用量抽取依赖它），
+///     再在 first-pane 门禁下做 auto rename。占位标题也必须绑定，不能等 generated_title。
 ///
 /// Code Logic（这个函数做什么）:
-///     清洗 title → 解析 terminal（native 优先，cwd 兜底）→ pane 门禁 → try_auto_rename + 异步 upsert。
-///     返回三态同步结果，让 provider 区分“已经处理”与“临时找不到绑定”。
+///     解析 terminal（native 优先，cwd 兜底）→ 有 native 就 ensure Idle 行 →
+///     标题实质时才 pane 门禁 + rename。返回三态同步结果。
 fn try_auto_rename_bound_title(
     state: &AppState,
     title_raw: &str,
@@ -379,9 +384,6 @@ fn try_auto_rename_bound_title(
     source_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     source_label: &str,
 ) -> AutoTitleSyncResult {
-    let Some(title) = sanitize_auto_title(title_raw) else {
-        return AutoTitleSyncResult::AlreadySettled;
-    };
     let registry = &state.workbench_sessions;
     let live = registry.list_live_session_rows();
     if live.is_empty() {
@@ -392,17 +394,15 @@ fn try_auto_rename_bound_title(
     // 1) native_session_id → agent runtime terminal（强绑定，首选）
     // 2) 无 native 时仅当 cwd 唯一匹配一个 live terminal 才兜底
     //    （多终端同 cwd 禁止猜，避免历史 session 互相抢名闪烁）
-    let native_terminal_id =
-        native_session_id.and_then(|n| find_terminal_by_native_session(state, n));
+    let native_clean = native_session_id.map(str::trim).filter(|s| !s.is_empty());
+    let provider_id = provider_id_from_auto_title_source(source_label);
+    let native_terminal_id = native_clean.and_then(|n| find_terminal_by_native_session(state, n));
     let used_cwd_fallback = native_terminal_id.is_none();
     let terminal_id = native_terminal_id.or_else(|| pick_unique_terminal_for_cwd(&live, cwd));
 
     let Some(terminal_id) = terminal_id else {
         // 多终端同 cwd：不猜改名，但仍尝试把 Agent 落到一个空闲 window。
-        if let (Some(native), Some(provider_id)) = (
-            native_session_id.map(str::trim).filter(|s| !s.is_empty()),
-            provider_id_from_auto_title_source(source_label),
-        ) {
+        if let (Some(native), Some(provider_id)) = (native_clean, provider_id) {
             let fallbacks = matching_terminals_for_cwd(&live, cwd);
             if let Some(first_id) = fallbacks.first() {
                 if let Some(target) = live.iter().find(|row| row.id == *first_id) {
@@ -418,10 +418,6 @@ fn try_auto_rename_bound_title(
         }
         return AutoTitleSyncResult::RetryableMiss;
     };
-
-    if !is_substantive_auto_title(&title) {
-        return AutoTitleSyncResult::AlreadySettled;
-    }
 
     let Some(target) = live.iter().find(|row| row.id == terminal_id) else {
         return AutoTitleSyncResult::RetryableMiss;
@@ -447,13 +443,26 @@ fn try_auto_rename_bound_title(
             return AutoTitleSyncResult::AlreadySettled;
         }
     }
+
+    // 用量抽取依赖 native_session_id；占位标题也必须建 Idle 行。
+    if let (Some(native), Some(provider_id)) = (native_clean, provider_id) {
+        schedule_ensure_interactive_agent(state, target, native, provider_id, &[]);
+    }
+
+    let Some(title) = sanitize_auto_title(title_raw) else {
+        return AutoTitleSyncResult::AlreadySettled;
+    };
+    if !is_substantive_auto_title(&title) {
+        return AutoTitleSyncResult::AlreadySettled;
+    }
+
     // seed title-owner；多 pane 时仅 owner pane 上的 agent 可改名。
     let owner = registry.ensure_title_owner_pane(&terminal_id);
     let pane_count = registry.pane_count_for_session(&terminal_id).unwrap_or(1);
     let agent_pane = registry.agent_title_pane_for(&terminal_id, native_session_id);
     // 若 native 已知但尚未 bind pane，尝试用 terminal 绑定回填 native map。
     if agent_pane.is_none() {
-        if let Some(n) = native_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(n) = native_clean {
             let _ = registry.bind_native_title_pane(&terminal_id, n);
         }
     }
@@ -468,14 +477,6 @@ fn try_auto_rename_bound_title(
             "跳过自动标题：agent 不在 title-owner pane"
         );
         return AutoTitleSyncResult::RetryableMiss;
-    }
-
-    // 同名/手改也必须感知：否则 snapshot 永远空，hint 停在 0/0。
-    if let (Some(native), Some(provider_id)) = (
-        native_session_id.map(str::trim).filter(|s| !s.is_empty()),
-        provider_id_from_auto_title_source(source_label),
-    ) {
-        schedule_ensure_interactive_agent(state, target, native, provider_id, &[]);
     }
 
     if matches!(
@@ -625,20 +626,29 @@ pub fn bind_agent_title_pane_for_state(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Codex/OpenCode 轮询任务需要在 headless owner 生命周期内运行并可 cancel。
+///     Codex/OpenCode/catalog 轮询任务需要在 headless owner 生命周期内运行并可 cancel。
 ///
 /// Code Logic（这个函数做什么）:
-///     spawn 两个子任务：codex session_index 轮询 + opencode sqlite 轮询；监听 cancel。
+///     spawn 三个子任务：codex session_index、opencode sqlite、Grok/Gemini/Cursor/Pi 会话文件；监听 cancel。
 pub fn start_provider_title_pollers(state: AppState, cancel: tokio_util::sync::CancellationToken) {
     let codex_state = state.clone();
     let codex_cancel = cancel.child_token();
     tauri::async_runtime::spawn(async move {
         crate::workbench::auto_title_codex::run_codex_title_poller(codex_state, codex_cancel).await;
     });
-    let oc_state = state;
+    let oc_state = state.clone();
     let oc_cancel = cancel.child_token();
     tauri::async_runtime::spawn(async move {
         crate::workbench::auto_title_opencode::run_opencode_title_poller(oc_state, oc_cancel).await;
+    });
+    let catalog_state = state;
+    let catalog_cancel = cancel.child_token();
+    tauri::async_runtime::spawn(async move {
+        crate::workbench::auto_title_catalog::run_catalog_title_poller(
+            catalog_state,
+            catalog_cancel,
+        )
+        .await;
     });
 }
 
@@ -739,6 +749,22 @@ mod tests {
         assert_eq!(
             provider_id_from_auto_title_source("opencode.session.title"),
             Some("openCodeVisible")
+        );
+        assert_eq!(
+            provider_id_from_auto_title_source("grok.session.title"),
+            Some("grokBuildVisible")
+        );
+        assert_eq!(
+            provider_id_from_auto_title_source("gemini.session.title"),
+            Some("geminiCliVisible")
+        );
+        assert_eq!(
+            provider_id_from_auto_title_source("cursor.session.title"),
+            Some("cursorCliVisible")
+        );
+        assert_eq!(
+            provider_id_from_auto_title_source("pi.session.title"),
+            Some("piVisible")
         );
         assert_eq!(provider_id_from_auto_title_source("unknown.source"), None);
     }

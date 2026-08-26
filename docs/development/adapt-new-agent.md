@@ -152,6 +152,7 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 - `is_usage_extractable_provider` 加上 runtime id **和** catalog 短码
 - `extract_provider_usage` / `locate_*` 无证据时走 `_ => None`
 - **禁止把缺失写成 0**；UI 显示「未提供」
+- live usage 还要求非空 `native_session_id`。Claude/Codex/OpenCode 走各自 auto-title；Grok/Gemini/Cursor/Pi 走 `workbench/auto_title_catalog.rs`，只扫该 CLI **已证实**的会话文件（Grok `active_sessions.json` + `summary.json`，Gemini `tmp/*/chats/*.json`，Cursor CLI `chats/<hash>/<chatId>/meta.json`，Pi `~/.pi/agent/sessions/**/*.jsonl`）。不要猜路径，不要把 Cursor IDE `agent-transcripts` 当 CLI 会话。占位标题也必须绑定 native id，不能等 generated_title。
 
 ### 3.7 Prompt 历史
 

@@ -60,7 +60,7 @@ static TERMINAL_USAGE_NOTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 ///     已把可靠 usage 落到本地 session 文件/SQLite，需要在 runtime 终态时提取补记。
 ///
 /// Code Logic（这个模块做什么）:
-///     仅 terminal phase + 支持 usage 的三 provider + 非空 native_session_id 才触发；
+///     仅 terminal phase + 可抽取 provider + 非空 native_session_id 才触发；
 ///     `TERMINAL_USAGE_NOTED` 按 agent_session_id 一次性去重后 tokio::spawn：
 ///     spawn_blocking 提取 → has_any 时 note_usage；Err 仅 debug 日志（不打路径），不阻断。
 async fn maybe_note_terminal_usage(state: &AppState, row: &AgentSessionRuntime) {
