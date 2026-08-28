@@ -1,6 +1,6 @@
 # 接入新 CLI Agent 操作手册
 
-> 给下一次「再适配一种 Agent」用。本文是落地清单：先锁身份，再按面接线，最后用编译器与 grep 清漏网。
+> 给下一次「再适配一种 Agent」用。本文是落地清单：先锁身份，再按面接线，最后用编译器与 grep 清漏网。用量面必须同时绑定 `native_session_id` 并对照真实磁盘字段抽取，见 §3.6。
 >
 > 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
 >
@@ -19,6 +19,7 @@
 9. **不碰这些面**：可切换 LAN 模式、鉴权矩阵、把 peer 称为已认证设备、自动安装 CLI、读取 API key、把 `cc-switch` / Provider Manager 并进身份目录、为新 CLI 伪造 Claude status 文件或 OpenCode runtime bridge。
 10. **可执行名 ≠ 产品名**。只启动官方 CLI（Cursor 是 `agent`），禁止拉起 GUI。
 11. **新身份必须进入 `all_hub_targets()`。** 用户级镜像一次处理 catalog 全部 Hub Agent；缺席不得静默跳过，必须显式失败（unavailable / fail-closed）。禁止只镜像 Claude/Codex/OpenCode 子集而把后来者当不存在。见 [`2026-08-23-agent-hub-user-mirror-design.md`](../superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md)。
+12. **用量必须同时绑定 `native_session_id`。** `has_usage: true` 和抽取器都不够：live usage 每 2s 刷新时，空 native id 直接 Skip，状态卡会一直「未提供」。占位标题也要绑定，不能等 generated_title。无磁盘证据就保持 extract `None`，禁止把缺失写成 0。详见 §3.6。
 
 ## 1. 先锁身份（未锁完禁止开写）
 
@@ -41,8 +42,9 @@
 | Runtime provider | camelCase，带 `Visible` 后缀 | `cursorCliVisible` |
 | 启动 / resume | argv + stdin | 空 args + prompt stdin；`agent --resume {id}` |
 | 完成合同 | 无稳定 sentinel 就 Manual | `Manual` + `ResumeTerminalPolicy::Fresh` |
-| 会话布局 | 有合同才扫盘 | 未固化 → tab 在、结果 `unavailable` |
-| 用量抽取 | 有稳定字段才实现 | `has_usage: true`，extract 返回 `None` |
+| 会话搜索布局 | ⌘K 预览/resume 有合同才扫盘 | 未固化 → tab 在、结果 `unavailable`；**不等于**不能绑 native id |
+| native session 绑定 | 会话文件 / 标题索引 / OSC 里能拿到 **id + cwd** | 无绑定则状态卡永远「未提供」。默认走 `auto_title_catalog.rs` |
+| 用量抽取 | 对照**本机真实文件**的稳定字段 | `has_usage: true` 仍须接线 extract；CLI 没写 billed tokens 就保持 null，不要发明 `input_tokens` |
 | Prompt 历史 | 有用户输入文件才加 collector | `history_source` 可登记；无 collector 则筛选为空 |
 | Headless / 优化器 | catalog 位 ≠ 设置里可选 | `has_headless: true`，优化器仍只开 claude+grok |
 | 无图形剪贴板贴图 | `HeadlessImagePasteKind`；必须有该 CLI 官方或源码合同，禁止抄 Claude 的 `@路径` | 见 §3.14；Codex=`bracketedPathPaste`，Pi=`typedAbsolutePath`，其余现身份=`atFileMention` |
@@ -69,9 +71,10 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 2. **Hub 枚举与路径**（`AgentTarget`、`TargetHomes`、support-manifest）
 3. **Hub AssetAdapter**（新 `targets/<id>.rs`，单测锁「不写 AGENTS.md / 不写 ~/.claude」）
 4. **Runtime AgentAdapter**（新 `orchestrator/agent_adapter/<id>.rs` + registry）
-5. **穷尽 match / 列表**（Hub 投影、portable、`plugin_enablement`、`portable_store`、`PortableAssetActionKind`/`PlanOperation`、packages、session、usage）
-6. **前端类型 / decoder / i18n / 列表 helper**
-7. **验证**（§6）
+5. **穷尽 match / 列表**（Hub 投影、portable、`plugin_enablement`、`portable_store`、`PortableAssetActionKind`/`PlanOperation`、packages、session）
+6. **native-id 绑定 + 用量抽取**（§3.6，必须在宣称 `has_usage` 之前做完；绑定与 ⌘K 搜索是两条路）
+7. **前端类型 / decoder / i18n / 列表 helper**
+8. **验证**（§6）
 
 不要先做 UI 再补 catalog。壳层列表必须读 `allHubTargets()` / `allSessionSources()` / `allHistorySources()`。
 
@@ -93,7 +96,8 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 - `runtimeProvider: None` → 不进编排器 / 可见 Runner
 - `sessionSource: None` → ⌘K 不出现该 tab
 - `historySource: None` → Prompt 历史筛选不出现；有 source 无 collector 则 tab 在、列表空
-- `has_usage: false` → Token 统计不抽该 provider
+- `has_usage: false` → Token 统计与 live usage **都不抽**该 provider（`is_usage_extractable_provider` 也不得加它）
+- `has_usage: true` → 必须完成 §3.6 绑定 **和** extract 接线；只改 catalog 位，状态卡仍会「未提供」
 - `has_headless: true` 只表示「登记过」；设置页可选集另滤
 
 ### 3.2 Hub：枚举、路径、manifest
@@ -145,14 +149,98 @@ Cursor 走 **Grok 型**：公共槽复用已有 `AGENTS.md`，专属写 `.cursor
 
 磁盘布局没有官方合同就返回 `diagnostics.status = unavailable`，不要猜路径、不要误扫 Claude jsonl。
 
-### 3.6 用量
+⌘K **搜索** 和状态卡 **用量** 是两条路：搜索需要可预览的 transcript 合同；用量绑定只需要已证实文件里的 **session id + cwd**。Cursor/Pi 搜索可以继续 `unavailable`，同时 catalog 仍可绑定 native id。
 
-`src-tauri/src/workbench/agent_runtime/agent_usage.rs`：
+### 3.6 用量与 native session 绑定
 
-- `is_usage_extractable_provider` 加上 runtime id **和** catalog 短码
-- `extract_provider_usage` / `locate_*` 无证据时走 `_ => None`
-- **禁止把缺失写成 0**；UI 显示「未提供」
-- live usage 还要求非空 `native_session_id`。Claude/Codex/OpenCode 走各自 auto-title；Grok/Gemini/Cursor/Pi 走 `workbench/auto_title_catalog.rs`，只扫该 CLI **已证实**的会话文件（Grok `active_sessions.json` + `summary.json`，Gemini `tmp/*/chats/*.json`，Cursor CLI `chats/<hash>/<chatId>/meta.json`，Pi `~/.pi/agent/sessions/**/*.jsonl`）。不要猜路径，不要把 Cursor IDE `agent-transcripts` 当 CLI 会话。占位标题也必须绑定 native id，不能等 generated_title。
+Workbench 右侧「当前会话」读 `liveUsage ?? ledgerEntry`。live 路径在 `agent_runtime/live_usage.rs` 每 2s 刷新，**两道门同时成立**才会出现数字：
+
+1. `is_usage_extractable_provider(provider_id)`（runtime id 与 catalog 短码都要认）
+2. 非空 `native_session_id`（trim 后）
+
+终态 ledger（`maybe_note_terminal_usage`）是同一对门禁。缺任一扇门，UI 显示「未提供」，**禁止**把缺失写成 0。
+
+Grok/Gemini/Cursor/Pi 曾经只加了抽取器或 `has_usage`，没有绑定 native id，状态卡全空。新身份不要再走这条路。
+
+#### 3.6.1 先锁绑定源（未锁完禁止写 extract）
+
+在身份表写明下面三格，空格必须写「本轮不做 / 无证据」：
+
+| 决策 | 写什么 |
+|------|--------|
+| native id 从哪来 | 活会话清单 / 标题索引 / OSC / session 目录名 / jsonl 头 |
+| 用哪条 `source_label` | 约定 `<wire>.session.title`（如 `grok.session.title`），未知 label 不得建 Idle 行 |
+| 用量文件 | 真实路径 + 真实字段名；没有 billed tokens 就写「仅 context」或「extract 保持 None」 |
+
+对照本机一次真实会话，**不要**用文档幻想或单测里发明的 `input_tokens` 当合同。Grok `signals.json` 实际是 `contextTokensUsed` / `contextWindowTokens` / `avgTimeToFirstTokenMs` / `primaryModelId`，没有 input/output。
+
+#### 3.6.2 绑定 native_session_id
+
+三种路径，只选**有证据**的一种；不要为对称再抄一份 Codex poller。
+
+| 路径 | 何时用 | 代码 |
+|------|--------|------|
+| 专用标题轮询 | CLI 有权威标题索引 | Claude `claude_sessions`；Codex `auto_title_codex.rs`；OpenCode `auto_title_opencode.rs` |
+| OSC / status 文件 | CLI 主动打 OSC 或写 metadata-only status | Claude OSC + `claude_status.rs` |
+| catalog 会话文件轮询 | 只有磁盘会话文件 | **默认。** `workbench/auto_title_catalog.rs` |
+
+catalog 接线清单：
+
+1. `auto_title.rs` 的 `provider_id_from_auto_title_source` 增加 `source_label → runtime id`（例如 `foo.session.title` → `fooVisible`），并补 `provider_id_maps_known_auto_title_sources`。
+2. 在 `auto_title_catalog.rs` 增加 `parse_*` + `collect_*_hints`：有界遍历（目录/文件上限与现有 10_000 同级）；配置根跟 Hub `resolve_*_home` 一致（有官方 env 才认，禁止臆造 `PI_HOME`）。
+3. `collect_all_hints` 并入；`start_provider_title_pollers` 已经 spawn catalog，不必再开一条 tokio 任务。
+4. `CatalogSessionHint` 必填：`native_session_id`、`cwd`、`source_updated_at`、`source_label`、`live`。
+5. **占位标题也要绑定。** `try_auto_rename_by_native_session` 在标题为空 / `New Chat` / `未命名` 时仍会 `ensure_interactive_active`。不要在 collect 里 `if !is_substantive_auto_title { skip }` 把活会话滤掉。
+6. 活会话（pid 仍在、`active_sessions.json` 这类清单）设 `live: true`。cwd 兜底绑定时用「现在」当时间戳，避免长会话 `opened_at` 早于新 window 被当成过期标题丢掉。
+7. 非活文件只收近期窗口（现网 10 分钟），避免启动时把历史会话抢绑到当前终端。
+8. 多终端同 cwd **禁止猜改名**；现有代码仍可把 Agent 落到一个空闲 window，不要改成「随便挑最新」。
+9. **禁止**把 IDE 会话树当 CLI 会话（Cursor `~/.cursor/projects/*/agent-transcripts` 是 IDE，不是 `cursor-agent`）。
+10. 单测至少：parser 读出 id+cwd；活清单与 summary 合并标题；过期 `meta.json` / 无 id 丢弃。
+
+专用 poller（Codex 型）同样：index 里一旦有 id 就绑定，不要等 `thread_name` 变成实质标题才 `ensure_interactive_active`。
+
+#### 3.6.3 抽取器
+
+`src-tauri/src/workbench/agent_runtime/agent_usage.rs` 三处都要加臂，漏一处 live 或终态会永远 Skip：
+
+| 入口 | 作用 |
+|------|------|
+| `is_usage_extractable_provider` | runtime id **和** catalog 短码（`grokBuildVisible` 与 `grok`） |
+| `extract_provider_usage` | 终态 ledger + locate 未命中时的 live 回退 |
+| `locate_provider_session_file` | live 路径缓存（mtime/size 未变跳过重解析） |
+| `extract_provider_usage_from_path` | 已定位文件的解析 |
+
+字段规则：
+
+- 只认本机真实键名；`read_loose_usage` 已有常见别名（含 Pi 的 `input` / `cacheRead` / `cost.total`），不够就在该 CLI 的 parse 里补，不要改到让别家 0 污染。
+- `has_token_dim` 包含 **context_length / context_window**：只有占用也可以返回 `Some`（Grok）。Gemini 继续用 `has_gemini_stable`（要有 input/output/cached 才算稳定 billed）。
+- occupancy 取末轮，**不要**把累计 billed 当占用，也不要把 `contextTokensUsed` 填进 `input_tokens`。
+- 有界：目录上限、jsonl `64MiB`、单行 `1MiB`；`is_safe_native_id` 拒绝 `/`、`\`、`..`。
+- locate 应指向**会变**的 usage 文件。Cursor 只有 `meta.json`（无 token）时 locate 返回 `None`，live 每次走 extract，仍是 `None` 直到目录里出现 jsonl/json usage。
+- 无证据：`_ => None`。`has_usage: false` 的身份不要进 `is_usage_extractable_provider`。
+
+单测至少：真实字段名抽出对应维；缺文件 / `{}` / 不安全 id → `None`；有 billed 的 jsonl 按轮次加总、user 行忽略。
+
+#### 3.6.4 已适配身份对照（2026-08）
+
+| Agent | 绑定 | 用量文件 | 状态卡常见结果 |
+|-------|------|----------|----------------|
+| Claude | 会话索引 + OSC / `claude_status` | `~/.claude/projects/*/<id>.jsonl` | input/output/cache/occupancy |
+| Codex | `session_index.jsonl` poller | rollout jsonl `token_count` | 累计 billed + occupancy |
+| OpenCode | sqlite title poller + OSC bridge | `opencode.db` message.data | 求和 billed + occupancy |
+| Grok | catalog：`active_sessions.json` 优先，`summary.json` 补标题 | `~/.grok/sessions/<group>/<id>/signals.json` | 占用 / 窗口 / 模型 / TTFT；常无 billed |
+| Gemini | catalog：`tmp/*/chats/*.json` | 同文件 `usageMetadata` | 有稳定 token 才显示 |
+| Cursor CLI | catalog：`~/.cursor/chats/<hash>/<chatId>/meta.json` | 同目录 jsonl/json；**不扫** IDE transcripts | 现网常仅 cwd → 「未提供」直到 CLI 写出 usage |
+| Pi | catalog：`~/.pi/agent/sessions/**/*.jsonl` 头 | 同 jsonl assistant `usage` | input/output/cache/cost + `totalTokens` occupancy |
+
+#### 3.6.5 接入核对
+
+1. 本机跑一次该 CLI，记下 session id、cwd、用量文件路径和字段名。
+2. catalog 或专用 poller 能在 **无实质标题** 时把 native id 写进 Idle 行。
+3. `provider_id_from_auto_title_source` 与 `is_usage_extractable_provider` 都认新 id。
+4. extract 对真实文件返回 `Some` 当且仅当至少一维非空；没有的维保持 `None`。
+5. 重启应用后，工作台「当前会话」对 CLI 写了的维出数字，没写的仍「未提供」。
+6. 投影 DTO 仍不得带 `native_session_id` / path / prompt / transcript。
 
 ### 3.7 Prompt 历史
 
@@ -389,7 +477,7 @@ Scanner 对 canonicalize 落在 `portable-store/` 外的 Skill/Command 根软链
 `cargo check` 能抓住 Rust 穷尽 match。下面这些 **不会** 报非穷尽，接入后要搜一遍旧的「最后一家」：
 
 ```bash
-# 仍写死五家 / 三家的列表
+# 仍写死五家 / 三家 / 七家字面量（新身份后这条会再过时，改完应用 catalog 列表）
 rg -n "claude.*codex.*opencode.*grok.*gemini[^\"]" src-tauri web/src
 
 # 前端仍手写 unmanaged 五行
@@ -432,9 +520,15 @@ rg -n "all_hub_targets" src-tauri/src/agent_hub/user_mirror src-tauri/src/agent_
 # 无图形贴图是否漏身份 / 是否写死 Claude @路径
 rg -n "headless_image_paste|headlessImagePaste" src-tauri/src/agent_catalog web/src/lib/agentCatalog.ts
 rg -n "AtFileMention|BracketedPathPaste|TypedAbsolutePath" src-tauri/src/agent_catalog src-tauri/src/screenshot
+
+# 用量：只加了 has_usage / extractable，却没绑 native id
+rg -n "provider_id_from_auto_title_source" src-tauri/src/workbench/auto_title.rs
+rg -n "is_usage_extractable_provider|extract_provider_usage|locate_provider_session_file" src-tauri/src/workbench/agent_runtime/agent_usage.rs
+rg -n "collect_all_hints|source_label:" src-tauri/src/workbench/auto_title_catalog.rs
+rg -n "agent-transcripts" src-tauri/src/workbench
 ```
 
-文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。不要写「关掉 Claude plugin 等于关掉所有 Agent」。不要写「`~/.agents` 就是全 Agent 统一库」。不要把「确认当前版本」写成会改写磁盘或需要 L3。不要把「恢复为仓库资产」写成会删除源树或把 native 真树 rename 进仓库。用户发起的 user-mirror 可以写该身份用户级白名单文件 / MCP leaf / viewing Disable，但不得 spawn 未认证 CLI；新身份缺席 `all_hub_targets` 必须 fail-closed，不得跳过。
+文档：根 `AGENTS.md` 产品一句、`src-tauri/AGENTS.md` 的 `targets/` 文件名单。不要在文档里宣称 L3 真机写盘已认证。不要写「关掉 Claude plugin 等于关掉所有 Agent」。不要写「`~/.agents` 就是全 Agent 统一库」。不要写「登记 `has_usage` 就等于状态卡有用量」。不要把「确认当前版本」写成会改写磁盘或需要 L3。不要把「恢复为仓库资产」写成会删除源树或把 native 真树 rename 进仓库。用户发起的 user-mirror 可以写该身份用户级白名单文件 / MCP leaf / viewing Disable，但不得 spawn 未认证 CLI；新身份缺席 `all_hub_targets` 必须 fail-closed，不得跳过。
 
 ## 5. 能力状态怎么填
 
@@ -463,6 +557,8 @@ cargo test --locked --lib -- agents_without_plugin_flags
 cargo test --locked --lib -- portable_store
 cargo test --locked --lib -- grok_unattached_store
 cargo test --locked --lib -- confirm_current_version
+cargo test --locked --lib -- auto_title
+cargo test --locked --lib -- agent_usage
 
 # 前端
 cd web
@@ -495,8 +591,8 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 | 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `.cursorrules` Fallback；`.cursor/rules/*.mdc`；绝不把 `~/.claude` 当 Cursor native |
 | Portable | `.cursor/skills`、`.cursor/commands`、`mcp.json` → `mcpServers`（JSONC）；兼容扫描 Claude + **Codex** + `.agents`（官方 skills 目录）；无独立 plugin 开关，不得继承 Claude `enabledPlugins`；portable-store 可盘点，apply attach 仍 blocked（无 L3）；漂移「确认当前版本」仍可 apply（只改 Hub 账本） |
 | Runtime | `cursorCliVisible`；stdin prompt；`agent --resume {id}`；Manual；Fresh |
-| 会话搜索 | 已登记；v1 `unavailable`（布局未认证） |
-| 用量 | 已登记；extract = `None` |
+| 会话搜索 | 已登记；v1 `unavailable`（⌘K 预览布局未认证，不要猜 IDE transcripts） |
+| 用量 | `has_usage`；catalog 绑定 `~/.cursor/chats/<hash>/<chatId>/meta.json`（id=目录名，cwd 在 meta）；extract 只读该目录 jsonl/json，仅 meta 则 `None`；**禁止**扫 `~/.cursor/projects/*/agent-transcripts` |
 | 历史 collector | 未做；`historySource: 'cursor'` 筛选可为空 |
 | 优化器 | catalog `hasHeadless`，设置页仍仅 claude+grok |
 | Hub 原生写 | support-manifest 全 blocked（同 Grok/Gemini） |
@@ -522,8 +618,8 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 | 扫描 | 项目 `AGENTS.md` NativePrimary（只读）；`CLAUDE.md` / `AGENTS.override.md` / `.pi/SYSTEM.md`；绝不把 `~/.claude` 当 Pi native |
 | Portable | `.pi/skills`、`~/.pi/agent/skills`；无条件 `~/.agents/skills`；Claude / Codex skills 仅 settings `skills` 点名该路径；无内建 MCP，不伪造 `mcp.json`；无 command 根（store Command 缺席）；无独立 plugin 开关，不得继承 Claude `enabledPlugins`；store apply blocked；漂移「确认当前版本」仍可 apply |
 | Runtime | `piVisible`；stdin prompt；`pi --session {id}`；Manual；Fresh |
-| 会话搜索 | 已登记；v1 `unavailable`（JSONL 布局未认证） |
-| 用量 | 已登记；extract = `None` |
+| 会话搜索 | 已登记；v1 `unavailable`（⌘K 预览未当合同认证，不阻止用量绑定） |
+| 用量 | `has_usage`；catalog 绑定 `~/.pi/agent/sessions/**/<timestamp>_<uuid>.jsonl` 头（id+cwd）；extract 累加 assistant `usage`（`input`/`output`/`cacheRead`/`cacheWrite`/`cost.total`），`totalTokens` 作 occupancy；无 `PI_HOME` |
 | 历史 collector | 未做；`historySource: 'pi'` 筛选可为空 |
 | 优化器 | catalog `hasHeadless`，设置页仍仅 claude+grok |
 | Hub 原生写 | support-manifest 全 blocked（同 Grok/Gemini/Cursor） |
@@ -532,6 +628,11 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 ## 9. 明确不要做的
 
 - 不要为了「看起来对称」去猜 session 目录或 usage JSON 字段
+- 不要只把 `has_usage` / `is_usage_extractable_provider` 打开却不绑 `native_session_id`（状态卡会一直「未提供」）
+- 不要等 generated_title / 实质标题才 `ensure_interactive_active`
+- 不要把 Cursor IDE `agent-transcripts`（或任何 GUI 会话树）当成 CLI 用量/绑定源
+- 不要把 context occupancy / `totalTokens` 填进 `input_tokens`，也不要把缺失写成 0
+- 不要在单测里发明 CLI 磁盘上不存在的字段，然后宣称「已适配用量」
 - 不要把 GUI 二进制（如 `cursor`）当 CLI
 - 不要把新 CLI 的 Claude 兼容扫描根再写一套副本
 - 不要把 Cursor 的 Claude+Codex+`.agents` 兼容集抄给不会加载 `.codex` 的 Agent（Grok / Gemini / OpenCode / Pi 默认都不扫 Codex 目录）

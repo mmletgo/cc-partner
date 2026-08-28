@@ -133,7 +133,7 @@ cc-partner/
 | 前端命令、Vitest/Playwright、Workbench controllers、Attention、runtime cache | `web/AGENTS.md` |
 | P2P 协议 v1 / 错误信封 / 幂等 / 端口 / CLI doctor / smoke / 发版 | `src-tauri/AGENTS.md` |
 | macOS 固定签名 / ad-hoc 手动授权 / 输入监控真机验收 | `docs/development/macos-internal-signing.md` |
-| 接入新 CLI Agent（身份目录 / Hub / Runtime / 会话 / 用量） | [`docs/development/adapt-new-agent.md`](docs/development/adapt-new-agent.md) |
+| 接入新 CLI Agent（身份目录 / Hub / Runtime / 会话 / 用量绑定） | [`docs/development/adapt-new-agent.md`](docs/development/adapt-new-agent.md) |
 | 用户向启动、防火墙、产品定位 | `README.md` |
 | 持久产品行为 | `docs/prd.md` |
 
@@ -561,7 +561,7 @@ Rust `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`（�
 | `src-tauri/tauri.conf.json` | Tauri 配置 + bundle + updater（版本号单一来源） | 低（发版改） |
 | `docs/p2p-protocol.md` | P2P 路由权威清单 | 中 |
 | `docs/development/macos-internal-signing.md` | macOS 固定/ad-hoc 签名与输入监控 L3 手册 | 低 |
-| `docs/development/adapt-new-agent.md` | 接入新 CLI Agent 操作手册（身份表 → 分面接线 → grep 漏网） | 低（新身份时跟改） |
+| `docs/development/adapt-new-agent.md` | 接入新 CLI Agent 操作手册（身份表 → 分面接线含 §3.6 用量绑定 → grep 漏网） | 低（新身份时跟改） |
 
 ---
 
