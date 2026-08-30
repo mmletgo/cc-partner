@@ -183,13 +183,10 @@ describe('useMobileTransferController', () => {
     });
 
     const file = new File(['hello'], 'hello.txt', { type: 'text/plain' });
-    act(() => {
+    // 选完文件即自动开始发送，无需再点 onSend
+    await act(async () => {
       result.current.onDeviceChange('self');
       result.current.onFileChosen(file);
-    });
-
-    await act(async () => {
-      result.current.onSend();
     });
 
     await waitFor(() => {
@@ -198,6 +195,33 @@ describe('useMobileTransferController', () => {
 
     expect(completeUploadMock).toHaveBeenCalledTimes(1);
     expect(initUploadMock).toHaveBeenCalledTimes(1);
+    expect(result.current.selectedFileName).toBeNull();
+  });
+
+  test('choosing a file starts upload automatically without pressing send', async () => {
+    initUploadMock.mockResolvedValue({ id: 'staging-auto', receivedBytes: 0 });
+    uploadChunkMock.mockResolvedValue({ receivedBytes: 5 });
+    completeUploadMock.mockResolvedValue({ ok: true });
+
+    const { result } = renderHook(() => useMobileTransferController(), { wrapper });
+    await waitFor(() => {
+      expect(result.current.devices.length).toBeGreaterThan(0);
+    });
+
+    const file = new File(['auto'], 'auto.txt', { type: 'text/plain' });
+    await act(async () => {
+      result.current.onFileChosen(file);
+    });
+
+    await waitFor(() => {
+      expect(initUploadMock).toHaveBeenCalledTimes(1);
+    });
+    expect(initUploadMock).toHaveBeenCalledWith(
+      expect.objectContaining({ filename: 'auto.txt', deviceId: 'self' }),
+    );
+    await waitFor(() => {
+      expect(completeUploadMock).toHaveBeenCalledTimes(1);
+    });
     expect(result.current.selectedFileName).toBeNull();
   });
 });

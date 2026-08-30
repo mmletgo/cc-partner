@@ -352,13 +352,40 @@ pub fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     has_connection_upgrade && has_websocket_upgrade
 }
 
+/// 判断 WebSocket upgrade 是否携带 Vite client 的 `vite-ping` 探测子协议。
+///
+/// Business Logic: 手机打开系统文件选择器时页面进后台，浏览器会冻结并断开 HMR WS；
+/// Vite client 收到断开后会把“连接恢复”误判为 dev server 重启，每秒用 `vite-ping`
+/// 子协议的 WS 探测，一旦成功立即 `location.reload()`，导致移动端传输面板整页重载、
+/// 已选 File 丢失。拒绝该探测即可保住页面状态，而 `vite-hmr` 主连接不受影响。
+///
+/// Code Logic: 解析 `Sec-WebSocket-Protocol`（逗号分隔、大小写不敏感）中是否含
+/// `vite-ping`。
+pub fn is_vite_ping_websocket(headers: &HeaderMap) -> bool {
+    headers
+        .get(HeaderName::from_static("sec-websocket-protocol"))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("vite-ping"))
+        })
+        .unwrap_or(false)
+}
+
 /// 将 fallback 上的 WebSocket 桥接到 Vite HMR。
 ///
 /// Business Logic: 手机通过 62116 打开页面时，HMR client 会连同一 host:port 的 WS。
+///   `vite-ping` 探测连接必须拒绝：Vite client 在 HMR WS 断开后（手机打开文件选择器
+///   导致后台冻结）用它轮询 dev server，探测成功会触发 `location.reload()` 整页重载，
+///   丢失移动端传输面板已选文件。`vite-hmr` 主连接照常桥接，热更新不受影响。
 /// Code Logic: connect_async 上游 → axum upgrade → 双向 forward；失败返回 502 文本。
 pub async fn proxy_websocket(req: Request<Body>) -> Response<Body> {
     if !is_proxy_enabled() {
         return plain_response(StatusCode::NOT_FOUND, "mobile vite proxy disabled");
+    }
+    if is_vite_ping_websocket(req.headers()) {
+        return plain_response(StatusCode::FORBIDDEN, "vite ping probe rejected");
     }
     if negative_cache_blocks() {
         return plain_response(StatusCode::BAD_GATEWAY, "vite dev server unavailable");
@@ -635,6 +662,27 @@ mod tests {
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
         headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
         assert!(is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn vite_ping_probe_detection() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_vite_ping_websocket(&headers));
+        headers.insert(
+            HeaderName::from_static("sec-websocket-protocol"),
+            HeaderValue::from_static("vite-hmr"),
+        );
+        assert!(!is_vite_ping_websocket(&headers));
+        headers.insert(
+            HeaderName::from_static("sec-websocket-protocol"),
+            HeaderValue::from_static("vite-ping"),
+        );
+        assert!(is_vite_ping_websocket(&headers));
+        headers.insert(
+            HeaderName::from_static("sec-websocket-protocol"),
+            HeaderValue::from_static("VITE-PING, foo"),
+        );
+        assert!(is_vite_ping_websocket(&headers));
     }
 
     #[test]

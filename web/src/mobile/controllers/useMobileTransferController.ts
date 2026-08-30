@@ -247,18 +247,6 @@ export function useMobileTransferController(): MobileTransferViewModel {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   浏览器只能提供 File，不能给主机绝对路径。
-   *
-   * Code Logic（这个函数做什么）:
-   *   只保留单个 File；清空发送错误。
-   */
-  const handleFileChosen = useCallback((file: File | null): void => {
-    setSelectedFile(file);
-    setSendError(null);
-  }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
    *   清理行级错误。
    *
    * Code Logic（这个函数做什么）:
@@ -336,19 +324,21 @@ export function useMobileTransferController(): MobileTransferViewModel {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点发送后必须 init → chunk → complete；uncertain 只对账。
+   *   用户选完文件后必须 init → chunk → complete；uncertain 只对账。
    *
    * Code Logic（这个函数做什么）:
    *   sendingRef 门闩；按 intentKey 复用 clientOperationId；file.slice 分块；
    *   本地进度写入 localUpload；成功后 force 刷新任务。
+   *   fileOverride 供“选完即传”路径直接传入 File（此时 selectedFile state 尚未落盘）。
    */
-  const handleSend = useCallback(async (): Promise<void> => {
-    if (!selectedFile || !selectedDeviceId || sendingRef.current) return;
+  const handleSend = useCallback(async (fileOverride?: File): Promise<void> => {
+    const file = fileOverride ?? selectedFile;
+    if (!file || !selectedDeviceId || sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
     setSendError(null);
 
-    const intentKey = buildMobileTransferSendIntentKey(selectedDeviceId, selectedFile);
+    const intentKey = buildMobileTransferSendIntentKey(selectedDeviceId, file);
     const existing = pendingSendIntentRef.current;
     const clientOperationId =
       existing && existing.intentKey === intentKey
@@ -358,7 +348,6 @@ export function useMobileTransferController(): MobileTransferViewModel {
 
     const deviceName =
       devices.find((device) => device.id === selectedDeviceId)?.name ?? selectedDeviceId;
-    const file = selectedFile;
 
     /**
      * Business Logic（为什么需要这个函数）:
@@ -444,6 +433,27 @@ export function useMobileTransferController(): MobileTransferViewModel {
       setSending(false);
     }
   }, [devices, reconcileClientOperation, runTasksNow, selectedDeviceId, selectedFile, t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   浏览器只能提供 File，不能给主机绝对路径；且移动端打开系统文件选择器可能触发
+   *   页面整页重载（dev 态 Vite 断线 reload / 生产态浏览器后台回收），等待手动点
+   *   “发送”的窗口期内 File 引用会随重载丢失，所以选完文件必须立即自动上传。
+   *
+   * Code Logic（这个函数做什么）:
+   *   保留单个 File、清空发送错误，并直接把 File 传给 handleSend 立即开始
+   *   init → chunk → complete（不依赖尚未落盘的 selectedFile state）。
+   */
+  const handleFileChosen = useCallback(
+    (file: File | null): void => {
+      setSelectedFile(file);
+      setSendError(null);
+      if (file) {
+        void handleSend(file);
+      }
+    },
+    [handleSend],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
