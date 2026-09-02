@@ -109,4 +109,11 @@ describe('localeParity', () => {
 
     expect(mismatches).toEqual([]);
   });
+
+  test('transfer JSON is type-only in i18n/index so it stays out of initial graph', () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'index.ts'), 'utf8');
+    expect(src).toMatch(/import type enTransfer from '\.\/locales\/en\/transfer\.json'/);
+    expect(src).not.toMatch(/import enTransfer from '\.\/locales\/en\/transfer\.json'/);
+    expect(src).not.toMatch(/from '\.\/locales\/zh\/transfer\.json'/);
+  });
 });

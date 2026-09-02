@@ -273,7 +273,7 @@ test.describe('E2E-TRANSFER-001 Transfer critical journey', () => {
     const deviceSelect = page.getByLabel('选择目标设备');
     await expect(deviceSelect).toBeVisible();
     await expect(deviceSelect.locator('option:checked')).toHaveText('手机');
-    await expect(page.getByText('文件仍留在原位置')).toBeVisible();
+    await expect(page.getByText('未复制，勿事后移动或删除。')).toBeVisible();
 
     await page.getByRole('button', { name: '浏览…' }).click();
     await expect(page.getByText('已选择：report.txt')).toBeVisible();

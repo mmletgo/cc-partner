@@ -25,7 +25,10 @@ import {
   XIcon,
 } from '@/lib/icons';
 import type { TransferPhase } from '@/lib/types';
+import { registerTransferLocale } from '@/i18n/registerTransferLocale';
 import styles from './TransferItem.module.css';
+
+registerTransferLocale();
 
 export type TransferDirection = 'send' | 'receive';
 export type TransferStatus = 'pending' | 'transferring' | 'completed' | 'failed' | 'cancelled';

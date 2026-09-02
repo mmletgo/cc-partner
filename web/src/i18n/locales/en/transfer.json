@@ -27,7 +27,7 @@
   "download": "Download",
   "thisComputer": "This computer",
   "mobileInbox": "Phone",
-  "mobileInboxHint": "The file stays where it is. If you move or delete it later, the phone will not be able to download it.",
+  "mobileInboxHint": "Not copied. Don't move or delete it later.",
   "downloadFailed": "Download failed: {{error}}",
   "revealInFolder": "Show in folder",
   "reconciling": "Confirming result…",

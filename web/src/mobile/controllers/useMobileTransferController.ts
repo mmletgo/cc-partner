@@ -27,6 +27,9 @@ import {
   mintTransferClientOperationId,
 } from '@/pages/Transfer/transferHistory';
 import { errorMessage } from '@/pages/Transfer/transferPageUtils';
+import { registerTransferLocale } from '@/i18n/registerTransferLocale';
+
+registerTransferLocale();
 
 const TASK_REFRESH_INTERVAL_MS = 3000;
 const DEVICE_REFRESH_INTERVAL_MS = 5000;

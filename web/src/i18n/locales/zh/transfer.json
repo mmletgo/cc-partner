@@ -27,7 +27,7 @@
   "download": "下载",
   "thisComputer": "这台电脑",
   "mobileInbox": "手机",
-  "mobileInboxHint": "文件仍留在原位置。若之后移动或删除，手机将无法下载。",
+  "mobileInboxHint": "未复制，勿事后移动或删除。",
   "downloadFailed": "下载失败：{{error}}",
   "revealInFolder": "在文件夹中显示",
   "reconciling": "正在确认结果",

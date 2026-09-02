@@ -6,7 +6,7 @@
  *   语言推断(navigator.language 以 zh 开头→中文),其余回退英文。
  *
  * Code Logic（这个文件做什么）:
- *   - 同步 import 全部 namespace 的 en/zh JSON 资源
+ *   - 同步 import 非传输 namespace 的 en/zh JSON；transfer 由 registerTransferLocale 在 lazy 页加载
  *   - detectLanguage:localStorage['cp-lang'] > navigator.language > 'en'
  *   - 配置 fallbackLng='en'、defaultNS='common'
  *   - declare module 让 react-i18next 的 t() 在编译期校验 key
@@ -19,7 +19,7 @@ import enNav from './locales/en/nav.json';
 import enHome from './locales/en/home.json';
 import enPrompts from './locales/en/prompts.json';
 import enWorkbench from './locales/en/workbench.json';
-import enTransfer from './locales/en/transfer.json';
+import type enTransfer from './locales/en/transfer.json';
 import enScratchpad from './locales/en/scratchpad.json';
 import enPromptOptimizer from './locales/en/promptOptimizer.json';
 import enClaudeMd from './locales/en/claudeMd.json';
@@ -40,7 +40,6 @@ import zhNav from './locales/zh/nav.json';
 import zhHome from './locales/zh/home.json';
 import zhPrompts from './locales/zh/prompts.json';
 import zhWorkbench from './locales/zh/workbench.json';
-import zhTransfer from './locales/zh/transfer.json';
 import zhScratchpad from './locales/zh/scratchpad.json';
 import zhPromptOptimizer from './locales/zh/promptOptimizer.json';
 import zhClaudeMd from './locales/zh/claudeMd.json';
@@ -98,7 +97,7 @@ export const resources = {
     home: enHome,
     prompts: enPrompts,
     workbench: enWorkbench,
-    transfer: enTransfer,
+    transfer: {} as typeof enTransfer,
     scratchpad: enScratchpad,
     promptOptimizer: enPromptOptimizer,
     claudeMd: enClaudeMd,
@@ -120,7 +119,7 @@ export const resources = {
     home: zhHome,
     prompts: zhPrompts,
     workbench: zhWorkbench,
-    transfer: zhTransfer,
+    transfer: {} as typeof enTransfer,
     scratchpad: zhScratchpad,
     promptOptimizer: zhPromptOptimizer,
     claudeMd: zhClaudeMd,
