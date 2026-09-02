@@ -437,8 +437,7 @@ pub fn relaunch_for_permissions(app: &tauri::AppHandle) -> Result<(), crate::err
                 .spawn()
                 .is_ok()
             {
-                app.exit(0);
-                return Ok(());
+                crate::commands::backend::force_terminate_gui(app);
             }
         }
     }
@@ -569,6 +568,33 @@ mod tests {
     fn app_identity_serializes_flavor() {
         let value = serde_json::to_value(app_identity()).expect("serialize identity");
         assert!(value.get("flavor").is_some());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     权限「重新打开应用」若仍走 `app.exit(0)`，macOS 托盘会把旧进程留在程序坞里，
+    ///     和新实例叠在一起。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     读取 relaunch_for_permissions 源码，断言 spawn `open` 之后调用
+    ///     `force_terminate_gui`，且不再出现 `app.exit(`。
+    #[test]
+    fn relaunch_for_permissions_force_terminates_old_gui() {
+        let src = include_str!("mod.rs");
+        let start = src
+            .find("pub fn relaunch_for_permissions")
+            .expect("必须定义 relaunch_for_permissions");
+        let body = src[start..]
+            .split("#[cfg(target_os = \"macos\")]\nfn enclosing_app_bundle_path")
+            .next()
+            .expect("relaunch_for_permissions 后应有 enclosing_app_bundle_path");
+        assert!(
+            body.contains("force_terminate_gui"),
+            "权限重开必须复用 GUI 强退，避免托盘拖住旧进程"
+        );
+        assert!(
+            !body.contains("app.exit("),
+            "relaunch_for_permissions 不得再走 app.exit"
+        );
     }
 
     /// relaunch 的 shell 参数必须安全包裹空格和单引号。

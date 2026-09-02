@@ -16,7 +16,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use std::path::PathBuf;
 use std::process::Stdio;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tokio::process::Command;
 
@@ -72,17 +72,44 @@ pub async fn stop_backend_process(app: AppHandle) -> Result<BackendStatus, AppEr
     Ok(control::current_status().await)
 }
 
+/// 强制结束当前 GUI 进程。
+///
+/// Business Logic（为什么需要这个函数）:
+///     关闭选择与权限「重新打开应用」都必须真正杀掉桌面进程。macOS 上托盘
+///     NSStatusItem 加上窗口 CloseRequested preventDefault 会让 `AppHandle.exit`
+///     无法结束进程，程序坞继续显示「在后台运行」。
+///
+/// Code Logic（这个函数做什么）:
+///     拆除 `main-tray`、macOS 隐藏 Dock、先 `shutdown_backend_runtime`（process::exit
+///     会跳过 `RunEvent::Exit`），再 `cleanup_before_exit`，最后 `std::process::exit(0)`。
+///     本函数不会返回。
+pub(crate) fn force_terminate_gui(app: &AppHandle) -> ! {
+    drop(app.remove_tray_by_id("main-tray"));
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(error) = app.set_dock_visibility(false) {
+            tracing::warn!("隐藏 Dock 失败: {error}");
+        }
+    }
+    {
+        let state: tauri::State<AppState> = app.state();
+        crate::backend::runtime::shutdown_backend_runtime(&state);
+    }
+    app.cleanup_before_exit();
+    #[allow(clippy::exit)]
+    std::process::exit(0);
+}
+
 /// 退出 GUI 进程。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     关闭选择弹窗需要“仅关闭 GUI”和“前后端都关闭”两条路径共用同一个最终退出动作。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 Tauri AppHandle.exit(0) 请求桌面进程退出；命令返回 Ok 仅表示退出请求已发出。
+///     委托 `force_terminate_gui` 强退桌面进程；本命令不会正常返回。
 #[tauri::command]
 pub fn exit_gui(app: AppHandle) -> Result<(), AppError> {
-    app.exit(0);
-    Ok(())
+    force_terminate_gui(&app);
 }
 
 /// 读取 sidecar 脱敏运行诊断。
@@ -521,6 +548,59 @@ fn is_durable_backend_runtime_path(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `app.exit(0)` 在 macOS 托盘应用上常常只发退出请求，窗口 preventDefault
+    ///     与 NSStatusItem 会让进程继续活着，程序坞显示「在后台运行」。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     读取 `force_terminate_gui` 源码，断言拆除托盘、macOS 隐藏 Dock、先 shutdown
+    ///     runtime、再 `std::process::exit`；`exit_gui` 必须委托该 helper，且二者都不走 `app.exit`。
+    #[test]
+    fn exit_gui_force_terminates_after_removing_tray_and_hiding_dock() {
+        let src = include_str!("backend.rs");
+        let helper_start = src
+            .find("pub(crate) fn force_terminate_gui")
+            .expect("必须定义 force_terminate_gui");
+        let helper = src[helper_start..]
+            .split("pub fn exit_gui")
+            .next()
+            .expect("force_terminate_gui 后应有 exit_gui");
+        assert!(
+            helper.contains("remove_tray_by_id"),
+            "退出前必须拆除 main-tray，避免 NSStatusItem 拖住 NSApp"
+        );
+        assert!(
+            helper.contains("set_dock_visibility(false)"),
+            "macOS 退出前必须隐藏 Dock"
+        );
+        assert!(
+            helper.contains("shutdown_backend_runtime"),
+            "process::exit 会跳过 RunEvent::Exit，必须先 shutdown 运行时"
+        );
+        assert!(
+            helper.contains("std::process::exit"),
+            "必须 process::exit 强退 GUI 进程，不能只 request_exit"
+        );
+        assert!(
+            !helper.contains("app.exit("),
+            "force_terminate_gui 不得再走 app.exit"
+        );
+
+        let exit_start = src.find("pub fn exit_gui").expect("必须定义 exit_gui");
+        let exit_body = src[exit_start..]
+            .split("/// 读取 sidecar 脱敏运行诊断")
+            .next()
+            .expect("exit_gui 后应有下一条命令");
+        assert!(
+            exit_body.contains("force_terminate_gui("),
+            "exit_gui 必须委托 force_terminate_gui"
+        );
+        assert!(
+            !exit_body.contains("app.exit("),
+            "exit_gui 不得再走 app.exit，以免 CloseRequested preventDefault 取消退出"
+        );
+    }
 
     /// Business Logic（为什么需要这个测试）:
     ///     Dev.app 热更新会 codesign 覆盖 bundle 内 sidecar；serve 不能跑在这条路径上。

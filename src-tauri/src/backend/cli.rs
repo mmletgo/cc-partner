@@ -97,8 +97,10 @@ struct StopRouteResponse {
 ///     （含 doctor 的 0/1/2 与 start/serve/stop/status 的既有语义）。
 ///
 /// Code Logic（这个函数做什么）:
-///     收集 `std::env::args()` 后委托命令分发；异步命令内部自建 Tokio runtime。
+///     先让 sidecar 脱离 macOS Dock，再收集 `std::env::args()` 委托命令分发；
+///     异步命令内部自建 Tokio runtime。
 pub fn run_from_env() -> i32 {
+    crate::backend::macos_dock::detach_current_process_from_dock();
     dispatch(std::env::args())
 }
 
@@ -1131,6 +1133,32 @@ mod tests {
         assert_eq!(
             super::dispatch_for_test(["cc-partner-backend", "frobnicate"]),
             2
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     sidecar 只要从宿主 .app 启动就会点亮程序坞；CLI 入口必须在任何子命令前脱离 Dock。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     读取 cli.rs 源码，断言 `run_from_env` 在 `dispatch` 之前调用
+    ///     `detach_current_process_from_dock()`。
+    #[test]
+    fn run_from_env_detaches_backend_process_from_dock_before_dispatch() {
+        let src = include_str!("cli.rs");
+        let run_fn = src
+            .split("pub fn run_from_env()")
+            .nth(1)
+            .and_then(|rest| rest.split("fn dispatch").next())
+            .expect("run_from_env 应存在");
+        let detach_at = run_fn
+            .find("detach_current_process_from_dock()")
+            .expect("backend CLI 必须在 dispatch 前脱离 macOS Dock，避免 sidecar 点亮宿主 .app");
+        let dispatch_at = run_fn
+            .find("dispatch(")
+            .expect("run_from_env 必须调用 dispatch");
+        assert!(
+            detach_at < dispatch_at,
+            "detach_current_process_from_dock 必须发生在 dispatch 之前"
         );
     }
 

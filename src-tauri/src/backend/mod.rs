@@ -17,6 +17,7 @@ pub mod control_workbench;
 pub mod doctor;
 pub mod event_bus;
 pub mod logging;
+pub mod macos_dock;
 pub mod runtime;
 pub mod runtime_metrics;
 pub mod supervisor;
