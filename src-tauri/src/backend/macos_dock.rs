@@ -49,21 +49,38 @@ pub fn process_transform_code(role: DockProcessRole) -> i32 {
 ///
 /// Code Logic（这个函数做什么）:
 ///     读 current_exe；不该脱离则返回；macOS 上调用 TransformProcessType(Background)。
+///     非 macOS 仍走同一判定，真正的进程变换为空操作，避免 Linux clippy 把尾部 `return` 当成 needless_return。
 pub fn detach_current_process_from_dock() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    if !should_detach_current_process_from_dock(&exe) {
-        return;
+    if should_detach_current_process_from_dock(&exe) {
+        apply_backend_dock_detach();
     }
-    #[cfg(target_os = "macos")]
-    {
-        let status =
-            transform_current_process(process_transform_code(DockProcessRole::BackgroundHelper));
-        if status != 0 {
-            tracing::warn!("将 backend 进程转为后台 helper 失败: status={status}");
-        }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Dock 变换只在 macOS 有系统 API；其它平台必须保持空操作。
+///
+/// Code Logic（这个函数做什么）:
+///     macOS 调 TransformProcessType(Background)。
+#[cfg(target_os = "macos")]
+fn apply_backend_dock_detach() {
+    let status =
+        transform_current_process(process_transform_code(DockProcessRole::BackgroundHelper));
+    if status != 0 {
+        tracing::warn!("将 backend 进程转为后台 helper 失败: status={status}");
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Linux/Windows CI 仍编译本模块；真正的 Dock 变换只存在于 macOS。
+///
+/// Code Logic（这个函数做什么）:
+///     no-op，保证非 macOS 上 `detach_current_process_from_dock` 没有尾部 needless_return。
+#[cfg(not(target_os = "macos"))]
+fn apply_backend_dock_detach() {
+    // TransformProcessType 只在 macOS 存在。
 }
 
 #[cfg(target_os = "macos")]
