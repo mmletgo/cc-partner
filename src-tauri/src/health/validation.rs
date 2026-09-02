@@ -433,33 +433,30 @@ pub fn checked_future_timestamp(now: i64, minutes: i64) -> Result<i64, AppError>
         .ok_or_else(|| AppError::validation("snooze.until 时间戳溢出"))
 }
 
-/// 计算喝水延迟后的 `last_drink_ts`：`now - interval + minutes*60`。
+/// 校验贪睡分钟并计算 interval 模板回拨后的在场计时：`max(0, interval - minutes*60)`。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     喝水「延迟 N 分钟」需把计时起点回拨，使距离下次阈值还差 N 分钟；非法 minutes 或算术溢出
-///     不得改写 `WaterState`。
+///     「延迟 N 分钟」语义是按在场计时回拨：把已累计的在场秒数退回，使距离下次
+///     提醒还剩 N 分钟；非法 minutes/interval 或算术溢出不得改写模板运行时。
 /// Code Logic（这个函数做什么）:
-///     校验 minutes 1..=1440；interval 必须 >0（否则 Validation）；全程 checked_mul/add/sub。
-pub fn checked_water_snooze_origin(now: i64, interval: i64, minutes: i64) -> Result<i64, AppError> {
+///     校验 minutes 在 1..=1440、interval>0，全程 checked_mul/sub，结果 clamp 到 >=0
+///     （贪睡分钟数覆盖整个间隔时归零，不产生负计时）。
+pub fn checked_snooze_elapsed(interval: i64, minutes: i64) -> Result<i64, AppError> {
     if !(SNOOZE_MINUTES_MIN..=SNOOZE_MINUTES_MAX).contains(&minutes) {
         return Err(AppError::validation(format!(
             "snooze.minutes 必须在 {SNOOZE_MINUTES_MIN}..={SNOOZE_MINUTES_MAX}"
         )));
     }
     if interval <= 0 {
-        return Err(AppError::validation(
-            "health.water_interval_seconds 必须为正数",
-        ));
+        return Err(AppError::validation("health.interval_seconds 必须为正数"));
     }
-    let add_secs = minutes
+    let snooze_secs = minutes
         .checked_mul(SECONDS_PER_MINUTE)
         .ok_or_else(|| AppError::validation("snooze.minutes 溢出"))?;
-    let after_sub = now
-        .checked_sub(interval)
-        .ok_or_else(|| AppError::validation("snooze.water_origin 时间戳溢出"))?;
-    after_sub
-        .checked_add(add_secs)
-        .ok_or_else(|| AppError::validation("snooze.water_origin 时间戳溢出"))
+    let elapsed = interval
+        .checked_sub(snooze_secs)
+        .ok_or_else(|| AppError::validation("snooze.elapsed 计算溢出"))?;
+    Ok(elapsed.max(0))
 }
 
 /// 计算明细清理 cutoff：`now - retain_days * 86400`。
@@ -602,17 +599,20 @@ mod tests {
     }
 
     #[test]
-    fn water_snooze_origin_checked() {
-        let now = 10_000;
-        let interval = 3600;
-        assert_eq!(
-            checked_water_snooze_origin(now, interval, 5).unwrap(),
-            now - interval + 5 * 60
-        );
-        assert!(checked_water_snooze_origin(now, interval, 0).is_err());
-        assert!(checked_water_snooze_origin(now, 0, 5).is_err());
-        assert!(checked_water_snooze_origin(now, -1, 5).is_err());
-        assert!(checked_water_snooze_origin(i64::MIN + 1, interval, 5).is_err());
+    fn snooze_elapsed_checked() {
+        // 延迟 5 分钟 → 在场计时回拨到还剩 5 分钟
+        assert_eq!(checked_snooze_elapsed(3600, 5).unwrap(), 3600 - 300);
+        // 贪睡分钟覆盖整个间隔 → 归零，不产生负计时
+        assert_eq!(checked_snooze_elapsed(300, 5).unwrap(), 0);
+        assert_eq!(checked_snooze_elapsed(300, 10).unwrap(), 0);
+        // 非法 minutes
+        assert!(checked_snooze_elapsed(3600, 0).is_err());
+        assert!(checked_snooze_elapsed(3600, 1441).is_err());
+        assert!(checked_snooze_elapsed(3600, i64::MIN).is_err());
+        // 非法 interval
+        assert!(checked_snooze_elapsed(0, 5).is_err());
+        assert!(checked_snooze_elapsed(-1, 5).is_err());
+        assert!(checked_snooze_elapsed(i64::MIN + 1, 5).is_err());
     }
 
     #[test]

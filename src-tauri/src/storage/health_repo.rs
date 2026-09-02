@@ -1,17 +1,17 @@
 //! health_repo.rs — 健康提醒模块的 SQLite 存储
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     健康提醒功能需要持续记录用户每分钟的活动 / 闲置状态（用于久坐提醒、
+//!     健康提醒功能需要持续记录用户每分钟的活动 / 闲置 / 在场状态（用于久坐提醒、
 //!     屏幕使用时长统计）以及喝水打卡记录。Task 6 的后台 daemon 每分钟采样一次
-//!     前台窗口活动，把采样结果写入 `activity_records`；统计窗口内的活跃 / 闲置
-//!     分钟数，并定期清理过期明细控制库体积；用户点击「喝水」按钮则写一条
+//!     前台窗口活动，把采样结果写入 `activity_records`；统计窗口内的在场 / 活跃 /
+//!     离场分钟数，并定期清理过期明细控制库体积；用户点击「喝水」按钮则写一条
 //!     `water_records`。本模块封装这些读写。
 //!
 //! Code Logic（这个模块做什么）:
 //!     持有共享 `SqlitePool`，用运行期 `sqlx::query`（非宏）执行 SQL。
 //!     `activity_records` 以分钟级 unix 时间戳 `ts` 为主键，同分钟重采时用
-//!     `INSERT OR REPLACE` 覆盖；`aggregate_minutes` 用 `SUM(CASE WHEN ...)` 在
-//!     SQL 层完成活跃/闲置计数，避免把全量明细拉进内存。
+//!     `INSERT OR REPLACE` 覆盖；`aggregate_presence_minutes` 用 `SUM(CASE WHEN ...)` 在
+//!     SQL 层完成在场/活跃/离场计数，避免把全量明细拉进内存。
 
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
@@ -36,10 +36,47 @@ pub struct ActivityRecord {
     pub ts: i64,
     /// 该分钟内是否检测到用户活动（键鼠输入 / 非空闲）。
     pub is_active: bool,
+    /// 该分钟用户是否在场（Working 相位；采样降级时退化为 is_active）。
+    pub is_present: bool,
     /// 该分钟内前台进程名（可空，闲置或采集失败时为 None）。
     pub process_name: Option<String>,
     /// 该分钟内前台窗口标题（可空，闲置或采集失败时为 None）。
     pub window_title: Option<String>,
+}
+
+/// 旧库幂等补 activity_records.is_present 列并按 is_active 近似回填。
+///
+/// Business Logic（为什么需要这个函数）:
+///     「在场计时」改造给 activity_records 增加 is_present 列；旧用户库需无损升级，
+///     用「键鼠活跃≈在场」近似回填历史数据，避免旧数据在场统计读出全 0。
+/// Code Logic（这个函数做什么）:
+///     PRAGMA table_info 检查无 is_present 列时执行 ALTER TABLE ADD COLUMN
+///     `is_present INTEGER NOT NULL DEFAULT 0` + `UPDATE SET is_present = is_active`；
+///     已有列或表不存在（PRAGMA 空集）时为 no-op。GUI 与 headless 共用的 init_db 调用。
+pub async fn ensure_activity_present_column(pool: &SqlitePool) -> Result<(), AppError> {
+    let columns = sqlx::query("PRAGMA table_info(activity_records)")
+        .fetch_all(pool)
+        .await?;
+    // 表不存在时 PRAGMA 返回空集：单测/局部 schema 场景跳过，避免 ALTER 失败。
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let has_col = columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == "is_present")
+            .unwrap_or(false)
+    });
+    if !has_col {
+        sqlx::query(
+            "ALTER TABLE activity_records ADD COLUMN is_present INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("UPDATE activity_records SET is_present = is_active")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 /// health 模块数据库访问对象，封装 activity_records / water_records 的全部读写。
@@ -69,19 +106,20 @@ impl HealthRepo {
 
     /// 写入一条分钟级活动记录。
     ///
-    /// Business Logic: daemon 每分钟采样一次前台活动，落库供后续久坐/屏幕时长统计。
+    /// Business Logic: daemon 每分钟采样一次前台活动，落库供后续久坐/在场统计。
     ///     同一分钟若重采（例如系统挂起恢复后补采），用 INSERT OR REPLACE 覆盖，
     ///     保证每个分钟桶只有一行最新结果。
-    /// Code Logic: 持 shared write lease 后绑定 (ts, is_active as i64, process_name, window_title)
-    ///     执行 INSERT OR REPLACE，is_active 布尔转 0/1 存储。
+    /// Code Logic: 持 shared write lease 后绑定 (ts, is_active, is_present, process_name,
+    ///     window_title) 执行 INSERT OR REPLACE，布尔转 0/1 存储。
     pub async fn insert_activity(&self, r: &ActivityRecord) -> Result<(), AppError> {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
-                "INSERT OR REPLACE INTO activity_records (ts, is_active, process_name, window_title) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO activity_records (ts, is_active, is_present, process_name, window_title) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(r.ts)
             .bind(r.is_active as i64)
+            .bind(r.is_present as i64)
             .bind(r.process_name.as_deref())
             .bind(r.window_title.as_deref())
             .execute(&self.db)
@@ -96,14 +134,14 @@ impl HealthRepo {
     /// Business Logic: daemon 需要回看一个统计窗口（如最近 60 分钟）的全部明细，
     ///     用于触达判定或前端展示。
     /// Code Logic: SELECT 全字段 WHERE ts >= ? ORDER BY ts，逐行 try_get 还原为
-    ///     ActivityRecord（is_active: i64 != 0）。
+    ///     ActivityRecord（布尔: i64 != 0）。
     #[allow(dead_code)]
     pub async fn get_activities_since(
         &self,
         since_ts: i64,
     ) -> Result<Vec<ActivityRecord>, AppError> {
         let rows = sqlx::query(
-            "SELECT ts, is_active, process_name, window_title FROM activity_records WHERE ts >= ? ORDER BY ts",
+            "SELECT ts, is_active, is_present, process_name, window_title FROM activity_records WHERE ts >= ? ORDER BY ts",
         )
         .bind(since_ts)
         .fetch_all(&self.db)
@@ -113,6 +151,7 @@ impl HealthRepo {
                 Ok(ActivityRecord {
                     ts: row.try_get("ts")?,
                     is_active: row.try_get::<i64, _>("is_active")? != 0,
+                    is_present: row.try_get::<i64, _>("is_present")? != 0,
                     process_name: row.try_get("process_name")?,
                     window_title: row.try_get("window_title")?,
                 })
@@ -120,17 +159,24 @@ impl HealthRepo {
             .collect()
     }
 
-    /// 统计 [since_ts, +∞) 内活跃 / 非活跃分钟数。
+    /// 统计 [since_ts, +∞) 内在场 / 键鼠活跃 / 离场分钟数。
     ///
-    /// Business Logic: 久坐 / 屏幕时长提醒需要知道「最近 N 分钟内有多少分钟活跃、
-    ///     多少分钟闲置」，由此判断是否触发提醒。
-    /// Code Logic: 用 SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) 在 SQL 层分别计
-    ///     活跃 / 闲置行数；无任何记录时 SUM 返回 NULL，回退为 0。返回 (active, idle)。
-    pub async fn aggregate_minutes(&self, since_ts: i64) -> Result<(i64, i64), AppError> {
+    /// Business Logic（为什么需要这个函数）:
+    ///     活动统计改为「在场」口径：用户在设备前发呆（无键鼠输入但在场）也计入
+    ///     在场时间；前端需要 present/active/away 三值分别展示。
+    /// Code Logic（这个函数做什么）:
+    ///     SQL 层聚合 present=SUM(is_present=1)、active=SUM(is_active=1)，
+    ///     away=COUNT(*)-present（总桶数减在场）；无记录时 SUM 为 NULL 回退 0，
+    ///     空表回 (0,0,0)。返回 (present, active, away)。
+    pub async fn aggregate_presence_minutes(
+        &self,
+        since_ts: i64,
+    ) -> Result<(i64, i64, i64), AppError> {
         let row = sqlx::query(
             "SELECT \
-                SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) AS active, \
-                SUM(CASE WHEN is_active=0 THEN 1 ELSE 0 END) AS idle \
+                COUNT(*) AS total, \
+                SUM(CASE WHEN is_present=1 THEN 1 ELSE 0 END) AS present, \
+                SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) AS active \
              FROM activity_records WHERE ts >= ?",
         )
         .bind(since_ts)
@@ -138,11 +184,12 @@ impl HealthRepo {
         .await?;
         match row {
             Some(r) => {
+                let total: i64 = r.try_get("total").ok().unwrap_or(0);
+                let present: i64 = r.try_get("present").ok().unwrap_or(0);
                 let active: i64 = r.try_get("active").ok().unwrap_or(0);
-                let idle: i64 = r.try_get("idle").ok().unwrap_or(0);
-                Ok((active, idle))
+                Ok((present, active, total.saturating_sub(present)))
             }
-            None => Ok((0, 0)),
+            None => Ok((0, 0, 0)),
         }
     }
 
@@ -186,21 +233,22 @@ impl HealthRepo {
             .collect()
     }
 
-    /// 按本地小时(0-23)聚合 [since_ts, +∞) 内的活跃分钟数,返回长度 24 的数组。
+    /// 按本地小时(0-23)聚合 [since_ts, +∞) 内的在场分钟数,返回长度 24 的数组。
     ///
-    /// Business Logic: 统计页需要展示「一天 24 小时每个时段的活跃分布」,帮助用户
-    ///     了解工作节奏(例如上午/下午/深夜的活动峰值)。用户体感中的「上午 10 点」
+    /// Business Logic: 统计页需要展示「一天 24 小时每个时段的在场分布」,帮助用户
+    ///     了解工作节奏(例如上午/下午/深夜的在场峰值)。口径为在场(is_present=1):
+    ///     用户在设备前发呆(无键鼠输入但在场)也计入;用户体感中的「上午 10 点」
     ///     是本地时区的 10 点,用 UTC 桶在东八区会整体偏移 8 小时,图表错位。
     ///
     /// Code Logic: SQL 层用 SQLite `strftime('%H', datetime(ts,'unixepoch','localtime'))`
-    ///     把时间戳按系统本地时区取小时(00-23 字符串),CAST INTEGER 后 GROUP BY;
-    ///     先初始化 24 个 0,再把查询结果填入对应桶(范围外忽略,保长度恒 24)。
+    ///     把时间戳按系统本地时区取小时(00-23 字符串),CAST INTEGER 后对 is_present=1
+    ///     的行 GROUP BY;先初始化 24 个 0,再把查询结果填入对应桶(范围外忽略,保长度恒 24)。
     pub async fn get_hourly_activity(&self, since_ts: i64) -> Result<Vec<i64>, AppError> {
         let mut hours = vec![0i64; 24];
         let rows = sqlx::query(
             "SELECT CAST(strftime('%H', datetime(ts, 'unixepoch', 'localtime')) AS INTEGER) AS h, \
              COUNT(*) AS mins FROM activity_records \
-             WHERE ts >= ? AND is_active = 1 GROUP BY h",
+             WHERE ts >= ? AND is_present = 1 GROUP BY h",
         )
         .bind(since_ts)
         .fetch_all(&self.db)
@@ -587,7 +635,7 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS activity_records (ts INTEGER PRIMARY KEY, is_active INTEGER NOT NULL, process_name TEXT, window_title TEXT)").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS activity_records (ts INTEGER PRIMARY KEY, is_active INTEGER NOT NULL, is_present INTEGER NOT NULL DEFAULT 0, process_name TEXT, window_title TEXT)").execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS water_records (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL)")
             .execute(&pool)
             .await
@@ -607,33 +655,80 @@ mod tests {
     async fn test_insert_and_aggregate() {
         let pool = setup_db().await;
         let repo = HealthRepo::new(pool);
+        // 活跃且在场
         repo.insert_activity(&ActivityRecord {
             ts: 1000,
             is_active: true,
+            is_present: true,
             process_name: Some("code".into()),
             window_title: None,
         })
         .await
         .unwrap();
+        // 不活跃但在场(设备前发呆)
         repo.insert_activity(&ActivityRecord {
             ts: 1001,
-            is_active: true,
+            is_active: false,
+            is_present: true,
             process_name: None,
             window_title: None,
         })
         .await
         .unwrap();
+        // 离场
         repo.insert_activity(&ActivityRecord {
             ts: 1002,
             is_active: false,
+            is_present: false,
             process_name: None,
             window_title: None,
         })
         .await
         .unwrap();
-        let (active, idle) = repo.aggregate_minutes(0).await.unwrap();
-        assert_eq!(active, 2);
-        assert_eq!(idle, 1);
+        let (present, active, away) = repo.aggregate_presence_minutes(0).await.unwrap();
+        assert_eq!(present, 2);
+        assert_eq!(active, 1);
+        assert_eq!(away, 1);
+    }
+
+    /// 旧库(无 is_present 列)跑迁移后补列,is_present 按 is_active 回填,且迁移幂等。
+    #[tokio::test]
+    async fn test_migration_backfills_is_present_from_is_active() {
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        // 手工建旧版(无 is_present)表并插入两行历史数据
+        sqlx::query("CREATE TABLE activity_records (ts INTEGER PRIMARY KEY, is_active INTEGER NOT NULL, process_name TEXT, window_title TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO activity_records (ts, is_active) VALUES (1, 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO activity_records (ts, is_active) VALUES (2, 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        ensure_activity_present_column(&pool).await.unwrap();
+        // 幂等:重复执行不报错、不重复回填
+        ensure_activity_present_column(&pool).await.unwrap();
+
+        let repo = HealthRepo::new(pool);
+        let recs = repo.get_activities_since(0).await.unwrap();
+        assert_eq!(recs.len(), 2);
+        assert!(recs[0].is_active);
+        assert!(recs[0].is_present, "旧数据回填: 键鼠活跃≈在场");
+        assert!(!recs[1].is_active);
+        assert!(!recs[1].is_present);
+        let (present, active, away) = repo.aggregate_presence_minutes(0).await.unwrap();
+        assert_eq!((present, active, away), (1, 1, 1));
     }
 
     #[tokio::test]
@@ -643,6 +738,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1,
             is_active: true,
+            is_present: true,
             process_name: None,
             window_title: None,
         })
@@ -651,6 +747,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 100,
             is_active: true,
+            is_present: true,
             process_name: None,
             window_title: None,
         })
@@ -686,8 +783,9 @@ mod tests {
         assert_eq!(repo.count_water_since(0).await.unwrap(), 3);
     }
 
-    /// 按本地小时桶聚合:插入「本地今天指定小时」的若干分钟活跃记录,
-    /// 断言落在正确的本地小时桶。用 chrono 构造本地某小时的 ts,使测试与时区无关。
+    /// 按本地小时桶聚合在场分钟:插入「本地今天指定小时」的若干分钟记录,
+    /// 断言只计 is_present=1 的行落在正确的本地小时桶。用 chrono 构造本地某小时的 ts,
+    /// 使测试与时区无关。
     #[tokio::test]
     async fn test_hourly_activity_local_buckets() {
         use chrono::{Datelike, Local, NaiveDate, TimeZone};
@@ -697,26 +795,23 @@ mod tests {
         let today = Local::now().naive_local().date();
         let date =
             NaiveDate::from_ymd_opt(today.year(), today.month(), today.day()).expect("valid today");
-        // 本地 9:00 与 9:01 两条活跃记录 + 一条 9:02 闲置(不计入活跃桶)
-        let ts_900 = Local
-            .from_local_datetime(&date.and_hms_opt(9, 0, 0).unwrap())
-            .single()
-            .unwrap()
-            .timestamp();
-        let ts_901 = Local
-            .from_local_datetime(&date.and_hms_opt(9, 1, 0).unwrap())
-            .single()
-            .unwrap()
-            .timestamp();
-        let ts_902 = Local
-            .from_local_datetime(&date.and_hms_opt(9, 2, 0).unwrap())
-            .single()
-            .unwrap()
-            .timestamp();
-        for ts in [ts_900, ts_901] {
+        let mk_ts = |h: u32, m: u32| -> i64 {
+            Local
+                .from_local_datetime(&date.and_hms_opt(h, m, 0).unwrap())
+                .single()
+                .unwrap()
+                .timestamp()
+        };
+        // 本地 9:00/9:01 在场活跃 + 9:02 离场(不计入) + 9:03 在场但无键鼠输入(计入)
+        let ts_900 = mk_ts(9, 0);
+        let ts_901 = mk_ts(9, 1);
+        let ts_902 = mk_ts(9, 2);
+        let ts_903 = mk_ts(9, 3);
+        for (ts, is_active) in [(ts_900, true), (ts_901, true)] {
             repo.insert_activity(&ActivityRecord {
                 ts,
-                is_active: true,
+                is_active,
+                is_present: true,
                 process_name: None,
                 window_title: None,
             })
@@ -726,6 +821,16 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: ts_902,
             is_active: false,
+            is_present: false,
+            process_name: None,
+            window_title: None,
+        })
+        .await
+        .unwrap();
+        repo.insert_activity(&ActivityRecord {
+            ts: ts_903,
+            is_active: false,
+            is_present: true,
             process_name: None,
             window_title: None,
         })
@@ -734,10 +839,10 @@ mod tests {
 
         let hours = repo.get_hourly_activity(0).await.unwrap();
         assert_eq!(hours.len(), 24);
-        // 本地 9 点桶应有 2 条活跃分钟,其余桶为 0
-        assert_eq!(hours[9], 2);
+        // 本地 9 点桶应只含在场分钟:活跃 2 + 在场发呆 1 = 3(离场 9:02 不计入)
+        assert_eq!(hours[9], 3);
         let sum: i64 = hours.iter().sum();
-        assert_eq!(sum, 2);
+        assert_eq!(sum, 3);
     }
 
     /// 验证 count_water_since 在空表/单条/多条情况下的计数。
@@ -881,6 +986,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1000,
             is_active: true,
+            is_present: true,
             process_name: Some("Code".into()),
             window_title: Some("main.rs — cc-partner".into()),
         })
@@ -889,6 +995,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1060,
             is_active: true,
+            is_present: true,
             process_name: Some("Code".into()),
             window_title: Some("main.rs — cc-partner".into()),
         })
@@ -897,6 +1004,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1120,
             is_active: true,
+            is_present: true,
             process_name: Some("Safari".into()),
             window_title: Some("GitHub".into()),
         })
@@ -905,6 +1013,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1180,
             is_active: false,
+            is_present: false,
             process_name: Some("Code".into()),
             window_title: Some("main.rs — cc-partner".into()),
         })
@@ -913,6 +1022,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1240,
             is_active: true,
+            is_present: true,
             process_name: Some("Finder".into()),
             window_title: Some("".into()),
         })
@@ -921,6 +1031,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 1300,
             is_active: true,
+            is_present: true,
             process_name: Some("Finder".into()),
             window_title: None,
         })
@@ -929,6 +1040,7 @@ mod tests {
         repo.insert_activity(&ActivityRecord {
             ts: 10,
             is_active: true,
+            is_present: true,
             process_name: Some("Code".into()),
             window_title: Some("old".into()),
         })

@@ -5,7 +5,7 @@
  *   长时间久坐工作有害健康;后端 daemon 每分钟采样键鼠活跃度,推进
  *   工作/休息状态机,连续工作达阈值触发久坐提醒(支持免打扰/暂停/贪睡/跳过)。
  *   用户需要在此页快速判断监测是否正常、连续工作是否接近提醒阈值、
- *   今日活跃/休息占比如何,并能直接进入完整配置项。
+ *   今日在场/键鼠活跃/离场分布如何,并能直接进入完整配置项。
  *
  * Code Logic（这个组件做什么）:
  *   - refresh:并行取 status + stats(startOfDay 起);每 5s 可见性感知轮询
@@ -274,10 +274,11 @@ export function Health() {
   const elapsedSeconds = status.windowStartTs ? Math.max(0, nowTs - status.windowStartTs) : 0;
   const workProgress = status.workWindowSeconds > 0 ? elapsedSeconds / status.workWindowSeconds : 0;
   const remainingSeconds = Math.max(0, status.workWindowSeconds - elapsedSeconds);
+  // 在场口径：在场 = 键鼠活跃 + 短停歇；离场 = 超过休息阈值无活动
+  const presentMinutes = stats?.presentMinutes ?? 0;
   const activeMinutes = stats?.activeMinutes ?? 0;
-  const idleMinutes = stats?.idleMinutes ?? 0;
-  const totalTrackedMinutes = activeMinutes + idleMinutes;
-  const activeShare = totalTrackedMinutes > 0 ? Math.round((activeMinutes / totalTrackedMinutes) * 100) : 0;
+  const awayMinutes = stats?.awayMinutes ?? 0;
+  const activeShare = presentMinutes > 0 ? Math.round((activeMinutes / presentMinutes) * 100) : 0;
   const snoozeLabel = status.snoozeUntil && status.snoozeUntil > nowTs
     ? t('health:snoozeUntil', { time: formatClock(status.snoozeUntil) })
     : null;
@@ -370,15 +371,19 @@ export function Health() {
 
             <div className={styles.metricGrid}>
               <div className={styles.metricTile}>
-                <span className={styles.metricLabel}>{t('health:activeToday')}</span>
+                <span className={styles.metricLabel}>{t('health:presentToday')}</span>
+                <strong className={styles.metricValue}>{t('health:minutesValue', { n: presentMinutes })}</strong>
+              </div>
+              <div className={styles.metricTile}>
+                <span className={styles.metricLabel}>{t('health:kbActiveToday')}</span>
                 <strong className={styles.metricValue}>{t('health:minutesValue', { n: activeMinutes })}</strong>
               </div>
               <div className={styles.metricTile}>
-                <span className={styles.metricLabel}>{t('health:idleToday')}</span>
-                <strong className={styles.metricValue}>{t('health:minutesValue', { n: idleMinutes })}</strong>
+                <span className={styles.metricLabel}>{t('health:awayToday')}</span>
+                <strong className={styles.metricValue}>{t('health:minutesValue', { n: awayMinutes })}</strong>
               </div>
               <div className={styles.metricTile}>
-                <span className={styles.metricLabel}>{t('health:activeShare')}</span>
+                <span className={styles.metricLabel}>{t('health:activePresentShare')}</span>
                 <strong className={styles.metricValue}>{t('health:percentValue', { n: activeShare })}</strong>
               </div>
               <div className={styles.metricTile}>

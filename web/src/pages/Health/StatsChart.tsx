@@ -2,10 +2,10 @@
  * StatsChart - 健康提醒活动统计图表
  *
  * Business Logic（为什么需要这个组件）:
- *   用户需要直观看到「今天在哪些 app / 窗口上花了最多时间」和「一天 24 小时活跃分布」，
+ *   用户需要直观看到「今天在哪些 app / 窗口上花了最多时间」和「一天 24 小时在场分布」，
  *   以了解自己的屏幕使用习惯。用 recharts 把后端 get_activity_detail 的数据可视化：
  *   左侧 app 使用时长排行 top8、下方窗口标题排行 top8（横向柱状图，倒序最长的在最上），
- *   右侧 24 小时活跃分布（纵向柱状图）。无数据时显示占位文案。
+ *   右侧 24 小时在场分布（纵向柱状图）。无数据时显示占位文案。
  *
  * Code Logic（这个组件做什么）:
  *   纯展示组件，接收 ActivityDetail prop。appData / windowData 取前 8 项；
@@ -163,7 +163,7 @@ function toRankingData(items: AppUsageItem[] | undefined): Array<{ name: string;
 }
 
 /**
- * StatsChart 组件：渲染 app 排行 + 窗口标题排行 + 24 小时活跃分布。
+ * StatsChart 组件：渲染 app 排行 + 窗口标题排行 + 24 小时在场分布。
  */
 export function StatsChart({ detail }: StatsChartProps) {
   const { t } = useTranslation(['health', 'common']);
@@ -171,7 +171,8 @@ export function StatsChart({ detail }: StatsChartProps) {
   const windowData = toRankingData(detail.windowUsage);
   const hourData = detail.hourly.map((mins, h) => ({ h: `${h}`, mins }));
   const minuteUnit = t('health:minutesUnit');
-  const seriesName = t('health:activeToday');
+  // 在场口径：柱系列名统一用「今日在场」
+  const seriesName = t('health:presentToday');
   const empty = t('health:noData');
 
   return (

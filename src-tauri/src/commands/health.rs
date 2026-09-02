@@ -16,7 +16,8 @@ use tauri::State;
 
 use crate::backend::control_client::BackendControlClient;
 use crate::config::{
-    HealthConfig, ReminderComplete, HEALTH_REMINDER_REST_ID, HEALTH_REMINDER_WATER_ID,
+    HealthConfig, ReminderComplete, ReminderTrigger, HEALTH_REMINDER_REST_ID,
+    HEALTH_REMINDER_WATER_ID,
 };
 #[cfg(test)]
 use crate::config_runtime::{update_config_transactionally, ConfigRuntime};
@@ -25,7 +26,7 @@ use crate::error::AppError;
 use crate::health::state::MachineState;
 use crate::health::templates::{progress_threshold_seconds, TemplateRuntime};
 use crate::health::validation::{
-    checked_future_timestamp, checked_water_snooze_origin, validate_health_config,
+    checked_future_timestamp, checked_snooze_elapsed, validate_health_config,
 };
 use crate::health::HealthRuntime;
 use crate::state::AppState;
@@ -130,14 +131,21 @@ pub struct HealthStatusDto {
     pub overlay_queue: Vec<String>,
 }
 
-/// 活跃/闲置统计 DTO（camelCase，对齐前端）。
+/// 在场/活跃统计 DTO（camelCase，对齐前端）。
+///
+/// Business Logic: 活动统计改为「在场」口径：用户在设备前发呆（无键鼠输入但在场）
+///     也算在场时间；前端需分别展示在场 / 键鼠活跃 / 离场三值。
+/// Code Logic: 三值由 `aggregate_presence_minutes` SQL 聚合返回：
+///     present=在场分钟，active=键鼠活跃分钟（必为在场的子集），away=总桶数-present。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityStatsDto {
-    /// 统计窗口内的活跃分钟数。
+    /// 统计窗口内的在场分钟数（Working 相位；采样降级时退化为键鼠活跃）。
+    pub present_minutes: i64,
+    /// 统计窗口内键鼠活跃的分钟数。
     pub active_minutes: i64,
-    /// 统计窗口内的闲置分钟数。
-    pub idle_minutes: i64,
+    /// 统计窗口内的离场分钟数（总采样桶数 - 在场）。
+    pub away_minutes: i64,
 }
 
 /// 单个 app 的活跃分钟数排行项（camelCase，对齐前端 AppUsageItem）。
@@ -200,6 +208,8 @@ pub struct TemplateHabitStatsDto {
     pub daily_completed: Vec<i64>,
     /// 最近一次完成时间戳。
     pub last_completed_ts: Option<i64>,
+    /// interval 模板当前已累计的在场秒数（sedentary 恒 0）；前端据此画「距下次提醒」进度。
+    pub active_elapsed_seconds: i64,
 }
 
 /// 读取完整健康提醒配置（全部字段，供前端配置表单初始化）。
@@ -331,16 +341,6 @@ fn prepare_snooze_until(now: i64, minutes: i64) -> Result<i64, AppError> {
     checked_future_timestamp(now, minutes)
 }
 
-/// 计算喝水延迟后的 last_drink_ts（纯函数）。
-///
-/// Business Logic（为什么需要这个函数）:
-///     喝水「延迟 N 分钟」需在持锁改 WaterState 前完成范围与检查算术校验。
-/// Code Logic（这个函数做什么）:
-///     委托 `checked_water_snooze_origin(now, interval, minutes)`。
-fn prepare_water_snooze(now: i64, interval: i64, minutes: i64) -> Result<i64, AppError> {
-    checked_water_snooze_origin(now, interval, minutes)
-}
-
 /// 把前端 DTO 映射为待写入的 `HealthConfig` 并校验归一化。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -396,27 +396,54 @@ fn apply_snooze_template_for_runtime(
     Ok(())
 }
 
-/// 校验后写入喝水延迟起点（测试可注入 HealthRuntime）。
+/// 校验后回拨指定 interval 模板的在场计时（「延迟 N 分钟」通用实现）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     喝水/提肛等固定间隔模板的「延迟 N 分钟」= 在场计时回拨到还剩 N 分钟
+///     （离开期间本就不累计）；命令层喝水遮罩与 acknowledge 通用入口必须共用
+///     同一实现，避免两套语义漂移。
+/// Code Logic（这个函数做什么）:
+///     `checked_snooze_elapsed` 校验并计算回拨值后，锁 templates 写该模板：
+///     active_elapsed_seconds=回拨值、pending=false、snooze_until=None、
+///     last_completed_ts=now（记录操作时刻，仅排查用，不驱动触发）。
+fn apply_snooze_interval_template_for_runtime(
+    health: &HealthRuntime,
+    template_id: &str,
+    now: i64,
+    interval: i64,
+    minutes: i64,
+) -> Result<(), AppError> {
+    let elapsed = checked_snooze_elapsed(interval, minutes)?;
+    let mut map = health.templates.lock().unwrap();
+    let entry = map
+        .entry(template_id.to_string())
+        .or_insert_with(|| TemplateRuntime::new(now));
+    entry.active_elapsed_seconds = elapsed;
+    entry.pending = false;
+    entry.snooze_until = None;
+    entry.last_completed_ts = now;
+    Ok(())
+}
+
+/// 校验后回拨喝水模板的在场计时（测试可注入 HealthRuntime）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     非法 minutes/interval 或溢出不得改写饮水模板。
 /// Code Logic（这个函数做什么）:
-///     `prepare_water_snooze` 成功后再写 water 的 last_completed 与 pending。
+///     委托 `apply_snooze_interval_template_for_runtime`（water 模板）。
 fn apply_snooze_water_reminder_for_runtime(
     health: &HealthRuntime,
     now: i64,
     interval: i64,
     minutes: i64,
 ) -> Result<(), AppError> {
-    let origin = prepare_water_snooze(now, interval, minutes)?;
-    let mut map = health.templates.lock().unwrap();
-    let entry = map
-        .entry(HEALTH_REMINDER_WATER_ID.into())
-        .or_insert_with(|| TemplateRuntime::new(now));
-    entry.last_completed_ts = origin;
-    entry.pending = false;
-    entry.snooze_until = None;
-    Ok(())
+    apply_snooze_interval_template_for_runtime(
+        health,
+        HEALTH_REMINDER_WATER_ID,
+        now,
+        interval,
+        minutes,
+    )
 }
 
 /// 贪睡 N 分钟（设置贪睡到期时间戳，期间提醒静默）。
@@ -496,19 +523,25 @@ pub async fn update_health_config(
     Ok(resp.snapshot.health.into())
 }
 
-/// 查询 [since_ts, +∞) 区间内的活跃/闲置分钟数。
+/// 查询 [since_ts, +∞) 区间内的在场/键鼠活跃/离场分钟数。
 ///
-/// Business Logic: 前端统计页展示「最近 N 分钟活跃多久、闲置多久」。
-/// Code Logic: 委托 `HealthRepo::aggregate_minutes`（SQL 层 SUM(CASE WHEN ...)）。
+/// Business Logic: 前端统计页展示「最近 N 分钟在场多久、键鼠活跃多久、离场多久」，
+///     在场口径包含无键鼠输入但在设备前的发呆时间。
+/// Code Logic: 委托 `HealthRepo::aggregate_presence_minutes`（SQL 层聚合三值，
+///     away = 总桶数 - present）。
 #[tauri::command]
 pub async fn get_activity_stats(
     state: State<'_, AppState>,
     since_ts: i64,
 ) -> Result<ActivityStatsDto, AppError> {
-    let (active, idle) = state.health_repo.aggregate_minutes(since_ts).await?;
+    let (present, active, away) = state
+        .health_repo
+        .aggregate_presence_minutes(since_ts)
+        .await?;
     Ok(ActivityStatsDto {
+        present_minutes: present,
         active_minutes: active,
-        idle_minutes: idle,
+        away_minutes: away,
     })
 }
 
@@ -585,12 +618,13 @@ pub async fn skip_water_reminder(state: State<'_, AppState>) -> Result<(), AppEr
     Ok(())
 }
 
-/// 延迟 N 分钟再提醒喝水(把下次提醒推迟 minutes 分钟 + 清未响应提醒,不入库)。
+/// 延迟 N 分钟再提醒喝水(把饮水模板在场计时回拨 N 分钟 + 清未响应提醒,不入库)。
 ///
-/// Business Logic: 前端喝水遮罩「延迟 5/10 分钟」按钮;用户想稍后再被提醒喝水,需要把下次提醒
-///                  推迟指定分钟数(而非一个完整间隔)。不落库(没有真实喝水行为)。非法 minutes 无副作用。
-/// Code Logic: 先读 config 取 `water_interval_seconds` 并释放读锁,再 `prepare_water_snooze`
-///             校验/检查算术,成功后才写 `last_drink_ts` 并清 pending。
+/// Business Logic: 前端喝水遮罩「延迟 5/10 分钟」按钮;用户想稍后再被提醒喝水,需要把
+///                  在场计时回拨,使距离下次提醒还剩 N 分钟(离开期间本就不累计)。
+///                  不落库(没有真实喝水行为)。非法 minutes 无副作用。
+/// Code Logic: 先读 config 取 `water_interval_seconds` 并释放读锁,再
+///             `checked_snooze_elapsed` 校验/检查算术,成功后经通用 helper 写回拨值并清 pending。
 #[tauri::command]
 pub async fn snooze_water_reminder(
     state: State<'_, AppState>,
@@ -715,7 +749,9 @@ pub async fn add_habit_manual(
 /// Business Logic（为什么需要这个函数）:
 ///     遮罩与统计卡都按 templateId 操作，避免再为每条模板复制命令。
 /// Code Logic（这个函数做什么）:
-///     action=completed 双写；skipped 只改 runtime；snooze 要 minutes。
+///     action=completed 双写；skipped 只改 runtime；snooze 要 minutes，且按模板
+///     trigger 分派——interval 走在场计时回拨，sedentary 走墙钟 snooze_until；
+///     找不到模板报 validation 错误。
 #[tauri::command]
 pub async fn acknowledge_health_reminder(
     app: tauri::AppHandle,
@@ -736,7 +772,27 @@ pub async fn acknowledge_health_reminder(
         }
         "snoozed" => {
             let mins = minutes.ok_or_else(|| AppError::validation("snooze 需要 minutes"))?;
-            apply_snooze_template_for_runtime(&state.health, &template_id, now, mins)?;
+            // 先 clone 配置并释放读锁,避免跨 await 持 RwLockReadGuard(非 Send)。
+            let cfg = state.config.read().unwrap().health.clone();
+            let tmpl = cfg
+                .reminders
+                .iter()
+                .find(|t| t.id == template_id)
+                .ok_or_else(|| AppError::validation(format!("未知提醒模板: {template_id}")))?;
+            match tmpl.trigger {
+                ReminderTrigger::Interval => {
+                    apply_snooze_interval_template_for_runtime(
+                        &state.health,
+                        &template_id,
+                        now,
+                        tmpl.interval_seconds.unwrap_or(0),
+                        mins,
+                    )?;
+                }
+                ReminderTrigger::Sedentary => {
+                    apply_snooze_template_for_runtime(&state.health, &template_id, now, mins)?;
+                }
+            }
         }
         other => {
             return Err(AppError::validation(format!("未知提醒动作: {other}")));
@@ -780,6 +836,7 @@ pub async fn record_rest_completed(state: State<'_, AppState>) -> Result<(), App
 /// Business Logic: 习惯统计卡片一次拉取饮水+休息聚合数据,减少前端多次 invoke。
 /// Code Logic: 串行查询 water/rest 各聚合方法(单连接池语义下并行无收益),组装 HabitStatsDto。
 ///             days 默认 7,clamp 到 1..=31(产品最多展示月视图级别,避免过大 days 累加溢出)。
+///             templates[].activeElapsedSeconds 来自内存 runtime 的在场累计(interval 专用)。
 #[tauri::command]
 pub async fn get_habit_stats(
     state: State<'_, AppState>,
@@ -816,6 +873,15 @@ pub async fn get_habit_stats(
     let reminder_templates = state.config.read().unwrap().health.reminders.clone();
     let mut templates = Vec::new();
     for tmpl in reminder_templates {
+        // interval 模板的当前在场累计：前端「距下次提醒」进度条数据源；无 runtime 视为 0。
+        let active_elapsed_seconds = state
+            .health
+            .templates
+            .lock()
+            .unwrap()
+            .get(&tmpl.id)
+            .map(|rt| rt.active_elapsed_seconds)
+            .unwrap_or(0);
         templates.push(TemplateHabitStatsDto {
             id: tmpl.id.clone(),
             today_completed: state
@@ -838,6 +904,7 @@ pub async fn get_habit_stats(
                 .health_repo
                 .get_last_habit_ts(&tmpl.id, "completed")
                 .await?,
+            active_elapsed_seconds,
         });
     }
 
@@ -1047,6 +1114,7 @@ mod tests {
                 TemplateRuntime {
                     pending: false,
                     last_completed_ts: 0,
+                    active_elapsed_seconds: 0,
                     reminded_this_window: false,
                     snooze_until: Some(42),
                 },
@@ -1080,21 +1148,23 @@ mod tests {
                 TemplateRuntime {
                     pending: true,
                     last_completed_ts: 12345,
+                    active_elapsed_seconds: 1234,
                     reminded_this_window: false,
                     snooze_until: None,
                 },
             );
         }
-        let (before_ts, before_pending) = {
+        let (before_elapsed, before_pending) = {
             let map = rt.templates.lock().unwrap();
             let w = map.get(HEALTH_REMINDER_WATER_ID).unwrap();
-            (w.last_completed_ts, w.pending)
+            (w.active_elapsed_seconds, w.pending)
         };
         assert!(apply_snooze_water_reminder_for_runtime(&rt, 10_000, 3600, 0).is_err());
         assert!(apply_snooze_water_reminder_for_runtime(&rt, 10_000, 3600, 2000).is_err());
+        assert!(apply_snooze_water_reminder_for_runtime(&rt, 10_000, 0, 5).is_err());
         let map = rt.templates.lock().unwrap();
         let w = map.get(HEALTH_REMINDER_WATER_ID).unwrap();
-        assert_eq!(w.last_completed_ts, before_ts);
+        assert_eq!(w.active_elapsed_seconds, before_elapsed);
         assert_eq!(w.pending, before_pending);
     }
 
@@ -1111,11 +1181,27 @@ mod tests {
             Some(1_000 + 600)
         );
 
+        // 喝水延迟 5 分钟 = 在场计时回拨到还剩 5 分钟(3600-300),同时记录操作时刻。
         apply_snooze_water_reminder_for_runtime(&rt, 10_000, 3600, 5).unwrap();
         let map = rt.templates.lock().unwrap();
         let w = map.get(HEALTH_REMINDER_WATER_ID).unwrap();
-        assert_eq!(w.last_completed_ts, 10_000 - 3600 + 300);
+        assert_eq!(w.active_elapsed_seconds, 3600 - 300);
+        assert_eq!(w.last_completed_ts, 10_000);
         assert!(!w.pending);
+        assert_eq!(w.snooze_until, None);
+    }
+
+    /// 通用 interval 回拨 helper：sedentary/未知模板不走该路径，interval 任意 id 可复用。
+    #[test]
+    fn interval_snooze_helper_works_for_any_interval_template() {
+        let rt = HealthRuntime::new();
+        // 贪睡分钟覆盖整个间隔 → elapsed 归零
+        apply_snooze_interval_template_for_runtime(&rt, "kegel", 5_000, 300, 10).unwrap();
+        let map = rt.templates.lock().unwrap();
+        let k = map.get("kegel").unwrap();
+        assert_eq!(k.active_elapsed_seconds, 0);
+        assert_eq!(k.last_completed_ts, 5_000);
+        assert!(!k.pending);
     }
 
     #[test]

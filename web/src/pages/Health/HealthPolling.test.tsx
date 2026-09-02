@@ -141,7 +141,7 @@ beforeEach(() => {
   getHabitStatsMock.mockReset();
 
   getStatusMock.mockResolvedValue(buildStatus());
-  getStatsMock.mockResolvedValue({ activeMinutes: 10, idleMinutes: 5 });
+  getStatsMock.mockResolvedValue({ presentMinutes: 15, activeMinutes: 10, awayMinutes: 5 });
   getDetailMock.mockResolvedValue({
     appUsage: [],
     windowUsage: [],
@@ -266,6 +266,30 @@ describe('Health visibility polling', () => {
     expect(screen.queryByText('加载中…')).toBeNull();
     expect(screen.getByRole('alert').textContent).toMatch(/加载失败|重试|status unavailable|健康状态/);
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+  });
+
+  test('renders present-based metric tiles from activity stats', async () => {
+    renderHealth();
+    await flushMicrotasks(20);
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   指标格文案可能与他格重复（如休息判定也是 5 分钟），需按格定位。
+     *
+     * Code Logic（这个函数做什么）:
+     *   找到标签 span 所在 metricTile，返回整格文本。
+     */
+    const tileText = (label: string): string => {
+      const tile = screen.getByText(label).parentElement;
+      if (!tile) throw new Error(`missing metric tile: ${label}`);
+      return tile.textContent ?? '';
+    };
+
+    // 在场口径：在场 15 / 键鼠活跃 10 / 离场 5；活跃占在场比 = round(10/15*100) = 67%
+    expect(tileText('今日在场')).toMatch(/15 分钟/);
+    expect(tileText('键鼠活跃')).toMatch(/10 分钟/);
+    expect(tileText('离场')).toMatch(/5 分钟/);
+    expect(tileText('活跃占在场比')).toMatch(/67%/);
   });
 
   test('does not render activity charts that now live on the activity stats page', async () => {

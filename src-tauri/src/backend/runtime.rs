@@ -204,9 +204,11 @@ const SCRATCHPAD_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scratchpad (
 )";
 
 /// 健康提醒 - 每分钟活动采样表（分钟级 unix 时间戳为主键，同分钟重采覆盖）。
+/// is_present 为「在场」标记：Working 相位（或降级时键鼠活跃）的分钟才计入在场统计。
 const HEALTH_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS activity_records (
     ts INTEGER PRIMARY KEY,
     is_active INTEGER NOT NULL,
+    is_present INTEGER NOT NULL DEFAULT 0,
     process_name TEXT,
     window_title TEXT
 )";
@@ -374,6 +376,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     // N2 recovery_jobs 状态机（导出/恢复）
     crate::storage::RecoveryJobRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;
+    // 活动记录在场标记（is_present）：旧库幂等补列并按 is_active 近似回填（键鼠活跃≈在场）。
+    crate::storage::health_repo::ensure_activity_present_column(&pool).await?;
 
     let needs_recreate: bool = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM pragma_table_info('water_records') WHERE name = 'id'",

@@ -386,13 +386,16 @@ export interface HealthStatus {
 
 /**
  * 活动统计（get_activity_stats 返回，camelCase）。
- * 由 activity_records 表 SUM 聚合得出。
+ * 由 activity_records 表按「在场」口径聚合：键鼠活跃 + 短停歇都算在场，
+ * 超过休息阈值无活动即离场；presentMinutes = activeMinutes + 短停歇折算。
  */
 export interface ActivityStats {
-  /** 活跃分钟数 */
+  /** 今日在场分钟数（键鼠活跃 + 短停歇，间隔提醒按此口径计时） */
+  presentMinutes: number;
+  /** 今日键鼠活跃分钟数（在场中真实操作的子集） */
   activeMinutes: number;
-  /** 闲置分钟数 */
-  idleMinutes: number;
+  /** 今日离场分钟数（超过休息阈值无活动） */
+  awayMinutes: number;
 }
 
 /**
@@ -432,6 +435,8 @@ export interface TemplateHabitStats {
   dailyCompleted: number[];
   /** 最近一次完成时间戳。 */
   lastCompletedTs?: number | null;
+  /** interval 模板本周期已累计的在场秒数（距下次触发 = ceil((intervalSeconds - 该值)/60)，下限 0）。 */
+  activeElapsedSeconds: number;
 }
 
 /** 习惯统计(饮水 + 休息)后端返回,对应 HabitStatsDto。 */

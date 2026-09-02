@@ -9,7 +9,7 @@ import styles from './HabitStatsCard.module.css';
  *   用户在 Health 页按已启用模板看到今日完成次数 + 近 7 天趋势。
  *
  * Code Logic(做什么):
- *   按 templates 渲染多栏;instant 显示 +1;interval 显示距下次。
+ *   按 templates 渲染多栏;instant 显示 +1;interval 按在场计时显示距下次。
  */
 interface HabitStatsCardProps {
   stats: HabitStats | null;
@@ -22,18 +22,15 @@ interface HabitStatsCardProps {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   interval 模板需要告诉用户还有多久到下次。
+ *   interval 模板改为按「在场时间」累计计时：只有用户在设备面前（键鼠活跃或短停歇）
+ *   才推进周期，离场不消耗间隔；界面需要告诉用户按在场口径还有多久到下次。
  *
  * Code Logic（这个函数做什么）:
- *   lastCompleted + interval - now，向下取整到分钟且不小于 0。
+ *   用 intervalSeconds 减去本周期已累计的在场秒数 activeElapsedSeconds，
+ *   向上取整到分钟且不小于 0。
  */
-function computeNextMinutes(
-  lastCompletedTs: number | null | undefined,
-  interval: number,
-  nowSec: number,
-): number {
-  const base = lastCompletedTs ?? nowSec;
-  return Math.max(0, Math.ceil((base + interval - nowSec) / 60));
+function computeNextMinutes(activeElapsedSeconds: number, intervalSeconds: number): number {
+  return Math.max(0, Math.ceil((intervalSeconds - activeElapsedSeconds) / 60));
 }
 
 /**
@@ -41,7 +38,7 @@ function computeNextMinutes(
  *   旧 HabitStats 可能还没有 templates[]，要用兼容字段兜底出厂两项。
  *
  * Code Logic（这个函数做什么）:
- *   优先 stats.templates；否则用水/休息聚合字段合成。
+ *   优先 stats.templates；否则用水/休息聚合字段合成（兜底无在场秒数，计 0）。
  */
 function statsForTemplate(stats: HabitStats, id: string): TemplateHabitStats {
   const found = stats.templates?.find((item) => item.id === id);
@@ -54,6 +51,7 @@ function statsForTemplate(stats: HabitStats, id: string): TemplateHabitStats {
       todayDurationSeconds: 0,
       dailyCompleted: stats.waterDailyCounts,
       lastCompletedTs: stats.lastWaterTs ?? null,
+      activeElapsedSeconds: 0,
     };
   }
   if (id === 'rest') {
@@ -64,6 +62,7 @@ function statsForTemplate(stats: HabitStats, id: string): TemplateHabitStats {
       todayDurationSeconds: stats.todayRestTotalSeconds,
       dailyCompleted: stats.restDailyCounts,
       lastCompletedTs: null,
+      activeElapsedSeconds: 0,
     };
   }
   return {
@@ -73,6 +72,7 @@ function statsForTemplate(stats: HabitStats, id: string): TemplateHabitStats {
     todayDurationSeconds: 0,
     dailyCompleted: Array.from({ length: 7 }, () => 0),
     lastCompletedTs: null,
+    activeElapsedSeconds: 0,
   };
 }
 
@@ -120,7 +120,7 @@ export function HabitStatsCard({
           const item = statsForTemplate(stats, reminder.id);
           const nextMin =
             reminder.trigger === 'interval' && reminder.intervalSeconds
-              ? computeNextMinutes(item.lastCompletedTs, reminder.intervalSeconds, nowTs)
+              ? computeNextMinutes(item.activeElapsedSeconds, reminder.intervalSeconds)
               : null;
           const durationMin = Math.round(item.todayDurationSeconds / 60);
           return (

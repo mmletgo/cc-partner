@@ -10,15 +10,17 @@ use std::collections::{HashMap, VecDeque};
 /// 单条模板的内存态。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     多条提醒共用时钟，但 pending / 本窗口已触发 / 间隔原点 / 贪睡必须彼此独立。
+///     多条提醒共用时钟，但 pending / 本窗口已触发 / 间隔原点 / 在场累计 / 贪睡必须彼此独立。
 /// Code Logic（这个结构做什么）:
 ///     纯数据载体，由 daemon 与命令层在同一把 `templates` 锁内读写。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemplateRuntime {
     /// 已弹出尚未响应，防止每 tick 重复入队。
     pub pending: bool,
-    /// 间隔模板的计时原点（完成/跳过/贪睡/启动）。
+    /// 间隔模板的计时原点（完成/跳过/贪睡/启动）；不再驱动 interval 触发，仅供排查。
     pub last_completed_ts: i64,
+    /// 间隔模板的在场累计秒数：每个在场采样拍 +60，离开期间不累计；interval 触发的唯一依据。
+    pub active_elapsed_seconds: i64,
     /// sedentary 本共享窗口是否已触发过。
     pub reminded_this_window: bool,
     /// 该模板贪睡到期时间戳；None 表示未贪睡。
@@ -31,11 +33,12 @@ impl TemplateRuntime {
     /// Business Logic（为什么需要这个函数）:
     ///     启动或新加模板时不能立刻遮罩打断用户。
     /// Code Logic（这个函数做什么）:
-    ///     last_completed_ts=now，其余清零。
+    ///     last_completed_ts=now，在场累计与其余标记清零。
     pub fn new(now_ts: i64) -> Self {
         Self {
             pending: false,
             last_completed_ts: now_ts,
+            active_elapsed_seconds: 0,
             reminded_this_window: false,
             snooze_until: None,
         }
@@ -110,6 +113,29 @@ pub fn clear_sedentary_window_flags(
     }
 }
 
+/// 给全部 interval 模板的在场计时累计一拍（60 秒）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     喝水/提肛等固定间隔提醒要按「用户在场时间」计时：离开期间不累计、回来继续，
+///     所以每个在场采样拍（相位为 Working 或采样降级）需要给所有 interval 模板加一分钟。
+/// Code Logic（这个函数做什么）:
+///     遍历配置模板，对 trigger=interval 且存在于 runtime map 的条目
+///     `active_elapsed_seconds` 做 `saturating_add(60)`（一拍=一分钟桶）；
+///     sedentary 模板与 map 中不存在的 id 不动。
+pub fn credit_present_minute(
+    runtimes: &mut HashMap<String, TemplateRuntime>,
+    templates: &[HealthReminderTemplate],
+) {
+    for tmpl in templates {
+        if tmpl.trigger != ReminderTrigger::Interval {
+            continue;
+        }
+        if let Some(rt) = runtimes.get_mut(&tmpl.id) {
+            rt.active_elapsed_seconds = rt.active_elapsed_seconds.saturating_add(60);
+        }
+    }
+}
+
 /// 按当前配置补齐/裁剪模板运行时（不重置仍存在模板的计时）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -133,10 +159,12 @@ pub fn reconcile_template_runtimes(
 /// 判定一条已启用模板此刻是否应触发。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     间隔与久坐规则不同，且 pending/贪睡/本窗口已触发都必须挡住重复弹窗。
+///     间隔与久坐规则不同，且 pending/贪睡/本窗口已触发都必须挡住重复弹窗；
+///     间隔提醒按「在场时间」计满才弹，用户离开期间不折算时间。
 /// Code Logic（这个函数做什么）:
-///     pending 或 snooze 未到期 → false；interval 看 last_completed；sedentary 仅 Working
-///     且本窗口未提醒且窗口时长达阈值。
+///     pending 或 snooze 未到期 → false；interval 看在场累计秒数
+///     （active_elapsed_seconds >= interval）；sedentary 仅 Working 且本窗口未提醒
+///     且窗口时长达阈值。
 pub fn should_fire_template(
     template: &HealthReminderTemplate,
     runtime: &TemplateRuntime,
@@ -152,7 +180,7 @@ pub fn should_fire_template(
     match template.trigger {
         ReminderTrigger::Interval => {
             let interval = template.interval_seconds.unwrap_or(i64::MAX);
-            now_ts.saturating_sub(runtime.last_completed_ts) >= interval
+            runtime.active_elapsed_seconds >= interval
         }
         ReminderTrigger::Sedentary => match machine {
             MachineState::Working(w) => {
@@ -241,18 +269,33 @@ mod tests {
         })
     }
 
+    /// interval 按在场累计触发：elapsed=3599 不触发，累计一拍（+60）后触发；
+    /// pending 置位后持续拦截。
     #[test]
-    fn interval_fires_after_origin_and_not_when_pending() {
+    fn interval_fires_on_present_elapsed_and_not_when_pending() {
         let tmpl = interval_tmpl("water", 3600);
         let mut rt = TemplateRuntime::new(0);
-        assert!(!should_fire_template(&tmpl, &rt, &MachineState::Idle, 3599));
-        assert!(should_fire_template(&tmpl, &rt, &MachineState::Idle, 3600));
+        rt.active_elapsed_seconds = 3599;
+        // 墙钟 now 再大也不影响：触发只看在场累计
+        assert!(!should_fire_template(
+            &tmpl,
+            &rt,
+            &MachineState::Idle,
+            999_999
+        ));
+        rt.active_elapsed_seconds += 60;
+        assert!(should_fire_template(
+            &tmpl,
+            &rt,
+            &MachineState::Idle,
+            999_999
+        ));
         rt.pending = true;
         assert!(!should_fire_template(
             &tmpl,
             &rt,
             &MachineState::Idle,
-            99999
+            999_999
         ));
     }
 
@@ -279,10 +322,31 @@ mod tests {
         let a = interval_tmpl("a", 100);
         let b = interval_tmpl("b", 100);
         let mut ra = TemplateRuntime::new(0);
-        let rb = TemplateRuntime::new(0);
-        ra.last_completed_ts = 1000;
+        let mut rb = TemplateRuntime::new(0);
+        ra.active_elapsed_seconds = 100;
+        assert!(should_fire_template(&a, &ra, &MachineState::Idle, 1099));
+        assert!(!should_fire_template(&b, &rb, &MachineState::Idle, 100));
+        // a 完成清零自身 elapsed，不影响 b 的独立计时
+        ra.active_elapsed_seconds = 0;
         assert!(!should_fire_template(&a, &ra, &MachineState::Idle, 1099));
+        rb.active_elapsed_seconds = 100;
         assert!(should_fire_template(&b, &rb, &MachineState::Idle, 100));
+    }
+
+    /// credit 只给 interval 模板累计：sedentary 与 map 中不存在的 id 均不受影响。
+    #[test]
+    fn credit_present_minute_only_accrues_interval_templates() {
+        let templates = vec![interval_tmpl("water", 3600), sit_tmpl("rest", 120)];
+        let mut map = HashMap::new();
+        map.insert("water".into(), TemplateRuntime::new(0));
+        map.insert("rest".into(), TemplateRuntime::new(0));
+        credit_present_minute(&mut map, &templates);
+        assert_eq!(map["water"].active_elapsed_seconds, 60);
+        assert_eq!(map["rest"].active_elapsed_seconds, 0);
+        // 配置里的 id 不在 map 中时不 panic（reconcile 之前调用也安全）
+        let ghost = vec![interval_tmpl("ghost", 60)];
+        credit_present_minute(&mut map, &ghost);
+        assert_eq!(map["water"].active_elapsed_seconds, 60);
     }
 
     #[test]
@@ -294,6 +358,7 @@ mod tests {
             TemplateRuntime {
                 pending: false,
                 last_completed_ts: 10,
+                active_elapsed_seconds: 55,
                 reminded_this_window: true,
                 snooze_until: None,
             },
@@ -303,6 +368,7 @@ mod tests {
             TemplateRuntime {
                 pending: false,
                 last_completed_ts: 10,
+                active_elapsed_seconds: 55,
                 reminded_this_window: true,
                 snooze_until: None,
             },
@@ -311,6 +377,8 @@ mod tests {
         assert!(!map["rest"].reminded_this_window);
         assert!(map["water"].reminded_this_window);
         assert_eq!(map["water"].last_completed_ts, 10);
+        // 关窗只清 sedentary 标记，interval 的在场累计不得被动
+        assert_eq!(map["water"].active_elapsed_seconds, 55);
     }
 
     #[test]
@@ -344,7 +412,7 @@ mod tests {
     fn snooze_blocks_until_expiry() {
         let tmpl = interval_tmpl("water", 10);
         let mut rt = TemplateRuntime::new(0);
-        rt.last_completed_ts = 0;
+        rt.active_elapsed_seconds = 10;
         rt.snooze_until = Some(50);
         assert!(!should_fire_template(&tmpl, &rt, &MachineState::Idle, 40));
         assert!(should_fire_template(&tmpl, &rt, &MachineState::Idle, 50));
