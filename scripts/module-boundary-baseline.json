@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-08-25T06:54:30.333Z",
+  "generatedAt": "2026-09-02T10:34:02.064Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -55,7 +55,7 @@
       "lines": 2539
     },
     "src-tauri/src/net/peer_client.rs": {
-      "lines": 3110
+      "lines": 3109
     },
     "src-tauri/src/net/routes/orchestrator.rs": {
       "lines": 2617
@@ -67,7 +67,7 @@
       "lines": 3034
     },
     "src-tauri/src/orchestrator/remote_client.rs": {
-      "lines": 2866
+      "lines": 2864
     },
     "src-tauri/src/storage/agent_hub_repo.rs": {
       "lines": 9699,
@@ -76,9 +76,6 @@
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
         "expiresAt": "2026-11-23"
       }
-    },
-    "src-tauri/src/workbench/dependencies.rs": {
-      "lines": 3544
     },
     "src-tauri/src/workbench/git.rs": {
       "lines": 4811
@@ -90,7 +87,7 @@
       "lines": 4804
     },
     "src-tauri/src/workbench/sessions.rs": {
-      "lines": 11828,
+      "lines": 8031,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
