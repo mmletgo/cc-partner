@@ -881,6 +881,27 @@ fn native_tmux_command_uses_stable_socket_and_config() {
 }
 
 /// Business Logic（为什么需要这个测试）:
+///     tmux start-server 若仍由 GUI spawn，Dev.app codesign 会杀掉 server 与全部 pane。
+///
+/// Code Logic（这个测试做什么）:
+///     锁定 `ensure_workbench_tmux_server` 调用 `run_disclaimed`。
+#[test]
+fn tmux_start_server_uses_disclaimed_spawn() {
+    let src = include_str!("sessions.rs");
+    let start = src
+        .find("fn ensure_workbench_tmux_server")
+        .expect("ensure_workbench_tmux_server");
+    let body = src[start..]
+        .split("fn detach_tmux_clients_for_row")
+        .next()
+        .expect("body");
+    assert!(
+        body.contains("run_disclaimed"),
+        "tmux start-server 必须走 detached_spawn::run_disclaimed，避免 GUI 责任链"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
 ///     sidecar/GUI 热更新会 SIGHUP attach 客户端；若 last-client 时拆掉 unattached session，
 ///     pane 里的 shell/Agent 会一起死，重启后 restore 只能看到 tmux_target_missing。
 ///

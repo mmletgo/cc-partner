@@ -1892,13 +1892,22 @@ fn ensure_tmux_window_identity(tmux: &TmuxCommand, target: &str, session_id: &st
 
 /// Business Logic（为什么需要这个函数）:
 ///     专用 socket 上的 tmux server 可能尚未起来；create/restore 必须先 start-server 并关掉 exit-empty。
+///     macOS 上 start-server 必须脱离 GUI 责任链，否则 Dev.app codesign SIGKILL 会拆掉全部 pane。
 ///
 /// Code Logic（这个函数做什么）:
-///     best-effort `start-server` + server persist；失败只 debug。
+///     先 `run_disclaimed` 跑 `start-server`，失败再回退 `run_tmux_command`；然后 server persist。
 fn ensure_workbench_tmux_server(tmux: &TmuxCommand) {
-    if let Err(error) = run_tmux_command(tmux, &["start-server"]) {
-        tracing::debug!("启动工作台 tmux server 失败: {error}");
-        return;
+    let mut start_args = tmux.prefix_args.clone();
+    start_args.push("start-server".to_string());
+    if let Err(error) = crate::backend::detached_spawn::run_disclaimed(
+        std::path::Path::new(&tmux.program),
+        &start_args,
+    ) {
+        tracing::debug!("脱离责任链启动工作台 tmux server 失败，回退普通 spawn: {error}");
+        if let Err(error) = run_tmux_command(tmux, &["start-server"]) {
+            tracing::debug!("启动工作台 tmux server 失败: {error}");
+            return;
+        }
     }
     for args in tmux_server_persist_commands() {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();

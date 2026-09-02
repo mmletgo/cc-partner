@@ -22,6 +22,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
 use serde::Serialize;
+#[cfg(any(not(unix), test))]
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -534,18 +535,24 @@ async fn start() -> Result<(), AppError> {
         BackendStatusKind::Stopped => {}
     }
 
-    // start detach 后 serve 子进程独立读取环境变量；必须显式继承 CC_PARTNER_DATA_DIR，
-    // 保证 control/config/db/log 与父进程落在同一隔离根，避免写回用户真实 home。
+    // start detach 后 serve 子进程独立读取环境变量；posix_spawn/Command 均继承当前
+    // 环境，因此 CC_PARTNER_DATA_DIR 会进入 serve。macOS 必须 disclaim，否则 Dev.app
+    // codesign SIGKILL 会沿着责任链杀掉 sidecar 与 tmux。
     let current_exe = std::env::current_exe()?;
-    let mut command = Command::new(current_exe);
-    command
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    inherit_data_dir_env(&mut command);
-    configure_detached_child(&mut command);
-    let mut child = command.spawn()?;
+    #[cfg(unix)]
+    let mut child = crate::backend::detached_spawn::spawn_disclaimed(&current_exe, &["serve"])?;
+    #[cfg(not(unix))]
+    let mut child = {
+        let mut command = Command::new(current_exe);
+        command
+            .arg("serve")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        inherit_data_dir_env(&mut command);
+        configure_detached_child(&mut command);
+        command.spawn()?
+    };
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
@@ -557,7 +564,7 @@ async fn start() -> Result<(), AppError> {
             }
             Ok(None) => {}
             Err(err) => {
-                let _ = kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT);
+                let _ = reap_started_serve(&mut child);
                 return Err(err.into());
             }
         }
@@ -574,7 +581,7 @@ async fn start() -> Result<(), AppError> {
                 return Ok(());
             }
             // 他人实例已 Running：仅当确认自己的 child 已死才能成功采纳，否则报告残留 PID。
-            match kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT) {
+            match reap_started_serve(&mut child) {
                 Ok(note) => {
                     println!("{}", render_status_json(&status)?);
                     let _ = note;
@@ -591,12 +598,29 @@ async fn start() -> Result<(), AppError> {
     }
 
     // 超时或任何未确认 Running 的路径都必须有界 kill+reap 自己 spawn 的 child，避免孤儿 writer。
-    match kill_and_reap_owned_child(&mut child, CHILD_REAP_TIMEOUT) {
+    match reap_started_serve(&mut child) {
         Ok(note) => Err(AppError::generic(format!("等待后端启动超时{note}"))),
         Err(reap_err) => Err(AppError::generic(format!(
             "等待后端启动超时；且清理子进程失败: {reap_err}"
         ))),
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     start 失败路径必须杀掉自己 spawn 的 serve；Unix 走 disclaim child，Windows 仍是 std Child。
+///
+/// Code Logic（这个函数做什么）:
+///     按平台委托 `DisclaimedChild::kill_and_reap` 或 `kill_and_reap_owned_child`。
+#[cfg(unix)]
+fn reap_started_serve(
+    child: &mut crate::backend::detached_spawn::DisclaimedChild,
+) -> Result<String, String> {
+    child.kill_and_reap(CHILD_REAP_TIMEOUT)
+}
+
+#[cfg(not(unix))]
+fn reap_started_serve(child: &mut std::process::Child) -> Result<String, String> {
+    kill_and_reap_owned_child(child, CHILD_REAP_TIMEOUT)
 }
 
 /// owned child 有界 kill+reap 的默认等待窗口。
@@ -610,6 +634,7 @@ const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托 `kill_and_reap_owned_child_with`，生产路径用 `Child::try_wait` 轮询。
+#[cfg(any(not(unix), test))]
 fn kill_and_reap_owned_child(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -625,6 +650,7 @@ fn kill_and_reap_owned_child(
 /// Code Logic（这个函数做什么）:
 ///     `child.kill()` 后在 `timeout` 内反复调用 `wait_once`；确认退出返回 Ok(诊断后缀)，
 ///     超时/reap 失败返回 Err(含残留 PID)。测试可注入恒返回 None 的 wait 模拟卡住 child。
+#[cfg(any(not(unix), test))]
 fn kill_and_reap_owned_child_with<F>(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -915,6 +941,7 @@ fn process_is_alive(pid: u32) -> bool {
 ///     若当前进程设置了 `CC_PARTNER_DATA_DIR`，显式写入 child Command 的 env 并返回该值；
 ///     未设置则不改动（子进程默认继承父环境，保持生产行为）。
 ///     返回注入值供测试断言；Windows 上 `Command` Debug 不含 env，不能靠 Debug 字符串检查。
+#[cfg(any(not(unix), test))]
 fn inherit_data_dir_env(command: &mut Command) -> Option<OsString> {
     let value = std::env::var_os("CC_PARTNER_DATA_DIR")?;
     command.env("CC_PARTNER_DATA_DIR", &value);
@@ -929,6 +956,7 @@ fn inherit_data_dir_env(command: &mut Command) -> Option<OsString> {
 /// Code Logic（这个函数做什么）:
 ///     在 child exec 前调用 `setsid()` 创建新 session；失败时让 spawn 返回对应 IO 错误。
 #[cfg(unix)]
+#[allow(dead_code)] // start() 改走 spawn_disclaimed；保留给非 macOS 对照与历史 smoke 语义
 fn configure_detached_child(command: &mut Command) {
     apply_unix_detached_pre_exec(command);
 }
@@ -1521,6 +1549,25 @@ mod tests {
 
         server.abort();
         assert!(error.to_string().contains("ok=false"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Unix `start` 若仍用普通 Command spawn，macOS GUI 责任链会在 codesign 时杀掉 sidecar。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     锁定 `start` 调用 `spawn_disclaimed`。
+    #[test]
+    fn start_unix_path_uses_disclaimed_spawn() {
+        let src = include_str!("cli.rs");
+        let start = src.find("async fn start()").expect("start");
+        let body = src[start..]
+            .split("fn reap_started_serve")
+            .next()
+            .expect("start body");
+        assert!(
+            body.contains("spawn_disclaimed"),
+            "Unix start 必须 spawn_disclaimed，避免 GUI codesign 杀掉 sidecar"
+        );
     }
 
     /// 验证 start 子进程 detach 时把 stdio 置 null，而不是重定向到 backend.log。
