@@ -852,19 +852,19 @@ fn tmux_attach_window_args_switch_client_to_window_target() {
 ///     默认 `/tmp/tmux-$UID` socket 在 sidecar 被杀后会变 stale；工作台必须用 data_dir 下的固定 socket。
 ///
 /// Code Logic（这个测试做什么）:
-///     锁定 isolation args 的 `-S/-f` 形状，并断言 native 命令带上稳定 socket 或 `-L` 回退。
+///     锁定 isolation args 的 `-S/-f` 形状（路径分隔符跟随宿主 `Path::join`，Windows 上再交给 WSL 转换）；
+///     并断言 native 命令带上稳定 socket 或 `-L` 回退。
 #[test]
 fn native_tmux_command_uses_stable_socket_and_config() {
-    let args = crate::workbench::dependencies::workbench_tmux_isolation_args_for_dir(
-        std::path::Path::new("/tmp/cc-partner-data/tmux"),
-    );
+    let dir = std::path::Path::new("/tmp/cc-partner-data/tmux");
+    let args = crate::workbench::dependencies::workbench_tmux_isolation_args_for_dir(dir);
     assert_eq!(
         args,
         vec![
             "-S",
-            "/tmp/cc-partner-data/tmux/cc-partner.sock",
+            dir.join("cc-partner.sock").to_string_lossy().as_ref(),
             "-f",
-            "/tmp/cc-partner-data/tmux/tmux.conf",
+            dir.join("tmux.conf").to_string_lossy().as_ref(),
         ]
     );
     let backend = TmuxCommand::native("tmux");

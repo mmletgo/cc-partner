@@ -4,7 +4,7 @@
  * 独立于 AppShell/OnboardingGuard，路由 `/health-overlay?display={i}&template={id}`，
  * 旧 `type=water|reminder` 仍可解析。由 Tauri 透明置顶遮罩窗口直接加载。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
