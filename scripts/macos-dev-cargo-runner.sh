@@ -9,7 +9,8 @@
 #   - 非 `run`：原样转发给 cargo
 #   - `run`：cargo build → prepare-macos-dev-app → open -n 启动 .app → 等待进程退出
 #   - 禁止 open --stdout=/dev/stdout（tauri 管道下会 LS 错误 -10810）；日志写文件并可 tail
-#   - EXIT/TERM 时杀掉开发 App，便于热重载
+#   - EXIT/TERM 时杀掉开发 GUI，便于热重载；不得杀 cc-partner-backend
+#     （serve 必须跑在 cargo target，不能跑在本 .app 内，否则 codesign --force 会带走 owner）
 #
 # 用法:
 #   tauri dev --runner scripts/macos-dev-cargo-runner.sh

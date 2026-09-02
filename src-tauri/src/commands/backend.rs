@@ -229,8 +229,14 @@ pub async fn ensure_backend_process_for_gui(app: &AppHandle) -> Result<BackendSt
 ///     packaged app 必须通过 Tauri sidecar 执行 bundled backend；开发模式还需要在未打包 sidecar 时可启动。
 ///
 /// Code Logic（这个函数做什么）:
-///     先尝试 `app.shell().sidecar("cc-partner-backend")`，失败后按 dev binary/cargo fallback 执行同一子命令。
+///     debug 构建只走 cargo target/debug，避免 Dev.app 热更新 codesign 杀掉 serve；
+///     release 先尝试 `app.shell().sidecar("cc-partner-backend")`，失败后再 dev fallback。
 async fn run_backend_cli_command(app: &AppHandle, subcommand: &str) -> Result<(), AppError> {
+    // debug：serve 必须从 cargo target 启动。Dev.app 内 sidecar 每次热更新都会被
+    // copy + codesign --force，跑在 bundle 里的 owner 会被内核杀掉。
+    if cfg!(debug_assertions) {
+        return run_dev_backend_command(subcommand).await;
+    }
     match run_packaged_sidecar_command(app, subcommand).await {
         Ok(()) => Ok(()),
         Err(sidecar_error) => {
@@ -360,20 +366,27 @@ async fn run_dev_backend_command(subcommand: &str) -> Result<(), AppError> {
 fn dev_backend_binary_candidates() -> Vec<PathBuf> {
     let binary_name = backend_binary_name();
     let mut candidates = Vec::new();
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(dir) = current_exe.parent() {
-            candidates.push(dir.join(binary_name));
-            if let Some(parent) = dir.parent() {
-                candidates.push(parent.join(binary_name));
-            }
-        }
-    }
+    // cargo target 必须排在 Dev.app bundle 前面：后者热更新会被 codesign 覆盖。
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
             .join(binary_name),
     );
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(dir) = current_exe.parent() {
+            let sibling = dir.join(binary_name);
+            if !is_dev_app_bundle_sidecar_path(&sibling) {
+                candidates.push(sibling);
+            }
+            if let Some(parent) = dir.parent() {
+                let parent_bin = parent.join(binary_name);
+                if !is_dev_app_bundle_sidecar_path(&parent_bin) {
+                    candidates.push(parent_bin);
+                }
+            }
+        }
+    }
     candidates
 }
 
@@ -427,4 +440,64 @@ fn command_output_detail(stdout: &[u8], stderr: &[u8]) -> String {
         return stdout_text;
     }
     "无输出".to_string()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     macOS dev runner 每次热更新都会把 sidecar 拷进 `cc-partner (Dev).app` 并 `codesign --force`；
+///     若 serve 进程跑在该路径上，签名失效会把 owner 一起杀掉，tmux attach 全断。
+///
+/// Code Logic（这个函数做什么）:
+///     识别 `.app/Contents/MacOS/` 下的 `cc-partner-backend` 路径。
+fn is_dev_app_bundle_sidecar_path(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy();
+    text.contains(".app/Contents/MacOS/") && text.contains("cc-partner-backend")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Dev.app 热更新会 codesign 覆盖 bundle 内 sidecar；serve 不能跑在这条路径上。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     bundle MacOS 路径为 true，cargo target/debug 路径为 false。
+    #[test]
+    fn dev_app_bundle_sidecar_path_is_rejected_for_long_lived_serve() {
+        assert!(is_dev_app_bundle_sidecar_path(
+            PathBuf::from(
+                "/Users/hans/Applications/cc-partner (Dev).app/Contents/MacOS/cc-partner-backend"
+            )
+            .as_path()
+        ));
+        assert!(!is_dev_app_bundle_sidecar_path(
+            PathBuf::from(
+                "/Users/hans/web_project/cc-partner/src-tauri/target/debug/cc-partner-backend"
+            )
+            .as_path()
+        ));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 从 Dev.app 启动时 current_exe 同目录就是 bundle sidecar；候选顺序必须跳过它，
+    ///     否则 start 仍会 spawn 会被 codesign 杀死的 serve。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     过滤候选后 bundle 路径消失，cargo target 路径保留。
+    #[test]
+    fn dev_backend_candidates_skip_re_signed_app_bundle() {
+        let bundle = PathBuf::from(
+            "/Users/hans/Applications/cc-partner (Dev).app/Contents/MacOS/cc-partner-backend",
+        );
+        let cargo_debug = PathBuf::from(
+            "/Users/hans/web_project/cc-partner/src-tauri/target/debug/cc-partner-backend",
+        );
+        let filtered: Vec<_> = [bundle.clone(), cargo_debug.clone()]
+            .into_iter()
+            .filter(|path| !is_dev_app_bundle_sidecar_path(path))
+            .collect();
+        assert_eq!(filtered, vec![cargo_debug]);
+        assert!(!filtered.contains(&bundle));
+    }
 }

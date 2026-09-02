@@ -17,6 +17,10 @@ import styles from './HealthOverlay.module.css';
 
 type Mode = 'actions' | 'session';
 
+interface HealthOverlaySurfaceProps {
+  templateId: string;
+}
+
 /**
  * Business Logic（为什么需要这个函数）:
  *   session 倒计时需要 MM:SS，避免各屏自己估秒。
@@ -36,14 +40,23 @@ function formatMmSs(total: number): string {
  *   每条模板共用同一套遮罩表面，不能再按饮水/休息硬分叉。
  *
  * Code Logic（这个组件做什么）:
- *   读 template query + 配置；模板未返回前不画旧休息文案；instant 确认/跳过/推迟；
- *   session 开始后跟后端 endTs。
+ *   读 template query；用 key 在模板切换时整页复位，避免 effect 同步 setState。
  */
-export default function HealthOverlay() {
-  const { t } = useTranslation(['health', 'common']);
+export default function HealthOverlay(): JSX.Element {
   const [searchParams] = useSearchParams();
   const templateId = useMemo(() => resolveOverlayTemplateId(searchParams), [searchParams]);
+  return <HealthOverlaySurface key={templateId} templateId={templateId} />;
+}
 
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   单个模板的遮罩状态（配置、倒计时、动作）必须与当前 templateId 同生共死。
+ *
+ * Code Logic（这个组件做什么）:
+ *   读配置；模板未返回前不画旧休息文案；instant 确认/跳过/推迟；session 开始后跟后端 endTs。
+ */
+function HealthOverlaySurface({ templateId }: HealthOverlaySurfaceProps): JSX.Element {
+  const { t } = useTranslation(['health', 'common']);
   const [template, setTemplate] = useState<HealthReminderTemplate | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [mode, setMode] = useState<Mode>('actions');
@@ -57,8 +70,6 @@ export default function HealthOverlay() {
 
   useEffect(() => {
     let cancelled = false;
-    setTemplate(null);
-    setConfigLoaded(false);
     Promise.all([healthApi.getConfig(), healthApi.getStatus()])
       .then(([config, status]) => {
         if (cancelled) return;
