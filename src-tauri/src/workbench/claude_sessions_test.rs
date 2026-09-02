@@ -36,6 +36,26 @@ fn unique_temp_dir(test_name: &str) -> PathBuf {
     dir
 }
 
+/// 生成唯一 Claude session_id，避免并发测试撞进程级 last_applied 缓存。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `maybe_auto_title_from_index` 用进程内 `LAST_APPLIED[session_id]` 去重；
+///     多条测试共用 `new-session` 时，空标题会把另一条 `/clear` 重置跳过。
+///
+/// Code Logic（这个函数做什么）:
+///     prefix + pid + 纳秒，保证跨测试唯一。
+fn unique_session_id(prefix: &str) -> String {
+    format!(
+        "{}-{}-{}",
+        prefix,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    )
+}
+
 /// 写一个 jsonl 文件（每行一个 JSON 对象），返回文件路径。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1903,6 +1923,8 @@ async fn auto_title_resets_window_name_when_latest_session_has_no_ai_title() {
     let old_activity = started + chrono::Duration::minutes(1);
     let new_activity = chrono::Utc::now();
     let cwd = worktree.to_string_lossy().to_string();
+    let old_session_id = unique_session_id("old-session-reset");
+    let new_session_id = unique_session_id("new-session-reset");
     state
         .workbench_sessions
         .insert_fake_session_row_for_test(auto_title_terminal_row(
@@ -1917,9 +1939,9 @@ async fn auto_title_resets_window_name_when_latest_session_has_no_ai_title() {
         encoded_cwd: encode_claude_project_path(&cwd),
         sessions: HashMap::from([
             (
-                "old-session".to_string(),
+                old_session_id.clone(),
                 auto_title_session_index(
-                    "old-session",
+                    &old_session_id,
                     "上一轮修复登录",
                     true,
                     &cwd,
@@ -1928,9 +1950,9 @@ async fn auto_title_resets_window_name_when_latest_session_has_no_ai_title() {
                 ),
             ),
             (
-                "new-session".to_string(),
+                new_session_id.clone(),
                 auto_title_session_index(
-                    "new-session",
+                    &new_session_id,
                     "",
                     false,
                     &cwd,
@@ -1971,6 +1993,8 @@ async fn auto_title_applies_new_conversation_title_after_clear() {
     let old_activity = started + chrono::Duration::minutes(1);
     let new_activity = chrono::Utc::now();
     let cwd = worktree.to_string_lossy().to_string();
+    let old_session_id = unique_session_id("old-session-new-title");
+    let new_session_id = unique_session_id("new-session-new-title");
     state
         .workbench_sessions
         .insert_fake_session_row_for_test(auto_title_terminal_row(
@@ -1986,9 +2010,9 @@ async fn auto_title_applies_new_conversation_title_after_clear() {
         encoded_cwd: encode_claude_project_path(&cwd),
         sessions: HashMap::from([
             (
-                "old-session".to_string(),
+                old_session_id.clone(),
                 auto_title_session_index(
-                    "old-session",
+                    &old_session_id,
                     "上一轮修复登录",
                     true,
                     &cwd,
@@ -1997,9 +2021,9 @@ async fn auto_title_applies_new_conversation_title_after_clear() {
                 ),
             ),
             (
-                "new-session".to_string(),
+                new_session_id.clone(),
                 auto_title_session_index(
-                    "new-session",
+                    &new_session_id,
                     new_title,
                     true,
                     &cwd,
@@ -2039,6 +2063,7 @@ async fn auto_title_does_not_reset_manually_named_window_after_clear() {
     let started = chrono::Utc::now() - chrono::Duration::minutes(5);
     let new_activity = chrono::Utc::now();
     let cwd = worktree.to_string_lossy().to_string();
+    let new_session_id = unique_session_id("new-session-manual");
     state
         .workbench_sessions
         .insert_fake_session_row_for_test(auto_title_terminal_row(
@@ -2052,9 +2077,9 @@ async fn auto_title_does_not_reset_manually_named_window_after_clear() {
         worktree_path: worktree.clone(),
         encoded_cwd: encode_claude_project_path(&cwd),
         sessions: HashMap::from([(
-            "new-session".to_string(),
+            new_session_id.clone(),
             auto_title_session_index(
-                "new-session",
+                &new_session_id,
                 "",
                 false,
                 &cwd,
