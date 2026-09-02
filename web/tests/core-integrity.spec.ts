@@ -563,7 +563,7 @@ test.describe('Core product integrity', () => {
     await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0);
 
     const sendArgs = await page.evaluate(() => window.__coreIntegrityTestApi?.getLastSendArgs());
-    expect(sendArgs?.deviceId).toBe('peer-1');
+    expect(sendArgs?.deviceId).toBe('cc-partner-mobile-inbox');
     expect(sendArgs?.filePath).toBe('/tmp/report.txt');
     expect(typeof sendArgs?.clientOperationId).toBe('string');
     expect((sendArgs?.clientOperationId ?? '').length).toBeGreaterThan(0);

@@ -11,7 +11,8 @@
 //!     - `GET /api/mobile/transfer/tasks`：`list_transfers_for_state` 后剥离 path
 //!     - `POST /api/mobile/transfer/upload/{init,chunk/:id,complete/:id}`：staging 续传
 //!     - `POST /api/mobile/transfer/{cancel,retry,resume,get-operation}`：复用 registry/sender
-//!     - `GET /api/mobile/transfer/download/:taskId`：仅 Receive+completed 流式下载
+//!     - `GET /api/mobile/transfer/download/:taskId`：Receive+completed 或发给手机的
+//!       Send+completed 流式下载
 
 use crate::commands::devices::{get_local_device_for_state, list_devices_for_state};
 use crate::commands::transfer::list_transfers_for_state;
@@ -379,20 +380,21 @@ pub async fn get_mobile_transfer_operation(
         .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.transfer.get_operation"))
 }
 
-/// GET /api/mobile/transfer/download/:taskId：仅 completed Receive 流式下载。
+/// GET /api/mobile/transfer/download/:taskId：completed Receive 或手机邮箱 offer。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     手机不能 Open/Reveal；只能下载本机已接收完成的文件，且 JSON/错误不得带 path。
+///     手机不能 Open/Reveal；只能下载已接收完成的文件，或电脑发给手机且已完成的原文件，
+///     JSON/错误不得带 path。
 ///
 /// Code Logic（这个函数做什么）:
-///     registry/history 查找 → 非 Receive+completed 或文件不可读 → 404 泛化文案；
+///     registry/history 查找 → 非允许资格或文件不可读 → 404 泛化文案；
 ///     成功则 `octet-stream` + `Content-Disposition` 分块流。
 pub async fn download_mobile_transfer(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Path(task_id): Path<String>,
 ) -> Result<Response, P2pError> {
-    match open_completed_receive_download(&state, &task_id).await {
+    match open_completed_download(&state, &task_id).await {
         Ok((filename, file)) => Ok(stream_download_response(&filename, file)),
         Err(e) => Err(P2pError::from_app_error(
             e,
@@ -672,7 +674,24 @@ fn place_staging_exclusive(
 }
 
 /// 仅 completed Receive 可下载；失败一律泛化 404，不带 path。
-async fn open_completed_receive_download(
+/// 是否允许 `/mobile` 下载该任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     已接收文件和电脑发给手机的 offer 可下；发给其它电脑的 Send 即使 path 仍在也禁止。
+///
+/// Code Logic（这个函数做什么）:
+///     Receive+completed，或 Send+completed 且 peer 为 mobile inbox。
+fn is_mobile_downloadable(task: &TransferTask) -> bool {
+    if task.status != TransferStatus::Completed {
+        return false;
+    }
+    match task.direction {
+        TransferDirection::Receive => true,
+        TransferDirection::Send => crate::transfer::is_mobile_inbox_device_id(&task.peer_device_id),
+    }
+}
+
+async fn open_completed_download(
     state: &AppState,
     task_id: &str,
 ) -> Result<(String, tokio::fs::File), AppError> {
@@ -690,7 +709,7 @@ async fn open_completed_receive_download(
             .await?
             .ok_or_else(unavailable)?
     };
-    if task.direction != TransferDirection::Receive || task.status != TransferStatus::Completed {
+    if !is_mobile_downloadable(&task) {
         return Err(unavailable());
     }
     let path = FsPath::new(task.file_path.trim());
@@ -704,6 +723,11 @@ async fn open_completed_receive_download(
     }
     let meta = std::fs::symlink_metadata(path).map_err(|_| unavailable())?;
     if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(unavailable());
+    }
+    let inbox_offer = task.direction == TransferDirection::Send
+        && crate::transfer::is_mobile_inbox_device_id(&task.peer_device_id);
+    if inbox_offer && meta.len() != task.size {
         return Err(unavailable());
     }
     let file = tokio::fs::File::open(path)
@@ -970,7 +994,10 @@ mod tests {
         AppConfig, BatteryConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
     };
     use crate::models::device::Device;
-    use crate::models::transfer::{TransferDirection, TransferPhase, TransferStatus, TransferTask};
+    use crate::models::transfer::{
+        TransferDirection, TransferFailure, TransferFailureStage, TransferPhase, TransferStatus,
+        TransferTask,
+    };
     use crate::net::peer_client::PeerClient;
     use crate::net::request_context::P2pRequestContext;
     use crate::orchestrator::repo::OrchestratorRepo;
@@ -1166,15 +1193,27 @@ mod tests {
         status: TransferStatus,
         file_path: &str,
     ) {
+        record_history_with_peer(state, id, direction, status, file_path, "peer", 4).await;
+    }
+
+    async fn record_history_with_peer(
+        state: &AppState,
+        id: &str,
+        direction: TransferDirection,
+        status: TransferStatus,
+        file_path: &str,
+        peer_device_id: &str,
+        size: u64,
+    ) {
         let task = TransferTask {
             filename: "payload.bin".into(),
             file_path: file_path.into(),
-            size: 4,
+            size,
             sha256: "abcd".into(),
             direction,
-            peer_device_id: "peer".into(),
+            peer_device_id: peer_device_id.into(),
             status,
-            transferred_bytes: 4,
+            transferred_bytes: size,
             created_at: "2026-07-14T10:00:00Z".into(),
             completed_at: if status == TransferStatus::Completed {
                 Some("2026-07-14T10:01:00Z".into())
@@ -1380,6 +1419,188 @@ mod tests {
                 "错误文案不得泄露 path"
             );
         }
+    }
+
+    /// 电脑发给手机的 completed Send 可下载；size 变化或普通 Send 404 且无 path。
+    #[tokio::test]
+    async fn download_allows_mobile_inbox_offer_but_not_peer_send() {
+        let root = unique_temp_dir();
+        let state = build_test_state(&root).await;
+        let file = root.join("source.bin");
+        std::fs::write(&file, b"INBOX").unwrap();
+        record_history_with_peer(
+            &state,
+            "inbox-ok",
+            TransferDirection::Send,
+            TransferStatus::Completed,
+            &file.to_string_lossy(),
+            crate::transfer::MOBILE_INBOX_DEVICE_ID,
+            5,
+        )
+        .await;
+        record_history_with_peer(
+            &state,
+            "peer-send",
+            TransferDirection::Send,
+            TransferStatus::Completed,
+            &file.to_string_lossy(),
+            "other-pc",
+            5,
+        )
+        .await;
+
+        let ok = download_mobile_transfer(
+            State(state.clone()),
+            Extension(ctx()),
+            Path("inbox-ok".into()),
+        )
+        .await
+        .expect("inbox offer 应可下载");
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = to_bytes(ok.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"INBOX");
+
+        let peer_err = download_mobile_transfer(
+            State(state.clone()),
+            Extension(ctx()),
+            Path("peer-send".into()),
+        )
+        .await
+        .expect_err("发给其它电脑的 Send 不得下载");
+        assert_eq!(peer_err.status(), StatusCode::NOT_FOUND);
+        assert!(!peer_err
+            .envelope()
+            .error
+            .contains(file.to_string_lossy().as_ref()));
+
+        std::fs::write(&file, b"CHANGED").unwrap();
+        let size_err = download_mobile_transfer(
+            State(state.clone()),
+            Extension(ctx()),
+            Path("inbox-ok".into()),
+        )
+        .await
+        .expect_err("size 变化应 404");
+        assert_eq!(size_err.status(), StatusCode::NOT_FOUND);
+        assert!(!size_err
+            .envelope()
+            .error
+            .contains(file.to_string_lossy().as_ref()));
+    }
+
+    /// start_sending 命中 inbox：立即 completed，不进 devices 表，幂等回放。
+    #[tokio::test]
+    async fn start_sending_mobile_inbox_completes_without_peer() {
+        let root = unique_temp_dir();
+        let state = build_test_state(&root).await;
+        let file = root.join("offer.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let op = format!("op-inbox-{}", Uuid::new_v4());
+        let id = sender::start_sending(
+            state.clone(),
+            crate::transfer::MOBILE_INBOX_DEVICE_ID.to_string(),
+            file.to_string_lossy().into_owned(),
+            op.clone(),
+        )
+        .await
+        .expect("inbox send");
+        let task = state.transfer_repo.get_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(task.status, TransferStatus::Completed);
+        assert_eq!(task.direction, TransferDirection::Send);
+        assert_eq!(task.peer_device_id, crate::transfer::MOBILE_INBOX_DEVICE_ID);
+        assert_eq!(task.transferred_bytes, 5);
+        assert!(task.sha256.is_empty());
+        assert!(state.transfers.get(&id).is_none());
+        assert!(state
+            .devices
+            .read()
+            .unwrap()
+            .get(crate::transfer::MOBILE_INBOX_DEVICE_ID)
+            .is_none());
+
+        let replay = sender::start_sending(
+            state.clone(),
+            crate::transfer::MOBILE_INBOX_DEVICE_ID.to_string(),
+            file.to_string_lossy().into_owned(),
+            op.clone(),
+        )
+        .await
+        .expect("replay");
+        assert_eq!(replay, id);
+
+        let other = root.join("other.txt");
+        std::fs::write(&other, b"hello").unwrap();
+        let conflict = sender::start_sending(
+            state.clone(),
+            crate::transfer::MOBILE_INBOX_DEVICE_ID.to_string(),
+            other.to_string_lossy().into_owned(),
+            op,
+        )
+        .await
+        .expect_err("different path same op");
+        assert!(conflict.to_string().contains("operationIdConflict"));
+    }
+
+    /// inbox failed 可 retry 重新挂出；resume 明确 unsupported。
+    #[tokio::test]
+    async fn mobile_inbox_retry_reoffers_and_resume_is_unsupported() {
+        let root = unique_temp_dir();
+        let state = build_test_state(&root).await;
+        let file = root.join("retry.txt");
+        std::fs::write(&file, b"abc").unwrap();
+        let failed = TransferTask {
+            filename: "retry.txt".into(),
+            file_path: file.to_string_lossy().into_owned(),
+            size: 3,
+            sha256: String::new(),
+            direction: TransferDirection::Send,
+            peer_device_id: crate::transfer::MOBILE_INBOX_DEVICE_ID.into(),
+            status: TransferStatus::Failed,
+            transferred_bytes: 0,
+            created_at: "2026-09-02T00:00:00Z".into(),
+            completed_at: Some("2026-09-02T00:01:00Z".into()),
+            phase: Some(TransferPhase::Failed),
+            failure: Some(TransferFailure {
+                stage: TransferFailureStage::Source,
+                code: "source_missing".into(),
+                retryable: true,
+                message: "gone".into(),
+            }),
+            attempt: 1,
+            logical_transfer_id: "inbox-fail".into(),
+            attempt_id: "inbox-fail".into(),
+            protocol_transfer_id: "inbox-fail".into(),
+            ..TransferTask::recovery_defaults("inbox-fail")
+        };
+        state.transfer_repo.record(&failed).await.unwrap();
+
+        let resume_err =
+            sender::resume_transfer(state.clone(), "inbox-fail".into(), "op-inbox-resume".into())
+                .await
+                .expect_err("inbox resume");
+        assert!(resume_err.to_string().contains("unsupported"));
+
+        let retried =
+            sender::retry_transfer(state.clone(), "inbox-fail".into(), "op-inbox-retry".into())
+                .await
+                .expect("inbox retry");
+        assert_eq!(retried.status, TransferStatus::Completed);
+        assert_eq!(
+            retried.peer_device_id,
+            crate::transfer::MOBILE_INBOX_DEVICE_ID
+        );
+        assert_ne!(retried.id, "inbox-fail");
+    }
+
+    /// list_mobile_devices 不得注入虚拟手机目标。
+    #[tokio::test]
+    async fn list_mobile_devices_omits_inbox_id() {
+        let root = unique_temp_dir();
+        let state = build_test_state(&root).await;
+        let list = list_mobile_devices_for_state(&state).unwrap();
+        assert!(list
+            .iter()
+            .all(|d| d.id != crate::transfer::MOBILE_INBOX_DEVICE_ID));
     }
 
     /// 任务列表 JSON 不得出现 path/filePath。

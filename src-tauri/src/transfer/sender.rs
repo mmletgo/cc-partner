@@ -10,7 +10,8 @@
 //!     成功后本地单事务提交 completed，uncertain 保持 pending 不提供 retry。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `start_sending(state, device_id, file_path, client_operation_id)`：先 claim 再 spawn，
+//!     - `start_sending(state, device_id, file_path, client_operation_id)`：
+//!       `cc-partner-mobile-inbox` 零拷贝挂出后立即 completed；其它目标先 claim 再 spawn，
 //!       same clientOperationId+payload 幂等回放 task id；立即返回 transfer_id。
 //!     - `retry_transfer` / `resume_transfer`：校验父任务状态/指纹/能力 → claim → registry.add → spawn。
 //!     - `recover_pending_claimed_operations`：owner 启动时恢复 insert-before-spawn 的 Queued 行。
@@ -32,10 +33,10 @@ use crate::net::protocol::{CAPABILITY_TRANSFER_COMPLETE_V1, CAPABILITY_TRANSFER_
 use crate::state::AppState;
 use crate::storage::transfer_repo::SenderClaimOutcome;
 use crate::transfer::registry::TransferRegistry;
-use crate::transfer::CHUNK_SIZE;
+use crate::transfer::{is_mobile_inbox_device_id, CHUNK_SIZE, MOBILE_INBOX_DEVICE_ID};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::sync::CancellationToken;
@@ -44,6 +45,153 @@ use uuid::Uuid;
 /// 当前时间 RFC3339 ISO 字符串（对照 Python datetime.now().isoformat()）。
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// 校验发给手机的源文件：绝对路径、普通文件、非 symlink。
+///
+/// Business Logic（为什么需要这个函数）:
+///     零拷贝下载会按登记路径打开文件；目录/链接/相对路径不能挂出。
+///
+/// Code Logic（这个函数做什么）:
+///     `symlink_metadata` 检查；错误只用 basename，不含完整 path。
+fn inspect_mobile_inbox_source(file_path: &str) -> Result<(u64, String), AppError> {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::validation("文件路径不能为空"));
+    }
+    let path = Path::new(trimmed);
+    let basename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    if !path.is_absolute() {
+        return Err(AppError::validation("文件路径必须是绝对路径"));
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(AppError::validation("文件路径非法"));
+    }
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|_| AppError::not_found(format!("文件不存在: {basename}")))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(AppError::validation("只能发送普通文件"));
+    }
+    Ok((meta.len(), basename))
+}
+
+/// 把本机文件登记为发给手机的已完成发送任务（不拷贝、不算 SHA）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机不是 P2P 节点；电脑发送只需挂出原路径，稍后 `/mobile` 下载。
+///
+/// Code Logic（这个函数做什么）:
+///     claim 幂等（Pending 入口，因 ledger 会把 Completed 归一成 Queued）→
+///     立即 record Completed 并 emit `transfer:completed`；不 spawn。
+async fn register_mobile_inbox_offer(
+    state: AppState,
+    file_path: String,
+    client_operation_id: String,
+) -> Result<String, AppError> {
+    let (file_size, filename) = inspect_mobile_inbox_source(&file_path)?;
+    let payload_hash = canonical_send_payload_hash(&file_path, MOBILE_INBOX_DEVICE_ID);
+    let transfer_id = Uuid::new_v4().to_string();
+    let now = now_iso();
+    let claim_task = TransferTask {
+        id: transfer_id.clone(),
+        filename,
+        file_path,
+        size: file_size,
+        sha256: String::new(),
+        chunk_size: CHUNK_SIZE as u64,
+        direction: TransferDirection::Send,
+        peer_device_id: MOBILE_INBOX_DEVICE_ID.to_string(),
+        status: TransferStatus::Pending,
+        transferred_bytes: 0,
+        created_at: now,
+        completed_at: None,
+        phase: Some(TransferPhase::Queued),
+        failure: None,
+        attempt: 1,
+        logical_transfer_id: transfer_id.clone(),
+        attempt_id: transfer_id.clone(),
+        protocol_transfer_id: transfer_id.clone(),
+        client_operation_id: Some(client_operation_id.clone()),
+        operation_payload_hash: Some(payload_hash.clone()),
+    };
+
+    let outcome = state
+        .transfer_repo
+        .claim_sender_operation(&client_operation_id, &payload_hash, &claim_task)
+        .await?;
+
+    match outcome {
+        SenderClaimOutcome::Fresh(task) => {
+            let completed = finalize_mobile_inbox_offer(&state, task).await?;
+            Ok(completed.id)
+        }
+        SenderClaimOutcome::Replay(task) => {
+            if is_terminal_status(task.status) {
+                return Ok(task.id);
+            }
+            if !is_mobile_inbox_device_id(&task.peer_device_id) {
+                return Err(AppError::generic("mobile inbox offer 回放到非 inbox 任务"));
+            }
+            let completed = finalize_mobile_inbox_offer(&state, task).await?;
+            Ok(completed.id)
+        }
+        SenderClaimOutcome::Conflict { .. } => Err(AppError::conflict(
+            "operationIdConflict: clientOperationId 已绑定不同 payload",
+        )),
+    }
+}
+
+/// 将 inbox claim 行提交为 Send+completed。
+///
+/// Business Logic（为什么需要这个函数）:
+///     claim 入口不能直接写 Completed；crash 留下的 Queued inbox 也要收敛，不能 spawn P2P。
+///
+/// Code Logic（这个函数做什么）:
+///     record completed → 移出 registry → emit `transfer:completed`。
+async fn finalize_mobile_inbox_offer(
+    state: &AppState,
+    task: TransferTask,
+) -> Result<TransferTask, AppError> {
+    let mut snapshot = task;
+    snapshot.status = TransferStatus::Completed;
+    snapshot.phase = Some(TransferPhase::Completed);
+    snapshot.failure = None;
+    snapshot.transferred_bytes = snapshot.size;
+    snapshot.completed_at = Some(now_iso());
+    state.transfer_repo.record(&snapshot).await?;
+    state.transfers.remove(&snapshot.id);
+    state.emit_event(
+        "transfer:completed",
+        StatusPayload {
+            id: snapshot.id.clone(),
+            status: "completed".to_string(),
+            error_message: None,
+        },
+    );
+    Ok(snapshot)
+}
+
+/// inbox 任务的 retry/resume：resume 拒绝；retry 重新挂出同一路径。
+async fn recover_mobile_inbox_offer(
+    state: AppState,
+    parent: TransferTask,
+    client_operation_id: String,
+    kind: TransferRecoveryKind,
+) -> Result<TransferTask, AppError> {
+    match kind {
+        TransferRecoveryKind::Resume => Err(AppError::validation(
+            "unsupported: 发给手机的任务不支持续传",
+        )),
+        TransferRecoveryKind::Retry => {
+            let id =
+                register_mobile_inbox_offer(state.clone(), parent.file_path, client_operation_id)
+                    .await?;
+            load_parent_task(&state, &id).await
+        }
+    }
 }
 
 /// 以 8KB 块流式计算文件 SHA256（避免大文件一次性载入内存），对照 Python `_calculate_sha256`。
@@ -90,17 +238,21 @@ struct StatusPayload {
 ///     立即返回 transfer_id 供前端追踪。对照 Python `send_file`。
 ///
 /// Code Logic:
-///     1. 校验文件存在并取 size/filename/SHA256；
-///     2. 计算 send payload hash（kind=send + peer + sourcePath，不含随机 UUID）；
-///     3. claim_sender_operation：Fresh → insert Queued + spawn；Replay → 回放 task id
+///     1. 虚拟目标 `cc-partner-mobile-inbox` 走零拷贝 offer，不计算 SHA、不 spawn P2P；
+///     2. 否则校验文件存在并取 size/filename/SHA256；
+///     3. 计算 send payload hash（kind=send + peer + sourcePath，不含随机 UUID）；
+///     4. claim_sender_operation：Fresh → insert Queued + spawn；Replay → 回放 task id
 ///        （终态直接返回 id；非终态 ensure_replayed_attempt_running）；Conflict → 409；
-///     4. 返回 accepted 侧的 local task id。
+///     5. 返回 accepted 侧的 local task id。
 pub async fn start_sending(
     state: AppState,
     device_id: String,
     file_path: String,
     client_operation_id: String,
 ) -> Result<String, AppError> {
+    if is_mobile_inbox_device_id(&device_id) {
+        return register_mobile_inbox_offer(state, file_path, client_operation_id).await;
+    }
     let path = Path::new(&file_path);
     if !path.exists() {
         return Err(AppError::NotFound(format!("文件不存在: {file_path}")));
@@ -470,6 +622,15 @@ pub async fn recover_pending_claimed_operations(state: &AppState) -> Result<u32,
         if state.transfers.get(&task.id).is_some() {
             continue;
         }
+        if is_mobile_inbox_device_id(&task.peer_device_id) {
+            match finalize_mobile_inbox_offer(state, task).await {
+                Ok(_) => recovered += 1,
+                Err(err) => {
+                    tracing::warn!("恢复 mobile inbox offer 失败: {err}");
+                }
+            }
+            continue;
+        }
         let path = Path::new(&task.file_path);
         if !path.exists() {
             let mut failed = task.clone();
@@ -525,6 +686,9 @@ async fn start_recovery_operation(
 ) -> Result<TransferTask, AppError> {
     let parent = load_parent_task(&state, &task_id).await?;
     validate_parent_for_recovery(&parent, kind)?;
+    if is_mobile_inbox_device_id(&parent.peer_device_id) {
+        return recover_mobile_inbox_offer(state, parent, client_operation_id, kind).await;
+    }
 
     let logical_id = resolve_logical_transfer_id(&parent);
     // 旧 failed 父行仍可点 recovery；同 logical 已有**不同** clientOperationId 的活跃 child 才 conflict。
@@ -1615,6 +1779,30 @@ mod tests {
             protocol_transfer_id: id.into(),
             ..TransferTask::recovery_defaults(id)
         }
+    }
+
+    /// 虚拟目标 id 必须与前端常量相同。
+    #[test]
+    fn mobile_inbox_device_id_is_stable() {
+        assert_eq!(MOBILE_INBOX_DEVICE_ID, "cc-partner-mobile-inbox");
+        assert!(is_mobile_inbox_device_id(MOBILE_INBOX_DEVICE_ID));
+        assert!(!is_mobile_inbox_device_id("device-test"));
+    }
+
+    /// 相对路径、空路径、目录不能挂出。
+    #[test]
+    fn mobile_inbox_source_rejects_relative_and_directory() {
+        let err = inspect_mobile_inbox_source("relative.bin").unwrap_err();
+        assert!(err.to_string().contains("绝对路径"));
+        let empty = inspect_mobile_inbox_source("   ").unwrap_err();
+        assert!(empty.to_string().contains("不能为空"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir_err =
+            inspect_mobile_inbox_source(dir.path().to_str().expect("utf8 temp")).unwrap_err();
+        assert!(dir_err.to_string().contains("普通文件"));
+        assert!(!dir_err
+            .to_string()
+            .contains(dir.path().to_string_lossy().as_ref()));
     }
 
     /// 非 retryable 失败拒绝 recovery。

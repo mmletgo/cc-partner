@@ -1,7 +1,7 @@
 # PC → 移动端文件传输（本机邮箱 / 零拷贝）
 
 - 日期：2026-09-02
-- 状态：待确认
+- 状态：已实现
 - 依赖：现有 `send_transfer` 幂等合同、Transfer 任务模型、`GET /api/mobile/transfer/download/:taskId`、mobile Transfer 动作矩阵
 
 ## 1. 问题

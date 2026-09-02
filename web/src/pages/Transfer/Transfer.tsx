@@ -26,6 +26,11 @@ import { deviceSupportsTransferResume, devicesApi } from '@/api/devices';
 import { transferApi } from '@/api/transfer';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { classifyTransportFault, planFaultRecovery } from '@/lib/faultRecovery';
+import {
+  MOBILE_INBOX_DEVICE_ID,
+  buildMobileInboxDevice,
+  isMobileInboxDevice,
+} from '@/lib/mobileInbox';
 import type { Device, TransferTask } from '@/lib/types';
 import { SendIcon, UploadIcon } from '@/lib/icons';
 import {
@@ -97,7 +102,7 @@ export function Transfer() {
 
   // ── 设备列表（目标设备下拉数据源） ──
   const [devices, setDevices] = useState<Device[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>(MOBILE_INBOX_DEVICE_ID);
   const [devicesState, setDevicesState] = useState<LoadState>('loading');
   const [devicesError, setDevicesError] = useState<string | null>(null);
 
@@ -149,11 +154,11 @@ export function Transfer() {
     try {
       const data = await devicesApi.list();
       if (!mountedRef.current) return;
-      const next = Array.isArray(data) ? data : [];
+      const next = (Array.isArray(data) ? data : []).filter(
+        (device) => !isMobileInboxDevice(device.id),
+      );
       setDevices(next);
-      if (next.length > 0) {
-        setSelectedDeviceId((prev) => prev || next[0]!.id);
-      }
+      setSelectedDeviceId((prev) => prev || MOBILE_INBOX_DEVICE_ID);
       setDevicesState('success');
       setDevicesError(null);
     } catch (err) {
@@ -225,6 +230,12 @@ export function Transfer() {
     () => groupTransferTasks(tasks, reconcilingIds),
     [tasks, reconcilingIds],
   );
+
+  const transferTargets = useMemo(() => {
+    const inbox = buildMobileInboxDevice(t('transfer:mobileInbox'));
+    const peers = devices.filter((device) => !isMobileInboxDevice(device.id));
+    return [inbox, ...peers];
+  }, [devices, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -730,7 +741,9 @@ export function Transfer() {
               direction: task.direction,
               status: task.status,
               progress: task.progress,
-              peerDevice: task.peerDeviceName,
+              peerDevice: isMobileInboxDevice(task.peerDeviceId)
+                ? t('transfer:mobileInbox')
+                : task.peerDeviceName,
               speed: task.speed,
               errorMessage: task.failure?.message ?? task.errorMessage,
               phase: task.phase,
@@ -759,6 +772,7 @@ export function Transfer() {
       handleRecovery,
       handleRevealTask,
       reconcilingIds,
+      t,
       taskActionErrors,
       tasks,
     ],
@@ -791,19 +805,15 @@ export function Transfer() {
                 value={selectedDeviceId}
                 onChange={handleDeviceChange}
                 aria-label={t('transfer:selectDevice')}
-                disabled={devicesState === 'loading' && devices.length === 0}
+                disabled={devicesState === 'loading' && transferTargets.length === 0}
               >
-                {devicesState === 'loading' && devices.length === 0 ? (
-                  <option value="">{t('transfer:loading')}</option>
-                ) : devices.length === 0 ? (
-                  <option value="">{t('transfer:noDevices')}</option>
-                ) : (
-                  devices.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} · {d.address}:{d.port}
-                    </option>
-                  ))
-                )}
+                {transferTargets.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {isMobileInboxDevice(d.id)
+                      ? t('transfer:mobileInbox')
+                      : `${d.name} · ${d.address}:${d.port}`}
+                  </option>
+                ))}
               </select>
               <span className={styles.selectArrow} aria-hidden="true">
                 ▾
@@ -868,7 +878,11 @@ export function Transfer() {
               ? t('transfer:dropTitlePicked', { file: pickedName })
               : t('transfer:dropTitleEmpty')}
           </p>
-          <p className={styles.dropHint}>{t('transfer:chunkHint')}</p>
+          <p className={styles.dropHint}>
+            {isMobileInboxDevice(selectedDeviceId)
+              ? t('transfer:mobileInboxHint')
+              : t('transfer:chunkHint')}
+          </p>
         </div>
 
         {selectionNotice ? (

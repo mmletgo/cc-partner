@@ -16,3 +16,17 @@ pub mod sender;
 ///
 /// Business Logic: 低于 aiohttp 默认 client_max_size(1MB)，兼容未自定义 body 限制的旧版对端。
 pub const CHUNK_SIZE: usize = 960 * 1024;
+
+/// 电脑发给本机 `/mobile` 的虚拟目标 id。不是 mDNS 设备，不进 `devices` 表。
+pub const MOBILE_INBOX_DEVICE_ID: &str = "cc-partner-mobile-inbox";
+
+/// 是否发给手机邮箱的虚拟目标。
+///
+/// Business Logic（为什么需要这个函数）:
+///     send/retry/download 必须在 peer lookup 之前认出这个 id，避免当 P2P 对端。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `MOBILE_INBOX_DEVICE_ID` 精确相等。
+pub fn is_mobile_inbox_device_id(device_id: &str) -> bool {
+    device_id == MOBILE_INBOX_DEVICE_ID
+}

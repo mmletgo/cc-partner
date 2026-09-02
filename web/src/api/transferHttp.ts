@@ -514,7 +514,7 @@ export const transferHttp = {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   已完成 Receive 只能下载字节流，不能 Open/Reveal 主机路径。
+   *   已完成 Receive，以及电脑发给手机的 inbox offer，只能下载字节流，不能 Open/Reveal 主机路径。
    *
    * Code Logic（这个函数做什么）:
    *   GET download/:taskId → blob → a[download]；文件名来自 Content-Disposition 或调用方 basename。

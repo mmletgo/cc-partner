@@ -45,7 +45,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **描述**：在局域网内的多个设备间互传文件。
 
 **功能点**：
-- 选择在线设备作为传输目标；`/mobile` 目标列表由主机合成「这台电脑」（`isSelf=true`）置顶，再加上当前对端
+- 选择在线设备作为传输目标；桌面传输页下拉框置顶虚拟目标「手机」（id `cc-partner-mobile-inbox`，不进 mDNS/`list_devices`），发给正在或稍后打开本机 `/mobile` 的手机；`/mobile` 目标列表由主机合成「这台电脑」（`isSelf=true`）置顶，再加上当前对端，**不含**「手机」
 - 支持任意大小文件传输
 - 分块传输（约 960KB/块），显示传输进度、phase 与速率
 - 断点续传：传输中断后，若双方 resume metadata 与源 fingerprint 仍匹配，可从已确认 offset 继续（复用稳定 `protocolTransferId`）
@@ -57,8 +57,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
   - `failed + retryable` 无 resume metadata、或旧 peer 无 resume capability、或 `cancelled` 且源仍匹配 → `retry_transfer`「重新传输」
   - transport timeout / uncertain outcome → 先 `get_transfer_operation(clientOperationId)` 对账，展示「正在确认结果」，禁止 blind retry
   - `direction=Receive` + `completed`（same-device desktop GUI only）→ Open / Reveal；P2P 对端明确 unsupported
-  - `/mobile` 已完成 Receive 只提供 Download（浏览器 blob / `a[download]`），不提供 Open/Reveal
-- 移动端主机中转闭环：手机浏览器把文件分块上传到主机 staging（`data_dir/mobile-transfer-uploads`，不是 `receive_dir`），主机对本机目标落入 `receive_dir` 并记 Receive completed，或对局域网对端调用 `start_sending`；手机不是独立 P2P 节点，不能走 `send_transfer(filePath)`；任务 JSON 不得返回主机 path。手机端选择文件后必须立即自动开始上传（不设"先选后点发送"的等待窗口）：移动端打开系统文件选择器可能导致页面整页重载（开发态 Vite 断线 reload、生产态浏览器后台回收），等待期内的 File 引用会随重载丢失；发送按钮仅作失败后的手动兜底
+  - `/mobile` 已完成 Receive，以及电脑发给手机的 Send+completed（peer=`cc-partner-mobile-inbox`）提供 Download（浏览器 blob / `a[download]`），不提供 Open/Reveal；发给其它电脑的 Send 不可下载
+- 电脑发给本机 `/mobile`：`send_transfer(cc-partner-mobile-inbox, filePath, clientOperationId)` 零拷贝登记原路径，立即记 Send+completed，不拷贝到 `receive_dir`/staging、不计算 SHA256、不 spawn P2P；发送时不要求手机在线。稍后打开本机 `/mobile` 传输页可多次下载；源文件被移动/删除或 size 变化则下载 404（不含 path）。桌面这条任务不提供 Open/Reveal/Download
+- 移动端主机中转闭环：手机浏览器把文件分块上传到主机 staging（`data_dir/mobile-transfer-uploads`，不是 `receive_dir`），主机对本机目标落入 `receive_dir` 并记 Receive completed，或对局域网对端调用 `start_sending`；手机不是独立 P2P 节点，不能走 `send_transfer(filePath)` 发给电脑（电脑→手机走上一款零拷贝邮箱）；任务 JSON 不得返回主机 path。手机端选择文件后必须立即自动开始上传（不设"先选后点发送"的等待窗口）：移动端打开系统文件选择器可能导致页面整页重载（开发态 Vite 断线 reload、生产态浏览器后台回收），等待期内的 File 引用会随重载丢失；发送按钮仅作失败后的手动兜底
 - 幂等合同：`clientOperationId` 是发送端全局唯一持久键（same id + same payload 回放；same id + different payload → `operationIdConflict`）；`X-CC-Request-Id` / invoke request id 仅追踪，不作幂等键。resume 复用稳定 protocol id 命中 receiver checkpoint；full retry 可 mint 新 protocol id。lost final ACK 时发送端按 protocol id 查询 receiver status，确认成功后本地提交 outcome，不二次破坏性 finalize
 - 路径为不透明 UTF-8 字符串透传，UI 只展示 basename；刷新失败保留已有 devices/tasks，不得用空数组覆盖
 - 文件接收后保存到用户配置的目录

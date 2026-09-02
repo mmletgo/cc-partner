@@ -114,7 +114,9 @@ test.describe('E2E-TRANSFER-001 Transfer critical journey', () => {
       timeout: 15_000,
     });
     await expect(page.getByLabel('选择目标设备')).toBeVisible();
+    await expect(page.getByRole('option', { name: '手机' })).toHaveCount(1);
     await expect(page.getByRole('option', { name: /Peer Mac/ })).toHaveCount(1);
+    await page.getByLabel('选择目标设备').selectOption('peer-1');
 
     // dropzone Enter 激活原生选择
     const dropzone = page.getByRole('button', { name: '拖拽文件到此处或点击选择' });
@@ -231,5 +233,69 @@ test.describe('E2E-TRANSFER-001 Transfer critical journey', () => {
       command: 'cancel_transfer',
       args: { taskId: 'task-2' },
     });
+  });
+
+  test('default target is phone inbox; send uses cc-partner-mobile-inbox', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerTransferCommands(backendHarness);
+    backendHarness.command('send_transfer', {
+      kind: 'resolve',
+      value: {
+        accepted: true,
+        deviceId: 'cc-partner-mobile-inbox',
+        filePath: ABSOLUTE_PATH,
+        id: 'inbox-1',
+      },
+    });
+    backendHarness.command('list_transfers', {
+      kind: 'resolve',
+      value: [
+        {
+          ...makeTask({
+            id: 'inbox-1',
+            status: 'completed',
+            progress: 1,
+            completedAt: '2026-09-02T00:02:00.000Z',
+          }),
+          peerDeviceId: 'cc-partner-mobile-inbox',
+          peerDeviceName: '手机',
+        },
+      ],
+    });
+
+    await page.goto('/transfer');
+    await expect(page.getByRole('heading', { name: '文件传输' })).toBeVisible({
+      timeout: 15_000,
+    });
+    const deviceSelect = page.getByLabel('选择目标设备');
+    await expect(deviceSelect).toBeVisible();
+    await expect(deviceSelect.locator('option:checked')).toHaveText('手机');
+    await expect(page.getByText('文件仍留在原位置')).toBeVisible();
+
+    await page.getByRole('button', { name: '浏览…' }).click();
+    await expect(page.getByText('已选择：report.txt')).toBeVisible();
+    await page.getByRole('button', { name: /发送「report\.txt」/ }).click();
+
+    const sendCalls = backendHarness
+      .calls()
+      .filter((call) => call.type === 'invoke' && call.command === 'send_transfer');
+    expect(sendCalls.length).toBeGreaterThanOrEqual(1);
+    expect(sendCalls[sendCalls.length - 1]).toMatchObject({
+      type: 'invoke',
+      command: 'send_transfer',
+      args: {
+        deviceId: 'cc-partner-mobile-inbox',
+        filePath: ABSOLUTE_PATH,
+      },
+    });
+    await expect(page.getByRole('list').getByText('report.txt')).toBeVisible({
+      timeout: 5_000,
+    });
+    const taskList = page.getByRole('list').filter({ hasText: 'report.txt' });
+    await expect(taskList.getByRole('button', { name: '下载' })).toHaveCount(0);
+    await expect(taskList.getByRole('button', { name: '打开' })).toHaveCount(0);
   });
 });
