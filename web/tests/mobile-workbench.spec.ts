@@ -753,6 +753,89 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
       )
       .toBeGreaterThanOrEqual(1);
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   发给手机的任务行不得比普通传输行更宽，也不得撑出 390 视口。
+   *
+   * Code Logic（这个测试做什么）:
+   *   同列表放进行中发送与长文件名 inbox offer；量 article 宽度与横向溢出。
+   */
+  test('inbox offer row stays within mobile viewport like other transfer rows', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeMobileProject();
+    const worktree = makeMobileWorktree(project.id);
+    const session = makeMobileSession(project.id, worktree.id);
+    const longName = 'desktop-release-notes-and-changelog-document.pdf';
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cp-lang', 'zh');
+      window.localStorage.setItem('cp-theme', 'light');
+    });
+    registerMobileRoutes(backendHarness, { project, worktree, session });
+    backendHarness.route('GET', '/api/mobile/transfer/tasks', {
+      kind: 'resolve',
+      value: [
+        {
+          ...makeMobileTransferringTask(),
+          id: 'send-active',
+          fileName: longName,
+          logicalTransferId: 'send-active',
+          attemptId: 'send-active',
+          protocolTransferId: 'send-active',
+        },
+        {
+          ...makeMobileInboxOfferTask(),
+          fileName: longName,
+        },
+      ],
+    });
+
+    await page.goto('/mobile');
+    const openNav = page.getByRole('button', { name: /打开导航/ });
+    await expect(openNav).toBeVisible({ timeout: 20_000 });
+    await openNav.click();
+    await page.getByRole('dialog').getByRole('button', { name: /^传输$/ }).click();
+    await expect(page.getByRole('heading', { name: '文件传输' })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    const transferringRow = page.locator('article').filter({ hasText: '传输中' });
+    const inboxRow = page.locator('article').filter({ hasText: '下载' });
+    await expect(transferringRow).toBeVisible();
+    await expect(inboxRow).toBeVisible();
+
+    const metrics = await page.evaluate(() => {
+      const articles = Array.from(document.querySelectorAll('article'));
+      const transferring = articles.find((el) => el.textContent?.includes('传输中'));
+      const inbox = articles.find((el) => el.textContent?.includes('下载'));
+      const box = (el: Element | undefined) => {
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          width: rect.width,
+          right: rect.right,
+          scrollWidth: el.scrollWidth,
+          clientWidth: el.clientWidth,
+        };
+      };
+      return {
+        viewport: window.innerWidth,
+        transferring: box(transferring),
+        inbox: box(inbox),
+        pageScrollWidth: document.documentElement.scrollWidth,
+      };
+    });
+
+    expect(metrics.transferring).not.toBeNull();
+    expect(metrics.inbox).not.toBeNull();
+    expect(metrics.inbox!.width).toBeLessThanOrEqual(metrics.viewport);
+    expect(metrics.inbox!.right).toBeLessThanOrEqual(metrics.viewport);
+    expect(metrics.inbox!.scrollWidth).toBeLessThanOrEqual(metrics.inbox!.clientWidth + 1);
+    expect(Math.abs(metrics.inbox!.width - metrics.transferring!.width)).toBeLessThanOrEqual(2);
+    expect(metrics.pageScrollWidth).toBeLessThanOrEqual(metrics.viewport);
+  });
 });
 
 test.describe('E2E-MOBILE-001 landscape 844x390 shell', () => {
