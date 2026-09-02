@@ -1891,6 +1891,24 @@ fn ensure_tmux_window_identity(tmux: &TmuxCommand, target: &str, session_id: &st
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     专用 socket 上的 tmux server 可能尚未起来；create/restore 必须先 start-server 并关掉 exit-empty。
+///
+/// Code Logic（这个函数做什么）:
+///     best-effort `start-server` + server persist；失败只 debug。
+fn ensure_workbench_tmux_server(tmux: &TmuxCommand) {
+    if let Err(error) = run_tmux_command(tmux, &["start-server"]) {
+        tracing::debug!("启动工作台 tmux server 失败: {error}");
+        return;
+    }
+    for args in tmux_server_persist_commands() {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        if let Err(error) = run_tmux_command(tmux, &arg_refs) {
+            tracing::debug!("设置工作台 tmux server persist 失败: {error}");
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     sidecar 退出时先 detach，pane 进程才不会跟着 attach PTY 的 hangup 退出。
 ///
 /// Code Logic（这个函数做什么）:
@@ -2108,6 +2126,7 @@ fn create_tmux_window(
     let tmux_cwd = tmux.project_cwd(cwd)?;
     let cols_text = cols.to_string();
     let rows_text = rows.to_string();
+    ensure_workbench_tmux_server(tmux);
     let mut command = tmux.std_command();
     if tmux_has_session(tmux, session_name) {
         // new-window 无 -x/-y；尺寸在拿到 window_id 后由 resize-window 强制同步。
@@ -5147,6 +5166,7 @@ impl WorkbenchSessionRegistry {
         let Some(tmux) = available_tmux_command() else {
             return Err(AppError::unavailable("tmux_unavailable".to_string()));
         };
+        ensure_workbench_tmux_server(&tmux);
         if !tmux_restore_target_usable(
             &tmux,
             row.backend_id.as_deref().unwrap_or(""),
@@ -5212,6 +5232,7 @@ impl WorkbenchSessionRegistry {
         let Some(tmux) = available_tmux_command() else {
             return Err(AppError::unavailable("tmux_unavailable".to_string()));
         };
+        ensure_workbench_tmux_server(&tmux);
         let desired_session_name = tmux_worktree_session_name(
             &project.name,
             &project.id,
@@ -6461,6 +6482,44 @@ impl WorkbenchSessionRegistry {
     ///
     /// Code Logic（这个函数做什么）:
     ///     trim 名称 → tmux rename-window（best-effort）→ 更新 row.name + name_source。
+    /// Business Logic（为什么需要这个函数）:
+    ///     `/clear` 或新对话还没有实质标题时，auto 窗口名必须退回默认，不能继续显示上一轮主题。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Manual 不改；已是 Default 且同名 → None；否则清 last_auto_title 并以 Default 改名。
+    pub fn reset_auto_named_window(
+        &self,
+        session_id: &str,
+        default_name: &str,
+    ) -> Result<Option<WorkbenchSessionRow>, AppError> {
+        let handle = self.get_handle(session_id)?;
+        let (source, current_name) = {
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            (
+                SessionNameSource::parse(&handle.row.name_source),
+                handle.row.name.clone(),
+            )
+        };
+        if matches!(source, SessionNameSource::Manual) {
+            return Ok(None);
+        }
+        let next_name = default_name.trim();
+        if next_name.is_empty() {
+            return Ok(None);
+        }
+        if matches!(source, SessionNameSource::Default) && current_name.trim() == next_name {
+            return Ok(None);
+        }
+        if let Ok(mut map) = last_auto_title_map().lock() {
+            map.remove(session_id);
+        }
+        Ok(Some(self.rename_with_source(
+            session_id,
+            next_name,
+            SessionNameSource::Default,
+        )?))
+    }
+
     pub fn rename_with_source(
         &self,
         session_id: &str,

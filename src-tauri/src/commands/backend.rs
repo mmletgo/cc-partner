@@ -308,7 +308,21 @@ async fn run_dev_backend_command(subcommand: &str) -> Result<(), AppError> {
             );
             continue;
         }
-        let output = match Command::new(&candidate)
+        let argv0 = if subcommand == "start" {
+            match install_durable_backend_binary(&candidate) {
+                Ok(path) => path,
+                Err(error) => {
+                    candidate_errors.push(format!(
+                        "安装 durable backend {} 失败: {error}",
+                        candidate.display()
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            candidate.clone()
+        };
+        let output = match Command::new(&argv0)
             .arg(subcommand)
             .stdin(Stdio::null())
             .output()
@@ -316,7 +330,7 @@ async fn run_dev_backend_command(subcommand: &str) -> Result<(), AppError> {
         {
             Ok(output) => output,
             Err(error) => {
-                candidate_errors.push(format!("执行 {} 失败: {error}", candidate.display()));
+                candidate_errors.push(format!("执行 {} 失败: {error}", argv0.display()));
                 continue;
             }
         };
@@ -325,7 +339,7 @@ async fn run_dev_backend_command(subcommand: &str) -> Result<(), AppError> {
         }
         candidate_errors.push(format!(
             "{} {subcommand} 退出失败: status={:?}, {}",
-            candidate.display(),
+            argv0.display(),
             output.status,
             command_output_detail(&output.stdout, &output.stderr)
         ));
@@ -453,6 +467,56 @@ fn is_dev_app_bundle_sidecar_path(path: &std::path::Path) -> bool {
     text.contains(".app/Contents/MacOS/") && text.contains("cc-partner-backend")
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     cargo test/clippy 会覆盖 `target/debug/cc-partner-backend`；serve 若跑在该路径上，
+///     热更新/测例会把 owner 杀掉。需要一份不在 cargo target、也不在 Dev.app 里的 durable 副本。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 `<data_dir>/runtime/cc-partner-backend[.exe]`。
+fn durable_backend_runtime_path() -> Result<PathBuf, AppError> {
+    let dir = crate::config::data_dir()?.join("runtime");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(backend_binary_name()))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     `start` 必须 exec durable 副本，这样 `current_exe()` spawn 出的 serve 也不在 cargo target 上。
+///
+/// Code Logic（这个函数做什么）:
+///     把 source copy 到 sibling temp 再 rename 到 durable 路径，避免截断正在跑的 dest。
+fn install_durable_backend_binary(source: &std::path::Path) -> Result<PathBuf, AppError> {
+    let dest = durable_backend_runtime_path()?;
+    let tmp = dest.with_extension("tmp");
+    std::fs::copy(source, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmp, perms)?;
+    }
+    std::fs::rename(&tmp, &dest)?;
+    if !is_durable_backend_runtime_path(&dest) {
+        return Err(AppError::generic(format!(
+            "durable backend 路径不合法: {}",
+            dest.display()
+        )));
+    }
+    Ok(dest)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单测锁定 durable 路径既不在 Dev.app 也不在 cargo target。
+///
+/// Code Logic（这个函数做什么）:
+///     路径含 `/runtime/cc-partner-backend` 且不含 `.app/Contents/MacOS` 与 `/target/debug/`。
+fn is_durable_backend_runtime_path(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.contains("/runtime/cc-partner-backend")
+        && !text.contains(".app/Contents/MacOS/")
+        && !text.contains("/target/debug/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +563,23 @@ mod tests {
             .collect();
         assert_eq!(filtered, vec![cargo_debug]);
         assert!(!filtered.contains(&bundle));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     durable serve 路径必须同时躲开 Dev.app codesign 和 cargo target 覆盖。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     runtime 副本为 true，cargo target 与 Dev.app 为 false。
+    #[test]
+    fn durable_backend_runtime_path_is_outside_app_bundle_and_cargo_target() {
+        assert!(is_durable_backend_runtime_path(std::path::Path::new(
+            "/Users/hans/.cc-partner/runtime/cc-partner-backend"
+        )));
+        assert!(!is_durable_backend_runtime_path(std::path::Path::new(
+            "/Users/hans/web_project/cc-partner/src-tauri/target/debug/cc-partner-backend"
+        )));
+        assert!(!is_durable_backend_runtime_path(std::path::Path::new(
+            "/Users/hans/Applications/cc-partner (Dev).app/Contents/MacOS/cc-partner-backend"
+        )));
     }
 }

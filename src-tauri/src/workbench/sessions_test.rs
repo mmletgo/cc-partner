@@ -532,24 +532,28 @@ fn wsl_tmux_backend_invokes_tmux_through_wsl() {
     let backend = TmuxCommand::wsl();
 
     assert_eq!(backend.program, "wsl.exe");
-    assert_eq!(backend.prefix_args, vec!["--exec", "tmux"]);
+    assert_eq!(backend.prefix_args[0], "--exec");
+    assert_eq!(backend.prefix_args[1], "tmux");
+    assert!(
+        backend.prefix_args.contains(&"-S".to_string())
+            || backend.prefix_args.contains(&"-L".to_string()),
+        "WSL tmux must isolate socket from host TMPDIR: {:?}",
+        backend.prefix_args
+    );
     assert_eq!(
         backend.project_cwd(r"C:\Users\hans\project").unwrap(),
         "/mnt/c/Users/hans/project"
     );
     assert_eq!(backend.shell_command_for_new_session("cmd.exe"), None);
-    assert_eq!(
-        backend.display_command_for_session("cc-partner-session", None, "cmd.exe"),
-        "wsl.exe --exec tmux attach-session -t cc-partner-session"
+    let display = backend.display_command_for_session("cc-partner-session", None, "cmd.exe");
+    assert!(display.starts_with("wsl.exe --exec tmux"));
+    assert!(display.contains("attach-session -t cc-partner-session"));
+    let display_window = backend.display_command_for_session(
+        "cc-partner-session",
+        Some("cc-partner-session:@7"),
+        "cmd.exe",
     );
-    assert_eq!(
-        backend.display_command_for_session(
-            "cc-partner-session",
-            Some("cc-partner-session:@7"),
-            "cmd.exe"
-        ),
-        "wsl.exe --exec tmux attach-session -t cc-partner-session ; switch-client -t cc-partner-session:@7"
-    );
+    assert!(display_window.contains("switch-client -t cc-partner-session:@7"));
 }
 
 /// Business Logic（为什么需要这个测试）:
@@ -841,6 +845,38 @@ fn tmux_attach_window_args_switch_client_to_window_target() {
             "-t",
             "cc-partner-project-project1234abcd:@7",
         ]
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     默认 `/tmp/tmux-$UID` socket 在 sidecar 被杀后会变 stale；工作台必须用 data_dir 下的固定 socket。
+///
+/// Code Logic（这个测试做什么）:
+///     锁定 isolation args 的 `-S/-f` 形状，并断言 native 命令带上稳定 socket 或 `-L` 回退。
+#[test]
+fn native_tmux_command_uses_stable_socket_and_config() {
+    let args = crate::workbench::dependencies::workbench_tmux_isolation_args_for_dir(
+        std::path::Path::new("/tmp/cc-partner-data/tmux"),
+    );
+    assert_eq!(
+        args,
+        vec![
+            "-S",
+            "/tmp/cc-partner-data/tmux/cc-partner.sock",
+            "-f",
+            "/tmp/cc-partner-data/tmux/tmux.conf",
+        ]
+    );
+    let backend = TmuxCommand::native("tmux");
+    let joined = backend.prefix_args.join(" ");
+    assert!(joined.contains("-S "), "{joined}");
+    assert!(
+        joined.contains("cc-partner.sock") || joined.contains("-L cc-partner"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("-f ") || joined.contains("-L cc-partner"),
+        "{joined}"
     );
 }
 
