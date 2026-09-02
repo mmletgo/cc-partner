@@ -67,6 +67,7 @@ pub mod health;
 mod hotkey;
 mod mobile;
 mod models;
+mod monitor_geom;
 mod net;
 pub mod orchestrator;
 mod permissions;

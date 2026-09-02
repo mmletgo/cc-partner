@@ -3,12 +3,14 @@
 //! 子模块:
 //! - `state`:工作/休息状态机(纯算法)
 //! - `monitor`:键鼠采样(跨平台)
+//! - `overlay`:健康遮罩 create/navigate/close 规划（几何去重见 `monitor_geom`）
 //! - `reminder`:提醒生命周期 + 免打扰
 //! - `templates`:每条提醒的独立判定(pending/在场累计/贪睡) + 遮罩队列
 //! - `validation`:配置范围/DND/贪睡检查算术
 //! - daemon 入口 `start_health_daemon`(本文件)
 
 pub mod monitor;
+pub mod overlay;
 pub mod reminder;
 pub mod state;
 pub mod templates;
@@ -31,12 +33,14 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 use self::monitor::{ActivitySample, ActivitySampler, DeviceQuerySampler};
+use self::overlay::{health_overlay_navigate_js, health_overlay_path, plan_health_overlay_windows};
 use self::reminder::is_in_dnd;
 use self::state::{HealthStateMachine, HealthThresholds, MachineState};
 use self::templates::{
     advance_overlay_queue, clear_sedentary_window_flags, credit_present_minute, enqueue_overlay,
     reconcile_template_runtimes, should_fire_template, OverlayQueue, TemplateRuntime,
 };
+use crate::monitor_geom::{geom_from_xcap, list_unique_xcap_monitors};
 
 /// 一次「开始休息」遮罩倒计时会话:多屏共享同一份权威态。
 ///
@@ -465,42 +469,59 @@ async fn credit_health_completed(
 /// 打开全屏健康提醒遮罩窗口(每屏一个,复用截图透明窗口构建模式)。
 ///
 /// Business Logic: 健康监测启用后,久坐/喝水提醒触发时需在每块屏幕覆盖
-///     一个透明置顶遮罩窗口强制打断,展示推迟/跳过(久坐另有「开始休息」倒计时;喝水另有
-///     「已饮水」/延迟/跳过)按钮。macOS 单窗口不能跨屏(与截图同理),故枚举每块显示器建独立窗口。
-/// Code Logic: 枚举 `xcap::Monitor::all()`,每个显示器用 `WebviewWindowBuilder` 建
-///     decorations(false)/transparent(true)/always_on_top(true)/focused(true)/
-///     skip_taskbar(true)/resizable(false) 的窗口,label = `health-overlay-{i}`,
-///     url = `/health-overlay?display={i}&template={template_id}`。
-///     窗口几何直接用 xcap 的 x()/y()/width()/height()(逻辑点)。已存在同名窗口则跳过。
+///     一个透明置顶遮罩窗口强制打断。Ubuntu/X11 上 xcap 可能把同一块屏列成多个
+///     重叠 output，必须去重，否则两层透明窗会叠出新旧文案。已有窗口要改 URL，
+///     不能跳过（队列下一项会继续显示上一模板）。
+/// Code Logic: 枚举 xcap 显示器 → 逻辑像素几何去重 → 规划 create/navigate/close →
+///     先关多余窗，再给已有窗 eval location.replace，最后新建缺失窗。
 pub fn open_health_overlay(app: &AppHandle, template_id: &str) -> Result<(), AppError> {
-    let monitors =
-        xcap::Monitor::all().map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
+    let monitors = list_unique_xcap_monitors()?;
+    let geoms: Vec<_> = monitors.iter().map(geom_from_xcap).collect();
+    let existing: Vec<String> = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| label.starts_with("health-overlay-"))
+        .collect();
+    let plan = plan_health_overlay_windows(&geoms, &existing);
 
-    for (i, monitor) in monitors.into_iter().enumerate() {
-        let label = format!("health-overlay-{i}");
-        // 已存在同名窗口(上次未清理)则跳过,避免重复创建报错。
-        if app.get_webview_window(&label).is_some() {
+    for label in &plan.close {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.close();
+        }
+    }
+
+    for op in &plan.navigate {
+        let Some(win) = app.get_webview_window(&op.label) else {
+            continue;
+        };
+        let js = health_overlay_navigate_js(op.display, template_id);
+        if let Err(e) = win.eval(&js) {
+            tracing::warn!(label = %op.label, error = %e, "导航已有健康遮罩窗口失败");
+        }
+        let _ = win.set_position(tauri::LogicalPosition::new(
+            op.geom.x as f64,
+            op.geom.y as f64,
+        ));
+        let _ = win.set_size(tauri::LogicalSize::new(op.geom.width, op.geom.height));
+        let _ = win.set_focus();
+    }
+
+    for op in &plan.create {
+        if app.get_webview_window(&op.label).is_some() {
             continue;
         }
-        // macOS: xcap 的 x()/y()/width()/height() 均为逻辑点,直接喂窗口几何,不除 scale。
-        let mx = monitor.x().unwrap_or(0);
-        let my = monitor.y().unwrap_or(0);
-        let mw = monitor.width().unwrap_or(1920) as f64;
-        let mh = monitor.height().unwrap_or(1080) as f64;
-
         tracing::info!(
-            display = i,
-            x = mx,
-            y = my,
-            w = mw,
-            h = mh,
+            display = op.display,
+            x = op.geom.x,
+            y = op.geom.y,
+            w = op.geom.width,
+            h = op.geom.height,
             "健康提醒遮罩窗口几何(逻辑点)"
         );
-
         WebviewWindowBuilder::new(
             app,
-            &label,
-            WebviewUrl::App(format!("/health-overlay?display={i}&template={template_id}").into()),
+            &op.label,
+            WebviewUrl::App(health_overlay_path(op.display, template_id).into()),
         )
         .title("健康提醒")
         .decorations(false)
@@ -509,8 +530,8 @@ pub fn open_health_overlay(app: &AppHandle, template_id: &str) -> Result<(), App
         .focused(true)
         .skip_taskbar(true)
         .resizable(false)
-        .inner_size(mw, mh)
-        .position(mx as f64, my as f64)
+        .inner_size(op.geom.width, op.geom.height)
+        .position(op.geom.x as f64, op.geom.y as f64)
         .build()
         .map_err(|e| AppError::Bad(format!("创建健康遮罩窗口失败: {e}")))?;
     }

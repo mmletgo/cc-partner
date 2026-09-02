@@ -200,3 +200,29 @@ export function resolveOverlayTemplateId(search: OverlaySearchParams): string {
     ? HEALTH_REMINDER_WATER_ID
     : HEALTH_REMINDER_REST_ID;
 }
+
+/** 遮罩主文案；模板未知时不回退旧休息文案。 */
+export interface OverlaySurfaceCopy {
+  title: string;
+  body: string;
+  confirmLabel: string;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   配置尚未返回时不能先画出旧的休息文案，否则透明窗残留会叠在饮水文案上。
+ *
+ * Code Logic（这个函数做什么）:
+ *   loaded 为 false 或没有模板时返回 null；否则用模板自身 title/body/confirmLabel。
+ */
+export function overlaySurfaceCopy(
+  template: HealthReminderTemplate | null | undefined,
+  loaded: boolean,
+): OverlaySurfaceCopy | null {
+  if (!loaded || !template) return null;
+  return {
+    title: template.title.trim(),
+    body: template.body.trim(),
+    confirmLabel: template.confirmLabel.trim(),
+  };
+}

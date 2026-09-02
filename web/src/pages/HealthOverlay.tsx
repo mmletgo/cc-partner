@@ -11,7 +11,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Button } from '@/components/primitives';
 import { healthApi } from '@/api/health';
 import type { HealthReminderTemplate } from '@/lib/types';
-import { resolveOverlayTemplateId } from '@/lib/healthReminders';
+import { overlaySurfaceCopy, resolveOverlayTemplateId } from '@/lib/healthReminders';
 import { computeRestLeft } from './healthOverlayCountdown';
 import styles from './HealthOverlay.module.css';
 
@@ -36,7 +36,8 @@ function formatMmSs(total: number): string {
  *   每条模板共用同一套遮罩表面，不能再按饮水/休息硬分叉。
  *
  * Code Logic（这个组件做什么）:
- *   读 template query + 配置；instant 确认/跳过/推迟；session 开始后跟后端 endTs。
+ *   读 template query + 配置；模板未返回前不画旧休息文案；instant 确认/跳过/推迟；
+ *   session 开始后跟后端 endTs。
  */
 export default function HealthOverlay() {
   const { t } = useTranslation(['health', 'common']);
@@ -44,6 +45,7 @@ export default function HealthOverlay() {
   const templateId = useMemo(() => resolveOverlayTemplateId(searchParams), [searchParams]);
 
   const [template, setTemplate] = useState<HealthReminderTemplate | null>(null);
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [mode, setMode] = useState<Mode>('actions');
   const [restLeft, setRestLeft] = useState(0);
   const [restEndTs, setRestEndTs] = useState<number | null>(null);
@@ -55,6 +57,8 @@ export default function HealthOverlay() {
 
   useEffect(() => {
     let cancelled = false;
+    setTemplate(null);
+    setConfigLoaded(false);
     Promise.all([healthApi.getConfig(), healthApi.getStatus()])
       .then(([config, status]) => {
         if (cancelled) return;
@@ -63,6 +67,7 @@ export default function HealthOverlay() {
           config.reminders.find((item) => item.id === status.overlayTemplateId) ??
           null;
         setTemplate(found);
+        setConfigLoaded(true);
         const sameTemplate =
           !status.overlayTemplateId || status.overlayTemplateId === templateId;
         if (sameTemplate && typeof status.overlayRestEndTs === 'number') {
@@ -70,7 +75,10 @@ export default function HealthOverlay() {
           setMode('session');
         }
       })
-      .catch((e) => console.error('读取健康遮罩配置失败', e));
+      .catch((e) => {
+        console.error('读取健康遮罩配置失败', e);
+        if (!cancelled) setConfigLoaded(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -156,9 +164,11 @@ export default function HealthOverlay() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const title = template?.title || t('health:reminderTitle');
-  const body = template?.body || t('health:reminderBody');
-  const confirmLabel = template?.confirmLabel || t('health:startRest');
+  const copy = overlaySurfaceCopy(template, configLoaded);
+  const title = copy?.title || (configLoaded ? t('health:reminderTitle') : '');
+  const body = copy?.body || (configLoaded ? t('health:reminderBody') : '');
+  const confirmLabel = copy?.confirmLabel || (configLoaded ? t('health:startRest') : '');
+  const showActions = mode !== 'session' && (copy != null || configLoaded);
 
   return (
     <div className={styles.root}>
@@ -169,7 +179,7 @@ export default function HealthOverlay() {
             <p className={styles.timer}>{formatMmSs(restLeft)}</p>
             <p className={styles.hint}>{t('health:escToClose')}</p>
           </>
-        ) : (
+        ) : showActions ? (
           <>
             <h1 className={styles.title}>{title}</h1>
             <p className={styles.body}>{body}</p>
@@ -188,7 +198,7 @@ export default function HealthOverlay() {
               </Button>
             </div>
           </>
-        )}
+        ) : null}
       </div>
     </div>
   );

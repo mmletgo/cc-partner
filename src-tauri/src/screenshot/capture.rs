@@ -6,7 +6,7 @@
 //!     由 save_clipboard_from_png 解码写剪贴板；capture_region 仅供前端取选区桌面快照。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `capture_monitor(display_index)`：取 xcap 第 index 显示器抓整屏（物理像素）。
+//!     - `capture_monitor(display_index)`：取去重后第 index 显示器抓整屏（物理像素）。
 //!     - `clamp_crop_rect(...)`：逻辑坐标 ×dpr → 物理像素 rect，clamp 到帧边界（纯函数，单测覆盖）。
 //!     - `capture_region(...)`：抓屏 + clamp_crop_rect + crop_imm，返回选区 RgbaImage。
 //!     - `region_to_png_base64(...)`：capture_region → PNG → base64 data URL（前端 canvas 背景）。
@@ -28,11 +28,11 @@ use crate::error::AppError;
 
 /// 取第 `display_index` 个显示器对象。
 ///
-/// Business Logic: `xcap::Monitor::all()` 顺序单进程内稳定，前端 Overlay 用同一 index 取快照/裁剪，
-///     保证两处指向同一台显示器。
-/// Code Logic: `Monitor::all()?` 枚举全部显示器，按 index 取，越界返回 Bad 错误。
+/// Business Logic: 前端 Overlay 的 `display={i}` 与抓屏必须指向同一块去重后的屏；
+///     Ubuntu 上 raw `Monitor::all()` 含重叠 output，不能直接按 raw index 取。
+/// Code Logic: 与开窗共用 `list_unique_xcap_monitors()`，按去重后 index 取，越界返回 Bad。
 fn get_monitor(display_index: usize) -> Result<Monitor, AppError> {
-    let monitors = Monitor::all().map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
+    let monitors = crate::monitor_geom::list_unique_xcap_monitors()?;
     monitors
         .into_iter()
         .nth(display_index)

@@ -2,13 +2,13 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     macOS 不允许单个窗口跨屏（Linux 窗管也把 fullscreen 限制到单屏），Python 版为每个 QScreen
-//!     创建独立 ScreenshotOverlay。Tauri 版同理：枚举 `xcap::Monitor::all()`，每个显示器建一个
+//!     创建独立 ScreenshotOverlay。Tauri 版同理：枚举去重后的显示器，每个唯一屏建一个
 //!     无边框透明置顶全屏窗口，加载同一个 React 选区页（带 `?display={i}` 参数）。
 //!     窗口位置/尺寸均用该显示器逻辑几何（macOS 上 xcap 的 x/y/w/h 均为逻辑点），
 //!     React 选区坐标相对该窗口。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `start_region_capture(app)`：枚举显示器 → 逐个 `WebviewWindowBuilder` 建 overlay 窗口
+//!     - `start_region_capture(app)`：枚举去重后的显示器 → 关掉多余旧窗 → 逐个建 overlay 窗口
 //!       （decorations(false)/transparent(true)/always_on_top(true)/focused(true)），
 //!       url 指向 `/screenshot-overlay?display={i}`，label = `screenshot-overlay-{i}`，
 //!       位置/尺寸均直接用 xcap 的 x/y/w/h（均为逻辑点）。
@@ -17,6 +17,7 @@
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::AppError;
+use crate::monitor_geom::{extra_prefixed_overlay_labels, list_unique_xcap_monitors};
 use crate::screenshot::OVERLAY_LABEL_PREFIX;
 
 /// 启动区域截图：为每个显示器创建一个透明置顶选区窗口。
@@ -24,7 +25,8 @@ use crate::screenshot::OVERLAY_LABEL_PREFIX;
 /// Business Logic: 用户触发截图时需在每块屏幕上覆盖一个选区层。窗口透明、置顶、无边框，
 ///     载入 `/screenshot-overlay?display={i}` 页（React 渲染选区框）。
 /// Code Logic: 先预检屏幕录制权限，未授权则显示主窗口 + emit `screenshot:permission-needed`
-///     引导授权（不抓空白图）；已授权则枚举 `Monitor::all()`，逐个用 `WebviewWindowBuilder`
+///     引导授权（不抓空白图）；已授权则枚举去重后的显示器，关掉多余 `screenshot-overlay-*`，
+///     逐个用 `WebviewWindowBuilder`
 ///     建窗口；macOS 上 xcap 的 x()/y()/width()/height() 均为逻辑点，直接喂 set_position/set_size（Tauri 窗口几何按逻辑像素）；
 ///     只有 capture_image() 返回的帧才是物理像素（裁剪时前端 ×dpr 换算）。url 走 WebviewUrl::App 路径。
 pub fn start_region_capture(app: &AppHandle) -> Result<(), AppError> {
@@ -36,8 +38,17 @@ pub fn start_region_capture(app: &AppHandle) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let monitors =
-        xcap::Monitor::all().map_err(|e| AppError::Bad(format!("枚举显示器失败: {e}")))?;
+    let monitors = list_unique_xcap_monitors()?;
+    let existing: Vec<String> = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| label.starts_with(OVERLAY_LABEL_PREFIX))
+        .collect();
+    for label in extra_prefixed_overlay_labels(OVERLAY_LABEL_PREFIX, monitors.len(), &existing) {
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ = win.close();
+        }
+    }
 
     for (i, monitor) in monitors.into_iter().enumerate() {
         // macOS 单位：xcap 的 x()/y()/width()/height() 均为**逻辑点**（points）；

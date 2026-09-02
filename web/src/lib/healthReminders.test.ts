@@ -16,6 +16,7 @@ import {
   cloneHealthReminders,
   createCustomHealthReminder,
   createDefaultHealthReminders,
+  overlaySurfaceCopy,
   resetBuiltinHealthReminders,
   resolveOverlayTemplateId,
 } from './healthReminders';
@@ -99,5 +100,16 @@ describe('healthReminders', () => {
     expect(resolveOverlayTemplateId(search({ type: 'water' }))).toBe(HEALTH_REMINDER_WATER_ID);
     expect(resolveOverlayTemplateId(search({ type: 'reminder' }))).toBe(HEALTH_REMINDER_REST_ID);
     expect(resolveOverlayTemplateId(search({}))).toBe(HEALTH_REMINDER_REST_ID);
+  });
+
+  test('overlay copy stays empty until the template is known', () => {
+    expect(overlaySurfaceCopy(null, false)).toBeNull();
+    expect(overlaySurfaceCopy(undefined, false)).toBeNull();
+    const water = createDefaultHealthReminders()[0];
+    expect(overlaySurfaceCopy(water, true)).toEqual({
+      title: water.title,
+      body: water.body,
+      confirmLabel: water.confirmLabel,
+    });
   });
 });
