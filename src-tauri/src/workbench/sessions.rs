@@ -6478,11 +6478,6 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     用户 rename 与 agent 自动标题共用改名实现，但来源门禁不同。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     trim 名称 → tmux rename-window（best-effort）→ 更新 row.name + name_source。
-    /// Business Logic（为什么需要这个函数）:
     ///     `/clear` 或新对话还没有实质标题时，auto 窗口名必须退回默认，不能继续显示上一轮主题。
     ///
     /// Code Logic（这个函数做什么）:
@@ -6520,6 +6515,11 @@ impl WorkbenchSessionRegistry {
         )?))
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户 rename 与 agent 自动标题共用改名实现，但来源门禁不同。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     trim 名称 → tmux rename-window（best-effort）→ 更新 row.name + name_source。
     pub fn rename_with_source(
         &self,
         session_id: &str,

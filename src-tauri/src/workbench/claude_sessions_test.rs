@@ -1830,6 +1830,255 @@ async fn watcher_refresh_does_not_apply_title_from_closed_window() {
     assert_eq!(live[0].name_source, "default");
 }
 
+/// 构造一条可插入 registry 的 fake terminal 行。
+fn auto_title_terminal_row(
+    id: &str,
+    name: &str,
+    name_source: &str,
+    cwd: &str,
+    started_at: &str,
+) -> WorkbenchSessionRow {
+    WorkbenchSessionRow {
+        id: id.to_string(),
+        project_id: "project-auto-title".to_string(),
+        worktree_id: None,
+        name: name.to_string(),
+        name_source: name_source.to_string(),
+        command: "/bin/sh".to_string(),
+        cwd: cwd.to_string(),
+        status: "running".to_string(),
+        cols: 80,
+        rows: 24,
+        started_at: started_at.to_string(),
+        exited_at: None,
+        exit_code: None,
+        backend: "pty".to_string(),
+        backend_id: None,
+        backend_window_id: None,
+        created_at: started_at.to_string(),
+        updated_at: started_at.to_string(),
+    }
+}
+
+/// 构造 Claude 索引条目。
+fn auto_title_session_index(
+    session_id: &str,
+    title: &str,
+    has_ai_title: bool,
+    cwd: &str,
+    last_activity_at: &str,
+    transcript: &std::path::Path,
+) -> ClaudeSessionIndex {
+    ClaudeSessionIndex {
+        session_id: session_id.to_string(),
+        title: title.to_string(),
+        has_ai_title,
+        transcript_path: transcript.to_path_buf(),
+        first_activity_at: last_activity_at.to_string(),
+        last_activity_at: last_activity_at.to_string(),
+        message_count: if has_ai_title { 2 } else { 1 },
+        user_text: String::new(),
+        assistant_text: String::new(),
+        recent_messages: Vec::new(),
+        cwd: Some(cwd.to_string()),
+        git_branch: None,
+        source_size: 1,
+        source_mtime_ns: Some(1),
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     `/clear` 后新 jsonl 往往还没有 ai-title；窗口不得继续显示上一轮对话标题。
+///
+/// Code Logic（这个测试做什么）:
+///     先让 window 处于 auto 旧标题，再投影更新的无 ai-title session；断言名称回到 cwd 目录名且
+///     name_source=default。
+#[tokio::test]
+async fn auto_title_resets_window_name_when_latest_session_has_no_ai_title() {
+    let data_dir = unique_temp_dir("auto_title_reset_after_clear");
+    let worktree = data_dir.join("project");
+    fs::create_dir_all(&worktree).unwrap();
+    let state = build_session_index_test_state(&data_dir).await;
+    let started = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let old_activity = started + chrono::Duration::minutes(1);
+    let new_activity = chrono::Utc::now();
+    let cwd = worktree.to_string_lossy().to_string();
+    state
+        .workbench_sessions
+        .insert_fake_session_row_for_test(auto_title_terminal_row(
+            "terminal-after-clear",
+            "上一轮修复登录",
+            "auto",
+            &cwd,
+            &started.to_rfc3339(),
+        ));
+    let index = Arc::new(RwLock::new(WorktreeSessionIndex {
+        worktree_path: worktree.clone(),
+        encoded_cwd: encode_claude_project_path(&cwd),
+        sessions: HashMap::from([
+            (
+                "old-session".to_string(),
+                auto_title_session_index(
+                    "old-session",
+                    "上一轮修复登录",
+                    true,
+                    &cwd,
+                    &old_activity.to_rfc3339(),
+                    &worktree.join("old.jsonl"),
+                ),
+            ),
+            (
+                "new-session".to_string(),
+                auto_title_session_index(
+                    "new-session",
+                    "",
+                    false,
+                    &cwd,
+                    &new_activity.to_rfc3339(),
+                    &worktree.join("new.jsonl"),
+                ),
+            ),
+        ]),
+        last_scan_at: new_activity.to_rfc3339(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }));
+
+    let state_for_refresh = state.clone();
+    tokio::task::spawn_blocking(move || {
+        maybe_auto_title_from_index(&state_for_refresh, &index);
+    })
+    .await
+    .unwrap();
+
+    let live = state.workbench_sessions.list_live_session_rows();
+    assert_eq!(live[0].name, "project");
+    assert_eq!(live[0].name_source, "default");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     新对话生成 ai-title 后，工作台窗口名必须换成新主题，不能粘在 `/clear` 前的标题。
+///
+/// Code Logic（这个测试做什么）:
+///     auto 旧标题 window + 更新的新 session ai-title；断言 window 名变为新标题。
+#[tokio::test]
+async fn auto_title_applies_new_conversation_title_after_clear() {
+    let data_dir = unique_temp_dir("auto_title_new_conversation_after_clear");
+    let worktree = data_dir.join("project");
+    fs::create_dir_all(&worktree).unwrap();
+    let state = build_session_index_test_state(&data_dir).await;
+    let started = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let old_activity = started + chrono::Duration::minutes(1);
+    let new_activity = chrono::Utc::now();
+    let cwd = worktree.to_string_lossy().to_string();
+    state
+        .workbench_sessions
+        .insert_fake_session_row_for_test(auto_title_terminal_row(
+            "terminal-new-conversation",
+            "上一轮修复登录",
+            "auto",
+            &cwd,
+            &started.to_rfc3339(),
+        ));
+    let new_title = "实现会话轮换刷新";
+    let index = Arc::new(RwLock::new(WorktreeSessionIndex {
+        worktree_path: worktree.clone(),
+        encoded_cwd: encode_claude_project_path(&cwd),
+        sessions: HashMap::from([
+            (
+                "old-session".to_string(),
+                auto_title_session_index(
+                    "old-session",
+                    "上一轮修复登录",
+                    true,
+                    &cwd,
+                    &old_activity.to_rfc3339(),
+                    &worktree.join("old.jsonl"),
+                ),
+            ),
+            (
+                "new-session".to_string(),
+                auto_title_session_index(
+                    "new-session",
+                    new_title,
+                    true,
+                    &cwd,
+                    &new_activity.to_rfc3339(),
+                    &worktree.join("new.jsonl"),
+                ),
+            ),
+        ]),
+        last_scan_at: new_activity.to_rfc3339(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }));
+
+    let state_for_refresh = state.clone();
+    tokio::task::spawn_blocking(move || {
+        maybe_auto_title_from_index(&state_for_refresh, &index);
+    })
+    .await
+    .unwrap();
+
+    let live = state.workbench_sessions.list_live_session_rows();
+    assert_eq!(live[0].name, new_title);
+    assert_eq!(live[0].name_source, "auto");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     用户手改过的窗口名在 `/clear` 后不得被默认名覆盖。
+///
+/// Code Logic（这个测试做什么）:
+///     name_source=manual 的旧标题 + 无 ai-title 的新 session；断言名称与 source 不变。
+#[tokio::test]
+async fn auto_title_does_not_reset_manually_named_window_after_clear() {
+    let data_dir = unique_temp_dir("auto_title_keep_manual_after_clear");
+    let worktree = data_dir.join("project");
+    fs::create_dir_all(&worktree).unwrap();
+    let state = build_session_index_test_state(&data_dir).await;
+    let started = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let new_activity = chrono::Utc::now();
+    let cwd = worktree.to_string_lossy().to_string();
+    state
+        .workbench_sessions
+        .insert_fake_session_row_for_test(auto_title_terminal_row(
+            "terminal-manual-after-clear",
+            "我自己起的名字",
+            "manual",
+            &cwd,
+            &started.to_rfc3339(),
+        ));
+    let index = Arc::new(RwLock::new(WorktreeSessionIndex {
+        worktree_path: worktree.clone(),
+        encoded_cwd: encode_claude_project_path(&cwd),
+        sessions: HashMap::from([(
+            "new-session".to_string(),
+            auto_title_session_index(
+                "new-session",
+                "",
+                false,
+                &cwd,
+                &new_activity.to_rfc3339(),
+                &worktree.join("new.jsonl"),
+            ),
+        )]),
+        last_scan_at: new_activity.to_rfc3339(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }));
+
+    let state_for_refresh = state.clone();
+    tokio::task::spawn_blocking(move || {
+        maybe_auto_title_from_index(&state_for_refresh, &index);
+    })
+    .await
+    .unwrap();
+
+    let live = state.workbench_sessions.list_live_session_rows();
+    assert_eq!(live[0].name, "我自己起的名字");
+    assert_eq!(live[0].name_source, "manual");
+}
+
 /// Business Logic（为什么需要这个测试）:
 ///     项目移除时若 ensure 扫描仍在进行，dispose 必须清 inflight 并阻止 finish 写回幽灵索引/watcher。
 ///

@@ -1867,10 +1867,11 @@ async fn scan_test_hooks_wait_before_scan() {
 
 /// Business Logic（为什么需要这个函数）:
 ///     索引刷新后应把 Claude **真实 ai-title** 同步到绑定终端 window 名（best-effort）。
+///     `/clear` 后最新 session 可能还没有 ai-title，也必须绑定 native 并清掉旧 auto 标题。
 ///     不得用 last-prompt/首条 user 抢名，否则尚未对话或历史 session 会让 tab 疯狂闪烁。
 ///
 /// Code Logic（这个函数做什么）:
-///     仅 has_ai_title 的 session；同 cwd 只取 last_activity_at 最新一条；
+///     同 cwd 只取 last_activity_at 最新一条（不要求 has_ai_title）；
 ///     按 session_id 去重「标题未变」后调用 `try_auto_rename_from_claude_index`。
 fn maybe_auto_title_from_index(state: &AppState, shared: &SharedWorktreeSessionIndex) {
     use std::collections::HashMap;
@@ -1887,20 +1888,19 @@ fn maybe_auto_title_from_index(state: &AppState, shared: &SharedWorktreeSessionI
         }
     };
 
-    // 仅真实 ai-title；空标题跳过。
-    let mut with_ai: Vec<ClaudeSessionIndex> = sessions
+    let mut latest: Vec<ClaudeSessionIndex> = sessions
         .into_iter()
-        .filter(|s| s.has_ai_title && !s.title.trim().is_empty())
+        .filter(|s| !s.session_id.trim().is_empty())
         .collect();
-    if with_ai.is_empty() {
+    if latest.is_empty() {
         return;
     }
 
     // 同 cwd 只保留最近活动的一条，避免多历史 session 抢同一个终端。
-    with_ai.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+    latest.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
     let mut best_by_cwd: HashMap<String, ClaudeSessionIndex> = HashMap::new();
     let mut no_cwd: Vec<ClaudeSessionIndex> = Vec::new();
-    for index in with_ai {
+    for index in latest {
         let key = index
             .cwd
             .as_deref()

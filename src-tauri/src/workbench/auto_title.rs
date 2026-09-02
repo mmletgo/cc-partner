@@ -449,12 +449,10 @@ fn try_auto_rename_bound_title(
         schedule_ensure_interactive_agent(state, target, native, provider_id, &[]);
     }
 
-    let Some(title) = sanitize_auto_title(title_raw) else {
-        return AutoTitleSyncResult::AlreadySettled;
-    };
-    if !is_substantive_auto_title(&title) {
-        return AutoTitleSyncResult::AlreadySettled;
+    if !is_substantive_auto_title(title_raw) {
+        return maybe_reset_auto_window_name(state, target);
     }
+    let title = sanitize_auto_title(title_raw).unwrap_or_default();
 
     // seed title-owner；多 pane 时仅 owner pane 上的 agent 可改名。
     let owner = registry.ensure_title_owner_pane(&terminal_id);
@@ -517,6 +515,72 @@ fn try_auto_rename_bound_title(
     }
 }
 
+/// 从 cwd 推导窗口默认名（项目/worktree 目录名）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `/clear` 后 auto 标题要退回可识别的默认名，且不能在 spawn_blocking 里查项目表。
+///
+/// Code Logic（这个函数做什么）:
+///     取 cwd 最后一段；空则 `session`。
+fn default_window_name_from_cwd(cwd: &str) -> String {
+    Path::new(cwd.trim())
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("session")
+        .to_string()
+}
+
+/// 无实质对话标题时，把 auto 窗口名退回默认。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户 `/clear` 或新对话尚未生成 ai-title 时，tab 不能继续显示上一轮主题。
+///
+/// Code Logic（这个函数做什么）:
+///     Manual 不动；否则 `reset_auto_named_window(cwd 目录名)` → persist + emit。
+fn maybe_reset_auto_window_name(
+    state: &AppState,
+    terminal: &WorkbenchSessionRow,
+) -> AutoTitleSyncResult {
+    if !matches!(
+        SessionNameSource::parse(&terminal.name_source),
+        SessionNameSource::Auto
+    ) {
+        return AutoTitleSyncResult::AlreadySettled;
+    }
+    let default_name = default_window_name_from_cwd(&terminal.cwd);
+    match state
+        .workbench_sessions
+        .reset_auto_named_window(&terminal.id, &default_name)
+    {
+        Ok(Some(row)) => {
+            let repo = state.workbench_session_repo.clone();
+            let row_clone = row.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = repo.upsert(&row_clone).await {
+                    tracing::debug!("自动标题重置持久化失败: {err}");
+                }
+            });
+            emit_session_updated(state, &row);
+            tracing::debug!(
+                terminal_id = %terminal.id,
+                default_name = %default_name,
+                "已将 auto 窗口名重置为默认（会话 clear / 新对话）"
+            );
+            AutoTitleSyncResult::Applied
+        }
+        Ok(None) => AutoTitleSyncResult::AlreadySettled,
+        Err(err) => {
+            tracing::debug!(
+                terminal_id = %terminal.id,
+                "重置 auto 窗口名失败: {err}"
+            );
+            AutoTitleSyncResult::RetryableMiss
+        }
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Claude 索引刷新后应 best-effort 把 ai-title 写到绑定终端 window 名。
 ///
@@ -526,15 +590,15 @@ pub fn try_auto_rename_from_claude_index(
     state: &AppState,
     index: &ClaudeSessionIndex,
 ) -> AutoTitleSyncResult {
-    if !index.has_ai_title {
-        return AutoTitleSyncResult::AlreadySettled;
-    }
-    if !is_substantive_auto_title(&index.title) {
-        return AutoTitleSyncResult::AlreadySettled;
-    }
+    // 无 ai-title 时仍绑定 native（用量）并在 auto 窗口上退回默认名；不得用 last-prompt 抢名。
+    let title = if index.has_ai_title {
+        index.title.as_str()
+    } else {
+        ""
+    };
     try_auto_rename_bound_title(
         state,
-        &index.title,
+        title,
         Some(index.session_id.as_str()),
         index.cwd.as_deref(),
         chrono::DateTime::parse_from_rfc3339(&index.last_activity_at)

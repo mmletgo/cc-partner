@@ -73,7 +73,8 @@ pub struct StartOrReplaceOutcome {
 ///     但不能抢走 Orchestrator terminal，也不能每次 auto-title 都新建。
 ///
 /// Code Logic（这个类型做什么）:
-///     Created=新 Idle 行；Unchanged=已有同 native/该 terminal 的 interactive 行；
+///     Created=新 Idle 行（ended 在 native 轮换时为被替换的旧行）；
+///     Unchanged=已有同 native/该 terminal 的 interactive 行；
 ///     SkippedOrchestrator=候选全是编排占用；Unbound=没有可写 terminal。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)] // Created 携带完整 runtime 行供 emit；与 unit 变体体量差可接受
@@ -216,10 +217,12 @@ impl AgentRuntimeReducer {
     /// Business Logic（为什么需要这个函数）:
     ///     用户手开的 Claude/Codex/OpenCode 没有 hook_repair / Runner 建行路径；
     ///     snapshot 空则项目卡和 tab 永远 0/0。感知必须幂等，且不得覆盖编排 Agent。
+    ///     `/clear` / 新对话会换 native session，必须替换旧行，否则状态卡继续抽上一轮用量。
     ///
     /// Code Logic（这个函数做什么）:
     ///     写锁内：同 native 已存在 → Unchanged；按 preferred+fallback 找第一个
-    ///     无 Orchestrator 占用的 terminal；空闲则 create Idle；已有 interactive → Unchanged；
+    ///     无 Orchestrator 占用的 terminal；空闲则 create Idle；preferred 上已有 interactive
+    ///     且 native 不同 → end Disconnected(replaced) 再 create；fallback 占用则跳过；
     ///     全是编排占用 → SkippedOrchestrator。
     pub async fn ensure_interactive_active(
         &self,
@@ -227,12 +230,13 @@ impl AgentRuntimeReducer {
         fallback_terminal_ids: &[String],
     ) -> Result<EnsureInteractiveOutcome, AppError> {
         let _guard = agent_runtime_write_lock().lock().await;
-        if let Some(native) = input
+        let incoming_native = input
             .native_session_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
+            .map(str::to_string);
+        if let Some(native) = incoming_native.as_deref() {
             let active = self.repo.list_active(None, 10_000).await?;
             if let Some(existing) = active
                 .into_iter()
@@ -243,9 +247,9 @@ impl AgentRuntimeReducer {
         }
 
         let mut candidates = Vec::new();
-        let preferred = input.terminal_session_id.trim();
+        let preferred = input.terminal_session_id.trim().to_string();
         if !preferred.is_empty() {
-            candidates.push(preferred.to_string());
+            candidates.push(preferred.clone());
         }
         for id in fallback_terminal_ids {
             let trimmed = id.trim();
@@ -262,12 +266,44 @@ impl AgentRuntimeReducer {
 
         let mut saw_orchestrator = false;
         for terminal_id in candidates {
+            let is_preferred = !preferred.is_empty() && terminal_id == preferred;
             match self.repo.get_active_for_terminal(&terminal_id).await? {
                 Some(row) if row.orchestrator_task_id.is_some() => {
                     saw_orchestrator = true;
                     continue;
                 }
-                Some(row) => return Ok(EnsureInteractiveOutcome::Unchanged(row)),
+                Some(row) => {
+                    let existing_native = row
+                        .native_session_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if incoming_native.as_deref() == existing_native {
+                        return Ok(EnsureInteractiveOutcome::Unchanged(row));
+                    }
+                    if is_preferred && incoming_native.is_some() {
+                        let at = input.started_at.clone();
+                        let ended = self
+                            .repo
+                            .end_active_for_terminal(
+                                &terminal_id,
+                                AgentSessionPhase::Disconnected,
+                                Some("replaced"),
+                                &at,
+                            )
+                            .await?;
+                        let mut create = input;
+                        create.terminal_session_id = terminal_id;
+                        if create.phase.is_terminal() {
+                            create.phase = AgentSessionPhase::Idle;
+                        }
+                        let active = self.repo.create_active(create).await?;
+                        return Ok(EnsureInteractiveOutcome::Created { ended, active });
+                    }
+                    if is_preferred {
+                        return Ok(EnsureInteractiveOutcome::Unchanged(row));
+                    }
+                }
                 None => {
                     let mut create = input;
                     create.terminal_session_id = terminal_id;
@@ -773,5 +809,48 @@ mod tests {
         let listed = reducer.repo().list_active(None, 10).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].orchestrator_task_id.as_deref(), Some("task-2"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `/clear` 或新对话会换 native session id；若仍 Unchanged 旧行，状态卡会继续抽旧
+    ///     transcript 的 token/上下文，窗口也无法跟到新对话。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一 preferred terminal 先绑定 native-a，再 ensure native-b；断言旧行 Disconnected，
+    ///     新 active 的 native 为 b，且 listed active 只剩一行。
+    #[tokio::test]
+    async fn ensure_interactive_replaces_row_when_native_session_rotates() {
+        let reducer = fixture_reducer().await;
+        let mut first = create_input("term-user", "claudeCodeVisible", "2026-08-14T00:00:00Z");
+        first.native_session_id = Some("claude-native-a".to_string());
+        first.phase = AgentSessionPhase::Idle;
+        let EnsureInteractiveOutcome::Created { active: old, .. } =
+            reducer.ensure_interactive_active(first, &[]).await.unwrap()
+        else {
+            panic!("expected first Created");
+        };
+
+        let mut rotated = create_input("term-user", "claudeCodeVisible", "2026-08-14T00:03:00Z");
+        rotated.native_session_id = Some("claude-native-b".to_string());
+        rotated.phase = AgentSessionPhase::Idle;
+        let outcome = reducer
+            .ensure_interactive_active(rotated, &[])
+            .await
+            .unwrap();
+        let EnsureInteractiveOutcome::Created { ended, active } = outcome else {
+            panic!("expected Created replacement, got {outcome:?}");
+        };
+        let ended = ended.expect("old interactive row must be ended");
+        assert_eq!(ended.id, old.id);
+        assert!(!ended.is_active);
+        assert_eq!(ended.phase, AgentSessionPhase::Disconnected);
+        assert_eq!(ended.native_session_id.as_deref(), Some("claude-native-a"));
+        assert_ne!(active.id, old.id);
+        assert!(active.is_active);
+        assert_eq!(active.native_session_id.as_deref(), Some("claude-native-b"));
+        assert_eq!(active.terminal_session_id, "term-user");
+        let listed = reducer.repo().list_active(None, 10).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, active.id);
     }
 }
