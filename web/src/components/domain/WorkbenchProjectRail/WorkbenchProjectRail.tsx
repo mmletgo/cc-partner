@@ -77,6 +77,7 @@ export function WorkbenchProjectRail() {
     projectError,
     projectSessionStats,
     loadProjects,
+    addProjectFromPath,
     openRemoteProject,
     selectProject,
     removeProject,
@@ -754,6 +755,7 @@ export function WorkbenchProjectRail() {
         </h2>
         <WorkbenchRemoteProjectPicker
           source="local"
+          openLocalProject={addProjectFromPath}
           onCancel={closeLocalPicker}
           onOpenBusyChange={setLocalOpenBusy}
           onProjectOpened={() => {

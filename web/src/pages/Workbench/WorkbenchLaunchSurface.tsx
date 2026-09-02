@@ -203,7 +203,7 @@ export function WorkbenchLaunchSurface({
 }: WorkbenchLaunchSurfaceProps): ReactElement {
   const { t } = useTranslation(['workbench', 'attention']);
   const navigate = useNavigate();
-  const { openRemoteProject, selectProject, projects } =
+  const { addProjectFromPath, openRemoteProject, selectProject, projects } =
     useWorkbenchProjects();
   const { check: checkDependency } = useWorkbenchDependency();
   const attention = useAttention();
@@ -369,6 +369,7 @@ export function WorkbenchLaunchSurface({
           </h2>
           <WorkbenchRemoteProjectPicker
             source="local"
+            openLocalProject={addProjectFromPath}
             onCancel={closeLocalPicker}
             onOpenBusyChange={setLocalOpenBusy}
             onProjectOpened={() => {
@@ -570,6 +571,7 @@ export function WorkbenchLaunchSurface({
         </h2>
         <WorkbenchRemoteProjectPicker
           source="local"
+          openLocalProject={addProjectFromPath}
           onCancel={closeLocalPicker}
           onOpenBusyChange={setLocalOpenBusy}
           onProjectOpened={() => {

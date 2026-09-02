@@ -42,6 +42,8 @@ export interface WorkbenchRemoteProjectPickerProps {
   onOpenBusyChange?: (openBusy: boolean) => void;
   /** 可注入的打开实现；默认直接调用 workbenchApi.remote.openProject。 */
   openProject?: (deviceId: string, path: string) => Promise<WorkbenchProject | null>;
+  /** 可注入的本机打开实现；默认直接调用 workbenchApi.projects.add。桌面侧栏/启动面必须注入 addProjectFromPath，否则共享列表不会更新。 */
+  openLocalProject?: (path: string) => Promise<WorkbenchProject | null>;
   /** local=本机应用内浏览；remote=局域网设备。默认 remote。 */
   source?: WorkbenchProjectPickerSource;
 }
@@ -314,10 +316,11 @@ function deferEffect(work: () => void | (() => void)): () => void {
  *   用户需要从侧栏添加入口选择“远端设备项目”，并直接把局域网设备上的目录加入 Workbench。
  *
  * Code Logic（这个组件做什么）:
- *   使用 devicesApi 与 workbenchApi.remote 分层加载设备、根目录、目录项和路径信息，打开成功后调用 onProjectOpened。
+ *   使用 devicesApi 与 workbenchApi.remote/fs 分层加载设备、根目录、目录项和路径信息；
+ *   本机打开走 openLocalProject（缺省 projects.add），远端打开走 openProject，成功后调用 onProjectOpened。
  */
 export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPickerProps) {
-  const { onProjectOpened, onCancel, onOpenBusyChange, openProject, source = 'remote' } = props;
+  const { onProjectOpened, onCancel, onOpenBusyChange, openProject, openLocalProject, source = 'remote' } = props;
   const isLocal = source === 'local';
   const { t } = useTranslation(['workbench']);
   const [state, dispatch] = useReducer(remoteProjectPickerReducer, initialPickerState);
@@ -378,6 +381,11 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
     (deviceId: string, path: string) =>
       openProject ? openProject(deviceId, path) : workbenchApi.remote.openProject(deviceId, path),
     [openProject],
+  );
+  const effectiveOpenLocalProject = useCallback(
+    (path: string) =>
+      openLocalProject ? openLocalProject(path) : workbenchApi.projects.add(path),
+    [openLocalProject],
   );
   const handleCancel = useCallback(() => {
     if (pickerBusy) return;
@@ -523,7 +531,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
       onOpenBusyChange?.(true);
       dispatch({ type: 'openStarted' });
       const project = isLocal
-        ? await workbenchApi.projects.add(requestPath)
+        ? await effectiveOpenLocalProject(requestPath)
         : await effectiveOpenProject(requestDeviceId as string, requestPath);
       const currentSelection = selectionRef.current;
       const isCurrentRequest =
@@ -552,6 +560,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
     }
   }, [
     canOpenSelectedPath,
+    effectiveOpenLocalProject,
     effectiveOpenProject,
     isLocal,
     onOpenBusyChange,

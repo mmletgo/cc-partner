@@ -23,6 +23,8 @@ export interface WorkbenchProjectsContextValue {
   loadProjects: () => Promise<void>;
   refreshProjectSessionStats: (projectId?: string) => Promise<void>;
   chooseAndAddProject: () => Promise<WorkbenchProject | null>;
+  /** 把本机目录加入项目列表并设为当前项目；选择器打开成功后必须走这条路径。 */
+  addProjectFromPath: (path: string) => Promise<WorkbenchProject | null>;
   openRemoteProject: (deviceId: string, path: string) => Promise<WorkbenchProject | null>;
   selectProject: (project: WorkbenchProject) => Promise<WorkbenchProject>;
   removeProject: (projectId: string) => Promise<void>;

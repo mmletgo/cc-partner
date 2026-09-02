@@ -589,6 +589,56 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
       )
       .toEqual({ status: 0, merge: 0 });
   });
+
+  test('adding a local project appears in the rail without clicking refresh', async ({
+    page,
+    backendHarness,
+  }) => {
+    const added = makeProject({
+      id: 'proj-new',
+      name: 'demo-app',
+      path: '/Users/demo',
+    });
+    await installAppLocalStorage(page);
+    registerWorkbenchBaseline(backendHarness);
+    backendHarness.command('list_workbench_projects', { kind: 'resolve', value: [] });
+    backendHarness.command('list_workbench_fs_roots', {
+      kind: 'resolve',
+      value: [{ label: 'Home', path: '/Users/demo', kind: 'home' }],
+    });
+    backendHarness.command('list_workbench_fs_dir', { kind: 'resolve', value: [] });
+    backendHarness.command('get_workbench_fs_path_info', {
+      kind: 'resolve',
+      value: {
+        name: 'demo',
+        path: '/Users/demo',
+        kind: 'dir',
+        readable: true,
+        isGitRepo: true,
+        suggestedProjectName: 'demo',
+      },
+    });
+    backendHarness.command('add_workbench_project', { kind: 'resolve', value: added });
+
+    await page.goto('/');
+    const rail = page.getByRole('region', { name: '工作台项目' });
+    await expect(rail).toBeVisible({ timeout: 20_000 });
+    await rail.getByRole('button', { name: '添加本机项目' }).click();
+    const picker = page.getByRole('dialog', { name: '打开本机项目' });
+    await expect(picker).toBeVisible();
+    const openButton = picker.getByRole('button', { name: '打开项目' });
+    await expect(openButton).toBeEnabled({ timeout: 10_000 });
+    await openButton.click();
+
+    await expect(rail.getByRole('button', { name: /demo-app/ })).toBeVisible({
+      timeout: 10_000,
+    });
+    expect(
+      backendHarness
+        .calls()
+        .some((call) => call.type === 'invoke' && call.command === 'add_workbench_project'),
+    ).toBe(true);
+  });
 });
 
 test.describe('E2E-WORKBENCH-001 1024x768 inspector discoverability', () => {
@@ -903,3 +953,4 @@ test.describe('E2E-WORKBENCH-002 terminal live path release-like journey', () =>
     await expect(page.getByTestId('terminal-pane')).toBeVisible();
   });
 });
+

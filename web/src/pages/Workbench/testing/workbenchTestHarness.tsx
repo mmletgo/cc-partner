@@ -836,6 +836,7 @@ export function buildProjectsContextValue(
     loadProjects: vi.fn(async () => Promise.resolve()),
     refreshProjectSessionStats: vi.fn(async () => Promise.resolve()),
     chooseAndAddProject: vi.fn(async () => Promise.resolve(null)),
+    addProjectFromPath: vi.fn(async () => Promise.resolve(null)),
     openRemoteProject: vi.fn(async () => Promise.resolve(null)),
     selectProject: vi.fn(async (project: WorkbenchProject) => Promise.resolve(project)),
     removeProject: vi.fn(async () => Promise.resolve()),

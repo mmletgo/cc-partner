@@ -152,6 +152,7 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     loadProjects: vi.fn(async () => undefined),
     refreshProjectSessionStats: vi.fn(async () => undefined),
     chooseAndAddProject: vi.fn(async () => null),
+    addProjectFromPath: vi.fn(async () => null),
     openRemoteProject: vi.fn(async () => null),
     selectProject: vi.fn(async (project) => project),
     removeProject: vi.fn(async () => undefined),

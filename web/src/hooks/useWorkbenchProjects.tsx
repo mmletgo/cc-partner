@@ -218,6 +218,14 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
     }
   }, [desktopUnavailableMessage, persistActiveProject, refreshProjectSessionStats, t]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   本机目录选择器打开成功后必须立刻写入共享列表并设为当前项目，
+   *   否则侧栏只能等用户点刷新才看得到新项目。
+   *
+   * Code Logic（这个函数做什么）:
+   *   add_workbench_project → upsert 到列表顶部或就地更新 → 设为 active → 刷新该项目 session 统计。
+   */
   const addProjectFromPath = useCallback(
     async (path: string) => {
       const trimmedPath = path.trim();
@@ -225,9 +233,10 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       const project = await workbenchApi.projects.add(trimmedPath);
       setProjects((current) => upsertWorkbenchProjectInPlace(current, project));
       setActiveProjectId(project.id);
+      void refreshProjectSessionStats(project.id);
       return project;
     },
-    [setActiveProjectId],
+    [refreshProjectSessionStats, setActiveProjectId],
   );
 
   const chooseAndAddProject = useCallback(async () => {
@@ -250,9 +259,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
         return null;
       }
       if (!result.path) return null;
-      const project = await addProjectFromPath(result.path);
-      if (project) void refreshProjectSessionStats(project.id);
-      return project;
+      return addProjectFromPath(result.path);
     } catch (error) {
       setProjectError(
         displayWorkbenchErrorMessage(
@@ -266,7 +273,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       projectAddBusyRef.current = false;
       setProjectBusy(false);
     }
-  }, [addProjectFromPath, desktopUnavailableMessage, projectBusy, refreshProjectSessionStats, t]);
+  }, [addProjectFromPath, desktopUnavailableMessage, projectBusy, t]);
 
   const openRemoteProject = useCallback(
     async (deviceId: string, path: string) => {
@@ -436,6 +443,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       loadProjects,
       refreshProjectSessionStats,
       chooseAndAddProject,
+      addProjectFromPath,
       openRemoteProject,
       selectProject,
       removeProject,
@@ -448,6 +456,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       activeProject,
       activeProjectId,
       currentWindowLabel,
+      addProjectFromPath,
       chooseAndAddProject,
       loadProjects,
       openRemoteProject,
