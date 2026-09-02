@@ -746,13 +746,14 @@ impl TmuxCommand {
     pub(crate) fn std_command(&self) -> StdCommand {
         let mut command = StdCommand::new(&self.program);
         command.args(&self.prefix_args);
-        // 短命 tmux client 不得留在 sidecar 进程组：sidecar 被 SIGKILL 时不能把 server 一起带走。
+        // 新进程组即可与 sidecar 脱钩；禁止 setsid——探测路径随后还会 setpgid，
+        // session leader 上 setpgid 会 EPERM，所有候选失败后 UI 误报「需要安装 tmux」。
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             unsafe {
                 command.pre_exec(|| {
-                    if libc::setsid() == -1 {
+                    if libc::setpgid(0, 0) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -760,6 +761,29 @@ impl TmuxCommand {
             }
         }
         command
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     「有没有安装 tmux」只应跑 `tmux -V`，不能带工作台 `-S/-f`，也不能 setsid。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Native：`{program} -V`；WSL：`wsl.exe --exec tmux -V`。无 isolation 前缀、无 pre_exec。
+    pub(crate) fn version_probe_command(&self) -> StdCommand {
+        let mut command = StdCommand::new(&self.program);
+        command.args(self.version_probe_args());
+        command
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     单测锁定版本探测参数不含 socket/config，避免探测失败被当成未安装。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Native 仅 `-V`；WSL 为 `--exec tmux -V`。
+    pub(crate) fn version_probe_args(&self) -> Vec<String> {
+        match self.cwd_mode {
+            TmuxCwdMode::Native => vec!["-V".to_string()],
+            TmuxCwdMode::Wsl => vec!["--exec".to_string(), "tmux".to_string(), "-V".to_string()],
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1328,8 +1352,7 @@ where
     }
     let mut saw_timeout = false;
     for candidate in candidates {
-        let mut command = candidate.command.std_command();
-        command.args(["-V"]);
+        let command = candidate.command.version_probe_command();
         match runner(command, PROBE_COMMAND_TIMEOUT) {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
