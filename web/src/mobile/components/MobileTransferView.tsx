@@ -13,6 +13,7 @@ import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, ProgressBar } from '@/components/primitives';
 import { TransferItem } from '@/components/domain';
+import { isMobileInboxDevice, isMobileInboxOffer } from '@/lib/mobileInbox';
 import {
   canOpenRevealTransfer,
   isLogicalTransferRecoveryLocked,
@@ -71,7 +72,8 @@ export function MobileTransferView(props: MobileTransferViewProps): ReactElement
       !reconciling && !recoveryLocked && isTransferResumable(task, peerSupportsResume);
     const canRetry =
       !reconciling && !recoveryLocked && isTransferRetryable(task, peerSupportsResume);
-    const canDownload = !reconciling && canOpenRevealTransfer(task);
+    const canDownload =
+      !reconciling && (canOpenRevealTransfer(task) || isMobileInboxOffer(task));
     const actionError = props.taskActionErrors[task.id];
 
     return (
@@ -84,7 +86,9 @@ export function MobileTransferView(props: MobileTransferViewProps): ReactElement
             direction: task.direction,
             status: task.status,
             progress: task.progress,
-            peerDevice: task.peerDeviceName,
+            peerDevice: isMobileInboxDevice(task.peerDeviceId)
+              ? t('transfer:mobileInbox')
+              : task.peerDeviceName,
             speed: task.speed,
             errorMessage: task.failure?.message ?? task.errorMessage,
             phase: task.phase,

@@ -162,6 +162,34 @@ function makeMobileTransferSelfDevice() {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   电脑发给手机的任务必须能在传输面板出现 Download。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 Send+completed、peer 为 inbox id 的任务（无 filePath）。
+ */
+function makeMobileInboxOfferTask() {
+  return {
+    id: 'inbox-1',
+    fileName: 'from-pc.pdf',
+    fileSize: 2048,
+    direction: 'send',
+    status: 'completed',
+    progress: 1,
+    peerDeviceId: 'cc-partner-mobile-inbox',
+    peerDeviceName: '手机',
+    startedAt: TS,
+    completedAt: TS,
+    transferredBytes: 2048,
+    phase: 'completed',
+    attempt: 1,
+    logicalTransferId: 'inbox-1',
+    attemptId: 'inbox-1',
+    protocolTransferId: 'inbox-1',
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   取消路径需要一条进行中任务；JSON 不得带 filePath。
  *
  * Code Logic（这个函数做什么）:
@@ -672,6 +700,58 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     const cancelCall = fetchCallsFor(backendHarness, '/api/mobile/transfer/cancel')[0];
     expect(cancelCall?.body).toEqual({ taskId: 'mt-1' });
     expect(invokeCallsFor(backendHarness, 'cancel_transfer')).toBe(0);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   电脑发给手机的 completed Send 必须出现 Download，并打到 download 路由。
+   *
+   * Code Logic（这个测试做什么）:
+   *   mock inbox offer 任务；打开传输；点下载；断言 GET download/:id。
+   */
+  test('inbox offer shows download and hits mobile download route', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeMobileProject();
+    const worktree = makeMobileWorktree(project.id);
+    const session = makeMobileSession(project.id, worktree.id);
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cp-lang', 'zh');
+      window.localStorage.setItem('cp-theme', 'light');
+    });
+    registerMobileRoutes(backendHarness, { project, worktree, session });
+    backendHarness.route('GET', '/api/mobile/transfer/tasks', {
+      kind: 'resolve',
+      value: [makeMobileInboxOfferTask()],
+    });
+    backendHarness.route('GET', '/api/mobile/transfer/download/:taskId', {
+      kind: 'resolve',
+      value: 'PDF',
+    });
+
+    await page.goto('/mobile');
+    const openNav = page.getByRole('button', { name: /打开导航/ });
+    await expect(openNav).toBeVisible({ timeout: 20_000 });
+    await openNav.click();
+    await page.getByRole('dialog').getByRole('button', { name: /^传输$/ }).click();
+
+    await expect(page.getByRole('heading', { name: '文件传输' })).toBeVisible({
+      timeout: 10_000,
+    });
+    const deviceSelect = page.getByLabel('选择目标设备');
+    await expect(deviceSelect.locator('option', { hasText: '手机' })).toHaveCount(0);
+    await expect(page.getByText('from-pc.pdf')).toBeVisible();
+    const download = page.getByRole('button', { name: '下载' });
+    await expect(download).toBeVisible();
+    await download.click();
+
+    await expect
+      .poll(
+        () => fetchCallsFor(backendHarness, '/api/mobile/transfer/download/inbox-1').length,
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThanOrEqual(1);
   });
 });
 

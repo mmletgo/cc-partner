@@ -18,6 +18,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
+import { MOBILE_INBOX_DEVICE_ID } from '@/lib/mobileInbox';
 import type { Device, TransferTask } from '@/lib/types';
 
 const listDevicesMock = vi.fn();
@@ -342,7 +343,7 @@ describe('Transfer page journey', () => {
     fireEvent.click(screen.getByRole('button', { name: /发送「report\.txt」/ }));
 
     await waitFor(() => {
-      expect(sendTransferMock.mock.calls[0][0]).toBe('device-a');
+      expect(sendTransferMock.mock.calls[0][0]).toBe(MOBILE_INBOX_DEVICE_ID);
       expect(sendTransferMock.mock.calls[0][1]).toBe(windowsPath);
       expect(typeof sendTransferMock.mock.calls[0][2]).toBe('string');
       const sendBtn = screen.getByRole('button', { name: /发送「report\.txt」/ });
@@ -353,7 +354,7 @@ describe('Transfer page journey', () => {
     await act(async () => {
       resolveSend?.({
         accepted: true,
-        deviceId: 'device-a',
+        deviceId: MOBILE_INBOX_DEVICE_ID,
         filePath: windowsPath,
         id: 'transfer-1',
       });
@@ -424,7 +425,7 @@ describe('Transfer page journey', () => {
 
     await waitFor(() => {
       expect(sendTransferMock).toHaveBeenCalledTimes(1);
-      expect(sendTransferMock.mock.calls[0][0]).toBe('device-a');
+      expect(sendTransferMock.mock.calls[0][0]).toBe(MOBILE_INBOX_DEVICE_ID);
       expect(sendTransferMock.mock.calls[0][1]).toBe(windowsPath);
       expect(typeof sendTransferMock.mock.calls[0][2]).toBe('string');
     });
@@ -432,10 +433,69 @@ describe('Transfer page journey', () => {
     await act(async () => {
       resolveSend?.({
         accepted: true,
-        deviceId: 'device-a',
+        deviceId: MOBILE_INBOX_DEVICE_ID,
         filePath: windowsPath,
         id: 'transfer-dbl',
       });
+    });
+  });
+
+  test('device dropdown pins phone first and still sends with no LAN peers', async () => {
+    listDevicesMock.mockResolvedValue([]);
+    pickTransferFileMock.mockResolvedValueOnce('/tmp/solo.txt');
+    sendTransferMock.mockResolvedValueOnce({
+      accepted: true,
+      deviceId: MOBILE_INBOX_DEVICE_ID,
+      filePath: '/tmp/solo.txt',
+      id: 'inbox-1',
+    });
+
+    renderTransfer();
+
+    await waitFor(() => {
+      const select = screen.getByRole('combobox', { name: '选择目标设备' }) as HTMLSelectElement;
+      expect(within(select).getByRole('option', { name: '手机' })).toBeTruthy();
+      expect(select.value).toBe(MOBILE_INBOX_DEVICE_ID);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '浏览…' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /发送「solo\.txt」/ }).hasAttribute('disabled')).toBe(
+        false,
+      );
+    });
+    fireEvent.click(screen.getByRole('button', { name: /发送「solo\.txt」/ }));
+    await waitFor(() => {
+      expect(sendTransferMock.mock.calls[0][0]).toBe(MOBILE_INBOX_DEVICE_ID);
+    });
+  });
+
+  test('selecting a LAN peer still sends to that device', async () => {
+    pickTransferFileMock.mockResolvedValueOnce('/tmp/lan.txt');
+    sendTransferMock.mockResolvedValueOnce({
+      accepted: true,
+      deviceId: 'device-a',
+      filePath: '/tmp/lan.txt',
+      id: 'lan-1',
+    });
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /MacBook Pro/ })).toBeTruthy();
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: '选择目标设备' }), {
+      target: { value: 'device-a' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '浏览…' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /发送「lan\.txt」/ }).hasAttribute('disabled')).toBe(
+        false,
+      );
+    });
+    fireEvent.click(screen.getByRole('button', { name: /发送「lan\.txt」/ }));
+    await waitFor(() => {
+      expect(sendTransferMock.mock.calls[0][0]).toBe('device-a');
     });
   });
 
@@ -641,6 +701,29 @@ describe('Transfer page journey', () => {
     });
 
     expectRowActions(task.fileName, [...actions]);
+  });
+
+  test('completed inbox offer does not render open/reveal/download', async () => {
+    listTransfersMock.mockResolvedValue([
+      buildTask({
+        id: 't-inbox',
+        status: 'completed',
+        direction: 'send',
+        fileName: 'phone.bin',
+        progress: 1,
+        peerDeviceId: MOBILE_INBOX_DEVICE_ID,
+        peerDeviceName: undefined,
+        speed: undefined,
+      }),
+    ]);
+
+    renderTransfer();
+
+    await waitFor(() => {
+      expect(screen.getByText('phone.bin')).toBeTruthy();
+    });
+
+    expectRowActions('phone.bin', []);
   });
 
   test('completed send does not render open/reveal', async () => {
