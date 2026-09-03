@@ -448,11 +448,11 @@ describe('MobileWorkbench location restore', () => {
     await openProject('Project p1');
     await waitFor(() => {
       expect(screen.getByTestId('mobile-worktree-tabs')).toBeTruthy();
+      expect(window.location.search).toContain('projectId=p1');
+      expect(window.location.search).toContain('panel=terminal');
+      expect(window.location.search).toContain('worktreeId=p1%3Amain');
+      expect(window.location.search).toContain('sessionId=p1%3As1');
     });
-    expect(window.location.search).toContain('projectId=p1');
-    expect(window.location.search).toContain('panel=terminal');
-    expect(window.location.search).toContain('worktreeId=p1%3Amain');
-    expect(window.location.search).toContain('sessionId=p1%3As1');
   });
 
   test('returning to the project list clears workbench query params', async () => {
