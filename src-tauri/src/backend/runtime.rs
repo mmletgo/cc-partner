@@ -619,6 +619,7 @@ pub async fn build_app_state_with_role(
         overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
         manual_peer_cancel: Arc::new(Mutex::new(None)),
         peer_client: Arc::new(PeerClient::new()),
+        relay: Arc::new(crate::net::relay::RelayRuntime::new()),
         transfers: Arc::new(TransferRegistry::new()),
         ui,
         update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),

@@ -169,6 +169,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            relay: crate::config::RelayConfig::default(),
             experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         }
     }

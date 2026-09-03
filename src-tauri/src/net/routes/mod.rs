@@ -23,6 +23,7 @@ pub mod mobile_transfer;
 pub mod orchestrator;
 pub mod prompts;
 pub mod provider_manager;
+pub mod relay;
 pub mod scratchpad_sync;
 pub mod ssh_target_sync;
 pub mod sync;

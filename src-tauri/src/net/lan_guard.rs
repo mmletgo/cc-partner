@@ -708,32 +708,68 @@ pub fn evaluate_browser_request_from_http(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     调用方若声称目标设备（`X-Cc-Partner-Expected-Device-Id`），本机必须在进入业务 handler
-///     前核对是否为本机 `device_id`；错机 fail-closed。缺 header 或空值 → 行为不变（LAN 无鉴权）。
+///     前核对；错机 fail-closed。缺 header 或空值 → 行为不变（LAN 无鉴权）。
+///     中转（relay）路径的语义扩展：该 header 值是**被中转目标 C** 而非本机 B，
+///     必须改与 URL 中的 `{device_id}` 段比对（见 `relay_path_target_device_id`），
+///     否则合法中转请求会被误杀。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 header；非空且与 `state.device_id` 不等 → 409 + code `device_id_mismatch` 信封；
+///     从 path 解析 relay 目标段（非 relay 路径为 None）；读 header 并按
+///     `evaluate_expected_device_id_header` 判定（relay 路径比对目标段、非 relay
+///     路径比对 `state.device_id`）；失败 → 409 + code `device_id_mismatch` 信封；
 ///     否则 `next.run`。
 pub async fn expected_device_id_guard(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if let Err(err) = evaluate_expected_device_id_header(&request, state.device_id.as_str()) {
+    let relay_target = relay_path_target_device_id(request.uri().path());
+    if let Err(err) =
+        evaluate_expected_device_id_header(&request, state.device_id.as_str(), relay_target)
+    {
         return err.into_response();
     }
     next.run(request).await
 }
 
+/// 解析 relay 转发路径中的目标 device_id 段。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `expected_device_id_guard` 在中间件层（路由匹配之前）运行，只能从 path 字符串
+///     判断"这是转发给哪台设备的请求"；`/api/relay/peers` 是 B 自身的列表端点
+///     （非转发路径），必须排除，保持"header == B 自身"的普通语义。
+///
+/// Code Logic（这个函数做什么）:
+///     path 不以 `/api/relay/` 开头 → None（非 relay 路径）；剥前缀后剩余为空或
+///     恰为 `peers` → None（B 自身端点）；否则取第一段（到下一个 `/`）作为目标
+///     device_id。纯函数，无状态。
+pub fn relay_path_target_device_id(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(crate::net::relay::RELAY_ROUTE_PREFIX)?;
+    if rest.is_empty() || rest == "peers" {
+        return None;
+    }
+    let segment = rest.split('/').next().unwrap_or_default();
+    if segment.is_empty() {
+        None
+    } else {
+        Some(segment)
+    }
+}
+
 /// 纯函数：校验可选期望 device_id header。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     中间件与单测共用同一 fail-closed 规则，避免 mock 与生产漂移。
+///     中间件与单测共用同一 fail-closed 规则，避免 mock 与生产漂移。relay 路径上
+///     header 值是被中转目标 C 的 device_id（A 侧语义原样透传），与 URL 目标段比对。
 ///
 /// Code Logic（这个函数做什么）:
-///     header 缺/空 → Ok；trim 后与 actual 不等 → Err(stable device_id_mismatch @ 409)。
+///     header 缺/空 → Ok；`relay_target` 为 Some（relay 转发路径）时 trim 后与目标段
+///     不等 → Err(stable device_id_mismatch @ 409)；为 None（普通路径）时与本机
+///     `actual_device_id` 不等 → 同样 Err。满足"缺失即放行"的现状宽松度不变。
 pub fn evaluate_expected_device_id_header(
     request: &Request<Body>,
     actual_device_id: &str,
+    relay_target: Option<&str>,
 ) -> Result<(), P2pError> {
     let Some(raw) = request.headers().get(&EXPECTED_DEVICE_ID_HEADER) else {
         return Ok(());
@@ -752,10 +788,13 @@ pub fn evaluate_expected_device_id_header(
     if expected.is_empty() {
         return Ok(());
     }
-    if expected != actual_device_id {
+    // relay 转发路径：header 声明的是被中转目标，与 URL 目标段比对；
+    // 普通路径：header 声明的是本机，与本机 device_id 比对。
+    let expected_actual = relay_target.unwrap_or(actual_device_id);
+    if expected != expected_actual {
         let context = request_context_from_request(request);
         return Err(P2pError::stable(
-            format!("device_id mismatch: expected {expected}, this host is {actual_device_id}"),
+            format!("device_id mismatch: expected {expected}, this route serves {expected_actual}"),
             "device_id_mismatch",
             StatusCode::CONFLICT,
             &context,
@@ -860,7 +899,8 @@ mod tests {
     ///     可选期望 device_id header 错机必须 409 device_id_mismatch；匹配/缺省放行。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造 Request 带 wrong/match/absent header，调用 evaluate_expected_device_id_header。
+    ///     构造 Request 带 wrong/match/absent header，调用 evaluate_expected_device_id_header
+    ///     （非 relay 路径，relay_target=None）。
     #[test]
     fn expected_device_id_header_rejects_mismatch_accepts_match_or_absent() {
         let mismatch = Request::builder()
@@ -868,7 +908,7 @@ mod tests {
             .header(&EXPECTED_DEVICE_ID_HEADER, "wrong-device")
             .body(Body::empty())
             .expect("request");
-        let err = evaluate_expected_device_id_header(&mismatch, "host-device")
+        let err = evaluate_expected_device_id_header(&mismatch, "host-device", None)
             .expect_err("wrong header must fail closed");
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -878,20 +918,131 @@ mod tests {
             .header(&EXPECTED_DEVICE_ID_HEADER, "host-device")
             .body(Body::empty())
             .expect("request");
-        assert!(evaluate_expected_device_id_header(&matching, "host-device").is_ok());
+        assert!(evaluate_expected_device_id_header(&matching, "host-device", None).is_ok());
 
         let absent = Request::builder()
             .uri("/api/health")
             .body(Body::empty())
             .expect("request");
-        assert!(evaluate_expected_device_id_header(&absent, "host-device").is_ok());
+        assert!(evaluate_expected_device_id_header(&absent, "host-device", None).is_ok());
 
         let empty = Request::builder()
             .uri("/api/health")
             .header(&EXPECTED_DEVICE_ID_HEADER, "   ")
             .body(Body::empty())
             .expect("request");
-        assert!(evaluate_expected_device_id_header(&empty, "host-device").is_ok());
+        assert!(evaluate_expected_device_id_header(&empty, "host-device", None).is_ok());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     中转（relay）路径上 header 值是**被中转目标 C** 而非本机 B：等于 URL 目标段
+    ///     才放行，等于本机反而必须 409（这是 relay 语义扩展的核心）；header 缺失
+    ///     仍放行（宽松度不变）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 `/api/relay/target-C/api/health` 分别带 header=target-C / host-B / 缺失，
+    ///     断言 Ok / 409 Err / Ok；并断言 `/api/relay/peers`（B 自身端点）回到
+    ///     "必须等于本机"的普通语义。
+    #[test]
+    fn expected_device_id_header_relay_path_compares_against_url_target() {
+        // relay 转发路径 + header == 目标段 → 放行。
+        let relay_match = Request::builder()
+            .uri("/api/relay/target-C/api/health")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "target-C")
+            .body(Body::empty())
+            .expect("request");
+        assert!(
+            evaluate_expected_device_id_header(
+                &relay_match,
+                "host-B",
+                relay_path_target_device_id("/api/relay/target-C/api/health")
+            )
+            .is_ok(),
+            "relay 路径 header 等于目标段应放行"
+        );
+
+        // relay 转发路径 + header == 本机 → 409（A 声称的目标与 URL 不一致）。
+        let relay_self = Request::builder()
+            .uri("/api/relay/target-C/api/health")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "host-B")
+            .body(Body::empty())
+            .expect("request");
+        let err = evaluate_expected_device_id_header(
+            &relay_self,
+            "host-B",
+            relay_path_target_device_id("/api/relay/target-C/api/health"),
+        )
+        .expect_err("relay 路径 header 等于本机应 fail-closed");
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
+
+        // relay 转发路径 + header 缺失 → 放行（宽松度不变）。
+        let relay_absent = Request::builder()
+            .uri("/api/relay/target-C/api/health")
+            .body(Body::empty())
+            .expect("request");
+        assert!(evaluate_expected_device_id_header(
+            &relay_absent,
+            "host-B",
+            relay_path_target_device_id("/api/relay/target-C/api/health"),
+        )
+        .is_ok());
+
+        // `/api/relay/peers` 是 B 自身端点：普通语义（必须等于本机）。
+        let peers_self = Request::builder()
+            .uri("/api/relay/peers")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "host-B")
+            .body(Body::empty())
+            .expect("request");
+        assert!(
+            evaluate_expected_device_id_header(
+                &peers_self,
+                "host-B",
+                relay_path_target_device_id("/api/relay/peers")
+            )
+            .is_ok(),
+            "peers 端点 header 等于本机应放行"
+        );
+        let peers_target = Request::builder()
+            .uri("/api/relay/peers")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "target-C")
+            .body(Body::empty())
+            .expect("request");
+        assert!(
+            evaluate_expected_device_id_header(
+                &peers_target,
+                "host-B",
+                relay_path_target_device_id("/api/relay/peers")
+            )
+            .is_err(),
+            "peers 端点 header 等于他机应 409"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `relay_path_target_device_id` 是 guard relay 分支的唯一路径解析入口：
+    ///     前缀判定、peers 排除、多级子路径取第一段的行为都不能漂移。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     表驱动断言普通路径 / relay 根 / peers / 转发路径 / 无尾段的解析结果。
+    #[test]
+    fn relay_path_target_device_id_parses_prefix_and_peers() {
+        assert_eq!(relay_path_target_device_id("/api/health"), None);
+        assert_eq!(relay_path_target_device_id("/api/relay"), None);
+        assert_eq!(relay_path_target_device_id("/api/relay/"), None);
+        assert_eq!(relay_path_target_device_id("/api/relay/peers"), None);
+        assert_eq!(
+            relay_path_target_device_id("/api/relay/target-C/api/health"),
+            Some("target-C")
+        );
+        assert_eq!(
+            relay_path_target_device_id("/api/relay/target-C/api/workbench/fs/list"),
+            Some("target-C")
+        );
+        assert_eq!(
+            relay_path_target_device_id("/api/relay/target-C"),
+            Some("target-C")
+        );
+        assert_eq!(relay_path_target_device_id("/api/relayx/target-C"), None);
     }
 
     /// Business Logic（为什么需要这个测试）:

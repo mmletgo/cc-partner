@@ -23,6 +23,8 @@ pub mod peer_client;
 pub mod peer_error;
 pub mod peer_timeout;
 pub mod protocol;
+/// 中转访问（跳板机）透明转发器（HTTP 流式转发 + 终端 WS 桥 + 并发闸）。
+pub mod relay;
 pub mod request_context;
 pub mod routes;
 

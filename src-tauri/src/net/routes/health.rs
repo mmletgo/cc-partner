@@ -7,10 +7,11 @@
 //! Code Logic（这个模块做什么）:
 //!     GET /api/health → 200 + `{ok, device_id, device_name, http_port, ts,
 //!     protocol_version, capabilities}`。从 AppState 取 device_id/device_name（config 读锁）
-//!     与 actual_http_port（原子读）；protocol_version 与 capabilities 永远取
-//!     `server_protocol_info()` 的完整权威清单，对端只需信任本机宣告。
+//!     与 actual_http_port（原子读）；protocol_version 与 capabilities 基准取
+//!     `server_protocol_info()` 的权威清单，仅在 `config.relay.enabled=false` 时
+//!     裁掉 `net.relay.v1`（见 `advertised_capabilities`）。
 
-use crate::net::protocol::{server_protocol_info, PeerProtocolInfo};
+use crate::net::protocol::{server_protocol_info, PeerProtocolInfo, CAPABILITY_NET_RELAY_V1};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -60,14 +61,33 @@ impl HealthResponse {
     }
 }
 
+/// 按运行配置裁剪对外宣告的能力清单。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `server_protocol_info()` 是 build 级静态全集（mDNS caps TXT 也用它），不能因
+///     配置翻转而改变签名；但 `net.relay.v1` 语义上要求与 `relay.enabled` 联动——
+///     关闭中转后继续宣告会让 A 侧把流量交给一个只回 `relay_disabled` 的 B。
+///     在 health 调用点按 config 增删 token 是最小侵入的实现。
+///
+/// Code Logic（这个函数做什么）:
+///     接收全集 capabilities 与 relay 开关；enabled=true 原样返回，false 时
+///     retain 掉 `net.relay.v1`。纯函数，供 handler 与单测共用。
+pub fn advertised_capabilities(mut capabilities: Vec<String>, relay_enabled: bool) -> Vec<String> {
+    if !relay_enabled {
+        capabilities.retain(|capability| capability != CAPABILITY_NET_RELAY_V1);
+    }
+    capabilities
+}
+
 /// GET /api/health：返回本机设备信息与端口，供对端连通性验证。
 ///
 /// Business Logic: 对端 peer_client.health() 调用此端点判断本机可达，并通过 protocol_version /
-///     capabilities 判断本机支持的 P2P 能力。protocol_version 与 capabilities 必须永远取
-///     `server_protocol_info()` 的完整权威清单，不能因调用方/状态而异，保证对端拿到确定结论。
+///     capabilities 判断本机支持的 P2P 能力。protocol_version 与 capabilities 基准永远取
+///     `server_protocol_info()`（对端拿到确定结论）；唯一例外是 `net.relay.v1`：
+///     `config.relay.enabled=false` 时裁掉（中转路由此时返回 relay_disabled，宣告即误导）。
 /// Code Logic: device_id/device_name 从 config RwLock 读；http_port 从 AtomicU16 读；
 ///             ts 取 Utc::now().timestamp()（对照 Python int(datetime.now(timezone.utc).timestamp())）；
-///             protocol_version + capabilities 取 server_protocol_info() 的字段。
+///             capabilities = advertised_capabilities(server_protocol_info().capabilities, cfg.relay.enabled)。
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let cfg = state.config.read().expect("config 读锁中毒");
     let port = state.actual_http_port.load(Ordering::SeqCst);
@@ -79,7 +99,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         http_port: port,
         ts: Utc::now().timestamp(),
         protocol_version: info.protocol_version,
-        capabilities: info.capabilities,
+        capabilities: advertised_capabilities(info.capabilities, cfg.relay.enabled),
     })
 }
 
@@ -217,5 +237,39 @@ mod tests {
         let proto = resp.protocol_info();
         assert!(proto.supports("errors.envelope.v1"));
         assert!(!proto.supports("inbox.messages.v1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `advertised_capabilities` 是 `relay.enabled` 与 health 宣告的唯一联动点：
+    ///     关闭时必须精确裁掉 `net.relay.v1`（其余 token 一个不动），开启时必须原样
+    ///     保留——漏裁会误导 A 侧把流量交给只回 `relay_disabled` 的 B，多裁会让
+    ///     其它能力的客户端误判 unsupported。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 `server_protocol_info()` 全集分别喂 enabled=true/false，断言裁剪/保留结果
+    ///     与清单长度差异。
+    #[test]
+    fn advertised_capabilities_toggles_relay_token_with_config() {
+        let info = server_protocol_info();
+        assert!(
+            info.supports(CAPABILITY_NET_RELAY_V1),
+            "静态全集应包含 net.relay.v1"
+        );
+        let enabled = advertised_capabilities(info.capabilities.clone(), true);
+        assert_eq!(enabled, info.capabilities, "开启时应原样返回全集");
+        let disabled = advertised_capabilities(info.capabilities.clone(), false);
+        assert!(
+            !disabled
+                .iter()
+                .any(|capability| capability == CAPABILITY_NET_RELAY_V1),
+            "关闭时应裁掉 net.relay.v1"
+        );
+        assert_eq!(disabled.len() + 1, info.capabilities.len());
+        // 其余 token 全部保留。
+        for capability in &info.capabilities {
+            if capability != CAPABILITY_NET_RELAY_V1 {
+                assert!(disabled.contains(capability), "不应误裁 {capability}");
+            }
+        }
     }
 }

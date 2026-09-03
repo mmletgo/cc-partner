@@ -36,6 +36,23 @@ pub const PROTOCOL_VERSION_V1: u32 = 1;
 /// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配。
 pub const CAPABILITY_ERRORS_ENVELOPE_V1: &str = "errors.envelope.v1";
 
+/// 能力 token：v1 中转访问（跳板机）转发路由（`/api/relay/*`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     局域网存在发起方 A 与目标 C 互相不可达、但共享可达邻居 B 的拓扑（跨 VLAN/防火墙）。
+///     A 在把对 C 的请求交给 B 中转前，必须确认 B 已实现 `/api/relay/*` 转发路由，
+///     旧版本 B 缺失时 A 应显示"跳板不支持"而不是反复 404。
+///
+/// **语义边界（重要）**：本 token 是**能力声明**（本机 build 实现了透明转发器），与
+/// `workbench.dependency-install.v1` 同性质；**不是**权限 token——转发路由对全部 LAN
+/// peer 平等开放，符合固定 LAN 边界（无身份鉴权/无 LAN 权限 capability token）。
+/// health 宣告按 `config.relay.enabled` 动态裁剪：关闭时不宣告，路由返回 `relay_disabled`。
+///
+/// Code Logic: 字符串常量 `net.relay.v1`，列入 `server_protocol_info()`
+/// （字典序：在 `errors.envelope.v1` 之后、`orchestrator.*` 之前）；与 `/api/relay/*`
+/// 三条路由原子上线，client `supports` 门控。
+pub const CAPABILITY_NET_RELAY_V1: &str = "net.relay.v1";
+
 /// 能力 token：v1 Orchestrator owning-device runtime-snapshot 路由
 /// （`POST /api/orchestrator/runtime-snapshot`）。
 ///
@@ -508,6 +525,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
             CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+            CAPABILITY_NET_RELAY_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1.to_string(),
@@ -691,6 +709,7 @@ mod tests {
                 "cc-history.paged-sync.v1".to_string(),
                 "device.request-binding.v1".to_string(),
                 "errors.envelope.v1".to_string(),
+                "net.relay.v1".to_string(),
                 "orchestrator.agent-adapters.v1".to_string(),
                 "orchestrator.complete-agent-run.v1".to_string(),
                 "orchestrator.experiments.v1".to_string(),

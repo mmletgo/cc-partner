@@ -1237,6 +1237,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            relay: crate::config::RelayConfig::default(),
             experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
@@ -1264,6 +1265,7 @@ mod tests {
             overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
             manual_peer_cancel: Arc::new(Mutex::new(None)),
             peer_client: Arc::new(PeerClient::new()),
+            relay: Arc::new(crate::net::relay::RelayRuntime::new()),
             transfers: Arc::new(TransferRegistry::new()),
             ui: Arc::new(HeadlessBackendUi::new(std::path::PathBuf::from("/tmp"))),
             update_runtime: Arc::new(UpdateRuntime::new()),

@@ -340,6 +340,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         internal_claude: crate::config::InternalClaudeConfig::default(),
         agent_hub: crate::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
+        relay: crate::config::RelayConfig::default(),
         experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
     };
     // S3 ConfigRuntime + UpdateRuntime；与 config 共享同一 Arc。
@@ -367,6 +368,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
         manual_peer_cancel: Arc::new(Mutex::new(None)),
         peer_client: Arc::new(PeerClient::new()),
+        relay: Arc::new(crate::net::relay::RelayRuntime::new()),
         transfers: Arc::new(TransferRegistry::new()),
         ui: Arc::new(HeadlessBackendUi::new(std::path::PathBuf::from("/tmp"))),
         update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),

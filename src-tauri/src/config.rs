@@ -1136,10 +1136,54 @@ pub struct ManualPeerConfig {
     pub port: u16,
 }
 
+/// 远程项目中转访问（跳板机）配置。
+///
+/// Business Logic（为什么需要这个结构）:
+///     局域网存在 A、C 互相不可达但共享可达邻居 B 的拓扑（跨 VLAN / 防火墙隔离）。
+///     A 需要显式指定"允许作为跳板的直连设备"（`via_device_ids`），B 端则可整体关闭
+///     被用作跳板的能力（`enabled=false`）。`ignored_target_ids` 留给 A 侧显式忽略
+///     某些经跳板可见的目标（V1 仅持久化字段，不做探测过滤逻辑）。
+///
+/// Code Logic（这个结构做什么）:
+///     三个字段 camelCase 序列化对齐前端契约。`enabled` 缺字段必须回退 true
+///     （serde bool 缺省是 false，需 `default_true` + Default impl 双保险）；
+///     via/ignored 列表缺字段回退空。旧 config.json 无 `relay` 字段时整体走 Default。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayConfig {
+    /// B 侧角色：本机是否允许被用作跳板（默认 true）。false 时路由返回 `relay_disabled` 且 health 不宣告 `net.relay.v1`。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// A 侧角色：允许作为跳板的直连设备 device_id 列表（默认空）。
+    #[serde(default)]
+    pub via_device_ids: Vec<String>,
+    /// A 侧角色：从跳板可见目标里显式忽略的 device_id 列表（默认空，V1 仅持久化）。
+    #[serde(default)]
+    pub ignored_target_ids: Vec<String>,
+}
+
+impl Default for RelayConfig {
+    /// 默认启用跳板能力、无跳板与忽略列表。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 config.json 无 `relay` 字段（`#[serde(default)]` 整体回退）时必须保持
+    ///     "装好即具备被用作跳板的能力"（默认零配置）语义，enabled 不能因缺字段变 false。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     enabled=true，两个列表为空。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            via_device_ids: Vec::new(),
+            ignored_target_ids: Vec::new(),
+        }
+    }
+}
+
 /// 内测功能 opt-in 开关（默认全部关闭）。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     充电模式、游戏大厅、网页浏览、项目自动化与 GitHub 云端同步默认不对用户暴露；
+///     充电模式、游戏大厅、网页浏览、项目自动化与 GitHub 云同步默认不对用户暴露；
 ///     用户须在设置「内测功能」页显式打开后，对应入口与调度才生效。
 ///     旧 `config.json` 缺字段必须 fail-closed 为全关，不得因曾用过充电/云同步而自动打开。
 ///
@@ -1236,6 +1280,10 @@ pub struct AppConfig {
     /// 默认空 = 仅 mDNS LAN 发现，不改默认信任边界。详见 `ManualPeerConfig`。
     #[serde(default)]
     pub manual_peers: Vec<ManualPeerConfig>,
+    /// 远程项目中转访问（跳板机）配置。`#[serde(default)]` 兼容旧 config.json
+    /// （缺字段回退 `RelayConfig::default()`，enabled=true）。
+    #[serde(default)]
+    pub relay: RelayConfig,
     /// 内测功能 opt-in。`#[serde(default)]` 兼容旧 config.json（缺字段 = 全关）。
     #[serde(default)]
     pub experimental_features: ExperimentalFeaturesConfig,
@@ -1347,6 +1395,39 @@ impl AppConfig {
             }
         }
 
+        // relay：via/ignored 各自元素非空且去重；就地 trim 元素（参照 manual_peers 风格）。
+        {
+            let mut seen_via: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for id in &mut self.relay.via_device_ids {
+                let trimmed = id.trim();
+                if trimmed.is_empty() {
+                    return Err(AppError::validation("relay.via_device_ids 元素不能为空"));
+                }
+                *id = trimmed.to_string();
+                if !seen_via.insert(id.clone()) {
+                    return Err(AppError::validation(format!(
+                        "relay.via_device_ids 存在重复条目: {id}"
+                    )));
+                }
+            }
+            let mut seen_ignored: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for id in &mut self.relay.ignored_target_ids {
+                let trimmed = id.trim();
+                if trimmed.is_empty() {
+                    return Err(AppError::validation(
+                        "relay.ignored_target_ids 元素不能为空",
+                    ));
+                }
+                *id = trimmed.to_string();
+                if !seen_ignored.insert(id.clone()) {
+                    return Err(AppError::validation(format!(
+                        "relay.ignored_target_ids 存在重复条目: {id}"
+                    )));
+                }
+            }
+        }
+
         // 快捷键：优先 parse_shortcut；插件依赖/单修饰键等解析失败时，只要非空仍允许落盘
         // （真实注册在 hotkey 层再处理；空串一律拒绝）。
         validate_hotkey_field("screenshot_hotkey", &self.screenshot_hotkey)?;
@@ -1445,6 +1526,7 @@ impl AppConfig {
                 internal_claude: InternalClaudeConfig::default(),
                 agent_hub: AgentHubConfig::default(),
                 manual_peers: Vec::new(),
+                relay: RelayConfig::default(),
                 experimental_features: ExperimentalFeaturesConfig::default(),
             };
             store.save_atomic(&cfg)?;
@@ -2026,6 +2108,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            relay: RelayConfig::default(),
             experimental_features: ExperimentalFeaturesConfig::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -2110,6 +2193,7 @@ mod tests {
             internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: AgentHubConfig::default(),
             manual_peers: Vec::new(),
+            relay: RelayConfig::default(),
             experimental_features: ExperimentalFeaturesConfig::default(),
         }
     }
@@ -2366,5 +2450,72 @@ mod tests {
         cfg.game_plugin_dir = "plugins".into();
         let err = cfg.validate().expect_err("相对路径应拒绝");
         assert!(err.to_string().contains("game_plugin_dir"), "{err}");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 config.json 没有 `relay` 字段时必须整体回落默认值且 `enabled=true`
+    ///     （"装好即具备被用作跳板的能力"是默认零配置语义）；serde bool 缺省是
+    ///     false，若缺省处理不当会静默关闭中转能力。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     1) 反序列化无 `relay` 字段的旧配置，断言 relay == RelayConfig::default()
+    ///     且 enabled=true；2) 反序列化只有部分字段的 `relay` 对象，断言缺失字段
+    ///     各自回落（enabled=true、列表空）。
+    #[test]
+    fn relay_config_defaults_to_enabled_when_missing() {
+        let legacy_json = r#"{
+            "device_id":"d","device_name":"n","http_port":0,
+            "receive_dir":"/tmp/r","db_path":"/tmp/db.db",
+            "screenshot_hotkey":"<ctrl>+s"
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(cfg.relay, RelayConfig::default());
+        assert!(cfg.relay.enabled, "缺 relay 字段时 enabled 必须默认 true");
+
+        let partial: RelayConfig = serde_json::from_str(r#"{"viaDeviceIds":["B"]}"#).unwrap();
+        assert!(partial.enabled, "部分字段缺失时 enabled 仍默认 true");
+        assert_eq!(partial.via_device_ids, vec!["B".to_string()]);
+        assert!(partial.ignored_target_ids.is_empty());
+
+        let explicit: RelayConfig =
+            serde_json::from_str(r#"{"enabled":false,"viaDeviceIds":[],"ignoredTargetIds":[]}"#)
+                .unwrap();
+        assert!(!explicit.enabled, "显式 false 应被尊重");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     via/ignored 列表是后续影子设备探测的输入，空串元素与重复条目会导致
+    ///     探测循环空转或重复请求；validate 必须参照 manual_peers 的风格拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造空串元素 / 重复条目的 via 与 ignored，断言 validate 返回对应
+    ///     validation 错误；合法输入 trim 后通过。
+    #[test]
+    fn validate_rejects_relay_list_empty_and_duplicate_entries() {
+        let _env = install_data_dir_env(None);
+        let mut cfg = cfg_with_db_path("/tmp/db.db");
+
+        cfg.relay.via_device_ids = vec!["B".to_string(), "  ".to_string()];
+        let err = cfg.validate().expect_err("via 空元素应拒绝");
+        assert!(err.to_string().contains("via_device_ids"), "{err}");
+
+        cfg.relay.via_device_ids = vec!["B".to_string(), "B".to_string()];
+        let err = cfg.validate().expect_err("via 重复应拒绝");
+        assert!(err.to_string().contains("重复"), "{err}");
+
+        cfg.relay.via_device_ids = vec![" B ".to_string()];
+        cfg.relay.ignored_target_ids = vec!["C".to_string(), "C".to_string()];
+        let err = cfg.validate().expect_err("ignored 重复应拒绝");
+        assert!(err.to_string().contains("ignored_target_ids"), "{err}");
+
+        cfg.relay.ignored_target_ids = vec!["  ".to_string()];
+        let err = cfg.validate().expect_err("ignored 空元素应拒绝");
+        assert!(err.to_string().contains("ignored_target_ids"), "{err}");
+
+        cfg.relay.via_device_ids = vec![" B ".to_string()];
+        cfg.relay.ignored_target_ids = vec![" C ".to_string()];
+        cfg.validate().expect("trim 后合法输入应通过");
+        assert_eq!(cfg.relay.via_device_ids, vec!["B".to_string()]);
+        assert_eq!(cfg.relay.ignored_target_ids, vec!["C".to_string()]);
     }
 }

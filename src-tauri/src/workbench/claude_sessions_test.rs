@@ -1576,6 +1576,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         internal_claude: crate::config::InternalClaudeConfig::default(),
         agent_hub: crate::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
+        relay: crate::config::RelayConfig::default(),
         experimental_features: crate::config::ExperimentalFeaturesConfig::default(),
     };
     let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
@@ -1602,6 +1603,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
         manual_peer_cancel: Arc::new(Mutex::new(None)),
         peer_client: Arc::new(PeerClient::new()),
+        relay: Arc::new(crate::net::relay::RelayRuntime::new()),
         transfers: Arc::new(TransferRegistry::new()),
         ui: Arc::new(HeadlessBackendUi::new(data_dir.join("dist"))),
         update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),

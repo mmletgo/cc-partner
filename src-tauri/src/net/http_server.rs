@@ -23,8 +23,8 @@ use crate::net::mobile_dev_proxy;
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
-    health, mobile, mobile_transfer, orchestrator, prompts, provider_manager, scratchpad_sync,
-    ssh_target_sync, sync, transfer, workbench, workbench_project_order_sync,
+    health, mobile, mobile_transfer, orchestrator, prompts, provider_manager, relay,
+    scratchpad_sync, ssh_target_sync, sync, transfer, workbench, workbench_project_order_sync,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
@@ -417,6 +417,17 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
     // axum Router：with_state 注入 AppState，与 invoke 命令层共享同一份 Arc
     let app: Router = Router::new()
         .route("/api/health", get(health::health))
+        // 中转访问（跳板机）：B 端透明转发路由（能力 net.relay.v1）。
+        // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+        // 精确路由（peers / terminal-input-stream）先于 *path 通配注册；axum matchit
+        // 静态优先，通配不会吞掉精确路径（测试覆盖）。enabled=false 时 handler 内
+        // 返回 relay_disabled 信封（热生效，不做动态路由注册）。
+        .route("/api/relay/peers", get(relay::relay_peers))
+        .route(
+            "/api/relay/:device_id/api/workbench/terminal-input-stream",
+            get(relay::relay_terminal_ws),
+        )
+        .route("/api/relay/:device_id/*path", any(relay::relay_forward))
         .route("/api/backend/control/stop", post(stop_backend_control))
         // N1 Task2：loopback control API（status/get-config/update-config，256 KiB body）
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。

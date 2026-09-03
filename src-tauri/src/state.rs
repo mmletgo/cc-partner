@@ -80,6 +80,9 @@ pub struct AppState {
     pub overlay_trusted_ips: Arc<RwLock<HashSet<IpAddr>>>,
     /// 手动对端探测循环取消令牌（启动时写入，shutdown 时 cancel）。
     pub manual_peer_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    /// 中转访问（跳板机）转发器运行时：出站 client、全局/per-target 并发闸与
+    /// 活跃转发计数（`/api/relay/*` 路由共享；详见 `net::relay`）。
+    pub relay: Arc<crate::net::relay::RelayRuntime>,
     /// 对端 HTTP 客户端（调对端 /api/health、sync、transfer）
     #[allow(dead_code)]
     pub peer_client: Arc<PeerClient>,
