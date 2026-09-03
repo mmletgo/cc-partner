@@ -1,6 +1,4 @@
 //! 影子设备（经跳板可见的远端目标）状态与纯规则。
-// 脚手架阶段：表操作函数由影子探测任务（下一任务）接线，接线时移除本 allow。
-#![allow(dead_code)]
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     设备 A 无法直连设备 C 时，A 从跳板 B 的 `/api/relay/peers` 报告里"看到"C。
@@ -141,4 +139,176 @@ pub fn is_shadow_eligible(
     // 同一 target 只呈现一条影子（先到先得；replace_shadows_for_via 已先清空同 via 旧条目，
     // 此处命中的必属其它 via）。
     !shadows.contains_key(target_device_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::relay_shadow_probe::test_support::build_test_state;
+
+    /// 固定测试身份：A（本机）/ 跳板 B1、B2 / 目标 C、D。
+    const SELF_ID: &str = "shadow-rule-self";
+    const VIA_B1: &str = "relay-rule-B1";
+    const VIA_B2: &str = "relay-rule-B2";
+    const TARGET_C: &str = "target-rule-C";
+    const TARGET_D: &str = "target-rule-D";
+
+    /// 构造一条直连表 Device。
+    fn device(id: &str, host: &str, port: u16, online: bool) -> Device {
+        Device {
+            id: id.to_string(),
+            name: format!("device-{id}"),
+            host: host.to_string(),
+            port,
+            last_seen: Utc::now(),
+            online,
+            proto_version: 1,
+            capabilities: Vec::new(),
+        }
+    }
+
+    /// 构造一份跳板报告（全部视作在线目标）。
+    fn report_of(ids: &[&str]) -> Vec<Device> {
+        ids.iter()
+            .map(|id| device(id, "10.0.0.1", 62116, true))
+            .collect()
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     排除规则是影子表口径的唯一防线：本机不得经中转访问自己、直连已有目标
+    ///     不得被影子重复呈现（直连永远优先）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     `is_shadow_eligible` 纯函数断言：本机拒绝、直连表已有目标拒绝、
+    ///     陌生目标放行；`replace_shadows_for_via` 端到端复验同样的过滤结果。
+    #[test]
+    fn shadow_eligibility_excludes_self_and_direct_duplicates() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = rt.block_on(build_test_state(SELF_ID, vec![VIA_B1.to_string()]));
+        device_insert(&state, device(TARGET_D, "10.0.0.9", 62116, true));
+
+        let shadows = state.relay.shadow_devices.read().unwrap();
+        let devices = state.devices.read().unwrap();
+        assert!(!is_shadow_eligible(SELF_ID, SELF_ID, &shadows, &devices));
+        assert!(!is_shadow_eligible(TARGET_D, SELF_ID, &shadows, &devices));
+        assert!(is_shadow_eligible(TARGET_C, SELF_ID, &shadows, &devices));
+        drop(shadows);
+        drop(devices);
+
+        replace_shadows_for_via(&state, VIA_B1, report_of(&[SELF_ID, TARGET_D, TARGET_C]));
+        let shadows = state.relay.shadow_devices.read().unwrap();
+        assert_eq!(shadows.len(), 1, "仅陌生目标 C 入表: {shadows:?}");
+        assert!(shadows.contains_key(TARGET_C));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一 target 只能呈现一条影子（先到先得）：后到的跳板报告不得抢走已有
+    ///     影子的归属，避免列表与解析的 via 随探测顺序抖动。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     B1 先写入 C；B2 随后报告 [C, D]；断言 C 仍属 B1、D 归 B2。
+    #[test]
+    fn replace_shadows_keeps_first_wins_across_vias() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = rt.block_on(build_test_state(
+            SELF_ID,
+            vec![VIA_B1.to_string(), VIA_B2.to_string()],
+        ));
+
+        replace_shadows_for_via(&state, VIA_B1, report_of(&[TARGET_C]));
+        replace_shadows_for_via(&state, VIA_B2, report_of(&[TARGET_C, TARGET_D]));
+
+        let shadows = state.relay.shadow_devices.read().unwrap();
+        assert_eq!(shadows.len(), 2, "C 保持 B1、D 新增 B2: {shadows:?}");
+        assert_eq!(shadows.get(TARGET_C).unwrap().via_device_id, VIA_B1);
+        assert_eq!(shadows.get(TARGET_D).unwrap().via_device_id, VIA_B2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     跳板自身不可达时其名下影子必须整批下线（复合 online 语义），但不得误伤
+    ///     其它跳板名下的影子。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     B1、B2 各写一条 online 影子；`mark_via_offline(B1)` 后断言仅 B1 的下线。
+    #[test]
+    fn mark_via_offline_only_affects_matching_via() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = rt.block_on(build_test_state(
+            SELF_ID,
+            vec![VIA_B1.to_string(), VIA_B2.to_string()],
+        ));
+        replace_shadows_for_via(&state, VIA_B1, report_of(&[TARGET_C]));
+        replace_shadows_for_via(&state, VIA_B2, report_of(&[TARGET_D]));
+
+        mark_via_offline(&state, VIA_B1);
+
+        let shadows = state.relay.shadow_devices.read().unwrap();
+        assert!(!shadows.get(TARGET_C).unwrap().online, "B1 名下应下线");
+        assert!(shadows.get(TARGET_D).unwrap().online, "B2 名下不受影响");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户撤销对跳板的信任后其名下影子必须全部清理，其它跳板影子保留。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     B1、B2 各写一条影子；`remove_via(B1)` 后断言只剩 B2 的影子。
+    #[test]
+    fn remove_via_drops_only_matching_via_shadows() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = rt.block_on(build_test_state(
+            SELF_ID,
+            vec![VIA_B1.to_string(), VIA_B2.to_string()],
+        ));
+        replace_shadows_for_via(&state, VIA_B1, report_of(&[TARGET_C]));
+        replace_shadows_for_via(&state, VIA_B2, report_of(&[TARGET_D]));
+
+        remove_via(&state, VIA_B1);
+
+        let shadows = state.relay.shadow_devices.read().unwrap();
+        assert_eq!(shadows.len(), 1, "仅剩 B2 名下影子: {shadows:?}");
+        assert!(shadows.contains_key(TARGET_D));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     整批替换要同时处理"新增/改名/消失"：同名目标属性被最新报告刷新，
+    ///     消失目标被移除。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首轮 B1 报告 C；第二轮报告 D（C 消失）；断言 C 被移除、D 入表。
+    #[test]
+    fn replace_shadows_batch_replaces_stale_entries() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = rt.block_on(build_test_state(SELF_ID, vec![VIA_B1.to_string()]));
+        replace_shadows_for_via(&state, VIA_B1, report_of(&[TARGET_C]));
+
+        replace_shadows_for_via(&state, VIA_B1, report_of(&[TARGET_D]));
+
+        let shadows = state.relay.shadow_devices.read().unwrap();
+        assert_eq!(shadows.len(), 1, "C 消失后应被移除: {shadows:?}");
+        assert!(shadows.contains_key(TARGET_D));
+    }
+
+    /// 把 Device 写入直连表（测试播种）。
+    fn device_insert(state: &AppState, entry: Device) {
+        state
+            .devices
+            .write()
+            .unwrap()
+            .insert(entry.id.clone(), entry);
+    }
 }

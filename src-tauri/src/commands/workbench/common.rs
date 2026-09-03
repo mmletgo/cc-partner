@@ -977,33 +977,89 @@ pub(crate) fn validate_save_file_type(
     Ok(detected_type)
 }
 
-/// 从设备表解析远端设备 base URL。
+/// 从设备表解析远端设备 base URL（直连表单段，三段解析的第 1 段）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     远端 Workbench 命令必须先确认目标设备仍在 mDNS 发现表中，否则应提示设备离线。
+///     远端 Workbench 命令必须先确认目标设备仍在线，否则应提示设备离线；
+///     直连表命中即静态决定链路——offline 也按命中处理并直接报错，
+///     不静默 fallback 到影子链路（设计 §5.3：不做直连失败自动 fallback）。
 ///
 /// Code Logic（这个函数做什么）:
-///     从传入的设备 HashMap 按 device_id 查找设备，命中后调用 `Device::base_url`，缺失返回中文错误。
+///     从传入的设备 HashMap 按 device_id 查找设备：命中且 online → `Device::base_url`；
+///     命中但 offline 或缺失 → 中文错误"远端设备不在线"。
 pub(crate) fn device_base_url_from_devices(
     devices: &HashMap<String, Device>,
     device_id: &str,
 ) -> Result<String, AppError> {
-    let device = devices
-        .get(device_id)
-        .ok_or_else(|| AppError::generic("远端设备不在线"))?;
-    Ok(device.base_url())
+    match devices.get(device_id) {
+        Some(device) if device.online => Ok(device.base_url()),
+        _ => Err(AppError::generic("远端设备不在线")),
+    }
 }
 
-/// 从 AppState 解析远端设备 base URL。
+/// 直连 + 影子三段解析（纯函数，便于单测）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Tauri 远端 Workbench 命令只拿到 deviceId，需要通过当前发现设备表找到对端 HTTP 入口。
+///     A 无法直连 C 但与跳板 B 互可达时，对 C 的出站 base_url 应解析为
+///     `{via_base}/api/relay/{C}`，让所有既有客户端（workbench HTTP、事件
+///     NDJSON、终端 WS、浏览器预览代理）零改动获得中转能力；直连永远优先，
+///     解析失败保持 fail-closed 语义（"远端设备不在线"）。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 `state.devices`，委托纯 helper 生成 base URL；只在同步代码段持有读锁，不跨 await。
+///     1. 直连表命中 → 委托 `device_base_url_from_devices`（命中且 online →
+///        直连 URL；offline → 报错，绝不 fallback 影子——链路由表命中静态决定）；
+///     2. 直连未命中但影子表命中且 `shadow.online` 且 via 在直连表且 online →
+///        `{via_base}/api/relay/{target_device_id}`；
+///     3. 影子 offline、via 不可达或都未命中 → 报错"远端设备不在线"。
+pub(crate) fn device_base_url_with_shadows(
+    devices: &HashMap<String, Device>,
+    shadows: &crate::net::relay_shadow::RelayShadowTable,
+    device_id: &str,
+) -> Result<String, AppError> {
+    // 第 1 段：直连表命中永远优先（含 offline——offline 视为命中并直接报错，
+    // 不静默 fallback 到影子，见设计 §5.3）。
+    if devices.contains_key(device_id) {
+        return device_base_url_from_devices(devices, device_id);
+    }
+    // 第 2 段：影子链路（via 直连可达 && 影子 online）。
+    if let Some(shadow) = shadows.get(device_id) {
+        let via = devices
+            .get(&shadow.via_device_id)
+            .filter(|device| device.online);
+        if shadow.online {
+            if let Some(via) = via {
+                return Ok(format!(
+                    "{}/api/relay/{}",
+                    via.base_url(),
+                    shadow.target_device_id
+                ));
+            }
+        }
+        // 影子 offline 或 via 不可达：落到第 3 段失败（fail-closed 语义不变）。
+        return Err(AppError::generic("远端设备不在线"));
+    }
+    // 第 3 段：都未命中。
+    Err(AppError::generic("远端设备不在线"))
+}
+
+/// 从 AppState 解析远端设备 base URL（直连 + 影子三段解析）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tauri 远端 Workbench 命令只拿到 deviceId，需要通过当前发现设备表找到对端
+///     HTTP 入口；目标不可直连时可经跳板（影子表）解析为 `/api/relay/{target}` 前缀。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `state.relay.shadow_devices` 与 `state.devices`（锁序：先影子表后
+///     devices，与 `net::relay_shadow` 写入方一致，避免交叉锁死锁），委托纯 helper
+///     `device_base_url_with_shadows` 生成 base URL；只在同步代码段持有读锁，不跨 await。
 pub(crate) fn device_base_url(state: &AppState, device_id: &str) -> Result<String, AppError> {
+    let shadows = state
+        .relay
+        .shadow_devices
+        .read()
+        .expect("relay 影子表读锁中毒");
     let devices = state.devices.read().expect("devices 读锁中毒");
-    device_base_url_from_devices(&devices, device_id)
+    device_base_url_with_shadows(&devices, &shadows, device_id)
 }
 
 /// 读取当前发现设备名。

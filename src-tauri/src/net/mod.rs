@@ -27,6 +27,8 @@ pub mod protocol;
 pub mod relay;
 /// 影子设备（经跳板可见的远端目标）状态与纯规则。
 pub mod relay_shadow;
+/// 影子设备周期探测（A 侧：拉取跳板 `/api/relay/peers` 合成/老化影子表）。
+pub mod relay_shadow_probe;
 pub mod request_context;
 pub mod routes;
 

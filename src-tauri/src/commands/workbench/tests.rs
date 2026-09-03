@@ -15,6 +15,7 @@ use super::sessions::should_attempt_session_zoom;
 use super::*;
 use crate::error::AppError;
 use crate::models::device::Device;
+use crate::net::relay_shadow::{RelayShadowDevice, RelayShadowTable};
 use crate::workbench::git as workbench_git;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitStatusDto, WorkbenchProjectDto, WorkbenchProjectRow,
@@ -52,6 +53,126 @@ fn device_base_url_from_devices_returns_url_and_offline_error() {
 
     assert_eq!(url, "http://192.168.1.9:14210");
     assert_eq!(missing.to_string(), "远端设备不在线");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     三段解析的第 2 段：目标不可直连但经跳板可见（影子 online 且 via 直连在线）时，
+///     base_url 必须解析为 `{via_base}/api/relay/{target}`，让既有客户端零改动走中转。
+///
+/// Code Logic（这个测试做什么）:
+///     构造影子表（C 经 B1 online）+ 直连表（B1 online、B2 offline），
+///     断言 C 解析为 B1 的 relay 前缀 URL；影子 online 但 via offline → 报错。
+#[test]
+fn device_base_url_with_shadows_resolves_relay_prefix_when_via_reachable() {
+    let mut devices = HashMap::new();
+    devices.insert(
+        "via-b1".to_string(),
+        device("via-b1", "10.0.0.2", 62116, true),
+    );
+    devices.insert(
+        "via-b2".to_string(),
+        device("via-b2", "10.0.0.3", 62116, false),
+    );
+    let mut shadows = RelayShadowTable::new();
+    shadows.insert("target-c".to_string(), shadow("target-c", "via-b1", true));
+    shadows.insert("target-d".to_string(), shadow("target-d", "via-b2", true));
+
+    let relayed = device_base_url_with_shadows(&devices, &shadows, "target-c").unwrap();
+    let via_down = device_base_url_with_shadows(&devices, &shadows, "target-d").unwrap_err();
+
+    assert_eq!(relayed, "http://10.0.0.2:62116/api/relay/target-c");
+    assert_eq!(via_down.to_string(), "远端设备不在线");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     直连表命中（含 offline）必须永远优先且不 fallback 影子：链路由表命中静态
+///     决定（设计 §5.3 不做直连失败自动 fallback），避免健康抖动导致同一请求
+///     链路不确定。
+///
+/// Code Logic（这个测试做什么）:
+///     同一 target 既有直连表 offline 条目又有 online 影子，断言解析报
+///     "远端设备不在线"而不是返回影子 relay URL；直连 online 时返回直连 URL。
+#[test]
+fn device_base_url_with_shadows_never_falls_back_to_shadow_for_direct_hits() {
+    let mut devices = HashMap::new();
+    devices.insert(
+        "target-c".to_string(),
+        device("target-c", "192.168.1.9", 62116, false),
+    );
+    devices.insert(
+        "target-online".to_string(),
+        device("target-online", "192.168.1.10", 62116, true),
+    );
+    let mut shadows = RelayShadowTable::new();
+    shadows.insert("target-c".to_string(), shadow("target-c", "via-b1", true));
+
+    let offline = device_base_url_with_shadows(&devices, &shadows, "target-c").unwrap_err();
+    let direct = device_base_url_with_shadows(&devices, &shadows, "target-online").unwrap();
+    // 对照组：直连表没有 target-c 且 via 也不在表时，同一影子条目解析应失败
+    // （证明 offline 命中本身挡住了 fallback，而非影子 URL 构造失败）。
+    let mut via_only_devices = HashMap::new();
+    via_only_devices.insert(
+        "via-b1".to_string(),
+        device("via-b1", "10.0.0.2", 62116, true),
+    );
+    let fallback_blocked_without_direct =
+        device_base_url_with_shadows(&HashMap::new(), &shadows, "target-c").is_err();
+    let shadow_resolves_with_via =
+        device_base_url_with_shadows(&via_only_devices, &shadows, "target-c").is_ok();
+
+    assert_eq!(offline.to_string(), "远端设备不在线");
+    assert_eq!(direct, "http://192.168.1.10:62116");
+    assert!(
+        fallback_blocked_without_direct,
+        "直连缺失 + via 也不在表时应失败"
+    );
+    assert!(shadow_resolves_with_via, "对照组：via 在表时影子可解析");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     第 3 段 fail-closed：影子 offline / 都未命中时必须返回与现状一致的
+///     "远端设备不在线"错误，不得构造不可用的 URL。
+///
+/// Code Logic（这个测试做什么）:
+///     断言影子 offline、影子表无条目两种情况都报错且文案一致。
+#[test]
+fn device_base_url_with_shadows_fails_closed_on_unreachable_links() {
+    let devices = HashMap::new();
+    let mut shadows = RelayShadowTable::new();
+    shadows.insert("target-c".to_string(), shadow("target-c", "via-b1", false));
+
+    let shadow_offline = device_base_url_with_shadows(&devices, &shadows, "target-c").unwrap_err();
+    let unknown = device_base_url_with_shadows(&devices, &shadows, "no-such").unwrap_err();
+
+    assert_eq!(shadow_offline.to_string(), "远端设备不在线");
+    assert_eq!(unknown.to_string(), "远端设备不在线");
+}
+
+/// 构造测试用直连 Device（host/port/online 可控）。
+fn device(id: &str, host: &str, port: u16, online: bool) -> Device {
+    Device {
+        id: id.to_string(),
+        name: format!("device-{id}"),
+        host: host.to_string(),
+        port,
+        last_seen: Utc::now(),
+        online,
+        proto_version: 1,
+        capabilities: Vec::new(),
+    }
+}
+
+/// 构造测试用影子条目（target/via/online 可控）。
+fn shadow(target: &str, via: &str, online: bool) -> RelayShadowDevice {
+    RelayShadowDevice {
+        target_device_id: target.to_string(),
+        via_device_id: via.to_string(),
+        device_name: format!("device-{target}"),
+        proto_version: 1,
+        capabilities: Vec::new(),
+        online,
+        last_seen: Utc::now(),
+    }
 }
 
 /// Business Logic（为什么需要这个测试）:

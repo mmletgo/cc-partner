@@ -714,6 +714,15 @@ pub async fn start_backend_services(
         move || crate::net::manual_peers::start_manual_peer_probe(probe_state),
     );
 
+    // relay 影子设备（A 侧）：周期拉取跳板 /api/relay/peers 合成影子表
+    // （config.relay.via_device_ids 热生效，≤15s）；经跳板的中转解析与设备列表合并依赖此表。
+    let shadow_probe_state = state.clone();
+    start_cancelled_task_once(
+        crate::net::relay_shadow_probe::relay_shadow_probe_cancel_slot(),
+        "relay 影子设备探测",
+        move || crate::net::relay_shadow_probe::start_relay_shadow_probe(shadow_probe_state),
+    );
+
     Ok(port)
 }
 
@@ -989,6 +998,10 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
 pub fn shutdown_backend_runtime(state: &AppState) {
     discovery::stop_discovery(state);
     cancel_runtime_token(&state.manual_peer_cancel, "manual_peers 探测");
+    cancel_runtime_token(
+        crate::net::relay_shadow_probe::relay_shadow_probe_cancel_slot(),
+        "relay 影子设备探测",
+    );
     cancel_runtime_token(&state.cc_collector_cancel, "CC 历史采集器");
     cancel_runtime_token(&state.cloud_sync_cancel, "云端同步 scheduler");
     cancel_runtime_token(&state.orchestrator_cancel, "Orchestrator scheduler");
