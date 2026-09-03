@@ -565,6 +565,43 @@ send/retry/resume/get-operation/cancel are **local control plane**
 | Open / Reveal | Same-device **desktop GUI only** for `direction=Receive` + `completed`. Sidecar validates path (no-follow ordinary file) via loopback `prepare-open` and returns `LocalTransferOpenTarget`; GUI runs `plugin-opener` `openPath` / `revealItemInDir`. P2P and mobile return `unsupported`; never expose absolute paths over LAN. |
 | 1 GiB dual-host | Real disconnect/restart/resume/SHA on two physical hosts is deferred L3 (`L3-DUAL-HOST-LAN-001`, **NOT VERIFIED**). L0/L2 smoke must not claim that surface. |
 
+## Relay forwarder contract (jump host, `net.relay.v1`)
+
+When the initiator A and the target C cannot reach each other but both reach a
+shared neighbor B, A calls `ANY {B}/api/relay/{C_device_id}/api/...` and B
+transparently forwards to C. C is zero-aware (any existing build can be
+forwarded to). B parses no bodies, buffers nothing, and rewrites no semantics —
+it only strips the `/api/relay/{C}` prefix, passes method/query/end-to-end
+headers through, and streams bodies both ways. The fixed LAN boundary is
+unchanged: `net.relay.v1` is protocol negotiation only — **not** an
+auth/permission token; the three relay routes stay open to all LAN peers.
+
+| Topic | Contract |
+| --- | --- |
+| Capability gate | Client reads `/api/health` first; only a peer with `supports("net.relay.v1")` may be used as the jump host. The token and the three routes ship in the same build. |
+| Single hop | `resolve_relay_target` resolves the target **only** from the relay host's own device table (mDNS + manual peers): a hit that is `online` — else 404 `relay_target_offline`; self-reference (target == relay host) is refused with the same code. There is no secondary lookup and no via chain, so `A → B → D → C` chains are structurally impossible. |
+| Path allowlist | Forwarded `*path` must be `/api/health` (exact) or under `/api/workbench/` / `/api/orchestrator/`; everything else (sync, transfer, prompts, mobile, backend control, …) → 403 `relay_path_not_allowed`. |
+| Retry class | `ANY /api/relay/:device_id/*path` and the WS route are `no-transport-retry`: B forwards bytes for arbitrary methods and can therefore replay a non-idempotent upstream POST/PUT/DELETE. Retry responsibility stays with the caller; the transport must not auto-replay. |
+| Concurrency | Global **8** / per-target **4**, shared by HTTP forwards and WS bridges. Acquisition is non-blocking: saturated → 503 `relay_busy` immediately (fail-fast, no queueing — callers back off). Permits are RAII-bound to the response stream / WS session lifetime, so a long NDJSON stream holding one slot for minutes is expected behavior, not a leak. |
+| Body / buffering | The relay never buffers: request bodies stream through, response bodies stream back, and the outbound client has a connect timeout only (no total timeout, so long streams are not truncated). Body caps are inherited — B's global 32 MiB request limit applies at the relay route and the target route's own limits apply at C; the relay adds none of its own. |
+| Headers | Hop-by-hop headers are stripped in both directions (`host`, `connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `proxy-connection`, `te`, `trailer`, `transfer-encoding`, `upgrade`, `content-length`, `sec-websocket-*`; host/content-length are recomputed by the outbound client). End-to-end: `X-CC-Request-Id` is re-set from the request context (inbound value preserved; if absent, B writes its own generated id so C's logs/error envelopes correlate across hops) and `X-Cc-Partner-Expected-Device-Id` plus other business headers (`Content-Type`, `X-Chunk-Offset`, …) pass through untouched. B adds no CORS headers and no identity semantics. |
+| Expected-device guard | On relay forward paths `expected_device_id_guard` compares `X-Cc-Partner-Expected-Device-Id` against the URL `{device_id}` target segment (not against the relay host); mismatch → 409 `device_id_mismatch`, still fail-closed. Missing/empty header keeps the existing permissive behavior. `/api/relay/peers` is B's own endpoint and keeps the normal compare-against-B semantics. |
+| `GET /api/relay/peers` | camelCase `RelayPeerInfoDto {deviceId, deviceName, protoVersion, capabilities, online}`, sorted by `deviceId`. Reports only devices that are online and not the relay host itself in B's direct table; **no addresses** — address resolution happens only on the relay host. `protoVersion`/`capabilities` are mDNS hints; health stays authoritative. |
+| WS bridge | `GET /api/relay/:device_id/api/workbench/terminal-input-stream` upgrades on B and dials C's terminal input stream as a WS client. The `cc-partner.terminal-input.v1` subprotocol is negotiated end-to-end (C's selection is passed back to A); the outbound handshake carries `X-Cc-Partner-Expected-Device-Id: {device_id}` because C's guard requires it. Frames pass both ways unmodified; either side closing or erroring closes both sides — B never reconnects and never replays frames (ACK semantics live at the target gateway). A malformed inbound upgrade answers 400 with code `relay_target_unreachable`. |
+| Disabled | `relay.enabled=false`: `/api/health` drops `net.relay.v1` from `capabilities` (authoritative signal) and all three routes answer 503 `relay_disabled` (hot config change; routes stay mounted). mDNS TXT caps come from the build-level static capability list and may still contain the token — treat `/api/health` as authoritative. |
+| Caller (A side) | Link choice is static, derived from whether A's direct device table hits: direct hit → call C directly; otherwise a shadow device (via marker) resolves to `{via}/api/relay/{target}`. Direct-call failure must **not** automatically fall back to the relay (health flapping would make one request take different paths); shadow entries exist for listing and resolution only, and every real call is still verified by the target's health. |
+
+Error domain codes (envelope `code`; the same codes appear in the route
+inventory rows above):
+
+| Code | HTTP | Semantics |
+| --- | --- | --- |
+| `relay_target_offline` | 404 | target missing / offline / self-reference in the relay host's device table; `retryable=false` |
+| `relay_target_unreachable` | 502 | upstream connect (or WS handshake) failed; the relay host marks the target offline in its device table so the next call converges to `relay_target_offline`; `retryable=true` |
+| `relay_busy` | 503 | global 8 / per-target 4 saturated; fail-fast, caller backs off; `retryable=true` |
+| `relay_disabled` | 503 | `relay.enabled=false` on the relay host; `retryable=true` |
+| `relay_path_not_allowed` | 403 | forwarded path outside the allowlist; `retryable=false` |
+
 ## Notes on the mandatory classifications
 
 - **Server-enforced idempotency keys today.** (1) Orchestrator create:
