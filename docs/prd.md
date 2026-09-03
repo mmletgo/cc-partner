@@ -360,7 +360,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.15 工作台
 
-**描述**：以项目文件夹为中心管理 Git worktree、普通交互式终端、当前工作区文件夹、文件内容浏览/编辑和 Git 提交树。支持本机目录、已挂载局域网目录，以及通过局域网 P2P 直连选择远端 cc-partner 设备项目目录（无调用者身份校验）；用户可直接浏览已发现设备的目录并选择远端项目文件夹，文件、Git、worktree、终端和 Prompt 优化均代理到远端设备执行。
+**描述**：以项目文件夹为中心管理 Git worktree、普通交互式终端、当前工作区文件夹、文件内容浏览/编辑和 Git 提交树。支持本机目录、已挂载局域网目录，以及通过局域网 P2P 直连选择远端 cc-partner 设备项目目录（无调用者身份校验）；用户可直接浏览已发现设备的目录并选择远端项目文件夹，文件、Git、worktree、终端和 Prompt 优化均代理到远端设备执行。直连不可达的目标设备可经跳板中转访问（见 2.19）。
 
 **功能点**：
 - 工作现场安全恢复：桌面端自动保存最后工作现场结构 metadata（project/worktree/session/view/inspector/browser target；主窗 slot `desktop:auto`，卫星窗 slot `desktop:auto:window:workbench-[1-4]`，`schemaVersion=1`，稳定 selection 变化 500ms debounce 合并；revision CAS）。卫星窗 URL `projectId` 与 slot 内项目不一致时以 URL 为准，跳过该 slot restore。layout **不得**包含 terminal 字节、Prompt/回复、文件正文、env、token、命令、provider 配置或 preview ID。打开 Workbench 时先 side-effect-free preflight，再应用可安全恢复项；tmux target 存在才允许幂等 safe attach，禁止 `tmux new-session/new-window`、raw PTY fallback、terminal write、创建 worktree/shell、Claude/Codex resume。完全成功静默；partial 仅一条可关闭 inline notice。命名 snapshot 仅结构 metadata，非可执行命令配方；2026-08 起**不在 Workbench 标题行暴露「现场快照」UI 入口**——"动态新建窗口/新建 worktree"的用户从不需要命名 layout，二级按钮只会变成噪音；数据层（`workspaceLayout` `kind:'named'`、IPC `list_named_workspace_layouts` / `save_workspace_layout{named}` / `delete_named_workspace_layout`、Dialog `WorkspaceSnapshotDialog` 与对应单测）保留，后续若需要可在 hook 之外另起入口（Settings 高级/调试）。remote layout 留在控制设备；owner 只接收 inner ID 做 preflight/attach，capability `workbench.workspace-safe-restore.v1`；Mobile v1 不自动应用 Desktop layout。不新增第 8 个 Workbench controller。
@@ -464,6 +464,22 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 判题在后端完成；选择即时对错；填空/改错大小写不敏感并忽略常见标点
 
 - 移动端新建 xterm 时必须用 session 持久化 cols/rows 初始化 resize 基线，首个 FitAddon 结果相同不得回传 resize、触发 tmux 强制重绘；共享 xterm scrollback 至少保留 20,000 个物理行，避免窄屏重排后只剩靠后的 TUI 重绘帧、无法到达早期消息。
+
+### 2.19 中转访问（跳板机）
+
+**描述**：发起方 A 与目标设备 C 互相不可达（不同子网 / VLAN / AP 隔离 / 防火墙）但共享一台可达邻居 B 时，A 可经 B 中转访问 C 的远程项目（`A → B → C`）。B 必须运行 cc-partner（GUI 桌面版或 headless `cc-partner-backend`，默认允许被用作跳板）；**C 零感知零改动**（老版本即兼容）。链路上没有 SSH 参与，A→B 与 B→C 均为 cc-partner HTTP。权威设计见 [`docs/superpowers/specs/2026-09-04-p2p-relay-design.md`](superpowers/specs/2026-09-04-p2p-relay-design.md)。
+
+**功能点**：
+- B 端转发为应用层透明转发（`/api/relay/*`），仅放行 `/api/health`、`/api/workbench/*`、`/api/orchestrator/*` 路径；受与其它业务 API 相同的 LAN 边界（socket peer / Host / Origin / Content-Type / body 上限）约束，另有全局 8、单目标 4 的转发并发上限；能力声明 `net.relay.v1` 仅表示"本机支持转发"，不带授权语义
+- B 端默认允许被用作跳板（`relay.enabled=true`），可在 Settings 依赖环境页或 headless CLI `cc-partner-backend relay allow off` 关闭；关闭后不宣告能力、转发拒绝
+- A 端用户只需在 Settings 依赖环境页勾选"信任的跳板设备"（或 headless CLI `relay via add <device_id|device_name>`），**不需要逐个配置目标**：目标设备经跳板自动发现（约 15s 周期），以"影子设备"进入设备列表（带「经 X 中转」标记，在线状态 = 跳板可达且目标在线）
+- 直连永远优先：目标对 A 直连可达时自动走直连，恢复直连后已打开的远程项目无需重开（shortcut 只存目标 device_id，与链路解耦）
+- 单跳硬限制：链路深度固定为 1，跳板的转发目标只从跳板自己的直连表解析，不允许多级跳板串联
+- 影子设备离线（跳板不可达或目标下线）时在设备选择列表置灰并提示原因；错误按 domain_code 区分"跳板故障"与"目标设备故障"
+- 中转链路覆盖远程项目全链路：项目列表/打开、文件读写、Git/worktree、终端（HTTP 控制 + WS 输入 + NDJSON 事件流）、浏览器预览、Orchestrator；手机 `/mobile` 经主机自动获得三跳链路（手机 → A → B → C），零配置
+- headless 设备全程可用命令配置与排查：`cc-partner-backend devices` / `relay status` / `relay via add|remove` / `relay allow on|off` / `peers add|remove|list`（manual peer 手动发现兜底）；运行中经 control plane 热生效，未运行直接落盘 config.json
+- 中转不改变固定局域网信任边界：不引入任何身份鉴权或授权机制；跳板可见明文流量（与全 P2P 明文 HTTP 同等级），Settings 固定展示风险提示
+- 明确范围外：Transfer P2P 文件传输与双向同步（sync/prompts）不经中转（后续扩展另行评审）；Linux headless 交叉编译产物经 `scripts/docker-build-backend-linux.mjs` 构建分发
 
 ## 3. 非功能需求
 
