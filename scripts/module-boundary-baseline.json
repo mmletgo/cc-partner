@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-02T10:34:02.064Z",
+  "generatedAt": "2026-09-03T08:42:44.053Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -40,7 +40,7 @@
       "lines": 2851
     },
     "src-tauri/src/backend/control_client.rs": {
-      "lines": 4202
+      "lines": 4181
     },
     "src-tauri/src/backend/logging.rs": {
       "lines": 2502
@@ -87,7 +87,7 @@
       "lines": 4804
     },
     "src-tauri/src/workbench/sessions.rs": {
-      "lines": 8031,
+      "lines": 8012,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
