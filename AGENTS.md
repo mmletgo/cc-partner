@@ -507,7 +507,7 @@ git tag v<版本号> && git push origin v<版本号>  # 公开发布 macOS arm64
 | Tauri `#[tauri::command]` 注册与领域语义 | `src-tauri/src/commands/*` + `src-tauri/AGENTS.md` 各领域节 |
 | 前端 invoke / HTTP 封装 | `web/src/api/*` + `web/AGENTS.md` |
 | P2P `/api/*` 路由、retry class、幂等键 | `docs/p2p-protocol.md` + `node scripts/check-p2p-route-inventory.mjs` + `src-tauri/AGENTS.md`「P2P 协议…」 |
-| Health 能力 token | `server_protocol_info()` 字典序全集；本轮新增含 `agent-hub.portable-user.v1` · `agent-hub.user-instructions.v1` · `agent-hub.user-mirror.v1` · `orchestrator.complete-agent-run.v1` · `orchestrator.move-workflow-state.v1` · `workbench.banner.v1` · `workbench.dependency-install.v1` · `workbench.fs.create-dir.v1` · `workbench.hook-repair.v1` · `workbench.project-notes.v1`（权威清单见 `docs/p2p-protocol.md`） |
+| Health 能力 token | `server_protocol_info()` 字典序全集；本轮新增含 `agent-hub.portable-user.v1` · `agent-hub.user-instructions.v1` · `agent-hub.user-mirror.v1` · `net.relay.v1` · `orchestrator.complete-agent-run.v1` · `orchestrator.move-workflow-state.v1` · `workbench.banner.v1` · `workbench.dependency-install.v1` · `workbench.fs.create-dir.v1` · `workbench.hook-repair.v1` · `workbench.project-notes.v1`（权威清单见 `docs/p2p-protocol.md`） |
 
 ### 8.3 添加新能力
 
