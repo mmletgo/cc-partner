@@ -463,6 +463,16 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ),
             ),
         )
+        // 中转访问（跳板机）：headless CLI 只读设备/影子/relay 配置快照
+        // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+        .route(
+            "/api/backend/control/devices",
+            post(crate::backend::control_api::control_devices).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
         // N1 Task4：Workbench owner control（metadata 256 KiB；data 32 MiB）
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
         .route(

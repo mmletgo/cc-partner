@@ -1026,3 +1026,322 @@ fn agent_hub_owner_lifecycle_single_owner() {
         fail_case(&mut case, format!("stop 后 owner pid={first_pid} 仍存活"));
     }
 }
+
+/// 从 CLI stdout 提取最后一个非空行并解析为 JSON Value。
+///
+/// Business Logic（为什么需要这个函数）:
+///     devices / relay status / peers list 的 `--json` 契约是"stdout 单行可 jq"；
+///     smoke 需要按同一口径解析。
+///
+/// Code Logic（这个函数做什么）:
+///     取 stdout 最后一个非空行，`serde_json` 解析为 `Value`，失败附带诊断。
+fn parse_last_json_line(captured: &CapturedCli) -> Result<serde_json::Value, String> {
+    let line = captured
+        .stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .ok_or_else(|| format!("CLI stdout 无 JSON 行\n{}", captured.diagnostic()))?;
+    serde_json::from_str(line).map_err(|err| {
+        format!(
+            "解析 JSON 失败: {err}\nline={line}\n{}",
+            captured.diagnostic()
+        )
+    })
+}
+
+/// 中转访问 CLI：离线落盘 → 运行中热更新 → devices/relay status 读取全链路。
+///
+/// Business Logic（为什么需要这个测试）:
+///     无 GUI 设备（跳板机/发起方）必须全程命令行可配：backend 未运行时写 config.json，
+///     运行中经 control CAS 热生效；`--json` 契约与退出码（0/1/2）必须稳定。
+///
+/// Code Logic（这个测试做什么）:
+///     隔离 data dir 内先离线验证 `relay allow off`、`peers add`（含重复 exit 1、
+///     非法参数 exit 2）、`relay via add`（透明 id）与 config.json 落盘；再 start 后
+///     验证 `devices --json`、`relay status --json` 读取，`relay allow on`、
+///     `peers add/remove` 经 CAS 热生效并落盘，空设备表下按名添加 exit 1；最后 stop
+///     并确认离线 `peers list --json` 与运行时最终状态一致。
+#[test]
+fn relay_cli_offline_and_running_configuration() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+
+    let mut case = SmokeCase::new("relay-cli").expect("创建 smoke case");
+    let config_file = case.data_dir.join("config.json");
+
+    // ── 离线阶段：backend 未运行，写命令直接落盘 ─────────────────────────
+    let allow_off = match case.run_cli(&["relay", "allow", "off"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("relay allow off 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "relay allow off", &allow_off);
+
+    let peer_add = match case.run_cli(&["peers", "add", "127.0.0.1:59999"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("peers add 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "peers add", &peer_add);
+
+    let peer_dup = match case.run_cli(&["peers", "add", "127.0.0.1:59999"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("重复 peers add 执行失败: {err}")),
+    };
+    if peer_dup.code != Some(1) {
+        fail_case(
+            &mut case,
+            format!("重复 peers add 应 exit 1\n{}", peer_dup.diagnostic()),
+        );
+    }
+
+    let peer_add_default = match case.run_cli(&["peers", "add", "127.0.0.2"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("默认端口 peers add 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "peers add 默认端口", &peer_add_default);
+
+    let via_offline = match case.run_cli(&["relay", "via", "add", "offline-jump-id"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("离线 relay via add 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "relay via add 离线", &via_offline);
+
+    for (label, args, expected) in [
+        ("relay allow 非法枚举", vec!["relay", "allow", "banana"], 2),
+        ("peers add 裸 IPv6", vec!["peers", "add", "::1"], 2),
+        ("peers add 端口 0", vec!["peers", "add", "host:0"], 2),
+        ("peers list 未知选项", vec!["peers", "list", "--yaml"], 2),
+    ] {
+        let captured = match case.run_cli(&args) {
+            Ok(captured) => captured,
+            Err(err) => fail_case(&mut case, format!("{label} 执行失败: {err}")),
+        };
+        if captured.code != Some(expected) {
+            fail_case(
+                &mut case,
+                format!("{label} 应 exit {expected}\n{}", captured.diagnostic()),
+            );
+        }
+    }
+
+    let peers_list_offline = match case.run_cli(&["peers", "list", "--json"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("离线 peers list 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "离线 peers list --json", &peers_list_offline);
+    let peers_offline_json = match parse_last_json_line(&peers_list_offline) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if peers_offline_json["peers"].as_array().map(Vec::len) != Some(2) {
+        fail_case(
+            &mut case,
+            format!("离线 peers list 应 2 条: {peers_offline_json}"),
+        );
+    }
+
+    let config_on_disk = match std::fs::read_to_string(&config_file) {
+        Ok(text) => text,
+        Err(err) => fail_case(&mut case, format!("读取 config.json 失败: {err}")),
+    };
+    let config_json: serde_json::Value = match serde_json::from_str(&config_on_disk) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, format!("config.json 不是合法 JSON: {err}")),
+    };
+    if config_json["relay"]["enabled"] != serde_json::Value::Bool(false) {
+        fail_case(&mut case, format!("离线 allow off 未落盘: {config_json}"));
+    }
+    let via_ids = config_json["relay"]["viaDeviceIds"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !via_ids.iter().any(|v| v == "offline-jump-id") {
+        fail_case(&mut case, format!("离线 via add 未落盘: {config_json}"));
+    }
+    // AppConfig 顶层键为 snake_case（磁盘持久化契约）；嵌套 RelayConfig 为 camelCase。
+    if config_json["manual_peers"].as_array().map(Vec::len) != Some(2) {
+        fail_case(&mut case, format!("离线 peers add 未落盘: {config_json}"));
+    }
+
+    // ── 运行阶段：start 后经 control CAS 热更新 ─────────────────────────
+    let start = match case.run_cli(&["start"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("start 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "start", &start);
+    let start_status = match start.parse_status_json() {
+        Ok(status) => status,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if start_status.kind != "running" {
+        fail_case(&mut case, format!("start 后应 running: {start_status:?}"));
+    }
+    record_pid_from_status(&mut case, &start_status);
+    let control = match case.wait_for_control_file() {
+        Ok(control) => control,
+        Err(err) => fail_case(&mut case, err),
+    };
+    case.record_pid(control.pid);
+
+    let devices = match case.run_cli(&["devices", "--json"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("devices --json 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "devices --json", &devices);
+    let devices_json = match parse_last_json_line(&devices) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if devices_json["deviceId"].as_str().unwrap_or("") != control.device_id {
+        fail_case(
+            &mut case,
+            format!("devices.deviceId 应与 control 一致: {devices_json}"),
+        );
+    }
+    if !devices_json["devices"].is_array() {
+        fail_case(
+            &mut case,
+            format!("devices.devices 应为数组: {devices_json}"),
+        );
+    }
+
+    let status_before = match case.run_cli(&["relay", "status", "--json"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("relay status --json 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "relay status --json（启动后）", &status_before);
+    let status_before_json = match parse_last_json_line(&status_before) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if status_before_json["relayEnabled"] != serde_json::Value::Bool(false) {
+        fail_case(
+            &mut case,
+            format!("relay status 应反映启动时磁盘配置: {status_before_json}"),
+        );
+    }
+
+    let allow_on = match case.run_cli(&["relay", "allow", "on"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("relay allow on 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "relay allow on（运行中 CAS）", &allow_on);
+
+    let status_after = match case.run_cli(&["relay", "status", "--json"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("relay status --json 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "relay status --json（热更新后）", &status_after);
+    let status_after_json = match parse_last_json_line(&status_after) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if status_after_json["relayEnabled"] != serde_json::Value::Bool(true) {
+        fail_case(
+            &mut case,
+            format!("运行中 allow on 未热生效: {status_after_json}"),
+        );
+    }
+
+    let peer_hot_add = match case.run_cli(&["peers", "add", "127.0.0.1:58888"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("运行中 peers add 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "运行中 peers add（CAS）", &peer_hot_add);
+    let via_name_miss = match case.run_cli(&["relay", "via", "add", "no-such-device"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("relay via add 按名失败: {err}")),
+    };
+    if via_name_miss.code != Some(1) {
+        fail_case(
+            &mut case,
+            format!("空设备表按名添加应 exit 1\n{}", via_name_miss.diagnostic()),
+        );
+    }
+
+    let peers_list_running = match case.run_cli(&["peers", "list", "--json"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("运行中 peers list 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "运行中 peers list --json", &peers_list_running);
+    let peers_running_json = match parse_last_json_line(&peers_list_running) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if peers_running_json["peers"].as_array().map(Vec::len) != Some(3) {
+        fail_case(
+            &mut case,
+            format!("运行中 peers list 应 3 条: {peers_running_json}"),
+        );
+    }
+
+    let peer_hot_remove = match case.run_cli(&["peers", "remove", "127.0.0.1:58888"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("运行中 peers remove 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "运行中 peers remove（CAS）", &peer_hot_remove);
+
+    let devices_text = match case.run_cli(&["devices"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("devices 文本模式失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "devices（文本）", &devices_text);
+    if !devices_text.stdout.contains("本机") {
+        fail_case(
+            &mut case,
+            format!(
+                "devices 文本输出应含本机身份\n{}",
+                devices_text.diagnostic()
+            ),
+        );
+    }
+
+    let stop = match case.run_cli(&["stop"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("stop 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "stop", &stop);
+    let stop_status = match stop.parse_status_json() {
+        Ok(status) => status,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if stop_status.kind != "stopped" {
+        fail_case(&mut case, format!("stop 后应 stopped: {stop_status:?}"));
+    }
+    let stop_deadline = Instant::now() + case.op_timeout;
+    while Instant::now() < stop_deadline && process_is_alive(control.pid) {
+        thread::sleep(Duration::from_millis(100));
+    }
+    if process_is_alive(control.pid) {
+        fail_case(&mut case, format!("stop 后 pid {} 仍存活", control.pid));
+    }
+
+    // stop 后离线 list 应与运行中 CAS 的最终落盘一致（3-1=2 条）。
+    let peers_list_final = match case.run_cli(&["peers", "list", "--json"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("stop 后 peers list 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "stop 后 peers list --json", &peers_list_final);
+    let peers_final_json = match parse_last_json_line(&peers_list_final) {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if peers_final_json["peers"].as_array().map(Vec::len) != Some(2) {
+        fail_case(
+            &mut case,
+            format!("stop 后 peers list 应 2 条（CAS 落盘）: {peers_final_json}"),
+        );
+    }
+    let final_config: serde_json::Value = match std::fs::read_to_string(&config_file)
+        .map_err(|e| e.to_string())
+        .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+    {
+        Ok(value) => value,
+        Err(err) => fail_case(&mut case, format!("读取最终 config.json 失败: {err}")),
+    };
+    if final_config["relay"]["enabled"] != serde_json::Value::Bool(true) {
+        fail_case(&mut case, format!("运行中 allow on 未落盘: {final_config}"));
+    }
+}

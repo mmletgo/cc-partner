@@ -407,6 +407,12 @@ pub struct ConfigSnapshot {
     pub internal_claude: crate::config::InternalClaudeConfig,
     #[serde(default)]
     pub experimental_features: crate::config::ExperimentalFeaturesConfig,
+    /// 中转访问（跳板机）配置投影（headless CLI CAS 合并需要当前值）。
+    #[serde(default)]
+    pub relay: crate::config::RelayConfig,
+    /// 手动 overlay 对端投影（headless CLI CAS 合并需要当前值）。
+    #[serde(default)]
+    pub manual_peers: Vec<crate::config::ManualPeerConfig>,
 }
 
 impl ConfigSnapshot {
@@ -444,6 +450,8 @@ impl ConfigSnapshot {
             github_trending: config.github_trending.clone(),
             internal_claude: config.internal_claude.clone(),
             experimental_features: config.experimental_features.clone(),
+            relay: config.relay.clone(),
+            manual_peers: config.manual_peers.clone(),
         }
     }
 
@@ -477,6 +485,8 @@ impl ConfigSnapshot {
         cfg.github_trending = self.github_trending.clone();
         cfg.internal_claude = self.internal_claude.clone();
         cfg.experimental_features = self.experimental_features.clone();
+        cfg.relay = self.relay.clone();
+        cfg.manual_peers = self.manual_peers.clone();
     }
 }
 
@@ -663,6 +673,14 @@ pub struct RuntimeConfigPatch {
     /// 内测功能开关整表覆盖。
     #[serde(default)]
     pub experimental_features: Option<crate::config::ExperimentalFeaturesConfig>,
+    /// 中转访问（跳板机）配置整段覆盖（enabled/via_device_ids/ignored_target_ids）。
+    /// Some 时整体替换并走既有 `AppConfig::validate`（via/ignored 去重、元素非空）。
+    #[serde(default)]
+    pub relay: Option<crate::config::RelayConfig>,
+    /// 手动 overlay 对端整表覆盖（跨子网/VPN）。Some 时整体替换；
+    /// host 空/port 0/重复 (host,port) 由既有 validate 拒绝。
+    #[serde(default)]
+    pub manual_peers: Option<Vec<crate::config::ManualPeerConfig>>,
 }
 
 impl RuntimeConfigPatch {
@@ -743,6 +761,12 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref features) = self.experimental_features {
             cfg.experimental_features = features.clone();
+        }
+        if let Some(ref relay) = self.relay {
+            cfg.relay = relay.clone();
+        }
+        if let Some(ref peers) = self.manual_peers {
+            cfg.manual_peers = peers.clone();
         }
         Ok(())
     }
@@ -1170,6 +1194,158 @@ mod tests {
             msg.contains("unknown field") || msg.contains("theme"),
             "应拒绝未知字段: {msg}"
         );
+    }
+
+    /// relay/manual_peers patch 经 CAS 路径整段生效并进入 ConfigSnapshot 投影。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     headless CLI（relay via/allow、peers add/remove）依赖 allowlist patch 的两个新段
+    ///     热更新 sidecar 权威配置，且后续 get-config 必须带回当前值供 CLI 合并。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     提交 relay+manual_peers patch → 断言内存配置替换、generation 0→1、
+    ///     `snapshot_with_generation` 投影包含新值；反序列化侧确认新字段 camelCase 可回读。
+    #[tokio::test]
+    async fn relay_and_manual_peers_patch_applies_and_projects() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
+        let runtime = test_config_runtime("owner-a", 0).await;
+        let patch = RuntimeConfigPatch {
+            relay: Some(crate::config::RelayConfig {
+                enabled: false,
+                via_device_ids: vec!["jump-1".into(), "jump-2".into()],
+                ignored_target_ids: vec!["ghost".into()],
+            }),
+            manual_peers: Some(vec![crate::config::ManualPeerConfig {
+                host: "10.0.0.9".into(),
+                port: 40001,
+            }]),
+            ..Default::default()
+        };
+        let response = runtime
+            .apply_patch_if_generation("owner-a", 0, patch)
+            .await
+            .expect("relay patch 应成功");
+        assert_eq!(response.generation, 1);
+
+        let cfg = runtime.snapshot().unwrap();
+        assert!(!cfg.relay.enabled);
+        assert_eq!(cfg.relay.via_device_ids, vec!["jump-1", "jump-2"]);
+        assert_eq!(cfg.relay.ignored_target_ids, vec!["ghost"]);
+        assert_eq!(cfg.manual_peers.len(), 1);
+        assert_eq!(cfg.manual_peers[0].host, "10.0.0.9");
+        assert_eq!(cfg.manual_peers[0].port, 40001);
+
+        let snap = runtime.snapshot_with_generation().unwrap();
+        assert_eq!(snap.relay, cfg.relay);
+        assert_eq!(snap.manual_peers, cfg.manual_peers);
+        let raw = serde_json::to_string(&snap).unwrap();
+        assert!(raw.contains("\"relay\":{\"enabled\":false"), "{raw}");
+        assert!(raw.contains("\"viaDeviceIds\":[\"jump-1\""), "{raw}");
+        assert!(
+            raw.contains("\"manualPeers\":[{\"host\":\"10.0.0.9\""),
+            "{raw}"
+        );
+    }
+
+    /// 缺省 relay/manual_peers 字段的 patch 不得触碰既有配置段。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 旧客户端只提交自己编辑的字段；新增可选字段缺省时必须保持“未传即保留”。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先落一份非默认 relay/manual_peers，再提交仅含 device_name 的 patch，
+    ///     断言 relay 与 manual_peers 原样保留。
+    #[tokio::test]
+    async fn patch_without_relay_fields_leaves_existing_values() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
+        let runtime = test_config_runtime("owner-a", 0).await;
+        let seed = RuntimeConfigPatch {
+            relay: Some(crate::config::RelayConfig {
+                enabled: false,
+                via_device_ids: vec!["keep-via".into()],
+                ignored_target_ids: Vec::new(),
+            }),
+            manual_peers: Some(vec![crate::config::ManualPeerConfig {
+                host: "10.9.9.9".into(),
+                port: 62116,
+            }]),
+            ..Default::default()
+        };
+        runtime
+            .apply_patch_if_generation("owner-a", 0, seed)
+            .await
+            .expect("seed patch");
+
+        runtime
+            .apply_patch_if_generation(
+                "owner-a",
+                1,
+                RuntimeConfigPatch {
+                    device_name: Some("only-name".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("name patch");
+
+        let cfg = runtime.snapshot().unwrap();
+        assert_eq!(cfg.device_name, "only-name");
+        assert!(!cfg.relay.enabled);
+        assert_eq!(cfg.relay.via_device_ids, vec!["keep-via"]);
+        assert_eq!(cfg.manual_peers.len(), 1);
+        assert_eq!(cfg.manual_peers[0].host, "10.9.9.9");
+    }
+
+    /// 非法 relay/manual_peers patch 必须被 validate 拒绝且不落盘不换内存。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     via 重复与 peer (host,port) 重复会破坏配置不变量；CAS 失败路径不得 swap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别提交 via 重复与 peer 重复的 patch，断言 Err、generation 不变、
+    ///     内存配置保持默认段。
+    #[tokio::test]
+    async fn invalid_relay_or_peer_patch_rejected_without_swap() {
+        let _data_dir_guard = crate::config::install_data_dir_env(None);
+        let runtime = test_config_runtime("owner-a", 0).await;
+
+        let dup_via = RuntimeConfigPatch {
+            relay: Some(crate::config::RelayConfig {
+                enabled: true,
+                via_device_ids: vec!["same".into(), " same ".into()],
+                ignored_target_ids: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let err = runtime
+            .apply_patch_if_generation("owner-a", 0, dup_via)
+            .await
+            .expect_err("via 重复应被 validate 拒绝");
+        assert!(err.to_string().contains("via_device_ids"), "{err}");
+
+        let dup_peer = RuntimeConfigPatch {
+            manual_peers: Some(vec![
+                crate::config::ManualPeerConfig {
+                    host: "10.0.0.1".into(),
+                    port: 62116,
+                },
+                crate::config::ManualPeerConfig {
+                    host: "10.0.0.1".into(),
+                    port: 62116,
+                },
+            ]),
+            ..Default::default()
+        };
+        let err = runtime
+            .apply_patch_if_generation("owner-a", 0, dup_peer)
+            .await
+            .expect_err("peer 重复应被 validate 拒绝");
+        assert!(err.to_string().contains("manual_peers"), "{err}");
+
+        assert_eq!(runtime.generation(), 0, "失败不得递增 generation");
+        let cfg = runtime.snapshot().unwrap();
+        assert!(cfg.relay.via_device_ids.is_empty(), "内存不得被半提交污染");
+        assert!(cfg.manual_peers.is_empty());
     }
 
     /// 事务路径成功后 generation 递增。

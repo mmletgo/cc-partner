@@ -22,6 +22,7 @@ use crate::backup::{
     BackupRestoreService, CreateBackupResult, InspectPreview, PreRestoreBackupInfo, RestoreMode,
     RestoreRequest, RestoreResult, FORMAT_VERSION,
 };
+use crate::commands::devices::collect_device_dtos_with_shadows;
 use crate::commands::orchestrator::{
     append_orchestrator_task_block_member_view_for_state,
     approve_orchestrator_experiment_winner_for_state, cancel_orchestrator_experiment_for_state,
@@ -611,6 +612,134 @@ pub async fn control_update_config(
 pub struct ControlRuntimeSnapshotRequest {
     pub control_token: String,
     pub project_id: String,
+}
+
+// ── relay CLI devices 快照（headless CLI 专用只读 control 端点）────────────
+
+/// control devices 请求体（仅 token）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     headless CLI（`cc-partner-backend devices/relay`）需要 loopback+token 读取
+///     直连+影子设备表与 relay 配置快照；鉴权字段与相邻 control 端点一致。
+///
+/// Code Logic（这个结构做什么）:
+///     反序列化 camelCase `controlToken`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlDevicesRequest {
+    pub control_token: String,
+}
+
+/// 影子设备条目 DTO（CLI 渲染与 `relay status --json` 复用）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     CLI 与 GUI 需要同一份"经跳板可见目标"视图：target/via/device_name/online/last_seen。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase wire；last_seen 为 RFC3339 字符串。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlRelayShadowDto {
+    /// 被中转访问的目标设备 device_id。
+    pub target_device_id: String,
+    /// 提供中转的跳板设备 device_id。
+    pub via_device_id: String,
+    /// 目标设备名（跳板报告）。
+    pub device_name: String,
+    /// via 直连可达 && via 报告 target online。
+    pub online: bool,
+    /// 最近一次跳板报告确认时间（RFC3339）。
+    pub last_seen: String,
+}
+
+/// control devices 响应（本机身份 + 直连/影子合并设备表 + relay 配置 + 影子清单）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     headless 设备配置中转需一条命令拿到 device_id 名册（`devices`）、跳板当前
+///     配置与影子可达性（`relay status`）；数据全部来自 owner 内存表，无网络 IO。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase；devices 为 `collect_device_dtos_with_shadows` 的合并结果（影子条目带
+///     viaDeviceId/viaDeviceName）；relay 为 config_runtime 内存快照的 relay 段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlDevicesResponse {
+    /// 本机 device_id。
+    pub device_id: String,
+    /// 本机设备名。
+    pub device_name: String,
+    /// 直连 + 影子合并设备表（is_self=false）。
+    pub devices: Vec<crate::models::device::DeviceDto>,
+    /// 当前权威 relay 配置（enabled/viaDeviceIds/ignoredTargetIds）。
+    pub relay: crate::config::RelayConfig,
+    /// 影子设备清单（按 target_device_id 排序，稳定输出）。
+    pub shadows: Vec<ControlRelayShadowDto>,
+}
+
+/// 影子表条目转 CLI DTO。
+///
+/// Business Logic（为什么需要这个函数）:
+///     control devices 响应只暴露展示/诊断字段（不含 proto/capabilities 转述）。
+///
+/// Code Logic（这个函数做什么）:
+///     映射五个字段并把 `last_seen` 转 RFC3339。
+fn relay_shadow_to_dto(
+    shadow: &crate::net::relay_shadow::RelayShadowDevice,
+) -> ControlRelayShadowDto {
+    ControlRelayShadowDto {
+        target_device_id: shadow.target_device_id.clone(),
+        via_device_id: shadow.via_device_id.clone(),
+        device_name: shadow.device_name.clone(),
+        online: shadow.online,
+        last_seen: shadow.last_seen.to_rfc3339(),
+    }
+}
+
+/// 返回本机设备身份 + 直连/影子设备表 + relay 配置快照（headless CLI 专用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 GUI 设备（跳板机/发起方）需要全程命令行配置中转：拿 device_id 名册、
+///     看 via 可达性与影子在线状态；数据必须来自 owner 权威内存表，而非 CLI 本地猜测。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → `collect_device_dtos_with_shadows`（直连+影子合并）→
+///     读 config_runtime 内存快照的 relay 段 → 读影子表（按 target 排序）→ 1 MiB 上限。
+pub async fn control_devices(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlDevicesRequest>,
+) -> P2pResult<Json<ControlDevicesResponse>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let devices = collect_device_dtos_with_shadows(&state)
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.devices"))?;
+    let relay = state
+        .config_runtime
+        .snapshot()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.devices"))?
+        .relay;
+    let shadows = {
+        let shadows = state.relay.shadow_devices.read().map_err(|_| {
+            P2pError::from_app_error(
+                AppError::generic("relay 影子表读锁中毒"),
+                &context,
+                "control.devices",
+            )
+        })?;
+        let mut entries: Vec<ControlRelayShadowDto> =
+            shadows.values().map(relay_shadow_to_dto).collect();
+        entries.sort_by(|a, b| a.target_device_id.cmp(&b.target_device_id));
+        entries
+    };
+    let body = ControlDevicesResponse {
+        device_id: state.device_id.as_ref().clone(),
+        device_name: state.device_name(),
+        devices,
+        relay,
+        shadows,
+    };
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
 }
 
 /// 事件 catch-up / stream 请求。
@@ -2492,5 +2621,96 @@ mod tests {
             .await
             .expect_err("stale");
         assert_eq!(err.to_string(), "config_generation_conflict");
+    }
+
+    /// 影子条目 → DTO 映射与 control devices 响应 wire 形状（camelCase round-trip）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     headless CLI 与 owner 共用 control contract：字段名漂移会导致 `relay status --json`
+    ///     解析失败；影子表非空时 shadows 必须逐字段保真（排序稳定）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造两条影子（last_seen 含毫秒）经 `relay_shadow_to_dto` 映射，组装
+    ///     `ControlDevicesResponse` 序列化为 JSON 断言顶层键与影子字段；再反序列化回类型
+    ///     （模拟 CLI 解析位置）断言 round-trip 相等；映射函数对 last_seen 输出 RFC3339。
+    #[test]
+    fn control_devices_response_shape_and_shadow_mapping_roundtrip() {
+        use crate::net::relay_shadow::RelayShadowDevice;
+        use chrono::TimeZone;
+
+        let shadow = RelayShadowDevice {
+            target_device_id: "target-c".into(),
+            via_device_id: "jump-b".into(),
+            device_name: "power-vpn".into(),
+            proto_version: 1,
+            capabilities: vec!["net.relay.v1".into()],
+            online: true,
+            last_seen: chrono::Utc
+                .timestamp_millis_opt(1_750_000_000_123)
+                .single()
+                .expect("固定时间戳"),
+        };
+        let dto = relay_shadow_to_dto(&shadow);
+        assert_eq!(dto.target_device_id, "target-c");
+        assert_eq!(dto.via_device_id, "jump-b");
+        assert_eq!(dto.device_name, "power-vpn");
+        assert!(dto.online);
+        assert!(
+            dto.last_seen.ends_with("+00:00"),
+            "last_seen 应为 RFC3339: {}",
+            dto.last_seen
+        );
+        assert!(
+            dto.last_seen.contains(".123"),
+            "毫秒应保留: {}",
+            dto.last_seen
+        );
+
+        let body = ControlDevicesResponse {
+            device_id: "self-a".into(),
+            device_name: "mac".into(),
+            devices: vec![crate::models::device::DeviceDto {
+                id: "target-c".into(),
+                name: "power-vpn".into(),
+                address: "10.0.0.3".into(),
+                port: 62116,
+                last_seen: "2026-09-04T00:00:00Z".into(),
+                online: true,
+                is_self: false,
+                proto_version: 1,
+                capabilities: vec![],
+                via_device_id: Some("jump-b".into()),
+                via_device_name: Some("nas-vpn".into()),
+            }],
+            relay: crate::config::RelayConfig {
+                enabled: true,
+                via_device_ids: vec!["jump-b".into()],
+                ignored_target_ids: Vec::new(),
+            },
+            shadows: vec![dto.clone()],
+        };
+        let json = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(json["deviceId"], "self-a");
+        assert_eq!(json["deviceName"], "mac");
+        assert_eq!(json["relay"]["enabled"], true);
+        assert_eq!(json["relay"]["viaDeviceIds"][0], "jump-b");
+        assert_eq!(
+            json["relay"]["ignoredTargetIds"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(json["shadows"][0]["targetDeviceId"], "target-c");
+        assert_eq!(json["shadows"][0]["viaDeviceId"], "jump-b");
+        assert_eq!(json["shadows"][0]["online"], true);
+        assert_eq!(
+            json["devices"][0]["viaDeviceName"], "nas-vpn",
+            "合并设备表的影子条目应带 via 展示字段"
+        );
+
+        // CLI 解析位置：同一类型从 JSON 反序列化必须 round-trip 相等。
+        let parsed: ControlDevicesResponse = serde_json::from_value(json).expect("CLI 侧反序列化");
+        assert_eq!(parsed.device_id, body.device_id);
+        assert_eq!(parsed.relay, body.relay);
+        assert_eq!(parsed.shadows, body.shadows);
+        assert_eq!(parsed.devices[0].via_device_id.as_deref(), Some("jump-b"));
     }
 }

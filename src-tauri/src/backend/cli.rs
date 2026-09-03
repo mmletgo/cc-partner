@@ -10,6 +10,8 @@
 //!     `doctor` / `doctor --json` 采集脱敏快照，stdout 与 stderr tracing 隔离，退出码 0/1/2。
 
 use crate::backend::control::{self, BackendControlFile, BackendStatus, BackendStatusKind};
+use crate::backend::control_api::{ControlDevicesResponse, ControlRelayShadowDto};
+use crate::backend::control_client::BackendControlClient;
 use crate::backend::doctor::{
     collect_doctor_snapshot, DoctorCheck, DoctorCheckStatus, DoctorSnapshot, DoctorStatus,
 };
@@ -18,7 +20,11 @@ use crate::backend::runtime::{
     BackendRuntimeMode,
 };
 use crate::backend::ui::{BackendUi, HeadlessBackendUi};
-use crate::error::AppError;
+use crate::config::{AppConfig, ManualPeerConfig, RelayConfig};
+use crate::config_runtime::{ConfigSnapshot, ConfigUpdateRequest, RuntimeConfigPatch};
+use crate::config_store::{ConfigStore, FsConfigStore};
+use crate::error::{AppError, AppErrorCategory};
+use crate::models::device::DeviceDto;
 use crate::state::AppState;
 use chrono::Utc;
 use serde::Serialize;
@@ -128,6 +134,9 @@ where
         Some("status") => map_lifecycle_result(run_async(print_status())),
         Some("supervise") => map_lifecycle_result(crate::backend::supervisor::supervise()),
         Some("doctor") => dispatch_doctor(&args[2..]),
+        Some("devices") => dispatch_devices(&args[2..]),
+        Some("relay") => dispatch_relay(&args[2..]),
+        Some("peers") => dispatch_peers(&args[2..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             0
@@ -136,6 +145,11 @@ where
             eprintln!(
                 "用法: cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]|version|--version|-V>"
             );
+            eprintln!("      cc-partner-backend devices [--json]");
+            eprintln!(
+                "      cc-partner-backend relay <status [--json] | via add|remove <device_id|device_name> | allow on|off>"
+            );
+            eprintln!("      cc-partner-backend peers <list [--json] | add|remove <host[:port]>>");
             2
         }
     }
@@ -192,20 +206,33 @@ fn dispatch_doctor(rest: &[String]) -> i32 {
 ///     只允许无参或单一 `--json`；未知选项/多余参数必须明确失败，避免静默忽略。
 ///
 /// Code Logic（这个函数做什么）:
-///     扫描剩余参数：无参 → json=false；仅 `--json` → true；其它一律错误。
+///     以命令名 `doctor` 委托 `parse_json_flag_args`。
 fn parse_doctor_args(rest: &[String]) -> Result<bool, String> {
+    parse_json_flag_args(rest, "doctor")
+}
+
+/// 严格解析"仅允许可选 `--json`"的只读命令参数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     doctor / devices / relay status / peers list 共享同一 stdout 单行 JSON 契约，
+///     参数解析必须一致：未知选项与多余参数一律报错，不得静默忽略。
+///
+/// Code Logic（这个函数做什么）:
+///     扫描剩余参数：无参 → false；仅一次 `--json` → true；重复/未知选项/多余参数
+///     返回带命令名的错误文本（供调用方写 stderr 并退出 2）。
+fn parse_json_flag_args(rest: &[String], command: &str) -> Result<bool, String> {
     let mut json_mode = false;
     for arg in rest {
         match arg.as_str() {
             "--json" if !json_mode => json_mode = true,
             "--json" => {
-                return Err("doctor 不接受重复的 --json".to_string());
+                return Err(format!("{command} 不接受重复的 --json"));
             }
             other if other.starts_with('-') => {
-                return Err(format!("doctor 未知选项: {other}"));
+                return Err(format!("{command} 未知选项: {other}"));
             }
             other => {
-                return Err(format!("doctor 多余参数: {other}"));
+                return Err(format!("{command} 多余参数: {other}"));
             }
         }
     }
@@ -427,6 +454,1097 @@ where
     S: Into<String>,
 {
     dispatch(args)
+}
+
+// ---------------------------------------------------------------------------
+// devices / relay / peers 子命令（headless 中转访问配置）
+// ---------------------------------------------------------------------------
+
+/// 手动 peer 未显式给端口时的默认端口（与 P2P 首选端口一致）。
+const PEER_DEFAULT_PORT: u16 = 62116;
+
+/// devices/relay/peers 命令的统一结果：Ok(stdout 文本) / Err(stderr 文本)。
+type CliCommandResult = Result<String, AppError>;
+
+/// `relay status --json` 中单个跳板（via）的可达性摘要。
+///
+/// Business Logic（为什么需要这个结构）:
+///     跳板是否在线由 owner 直连表权威判定；CLI 需要结构化输出供脚本判断。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase；跳板不在直连表时省略 name/address 且 online=false。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRelayViaStatus {
+    device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_name: Option<String>,
+    online: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+    shadow_count: usize,
+}
+
+/// `relay status --json` 输出结构。
+///
+/// Business Logic（为什么需要这个结构）:
+///     relay 配置 + 跳板可达性 + 影子清单需要在 stdout 输出为单行稳定 JSON。
+///
+/// Code Logic（这个结构做什么）:
+///     relay_enabled/ignored_target_ids 来自权威 relay 配置；shadows 为 owner 影子表。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRelayStatusOutput {
+    relay_enabled: bool,
+    via: Vec<CliRelayViaStatus>,
+    ignored_target_ids: Vec<String>,
+    shadows: Vec<ControlRelayShadowDto>,
+}
+
+/// `peers list --json` 输出结构。
+///
+/// Business Logic（为什么需要这个结构）:
+///     手动 peer 列表需要机器可读形式；直接复用 `ManualPeerConfig`（host/port camelCase）。
+///
+/// Code Logic（这个结构做什么）:
+///     包装 `{peers: [{host, port}]}`。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliPeersListOutput {
+    peers: Vec<ManualPeerConfig>,
+}
+
+/// via 候选解析结果（`relay via add` 的设备表匹配）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     用户可能传 device_id 或设备名；多匹配/零匹配必须分别给出可操作错误。
+///
+/// Code Logic（这个枚举做什么）:
+///     Resolved 携带解析出的 device_id 与可选设备名；Ambiguous 列出候选展示串；
+///     NotFound 表示 id 与名称在直连设备表中均未命中。
+enum ViaResolution {
+    Resolved {
+        device_id: String,
+        device_name: Option<String>,
+    },
+    Ambiguous(Vec<String>),
+    NotFound,
+}
+
+/// 分发 `devices` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     headless 设备需要命令行获取 device_id 名册（跳板/目标配置都依赖它）。
+///
+/// Code Logic（这个函数做什么）:
+///     严格解析 `--json` → 初始化仅 stderr tracing → 异步查询 control `/devices` →
+///     JSON 或中文文本到 stdout；解析失败 2，业务失败 1，成功 0。
+fn dispatch_devices(rest: &[String]) -> i32 {
+    let json_mode = match parse_json_flag_args(rest, "devices") {
+        Ok(json_mode) => json_mode,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("用法: cc-partner-backend devices [--json]");
+            return 2;
+        }
+    };
+    crate::backend::logging::init_doctor_tracing();
+    map_cli_command_result(run_async(run_devices_command(json_mode)))
+}
+
+/// 分发 `relay` 子命令（status / via add|remove / allow on|off）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     A 侧配置跳板（via）、B 侧开关被中转能力（allow）、运维排查（status）
+///     都需要在无 GUI 设备上命令行完成。
+///
+/// Code Logic（这个函数做什么）:
+///     手写 match 严格解析二级子命令与参数个数；用法错误统一打印用法并返回 2；
+///     业务命令经 `map_cli_command_result` 映射为 0/1。
+fn dispatch_relay(rest: &[String]) -> i32 {
+    let Some(action) = rest.first().map(String::as_str) else {
+        print_relay_usage();
+        return 2;
+    };
+    match action {
+        "status" => {
+            let json_mode = match parse_json_flag_args(&rest[1..], "relay status") {
+                Ok(json_mode) => json_mode,
+                Err(message) => {
+                    eprintln!("{message}");
+                    print_relay_usage();
+                    return 2;
+                }
+            };
+            crate::backend::logging::init_doctor_tracing();
+            map_cli_command_result(run_async(run_relay_status_command(json_mode)))
+        }
+        "via" => {
+            let Some(verb) = rest.get(1).map(String::as_str) else {
+                print_relay_usage();
+                return 2;
+            };
+            match verb {
+                "add" | "remove" => {
+                    let Some(target) = rest.get(2).map(String::as_str) else {
+                        eprintln!("relay via {verb} 需要一个 <device_id|device_name> 参数");
+                        print_relay_usage();
+                        return 2;
+                    };
+                    if rest.len() > 3 {
+                        eprintln!("relay via {verb} 只接受一个参数");
+                        print_relay_usage();
+                        return 2;
+                    }
+                    crate::backend::logging::init_doctor_tracing();
+                    let result = if verb == "add" {
+                        run_async(run_relay_via_add(target))
+                    } else {
+                        run_async(run_relay_via_remove(target))
+                    };
+                    map_cli_command_result(result)
+                }
+                _ => {
+                    print_relay_usage();
+                    2
+                }
+            }
+        }
+        "allow" => {
+            if rest.len() > 2 {
+                eprintln!("relay allow 只接受一个参数");
+                print_relay_usage();
+                return 2;
+            }
+            let Some(value) = rest.get(1).map(String::as_str) else {
+                eprintln!("relay allow 需要 on 或 off");
+                print_relay_usage();
+                return 2;
+            };
+            let enabled = match value {
+                "on" => true,
+                "off" => false,
+                other => {
+                    eprintln!("relay allow 只接受 on 或 off，实际: {other}");
+                    print_relay_usage();
+                    return 2;
+                }
+            };
+            crate::backend::logging::init_doctor_tracing();
+            map_cli_command_result(run_async(run_relay_allow(enabled)))
+        }
+        _ => {
+            print_relay_usage();
+            2
+        }
+    }
+}
+
+/// 分发 `peers` 子命令（list / add / remove）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跨子网/VPN 拓扑下 mDNS 不可见时，用户需要命令行维护 manual peers 兜底发现。
+///
+/// Code Logic（这个函数做什么）:
+///     add/remove 先严格解析 `host[:port]`（解析失败 → 用法 2），list 复用 `--json`
+///     解析；业务命令经 `map_cli_command_result` 映射为 0/1。
+fn dispatch_peers(rest: &[String]) -> i32 {
+    let Some(action) = rest.first().map(String::as_str) else {
+        print_peers_usage();
+        return 2;
+    };
+    match action {
+        "add" | "remove" => {
+            let Some(target) = rest.get(1).map(String::as_str) else {
+                eprintln!("peers {action} 需要 <host[:port]> 参数");
+                print_peers_usage();
+                return 2;
+            };
+            if rest.len() > 2 {
+                eprintln!("peers {action} 只接受一个参数");
+                print_peers_usage();
+                return 2;
+            }
+            let (host, port) = match parse_peer_target(target) {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    eprintln!("{message}");
+                    print_peers_usage();
+                    return 2;
+                }
+            };
+            crate::backend::logging::init_doctor_tracing();
+            let result = if action == "add" {
+                run_async(run_peers_add(&host, port))
+            } else {
+                run_async(run_peers_remove(&host, port))
+            };
+            map_cli_command_result(result)
+        }
+        "list" => {
+            let json_mode = match parse_json_flag_args(&rest[1..], "peers list") {
+                Ok(json_mode) => json_mode,
+                Err(message) => {
+                    eprintln!("{message}");
+                    print_peers_usage();
+                    return 2;
+                }
+            };
+            crate::backend::logging::init_doctor_tracing();
+            map_cli_command_result(run_async(run_peers_list(json_mode)))
+        }
+        _ => {
+            print_peers_usage();
+            2
+        }
+    }
+}
+
+/// 打印 relay 子命令用法（stderr）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用法错误必须给出完整可复制的命令形态，避免用户猜测参数。
+///
+/// Code Logic（这个函数做什么）:
+///     逐行输出 status/via/allow 用法。
+fn print_relay_usage() {
+    eprintln!("用法: cc-partner-backend relay status [--json]");
+    eprintln!("      cc-partner-backend relay via add <device_id|device_name>");
+    eprintln!("      cc-partner-backend relay via remove <device_id>");
+    eprintln!("      cc-partner-backend relay allow on|off");
+}
+
+/// 打印 peers 子命令用法（stderr）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同 `print_relay_usage`：用法错误要给出完整命令形态。
+///
+/// Code Logic（这个函数做什么）:
+///     逐行输出 list/add/remove 用法（端口缺省 62116 与 IPv6 形式提示）。
+fn print_peers_usage() {
+    eprintln!("用法: cc-partner-backend peers list [--json]");
+    eprintln!("      cc-partner-backend peers add <host[:port]>");
+    eprintln!("      cc-partner-backend peers remove <host[:port]>");
+    eprintln!("      （端口缺省 62116；IPv6 使用 [::1]:端口 形式）");
+}
+
+/// 统一映射 devices/relay/peers 命令结果为退出码。
+///
+/// Business Logic（为什么需要这个函数）:
+///     新子命令必须保持既有退出码契约：0 成功（stdout）/ 1 业务失败（stderr）。
+///
+/// Code Logic（这个函数做什么）:
+///     `Ok(message)` 打印 stdout 返回 0；`Err` 打印 stderr 返回 1。
+fn map_cli_command_result(result: CliCommandResult) -> i32 {
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
+/// 运行 `devices` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     获取跳板/目标 device_id 的权威途径；--json 供脚本，文本供人工。
+///
+/// Code Logic（这个函数做什么）:
+///     要求 backend 运行中并查询 control `/devices`，按模式渲染。
+async fn run_devices_command(json_mode: bool) -> CliCommandResult {
+    let payload = require_running_devices_payload().await?;
+    if json_mode {
+        Ok(serde_json::to_string(&payload)?)
+    } else {
+        Ok(render_devices_text(&payload))
+    }
+}
+
+/// 运行 `relay status` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     排查"跳板不可达 / 目标下线 / 配置错误"需要 relay 配置 + via 可达性 + 影子状态一体视图。
+///
+/// Code Logic（这个函数做什么）:
+///     查询 control `/devices` 后组合 `CliRelayStatusOutput`（--json）或中文文本。
+async fn run_relay_status_command(json_mode: bool) -> CliCommandResult {
+    let payload = require_running_devices_payload().await?;
+    if json_mode {
+        Ok(serde_json::to_string(&build_relay_status_output(&payload))?)
+    } else {
+        Ok(render_relay_status_text(&payload))
+    }
+}
+
+/// 运行 `relay via add` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     A 侧需要把可信跳板写入 `relay.via_device_ids`：运行中走 control CAS 热生效；
+///     离线直接落盘 config.json，下次启动生效。
+///
+/// Code Logic（这个函数做什么）:
+///     运行中：先经设备表解析参数（device_id 精确优先，其次设备名精确匹配；
+///     多匹配/零匹配报错），再 get-config 合并 relay 段提交 update-config；
+///     离线：参数按 device_id 直接落盘（名称解析无法离线进行）。
+async fn run_relay_via_add(arg: &str) -> CliCommandResult {
+    let target = arg.trim();
+    match running_control_file().await {
+        Some(control) => {
+            let payload = fetch_control_devices(&control).await?;
+            let (device_id, device_name) = match resolve_via_candidate(target, &payload.devices) {
+                ViaResolution::Resolved {
+                    device_id,
+                    device_name,
+                } => (device_id, device_name),
+                ViaResolution::Ambiguous(candidates) => {
+                    return Err(AppError::validation(format!(
+                        "设备名 \"{target}\" 匹配到多台设备，请改用 device_id。候选: {}",
+                        candidates.join("、")
+                    )));
+                }
+                ViaResolution::NotFound => {
+                    return Err(AppError::not_found(format!(
+                        "设备表中未找到 \"{target}\"（按 device_id 与设备名均未命中）；\
+                         可运行 devices 查看，或停止 backend 后按 device_id 离线添加"
+                    )));
+                }
+            };
+            let client = BackendControlClient::from_control(&control)?;
+            let snapshot = client.get_config().await?;
+            let relay =
+                relay_with_via_add(&snapshot.relay, &device_id).map_err(AppError::validation)?;
+            commit_config_patch(
+                &client,
+                &snapshot,
+                RuntimeConfigPatch {
+                    relay: Some(relay),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            match device_name {
+                Some(name) => Ok(format!("已添加跳板设备: {name} ({device_id})")),
+                None => Ok(format!("已添加跳板设备: {device_id}")),
+            }
+        }
+        None => {
+            apply_offline_config_edit(|cfg| {
+                let relay = relay_with_via_add(&cfg.relay, target).map_err(AppError::validation)?;
+                cfg.relay = relay;
+                Ok(())
+            })?;
+            Ok(format!(
+                "backend 未运行，已离线写入跳板 device_id: {target}（下次启动生效）"
+            ))
+        }
+    }
+}
+
+/// 运行 `relay via remove` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     撤销对某跳板的信任必须与 add 对称：运行中热生效，离线落盘。
+///
+/// Code Logic（这个函数做什么）:
+///     仅按 device_id 操作（与 spec 一致）：get-config/磁盘读出当前 relay 段，
+///     移除目标 id（不存在则报错），提交 CAS patch 或原子落盘。
+async fn run_relay_via_remove(device_id: &str) -> CliCommandResult {
+    let target = device_id.trim();
+    match running_control_file().await {
+        Some(control) => {
+            let client = BackendControlClient::from_control(&control)?;
+            let snapshot = client.get_config().await?;
+            let relay =
+                relay_with_via_remove(&snapshot.relay, target).map_err(AppError::validation)?;
+            commit_config_patch(
+                &client,
+                &snapshot,
+                RuntimeConfigPatch {
+                    relay: Some(relay),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            Ok(format!("已移除跳板设备: {target}"))
+        }
+        None => {
+            apply_offline_config_edit(|cfg| {
+                let relay =
+                    relay_with_via_remove(&cfg.relay, target).map_err(AppError::validation)?;
+                cfg.relay = relay;
+                Ok(())
+            })?;
+            Ok(format!(
+                "backend 未运行，已离线移除跳板 device_id: {target}（下次启动生效）"
+            ))
+        }
+    }
+}
+
+/// 运行 `relay allow on|off` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     B 侧（跳板机）需要整体关闭"被用作跳板"能力；关闭后 health 不再宣告 net.relay.v1。
+///
+/// Code Logic（这个函数做什么）:
+///     运行中 get-config 合并 enabled 字段提交 CAS（热生效）；离线直接改盘。
+async fn run_relay_allow(enabled: bool) -> CliCommandResult {
+    match running_control_file().await {
+        Some(control) => {
+            let client = BackendControlClient::from_control(&control)?;
+            let snapshot = client.get_config().await?;
+            let relay = relay_with_allow(&snapshot.relay, enabled);
+            commit_config_patch(
+                &client,
+                &snapshot,
+                RuntimeConfigPatch {
+                    relay: Some(relay),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            Ok(format!(
+                "已{}本机被用作跳板（relay.allow={}，热生效）",
+                if enabled { "允许" } else { "禁止" },
+                if enabled { "on" } else { "off" }
+            ))
+        }
+        None => {
+            apply_offline_config_edit(|cfg| {
+                cfg.relay.enabled = enabled;
+                Ok(())
+            })?;
+            Ok(format!(
+                "backend 未运行，已离线写入 relay.allow={}（下次启动生效）",
+                if enabled { "on" } else { "off" }
+            ))
+        }
+    }
+}
+
+/// 运行 `peers add` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跨子网/VPN 对端 mDNS 不可见时需要手动登记 host:port 兜底发现。
+///
+/// Code Logic（这个函数做什么）:
+///     运行中 get-config 合并 manual_peers 段提交 CAS（探测循环最迟 15s 内生效）；
+///     离线直接落盘；重复 (host,port) 一律报错。
+async fn run_peers_add(host: &str, port: u16) -> CliCommandResult {
+    match running_control_file().await {
+        Some(control) => {
+            let client = BackendControlClient::from_control(&control)?;
+            let snapshot = client.get_config().await?;
+            let peers = manual_peers_with_add(&snapshot.manual_peers, host, port)
+                .map_err(AppError::validation)?;
+            commit_config_patch(
+                &client,
+                &snapshot,
+                RuntimeConfigPatch {
+                    manual_peers: Some(peers),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            Ok(format!("已添加手动 peer: {host}:{port}"))
+        }
+        None => {
+            apply_offline_config_edit(|cfg| {
+                let peers = manual_peers_with_add(&cfg.manual_peers, host, port)
+                    .map_err(AppError::validation)?;
+                cfg.manual_peers = peers;
+                Ok(())
+            })?;
+            Ok(format!(
+                "backend 未运行，已离线写入手动 peer: {host}:{port}（下次启动生效）"
+            ))
+        }
+    }
+}
+
+/// 运行 `peers remove` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     撤销手动 peer 必须精确匹配 (host,port)，避免误删相近条目。
+///
+/// Code Logic（这个函数做什么）:
+///     运行中/离线分别从权威快照或磁盘读出列表，精确移除（不存在则报错）后提交。
+async fn run_peers_remove(host: &str, port: u16) -> CliCommandResult {
+    match running_control_file().await {
+        Some(control) => {
+            let client = BackendControlClient::from_control(&control)?;
+            let snapshot = client.get_config().await?;
+            let peers = manual_peers_with_remove(&snapshot.manual_peers, host, port)
+                .map_err(AppError::validation)?;
+            commit_config_patch(
+                &client,
+                &snapshot,
+                RuntimeConfigPatch {
+                    manual_peers: Some(peers),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            Ok(format!("已移除手动 peer: {host}:{port}"))
+        }
+        None => {
+            apply_offline_config_edit(|cfg| {
+                let peers = manual_peers_with_remove(&cfg.manual_peers, host, port)
+                    .map_err(AppError::validation)?;
+                cfg.manual_peers = peers;
+                Ok(())
+            })?;
+            Ok(format!(
+                "backend 未运行，已离线移除手动 peer: {host}:{port}（下次启动生效）"
+            ))
+        }
+    }
+}
+
+/// 运行 `peers list` 子命令。
+///
+/// Business Logic（为什么需要这个函数）:
+///     排查 manual peers 配置需要当前列表；列表只依赖 config，运行中读权威快照、
+///     离线读磁盘（两者都可用，不像 devices/relay status 依赖运行时设备表）。
+///
+/// Code Logic（这个函数做什么）:
+///     运行中经 control get-config，离线 `AppConfig::load()`；按模式渲染 JSON/文本。
+async fn run_peers_list(json_mode: bool) -> CliCommandResult {
+    let peers = match running_control_file().await {
+        Some(control) => {
+            BackendControlClient::from_control(&control)?
+                .get_config()
+                .await?
+                .manual_peers
+        }
+        None => AppConfig::load()?.manual_peers,
+    };
+    if json_mode {
+        Ok(serde_json::to_string(&CliPeersListOutput { peers })?)
+    } else {
+        Ok(render_peers_list_text(&peers))
+    }
+}
+
+/// 提取运行中 backend 的控制文件（未运行返回 None）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     写命令的"运行中/离线"分叉必须与 start/stop/status 共用同一状态判定，避免口径分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 `current_status()`（控制文件 + pid + health）；仅 Running 且带控制文件时返回。
+async fn running_control_file() -> Option<BackendControlFile> {
+    let status = current_status().await;
+    if status.kind == BackendStatusKind::Running {
+        status.control.clone()
+    } else {
+        None
+    }
+}
+
+/// 查询运行中 backend 的 devices 快照；未运行时返回带指引的业务错误。
+///
+/// Business Logic（为什么需要这个函数）:
+///     devices / relay status 依赖运行时设备表/影子表，离线无法查询，必须给出可操作提示。
+///
+/// Code Logic（这个函数做什么）:
+///     `running_control_file()` 为空 → unavailable 错误（exit 1）；否则 POST control `/devices`。
+async fn require_running_devices_payload() -> Result<ControlDevicesResponse, AppError> {
+    let Some(control) = running_control_file().await else {
+        return Err(AppError::unavailable(
+            "backend 未运行，无法查询设备表（可先 cc-partner-backend start）",
+        ));
+    };
+    fetch_control_devices(&control).await
+}
+
+/// POST control `/devices` 读取设备/影子/relay 快照。
+///
+/// Business Logic（为什么需要这个函数）:
+///     CLI 与 owner 共用 loopback+token 控制面；沿用 `request_stop_route` 的直连 POST 先例。
+///
+/// Code Logic（这个函数做什么）:
+///     POST `http://127.0.0.1:{port}/api/backend/control/devices`，body 仅 `controlToken`；
+///     非成功状态转业务错误，成功解析为 `ControlDevicesResponse`。
+async fn fetch_control_devices(
+    control: &BackendControlFile,
+) -> Result<ControlDevicesResponse, AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(HEALTH_TIMEOUT)
+        .build()
+        .map_err(|error| AppError::generic(format!("构造 devices client 失败: {error}")))?;
+    let url = format!(
+        "http://127.0.0.1:{}/api/backend/control/devices",
+        control.port
+    );
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({ "controlToken": control.control_token }))
+        .send()
+        .await
+        .map_err(|error| AppError::generic(format!("请求 devices control 失败: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::generic(format!(
+            "devices control 返回 HTTP {}",
+            response.status()
+        )));
+    }
+    response
+        .json::<ControlDevicesResponse>()
+        .await
+        .map_err(|error| AppError::generic(format!("解析 devices control 响应失败: {error}")))
+}
+
+/// 经 control CAS 提交配置 patch（冲突转"并发修改，请重试"）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     运行中写命令共享 get-config → 合并 → update-config 流程；generation 冲突必须
+///     给出统一友好提示（exit 1），而不是透出内部错误码。
+///
+/// Code Logic（这个函数做什么）:
+///     用 snapshot 的 owner/generation 构造 `ConfigUpdateRequest`；Conflict 类错误
+///     统一替换为"配置已被并发修改，请重试"。
+async fn commit_config_patch(
+    client: &BackendControlClient,
+    snapshot: &ConfigSnapshot,
+    patch: RuntimeConfigPatch,
+) -> Result<(), AppError> {
+    let request = ConfigUpdateRequest {
+        expected_owner_instance_id: snapshot.owner_instance_id.clone(),
+        expected_generation: snapshot.generation,
+        patch,
+    };
+    match client.update_config(request).await {
+        Ok(_) => Ok(()),
+        Err(error) if error.classify() == AppErrorCategory::Conflict => {
+            Err(AppError::conflict("配置已被并发修改，请重试"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// backend 未运行时的离线配置写入：load → 编辑 → validate → 原子落盘。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跳板机/目标机常在启动前预配置；离线路径必须复用 `AppConfig::validate` 既有校验
+///     （manual_peers/relay 去重等）与 `FsConfigStore::save_atomic` 原子写，并尊重
+///     `CC_PARTNER_DATA_DIR` 隔离（load/save 均走同一 config 路径）。
+///
+/// Code Logic（这个函数做什么）:
+///     `AppConfig::load()`（缺文件则初始化默认配置）→ 调用方闭包编辑 → validate →
+///     `FsConfigStore::save_atomic` 落盘。仅限 backend 未运行时调用（绕过 ConfigRuntime
+///     writer gate 的唯一合法场景，与 config.rs load 迁移保存路径同语义）。
+fn apply_offline_config_edit<F>(edit: F) -> Result<(), AppError>
+where
+    F: FnOnce(&mut AppConfig) -> Result<(), AppError>,
+{
+    let mut cfg = AppConfig::load()?;
+    edit(&mut cfg)?;
+    cfg.validate()?;
+    let store = FsConfigStore::default_path()?;
+    store.save_atomic(&cfg)?;
+    Ok(())
+}
+
+/// 解析 `host[:port]` 形式的手动 peer 参数。
+///
+/// Business Logic（为什么需要这个函数）:
+///     peers add/remove 的参数合法性必须在进入业务前失败（用法 2）；IPv6 裸地址
+///     有歧义，必须强制 `[::1]:port` 形式；端口缺省 62116。
+///
+/// Code Logic（这个函数做什么）:
+///     `[` 开头按 IPv6 字面量解析（`]` 后仅允许空或 `:port`）；普通 host 按 0/1 个冒号
+///     处理（>1 个冒号提示 IPv6 形式）；host trim 后非空、port ∈ 1..=65535。
+fn parse_peer_target(input: &str) -> Result<(String, u16), String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return Err("peer 地址不能为空".to_string());
+    }
+    if let Some(rest) = raw.strip_prefix('[') {
+        let Some(close_index) = rest.find(']') else {
+            return Err(format!("IPv6 地址缺少 ']'，请使用 [::1]:端口 形式: {raw}"));
+        };
+        let host = rest[..close_index].trim();
+        if host.is_empty() {
+            return Err(format!("IPv6 地址不能为空: {raw}"));
+        }
+        let after = &rest[close_index + 1..];
+        let port = if after.is_empty() {
+            PEER_DEFAULT_PORT
+        } else {
+            let Some(port_text) = after.strip_prefix(':') else {
+                return Err(format!("IPv6 地址 ']' 后只允许跟 ':端口': {raw}"));
+            };
+            parse_peer_port(port_text, raw)?
+        };
+        return Ok((host.to_string(), port));
+    }
+    match raw.matches(':').count() {
+        0 => Ok((raw.to_string(), PEER_DEFAULT_PORT)),
+        1 => {
+            let (host, port_text) = raw.split_once(':').expect("已确认恰好一个冒号");
+            let host = host.trim();
+            if host.is_empty() {
+                return Err(format!("peer 主机名不能为空: {raw}"));
+            }
+            Ok((host.to_string(), parse_peer_port(port_text, raw)?))
+        }
+        _ => Err(format!("IPv6 地址请使用 [::1]:端口 形式: {raw}")),
+    }
+}
+
+/// 解析并校验端口文本（1..=65535）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     端口 0 与超范围值会直接被 config validate 拒绝；CLI 应先给出可读错误。
+///
+/// Code Logic（这个函数做什么）:
+///     u32 解析失败提示"不是合法数字"；越界提示 1..=65535；错误文本附原始参数。
+fn parse_peer_port(text: &str, original: &str) -> Result<u16, String> {
+    let port: u32 = text
+        .parse()
+        .map_err(|_| format!("端口不是合法数字: {original}"))?;
+    if !(1..=65535).contains(&port) {
+        return Err(format!("端口必须在 1..=65535: {original}"));
+    }
+    Ok(port as u16)
+}
+
+/// 在直连设备表中解析 via 候选（device_id 精确优先，其次设备名精确匹配）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户既会粘 device_id 也会传设备名；解析必须确定性（id 优先），且只在直连设备中
+///     匹配（影子目标不是合法跳板候选）；多匹配必须列出候选帮助用户消歧。
+///
+/// Code Logic（这个函数做什么）:
+///     先按 id 精确匹配（仅直连条目）；未命中再按 name 精确匹配（大小写敏感）：
+///     唯一 → Resolved；多个 → Ambiguous（候选 "name (id)" 列表）；零个 → NotFound。
+fn resolve_via_candidate(arg: &str, devices: &[DeviceDto]) -> ViaResolution {
+    let target = arg.trim();
+    if let Some(direct) = devices
+        .iter()
+        .find(|d| d.via_device_id.is_none() && d.id == target)
+    {
+        return ViaResolution::Resolved {
+            device_id: direct.id.clone(),
+            device_name: Some(direct.name.clone()),
+        };
+    }
+    let by_name: Vec<&DeviceDto> = devices
+        .iter()
+        .filter(|d| d.via_device_id.is_none() && d.name == target)
+        .collect();
+    match by_name.len() {
+        1 => ViaResolution::Resolved {
+            device_id: by_name[0].id.clone(),
+            device_name: Some(by_name[0].name.clone()),
+        },
+        0 => ViaResolution::NotFound,
+        _ => ViaResolution::Ambiguous(
+            by_name
+                .iter()
+                .map(|d| format!("{} ({})", d.name, d.id))
+                .collect(),
+        ),
+    }
+}
+
+/// 返回开关被中转能力后的 relay 配置（保留 via/ignored 列表）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `relay allow on|off` 只改 enabled 一个字段，必须不触碰已配置的跳板与忽略列表。
+///
+/// Code Logic（这个函数做什么）:
+///     clone 后覆盖 enabled 返回。
+fn relay_with_allow(relay: &RelayConfig, enabled: bool) -> RelayConfig {
+    let mut next = relay.clone();
+    next.enabled = enabled;
+    next
+}
+
+/// 返回追加 via 后的 relay 配置（重复报错）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     重复添加跳板应是显式失败而非静默幂等，避免用户误以为换了配置。
+///
+/// Code Logic（这个函数做什么）:
+///     clone 后 push；已存在同一 device_id 返回错误文本（走 validation → exit 1）。
+fn relay_with_via_add(relay: &RelayConfig, device_id: &str) -> Result<RelayConfig, String> {
+    if relay.via_device_ids.iter().any(|id| id == device_id) {
+        return Err(format!("该设备已在跳板列表中: {device_id}"));
+    }
+    let mut next = relay.clone();
+    next.via_device_ids.push(device_id.to_string());
+    Ok(next)
+}
+
+/// 返回移除 via 后的 relay 配置（不存在报错）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     移除不存在的跳板大概率是笔误，必须显式失败并列出当前列表。
+///
+/// Code Logic（这个函数做什么）:
+///     定位失败返回含当前列表的错误文本；命中则 retain 移除。
+fn relay_with_via_remove(relay: &RelayConfig, device_id: &str) -> Result<RelayConfig, String> {
+    if !relay.via_device_ids.iter().any(|id| id == device_id) {
+        return Err(format!(
+            "跳板列表中不存在该 device_id: {device_id}（当前: {}）",
+            if relay.via_device_ids.is_empty() {
+                "无".to_string()
+            } else {
+                relay.via_device_ids.join("、")
+            }
+        ));
+    }
+    let mut next = relay.clone();
+    next.via_device_ids.retain(|id| id != device_id);
+    Ok(next)
+}
+
+/// 追加手动 peer（重复 (host,port) 报错）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     config validate 会拦重复，但 CLI 应先给友好错误；同样拒绝静默幂等。
+///
+/// Code Logic（这个函数做什么）:
+///     host trim 后查重 (host, port)；未命中才追加并返回新列表。
+fn manual_peers_with_add(
+    peers: &[ManualPeerConfig],
+    host: &str,
+    port: u16,
+) -> Result<Vec<ManualPeerConfig>, String> {
+    let host = host.trim();
+    if peers.iter().any(|p| p.host == host && p.port == port) {
+        return Err(format!("已存在相同的手动 peer: {host}:{port}"));
+    }
+    let mut next = peers.to_vec();
+    next.push(ManualPeerConfig {
+        host: host.to_string(),
+        port,
+    });
+    Ok(next)
+}
+
+/// 精确移除手动 peer（不存在报错）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remove 必须命中确切 (host,port)，未命中提示当前列表避免误操作。
+///
+/// Code Logic（这个函数做什么）:
+///     精确匹配失败返回含现有列表的错误文本；命中则 retain 移除。
+fn manual_peers_with_remove(
+    peers: &[ManualPeerConfig],
+    host: &str,
+    port: u16,
+) -> Result<Vec<ManualPeerConfig>, String> {
+    let host = host.trim();
+    if !peers.iter().any(|p| p.host == host && p.port == port) {
+        let current = peers
+            .iter()
+            .map(|p| format!("{}:{}", p.host, p.port))
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(format!(
+            "手动 peer 不存在: {host}:{port}（当前: {}）",
+            if current.is_empty() {
+                "无".to_string()
+            } else {
+                current
+            }
+        ));
+    }
+    let mut next = peers.to_vec();
+    next.retain(|p| !(p.host == host && p.port == port));
+    Ok(next)
+}
+
+/// 在合并设备表中定位某 via 的直连条目（影子条目不参与）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     via 可达性由 owner 直连表权威判定；同名同 id 的影子条目不得干扰。
+///
+/// Code Logic（这个函数做什么）:
+///     取 devices 中 id 匹配且 via_device_id 为空的条目。
+fn direct_device_for_via<'a>(
+    payload: &'a ControlDevicesResponse,
+    via_id: &str,
+) -> Option<&'a DeviceDto> {
+    payload
+        .devices
+        .iter()
+        .find(|d| d.via_device_id.is_none() && d.id == via_id)
+}
+
+/// 组装 `relay status --json` 输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     脚本需要结构化判断"哪个跳板离线/各跳板可见几台影子"。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历 relay.via_device_ids，从合并设备表取直连条目的名称/地址/在线状态，
+///     统计各 via 名下影子数量；shadows 原样透出。
+fn build_relay_status_output(payload: &ControlDevicesResponse) -> CliRelayStatusOutput {
+    let via = payload
+        .relay
+        .via_device_ids
+        .iter()
+        .map(|via_id| {
+            let direct = direct_device_for_via(payload, via_id);
+            CliRelayViaStatus {
+                device_id: via_id.clone(),
+                device_name: direct.map(|d| d.name.clone()),
+                online: direct.map(|d| d.online).unwrap_or(false),
+                address: direct.map(|d| format!("{}:{}", d.address, d.port)),
+                shadow_count: payload
+                    .shadows
+                    .iter()
+                    .filter(|s| s.via_device_id == *via_id)
+                    .count(),
+            }
+        })
+        .collect();
+    CliRelayStatusOutput {
+        relay_enabled: payload.relay.enabled,
+        via,
+        ignored_target_ids: payload.relay.ignored_target_ids.clone(),
+        shadows: payload.shadows.clone(),
+    }
+}
+
+/// 渲染 devices 人类可读文本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 `--json` 时用户需要一眼看到本机身份与直连/影子设备清单。
+///
+/// Code Logic（这个函数做什么）:
+///     首行本机，其次按台数汇总（直连/影子），每台一行在线状态 + 名称 + id + 地址，
+///     影子条目标注经谁中转。
+fn render_devices_text(payload: &ControlDevicesResponse) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "本机: {} ({})",
+        payload.device_name, payload.device_id
+    ));
+    let direct_count = payload
+        .devices
+        .iter()
+        .filter(|d| d.via_device_id.is_none())
+        .count();
+    let shadow_count = payload.devices.len() - direct_count;
+    if payload.devices.is_empty() {
+        lines.push("对端设备 0 台（直连 0 / 影子 0）".to_string());
+    } else {
+        lines.push(format!(
+            "对端设备 {} 台（直连 {direct_count} / 影子 {shadow_count}）:",
+            payload.devices.len()
+        ));
+        for device in &payload.devices {
+            let state = if device.online { "在线" } else { "离线" };
+            match device.via_device_id.as_deref() {
+                Some(via_id) => {
+                    let via_name = device.via_device_name.as_deref().unwrap_or(via_id);
+                    lines.push(format!(
+                        "  [{state}] {} ({})  地址={}:{}  经 {via_name} 中转",
+                        device.name, device.id, device.address, device.port
+                    ));
+                }
+                None => lines.push(format!(
+                    "  [{state}] {} ({})  地址={}:{}",
+                    device.name, device.id, device.address, device.port
+                )),
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// 渲染 relay status 人类可读文本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     排查中转链路需要按"跳板 → 影子"层级展示在线状态与配置。
+///
+/// Code Logic（这个函数做什么）:
+///     输出 allow 开关、逐跳板可达性（直连表未命中标记未发现）、影子清单与忽略目标。
+fn render_relay_status_text(payload: &ControlDevicesResponse) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("中转访问状态:".to_string());
+    lines.push(format!(
+        "  允许被用作跳板 (relay.allow): {}",
+        if payload.relay.enabled { "on" } else { "off" }
+    ));
+    if payload.relay.via_device_ids.is_empty() {
+        lines.push("  跳板设备 (via): 无（可 relay via add <device_id|device_name>）".to_string());
+    } else {
+        lines.push(format!(
+            "  跳板设备 (via) {} 台:",
+            payload.relay.via_device_ids.len()
+        ));
+        for via_id in &payload.relay.via_device_ids {
+            match direct_device_for_via(payload, via_id) {
+                Some(direct) => {
+                    let state = if direct.online { "在线" } else { "离线" };
+                    let count = payload
+                        .shadows
+                        .iter()
+                        .filter(|s| s.via_device_id == *via_id)
+                        .count();
+                    lines.push(format!(
+                        "  [{state}] {} ({})  地址={}:{}  可见影子 {count} 台",
+                        direct.name, direct.id, direct.address, direct.port
+                    ));
+                }
+                None => lines.push(format!("  [离线] {via_id}（当前设备表中未发现）")),
+            }
+        }
+    }
+    if payload.shadows.is_empty() {
+        lines.push("  影子设备: 无".to_string());
+    } else {
+        lines.push(format!("  影子设备 {} 台:", payload.shadows.len()));
+        for shadow in &payload.shadows {
+            let state = if shadow.online { "在线" } else { "离线" };
+            lines.push(format!(
+                "  [{state}] {} ({})  经 {} 中转",
+                shadow.device_name, shadow.target_device_id, shadow.via_device_id
+            ));
+        }
+    }
+    if payload.relay.ignored_target_ids.is_empty() {
+        lines.push("  显式忽略目标 (ignored): 无".to_string());
+    } else {
+        lines.push(format!(
+            "  显式忽略目标 (ignored): {}",
+            payload.relay.ignored_target_ids.join("、")
+        ));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// 渲染 peers list 人类可读文本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 `--json` 时需要直观列出当前手动 peer。
+///
+/// Code Logic（这个函数做什么）:
+///     空列表提示用法；非空逐条 `host:port`。
+fn render_peers_list_text(peers: &[ManualPeerConfig]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if peers.is_empty() {
+        lines.push("手动 peer 0 条（可 peers add <host[:port]>，端口缺省 62116）".to_string());
+    } else {
+        lines.push(format!("手动 peer {} 条:", peers.len()));
+        for peer in peers {
+            lines.push(format!("  {}:{}", peer.host, peer.port));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 /// 在独立 Tokio runtime 中运行异步 CLI 命令。
@@ -1124,6 +2242,7 @@ fn headless_dist_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backend::control::{BackendControlFile, BackendStatus, BackendStatusKind};
     use crate::backend::doctor::{
         DoctorBackendCheck, DoctorCheck, DoctorCheckStatus, DoctorDependencies, DoctorErrorSummary,
@@ -1692,5 +2811,402 @@ mod tests {
         );
         // 清理：真实 try_wait 路径 reap，避免测试泄漏 sleep。
         let _ = super::kill_and_reap_owned_child(&mut child, super::CHILD_REAP_TIMEOUT);
+    }
+
+    // ── devices / relay / peers 子命令 ────────────────────────────────
+
+    /// 构造测试用 DeviceDto。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     via 解析与渲染测试需要多台直连/影子设备 fixture，避免重复拼字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按参数生成直连（via=None）或影子（via=Some）条目。
+    fn device_dto_for_test(
+        id: &str,
+        name: &str,
+        online: bool,
+        via: Option<(&str, &str)>,
+    ) -> DeviceDto {
+        DeviceDto {
+            id: id.to_string(),
+            name: name.to_string(),
+            address: "10.0.0.1".to_string(),
+            port: 62116,
+            last_seen: "2026-09-04T00:00:00Z".to_string(),
+            online,
+            is_self: false,
+            proto_version: 1,
+            capabilities: Vec::new(),
+            via_device_id: via.map(|(id, _)| id.to_string()),
+            via_device_name: via.map(|(_, name)| name.to_string()),
+        }
+    }
+
+    /// 构造测试用 control devices 快照。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     渲染与 relay status 组装测试需要固定 devices/relay/shadows 数据。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     两台直连（一台离线）+ 一台影子 + 非默认 relay 配置。
+    fn devices_payload_for_test() -> ControlDevicesResponse {
+        ControlDevicesResponse {
+            device_id: "self-a".to_string(),
+            device_name: "发起机".to_string(),
+            devices: vec![
+                device_dto_for_test("jump-b", "nas-vpn", true, None),
+                device_dto_for_test("other-d", "desk", false, None),
+                device_dto_for_test("target-c", "power-vpn", true, Some(("jump-b", "nas-vpn"))),
+            ],
+            relay: crate::config::RelayConfig {
+                enabled: false,
+                via_device_ids: vec!["jump-b".to_string(), "ghost-x".to_string()],
+                ignored_target_ids: vec!["hidden-z".to_string()],
+            },
+            shadows: vec![ControlRelayShadowDto {
+                target_device_id: "target-c".to_string(),
+                via_device_id: "jump-b".to_string(),
+                device_name: "power-vpn".to_string(),
+                online: true,
+                last_seen: "2026-09-04T00:00:00Z".to_string(),
+            }],
+        }
+    }
+
+    /// `parse_peer_target` 必须覆盖缺省端口、显式端口、IPv6 与非法输入。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     peers 参数解析是用法错误的守门员；IPv6 裸地址歧义必须被拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言默认 62116、host:port、[::1] 与 [::1]:4000、空串/端口 0/超范围/
+    ///     裸 IPv6/缺 ']' 各自的成功或错误文本。
+    #[test]
+    fn parse_peer_target_covers_default_port_ipv6_and_invalid_inputs() {
+        let cases: Vec<(&str, (String, u16))> = vec![
+            ("10.0.0.5", ("10.0.0.5".to_string(), 62116)),
+            ("  nas.local ", ("nas.local".to_string(), 62116)),
+            ("10.0.0.5:40000", ("10.0.0.5".to_string(), 40000)),
+            ("[::1]", ("::1".to_string(), 62116)),
+            ("[::1]:4000", ("::1".to_string(), 4000)),
+            ("[fe80::1%en0]:62116", ("fe80::1%en0".to_string(), 62116)),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                super::parse_peer_target(input).expect(input),
+                expected,
+                "输入: {input}"
+            );
+        }
+        for bad in [
+            "",
+            "   ",
+            "10.0.0.5:0",
+            "10.0.0.5:99999",
+            "10.0.0.5:abc",
+            "::1",
+            "10.0.0.5::9",
+            "[::1",
+            "[:]:x",
+        ] {
+            let err = super::parse_peer_target(bad).expect_err(&format!("非法输入应失败: {bad}"));
+            assert!(!err.is_empty(), "{bad}");
+        }
+        assert!(super::parse_peer_target("[::1")
+            .unwrap_err()
+            .contains("']'"));
+        assert!(super::parse_peer_target("::1")
+            .unwrap_err()
+            .contains("IPv6"));
+        assert!(super::parse_peer_target("10.0.0.5:0")
+            .unwrap_err()
+            .contains("1..=65535"));
+    }
+
+    /// `resolve_via_candidate`：id 精确优先、名称唯一命中、多匹配列候选、零匹配 NotFound、影子不参与。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     `relay via add <device_id|device_name>` 的消歧规则必须确定性且只认直连设备。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 devices_payload_for_test 分别按 id、唯一名、重名、未知值解析并断言分支。
+    #[test]
+    fn resolve_via_candidate_prefers_id_then_exact_name() {
+        let payload = devices_payload_for_test();
+        // id 精确命中（影子条目 target-c 虽在表内，但只匹配直连）。
+        match super::resolve_via_candidate("jump-b", &payload.devices) {
+            super::ViaResolution::Resolved {
+                device_id,
+                device_name,
+            } => {
+                assert_eq!(device_id, "jump-b");
+                assert_eq!(device_name.as_deref(), Some("nas-vpn"));
+            }
+            _ => panic!("id 应精确命中"),
+        }
+        // 名称唯一命中 → 解析到对应 id。
+        match super::resolve_via_candidate("desk", &payload.devices) {
+            super::ViaResolution::Resolved { device_id, .. } => assert_eq!(device_id, "other-d"),
+            _ => panic!("唯一名称应命中"),
+        }
+        // 名称大小写敏感：零匹配。
+        assert!(matches!(
+            super::resolve_via_candidate("Desk", &payload.devices),
+            super::ViaResolution::NotFound
+        ));
+        // 未知值 → NotFound。
+        assert!(matches!(
+            super::resolve_via_candidate("ghost", &payload.devices),
+            super::ViaResolution::NotFound
+        ));
+        // 影子目标不能作为候选：target-c 仅以影子形式存在 → NotFound。
+        assert!(matches!(
+            super::resolve_via_candidate("target-c", &payload.devices),
+            super::ViaResolution::NotFound
+        ));
+        // 重名 → Ambiguous 且候选包含 id。
+        let mut doubled = payload.devices.clone();
+        doubled.insert(0, device_dto_for_test("jump-b2", "nas-vpn", true, None));
+        match super::resolve_via_candidate("nas-vpn", &doubled) {
+            super::ViaResolution::Ambiguous(candidates) => {
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates.iter().any(|c| c.contains("jump-b")));
+                assert!(candidates.iter().any(|c| c.contains("jump-b2")));
+            }
+            _ => panic!("重名应 Ambiguous"),
+        }
+    }
+
+    /// via 与 manual peers 的纯合并助手：追加/移除/重复与缺失分支。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     运行中与离线两条写路径共用同一组合并助手，重复/缺失必须显式失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     逐个调用 relay_with_via_add/remove 与 manual_peers_with_add/remove，
+    ///     断言成功值与错误文本。
+    #[test]
+    fn merge_helpers_reject_duplicate_and_missing_entries() {
+        let relay = crate::config::RelayConfig::default();
+        let added = super::relay_with_via_add(&relay, "jump-1").expect("add");
+        assert_eq!(added.via_device_ids, vec!["jump-1"]);
+        let err = super::relay_with_via_add(&added, "jump-1").expect_err("重复 add");
+        assert!(err.contains("已在跳板列表"), "{err}");
+        let removed = super::relay_with_via_remove(&added, "jump-1").expect("remove");
+        assert!(removed.via_device_ids.is_empty());
+        let err = super::relay_with_via_remove(&removed, "jump-1").expect_err("缺失 remove");
+        assert!(err.contains("不存在"), "{err}");
+        // allow 开关保留 via 列表。
+        let toggled = super::relay_with_allow(&added, false);
+        assert!(!toggled.enabled);
+        assert_eq!(toggled.via_device_ids, vec!["jump-1"]);
+
+        let peers = Vec::new();
+        let added = super::manual_peers_with_add(&peers, "10.0.0.9", 40000).expect("add");
+        assert_eq!(added.len(), 1);
+        let err = super::manual_peers_with_add(&added, " 10.0.0.9 ", 40000)
+            .expect_err("重复（host 先 trim）");
+        assert!(err.contains("已存在"), "{err}");
+        let removed = super::manual_peers_with_remove(&added, "10.0.0.9", 40000).expect("remove");
+        assert!(removed.is_empty());
+        let err =
+            super::manual_peers_with_remove(&removed, "10.0.0.9", 40000).expect_err("缺失 remove");
+        assert!(err.contains("不存在"), "{err}");
+    }
+
+    /// devices / relay status 渲染与 `relay status --json` 单行 JSON 契约。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     `--json` 输出必须可直接 jq；文本输出必须区分直连/影子与在线/离线。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     渲染文本断言关键字段；组装 CliRelayStatusOutput 序列化为单行并回读断言
+    ///     relayEnabled/via.online/shadowCount/shadows。
+    #[test]
+    fn render_devices_and_relay_status_outputs() {
+        let payload = devices_payload_for_test();
+
+        let devices_text = super::render_devices_text(&payload);
+        assert!(
+            devices_text.contains("本机: 发起机 (self-a)"),
+            "{devices_text}"
+        );
+        assert!(devices_text.contains("直连 2 / 影子 1"), "{devices_text}");
+        assert!(
+            devices_text.contains("[离线] desk (other-d)"),
+            "{devices_text}"
+        );
+        assert!(devices_text.contains("经 nas-vpn 中转"), "{devices_text}");
+
+        let status_text = super::render_relay_status_text(&payload);
+        assert!(status_text.contains("(relay.allow): off"), "{status_text}");
+        assert!(
+            status_text.contains("[在线] nas-vpn (jump-b)"),
+            "{status_text}"
+        );
+        assert!(status_text.contains("可见影子 1 台"), "{status_text}");
+        assert!(
+            status_text.contains("[离线] ghost-x（当前设备表中未发现）"),
+            "{status_text}"
+        );
+        assert!(status_text.contains("经 jump-b 中转"), "{status_text}");
+        assert!(status_text.contains("hidden-z"), "{status_text}");
+
+        let output = super::build_relay_status_output(&payload);
+        let json = serde_json::to_string(&output).expect("serialize");
+        assert!(!json.contains('\n'), "--json 必须单行: {json}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("单行 JSON");
+        assert_eq!(parsed["relayEnabled"], false);
+        assert_eq!(parsed["via"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["via"][0]["deviceId"], "jump-b");
+        assert_eq!(parsed["via"][0]["deviceName"], "nas-vpn");
+        assert_eq!(parsed["via"][0]["online"], true);
+        assert_eq!(parsed["via"][0]["shadowCount"], 1);
+        assert_eq!(parsed["via"][1]["online"], false, "未发现跳板应离线");
+        assert!(parsed["via"][1].get("address").is_none());
+        assert_eq!(parsed["ignoredTargetIds"][0], "hidden-z");
+        assert_eq!(parsed["shadows"][0]["targetDeviceId"], "target-c");
+    }
+
+    /// 新子命令的用法错误必须返回 2 且不得触发任何 IO。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     参数解析是这些命令的第一道门；错误用法必须在触碰网络/磁盘前失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 devices/relay/peers 的缺参、未知动作、非法枚举、非法 host:port、
+    ///     重复 --json 等路径逐一断言 exit 2。
+    #[test]
+    fn devices_relay_peers_usage_errors_exit_two() {
+        let cases: &[&[&str]] = &[
+            &["cc-partner-backend", "devices", "--yaml"],
+            &["cc-partner-backend", "devices", "--json", "--json"],
+            &["cc-partner-backend", "devices", "extra"],
+            &["cc-partner-backend", "relay"],
+            &["cc-partner-backend", "relay", "frobnicate"],
+            &["cc-partner-backend", "relay", "status", "--yaml"],
+            &["cc-partner-backend", "relay", "via"],
+            &["cc-partner-backend", "relay", "via", "frobnicate"],
+            &["cc-partner-backend", "relay", "via", "add"],
+            &["cc-partner-backend", "relay", "via", "add", "a", "b"],
+            &["cc-partner-backend", "relay", "via", "remove", "a", "b"],
+            &["cc-partner-backend", "relay", "allow"],
+            &["cc-partner-backend", "relay", "allow", "banana"],
+            &["cc-partner-backend", "relay", "allow", "on", "extra"],
+            &["cc-partner-backend", "peers"],
+            &["cc-partner-backend", "peers", "frobnicate"],
+            &["cc-partner-backend", "peers", "add"],
+            &["cc-partner-backend", "peers", "add", "a", "b"],
+            &["cc-partner-backend", "peers", "add", "::1"],
+            &["cc-partner-backend", "peers", "add", "[::1"],
+            &["cc-partner-backend", "peers", "add", "host:0"],
+            &["cc-partner-backend", "peers", "add", "host:70000"],
+            &["cc-partner-backend", "peers", "add", "host:abc"],
+            &["cc-partner-backend", "peers", "remove"],
+            &["cc-partner-backend", "peers", "list", "--yaml"],
+        ];
+        for case in cases {
+            let exit = super::dispatch_for_test(case.iter().copied());
+            assert_eq!(exit, 2, "用法错误应 exit 2: {case:?}");
+        }
+    }
+
+    /// 离线 `relay via add|remove` 直接落盘并可在重载后读回。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     跳板机常在启动前预配置；离线路径必须走隔离数据目录 + validate + 原子写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     `CC_PARTNER_DATA_DIR` 指向临时目录（backend 无控制文件 → 离线分支），
+    ///     依次添加两个 id、断言重复报错、移除与缺失移除报错，最后读盘核对列表。
+    #[tokio::test]
+    async fn relay_via_add_remove_offline_persist_in_isolated_data_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::install_data_dir_env(Some(temp.path().to_str().unwrap()));
+
+        let message = super::run_relay_via_add("jump-device-1")
+            .await
+            .expect("离线添加应成功");
+        assert!(message.contains("离线"), "{message}");
+        super::run_relay_via_add("opaque-id-甲")
+            .await
+            .expect("第二个 id");
+
+        let cfg = crate::config::AppConfig::load().expect("reload config");
+        assert_eq!(
+            cfg.relay.via_device_ids,
+            vec!["jump-device-1", "opaque-id-甲"]
+        );
+        assert!(cfg.relay.enabled, "默认 allow=on 不得被 via 操作改写");
+
+        let err = super::run_relay_via_add("jump-device-1")
+            .await
+            .expect_err("重复添加应失败");
+        assert!(err.to_string().contains("已在跳板列表"), "{err}");
+
+        super::run_relay_via_remove("jump-device-1")
+            .await
+            .expect("移除应成功");
+        let err = super::run_relay_via_remove("jump-device-1")
+            .await
+            .expect_err("移除不存在应失败");
+        assert!(err.to_string().contains("不存在"), "{err}");
+
+        let cfg = crate::config::AppConfig::load().expect("reload config");
+        assert_eq!(cfg.relay.via_device_ids, vec!["opaque-id-甲"]);
+    }
+
+    /// 离线 `relay allow` 与 `peers add|remove|list` 落盘与 JSON 契约。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     peers list 允许离线读盘（只依赖 config）；写路径必须尊重 CC_PARTNER_DATA_DIR。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     隔离目录内 allow off → add 两条 peer（显式端口 + 默认端口）→ 重复报错 →
+    ///     list --json 解析断言 → list 文本断言 → 读盘核对 → remove 与缺失移除。
+    #[tokio::test]
+    async fn relay_allow_and_peers_offline_persist_in_isolated_data_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::install_data_dir_env(Some(temp.path().to_str().unwrap()));
+
+        super::run_relay_allow(false).await.expect("allow off");
+        super::run_peers_add("10.8.0.1", 40001)
+            .await
+            .expect("peer add");
+        let err = super::run_peers_add("10.8.0.1", 40001)
+            .await
+            .expect_err("重复 peer 应失败");
+        assert!(err.to_string().contains("已存在"), "{err}");
+        super::run_peers_add("10.8.0.2", super::PEER_DEFAULT_PORT)
+            .await
+            .expect("默认端口 add");
+
+        let json = super::run_peers_list(true).await.expect("list --json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("peers list JSON 应为单行合法 JSON");
+        assert_eq!(parsed["peers"].as_array().map(Vec::len), Some(2));
+        assert_eq!(parsed["peers"][0]["host"], "10.8.0.1");
+        assert_eq!(parsed["peers"][0]["port"], 40001);
+        assert_eq!(parsed["peers"][1]["port"], 62116);
+
+        let text = super::run_peers_list(false).await.expect("list 文本");
+        assert!(text.contains("手动 peer 2 条"), "{text}");
+        assert!(text.contains("10.8.0.1:40001"), "{text}");
+
+        let cfg = crate::config::AppConfig::load().expect("reload config");
+        assert!(!cfg.relay.enabled);
+        assert_eq!(cfg.manual_peers.len(), 2);
+
+        super::run_peers_remove("10.8.0.1", 40001)
+            .await
+            .expect("remove 应成功");
+        let err = super::run_peers_remove("10.8.0.1", 40001)
+            .await
+            .expect_err("再删应失败");
+        assert!(err.to_string().contains("不存在"), "{err}");
+        let cfg = crate::config::AppConfig::load().expect("reload config");
+        assert_eq!(cfg.manual_peers.len(), 1);
+        assert_eq!(cfg.manual_peers[0].host, "10.8.0.2");
     }
 }
