@@ -15,12 +15,15 @@ import type {
   PermissionsStatus,
   PromptOptimizerFillLanguage,
   PromptOptimizerProvider,
+  RelayConfig,
 } from '../types';
 import {
+  arrayDecoder,
   booleanDecoder,
   enumDecoder,
   numberDecoder,
   objectDecoder,
+  optionalDecoder,
   stringDecoder,
   type Decoder,
 } from '../runtimeSchema';
@@ -72,11 +75,35 @@ const DEFAULT_EXPERIMENTAL_FEATURES: ExperimentalFeaturesConfig = {
 
 /**
  * Business Logic（为什么需要这个 decoder）:
+ *   旧后端不带 relay 段时必须回落默认值，不能把整个 config 判成残缺而拒绝加载；
+ *   新后端带的 relay 段必须严格解码，避免半截数组进入跳板管理 UI。
+ *
+ * Code Logic（这个 decoder做什么）:
+ *   解码 enabled/viaDeviceIds/ignoredTargetIds；三个字段均缺省（默认允许中转、空列表）。
+ */
+export const relayConfigDecoder: Decoder<RelayConfig> = objectDecoder(
+  'RelayConfig',
+  {
+    enabled: booleanDecoder,
+    viaDeviceIds: arrayDecoder(stringDecoder),
+    ignoredTargetIds: arrayDecoder(stringDecoder),
+  },
+  {
+    defaults: {
+      enabled: true,
+      viaDeviceIds: [],
+      ignoredTargetIds: [],
+    },
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
  *   基础偏好与快捷键配置是 Settings 核心资源。
  *
  * Code Logic（这个 decoder 做什么）:
  *   严格解码 deviceId/deviceName/receiveDir/hotkeys/port/fillLanguage；
- *   experimentalFeatures 缺省全关。
+ *   experimentalFeatures 缺省全关；relay 为可选字段（旧后端缺省 undefined）。
  */
 export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   deviceId: stringDecoder,
@@ -90,6 +117,7 @@ export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   promptQuickInputHotkey: stringDecoder,
   httpPort: numberDecoder,
   experimentalFeatures: experimentalFeaturesDecoder,
+  relay: optionalDecoder(relayConfigDecoder),
 }, {
   defaults: {
     promptOptimizerProvider: 'claude',

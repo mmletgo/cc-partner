@@ -120,6 +120,8 @@
     "createFolder": "新建文件夹",
     "createFolderPlaceholder": "文件夹名称",
     "createFolderConfirm": "创建",
+    "viaRelay": "经 {{device}} 中转",
+    "relayOffline": "中转设备 {{device}} 不可达或目标已下线",
     "errors": {
       "devices": "读取在线设备失败",
       "roots": "读取远端根目录失败",

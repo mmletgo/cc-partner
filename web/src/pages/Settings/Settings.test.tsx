@@ -440,6 +440,7 @@ vi.mock('@/components/domain', () => {
     PermissionCard: () => <div data-testid="perm-card" />,
     WorkbenchDependencyCard: () => <div data-testid="wb-card" />,
     CcSwitchCliDependencyCard: () => <div data-testid="cc-switch-card" />,
+    RelayAccessCard: () => <div data-testid="relay-card" />,
     RuntimeDiagnosticsCard: RuntimeDiagnosticsCardStub,
   };
 });

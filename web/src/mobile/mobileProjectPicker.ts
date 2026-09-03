@@ -4,6 +4,7 @@ import type {
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
 } from '@/lib/types';
+import { dedupeRelayShadowDevices } from '@/lib/relayDevices';
 
 export type MobileProjectPickerMode = 'closed' | 'local' | 'lan-devices' | 'lan-browse';
 
@@ -75,15 +76,20 @@ export const initialMobileProjectPickerState: MobileProjectPickerState = {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   局域网添加入口必须排除主机自己和离线设备，避免把本机当对端打开。
+ *   局域网添加入口必须排除主机自己和离线设备，避免把本机当对端打开；
+ *   经跳板可见的影子设备离线（跳板不可达或目标下线）同样不可选，
+ *   且影子条目与直连条目并存时只保留直连（直连优先，防止同设备重复出现）。
  *
  * Code Logic（这个函数做什么）:
- *   保留 status=online 且 isSelf 不为 true 的设备。
+ *   先按 relay 规则去重（同 id 直连+影子只留直连），再保留 status=online
+ *   且 isSelf 不为 true 的设备。
  */
 export function filterOnlineLanDevices(
   devices: MobileTransferDevice[],
 ): MobileTransferDevice[] {
-  return devices.filter((device) => device.status === 'online' && device.isSelf !== true);
+  return dedupeRelayShadowDevices(devices).filter(
+    (device) => device.status === 'online' && device.isSelf !== true,
+  );
 }
 
 function clearBrowseFields(): Pick<

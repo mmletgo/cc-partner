@@ -120,6 +120,8 @@
     "createFolder": "New folder",
     "createFolderPlaceholder": "Folder name",
     "createFolderConfirm": "Create",
+    "viaRelay": "via {{device}}",
+    "relayOffline": "Relay device {{device}} is unreachable or the target is offline",
     "errors": {
       "devices": "Failed to load online devices",
       "roots": "Failed to load remote roots",

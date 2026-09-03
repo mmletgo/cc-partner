@@ -25,6 +25,8 @@ export interface AppConfig {
   httpPort: number;
   /** 内测功能 opt-in；缺字段视为全关。 */
   experimentalFeatures: ExperimentalFeaturesConfig;
+  /** 中转访问（跳板）配置；旧后端缺该字段时按默认值处理。 */
+  relay?: RelayConfig;
 }
 
 /**
@@ -51,6 +53,34 @@ export const DEFAULT_EXPERIMENTAL_FEATURES: ExperimentalFeaturesConfig = {
   browser: false,
   automation: false,
   cloudSync: false,
+};
+
+/**
+ * 中转访问（跳板机）配置（对齐后端 config `relay` 段，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   设备 A 无法直连设备 C 时，可指定一台共同可达的直连设备 B 作为跳板访问 C；
+ *   用户需要在 Settings 勾选信任的跳板，并决定本机是否允许被别人当跳板。
+ *
+ * Code Logic（字段说明）:
+ *   enabled 是 B 侧角色（本机是否允许被用作跳板，默认 true）；
+ *   viaDeviceIds 是 A 侧角色（允许作为跳板的本机直连设备 id）；
+ *   ignoredTargetIds 是显式忽略的中转目标（V1 无 UI，仅保留字段）。
+ */
+export interface RelayConfig {
+  /** 本机是否允许其他设备经本机中转访问它们的对端 */
+  enabled: boolean;
+  /** 允许作为跳板的直连设备 id 列表 */
+  viaDeviceIds: string[];
+  /** 从影子列表里显式忽略的目标设备 id */
+  ignoredTargetIds: string[];
+}
+
+/** relay 配置缺省值：允许被中转、无跳板、无忽略目标。 */
+export const DEFAULT_RELAY_CONFIG: RelayConfig = {
+  enabled: true,
+  viaDeviceIds: [],
+  ignoredTargetIds: [],
 };
 
 export type WorkbenchDependencyState =

@@ -171,6 +171,35 @@
   white-space: nowrap;
 }
 
+.deviceButton[data-relay] {
+  flex-wrap: wrap;
+}
+
+.relayPill {
+  flex: 0 0 auto;
+}
+
+.deviceRelayHint {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.deviceButton[data-relay-offline='true'] {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.deviceButton[data-relay-offline='true']:hover {
+  border-color: var(--border-soft);
+  box-shadow: none;
+}
+
+.deviceButton:disabled {
+  color: var(--muted);
+}
+
 .rootButton {
   min-height: 50px;
   padding: var(--space-2) var(--space-3);

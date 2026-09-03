@@ -110,6 +110,13 @@ export interface Device {
   capabilities?: string[];
   /** 协议版本提示（mDNS 非权威）。 */
   protoVersion?: number;
+  /**
+   * 影子设备（经跳板中转可见）的中转来源设备 id。
+   * 直连设备没有该字段；同一 device_id 同时直连可见时后端/前端都按直连优先。
+   */
+  viaDeviceId?: string;
+  /** 影子设备的中转来源设备名（仅展示用）。 */
+  viaDeviceName?: string;
 }
 
 export type TransferDirection = 'send' | 'receive';

@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { transferHttp } from '@/api/transferHttp';
 import { httpWorkbenchTransport, workbenchHttp } from '@/api/workbenchHttp';
-import { Button, Dialog, Drawer, Input } from '@/components/primitives';
+import { Button, Dialog, Drawer, Input, Pill } from '@/components/primitives';
 import {
   canOpenHostProjectSelection,
   canOpenRemoteProjectSelection,
@@ -12,6 +12,7 @@ import {
   remoteParentPath,
   sortRemoteDirectoryEntries,
 } from '@/lib/workbenchRemoteProjects';
+import { isRelayShadowDevice } from '@/lib/relayDevices';
 import type { WorkbenchProject, WorkbenchRemoteDirectoryEntry } from '@/lib/types';
 import {
   filterOnlineLanDevices,
@@ -318,18 +319,29 @@ export function MobileProjectPicker(props: MobileProjectPickerProps): ReactEleme
                 {t('workbench:mobile.projectPanel.pickerEmptyDevices')}
               </p>
             ) : null}
-            {devices.map((device) => (
-              <button
-                key={device.id}
-                type="button"
-                className={styles.mobileListItem}
-                disabled={pickerBusy}
-                onClick={() => dispatch({ type: 'deviceSelected', deviceId: device.id })}
-              >
-                <strong className={styles.mobileListTitle}>{device.name}</strong>
-                <span className={styles.mobileListPath}>{device.address}</span>
-              </button>
-            ))}
+            {devices.map((device) => {
+              const viaRelay = isRelayShadowDevice(device);
+              const viaName = device.viaDeviceName ?? device.viaDeviceId ?? device.name;
+              return (
+                <button
+                  key={device.id}
+                  type="button"
+                  className={styles.mobileListItem}
+                  disabled={pickerBusy}
+                  onClick={() => dispatch({ type: 'deviceSelected', deviceId: device.id })}
+                >
+                  <span className={styles.mobileListTitleRow}>
+                    <strong className={styles.mobileListTitle}>{device.name}</strong>
+                    {viaRelay ? (
+                      <Pill tone="neutral">
+                        {t('workbench:remoteProjectPicker.viaRelay', { device: viaName })}
+                      </Pill>
+                    ) : null}
+                  </span>
+                  <span className={styles.mobileListPath}>{device.address}</span>
+                </button>
+              );
+            })}
           </>
         ) : null}
         {showBrowser ? (

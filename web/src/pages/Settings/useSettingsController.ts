@@ -74,6 +74,8 @@ import {
 import { useSettingsFormSaves } from './controllers/useSettingsFormSaves';
 import { useSettingsResources } from './controllers/useSettingsResources';
 import { useSettingsUpdatePermissions } from './controllers/useSettingsUpdatePermissions';
+import { useSettingsRelay } from './controllers/useSettingsRelay';
+import type { UseSettingsRelayResult } from './controllers/useSettingsRelay';
 
 export type { SettingsTab };
 export {
@@ -156,6 +158,8 @@ export interface UseSettingsControllerResult {
   permRequesting: ReadonlySet<PermissionType>;
   refreshPermissions: () => void | Promise<void>;
   handleRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
+  /** 依赖环境页「中转访问（跳板）」卡片数据与动作（useSettingsRelay bundle） */
+  relay: UseSettingsRelayResult;
 
   // health
   healthForm: HealthForm;
@@ -305,6 +309,7 @@ export function useSettingsController(): UseSettingsControllerResult {
   );
   const resources = useSettingsResources({ hydrator });
   const updatePermissions = useSettingsUpdatePermissions();
+  const relay = useSettingsRelay();
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -630,6 +635,7 @@ export function useSettingsController(): UseSettingsControllerResult {
     permRequesting: updatePermissions.permRequesting,
     refreshPermissions: updatePermissions.refreshPermissions,
     handleRequestAccess: updatePermissions.handleRequestAccess,
+    relay,
 
     healthForm: form.healthForm,
     healthConfig: form.healthConfig,

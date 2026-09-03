@@ -43,6 +43,59 @@ describe('filterOnlineLanDevices', () => {
     ];
     expect(filterOnlineLanDevices(devices).map((item) => item.id)).toEqual(['office']);
   });
+
+  test('keeps online shadow devices and drops offline ones', () => {
+    const devices: MobileTransferDevice[] = [
+      {
+        id: 'c-online',
+        name: 'power-vpn',
+        address: '10.0.0.5',
+        port: 62116,
+        status: 'online',
+        isSelf: false,
+        viaDeviceId: 'dev-b',
+        viaDeviceName: 'nas-vpn',
+      },
+      {
+        id: 'c-offline',
+        name: 'old-box',
+        address: '10.0.0.6',
+        port: 62116,
+        status: 'offline',
+        isSelf: false,
+        viaDeviceId: 'dev-b',
+        viaDeviceName: 'nas-vpn',
+      },
+    ];
+    const filtered = filterOnlineLanDevices(devices);
+    expect(filtered.map((item) => item.id)).toEqual(['c-online']);
+    expect(filtered[0]?.viaDeviceName).toBe('nas-vpn');
+  });
+
+  test('keeps only the direct entry when same id has direct and shadow rows', () => {
+    const devices: MobileTransferDevice[] = [
+      {
+        id: 'dup',
+        name: 'power-vpn',
+        address: '10.0.0.5',
+        port: 62116,
+        status: 'online',
+        isSelf: false,
+        viaDeviceId: 'dev-b',
+      },
+      {
+        id: 'dup',
+        name: 'power-vpn',
+        address: '10.0.0.5',
+        port: 62116,
+        status: 'online',
+        isSelf: false,
+      },
+    ];
+    const filtered = filterOnlineLanDevices(devices);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.viaDeviceId).toBeUndefined();
+  });
 });
 
 describe('mobileProjectPickerReducer', () => {

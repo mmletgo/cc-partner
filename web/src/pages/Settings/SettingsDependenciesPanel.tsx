@@ -2,12 +2,13 @@
  * Settings 依赖环境面板
  *
  * Business Logic（为什么需要这个组件）:
- *   用户在依赖环境 tab 查看/请求 macOS 权限，并查看 Workbench tmux 与局域网防火墙依赖；
- *   编排留在 controller，本组件只渲染。
+ *   用户在依赖环境 tab 查看/请求 macOS 权限，并查看 Workbench tmux、局域网防火墙与
+ *   中转访问（跳板）依赖；编排留在 controller，本组件只渲染。
  *
  * Code Logic（这个组件做什么）:
  *   渲染权限 Card（含 mapPermissions 列表）、RuntimeDiagnosticsCard、
- *   WorkbenchDependencyCard / LanFirewallDependencyCard；不直接 import @/api 或 invoke。
+ *   WorkbenchDependencyCard / LanFirewallDependencyCard / RelayAccessCard；
+ *   不直接 import @/api 或 invoke，中转卡片数据与动作经 relay props 注入。
  */
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -16,21 +17,25 @@ import {
   CcSwitchCliDependencyCard,
   LanFirewallDependencyCard,
   PermissionCard,
+  RelayAccessCard,
   RuntimeDiagnosticsCard,
   WorkbenchDependencyCard,
 } from '@/components/domain';
 import { mapPermissions, type PermissionEntryAction } from '@/lib/permissionEntries';
 import type { PermissionType, PermissionsStatus } from '@/lib/types';
+import type { UseSettingsRelayResult } from './controllers/useSettingsRelay';
 import styles from './Settings.module.css';
 
 /**
  * 依赖环境面板 props
  *
  * Business Logic（为什么需要这个接口）:
- *   权限状态由 usePermissions 在 controller 中轮询；panel 仅消费投影结果。
+ *   权限状态由 usePermissions 在 controller 中轮询；中转访问数据由 useSettingsRelay
+ *   在 controller 中加载/保存；panel 仅消费投影结果。
  *
  * Code Logic（这个接口做什么）:
- *   声明权限 status/loading/error/requesting 与 request/refresh 回调。
+ *   声明权限 status/loading/error/requesting 与 request/refresh 回调，
+ *   以及 relay 卡片的完整 props bundle。
  */
 export interface SettingsDependenciesPanelProps {
   permStatus: PermissionsStatus | null;
@@ -40,6 +45,7 @@ export interface SettingsDependenciesPanelProps {
   permRequesting: ReadonlySet<PermissionType> | Set<PermissionType>;
   onRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   onRefreshPermissions: () => void;
+  relay: UseSettingsRelayResult;
 }
 
 /**
@@ -62,6 +68,7 @@ export function SettingsDependenciesPanel({
   permRequesting,
   onRequestAccess,
   onRefreshPermissions,
+  relay,
 }: SettingsDependenciesPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const [tWelcome] = useTranslation('welcome');
@@ -133,6 +140,20 @@ export function SettingsDependenciesPanel({
 <RuntimeDiagnosticsCard />
 <WorkbenchDependencyCard />
 <LanFirewallDependencyCard />
+<RelayAccessCard
+  candidates={relay.candidates}
+  viaDevices={relay.viaDevices}
+  allowEnabled={relay.allowEnabled}
+  loading={relay.loading}
+  saving={relay.saving}
+  loadError={relay.loadError}
+  saveError={relay.saveError}
+  saveSuccess={relay.saveSuccess}
+  onAddViaDevice={relay.handleAddViaDevice}
+  onRemoveViaDevice={relay.handleRemoveViaDevice}
+  onToggleAllow={relay.handleToggleAllow}
+  onRefresh={() => void relay.refresh()}
+/>
 <CcSwitchCliDependencyCard />
     </>
   );

@@ -333,6 +333,29 @@
       }
     }
   },
+  "relay": {
+    "title": "中转访问（跳板）",
+    "subtitle": "跨网段访问远程项目",
+    "description": "当前设备无法直连某台设备时，可以指定一台双方都能访问的局域网设备作为跳板，经它中转打开对方的远程项目。",
+    "riskNotice": "中转流量途经跳板设备明文中转，跳板设备可见流量内容；局域网模型不验证调用者身份。请只添加自己信任的跳板设备。",
+    "viaSectionTitle": "跳板设备",
+    "addRelayLabel": "添加跳板设备",
+    "addRelayPlaceholder": "选择设备",
+    "candidatesEmpty": "没有可添加的在线直连设备",
+    "addRelay": "添加",
+    "emptyVia": "还没有添加跳板设备",
+    "removeVia": "移除跳板 {{device}}",
+    "shadowCount": "可见 {{count}} 台设备",
+    "shadowDiscoveryHint": "添加跳板后约 15 秒（探测周期），经跳板可见的设备会出现在 Workbench 的远端设备列表。",
+    "allowSectionTitle": "本机角色",
+    "allowLabel": "允许其他设备经本机中转",
+    "allowHelper": "关闭后本机不再为邻居设备转发 Workbench 流量。",
+    "allowStateOn": "已允许",
+    "allowStateOff": "已关闭",
+    "saveSuccess": "中转配置已保存",
+    "saveFailed": "保存中转配置失败",
+    "loadFailed": "读取中转信息失败：{{error}}"
+  },
   "about": {
     "title": "关于",
     "versionLabel": "版本号",

@@ -22,6 +22,10 @@ import type {
 } from '@/lib/types';
 import { ChevronRightIcon, FileIcon, FolderIcon, XIcon } from '@/lib/icons';
 import {
+  isRelayShadowDevice,
+  pickRelayAwarePickerDevices,
+} from '@/lib/relayDevices';
+import {
   canOpenHostProjectSelection,
   canOpenRemoteProjectSelection,
   isValidBrowseChildName,
@@ -410,7 +414,7 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
           if (cancelled) return;
           dispatch({
             type: 'devicesLoaded',
-            devices: list.filter((device) => device.status === 'online'),
+            devices: pickRelayAwarePickerDevices(list),
           });
         })
         .catch((loadError: unknown) => {
@@ -651,20 +655,37 @@ export function WorkbenchRemoteProjectPicker(props: WorkbenchRemoteProjectPicker
             {!devicesLoading && devices.length === 0 ? (
               <div className={styles.empty}>{t('workbench:remoteProjectPicker.noDevices')}</div>
             ) : null}
-            {devices.map((device) => (
-              <button
-                key={device.id}
-                type="button"
-                className={styles.deviceButton}
-                data-active={device.id === selectedDeviceId || undefined}
-                disabled={pickerBusy}
-                onClick={() => handleDeviceSelect(device.id)}
-              >
-                <StatusDot status={device.status} size="sm" />
-                <span className={styles.deviceName}>{device.name}</span>
-                <span className={styles.deviceAddress}>{device.address}</span>
-              </button>
-            ))}
+            {devices.map((device) => {
+              const viaRelay = isRelayShadowDevice(device);
+              const viaName = device.viaDeviceName ?? device.viaDeviceId ?? device.name;
+              const relayOffline = viaRelay && device.status === 'offline';
+              return (
+                <button
+                  key={device.id}
+                  type="button"
+                  className={styles.deviceButton}
+                  data-active={device.id === selectedDeviceId || undefined}
+                  data-relay={viaRelay || undefined}
+                  data-relay-offline={relayOffline || undefined}
+                  disabled={pickerBusy || relayOffline}
+                  onClick={() => handleDeviceSelect(device.id)}
+                >
+                  <StatusDot status={device.status} size="sm" />
+                  <span className={styles.deviceName}>{device.name}</span>
+                  {viaRelay ? (
+                    <Pill tone="neutral" className={styles.relayPill}>
+                      {t('workbench:remoteProjectPicker.viaRelay', { device: viaName })}
+                    </Pill>
+                  ) : null}
+                  <span className={styles.deviceAddress}>{device.address}</span>
+                  {relayOffline ? (
+                    <span className={styles.deviceRelayHint}>
+                      {t('workbench:remoteProjectPicker.relayOffline', { device: viaName })}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         </section>
         )}

@@ -25,6 +25,10 @@ interface DeviceDto {
   /** mDNS 非权威能力提示 */
   capabilities?: string[];
   protoVersion?: number;
+  /** 影子设备（经跳板可见）的中转来源设备 id；直连设备无该字段 */
+  viaDeviceId?: string;
+  /** 影子设备的中转来源设备名 */
+  viaDeviceName?: string;
 }
 
 /** 对端 resume 能力 token（与 Rust CAPABILITY_TRANSFER_RESUME_V1 对齐）。 */
@@ -47,7 +51,8 @@ export interface HealthResponse {
  *   status:'online'|'offline'。在 API 边界完成转换，避免每个页面重复处理。
  *
  * Code Logic（做什么）:
- *   映射 id/name/address/port/lastSeen 原字段，并把 online 布尔值转换为 status 枚举。
+ *   映射 id/name/address/port/lastSeen 原字段，把 online 布尔值转换为 status 枚举，
+ *   并透传影子设备的 viaDeviceId/viaDeviceName 中转链路标记（直连设备为 undefined）。
  */
 function toDevice(dto: DeviceDto): Device {
   return {
@@ -59,6 +64,8 @@ function toDevice(dto: DeviceDto): Device {
     lastSeen: dto.lastSeen,
     capabilities: Array.isArray(dto.capabilities) ? dto.capabilities : [],
     protoVersion: typeof dto.protoVersion === 'number' ? dto.protoVersion : 0,
+    viaDeviceId: dto.viaDeviceId,
+    viaDeviceName: dto.viaDeviceName,
   };
 }
 

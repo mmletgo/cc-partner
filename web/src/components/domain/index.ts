@@ -55,6 +55,8 @@ export { WorkbenchProjectRail } from './WorkbenchProjectRail';
 export { WorkbenchDependencyCard } from './WorkbenchDependencyCard';
 export { LanFirewallDependencyCard } from './LanFirewallDependencyCard';
 export type { LanFirewallDependencyCardProps } from './LanFirewallDependencyCard';
+export { RelayAccessCard } from './RelayAccessCard';
+export type { RelayAccessCandidate, RelayAccessCardProps } from './RelayAccessCard';
 export { RuntimeDiagnosticsCard } from './RuntimeDiagnosticsCard';
 export { CcSwitchCliDependencyCard } from './CcSwitchCliDependencyCard';
 export type { CcSwitchCliDependencyCardProps } from './CcSwitchCliDependencyCard';

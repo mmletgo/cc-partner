@@ -333,6 +333,30 @@
       }
     }
   },
+  "relay": {
+    "title": "Relay access (jump host)",
+    "subtitle": "Cross-subnet remote project access",
+    "description": "When this device cannot reach another device directly, pick a LAN device both sides can reach as a jump host to open its remote projects through relay.",
+    "riskNotice": "Relayed traffic is forwarded in plain text through the jump host, which can see the traffic; the LAN model does not verify caller identity. Only add jump hosts you trust.",
+    "viaSectionTitle": "Jump devices",
+    "addRelayLabel": "Add jump device",
+    "addRelayPlaceholder": "Select a device",
+    "candidatesEmpty": "No online direct devices to add",
+    "addRelay": "Add",
+    "emptyVia": "No jump devices added",
+    "removeVia": "Remove jump device {{device}}",
+    "shadowCount": "Sees {{count}} device",
+    "shadowCount_other": "Sees {{count}} devices",
+    "shadowDiscoveryHint": "About 15 seconds after adding a jump host (probe interval), devices visible through it appear in the Workbench remote device list.",
+    "allowSectionTitle": "This device",
+    "allowLabel": "Allow other devices to relay through this device",
+    "allowHelper": "When off, this device no longer forwards Workbench traffic for neighbor devices.",
+    "allowStateOn": "Allowed",
+    "allowStateOff": "Off",
+    "saveSuccess": "Relay settings saved",
+    "saveFailed": "Failed to save relay settings",
+    "loadFailed": "Failed to load relay info: {{error}}"
+  },
   "about": {
     "title": "About",
     "versionLabel": "Version",

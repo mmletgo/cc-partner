@@ -427,6 +427,7 @@ export function Settings(): ReactElement {
               permRequesting={ctrl.permRequesting}
               onRequestAccess={ctrl.handleRequestAccess}
               onRefreshPermissions={() => void ctrl.refreshPermissions()}
+              relay={ctrl.relay}
             />
           </div>
         ) : null}

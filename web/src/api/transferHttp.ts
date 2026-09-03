@@ -115,6 +115,8 @@ const mobileTransferDeviceDtoDecoder = objectDecoder('MobileTransferDeviceDto', 
   protoVersion: optionalDecoder(numberDecoder),
   status: optionalDecoder(deviceStatusDecoder),
   online: optionalDecoder(booleanDecoder),
+  viaDeviceId: optionalDecoder(stringDecoder),
+  viaDeviceName: optionalDecoder(stringDecoder),
 });
 
 const mobileUploadInitDecoder: Decoder<MobileUploadInitResult> = objectDecoder(
@@ -153,6 +155,8 @@ export function decodeMobileTransferDevice(raw: unknown): MobileTransferDevice {
     capabilities: Array.isArray(dto.capabilities) ? dto.capabilities : [],
     protoVersion: typeof dto.protoVersion === 'number' ? dto.protoVersion : 0,
     isSelf: dto.isSelf,
+    viaDeviceId: dto.viaDeviceId,
+    viaDeviceName: dto.viaDeviceName,
   };
 }
 
