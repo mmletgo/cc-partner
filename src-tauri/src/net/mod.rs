@@ -25,6 +25,8 @@ pub mod peer_timeout;
 pub mod protocol;
 /// 中转访问（跳板机）透明转发器（HTTP 流式转发 + 终端 WS 桥 + 并发闸）。
 pub mod relay;
+/// 影子设备（经跳板可见的远端目标）状态与纯规则。
+pub mod relay_shadow;
 pub mod request_context;
 pub mod routes;
 

@@ -71,6 +71,9 @@ pub struct RelayRuntime {
     global_permits: Arc<Semaphore>,
     per_target_permits: RwLock<HashMap<String, Arc<Semaphore>>>,
     active_forwards: Arc<AtomicUsize>,
+    /// 影子设备表（A 侧角色：经跳板可见的目标）。挂在 RelayRuntime 避免新增
+    /// AppState 字段波及全部装配点；读写经由 `net::relay_shadow` 的表操作函数。
+    pub shadow_devices: RwLock<crate::net::relay_shadow::RelayShadowTable>,
 }
 
 impl RelayRuntime {
@@ -94,6 +97,7 @@ impl RelayRuntime {
             global_permits: Arc::new(Semaphore::new(RELAY_GLOBAL_MAX_CONCURRENCY)),
             per_target_permits: RwLock::new(HashMap::new()),
             active_forwards: Arc::new(AtomicUsize::new(0)),
+            shadow_devices: RwLock::new(HashMap::new()),
         }
     }
 
