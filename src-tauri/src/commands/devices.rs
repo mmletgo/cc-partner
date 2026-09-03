@@ -70,5 +70,57 @@ pub fn get_local_device_for_state(state: &AppState) -> DeviceDto {
         is_self: true,
         proto_version: info.protocol_version,
         capabilities: info.capabilities,
+        via_device_id: None,
+        via_device_name: None,
     }
+}
+
+/// 含影子设备的对端快照（直连 + 经跳板可见，device_id 直连优先）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 `list_devices`、`/api/mobile/devices` 与 control plane `devices` 端点
+///     需要同一份"直连 + 影子"合并视图；单点实现避免三处口径漂移
+///     （影子 online 语义 = via 可达 && via 报告 online；address 展示跳板地址）。
+///
+/// Code Logic（这个函数做什么）:
+///     先收集直连 DTO（排除本机），再读影子表把影子条目转为 DeviceDto
+///     （address/port 取 via 跳板的直连地址；via 已不在直连表时 online 强制 false），
+///     影子按 name 排序追加在直连之后。
+// 脚手架：影子合并由 A 侧任务接线（当前仅直连），接线时移除本 allow。
+#[allow(dead_code)]
+pub fn collect_device_dtos_with_shadows(state: &AppState) -> Result<Vec<DeviceDto>, AppError> {
+    let mut direct = list_devices_for_state(state)?;
+    let shadows = state
+        .relay
+        .shadow_devices
+        .read()
+        .map_err(|_| AppError::generic("relay 影子表读锁中毒"))?;
+    if shadows.is_empty() {
+        return Ok(direct);
+    }
+    let devices = state
+        .devices
+        .read()
+        .map_err(|_| AppError::generic("devices 读锁中毒"))?;
+    for shadow in shadows.values() {
+        let via = devices.get(&shadow.via_device_id);
+        let via_online = via.map(|d| d.online).unwrap_or(false);
+        let (address, port) = via
+            .map(|d| (d.host.clone(), d.port))
+            .unwrap_or_else(|| (String::new(), 0));
+        direct.push(DeviceDto {
+            id: shadow.target_device_id.clone(),
+            name: shadow.device_name.clone(),
+            address,
+            port,
+            last_seen: shadow.last_seen.to_rfc3339(),
+            online: shadow.online && via_online,
+            is_self: false,
+            proto_version: shadow.proto_version,
+            capabilities: shadow.capabilities.clone(),
+            via_device_id: Some(shadow.via_device_id.clone()),
+            via_device_name: via.map(|d| d.name.clone()),
+        });
+    }
+    Ok(direct)
 }

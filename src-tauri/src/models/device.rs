@@ -74,6 +74,12 @@ pub struct DeviceDto {
     /// 能力清单提示（mDNS 非权威；可能因 TXT 长度上限被裁剪，仅作预筛展示）。
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 影子设备（经跳板中转可见）的中转来源 device_id；直连设备为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_device_id: Option<String>,
+    /// 影子设备的中转来源设备名（仅展示用）；直连设备为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_device_name: Option<String>,
 }
 
 impl Device {
@@ -91,6 +97,8 @@ impl Device {
             is_self,
             proto_version: self.proto_version,
             capabilities: self.capabilities.clone(),
+            via_device_id: None,
+            via_device_name: None,
         }
     }
 }
