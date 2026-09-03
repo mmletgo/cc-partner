@@ -220,18 +220,6 @@ export function WorkbenchMarkdownEditor({
     return () => window.clearTimeout(syncTimer);
   }, [editor, value]);
 
-  const handleWysiwygMode = useCallback(() => {
-    onModeChange('wysiwyg');
-  }, [onModeChange]);
-
-  const handleSourceMode = useCallback(() => {
-    onModeChange('source');
-  }, [onModeChange]);
-
-  const handleSplitMode = useCallback(() => {
-    onModeChange('split');
-  }, [onModeChange]);
-
   const handleSourceChange = useCallback(
     (next: string) => {
       if (editor && !trySetEditorMarkdown(editor, next)) {
@@ -257,33 +245,18 @@ export function WorkbenchMarkdownEditor({
         role="group"
         aria-label={t('workbench:markdownEditor.modeBar')}
       >
-        <button
-          type="button"
-          className={styles.modeButton}
-          data-active={mode === 'wysiwyg'}
-          aria-pressed={mode === 'wysiwyg'}
-          onClick={handleWysiwygMode}
-        >
-          {t('workbench:markdownEditor.modes.wysiwyg')}
-        </button>
-        <button
-          type="button"
-          className={styles.modeButton}
-          data-active={mode === 'source'}
-          aria-pressed={mode === 'source'}
-          onClick={handleSourceMode}
-        >
-          {t('workbench:markdownEditor.modes.source')}
-        </button>
-        <button
-          type="button"
-          className={styles.modeButton}
-          data-active={mode === 'split'}
-          aria-pressed={mode === 'split'}
-          onClick={handleSplitMode}
-        >
-          {t('workbench:markdownEditor.modes.split')}
-        </button>
+        {(['wysiwyg', 'source', 'split'] as const).map((item) => (
+          <button
+            key={item}
+            type="button"
+            className={styles.modeButton}
+            data-active={mode === item}
+            aria-pressed={mode === item}
+            onClick={() => onModeChange(item)}
+          >
+            {t(`workbench:markdownEditor.modes.${item}`)}
+          </button>
+        ))}
       </div>
       ) : null}
 
