@@ -155,7 +155,9 @@ impl DisclaimedChild {
 ///     重建签名会把 pane 里的 Agent 一起杀掉。
 ///
 /// Code Logic（这个函数做什么）:
-///     macOS：`posix_spawn` + `responsibility_spawnattrs_setdisclaim` + SETPGROUP + stdio `/dev/null`；
+///     macOS：`posix_spawn` + `responsibility_spawnattrs_setdisclaim` + SETSID
+///     + stdio `/dev/null`（rust libc 未导出 `POSIX_SPAWN_SETSID`，用 Darwin `0x0400`；
+///     不可再叠加 SETPGROUP，否则 posix_spawnp EPERM）；
 ///     其它 Unix：`setsid` pre_exec。
 pub fn spawn_disclaimed(
     program: impl AsRef<Path>,
@@ -240,14 +242,13 @@ fn spawn_disclaimed_impl(
         actions: &mut actions,
     };
 
-    let flags = libc::POSIX_SPAWN_SETPGROUP as libc::c_short;
+    // Darwin sys/spawn.h：POSIX_SPAWN_SETSID = 0x0400。SETSID 已隐含新 process
+    // group；再叠加 SETPGROUP 会 posix_spawnp EPERM。
+    const POSIX_SPAWN_SETSID: libc::c_short = 0x0400;
+    let flags = POSIX_SPAWN_SETSID;
     check_posix(
         unsafe { libc::posix_spawnattr_setflags(attr_guard.attr, flags) },
         "posix_spawnattr_setflags",
-    )?;
-    check_posix(
-        unsafe { libc::posix_spawnattr_setpgroup(attr_guard.attr, 0) },
-        "posix_spawnattr_setpgroup",
     )?;
     check_posix(
         unsafe { responsibility_spawnattrs_setdisclaim(attr_guard.attr, 1) },
@@ -414,6 +415,27 @@ mod tests {
             responsible, pid,
             "disclaim 后 child 的 responsible pid 必须是它自己，实际 responsible={responsible} parent={}",
             std::process::id()
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     仅 SETPGROUP/disclaim 时 child 仍在 GUI 的 Unix session 里，GUI 退出或
+    ///     codesign SIGKILL 会间歇性带走 tmux。daemonize 必须 setsid 成为 session leader。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     spawn `/bin/sleep`，断言 `getsid(child) == child`。
+    #[cfg(unix)]
+    #[test]
+    fn spawn_disclaimed_child_is_session_leader() {
+        let mut child = spawn_disclaimed("/bin/sleep", &["30"]).expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        let sid = unsafe { libc::getsid(pid) };
+        let parent_sid = unsafe { libc::getsid(0) };
+        let _ = child.kill();
+        let _ = child.try_wait();
+        assert_eq!(
+            sid, pid,
+            "disclaim spawn 必须 setsid，实际 sid={sid} pid={pid} parent_sid={parent_sid}"
         );
     }
 

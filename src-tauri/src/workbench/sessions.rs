@@ -1347,6 +1347,22 @@ fn tmux_server_persist_commands() -> Vec<Vec<String>> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     默认 socket 上 `tmux start-server` 会读用户 `~/.tmux.conf`，`exit-empty` 默认 on，
+///     空 server 立刻退出。start-server 必须带 persist conf，且不得改用 `-S` 隔离 socket。
+///
+/// Code Logic（这个函数做什么）:
+///     `prefix + 可选 -f <conf> + start-server`。
+fn tmux_start_server_args(prefix_args: &[String], persist_conf: Option<&str>) -> Vec<String> {
+    let mut args = prefix_args.to_vec();
+    if let Some(conf) = persist_conf.filter(|path| !path.is_empty()) {
+        args.push("-f".to_string());
+        args.push(conf.to_string());
+    }
+    args.push("start-server".to_string());
+    args
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     shutdown 应先让 tmux 干净 detach，再关 PTY；直接 SIGHUP attach 可能把 hangup 传到 pane。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1892,22 +1908,21 @@ fn ensure_tmux_window_identity(tmux: &TmuxCommand, target: &str, session_id: &st
 
 /// Business Logic（为什么需要这个函数）:
 ///     默认 socket 上的 tmux server 可能尚未起来；create/restore 必须先 start-server 并关掉 exit-empty。
-///     macOS 上 start-server 必须脱离 GUI 责任链，否则 Dev.app codesign SIGKILL 会拆掉全部 pane。
+///     macOS 上 start-server 必须脱离 GUI 责任链且 setsid，否则 Dev.app 重启会间歇性拆掉 pane。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 `run_disclaimed` 跑 `start-server`，失败再回退 `run_tmux_command`；然后 server persist。
+///     写入 persist conf 后 `run_disclaimed` 跑 `-f conf start-server`（默认 socket）；
+///     失败只记日志，禁止回退普通 spawn。然后 `set-option -s exit-empty off`。
 fn ensure_workbench_tmux_server(tmux: &TmuxCommand) {
-    let mut start_args = tmux.prefix_args.clone();
-    start_args.push("start-server".to_string());
+    let persist_conf = workbench_tmux_persist_conf_path()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string));
+    let start_args = tmux_start_server_args(&tmux.prefix_args, persist_conf.as_deref());
     if let Err(error) = crate::backend::detached_spawn::run_disclaimed(
         std::path::Path::new(&tmux.program),
         &start_args,
     ) {
-        tracing::debug!("脱离责任链启动工作台 tmux server 失败，回退普通 spawn: {error}");
-        if let Err(error) = run_tmux_command(tmux, &["start-server"]) {
-            tracing::debug!("启动工作台 tmux server 失败: {error}");
-            return;
-        }
+        tracing::warn!("脱离责任链启动工作台 tmux server 失败: {error}");
     }
     for args in tmux_server_persist_commands() {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1915,6 +1930,23 @@ fn ensure_workbench_tmux_server(tmux: &TmuxCommand) {
             tracing::debug!("设置工作台 tmux server persist 失败: {error}");
         }
     }
+}
+
+const WORKBENCH_TMUX_PERSIST_CONF: &str =
+    "set -s exit-empty off\nset -g destroy-unattached off\nset -g mouse off\n";
+
+/// Business Logic（为什么需要这个函数）:
+///     `start-server` 必须在创建 server 时就带上 `exit-empty off`，不能等 server
+///     因空 session 退出后再 `set-option`。
+///
+/// Code Logic（这个函数做什么）:
+///     把 persist conf 写到 `<data_dir>/tmux.conf`（文件，不是隔离 socket 目录）。
+fn workbench_tmux_persist_conf_path() -> Result<PathBuf, AppError> {
+    let path = crate::config::data_dir()?.join("tmux.conf");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(WORKBENCH_TMUX_PERSIST_CONF) {
+        std::fs::write(&path, WORKBENCH_TMUX_PERSIST_CONF)?;
+    }
+    Ok(path)
 }
 
 /// Business Logic（为什么需要这个函数）:

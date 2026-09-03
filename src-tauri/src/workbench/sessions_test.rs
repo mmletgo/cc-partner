@@ -889,6 +889,46 @@ fn tmux_start_server_uses_disclaimed_spawn() {
         body.contains("run_disclaimed"),
         "tmux start-server 必须走 detached_spawn::run_disclaimed，避免 GUI 责任链"
     );
+    assert!(
+        !body.contains("回退普通 spawn"),
+        "start-server 失败不得回退到 GUI 责任链上的普通 spawn，否则 tmux 会间歇性被 codesign 杀掉"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     默认 socket 上 `start-server` 若仍加载用户 conf 且 `exit-empty` 为 on，
+///     空 server 会立刻退出，留下 stale socket，restore 变成 tmux_target_missing。
+///
+/// Code Logic（这个测试做什么）:
+///     Native 为 `-f <conf> start-server`；WSL 前缀之后同样带 `-f`；全程不得出现 `-S`。
+#[test]
+fn tmux_start_server_args_use_persist_conf_on_default_socket() {
+    assert_eq!(
+        tmux_start_server_args(&[], Some("/tmp/cc-partner/tmux.conf")),
+        vec![
+            "-f".to_string(),
+            "/tmp/cc-partner/tmux.conf".to_string(),
+            "start-server".to_string(),
+        ]
+    );
+    assert_eq!(
+        tmux_start_server_args(
+            &["--exec".to_string(), "tmux".to_string()],
+            Some("/mnt/c/tmux.conf"),
+        ),
+        vec![
+            "--exec".to_string(),
+            "tmux".to_string(),
+            "-f".to_string(),
+            "/mnt/c/tmux.conf".to_string(),
+            "start-server".to_string(),
+        ]
+    );
+    let args = tmux_start_server_args(&[], Some("/tmp/cc-partner/tmux.conf"));
+    assert!(
+        !args.iter().any(|arg| arg == "-S"),
+        "start-server 必须走默认 socket，不得 -S: {args:?}"
+    );
 }
 
 /// Business Logic（为什么需要这个测试）:
