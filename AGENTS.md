@@ -303,6 +303,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
 | GameHubDialog | open, onClose | 侧栏 footer `game` 打开的大厅/记单词/插件三态 Dialog；游戏中点遮罩不退出 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
+| RelayAccessCard | candidates, viaDevices, allowEnabled, loading/saving, loadError/saveError/saveSuccess, onAddViaDevice/onRemoveViaDevice/onToggleAllow/onRefresh | Settings 依赖环境页「中转访问（跳板）」卡片：添加/移除跳板设备（展开影子清单）、本机允许被中转开关与固定明文中转风险提示；pure view，数据经 `useSettingsRelay` controller 注入 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells；legacy matrix 兼容） |
 | WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口） |
 | WorkbenchRemoteProjectPicker | source local\|remote, onProjectOpened, onCancel, openProject | Workbench 本机/局域网应用内目录选择器（可新建一层文件夹后确认打开） |
