@@ -761,7 +761,8 @@
     "reasonMaxFileBytes": "Max file size",
     "reasonMaxLineBytes": "Max line size",
     "reasonMaxTotalBytes": "Max total bytes",
-    "reasonMaxSessionChars": "Max session text"
+    "reasonMaxSessionChars": "Max session text",
+    "reasonMaxScan": "Scan time limit"
   },
   "markdownEditor": {
     "modeBar": "Markdown edit mode",

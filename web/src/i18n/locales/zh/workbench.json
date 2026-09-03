@@ -753,7 +753,8 @@
     "reasonMaxFileBytes": "单文件大小上限",
     "reasonMaxLineBytes": "行大小上限",
     "reasonMaxTotalBytes": "总读取字节上限",
-    "reasonMaxSessionChars": "会话文本上限"
+    "reasonMaxSessionChars": "会话文本上限",
+    "reasonMaxScan": "扫描时限"
   },
   "markdownEditor": {
     "modeBar": "Markdown 编辑模式",

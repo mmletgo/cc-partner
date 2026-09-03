@@ -191,6 +191,8 @@ function mapSearchReasonLabel(
       return t('workbench:sessionSearch.reasonMaxTotalBytes');
     case 'max_session_chars':
       return t('workbench:sessionSearch.reasonMaxSessionChars');
+    case 'max_scan':
+      return t('workbench:sessionSearch.reasonMaxScan');
     default:
       return null;
   }

@@ -5,9 +5,9 @@
 //!     Codex / OpenCode，需要按 agent 切换搜索历史 session 并一键在新终端 resume。
 //!
 //! Code Logic（这个模块做什么）:
-//!     本机按 worktree path 过滤 Codex rollout / OpenCode SQLite session；搜索/preview 复用
-//!     既有 `SessionSearchHit` / `SessionPreview` DTO；resume 命令字符串按 agent 构造。
-//!     不做索引 watcher（按需扫描）；远端代理本模块不负责（命令层 local-only 门禁）。
+//!     Codex 先读 session_meta 按 cwd 过滤，空查询不全量解析 rollout；关键词搜索受
+//!     字节/墙钟预算截断。OpenCode 走 SQLite。搜索/preview 复用既有 DTO；resume
+//!     命令按 agent 构造。不做索引 watcher（按需扫描）；远端代理在命令层。
 
 use crate::agent_cli::selectors::normalize_path_for_match;
 use crate::error::AppError;
@@ -27,7 +27,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::process::Command;
 
 const DEFAULT_LIMIT: usize = 50;
@@ -255,58 +255,141 @@ fn extract_codex_content_text(content: &Value, role: &str) -> Option<String> {
     }
 }
 
-fn session_meta_from_rollout(path: &Path) -> (Option<String>, Option<String>) {
+struct CodexHeadMeta {
+    cwd: Option<String>,
+    session_id: Option<String>,
+    timestamp: Option<String>,
+    bytes_read: u64,
+}
+
+struct CodexRolloutMeta {
+    path: PathBuf,
+    session_id: String,
+    first_activity_at: String,
+    last_activity_at: String,
+    size: u64,
+}
+
+struct CodexMetaPass {
+    matching: Vec<CodexRolloutMeta>,
+    files_considered: u64,
+    bytes_read: u64,
+    reasons: Vec<String>,
+}
+
+/// 只读 rollout 头部 session_meta，避免为过滤 cwd 而扫完整 transcript。
+fn read_codex_head_meta(path: &Path) -> CodexHeadMeta {
+    let mut out = CodexHeadMeta {
+        cwd: None,
+        session_id: None,
+        timestamp: None,
+        bytes_read: 0,
+    };
     let Ok(file) = File::open(path) else {
-        return (None, None);
+        return out;
     };
     let reader = BufReader::new(file);
-    let mut cwd = None;
-    let mut session_id = None;
     for line in reader.lines().take(40) {
         let Ok(l) = line else { continue };
+        out.bytes_read = out
+            .bytes_read
+            .saturating_add((l.len() as u64).saturating_add(1));
         let Ok(v) = serde_json::from_str::<Value>(&l) else {
             continue;
         };
         if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
             continue;
         }
+        if out.timestamp.is_none() {
+            out.timestamp = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
         if let Some(p) = v.get("payload") {
-            if cwd.is_none() {
-                cwd = p
+            if out.cwd.is_none() {
+                out.cwd = p
                     .get("cwd")
                     .and_then(|c| c.as_str())
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
             }
-            if session_id.is_none() {
-                session_id = p
+            if out.session_id.is_none() {
+                out.session_id = p
                     .get("id")
                     .or_else(|| p.get("session_id"))
                     .and_then(|c| c.as_str())
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
             }
+            if out.timestamp.is_none() {
+                out.timestamp = p
+                    .get("timestamp")
+                    .and_then(|t| t.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+            }
         }
-        if cwd.is_some() && session_id.is_some() {
+        if out.cwd.is_some() && out.session_id.is_some() {
             break;
         }
     }
-    (cwd, session_id)
+    out
 }
 
-fn collect_codex_jsonl(root: &Path) -> Vec<PathBuf> {
+fn fallback_codex_session_id(path: &Path, from_meta: Option<String>) -> String {
+    if let Some(id) = from_meta.filter(|s| !s.is_empty()) {
+        return id;
+    }
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    if let Some(idx) = name.rfind('-') {
+        let tail = &name[idx + 1..];
+        if tail.len() >= 8 {
+            return tail.to_string();
+        }
+    }
+    name
+}
+
+fn metadata_mtime_rfc3339(md: &fs::Metadata) -> String {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|d| {
+            Utc.timestamp_opt(d.as_secs() as i64, d.subsec_nanos())
+                .single()
+        })
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| Utc::now().to_rfc3339())
+}
+
+fn push_unique_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|r| r == reason) {
+        reasons.push(reason.to_string());
+    }
+}
+
+fn collect_codex_jsonl(root: &Path, max_files: usize) -> (Vec<PathBuf>, bool) {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     let mut visited = 0usize;
+    let mut truncated = false;
+    let cap = max_files.max(1);
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             visited += 1;
-            if visited > 50_000 || out.len() >= MAX_CODEX_FILES {
-                return out;
+            if visited > 50_000 || out.len() >= cap {
+                truncated = true;
+                return (out, truncated);
             }
             let path = entry.path();
             if path.is_dir() {
@@ -318,7 +401,118 @@ fn collect_codex_jsonl(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    out
+    (out, truncated)
+}
+
+/// 先扫全部 jsonl 的 session_meta，只把 cwd 匹配的文件留给后续 listing/正文搜索。
+fn collect_matching_codex_metas(
+    home: &Path,
+    worktree_path: &str,
+    budget: CodexScanBudget,
+    started: Instant,
+) -> CodexMetaPass {
+    let sessions_dir = home.join("sessions");
+    if !sessions_dir.is_dir() {
+        return CodexMetaPass {
+            matching: Vec::new(),
+            files_considered: 0,
+            bytes_read: 0,
+            reasons: Vec::new(),
+        };
+    }
+    let (paths, files_truncated) = collect_codex_jsonl(&sessions_dir, budget.max_files);
+    let mut reasons = Vec::new();
+    if files_truncated {
+        push_unique_reason(&mut reasons, "max_files");
+    }
+    let mut matching = Vec::new();
+    let mut bytes_read = 0u64;
+    let files_considered = paths.len() as u64;
+    for path in paths {
+        if started.elapsed() >= budget.max_scan {
+            push_unique_reason(&mut reasons, "max_scan");
+            break;
+        }
+        let Ok(md) = fs::metadata(&path) else {
+            continue;
+        };
+        let head = read_codex_head_meta(&path);
+        bytes_read = bytes_read.saturating_add(head.bytes_read);
+        if !head
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| paths_match(cwd, worktree_path))
+        {
+            continue;
+        }
+        let session_id = fallback_codex_session_id(&path, head.session_id);
+        let last_activity_at = metadata_mtime_rfc3339(&md);
+        let first_activity_at = head.timestamp.unwrap_or_else(|| last_activity_at.clone());
+        matching.push(CodexRolloutMeta {
+            path,
+            session_id,
+            first_activity_at,
+            last_activity_at,
+            size: md.len(),
+        });
+    }
+    matching.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+    CodexMetaPass {
+        matching,
+        files_considered,
+        bytes_read,
+        reasons,
+    }
+}
+
+/// 空查询只需标题与粗略消息数：优先 index 标题，正文只读头部 64KiB。
+fn peek_codex_listing(path: &Path) -> (Option<String>, u32) {
+    let Ok(file) = File::open(path) else {
+        return (None, 0);
+    };
+    let reader = BufReader::new(file);
+    let mut seen = 0u64;
+    let mut title = None;
+    let mut message_count = 0u32;
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        seen = seen.saturating_add((line.len() as u64).saturating_add(1));
+        if seen > 64 * 1024 {
+            break;
+        }
+        let Ok(outer) = serde_json::from_str::<CodexOuterLine>(&line) else {
+            continue;
+        };
+        if outer.r#type != "response_item" {
+            continue;
+        }
+        let Some(payload) = outer.payload else {
+            continue;
+        };
+        if payload.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let Some(content) = payload.get("content") else {
+            continue;
+        };
+        let Some(text) = extract_codex_content_text(content, role) else {
+            continue;
+        };
+        if role == "user" && is_systemish_user_text(&text) {
+            continue;
+        }
+        if role == "user" || role == "assistant" {
+            message_count = message_count.saturating_add(1);
+            if title.is_none() && role == "user" {
+                let candidate: String = text.chars().take(200).collect();
+                if !candidate.trim().is_empty() {
+                    title = Some(candidate);
+                }
+            }
+        }
+    }
+    (title, message_count)
 }
 
 fn load_codex_titles(home: &Path) -> HashMap<String, String> {
@@ -349,29 +543,16 @@ fn load_codex_titles(home: &Path) -> HashMap<String, String> {
 fn parse_codex_rollout(
     path: &Path,
     titles: &HashMap<String, String>,
+    max_file_bytes: u64,
+    max_session_chars: usize,
 ) -> Option<CodexSessionRecord> {
     let md = fs::metadata(path).ok()?;
-    if md.len() > MAX_CODEX_FILE_BYTES {
+    if md.len() > max_file_bytes {
         return None;
     }
-    let (cwd, session_from_meta) = session_meta_from_rollout(path);
-    let fallback = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    // 文件名常含 uuid：rollout-...-{uuid}
-    let session_id = session_from_meta.unwrap_or_else(|| {
-        // 尝试从文件名提取 UUID 形态
-        let name = fallback.clone();
-        if let Some(idx) = name.rfind('-') {
-            let tail = &name[idx + 1..];
-            if tail.len() >= 8 {
-                return tail.to_string();
-            }
-        }
-        name
-    });
+    let head = read_codex_head_meta(path);
+    let session_id = fallback_codex_session_id(path, head.session_id);
+    let cwd = head.cwd;
 
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -381,8 +562,8 @@ fn parse_codex_rollout(
     let mut first_at: Option<String> = None;
     let mut last_at: Option<String> = None;
     let mut message_count = 0u32;
-    let mut user_budget = MAX_SESSION_CHARS;
-    let mut assistant_budget = MAX_SESSION_CHARS;
+    let mut user_budget = max_session_chars;
+    let mut assistant_budget = max_session_chars;
     let mut first_user: Option<String> = None;
 
     for line_res in reader.lines() {
@@ -470,32 +651,24 @@ fn parse_codex_rollout(
     })
 }
 
-fn load_codex_sessions_for_worktree(worktree_path: &str) -> Vec<CodexSessionRecord> {
-    let Some(home) = codex_home_dir() else {
-        return Vec::new();
+fn finish_codex_search(
+    items: Vec<SessionSearchHit>,
+    reasons: Vec<String>,
+    files_considered: u64,
+    files_indexed: u64,
+    bytes_read: u64,
+) -> SessionSearchResult {
+    let truncated = !reasons.is_empty();
+    let diagnostics = if truncated {
+        SessionSearchDiagnostics::truncated(reasons, files_considered, files_indexed, bytes_read)
+    } else {
+        SessionSearchDiagnostics::ok(files_considered, files_indexed, bytes_read)
     };
-    load_codex_sessions_from_home(&home, worktree_path)
-}
-
-fn load_codex_sessions_from_home(home: &Path, worktree_path: &str) -> Vec<CodexSessionRecord> {
-    let sessions_dir = home.join("sessions");
-    if !sessions_dir.is_dir() {
-        return Vec::new();
+    SessionSearchResult {
+        items,
+        truncated,
+        diagnostics,
     }
-    let titles = load_codex_titles(&home);
-    let mut out = Vec::new();
-    for path in collect_codex_jsonl(&sessions_dir) {
-        let Some(rec) = parse_codex_rollout(&path, &titles) else {
-            continue;
-        };
-        let Some(cwd) = rec.cwd.as_deref() else {
-            continue;
-        };
-        if paths_match(cwd, worktree_path) {
-            out.push(rec);
-        }
-    }
-    out
 }
 
 /// 搜索当前 worktree 下的 Codex session。
@@ -521,83 +694,144 @@ pub(crate) fn search_codex_sessions_in(
     query: &str,
     limit: usize,
 ) -> SessionSearchResult {
-    search_codex_sessions_with_budget(home, worktree_path, query, limit, CodexScanBudget::default())
+    search_codex_sessions_with_budget(
+        home,
+        worktree_path,
+        query,
+        limit,
+        CodexScanBudget::default(),
+    )
 }
 
 /// 带扫描预算的 Codex 搜索。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `~/.codex/sessions` 是全局日期目录，不能按 worktree 直接定位；若对每个 jsonl
+///     做全文解析，数千个文件会超过 GUI→sidecar 15s control 超时。
+///
+/// Code Logic（这个函数做什么）:
+///     先读 session_meta 按 cwd 过滤；空查询只组装 meta+标题；关键词才对匹配文件
+///     按 mtime 倒序解析正文，并受 max_total_content_bytes / max_scan 截断。
 pub(crate) fn search_codex_sessions_with_budget(
     home: &Path,
     worktree_path: &str,
     query: &str,
     limit: usize,
-    _budget: CodexScanBudget,
+    budget: CodexScanBudget,
 ) -> SessionSearchResult {
-    let records = load_codex_sessions_from_home(home, worktree_path);
-    let files_considered = records.len() as u64;
+    let started = Instant::now();
+    let titles = load_codex_titles(home);
+    let pass = collect_matching_codex_metas(home, worktree_path, budget, started);
+    let mut reasons = pass.reasons;
+    let mut bytes_read = pass.bytes_read;
+    let files_considered = pass.files_considered;
+    let files_indexed = pass.matching.len() as u64;
+    let matching = pass.matching;
     let query_trimmed = query.trim();
     let limit = if limit == 0 { DEFAULT_LIMIT } else { limit };
-    let mut hits = Vec::new();
 
     if query_trimmed.is_empty() {
-        let mut all = records;
-        all.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
-        for rec in all.into_iter().take(limit) {
+        let mut hits = Vec::new();
+        for meta in matching.into_iter().take(limit) {
+            let (peek_title, message_count) = peek_codex_listing(&meta.path);
+            let title = titles
+                .get(&meta.session_id)
+                .cloned()
+                .or(peek_title)
+                .unwrap_or_else(|| meta.session_id.chars().take(8).collect());
             hits.push(SessionSearchHit {
-                session_id: rec.session_id,
-                title: rec.title,
+                session_id: meta.session_id,
+                title,
                 title_hit: false,
                 user_hit: false,
                 assistant_hit: false,
-                first_activity_at: rec.first_activity_at,
-                last_activity_at: rec.last_activity_at,
-                message_count: rec.message_count,
+                first_activity_at: meta.first_activity_at,
+                last_activity_at: meta.last_activity_at,
+                message_count,
                 preview_snippets: Vec::new(),
             });
         }
-    } else {
-        let q = query_trimmed.to_lowercase();
-        for rec in records {
-            let title_hit = rec.title.to_lowercase().contains(&q);
-            let user_hit = rec.user_text.to_lowercase().contains(&q);
-            let assistant_hit = rec.assistant_text.to_lowercase().contains(&q);
-            if !title_hit && !user_hit && !assistant_hit {
-                continue;
-            }
-            let mut snippets = Vec::new();
-            if title_hit {
-                collect_snippets(&rec.title, &q, &mut snippets);
-            }
-            if user_hit {
-                collect_snippets(&rec.user_text, &q, &mut snippets);
-            }
-            if assistant_hit {
-                collect_snippets(&rec.assistant_text, &q, &mut snippets);
-            }
-            hits.push(SessionSearchHit {
-                session_id: rec.session_id,
-                title: rec.title,
-                title_hit,
-                user_hit,
-                assistant_hit,
-                first_activity_at: rec.first_activity_at,
-                last_activity_at: rec.last_activity_at,
-                message_count: rec.message_count,
-                preview_snippets: snippets,
-            });
-        }
-        hits = sort_and_limit(hits, limit);
+        return finish_codex_search(hits, reasons, files_considered, files_indexed, bytes_read);
     }
 
-    let indexed = hits.len() as u64;
-    SessionSearchResult {
-        items: hits,
-        truncated: false,
-        diagnostics: SessionSearchDiagnostics::ok(
-            files_considered,
-            indexed.min(files_considered),
-            0,
-        ),
+    let q = query_trimmed.to_lowercase();
+    let mut hits = Vec::new();
+    let mut content_bytes = 0u64;
+    for meta in matching {
+        if started.elapsed() >= budget.max_scan {
+            push_unique_reason(&mut reasons, "max_scan");
+            break;
+        }
+        let index_title = titles.get(&meta.session_id).cloned().unwrap_or_default();
+        let title_hit = !index_title.is_empty() && index_title.to_lowercase().contains(&q);
+        if title_hit {
+            let mut snippets = Vec::new();
+            collect_snippets(&index_title, &q, &mut snippets);
+            hits.push(SessionSearchHit {
+                session_id: meta.session_id,
+                title: index_title,
+                title_hit: true,
+                user_hit: false,
+                assistant_hit: false,
+                first_activity_at: meta.first_activity_at,
+                last_activity_at: meta.last_activity_at,
+                message_count: 0,
+                preview_snippets: snippets,
+            });
+            continue;
+        }
+        if meta.size > budget.max_file_bytes {
+            push_unique_reason(&mut reasons, "max_file_bytes");
+            continue;
+        }
+        if content_bytes >= budget.max_total_content_bytes {
+            push_unique_reason(&mut reasons, "max_total_bytes");
+            break;
+        }
+        let Some(rec) = parse_codex_rollout(
+            &meta.path,
+            &titles,
+            budget.max_file_bytes,
+            budget.max_session_chars,
+        ) else {
+            continue;
+        };
+        content_bytes = content_bytes.saturating_add(meta.size);
+        bytes_read = bytes_read.saturating_add(meta.size);
+        let title_hit = rec.title.to_lowercase().contains(&q);
+        let user_hit = rec.user_text.to_lowercase().contains(&q);
+        let assistant_hit = rec.assistant_text.to_lowercase().contains(&q);
+        if !title_hit && !user_hit && !assistant_hit {
+            continue;
+        }
+        let mut snippets = Vec::new();
+        if title_hit {
+            collect_snippets(&rec.title, &q, &mut snippets);
+        }
+        if user_hit {
+            collect_snippets(&rec.user_text, &q, &mut snippets);
+        }
+        if assistant_hit {
+            collect_snippets(&rec.assistant_text, &q, &mut snippets);
+        }
+        hits.push(SessionSearchHit {
+            session_id: rec.session_id,
+            title: rec.title,
+            title_hit,
+            user_hit,
+            assistant_hit,
+            first_activity_at: rec.first_activity_at,
+            last_activity_at: rec.last_activity_at,
+            message_count: rec.message_count,
+            preview_snippets: snippets,
+        });
+        if content_bytes >= budget.max_total_content_bytes {
+            push_unique_reason(&mut reasons, "max_total_bytes");
+            break;
+        }
     }
+    hits = sort_and_limit(hits, limit);
+    finish_codex_search(hits, reasons, files_considered, files_indexed, bytes_read)
 }
 
 /// Codex session preview。
@@ -617,10 +851,16 @@ pub(crate) fn preview_codex_session_in(
     worktree_path: &str,
     session_id: &str,
 ) -> Result<SessionPreview, AppError> {
-    let records = load_codex_sessions_from_home(home, worktree_path);
-    let rec = records
+    let started = Instant::now();
+    let titles = load_codex_titles(home);
+    let pass =
+        collect_matching_codex_metas(home, worktree_path, CodexScanBudget::default(), started);
+    let meta = pass
+        .matching
         .into_iter()
-        .find(|r| r.session_id == session_id)
+        .find(|m| m.session_id == session_id)
+        .ok_or_else(|| AppError::not_found("Codex session 不存在"))?;
+    let rec = parse_codex_rollout(&meta.path, &titles, MAX_CODEX_FILE_BYTES, MAX_SESSION_CHARS)
         .ok_or_else(|| AppError::not_found("Codex session 不存在"))?;
     Ok(SessionPreview {
         session_id: rec.session_id,
@@ -1381,11 +1621,9 @@ mod tests {
         let result = search_codex_sessions_in(home, worktree, "", 50);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].session_id, "sess-match");
+        assert!(result.items[0].message_count >= 1);
         assert_eq!(result.diagnostics.files_considered, 2);
-        assert!(
-            result.diagnostics.bytes_read > 0,
-            "meta 扫描应报告读取字节"
-        );
+        assert!(result.diagnostics.bytes_read > 0, "meta 扫描应报告读取字节");
         assert!(
             result.diagnostics.bytes_read < 80_000,
             "空查询不得把无关 rollout 正文算进 bytes_read，got {}",
@@ -1405,7 +1643,10 @@ mod tests {
             &[
                 meta_line("sess-titled", worktree, "2026-01-02T00:00:00Z"),
                 user_line("first user", "2026-01-02T00:00:01Z"),
-                assistant_line("long assistant should not be required", "2026-01-02T00:00:02Z"),
+                assistant_line(
+                    "long assistant should not be required",
+                    "2026-01-02T00:00:02Z",
+                ),
             ],
         );
         fs::write(
@@ -1480,8 +1721,7 @@ mod tests {
             max_total_content_bytes: 1200,
             ..CodexScanBudget::default()
         };
-        let result =
-            search_codex_sessions_with_budget(home, worktree, "needle", 10, budget);
+        let result = search_codex_sessions_with_budget(home, worktree, "needle", 10, budget);
         assert!(result.truncated || result.diagnostics.status == "truncated");
         assert!(
             result
@@ -1491,6 +1731,33 @@ mod tests {
                 .any(|r| r == "max_total_bytes"),
             "expected max_total_bytes, got {:?}",
             result.diagnostics.reasons
+        );
+    }
+
+    /// 本机若存在真实 Codex sessions，空查询必须在 control 15s 超时前结束。
+    #[test]
+    #[ignore = "reads developer ~/.codex; run with --ignored"]
+    fn codex_empty_search_real_home_if_present_finishes_under_15s() {
+        let Some(home) = dirs::home_dir().map(|h| h.join(".codex")) else {
+            return;
+        };
+        if !home.join("sessions").is_dir() {
+            return;
+        }
+        let started = Instant::now();
+        let worktree = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("/tmp/cc-partner-codex-search-bench-missing");
+        let result = search_codex_sessions_in(&home, worktree, "", 50);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "empty Codex search took {elapsed:?} considered={}",
+            result.diagnostics.files_considered
+        );
+        assert!(
+            result.diagnostics.files_considered > 0 || result.diagnostics.status == "unavailable"
         );
     }
 
@@ -1518,17 +1785,13 @@ mod tests {
         );
         let preview = preview_codex_session_in(home, worktree, "sess-a").expect("preview");
         assert_eq!(preview.session_id, "sess-a");
-        assert!(
-            preview
-                .recent_messages
-                .iter()
-                .any(|m| m.text.contains("hello from a"))
-        );
-        assert!(
-            preview
-                .recent_messages
-                .iter()
-                .all(|m| !m.text.contains("hello from b"))
-        );
+        assert!(preview
+            .recent_messages
+            .iter()
+            .any(|m| m.text.contains("hello from a")));
+        assert!(preview
+            .recent_messages
+            .iter()
+            .all(|m| !m.text.contains("hello from b")));
     }
 }
