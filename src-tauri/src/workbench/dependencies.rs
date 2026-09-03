@@ -11,7 +11,6 @@ use chrono::Utc;
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Read};
-use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command as StdCommand, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -606,84 +605,6 @@ fn now_status_changed_at() -> String {
     Utc::now().to_rfc3339()
 }
 
-const WORKBENCH_TMUX_CONF: &str =
-    "set -s exit-empty off\nset -g destroy-unattached off\nset -g mouse off\n";
-
-/// Business Logic（为什么需要这个函数）:
-///     默认 tmux socket 跟 TMPDIR/`/tmp`，sidecar 被杀后 server 退出会留下坏 socket，
-///     下次 restore 看到 tmux_target_missing。socket 必须落在 data_dir 里，和 TMPDIR 脱钩。
-///
-/// Code Logic（这个函数做什么）:
-///     返回 `<data_dir>/tmux`，必要时创建目录。
-pub(crate) fn workbench_tmux_runtime_dir() -> Result<PathBuf, AppError> {
-    let dir = crate::config::data_dir()?.join("tmux");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     单测需要在不碰真实 home 的情况下锁定 `-S/-f` 参数形状。
-///
-/// Code Logic（这个函数做什么）:
-///     生成 `-S <dir>/cc-partner.sock -f <dir>/tmux.conf`。
-pub(crate) fn workbench_tmux_isolation_args_for_dir(dir: &Path) -> Vec<String> {
-    vec![
-        "-S".to_string(),
-        dir.join("cc-partner.sock").to_string_lossy().into_owned(),
-        "-f".to_string(),
-        dir.join("tmux.conf").to_string_lossy().into_owned(),
-    ]
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     工作台 tmux 不得加载用户 `~/.tmux.conf`（可能 destroy-unattached on），
-///     也不得使用进程 TMPDIR 下的默认 socket。
-///
-/// Code Logic（这个函数做什么）:
-///     确保 conf 内容后返回 isolation args；失败则回退 `-L cc-partner`。
-///     WSL 把 Windows data_dir 转成 `/mnt/<drive>/...`，转失败同样回退 `-L`。
-fn workbench_tmux_isolation_args(cwd_mode: TmuxCwdMode) -> Vec<String> {
-    match prepare_workbench_tmux_runtime() {
-        Ok(dir) => {
-            let args = workbench_tmux_isolation_args_for_dir(&dir);
-            match cwd_mode {
-                TmuxCwdMode::Native => args,
-                TmuxCwdMode::Wsl => match convert_isolation_args_for_wsl(&args) {
-                    Some(converted) => converted,
-                    None => vec!["-L".to_string(), "cc-partner".to_string()],
-                },
-            }
-        }
-        Err(_) => vec!["-L".to_string(), "cc-partner".to_string()],
-    }
-}
-
-fn prepare_workbench_tmux_runtime() -> Result<PathBuf, AppError> {
-    let dir = workbench_tmux_runtime_dir()?;
-    let conf = dir.join("tmux.conf");
-    if std::fs::read_to_string(&conf).ok().as_deref() != Some(WORKBENCH_TMUX_CONF) {
-        std::fs::write(&conf, WORKBENCH_TMUX_CONF)?;
-    }
-    Ok(dir)
-}
-
-fn convert_isolation_args_for_wsl(args: &[String]) -> Option<Vec<String>> {
-    let mut converted = Vec::with_capacity(args.len());
-    let mut pending_path = false;
-    for arg in args {
-        if pending_path {
-            converted.push(crate::workbench::sessions::windows_path_to_wsl_path(arg)?);
-            pending_path = false;
-            continue;
-        }
-        if arg == "-S" || arg == "-f" {
-            pending_path = true;
-        }
-        converted.push(arg.clone());
-    }
-    Some(converted)
-}
-
 /// Business Logic（为什么需要这个枚举）:
 ///     Windows 上的 tmux 运行在 WSL 内部，不能直接识别宿主 Windows 盘符路径。
 ///
@@ -712,13 +633,15 @@ pub(crate) struct TmuxCommand {
 impl TmuxCommand {
     /// Business Logic（为什么需要这个函数）:
     ///     macOS/Linux 上的 tmux 可以直接用原生命令执行，并使用项目的原生文件系统路径。
+    ///     必须走默认 socket（与 0.8.3 相同）：隔离 data_dir socket 在 sidecar/GUI
+    ///     重启后变成空 server，restore 只能看到 tmux_target_missing。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造 cwd 模式为 Native 的 tmux 命令，并带上 data_dir socket/config isolation 前缀。
+    ///     构造无固定前缀、cwd 模式为 Native 的 tmux 命令描述。
     pub(crate) fn native(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
-            prefix_args: workbench_tmux_isolation_args(TmuxCwdMode::Native),
+            prefix_args: Vec::new(),
             cwd_mode: TmuxCwdMode::Native,
         }
     }
@@ -728,12 +651,11 @@ impl TmuxCommand {
     ///
     /// Code Logic（这个函数做什么）:
     ///     构造 `wsl.exe --exec tmux` 命令描述，并标记 cwd 需要转换成 WSL mount 路径。
+    ///     不附加 `-S/-f`，与 Native 一样使用 WSL 默认 tmux socket。
     pub(crate) fn wsl() -> Self {
-        let mut prefix_args = vec!["--exec".to_string(), "tmux".to_string()];
-        prefix_args.extend(workbench_tmux_isolation_args(TmuxCwdMode::Wsl));
         Self {
             program: "wsl.exe".to_string(),
-            prefix_args,
+            prefix_args: vec!["--exec".to_string(), "tmux".to_string()],
             cwd_mode: TmuxCwdMode::Wsl,
         }
     }
@@ -764,10 +686,10 @@ impl TmuxCommand {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     「有没有安装 tmux」只应跑 `tmux -V`，不能带工作台 `-S/-f`，也不能 setsid。
+    ///     「有没有安装 tmux」只应跑 `tmux -V`，不能带业务前缀，也不能 setsid。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     Native：`{program} -V`；WSL：`wsl.exe --exec tmux -V`。无 isolation 前缀、无 pre_exec。
+    ///     Native：`{program} -V`；WSL：`wsl.exe --exec tmux -V`。无 pre_exec。
     pub(crate) fn version_probe_command(&self) -> StdCommand {
         let mut command = StdCommand::new(&self.program);
         command.args(self.version_probe_args());

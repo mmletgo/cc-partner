@@ -1891,7 +1891,7 @@ fn ensure_tmux_window_identity(tmux: &TmuxCommand, target: &str, session_id: &st
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     专用 socket 上的 tmux server 可能尚未起来；create/restore 必须先 start-server 并关掉 exit-empty。
+///     默认 socket 上的 tmux server 可能尚未起来；create/restore 必须先 start-server 并关掉 exit-empty。
 ///     macOS 上 start-server 必须脱离 GUI 责任链，否则 Dev.app codesign SIGKILL 会拆掉全部 pane。
 ///
 /// Code Logic（这个函数做什么）:

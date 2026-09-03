@@ -3758,6 +3758,23 @@ mod tests {
         );
     }
 
+    /// Codex session 扫描可能遍历数千 jsonl；15s mutation 超时会把仍在扫描的 sidecar 误报 uncertain。
+    #[test]
+    fn workbench_control_timeout_extends_claude_session_search() {
+        assert_eq!(
+            workbench_control_timeout("claude.search"),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            workbench_control_timeout("claude.preview"),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            workbench_control_timeout("sessions.list"),
+            Some(MUTATE_TIMEOUT)
+        );
+    }
+
     /// Token 统计导出可能翻页写盘，不能用默认 15s mutation 超时。
     #[test]
     fn workbench_control_timeout_extends_token_stats_export() {

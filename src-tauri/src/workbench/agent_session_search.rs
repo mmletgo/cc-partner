@@ -27,7 +27,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
 const DEFAULT_LIMIT: usize = 50;
@@ -37,6 +37,32 @@ const MAX_CODEX_FILES: usize = 5_000;
 const MAX_CODEX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SESSION_CHARS: usize = 200_000;
 const MAX_RECENT: usize = 20;
+/// 内容搜索累计读取上限：空查询走 meta，命中正文时避免扫完整 8GB 语料。
+const MAX_CODEX_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
+/// 扫描墙钟上限，需低于 GUI→sidecar `claude.search` 默认超时。
+const MAX_CODEX_SCAN: Duration = Duration::from_secs(8);
+
+/// Codex 按需扫描预算。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CodexScanBudget {
+    pub max_files: usize,
+    pub max_file_bytes: u64,
+    pub max_total_content_bytes: u64,
+    pub max_scan: Duration,
+    pub max_session_chars: usize,
+}
+
+impl Default for CodexScanBudget {
+    fn default() -> Self {
+        Self {
+            max_files: MAX_CODEX_FILES,
+            max_file_bytes: MAX_CODEX_FILE_BYTES,
+            max_total_content_bytes: MAX_CODEX_CONTENT_BYTES,
+            max_scan: MAX_CODEX_SCAN,
+            max_session_chars: MAX_SESSION_CHARS,
+        }
+    }
+}
 
 /// Session Search 支持的 agent 源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +474,10 @@ fn load_codex_sessions_for_worktree(worktree_path: &str) -> Vec<CodexSessionReco
     let Some(home) = codex_home_dir() else {
         return Vec::new();
     };
+    load_codex_sessions_from_home(&home, worktree_path)
+}
+
+fn load_codex_sessions_from_home(home: &Path, worktree_path: &str) -> Vec<CodexSessionRecord> {
     let sessions_dir = home.join("sessions");
     if !sessions_dir.is_dir() {
         return Vec::new();
@@ -474,7 +504,35 @@ pub fn search_codex_sessions(
     query: &str,
     limit: usize,
 ) -> SessionSearchResult {
-    let records = load_codex_sessions_for_worktree(worktree_path);
+    let Some(home) = codex_home_dir() else {
+        return SessionSearchResult {
+            items: Vec::new(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::unavailable(),
+        };
+    };
+    search_codex_sessions_in(&home, worktree_path, query, limit)
+}
+
+/// 在指定 CODEX_HOME 下搜索（供单测注入隔离目录）。
+pub(crate) fn search_codex_sessions_in(
+    home: &Path,
+    worktree_path: &str,
+    query: &str,
+    limit: usize,
+) -> SessionSearchResult {
+    search_codex_sessions_with_budget(home, worktree_path, query, limit, CodexScanBudget::default())
+}
+
+/// 带扫描预算的 Codex 搜索。
+pub(crate) fn search_codex_sessions_with_budget(
+    home: &Path,
+    worktree_path: &str,
+    query: &str,
+    limit: usize,
+    _budget: CodexScanBudget,
+) -> SessionSearchResult {
+    let records = load_codex_sessions_from_home(home, worktree_path);
     let files_considered = records.len() as u64;
     let query_trimmed = query.trim();
     let limit = if limit == 0 { DEFAULT_LIMIT } else { limit };
@@ -547,7 +605,19 @@ pub fn preview_codex_session(
     worktree_path: &str,
     session_id: &str,
 ) -> Result<SessionPreview, AppError> {
-    let records = load_codex_sessions_for_worktree(worktree_path);
+    let Some(home) = codex_home_dir() else {
+        return Err(AppError::not_found("Codex session 不存在"));
+    };
+    preview_codex_session_in(&home, worktree_path, session_id)
+}
+
+/// 在指定 CODEX_HOME 下 preview。
+pub(crate) fn preview_codex_session_in(
+    home: &Path,
+    worktree_path: &str,
+    session_id: &str,
+) -> Result<SessionPreview, AppError> {
+    let records = load_codex_sessions_from_home(home, worktree_path);
     let rec = records
         .into_iter()
         .find(|r| r.session_id == session_id)
@@ -1253,5 +1323,212 @@ mod tests {
         // 相对与绝对可能因 canonicalize 失败走字面比较；至少相同字面应匹配
         assert!(paths_match("/tmp/foo", "/tmp/foo"));
         assert!(!paths_match("/tmp/foo", "/tmp/bar"));
+    }
+
+    fn meta_line(id: &str, cwd: &str, ts: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{id}","cwd":"{cwd}","timestamp":"{ts}"}}}}"#
+        )
+    }
+
+    fn user_line(text: &str, ts: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    fn assistant_line(text: &str, ts: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    fn write_rollout(home: &Path, rel: &str, lines: &[String]) {
+        let path = home.join("sessions").join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create rollout dir");
+        }
+        fs::write(path, lines.join("\n") + "\n").expect("write rollout");
+    }
+
+    /// 空查询必须按 cwd 过滤，但 files_considered 要计入全部 jsonl（含其它项目）。
+    #[test]
+    fn codex_empty_search_counts_unrelated_files_and_filters_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let worktree = "/tmp/cc-partner-codex-a";
+        write_rollout(
+            home,
+            "2026/01/01/rollout-match.jsonl",
+            &[
+                meta_line("sess-match", worktree, "2026-01-01T00:00:00Z"),
+                user_line("fix the timeout", "2026-01-01T00:00:01Z"),
+            ],
+        );
+        let mut unrelated = vec![meta_line(
+            "sess-other",
+            "/tmp/other-project",
+            "2026-01-01T00:00:00Z",
+        )];
+        for i in 0..4000 {
+            unrelated.push(assistant_line(
+                &format!("padding-{i}-unrelated-body"),
+                "2026-01-01T00:00:02Z",
+            ));
+        }
+        write_rollout(home, "2026/01/01/rollout-other.jsonl", &unrelated);
+
+        let result = search_codex_sessions_in(home, worktree, "", 50);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].session_id, "sess-match");
+        assert_eq!(result.diagnostics.files_considered, 2);
+        assert!(
+            result.diagnostics.bytes_read > 0,
+            "meta 扫描应报告读取字节"
+        );
+        assert!(
+            result.diagnostics.bytes_read < 80_000,
+            "空查询不得把无关 rollout 正文算进 bytes_read，got {}",
+            result.diagnostics.bytes_read
+        );
+    }
+
+    /// session_index 的 thread_name 应作为空查询标题，无需读完整 assistant 正文。
+    #[test]
+    fn codex_empty_search_uses_session_index_title() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let worktree = "/tmp/cc-partner-codex-b";
+        write_rollout(
+            home,
+            "2026/01/02/rollout-titled.jsonl",
+            &[
+                meta_line("sess-titled", worktree, "2026-01-02T00:00:00Z"),
+                user_line("first user", "2026-01-02T00:00:01Z"),
+                assistant_line("long assistant should not be required", "2026-01-02T00:00:02Z"),
+            ],
+        );
+        fs::write(
+            home.join("session_index.jsonl"),
+            r#"{"id":"sess-titled","thread_name":"Indexed Title","updated_at":"2026-01-02T00:00:03Z"}"#
+                .to_string()
+                + "\n",
+        )
+        .expect("write index");
+
+        let result = search_codex_sessions_in(home, worktree, "", 10);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].title, "Indexed Title");
+    }
+
+    /// 关键词搜索不得把其它 cwd 的正文算作命中。
+    #[test]
+    fn codex_query_search_ignores_other_cwd_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let worktree = "/tmp/cc-partner-codex-c";
+        write_rollout(
+            home,
+            "2026/01/03/rollout-match.jsonl",
+            &[
+                meta_line("sess-match", worktree, "2026-01-03T00:00:00Z"),
+                user_line("alpha unique-in-match", "2026-01-03T00:00:01Z"),
+            ],
+        );
+        write_rollout(
+            home,
+            "2026/01/03/rollout-other.jsonl",
+            &[
+                meta_line("sess-other", "/tmp/other", "2026-01-03T00:00:00Z"),
+                user_line("alpha unique-in-other", "2026-01-03T00:00:01Z"),
+            ],
+        );
+
+        let result = search_codex_sessions_in(home, worktree, "unique-in-other", 10);
+        assert!(result.items.is_empty());
+        let result = search_codex_sessions_in(home, worktree, "unique-in-match", 10);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].session_id, "sess-match");
+        assert!(result.items[0].user_hit);
+    }
+
+    /// 内容预算耗尽时应截断并带 max_total_bytes，而不是扫完全部匹配文件。
+    #[test]
+    fn codex_query_search_truncates_when_content_budget_exhausted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let worktree = "/tmp/cc-partner-codex-d";
+        write_rollout(
+            home,
+            "2026/01/04/rollout-old.jsonl",
+            &[
+                meta_line("sess-old", worktree, "2026-01-04T00:00:00Z"),
+                user_line("needle-old", "2026-01-04T00:00:01Z"),
+                assistant_line(&"x".repeat(4000), "2026-01-04T00:00:02Z"),
+            ],
+        );
+        write_rollout(
+            home,
+            "2026/01/04/rollout-new.jsonl",
+            &[
+                meta_line("sess-new", worktree, "2026-01-04T01:00:00Z"),
+                user_line("needle-new", "2026-01-04T01:00:01Z"),
+                assistant_line(&"y".repeat(4000), "2026-01-04T01:00:02Z"),
+            ],
+        );
+        let budget = CodexScanBudget {
+            max_total_content_bytes: 1200,
+            ..CodexScanBudget::default()
+        };
+        let result =
+            search_codex_sessions_with_budget(home, worktree, "needle", 10, budget);
+        assert!(result.truncated || result.diagnostics.status == "truncated");
+        assert!(
+            result
+                .diagnostics
+                .reasons
+                .iter()
+                .any(|r| r == "max_total_bytes"),
+            "expected max_total_bytes, got {:?}",
+            result.diagnostics.reasons
+        );
+    }
+
+    /// preview 只解析目标 session，仍能返回最近 user 消息。
+    #[test]
+    fn codex_preview_reads_target_session_recent_messages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        let worktree = "/tmp/cc-partner-codex-e";
+        write_rollout(
+            home,
+            "2026/01/05/rollout-a.jsonl",
+            &[
+                meta_line("sess-a", worktree, "2026-01-05T00:00:00Z"),
+                user_line("hello from a", "2026-01-05T00:00:01Z"),
+            ],
+        );
+        write_rollout(
+            home,
+            "2026/01/05/rollout-b.jsonl",
+            &[
+                meta_line("sess-b", worktree, "2026-01-05T00:00:00Z"),
+                user_line("hello from b", "2026-01-05T00:00:01Z"),
+            ],
+        );
+        let preview = preview_codex_session_in(home, worktree, "sess-a").expect("preview");
+        assert_eq!(preview.session_id, "sess-a");
+        assert!(
+            preview
+                .recent_messages
+                .iter()
+                .any(|m| m.text.contains("hello from a"))
+        );
+        assert!(
+            preview
+                .recent_messages
+                .iter()
+                .all(|m| !m.text.contains("hello from b"))
+        );
     }
 }

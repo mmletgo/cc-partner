@@ -22,11 +22,11 @@ fn parse_tmux_version_extracts_version_token() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     工作台 isolation 前缀 `-S/-f` 或 std_command 的 setsid 若进 `tmux -V` 探测，
-///     会和超时 runner 的 setpgid 冲突，已安装 tmux 也会被当成 missing。
+///     std_command 的 setpgid 若进 `tmux -V` 探测，会和超时 runner 的 setpgid 冲突，
+///     已安装 tmux 也会被当成 missing。
 ///
 /// Code Logic（这个测试做什么）:
-///     Native 探测参数只有 `-V`；WSL 为 `--exec tmux -V`；都不含 `-S`/`-f`。
+///     Native 探测参数只有 `-V`；WSL 为 `--exec tmux -V`。
 #[test]
 fn tmux_version_probe_args_do_not_include_isolation_socket() {
     let native = TmuxCommand::native("tmux");

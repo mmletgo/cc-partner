@@ -532,13 +532,10 @@ fn wsl_tmux_backend_invokes_tmux_through_wsl() {
     let backend = TmuxCommand::wsl();
 
     assert_eq!(backend.program, "wsl.exe");
-    assert_eq!(backend.prefix_args[0], "--exec");
-    assert_eq!(backend.prefix_args[1], "tmux");
-    assert!(
-        backend.prefix_args.contains(&"-S".to_string())
-            || backend.prefix_args.contains(&"-L".to_string()),
-        "WSL tmux must isolate socket from host TMPDIR: {:?}",
-        backend.prefix_args
+    assert_eq!(
+        backend.prefix_args,
+        vec!["--exec".to_string(), "tmux".to_string()],
+        "WSL tmux 与 0.8.3 一样走默认 socket，不得再加 -S/-L/-f"
     );
     assert_eq!(
         backend.project_cwd(r"C:\Users\hans\project").unwrap(),
@@ -849,34 +846,27 @@ fn tmux_attach_window_args_switch_client_to_window_target() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     默认 `/tmp/tmux-$UID` socket 在 sidecar 被杀后会变 stale；工作台必须用 data_dir 下的固定 socket。
+///     隔离 data_dir socket 在 sidecar/GUI 重启后变成空 server，restore 只能看到
+///     tmux_target_missing。0.8.3 用默认 socket，server 由 `new-session` 自行 daemonize，
+///     重启后 window 还在。
 ///
 /// Code Logic（这个测试做什么）:
-///     锁定 isolation args 的 `-S/-f` 形状（路径分隔符跟随宿主 `Path::join`，Windows 上再交给 WSL 转换）；
-///     并断言 native 命令带上稳定 socket 或 `-L` 回退。
+///     Native 前缀必须为空；不得带 `-S`/`-f`/`-L`。
 #[test]
-fn native_tmux_command_uses_stable_socket_and_config() {
-    let dir = std::path::Path::new("/tmp/cc-partner-data/tmux");
-    let args = crate::workbench::dependencies::workbench_tmux_isolation_args_for_dir(dir);
-    assert_eq!(
-        args,
-        vec![
-            "-S",
-            dir.join("cc-partner.sock").to_string_lossy().as_ref(),
-            "-f",
-            dir.join("tmux.conf").to_string_lossy().as_ref(),
-        ]
-    );
+fn native_tmux_command_uses_default_socket() {
     let backend = TmuxCommand::native("tmux");
-    let joined = backend.prefix_args.join(" ");
-    assert!(joined.contains("-S "), "{joined}");
     assert!(
-        joined.contains("cc-partner.sock") || joined.contains("-L cc-partner"),
-        "{joined}"
+        backend.prefix_args.is_empty(),
+        "native tmux 必须走默认 socket，实际 prefix={:?}",
+        backend.prefix_args
     );
     assert!(
-        joined.contains("-f ") || joined.contains("-L cc-partner"),
-        "{joined}"
+        !backend
+            .prefix_args
+            .iter()
+            .any(|arg| arg == "-S" || arg == "-f" || arg == "-L"),
+        "不得隔离 socket/config: {:?}",
+        backend.prefix_args
     );
 }
 
