@@ -63,6 +63,8 @@ pub fn diff_inventories(
         agents,
         blocking_reasons: Vec::new(),
         peer_device_ids: Vec::new(),
+        // preview 不带选择；apply 时由 request.selection 合并进内存 plan。
+        selection: None,
     }
 }
 

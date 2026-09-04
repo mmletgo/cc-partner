@@ -274,6 +274,7 @@ mod tests {
             ApplyUserMirrorRequest {
                 plan_token: plan.plan_token,
                 client_request_id: "req-stale".into(),
+                selection: None,
             },
             &BTreeMap::new(),
             &[],
@@ -296,6 +297,7 @@ mod tests {
             ApplyUserMirrorRequest {
                 plan_token: "no-such-plan".into(),
                 client_request_id: "req-missing".into(),
+                selection: None,
             },
             &BTreeMap::new(),
             &[],

@@ -9,8 +9,9 @@
 //!     item_bindings；累计超 512 MiB fail-closed；legacyLossy MCP 标 blocked 且不把占位当凭据。
 
 use super::models::{
-    UserMirrorAgentInventoryDto, UserMirrorInventoryDto, USER_MIRROR_DEST_MAX_TOTAL_BYTES,
-    USER_MIRROR_PLAN_TTL_MINUTES, USER_MIRROR_TRANSFER_LIMIT,
+    UserMirrorAgentInventoryDto, UserMirrorInventoryDto, UserMirrorSelectionFilterDto,
+    UserMirrorSlotHashesDto, USER_MIRROR_DEST_MAX_TOTAL_BYTES, USER_MIRROR_PLAN_TTL_MINUTES,
+    USER_MIRROR_TRANSFER_LIMIT,
 };
 use crate::agent_hub::models::{
     AgentTarget, AssetKind, AssetPolicy, RevisionOperation, RevisionOriginKind, ScopeKind,
@@ -221,6 +222,48 @@ pub(crate) fn ensure_user_mirror_bytes_budget(current: u64, next: u64) -> Result
         return Err(AppError::validation(USER_MIRROR_TRANSFER_LIMIT.to_string()));
     }
     Ok(())
+}
+
+/// 按 selection 裁剪 inventory 副本，供 freeze 只打包选中的资产（省传输）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     pull/push 选择部分资产时，源端冻结应只包含选中项；stale 校验必须仍基于
+///     全量探测 inventory，所以只能裁剪副本、不得改 `inventory_snapshot_hash`。
+///
+/// Code Logic（这个函数做什么）:
+///     纯函数：selection None → 原样克隆；`portable_keys=Some(list)` 时每个 Agent 的
+///     items 仅保留 `(kind, native_id)` ∈ keys 的项；`include_instructions=false` 时
+///     同时清空 nativeFiles 与 slots（common/adapted/exclusive 全置 None）。
+pub(crate) fn filter_inventory_for_freeze(
+    inv: &UserMirrorInventoryDto,
+    selection: Option<&UserMirrorSelectionFilterDto>,
+) -> UserMirrorInventoryDto {
+    let Some(selection) = selection else {
+        return inv.clone();
+    };
+    let keys: Option<std::collections::BTreeSet<(PortableAssetKind, String)>> =
+        selection.portable_keys.as_ref().map(|keys| {
+            keys.iter()
+                .map(|key| (key.kind, key.native_id.clone()))
+                .collect()
+        });
+    let mut trimmed = inv.clone();
+    for agent in &mut trimmed.agents {
+        if let Some(keys) = keys.as_ref() {
+            agent
+                .items
+                .retain(|item| keys.contains(&(item.kind, item.native_id.clone())));
+        }
+        if !selection.include_instructions {
+            agent.native_files.clear();
+            agent.slots = UserMirrorSlotHashesDto {
+                common: None,
+                adapted: None,
+                exclusive: None,
+            };
+        }
+    }
+    trimmed
 }
 
 /// 选择 envelope 的 replica id：优先合法 UUID。
@@ -481,24 +524,37 @@ async fn freeze_one_portable(
     Ok(())
 }
 
-/// 逃逸软链 / source_blocked 不得跟随哈希，也不得拖垮整次冻结。
+/// 逃逸软链 / source_blocked 不得拖垮整次冻结；可解析的仓库软链照常打包。
 ///
-/// Business Logic: 与 portable planner 同一条 fail-closed 边界；镜像仍可处理其余资产。
-/// Code Logic: warning 码或 native 根 `EscapeLink` 即跳过。
-fn portable_item_is_blocked_source(item: &PortableInventoryItemDto) -> bool {
-    if item.warnings.iter().any(|warning| {
+/// Business Logic: 与 portable planner 同一条 fail-closed 边界——本机写动作不跟随逃逸链；
+///     但 push/pull 是只读打包，skill/command 的「仓库真树 + Agent 软链」形式
+///     （如 `~/.agents/skills`）应 dereference 真树内容送进对端 portable store；
+///     断链（目标缺失）才保持 blocked。
+/// Code Logic: warning 码或 native 根 `EscapeLink` 时，source_path 可 canonicalize 则放行，
+///     否则跳过。
+pub(crate) fn portable_item_is_blocked_source(item: &PortableInventoryItemDto) -> bool {
+    let flagged = item.warnings.iter().any(|warning| {
         warning == "store_symlink_escape"
             || warning == "source_blocked"
             || warning.contains("store_symlink_escape")
-    }) {
-        return true;
-    }
-    item.source_path.as_deref().is_some_and(|path| {
+    }) || item.source_path.as_deref().is_some_and(|path| {
         matches!(
             classify_store_link(Path::new(path)),
             StoreLinkClass::EscapeLink
         )
-    })
+    });
+    if !flagged {
+        return false;
+    }
+    !escape_source_resolvable(item)
+}
+
+/// 逃逸软链能否 dereference 出真实源树（只读打包跟随的前提）。
+fn escape_source_resolvable(item: &PortableInventoryItemDto) -> bool {
+    item.source_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .is_some_and(|path| fs::canonicalize(path).is_ok())
 }
 
 /// `pack_inventory_item` 把目录逃逸包装成 `PORTABLE_PULL_SKILL_HASH:...`。
@@ -726,7 +782,8 @@ fn finish_envelope(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_user_mirror_bytes_budget, freeze_user_mirror_selection, USER_MIRROR_TRANSFER_LIMIT,
+        ensure_user_mirror_bytes_budget, filter_inventory_for_freeze, freeze_user_mirror_selection,
+        freeze_user_mirror_selection_with_env, USER_MIRROR_TRANSFER_LIMIT,
     };
     use crate::agent_hub::models::AgentTarget;
     use crate::agent_hub::portable_inventory::{
@@ -735,7 +792,11 @@ mod tests {
     use crate::agent_hub::snapshot::portable_builder::LEGACY_LOSSY_PLACEHOLDER;
     use crate::agent_hub::targets::TargetEnvironment;
     use crate::agent_hub::user_mirror::build_local_user_mirror_inventory;
-    use crate::agent_hub::user_mirror::models::USER_MIRROR_DEST_MAX_TOTAL_BYTES;
+    use crate::agent_hub::user_mirror::models::{
+        UserMirrorAgentInventoryDto, UserMirrorInventoryDto, UserMirrorNativeFileFactDto,
+        UserMirrorPortableItemDto, UserMirrorPortableKeyDto, UserMirrorSelectionFilterDto,
+        UserMirrorSlotHashesDto, USER_MIRROR_DEST_MAX_TOTAL_BYTES,
+    };
     use crate::backend::runtime::build_app_state;
     use crate::backend::ui::RecordingBackendUi;
     use crate::config::{install_data_dir_env, install_env_var};
@@ -908,6 +969,75 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     仓库软链形式的 Skill（仓库真树 + Agent 根软链）冻结时必须 dereference
+    ///     真树内容进 CAS，让对端能把资产落进 portable store；断链逃逸仍 blocked。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     建 `agent-repo/skills/repo-link` 真树 + `.claude/skills` 软链 + 断链软链；
+    ///     freeze 后断言 repo-link binding 非 blocked 且真树正文进对象，断链 binding blocked。
+    #[tokio::test]
+    async fn freeze_follows_resolvable_escape_skill_and_blocks_broken_link() {
+        let env = seed_user_mirror_homes().await;
+        let repo = env.home.join("agent-repo/skills/repo-link");
+        write(
+            repo.join("SKILL.md").as_path(),
+            "---\nname: repo-link\ndescription: repo\n---\nREPO-BODY\n",
+        );
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(env.claude_home.join("skills")).expect("claude skills root");
+            std::os::unix::fs::symlink(&repo, env.claude_home.join("skills/repo-link"))
+                .expect("escape link");
+            std::os::unix::fs::symlink(
+                env.home.join("no-such-target"),
+                env.claude_home.join("skills/broken-link"),
+            )
+            .expect("broken link");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = repo;
+            return;
+        }
+
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let built = freeze_user_mirror_selection(&env.app_state, &inventory)
+            .await
+            .unwrap();
+
+        let repo_binding = built
+            .item_bindings
+            .iter()
+            .find(|b| {
+                b.kind == Some(PortableAssetKind::Skill)
+                    && b.native_id.as_deref() == Some("repo-link")
+            })
+            .expect("repo-link binding");
+        assert!(
+            !repo_binding.blocked,
+            "resolvable escape must be packed: {repo_binding:?}"
+        );
+        assert!(
+            built
+                .object_bytes
+                .values()
+                .any(|b| String::from_utf8_lossy(b).contains("REPO-BODY")),
+            "repo tree body must be frozen into CAS objects"
+        );
+        if let Some(broken_binding) = built.item_bindings.iter().find(|b| {
+            b.kind == Some(PortableAssetKind::Skill)
+                && b.native_id.as_deref() == Some("broken-link")
+        }) {
+            assert!(
+                broken_binding.blocked,
+                "broken escape must stay blocked: {broken_binding:?}"
+            );
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     超过 512 MiB 必须 fail-closed，禁止靠分配整包来测上限。
     ///
     /// Code Logic（这个测试做什么）:
@@ -969,18 +1099,20 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     一条逃逸软链 Skill 不得让整次用户级冻结失败，否则其余 Agent 资产也无法镜像。
+    ///     一条逃逸软链 Skill 不得让整次用户级冻结失败，否则其余 Agent 资产也无法镜像；
+    ///     可解析的仓库软链照常 dereference 打包，不再 fail-closed blocked。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     真树 hello 与指向 store 外的 escaped 并存；冻结成功，escaped blocked，hello 仍进 CAS。
+    ///     真树 hello 与指向 store 外真树的 escaped 并存；冻结成功，escaped 非 blocked
+    ///     且带 CAS 对象，hello 仍进 CAS。
     #[tokio::test]
-    async fn freeze_skips_escape_symlink_skill_without_failing_selection() {
+    async fn freeze_packs_resolvable_escape_symlink_skill_without_failing_selection() {
         let env = seed_user_mirror_homes().await;
         seed_claude_native_skill_and_mcp(&env);
         let outside = env.home.join("outside-escape/SKILL.md");
         write(
             &outside,
-            "---\nname: escaped\ndescription: outside store\n---\n",
+            "---\nname: escaped\ndescription: outside store\n---\nESCAPED-BODY\n",
         );
         let link = env.claude_home.join("skills/escaped");
         #[cfg(unix)]
@@ -1004,9 +1136,17 @@ mod tests {
             binding.kind == Some(PortableAssetKind::Skill)
                 && binding.native_id.as_deref() == Some("escaped")
         });
+        let escaped = escaped.expect("escaped skill must still be listed");
         assert!(
-            escaped.is_some_and(|binding| binding.blocked && binding.object_hash.is_empty()),
-            "escaped skill must be blocked without CAS object: {escaped:?}"
+            !escaped.blocked && !escaped.object_hash.is_empty(),
+            "resolvable escape must pack a CAS object: {escaped:?}"
+        );
+        assert!(
+            built
+                .object_bytes
+                .values()
+                .any(|b| String::from_utf8_lossy(b).contains("ESCAPED-BODY")),
+            "escape tree body must be frozen into CAS objects"
         );
         assert!(built.item_bindings.iter().any(|binding| {
             binding.kind == Some(PortableAssetKind::Skill)
@@ -1056,5 +1196,195 @@ mod tests {
         freeze_user_mirror_selection(&env.app_state, &inventory)
             .await
             .expect("duplicate listed native_id must not invalidate envelope");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     镜像冻结前的 store 收编必须让 Skill/Command 全部变成可打包形态：
+    ///     freeze 结果里的 skill/command binding 不得再有 blocked。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真树 hello + 仓库软链 repo-link + 独立 command 并存 →
+    ///     `migrate_portable_assets_into_store` → 重建 inventory → freeze_with_env →
+    ///     断言全部 Skill/Command binding 非 blocked 且 store 真树已生成。
+    #[tokio::test]
+    async fn mirror_store_migration_then_freeze_yields_no_blocked_skill_command_bindings() {
+        let env = seed_user_mirror_homes().await;
+        write(
+            env.claude_home.join("skills/hello/SKILL.md").as_path(),
+            "---\nname: hello\ndescription: d\n---\n",
+        );
+        write(
+            env.claude_home.join("commands/rel.md").as_path(),
+            "---\nname: rel\n---\nbody\n",
+        );
+        let repo = env.home.join("agent-repo/skills/repo-link");
+        write(
+            repo.join("SKILL.md").as_path(),
+            "---\nname: repo-link\ndescription: repo\n---\nREPO-BODY\n",
+        );
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(env.claude_home.join("skills")).expect("claude skills root");
+            std::os::unix::fs::symlink(&repo, env.claude_home.join("skills/repo-link"))
+                .expect("escape link");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = repo;
+            return;
+        }
+
+        crate::agent_hub::user_mirror::migrate_portable_assets_into_store(&env.app_state)
+            .await
+            .expect("store migration before freeze");
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let env_scan = TargetEnvironment::from_process();
+        let built = freeze_user_mirror_selection_with_env(&env.app_state, &inventory, &env_scan)
+            .await
+            .expect("freeze after migration");
+
+        let skill_command_bindings: Vec<_> = built
+            .item_bindings
+            .iter()
+            .filter(|binding| {
+                matches!(
+                    binding.kind,
+                    Some(PortableAssetKind::Skill) | Some(PortableAssetKind::Command)
+                )
+            })
+            .collect();
+        assert!(
+            !skill_command_bindings.is_empty(),
+            "skill/command bindings must be present: {:?}",
+            built.item_bindings
+        );
+        for binding in &skill_command_bindings {
+            assert!(
+                !binding.blocked,
+                "post-migration skill/command binding must not be blocked: {binding:?}"
+            );
+        }
+        let data_dir = crate::config::data_dir().expect("data dir");
+        assert!(
+            data_dir
+                .join("portable-store/skills/hello/SKILL.md")
+                .is_file()
+                && data_dir
+                    .join("portable-store/skills/repo-link/SKILL.md")
+                    .is_file()
+                && data_dir.join("portable-store/commands/rel.md").is_file(),
+            "migration must land real trees in the portable store"
+        );
+    }
+
+    /// 构造 filter_inventory_for_freeze 的 fixture：2 Skill + 1 Command + 指令事实。
+    fn filter_fixture_inventory(device: &str) -> UserMirrorInventoryDto {
+        let item = |kind: PortableAssetKind, native_id: &str| UserMirrorPortableItemDto {
+            kind,
+            native_id: native_id.to_string(),
+            display_name: native_id.to_string(),
+            content_hash: Some(format!("hash-{native_id}")),
+            tree_hash: None,
+            actual_enabled: Some(true),
+            mcp_credential: None,
+            warnings: Vec::new(),
+        };
+        UserMirrorInventoryDto {
+            source_device_id: device.to_string(),
+            inventory_snapshot_hash: format!("snap-{device}"),
+            refreshed_at: "2026-08-23T00:00:00Z".into(),
+            agents: vec![UserMirrorAgentInventoryDto {
+                target: AgentTarget::Claude,
+                slots: UserMirrorSlotHashesDto {
+                    common: Some("common-hash".into()),
+                    adapted: Some("adapted-hash".into()),
+                    exclusive: None,
+                },
+                native_files: vec![UserMirrorNativeFileFactDto {
+                    logical_id: "claude.native.CLAUDE.md".into(),
+                    content_hash: Some("native-hash".into()),
+                    exists: true,
+                    size: 3,
+                }],
+                items: vec![
+                    item(PortableAssetKind::Skill, "keep-a"),
+                    item(PortableAssetKind::Skill, "keep-b"),
+                    item(PortableAssetKind::Command, "cmd-x"),
+                ],
+            }],
+            credential_bearing_count: 0,
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     selection=None 是旧客户端/默认全量路径；freeze 输入必须与全量克隆完全一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     None 调用后断言 items/nativeFiles/slots/hash 全部保留。
+    #[test]
+    fn filter_inventory_for_freeze_none_keeps_full_clone() {
+        let inv = filter_fixture_inventory("dev-a");
+        let trimmed = filter_inventory_for_freeze(&inv, None);
+        assert_eq!(trimmed.inventory_snapshot_hash, inv.inventory_snapshot_hash);
+        assert_eq!(trimmed.agents.len(), inv.agents.len());
+        assert_eq!(trimmed.agents[0].items.len(), 3);
+        assert_eq!(trimmed.agents[0].native_files.len(), 1);
+        assert!(trimmed.agents[0].slots.common.is_some());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     部分选择时 freeze 只能打包选中键；include_instructions=false 必须同时清空
+    ///     nativeFiles 与三槽 hash；身份 hash 保持全量（stale 校验依赖它）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     只选 skill:keep-a 且关闭指令；断言 items 仅剩 keep-a、nativeFiles/slots 清空、
+    ///     inventory_snapshot_hash 不变。
+    #[test]
+    fn filter_inventory_for_freeze_trims_items_and_clears_instructions() {
+        let inv = filter_fixture_inventory("dev-a");
+        let selection = UserMirrorSelectionFilterDto {
+            include_instructions: false,
+            portable_keys: Some(vec![UserMirrorPortableKeyDto {
+                kind: PortableAssetKind::Skill,
+                native_id: "keep-a".into(),
+            }]),
+        };
+        let trimmed = filter_inventory_for_freeze(&inv, Some(&selection));
+        assert_eq!(
+            trimmed.inventory_snapshot_hash, inv.inventory_snapshot_hash,
+            "identity hash must stay full for stale checks"
+        );
+        let ids: Vec<String> = trimmed.agents[0]
+            .items
+            .iter()
+            .map(|item| item.native_id.clone())
+            .collect();
+        assert_eq!(ids, vec!["keep-a".to_string()], "{ids:?}");
+        assert!(trimmed.agents[0].native_files.is_empty());
+        assert_eq!(
+            trimmed.agents[0].slots,
+            UserMirrorSlotHashesDto {
+                common: None,
+                adapted: None,
+                exclusive: None,
+            }
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     portable_keys=None + include_instructions=true 等价全量：条目全保留、指令不清。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Some(全开缺省) 后断言与原 inventory 内容一致（仅克隆）。
+    #[test]
+    fn filter_inventory_for_freeze_default_filter_keeps_everything() {
+        let inv = filter_fixture_inventory("dev-a");
+        let trimmed =
+            filter_inventory_for_freeze(&inv, Some(&UserMirrorSelectionFilterDto::default()));
+        assert_eq!(trimmed.agents[0].items.len(), 3);
+        assert_eq!(trimmed.agents[0].native_files.len(), 1);
+        assert!(trimmed.agents[0].slots.common.is_some());
     }
 }

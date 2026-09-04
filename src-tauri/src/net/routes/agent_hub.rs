@@ -36,10 +36,11 @@ use crate::agent_hub::user_instructions::{
     SaveUserInstructionBlocksRequest, WriteUserNativeInstructionFileRequest,
 };
 use crate::agent_hub::user_mirror::{
-    build_local_user_mirror_inventory, commit_user_mirror, freeze_user_mirror_selection,
-    prepare_user_mirror, put_user_mirror_object, source_read_user_mirror_object_chunk,
-    CommitUserMirrorRequest, PrepareUserMirrorRequest, UserMirrorInventoryDto,
-    UserMirrorSelectionQuery, UserMirrorSelectionResponse,
+    build_local_user_mirror_inventory, commit_user_mirror, filter_inventory_for_freeze,
+    freeze_user_mirror_selection, migrate_portable_assets_into_store, prepare_user_mirror,
+    put_user_mirror_object, source_read_user_mirror_object_chunk, CommitUserMirrorRequest,
+    PrepareUserMirrorRequest, UserMirrorInventoryDto, UserMirrorSelectionQuery,
+    UserMirrorSelectionResponse,
 };
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions
@@ -687,17 +688,29 @@ pub async fn agent_hub_user_mirror_inventory(
 
 /// POST /api/agent-hub/user-mirror/selection
 ///
-/// Business Logic: 按 inventory 冻结 SnapshotEnvelope/CAS；源端不得 adoption。
-/// Code Logic: `freeze_user_mirror_selection`；返回 transferId + envelope + bindings。
+/// Business Logic: 按 inventory 冻结 SnapshotEnvelope/CAS；源端不得 adoption；
+///     selection 只裁剪打包范围（缺省 None = 全量），inventory 身份 hash 不变。
+/// Code Logic: 解析 selection query → `filter_inventory_for_freeze` 裁剪本机 inventory
+///     副本 → `freeze_user_mirror_selection`；返回 transferId + envelope + bindings。
 pub async fn agent_hub_user_mirror_selection(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(body): Json<serde_json::Value>,
 ) -> P2pResult<Json<UserMirrorSelectionResponse>> {
     reject_nested_user_instruction_device_id(&body, &ctx)?;
-    let query: UserMirrorSelectionQuery = serde_json::from_value(body)
+    // body 仍按 wire 合同解析校验；冻结用重建后的本机 inventory，不用请求体里的 inventory。
+    let query = serde_json::from_value::<UserMirrorSelectionQuery>(body)
         .map_err(|e| P2pError::validation(format!("user-mirror selection body: {e}"), &ctx))?;
-    let built = freeze_user_mirror_selection(&state, &query.inventory)
+    // Pull 链路对端 freeze 前：先把 user-scope Skill/Command 收编进本机 portable-store，
+    // 再重建本机 inventory 并冻结；调用方的 stale 校验用的是它自己探测的 inventory，互不影响。
+    migrate_portable_assets_into_store(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
+    let inventory = build_local_user_mirror_inventory(&state, state.device_id.as_str())
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
+    let frozen = filter_inventory_for_freeze(&inventory, query.selection.as_ref());
+    let built = freeze_user_mirror_selection(&state, &frozen)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
     let missing_object_hashes: Vec<String> = built

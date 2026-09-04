@@ -24,7 +24,9 @@ import type {
   UserMirrorPlanDto,
   UserMirrorPortableChangeDto,
   UserMirrorPortableItemDto,
+  UserMirrorPortableKeyDto,
   UserMirrorResultDto,
+  UserMirrorSelectionFilterDto,
   UserMirrorSlotHashesDto,
 } from '../types/userMirror';
 import {
@@ -36,6 +38,7 @@ import {
   numberDecoder,
   nullableDecoder,
   objectDecoder,
+  optionalDecoder,
   stringDecoder,
   actualKindOf,
   type Decoder,
@@ -196,7 +199,23 @@ export const userMirrorAgentPlanDecoder: Decoder<UserMirrorAgentPlanDto> = objec
   },
 );
 
-/** Preview plan。 */
+/** portable 资产选择键（跨 Agent 联动）。 */
+export const userMirrorPortableKeyDecoder: Decoder<UserMirrorPortableKeyDto> = objectDecoder(
+  'UserMirrorPortableKeyDto',
+  {
+    kind: portableAssetKindDecoder,
+    nativeId: stringDecoder,
+  },
+);
+
+/** 镜像选择过滤器；plan 里缺省/null 均表示全量。 */
+export const userMirrorSelectionFilterDecoder: Decoder<UserMirrorSelectionFilterDto> =
+  objectDecoder('UserMirrorSelectionFilterDto', {
+    includeInstructions: booleanDecoder,
+    portableKeys: nullableDecoder(arrayDecoder(userMirrorPortableKeyDecoder)),
+  });
+
+/** Preview plan（selection 为后端 apply 时写入的可选字段）。 */
 export const userMirrorPlanDecoder: Decoder<UserMirrorPlanDto> = objectDecoder(
   'UserMirrorPlanDto',
   {
@@ -211,6 +230,7 @@ export const userMirrorPlanDecoder: Decoder<UserMirrorPlanDto> = objectDecoder(
     hasCredentialBearingAssets: booleanDecoder,
     agents: arrayDecoder(userMirrorAgentPlanDecoder),
     blockingReasons: arrayDecoder(stringDecoder),
+    selection: optionalDecoder(nullableDecoder(userMirrorSelectionFilterDecoder)),
   },
 );
 

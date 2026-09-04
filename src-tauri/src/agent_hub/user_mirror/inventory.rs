@@ -12,6 +12,7 @@ use super::models::{
     UserMirrorAgentInventoryDto, UserMirrorInventoryDto, UserMirrorMcpCredentialFactDto,
     UserMirrorNativeFileFactDto, UserMirrorPortableItemDto, UserMirrorSlotHashesDto,
 };
+use super::selection::portable_item_is_blocked_source;
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::portable_inventory::{
@@ -218,14 +219,6 @@ fn dedup_user_mirror_portable_items<'a>(
         }
     }
     by_key.into_values().collect()
-}
-
-fn portable_item_is_blocked_source(item: &PortableInventoryItemDto) -> bool {
-    item.warnings.iter().any(|warning| {
-        warning == "store_symlink_escape"
-            || warning == "source_blocked"
-            || warning.contains("store_symlink_escape")
-    })
 }
 
 /// `keep` 是否优于 `other`（true 则不替换）。

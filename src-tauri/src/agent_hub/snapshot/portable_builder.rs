@@ -23,7 +23,7 @@ use crate::agent_hub::snapshot::envelope::{
     FORMAT_NAME, FORMAT_VERSION,
 };
 use crate::agent_hub::targets::portable::{
-    hash_skill_directory, parse_simple_frontmatter, unknown_fields_extension,
+    hash_skill_directory_dereferenced, parse_simple_frontmatter, unknown_fields_extension,
 };
 use crate::error::AppError;
 use chrono::Utc;
@@ -503,7 +503,8 @@ fn load_skill_payload(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(dir_name);
     let description = fields.get("description").cloned().unwrap_or_default();
-    let (skill_hash, tree_hash, _, _) = hash_skill_directory(&dir).map_err(|e| {
+    // 打包链路只读：仓库软链根（~/.agents 等）跟随到真树 hash；本机写路径不受影响。
+    let (skill_hash, tree_hash, _, _) = hash_skill_directory_dereferenced(&dir).map_err(|e| {
         AppError::validation(format!(
             "PORTABLE_PULL_SKILL_HASH:{}:{e}",
             item.inventory_item_id

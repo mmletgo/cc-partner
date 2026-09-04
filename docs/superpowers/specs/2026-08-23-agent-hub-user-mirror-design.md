@@ -93,6 +93,18 @@
 
 选择是隐式的：`mode = userScopeAllAgents`。请求体没有 `inventoryItemIds`、没有 `SnapshotSelectionMode`、没有冲突策略（固定 replace + 删除多余）。
 
+### 5.2.1 资产选择（2026-09-04 增补）
+
+在「一次全部已登记 Agent」的镜像内，用户可以在预览后、应用前选择**要同步哪些资产**（默认全量；不带 selection 的请求行为完全不变）：
+
+- **wire 契约**（camelCase）：`UserMirrorSelectionFilterDto { includeInstructions: bool = true, portableKeys: Option<Vec<{kind, nativeId}>> }`；挂在 `ApplyUserMirrorRequest.selection`（本机 apply）与 `UserMirrorPlanDto.selection`（plan 落库/push 对端传递）上，均 `#[serde(default)]` 缺省 None。
+- **键跨 Agent 联动**：选择键是 `(kind, nativeId)`，同名 Skill 在多个 Agent 上算同一资产——选中即所有 Agent 上一起 upsert；未选中的资产 upsert 与 delete/disable **一并跳过**。
+- **includeInstructions=false**：原生指令文件写与 Hub 三槽覆盖全部跳过；`portableKeys=null` 表示全部 portable。
+- **双保险执行**：源端 freeze 前 `filter_inventory_for_freeze` 用裁剪副本打包（省传输）；apply 端 `filter_agent_plan_for_selection` 是**唯一权威过滤点**（per-agent 剔除未选中 upsert/delete/disable，关指令时跳过 native 写与三槽覆盖）。未选中条目即使被冻结进对象也不会落地。
+- **stale 校验不破坏**：push 的 `local.inventory_snapshot_hash != plan.local_inventory_snapshot_hash` 与 pull `collect_source_objects` 的探测 inventory 比对仍基于**全量** inventory；selection 只影响裁剪副本与对象集，不改 inventory 身份 hash。
+- **push fan-out 携带**：`request.selection` 在 claim 后合并进内存 plan，`dest_plan` 序列化传对端 prepare/commit，对端落库完整 plan JSON 后 dest apply 自动过滤。
+- 前端：预览区新增「同步内容选择」——指令总开关（默认开）+ portable 勾选列表（按 `(kind, nativeId)` 去重、默认全选、全选/全不选快捷操作）；全部勾选且指令开时 apply **不带** selection（等价默认）。
+
 ### 5.3 传输
 
 复用 CAS 分块（单 chunk ≤ 8 MiB，offset 续传，SHA-256 校验）。对象落磁盘 staging，禁止把整包载入内存。累计上限 **512 MiB**（现 portable-pull 的 64 MiB 不够覆盖全 Agent + Plugin）。超限 fail-closed：`USER_MIRROR_TRANSFER_LIMIT`。
@@ -152,7 +164,8 @@ Tauri / control op 名称固定为：
 ### 6.2 Skill / Command
 
 - 源有的：canonical 导入 + 安装到**该 Agent 自己的 native 根**（portable-store + 正规软链）。冲突一律替换。
-- 目标多的：对该 viewing Agent **detach / 卸下 native**。共享仓库包只要仍被其他 Agent 使用则不得 `destroyStore`。禁止为列表干净去改所有者磁盘上的 `~/.agents` 源树。逃逸软链不在镜像里自动「恢复为仓库资产」。
+- 目标多的：对该 viewing Agent **detach / 卸下 native**。共享仓库包只要仍被其他 Agent 使用则不得 `destroyStore`。禁止为列表干净去改所有者磁盘上的 `~/.agents` 源树。
+- **源端先确认版本并收编进 portable-store**：freeze 打包前，源端经 `user_mirror/store_migration.rs::migrate_portable_assets_into_store` 先把本机 user-scope Skill/Command 收编进本机 portable-store——已在库（StoreLink）跳过；「仓库真树 + Agent 根软链」的逃逸链可解析时走 `MaterializeEscapeLink`（真树复制进 store、原软链位置换成 store 软链）；散落真树走 `MigrateToStore`（move 进 store、原位换链，同名冲突按 frontmatter version / mtime 裁决记 manifest 版本）；单条失败不阻断镜像。push 在 preview 与 apply(freeze) 前各执行一次（幂等）；pull 在对端 selection freeze 前与本机源分支执行。随后 freeze 发送 store 真树，对端先落对端 portable-store 再建软链。断链（软链目标缺失）不迁移，仍 fail-closed blocked；可解析但迁移失败的项由 `hash_skill_directory_dereferenced` 只读 dereference 打包兜底。Plugin/MCP 及 plugin 组件 Skill/Command 完全不动，按原文件覆盖同步。
 
 ### 6.3 Plugin
 

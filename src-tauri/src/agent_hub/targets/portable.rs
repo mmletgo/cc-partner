@@ -579,7 +579,7 @@ pub fn unknown_fields_extension(
 /// 计算目录 TreeManifest（不写 CAS）并返回 manifest hash + skill_md hash。
 ///
 /// Business Logic: discovery 需要稳定 content/tree hash，但 scan 不得写 objects 目录。
-/// Code Logic: walk 文件；构建 sorted TreeManifest；hash(JSON) 与 SKILL.md 字节 hash。
+/// Code Logic: 逃逸软链根 fail-closed；其余 walk 文件；构建 sorted TreeManifest；hash(JSON) 与 SKILL.md 字节 hash。
 pub fn hash_skill_directory(
     dir: &Path,
 ) -> Result<(String, String, TreeManifest, Vec<PortabilityDiagnostic>), AppError> {
@@ -588,10 +588,42 @@ pub fn hash_skill_directory(
             "agent_hub_portable_skill_tree_symlink_escape".to_string(),
         ));
     }
+    hash_skill_directory_unchecked(dir)
+}
+
+/// push/pull 打包专用：根目录是逃逸软链时跟随到仓库真树再 hash（全程只读）。
+///
+/// Business Logic: skill/command 常以「仓库真树 + Agent 软链」形式存在（如 `~/.agents/skills`），
+///     跨机镜像必须能把这些资产送进对端 portable store，而不是 fail-closed 拒推；
+///     本机写路径仍走 `hash_skill_directory` 的逃逸拒绝，不受影响。
+/// Code Logic: 软链根 canonicalize 到目标目录（断链 → 逃逸错误）；StoreLink 用 canonical；
+///     其余原样；然后与普通路径同一 walk/manifest 语义。
+pub fn hash_skill_directory_dereferenced(
+    dir: &Path,
+) -> Result<(String, String, TreeManifest, Vec<PortabilityDiagnostic>), AppError> {
+    let resolved = match classify_store_link(dir) {
+        StoreLinkClass::Regular => dir.to_path_buf(),
+        StoreLinkClass::EscapeLink => fs::canonicalize(dir).map_err(|_| {
+            AppError::validation("agent_hub_portable_skill_tree_symlink_escape".to_string())
+        })?,
+        StoreLinkClass::StoreLink { canonical, .. } => canonical,
+    };
+    hash_skill_directory_unchecked(&resolved)
+}
+
+fn hash_skill_directory_unchecked(
+    root: &Path,
+) -> Result<(String, String, TreeManifest, Vec<PortabilityDiagnostic>), AppError> {
     let mut entries = Vec::new();
     let mut diagnostics = Vec::new();
     let mut skill_md_hash: Option<String> = None;
-    walk_files(dir, dir, &mut entries, &mut diagnostics, &mut skill_md_hash)?;
+    walk_files(
+        root,
+        root,
+        &mut entries,
+        &mut diagnostics,
+        &mut skill_md_hash,
+    )?;
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     let Some(skill_hash) = skill_md_hash else {
         return Err(AppError::validation(
@@ -2115,6 +2147,54 @@ mod tests {
     fn unescape_json_string_inner_keeps_invalid_unicode_escape() {
         assert_eq!(unescape_json_string_inner(r"\uZZZZ left"), r"\uZZZZ left");
         assert_eq!(unescape_json_string_inner(r"\u7528"), "用");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     push/pull 打包必须能跟随「仓库真树 + Agent 软链」的逃逸根读取内容，
+    ///     而本机写路径 hash 仍保持逃逸 fail-closed；断链软链两种模式都拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真树 + 软链根；deref hash 与直读真树 hash 一致；deref 拒绝断链；
+    ///     `hash_skill_directory` 对软链根保持拒绝。
+    #[test]
+    fn hash_skill_directory_dereferenced_follows_escape_root_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("repo/skill-a");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(
+            real.join("SKILL.md"),
+            "---\nname: skill-a\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let link = tmp.path().join("claude-skills/skill-a");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let broken = tmp.path().join("claude-skills/broken");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            std::os::unix::fs::symlink(tmp.path().join("missing"), &broken).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+            std::os::windows::fs::symlink_dir(tmp.path().join("missing"), &broken).unwrap();
+        }
+
+        let deref = hash_skill_directory_dereferenced(&link).expect("dereferenced hash");
+        let direct = hash_skill_directory(&real).expect("direct hash");
+        assert_eq!(
+            deref.1, direct.1,
+            "dereferenced tree hash must match the real tree"
+        );
+
+        assert!(
+            hash_skill_directory_dereferenced(&broken).is_err(),
+            "dangling escape link must be rejected"
+        );
+        assert!(
+            hash_skill_directory(&link).is_err(),
+            "write-path hash must keep rejecting escape roots"
+        );
     }
 
     #[test]

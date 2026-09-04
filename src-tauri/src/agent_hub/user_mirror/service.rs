@@ -22,7 +22,10 @@ use super::models::{
 };
 use super::preview::preview_from_two_inventories as build_preview_from_two_inventories;
 use super::receive::{UserMirrorSelectionQuery, UserMirrorSelectionResponse};
-use super::selection::{freeze_user_mirror_selection, UserMirrorObjectBinding};
+use super::selection::{
+    filter_inventory_for_freeze, freeze_user_mirror_selection, UserMirrorObjectBinding,
+};
+use super::store_migration::migrate_portable_assets_into_store;
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::targets::TargetEnvironment;
 use crate::error::AppError;
@@ -180,7 +183,12 @@ pub(crate) async fn apply_user_mirror_with_env(
             ))
         }
         UserMirrorClaim::Claimed(record) => {
-            let plan = parse_plan(&record.plan_json)?;
+            let mut plan = parse_plan(&record.plan_json)?;
+            // apply 的 claim 从 DB plan_json 解析；request.selection 在此合并进内存 plan
+            // （request 优先，push-dest 则保留 dest plan 已携带的 selection）。落库 plan 不改。
+            if request.selection.is_some() {
+                plan.selection = request.selection.clone();
+            }
             if plan.expires_at.as_str() < Utc::now().to_rfc3339().as_str() {
                 let fail =
                     failed_stale_result(&request.plan_token, &request.client_request_id, &plan);
@@ -324,6 +332,9 @@ impl UserMirrorService {
                     .first()
                     .cloned()
                     .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?;
+                // Push 以本机为源：preview 前先把 user-scope Skill/Command 收编进
+                // portable-store（确认版本），扫描级故障经 `?` 传播。
+                migrate_portable_assets_into_store(state).await?;
                 let source =
                     build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
                 let dest = load_source_inventory(state, &dest_device_id).await?;
@@ -344,7 +355,8 @@ impl UserMirrorService {
     /// 应用已预览镜像（Pull 本机写盘；Push 源侧 freeze 后对每 peer dest commit）。
     ///
     /// Business Logic: 同 clientRequestId 幂等；GUI 不得把 apply 打到 LAN。
-    /// Code Logic: 读 plan 方向；Pull 收集源 objects 后调 dest apply；Push 走 sender。
+    /// Code Logic: 读 plan 方向并把 request.selection 合并进内存 plan（后续 collect /
+    /// fan-out / 对端 prepare 携带）；Pull 收集源 objects 后调 dest apply；Push 走 sender。
     pub async fn apply_user_mirror(
         state: &AppState,
         request: ApplyUserMirrorRequest,
@@ -357,7 +369,12 @@ impl UserMirrorService {
             .get_user_mirror_plan(&request.plan_token)
             .await?
             .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?;
-        let plan = parse_plan(&row.plan_json)?;
+        let mut plan = parse_plan(&row.plan_json)?;
+        // 匹配方向前把 request.selection 写进 plan；后续 push fan-out 的 dest_plan
+        // 序列化与对端 prepare/commit 自然携带。
+        if request.selection.is_some() {
+            plan.selection = request.selection.clone();
+        }
         match plan.direction {
             UserMirrorDirection::Pull => {
                 let (objects, bindings) = collect_source_objects(state, &plan).await?;
@@ -391,6 +408,10 @@ async fn load_source_inventory(
 }
 
 /// Pull apply 前收集源 CAS 对象（本机 freeze 或对端 selection+objects）。
+///
+/// Business Logic: selection 只影响冻结打包范围；stale 校验必须仍基于全量探测 inventory。
+/// Code Logic: 先全量探测 + stale 校验；本机源分支裁剪 inventory 副本后 freeze，
+/// 对端分支把 selection 带进 selection 路由由对端裁剪。
 async fn collect_source_objects(
     state: &AppState,
     plan: &UserMirrorPlanDto,
@@ -400,7 +421,13 @@ async fn collect_source_objects(
         return Err(AppError::conflict(USER_MIRROR_STALE));
     }
     if plan.source_device_id == state.device_id.as_str() {
-        let built = freeze_user_mirror_selection(state, &inventory).await?;
+        // 本机源：freeze 前先收编 Skill/Command 进 portable-store，再用重建后的
+        // inventory 冻结；stale 校验仍基于迁移前探测的 inventory，互不影响。
+        migrate_portable_assets_into_store(state).await?;
+        let migrated_inventory =
+            build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
+        let frozen = filter_inventory_for_freeze(&migrated_inventory, plan.selection.as_ref());
+        let built = freeze_user_mirror_selection(state, &frozen).await?;
         return Ok((built.object_bytes, built.item_bindings));
     }
     let (base_url, expected) = resolve_online_peer(state, &plan.source_device_id)?;
@@ -414,7 +441,10 @@ async fn collect_source_objects(
         &peer,
         &base_url,
         "/api/agent-hub/user-mirror/selection",
-        &UserMirrorSelectionQuery { inventory },
+        &UserMirrorSelectionQuery {
+            inventory,
+            selection: plan.selection.clone(),
+        },
         &expected,
         PeerTimeoutClass::Metadata.timeout(),
     )
@@ -916,6 +946,7 @@ mod tests {
         let request = ApplyUserMirrorRequest {
             plan_token: plan.plan_token.clone(),
             client_request_id: "req-local-1".into(),
+            selection: None,
         };
         let first = apply_user_mirror_with_env(
             &env.dest_state,

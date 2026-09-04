@@ -357,6 +357,9 @@ async fn execute_claimed_plan(
         TargetActionRawOutcome,
         Option<PortableInventoryItemDto>,
     )> = Vec::with_capacity(plan.changes.len());
+    // confirm current version 的跨 Agent 聚合观测数（含自身），按 item id 记录；
+    // 仅在自身确认成功且聚合重扫完成时存在，用于把聚合数反映到 item message。
+    let mut confirm_aggregate_counts: BTreeMap<String, usize> = BTreeMap::new();
 
     for change in &plan.changes {
         let pre = pre_by_id.get(&change.inventory_item_id).cloned();
@@ -405,7 +408,17 @@ async fn execute_claimed_plan(
         }
 
         if plan.action.is_hub_ledger_only() {
-            let outcome = confirm_current_version_on_ledger(&deps.repo, change, pre.as_ref()).await;
+            let (outcome, aggregate_count) = confirm_current_version_on_ledger(
+                state,
+                deps,
+                stored.request.inventory_query.clone(),
+                change,
+                pre.as_ref(),
+            )
+            .await;
+            if let Some(count) = aggregate_count {
+                confirm_aggregate_counts.insert(change.inventory_item_id.clone(), count);
+            }
             raw_results.push((change.inventory_item_id.clone(), outcome, pre));
             continue;
         }
@@ -505,7 +518,7 @@ async fn execute_claimed_plan(
             .iter()
             .find(|c| c.inventory_item_id == item_id)
             .expect("change exists");
-        let state = reconcile_item(
+        let (state, error_code, mut message) = reconcile_item(
             plan.action,
             plan.keep_data,
             change.kind,
@@ -513,11 +526,21 @@ async fn execute_claimed_plan(
             pre.as_ref(),
             resolve_post_item(&item_id, pre.as_ref(), &post_by_id, &post_by_logical_key),
         );
+        // 聚合了其它 Agent 观测时把数量带进成功 message（N 含自身；N==1 保持原文）。
+        if plan.action == PortableAssetActionKind::ConfirmCurrentVersion {
+            if let Some(count) = confirm_aggregate_counts.get(&item_id) {
+                if *count > 1 && message.as_deref() == Some("current version recorded") {
+                    message = Some(format!(
+                        "current version recorded ({count} agent observations)"
+                    ));
+                }
+            }
+        }
         items.push(PortableAssetActionItemResultDto {
             inventory_item_id: item_id,
-            state: state.0,
-            error_code: state.1,
-            message: state.2,
+            state,
+            error_code,
+            message,
         });
     }
 
@@ -1022,56 +1045,164 @@ fn materialize_escape_link_change(
     }
 }
 
-/// 把当前磁盘 hash 写回 materialization，不改 Agent 文件。
+/// 把当前磁盘 hash 写回 materialization，不改 Agent 文件；并跨 Agent 聚合确认。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Skill/Command/Plugin/MCP 可能被 CLI 自己更新；用户确认后 Hub 只把当前文件记为一致基准。
+///     同一仓库真树常被多个 Agent 软链观测（如 `~/.claude/skills/foo` 与 `~/.codex/skills/foo`
+///     同时链到 `~/.agents/skills/foo`），确认一次必须让同一 canonical asset 下其它 target 上
+///     观测到相同内容的 Drifted 项一并生效，而不是逼用户逐个 Agent 重复点确认。
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验 preview 绑定的 observed hash，按 viewing target 找到 binding/materialization，
-///     把 `rendered_hash`/`observed_external_hash` 对齐并标 Synced。
+///     把 `rendered_hash`/`observed_external_hash` 对齐并标 Synced；自身写入成功（Applied 或
+///     Skipped）后用 target=None 的同 scope query 强制重扫，把同一 canonical asset 下其它
+///     target 观测到相同内容 hash 的 Drifted 项一并写 Synced（单项失败只 warn 不中断）。
+///     返回 raw outcome 与聚合观测数（含自身）；聚合重扫失败时观测数为 None（不聚合、不报错）。
 async fn confirm_current_version_on_ledger(
-    repo: &AgentHubRepo,
+    state: Option<&AppState>,
+    deps: &PortableActionExecutorDeps,
+    query: PortableInventoryQuery,
     change: &super::models::PortableAssetActionChangeDto,
     pre: Option<&PortableInventoryItemDto>,
-) -> TargetActionRawOutcome {
+) -> (TargetActionRawOutcome, Option<usize>) {
     let Some(item) = pre else {
-        return TargetActionRawOutcome::Blocked {
-            code: "PORTABLE_ASSET_ACTION_ITEM_NOT_FOUND".into(),
-            message: "inventory item missing before confirm current version".into(),
-        };
+        return (
+            TargetActionRawOutcome::Blocked {
+                code: "PORTABLE_ASSET_ACTION_ITEM_NOT_FOUND".into(),
+                message: "inventory item missing before confirm current version".into(),
+            },
+            None,
+        );
     };
     let Some(asset_id) = item.canonical_asset_id.as_deref() else {
-        return TargetActionRawOutcome::Blocked {
-            code: "PORTABLE_ASSET_ACTION_CANONICAL_MISSING".into(),
-            message: "canonical asset missing for confirm current version".into(),
-        };
+        return (
+            TargetActionRawOutcome::Blocked {
+                code: "PORTABLE_ASSET_ACTION_CANONICAL_MISSING".into(),
+                message: "canonical asset missing for confirm current version".into(),
+            },
+            None,
+        );
     };
     let observed = item.content_hash.clone().or_else(|| item.tree_hash.clone());
     let Some(observed) = observed else {
-        return TargetActionRawOutcome::Blocked {
-            code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into(),
-            message: "observed hash missing for confirm current version".into(),
-        };
+        return (
+            TargetActionRawOutcome::Blocked {
+                code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into(),
+                message: "observed hash missing for confirm current version".into(),
+            },
+            None,
+        );
     };
     if let Some(expected) = change.expected_source_hash.as_deref() {
         if expected != observed {
-            return TargetActionRawOutcome::Failed {
-                code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
-                message: "disk hash changed since preview".into(),
-            };
+            return (
+                TargetActionRawOutcome::Failed {
+                    code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+                    message: "disk hash changed since preview".into(),
+                },
+                None,
+            );
         }
     }
 
-    match confirm_current_version_write(repo, item, asset_id, &observed).await {
-        Ok(outcome) => outcome,
-        Err(error) => TargetActionRawOutcome::Failed {
-            code: "PORTABLE_ASSET_ACTION_CONFIRM_CURRENT_VERSION_FAILED".into(),
-            message: error.to_string(),
-        },
+    match confirm_current_version_write(&deps.repo, item, asset_id, &observed).await {
+        Ok(outcome) => {
+            // Applied / Skipped 都执行聚合：自身已一致时其它 Agent 观测可能仍 Drifted。
+            let aggregate_count = if matches!(
+                outcome,
+                TargetActionRawOutcome::Applied | TargetActionRawOutcome::Skipped
+            ) {
+                aggregate_confirm_same_asset_other_targets(
+                    state, deps, query, item, asset_id, &observed,
+                )
+                .await
+            } else {
+                None
+            };
+            (outcome, aggregate_count)
+        }
+        Err(error) => (
+            TargetActionRawOutcome::Failed {
+                code: "PORTABLE_ASSET_ACTION_CONFIRM_CURRENT_VERSION_FAILED".into(),
+                message: error.to_string(),
+            },
+            None,
+        ),
     }
 }
 
+/// 跨 Agent 聚合确认：同一 canonical asset 下其它 target 的相同内容 Drifted 观测一并写 Synced。
+///
+/// Business Logic（为什么需要这个函数）:
+///     软链同一仓库真树的多个 Agent 会在库存里各自观测出 Drifted；用户确认一次当前版本后，
+///     相同内容 hash 的其它 Agent 观测应同步确认为一致基准，避免重复操作。
+///
+/// Code Logic（这个函数做什么）:
+///     把传入 query 的 target 过滤清空后强制重扫 inventory（沿用 deps 注入 seam，测试可控制），
+///     对每个满足「target 不同于自身 + 同一 canonical asset + management_state 为 Drifted +
+///     content/tree hash 与本次确认的 observed 一致」的项调用 `confirm_current_version_write`；
+///     单项失败 `tracing::warn!` 后继续。返回聚合后的观测总数（含自身）；重扫失败返回 None。
+async fn aggregate_confirm_same_asset_other_targets(
+    state: Option<&AppState>,
+    deps: &PortableActionExecutorDeps,
+    query: PortableInventoryQuery,
+    item: &PortableInventoryItemDto,
+    asset_id: &str,
+    observed: &str,
+) -> Option<usize> {
+    let mut aggregation_query = query;
+    aggregation_query.target = None;
+    let snapshot = match resolve_force_inventory(state, deps, aggregation_query).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "portable confirm current version aggregation rescan failed"
+            );
+            return None;
+        }
+    };
+    let mut confirmed_others = 0usize;
+    for other in &snapshot.items {
+        if other.target == item.target {
+            continue;
+        }
+        if other.canonical_asset_id.as_deref() != Some(asset_id)
+            || other.management_state != PortableInventoryManagementState::Drifted
+        {
+            continue;
+        }
+        let other_observed = other
+            .content_hash
+            .clone()
+            .or_else(|| other.tree_hash.clone());
+        if other_observed.as_deref() != Some(observed) {
+            // 磁盘内容分叉：其它 target 观测的不是本次确认的版本，保持 Drifted 不动。
+            continue;
+        }
+        match confirm_current_version_write(&deps.repo, other, asset_id, observed).await {
+            Ok(_) => confirmed_others += 1,
+            Err(error) => tracing::warn!(
+                error = %error,
+                target = other.target.as_str(),
+                "portable confirm current version aggregation write failed"
+            ),
+        }
+    }
+    Some(1 + confirmed_others)
+}
+
+/// 把单个 inventory 观测的 hash 写回其 target binding 的 materialization。
+///
+/// Business Logic（为什么需要这个函数）:
+///     确认当前版本只改 Hub 账本：把 binding 对应 materialization 的
+///     `rendered_hash`/`observed_external_hash` 对齐磁盘观测并标 Synced，不写 Agent 磁盘。
+///
+/// Code Logic（这个函数做什么）:
+///     按 asset_id 列出 target bindings，取 `binding.target == item.target` 的一条，读其
+///     materialization；若已是 Synced 且双 hash 等于 observed 则 Skipped，否则 upsert 为
+///     Synced 并返回 Applied。
 async fn confirm_current_version_write(
     repo: &AgentHubRepo,
     item: &PortableInventoryItemDto,
@@ -1599,6 +1730,335 @@ mod tests {
             Some(identity.as_str())
         );
         assert_eq!(mat.status, MaterializationStatus::Synced);
+    }
+
+    /// Business Logic: 同一仓库真树被多个 Agent 软链观测时，确认一次当前版本即让
+    /// 同一 canonical asset 下其它 target 观测到相同内容 hash 的 Drifted 项一并确认。
+    #[tokio::test]
+    async fn confirm_current_version_aggregates_same_asset_other_targets() {
+        let repo = test_repo().await;
+        repo.insert_scope(NewScopeNode {
+            id: Some("user".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .expect("scope");
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: "user".into(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "tool".into(),
+                display_name: "tool".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .expect("asset");
+        let claude_binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .expect("binding");
+        let codex_binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Codex,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .expect("binding");
+        for binding in [&claude_binding, &codex_binding] {
+            repo.upsert_materialization(NewMaterialization {
+                asset_id: asset.id.clone(),
+                target: binding.target,
+                target_binding_id: binding.id.clone(),
+                native_path: Some(format!("/{}/skills/tool", binding.target.as_str())),
+                last_projected_revision_id: None,
+                rendered_hash: Some("old-hash".into()),
+                observed_external_hash: Some("old-hash".into()),
+                status: MaterializationStatus::Drift,
+                last_error: None,
+            })
+            .await
+            .expect("materialization");
+        }
+
+        let mut claude_item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "tool",
+            "/claude/skills/tool",
+            Some(true),
+        );
+        claude_item.canonical_asset_id = Some(asset.id.clone());
+        claude_item.management_state = PortableInventoryManagementState::Drifted;
+        claude_item.content_hash = Some("new-hash".into());
+        claude_item.tree_hash = None;
+        claude_item.capabilities.can_confirm_current_version = true;
+        // Codex 软链同一仓库真树：同 canonical asset、同观测内容 hash、同样 Drifted。
+        let mut codex_item = claude_item.clone();
+        codex_item.target = AgentTarget::Codex;
+        codex_item.loaded_by = AgentTarget::Codex;
+        codex_item.owned_by = PortableAssetOwner::from_target(AgentTarget::Codex);
+        codex_item.source_path = Some("/codex/skills/tool".into());
+        codex_item.inventory_item_id =
+            inventory_item_id(AgentTarget::Codex, "user", "standalone", "tool");
+        let snap = snapshot_from(
+            vec![
+                sample_target(AgentTarget::Claude),
+                sample_target(AgentTarget::Codex),
+            ],
+            vec![claude_item.clone(), codex_item],
+        );
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![claude_item.inventory_item_id.clone()],
+            PortableAssetActionKind::ConfirmCurrentVersion,
+            false,
+        )
+        .await;
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "unexpected blocking: {:?}",
+            plan.blocking_reasons
+        );
+
+        let mut post_item = claude_item.clone();
+        post_item.management_state = PortableInventoryManagementState::HubManaged;
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
+        let runner = Arc::new(FakeProcessRunner::new());
+        let deps = PortableActionExecutorDeps {
+            repo: repo.clone(),
+            runner: runner.clone(),
+            env: None,
+            // 聚合重扫走 resolve_force_inventory seam：注入 pre_inventory 即返回全量观测
+            //（Claude + Codex 均 Drifted、hash 一致），无需真实 inspect。
+            pre_inventory: Some(snap),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token.clone(),
+                client_request_id: "req-confirm-aggregate".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded
+        );
+        assert_eq!(
+            result.items[0].message.as_deref(),
+            Some("current version recorded (2 agent observations)"),
+            "aggregate count must surface in message: {:?}",
+            result.items[0].message
+        );
+        assert!(runner.calls().is_empty(), "ledger-only must not spawn CLI");
+        for binding in [&claude_binding, &codex_binding] {
+            let mat = repo
+                .get_materialization_by_binding(&binding.id)
+                .await
+                .expect("read mat")
+                .expect("mat exists");
+            assert_eq!(
+                mat.rendered_hash.as_deref(),
+                Some("new-hash"),
+                "target {} materialization must be confirmed",
+                binding.target.as_str()
+            );
+            assert_eq!(mat.observed_external_hash.as_deref(), Some("new-hash"));
+            assert_eq!(mat.status, MaterializationStatus::Synced);
+        }
+    }
+
+    /// Business Logic: 其它 target 观测的内容 hash 与本次确认不一致（内容分叉）时，
+    /// 不得被聚合确认，保持原 Drifted materialization。
+    #[tokio::test]
+    async fn confirm_current_version_does_not_aggregate_different_content() {
+        let repo = test_repo().await;
+        repo.insert_scope(NewScopeNode {
+            id: Some("user".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .expect("scope");
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: "user".into(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "tool".into(),
+                display_name: "tool".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .expect("asset");
+        let claude_binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .expect("binding");
+        let codex_binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Codex,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .expect("binding");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: claude_binding.id.clone(),
+            native_path: Some("/claude/skills/tool".into()),
+            last_projected_revision_id: None,
+            rendered_hash: Some("old-hash".into()),
+            observed_external_hash: Some("old-hash".into()),
+            status: MaterializationStatus::Drift,
+            last_error: None,
+        })
+        .await
+        .expect("materialization");
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Codex,
+            target_binding_id: codex_binding.id.clone(),
+            native_path: Some("/codex/skills/tool".into()),
+            last_projected_revision_id: None,
+            rendered_hash: Some("codex-old-hash".into()),
+            observed_external_hash: Some("codex-old-hash".into()),
+            status: MaterializationStatus::Drift,
+            last_error: None,
+        })
+        .await
+        .expect("materialization");
+
+        let mut claude_item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "tool",
+            "/claude/skills/tool",
+            Some(true),
+        );
+        claude_item.canonical_asset_id = Some(asset.id.clone());
+        claude_item.management_state = PortableInventoryManagementState::Drifted;
+        claude_item.content_hash = Some("new-hash".into());
+        claude_item.tree_hash = None;
+        claude_item.capabilities.can_confirm_current_version = true;
+        // Codex 观测的是分叉后的不同内容，不满足聚合条件。
+        let mut codex_item = claude_item.clone();
+        codex_item.target = AgentTarget::Codex;
+        codex_item.loaded_by = AgentTarget::Codex;
+        codex_item.owned_by = PortableAssetOwner::from_target(AgentTarget::Codex);
+        codex_item.source_path = Some("/codex/skills/tool".into());
+        codex_item.content_hash = Some("codex-hash".into());
+        codex_item.inventory_item_id =
+            inventory_item_id(AgentTarget::Codex, "user", "standalone", "tool");
+        let snap = snapshot_from(
+            vec![
+                sample_target(AgentTarget::Claude),
+                sample_target(AgentTarget::Codex),
+            ],
+            vec![claude_item.clone(), codex_item],
+        );
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![claude_item.inventory_item_id.clone()],
+            PortableAssetActionKind::ConfirmCurrentVersion,
+            false,
+        )
+        .await;
+        assert!(
+            plan.blocking_reasons.is_empty(),
+            "unexpected blocking: {:?}",
+            plan.blocking_reasons
+        );
+
+        let mut post_item = claude_item.clone();
+        post_item.management_state = PortableInventoryManagementState::HubManaged;
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
+        let runner = Arc::new(FakeProcessRunner::new());
+        let deps = PortableActionExecutorDeps {
+            repo: repo.clone(),
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snap),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token.clone(),
+                client_request_id: "req-confirm-no-aggregate".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded
+        );
+        assert_eq!(
+            result.items[0].message.as_deref(),
+            Some("current version recorded"),
+            "no aggregation must keep the plain message: {:?}",
+            result.items[0].message
+        );
+        assert!(runner.calls().is_empty(), "ledger-only must not spawn CLI");
+        let claude_mat = repo
+            .get_materialization_by_binding(&claude_binding.id)
+            .await
+            .expect("read mat")
+            .expect("mat exists");
+        assert_eq!(claude_mat.rendered_hash.as_deref(), Some("new-hash"));
+        assert_eq!(claude_mat.status, MaterializationStatus::Synced);
+        let codex_mat = repo
+            .get_materialization_by_binding(&codex_binding.id)
+            .await
+            .expect("read mat")
+            .expect("mat exists");
+        assert_eq!(
+            codex_mat.rendered_hash.as_deref(),
+            Some("codex-old-hash"),
+            "divergent content must not be aggregated"
+        );
+        assert_eq!(
+            codex_mat.observed_external_hash.as_deref(),
+            Some("codex-old-hash")
+        );
+        assert_eq!(codex_mat.status, MaterializationStatus::Drift);
     }
 
     /// Business Logic: 逃逸软链恢复进仓库并挂正规软链，不删源树、不 spawn CLI。

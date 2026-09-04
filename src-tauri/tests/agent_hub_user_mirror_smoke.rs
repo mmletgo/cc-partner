@@ -633,6 +633,7 @@ async fn l2_agent_hub_user_mirror_001_full_mirror() {
         ApplyUserMirrorRequest {
             plan_token: plan.plan_token.clone(),
             client_request_id: "req-full-001".into(),
+            selection: None,
         },
         &built.object_bytes,
         &built.item_bindings,
@@ -776,6 +777,7 @@ async fn l2_agent_hub_user_mirror_002_partial_no_rollback() {
     let request = ApplyUserMirrorRequest {
         plan_token: plan.plan_token.clone(),
         client_request_id: "req-partial-002".into(),
+        selection: None,
     };
     let first = apply_user_mirror(
         &dest_state,
@@ -905,6 +907,7 @@ async fn l2_agent_hub_user_mirror_003_extras_policy() {
         ApplyUserMirrorRequest {
             plan_token: plan.plan_token.clone(),
             client_request_id: "req-extras-003".into(),
+            selection: None,
         },
         &built.object_bytes,
         &built.item_bindings,

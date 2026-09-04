@@ -136,7 +136,7 @@ pub struct UserMirrorPortableItemDto {
 ///
 /// Business Logic: inventory 只传 hash，正文走 CAS，避免把整份指令放进元数据快照。
 /// Code Logic: 空槽为 None。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserMirrorSlotHashesDto {
     pub common: Option<String>,
@@ -227,6 +227,47 @@ pub struct UserMirrorAgentPlanDto {
     pub mcp_deletes: Vec<UserMirrorPortableChangeDto>,
 }
 
+/// portable 资产选择键：跨 Agent 联动（同名 Skill 在多个 Agent 上算同一资产）。
+///
+/// Business Logic: 用户按 `(kind, nativeId)` 勾选要同步的资产；同名资产跨 Agent 一起同步。
+/// Code Logic: camelCase wire；与 inventory/plan 的 `(kind, native_id)` 对号。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMirrorPortableKeyDto {
+    pub kind: PortableAssetKind,
+    pub native_id: String,
+}
+
+/// 镜像选择过滤器；None / 缺省 = 全部同步（默认行为不变）。
+///
+/// Business Logic: pull/push 时用户可选择只同步部分资产；缺省必须等价旧的全量镜像。
+/// Code Logic: `include_instructions` 缺省 true；`portable_keys=None` 表示全部 portable 资产。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UserMirrorSelectionFilterDto {
+    /// 原生指令文件 + Hub 三槽是否同步（默认 true）
+    #[serde(default = "default_true")]
+    pub include_instructions: bool,
+    /// None = 全部 portable 资产；Some(list) = 仅选中的键
+    pub portable_keys: Option<Vec<UserMirrorPortableKeyDto>>,
+}
+
+impl Default for UserMirrorSelectionFilterDto {
+    /// Business Logic: 缺省过滤器必须等价「全量镜像」，不得让 Default 意外关闭指令。
+    /// Code Logic: include_instructions=true、portable_keys=None。
+    fn default() -> Self {
+        Self {
+            include_instructions: true,
+            portable_keys: None,
+        }
+    }
+}
+
+/// `include_instructions` 的 serde 缺省值（true）。
+fn default_true() -> bool {
+    true
+}
+
 /// 绑定源/目标 inventory 的镜像 preview plan。
 ///
 /// Business Logic: apply 必须带本 plan；TTL 15 分钟；凭据条数用于确认框披露。
@@ -248,17 +289,24 @@ pub struct UserMirrorPlanDto {
     /// Push 所选对端；空则 apply 回落到 `destination_device_id`。
     #[serde(default)]
     pub peer_device_ids: Vec<String>,
+    /// 用户选择的同步范围；None = 全量。preview 时为空，apply 时由 request 合并进内存 plan，
+    /// push fan-out 经 dest_plan 序列化携带到对端。
+    #[serde(default)]
+    pub selection: Option<UserMirrorSelectionFilterDto>,
 }
 
 /// 应用已预览镜像的请求。
 ///
 /// Business Logic: 同 `clientRequestId` 重放同一结果；不同 plan 冲突。
-/// Code Logic: 仅 planToken + clientRequestId，无选择列表。
+/// Code Logic: planToken + clientRequestId；`selection` 缺省 None = 全量同步（旧客户端兼容）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyUserMirrorRequest {
     pub plan_token: String,
     pub client_request_id: String,
+    /// 本机 apply 的同步范围选择；push-dest 经 plan 携带（缺省 None = 全量）。
+    #[serde(default)]
+    pub selection: Option<UserMirrorSelectionFilterDto>,
 }
 
 /// 单 Agent / 条目落地结果。

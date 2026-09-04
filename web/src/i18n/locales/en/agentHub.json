@@ -959,6 +959,11 @@
     "reportAria": "Mirror results per peer",
     "partial": "Some agents failed or the outcome is unknown. Successful items are kept. Reconcile, then run the mirror again if needed.",
     "stale": "This preview expired or inventories drifted. Preview again.",
-    "previewRequired": "Preview this mirror before applying."
+    "previewRequired": "Preview this mirror before applying.",
+    "selectionTitle": "Sync content selection",
+    "selectionAria": "Select content to sync",
+    "includeInstructions": "Include instruction files (CLAUDE.md / AGENTS.md slots, etc.)",
+    "assetSelectAll": "Select all assets",
+    "assetDeselectAll": "Deselect all assets"
   }
 }

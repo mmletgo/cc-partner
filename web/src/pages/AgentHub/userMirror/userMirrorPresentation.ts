@@ -17,9 +17,12 @@ import {
   type UserMirrorDirection,
   type UserMirrorItemState,
   type UserMirrorPlanDto,
+  type UserMirrorPortableKeyDto,
   type UserMirrorResultDto,
+  type UserMirrorSelectionFilterDto,
 } from '@/lib/types/userMirror';
 import type { AgentTarget } from '@/lib/types/agentHub';
+import type { PortableAssetKind } from '@/lib/types/portableInventory';
 
 /** 单个 Agent 在预览中的变更计数。 */
 export interface UserMirrorAgentSummary {
@@ -176,6 +179,71 @@ export function isUserMirrorStaleError(reason: unknown): boolean {
   if (!reason || typeof reason !== 'object') return false;
   const code = (reason as { code?: unknown }).code;
   return code === USER_MIRROR_STALE;
+}
+
+/** 可勾选的 portable 资产选项（跨 Agent 按 (kind, nativeId) 去重）。 */
+export interface UserMirrorAssetOption {
+  /** 稳定去重键 `${kind}:${nativeId}`。 */
+  key: string;
+  kind: PortableAssetKind;
+  nativeId: string;
+  displayName: string;
+}
+
+/**
+ * Business Logic: 同名资产在多个 Agent 上算同一份，勾选必须跨 Agent 联动。
+ * Code Logic: 汇总 plan 四个 portable 列表，按 `${kind}:${nativeId}` 去重取首个 displayName。
+ */
+export function collectPlanAssetOptions(plan: UserMirrorPlanDto | null): UserMirrorAssetOption[] {
+  if (!plan) return [];
+  const seen = new Map<string, UserMirrorAssetOption>();
+  for (const agent of plan.agents) {
+    for (const change of [
+      ...agent.portableUpserts,
+      ...agent.portableDeletes,
+      ...agent.pluginDisables,
+      ...agent.mcpDeletes,
+    ]) {
+      const key = userMirrorAssetKey(change.kind, change.nativeId);
+      if (!seen.has(key)) {
+        seen.set(key, {
+          key,
+          kind: change.kind,
+          nativeId: change.nativeId,
+          displayName: change.displayName,
+        });
+      }
+    }
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Business Logic: 勾选键与 wire 契约的 (kind, nativeId) 对号，禁止用 displayName。
+ * Code Logic: `${kind}:${nativeId}`。
+ */
+export function userMirrorAssetKey(kind: PortableAssetKind, nativeId: string): string {
+  return `${kind}:${nativeId}`;
+}
+
+/**
+ * Business Logic: 默认全选 + 指令开必须等价旧行为（apply 不带 selection）；
+ * 否则把选中状态编码为 wire 过滤器（未选中的 delete/disable 由后端一并跳过）。
+ * Code Logic: 无取消勾选项 → portableKeys=null（全部）；否则传选中键数组。
+ */
+export function buildSelectionFilter(input: {
+  includeInstructions: boolean;
+  options: readonly UserMirrorAssetOption[];
+  deselectedKeys: ReadonlySet<string>;
+}): UserMirrorSelectionFilterDto | null {
+  const nothingDeselected = input.deselectedKeys.size === 0;
+  if (input.includeInstructions && nothingDeselected) return null;
+  const portableKeys = nothingDeselected
+    ? null
+    : input.options
+        .filter((option) => !input.deselectedKeys.has(option.key))
+        .map((option): UserMirrorPortableKeyDto => ({ kind: option.kind, nativeId: option.nativeId }));
+  return { includeInstructions: input.includeInstructions, portableKeys };
 }
 
 export { USER_MIRROR_PREVIEW_REQUIRED, USER_MIRROR_STALE };

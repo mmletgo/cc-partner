@@ -328,4 +328,131 @@ describe('useUserMirrorController', () => {
     await waitFor(() => expect(result.current.confirmed).toBe(false));
     expect(result.current.plan).toBeNull();
   });
+
+  test('default selection applies without a selection field', async () => {
+    const mirrorApi = createMirrorApi();
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+    });
+
+    // 默认全选 + 指令开：资产全部列出并勾选。
+    expect(result.current.assetOptions.map((option) => option.key)).toEqual([
+      'skill:skill-a',
+      'command:cmd-x',
+      'plugin:plug-x',
+      'mcp:github',
+    ]);
+    expect(result.current.selectedAssetKeys).toHaveLength(4);
+    expect(result.current.includeInstructions).toBe(true);
+
+    await act(async () => {
+      await result.current.apply();
+    });
+    const payload = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      planToken?: unknown;
+      clientRequestId?: unknown;
+      selection?: unknown;
+    };
+    expect('selection' in payload).toBe(false);
+  });
+
+  test('deselecting an asset sends a selection filter with the remaining keys', async () => {
+    const mirrorApi = createMirrorApi();
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+    });
+
+    await act(async () => {
+      result.current.toggleAsset('skill:skill-a');
+    });
+    expect(result.current.selectedAssetKeys).toEqual([
+      'command:cmd-x',
+      'plugin:plug-x',
+      'mcp:github',
+    ]);
+
+    await act(async () => {
+      await result.current.apply();
+    });
+    const payload = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      selection?: { includeInstructions: boolean; portableKeys: unknown };
+    };
+    expect(payload.selection).toEqual({
+      includeInstructions: true,
+      portableKeys: [
+        { kind: 'command', nativeId: 'cmd-x' },
+        { kind: 'plugin', nativeId: 'plug-x' },
+        { kind: 'mcp', nativeId: 'github' },
+      ],
+    });
+
+    // 全选快捷操作回到默认：等重渲染后再 apply，不带 selection。
+    await act(async () => {
+      result.current.selectAllAssets();
+    });
+    await act(async () => {
+      await result.current.apply();
+    });
+    const second = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] as {
+      selection?: unknown;
+    };
+    expect('selection' in second).toBe(false);
+  });
+
+  test('turning includeInstructions off sends includeInstructions=false', async () => {
+    const mirrorApi = createMirrorApi();
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+    });
+
+    await act(async () => {
+      result.current.setIncludeInstructions(false);
+    });
+    expect(result.current.includeInstructions).toBe(false);
+
+    await act(async () => {
+      await result.current.apply();
+    });
+    const payload = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      selection?: { includeInstructions: boolean; portableKeys: unknown };
+    };
+    expect(payload.selection).toEqual({ includeInstructions: false, portableKeys: null });
+
+    // 重新预览后选择重置为默认（全选 + 指令开）。
+    await act(async () => {
+      await result.current.preview();
+    });
+    expect(result.current.includeInstructions).toBe(true);
+    expect(result.current.selectedAssetKeys).toHaveLength(4);
+  });
 });

@@ -23,6 +23,7 @@ import {
   userMirrorPlanDecoder,
   userMirrorPortableItemDecoder,
   userMirrorResultDecoder,
+  userMirrorSelectionFilterDecoder,
 } from './userMirror';
 
 /** 合法 MCP 凭据事实（仅 present/hash）。 */
@@ -328,5 +329,43 @@ describe('user-mirror schemas', () => {
     expectTypeOf(userMirrorInventoryDecoder.decode(validInventory)).toEqualTypeOf<UserMirrorInventoryDto>();
     expectTypeOf(userMirrorPlanDecoder.decode(validPlan)).toEqualTypeOf<UserMirrorPlanDto>();
     expectTypeOf(userMirrorResultDecoder.decode(validResult)).toEqualTypeOf<UserMirrorResultDto>();
+  });
+
+  test('plan decodes selection as missing, null, or a filter object', () => {
+    // 缺字段（旧对端）：optional 字段不报错，解码为 undefined。
+    const withoutSelection = userMirrorPlanDecoder.decode(validPlan);
+    expect(withoutSelection.selection).toBeUndefined();
+
+    // null（Rust Option 序列化缺省）：等价全量。
+    const nullSelection = userMirrorPlanDecoder.decode({ ...validPlan, selection: null });
+    expect(nullSelection.selection).toBeNull();
+
+    // 对象：严格解码键列表。
+    const withSelection = userMirrorPlanDecoder.decode({
+      ...validPlan,
+      selection: {
+        includeInstructions: false,
+        portableKeys: [{ kind: 'skill', nativeId: 'skill-a' }],
+      },
+    });
+    expect(withSelection.selection).toEqual({
+      includeInstructions: false,
+      portableKeys: [{ kind: 'skill', nativeId: 'skill-a' }],
+    });
+  });
+
+  test('selection filter decoder rejects bad enum or wrong key type', () => {
+    expect(() =>
+      userMirrorSelectionFilterDecoder.decode({
+        includeInstructions: true,
+        portableKeys: [{ kind: 'unknown-kind', nativeId: 'x' }],
+      }),
+    ).toThrow(ContractDecodeError);
+    expect(() =>
+      userMirrorSelectionFilterDecoder.decode({
+        includeInstructions: true,
+        portableKeys: [{ kind: 'skill', nativeId: 42 }],
+      }),
+    ).toThrow(ContractDecodeError);
   });
 });

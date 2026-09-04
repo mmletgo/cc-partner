@@ -4,16 +4,18 @@
  * UserMirrorDialog pure view tests.
  *
  * Business Logic（为什么需要这个测试）:
- *   生产 Pull/Push 不得再出现 mode radio、库存勾选或冲突策略；
+ *   生产 Pull/Push 不得再出现 mode radio、旧逐项勾选或冲突策略；
+ *   预览后提供「同步内容选择」（默认全选、跨 Agent 联动）；
  *   未预览或未勾选确认时 Apply 必须禁用。
  *
  * Code Logic（这个测试做什么）:
- *   pure props 渲染；mock i18n；断言无旧 picker 控件且 confirm 门闩 apply。
+ *   pure props 渲染；mock i18n；断言无旧 picker 控件、资产勾选回调与 confirm 门闩 apply。
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { UserMirrorPlanDto, UserMirrorResultDto } from '@/lib/types/userMirror';
+import type { UserMirrorAssetOption } from './userMirrorPresentation';
 import { UserMirrorDialog } from './UserMirrorDialog';
 
 vi.mock('react-i18next', () => ({
@@ -22,6 +24,11 @@ vi.mock('react-i18next', () => ({
       opts ? `${key}:${JSON.stringify(opts)}` : key,
   }),
 }));
+
+const assetOptions: UserMirrorAssetOption[] = [
+  { key: 'skill:skill-a', kind: 'skill', nativeId: 'skill-a', displayName: 'Skill A' },
+  { key: 'command:cmd-x', kind: 'command', nativeId: 'cmd-x', displayName: 'Cmd X' },
+];
 
 const plan: UserMirrorPlanDto = {
   planToken: 'plan-1',
@@ -106,7 +113,7 @@ afterEach(() => {
 });
 
 describe('UserMirrorDialog', () => {
-  it('has no mode radios, inventory checkboxes, or conflict policy, and confirm gates apply', () => {
+  it('has no mode radios, legacy asset pickers, or conflict policy, and confirm gates apply', () => {
     const onApply = vi.fn();
     const onConfirmChange = vi.fn();
     render(
@@ -127,6 +134,13 @@ describe('UserMirrorDialog', () => {
         confirmed={false}
         canApply={false}
         canReconcile={false}
+        assetOptions={assetOptions}
+        selectedAssetKeys={['skill:skill-a', 'command:cmd-x']}
+        includeInstructions
+        onToggleAsset={vi.fn()}
+        onSelectAllAssets={vi.fn()}
+        onDeselectAllAssets={vi.fn()}
+        onSetIncludeInstructions={vi.fn()}
         onSelectSourceDevice={vi.fn()}
         onTogglePeer={vi.fn()}
         onConfirmChange={onConfirmChange}
@@ -163,6 +177,66 @@ describe('UserMirrorDialog', () => {
     expect(onConfirmChange).toHaveBeenCalledWith(true);
   });
 
+  it('renders sync content selection with default all-selected and fires asset callbacks', () => {
+    const onToggleAsset = vi.fn();
+    const onSelectAllAssets = vi.fn();
+    const onDeselectAllAssets = vi.fn();
+    const onSetIncludeInstructions = vi.fn();
+    render(
+      <UserMirrorDialog
+        open
+        direction="pull"
+        busy={false}
+        error={null}
+        stale={false}
+        devices={[{ deviceId: 'device-a', name: 'Alpha' }]}
+        sourceDeviceId="device-a"
+        selectedPeerIds={[]}
+        plan={plan}
+        result={null}
+        confirmed={false}
+        canApply={false}
+        canReconcile={false}
+        assetOptions={assetOptions}
+        selectedAssetKeys={['skill:skill-a']}
+        includeInstructions
+        onToggleAsset={onToggleAsset}
+        onSelectAllAssets={onSelectAllAssets}
+        onDeselectAllAssets={onDeselectAllAssets}
+        onSetIncludeInstructions={onSetIncludeInstructions}
+        onSelectSourceDevice={vi.fn()}
+        onTogglePeer={vi.fn()}
+        onConfirmChange={vi.fn()}
+        onPreview={vi.fn()}
+        onApply={vi.fn()}
+        onReconcile={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // 同步内容选择区：指令总开关默认开，资产行显示 displayName (kind)。
+    expect(screen.getByTestId('user-mirror-selection')).toBeTruthy();
+    const includeInstructions = screen.getByTestId(
+      'user-mirror-include-instructions',
+    ) as HTMLInputElement;
+    expect(includeInstructions.checked).toBe(true);
+    const skillBox = screen.getByTestId('user-mirror-asset-skill:skill-a') as HTMLInputElement;
+    const commandBox = screen.getByTestId('user-mirror-asset-command:cmd-x') as HTMLInputElement;
+    expect(skillBox.checked).toBe(true);
+    expect(commandBox.checked).toBe(false);
+    expect(screen.getByTestId('user-mirror-selection').textContent).toContain('Skill A');
+    expect(screen.getByTestId('user-mirror-selection').textContent).toContain('skill');
+
+    fireEvent.click(skillBox);
+    expect(onToggleAsset).toHaveBeenCalledWith('skill:skill-a');
+    fireEvent.click(screen.getByTestId('user-mirror-asset-select-all'));
+    expect(onSelectAllAssets).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('user-mirror-asset-deselect-all'));
+    expect(onDeselectAllAssets).toHaveBeenCalledTimes(1);
+    fireEvent.click(includeInstructions);
+    expect(onSetIncludeInstructions).toHaveBeenCalledWith(false);
+  });
+
   it('enables apply after confirm and shows partial StatusMessage plus reconcile', () => {
     const onApply = vi.fn();
     const onReconcile = vi.fn();
@@ -181,6 +255,13 @@ describe('UserMirrorDialog', () => {
         confirmed
         canApply
         canReconcile
+        assetOptions={assetOptions}
+        selectedAssetKeys={['skill:skill-a', 'command:cmd-x']}
+        includeInstructions
+        onToggleAsset={vi.fn()}
+        onSelectAllAssets={vi.fn()}
+        onDeselectAllAssets={vi.fn()}
+        onSetIncludeInstructions={vi.fn()}
         onSelectSourceDevice={vi.fn()}
         onTogglePeer={vi.fn()}
         onConfirmChange={vi.fn()}
@@ -222,6 +303,13 @@ describe('UserMirrorDialog', () => {
         confirmed={false}
         canApply={false}
         canReconcile
+        assetOptions={[]}
+        selectedAssetKeys={[]}
+        includeInstructions
+        onToggleAsset={vi.fn()}
+        onSelectAllAssets={vi.fn()}
+        onDeselectAllAssets={vi.fn()}
+        onSetIncludeInstructions={vi.fn()}
         onSelectSourceDevice={vi.fn()}
         onTogglePeer={onTogglePeer}
         onConfirmChange={vi.fn()}

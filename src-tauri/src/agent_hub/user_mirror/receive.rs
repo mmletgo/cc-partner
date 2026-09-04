@@ -11,6 +11,7 @@
 use super::ledger::UserMirrorPlanRecord;
 use super::models::{
     ApplyUserMirrorRequest, UserMirrorInventoryDto, UserMirrorPlanDto, UserMirrorResultDto,
+    UserMirrorSelectionFilterDto,
 };
 use super::selection::UserMirrorObjectBinding;
 use super::service::apply_user_mirror;
@@ -33,12 +34,17 @@ use std::path::Path;
 
 /// 源端 selection 冻结请求（调用方回传 inventory 快照）。
 ///
-/// Business Logic: 冻结必须对准已预览的 inventory 身份，禁止再勾选条目。
-/// Code Logic: camelCase；`inventory` 为 metadata-only DTO。
+/// Business Logic: 冻结必须对准已预览的 inventory 身份，禁止再勾选条目；
+///     selection 只裁剪打包范围，不得改变 inventory 身份 hash。
+/// Code Logic: camelCase；`inventory` 为 metadata-only DTO；`selection` 缺省 None = 全量
+///     （旧客户端不带字段行为不变）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserMirrorSelectionQuery {
     pub inventory: UserMirrorInventoryDto,
+    /// 同步范围过滤器；None / 缺省 = 全部资产。
+    #[serde(default)]
+    pub selection: Option<UserMirrorSelectionFilterDto>,
 }
 
 /// 源端 selection 响应。
@@ -331,6 +337,8 @@ pub async fn commit_user_mirror(
         ApplyUserMirrorRequest {
             plan_token: req.plan_token.trim().to_string(),
             client_request_id: req.client_request_id.trim().to_string(),
+            // push-dest 不带 request selection；apply 从 dest plan JSON 里读源端携带的 selection。
+            selection: None,
         },
         &object_bytes,
         &bindings,

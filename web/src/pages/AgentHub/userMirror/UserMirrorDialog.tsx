@@ -3,11 +3,13 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   生产 Agent Hub 一次镜像全部已登记 Agent 的用户级指令与资产；
- *   不再提供条目勾选、kind 筛选、冲突策略或 full/user/project/assets mode。
+ *   不再提供 mode radio、冲突策略或 full/user/project/assets mode；
+ *   预览后可勾选同步内容（默认全选，跨 Agent 联动）。
  *
  * Code Logic（这个组件做什么）:
  *   复用 Dialog 原语；Pull 单选源设备、Push 多选对端；预览按 Agent 计数；
- *   确认勾选门闩 apply；忙时锁 Escape/遮罩。hooks 在 early return 前。
+ *   「同步内容选择」含指令总开关与 portable 资产勾选；确认勾选门闩 apply；
+ *   忙时锁 Escape/遮罩。hooks 在 early return 前。
  */
 
 import { useMemo, type JSX } from 'react';
@@ -18,6 +20,7 @@ import type { UserMirrorDirection, UserMirrorPlanDto, UserMirrorResultDto } from
 import {
   summarizePlanAgents,
   userMirrorItemStateTone,
+  type UserMirrorAssetOption,
 } from './userMirrorPresentation';
 import styles from './UserMirrorDialog.module.css';
 
@@ -41,6 +44,15 @@ export interface UserMirrorDialogProps {
   confirmed: boolean;
   canApply: boolean;
   canReconcile: boolean;
+  /** 可勾选的 portable 资产（跨 Agent 去重，来自预览 plan）。 */
+  assetOptions: UserMirrorAssetOption[];
+  /** 当前勾选的资产键（默认全选）。 */
+  selectedAssetKeys: string[];
+  includeInstructions: boolean;
+  onToggleAsset: (key: string) => void;
+  onSelectAllAssets: () => void;
+  onDeselectAllAssets: () => void;
+  onSetIncludeInstructions: (value: boolean) => void;
   onSelectSourceDevice: (deviceId: string) => void;
   onTogglePeer: (deviceId: string) => void;
   onConfirmChange: (confirmed: boolean) => void;
@@ -70,6 +82,13 @@ export function UserMirrorDialog(props: UserMirrorDialogProps): JSX.Element | nu
     confirmed,
     canApply,
     canReconcile,
+    assetOptions,
+    selectedAssetKeys,
+    includeInstructions,
+    onToggleAsset,
+    onSelectAllAssets,
+    onDeselectAllAssets,
+    onSetIncludeInstructions,
     onSelectSourceDevice,
     onTogglePeer,
     onConfirmChange,
@@ -81,6 +100,7 @@ export function UserMirrorDialog(props: UserMirrorDialogProps): JSX.Element | nu
 
   const peerList = devices ?? [];
   const selectedSet = useMemo(() => new Set(selectedPeerIds ?? []), [selectedPeerIds]);
+  const selectedAssetSet = useMemo(() => new Set(selectedAssetKeys ?? []), [selectedAssetKeys]);
   const agentRows = useMemo(() => summarizePlanAgents(plan), [plan]);
   const titleKey = direction === 'pull' ? 'agentHub:userMirror.pullTitle' : 'agentHub:userMirror.pushTitle';
   const hintKey = direction === 'pull' ? 'agentHub:userMirror.pullHint' : 'agentHub:userMirror.pushHint';
@@ -192,6 +212,71 @@ export function UserMirrorDialog(props: UserMirrorDialogProps): JSX.Element | nu
                 </li>
               ))}
             </ul>
+          </section>
+        ) : null}
+
+        {plan ? (
+          <section
+            className={styles.section}
+            data-testid="user-mirror-selection"
+            aria-label={t('agentHub:userMirror.selectionAria')}
+          >
+            <h3 className={styles.sectionTitle}>{t('agentHub:userMirror.selectionTitle')}</h3>
+            <label className={styles.checkRow}>
+              <input
+                type="checkbox"
+                checked={includeInstructions}
+                disabled={busy}
+                onChange={(event) => onSetIncludeInstructions(event.currentTarget.checked)}
+                data-testid="user-mirror-include-instructions"
+              />
+              <span>{t('agentHub:userMirror.includeInstructions')}</span>
+            </label>
+            {assetOptions.length > 0 ? (
+              <>
+                <div className={styles.assetActions}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={onSelectAllAssets}
+                    disabled={busy}
+                    data-testid="user-mirror-asset-select-all"
+                  >
+                    {t('agentHub:userMirror.assetSelectAll')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={onDeselectAllAssets}
+                    disabled={busy}
+                    data-testid="user-mirror-asset-deselect-all"
+                  >
+                    {t('agentHub:userMirror.assetDeselectAll')}
+                  </Button>
+                </div>
+                <ul className={styles.list}>
+                  {assetOptions.map((option) => (
+                    <li key={option.key}>
+                      <label className={styles.checkRow}>
+                        <input
+                          type="checkbox"
+                          checked={selectedAssetSet.has(option.key)}
+                          disabled={busy}
+                          onChange={() => onToggleAsset(option.key)}
+                          data-testid={`user-mirror-asset-${option.key}`}
+                        />
+                        <span>
+                          {option.displayName}{' '}
+                          <span className={styles.peerMeta}>({option.kind})</span>
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
           </section>
         ) : null}
 

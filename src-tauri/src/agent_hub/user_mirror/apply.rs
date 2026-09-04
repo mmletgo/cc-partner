@@ -13,7 +13,8 @@
 use super::models::{
     UserMirrorAgentPlanDto, UserMirrorAgentResultDto, UserMirrorChangeOp, UserMirrorFileChangeDto,
     UserMirrorItemState, UserMirrorPlanDto, UserMirrorPortableChangeDto,
-    USER_MIRROR_LEGACY_LOSSY_BLOCKED, USER_MIRROR_NATIVE_PATH_FORBIDDEN,
+    UserMirrorSelectionFilterDto, USER_MIRROR_LEGACY_LOSSY_BLOCKED,
+    USER_MIRROR_NATIVE_PATH_FORBIDDEN,
 };
 use super::selection::UserMirrorObjectBinding;
 use crate::agent_hub::assets::{from_canonical_bytes, PortableAssetPayload};
@@ -76,10 +77,75 @@ pub async fn apply_user_mirror_instructions(
     apply_user_mirror_instructions_with_env(dest_state, plan, objects, bindings, &env).await
 }
 
+/// 按 selection 过滤单个 Agent 的 plan（apply 过滤的唯一权威点）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户只勾选部分资产时，未选中条目的 upsert 与 delete/disable 必须一并跳过，
+///     指令文件与 Hub 三槽可整体关闭；selection=None 必须原样保留（默认行为不变）。
+///
+/// Code Logic（这个函数做什么）:
+///     纯函数：selection None → 原样克隆；`portable_keys=Some(list)` 时四个 portable
+///     列表按 `(kind, native_id)` ∈ keys 保留；`include_instructions=false` 时
+///     instructionWrites 置空（Hub 三槽由 apply_one_agent 按同一开关跳过）。
+pub(crate) fn filter_agent_plan_for_selection(
+    agent: &UserMirrorAgentPlanDto,
+    selection: Option<&UserMirrorSelectionFilterDto>,
+) -> UserMirrorAgentPlanDto {
+    let Some(selection) = selection else {
+        return agent.clone();
+    };
+    let keys: Option<std::collections::BTreeSet<(PortableAssetKind, String)>> =
+        selection.portable_keys.as_ref().map(|keys| {
+            keys.iter()
+                .map(|key| (key.kind, key.native_id.clone()))
+                .collect()
+        });
+    let selected = |change: &UserMirrorPortableChangeDto| -> bool {
+        match keys.as_ref() {
+            None => true,
+            Some(keys) => keys.contains(&(change.kind, change.native_id.clone())),
+        }
+    };
+    UserMirrorAgentPlanDto {
+        target: agent.target,
+        instruction_writes: if selection.include_instructions {
+            agent.instruction_writes.clone()
+        } else {
+            Vec::new()
+        },
+        portable_upserts: agent
+            .portable_upserts
+            .iter()
+            .filter(|change| selected(change))
+            .cloned()
+            .collect(),
+        portable_deletes: agent
+            .portable_deletes
+            .iter()
+            .filter(|change| selected(change))
+            .cloned()
+            .collect(),
+        plugin_disables: agent
+            .plugin_disables
+            .iter()
+            .filter(|change| selected(change))
+            .cloned()
+            .collect(),
+        mcp_deletes: agent
+            .mcp_deletes
+            .iter()
+            .filter(|change| selected(change))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// 注入 dest 环境下的指令/原生文件与 portable apply（测试与生产共用规则）。
 ///
-/// Business Logic: DualEnv 隔离 HOME 必须与生产走同一白名单，禁止信任 LAN 路径。
-/// Code Logic: 按 Agent 写 native → 同步三槽 → portable upsert/extras；单 Agent 失败继续其余 Agent。
+/// Business Logic: DualEnv 隔离 HOME 必须与生产走同一白名单，禁止信任 LAN 路径；
+///     plan.selection 过滤是唯一权威点：未选中的 portable 一律不执行。
+/// Code Logic: 每个 agent_plan 先按 selection 过滤再执行；include_instructions=false
+///     跳过 native 写与 Hub 三槽覆盖；单 Agent 失败继续其余 Agent。
 pub(crate) async fn apply_user_mirror_instructions_with_env(
     dest_state: &AppState,
     plan: &UserMirrorPlanDto,
@@ -88,9 +154,23 @@ pub(crate) async fn apply_user_mirror_instructions_with_env(
     env: &TargetEnvironment,
 ) -> Result<Vec<UserMirrorAgentResultDto>, AppError> {
     let homes = TargetPathResolver::resolve_all(env);
+    let include_instructions = plan
+        .selection
+        .as_ref()
+        .map_or(true, |selection| selection.include_instructions);
     let mut results = Vec::with_capacity(plan.agents.len());
     for agent_plan in &plan.agents {
-        let result = apply_one_agent(dest_state, env, &homes, agent_plan, objects, bindings).await;
+        let filtered = filter_agent_plan_for_selection(agent_plan, plan.selection.as_ref());
+        let result = apply_one_agent(
+            dest_state,
+            env,
+            &homes,
+            &filtered,
+            objects,
+            bindings,
+            include_instructions,
+        )
+        .await;
         results.push(result);
     }
     Ok(results)
@@ -98,7 +178,8 @@ pub(crate) async fn apply_user_mirror_instructions_with_env(
 
 /// 落地单个 Agent 的 instruction_writes、Hub 三槽与 portable 资产。
 ///
-/// Business Logic: 该 Agent 任一步失败则 Failed，不回滚已写文件，不影响其他 Agent。
+/// Business Logic: 该 Agent 任一步失败则 Failed，不回滚已写文件，不影响其他 Agent；
+///     include_instructions=false 时原生指令文件与 Hub 三槽覆盖全部跳过。
 /// Code Logic: 先逐条 native；全成功后再覆盖三槽；portable 按条目继续，收集首个失败。
 async fn apply_one_agent(
     dest_state: &AppState,
@@ -107,18 +188,21 @@ async fn apply_one_agent(
     agent_plan: &UserMirrorAgentPlanDto,
     objects: &BTreeMap<String, Vec<u8>>,
     bindings: &[UserMirrorObjectBinding],
+    include_instructions: bool,
 ) -> UserMirrorAgentResultDto {
-    for change in &agent_plan.instruction_writes {
+    if include_instructions {
+        for change in &agent_plan.instruction_writes {
+            if let Err(error) =
+                write_one_native(env, homes, agent_plan.target, change, objects, bindings)
+            {
+                return failed_agent(agent_plan.target, &error);
+            }
+        }
         if let Err(error) =
-            write_one_native(env, homes, agent_plan.target, change, objects, bindings)
+            sync_hub_slots_for_agent(dest_state, agent_plan.target, objects, bindings).await
         {
             return failed_agent(agent_plan.target, &error);
         }
-    }
-    if let Err(error) =
-        sync_hub_slots_for_agent(dest_state, agent_plan.target, objects, bindings).await
-    {
-        return failed_agent(agent_plan.target, &error);
     }
     if let Err(error) =
         apply_agent_portables(dest_state, env, homes, agent_plan, objects, bindings).await
@@ -1244,7 +1328,8 @@ fn mirror_error_code(error: &AppError) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_user_mirror_instructions_with_env, dest_path_for_logical_id, write_one_native,
+        apply_user_mirror_instructions_with_env, dest_path_for_logical_id,
+        filter_agent_plan_for_selection, write_one_native,
     };
     use crate::agent_hub::models::AgentTarget;
     use crate::agent_hub::portable_inventory::PortableAssetKind;
@@ -1252,9 +1337,10 @@ mod tests {
     use crate::agent_hub::targets::{TargetEnvironment, TargetPathResolver};
     use crate::agent_hub::user_mirror::inventory::build_local_user_mirror_inventory_with_env;
     use crate::agent_hub::user_mirror::models::{
-        UserMirrorAgentResultDto, UserMirrorChangeOp, UserMirrorDirection, UserMirrorFileChangeDto,
-        UserMirrorItemState, UserMirrorPlanDto, USER_MIRROR_LEGACY_LOSSY_BLOCKED,
-        USER_MIRROR_NATIVE_PATH_FORBIDDEN,
+        UserMirrorAgentPlanDto, UserMirrorAgentResultDto, UserMirrorChangeOp, UserMirrorDirection,
+        UserMirrorFileChangeDto, UserMirrorItemState, UserMirrorPlanDto,
+        UserMirrorPortableChangeDto, UserMirrorPortableKeyDto, UserMirrorSelectionFilterDto,
+        USER_MIRROR_LEGACY_LOSSY_BLOCKED, USER_MIRROR_NATIVE_PATH_FORBIDDEN,
     };
     use crate::agent_hub::user_mirror::preview::preview_from_two_inventories;
     use crate::agent_hub::user_mirror::selection::{
@@ -1276,6 +1362,7 @@ mod tests {
         dest_state: AppState,
         source_home: PathBuf,
         dest_home: PathBuf,
+        dest_data: PathBuf,
         source_env: TargetEnvironment,
         dest_env: TargetEnvironment,
     }
@@ -1321,6 +1408,7 @@ mod tests {
             dest_state,
             source_home,
             dest_home,
+            dest_data,
             source_env,
             dest_env,
         }
@@ -1678,12 +1766,15 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     源端逃逸软链 Skill 跳过后，dest 仍应成功写入可打包的 Skill。
+    ///     仓库软链形式的 Skill（逃逸链但真树可解析）必须能跨机镜像进对端 portable store；
+    ///     断链逃逸仍 fail-closed 跳过，且都不得拖垮其余 Skill。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     源 keep + store 外 escaped 软链；apply 后 Claude succeeded，keep 落地，escaped 不跟到 dest。
+    ///     源 keep 真树 + escaped 软链（指向存在的仓库真树）+ broken 软链（目标缺失）；
+    ///     apply 后 Claude succeeded，keep 照常落地，escaped 进 dest portable store 并挂
+    ///     store 软链，broken 不落 dest。
     #[tokio::test]
-    async fn apply_skips_blocked_escape_skill_and_still_upserts_other_skills() {
+    async fn apply_pushes_resolvable_escape_skill_into_dest_store_and_skips_broken_link() {
         let env = seed_dual_env().await;
         write(
             env.source_home
@@ -1691,20 +1782,22 @@ mod tests {
                 .as_path(),
             "---\nname: keep\ndescription: keep skill\n---\nKEEP-SKILL-BODY\n",
         );
-        let outside = env.source_home.join("outside-escape/SKILL.md");
+        let outside = env.source_home.join("outside-escape");
         write(
-            &outside,
+            &outside.join("SKILL.md"),
             "---\nname: escaped\ndescription: outside store\n---\nESCAPE-BODY\n",
         );
         let link = env.source_home.join(".claude/skills/escaped");
+        let broken = env.source_home.join(".claude/skills/broken");
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(outside.parent().expect("parent"), &link)
-                .expect("escape symlink");
+            std::os::unix::fs::symlink(&outside, &link).expect("escape symlink");
+            std::os::unix::fs::symlink(env.source_home.join("missing-target"), &broken)
+                .expect("broken symlink");
         }
         #[cfg(not(unix))]
         {
-            let _ = link;
+            let _ = (link, broken);
             return;
         }
 
@@ -1714,19 +1807,56 @@ mod tests {
             UserMirrorItemState::Succeeded,
             "{results:?}"
         );
-        assert!(built.item_bindings.iter().any(|binding| {
-            binding.kind == Some(PortableAssetKind::Skill)
-                && binding.native_id.as_deref() == Some("escaped")
-                && binding.blocked
-        }));
+        let escaped_binding = built
+            .item_bindings
+            .iter()
+            .find(|binding| {
+                binding.kind == Some(PortableAssetKind::Skill)
+                    && binding.native_id.as_deref() == Some("escaped")
+            })
+            .expect("escaped binding");
+        assert!(
+            !escaped_binding.blocked,
+            "resolvable escape must be packed, {escaped_binding:?}"
+        );
+        assert!(
+            built.item_bindings.iter().any(|binding| {
+                binding.kind == Some(PortableAssetKind::Skill)
+                    && binding.native_id.as_deref() == Some("broken")
+                    && binding.blocked
+            }),
+            "broken escape must stay blocked"
+        );
+
+        // escaped 真树进 dest portable store，dest native 根挂 store 软链
+        let dest_store_skill = env.dest_data.join("portable-store/skills/escaped");
+        let store_body = fs::read_to_string(dest_store_skill.join("SKILL.md"))
+            .expect("escaped must land in dest portable store");
+        assert!(
+            store_body.contains("ESCAPE-BODY"),
+            "unexpected store body {store_body:?}"
+        );
+        let dest_native = env.dest_home.join(".claude/skills/escaped");
+        assert!(
+            fs::symlink_metadata(&dest_native)
+                .expect("dest native")
+                .file_type()
+                .is_symlink(),
+            "dest native must be a store link"
+        );
+        assert_eq!(
+            fs::canonicalize(&dest_native).expect("canonicalize dest native"),
+            fs::canonicalize(&dest_store_skill).expect("canonicalize dest store")
+        );
+
         let skills = rescan_dest_claude_items(&env, PortableAssetKind::Skill).await;
         assert!(
             skills.iter().any(|item| item.native_id == "keep"),
             "keep skill must still land: {skills:?}"
         );
         assert!(
-            !skills.iter().any(|item| item.native_id == "escaped"),
-            "escape skill must not be followed onto dest: {skills:?}"
+            !skills.iter().any(|item| item.native_id == "broken"),
+            "broken escape must not be followed onto dest: {skills:?}"
         );
     }
 
@@ -1885,5 +2015,258 @@ mod tests {
         let src = include_str!("apply.rs");
         assert!(src.contains("bytes.iter().all(|b| b.is_ascii_whitespace())"));
         assert!(src.contains("let Ok(value) = mcp_leaf_value(target, &bytes) else"));
+    }
+
+    fn portable_change(
+        kind: PortableAssetKind,
+        native_id: &str,
+        op: UserMirrorChangeOp,
+    ) -> UserMirrorPortableChangeDto {
+        UserMirrorPortableChangeDto {
+            kind,
+            native_id: native_id.to_string(),
+            display_name: native_id.to_string(),
+            op,
+            credential_bearing: false,
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     selection=None 是默认全量路径；过滤函数必须原样克隆，不得丢任何变更。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     None 过滤后断言五个列表与原 plan 一致；Some(keys) 时未选中的
+    ///     upsert/delete/disable/mcp_delete 全部剔除，指令列表不受 portable 键影响。
+    #[test]
+    fn filter_agent_plan_selection_none_clones_and_keys_trim_portables() {
+        let agent = UserMirrorAgentPlanDto {
+            target: AgentTarget::Claude,
+            instruction_writes: vec![UserMirrorFileChangeDto {
+                logical_id: "claude.native.CLAUDE.md".into(),
+                op: UserMirrorChangeOp::Replace,
+                source_hash: Some("a".into()),
+                dest_hash: Some("b".into()),
+            }],
+            portable_upserts: vec![portable_change(
+                PortableAssetKind::Skill,
+                "keep-a",
+                UserMirrorChangeOp::Write,
+            )],
+            portable_deletes: vec![portable_change(
+                PortableAssetKind::Command,
+                "cmd-x",
+                UserMirrorChangeOp::Delete,
+            )],
+            plugin_disables: vec![portable_change(
+                PortableAssetKind::Plugin,
+                "plug-x",
+                UserMirrorChangeOp::Disable,
+            )],
+            mcp_deletes: vec![portable_change(
+                PortableAssetKind::Mcp,
+                "srv-x",
+                UserMirrorChangeOp::Delete,
+            )],
+        };
+        let none = filter_agent_plan_for_selection(&agent, None);
+        assert_eq!(none.instruction_writes.len(), 1);
+        assert_eq!(none.portable_upserts.len(), 1);
+        assert_eq!(none.portable_deletes.len(), 1);
+        assert_eq!(none.plugin_disables.len(), 1);
+        assert_eq!(none.mcp_deletes.len(), 1);
+
+        let selection = UserMirrorSelectionFilterDto {
+            include_instructions: true,
+            portable_keys: Some(vec![UserMirrorPortableKeyDto {
+                kind: PortableAssetKind::Skill,
+                native_id: "keep-a".into(),
+            }]),
+        };
+        let filtered = filter_agent_plan_for_selection(&agent, Some(&selection));
+        assert_eq!(filtered.instruction_writes.len(), 1);
+        assert_eq!(filtered.portable_upserts.len(), 1);
+        assert!(filtered.portable_deletes.is_empty());
+        assert!(filtered.plugin_disables.is_empty());
+        assert!(filtered.mcp_deletes.is_empty());
+
+        let no_instructions = UserMirrorSelectionFilterDto {
+            include_instructions: false,
+            portable_keys: None,
+        };
+        let filtered = filter_agent_plan_for_selection(&agent, Some(&no_instructions));
+        assert!(filtered.instruction_writes.is_empty());
+        assert_eq!(filtered.portable_upserts.len(), 1);
+        assert_eq!(filtered.portable_deletes.len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     selection 过滤是 apply 的唯一权威点：选中资产照常落地，未选中资产的
+    ///     upsert 与目标多出资产的 delete 一律不动。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源 keep-a/keep-b、dest-only；selection 只选 keep-a。apply 后 dest 有 keep-a、
+    ///     无 keep-b，dest-only 仍存在。
+    #[tokio::test]
+    async fn apply_selection_filters_unselected_portable_upserts_and_deletes() {
+        let env = seed_dual_env().await;
+        write(
+            env.source_home
+                .join(".claude/skills/keep-a/SKILL.md")
+                .as_path(),
+            "---\nname: keep-a\ndescription: a\n---\nKEEP-A\n",
+        );
+        write(
+            env.source_home
+                .join(".claude/skills/keep-b/SKILL.md")
+                .as_path(),
+            "---\nname: keep-b\ndescription: b\n---\nKEEP-B\n",
+        );
+        write(
+            env.dest_home
+                .join(".claude/skills/dest-only/SKILL.md")
+                .as_path(),
+            "---\nname: dest-only\ndescription: d\n---\nDEST-ONLY\n",
+        );
+
+        let source_inventory = build_local_user_mirror_inventory_with_env(
+            &env.source_state,
+            "src-dev",
+            &env.source_env,
+        )
+        .await
+        .expect("source inventory");
+        let dest_inventory =
+            build_local_user_mirror_inventory_with_env(&env.dest_state, "dst-dev", &env.dest_env)
+                .await
+                .expect("dest inventory");
+        let mut plan = preview_from_two_inventories(
+            &source_inventory,
+            &dest_inventory,
+            "src-dev",
+            "dst-dev",
+            UserMirrorDirection::Pull,
+        );
+        plan.selection = Some(UserMirrorSelectionFilterDto {
+            include_instructions: true,
+            portable_keys: Some(vec![UserMirrorPortableKeyDto {
+                kind: PortableAssetKind::Skill,
+                native_id: "keep-a".into(),
+            }]),
+        });
+        let built = freeze_user_mirror_selection_with_env(
+            &env.source_state,
+            &source_inventory,
+            &env.source_env,
+        )
+        .await
+        .expect("freeze");
+        let results = apply_user_mirror_instructions_with_env(
+            &env.dest_state,
+            &plan,
+            &built.object_bytes,
+            &built.item_bindings,
+            &env.dest_env,
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            claude_result(&results).state,
+            UserMirrorItemState::Succeeded,
+            "{results:?}"
+        );
+
+        let skills = rescan_dest_claude_items(&env, PortableAssetKind::Skill).await;
+        assert!(
+            skills.iter().any(|item| item.native_id == "keep-a"),
+            "selected keep-a must land: {skills:?}"
+        );
+        assert!(
+            !skills.iter().any(|item| item.native_id == "keep-b"),
+            "unselected keep-b must not be upserted: {skills:?}"
+        );
+        assert!(
+            skills.iter().any(|item| item.native_id == "dest-only"),
+            "unselected dest-only must not be deleted: {skills:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     include_instructions=false 必须跳过原生指令文件写与 Hub 三槽覆盖，
+    ///     而 portable（None = 全部）照常同步。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源 CLAUDE.md=FROM-SRC、dest=OLD-DEST；selection 关指令。apply 后 dest
+    ///     CLAUDE.md 保持 OLD-DEST，且该 Agent Succeeded。
+    #[tokio::test]
+    async fn apply_selection_without_instructions_skips_native_and_slot_writes() {
+        let env = seed_dual_env().await;
+        write(
+            env.source_home.join(".claude/CLAUDE.md").as_path(),
+            "FROM-SRC",
+        );
+        write(
+            env.dest_home.join(".claude/CLAUDE.md").as_path(),
+            "OLD-DEST",
+        );
+        write(
+            env.source_home
+                .join(".claude/skills/only-skill/SKILL.md")
+                .as_path(),
+            "---\nname: only-skill\ndescription: s\n---\nONLY\n",
+        );
+
+        let source_inventory = build_local_user_mirror_inventory_with_env(
+            &env.source_state,
+            "src-dev",
+            &env.source_env,
+        )
+        .await
+        .expect("source inventory");
+        let dest_inventory =
+            build_local_user_mirror_inventory_with_env(&env.dest_state, "dst-dev", &env.dest_env)
+                .await
+                .expect("dest inventory");
+        let mut plan = preview_from_two_inventories(
+            &source_inventory,
+            &dest_inventory,
+            "src-dev",
+            "dst-dev",
+            UserMirrorDirection::Pull,
+        );
+        plan.selection = Some(UserMirrorSelectionFilterDto {
+            include_instructions: false,
+            portable_keys: None,
+        });
+        let built = freeze_user_mirror_selection_with_env(
+            &env.source_state,
+            &source_inventory,
+            &env.source_env,
+        )
+        .await
+        .expect("freeze");
+        let results = apply_user_mirror_instructions_with_env(
+            &env.dest_state,
+            &plan,
+            &built.object_bytes,
+            &built.item_bindings,
+            &env.dest_env,
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            claude_result(&results).state,
+            UserMirrorItemState::Succeeded,
+            "{results:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(env.dest_home.join(".claude/CLAUDE.md")).unwrap(),
+            "OLD-DEST",
+            "instruction native file must stay untouched when include_instructions=false"
+        );
+        let skills = rescan_dest_claude_items(&env, PortableAssetKind::Skill).await;
+        assert!(
+            skills.iter().any(|item| item.native_id == "only-skill"),
+            "portable_keys=None keeps syncing all portables: {skills:?}"
+        );
     }
 }

@@ -199,6 +199,29 @@ export interface UserMirrorAgentPlanDto {
 }
 
 /**
+ * portable 资产选择键：跨 Agent 联动（同名 skill 在多个 Agent 上算同一资产）。
+ *
+ * Business Logic: 用户按 (kind, nativeId) 勾选要同步的资产；同名资产跨 Agent 一起同步。
+ * Code Logic: 与 Rust `UserMirrorPortableKeyDto` 对齐；`(kind, nativeId)` 对号 inventory。
+ */
+export interface UserMirrorPortableKeyDto {
+  kind: PortableAssetKind;
+  nativeId: string;
+}
+
+/**
+ * 镜像选择过滤器；undefined / null = 全部同步（默认行为不变）。
+ *
+ * Business Logic: pull/push 可只同步部分资产；缺省必须等价旧全量镜像。
+ * Code Logic: `includeInstructions=false` 跳过指令文件与 Hub 三槽；
+ * `portableKeys=null` = 全部 portable，数组 = 仅选中键（跨 Agent 联动）。
+ */
+export interface UserMirrorSelectionFilterDto {
+  includeInstructions: boolean;
+  portableKeys: UserMirrorPortableKeyDto[] | null;
+}
+
+/**
  * 绑定源/目标 inventory 的镜像 preview plan。
  *
  * Business Logic: apply 必须带本 plan；TTL 15 分钟；凭据条数用于确认框披露。
@@ -216,17 +239,20 @@ export interface UserMirrorPlanDto {
   hasCredentialBearingAssets: boolean;
   agents: UserMirrorAgentPlanDto[];
   blockingReasons: string[];
+  /** apply 时写入的同步范围；缺省/null = 全量（preview 恒为 null）。 */
+  selection?: UserMirrorSelectionFilterDto | null;
 }
 
 /**
  * 应用已预览镜像的请求。
  *
  * Business Logic: 同 `clientRequestId` 重放同一结果；不同 plan 冲突。
- * Code Logic: 仅 planToken + clientRequestId，无选择列表。
+ * Code Logic: planToken + clientRequestId；selection 缺省 = 全量同步（旧语义不变）。
  */
 export interface ApplyUserMirrorRequest {
   planToken: string;
   clientRequestId: string;
+  selection?: UserMirrorSelectionFilterDto | null;
 }
 
 /**

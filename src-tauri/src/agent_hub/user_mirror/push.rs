@@ -18,7 +18,9 @@ use super::models::{
     USER_MIRROR_PEER_OFFLINE, USER_MIRROR_PREVIEW_REQUIRED, USER_MIRROR_STALE,
 };
 use super::receive::{CommitUserMirrorRequest, CommitUserMirrorResponse, PrepareUserMirrorRequest};
-use super::selection::{freeze_user_mirror_selection, BuiltUserMirrorSelection};
+use super::selection::{
+    filter_inventory_for_freeze, freeze_user_mirror_selection, BuiltUserMirrorSelection,
+};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::replication::receiver::{
     PreparePushResponse, PutObjectResponse, AGENT_HUB_MAX_CHUNK_BYTES,
@@ -70,9 +72,14 @@ pub async fn apply_push_user_mirror(
         .get_user_mirror_plan(&request.plan_token)
         .await?
         .ok_or_else(|| AppError::validation(USER_MIRROR_PREVIEW_REQUIRED))?;
-    let plan = parse_plan(&row.plan_json)?;
+    let mut plan = parse_plan(&row.plan_json)?;
     if plan.direction != UserMirrorDirection::Push {
         return Err(AppError::validation(USER_MIRROR_PREVIEW_REQUIRED));
+    }
+    // request.selection 在 claim 前合并进内存 plan：run_claimed_push 用它裁剪 freeze，
+    // fan-out 的 dest_plan 序列化也会把 selection 携带给对端 prepare/commit。
+    if request.selection.is_some() {
+        plan.selection = request.selection.clone();
     }
     let peers = push_peer_ids(&plan);
     if peers.is_empty() {
@@ -95,6 +102,12 @@ pub async fn apply_push_user_mirror(
 }
 
 /// claim 成功后 freeze 并 fan-out。
+///
+/// Business Logic: stale 校验基于全量 inventory；freeze 用 selection 裁剪副本，
+/// dest_plan 携带 selection 让对端 apply 只执行选中的变更。
+///
+/// Code Logic: 校验 TTL/全量 inventory → 裁剪 inventory → freeze 一次 →
+/// buffer_unordered(3) 推送 → complete。
 async fn run_claimed_push(
     state: &AppState,
     request: &ApplyUserMirrorRequest,
@@ -112,7 +125,10 @@ async fn run_claimed_push(
         return Err(AppError::conflict(USER_MIRROR_STALE));
     }
 
+    // 幂等收编：preview 时已迁移，此处多为 StoreLink skip，inventory hash 与 preview 一致。
+    super::store_migration::migrate_portable_assets_into_store(state).await?;
     let local = build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
+    // stale 校验必须基于全量 inventory；通过后才用裁剪副本 freeze（省传输）。
     if local.inventory_snapshot_hash != plan.local_inventory_snapshot_hash {
         let fail = failed_code_result(
             request,
@@ -123,8 +139,9 @@ async fn run_claimed_push(
         complete_plan(state, request, &fail).await?;
         return Err(AppError::conflict(USER_MIRROR_STALE));
     }
+    let frozen_inventory = filter_inventory_for_freeze(&local, plan.selection.as_ref());
 
-    let built = match freeze_user_mirror_selection(state, &local).await {
+    let built = match freeze_user_mirror_selection(state, &frozen_inventory).await {
         Ok(built) => Arc::new(built),
         Err(error) => {
             let fail = failed_code_result(
@@ -766,6 +783,7 @@ mod tests {
         apply_push_user_mirror, map_peer_error_code, USER_MIRROR_CAPABILITY_UNSUPPORTED,
         USER_MIRROR_DEVICE_ID_MISMATCH,
     };
+    use crate::agent_hub::portable_inventory::PortableAssetKind;
     use crate::agent_hub::replication::receiver::{PreparePushResponse, PutObjectResponse};
     use crate::agent_hub::replication::sender::{
         list_failed_source_push_targets, SOURCE_PUSH_KIND_USER_MIRROR,
@@ -773,6 +791,7 @@ mod tests {
     use crate::agent_hub::user_mirror::inventory::build_local_user_mirror_inventory;
     use crate::agent_hub::user_mirror::models::{
         ApplyUserMirrorRequest, UserMirrorDirection, UserMirrorInventoryDto,
+        UserMirrorPortableKeyDto, UserMirrorSelectionFilterDto,
         USER_MIRROR_CAPABILITY_UNSUPPORTED as UNSUPPORTED,
     };
     use crate::agent_hub::user_mirror::receive::{
@@ -855,6 +874,8 @@ mod tests {
         capabilities: Vec<String>,
         objects: Mutex<BTreeMap<String, Vec<u8>>>,
         bindings: Mutex<Vec<crate::agent_hub::user_mirror::UserMirrorObjectBinding>>,
+        /// prepare 请求里 dest_plan 携带的 selection（fan-out 传递断言用）。
+        plan_selection: Mutex<Option<UserMirrorSelectionFilterDto>>,
         dest_claude: PathBuf,
     }
 
@@ -870,6 +891,7 @@ mod tests {
                 capabilities: caps,
                 objects: Mutex::new(BTreeMap::new()),
                 bindings: Mutex::new(Vec::new()),
+                plan_selection: Mutex::new(None),
                 dest_claude,
             })
         }
@@ -925,6 +947,8 @@ mod tests {
                     async move {
                         c.prepare.fetch_add(1, Ordering::SeqCst);
                         *c.bindings.lock().expect("bindings") = body.item_bindings.clone();
+                        *c.plan_selection.lock().expect("plan selection") =
+                            body.plan.selection.clone();
                         let missing: Vec<String> = body
                             .envelope
                             .objects
@@ -1083,6 +1107,7 @@ mod tests {
             ApplyUserMirrorRequest {
                 plan_token,
                 client_request_id: "req-no-cap".into(),
+                selection: None,
             },
         )
         .await
@@ -1119,6 +1144,7 @@ mod tests {
             ApplyUserMirrorRequest {
                 plan_token,
                 client_request_id: "req-ok".into(),
+                selection: None,
             },
         )
         .await
@@ -1147,6 +1173,7 @@ mod tests {
             ApplyUserMirrorRequest {
                 plan_token,
                 client_request_id: "req-mismatch".into(),
+                selection: None,
             },
         )
         .await
@@ -1214,6 +1241,7 @@ mod tests {
             ApplyUserMirrorRequest {
                 plan_token: plan.plan_token,
                 client_request_id: "req-partial".into(),
+                selection: None,
             },
         )
         .await
@@ -1280,5 +1308,85 @@ mod tests {
             mapped.contains("validation_error") && mapped.contains("revision_unknown_tree"),
             "{mapped}"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     push fan-out 必须把 request.selection 写进 dest_plan 传给对端
+    ///     （对端 apply 据 plan.selection 过滤），且源端 freeze 只打包选中资产。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源 keep-a/keep-b 两个 Skill；request.selection 只选 keep-a；fake peer 捕获
+    ///     prepare 的 plan.selection 与 bindings：断言 selection 原样到达、keep-b 未冻结。
+    #[tokio::test]
+    async fn push_selection_flows_into_dest_plan_and_freeze() {
+        let env = seed_source_env().await;
+        write(env.home.join(".claude/CLAUDE.md").as_path(), "FROM-SRC");
+        write(
+            env.home.join(".claude/skills/keep-a/SKILL.md").as_path(),
+            "---\nname: keep-a\ndescription: a\n---\nKEEP-A\n",
+        );
+        write(
+            env.home.join(".claude/skills/keep-b/SKILL.md").as_path(),
+            "---\nname: keep-b\ndescription: b\n---\nKEEP-B\n",
+        );
+        let counters = FakeCounters::new("peer-test", supported_caps(), env.dest_claude.clone());
+        let (base, handle) = spawn_fake_peer(Arc::clone(&counters)).await;
+        register_peer(&env.state, "peer-test", &base);
+        // 生产 push preview 在建 inventory 前已收编；apply 时迁移幂等、hash 稳定。
+        crate::agent_hub::user_mirror::migrate_portable_assets_into_store(&env.state)
+            .await
+            .expect("migrate before preview");
+        let plan_token = persist_push_plan(&env.state, "peer-test").await;
+        let result = apply_push_user_mirror(
+            &env.state,
+            ApplyUserMirrorRequest {
+                plan_token,
+                client_request_id: "req-selection".into(),
+                selection: Some(UserMirrorSelectionFilterDto {
+                    include_instructions: true,
+                    portable_keys: Some(vec![UserMirrorPortableKeyDto {
+                        kind: PortableAssetKind::Skill,
+                        native_id: "keep-a".into(),
+                    }]),
+                }),
+            },
+        )
+        .await
+        .expect("apply");
+        assert!(!result.partial, "result={result:?}");
+
+        let captured = counters
+            .plan_selection
+            .lock()
+            .expect("plan selection")
+            .clone()
+            .expect("dest plan must carry selection");
+        assert!(captured.include_instructions);
+        assert_eq!(
+            captured.portable_keys,
+            Some(vec![UserMirrorPortableKeyDto {
+                kind: PortableAssetKind::Skill,
+                native_id: "keep-a".into(),
+            }]),
+            "dest plan selection must match the request: {captured:?}"
+        );
+
+        let skill_ids: Vec<String> = counters
+            .bindings
+            .lock()
+            .expect("bindings")
+            .iter()
+            .filter(|binding| binding.kind == Some(PortableAssetKind::Skill))
+            .filter_map(|binding| binding.native_id.clone())
+            .collect();
+        assert!(
+            skill_ids.contains(&"keep-a".to_string()),
+            "selected keep-a must be frozen: {skill_ids:?}"
+        );
+        assert!(
+            !skill_ids.contains(&"keep-b".to_string()),
+            "unselected keep-b must not be frozen: {skill_ids:?}"
+        );
+        handle.abort();
     }
 }

@@ -959,6 +959,11 @@
     "reportAria": "各对端镜像结果",
     "partial": "部分 Agent 失败或结果未知，已成功项不会撤回。可核对后再跑一次镜像。",
     "stale": "预览已过期或两侧库存已变化，请重新预览。",
-    "previewRequired": "请先预览这次镜像，再应用。"
+    "previewRequired": "请先预览这次镜像，再应用。",
+    "selectionTitle": "同步内容选择",
+    "selectionAria": "选择要同步的内容",
+    "includeInstructions": "包含指令文件（CLAUDE.md / AGENTS.md 三槽等）",
+    "assetSelectAll": "全选资产",
+    "assetDeselectAll": "全不选资产"
   }
 }

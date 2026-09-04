@@ -736,6 +736,13 @@ export function AgentHubView(props: AgentHubViewProps) {
         onSelectSourceDevice={(deviceId) => userMirror.selectSourceDevice(deviceId)}
         onTogglePeer={(deviceId) => userMirror.togglePeer(deviceId)}
         onConfirmChange={(value) => userMirror.setConfirmed(value)}
+        assetOptions={userMirror.assetOptions}
+        selectedAssetKeys={userMirror.selectedAssetKeys}
+        includeInstructions={userMirror.includeInstructions}
+        onToggleAsset={(key) => userMirror.toggleAsset(key)}
+        onSelectAllAssets={() => userMirror.selectAllAssets()}
+        onDeselectAllAssets={() => userMirror.deselectAllAssets()}
+        onSetIncludeInstructions={(value) => userMirror.setIncludeInstructions(value)}
         onPreview={() => {
           void userMirror.preview();
         }}
