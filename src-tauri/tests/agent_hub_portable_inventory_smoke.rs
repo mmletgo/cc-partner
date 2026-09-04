@@ -45,6 +45,20 @@ use std::sync::Arc;
 const CREDENTIAL_FIXTURE: &str = "plain-fixture-portable-parity";
 const EVIDENCE: &str = "L2-AGENT-HUB-PORTABLE-PARITY-001";
 
+/// 进程级缓存互斥：inventory cache 是全局单例，两个 smoke 测试并发时
+/// 另一测试的 mutation invalidate 会摧毁本测试的 2 秒缓存窗口，导致 flaky。
+static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// 包装 struct 让 clippy await-holding-lock 接受跨 .await 持有锁到测试结束。
+#[allow(dead_code)]
+struct CacheTestGuard(std::sync::MutexGuard<'static, ()>);
+fn cache_test_lock() -> CacheTestGuard {
+    CacheTestGuard(
+        CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
 struct PortableParityEnv {
     _root: tempfile::TempDir,
     data_dir: PathBuf,
@@ -56,6 +70,7 @@ struct PortableParityEnv {
 /// 必须看到嵌套文件的新 tree hash；不注入 `rescan_override`。
 #[tokio::test]
 async fn production_force_rescan_bypasses_recent_inventory_cache() {
+    let _cache_lock = cache_test_lock();
     let env = setup_isolated_env("force-rescan");
     let target_env = seed_3x4_fixtures(&env.home);
     std::env::set_var("HOME", &env.home);
@@ -495,6 +510,7 @@ async fn preview_action(
 /// L2-AGENT-HUB-PORTABLE-PARITY-001
 #[tokio::test]
 async fn l2_agent_hub_portable_parity_001_inventory_and_actions() {
+    let _cache_lock = cache_test_lock();
     let env = setup_isolated_env("inventory");
     let pool = open_hub_pool(&env.db_path).await;
     let repo = AgentHubRepo::new(pool);
