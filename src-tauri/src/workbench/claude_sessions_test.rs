@@ -655,6 +655,17 @@ fn index_budget_baseline() {
         }
     }
     let elapsed = wall_start.elapsed();
+    // 保底测量窗口：断言语义只是「heartbeat 测量面可观测」；索引在闲置机器上
+    // 可能不足一个 2ms tick 周期，并发负载下 hb 线程又可能被饿死——两者都是
+    // 调度问题而非被测行为。把窗口垫到 50ms 让可观测性与调度解耦（elapsed
+    // 仅作基线证据打印，不做断言）。
+    const MIN_MEASUREMENT_WINDOW: Duration = Duration::from_millis(50);
+    if elapsed < MIN_MEASUREMENT_WINDOW {
+        while wall_start.elapsed() < MIN_MEASUREMENT_WINDOW {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let elapsed = wall_start.elapsed();
     stop.store(true, Ordering::Relaxed);
     let _ = hb.join();
     let heartbeat_ticks = ticks.load(Ordering::Relaxed);

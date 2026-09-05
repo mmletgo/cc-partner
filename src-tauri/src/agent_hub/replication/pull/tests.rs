@@ -349,8 +349,26 @@ fn skip_existing_demotion_fail_closed_before_install_and_rescan() {
     assert!(src.contains("PORTABLE_PULL_RESCAN_MISSING"));
 }
 
+/// 串行化使用进程级 staging map 的测试。
+///
+/// Business Logic（为什么需要这个函数）:
+///     staging 是进程级全局 map，且 `staging_limit_rejects_oversized` 会
+///     `clear()` 整表并填满容量触发「淘汰最旧」；与 `source_chunk_resume`
+///     并行时会清掉/挤掉对方刚插入的 transfer，读侧报
+///     `PORTABLE_PULL_TRANSFER_NOT_FOUND` 偶发失败。
+///
+/// Code Logic（这个函数做什么）:
+///     返回模块级全局 Mutex guard，两个 staging 测试各自持锁全程串行。
+fn staging_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
 #[test]
 fn source_chunk_resume_from_offset() {
+    let _staging = staging_test_lock();
     let mut built = BuiltPortableSelection {
         envelope: SnapshotEnvelopeV1 {
             format: "cc-partner-agent-hub".into(),
@@ -941,6 +959,7 @@ fn plugin_hash_list_payload_is_rejected_contract() {
 
 #[test]
 fn staging_limit_rejects_oversized() {
+    let _staging = staging_test_lock();
     // Construct many tiny staged transfers until limit
     let make = |id: &str| {
         let mut built = BuiltPortableSelection {

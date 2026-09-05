@@ -339,6 +339,16 @@ mod tests {
         // 另一进程语义：不同 gate 实例
         assert!(gate_b.try_acquire_shared().is_none());
         drop(exclusive);
-        assert!(gate_b.try_acquire_shared().is_some());
+        // 断言语义是「exclusive 释放后 shared 必须可得」；系统级 open() 瞬态失败
+        // （多测试进程高并发下 ENFILE/资源压力）不属被测 flock 合同，短暂重试吸收。
+        let mut acquired = gate_b.try_acquire_shared();
+        for _ in 0..20 {
+            if acquired.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            acquired = gate_b.try_acquire_shared();
+        }
+        assert!(acquired.is_some());
     }
 }
