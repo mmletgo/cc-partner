@@ -2154,6 +2154,13 @@ mod tests {
 
     #[test]
     fn sanitize_replaces_home_and_redacts_secrets() {
+        // 并行 lib 测试可能临时改写进程级 HOME；本测试捕获的 home 与
+        // sanitize 内部读到的 home_dir() 必须一致，钉住 HOME 并持 HOME 锁。
+        let home_tmp = tempfile::tempdir().expect("临时 HOME");
+        let _home_guard = crate::config::install_env_var(
+            "HOME",
+            Some(home_tmp.path().to_str().expect("utf8 home")),
+        );
         let home = dirs::home_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/Users/hostile".into());
@@ -2217,6 +2224,13 @@ mod tests {
     /// Code Logic: with_default 挂 sanitized JSON layer → 写文件 → 扫描全部日志文件。
     #[test]
     fn redacts_sensitive_diagnostics() {
+        // 并行 lib 测试可能临时改写进程级 HOME；脱敏层在事件写入时读 home_dir()，
+        // 与测试捕获值不一致会把真实 home 漏进日志。钉住 HOME 并持 HOME 锁。
+        let home_tmp = tempfile::tempdir().expect("临时 HOME");
+        let _home_guard = crate::config::install_env_var(
+            "HOME",
+            Some(home_tmp.path().to_str().expect("utf8 home")),
+        );
         let (_dir, config) = test_config(BACKEND_LOG_MAX_BYTES, 3);
         let writer = RotatingLogWriter::open(config.clone()).expect("open rotating");
         // 同步写盘，避免 non_blocking 竞态

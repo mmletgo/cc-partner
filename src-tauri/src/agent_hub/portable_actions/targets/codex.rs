@@ -975,13 +975,22 @@ mod tests {
         ensure_portable_store_layout, portable_store_root, store_skill_dir,
     };
     use crate::agent_hub::targets::portable::DATA_DIR_ENV_LOCK;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     /// CODEX_HOME 是进程全局 env；凡依赖它的单测必须串行。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     历史上这里是一把独立锁，与 config.rs 通用 env 锁互不互斥，构成
+    ///     两族并行覆写同一变量的窗口；现委托 config 的统一锁，保证
+    ///     CODEX_HOME 全 crate 只有一个写者锁族（映射进 LOCK_OTHER 桶，
+    ///     该桶当前无其它 key 使用者，不会引入额外串行）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     取 `crate::config::generic_env_var_lock("CODEX_HOME")` 并把中毒锁
+    ///     还原为 guard 返回。
     fn codex_home_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::generic_env_var_lock("CODEX_HOME")
             .lock()
             .unwrap_or_else(|p| p.into_inner())
     }

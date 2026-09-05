@@ -29,3 +29,4 @@ release/
 # Managed Chrome for Testing cache and extracted runtime (prepared by scripts/prepare-browser-runtime.mjs)
 .browser-runtime-cache/
 src-tauri/resources/browser-runtime/
+src-tauri/target-linux/

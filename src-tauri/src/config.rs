@@ -1679,14 +1679,20 @@ mod data_dir_env_test {
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    /// 进程级 `CC_PARTNER_DATA_DIR` 环境变量锁。
+    /// 进程级 `CC_PARTNER_DATA_DIR` 环境变量锁（全 crate 唯一锁族）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     多个 data_dir 测试会改写同一进程环境变量，必须串行避免互相污染。
+    ///     portable_store / portable_actions targets 等模块历史上持有自己的
+    ///     `DATA_DIR_ENV_LOCK`，与这套锁互不互斥：并行下裸 set/remove 会在
+    ///     user_mirror 等测试 `build_app_state` 的 await 中途覆写变量，导致
+    ///     AppState 解析到错误 data_dir 后在 SQLite/flock 上挂死。因此所有
+    ///     `CC_PARTNER_DATA_DIR` 写者（含裸写模块）必须共享本锁。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 OnceLock 初始化全局 Mutex，所有相关测试共享同一把锁。
-    fn data_dir_env_lock() -> &'static Mutex<()> {
+    ///     用 OnceLock 初始化全局 Mutex，所有相关测试共享同一把锁；
+    ///     供本模块 guard 与外部模块（portable/codex 等）委托加锁。
+    pub(crate) fn data_dir_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -1694,7 +1700,14 @@ mod data_dir_env_test {
     /// 通用 env 测试锁（按 key 分锁）：`CLAUDE_CONFIG_DIR` / `HOME` 等无专属锁的
     /// 变量各自一把，消除跨模块测试裸 set/remove 的窗口竞态；同测试持多个不同
     /// key 的 guard 时互不阻塞，避免不可重入 Mutex 自死锁。
-    fn generic_env_var_lock(key: &str) -> &'static Mutex<()> {
+    /// `net/http_server` 的 control HOME 锁与 codex.rs 的 CODEX_HOME 锁均委托本
+    /// 函数取同一把锁，保证每变量全 crate 只有一个写者锁族。
+    ///
+    /// **锁序约定（防 AB-BA 死锁）**：同时需要 data_dir 与其它 env key 的测试，
+    /// 必须先 `install_data_dir_env` 再 `install_env_var`（DATA → HOME/其它）。
+    /// user_mirror `seed_dual_env` 持 DATA 跨 await 等 HOME；任何先 HOME 后 DATA
+    /// 的逆序用例都会与之互相等待，把并行 lib 测试整体挂死。
+    pub(crate) fn generic_env_var_lock(key: &str) -> &'static Mutex<()> {
         static LOCK_CLAUDE_CONFIG: OnceLock<Mutex<()>> = OnceLock::new();
         static LOCK_HOME: OnceLock<Mutex<()>> = OnceLock::new();
         static LOCK_OTHER: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1801,6 +1814,8 @@ mod data_dir_env_test {
     }
 }
 
+#[cfg(test)]
+pub(crate) use data_dir_env_test::{data_dir_env_lock, generic_env_var_lock};
 #[cfg(test)]
 pub use data_dir_env_test::{install_data_dir_env, install_env_var, DataDirEnvGuard};
 

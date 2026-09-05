@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-05T09:29:33.084Z",
+  "generatedAt": "2026-09-05T10:58:49.040Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -26,7 +26,7 @@
       "lines": 4182
     },
     "src-tauri/src/backend/logging.rs": {
-      "lines": 2502
+      "lines": 2516
     },
     "src-tauri/src/commands/workbench/common.rs": {
       "lines": 2626
@@ -35,10 +35,10 @@
       "lines": 4655
     },
     "src-tauri/src/config.rs": {
-      "lines": 2521
+      "lines": 2536
     },
     "src-tauri/src/net/http_server.rs": {
-      "lines": 2560
+      "lines": 2563
     },
     "src-tauri/src/net/peer_client.rs": {
       "lines": 3109

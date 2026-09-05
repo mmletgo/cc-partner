@@ -1922,7 +1922,7 @@ mod tests {
     use crate::workbench::remote_protocol::RemoteSaveTextReq;
     use std::ffi::OsString;
     use std::net::Ipv4Addr;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
     /// 测试用 HOME 环境隔离守卫。
@@ -1963,12 +1963,15 @@ mod tests {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     HOME 是进程级全局状态，多个 route 测试并发修改会互相污染控制文件路径。
+    ///     这里曾持有一把独立锁，与 config.rs `install_env_var("HOME")` 的锁互不
+    ///     互斥，构成两族并行覆写同一变量的窗口；现委托 config 的统一 HOME 锁，
+    ///     保证每变量全 crate 只有一个写者锁族。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 OnceLock 初始化全局 Mutex，所有需要临时 HOME 的测试串行执行。
+    ///     返回 `crate::config::generic_env_var_lock("HOME")` 的全局 Mutex，
+    ///     所有需要临时 HOME 的测试（含 config guard 用户）串行执行。
     fn backend_control_home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::generic_env_var_lock("HOME")
     }
 
     /// 安装临时 HOME 供 backend control route 测试使用。

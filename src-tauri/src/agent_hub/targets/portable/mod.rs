@@ -47,12 +47,39 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::Mutex;
 
 /// 单测串行化 `CC_PARTNER_DATA_DIR` 覆盖，避免跨 adapter 并行污染。
+///
+/// Business Logic（为什么需要这个类型）:
+///     本模块族（portable_store / portable_actions targets）的测试裸写
+///     `CC_PARTNER_DATA_DIR`；历史上这里是一把独立 static 锁，与 config.rs
+///     `install_data_dir_env` 的锁互不互斥，两族并行时会在 user_mirror 等
+///     测试 `build_app_state` 的 await 中途覆写变量造成挂死。现统一委托
+///     config 的全 crate 唯一 data_dir 测试锁。
+///
+/// Code Logic（这个类型做什么）:
+///     零尺寸标记类型，`lock()` 转发到 `crate::config::data_dir_env_lock()`
+///     并原样返回 `LockResult`；调用点保持 `DATA_DIR_ENV_LOCK.lock()…` 语法。
 #[cfg(test)]
-pub(crate) static DATA_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) struct DataDirEnvLock;
+
+#[cfg(test)]
+impl DataDirEnvLock {
+    /// 取全局 data_dir 测试锁；返回 `Result` 以保持既有调用点
+    /// `.lock().unwrap()` / `.lock().unwrap_or_else(...)` 语法不变。
+    #[cfg(test)]
+    pub(crate) fn lock(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'static, ()>,
+        std::sync::PoisonError<std::sync::MutexGuard<'static, ()>>,
+    > {
+        crate::config::data_dir_env_lock().lock()
+    }
+}
+
+#[cfg(test)]
+pub(crate) use DataDirEnvLock as DATA_DIR_ENV_LOCK;
 
 /// 发现来源分类。
 ///

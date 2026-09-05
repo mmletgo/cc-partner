@@ -1995,12 +1995,14 @@ pub fn prove_legacy_lossy_placeholder_never_overwrites_canonical_credential() {
     let data = dir.path().join("cc-data");
     fs::create_dir_all(&data).expect("data");
     // SAFETY: 串行 env_lock 持有期间修改测试 env。
+    // 锁序约定：DATA → 其它 env key（与 user_mirror seed_dual_env 一致）；
+    // HOME 先于 DATA 会与其构成 AB-BA 死锁（并行 lib 测试挂死根因）。
+    let _data_dir_guard =
+        crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
     let _claude_env_guard =
         crate::config::install_env_var("CLAUDE_CONFIG_DIR", Some(claude.to_str().expect("utf8")));
     let _home_env_guard =
         crate::config::install_env_var("HOME", Some(dir.path().to_str().expect("utf8")));
-    let _data_dir_guard =
-        crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
 
     let lossy = serde_json::json!({
         "env": { "API_TOKEN": REDACTED_PLACEHOLDER },
@@ -2083,17 +2085,18 @@ mod tests {
         .unwrap();
 
         // 隔离：CLAUDE_CONFIG_DIR + 假 home 避免读真实环境
+        // 锁序约定：DATA → 其它 env key，避免与 user_mirror 的 DATA→HOME 逆序死锁。
+        // assets_root 走 CC_PARTNER_DATA_DIR
+        let data = dir.path().join("cc-data");
+        fs::create_dir_all(&data).unwrap();
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
         let _claude_env_guard = crate::config::install_env_var(
             "CLAUDE_CONFIG_DIR",
             Some(claude.to_str().expect("utf8")),
         );
         let _home_env_guard =
             crate::config::install_env_var("HOME", Some(dir.path().to_str().expect("utf8")));
-        // assets_root 走 CC_PARTNER_DATA_DIR
-        let data = dir.path().join("cc-data");
-        fs::create_dir_all(&data).unwrap();
-        let _data_dir_guard =
-            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
 
         let assets = tauri::async_runtime::block_on(list_assets()).expect("list");
         // plugin CLI 可能失败被跳过；skills/commands/mcp 应在
@@ -2136,14 +2139,15 @@ mod tests {
         .unwrap();
         let data = dir.path().join("cc-data");
         fs::create_dir_all(&data).unwrap();
+        // 锁序约定：DATA → 其它 env key，避免与 user_mirror 的 DATA→HOME 逆序死锁。
+        let _data_dir_guard =
+            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
         let _claude_env_guard = crate::config::install_env_var(
             "CLAUDE_CONFIG_DIR",
             Some(claude.to_str().expect("utf8")),
         );
         let _home_env_guard =
             crate::config::install_env_var("HOME", Some(dir.path().to_str().expect("utf8")));
-        let _data_dir_guard =
-            crate::config::install_data_dir_env(Some(data.to_str().expect("utf8 data dir")));
 
         let bytes = tauri::async_runtime::block_on(build_bundle(vec![ClaudeCodeAssetSelector {
             kind: ClaudeCodeAssetKind::Mcp,

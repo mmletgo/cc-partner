@@ -576,12 +576,13 @@ pub fn codex_disable_strategy() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_hub::targets::portable::{PortableDiscoveryStatus, DATA_DIR_ENV_LOCK};
+    use crate::agent_hub::targets::portable::PortableDiscoveryStatus;
     use std::fs;
 
     #[test]
     fn hub_disabled_skill_is_discovered_under_data_dir() {
-        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap();
+        // install_data_dir_env 的 guard 已持有统一的 data_dir 测试锁并负责恢复环境，
+        // 不再叠加外层 DATA_DIR_ENV_LOCK（同一把非重入锁会自死锁）。
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let data = tmp.path().join("data");
