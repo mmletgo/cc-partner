@@ -572,22 +572,37 @@ fn single_prompt_response_to_full(
 ///     不能把结果写成继续向用户追问意见的澄清问题。
 ///
 /// Code Logic（这个函数做什么）:
-///     把原始 prompt 作为 fenced code block 嵌入系统化指令，要求输出目标、上下文、约束、验收标准；
-///     缺失信息只能写成待补充占位或执行假设，不能新增原始需求没有要求的文档/文件输出确认。
+///     把原始 prompt 作为 fenced code block 嵌入系统化指令：先分析原 prompt 的目标/歧义/缺失上下文，
+///     再按 prompt 工程原则重写；硬约束覆盖字段语言纯度、四要素（目标/上下文/约束/验收标准）、
+///     不回答而是扩写、聚焦 WHAT 而非 HOW、不写实现步骤/代码片段、不主动推荐技术栈、
+///     不请求教程、不新增文档/文件输出确认、长度与完整性要求，并附一个双语 few-shot 示例。
 fn build_optimize_instruction(prompt: &str) -> String {
     format!(
-        "You optimize user prompts for Claude Code programming tasks.\n\
-         Return only data matching the JSON schema.\n\
-         Requirements:\n\
-         - Preserve the user's intent and do not invent external facts.\n\
-         - optimizedZh must be a clear Simplified Chinese prompt.\n\
-         - optimizedEn must be an equivalent English prompt.\n\
+        "You are a prompt engineering expert optimizing prompts for Claude Code programming tasks.\n\
+         Return only data matching the JSON schema.\n\n\
+         ANALYSIS PROCESS:\n\
+         Evaluate the original prompt first: identify the main objective and expected output, note ambiguities and gaps, and check for missing context. Then build the enhanced version from that analysis.\n\n\
+         ENHANCEMENT PRINCIPLES:\n\
+         - Write clear, specific instructions with the necessary context.\n\
+         - Set explicit parameters and constraints, and describe the expected result.\n\
+         - Remove redundant information; keep every sentence load-bearing.\n\
+         - Always produce a substantive enhancement: clarify the task, scope, constraints, and expected output. If the original is already clear, lightly polish it instead of returning it unchanged.\n\n\
+         HARD CONSTRAINTS:\n\
+         - optimizedZh must be written entirely in Simplified Chinese and optimizedEn entirely in English; never mix languages within one field.\n\
          - Both versions must include: goal, context, constraints, and acceptance criteria.\n\
          - Write both optimized prompts from the requester's perspective, as a direct prompt they can paste into Claude Code.\n\
+         - Preserve the user's intent and do not invent external facts, features, or requirements.\n\
+         - Do not answer the request; expand and rewrite it into a more detailed prompt.\n\
          - Do not ask the requester clarifying questions or include confirmation requests.\n\
          - If details are missing, express them as bracketed placeholders or execution assumptions inside the prompt, not as questions to the requester.\n\
+         - Focus on WHAT the agent should build, not HOW; do not write step-by-step implementation plans or code snippets.\n\
+         - Do not suggest specific technologies, frameworks, or libraries unless the original prompt mentions them.\n\
+         - Do not request guides, how-tos, or tutorials.\n\
          - Do not add documentation, docs/, file-writing, persistence, or confirmation requirements unless the original prompt explicitly asks for those outputs.\n\
-         - Keep the prompt actionable for a coding agent.\n\n\
+         - Keep each version concise and complete (aim for 300-1500 characters); do not end with an unfinished list, dangling conjunction, or trailing colon.\n\n\
+         Example input: \"做个番茄钟\"\n\
+         Example optimizedZh: \"开发一个网页版番茄钟。目标：提供 25 分钟专注、5 分钟休息的标准循环，两种时长与循环轮数均可自定义，计时结束播放提示音，并记录当日完成的专注轮次。上下文：这是个人效率工具，单人使用。约束：做成单页应用即可，数据仅保存在浏览器本地，无需账号或后端服务；不指定具体前端框架。验收标准：启动/暂停/重置计时、时长与轮数自定义、结束提示音和当日轮次记录均可在浏览器中直接演示，且控制台无报错。\"\n\
+         Example optimizedEn: \"Build a web-based Pomodoro timer. Goal: provide a standard 25-minute focus and 5-minute break cycle with customizable durations and round count, play a sound when a timer ends, and record today's completed focus rounds. Context: this is a single-user personal productivity tool. Constraints: a single-page app is enough, data stays in browser-local storage only with no accounts or backend service, and no specific frontend framework is prescribed. Acceptance criteria: start/pause/reset, duration and round customization, the end-of-timer sound, and the local round history are all demonstrable in a browser with no console errors.\"\n\n\
          Original prompt:\n```text\n{}\n```",
         prompt
     )
@@ -599,7 +614,8 @@ fn build_optimize_instruction(prompt: &str) -> String {
 ///     Workbench 小组件只需要设置页选择的一种语言，普通 Prompt 优化页仍保留双语输出。
 ///
 /// Code Logic（这个函数做什么）:
-///     target 为 None 时复用双语指令；target 为 Some 时构造只返回 `optimizedPrompt` 的单语指令。
+///     target 为 None 时复用双语指令；target 为 Some 时构造只返回 `optimizedPrompt` 的单语指令：
+///     与双语版共享同一套分析流程、工程原则和 Do-NOT 硬约束，另锁定目标语言纯度并禁止生成第二语言版本。
 fn build_optimize_instruction_for_target(
     prompt: &str,
     target: Option<PromptOptimizeTargetLanguage>,
@@ -608,17 +624,28 @@ fn build_optimize_instruction_for_target(
         return build_optimize_instruction(prompt);
     };
     format!(
-        "You optimize user prompts for Claude Code programming tasks.\n\
-         Return only data matching the JSON schema.\n\
-         Requirements:\n\
-         - Preserve the user's intent and do not invent external facts.\n\
-         - optimizedPrompt must be a clear {} prompt.\n\
-         - optimizedPrompt must include: goal, context, constraints, and acceptance criteria.\n\
+        "You are a prompt engineering expert optimizing prompts for Claude Code programming tasks.\n\
+         Return only data matching the JSON schema.\n\n\
+         ANALYSIS PROCESS:\n\
+         Evaluate the original prompt first: identify the main objective and expected output, note ambiguities and gaps, and check for missing context. Then build the enhanced version from that analysis.\n\n\
+         ENHANCEMENT PRINCIPLES:\n\
+         - Write clear, specific instructions with the necessary context.\n\
+         - Set explicit parameters and constraints, and describe the expected result.\n\
+         - Remove redundant information; keep every sentence load-bearing.\n\
+         - Always produce a substantive enhancement: clarify the task, scope, constraints, and expected output. If the original is already clear, lightly polish it instead of returning it unchanged.\n\n\
+         HARD CONSTRAINTS:\n\
+         - optimizedPrompt must be written entirely in {}; never mix in another language.\n\
+         - It must include: goal, context, constraints, and acceptance criteria.\n\
          - Write optimizedPrompt from the requester's perspective, as a direct prompt they can paste into Claude Code.\n\
+         - Preserve the user's intent and do not invent external facts, features, or requirements.\n\
+         - Do not answer the request; expand and rewrite it into a more detailed prompt.\n\
          - Do not ask the requester clarifying questions or include confirmation requests.\n\
          - If details are missing, express them as bracketed placeholders or execution assumptions inside the prompt, not as questions to the requester.\n\
+         - Focus on WHAT the agent should build, not HOW; do not write step-by-step implementation plans or code snippets.\n\
+         - Do not suggest specific technologies, frameworks, or libraries unless the original prompt mentions them.\n\
+         - Do not request guides, how-tos, or tutorials.\n\
          - Do not add documentation, docs/, file-writing, persistence, or confirmation requirements unless the original prompt explicitly asks for those outputs.\n\
-         - Keep the prompt actionable for a coding agent.\n\
+         - Keep it concise and complete (aim for 300-1500 characters); do not end with an unfinished list, dangling conjunction, or trailing colon.\n\
          - Do not generate a second language version.\n\n\
          Original prompt:\n```text\n{}\n```",
         target.instruction_label(),
@@ -632,25 +659,37 @@ fn build_optimize_instruction_for_target(
 ///     快捷键小组件会直接把模型输出写进终端，因此输出必须是单语纯 Prompt 文本，不能包含 JSON 包装或解释。
 ///
 /// Code Logic（这个函数做什么）:
-///     按设置页目标语种生成 stream-json 纯文本任务指令；提示 Claude Code 使用当前项目目录自动加载的上下文，
-///     并禁止生成第二语言版本、澄清问题和未经原始需求要求的 docs/ 文档输出。
+///     按设置页目标语种生成 stream-json 纯文本任务指令：与双语版共享同一套分析流程、工程原则和 Do-NOT
+///     硬约束，允许利用当前项目目录自动加载的 CLAUDE.md 上下文；禁止 JSON/围栏/解释输出、
+///     第二语言版本和未经原始需求要求的 docs/ 文档输出。
 fn build_streaming_optimize_instruction(
     prompt: &str,
     target: PromptOptimizeTargetLanguage,
 ) -> String {
     format!(
-        "You optimize user prompts for Claude Code programming tasks.\n\
+        "You are a prompt engineering expert optimizing prompts for Claude Code programming tasks.\n\
          Output only the optimized prompt text in {}.\n\
-         Do not output JSON, Markdown fences, headings about your answer, explanations, or metadata.\n\
-         Requirements:\n\
-         - Preserve the user's intent and do not invent external facts.\n\
+         Do not output JSON, Markdown fences, headings about your answer, explanations, or metadata.\n\n\
+         ANALYSIS PROCESS:\n\
+         Evaluate the original prompt first: identify the main objective and expected output, note ambiguities and gaps, and check for missing context. Then build the enhanced version from that analysis.\n\n\
+         ENHANCEMENT PRINCIPLES:\n\
+         - Write clear, specific instructions with the necessary context.\n\
+         - Set explicit parameters and constraints, and describe the expected result.\n\
+         - Remove redundant information; keep every sentence load-bearing.\n\
+         - Always produce a substantive enhancement: clarify the task, scope, constraints, and expected output. If the original is already clear, lightly polish it instead of returning it unchanged.\n\n\
+         HARD CONSTRAINTS:\n\
+         - Preserve the user's intent and do not invent external facts, features, or requirements.\n\
          - Use any project instructions/context Claude Code auto-loads from the current working directory, including CLAUDE.md, when relevant.\n\
          - The optimized prompt must include: goal, context, constraints, and acceptance criteria.\n\
          - Write the optimized prompt from the requester's perspective, as a direct prompt they can paste into Claude Code.\n\
+         - Do not answer the request; expand and rewrite it into a more detailed prompt.\n\
          - Do not ask the requester clarifying questions or include confirmation requests.\n\
          - If details are missing, express them as bracketed placeholders or execution assumptions inside the prompt, not as questions to the requester.\n\
+         - Focus on WHAT the agent should build, not HOW; do not write step-by-step implementation plans or code snippets.\n\
+         - Do not suggest specific technologies, frameworks, or libraries unless the original prompt mentions them.\n\
+         - Do not request guides, how-tos, or tutorials.\n\
          - Do not add documentation, docs/, file-writing, persistence, or confirmation requirements unless the original prompt explicitly asks for those outputs.\n\
-         - Keep the prompt actionable for a coding agent.\n\
+         - Keep it concise and complete (aim for 300-1500 characters); do not end with an unfinished list, dangling conjunction, or trailing colon.\n\
          - Do not generate a second language version.\n\n\
          Original prompt:\n```text\n{}\n```",
         target.instruction_label(),
@@ -833,6 +872,42 @@ mod tests {
         assert!(instruction.contains(
             "Do not ask the requester clarifying questions or include confirmation requests."
         ));
+        assert!(instruction.contains("ANALYSIS PROCESS"));
+        assert!(instruction.contains(
+            "Do not answer the request; expand and rewrite it into a more detailed prompt."
+        ));
+        assert!(instruction.contains(
+            "Focus on WHAT the agent should build, not HOW; do not write step-by-step implementation plans or code snippets."
+        ));
+        assert!(instruction.contains(
+            "Do not suggest specific technologies, frameworks, or libraries unless the original prompt mentions them."
+        ));
+        assert!(instruction.contains("Do not request guides, how-tos, or tutorials."));
+        assert!(instruction.contains("never mix languages within one field."));
+        assert!(instruction.contains("Example input:"));
+    }
+
+    #[test]
+    fn single_language_instruction_locks_target_language_and_constraints() {
+        let zh = build_optimize_instruction_for_target(
+            "修复工作台 Prompt 优化浮层",
+            Some(PromptOptimizeTargetLanguage::Zh),
+        );
+        let en = build_optimize_instruction_for_target(
+            "修复工作台 Prompt 优化浮层",
+            Some(PromptOptimizeTargetLanguage::En),
+        );
+
+        assert!(zh.contains("optimizedPrompt must be written entirely in Simplified Chinese"));
+        assert!(en.contains("optimizedPrompt must be written entirely in English"));
+        assert!(!en.contains("Simplified Chinese"));
+        for instruction in [zh, en] {
+            assert!(instruction.contains("Do not generate a second language version"));
+            assert!(instruction.contains(
+                "Do not suggest specific technologies, frameworks, or libraries"
+            ));
+            assert!(instruction.contains("Do not request guides, how-tos, or tutorials."));
+        }
     }
 
     #[test]
@@ -847,6 +922,8 @@ mod tests {
         assert!(instruction.contains("Do not generate a second language version"));
         assert!(instruction.contains("Simplified Chinese"));
         assert!(!instruction.contains("optimizedPrompt"));
+        assert!(instruction.contains("Use any project instructions/context Claude Code auto-loads"));
+        assert!(instruction.contains("Do not request guides, how-tos, or tutorials."));
     }
 
     #[test]
