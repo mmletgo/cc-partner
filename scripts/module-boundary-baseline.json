@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-05T05:35:24.613Z",
+  "generatedAt": "2026-09-05T09:29:33.084Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -16,29 +16,6 @@
     }
   },
   "files": {
-    "src-tauri/src/agent_hub/portable_actions/executor.rs": {
-      "lines": 3289
-    },
-    "src-tauri/src/agent_hub/portable_inventory/scanner.rs": {
-      "lines": 5006,
-      "exception": {
-        "owner": "module-maintainers",
-        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
-        "expiresAt": "2026-11-23"
-      }
-    },
-    "src-tauri/src/agent_hub/replication/pull.rs": {
-      "lines": 3912
-    },
-    "src-tauri/src/agent_hub/service.rs": {
-      "lines": 3414
-    },
-    "src-tauri/src/agent_hub/snapshot/importer.rs": {
-      "lines": 2884
-    },
-    "src-tauri/src/agent_hub/targets/portable.rs": {
-      "lines": 2931
-    },
     "src-tauri/src/backend/cli.rs": {
       "lines": 3212
     },
