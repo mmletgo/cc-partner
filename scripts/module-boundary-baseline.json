@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-03T08:42:44.053Z",
+  "generatedAt": "2026-09-05T05:35:24.613Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -17,7 +17,7 @@
   },
   "files": {
     "src-tauri/src/agent_hub/portable_actions/executor.rs": {
-      "lines": 2829
+      "lines": 3289
     },
     "src-tauri/src/agent_hub/portable_inventory/scanner.rs": {
       "lines": 5006,
@@ -31,34 +31,43 @@
       "lines": 3912
     },
     "src-tauri/src/agent_hub/service.rs": {
-      "lines": 3412
+      "lines": 3414
     },
     "src-tauri/src/agent_hub/snapshot/importer.rs": {
       "lines": 2884
     },
     "src-tauri/src/agent_hub/targets/portable.rs": {
-      "lines": 2851
+      "lines": 2931
+    },
+    "src-tauri/src/backend/cli.rs": {
+      "lines": 3212
+    },
+    "src-tauri/src/backend/control_api.rs": {
+      "lines": 2716
     },
     "src-tauri/src/backend/control_client.rs": {
-      "lines": 4181
+      "lines": 4182
     },
     "src-tauri/src/backend/logging.rs": {
       "lines": 2502
     },
     "src-tauri/src/commands/workbench/common.rs": {
-      "lines": 2568
+      "lines": 2626
     },
     "src-tauri/src/commands/workbench/git.rs": {
-      "lines": 4653
+      "lines": 4655
+    },
+    "src-tauri/src/config.rs": {
+      "lines": 2521
     },
     "src-tauri/src/net/http_server.rs": {
-      "lines": 2539
+      "lines": 2560
     },
     "src-tauri/src/net/peer_client.rs": {
       "lines": 3109
     },
     "src-tauri/src/net/routes/orchestrator.rs": {
-      "lines": 2617
+      "lines": 2618
     },
     "src-tauri/src/net/routes/workbench.rs": {
       "lines": 3569
