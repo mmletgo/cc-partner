@@ -35,11 +35,10 @@
   cursor: crosshair;
 }
 
-/* 工具条外层定位容器（居中于选区宽度） */
+/* 工具条外层定位容器：left/top 由 computeScreenshotToolbarPosition 夹进视口，宽度跟随工具条本身 */
 .toolbarWrap {
   position: absolute;
   display: flex;
-  justify-content: center;
   pointer-events: none;
 }
 

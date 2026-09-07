@@ -16,6 +16,7 @@ declare global {
       unregisterListener: (event: string, eventId: number) => void;
     };
     __resolveSnapshot?: () => void;
+    __clipboardSaveCount?: number;
     __snapshotInvokeState?: {
       toolbarVisible: boolean;
       selectionVisible: boolean;
@@ -63,7 +64,7 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
         currentWindow: { label: 'screenshot-overlay' },
         currentWebview: { windowLabel: 'screenshot-overlay', label: 'screenshot-overlay' },
       },
-      invoke: async (cmd: string) => {
+      invoke: async (cmd: string, _args?: Record<string, unknown>) => {
         if (cmd === 'plugin:event|listen') return 1;
         if (cmd === 'plugin:event|unlisten') return undefined;
         if (cmd === 'get_lan_disclosure_status') {
@@ -101,6 +102,10 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
             notifyRemoteOutboxFailed: true,
             notifyTaskDone: false,
           };
+        }
+        if (cmd === 'save_clipboard_image') {
+          window.__clipboardSaveCount = (window.__clipboardSaveCount ?? 0) + 1;
+          return undefined;
         }
         if (cmd === 'get_region_snapshot') {
           window.__snapshotInvokeState = {
@@ -186,6 +191,78 @@ test.describe('截图选区 Overlay', () => {
       toolbarVisible: true,
       selectionVisible: true,
     });
+    await page.evaluate(() => window.__resolveSnapshot?.());
+  });
+
+  test('框选完成后按回车即确认写剪贴板', async ({ page }) => {
+    await installDelayedSnapshotMock(page);
+    await page.goto('/screenshot-overlay?display=0');
+    await expect(page.locator('[class*="overlay"]')).toBeVisible();
+
+    const box = await page.locator('[class*="overlay"]').boundingBox();
+    if (!box) throw new Error('overlay not laid out');
+    await page.mouse.move(box.x + 40, box.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 320, box.y + 260, { steps: 8 });
+    await page.mouse.up();
+
+    await expect(page.getByRole('toolbar')).toBeVisible({ timeout: 10_000 });
+    await page.waitForFunction(() => window.__snapshotInvokeState !== undefined, null, {
+      timeout: 15_000,
+    });
+    await page.evaluate(() => window.__resolveSnapshot?.());
+    await expect(page.locator('canvas')).toBeVisible({ timeout: 10_000 });
+
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => page.evaluate(() => window.__clipboardSaveCount ?? 0)).toBe(1);
+  });
+
+  test('快照未返回时按回车会在画完后确认', async ({ page }) => {
+    await installDelayedSnapshotMock(page);
+    await page.goto('/screenshot-overlay?display=0');
+    await expect(page.locator('[class*="overlay"]')).toBeVisible();
+
+    const box = await page.locator('[class*="overlay"]').boundingBox();
+    if (!box) throw new Error('overlay not laid out');
+    await page.mouse.move(box.x + 40, box.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 320, box.y + 260, { steps: 8 });
+    await page.mouse.up();
+
+    await expect(page.getByRole('toolbar')).toBeVisible({ timeout: 10_000 });
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => page.evaluate(() => window.__clipboardSaveCount ?? 0)).toBe(0);
+
+    await page.waitForFunction(() => window.__snapshotInvokeState !== undefined, null, {
+      timeout: 15_000,
+    });
+    await page.evaluate(() => window.__resolveSnapshot?.());
+    await expect.poll(async () => page.evaluate(() => window.__clipboardSaveCount ?? 0)).toBe(1);
+  });
+
+  test('贴右下角的选区工具条仍完整落在视口内', async ({ page }) => {
+    await installDelayedSnapshotMock(page);
+    await page.goto('/screenshot-overlay?display=0');
+    await expect(page.locator('[class*="overlay"]')).toBeVisible();
+
+    const box = await page.locator('[class*="overlay"]').boundingBox();
+    if (!box) throw new Error('overlay not laid out');
+    const x0 = box.x + box.width - 120;
+    const y0 = box.y + box.height - 120;
+    await page.mouse.move(x0, y0);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 8, box.y + box.height - 8, { steps: 8 });
+    await page.mouse.up();
+
+    const toolbar = page.getByRole('toolbar');
+    await expect(toolbar).toBeVisible({ timeout: 10_000 });
+    const tb = await toolbar.boundingBox();
+    if (!tb) throw new Error('toolbar not laid out');
+    expect(tb.x).toBeGreaterThanOrEqual(0);
+    expect(tb.y).toBeGreaterThanOrEqual(0);
+    expect(tb.x + tb.width).toBeLessThanOrEqual(box.width + 1);
+    expect(tb.y + tb.height).toBeLessThanOrEqual(box.height + 1);
+
     await page.evaluate(() => window.__resolveSnapshot?.());
   });
 });

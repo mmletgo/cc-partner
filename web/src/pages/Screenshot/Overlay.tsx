@@ -5,7 +5,8 @@
  *   - idle：整屏半透明遮罩
  *   - selecting：拖拽框选（四块遮罩 + 蓝虚线边框）
  *   - editing：选区确定，canvas 画桌面快照 + 标注，工具条选矩形/箭头/颜色/撤销/确认/取消
- *   确认 → canvas.toDataURL 合成 → save_clipboard_image 写剪贴板。ESC/取消 → 关闭。
+ *   确认 / 回车 → canvas.toDataURL 合成 → save_clipboard_image 写剪贴板。ESC/取消 → 关闭。
+ *   工具条 left/top 夹进视口，避免贴边时确认按钮被 overflow:hidden 裁掉。
  *
  * Code Logic: 状态机 + selectionRef（mouseup 读最新选区）；mouseup 后先提交编辑态工具条和选区框，
  *   再抓纯桌面快照。选区框用外侧 outline 绘制，不进入截图 crop。hooks 在所有 early return 之前（项目规则 20）。
@@ -16,6 +17,7 @@ import { flushSync } from 'react-dom';
 import { invoke } from '@/api/client';
 import { useAnnotationCanvas, type Annotation } from './useAnnotationCanvas';
 import { ScreenshotToolbar, COLORS, type ToolKind } from './ScreenshotToolbar';
+import { computeScreenshotToolbarPosition, resolveScreenshotOverlayKey } from './screenshotOverlayInput';
 import styles from './Overlay.module.css';
 
 type Mode = 'idle' | 'selecting' | 'editing';
@@ -63,6 +65,7 @@ function waitForPaint(): Promise<void> {
  * Code Logic（这个组件做什么）:
  *   管理 idle/selecting/editing 三态；mouseup 后立即进入 editing 渲染工具条，
  *   等工具条和选区框完成首帧绘制后再异步抓纯桌面快照，快照完成后挂载 canvas 标注层。
+ *   框选完成后 Enter 确认（快照未就绪则排队），Esc 取消；工具条位置夹在视口内。
  */
 export function Overlay() {
   const [mode, setMode] = useState<Mode>('idle');
@@ -78,6 +81,7 @@ export function Overlay() {
   const displayRef = useRef<number>(parseDisplay());
   const draggingRef = useRef<boolean>(false);
   const selectionRef = useRef<Selection | null>(null);
+  const pendingConfirmRef = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // DPR 在 overlay 窗口生命周期内为常量，用 lazy-init state 取代 ref（避免 render 阶段读 ref.current 触发 react-hooks/refs）
   const [dpr] = useState<number>(() => window.devicePixelRatio || 1);
@@ -97,6 +101,7 @@ export function Overlay() {
   }, []);
 
   const cancel = useCallback(async () => {
+    pendingConfirmRef.current = false;
     try {
       await invoke('cancel_region_capture');
     } catch {
@@ -104,14 +109,57 @@ export function Overlay() {
     }
   }, []);
 
-  // ESC 取消
+  const confirm = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    const canvas = canvasRef.current;
+    try {
+      const dataUrl = canvas?.toDataURL('image/png');
+      if (!dataUrl) throw new Error('canvas 合成失败');
+      await invoke('save_clipboard_image', { dataUrl });
+      // 成功后 Rust 已关 overlay；失败抛出
+    } catch {
+      setBusy(false); // 保留 editing 让用户重试
+    }
+  }, [busy]);
+
+  // ESC 取消；框选完成后回车确认（贴边时工具条可能被裁切）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') void cancel();
+      const action = resolveScreenshotOverlayKey(e, mode);
+      if (action === 'cancel') {
+        void cancel();
+        return;
+      }
+      if (action !== 'confirm') return;
+      e.preventDefault();
+      if (!snapshot || busy) {
+        pendingConfirmRef.current = true;
+        return;
+      }
+      void confirm();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [cancel]);
+  }, [busy, cancel, confirm, mode, snapshot]);
+
+  // 快照仍在加载时按了回车：等 canvas 画完再确认
+  useEffect(() => {
+    if (mode !== 'editing') {
+      if (mode !== 'selecting') pendingConfirmRef.current = false;
+      return;
+    }
+    if (!pendingConfirmRef.current || !snapshot || busy) return;
+    let cancelled = false;
+    void waitForPaint().then(() => {
+      if (cancelled || !pendingConfirmRef.current) return;
+      pendingConfirmRef.current = false;
+      void confirm();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [busy, confirm, mode, snapshot]);
 
   // canvas 重绘（editing 时快照 + 已有标注 + 草稿预览）
   useAnnotationCanvas(
@@ -246,33 +294,15 @@ export function Overlay() {
   // 工具条回调
   const undo = useCallback(() => setAnnotations((prev) => prev.slice(0, -1)), []);
 
-  const confirm = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
-    const canvas = canvasRef.current;
-    try {
-      const dataUrl = canvas?.toDataURL('image/png');
-      if (!dataUrl) throw new Error('canvas 合成失败');
-      await invoke('save_clipboard_image', { dataUrl });
-      // 成功后 Rust 已关 overlay；失败抛出
-    } catch {
-      setBusy(false); // 保留 editing 让用户重试
-    }
-  }, [busy]);
-
   const showSelection = selection && selection.w > 0 && selection.h > 0;
   const showEditing = mode === 'editing' && selection;
 
-  // editing 工具条位置：默认选区下方居中，贴近下边则翻到上方
-  const tbH = 44;
-  const winH = typeof window !== 'undefined' ? window.innerHeight : 9999;
-  const tbBelow = selection && selection.y + selection.h + 8 + tbH <= winH;
+  // editing 工具条：选区中心对齐后夹进视口，避免贴边时确认按钮被 overflow 裁掉
   const toolbarStyle: React.CSSProperties = selection
-    ? {
-        left: selection.x,
-        top: tbBelow ? selection.y + selection.h + 8 : Math.max(0, selection.y - tbH - 8),
-        width: selection.w,
-      }
+    ? computeScreenshotToolbarPosition(selection, {
+        width: typeof window !== 'undefined' ? window.innerWidth : 9999,
+        height: typeof window !== 'undefined' ? window.innerHeight : 9999,
+      })
     : {};
 
   return (
