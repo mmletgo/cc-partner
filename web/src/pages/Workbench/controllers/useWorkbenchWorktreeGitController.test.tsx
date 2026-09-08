@@ -45,6 +45,7 @@ interface FakeWorktreesApi {
   create: ReturnType<typeof vi.fn>;
   commit: ReturnType<typeof vi.fn>;
   push: ReturnType<typeof vi.fn>;
+  pull: ReturnType<typeof vi.fn>;
   merge: ReturnType<typeof vi.fn>;
   remove: ReturnType<typeof vi.fn>;
   getMutationOperation: ReturnType<typeof vi.fn>;
@@ -66,6 +67,9 @@ const fakeWorktreesApi = vi.hoisted<FakeWorktreesApi>(() => ({
     succeededEnvelope({} as WorkbenchWorktree),
   ),
   push: vi.fn(async () =>
+    succeededEnvelope({} as WorkbenchWorktree),
+  ),
+  pull: vi.fn(async () =>
     succeededEnvelope({} as WorkbenchWorktree),
   ),
   merge: vi.fn(async () =>
@@ -351,6 +355,7 @@ beforeEach(() => {
   fakeWorktreesApi.create.mockReset();
   fakeWorktreesApi.commit.mockReset();
   fakeWorktreesApi.push.mockReset();
+  fakeWorktreesApi.pull.mockReset();
   fakeWorktreesApi.merge.mockReset();
   fakeWorktreesApi.remove.mockReset();
   fakeWorktreesApi.getMutationOperation.mockReset();
@@ -361,6 +366,9 @@ beforeEach(() => {
     succeededEnvelope({} as WorkbenchWorktree),
   );
   fakeWorktreesApi.push.mockImplementation(async () =>
+    succeededEnvelope({} as WorkbenchWorktree),
+  );
+  fakeWorktreesApi.pull.mockImplementation(async () =>
     succeededEnvelope({} as WorkbenchWorktree),
   );
   fakeWorktreesApi.merge.mockImplementation(async () =>
@@ -899,6 +907,51 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     expect(result.current.worktreeBusy).toBeNull();
   });
 
+  test('handlePullWorktree pulls, reloads worktrees, refreshes git history when on history tab', async () => {
+    const project = buildLocalProject();
+    fakeWorktreesApi.pull.mockResolvedValueOnce(
+      succeededEnvelope(buildWorktree({ id: 'wt-main' })),
+    );
+    fakeWorktreesApi.list.mockResolvedValueOnce([buildWorktree({ id: 'wt-main' })]);
+    fakeGitApi.listCommits.mockResolvedValueOnce([buildCommit()]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+      inspectorTab: 'history',
+    });
+
+    await act(async () => {
+      await result.current.handlePullWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(fakeWorktreesApi.pull).toHaveBeenCalledWith('wt-main', expect.any(String));
+    expect(result.current.worktreeBusy).toBeNull();
+  });
+
+  test('handlePullWorktree surfaces error and marks failure on throw', async () => {
+    const project = buildLocalProject();
+    fakeWorktreesApi.pull.mockRejectedValueOnce(new Error('pull failed'));
+    const markFailure = vi.fn();
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+      inspectorTab: 'files',
+      markRequestFailure: markFailure,
+    });
+
+    await act(async () => {
+      await result.current.handlePullWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.worktreeError).toContain('pull failed');
+    expect(markFailure).toHaveBeenCalledWith(project.id, expect.any(Error));
+    expect(result.current.worktreeBusy).toBeNull();
+  });
+
   test('commit/push are no-ops when no active worktree or remoteWriteDisabled', async () => {
     const { result } = renderController({
       activeProjectId: 'project-1',
@@ -909,10 +962,12 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     await act(async () => {
       await result.current.handleCommitWorktree();
       await result.current.handlePushWorktree();
+      await result.current.handlePullWorktree();
       await flushMicrotasks();
     });
     expect(fakeWorktreesApi.commit).not.toHaveBeenCalled();
     expect(fakeWorktreesApi.push).not.toHaveBeenCalled();
+    expect(fakeWorktreesApi.pull).not.toHaveBeenCalled();
   });
 
   test.each(['resolve', 'reject'] as const)(

@@ -30,7 +30,8 @@ use crate::commands::workbench::{
     local_list_workbench_git_commits, local_list_workbench_sessions,
     local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
     local_paste_workbench_session_image, local_preview_workbench_html_asset,
-    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
+    local_preview_workbench_sqlite, local_push_workbench_worktree,
+    local_remove_workbench_worktree,
     local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
     local_save_workbench_banner, local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
@@ -38,7 +39,8 @@ use crate::commands::workbench::{
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
     open_workbench_remote_project_for_state, owner_local_preflight_for_state,
     owner_local_safe_attach_for_state, paste_workbench_session_image_for_state,
-    push_workbench_worktree_for_state, remove_workbench_project_for_state,
+    pull_workbench_worktree_for_state, push_workbench_worktree_for_state,
+    remove_workbench_project_for_state,
     remove_workbench_worktree_for_state, repair_worktree_hook_failure_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
     resume_agent_session_for_state, save_workbench_text_file_for_state,
@@ -718,6 +720,43 @@ pub async fn push_worktree(
             })?))
         }
     }
+}
+
+/// 拉取远端设备本机 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 的 pull 动作需要在项目所在设备执行真实 git pull。
+///     Pull 与 mutation-outcome 同提交上线，始终返回 envelope（无 legacy raw DTO）。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 worktree 属于 local 项目；有 clientOperationId 则用它，否则 mint compat id；ledger+envelope。
+pub async fn pull_worktree(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteWorktreeReq>,
+) -> P2pResult<Json<Value>> {
+    ensure_remote_gateway_local_worktree_id(&state, &req.worktree_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.pull"))?;
+    let client_operation_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("compat-{}", uuid::Uuid::new_v4()));
+    let envelope = crate::commands::workbench::local_pull_workbench_worktree_with_ledger(
+        &state,
+        req.worktree_id,
+        client_operation_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.pull"))?;
+    Ok(Json(serde_json::to_value(envelope).map_err(|e| {
+        P2pError::from_app_error(
+            AppError::generic(e.to_string()),
+            &ctx,
+            "workbench.worktrees.pull",
+        )
+    })?))
 }
 
 /// 合并远端设备本机 worktree。
@@ -2229,6 +2268,31 @@ pub async fn mobile_push_worktree(
     let envelope = push_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.push"))?;
+    Ok(Json(envelope))
+}
+
+/// 手机端拉取本机或远端 worktree。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机端应能从 Git remote 拉取 owning device 上的当前分支更新。
+///
+/// Code Logic（这个函数做什么）:
+///     接收 worktreeId + clientOperationId，委托 commands 层 remote-aware pull helper。
+pub async fn mobile_pull_worktree(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteWorktreeReq>,
+) -> P2pResult<
+    Json<crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>>,
+> {
+    let client_operation_id = req
+        .client_operation_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("mobile-{}", uuid::Uuid::new_v4()));
+    let envelope = pull_workbench_worktree_for_state(&state, req.worktree_id, client_operation_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.pull"))?;
     Ok(Json(envelope))
 }
 

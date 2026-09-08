@@ -1063,7 +1063,8 @@
 
 .gitActionBar {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-2);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
@@ -1073,9 +1074,21 @@
 
 .gitActionStatus {
   min-width: 0;
+  flex: 1 1 12rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.gitActionStatus > :not(.gitActionBranch) {
+  flex: 0 0 auto;
+}
+
+.gitActionSync {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
   gap: var(--space-2);
 }
 
@@ -1092,6 +1105,7 @@
 .gitActionButtons {
   display: flex;
   flex-wrap: wrap;
+  flex: 0 1 auto;
   gap: var(--space-2);
 }
 

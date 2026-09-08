@@ -2,7 +2,7 @@
  * Workbench Git mutation 纯对账矩阵。
  *
  * Business Logic（为什么需要这个模块）:
- *   commit/push/merge/remove 在 timeout/network 下不能盲重放；前端用 intent + 权威后置条件
+ *   commit/push/pull/merge/remove 在 timeout/network 下不能盲重放；前端用 intent + 权威后置条件
  *   确认是否已生效，与 Rust `confirm_mutation` 语义对齐。
  *   ledger 终态（succeeded/failed）优先于稀疏 authority，避免 commit/push 永远卡 unknown。
  *
@@ -32,6 +32,7 @@ export type WorkbenchMutationReconcileResult =
  *   3. pending/claimed/running/null → 镜像 Rust confirm_mutation 矩阵：
  *      - commit: headTree==expectedTree 且 ((headParent==beforeHead && head!=beforeHead) 或 head==beforeHead)
  *      - push: remoteRefHead == localHead
+ *      - pull: head != beforeHead（already-up-to-date 保持 unknown）
  *      - merge: mainContainsSourceHead===true && sourceWorktreePresent===false
  *      - collectMerge: mainContainsSourceHead===true（主工作区留下，不要求源消失）
  *      - remove: worktreeIdentityPresent===false
@@ -73,6 +74,13 @@ export function reconcileWorkbenchMutation(
     }
     case 'push': {
       if (authorityAfter.remoteRefHead === intent.localHead) {
+        return 'confirmedSucceeded';
+      }
+      return 'unknown';
+    }
+    case 'pull': {
+      const head = authorityAfter.head ?? null;
+      if (head != null && head !== intent.beforeHead) {
         return 'confirmedSucceeded';
       }
       return 'unknown';

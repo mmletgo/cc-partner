@@ -8,7 +8,9 @@
 
 use crate::claude_cli;
 use crate::error::{AppError, AppErrorCategory};
-use crate::net::protocol::CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1;
+use crate::net::protocol::{
+    CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1, CAPABILITY_WORKBENCH_WORKTREE_PULL_V1,
+};
 use crate::state::AppState;
 use crate::workbench::hook_repair::{
     repair_local_worktree_hook_failure, RepairHookFailureDto, RepairHookFailureReq,
@@ -19,7 +21,8 @@ use crate::workbench::models::{
 };
 use crate::workbench::operation_ledger::{
     canonical_collect_merge_payload, canonical_commit_payload, canonical_merge_payload,
-    canonical_push_payload, canonical_remove_payload, hash_canonical_payload,
+    canonical_pull_payload, canonical_push_payload, canonical_remove_payload,
+    hash_canonical_payload,
     normalize_client_operation_id, run_claimed_mutation, run_claimed_mutation_with_hook,
     ClaimOutcome, CollectMergeSource, MutationIntent, MutationKind, MutationState,
     MutationTransportClass, WorkbenchHookFailureDto, WorkbenchMutationEnvelopeDto,
@@ -813,6 +816,132 @@ pub async fn push_workbench_worktree(
         return Ok(v);
     }
     push_workbench_worktree_for_state(state.inner(), worktree_id, client_operation_id).await
+}
+
+/// 带 ledger 的本机 pull。
+///
+/// Business Logic（为什么需要这个函数）:
+///     拉取前捕获 local/remote ref 与 local HEAD，timeout 后可确认 HEAD 是否前进。
+///
+/// Code Logic（这个函数做什么）:
+///     捕获 intent → claim → pull_branch → envelope。
+pub(crate) async fn local_pull_workbench_worktree_with_ledger(
+    state: &AppState,
+    worktree_id: String,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    state.runtime_role.require_owner()?;
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
+    let row = state
+        .workbench_worktree_repo
+        .get(&worktree_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+    let branch = row
+        .branch
+        .clone()
+        .or_else(|| workbench_git::current_branch(Path::new(&row.path)))
+        .ok_or_else(|| AppError::generic("当前 worktree 没有可拉取的分支"))?;
+    let (local_ref, remote_ref, before_head) =
+        workbench_git::push_ref_identity(Path::new(&row.path), &branch)?;
+    let intent = MutationIntent::Pull {
+        project_id: row.project_id.clone(),
+        worktree_id: worktree_id.clone(),
+        local_ref,
+        remote_ref,
+        before_head,
+    };
+    let payload = canonical_pull_payload(&worktree_id);
+    let payload_hash = hash_canonical_payload(&payload)?;
+    let ledger = WorkbenchMutationLedger::new(state.db.clone());
+    let claim = ledger
+        .claim(&op_id, MutationKind::Pull, &payload_hash, &intent)
+        .await?;
+    let row_for_exec = row.clone();
+    let branch_for_exec = branch.clone();
+    run_claimed_mutation(&ledger, &op_id, claim, move || async move {
+        workbench_git::pull_branch(Path::new(&row_for_exec.path), &branch_for_exec)?;
+        Ok(worktree_to_dto(&row_for_exec))
+    })
+    .await
+}
+
+/// 从 origin/upstream 拉取当前 worktree 分支（ledger + envelope）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote/local pull 共用 typed envelope。旧 peer 缺 `workbench.worktree-pull.v1` 时 unsupported。
+///
+/// Code Logic（这个函数做什么）:
+///     Local ledger；Remote 先 capability 门控再传播 envelope。
+pub(crate) async fn pull_workbench_worktree_for_state(
+    state: &AppState,
+    worktree_id: String,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    let op_id = normalize_client_operation_id(&client_operation_id)?;
+    match worktree_command_target(&worktree_id)? {
+        WorktreeCommandTarget::Remote {
+            device_id,
+            inner_worktree_id,
+        } => {
+            let context =
+                ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
+            let supports = client
+                .peer_supports_capability(&context.base_url, CAPABILITY_WORKBENCH_WORKTREE_PULL_V1)
+                .await
+                .unwrap_or(false);
+            if !supports {
+                return Err(AppError::unavailable(
+                    "capability_unsupported:workbench.worktree-pull.v1".to_string(),
+                ));
+            }
+            let envelope = client
+                .pull_worktree_envelope(
+                    &context.base_url,
+                    &context.inner_worktree_id,
+                    Some(op_id.clone()),
+                )
+                .await?;
+            Ok(map_remote_worktree_envelope(
+                &context.device_id,
+                &context.local_project_id,
+                envelope,
+            ))
+        }
+        WorktreeCommandTarget::Local(local_worktree_id) => {
+            local_pull_workbench_worktree_with_ledger(state, local_worktree_id, op_id).await
+        }
+    }
+}
+
+/// 从 origin/upstream 拉取当前 worktree 分支。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 Pull 返回 typed envelope。
+///
+/// Code Logic（这个命令做什么）:
+///     GuiClient mutation proxy；owner for_state。
+#[tauri::command]
+pub async fn pull_workbench_worktree(
+    state: State<'_, AppState>,
+    worktree_id: String,
+    client_operation_id: String,
+) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+    if let Some(v) = proxy_workbench_mutation_if_gui(
+        state.inner(),
+        "worktrees.pull",
+        serde_json::json!({
+            "worktreeId": worktree_id.clone(),
+            "clientOperationId": client_operation_id.clone(),
+        }),
+        &client_operation_id,
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    pull_workbench_worktree_for_state(state.inner(), worktree_id, client_operation_id).await
 }
 
 /// Business Logic（为什么需要这个函数）:

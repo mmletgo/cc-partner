@@ -9,6 +9,7 @@ import {
   buildGitGraphRows,
   canCommitWorktree,
   canMergeWorktree,
+  canPullWorktree,
   canPushWorktree,
   canRemoveWorktree,
   createWorktreeWithTerminalWindow,
@@ -164,6 +165,12 @@ function testGitHistoryActionAvailability(): void {
   if (canPushWorktree({ ...feature, branch: null }, null)) {
     throw new Error('expected missing branch to block push');
   }
+  if (!canPullWorktree(feature, null)) {
+    throw new Error('expected feature branch to allow pull');
+  }
+  if (canPullWorktree(localOnlyFeature, null)) {
+    throw new Error('expected local-only branch without remote to block pull');
+  }
   if (!canMergeWorktree(feature, null)) {
     throw new Error('expected non-main worktree to allow merge');
   }
@@ -208,6 +215,9 @@ function testUnknownMutationLockSharedAcrossMutationKinds(): void {
   }
   if (canPushWorktree(feature, null, commitLock)) {
     throw new Error('expected commit lock to disable sibling push');
+  }
+  if (canPullWorktree(feature, null, commitLock)) {
+    throw new Error('expected commit lock to disable sibling pull');
   }
   if (canMergeWorktree(feature, null, commitLock)) {
     throw new Error('expected commit lock to disable sibling merge');

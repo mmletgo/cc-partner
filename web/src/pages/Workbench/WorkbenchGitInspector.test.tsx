@@ -159,6 +159,7 @@ function renderGitInspector(
         clearMergeStagePanel={vi.fn()}
         loadGitHistory={vi.fn(async () => undefined)}
         handleCommitWorktree={vi.fn(async () => undefined)}
+        handlePullWorktree={vi.fn(async () => undefined)}
         handlePushWorktree={vi.fn(async () => undefined)}
         handleMergeWorktree={vi.fn(async () => undefined)}
         {...overrides}
@@ -182,6 +183,22 @@ describe('WorkbenchGitInspector graph presentation', () => {
     expect(screen.getByTitle('refs/remotes/origin/feature')).toBeTruthy();
     expect(screen.getByText('Bob')).toBeTruthy();
     expect(screen.getByText('c3d4e5f')).toBeTruthy();
+  });
+
+  test('renders Pull and Push on the status row between Clean and the branch name', () => {
+    renderGitInspector();
+    const pull = screen.getByRole('button', { name: 'Pull' });
+    const push = screen.getByRole('button', { name: 'Push' });
+    const commit = screen.getByRole('button', { name: 'Commit' });
+    const merge = screen.getByRole('button', { name: '合并' });
+
+    const statusRow = pull.parentElement?.parentElement;
+    expect(statusRow?.textContent).toContain('Clean');
+    expect(statusRow?.textContent).toContain('main');
+    expect(statusRow?.contains(pull)).toBe(true);
+    expect(statusRow?.contains(push)).toBe(true);
+    expect(statusRow?.contains(commit)).toBe(false);
+    expect(statusRow?.contains(merge)).toBe(false);
   });
 });
 

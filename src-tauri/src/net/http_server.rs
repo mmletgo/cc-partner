@@ -1226,6 +1226,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::push_worktree),
         )
         .route(
+            "/api/workbench/worktrees/pull",
+            post(workbench::pull_worktree),
+        )
+        .route(
             "/api/workbench/worktrees/merge",
             post(workbench::merge_worktree),
         )
@@ -1521,6 +1525,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/workbench/worktrees/push",
             post(workbench::mobile_push_worktree),
+        )
+        .route(
+            "/api/mobile/workbench/worktrees/pull",
+            post(workbench::mobile_pull_worktree),
         )
         .route(
             "/api/mobile/workbench/worktrees/merge",

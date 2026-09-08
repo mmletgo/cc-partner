@@ -8,14 +8,14 @@
  * Code Logic（这个组件做什么）:
  *   - 内部封装 gitGraphColorStyle / gitGraphWidth / gitGraphX 与 GIT_GRAPH_* 常量（随 Git 检查器一起从页面迁出）；
  *   - 参考 VS Code Source Control Graph 的紧凑泳道语法，渲染连续 lane、HEAD/merge 节点和内联 ref badge；
- *   - 渲染刷新/commit/push/merge 按钮、merge stage panel（失败后可关闭）和带 lane 颜色的 commit graph SVG；
+ *   - 渲染刷新/commit/pull/push/merge 按钮、merge stage panel（失败后可关闭）和带 lane 颜色的 commit graph SVG；
  *   - 暴露 WorkbenchGitInspectorProps 类型，所有数据均来自 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享。
  */
 import * as React from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
-import { EditIcon, SyncIcon, UploadIcon, XIcon } from '@/lib/icons';
+import { DownloadIcon, EditIcon, SyncIcon, UploadIcon, XIcon } from '@/lib/icons';
 import type {
   WorkbenchGitCommit,
   WorkbenchMergeStage,
@@ -27,6 +27,7 @@ import {
   buildGitGraphRows,
   canCommitWorktree,
   canMergeWorktree,
+  canPullWorktree,
   canPushWorktree,
   formatCommitRelativeTime,
   canDismissFailedMergeStages,
@@ -168,17 +169,18 @@ export interface WorkbenchGitInspectorProps {
   clearMergeStagePanel: () => void;
   loadGitHistory: () => Promise<void>;
   handleCommitWorktree: () => Promise<void>;
+  handlePullWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
   handleMergeWorktree: () => Promise<void>;
 }
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   Workbench 检查器的 "history" tab 需要一个独立的叶子视图，把 Git 提交图、commit/push/merge actions 和
+   *   Workbench 检查器的 "history" tab 需要一个独立的叶子视图，把 Git 提交图、commit/pull/push/merge actions 和
  *   merge stage panel 集中渲染。该组件由 WorkbenchInspector 在 history tab 时挂载；接收 controller 派生的 props。
  *
  * Code Logic（这个组件做什么）:
- *   渲染刷新/commit/push/merge 按钮 + merge stage panel（失败可关闭）+ commit graph SVG；不持有状态、不调用 workbenchApi。
+   *   渲染刷新/commit/pull/push/merge 按钮 + merge stage panel（失败可关闭）+ commit graph SVG；不持有状态、不调用 workbenchApi。
  */
 export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
   const { t } = useTranslation(['workbench']);
@@ -200,6 +202,7 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
     clearMergeStagePanel,
     loadGitHistory,
     handleCommitWorktree,
+    handlePullWorktree,
     handlePushWorktree,
     handleMergeWorktree,
   } = props;
@@ -277,6 +280,34 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
           <Pill tone={activeWorktreePillTone} dot>
             {activeWorktreeStatusLabel}
           </Pill>
+          <div className={styles.gitActionSync}>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<DownloadIcon />}
+              loading={worktreeBusy === 'pull'}
+              disabled={
+                !canPullWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
+                || remoteWriteDisabled
+              }
+              onClick={() => void handlePullWorktree()}
+            >
+              {t('workbench:worktrees.pull')}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<UploadIcon />}
+              loading={worktreeBusy === 'push'}
+              disabled={
+                !canPushWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
+                || remoteWriteDisabled
+              }
+              onClick={() => void handlePushWorktree()}
+            >
+              {t('workbench:worktrees.push')}
+            </Button>
+          </div>
           <span className={styles.gitActionBranch}>
             {activeWorktree?.branch ?? activeWorktree?.name ?? emptyValue}
           </span>
@@ -294,19 +325,6 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
             onClick={() => void handleCommitWorktree()}
           >
             {t('workbench:worktrees.commit')}
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={<UploadIcon />}
-            loading={worktreeBusy === 'push'}
-            disabled={
-              !canPushWorktree(activeWorktree, worktreeBusy, unknownMutationLock)
-              || remoteWriteDisabled
-            }
-            onClick={() => void handlePushWorktree()}
-          >
-            {t('workbench:worktrees.push')}
           </Button>
           <Button
             size="sm"

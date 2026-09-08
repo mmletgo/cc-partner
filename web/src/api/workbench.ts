@@ -248,6 +248,23 @@ export const workbenchApi = {
 
     /**
      * Business Logic（为什么需要这个函数）:
+     *   Pull 必须带 clientOperationId 并返回 envelope，禁止 timeout 后盲重放。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded pull_workbench_worktree → WorkbenchMutationEnvelope<WorkbenchWorktree>。
+     */
+    pull: (
+      worktreeId: string,
+      clientOperationId: string,
+    ): Promise<WorkbenchMutationEnvelope<WorkbenchWorktree>> =>
+      invokeDecoded(
+        'pull_workbench_worktree',
+        { worktreeId, clientOperationId },
+        workbenchMutationEnvelopeDecoder(workbenchWorktreeDecoder),
+      ),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
      *   Merge 返回 envelope 包装的阶段结果，uncertain transport 走 unknown。
      *
      * Code Logic（这个函数做什么）:
@@ -1047,6 +1064,7 @@ export type WorktreeGitApiScope = {
     | 'create'
     | 'commit'
     | 'push'
+    | 'pull'
     | 'merge'
     | 'remove'
     | 'getMutationOperation'

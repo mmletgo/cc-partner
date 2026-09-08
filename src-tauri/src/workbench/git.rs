@@ -1764,6 +1764,53 @@ fn truncate_for_commit_message(diff: &str) -> (String, bool) {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Git 历史 Pull 按钮要从 GitHub/origin 拉取当前分支的远端更新。
+///
+/// Code Logic（这个函数做什么）:
+///     已有 upstream 时执行普通 `git pull`；否则只选择 origin 执行 `git pull origin <branch>`。
+///     遵循用户本机 `pull.rebase` / `pull.ff` 配置，不强制 `--ff-only`。
+pub fn pull_branch(path: &Path, branch: &str) -> Result<(), AppError> {
+    if branch.trim().is_empty() {
+        return Err(AppError::generic("当前 worktree 没有可拉取的分支"));
+    }
+    match resolve_pull_target(path)? {
+        PushTarget::Upstream => {
+            run_git(path, &["pull"])?;
+        }
+        PushTarget::Remote(remote) => {
+            run_git(path, &["pull", &remote, branch])?;
+        }
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Pull 与 Push 共用 origin/upstream 选择，但错误文案必须说「拉取」而不是「推送」。
+///
+/// Code Logic（这个函数做什么）:
+///     已有 upstream → Upstream；否则仅在存在 origin 时返回 Remote("origin")。
+fn resolve_pull_target(path: &Path) -> Result<PushTarget, AppError> {
+    if has_upstream(path) {
+        return Ok(PushTarget::Upstream);
+    }
+
+    let remotes = list_remotes(path)?;
+    if remotes.is_empty() {
+        return Err(AppError::generic(
+            "当前分支没有 upstream，且 Git 仓库没有配置 origin remote，无法拉取。请先在项目目录执行 `git remote add origin <url>`，或设置当前分支 upstream 后重试。",
+        ));
+    }
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok(PushTarget::Remote("origin".to_string()));
+    }
+
+    Err(AppError::generic(format!(
+        "当前分支没有 upstream，且 Git 仓库没有 origin remote（现有 remote：{}），无法判断安全的拉取来源。请先设置当前分支 upstream，或添加 origin 后重试。",
+        remotes.join(", ")
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户完成 worktree commit 后，需要把对应分支推送到远端以便协作或备份。
 ///
 /// Code Logic（这个函数做什么）:
@@ -3164,6 +3211,83 @@ UU web/src/App.tsx
             &remote,
             &["rev-parse", "--verify", "refs/heads/feature/worktree-push"],
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     克隆仓库落后 origin 时，Workbench Pull 应快进到远端最新提交。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     真实仓库 + bare origin + clone；源仓再提交并 push 后对 clone 调 pull_branch，断言新文件到达。
+    #[test]
+    fn pull_branch_fast_forwards_from_origin() {
+        let root = temp_git_dir("workbench-pull-ff");
+        let repo = root.join("repo");
+        let remote = root.join("origin.git");
+        let clone = root.join("clone");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "main"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+        git_test_command(
+            &root,
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        git_test_command(
+            &repo,
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        git_test_command(&repo, &["push", "-u", "origin", "main"]);
+        git_test_command(
+            &root,
+            &[
+                "clone",
+                remote.to_string_lossy().as_ref(),
+                clone.to_string_lossy().as_ref(),
+            ],
+        );
+        git_test_command(&clone, &["config", "user.email", "test@example.com"]);
+        git_test_command(&clone, &["config", "user.name", "Workbench Test"]);
+
+        fs::write(repo.join("README.md"), "hello pulled\n").expect("write update");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "update"]);
+        git_test_command(&repo, &["push"]);
+
+        pull_branch(&clone, "main").expect("pull from origin");
+        let content = fs::read_to_string(clone.join("README.md")).expect("read clone readme");
+        assert_eq!(content, "hello pulled\n");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     本地未配置 remote 的仓库点 Pull 应得到可操作提示，而不是 Git fatal。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建无 remote 的真实仓库，断言 pull_branch 返回配置 origin/upstream 的业务错误。
+    #[test]
+    fn pull_branch_reports_missing_remote_before_git_fatal() {
+        let root = temp_git_dir("workbench-pull-no-remote");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "-b", "feature/local-only"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        git_test_command(&repo, &["add", "README.md"]);
+        git_test_command(&repo, &["commit", "-m", "initial"]);
+
+        let err = pull_branch(&repo, "feature/local-only").expect_err("missing remote should fail");
+        let message = err.to_string();
+        assert!(message.contains("没有配置 origin remote"));
+        assert!(message.contains("无法拉取"));
 
         let _ = fs::remove_dir_all(root);
     }

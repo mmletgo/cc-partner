@@ -881,6 +881,14 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
       if (envelope.kind === 'succeeded') return envelope.value;
       throw new Error('操作结果未知，请刷新后人工核对');
     },
+    pull: async (worktreeId) => {
+      const envelope = await workbenchHttp.git.pull({
+        worktreeId,
+        clientOperationId: createHttpOrchestratorClientRequestId(),
+      });
+      if (envelope.kind === 'succeeded') return envelope.value;
+      throw new Error('操作结果未知，请刷新后人工核对');
+    },
     merge: async (worktreeId) => {
       const envelope = await workbenchHttp.git.merge({
         worktreeId,
@@ -1171,6 +1179,12 @@ export interface WorkbenchHttpGitPushRequest {
   policy?: HttpRequestPolicy;
 }
 
+export interface WorkbenchHttpGitPullRequest {
+  worktreeId: string;
+  clientOperationId: string;
+  policy?: HttpRequestPolicy;
+}
+
 export interface WorkbenchHttpGitMergeRequest {
   worktreeId: string;
   clientOperationId: string;
@@ -1361,6 +1375,33 @@ export const workbenchHttp = {
       }
       return postWorkbenchMutationEnvelope(
         `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/push`,
+        {
+          worktreeId: request.worktreeId,
+          clientOperationId,
+        },
+        clientOperationId,
+        request.policy ?? { kind: 'longMutation' },
+        workbenchWorktreeDecoder,
+      );
+    },
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Mobile pull 超时后只能 unknown 对账，禁止 transport 自动重试。
+     *
+     * Code Logic（这个函数做什么）:
+     *   longMutation POST pull + envelope decoder。
+     */
+    pull: (
+      request: WorkbenchHttpGitPullRequest,
+    ): Promise<WorkbenchMutationEnvelope<WorkbenchWorktree>> => {
+      const clientOperationId = request.clientOperationId.trim();
+      if (!clientOperationId) {
+        return Promise.reject(
+          new OrchestratorRuntimeTransportError('clientOperationId 不能为空', 'protocol'),
+        );
+      }
+      return postWorkbenchMutationEnvelope(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/pull`,
         {
           worktreeId: request.worktreeId,
           clientOperationId,

@@ -2,7 +2,7 @@
  * Workbench worktree/Git 域 controller —— worktree 生命周期 + 创建表单/busy/error + Git 提交刷新 + merge 阶段。
  *
  * Business Logic（为什么需要这个 controller）:
- *   Workbench 的 worktree/Git 域负责 worktree 的 load/select/create/remove/commit/push/merge 全生命周期，
+ *   Workbench 的 worktree/Git 域负责 worktree 的 load/select/create/remove/commit/pull/push/merge 全生命周期，
  *   以及创建表单的 busy/error、Git 提交历史刷新、一键合并的阶段进度（merge-progress 事件）。这些状态和
  *   effect 原先散落在 Workbench.tsx 多处 state/useCallback/useEffect；本 controller 把它们集中持有，让
  *   Workbench.tsx 只负责调度与渲染。
@@ -22,7 +22,7 @@
  *   - 维护 activeProjectIdRef / activeWorktreeIdRef / 按项目 merge 快照与 operation ref，
  *     让普通 mutation 继续做 stale guard，同时不因切换工作区丢弃后台 merge 的阶段与终态。
  *   - 暴露 loadWorktrees / loadGitHistory / handleOpenCreateWorktree / handleCancelCreateWorktree /
- *     handleCreateWorktree / handleCommitWorktree / handlePushWorktree / handleMergeWorktree /
+ *     handleCreateWorktree / handleCommitWorktree / handlePullWorktree / handlePushWorktree / handleMergeWorktree /
  *     handleRemoveWorktree / clearMergeStagePanel 操作函数。
  *   - loadGitHistory 在拉提交前 best-effort 对账 worktree 列表（复用 list → sync_git_worktrees），
  *     让外部已清理的 worktree 从导航入口消失；对账失败不挡历史刷新。
@@ -85,7 +85,7 @@ import type { WorkbenchTerminalBridge } from './useWorkbenchTerminalController';
 /**
  * controller 用的 worktree 操作 busy 标记；与原 Workbench.tsx 内部使用的 string 标记保持一致。
  */
-export type WorktreeBusyKind = 'create' | 'commit' | 'push' | 'merge' | 'remove';
+export type WorktreeBusyKind = 'create' | 'commit' | 'push' | 'pull' | 'merge' | 'remove';
 
 /**
  * unknown 后保留的稳定 operation 锁。
@@ -149,6 +149,7 @@ export type WorkbenchWorktreeGitErrorKey =
   | 'createWorktree'
   | 'commitWorktree'
   | 'pushWorktree'
+  | 'pullWorktree'
   | 'mergeWorktree'
   | 'removeWorktree'
   | 'gitHistory'
@@ -241,6 +242,7 @@ export interface WorkbenchWorktreeGitControllerResult {
   handleCancelCreateWorktree: () => void;
   handleCreateWorktree: () => Promise<void>;
   handleCommitWorktree: () => Promise<void>;
+  handlePullWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
   handleMergeWorktree: () => Promise<void>;
   handleRemoveWorktree: (worktreeId: string) => Promise<void>;
@@ -796,7 +798,7 @@ export function useWorkbenchWorktreeGitController(
         }
       }
 
-      // commit/push：前端无 head 权威字段 → 保持 unknown（除非 ledger 终态，已在上方处理）。
+      // commit/push/pull：前端无 head 权威字段 → 保持 unknown（除非 ledger 终态，已在上方处理）。
       return reconcileWorkbenchMutation(intent, ledger, {});
     },
     [
@@ -1215,6 +1217,132 @@ export function useWorkbenchWorktreeGitController(
       markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(error, translateError('pushWorktree'), desktopUnavailableMessage),
+      );
+    } finally {
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
+    }
+  }, [
+    beginMutationOperation,
+    clearUnknownMutationLockForKind,
+    desktopUnavailableMessage,
+    displayErrorMessage,
+    inspectorTab,
+    invalidateGitHistoryRequests,
+    invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
+    isSettledCurrent,
+    loadGitHistory,
+    loadWorktrees,
+    markRequestFailure,
+    reconcileUnknownMutation,
+    remoteWriteDisabled,
+    resolveClientOperationId,
+    translateError,
+    unknownMutationLock,
+    api.worktrees,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户从 origin/upstream 拉取当前 worktree 分支更新；成功后刷新 worktree 状态与 Git 历史。
+   *
+   * Code Logic（这个函数做什么）:
+   *   与 handlePushWorktree 相同 envelope/context 守卫；pull 不产生 failedHook。
+   */
+  const handlePullWorktree = useCallback(async (): Promise<void> => {
+    const worktreeId = activeWorktreeIdRef.current;
+    if (!worktreeId) return;
+    if (remoteWriteDisabled) return;
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('pull')) return;
+    const settled = beginMutationOperation(projectId, worktreeId);
+    const clientOperationId = resolveClientOperationId(
+      'pull',
+      projectId,
+      worktreeId,
+      unknownMutationLock,
+    );
+    try {
+      setWorktreeBusy('pull');
+      setWorktreeError(null);
+      if (
+        unknownMutationLock
+        && unknownMutationLock.kind === 'pull'
+        && unknownMutationLock.clientOperationId === clientOperationId
+      ) {
+        const confirmed = await reconcileUnknownMutation(
+          clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('pull');
+          setWorktreeError(null);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('pull');
+          setWorktreeError(translateError('pullWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'pull',
+            projectId,
+            worktreeId,
+            clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+        return;
+      }
+
+      const envelope = await api.worktrees.pull(worktreeId, clientOperationId);
+      if (!isSettledCurrent(settled)) return;
+
+      if (isMutationSucceeded(envelope)) {
+        clearUnknownMutationLockForKind('pull');
+        invalidateWorktreeListRequests(projectId);
+        invalidateGitHistoryRequests(projectId, worktreeId);
+        await loadWorktrees(projectId);
+        if (!isSettledCurrent(settled)) return;
+        if (inspectorTab === 'history') await loadGitHistory();
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('pull');
+          setWorktreeError(null);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('pull');
+          setWorktreeError(translateError('pullWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'pull',
+            projectId,
+            worktreeId,
+            clientOperationId: envelope.clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+      }
+    } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      clearUnknownMutationLockForKind('pull');
+      markRequestFailure(projectId, error);
+      setWorktreeError(
+        displayErrorMessage(error, translateError('pullWorktree'), desktopUnavailableMessage),
       );
     } finally {
       if (isSettledCurrent(settled)) {
@@ -1722,6 +1850,7 @@ export function useWorkbenchWorktreeGitController(
     handleCancelCreateWorktree,
     handleCreateWorktree,
     handleCommitWorktree,
+    handlePullWorktree,
     handlePushWorktree,
     handleMergeWorktree,
     handleRemoveWorktree,

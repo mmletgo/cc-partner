@@ -217,7 +217,7 @@ export interface WorkbenchRepairHookFailureDto {
 }
 
 /** mutation 种类（ledger / wire 小写 token）。 */
-export type MutationKind = 'commit' | 'push' | 'merge' | 'remove';
+export type MutationKind = 'commit' | 'push' | 'pull' | 'merge' | 'remove';
 
 /** ledger 状态。 */
 export type MutationState = 'claimed' | 'running' | 'succeeded' | 'failed';
@@ -246,6 +246,14 @@ export type MutationIntent =
       localRef: string;
       remoteRef: string;
       localHead: string;
+    }
+  | {
+      kind: 'pull';
+      projectId: string;
+      worktreeId: string;
+      localRef: string;
+      remoteRef: string;
+      beforeHead: string;
     }
   | {
       kind: 'merge';

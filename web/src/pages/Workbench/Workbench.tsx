@@ -289,6 +289,7 @@ export function Workbench() {
     handleCancelCreateWorktree,
     handleCreateWorktree,
     handleCommitWorktree,
+    handlePullWorktree,
     handlePushWorktree,
     handleMergeWorktree,
     handleRemoveWorktree,
@@ -1163,7 +1164,7 @@ export function Workbench() {
             gitHistoryError, worktreeBusy, unknownMutationLock,
             hookRepair, handleRepairHookFailure, handleDismissHookFailure, handleRetryAfterRepair,
             mergeStages, clearMergeStagePanel, loadGitHistory,
-            handleCommitWorktree, handlePushWorktree, handleMergeWorktree,
+            handleCommitWorktree, handlePullWorktree, handlePushWorktree, handleMergeWorktree,
           }}
           notesInspector={{ activeProjectId, ...notes }}
         />

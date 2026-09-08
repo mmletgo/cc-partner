@@ -26,6 +26,7 @@ vi.mock('@/api/workbenchHttp', () => ({
     git: {
       commit: vi.fn(),
       push: vi.fn(),
+      pull: vi.fn(),
       merge: vi.fn(),
       remove: vi.fn(),
       getMutationOperation: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock('@/api/workbenchHttp', () => ({
       create: vi.fn(),
       commit: vi.fn(),
       push: vi.fn(),
+      pull: vi.fn(),
       merge: vi.fn(),
       remove: vi.fn(),
     },

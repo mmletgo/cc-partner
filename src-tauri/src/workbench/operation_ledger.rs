@@ -1,7 +1,7 @@
 //! workbench/operation_ledger.rs — Workbench Git mutation 持久化 operation ledger
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     commit/push/merge/remove 在 timeout/network 下不能盲重放；sidecar 必须先 claim 稳定
+//!     commit/push/pull/merge/remove 在 timeout/network 下不能盲重放；sidecar 必须先 claim 稳定
 //!     `client_operation_id`，持久化 canonical payload hash 与 reconciliation intent，供桌面/Mobile
 //!     在 unknown 后按 intent 精确对账。
 //!
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS workbench_mutation_operations (
 pub enum MutationKind {
     Commit,
     Push,
+    Pull,
     Merge,
     Remove,
 }
@@ -53,17 +54,19 @@ impl MutationKind {
         match self {
             Self::Commit => "commit",
             Self::Push => "push",
+            Self::Pull => "pull",
             Self::Merge => "merge",
             Self::Remove => "remove",
         }
     }
 
     /// Business Logic: 从 DB/wire 解析 kind。
-    /// Code Logic: 精确匹配四种 token，其它返回 Validation。
+    /// Code Logic: 精确匹配五种 token，其它返回 Validation。
     pub fn parse(raw: &str) -> Result<Self, AppError> {
         match raw {
             "commit" => Ok(Self::Commit),
             "push" => Ok(Self::Push),
+            "pull" => Ok(Self::Pull),
             "merge" => Ok(Self::Merge),
             "remove" => Ok(Self::Remove),
             other => Err(AppError::validation(format!(
@@ -322,6 +325,21 @@ pub enum MutationIntent {
         #[serde(rename = "localHead")]
         local_head: String,
     },
+    Pull {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "worktreeId")]
+        worktree_id: String,
+        /// 本地 ref 全名，如 refs/heads/feature/x。
+        #[serde(rename = "localRef")]
+        local_ref: String,
+        /// 期望远端 tracking ref 全名，如 refs/remotes/origin/feature/x。
+        #[serde(rename = "remoteRef")]
+        remote_ref: String,
+        /// 拉取前本地 HEAD。
+        #[serde(rename = "beforeHead")]
+        before_head: String,
+    },
     Merge {
         #[serde(rename = "projectId")]
         project_id: String,
@@ -374,6 +392,7 @@ impl MutationIntent {
         match self {
             Self::Commit { .. } => MutationKind::Commit,
             Self::Push { .. } => MutationKind::Push,
+            Self::Pull { .. } => MutationKind::Pull,
             Self::Merge { .. } | Self::CollectMerge { .. } => MutationKind::Merge,
             Self::Remove { .. } => MutationKind::Remove,
         }
@@ -385,6 +404,7 @@ impl MutationIntent {
         match self {
             Self::Commit { project_id, .. }
             | Self::Push { project_id, .. }
+            | Self::Pull { project_id, .. }
             | Self::Merge { project_id, .. }
             | Self::CollectMerge { project_id, .. }
             | Self::Remove { project_id, .. } => project_id,
@@ -397,6 +417,7 @@ impl MutationIntent {
         match self {
             Self::Commit { worktree_id, .. }
             | Self::Push { worktree_id, .. }
+            | Self::Pull { worktree_id, .. }
             | Self::CollectMerge { worktree_id, .. }
             | Self::Remove { worktree_id, .. } => worktree_id,
             Self::Merge {
@@ -771,6 +792,15 @@ pub fn canonical_push_payload(worktree_id: &str) -> Value {
     })
 }
 
+/// Business Logic: pull payload 仅 worktree 身份。
+/// Code Logic: kind+worktreeId。
+pub fn canonical_pull_payload(worktree_id: &str) -> Value {
+    serde_json::json!({
+        "kind": "pull",
+        "worktreeId": worktree_id,
+    })
+}
+
 /// Business Logic: merge payload 仅 worktree 身份。
 /// Code Logic: kind+worktreeId。
 pub fn canonical_merge_payload(worktree_id: &str) -> Value {
@@ -813,6 +843,7 @@ pub fn canonical_remove_payload(worktree_id: &str, force: bool) -> Value {
 /// Code Logic:
 ///     commit: (parent==beforeHead && tree==expectedTree) 或 (no-op: head==beforeHead && tree==expectedTree)
 ///     push: remote_ref_head == local_head
+///     pull: head != before_head（already-up-to-date 保持 unknown）
 ///     merge: main_contains_source_head==true && source_worktree_present==false
 ///     remove: worktree_identity_present==false
 #[allow(dead_code)] // N3 pure confirm 矩阵；生产前端对账，后端单测 + 后续 owner auto-confirm
@@ -847,6 +878,14 @@ pub fn confirm_mutation(
         }
         MutationIntent::Push { local_head, .. } => {
             if authority.remote_ref_head.as_deref() == Some(local_head.as_str()) {
+                MutationConfirmResult::ConfirmedSucceeded
+            } else {
+                MutationConfirmResult::Unknown
+            }
+        }
+        MutationIntent::Pull { before_head, .. } => {
+            // HEAD 相对拉取前前进 → 已纳入远端提交。already-up-to-date 与未执行无法区分，保持 unknown。
+            if authority.head.is_some() && authority.head.as_deref() != Some(before_head.as_str()) {
                 MutationConfirmResult::ConfirmedSucceeded
             } else {
                 MutationConfirmResult::Unknown
@@ -1335,6 +1374,34 @@ mod tests {
                 &push,
                 &MutationAuthoritySnapshot {
                     remote_ref_head: Some("zzz".into()),
+                    ..Default::default()
+                }
+            ),
+            MutationConfirmResult::Unknown
+        );
+
+        let pull = MutationIntent::Pull {
+            project_id: "p".into(),
+            worktree_id: "w".into(),
+            local_ref: "refs/heads/f".into(),
+            remote_ref: "refs/remotes/origin/f".into(),
+            before_head: "abc".into(),
+        };
+        assert_eq!(
+            confirm_mutation(
+                &pull,
+                &MutationAuthoritySnapshot {
+                    head: Some("def".into()),
+                    ..Default::default()
+                }
+            ),
+            MutationConfirmResult::ConfirmedSucceeded
+        );
+        assert_eq!(
+            confirm_mutation(
+                &pull,
+                &MutationAuthoritySnapshot {
+                    head: Some("abc".into()),
                     ..Default::default()
                 }
             ),

@@ -94,6 +94,22 @@ describe('workbenchApi mutation ledger envelope', () => {
     expect(result).toEqual(envelope);
   });
 
+  test('pull requires clientOperationId and decodes envelope', async () => {
+    mockInvoke.mockResolvedValueOnce({
+      kind: 'succeeded',
+      value: sampleWorktree,
+      clientOperationId: 'op-pull',
+    });
+    await expect(workbenchApi.worktrees.pull('wt-1', 'op-pull')).resolves.toMatchObject({
+      kind: 'succeeded',
+      clientOperationId: 'op-pull',
+    });
+    expect(mockInvoke).toHaveBeenCalledWith('pull_workbench_worktree', {
+      worktreeId: 'wt-1',
+      clientOperationId: 'op-pull',
+    });
+  });
+
   test('push/merge/remove require clientOperationId and decode envelopes', async () => {
     mockInvoke
       .mockResolvedValueOnce({

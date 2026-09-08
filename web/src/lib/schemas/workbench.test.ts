@@ -195,6 +195,26 @@ describe('workbench schemas', () => {
     });
   });
 
+  test('mutationIntentDecoder decodes pull', () => {
+    expect(
+      mutationIntentDecoder.decode({
+        kind: 'pull',
+        projectId: 'p1',
+        worktreeId: 'wt-1',
+        localRef: 'refs/heads/feature',
+        remoteRef: 'refs/remotes/origin/feature',
+        beforeHead: 'abc',
+      }),
+    ).toEqual({
+      kind: 'pull',
+      projectId: 'p1',
+      worktreeId: 'wt-1',
+      localRef: 'refs/heads/feature',
+      remoteRef: 'refs/remotes/origin/feature',
+      beforeHead: 'abc',
+    });
+  });
+
   test('mutationIntentDecoder still decodes feature merge', () => {
     expect(
       mutationIntentDecoder.decode({

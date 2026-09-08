@@ -315,6 +315,7 @@ export function workbenchMutationEnvelopeDecoder<T>(
 const mutationKindDecoder: Decoder<MutationKind> = enumDecoder('MutationKind', [
   'commit',
   'push',
+  'pull',
   'merge',
   'remove',
 ] as const);
@@ -331,7 +332,7 @@ const mutationStateDecoder: Decoder<MutationState> = enumDecoder('MutationState'
  *   ledger intent 是 unknown 后对账唯一来源，kind 错位不得进入矩阵。
  *
  * Code Logic（这个 decoder 做什么）:
- *   tag=kind 联合解码 commit/push/merge/collectMerge/remove intent 字段。
+ *   tag=kind 联合解码 commit/push/pull/merge/collectMerge/remove intent 字段。
  */
 export const mutationIntentDecoder: Decoder<MutationIntent> = unionDecoder<MutationIntent>(
   'MutationIntent',
@@ -350,6 +351,14 @@ export const mutationIntentDecoder: Decoder<MutationIntent> = unionDecoder<Mutat
       localRef: stringDecoder,
       remoteRef: stringDecoder,
       localHead: stringDecoder,
+    }),
+    objectDecoder('MutationIntentPull', {
+      kind: literalDecoder('pull'),
+      projectId: stringDecoder,
+      worktreeId: stringDecoder,
+      localRef: stringDecoder,
+      remoteRef: stringDecoder,
+      beforeHead: stringDecoder,
     }),
     objectDecoder('MutationIntentMerge', {
       kind: literalDecoder('merge'),

@@ -620,6 +620,30 @@ impl RemoteWorkbenchClient {
         .await
     }
 
+    /// 拉取远端 worktree，解析 mutation envelope。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     新 peer 返回 succeeded|unknown envelope。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST pull 并反序列化 WorkbenchMutationEnvelopeDto。
+    pub async fn pull_worktree_envelope(
+        &self,
+        base_url: &str,
+        worktree_id: &str,
+        client_operation_id: Option<String>,
+    ) -> Result<WorkbenchMutationEnvelopeDto<WorkbenchWorktreeDto>, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/worktrees/pull"),
+            &RemoteWorktreeReq {
+                worktree_id: worktree_id.to_string(),
+                client_operation_id,
+            },
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
     /// 合并远端本机 worktree。
     ///
     /// Business Logic（为什么需要这个函数）:

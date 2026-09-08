@@ -58,6 +58,15 @@ const pushIntent: MutationIntent = {
   localHead: 'bbb',
 };
 
+const pullIntent: MutationIntent = {
+  kind: 'pull',
+  projectId: 'proj',
+  worktreeId: 'wt',
+  localRef: 'refs/heads/feature',
+  remoteRef: 'refs/remotes/origin/feature',
+  beforeHead: 'bbb',
+};
+
 const mergeIntent: MutationIntent = {
   kind: 'merge',
   projectId: 'proj',
@@ -128,6 +137,18 @@ describe('reconcileWorkbenchMutation', () => {
       name: 'push: remote mismatch stays unknown',
       intent: pushIntent,
       authority: { remoteRefHead: 'zzz' },
+      expected: 'unknown',
+    },
+    {
+      name: 'pull: head moved from beforeHead',
+      intent: pullIntent,
+      authority: { head: 'ccc' },
+      expected: 'confirmedSucceeded',
+    },
+    {
+      name: 'pull: same head stays unknown',
+      intent: pullIntent,
+      authority: { head: 'bbb' },
       expected: 'unknown',
     },
     {

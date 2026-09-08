@@ -69,6 +69,7 @@ export interface WorkbenchTransport {
     ) => Promise<WorkbenchWorktree>;
     commit: (worktreeId: string, message?: string | null) => Promise<WorkbenchWorktree>;
     push: (worktreeId: string) => Promise<WorkbenchWorktree>;
+    pull: (worktreeId: string) => Promise<WorkbenchWorktree>;
     merge: (worktreeId: string) => Promise<WorkbenchMergeResult>;
     remove: (worktreeId: string, force?: boolean) => Promise<{ ok: boolean; worktreeId: string }>;
   };
@@ -267,6 +268,11 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     },
     push: async (worktreeId) => {
       const envelope = await workbenchApi.worktrees.push(worktreeId, crypto.randomUUID());
+      if (envelope.kind === 'succeeded') return envelope.value;
+      throw new Error('操作结果未知，请刷新后人工核对');
+    },
+    pull: async (worktreeId) => {
+      const envelope = await workbenchApi.worktrees.pull(worktreeId, crypto.randomUUID());
       if (envelope.kind === 'succeeded') return envelope.value;
       throw new Error('操作结果未知，请刷新后人工核对');
     },

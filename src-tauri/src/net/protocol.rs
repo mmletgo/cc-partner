@@ -382,6 +382,17 @@ pub const CAPABILITY_WORKBENCH_FS_CREATE_DIR_V1: &str = "workbench.fs.create-dir
 ///     字符串常量，列入 `server_protocol_info()`；与 repair-hook-failure 路由原子上线。
 pub const CAPABILITY_WORKBENCH_HOOK_REPAIR_V1: &str = "workbench.hook-repair.v1";
 
+/// 能力 token：v1 Workbench worktree pull
+/// （`POST /api/workbench/worktrees/pull`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     远端 worktree 的 Pull 必须在 owning device 执行 `git pull`；
+///     旧 peer 缺失时 unsupported，不得在控制端对本机仓库误 pull。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 pull 路由原子上线。
+pub const CAPABILITY_WORKBENCH_WORKTREE_PULL_V1: &str = "workbench.worktree-pull.v1";
+
 /// 能力 token：Agent Hub LAN source-push 三阶段协议
 /// （`POST /api/agent-hub/push/prepare`、`PUT .../objects/:hash`、`POST .../commit`）。
 ///
@@ -552,6 +563,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1.to_string(),
             CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1.to_string(),
             CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
+            CAPABILITY_WORKBENCH_WORKTREE_PULL_V1.to_string(),
         ],
     }
 }
@@ -736,6 +748,7 @@ mod tests {
                 "workbench.terminal-paste-image.v1".to_string(),
                 "workbench.wordgame-extract.v1".to_string(),
                 "workbench.workspace-safe-restore.v1".to_string(),
+                "workbench.worktree-pull.v1".to_string(),
             ]
         );
         assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
@@ -767,6 +780,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_WORKTREE_PULL_V1));
     }
 
     /// Business Logic（为什么需要这个测试）:

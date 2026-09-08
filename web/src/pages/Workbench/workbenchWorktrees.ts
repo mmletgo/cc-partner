@@ -155,7 +155,7 @@ export function worktreeStatusTone(worktree: WorkbenchWorktree): WorktreeTone {
  *   kind 为锁定的 mutation 种类；其它字段可选，can* 只按 kind 判断。
  */
 export type WorktreeUnknownMutationLockLike = {
-  kind: 'commit' | 'push' | 'merge' | 'remove';
+  kind: 'commit' | 'push' | 'pull' | 'merge' | 'remove';
 } | null;
 
 /**
@@ -166,7 +166,7 @@ export type WorktreeUnknownMutationLockLike = {
  *   lock 为空时放行；非空时仅当 kind 匹配 actionKind 才放行。
  */
 export function isWorktreeMutationKindAllowedByUnknownLock(
-  actionKind: 'commit' | 'push' | 'merge' | 'remove',
+  actionKind: 'commit' | 'push' | 'pull' | 'merge' | 'remove',
   unknownMutationLock: WorktreeUnknownMutationLockLike = null,
 ): boolean {
   if (!unknownMutationLock) return true;
@@ -208,6 +208,25 @@ export function canPushWorktree(
     Boolean(activeWorktree?.branch && activeWorktree.status.canPush)
     && worktreeBusy === null
     && isWorktreeMutationKindAllowedByUnknownLock('push', unknownMutationLock)
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Git 历史工具条需要判断当前 worktree 是否可以 pull，避免本地未发布仓库显示可点击 Pull。
+ *
+ * Code Logic（这个函数做什么）:
+ *   与 Push 相同的 remote 可用性（后端 canPush = 有 upstream/origin）、非 busy，且 unknown 锁允许 pull。
+ */
+export function canPullWorktree(
+  activeWorktree: WorkbenchWorktree | null,
+  worktreeBusy: string | null,
+  unknownMutationLock: WorktreeUnknownMutationLockLike = null,
+): boolean {
+  return (
+    Boolean(activeWorktree?.branch && activeWorktree.status.canPush)
+    && worktreeBusy === null
+    && isWorktreeMutationKindAllowedByUnknownLock('pull', unknownMutationLock)
   );
 }
 

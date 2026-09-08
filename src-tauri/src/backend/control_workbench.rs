@@ -311,6 +311,17 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(item)?)
         }
+        "worktrees.pull" => {
+            let worktree_id = required_string(&payload, "worktreeId")?;
+            let client_operation_id = required_string(&payload, "clientOperationId")?;
+            let item = workbench::pull_workbench_worktree_for_state(
+                state,
+                worktree_id,
+                client_operation_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
         "worktrees.merge" => {
             let worktree_id = required_string(&payload, "worktreeId")?;
             let client_operation_id = required_string(&payload, "clientOperationId")?;

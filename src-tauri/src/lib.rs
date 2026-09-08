@@ -668,6 +668,7 @@ pub fn run() {
             workbench_cmd::list_workbench_worktrees,
             workbench_cmd::create_workbench_worktree,
             workbench_cmd::commit_workbench_worktree,
+            workbench_cmd::pull_workbench_worktree,
             workbench_cmd::push_workbench_worktree,
             workbench_cmd::merge_workbench_worktree,
             workbench_cmd::remove_workbench_worktree,

@@ -232,6 +232,7 @@ fn workbench_control_timeout(op: &str) -> Option<Duration> {
         "worktrees.merge" => None,
         "worktrees.commit"
         | "worktrees.push"
+        | "worktrees.pull"
         | "worktrees.create"
         | "claude.resume"
         | "files.open"
