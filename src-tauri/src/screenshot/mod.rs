@@ -10,13 +10,14 @@
 //!     - `capture::region_to_png_base64`：选区快照编码 PNG base64（前端 canvas 背景）。
 //!     - `capture::save_clipboard_from_png`：PNG data URL 解码写剪贴板。
 //!     - `clipboard`：Linux 显示套接字探测、X11 失败分类、Agent 贴图 Ctrl+V / 按身份表路径语法回退。
-//!     - `overlay::start_region_capture`：枚举去重后的显示器，每个唯一屏创建一个透明置顶全屏窗口。
-//!     - `overlay::close_all_overlays`：关闭所有选区窗口。
+//!     - `overlay::start_region_capture`：枚举去重后的显示器，每屏复用或创建一个透明置顶全屏窗口
+//!       （macOS 26/27 WebKit「display link × 页面销毁」竞态 SIGSEGV 规避：窗口跨会话复用）。
+//!     - `overlay::hide_all_overlays`：隐藏（不销毁）所有选区窗口，留待下轮复用。
 
 pub mod capture;
 pub mod clipboard;
 pub mod overlay;
 
 /// 选区窗口 label 前缀；`overlay::start_region_capture` 按 `screenshot-overlay-{i}` 命名每个窗口，
-/// `close_all_overlays` 与 `commands::screenshot` 关闭时按此前缀匹配。
+/// `hide_all_overlays` 与 `commands::screenshot` 隐藏时按此前缀匹配。
 pub const OVERLAY_LABEL_PREFIX: &str = "screenshot-overlay-";

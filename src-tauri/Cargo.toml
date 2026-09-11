@@ -130,8 +130,19 @@ sha2 = "0.10"
 [profile.dev]
 debug = "line-tables-only"
 
+# macOS 27 工具链坑（rust-lang/rust#157750）：cargo 在 debuginfo 关闭时会隐式传
+# `-Cstrip=debuginfo`，该 strip 路径经 Xcode 27 链接器产出的 dylib 符号字符串池（stroff）
+# 不保证 8 字节对齐，macOS 27 dyld 直接拒载（`mis-aligned LINKEDIT string pool`），
+# proc-macro dylib（如 sqlx_macros）加载失败导致编译报错。显式 `strip = "none"` 绕开：
+# debug=false 本就没有 DWARF 可 strip，关掉显式 strip 无体积代价。修复进 rustc 1.98+ 后可移除。
 [profile.dev.package."*"]
 debug = false
+strip = "none"
+
+# release 同理：默认 debug=false 也会被 cargo 隐式 strip，显式关闭避免主二进制/proc-macro
+# dylib 被 macOS 27 dyld 拒载。
+[profile.release]
+strip = "none"
 
 # 完整变量级调试档（按需）：继承 dev 的其余设置，仅恢复完整 debug info。
 [profile.debugging]

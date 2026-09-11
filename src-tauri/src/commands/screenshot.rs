@@ -4,11 +4,12 @@
 //!     前端通过 invoke 触发区域截图流程：开选区窗口、进编辑模式取选区快照、确认后写剪贴板、取消。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `start_region_capture(app)`：每屏建透明置顶选区窗口。
+//!     - `start_region_capture(app)`：每屏复用或新建透明置顶选区窗口（macOS 27 WebKit
+//!       「display link × 页面销毁」竞态 SIGSEGV 规避：窗口跨会话复用，不再每次销毁）。
 //!     - `get_region_snapshot(display, x, y, w, h, dpr)`：抓该屏纯桌面选区，返回 PNG base64。
-//!     - `save_clipboard_image(app, dataUrl)`：把前端合成的 PNG data URL 写剪贴板 + 关全部 overlay。
+//!     - `save_clipboard_image(app, dataUrl)`：把前端合成的 PNG data URL 写剪贴板 + 隐藏全部 overlay。
 //!     - `read_clipboard_image()`：GUI 进程读取 OS 剪贴板图片，返回 PNG data URL 或 null。
-//!     - `cancel_region_capture(app)`：emit `region-capture:result` {cancelled:true}，关全部 overlay。
+//!     - `cancel_region_capture(app)`：emit `region-capture:result` {cancelled:true}，隐藏全部 overlay。
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
@@ -43,16 +44,18 @@ pub async fn get_region_snapshot(
     capture::region_to_png_base64(display, x, y, w, h, dpr)
 }
 
-/// 把前端 canvas 合成的「桌面+标注」PNG 写入剪贴板，并关闭所有 overlay。
+/// 把前端 canvas 合成的「桌面+标注」PNG 写入剪贴板，并结束本次选区会话（隐藏所有 overlay）。
 ///
 /// Business Logic: 用户点「确认」后，前端把 canvas.toDataURL（桌面选区 + 标注）传过来，
-///     Rust 解码写剪贴板（可直接粘贴到 Claude Code），成功后关 overlay。
-/// Code Logic: `capture::save_clipboard_from_png` → emit `region-capture:result` {ok:true} → `overlay::close_all_overlays`。
+///     Rust 解码写剪贴板（可直接粘贴到 Claude Code），成功后 overlay 从屏幕消失。
+/// Code Logic: `capture::save_clipboard_from_png` → emit `region-capture:result` {ok:true} →
+///     `overlay::hide_all_overlays`（隐藏而非销毁：macOS 27 WebKit「display link × 页面销毁」
+///     竞态 SIGSEGV 规避，窗口留待下次截图复用）。
 #[tauri::command]
 pub async fn save_clipboard_image(app: AppHandle, data_url: String) -> Result<(), AppError> {
     capture::save_clipboard_from_png(&data_url)?;
     let _ = app.emit("region-capture:result", json!({ "ok": true }));
-    overlay::close_all_overlays(&app);
+    overlay::hide_all_overlays(&app);
     Ok(())
 }
 
@@ -71,11 +74,13 @@ pub fn read_clipboard_image() -> Result<Option<String>, AppError> {
 
 /// 取消区域截图。
 ///
-/// Business Logic: 用户在选区窗口按 ESC / 右键 / 点工具条「取消」，或框选选区过小，要中止本次截图流程并关闭全部 overlay。
-/// Code Logic: emit `region-capture:result` {cancelled:true}（前端据此清状态）→ `overlay::close_all_overlays`（按 label 前缀 `screenshot-overlay-` 关闭所有选区窗口）。
+/// Business Logic: 用户在选区窗口按 ESC / 右键 / 点工具条「取消」，或框选选区过小，要中止本次截图流程并让全部 overlay 从屏幕消失。
+/// Code Logic: emit `region-capture:result` {cancelled:true}（前端据此清状态）→ `overlay::hide_all_overlays`
+///     （按 label 前缀 `screenshot-overlay-` 隐藏所有选区窗口而非销毁：macOS 27 WebKit
+///     「display link × 页面销毁」竞态 SIGSEGV 规避，窗口留待下次截图复用）。
 #[tauri::command]
 pub async fn cancel_region_capture(app: AppHandle) -> Result<(), AppError> {
     let _ = app.emit("region-capture:result", json!({ "cancelled": true }));
-    overlay::close_all_overlays(&app);
+    overlay::hide_all_overlays(&app);
     Ok(())
 }
