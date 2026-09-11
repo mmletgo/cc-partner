@@ -64,7 +64,7 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
         currentWindow: { label: 'screenshot-overlay' },
         currentWebview: { windowLabel: 'screenshot-overlay', label: 'screenshot-overlay' },
       },
-      invoke: async (cmd: string, _args?: Record<string, unknown>) => {
+      invoke: async (cmd: string) => {
         if (cmd === 'plugin:event|listen') return 1;
         if (cmd === 'plugin:event|unlisten') return undefined;
         if (cmd === 'get_lan_disclosure_status') {

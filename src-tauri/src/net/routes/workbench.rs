@@ -30,8 +30,7 @@ use crate::commands::workbench::{
     local_list_workbench_git_commits, local_list_workbench_sessions,
     local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
     local_paste_workbench_session_image, local_preview_workbench_html_asset,
-    local_preview_workbench_sqlite, local_push_workbench_worktree,
-    local_remove_workbench_worktree,
+    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
     local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
     local_save_workbench_banner, local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
@@ -40,12 +39,12 @@ use crate::commands::workbench::{
     open_workbench_remote_project_for_state, owner_local_preflight_for_state,
     owner_local_safe_attach_for_state, paste_workbench_session_image_for_state,
     pull_workbench_worktree_for_state, push_workbench_worktree_for_state,
-    remove_workbench_project_for_state,
-    remove_workbench_worktree_for_state, repair_worktree_hook_failure_for_state,
-    replay_workbench_session_for_state, resize_workbench_session_for_state,
-    resume_agent_session_for_state, save_workbench_text_file_for_state,
-    search_agent_sessions_for_state, split_workbench_pane_for_state,
-    switch_workbench_pane_for_state, zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
+    remove_workbench_project_for_state, remove_workbench_worktree_for_state,
+    repair_worktree_hook_failure_for_state, replay_workbench_session_for_state,
+    resize_workbench_session_for_state, resume_agent_session_for_state,
+    save_workbench_text_file_for_state, search_agent_sessions_for_state,
+    split_workbench_pane_for_state, switch_workbench_pane_for_state, zoom_workbench_pane_for_state,
+    WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
 use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
