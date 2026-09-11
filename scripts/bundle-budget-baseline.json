@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "commit": "b32cb3d6",
-  "capturedAt": "2026-09-02T12:31:00.000Z",
+  "commit": "d45335bd",
+  "capturedAt": "2026-09-11T20:18:35.794Z",
   "finalTargets": {
     "mainInitialGzipBytes": 327680,
     "mobileInitialGzipBytes": 286720,
@@ -12,9 +12,9 @@
   "metrics": {
     "mainInitialGzipBytes": 261449,
     "mobileInitialGzipBytes": 241237,
-    "maxLazyChunkGzipBytes": 150216,
+    "maxLazyChunkGzipBytes": 150176,
     "totalRuntimeJsGzipBytes": 1210130,
     "sourcemapRawBytes": 0,
-    "editorEntryLoadedGzipBytes": 34064
+    "editorEntryLoadedGzipBytes": 34050
   }
 }
