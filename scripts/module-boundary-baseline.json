@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-05T10:58:49.040Z",
+  "generatedAt": "2026-09-11T19:45:00.862Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -23,7 +23,7 @@
       "lines": 2716
     },
     "src-tauri/src/backend/control_client.rs": {
-      "lines": 4182
+      "lines": 4184
     },
     "src-tauri/src/backend/logging.rs": {
       "lines": 2516
@@ -32,13 +32,13 @@
       "lines": 2626
     },
     "src-tauri/src/commands/workbench/git.rs": {
-      "lines": 4655
+      "lines": 4783
     },
     "src-tauri/src/config.rs": {
       "lines": 2536
     },
     "src-tauri/src/net/http_server.rs": {
-      "lines": 2563
+      "lines": 2571
     },
     "src-tauri/src/net/peer_client.rs": {
       "lines": 3109
@@ -47,7 +47,7 @@
       "lines": 2618
     },
     "src-tauri/src/net/routes/workbench.rs": {
-      "lines": 3569
+      "lines": 3632
     },
     "src-tauri/src/orchestrator/delivery.rs": {
       "lines": 3034
@@ -64,10 +64,10 @@
       }
     },
     "src-tauri/src/workbench/git.rs": {
-      "lines": 4811
+      "lines": 4935
     },
     "src-tauri/src/workbench/remote_client.rs": {
-      "lines": 3277
+      "lines": 3301
     },
     "src-tauri/src/workbench/remote_events.rs": {
       "lines": 4804
@@ -84,10 +84,15 @@
       "lines": 1293
     },
     "web/src/api/workbench.ts": {
-      "lines": 1081
+      "lines": 1099
     },
     "web/src/api/workbenchHttp.ts": {
-      "lines": 1475
+      "lines": 1516,
+      "exception": {
+        "owner": "module-maintainers",
+        "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
+        "expiresAt": "2026-12-10"
+      }
     },
     "web/src/hooks/useWorkbenchHttpEvents.ts": {
       "lines": 1438
@@ -99,7 +104,7 @@
       "lines": 1347
     },
     "web/src/lib/types/workbench.ts": {
-      "lines": 1014
+      "lines": 1022
     },
     "web/src/mobile/components/MobileTerminalPanel.tsx": {
       "lines": 2610,
@@ -173,7 +178,7 @@
       }
     },
     "web/src/pages/Workbench/controllers/useWorkbenchWorktreeGitController.ts": {
-      "lines": 1733,
+      "lines": 1862,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
@@ -181,7 +186,7 @@
       }
     },
     "web/src/pages/Workbench/Workbench.tsx": {
-      "lines": 1182
+      "lines": 1183
     }
   }
 }
