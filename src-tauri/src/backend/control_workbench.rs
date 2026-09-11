@@ -865,6 +865,20 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(item)?)
         }
+        "prompt_optimizer.stream" => {
+            let prompt = required_string(&payload, "prompt")?;
+            let working_directory = optional_string(&payload, "workingDirectory");
+            let target_language = required_string(&payload, "targetLanguage")?;
+            let session_id = required_string(&payload, "sessionId")?;
+            crate::commands::prompt_optimizer::stream_optimize_prompt_to_workbench_session_for_state(
+                state,
+                prompt,
+                working_directory,
+                target_language,
+                session_id,
+            )
+            .await
+        }
 
         // ---- project notes（owning device SQLite；remote 由 for_state P2P）----
         "notes.get" => {
@@ -1379,6 +1393,19 @@ mod tests {
         assert!(
             src.contains("\"agent_ledger.export_token_stats\" =>"),
             "dispatch_workbench_op 必须注册 agent_ledger.export_token_stats"
+        );
+    }
+
+    /// GUI Prompt 优化写入终端必须走 sidecar owner；缺 arm 会返回
+    /// 「未知 workbench control op: prompt_optimizer.stream」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op。
+    #[test]
+    fn dispatch_recognizes_prompt_optimizer_stream() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"prompt_optimizer.stream\" =>"),
+            "dispatch_workbench_op 必须注册 prompt_optimizer.stream"
         );
     }
 }

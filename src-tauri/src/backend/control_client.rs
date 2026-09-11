@@ -234,7 +234,7 @@ fn workbench_control_timeout(op: &str) -> Option<Duration> {
         | "worktrees.push"
         | "worktrees.pull"
         | "worktrees.create"
-        | "claude.resume"
+        | "claude.resume" | "prompt_optimizer.stream"
         | "files.open"
         | "files.save_text"
         | "agent_ledger.export_token_stats"

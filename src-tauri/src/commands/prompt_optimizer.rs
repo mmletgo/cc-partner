@@ -8,7 +8,7 @@
 //!     固定走 Claude Code CLI（忽略历史配置里的 grok）；输出 DTO 不变；Github 热门解说仍走 Claude。
 
 use crate::claude_cli;
-use crate::commands::workbench::device_base_url;
+use crate::commands::workbench::{device_base_url, proxy_workbench_if_gui};
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::{
@@ -248,7 +248,8 @@ pub(crate) async fn stream_optimize_prompt_to_workbench_session_for_state(
 ///     Workbench 快捷键小组件需要在当前 Claude Code/终端输入位置下方优化 prompt，并把生成内容边生成边填入当前终端。
 ///
 /// Code Logic（这个命令做什么）:
-///     Tauri command 只解包 State 和参数，再委托 mobile HTTP route 也能复用的 for_state helper。
+///     GuiClient 经 control `prompt_optimizer.stream` 代理到 sidecar owner（PTY 不在 GUI 进程）；
+///     owner / 测试宿主再委托 mobile HTTP 也能复用的 for_state helper。
 #[tauri::command]
 pub async fn stream_optimize_prompt_to_workbench_session(
     state: State<'_, AppState>,
@@ -257,6 +258,20 @@ pub async fn stream_optimize_prompt_to_workbench_session(
     target_language: String,
     session_id: String,
 ) -> Result<Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "prompt_optimizer.stream",
+        serde_json::json!({
+            "prompt": prompt.clone(),
+            "workingDirectory": working_directory.clone(),
+            "targetLanguage": target_language.clone(),
+            "sessionId": session_id.clone(),
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
     stream_optimize_prompt_to_workbench_session_for_state(
         state.inner(),
         prompt,
@@ -903,9 +918,8 @@ mod tests {
         assert!(!en.contains("Simplified Chinese"));
         for instruction in [zh, en] {
             assert!(instruction.contains("Do not generate a second language version"));
-            assert!(instruction.contains(
-                "Do not suggest specific technologies, frameworks, or libraries"
-            ));
+            assert!(instruction
+                .contains("Do not suggest specific technologies, frameworks, or libraries"));
             assert!(instruction.contains("Do not request guides, how-tos, or tutorials."));
         }
     }
@@ -959,6 +973,19 @@ mod tests {
         assert_eq!(
             result.acceptance_criteria,
             "用户可手动填写，也可让 AI 完善三字段",
+        );
+    }
+
+    /// GUI 进程不持有 PTY；流式优化必须先代理到 sidecar，否则 write_input 会报「工作台会话不存在」。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码合同：Tauri command 经 `proxy_workbench_if_gui("prompt_optimizer.stream")` 代理。
+    #[test]
+    fn stream_command_proxies_gui_to_sidecar_owner() {
+        let src = include_str!("prompt_optimizer.rs");
+        assert!(
+            src.contains("state.inner(),\n        \"prompt_optimizer.stream\","),
+            "GUI 流式优化必须 proxy_workbench_if_gui(state, prompt_optimizer.stream)"
         );
     }
 }

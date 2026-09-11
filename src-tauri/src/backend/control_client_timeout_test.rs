@@ -39,6 +39,21 @@ fn workbench_control_timeout_extends_token_stats_export() {
     );
 }
 
+/// Workbench Prompt 优化会跑最长 180s 的 Claude CLI，GUI→sidecar 不能套 15s mutation 超时。
+///
+/// Business Logic（为什么需要这个测试）:
+///     桌面 GUI 必须把流式优化代理到 sidecar owner；默认 15s 会把仍在生成的 CLI 误报 uncertain。
+///
+/// Code Logic（这个测试做什么）:
+///     `prompt_optimizer.stream` 使用 360s，与其它 Claude 长操作一致。
+#[test]
+fn workbench_control_timeout_extends_prompt_optimizer_stream() {
+    assert_eq!(
+        workbench_control_timeout("prompt_optimizer.stream"),
+        Some(Duration::from_secs(360))
+    );
+}
+
 /// Business Logic（为什么需要这个测试）:
 ///     GUI→sidecar 的 merge 会包住 Claude 解冲突；墙钟 360s 会在 CLI 仍有输出时误报超时。
 ///
