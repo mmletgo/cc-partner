@@ -1345,3 +1345,190 @@ fn relay_cli_offline_and_running_configuration() {
         fail_case(&mut case, format!("运行中 allow on 未落盘: {final_config}"));
     }
 }
+
+/// Business Logic（为什么需要这个函数）:
+///     `/mobile` 静态资源回归需要断言状态码与任意文本 body；support 的
+///     `http_get_json` 只服务 health JSON，无法覆盖 HTML/JS 资源探测。
+///
+/// Code Logic（这个函数做什么）:
+///     用 std TcpStream 发最小 HTTP/1.1 GET，解析状态行与 body，返回
+///     (状态码, body 文本)；连接/读写/解析失败转诊断字符串。
+fn http_get_status_body(host_port: &str, path: &str) -> Result<(u16, String), String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let mut stream =
+        TcpStream::connect(host_port).map_err(|e| format!("连接 {host_port} 失败: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("设置写超时失败: {e}"))?;
+
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("写 HTTP 请求失败: {e}"))?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("读 HTTP 响应失败: {e}"))?;
+    let text = String::from_utf8_lossy(&raw);
+    let (header, body) = text
+        .split_once("\r\n\r\n")
+        .or_else(|| text.split_once("\n\n"))
+        .ok_or_else(|| format!("HTTP 响应无 header/body 分隔: {text}"))?;
+    let status_line = header.lines().next().unwrap_or("");
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("HTTP 状态行不可解析: {status_line}"))?;
+    Ok((status, body.to_string()))
+}
+
+/// `CC_PARTNER_WEB_DIST` → headless serve `/mobile` 静态资源消费侧闭环。
+///
+/// Business Logic（为什么需要这个测试）:
+///     发布安装包在用户机器上没有源码树 `web/dist`；GUI 把 bundle 内 web-dist
+///     通过 `CC_PARTNER_WEB_DIST` 指给 sidecar serve。若 serve 不读该变量或静态
+///     fallback 断链，用户手机打开 `/mobile` 只会得到 404。必须在真实 serve
+///     进程上证明「env 注入 → serve 读到资源 → `/mobile` 可打开」。
+///
+/// Code Logic（这个测试做什么）:
+///     构造临时 dist（`mobile.html` 写唯一 marker + `assets/smoke.js` 小文件），
+///     以 `CC_PARTNER_WEB_DIST` 指向它 spawn `serve`，轮询 control 与 health
+///     就绪后 GET `/mobile` 断言 200 且 body 含 marker、GET `/assets/smoke.js`
+///     断言 200 且内容一致；最后 stop 并确认进程/control 文件清理（临时 dist
+///     位于 case 目录内，由 SmokeCase Drop 统一删除）。
+#[test]
+fn serve_serves_mobile_from_cc_partner_web_dist() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+
+    let mut case = SmokeCase::new("web-dist-mobile").expect("创建 smoke case");
+
+    // 构造临时 dist：mobile.html 唯一 marker + assets/smoke.js。
+    let dist_dir = case.case_dir.join("web-dist");
+    let marker = format!("cc-partner-web-dist-marker-{}", std::process::id());
+    let smoke_js = "console.log('cc-partner-smoke-web-dist');";
+    let prepare_dist = std::fs::create_dir_all(dist_dir.join("assets"))
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            std::fs::write(
+                dist_dir.join("mobile.html"),
+                format!("<!DOCTYPE html><html><body><!-- {marker} --></body></html>"),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .and_then(|()| {
+            std::fs::write(dist_dir.join("assets").join("smoke.js"), smoke_js)
+                .map_err(|e| e.to_string())
+        });
+    if let Err(err) = prepare_dist {
+        fail_case(&mut case, format!("构造临时 web-dist 失败: {err}"));
+    }
+
+    // 以 CC_PARTNER_WEB_DIST 指向临时 dist spawn serve（等价 GUI packaged 注入的环境）。
+    let bin = case.backend_bin.clone();
+    let data_dir = case.data_dir.clone();
+    let mut serve_child = match std::process::Command::new(&bin)
+        .arg("serve")
+        .env("CC_PARTNER_DATA_DIR", &data_dir)
+        .env("CC_PARTNER_WEB_DIST", &dist_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => fail_case(&mut case, format!("spawn serve 失败: {err}")),
+    };
+    case.record_pid(serve_child.id());
+
+    let control = match case.wait_for_control_file() {
+        Ok(control) => control,
+        Err(err) => fail_case(&mut case, err),
+    };
+    case.record_pid(control.pid);
+    if control.pid != serve_child.id() {
+        fail_case(
+            &mut case,
+            format!(
+                "control pid 与 serve child 不一致: control={} child={}",
+                control.pid,
+                serve_child.id()
+            ),
+        );
+    }
+    if let Err(err) = case.wait_for_health(control.port) {
+        fail_case(&mut case, err);
+    }
+
+    let host_port = format!("127.0.0.1:{}", control.port);
+    let (mobile_status, mobile_body) = match http_get_status_body(&host_port, "/mobile") {
+        Ok(result) => result,
+        Err(err) => fail_case(&mut case, format!("GET /mobile 失败: {err}")),
+    };
+    if mobile_status != 200 {
+        fail_case(
+            &mut case,
+            format!("GET /mobile 应 200，实际 {mobile_status}\nbody={mobile_body}"),
+        );
+    }
+    if !mobile_body.contains(&marker) {
+        fail_case(
+            &mut case,
+            format!("GET /mobile body 未包含 marker {marker}\nbody={mobile_body}"),
+        );
+    }
+
+    let (asset_status, asset_body) = match http_get_status_body(&host_port, "/assets/smoke.js") {
+        Ok(result) => result,
+        Err(err) => fail_case(&mut case, format!("GET /assets/smoke.js 失败: {err}")),
+    };
+    if asset_status != 200 {
+        fail_case(
+            &mut case,
+            format!("GET /assets/smoke.js 应 200，实际 {asset_status}\nbody={asset_body}"),
+        );
+    }
+    if !asset_body.contains("cc-partner-smoke-web-dist") {
+        fail_case(
+            &mut case,
+            format!("GET /assets/smoke.js 内容不符: {asset_body}"),
+        );
+    }
+
+    // 清理：stop 并确认 control/pid 文件与进程消失（case_dir 由 Drop 删除）。
+    // 注意：serve 是本测试的直接 child，退出后未 wait 会变成僵尸进程，`kill -0`
+    // 对僵尸误报存活；必须用 `try_wait` 判断真实退出（见并发 serve 用例同款处理）。
+    let stop = match case.run_cli(&["stop"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("stop 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "stop", &stop);
+    let stop_deadline = Instant::now() + case.op_timeout;
+    loop {
+        match serve_child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= stop_deadline {
+                    fail_case(
+                        &mut case,
+                        format!("stop 后 serve child 未退出 (pid={})", control.pid),
+                    );
+                }
+            }
+            Err(err) => fail_case(&mut case, format!("try_wait serve 失败: {err}")),
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if case.control_file_path().exists() || case.pid_file_path().exists() {
+        fail_case(&mut case, "stop 后 control/pid 文件仍存在");
+    }
+}

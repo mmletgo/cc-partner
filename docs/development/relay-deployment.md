@@ -115,7 +115,7 @@ sudo apt-get install -y libgtk-3-0 libwebkit2gtk-4.1-0   # webkit2gtk/gtk 运行
 mkdir -p ~/.cc-partner
 ```
 
-`web/dist` 是 headless 模式服务 `/mobile` 等静态页面的资源目录，用环境变量 `CC_PARTNER_WEB_DIST` 指向它（例如写入 systemd 单元或 shell profile：`export CC_PARTNER_WEB_DIST=$HOME/cc-partner/web-dist`）。数据与日志默认在 `~/.cc-partner`，可用 `CC_PARTNER_DATA_DIR` 隔离。
+`web/dist` 是 headless 模式服务 `/mobile` 等静态页面的资源目录，用环境变量 `CC_PARTNER_WEB_DIST` 指向它（例如写入 systemd 单元或 shell profile：`export CC_PARTNER_WEB_DIST=$HOME/cc-partner/web-dist`）。GUI 安装包内的 sidecar 不需要手动设置：桌面端拉起 packaged sidecar 时会自动把该变量注入为 bundle 内的 web-dist 目录；本节的 headless 手动部署（systemd/supervise）仍需自行 export。数据与日志默认在 `~/.cc-partner`，可用 `CC_PARTNER_DATA_DIR` 隔离。
 
 **步骤 3：放行防火墙**（§1.3，UDP 5353 + TCP 62116）。
 

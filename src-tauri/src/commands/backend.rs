@@ -287,12 +287,32 @@ async fn run_backend_cli_command(app: &AppHandle, subcommand: &str) -> Result<()
 ///     正式安装包中 `cc-partner-backend` 由 Tauri externalBin 打包，GUI 只能通过 shell plugin 定位它。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 sidecar command，传入 start/stop 子命令并等待短生命周期 CLI 输出；非零退出转业务错误。
+///     创建 sidecar command；若 bundle resources 内存在 web-dist（含 mobile.html），
+///     注入 `CC_PARTNER_WEB_DIST` 指向包内目录，让 headless serve 能在用户机器上
+///     服务 `/mobile` 静态页；随后传入 start/stop 子命令并等待短生命周期 CLI 输出，
+///     非零退出转业务错误。
 async fn run_packaged_sidecar_command(app: &AppHandle, subcommand: &str) -> Result<(), AppError> {
-    let output = app
+    let mut command = app
         .shell()
         .sidecar(BACKEND_SIDECAR_NAME)
-        .map_err(|error| AppError::generic(format!("创建 backend sidecar 失败: {error}")))?
+        .map_err(|error| AppError::generic(format!("创建 backend sidecar 失败: {error}")))?;
+    // 正式包内 GUI 进程没有 web/dist；serve 的编译期回退路径在用户机器上不存在，
+    // 必须显式指向 bundle resources 里的 web-dist，否则 /mobile 返回 404。
+    match app.path().resource_dir() {
+        Ok(resource_dir) => match packaged_web_dist_env_value(&resource_dir) {
+            Some(web_dist) => {
+                command = command.env("CC_PARTNER_WEB_DIST", &web_dist);
+            }
+            None => tracing::debug!(
+                "resource_dir 下未找到 web-dist/mobile.html，跳过 CC_PARTNER_WEB_DIST 注入: {}",
+                resource_dir.display()
+            ),
+        },
+        Err(error) => {
+            tracing::debug!("解析 resource_dir 失败，跳过 CC_PARTNER_WEB_DIST 注入: {error}");
+        }
+    }
+    let output = command
         .arg(subcommand)
         .output()
         .await
@@ -307,6 +327,25 @@ async fn run_packaged_sidecar_command(app: &AppHandle, subcommand: &str) -> Resu
         output.status,
         command_output_detail(&output.stdout, &output.stderr)
     )))
+}
+
+/// 计算 packaged sidecar 需要注入的 web-dist 资源目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     正式安装包的 GUI 进程不持有 web/dist；headless sidecar 服务 `/mobile`
+///     静态页必须靠 `CC_PARTNER_WEB_DIST` 指向 bundle 内的 web-dist，否则用户
+///     手机打开移动端页面只会得到 404。
+///
+/// Code Logic（这个函数做什么）:
+///     在 resource_dir 下拼接 `resources/web-dist`；仅当其中 `mobile.html` 是
+///     普通文件时返回 Some(目录)，否则返回 None（dev/无资源场景不注入）。
+fn packaged_web_dist_env_value(resource_dir: &std::path::Path) -> Option<PathBuf> {
+    let web_dist = resource_dir.join("resources").join("web-dist");
+    let mobile_html = web_dist.join("mobile.html");
+    match std::fs::metadata(&mobile_html) {
+        Ok(metadata) if metadata.is_file() => Some(web_dist),
+        _ => None,
+    }
 }
 
 /// 执行开发环境 backend CLI fallback。
@@ -661,5 +700,40 @@ mod tests {
         assert!(!is_durable_backend_runtime_path(std::path::Path::new(
             "/Users/hans/Applications/cc-partner (Dev).app/Contents/MacOS/cc-partner-backend"
         )));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     packaged sidecar 注入 `CC_PARTNER_WEB_DIST` 必须以 bundle 内真实存在
+    ///     `mobile.html` 为准；否则会把不存在的目录传给 serve，让 `/mobile` 在
+    ///     用户机器上 404。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     tempdir 下构造 `resources/web-dist/mobile.html` 时返回 Some(目录)；
+    ///     目录缺失、目录存在但缺 mobile.html、mobile.html 是目录三种情况返回 None。
+    #[test]
+    fn packaged_web_dist_env_value_requires_mobile_html_file() {
+        let temp = tempfile::tempdir().expect("创建 tempdir");
+        let resource_dir = temp.path();
+
+        // 无 web-dist 目录：None。
+        assert!(packaged_web_dist_env_value(resource_dir).is_none());
+
+        // 有 web-dist 但缺 mobile.html：None。
+        let empty_web_dist = resource_dir.join("resources").join("web-dist");
+        std::fs::create_dir_all(&empty_web_dist).expect("创建空 web-dist");
+        assert!(packaged_web_dist_env_value(resource_dir).is_none());
+
+        // mobile.html 是目录而非普通文件：None。
+        std::fs::create_dir_all(empty_web_dist.join("mobile.html")).expect("创建同名目录");
+        assert!(packaged_web_dist_env_value(resource_dir).is_none());
+
+        // mobile.html 是普通文件：Some(web-dist 目录)。
+        std::fs::remove_dir(empty_web_dist.join("mobile.html")).expect("移除同名目录");
+        std::fs::write(empty_web_dist.join("mobile.html"), "<html>packaged</html>")
+            .expect("写入 mobile.html");
+        assert_eq!(
+            packaged_web_dist_env_value(resource_dir),
+            Some(empty_web_dist)
+        );
     }
 }

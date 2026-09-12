@@ -8,7 +8,7 @@
     "frontendDist": "../web/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd ../web && npm run dev",
-    "beforeBuildCommand": "cd ../web && npm run build"
+    "beforeBuildCommand": "cd ../web && npm run build && node ../scripts/prepare-web-dist-resource.mjs"
   },
   "app": {
     "windows": [
@@ -50,7 +50,8 @@
       }
     },
     "resources": [
-      "resources/browser-runtime/**/*"
+      "resources/browser-runtime/**/*",
+      "resources/web-dist/**/*"
     ]
   },
   "plugins": {
