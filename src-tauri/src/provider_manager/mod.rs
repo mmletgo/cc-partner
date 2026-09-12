@@ -12,8 +12,8 @@
 //!     - `switch(app, id)`：校验 → CLI 切换 → 重读该 app 返回更新态。
 //!     - `install_cli()`：安装 cc-switch CLI（macOS brew / 其余人工指引）。
 //!
-//!     无 AppState 字段、无 axum 路由、不写 `~/.cc-switch` 与各 agent 活配置文件。
-//!     切换是本机 GUI 进程的文件/CLI IO（与 `claude_code_assets` 同一先例）。
+//! 无 AppState 字段、无 axum 路由、不写 `~/.cc-switch` 与各 agent 活配置文件。
+//! 切换是本机 GUI 进程的文件/CLI IO（与 `claude_code_assets` 同一先例）。
 
 mod cc_switch_cli;
 pub mod models;

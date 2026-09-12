@@ -2,13 +2,14 @@
 //! Claude 调用，且**不**改写 OS 默认 `~/.claude/settings.json`。
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     commit / merge / prompt 优化 / GitHub 解说 / verifier 等内部 Claude 调用默认继承
-//!     `~/.claude/settings.json`（cc-switch 维护的 OS 默认 provider）。用户希望这些内部调用
-//!     使用一个**不同**的 cc-switch provider，且不与交互式 Claude 会话争用 OS 默认配置。
 //!
-//!     经查 Claude Code 官方文档：进程 env 会被 settings.json 的 `env` 块覆盖；`--settings`
-//!     是浅层 per-key merge，存在 stale-key 泄露风险；唯一无合并/无泄露的机制是
-//!     `CLAUDE_CONFIG_DIR`（整体重定位 `~/.claude`，使 claude 只读我们写的 settings.json）。
+//! commit / merge / prompt 优化 / GitHub 解说 / verifier 等内部 Claude 调用默认继承
+//! `~/.claude/settings.json`（cc-switch 维护的 OS 默认 provider）。用户希望这些内部调用
+//! 使用一个**不同**的 cc-switch provider，且不与交互式 Claude 会话争用 OS 默认配置。
+//!
+//! 经查 Claude Code 官方文档：进程 env 会被 settings.json 的 `env` 块覆盖；`--settings`
+//! 是浅层 per-key merge，存在 stale-key 泄露风险；唯一无合并/无泄露的机制是
+//! `CLAUDE_CONFIG_DIR`（整体重定位 `~/.claude`，使 claude 只读我们写的 settings.json）。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 读取所选 provider 的 `settings_config`（provider_manager::store 只读查询）。

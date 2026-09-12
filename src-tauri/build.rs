@@ -29,6 +29,7 @@ fn main() {
     ensure_debug_sidecar_launcher();
     ensure_browser_runtime_resource();
     ensure_web_dist_resource();
+    ensure_web_dist_for_embed();
     compile_macos_notification_auth();
     tauri_build::build()
 }
@@ -103,6 +104,44 @@ fn ensure_web_dist_resource() {
         "web dist resource not prepared; run `cd web && npm run build && node scripts/prepare-web-dist-resource.mjs`\n",
     ) {
         panic!("写入 web-dist 占位失败: {error}");
+    }
+}
+
+/// 保证 headless 嵌入资源源 `../web/dist` 存在且至少一个文件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     headless 后端把 `../web/dist` 经 `include_dir!` 编译期嵌入二进制实现单文件部署；
+///     干净克隆直接 `cargo build --release --bin cc-partner-backend`（不跑前端构建）时
+///     目录可能不存在/为空，`include_dir!` 需要路径在编译期存在才能通过，否则阻断编译。
+///
+/// Code Logic（这个函数做什么）:
+///     声明 `cargo:rerun-if-changed=../web/dist` 让前端产物变化触发重编；若路径是
+///     损坏/自指 symlink 或普通文件则删除后重建目录；目录为空时写入 `.web-dist-empty`
+///     占位（提示运行 `cd web && npm run build`），保证可编译，仅嵌入内容为占位。
+fn ensure_web_dist_for_embed() {
+    let web_dist_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("web")
+        .join("dist");
+    println!("cargo:rerun-if-changed=../web/dist");
+
+    if !resource_dir_has_entries(&web_dist_root) {
+        replace_unusable_resource_path(&web_dist_root);
+        if let Err(error) = fs::create_dir_all(&web_dist_root) {
+            panic!("创建嵌入用 web/dist 目录失败: {error}");
+        }
+    }
+
+    if resource_dir_has_entries(&web_dist_root) {
+        return;
+    }
+
+    let placeholder = web_dist_root.join(".web-dist-empty");
+    if let Err(error) = fs::write(
+        &placeholder,
+        "web dist not built; embedded /mobile assets are a placeholder; run `cd web && npm run build`\n",
+    ) {
+        panic!("写入嵌入用 web/dist 占位失败: {error}");
     }
 }
 

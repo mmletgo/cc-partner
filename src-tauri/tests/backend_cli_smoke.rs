@@ -1532,3 +1532,106 @@ fn serve_serves_mobile_from_cc_partner_web_dist() {
         fail_case(&mut case, "stop 后 control/pid 文件仍存在");
     }
 }
+
+/// 无 `CC_PARTNER_WEB_DIST` 时 serve 也能提供 `/mobile`（磁盘源码树路径或嵌入资源）。
+///
+/// Business Logic（为什么需要这个测试）:
+///     单文件部署场景：远程服务器只下载一个 backend 二进制、不设任何资源环境变量，
+///     `/mobile` 必须仍可打开（命中编译期源码树磁盘路径或嵌入资源兜底都合法）。
+///     若资源查找断链，用户手机打开 `/mobile` 会得到 404。
+///
+/// Code Logic（这个测试做什么）:
+///     显式移除 `CC_PARTNER_WEB_DIST` 后直接 spawn `serve`，轮询 control 与 health
+///     就绪后 GET `/mobile` 断言 200 且 body 含 `<!doctype html` 或 `mobile`；
+///     最后 stop 并确认 serve child 退出（try_wait 防僵尸误报）与 control/pid 文件清理。
+#[test]
+fn serve_serves_mobile_without_web_dist_env() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+
+    let mut case = SmokeCase::new("web-dist-mobile-no-env").expect("创建 smoke case");
+
+    // 不注入 CC_PARTNER_WEB_DIST（显式移除防外部环境泄漏），等价裸二进制单文件部署。
+    let bin = case.backend_bin.clone();
+    let data_dir = case.data_dir.clone();
+    let mut serve_child = match std::process::Command::new(&bin)
+        .arg("serve")
+        .env("CC_PARTNER_DATA_DIR", &data_dir)
+        .env_remove("CC_PARTNER_WEB_DIST")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => fail_case(&mut case, format!("spawn serve 失败: {err}")),
+    };
+    case.record_pid(serve_child.id());
+
+    let control = match case.wait_for_control_file() {
+        Ok(control) => control,
+        Err(err) => fail_case(&mut case, err),
+    };
+    case.record_pid(control.pid);
+    if control.pid != serve_child.id() {
+        fail_case(
+            &mut case,
+            format!(
+                "control pid 与 serve child 不一致: control={} child={}",
+                control.pid,
+                serve_child.id()
+            ),
+        );
+    }
+    if let Err(err) = case.wait_for_health(control.port) {
+        fail_case(&mut case, err);
+    }
+
+    let host_port = format!("127.0.0.1:{}", control.port);
+    let (mobile_status, mobile_body) = match http_get_status_body(&host_port, "/mobile") {
+        Ok(result) => result,
+        Err(err) => fail_case(&mut case, format!("GET /mobile 失败: {err}")),
+    };
+    if mobile_status != 200 {
+        fail_case(
+            &mut case,
+            format!("GET /mobile 应 200，实际 {mobile_status}\nbody={mobile_body}"),
+        );
+    }
+    let lowered_body = mobile_body.to_lowercase();
+    if !lowered_body.contains("<!doctype html") && !lowered_body.contains("mobile") {
+        fail_case(
+            &mut case,
+            format!("GET /mobile body 不像 mobile 页面\nbody={mobile_body}"),
+        );
+    }
+
+    // 清理：stop 并确认 control/pid 文件与进程消失（本用例 serve 是直接 child，
+    // 必须 try_wait 判真实退出，防僵尸进程让 kill -0 误报存活）。
+    let stop = match case.run_cli(&["stop"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("stop 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "stop", &stop);
+    let stop_deadline = Instant::now() + case.op_timeout;
+    loop {
+        match serve_child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= stop_deadline {
+                    fail_case(
+                        &mut case,
+                        format!("stop 后 serve child 未退出 (pid={})", control.pid),
+                    );
+                }
+            }
+            Err(err) => fail_case(&mut case, format!("try_wait serve 失败: {err}")),
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if case.control_file_path().exists() || case.pid_file_path().exists() {
+        fail_case(&mut case, "stop 后 control/pid 文件仍存在");
+    }
+}

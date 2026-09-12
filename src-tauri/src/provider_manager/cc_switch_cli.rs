@@ -5,9 +5,9 @@
 //!     逻辑（common-config 合并、official-auth 保留、原子写）复杂且易出错。我们不自行写盘，
 //!     而是委托给 cc-switch CLI（与 GUI 共享同一服务层）执行切换。
 //!
-//!     关键约束：在 Linux/Windows 上 cc-switch CLI 与 GUI 二进制同名 `cc-switch`，因此
-//!     **绝不能**按名字判定 PATH 上的 `cc-switch` 就是 CLI；必须按"行为"判定（--help 含
-//!     CLI-only 子命令 + --version 退出 0），且只调用解析到的绝对路径。
+//! 关键约束：在 Linux/Windows 上 cc-switch CLI 与 GUI 二进制同名 `cc-switch`，因此
+//! **绝不能**按名字判定 PATH 上的 `cc-switch` 就是 CLI；必须按"行为"判定（--help 含
+//! CLI-only 子命令 + --version 退出 0），且只调用解析到的绝对路径。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `detect()`：在常见安装目录与 PATH 中找候选，逐个做行为探测，命中即缓存绝对路径。

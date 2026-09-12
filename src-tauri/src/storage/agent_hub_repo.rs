@@ -4881,6 +4881,9 @@ pub enum AgentHubImportFault {
     BeforeTxCommit,
 }
 
+// 编解码仅服务于上方 #[cfg(any(test, debug_assertions))] 的故障注入读写；
+// release 构建剔除调用方后这两个私有 fn 会成死代码，impl 必须同 cfg 门控。
+#[cfg(any(test, debug_assertions))]
 impl AgentHubImportFault {
     fn as_u8(self) -> u8 {
         match self {

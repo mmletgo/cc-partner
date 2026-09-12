@@ -26,6 +26,20 @@ pub const BACKEND_RUNTIME_GAP_EVENT: &str = "backend:runtime-gap";
 /// Gap resync 后终端 buffer 全量重置事件（sessionId + buffer）。
 pub const WORKBENCH_TERMINAL_RESYNC_EVENT: &str = "workbench:terminal-resync";
 
+/// 编译期嵌入的 `/mobile` 静态资源（源码树 `web/dist`）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     headless 后端要做到单文件部署：远程无 GUI 服务器只下载一个
+///     `cc-partner-backend` 二进制即可同时服务桌面端 P2P API 与手机端 `/mobile`，
+///     不再依赖磁盘上的 web-dist 资源包或 `CC_PARTNER_WEB_DIST`。
+///
+/// Code Logic（这个常量做什么）:
+///     `include_dir!` 在编译期把 `$CARGO_MANIFEST_DIR/../web/dist` 递归嵌入只读目录树；
+///     目录缺失/为空时由 `build.rs` 的 `ensure_web_dist_for_embed` 写占位文件兜底，
+///     `cargo:rerun-if-changed=../web/dist` 保证前端产物变化触发重编。
+static EMBEDDED_WEB_DIST: include_dir::Dir<'_> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/../web/dist");
+
 /// GUI owner event relay 对单条消息的应用结果。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -972,10 +986,13 @@ impl BackendUi for TauriBackendUi {
 /// Headless 后端 UI adapter。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     独立后端进程没有 Tauri 窗口，但仍需服务 `/mobile` 页面给手机浏览器；资源来自显式传入的 dist 目录。
+///     独立后端进程没有 Tauri 窗口，但仍需服务 `/mobile` 页面给手机浏览器；资源优先来自
+///     显式传入的 dist 目录（env 显式覆盖或编译期源码树路径），目录未命中时回退到编译期
+///     嵌入资源，使二进制单文件即可提供完整 `/mobile` 服务。
 ///
 /// Code Logic（这个结构做什么）:
-///     保存 dist 根目录；emit 为 no-op；asset 会先校验相对路径安全性，再读取 dist 下对应文件。
+///     保存 dist 根目录；emit 为 no-op；asset 会先校验相对路径安全性，再按
+///     「磁盘目录 > 嵌入资源」优先级读取 dist 下对应文件或 `EMBEDDED_WEB_DIST` 条目。
 #[derive(Debug, Clone)]
 pub struct HeadlessBackendUi {
     dist_dir: PathBuf,
@@ -985,7 +1002,8 @@ impl HeadlessBackendUi {
     /// 创建 headless UI adapter。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     CLI/headless runtime 启动时需要指定 web dist 目录作为手机端静态资源来源。
+    ///     CLI/headless runtime 启动时需要指定 web dist 目录作为手机端静态资源的显式来源；
+    ///     单文件部署场景下该目录可以不存在，读取时由嵌入资源兜底。
     ///
     /// Code Logic（这个函数做什么）:
     ///     保存调用方传入的 dist 目录路径，读取时再与规范化 asset key 拼接。
@@ -1050,21 +1068,38 @@ impl BackendUi for HeadlessBackendUi {
     ///     不读取参数、不产生副作用，直接返回。
     fn emit(&self, _event: &str, _payload: Value) {}
 
-    /// 读取 headless dist 静态资源。
+    /// 读取 headless dist 静态资源，磁盘未命中时回退编译期嵌入资源。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     独立后端进程仍要通过局域网 HTTP 为手机浏览器提供 `/mobile` 页面。
+    ///     单文件部署要求二进制自身携带资源：env 显式目录（GUI bundle 注入或运维自定义）
+    ///     保持最高优先级，未配置或目录缺失时由嵌入资源兜底，`CC_PARTNER_WEB_DIST`
+    ///     降级为显式覆盖/自定义资源的逃生口。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先校验 asset key 为安全相对路径，再读取 dist 目录下对应文件并按扩展名填充 MIME。
+    ///     先校验 asset key 为安全相对路径；第一段读磁盘 dist 目录下对应文件（现有行为）；
+    ///     miss 后查 `EMBEDDED_WEB_DIST` 嵌入条目（打 debug 日志标注资源来源），按扩展名
+    ///     推导 MIME、CSP 传 None 构造 `BackendAsset`；两者都 miss 返回 None。
     fn asset(&self, asset_key: &str) -> Option<BackendAsset> {
         let relative_path = Self::normalized_asset_path(asset_key)?;
-        let bytes = std::fs::read(self.dist_dir.join(relative_path)).ok()?;
-        Some(BackendAsset::new(
-            bytes,
-            asset_mime_type(asset_key).to_string(),
-            None,
-        ))
+        if let Ok(bytes) = std::fs::read(self.dist_dir.join(&relative_path)) {
+            return Some(BackendAsset::new(
+                bytes,
+                asset_mime_type(asset_key).to_string(),
+                None,
+            ));
+        }
+
+        if let Some(file) = EMBEDDED_WEB_DIST.get_file(&relative_path) {
+            tracing::debug!("磁盘 dist 未命中，回退嵌入资源: {asset_key}");
+            return Some(BackendAsset::new(
+                file.contents().to_vec(),
+                asset_mime_type(asset_key).to_string(),
+                None,
+            ));
+        }
+
+        None
     }
 }
 
@@ -1169,6 +1204,46 @@ mod tests {
     fn headless_emit_is_noop() {
         let ui = HeadlessBackendUi::new(std::path::PathBuf::from("/tmp/missing"));
         ui.emit("workbench:terminal-output", serde_json::json!({"ok": true}));
+    }
+
+    /// 验证 headless 静态资源在磁盘 miss 时回退到编译期嵌入资源。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     单文件部署要求二进制自身携带 `/mobile` 静态资源：磁盘 dist 目录不存在时
+    ///     嵌入资源必须兜底生效，否则远程服务器只有二进制时 `/mobile` 全部 404。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造磁盘必 miss 的不存在 dist 目录适配器，断言 `mobile.html` 返回 Some 且
+    ///     bytes 与源码树 `../web/dist/mobile.html` 一致（磁盘文件不存在时仅断言 None
+    ///     并跳过对比）；再断言含 `..` 的 key 嵌入路径同样拒绝（先过 normalized_asset_path，
+    ///     不可越狱）。
+    #[test]
+    fn headless_asset_falls_back_to_embedded() {
+        let ui = HeadlessBackendUi::new(std::path::PathBuf::from(
+            "/nonexistent-web-dist-embed-fallback",
+        ));
+
+        let disk_mobile_html =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/dist/mobile.html");
+        match ui.asset("mobile.html") {
+            Some(asset) => {
+                if let Ok(expected) = std::fs::read(&disk_mobile_html) {
+                    assert_eq!(asset.bytes, expected, "嵌入 mobile.html 应与磁盘内容一致");
+                }
+                assert_eq!(asset.mime_type, "text/html; charset=utf-8");
+                assert_eq!(asset.csp_header, None);
+            }
+            None => {
+                // 嵌入树为空意味着磁盘源也不存在（build.rs 占位兜底场景），此时两者一致。
+                assert!(
+                    !disk_mobile_html.exists(),
+                    "磁盘 mobile.html 存在时嵌入资源不应 miss"
+                );
+            }
+        }
+
+        assert!(ui.asset("assets/../evil").is_none());
+        assert!(ui.asset("../evil").is_none());
     }
 
     /// 启动仅服务 sessions.list/replay 的 mock workbench control。

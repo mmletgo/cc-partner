@@ -14,8 +14,11 @@ use crate::agent_hub::models::{
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::atomic_writer::{
     AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
-    ProjectionWriteFault,
 };
+// ProjectionWriteFault 仅被 test/debug 故障注入路径（字段与 inject_write_fault）引用，
+// release 构建下随 cfg 剔除，import 必须同样门控否则报 unused import。
+#[cfg(any(test, debug_assertions))]
+use crate::agent_hub::projection::atomic_writer::ProjectionWriteFault;
 use crate::error::AppError;
 use crate::storage::AgentHubRepo;
 use futures_util::stream::{FuturesUnordered, StreamExt};

@@ -94,14 +94,19 @@ CLI 契约与现有 lifecycle 命令一致：严格参数解析；退出码 **0*
 
 **步骤 1：获取 Linux 二进制**
 
-优先从 GitHub Release 下载（v0.9.5 起随版发布，与 GUI 包内 sidecar 同源同锁）：
+优先从 GitHub Release 下载（v0.9.5 起随版发布，与 GUI 包内 sidecar 同源同锁）。**单文件即完整后端（推荐）**：`/mobile` 静态资源已编译期嵌入二进制，下载一个文件即可运行，无需单独的资源包或 `CC_PARTNER_WEB_DIST` 配置：
 
 ```bash
 # x86_64：cc-partner-backend-linux-x86_64；ARM64：cc-partner-backend-linux-aarch64
-# 静态资源包（/mobile 页面）：web-dist.tar.gz（与二进制同一 Release）
 curl -sSL -o cc-partner-backend "https://github.com/mmletgo/cc-partner/releases/download/<tag>/cc-partner-backend-linux-x86_64"
-curl -sSL -o web-dist.tar.gz "https://github.com/mmletgo/cc-partner/releases/download/<tag>/web-dist.tar.gz"
 chmod +x cc-partner-backend
+```
+
+可选：`web-dist.tar.gz` 静态资源包（与二进制同一 Release）仅在需要**覆盖或自定义**嵌入资源时使用（例如嵌入版本与二进制不一致、或要临时替换前端产物）：
+
+```bash
+# 仅需覆盖/自定义资源时下载；默认单文件即可
+# curl -sSL -o web-dist.tar.gz "https://github.com/mmletgo/cc-partner/releases/download/<tag>/web-dist.tar.gz"
 ```
 
 无法访问 Release 时（如需自定义构建）在开发机仓库根用 Docker 构建：
@@ -111,14 +116,17 @@ node scripts/docker-build-backend-linux.mjs
 # 产物：src-tauri/target-linux/release/cc-partner-backend
 ```
 
-脚本在 Docker（`rust:1.95-bookworm`，linux/amd64 via QEMU）内 `cargo build --release --bin cc-partner-backend --locked` 交叉编译 x86_64 Linux 产物，glibc 兼容 Ubuntu 24.04。需要本机装有 Docker。
+脚本在 Docker（`rust:1.95-bookworm`，linux/amd64 via QEMU）内 `cargo build --release --bin cc-partner-backend --locked` 交叉编译 x86_64 Linux 产物，glibc 兼容 Ubuntu 24.04。需要本机装有 Docker。Docker 构建产物同样嵌入了构建时源码树 `web/dist` 的资源。
 
 **步骤 2：分发到 B 并安装运行库**
 
 ```bash
-# 二进制与资源按步骤 1 的来源二选一：
+# 推荐单文件部署：只 scp 二进制，无需任何资源目录
 scp cc-partner-backend user@B:/usr/local/bin/cc-partner-backend   # Release 下载或 Docker 构建产物
-scp -r web/dist user@B:~/cc-partner/web-dist                      # 源码树途径
+
+# 可选（覆盖/自定义资源时）：把源码树 dist 或 Release 资源包解压到 B，并用
+# CC_PARTNER_WEB_DIST 指向它（见步骤 2 末尾的变量说明）
+# scp -r web/dist user@B:~/cc-partner/web-dist                      # 源码树途径
 # 或在 B 上直接解压 Release 资源包：
 # ssh user@B 'mkdir -p ~/cc-partner/web-dist && tar -xzf web-dist.tar.gz -C ~/cc-partner/web-dist'
 ```
@@ -130,7 +138,7 @@ sudo apt-get install -y libgtk-3-0 libwebkit2gtk-4.1-0   # webkit2gtk/gtk 运行
 mkdir -p ~/.cc-partner
 ```
 
-`web/dist` 是 headless 模式服务 `/mobile` 等静态页面的资源目录，用环境变量 `CC_PARTNER_WEB_DIST` 指向它（例如写入 systemd 单元或 shell profile：`export CC_PARTNER_WEB_DIST=$HOME/cc-partner/web-dist`）。GUI 安装包内的 sidecar 不需要手动设置：桌面端拉起 packaged sidecar 时会自动把该变量注入为 bundle 内的 web-dist 目录；本节的 headless 手动部署（systemd/supervise）仍需自行 export。数据与日志默认在 `~/.cc-partner`，可用 `CC_PARTNER_DATA_DIR` 隔离。
+`/mobile` 静态页资源默认已嵌入 backend 二进制，**单文件部署无需任何资源配置**。`CC_PARTNER_WEB_DIST` 保留为显式覆盖/自定义资源的逃生口：需要用磁盘目录替换嵌入资源时，把该变量指向 dist 目录（例如写入 systemd 单元或 shell profile：`export CC_PARTNER_WEB_DIST=$HOME/cc-partner/web-dist`，资源查找优先级为「显式目录 > 嵌入资源」）。源码树内直接 `cargo run` 的开发场景会自动回退到编译期路径 `web/dist`，同样无需手动 export。GUI 安装包内的 sidecar 不需要手动设置：桌面端拉起 packaged sidecar 时会自动把该变量注入为 bundle 内的 web-dist 目录。数据与日志默认在 `~/.cc-partner`，可用 `CC_PARTNER_DATA_DIR` 隔离。
 
 **步骤 3：放行防火墙**（§1.3，UDP 5353 + TCP 62116）。
 
@@ -162,7 +170,7 @@ cc-partner-backend devices --json                # 复查 C 已在列且 online
 
 ### 3.2 C（目标机）
 
-部署方式与 B 完全相同（§3.1 步骤 1–5：构建产物、scp 二进制与 `web/dist`、运行库、防火墙、`start` + `doctor`、必要时手动 peer 让 C 看到 B 所在网段的地址也可）。
+部署方式与 B 完全相同（§3.1 步骤 1–5：单文件部署只 scp 二进制（可选才覆盖资源目录）、运行库、防火墙、`start` + `doctor`、必要时手动 peer 让 C 看到 B 所在网段的地址也可）。
 
 - **C 零中转配置**：不装任何 relay 开关、不加任何中转设置，老版本 C 也能被中转。
 - 自检重点是「C 的 62116 对 B 可达」。在 **B** 上验证：
@@ -234,7 +242,7 @@ cc-partner-backend relay via add <B 的 device_id>      # 或按设备名：rela
 cc-partner-backend supervise    # 登录自启监督入口
 ```
 
-`supervise` 从当前可执行文件直接 spawn `serve` 子进程（不经 shell），异常退出按 1→60s 指数退避自动重启（连续健康 10 分钟后重置退避）；执行 `cc-partner-backend stop`（退出码 0）会连带结束监督循环。也可改配 systemd 单元（`ExecStart=<二进制路径> serve`，配好 `CC_PARTNER_WEB_DIST`）。升级二进制：
+`supervise` 从当前可执行文件直接 spawn `serve` 子进程（不经 shell），异常退出按 1→60s 指数退避自动重启（连续健康 10 分钟后重置退避）；执行 `cc-partner-backend stop`（退出码 0）会连带结束监督循环。也可改配 systemd 单元（`ExecStart=<二进制路径> serve`；默认单文件部署无需配 `CC_PARTNER_WEB_DIST`，仅在覆盖/自定义嵌入资源时才设置）。升级二进制：
 
 ```bash
 cc-partner-backend stop && cp cc-partner-backend-new /usr/local/bin/cc-partner-backend && cc-partner-backend start

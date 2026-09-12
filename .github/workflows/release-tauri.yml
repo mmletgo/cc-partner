@@ -232,7 +232,8 @@ jobs:
         run: web/node_modules/.bin/tauri build --bundles appimage,deb,rpm
 
       # headless 部署的 /mobile 静态资源包：与 GUI 包内 resources/web-dist 同源
-      # （beforeBuildCommand 已产出 web/dist）。只在 linux-x86_64 job 打一份，
+      # （beforeBuildCommand 已产出 web/dist）。资源默认已嵌入 backend 二进制，
+      # 此包仅供覆盖/自定义。只在 linux-x86_64 job 打一份，
       # 避免多 job 上传同名 artifact 冲突。
       - name: Pack web-dist for headless deployment
         if: matrix.matrix_id == 'linux-x86_64'
@@ -387,10 +388,12 @@ jobs:
             ### 独立 CLI（无 GUI 服务器部署）
 
             - **完整后端**（推荐）：下载 `cc-partner-backend-linux-x86_64` 或
-              `cc-partner-backend-linux-aarch64` 与 `web-dist.tar.gz`；二进制放入 PATH，
-              资源包解压后 `export CC_PARTNER_WEB_DIST=<解压目录>`，再执行
-              `cc-partner-backend start`。单进程同时提供桌面端 P2P API
+              `cc-partner-backend-linux-aarch64` 单个文件即可运行——`/mobile`
+              静态资源已编译期嵌入二进制；放入 PATH 后执行
+              `cc-partner-backend start`，单进程同时提供桌面端 P2P API
               （Workbench / 文件传输 / 中转）与手机端 `/mobile`。
+              `web-dist.tar.gz` 为可选资源包，仅在需要覆盖/自定义嵌入资源时
+              下载解压并 `export CC_PARTNER_WEB_DIST=<解压目录>`。
             - **Agent 控制面 CLI**：`cc-partner-cli-macos-aarch64`、
               `cc-partner-cli-windows-x86_64.exe` 或对应架构的 Linux CLI
               （与上面的后端二进制是两个产物，仅用于 Agent 自动化控制）。
