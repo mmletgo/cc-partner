@@ -199,22 +199,6 @@ jobs:
           echo "=== agent CLI artifact ==="
           ls -la "$OUT"
 
-      # headless 后端二进制：远程无 GUI 服务器的完整后端（P2P API + Workbench + 中转 +
-      # /mobile 静态页）。与 Agent 控制面 CLI（cc-partner-cli）是两个产物，勿混用。
-      # 只发 Linux（headless 部署的主场景）；桌面平台的 backend 随 GUI 安装包分发。
-      - name: Build headless backend CLI (cc-partner-backend)
-        if: startsWith(matrix.platform, 'ubuntu')
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          cargo build --locked --release --bin cc-partner-backend --manifest-path src-tauri/Cargo.toml
-          BIN="src-tauri/target/release/cc-partner-backend"
-          OUT="release-assets/cc-partner-backend-${{ matrix.matrix_id }}"
-          cp "$BIN" "$OUT"
-          echo "=== backend CLI artifact ==="
-          ls -la "$OUT"
-
       - name: Build Tauri App (Windows)
         if: startsWith(matrix.platform, 'windows')
         shell: bash
@@ -230,6 +214,26 @@ jobs:
         # 同时产 .sig（Tauri 2 官方支持 Linux updater，AppImage 是 updater 产物）。
         # deb/rpm 仅供手动安装，不参与 updater。
         run: web/node_modules/.bin/tauri build --bundles appimage,deb,rpm
+
+      # headless 后端二进制：远程无 GUI 服务器的完整后端（P2P API + Workbench + 中转 +
+      # /mobile 静态页）。与 Agent 控制面 CLI（cc-partner-cli）是两个产物，勿混用。
+      # 只发 Linux（headless 部署的主场景）；桌面平台的 backend 随 GUI 安装包分发。
+      # ⚠️ 必须排在 Build Tauri App (Linux) 之后：backend 把 ../web/dist 编译期嵌入
+      # 二进制（include_dir），而 web/dist 由 tauri build 的 beforeBuildCommand 产出；
+      # 若在 tauri build 前编译，build.rs 只能写空占位，嵌入资源为空导致 /mobile 404。
+      - name: Build headless backend CLI (cc-partner-backend)
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          test -f web/dist/mobile.html || { echo "❌ web/dist/mobile.html 不存在（tauri build 未产出前端）" >&2; exit 1; }
+          cargo build --locked --release --bin cc-partner-backend --manifest-path src-tauri/Cargo.toml
+          BIN="src-tauri/target/release/cc-partner-backend"
+          OUT="release-assets/cc-partner-backend-${{ matrix.matrix_id }}"
+          cp "$BIN" "$OUT"
+          echo "=== backend CLI artifact ==="
+          ls -la "$OUT"
 
       # headless 部署的 /mobile 静态资源包：与 GUI 包内 resources/web-dist 同源
       # （beforeBuildCommand 已产出 web/dist）。资源默认已嵌入 backend 二进制，
