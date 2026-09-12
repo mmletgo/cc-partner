@@ -92,7 +92,19 @@ CLI 契约与现有 lifecycle 命令一致：严格参数解析；退出码 **0*
 
 ### 3.1 B（跳板，headless Linux 小主机）
 
-**步骤 1：构建 Linux 二进制（在开发机仓库根执行）**
+**步骤 1：获取 Linux 二进制**
+
+优先从 GitHub Release 下载（v0.9.5 起随版发布，与 GUI 包内 sidecar 同源同锁）：
+
+```bash
+# x86_64：cc-partner-backend-linux-x86_64；ARM64：cc-partner-backend-linux-aarch64
+# 静态资源包（/mobile 页面）：web-dist.tar.gz（与二进制同一 Release）
+curl -sSL -o cc-partner-backend "https://github.com/mmletgo/cc-partner/releases/download/<tag>/cc-partner-backend-linux-x86_64"
+curl -sSL -o web-dist.tar.gz "https://github.com/mmletgo/cc-partner/releases/download/<tag>/web-dist.tar.gz"
+chmod +x cc-partner-backend
+```
+
+无法访问 Release 时（如需自定义构建）在开发机仓库根用 Docker 构建：
 
 ```bash
 node scripts/docker-build-backend-linux.mjs
@@ -104,8 +116,11 @@ node scripts/docker-build-backend-linux.mjs
 **步骤 2：分发到 B 并安装运行库**
 
 ```bash
-scp src-tauri/target-linux/release/cc-partner-backend user@B:/usr/local/bin/cc-partner-backend
-scp -r web/dist user@B:~/cc-partner/web-dist
+# 二进制与资源按步骤 1 的来源二选一：
+scp cc-partner-backend user@B:/usr/local/bin/cc-partner-backend   # Release 下载或 Docker 构建产物
+scp -r web/dist user@B:~/cc-partner/web-dist                      # 源码树途径
+# 或在 B 上直接解压 Release 资源包：
+# ssh user@B 'mkdir -p ~/cc-partner/web-dist && tar -xzf web-dist.tar.gz -C ~/cc-partner/web-dist'
 ```
 
 在 B 上（Ubuntu 24.04）安装运行库并准备数据目录：

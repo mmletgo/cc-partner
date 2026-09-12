@@ -199,6 +199,22 @@ jobs:
           echo "=== agent CLI artifact ==="
           ls -la "$OUT"
 
+      # headless 后端二进制：远程无 GUI 服务器的完整后端（P2P API + Workbench + 中转 +
+      # /mobile 静态页）。与 Agent 控制面 CLI（cc-partner-cli）是两个产物，勿混用。
+      # 只发 Linux（headless 部署的主场景）；桌面平台的 backend 随 GUI 安装包分发。
+      - name: Build headless backend CLI (cc-partner-backend)
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cargo build --locked --release --bin cc-partner-backend --manifest-path src-tauri/Cargo.toml
+          BIN="src-tauri/target/release/cc-partner-backend"
+          OUT="release-assets/cc-partner-backend-${{ matrix.matrix_id }}"
+          cp "$BIN" "$OUT"
+          echo "=== backend CLI artifact ==="
+          ls -la "$OUT"
+
       - name: Build Tauri App (Windows)
         if: startsWith(matrix.platform, 'windows')
         shell: bash
@@ -214,6 +230,20 @@ jobs:
         # 同时产 .sig（Tauri 2 官方支持 Linux updater，AppImage 是 updater 产物）。
         # deb/rpm 仅供手动安装，不参与 updater。
         run: web/node_modules/.bin/tauri build --bundles appimage,deb,rpm
+
+      # headless 部署的 /mobile 静态资源包：与 GUI 包内 resources/web-dist 同源
+      # （beforeBuildCommand 已产出 web/dist）。只在 linux-x86_64 job 打一份，
+      # 避免多 job 上传同名 artifact 冲突。
+      - name: Pack web-dist for headless deployment
+        if: matrix.matrix_id == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          test -f web/dist/mobile.html || { echo "❌ web/dist/mobile.html 不存在（tauri build 未产出前端）" >&2; exit 1; }
+          tar -czf release-assets/web-dist.tar.gz -C web/dist .
+          echo "=== web-dist.tar.gz ==="
+          ls -la release-assets/web-dist.tar.gz
 
       - name: Build Tauri App (macOS arm64)
         if: startsWith(matrix.platform, 'macos')
@@ -354,10 +384,16 @@ jobs:
             已安装旧版本的用户，应用内会自动检查更新（读取本 Release 的 `latest.json`）。
             macOS 与 Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
 
-            ### 独立 CLI
+            ### 独立 CLI（无 GUI 服务器部署）
 
-            自动化或无头环境可下载 `cc-partner-cli-macos-aarch64`、
-            `cc-partner-cli-windows-x86_64.exe` 或对应架构的 Linux CLI。
+            - **完整后端**（推荐）：下载 `cc-partner-backend-linux-x86_64` 或
+              `cc-partner-backend-linux-aarch64` 与 `web-dist.tar.gz`；二进制放入 PATH，
+              资源包解压后 `export CC_PARTNER_WEB_DIST=<解压目录>`，再执行
+              `cc-partner-backend start`。单进程同时提供桌面端 P2P API
+              （Workbench / 文件传输 / 中转）与手机端 `/mobile`。
+            - **Agent 控制面 CLI**：`cc-partner-cli-macos-aarch64`、
+              `cc-partner-cli-windows-x86_64.exe` 或对应架构的 Linux CLI
+              （与上面的后端二进制是两个产物，仅用于 Agent 自动化控制）。
           files: release-assets/*
 
   # ─────────────────────────────────────────────────────────────────────────
