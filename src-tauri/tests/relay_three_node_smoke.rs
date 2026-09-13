@@ -615,18 +615,41 @@ async fn relay_case1_shadow_discovery_and_relay_peers() {
             "peers 不得包含跳板自身, peers={peers:?}"
         );
 
-        let snapshot: serde_json::Value = client
-            .post(format!(
-                "{}/api/backend/control/devices",
-                nodes.base_url(nodes.port_a)
-            ))
-            .json(&serde_json::json!({ "controlToken": CONTROL_TOKEN }))
-            .send()
-            .await
-            .expect("A control devices 应可达")
-            .json()
-            .await
-            .expect("control devices 应为 JSON");
+        // A 侧影子表由 15s 生产探测循环整批替换，慢 runner 上快照可能落在
+        // 「探测失败整批清空」的瞬态上——轮询等待影子重新收敛。
+        let base_a = nodes.base_url(nodes.port_a);
+        let client_for_snapshot = client.clone();
+        let snapshot: serde_json::Value = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "A 设备列表应含 online 的 C 影子（等待影子探测循环重新收敛）",
+            move || {
+                let client = client_for_snapshot.clone();
+                let url = format!("{base_a}/api/backend/control/devices");
+                async move {
+                    let value: serde_json::Value = client
+                        .post(url)
+                        .json(&serde_json::json!({ "controlToken": CONTROL_TOKEN }))
+                        .send()
+                        .await
+                        .ok()?
+                        .json()
+                        .await
+                        .ok()?;
+                    let shadow_in_devices = value["devices"].as_array().is_some_and(|devices| {
+                        find_device(devices, ID_C).is_some_and(|view| {
+                            view["viaDeviceId"] == ID_B && view["online"] == true
+                        })
+                    });
+                    let shadow_in_list = value["shadows"].as_array().is_some_and(|shadows| {
+                        shadows.iter().any(|shadow| {
+                            shadow["targetDeviceId"] == ID_C && shadow["online"] == true
+                        })
+                    });
+                    (shadow_in_devices && shadow_in_list).then_some(value)
+                }
+            },
+        )
+        .await;
         assert_eq!(snapshot["deviceId"], ID_A);
         let via_ids = snapshot["relay"]["viaDeviceIds"]
             .as_array()
