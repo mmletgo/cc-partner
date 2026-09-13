@@ -104,10 +104,11 @@ struct StopRouteResponse {
 ///     （含 doctor 的 0/1/2 与 start/serve/stop/status 的既有语义）。
 ///
 /// Code Logic（这个函数做什么）:
-///     先让 sidecar 脱离 macOS Dock，再收集 `std::env::args()` 委托命令分发；
-///     异步命令内部自建 Tokio runtime。
+///     收集 `std::env::args()` 委托命令分发；异步命令内部自建 Tokio runtime。
+///     不得在此调用任何 LaunchServices/AppKit 进程注册 API（进程角色变换等）：
+///     macOS 27 会把注册成 app 成员的 headless serve 按主线程 RunLoop 响应性监管，
+///     serve 主线程 block_on 永久 park，启动约 30 秒即被判 hang 并遭系统 SIGKILL。
 pub fn run_from_env() -> i32 {
-    crate::backend::macos_dock::detach_current_process_from_dock();
     dispatch(std::env::args())
 }
 
@@ -2284,29 +2285,40 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     sidecar 只要从宿主 .app 启动就会点亮程序坞；CLI 入口必须在任何子命令前脱离 Dock。
+    ///     headless backend 一旦向 LaunchServices 注册成 app（进程角色变换 API 等），
+    ///     macOS 27 会按主线程 RunLoop 响应性监管它；serve 主线程 block_on 永久 park，
+    ///     启动约 30 秒即被判 hang 并被系统 SIGKILL（崩溃循环、无优雅退出日志）。
+    ///     backend 必须始终保持纯 CLI 身份，不得 checkin 为任何 bundle 的 app 成员。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     读取 cli.rs 源码，断言 `run_from_env` 在 `dispatch` 之前调用
-    ///     `detach_current_process_from_dock()`。
+    ///     扫描 `src/backend/*.rs` 源码，断言不再出现进程角色变换 / AppKit 应用对象
+    ///     等注册符号；符号在运行时拼接，避免测试源码自命中。
     #[test]
-    fn run_from_env_detaches_backend_process_from_dock_before_dispatch() {
-        let src = include_str!("cli.rs");
-        let run_fn = src
-            .split("pub fn run_from_env()")
-            .nth(1)
-            .and_then(|rest| rest.split("fn dispatch").next())
-            .expect("run_from_env 应存在");
-        let detach_at = run_fn
-            .find("detach_current_process_from_dock()")
-            .expect("backend CLI 必须在 dispatch 前脱离 macOS Dock，避免 sidecar 点亮宿主 .app");
-        let dispatch_at = run_fn
-            .find("dispatch(")
-            .expect("run_from_env 必须调用 dispatch");
-        assert!(
-            detach_at < dispatch_at,
-            "detach_current_process_from_dock 必须发生在 dispatch 之前"
-        );
+    fn backend_sources_must_not_check_in_as_launch_services_app() {
+        // 拼接书写，防止本测试文件自身包含完整符号导致误报。
+        let forbidden = [
+            format!("Transform{}Type", "Process"),
+            format!("NS{}", "Application"),
+        ];
+        let backend_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend");
+        let mut scanned = 0u32;
+        for entry in std::fs::read_dir(&backend_dir).expect("读取 src/backend 目录") {
+            let path = entry.expect("目录项").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            scanned += 1;
+            let src = std::fs::read_to_string(&path).expect("读取源码");
+            for symbol in &forbidden {
+                assert!(
+                    !src.contains(symbol.as_str()),
+                    "{} 不得调用 {}；headless 进程注册为 app 会被 macOS hang 监控 SIGKILL",
+                    path.display(),
+                    symbol
+                );
+            }
+        }
+        assert!(scanned > 0, "应至少扫描到一个源码文件");
     }
 
     /// 验证 status 输出符合 CLI JSON 契约。
