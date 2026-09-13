@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-13T13:28:31.334Z",
+  "generatedAt": "2026-09-13T14:29:18.995Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -17,7 +17,7 @@
   },
   "files": {
     "src-tauri/src/backend/cli.rs": {
-      "lines": 3212
+      "lines": 3224
     },
     "src-tauri/src/backend/control_api.rs": {
       "lines": 2716
