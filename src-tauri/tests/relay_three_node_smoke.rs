@@ -42,6 +42,17 @@
 //!        `PeerClient::health_info` → `PeerCallError::Network`（"远端设备不在线"
 //!        的生产错误分类）。
 //!
+//! 稳定性约定（慢 runner 容忍，2026-09-12）：
+//!     B→C 健康探测循环约 15s 一轮；共享 CI runner 上 C 可能因探测超时被暂时驱逐出
+//!     relay 表——表现为经中转请求瞬时 404 `relay_target_offline`，且驱逐后 1–2 轮
+//!     探测内自动重新收敛。所有「真实转发」断言（case1 影子发现 / case2 health /
+//!     case3 fs / case4 事件流 / case5 终端 WS / case8 放行路径）因此统一经
+//!     `poll_until(RELAY_RECOVERY_MAX_SECS)` 轮询：仅对 `relay_target_offline`
+//!     轮询等待恢复，其余失败立即 panic，避免瞬态驱逐遮蔽真实回归。错误路径用例
+//!     （case6 / case7 / case8 前半 409 / case9）的断言目标就是错误信封且不受驱逐
+//!     影响（白名单 403 与 expected-device 409 均在目标派发前判定），保持一次性请求。
+//!     用例总预算相应放宽为 CASE_TOTAL_BUDGET（120s）。
+//!
 //! 保真度边界（已知缺口，不遮蔽）：
 //!     - A 侧客户端栈（`RemoteWorkbenchClient` / `device_base_url` 三段解析 /
 //!       `parse_peer_response`）在 `commands`/`workbench`/`net` crate 私有模块内，
@@ -77,8 +88,17 @@ use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-/// 单用例网络断言预算（防悬挂；fixture 收敛轮询单独给更长预算）。
+/// 流式帧级等待预算（逐块读首帧、WS 单帧等待；防悬挂）。
 const CASE_BUDGET: Duration = Duration::from_secs(10);
+
+/// 单用例总预算：涵盖「目标被探测驱逐后的离线恢复轮询」（RELAY_RECOVERY_MAX_SECS）。
+/// 正常负载下整套 9 用例约 15s；只有发生驱逐恢复时个别用例才会拉长到轮询预算量级。
+const CASE_TOTAL_BUDGET: Duration = Duration::from_secs(120);
+
+/// 经中转请求的目标离线恢复轮询预算（秒）：B→C 健康探测循环约 15s 一轮，慢 runner
+/// 上 C 可能被暂时驱逐出直连表（探测超时即出表），驱逐后重新收敛一般 1–2 轮；
+/// 60s 覆盖连续 3–4 轮探测失败的场景。
+const RELAY_RECOVERY_MAX_SECS: u64 = 60;
 
 /// 三节点固定身份：A 发起方 / B 跳板 / C 目标 / ghost 永不上线的假目标。
 const ID_A: &str = "relay-smoke-initiator-a";
@@ -504,13 +524,15 @@ where
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     任何用例的网络断言都不得悬挂拖死整轮测试；超时立即 panic 带用例名。
+///     慢 runner 上 B→C 健康探测可能超时导致 C 被暂时驱逐出 relay 表，经中转
+///     用例内置的离线恢复轮询（RELAY_RECOVERY_MAX_SECS）也必须落在总预算内。
 ///
 /// Code Logic（这个函数做什么）:
-///     `tokio::time::timeout(CASE_BUDGET, fut)` 包装，超时 panic。
+///     `tokio::time::timeout(CASE_TOTAL_BUDGET, fut)` 包装，超时 panic。
 async fn within_budget<T>(label: &str, fut: impl Future<Output = T>) -> T {
-    tokio::time::timeout(CASE_BUDGET, fut)
+    tokio::time::timeout(CASE_TOTAL_BUDGET, fut)
         .await
-        .unwrap_or_else(|_| panic!("用例预算（{CASE_BUDGET:?}）超时: {label}"))
+        .unwrap_or_else(|_| panic!("用例预算（{CASE_TOTAL_BUDGET:?}）超时: {label}"))
 }
 
 /// 解析并断言 P2P 错误信封的稳定 code 与 request_id。
@@ -560,15 +582,28 @@ fn find_device<'a>(devices: &'a [serde_json::Value], id: &str) -> Option<&'a ser
 async fn relay_case1_shadow_discovery_and_relay_peers() {
     let nodes = nodes();
     let client = http_client();
+    let base_b = nodes.base_url(nodes.port_b);
+    let client_for_peers = client.clone();
     within_budget("case1", async {
-        let peers: serde_json::Value = client
-            .get(format!("{}/api/relay/peers", nodes.base_url(nodes.port_b)))
-            .send()
-            .await
-            .expect("B /api/relay/peers 应可达")
-            .json()
-            .await
-            .expect("peers 应为 JSON");
+        // C 可能被慢 runner 上的探测超时暂时驱逐（fixture 收敛后仍可能发生），
+        // 轮询等待重新收敛而不是一次性断言。
+        let peers: serde_json::Value = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "B 的 relay peers 应包含 C（等待探测驱逐后重新收敛）",
+            move || {
+                let client = client_for_peers.clone();
+                let url = format!("{base_b}/api/relay/peers");
+                async move {
+                    let value: serde_json::Value =
+                        client.get(url).send().await.ok()?.json().await.ok()?;
+                    value
+                        .as_array()
+                        .is_some_and(|array| find_device(array, ID_C).is_some())
+                        .then_some(value)
+                }
+            },
+        )
+        .await;
         let peers = peers.as_array().expect("peers 数组");
         let entry = find_device(peers, ID_C)
             .unwrap_or_else(|| panic!("B 的 relay peers 应包含 C, peers={peers:?}"));
@@ -648,27 +683,48 @@ async fn relay_case1_shadow_discovery_and_relay_peers() {
 async fn relay_case2_health_binding_via_relay() {
     let nodes = nodes();
     let client = http_client();
+    let health_url = format!(
+        "{}/api/relay/{ID_C}/api/health",
+        nodes.base_url(nodes.port_b)
+    );
+    let client_for_health = client.clone();
     within_budget("case2", async {
-        let response = client
-            .get(format!(
-                "{}/api/relay/{ID_C}/api/health",
-                nodes.base_url(nodes.port_b)
-            ))
-            .header(EXPECTED_DEVICE_HEADER, ID_C)
-            .send()
-            .await
-            .expect("经中转的 health 请求应可达");
-        assert_eq!(
-            response.status().as_u16(),
-            200,
-            "经中转 health 应成功, {}",
-            nodes.diagnostics()
-        );
-        assert!(
-            response.headers().get("x-cc-request-id").is_some(),
-            "响应应携带全链 request_id"
-        );
-        let health: serde_json::Value = response.json().await.expect("health JSON");
+        let (status, request_id, health): (u16, Option<String>, serde_json::Value) = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "经中转 health 应成功（等待探测驱逐后重新收敛）",
+            move || {
+                let client = client_for_health.clone();
+                let url = health_url.clone();
+                async move {
+                    let response = client
+                        .get(url)
+                        .header(EXPECTED_DEVICE_HEADER, ID_C)
+                        .send()
+                        .await
+                        .expect("经中转的 health 请求应可达");
+                    if response.status().as_u16() == 404 {
+                        let body: serde_json::Value =
+                            response.json().await.expect("404 信封应为 JSON");
+                        // 目标被探测驱逐的瞬态 → 轮询等待恢复；其余 404 立即失败。
+                        if body["code"] == "relay_target_offline" {
+                            return None;
+                        }
+                        panic!("经中转 health 意外 404（非目标离线）, body={body}");
+                    }
+                    let request_id = response
+                        .headers()
+                        .get("x-cc-request-id")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    let status = response.status().as_u16();
+                    let health: serde_json::Value = response.json().await.expect("health JSON");
+                    Some((status, request_id, health))
+                }
+            },
+        )
+        .await;
+        assert_eq!(status, 200, "经中转 health 应成功, {}", nodes.diagnostics());
+        assert!(request_id.is_some(), "响应应携带全链 request_id");
         assert_eq!(
             health["device_id"], ID_C,
             "经中转返回的必须是 C 的身份（expected-device 绑定通过）"
@@ -694,15 +750,34 @@ async fn relay_case3_workbench_fs_read_via_relay() {
         nodes.base_url(nodes.port_b)
     );
     within_budget("case3", async {
-        let roots: serde_json::Value = client
-            .get(format!("{base}/fs/roots"))
-            .header(EXPECTED_DEVICE_HEADER, ID_C)
-            .send()
-            .await
-            .expect("经中转 fs/roots 应可达")
-            .json()
-            .await
-            .expect("roots 应为 JSON");
+        let client_for_roots = client.clone();
+        let roots_url = format!("{base}/fs/roots");
+        let roots: serde_json::Value = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "经中转 fs/roots 应成功（等待探测驱逐后重新收敛）",
+            move || {
+                let client = client_for_roots.clone();
+                let url = roots_url.clone();
+                async move {
+                    let response = client
+                        .get(url)
+                        .header(EXPECTED_DEVICE_HEADER, ID_C)
+                        .send()
+                        .await
+                        .expect("经中转 fs/roots 应可达");
+                    if response.status().as_u16() == 404 {
+                        let body: serde_json::Value =
+                            response.json().await.expect("404 信封应为 JSON");
+                        if body["code"] == "relay_target_offline" {
+                            return None;
+                        }
+                        panic!("经中转 fs/roots 意外 404（非目标离线）, body={body}");
+                    }
+                    Some(response.json().await.expect("roots 应为 JSON"))
+                }
+            },
+        )
+        .await;
         let roots = roots.as_array().expect("roots 数组");
         assert!(
             !roots.is_empty(),
@@ -714,16 +789,37 @@ async fn relay_case3_workbench_fs_read_via_relay() {
             "roots 条目应携带绝对 path"
         );
 
-        let listing: serde_json::Value = client
-            .post(format!("{base}/fs/list"))
-            .header(EXPECTED_DEVICE_HEADER, ID_C)
-            .json(&serde_json::json!({ "path": nodes.fs_marker_dir.display().to_string() }))
-            .send()
-            .await
-            .expect("经中转 fs/list 应可达")
-            .json()
-            .await
-            .expect("fs/list 应为 JSON");
+        let client_for_list = client.clone();
+        let list_url = format!("{base}/fs/list");
+        let marker_path = nodes.fs_marker_dir.display().to_string();
+        let listing: serde_json::Value = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "经中转 fs/list 应成功（等待探测驱逐后重新收敛）",
+            move || {
+                let client = client_for_list.clone();
+                let url = list_url.clone();
+                let body = serde_json::json!({ "path": marker_path });
+                async move {
+                    let response = client
+                        .post(url)
+                        .header(EXPECTED_DEVICE_HEADER, ID_C)
+                        .json(&body)
+                        .send()
+                        .await
+                        .expect("经中转 fs/list 应可达");
+                    if response.status().as_u16() == 404 {
+                        let envelope: serde_json::Value =
+                            response.json().await.expect("404 信封应为 JSON");
+                        if envelope["code"] == "relay_target_offline" {
+                            return None;
+                        }
+                        panic!("经中转 fs/list 意外 404（非目标离线）, body={envelope}");
+                    }
+                    Some(response.json().await.expect("fs/list 应为 JSON"))
+                }
+            },
+        )
+        .await;
         let entries = listing.as_array().expect("fs/list 数组");
         let subdir = entries
             .iter()
@@ -761,19 +857,41 @@ async fn relay_case4_events_ndjson_gap_via_relay() {
     let nodes = nodes();
     let client = http_client();
     within_budget("case4", async {
-        let mut response = client
-            .get(format!(
-                "{}/api/relay/{ID_C}/api/workbench/events",
-                nodes.base_url(nodes.port_b)
-            ))
-            .query(&[
-                ("afterOwnerInstanceId", "relay-smoke-stale-owner"),
-                ("afterSequence", "1"),
-            ])
-            .header(EXPECTED_DEVICE_HEADER, ID_C)
-            .send()
-            .await
-            .expect("经中转事件流应可达");
+        let client_for_events = client.clone();
+        let events_url = format!(
+            "{}/api/relay/{ID_C}/api/workbench/events",
+            nodes.base_url(nodes.port_b)
+        );
+        let mut response = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "经中转事件流应成功（等待探测驱逐后重新收敛）",
+            move || {
+                let client = client_for_events.clone();
+                let url = events_url.clone();
+                async move {
+                    let response = client
+                        .get(url)
+                        .query(&[
+                            ("afterOwnerInstanceId", "relay-smoke-stale-owner"),
+                            ("afterSequence", "1"),
+                        ])
+                        .header(EXPECTED_DEVICE_HEADER, ID_C)
+                        .send()
+                        .await
+                        .expect("经中转事件流应可达");
+                    if response.status().as_u16() == 404 {
+                        let body: serde_json::Value =
+                            response.json().await.expect("404 信封应为 JSON");
+                        if body["code"] == "relay_target_offline" {
+                            return None;
+                        }
+                        panic!("经中转事件流意外 404（非目标离线）, body={body}");
+                    }
+                    Some(response)
+                }
+            },
+        )
+        .await;
         assert_eq!(response.status().as_u16(), 200);
         let content_type = response
             .headers()
@@ -836,23 +954,51 @@ async fn relay_case4_events_ndjson_gap_via_relay() {
 #[tokio::test]
 async fn relay_case5_terminal_input_ws_via_relay() {
     let nodes = nodes();
+    let ws_url = format!(
+        "ws://127.0.0.1:{}/api/relay/{ID_C}/api/workbench/terminal-input-stream",
+        nodes.port_b
+    );
     within_budget("case5", async {
-        let ws_url = format!(
-            "ws://127.0.0.1:{}/api/relay/{ID_C}/api/workbench/terminal-input-stream",
-            nodes.port_b
-        );
-        let mut request = ws_url
-            .into_client_request()
-            .expect("构造终端输入 WS 握手请求");
-        request.headers_mut().insert(
-            "sec-websocket-protocol",
-            TERMINAL_INPUT_SUBPROTOCOL
-                .parse()
-                .expect("子协议 header 值"),
-        );
-        let (mut socket, response) = tokio_tungstenite::connect_async(request)
-            .await
-            .expect("经中转终端 WS 应连接成功");
+        let (mut socket, response) = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "经中转终端 WS 应连接成功（等待探测驱逐后重新收敛）",
+            move || {
+                let mut request = ws_url
+                    .clone()
+                    .into_client_request()
+                    .expect("构造终端输入 WS 握手请求");
+                request.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    TERMINAL_INPUT_SUBPROTOCOL
+                        .parse()
+                        .expect("子协议 header 值"),
+                );
+                async move {
+                    match tokio_tungstenite::connect_async(request).await {
+                        Ok(pair) => Some(pair),
+                        Err(error) => {
+                            // 目标被探测驱逐的瞬态 404 → 轮询等待恢复；其余握手失败立即失败。
+                            let offline = matches!(
+                                &error,
+                                tokio_tungstenite::tungstenite::Error::Http(response)
+                                    if response.status().as_u16() == 404
+                                        && response.body().as_ref().is_some_and(|bytes| {
+                                            std::str::from_utf8(bytes).is_ok_and(|text| {
+                                                text.contains("relay_target_offline")
+                                            })
+                                        })
+                            );
+                            if offline {
+                                None
+                            } else {
+                                panic!("经中转终端 WS 应连接成功: {error:?}")
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        .await;
         assert_eq!(
             response.headers().get("sec-websocket-protocol").unwrap(),
             TERMINAL_INPUT_SUBPROTOCOL,
@@ -1002,15 +1148,38 @@ async fn relay_case8_expected_device_guard() {
         let body = mismatch.text().await.expect("读取错误 body");
         assert_envelope_code("device_id_mismatch", &body);
 
-        let passed = client
-            .get(&url)
-            .header(EXPECTED_DEVICE_HEADER, ID_C)
-            .send()
-            .await
-            .expect("guard 放行响应应可达");
-        assert_eq!(passed.status().as_u16(), 200);
-        let health: serde_json::Value = passed.json().await.expect("health JSON");
-        assert_eq!(health["device_id"], ID_C);
+        let client_for_pass = client.clone();
+        let pass_url = url.clone();
+        let (passed_status, passed_health): (u16, serde_json::Value) = poll_until(
+            RELAY_RECOVERY_MAX_SECS,
+            "guard 放行后经中转 health 应成功（等待探测驱逐后重新收敛）",
+            move || {
+                let client = client_for_pass.clone();
+                let url = pass_url.clone();
+                async move {
+                    let response = client
+                        .get(url)
+                        .header(EXPECTED_DEVICE_HEADER, ID_C)
+                        .send()
+                        .await
+                        .expect("guard 放行响应应可达");
+                    if response.status().as_u16() == 404 {
+                        let body: serde_json::Value =
+                            response.json().await.expect("404 信封应为 JSON");
+                        if body["code"] == "relay_target_offline" {
+                            return None;
+                        }
+                        panic!("经中转 health 意外 404（非目标离线）, body={body}");
+                    }
+                    let status = response.status().as_u16();
+                    let health: serde_json::Value = response.json().await.expect("health JSON");
+                    Some((status, health))
+                }
+            },
+        )
+        .await;
+        assert_eq!(passed_status, 200);
+        assert_eq!(passed_health["device_id"], ID_C);
     })
     .await;
     println!("[pass] case8 expected-device guard 语义");
