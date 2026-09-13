@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-11T19:45:00.862Z",
+  "generatedAt": "2026-09-13T13:28:31.334Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -56,7 +56,7 @@
       "lines": 2864
     },
     "src-tauri/src/storage/agent_hub_repo.rs": {
-      "lines": 9699,
+      "lines": 9702,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
