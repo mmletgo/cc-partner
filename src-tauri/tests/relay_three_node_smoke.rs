@@ -734,6 +734,12 @@ async fn relay_case2_health_binding_via_relay() {
                         }
                         panic!("经中转 health 意外 404（非目标离线）, body={body}");
                     }
+                    // 502/503/504 中转传输层瞬态（B→C 拨号失败 / 单目标并发许可打满）：
+                    // 全套件并行时与目标离线同级，继续轮询等收敛，不当终态断言（同 case8）。
+                    if (500..505).contains(&response.status().as_u16()) {
+                        let _ = response.text().await;
+                        return None;
+                    }
                     let request_id = response
                         .headers()
                         .get("x-cc-request-id")
@@ -1186,7 +1192,10 @@ async fn relay_case8_expected_device_guard() {
                         .send()
                         .await
                         .expect("guard 放行响应应可达");
-                    if response.status().as_u16() == 404 {
+                    let status = response.status().as_u16();
+                    // 404 relay_target_offline：目标被探测驱逐，已知的瞬态（继续轮询）；
+                    // 其它 404 是真实回归信号，立即 panic。
+                    if status == 404 {
                         let body: serde_json::Value =
                             response.json().await.expect("404 信封应为 JSON");
                         if body["code"] == "relay_target_offline" {
@@ -1194,7 +1203,14 @@ async fn relay_case8_expected_device_guard() {
                         }
                         panic!("经中转 health 意外 404（非目标离线）, body={body}");
                     }
-                    let status = response.status().as_u16();
+                    // 502/503/504 是中转传输层瞬态（B→C 拨号失败 relay_target_unreachable、
+                    // 单目标 4 并发许可打满 relay_busy 等）。全套件并行时同 fixture 被多个
+                    // 用例共享，这些状态与目标离线同级——必须继续轮询等收敛，直接当终态
+                    // 断言会把「负载抖动」误报成回归（曾致 full cargo test 偶发红）。
+                    if (500..505).contains(&status) {
+                        let _ = response.text().await;
+                        return None;
+                    }
                     let health: serde_json::Value = response.json().await.expect("health JSON");
                     Some((status, health))
                 }

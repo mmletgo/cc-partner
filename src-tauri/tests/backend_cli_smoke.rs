@@ -1399,7 +1399,10 @@ fn http_get_status_body(host_port: &str, path: &str) -> Result<(u16, String), St
 ///
 /// Code Logic（这个测试做什么）:
 ///     构造临时 dist（`mobile.html` 写唯一 marker + `assets/smoke.js` 小文件），
-///     以 `CC_PARTNER_WEB_DIST` 指向它 spawn `serve`，轮询 control 与 health
+///     以 `CC_PARTNER_WEB_DIST` 指向它 spawn `serve`，并显式
+///     `CC_PARTNER_MOBILE_DEV_PROXY=0` 关闭 debug 构建的 `/mobile` 本地 Vite dev
+///     代理（Auto 模式会探测 127.0.0.1:5173，本机恰有 dev server 时响应会变成
+///     dev HTML，属于环境依赖污染），轮询 control 与 health
 ///     就绪后 GET `/mobile` 断言 200 且 body 含 marker、GET `/assets/smoke.js`
 ///     断言 200 且内容一致；最后 stop 并确认进程/control 文件清理（临时 dist
 ///     位于 case 目录内，由 SmokeCase Drop 统一删除）。
@@ -1434,12 +1437,17 @@ fn serve_serves_mobile_from_cc_partner_web_dist() {
     }
 
     // 以 CC_PARTNER_WEB_DIST 指向临时 dist spawn serve（等价 GUI packaged 注入的环境）。
+    // Business Logic: 断言依赖静态 dist 的唯一 marker，不能被本机 5173 的 Vite
+    // dev server 代理劫持（debug 默认 Auto 会反代出 dev HTML）。
+    // Code Logic: CC_PARTNER_MOBILE_DEV_PROXY=0 强制关闭 mobile dev 代理，
+    // 让 `/mobile` 只走静态 dist 服务路径，消除环境依赖。
     let bin = case.backend_bin.clone();
     let data_dir = case.data_dir.clone();
     let mut serve_child = match std::process::Command::new(&bin)
         .arg("serve")
         .env("CC_PARTNER_DATA_DIR", &data_dir)
         .env("CC_PARTNER_WEB_DIST", &dist_dir)
+        .env("CC_PARTNER_MOBILE_DEV_PROXY", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1541,7 +1549,10 @@ fn serve_serves_mobile_from_cc_partner_web_dist() {
 ///     若资源查找断链，用户手机打开 `/mobile` 会得到 404。
 ///
 /// Code Logic（这个测试做什么）:
-///     显式移除 `CC_PARTNER_WEB_DIST` 后直接 spawn `serve`，轮询 control 与 health
+///     显式移除 `CC_PARTNER_WEB_DIST` 后直接 spawn `serve`，并显式
+///     `CC_PARTNER_MOBILE_DEV_PROXY=0` 关闭 debug 构建的本地 Vite dev 代理——
+///     否则本机 5173 有 dev server 时响应来自代理，用例会在没验证静态兜底的
+///     情况下"假通过"。轮询 control 与 health
 ///     就绪后 GET `/mobile` 断言 200 且 body 含 `<!doctype html` 或 `mobile`；
 ///     最后 stop 并确认 serve child 退出（try_wait 防僵尸误报）与 control/pid 文件清理。
 #[test]
@@ -1554,12 +1565,18 @@ fn serve_serves_mobile_without_web_dist_env() {
     let mut case = SmokeCase::new("web-dist-mobile-no-env").expect("创建 smoke case");
 
     // 不注入 CC_PARTNER_WEB_DIST（显式移除防外部环境泄漏），等价裸二进制单文件部署。
+    // Business Logic: 本用例验证的是无 env 时 serve 自身的静态兜底（磁盘源码树
+    // 路径或嵌入资源）；宽松断言（doctype/mobile）对 Vite dev HTML 也成立，若被
+    // 本机 5173 代理劫持会"假通过"，等于没测兜底。
+    // Code Logic: CC_PARTNER_MOBILE_DEV_PROXY=0 强制关闭 mobile dev 代理，
+    // 确保响应来自 serve 静态兜底而非外部 dev server。
     let bin = case.backend_bin.clone();
     let data_dir = case.data_dir.clone();
     let mut serve_child = match std::process::Command::new(&bin)
         .arg("serve")
         .env("CC_PARTNER_DATA_DIR", &data_dir)
         .env_remove("CC_PARTNER_WEB_DIST")
+        .env("CC_PARTNER_MOBILE_DEV_PROXY", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

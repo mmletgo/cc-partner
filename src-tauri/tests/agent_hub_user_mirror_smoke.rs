@@ -18,6 +18,13 @@
 //! NOT VERIFIED（本 smoke 不宣称）:
 //!     - 真实双主机 mDNS / 多进程 backend / LAN 身份认证（L3）
 //!     - 打包 GUI / 全平台矩阵
+//!
+//! SAFETY（并发说明）:
+//!     activate_owner 会改进程级 HOME / CC_PARTNER_DATA_DIR 并 remove
+//!     CLAUDE_CONFIG_DIR 等覆盖键。本文件全部测试通过文件级 `SERIAL` 异步互斥锁
+//!     自串行化（tokio Mutex 无中毒语义，用例 panic 不影响后续拿锁），同一时刻
+//!     只有一个用例持有进程 env，因此任意调用方式——含默认并行
+//!     `cargo test --locked` 与 `--test-threads=1`——都安全。
 
 use app_lib::agent_catalog::all_hub_targets;
 use app_lib::agent_hub::portable_inventory::{
@@ -60,6 +67,22 @@ const SRC_CODEX: &str = "FROM-SRC-CODEX";
 const SRC_GROK: &str = "FROM-SRC-GROK";
 const KEEP_SKILL_BODY: &str = "KEEP-SKILL-BODY";
 const REPO_AGENTS: &str = "REPO-AGENTS-MUST-STAY";
+
+/// Business Logic（为什么需要这个静态量）:
+///     本文件 3 个 `#[tokio::test]` 都会经 `activate_owner` 改进程级 HOME /
+///     CC_PARTNER_DATA_DIR 并 remove CLAUDE_CONFIG_DIR 等覆盖键；`cargo test`
+///     默认并行会让不同用例在不同线程同时改/读 HOME，互相污染，产生
+///     `duplicate column name` / inventory 错设备 / USER_NATIVE_INSTRUCTION_STALE
+///     等随机失败（单跑任一用例均绿）。
+///
+/// Code Logic（这个静态量做什么）:
+///     文件级异步互斥锁（经 `OnceLock` 惰性构造：`tokio::sync::Mutex::new`
+///     在当前 tokio 版本非 const fn）：每个测试函数体开头 `lock().await` 取得
+///     guard 并持有到函数结束，强制同文件用例串行执行。用 `tokio::sync::Mutex`
+///     而非 `std::sync::Mutex`：guard 需要跨 await 持有（std 版会触发 clippy
+///     `await_holding_lock`），且 tokio 版无中毒语义，某用例 panic 后后续用例
+///     仍可正常拿锁。
+static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 struct DualEnv {
     _root: tempfile::TempDir,
@@ -171,7 +194,10 @@ fn assert_dest_sees_mcp(
     );
 }
 
-/// SAFETY: 本文件必须 `--test-threads=1`；切换 owner 会改进程 HOME / CC_PARTNER_DATA_DIR。
+/// SAFETY: 切换 owner 会改进程级 HOME / CC_PARTNER_DATA_DIR。本文件所有测试已
+/// 通过文件级 `SERIAL` 互斥锁自串行化（见模块头与 `SERIAL` 文档），同一时刻
+/// 仅一个用例持有进程 env，任意调用方式（含默认并行 `cargo test --locked`）
+/// 都安全；历史要求的 `--test-threads=1` 不再是正确性前提，仅作加速复用。
 ///
 /// DualEnv 单测用空 vars 解析 MCP 为 `$HOME/.claude.json`。这里清掉 CLAUDE_CONFIG_DIR
 /// 等覆盖键，避免 MCP 落到 `$HOME/.claude/.claude.json` 而夹具写不到。
@@ -468,6 +494,13 @@ async fn bind_loopback(app: Router) -> (String, tokio::task::JoinHandle<()>) {
 /// L2-AGENT-HUB-USER-MIRROR-001：双 data_dir 全量镜像 + frozen loopback 能力门。
 #[tokio::test]
 async fn l2_agent_hub_user_mirror_001_full_mirror() {
+    // Business Logic: activate_owner 会改进程级 env，默认并行 cargo test 下必须
+    // 独占 SERIAL 才能避免用例间 HOME 污染。
+    // Code Logic: 异步锁 guard 跨 await 持有（tokio Mutex 无中毒语义），守护整个测试体。
+    let _serial_guard = SERIAL
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let dual = setup_dual_env();
     seed_source_home(&dual.source_home);
     seed_dest_home(&dual.dest_home);
@@ -726,6 +759,13 @@ async fn l2_agent_hub_user_mirror_001_full_mirror() {
 /// L2-AGENT-HUB-USER-MIRROR-002：单 Agent 写失败不回滚，同 request 重放。
 #[tokio::test]
 async fn l2_agent_hub_user_mirror_002_partial_no_rollback() {
+    // Business Logic: activate_owner 会改进程级 env，默认并行 cargo test 下必须
+    // 独占 SERIAL 才能避免用例间 HOME 污染。
+    // Code Logic: 异步锁 guard 跨 await 持有（tokio Mutex 无中毒语义），守护整个测试体。
+    let _serial_guard = SERIAL
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let dual = setup_dual_env();
     write(&dual.source_home.join(".claude/CLAUDE.md"), SRC_CLAUDE);
     write(&dual.source_home.join(".codex/AGENTS.md"), SRC_CODEX);
@@ -847,6 +887,13 @@ async fn l2_agent_hub_user_mirror_002_partial_no_rollback() {
 /// L2-AGENT-HUB-USER-MIRROR-003：dest extras 策略。
 #[tokio::test]
 async fn l2_agent_hub_user_mirror_003_extras_policy() {
+    // Business Logic: activate_owner 会改进程级 env，默认并行 cargo test 下必须
+    // 独占 SERIAL 才能避免用例间 HOME 污染。
+    // Code Logic: 异步锁 guard 跨 await 持有（tokio Mutex 无中毒语义），守护整个测试体。
+    let _serial_guard = SERIAL
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let dual = setup_dual_env();
     seed_source_home(&dual.source_home);
     seed_dest_home(&dual.dest_home);
