@@ -69,10 +69,12 @@ const VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 420;
 /// health/capability 探测专用短超时。
 ///
 /// Business Logic（为什么需要这个常量）:
-///     health 响应体极小（<1KiB），实际物理延迟 ~40ms（直连）或 ~200ms（DERP），15s 的 Short
-///     超时对它而言太长：跨境链路瞬时黑洞会让单次探测空等 15s 才失败，再叠加重试退避体感很差。
-///     5s 远超 health 实际需要，主要价值是黑洞时快速失败、尽快交给下一次重试。
-const HEALTH_PROBE_TIMEOUT_SECS: u64 = 5;
+///     health 响应体极小（<1KiB），直连时实际物理延迟 ~40ms；但 overlay（Tailscale 类）链路
+///     在打洞失败/中继切换窗口会劣化到 RTT 2.5s 级（DERP 中继，实测见 2026-09-14 案例），
+///     此时 HTTP 一次往返需 2~3 个 RTT ≈ 5~7.5s，若超时仍设 5s 会把「链路慢」误判成
+///     「链路黑洞」导致探测连败、UI 报错。10s 覆盖 DERP 级往返仍保留快速失败价值
+///     （远低于 Short 15s，真黑洞时尽快交给下一次重试）。
+const HEALTH_PROBE_TIMEOUT_SECS: u64 = 10;
 
 /// 远端 health/capability 探测的有界传输层重试上限（含首次尝试）。
 ///
@@ -98,7 +100,7 @@ enum RemoteRequestTimeoutKind {
     Long,
     VeryLong,
     /// health/capability 探测专用短超时，配合 `get_json_with_retry` 在跨境链路瞬时黑洞时
-    /// 快速失败、把总探测窗口缩到合理范围（4 次 × 5s + 退避 ≈ 最坏 23s）。
+    /// 快速失败、把总探测窗口缩到合理范围（4 次 × 10s + 退避 ≈ 最坏 42.8s）。
     HealthProbe,
     /// merge：HTTP 无墙钟，由对端 Claude CLI idle（连续 300s 无输出）结束。
     UntilPeerReturns,
@@ -2196,7 +2198,7 @@ mod tests {
         );
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::HealthProbe),
-            Some(Duration::from_secs(5))
+            Some(Duration::from_secs(10))
         );
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::UntilPeerReturns),
