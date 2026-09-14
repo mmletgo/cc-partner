@@ -2,7 +2,14 @@
   "title": "Provider Manager",
   "subtitle": "Switch the active provider for each agent configured in cc-switch. Switching is delegated to the cc-switch CLI; your existing cc-switch GUI keeps working.",
   "loadFailed": "Failed to load provider status: {{error}}",
+  "remoteLoadFailed": "Failed to load provider status from the remote device: {{error}}",
   "noProviders": "No configured providers found. Configure providers in cc-switch first.",
+  "device": {
+    "selectorLabel": "Target device",
+    "local": "This device",
+    "remoteTarget": "Managing providers on remote device \"{{device}}\"; switches run on that device.",
+    "viaSuffix": "{{name}} (via {{via}})"
+  },
   "actions": {
     "switch": "Switch",
     "enabled": "Enabled",
@@ -14,6 +21,8 @@
     "current": "Current",
     "cliMissing": "cc-switch CLI is not installed, so switching is disabled.",
     "cliMissingHint": "Installing cc-switch CLI shares data with your existing cc-switch and will not affect the GUI.",
+    "cliMissingRemote": "cc-switch CLI is not installed on the remote device, so remote switching is unavailable.",
+    "cliMissingHintRemote": "Install cc-switch CLI on the remote device, then come back here and recheck.",
     "dbMissing": "No cc-switch data found. Install cc-switch and configure at least one provider first.",
     "versionMismatch": "cc-switch GUI v{{guiVersion}} and CLI v{{cliVersion}} differ — align releases so a switch does not trigger a migration the GUI cannot read.",
     "guiRunning": "cc-switch GUI is open. Switching is safe; its window may show a stale current until you refresh it.",

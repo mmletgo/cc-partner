@@ -80,7 +80,11 @@ impl AgentApp {
 }
 
 /// cc-switch CLI 检测结果。
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// Business Logic: 同一 DTO 既用于本机 IPC 返回，也作为远端 `provider-manager.v1`
+///     summary 路由的 wire 响应体（`RemoteProviderManagerClient` 需反序列化对端返回），
+///     因此同时 derive Serialize/Deserialize，camelCase 形状不变。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliStatus {
     /// 是否检测到一个"行为像 CLI"的 cc-switch 可执行文件。
@@ -92,7 +96,7 @@ pub struct CliStatus {
 }
 
 /// cc-switch GUI 检测结果（best-effort，只读，从不启动或修改 GUI）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CcSwitchGuiStatus {
     pub installed: bool,
@@ -104,7 +108,7 @@ pub struct CcSwitchGuiStatus {
 }
 
 /// 单个 provider 摘要（不含 `settings_config`/API key 等敏感字段）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderEntry {
     pub id: String,
@@ -114,7 +118,7 @@ pub struct ProviderEntry {
 }
 
 /// 某 agent 下全部 provider 及其当前 provider id。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppProviders {
     pub app: AgentApp,
@@ -123,7 +127,7 @@ pub struct AppProviders {
 }
 
 /// Provider Manager 页面整体状态快照。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderManagerSummary {
     pub cc_switch_db_present: bool,

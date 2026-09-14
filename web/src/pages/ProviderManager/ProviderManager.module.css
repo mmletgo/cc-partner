@@ -44,6 +44,27 @@
   font-size: var(--text-sm);
 }
 
+/* 目标设备选择器：本机 + 在线远端设备 chip 行 */
+.deviceBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.deviceLabel {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+/* 远端模式下 header 中提示当前目标设备名 */
+.remoteTarget {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--fg-2);
+  margin: var(--space-1) 0 0;
+}
+
 .appSection {
   display: flex;
   flex-direction: column;

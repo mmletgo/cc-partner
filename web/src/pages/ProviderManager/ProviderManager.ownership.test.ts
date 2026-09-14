@@ -28,5 +28,7 @@ describe('ProviderManager ownership (controller/view split)', () => {
 
   test('controller is the transport entry point', () => {
     expect(controller).toContain('@/api/providerManager');
+    // 目标设备选择器的设备列表同样只允许 controller 调 transport。
+    expect(controller).toContain('@/api/devices');
   });
 });

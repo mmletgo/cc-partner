@@ -13,6 +13,7 @@
 - **Prompt 管理** — 记录 / 复制 / 打标签 / 跨设备同步
 - **Prompt 优化** — 调用本机 Claude Code CLI 生成优化版 Prompt（结果语言跟随当前界面语种）
 - **速记本** — 多页面自动保存文本，支持页面标题、局域网与 GitHub 同步
+- **Provider 管理** — `/provider-manager` 查询并切换 cc-switch 已配置的各 agent provider（读 cc-switch SQLite + 委托 CLI 写盘，不编辑详情、不带 API key）；支持本机与局域网远端设备（含跳板影子设备）目标切换
 - **工作台** — 指定本机或局域网远端项目文件夹，管理 Git worktree、多个项目终端、文件工作区、Git 提交树和项目自动化看板
 - **Agent Hub** — `/agent-hub` 统一管理 Claude/Codex/OpenCode/Grok Build/Gemini CLI/Cursor CLI/Pi 用户级与项目级指令（公共/适配/独有三槽 + AI 辅助修订）与 Skill/Command/Agent/MCP 可移植资产；用户级 Pull/Push = 全 Agent 镜像，见 [`docs/superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md`](docs/superpowers/specs/2026-08-23-agent-hub-user-mirror-design.md)；身份目录见 `src-tauri/src/agent_catalog`
 - **移动端 Workbench** — 局域网内通过 `/mobile` 手机浏览器远程操作 Workbench（无调用者身份校验；同一可达网络任意设备可读写执行）；本机可作为手机到远端设备的二级代理，统一管理远端项目的 worktree、终端、文件、Git、Prompt 优化和项目自动化，桌面端展示访问链接、二维码与固定风险提示
@@ -95,6 +96,7 @@ cc-partner/
 │   │   │   ├── GamePluginPlayer/  # 插件游戏全应用播放器（不进路由，由 GameHubDialog 挂载）
 │   │   │   ├── ActivityStats/     # 活动统计（应用/窗口排行 + 小时分布）
 │   │   │   ├── TokenStats/        # Token 统计（KPI / 趋势 / 三维拆分 / 导出）
+│   │   │   ├── ProviderManager/   # Provider 管理（/provider-manager）：本机或局域网远端设备的 cc-switch provider 查询/切换
 │   │   │   ├── Welcome/          # 06-welcome.html
 │   │   │   └── DesignSystem/     # 🆕 设计系统预览（仅 dev）
 │   │   ├── api/                  # 桌面 invoke + mobile HTTP 封装（含 attention / workbenchHttp）

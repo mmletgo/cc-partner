@@ -14,9 +14,12 @@
 //!
 //! 无 AppState 字段、无 axum 路由、不写 `~/.cc-switch` 与各 agent 活配置文件。
 //! 切换是本机 GUI 进程的文件/CLI IO（与 `claude_code_assets` 同一先例）。
+//! 远端设备的查询/切换经 `remote.rs` 的 `RemoteProviderManagerClient` 走对端
+//! 既有 P2P 路由（`provider-manager.v1`），本模块自身仍保持无路由。
 
 mod cc_switch_cli;
 pub mod models;
+pub mod remote;
 mod store;
 
 pub use models::{
