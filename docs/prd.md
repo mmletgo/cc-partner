@@ -489,7 +489,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 页面顶部为目标设备选择器：默认「本机」，可切换到局域网内任意在线 cc-partner 设备（含经跳板可见的影子设备，带「经 X 中转」标记）；mDNS 能力提示不可靠（有 220 字节截断），设备列表不按能力过滤，对端版本过旧时在加载时报「对端不支持 Provider 管理」类错误
 - 选中远端设备后，状态快照（DB 存在性 / CLI 检测 / GUI 检测 / 各 agent provider 列表）与切换动作全部作用于该设备：本机 GUI 进程经 loopback control 代理到 sidecar，sidecar 以 `device_base_url`（直连优先，影子走 `/api/relay/{target}` 前缀）调用对端 `/api/provider-manager/{summary,switch}`（能力 token `provider-manager.v1`）
 - 切换为非幂等远端 CLI 写盘，遵循 no-transport-retry（客户端不重试传输层失败）；设备离线返回「远端设备不在线」
-- 远端模式下「安装 cc-switch CLI」动作隐藏（安装只能在本机执行）；远端 CLI 缺失时提示到对端设备安装后再切换
+- cc-switch CLI 安装支持本机与远端：远端 CLI 缺失时页面显示「在对端安装」按钮，经对端 `POST /api/provider-manager/install-cli`（能力 token `provider-manager.install.v1`，长超时链路：远端 420s / control 代理 360s，单次不重试）在对端执行安装；macOS 自动 brew 安装并共享对端 cc-switch 数据，其余平台返回对端人工指引文案
 - 移动端 `/mobile` 的 Provider 面板仍只操作提供 `/mobile` 页的那台设备，不跨设备（后续如需另行评审）
 
 ## 3. 非功能需求

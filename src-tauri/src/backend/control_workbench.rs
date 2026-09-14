@@ -970,6 +970,14 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(item)?)
         }
+        "provider-manager.install" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item = crate::commands::provider_manager::provider_manager_install_cli_for_state(
+                state, device_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
 
         other => Err(AppError::validation(format!(
             "未知 workbench control op: {other}"
@@ -1480,6 +1488,19 @@ mod tests {
         assert!(
             src.contains("\"provider-manager.switch\" =>"),
             "dispatch_workbench_op 必须注册 provider-manager.switch"
+        );
+    }
+
+    /// GuiClient 的 Provider Manager 远端安装必须经 control 代理到 sidecar owner；
+    /// 缺 arm 会返回「未知 workbench control op: provider-manager.install」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op。
+    #[test]
+    fn dispatch_recognizes_provider_manager_install() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"provider-manager.install\" =>"),
+            "dispatch_workbench_op 必须注册 provider-manager.install"
         );
     }
 

@@ -2,25 +2,33 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     桌面端 Provider Manager 页允许把局域网内其他 cc-partner 设备作为目标，查询/切换
-//!     对端 cc-switch 已配置的 provider。对端已有现成 P2P 路由（`GET
-//!     /api/provider-manager/summary`、`POST /api/provider-manager/switch`，能力 token
-//!     `provider-manager.v1`），本模块只做客户端封装，不新增任何 P2P 路由。
+//!     对端 cc-switch 已配置的 provider，并在对端安装 cc-switch CLI。对端已有现成 P2P
+//!     路由（`GET /api/provider-manager/summary`、`POST /api/provider-manager/switch`，
+//!     能力 token `provider-manager.v1`）与本轮新增的 `POST
+//!     /api/provider-manager/install-cli`（能力 token `provider-manager.install.v1`），
+//!     本模块只做客户端封装。
 //!
 //! Code Logic（这个模块做什么）:
 //!     `RemoteProviderManagerClient` 仿 `workbench::remote_client::RemoteWorkbenchClient`
 //!     的最小子集：自持 `reqwest::Client`，每个出站请求带 `X-CC-Request-Id`（多跳调用链
 //!     关联）；可选绑定 `X-Cc-Partner-Expected-Device-Id`，绑定时先做 health 预检（要求
 //!     对端宣告 `device.request-binding.v1` 且 device_id 精确匹配，防 stale peer 映射
-//!     fail-open 打错设备）。调用前经 `PeerClient::require_capability` 预检
-//!     `provider-manager.v1`，对端版本过旧时返回可区分的中文 validation 错误。
+//!     fail-open 打错设备）。调用前经 `PeerClient::require_capability` 预检对应能力 token，
+//!     对端版本过旧时返回可区分的中文 validation 错误。
 //!     网络错误/非 2xx/对端错误信封统一经 `net::peer_error` 解析并透出对端 message。
-//!     switch 在对端是 cc-switch CLI 写盘（非幂等），按协议约定单次发送、不做传输重试。
+//!     switch 与 install 在对端是 cc-switch CLI 写盘/安装（非幂等），按协议约定单次发送、
+//!     不做传输重试；install 超时 420s（brew 安装可能数分钟）。
 
 use crate::error::AppError;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::{parse_peer_response, peer_call_error_to_app_error, PeerCallError};
-use crate::net::protocol::{CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_PROVIDER_MANAGER_V1};
-use crate::provider_manager::models::{AgentApp, AppProviders, ProviderManagerSummary};
+use crate::net::protocol::{
+    CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_PROVIDER_MANAGER_INSTALL_V1,
+    CAPABILITY_PROVIDER_MANAGER_V1,
+};
+use crate::provider_manager::models::{
+    AgentApp, AppProviders, InstallResult, ProviderManagerSummary,
+};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
@@ -29,6 +37,10 @@ const SUMMARY_TIMEOUT_SECS: u64 = 15;
 
 /// switch（对端 CLI 写盘）请求超时。
 const SWITCH_TIMEOUT_SECS: u64 = 120;
+
+/// install（对端 CLI 安装；macOS brew 可能数分钟）请求超时，
+/// 对齐 `workbench::remote_client` 的 VeryLong 语义。
+const INSTALL_TIMEOUT_SECS: u64 = 420;
 
 /// 错误文案里的客户端标签，便于日志定位调用方。
 const CLIENT_LABEL: &str = "远端 Provider 管理";
@@ -58,7 +70,8 @@ struct RemoteProviderSwitchReq<'a> {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     持有 cloneable 的 `reqwest::Client` 与可选的期望 device_id 绑定；对外提供
-///     `summary`（GET，15s 超时）与 `switch`（POST，120s 超时、单次不重试）。
+///     `summary`（GET，15s 超时）、`switch`（POST，120s 超时、单次不重试）与
+///     `install_cli`（POST，420s 超时、单次不重试）。
 #[derive(Clone)]
 pub struct RemoteProviderManagerClient {
     client: reqwest::Client,
@@ -143,6 +156,32 @@ impl RemoteProviderManagerClient {
         .await
     }
 
+    /// 安装远端设备的 cc-switch CLI（显式用户动作）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     选中远端设备且对端未安装 cc-switch CLI 时，用户应能在本页直接对对端执行安装，
+    ///     而不是只能收到"请去对端安装"的提示。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     预检 `provider-manager.install.v1` 能力（缺失 → validation 中文错误，引导升级对端）
+    ///     → POST `{base}/api/provider-manager/install-cli`（无业务请求体，420s 超时）。
+    ///     install 在对端是 brew 写盘（非幂等），按协议约定单次发送，**不做**传输层重试；
+    ///     返回对端 `InstallResult`（macOS brew 成功/失败，其余平台 manual 人工指引）。
+    pub async fn install_cli(&self, base_url: &str) -> Result<InstallResult, AppError> {
+        self.require_capability_with_label(
+            base_url,
+            CAPABILITY_PROVIDER_MANAGER_INSTALL_V1,
+            "远程安装 cc-switch CLI",
+        )
+        .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/provider-manager/install-cli"),
+            &serde_json::Map::<String, serde_json::Value>::new(),
+            Duration::from_secs(INSTALL_TIMEOUT_SECS),
+        )
+        .await
+    }
+
     /// 能力门：调用远端路由前检查对端是否支持 `provider-manager.v1`。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -151,18 +190,43 @@ impl RemoteProviderManagerClient {
     ///     而不是模糊的网络失败。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     `PeerClient::require_capability(base_url, provider-manager.v1)`；缺失 →
-    ///     validation 中文错误（含"版本过旧"与能力 token，文案与网络错误可区分）；
-    ///     其他探测失败（离线/响应非法）→ 经 `peer_call_error_to_app_error` 统一映射。
-    ///     探测成功只需布尔结论，丢弃 `HealthResponse` 载荷。
+    ///     委托通用 `require_capability_with_label`，功能标签为 "Provider 管理"。
     async fn require_provider_manager_capability(&self, base_url: &str) -> Result<(), AppError> {
+        self.require_capability_with_label(
+            base_url,
+            CAPABILITY_PROVIDER_MANAGER_V1,
+            "Provider 管理",
+        )
+        .await
+    }
+
+    /// 能力门通用实现（summary/switch 与 install 共享，避免文案与映射逻辑漂移）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     所有 provider-manager 远端调用的能力预检共享同一错误语义：缺 token 时给
+    ///     可区分的中文 validation 错误（含功能标签与能力 token，引导升级对端），
+    ///     其余探测失败（离线/响应非法）统一映射。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `PeerClient::require_capability(base_url, capability)`；缺失 →
+    ///     validation 中文错误（"对端设备版本过旧，不支持{feature}（{url} 缺少能力
+    ///     {capability}）；请在对端升级 cc-partner 后重试"）；其他探测失败 →
+    ///     经 `peer_call_error_to_app_error` 统一映射。探测成功只需布尔结论，
+    ///     丢弃 `HealthResponse` 载荷。capability 为 `&'static str`（能力 token 常量，
+    ///     对齐 `PeerClient::require_capability` 签名）。
+    async fn require_capability_with_label(
+        &self,
+        base_url: &str,
+        capability: &'static str,
+        feature: &str,
+    ) -> Result<(), AppError> {
         PeerClient::new()
-            .require_capability(base_url, CAPABILITY_PROVIDER_MANAGER_V1)
+            .require_capability(base_url, capability)
             .await
             .map(|_health| ())
             .map_err(|err| match err {
                 PeerCallError::Unsupported { url, capability } => AppError::validation(format!(
-                    "对端设备版本过旧，不支持 Provider 管理（{url} 缺少能力 {capability}）；请在对端升级 cc-partner 后重试"
+                    "对端设备版本过旧，不支持{feature}（{url} 缺少能力 {capability}）；请在对端升级 cc-partner 后重试"
                 )),
                 other => peer_call_error_to_app_error(other, CLIENT_LABEL),
             })
@@ -230,12 +294,13 @@ impl RemoteProviderManagerClient {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     远端 POST（switch）与 GET 共享绑定预检/注入/错误映射，仅方法与超时不同；
-    ///     且必须单次发送（对端 CLI 写盘非幂等，协议 no-transport-retry）。
+    ///     远端 POST（switch/install）与 GET 共享绑定预检/注入/错误映射，仅方法与超时不同；
+    ///     且必须单次发送（对端 CLI 写盘/安装非幂等，协议 no-transport-retry）。
     ///
     /// Code Logic（这个函数做什么）:
     ///     已绑定期望设备时先做 health 绑定预检；随后 POST JSON body（附 `X-CC-Request-Id`
-    ///     新 UUID 与期望设备 header，120s 超时，单次不重试），委托 `parse_json_response`。
+    ///     新 UUID 与期望设备 header，按调用方传入的超时，单次不重试），委托
+    ///     `parse_json_response`。
     async fn post_json<T, B>(&self, url: String, body: &B, timeout: Duration) -> Result<T, AppError>
     where
         T: DeserializeOwned,
@@ -711,6 +776,145 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             1,
             "switch 禁止传输层自动重试"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧版对端缺 `provider-manager.install.v1` 时必须给出可区分的中文错误（引导升级），
+    ///     且文案要指向"远程安装 cc-switch CLI"这一具体功能，与 summary/switch 的能力缺失
+    ///     提示可区分，分类必须是 validation。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 只宣告 errors.envelope.v1，调用 install_cli 应失败：文案含「版本过旧」
+    ///     「远程安装 cc-switch CLI」与能力 token，classify() == Validation。
+    #[tokio::test]
+    async fn install_missing_capability_maps_to_distinct_chinese_validation_error() {
+        let app = Router::new().route(
+            "/api/health",
+            get(|| async { Json(health_json("dev-A", &["errors.envelope.v1"])) }),
+        );
+        let base = spawn_server(app).await;
+
+        let error = RemoteProviderManagerClient::new()
+            .install_cli(&base)
+            .await
+            .expect_err("缺能力应失败");
+
+        let message = error.to_string();
+        assert!(message.contains("版本过旧"), "文案应可区分: {message}");
+        assert!(
+            message.contains("远程安装 cc-switch CLI"),
+            "文案应可区分: {message}"
+        );
+        assert!(message.contains("provider-manager.install.v1"));
+        assert_eq!(error.classify(), AppErrorCategory::Validation);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端安装必须打约定的 POST 路由并解析对端 `InstallResult`（camelCase DTO），
+    ///     出站带 request id；manual 指引形态（ok=false + message/url）也要原样透传。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     临时服务宣告 provider-manager.install.v1 并返回 manual 指引 JSON，断言客户端
+    ///     解析出 method/ok/message/url，且出站带 36 字符 `X-CC-Request-Id`。
+    #[tokio::test]
+    async fn install_posts_route_and_parses_install_result() {
+        let observed_request_id = Arc::new(Mutex::new(String::new()));
+        let observed = observed_request_id.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(health_json(
+                        "dev-A",
+                        &["provider-manager.install.v1", "errors.envelope.v1"],
+                    ))
+                }),
+            )
+            .route(
+                "/api/provider-manager/install-cli",
+                post(move |headers: axum::http::HeaderMap| {
+                    let observed = observed.clone();
+                    async move {
+                        let id = headers
+                            .get("x-cc-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        *observed.lock().unwrap() = id;
+                        Json(serde_json::json!({
+                            "method": "manual",
+                            "ok": false,
+                            "version": null,
+                            "path": null,
+                            "message": "未检测到 Homebrew。请安装 cc-switch-cli。",
+                            "url": "https://github.com/SaladDay/cc-switch-cli#-installation"
+                        }))
+                    }
+                }),
+            );
+        let base = spawn_server(app).await;
+
+        let result = RemoteProviderManagerClient::new()
+            .install_cli(&base)
+            .await
+            .expect("install 应成功解析对端 InstallResult");
+
+        assert_eq!(result.method, "manual");
+        assert!(!result.ok);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("未检测到 Homebrew。请安装 cc-switch-cli。")
+        );
+        assert_eq!(
+            result.url.as_deref(),
+            Some("https://github.com/SaladDay/cc-switch-cli#-installation")
+        );
+        assert_eq!(
+            observed_request_id.lock().unwrap().len(),
+            36,
+            "出站必须带 36 字符 UUID request id"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     install 在对端是 brew 安装（非幂等）；客户端任何路径都不得对它做自动传输重试
+    ///     （协议 no-transport-retry）。用对端观测调用次数锁死：单次调用即使失败也只应
+    ///     产生 1 次出站请求。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     install-cli 路由返回 503 并计数；调用一次失败后断言对端恰好观测到 1 次请求。
+    #[tokio::test]
+    async fn install_does_not_transport_retry_on_failure() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async { Json(health_json("dev-A", &["provider-manager.install.v1"])) }),
+            )
+            .route(
+                "/api/provider-manager/install-cli",
+                post(move |attempts: State<Arc<AtomicU32>>| async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "boom",
+                            "code": "unavailable",
+                            "retryable": true
+                        })),
+                    )
+                }),
+            )
+            .with_state(attempts.clone());
+        let base = spawn_server(app).await;
+
+        let result = RemoteProviderManagerClient::new().install_cli(&base).await;
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "install 禁止传输层自动重试"
         );
     }
 }

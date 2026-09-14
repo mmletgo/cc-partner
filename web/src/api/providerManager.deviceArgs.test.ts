@@ -2,9 +2,9 @@
  * providerManagerApi deviceId 分流契约单元测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   Provider Manager 支持把 summary/switch 的作用目标切到局域网对端 cc-partner 设备；
- *   Tauri 命令契约是可选 `deviceId` 参数（Rust Option<String>）——本机调用不得携带该键，
- *   远端调用必须携带，避免后端把缺失键误判为远端。
+ *   Provider Manager 支持把 summary/switch/installCli 的作用目标切到局域网对端 cc-partner
+ *   设备；Tauri 命令契约是可选 `deviceId` 参数（Rust Option<String>）——本机调用不得携带
+ *   该键，远端调用必须携带，避免后端把缺失键误判为远端。
  *
  * Code Logic（这个测试做什么）:
  *   mock ./client 的 invokeDecoded，断言命令名与 args 形状（deviceId 有无分流）。
@@ -67,6 +67,33 @@ describe('providerManagerApi deviceId 分流', () => {
     expect(mockInvokeDecoded).toHaveBeenCalledWith(
       'provider_manager_switch',
       { app: 'codex', providerId: 'p2', deviceId: 'dev-9' },
+      expect.anything(),
+    );
+  });
+
+  test('installCli 本机：不携带 deviceId 参数', async () => {
+    await providerManagerApi.installCli();
+    expect(mockInvokeDecoded).toHaveBeenCalledWith(
+      'provider_manager_install_cli',
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  test('installCli(null) 本机：不携带 deviceId 参数', async () => {
+    await providerManagerApi.installCli(null);
+    expect(mockInvokeDecoded).toHaveBeenCalledWith(
+      'provider_manager_install_cli',
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  test('installCli(deviceId) 远端：args 携带 { deviceId }', async () => {
+    await providerManagerApi.installCli('dev-9');
+    expect(mockInvokeDecoded).toHaveBeenCalledWith(
+      'provider_manager_install_cli',
+      { deviceId: 'dev-9' },
       expect.anything(),
     );
   });

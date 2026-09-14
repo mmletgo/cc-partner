@@ -1189,6 +1189,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/provider-manager/switch",
             post(provider_manager::switch),
         )
+        .route(
+            "/api/provider-manager/install-cli",
+            post(provider_manager::install_cli),
+        )
         // Workbench 远端目录选择与项目打开：远端设备执行本机 helper，调用方后续再建立 remote shortcut
         .route("/api/workbench/fs/roots", get(workbench::remote_roots))
         .route("/api/workbench/fs/list", post(workbench::remote_list_dir))

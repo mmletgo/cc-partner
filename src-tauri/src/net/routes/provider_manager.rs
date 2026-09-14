@@ -1,14 +1,16 @@
 //! net/routes/provider_manager.rs — Provider Manager HTTP 路由处理器。
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     移动端 `/mobile` 浏览器无法走 Tauri invoke，需要经 HTTP 切换 cc-switch 已配置的
-//!     provider。本模块把无状态的 `provider_manager` 业务逻辑（读 cc-switch SQLite + 委托
-//!     CLI 写盘）映射到 `/api/provider-manager/*` 路由；桌面端 invoke 路径保持不变。
+//!     移动端 `/mobile` 浏览器与局域网对端设备无法走 Tauri invoke，需要经 HTTP 查询/切换
+//!     cc-switch 已配置的 provider，以及在对端安装 cc-switch CLI。本模块把无状态的
+//!     `provider_manager` 业务逻辑（读 cc-switch SQLite + 委托 CLI 写盘/安装）映射到
+//!     `/api/provider-manager/*` 路由；桌面端 invoke 路径保持不变。
 //!
 //! Code Logic（这个模块做什么）:
-//!     三个薄 handler：summary（只读快照）、list（各 agent provider 列表）、switch（切换）。
-//!     失败统一经 `P2pError::from_app_error` 走错误信封；DTO 复用 `provider_manager::models`
-//!     的 camelCase serde，与桌面 IPC 同源，无新 wire 格式。
+//!     四个薄 handler：summary（只读快照）、list（各 agent provider 列表）、switch（切换）、
+//!     install_cli（安装 cc-switch CLI，显式用户动作）。失败统一经 `P2pError::from_app_error`
+//!     走错误信封；DTO 复用 `provider_manager::models` 的 camelCase serde，与桌面 IPC 同源，
+//!     无新 wire 格式。
 
 use axum::extract::Extension;
 use axum::Json;
@@ -16,7 +18,7 @@ use serde::Deserialize;
 
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
-use crate::provider_manager::{AgentApp, AppProviders, ProviderManagerSummary};
+use crate::provider_manager::{AgentApp, AppProviders, InstallResult, ProviderManagerSummary};
 
 /// `POST /api/provider-manager/switch` 请求体（camelCase，对齐前端）。
 ///
@@ -58,6 +60,25 @@ pub async fn switch(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "provider-manager.switch"))?;
     Ok(Json(updated))
+}
+
+/// `POST /api/provider-manager/install-cli` — 在本机（对请求方而言的"对端设备"）安装 cc-switch CLI。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机 Provider Manager 页选中局域网对端设备后，可经该路由直接在对端执行 cc-switch CLI
+///     安装（macOS 走 brew，可能数分钟；其余平台返回人工指引 `InstallResult{ok:false}`）。
+///
+/// Code Logic（这个函数做什么）:
+///     无请求体（忽略 body）；委托 `provider_manager::install_cli()`（显式用户动作，先失效
+///     CLI 检测缓存再安装）；brew 失败也返回 200 + `ok:false`（业务结果，非传输错误）；
+///     仅内部错误经 `P2pError::from_app_error`（domain=`provider-manager.install`）走错误信封。
+pub async fn install_cli(
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<InstallResult>> {
+    let result = crate::provider_manager::install_cli()
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "provider-manager.install"))?;
+    Ok(Json(result))
 }
 
 #[cfg(test)]
@@ -102,5 +123,51 @@ mod tests {
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.envelope().code, "validation_error");
         assert_eq!(err.envelope().request_id, "req-pm-test");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     install 路由的响应体是 `InstallResult` camelCase DTO；远端
+    ///     `RemoteProviderManagerClient` 需要反序列化对端返回，wire 往返必须稳定。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 brew 成功（ok=true）与 manual 人工指引（ok=false，带 message/url）两种形态
+    ///     做 serialize → deserialize 往返，断言键名为 camelCase 且字段逐项还原。
+    #[test]
+    fn install_result_serde_round_trip_camel_case() {
+        let brew = InstallResult {
+            method: "brew".to_string(),
+            ok: true,
+            version: Some("1.2.3".to_string()),
+            path: Some("/opt/homebrew/bin/cc-switch".to_string()),
+            message: None,
+            url: None,
+        };
+        let json = serde_json::to_value(&brew).expect("序列化应成功");
+        assert!(json.get("version").is_some(), "必须为 camelCase 键");
+        assert!(json.get("message").is_some(), "必须为 camelCase 键");
+        let parsed: InstallResult = serde_json::from_value(json).expect("反序列化应成功");
+        assert_eq!(parsed.method, "brew");
+        assert!(parsed.ok);
+        assert_eq!(parsed.version.as_deref(), Some("1.2.3"));
+        assert_eq!(parsed.path.as_deref(), Some("/opt/homebrew/bin/cc-switch"));
+        assert!(parsed.message.is_none() && parsed.url.is_none());
+
+        let manual = InstallResult {
+            method: "manual".to_string(),
+            ok: false,
+            version: None,
+            path: None,
+            message: Some("请安装 cc-switch-cli".to_string()),
+            url: Some("https://github.com/SaladDay/cc-switch-cli#-installation".to_string()),
+        };
+        let json = serde_json::to_value(&manual).expect("序列化应成功");
+        let parsed: InstallResult = serde_json::from_value(json).expect("反序列化应成功");
+        assert_eq!(parsed.method, "manual");
+        assert!(!parsed.ok);
+        assert_eq!(parsed.message.as_deref(), Some("请安装 cc-switch-cli"));
+        assert_eq!(
+            parsed.url.as_deref(),
+            Some("https://github.com/SaladDay/cc-switch-cli#-installation")
+        );
     }
 }

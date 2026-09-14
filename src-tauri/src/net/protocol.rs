@@ -471,6 +471,20 @@ pub const CAPABILITY_USER_MIRROR_V1: &str = "agent-hub.user-mirror.v1";
 ///     字符串常量 `provider-manager.v1`，列入 `server_protocol_info()`（字典序）。
 pub const CAPABILITY_PROVIDER_MANAGER_V1: &str = "provider-manager.v1";
 
+/// 能力 token：对端安装 cc-switch CLI（`POST /api/provider-manager/install-cli`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     本机 Provider Manager 页选中局域网对端设备时，可在本页直接对对端执行 cc-switch CLI
+///     安装（macOS 走 brew，其余平台返回人工指引）。安装是对端本机副作用（brew 数分钟），
+///     旧对端没有该路由；必须先确认能力，缺失时返回可区分的中文提示（引导升级对端），
+///     而不是模糊的 404。本 token 与该路由原子上线。
+///     路由对合法 loopback/LAN peer 无身份校验，token 仅协议协商，**不是**鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量 `provider-manager.install.v1`，列入 `server_protocol_info()`（字典序，
+///     排在 `provider-manager.v1` 之前）。
+pub const CAPABILITY_PROVIDER_MANAGER_INSTALL_V1: &str = "provider-manager.install.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -544,6 +558,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_TASK_BLOCKS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
+            CAPABILITY_PROVIDER_MANAGER_INSTALL_V1.to_string(),
             CAPABILITY_PROVIDER_MANAGER_V1.to_string(),
             CAPABILITY_SYNC_MANIFEST_V2.to_string(),
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
@@ -696,8 +711,9 @@ mod tests {
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
     ///     且包含 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
     ///     `orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、
-    ///     `transfer.complete.v1`、`transfer.resume.v1`、`workbench.mutation-outcome.v1`
-    ///     与 `provider-manager.v1`（分别与对应路由/ledger/契约原子上线；A0 后不再宣告已撤销的人工 review diff 能力）。
+    ///     `transfer.complete.v1`、`transfer.resume.v1`、`workbench.mutation-outcome.v1`、
+    ///     `provider-manager.v1` 与 `provider-manager.install.v1`
+    ///     （分别与对应路由/ledger/契约原子上线；A0 后不再宣告已撤销的人工 review diff 能力）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
@@ -729,6 +745,7 @@ mod tests {
                 "orchestrator.runtime-snapshot.v1".to_string(),
                 "orchestrator.task-blocks.v1".to_string(),
                 "orchestrator.workflow-document.v1".to_string(),
+                "provider-manager.install.v1".to_string(),
                 "provider-manager.v1".to_string(),
                 "sync.manifest.v2".to_string(),
                 "transfer.complete.v1".to_string(),

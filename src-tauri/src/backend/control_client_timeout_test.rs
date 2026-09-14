@@ -67,3 +67,26 @@ fn workbench_control_timeout_lets_merge_wait_for_peer() {
         Some(Duration::from_secs(360))
     );
 }
+
+/// Workbench 远端 cc-switch CLI 安装在对端跑 brew（可能数分钟），GUI→sidecar 不能套 15s 超时。
+///
+/// Business Logic（为什么需要这个测试）:
+///     GuiClient 经 control op `provider-manager.install` 代理到 sidecar owner，owner 再
+///     POST 对端 `/api/provider-manager/install-cli`（远端客户端独立预算 420s）。control
+///     链路用 360s 长变更预算（对齐 BACKUP_MUTATE_TIMEOUT 先例），15s 会把仍在安装的
+///     brew 误报 uncertain；两层预算独立，control 墙钟先到时 GUI 侧报超时，sidecar 继续
+///     完成安装，用户重新检测可见结果。
+///
+/// Code Logic（这个测试做什么）:
+///     `provider-manager.install` 使用 360s，普通状态查询 op 仍为 MUTATE_TIMEOUT。
+#[test]
+fn workbench_control_timeout_extends_provider_manager_install() {
+    assert_eq!(
+        workbench_control_timeout("provider-manager.install"),
+        Some(Duration::from_secs(360))
+    );
+    assert_eq!(
+        workbench_control_timeout("provider-manager.status"),
+        Some(MUTATE_TIMEOUT)
+    );
+}

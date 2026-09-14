@@ -222,11 +222,12 @@ fn workbench_control_path(op: &str) -> &'static str {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     commit/resume 等长操作不能用默认 15s mutation 超时；merge 会跟随 Claude 输出，
-///     GUI→sidecar HTTP 不能用墙钟提前掐断。
+///     GUI→sidecar HTTP 不能用墙钟提前掐断；provider-manager.install 对端 brew 安装
+///     可能数分钟（对齐 BACKUP_MUTATE_TIMEOUT 先例）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     merge 返回 None（不设 request timeout）；Claude/Codex session 搜索/preview 用 60s；
-///     其它长 Git/Claude op 用 360s，其余用 MUTATE_TIMEOUT。
+///     其它长 Git/Claude op 与 provider-manager.install 用 360s，其余用 MUTATE_TIMEOUT。
 fn workbench_control_timeout(op: &str) -> Option<Duration> {
     match op {
         "worktrees.merge" => None,
@@ -239,7 +240,8 @@ fn workbench_control_timeout(op: &str) -> Option<Duration> {
         | "files.open"
         | "files.save_text"
         | "agent_ledger.export_token_stats"
-        | "sessions.pasteImage" => Some(Duration::from_secs(360)),
+        | "sessions.pasteImage"
+        | "provider-manager.install" => Some(Duration::from_secs(360)),
         "claude.search" | "claude.preview" => Some(Duration::from_secs(60)),
         _ => Some(MUTATE_TIMEOUT),
     }

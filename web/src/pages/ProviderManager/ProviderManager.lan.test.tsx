@@ -3,15 +3,17 @@
  * ProviderManager 局域网目标设备测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   Provider Manager 支持把 summary/switch 的作用目标切到局域网内其他 cc-partner 设备：
- *   选择器只列在线远端设备（不按 capabilities 过滤，mDNS 有 220 字节截断不可靠），
- *   选中远端后 status/switch 携带 deviceId，switching 在途时禁止切换设备避免竞态，
- *   远端模式下隐藏本机安装入口并展示远端版提示。
+ *   Provider Manager 支持把 summary/switch/installCli 的作用目标切到局域网内其他 cc-partner
+ *   设备：选择器只列在线远端设备（不按 capabilities 过滤，mDNS 有 220 字节截断不可靠），
+ *   选中远端后 status/switch/installCli 携带 deviceId，switching 在途时禁止切换设备避免竞态，
+ *   远端 CLI 缺失时展示「在对端安装」按钮（安装在对端执行），manual 指引（ok=false + message）
+ *   写入 installError 展示。
  *
  * Code Logic（这个测试做什么）:
  *   mock `@/api/providerManager` 与 `@/api/devices`：renderHook 验证 controller 分流
- *   （本机/远端、重载、online 过滤、switch 携带 deviceId、切换竞态守卫）；
- *   以手造 props 渲染 ProviderManagerView 验证选择器 chip 与远端 UI。
+ *   （本机/远端、重载、online 过滤、switch/installCli 携带 deviceId、切换竞态守卫、
+ *   manual 指引进 installError）；以手造 props 渲染 ProviderManagerView 验证选择器 chip
+ *   与远端 UI。
  */
 
 import { act, cleanup, render, renderHook, screen, waitFor } from '@testing-library/react';
@@ -290,6 +292,56 @@ describe('useProviderManagerController 目标设备分流', () => {
     expect(result.current.isRemote).toBe(true);
     unmount();
   });
+
+  test('本机 onInstall：installCli 不带 deviceId，成功后不写 installError', async () => {
+    installCliMock.mockResolvedValue({
+      method: 'brew',
+      ok: true,
+      version: '1.2.3',
+      path: '/opt/homebrew/bin/cc-switch',
+      message: null,
+      url: null,
+    });
+    const { result, unmount } = renderHook(() => useProviderManagerController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.onInstall();
+    });
+
+    expect(installCliMock).toHaveBeenCalledWith(null);
+    expect(result.current.installError).toBeNull();
+    unmount();
+  });
+
+  test('远端 onInstall：携带 deviceId；ok=false 的 manual 指引（含 url）写入 installError', async () => {
+    installCliMock.mockResolvedValue({
+      method: 'manual',
+      ok: false,
+      version: null,
+      path: null,
+      message: '未检测到 Homebrew。请安装 cc-switch-cli。',
+      url: 'https://github.com/SaladDay/cc-switch-cli#-installation',
+    });
+    const { result, unmount } = renderHook(() => useProviderManagerController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => {
+      result.current.onSelectDevice('dev-1');
+    });
+    await waitFor(() => expect(statusMock).toHaveBeenLastCalledWith('dev-1'));
+
+    await act(async () => {
+      await result.current.onInstall();
+    });
+
+    expect(installCliMock).toHaveBeenCalledWith('dev-1');
+    expect(result.current.installError).toContain('未检测到 Homebrew。请安装 cc-switch-cli。');
+    expect(result.current.installError).toContain(
+      'https://github.com/SaladDay/cc-switch-cli#-installation',
+    );
+    unmount();
+  });
 });
 
 describe('ProviderManagerView 目标设备选择器', () => {
@@ -332,12 +384,34 @@ describe('ProviderManagerView 目标设备选择器', () => {
     expect(screen.getByText(/未安装 cc-switch CLI/)).toBeTruthy();
   });
 
-  test('远端 CLI 缺失：隐藏安装按钮，warn 换远端文案（需在对端设备安装）', () => {
+  test('远端 CLI 缺失：显示「在对端安装」按钮与远端可操作文案', () => {
     renderView(buildViewProps({ deviceId: 'dev-1', isRemote: true }));
 
+    expect(screen.getByRole('button', { name: '在对端安装' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: '安装 cc-switch CLI' })).toBeNull();
     expect(screen.getByText(/远端设备未安装 cc-switch CLI/)).toBeTruthy();
-    expect(screen.getByText(/请在对端设备上安装 cc-switch CLI/)).toBeTruthy();
+    expect(screen.getByText(/点击将在远端设备上执行安装/)).toBeTruthy();
+  });
+
+  test('远端点击「在对端安装」回调 onInstall', () => {
+    const onInstall = vi.fn(() => Promise.resolve());
+    renderView(buildViewProps({ deviceId: 'dev-1', isRemote: true, onInstall }));
+
+    screen.getByRole('button', { name: '在对端安装' }).click();
+    expect(onInstall).toHaveBeenCalledTimes(1);
+  });
+
+  test('installError（manual 指引）以 danger 消息展示', () => {
+    renderView(
+      buildViewProps({
+        deviceId: 'dev-1',
+        isRemote: true,
+        installError: '未检测到 Homebrew。请安装 cc-switch-cli。（https://example.com/install）',
+      }),
+    );
+
+    expect(screen.getByText(/请安装 cc-switch-cli。/)).toBeTruthy();
+    expect(screen.getByText(/https:\/\/example\.com\/install/)).toBeTruthy();
   });
 
   test('远端加载失败：错误文案使用远端版本', () => {

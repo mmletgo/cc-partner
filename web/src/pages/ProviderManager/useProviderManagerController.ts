@@ -11,7 +11,9 @@
  *     与 `list_devices`（过滤 online，供目标设备选择器）。
  *   - `onSwitch` 调 `provider_manager_switch`（携带当前 deviceId），成功后用返回的
  *     `AppProviders` 原地替换该 app。
- *   - `onInstall` 调 `provider_manager_install_cli`（仅本机语义），成功后 force 重拉状态。
+ *   - `onInstall` 调 `provider_manager_install_cli`（携带当前 deviceId：本机安装 / 对端安装），
+ *     成功后 force 重拉状态；返回 `ok=false` 且带 message（如非 macOS 平台的人工指引，
+ *     或 brew 失败原因）时把 message（有 url 附上）写入 installError 展示——本机与远端同语义。
  *   - `onSelectDevice` 同步更新 deviceId（state + ref），并 force 重拉；
  *     switching 在途时忽略，避免竞态。
  *   - deviceId 存 ref 一份：load 身份稳定，选择设备后立即触发的刷新也能读到最新目标。
@@ -27,6 +29,18 @@ import type { AgentApp, AppProviders, Device, ProviderManagerSummary } from '@/l
 /** 切换在途标识：`${app}:${providerId}`。 */
 function switchKey(app: AgentApp, providerId: string): string {
   return `${app}:${providerId}`;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   安装结果 `ok=false` 时（非 macOS 平台返回人工指引、或 brew 失败原因），后端 message
+ *   常附带官方安装链接；用户需要看到完整指引才能继续，本机与远端同语义。
+ *
+ * Code Logic（这个函数做什么）:
+ *   有 url 时拼成 `message（url）`，否则原样返回 message。
+ */
+function composeManualGuidance(message: string, url: string | null): string {
+  return url ? `${message}（${url}）` : message;
 }
 
 /** controller 返回值（view props 契约）。 */
@@ -45,7 +59,7 @@ export interface UseProviderManagerControllerResult {
   /** 当前是否作用于远端设备（deviceId 非空）。 */
   isRemote: boolean;
   onSwitch: (app: AgentApp, providerId: string) => Promise<void>;
-  /** 仅本机语义；远端模式下由 view 负责隐藏安装入口。 */
+  /** 安装 cc-switch CLI：按当前 deviceId 分流本机安装 / 对端安装。 */
   onInstall: () => Promise<void>;
   onRecheck: () => Promise<void>;
   /** 选择目标设备（null = 本机）；switching 在途时忽略。 */
@@ -140,13 +154,25 @@ export function useProviderManagerController(): UseProviderManagerControllerResu
     [],
   );
 
+  /**
+   * Business Logic: 安装按当前目标设备分流（deviceIdRef 非空 = 对端安装）；安装后 force 重拉
+   *   捕获新版本/路径。返回 `ok=false` 且带 message（非 macOS 平台的人工指引、brew 失败原因）
+   *   不是 invoke 异常，必须显式把 message（有 url 附上）写入 installError 展示，
+   *   本机与远端同语义。
+   *
+   * Code Logic: providerManagerApi.installCli(deviceIdRef.current) → ok/message/url 判定 →
+   *   composeManualGuidance 组装展示文案；异常路径照旧透传 err.message。
+   */
   const onInstall = useCallback(async () => {
     setInstalling(true);
     setInstallError(null);
     try {
-      await providerManagerApi.installCli();
-      // 安装后强制重拉，捕获新版本/路径。
+      const result = await providerManagerApi.installCli(deviceIdRef.current);
+      // 安装后强制重拉，捕获新版本/路径（manual 指引时重拉无害，状态不变）。
       await runNow({ force: true });
+      if (!result.ok && result.message) {
+        setInstallError(composeManualGuidance(result.message, result.url));
+      }
     } catch (err) {
       setInstallError(err instanceof Error ? err.message : String(err));
     } finally {

@@ -138,7 +138,12 @@ pub struct ProviderManagerSummary {
 }
 
 /// 安装 cc-switch CLI 的结果。
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// Business Logic: 同一 DTO 既用于本机 IPC 返回，也作为远端
+///     `provider-manager.install.v1` install 路由的 wire 响应体
+///     （`RemoteProviderManagerClient` 需反序列化对端返回），
+///     因此同时 derive Serialize/Deserialize，camelCase 形状不变。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallResult {
     /// `"brew"`（已执行安装）或 `"manual"`（仅返回人工指引，不自行 curl|bash）。

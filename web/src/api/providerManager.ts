@@ -4,7 +4,8 @@
  * Business Logic（为什么需要这个模块）:
  *   桌面端「Provider Manager」页与「设置 → 依赖环境」的 cc-switch 依赖卡片通过统一入口
  *   读写 provider 列表/状态、切换当前 provider、安装 cc-switch CLI，避免散落 invoke 字符串；
- *   status/switch 支持可选 deviceId，用于操作局域网对端 cc-partner 设备上的 provider。
+ *   status/switch/installCli 支持可选 deviceId，用于操作局域网对端 cc-partner 设备上的
+ *   provider（安装在对端执行）。
  *
  * Code Logic（这个模块做什么）:
  *   使用 invokeDecoded + providerManager schema 做 fail-closed 边界校验；
@@ -72,9 +73,15 @@ export const providerManagerApi = {
     ),
 
   /**
-   * Business Logic: 安装 cc-switch CLI（显式用户动作；macOS brew / 其余人工指引）。
-   * Code Logic: provider_manager_install_cli → InstallResult。
+   * Business Logic: 安装 cc-switch CLI（显式用户动作；macOS brew / 其余人工指引）；
+   * 传入远端 deviceId 时对局域网对端设备执行安装（对端 brew / 返回人工指引）。
+   * Code Logic: provider_manager_install_cli → InstallResult；
+   * deviceId 非空时携带 { deviceId }，空/null 省略参数（对齐 Rust Option<String>）。
    */
-  installCli: (): Promise<InstallResult> =>
-    invokeDecoded(PROVIDER_MANAGER_COMMANDS.installCli, undefined, installResultDecoder),
+  installCli: (deviceId?: string | null): Promise<InstallResult> =>
+    invokeDecoded(
+      PROVIDER_MANAGER_COMMANDS.installCli,
+      deviceId ? { deviceId } : undefined,
+      installResultDecoder,
+    ),
 };

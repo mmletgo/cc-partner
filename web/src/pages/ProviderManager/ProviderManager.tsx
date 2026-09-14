@@ -192,10 +192,13 @@ export function ProviderManagerView(props: ProviderManagerViewProps): ReactEleme
   // 当前目标设备名：优先取设备列表里的名称，设备刚下线被裁掉时兜底显示 id。
   const targetDeviceName = devices.find((device) => device.id === deviceId)?.name ?? deviceId;
 
-  // 安装 CLI 是本机动作；远端模式下隐藏入口，仅保留远端版 warn 文案。
-  const installAction: ReactNode = cliMissing && !isRemote ? (
+  // 安装 CLI 按当前目标设备分流：本机 → 「安装 cc-switch CLI」；远端 → 「在对端安装」
+  //（controller 携带 deviceId，安装在对端执行；非 macOS 平台返回人工指引进 installError）。
+  const installAction: ReactNode = cliMissing ? (
     <Button variant="secondary" size="sm" loading={installing} disabled={installing} onClick={onInstall}>
-      {installing ? t('providerManager:actions.installing') : t('providerManager:actions.install')}
+      {installing
+        ? t('providerManager:actions.installing')
+        : t(isRemote ? 'providerManager:actions.installRemote' : 'providerManager:actions.install')}
     </Button>
   ) : null;
 

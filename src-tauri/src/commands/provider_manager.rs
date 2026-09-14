@@ -3,15 +3,17 @@
 //! Business Logic（为什么需要这个模块）:
 //!     前端「Provider Manager」页与「设置 → 依赖环境」的 cc-switch 依赖卡片通过 invoke 调用
 //!     这些命令：查整体状态、列各 agent 的 provider、切换当前 provider、安装 cc-switch CLI。
-//!     status/switch 支持可选 `deviceId`：选中局域网内其他 cc-partner 设备时查询/切换对端
-//!     cc-switch provider（对端既有 `/api/provider-manager/*` 路由）；本机路径保持现状。
+//!     status/switch/install_cli 支持可选 `deviceId`：选中局域网内其他 cc-partner 设备时
+//!     查询/切换对端 cc-switch provider，或直接在对端安装 cc-switch CLI（对端
+//!     `/api/provider-manager/*` 路由）；本机路径保持现状。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `list`/`install_cli` 仍为 stateless 薄封装（无 AppState）；`status`/`switch` 持有
+//!     `list` 仍为 stateless 薄封装（无 AppState）；`status`/`switch`/`install_cli` 持有
 //!     AppState 做设备分流：GuiClient（打包发行版）经 loopback control op
-//!     `provider-manager.{status,switch}` 代理到 sidecar owner，owner 与 headless 命令层
-//!     共享 `*_for_state` helper（外机 → `device_base_url` + `RemoteProviderManagerClient`，
-//!     本机 → `provider_manager` 领域模块原路径）。参数 camelCase，返回 `Result<T, AppError>`。
+//!     `provider-manager.{status,switch,install}` 代理到 sidecar owner，owner 与 headless
+//!     命令层共享 `*_for_state` helper（外机 → `device_base_url` +
+//!     `RemoteProviderManagerClient`，本机 → `provider_manager` 领域模块原路径）。
+//!     参数 camelCase，返回 `Result<T, AppError>`。
 
 use crate::commands::workbench::{device_base_url, proxy_workbench_if_gui};
 use crate::error::AppError;
@@ -154,9 +156,49 @@ pub async fn provider_manager_switch_for_state(
 
 /// 安装 cc-switch CLI（显式用户动作；macOS 走 brew，其余返回人工指引）。
 ///
-/// 保持纯本机：CLI 安装只对本机 cc-switch 有意义。
+/// 可选 `deviceId`：外机在对端执行安装（对端 brew/检测），本机走既有
+/// `provider_manager::install_cli()`。
 #[tauri::command]
-pub async fn provider_manager_install_cli() -> Result<InstallResult, AppError> {
+pub async fn provider_manager_install_cli(
+    state: State<'_, AppState>,
+    device_id: Option<String>,
+) -> Result<InstallResult, AppError> {
+    if is_foreign_device(state.inner(), device_id.as_deref()) {
+        if let Some(v) = proxy_workbench_if_gui(
+            state.inner(),
+            "provider-manager.install",
+            serde_json::json!({ "deviceId": device_id }),
+        )
+        .await?
+        {
+            return Ok(v);
+        }
+    }
+    provider_manager_install_cli_for_state(state.inner(), device_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     control 分发器与 invoke 命令必须共享安装路径；且对端 install 是 brew 写盘
+///     （非幂等、可能数分钟），必须由 `RemoteProviderManagerClient` 单次发送（420s 超时），
+///     本层不引入重试。
+///
+/// Code Logic（这个函数做什么）:
+///     外机 → `device_base_url` 解析对端入口后 POST 对端
+///     `/api/provider-manager/install-cli`（预检 `provider-manager.install.v1` 能力），
+///     返回对端 `InstallResult`（macOS brew 成功/失败，其余平台 manual 人工指引）；
+///     本机 → 现有 `provider_manager::install_cli()` 原样。
+pub async fn provider_manager_install_cli_for_state(
+    state: &AppState,
+    device_id: Option<String>,
+) -> Result<InstallResult, AppError> {
+    if is_foreign_device(state, device_id.as_deref()) {
+        let device_id = device_id.unwrap_or_default();
+        let base_url = device_base_url(state, device_id.trim())?;
+        return RemoteProviderManagerClient::new()
+            .with_expected_device_id(device_id.trim())
+            .install_cli(&base_url)
+            .await;
+    }
     provider_manager::install_cli().await
 }
 

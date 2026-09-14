@@ -15,14 +15,15 @@
     "enabled": "Enabled",
     "recheck": "Recheck",
     "install": "Install cc-switch CLI",
+    "installRemote": "Install on remote device",
     "installing": "Installing…"
   },
   "status": {
     "current": "Current",
     "cliMissing": "cc-switch CLI is not installed, so switching is disabled.",
     "cliMissingHint": "Installing cc-switch CLI shares data with your existing cc-switch and will not affect the GUI.",
-    "cliMissingRemote": "cc-switch CLI is not installed on the remote device, so remote switching is unavailable.",
-    "cliMissingHintRemote": "Install cc-switch CLI on the remote device, then come back here and recheck.",
+    "cliMissingRemote": "cc-switch CLI is not installed on the remote device. Click \"Install on remote device\" to install it there directly.",
+    "cliMissingHintRemote": "Clicking runs the install on the remote device: macOS uses Homebrew automatically (it may take a few minutes); other platforms return manual installation guidance. Recheck here once done.",
     "dbMissing": "No cc-switch data found. Install cc-switch and configure at least one provider first.",
     "versionMismatch": "cc-switch GUI v{{guiVersion}} and CLI v{{cliVersion}} differ — align releases so a switch does not trigger a migration the GUI cannot read.",
     "guiRunning": "cc-switch GUI is open. Switching is safe; its window may show a stale current until you refresh it.",
