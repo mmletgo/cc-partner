@@ -36,16 +36,14 @@ fn device_base_url_from_devices_returns_url_and_offline_error() {
     let mut devices = HashMap::new();
     devices.insert(
         "device-a".to_string(),
-        Device {
-            id: "device-a".to_string(),
-            name: "Remote Mac".to_string(),
-            host: "192.168.1.9".to_string(),
-            port: 14210,
-            last_seen: Utc::now(),
-            online: true,
-            proto_version: 0,
-            capabilities: Vec::new(),
-        },
+        Device::new(
+            "device-a".to_string(),
+            "Remote Mac".to_string(),
+            "192.168.1.9".to_string(),
+            14210,
+            0,
+            Vec::new(),
+        ),
     );
 
     let url = device_base_url_from_devices(&devices, "device-a").unwrap();
@@ -150,16 +148,16 @@ fn device_base_url_with_shadows_fails_closed_on_unreachable_links() {
 
 /// 构造测试用直连 Device（host/port/online 可控）。
 fn device(id: &str, host: &str, port: u16, online: bool) -> Device {
-    Device {
-        id: id.to_string(),
-        name: format!("device-{id}"),
-        host: host.to_string(),
+    let mut device = Device::new(
+        id.to_string(),
+        format!("device-{id}"),
+        host.to_string(),
         port,
-        last_seen: Utc::now(),
-        online,
-        proto_version: 1,
-        capabilities: Vec::new(),
-    }
+        1,
+        Vec::new(),
+    );
+    device.online = online;
+    device
 }
 
 /// 构造测试用影子条目（target/via/online 可控）。

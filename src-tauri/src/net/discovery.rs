@@ -16,13 +16,12 @@
 //!     - 本机 IP 探测：`local_lan_ip` 优先选真实局域网接口 IP，对照 Python `_get_local_ip`。
 //!     - 移动端扫码候选：`list_mobile_access_candidates` 枚举多网卡可达地址（黑名单 + wifi/wired 角色启发式）。
 
-use crate::models::device::Device;
+use crate::models::device::{upsert_device_health, DeviceHealthMeta};
 use crate::net::protocol::server_protocol_info;
 #[cfg(test)]
 use crate::net::protocol::PROTOCOL_VERSION_V1;
 use crate::net::SERVICE_TYPE;
 use crate::state::AppState;
-use chrono::Utc;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -241,11 +240,14 @@ async fn event_loop(receiver: Receiver<ServiceEvent>, state: AppState, my_device
     }
 }
 
-/// 处理 ServiceResolved：解析 TXT/IP/port，写入 devices 表（过滤本机）。
+/// 处理 ServiceResolved：解析 TXT/IP/port，以「登记地址行」语义合并进 devices 表（过滤本机）。
 ///
-/// Business Logic: 一个对端服务被完整解析后，更新本地设备列表。
+/// Business Logic: 一个对端服务被完整解析后登记其地址行。mDNS 事件只登记未测量行
+///     （rtt=None），RTT 由下一轮 overlay 探测补测；同一设备多地址（如 mDNS + Tailscale）
+///     合并为一个 Device 的多行，不再整体覆盖其它发现源已登记的地址与已测 RTT。
 /// Code Logic: 从 TXT 取 device_id/device_name；device_id 与本机一致则忽略；
-///             从 addresses 取首个 IPv4 作为 host（与 Python `inet_ntoa(addresses[0])` 一致）。
+///             从 addresses 取首个 IPv4 作为 host（与 Python `inet_ntoa(addresses[0])` 一致）；
+///             经 `upsert_device_health` 行级合并并重新择优活跃地址。
 fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
     // 解析 TXT
     let device_id = match info.get_property_val_str(TXT_KEY_DEVICE_ID) {
@@ -280,19 +282,20 @@ fn handle_resolved(state: &AppState, info: ServiceInfo, my_device_id: &str) {
     let proto_version = parse_proto_hint(info.get_property_val_str(TXT_KEY_PROTO));
     let capabilities = parse_caps_hint(info.get_property_val_str(TXT_KEY_CAPS));
 
-    let device = Device {
-        id: device_id.clone(),
-        name: device_name.clone(),
-        host,
-        port,
-        last_seen: Utc::now(),
-        online: true,
-        proto_version,
-        capabilities,
-    };
-
     let mut devices = state.devices.write().expect("devices 写锁中毒");
-    devices.insert(device_id.clone(), device);
+    upsert_device_health(
+        &mut devices,
+        &device_id,
+        &host,
+        port,
+        None,
+        DeviceHealthMeta {
+            name: &device_name,
+            proto_version,
+            capabilities: &capabilities,
+        },
+    );
+    drop(devices);
     tracing::info!("发现设备: {device_name} (id={device_id}, {host_for_log}:{port})");
 }
 
@@ -789,6 +792,96 @@ mod tests {
         assert!(parse_caps_hint(None).is_empty());
         // 空串 → 空
         assert!(parse_caps_hint(Some("")).is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     mDNS Resolved 必须从「整体覆盖 Device」改为「登记/合并地址行」：
+    ///     同一设备多源发现（mDNS + overlay 探测）时地址行共存、已测 RTT 不被
+    ///     未测量的 mDNS 事件冲掉，否则多地址择优会被事件抖动破坏。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造带 TXT 的 ServiceInfo 依次触发 handle_resolved：首次解析建设备+单行
+    ///     （rtt=None）；第二地址解析合并为两行；对首行注入实测 RTT 后再次解析同地址，
+    ///     断言行数仍为两行且已测 RTT 保留。
+    #[tokio::test]
+    async fn resolved_upsert_merges_rows_without_clobbering() {
+        let state =
+            crate::net::relay_shadow_probe::test_support::build_test_state("self", Vec::new())
+                .await;
+        // 构造带 device_id/device_name TXT 与指定 IP/port 的 ServiceInfo（同 advertise 路径）。
+        let resolved_info = |id: &str, name: &str, ip: &str, port: u16| {
+            build_service_info_for_plan(
+                &DiscoveryStartPlan::new(true, false),
+                id,
+                name,
+                port,
+                Some(ip.parse().unwrap()),
+            )
+            .expect("ServiceInfo 构造失败")
+            .expect("advertise 计划应产出 ServiceInfo")
+        };
+
+        // 首次解析：创建设备 + 单条未测量地址行。
+        handle_resolved(
+            &state,
+            resolved_info("peer-1", "Peer One", "192.168.1.5", 62116),
+            "self",
+        );
+        {
+            let devices = state.devices.read().unwrap();
+            let device = devices.get("peer-1").expect("首次解析应创建设备");
+            assert_eq!(device.addresses.len(), 1);
+            assert_eq!(device.addresses[0].host, "192.168.1.5");
+            assert_eq!(device.addresses[0].rtt_ms, None, "mDNS 登记行未测量");
+            assert_eq!(device.host, "192.168.1.5");
+            assert_eq!(device.name, "Peer One");
+            assert!(device.online);
+        }
+
+        // 同设备第二地址（多网卡/多源）：合并为两行而非覆盖。
+        handle_resolved(
+            &state,
+            resolved_info("peer-1", "Peer One", "192.168.1.6", 62116),
+            "self",
+        );
+        {
+            let devices = state.devices.read().unwrap();
+            let device = devices.get("peer-1").unwrap();
+            assert_eq!(device.addresses.len(), 2, "第二地址应合并为新行");
+        }
+
+        // 已测 RTT 的行再次被 mDNS 解析：行不重复、RTT 不被 None 冲掉。
+        {
+            let mut devices = state.devices.write().unwrap();
+            upsert_device_health(
+                &mut devices,
+                "peer-1",
+                "192.168.1.5",
+                62116,
+                Some(1.2),
+                DeviceHealthMeta {
+                    name: "Peer One",
+                    proto_version: 1,
+                    capabilities: &[],
+                },
+            );
+        }
+        handle_resolved(
+            &state,
+            resolved_info("peer-1", "Peer One", "192.168.1.5", 62116),
+            "self",
+        );
+        {
+            let devices = state.devices.read().unwrap();
+            let device = devices.get("peer-1").unwrap();
+            assert_eq!(device.addresses.len(), 2, "重复解析不得新增行");
+            let row = device
+                .addresses
+                .iter()
+                .find(|a| a.host == "192.168.1.5")
+                .unwrap();
+            assert_eq!(row.rtt_ms, Some(1.2), "mDNS 重复解析不得冲掉已测 RTT");
+        }
     }
 
     /// 验证 mDNS 注册 → 解析 round-trip：本机 advertise 的 proto/caps 提示能被对端解析路径还原。

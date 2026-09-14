@@ -1772,16 +1772,14 @@ mod tests {
         let sender = AgentHubPushSender::new(pool, gate, "src-device", dir.path());
         let without = base.trim_start_matches("http://");
         let (host, port_s) = without.rsplit_once(':').unwrap();
-        let device = Device {
-            id: "peer-test".into(),
-            name: "Peer Test".into(),
-            host: host.to_string(),
-            port: port_s.parse().unwrap(),
-            last_seen: Utc::now(),
-            online: true,
-            proto_version: 1,
-            capabilities: vec![CAPABILITY_AGENT_HUB_V1.into()],
-        };
+        let device = Device::new(
+            "peer-test".into(),
+            "Peer Test".into(),
+            host.to_string(),
+            port_s.parse().unwrap(),
+            1,
+            vec![CAPABILITY_AGENT_HUB_V1.into()],
+        );
         let built = BuiltSnapshot {
             envelope: SnapshotEnvelopeV1 {
                 format: FORMAT_NAME.into(),
@@ -1886,19 +1884,17 @@ mod tests {
         let sender = AgentHubPushSender::new(pool, gate, "src-device", dir.path());
         let without = base.trim_start_matches("http://");
         let (host, port_s) = without.rsplit_once(':').unwrap();
-        let device = Device {
-            id: "peer-test".into(),
-            name: "Peer Test".into(),
-            host: host.to_string(),
-            port: port_s.parse().unwrap(),
-            last_seen: Utc::now(),
-            online: true,
-            proto_version: 1,
-            capabilities: vec![
+        let device = Device::new(
+            "peer-test".into(),
+            "Peer Test".into(),
+            host.to_string(),
+            port_s.parse().unwrap(),
+            1,
+            vec![
                 CAPABILITY_AGENT_HUB_V1.into(),
                 CAPABILITY_DEVICE_REQUEST_BINDING_V1.into(),
             ],
-        };
+        );
         let built = BuiltSnapshot {
             envelope: SnapshotEnvelopeV1 {
                 format: FORMAT_NAME.into(),
@@ -2019,19 +2015,17 @@ mod tests {
 
         let without = base.trim_start_matches("http://");
         let (host, port_s) = without.rsplit_once(':').unwrap();
-        let device = Device {
-            id: "peer-test".into(),
-            name: "Peer Test".into(),
-            host: host.to_string(),
-            port: port_s.parse().unwrap(),
-            last_seen: Utc::now(),
-            online: true,
-            proto_version: 1,
-            capabilities: vec![
+        let device = Device::new(
+            "peer-test".into(),
+            "Peer Test".into(),
+            host.to_string(),
+            port_s.parse().unwrap(),
+            1,
+            vec![
                 CAPABILITY_AGENT_HUB_V1.into(),
                 CAPABILITY_DEVICE_REQUEST_BINDING_V1.into(),
             ],
-        };
+        );
 
         let cancel = CancellationToken::new();
         let outcome = sender

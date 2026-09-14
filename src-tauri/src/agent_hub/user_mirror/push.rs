@@ -1038,16 +1038,14 @@ mod tests {
     fn register_peer(state: &AppState, peer_id: &str, base: &str) {
         let without = base.trim_start_matches("http://");
         let (host, port_s) = without.rsplit_once(':').unwrap();
-        let device = Device {
-            id: peer_id.into(),
-            name: "Peer Test".into(),
-            host: host.to_string(),
-            port: port_s.parse().unwrap(),
-            last_seen: Utc::now(),
-            online: true,
-            proto_version: 1,
-            capabilities: supported_caps(),
-        };
+        let device = Device::new(
+            peer_id.into(),
+            "Peer Test".into(),
+            host.to_string(),
+            port_s.parse().unwrap(),
+            1,
+            supported_caps(),
+        );
         state
             .devices
             .write()

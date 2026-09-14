@@ -1012,7 +1012,6 @@ mod tests {
     use axum::http::{Method, Request};
     use axum::routing::post;
     use axum::Router;
-    use chrono::Utc;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
     use std::sync::atomic::AtomicU16;
@@ -1294,16 +1293,14 @@ mod tests {
             let mut devices = state.devices.write().unwrap();
             devices.insert(
                 "peer-1".into(),
-                Device {
-                    id: "peer-1".into(),
-                    name: "peer".into(),
-                    host: "192.0.2.10".into(),
-                    port: 62116,
-                    last_seen: Utc::now(),
-                    online: true,
-                    proto_version: 1,
-                    capabilities: vec![],
-                },
+                Device::new(
+                    "peer-1".into(),
+                    "peer".into(),
+                    "192.0.2.10".into(),
+                    62116,
+                    1,
+                    vec![],
+                ),
             );
         }
         let op = format!("op-peer-{}", Uuid::new_v4());

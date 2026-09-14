@@ -141,16 +141,16 @@ mod tests {
 
     /// 构造一条直连表 Device。
     fn device(id: &str, host: &str, port: u16, online: bool) -> Device {
-        Device {
-            id: id.to_string(),
-            name: format!("device-{id}"),
-            host: host.to_string(),
+        let mut device = Device::new(
+            id.to_string(),
+            format!("device-{id}"),
+            host.to_string(),
             port,
-            last_seen: chrono::Utc::now(),
-            online,
-            proto_version: 1,
-            capabilities: Vec::new(),
-        }
+            1,
+            Vec::new(),
+        );
+        device.online = online;
+        device
     }
 
     /// 构造一条影子条目。

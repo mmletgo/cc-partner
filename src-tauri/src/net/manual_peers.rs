@@ -15,29 +15,30 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `populate_overlay_trusted_ips`：启动时用静态集合（manual_peers IP ∪ 本机 overlay 接口 IP）播种。
-//!     - `start_manual_peer_probe`：spawn 后台 task，每 15s 一个周期：拉 Tailscale peers + 读 manual_peers
-//!       → 逐个 health 探测 → upsert `state.devices` → 用「静态 ∪ 在线 cc-partner peer IP」刷新 overlay 集合。
-//!     - 连续 3 次失败的候选移除其 device 条目（防抖动）；Tailscale 非 cc-partner 节点不入表不计数。
+//!     - `start_manual_peer_probe`：spawn 后台 task，每 15s 一个周期：候选 = manual_peers ∪ Tailscale
+//!       peers ∪ devices 表已有地址行（mDNS 发现的地址也会被补测 RTT）→ 每个地址独立 health 探测
+//!       并以 `Instant` 计 RTT → 成功 `report_health`（同 device_id 多地址归并为一 Device 多行 +
+//!       延迟择优写回活跃 host/port）、失败行级 fail_count+1 → 用「静态 ∪ 在线 cc-partner peer IP」
+//!       刷新 overlay 集合。
+//!     - 连续 3 次失败的地址行被移除，全部行移除才删 device 条目（防抖动）；Tailscale 非
+//!       cc-partner 节点不入表不计数。
 
 use crate::config::ManualPeerConfig;
-use crate::models::device::Device;
+use crate::models::device::{report_device_failure, upsert_device_health, DeviceHealthMeta};
 use crate::net::lan_guard::{classify_peer_ip, LanPeerScope};
 use crate::net::routes::health::HealthResponse;
 use crate::state::AppState;
-use chrono::Utc;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// 探测周期（秒）。对端上下线由周期 health 驱动（与 mDNS 事件驱动不同）。
 const PROBE_INTERVAL_SECS: u64 = 15;
-/// 连续失败多少次后从 `state.devices` 移除条目（防瞬时网络抖动反复增删）。
-const FAILURE_THRESHOLD: u32 = 3;
 /// Tailscale 自动发现使用的探测端口（cc-partner 首选默认端口；非默认端口的 peer 走 manual_peers）。
 const TAILSCALE_PROBE_PORT: u16 = 62116;
 /// `tailscale status --json` 调用硬超时（秒），避免 daemon 异常时阻塞探测循环。
@@ -112,9 +113,8 @@ pub fn start_manual_peer_probe(state: AppState) -> CancellationToken {
     let cancel_clone = cancel.clone();
     let state_clone = state.clone();
     tauri::async_runtime::spawn(async move {
-        let mut fail_counts: HashMap<String, u32> = HashMap::new();
         loop {
-            probe_cycle(&state_clone, &mut fail_counts).await;
+            probe_cycle(&state_clone).await;
             tokio::select! {
                 _ = cancel_clone.cancelled() => {
                     tracing::info!("overlay 对端探测循环已停止");
@@ -127,12 +127,27 @@ pub fn start_manual_peer_probe(state: AppState) -> CancellationToken {
     cancel
 }
 
-/// 单轮探测：合并 Tailscale peers + manual_peers，逐个 health 探测，刷新 devices 与 overlay 集合。
-async fn probe_cycle(state: &AppState, fail_counts: &mut HashMap<String, u32>) {
+/// 单轮探测：合并 manual_peers + Tailscale + devices 已有地址行，逐地址测 RTT 探测并归并进表。
+///
+/// Business Logic: 同一设备（如 LAN IP + Tailscale IP）的多地址必须共存于一个 Device 的多行、
+///     各自独立测 RTT，由 `models::device` 的择优逻辑自动选路；不再是整体覆盖互相抖动。
+///
+/// Code Logic: 候选 = manual_peers ∪ Tailscale peers ∪ devices 表已有地址行（去重）；
+///     每个候选以 `Instant` 包住 `health_info` 计 RTT：成功 → `record_probe_success`
+///     （行级 upsert + EMA），失败 → `record_probe_failure`（行级计数、达阈值移除）；
+///     最后以「静态 ∪ Tailscale peer IP ∪ 在线 cc-partner peer IP」刷新 overlay 信任集合。
+async fn probe_cycle(state: &AppState) {
     let my_device_id = state.device_id.as_ref().clone();
 
-    // 候选 = manual_peers（config）+ Tailscale peers（自动）。每条 (host 字符串, 端口)。
+    // 候选 = manual_peers（config）+ Tailscale peers（自动）+ devices 表已有地址行
+    // （mDNS 发现的地址行由此纳入每轮 RTT 测量）。按 (host, port) 去重保序。
     let mut candidates: Vec<(String, u16)> = Vec::new();
+    let mut seen: HashSet<(String, u16)> = HashSet::new();
+    let mut push_candidate = |host: String, port: u16, candidates: &mut Vec<(String, u16)>| {
+        if seen.insert((host.clone(), port)) {
+            candidates.push((host, port));
+        }
+    };
     let manual: Vec<ManualPeerConfig> = state
         .config
         .read()
@@ -140,11 +155,16 @@ async fn probe_cycle(state: &AppState, fail_counts: &mut HashMap<String, u32>) {
         .manual_peers
         .clone();
     for p in &manual {
-        candidates.push((p.host.clone(), p.port));
+        push_candidate(p.host.clone(), p.port, &mut candidates);
     }
     let ts_peers = tailscale_peers().await;
     for (ip, _hostname) in &ts_peers {
-        candidates.push((ip.to_string(), TAILSCALE_PROBE_PORT));
+        push_candidate(ip.to_string(), TAILSCALE_PROBE_PORT, &mut candidates);
+    }
+    for device in state.devices.read().expect("devices 读锁中毒").values() {
+        for addr in &device.addresses {
+            push_candidate(addr.host.clone(), addr.port, &mut candidates);
+        }
     }
     if candidates.is_empty() {
         return;
@@ -162,73 +182,102 @@ async fn probe_cycle(state: &AppState, fail_counts: &mut HashMap<String, u32>) {
 
     for (host, port) in candidates {
         let base_url = format!("http://{host}:{port}");
-        match state.peer_client.health_info(&base_url).await {
+        // Instant 计时包住 health_info：成功路径的耗时即该地址行的实测 RTT。
+        let started = Instant::now();
+        let result = state.peer_client.health_info(&base_url).await;
+        let rtt_ms = started.elapsed().as_secs_f64() * 1000.0;
+        match result {
             Ok(health) if health.ok && health.device_id == *my_device_id => {
                 // 对端回环是自己（如配了本机地址），不计入。
             }
             Ok(health) if health.ok => {
-                upsert_device(state, &host, port, health);
+                record_probe_success(state, &host, health, rtt_ms);
                 if let Ok(ip) = host.parse::<IpAddr>() {
                     trusted.insert(ip);
                 }
-                fail_counts.remove(&base_url);
             }
             _ => {
-                let count = fail_counts.entry(base_url.clone()).or_insert(0);
-                *count += 1;
-                if *count >= FAILURE_THRESHOLD {
-                    remove_device_by_host(state, &host);
-                    fail_counts.remove(&base_url);
-                }
+                record_probe_failure(state, &host, port);
             }
         }
     }
 
-    let n = trusted.len();
     *state
         .overlay_trusted_ips
         .write()
         .expect("overlay_trusted_ips 写锁中毒") = trusted;
-    let _ = n; // 数量已在周期日志体现，避免高频日志噪音此处省略打印
 }
 
-/// 移除 host 匹配的对端 device 条目（连续失败阈值触发）。
-fn remove_device_by_host(state: &AppState, host: &str) {
-    let mut removed_ids = Vec::new();
-    let mut devices = state.devices.write().expect("devices 写锁中毒");
-    devices.retain(|_id, d| {
-        let keep = d.host != host;
-        if !keep {
-            removed_ids.push(d.id.clone());
-        }
-        keep
-    });
-    drop(devices);
-    if !removed_ids.is_empty() {
-        tracing::info!("overlay 对端连续失败移除: {host} (ids={removed_ids:?})");
+/// 登记一次探测成功：行级 upsert 地址行（EMA RTT + 元数据刷新）并触发延迟择优。
+///
+/// Business Logic: 探测循环与 mDNS 共用 `state.devices`；成功探测按 device_id 归并——
+///     同一设备的第二个地址自然成为同一 Device 的第二行，由 `select_active` 择优，
+///     不再整体覆盖。
+///
+/// Code Logic: 行端口取 health 报告的实际监听端口（对端端口被占自动 +1 后的权威值）；
+///     RTT 以 Some 传入走 EMA。新设备/新地址行打 info 日志，例行刷新降为 debug。
+fn record_probe_success(state: &AppState, host: &str, health: HealthResponse, rtt_ms: f64) {
+    let port = health.http_port;
+    let (existed, had_row) = {
+        let devices = state.devices.read().expect("devices 读锁中毒");
+        let entry = devices.get(&health.device_id);
+        (
+            entry.is_some(),
+            entry
+                .map(|d| d.addresses.iter().any(|a| a.host == host))
+                .unwrap_or(false),
+        )
+    };
+    {
+        let mut devices = state.devices.write().expect("devices 写锁中毒");
+        upsert_device_health(
+            &mut devices,
+            &health.device_id,
+            host,
+            port,
+            Some(rtt_ms),
+            DeviceHealthMeta {
+                name: &health.device_name,
+                proto_version: health.protocol_version,
+                capabilities: &health.capabilities,
+            },
+        );
+    }
+    if !existed {
+        tracing::info!(
+            "overlay 发现对端: {} (id={}, {host}:{port}, rtt={rtt_ms:.1}ms)",
+            health.device_name,
+            health.device_id
+        );
+    } else if !had_row {
+        tracing::info!(
+            "overlay 对端新增地址: {} (id={}, {host}:{port}, rtt={rtt_ms:.1}ms)",
+            health.device_name,
+            health.device_id
+        );
+    } else {
+        tracing::debug!(
+            "overlay 对端地址刷新: {} (id={}, {host}:{port}, rtt={rtt_ms:.1}ms)",
+            health.device_name,
+            health.device_id
+        );
     }
 }
 
-/// 把 health 响应 + host/port 构造为 Device 并 upsert 进 state.devices。
-fn upsert_device(state: &AppState, host: &str, port: u16, health: HealthResponse) {
-    let device = Device {
-        id: health.device_id.clone(),
-        name: health.device_name.clone(),
-        host: host.to_string(),
-        port: health.http_port,
-        last_seen: Utc::now(),
-        online: true,
-        proto_version: health.protocol_version,
-        capabilities: health.capabilities,
-    };
-    let id = device.id.clone();
-    let name = device.name.clone();
-    state
-        .devices
-        .write()
-        .expect("devices 写锁中毒")
-        .insert(id.clone(), device);
-    tracing::info!("overlay 发现对端: {name} (id={id}, {host}:{port})");
+/// 登记一次探测失败：行级 fail_count+1，达阈值移除该行；全部行移除才删除 Device 条目。
+///
+/// Business Logic: 失败按（host, port）行级归因——同 host 探测未开 cc-partner 的端口
+///     （如 Tailscale 扫到非默认端口）不得惩罚同 host 的健康地址行；设备只有全部地址
+///     行都被移除才从表里删除（防瞬时抖动反复增删）。
+///
+/// Code Logic: 委托 `models::device::report_device_failure`（持有 devices 写锁）；
+///     返回 Some(device_id) 表示该设备行全空、条目已被删除，打 info 日志。
+fn record_probe_failure(state: &AppState, host: &str, port: u16) {
+    let mut devices = state.devices.write().expect("devices 写锁中毒");
+    if let Some(device_id) = report_device_failure(&mut devices, host, port) {
+        drop(devices);
+        tracing::info!("overlay 对端全部地址失败，移除条目: {host}:{port} (id={device_id})");
+    }
 }
 
 /// 解析 `tailscale status --json` 得到同 Tailnet 的 peer 列表 `(IP, hostname)`。
@@ -368,6 +417,21 @@ fn resolve_tailscale_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::device::{DeviceAddress, FAILURE_THRESHOLD};
+    use crate::net::relay_shadow_probe::test_support::build_test_state;
+
+    /// 构造指定设备身份的 health 响应（默认探测端口）。
+    fn health_of(device_id: &str, http_port: u16) -> HealthResponse {
+        HealthResponse {
+            ok: true,
+            device_id: device_id.to_string(),
+            device_name: format!("device-{device_id}"),
+            http_port,
+            ts: 0,
+            protocol_version: 1,
+            capabilities: Vec::new(),
+        }
+    }
 
     #[test]
     fn constants_are_sensible() {
@@ -402,5 +466,125 @@ mod tests {
         // 无 TailscaleIPs 的 peer 被跳过，不 panic。
         let with_bad = br#"{"Peer":{"x":{"HostName":"h"}}}"#;
         assert!(parse_tailscale_status(with_bad).is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     多地址探测归并是本特性核心：同一 device_id 的两个地址（LAN + Tailscale）
+    ///     探测成功必须归并为一个 Device 的两行，活跃地址自动择优到低 RTT 行，
+    ///     而不是互相整体覆盖抖动。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造测试 AppState，先后以 0.5ms/5ms RTT 上报同 device_id 的两个 host，
+    ///     断言表内只有一个 Device、两行地址、活跃 host/port 为 LAN 行且 online。
+    #[tokio::test]
+    async fn probe_success_merges_two_addresses_into_one_device() {
+        let state = build_test_state("self-a", Vec::new()).await;
+        record_probe_success(&state, "100.113.214.69", health_of("peer-1", 62116), 5.0);
+        record_probe_success(&state, "192.168.6.17", health_of("peer-1", 62116), 0.5);
+
+        let devices = state.devices.read().unwrap();
+        assert_eq!(devices.len(), 1, "同 device_id 多地址必须归并为一个 Device");
+        let device = devices.get("peer-1").unwrap();
+        assert_eq!(device.addresses.len(), 2);
+        assert_eq!(
+            device.host, "192.168.6.17",
+            "活跃地址应择优到低 RTT 的 LAN 行"
+        );
+        assert_eq!(device.port, 62116);
+        assert!(device.online);
+        let hosts: Vec<&str> = device.addresses.iter().map(|a| a.host.as_str()).collect();
+        assert!(hosts.contains(&"192.168.6.17") && hosts.contains(&"100.113.214.69"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     失败必须行级隔离：同 device_id 的一个地址连续失败达阈值只移除该行，
+    ///     其余健康行保留并接管活跃地址；全部行移除才删条目。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     双行设备对 LAN 行连续失败 3 次 → 条目保留、活跃切 Tailscale 行；
+    ///     再对 Tailscale 行连续失败 3 次 → 条目被删除。
+    #[tokio::test]
+    async fn probe_failure_removes_rows_level_by_level_then_entry() {
+        let state = build_test_state("self-a", Vec::new()).await;
+        record_probe_success(&state, "192.168.6.17", health_of("peer-1", 62116), 0.5);
+        record_probe_success(&state, "100.113.214.69", health_of("peer-1", 62116), 5.0);
+
+        for _ in 0..FAILURE_THRESHOLD {
+            record_probe_failure(&state, "192.168.6.17", 62116);
+        }
+        {
+            let devices = state.devices.read().unwrap();
+            let device = devices.get("peer-1").expect("仍有健康行，条目应保留");
+            assert_eq!(device.addresses.len(), 1);
+            assert_eq!(device.host, "100.113.214.69", "活跃应切到剩余健康行");
+            assert!(device.online);
+        }
+
+        for _ in 0..FAILURE_THRESHOLD {
+            record_probe_failure(&state, "100.113.214.69", 62116);
+        }
+        let devices = state.devices.read().unwrap();
+        assert!(devices.get("peer-1").is_none(), "全部行移除后条目应删除");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     探测候选端口与已有地址行同 host 不同 port（如 manual_peers 配了 ghost 端口、
+    ///     或 Tailscale 扫到非 cc-partner 端口）时，失败不得惩罚同 host 的健康地址行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     健康行 (LAN, 62116) 在位，对 (LAN, 9999) 连续失败 3 次：
+    ///     断言行数不变、活跃不变、online 保持。
+    #[tokio::test]
+    async fn probe_failure_on_other_port_does_not_punish_healthy_row() {
+        let state = build_test_state("self-a", Vec::new()).await;
+        record_probe_success(&state, "192.168.6.17", health_of("peer-1", 62116), 0.5);
+
+        for _ in 0..FAILURE_THRESHOLD {
+            record_probe_failure(&state, "192.168.6.17", 9999);
+        }
+        let devices = state.devices.read().unwrap();
+        let device = devices.get("peer-1").expect("ghost 端口失败不应影响条目");
+        assert_eq!(device.addresses.len(), 1);
+        assert_eq!(device.addresses[0].port, 62116);
+        assert_eq!(device.host, "192.168.6.17");
+        assert!(device.online);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     mDNS 只登记未测量行，RTT 由探测循环补测：候选集必须包含 devices 表已有地址行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     预置一个 rtt=None 的地址行（模拟 mDNS 登记），探测成功后断言该行 rtt 被实测值填充。
+    #[tokio::test]
+    async fn probe_cycle_measures_existing_unmeasured_address_rows() {
+        let state = build_test_state("self-a", Vec::new()).await;
+        {
+            let mut devices = state.devices.write().unwrap();
+            devices.insert(
+                "peer-1".to_string(),
+                crate::models::device::Device::new(
+                    "peer-1".to_string(),
+                    "device-peer-1".to_string(),
+                    "192.168.6.17".to_string(),
+                    62116,
+                    1,
+                    Vec::new(),
+                ),
+            );
+            let device = devices.get_mut("peer-1").unwrap();
+            device.addresses[0].rtt_ms = None;
+        }
+        record_probe_success(&state, "192.168.6.17", health_of("peer-1", 62116), 1.5);
+
+        let devices = state.devices.read().unwrap();
+        let device = devices.get("peer-1").unwrap();
+        let rtt = device.addresses[0]
+            .rtt_ms
+            .expect("探测成功后应写入实测 RTT");
+        assert!((rtt - 1.5).abs() < 1e-9, "新行 rtt 应取测量值，实际 {rtt}");
+        assert!(matches!(
+            device.addresses[0],
+            DeviceAddress { fail_count: 0, .. }
+        ));
     }
 }

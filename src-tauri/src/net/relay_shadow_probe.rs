@@ -23,7 +23,6 @@ use crate::net::peer_timeout::PeerTimeoutClass;
 use crate::net::relay_shadow::{mark_via_offline, remove_via, replace_shadows_for_via};
 use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
-use chrono::Utc;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -143,18 +142,18 @@ async fn probe_via(state: &AppState, via_device_id: &str) {
     let url = format!("{}/api/relay/peers", via_device.base_url());
     match fetch_relay_peers(state, &url).await {
         Ok(peers) => {
-            let now = Utc::now();
+            // 影子载体 Device：host/port 填 via 的直连地址（活跃地址），不进直连表。
             let reported = peers
                 .into_iter()
-                .map(|peer| Device {
-                    id: peer.device_id,
-                    name: peer.device_name,
-                    host: via_device.host.clone(),
-                    port: via_device.port,
-                    last_seen: now,
-                    online: true,
-                    proto_version: peer.proto_version,
-                    capabilities: peer.capabilities,
+                .map(|peer| {
+                    Device::new(
+                        peer.device_id,
+                        peer.device_name,
+                        via_device.host.clone(),
+                        via_device.port,
+                        peer.proto_version,
+                        peer.capabilities,
+                    )
                 })
                 .collect();
             replace_shadows_for_via(state, via_device_id, reported);
@@ -431,16 +430,16 @@ mod tests {
 
     /// 构造一条可控 host/port/online 的直连表 Device。
     fn device(id: &str, host: &str, port: u16, online: bool) -> Device {
-        Device {
-            id: id.to_string(),
-            name: format!("device-{id}"),
-            host: host.to_string(),
+        let mut device = Device::new(
+            id.to_string(),
+            format!("device-{id}"),
+            host.to_string(),
             port,
-            last_seen: Utc::now(),
-            online,
-            proto_version: 1,
-            capabilities: vec!["workbench.projects.v1".to_string()],
-        }
+            1,
+            vec!["workbench.projects.v1".to_string()],
+        );
+        device.online = online;
+        device
     }
 
     /// 把 Device 写入 A 的直连表。

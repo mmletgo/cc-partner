@@ -37,7 +37,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -502,16 +501,14 @@ async fn build_local_state(device_id: &str) -> AppState {
 fn device_for(base_url: &str) -> Device {
     let trimmed = base_url.trim_start_matches("http://");
     let (host, port_s) = trimmed.split_once(':').unwrap();
-    Device {
-        id: "peer".into(),
-        name: "peer".into(),
-        host: host.to_string(),
-        port: port_s.parse().unwrap(),
-        last_seen: Utc::now(),
-        online: true,
-        proto_version: 1,
-        capabilities: vec![],
-    }
+    Device::new(
+        "peer".into(),
+        "peer".into(),
+        host.to_string(),
+        port_s.parse().unwrap(),
+        1,
+        vec![],
+    )
 }
 
 fn insert_device(state: &AppState, device: Device) {

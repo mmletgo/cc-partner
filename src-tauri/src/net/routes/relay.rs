@@ -357,7 +357,6 @@ mod tests {
     use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::routing::{any, get};
     use axum::Router;
-    use chrono::Utc;
     use futures_util::{SinkExt, StreamExt};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::collections::HashMap;
@@ -538,16 +537,16 @@ mod tests {
     /// Business Logic（为什么需要这个函数）:
     ///     relay 转发目标解析读 devices 表；测试需要可控的 host/port/online 组合。
     fn test_device(id: &str, host: &str, port: u16, online: bool) -> Device {
-        Device {
-            id: id.to_string(),
-            name: format!("device-{id}"),
-            host: host.to_string(),
+        let mut device = Device::new(
+            id.to_string(),
+            format!("device-{id}"),
+            host.to_string(),
             port,
-            last_seen: Utc::now(),
-            online,
-            proto_version: 1,
-            capabilities: vec!["workbench.projects.v1".to_string()],
-        }
+            1,
+            vec!["workbench.projects.v1".to_string()],
+        );
+        device.online = online;
+        device
     }
 
     /// 把目标设备写入（或移出）B 的直连表。
