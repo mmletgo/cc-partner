@@ -37,8 +37,11 @@ pub struct DeviceAddress {
 - `report_failure(host)`：fail_count += 1；达 `FAILURE_THRESHOLD`(3) 移除该行；然后 `select_active()`。
 - `select_active()`（核心选路，纯函数可测）：
   1. 候选 = `addresses` 中 `fail_count == 0` 的行；
-  2. 活跃行（现 host/port）若仍在候选中且满足粘滞：`rtt_active <= best_rtt * SWITCH_RATIO`，保持；
-  3. 否则切到 rtt 最小的候选（`None` 视为 +∞，即测过的优先于未测的）；
+  2. 活跃行（现 host/port）若仍在候选中：仅当存在比它显著更快的备选
+     （`rtt_other < rtt_active * SWITCH_RATIO`）才让位，否则保持——相近 RTT 的路径
+     不随探测周期抖动互切（比较方向不能写成 `rtt_active <= best * SWITCH_RATIO`：
+     活跃行自身计入 best 时该条件恒不成立，退化为永远取 min）；
+  3. 让位后取 rtt 最小的候选（`None` 视为 +∞，即测过的优先于未测的）；
   4. 无候选 → `online = false`（所有地址都连续失败时才判定设备离线）。
 - `SWITCH_RATIO = 0.6`（防抖：新路径 RTT 必须显著优于现路径才切换；LAN ~0.5ms vs Tailscale
   ~5–200ms 差距远超阈值，切换是即时的；反过来 LAN 断开时活跃行 fail_count>0 立即失格）。

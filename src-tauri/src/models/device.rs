@@ -24,7 +24,8 @@ use std::collections::HashMap;
 ///     避免设备条目被反复增删。
 pub const FAILURE_THRESHOLD: u32 = 3;
 
-/// 活跃地址粘滞阈值：`rtt_active <= best_rtt * SWITCH_RATIO` 时保持现活跃地址（防抖）。
+/// 活跃地址粘滞阈值：仅当备选路径 `rtt_other < rtt_active * SWITCH_RATIO`
+///     （比现路径快 1/SWITCH_RATIO 倍以上）时才切换活跃地址（防抖）。
 ///
 /// Business Logic: 新路径 RTT 必须显著优于现路径才值得切换；LAN ~0.5ms vs Tailscale
 ///     ~5–200ms 差距远超该阈值，切换是即时的，而量级相近的路径之间不来回抖动。
@@ -250,8 +251,12 @@ impl Device {
 ///
 /// Code Logic:
 ///     1. 候选 = `fail_count == 0` 的行；
-///     2. 活跃行若仍在候选中且满足粘滞（`rtt_active <= best_rtt * SWITCH_RATIO`）则保持；
-///     3. 否则取 rtt 最小的候选（None 视为 +∞，即测过的优先于未测的；并列取先插入行）；
+///     2. 活跃行若仍是候选：仅当存在比它快 `SWITCH_RATIO` 倍以上的备选
+///        （`rtt_other < rtt_active * SWITCH_RATIO`，即备选明显更优）才让位，
+///        否则保持——相近 RTT 的两条路径不随每轮探测抖动互切；活跃行 rtt 未测量
+///        视为不满足粘滞（让位给已测量的行）；
+///     3. 让位或活跃行不在候选时，取 rtt 最小的候选（None 视为 +∞，测过的优先；
+///        并列取先插入行）；
 ///     4. 无候选返回 None（调用方据此判定 offline）。
 pub fn select_active_address<'a>(
     addresses: &'a [DeviceAddress],
@@ -261,15 +266,16 @@ pub fn select_active_address<'a>(
     if candidates.is_empty() {
         return None;
     }
-    let best_rtt = candidates
-        .iter()
-        .filter_map(|a| a.rtt_ms)
-        .fold(f64::INFINITY, f64::min);
-    // 活跃行粘滞：仍在候选且不劣于阈值时保持（spec 公式原样；best 含活跃行自身，
-    // 故该分支实际只在 rtt 相同/为 0 的边界成立，常态等价于直接取最小 rtt）。
+    // 活跃行粘滞：只有备选比它快 SWITCH_RATIO 倍以上才让位（`rtt_other < rtt_active *
+    // SWITCH_RATIO`）。比较方向必须是「备选 < 活跃 * 阈值」——若写成「活跃 <= 备选 * 阈值」
+    // 则该条件蕴含活跃已是最小，分支退化为 min、SWITCH_RATIO 成死代码（实现时踩过的坑）。
     if let Some(active) = candidates.iter().find(|a| a.host == active_host) {
-        if let Some(rtt) = active.rtt_ms {
-            if rtt <= best_rtt * SWITCH_RATIO {
+        if let Some(active_rtt) = active.rtt_ms {
+            let dominated = candidates.iter().any(|a| {
+                a.host != active_host
+                    && matches!(a.rtt_ms, Some(rtt) if rtt < active_rtt * SWITCH_RATIO)
+            });
+            if !dominated {
                 return Some(active);
             }
         }
@@ -448,28 +454,38 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     粘滞规则防路径抖动：活跃行仍是健康候选且满足 spec 粘滞公式时应保持，
-    ///     不得因择优比较在相近路径间来回切换。
+    ///     粘滞规则防路径抖动：备选未显著快于活跃路径（rtt_other >= rtt_active *
+    ///     SWITCH_RATIO）时必须保持现活跃地址，相近 RTT 的两条路径不得随探测周期互切。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     活跃 LAN rtt=0.0、Tailscale rtt=10：0 <= 10*0.6 成立，断言走粘滞分支保持 LAN；
-    ///     对照组 LAN rtt=0.5、Tailscale=5（0.5 > 5*0.6 不成立）同样收敛到最小 rtt 的 LAN，
-    ///     并断言 SWITCH_RATIO 常量与 spec 一致。
+    ///     ① 反抖动关键用例：活跃 LAN rtt=0.9、Tailscale rtt=0.6——0.6 < 0.9*0.6=0.54
+    ///        不成立，必须保持 LAN（在退化的「永远取 min」实现下此断言会失败）；
+    ///     ② 让位用例：活跃 Tailscale rtt=5、LAN rtt=0.5——0.5 < 5*0.6=3 成立，切换到 LAN；
+    ///     ③ rtt=0 边界：活跃 LAN rtt=0、Tailscale=10 保持 LAN。
     #[test]
     fn select_active_keeps_active_within_switch_ratio() {
         assert_eq!(SWITCH_RATIO, 0.6);
+
+        // ① 反抖动：备选不够快，保持活跃（该断言卡死退化实现）。
+        let mut device = dual_device("192.168.6.17");
+        device.addresses[0].rtt_ms = Some(0.9);
+        device.addresses[1].rtt_ms = Some(0.6);
+        device.select_active();
+        assert_eq!(device.host, "192.168.6.17", "备选未快过阈值不应切换");
+
+        // ② 让位：备选显著更快（0.5 < 5*0.6），立即切换。
+        let mut device = dual_device("100.113.214.69");
+        device.addresses[0].rtt_ms = Some(5.0);
+        device.addresses[1].rtt_ms = Some(0.5);
+        device.select_active();
+        assert_eq!(device.host, "192.168.6.17", "备选快过阈值应切换");
+
+        // ③ rtt=0 边界：0 的行不可能被支配，保持。
         let mut device = dual_device("192.168.6.17");
         device.addresses[0].rtt_ms = Some(0.0);
         device.addresses[1].rtt_ms = Some(10.0);
         device.select_active();
-        assert_eq!(device.host, "192.168.6.17", "粘滞分支应保持现活跃地址");
-
-        // 对照：不满足粘滞公式时按最小 rtt 收敛（仍应选中更快的 LAN）。
-        let mut device = dual_device("192.168.6.17");
-        device.addresses[0].rtt_ms = Some(0.5);
-        device.addresses[1].rtt_ms = Some(5.0);
-        device.select_active();
-        assert_eq!(device.host, "192.168.6.17");
+        assert_eq!(device.host, "192.168.6.17", "rtt=0 应保持现活跃地址");
     }
 
     /// Business Logic（为什么需要这个测试）:
