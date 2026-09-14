@@ -948,6 +948,29 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(item)?)
         }
 
+        // ---- provider manager（cc-switch 联动；remote 由 for_state P2P，本机走原路径）----
+        "provider-manager.status" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let item = crate::commands::provider_manager::provider_manager_status_for_state(
+                state, device_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "provider-manager.switch" => {
+            let device_id = optional_string(&payload, "deviceId");
+            let app = parse_provider_app(&payload)?;
+            let provider_id = required_string(&payload, "providerId")?;
+            let item = crate::commands::provider_manager::provider_manager_switch_for_state(
+                state,
+                app,
+                provider_id,
+                device_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+
         other => Err(AppError::validation(format!(
             "未知 workbench control op: {other}"
         ))),
@@ -1301,6 +1324,29 @@ fn optional_bool(payload: &Value, key: &str) -> Option<bool> {
     payload.get(key).and_then(|v| v.as_bool())
 }
 
+/// 解析 `provider-manager.switch` payload 的必填 `app` 字段为 `AgentApp`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 代理的 provider 切换 op 的 `app` 必须与对端 HTTP 路由同源解析
+///     （`AgentApp` lowercase serde）；非法值（如 `claude-desktop`）必须 validation 拒绝，
+///     不能透传到对端才失败。
+///
+/// Code Logic（这个函数做什么）:
+///     缺失/非字符串 → validation「app 必填」；字符串经 `AgentApp` 的 serde 反序列化，
+///     非法 → validation 并列出受支持的 app 清单。纯函数，脱离 AppState 可单测。
+fn parse_provider_app(payload: &Value) -> Result<crate::provider_manager::AgentApp, AppError> {
+    let raw = payload
+        .get("app")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::validation("app 必填"))?;
+    serde_json::from_value::<crate::provider_manager::AgentApp>(serde_json::Value::from(raw))
+        .map_err(|_| {
+            AppError::validation(
+                "未知 provider app，支持 claude|codex|gemini|opencode|hermes|openclaw",
+            )
+        })
+}
+
 /// 读取 payload 可选字符串数组。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1383,6 +1429,8 @@ fn ensure_response_within_limit<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
+    use super::parse_provider_app;
+
     /// GUI `export_token_stats` 代理到 sidecar；缺 arm 会返回
     /// 「未知 workbench control op: agent_ledger.export_token_stats」。
     ///
@@ -1407,5 +1455,70 @@ mod tests {
             src.contains("\"prompt_optimizer.stream\" =>"),
             "dispatch_workbench_op 必须注册 prompt_optimizer.stream"
         );
+    }
+
+    /// GuiClient 的 Provider Manager 状态查询必须经 control 代理到 sidecar owner；
+    /// 缺 arm 会返回「未知 workbench control op: provider-manager.status」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op。
+    #[test]
+    fn dispatch_recognizes_provider_manager_status() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"provider-manager.status\" =>"),
+            "dispatch_workbench_op 必须注册 provider-manager.status"
+        );
+    }
+
+    /// GuiClient 的 Provider Manager 切换必须经 control 代理到 sidecar owner；
+    /// 缺 arm 会返回「未知 workbench control op: provider-manager.switch」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op。
+    #[test]
+    fn dispatch_recognizes_provider_manager_switch() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"provider-manager.switch\" =>"),
+            "dispatch_workbench_op 必须注册 provider-manager.switch"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `provider-manager.switch` 的 `app` 必须与对端 HTTP 路由同源解析（AgentApp
+    ///     lowercase serde）；受支持的六个 app 都要通过。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     逐个断言 lowercase app 字符串解析为对应 AgentApp。
+    #[test]
+    fn parse_provider_app_accepts_all_supported_apps() {
+        for &app in crate::provider_manager::AgentApp::all() {
+            let parsed = parse_provider_app(&serde_json::json!({ "app": app.as_str() }))
+                .unwrap_or_else(|e| panic!("{} 应可解析: {e}", app.as_str()));
+            assert_eq!(parsed, app);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     非法 app（未适配目标/大小写不符/非字符串/缺失）必须在本机 validation 拒绝，
+    ///     不能透传到对端才失败，更不能默认成某个 agent。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 `claude-desktop`/`Claude`/数字/缺失 → validation 错误，错误文案含支持清单。
+    #[test]
+    fn parse_provider_app_rejects_invalid_app_with_validation() {
+        for payload in [
+            serde_json::json!({ "app": "claude-desktop" }),
+            serde_json::json!({ "app": "Claude" }),
+            serde_json::json!({ "app": 1 }),
+            serde_json::json!({}),
+        ] {
+            let error = parse_provider_app(&payload).expect_err("非法 app 应拒绝");
+            assert_eq!(error.classify(), crate::error::AppErrorCategory::Validation);
+            let message = error.to_string();
+            assert!(
+                message.contains("claude|codex") || message.contains("app 必填"),
+                "错误文案应可操作: {message}"
+            );
+        }
     }
 }

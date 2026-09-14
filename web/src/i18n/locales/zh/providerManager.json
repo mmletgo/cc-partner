@@ -2,7 +2,14 @@
   "title": "Provider 管理",
   "subtitle": "切换每个 agent 在 cc-switch 中已配置的当前 provider。切换由 cc-switch CLI 执行，不会影响你已安装的 cc-switch GUI。",
   "loadFailed": "加载 provider 状态失败：{{error}}",
+  "remoteLoadFailed": "加载远端设备 provider 状态失败：{{error}}",
   "noProviders": "未找到已配置的 provider，请先在 cc-switch 中配置 provider。",
+  "device": {
+    "selectorLabel": "目标设备",
+    "local": "本机",
+    "remoteTarget": "正在管理远端设备「{{device}}」的 provider，切换会在该设备上执行。",
+    "viaSuffix": "{{name}}（经 {{via}}）"
+  },
   "actions": {
     "switch": "切换",
     "enabled": "已启用",
@@ -14,6 +21,8 @@
     "current": "当前",
     "cliMissing": "未安装 cc-switch CLI，切换功能已禁用。",
     "cliMissingHint": "安装 cc-switch CLI 会与你现有的 cc-switch 共享同一份数据，不会影响 GUI。",
+    "cliMissingRemote": "远端设备未安装 cc-switch CLI，无法在该设备上切换 provider。",
+    "cliMissingHintRemote": "请在对端设备上安装 cc-switch CLI，然后回到本页重新检测。",
     "dbMissing": "未找到 cc-switch 数据，请先安装 cc-switch 并至少配置一个 provider。",
     "versionMismatch": "cc-switch GUI v{{guiVersion}} 与 CLI v{{cliVersion}} 版本不一致——请对齐版本，避免切换触发 GUI 无法识别的数据库迁移。",
     "guiRunning": "cc-switch GUI 已打开。切换是安全的；GUI 窗口可能在刷新前显示旧的当前 provider。",
