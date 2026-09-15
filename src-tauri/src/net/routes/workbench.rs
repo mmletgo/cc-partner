@@ -3006,6 +3006,43 @@ pub async fn dependency_install(
     Ok(Json(status))
 }
 
+/// 预检 owner 本机「全新启动连接」影响面（只读 + 有界 ssh 探测；设备级，无项目上下文）。
+pub async fn fresh_restart_preview(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<crate::workbench::fresh_restart::WorkbenchFreshRestartPreviewDto>> {
+    let preview =
+        crate::commands::workbench::fresh_restart::preview_workbench_fresh_restart_for_state(
+            &state, None,
+        )
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fresh-restart.preview"))?;
+    Ok(Json(preview))
+}
+
+/// 执行 owner 本机设备级「全新启动连接」。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreshRestartExecuteReq {
+    #[serde(default)]
+    pub include_foreign_sessions: bool,
+}
+
+pub async fn fresh_restart_execute(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<FreshRestartExecuteReq>,
+) -> P2pResult<Json<crate::workbench::fresh_restart::WorkbenchFreshRestartResultDto>> {
+    let result = crate::commands::workbench::fresh_restart::run_workbench_fresh_restart_for_state(
+        &state,
+        None,
+        Some(req.include_foreign_sessions),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.fresh-restart.execute"))?;
+    Ok(Json(result))
+}
+
 /// 取消 owner 本机 tmux 安装。
 pub async fn dependency_cancel(
     State(state): State<AppState>,

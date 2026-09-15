@@ -16,8 +16,8 @@ use crate::net::protocol::{
     PeerProtocolInfo, CAPABILITY_DEVICE_REQUEST_BINDING_V1,
     CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_BANNER_V1,
     CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1,
-    CAPABILITY_WORKBENCH_HOOK_REPAIR_V1, CAPABILITY_WORKBENCH_PROJECT_NOTES_V1,
-    CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
+    CAPABILITY_WORKBENCH_FRESH_RESTART_V1, CAPABILITY_WORKBENCH_HOOK_REPAIR_V1,
+    CAPABILITY_WORKBENCH_PROJECT_NOTES_V1, CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
 };
 use crate::workbench::agent_ledger::models::{
     AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
@@ -30,6 +30,9 @@ use crate::workbench::claude_sessions::{
     decode_session_search_response_body, SessionPreview, SessionSearchResult,
 };
 use crate::workbench::dependencies::WorkbenchDependencyStatusDto;
+use crate::workbench::fresh_restart::{
+    WorkbenchFreshRestartPreviewDto, WorkbenchFreshRestartResultDto,
+};
 use crate::workbench::hook_repair::RepairHookFailureDto;
 use crate::workbench::lan_fleet::models::{LanFleetOwnerBatchReq, LanFleetOwnerBatchResp};
 use crate::workbench::models::{
@@ -1062,6 +1065,37 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/dependency/cancel"),
             &serde_json::json!({}),
             RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 预检 owning device 的「全新启动连接」影响面（只读 + 有界 ssh 探测）。
+    pub async fn fresh_restart_preview(
+        &self,
+        base_url: &str,
+    ) -> Result<WorkbenchFreshRestartPreviewDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_FRESH_RESTART_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/fresh-restart/preview"),
+            &serde_json::json!({}),
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 在 owning device 执行设备级「全新启动连接」（杀全部工作台终端 + 重启 tmux server）。
+    pub async fn fresh_restart(
+        &self,
+        base_url: &str,
+        include_foreign_sessions: bool,
+    ) -> Result<WorkbenchFreshRestartResultDto, AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_FRESH_RESTART_V1)
+            .await?;
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/fresh-restart/execute"),
+            &serde_json::json!({ "includeForeignSessions": include_foreign_sessions }),
+            RemoteRequestTimeoutKind::VeryLong,
         )
         .await
     }

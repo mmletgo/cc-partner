@@ -134,6 +134,7 @@ where
         Some("stop") => map_lifecycle_result(run_async(stop())),
         Some("status") => map_lifecycle_result(run_async(print_status())),
         Some("supervise") => map_lifecycle_result(crate::backend::supervisor::supervise()),
+        Some("workbench-fresh") => dispatch_workbench_fresh(&args[2..]),
         Some("doctor") => dispatch_doctor(&args[2..]),
         Some("devices") => dispatch_devices(&args[2..]),
         Some("relay") => dispatch_relay(&args[2..]),
@@ -144,7 +145,7 @@ where
         }
         _ => {
             eprintln!(
-                "用法: cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]|version|--version|-V>"
+                "用法: cc-partner-backend <start|serve|stop|status|supervise|workbench-fresh|doctor [--json]|version|--version|-V>"
             );
             eprintln!("      cc-partner-backend devices [--json]");
             eprintln!(
@@ -1817,6 +1818,72 @@ async fn print_status() -> Result<(), AppError> {
     Ok(())
 }
 
+/// 运行 `workbench-fresh` 子命令：以调用者环境执行设备级全新启动连接。
+///
+/// Business Logic（为什么需要这个函数）:
+///     "全新启动连接"的 ssh 自动引导不可用时（无 sshd/免密），用户需要一条可在
+///     任意新 SSH 登录里手动执行的命令获得同样的全新环境引导；本子命令以调用者
+///     进程环境运行核心逻辑，正好承载该降级路径。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝多余参数 → 检查 control file：owner 运行中直接报可操作错误退出 1
+///     （跨进程无法共享进程级 barrier，拒绝比竞态安全）→ stopped 时以
+///     `build_app_state` 构造一次性 state（不启服务、不写 control file）执行核心
+///     `run_workbench_fresh_restart_for_state`（不连带用户 tmux 会话）→ 人类可读输出。
+fn dispatch_workbench_fresh(rest: &[String]) -> i32 {
+    if !rest.is_empty() {
+        eprintln!("未知参数: {rest:?}；用法: cc-partner-backend workbench-fresh");
+        return 2;
+    }
+    match run_async(run_workbench_fresh_cli()) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("workbench-fresh 执行失败: {error}");
+            1
+        }
+    }
+}
+
+/// `workbench-fresh` 的异步主体（一次性 state；见 `dispatch_workbench_fresh`）。
+async fn run_workbench_fresh_cli() -> Result<i32, AppError> {
+    let status = current_status().await;
+    if status.kind == BackendStatusKind::Running {
+        eprintln!(
+            "后端正在运行；请在应用内工作台执行「全新启动连接」，或先 cc-partner-backend stop 后再运行本命令"
+        );
+        return Ok(1);
+    }
+    let ui: Arc<dyn BackendUi> = Arc::new(HeadlessBackendUi::new(headless_dist_dir()));
+    let state = build_app_state(ui).await?;
+    let result =
+        crate::workbench::fresh_restart::run_workbench_fresh_restart_for_state(&state, false)
+            .await?;
+    println!("已终止工作台终端会话: {}", result.terminated_session_count);
+    if !result.skipped_session_ids.is_empty() {
+        println!(
+            "跳过（关闭失败，保留元数据）: {}",
+            result.skipped_session_ids.len()
+        );
+    }
+    if result.server_restarted {
+        println!("tmux server 已以全新登录环境重启（loopback ssh 引导）");
+    } else {
+        match result.bootstrap {
+            crate::workbench::fresh_restart::FreshRestartBootstrap::Ssh => {}
+            _ => {
+                println!(
+                    "tmux server 未重启：{}",
+                    result.degraded_detail.as_deref().unwrap_or("未知原因")
+                );
+                if let Some(command) = result.manual_command.as_deref() {
+                    println!("可在新的 SSH 登录中手动执行: {command}");
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
 /// 运行 `stop` 子命令。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2356,33 +2423,12 @@ mod tests {
     ///     Drop 守卫保证 panic 后仍恢复环境。不依赖 Command Debug（Windows 上不含 env）。
     #[test]
     fn start_inherits_data_dir_env_for_detached_serve() {
-        use std::ffi::{OsStr, OsString};
-        use std::sync::{Mutex, MutexGuard, OnceLock};
+        use std::ffi::OsStr;
 
-        struct EnvGuard {
-            _lock: MutexGuard<'static, ()>,
-            previous: Option<OsString>,
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.previous {
-                    Some(value) => std::env::set_var("CC_PARTNER_DATA_DIR", value),
-                    None => std::env::remove_var("CC_PARTNER_DATA_DIR"),
-                }
-            }
-        }
-
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("data dir inherit 测试锁中毒");
-        let previous = std::env::var_os("CC_PARTNER_DATA_DIR");
-        std::env::set_var("CC_PARTNER_DATA_DIR", "/tmp/cc-partner-isolated");
-        let _guard = EnvGuard {
-            _lock: lock,
-            previous,
-        };
+        // 必须复用 config::data_dir_env_test 全局锁族：自建锁 + 裸 set_var 会与
+        // 其它持全局锁的 env 测试并发写同一 key（macOS environ 非原子），把并行
+        // relay 测试刚设置的隔离目录覆盖回 None，使其读到真实 home control file。
+        let _guard = crate::config::install_data_dir_env(Some("/tmp/cc-partner-isolated"));
 
         let mut command = std::process::Command::new("true");
         let inherited = super::inherit_data_dir_env(&mut command);

@@ -78,3 +78,33 @@ pub(crate) fn workbench_tmux_persist_conf_path() -> Result<PathBuf, AppError> {
     }
     Ok(path)
 }
+
+/// Business Logic（为什么需要这个函数）:
+///     设备级「全新启动连接」要让新 tmux server 继承全新登录环境，唯一途径是
+///     终止旧 server；工作台逐会话 kill 不影响用户自己的 tmux 会话，只有显式
+///     kill-server 才能换掉 server 进程环境。
+///
+/// Code Logic（这个函数做什么）:
+///     生成 `prefix + kill-server` argv（默认 socket，禁 `-S`）。
+pub(crate) fn tmux_kill_server_args(prefix_args: &[String]) -> Vec<String> {
+    let mut args = prefix_args.to_vec();
+    args.push("kill-server".to_string());
+    args
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     全新启动前必须知道 tmux server 上还有哪些非工作台 session（kill-server 会
+///     把它们一并终止，需要用户显式确认）；session 名无固定前缀，只能枚举全量
+///     再与 SQLite 权威集合做差集。
+///
+/// Code Logic（这个函数做什么）:
+///     生成 `prefix + list-sessions -F #{session_name}` argv。
+pub(crate) fn tmux_list_session_names_args(prefix_args: &[String]) -> Vec<String> {
+    let mut args = prefix_args.to_vec();
+    args.extend([
+        "list-sessions".to_string(),
+        "-F".to_string(),
+        "#{session_name}".to_string(),
+    ]);
+    args
+}

@@ -1315,6 +1315,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/workbench/dependency/cancel",
             post(workbench::dependency_cancel),
         )
+        .route(
+            "/api/workbench/fresh-restart/preview",
+            post(workbench::fresh_restart_preview),
+        )
+        .route(
+            "/api/workbench/fresh-restart/execute",
+            post(workbench::fresh_restart_execute),
+        )
         .route("/api/workbench/events", get(workbench::workbench_events))
         .route(
             "/api/workbench/agent-runtime/snapshot",

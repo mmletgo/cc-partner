@@ -207,7 +207,7 @@ const SESSION_REPLAY_MAX_CHARS: usize = 120_000;
 /// 冷恢复历史独立于 120k live ring 保留；两者合计不超过前端 200k buffer 合同。
 const SESSION_REPLAY_RESTORED_PREFIX_MAX_CHARS: usize = 80_000;
 const RAW_PTY_BACKEND: &str = "pty";
-const TMUX_BACKEND: &str = "tmux";
+pub(crate) const TMUX_BACKEND: &str = "tmux";
 #[cfg(windows)]
 const FALLBACK_TERMINAL_COMMAND: &str = "cmd.exe";
 #[cfg(not(windows))]
@@ -901,6 +901,30 @@ fn default_terminal_command_from_env(command: Option<OsString>) -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| FALLBACK_TERMINAL_COMMAND.to_string())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     工作台终端环境此前固化在 tmux server 启动环境 + 裸 `$SHELL`（非 login）上，
+///     用户修改 /etc/profile、~/.zshrc 等 rc 文件后重开终端也不生效，被迫手动重连。
+///     新建 tmux pane 改用 login shell，让 profile 类变更重开终端即生效。
+///
+/// Code Logic（这个函数做什么）:
+///     非 Windows 在默认终端命令后追加 ` -l`（trim 幂等，防 `-l -l`）；Windows 的
+///     ComSpec 不接受 `-l`，WSL tmux 分支本就不传 shell command，均原样返回。
+///     raw PTY fallback 不使用本函数（CommandBuilder 把整串当 program，混入参数会 exec 失败）。
+fn default_terminal_login_command() -> String {
+    #[cfg(windows)]
+    {
+        default_terminal_command()
+    }
+    #[cfg(not(windows))]
+    {
+        let base = default_terminal_command();
+        if base.trim_end().ends_with(" -l") {
+            return base;
+        }
+        format!("{base} -l")
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1871,6 +1895,12 @@ fn ensure_tmux_window_identity(tmux: &TmuxCommand, target: &str, session_id: &st
 ///     写入 persist conf 后 `run_disclaimed` 跑 `-f conf start-server`（默认 socket）；
 ///     失败只记日志，禁止回退普通 spawn。然后 `set-option -s exit-empty off`。
 fn ensure_workbench_tmux_server(tmux: &TmuxCommand) {
+    // 闸点 B：fresh restart kill-server/ssh 引导窗口内禁止以 backend 旧环境拉起 server
+    // （entry 检查在 require_project_not_closing 闸点 A，此处堵 TOCTOU 窗口）。
+    if crate::workbench::fresh_restart::is_device_fresh_restart_active() {
+        tracing::debug!("fresh restart barrier 活跃，跳过 ensure_workbench_tmux_server");
+        return;
+    }
     let persist_conf = workbench_tmux_persist_conf_path()
         .ok()
         .and_then(|path| path.to_str().map(str::to_string));
@@ -2318,7 +2348,7 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError>
 ///
 /// Code Logic（这个函数做什么）:
 ///     对 stdout+stderr 做大小写不敏感子串匹配：can't find / no server / no such / not found。
-fn tmux_destroy_exit_is_already_gone(stdout: &str, stderr: &str) -> bool {
+pub(crate) fn tmux_destroy_exit_is_already_gone(stdout: &str, stderr: &str) -> bool {
     let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
     combined.contains("can't find")
         || combined.contains("can not find")
@@ -4160,6 +4190,9 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     project_closing 含 project_id → `unavailable(project_closing_barrier_active)`。
     pub fn require_project_not_closing(&self, project_id: &str) -> Result<(), AppError> {
+        // 闸点 A：设备级 fresh restart 执行期间拒绝一切 create/attach/restore/spawn
+        // （该函数是这些入口共同的 barrier 前置检查；project_id 仅用于下方 project 级闸）。
+        crate::workbench::fresh_restart::require_device_not_fresh_restarting()?;
         let map = self.project_closing.lock().expect("project_closing 锁中毒");
         if map.contains_key(project_id) {
             Err(AppError::unavailable(
@@ -4999,6 +5032,8 @@ impl WorkbenchSessionRegistry {
         let now = chrono::Utc::now().to_rfc3339();
         let (cols, rows) = initial_terminal_size(initial_cols, initial_rows);
         let terminal_command = default_terminal_command();
+        // tmux pane 用 login shell（profile 类变更重开生效）；raw PTY fallback 保持裸命令。
+        let terminal_login_command = default_terminal_login_command();
         let agent_ctx = TerminalAgentContextIds {
             project_id: project.id.clone(),
             worktree_id: worktree_id.clone().unwrap_or_default(),
@@ -5022,7 +5057,7 @@ impl WorkbenchSessionRegistry {
                     &worktree_tmux_id,
                     &project.name,
                     &cwd,
-                    &terminal_command,
+                    &terminal_login_command,
                     Some(&agent_ctx),
                     cols,
                     rows,
@@ -5032,7 +5067,7 @@ impl WorkbenchSessionRegistry {
                         let display_command = tmux.display_command_for_session(
                             &worktree_tmux_id,
                             Some(&target),
-                            &terminal_command,
+                            &terminal_login_command,
                         );
                         (
                             TMUX_BACKEND.to_string(),
@@ -5222,7 +5257,8 @@ impl WorkbenchSessionRegistry {
         );
         let session_name =
             migrate_tmux_session_name(&tmux, row.backend_id.as_deref(), &desired_session_name);
-        let terminal_command = default_terminal_command();
+        // restore 只重建 display 字符串，用 login 变体与 create 保持展示一致。
+        let terminal_command = default_terminal_login_command();
         let target_exists = if tmux_row_requires_window_recreation(&row) {
             false
         } else {

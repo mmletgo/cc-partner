@@ -1113,5 +1113,44 @@
     "unsupported": "Unsupported without runtime evidence",
     "blocked": "Blocked: {{reason}}",
     "openPreview": "Open project preview"
+  },
+  "freshStart": {
+    "button": "Fresh restart connection…",
+    "title": "Fresh restart connection",
+    "description": "Closes all workbench terminal sessions on this device and restarts the tmux server with a fresh login environment; terminals created afterwards pick up system-level changes (groups, limits, profiles).",
+    "confirmTitle": "Confirm fresh restart",
+    "confirmBody": "This terminates ALL workbench terminal sessions on this device ({{count}}); running processes (including Claude and other agents) will be killed. This cannot be undone.",
+    "previewLoading": "Checking impact…",
+    "previewFailed": "Preview failed",
+    "sessionsTitle": "Sessions to terminate",
+    "foreignWarning": "tmux on this device also has {{count}} non-workbench session(s) ({{names}}). Unless they are terminated too, the tmux server will not restart and group/limits changes will not take effect yet.",
+    "includeForeignLabel": "Also terminate these non-workbench tmux sessions",
+    "sshUnavailable": "Automatic bootstrap unavailable ({{detail}}); follow the manual command in the result, or run it from any new SSH login.",
+    "execute": "Fresh restart",
+    "cancel": "Cancel",
+    "running": "Running fresh restart…",
+    "succeeded": "Terminated {{count}} session(s); tmux server restarted with a fresh login environment.",
+    "serverNotRestarted": "Terminated {{count}} session(s); tmux server was NOT restarted.",
+    "skippedSessions": "{{count}} session(s) failed to close and were kept.",
+    "manualCommandLabel": "Manual command (run from a new SSH login)",
+    "copyCommand": "Copy command",
+    "copyFailed": "Copy failed",
+    "copied": "Copied",
+    "close": "Close",
+    "degraded": {
+      "platform_unsupported": "Automatic bootstrap is not supported on this platform; use the manual command",
+      "ssh_unavailable": "Failed to start ssh; use the manual command",
+      "ssh_failed": "ssh bootstrap failed; use the manual command",
+      "ssh_timeout": "ssh bootstrap timed out (passwordless login may be missing); use the manual command",
+      "user_unknown": "Could not determine the running user; use the manual command",
+      "foreign_present": "Non-workbench tmux sessions exist; server was not restarted",
+      "close_failed": "Some sessions failed to close; server was not restarted",
+      "kill_server_failed": "Failed to stop the tmux server; use the manual command",
+      "unknown": "Unknown degradation"
+    },
+    "errors": {
+      "preview": "Failed to preview fresh restart",
+      "execute": "Failed to execute fresh restart"
+    }
   }
 }

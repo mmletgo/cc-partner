@@ -1020,3 +1020,37 @@ export interface WorkbenchLaunchSummaryWire {
   transfers: WorkbenchLaunchSectionWire<WorkbenchLaunchTransfer>;
   generatedAt: string;
 }
+
+/** 「全新启动连接」预检单条会话摘要（与 Rust WorkbenchFreshRestartSessionDto 对齐）。 */
+export interface WorkbenchFreshRestartSession {
+  sessionId: string;
+  projectId: string;
+  name: string;
+  backend: string;
+}
+
+/** 「全新启动连接」预检结果（与 Rust WorkbenchFreshRestartPreviewDto 对齐）。 */
+export interface WorkbenchFreshRestartPreview {
+  sessions: WorkbenchFreshRestartSession[];
+  workbenchTmuxSessionCount: number;
+  foreignSessionCount: number;
+  foreignSessionNames: string[];
+  sshBootstrapAvailable: boolean | null;
+  sshBootstrapDetail: string | null;
+}
+
+/** 新 tmux server 引导方式（与 Rust FreshRestartBootstrap 对齐）。 */
+export type WorkbenchFreshRestartBootstrap = 'ssh' | 'manual' | 'skipped';
+
+/** 「全新启动连接」执行结果（与 Rust WorkbenchFreshRestartResultDto 对齐）。 */
+export interface WorkbenchFreshRestartResult {
+  terminatedSessionCount: number;
+  terminatedSessionIds: string[];
+  skippedSessionIds: string[];
+  serverRestarted: boolean;
+  bootstrap: WorkbenchFreshRestartBootstrap;
+  degradedReason: string | null;
+  degradedDetail: string | null;
+  foreignSessionCount: number;
+  manualCommand: string | null;
+}

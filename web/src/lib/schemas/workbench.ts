@@ -837,3 +837,59 @@ export const sessionSearchResultDecoder: Decoder<SessionSearchResult> = objectDe
     diagnostics: sessionSearchDiagnosticsDecoder,
   },
 );
+
+/**
+ * 「全新启动连接」预检结果 decoder。
+ *
+ * Business Logic（为什么需要这个 decoder）:
+ *   确认弹窗依据 preview 展示将被终止的会话与非工作台 tmux 会话数；损坏 payload
+ *   fail-closed，不得以空清单冒充"无影响"诱导用户确认。
+ *
+ * Code Logic（这个函数做什么）:
+ *   严格解码 camelCase 字段；sshBootstrapAvailable/detail 可空（探测未执行）。
+ */
+export const workbenchFreshRestartPreviewDecoder: Decoder<
+  import('../types/workbench').WorkbenchFreshRestartPreview
+> = objectDecoder('WorkbenchFreshRestartPreview', {
+  sessions: arrayDecoder(
+    objectDecoder('WorkbenchFreshRestartSession', {
+      sessionId: stringDecoder,
+      projectId: stringDecoder,
+      name: stringDecoder,
+      backend: stringDecoder,
+    }),
+  ),
+  workbenchTmuxSessionCount: numberDecoder,
+  foreignSessionCount: numberDecoder,
+  foreignSessionNames: arrayDecoder(stringDecoder),
+  sshBootstrapAvailable: nullableDecoder(booleanDecoder),
+  sshBootstrapDetail: nullableDecoder(stringDecoder),
+});
+
+const workbenchFreshRestartBootstrapDecoder: Decoder<
+  import('../types/workbench').WorkbenchFreshRestartBootstrap
+> = enumDecoder('WorkbenchFreshRestartBootstrap', ['ssh', 'manual', 'skipped']);
+
+/**
+ * 「全新启动连接」执行结果 decoder。
+ *
+ * Business Logic（为什么需要这个 decoder）:
+ *   结果里的 serverRestarted/degraded 字段驱动成功反馈与降级指引（可复制手动命令）；
+ *   损坏 payload fail-closed，不得把降级误读为成功。
+ *
+ * Code Logic（这个函数做什么）:
+ *   严格解码 camelCase 字段；degraded/manual 字段可空。
+ */
+export const workbenchFreshRestartResultDecoder: Decoder<
+  import('../types/workbench').WorkbenchFreshRestartResult
+> = objectDecoder('WorkbenchFreshRestartResult', {
+  terminatedSessionCount: numberDecoder,
+  terminatedSessionIds: arrayDecoder(stringDecoder),
+  skippedSessionIds: arrayDecoder(stringDecoder),
+  serverRestarted: booleanDecoder,
+  bootstrap: workbenchFreshRestartBootstrapDecoder,
+  degradedReason: nullableDecoder(stringDecoder),
+  degradedDetail: nullableDecoder(stringDecoder),
+  foreignSessionCount: numberDecoder,
+  manualCommand: nullableDecoder(stringDecoder),
+});

@@ -53,6 +53,7 @@ function makeProps(overrides: Partial<WorkbenchStatusCardProps> = {}): Workbench
     runtimeVisible: true,
     activeAgent: null,
     ledgerEntry: null,
+    onOpenFreshRestart: () => undefined,
     ...overrides,
   };
 }

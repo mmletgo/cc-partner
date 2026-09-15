@@ -947,6 +947,28 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(item)?)
         }
+        // ---- 设备级「全新启动连接」：owner 本机执行（remote 由 for_state P2P 分流）----
+        "workbench.fresh-restart-preview" => {
+            let item = crate::commands::workbench::fresh_restart::preview_workbench_fresh_restart_for_state(
+                state, None,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "workbench.fresh-restart" => {
+            let include_foreign = payload
+                .get("includeForeignSessions")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let item =
+                crate::commands::workbench::fresh_restart::run_workbench_fresh_restart_for_state(
+                    state,
+                    None,
+                    Some(include_foreign),
+                )
+                .await?;
+            Ok(serde_json::to_value(item)?)
+        }
 
         // ---- provider manager（cc-switch 联动；remote 由 for_state P2P，本机走原路径）----
         "provider-manager.status" => {
@@ -1462,6 +1484,32 @@ mod tests {
         assert!(
             src.contains("\"prompt_optimizer.stream\" =>"),
             "dispatch_workbench_op 必须注册 prompt_optimizer.stream"
+        );
+    }
+
+    /// GuiClient 的「全新启动连接」预检必须经 control 代理到 sidecar owner；
+    /// 缺 arm 会返回「未知 workbench control op: workbench.fresh-restart-preview」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op。
+    #[test]
+    fn dispatch_recognizes_workbench_fresh_restart_preview() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"workbench.fresh-restart-preview\" =>"),
+            "dispatch_workbench_op 必须注册 workbench.fresh-restart-preview"
+        );
+    }
+
+    /// GuiClient 的「全新启动连接」执行必须经 control 代理到 sidecar owner；
+    /// 缺 arm 会返回「未知 workbench control op: workbench.fresh-restart」。
+    ///
+    /// Code Logic: 源码合同，确保 dispatch match 含该 op（mutation，360s 预算）。
+    #[test]
+    fn dispatch_recognizes_workbench_fresh_restart() {
+        let src = include_str!("control_workbench.rs");
+        assert!(
+            src.contains("\"workbench.fresh-restart\" =>"),
+            "dispatch_workbench_op 必须注册 workbench.fresh-restart"
         );
     }
 

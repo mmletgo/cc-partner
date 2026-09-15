@@ -142,6 +142,12 @@ export interface WorkbenchStatusCardProps {
    * 未命中时为 null。
    */
   ledgerEntry?: AgentLedgerEntry | null;
+  /**
+   * 打开设备级「全新启动连接」确认弹窗。
+   *
+   * Business Logic: 状态卡是设备级动作入口；弹窗状态由 useWorkbenchProjectController 持有。
+   */
+  onOpenFreshRestart: () => void;
 }
 
 /**
@@ -167,6 +173,7 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     runtimeVisible,
     activeAgent = null,
     ledgerEntry = null,
+    onOpenFreshRestart,
   } = props;
 
   const emptyValue = t('workbench:emptyValue');
@@ -330,6 +337,15 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
             {t('workbench:closeTerminal')}
           </Button>
         </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={remoteWriteDisabled || !activeProject}
+          onClick={onOpenFreshRestart}
+          data-testid="workbench-fresh-restart-open"
+        >
+          {t('workbench:freshStart.button')}
+        </Button>
       </div>
     </Card>
   );
