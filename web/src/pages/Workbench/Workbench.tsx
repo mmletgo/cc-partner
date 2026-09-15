@@ -62,7 +62,7 @@ import type { WorkbenchInspectorTab } from './WorkbenchInspector';
 import { WorkbenchSessionTabs } from './WorkbenchSessionTabs';
 import { useWorkbenchPageBridges } from './useWorkbenchPageBridges';
 import { WorkbenchStatusCard } from './WorkbenchStatusCard';
-import { WorkbenchFreshRestartDialog } from './views/WorkbenchFreshRestartDialog';
+import { WorkbenchFreshRestartDialog } from '@/components/domain/WorkbenchFreshRestartDialog';
 import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
 import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';

@@ -549,3 +549,103 @@ describe('useWorkbenchProjectController', () => {
     }
   });
 });
+
+describe('useWorkbenchProjectController fresh restart (delegated hook)', () => {
+  function renderFrController(overrides: {
+    activeProject?: WorkbenchProject | null;
+    onFreshRestartCompleted?: () => void;
+  } = {}) {
+    const project =
+      overrides.activeProject === undefined ? buildLocalProject() : overrides.activeProject;
+    const selectProject = vi.fn(async (p: WorkbenchProject) => p);
+    return renderHook(() =>
+      useWorkbenchProjectController({
+        activeProject: project,
+        activeProjectId: project?.id ?? null,
+        projects: project ? [project] : [],
+        selectProject,
+        onFreshRestartCompleted: overrides.onFreshRestartCompleted,
+      }),
+    );
+  }
+
+  const frPreview = (overrides: Record<string, unknown> = {}) => ({
+    sessions: [],
+    workbenchTmuxSessionCount: 0,
+    foreignSessionCount: 0,
+    foreignSessionNames: [],
+    sshBootstrapAvailable: true,
+    sshBootstrapDetail: null,
+    ...overrides,
+  });
+
+  const frResult = (overrides: Record<string, unknown> = {}) => ({
+    terminatedSessionCount: 2,
+    terminatedSessionIds: ['s1', 's2'],
+    skippedSessionIds: [],
+    serverRestarted: true,
+    bootstrap: 'ssh',
+    degradedReason: null,
+    degradedDetail: null,
+    foreignSessionCount: 0,
+    manualCommand: null,
+    ...overrides,
+  });
+
+  test('open 本机项目自动 preview（deviceId=undefined）并写入 dialog 态', async () => {
+    freshRestartPreviewMock.mockResolvedValue(
+      frPreview({ sessions: [{ sessionId: 's1', projectId: 'local-1', name: 'demo', backend: 'tmux' }] }),
+    );
+    const { result } = renderFrController();
+    await act(async () => {
+      result.current.openFreshRestartDialog();
+    });
+    expect(freshRestartPreviewMock).toHaveBeenCalledWith(undefined);
+    expect(result.current.freshRestartDialog.open).toBe(true);
+    expect(result.current.freshRestartDialog.preview?.sessions).toHaveLength(1);
+  });
+
+  test('remote 项目解析对端 deviceId 并透传给 preview', async () => {
+    freshRestartPreviewMock.mockResolvedValue(
+      frPreview({ foreignSessionCount: 1, foreignSessionNames: ['manual'], sshBootstrapAvailable: false }),
+    );
+    const { result } = renderFrController({ activeProject: buildRemoteProject() });
+    await act(async () => {
+      result.current.openFreshRestartDialog();
+    });
+    expect(freshRestartPreviewMock).toHaveBeenCalledWith('device-a');
+    expect(result.current.freshRestartDialog.preview?.foreignSessionCount).toBe(1);
+  });
+
+  test('confirm 成功后写入 result 并回调 onFreshRestartCompleted', async () => {
+    freshRestartPreviewMock.mockResolvedValue(frPreview());
+    freshRestartExecuteMock.mockResolvedValue(frResult());
+    const completed = vi.fn();
+    const { result } = renderFrController({ onFreshRestartCompleted: completed });
+    await act(async () => {
+      result.current.openFreshRestartDialog();
+    });
+    await act(async () => {
+      await result.current.confirmFreshRestart(true);
+    });
+    expect(freshRestartExecuteMock).toHaveBeenCalledWith(undefined, true);
+    expect(result.current.freshRestartDialog.result?.serverRestarted).toBe(true);
+    expect(completed).toHaveBeenCalled();
+  });
+
+  test('confirm 传输失败保留 error 供重试，不回调 onFreshRestartCompleted', async () => {
+    freshRestartPreviewMock.mockResolvedValue(frPreview());
+    freshRestartExecuteMock.mockRejectedValue(new Error('boom'));
+    const completed = vi.fn();
+    const { result } = renderFrController({ onFreshRestartCompleted: completed });
+    await act(async () => {
+      result.current.openFreshRestartDialog();
+    });
+    await act(async () => {
+      await result.current.confirmFreshRestart(false);
+    });
+    expect(result.current.freshRestartDialog.error).toContain('boom');
+    expect(result.current.freshRestartDialog.result).toBeNull();
+    expect(completed).not.toHaveBeenCalled();
+  });
+});

@@ -95,6 +95,27 @@ vi.mock('@/hooks/useLanAgentFleet', () => ({
   }),
 }));
 
+const freshRestartPreviewMock = vi.fn();
+const freshRestartExecuteMock = vi.fn();
+
+vi.mock('@/api/workbench', () => ({
+  workbenchApi: {
+    freshRestart: {
+      preview: (...args: unknown[]) => freshRestartPreviewMock(...args),
+      execute: (...args: unknown[]) => freshRestartExecuteMock(...args),
+    },
+  },
+}));
+
+const freshRestartPreviewBase = {
+  sessions: [],
+  workbenchTmuxSessionCount: 0,
+  foreignSessionCount: 0,
+  foreignSessionNames: [],
+  sshBootstrapAvailable: true,
+  sshBootstrapDetail: null,
+};
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
@@ -388,5 +409,81 @@ describe('WorkbenchProjectRail discovery IA', () => {
     const b = buildProject({ id: 'b', name: 'b-repo', path: '/tmp/b' });
     renderRail({ projects: [a, b] });
     expect(screen.queryByLabelText('按设备筛选')).toBeNull();
+  });
+});
+
+describe('WorkbenchProjectRail fresh restart hover entry', () => {
+  afterEach(() => {
+    freshRestartPreviewMock.mockReset();
+    freshRestartExecuteMock.mockReset();
+  });
+
+  test('hover 按钮对每个项目渲染且 local 项目点击后 preview 收到 undefined', async () => {
+    freshRestartPreviewMock.mockResolvedValue(freshRestartPreviewBase);
+    renderRail({ projects: [buildProject({ id: 'p-local', name: 'local-repo' })] });
+
+    const button = screen.getByTestId('project-fresh-restart');
+    expect(button.getAttribute('aria-label')).toBe('全新启动连接');
+    fireEvent.click(button);
+    await vi.waitFor(() => {
+      expect(freshRestartPreviewMock).toHaveBeenCalledWith(undefined);
+    });
+    // 弹窗打开并展示标题
+    expect(screen.getByTestId('workbench-fresh-restart-dialog')).toBeTruthy();
+  });
+
+  test('remote 项目点击后 preview 收到对端 deviceId', async () => {
+    freshRestartPreviewMock.mockResolvedValue(freshRestartPreviewBase);
+    renderRail({
+      projects: [
+        buildProject({
+          id: 'p-remote',
+          name: 'remote-repo',
+          kind: 'remote',
+          deviceId: 'device-x',
+        }),
+      ],
+    });
+
+    fireEvent.click(screen.getByTestId('project-fresh-restart'));
+    await vi.waitFor(() => {
+      expect(freshRestartPreviewMock).toHaveBeenCalledWith('device-x');
+    });
+  });
+
+  test('设备离线时按钮禁用', () => {
+    fleetMockState.snapshot = {
+      generatedAt: '2026-07-13T00:00:00.000Z',
+      truncated: false,
+      devices: [
+        {
+          deviceId: 'dev-hk',
+          deviceName: 'HK',
+          reachability: 'offline',
+          freshness: 'live',
+          schedulerSlotsUsed: null,
+          schedulerSlotsMax: null,
+          projects: [{ projectId: 'p-off' }],
+          errorCode: null,
+          capturedAt: null,
+        },
+      ],
+    };
+    try {
+      renderRail({
+        projects: [
+          buildProject({
+            id: 'p-off',
+            name: 'offline-repo',
+            kind: 'remote',
+            deviceId: 'dev-hk',
+          }),
+        ],
+      });
+      const button = screen.getByTestId('project-fresh-restart') as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+    } finally {
+      fleetMockState.snapshot = null;
+    }
   });
 });

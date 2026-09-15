@@ -334,6 +334,7 @@
 }
 
 .projectOpenWindowButton,
+.projectFreshRestartButton,
 .projectRemoveButton {
   position: absolute;
   bottom: var(--space-1);
@@ -341,6 +342,10 @@
 }
 
 .projectOpenWindowButton {
+  right: calc(var(--space-1) + 56px);
+}
+
+.projectFreshRestartButton {
   right: calc(var(--space-1) + 28px);
 }
 
@@ -349,8 +354,10 @@
 }
 
 .projectItem:hover .projectOpenWindowButton,
+.projectItem:hover .projectFreshRestartButton,
 .projectItem:hover .projectRemoveButton,
 .projectOpenWindowButton:focus-visible,
+.projectFreshRestartButton:focus-visible,
 .projectRemoveButton:focus-visible {
   opacity: 1;
 }

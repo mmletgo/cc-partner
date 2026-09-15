@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { workbenchApi } from '@/api/workbench';
+import { useWorkbenchFreshRestart } from '@/hooks/useWorkbenchFreshRestart';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import {
   isRemoteWorkbenchOfflineError,
@@ -155,14 +156,13 @@ export function useWorkbenchProjectController(
   const [agentLedgerLoading, setAgentLedgerLoading] = useState(false);
   const [agentLedgerLoadingMore, setAgentLedgerLoadingMore] = useState(false);
   const [agentLedgerError, setAgentLedgerError] = useState<string | null>(null);
-  // ---- 设备级「全新启动连接」确认弹窗状态（本机/远端由 activeProject 决定）----
-  const [freshRestartOpen, setFreshRestartOpen] = useState(false);
-  const [freshRestartBusy, setFreshRestartBusy] = useState(false);
-  const [freshRestartPreviewing, setFreshRestartPreviewing] = useState(false);
-  const [freshRestartPreview, setFreshRestartPreview] = useState<WorkbenchFreshRestartPreview | null>(null);
-  const [freshRestartResult, setFreshRestartResult] = useState<WorkbenchFreshRestartResult | null>(null);
-  const [freshRestartError, setFreshRestartError] = useState<string | null>(null);
-  const [freshRestartDeviceId, setFreshRestartDeviceId] = useState<string | null>(null);
+  // ---- 设备级「全新启动连接」弹窗状态机委托共享 hook（与侧栏 Rail 入口共用实现）----
+  const {
+    dialog: freshRestartDialog,
+    openFreshRestartDialog: openFreshRestartDialogForDevice,
+    closeFreshRestartDialog,
+    confirmFreshRestart,
+  } = useWorkbenchFreshRestart({ onCompleted: onFreshRestartCompleted });
 
   const agentLedgerSeqRef = useRef(0);
   // 切换项目时在 render 中复位 drawer，避免跨项目泄漏与 setState-in-effect
@@ -443,76 +443,16 @@ export function useWorkbenchProjectController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   打开确认弹窗时按当前项目解析目标设备并自动预检影响面（会话清单 + 非工作台
-   *   tmux 会话数 + ssh 通道可用性），让用户在确认前看到准确数字。
+   *   页面入口固定针对当前 active project；remote → 对端 deviceId，local → 本机。
    *
    * Code Logic（这个函数做什么）:
-   *   remote 项目 → device.deviceId；local → undefined（本机）；置 open 并拉 preview。
+   *   解析 activeProject 的目标设备后委托共享 hook 打开弹窗并自动 preview。
    */
   const openFreshRestartDialog = useCallback(() => {
-    const deviceId = activeProject?.kind === 'remote' ? activeProject.deviceId : undefined;
-    setFreshRestartDeviceId(deviceId ?? null);
-    setFreshRestartOpen(true);
-    setFreshRestartResult(null);
-    setFreshRestartError(null);
-    setFreshRestartPreview(null);
-    setFreshRestartPreviewing(true);
-    workbenchApi.freshRestart
-      .preview(deviceId)
-      .then((preview) => {
-        setFreshRestartPreview(preview);
-      })
-      .catch((error: unknown) => {
-        setFreshRestartError(launchErrorMessage(error, '全新启动连接预检失败'));
-      })
-      .finally(() => {
-        setFreshRestartPreviewing(false);
-      });
-  }, [activeProject]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   执行期间禁止关闭弹窗/重复触发（设备级单飞，后端也有 barrier）。
-   *
-   * Code Logic（这个函数做什么）:
-   *   busy 时直接返回；执行后保留 result 供弹窗展示成功/降级详情。
-   */
-  const closeFreshRestartDialog = useCallback(() => {
-    if (freshRestartBusy) return;
-    setFreshRestartOpen(false);
-    setFreshRestartPreview(null);
-    setFreshRestartResult(null);
-    setFreshRestartError(null);
-  }, [freshRestartBusy]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   用户确认后执行设备级全新启动；成功（含降级结果）刷新 session 列表对账，
-   *   传输失败保留弹窗并展示错误供重试。
-   *
-   * Code Logic（这个函数做什么）:
-   *   busy 双锁 → execute → 写 result → 成功回调 onFreshRestartCompleted。
-   */
-  const confirmFreshRestart = useCallback(
-    async (includeForeignSessions: boolean) => {
-      if (freshRestartBusy) return;
-      setFreshRestartBusy(true);
-      setFreshRestartError(null);
-      try {
-        const result = await workbenchApi.freshRestart.execute(
-          freshRestartDeviceId ?? undefined,
-          includeForeignSessions,
-        );
-        setFreshRestartResult(result);
-        onFreshRestartCompleted?.();
-      } catch (error) {
-        setFreshRestartError(launchErrorMessage(error, '全新启动连接执行失败'));
-      } finally {
-        setFreshRestartBusy(false);
-      }
-    },
-    [freshRestartBusy, freshRestartDeviceId, onFreshRestartCompleted],
-  );
+    openFreshRestartDialogForDevice({
+      deviceId: activeProject?.kind === 'remote' ? activeProject.deviceId : undefined,
+    });
+  }, [activeProject, openFreshRestartDialogForDevice]);
 
   return {
     remoteProjectOffline,
@@ -534,14 +474,7 @@ export function useWorkbenchProjectController(
     closeAgentLedger,
     refreshAgentLedger,
     loadMoreAgentLedger,
-    freshRestartDialog: {
-      open: freshRestartOpen,
-      busy: freshRestartBusy,
-      previewing: freshRestartPreviewing,
-      preview: freshRestartPreview,
-      result: freshRestartResult,
-      error: freshRestartError,
-    },
+    freshRestartDialog,
     openFreshRestartDialog,
     closeFreshRestartDialog,
     confirmFreshRestart,

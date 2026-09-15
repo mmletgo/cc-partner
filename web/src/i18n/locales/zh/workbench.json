@@ -1107,6 +1107,7 @@
     "openPreview": "打开项目 preview"
   },
   "freshStart": {
+    "iconLabel": "全新启动连接",
     "button": "全新启动连接…",
     "title": "全新启动连接",
     "description": "关闭本设备全部工作台终端会话，并以全新登录环境重启 tmux server；之后新建的终端将立即应用系统级变更（用户组、limits、profile 等）。",

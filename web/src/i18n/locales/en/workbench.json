@@ -1115,6 +1115,7 @@
     "openPreview": "Open project preview"
   },
   "freshStart": {
+    "iconLabel": "Fresh restart connection",
     "button": "Fresh restart connection…",
     "title": "Fresh restart connection",
     "description": "Closes all workbench terminal sessions on this device and restarts the tmux server with a fresh login environment; terminals created afterwards pick up system-level changes (groups, limits, profiles).",

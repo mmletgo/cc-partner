@@ -309,7 +309,8 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
 | RelayAccessCard | candidates, viaDevices, allowEnabled, loading/saving, loadError/saveError/saveSuccess, onAddViaDevice/onRemoveViaDevice/onToggleAllow/onRefresh | Settings 依赖环境页「中转访问（跳板）」卡片：添加/移除跳板设备（展开影子清单）、本机允许被中转开关与固定明文中转风险提示；pure view，数据经 `useSettingsRelay` controller 注入 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells；legacy matrix 兼容） |
-| WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口） |
+| WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口）；悬停项目卡出现「全新启动连接」icon 按钮（设备离线禁用） |
+| WorkbenchFreshRestartDialog | open, onClose, previewing, preview, result, error, busy, onConfirm | 设备级「全新启动连接」确认弹窗（pure view）：预检会话清单/非工作台 tmux 会话勾选/busy 锁/降级手动命令复制；Workbench 状态卡与侧栏 Rail 共用，状态机在 `hooks/useWorkbenchFreshRestart` |
 | WorkbenchRemoteProjectPicker | source local\|remote, onProjectOpened, onCancel, openProject | Workbench 本机/局域网应用内目录选择器（可新建一层文件夹后确认打开） |
 | WorkbenchDependencyCard | compact, className, source?, deviceName?, remoteWriteDisabled? | Workbench tmux 依赖状态与安装引导卡片；远端项目传入对端 source + 设备名，确认框展示对端 argv；Settings 仍用本机 Context |
 | WorkbenchCodeEditor | value, language, readOnly, onChange | Workbench 代码/源码文件的 CodeMirror 编辑器 |
