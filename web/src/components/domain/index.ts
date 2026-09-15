@@ -52,6 +52,8 @@ export { AgentAssetRow } from './AgentAssetRow';
 export type { AgentAssetRowProps } from './AgentAssetRow';
 
 export { WorkbenchProjectRail } from './WorkbenchProjectRail';
+export { WorkbenchFreshRestartDialog } from './WorkbenchFreshRestartDialog';
+export type { WorkbenchFreshRestartDialogProps } from './WorkbenchFreshRestartDialog';
 export { WorkbenchDependencyCard } from './WorkbenchDependencyCard';
 export { LanFirewallDependencyCard } from './LanFirewallDependencyCard';
 export type { LanFirewallDependencyCardProps } from './LanFirewallDependencyCard';

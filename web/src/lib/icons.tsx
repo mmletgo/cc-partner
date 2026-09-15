@@ -626,3 +626,20 @@ export const CommitIcon = ({ size, ...rest }: IconProps) => (
     <path d="M8 10.2V14" />
   </svg>
 );
+
+/**
+ * PowerIcon — 全新启动连接
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   「全新启动连接」（重启 tmux server 于全新登录环境）语义是重启而非刷新，
+ *   复用 SyncIcon/RefreshIcon 会与项目刷新混淆，需要独立的电源符号图标。
+ *
+ * Code Logic（这个组件做什么）:
+ *   经典电源符号：顶部竖线 + 开口圆弧。
+ */
+export const PowerIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M8 1.8v5" />
+    <path d="M11.9 3.9a5.6 5.6 0 1 1-7.8 0" />
+  </svg>
+);

@@ -1,13 +1,14 @@
 /**
- * WorkbenchFreshRestartDialog — 设备级「全新启动连接」确认弹窗（pure view）。
+ * WorkbenchFreshRestartDialog — 设备级「全新启动连接」确认弹窗（pure domain view）。
  *
  * Business Logic（为什么需要）:
  *   终止整台设备的工作台终端是不可逆动作，用户确认前需要看到预检影响面（会话清单、
  *   非工作台 tmux 会话数、ssh 引导通道可用性），并显式决定是否连带终止用户自己的
  *   tmux 会话；执行后如 ssh 自动引导降级，还需展示可复制的手动命令。
+ *   Workbench 页面状态卡与侧栏 WorkbenchProjectRail 两个入口共用本弹窗。
  *
  * Code Logic（做什么）:
- *   props-only 消费 controller 状态：previewing/preview → 确认 UI（foreign checkbox）；
+ *   props-only 消费调用方状态：previewing/preview → 确认 UI（foreign checkbox）；
  *   result → 结果反馈（成功/未重启 + skipped + 降级详情 + manual command + 复制按钮）；
  *   error → role=alert。busy 期间禁 Escape/Backdrop 关闭与确认双锁。
  *   不 import @/api/*；用户文案走 workbench:freshStart。
@@ -23,9 +24,9 @@ import type {
   WorkbenchFreshRestartPreview,
   WorkbenchFreshRestartResult,
 } from '@/lib/types';
-import styles from '../Workbench.module.css';
+import styles from './WorkbenchFreshRestartDialog.module.css';
 
-/** controller 传入的弹窗状态切片（见 useWorkbenchProjectController）。 */
+/** 调用方传入的弹窗状态切片（见 hooks/useWorkbenchFreshRestart）。 */
 export interface WorkbenchFreshRestartDialogProps {
   open: boolean;
   onClose: () => void;
@@ -107,12 +108,12 @@ export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogPr
       closeOnEscape={!busy}
       closeOnBackdrop={!busy}
     >
-      <div className={styles.snapshotDialog} data-testid="workbench-fresh-restart-dialog">
+      <div className={styles.dialog} data-testid="workbench-fresh-restart-dialog">
         <h2 id={titleId}>{t('workbench:freshStart.title')}</h2>
-        <p className={styles.snapshotHint}>{t('workbench:freshStart.description')}</p>
+        <p className={styles.hint}>{t('workbench:freshStart.description')}</p>
 
         {previewing && !result ? (
-          <p className={styles.freshStartStatusLine}>{t('workbench:freshStart.previewLoading')}</p>
+          <p className={styles.statusLine}>{t('workbench:freshStart.previewLoading')}</p>
         ) : null}
 
         {!previewing && !preview && !result ? (
@@ -123,33 +124,33 @@ export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogPr
 
         {preview && !result ? (
           <>
-            <p className={styles.freshStartStatusLine}>
+            <p className={styles.statusLine}>
               {t('workbench:freshStart.confirmBody', { count: sessionCount })}
             </p>
             {preview.sessions.length > 0 ? (
-              <div className={styles.freshStartSessions}>
-                <p className={styles.freshStartSessionsTitle}>
+              <div className={styles.sessions}>
+                <p className={styles.sessionsTitle}>
                   {t('workbench:freshStart.sessionsTitle')}
                 </p>
-                <ul className={styles.snapshotList}>
+                <ul className={styles.sessionList}>
                   {preview.sessions.map((session) => (
-                    <li key={session.sessionId} className={styles.snapshotItem}>
-                      <span className={styles.freshStartSessionName}>{session.name}</span>
-                      <span className={styles.freshStartSessionBackend}>{session.backend}</span>
+                    <li key={session.sessionId} className={styles.sessionItem}>
+                      <span className={styles.sessionName}>{session.name}</span>
+                      <span className={styles.sessionBackend}>{session.backend}</span>
                     </li>
                   ))}
                 </ul>
               </div>
             ) : null}
             {preview.foreignSessionCount > 0 ? (
-              <div className={styles.freshStartForeignWarning}>
+              <div className={styles.foreignWarning}>
                 <p>
                   {t('workbench:freshStart.foreignWarning', {
                     count: preview.foreignSessionCount,
                     names: foreignNames.join(', '),
                   })}
                 </p>
-                <label className={styles.freshStartForeignLabel}>
+                <label className={styles.foreignLabel}>
                   <input
                     type="checkbox"
                     checked={includeForeign}
@@ -186,7 +187,7 @@ export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogPr
               </StatusMessage>
             )}
             {result.skippedSessionIds.length > 0 ? (
-              <p className={styles.freshStartStatusLine}>
+              <p className={styles.statusLine}>
                 {t('workbench:freshStart.skippedSessions', {
                   count: result.skippedSessionIds.length,
                 })}
@@ -199,11 +200,11 @@ export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogPr
               </StatusMessage>
             ) : null}
             {result.manualCommand ? (
-              <div className={styles.freshStartCommandBox}>
-                <p className={styles.freshStartSessionsTitle}>
+              <div className={styles.commandBox}>
+                <p className={styles.sessionsTitle}>
                   {t('workbench:freshStart.manualCommandLabel')}
                 </p>
-                <div className={styles.freshStartCommandRow}>
+                <div className={styles.commandRow}>
                   <code>{result.manualCommand}</code>
                   <Button
                     variant="ghost"
@@ -228,7 +229,7 @@ export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogPr
           </StatusMessage>
         ) : null}
 
-        <div className={styles.freshStartActions}>
+        <div className={styles.actions}>
           {result ? (
             <Button variant="ghost" onClick={onClose} disabled={busy}>
               {t('workbench:freshStart.close')}

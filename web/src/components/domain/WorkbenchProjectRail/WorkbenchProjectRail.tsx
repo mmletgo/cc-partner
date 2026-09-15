@@ -16,7 +16,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog, HintStatusDot } from '@/components/primitives';
-import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, WindowIcon, XIcon } from '@/lib/icons';
+import { DevicesIcon, FolderIcon, PlusIcon, PowerIcon, SyncIcon, WindowIcon, XIcon } from '@/lib/icons';
+import { WorkbenchFreshRestartDialog } from '@/components/domain/WorkbenchFreshRestartDialog';
+import { useWorkbenchFreshRestart } from '@/hooks/useWorkbenchFreshRestart';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
 import { useOptionalWorkbenchAgentHints } from '@/hooks/workbenchAgentHintsContext';
@@ -93,6 +95,13 @@ export function WorkbenchProjectRail() {
   }, [occupancy]);
 
   const { projectSummaries, snapshot: fleetSnapshot } = useLanAgentFleet({ enabled: true });
+  // ---- 设备级「全新启动连接」悬停入口：共享弹窗状态机；完成后刷新项目统计 ----
+  const {
+    dialog: freshRestartDialog,
+    openFreshRestartDialog,
+    closeFreshRestartDialog,
+    confirmFreshRestart,
+  } = useWorkbenchFreshRestart({ onCompleted: () => void loadProjects() });
   const agentHints = useOptionalWorkbenchAgentHints();
   const hintsForProject = agentHints?.hintsForProject;
 
@@ -671,6 +680,20 @@ export function WorkbenchProjectRail() {
                 onClick={() => void openProjectInNewWindow(project)}
               />
               <Button
+                className={styles.projectFreshRestartButton}
+                variant="icon"
+                icon={<PowerIcon />}
+                title={t('workbench:freshStart.iconLabel')}
+                aria-label={t('workbench:freshStart.iconLabel')}
+                data-testid="project-fresh-restart"
+                disabled={offline}
+                onClick={() =>
+                  openFreshRestartDialog({
+                    deviceId: project.kind === 'remote' ? project.deviceId : undefined,
+                  })
+                }
+              />
+              <Button
                 className={styles.projectRemoveButton}
                 variant="icon"
                 icon={<XIcon />}
@@ -764,6 +787,10 @@ export function WorkbenchProjectRail() {
           }}
         />
       </Dialog>
+
+      <WorkbenchFreshRestartDialog {...freshRestartDialog} onClose={closeFreshRestartDialog}
+        onConfirm={(includeForeign) => { void confirmFreshRestart(includeForeign); }}
+      />
     </section>
   );
 }
