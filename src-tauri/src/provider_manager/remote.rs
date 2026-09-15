@@ -13,23 +13,26 @@
 //!     的最小子集：自持 `reqwest::Client`，每个出站请求带 `X-CC-Request-Id`（多跳调用链
 //!     关联）；可选绑定 `X-Cc-Partner-Expected-Device-Id`，绑定时先做 health 预检（要求
 //!     对端宣告 `device.request-binding.v1` 且 device_id 精确匹配，防 stale peer 映射
-//!     fail-open 打错设备）。调用前经 `PeerClient::require_capability` 预检对应能力 token，
-//!     对端版本过旧时返回可区分的中文 validation 错误。
+//!     fail-open 打错设备）。调用前经自带 health 探测（10s 超时 + 有界传输层退避重试，
+//!     与 `workbench::remote_client` 同参数；`PeerClient::health_info` 的 3s 单发在
+//!     overlay 慢链路上会把「链路慢」误判成失败）预检对应能力 token，对端版本过旧时
+//!     返回可区分的中文 validation 错误。
 //!     网络错误/非 2xx/对端错误信封统一经 `net::peer_error` 解析并透出对端 message。
 //!     switch 与 install 在对端是 cc-switch CLI 写盘/安装（非幂等），按协议约定单次发送、
 //!     不做传输重试；install 超时 420s（brew 安装可能数分钟）。
 
-use crate::error::AppError;
-use crate::net::peer_client::PeerClient;
-use crate::net::peer_error::{parse_peer_response, peer_call_error_to_app_error, PeerCallError};
+use crate::error::{AppError, AppErrorCategory};
+use crate::net::peer_error::{parse_peer_response, peer_call_error_to_app_error};
 use crate::net::protocol::{
     CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_PROVIDER_MANAGER_INSTALL_V1,
     CAPABILITY_PROVIDER_MANAGER_V1,
 };
+use crate::net::routes::health::HealthResponse;
 use crate::provider_manager::models::{
     AgentApp, AppProviders, InstallResult, ProviderManagerSummary,
 };
 use serde::{de::DeserializeOwned, Serialize};
+use std::future::Future;
 use std::time::Duration;
 
 /// summary（只读快照）请求超时。
@@ -41,6 +44,20 @@ const SWITCH_TIMEOUT_SECS: u64 = 120;
 /// install（对端 CLI 安装；macOS brew 可能数分钟）请求超时，
 /// 对齐 `workbench::remote_client` 的 VeryLong 语义。
 const INSTALL_TIMEOUT_SECS: u64 = 420;
+
+/// health/能力探测专用超时（秒）。
+///
+/// Business Logic: overlay（Tailscale 类）链路打洞失败/中继切换窗口会劣化到 RTT 2.5s 级，
+///     一次 HTTP 往返需 2~3 个 RTT ≈ 5~7.5s；`PeerClient::health_info` 的 3s 单发会把
+///     「链路慢」误判成失败（实测 Tailscale 直连首请求 2.3s+）。10s 覆盖 DERP 级往返，
+///     参数与 `workbench::remote_client` 的 HEALTH_PROBE_TIMEOUT_SECS 同源。
+const HEALTH_PROBE_TIMEOUT_SECS: u64 = 10;
+
+/// health/能力探测的有界传输层重试上限（含首次尝试）。
+const HEALTH_RETRY_MAX_ATTEMPTS: u32 = 4;
+
+/// health 探测重试退避基数；实际退避 = base * 2^(attempt-1)（400ms、800ms…）。
+const HEALTH_RETRY_BASE_DELAY: Duration = Duration::from_millis(400);
 
 /// 错误文案里的客户端标签，便于日志定位调用方。
 const CLIENT_LABEL: &str = "远端 Provider 管理";
@@ -205,41 +222,39 @@ impl RemoteProviderManagerClient {
     /// Business Logic（为什么需要这个函数）:
     ///     所有 provider-manager 远端调用的能力预检共享同一错误语义：缺 token 时给
     ///     可区分的中文 validation 错误（含功能标签与能力 token，引导升级对端），
-    ///     其余探测失败（离线/响应非法）统一映射。
+    ///     其余探测失败（离线/响应非法）统一映射。探测经 10s 超时 + 有界重试的
+    ///     `fetch_health_with_retry`，overlay 慢链路首请求 2~3s 不再被误判成失败。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     `PeerClient::require_capability(base_url, capability)`；缺失 →
-    ///     validation 中文错误（"对端设备版本过旧，不支持{feature}（{url} 缺少能力
-    ///     {capability}）；请在对端升级 cc-partner 后重试"）；其他探测失败 →
-    ///     经 `peer_call_error_to_app_error` 统一映射。探测成功只需布尔结论，
-    ///     丢弃 `HealthResponse` 载荷。capability 为 `&'static str`（能力 token 常量，
-    ///     对齐 `PeerClient::require_capability` 签名）。
+    ///     `fetch_health_with_retry(base_url)` 取对端 health → `protocol_info().supports`
+    ///     判定能力；缺失 → validation 中文错误（"对端设备版本过旧，不支持{feature}
+    ///     （{url} 缺少能力 {capability}）；请在对端升级 cc-partner 后重试"）；
+    ///     传输失败耗尽重试后按 `map_send_error`/信封映射上抛。capability 为 `&'static str`
+    ///     （能力 token 常量）。
     async fn require_capability_with_label(
         &self,
         base_url: &str,
         capability: &'static str,
         feature: &str,
     ) -> Result<(), AppError> {
-        PeerClient::new()
-            .require_capability(base_url, capability)
-            .await
-            .map(|_health| ())
-            .map_err(|err| match err {
-                PeerCallError::Unsupported { url, capability } => AppError::validation(format!(
-                    "对端设备版本过旧，不支持{feature}（{url} 缺少能力 {capability}）；请在对端升级 cc-partner 后重试"
-                )),
-                other => peer_call_error_to_app_error(other, CLIENT_LABEL),
-            })
+        let health = self.fetch_health_with_retry(base_url).await?;
+        if !health.protocol_info().supports(capability) {
+            return Err(AppError::validation(format!(
+                "对端设备版本过旧，不支持{feature}（{base_url} 缺少能力 {capability}）；请在对端升级 cc-partner 后重试"
+            )));
+        }
+        Ok(())
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     绑定 expected_device_id 时，旧 peer 会忽略设备头并 fail-open；必须先确认对端
     ///     宣告 `device.request-binding.v1` 且 health.device_id 精确匹配，防止 stale peer
-    ///     映射把 provider 切到错误设备。
+    ///     映射把 provider 切到错误设备。预检同样走 10s + 有界重试的 health 探测。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     expected_device_id 为 None 时直接 Ok；否则 require_capability(binding) +
-    ///     device_id 精确匹配，不匹配 → conflict；缺能力 → validation（经统一映射）。
+    ///     expected_device_id 为 None 时直接 Ok；否则 `fetch_health_with_retry` 后先确认
+    ///     binding 能力（缺失 → validation，文案与 `peer_call_error_to_app_error` 的
+    ///     Unsupported 映射同形），再 device_id 精确匹配，不匹配 → conflict。
     async fn ensure_expected_device_binding(&self, base_url: &str) -> Result<(), AppError> {
         let Some(expected) = self.expected_device_id.as_deref() else {
             return Ok(());
@@ -248,10 +263,15 @@ impl RemoteProviderManagerClient {
         if expected.is_empty() {
             return Ok(());
         }
-        let health = PeerClient::new()
-            .require_capability(base_url, CAPABILITY_DEVICE_REQUEST_BINDING_V1)
-            .await
-            .map_err(|err| peer_call_error_to_app_error(err, CLIENT_LABEL))?;
+        let health = self.fetch_health_with_retry(base_url).await?;
+        if !health
+            .protocol_info()
+            .supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1)
+        {
+            return Err(AppError::validation(format!(
+                "{CLIENT_LABEL} ({base_url}) 不支持能力 {CAPABILITY_DEVICE_REQUEST_BINDING_V1}"
+            )));
+        }
         if health.device_id.trim() != expected {
             return Err(AppError::conflict(format!(
                 "{CLIENT_LABEL} device_id 不匹配: expected={expected}, got={}",
@@ -259,6 +279,56 @@ impl RemoteProviderManagerClient {
             )));
         }
         Ok(())
+    }
+
+    /// 单次 health/能力探测（10s 超时）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     `PeerClient::health_info` 的 3s 单发超时在 Tailscale 类 overlay 链路上会把
+    ///     「首请求慢」（实测 2~3s）误判成「对端失败」，进而让整个 summary 加载报错。
+    ///     本模块需要自己的 10s 探测，且不能复用 `get_json`（已绑定期望设备时它会先做
+    ///     绑定预检，而绑定预检本身要打 health，会递归）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     原生 GET `{base}/api/health`（附 `X-CC-Request-Id` 与期望设备 header，10s 超时，
+    ///     无绑定预检），经 `parse_json_response` 解析为 `HealthResponse`。
+    async fn health_probe_once(&self, base_url: &str) -> Result<HealthResponse, AppError> {
+        let url = endpoint_url(base_url, "/api/health");
+        let mut request = self
+            .client
+            .get(&url)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                crate::net::request_context::new_request_id(),
+            )
+            .timeout(Duration::from_secs(HEALTH_PROBE_TIMEOUT_SECS));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            request = request.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = request.send().await.map_err(map_send_error)?;
+        parse_json_response(response).await
+    }
+
+    /// 带有界传输层重试的 health/能力探测。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     health 是只读幂等 GET，瞬时丢包/中继切换窗口可安全重试；跨设备 overlay 链路
+    ///     单次请求落在坏窗口很常见（下一落点通常已恢复）。真实业务调用（summary 之外的
+    ///     switch/install）仍是 no-transport-retry，本重试通道只覆盖 health 探测。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `retry_on_transport_error`（4 次 × 10s + 400ms 指数退避）逐次调用
+    ///     `health_probe_once`；仅传输类失败（Unavailable/Timeout）重试。
+    async fn fetch_health_with_retry(&self, base_url: &str) -> Result<HealthResponse, AppError> {
+        retry_on_transport_error(
+            HEALTH_RETRY_MAX_ATTEMPTS,
+            HEALTH_RETRY_BASE_DELAY,
+            || async { self.health_probe_once(base_url).await },
+        )
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -350,6 +420,55 @@ impl Default for RemoteProviderManagerClient {
 ///     去掉 base URL 尾部 `/`，再追加以 `/` 开头的 API path。
 fn endpoint_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
+}
+
+/// 只读幂等操作（health 探测）的有界传输层重试。
+///
+/// Business Logic（为什么需要这个函数）:
+///     overlay 链路瞬时丢包/中继切换窗口会让单次请求在 TCP 握手或 send 阶段失败，但下一
+///     次请求通常落在好窗口。health 是只读幂等 GET，安全可重试；mutation（switch/install）
+///     仍是 no-transport-retry，本 helper 只服务 health 探测通道。实现与
+///     `workbench::remote_client::retry_on_transport_error` 同源（本模块按自包含最小子集
+///     设计，不跨域引用 workbench 私有 helper）。
+///
+/// Code Logic（这个函数做什么）:
+///     逐次调用 `op`：成功即返回；失败仅当 classify 为 Unavailable/Timeout（传输类）且
+///     还有剩余次数时按 base * 2^(attempt-1) 退避后重试；业务类错误（NotFound/Validation/
+///     Conflict 等）或次数耗尽原样上抛最后一次错误。
+async fn retry_on_transport_error<T, F, Fut>(
+    max_attempts: u32,
+    base_delay: Duration,
+    mut op: F,
+) -> Result<T, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, AppError>>,
+{
+    let mut last_err: Option<AppError> = None;
+    for attempt in 1..=max_attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                let retryable = matches!(
+                    err.classify(),
+                    AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+                );
+                if !retryable || attempt == max_attempts {
+                    return Err(err);
+                }
+                let delay = base_delay * 2u32.pow(attempt - 1);
+                tracing::warn!(
+                    attempt,
+                    max_attempts,
+                    delay_ms = delay.as_millis() as u64,
+                    "远端 health 探测传输层失败，退避后重试"
+                );
+                tokio::time::sleep(delay).await;
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| AppError::generic("远端 health 探测重试耗尽")))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -915,6 +1034,144 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             1,
             "install 禁止传输层自动重试"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 探测的重试通道必须在传输类失败（timeout）清除后恢复；overlay 链路
+    ///     瞬时坏窗口就是这种「前几次失败、后续成功」的形态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     op 前两次返回 timeout 错误、第三次成功；断言结果成功且恰好尝试 3 次。
+    #[tokio::test]
+    async fn health_retry_recovers_when_transport_error_clears_within_attempts() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_closure = attempts.clone();
+        let op = move || {
+            let attempts = attempts_for_closure.clone();
+            async move {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(AppError::timeout("transient transport failure"))
+                } else {
+                    Ok(7u32)
+                }
+            }
+        };
+        let result: Result<u32, AppError> =
+            retry_on_transport_error(4, Duration::from_millis(1), op).await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     业务类错误（如 Validation）是稳定终态，第一次就应上抛，不得无意义重试
+    ///     （与 switch/install 的 no-transport-retry 语义保持隔离）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     op 返回 validation 错误；断言错误原样上抛且仅尝试 1 次。
+    #[tokio::test]
+    async fn health_retry_does_not_retry_non_transport_business_error() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_closure = attempts.clone();
+        let op = move || {
+            let attempts = attempts_for_closure.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(AppError::validation("stable business error"))
+            }
+        };
+        let result: Result<u32, AppError> =
+            retry_on_transport_error(4, Duration::from_millis(1), op).await;
+        assert_eq!(result.unwrap_err().classify(), AppErrorCategory::Validation);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 持续失败（真黑洞）时重试通道必须耗尽后上抛最后一次错误并停止，
+    ///     不能无限重试；总尝试次数被上限锁死。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     op 恒返回 unavailable；断言最终错误上抛且尝试次数 == max_attempts。
+    #[tokio::test]
+    async fn health_retry_exhausts_attempts_then_returns_last_transport_error() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_closure = attempts.clone();
+        let op = move || {
+            let attempts = attempts_for_closure.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(AppError::unavailable("link blackhole"))
+            }
+        };
+        let result: Result<u32, AppError> =
+            retry_on_transport_error(4, Duration::from_millis(1), op).await;
+        assert_eq!(
+            result.unwrap_err().classify(),
+            AppErrorCategory::Unavailable
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     overlay 慢链路上对端 health 偶发 5xx（中转/对端瞬时过载）不应让整个 summary
+    ///     加载失败——能力预检的 health 通道必须按传输瞬态重试到收敛。这是本修复的
+    ///     端到端行为锁（实测 Tailscale 链路首请求 2.3s+ 曾被 3s 单发探测误杀）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     /api/health 前两次返回 500（信封 code=unavailable，属可重试传输类）后恢复
+    ///     200 + 完整能力；断言 summary 成功且 health 恰好被调用 3 次。
+    #[tokio::test]
+    async fn summary_survives_transient_health_5xx_via_retry() {
+        let health_attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_route = health_attempts.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(move || {
+                    let attempts = attempts_for_route.clone();
+                    async move {
+                        let n = attempts.fetch_add(1, Ordering::SeqCst);
+                        if n < 2 {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error": "transient overlay hiccup",
+                                    "code": "unavailable",
+                                    "retryable": true
+                                })),
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                Json(health_json("dev-A", &["provider-manager.v1"])),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/provider-manager/summary",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "ccSwitchDbPresent": false,
+                        "cli": { "available": false, "path": null, "version": null },
+                        "gui": null,
+                        "apps": []
+                    }))
+                }),
+            );
+        let base = spawn_server(app).await;
+
+        let summary = RemoteProviderManagerClient::new()
+            .summary(&base)
+            .await
+            .expect("health 瞬态 5xx 后 summary 应经重试成功");
+        assert!(!summary.cc_switch_db_present);
+        assert_eq!(
+            health_attempts.load(Ordering::SeqCst),
+            3,
+            "health 探测应在第 3 次收敛"
         );
     }
 }
