@@ -62,6 +62,7 @@ import type { WorkbenchInspectorTab } from './WorkbenchInspector';
 import { WorkbenchSessionTabs } from './WorkbenchSessionTabs';
 import { useWorkbenchPageBridges } from './useWorkbenchPageBridges';
 import { WorkbenchStatusCard } from './WorkbenchStatusCard';
+import { WorkbenchFreshRestartDialog } from './views/WorkbenchFreshRestartDialog';
 import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
 import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
@@ -112,11 +113,16 @@ export function Workbench() {
     [locationSearch],
   );
   // Business Logic: 项目域由独立 controller 持有，不复制邻接域 state。
+  const freshRestartCompletedRef = useRef<() => void>(() => undefined);
+  const handleFreshRestartCompleted = useCallback(() => {
+    freshRestartCompletedRef.current();
+  }, []);
   const projectCtrl = useWorkbenchProjectController({
     activeProject,
     activeProjectId,
     projects,
     selectProject,
+    onFreshRestartCompleted: handleFreshRestartCompleted,
   });
   const {
     remoteProjectOffline,
@@ -127,6 +133,7 @@ export function Workbench() {
     selectProjectFromDeepLink,
     launchSummary,
     refreshLaunchSummary,
+    freshRestartDialog, openFreshRestartDialog, closeFreshRestartDialog, confirmFreshRestart,
   } = projectCtrl;
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
   // Business Logic: workspaceView / automationConsoleOpen 是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
@@ -225,6 +232,11 @@ export function Workbench() {
     handleRefreshTerminalSize,
     handleSelectPaneAt,
   } = terminalController;
+  useEffect(() => {
+    freshRestartCompletedRef.current = () => {
+      void loadSessions();
+    };
+  }, [loadSessions]);
   // R12 M3：history sync 永久失败可订阅状态（hooks 必须在 early return 前）。
   const historySyncFailure = useTerminalHistorySyncFailure(activeSessionId);
   const startupBaselineFailure = useStartupBaselineFailure();
@@ -1128,6 +1140,10 @@ export function Workbench() {
           runtimeVisible={runtimeVisible}
           activeAgent={activeAgentForStatusCard}
           ledgerEntry={agentLedgerForStatusCard.ledgerEntry}
+          onOpenFreshRestart={openFreshRestartDialog}
+        />
+        <WorkbenchFreshRestartDialog {...freshRestartDialog} onClose={closeFreshRestartDialog}
+          onConfirm={(includeForeign) => { void confirmFreshRestart(includeForeign); }}
         />
         <WorkbenchInspector
           inspectorTab={inspectorTab}

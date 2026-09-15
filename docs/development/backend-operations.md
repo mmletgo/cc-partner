@@ -25,7 +25,9 @@ Chinese product wording (must stay equivalent): 同一可达网络中的任何�
 Usage:
 
 ```text
-cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]|version|--version|-V>
+cc-partner-backend <start|serve|stop|status|supervise|workbench-fresh|doctor [--json]|version|--version|-V>
+
+`workbench-fresh`：以当前调用者环境执行设备级「全新启动连接」（关闭本机全部工作台终端会话并以全新登录环境重启 tmux server；后端运行中会拒绝并提示改用应用内入口）。适合 ssh 自动引导不可用时，在任意新 SSH 登录中手动执行。
 ```
 
 | Subcommand | Role | Success exit | Failure exit |

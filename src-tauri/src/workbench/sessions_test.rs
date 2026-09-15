@@ -4241,3 +4241,89 @@ fn missing_handle_close_intent_atomic_with_claim_revoke() {
     );
     cleanup.finish_cleanup();
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     设备级 fresh restart 的 kill-server/ssh 引导窗口内，任何 create/attach/restore
+///     都会以 backend 旧环境抢先拉起 tmux server，破坏"全新登录环境"承诺；闸点 A
+///     必须真实挡住这些入口共用的 `require_project_not_closing`。
+///
+/// Code Logic（这个测试做什么）:
+///     begin 设备 barrier → `require_project_not_closing` 应返回 unavailable
+///     （稳定 code `workbench_fresh_restart_barrier_active`）→ 释放后恢复 Ok。
+///     持有窗口最小化（立即 drop），避免与并行测试的入口调用产生竞态。
+#[test]
+fn device_fresh_restart_barrier_blocks_session_entry_points() {
+    let _lock = crate::workbench::fresh_restart::BARRIER_TEST_LOCK
+        .lock()
+        .expect("barrier 测试锁中毒");
+    let registry = WorkbenchSessionRegistry::new();
+    let guard = crate::workbench::fresh_restart::begin_device_fresh_restart_barrier()
+        .expect("barrier begin 应成功");
+    let blocked = registry.require_project_not_closing("p-fresh-restart");
+    drop(guard);
+    let err = blocked.expect_err("fresh restart barrier 活跃时必须拒绝会话入口");
+    assert!(
+        err.to_string()
+            .contains("workbench_fresh_restart_barrier_active"),
+        "稳定 code 应为 workbench_fresh_restart_barrier_active: {err}"
+    );
+    assert!(
+        registry
+            .require_project_not_closing("p-fresh-restart")
+            .is_ok(),
+        "barrier 释放后入口应恢复"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     tmux pane 改用 login shell 后，rc/profile 类系统变更重开终端即生效；
+///     命令形态必须稳定（追加 `-l` 且不重复追加）。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 login 变体以 ` -l` 结尾且不含重复 ` -l -l`（无论测试进程 SHELL 与否）。
+#[test]
+fn default_terminal_login_command_appends_single_login_flag() {
+    #[cfg(windows)]
+    {
+        // Windows ComSpec 不接受 -l；与裸命令一致即可。
+        assert_eq!(default_terminal_login_command(), default_terminal_command());
+    }
+    #[cfg(not(windows))]
+    {
+        let command = default_terminal_login_command();
+        assert!(
+            command.trim_end().ends_with(" -l"),
+            "login 变体应以 ' -l' 结尾: {command}"
+        );
+        assert!(
+            !command.contains(" -l -l"),
+            "不得重复追加 login 标志: {command}"
+        );
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     raw PTY fallback 的 `CommandBuilder::new(row.command)` 把整串当 program，
+///     混入 ` -l` 会 exec 失败——login 变体只允许进 tmux 分支。
+///
+/// Code Logic（这个测试做什么）:
+///     源码合同：create 路径把 `terminal_login_command` 传给 `create_tmux_window` 与
+///     display，而两个 `RAW_PTY_BACKEND` fallback 分支仍使用 `terminal_command.clone()`。
+#[test]
+fn create_passes_login_command_only_to_tmux_backend() {
+    let src = include_str!("sessions.rs");
+    let start = src.find("fn create_with_ids").expect("create_with_ids");
+    let body = src[start..]
+        .split("fn restore_persisted_sessions")
+        .next()
+        .expect("create body");
+    assert!(
+        body.contains("&terminal_login_command,"),
+        "create_tmux_window 必须接收 login 变体"
+    );
+    let raw_uses = body.matches("terminal_command.clone()").count();
+    assert_eq!(
+        raw_uses, 2,
+        "两个 raw PTY fallback 分支必须保持裸 terminal_command"
+    );
+}

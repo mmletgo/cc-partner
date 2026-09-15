@@ -14,6 +14,7 @@ mod browser_verification;
 mod common;
 mod files;
 mod fleet;
+pub(crate) mod fresh_restart;
 mod git;
 mod layout;
 mod notes;
@@ -37,6 +38,13 @@ pub use agent_ledger::{
 pub use agent_runtime::{
     __cmd__get_agent_runtime_snapshot, __tauri_command_name_get_agent_runtime_snapshot,
     get_agent_runtime_snapshot,
+};
+
+pub use fresh_restart::{
+    __cmd__preview_workbench_fresh_restart, __cmd__run_workbench_fresh_restart,
+    __tauri_command_name_preview_workbench_fresh_restart,
+    __tauri_command_name_run_workbench_fresh_restart, preview_workbench_fresh_restart,
+    run_workbench_fresh_restart,
 };
 
 pub use fleet::{

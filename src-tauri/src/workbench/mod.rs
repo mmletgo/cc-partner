@@ -23,6 +23,7 @@ pub mod claude_sessions;
 pub mod dependencies;
 pub mod file_content;
 pub mod file_preview;
+pub mod fresh_restart;
 pub mod fs;
 pub mod git;
 pub mod hook_repair;

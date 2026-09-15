@@ -18,10 +18,16 @@ import type { WorkbenchProject } from '@/lib/types';
 import type { WorkbenchLaunchSummaryWire } from '@/lib/types';
 
 const getLaunchSummaryMock = vi.fn();
+const freshRestartPreviewMock = vi.fn();
+const freshRestartExecuteMock = vi.fn();
 
 vi.mock('@/api/workbench', () => ({
   workbenchApi: {
     getLaunchSummary: (...args: unknown[]) => getLaunchSummaryMock(...args),
+    freshRestart: {
+      preview: (...args: unknown[]) => freshRestartPreviewMock(...args),
+      execute: (...args: unknown[]) => freshRestartExecuteMock(...args),
+    },
   },
 }));
 

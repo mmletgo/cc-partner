@@ -241,7 +241,8 @@ fn workbench_control_timeout(op: &str) -> Option<Duration> {
         | "files.save_text"
         | "agent_ledger.export_token_stats"
         | "sessions.pasteImage"
-        | "provider-manager.install" => Some(Duration::from_secs(360)),
+        | "provider-manager.install"
+        | "workbench.fresh-restart" => Some(Duration::from_secs(360)),
         "claude.search" | "claude.preview" => Some(Duration::from_secs(60)),
         _ => Some(MUTATE_TIMEOUT),
     }

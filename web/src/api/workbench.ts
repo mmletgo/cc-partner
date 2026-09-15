@@ -11,6 +11,7 @@
  */
 
 import { invoke, invokeDecoded } from './client';
+import type { WorkbenchFreshRestartPreview, WorkbenchFreshRestartResult } from '@/lib/types/workbench';
 import { nullableDecoder } from '@/lib/runtimeSchema';
 import {
   workbenchFileNodesDecoder,
@@ -34,6 +35,8 @@ import {
   workbenchSessionsDecoder,
   workbenchWorktreeDecoder,
   workbenchWorktreesDecoder,
+  workbenchFreshRestartPreviewDecoder,
+  workbenchFreshRestartResultDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
 import {
@@ -336,6 +339,24 @@ export const workbenchApi = {
         { worktreeId, hookFailure },
         workbenchRepairHookFailureDecoder,
       ),
+  },
+
+  freshRestart: {
+    /** 预检「全新启动连接」影响面（只读：会话清单 + 非工作台会话数 + ssh 通道可用性）。 */
+    preview: (deviceId?: string): Promise<WorkbenchFreshRestartPreview> =>
+      invokeDecoded('preview_workbench_fresh_restart', {
+        deviceId: deviceId ?? null,
+      }, workbenchFreshRestartPreviewDecoder),
+
+    /** 执行设备级「全新启动连接」（杀全部工作台终端 + 全新登录环境重启 tmux server）。 */
+    execute: (
+      deviceId?: string,
+      includeForeignSessions = false,
+    ): Promise<WorkbenchFreshRestartResult> =>
+      invokeDecoded('run_workbench_fresh_restart', {
+        deviceId: deviceId ?? null,
+        includeForeignSessions,
+      }, workbenchFreshRestartResultDecoder),
   },
 
   git: {
