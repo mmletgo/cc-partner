@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS workbench_projects (
     path TEXT NOT NULL,
     last_opened_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    git_remote_fingerprint TEXT
 );
 
 -- workbench_worktrees 表：工作台项目下的 Git worktree 元数据；Git 状态运行期查询，不落库

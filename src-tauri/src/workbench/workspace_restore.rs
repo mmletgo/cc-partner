@@ -982,7 +982,7 @@ mod tests {
                 "CREATE TABLE workbench_projects (\
                  id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
                  device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
-                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, git_remote_fingerprint TEXT)",
             )
             .execute(&pool)
             .await

@@ -267,6 +267,8 @@ impl WorkbenchProjectRepo {
     /// Code Logic（这个函数做什么）:
     ///     持 shared write lease 后用 INSERT OR REPLACE 写入完整 row。
     pub async fn upsert(&self, row: &WorkbenchProjectRow) -> Result<(), AppError> {
+        // 测试夹具常手写旧 schema；写入前幂等补列，避免 `no column named git_remote_fingerprint`。
+        Self::ensure_fingerprint_schema(&self.pool).await?;
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "INSERT OR REPLACE INTO workbench_projects \
@@ -394,11 +396,38 @@ mod tests {
         }
     }
 
-    /// Business Logic（为什么需要这个函数）:
-    ///     侧栏项目顺序必须稳定：新添加的项目在最上，且选中项目不得置顶。
+    /// Business Logic（为什么需要这个测试）:
+    ///     大量测试夹具仍按旧 schema 建表；upsert 必须能给旧表补列，否则 CI 全红。
     ///
-    /// Code Logic（这个函数做什么）:
-    ///     插入两条 created_at 不同的记录，断言 list 按 created_at 倒序返回。
+    /// Code Logic（这个测试做什么）:
+    ///     建无 git_remote_fingerprint 的表，upsert 后 get 成功且 fingerprint 为 None。
+    #[tokio::test]
+    async fn upsert_adds_fingerprint_column_on_legacy_schema() {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repo = WorkbenchProjectRepo::new(pool);
+        repo.upsert(&row("p-legacy", "2026-06-24T01:00:00Z"))
+            .await
+            .unwrap();
+        let got = repo.get("p-legacy").await.unwrap().expect("row");
+        assert_eq!(got.git_remote_fingerprint, None);
+    }
+
     /// Business Logic（为什么需要这个测试）:
     ///     刷新整合依赖 fingerprint 落库，list 必须 round-trip。
     ///
@@ -422,6 +451,11 @@ mod tests {
         );
     }
 
+    /// Business Logic（为什么需要这个测试）:
+    ///     侧栏项目顺序必须稳定：新添加的项目在最上，且选中项目不得置顶。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入两条 created_at 不同的记录，断言 list 按 created_at 倒序返回。
     #[tokio::test]
     async fn list_orders_by_created_at_desc() {
         let repo = setup_repo().await;
