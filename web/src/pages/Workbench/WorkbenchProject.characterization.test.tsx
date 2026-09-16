@@ -260,10 +260,88 @@ describe('Workbench project domain (characterization)', () => {
     );
     await settle();
 
-    // session shell-a 应消失（B 项目无 session）；worktree chip 切换为 main-b。
-    expect(screen.queryAllByText('shell-a')).toHaveLength(0);
+    // 当前项目的 tab 不再显示 shell-a；worktree chip 切换为 main-b。
+    // 后台项目的 xterm 仍可挂载（display:none），所以不能按全文消失来断言。
+    const sessionTabs = screen.getByRole('tablist', { name: '终端会话' });
+    expect(sessionTabs.textContent).not.toContain('shell-a');
     const worktreeBar = screen.getByRole('region', { name: 'Worktree 管理' });
     expect(worktreeBar.textContent).toContain('main-b');
+  });
+
+  test('switching back to a visited project keeps its terminal before list returns', async () => {
+    const projectA = buildLocalProject({ id: 'pA', name: 'project-a' });
+    const projectB = buildLocalProject({ id: 'pB', name: 'project-b' });
+    const wtA = buildWorktree({
+      id: 'wtA',
+      projectId: 'pA',
+      name: 'main-a',
+      branch: 'main-a',
+    });
+    const wtB = buildWorktree({
+      id: 'wtB',
+      projectId: 'pB',
+      name: 'main-b',
+      branch: 'main-b',
+    });
+    const sessionA = buildSession({
+      id: 'sA',
+      projectId: 'pA',
+      worktreeId: 'wtA',
+      name: 'shell-a',
+    });
+    const sessionB = buildSession({
+      id: 'sB',
+      projectId: 'pB',
+      worktreeId: 'wtB',
+      name: 'shell-b',
+    });
+
+    const secondListA = createDeferred<typeof sessionA[]>();
+    let listACalls = 0;
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_worktrees':
+          return call.args.projectId === 'pA' ? [wtA] : [wtB];
+        case 'list_workbench_sessions':
+          if (call.args.projectId === 'pB') return [sessionB];
+          listACalls += 1;
+          if (listACalls === 1) return [sessionA];
+          return secondListA.promise;
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        default:
+          return { ok: true };
+      }
+    });
+
+    const utils = renderWorkbench(
+      buildProjectsContextValue({
+        projects: [projectA, projectB],
+        activeProjectId: 'pA',
+      }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+    expect(screen.getByRole('tablist', { name: '终端会话' }).textContent).toContain('shell-a');
+
+    utils.setProjectsContext(
+      buildProjectsContextValue({ projects: [projectA, projectB], activeProjectId: 'pB' }),
+    );
+    await settle();
+    expect(screen.getByRole('tablist', { name: '终端会话' }).textContent).toContain('shell-b');
+
+    utils.setProjectsContext(
+      buildProjectsContextValue({ projects: [projectA, projectB], activeProjectId: 'pA' }),
+    );
+    await settle();
+
+    expect(screen.getByRole('tablist', { name: '终端会话' }).textContent).toContain('shell-a');
+    const worktreeBar = screen.getByRole('region', { name: 'Worktree 管理' });
+    expect(worktreeBar.textContent).toContain('main-a');
+    secondListA.resolve([sessionA]);
+    await settle();
   });
 
   test('stale worktree list response is ignored when active project changes', async () => {

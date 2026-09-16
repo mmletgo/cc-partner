@@ -206,8 +206,15 @@ export const workbenchApi = {
      * Code Logic（这个函数做什么）:
      *   invokeDecoded list_workbench_worktrees → WorkbenchWorktree[]。
      */
-    list: (projectId: string) =>
-      invokeDecoded('list_workbench_worktrees', { projectId }, workbenchWorktreesDecoder),
+    list: (projectId: string, options?: { includeGitStatus?: boolean }) =>
+      invokeDecoded(
+        'list_workbench_worktrees',
+        {
+          projectId,
+          ...(options?.includeGitStatus === false ? { includeGitStatus: false } : {}),
+        },
+        workbenchWorktreesDecoder,
+      ),
 
     /** 从项目创建一个新的 Git worktree 和分支。 */
     create: (projectId: string, branchName: string, baseBranch?: string | null) =>

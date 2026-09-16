@@ -24,8 +24,8 @@
  *   - 暴露 loadWorktrees / loadGitHistory / handleOpenCreateWorktree / handleCancelCreateWorktree /
  *     handleCreateWorktree / handleCommitWorktree / handlePullWorktree / handlePushWorktree / handleMergeWorktree /
  *     handleRemoveWorktree / clearMergeStagePanel 操作函数。
- *   - loadGitHistory 在拉提交前 best-effort 对账 worktree 列表（复用 list → sync_git_worktrees），
- *     让外部已清理的 worktree 从导航入口消失；对账失败不挡历史刷新。
+ *   - loadGitHistory 只拉当前 worktree 提交，不再串行等待 worktrees.list / git status；
+ *     外部清理后的孤儿入口由 loadWorktrees 对账（项目切换与 mutation 后仍会跑）。
  *   - 注册 workbench:merge-progress 事件订阅（按 payload project/worktree 写入对应快照）。
  *
  * 不复制邻接 controller 状态：project / session / file / application / prompt optimizer 状态仍归
@@ -61,6 +61,7 @@ import {
   type WorkbenchMutationReconcileResult,
 } from '@/lib/workbenchMutationReconciliation';
 import { isLatestRequest } from '../workbenchFiles';
+import { gitHistoryCacheKey } from '../workbenchProjectSwitchCache';
 import type {
   MutationIntent,
   MutationKind,
@@ -327,7 +328,13 @@ export function useWorkbenchWorktreeGitController(
   // 引起 useCallback dep 抖动。
   const api = params.api ?? DEFAULT_WORKTREE_GIT_API;
 
-  const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
+  const [worktreesByProject, setWorktreesByProject] = useState<
+    Record<string, WorkbenchWorktree[]>
+  >({});
+  const worktrees = useMemo(
+    () => (activeProjectId ? (worktreesByProject[activeProjectId] ?? []) : []),
+    [activeProjectId, worktreesByProject],
+  );
   const [worktreeBusy, setWorktreeBusy] = useState<WorktreeBusyKind | null>(null);
   const [unknownMutationLock, setUnknownMutationLock] =
     useState<WorktreeUnknownMutationLock | null>(null);
@@ -340,7 +347,11 @@ export function useWorkbenchWorktreeGitController(
     useState<WorktreeBranchPrefix>(DEFAULT_WORKTREE_BRANCH_PREFIX);
   const [createWorktreeBranchSuffixDraft, setCreateWorktreeBranchSuffixDraft] =
     useState<string>('');
-  const [gitCommits, setGitCommits] = useState<WorkbenchGitCommit[]>([]);
+  const [gitCommitsByKey, setGitCommitsByKey] = useState<Record<string, WorkbenchGitCommit[]>>(
+    {},
+  );
+  const gitHistoryKey = gitHistoryCacheKey(activeProjectId ?? '', activeWorktreeId);
+  const gitCommits = activeProjectId ? (gitCommitsByKey[gitHistoryKey] ?? []) : [];
   const [gitHistoryLoading, setGitHistoryLoading] = useState<boolean>(false);
   const [gitHistoryError, setGitHistoryError] = useState<string | null>(null);
   // Business Logic: merge 在后端独立运行，切换 project/worktree 不能丢掉其阶段；按项目缓存后只投影
@@ -352,6 +363,31 @@ export function useWorkbenchWorktreeGitController(
   // Business Logic: 异步加载回调返回时，active project / worktree 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const activeWorktreeIdRef = useRef<string | null>(activeWorktreeId);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   页面仍把 worktrees 当成当前项目列表；切项目时只改当前切片，才能立刻画出缓存的 chip。
+   *
+   * Code Logic（这个函数做什么）:
+   *   无 active project 时忽略；否则写入当前项目切片。
+   */
+  const setWorktrees = useCallback((next: WorkbenchWorktree[]): void => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    setWorktreesByProject((prev) => ({ ...prev, [projectId]: next }));
+  }, []);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Git 历史按 project+worktree 缓存；切回时先展示旧提交。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入当前 ref 对应的 cache key。
+   */
+  const setGitCommits = useCallback((next: WorkbenchGitCommit[]): void => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    const key = gitHistoryCacheKey(projectId, activeWorktreeIdRef.current);
+    setGitCommitsByKey((prev) => ({ ...prev, [key]: next }));
+  }, []);
   // Business Logic: 事件可能在 React commit 前连续到达；同步 ref 让每个项目都以最新阶段做覆盖合并。
   const mergeProgressByProjectRef = useRef<Record<string, WorkbenchMergeProgressSnapshot>>({});
   // Business Logic: project A 的 merge 可在用户查看 project B 时继续；每个项目单独持有后台 operation 身份。
@@ -525,16 +561,18 @@ export function useWorkbenchWorktreeGitController(
       const requestSeq = (worktreeListRequestSeqRef.current[projectId] ?? 0) + 1;
       worktreeListRequestSeqRef.current[projectId] = requestSeq;
       try {
-        setWorktreeError(null);
+        if (isCurrentProject(projectId)) {
+          setWorktreeError(null);
+        }
         const list = await api.worktrees.list(projectId);
-        if (
-          !isCurrentProject(projectId) ||
-          !isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)
-        ) {
+        if (!isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)) {
           return null;
         }
+        setWorktreesByProject((prev) => ({ ...prev, [projectId]: list }));
+        if (!isCurrentProject(projectId)) {
+          return list;
+        }
         markRequestSuccess(projectId);
-        setWorktrees(list);
         // Business Logic: 保留仍存在的 active worktree；否则回退到第一个。读取 ref 拿到最新 active id，
         // 与原 Workbench.tsx 的 functional setState 行为等价。
         // 只通过 setter 通知页面；不在此写 activeWorktreeIdRef，避免打断 mutation settlement。
@@ -567,56 +605,30 @@ export function useWorkbenchWorktreeGitController(
    *
    * Code Logic（这个函数做什么）:
    *   1. 无 active project 时清空 commits/error/loading 并返回；
-   *   2. best-effort 调用 loadWorktrees（后端 list 内 sync_git_worktrees 会 prune 磁盘已不存在的非主 worktree）；
-   *      对账失败只走 worktree 既有 error 路径，不中止历史刷新；
-   *   3. 若对账返回 list：active 仍在则用之，否则用 list[0]（与 loadWorktrees 回退一致）；list 为 null 时回退到 ref；
-   *   4. 再 git.listCommits(projectId, worktreeId, 30)；project/worktree 切换时丢弃响应。
+   *   2. 直接 git.listCommits(projectId, current worktreeId, 30)，不串行等待 worktrees.list；
+   *   3. project/worktree 切换时丢弃响应。
    */
   const loadGitHistory = useCallback(async (): Promise<void> => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) {
-      setGitCommits([]);
       setGitHistoryError(null);
       setGitHistoryLoading(false);
       return;
     }
 
-    // Best-effort worktree reconcile: keep navigation honest without blocking history refresh.
-    // loadWorktrees swallows its own errors into worktreeError / markRequestFailure and returns null.
-    const reconciled = await loadWorktrees(projectId);
     if (!isCurrentProject(projectId) || activeProjectIdRef.current !== projectId) {
       return;
     }
 
-    // Prefer still-present active from reconcile result; if pruned, fall back to list[0] for this fetch.
-    // When reconcile failed (null), keep the current ref so history still attempts the active worktree.
-    let worktreeId = activeWorktreeIdRef.current;
-    if (reconciled) {
-      if (!(worktreeId && reconciled.some((worktree) => worktree.id === worktreeId))) {
-        worktreeId = reconciled[0]?.id ?? null;
-      }
-    }
-
-    const requestKey = `${projectId}::${worktreeId ?? '__none__'}`;
+    const worktreeId = activeWorktreeIdRef.current;
+    const requestKey = gitHistoryCacheKey(projectId, worktreeId);
     const requestSeq = (gitHistoryRequestSeqRef.current[requestKey] ?? 0) + 1;
     gitHistoryRequestSeqRef.current[requestKey] = requestSeq;
 
-    // Accept response when active ref still matches the requested worktree, or when we
-    // intentionally fell back after prune (ref still points at a missing id, request used list[0]).
     const isHistoryRequestCurrent = (): boolean => {
       if (!isCurrentProject(projectId)) return false;
       if (!isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)) return false;
-      const current = activeWorktreeIdRef.current;
-      if (current === worktreeId) return true;
-      if (
-        reconciled
-        && worktreeId === (reconciled[0]?.id ?? null)
-        && current !== null
-        && !reconciled.some((worktree) => worktree.id === current)
-      ) {
-        return true;
-      }
-      return false;
+      return activeWorktreeIdRef.current === worktreeId;
     };
 
     try {
@@ -642,7 +654,7 @@ export function useWorkbenchWorktreeGitController(
         setGitHistoryLoading(false);
       }
     }
-  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, loadWorktrees, api.git]);
+  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, setGitCommits, api.git]);
 
   /**
    * Business Logic（为什么需要这个函数）:

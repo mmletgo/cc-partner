@@ -1897,8 +1897,6 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
   test('loadGitHistory stores commits, marks success; clears on missing project', async () => {
     const project = buildLocalProject();
     const commits = [buildCommit({ hash: 'a' }), buildCommit({ hash: 'b' })];
-    const main = buildWorktree();
-    fakeWorktreesApi.list.mockResolvedValueOnce([main]);
     fakeGitApi.listCommits.mockResolvedValueOnce(commits);
     const markSuccess = vi.fn();
 
@@ -1913,7 +1911,7 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
       await flushMicrotasks();
     });
 
-    expect(fakeWorktreesApi.list).toHaveBeenCalledWith(project.id);
+    expect(fakeWorktreesApi.list).not.toHaveBeenCalled();
     expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-main', 30);
     expect(result.current.gitCommits).toEqual(commits);
     expect(result.current.gitHistoryLoading).toBe(false);
@@ -2105,16 +2103,13 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
     expect(markFailure).toHaveBeenCalledWith(project.id, expect.any(Error));
   });
 
-  test('loadGitHistory reconciles worktrees and loads history for fallback active after prune', async () => {
+  test('loadGitHistory uses the current worktree without reconciling worktrees.list', async () => {
     const project = buildLocalProject();
-    const main = buildWorktree({ id: 'wt-main', name: 'main', isMain: true });
-    // Active feature worktree was cleaned externally; list only returns main after sync_git_worktrees.
-    fakeWorktreesApi.list.mockResolvedValueOnce([main]);
-    const mainCommits = [buildCommit({ hash: 'main-head' })];
-    fakeGitApi.listCommits.mockResolvedValueOnce(mainCommits);
+    const featureCommits = [buildCommit({ hash: 'feature-head' })];
+    fakeGitApi.listCommits.mockResolvedValueOnce(featureCommits);
     const setActive = vi.fn();
 
-    const { result, activeWorktreeState } = renderController({
+    const { result } = renderController({
       activeProjectId: project.id,
       activeWorktreeId: 'wt-feature',
       setActiveWorktreeId: setActive,
@@ -2125,41 +2120,72 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
       await flushMicrotasks();
     });
 
-    expect(fakeWorktreesApi.list).toHaveBeenCalledWith(project.id);
-    expect(result.current.worktrees.map((wt) => wt.id)).toEqual(['wt-main']);
-    expect(setActive).toHaveBeenCalledWith('wt-main');
-    expect(activeWorktreeState.value).toBe('wt-main');
-    expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-main', 30);
-    expect(result.current.gitCommits).toEqual(mainCommits);
+    expect(fakeWorktreesApi.list).not.toHaveBeenCalled();
+    expect(setActive).not.toHaveBeenCalled();
+    expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-feature', 30);
+    expect(result.current.gitCommits).toEqual(featureCommits);
     expect(result.current.gitHistoryError).toBeNull();
   });
 
-  test('loadGitHistory still refreshes commits when worktree reconcile fails', async () => {
-    const project = buildLocalProject();
-    const commits = [buildCommit({ hash: 'kept' })];
-    fakeWorktreesApi.list.mockRejectedValueOnce(new Error('worktree list down'));
-    fakeGitApi.listCommits.mockResolvedValueOnce(commits);
-    const markFailure = vi.fn();
-    const markSuccess = vi.fn();
+  test('switching projects restores cached worktrees and git history without waiting on list', async () => {
+    const projectA = buildLocalProject({ id: 'p-a' });
+    const projectB = buildLocalProject({ id: 'p-b' });
+    const wtA = buildWorktree({ id: 'wt-a', projectId: 'p-a', name: 'main-a' });
+    const wtB = buildWorktree({ id: 'wt-b', projectId: 'p-b', name: 'main-b' });
+    const commitsA = [buildCommit({ hash: 'a-head' })];
+    const commitsB = [buildCommit({ hash: 'b-head' })];
+    fakeWorktreesApi.list.mockResolvedValueOnce([wtA]).mockResolvedValueOnce([wtB]);
+    fakeGitApi.listCommits.mockResolvedValueOnce(commitsA).mockResolvedValueOnce(commitsB);
 
-    const { result } = renderController({
-      activeProjectId: project.id,
-      activeWorktreeId: 'wt-main',
-      markRequestFailure: markFailure,
-      markRequestSuccess: markSuccess,
+    const current = { projectId: projectA.id };
+    const { result, rerender } = renderController({
+      activeProjectId: projectA.id,
+      activeWorktreeId: 'wt-a',
+      isCurrentProject: (id) => id === current.projectId,
     });
 
     await act(async () => {
+      await result.current.loadWorktrees(projectA.id);
       await result.current.loadGitHistory();
       await flushMicrotasks();
     });
+    expect(result.current.worktrees.map((item) => item.id)).toEqual(['wt-a']);
+    expect(result.current.gitCommits).toEqual(commitsA);
 
-    expect(result.current.worktreeError).toContain('worktree list down');
-    expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-main', 30);
-    expect(result.current.gitCommits).toEqual(commits);
-    expect(result.current.gitHistoryError).toBeNull();
-    expect(markFailure).toHaveBeenCalledWith(project.id, expect.any(Error));
-    expect(markSuccess).toHaveBeenCalledWith(project.id);
+    current.projectId = projectB.id;
+    rerender(
+      baseControllerProps({
+        activeProjectId: projectB.id,
+        activeWorktreeId: 'wt-b',
+        isCurrentProject: (id) => id === current.projectId,
+      }),
+    );
+    await act(async () => {
+      await result.current.loadWorktrees(projectB.id);
+      await result.current.loadGitHistory();
+      await flushMicrotasks();
+    });
+    expect(result.current.worktrees.map((item) => item.id)).toEqual(['wt-b']);
+    expect(result.current.gitCommits).toEqual(commitsB);
+
+    const listCalls = fakeWorktreesApi.list.mock.calls.length;
+    const commitCalls = fakeGitApi.listCommits.mock.calls.length;
+    current.projectId = projectA.id;
+    rerender(
+      baseControllerProps({
+        activeProjectId: projectA.id,
+        activeWorktreeId: 'wt-a',
+        isCurrentProject: (id) => id === current.projectId,
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.worktrees.map((item) => item.id)).toEqual(['wt-a']);
+    expect(result.current.gitCommits).toEqual(commitsA);
+    expect(fakeWorktreesApi.list.mock.calls.length).toBe(listCalls);
+    expect(fakeGitApi.listCommits.mock.calls.length).toBe(commitCalls);
   });
 });
 

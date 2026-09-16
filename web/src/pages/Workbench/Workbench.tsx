@@ -66,6 +66,11 @@ import { WorkbenchFreshRestartDialog } from '@/components/domain/WorkbenchFreshR
 import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
 import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
+import {
+  rememberLastWorktree,
+  resolveWorktreeIdAfterProjectSwitch,
+  suggestWorktreeIdFromSessions,
+} from './workbenchProjectSwitchCache';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
 import { useWorkbenchProjectNotes } from './useWorkbenchProjectNotes';
@@ -198,6 +203,7 @@ export function Workbench() {
   // A2 Agent 投影；snapshot 失败 phase=error 须暴露 refresh（禁永久 pending）。
   const agentRuntime = useAgentRuntime(activeProjectId);
   const {
+    sessions,
     scopedSessions,
     activeSession,
     activeSessionId,
@@ -215,7 +221,6 @@ export function Workbench() {
     setSessionNameDraft,
     setSessionError,
     setActiveSessionId,
-    setSessions,
     loadSessions,
     focusSession,
     handleCreateSession,
@@ -277,7 +282,6 @@ export function Workbench() {
   });
   const {
     worktrees,
-    setWorktrees,
     worktreeBusy,
     unknownMutationLock,
     worktreeError,
@@ -289,10 +293,8 @@ export function Workbench() {
     setCreateWorktreeBranchPrefix,
     setCreateWorktreeBranchSuffixDraft,
     gitCommits,
-    setGitCommits,
     gitHistoryLoading,
     gitHistoryError,
-    setGitHistoryError,
     mergeStages,
     loadWorktrees,
     loadGitHistory,
@@ -532,53 +534,54 @@ export function Workbench() {
     return () => window.cancelAnimationFrame(frame);
   }, [createWorktreeOpen]);
 
+  const [projectSwitchMemory, setProjectSwitchMemory] = useState({
+    boundProjectId: activeProjectId,
+    lastWorktreeByProject: {} as Record<string, string>,
+  });
+  if (projectSwitchMemory.boundProjectId !== activeProjectId) {
+    const lastWorktreeByProject = rememberLastWorktree(
+      projectSwitchMemory.lastWorktreeByProject,
+      projectSwitchMemory.boundProjectId,
+      activeWorktreeId,
+    );
+    setProjectSwitchMemory({ boundProjectId: activeProjectId, lastWorktreeByProject });
+    const nextWorktreeId = resolveWorktreeIdAfterProjectSwitch({
+      nextProjectId: activeProjectId,
+      cachedWorktrees: worktrees,
+      lastWorktreeId: activeProjectId ? lastWorktreeByProject[activeProjectId] ?? null : null,
+      cachedSessions: sessions,
+    });
+    if (nextWorktreeId !== activeWorktreeId) setActiveWorktreeId(nextWorktreeId);
+  }
+
   useEffect(() => {
     return deferEffect(() => {
-      // Business Logic: merge 在后端后台运行；切换项目时保留 controller 的按项目阶段快照，返回后继续展示。
-      // 成功快照由 controller 自动隐藏，失败快照由后续同项目操作覆盖，不能在这里无条件清空。
-      // Business Logic: 文件域（含 open/save/format/sqlite/dir stale 守卫）由 fileController.resetForContext 统一重置。
-      // Code Logic: resetForContext 忽略入参（仅作语义占位），不依赖当前 activeWorktreeId，因此本 effect 不订阅
-      // activeWorktreeId 变化——避免 worktree 切换时重跑 loadSessions 把 terminal-status 事件更新覆盖回 running。
-      // A8: restore apply 窗口内 suppressContextResetRef 为 true 时，只加载 worktrees/sessions，
-      // 不清 worktree / 不强制 terminal，避免与 restore 顺序竞态。
       const suppressReset = suppressContextResetRef.current;
       if (!suppressReset) {
         resetFileForContext(activeProjectId, null);
-      }
-      if (!activeProjectId) {
-        if (!suppressReset) {
-          setSessions([]);
-          setActiveSessionId(null);
-          setWorktrees([]);
-          setActiveWorktreeId(null);
-          setCreateWorktreeOpen(false);
-          setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-          setCreateWorktreeBranchSuffixDraft('');
-          setWorkspaceView('terminal');
-          setGitCommits([]);
-          setGitHistoryError(null);
-        }
-        return;
-      }
-      if (!suppressReset) {
-        setWorktrees([]);
-        setActiveWorktreeId(null);
         setCreateWorktreeOpen(false);
         setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
         setCreateWorktreeBranchSuffixDraft('');
         setWorkspaceView('terminal');
-        setGitCommits([]);
-        setGitHistoryError(null);
+        if (!activeProjectId) setActiveSessionId(null);
       }
+      if (!activeProjectId) return;
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
-  }, [activeProjectId, loadSessions, loadWorktrees, resetFileForContext, setActiveSessionId, setSessions, setWorktrees, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft, setGitCommits, setGitHistoryError]);
+  }, [activeProjectId, loadSessions, loadWorktrees, resetFileForContext, setActiveSessionId, setCreateWorktreeOpen, setCreateWorktreeBranchPrefix, setCreateWorktreeBranchSuffixDraft]);
+
+  useEffect(() => {
+    if (!activeProjectId || activeWorktreeId) return undefined;
+    return deferEffect(() => {
+      const suggested = suggestWorktreeIdFromSessions(sessions) ?? worktrees[0]?.id ?? null;
+      if (suggested) setActiveWorktreeId(suggested);
+    });
+  }, [activeProjectId, activeWorktreeId, sessions, worktrees]);
 
   useEffect(() => {
     return deferEffect(() => {
-      // Business Logic: worktree 切换时文件域需要彻底重置（含 stale 守卫），随后按新 worktree 重新加载根目录。
-      // A8: restore apply 期间不强制 terminal，保留 plan 中的 workspaceView。
+      // restore apply 期间不强制 terminal；其余情况重置文件域并按新 worktree 拉根目录。
       if (suppressContextResetRef.current) {
         if (activeProjectId && activeWorktreeId) {
           void loadDir('');
@@ -587,13 +590,11 @@ export function Workbench() {
       }
       resetFileForContext(activeProjectId, activeWorktreeId);
       setWorkspaceView('terminal');
-      setGitCommits([]);
-      setGitHistoryError(null);
       if (activeProjectId && activeWorktreeId) {
         void loadDir('');
       }
     });
-  }, [activeProjectId, activeWorktreeId, loadDir, resetFileForContext, setGitCommits, setGitHistoryError]);
+  }, [activeProjectId, activeWorktreeId, loadDir, resetFileForContext]);
 
   useEffect(() => {
     if (inspectorTab !== 'history') return undefined;
@@ -602,8 +603,7 @@ export function Workbench() {
     });
   }, [activeProjectId, activeWorktreeId, inspectorTab, loadGitHistory]);
 
-  // Business Logic: 桌面端用户需要把当前终端临时铺满屏幕，隐藏项目标题、worktree 管理层、文件层和右侧检查器。
-  // Code Logic: 关闭 Prompt 优化浮层，切回 terminal 工作区，并通过 controller 打开 terminalLayer fixed overlay。
+  /** 终端铺满：关 Prompt 浮层、切回 terminal，并由 controller 打开 overlay。 */
   const handleEnterTerminalFullscreen = useCallback((): void => {
     closePromptPanel();
     setWorkspaceView('terminal');

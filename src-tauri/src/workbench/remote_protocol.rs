@@ -39,6 +39,9 @@ pub type RemoteWorkbenchBrowserPreviewReq =
 #[serde(rename_all = "camelCase")]
 pub struct RemoteProjectReq {
     pub project_id: String,
+    /// 为 false 时跳过 git status / collect-merge；缺省视为 true。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_git_status: Option<bool>,
 }
 
 /// 远端创建 worktree 请求体。

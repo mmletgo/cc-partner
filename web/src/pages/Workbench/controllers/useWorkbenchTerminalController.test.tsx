@@ -347,6 +347,69 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     expect(result.current.sessionError).toBeNull();
   });
 
+  test('keeps previous project sessions mounted and restores the slice immediately on switch-back', async () => {
+    const projectA = buildLocalProject({ id: 'p-a' });
+    const projectB = buildLocalProject({ id: 'p-b' });
+    const worktreeA = buildWorktree({ id: 'wt-a', projectId: projectA.id });
+    const worktreeB = buildWorktree({ id: 'wt-b', projectId: projectB.id });
+    const sessionA = buildSession({
+      id: 'sa',
+      projectId: projectA.id,
+      worktreeId: worktreeA.id,
+      startedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const sessionB = buildSession({
+      id: 'sb',
+      projectId: projectB.id,
+      worktreeId: worktreeB.id,
+      startedAt: '2026-01-02T00:00:00.000Z',
+    });
+
+    const { result, rerender } = renderController({
+      activeProjectId: projectA.id,
+      activeWorktreeId: worktreeA.id,
+      isCurrentProject: (id) => id === projectA.id,
+    });
+
+    fakeSessionsApi.list.mockResolvedValueOnce([sessionA]);
+    await act(async () => {
+      await result.current.loadSessions(projectA.id);
+      await flushMicrotasks();
+    });
+
+    rerender(
+      baseControllerProps({
+        activeProjectId: projectB.id,
+        activeWorktreeId: worktreeB.id,
+        isCurrentProject: (id) => id === projectB.id,
+      }),
+    );
+    fakeSessionsApi.list.mockResolvedValueOnce([sessionB]);
+    await act(async () => {
+      await result.current.loadSessions(projectB.id);
+      await flushMicrotasks();
+    });
+
+    expect(result.current.sessions.map((item) => item.id)).toEqual(['sb']);
+    expect(result.current.mountedSessions.map((item) => item.id)).toEqual(['sa', 'sb']);
+
+    const listCallsAfterB = fakeSessionsApi.list.mock.calls.length;
+    rerender(
+      baseControllerProps({
+        activeProjectId: projectA.id,
+        activeWorktreeId: worktreeA.id,
+        isCurrentProject: (id) => id === projectA.id,
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.sessions.map((item) => item.id)).toEqual(['sa']);
+    expect(result.current.mountedSessions.map((item) => item.id)).toEqual(['sa', 'sb']);
+    expect(fakeSessionsApi.list.mock.calls.length).toBe(listCallsAfterB);
+  });
+
   test('slow initial loadSessions does not overwrite createSession mutation result', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();
@@ -1258,7 +1321,8 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
 
     expect(result.current.sessions.map((s) => s.id)).toEqual(['sb']);
     expect(result.current.sessionError).toBeNull();
-    expect(removeBuffer).not.toHaveBeenCalled();
+    expect(removeBuffer).toHaveBeenCalledWith('sa');
+    expect(result.current.mountedSessions.map((item) => item.id)).toEqual(['sb']);
     expect(refreshStats).not.toHaveBeenCalled();
     expect(markFailure).not.toHaveBeenCalled();
 

@@ -274,7 +274,8 @@ pub(crate) use projects::{
     create_workbench_remote_fs_dir_for_state, discover_workbench_browser_targets_for_state,
     get_workbench_remote_path_info_for_state, list_workbench_remote_dir_for_state,
     list_workbench_remote_roots_for_state, list_workbench_worktrees_for_state,
-    local_get_workbench_worktree, local_list_workbench_worktrees,
+    list_workbench_worktrees_for_state_with_git_status, local_get_workbench_worktree,
+    local_list_workbench_worktrees, local_list_workbench_worktrees_with_git_status,
     open_workbench_remote_project_for_state, remove_workbench_project_for_state,
 };
 

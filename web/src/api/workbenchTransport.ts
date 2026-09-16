@@ -61,7 +61,10 @@ export interface WorkbenchTransport {
     open: (path: string) => Promise<WorkbenchProject>;
   };
   worktrees: {
-    list: (projectId: string) => Promise<WorkbenchWorktree[]>;
+    list: (
+      projectId: string,
+      options?: { includeGitStatus?: boolean },
+    ) => Promise<WorkbenchWorktree[]>;
     create: (
       projectId: string,
       branchName: string,
@@ -252,7 +255,7 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     open: (path) => workbenchApi.projects.add(path),
   },
   worktrees: {
-    list: (projectId) => workbenchApi.worktrees.list(projectId),
+    list: (projectId, options) => workbenchApi.worktrees.list(projectId, options),
     create: (projectId, branchName, baseBranch) =>
       workbenchApi.worktrees.create(projectId, branchName, baseBranch),
     // Business Logic: transport 旧签名仍返回权威 value；envelope unknown 暂抛错，完整对账由 desktop controller / T6-T7 处理。

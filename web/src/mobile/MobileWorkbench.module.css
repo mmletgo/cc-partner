@@ -1488,8 +1488,16 @@
   height: 100%;
 }
 
-.mobileTerminalHost {
+.mobileTerminalHostStack {
   position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.mobileTerminalHost {
+  position: absolute;
+  inset: 0;
   min-width: 0;
   min-height: 0;
   height: 100%;

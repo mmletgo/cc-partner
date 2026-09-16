@@ -235,7 +235,7 @@ pub async fn remote_query_with_base(
             require_remote_device(base_url, device_id).await?;
             let items = RemoteWorkbenchClient::new()
                 .with_expected_device_id(device_id)
-                .list_worktrees(base_url, &project_id)
+                .list_worktrees(base_url, &project_id, true)
                 .await
                 .map_err(app_error_to_cli)?;
             Ok(json!({ "items": items }))
@@ -662,7 +662,7 @@ async fn resolve_remote_worktree_id(
     require_remote_device(base_url, device_id).await?;
     let items = RemoteWorkbenchClient::new()
         .with_expected_device_id(device_id)
-        .list_worktrees(base_url, project_id)
+        .list_worktrees(base_url, project_id, true)
         .await
         .map_err(app_error_to_cli)?;
     let candidates: Vec<WorktreeCandidate> = items

@@ -504,11 +504,17 @@ impl RemoteWorkbenchClient {
         &self,
         base_url: &str,
         project_id: &str,
+        include_git_status: bool,
     ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
         self.post_json(
             endpoint_url(base_url, "/api/workbench/worktrees/list"),
             &RemoteProjectReq {
                 project_id: project_id.to_string(),
+                include_git_status: if include_git_status {
+                    None
+                } else {
+                    Some(false)
+                },
             },
             RemoteRequestTimeoutKind::Short,
         )
@@ -948,6 +954,7 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/notes/get"),
             &RemoteProjectReq {
                 project_id: project_id.to_string(),
+                include_git_status: None,
             },
             RemoteRequestTimeoutKind::Short,
         )
@@ -2381,7 +2388,7 @@ mod tests {
         });
 
         let error = RemoteWorkbenchClient::new()
-            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .list_worktrees(&format!("http://{addr}"), "project-1", true)
             .await
             .expect_err("non-success JSON error should fail");
 
@@ -2413,7 +2420,7 @@ mod tests {
         });
 
         let error = RemoteWorkbenchClient::new()
-            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .list_worktrees(&format!("http://{addr}"), "project-1", true)
             .await
             .expect_err("non-success plain body should fail");
         let message = error.to_string();
@@ -2809,7 +2816,7 @@ mod tests {
         let client = RemoteWorkbenchClient::new();
 
         let items = client
-            .list_worktrees(&format!("http://{addr}"), "inner-project")
+            .list_worktrees(&format!("http://{addr}"), "inner-project", true)
             .await
             .unwrap();
 
@@ -3113,7 +3120,7 @@ mod tests {
 
         RemoteWorkbenchClient::new()
             .with_forwarded_request_id("wb-trace-001")
-            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .list_worktrees(&format!("http://{addr}"), "project-1", true)
             .await
             .expect("转发场景应成功");
         assert_eq!(
@@ -3123,7 +3130,7 @@ mod tests {
         );
 
         RemoteWorkbenchClient::new()
-            .list_worktrees(&format!("http://{addr}"), "project-1")
+            .list_worktrees(&format!("http://{addr}"), "project-1", true)
             .await
             .expect("非转发场景应成功");
         assert_eq!(

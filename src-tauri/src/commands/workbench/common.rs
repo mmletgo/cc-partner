@@ -490,6 +490,27 @@ pub(crate) async fn sync_git_worktrees(
 /// Code Logic（这个函数做什么）:
 ///     查询 `git status`，失败时返回 clean fallback 并保留 row.branch。
 pub(crate) fn worktree_to_dto(row: &WorkbenchWorktreeRow) -> WorkbenchWorktreeDto {
+    worktree_to_dto_with_git_status(row, true)
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   切项目关键路径不应阻塞在每个 worktree 的 `git status`；元数据列表先返回，状态后台补。
+ *
+ * Code Logic（这个函数做什么）:
+ *   include_git_status=false 时用 row.branch + clean fallback，不执行 git。
+ */
+pub(crate) fn worktree_to_dto_with_git_status(
+    row: &WorkbenchWorktreeRow,
+    include_git_status: bool,
+) -> WorkbenchWorktreeDto {
+    if !include_git_status {
+        return row.to_dto(WorkbenchGitStatusDto {
+            branch: row.branch.clone(),
+            clean: true,
+            ..WorkbenchGitStatusDto::default()
+        });
+    }
     let status =
         workbench_git::status(Path::new(&row.path)).unwrap_or_else(|_| WorkbenchGitStatusDto {
             branch: row.branch.clone(),

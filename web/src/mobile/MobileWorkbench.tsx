@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -192,9 +192,13 @@ export function MobileWorkbench(): ReactElement {
   const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [activeProject, setActiveProject] = useState<WorkbenchProject | null>(null);
-  const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
+  const [worktreesByProject, setWorktreesByProject] = useState<Record<string, WorkbenchWorktree[]>>(
+    {},
+  );
+  const [sessionsByProject, setSessionsByProject] = useState<Record<string, WorkbenchSession[]>>(
+    {},
+  );
   const [activeWorktree, setActiveWorktree] = useState<WorkbenchWorktree | null>(null);
-  const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [sessionRuntime, setSessionRuntime] = useState<MobileSessionRuntimeState>(() =>
     emptyMobileSessionRuntimeState(),
   );
@@ -230,6 +234,9 @@ export function MobileWorkbench(): ReactElement {
   const [transferPanelMounted, setTransferPanelMounted] = useState<boolean>(
     () => getInitialMobileWorkbenchPanel() === 'transfer',
   );
+  const [terminalPanelMounted, setTerminalPanelMounted] = useState<boolean>(
+    () => getInitialMobileWorkbenchPanel() === 'terminal',
+  );
   const [pickerKind, setPickerKind] = useState<MobileProjectPickerKind | null>(null);
   const [pendingRemove, setPendingRemove] = useState<WorkbenchProject | null>(null);
   const [removingProject, setRemovingProject] = useState<boolean>(false);
@@ -242,7 +249,7 @@ export function MobileWorkbench(): ReactElement {
   const projectDetailsAbortRef = useRef<AbortController | null>(null);
   const worktreesRequestIdRef = useRef<number>(0);
   const sessionsRequestIdRef = useRef<number>(0);
-  const sessionsRef = useRef<WorkbenchSession[]>(sessions);
+  const sessionsRef = useRef<WorkbenchSession[]>([]);
   const activeProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -266,13 +273,6 @@ export function MobileWorkbench(): ReactElement {
   ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // sessions 列表变化时在 render 阶段播种 runtime（保留已有 agent 投影），避免 setState-in-effect
-  const [seededSessions, setSeededSessions] = useState(sessions);
-  if (seededSessions !== sessions) {
-    setSeededSessions(sessions);
-    setSessionRuntime((prev) => seedMobileSessionRuntimeFromSessions(sessions, prev));
-  }
-
   /**
    * Business Logic（为什么需要这个函数）:
    *   HTTP terminalStatus 需更新当前已知 session 的 status，并同步 activeSession。
@@ -286,11 +286,23 @@ export function MobileWorkbench(): ReactElement {
       setSessionRuntime((prev) =>
         applyMobileTerminalStatusEvent(prev, payload.sessionId, status),
       );
-      setSessions((prev) =>
-        prev.map((session) =>
-          session.id === payload.sessionId ? { ...session, status } : session,
-        ),
-      );
+      setSessionsByProject((prev) => {
+        let changed = false;
+        const next: Record<string, WorkbenchSession[]> = { ...prev };
+        for (const [projectId, list] of Object.entries(prev)) {
+          if (!list.some((session) => session.id === payload.sessionId)) continue;
+          next[projectId] = list.map((session) =>
+            session.id === payload.sessionId ? { ...session, status } : session,
+          );
+          changed = true;
+        }
+        if (!changed) return prev;
+        const currentId = activeProjectIdRef.current;
+        if (currentId && next[currentId]) {
+          sessionsRef.current = next[currentId];
+        }
+        return next;
+      });
       setActiveSession((prev) =>
         prev && prev.id === payload.sessionId ? { ...prev, status } : prev,
       );
@@ -327,7 +339,10 @@ export function MobileWorkbench(): ReactElement {
     const result = applyKnownMobileSessionUpdatedEvent(sessionsRef.current, null, payload);
     if (!result.applied) return;
     sessionsRef.current = result.sessions;
-    setSessions(result.sessions);
+    const projectId = payload.projectId || activeProjectIdRef.current;
+    if (projectId) {
+      setSessionsByProject((prev) => ({ ...prev, [projectId]: result.sessions }));
+    }
     setActiveSession((current) =>
       current?.id === payload.id
         ? result.sessions.find((session) => session.id === payload.id) ?? current
@@ -355,6 +370,35 @@ export function MobileWorkbench(): ReactElement {
   }, [activeSession?.id, activeSession?.status]);
   const activeProjectRef = useRef<WorkbenchProject | null>(null);
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
+  const lastWorktreeByProjectRef = useRef<Record<string, string>>({});
+  const lastSessionByProjectRef = useRef<Record<string, string>>({});
+  const worktreesByProjectRef = useRef(worktreesByProject);
+  const sessionsByProjectRef = useRef(sessionsByProject);
+  const worktrees = useMemo(
+    () => (activeProject ? worktreesByProject[activeProject.id] ?? [] : []),
+    [activeProject, worktreesByProject],
+  );
+  const sessions = useMemo(
+    () => (activeProject ? sessionsByProject[activeProject.id] ?? [] : []),
+    [activeProject, sessionsByProject],
+  );
+  const setWorktrees = useCallback((next: WorkbenchWorktree[]): void => {
+    const projectId = activeProjectRef.current?.id;
+    if (!projectId) return;
+    setWorktreesByProject((prev) => ({ ...prev, [projectId]: next }));
+  }, []);
+  const setSessions = useCallback((next: WorkbenchSession[]): void => {
+    const projectId = activeProjectRef.current?.id;
+    if (!projectId) return;
+    sessionsRef.current = next;
+    setSessionsByProject((prev) => ({ ...prev, [projectId]: next }));
+  }, []);
+
+  const [seededSessions, setSeededSessions] = useState(sessions);
+  if (seededSessions !== sessions) {
+    setSeededSessions(sessions);
+    setSessionRuntime((prev) => seedMobileSessionRuntimeFromSessions(sessions, prev));
+  }
   const worktreeOperationBusyRef = useRef<boolean>(false);
   const worktreeOperationCountRef = useRef<number>(0);
   const projectsRef = useRef<WorkbenchProject[]>([]);
@@ -419,6 +463,23 @@ export function MobileWorkbench(): ReactElement {
   };
   const placeholder = panelPlaceholders[panel];
   const worktreeControlsBusy = projectDetailsLoading || worktreeOperationBusy;
+
+  useEffect(() => {
+    worktreesByProjectRef.current = worktreesByProject;
+  }, [worktreesByProject]);
+  useEffect(() => {
+    sessionsByProjectRef.current = sessionsByProject;
+  }, [sessionsByProject]);
+  useEffect(() => {
+    if (activeProject?.id && activeWorktree) {
+      lastWorktreeByProjectRef.current[activeProject.id] = activeWorktree.id;
+    }
+  }, [activeProject?.id, activeWorktree]);
+  useEffect(() => {
+    if (activeProject?.id && activeSession) {
+      lastSessionByProjectRef.current[activeProject.id] = activeSession.id;
+    }
+  }, [activeProject?.id, activeSession]);
 
   /* eslint-disable react-hooks/set-state-in-effect -- 项目或可用性变化时需要关闭 transient quick switch sheet */
   useEffect(() => {
@@ -548,7 +609,7 @@ export function MobileWorkbench(): ReactElement {
   const handleSessionsChange = useCallback((nextSessions: WorkbenchSession[]): void => {
     sessionsRef.current = nextSessions;
     setSessions(nextSessions);
-  }, []);
+  }, [setSessions]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -646,7 +707,7 @@ export function MobileWorkbench(): ReactElement {
       if (sessionsRequestIdRef.current !== requestId) return;
       setError(getErrorMessage(reason));
     }
-  }, [activeProject]);
+  }, [activeProject, setSessions]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -682,7 +743,7 @@ export function MobileWorkbench(): ReactElement {
       if (sessionsRequestIdRef.current !== requestId) return;
       setError(getErrorMessage(reason));
     }
-  }, [activeProject, worktrees]);
+  }, [activeProject, setSessions, worktrees]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -726,7 +787,13 @@ export function MobileWorkbench(): ReactElement {
     } finally {
       endWorktreeOperation();
     }
-  }, [activeProject, beginWorktreeOperation, confirmFileContextSwitch, setActiveWorktreeWithSession]);
+  }, [
+    activeProject,
+    beginWorktreeOperation,
+    confirmFileContextSwitch,
+    setActiveWorktreeWithSession,
+    setWorktrees,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -772,13 +839,20 @@ export function MobileWorkbench(): ReactElement {
     setError(null);
     activeProjectRef.current = project;
     setActiveProject(project);
+    const cachedWorktrees = worktreesByProjectRef.current[project.id] ?? [];
+    const cachedSessions = sessionsByProjectRef.current[project.id] ?? [];
+    const cachedHit = cachedWorktrees.length > 0 || cachedSessions.length > 0;
     if (activeProject?.id !== project.id) {
-      setWorktrees([]);
-      activeWorktreeRef.current = null;
-      setActiveWorktree(null);
-      setSessions([]);
-      sessionsRef.current = [];
-      setActiveSession(null);
+      const restoredCache = resolveRestoredMobileWorkspace(
+        cachedWorktrees,
+        cachedSessions,
+        options.worktreeId ?? lastWorktreeByProjectRef.current[project.id] ?? null,
+        options.sessionId ?? lastSessionByProjectRef.current[project.id] ?? null,
+      );
+      activeWorktreeRef.current = restoredCache.worktree;
+      setActiveWorktree(restoredCache.worktree);
+      sessionsRef.current = cachedSessions;
+      setActiveSession(restoredCache.session);
     }
 
     projectDetailsAbortRef.current?.abort();
@@ -787,11 +861,13 @@ export function MobileWorkbench(): ReactElement {
 
     const requestId = projectDetailsRequestIdRef.current + 1;
     projectDetailsRequestIdRef.current = requestId;
-    setProjectDetailStatus('loading');
+    if (!cachedHit) {
+      setProjectDetailStatus('loading');
+    }
 
     try {
       const [nextWorktrees, nextSessions] = await Promise.all([
-        httpWorkbenchTransport.worktrees.list(project.id),
+        httpWorkbenchTransport.worktrees.list(project.id, { includeGitStatus: false }),
         httpWorkbenchTransport.sessions.list(project.id),
       ]);
       if (abortController.signal.aborted) return false;
@@ -800,19 +876,28 @@ export function MobileWorkbench(): ReactElement {
       const restored = resolveRestoredMobileWorkspace(
         nextWorktrees,
         nextSessions,
-        options.worktreeId ?? null,
-        options.sessionId ?? null,
+        options.worktreeId ?? lastWorktreeByProjectRef.current[project.id] ?? null,
+        options.sessionId ?? lastSessionByProjectRef.current[project.id] ?? null,
       );
 
-      setWorktrees(nextWorktrees);
+      setWorktreesByProject((prev) => ({ ...prev, [project.id]: nextWorktrees }));
       activeWorktreeRef.current = restored.worktree;
       setActiveWorktree(restored.worktree);
       sessionsRef.current = nextSessions;
-      setSessions(nextSessions);
+      setSessionsByProject((prev) => ({ ...prev, [project.id]: nextSessions }));
       setActiveSession(restored.session);
       setPanel(nextPanel);
       setProjectDetailStatus('ready');
       noteConnectionOutcome(true);
+      void httpWorkbenchTransport.worktrees
+        .list(project.id)
+        .then((fullWorktrees) => {
+          if (activeProjectRef.current?.id !== project.id) return;
+          setWorktreesByProject((prev) => ({ ...prev, [project.id]: fullWorktrees }));
+        })
+        .catch(() => {
+          // 后台补 git status 失败不回滚已展示的元数据列表。
+        });
       return true;
     } catch (reason) {
       if (abortController.signal.aborted) return false;
@@ -891,10 +976,18 @@ export function MobileWorkbench(): ReactElement {
       setProjects((current) => current.filter((item) => item.id !== removedId));
       if (activeProjectRef.current?.id === removedId) {
         setActiveProject(null);
-        setWorktrees([]);
+        setWorktreesByProject((prev) => {
+          const next = { ...prev };
+          delete next[removedId];
+          return next;
+        });
+        setSessionsByProject((prev) => {
+          const next = { ...prev };
+          delete next[removedId];
+          return next;
+        });
         setActiveWorktreeWithSession(null);
         sessionsRef.current = [];
-        setSessions([]);
         setProjectDetailStatus('idle');
         setPanel('projects');
       }
@@ -1068,7 +1161,7 @@ export function MobileWorkbench(): ReactElement {
       setSessions(remainingSessions);
     }
     setWorktrees(nextWorktrees);
-  }, [removeBuffer]);
+  }, [removeBuffer, setSessions, setWorktrees]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1165,7 +1258,7 @@ export function MobileWorkbench(): ReactElement {
         setActiveWorktree(updatedWorktree);
       }
     },
-    [],
+    [setWorktrees],
   );
 
   /**
@@ -1325,6 +1418,8 @@ export function MobileWorkbench(): ReactElement {
       refreshWorktrees,
       removeBuffer,
       setActiveWorktreeWithSession,
+      setSessions,
+      setWorktrees,
       t,
       worktrees,
     ],
@@ -1572,13 +1667,16 @@ export function MobileWorkbench(): ReactElement {
     }
   }, [connectionState, loadProjects, refreshSessions, refreshWorktrees]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- files/transfer 首次激活后保持挂载 */
+  /* eslint-disable react-hooks/set-state-in-effect -- files/transfer/terminal 首次激活后保持挂载 */
   useEffect(() => {
     if (panel === 'files') {
       setFilesPanelMounted(true);
     }
     if (panel === 'transfer') {
       setTransferPanelMounted(true);
+    }
+    if (panel === 'terminal') {
+      setTerminalPanelMounted(true);
     }
   }, [panel]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -1680,7 +1778,7 @@ export function MobileWorkbench(): ReactElement {
           onIsWorktreeActive={isCurrentActiveWorktree}
         />
       </Suspense>
-    ) : panel === 'files' || panel === 'transfer' ? null : panel === 'git' ? (
+    ) : panel === 'files' || panel === 'transfer' || panel === 'terminal' ? null : panel === 'git' ? (
       <Suspense fallback={heavyPanelFallback}>
         <MobileGitPanel
           project={activeProject}
@@ -1718,25 +1816,6 @@ export function MobileWorkbench(): ReactElement {
           transport={httpWorkbenchTransport}
           project={activeProject}
           worktree={activeWorktree}
-        />
-      </Suspense>
-    ) : panel === 'terminal' ? (
-      <Suspense fallback={heavyPanelFallback}>
-        <MobileTerminalPanel
-          project={activeProject}
-          worktree={activeWorktree}
-          worktreeBar={worktreeTabsProps}
-          sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
-          activeSession={activeSession}
-          busy={projectDetailsLoading}
-          sessionRuntime={sessionRuntime}
-          onSessionsChange={handleSessionsChange}
-          onActiveSessionChange={setActiveSession}
-          onRefreshSessions={refreshSessions}
-          onWorktreeChange={handleWorktreeChange}
-          onMergeWorktree={handleMergeWorktree}
-          onRefreshWorktrees={refreshWorktrees}
-          onFocusRepairSession={handleFocusRepairSession}
         />
       </Suspense>
     ) : (
@@ -1841,6 +1920,34 @@ export function MobileWorkbench(): ReactElement {
         <div hidden={panel !== 'transfer'}>
           <Suspense fallback={heavyPanelFallback}>
             <MobileTransferPanel />
+          </Suspense>
+        </div>
+      ) : null}
+      {terminalPanelMounted ? (
+        <div hidden={panel !== 'terminal'}>
+          <Suspense fallback={heavyPanelFallback}>
+            <MobileTerminalPanel
+              project={activeProject}
+              worktree={activeWorktree}
+              worktreeBar={worktreeTabsProps}
+              sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
+              backgroundSessions={mergeMobileSessionsWithRuntime(
+                Object.entries(sessionsByProject)
+                  .filter(([projectId]) => projectId !== (activeProject?.id ?? ''))
+                  .flatMap(([, list]) => list),
+                sessionRuntime,
+              )}
+              activeSession={activeSession}
+              busy={projectDetailStatus === 'loading'}
+              sessionRuntime={sessionRuntime}
+              onSessionsChange={handleSessionsChange}
+              onActiveSessionChange={setActiveSession}
+              onRefreshSessions={refreshSessions}
+              onWorktreeChange={handleWorktreeChange}
+              onMergeWorktree={handleMergeWorktree}
+              onRefreshWorktrees={refreshWorktrees}
+              onFocusRepairSession={handleFocusRepairSession}
+            />
           </Suspense>
         </div>
       ) : null}

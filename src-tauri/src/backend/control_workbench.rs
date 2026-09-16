@@ -275,7 +275,13 @@ async fn dispatch_workbench_op(
         // ---- worktrees / git ----
         "worktrees.list" => {
             let project_id = required_string(&payload, "projectId")?;
-            let items = workbench::list_workbench_worktrees_for_state(state, project_id).await?;
+            let include_git_status = optional_bool(&payload, "includeGitStatus").unwrap_or(true);
+            let items = workbench::list_workbench_worktrees_for_state_with_git_status(
+                state,
+                project_id,
+                include_git_status,
+            )
+            .await?;
             Ok(serde_json::to_value(items)?)
         }
         "worktrees.create" => {

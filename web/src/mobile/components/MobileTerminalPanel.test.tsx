@@ -1114,6 +1114,73 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
       ]);
     });
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   切窗口/切项目要复用已挂载 xterm，不能每次 replay 新实例。
+   *
+   * Code Logic（这个测试做什么）:
+   *   同项目两个 session 同时挂载；切 active 后实例数不变。
+   */
+  test('keeps sibling session xterm mounted when switching the active window', async () => {
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'ready\n',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-1',
+    };
+    const store = createWorkbenchTerminalBufferStore();
+    const first = buildSession({ id: 's1', name: 'one' });
+    const second = buildSession({ id: 's2', name: 'two' });
+    const view = render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[first, second]}
+          activeSession={first}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(terminalEvents.instances.length).toBe(2);
+    });
+    view.rerender(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[first, second]}
+          activeSession={second}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+    expect(terminalEvents.instances.length).toBe(2);
+
+    view.rerender(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[second]}
+          backgroundSessions={[first]}
+          activeSession={second}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+    expect(terminalEvents.instances.length).toBe(2);
+  });
 });
 
 describe('MobileTerminalPanel — FAB menu', () => {

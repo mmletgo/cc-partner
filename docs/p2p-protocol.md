@@ -341,7 +341,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/fs/create-dir` | `routes/workbench.rs` | creates one directory under an absolute parent path | requires-idempotency-key | capability `workbench.fs.create-dir.v1`; body camelCase `{parentPath,name}`; no dedupe key yet; clients MUST NOT auto-retry; distinct from project-scoped `files/create-dir` |
 | GET | `/api/workbench/projects/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | `add_workbench_project` reuses the same project id for the same path and only refreshes timestamps |
-| POST | `/api/workbench/worktrees/list` | `routes/workbench.rs` | none (reconciles existing worktrees into SQLite) | read-only | — |
+| POST | `/api/workbench/worktrees/list` | `routes/workbench.rs` | none (reconciles existing worktrees into SQLite) | read-only | body `{projectId, includeGitStatus?}`；`includeGitStatus=false` 跳过每 worktree `git status` 与 collect-merge 探测，仍 ensure_main + `git worktree list` 对账；缺省 true |
 | POST | `/api/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry until a worktree-create idempotency key lands |
 | POST | `/api/workbench/worktrees/get` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | when body carries `clientOperationId`: UNIQUE ledger (`workbench_mutation_operations`) same id/same payload replays; different payload → conflict; response is `workbench.mutation-outcome.v1` envelope. when id omitted: legacy raw worktree DTO for old peers (no envelope) |
@@ -422,7 +422,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/remote/info` | `routes/workbench.rs` | none; peer path metadata via host two-hop | read-only | body `{deviceId,path}` |
 | POST | `/api/mobile/workbench/remote/open` | `routes/workbench.rs` | opens peer local project then upserts host remote shortcut | naturally-idempotent | same stable `remote:<deviceId>:<path>` shortcut id as desktop |
 | POST | `/api/mobile/workbench/remote/create-dir` | `routes/workbench.rs` | creates one directory on a peer via host two-hop | requires-idempotency-key | body `{deviceId,parentPath,name}`; host calls peer `POST /api/workbench/fs/create-dir`; no auto-retry |
-| POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |
+| POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | 与 P2P list 相同，支持 `includeGitStatus?` |
 | POST | `/api/mobile/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
 | POST | `/api/mobile/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | mobile shares the same `clientOperationId` ledger/envelope as P2P commit |
 | POST | `/api/mobile/workbench/worktrees/push` | `routes/workbench.rs` | `git push` | requires-idempotency-key | same ledger/envelope |

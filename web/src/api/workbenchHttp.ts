@@ -854,8 +854,15 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
       postJson<WorkbenchProject>(`${MOBILE_WORKBENCH_API_PREFIX}/projects/open`, { path }, { policy: { kind: 'mutation' }, decoder: workbenchProjectDecoder }),
   },
   worktrees: {
-    list: (projectId) =>
-      postJson<WorkbenchWorktree[]>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/list`, { projectId }, { policy: { kind: 'query' }, decoder: workbenchWorktreesDecoder }),
+    list: (projectId, options) =>
+      postJson<WorkbenchWorktree[]>(
+        `${MOBILE_WORKBENCH_API_PREFIX}/worktrees/list`,
+        {
+          projectId,
+          ...(options?.includeGitStatus === false ? { includeGitStatus: false } : {}),
+        },
+        { policy: { kind: 'query' }, decoder: workbenchWorktreesDecoder },
+      ),
     create: (projectId, branchName, baseBranch) =>
       postJson<WorkbenchWorktree>(`${MOBILE_WORKBENCH_API_PREFIX}/worktrees/create`, {
           projectId,

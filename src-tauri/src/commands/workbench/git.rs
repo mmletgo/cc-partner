@@ -48,7 +48,7 @@ use std::time::Duration;
 use tauri::State;
 
 use super::common::*;
-use super::projects::list_workbench_worktrees_for_state;
+use super::projects::list_workbench_worktrees_for_state_with_git_status;
 
 /// Business Logic: Timeout/Unavailable 映射为 unknown transport class。
 /// Code Logic: classify() → Timeout/Unavailable，其它返回 None。
@@ -95,17 +95,27 @@ fn map_legacy_mutation_result<T>(
 pub async fn list_workbench_worktrees(
     state: State<'_, AppState>,
     project_id: String,
+    include_git_status: Option<bool>,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
+    let include_git_status = include_git_status.unwrap_or(true);
     if let Some(v) = proxy_workbench_if_gui(
         state.inner(),
         "worktrees.list",
-        serde_json::json!({ "projectId": project_id.clone() }),
+        serde_json::json!({
+            "projectId": project_id.clone(),
+            "includeGitStatus": include_git_status,
+        }),
     )
     .await?
     {
         return Ok(v);
     }
-    list_workbench_worktrees_for_state(state.inner(), project_id).await
+    list_workbench_worktrees_for_state_with_git_status(
+        state.inner(),
+        project_id,
+        include_git_status,
+    )
+    .await
 }
 
 /// 创建一个项目 Git worktree。

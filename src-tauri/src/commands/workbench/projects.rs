@@ -805,6 +805,22 @@ pub(crate) async fn local_list_workbench_worktrees(
     state: &AppState,
     project_id: String,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
+    local_list_workbench_worktrees_with_git_status(state, project_id, true).await
+}
+
+/// 列出本机 Git worktree，可跳过实时 git status / collect-merge 探测。
+///
+/// Business Logic（为什么需要这个函数）:
+///     切项目先要 worktree id/path；`git status` 与 collect-merge 资格可以后台补。
+///
+/// Code Logic（这个函数做什么）:
+///     仍 ensure_main + sync_git_worktrees；include_git_status=false 时跳过 status 与
+///     apply_collect_merge_eligibility。
+pub(crate) async fn local_list_workbench_worktrees_with_git_status(
+    state: &AppState,
+    project_id: String,
+    include_git_status: bool,
+) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
     state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     ensure_main_worktree(state, &project).await?;
@@ -813,7 +829,6 @@ pub(crate) async fn local_list_workbench_worktrees(
         .workbench_worktree_repo
         .list_by_project(&project_id)
         .await?;
-    // list 对账后幂等刷新 bindings（仅 opted-in 项目生效）。
     if let Err(err) =
         crate::agent_hub::project_scope::refresh_checkout_bindings(state, &project_id).await
     {
@@ -823,8 +838,13 @@ pub(crate) async fn local_list_workbench_worktrees(
             "agent_hub refresh_checkout_bindings after list worktrees failed"
         );
     }
-    let mut dtos: Vec<WorkbenchWorktreeDto> = rows.iter().map(worktree_to_dto).collect();
-    apply_collect_merge_eligibility(&mut dtos);
+    let mut dtos: Vec<WorkbenchWorktreeDto> = rows
+        .iter()
+        .map(|row| worktree_to_dto_with_git_status(row, include_git_status))
+        .collect();
+    if include_git_status {
+        apply_collect_merge_eligibility(&mut dtos);
+    }
     Ok(dtos)
 }
 
@@ -865,12 +885,25 @@ pub(crate) async fn list_workbench_worktrees_for_state(
     state: &AppState,
     project_id: String,
 ) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
+    list_workbench_worktrees_for_state_with_git_status(state, project_id, true).await
+}
+
+/// 列出项目 worktree，可跳过实时 Git 状态。
+pub(crate) async fn list_workbench_worktrees_for_state_with_git_status(
+    state: &AppState,
+    project_id: String,
+    include_git_status: bool,
+) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
     let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
         let items = RemoteWorkbenchClient::new()
             .with_expected_device_id(&context.device_id)
-            .list_worktrees(&context.base_url, &context.inner_project_id)
+            .list_worktrees(
+                &context.base_url,
+                &context.inner_project_id,
+                include_git_status,
+            )
             .await?;
         return Ok(map_remote_worktree_dtos(
             &context.device_id,
@@ -878,5 +911,5 @@ pub(crate) async fn list_workbench_worktrees_for_state(
             items,
         ));
     }
-    local_list_workbench_worktrees(state, project_id).await
+    local_list_workbench_worktrees_with_git_status(state, project_id, include_git_status).await
 }

@@ -345,8 +345,9 @@ describe('MobileWorkbench project retry and connection', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新加载项目' }));
 
     await waitFor(() => {
-      expect(listWorktreesMock).toHaveBeenCalledTimes(2);
+      expect(listWorktreesMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
+    expect(listWorktreesMock.mock.calls[1]).toEqual(['p1', { includeGitStatus: false }]);
   });
 
   /**
@@ -387,23 +388,24 @@ describe('MobileWorkbench project retry and connection', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   ready 同项目可早退，不再重复拉详情。
+   *   ready 同项目可早退，不再重复拉详情。切项目关键路径只拉无 git status 的列表，
+   *   完整 status 在后台补一次，不得把同项目再点当成新的详情请求。
    *
    * Code Logic（这个测试做什么）:
-   *   成功打开后再次点击同项目，listWorktrees 调用次数不增加。
+   *   成功打开后断言 listWorktrees 先 includeGitStatus=false 再补全量；再次点击同项目次数不增加。
    */
   test('ready same project does not reload details', async () => {
     renderWorkbench();
     await openProject('Project p1');
     await waitFor(() => {
-      expect(listWorktreesMock).toHaveBeenCalledTimes(1);
+      expect(listWorktreesMock).toHaveBeenCalledTimes(2);
     });
-    // 成功后可能切到 terminal；回到 projects 再点
-    // 若已不在 projects，导航不一定存在；直接再点项目名可能在 status 区
+    expect(listWorktreesMock.mock.calls[0]).toEqual(['p1', { includeGitStatus: false }]);
+    expect(listWorktreesMock.mock.calls[1]).toEqual(['p1']);
     const projectButtons = screen.getAllByText('Project p1');
     fireEvent.click(projectButtons[0]!);
     await waitFor(() => {
-      expect(listWorktreesMock).toHaveBeenCalledTimes(1);
+      expect(listWorktreesMock).toHaveBeenCalledTimes(2);
     });
   });
 

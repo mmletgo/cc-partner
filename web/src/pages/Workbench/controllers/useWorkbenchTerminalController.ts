@@ -29,7 +29,11 @@ import type {
 import { workbenchApi, type TerminalApiScope, type WorkbenchPaneSplitDirection } from '@/api/workbench';
 import { createTerminalInputPump } from '../terminalInputPump';
 import type { TerminalInputPump } from '../terminalInputPump';
-import { mountedTerminalSessions, visibleTerminalSessions } from '../terminalSessionOrder';
+import { visibleTerminalSessions } from '../terminalSessionOrder';
+import {
+  disappearedSessionIds,
+  mountedSessionsFromProjects,
+} from '../workbenchProjectSwitchCache';
 import { canRefreshTerminalSize } from '../terminalSizing';
 import type { TerminalLayoutMode } from '../terminalSizing';
 import { sessionsForWorktree } from '../workbenchWorktrees';
@@ -324,7 +328,13 @@ export function useWorkbenchTerminalController(
   // 缺省回落 workbenchApi.sessions；既保生产路径零变化，又让测试侧注入 fake。
   const sessionsApi = params.api ?? workbenchApi.sessions;
 
-  const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
+  const [sessionsByProject, setSessionsByProject] = useState<Record<string, WorkbenchSession[]>>(
+    {},
+  );
+  const sessions = useMemo(
+    () => (activeProjectId ? (sessionsByProject[activeProjectId] ?? []) : []),
+    [activeProjectId, sessionsByProject],
+  );
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionNameDraft, setSessionNameDraftState] = useState<string>('');
   const [sessionBusy, setSessionBusy] = useState<boolean>(false);
@@ -366,6 +376,51 @@ export function useWorkbenchTerminalController(
   const writeBlockRecoveryInflightRef = useRef<Map<string, Promise<void>>>(new Map());
   // Business Logic: isCurrentProject 经 ref 读取，避免 status-check 回调闭包绑定过期函数。
   const isCurrentProjectRef = useRef(isCurrentProject);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   现有调用方把 sessions 当成当前项目列表；切项目时只改当前切片，其它项目的 xterm 才能继续挂着。
+   *
+   * Code Logic（这个函数做什么）:
+   *   无 active project 时忽略清空；否则把 next 写入当前项目切片。
+   */
+  const setSessions = useCallback(
+    (next: WorkbenchSession[] | ((current: WorkbenchSession[]) => WorkbenchSession[])): void => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      setSessionsByProject((prev) => {
+        const current = prev[projectId] ?? [];
+        const resolved = typeof next === 'function' ? next(current) : next;
+        if (resolved === current) return prev;
+        return { ...prev, [projectId]: resolved };
+      });
+    },
+    [],
+  );
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   terminal-status / session-updated 可能属于后台项目的已挂载 xterm，不能只改当前切片。
+   *
+   * Code Logic（这个函数做什么）:
+   *   在所有项目切片里找 sessionId，命中则映射替换。
+   */
+  const patchSessionById = useCallback(
+    (sessionId: string, mapper: (session: WorkbenchSession) => WorkbenchSession): void => {
+      setSessionsByProject((prev) => {
+        for (const [projectId, list] of Object.entries(prev)) {
+          const index = list.findIndex((session) => session.id === sessionId);
+          if (index < 0) continue;
+          const current = list[index];
+          const nextSession = mapper(current);
+          if (nextSession === current) return prev;
+          const nextList = list.slice();
+          nextList[index] = nextSession;
+          return { ...prev, [projectId]: nextList };
+        }
+        return prev;
+      });
+    },
+    [],
+  );
   useEffect(() => {
     canListenToTauriEventsRef.current = canListenToTauriEventsParam;
   });
@@ -533,7 +588,7 @@ export function useWorkbenchTerminalController(
         writeBlockRecoveryInflightRef.current.delete(sessionId);
       }
     }
-  }, [untrackWriteBlocked]);
+  }, [setSessions, untrackWriteBlocked]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -550,10 +605,11 @@ export function useWorkbenchTerminalController(
     await Promise.all(blocked.map((sessionId) => checkAndRecoverWriteBlock(sessionId)));
   }, [checkAndRecoverWriteBlock]);
 
-  // Business Logic: sessions 变化时同步 knownSessionIdsRef；对已消失的 session 丢弃输入 pending，
-  // 覆盖 close / loadSessions 项目切换 / 列表替换，但不触碰仍存活的 session。
+  // Business Logic: 已知 session 必须覆盖所有已访问项目的切片；切项目不能把后台 xterm 当成消失。
   useEffect(() => {
-    const nextIds = new Set(sessions.map((session) => session.id));
+    const nextIds = new Set(
+      Object.values(sessionsByProject).flatMap((list) => list.map((session) => session.id)),
+    );
     for (const previousId of knownSessionIdsRef.current) {
       if (!nextIds.has(previousId)) {
         terminalInputPumpRef.current?.disposeSession(previousId);
@@ -561,7 +617,7 @@ export function useWorkbenchTerminalController(
       }
     }
     knownSessionIdsRef.current = nextIds;
-  }, [sessions, untrackWriteBlocked]);
+  }, [sessionsByProject, untrackWriteBlocked]);
 
   // Business Logic: mount 时创建输入泵；unmount/StrictMode cleanup 时 dispose 并清空 ref，
   // 下次 setup 重建，避免 disposed 泵永久吞掉全部 enqueue。
@@ -609,8 +665,8 @@ export function useWorkbenchTerminalController(
     [activeSessionId, scopedSessions],
   );
   const mountedSessions = useMemo(
-    () => mountedTerminalSessions({ sessions }),
-    [sessions],
+    () => mountedSessionsFromProjects(sessionsByProject),
+    [sessionsByProject],
   );
   // Business Logic: tmux focus 轮询 effect 不再把 scopedSessions 作为依赖（避免 sessions 引用变化
   // 触发立即查后端、与用户刚点击的本地选择 race）；改为通过 ref 读取最新列表。
@@ -832,29 +888,27 @@ export function useWorkbenchTerminalController(
       try {
         setSessionError(null);
         const list = await sessionsApi.list(resolvedProjectId);
-        if (
-          !isCurrentProject(resolvedProjectId) ||
-          !isLatestRequest(sessionListRequestSeqRef.current[resolvedProjectId], requestSeq)
-        ) {
+        if (!isLatestRequest(sessionListRequestSeqRef.current[resolvedProjectId], requestSeq)) {
           return;
         }
-        markRequestSuccess(resolvedProjectId);
-        // Business Logic: 项目切换 / 列表替换时，先对消失 session 丢弃 pending 输入，
-        // 再更新 known ids；不能只写 Set，否则 sessions effect 读不到旧 id。
-        const nextIds = new Set(list.map((session) => session.id));
-        for (const previousId of knownSessionIdsRef.current) {
-          if (!nextIds.has(previousId)) {
+        // Business Logic: 即使已经切走，仍写入该项目切片，方便立刻切回；只是不改当前项目的焦点/错误。
+        setSessionsByProject((prev) => {
+          const disappeared = disappearedSessionIds(prev[resolvedProjectId], list);
+          for (const previousId of disappeared) {
             terminalInputPumpRef.current?.disposeSession(previousId);
             untrackWriteBlocked(previousId);
           }
+          return { ...prev, [resolvedProjectId]: list };
+        });
+        if (!isCurrentProject(resolvedProjectId)) {
+          return;
         }
-        knownSessionIdsRef.current = nextIds;
+        markRequestSuccess(resolvedProjectId);
         // Business Logic: 权威 list 成功后仅对 status==='running' 的 blocked session 解锁；
         // exited/disconnected 仍在列表中保持 blocked；recoverSession 只开新 generation，
         // 绝不自动重放失败批次。sessionError 已在 try 开头清空。
         recoverAllWriteBlockedSessions(list);
         reconcileSessionsForHints(resolvedProjectId, list);
-        setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);
       } catch (error) {
@@ -947,6 +1001,7 @@ export function useWorkbenchTerminalController(
       measureInitialTerminalSize,
       refreshProjectSessionStats,
       resetTerminalBuffer,
+      setSessions,
       t,
       terminalPanelRef,
     ],
@@ -1101,6 +1156,7 @@ export function useWorkbenchTerminalController(
     markRequestFailure,
     removeTerminalBuffer,
     remoteWriteDisabled,
+    setSessions,
     t,
     untrackWriteBlocked,
     updateActiveSession,
@@ -1129,19 +1185,24 @@ export function useWorkbenchTerminalController(
           invalidateSessionListRequests(sourceProjectId);
         }
         removeSessionFromHints(sessionId);
-        if (activeProjectIdRef.current !== sourceProjectId) {
-          return;
+        if (sourceProjectId) {
+          setSessionsByProject((prev) => {
+            const slice = prev[sourceProjectId];
+            if (!slice) return prev;
+            const next = slice.filter((session) => session.id !== sessionId);
+            if (activeProjectIdRef.current === sourceProjectId) {
+              updateActiveSession(next);
+            }
+            return { ...prev, [sourceProjectId]: next };
+          });
         }
-        setSessions((current) => {
-          const next = current.filter((session) => session.id !== sessionId);
-          updateActiveSession(next);
-          return next;
-        });
         knownSessionIdsRef.current.delete(sessionId);
         removeTerminalBuffer(sessionId);
         terminalInputPumpRef.current?.disposeSession(sessionId);
         untrackWriteBlocked(sessionId);
-        if (sourceProjectId) void refreshProjectSessionStats(sourceProjectId);
+        if (sourceProjectId && activeProjectIdRef.current === sourceProjectId) {
+          void refreshProjectSessionStats(sourceProjectId);
+        }
       } catch (error) {
         if (activeProjectIdRef.current !== sourceProjectId) {
           return;
@@ -1198,6 +1259,7 @@ export function useWorkbenchTerminalController(
       markRequestFailure,
       remoteWriteDisabled,
       sessions,
+      setSessions,
       t,
     ],
   );
@@ -1386,21 +1448,15 @@ export function useWorkbenchTerminalController(
       'workbench:terminal-status',
       (event) => {
         const payload = event.payload;
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === payload.sessionId
-              ? {
-                  ...session,
-                  status: payload.status,
-                  exitCode: payload.exitCode,
-                  exitedAt:
-                    payload.status === 'exited' || payload.status === 'disconnected'
-                      ? new Date(payload.ts).toISOString()
-                      : session.exitedAt,
-                }
-              : session,
-          ),
-        );
+        patchSessionById(payload.sessionId, (session) => ({
+          ...session,
+          status: payload.status,
+          exitCode: payload.exitCode,
+          exitedAt:
+            payload.status === 'exited' || payload.status === 'disconnected'
+              ? new Date(payload.ts).toISOString()
+              : session.exitedAt,
+        }));
       },
     ).then((fn) => {
       if (!registered) {
@@ -1414,7 +1470,7 @@ export function useWorkbenchTerminalController(
       registered = false;
       unlistenFn?.();
     };
-  }, []);
+  }, [patchSessionById]);
 
   // Business Logic: agent 自动标题 / 用户 rename 后后端 emit 完整 session DTO；
   // 立即合并到 sessions，避免 tab 名等到下一次 list 才刷新。
@@ -1429,13 +1485,7 @@ export function useWorkbenchTerminalController(
       (event) => {
         const payload = event.payload;
         if (!payload?.id) return;
-        setSessions((current) => {
-          const exists = current.some((session) => session.id === payload.id);
-          if (!exists) return current;
-          return current.map((session) =>
-            session.id === payload.id ? { ...session, ...payload } : session,
-          );
-        });
+        patchSessionById(payload.id, (session) => ({ ...session, ...payload }));
       },
     ).then((fn) => {
       if (!registered) {
@@ -1448,7 +1498,7 @@ export function useWorkbenchTerminalController(
       registered = false;
       unlistenFn?.();
     };
-  }, []);
+  }, [patchSessionById]);
 
   /**
    * Business Logic（为什么需要这个 setter）:

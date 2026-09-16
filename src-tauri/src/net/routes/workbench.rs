@@ -22,17 +22,19 @@ use crate::commands::workbench::{
     hydrate_workbench_session_scrollback_for_state, list_workbench_dir_for_state,
     list_workbench_git_commits_for_state, list_workbench_remote_dir_for_state,
     list_workbench_remote_roots_for_state, list_workbench_sessions_for_state,
-    list_workbench_worktrees_for_state, local_close_workbench_pane, local_close_workbench_session,
-    local_commit_workbench_worktree, local_create_workbench_dir, local_create_workbench_file,
-    local_create_workbench_session, local_create_workbench_worktree, local_delete_workbench_path,
-    local_focus_workbench_session, local_get_workbench_banner, local_get_workbench_path_info,
-    local_get_workbench_project_note, local_get_workbench_worktree, local_list_workbench_dir,
-    local_list_workbench_git_commits, local_list_workbench_sessions,
-    local_list_workbench_worktrees, local_merge_workbench_worktree, local_open_workbench_file,
-    local_paste_workbench_session_image, local_preview_workbench_html_asset,
-    local_preview_workbench_sqlite, local_push_workbench_worktree, local_remove_workbench_worktree,
-    local_rename_workbench_path, local_rename_workbench_session, local_resize_workbench_session,
-    local_save_workbench_banner, local_save_workbench_project_note, local_save_workbench_text_file,
+    list_workbench_worktrees_for_state, list_workbench_worktrees_for_state_with_git_status,
+    local_close_workbench_pane, local_close_workbench_session, local_commit_workbench_worktree,
+    local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
+    local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
+    local_get_workbench_banner, local_get_workbench_path_info, local_get_workbench_project_note,
+    local_get_workbench_worktree, local_list_workbench_dir, local_list_workbench_git_commits,
+    local_list_workbench_sessions, local_list_workbench_worktrees,
+    local_list_workbench_worktrees_with_git_status, local_merge_workbench_worktree,
+    local_open_workbench_file, local_paste_workbench_session_image,
+    local_preview_workbench_html_asset, local_preview_workbench_sqlite,
+    local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
+    local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_banner,
+    local_save_workbench_project_note, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
     local_write_workbench_session_input, local_zoom_workbench_pane,
     merge_workbench_worktree_for_state, open_workbench_file_for_state,
@@ -567,9 +569,11 @@ pub async fn list_worktrees(
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.list"))?;
-    let worktrees = local_list_workbench_worktrees(&state, req.project_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.list"))?;
+    let include_git_status = req.include_git_status.unwrap_or(true);
+    let worktrees =
+        local_list_workbench_worktrees_with_git_status(&state, req.project_id, include_git_status)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.worktrees.list"))?;
     Ok(Json(worktrees))
 }
 
@@ -2168,9 +2172,14 @@ pub async fn mobile_list_worktrees(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteProjectReq>,
 ) -> P2pResult<Json<Vec<WorkbenchWorktreeDto>>> {
-    let worktrees = list_workbench_worktrees_for_state(&state, req.project_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.list"))?;
+    let include_git_status = req.include_git_status.unwrap_or(true);
+    let worktrees = list_workbench_worktrees_for_state_with_git_status(
+        &state,
+        req.project_id,
+        include_git_status,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.worktrees.list"))?;
     Ok(Json(worktrees))
 }
 
