@@ -957,15 +957,17 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(item)?)
         }
-        // ---- 设备级「全新启动连接」：owner 本机执行（remote 由 for_state P2P 分流）----
+        // ---- 设备级「全新启动连接」：payload.deviceId 交给 for_state（本机/远端 P2P 分流）----
         "workbench.fresh-restart-preview" => {
+            let device_id = optional_string(&payload, "deviceId");
             let item = crate::commands::workbench::fresh_restart::preview_workbench_fresh_restart_for_state(
-                state, None,
+                state, device_id,
             )
             .await?;
             Ok(serde_json::to_value(item)?)
         }
         "workbench.fresh-restart" => {
+            let device_id = optional_string(&payload, "deviceId");
             let include_foreign = payload
                 .get("includeForeignSessions")
                 .and_then(serde_json::Value::as_bool)
@@ -973,7 +975,7 @@ async fn dispatch_workbench_op(
             let item =
                 crate::commands::workbench::fresh_restart::run_workbench_fresh_restart_for_state(
                     state,
-                    None,
+                    device_id,
                     Some(include_foreign),
                 )
                 .await?;
@@ -1520,6 +1522,63 @@ mod tests {
         assert!(
             src.contains("\"workbench.fresh-restart\" =>"),
             "dispatch_workbench_op 必须注册 workbench.fresh-restart"
+        );
+    }
+
+    /// 截取 `dispatch_workbench_op` 中某个 match arm 的源码片段。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     设备级 op 必须从 payload 取 deviceId 再交给 for_state；只断言整文件
+    ///     含 op 名拦不住「写死 None、远端落到本机」这类回归。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 `"<op>" =>` 切到下一个 `"<next_op>" =>`（不含 next）。
+    fn dispatch_arm_src(src: &str, op: &str, next_op: &str) -> String {
+        let needle = format!("\"{op}\" =>");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing arm {op}"));
+        let rest = &src[start..];
+        let next = format!("\"{next_op}\" =>");
+        let end = rest
+            .find(&next)
+            .unwrap_or_else(|| panic!("missing following arm {next_op} after {op}"));
+        rest[..end].to_string()
+    }
+
+    /// GUI 代理远端「全新启动连接」预检时必须把 payload.deviceId 交给 for_state，
+    /// 否则 sidecar owner 会把远端动作当成 owner 本机执行。
+    #[test]
+    fn dispatch_fresh_restart_preview_forwards_payload_device_id() {
+        let src = include_str!("control_workbench.rs");
+        let arm = dispatch_arm_src(
+            src,
+            "workbench.fresh-restart-preview",
+            "workbench.fresh-restart",
+        );
+        assert!(
+            arm.contains("optional_string(&payload, \"deviceId\")"),
+            "fresh-restart-preview 必须从 payload 取 deviceId，禁止写死 None 导致远端落到本机"
+        );
+        assert!(
+            !arm.contains("state, None"),
+            "fresh-restart-preview 不得把 deviceId 固定传 None: {arm}"
+        );
+    }
+
+    /// GUI 代理远端「全新启动连接」执行时必须把 payload.deviceId 交给 for_state，
+    /// 否则 sidecar owner 会杀本机 tmux 而不是对端。
+    #[test]
+    fn dispatch_fresh_restart_execute_forwards_payload_device_id() {
+        let src = include_str!("control_workbench.rs");
+        let arm = dispatch_arm_src(src, "workbench.fresh-restart", "provider-manager.status");
+        assert!(
+            arm.contains("optional_string(&payload, \"deviceId\")"),
+            "fresh-restart 必须从 payload 取 deviceId，禁止写死 None 导致远端落到本机"
+        );
+        assert!(
+            !arm.contains("state,\n            None,"),
+            "fresh-restart 不得把 deviceId 固定传 None: {arm}"
         );
     }
 

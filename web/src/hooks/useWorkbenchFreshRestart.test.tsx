@@ -59,22 +59,30 @@ describe('useWorkbenchFreshRestart', () => {
     freshRestartPreviewMock.mockResolvedValue(basePreview);
     const { result } = renderHook(() => useWorkbenchFreshRestart({}));
     await act(async () => {
-      result.current.openFreshRestartDialog({ deviceId: 'device-a' });
+      result.current.openFreshRestartDialog({
+        deviceId: 'device-a',
+        deviceName: 'Studio Mac',
+        kind: 'remote',
+      });
     });
     expect(freshRestartPreviewMock).toHaveBeenCalledWith('device-a');
     expect(result.current.dialog.open).toBe(true);
     expect(result.current.dialog.preview?.sessions).toHaveLength(1);
     expect(result.current.dialog.previewing).toBe(false);
+    expect(result.current.dialog.targetKind).toBe('remote');
+    expect(result.current.dialog.deviceName).toBe('Studio Mac');
   });
 
   test('open 无 deviceId（本机）时 preview 收到 undefined', async () => {
     freshRestartPreviewMock.mockResolvedValue(basePreview);
     const { result } = renderHook(() => useWorkbenchFreshRestart({}));
     await act(async () => {
-      result.current.openFreshRestartDialog({});
+      result.current.openFreshRestartDialog({ deviceName: 'Mac', kind: 'local' });
     });
     expect(freshRestartPreviewMock).toHaveBeenCalledWith(undefined);
     expect(result.current.dialog.open).toBe(true);
+    expect(result.current.dialog.targetKind).toBe('local');
+    expect(result.current.dialog.deviceName).toBe('Mac');
   });
 
   test('preview 失败保留 error 弹窗并展示（不静默关闭）', async () => {

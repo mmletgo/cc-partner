@@ -6,9 +6,10 @@
 //!     在 owning device 就地执行，控制端绝不本地误杀。
 //!
 //! Code Logic（这个模块做什么）:
-//!     preview/execute 两个 thin command（镜像 workbench_dependencies 范式）：
-//!     外机 → `proxy_workbench_if_gui` / `device_base_url` + `RemoteWorkbenchClient`；
-//!     本机 → `workbench::fresh_restart` 核心实现（require_owner）。
+//!     preview/execute 两个 thin command：GuiClient 一律 `proxy_workbench_if_gui`
+//!     到 sidecar（本机也不得在 GUI 进程直连 owner 核心）；sidecar/headless 的
+//!     for_state 再按 deviceId 分流——外机 `RemoteWorkbenchClient` P2P，本机
+//!     `workbench::fresh_restart` 核心（require_owner）。
 
 use crate::commands::workbench::{device_base_url, proxy_workbench_if_gui};
 use crate::error::AppError;
@@ -22,7 +23,7 @@ use crate::workbench::remote_client::RemoteWorkbenchClient;
 use tauri::State;
 
 /// Business Logic（为什么需要这个函数）:
-///     只有选中远端设备时才走 P2P/代理；本机（空或等于本机 id）直连 owner 核心。
+///     for_state 需要区分本机核心路径与对端 P2P；空或等于本机 id 视为本机。
 ///
 /// Code Logic（这个函数做什么）:
 ///     空/等于本机 deviceId → false；否则 true。
@@ -38,22 +39,20 @@ fn is_foreign_device(state: &AppState, device_id: Option<&str>) -> bool {
 ///     会话清单、非工作台 tmux 会话数与 loopback ssh 引导通道可用性。
 ///
 /// Code Logic（这个函数做什么）:
-///     外机经 sidecar P2P 代理；本机直连 `preview_workbench_fresh_restart_for_state`。
+///     GuiClient 一律代理到 sidecar；sidecar/headless 走 for_state。
 #[tauri::command]
 pub async fn preview_workbench_fresh_restart(
     state: State<'_, AppState>,
     device_id: Option<String>,
 ) -> Result<WorkbenchFreshRestartPreviewDto, AppError> {
-    if is_foreign_device(state.inner(), device_id.as_deref()) {
-        if let Some(v) = proxy_workbench_if_gui(
-            state.inner(),
-            "workbench.fresh-restart-preview",
-            serde_json::json!({ "deviceId": device_id }),
-        )
-        .await?
-        {
-            return Ok(v);
-        }
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "workbench.fresh-restart-preview",
+        serde_json::json!({ "deviceId": device_id }),
+    )
+    .await?
+    {
+        return Ok(v);
     }
     preview_workbench_fresh_restart_for_state(state.inner(), device_id).await
 }
@@ -83,26 +82,24 @@ pub async fn preview_workbench_fresh_restart_for_state(
 ///     让系统级变更（组/limits/profile）在新终端生效；结果如实标注降级原因。
 ///
 /// Code Logic（这个函数做什么）:
-///     外机经 sidecar P2P 代理；本机直连 `run_workbench_fresh_restart_for_state`。
+///     GuiClient 一律代理到 sidecar；sidecar/headless 走 for_state。
 #[tauri::command]
 pub async fn run_workbench_fresh_restart(
     state: State<'_, AppState>,
     device_id: Option<String>,
     include_foreign_sessions: Option<bool>,
 ) -> Result<WorkbenchFreshRestartResultDto, AppError> {
-    if is_foreign_device(state.inner(), device_id.as_deref()) {
-        if let Some(v) = proxy_workbench_if_gui(
-            state.inner(),
-            "workbench.fresh-restart",
-            serde_json::json!({
-                "deviceId": device_id,
-                "includeForeignSessions": include_foreign_sessions.unwrap_or(false),
-            }),
-        )
-        .await?
-        {
-            return Ok(v);
-        }
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "workbench.fresh-restart",
+        serde_json::json!({
+            "deviceId": device_id,
+            "includeForeignSessions": include_foreign_sessions.unwrap_or(false),
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
     }
     run_workbench_fresh_restart_for_state(state.inner(), device_id, include_foreign_sessions).await
 }
@@ -126,4 +123,66 @@ pub async fn run_workbench_fresh_restart_for_state(
             .await;
     }
     run_local_fresh_restart(state, include_foreign_sessions.unwrap_or(false)).await
+}
+
+#[cfg(test)]
+mod tests {
+    /// 截取 Tauri command 函数体到下一个 `pub async fn`。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 必须无条件把 preview/execute 代理到 sidecar；只断言文件里
+    ///     出现 `proxy_workbench_if_gui` 拦不住「仅外机才代理、本机 GUI 直跑」。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用带 `(` 的函数签名切到下一个 `pub async fn`。
+    fn tauri_command_body<'a>(src: &'a str, fn_name: &str, next_fn: &str) -> &'a str {
+        let needle = format!("pub async fn {fn_name}(");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {fn_name}"));
+        let rest = &src[start..];
+        let next = format!("pub async fn {next_fn}(");
+        let end = rest
+            .find(&next)
+            .unwrap_or_else(|| panic!("missing {next_fn} after {fn_name}"));
+        &rest[..end]
+    }
+
+    /// GuiClient 预检必须始终走 sidecar，本机也不得在 GUI 进程直连 owner 核心。
+    #[test]
+    fn preview_tauri_command_always_proxies_gui() {
+        let src = include_str!("fresh_restart.rs");
+        let body = tauri_command_body(
+            src,
+            "preview_workbench_fresh_restart",
+            "preview_workbench_fresh_restart_for_state",
+        );
+        assert!(
+            body.contains("proxy_workbench_if_gui"),
+            "preview Tauri command 必须经 control 代理到 sidecar"
+        );
+        assert!(
+            !body.contains("if is_foreign_device(state.inner()"),
+            "GuiClient 本机也必须代理到 sidecar，禁止用 is_foreign_device 门闩跳过: {body}"
+        );
+    }
+
+    /// GuiClient 执行必须始终走 sidecar，本机也不得在 GUI 进程杀 tmux。
+    #[test]
+    fn execute_tauri_command_always_proxies_gui() {
+        let src = include_str!("fresh_restart.rs");
+        let body = tauri_command_body(
+            src,
+            "run_workbench_fresh_restart",
+            "run_workbench_fresh_restart_for_state",
+        );
+        assert!(
+            body.contains("proxy_workbench_if_gui"),
+            "execute Tauri command 必须经 control 代理到 sidecar"
+        );
+        assert!(
+            !body.contains("if is_foreign_device(state.inner()"),
+            "GuiClient 本机也必须代理到 sidecar，禁止用 is_foreign_device 门闩跳过: {body}"
+        );
+    }
 }

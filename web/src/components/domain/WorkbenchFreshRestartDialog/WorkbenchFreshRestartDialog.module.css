@@ -13,6 +13,13 @@
   line-height: var(--leading-tight);
 }
 
+.targetLine {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
 .hint {
   margin: 0;
   color: var(--fg-muted-readable);

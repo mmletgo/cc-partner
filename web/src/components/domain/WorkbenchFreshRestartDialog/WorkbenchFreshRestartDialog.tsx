@@ -12,6 +12,7 @@
  *   result → 结果反馈（成功/未重启 + skipped + 降级详情 + manual command + 复制按钮）；
  *   error → role=alert。busy 期间禁 Escape/Backdrop 关闭与确认双锁。
  *   不 import @/api/*；用户文案走 workbench:freshStart。
+ *   标题下标明目标设备（本机名 / 远端名），避免看成重启本机。
  */
 
 import { useId, useState } from 'react';
@@ -36,6 +37,10 @@ export interface WorkbenchFreshRestartDialogProps {
   error: string | null;
   busy: boolean;
   onConfirm: (includeForeignSessions: boolean) => void;
+  /** 目标设备显示名；本机/远端都传项目上的 deviceName。 */
+  deviceName?: string | null;
+  /** 本机或远端；缺省按本机展示，避免未接线时误标远端。 */
+  targetKind?: 'local' | 'remote';
 }
 
 /** degraded_reason 稳定 token → i18n key 后缀的映射（闭集）。 */
@@ -71,15 +76,35 @@ function degradedKeySuffix(reason: string | null): string {
  *   错误 alert；确认按钮 busy 双锁，busy 时禁 Escape/Backdrop。
  */
 export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogProps): ReactElement {
-  const { open, onClose, previewing, preview, result, error, busy, onConfirm } = props;
+  const {
+    open,
+    onClose,
+    previewing,
+    preview,
+    result,
+    error,
+    busy,
+    onConfirm,
+    deviceName = null,
+    targetKind = 'local',
+  } = props;
   const { t } = useTranslation(['workbench', 'common']);
+  const titleId = useId();
+  const [includeForeign, setIncludeForeign] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   // 动态拼 key（degraded token 闭集映射）需要绕过 i18n key 联合类型（照
   // LanFirewallDependencyCard 的 translateDynamicKey 模式；suffix 已闭集校验）。
   const translateDegraded = (suffix: string): string =>
     t(`workbench:freshStart.degraded.${suffix}` as never);
-  const titleId = useId();
-  const [includeForeign, setIncludeForeign] = useState(false);
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const targetName = deviceName?.trim() ?? '';
+  const targetLabel =
+    targetKind === 'remote'
+      ? targetName
+        ? t('workbench:freshStart.targetRemote', { deviceName: targetName })
+        : t('workbench:freshStart.targetRemoteFallback')
+      : targetName
+        ? t('workbench:freshStart.targetLocal', { deviceName: targetName })
+        : t('workbench:freshStart.targetLocalFallback');
 
   const sessionCount = preview?.sessions.length ?? preview?.workbenchTmuxSessionCount ?? 0;
   const foreignNames = preview?.foreignSessionNames ?? [];
@@ -110,6 +135,9 @@ export function WorkbenchFreshRestartDialog(props: WorkbenchFreshRestartDialogPr
     >
       <div className={styles.dialog} data-testid="workbench-fresh-restart-dialog">
         <h2 id={titleId}>{t('workbench:freshStart.title')}</h2>
+        <p className={styles.targetLine} data-testid="fresh-restart-target">
+          {targetLabel}
+        </p>
         <p className={styles.hint}>{t('workbench:freshStart.description')}</p>
 
         {previewing && !result ? (

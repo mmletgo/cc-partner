@@ -8,7 +8,8 @@
  *
  * Code Logic（这个 hook 做什么）:
  *   - openFreshRestartDialog(target)：按 target.deviceId（remote → 设备 id；
- *     local/缺省 → undefined=本机）打开弹窗并自动 preview；
+ *     local/缺省 → undefined=本机）打开弹窗并自动 preview；弹窗同时带上
+ *     deviceName + targetKind，标明本机还是远端；
  *   - confirmFreshRestart(includeForeignSessions)：busy 双锁执行 execute，
  *     成功（含降级结果）后回调 onCompleted 供调用方刷新统计/session 列表；
  *   - 传输失败保留 error 供弹窗内重试，不回调 onCompleted。
@@ -25,6 +26,10 @@ import type {
 /** open 时的目标设备：remote 传对端 deviceId；本机传 undefined/null。 */
 export interface WorkbenchFreshRestartTarget {
   deviceId?: string | null;
+  /** 项目上的设备显示名，弹窗用来标明本机/远端。 */
+  deviceName?: string | null;
+  /** 显式本机/远端；缺省时有 deviceId 视为远端。 */
+  kind?: 'local' | 'remote';
 }
 
 /** 弹窗状态切片（WorkbenchFreshRestartDialog 的 props 子集）。 */
@@ -35,6 +40,8 @@ export interface WorkbenchFreshRestartDialogState {
   preview: WorkbenchFreshRestartPreview | null;
   result: WorkbenchFreshRestartResult | null;
   error: string | null;
+  deviceName: string | null;
+  targetKind: 'local' | 'remote';
 }
 
 export interface UseWorkbenchFreshRestartResult {
@@ -76,6 +83,8 @@ export function useWorkbenchFreshRestart(params: {
   const [result, setResult] = useState<WorkbenchFreshRestartResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [deviceName, setDeviceName] = useState<string | null>(null);
+  const [targetKind, setTargetKind] = useState<'local' | 'remote'>('local');
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -86,7 +95,15 @@ export function useWorkbenchFreshRestart(params: {
    */
   const openFreshRestartDialog = useCallback((target: WorkbenchFreshRestartTarget) => {
     const resolvedDeviceId = target.deviceId?.trim() || null;
+    const resolvedKind: 'local' | 'remote' =
+      target.kind === 'local' || target.kind === 'remote'
+        ? target.kind
+        : resolvedDeviceId
+          ? 'remote'
+          : 'local';
     setDeviceId(resolvedDeviceId);
+    setDeviceName(target.deviceName?.trim() || null);
+    setTargetKind(resolvedKind);
     setOpen(true);
     setResult(null);
     setError(null);
@@ -150,7 +167,7 @@ export function useWorkbenchFreshRestart(params: {
   );
 
   return {
-    dialog: { open, busy, previewing, preview, result, error },
+    dialog: { open, busy, previewing, preview, result, error, deviceName, targetKind },
     openFreshRestartDialog,
     closeFreshRestartDialog,
     confirmFreshRestart,

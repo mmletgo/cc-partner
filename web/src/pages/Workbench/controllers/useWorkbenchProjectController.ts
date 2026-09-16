@@ -110,6 +110,8 @@ export interface WorkbenchProjectControllerResult {
     preview: WorkbenchFreshRestartPreview | null;
     result: WorkbenchFreshRestartResult | null;
     error: string | null;
+    deviceName: string | null;
+    targetKind: 'local' | 'remote';
   };
   openFreshRestartDialog: () => void;
   closeFreshRestartDialog: () => void;
@@ -451,6 +453,8 @@ export function useWorkbenchProjectController(
   const openFreshRestartDialog = useCallback(() => {
     openFreshRestartDialogForDevice({
       deviceId: activeProject?.kind === 'remote' ? activeProject.deviceId : undefined,
+      deviceName: activeProject?.deviceName ?? null,
+      kind: activeProject?.kind === 'remote' ? 'remote' : 'local',
     });
   }, [activeProject, openFreshRestartDialogForDevice]);
 

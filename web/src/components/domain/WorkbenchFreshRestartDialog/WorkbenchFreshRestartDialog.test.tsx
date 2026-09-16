@@ -59,6 +59,21 @@ afterEach(() => {
 });
 
 describe('WorkbenchFreshRestartDialog', () => {
+  test('远端目标展示设备名，避免看成是本机', () => {
+    renderDialog({ deviceName: 'Studio Mac', targetKind: 'remote' });
+    const target = screen.getByTestId('fresh-restart-target');
+    expect(target.textContent).toContain('远端');
+    expect(target.textContent).toContain('Studio Mac');
+    expect(target.textContent).not.toContain('本机');
+  });
+
+  test('本机目标展示本机与设备名', () => {
+    renderDialog({ deviceName: 'Mac', targetKind: 'local' });
+    const target = screen.getByTestId('fresh-restart-target');
+    expect(target.textContent).toContain('本机');
+    expect(target.textContent).toContain('Mac');
+  });
+
   test('预检态渲染会话清单并确认时透传 includeForeign=false', () => {
     const { onConfirm } = renderDialog();
     expect(screen.getByText('demo-main')).toBeDefined();

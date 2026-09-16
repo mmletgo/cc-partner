@@ -735,6 +735,8 @@ export function WorkbenchProjectRail() {
                 onClick={() =>
                   openFreshRestartDialog({
                     deviceId: project.kind === 'remote' ? project.deviceId : undefined,
+                    deviceName: project.deviceName,
+                    kind: project.kind === 'remote' ? 'remote' : 'local',
                   })
                 }
               />

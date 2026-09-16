@@ -455,6 +455,7 @@ describe('WorkbenchProjectRail fresh restart hover entry', () => {
       expect(freshRestartPreviewMock).toHaveBeenCalledWith(undefined);
     });
     expect(await screen.findByTestId('workbench-fresh-restart-dialog')).toBeTruthy();
+    expect(screen.getByTestId('fresh-restart-target').textContent).toContain('本机');
   });
 
   test('remote 项目点击后 preview 收到对端 deviceId', async () => {
@@ -466,6 +467,7 @@ describe('WorkbenchProjectRail fresh restart hover entry', () => {
           name: 'remote-repo',
           kind: 'remote',
           deviceId: 'device-x',
+          deviceName: 'Studio Mac',
         }),
       ],
     });
@@ -474,6 +476,9 @@ describe('WorkbenchProjectRail fresh restart hover entry', () => {
     await vi.waitFor(() => {
       expect(freshRestartPreviewMock).toHaveBeenCalledWith('device-x');
     });
+    expect(await screen.findByTestId('fresh-restart-target')).toBeTruthy();
+    expect(screen.getByTestId('fresh-restart-target').textContent).toContain('远端');
+    expect(screen.getByTestId('fresh-restart-target').textContent).toContain('Studio Mac');
   });
 
   test('设备离线时按钮禁用', () => {

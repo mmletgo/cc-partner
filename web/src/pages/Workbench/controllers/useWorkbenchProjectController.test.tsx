@@ -603,6 +603,8 @@ describe('useWorkbenchProjectController fresh restart (delegated hook)', () => {
     expect(freshRestartPreviewMock).toHaveBeenCalledWith(undefined);
     expect(result.current.freshRestartDialog.open).toBe(true);
     expect(result.current.freshRestartDialog.preview?.sessions).toHaveLength(1);
+    expect(result.current.freshRestartDialog.targetKind).toBe('local');
+    expect(result.current.freshRestartDialog.deviceName).toBe('Mac');
   });
 
   test('remote 项目解析对端 deviceId 并透传给 preview', async () => {
@@ -615,6 +617,8 @@ describe('useWorkbenchProjectController fresh restart (delegated hook)', () => {
     });
     expect(freshRestartPreviewMock).toHaveBeenCalledWith('device-a');
     expect(result.current.freshRestartDialog.preview?.foreignSessionCount).toBe(1);
+    expect(result.current.freshRestartDialog.targetKind).toBe('remote');
+    expect(result.current.freshRestartDialog.deviceName).toBe('Studio Mac');
   });
 
   test('confirm 成功后写入 result 并回调 onFreshRestartCompleted', async () => {
