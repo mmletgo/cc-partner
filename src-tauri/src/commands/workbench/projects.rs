@@ -122,7 +122,8 @@ async fn scan_project_fingerprint(
     row: &WorkbenchProjectRow,
 ) -> Result<Option<String>, AppError> {
     if row.kind == "remote" {
-        let info = get_workbench_remote_path_info_for_state(state, &row.device_id, &row.path).await?;
+        let info =
+            get_workbench_remote_path_info_for_state(state, &row.device_id, &row.path).await?;
         return match info.git_remote_fingerprint {
             None => Err(AppError::generic("对端未提供 git remote fingerprint")),
             Some(value) => {

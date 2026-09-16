@@ -111,7 +111,10 @@ pub fn canonical_git_remote_fingerprint(url: &str) -> String {
     }
     if let Some(scheme_end) = s.find("://") {
         let rest = &s[scheme_end + 3..];
-        let rest = rest.split_once('@').map(|(_, hostpath)| hostpath).unwrap_or(rest);
+        let rest = rest
+            .split_once('@')
+            .map(|(_, hostpath)| hostpath)
+            .unwrap_or(rest);
         let rest = rest.trim_start_matches('/');
         if let Some((hostport, path)) = rest.split_once('/') {
             let host = hostport.split(':').next().unwrap_or(hostport);
