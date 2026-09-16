@@ -148,41 +148,41 @@ describe('mobileTerminalTouchScroll', () => {
     );
   });
 
-  test('MobileTerminalPanel branches scrollback vs SGR wheel like desktop', () => {
-    const panelSource = readFileSync(
-      new URL('./components/MobileTerminalPanel.tsx', import.meta.url),
+  test('MobileTerminalXtermSlot branches scrollback vs SGR wheel like desktop', () => {
+    const slotSource = readFileSync(
+      new URL('./components/MobileTerminalXtermSlot.tsx', import.meta.url),
       'utf8',
     );
     assertContains(
-      panelSource,
+      slotSource,
       'capture: true',
       'touch listeners must use capture so canvas/xterm-viewport cannot consume gestures first',
     );
     assertContains(
-      panelSource,
+      slotSource,
       'resolveMobileTerminalScrollMode',
-      'panel must branch on buffer type like desktop wheel path',
+      'slot must branch on buffer type like desktop wheel path',
     );
     assertContains(
-      panelSource,
+      slotSource,
       'scrollTerminalBufferLines(terminal, result.lines)',
       'normal buffer with scrollback must use absolute scrollToLine helper',
     );
     assertContains(
-      panelSource,
+      slotSource,
       'encodeMobileTerminalWheelReports',
       'TUI/alternate buffer must encode SGR wheel reports into PTY input stream',
     );
     assertContains(
-      panelSource,
+      slotSource,
       'hydrateScrollback()',
       'mode none without authoritative history must trigger hydration',
     );
-    if (panelSource.includes('encodeMobileTerminalTuiScrollKeys')) {
+    if (slotSource.includes('encodeMobileTerminalTuiScrollKeys')) {
       throw new Error('must not fall back to arrow-key encoding for TUI scroll');
     }
     assertContains(
-      panelSource,
+      slotSource,
       'passive: false',
       'touchmove must be non-passive so preventDefault can cancel native page/xterm scrolling',
     );

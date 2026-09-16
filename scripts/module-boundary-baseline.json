@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-16T03:18:13.319Z",
+  "generatedAt": "2026-09-16T05:50:01.519Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -29,10 +29,10 @@
       "lines": 2516
     },
     "src-tauri/src/commands/workbench/common.rs": {
-      "lines": 2634
+      "lines": 2655
     },
     "src-tauri/src/commands/workbench/git.rs": {
-      "lines": 4784
+      "lines": 4794
     },
     "src-tauri/src/config.rs": {
       "lines": 2536
@@ -47,7 +47,7 @@
       "lines": 2619
     },
     "src-tauri/src/net/routes/workbench.rs": {
-      "lines": 3670
+      "lines": 3679
     },
     "src-tauri/src/orchestrator/delivery.rs": {
       "lines": 3035
@@ -67,7 +67,7 @@
       "lines": 4935
     },
     "src-tauri/src/workbench/remote_client.rs": {
-      "lines": 3337
+      "lines": 3344
     },
     "src-tauri/src/workbench/remote_events.rs": {
       "lines": 4804
@@ -84,10 +84,10 @@
       "lines": 1293
     },
     "web/src/api/workbench.ts": {
-      "lines": 1131
+      "lines": 1138
     },
     "web/src/api/workbenchHttp.ts": {
-      "lines": 1516,
+      "lines": 1523,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
@@ -107,12 +107,15 @@
       "lines": 1063
     },
     "web/src/mobile/components/MobileTerminalPanel.tsx": {
-      "lines": 2610,
+      "lines": 1724,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
         "expiresAt": "2026-11-23"
       }
+    },
+    "web/src/mobile/components/MobileTerminalXtermSlot.tsx": {
+      "lines": 1102
     },
     "web/src/mobile/controllers/useMobileAutomationController.ts": {
       "lines": 1692,
@@ -123,7 +126,7 @@
       }
     },
     "web/src/mobile/MobileWorkbench.tsx": {
-      "lines": 1849,
+      "lines": 1967,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
@@ -170,7 +173,7 @@
       "lines": 1478
     },
     "web/src/pages/Workbench/controllers/useWorkbenchTerminalController.ts": {
-      "lines": 1545,
+      "lines": 1595,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",
@@ -178,7 +181,7 @@
       }
     },
     "web/src/pages/Workbench/controllers/useWorkbenchWorktreeGitController.ts": {
-      "lines": 2032,
+      "lines": 2044,
       "exception": {
         "owner": "module-maintainers",
         "reason": "Oversized source pending domain decomposition; temporary hard-limit exception",

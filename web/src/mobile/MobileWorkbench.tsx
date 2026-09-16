@@ -382,11 +382,22 @@ export function MobileWorkbench(): ReactElement {
     () => (activeProject ? sessionsByProject[activeProject.id] ?? [] : []),
     [activeProject, sessionsByProject],
   );
-  const setWorktrees = useCallback((next: WorkbenchWorktree[]): void => {
-    const projectId = activeProjectRef.current?.id;
-    if (!projectId) return;
-    setWorktreesByProject((prev) => ({ ...prev, [projectId]: next }));
-  }, []);
+  const setWorktrees = useCallback(
+    (
+      next:
+        | WorkbenchWorktree[]
+        | ((current: WorkbenchWorktree[]) => WorkbenchWorktree[]),
+    ): void => {
+      const projectId = activeProjectRef.current?.id;
+      if (!projectId) return;
+      setWorktreesByProject((prev) => {
+        const current = prev[projectId] ?? [];
+        const resolved = typeof next === 'function' ? next(current) : next;
+        return { ...prev, [projectId]: resolved };
+      });
+    },
+    [],
+  );
   const setSessions = useCallback((next: WorkbenchSession[]): void => {
     const projectId = activeProjectRef.current?.id;
     if (!projectId) return;

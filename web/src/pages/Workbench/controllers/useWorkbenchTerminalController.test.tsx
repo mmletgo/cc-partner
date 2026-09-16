@@ -212,7 +212,7 @@ interface ControllerProps {
   api?: FakeSessionsApi;
 }
 
-function renderController(props: ControllerProps) {
+function renderController(props: Partial<ControllerProps> = {}) {
   const merged = baseControllerProps(props);
   return renderHook(
     (currentProps: ControllerProps) =>
