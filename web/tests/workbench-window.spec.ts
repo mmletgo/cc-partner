@@ -155,10 +155,10 @@ test.describe('E2E-WORKBENCH-WINDOW-001 satellite occupancy', () => {
     });
     await expect(page.getByText('已在其他窗口')).toBeVisible({ timeout: 10_000 });
 
-    await page
-      .locator('[data-project-id="pB"]')
-      .getByTestId('project-open-new-window')
-      .click();
+    // 无 Git remote 的项目按 `id:{projectId}` 成组；新窗口按钮仅悬停可见。
+    const occupiedCard = page.locator('[data-project-id="id:pB"]');
+    await occupiedCard.hover();
+    await occupiedCard.getByTestId('project-open-new-window').click();
 
     await expect
       .poll(

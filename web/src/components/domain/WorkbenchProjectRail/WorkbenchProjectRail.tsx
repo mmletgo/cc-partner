@@ -10,14 +10,23 @@
  *   空态打开本机/远端应用内目录选择器；
  *   点击项目后选择项目并跳转 `/workbench`，保持 deep link 语义。
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
+ *   「全新启动连接」弹窗按需 lazy，避免把确认 UI 打进 AppShell 首屏。
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog, HintStatusDot } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, PlusIcon, PowerIcon, SyncIcon, WindowIcon, XIcon } from '@/lib/icons';
-import { WorkbenchFreshRestartDialog } from '@/components/domain/WorkbenchFreshRestartDialog';
 import { useWorkbenchFreshRestart } from '@/hooks/useWorkbenchFreshRestart';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
@@ -45,6 +54,11 @@ import {
 } from '@/lib/workbenchProjectGroups';
 import type { WorkbenchProject } from '@/lib/types';
 import styles from './WorkbenchProjectRail.module.css';
+
+const WorkbenchFreshRestartDialog = lazy(async () => {
+  const module = await import('@/components/domain/WorkbenchFreshRestartDialog');
+  return { default: module.WorkbenchFreshRestartDialog };
+});
 
 /**
  * Business Logic（为什么需要这个组件）:
@@ -828,9 +842,17 @@ export function WorkbenchProjectRail() {
         />
       </Dialog>
 
-      <WorkbenchFreshRestartDialog {...freshRestartDialog} onClose={closeFreshRestartDialog}
-        onConfirm={(includeForeign) => { void confirmFreshRestart(includeForeign); }}
-      />
+      {freshRestartDialog.open ? (
+        <Suspense fallback={null}>
+          <WorkbenchFreshRestartDialog
+            {...freshRestartDialog}
+            onClose={closeFreshRestartDialog}
+            onConfirm={(includeForeign) => {
+              void confirmFreshRestart(includeForeign);
+            }}
+          />
+        </Suspense>
+      ) : null}
 
       <Dialog
         open={removeGroup !== null}

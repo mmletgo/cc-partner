@@ -162,6 +162,14 @@ export type WorkbenchWorktreeGitErrorKey =
   | 'gitHistory'
   | 'mutationUnknown';
 
+/** worktree 操作提示 / 同步结果 / merge 阶段消息的 i18n key。 */
+export type WorkbenchWorktreeGitMessageKey =
+  | 'mergeConfirm'
+  | 'mergeCollectConfirm'
+  | 'checkSourceMessage'
+  | 'syncSucceeded'
+  | 'syncPartial';
+
 /**
  * controller 输入：窄 API + 回调 + 外部 bridge，避免吞并 Projects / Sessions / Terminal buffer context。
  *
@@ -206,12 +214,7 @@ export interface UseWorkbenchWorktreeGitControllerParams {
   desktopUnavailableMessage: string;
   translateError: (key: WorkbenchWorktreeGitErrorKey) => string;
   translateWorktreeMessage: (
-    key:
-      | 'mergeConfirm'
-      | 'mergeCollectConfirm'
-      | 'checkSourceMessage'
-      | 'syncSucceeded'
-      | 'syncPartial',
+    key: WorkbenchWorktreeGitMessageKey,
     vars?: Record<string, unknown>,
   ) => string;
   /** merge 前的用户确认；remove 已迁出本 controller 到 UI 层 Dialog。 */

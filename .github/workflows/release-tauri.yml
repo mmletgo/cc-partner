@@ -375,6 +375,13 @@ jobs:
           body: |
             ## cc-partner ${{ env.RELEASE_TAG }}
 
+            ### 本版本
+
+            - 侧栏按 Git remote 合并同一仓库，工作区内可切换设备/路径，并支持跨设备同步主分支
+            - 设备级「全新启动连接」：关闭工作台会话并以全新登录环境重启 tmux server
+            - Provider Manager 可查询/切换局域网远端设备的 cc-switch provider，并在本机为远端安装 CLI
+            - Workbench 远端 health 探测超时抬升到 10s，降低 overlay 慢链路误判
+
             ### 三种运行模式
 
             | 模式 | 适用场景 | 对应资产 |

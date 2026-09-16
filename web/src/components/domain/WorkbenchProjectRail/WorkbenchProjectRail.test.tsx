@@ -454,8 +454,7 @@ describe('WorkbenchProjectRail fresh restart hover entry', () => {
     await vi.waitFor(() => {
       expect(freshRestartPreviewMock).toHaveBeenCalledWith(undefined);
     });
-    // 弹窗打开并展示标题
-    expect(screen.getByTestId('workbench-fresh-restart-dialog')).toBeTruthy();
+    expect(await screen.findByTestId('workbench-fresh-restart-dialog')).toBeTruthy();
   });
 
   test('remote 项目点击后 preview 收到对端 deviceId', async () => {

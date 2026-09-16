@@ -24,7 +24,10 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { useEffect, useState } from 'react';
 
 import { useWorkbenchWorktreeGitController } from './useWorkbenchWorktreeGitController';
-import type { WorkbenchWorktreeGitErrorKey } from './useWorkbenchWorktreeGitController';
+import type {
+  WorkbenchWorktreeGitErrorKey,
+  WorkbenchWorktreeGitMessageKey,
+} from './useWorkbenchWorktreeGitController';
 import type {
   WorkbenchGitCommit,
   WorkbenchHookFailure,
@@ -325,7 +328,7 @@ function renderController(
           key: WorkbenchWorktreeGitErrorKey,
         ) => string,
         translateWorktreeMessage: currentProps.translateWorktreeMessage as (
-          key: 'mergeConfirm' | 'mergeCollectConfirm' | 'removeConfirm' | 'checkSourceMessage',
+          key: WorkbenchWorktreeGitMessageKey,
           vars?: Record<string, unknown>,
         ) => string,
         confirmAction: currentProps.confirmAction,
