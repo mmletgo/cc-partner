@@ -1389,6 +1389,28 @@
   color: var(--git-ref-tag);
 }
 
+.historyHoverTip {
+  position: fixed;
+  z-index: var(--z-toast);
+  transform: translate(-50%, calc(-100% - var(--space-1)));
+  max-width: min(360px, calc(100vw - var(--space-4)));
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--fg);
+  color: var(--surface);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.historyHoverTip[data-place='below'] {
+  transform: translate(-50%, var(--space-1));
+}
+
 .commitMeta {
   min-width: 0;
   display: flex;

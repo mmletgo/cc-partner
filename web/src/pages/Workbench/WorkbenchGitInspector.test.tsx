@@ -188,6 +188,66 @@ describe('WorkbenchGitInspector graph presentation', () => {
     expect(screen.getByText('c3d4e5f')).toBeTruthy();
   });
 
+  test('shows the full branch name and version tag in a tooltip on hover', () => {
+    const longBranch = 'feat/agent-hub-user-instruction-three-pane-redesign';
+    const longTag = 'v0.12.0-beta.1+build.20260916';
+    const [mergeCommit, ...rest] = makeCommits();
+    if (!mergeCommit) {
+      throw new Error('expected merge commit fixture');
+    }
+    renderGitInspector({
+      activeWorktree: {
+        ...makeWorktree(),
+        branch: longBranch,
+      },
+      gitCommits: [
+        {
+          ...mergeCommit,
+          refs: [
+            {
+              name: longBranch,
+              fullName: `refs/heads/${longBranch}`,
+              kind: 'local',
+              remote: null,
+              isHead: true,
+            },
+            {
+              name: longTag,
+              fullName: `refs/tags/${longTag}`,
+              kind: 'tag',
+              remote: null,
+              isHead: false,
+            },
+          ],
+        },
+        ...rest,
+      ],
+    });
+
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    const branchBadges = screen.getAllByText(longBranch);
+    const refBadge = branchBadges.find((node) => node.getAttribute('data-kind') === 'local');
+    expect(refBadge).toBeTruthy();
+    fireEvent.mouseEnter(refBadge as HTMLElement);
+    expect(screen.getByRole('tooltip').textContent).toBe(longBranch);
+
+    fireEvent.mouseLeave(refBadge as HTMLElement);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    const tagBadge = screen.getByTitle(`refs/tags/${longTag}`);
+    fireEvent.mouseEnter(tagBadge);
+    expect(screen.getByRole('tooltip').textContent).toBe(longTag);
+
+    fireEvent.mouseLeave(tagBadge);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+
+    const currentBranch = branchBadges.find((node) => node.className.includes('gitActionBranch'));
+    expect(currentBranch).toBeTruthy();
+    fireEvent.mouseEnter(currentBranch as HTMLElement);
+    expect(screen.getByRole('tooltip').textContent).toBe(longBranch);
+  });
+
   test('renders Pull and Push on the status row between Clean and the branch name', () => {
     renderGitInspector();
     const pull = screen.getByRole('button', { name: 'Pull' });

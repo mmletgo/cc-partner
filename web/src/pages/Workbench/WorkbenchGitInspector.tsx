@@ -12,7 +12,8 @@
  *   - 暴露 WorkbenchGitInspectorProps 类型，所有数据均来自 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享。
  */
 import * as React from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, HTMLAttributes, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
 import { DownloadIcon, EditIcon, SyncIcon, UploadIcon, XIcon } from '@/lib/icons';
@@ -115,6 +116,83 @@ function gitGraphParentPath(fromLane: number, toLane: number): string {
     return `M ${fromX} ${GIT_GRAPH_NODE_Y} V ${GIT_GRAPH_ROW_HEIGHT}`;
   }
   return `M ${fromX} ${GIT_GRAPH_NODE_Y} C ${fromX} ${GIT_GRAPH_NODE_Y + 6} ${toX} ${GIT_GRAPH_NODE_Y + 6} ${toX} ${GIT_GRAPH_ROW_HEIGHT}`;
+}
+
+interface GitHistoryHoverTipProps extends HTMLAttributes<HTMLSpanElement> {
+  text: string;
+  children: ReactNode;
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   Git 历史里的分支名、版本 tag、当前分支会被 CSS ellipsis 截断；桌面 WebView 不弹出原生
+ *   `title`，父级提交行的 title 还会抢走悬停，用户无法读到完整信息。
+ *
+ * Code Logic（这个组件做什么）:
+ *   鼠标进入或键盘聚焦时按触发器视口坐标 portal 一条 role=tooltip 浮层；离开/失焦卸载。
+ *   浮层 pointer-events:none，避免挡住下一条提交。
+ */
+function GitHistoryHoverTip(props: GitHistoryHoverTipProps): React.JSX.Element {
+  const { text, children, onMouseEnter, onMouseLeave, onFocus, onBlur, ...rest } = props;
+  const triggerRef = React.useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = React.useState(false);
+  const [position, setPosition] = React.useState({ x: 0, y: 0, placeBelow: false });
+
+  const showTip = React.useCallback(() => {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) {
+      setOpen(true);
+      return;
+    }
+    const x = Math.min(Math.max(rect.left + rect.width / 2, 12), window.innerWidth - 12);
+    const placeBelow = rect.top < 36;
+    setPosition({ x, y: placeBelow ? rect.bottom : rect.top, placeBelow });
+    setOpen(true);
+  }, []);
+
+  const hideTip = React.useCallback(() => {
+    setOpen(false);
+  }, []);
+
+  return (
+    <>
+      <span
+        {...rest}
+        ref={triggerRef}
+        onMouseEnter={(event) => {
+          onMouseEnter?.(event);
+          showTip();
+        }}
+        onMouseLeave={(event) => {
+          onMouseLeave?.(event);
+          hideTip();
+        }}
+        onFocus={(event) => {
+          onFocus?.(event);
+          showTip();
+        }}
+        onBlur={(event) => {
+          onBlur?.(event);
+          hideTip();
+        }}
+      >
+        {children}
+      </span>
+      {open
+        ? createPortal(
+            <span
+              className={styles.historyHoverTip}
+              data-place={position.placeBelow ? 'below' : 'above'}
+              role="tooltip"
+              style={{ left: position.x, top: position.y }}
+            >
+              {text}
+            </span>,
+            document.body,
+          )
+        : null}
+    </>
+  );
 }
 
 /**
@@ -315,9 +393,12 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
               {t('workbench:worktrees.push')}
             </Button>
           </div>
-          <span className={styles.gitActionBranch}>
+          <GitHistoryHoverTip
+            className={styles.gitActionBranch}
+            text={activeWorktree?.branch ?? activeWorktree?.name ?? emptyValue}
+          >
             {activeWorktree?.branch ?? activeWorktree?.name ?? emptyValue}
-          </span>
+          </GitHistoryHoverTip>
         </div>
         <div className={styles.gitActionButtons}>
           <Button
@@ -603,22 +684,26 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
                   </div>
                   <div className={styles.commitContent}>
                     <div className={styles.commitPrimary}>
-                      <span className={styles.commitSummary}>
+                      <GitHistoryHoverTip
+                        className={styles.commitSummary}
+                        text={row.commit.summary || emptyValue}
+                      >
                         {row.commit.summary || emptyValue}
-                      </span>
+                      </GitHistoryHoverTip>
                       {row.commit.refs.length > 0 ? (
                         <div className={styles.refList}>
                           {row.commit.refs.map((ref) => (
-                            <span
+                            <GitHistoryHoverTip
                               key={`${row.commit.hash}-${ref.fullName}`}
                               className={styles.refBadge}
                               data-kind={ref.kind}
                               data-head={ref.isHead ? 'true' : undefined}
                               title={ref.fullName}
+                              text={ref.name}
                             >
                               {ref.kind === 'remote' ? <UploadIcon size={11} /> : null}
                               {ref.name}
-                            </span>
+                            </GitHistoryHoverTip>
                           ))}
                         </div>
                       ) : null}

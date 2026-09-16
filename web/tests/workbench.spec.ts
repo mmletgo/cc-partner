@@ -145,6 +145,13 @@ function makeGitHistory() {
           remote: null,
           isHead: true,
         },
+        {
+          name: 'v0.12.0-beta.1+build.20260916',
+          fullName: 'refs/tags/v0.12.0-beta.1+build.20260916',
+          kind: 'tag',
+          remote: null,
+          isHead: false,
+        },
       ],
     },
     {
@@ -566,6 +573,13 @@ test.describe('E2E-WORKBENCH-001 Workbench critical journey', () => {
     );
     await expect(page.getByTitle('refs/heads/main-remote')).toBeVisible();
     await expect(page.getByTitle('refs/remotes/origin/feature')).toBeVisible();
+    await expect(page.getByTitle('refs/tags/v0.12.0-beta.1+build.20260916')).toBeVisible();
+    await page.getByTitle('refs/heads/main-remote').hover();
+    await expect(page.getByRole('tooltip', { name: 'main-remote' })).toBeVisible();
+    await page.getByTitle('refs/remotes/origin/feature').hover();
+    await expect(page.getByRole('tooltip', { name: 'origin/feature' })).toBeVisible();
+    await page.getByTitle('refs/tags/v0.12.0-beta.1+build.20260916').hover();
+    await expect(page.getByRole('tooltip', { name: 'v0.12.0-beta.1+build.20260916' })).toBeVisible();
 
     // listener 基线：离开 workbench 后 terminal-status / merge-progress 应收敛
     const listenBeforeNav = {
