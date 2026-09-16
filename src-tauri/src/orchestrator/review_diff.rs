@@ -1378,6 +1378,7 @@ mod tests {
             last_opened_at: "t".to_string(),
             created_at: "t".to_string(),
             updated_at: "t".to_string(),
+            git_remote_fingerprint: None,
         };
         let diff = collect_review_diff(&task, &attempt, &project, repo.path(), None).unwrap();
         assert_eq!(diff.task_id, "task-1");

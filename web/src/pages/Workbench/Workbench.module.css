@@ -341,6 +341,27 @@
   word-break: break-word;
 }
 
+.workspaceSwitcher {
+  display: block;
+  width: min(100%, 42rem);
+  max-width: 100%;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.workspaceSwitcher:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .workspaceHeaderActions {
   display: flex;
   flex: 0 0 auto;

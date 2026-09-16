@@ -28,16 +28,22 @@ import { EMPTY_PROJECT_SESSION_STATS } from '@/lib/workbenchProjectStats';
 import { fleetExceptionCount } from '@/lib/types/lanFleet';
 import type { LanFleetDeviceSummary, LanFleetProjectSummary } from '@/lib/types/lanFleet';
 import { WorkbenchRemoteProjectPicker } from '@/components/domain/WorkbenchRemoteProjectPicker';
-import { moveProjectId, orderProjectsByIds } from '@/lib/workbenchRemoteProjects';
+import { moveProjectId } from '@/lib/workbenchRemoteProjects';
 import {
   DEVICE_FILTER_ALL,
-  applyVisibleReorderToFullOrder,
   collectDeviceFilterOptions,
-  filterProjectsByDevice,
   readStoredDeviceFilterId,
   resolveDeviceFilterId,
   writeStoredDeviceFilterId,
 } from '@/lib/workbenchProjectDeviceFilter';
+import {
+  expandGroupOrderToProjectIds,
+  filterProjectGroupsByDevice,
+  groupWorkbenchProjects,
+  otherDeviceNames,
+  pickDisplayMember,
+} from '@/lib/workbenchProjectGroups';
+import type { WorkbenchProject } from '@/lib/types';
 import styles from './WorkbenchProjectRail.module.css';
 
 /**
@@ -48,7 +54,7 @@ import styles from './WorkbenchProjectRail.module.css';
  *   使用共享 Workbench 项目上下文渲染项目列表、terminal window/pane 统计和添加来源选择，并用 React Router 导航到 `/workbench`。
  */
 export function WorkbenchProjectRail() {
-  const { t } = useTranslation(['workbench']);
+  const { t } = useTranslation(['workbench', 'common']);
   const navigate = useNavigate();
   const addProjectButtonRef = useRef<HTMLButtonElement>(null);
   const [sourcePickerOpen, setSourcePickerOpen] = useState<boolean>(false);
@@ -62,6 +68,11 @@ export function WorkbenchProjectRail() {
     position: 'before' | 'after';
   } | null>(null);
   const [previewOrderIds, setPreviewOrderIds] = useState<string[] | null>(null);
+  const [removeGroup, setRemoveGroup] = useState<{
+    members: WorkbenchProject[];
+    selectedIds: string[];
+  } | null>(null);
+  const [removing, setRemoving] = useState<boolean>(false);
   const [deviceFilterId, setDeviceFilterId] = useState<string>(() => {
     return resolveDeviceFilterId(readStoredDeviceFilterId(), []);
   });
@@ -242,15 +253,20 @@ export function WorkbenchProjectRail() {
    * Code Logic（这个函数做什么）:
    *   先按 resolvedDeviceFilterId 过滤，再叠加热拖拽 preview 序。
    */
-  const filteredProjects = useMemo(
-    () => filterProjectsByDevice(projects, resolvedDeviceFilterId),
-    [projects, resolvedDeviceFilterId],
+  const allGroups = useMemo(() => groupWorkbenchProjects(projects), [projects]);
+
+  const filteredGroups = useMemo(
+    () => filterProjectGroupsByDevice(allGroups, resolvedDeviceFilterId),
+    [allGroups, resolvedDeviceFilterId],
   );
 
-  const displayProjects = useMemo(() => {
-    if (!previewOrderIds) return filteredProjects;
-    return orderProjectsByIds(filteredProjects, previewOrderIds);
-  }, [filteredProjects, previewOrderIds]);
+  const displayGroups = useMemo(() => {
+    if (!previewOrderIds) return filteredGroups;
+    const byKey = new Map(filteredGroups.map((group) => [group.key, group]));
+    return previewOrderIds
+      .map((key) => byKey.get(key))
+      .filter((group): group is (typeof filteredGroups)[number] => Boolean(group));
+  }, [filteredGroups, previewOrderIds]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -288,7 +304,7 @@ export function WorkbenchProjectRail() {
       }
     }
     itemRectsRef.current = nextRects;
-  }, [displayProjects]);
+  }, [displayGroups]);
 
   const captureItemNode = useCallback((projectId: string, node: HTMLDivElement | null) => {
     if (!node) {
@@ -341,33 +357,37 @@ export function WorkbenchProjectRail() {
       if (!target) return;
       setDropIndicator(target);
       const base =
-        previewOrderIdsRef.current ?? filteredProjects.map((project) => project.id);
+        previewOrderIdsRef.current ?? filteredGroups.map((group) => group.key);
       const next = moveProjectId(base, sourceId, target.projectId, target.position);
       if (next.join('\0') === base.join('\0')) return;
       previewOrderIdsRef.current = next;
       setPreviewOrderIds(next);
     },
-    [filteredProjects, resolveDropTarget],
+    [filteredGroups, resolveDropTarget],
   );
 
   const finishPointerReorder = useCallback(() => {
     const sourceId = draggingProjectIdRef.current;
     if (!sourceId) return;
     const visibleNext =
-      previewOrderIdsRef.current ?? filteredProjects.map((project) => project.id);
+      previewOrderIdsRef.current ?? filteredGroups.map((group) => group.key);
     const unchanged =
-      visibleNext.length === filteredProjects.length &&
-      visibleNext.every((id, index) => filteredProjects[index]?.id === id);
+      visibleNext.length === filteredGroups.length &&
+      visibleNext.every((key, index) => filteredGroups[index]?.key === key);
     clearDragUi();
     if (unchanged) return;
-    // 筛选视图只重排可见子集，再投影回全局 ordered_ids（隐藏设备项目相对位置不变）。
-    const fullOrderIds = projects.map((project) => project.id);
-    const nextFull =
-      resolvedDeviceFilterId === DEVICE_FILTER_ALL
-        ? visibleNext
-        : applyVisibleReorderToFullOrder(fullOrderIds, visibleNext);
+    const membersByKey: Record<string, string[]> = {};
+    for (const group of allGroups) {
+      membersByKey[group.key] = group.members.map((member) => member.id);
+    }
+    const nextFull = expandGroupOrderToProjectIds({
+      fullProjectIds: projects.map((project) => project.id),
+      fullGroupKeys: allGroups.map((group) => group.key),
+      membersByKey,
+      visibleGroupKeysNewOrder: visibleNext,
+    });
     void reorderProjects(nextFull);
-  }, [clearDragUi, filteredProjects, projects, reorderProjects, resolvedDeviceFilterId]);
+  }, [allGroups, clearDragUi, filteredGroups, projects, reorderProjects]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -381,7 +401,7 @@ export function WorkbenchProjectRail() {
       if (projectBusy || event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
-      const initialOrder = filteredProjects.map((project) => project.id);
+      const initialOrder = filteredGroups.map((group) => group.key);
       pointerIdRef.current = event.pointerId;
       draggingProjectIdRef.current = projectId;
       previewOrderIdsRef.current = initialOrder;
@@ -395,7 +415,7 @@ export function WorkbenchProjectRail() {
       }
       applyPointerReorder(event.clientY);
     },
-    [applyPointerReorder, filteredProjects, projectBusy],
+    [applyPointerReorder, filteredGroups, projectBusy],
   );
 
   useEffect(() => {
@@ -462,7 +482,7 @@ export function WorkbenchProjectRail() {
               icon={<SyncIcon />}
               title={t('workbench:refresh')}
               aria-label={t('workbench:refresh')}
-              onClick={() => void loadProjects()}
+              onClick={() => void loadProjects({ refreshIdentities: true })}
             />
             <Button
               ref={addProjectButtonRef}
@@ -516,7 +536,7 @@ export function WorkbenchProjectRail() {
         ) : null}
         {!projectsLoading &&
         projects.length > 0 &&
-        filteredProjects.length === 0 &&
+        filteredGroups.length === 0 &&
         resolvedDeviceFilterId !== DEVICE_FILTER_ALL ? (
           <div className={styles.filterEmpty}>
             <span>{t('workbench:projectRail.deviceFilterEmpty')}</span>
@@ -529,7 +549,10 @@ export function WorkbenchProjectRail() {
             </button>
           </div>
         ) : null}
-        {displayProjects.map((project) => {
+        {displayGroups.map((group) => {
+          const project = pickDisplayMember(group.members, {
+            deviceFilterId: resolvedDeviceFilterId,
+          });
           const stats = projectSessionStats[project.id] ?? EMPTY_PROJECT_SESSION_STATS;
           const windowCountLabel = t('workbench:projectWindowCount', {
             count: stats.windowCount,
@@ -537,14 +560,15 @@ export function WorkbenchProjectRail() {
           const paneCountLabel = t('workbench:projectPaneCount', {
             count: stats.paneCount,
           });
-          const isActive = project.id === activeProjectId;
-          const occupiedLabel = occupancyByProject.get(project.id);
-          const occupiedElsewhere = Boolean(
-            occupiedLabel && occupiedLabel !== currentWindowLabel,
-          );
+          const isActive = group.members.some((member) => member.id === activeProjectId);
+          const occupiedElsewhere = group.members.some((member) => {
+            const occupiedLabel = occupancyByProject.get(member.id);
+            return Boolean(occupiedLabel && occupiedLabel !== currentWindowLabel);
+          });
           const statusLabel = occupiedElsewhere
             ? t('workbench:projectRail.statusOccupied')
             : null;
+          const extraDevices = otherDeviceNames(group.members, project);
           const fleetProject: LanFleetProjectSummary | undefined =
             projectSummaries[project.id];
           const fleetDevice = deviceByProjectId[project.id];
@@ -571,19 +595,19 @@ export function WorkbenchProjectRail() {
           const hintAria = agentHintAriaSpec(hint);
           return (
             <div
-              key={project.id}
-              ref={(node) => captureItemNode(project.id, node)}
+              key={group.key}
+              ref={(node) => captureItemNode(group.key, node)}
               className={styles.projectItem}
-              data-project-id={project.id}
+              data-project-id={group.key}
               data-active={isActive || undefined}
-              data-dragging={draggingProjectId === project.id || undefined}
+              data-dragging={draggingProjectId === group.key || undefined}
               data-drop-before={
-                dropIndicator?.projectId === project.id && dropIndicator.position === 'before'
+                dropIndicator?.projectId === group.key && dropIndicator.position === 'before'
                   ? true
                   : undefined
               }
               data-drop-after={
-                dropIndicator?.projectId === project.id && dropIndicator.position === 'after'
+                dropIndicator?.projectId === group.key && dropIndicator.position === 'after'
                   ? true
                   : undefined
               }
@@ -594,7 +618,7 @@ export function WorkbenchProjectRail() {
                 tabIndex={projectBusy ? -1 : 0}
                 title={t('workbench:projectRail.dragHandleAria')}
                 aria-label={t('workbench:projectRail.dragHandleAria')}
-                onPointerDown={(event) => handleHandlePointerDown(event, project.id)}
+                onPointerDown={(event) => handleHandlePointerDown(event, group.key)}
               >
                 ⋮⋮
               </span>
@@ -630,6 +654,13 @@ export function WorkbenchProjectRail() {
                     ) : null}
                   </span>
                   <span className={styles.projectPath}>{project.path}</span>
+                  {extraDevices.length > 0 ? (
+                    <span className={styles.projectOtherDevices}>
+                      {t('workbench:projectRail.otherDevices', {
+                        names: extraDevices.join(' · '),
+                      })}
+                    </span>
+                  ) : null}
                   <span className={styles.projectMeta}>
                     <span className={styles.projectDevice}>
                       {project.kind === 'remote' ? (
@@ -699,7 +730,16 @@ export function WorkbenchProjectRail() {
                 icon={<XIcon />}
                 title={t('workbench:removeProject')}
                 aria-label={t('workbench:removeProject')}
-                onClick={() => void removeProject(project.id)}
+                onClick={() => {
+                  if (group.members.length === 1) {
+                    void removeProject(project.id);
+                    return;
+                  }
+                  setRemoveGroup({
+                    members: group.members,
+                    selectedIds: group.members.map((member) => member.id),
+                  });
+                }}
               />
             </div>
           );
@@ -791,6 +831,83 @@ export function WorkbenchProjectRail() {
       <WorkbenchFreshRestartDialog {...freshRestartDialog} onClose={closeFreshRestartDialog}
         onConfirm={(includeForeign) => { void confirmFreshRestart(includeForeign); }}
       />
+
+      <Dialog
+        open={removeGroup !== null}
+        titleId="workbench-remove-group-title"
+        onClose={() => {
+          if (!removing) setRemoveGroup(null);
+        }}
+        closeOnEscape={!removing}
+        closeOnBackdrop={!removing}
+      >
+        <h2 id="workbench-remove-group-title" className={styles.removeDialogTitle}>
+          {t('workbench:projectRail.removeGroupTitle')}
+        </h2>
+        <p className={styles.removeDialogBody}>
+          {t('workbench:projectRail.removeGroupBody')}
+        </p>
+        <div className={styles.removeGroupList} role="group" aria-labelledby="workbench-remove-group-title">
+          {removeGroup?.members.map((member) => {
+            const checked = removeGroup.selectedIds.includes(member.id);
+            return (
+              <label key={member.id} className={styles.removeGroupOption}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={removing}
+                  onChange={() => {
+                    setRemoveGroup((current) => {
+                      if (!current) return current;
+                      const selectedIds = current.selectedIds.includes(member.id)
+                        ? current.selectedIds.filter((id) => id !== member.id)
+                        : [...current.selectedIds, member.id];
+                      return { ...current, selectedIds };
+                    });
+                  }}
+                />
+                <span>
+                  <strong>{member.deviceName}</strong>
+                  <span>{member.path}</span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <div className={styles.removeDialogActions}>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={removing}
+            onClick={() => setRemoveGroup(null)}
+          >
+            {t('common:action.cancel')}
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            loading={removing}
+            disabled={!removeGroup || removeGroup.selectedIds.length === 0}
+            onClick={() => {
+              if (!removeGroup) return;
+              const ids = [...removeGroup.selectedIds];
+              setRemoving(true);
+              void (async () => {
+                try {
+                  for (const id of ids) {
+                    await removeProject(id);
+                  }
+                  setRemoveGroup(null);
+                } finally {
+                  setRemoving(false);
+                }
+              })();
+            }}
+          >
+            {t('workbench:projectRail.removeSelected')}
+          </Button>
+        </div>
+      </Dialog>
     </section>
   );
 }

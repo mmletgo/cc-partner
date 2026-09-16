@@ -20,6 +20,7 @@ import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 
 const commitMock = vi.fn();
 const pushMock = vi.fn();
+const pullMock = vi.fn();
 const getMutationOperationMock = vi.fn();
 const repairHookFailureMock = vi.fn();
 const listCommitsMock = vi.fn();
@@ -37,6 +38,7 @@ vi.mock('@/api/workbenchHttp', () => ({
     git: {
       commit: (...args: unknown[]) => commitMock(...args),
       push: (...args: unknown[]) => pushMock(...args),
+      pull: (...args: unknown[]) => pullMock(...args),
       merge: vi.fn(),
       remove: vi.fn(),
       getMutationOperation: (...args: unknown[]) => getMutationOperationMock(...args),
@@ -111,6 +113,7 @@ beforeAll(async () => {
 beforeEach(() => {
   commitMock.mockReset();
   pushMock.mockReset();
+  pullMock.mockReset();
   getMutationOperationMock.mockReset();
   repairHookFailureMock.mockReset();
   listCommitsMock.mockReset();
@@ -485,5 +488,123 @@ describe('MobileGitPanel collect-merge', () => {
     await waitFor(() => {
       expect(onMergeWorktree).toHaveBeenCalledWith(main);
     });
+  });
+});
+
+describe('MobileGitPanel cross-device sync', () => {
+  test('places sync beside commit and pushes main then pulls other-device main', async () => {
+    const local = createProject();
+    local.gitRemoteFingerprint = 'github.com/org/cc-partner';
+    const ubuntu: WorkbenchProject = {
+      ...createProject(),
+      id: 'ubuntu',
+      kind: 'remote',
+      deviceId: 'ubuntu',
+      deviceName: 'Ubuntu',
+      path: '/home/hans/cc-partner',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    };
+    const localMain = createWorktree({
+      id: 'mac-main',
+      projectId: local.id,
+      name: 'main',
+      branch: 'main',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    const ubuntuMain = createWorktree({
+      id: 'ubuntu-main',
+      projectId: ubuntu.id,
+      name: 'main',
+      branch: 'main',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 1,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    pushMock.mockResolvedValue({
+      kind: 'succeeded',
+      clientOperationId: 'op-1',
+      value: localMain,
+    });
+    pullMock.mockResolvedValue({
+      kind: 'succeeded',
+      clientOperationId: 'op-2',
+      value: ubuntuMain,
+    });
+    listWorktreesMock.mockImplementation(async (projectId: string) => {
+      if (projectId === ubuntu.id) return [ubuntuMain];
+      return [localMain];
+    });
+
+    renderPanel(
+      <MobileGitPanel
+        project={local}
+        worktree={localMain}
+        projects={[local, ubuntu]}
+        worktrees={[localMain]}
+        onMergeWorktree={async () => true}
+        onRefreshWorktrees={refreshWorktreesMock}
+      />,
+    );
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    const commit = screen.getByRole('button', { name: 'Commit' });
+    const sync = screen.getByTestId('mobile-git-sync');
+    expect(commit.nextElementSibling).toBe(sync);
+    expect((sync as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(sync);
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith({
+        worktreeId: 'mac-main',
+        clientOperationId: expect.any(String),
+      });
+      expect(pullMock).toHaveBeenCalledWith({
+        worktreeId: 'ubuntu-main',
+        clientOperationId: expect.any(String),
+      });
+    });
+    expect(await screen.findByText(/已推送主分支/)).toBeTruthy();
+  });
+
+  test('disables sync when there is no other-device sibling', async () => {
+    const local = createProject();
+    const main = createWorktree({
+      isMain: true,
+      branch: 'main',
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    renderPanel(
+      <MobileGitPanel
+        project={local}
+        worktree={main}
+        projects={[local]}
+        worktrees={[main]}
+        onMergeWorktree={async () => true}
+      />,
+    );
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalled());
+    expect((screen.getByTestId('mobile-git-sync') as HTMLButtonElement).disabled).toBe(true);
   });
 });

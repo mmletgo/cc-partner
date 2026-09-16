@@ -92,6 +92,37 @@ pub fn normalize_git_remote_fingerprint(url: &str) -> String {
     s
 }
 
+/// 把 Git remote 收成「host/owner/repo」，让 SSH 与 HTTPS 指向同一仓库时 fingerprint 相同。
+///
+/// Business Logic（为什么需要这个函数）:
+///     工作台按仓库合并列表项；同一 GitHub/GitLab 仓的 git@ 与 https:// 必须合成一项。
+///
+/// Code Logic（这个函数做什么）:
+///     先走 strip `.git`/大小写，再把 `git@host:path` 与 `scheme://[user@]host[:port]/path` 收成 `host/path`。
+pub fn canonical_git_remote_fingerprint(url: &str) -> String {
+    let s = normalize_git_remote_fingerprint(url);
+    if let Some(rest) = s.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            let path = path.trim_start_matches('/');
+            if !host.is_empty() && !path.is_empty() {
+                return format!("{host}/{path}");
+            }
+        }
+    }
+    if let Some(scheme_end) = s.find("://") {
+        let rest = &s[scheme_end + 3..];
+        let rest = rest.split_once('@').map(|(_, hostpath)| hostpath).unwrap_or(rest);
+        let rest = rest.trim_start_matches('/');
+        if let Some((hostport, path)) = rest.split_once('/') {
+            let host = hostport.split(':').next().unwrap_or(hostport);
+            if !host.is_empty() && !path.is_empty() {
+                return format!("{host}/{path}");
+            }
+        }
+    }
+    s
+}
+
 /// 读取仓库 origin（或首个 remote）URL。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -106,6 +137,42 @@ pub fn read_git_remote_url(repo_path: &Path) -> Option<String> {
     let remotes = git_remote_list(repo_path)?;
     let first = remotes.into_iter().next()?;
     git_remote_get_url(repo_path, &first)
+}
+
+/// 读取并规范化 Git remote fingerprint。
+///
+/// Business Logic（为什么需要这个函数）:
+///     刷新整合与添加项目需要把 origin 写成可比较的身份；git 无法执行时必须与「没有 remote」区分，以免误清分组。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn `git remote`：进程启动失败返回 Err；非 git 目录或无 remote 返回 Ok(None)；否则 normalize origin/首个 remote。
+pub fn read_git_remote_fingerprint(repo_path: &Path) -> Result<Option<String>, AppError> {
+    let output = Command::new("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| AppError::generic(format!("无法执行 git: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(read_git_remote_url(repo_path)
+        .map(|url| canonical_git_remote_fingerprint(&url))
+        .filter(|fingerprint| !fingerprint.is_empty()))
+}
+
+/// path_info 线上的 fingerprint：有 remote 为规范化 URL，无 remote 为空串；git 无法执行则 None（省略字段）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制端刷新远端 shortcut 时，必须区分旧对端省略字段、新对端确认无 remote、以及扫描失败。
+///
+/// Code Logic（这个函数做什么）:
+///     Ok(Some) → Some(fp)；Ok(None) → Some("")；Err → None。
+pub fn git_remote_fingerprint_wire(repo_path: &Path) -> Option<String> {
+    match read_git_remote_fingerprint(repo_path) {
+        Ok(Some(fingerprint)) => Some(fingerprint),
+        Ok(None) => Some(String::new()),
+        Err(_) => None,
+    }
 }
 
 /// 执行 `git remote get-url <name>`。
@@ -163,7 +230,10 @@ fn git_remote_list(repo_path: &Path) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_git_remote_fingerprint, resolve_project_path};
+    use super::{
+        canonical_git_remote_fingerprint, normalize_git_remote_fingerprint,
+        read_git_remote_fingerprint, resolve_project_path,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -208,5 +278,49 @@ mod tests {
             normalize_git_remote_fingerprint("https://GitHub.com/Org/Repo.git/"),
             "https://github.com/org/repo"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     工作台合并必须把 SSH 与 HTTPS 的同一仓库当成一项。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     三种 origin 写法得到同一 canonical fingerprint。
+    #[test]
+    fn canonical_fingerprint_unifies_ssh_and_https() {
+        assert_eq!(
+            canonical_git_remote_fingerprint("https://GitHub.com/Org/Repo.git/"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            canonical_git_remote_fingerprint("git@GitHub.com:Org/Repo.git"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            canonical_git_remote_fingerprint("ssh://git@github.com/Org/Repo.git"),
+            "github.com/org/repo"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     刷新整合依赖 origin 扫描；SSH/HTTPS 必须得到同一 fingerprint。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     临时 git 仓设 origin 为 SSH URL，断言规范化结果。
+    #[test]
+    fn read_git_remote_fingerprint_from_origin() {
+        let root = temp_root();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "git@GitHub.com:Org/Repo.git"])
+            .current_dir(&root)
+            .output()
+            .expect("git remote add");
+        let fingerprint = read_git_remote_fingerprint(&root).expect("scan");
+        assert_eq!(fingerprint.as_deref(), Some("github.com/org/repo"));
+        let _ = fs::remove_dir_all(root);
     }
 }

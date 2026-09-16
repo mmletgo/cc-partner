@@ -258,7 +258,8 @@ const WORKBENCH_PROJECT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_pro
     path TEXT NOT NULL,
     last_opened_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    git_remote_fingerprint TEXT
 )";
 
 /// 工作台项目自定义顺序列表（跨设备 LWW 单例偏好）。
@@ -401,6 +402,7 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
         .execute(&pool)
         .await?;
     sqlx::query(WORKBENCH_PROJECT_SCHEMA).execute(&pool).await?;
+    crate::storage::WorkbenchProjectRepo::ensure_fingerprint_schema(&pool).await?;
     sqlx::query(WORKBENCH_PROJECT_ORDER_SCHEMA)
         .execute(&pool)
         .await?;

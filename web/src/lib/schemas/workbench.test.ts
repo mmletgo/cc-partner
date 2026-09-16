@@ -118,6 +118,13 @@ const openFile = {
 describe('workbench schemas', () => {
   test('decodes project/worktree/session/path/save/fileNode/openFile', () => {
     expect(workbenchProjectDecoder.decode(project).id).toBe('p1');
+    expect(workbenchProjectDecoder.decode(project).gitRemoteFingerprint).toBeUndefined();
+    expect(
+      workbenchProjectDecoder.decode({
+        ...project,
+        gitRemoteFingerprint: 'https://github.com/org/repo',
+      }).gitRemoteFingerprint,
+    ).toBe('https://github.com/org/repo');
     expect(workbenchWorktreeDecoder.decode(worktree).isMain).toBe(true);
     expect(workbenchSessionDecoder.decode(session).paneCount).toBe(1);
     expect(workbenchPathInfoDecoder.decode(pathInfo).kind).toBe('file');

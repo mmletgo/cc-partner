@@ -172,6 +172,10 @@ export interface WorkbenchGitInspectorProps {
   handlePullWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
   handleMergeWorktree: () => Promise<void>;
+  /** 推送当前仓库主分支并在其他设备主工作区拉取。 */
+  handleSyncProjectMain: () => Promise<void>;
+  canSyncProjectMain: boolean;
+  worktreeSyncNotice: string | null;
 }
 
 /**
@@ -205,6 +209,9 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
     handlePullWorktree,
     handlePushWorktree,
     handleMergeWorktree,
+    handleSyncProjectMain,
+    canSyncProjectMain,
+    worktreeSyncNotice,
   } = props;
 
   const emptyValue = t('workbench:emptyValue');
@@ -325,6 +332,19 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
             onClick={() => void handleCommitWorktree()}
           >
             {t('workbench:worktrees.commit')}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<SyncIcon />}
+            title={t('workbench:worktrees.syncTitle')}
+            aria-label={t('workbench:worktrees.syncTitle')}
+            data-testid="workbench-git-sync"
+            loading={worktreeBusy === 'sync'}
+            disabled={!canSyncProjectMain || remoteWriteDisabled}
+            onClick={() => void handleSyncProjectMain()}
+          >
+            {t('workbench:worktrees.sync')}
           </Button>
           <Button
             size="sm"
@@ -478,6 +498,11 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
       {gitHistoryError ? (
         <StatusMessage tone="danger" className={styles.errorBox}>
           {gitHistoryError}
+        </StatusMessage>
+      ) : null}
+      {worktreeSyncNotice ? (
+        <StatusMessage tone="success" className={styles.errorBox}>
+          {worktreeSyncNotice}
         </StatusMessage>
       ) : null}
 

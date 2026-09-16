@@ -188,11 +188,13 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
     }
   }, []);
 
-  const loadProjects = useCallback(async () => {
+  const loadProjects = useCallback(async (options?: { refreshIdentities?: boolean }) => {
     try {
       setProjectsLoading(true);
       setProjectError(null);
-      const list = await workbenchApi.projects.list();
+      const list = options?.refreshIdentities
+        ? await workbenchApi.projects.refreshIdentities()
+        : await workbenchApi.projects.list();
       setProjects(list);
       setActiveProjectIdState((current) => {
         // 仅保留仍存在于列表中的当前选中项；无效/空时保持 null，

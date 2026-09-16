@@ -59,6 +59,11 @@ export interface WorkbenchRemotePathInfo {
   readable: boolean;
   isGitRepo: boolean;
   suggestedProjectName: string;
+  /**
+   * 对端扫描到的规范化 Git remote。
+   * 旧对端省略该字段；新对端无 remote 时发空字符串，有 remote 时发 fingerprint。
+   */
+  gitRemoteFingerprint?: string | null;
 }
 
 /**
@@ -80,6 +85,8 @@ export interface WorkbenchProject {
   lastOpenedAt: string;
   createdAt: string;
   updatedAt: string;
+  /** 规范化 Git remote；缺失或空表示尚未扫描或没有 remote，不参与合并。 */
+  gitRemoteFingerprint?: string | null;
 }
 
 /**

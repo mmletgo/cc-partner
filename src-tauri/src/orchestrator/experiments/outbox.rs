@@ -444,6 +444,7 @@ pub async fn dispatch_experiment_outbox_once(
             last_opened_at: claimed.updated_at.clone(),
             created_at: claimed.created_at.clone(),
             updated_at: claimed.updated_at.clone(),
+            git_remote_fingerprint: None,
         };
 
         let context = match open_remote_project_for_shortcut(state, &shortcut, None).await {

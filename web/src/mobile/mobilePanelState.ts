@@ -11,7 +11,7 @@ export interface MobileFileDirtySnapshot {
   context: MobileFilePanelContext | null;
 }
 
-export type MobileGitPanelAction = 'commit' | 'push' | 'merge';
+export type MobileGitPanelAction = 'commit' | 'push' | 'merge' | 'sync';
 
 /**
  * 移动端 Git/worktree mutation UI 相位。

@@ -1111,6 +1111,12 @@ pub(crate) fn build_remote_project_shortcut_row(
             .map(|project| project.created_at.clone())
             .unwrap_or_else(|| now.to_string()),
         updated_at: now.to_string(),
+        git_remote_fingerprint: remote
+            .git_remote_fingerprint
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| existing.and_then(|row| row.git_remote_fingerprint.clone())),
     }
 }
 
@@ -1739,6 +1745,7 @@ pub(super) mod restore_holder_fail_closed_tests {
                 last_opened_at: "t".to_string(),
                 created_at: "t".to_string(),
                 updated_at: "t".to_string(),
+                git_remote_fingerprint: None,
             })
             .await
             .unwrap();
@@ -2159,6 +2166,7 @@ mod sync_git_worktrees_external_delete_tests {
             last_opened_at: "t".to_string(),
             created_at: "t".to_string(),
             updated_at: "t".to_string(),
+            git_remote_fingerprint: None,
         }
     }
 

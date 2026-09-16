@@ -1685,6 +1685,8 @@ export function MobileWorkbench(): ReactElement {
         <MobileGitPanel
           project={activeProject}
           worktree={activeWorktree}
+          projects={projects}
+          worktrees={worktrees}
           busy={worktreeControlsBusy}
           onWorktreeChange={handleWorktreeChange}
           onMergeWorktree={handleMergeWorktree}

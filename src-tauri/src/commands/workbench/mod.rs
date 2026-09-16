@@ -112,8 +112,9 @@ pub use projects::{
     __cmd__get_workbench_launch_summary, __cmd__get_workbench_remote_path_info,
     __cmd__list_workbench_fs_dir, __cmd__list_workbench_fs_roots, __cmd__list_workbench_projects,
     __cmd__list_workbench_remote_dir, __cmd__list_workbench_remote_roots,
-    __cmd__open_workbench_remote_project, __cmd__remove_workbench_project,
-    __cmd__reorder_workbench_projects, __cmd__touch_workbench_project,
+    __cmd__open_workbench_remote_project, __cmd__refresh_workbench_project_identities,
+    __cmd__remove_workbench_project, __cmd__reorder_workbench_projects,
+    __cmd__touch_workbench_project,
     __tauri_command_name_add_workbench_project, __tauri_command_name_create_workbench_fs_dir,
     __tauri_command_name_create_workbench_remote_fs_dir,
     __tauri_command_name_get_workbench_fs_path_info,
@@ -123,16 +124,19 @@ pub use projects::{
     __tauri_command_name_list_workbench_projects, __tauri_command_name_list_workbench_remote_dir,
     __tauri_command_name_list_workbench_remote_roots,
     __tauri_command_name_open_workbench_remote_project,
+    __tauri_command_name_refresh_workbench_project_identities,
     __tauri_command_name_remove_workbench_project, __tauri_command_name_reorder_workbench_projects,
     __tauri_command_name_touch_workbench_project, add_workbench_project, create_workbench_fs_dir,
     create_workbench_remote_fs_dir, get_workbench_fs_path_info, get_workbench_launch_summary,
     get_workbench_remote_path_info, list_workbench_fs_dir, list_workbench_fs_roots,
     list_workbench_projects, list_workbench_remote_dir, list_workbench_remote_roots,
-    open_workbench_remote_project, remove_workbench_project, reorder_workbench_projects,
-    touch_workbench_project,
+    open_workbench_remote_project, refresh_workbench_project_identities,
+    remove_workbench_project, reorder_workbench_projects, touch_workbench_project,
 };
 // control_workbench 经 crate::commands::workbench:: 路径访问 pub(crate) helper
-pub(crate) use projects::reorder_workbench_projects_for_state;
+pub(crate) use projects::{
+    refresh_workbench_project_identities_for_state, reorder_workbench_projects_for_state,
+};
 
 pub use sessions::{
     __cmd__close_workbench_pane, __cmd__close_workbench_session, __cmd__create_workbench_dir,

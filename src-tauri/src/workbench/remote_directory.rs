@@ -13,7 +13,7 @@ use crate::workbench::fs::validate_child_name;
 use crate::workbench::models::{
     WorkbenchRemoteDirectoryEntryDto, WorkbenchRemotePathInfoDto, WorkbenchRemoteRootDto,
 };
-use crate::workbench::projects::infer_project_name;
+use crate::workbench::projects::{git_remote_fingerprint_wire, infer_project_name};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::fs;
@@ -215,6 +215,11 @@ pub fn remote_path_info(path: &Path) -> Result<WorkbenchRemotePathInfoDto, AppEr
         readable,
         is_git_repo: is_git_repo(path, is_dir),
         suggested_project_name,
+        git_remote_fingerprint: if is_dir {
+            git_remote_fingerprint_wire(path)
+        } else {
+            Some(String::new())
+        },
     })
 }
 

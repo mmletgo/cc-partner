@@ -1,5 +1,6 @@
 {
   "title": "Workbench",
+  "workspaceSwitcherAria": "Switch device or path for this repository",
   "refresh": "Refresh",
   "recheckWriteBlock": "Recheck input",
   "loading": "Loading",
@@ -23,7 +24,11 @@
     "deviceFilterLabel": "Filter by device",
     "deviceFilterAll": "All devices",
     "deviceFilterEmpty": "No projects on this device",
-    "deviceFilterShowAll": "Show all"
+    "deviceFilterShowAll": "Show all",
+    "otherDevices": "Also on {{names}}",
+    "removeGroupTitle": "Remove workspaces",
+    "removeGroupBody": "Choose which workspaces to remove from the workbench list. This does not delete the repository on disk.",
+    "removeSelected": "Remove selected"
   },
   "agentHints": {
     "dotAriaWaiting": "{{count}} windows waiting for input",
@@ -356,6 +361,7 @@
       "committing": "Committing",
       "commitSucceeded": "Commit succeeded",
       "pushing": "Pushing",
+      "syncing": "Syncing",
       "merging": "Merging",
       "commitMeta": "{{author}} · {{date}}",
       "reconciling": "Reconciling…",
@@ -626,6 +632,10 @@
     "commit": "Commit",
     "push": "Push",
     "pull": "Pull",
+    "sync": "Sync",
+    "syncTitle": "Push this repo's main branch, then pull it on other devices",
+    "syncSucceeded": "Pushed main and pulled on {{devices}}",
+    "syncPartial": "Pushed main. Pulled: {{ok}}. Failed: {{failed}}",
     "merge": "Merge",
     "remove": "Remove worktree",
     "removeAria": "Remove {{name}}",
@@ -955,6 +965,7 @@
     "commitWorktree": "Failed to commit worktree",
     "pushWorktree": "Failed to push worktree",
     "pullWorktree": "Failed to pull worktree",
+    "syncWorktree": "Failed to sync main branch",
     "mergeWorktree": "Failed to merge worktree",
     "removeWorktree": "Failed to remove worktree",
     "sessions": "Failed to load terminals",

@@ -20,7 +20,7 @@ export interface WorkbenchProjectsContextValue {
   projectBusy: boolean;
   projectError: string | null;
   projectSessionStats: Record<string, WorkbenchProjectSessionStats>;
-  loadProjects: () => Promise<void>;
+  loadProjects: (options?: { refreshIdentities?: boolean }) => Promise<void>;
   refreshProjectSessionStats: (projectId?: string) => Promise<void>;
   chooseAndAddProject: () => Promise<WorkbenchProject | null>;
   /** 把本机目录加入项目列表并设为当前项目；选择器打开成功后必须走这条路径。 */

@@ -29,6 +29,7 @@ pub struct WorkbenchProjectRow {
     pub last_opened_at: String,
     pub created_at: String,
     pub updated_at: String,
+    pub git_remote_fingerprint: Option<String>,
 }
 
 /// 工作台项目 DTO。
@@ -50,6 +51,8 @@ pub struct WorkbenchProjectDto {
     pub last_opened_at: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub git_remote_fingerprint: Option<String>,
 }
 
 /// Git worktree 状态摘要 DTO。
@@ -224,6 +227,9 @@ pub struct WorkbenchRemotePathInfoDto {
     pub readable: bool,
     pub is_git_repo: bool,
     pub suggested_project_name: String,
+    /// 新对端始终发送：有 remote 为 fingerprint，无 remote 为空串；旧对端省略（None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote_fingerprint: Option<String>,
 }
 
 impl WorkbenchProjectRow {
@@ -243,6 +249,7 @@ impl WorkbenchProjectRow {
             last_opened_at: self.last_opened_at.clone(),
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
+            git_remote_fingerprint: self.git_remote_fingerprint.clone(),
         }
     }
 }

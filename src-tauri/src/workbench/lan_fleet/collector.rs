@@ -1268,6 +1268,7 @@ mod tests {
             last_opened_at: "2026-07-15T00:00:00Z".into(),
             created_at: "2026-07-15T00:00:00Z".into(),
             updated_at: "2026-07-15T00:00:00Z".into(),
+            git_remote_fingerprint: None,
         }
     }
 

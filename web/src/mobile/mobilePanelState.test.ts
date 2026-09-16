@@ -315,6 +315,11 @@ describe('mobilePanelState', () => {
       'push should reload commits',
     );
     assertEqual(
+      shouldReloadMobileGitCommitsAfterAction('sync'),
+      true,
+      'sync should reload commits after pushing main',
+    );
+    assertEqual(
       shouldReloadMobileGitCommitsAfterAction('merge'),
       false,
       'merge should not reload commits from deleted source worktree',

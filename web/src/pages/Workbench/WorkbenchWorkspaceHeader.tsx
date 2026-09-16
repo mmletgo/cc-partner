@@ -8,7 +8,7 @@
  *   渲染 workspaceHeader：title + 标语空隙 + ledger/项目 Agent/项目自动化。
  */
 
-import type { ReactElement } from 'react';
+import { useMemo, type ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { ClaudeMdIcon, OrchestratorIcon } from '@/lib/icons';
@@ -18,10 +18,10 @@ import { WorkbenchBatteryBadge } from './views/WorkbenchBatteryBadge';
 import type { WorkbenchProjectControllerResult } from './controllers/useWorkbenchProjectController';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
 import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
+import { groupWorkbenchProjects } from '@/lib/workbenchProjectGroups';
 import styles from './Workbench.module.css';
 
 export interface WorkbenchWorkspaceHeaderProps {
-  workspaceLine: string;
   terminalFullscreen: boolean;
   activeProjectId: string | null;
   projectCtrl: WorkbenchProjectControllerResult;
@@ -37,7 +37,6 @@ export interface WorkbenchWorkspaceHeaderProps {
  */
 export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): ReactElement {
   const {
-    workspaceLine,
     terminalFullscreen,
     activeProjectId,
     projectCtrl,
@@ -48,9 +47,19 @@ export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): 
   } = props;
   const { t } = useTranslation(['workbench']);
   const { features } = useExperimentalFeatures();
-  const { activeProject } = useWorkbenchProjects();
+  const { activeProject, projects, selectProject } = useWorkbenchProjects();
   const bannerDeviceId =
     activeProject?.kind === 'remote' ? activeProject.deviceId : undefined;
+  const workspaceMembers = useMemo(() => {
+    if (!activeProject) return [];
+    const group = groupWorkbenchProjects(projects).find((item) =>
+      item.members.some((member) => member.id === activeProject.id),
+    );
+    return group?.members ?? [activeProject];
+  }, [activeProject, projects]);
+  const workspaceLine = activeProject
+    ? `${activeProject.deviceName} · ${activeProject.path}`
+    : t('workbench:noProjectHint');
 
   return (
     <section className={styles.workspaceHeader}>
@@ -60,7 +69,25 @@ export function WorkbenchWorkspaceHeader(props: WorkbenchWorkspaceHeaderProps): 
             <h1 className={styles.workspaceTitle}>{t('workbench:title')}</h1>
             <WorkbenchBatteryBadge />
           </div>
-          <p className={styles.workspacePath}>{workspaceLine}</p>
+          {workspaceMembers.length > 1 ? (
+            <select
+              className={styles.workspaceSwitcher}
+              value={activeProject?.id ?? ''}
+              aria-label={t('workbench:workspaceSwitcherAria')}
+              onChange={(event) => {
+                const next = workspaceMembers.find((member) => member.id === event.target.value);
+                if (next) void selectProject(next);
+              }}
+            >
+              {workspaceMembers.map((member) => (
+                <option key={member.id} value={member.id}>
+                  {member.deviceName} · {member.path}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p className={styles.workspacePath}>{workspaceLine}</p>
+          )}
         </div>
       </div>
       <WorkbenchBanner

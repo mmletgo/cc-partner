@@ -85,6 +85,7 @@ export const workbenchProjectDecoder: Decoder<WorkbenchProject> = objectDecoder(
     lastOpenedAt: stringDecoder,
     createdAt: stringDecoder,
     updatedAt: stringDecoder,
+    gitRemoteFingerprint: optionalDecoder(nullableDecoder(stringDecoder)),
   },
 );
 
@@ -153,6 +154,7 @@ export const workbenchRemotePathInfoDecoder: Decoder<WorkbenchRemotePathInfo> = 
     readable: booleanDecoder,
     isGitRepo: booleanDecoder,
     suggestedProjectName: stringDecoder,
+    gitRemoteFingerprint: optionalDecoder(nullableDecoder(stringDecoder)),
   },
 );
 

@@ -547,6 +547,7 @@ async fn dispatch_claimed_remote_outbox_item(
         last_opened_at: item.updated_at.clone(),
         created_at: item.created_at.clone(),
         updated_at: item.updated_at.clone(),
+        git_remote_fingerprint: None,
     };
     let context = open_remote_project_for_shortcut(state, &shortcut, None)
         .await
@@ -597,6 +598,7 @@ async fn dispatch_claimed_remote_block_outbox_item(
         last_opened_at: item.updated_at.clone(),
         created_at: item.created_at.clone(),
         updated_at: item.updated_at.clone(),
+        git_remote_fingerprint: None,
     };
     let context = open_remote_project_for_shortcut(state, &shortcut, None)
         .await

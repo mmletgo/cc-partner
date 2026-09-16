@@ -9,10 +9,16 @@ import {
 import { StatusMessage } from '@/components/primitives';
 import {
   getUnknownMutationClientOperationId,
+  isMutationFailedHook,
   isMutationSucceeded,
   isMutationUnknown,
   isWorkbenchMutationUnknownError,
 } from '@/lib/asyncState/mutationOutcome';
+import {
+  canSyncProjectMain,
+  pickMainWorktree,
+  siblingProjectsOnOtherDevices,
+} from '@/lib/workbenchProjectMainSync';
 import type {
   MutationIntent,
   WorkbenchGitCommit,
@@ -44,6 +50,10 @@ import styles from '../MobileWorkbench.module.css';
 export interface MobileGitPanelProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
+  /** 全部工作台项目，用于按 fingerprint 找其他设备。 */
+  projects?: WorkbenchProject[];
+  /** 当前项目的 worktree 列表，用于定位主工作区。 */
+  worktrees?: WorkbenchWorktree[];
   busy?: boolean;
   onWorktreeChange?: (worktree: WorkbenchWorktree) => void;
   onMergeWorktree: (worktree: WorkbenchWorktree) => Promise<boolean>;
@@ -94,6 +104,8 @@ function getErrorMessage(reason: unknown): string {
 export function MobileGitPanel({
   project,
   worktree,
+  projects = [],
+  worktrees = [],
   busy = false,
   onWorktreeChange,
   onMergeWorktree,
@@ -103,7 +115,7 @@ export function MobileGitPanel({
   const { t } = useTranslation(['workbench']);
   const [commits, setCommits] = useState<WorkbenchGitCommit[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
-  const [actionBusy, setActionBusy] = useState<'commit' | 'push' | 'merge' | null>(null);
+  const [actionBusy, setActionBusy] = useState<'commit' | 'push' | 'merge' | 'sync' | null>(null);
   const [mutationPhase, setMutationPhase] = useState<MobileMutationPhase>('idle');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -595,6 +607,122 @@ export function MobileGitPanel({
     worktree,
   ]);
 
+  const syncSiblings = useMemo(
+    () => siblingProjectsOnOtherDevices(project, projects),
+    [project, projects],
+  );
+  const mainWorktree = useMemo(() => pickMainWorktree(worktrees), [worktrees]);
+  const canSync = canSyncProjectMain({
+    mainWorktree,
+    siblingCount: syncSiblings.length,
+    worktreeBusy: actionBusy,
+    remoteWriteDisabled: busy,
+  });
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Git 面板与桌面一样，要把当前仓库主分支推到 origin，再在其他设备主工作区拉取。
+   *
+   * Code Logic（这个函数做什么）:
+   *   push 当前项目 isMain；成功后对其他设备 list+pull 主 worktree；摘要写入 success。
+   */
+  const handleSync = useCallback(async (): Promise<void> => {
+    if (busy || !project || !mainWorktree) return;
+    if (isMobileMutationActionLocked(mutationPhase)) return;
+    if (!canSync) return;
+    const actionContext = { projectId: project.id, worktreeId: mainWorktree.id };
+    const siblings = siblingProjectsOnOtherDevices(project, projects);
+    setActionBusy('sync');
+    setMutationPhase('busy');
+    setError(null);
+    setSuccess(null);
+    setHookRepair(null);
+    try {
+      const pushEnvelope = await workbenchHttp.git.push({
+        worktreeId: mainWorktree.id,
+        clientOperationId: createHttpOrchestratorClientRequestId(),
+      });
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      if (isMutationFailedHook(pushEnvelope)) {
+        setMutationPhase('idle');
+        setHookRepair({
+          kind: 'push',
+          hookFailure: pushEnvelope.hookFailure,
+          clientOperationId: pushEnvelope.clientOperationId,
+        });
+        return;
+      }
+      if (isMutationUnknown(pushEnvelope)) {
+        setMutationPhase('idle');
+        setError(t('workbench:errors.mutationUnknown'));
+        return;
+      }
+      if (!isMutationSucceeded(pushEnvelope)) {
+        setMutationPhase('idle');
+        setError(t('workbench:errors.pushWorktree'));
+        return;
+      }
+
+      const pulled: string[] = [];
+      const failed: string[] = [];
+      for (const sibling of siblings) {
+        if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+        try {
+          const siblingTrees = await httpWorkbenchTransport.worktrees.list(sibling.id);
+          if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+          const siblingMain = pickMainWorktree(siblingTrees);
+          if (!siblingMain) {
+            failed.push(`${sibling.deviceName}: ${t('workbench:errors.pullWorktree')}`);
+            continue;
+          }
+          const pullEnvelope = await workbenchHttp.git.pull({
+            worktreeId: siblingMain.id,
+            clientOperationId: createHttpOrchestratorClientRequestId(),
+          });
+          if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+          if (isMutationSucceeded(pullEnvelope)) {
+            pulled.push(sibling.deviceName);
+          } else {
+            failed.push(`${sibling.deviceName}: ${t('workbench:errors.pullWorktree')}`);
+          }
+        } catch (reason) {
+          if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+          failed.push(`${sibling.deviceName}: ${getErrorMessage(reason)}`);
+        }
+      }
+
+      setMutationPhase('idle');
+      if (failed.length === 0) {
+        setSuccess(t('workbench:worktrees.syncSucceeded', { devices: pulled.join(' · ') }));
+      } else {
+        setSuccess(
+          t('workbench:worktrees.syncPartial', {
+            ok: pulled.join(' · ') || t('workbench:emptyValue'),
+            failed: failed.join(' · '),
+          }),
+        );
+      }
+      await refreshAfterAction('sync', actionContext);
+    } catch (reason) {
+      if (!isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) return;
+      setMutationPhase('idle');
+      setError(`${t('workbench:errors.syncWorktree')}: ${getErrorMessage(reason)}`);
+    } finally {
+      if (isMobileGitActionResponseCurrent(actionContext, currentContextRef.current)) {
+        setActionBusy(null);
+      }
+    }
+  }, [
+    busy,
+    canSync,
+    mainWorktree,
+    mutationPhase,
+    project,
+    projects,
+    refreshAfterAction,
+    t,
+  ]);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   功能 worktree 合回主工作区，或主工作区 collect-merge 可收集分支。
@@ -781,6 +909,19 @@ export function MobileGitPanel({
             {actionBusy === 'commit'
               ? t('workbench:mobile.gitPanel.committing')
               : t('workbench:worktrees.commit')}
+          </button>
+          <button
+            type="button"
+            className={styles.secondaryButton}
+            disabled={actionDisabled || !canSync}
+            aria-busy={actionBusy === 'sync' || undefined}
+            aria-label={t('workbench:worktrees.syncTitle')}
+            data-testid="mobile-git-sync"
+            onClick={() => void handleSync()}
+          >
+            {actionBusy === 'sync'
+              ? t('workbench:mobile.gitPanel.syncing')
+              : t('workbench:worktrees.sync')}
           </button>
           <button
             type="button"

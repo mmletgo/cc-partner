@@ -253,6 +253,7 @@ fn build_remote_project_shortcut_row_preserves_remote_kind_and_stable_id() {
         last_opened_at: "2026-06-25T00:00:00Z".to_string(),
         created_at: "2026-06-25T00:00:00Z".to_string(),
         updated_at: "2026-06-25T00:00:00Z".to_string(),
+        git_remote_fingerprint: None,
     };
     let existing = WorkbenchProjectRow {
         id: crate::workbench::remote_ids::remote_project_id(
@@ -267,6 +268,7 @@ fn build_remote_project_shortcut_row_preserves_remote_kind_and_stable_id() {
         last_opened_at: "2026-06-24T00:00:00Z".to_string(),
         created_at: "2026-06-24T00:00:00Z".to_string(),
         updated_at: "2026-06-24T00:00:00Z".to_string(),
+        git_remote_fingerprint: None,
     };
 
     let row = build_remote_project_shortcut_row(
@@ -913,6 +915,7 @@ fn discovered_git_worktree_row_uses_stable_metadata() {
         last_opened_at: "2026-06-26T00:00:00Z".to_string(),
         created_at: "2026-06-26T00:00:00Z".to_string(),
         updated_at: "2026-06-26T00:00:00Z".to_string(),
+        git_remote_fingerprint: None,
     };
     let parsed = workbench_git::ParsedWorktree {
         path: "/repo/worktrees/feature-a".to_string(),
@@ -948,6 +951,7 @@ fn discovered_git_worktree_row_reuses_existing_row_for_same_path() {
         last_opened_at: "2026-06-26T00:00:00Z".to_string(),
         created_at: "2026-06-26T00:00:00Z".to_string(),
         updated_at: "2026-06-26T00:00:00Z".to_string(),
+        git_remote_fingerprint: None,
     };
     let existing = WorkbenchWorktreeRow {
         id: "existing-row".to_string(),

@@ -719,6 +719,7 @@ mod tests {
             last_opened_at: "t".into(),
             created_at: "t".into(),
             updated_at: "t".into(),
+            git_remote_fingerprint: None,
         };
     }
 

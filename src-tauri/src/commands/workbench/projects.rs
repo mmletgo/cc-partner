@@ -23,6 +23,7 @@ use crate::workbench::{
     projects, remote_client::RemoteWorkbenchClient, remote_ids::remote_project_id,
     remote_protocol::RemoteWorkbenchBrowserDiscoverReq,
 };
+use std::path::Path;
 use tauri::State;
 
 use super::common::*;
@@ -47,7 +48,95 @@ pub async fn list_workbench_projects(
     Ok(rows.iter().map(WorkbenchProjectRow::to_dto).collect())
 }
 
-/// 获取 Workbench Continue Working 启动摘要。
+/// 扫描并写回各项目 Git remote fingerprint，供侧栏按仓库合并。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户点刷新时才全表重扫 origin；离线/读失败不得拆掉上次合并结果。
+///
+/// Code Logic（这个函数做什么）:
+///     本机路径 `read_git_remote_fingerprint`；在线远端走 path_info 的 wire 字段（None=旧对端跳过，空串=确认无 remote）。
+///     写回后 list 转 DTO。
+#[tauri::command]
+pub async fn refresh_workbench_project_identities(
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkbenchProjectDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.refresh_identities",
+        serde_json::json!({}),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    refresh_workbench_project_identities_for_state(state.inner()).await
+}
+
+/// owner 路径：刷新 fingerprint 后返回完整项目列表。
+pub async fn refresh_workbench_project_identities_for_state(
+    state: &AppState,
+) -> Result<Vec<WorkbenchProjectDto>, AppError> {
+    let rows = state.workbench_project_repo.list().await?;
+    for row in rows {
+        match scan_project_fingerprint(state, &row).await {
+            Ok(Some(next)) => {
+                if row.git_remote_fingerprint.as_deref() == Some(next.as_str()) {
+                    continue;
+                }
+                let mut updated = row;
+                updated.git_remote_fingerprint = Some(next);
+                updated.updated_at = now_iso();
+                state.workbench_project_repo.upsert(&updated).await?;
+            }
+            Ok(None) => {
+                if row.git_remote_fingerprint.is_none() {
+                    continue;
+                }
+                let mut updated = row;
+                updated.git_remote_fingerprint = None;
+                updated.updated_at = now_iso();
+                state.workbench_project_repo.upsert(&updated).await?;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    project_id = %row.id,
+                    error = %error,
+                    "skip workbench project fingerprint scan"
+                );
+            }
+        }
+    }
+    let rows = state.workbench_project_repo.list().await?;
+    Ok(rows.iter().map(WorkbenchProjectRow::to_dto).collect())
+}
+
+/// 扫描一行项目的 fingerprint。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机与远端的失败语义不同：远端省略字段必须跳过，不能当成无 remote。
+///
+/// Code Logic（这个函数做什么）:
+///     local → Result<Option<fp>>；remote → path_info wire：None=Err(skip)，Some("")=Ok(None)，Some(fp)=Ok(Some)。
+async fn scan_project_fingerprint(
+    state: &AppState,
+    row: &WorkbenchProjectRow,
+) -> Result<Option<String>, AppError> {
+    if row.kind == "remote" {
+        let info = get_workbench_remote_path_info_for_state(state, &row.device_id, &row.path).await?;
+        return match info.git_remote_fingerprint {
+            None => Err(AppError::generic("对端未提供 git remote fingerprint")),
+            Some(value) => {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(projects::canonical_git_remote_fingerprint(&trimmed)))
+                }
+            }
+        };
+    }
+    projects::read_git_remote_fingerprint(Path::new(&row.path))
+}
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     桌面入口需要一次读出有界项目/会话/任务/传输/设备摘要；GUI 必须走 sidecar control。
@@ -148,6 +237,17 @@ pub async fn add_local_workbench_project_from_path(
             .map(|project| project.created_at.clone())
             .unwrap_or_else(|| now.clone()),
         updated_at: now,
+        git_remote_fingerprint: match projects::read_git_remote_fingerprint(&root) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                tracing::debug!(
+                    path = %root.display(),
+                    error = %error,
+                    "read git remote fingerprint after add skipped"
+                );
+                None
+            }
+        },
     };
     state.workbench_project_repo.upsert(&row).await?;
     // 新项目置顶顺序文档（best-effort：失败不阻断添加）。

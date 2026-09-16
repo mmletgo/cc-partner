@@ -536,6 +536,7 @@ mod tests {
             last_opened_at: "2026-07-11T08:00:00Z".to_string(),
             created_at: "2026-07-11T08:00:00Z".to_string(),
             updated_at: "2026-07-11T08:00:00Z".to_string(),
+            git_remote_fingerprint: None,
         }
     }
 
@@ -952,6 +953,7 @@ mod tests {
             last_opened_at: "2026-07-11T08:00:00Z".to_string(),
             created_at: "2026-07-11T08:00:00Z".to_string(),
             updated_at: "2026-07-11T08:00:00Z".to_string(),
+            git_remote_fingerprint: None,
         };
         let active_task = local_task(
             "active-blocked",

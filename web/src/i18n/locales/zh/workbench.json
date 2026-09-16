@@ -1,5 +1,6 @@
 {
   "title": "工作台",
+  "workspaceSwitcherAria": "切换此仓库的设备或路径",
   "refresh": "刷新",
   "recheckWriteBlock": "重新检查输入",
   "loading": "加载中",
@@ -23,7 +24,11 @@
     "deviceFilterLabel": "按设备筛选",
     "deviceFilterAll": "全部设备",
     "deviceFilterEmpty": "该设备下暂无项目",
-    "deviceFilterShowAll": "显示全部"
+    "deviceFilterShowAll": "显示全部",
+    "otherDevices": "另有 {{names}}",
+    "removeGroupTitle": "移除工作区",
+    "removeGroupBody": "选择要从工作台列表移除的工作区（不会删除磁盘上的仓库）。",
+    "removeSelected": "移除所选"
   },
   "agentHints": {
     "dotAriaWaiting": "{{count}} 个窗口等待输入",
@@ -352,6 +357,7 @@
       "committing": "提交中",
       "commitSucceeded": "提交成功",
       "pushing": "推送中",
+      "syncing": "同步中",
       "merging": "合并中",
       "commitMeta": "{{author}} · {{date}}",
       "reconciling": "核对结果中…",
@@ -620,6 +626,10 @@
     "commit": "Commit",
     "push": "Push",
     "pull": "Pull",
+    "sync": "同步",
+    "syncTitle": "推送当前仓库主分支，并在其他设备的主工作区拉取",
+    "syncSucceeded": "已推送主分支，并在 {{devices}} 上拉取",
+    "syncPartial": "已推送主分支。已拉取：{{ok}}。失败：{{failed}}",
     "merge": "合并",
     "remove": "移除 worktree",
     "removeAria": "移除 {{name}}",
@@ -947,6 +957,7 @@
     "commitWorktree": "提交 worktree 失败",
     "pushWorktree": "推送 worktree 失败",
     "pullWorktree": "拉取 worktree 失败",
+    "syncWorktree": "同步主分支失败",
     "mergeWorktree": "合并 worktree 失败",
     "removeWorktree": "移除 worktree 失败",
     "sessions": "读取终端失败",

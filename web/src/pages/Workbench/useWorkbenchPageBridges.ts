@@ -32,12 +32,20 @@ export function useWorkbenchPageBridges(t: TFunction<'workbench'>, deviceName: s
   );
   const translateWorktreeMessage = useCallback(
     (
-      key: 'mergeConfirm' | 'mergeCollectConfirm' | 'removeConfirm' | 'checkSourceMessage',
+      key:
+        | 'mergeConfirm'
+        | 'mergeCollectConfirm'
+        | 'removeConfirm'
+        | 'checkSourceMessage'
+        | 'syncSucceeded'
+        | 'syncPartial',
       vars?: Record<string, unknown>,
     ): string => {
       if (key === 'mergeConfirm') return t('worktrees.mergeConfirm', vars);
       if (key === 'mergeCollectConfirm') return t('worktrees.mergeCollectConfirm', vars);
       if (key === 'removeConfirm') return t('worktrees.removeConfirm', vars);
+      if (key === 'syncSucceeded') return t('worktrees.syncSucceeded', vars);
+      if (key === 'syncPartial') return t('worktrees.syncPartial', vars);
       return t('mergeStages.messages.checkSource');
     },
     [t],

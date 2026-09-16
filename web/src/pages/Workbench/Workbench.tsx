@@ -259,8 +259,7 @@ export function Workbench() {
   );
   const worktreeGitController = useWorkbenchWorktreeGitController({
     api: { worktrees: workbenchApi.worktrees, git: workbenchApi.git },
-    activeProjectId,
-    activeWorktreeId,
+    activeProjectId, activeProject, projects, activeWorktreeId,
     setActiveWorktreeId,
     remoteWriteDisabled,
     inspectorTab,
@@ -302,7 +301,7 @@ export function Workbench() {
     handleCreateWorktree,
     handleCommitWorktree,
     handlePullWorktree,
-    handlePushWorktree,
+    handlePushWorktree, handleSyncProjectMain, canSyncProjectMain, worktreeSyncNotice,
     handleMergeWorktree,
     handleRemoveWorktree,
     handleRepairHookFailure,
@@ -714,9 +713,6 @@ export function Workbench() {
     [closeAutomationConsole, currentWindowLabel, navigate, occupancy, openTaskWorkbench],
   );
 
-  const workspaceLine = activeProject
-    ? `${activeProject.deviceName} · ${activeProject.path}`
-    : t('workbench:noProjectHint');
   const promptPanelStyle = {
     '--prompt-panel-left': `${promptPanelPosition.left}px`,
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
@@ -791,7 +787,6 @@ export function Workbench() {
           </StatusMessage>
         ) : null}
         <WorkbenchWorkspaceHeader
-          workspaceLine={workspaceLine}
           terminalFullscreen={terminalFullscreen}
           activeProjectId={activeProjectId}
           projectCtrl={projectCtrl}
@@ -1180,7 +1175,8 @@ export function Workbench() {
             gitHistoryError, worktreeBusy, unknownMutationLock,
             hookRepair, handleRepairHookFailure, handleDismissHookFailure, handleRetryAfterRepair,
             mergeStages, clearMergeStagePanel, loadGitHistory,
-            handleCommitWorktree, handlePullWorktree, handlePushWorktree, handleMergeWorktree,
+            handleCommitWorktree, handlePullWorktree, handlePushWorktree, handleSyncProjectMain,
+            canSyncProjectMain, worktreeSyncNotice, handleMergeWorktree,
           }}
           notesInspector={{ activeProjectId, ...notes }}
         />

@@ -2327,6 +2327,7 @@ mod tests {
                 last_opened_at: now.clone(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
+                git_remote_fingerprint: None,
             })
             .await
             .expect("insert project");

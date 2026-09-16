@@ -31,7 +31,7 @@
  * 不复制邻接 controller 状态：project / session / file / application / prompt optimizer 状态仍归
  * Workbench.tsx 各自所有。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { workbenchApi, type WorktreeGitApiScope } from '@/api/workbench';
 
@@ -70,8 +70,14 @@ import type {
   WorkbenchMergeStageId,
   WorkbenchMutationEnvelope,
   WorkbenchHookFailure,
+  WorkbenchProject,
   WorkbenchWorktree,
 } from '@/lib/types';
+import {
+  canSyncProjectMain as canSyncProjectMainPlan,
+  pickMainWorktree,
+  siblingProjectsOnOtherDevices,
+} from '@/lib/workbenchProjectMainSync';
 import {
   DEFAULT_WORKTREE_BRANCH_PREFIX,
   canMergeWorktree,
@@ -85,7 +91,7 @@ import type { WorkbenchTerminalBridge } from './useWorkbenchTerminalController';
 /**
  * controller 用的 worktree 操作 busy 标记；与原 Workbench.tsx 内部使用的 string 标记保持一致。
  */
-export type WorktreeBusyKind = 'create' | 'commit' | 'push' | 'pull' | 'merge' | 'remove';
+export type WorktreeBusyKind = 'create' | 'commit' | 'push' | 'pull' | 'merge' | 'remove' | 'sync';
 
 /**
  * unknown 后保留的稳定 operation 锁。
@@ -150,6 +156,7 @@ export type WorkbenchWorktreeGitErrorKey =
   | 'commitWorktree'
   | 'pushWorktree'
   | 'pullWorktree'
+  | 'syncWorktree'
   | 'mergeWorktree'
   | 'removeWorktree'
   | 'gitHistory'
@@ -175,6 +182,9 @@ export type WorkbenchWorktreeGitErrorKey =
  */
 export interface UseWorkbenchWorktreeGitControllerParams {
   activeProjectId: string | null;
+  /** 当前项目及列表：同步主分支时按 fingerprint 找其他设备。 */
+  activeProject?: WorkbenchProject | null;
+  projects?: WorkbenchProject[];
   /** 当前 active worktree id；由页面持有（终端域 controller / 文件 effect 也读取同一值）。 */
   activeWorktreeId: string | null;
   /** 页面持有的 activeWorktreeId setter；controller 在 loadWorktrees / create / remove 后调用它切换。 */
@@ -196,7 +206,12 @@ export interface UseWorkbenchWorktreeGitControllerParams {
   desktopUnavailableMessage: string;
   translateError: (key: WorkbenchWorktreeGitErrorKey) => string;
   translateWorktreeMessage: (
-    key: 'mergeConfirm' | 'mergeCollectConfirm' | 'checkSourceMessage',
+    key:
+      | 'mergeConfirm'
+      | 'mergeCollectConfirm'
+      | 'checkSourceMessage'
+      | 'syncSucceeded'
+      | 'syncPartial',
     vars?: Record<string, unknown>,
   ) => string;
   /** merge 前的用户确认；remove 已迁出本 controller 到 UI 层 Dialog。 */
@@ -244,6 +259,9 @@ export interface WorkbenchWorktreeGitControllerResult {
   handleCommitWorktree: () => Promise<void>;
   handlePullWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
+  handleSyncProjectMain: () => Promise<void>;
+  canSyncProjectMain: boolean;
+  worktreeSyncNotice: string | null;
   handleMergeWorktree: () => Promise<void>;
   handleRemoveWorktree: (worktreeId: string) => Promise<void>;
   /**
@@ -282,6 +300,8 @@ export function useWorkbenchWorktreeGitController(
 ): WorkbenchWorktreeGitControllerResult {
   const {
     activeProjectId,
+    activeProject = null,
+    projects = [],
     activeWorktreeId,
     setActiveWorktreeId,
     remoteWriteDisabled,
@@ -309,6 +329,7 @@ export function useWorkbenchWorktreeGitController(
   const [unknownMutationLock, setUnknownMutationLock] =
     useState<WorktreeUnknownMutationLock | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  const [worktreeSyncNotice, setWorktreeSyncNotice] = useState<string | null>(null);
   // failedHook 修复上下文：commit/push 钩子失败时设置；用户点重试/开始新 commit/push 时清空。
   const [hookRepair, setHookRepair] = useState<WorkbenchHookRepair | null>(null);
   const [createWorktreeOpen, setCreateWorktreeOpen] = useState<boolean>(false);
@@ -1244,6 +1265,149 @@ export function useWorkbenchWorktreeGitController(
     api.worktrees,
   ]);
 
+  const syncSiblings = useMemo(
+    () => siblingProjectsOnOtherDevices(activeProject, projects),
+    [activeProject, projects],
+  );
+  const canSyncProjectMain = canSyncProjectMainPlan({
+    mainWorktree: pickMainWorktree(worktrees),
+    siblingCount: syncSiblings.length,
+    worktreeBusy,
+    unknownMutationLock,
+    remoteWriteDisabled,
+  });
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   把当前仓库主分支推到 origin，再在其他设备的主工作区拉取，避免逐台手动 Push/Pull。
+   *
+   * Code Logic（这个函数做什么）:
+   *   push 当前项目 isMain worktree；成功后逐台 list+pull 兄弟项目主 worktree；汇总 notice。
+   */
+  const handleSyncProjectMain = useCallback(async (): Promise<void> => {
+    if (remoteWriteDisabled) return;
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    if (unknownMutationLock) return;
+    const main = pickMainWorktree(worktrees);
+    if (!main?.branch || !main.status.canPush) return;
+    const siblings = siblingProjectsOnOtherDevices(activeProject, projects);
+    if (siblings.length === 0) return;
+    const settled = beginMutationOperation(projectId, main.id);
+    const pushOperationId = crypto.randomUUID();
+    try {
+      setWorktreeBusy('sync');
+      setWorktreeError(null);
+      setWorktreeSyncNotice(null);
+      const pushEnvelope = await api.worktrees.push(main.id, pushOperationId);
+      if (!isSettledCurrent(settled)) return;
+      if (isMutationFailedHook(pushEnvelope)) {
+        setHookRepair({
+          kind: 'push',
+          hookFailure: pushEnvelope.hookFailure,
+          clientOperationId: pushEnvelope.clientOperationId,
+        });
+        return;
+      }
+      if (isMutationUnknown(pushEnvelope)) {
+        setUnknownMutationLock({
+          kind: 'push',
+          projectId,
+          worktreeId: main.id,
+          clientOperationId: pushEnvelope.clientOperationId,
+        });
+        setWorktreeError(translateError('mutationUnknown'));
+        return;
+      }
+      if (!isMutationSucceeded(pushEnvelope)) {
+        setWorktreeError(translateError('pushWorktree'));
+        return;
+      }
+
+      const pulled: string[] = [];
+      const failed: string[] = [];
+      for (const sibling of siblings) {
+        if (!isSettledCurrent(settled)) return;
+        try {
+          const siblingTrees = await api.worktrees.list(sibling.id);
+          if (!isSettledCurrent(settled)) return;
+          const siblingMain = pickMainWorktree(siblingTrees);
+          if (!siblingMain) {
+            failed.push(`${sibling.deviceName}: ${translateError('pullWorktree')}`);
+            continue;
+          }
+          const pullEnvelope = await api.worktrees.pull(
+            siblingMain.id,
+            crypto.randomUUID(),
+          );
+          if (!isSettledCurrent(settled)) return;
+          if (isMutationSucceeded(pullEnvelope)) {
+            pulled.push(sibling.deviceName);
+          } else {
+            failed.push(`${sibling.deviceName}: ${translateError('pullWorktree')}`);
+          }
+        } catch (error) {
+          if (!isSettledCurrent(settled)) return;
+          failed.push(
+            `${sibling.deviceName}: ${displayErrorMessage(
+              error,
+              translateError('pullWorktree'),
+              desktopUnavailableMessage,
+            )}`,
+          );
+        }
+      }
+
+      invalidateWorktreeListRequests(projectId);
+      invalidateGitHistoryRequests(projectId, main.id);
+      await loadWorktrees(projectId);
+      if (!isSettledCurrent(settled)) return;
+      if (inspectorTab === 'history') await loadGitHistory();
+      if (!isSettledCurrent(settled)) return;
+      if (failed.length === 0) {
+        setWorktreeSyncNotice(
+          translateWorktreeMessage('syncSucceeded', { devices: pulled.join(' · ') }),
+        );
+      } else {
+        setWorktreeSyncNotice(
+          translateWorktreeMessage('syncPartial', {
+            ok: pulled.join(' · ') || '—',
+            failed: failed.join(' · '),
+          }),
+        );
+      }
+    } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      markRequestFailure(projectId, error);
+      setWorktreeError(
+        displayErrorMessage(error, translateError('syncWorktree'), desktopUnavailableMessage),
+      );
+    } finally {
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
+    }
+  }, [
+    activeProject,
+    beginMutationOperation,
+    desktopUnavailableMessage,
+    displayErrorMessage,
+    inspectorTab,
+    invalidateGitHistoryRequests,
+    invalidateWorktreeListRequests,
+    isSettledCurrent,
+    loadGitHistory,
+    loadWorktrees,
+    markRequestFailure,
+    projects,
+    remoteWriteDisabled,
+    translateError,
+    translateWorktreeMessage,
+    unknownMutationLock,
+    worktrees,
+    api.worktrees,
+  ]);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户从 origin/upstream 拉取当前 worktree 分支更新；成功后刷新 worktree 状态与 Git 历史。
@@ -1852,6 +2016,9 @@ export function useWorkbenchWorktreeGitController(
     handleCommitWorktree,
     handlePullWorktree,
     handlePushWorktree,
+    handleSyncProjectMain,
+    canSyncProjectMain,
+    worktreeSyncNotice,
     handleMergeWorktree,
     handleRemoveWorktree,
     handleRepairHookFailure,

@@ -140,6 +140,10 @@ async fn dispatch_workbench_op(
             let items: Vec<_> = rows.iter().map(WorkbenchProjectRow::to_dto).collect();
             Ok(serde_json::to_value(items)?)
         }
+        "projects.refresh_identities" => {
+            let items = workbench::refresh_workbench_project_identities_for_state(state).await?;
+            Ok(serde_json::to_value(items)?)
+        }
         "projects.add" => {
             let path = required_string(&payload, "path")?;
             let item = workbench::add_local_workbench_project_from_path(state, path).await?;

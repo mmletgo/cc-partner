@@ -4123,6 +4123,7 @@ mod collect_merge_tests {
                 last_opened_at: "t".to_string(),
                 created_at: "t".to_string(),
                 updated_at: "t".to_string(),
+                git_remote_fingerprint: None,
             })
             .await
             .unwrap();

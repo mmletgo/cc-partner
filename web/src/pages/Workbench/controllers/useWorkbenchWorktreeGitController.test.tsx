@@ -191,6 +191,8 @@ interface TerminalBridgeFakes {
 
 interface ControllerProps {
   activeProjectId: string | null;
+  activeProject?: WorkbenchProject | null;
+  projects?: WorkbenchProject[];
   activeWorktreeId: string | null;
   remoteWriteDisabled: boolean;
   inspectorTab: 'files' | 'history' | 'notes';
@@ -249,8 +251,18 @@ function baseControllerProps(
     desktopUnavailableMessage: 'desktop unavailable',
     canListenToTauriEvents: () => true,
     translateError: (key) => `err:${key}`,
-    translateWorktreeMessage: (key, vars) =>
-      vars && typeof vars === 'object' && 'name' in vars ? `${key}:${String(vars.name)}` : key,
+    translateWorktreeMessage: (key, vars) => {
+      if (vars && typeof vars === 'object' && 'devices' in vars) {
+        return `${key}:${String(vars.devices)}`;
+      }
+      if (vars && typeof vars === 'object' && 'ok' in vars) {
+        return `${key}:${String(vars.ok)}/${String(vars.failed)}`;
+      }
+      if (vars && typeof vars === 'object' && 'name' in vars) {
+        return `${key}:${String(vars.name)}`;
+      }
+      return key;
+    },
     confirmAction: () => true,
     setActiveWorktreeId: () => undefined,
     ...overrides,
@@ -287,6 +299,8 @@ function renderController(
       };
       return useWorkbenchWorktreeGitController({
         activeProjectId: currentProps.activeProjectId,
+        activeProject: currentProps.activeProject,
+        projects: currentProps.projects,
         activeWorktreeId: activeWt,
         setActiveWorktreeId: handleSetActive,
         remoteWriteDisabled: currentProps.remoteWriteDisabled,
@@ -927,6 +941,79 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     });
 
     expect(fakeWorktreesApi.pull).toHaveBeenCalledWith('wt-main', expect.any(String));
+    expect(result.current.worktreeBusy).toBeNull();
+  });
+
+  test('handleSyncProjectMain pushes current main then pulls other-device main', async () => {
+    const local = buildLocalProject({
+      id: 'mac',
+      deviceId: 'mac',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    });
+    const ubuntu = buildLocalProject({
+      id: 'ubuntu',
+      kind: 'remote',
+      deviceId: 'ubuntu',
+      deviceName: 'Ubuntu',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    });
+    const localMain = buildWorktree({
+      id: 'mac-main',
+      projectId: 'mac',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    const ubuntuMain = buildWorktree({
+      id: 'ubuntu-main',
+      projectId: 'ubuntu',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 1,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    fakeWorktreesApi.list.mockImplementation(async (projectId: string) => {
+      if (projectId === 'ubuntu') return [ubuntuMain];
+      return [localMain];
+    });
+    fakeWorktreesApi.push.mockResolvedValue(succeededEnvelope(localMain));
+    fakeWorktreesApi.pull.mockResolvedValue(succeededEnvelope(ubuntuMain));
+
+    const { result } = renderController({
+      activeProjectId: local.id,
+      activeProject: local,
+      projects: [local, ubuntu],
+      activeWorktreeId: 'mac-main',
+      inspectorTab: 'history',
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees(local.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.canSyncProjectMain).toBe(true);
+
+    await act(async () => {
+      await result.current.handleSyncProjectMain();
+      await flushMicrotasks();
+    });
+
+    expect(fakeWorktreesApi.push).toHaveBeenCalledWith('mac-main', expect.any(String));
+    expect(fakeWorktreesApi.pull).toHaveBeenCalledWith('ubuntu-main', expect.any(String));
+    expect(result.current.worktreeSyncNotice).toBe('syncSucceeded:Ubuntu');
     expect(result.current.worktreeBusy).toBeNull();
   });
 

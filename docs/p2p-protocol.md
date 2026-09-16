@@ -337,7 +337,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/claude-code/assets/bundle` | `routes/claude_code_assets.rs` | builds an in-memory zip; no persistent mutation | read-only | — |
 | GET | `/api/workbench/fs/roots` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/fs/list` | `routes/workbench.rs` | none | read-only | — |
-| POST | `/api/workbench/fs/info` | `routes/workbench.rs` | none | read-only | — |
+| POST | `/api/workbench/fs/info` | `routes/workbench.rs` | none | read-only | optional `gitRemoteFingerprint` (empty string = scanned no remote; omitted = old peer / scan failed); extra field ignored by old clients |
 | POST | `/api/workbench/fs/create-dir` | `routes/workbench.rs` | creates one directory under an absolute parent path | requires-idempotency-key | capability `workbench.fs.create-dir.v1`; body camelCase `{parentPath,name}`; no dedupe key yet; clients MUST NOT auto-retry; distinct from project-scoped `files/create-dir` |
 | GET | `/api/workbench/projects/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | `add_workbench_project` reuses the same project id for the same path and only refreshes timestamps |

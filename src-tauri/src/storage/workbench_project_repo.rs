@@ -64,7 +64,7 @@ impl WorkbenchProjectRepo {
     ///     查询全部项目按 created_at DESC，再读顺序单例并用 `apply_project_order` 投影。
     pub async fn list(&self) -> Result<Vec<WorkbenchProjectRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at \
+            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at, git_remote_fingerprint \
              FROM workbench_projects ORDER BY created_at DESC, id ASC",
         )
         .fetch_all(&self.pool)
@@ -96,6 +96,26 @@ impl WorkbenchProjectRepo {
         )
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧库没有 git_remote_fingerprint 列；刷新整合必须幂等补列，禁止 sqlx::migrate!。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     PRAGMA table_info 检查列名；缺失则 ALTER TABLE ADD COLUMN TEXT。
+    pub async fn ensure_fingerprint_schema(pool: &SqlitePool) -> Result<(), AppError> {
+        let columns = sqlx::query("PRAGMA table_info(workbench_projects)")
+            .fetch_all(pool)
+            .await?;
+        let has_fingerprint = columns.iter().any(|row| {
+            row.try_get::<String, _>("name").ok().as_deref() == Some("git_remote_fingerprint")
+        });
+        if !has_fingerprint {
+            sqlx::query("ALTER TABLE workbench_projects ADD COLUMN git_remote_fingerprint TEXT")
+                .execute(pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -216,7 +236,7 @@ impl WorkbenchProjectRepo {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at \
+            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at, git_remote_fingerprint \
              FROM workbench_projects ORDER BY last_opened_at DESC LIMIT ?",
         )
         .bind(limit)
@@ -232,7 +252,7 @@ impl WorkbenchProjectRepo {
     ///     按 id 查询单条记录，不存在返回 None。
     pub async fn get(&self, id: &str) -> Result<Option<WorkbenchProjectRow>, AppError> {
         let row = sqlx::query(
-            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at \
+            "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at, git_remote_fingerprint \
              FROM workbench_projects WHERE id = ?",
         )
         .bind(id)
@@ -250,8 +270,8 @@ impl WorkbenchProjectRepo {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "INSERT OR REPLACE INTO workbench_projects \
-                 (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at, git_remote_fingerprint) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.name)
@@ -262,6 +282,7 @@ impl WorkbenchProjectRepo {
             .bind(&row.last_opened_at)
             .bind(&row.created_at)
             .bind(&row.updated_at)
+            .bind(&row.git_remote_fingerprint)
             .execute(&self.pool)
             .await?;
             Ok(())
@@ -302,6 +323,7 @@ fn row_to_project(row: &SqliteRow) -> Result<WorkbenchProjectRow, AppError> {
         last_opened_at: row.try_get("last_opened_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        git_remote_fingerprint: row.try_get("git_remote_fingerprint").unwrap_or(None),
     })
 }
 
@@ -329,11 +351,14 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS workbench_projects (\
              id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
              device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
-             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, git_remote_fingerprint TEXT)",
         )
         .execute(&pool)
         .await
         .unwrap();
+        WorkbenchProjectRepo::ensure_fingerprint_schema(&pool)
+            .await
+            .unwrap();
         WorkbenchProjectRepo::ensure_order_schema(&pool)
             .await
             .unwrap();
@@ -365,6 +390,7 @@ mod tests {
             last_opened_at: last_opened_at.to_string(),
             created_at: created_at.to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
+            git_remote_fingerprint: None,
         }
     }
 
@@ -373,6 +399,29 @@ mod tests {
     ///
     /// Code Logic（这个函数做什么）:
     ///     插入两条 created_at 不同的记录，断言 list 按 created_at 倒序返回。
+    /// Business Logic（为什么需要这个测试）:
+    ///     刷新整合依赖 fingerprint 落库，list 必须 round-trip。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     upsert 带 fingerprint 的行，get/list 读回同一值。
+    #[tokio::test]
+    async fn upsert_round_trips_git_remote_fingerprint() {
+        let repo = setup_repo().await;
+        let mut item = row("p-fp", "2026-06-24T01:00:00Z");
+        item.git_remote_fingerprint = Some("https://github.com/org/repo".into());
+        repo.upsert(&item).await.unwrap();
+        let got = repo.get("p-fp").await.unwrap().expect("row");
+        assert_eq!(
+            got.git_remote_fingerprint.as_deref(),
+            Some("https://github.com/org/repo")
+        );
+        let listed = repo.list().await.unwrap();
+        assert_eq!(
+            listed[0].git_remote_fingerprint.as_deref(),
+            Some("https://github.com/org/repo")
+        );
+    }
+
     #[tokio::test]
     async fn list_orders_by_created_at_desc() {
         let repo = setup_repo().await;

@@ -162,6 +162,9 @@ function renderGitInspector(
         handlePullWorktree={vi.fn(async () => undefined)}
         handlePushWorktree={vi.fn(async () => undefined)}
         handleMergeWorktree={vi.fn(async () => undefined)}
+        handleSyncProjectMain={vi.fn(async () => undefined)}
+        canSyncProjectMain={false}
+        worktreeSyncNotice={null}
         {...overrides}
       />
     </I18nextProvider>,
@@ -199,6 +202,26 @@ describe('WorkbenchGitInspector graph presentation', () => {
     expect(statusRow?.contains(push)).toBe(true);
     expect(statusRow?.contains(commit)).toBe(false);
     expect(statusRow?.contains(merge)).toBe(false);
+  });
+
+  test('places sync button to the right of commit', () => {
+    const onSync = vi.fn(async () => undefined);
+    renderGitInspector({
+      canSyncProjectMain: true,
+      handleSyncProjectMain: onSync,
+    });
+    const commit = screen.getByRole('button', { name: 'Commit' });
+    const sync = screen.getByTestId('workbench-git-sync');
+    expect(commit.nextElementSibling).toBe(sync);
+    expect(sync.textContent).toContain('同步');
+    expect(sync.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(sync);
+    expect(onSync).toHaveBeenCalledTimes(1);
+  });
+
+  test('disables sync when canSyncProjectMain is false', () => {
+    renderGitInspector({ canSyncProjectMain: false });
+    expect(screen.getByTestId('workbench-git-sync').hasAttribute('disabled')).toBe(true);
   });
 });
 

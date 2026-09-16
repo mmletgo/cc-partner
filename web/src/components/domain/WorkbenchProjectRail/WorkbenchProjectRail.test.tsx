@@ -410,6 +410,32 @@ describe('WorkbenchProjectRail discovery IA', () => {
     renderRail({ projects: [a, b] });
     expect(screen.queryByLabelText('按设备筛选')).toBeNull();
   });
+
+  test('merges same git remote across devices into one list item', () => {
+    const local = buildProject({
+      id: 'mac',
+      name: 'cc-partner',
+      gitRemoteFingerprint: 'https://github.com/org/cc-partner',
+      lastOpenedAt: '2026-09-10T00:00:00.000Z',
+    });
+    const remote = buildProject({
+      id: 'ubuntu',
+      name: 'cc-partner',
+      path: '/home/hans/cc-partner',
+      kind: 'remote',
+      deviceId: 'ubuntu',
+      deviceName: 'Ubuntu',
+      gitRemoteFingerprint: 'https://github.com/org/cc-partner',
+      lastOpenedAt: '2026-09-12T00:00:00.000Z',
+    });
+    const ctx = renderRail({ projects: [local, remote] });
+    expect(screen.getAllByRole('button', { name: /cc-partner/ })).toHaveLength(1);
+    expect(screen.getByText('另有 本机')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /cc-partner/ }));
+    expect(ctx.selectProject).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ubuntu' }),
+    );
+  });
 });
 
 describe('WorkbenchProjectRail fresh restart hover entry', () => {

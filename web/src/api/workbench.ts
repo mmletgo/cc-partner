@@ -95,6 +95,17 @@ export const workbenchApi = {
     list: () =>
       invokeDecoded('list_workbench_projects', undefined, workbenchProjectsDecoder),
 
+    /**
+     * Business Logic: 侧栏刷新按钮扫描 Git remote 并写回 fingerprint，供按仓库合并。
+     * Code Logic: invokeDecoded refresh_workbench_project_identities → 项目列表。
+     */
+    refreshIdentities: () =>
+      invokeDecoded(
+        'refresh_workbench_project_identities',
+        undefined,
+        workbenchProjectsDecoder,
+      ),
+
     /** 添加或重新打开一个项目文件夹，path 为本机或已挂载局域网目录。 */
     add: (path: string) =>
       invokeDecoded('add_workbench_project', { path }, workbenchProjectDecoder),

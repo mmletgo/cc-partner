@@ -92,6 +92,7 @@ fn remote_shortcut_row() -> WorkbenchProjectRow {
         last_opened_at: "2026-07-05T00:00:00Z".to_string(),
         created_at: "2026-07-05T00:00:00Z".to_string(),
         updated_at: "2026-07-05T00:00:00Z".to_string(),
+        git_remote_fingerprint: None,
     }
 }
 
@@ -111,6 +112,7 @@ fn local_project_row(path: String) -> WorkbenchProjectRow {
         last_opened_at: "2026-07-05T00:00:00Z".to_string(),
         created_at: "2026-07-05T00:00:00Z".to_string(),
         updated_at: "2026-07-05T00:00:00Z".to_string(),
+        git_remote_fingerprint: None,
     }
 }
 
@@ -2232,6 +2234,7 @@ fn local_owner_workflow_document_helpers_round_trip_without_dispatch() {
         last_opened_at: "t".to_string(),
         created_at: "t".to_string(),
         updated_at: "t".to_string(),
+        git_remote_fingerprint: None,
     };
 
     let missing = get_local_owner_workflow_document(&project).expect("get missing");
