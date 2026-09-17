@@ -6,7 +6,7 @@
 
 ## 决策
 
-- 身份：canonical Git remote fingerprint（`host/owner/repo`，SSH 与 HTTPS 相同即同一仓库，不限 GitHub）。无 remote 的目录永不互并。Hub 仍用旧的 URL 规范化，互不影响。
+- 身份：canonical Git remote fingerprint（`host/owner/repo`，SSH 与 HTTPS 相同即同一仓库，不限 GitHub；GitHub SSH-over-443 主机 `ssh.github.com` 映射为 `github.com`）。无 remote 的目录永不互并。Hub 仍用旧的 URL 规范化，互不影响。
 - 存储：不合并 `workbench_projects` 行。新增可空列 `git_remote_fingerprint`。终端/占用/新窗口仍用原 `projectId`。
 - 刷新按钮：扫描可达项目的 origin 并写回 fingerprint，再按该字段分组。离线或读失败保留上次 fingerprint。
 - 添加本机/打开远端：顺带写入该行 fingerprint；能匹配已有组则立即并入。

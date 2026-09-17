@@ -98,14 +98,15 @@ pub fn normalize_git_remote_fingerprint(url: &str) -> String {
 ///     工作台按仓库合并列表项；同一 GitHub/GitLab 仓的 git@ 与 https:// 必须合成一项。
 ///
 /// Code Logic（这个函数做什么）:
-///     先走 strip `.git`/大小写，再把 `git@host:path` 与 `scheme://[user@]host[:port]/path` 收成 `host/path`。
+///     先走 strip `.git`/大小写，再把 `git@host:path` 与 `scheme://[user@]host[:port]/path` 收成 `host/path`，
+///     最后把 GitHub SSH-over-443 主机 `ssh.github.com` 映射为 `github.com`。
 pub fn canonical_git_remote_fingerprint(url: &str) -> String {
     let s = normalize_git_remote_fingerprint(url);
     if let Some(rest) = s.strip_prefix("git@") {
         if let Some((host, path)) = rest.split_once(':') {
             let path = path.trim_start_matches('/');
             if !host.is_empty() && !path.is_empty() {
-                return format!("{host}/{path}");
+                return alias_canonical_git_remote_host(format!("{host}/{path}"));
             }
         }
     }
@@ -119,11 +120,26 @@ pub fn canonical_git_remote_fingerprint(url: &str) -> String {
         if let Some((hostport, path)) = rest.split_once('/') {
             let host = hostport.split(':').next().unwrap_or(hostport);
             if !host.is_empty() && !path.is_empty() {
-                return format!("{host}/{path}");
+                return alias_canonical_git_remote_host(format!("{host}/{path}"));
             }
         }
     }
-    s
+    alias_canonical_git_remote_host(s)
+}
+
+/// 把已知 Git 主机别名收成合并用的 canonical host。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GitHub 走 443 的 SSH 入口是 `ssh.github.com`，与 HTTPS `github.com` 是同一仓库。
+///
+/// Code Logic（这个函数做什么）:
+///     fingerprint 以 `ssh.github.com/` 开头且后面非空时，改写为 `github.com/{path}`。
+fn alias_canonical_git_remote_host(fingerprint: String) -> String {
+    const SSH_GITHUB_PREFIX: &str = "ssh.github.com/";
+    match fingerprint.strip_prefix(SSH_GITHUB_PREFIX) {
+        Some(path) if !path.is_empty() => format!("github.com/{path}"),
+        _ => fingerprint,
+    }
 }
 
 /// 读取仓库 origin（或首个 remote）URL。
@@ -301,6 +317,31 @@ mod tests {
         assert_eq!(
             canonical_git_remote_fingerprint("ssh://git@github.com/Org/Repo.git"),
             "github.com/org/repo"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     GitHub 走 443 的 SSH 入口主机是 `ssh.github.com`，与 HTTPS 的 `github.com` 是同一仓库。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     ssh://、git@ 与已收成 host/path 的三种写法都必须得到 `github.com/owner/repo`。
+    #[test]
+    fn canonical_fingerprint_maps_ssh_github_host() {
+        assert_eq!(
+            canonical_git_remote_fingerprint("ssh://git@ssh.github.com:443/mmletgo/cc-partner.git"),
+            "github.com/mmletgo/cc-partner"
+        );
+        assert_eq!(
+            canonical_git_remote_fingerprint("git@ssh.github.com:mmletgo/cc-partner.git"),
+            "github.com/mmletgo/cc-partner"
+        );
+        assert_eq!(
+            canonical_git_remote_fingerprint("ssh.github.com/mmletgo/cc-partner"),
+            "github.com/mmletgo/cc-partner"
+        );
+        assert_eq!(
+            canonical_git_remote_fingerprint("https://github.com/mmletgo/cc-partner.git"),
+            "github.com/mmletgo/cc-partner"
         );
     }
 
