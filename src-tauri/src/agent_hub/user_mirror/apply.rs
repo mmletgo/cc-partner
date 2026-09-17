@@ -220,7 +220,10 @@ async fn apply_one_agent(
 /// 把一条 native instruction_write 写到 dest 白名单路径。
 ///
 /// Business Logic: logical_id 必须在 dest 进程白名单内；仓库根 AGENTS.md 不得作为 Grok 输出。
-/// Code Logic: 查 `user_level_mirror_native_paths`；Write/Replace 取 CAS UTF-8；Clear 写空串。
+///     镜像是已确认覆盖：CAS 必须对落盘当下，不能用 preview 时的 destHash
+///     （冻结/传输期间对端 Hub 投影常改写 CLAUDE.md / AGENTS.md）。
+/// Code Logic: 查 `user_level_mirror_native_paths`；Write/Replace 取 CAS UTF-8；Clear 写空串；
+///     expected hash 取当前文件 sha256（缺失则 None）。
 pub(crate) fn write_one_native(
     env: &TargetEnvironment,
     homes: &TargetHomes,
@@ -236,7 +239,29 @@ pub(crate) fn write_one_native(
             "USER_NATIVE_INSTRUCTION_CONTENT_TOO_LARGE".to_string(),
         ));
     }
-    write_dest_native_file(env, &path, &content, change.dest_hash.as_deref())
+    write_dest_native_file(
+        env,
+        &path,
+        &content,
+        current_native_file_hash(&path)?.as_deref(),
+    )
+}
+
+/// 镜像写盘前读取 dest 当前文件 hash，供 AtomicProjectionWriter CAS。
+///
+/// Business Logic: preview destHash 在传输后往往已过期；当下 hash 才能覆盖漂移。
+/// Code Logic: 不存在 → None；目录 → 校验错误；否则 sha256 全文。
+fn current_native_file_hash(path: &Path) -> Result<Option<String>, AppError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    if path.is_dir() {
+        return Err(AppError::validation(
+            USER_MIRROR_NATIVE_PATH_FORBIDDEN.to_string(),
+        ));
+    }
+    let bytes = fs::read(path)?;
+    Ok(Some(sha256_hex(&bytes)))
 }
 
 /// dest 进程把 logical_id 映射为白名单绝对路径。
@@ -313,6 +338,22 @@ fn write_dest_native_file(
     content: &str,
     expected_hash: Option<&str>,
 ) -> Result<(), AppError> {
+    match write_dest_native_file_once(env, path, content, expected_hash) {
+        Ok(()) => Ok(()),
+        Err(error) if is_native_instruction_stale(&error) => {
+            let refreshed = current_native_file_hash(path)?;
+            write_dest_native_file_once(env, path, content, refreshed.as_deref())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn write_dest_native_file_once(
+    env: &TargetEnvironment,
+    path: &Path,
+    content: &str,
+    expected_hash: Option<&str>,
+) -> Result<(), AppError> {
     let request = WriteUserNativeInstructionFileRequest {
         path: path.to_string_lossy().into_owned(),
         content: content.to_string(),
@@ -325,6 +366,10 @@ fn write_dest_native_file(
         }
         Err(error) => Err(error),
     }
+}
+
+fn is_native_instruction_stale(error: &AppError) -> bool {
+    error.to_string().contains("USER_NATIVE_INSTRUCTION_STALE")
 }
 
 fn is_native_path_not_allowed(error: &AppError) -> bool {
@@ -1590,6 +1635,91 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     Push 冻结/传输可达数分钟，对端 Hub 投影可能改写 CLAUDE.md / AGENTS.md；
+    ///     用户已确认覆盖，apply 不得因 preview destHash 过期报 STALE 而拒写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     preview 时 dest=OLD-DEST；apply 前改成 DRIFTED-DEST；断言 Claude succeeded
+    ///     且落盘为 FROM-SRC。
+    #[tokio::test]
+    async fn apply_overwrites_native_file_even_if_dest_hash_drifted_after_preview() {
+        let env = seed_dual_env().await;
+        write(
+            env.source_home.join(".claude/CLAUDE.md").as_path(),
+            "FROM-SRC",
+        );
+        write(
+            env.dest_home.join(".claude/CLAUDE.md").as_path(),
+            "OLD-DEST",
+        );
+
+        let source_inventory = build_local_user_mirror_inventory_with_env(
+            &env.source_state,
+            "src-dev",
+            &env.source_env,
+        )
+        .await
+        .expect("source inventory");
+        let dest_inventory =
+            build_local_user_mirror_inventory_with_env(&env.dest_state, "dst-dev", &env.dest_env)
+                .await
+                .expect("dest inventory");
+        let plan = preview_from_two_inventories(
+            &source_inventory,
+            &dest_inventory,
+            "src-dev",
+            "dst-dev",
+            UserMirrorDirection::Pull,
+        );
+        let claude_write = plan
+            .agents
+            .iter()
+            .find(|agent| agent.target == AgentTarget::Claude)
+            .expect("claude plan")
+            .instruction_writes
+            .iter()
+            .find(|change| change.logical_id == "claude.native.CLAUDE.md")
+            .expect("claude native write");
+        assert_eq!(claude_write.op, UserMirrorChangeOp::Replace);
+        assert_eq!(
+            claude_write.dest_hash.as_deref(),
+            Some(crate::agent_hub::object_store::sha256_hex(b"OLD-DEST").as_str())
+        );
+
+        write(
+            env.dest_home.join(".claude/CLAUDE.md").as_path(),
+            "DRIFTED-DEST",
+        );
+
+        let built = freeze_user_mirror_selection_with_env(
+            &env.source_state,
+            &source_inventory,
+            &env.source_env,
+        )
+        .await
+        .expect("freeze");
+        let results = apply_user_mirror_instructions_with_env(
+            &env.dest_state,
+            &plan,
+            &built.object_bytes,
+            &built.item_bindings,
+            &env.dest_env,
+        )
+        .await
+        .expect("apply");
+        let claude = claude_result(&results);
+        assert_eq!(
+            claude.state,
+            UserMirrorItemState::Succeeded,
+            "drifted dest native file must still be overwritten after confirmed mirror: {claude:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(env.dest_home.join(".claude/CLAUDE.md")).unwrap(),
+            "FROM-SRC"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     解析到白名单外的 logical_id 必须只让该 Agent 失败，其它 Agent 继续写盘。
     ///
     /// Code Logic（这个测试做什么）:
@@ -1762,6 +1892,56 @@ mod tests {
         assert!(
             keep_body.contains("KEEP-SKILL-BODY"),
             "source keep skill body must land on dest native root, got {keep_body:?}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Skill 目录含内部 symlink 时，dest 必须仍能按 packed tree hash 还原；
+    ///     这是生产 Push 对端 `USER_MIRROR_OBJECT_NOT_FOUND` 的最小复现。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源 Skill 含 SKILL.md + 普通文件 + 内部 symlink；apply 后 Claude succeeded，
+    ///     dest native 有 SKILL.md 正文。
+    #[tokio::test]
+    async fn apply_skill_with_inner_symlink_does_not_fail_object_not_found() {
+        let env = seed_dual_env().await;
+        write(
+            env.source_home
+                .join(".claude/skills/linked/SKILL.md")
+                .as_path(),
+            "---\nname: linked\ndescription: has symlink\n---\nLINKED-BODY\n",
+        );
+        write(
+            env.source_home
+                .join(".claude/skills/linked/notes.txt")
+                .as_path(),
+            "notes-body\n",
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                "notes.txt",
+                env.source_home.join(".claude/skills/linked/notes.link"),
+            )
+            .expect("inner symlink");
+        }
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        let (_, _, results) = run_apply_mirror(&env).await;
+        let claude = claude_result(&results);
+        assert_eq!(
+            claude.state,
+            UserMirrorItemState::Succeeded,
+            "inner-symlink skill must apply, got {claude:?}"
+        );
+        let dest_skill = fs::read_to_string(env.dest_home.join(".claude/skills/linked/SKILL.md"))
+            .unwrap_or_default();
+        assert!(
+            dest_skill.contains("LINKED-BODY"),
+            "linked skill body must land on dest, got {dest_skill:?}"
         );
     }
 

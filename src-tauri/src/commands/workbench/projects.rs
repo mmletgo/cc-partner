@@ -793,21 +793,6 @@ pub async fn touch_workbench_project(
     Ok(row.to_dto())
 }
 
-/// 列出项目下的 Git worktree。
-///
-/// Business Logic（为什么需要这个函数）:
-///     Workbench 顶部需要用 worktree 管理层替代项目路径说明，让用户在主工作区和功能 worktree 间切换。
-///
-/// Code Logic（这个函数做什么）:
-///     确保主 worktree 存在，同步 Git 已有 worktree 到 SQLite，再注入实时 Git 状态
-///     与主工作区 collect-merge 资格。
-pub(crate) async fn local_list_workbench_worktrees(
-    state: &AppState,
-    project_id: String,
-) -> Result<Vec<WorkbenchWorktreeDto>, AppError> {
-    local_list_workbench_worktrees_with_git_status(state, project_id, true).await
-}
-
 /// 列出本机 Git worktree，可跳过实时 git status / collect-merge 探测。
 ///
 /// Business Logic（为什么需要这个函数）:

@@ -31,6 +31,7 @@ use crate::agent_hub::snapshot::envelope::{
 use crate::agent_hub::snapshot::portable_builder::{
     bytes_are_legacy_lossy, pack_inventory_item, pack_plugin_item,
 };
+use crate::agent_hub::targets::portable::hash_skill_directory_dereferenced;
 use crate::agent_hub::targets::{TargetEnvironment, TargetPathResolver};
 use crate::agent_hub::user_instructions::{
     extract_slot_text, inspect_user_instruction_workspace_with_env, user_level_mirror_native_paths,
@@ -488,6 +489,14 @@ async fn freeze_one_portable(
             Err(err) => return Err(err),
         }
     };
+    // dest apply 按 packed Skill.tree_manifest_hash 还原；该 hash 来自
+    // hash_skill_directory（跳过 Regular/Escape symlink），与 put_tree 不同。
+    // 必须把 pack 树打进 CAS，否则对端 USER_MIRROR_OBJECT_NOT_FOUND。
+    if item.kind == PortableAssetKind::Skill {
+        if let Some(dir) = portable_tree_dir(item) {
+            record_skill_pack_tree(acc, &dir).await?;
+        }
+    }
     let legacy_lossy = packed.legacy_lossy || bytes_are_legacy_lossy(&packed.bytes);
     if legacy_lossy {
         acc.bindings.push(UserMirrorObjectBinding {
@@ -594,6 +603,44 @@ fn portable_tree_dir(item: &PortableInventoryItemDto) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// 把 `pack_inventory_item` 使用的 Skill 树写入 CAS。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dest apply 按 packed payload 的 `tree_manifest_hash` 还原目录。该 hash 由
+///     `hash_skill_directory_dereferenced` 计算（内部 Regular/Escape symlink 跳过），
+///     与 `put_tree_from_directory`（把 symlink 收成 Symlink 条目）不是同一身份。
+///     漏传 pack 树时对端对每个 Agent 报 `USER_MIRROR_OBJECT_NOT_FOUND`。
+///
+/// Code Logic（这个函数做什么）:
+///     再跑一遍 pack 同源 walk；manifest JSON 与每个 File blob 经 `record_bytes`
+///     进 envelope.objects（已 seen 则幂等）。
+async fn record_skill_pack_tree(acc: &mut FreezeAcc, dir: &Path) -> Result<String, AppError> {
+    let (_, tree_hash, manifest, _) = hash_skill_directory_dereferenced(dir).map_err(|err| {
+        AppError::validation(format!(
+            "USER_MIRROR_SKILL_PACK_TREE:{}:{err}",
+            dir.display()
+        ))
+    })?;
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .map_err(|err| AppError::generic(format!("user_mirror_skill_pack_tree_serialize:{err}")))?;
+    record_bytes(acc, manifest_bytes, false).await?;
+    for entry in manifest.entries {
+        if acc.seen.contains(&entry.blob_hash) {
+            continue;
+        }
+        let rel = entry.path.replace('\\', "/");
+        let path = dir.join(rel.split('/').collect::<PathBuf>());
+        let bytes = fs::read(&path).map_err(|err| {
+            AppError::generic(format!(
+                "user_mirror_skill_pack_tree_blob:{}:{err}",
+                entry.path
+            ))
+        })?;
+        record_bytes(acc, bytes, false).await?;
+    }
+    Ok(tree_hash)
 }
 
 /// 把目录树写入 CAS 并把 manifest/blob 记入 object_bytes。
@@ -916,6 +963,85 @@ mod tests {
                 && !b.blocked
         }));
         assert!(!built.transfer_id.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     dest apply 按 packed Skill 的 `tree_manifest_hash` 从 CAS 还原目录。
+    ///     目录里有 symlink 时 `put_tree_from_directory` 与 `hash_skill_directory`
+    ///     会算出不同 hash；漏传 pack 那份树会让对端整次 Push 报
+    ///     `USER_MIRROR_OBJECT_NOT_FOUND`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Skill 含 SKILL.md + 普通文件 + 指向该文件的 symlink；冻结后解析 packed
+    ///     payload，断言 `tree_manifest_hash` 及其 blob 都在 `object_bytes`。
+    #[tokio::test]
+    async fn freeze_includes_packed_skill_tree_hash_when_directory_has_symlink() {
+        let env = seed_user_mirror_homes().await;
+        write(
+            env.claude_home.join("skills/linked/SKILL.md").as_path(),
+            "---\nname: linked\ndescription: has symlink\n---\nLINKED-BODY\n",
+        );
+        write(
+            env.claude_home.join("skills/linked/notes.txt").as_path(),
+            "notes-body\n",
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                "notes.txt",
+                env.claude_home.join("skills/linked/notes.link"),
+            )
+            .expect("inner symlink");
+        }
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        let built = freeze_user_mirror_selection(&env.app_state, &inventory)
+            .await
+            .expect("freeze");
+        let binding = built
+            .item_bindings
+            .iter()
+            .find(|binding| {
+                binding.target == AgentTarget::Claude
+                    && binding.kind == Some(PortableAssetKind::Skill)
+                    && binding.native_id.as_deref() == Some("linked")
+                    && !binding.blocked
+            })
+            .expect("linked skill binding");
+        let packed = built
+            .object_bytes
+            .get(&binding.object_hash)
+            .expect("packed skill payload");
+        let crate::agent_hub::assets::PortableAssetPayload::Skill(skill) =
+            crate::agent_hub::assets::from_canonical_bytes(packed).expect("skill payload")
+        else {
+            panic!("packed payload must be Skill");
+        };
+        assert!(
+            built.object_bytes.contains_key(&skill.tree_manifest_hash),
+            "packed skill tree hash {} must be in frozen objects (dest apply looks this up)",
+            skill.tree_manifest_hash
+        );
+        let manifest: crate::agent_hub::object_store::TreeManifest =
+            serde_json::from_slice(&built.object_bytes[&skill.tree_manifest_hash])
+                .expect("packed tree manifest");
+        for entry in &manifest.entries {
+            if entry.entry_type != crate::agent_hub::object_store::TreeEntryType::File {
+                continue;
+            }
+            assert!(
+                built.object_bytes.contains_key(&entry.blob_hash),
+                "packed tree blob {} ({}) must be in frozen objects",
+                entry.blob_hash,
+                entry.path
+            );
+        }
     }
 
     /// Business Logic（为什么需要这个测试）:

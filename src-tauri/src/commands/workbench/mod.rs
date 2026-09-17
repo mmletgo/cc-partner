@@ -275,8 +275,8 @@ pub(crate) use projects::{
     get_workbench_remote_path_info_for_state, list_workbench_remote_dir_for_state,
     list_workbench_remote_roots_for_state, list_workbench_worktrees_for_state,
     list_workbench_worktrees_for_state_with_git_status, local_get_workbench_worktree,
-    local_list_workbench_worktrees, local_list_workbench_worktrees_with_git_status,
-    open_workbench_remote_project_for_state, remove_workbench_project_for_state,
+    local_list_workbench_worktrees_with_git_status, open_workbench_remote_project_for_state,
+    remove_workbench_project_for_state,
 };
 
 pub(crate) use sessions::{
