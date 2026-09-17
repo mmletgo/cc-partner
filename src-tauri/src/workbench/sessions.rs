@@ -2228,14 +2228,39 @@ fn create_tmux_window(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     SQLite 里可能留下空白 `backend_window_id`；拼成 `session:` 会让 tmux 杀掉当前窗。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后空串视为 None。
+fn tmux_normalized_window_id(window_id: Option<&str>) -> Option<&str> {
+    window_id.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     关闭幽灵 tab 时，目标 window 可能已不存在，或 `@N` 已被新 tab 占用；
+///     这两种情况都必须 skip destroy，否则会杀掉别人的窗或被 tmux 3.6a
+///     `no current target` 卡住删不掉 SQLite。
+///
+/// Code Logic（这个函数做什么）:
+///     目标不存在，或 identity tag 不是本 session id（legacy 空 tag 仍视为可杀）→ true。
+fn should_skip_kill_for_persisted_tmux_target(
+    target_exists: bool,
+    identity_tag: &str,
+    session_id: &str,
+) -> bool {
+    !target_exists || !tmux_window_identity_allows_restore(identity_tag, session_id)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     关闭 terminal window 时需销毁对应 tmux 后端；R36 H1：已知 window_id 时永远只 kill-window，
 ///     禁止用 count==1 降级 kill-session——并发/重试 close 可能先杀掉目标窗，再把 count==1 误读为
 ///     “只剩自己”而 kill 整个 session，毁掉仍存活的兄弟 terminal。末窗 kill-window 后 tmux 会自行
 ///     回收空 session。仅 legacy 行缺 window_id 且 count 可知时才 kill-session。
 ///     R32 H1：list-windows 探测失败不得降级 kill-session。
+///     空白 window_id 先归一成 None，禁止发出 `session:` 误杀当前窗。
 ///
 /// Code Logic（这个函数做什么）:
-///     - window_id = Some → 始终 `kill-window -t session:window`（忽略 count，含 count=1/None）；
+///     - window_id = Some（非空）→ 始终 `kill-window -t session:window`（忽略 count，含 count=1/None）；
 ///     - window_id = None 且 count 可知 → `kill-session -t session`（legacy 路径）；
 ///     - window_id = None 且 count=None → None（fail closed，不发 kill-session）。
 fn tmux_destroy_backend_args(
@@ -2243,7 +2268,7 @@ fn tmux_destroy_backend_args(
     window_id: Option<&str>,
     window_count: Option<usize>,
 ) -> Option<Vec<String>> {
-    match (window_id, window_count) {
+    match (tmux_normalized_window_id(window_id), window_count) {
         // R36 H1 / R32 H1：有 window_id 永远只杀该 window，永不 kill-session。
         (Some(window_id), _) => Some(vec![
             "kill-window".to_string(),
@@ -2275,7 +2300,7 @@ fn kill_created_tmux_window_only(row: &WorkbenchSessionRow) {
     let Some(session_name) = row.backend_id.as_deref() else {
         return;
     };
-    let Some(window_id) = row.backend_window_id.as_deref() else {
+    let Some(window_id) = tmux_normalized_window_id(row.backend_window_id.as_deref()) else {
         // 无已知 window_id 时 fail closed：禁止 kill-session 盲杀兄弟窗。
         tracing::debug!("TmuxCreateGuard reclaim skipped: missing backend_window_id");
         return;
@@ -2299,6 +2324,7 @@ fn kill_created_tmux_window_only(row: &WorkbenchSessionRow) {
 /// Code Logic（这个函数做什么）:
 ///     - 非 tmux backend / 缺 backend_id → Ok（无需销毁）；
 ///     - tmux backend 但 tmux 不可用 → Err(unavailable)，禁止删元数据；
+///     - 已知 window_id 但 target 缺失或 identity 不是本 tab → Ok（不杀别人的窗）；
 ///     - list-windows 探测 window_count；经 `tmux_destroy_backend_args`：
 ///       有 window_id → 始终 kill-window（R36 H1，含 count==1）；
 ///       无 window_id 且 count 可知 → kill-session（legacy）；
@@ -2310,7 +2336,12 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError>
         // R41 M7：raw/pty 无独立后端可杀；missing-handle 路径不得把 running 当自动成功。
         return raw_pty_kill_persisted_policy(row);
     }
-    let Some(session_name) = row.backend_id.as_deref() else {
+    let Some(session_name) = row
+        .backend_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return Ok(());
     };
     let Some(tmux) = available_tmux_command() else {
@@ -2318,6 +2349,14 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError>
             "tmux_unavailable_for_persisted_backend_kill".to_string(),
         ));
     };
+    let window_id = tmux_normalized_window_id(row.backend_window_id.as_deref());
+    if window_id.is_some() && !tmux_restore_target_usable(&tmux, session_name, window_id, &row.id) {
+        tracing::debug!(
+            session_id = %row.id,
+            "kill_persisted_backend skipped: tmux target missing or owned by another tab"
+        );
+        return Ok(());
+    }
     let window_count = run_tmux_command(
         &tmux,
         &["list-windows", "-t", session_name, "-F", "#{window_id}"],
@@ -2329,9 +2368,7 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError>
             .filter(|line| !line.trim().is_empty())
             .count()
     });
-    let Some(args) =
-        tmux_destroy_backend_args(session_name, row.backend_window_id.as_deref(), window_count)
-    else {
+    let Some(args) = tmux_destroy_backend_args(session_name, window_id, window_count) else {
         // R32 H1 / R35 M3：list-windows 失败且无 window_id → fail closed，不 kill-session，
         // 且返回 Err 阻止调用方删除 SQLite（无法确认可安全销毁）。
         tracing::debug!("kill_persisted_backend skipped: list-windows failed without window_id");
@@ -2347,7 +2384,8 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError>
 ///     这类“已经没了”应视为成功，否则会卡住 barrier、永远删不掉元数据。
 ///
 /// Code Logic（这个函数做什么）:
-///     对 stdout+stderr 做大小写不敏感子串匹配：can't find / no server / no such / not found。
+///     对 stdout+stderr 做大小写不敏感子串匹配：can't find / no server / no such /
+///     not found / no current target（tmux 3.6a 空 persist server 对 `-t` 也报这个）。
 pub(crate) fn tmux_destroy_exit_is_already_gone(stdout: &str, stderr: &str) -> bool {
     let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
     combined.contains("can't find")
@@ -2355,6 +2393,7 @@ pub(crate) fn tmux_destroy_exit_is_already_gone(stdout: &str, stderr: &str) -> b
         || combined.contains("no server")
         || combined.contains("no such")
         || combined.contains("not found")
+        || combined.contains("no current target")
 }
 
 /// Business Logic（为什么需要这个函数）:

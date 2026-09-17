@@ -1659,8 +1659,54 @@ fn tmux_destroy_exit_is_already_gone_detects_common_messages() {
     ));
     assert!(tmux_destroy_exit_is_already_gone("", "no such window: @9"));
     assert!(tmux_destroy_exit_is_already_gone("", "session not found"));
+    assert!(tmux_destroy_exit_is_already_gone("", "no current target"));
+    assert!(tmux_destroy_exit_is_already_gone("No Current Target", ""));
     assert!(!tmux_destroy_exit_is_already_gone("", "permission denied"));
     assert!(!tmux_destroy_exit_is_already_gone("", ""));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     tmux 3.6a 在 `exit-empty off` 的空 server 上对 `-t session:@N` 也报
+///     `no current target`，而不是 can't find；空白 window_id 若拼成 `session:`
+///     会杀掉该 session 的当前窗（别人的 tab）。
+///
+/// Code Logic（这个测试做什么）:
+///     空白 window_id 归一成 None（有 count → kill-session，无 count → fail closed）；
+///     目标不存在或 identity 被其它 tab 占用时 skip destroy。
+#[test]
+fn tmux_destroy_skips_blank_window_and_unowned_target() {
+    assert_eq!(
+        tmux_destroy_backend_args("wt-session", Some(""), Some(1)),
+        Some(vec![
+            "kill-session".to_string(),
+            "-t".to_string(),
+            "wt-session".to_string(),
+        ])
+    );
+    assert_eq!(
+        tmux_destroy_backend_args("wt-session", Some("  "), None),
+        None
+    );
+    assert_eq!(
+        tmux_destroy_backend_args("wt-session", Some("@1"), Some(1)),
+        Some(vec![
+            "kill-window".to_string(),
+            "-t".to_string(),
+            "wt-session:@1".to_string(),
+        ])
+    );
+    assert!(should_skip_kill_for_persisted_tmux_target(
+        false, "s-old", "s-old"
+    ));
+    assert!(should_skip_kill_for_persisted_tmux_target(
+        true, "s-new", "s-old"
+    ));
+    assert!(!should_skip_kill_for_persisted_tmux_target(
+        true, "s-old", "s-old"
+    ));
+    assert!(!should_skip_kill_for_persisted_tmux_target(
+        true, "", "s-old"
+    ));
 }
 
 /// Business Logic（R35 M3 / R41 M7: 为什么需要这个测试）:
