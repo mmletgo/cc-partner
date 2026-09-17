@@ -1020,6 +1020,176 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
     expect(result.current.worktreeBusy).toBeNull();
   });
 
+  test('handleSyncProjectMain success notice auto-dismisses after merge-stage delay', async () => {
+    const local = buildLocalProject({
+      id: 'mac',
+      deviceId: 'mac',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    });
+    const ubuntu = buildLocalProject({
+      id: 'ubuntu',
+      kind: 'remote',
+      deviceId: 'ubuntu',
+      deviceName: 'Ubuntu',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    });
+    const localMain = buildWorktree({
+      id: 'mac-main',
+      projectId: 'mac',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    const ubuntuMain = buildWorktree({
+      id: 'ubuntu-main',
+      projectId: 'ubuntu',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 1,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    fakeWorktreesApi.list.mockImplementation(async (projectId: string) => {
+      if (projectId === 'ubuntu') return [ubuntuMain];
+      return [localMain];
+    });
+    fakeWorktreesApi.push.mockResolvedValue(succeededEnvelope(localMain));
+    fakeWorktreesApi.pull.mockResolvedValue(succeededEnvelope(ubuntuMain));
+
+    const { result } = renderController({
+      activeProjectId: local.id,
+      activeProject: local,
+      projects: [local, ubuntu],
+      activeWorktreeId: 'mac-main',
+      inspectorTab: 'history',
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees(local.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      await result.current.handleSyncProjectMain();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.worktreeSyncNotice).toBe('syncSucceeded:Ubuntu');
+
+    await act(async () => {
+      vi.advanceTimersByTime(2499);
+      await flushMicrotasks();
+    });
+    expect(result.current.worktreeSyncNotice).toBe('syncSucceeded:Ubuntu');
+
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await flushMicrotasks();
+    });
+    expect(result.current.worktreeSyncNotice).toBeNull();
+  });
+
+  test('handleSyncProjectMain success notice clears immediately when switching project', async () => {
+    const local = buildLocalProject({
+      id: 'mac',
+      deviceId: 'mac',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    });
+    const ubuntu = buildLocalProject({
+      id: 'ubuntu',
+      kind: 'remote',
+      deviceId: 'ubuntu',
+      deviceName: 'Ubuntu',
+      gitRemoteFingerprint: 'github.com/org/cc-partner',
+    });
+    const other = buildLocalProject({
+      id: 'other',
+      deviceId: 'other',
+      gitRemoteFingerprint: 'github.com/org/other',
+    });
+    const localMain = buildWorktree({
+      id: 'mac-main',
+      projectId: 'mac',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    const ubuntuMain = buildWorktree({
+      id: 'ubuntu-main',
+      projectId: 'ubuntu',
+      isMain: true,
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 1,
+        conflicts: 0,
+        clean: true,
+        canPush: true,
+      },
+    });
+    fakeWorktreesApi.list.mockImplementation(async (projectId: string) => {
+      if (projectId === 'ubuntu') return [ubuntuMain];
+      return [localMain];
+    });
+    fakeWorktreesApi.push.mockResolvedValue(succeededEnvelope(localMain));
+    fakeWorktreesApi.pull.mockResolvedValue(succeededEnvelope(ubuntuMain));
+
+    const { result, rerender } = renderController({
+      activeProjectId: local.id,
+      activeProject: local,
+      projects: [local, ubuntu],
+      activeWorktreeId: 'mac-main',
+      inspectorTab: 'history',
+    });
+
+    await act(async () => {
+      await result.current.loadWorktrees(local.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      await result.current.handleSyncProjectMain();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.worktreeSyncNotice).toBe('syncSucceeded:Ubuntu');
+
+    rerender(
+      baseControllerProps({
+        activeProjectId: other.id,
+        activeProject: other,
+        projects: [local, ubuntu, other],
+        activeWorktreeId: 'mac-main',
+        inspectorTab: 'history',
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.worktreeSyncNotice).toBeNull();
+  });
+
   test('handlePullWorktree surfaces error and marks failure on throw', async () => {
     const project = buildLocalProject();
     fakeWorktreesApi.pull.mockRejectedValueOnce(new Error('pull failed'));

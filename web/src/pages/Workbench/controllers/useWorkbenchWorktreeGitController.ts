@@ -442,6 +442,12 @@ export function useWorkbenchWorktreeGitController(
     setHookRepair(null);
   }, [activeProjectId, activeWorktreeId]);
 
+  // Business Logic: 同步成功提示绑定当前项目；切到其他项目后不得继续占住 Git 历史区。
+  // Code Logic: 只跟 activeProjectId；同项目切 worktree 仍由 2.5s 自动收起。
+  useEffect(() => {
+    setWorktreeSyncNotice(null);
+  }, [activeProjectId]);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户可能连续发起 merge 或切换项目，旧的自动隐藏计时器不能误清新一轮进度。
@@ -527,6 +533,16 @@ export function useWorkbenchWorktreeGitController(
 
   // Business Logic: 与原 Workbench.tsx 行为一致——组件卸载时取消尚未触发的隐藏计时器。
   useEffect(() => clearMergeStageDismissTimer, [clearMergeStageDismissTimer]);
+
+  // Business Logic: 同步成功/部分成功只是短暂确认，不能一直占住 Git 历史区。
+  // Code Logic: 与 merge stage 同一延迟后清空；notice 变化或卸载时取消旧 timer。
+  useEffect(() => {
+    if (!worktreeSyncNotice) return undefined;
+    const timer = window.setTimeout(() => {
+      setWorktreeSyncNotice(null);
+    }, MERGE_STAGE_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [worktreeSyncNotice]);
 
   /**
    * Business Logic（为什么需要这个函数）:
