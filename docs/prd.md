@@ -187,6 +187,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 **Portable inventory 与 same-agent Pull（当前生产边界）**：
 - Agent Hub 以 observed inventory 为唯一真源，固定四 kind 主 Tab（Skill/命令/Plugin/MCP）；库存自身只保留 search/state/management，target/kind/scope 不再形成第二套 URL 状态
+- Plugin 包内的 Skill / Command / MCP 不进入对应主列表，也不单独启停或卸载；只作为 Plugin 整包管理（启用/停用/卸载）。Plugin 组件 Drawer 仍可只读展示包内构成，供删除预览区分独占与共享引用
 - Hub 从未投影/物化的独立 Skill/Command（上游 CLI 自更新目录，如 `~/.claude/skills`）刷新库存时跟随磁盘哈希，不标漂移、不要求「确认当前版本」；portable-store 附加、物化包、Plugin、MCP 哈希分叉仍标漂移，须用户确认当前版本（只改 Hub 账本，不写磁盘）
 - 无根 `SKILL.md` 的 skill 包（例如 `~/.agents/skills/superpowers/`）扫描时仍展开子项，避免 Grok 等递归加载的嵌套 skill 因包根没有清单而从 Hub 消失；已装备与仓库把同一 `skill:<包>` 合成一行（标题用包名，描述列出子项）。启停/卸下/彻底删除只作用于包根软链，禁止对单个子 skill 拆链
 - 本机原生动作在当前 scan-only manifest 下不可 Apply；stale / blocked / partial / outcomeUnknown 诚实展示，详情动作隐藏时同步展示原因

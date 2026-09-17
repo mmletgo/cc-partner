@@ -224,6 +224,29 @@ describe('portableInventoryPresentation filters', () => {
     expect(visible.some((item) => item.sourceOrigin === 'pluginComponent')).toBe(false);
   });
 
+  test('hides plugin-internal skills even if sourceOrigin leaked as standalone', () => {
+    const leaked = makeItem({
+      inventoryItemId: 'claude-skill-leaked-plugin',
+      kind: 'skill',
+      nativeId: 'ecc-tool',
+      displayName: 'ECC Tool',
+      sourceOrigin: 'standalone',
+      parentPluginInventoryItemId: 'claude-plugin-delta',
+      actualEnabled: true,
+      managementState: 'hubManaged',
+    });
+    const visible = filterPortableInventoryItems(
+      [...catalog, leaked],
+      filters({ kind: 'skill' }),
+    );
+    expect(visible.map((item) => item.inventoryItemId)).not.toContain(
+      'claude-skill-leaked-plugin',
+    );
+    expect(countPortableItemsByKind([...catalog, leaked]).skill).toBe(
+      countPortableItemsByKind(catalog).skill,
+    );
+  });
+
   test('covers all four kind tabs independently', () => {
     expect(filterPortableInventoryItems(catalog, filters({ kind: 'skill' })).map((i) => i.kind)).toEqual([
       'skill',

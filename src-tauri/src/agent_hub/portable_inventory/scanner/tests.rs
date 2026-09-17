@@ -788,7 +788,7 @@ fn scan_finds_four_kinds_per_target_with_enabled_and_plugin_parent() {
         .expect("disabled mcp");
     assert_eq!(off.actual_enabled, Some(false));
 
-    // plugin component has parent; standalone same name remains separate
+    // 同名 standalone skill 仍独立；plugin 包内 skill 不得进 Skill 库存，只留 Plugin 整包。
     let standalone = items
         .iter()
         .find(|i| {
@@ -798,29 +798,20 @@ fn scan_finds_four_kinds_per_target_with_enabled_and_plugin_parent() {
                 && i.source_origin == PortableInventorySourceOrigin::Standalone
         })
         .expect("standalone shared-name");
-    let component = items
-        .iter()
-        .find(|i| {
-            i.target == AgentTarget::Claude
-                && i.kind == PortableAssetKind::Skill
-                && i.native_id == "shared-name"
-                && i.source_origin == PortableInventorySourceOrigin::PluginComponent
-        })
-        .expect("plugin component shared-name");
-    assert_ne!(standalone.inventory_item_id, component.inventory_item_id);
-    assert!(component.parent_plugin_inventory_item_id.is_some());
-    let plugin = items
-        .iter()
-        .find(|i| {
-            i.target == AgentTarget::Claude
-                && i.kind == PortableAssetKind::Plugin
-                && i.native_id == "demo-plugin"
-        })
-        .expect("plugin package");
-    assert_eq!(
-        component.parent_plugin_inventory_item_id.as_deref(),
-        Some(plugin.inventory_item_id.as_str())
+    assert!(standalone.parent_plugin_inventory_item_id.is_none());
+    assert!(
+        !items.iter().any(|i| {
+            i.kind != PortableAssetKind::Plugin
+                && (i.source_origin == PortableInventorySourceOrigin::PluginComponent
+                    || i.parent_plugin_inventory_item_id.is_some())
+        }),
+        "plugin-internal skill/command/mcp must not appear as independently managed inventory"
     );
+    assert!(items.iter().any(|i| {
+        i.target == AgentTarget::Claude
+            && i.kind == PortableAssetKind::Plugin
+            && i.native_id == "demo-plugin"
+    }));
 }
 
 #[test]
@@ -847,7 +838,11 @@ fn filtered_scan_limits_target_kind_and_scope_before_inventory_result() {
     }));
     assert!(items.iter().any(|item| {
         item.native_id == "shared-name"
-            && item.source_origin == PortableInventorySourceOrigin::PluginComponent
+            && item.source_origin == PortableInventorySourceOrigin::Standalone
+    }));
+    assert!(!items.iter().any(|item| {
+        item.source_origin == PortableInventorySourceOrigin::PluginComponent
+            || item.parent_plugin_inventory_item_id.is_some()
     }));
     assert!(!items
         .iter()
@@ -1937,7 +1932,7 @@ fn scan_is_read_only_no_file_mutations() {
 }
 
 #[test]
-fn reconcile_snapshot_from_scan_keeps_standalone_and_component_separate() {
+fn reconcile_snapshot_from_scan_keeps_plugin_package_not_internal_skills() {
     let (_tmp, env) = seed_all_targets_fixture();
     let scopes = user_and_projects(&env.home);
     let (targets, items) = scan_portable_inventory_facts(&env, &scopes).unwrap();
@@ -1951,14 +1946,21 @@ fn reconcile_snapshot_from_scan_keeps_standalone_and_component_separate() {
                 && i.native_id == "shared-name"
         })
         .collect();
-    assert_eq!(shared.len(), 2);
-    assert!(shared.iter().any(|i| {
-        i.source_origin == PortableInventorySourceOrigin::Standalone
-            && i.parent_plugin_inventory_item_id.is_none()
+    assert_eq!(shared.len(), 1);
+    assert_eq!(
+        shared[0].source_origin,
+        PortableInventorySourceOrigin::Standalone
+    );
+    assert!(shared[0].parent_plugin_inventory_item_id.is_none());
+    assert!(snap.items.iter().any(|i| {
+        i.target == AgentTarget::Claude
+            && i.kind == PortableAssetKind::Plugin
+            && i.native_id == "demo-plugin"
     }));
-    assert!(shared.iter().any(|i| {
-        i.source_origin == PortableInventorySourceOrigin::PluginComponent
-            && i.parent_plugin_inventory_item_id.is_some()
+    assert!(!snap.items.iter().any(|i| {
+        i.kind != PortableAssetKind::Plugin
+            && (i.source_origin == PortableInventorySourceOrigin::PluginComponent
+                || i.parent_plugin_inventory_item_id.is_some())
     }));
     assert!(!snap.inventory_snapshot_hash.is_empty());
     assert!(!snap.refreshed_at.is_empty());

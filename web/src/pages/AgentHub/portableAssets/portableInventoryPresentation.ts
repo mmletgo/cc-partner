@@ -3,7 +3,7 @@
  *
  * Business Logic（为什么需要这个模块）:
  *   列表筛选、问题分类与主行动作必须从 observed inventory 纯函数推导，
- *   不依赖 React/API；Plugin component 不得与 standalone 合并计数。
+ *   不依赖 React/API；Plugin 包内资产不得进入 Skill/命令/MCP 主列表或计数。
  *
  * Code Logic（这个模块做什么）:
  *   暴露 filters 默认值、match/filter、kind count、actualState 分类、primary action 解析。
@@ -128,11 +128,14 @@ export function portableInventoryProblemWarnings(
 }
 
 /**
- * Business Logic: Plugin component 在 standalone 列表中不展示/不计数。
- * Code Logic: sourceOrigin === 'pluginComponent' 即视为 component。
+ * Business Logic: Plugin 包内 Skill/Command/MCP 只随 Plugin 整包管理，
+ *   不得进入 Skill/命令/MCP 主列表或 kind 计数。
+ * Code Logic: sourceOrigin === 'pluginComponent' 或挂了 parent plugin id。
  */
 export function isPortablePluginComponent(item: PortableInventoryItemDto): boolean {
-  return item.sourceOrigin === 'pluginComponent';
+  return (
+    item.sourceOrigin === 'pluginComponent' || Boolean(item.parentPluginInventoryItemId)
+  );
 }
 
 /**

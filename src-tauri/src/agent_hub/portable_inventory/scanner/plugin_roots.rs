@@ -1,20 +1,21 @@
 //! portable_inventory/scanner/plugin_roots — Plugin 包扫描与根候选
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     Plugin package 是顶层 Standalone 资产，必须在 inventory 中单列一行并关联包内组件；
+//!     Plugin package 是顶层 Standalone 资产，必须在 inventory 中单列一行；
+//!     包内 Skill/Command/MCP 不作为独立库存项；
 //!     各 CLI Agent 的安装权威（installed_plugins.json / cache manifest / 直装 manifest）不同，
 //!     必须按 target 收敛同一套根候选，禁止一级 read_dir(plugins) 把 cache/data 当成插件包。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `scan_plugin_packages` 遍历 plugin roots 生成 package inventory 行，并把包内组件经
-//!     discovered_to_item 写入同一 items、回填 parent_plugin_inventory_item_id；
+//!     `scan_plugin_packages` 遍历 plugin roots 只生成 package inventory 行；
+//!     包内 Skill/Command/MCP 随 Plugin 整包管理，不写入独立库存项；
 //!     `PluginRootCandidate` 携带 registry 身份与 origin 戳；其余函数负责各 target
 //!     user/project scope 的根发现与跨 Agent 借用重分类。
 
 use super::hashing::{hash_plugin_manifest, hash_plugin_root_cached};
 use super::items::{
-    action_capability_reason, apply_unopted_readonly_store_caps, discovered_to_item,
-    item_capabilities, mutation_gates_for_origin, should_replace_with,
+    action_capability_reason, apply_unopted_readonly_store_caps, item_capabilities,
+    mutation_gates_for_origin, should_replace_with,
 };
 use super::PortableScanScope;
 use crate::{
@@ -47,12 +48,12 @@ use std::{
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Plugin package 是顶层 Standalone 资产，需要单独发现并生成 inventory 行；
-///     同时遍历包内组件（skills/commands/...）的 discovery 并复用 discovered_to_item。
+///     包内 Skill/Command/MCP 只随整包启停/卸载，不得进入对应 kind 主列表。
 ///
 /// Code Logic（这个函数做什么）:
-///     遍历 plugin roots，对每个 package 算 inv_id（source_identity = "standalone"），
-///     按 seen 去重后写入共享 items；组件 discovery 经 discovered_to_item 写入同一 items，
-///     并把 parent_plugin_inventory_item_id 指向当前 package 的 inv_id。
+///     Skill/Command/MCP 查询直接返回；其余遍历 plugin roots，对每个 package 算
+///     inv_id（source_identity = "standalone"），按 seen 去重后写入共享 items。
+///     不扫描、不写入包内组件行。
 #[allow(clippy::too_many_arguments)] // 内部 helper：scope/env/homes/target/evaluated/seen/items/kind 8 段语义独立
 pub(super) fn scan_plugin_packages(
     scope: &PortableScanScope,
@@ -64,6 +65,14 @@ pub(super) fn scan_plugin_packages(
     items: &mut Vec<PortableInventoryItemDto>,
     selected_kind: Option<PortableAssetKind>,
 ) -> Result<(), AppError> {
+    if matches!(
+        selected_kind,
+        Some(PortableAssetKind::Skill)
+            | Some(PortableAssetKind::Command)
+            | Some(PortableAssetKind::Mcp)
+    ) {
+        return Ok(());
+    }
     let target = target_dto.target;
     let roots = plugin_roots_for(target, scope, env, homes);
     let codex_config_root = if target == AgentTarget::Codex && scope.scope_kind != ScopeKind::User {
@@ -264,39 +273,6 @@ pub(super) fn scan_plugin_packages(
                         items[idx] = item;
                     }
                     // 否则丢弃（保留已存在的）
-                }
-            }
-        }
-
-        // Installed plugin roots may live below cache/<marketplace>/<id>/<version> rather than
-        // directly below config_root/plugins. Scan components from the same authoritative roots
-        // so nested installed plugins are visible without treating cache infrastructure as a
-        // package of its own.
-        if selected_kind == Some(PortableAssetKind::Plugin) {
-            continue;
-        }
-        for discovery in
-            crate::agent_hub::targets::portable::scan_plugin_components_readonly_filtered(
-                target,
-                scope.scope_kind,
-                &root,
-                &source.plugin_id,
-                selected_kind.map(PortableAssetKind::to_asset_kind),
-            )?
-        {
-            let Ok(kind) = PortableAssetKind::try_from_asset_kind(discovery.kind) else {
-                continue;
-            };
-            if selected_kind.is_some_and(|selected| selected != kind) {
-                continue;
-            }
-            // 记录写入前 items 长度，判断 discovered_to_item 是否实际新增了一条；
-            // 若新增，再回填 parent_plugin_inventory_item_id。
-            let before = items.len();
-            discovered_to_item(kind, &discovery, scope, target_dto, evaluated, seen, items);
-            if items.len() > before {
-                if let Some(last) = items.last_mut() {
-                    last.parent_plugin_inventory_item_id = Some(inv_id.clone());
                 }
             }
         }

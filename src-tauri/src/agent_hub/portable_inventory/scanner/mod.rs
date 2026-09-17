@@ -7,6 +7,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     调 AssetAdapter::scan_portable_assets + 只读 Plugin package 发现；
+//!     Plugin 包内 Skill/Command/MCP 不进入独立库存，只保留 Plugin 整包行；
 //!     将 `DiscoveredPortableAsset` 转为 `PortableInventoryItemDto`；
 //!     inspect：scan → ensure_managed（ledger）→ reconcile；unopted 项目只读 mutation 能力。
 //!     本目录按职责拆分：`plugin_roots`（Plugin 包扫描与根候选）、`hashing`（确定性树哈希）、
@@ -45,10 +46,10 @@ use crate::{
             CapabilitySupport, EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
         },
         targets::{
-            AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
-            CursorInstructionAdapter, GeminiInstructionAdapter, GrokInstructionAdapter,
-            LocalScopeMapping, OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment,
-            TargetPathResolver, TargetProbe,
+            portable::PortableOriginKind, AssetAdapter, ClaudeInstructionAdapter,
+            CodexInstructionAdapter, CursorInstructionAdapter, GeminiInstructionAdapter,
+            GrokInstructionAdapter, LocalScopeMapping, OpenCodeInstructionAdapter,
+            PiInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
         },
     },
     error::AppError,
@@ -381,7 +382,7 @@ pub fn scan_portable_inventory_facts_query(
                     }
                 }
             };
-            // Plugin package roots（package 本体 + 组件 parent 关联）。MCP 不从这些目录发现。
+            // Plugin package 只进 Plugin 库存；包内 Skill/Command/MCP 不进对应 kind 主列表。
             if query.kind != Some(PortableAssetKind::Mcp) {
                 scan_plugin_packages(
                     scope,
@@ -401,6 +402,12 @@ pub fn scan_portable_inventory_facts_query(
                     continue;
                 };
                 if query.kind.is_some_and(|selected| selected != kind) {
+                    continue;
+                }
+                // Plugin 包内资产随整包管理，adapter 全量扫描里的 component 也丢弃。
+                if disc.origin.origin_kind == PortableOriginKind::Plugin
+                    || disc.origin.parent_plugin_id.is_some()
+                {
                     continue;
                 }
                 discovered_to_item(
