@@ -27,6 +27,8 @@ import {
 import {
   applyWorkspaceRestorePlan,
   classifyLayoutApplyError,
+  resolvedRestorePlanProjectId,
+  shouldAbortWorkspaceRestore,
   type WorkspaceRestorePlan,
   type WorkspaceRestoreSummary,
 } from './workspaceRestore';
@@ -175,6 +177,10 @@ export function useWorkspaceSafeRestore(
   const restoreRanRef = useRef(false);
   const suppressContextResetRef = useRef(false);
   const layoutAutosaveRef = useRef<WorkspaceLayoutAutosaveCoordinator | null>(null);
+  const urlProjectIdRef = useRef(urlProjectId);
+  urlProjectIdRef.current = urlProjectId;
+  const latestProjectIdRef = useRef(activeProjectId);
+  latestProjectIdRef.current = activeProjectId;
   const selectionRef = useRef({
     activeProjectId,
     activeWorktreeId,
@@ -314,12 +320,31 @@ export function useWorkspaceSafeRestore(
        * 默认尊重快照中的 `workspaceView`。
        */
       forceTerminalWorkspaceView?: boolean;
+      /**
+       * 初始 restore 传 true：preflight 期间用户点选或 URL 指定的项目压过旧 layout。
+       * 命名 snapshot 是显式 apply，不得因 URL leftover 被取消。
+       */
+      yieldToUserSelection?: boolean;
     }): Promise<WorkspaceRestoreSummary | null> => {
       suppressContextResetRef.current = true;
       layoutAutosaveRef.current?.pause();
       const bridgeOptions = { forceTerminalWorkspaceView: options.forceTerminalWorkspaceView };
       try {
         const plan = await options.loadPlan();
+        if (options.yieldToUserSelection) {
+          const abortReason = shouldAbortWorkspaceRestore({
+            previousProjectId: options.previous.projectId,
+            currentProjectId: latestProjectIdRef.current,
+            urlProjectId: urlProjectIdRef.current,
+            planProjectId: resolvedRestorePlanProjectId(plan),
+          });
+          if (abortReason) {
+            if (abortReason === 'url' && urlProjectIdRef.current) {
+              await selectProjectFromDeepLink(urlProjectIdRef.current);
+            }
+            return null;
+          }
+        }
         let appliedPlan = plan;
         try {
           const applied = await workbenchApi.layout.apply(plan);
@@ -354,7 +379,7 @@ export function useWorkspaceSafeRestore(
         });
       }
     },
-    [buildBridge],
+    [buildBridge, selectProjectFromDeepLink],
   );
 
   useEffect(() => {
@@ -419,16 +444,18 @@ export function useWorkspaceSafeRestore(
         const summary = await runRestoreWithUi({
           previous,
           loadPlan: async () => {
-            if (urlProjectId) {
+            const urlId = urlProjectIdRef.current;
+            if (urlId) {
               const existing = await workbenchApi.layout.get(layoutSlotKey);
-              if (existing && existing.projectId !== urlProjectId) {
-                await selectProjectFromDeepLink(urlProjectId);
+              if (existing && existing.projectId !== urlId) {
+                await selectProjectFromDeepLink(urlId);
                 throw new Error('workspace_layout_url_project_overrides_slot');
               }
             }
             return workbenchApi.layout.preflight(layoutSlotKey);
           },
           forceTerminalWorkspaceView: true,
+          yieldToUserSelection: true,
         });
         if (summary && !summary.silent) setRestoreSummary(summary);
       } catch {

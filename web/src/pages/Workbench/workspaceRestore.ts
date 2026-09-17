@@ -88,6 +88,54 @@ export interface WorkspaceRestoreSummary {
 }
 
 /**
+ * 用户在 restore 飞行中改选项目时，restore 应让位的原因。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   侧栏点击或 URL projectId 必须压过上次 autosave 的 layout，否则工作台会跳回最后一个项目。
+ */
+export type WorkspaceRestoreAbortReason = 'url' | 'selection';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   启动 restore 是异步的（preflight / server apply）。期间用户可能已点了另一个项目，
+ *   或 URL 已带明确 projectId；继续套用旧 layout 会把右侧工作台切走。
+ *
+ * Code Logic（这个函数做什么）:
+ *   URL 与 plan 项目不一致 → `'url'`；当前选中相对 restore 开始时已变化 → `'selection'`；
+ *   否则返回 null。
+ */
+export function shouldAbortWorkspaceRestore(input: {
+  previousProjectId: string | null;
+  currentProjectId: string | null;
+  urlProjectId: string | null;
+  planProjectId: string | null;
+}): WorkspaceRestoreAbortReason | null {
+  const url = input.urlProjectId?.trim() || null;
+  const current = input.currentProjectId?.trim() || null;
+  const previous = input.previousProjectId?.trim() || null;
+  const plan = input.planProjectId?.trim() || null;
+  if (url && plan && url !== plan) return 'url';
+  if (current && previous !== current) return 'selection';
+  return null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   abort 判断需要 plan 的目标项目，resolved 与 project action 可能只填一侧。
+ *
+ * Code Logic（这个函数做什么）:
+ *   优先 resolvedProjectId，否则取第一条 project action 的 resourceId。
+ */
+export function resolvedRestorePlanProjectId(
+  plan: Pick<WorkspaceRestorePlan, 'resolvedProjectId' | 'actions'>,
+): string | null {
+  const resolved = plan.resolvedProjectId?.trim() || null;
+  if (resolved) return resolved;
+  const action = plan.actions.find((item) => item.target === 'project');
+  return action?.resourceId?.trim() || null;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   preflight 完成前不得改 UI；应用顺序固定。
  *

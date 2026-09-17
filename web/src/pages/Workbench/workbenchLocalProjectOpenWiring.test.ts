@@ -53,4 +53,32 @@ describe('workbench local project open wiring', () => {
       'launch surface empty and continue local pickers must both inject addProjectFromPath',
     );
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   添加项目后若只进 `/workbench`，restore 会用上次 layout 盖掉刚打开的项目。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言侧栏与启动面的 onProjectOpened 把 project.id 写进 workbench deep link。
+   */
+  test('opening a project from pickers navigates with the new projectId', () => {
+    const rail = readFileSync(
+      new URL('../../components/domain/WorkbenchProjectRail/WorkbenchProjectRail.tsx', import.meta.url),
+      'utf8',
+    );
+    const launch = readFileSync(new URL('./WorkbenchLaunchSurface.tsx', import.meta.url), 'utf8');
+
+    assert(
+      !rail.includes("navigate('/workbench')"),
+      'project rail must not navigate to bare /workbench after opening a project',
+    );
+    assert(
+      rail.includes('onProjectOpened={(project) =>') && rail.includes('projectId: project.id'),
+      'project rail picker must put the opened project id on the workbench URL',
+    );
+    assert(
+      launch.includes('onProjectOpened={(project) =>') && launch.includes('projectId: project.id'),
+      'launch surface picker must put the opened project id on the workbench URL',
+    );
+  });
 });

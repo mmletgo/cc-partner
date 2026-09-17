@@ -111,7 +111,7 @@ interface HookParams {
 
 interface HarnessReturn {
   hook: { readonly current: UseWorkspaceSafeRestoreResult };
-  rerender: () => void;
+  rerender: (next?: Partial<HookParams>) => void;
   calls: {
     setWorkspaceView: WorkbenchFileWorkspaceView[];
     setInspectorTab: WorkbenchInspectorTab[];
@@ -163,39 +163,43 @@ function makeHarness(params: HookParams): HarnessReturn {
       current: params.activeWorktreeId,
     } as React.MutableRefObject<string | null>,
   };
-  // Keep refs in sync with current params so post-apply code reads latest values.
-  refs.activeProjectIdRef.current = params.activeProjectId;
-  refs.activeWorktreeIdRef.current = params.activeWorktreeId;
 
-  const {
-    result: hook,
-    rerender,
-  } = renderHook<UseWorkspaceSafeRestoreResult, unknown>(() =>
-    useWorkspaceSafeRestore({
-      projectsLoading: params.projectsLoading,
-      projectsLength: params.projectsLength,
-      activeProjectId: params.activeProjectId,
-      activeWorktreeId: params.activeWorktreeId,
-      activeSessionId: params.activeSessionId,
-      workspaceView: params.workspaceView,
-      inspectorTab: params.inspectorTab,
-      browserTargetUrl: params.browserTargetUrl,
-      dirtyEditor: params.dirtyEditor,
-      activeProjectIdRef: refs.activeProjectIdRef,
-      activeWorktreeIdRef: refs.activeWorktreeIdRef,
-      selectProjectFromDeepLink,
-      setActiveWorktreeId,
-      focusSession,
-      setWorkspaceView,
-      setInspectorTab,
-      setBrowserTargetUrl,
-      layoutSlotKey: params.layoutSlotKey,
-      urlProjectId: params.urlProjectId,
-      browserEnabled: params.browserEnabled ?? true,
-    }),
+  const { result: hook, rerender } = renderHook(
+    (hookParams: HookParams) => {
+      refs.activeProjectIdRef.current = hookParams.activeProjectId;
+      refs.activeWorktreeIdRef.current = hookParams.activeWorktreeId;
+      return useWorkspaceSafeRestore({
+        projectsLoading: hookParams.projectsLoading,
+        projectsLength: hookParams.projectsLength,
+        activeProjectId: hookParams.activeProjectId,
+        activeWorktreeId: hookParams.activeWorktreeId,
+        activeSessionId: hookParams.activeSessionId,
+        workspaceView: hookParams.workspaceView,
+        inspectorTab: hookParams.inspectorTab,
+        browserTargetUrl: hookParams.browserTargetUrl,
+        dirtyEditor: hookParams.dirtyEditor,
+        activeProjectIdRef: refs.activeProjectIdRef,
+        activeWorktreeIdRef: refs.activeWorktreeIdRef,
+        selectProjectFromDeepLink,
+        setActiveWorktreeId,
+        focusSession,
+        setWorkspaceView,
+        setInspectorTab,
+        setBrowserTargetUrl,
+        layoutSlotKey: hookParams.layoutSlotKey,
+        urlProjectId: hookParams.urlProjectId,
+        browserEnabled: hookParams.browserEnabled ?? true,
+      });
+    },
+    { initialProps: params },
   );
 
-  return { hook, rerender, calls, refs };
+  return {
+    hook,
+    rerender: (next) => rerender({ ...params, ...next }),
+    calls,
+    refs,
+  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -741,5 +745,56 @@ describe('useWorkspaceSafeRestore — apply failure rolls back previous view', (
     expect(layoutApi.preflight).not.toHaveBeenCalled();
     expect(layoutApi.apply).not.toHaveBeenCalled();
     expect(calls.selectProjectFromDeepLink).toEqual(['url-p']);
+  });
+
+  test('does not apply slot project after the user switches project during preflight', async () => {
+    vi.useFakeTimers();
+    let resolvePreflight: ((plan: WorkspaceRestorePlan) => void) | undefined;
+    layoutApi.preflight.mockImplementation(
+      () =>
+        new Promise<WorkspaceRestorePlan>((resolve) => {
+          resolvePreflight = resolve;
+        }),
+    );
+
+    const harness = makeHarness({
+      projectsLoading: false,
+      projectsLength: 2,
+      activeProjectId: 'last-layout',
+      activeWorktreeId: null,
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      dirtyEditor: false,
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(layoutApi.preflight).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      harness.rerender({
+        activeProjectId: 'clicked',
+        urlProjectId: 'clicked',
+      });
+    });
+
+    await act(async () => {
+      resolvePreflight?.(
+        buildPlan({
+          actions: [
+            { target: 'project', resourceId: 'last-layout', outcome: 'select' },
+            { target: 'workspaceView', resourceId: 'terminal', outcome: 'select' },
+          ],
+        }),
+      );
+      await vi.runAllTimersAsync();
+    });
+
+    expect(layoutApi.apply).not.toHaveBeenCalled();
+    expect(harness.calls.selectProjectFromDeepLink).not.toContain('last-layout');
+    expect(harness.calls.selectProjectFromDeepLink).toEqual(['clicked']);
   });
 });

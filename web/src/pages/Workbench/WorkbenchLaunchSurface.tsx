@@ -25,6 +25,7 @@ import type {
   WorkbenchLaunchSession,
   WorkbenchLaunchTask,
   WorkbenchLaunchTransfer,
+  WorkbenchProject,
 } from '@/lib/types';
 import { buildWorkbenchDeepLink } from './workbenchDeepLink';
 import type {
@@ -272,6 +273,26 @@ export function WorkbenchLaunchSurface({
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   启动面添加项目后同样要带 projectId，避免 restore 用上次 layout 盖掉刚打开的项目。
+   *
+   * Code Logic（这个函数做什么）:
+   *   navigate `/workbench?projectId=`。
+   */
+  const enterWorkbenchProject = useCallback(
+    (project: WorkbenchProject) => {
+      navigate(
+        buildWorkbenchDeepLink({
+          projectId: project.id,
+          worktreeId: null,
+          sessionId: null,
+        }),
+      );
+    },
+    [navigate],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   点击最近项目应激活该项目进入正常 Workbench chrome。
    *
    * Code Logic（这个函数做什么）:
@@ -349,8 +370,9 @@ export function WorkbenchLaunchSurface({
             openProject={openRemoteProject}
             onCancel={closeRemotePicker}
             onOpenBusyChange={setRemoteOpenBusy}
-            onProjectOpened={() => {
+            onProjectOpened={(project) => {
               closeRemotePicker({ force: true });
+              enterWorkbenchProject(project);
             }}
           />
         </Dialog>
@@ -372,8 +394,9 @@ export function WorkbenchLaunchSurface({
             openLocalProject={addProjectFromPath}
             onCancel={closeLocalPicker}
             onOpenBusyChange={setLocalOpenBusy}
-            onProjectOpened={() => {
+            onProjectOpened={(project) => {
               closeLocalPicker({ force: true });
+              enterWorkbenchProject(project);
             }}
           />
         </Dialog>
@@ -551,8 +574,9 @@ export function WorkbenchLaunchSurface({
           openProject={openRemoteProject}
           onCancel={closeRemotePicker}
           onOpenBusyChange={setRemoteOpenBusy}
-          onProjectOpened={() => {
+          onProjectOpened={(project) => {
             closeRemotePicker({ force: true });
+            enterWorkbenchProject(project);
           }}
         />
       </Dialog>
@@ -574,8 +598,9 @@ export function WorkbenchLaunchSurface({
           openLocalProject={addProjectFromPath}
           onCancel={closeLocalPicker}
           onOpenBusyChange={setLocalOpenBusy}
-          onProjectOpened={() => {
+          onProjectOpened={(project) => {
             closeLocalPicker({ force: true });
+            enterWorkbenchProject(project);
           }}
         />
       </Dialog>

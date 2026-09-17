@@ -14,8 +14,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
@@ -107,6 +107,36 @@ vi.mock('@/api/workbench', () => ({
   },
 }));
 
+vi.mock('@/components/domain/WorkbenchRemoteProjectPicker', () => ({
+  WorkbenchRemoteProjectPicker: ({
+    onProjectOpened,
+    source,
+  }: {
+    onProjectOpened: (project: WorkbenchProject) => void;
+    source?: string;
+  }) => (
+    <button
+      type="button"
+      data-testid={source === 'local' ? 'mock-open-local-project' : 'mock-open-remote-project'}
+      onClick={() =>
+        onProjectOpened({
+          id: source === 'local' ? 'added-local' : 'added-remote',
+          name: source === 'local' ? 'added-local-repo' : 'added-remote-repo',
+          path: source === 'local' ? '/tmp/added-local' : '/srv/added-remote',
+          kind: source === 'local' ? 'local' : 'remote',
+          deviceId: source === 'local' ? 'local' : 'dev-hk',
+          deviceName: source === 'local' ? '本机' : 'HK-Mac',
+          lastOpenedAt: '2026-07-13T00:00:00.000Z',
+          createdAt: '2026-07-13T00:00:00.000Z',
+          updatedAt: '2026-07-13T00:00:00.000Z',
+        })
+      }
+    >
+      mock-open
+    </button>
+  ),
+}));
+
 const freshRestartPreviewBase = {
   sessions: [],
   workbenchTmuxSessionCount: 0,
@@ -155,6 +185,19 @@ function buildProject(overrides: Partial<WorkbenchProject> = {}): WorkbenchProje
 }
 
 /**
+ * Business Logic（为什么需要这个探针）:
+ *   点击项目后必须带 projectId 进工作台，否则 restore 会用上次 layout 盖掉刚选的项目。
+ *
+ * Code Logic（这个组件做什么）:
+ *   把当前 pathname+search 写到可变盒子，供断言读取。
+ */
+function LocationProbe(props: { box: { path: string } }) {
+  const location = useLocation();
+  props.box.path = `${location.pathname}${location.search}`;
+  return null;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   契约测试需挂载路由、i18n 与项目上下文。
  *
@@ -183,10 +226,12 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     openProjectInNewWindow: vi.fn(async () => undefined),
     ...partial,
   };
+  const locationBox = { path: '' };
 
   render(
     <I18nextProvider i18n={i18n}>
       <MemoryRouter>
+        <LocationProbe box={locationBox} />
         <WorkbenchProjectsContext.Provider value={value}>
           <WorkbenchAgentHintsContext.Provider value={hintContextValue()}>
             <WorkbenchProjectRail />
@@ -196,7 +241,7 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     </I18nextProvider>,
   );
 
-  return value;
+  return { ...value, locationBox };
 }
 
 describe('WorkbenchProjectRail discovery IA', () => {
@@ -267,6 +312,42 @@ describe('WorkbenchProjectRail discovery IA', () => {
     fireEvent.click(screen.getByRole('button', { name: /occupied-repo/ }));
     expect(ctx.selectProject).toHaveBeenCalledWith(occupied);
     expect(screen.getByText('已在其他窗口')).toBeTruthy();
+    await waitFor(() => {
+      expect(ctx.selectProject).toHaveBeenCalledTimes(1);
+    });
+    expect(ctx.locationBox.path).toBe('/');
+  });
+
+  test('clicking a project navigates to workbench with that projectId so restore cannot overwrite it', async () => {
+    const last = buildProject({ id: 'last-layout', name: 'last-repo', path: '/tmp/last' });
+    const clicked = buildProject({ id: 'clicked', name: 'clicked-repo', path: '/tmp/clicked' });
+    const ctx = renderRail({
+      projects: [clicked, last],
+      activeProjectId: last.id,
+      activeProject: last,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /clicked-repo/ }));
+    expect(ctx.selectProject).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'clicked' }),
+    );
+    await waitFor(() => {
+      expect(ctx.locationBox.path).toBe('/workbench?projectId=clicked');
+    });
+  });
+
+  test('opening a local project from the picker navigates with that projectId', () => {
+    const ctx = renderRail({ projects: [] });
+    fireEvent.click(screen.getByRole('button', { name: '添加本机项目' }));
+    fireEvent.click(screen.getByTestId('mock-open-local-project'));
+    expect(ctx.locationBox.path).toBe('/workbench?projectId=added-local');
+  });
+
+  test('opening a remote project from the picker navigates with that projectId', () => {
+    const ctx = renderRail({ projects: [] });
+    fireEvent.click(screen.getByRole('button', { name: '选择局域网项目' }));
+    fireEvent.click(screen.getByTestId('mock-open-remote-project'));
+    expect(ctx.locationBox.path).toBe('/workbench?projectId=added-remote');
   });
 
   test('does not render agent exception badge even when fleet reports needs-input', () => {

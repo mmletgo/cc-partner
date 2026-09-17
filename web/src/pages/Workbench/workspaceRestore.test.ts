@@ -7,6 +7,8 @@ import {
   classifyLayoutApplyError,
   formatRestoreNotice,
   isTransientRestoreNotice,
+  resolvedRestorePlanProjectId,
+  shouldAbortWorkspaceRestore,
   type WorkspaceRestoreBridge,
   type WorkspaceRestorePlan,
   type WorkspaceRestoreSummary,
@@ -175,6 +177,48 @@ describe('applyWorkspaceRestorePlan', () => {
     });
     expect(rolling.calls).toContain('rollback');
     expect(summary?.reasons).toContain('applyException');
+  });
+
+  it('aborts restore when url project differs from the slot plan', () => {
+    expect(
+      shouldAbortWorkspaceRestore({
+        previousProjectId: 'last-layout',
+        currentProjectId: 'last-layout',
+        urlProjectId: 'clicked',
+        planProjectId: 'last-layout',
+      }),
+    ).toBe('url');
+  });
+
+  it('aborts restore when the user switches project during preflight', () => {
+    expect(
+      shouldAbortWorkspaceRestore({
+        previousProjectId: 'last-layout',
+        currentProjectId: 'clicked',
+        urlProjectId: null,
+        planProjectId: 'last-layout',
+      }),
+    ).toBe('selection');
+  });
+
+  it('does not abort restore when selection still matches the slot', () => {
+    expect(
+      shouldAbortWorkspaceRestore({
+        previousProjectId: 'last-layout',
+        currentProjectId: 'last-layout',
+        urlProjectId: null,
+        planProjectId: 'last-layout',
+      }),
+    ).toBeNull();
+  });
+
+  it('reads plan project from the project action when resolved id is empty', () => {
+    expect(
+      resolvedRestorePlanProjectId({
+        resolvedProjectId: null,
+        actions: [{ target: 'project', resourceId: 'last-layout', outcome: 'select' }],
+      }),
+    ).toBe('last-layout');
   });
 
   it('skips mobile auto-apply of desktop layout', async () => {

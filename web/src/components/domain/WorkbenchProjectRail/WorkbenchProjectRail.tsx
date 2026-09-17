@@ -8,7 +8,7 @@
  * Code Logic（这个组件做什么）:
  *   渲染设置菜单项下方的项目列表、window/pane 统计、本机/远端添加入口和项目移除操作；
  *   空态打开本机/远端应用内目录选择器；
- *   点击项目后选择项目并跳转 `/workbench`，保持 deep link 语义。
+ *   点击项目后选择项目并跳转 `/workbench?projectId=`，避免 restore 用上次 layout 盖掉刚选的项目。
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  *   「全新启动连接」弹窗按需 lazy，避免把确认 UI 打进 AppShell 首屏。
  */
@@ -53,6 +53,7 @@ import {
   pickDisplayMember,
 } from '@/lib/workbenchProjectGroups';
 import type { WorkbenchProject } from '@/lib/types';
+import { buildWorkbenchDeepLink } from '@/pages/Workbench/workbenchDeepLink';
 import styles from './WorkbenchProjectRail.module.css';
 
 const WorkbenchFreshRestartDialog = lazy(async () => {
@@ -257,6 +258,26 @@ export function WorkbenchProjectRail() {
     setSourcePickerOpen(false);
     window.setTimeout(() => addProjectButtonRef.current?.focus(), 0);
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   点选或添加项目后必须带 projectId 进工作台，否则 restore 会用上次 layout 盖掉刚打开的项目。
+   *
+   * Code Logic（这个函数做什么）:
+   *   navigate `/workbench?projectId=`。
+   */
+  const enterWorkbenchProject = useCallback(
+    (project: WorkbenchProject) => {
+      navigate(
+        buildWorkbenchDeepLink({
+          projectId: project.id,
+          worktreeId: null,
+          sessionId: null,
+        }),
+      );
+    },
+    [navigate],
+  );
 
 
 
@@ -646,7 +667,7 @@ export function WorkbenchProjectRail() {
                 }
                 onClick={() => {
                   void selectProject(project).then(() => {
-                    if (!occupiedElsewhere) navigate('/workbench');
+                    if (!occupiedElsewhere) enterWorkbenchProject(project);
                   });
                 }}
               >
@@ -812,9 +833,9 @@ export function WorkbenchProjectRail() {
           openProject={openRemoteProject}
           onCancel={closeRemotePicker}
           onOpenBusyChange={setRemoteOpenBusy}
-          onProjectOpened={() => {
+          onProjectOpened={(project) => {
             closeRemotePicker({ force: true });
-            navigate('/workbench');
+            enterWorkbenchProject(project);
           }}
         />
       </Dialog>
@@ -837,9 +858,9 @@ export function WorkbenchProjectRail() {
           openLocalProject={addProjectFromPath}
           onCancel={closeLocalPicker}
           onOpenBusyChange={setLocalOpenBusy}
-          onProjectOpened={() => {
+          onProjectOpened={(project) => {
             closeLocalPicker({ force: true });
-            navigate('/workbench');
+            enterWorkbenchProject(project);
           }}
         />
       </Dialog>
