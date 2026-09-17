@@ -24,8 +24,8 @@
  *   - 暴露 loadWorktrees / loadGitHistory / handleOpenCreateWorktree / handleCancelCreateWorktree /
  *     handleCreateWorktree / handleCommitWorktree / handlePullWorktree / handlePushWorktree / handleMergeWorktree /
  *     handleRemoveWorktree / clearMergeStagePanel 操作函数。
- *   - loadGitHistory 只拉当前 worktree 提交，不再串行等待 worktrees.list / git status；
- *     外部清理后的孤儿入口由 loadWorktrees 对账（项目切换与 mutation 后仍会跑）。
+ *   - loadGitHistory 默认只拉当前 worktree 提交，不串行等待 worktrees.list / git status；
+ *     用户点刷新时传 reconcileWorktrees，先对账 live git status 再拉提交。
  *   - 注册 workbench:merge-progress 事件订阅（按 payload project/worktree 写入对应快照）。
  *
  * 不复制邻接 controller 状态：project / session / file / application / prompt optimizer 状态仍归
@@ -93,6 +93,19 @@ import type { WorkbenchTerminalBridge } from './useWorkbenchTerminalController';
  * controller 用的 worktree 操作 busy 标记；与原 Workbench.tsx 内部使用的 string 标记保持一致。
  */
 export type WorktreeBusyKind = 'create' | 'commit' | 'push' | 'pull' | 'merge' | 'remove' | 'sync';
+
+/**
+ * loadGitHistory 可选行为。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   切项目自动拉历史必须跳过 git status；用户点刷新则要同时更新代码变更与 worktree 状态。
+ *
+ * Code Logic（字段说明）:
+ *   reconcileWorktrees 为 true 时先 best-effort loadWorktrees，再按对账后的 worktree 拉提交。
+ */
+export interface LoadGitHistoryOptions {
+  reconcileWorktrees?: boolean;
+}
 
 /**
  * unknown 后保留的稳定 operation 锁。
@@ -256,7 +269,7 @@ export interface WorkbenchWorktreeGitControllerResult {
   setGitHistoryError: (next: string | null) => void;
   /** 返回对账后的列表；stale/失败时 null（调用方可忽略返回值）。 */
   loadWorktrees: (projectId: string) => Promise<WorkbenchWorktree[] | null>;
-  loadGitHistory: () => Promise<void>;
+  loadGitHistory: (options?: LoadGitHistoryOptions) => Promise<void>;
   handleOpenCreateWorktree: () => void;
   handleCancelCreateWorktree: () => void;
   handleCreateWorktree: () => Promise<void>;
@@ -601,14 +614,14 @@ export function useWorkbenchWorktreeGitController(
   /**
    * Business Logic（为什么需要这个函数）:
    *   Git 历史 tab 与 commit/push/merge 完成后需要刷新当前 worktree 的提交历史；多 worktree 场景下旧响应不能覆盖。
-   *   外部清理（rm -rf / git worktree prune）后的孤儿导航入口也应在刷新历史时消失，因此每次刷新先对账 worktree。
+   *   用户点刷新时还要看到最新 dirty/ahead 与 worktree 列表，因此可选先对账 worktrees.list。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 无 active project 时清空 commits/error/loading 并返回；
-   *   2. 直接 git.listCommits(projectId, current worktreeId, 30)，不串行等待 worktrees.list；
-   *   3. project/worktree 切换时丢弃响应。
+   *   1. 无 active project 时清空 error/loading 并返回；
+   *   2. reconcileWorktrees 时 best-effort loadWorktrees（失败不挡历史刷新）；active 已被 prune 则用 list[0]；
+   *   3. 再 git.listCommits(projectId, worktreeId, 30)；project/worktree 切换时丢弃响应。
    */
-  const loadGitHistory = useCallback(async (): Promise<void> => {
+  const loadGitHistory = useCallback(async (options?: LoadGitHistoryOptions): Promise<void> => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) {
       setGitHistoryError(null);
@@ -620,7 +633,21 @@ export function useWorkbenchWorktreeGitController(
       return;
     }
 
-    const worktreeId = activeWorktreeIdRef.current;
+    let reconciled: WorkbenchWorktree[] | null = null;
+    if (options?.reconcileWorktrees) {
+      reconciled = await loadWorktrees(projectId);
+      if (!isCurrentProject(projectId) || activeProjectIdRef.current !== projectId) {
+        return;
+      }
+    }
+
+    let worktreeId = activeWorktreeIdRef.current;
+    if (reconciled) {
+      if (!(worktreeId && reconciled.some((worktree) => worktree.id === worktreeId))) {
+        worktreeId = reconciled[0]?.id ?? null;
+      }
+    }
+
     const requestKey = gitHistoryCacheKey(projectId, worktreeId);
     const requestSeq = (gitHistoryRequestSeqRef.current[requestKey] ?? 0) + 1;
     gitHistoryRequestSeqRef.current[requestKey] = requestSeq;
@@ -628,7 +655,21 @@ export function useWorkbenchWorktreeGitController(
     const isHistoryRequestCurrent = (): boolean => {
       if (!isCurrentProject(projectId)) return false;
       if (!isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)) return false;
-      return activeWorktreeIdRef.current === worktreeId;
+      const current = activeWorktreeIdRef.current;
+      if (current === worktreeId) return true;
+      if (
+        reconciled
+        && worktreeId === (reconciled[0]?.id ?? null)
+        && current !== null
+        && !reconciled.some((worktree) => worktree.id === current)
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const writeCommits = (next: WorkbenchGitCommit[]): void => {
+      setGitCommitsByKey((prev) => ({ ...prev, [requestKey]: next }));
     };
 
     try {
@@ -638,14 +679,14 @@ export function useWorkbenchWorktreeGitController(
       if (!isHistoryRequestCurrent()) {
         return;
       }
-      setGitCommits(commits);
+      writeCommits(commits);
       markRequestSuccess(projectId);
     } catch (error) {
       if (!isHistoryRequestCurrent()) {
         return;
       }
       markRequestFailure(projectId, error);
-      setGitCommits([]);
+      writeCommits([]);
       setGitHistoryError(
         displayErrorMessage(error, translateError('gitHistory'), desktopUnavailableMessage),
       );
@@ -654,7 +695,7 @@ export function useWorkbenchWorktreeGitController(
         setGitHistoryLoading(false);
       }
     }
-  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, setGitCommits, api.git]);
+  }, [isCurrentProject, loadWorktrees, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, api.git]);
 
   /**
    * Business Logic（为什么需要这个函数）:

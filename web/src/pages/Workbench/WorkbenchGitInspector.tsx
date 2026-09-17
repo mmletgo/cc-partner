@@ -39,6 +39,7 @@ import {
 } from './workbenchWorktrees';
 import type { WorkbenchGitGraphRow } from './workbenchWorktrees';
 import type {
+  LoadGitHistoryOptions,
   WorkbenchHookRepair,
   WorktreeBusyKind,
   WorktreeUnknownMutationLock,
@@ -245,7 +246,7 @@ export interface WorkbenchGitInspectorProps {
    * 进行中的 merge 不展示关闭按钮，避免用户误关进度。
    */
   clearMergeStagePanel: () => void;
-  loadGitHistory: () => Promise<void>;
+  loadGitHistory: (options?: LoadGitHistoryOptions) => Promise<void>;
   handleCommitWorktree: () => Promise<void>;
   handlePullWorktree: () => Promise<void>;
   handlePushWorktree: () => Promise<void>;
@@ -356,7 +357,7 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
           title={t('workbench:refreshGitHistory')}
           aria-label={t('workbench:refreshGitHistory')}
           disabled={!activeProjectId || gitHistoryLoading}
-          onClick={() => void loadGitHistory()}
+          onClick={() => void loadGitHistory({ reconcileWorktrees: true })}
         />
       </div>
 

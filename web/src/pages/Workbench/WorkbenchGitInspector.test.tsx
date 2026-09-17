@@ -283,6 +283,14 @@ describe('WorkbenchGitInspector graph presentation', () => {
     renderGitInspector({ canSyncProjectMain: false });
     expect(screen.getByTestId('workbench-git-sync').hasAttribute('disabled')).toBe(true);
   });
+
+  test('refresh button asks loadGitHistory to reconcile worktree git status', () => {
+    const loadGitHistory = vi.fn(async () => undefined);
+    renderGitInspector({ loadGitHistory });
+    fireEvent.click(screen.getByRole('button', { name: '刷新 Git 历史' }));
+    expect(loadGitHistory).toHaveBeenCalledTimes(1);
+    expect(loadGitHistory).toHaveBeenCalledWith({ reconcileWorktrees: true });
+  });
 });
 
 describe('WorkbenchGitInspector merge stage dismiss', () => {

@@ -608,3 +608,17 @@ describe('MobileGitPanel cross-device sync', () => {
     expect((screen.getByTestId('mobile-git-sync') as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe('MobileGitPanel git history refresh', () => {
+  test('refresh reloads worktree git status then commits', async () => {
+    renderPanel();
+    await waitFor(() => expect(listCommitsMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新 Git 历史' }));
+
+    await waitFor(() => {
+      expect(refreshWorktreesMock).toHaveBeenCalledWith({ expectedProjectId: 'project-1' });
+      expect(listCommitsMock).toHaveBeenCalledTimes(2);
+    });
+  });
+});

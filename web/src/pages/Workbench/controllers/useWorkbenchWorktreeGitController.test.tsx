@@ -2127,6 +2127,84 @@ describe('useWorkbenchWorktreeGitController — git history refresh', () => {
     expect(result.current.gitHistoryError).toBeNull();
   });
 
+  test('loadGitHistory({ reconcileWorktrees: true }) reloads live git status then commits', async () => {
+    const project = buildLocalProject();
+    const stale = buildWorktree({
+      status: {
+        branch: 'main',
+        changed: 0,
+        ahead: 0,
+        behind: 0,
+        conflicts: 0,
+        clean: true,
+        canPush: false,
+      },
+    });
+    const live = buildWorktree({
+      status: {
+        branch: 'main',
+        changed: 3,
+        ahead: 1,
+        behind: 0,
+        conflicts: 0,
+        clean: false,
+        canPush: true,
+      },
+    });
+    const commits = [buildCommit({ hash: 'head-now' })];
+    fakeWorktreesApi.list.mockResolvedValueOnce([live]);
+    fakeGitApi.listCommits.mockResolvedValueOnce(commits);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    await act(async () => {
+      result.current.setWorktrees([stale]);
+      await flushMicrotasks();
+    });
+    expect(result.current.worktrees[0]?.status.changed).toBe(0);
+    expect(result.current.worktrees[0]?.status.clean).toBe(true);
+
+    await act(async () => {
+      await result.current.loadGitHistory({ reconcileWorktrees: true });
+      await flushMicrotasks();
+    });
+
+    expect(fakeWorktreesApi.list).toHaveBeenCalledWith(project.id);
+    expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-main', 30);
+    expect(result.current.worktrees[0]?.status.changed).toBe(3);
+    expect(result.current.worktrees[0]?.status.clean).toBe(false);
+    expect(result.current.worktrees[0]?.status.ahead).toBe(1);
+    expect(result.current.gitCommits).toEqual(commits);
+  });
+
+  test('loadGitHistory({ reconcileWorktrees: true }) falls back to remaining worktree after prune', async () => {
+    const project = buildLocalProject();
+    const remaining = buildWorktree({ id: 'wt-main', isMain: true });
+    const remainingCommits = [buildCommit({ hash: 'main-after-prune' })];
+    fakeWorktreesApi.list.mockResolvedValueOnce([remaining]);
+    fakeGitApi.listCommits.mockResolvedValueOnce(remainingCommits);
+    const setActive = vi.fn();
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-gone',
+      setActiveWorktreeId: setActive,
+    });
+
+    await act(async () => {
+      await result.current.loadGitHistory({ reconcileWorktrees: true });
+      await flushMicrotasks();
+    });
+
+    expect(fakeWorktreesApi.list).toHaveBeenCalledWith(project.id);
+    expect(setActive).toHaveBeenCalledWith('wt-main');
+    expect(fakeGitApi.listCommits).toHaveBeenCalledWith(project.id, 'wt-main', 30);
+    expect(result.current.gitCommits).toEqual(remainingCommits);
+  });
+
   test('switching projects restores cached worktrees and git history without waiting on list', async () => {
     const projectA = buildLocalProject({ id: 'p-a' });
     const projectB = buildLocalProject({ id: 'p-b' });

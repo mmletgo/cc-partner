@@ -195,6 +195,19 @@ export function MobileGitPanel({
     }
   }, [project, t, worktree]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点刷新要同时看到最新 dirty/ahead 与提交列表；切项目自动加载只拉提交。
+   *
+   * Code Logic（这个函数做什么）:
+   *   先刷新权威 worktree 列表（含 git status），再拉当前 worktree 提交。
+   */
+  const refreshGitHistory = useCallback(async (): Promise<void> => {
+    if (!project) return;
+    await onRefreshWorktrees?.({ expectedProjectId: project.id });
+    await loadCommits();
+  }, [loadCommits, onRefreshWorktrees, project]);
+
   /* eslint-disable react-hooks/set-state-in-effect -- Git 面板在 project/worktree 变化时需要重新加载提交列表 */
   useEffect(() => {
     void loadCommits();
@@ -828,7 +841,7 @@ export function MobileGitPanel({
           type="button"
           className={styles.secondaryButton}
           disabled={!project || loading}
-          onClick={() => void loadCommits()}
+          onClick={() => void refreshGitHistory()}
         >
           {t('workbench:refreshGitHistory')}
         </button>
