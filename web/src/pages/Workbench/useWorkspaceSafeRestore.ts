@@ -178,9 +178,7 @@ export function useWorkspaceSafeRestore(
   const suppressContextResetRef = useRef(false);
   const layoutAutosaveRef = useRef<WorkspaceLayoutAutosaveCoordinator | null>(null);
   const urlProjectIdRef = useRef(urlProjectId);
-  urlProjectIdRef.current = urlProjectId;
   const latestProjectIdRef = useRef(activeProjectId);
-  latestProjectIdRef.current = activeProjectId;
   const selectionRef = useRef({
     activeProjectId,
     activeWorktreeId,
@@ -190,8 +188,10 @@ export function useWorkspaceSafeRestore(
     browserTargetUrl,
   });
 
-  // selection 仅供 autosave/restore 异步回调读取，不得在 render 中写 ref
+  // 异步 restore/autosave 回调读最新 id；在 effect 中同步，避免 render 期写 ref
   useEffect(() => {
+    urlProjectIdRef.current = urlProjectId;
+    latestProjectIdRef.current = activeProjectId;
     selectionRef.current = {
       activeProjectId,
       activeWorktreeId,
@@ -201,6 +201,7 @@ export function useWorkspaceSafeRestore(
       browserTargetUrl,
     };
   }, [
+    urlProjectId,
     activeProjectId,
     activeWorktreeId,
     activeSessionId,

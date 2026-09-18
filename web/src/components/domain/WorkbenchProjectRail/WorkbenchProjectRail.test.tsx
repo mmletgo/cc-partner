@@ -185,24 +185,12 @@ function buildProject(overrides: Partial<WorkbenchProject> = {}): WorkbenchProje
 }
 
 /**
- * Business Logic（为什么需要这个探针）:
- *   点击项目后必须带 projectId 进工作台，否则 restore 会用上次 layout 盖掉刚选的项目。
- *
- * Code Logic（这个组件做什么）:
- *   把当前 pathname+search 写到可变盒子，供断言读取。
- */
-function LocationProbe(props: { box: { path: string } }) {
-  const location = useLocation();
-  props.box.path = `${location.pathname}${location.search}`;
-  return null;
-}
-
-/**
  * Business Logic（为什么需要这个函数）:
  *   契约测试需挂载路由、i18n 与项目上下文。
  *
  * Code Logic（这个函数做什么）:
  *   组装默认 mock context 并 render WorkbenchProjectRail。
+ *   LocationProbe 闭包写 locationBox，避免改 props 触发 react-hooks/immutability。
  */
 function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
   const value: WorkbenchProjectsContextValue = {
@@ -227,11 +215,16 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     ...partial,
   };
   const locationBox = { path: '' };
+  function LocationProbe() {
+    const location = useLocation();
+    locationBox.path = `${location.pathname}${location.search}`;
+    return null;
+  }
 
   render(
     <I18nextProvider i18n={i18n}>
       <MemoryRouter>
-        <LocationProbe box={locationBox} />
+        <LocationProbe />
         <WorkbenchProjectsContext.Provider value={value}>
           <WorkbenchAgentHintsContext.Provider value={hintContextValue()}>
             <WorkbenchProjectRail />

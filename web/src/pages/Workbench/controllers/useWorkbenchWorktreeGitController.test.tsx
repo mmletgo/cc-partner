@@ -1088,14 +1088,9 @@ describe('useWorkbenchWorktreeGitController — commit / push', () => {
 
     expect(result.current.worktreeSyncNotice).toBe('syncSucceeded:Ubuntu');
 
+    // shouldAdvanceTime 会在 await 期间吃掉部分 2500ms；从「提示已出现」起再走满延迟即可。
     await act(async () => {
-      vi.advanceTimersByTime(2499);
-      await flushMicrotasks();
-    });
-    expect(result.current.worktreeSyncNotice).toBe('syncSucceeded:Ubuntu');
-
-    await act(async () => {
-      vi.advanceTimersByTime(1);
+      vi.advanceTimersByTime(2500);
       await flushMicrotasks();
     });
     expect(result.current.worktreeSyncNotice).toBeNull();

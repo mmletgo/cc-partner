@@ -30,9 +30,7 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention, useMarkNeedsInputAttentionOnSessionFocus } from '@/hooks/useAttention';
 import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures';
-import {
-  MaximizeIcon, MinimizeIcon, RefreshIcon, SearchIcon,
-} from '@/lib/icons';
+import { MaximizeIcon, MinimizeIcon, RefreshIcon, SearchIcon } from '@/lib/icons';
 import { WorkbenchPaneTools } from '@/components/domain/WorkbenchPaneTools';
 import styles from './Workbench.module.css';
 import { WorkbenchPromptTools } from './WorkbenchPromptTools';

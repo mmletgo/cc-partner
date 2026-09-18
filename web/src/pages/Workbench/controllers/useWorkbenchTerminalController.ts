@@ -1357,7 +1357,9 @@ export function useWorkbenchTerminalController(
   const attachInFlightRef = useRef(false);
   const [fileDropActive, setFileDropActive] = useState(false);
   const activeSessionIdRef = useRef(activeSessionId);
-  activeSessionIdRef.current = activeSessionId;
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1419,8 +1421,8 @@ export function useWorkbenchTerminalController(
 
   useEffect(() => {
     // 拖放必须走真实 webview API；测试把 canListenToTauriEvents 设 true 只为 terminal-status。
+    // 不在此同步 setState：条件为假时上一轮 cleanup 已清高亮，初始 state 也是 false。
     if (!canListenToTauriEventsDefault() || remoteWriteDisabled || !terminalSurfaceActive) {
-      setFileDropActive(false);
       return undefined;
     }
     let cancelled = false;

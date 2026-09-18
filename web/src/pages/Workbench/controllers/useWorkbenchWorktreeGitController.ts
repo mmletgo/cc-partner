@@ -353,6 +353,7 @@ export function useWorkbenchWorktreeGitController(
     useState<WorktreeUnknownMutationLock | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   const [worktreeSyncNotice, setWorktreeSyncNotice] = useState<string | null>(null);
+  const [syncNoticeBoundProjectId, setSyncNoticeBoundProjectId] = useState(activeProjectId);
   // failedHook 修复上下文：commit/push 钩子失败时设置；用户点重试/开始新 commit/push 时清空。
   const [hookRepair, setHookRepair] = useState<WorkbenchHookRepair | null>(null);
   const [createWorktreeOpen, setCreateWorktreeOpen] = useState<boolean>(false);
@@ -372,6 +373,12 @@ export function useWorkbenchWorktreeGitController(
   const [mergeProgressByProject, setMergeProgressByProject] = useState<
     Record<string, WorkbenchMergeProgressSnapshot>
   >({});
+  // 同步成功提示绑定当前项目；切项目时在 render 期复位，避免 effect 里同步 setState。
+  // 同项目切 worktree 仍由 2.5s 自动收起。
+  if (syncNoticeBoundProjectId !== activeProjectId) {
+    setSyncNoticeBoundProjectId(activeProjectId);
+    if (worktreeSyncNotice !== null) setWorktreeSyncNotice(null);
+  }
 
   // Business Logic: 异步加载回调返回时，active project / worktree 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
@@ -441,12 +448,6 @@ export function useWorkbenchWorktreeGitController(
     setUnknownMutationLock(null);
     setHookRepair(null);
   }, [activeProjectId, activeWorktreeId]);
-
-  // Business Logic: 同步成功提示绑定当前项目；切到其他项目后不得继续占住 Git 历史区。
-  // Code Logic: 只跟 activeProjectId；同项目切 worktree 仍由 2.5s 自动收起。
-  useEffect(() => {
-    setWorktreeSyncNotice(null);
-  }, [activeProjectId]);
 
   /**
    * Business Logic（为什么需要这个函数）:
