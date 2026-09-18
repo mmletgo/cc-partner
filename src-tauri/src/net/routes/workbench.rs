@@ -22,14 +22,14 @@ use crate::commands::workbench::{
     hydrate_workbench_session_scrollback_for_state, list_workbench_dir_for_state,
     list_workbench_git_commits_for_state, list_workbench_remote_dir_for_state,
     list_workbench_remote_roots_for_state, list_workbench_sessions_for_state,
-    list_workbench_worktrees_for_state_with_git_status, local_close_workbench_pane,
-    local_close_workbench_session, local_commit_workbench_worktree, local_create_workbench_dir,
-    local_create_workbench_file, local_create_workbench_session, local_create_workbench_worktree,
-    local_delete_workbench_path, local_focus_workbench_session, local_get_workbench_banner,
-    local_get_workbench_path_info, local_get_workbench_project_note, local_get_workbench_worktree,
-    local_list_workbench_dir, local_list_workbench_git_commits, local_list_workbench_sessions,
-    local_list_workbench_worktrees_with_git_status, local_merge_workbench_worktree,
-    local_open_workbench_file, local_paste_workbench_session_image,
+    list_workbench_worktrees_for_state_with_git_status, local_attach_workbench_session_files_req,
+    local_close_workbench_pane, local_close_workbench_session, local_commit_workbench_worktree,
+    local_create_workbench_dir, local_create_workbench_file, local_create_workbench_session,
+    local_create_workbench_worktree, local_delete_workbench_path, local_focus_workbench_session,
+    local_get_workbench_banner, local_get_workbench_path_info, local_get_workbench_project_note,
+    local_get_workbench_worktree, local_list_workbench_dir, local_list_workbench_git_commits,
+    local_list_workbench_sessions, local_list_workbench_worktrees_with_git_status,
+    local_merge_workbench_worktree, local_open_workbench_file, local_paste_workbench_session_image,
     local_preview_workbench_html_asset, local_preview_workbench_sqlite,
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
     local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_banner,
@@ -70,18 +70,19 @@ use crate::workbench::models::{
 use crate::workbench::remote_directory;
 use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson_filtered;
 use crate::workbench::remote_protocol::{
-    RemoteBannerSaveReq, RemoteProjectNoteSaveReq, RemoteRepairHookFailureReq, RemoteSafeAttachReq,
-    RemoteWorkspaceRestorePreflightReq, WorkbenchBannerDto, WorkbenchProjectNoteDto,
+    RemoteAttachSessionFilesReq, RemoteClaudeSessionReq, RemoteCommitWorktreeReq,
+    RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq,
+    RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq,
+    RemoteListSessionsReq, RemoteOpenFileReq, RemotePasteSessionImageReq, RemotePathInfoReq,
+    RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq,
+    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq,
+    RemoteResizeSessionReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq,
+    RemoteSelectPaneAtReq, RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq,
+    RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
 use crate::workbench::remote_protocol::{
-    RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
-    RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
-    RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
-    RemoteOpenFileReq, RemotePasteSessionImageReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
-    RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq,
-    RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
-    RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq, RemoteSessionReq,
-    RemoteSplitPaneReq, RemoteWorktreeReq, RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
+    RemoteBannerSaveReq, RemoteProjectNoteSaveReq, RemoteRepairHookFailureReq, RemoteSafeAttachReq,
+    RemoteWorkspaceRestorePreflightReq, WorkbenchBannerDto, WorkbenchProjectNoteDto,
 };
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
@@ -1518,6 +1519,27 @@ pub async fn paste_workbench_session_image(
     let result = local_paste_workbench_session_image(&state, req.session_id, req.data_url)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.paste-image"))?;
+    Ok(Json(result))
+}
+
+/// 向远端设备本机终端交付文件给 Agent。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote Agent 只能读 owning device 磁盘；对端把文件树落到临时目录再注入路径。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后解码文件树、落盘并注入。
+pub async fn attach_workbench_session_files(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteAttachSessionFilesReq>,
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.attach-files"))?;
+    let result = local_attach_workbench_session_files_req(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.attach-files"))?;
     Ok(Json(result))
 }
 
@@ -3491,6 +3513,19 @@ mod tests {
             server_protocol_info, CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
         };
         assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 必须宣告 terminal-attach-file.v1，控制端才能把文件送到 owning device。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     server_protocol_info supports CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1。
+    #[test]
+    fn server_advertises_terminal_attach_file_capability() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1,
+        };
+        assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1));
     }
 
     /// Business Logic（为什么需要这个测试）:

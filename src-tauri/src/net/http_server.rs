@@ -1365,6 +1365,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::paste_workbench_session_image),
         )
         .route(
+            "/api/workbench/sessions/attach-files",
+            post(workbench::attach_workbench_session_files),
+        )
+        .route(
             "/api/workbench/terminal-input-stream",
             get(workbench::terminal_input_stream),
         )

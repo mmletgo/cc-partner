@@ -336,6 +336,24 @@ pub struct RemotePasteSessionImageReq {
     pub data_url: String,
 }
 
+/// 远端终端把文件交给 Agent 的请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     远端 Agent 只能读 owning device 磁盘；控制端必须把文件树送到对端临时目录再注入路径。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase `{sessionId, files[], directories[], injectRelativePaths[]}`；文件内容为 STANDARD base64。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAttachSessionFilesReq {
+    pub session_id: String,
+    #[serde(default)]
+    pub files: Vec<crate::workbench::agent_file_attach::AttachFileWire>,
+    #[serde(default)]
+    pub directories: Vec<String>,
+    pub inject_relative_paths: Vec<String>,
+}
+
 /// 远端终端 resize 请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:

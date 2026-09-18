@@ -187,6 +187,7 @@ export function Workbench() {
     activeProjectId,
     activeWorktreeId,
     remoteWriteDisabled,
+    terminalSurfaceActive: workspaceView === 'terminal',
     terminalPanelRef,
     resetBuffer: resetTerminalBuffer,
     removeBuffer: removeTerminalBuffer,
@@ -232,6 +233,8 @@ export function Workbench() {
     renameSessionById,
     handleInput,
     handlePasteImage,
+    handleAttachClipboard,
+    fileDropActive,
     isWriteBlocked,
     handleResize,
     handleRefreshTerminalSize,
@@ -1062,6 +1065,8 @@ export function Workbench() {
               terminalResizeRequestKey={terminalResizeRequestKey}
               handleInput={handleInput}
               handlePasteImage={handlePasteImage}
+              handleAttachClipboard={handleAttachClipboard}
+              fileDropActive={fileDropActive}
               isWriteBlocked={isWriteBlocked}
               resolveAgent={agentRuntime.latestAgentForTerminal}
               handleResize={handleResize}

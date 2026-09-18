@@ -255,6 +255,17 @@ pub const CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1: &str =
 ///     字符串常量，列入 `server_protocol_info()`；与 paste-image 路由原子上线。
 pub const CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1: &str = "workbench.terminal-paste-image.v1";
 
+/// 能力 token：v1 Workbench 终端把文件交给 Agent
+/// （`POST /api/workbench/sessions/attach-files`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     远端 Agent 读 owning device 磁盘。控制端必须把拖入/粘贴的文件拷到对端临时目录
+///     再注入路径语法；旧 peer 缺 token 时 unsupported，不得把文件字节塞进 32 KiB 输入帧。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 attach-files 路由原子上线。
+pub const CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1: &str = "workbench.terminal-attach-file.v1";
+
 /// 能力 token：v2 Workbench Claude session 搜索结果 DTO
 /// （`{items, truncated, diagnostics}` + 混部 dual-decode）。
 ///
@@ -588,6 +599,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_PROJECT_NOTES_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
+            CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1.to_string(),
             CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1.to_string(),
             CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1.to_string(),
             CAPABILITY_WORKBENCH_WORDGAME_EXTRACT_V1.to_string(),
@@ -776,6 +788,7 @@ mod tests {
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.project-notes.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
+                "workbench.terminal-attach-file.v1".to_string(),
                 "workbench.terminal-input-stream.v1".to_string(),
                 "workbench.terminal-paste-image.v1".to_string(),
                 "workbench.wordgame-extract.v1".to_string(),

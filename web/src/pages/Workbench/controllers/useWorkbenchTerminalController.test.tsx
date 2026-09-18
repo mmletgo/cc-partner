@@ -37,6 +37,7 @@ interface FakeSessionsApi {
   create: ReturnType<typeof vi.fn>;
   enqueueInput: ReturnType<typeof vi.fn>;
   pasteImage: ReturnType<typeof vi.fn>;
+  attachFiles: ReturnType<typeof vi.fn>;
   readClipboardImage: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
@@ -63,6 +64,7 @@ function createFreshFakeSessionsApi(): FakeSessionsApi {
     create: vi.fn(async () => ({}) as WorkbenchSession),
     enqueueInput: vi.fn(async () => ({ accepted: true, sessionId: 's' })),
     pasteImage: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+    attachFiles: vi.fn(async () => ({ ok: true, sessionId: 's' })),
     readClipboardImage: vi.fn(async () => null),
     resize: vi.fn(async () => ({ ok: true, sessionId: 's' })),
     focus: vi.fn(async () => ({ ok: true, sessionId: 's' })),
@@ -1803,6 +1805,57 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     });
     expect(fakeSessionsApi.readClipboardImage).toHaveBeenCalled();
     expect(fakeSessionsApi.enqueueInput).toHaveBeenCalledWith('s1', '\x16');
+  });
+
+  test('handleAttachFiles sends native paths to the session API', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    fakeSessionsApi.attachFiles.mockClear();
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => false,
+    });
+
+    await act(async () => {
+      await result.current.handleAttachFiles('s1', { paths: ['/tmp/note.pdf'] });
+    });
+    expect(fakeSessionsApi.attachFiles).toHaveBeenCalledWith('s1', { paths: ['/tmp/note.pdf'] });
+  });
+
+  test('handleAttachClipboard prefers file URIs over File blobs', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    fakeSessionsApi.attachFiles.mockClear();
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => false,
+    });
+    const pdf = new File([new Uint8Array([1])], 'a.pdf', { type: 'application/pdf' });
+
+    await act(async () => {
+      await result.current.handleAttachClipboard('s1', [pdf], ['/Users/hans/note.pdf']);
+    });
+    expect(fakeSessionsApi.attachFiles).toHaveBeenCalledWith('s1', {
+      paths: ['/Users/hans/note.pdf'],
+    });
   });
 
   test('handleInput serializes rapid keys per session and coalesces only while in flight', async () => {

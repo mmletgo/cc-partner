@@ -213,6 +213,7 @@ fn workbench_control_path(op: &str) -> &'static str {
         | "sessions.replay"
         | "sessions.write"
         | "sessions.pasteImage"
+        | "sessions.attachFiles"
         | "notes.save" => "workbench/data",
         _ => "workbench",
     }
@@ -241,6 +242,7 @@ fn workbench_control_timeout(op: &str) -> Option<Duration> {
         | "files.save_text"
         | "agent_ledger.export_token_stats"
         | "sessions.pasteImage"
+        | "sessions.attachFiles"
         | "provider-manager.install"
         | "workbench.fresh-restart" => Some(Duration::from_secs(360)),
         "claude.search" | "claude.preview" => Some(Duration::from_secs(60)),
@@ -3756,6 +3758,10 @@ mod tests {
         assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
         assert_eq!(
             workbench_control_path("sessions.pasteImage"),
+            "workbench/data"
+        );
+        assert_eq!(
+            workbench_control_path("sessions.attachFiles"),
             "workbench/data"
         );
         assert_eq!(workbench_control_path("notes.save"), "workbench/data");

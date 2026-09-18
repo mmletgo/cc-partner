@@ -971,6 +971,8 @@
     "renameSession": "重命名会话失败",
     "writeSession": "写入终端失败",
     "pasteImage": "粘贴图片到终端失败",
+    "attachFiles": "把文件交给终端 Agent 失败",
+    "attachFilesTooLarge": "交给 Agent 的文件总大小不能超过 20 MB",
     "files": "读取文件夹失败",
     "openFile": "打开文件失败",
     "saveFile": "保存文件失败",

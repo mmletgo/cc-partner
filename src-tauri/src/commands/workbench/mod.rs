@@ -139,8 +139,9 @@ pub(crate) use projects::{
 };
 
 pub use sessions::{
-    __cmd__close_workbench_pane, __cmd__close_workbench_session, __cmd__create_workbench_dir,
-    __cmd__create_workbench_file, __cmd__create_workbench_session, __cmd__delete_workbench_path,
+    __cmd__attach_workbench_session_files, __cmd__close_workbench_pane,
+    __cmd__close_workbench_session, __cmd__create_workbench_dir, __cmd__create_workbench_file,
+    __cmd__create_workbench_session, __cmd__delete_workbench_path,
     __cmd__enqueue_workbench_terminal_input, __cmd__focus_workbench_session,
     __cmd__get_claude_session_preview, __cmd__get_focused_workbench_session,
     __cmd__get_workbench_path_info, __cmd__list_workbench_dir, __cmd__list_workbench_sessions,
@@ -149,9 +150,10 @@ pub use sessions::{
     __cmd__resize_workbench_session, __cmd__resume_claude_session, __cmd__search_claude_sessions,
     __cmd__select_workbench_pane_at, __cmd__split_workbench_pane, __cmd__switch_workbench_pane,
     __cmd__write_workbench_session_input, __cmd__zoom_workbench_pane,
-    __tauri_command_name_close_workbench_pane, __tauri_command_name_close_workbench_session,
-    __tauri_command_name_create_workbench_dir, __tauri_command_name_create_workbench_file,
-    __tauri_command_name_create_workbench_session, __tauri_command_name_delete_workbench_path,
+    __tauri_command_name_attach_workbench_session_files, __tauri_command_name_close_workbench_pane,
+    __tauri_command_name_close_workbench_session, __tauri_command_name_create_workbench_dir,
+    __tauri_command_name_create_workbench_file, __tauri_command_name_create_workbench_session,
+    __tauri_command_name_delete_workbench_path,
     __tauri_command_name_enqueue_workbench_terminal_input,
     __tauri_command_name_focus_workbench_session, __tauri_command_name_get_claude_session_preview,
     __tauri_command_name_get_focused_workbench_session,
@@ -163,14 +165,14 @@ pub use sessions::{
     __tauri_command_name_search_claude_sessions, __tauri_command_name_select_workbench_pane_at,
     __tauri_command_name_split_workbench_pane, __tauri_command_name_switch_workbench_pane,
     __tauri_command_name_write_workbench_session_input, __tauri_command_name_zoom_workbench_pane,
-    close_workbench_pane, close_workbench_session, create_workbench_dir, create_workbench_file,
-    create_workbench_session, delete_workbench_path, enqueue_workbench_terminal_input,
-    focus_workbench_session, get_claude_session_preview, get_focused_workbench_session,
-    get_workbench_path_info, list_workbench_dir, list_workbench_sessions,
-    paste_workbench_session_image, rename_workbench_path, rename_workbench_session,
-    replay_workbench_session, resize_workbench_session, resume_claude_session,
-    search_claude_sessions, select_workbench_pane_at, split_workbench_pane, switch_workbench_pane,
-    write_workbench_session_input, zoom_workbench_pane,
+    attach_workbench_session_files, close_workbench_pane, close_workbench_session,
+    create_workbench_dir, create_workbench_file, create_workbench_session, delete_workbench_path,
+    enqueue_workbench_terminal_input, focus_workbench_session, get_claude_session_preview,
+    get_focused_workbench_session, get_workbench_path_info, list_workbench_dir,
+    list_workbench_sessions, paste_workbench_session_image, rename_workbench_path,
+    rename_workbench_session, replay_workbench_session, resize_workbench_session,
+    resume_claude_session, search_claude_sessions, select_workbench_pane_at, split_workbench_pane,
+    switch_workbench_pane, write_workbench_session_input, zoom_workbench_pane,
 };
 
 pub use projects::add_local_workbench_project_from_path;
@@ -280,11 +282,12 @@ pub(crate) use projects::{
 };
 
 pub(crate) use sessions::{
-    close_workbench_pane_for_state, close_workbench_session_for_state,
-    create_workbench_session_for_state, deactivate_workbench_terminal_stream_for_state,
-    focus_workbench_session_for_state, get_agent_session_preview_for_state,
-    get_focused_workbench_session_for_state, get_workbench_path_info_for_state,
-    hydrate_workbench_session_scrollback_for_state, list_workbench_dir_for_state,
+    attach_workbench_session_files_for_state, close_workbench_pane_for_state,
+    close_workbench_session_for_state, create_workbench_session_for_state,
+    deactivate_workbench_terminal_stream_for_state, focus_workbench_session_for_state,
+    get_agent_session_preview_for_state, get_focused_workbench_session_for_state,
+    get_workbench_path_info_for_state, hydrate_workbench_session_scrollback_for_state,
+    list_workbench_dir_for_state, local_attach_workbench_session_files_req,
     local_close_workbench_pane, local_close_workbench_session, local_create_workbench_dir,
     local_create_workbench_file, local_create_workbench_session,
     local_create_workbench_session_with_preallocated_ids, local_delete_workbench_path,

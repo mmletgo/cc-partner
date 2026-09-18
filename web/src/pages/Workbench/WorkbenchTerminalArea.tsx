@@ -51,6 +51,8 @@ export interface WorkbenchTerminalAreaProps {
   terminalResizeRequestKey: number;
   handleInput: (sessionId: string, data: string) => void;
   handlePasteImage: (sessionId: string, dataUrl: string | null) => void;
+  handleAttachClipboard: (sessionId: string, files: File[], uriPaths: string[]) => void;
+  fileDropActive?: boolean;
   /**
    * Business Logic（为什么需要这个回调）:
    *   write 失败后输入泵 silent-block enqueue；UI 必须禁用 xterm 输入，避免键盘黑洞。
@@ -107,6 +109,8 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
     terminalResizeRequestKey,
     handleInput,
     handlePasteImage,
+    handleAttachClipboard,
+    fileDropActive = false,
     isWriteBlocked,
     resolveAgent,
     handleResize,
@@ -161,6 +165,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
       <section
         className={styles.terminalPanel}
         data-layout="single"
+        data-file-drop={fileDropActive || undefined}
         ref={terminalPanelRef}
       >
         {visibleSessions.length === 0 ? (
@@ -173,6 +178,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
             }
             onInput={handleInput}
             onPasteImage={handlePasteImage}
+            onAttachClipboard={handleAttachClipboard}
             onResize={handleResize}
             resizeRequestKey={0}
             renderVisible={terminalSurfaceVisible}
@@ -212,6 +218,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
               placeholder={t('workbench:terminalPlaceholder')}
               onInput={handleInput}
               onPasteImage={handlePasteImage}
+              onAttachClipboard={handleAttachClipboard}
               onResize={handleResize}
               resizeRequestKey={
                 session.id === renderedActiveSessionId ? terminalResizeRequestKey : 0

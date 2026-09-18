@@ -689,6 +689,7 @@ pub fn run() {
             workbench_cmd::replay_workbench_session,
             workbench_cmd::write_workbench_session_input,
             workbench_cmd::paste_workbench_session_image,
+            workbench_cmd::attach_workbench_session_files,
             workbench_cmd::enqueue_workbench_terminal_input,
             workbench_cmd::resize_workbench_session,
             workbench_cmd::focus_workbench_session,
