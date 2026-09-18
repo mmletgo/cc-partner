@@ -13,6 +13,11 @@ use crate::claude_cli;
 use crate::error::AppError;
 use crate::orchestrator::agent_adapter::types::AgentProviderId;
 use crate::state::AppState;
+use crate::workbench::agent_file_attach::{
+    agent_attach_drop_dir, attach_paths_input, collect_from_blobs, collect_from_paths,
+    payload_files_to_wire, payload_from_wire, persist_attach_payload, AttachFileWire,
+    AttachPayload, MAX_AGENT_ATTACH_BYTES, MAX_AGENT_ATTACH_FILES,
+};
 use crate::workbench::agent_session_search::{
     build_resume_command, check_agent_cli_available, preview_codex_session,
     preview_opencode_session, search_codex_sessions, search_opencode_sessions, AgentSessionSource,
@@ -33,8 +38,9 @@ use crate::workbench::{
     remote_client::RemoteWorkbenchClient,
     remote_ids::{parse_remote_entity_id, remote_entity_id},
     remote_protocol::{
-        RemoteClaudeSessionReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteDeletePathReq,
-        RemoteRenamePathReq, RemoteSearchClaudeSessionsReq, ResumeClaudeSessionResult,
+        RemoteAttachSessionFilesReq, RemoteClaudeSessionReq, RemoteCreatePathReq,
+        RemoteCreateSessionReq, RemoteDeletePathReq, RemoteRenamePathReq,
+        RemoteSearchClaudeSessionsReq, ResumeClaudeSessionResult,
     },
 };
 use std::path::PathBuf;
@@ -640,6 +646,175 @@ pub async fn paste_workbench_session_image(
         return Ok(v);
     }
     paste_workbench_session_image_for_state(state.inner(), session_id, data_url).await
+}
+
+/// 把本机文件路径或粘贴字节交给本机 Agent 终端。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机项目注入原路径；无原生路径的粘贴 blob 先落到 data_dir 临时目录。
+///     调用方保证 session 属于本机。文件不得走 32 KiB 终端输入 WebSocket。
+///
+/// Code Logic（这个函数做什么）:
+///     仅路径：存在性检查后按身份表注入。blob：收集、落盘、注入临时路径。
+pub(crate) async fn local_attach_workbench_session_files(
+    state: &AppState,
+    session_id: String,
+    paths: Vec<String>,
+    blobs: Vec<AttachFileWire>,
+) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
+    let kind = resolve_headless_image_paste_kind(state, &session_id).await;
+    let inject_paths = if !paths.is_empty() && blobs.is_empty() {
+        let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        for path in &path_bufs {
+            if !path.exists() {
+                return Err(AppError::validation(format!(
+                    "文件不存在: {}",
+                    path.display()
+                )));
+            }
+        }
+        path_bufs
+    } else {
+        let data_dir = crate::config::data_dir()?;
+        let drop_id = uuid::Uuid::new_v4().to_string();
+        let session_dir = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let payload = collect_attach_payload(paths, blobs)?;
+            let base = agent_attach_drop_dir(&data_dir, &session_dir, &drop_id);
+            persist_attach_payload(&base, &payload)
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("写入附件任务失败: {e}")))??
+    };
+    let refs: Vec<&std::path::Path> = inject_paths.iter().map(PathBuf::as_path).collect();
+    let input = attach_paths_input(kind, &refs);
+    state.workbench_sessions.write_input(&session_id, &input)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
+}
+
+fn collect_attach_payload(
+    paths: Vec<String>,
+    blobs: Vec<AttachFileWire>,
+) -> Result<AttachPayload, AppError> {
+    if !paths.is_empty() {
+        let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        collect_from_paths(&path_bufs, MAX_AGENT_ATTACH_BYTES, MAX_AGENT_ATTACH_FILES)
+    } else {
+        let mut decoded = Vec::with_capacity(blobs.len());
+        for blob in blobs {
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                blob.content_base64.as_bytes(),
+            )
+            .map_err(|_| AppError::validation("附件内容不是合法 base64"))?;
+            decoded.push((blob.relative_path, bytes));
+        }
+        collect_from_blobs(&decoded, MAX_AGENT_ATTACH_BYTES, MAX_AGENT_ATTACH_FILES)
+    }
+}
+
+/// 把文件交给本机或远端终端会话的 Agent。
+///
+/// Business Logic（为什么需要这个函数）:
+///     远端项目的 Agent 跑在 owning device 上；本机路径在对端不存在。
+///     必须把文件树拷到对端临时目录再注入路径。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 解析后收集 payload 并 POST attach-files；local 调用本地 helper。
+pub(crate) async fn attach_workbench_session_files_for_state(
+    state: &AppState,
+    session_id: String,
+    paths: Vec<String>,
+    blobs: Vec<AttachFileWire>,
+) -> Result<serde_json::Value, AppError> {
+    if paths.is_empty() && blobs.is_empty() {
+        return Err(AppError::validation("没有可交给 Agent 的文件"));
+    }
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let payload = tokio::task::spawn_blocking(move || collect_attach_payload(paths, blobs))
+            .await
+            .map_err(|e| AppError::generic(format!("读取附件任务失败: {e}")))??;
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
+            .attach_files(
+                &base_url,
+                RemoteAttachSessionFilesReq {
+                    session_id: inner_session_id,
+                    files: payload_files_to_wire(&payload),
+                    directories: payload.directories.clone(),
+                    inject_relative_paths: payload.inject_relative_paths.clone(),
+                },
+            )
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
+    }
+    local_attach_workbench_session_files(state, session_id, paths, blobs).await
+}
+
+/// 把文件交给工作台终端的 Agent。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端拖入或粘贴文件后，需要把路径或字节交给会话 owning device 上的 Agent。
+///
+/// Code Logic（这个命令做什么）:
+///     GuiClient 经 control `sessions.attachFiles`（data 路径）代理；owner 走 for_state。
+#[tauri::command]
+pub async fn attach_workbench_session_files(
+    state: State<'_, AppState>,
+    session_id: String,
+    paths: Option<Vec<String>>,
+    blobs: Option<Vec<AttachFileWire>>,
+) -> Result<serde_json::Value, AppError> {
+    let paths = paths.unwrap_or_default();
+    let blobs = blobs.unwrap_or_default();
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.attachFiles",
+        serde_json::json!({
+            "sessionId": session_id.clone(),
+            "paths": paths.clone(),
+            "blobs": blobs.clone(),
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    attach_workbench_session_files_for_state(state.inner(), session_id, paths, blobs).await
+}
+
+/// 对端发来的文件树落到本机临时目录并注入 Agent。
+///
+/// Business Logic（为什么需要这个函数）:
+///     P2P attach-files 的 body 已经是文件树，owning device 只负责落盘 + 注入。
+///
+/// Code Logic（这个函数做什么）:
+///     解码 wire → persist → 按身份表 write_input。
+pub(crate) async fn local_attach_workbench_session_files_req(
+    state: &AppState,
+    req: RemoteAttachSessionFilesReq,
+) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
+    let session_id = req.session_id;
+    let kind = resolve_headless_image_paste_kind(state, &session_id).await;
+    let payload = payload_from_wire(&req.files, req.directories, req.inject_relative_paths)?;
+    let data_dir = crate::config::data_dir()?;
+    let drop_id = uuid::Uuid::new_v4().to_string();
+    let session_dir = session_id.clone();
+    let inject_paths = tokio::task::spawn_blocking(move || {
+        let base = agent_attach_drop_dir(&data_dir, &session_dir, &drop_id);
+        persist_attach_payload(&base, &payload)
+    })
+    .await
+    .map_err(|e| AppError::generic(format!("写入附件任务失败: {e}")))??;
+    let refs: Vec<&std::path::Path> = inject_paths.iter().map(PathBuf::as_path).collect();
+    let input = attach_paths_input(kind, &refs);
+    state.workbench_sessions.write_input(&session_id, &input)?;
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 
 /// 向工作台终端写入输入。

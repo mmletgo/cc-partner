@@ -17,7 +17,8 @@ use crate::net::protocol::{
     CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_BANNER_V1,
     CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1, CAPABILITY_WORKBENCH_DEPENDENCY_INSTALL_V1,
     CAPABILITY_WORKBENCH_FRESH_RESTART_V1, CAPABILITY_WORKBENCH_HOOK_REPAIR_V1,
-    CAPABILITY_WORKBENCH_PROJECT_NOTES_V1, CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
+    CAPABILITY_WORKBENCH_PROJECT_NOTES_V1, CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1,
+    CAPABILITY_WORKBENCH_TERMINAL_PASTE_IMAGE_V1,
 };
 use crate::workbench::agent_ledger::models::{
     AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
@@ -45,12 +46,13 @@ use crate::workbench::operation_ledger::{
     WorkbenchMutationEnvelopeDto, WorkbenchMutationOperationDto,
 };
 use crate::workbench::remote_protocol::{
-    RemoteBannerSaveReq, RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq,
-    RemoteCreateSessionReq, RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
-    RemoteFocusedSessionResp, RemoteGitCommitsReq, RemoteListDirReq, RemoteListSessionsReq,
-    RemoteMutationOperationReq, RemoteOpenFileReq, RemotePasteSessionImageReq, RemotePathInfoReq,
-    RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteProjectNoteSaveReq, RemoteProjectReq,
-    RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
+    RemoteAttachSessionFilesReq, RemoteBannerSaveReq, RemoteClaudeSessionReq,
+    RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq, RemoteCreateWorktreeReq,
+    RemoteDeletePathReq, RemoteFocusedSessionReq, RemoteFocusedSessionResp, RemoteGitCommitsReq,
+    RemoteListDirReq, RemoteListSessionsReq, RemoteMutationOperationReq, RemoteOpenFileReq,
+    RemotePasteSessionImageReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
+    RemotePreviewSqliteReq, RemoteProjectNoteSaveReq, RemoteProjectReq, RemotePromptOptimizerReq,
+    RemoteRemoveWorktreeReq, RemoteRenamePathReq, RemoteRenameSessionReq,
     RemoteRepairHookFailureReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
     RemoteSafeAttachReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq,
     RemoteSelectPaneAtResp, RemoteSessionReq, RemoteSplitPaneReq,
@@ -1501,6 +1503,30 @@ impl RemoteWorkbenchClient {
                     session_id: session_id.to_string(),
                     data_url: data_url.to_string(),
                 },
+                RemoteRequestTimeoutKind::Long,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 把文件树送到远端终端的 Agent。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     远端 Agent 读 owning device 磁盘；必须把本机文件拷到对端临时目录再注入路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     要求 `workbench.terminal-attach-file.v1` 后 POST `/api/workbench/sessions/attach-files`。
+    pub async fn attach_files(
+        &self,
+        base_url: &str,
+        req: RemoteAttachSessionFilesReq,
+    ) -> Result<(), AppError> {
+        self.require_peer_capability(base_url, CAPABILITY_WORKBENCH_TERMINAL_ATTACH_FILE_V1)
+            .await?;
+        let _: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/sessions/attach-files"),
+                &req,
                 RemoteRequestTimeoutKind::Long,
             )
             .await?;

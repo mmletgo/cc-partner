@@ -43,6 +43,7 @@ import {
   fileToPngDataUrl,
   isCtrlVPasteKey,
 } from './terminalImagePaste';
+import { clipboardEventNonImageFiles, parseFileUriList } from './terminalFileAttach';
 
 export interface WorkbenchTerminalPaneProps {
   session: WorkbenchSession | null;
@@ -59,6 +60,11 @@ export interface WorkbenchTerminalPaneProps {
    *   由 controller 读本机 OS 剪贴板。未提供时保持旧的 Ctrl+V → `\x16` 路径（测试/无图）。
    */
   onPasteImage?: (sessionId: string, dataUrl: string | null) => void;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   非图片粘贴必须走附件通道，不能让 xterm 把文件名当文本敲进去。
+   */
+  onAttachClipboard?: (sessionId: string, files: File[], uriPaths: string[]) => void;
   onResize: (sessionId: string, cols: number, rows: number) => void;
   resizeRequestKey?: number;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
@@ -165,6 +171,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     onInput,
     onResize,
     onPasteImage,
+    onAttachClipboard,
     resizeRequestKey = 0,
     onCursorAnchorChange,
     onSelectPaneAt,
@@ -186,6 +193,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   );
   const selectPaneCallbackRef = useRef<WorkbenchTerminalPaneProps['onSelectPaneAt']>(onSelectPaneAt);
   const pasteImageCallbackRef = useRef<WorkbenchTerminalPaneProps['onPasteImage']>(onPasteImage);
+  const attachClipboardCallbackRef =
+    useRef<WorkbenchTerminalPaneProps['onAttachClipboard']>(onAttachClipboard);
   // Business Logic: 区分“点击切换分栏”与“拖拽选中文字”，需要记住 mousedown 落在哪个字符格。
   const pointerDownCellRef = useRef<TerminalCell | null>(null);
   // Business Logic: 同格内仍可能拖出几个像素形成选区；用按下坐标算位移，避免只靠字符格误判。
@@ -235,6 +244,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   useEffect(() => {
     pasteImageCallbackRef.current = onPasteImage;
   }, [onPasteImage]);
+
+  useEffect(() => {
+    attachClipboardCallbackRef.current = onAttachClipboard;
+  }, [onAttachClipboard]);
 
   useEffect(() => {
     refreshScrollbackRef.current = refreshScrollback;
@@ -570,18 +583,27 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     const handlePaste = (event: ClipboardEvent): void => {
       if (!inputEnabledRef.current || !sessionId) return;
       const pasteImage = pasteImageCallbackRef.current;
-      if (!pasteImage) return;
-      const file = clipboardEventImageFile(event);
-      if (!file) return;
+      const imageFile = clipboardEventImageFile(event);
+      if (pasteImage && imageFile) {
+        event.preventDefault();
+        event.stopPropagation();
+        void fileToPngDataUrl(imageFile)
+          .then((dataUrl) => {
+            pasteImage(sessionId, dataUrl);
+          })
+          .catch(() => {
+            // 编码失败不写 PTY；用户可重试粘贴。
+          });
+        return;
+      }
+      const attachClipboard = attachClipboardCallbackRef.current;
+      if (!attachClipboard) return;
+      const files = clipboardEventNonImageFiles(event);
+      const uriPaths = parseFileUriList(event.clipboardData?.getData('text/uri-list') ?? '');
+      if (files.length === 0 && uriPaths.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
-      void fileToPngDataUrl(file)
-        .then((dataUrl) => {
-          pasteImage(sessionId, dataUrl);
-        })
-        .catch(() => {
-          // 编码失败不写 PTY；用户可重试粘贴。
-        });
+      attachClipboard(sessionId, files, uriPaths);
     };
     viewport.addEventListener('paste', handlePaste, true);
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);

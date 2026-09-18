@@ -36,6 +36,12 @@ import {
 } from '../workbenchProjectSwitchCache';
 import { canRefreshTerminalSize } from '../terminalSizing';
 import type { TerminalLayoutMode } from '../terminalSizing';
+import {
+  attachFilesWithinLimit,
+  filesToAttachBlobs,
+  logicalPointHitsRect,
+  physicalDropPointToCss,
+} from '../terminalFileAttach';
 import { sessionsForWorktree } from '../workbenchWorktrees';
 import { isLatestRequest } from '../workbenchFiles';
 import {
@@ -165,6 +171,12 @@ export interface UseWorkbenchTerminalControllerParams {
   /** 桌面不可用提示文案。 */
   desktopUnavailableMessage: string;
   /**
+   * 终端表面是否是当前可见工作区。
+   *
+   * Business Logic: files/browser/automation 视图时终端层可能仍占布局矩形，不得把拖入交给隐藏终端。
+   */
+  terminalSurfaceActive?: boolean;
+  /**
    * 可选注入：判断当前运行时是否可注册 Tauri event listener；默认实现复用 transformCallback 检测。
    *
    * Business Logic: 普通 Vite/Playwright 浏览器环境没有 Tauri event internals，直接 listen 会抛底层错误；
@@ -190,7 +202,9 @@ export type WorkbenchTerminalErrorKey =
   | 'closeSession'
   | 'renameSession'
   | 'writeSession'
-  | 'pasteImage';
+  | 'pasteImage'
+  | 'attachFiles'
+  | 'attachFilesTooLarge';
 
 /**
  * controller 暴露给页面 deep link / 项目切换等流程的窄接口。
@@ -262,6 +276,24 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   handlePasteImage: (sessionId: string, dataUrl: string | null) => Promise<void>;
   /**
    * Business Logic（为什么需要这个函数）:
+   *   拖入走原生路径；粘贴无路径时走 blob。远端由后端拷到对端临时目录。
+   */
+  handleAttachFiles: (
+    sessionId: string,
+    request: {
+      paths?: string[];
+      blobs?: { relativePath: string; contentBase64: string }[];
+    },
+  ) => Promise<void>;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Cmd+V 粘贴非图片文件与 Finder file:// URI 走同一附件通道。
+   */
+  handleAttachClipboard: (sessionId: string, files: File[], uriPaths: string[]) => Promise<void>;
+  /** 拖入悬停在终端面板上时为 true，供面板描边。 */
+  fileDropActive: boolean;
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   write 失败后 pump lane 永久 blocked，若 xterm 仍启用输入会变成静默键盘黑洞；
    *   视图需按 session 禁用 input，直到 read-only status check 或 loadSessions 成功 recover。
    *
@@ -310,6 +342,7 @@ export function useWorkbenchTerminalController(
     activeProjectId,
     activeWorktreeId,
     remoteWriteDisabled,
+    terminalSurfaceActive = true,
     terminalPanelRef,
     resetBuffer: resetTerminalBuffer,
     removeBuffer: removeTerminalBuffer,
@@ -1321,6 +1354,136 @@ export function useWorkbenchTerminalController(
     [displayErrorMessage, remoteWriteDisabled, sessionsApi, t],
   );
 
+  const attachInFlightRef = useRef(false);
+  const [fileDropActive, setFileDropActive] = useState(false);
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   拖入给原生路径，粘贴给 blob；远端由 sidecar 拷到 owning device。
+   *
+   * Code Logic（这个函数做什么）:
+   *   remoteWriteDisabled / 进行中直接返回；sessions.attachFiles；失败写入 sessionError。
+   */
+  const handleAttachFiles = useCallback(
+    async (
+      sessionId: string,
+      request: {
+        paths?: string[];
+        blobs?: { relativePath: string; contentBase64: string }[];
+      },
+    ): Promise<void> => {
+      if (remoteWriteDisabled) return;
+      if (attachInFlightRef.current) return;
+      attachInFlightRef.current = true;
+      try {
+        await sessionsApi.attachFiles(sessionId, request);
+      } catch (error) {
+        setSessionError(displayErrorMessage(error, t('attachFiles')));
+      } finally {
+        attachInFlightRef.current = false;
+      }
+    },
+    [displayErrorMessage, remoteWriteDisabled, sessionsApi, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Finder 复制文件后 Cmd+V：有 file:// 用路径（本机不拷贝），否则读 File 字节。
+   *
+   * Code Logic（这个函数做什么）:
+   *   uriPaths 优先；否则校验体积、转 blob、attachFiles。
+   */
+  const handleAttachClipboard = useCallback(
+    async (sessionId: string, files: File[], uriPaths: string[]): Promise<void> => {
+      if (remoteWriteDisabled) return;
+      try {
+        if (uriPaths.length > 0) {
+          await handleAttachFiles(sessionId, { paths: uriPaths });
+          return;
+        }
+        if (files.length === 0) return;
+        if (!attachFilesWithinLimit(files)) {
+          setSessionError(t('attachFilesTooLarge'));
+          return;
+        }
+        const blobs = await filesToAttachBlobs(files);
+        await handleAttachFiles(sessionId, { blobs });
+      } catch (error) {
+        setSessionError(displayErrorMessage(error, t('attachFiles')));
+      }
+    },
+    [displayErrorMessage, handleAttachFiles, remoteWriteDisabled, t],
+  );
+
+  useEffect(() => {
+    // 拖放必须走真实 webview API；测试把 canListenToTauriEvents 设 true 只为 terminal-status。
+    if (!canListenToTauriEventsDefault() || remoteWriteDisabled || !terminalSurfaceActive) {
+      setFileDropActive(false);
+      return undefined;
+    }
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const un = await getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === 'leave') {
+          setFileDropActive(false);
+          return;
+        }
+        const panel = terminalPanelRef.current;
+        const sessionId = activeSessionIdRef.current;
+        if (!panel || !sessionId) {
+          setFileDropActive(false);
+          return;
+        }
+        const position = event.payload.position;
+        const dropPaths = event.payload.type === 'drop' ? event.payload.paths : null;
+        void getCurrentWindow()
+          .scaleFactor()
+          .then((scale) => {
+            if (cancelled) return;
+            const css = physicalDropPointToCss(position, scale);
+            const rect = panel.getBoundingClientRect();
+            const hits = logicalPointHitsRect(css.x, css.y, {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+            });
+            if (dropPaths) {
+              setFileDropActive(false);
+              if (!hits || dropPaths.length === 0) return;
+              void handleAttachFiles(sessionId, { paths: dropPaths });
+              return;
+            }
+            setFileDropActive(hits);
+          });
+      });
+      if (cancelled) {
+        un();
+        return;
+      }
+      unlisten = un;
+      } catch {
+        // Playwright/Vite 无 webview drag-drop internals。
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      setFileDropActive(false);
+    };
+  }, [
+    handleAttachFiles,
+    remoteWriteDisabled,
+    terminalPanelRef,
+    terminalSurfaceActive,
+  ]);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   write 失败后 pump 会 silent-block enqueue；视图需用本查询禁用 xterm 输入，
@@ -1547,6 +1710,9 @@ export function useWorkbenchTerminalController(
     handleRenameSession,
     handleInput,
     handlePasteImage,
+    handleAttachFiles,
+    handleAttachClipboard,
+    fileDropActive,
     isWriteBlocked,
     hasWriteBlockedSessions,
     retryWriteBlockRecovery,

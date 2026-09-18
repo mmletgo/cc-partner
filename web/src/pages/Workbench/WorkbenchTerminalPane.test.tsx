@@ -324,6 +324,7 @@ interface PaneHostProps {
   resizeRequestKey?: number;
   onInput?: (sessionId: string, data: string) => void;
   onPasteImage?: (sessionId: string, dataUrl: string | null) => void;
+  onAttachClipboard?: (sessionId: string, files: File[], uriPaths: string[]) => void;
   onResize?: (sessionId: string, cols: number, rows: number) => void;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
   refreshScrollback?: (sessionId: string) => void;
@@ -346,6 +347,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
     resizeRequestKey = 0,
     onInput,
     onPasteImage,
+    onAttachClipboard,
     onResize,
     onCursorAnchorChange,
     refreshScrollback,
@@ -375,6 +377,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
         agentTranscriptActive={agentTranscriptActive}
         onInput={stableInput}
         onPasteImage={onPasteImage}
+        onAttachClipboard={onAttachClipboard}
         onResize={stableResize}
         resizeRequestKey={resizeRequestKey}
         onCursorAnchorChange={onCursorAnchorChange ? stableCursor : undefined}
@@ -699,6 +702,45 @@ describe('WorkbenchTerminalPane — replay gate', () => {
         expect.stringMatching(/^data:image\/png;base64,/),
       );
     });
+  });
+
+  test('paste event with a non-image file is attached instead of typed', () => {
+    const onAttachClipboard = vi.fn();
+    const onPasteImage = vi.fn();
+    const session = buildSession({ id: 's1' });
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    render(
+      <PaneHost
+        session={session}
+        store={store}
+        inputEnabled={true}
+        onPasteImage={onPasteImage}
+        onAttachClipboard={onAttachClipboard}
+      />,
+    );
+    const viewport = document.querySelector('[data-testid="terminal-pane"] > div');
+    expect(viewport).toBeTruthy();
+    const file = new File([new Uint8Array([1, 2, 3])], 'note.pdf', { type: 'application/pdf' });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: {
+        items: [{ kind: 'file', type: 'application/pdf', getAsFile: () => file }],
+        files: {
+          length: 1,
+          item: () => file,
+          [Symbol.iterator]: function* iter() {
+            yield file;
+          },
+        },
+        getData: (type: string) => (type === 'text/uri-list' ? '' : ''),
+      },
+    });
+    act(() => {
+      viewport!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(onPasteImage).not.toHaveBeenCalled();
+    expect(onAttachClipboard).toHaveBeenCalledWith('s1', [file], []);
   });
 
   test('historical buffer replay writes through writeTerminalReplay and gates onData until release', async () => {

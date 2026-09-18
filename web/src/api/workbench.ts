@@ -645,6 +645,26 @@ export const workbenchApi = {
 
     /**
      * Business Logic（为什么需要这个函数）:
+     *   拖入给原生路径，粘贴给文件名+字节；远端 sidecar 再拷到 owning device 临时目录。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke attach_workbench_session_files；不经 32 KiB 输入 WebSocket。
+     */
+    attachFiles: (
+      sessionId: string,
+      request: {
+        paths?: string[];
+        blobs?: { relativePath: string; contentBase64: string }[];
+      },
+    ) =>
+      invoke<{ ok: boolean; sessionId: string }>('attach_workbench_session_files', {
+        sessionId,
+        paths: request.paths ?? [],
+        blobs: request.blobs ?? [],
+      }),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
      *   macOS Ctrl+V 不触发 paste 事件，需从 GUI 进程读 OS 剪贴板。
      *
      * Code Logic（这个函数做什么）:
@@ -1078,6 +1098,7 @@ export type TerminalApiScope = Pick<
   | 'create'
   | 'enqueueInput'
   | 'pasteImage'
+  | 'attachFiles'
   | 'readClipboardImage'
   | 'resize'
   | 'focus'

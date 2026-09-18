@@ -749,6 +749,13 @@ async fn dispatch_workbench_op(
             let data_url = required_string(&payload, "dataUrl")?;
             workbench::paste_workbench_session_image_for_state(state, session_id, data_url).await
         }
+        "sessions.attachFiles" => {
+            let session_id = required_string(&payload, "sessionId")?;
+            let paths = optional_string_array(&payload, "paths");
+            let blobs = parse_attach_file_blobs(&payload)?;
+            workbench::attach_workbench_session_files_for_state(state, session_id, paths, blobs)
+                .await
+        }
         "sessions.resize" => {
             let session_id = required_string(&payload, "sessionId")?;
             let cols = payload
@@ -1364,6 +1371,59 @@ fn optional_string(payload: &Value, key: &str) -> Option<String> {
 ///     仅接受 JSON bool；其它类型视为 None。
 fn optional_bool(payload: &Value, key: &str) -> Option<bool> {
     payload.get(key).and_then(|v| v.as_bool())
+}
+
+/// 读取 payload 字符串数组（缺省空）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     attachFiles 的 paths 可缺省，粘贴 blob 路径走另一字段。
+///
+/// Code Logic（这个函数做什么）:
+///     只收 JSON string 元素，其它类型忽略。
+fn optional_string_array(payload: &Value, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 读取 attachFiles 的 blob 列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     粘贴没有原生路径时，GUI 把文件名和 base64 交给 sidecar。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 `{relativePath, contentBase64}`；缺省空数组。
+fn parse_attach_file_blobs(
+    payload: &Value,
+) -> Result<Vec<crate::workbench::agent_file_attach::AttachFileWire>, AppError> {
+    let Some(items) = payload.get("blobs").and_then(|value| value.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut blobs = Vec::with_capacity(items.len());
+    for item in items {
+        let relative_path = item
+            .get("relativePath")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| AppError::validation("blobs.relativePath 必填"))?
+            .to_string();
+        let content_base64 = item
+            .get("contentBase64")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| AppError::validation("blobs.contentBase64 必填"))?
+            .to_string();
+        blobs.push(crate::workbench::agent_file_attach::AttachFileWire {
+            relative_path,
+            content_base64,
+        });
+    }
+    Ok(blobs)
 }
 
 /// 解析 `provider-manager.switch` payload 的必填 `app` 字段为 `AgentApp`。
