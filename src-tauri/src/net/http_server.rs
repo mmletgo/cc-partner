@@ -23,7 +23,7 @@ use crate::net::mobile_dev_proxy;
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
-    health, mobile, mobile_transfer, orchestrator, prompts, provider_manager, relay,
+    health, mobile, mobile_push, mobile_transfer, orchestrator, prompts, provider_manager, relay,
     scratchpad_sync, ssh_target_sync, sync, transfer, workbench, workbench_project_order_sync,
 };
 use crate::state::AppState;
@@ -794,6 +794,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         )
         // 移动端访问入口：返回手机可访问的局域网 /mobile URL（过滤 localhost/loopback）
         .route("/api/mobile/access-info", get(mobile::access_info))
+        .route("/api/mobile/push/register", post(mobile_push::register))
+        .route(
+            "/api/mobile/push/unregister",
+            post(mobile_push::unregister),
+        )
         // Mobile Attention 快照：v1 与 Tauri list_attention_items 共享；v2 含 Agent 投影
         .route("/api/mobile/attention", get(attention::list_attention))
         .route(

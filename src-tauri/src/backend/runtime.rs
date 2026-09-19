@@ -374,6 +374,7 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     // Prompt 收藏(favorite)字段：旧库幂等补齐favorite 列
     crate::storage::ensure_prompts_favorite_column(&pool).await?;
     crate::storage::AttentionReadRepo::ensure_schema(&pool).await?;
+    crate::storage::mobile_push_repo::MobilePushRepo::ensure_schema(&pool).await?;
     // N2 recovery_jobs 状态机（导出/恢复）
     crate::storage::RecoveryJobRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;

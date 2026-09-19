@@ -20,6 +20,12 @@ release/
 # Codex / git worktree 临时工作目录（不应 track）
 .worktrees/
 
+# Dart / Flutter
+.dart_tool/
+mobile/.dart_tool/
+mobile/build/
+mobile/.packages
+
 # Superpowers visual brainstorming 临时画布（不应 track）
 .superpowers/
 

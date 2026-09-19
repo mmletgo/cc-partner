@@ -1,0 +1,11 @@
+name: cc_partner_mobile
+description: cc-partner native mobile client (iOS/Android). P0 is a Dart package; Flutter shell is added in P8.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dev_dependencies:
+  lints: ^5.1.1
+  test: ^1.25.8

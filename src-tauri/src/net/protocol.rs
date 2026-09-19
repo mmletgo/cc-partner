@@ -36,6 +36,12 @@ pub const PROTOCOL_VERSION_V1: u32 = 1;
 /// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配。
 pub const CAPABILITY_ERRORS_ENVELOPE_V1: &str = "errors.envelope.v1";
 
+/// 能力 token：Flutter App 向本机登记 APNs/FCM token（`/api/mobile/push/*`）。
+///
+/// Business Logic: 协议协商，不是身份鉴权。token 与 register/unregister 路由同发。
+/// Code Logic: 字典序在 `errors.envelope.v1` 之后、`net.relay.v1` 之前。
+pub const CAPABILITY_MOBILE_PUSH_V1: &str = "mobile.push.v1";
+
 /// 能力 token：v1 中转访问（跳板机）转发路由（`/api/relay/*`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -574,6 +580,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
             CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+            CAPABILITY_MOBILE_PUSH_V1.to_string(),
             CAPABILITY_NET_RELAY_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_COMPLETE_AGENT_RUN_V1.to_string(),
@@ -763,6 +770,7 @@ mod tests {
                 "cc-history.paged-sync.v1".to_string(),
                 "device.request-binding.v1".to_string(),
                 "errors.envelope.v1".to_string(),
+                "mobile.push.v1".to_string(),
                 "net.relay.v1".to_string(),
                 "orchestrator.agent-adapters.v1".to_string(),
                 "orchestrator.complete-agent-run.v1".to_string(),
@@ -806,6 +814,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1));
+        assert!(info.supports(CAPABILITY_MOBILE_PUSH_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
