@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'address_book/book.dart';
-import 'address_book/models.dart';
 import 'address_book/file_store.dart';
 import 'app.dart';
 import 'core/lan_http.dart';
@@ -49,16 +48,7 @@ Future<void> _registerPush(
   if (token == null) {
     return;
   }
-  for (final server in book.servers) {
-    try {
-      final snap = await probeLanHealth(http, server.baseUrl);
-      if (snap.ok) {
-        server.lastHealth = ServerHealth.online;
-        server.capabilities = List<String>.from(snap.capabilities);
-        server.pcDeviceId = snap.deviceId ?? server.pcDeviceId;
-      }
-    } catch (_) {}
-  }
+  await book.refreshHealth((baseUrl) => probeLanHealth(http, baseUrl));
   await PushFanout(http).registerAll(
     book: book,
     token: token,

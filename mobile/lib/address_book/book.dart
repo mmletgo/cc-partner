@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import '../core/health_probe.dart';
 import '../core/server_url.dart';
 import 'models.dart';
 
@@ -40,9 +41,9 @@ class AddressBook {
     required AddressBookStore store,
     String? mobileDeviceId,
     Random? random,
-  })  : _store = store,
-        mobileDeviceId = mobileDeviceId ?? _newId(random ?? Random()),
-        _random = random ?? Random();
+  }) : _store = store,
+       mobileDeviceId = mobileDeviceId ?? _newId(random ?? Random()),
+       _random = random ?? Random();
 
   final AddressBookStore _store;
   final Random _random;
@@ -90,15 +91,16 @@ class AddressBook {
   }) async {
     final parsed = parseServerInput(input);
     HealthSnapshot? snapshot;
-    var health = ServerHealth.unreachable;
+    Object? probeError;
     try {
       snapshot = await probe(parsed.baseUrl);
       if (snapshot.ok) {
-        health = ServerHealth.online;
+        // Applied after the record exists.
       } else if (!forceIfUnreachable) {
         throw ServerUnreachableException(parsed.baseUrl);
       }
     } catch (error) {
+      probeError = error;
       if (error is ServerUnreachableException) {
         rethrow;
       }
@@ -108,10 +110,11 @@ class AddressBook {
     }
 
     final existing = servers.cast<ServerRecord?>().firstWhere(
-          (s) => s!.host == parsed.host && s.port == parsed.port,
-          orElse: () => null,
-        );
-    final record = existing ??
+      (s) => s!.host == parsed.host && s.port == parsed.port,
+      orElse: () => null,
+    );
+    final record =
+        existing ??
         ServerRecord(
           id: _newId(_random),
           host: parsed.host,
@@ -124,16 +127,70 @@ class AddressBook {
     if (name.isNotEmpty) {
       record.name = name;
     }
-    record.lastHealth = health;
-    if (snapshot != null && snapshot.ok) {
-      record.pcDeviceId = snapshot.deviceId;
-      record.deviceName = snapshot.deviceName;
-      record.protocolVersion = snapshot.protocolVersion;
-      record.capabilities = List<String>.from(snapshot.capabilities);
-    }
+    _applySnapshot(record, snapshot, probeError);
     activeServerId ??= record.id;
     await persist();
     return record;
+  }
+
+  /// Re-probe every saved PC (foreground / pull-to-refresh).
+  ///
+  /// Business Logic: 授权本地网络或电脑重新上线后，地址簿必须自己恢复「在线」，不能一直停在离线。
+  /// Code Logic: 有界并发（默认 3）best-effort 探测；成功写设备信息，失败标 unreachable 并记下原因。
+  Future<void> refreshHealth(HealthProbe probe, {int concurrency = 3}) async {
+    if (servers.isEmpty) {
+      return;
+    }
+    final queue = List<ServerRecord>.from(servers);
+    final workerCount = concurrency < queue.length ? concurrency : queue.length;
+    await Future.wait(
+      List<Future<void>>.generate(
+        workerCount,
+        (_) => _refreshWorker(queue, probe),
+      ),
+    );
+    await persist();
+  }
+
+  /// 从共享队列取一条记录做探测，供有界并发 worker 使用。
+  Future<void> _refreshWorker(
+    List<ServerRecord> queue,
+    HealthProbe probe,
+  ) async {
+    while (queue.isNotEmpty) {
+      final record = queue.removeAt(0);
+      await _probeRecord(record, probe);
+    }
+  }
+
+  /// 探测一条已保存 PC；失败只写在该记录上，不中断整批刷新。
+  Future<void> _probeRecord(ServerRecord record, HealthProbe probe) async {
+    try {
+      final snapshot = await probe(record.baseUrl);
+      _applySnapshot(record, snapshot, null);
+    } catch (error) {
+      _applySnapshot(record, null, error);
+    }
+  }
+
+  /// 把探测快照或失败原因写回地址簿记录。
+  void _applySnapshot(
+    ServerRecord record,
+    HealthSnapshot? snapshot,
+    Object? error,
+  ) {
+    if (snapshot != null && snapshot.ok) {
+      record.lastHealth = ServerHealth.online;
+      record.lastProbeError = null;
+      record.pcDeviceId = snapshot.deviceId ?? record.pcDeviceId;
+      record.deviceName = snapshot.deviceName ?? record.deviceName;
+      record.protocolVersion =
+          snapshot.protocolVersion ?? record.protocolVersion;
+      record.capabilities = List<String>.from(snapshot.capabilities);
+      return;
+    }
+    record.lastHealth = ServerHealth.unreachable;
+    record.lastProbeError = error != null ? describeProbeError(error) : '电脑未就绪';
   }
 
   /// Switch the workbench target. Tears the previous connection only.

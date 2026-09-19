@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../address_book/book.dart';
@@ -11,25 +13,83 @@ import 'workbench_home.dart';
 
 /// Address book screen: save and switch LAN PC servers.
 class AddressBookPage extends StatefulWidget {
-  const AddressBookPage({super.key, required this.book, required this.http});
+  const AddressBookPage({
+    super.key,
+    required this.book,
+    required this.http,
+    this.probe,
+  });
 
   final AddressBook book;
   final LanHttpClient http;
+  final HealthProbe? probe;
 
   @override
   State<AddressBookPage> createState() => _AddressBookPageState();
 }
 
-class _AddressBookPageState extends State<AddressBookPage> {
+class _AddressBookPageState extends State<AddressBookPage>
+    with WidgetsBindingObserver {
   String? _busyId;
   String? _error;
+  bool _refreshing = false;
+  bool _refreshAgain = false;
 
   AddressBook get _book => widget.book;
 
+  HealthProbe get _probe =>
+      widget.probe ?? ((baseUrl) => probeLanHealth(widget.http, baseUrl));
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_refreshHealth());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshHealth());
+    }
+  }
+
+  /// Re-probe saved PCs on open, resume, and pull-to-refresh.
+  ///
+  /// Business Logic: 本地网络授权或电脑上线发生在首次探测之后，必须再探一次才能从离线恢复。
+  /// Code Logic: 进行中的刷新结束后再跟一次，避免授权框期间的请求被丢掉。
+  Future<void> _refreshHealth() async {
+    if (_book.servers.isEmpty) {
+      return;
+    }
+    if (_refreshing) {
+      _refreshAgain = true;
+      return;
+    }
+    _refreshing = true;
+    try {
+      do {
+        _refreshAgain = false;
+        await _book.refreshHealth(_probe);
+      } while (_refreshAgain);
+    } finally {
+      _refreshing = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
   Future<void> _scanQr() async {
-    final payload = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const ScanQrPage()),
-    );
+    final payload = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const ScanQrPage()));
     if (payload == null || !mounted) {
       return;
     }
@@ -65,14 +125,17 @@ class _AddressBookPageState extends State<AddressBookPage> {
         input,
         name: name,
         forceIfUnreachable: forceIfUnreachable,
-        probe: (baseUrl) => probeLanHealth(widget.http, baseUrl),
+        probe: _probe,
       );
       if (mounted) {
         setState(() => _busyId = null);
-        final status = record.isOnline ? '已连接' : '已保存，当前离线';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$status ${record.baseUrl}')),
-        );
+        final reason = record.lastProbeError;
+        final status = record.isOnline
+            ? '已连接'
+            : '已保存，当前离线${reason == null ? '' : '（$reason）'}';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$status ${record.baseUrl}')));
       }
     } catch (error) {
       if (mounted) {
@@ -120,34 +183,42 @@ class _AddressBookPageState extends State<AddressBookPage> {
         icon: const Icon(Icons.add),
         label: const Text('手动添加'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Card(
-            color: Theme.of(context).colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                kLanRiskStatement,
-                key: const Key('risk-copy'),
-                style: Theme.of(context).textTheme.bodyMedium,
+      body: RefreshIndicator(
+        key: const Key('refresh-health'),
+        onRefresh: _refreshHealth,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          children: [
+            Card(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  kLanRiskStatement,
+                  key: const Key('risk-copy'),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
               ),
             ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 12),
-            Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            if (_busyId != null) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+            ],
+            const SizedBox(height: 16),
+            if (_book.servers.isEmpty)
+              const Text('还没有 PC。点右上角扫一扫桌面上的二维码，或点右下角手动填写。')
+            else
+              ..._book.servers.map(_serverTile),
           ],
-          if (_busyId != null) ...[
-            const SizedBox(height: 12),
-            const LinearProgressIndicator(),
-          ],
-          const SizedBox(height: 16),
-          if (_book.servers.isEmpty)
-            const Text('还没有 PC。点右上角扫一扫桌面上的二维码，或点右下角手动填写。')
-          else
-            ..._book.servers.map(_serverTile),
-        ],
+        ),
       ),
     );
   }
@@ -167,6 +238,7 @@ class _AddressBookPageState extends State<AddressBookPage> {
         title: Text(label),
         subtitle: Text(
           '${server.baseUrl}\n${_healthLabel(server.lastHealth)}'
+          '${server.lastProbeError == null ? '' : ' · ${server.lastProbeError}'}'
           '${active ? ' · 当前' : ''}',
         ),
         isThreeLine: true,
@@ -174,9 +246,9 @@ class _AddressBookPageState extends State<AddressBookPage> {
           await _switchTo(server);
           if (!server.isOnline) {
             if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('电脑离线，不能进入工作台')),
-              );
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('电脑离线，不能进入工作台')));
             }
             return;
           }
@@ -248,9 +320,9 @@ class _AddServerDialogState extends State<_AddServerDialog> {
     }
     final port = _port.text.trim();
     final input = host.contains('://') ? host : '$host:$port';
-    Navigator.of(context).pop(
-      _AddResult(input: input, name: _name.text.trim(), force: _force),
-    );
+    Navigator.of(
+      context,
+    ).pop(_AddResult(input: input, name: _name.text.trim(), force: _force));
   }
 
   @override

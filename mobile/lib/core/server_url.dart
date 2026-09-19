@@ -9,7 +9,13 @@ class ParsedServer {
   final int port;
 
   /// Canonical LAN base URL without trailing slash or path.
-  String get baseUrl => 'http://$host:$port';
+  ///
+  /// Business Logic: 地址簿只存 host:port，探测与请求都走这一条 baseUrl。
+  /// Code Logic: IPv6 必须加方括号，否则 `http://fd7a::1:62116` 无法解析。
+  String get baseUrl {
+    final hostPart = host.contains(':') ? '[$host]' : host;
+    return 'http://$hostPart:$port';
+  }
 }
 
 /// Parse hand-typed host:port, pasted URL, or desktop QR (`http://ip:port/mobile`).

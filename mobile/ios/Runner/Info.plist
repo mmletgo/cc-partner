@@ -35,6 +35,12 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>扫描电脑上的访问二维码，以添加局域网 PC。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>用于连接同一 Wi-Fi 上的 cc-partner 电脑，以打开工作台。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_cc-partner._tcp</string>
+	</array>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Send a photo to the Agent terminal.</string>
 	<key>UIApplicationSceneManifest</key>

@@ -16,18 +16,18 @@ class LastLocation {
   final String? sessionId;
 
   Map<String, dynamic> toJson() => {
-        'projectId': projectId,
-        'panel': panel,
-        'worktreeId': worktreeId,
-        'sessionId': sessionId,
-      };
+    'projectId': projectId,
+    'panel': panel,
+    'worktreeId': worktreeId,
+    'sessionId': sessionId,
+  };
 
   factory LastLocation.fromJson(Map<String, dynamic> json) => LastLocation(
-        projectId: json['projectId'] as String?,
-        panel: json['panel'] as String?,
-        worktreeId: json['worktreeId'] as String?,
-        sessionId: json['sessionId'] as String?,
-      );
+    projectId: json['projectId'] as String?,
+    panel: json['panel'] as String?,
+    worktreeId: json['worktreeId'] as String?,
+    sessionId: json['sessionId'] as String?,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -49,14 +49,14 @@ class PushIntent {
   final String? lastError;
 
   Map<String, dynamic> toJson() => {
-        'registeredToken': registeredToken,
-        'lastError': lastError,
-      };
+    'registeredToken': registeredToken,
+    'lastError': lastError,
+  };
 
   factory PushIntent.fromJson(Map<String, dynamic> json) => PushIntent(
-        registeredToken: json['registeredToken'] as String?,
-        lastError: json['lastError'] as String?,
-      );
+    registeredToken: json['registeredToken'] as String?,
+    lastError: json['lastError'] as String?,
+  );
 }
 
 /// One PC in the phone address book.
@@ -75,6 +75,7 @@ class ServerRecord {
     this.lastUsedAt,
     this.lastLocation,
     this.pushIntent,
+    this.lastProbeError,
   });
 
   final String id;
@@ -91,23 +92,26 @@ class ServerRecord {
   LastLocation? lastLocation;
   PushIntent? pushIntent;
 
+  /// Last probe failure text; in-memory only, not persisted.
+  String? lastProbeError;
+
   bool get isOnline => lastHealth == ServerHealth.online;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'host': host,
-        'port': port,
-        'baseUrl': baseUrl,
-        'pcDeviceId': pcDeviceId,
-        'deviceName': deviceName,
-        'protocolVersion': protocolVersion,
-        'capabilities': capabilities,
-        'lastHealth': lastHealth.name,
-        'lastUsedAt': lastUsedAt?.toIso8601String(),
-        'lastLocation': lastLocation?.toJson(),
-        'pushIntent': pushIntent?.toJson(),
-      };
+    'id': id,
+    'name': name,
+    'host': host,
+    'port': port,
+    'baseUrl': baseUrl,
+    'pcDeviceId': pcDeviceId,
+    'deviceName': deviceName,
+    'protocolVersion': protocolVersion,
+    'capabilities': capabilities,
+    'lastHealth': lastHealth.name,
+    'lastUsedAt': lastUsedAt?.toIso8601String(),
+    'lastLocation': lastLocation?.toJson(),
+    'pushIntent': pushIntent?.toJson(),
+  };
 
   factory ServerRecord.fromJson(Map<String, dynamic> json) {
     final healthName = json['lastHealth'] as String? ?? 'unreachable';
@@ -132,9 +136,7 @@ class ServerRecord {
           : DateTime.parse(json['lastUsedAt'] as String),
       lastLocation: json['lastLocation'] == null
           ? null
-          : LastLocation.fromJson(
-              json['lastLocation'] as Map<String, dynamic>,
-            ),
+          : LastLocation.fromJson(json['lastLocation'] as Map<String, dynamic>),
       pushIntent: json['pushIntent'] == null
           ? null
           : PushIntent.fromJson(json['pushIntent'] as Map<String, dynamic>),

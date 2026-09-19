@@ -27,6 +27,6 @@ void main() {
     expect(book.servers, isNotEmpty);
     expect(book.servers.single.isOnline, isFalse);
     expect(find.textContaining('10.255.255.1'), findsWidgets);
-    expect(find.textContaining('离线'), findsOneWidget);
+    expect(find.textContaining('离线'), findsWidgets);
   });
 }

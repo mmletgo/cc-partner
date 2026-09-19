@@ -42,6 +42,15 @@ void main() {
     expect(() => parseServerInput('  '), throwsFormatException);
   });
 
+  test('IPv6 QR URL keeps brackets in the stored baseUrl', () {
+    final parsed = parseServerInput(
+      'http://[fd7a:115c:a1e0::8032:fe51]:62116/mobile',
+    );
+    expect(parsed.host, 'fd7a:115c:a1e0::8032:fe51');
+    expect(parsed.port, 62116);
+    expect(parsed.baseUrl, 'http://[fd7a:115c:a1e0::8032:fe51]:62116');
+  });
+
   test('desktop QR payload is accepted and junk is ignored', () {
     expect(
       qrPayloadToServerInput('http://192.168.1.8:62116/mobile'),
