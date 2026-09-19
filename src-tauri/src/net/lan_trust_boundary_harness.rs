@@ -176,6 +176,10 @@ fn smoke_router(params: BrowserGuardParams, state: SmokeState) -> Router {
             "/api/mobile/workbench/files/save-text",
             post(smoke_save_text_handler),
         )
+        .route(
+            "/api/mobile/push/register",
+            post(|| async { Json(serde_json::json!({"ok": true, "route": "mobile_push_register"})) }),
+        )
         .route("/api/backend/control/stop", post(smoke_stop_handler))
         .route(
             "/api/workbench/browser/proxy/:previewId/*path",
@@ -472,6 +476,37 @@ async fn run_matrix_async() {
             "native no-Origin business write/read path"
         );
         println!("[ok] bound native no-Origin interoperability");
+    }
+
+    // 4b2 native no-Origin mobile.push register
+    {
+        let resp = client
+            .post(format!("{}/api/mobile/push/register", server.base_url))
+            .header("host", &host)
+            .header("content-type", "application/json")
+            .body(r#"{"mobileDeviceId":"phone-1","platform":"ios","token":"t"}"#)
+            .send()
+            .await
+            .expect("push register");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "native no-Origin mobile.push register"
+        );
+        let hostile = client
+            .post(format!("{}/api/mobile/push/register", server.base_url))
+            .header("host", format!("evil.example:{}", server.port))
+            .header("content-type", "application/json")
+            .body(r#"{"mobileDeviceId":"phone-1","platform":"ios","token":"t"}"#)
+            .send()
+            .await
+            .expect("push register hostile host");
+        assert_eq!(
+            hostile.status(),
+            StatusCode::FORBIDDEN,
+            "hostile Host rejected on mobile.push register"
+        );
+        println!("[ok] bound mobile.push register no-Origin allow + hostile Host reject");
     }
 
     // 4c same-origin mobile write

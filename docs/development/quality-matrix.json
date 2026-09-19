@@ -1141,6 +1141,76 @@
       ]
     },
     {
+      "id": "L3-FLUTTER-MOBILE-TERMINAL-001",
+      "surface": "flutter-mobile-terminal",
+      "level": "L3",
+      "tests": [
+        "mobile/test/terminal_controller_test.dart",
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: real iOS/Android Agent TUI over LAN (gap resync, unacked input, album paste-image)",
+      "ciJob": "manual",
+      "platforms": [
+        "ios",
+        "android"
+      ],
+      "exclusions": [
+        "hosted runner Flutter device farm",
+        "WebView of /mobile"
+      ],
+      "status": "NOT VERIFIED",
+      "docs": [
+        "docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "L3-FLUTTER-MOBILE-MULTI-PC-001",
+      "surface": "flutter-mobile-address-book",
+      "level": "L3",
+      "tests": [
+        "mobile/test/address_book_test.dart",
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: save two LAN PCs, switch workbench, QR parse, force-save offline",
+      "ciJob": "manual",
+      "platforms": [
+        "ios",
+        "android"
+      ],
+      "exclusions": [
+        "phone mDNS browse"
+      ],
+      "status": "NOT VERIFIED",
+      "docs": [
+        "docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md"
+      ]
+    },
+    {
+      "id": "L3-FLUTTER-MOBILE-PUSH-001",
+      "surface": "flutter-mobile-push",
+      "level": "L3",
+      "tests": [
+        "mobile/test/push_payload_test.dart",
+        "src-tauri/src/storage/mobile_push_repo.rs"
+      ],
+      "command": "manual: APNs/FCM delivery from every saved PC while the app is killed",
+      "ciJob": "manual",
+      "platforms": [
+        "ios",
+        "android"
+      ],
+      "exclusions": [
+        "claiming real APNs/FCM in CI",
+        "internet workbench"
+      ],
+      "status": "NOT VERIFIED",
+      "docs": [
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md"
+      ]
+    },
+    {
       "id": "L0-AGENT-LEDGER-001",
       "surface": "agent-metadata-ledger",
       "level": "L0",

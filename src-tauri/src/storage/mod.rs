@@ -16,6 +16,7 @@ pub mod content_version_repo;
 pub mod deletion_floor_repo;
 pub mod health_repo;
 pub mod maintenance_gate;
+pub mod mobile_push_repo;
 pub mod prompt_repo;
 pub mod recovery_job_repo;
 pub mod scratchpad_repo;

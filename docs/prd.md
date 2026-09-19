@@ -16,6 +16,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 使用多页面速记本记录临时文本，并在局域网与 GitHub 间同步
 - 在项目文件夹维度管理 Git worktree、多个普通终端 window/pane，并直接操作当前工作区文件树
 - 通过局域网 `/mobile` 入口在手机浏览器操作 Workbench 项目、worktree、终端、文件、Git 和项目级自动化任务（无访问 token）
+- 通过 Flutter 原生 iOS/Android App（内部包 / TestFlight）保存多台 PC 入口并切换，全自绘工作台（不含自动化看板与 Browser 预览）；网页 `/mobile` 保持独立、不改作 App 壳
 - 用全局 Inbox（待处理）实时投影当前阻塞工作的事项，并只导航到既有权威界面处理
 - 远端设备可只启动独立后端 CLI 暴露 P2P/Workbench/Orchestrator 远端支持，无需完整启动 GUI；可用 doctor 诊断本机后端健康与日志
 
@@ -27,6 +28,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 业务查询、写入与执行对范围内 peer 一律放行，不提供可切换暴露模式、只读模式、逐设备权限或路由级授权矩阵；
 - 网络范围、Host/Origin/Content-Type 与资源上限是部署边界与请求完整性保护，不是身份鉴权；
 - `/api/backend/control/*` 是本机 loopback 控制面（lifecycle + 运行时权威读写），要求 loopback peer + 控制文件 token；token 与 `controlSchemaVersion` 不进入 LAN 业务 API 或 health capabilities。
+- 移动推送中转的 `relayToken` 只用于 PC → 互联网中转调用 APNs/FCM，不是 LAN 调用者身份、不是可切换 LAN 模式；Flutter App 访问工作台 API 与 `/mobile` 相同，无账号/配对/token。
 
 **固定风险声明**：同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。
 
@@ -495,6 +497,22 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 切换为非幂等远端 CLI 写盘，遵循 no-transport-retry（客户端不重试传输层失败）；设备离线返回「远端设备不在线」
 - cc-switch CLI 安装支持本机与远端：远端 CLI 缺失时页面显示「在对端安装」按钮，经对端 `POST /api/provider-manager/install-cli`（能力 token `provider-manager.install.v1`，长超时链路：远端 420s / control 代理 360s，单次不重试）在对端执行安装；macOS 自动 brew 安装并共享对端 cc-switch 数据，其余平台返回对端人工指引文案
 - 移动端 `/mobile` 的 Provider 面板仍只操作提供 `/mobile` 页的那台设备，不跨设备（后续如需另行评审）
+- Flutter App 的 Provider 面板只操作地址簿当前 PC（与 `/mobile` 同一设备语义），不在手机上触发 cc-switch 安装
+
+### 2.21 Flutter 原生移动客户端
+
+**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且本轮不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：已确认待实现。
+
+**功能点**：
+- 本地地址簿：手填 `IP:端口`（默认端口 62116）、粘贴 URL、扫描桌面现有 `/mobile` 二维码（只取主机和端口）；同一规范化 host:port 不重复；保存前 health 探测，失败允许强制保存但不得标为在线
+- 同时只连一台 PC 做工作台；切换则拆掉 HTTP/WS 与内存终端缓冲，并恢复该机上次 `projectId/panel/worktreeId/sessionId`；其它 PC 不保持工作台热连接
+- 工作台全自绘（不内嵌 `/mobile` WebView）：项目、待处理（只导航）、终端、文件富预览、worktree/Git、传输、Provider、设置；第一版不做自动化看板、Browser 工作区、项目笔记
+- 文件 HTML 预览对标桌面 `WorkbenchHtmlPreview`：源码/预览/分栏、相对资源 data URL、空 sandbox（不允许脚本）；该 WebView 仅渲染这一份 HTML，不是 App 壳
+- 终端协议与 `/mobile` 相同：输入 WS `cc-partner.terminal-input.v1`、NDJSON events、gap 必须 replay、未 ACK 输入不得自动重放；相册贴图走 `paste-image`；长按自管选区复制
+- 传输仍经当前 PC 主机中转；系统文件选择器选出后立刻分块上传；下载用系统保存面板；任务 JSON 不得带主机 path
+- 系统推送：App 被杀也可收到；地址簿里每一台已登记 PC 都能发；PC 只把通知发给推送中转（APNs/FCM 密钥不进安装包）；点开后仍须在该局域网才能操作；载荷不含终端字节/路径/Prompt
+- 固定 LAN 无登录；列表/设置展示同一风险声明。同一可达网络中其它设备也可以向某 PC 登记推送 token，不因此新增身份鉴权
+- 第一版分发：TestFlight / Android 内部包，不上架
 
 ## 3. 非功能需求
 
@@ -502,6 +520,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 支持 macOS、Windows、Ubuntu
 - 使用 Tauri 打包为各平台独立桌面应用
 - 应用启动后主窗口默认进入系统全屏显示
+- 另提供 Flutter iOS/Android 客户端（一套代码；第一版内部包 / TestFlight，不上架）；工作台操作仍要求与目标 PC 同一可达局域网
 
 ### 3.2 性能
 - 文件传输速度应充分利用局域网带宽
@@ -523,8 +542,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 4.1 技术栈
 - 桌面宿主：Tauri 2（Rust 主进程）
-- 语言：Rust（后端）+ TypeScript（前端）
-- 网络：axum（HTTP 服务端，跨设备 P2P）+ reqwest（peer client）
+- 语言：Rust（后端）+ TypeScript（桌面与 `/mobile` 前端）+ Dart（Flutter 原生 App）
+- 网络：axum（HTTP 服务端，跨设备 P2P）+ reqwest（peer client）；Flutter App 以原生 HTTP/WebSocket 指向地址簿中的 PC，不带浏览器 Origin
 - 发现：mdns-sd（mDNS）
 - 存储：SQLite + sqlx
 - 抓屏/剪贴板：xcap + arboard
@@ -689,6 +708,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 | POST | /api/workbench/sessions/* | Workbench terminal window/pane 列表、创建、replay、输入、resize、focus、分屏、关闭和重命名 |
 | POST | /api/workbench/prompt-optimizer/stream-to-session | P2P Workbench 远端网关 Prompt 优化并流式写入对端 local 终端 |
 | GET/POST | /api/mobile/workbench/* | Mobile Workbench 本机入口；可继续代理 remote shortcut 的 worktree、terminal、files、Git 和 Prompt 操作 |
+| POST | /api/mobile/push/register | Flutter App 向当前 PC 登记 APNs/FCM token（`mobile.push.v1`，同设备 upsert，无身份鉴权） |
+| POST | /api/mobile/push/unregister | Flutter App 按 `mobileDeviceId` 取消登记 |
 
 
 ## 事务化配置与运行时
