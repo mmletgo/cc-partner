@@ -1,16 +1,10 @@
-/// First-version self-drawn workbench panels. Not a WebView of `/mobile`.
-const kFirstVersionPanels = <String>[
-  'projects',
-  'attention',
-  'terminal',
-  'files',
-  'worktrees',
-  'git',
-  'transfer',
-  'provider',
-  'settings',
-];
+import 'nav.dart';
 
-const kDeferredPanels = <String>['automation', 'browser', 'notes'];
+export 'nav.dart';
 
-bool isFirstVersionPanel(String panel) => kFirstVersionPanels.contains(panel);
+/// Self-drawn workbench; never a WebView of `/mobile`.
+const kEmbedsMobileSpa = false;
+
+const kDeferredPanels = <String>['notes'];
+
+bool isFirstVersionPanel(String panel) => isWorkbenchPanel(panel);

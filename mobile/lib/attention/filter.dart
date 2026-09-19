@@ -74,8 +74,11 @@ AttentionNavigation navigateAttention(AttentionItem item) {
       worktreeId: item.worktreeId,
     );
   }
-  if (item.targetKind == 'orchestratorTask' || item.targetKind == 'orchestratorOutbox') {
-    return AttentionNavigation(panel: 'attention', projectId: item.projectId);
+  if (item.targetKind == 'orchestratorTask' ||
+      item.targetKind == 'orchestratorOutbox' ||
+      item.targetKind == 'remoteOutbox' ||
+      item.targetKind == 'experiment') {
+    return AttentionNavigation(panel: 'automation', projectId: item.projectId);
   }
   return AttentionNavigation(panel: 'attention', projectId: item.projectId);
 }

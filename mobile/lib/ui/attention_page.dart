@@ -5,13 +5,18 @@ import '../attention/client.dart';
 import '../attention/filter.dart';
 import '../core/lan_http.dart';
 import '../projects/client.dart';
-import 'project_home.dart';
 
 class AttentionPage extends StatefulWidget {
-  const AttentionPage({super.key, required this.book, required this.http});
+  const AttentionPage({
+    super.key,
+    required this.book,
+    required this.http,
+    required this.onNavigate,
+  });
 
   final AddressBook book;
   final LanHttpClient http;
+  final void Function(ProjectSummary project, String panel, String? sessionId) onNavigate;
 
   @override
   State<AttentionPage> createState() => _AttentionPageState();
@@ -61,17 +66,7 @@ class _AttentionPageState extends State<AttentionPage> {
     if (!mounted || project == null) {
       return;
     }
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ProjectHome(
-          book: widget.book,
-          http: widget.http,
-          project: project,
-          initialTab: nav.panel == 'terminal' ? 0 : 0,
-          sessionId: nav.sessionId,
-        ),
-      ),
-    );
+    widget.onNavigate(project, nav.panel, nav.sessionId);
   }
 
   @override

@@ -35,4 +35,28 @@ void main() {
     expect(nav.panel, 'terminal');
     expect(nav.sessionId, 's1');
   });
+
+  test('orchestrator Inbox targets navigate to automation, not Inbox itself', () {
+    const task = AttentionItem(
+      id: 'task-1',
+      sourceKind: 'orchestrator',
+      targetKind: 'orchestratorTask',
+      projectId: 'p1',
+    );
+    const outbox = AttentionItem(
+      id: 'outbox-1',
+      sourceKind: 'orchestrator',
+      targetKind: 'remoteOutbox',
+      projectId: 'p1',
+    );
+    const experiment = AttentionItem(
+      id: 'exp-1',
+      sourceKind: 'orchestrator',
+      targetKind: 'experiment',
+      projectId: 'p1',
+    );
+    expect(navigateAttention(task).panel, 'automation');
+    expect(navigateAttention(outbox).panel, 'automation');
+    expect(navigateAttention(experiment).panel, 'automation');
+  });
 }
