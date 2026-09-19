@@ -61,4 +61,75 @@ class ProjectsClient {
       {'projectId': projectId},
     );
   }
+
+  Future<List<Map<String, dynamic>>> listLocalRoots() async {
+    final body = await _http.getDynamic(baseUrl, '/api/mobile/workbench/fs/roots');
+    return asObjectList(body, wrapKey: 'roots');
+  }
+
+  Future<List<Map<String, dynamic>>> listLocalDir(String path) async {
+    final body = await _http.postDynamic(
+      baseUrl,
+      '/api/mobile/workbench/fs/list',
+      {'path': path},
+    );
+    return asObjectList(body, wrapKey: 'entries');
+  }
+
+  Future<Map<String, dynamic>> createDir({
+    required String parentPath,
+    required String name,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/mobile/workbench/fs/create-dir',
+      {'parentPath': parentPath, 'name': name},
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> listRemoteRoots(String deviceId) async {
+    final body = await _http.postDynamic(
+      baseUrl,
+      '/api/mobile/workbench/remote/roots',
+      {'deviceId': deviceId},
+    );
+    return asObjectList(body, wrapKey: 'roots');
+  }
+
+  Future<List<Map<String, dynamic>>> listRemoteDir({
+    required String deviceId,
+    required String path,
+  }) async {
+    final body = await _http.postDynamic(
+      baseUrl,
+      '/api/mobile/workbench/remote/list',
+      {'deviceId': deviceId, 'path': path},
+    );
+    return asObjectList(body, wrapKey: 'entries');
+  }
+
+  Future<Map<String, dynamic>> createRemoteDir({
+    required String deviceId,
+    required String parentPath,
+    required String name,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/mobile/workbench/remote/create-dir',
+      {'deviceId': deviceId, 'parentPath': parentPath, 'name': name},
+    );
+  }
+
+  Future<ProjectSummary> openRemote({
+    required String deviceId,
+    required String path,
+  }) async {
+    final body = await _http.postJson(
+      baseUrl,
+      '/api/mobile/workbench/remote/open',
+      {'deviceId': deviceId, 'path': path},
+    );
+    final project = body['project'] as Map<String, dynamic>? ?? body;
+    return ProjectSummary.fromJson(project);
+  }
 }
