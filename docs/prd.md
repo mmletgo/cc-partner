@@ -24,7 +24,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 
 cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为：
 
-- 合法 loopback/LAN socket peer 调用 P2P、Mobile、Workbench 与 Orchestrator 业务 API 时，不需要账号、配对、token、cookie、session、签名或设备身份；
+- 合法 loopback/LAN socket peer（含 IPv4 CGNAT `100.64/10`，供 Tailscale 等虚拟局域网）调用 P2P、Mobile、Workbench 与 Orchestrator 业务 API 时，不需要账号、配对、token、cookie、session、签名或设备身份；
 - 业务查询、写入与执行对范围内 peer 一律放行，不提供可切换暴露模式、只读模式、逐设备权限或路由级授权矩阵；
 - 网络范围、Host/Origin/Content-Type 与资源上限是部署边界与请求完整性保护，不是身份鉴权；
 - `/api/backend/control/*` 是本机 loopback 控制面（lifecycle + 运行时权威读写），要求 loopback peer + 控制文件 token；token 与 `controlSchemaVersion` 不进入 LAN 业务 API 或 health capabilities。

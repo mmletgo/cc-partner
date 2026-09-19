@@ -54,7 +54,7 @@ pub static EXPECTED_DEVICE_ID_HEADER: HeaderName =
 pub enum LanPeerScope {
     /// IPv4 127.0.0.0/8 或 IPv6 ::1。
     Loopback,
-    /// RFC1918、IPv4 link-local、IPv6 ULA、IPv6 link-local。
+    /// RFC1918、IPv4 CGNAT 100.64/10、IPv4 link-local、IPv6 ULA、IPv6 link-local。
     Lan,
     /// 全局可路由、unspecified、multicast、文档保留或其它不支持地址。
     Denied,
@@ -67,7 +67,7 @@ pub enum LanPeerScope {
 ///
 /// Code Logic（这个函数做什么）:
 ///     接收 `IpAddr`；若为 IPv4-mapped IPv6 先还原为 IPv4；再按固定范围返回 `LanPeerScope`。
-///     允许：IPv4 loopback/private/link-local、IPv6 loopback/ULA/link-local；其余 Denied。
+///     允许：IPv4 loopback/private/CGNAT 100.64/10/link-local、IPv6 loopback/ULA/link-local；其余 Denied。
 pub fn classify_peer_ip(ip: IpAddr) -> LanPeerScope {
     let ip = normalize_peer_ip(ip);
     match ip {
@@ -79,9 +79,9 @@ pub fn classify_peer_ip(ip: IpAddr) -> LanPeerScope {
 /// 判断 IP 是否在用户显式配置的 overlay 信任集合（手动对端 IP ∪ 本机 overlay 接口 IP）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     mDNS 仅覆盖同子网 LAN；跨 VPN/不同子网（如 Tailscale CGNAT 100.64/10）对端需 opt-in。
-///     用户配置 `manual_peers` 后，`AppState.overlay_trusted_ips` 收集精确 IP，本函数据此放行。
-///     这是最小权限的精确 IP 白名单，**非**整段 CGNAT 放开，也**非**身份认证；默认空集合 = 不放行。
+///     mDNS 仅覆盖同子网 LAN。Tailscale CGNAT 100.64/10 已在 `classify_peer_ip` 默认 LAN 范围内。
+///     其它非默认作用域 VPN（如公网 ZeroTier 地址）仍靠 `manual_peers` / overlay 精确 IP 放行。
+///     这是最小权限白名单，也**非**身份认证；默认空集合 = 不额外放行公网 overlay。
 ///
 /// Code Logic（这个函数做什么）:
 ///     先 `normalize_peer_ip`（IPv4-mapped IPv6 还原），再查集合。
@@ -120,18 +120,32 @@ fn normalize_peer_ip(ip: IpAddr) -> IpAddr {
 /// 分类 IPv4 peer。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     IPv4 支持范围固定为 loopback、RFC1918 与 link-local。
+///     IPv4 支持范围固定为 loopback、RFC1918、CGNAT 100.64/10 与 link-local。
+///     100.64/10 是 Tailscale 等虚拟局域网；手机扫该网段二维码时 peer 与 Host 都必须放行。
 ///
 /// Code Logic（这个函数做什么）:
-///     loopback → Loopback；private / link-local → Lan；其余 → Denied。
+///     loopback → Loopback；private / CGNAT / link-local → Lan；其余 → Denied。
 fn classify_ipv4(ip: Ipv4Addr) -> LanPeerScope {
     if ip.is_loopback() {
         LanPeerScope::Loopback
-    } else if ip.is_private() || ip.is_link_local() {
+    } else if ip.is_private() || is_ipv4_cgnat(ip) || ip.is_link_local() {
         LanPeerScope::Lan
     } else {
         LanPeerScope::Denied
     }
+}
+
+/// 判断 IPv4 是否属于 CGNAT 共享地址空间（100.64.0.0/10）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Tailscale 把对端和本机都放在 100.64/10。该段不是 RFC1918，但语义上是用户可达的虚拟局域网；
+///     手机扫桌面 Tailscale 二维码时，Host 与 socket peer 都落在此段。
+///
+/// Code Logic（这个函数做什么）:
+///     检查最高 10 位是否为 `100.64/10`（首字节 100，次字节 64..=127）。
+fn is_ipv4_cgnat(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 100 && (octets[1] & 0xc0) == 64
 }
 
 /// 分类 IPv6 peer（已非 IPv4-mapped）。
@@ -1086,7 +1100,14 @@ mod tests {
             ("255.255.255.255", LanPeerScope::Denied),
             ("172.15.255.255", LanPeerScope::Denied), // 紧邻 172.16/12 下界外
             ("172.32.0.1", LanPeerScope::Denied),     // 紧邻 172.16/12 上界外
-            ("100.64.0.1", LanPeerScope::Denied),     // CGNAT 非产品支持范围
+            // IPv4 CGNAT 100.64/10（Tailscale 等虚拟局域网）
+            ("100.64.0.0", LanPeerScope::Lan),
+            ("100.64.0.1", LanPeerScope::Lan),
+            ("100.110.254.81", LanPeerScope::Lan),
+            ("100.127.255.255", LanPeerScope::Lan),
+            ("100.63.255.255", LanPeerScope::Denied), // 紧邻 100.64/10 下界外
+            ("100.128.0.1", LanPeerScope::Denied),    // 紧邻 100.64/10 上界外
+            ("::ffff:100.64.0.1", LanPeerScope::Lan),
             ("::", LanPeerScope::Denied),
             ("2001:db8::1", LanPeerScope::Denied), // documentation
             ("2001:4860:4860::8888", LanPeerScope::Denied),
@@ -1128,20 +1149,38 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     browser Host 门闸默认拒 CGNAT Host；当 overlay 信任集合含该 Host IP 时必须放行，
-    ///     让手动对端连过来时（Host=本机 CGNAT IP）通过。端口仍须匹配。
+    ///     手机扫 Tailscale 二维码时 Host 是本机 100.64/10 地址；不得再要求 overlay 白名单。
+    #[test]
+    fn evaluate_browser_request_allows_cgnat_host_without_overlay() {
+        let params = browser_guard_params("device-a", 62116);
+        let ctx = P2pRequestContext {
+            request_id: "req-cgnat-host".into(),
+        };
+        evaluate_browser_request(
+            &Method::GET,
+            "/api/health",
+            Some("100.110.254.81:62116"),
+            None,
+            None,
+            &params,
+            &ctx,
+        )
+        .expect("CGNAT Host + 正确端口应通过");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     非 CGNAT 的 overlay 公网 Host 默认仍拒；命中 overlay 精确 IP 才放行。
     #[test]
     fn evaluate_browser_request_allows_overlay_host_ip() {
         let mut params = browser_guard_params("device-a", 62116);
-        let cgnat: IpAddr = "100.72.52.63".parse().unwrap();
+        let overlay_ip: IpAddr = "203.0.113.5".parse().unwrap();
         let ctx = P2pRequestContext {
             request_id: "req-overlay".into(),
         };
-        // 默认（空 overlay）：CGNAT Host 被拒。
         let err = evaluate_browser_request(
             &Method::GET,
             "/api/health",
-            Some("100.72.52.63:62116"),
+            Some("203.0.113.5:62116"),
             None,
             None,
             &params,
@@ -1150,16 +1189,15 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.envelope().code, "forbidden");
 
-        // 注入 overlay 集合后：CGNAT Host 通过（端口一致）。
         params.overlay_trusted_ips = {
             let mut s = HashSet::new();
-            s.insert(cgnat);
+            s.insert(overlay_ip);
             s
         };
         evaluate_browser_request(
             &Method::GET,
             "/api/health",
-            Some("100.72.52.63:62116"),
+            Some("203.0.113.5:62116"),
             None,
             None,
             &params,

@@ -8,7 +8,7 @@ cc-partner is local/LAN only. There is a single fixed LAN behavior for all busin
 
 - Loopback and supported LAN socket peers are fully allowed **without** accounts, pairing, tokens, cookies, sessions, signatures, or device identity.
 - Socket peer IP comes from the real TCP `ConnectInfo` only (never `Forwarded` / `X-Forwarded-For` / `X-Real-IP`).
-- Supported ranges: IPv4 loopback `127.0.0.0/8`, RFC1918, IPv4 link-local `169.254.0.0/16`, IPv6 loopback `::1`, IPv6 ULA `fc00::/7`, IPv6 link-local `fe80::/10`. IPv4-mapped IPv6 is normalized to IPv4 before classification. Other peers get 403 before the handler.
+- Supported ranges: IPv4 loopback `127.0.0.0/8`, RFC1918, IPv4 CGNAT `100.64.0.0/10`, IPv4 link-local `169.254.0.0/16`, IPv6 loopback `::1`, IPv6 ULA `fc00::/7`, IPv6 link-local `fe80::/10`. IPv4-mapped IPv6 is normalized to IPv4 before classification. Other peers get 403 before the handler.
 - Listener may bind wildcard `0.0.0.0:<actualPort>`; the LAN-only enforcement is the socket gate, not “bind only LAN interfaces”.
 - Host/Origin/Content-Type guards reduce browser CSRF / DNS rebinding risk. Native peers may omit Origin. Ordinary `/api/*` rejects `Origin: null`; opaque null Origin is allowed only for a live Browser Preview session path after registry lookup.
 - Resource limits (absolute caps, not a per-route auth matrix): global body **32 MiB**, transfer chunk **960 KiB**, Workbench text save **5 MiB**, preview proxy body **32 MiB**.

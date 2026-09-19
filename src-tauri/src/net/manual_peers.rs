@@ -2,7 +2,9 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     cc-partner 设备发现纯靠 mDNS（`net::discovery`），仅覆盖同子网 LAN。跨 VPN/不同子网
-//!     （如 Tailscale CGNAT 100.64/10）的对端无法被 mDNS 看到，且 LAN 信任门闸默认拒 CGNAT。
+//!     （如 Tailscale CGNAT 100.64/10）的对端无法被 mDNS 看到。
+//!     100.64/10 已在默认 LAN 门禁范围内；本模块仍负责发现 overlay 上的 cc-partner 对端，
+//!     并把非 CGNAT 的 overlay 公网 IP 写入精确白名单。
 //!     本模块提供两条互补的 overlay 发现源：
 //!       1) **Tailscale 自动发现**（首选，免配置）：`tailscale status --json` 列出同 Tailnet 全部 peer，
 //!          逐个探测默认端口是否有 cc-partner health，命中即入 `state.devices`。新节点加入 Tailnet
@@ -10,8 +12,8 @@
 //!       2) **manual_peers**（显式覆盖，用于非 Tailscale 场景如 ZeroTier/跨子网 LAN）：config.json
 //!          配 `manual_peers: [{host,port}]`，同样探测入表。
 //!     两源发现的 cc-partner peer 的 IP 都加入 `AppState.overlay_trusted_ips`（精确 IP 白名单），
-//!     让 `lan_socket_gate` / `browser_request_guard` 放行 CGNAT/overlay。这是 opt-in 最小权限路径，
-//!     不改默认 CGNAT 拒绝策略，也非身份认证。
+//!     供 `lan_socket_gate` / `browser_request_guard` 放行非默认作用域的 overlay 地址。
+//!     这不是身份认证。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `populate_overlay_trusted_ips`：启动时用静态集合（manual_peers IP ∪ 本机 overlay 接口 IP）播种。

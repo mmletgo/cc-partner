@@ -19,8 +19,8 @@ cc-partner P2P/Mobile/Workbench/Orchestrator HTTP is **local/LAN only** and has
 - Business routes do **not** authenticate caller identity. Any socket peer in the
   supported loopback/LAN ranges may read, write, and execute without credentials.
 - Peer IP is taken only from TCP `ConnectInfo` (never forwarded headers). Supported
-  ranges: IPv4 loopback / RFC1918 / IPv4 link-local, IPv6 loopback / ULA /
-  link-local; IPv4-mapped IPv6 is normalized first.
+  ranges: IPv4 loopback / RFC1918 / IPv4 CGNAT `100.64/10` / IPv4 link-local,
+  IPv6 loopback / ULA / link-local; IPv4-mapped IPv6 is normalized first.
 - Listener may be wildcard `0.0.0.0` + actual TCP port (preferred **62116**,
   increment on conflict). Discovery uses mDNS UDP **5353**.
 - Request guards: Host allow-list + actual port, Origin rules (native missing
@@ -57,9 +57,10 @@ trusted overlay): this breaks the cold-start deadlock where two fresh peers each
 only trust the other after a successful health probe, but the probe requires the
 other's gate to already allow them. Device entries are still populated only when
 the peer is a confirmed cc-partner instance (health ok). `lan_socket_gate` and the
-browser Host guard allow an IP **only when it is in that explicit set** (precise
-IP allowlist — not whole CGNAT, not auth). Default empty set = no overlay trust;
-CGNAT stays denied.
+browser Host guard treat IPv4 CGNAT `100.64/10` as default LAN (Tailscale /
+carrier-grade NAT virtual LAN). `overlay_trusted_ips` remains a precise allowlist
+for other non-default-scope VPNs (for example a public ZeroTier address). This is
+not caller identity.
 
 This is a transport-reachability opt-in; it does **not** add caller identity,
 authentication, pairing, or encryption.
