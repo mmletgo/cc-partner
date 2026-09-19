@@ -11,6 +11,7 @@ import 'core/lan_http.dart';
 import 'core/health_probe.dart';
 import 'push/apns.dart';
 import 'push/fanout.dart';
+import 'settings/theme.dart';
 
 /// App sandbox documents directory (iOS HOME/Documents, Android app files).
 Directory documentsDirectory() {
@@ -36,7 +37,13 @@ Future<void> main() async {
       await _registerPush(book, http, tokenOverride: call.arguments as String);
     }
   });
-  runApp(CcPartnerApp(book: book, http: http));
+  runApp(
+    CcPartnerApp(
+      book: book,
+      http: http,
+      themeStore: FileThemeStore(File('${dir.path}/theme.txt')),
+    ),
+  );
 }
 
 Future<void> _registerPush(
