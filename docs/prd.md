@@ -16,7 +16,7 @@ cc-partner 是一款支持 Mac/Windows/Ubuntu 三端的桌面工具，设计用�
 - 使用多页面速记本记录临时文本，并在局域网与 GitHub 间同步
 - 在项目文件夹维度管理 Git worktree、多个普通终端 window/pane，并直接操作当前工作区文件树
 - 通过局域网 `/mobile` 入口在手机浏览器操作 Workbench 项目、worktree、终端、文件、Git 和项目级自动化任务（无访问 token）
-- 通过 Flutter 原生 iOS/Android App（内部包 / TestFlight）保存多台 PC 入口并切换，全自绘工作台（不含自动化看板与 Browser 预览）；网页 `/mobile` 保持独立、不改作 App 壳
+- 通过 Flutter 原生 iOS/Android App（内部包 / TestFlight）保存多台 PC 入口并切换，全自绘工作台（含与网页 `/mobile` 对齐的自动化看板与 Browser live preview）；网页 `/mobile` 保持独立、不改作 App 壳
 - 用全局 Inbox（待处理）实时投影当前阻塞工作的事项，并只导航到既有权威界面处理
 - 远端设备可只启动独立后端 CLI 暴露 P2P/Workbench/Orchestrator 远端支持，无需完整启动 GUI；可用 doctor 诊断本机后端健康与日志
 
@@ -504,9 +504,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且本轮不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：已确认待实现。
 
 **功能点**：
-- 本地地址簿：手填 `IP:端口`（默认端口 62116）、粘贴 URL、扫描桌面现有 `/mobile` 二维码（只取主机和端口）；同一规范化 host:port 不重复；保存前 health 探测，失败允许强制保存但不得标为在线
+- 本地地址簿：手填 `IP:端口`（默认端口 62116）、粘贴 URL、扫描桌面现有 `/mobile` 二维码（只取主机和端口）；同一规范化 host:port 不重复；保存前 health 探测，失败允许强制保存但不得标为在线，并展示失败原因。iOS 必须声明本地网络用途（`NSLocalNetworkUsageDescription`）。地址簿在打开、回到前台和下拉刷新时重新探测 `GET /api/health`
 - 同时只连一台 PC 做工作台；切换则拆掉 HTTP/WS 与内存终端缓冲，并恢复该机上次 `projectId/panel/worktreeId/sessionId`；其它 PC 不保持工作台热连接
-- 工作台全自绘（不内嵌 `/mobile` WebView）：项目、待处理（只导航）、终端、文件富预览、worktree/Git、传输、Provider、设置；第一版不做自动化看板、Browser 工作区、项目笔记
+- 工作台全自绘（不内嵌 `/mobile` WebView）：全局为项目 / 待处理（只导航）/ 传输 / 设置 / Provider；进入项目后为终端 / 文件 / Git / worktrees / 自动化 / 浏览器（live preview 允许脚本，与 HTML 文件预览的 JS-off 沙箱分离），并保留 worktree 切换条。项目笔记仍不做
 - 文件 HTML 预览对标桌面 `WorkbenchHtmlPreview`：源码/预览/分栏、相对资源 data URL、空 sandbox（不允许脚本）；该 WebView 仅渲染这一份 HTML，不是 App 壳
 - 终端协议与 `/mobile` 相同：输入 WS `cc-partner.terminal-input.v1`、NDJSON events、gap 必须 replay、未 ACK 输入不得自动重放；相册贴图走 `paste-image`；长按自管选区复制
 - 传输仍经当前 PC 主机中转；系统文件选择器选出后立刻分块上传；下载用系统保存面板；任务 JSON 不得带主机 path

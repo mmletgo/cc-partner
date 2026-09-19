@@ -35,7 +35,7 @@
 | D9 | HTML 预览 | 对标桌面 `WorkbenchHtmlPreview`（源码/预览/分栏 + 资源 data URL + 空 sandbox）；不是 Browser 工作区 |
 | D10 | Provider | 只操作当前 PC 上已有 cc-switch provider；不在手机上安装 CLI |
 | D11 | 推送 | App 被杀也能收到；地址簿里**每一台**已保存 PC 都能发；APNs/FCM 密钥只在推送中转 |
-| D12 | 第一版不做 | 自动化看板、网页浏览预览（Browser 工作区）、项目笔记、手机 mDNS 发现、跨手机同步地址簿、非图片 attach-to-agent |
+| D12 | 第一版不做 | 项目笔记、手机 mDNS 发现、跨手机同步地址簿、非图片 attach-to-agent。自动化看板与 Browser live preview 已纳入与网页 `/mobile` 对齐的工作台面板 |
 
 ## 3. 用户结果
 
@@ -43,7 +43,7 @@
 
 - 安装一份 Flutter App（iOS TestFlight 或 Android 内部包），在地址簿里保存多台 PC 的 `http://IP:端口`。
 - 扫描桌面现有「手机访问」二维码（内容仍是 `http://…/mobile`）或手填主机/端口，把该 PC 加进列表并切换。
-- 在当前 PC 上使用与 `/mobile` 同语义的工作台：项目、待处理、终端、文件（含富预览）、Git/worktree、传输、Provider、设置。
+- 在当前 PC 上使用与 `/mobile` 同语义的工作台：项目、待处理、终端、文件（含富预览）、Git/worktree、自动化、浏览器 live preview、传输、Provider、设置。
 - 用系统相册给 Agent 贴图，用系统文件选择器走主机中转传输。
 - 在 App 被杀掉时，收到地址簿里任一台已配置推送的 PC 的待处理/Agent 等输入通知；点开后若仍在该局域网则切到对应 PC 并导航到目标。
 - 继续用手机浏览器打开 `/mobile`，行为与现在一致。
@@ -55,7 +55,7 @@
 - 顶层 Flutter 工程 `mobile/`（iOS + Android）。
 - 本地地址簿、当前服务器、每台 PC 上次工作台位置。
 - 对当前 `baseUrl` 的原生 HTTP/WebSocket 客户端（省略 Origin，Host 为该入口主机和实际端口）。
-- 第一版面板：项目、待处理、终端、文件工作区、worktree/Git、传输、Provider、设置。
+- 工作台面板：项目、待处理、终端、文件工作区、worktree/Git、自动化、浏览器、传输、Provider、设置。
 - 推送登记 LAN 路由 + PC 侧触发 + 互联网中转发送。
 - 桌面 Settings 增加「移动推送中转」配置（URL + 凭据）；未配置则不发送。
 
@@ -65,7 +65,7 @@
 - 用 WebView 打开 `/mobile` 充当工作台（HTML 文件预览的独立 WebView 除外，见 §8）。
 - 公网工作台、内置 VPN、把推送当远程操作通道。
 - 身份登录、设备配对、可切换 LAN 模式。
-- 自动化看板、Browser 工作区、项目笔记。
+- 项目笔记。自动化看板与 Browser 工作区已与网页 `/mobile` 对齐。
 - 桌面 Finder「attach 非图片文件进 Agent」（网页 `/mobile` 也没有）。
 - 手机作为独立 P2P 节点 / mDNS 广告。
 - 上架 App Store / Google Play。
@@ -127,7 +127,7 @@ LAN 守卫：原生请求允许无 Origin；普通浏览器跨域仍拒绝。App
 - 手填 host + port。
 - 粘贴 `http(s)://host:port/...`：只取 host/port；路径 `/mobile` 丢弃。
 - 扫描桌面现有二维码：同样只取 host/port。
-- 保存前 `GET {baseUrl}/api/health`。成功则写入设备名、`device_id`（若响应有）、capabilities。失败允许**强制保存**，`lastHealth=unreachable`，不能把强制保存画成在线。
+- 保存前 `GET {baseUrl}/api/health`。成功则写入设备名、`device_id`（若响应有）、capabilities。失败允许**强制保存**，`lastHealth=unreachable`，不能把强制保存画成在线，并展示探测失败原因。
 - 规范化后的 `host:port` 去重；重复则更新已有行并选中。
 - 拒绝空 host。`https` 第一版不作为正式入口（现网 `/mobile` 是明文 HTTP）。模拟器可用 `10.0.2.2` / 本机调试地址；产品文案不把 `127.0.0.1` 当正式推荐。
 
@@ -140,7 +140,7 @@ LAN 守卫：原生请求允许无 Origin；普通浏览器跨域仍拒绝。App
 
 **探测**
 
-- 进入前台、切网、手动刷新：对当前项做 health；对其余项有界并发（建议 3）best-effort。
+- 打开地址簿、进入前台、下拉刷新：对全部已保存项做 health（有界并发 3，best-effort）；切网后回到前台同样再探。
 - 协议过旧或缺关键能力：`unsupported`，可进设置/地址簿，工作台面板 fail-closed。
 
 **不做：** 手机 mDNS browse、iCloud 同步地址簿、把多条网卡 IP 自动合成一条（用户可手动加 wifi/有线两个入口）。
@@ -151,12 +151,12 @@ LAN 守卫：原生请求允许无 Origin；普通浏览器跨域仍拒绝。App
 
 对齐 `/mobile` 双模式，不另发明导航。
 
-- **全局：** 项目、待处理、传输、设置（设置内含地址簿与 Provider 入口；Provider 也可作 System 子页）。
-- **项目内：** 终端、文件、Git、worktree；快捷入口：待处理、传输、设置。
+- **全局：** 项目、待处理、传输、设置、Provider。
+- **项目内：** 终端、浏览器、文件、Git、worktrees、自动化；快捷入口：待处理、传输、设置。
 - 当前 PC 是主机：项目列表、本机目录浏览、经主机跳到其它电脑，与现在 `/mobile` 相同。
 - 切地址簿 = 换主机，A 的项目不能带到 B。
 
-第一版面板与网页 `/mobile` 的语义对齐点见 §2 表；自动化与 Browser 不进主导航。
+面板与网页 `/mobile` 的语义对齐点见 §2 表；项目笔记仍不进主导航。
 
 Provider：先 `GET /api/health` 看 `provider-manager.v1`，没有则 unsupported。只操作当前 PC。缺 CLI 只读提示。DTO 不带 API key。不在手机触发 `install-cli`。
 
@@ -178,7 +178,7 @@ Provider：先 `GET /api/health` 看 `provider-manager.v1`，没有则 unsupport
 
 HTML 预览 WebView **不是** App 壳，禁止导航到 `/mobile` 或任意 http(s) 工作台。这是文件预览引擎例外，不推翻 D5。
 
-Browser 工作区（dev server、`allow-scripts`、无 `allow-same-origin`）仍不在第一版。
+Browser 工作区（dev server live preview，脚本开启）与 HTML 文件预览（脚本关闭）必须分两条通道，禁止混用。
 
 ## 9. 终端
 
@@ -346,7 +346,7 @@ cc-partner/
 ```
 
 - Flutter 当前稳定渠道；iOS 16+、Android 8+。
-- iOS ATS：允许局域网明文 HTTP（`NSAllowsLocalNetworking` 及实现所需例外）。Android cleartext 仅调试/内部包所需范围，不把任意域名改成明文。
+- iOS ATS：允许局域网明文 HTTP（`NSAllowsLocalNetworking` 及实现所需例外）。iOS 14+ 必须声明 `NSLocalNetworkUsageDescription`；建议同时声明 `NSBonjourServices` `_cc-partner._tcp`，启动时短时 browse 以弹出系统授权框（不把手机做成 mDNS 发现客户端）。Android cleartext 仅调试/内部包所需范围，不把任意域名改成明文。
 - 内部包签名：Apple/Google 开发者账号与证书不入库；CI 可后补 TestFlight workflow，第一版允许本机构建。
 - 根 `AGENTS.md` 目录地图在 `mobile/` 创建时加一行职责；分层指令可下沉 `mobile/AGENTS.md`。
 - 版本号：手机包版本与桌面 `tauri.conf.json` 不必同一数字，但 Settings 应显示 App build，health 显示 PC 版本，便于排错。
