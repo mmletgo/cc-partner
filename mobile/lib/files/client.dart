@@ -57,6 +57,26 @@ class FilesClient {
     );
   }
 
+  Future<Map<String, dynamic>> previewSqlite({
+    required String projectId,
+    required String path,
+    String? worktreeId,
+    String? table,
+    int limitRows = 200,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/workbench/files/preview-sqlite',
+      {
+        'projectId': projectId,
+        'worktreeId': worktreeId,
+        'path': path,
+        'table': table,
+        'limitRows': limitRows,
+      },
+    );
+  }
+
   Future<Map<String, dynamic>> saveText({
     required String projectId,
     required String path,

@@ -32,4 +32,21 @@ void main() {
     expect(detectFileKind('data.csv'), FileKind.csv);
     expect(detectFileKind('app.sqlite'), FileKind.sqlite);
   });
+
+  test('markdown preview has source / render / split modes', () {
+    expect(kMarkdownPreviewModes, ['source', 'render', 'split']);
+  });
+
+  test('sqlite preview selects a table then rows', () {
+    final preview = SqlitePreviewState.fromOpen({
+      'tables': ['users', 'orders'],
+      'table': 'users',
+      'rows': [
+        {'id': 1},
+      ],
+    });
+    expect(preview.tables, ['users', 'orders']);
+    expect(preview.selectedTable, 'users');
+    expect(preview.selectTable('orders').selectedTable, 'orders');
+  });
 }

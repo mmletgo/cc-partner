@@ -1,4 +1,83 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 enum FileKind { code, markdown, html, image, csv, sqlite, other }
+
+/// Decode a Workbench `files/open` image DTO into bytes for [Image.memory].
+/// data: URLs cannot be loaded with [Image.network].
+Uint8List? imageBytesFromOpenFile(Map<String, dynamic> opened) {
+  final image = opened['image'];
+  if (image is! Map) {
+    return null;
+  }
+  final map = Map<String, dynamic>.from(image);
+  final raw = map['base64'] as String?;
+  if (raw != null && raw.isNotEmpty) {
+    try {
+      return Uint8List.fromList(base64Decode(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+  final dataUrl = map['dataUrl'] as String?;
+  if (dataUrl == null || dataUrl.isEmpty) {
+    return null;
+  }
+  return decodeDataUrlImageBytes(dataUrl);
+}
+
+Uint8List? decodeDataUrlImageBytes(String dataUrl) {
+  if (!dataUrl.startsWith('data:')) {
+    return null;
+  }
+  final comma = dataUrl.indexOf(',');
+  if (comma < 0 || comma >= dataUrl.length - 1) {
+    return null;
+  }
+  try {
+    return Uint8List.fromList(base64Decode(dataUrl.substring(comma + 1)));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// data: and raw base64 images are rendered from bytes, never via network.
+bool imagePreviewUsesNetworkUrl(Map<String, dynamic> opened) {
+  return imageBytesFromOpenFile(opened) == null;
+}
+
+const kMarkdownPreviewModes = ['source', 'render', 'split'];
+
+class SqlitePreviewState {
+  const SqlitePreviewState({
+    required this.tables,
+    required this.selectedTable,
+    required this.rows,
+  });
+
+  final List<String> tables;
+  final String? selectedTable;
+  final List<dynamic> rows;
+
+  factory SqlitePreviewState.fromOpen(Map<String, dynamic> sqlite) {
+    final tables = (sqlite['tables'] as List<dynamic>? ?? const [])
+        .map((e) => '$e')
+        .toList();
+    final selected = sqlite['table'] as String? ?? sqlite['selectedTable'] as String?;
+    final rows = sqlite['rows'] as List<dynamic>? ?? const [];
+    return SqlitePreviewState(
+      tables: tables,
+      selectedTable: selected ?? (tables.isEmpty ? null : tables.first),
+      rows: rows,
+    );
+  }
+
+  SqlitePreviewState selectTable(String table) => SqlitePreviewState(
+        tables: tables,
+        selectedTable: table,
+        rows: const [],
+      );
+}
 
 FileKind detectFileKind(String path, {String? mime}) {
   final lower = path.toLowerCase();
