@@ -53,4 +53,22 @@ void main() {
       isTrue,
     );
   });
+
+  test('host PC is first in the transfer target list', () {
+    final ranked = rankTransferTargets([
+      {'id': 'peer', 'isSelf': false, 'name': 'Other'},
+      {'id': 'host', 'isSelf': true, 'name': 'This PC'},
+    ]);
+    expect(ranked.first['id'], 'host');
+  });
+
+  test('user can pick a non-host transfer target after host is pinned first', () {
+    final ranked = rankTransferTargets([
+      {'id': 'peer', 'isSelf': false, 'name': 'Other'},
+      {'id': 'host', 'isSelf': true, 'name': 'This PC'},
+    ]);
+    expect(pickTransferTargetId(ranked), 'host');
+    expect(pickTransferTargetId(ranked, selectedId: 'peer'), 'peer');
+    expect(pickTransferTargetId(ranked, selectedId: 'gone'), 'host');
+  });
 }

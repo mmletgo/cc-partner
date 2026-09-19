@@ -66,7 +66,41 @@ class TransferApi {
       const {},
     );
   }
+
+  bool get allowsBlindChunkRetry => false;
+
+  Future<List<int>> download(String taskId) {
+    return _http.getBytes(
+      baseUrl,
+      '/api/mobile/transfer/download/$taskId',
+    );
+  }
+
+  Future<void> cancel(String taskId) async {
+    await _http.postJson(
+      baseUrl,
+      '/api/mobile/transfer/cancel',
+      {'taskId': taskId},
+    );
+  }
 }
 
 String newClientOperationId() =>
     'mob-${DateTime.now().microsecondsSinceEpoch}-${DateTime.now().millisecondsSinceEpoch % 997}';
+
+typedef TransferSaveSink = Future<void> Function({
+  required String fileName,
+  required List<int> bytes,
+});
+
+/// Fetch the task bytes from the host relay, then persist them on the phone.
+Future<List<int>> downloadAndSaveTask({
+  required TransferApi api,
+  required String taskId,
+  required String fileName,
+  required TransferSaveSink save,
+}) async {
+  final bytes = await api.download(taskId);
+  await save(fileName: fileName, bytes: bytes);
+  return bytes;
+}

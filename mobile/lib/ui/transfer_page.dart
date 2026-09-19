@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
@@ -7,10 +9,18 @@ import '../transfer/api.dart';
 import '../transfer/client.dart';
 
 class TransferPage extends StatefulWidget {
-  const TransferPage({super.key, required this.book, required this.http});
+  const TransferPage({
+    super.key,
+    required this.book,
+    required this.http,
+    this.api,
+    this.saveSink,
+  });
 
   final AddressBook book;
   final LanHttpClient http;
+  final TransferApi? api;
+  final TransferSaveSink? saveSink;
 
   @override
   State<TransferPage> createState() => _TransferPageState();
@@ -19,6 +29,8 @@ class TransferPage extends StatefulWidget {
 class _TransferPageState extends State<TransferPage> {
   late final TransferApi _api;
   List<TransferTask> _tasks = [];
+  List<Map<String, dynamic>> _targets = [];
+  String? _selectedTargetId;
   String? _error;
   bool _loading = true;
   String? _busy;
@@ -26,7 +38,7 @@ class _TransferPageState extends State<TransferPage> {
   @override
   void initState() {
     super.initState();
-    _api = TransferApi(widget.http, widget.book.active!.baseUrl);
+    _api = widget.api ?? TransferApi(widget.http, widget.book.active!.baseUrl);
     _reload();
   }
 
@@ -37,9 +49,12 @@ class _TransferPageState extends State<TransferPage> {
     });
     try {
       final tasks = await _api.listTasks();
+      final targets = rankTransferTargets(await _api.listDevices());
       if (mounted) {
         setState(() {
           _tasks = tasks;
+          _targets = targets;
+          _selectedTargetId = pickTransferTargetId(targets, selectedId: _selectedTargetId);
           _loading = false;
         });
       }
@@ -63,12 +78,9 @@ class _TransferPageState extends State<TransferPage> {
     if (bytes == null) {
       return;
     }
+    final target = pickTransferTargetId(_targets, selectedId: _selectedTargetId) ?? '';
     setState(() => _busy = '上传');
     try {
-      final devices = await _api.listDevices();
-      final target = devices.isNotEmpty
-          ? devices.first['id'] as String? ?? devices.first['deviceId'] as String? ?? ''
-          : '';
       final plan = planUploadAfterPick(fileName: file.name, size: bytes.length);
       final init = await _api.uploadInit(
         filename: plan.fileName,
@@ -95,11 +107,51 @@ class _TransferPageState extends State<TransferPage> {
     }
   }
 
+  Future<void> _download(TransferTask task) async {
+    setState(() => _busy = '下载');
+    try {
+      await downloadAndSaveTask(
+        api: _api,
+        taskId: task.id,
+        fileName: task.fileName ?? task.id,
+        save: widget.saveSink ?? saveTransferBytesToPhone,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存到本机')));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('下载失败: $error')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = null);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
         if (_busy != null) const LinearProgressIndicator(),
+        if (_targets.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: DropdownButtonFormField<String>(
+              key: const Key('transfer-target'),
+              value: _selectedTargetId,
+              decoration: const InputDecoration(labelText: '发送到'),
+              items: [
+                for (final device in _targets)
+                  DropdownMenuItem(
+                    value: transferDeviceId(device),
+                    child: Text(transferDeviceLabel(device)),
+                  ),
+              ],
+              onChanged: (value) => setState(() => _selectedTargetId = value),
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.all(8),
           child: FilledButton.icon(
@@ -120,6 +172,26 @@ class _TransferPageState extends State<TransferPage> {
                         ListTile(
                           title: Text(task.fileName ?? task.id),
                           subtitle: Text('${task.direction} · ${task.status}${canDownload(task) ? ' · 可下载' : ''}'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (canDownload(task))
+                                IconButton(
+                                  tooltip: '下载',
+                                  onPressed: () => _download(task),
+                                  icon: const Icon(Icons.download),
+                                ),
+                              if (task.status != 'completed')
+                                IconButton(
+                                  tooltip: '取消',
+                                  onPressed: () async {
+                                    await _api.cancel(task.id);
+                                    await _reload();
+                                  },
+                                  icon: const Icon(Icons.cancel_outlined),
+                                ),
+                            ],
+                          ),
                         ),
                     ],
                   ),
@@ -128,4 +200,14 @@ class _TransferPageState extends State<TransferPage> {
       ],
     );
   }
+}
+
+Future<void> saveTransferBytesToPhone({
+  required String fileName,
+  required List<int> bytes,
+}) async {
+  await FilePicker.platform.saveFile(
+    fileName: fileName,
+    bytes: Uint8List.fromList(bytes),
+  );
 }

@@ -76,3 +76,45 @@ TransferUploadPlan planUploadAfterPick({
     startImmediately: true,
   );
 }
+
+/// Host PC (`isSelf`) is listed first, then the current peer, matching `/mobile`.
+List<Map<String, dynamic>> rankTransferTargets(List<Map<String, dynamic>> devices) {
+  final copy = List<Map<String, dynamic>>.from(devices);
+  copy.sort((a, b) {
+    final aSelf = a['isSelf'] == true;
+    final bSelf = b['isSelf'] == true;
+    if (aSelf == bSelf) {
+      return 0;
+    }
+    return aSelf ? -1 : 1;
+  });
+  return copy;
+}
+
+String transferDeviceId(Map<String, dynamic> device) =>
+    device['id'] as String? ?? device['deviceId'] as String? ?? '';
+
+String transferDeviceLabel(Map<String, dynamic> device) {
+  final name = device['name'] as String? ?? device['deviceName'] as String?;
+  final id = transferDeviceId(device);
+  final label = (name != null && name.isNotEmpty) ? name : id;
+  return device['isSelf'] == true ? '$label · 主机' : label;
+}
+
+/// Host is the default; a still-listed user choice wins.
+String? pickTransferTargetId(
+  List<Map<String, dynamic>> ranked, {
+  String? selectedId,
+}) {
+  if (selectedId != null && selectedId.isNotEmpty) {
+    for (final device in ranked) {
+      if (transferDeviceId(device) == selectedId) {
+        return selectedId;
+      }
+    }
+  }
+  if (ranked.isEmpty) {
+    return null;
+  }
+  return transferDeviceId(ranked.first);
+}

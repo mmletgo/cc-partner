@@ -24,6 +24,21 @@ class LanHttpClient {
     return _decodeDynamic(response);
   }
 
+  Future<List<int>> getBytes(String baseUrl, String path) async {
+    final uri = _uri(baseUrl, path);
+    final request = await _client.getUrl(uri);
+    _stripOrigin(request);
+    final response = await request.close();
+    final bytes = await response.fold<List<int>>(<int>[], (prev, chunk) {
+      prev.addAll(chunk);
+      return prev;
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw LanHttpException(response.statusCode, utf8.decode(bytes));
+    }
+    return bytes;
+  }
+
   Future<Map<String, dynamic>> postJson(
     String baseUrl,
     String path,
