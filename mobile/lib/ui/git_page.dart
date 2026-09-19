@@ -7,11 +7,18 @@ import '../projects/client.dart';
 import '../transfer/api.dart';
 
 class GitPage extends StatefulWidget {
-  const GitPage({super.key, required this.book, required this.http, required this.project});
+  const GitPage({
+    super.key,
+    required this.book,
+    required this.http,
+    required this.project,
+    this.worktreeId,
+  });
 
   final AddressBook book;
   final LanHttpClient http;
   final ProjectSummary project;
+  final String? worktreeId;
 
   @override
   State<GitPage> createState() => _GitPageState();
@@ -23,6 +30,8 @@ class _GitPageState extends State<GitPage> {
   String? _error;
   bool _loading = true;
   String? _busy;
+  Map<String, dynamic>? _hookFailure;
+  String? _hookWorktreeId;
 
   @override
   void initState() {
@@ -58,10 +67,16 @@ class _GitPageState extends State<GitPage> {
     }
   }
 
-  Future<void> _run(String label, Future<void> Function() action) async {
+  Future<void> _run(String label, Future<Map<String, dynamic>> Function() action) async {
     setState(() => _busy = label);
     try {
-      await action();
+      final result = await action();
+      if (result['kind'] == 'failedHook' || result['hookFailure'] != null) {
+        setState(() {
+          _hookFailure = result['hookFailure'] as Map<String, dynamic>? ?? result;
+          _hookWorktreeId = result['worktreeId'] as String?;
+        });
+      }
       await _reload();
     } catch (error) {
       if (mounted) {
@@ -72,6 +87,34 @@ class _GitPageState extends State<GitPage> {
         setState(() => _busy = null);
       }
     }
+  }
+
+  Future<void> _commit(String id) async {
+    final controller = TextEditingController();
+    final message = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('提交说明'),
+        content: TextField(controller: controller, autofocus: true),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('提交'),
+          ),
+        ],
+      ),
+    );
+    if (message == null || message.isEmpty) {
+      return;
+    }
+    await _run('提交', () {
+      return _client.commit(
+        worktreeId: id,
+        clientOperationId: newClientOperationId(),
+        message: message,
+      );
+    });
   }
 
   @override
@@ -88,31 +131,50 @@ class _GitPageState extends State<GitPage> {
     return ListView(
       children: [
         if (_busy != null) LinearProgressIndicator(key: ValueKey(_busy)),
+        if (_hookFailure != null)
+          Card(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: ListTile(
+              title: const Text('Git hook 失败'),
+              subtitle: Text('${_hookFailure!['output'] ?? _hookFailure}'),
+              trailing: TextButton(
+                onPressed: () async {
+                  await _client.repairHookFailure(
+                    worktreeId: _hookWorktreeId ?? widget.worktreeId ?? '',
+                    hookFailure: _hookFailure!,
+                  );
+                  if (mounted) {
+                    setState(() => _hookFailure = null);
+                  }
+                },
+                child: const Text('hook-repair'),
+              ),
+            ),
+          ),
         for (final tree in _trees)
           Card(
             child: ListTile(
               title: Text(tree['name'] as String? ?? tree['branch'] as String? ?? tree['id'] as String? ?? ''),
               subtitle: Text(tree['branch'] as String? ?? ''),
+              selected: tree['id'] == widget.worktreeId,
               trailing: PopupMenuButton<String>(
                 onSelected: (value) {
                   final id = tree['id'] as String? ?? '';
                   final op = newClientOperationId();
                   switch (value) {
                     case 'commit':
-                      _run('提交', () async {
-                        await _client.commit(worktreeId: id, clientOperationId: op);
-                      });
+                      _commit(id);
                     case 'pull':
-                      _run('拉取', () async {
-                        await _client.pull(projectId: widget.project.id, worktreeId: id);
+                      _run('拉取', () {
+                        return _client.pull(projectId: widget.project.id, worktreeId: id);
                       });
                     case 'push':
-                      _run('推送', () async {
-                        await _client.push(projectId: widget.project.id, worktreeId: id);
+                      _run('推送', () {
+                        return _client.push(projectId: widget.project.id, worktreeId: id);
                       });
                     case 'merge':
-                      _run('合并', () async {
-                        await _client.merge(
+                      _run('合并', () {
+                        return _client.merge(
                           projectId: widget.project.id,
                           worktreeId: id,
                           clientOperationId: op,

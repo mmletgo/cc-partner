@@ -67,4 +67,50 @@ class GitClient {
       },
     );
   }
+
+  Future<Map<String, dynamic>> create({
+    required String projectId,
+    required String branchName,
+    String? baseBranch,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/mobile/workbench/worktrees/create',
+      {
+        'projectId': projectId,
+        'branchName': branchName,
+        'baseBranch': baseBranch,
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> remove({
+    required String worktreeId,
+    required String clientOperationId,
+    bool force = false,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/mobile/workbench/worktrees/remove',
+      {
+        'worktreeId': worktreeId,
+        'clientOperationId': clientOperationId,
+        'force': force,
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> repairHookFailure({
+    required String worktreeId,
+    required Map<String, dynamic> hookFailure,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/mobile/workbench/worktrees/repair-hook-failure',
+      {
+        'worktreeId': worktreeId,
+        'hookFailure': hookFailure,
+      },
+    );
+  }
 }
