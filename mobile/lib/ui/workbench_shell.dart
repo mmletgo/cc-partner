@@ -42,6 +42,9 @@ class WorkbenchShell extends StatelessWidget {
     this.worktreeStrip,
     this.onBackToProjects,
     this.badges = const {},
+    this.automationEnabled = true,
+    this.browserEnabled = true,
+    this.hideWorktreeStrip = false,
   });
 
   final WorkbenchNavMode mode;
@@ -56,9 +59,20 @@ class WorkbenchShell extends StatelessWidget {
   /// 面板徽章计数（如「待处理」未读数）；null 或 <=0 不显示。
   final Map<WorkbenchPanel, int> badges;
 
+  /// 内测开关：关闭时 Drawer 隐藏对应入口（fail-closed 对齐 web）。
+  final bool automationEnabled;
+  final bool browserEnabled;
+
+  /// 终端全屏等工作区场景下隐藏 worktree 切换条。
+  final bool hideWorktreeStrip;
+
   @override
   Widget build(BuildContext context) {
-    final groups = getWorkbenchNavGroups(mode);
+    final groups = filterWorkbenchNavGroupsByFeatures(
+      getWorkbenchNavGroups(mode),
+      automationEnabled: automationEnabled,
+      browserEnabled: browserEnabled,
+    );
     return Scaffold(
       key: const Key('workbench-shell'),
       appBar: AppBar(
@@ -92,7 +106,7 @@ class WorkbenchShell extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                   child: Text(
-                    group.id,
+                    workbenchNavGroupLabel(group.id),
                     style: Theme.of(context).textTheme.labelSmall,
                   ),
                 ),
@@ -115,7 +129,7 @@ class WorkbenchShell extends StatelessWidget {
       ),
       body: Column(
         children: [
-          if (worktreeStrip != null)
+          if (worktreeStrip != null && !hideWorktreeStrip)
             KeyedSubtree(key: const Key('worktree-strip'), child: worktreeStrip!),
           Expanded(child: child),
         ],

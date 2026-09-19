@@ -44,6 +44,78 @@ const kGlobalNavGroups = <WorkbenchNavGroup>[
   ),
 ];
 
+/// 实验开关可以关闭的项目级面板集合（对齐 web ExperimentalFeaturesProvider 只滤 automation/browser）。
+const kExperimentalPanels = <WorkbenchPanel>[
+  WorkbenchPanel.automation,
+  WorkbenchPanel.browser,
+];
+
+/// Business Logic: Drawer 分组标题此前直接渲染英文 id（projects/inbox/...），
+/// 中文用户需要可读的分组标题（对齐 web navGroups 文案，inbox 用「待处理」口径）。
+/// Code Logic: 纯函数映射；未知 id 回退原 id，保证旧数据/新分组不炸 UI。
+String workbenchNavGroupLabel(String id) {
+  switch (id) {
+    case 'projects':
+      return '项目';
+    case 'inbox':
+      return '待处理';
+    case 'tools':
+      return '工具';
+    case 'system':
+      return '系统';
+    case 'work':
+      return '工作';
+    case 'shortcuts':
+      return '快捷';
+    default:
+      return id;
+  }
+}
+
+/// Business Logic: automation/browser 是内测开关，关闭时 Drawer 不能露出对应入口
+/// （对齐 web 侧栏按 experimentalFeatures 过滤）。
+/// Code Logic: 纯函数——按开关过滤 kExperimentalPanels，组内空了则整组移除；未知开关默认开。
+List<WorkbenchNavGroup> filterWorkbenchNavGroupsByFeatures(
+  List<WorkbenchNavGroup> groups, {
+  required bool automationEnabled,
+  required bool browserEnabled,
+}) {
+  bool enabled(WorkbenchPanel panel) {
+    if (panel == WorkbenchPanel.automation) {
+      return automationEnabled;
+    }
+    if (panel == WorkbenchPanel.browser) {
+      return browserEnabled;
+    }
+    return true;
+  }
+
+  return [
+    for (final group in groups)
+      () {
+        final panels = group.panels.where(enabled).toList();
+        return WorkbenchNavGroup(id: group.id, panels: panels);
+      }(),
+  ].where((group) => group.panels.isNotEmpty).toList();
+}
+
+/// Business Logic: 用户停在 automation/browser 面板时开关被关闭（或加载前 fail-closed），
+/// 必须自动回落到可用面板，不能留在黑屏页（对齐 web MobileWorkbench 的收回 effect）。
+/// Code Logic: 纯函数——当前面板被关闭时回落：有项目 → terminal，无项目 → projects；否则原样返回。
+WorkbenchPanel resolvePanelForFeatures({
+  required WorkbenchPanel panel,
+  required bool hasProject,
+  required bool automationEnabled,
+  required bool browserEnabled,
+}) {
+  final closed = (panel == WorkbenchPanel.automation && !automationEnabled) ||
+      (panel == WorkbenchPanel.browser && !browserEnabled);
+  if (!closed) {
+    return panel;
+  }
+  return hasProject ? WorkbenchPanel.terminal : WorkbenchPanel.projects;
+}
+
 const kProjectNavGroups = <WorkbenchNavGroup>[
   WorkbenchNavGroup(id: 'work', panels: kProjectBoundPanels),
   WorkbenchNavGroup(
@@ -97,10 +169,14 @@ WorkbenchPanel selectPanelForProject({
   return next;
 }
 
+/// Business Logic: 终端面板也要显示 worktree 切换条（对齐 web 终端页 tabs），
+/// 全屏时由 shell 用 hideWorktreeStrip 隐藏，而不是在这里排除终端。
+/// Code Logic: 纯函数——files/browser/git/terminal 显示，其余面板不显示。
 bool shouldShowWorktreeStrip(WorkbenchPanel panel) =>
     panel == WorkbenchPanel.files ||
     panel == WorkbenchPanel.browser ||
-    panel == WorkbenchPanel.git;
+    panel == WorkbenchPanel.git ||
+    panel == WorkbenchPanel.terminal;
 
 /// 带徽章的导航项（如「待处理」的未读数）。
 class WorkbenchNavItem {

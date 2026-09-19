@@ -129,6 +129,54 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
   }
 
+  /// Business Logic: 列表加载失败时不能只给一行裸错误——用户需要明确的失败卡与重试入口，
+  /// 且下拉刷新在错误态同样可用（对齐 web projectPanel 的 error + reload 语义）。
+  /// Code Logic: 错误卡展示「加载失败」+ 具体原因 + 重试按钮；RefreshIndicator 包住
+  /// 错误列表允许下拉重载。
+  Widget _errorPanel() {
+    final theme = Theme.of(context);
+    return RefreshIndicator(
+      onRefresh: _reload,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          Card(
+            key: const Key('projects-error-card'),
+            margin: const EdgeInsets.all(16),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.error_outline, color: theme.colorScheme.error),
+                      const SizedBox(width: 8),
+                      Text('加载失败', style: theme.textTheme.titleMedium),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _error ?? '',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    key: const Key('projects-error-retry'),
+                    onPressed: _reload,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重试'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -155,12 +203,22 @@ class _ProjectsPageState extends State<ProjectsPage> {
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : _error != null
-                  ? Center(child: Text(_error!))
+                  ? _errorPanel()
                   : _items.isEmpty
-                      ? const Center(child: Text('这台电脑还没有最近项目。请添加本机或局域网目录。'))
+                      ? RefreshIndicator(
+                          onRefresh: _reload,
+                          child: ListView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            children: const [
+                              SizedBox(height: 120),
+                              Center(child: Text('还没有项目文件夹')),
+                            ],
+                          ),
+                        )
                       : RefreshIndicator(
                           onRefresh: _reload,
                           child: ListView.builder(
+                            physics: const AlwaysScrollableScrollPhysics(),
                             itemCount: _items.length,
                             itemBuilder: (context, index) {
                               final project = _items[index];

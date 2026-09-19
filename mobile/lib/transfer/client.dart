@@ -6,22 +6,52 @@ class TransferTask {
     required this.status,
     this.fileName,
     this.peer,
+    this.peerDeviceName,
+    this.fileSize,
+    this.progress = 0,
+    this.transferredBytes,
+    this.failureRetryable,
+    this.logicalTransferId,
   });
 
   final String id;
   final String direction;
   final String status;
   final String? fileName;
+
+  /// 对端设备 id（兼容旧字段 `peer` / 新字段 `peerDeviceId`）。
   final String? peer;
+  final String? peerDeviceName;
+  final int? fileSize;
+
+  /// 0..1 进度比例；后端缺省时按 0 处理（续传判定依据之一）。
+  final double progress;
+
+  /// 已确认传输字节数；>0 时 failed 任务优先显示「继续传输」。
+  final int? transferredBytes;
+
+  /// 结构化 failure.retryable；缺省视为可重试（宽容解析）。
+  final bool? failureRetryable;
+
+  /// 逻辑传输 id（跨 retry 稳定）；缺省回落 task.id。
+  final String? logicalTransferId;
 
   factory TransferTask.fromJson(Map<String, dynamic> json) {
     assertNoHostPaths(json);
+    final failure = json['failure'];
+    final failureMap = failure is Map ? Map<String, dynamic>.from(failure) : const <String, dynamic>{};
     return TransferTask(
       id: json['id'] as String? ?? json['taskId'] as String? ?? '',
       direction: json['direction'] as String? ?? '',
       status: json['status'] as String? ?? '',
       fileName: json['fileName'] as String? ?? json['name'] as String?,
-      peer: json['peer'] as String?,
+      peer: json['peerDeviceId'] as String? ?? json['peer'] as String?,
+      peerDeviceName: json['peerDeviceName'] as String?,
+      fileSize: (json['fileSize'] as num?)?.toInt(),
+      progress: (json['progress'] as num?)?.toDouble() ?? 0,
+      transferredBytes: (json['transferredBytes'] as num?)?.toInt(),
+      failureRetryable: failureMap['retryable'] as bool?,
+      logicalTransferId: json['logicalTransferId'] as String?,
     );
   }
 }
@@ -164,4 +194,113 @@ String? pickTransferTargetId(
     return null;
   }
   return transferDeviceId(ranked.first);
+}
+
+/// 对端声明断点续传的能力 token，与后端 `transfer.resume.v1` 对齐。
+const transferResumeCapabilityV1 = 'transfer.resume.v1';
+
+/// Business Logic: 设备下拉与续传判定需要统一的能力口径，避免各处自行猜字段。
+/// Code Logic: capabilities 是字符串数组且包含 transfer.resume.v1 才算支持。
+bool deviceSupportsTransferResume(Map<String, dynamic> device) {
+  final caps = device['capabilities'];
+  return caps is List && caps.contains(transferResumeCapabilityV1);
+}
+
+/// Business Logic: 旧 peer 无 resume.v1 时必须回退「重新传输」，本机目标视为支持，
+/// 防止显示点了必然失败的假续传。
+/// Code Logic: 找到 task.peer 对应设备；isSelf 直接 true；否则查 capabilities；
+/// peer 缺失或不在列表里 fail-closed 返回 false。
+bool peerSupportsTransferResume(
+  TransferTask task,
+  List<Map<String, dynamic>> devices,
+) {
+  final peerId = task.peer?.trim() ?? '';
+  if (peerId.isEmpty) {
+    return false;
+  }
+  for (final device in devices) {
+    if (transferDeviceId(device) == peerId) {
+      if (device['isSelf'] == true) {
+        return true;
+      }
+      return deviceSupportsTransferResume(device);
+    }
+  }
+  return false;
+}
+
+/// Business Logic: 失败且仍有已确认字节/进度时优先续传，而不是全量重传。
+/// Code Logic: 仅 Send + failed + 未标不可重试，且 transferredBytes>0 或 0<progress<1，
+/// 且 peerSupportsResume（缺省 false）。
+bool isTransferResumable(TransferTask task, bool peerSupportsResume) {
+  if (!peerSupportsResume) {
+    return false;
+  }
+  if (task.direction.toLowerCase() != 'send') {
+    return false;
+  }
+  if (task.status != 'failed') {
+    return false;
+  }
+  if (task.failureRetryable == false) {
+    return false;
+  }
+  if ((task.transferredBytes ?? 0) > 0) {
+    return true;
+  }
+  return task.progress > 0 && task.progress < 1;
+}
+
+/// Business Logic: 无续传元数据、peer 无 resume 能力或已取消的任务允许显式重新传输。
+/// Code Logic: Send 方向 cancelled → true；failed 且可重试且非 resumable → true。
+bool isTransferRetryable(TransferTask task, bool peerSupportsResume) {
+  if (task.direction.toLowerCase() != 'send') {
+    return false;
+  }
+  if (task.status == 'cancelled') {
+    return true;
+  }
+  if (task.status != 'failed') {
+    return false;
+  }
+  if (task.failureRetryable == false) {
+    return false;
+  }
+  return !isTransferResumable(task, peerSupportsResume);
+}
+
+/// Business Logic: 恢复动作互斥与列表扫描共用同一逻辑身份解析。
+/// Code Logic: 非空 logicalTransferId 优先，否则回落 task.id。
+String resolveLogicalTransferId(TransferTask task) {
+  final logical = task.logicalTransferId?.trim() ?? '';
+  return logical.isNotEmpty ? logical : task.id;
+}
+
+/// Business Logic: 判定某 attempt 是否仍占用 logical transfer 的发送槽。
+/// Code Logic: status 为 pending 或 transferring 即活跃。
+bool isTransferAttemptActive(TransferTask task) {
+  return task.status == 'pending' || task.status == 'transferring';
+}
+
+/// Business Logic: 同一 logical transfer 下已有 attempt 在传输或对账中时，
+/// 旧 failed 行不得再点 resume/retry 另 mint clientOperationId 并发发送。
+/// Code Logic: 扫描 tasks，同 logical 且 reconciling 或活跃 → true。
+bool isTransferRecoveryLocked(
+  TransferTask task,
+  List<TransferTask> tasks,
+  Set<String> reconcilingIds,
+) {
+  final logicalId = resolveLogicalTransferId(task);
+  for (final candidate in tasks) {
+    if (resolveLogicalTransferId(candidate) != logicalId) {
+      continue;
+    }
+    if (reconcilingIds.contains(candidate.id)) {
+      return true;
+    }
+    if (isTransferAttemptActive(candidate)) {
+      return true;
+    }
+  }
+  return false;
 }

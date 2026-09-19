@@ -191,9 +191,10 @@ void main() {
   });
 
   test('attentionCategoryLabel maps known categories and hides unknown', () {
-    expect(attentionCategoryLabel('decision'), '决策');
-    expect(attentionCategoryLabel('blocked'), '阻塞');
-    expect(attentionCategoryLabel('environment'), '环境');
+    // 文案与 web i18n 权威一致（web MobileAttentionPanel.test.tsx 锁定「需要你的决定」）。
+    expect(attentionCategoryLabel('decision'), '需要你的决定');
+    expect(attentionCategoryLabel('blocked'), '运行受阻');
+    expect(attentionCategoryLabel('environment'), '环境受阻');
     expect(attentionCategoryLabel('unknown'), isNull);
     expect(attentionCategoryLabel(null), isNull);
   });

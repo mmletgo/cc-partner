@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:cc_partner_mobile/core/lan_http.dart';
 import 'package:cc_partner_mobile/attention/client.dart';
+import 'package:cc_partner_mobile/attention/filter.dart';
 import 'package:test/test.dart';
 
 /// 构造一条与后端 AttentionItemDto（camelCase）一致的快照条目。
@@ -11,6 +12,10 @@ Map<String, dynamic> snapshotItem({
   String sourceKind = 'agentNeedsInput',
   String targetKind = 'agentSession',
   String? readAt,
+  String? freshness = 'live',
+  String? cachedAt = '2026-09-19T07:30:00Z',
+  String? taskId,
+  String? outboxId,
 }) =>
     {
       'id': id,
@@ -19,8 +24,8 @@ Map<String, dynamic> snapshotItem({
       'title': '标题 $id',
       'summary': '摘要 $id',
       'updatedAt': '2026-09-19T08:00:00Z',
-      'freshness': 'live',
-      'cachedAt': null,
+      'freshness': freshness,
+      'cachedAt': cachedAt,
       'project': {'id': 'p1', 'name': 'demo', 'kind': 'local'},
       'device': {'id': 'pc-a', 'name': 'Hans Mac'},
       'target': {
@@ -28,6 +33,8 @@ Map<String, dynamic> snapshotItem({
         'projectId': 'p1',
         'terminalSessionId': 'tmux-1',
         'worktreeId': 'wt-1',
+        if (taskId != null) 'taskId': taskId,
+        if (outboxId != null) 'outboxId': outboxId,
       },
       if (readAt != null) 'readAt': readAt,
     };
@@ -99,8 +106,67 @@ void main() {
     expect(items[0].projectName, 'demo');
     expect(items[0].deviceName, 'Hans Mac');
     expect(items[0].updatedAt, '2026-09-19T08:00:00Z');
+    // freshness/cachedAt 解析（徽章与「最后同步于」展示依据）。
+    expect(items[0].freshness, 'live');
+    expect(items[0].cachedAt, '2026-09-19T07:30:00Z');
     expect(items[1].id, 'read-1');
     expect(items[1].isUnread, isFalse);
+  });
+
+  test('attention item parses automation focus ids from the semantic target', () {
+    final taskItem = AttentionItem.fromJson({
+      'id': 'task-1',
+      'sourceKind': 'orchestratorHumanReview',
+      'category': 'decision',
+      'target': {'kind': 'orchestratorTask', 'projectId': 'p1', 'taskId': 'task-9'},
+    });
+    expect(taskItem.targetKind, 'orchestratorTask');
+    expect(taskItem.taskId, 'task-9');
+    final nav = navigateAttention(taskItem);
+    expect(nav.panel, 'automation');
+    expect(nav.taskId, 'task-9');
+
+    final outboxItem = AttentionItem.fromJson({
+      'id': 'outbox-1',
+      'sourceKind': 'remoteOutboxFailed',
+      'category': 'blocked',
+      'target': {'kind': 'remoteOutbox', 'projectId': 'p1', 'outboxId': 'outbox-7'},
+    });
+    expect(outboxItem.outboxId, 'outbox-7');
+    final outboxNav = navigateAttention(outboxItem);
+    expect(outboxNav.panel, 'automation');
+    expect(outboxNav.outboxId, 'outbox-7');
+
+    // experiment 只导航不聚焦（与 web 一致）。
+    final experimentNav = navigateAttention(AttentionItem.fromJson({
+      'id': 'exp-1',
+      'sourceKind': 'experimentNeedsDecision',
+      'category': 'decision',
+      'target': {'kind': 'experiment', 'projectId': 'p1', 'experimentId': 'exp-7'},
+    }));
+    expect(experimentNav.panel, 'automation');
+    expect(experimentNav.taskId, isNull);
+    expect(experimentNav.outboxId, isNull);
+  });
+
+  test('groupAttentionItems buckets by category and trails unknown categories', () {
+    final groups = groupAttentionItems([
+      _rawItem('b1', 'blocked'),
+      _rawItem('d1', 'decision'),
+      _rawItem('e1', 'environment'),
+      _rawItem('x1', 'weird'),
+      _rawItem('x2', null),
+    ]);
+    expect(groups.map((g) => g.category).toList(), [
+      'decision',
+      'blocked',
+      'environment',
+      'other',
+    ]);
+    expect(groups[0].items.single.id, 'd1');
+    expect(groups[3].items.map((i) => i.id), ['x1', 'x2']);
+    expect(attentionGroupLabel('other'), '其他');
+    expect(attentionGroupLabel('blocked'), '运行受阻');
   });
 
   test('listVisible falls back to v1 when v2 fails', () async {
@@ -147,3 +213,10 @@ void main() {
     expect(items.single.isUnread, isFalse);
   });
 }
+
+AttentionItem _rawItem(String id, String? category) => AttentionItem(
+      id: id,
+      sourceKind: 'agentNeedsInput',
+      targetKind: 'agentSession',
+      category: category,
+    );

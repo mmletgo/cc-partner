@@ -1,5 +1,30 @@
 import '../core/lan_http.dart';
 
+/// worktree 分支名固定前缀（对齐 web WORKTREE_BRANCH_PREFIXES）。
+const kWorktreeBranchPrefixes = <String>[
+  'feature',
+  'fix',
+  'chore',
+  'docs',
+  'refactor',
+  'test',
+  'hotfix',
+];
+
+/// 创建 worktree 的默认分支前缀（对齐 web DEFAULT_WORKTREE_BRANCH_PREFIX）。
+const kDefaultWorktreeBranchPrefix = 'feature';
+
+/// Business Logic: 新建 worktree 时分支类型由固定前缀选择，用户只负责任务后缀
+/// （对齐 web composeWorktreeBranchName）。
+/// Code Logic: 后缀 trim 后非空返回 `prefix/suffix`，否则 null（禁止创建无名分支）。
+String? composeWorktreeBranchName(String prefix, String suffix) {
+  final trimmed = suffix.trim();
+  if (trimmed.isEmpty) {
+    return null;
+  }
+  return '$prefix/$trimmed';
+}
+
 /// worktree 卡片显示名：优先 name，其次 branch / id。
 String worktreeDisplayName(Map<String, dynamic> tree) =>
     tree['name'] as String? ?? tree['branch'] as String? ?? tree['id'] as String? ?? '';
@@ -191,22 +216,32 @@ class GitClient {
   Future<Map<String, dynamic>> pull({
     required String projectId,
     required String worktreeId,
+    String? clientOperationId,
   }) {
     return _http.postJson(
       baseUrl,
       '/api/mobile/workbench/worktrees/pull',
-      {'projectId': projectId, 'worktreeId': worktreeId},
+      {
+        'projectId': projectId,
+        'worktreeId': worktreeId,
+        if (clientOperationId != null) 'clientOperationId': clientOperationId,
+      },
     );
   }
 
   Future<Map<String, dynamic>> push({
     required String projectId,
     required String worktreeId,
+    String? clientOperationId,
   }) {
     return _http.postJson(
       baseUrl,
       '/api/mobile/workbench/worktrees/push',
-      {'projectId': projectId, 'worktreeId': worktreeId},
+      {
+        'projectId': projectId,
+        'worktreeId': worktreeId,
+        if (clientOperationId != null) 'clientOperationId': clientOperationId,
+      },
     );
   }
 
@@ -270,5 +305,32 @@ class GitClient {
         'hookFailure': hookFailure,
       },
     );
+  }
+
+  /// Business Logic: unknown mutation 后必须用同一 clientOperationId 查 owning ledger
+  /// 取 intent/state 对账，禁止盲重放（对齐 web git.getMutationOperation）。
+  /// Code Logic: POST /api/mobile/workbench/worktrees/mutation-operation {clientOperationId}；
+  /// 后端可能返回 null（无记录），非对象响应一律回 null。
+  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+    final decoded = await _http.postDynamic(
+      baseUrl,
+      '/api/mobile/workbench/worktrees/mutation-operation',
+      {'clientOperationId': clientOperationId},
+    );
+    if (decoded is! Map) {
+      return null;
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  /// Business Logic: 「同步」按钮需要全量项目清单（含 deviceId/gitRemoteFingerprint）
+  /// 来找其他设备上的同仓库兄弟项目（对齐 web projects 列表）。
+  /// Code Logic: GET /api/mobile/workbench/projects/list，返回原始项目 DTO 列表（宽容解析）。
+  Future<List<Map<String, dynamic>>> listAllProjects() async {
+    final decoded = await _http.getDynamic(
+      baseUrl,
+      '/api/mobile/workbench/projects/list',
+    );
+    return asObjectList(decoded, wrapKey: 'projects');
   }
 }

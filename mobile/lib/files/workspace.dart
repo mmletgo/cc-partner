@@ -48,6 +48,74 @@ bool imagePreviewUsesNetworkUrl(Map<String, dynamic> opened) {
 
 const kMarkdownPreviewModes = ['source', 'render', 'split'];
 
+/// Business Logic: 文件大小展示与 web MobileFilesPanel 相同分级：
+/// <1KB 精确到 B，KB/MB 各保留一位小数。
+/// Code Logic: null 返回 null 由调用方占位；1024 进制换算。
+String? formatFileSizeLabel(int? size) {
+  if (size == null) {
+    return null;
+  }
+  if (size < 1024) {
+    return '$size B';
+  }
+  if (size < 1024 * 1024) {
+    return '${(size / 1024).toStringAsFixed(1)} KB';
+  }
+  return '${(size / 1024 / 1024).toStringAsFixed(1)} MB';
+}
+
+/// Business Logic: 文件修改时间需按用户本地时间展示；后端给 ISO 字符串，
+/// 无效值不能让预览页崩溃。
+/// Code Logic: 解析失败或缺省返回 null（调用方显示占位符），成功转本地 `y-M-d HH:mm`。
+String? formatFileModifiedAt(String? iso) {
+  if (iso == null || iso.isEmpty) {
+    return null;
+  }
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) {
+    return null;
+  }
+  final local = parsed.isUtc ? parsed.toLocal() : parsed;
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${local.year}-${local.month}-${two(local.day)} '
+      '${two(local.hour)}:${two(local.minute)}';
+}
+
+/// Business Logic: 打开文件后要在头部展示「类型 · 大小 · 修改时间」元信息行，
+/// 与 web metadataText 同源同格式（`files/open` 响应）。
+/// Code Logic: 宽容解析 detectedType 与 metadata.size/modifiedAt；
+/// 单段缺省用「—」占位；三段全缺省返回 null（不渲染该行）。
+String? fileMetadataText(Map<String, dynamic> opened) {
+  final metadata = opened['metadata'];
+  final metadataMap =
+      metadata is Map ? Map<String, dynamic>.from(metadata) : const <String, dynamic>{};
+  final detectedType = (opened['detectedType'] as String?)?.trim() ?? '';
+  final size = (metadataMap['size'] as num?)?.toInt();
+  final modifiedAt = metadataMap['modifiedAt'] as String?;
+  final sizeLabel = formatFileSizeLabel(size);
+  final modifiedLabel = formatFileModifiedAt(modifiedAt);
+  final parts = [
+    detectedType.isNotEmpty ? detectedType : '—',
+    sizeLabel ?? '—',
+    modifiedLabel ?? '—',
+  ];
+  if (parts.every((part) => part == '—')) {
+    return null;
+  }
+  return parts.join(' · ');
+}
+
+/// Business Logic: open 响应的 notice（如哈希不匹配、权限受限）必须上屏提示。
+/// Code Logic: 宽容读取 notice 字符串，空串视为无提示。
+String? openFileNotice(Map<String, dynamic> opened) {
+  final notice = (opened['notice'] as String?)?.trim() ?? '';
+  return notice.isEmpty ? null : notice;
+}
+
+/// Business Logic: open 响应 truncated 表示内容被截断展示，避免用户误以为全文。
+/// Code Logic: 宽容读取布尔字段。
+bool openFileTruncated(Map<String, dynamic> opened) => opened['truncated'] == true;
+
 class SqlitePreviewState {
   const SqlitePreviewState({
     required this.tables,

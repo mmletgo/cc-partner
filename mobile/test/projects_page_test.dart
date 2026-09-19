@@ -104,6 +104,33 @@ class _FakeTransferApi extends TransferApi {
       ];
 }
 
+/// listRecent 可控失败的假客户端：错误态/重试/空态用。
+class _FlakyListProjectsClient extends ProjectsClient {
+  _FlakyListProjectsClient({this.empty = false}) : super(LanHttpClient(), 'http://127.0.0.1:1');
+
+  /// 非 null 时 listRecent 抛错；置回 null 后返回项目列表。
+  Object? listError;
+
+  /// 置为 true 时返回空列表（空态用）。
+  final bool empty;
+  int listCalls = 0;
+
+  @override
+  Future<List<ProjectSummary>> listRecent() async {
+    listCalls += 1;
+    final error = listError;
+    if (error != null) {
+      throw error;
+    }
+    if (empty) {
+      return const [];
+    }
+    return [
+      const ProjectSummary(id: 'p1', name: 'demo', kind: 'local', path: '/Users/demo'),
+    ];
+  }
+}
+
 AddressBook _book() => AddressBook(store: MemoryAddressBookStore());
 
 Text _pathText(WidgetTester tester) =>
@@ -254,5 +281,55 @@ void main() {
     expect(client.openedRemotePath, '/srv/proj-b');
     expect(opened?.id, 'p-lan');
     expect(find.byKey(const Key('picker-open')), findsNothing);
+  });
+
+  testWidgets('列表加载失败：错误卡 + 重试按钮 + 重试成功后回到列表', (tester) async {
+    final client = _FlakyListProjectsClient();
+    client.listError = Exception('list 失败');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProjectsPage(
+            book: _book(),
+            http: LanHttpClient(),
+            onOpen: (_) {},
+            client: client,
+            transferApi: _FakeTransferApi(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 错误卡语义：明确「加载失败」+ 原因 + 重试入口。
+    expect(find.byKey(const Key('projects-error-card')), findsOneWidget);
+    expect(find.text('加载失败'), findsOneWidget);
+    expect(find.textContaining('list 失败'), findsOneWidget);
+
+    // 重试成功后恢复列表。
+    client.listError = null;
+    await tester.tap(find.byKey(const Key('projects-error-retry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('projects-error-card')), findsNothing);
+    expect(find.text('demo'), findsOneWidget);
+  });
+
+  testWidgets('空项目列表显示 web 同款空态文案', (tester) async {
+    final client = _FlakyListProjectsClient(empty: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProjectsPage(
+            book: _book(),
+            http: LanHttpClient(),
+            onOpen: (_) {},
+            client: client,
+            transferApi: _FakeTransferApi(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('还没有项目文件夹'), findsOneWidget);
   });
 }

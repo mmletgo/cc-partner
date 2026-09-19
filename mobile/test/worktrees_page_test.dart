@@ -2,6 +2,7 @@ import 'package:cc_partner_mobile/address_book/book.dart';
 import 'package:cc_partner_mobile/core/lan_http.dart';
 import 'package:cc_partner_mobile/git/client.dart';
 import 'package:cc_partner_mobile/projects/client.dart';
+import 'package:cc_partner_mobile/sessions/client.dart';
 import 'package:cc_partner_mobile/ui/worktrees_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,13 +16,19 @@ class _FakeGitClient extends GitClient {
   Object? removeError;
   int removeCount = 0;
   List<String> removedIds = [];
+  List<String> createdBranchNames = [];
+  List<bool> listCalls = [];
 
   @override
   Future<Map<String, dynamic>> listWorktrees(
     String projectId, {
     bool includeGitStatus = false,
   }) async {
-    return {'ok': true, 'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)]};
+    listCalls.add(includeGitStatus);
+    return {
+      'ok': true,
+      'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)],
+    };
   }
 
   @override
@@ -33,11 +40,16 @@ class _FakeGitClient extends GitClient {
     if (createError != null) {
       throw createError!;
     }
-    trees = [
-      ...trees,
-      {'id': 'wt-new', 'name': branchName, 'branch': branchName, 'isMain': false},
-    ];
-    return {'id': 'wt-new', 'name': branchName, 'branch': branchName, 'isMain': false};
+    createdBranchNames.add(branchName);
+    final created = {
+      'id': 'wt-new',
+      'name': branchName,
+      'branch': branchName,
+      'isMain': false,
+      'path': '/repo/.worktrees/$branchName',
+    };
+    trees = [...trees, Map<String, dynamic>.from(created)];
+    return Map<String, dynamic>.from(created);
   }
 
   @override
@@ -67,7 +79,12 @@ void main() {
     return addressBook;
   }
 
-  Widget wrap(AddressBook addressBook, GitClient git) {
+  Widget wrap(
+    AddressBook addressBook,
+    GitClient git, {
+    ValueChanged<Map<String, dynamic>>? onSelect,
+    Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession,
+  }) {
     return MaterialApp(
       home: Scaffold(
         body: WorktreesPage(
@@ -75,8 +92,9 @@ void main() {
           http: LanHttpClient(),
           project: const ProjectSummary(id: 'p1', name: 'demo'),
           activeId: 'wt-main',
-          onSelect: (_) {},
+          onSelect: onSelect ?? (_) {},
           gitClient: git,
+          onCreateSession: onCreateSession,
         ),
       ),
     );
@@ -84,63 +102,219 @@ void main() {
 
   /// 等 SnackBar 自动消失，避免测试结束时残留 Timer。
   Future<void> flushSnackbars(WidgetTester tester) async {
-    await tester.pump(const Duration(seconds: 4));
+    await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
   }
 
   _FakeGitClient seed() => _FakeGitClient()
     ..trees = const [
-      {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true},
-      {'id': 'wt-1', 'name': 'feat', 'branch': 'feat/app', 'isMain': false},
+      {
+        'id': 'wt-main',
+        'name': 'main',
+        'branch': 'main',
+        'isMain': true,
+        'path': '/repo',
+        'status': {
+          'branch': 'main',
+          'changed': 0,
+          'ahead': 0,
+          'behind': 0,
+          'conflicts': 0,
+          'clean': true,
+          'canPush': true,
+        },
+      },
+      {
+        'id': 'wt-1',
+        'name': 'feat',
+        'branch': 'feat/app',
+        'isMain': false,
+        'path': '/repo/.worktrees/feat-app',
+        'status': {
+          'branch': 'feat/app',
+          'changed': 2,
+          'ahead': 1,
+          'behind': 3,
+          'conflicts': 1,
+          'clean': false,
+          'canPush': false,
+        },
+      },
     ];
 
-  testWidgets('删除前弹出确认框，取消时不删除', (tester) async {
+  testWidgets('卡片展示主/linked、分支、路径与状态/同步/可推送徽章', (tester) async {
     final git = seed();
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
 
-    await tester.tap(find.byTooltip('删除'));
+    expect(find.byKey(const Key('worktree-item-wt-main')), findsOneWidget);
+    expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
+    expect(find.text('主工作区'), findsOneWidget);
+    expect(find.text('worktree'), findsOneWidget);
+    expect(find.text('feat/app'), findsWidgets);
+    expect(find.text('/repo/.worktrees/feat-app'), findsOneWidget);
+    expect(find.text('1 处冲突'), findsOneWidget);
+    expect(find.text('领先 1 / 落后 3'), findsOneWidget);
+    expect(find.text('不可推送'), findsOneWidget);
+    expect(find.text('干净'), findsOneWidget);
+  });
+
+  testWidgets('列表请求带 includeGitStatus=true（状态徽章数据源）', (tester) async {
+    final git = seed();
+    await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
-    expect(find.text('删除 worktree'), findsOneWidget);
-    expect(find.textContaining('确定删除 worktree「feat」吗？'), findsOneWidget);
+    expect(git.listCalls, isNotEmpty);
+    expect(git.listCalls.every((flag) => flag), isTrue);
+  });
+
+  testWidgets('移除前弹出确认框，取消时不删除', (tester) async {
+    final git = seed();
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('移除 worktree'), findsOneWidget);
+    expect(find.textContaining('未推送的提交可能丢失'), findsOneWidget);
 
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
-    expect(find.text('删除 worktree'), findsNothing);
+    expect(find.text('移除 worktree'), findsNothing);
     expect(git.removeCount, 0);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
   });
 
-  testWidgets('确认后删除并刷新列表与提示', (tester) async {
+  testWidgets('确认后移除并刷新列表与提示', (tester) async {
     final git = seed();
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('删除'));
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
     await tester.pumpAndSettle();
 
     expect(git.removeCount, 1);
     expect(git.removedIds, ['wt-1']);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
-    expect(find.textContaining('已删除 worktree「feat」'), findsOneWidget);
+    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
     await flushSnackbars(tester);
   });
 
-  testWidgets('删除失败通过 SnackBar 上屏且列表保留', (tester) async {
+  testWidgets('移除失败通过 SnackBar 上屏且列表保留', (tester) async {
     final git = seed()..removeError = Exception('device offline');
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('删除'));
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('删除失败'), findsOneWidget);
+    expect(find.textContaining('移除失败'), findsOneWidget);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('后缀为空时创建按钮禁用；填写后按 前缀/后缀 组合创建', (tester) async {
+    final git = seed();
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    // 空后缀：创建禁用。
+    expect(
+      tester.widget<FilledButton>(find.widgetWithText(FilledButton, '创建')).onPressed,
+      isNull,
+    );
+
+    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'my-task');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<FilledButton>(find.widgetWithText(FilledButton, '创建')).onPressed,
+      isNotNull,
+    );
+
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+    expect(git.createdBranchNames, ['feature/my-task']);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('切换 prefix 下拉后按组合创建', (tester) async {
+    final git = seed();
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-prefix-select')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('fix').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'login-crash');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    expect(git.createdBranchNames, ['fix/login-crash']);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('创建成功后自动开绑定终端窗口并回调 onSelect', (tester) async {
+    final git = seed();
+    final createdSessions = <String>[];
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        onSelect: (tree) => selected.add(tree['id'] as String),
+        onCreateSession: (projectId, worktreeId) async {
+          createdSessions.add('$projectId/$worktreeId');
+          return SessionSummary(
+            id: 'tmux-1',
+            projectId: projectId,
+            name: 'w',
+            status: 'running',
+            worktreeId: worktreeId,
+          );
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'auto-term');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    expect(createdSessions, ['p1/wt-new']);
+    expect(selected, ['wt-new']);
+    expect(find.textContaining('已创建 worktree「feature/auto-term」'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'auto-term'), findsNothing);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('终端窗口创建失败时保留 worktree、提示且仍回调 onSelect', (tester) async {
+    final git = seed();
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        onSelect: (tree) => selected.add(tree['id'] as String),
+        onCreateSession: (projectId, worktreeId) async => throw Exception('pty boom'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'term-fail');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('终端窗口创建失败'), findsOneWidget);
+    // worktree 已保留并切换（不回滚）。
+    expect(find.byKey(const Key('worktree-item-wt-new')), findsOneWidget);
+    expect(selected, ['wt-new']);
     await flushSnackbars(tester);
   });
 
@@ -149,27 +323,13 @@ void main() {
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), 'feat/x');
+    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'feat/x');
+    await tester.pumpAndSettle();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('创建失败'), findsOneWidget);
     expect(find.widgetWithText(TextField, 'feat/x'), findsOneWidget);
-    await flushSnackbars(tester);
-  });
-
-  testWidgets('创建成功刷新列表并提示', (tester) async {
-    final git = seed();
-    await tester.pumpWidget(wrap(await book(), git));
-    await tester.pumpAndSettle();
-
-    await tester.enterText(find.byType(TextField), 'feat/x');
-    await tester.tap(find.text('创建'));
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('worktree-item-wt-new')), findsOneWidget);
-    expect(find.textContaining('已创建 worktree「feat/x」'), findsOneWidget);
-    expect(find.widgetWithText(TextField, 'feat/x'), findsNothing);
     await flushSnackbars(tester);
   });
 }

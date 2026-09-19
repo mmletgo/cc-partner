@@ -116,6 +116,114 @@ class TransferApi {
       {'taskId': taskId},
     );
   }
+
+  /// Business Logic: 失败/取消后的任务重新传输必须带稳定 clientOperationId，
+  /// 网络异常后才能靠同一 id 对账，不能盲重放。
+  /// Code Logic: POST /api/mobile/transfer/retry，body `{taskId, clientOperationId}`。
+  Future<void> retry(String taskId, String clientOperationId) async {
+    await _http.postJson(
+      baseUrl,
+      '/api/mobile/transfer/retry',
+      {'taskId': taskId, 'clientOperationId': clientOperationId},
+    );
+  }
+
+  /// Business Logic: 有续传元数据且对端支持 resume.v1 时继续传输，复用同一幂等键。
+  /// Code Logic: POST /api/mobile/transfer/resume，body `{taskId, clientOperationId}`。
+  Future<void> resume(String taskId, String clientOperationId) async {
+    await _http.postJson(
+      baseUrl,
+      '/api/mobile/transfer/resume',
+      {'taskId': taskId, 'clientOperationId': clientOperationId},
+    );
+  }
+
+  /// Business Logic: timeout/network 后结果未知，必须先对账再决定成功或报错。
+  /// Code Logic: POST /api/mobile/transfer/get-operation，body `{clientOperationId}`，
+  /// 返回 `{status: notFound|pending|succeeded|failed, taskId?, code?}` 的宽容解析。
+  Future<TransferOperationStatus> getOperation(String clientOperationId) async {
+    final body = await _http.postJson(
+      baseUrl,
+      '/api/mobile/transfer/get-operation',
+      {'clientOperationId': clientOperationId},
+    );
+    return TransferOperationStatus.fromJson(body);
+  }
+}
+
+/// get-operation 对账结果（与 web TransferOperationStatus 联合对齐）。
+class TransferOperationStatus {
+  TransferOperationStatus({required this.status, this.taskId, this.code});
+
+  /// notFound / pending / succeeded / failed。
+  final String status;
+
+  /// succeeded 时附带的任务 id。
+  final String? taskId;
+
+  /// failed 时附带的错误 code。
+  final String? code;
+
+  factory TransferOperationStatus.fromJson(Map<String, dynamic> json) {
+    return TransferOperationStatus(
+      status: json['status'] as String? ?? 'pending',
+      taskId: json['taskId'] as String?,
+      code: json['code'] as String?,
+    );
+  }
+
+  /// Business Logic: pending 表示主机还没落终态，调用方应继续等待或提示稍后重试。
+  bool get isPending => status == 'pending';
+}
+
+/// 与 web 对账节奏一致：最多 12 次、每次间隔 1.5s。
+const transferReconcileMaxAttempts = 12;
+const transferReconcileDelay = Duration(milliseconds: 1500);
+
+/// 对账等待的可注入延时签名（测试用 no-op）。
+typedef TransferReconcileDelay = Future<void> Function(Duration duration);
+
+Future<void> _defaultReconcileDelay(Duration duration) => Future<void>.delayed(duration);
+
+/// Business Logic: timeout/network 后只能用同一 clientOperationId 有界轮询对账，
+/// 禁止立即 mint 新 id 盲重试。
+/// Code Logic: 最多 maxAttempts 次调用 getOperation；非 pending 即返回终态；
+/// 全程仍 pending 则返回最后的 pending 状态；getOperation 抛错向上传播由调用方处理。
+Future<TransferOperationStatus?> reconcileTransferOperation({
+  required TransferApi api,
+  required String clientOperationId,
+  int maxAttempts = transferReconcileMaxAttempts,
+  TransferReconcileDelay delay = _defaultReconcileDelay,
+}) async {
+  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    final status = await api.getOperation(clientOperationId);
+    if (!status.isPending) {
+      return status;
+    }
+    if (attempt + 1 >= maxAttempts) {
+      return status;
+    }
+    await delay(transferReconcileDelay);
+  }
+  return TransferOperationStatus(status: 'pending');
+}
+
+/// Business Logic: timeout/network 后结果未知，不得把错误当确定性失败去重发；
+/// Code Logic: 匹配错误文案/类型中的 timeout/network/offline/unavailable 关键词，
+/// 与 web isTransferOutcomeUncertain 同语义。
+bool isTransferOutcomeUncertain(Object error) {
+  final String code;
+  if (error is LanHttpException) {
+    code = '${error.statusCode}';
+  } else {
+    code = '';
+  }
+  final message = error.toString().toLowerCase();
+  final hay = '$code $message';
+  return hay.contains('timeout') ||
+      hay.contains('network') ||
+      hay.contains('offline') ||
+      hay.contains('unavailable');
 }
 
 String newClientOperationId() =>

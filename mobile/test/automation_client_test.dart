@@ -116,6 +116,112 @@ void main() {
             ],
           }),
         );
+      } else if (request.uri.path.endsWith('/experiments/approve-winner')) {
+        request.response.write(
+          jsonEncode({
+            'id': payload['experimentId'],
+            'status': 'completed',
+            'winnerTaskId': payload['winnerTaskId'],
+          }),
+        );
+      } else if (request.uri.path.endsWith('/experiments/cancel')) {
+        request.response.write(
+          jsonEncode({'id': payload['experimentId'], 'status': 'cancelled'}),
+        );
+      } else if (request.uri.path.endsWith('/task-views/create-block')) {
+        request.response.write(
+          jsonEncode({
+            'block': {
+              'id': payload['clientRequestId'],
+              'projectId': payload['projectId'],
+              'title': payload['title'],
+            },
+            'tasks': [
+              {
+                'origin': 'local',
+                'task': {
+                  'id': 'blk-a',
+                  'title': (payload['members'] as List).first['title'],
+                  'goal': 'g',
+                  'workflowState': 'backlog',
+                  'blockId': 'blk1',
+                  'blockIndex': 0,
+                },
+              },
+              {
+                'origin': 'local',
+                'task': {
+                  'id': 'blk-b',
+                  'title': (payload['members'] as List).last['title'],
+                  'goal': 'g',
+                  'workflowState': 'backlog',
+                  'blockId': 'blk1',
+                  'blockIndex': 1,
+                },
+              },
+            ],
+          }),
+        );
+      } else if (request.uri.path.endsWith('/task-views/append-block-member')) {
+        request.response.write(
+          jsonEncode({
+            'origin': 'local',
+            'task': {
+              'id': 'blk-c',
+              'title': payload['title'],
+              'goal': payload['goal'],
+              'workflowState': 'backlog',
+              'blockId': payload['blockId'],
+              'blockIndex': 2,
+            },
+          }),
+        );
+      } else if (request.uri.path
+          .endsWith('/task-views/reorder-block-members')) {
+        final ordered = (payload['orderedTaskIds'] as List)
+            .asMap()
+            .entries
+            .map((entry) => {
+                  'origin': 'local',
+                  'task': {
+                    'id': entry.value,
+                    'title': 'step',
+                    'goal': 'g',
+                    'workflowState': 'backlog',
+                    'blockId': payload['blockId'],
+                    'blockIndex': entry.key,
+                  },
+                })
+            .toList();
+        // reorder-block-members 响应为裸数组（对齐 web arrayDecoder）。
+        request.response.write(jsonEncode(ordered));
+      } else if (request.uri.path.endsWith('/mobile/devices')) {
+        request.response.write(
+          jsonEncode({
+            'devices': [
+              {
+                'id': 'd2',
+                'name': 'Office PC',
+                'protoVersion': 1,
+                'capabilities': ['orchestrator.task-blocks.v1'],
+              },
+              {
+                'id': 'd3',
+                'name': 'Old PC',
+                'protoVersion': 0,
+                'capabilities': <String>[],
+              },
+            ],
+          }),
+        );
+      } else if (request.uri.path.endsWith('/projects/list')) {
+        request.response.write(
+          jsonEncode({
+            'projects': [
+              {'id': 'p1', 'deviceId': 'd2'},
+            ],
+          }),
+        );
       } else if (request.uri.path.endsWith('/runtime-snapshot')) {
         request.response.write(
           jsonEncode({'remoteStatus': 'local', 'slotsUsed': 0}),
@@ -247,5 +353,288 @@ void main() {
     expect(snapshot['remoteStatus'], 'local');
     final experiments = await client.listExperiments('p1');
     expect(experiments.single['id'], 'e1');
+  });
+
+  test('createBlock posts block payload and upserts member views', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AutomationClient(http, baseUrl);
+    final created = await client.createBlock(
+      projectId: 'p1',
+      title: 'Login block',
+      members: const [
+        {'title': 'step one', 'goal': 'g1', 'acceptanceCriteria': 'a1'},
+        {'title': 'step two', 'goal': 'g2', 'acceptanceCriteria': 'a2'},
+      ],
+      createAction: 'start',
+      clientRequestId: 'req-block-1',
+    );
+    final body = captured['/api/orchestrator/task-views/create-block']!;
+    expect(body['title'], 'Login block');
+    expect(body['createAction'], 'start');
+    expect(body['clientRequestId'], 'req-block-1');
+    expect((body['members'] as List).length, 2);
+    expect((body['members'] as List).first['title'], 'step one');
+    // 裸任务 DTO 回落为 local view 后可全部 upsert。
+    final views = automationUpsertBlockCreated([], created);
+    expect(views, hasLength(2));
+    expect(automationTaskOfView(views.first)?['blockId'], 'blk1');
+  });
+
+  test('appendBlockMember posts three fields and returns member view', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AutomationClient(http, baseUrl);
+    final created = await client.appendBlockMember(
+      projectId: 'p1',
+      blockId: 'blk1',
+      title: 'step three',
+      goal: 'g3',
+      acceptanceCriteria: 'a3',
+      clientRequestId: 'req-append-1',
+    );
+    final body = captured['/api/orchestrator/task-views/append-block-member']!;
+    expect(body['blockId'], 'blk1');
+    expect(body['title'], 'step three');
+    expect(body['clientRequestId'], 'req-append-1');
+    expect(automationTaskOfView(created)?['id'], 'blk-c');
+  });
+
+  test('reorderBlockMembers posts full permutation and returns bare list', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AutomationClient(http, baseUrl);
+    final updated = await client.reorderBlockMembers(
+      projectId: 'p1',
+      blockId: 'blk1',
+      orderedTaskIds: const ['blk-b', 'blk-a'],
+      clientRequestId: 'req-reorder-1',
+    );
+    final body = captured['/api/orchestrator/task-views/reorder-block-members']!;
+    expect(body['orderedTaskIds'], ['blk-b', 'blk-a']);
+    expect(updated, hasLength(2));
+    expect(automationTaskOfView(updated.first)?['id'], 'blk-b');
+    expect(automationTaskOfView(updated.first)?['blockIndex'], 0);
+  });
+
+  test('experiment approve-winner and cancel hit dedicated routes', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AutomationClient(http, baseUrl);
+    final approved = await client.approveExperimentWinner('e1', 'cand-2');
+    expect(
+      captured['/api/orchestrator/experiments/approve-winner']!,
+      containsPair('experimentId', 'e1'),
+    );
+    expect(
+      captured['/api/orchestrator/experiments/approve-winner']!['winnerTaskId'],
+      'cand-2',
+    );
+    expect(approved['status'], 'completed');
+    final cancelled = await client.cancelExperiment('e1');
+    expect(
+      captured['/api/orchestrator/experiments/cancel']!['experimentId'],
+      'e1',
+    );
+    expect(cancelled['status'], 'cancelled');
+  });
+
+  test('owner peer devices expose task-block capability', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AutomationClient(http, baseUrl);
+    final deviceId = await client.projectOwnerDeviceId('p1');
+    expect(deviceId, 'd2');
+    expect(captured['/api/mobile/workbench/projects/list'], isNotNull);
+    final devices = await client.listDevices();
+    final owner = devices.firstWhere((device) => device['id'] == deviceId);
+    expect(automationPeerSupportsTaskBlocks(owner), isTrue);
+    expect(
+      automationPeerSupportsTaskBlocks(
+        devices.firstWhere((device) => device['id'] == 'd3'),
+      ),
+      isFalse,
+    );
+  });
+
+  test('board grouping aggregates blocks into head lane with sorted members', () {
+    Map<String, dynamic> member(
+      String id, {
+      int blockIndex = 0,
+      String workflowState = 'backlog',
+      String runState = 'idle',
+      String createdAt = '2026-09-01T00:00:00Z',
+    }) =>
+        {
+          'origin': 'local',
+          'task': {
+            'id': id,
+            'title': id,
+            'goal': 'g',
+            'workflowState': workflowState,
+            'runState': runState,
+            'blockId': 'blk1',
+            'blockTitle': 'Login block',
+            'blockIndex': blockIndex,
+            'createdAt': createdAt,
+          },
+        };
+    final groups = automationGroupBoardItems([
+      member('m2', blockIndex: 1),
+      member('m1', blockIndex: 0),
+      {
+        'origin': 'local',
+        'task': {
+          'id': 'solo',
+          'title': 'solo',
+          'workflowState': 'inProgress',
+        },
+      },
+    ]);
+    // 块整块落在 head 泳道（backlog），成员按 blockIndex 排序。
+    expect(groups['backlog'], hasLength(1));
+    final block = groups['backlog']!.single;
+    expect(block.isBlock, isTrue);
+    expect(block.blockId, 'blk1');
+    expect(block.title, 'Login block');
+    expect(block.members.map((m) => m.id).toList(), ['m1', 'm2']);
+    // 无 blockId 任务按自身泳道独立成卡。
+    expect(groups['inProgress']!.single.isBlock, isFalse);
+    // 全部成员终态时块落在 done。
+    final doneGroups = automationGroupBoardItems([
+      member('m1', workflowState: 'done'),
+      member('m2', blockIndex: 1, workflowState: 'canceled'),
+    ]);
+    expect(doneGroups['done']!.single.isBlock, isTrue);
+  });
+
+  test('block append/reorder gates follow web board rules', () {
+    AutomationRenderableTask member({
+      String workflowState = 'backlog',
+      String runState = 'idle',
+    }) {
+      final view = {
+        'origin': 'local',
+        'task': {
+          'id': workflowState + runState,
+          'title': 't',
+          'workflowState': workflowState,
+          'runState': runState,
+          'blockId': 'blk1',
+          'blockIndex': 0,
+        },
+      };
+      return AutomationRenderableTask(
+        origin: 'local',
+        task: view['task'] as Map<String, dynamic>,
+        view: view,
+      );
+    }
+
+    final idleBacklog = [member(), member()];
+    expect(automationCanReorderBlock(idleBacklog), isTrue);
+    expect(automationCanAppendToBlock(idleBacklog), isTrue);
+    // 运行中的成员禁止重排；进入复核的成员禁止追加。
+    final running = [member(), member(runState: 'running')];
+    expect(automationCanReorderBlock(running), isFalse);
+    final reviewing = [member(), member(workflowState: 'humanReview')];
+    expect(automationCanAppendToBlock(reviewing), isFalse);
+    // 已达上限的块不再追加。
+    final full = List.generate(
+      kAutomationBlockMaxMembers,
+      (_) => member(),
+    );
+    expect(automationCanAppendToBlock(full), isFalse);
+  });
+
+  test('task-block capability gate mirrors web semantics', () {
+    // 本机项目始终可建块；无 kind fail-closed。
+    expect(
+      automationCanCreateTaskBlock(projectKind: 'local', peer: null),
+      isTrue,
+    );
+    expect(automationCanCreateTaskBlock(projectKind: null), isFalse);
+    // remote 缺 peer / v0 / 缺 token 都拒绝。
+    expect(automationCanCreateTaskBlock(projectKind: 'remote'), isFalse);
+    expect(
+      automationCanCreateTaskBlock(projectKind: 'remote', peer: const {
+        'protoVersion': 1,
+      }),
+      isFalse,
+    );
+    expect(
+      automationCanCreateTaskBlock(projectKind: 'remote', peer: const {
+        'protocol_version': 1,
+        'capabilities': ['other.v1'],
+      }),
+      isFalse,
+    );
+    expect(
+      automationCanCreateTaskBlock(projectKind: 'remote', peer: const {
+        'protocol_version': 1,
+        'capabilities': ['orchestrator.task-blocks.v1'],
+      }),
+      isTrue,
+    );
+  });
+
+  test('view upsert helpers keep stable keys for task and pending views', () {
+    final taskView = {
+      'origin': 'local',
+      'task': {'id': 't1', 'title': 'old'},
+    };
+    final pendingView = {
+      'origin': 'pendingRemote',
+      'item': {'id': 'o1', 'status': 'pending'},
+    };
+    // 相同 key 替换，不追加。
+    final replaced = automationUpsertView([taskView, pendingView], {
+      'origin': 'local',
+      'task': {'id': 't1', 'title': 'new'},
+    });
+    expect(replaced, hasLength(2));
+    expect(automationTaskOfView(replaced[0])?['title'], 'new');
+    // 新 key 插入头部。
+    final inserted = automationUpsertView([taskView], pendingView);
+    expect(inserted.first['origin'], 'pendingRemote');
+  });
+
+  test('experiment helpers expose needsDecision and recommended winner', () {
+    final needsDecision = {
+      'id': 'e1',
+      'status': 'needsDecision',
+      'winnerTaskId': null,
+      'candidates': [
+        {
+          'taskId': 'cand-1',
+          'ordinal': 1,
+          'outcome': 'candidateReady',
+        },
+        {
+          'taskId': 'cand-2',
+          'ordinal': 2,
+          'outcome': 'pending',
+        },
+      ],
+    };
+    expect(automationExperimentNeedsDecision(needsDecision), isTrue);
+    expect(automationExperimentRecommendedTaskId(needsDecision), 'cand-1');
+    // winnerTaskId 优先于 candidate 顺序。
+    expect(
+      automationExperimentRecommendedTaskId({
+        ...needsDecision,
+        'status': 'winnerReady',
+        'winnerTaskId': 'cand-2',
+      }),
+      'cand-2',
+    );
+    // 非决策态不触发动作。
+    expect(
+      automationExperimentNeedsDecision({
+        'id': 'e2',
+        'status': 'running',
+      }),
+      isFalse,
+    );
   });
 }

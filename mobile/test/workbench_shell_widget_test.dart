@@ -28,8 +28,10 @@ void main() {
     expect(find.byKey(const Key('nav-transfer')), findsOneWidget);
     expect(find.byKey(const Key('nav-settings')), findsOneWidget);
     expect(find.byKey(const Key('nav-provider')), findsOneWidget);
+    // 「项目」/「待处理」同时是分组标题与导航项文案；「工具」是分组标题。
     expect(find.text('项目'), findsWidgets);
-    expect(find.text('待处理'), findsOneWidget);
+    expect(find.text('待处理'), findsNWidgets(2));
+    expect(find.text('工具'), findsOneWidget);
     expect(find.text('传输'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
     expect(find.text('Provider'), findsOneWidget);
@@ -70,6 +72,50 @@ void main() {
     expect(find.text('worktrees'), findsOneWidget);
     expect(find.text('自动化'), findsOneWidget);
     expect(find.text('浏览器'), findsOneWidget);
+    // Drawer 分组标题已中文化（不再是英文 id）。
+    expect(find.text('工作'), findsOneWidget);
+    expect(find.text('快捷'), findsOneWidget);
+    expect(find.text('work'), findsNothing);
+    expect(find.text('shortcuts'), findsNothing);
+  });
+
+  testWidgets('experimental switches off hide automation/browser from drawer', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.project,
+          panel: WorkbenchPanel.terminal,
+          projectLabel: 'demo',
+          automationEnabled: false,
+          browserEnabled: false,
+          onSelect: (_) {},
+          child: const Text('project-body'),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('nav-automation')), findsNothing);
+    expect(find.byKey(const Key('nav-browser')), findsNothing);
+    expect(find.byKey(const Key('nav-terminal')), findsOneWidget);
+  });
+
+  testWidgets('hideWorktreeStrip removes the strip (terminal fullscreen)', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.project,
+          panel: WorkbenchPanel.terminal,
+          projectLabel: 'demo',
+          hideWorktreeStrip: true,
+          onSelect: (_) {},
+          worktreeStrip: const Text('wt-main'),
+          child: const Text('project-body'),
+        ),
+      ),
+    );
+    expect(find.byKey(const Key('worktree-strip')), findsNothing);
+    expect(find.text('project-body'), findsOneWidget);
   });
 
   testWidgets('WorkbenchHome first screen is the real dual-mode shell', (tester) async {
@@ -94,7 +140,8 @@ void main() {
     await tester.tap(find.byTooltip('Open navigation menu'));
     await tester.pumpAndSettle();
     expect(find.text('项目'), findsWidgets);
-    expect(find.text('待处理'), findsOneWidget);
+    expect(find.text('待处理'), findsNWidgets(2));
+    expect(find.text('工具'), findsOneWidget);
     expect(find.text('传输'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
     expect(find.text('Provider'), findsOneWidget);

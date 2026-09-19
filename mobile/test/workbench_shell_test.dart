@@ -91,12 +91,84 @@ void main() {
     );
   });
 
-  test('worktree strip is on files / browser / git', () {
+  test('worktree strip is on files / browser / git / terminal (fullscreen hides via shell)', () {
     expect(shouldShowWorktreeStrip(WorkbenchPanel.files), isTrue);
     expect(shouldShowWorktreeStrip(WorkbenchPanel.browser), isTrue);
     expect(shouldShowWorktreeStrip(WorkbenchPanel.git), isTrue);
-    expect(shouldShowWorktreeStrip(WorkbenchPanel.terminal), isFalse);
+    expect(shouldShowWorktreeStrip(WorkbenchPanel.terminal), isTrue);
     expect(shouldShowWorktreeStrip(WorkbenchPanel.projects), isFalse);
+    expect(shouldShowWorktreeStrip(WorkbenchPanel.attention), isFalse);
+  });
+
+  test('nav group ids render Chinese labels', () {
+    expect(workbenchNavGroupLabel('projects'), '项目');
+    expect(workbenchNavGroupLabel('inbox'), '待处理');
+    expect(workbenchNavGroupLabel('tools'), '工具');
+    expect(workbenchNavGroupLabel('system'), '系统');
+    expect(workbenchNavGroupLabel('work'), '工作');
+    expect(workbenchNavGroupLabel('shortcuts'), '快捷');
+    expect(workbenchNavGroupLabel('unknown-group'), 'unknown-group');
+  });
+
+  test('experimental switches filter automation/browser out of nav groups', () {
+    final all = getWorkbenchNavGroups(WorkbenchNavMode.project);
+    expect(all.first.panels, containsAll([WorkbenchPanel.automation, WorkbenchPanel.browser]));
+
+    final bothOff = filterWorkbenchNavGroupsByFeatures(
+      all,
+      automationEnabled: false,
+      browserEnabled: false,
+    );
+    expect(bothOff.first.panels, isNot(contains(WorkbenchPanel.automation)));
+    expect(bothOff.first.panels, isNot(contains(WorkbenchPanel.browser)));
+    expect(bothOff.first.panels, contains(WorkbenchPanel.terminal));
+
+    final browserOnly = filterWorkbenchNavGroupsByFeatures(
+      all,
+      automationEnabled: false,
+      browserEnabled: true,
+    );
+    expect(browserOnly.first.panels, contains(WorkbenchPanel.browser));
+    expect(browserOnly.first.panels, isNot(contains(WorkbenchPanel.automation)));
+  });
+
+  test('panels closed by experimental switches fall back to terminal/projects', () {
+    expect(
+      resolvePanelForFeatures(
+        panel: WorkbenchPanel.automation,
+        hasProject: true,
+        automationEnabled: false,
+        browserEnabled: true,
+      ),
+      WorkbenchPanel.terminal,
+    );
+    expect(
+      resolvePanelForFeatures(
+        panel: WorkbenchPanel.browser,
+        hasProject: false,
+        automationEnabled: true,
+        browserEnabled: false,
+      ),
+      WorkbenchPanel.projects,
+    );
+    expect(
+      resolvePanelForFeatures(
+        panel: WorkbenchPanel.automation,
+        hasProject: true,
+        automationEnabled: true,
+        browserEnabled: true,
+      ),
+      WorkbenchPanel.automation,
+    );
+    expect(
+      resolvePanelForFeatures(
+        panel: WorkbenchPanel.git,
+        hasProject: true,
+        automationEnabled: false,
+        browserEnabled: false,
+      ),
+      WorkbenchPanel.git,
+    );
   });
 
   test('withBadges attaches counts without changing panel order', () {

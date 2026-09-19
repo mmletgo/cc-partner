@@ -278,6 +278,7 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
   @override
   Widget build(BuildContext context) {
     final kind = detectFileKind(widget.path);
+    final metadataText = fileMetadataText(widget.opened);
     final csv = widget.opened['csv'];
     final imageBytes = imageBytesFromOpenFile(widget.opened);
     Widget body;
@@ -406,8 +407,73 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
               IconButton(onPressed: _save, icon: const Icon(Icons.save)),
           ],
         ),
-        body: Padding(padding: const EdgeInsets.all(8), child: body),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ..._openBanners(),
+            if (metadataText != null)
+              Padding(
+                key: const Key('files-open-metadata'),
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                child: Text(
+                  metadataText,
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ),
+            Expanded(child: Padding(padding: const EdgeInsets.all(8), child: body)),
+          ],
+        ),
       ),
     );
+  }
+
+  /// Business Logic: 打开文件的 notice 与截断提示必须上屏，避免用户把节流后的
+  /// 内容当成全文，或漏看服务端告警。
+  /// Code Logic: notice 原样展示；truncated 用 web 同款文案；元信息行
+  /// 「类型 · 大小 · 修改时间」来自 open 响应（宽容解析）。
+  List<Widget> _openBanners() {
+    final theme = Theme.of(context);
+    final notice = openFileNotice(widget.opened);
+    final truncated = openFileTruncated(widget.opened);
+    Widget banner(String text, {Color? background, Color? foreground, String? key}) {
+      return Material(
+        key: key == null ? null : Key(key),
+        color: background ?? theme.colorScheme.surfaceContainerHighest,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              Icon(Icons.info_outline, size: 16, color: foreground ?? theme.colorScheme.onSurface),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  text,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: foreground ?? theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return [
+      if (notice != null)
+        banner(
+          notice,
+          background: theme.colorScheme.tertiaryContainer,
+          foreground: theme.colorScheme.onTertiaryContainer,
+          key: 'files-open-notice',
+        ),
+      if (truncated)
+        banner(
+          '文件内容已截断显示',
+          background: theme.colorScheme.errorContainer,
+          foreground: theme.colorScheme.onErrorContainer,
+          key: 'files-open-truncated',
+        ),
+    ];
   }
 }

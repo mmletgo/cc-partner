@@ -7,6 +7,19 @@ import '../address_book/book.dart';
 import '../core/lan_http.dart';
 import '../transfer/api.dart';
 import '../transfer/client.dart';
+import '../transfer/polling.dart';
+
+/// 同一「设备 + 文件」上传意图的幂等键（不含任何路径），对齐 web buildMobileTransferSendIntentKey。
+String _transferSendIntentKey(String deviceId, String fileName, int size) =>
+    '$deviceId\x00$fileName\x00$size';
+
+/// 恢复动作的在途幂等记录：同 kind 重试复用同一 clientOperationId。
+class _PendingRecovery {
+  const _PendingRecovery({required this.clientOperationId, required this.resume});
+
+  final String clientOperationId;
+  final bool resume;
+}
 
 class TransferPage extends StatefulWidget {
   const TransferPage({
@@ -37,39 +50,131 @@ class _TransferPageState extends State<TransferPage> {
   int _uploadedBytes = 0;
   int _uploadTotalBytes = 0;
 
+  /// 发送区行内错误（role=alert 语义），与任务行级错误分开。
+  String? _sendError;
+
+  /// 任务行级动作错误（取消/重试/续传），key 为 taskId。
+  final Map<String, String> _taskActionErrors = {};
+
+  /// 对账中的任务（get-operation 有界轮询期间按钮禁用并显示「正在确认结果」）。
+  final Set<String> _reconcilingIds = {};
+
+  /// 取消防双击。
+  final Set<String> _cancellingIds = {};
+
+  /// 恢复动作防重入。
+  final Set<String> _recoveryBusy = {};
+
+  /// 恢复动作的幂等键缓存：uncertain 后复用同一 clientOperationId 对账。
+  final Map<String, _PendingRecovery> _pendingRecoveries = {};
+
+  /// 上传意图幂等键与对应 clientOperationId：uncertain 后同设备同文件复用同一 id 对账。
+  String? _pendingSendIntentKey;
+  String? _pendingSendOperationId;
+
+  /// 可见时轮询：任务 3s、设备 5s（对齐 web useVisibilityPolling）。
+  late final VisibilityPoller _tasksPoller;
+  late final VisibilityPoller _devicesPoller;
+
   @override
   void initState() {
     super.initState();
     _api = widget.api ?? TransferApi(widget.http, widget.book.active!.baseUrl);
-    _reload();
+    _tasksPoller = VisibilityPoller(interval: const Duration(seconds: 3), task: _pollTasks);
+    _devicesPoller = VisibilityPoller(interval: const Duration(seconds: 5), task: _pollDevices);
+    _reload(showLoading: true);
+    // initState 已首拉一次，轮询不再立即重复执行；回前台由生命周期立即补拉。
+    _tasksPoller.start(runImmediately: false);
+    _devicesPoller.start(runImmediately: false);
   }
 
-  Future<void> _reload() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  @override
+  void dispose() {
+    _tasksPoller.dispose();
+    _devicesPoller.dispose();
+    super.dispose();
+  }
+
+  /// Business Logic: 任务列表是进度/恢复动作的权威源，可见时每 3s 静默刷新。
+  /// Code Logic: 轮询路径不显示 loading；失败保留旧列表，仅首载失败才上屏错误。
+  Future<void> _pollTasks() => _loadTasks(showLoading: false);
+
+  /// Business Logic: 设备列表驱动目标下拉与续传能力判定，可见时每 5s 静默刷新。
+  /// Code Logic: 同上；失败不得清空已选目标。
+  Future<void> _pollDevices() => _loadDevices(showLoading: false);
+
+  Future<void> _reload({required bool showLoading}) async {
+    await Future.wait([
+      _loadTasks(showLoading: showLoading),
+      _loadDevices(showLoading: showLoading),
+    ]);
+  }
+
+  Future<void> _loadTasks({required bool showLoading}) async {
+    if (showLoading && mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final tasks = await _api.listTasks();
-      final targets = rankTransferTargets(await _api.listDevices());
       if (mounted) {
+        setState(() => _tasks = tasks);
+      }
+    } catch (error) {
+      // 刷新失败保留上一份列表（对齐 web retainListOnRefreshFailure）；
+      // 只有首载（尚无数据）才上屏错误。
+      if (mounted && _tasks.isEmpty) {
         setState(() {
-          _tasks = tasks;
-          _targets = targets;
-          _selectedTargetId = pickTransferTargetId(targets, selectedId: _selectedTargetId);
+          _error = '任务列表加载失败：$error';
           _loading = false;
         });
       }
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _error = error.toString();
-          _loading = false;
-        });
+    } finally {
+      if (mounted && showLoading) {
+        setState(() => _loading = false);
       }
     }
   }
 
+  Future<void> _loadDevices({required bool showLoading}) async {
+    if (showLoading && mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    try {
+      final targets = rankTransferTargets(await _api.listDevices());
+      if (mounted) {
+        setState(() {
+          _targets = targets;
+          _selectedTargetId = pickTransferTargetId(targets, selectedId: _selectedTargetId);
+        });
+      }
+    } catch (error) {
+      if (mounted && _targets.isEmpty) {
+        setState(() {
+          _error = '设备列表加载失败：$error';
+          _loading = false;
+        });
+      }
+    } finally {
+      if (mounted && showLoading) {
+        setState(() => _loading = false);
+      }
+    }
+  }
+
+  void _clearPendingSendIntent() {
+    _pendingSendIntentKey = null;
+    _pendingSendOperationId = null;
+  }
+
+  /// Business Logic: 选完文件立即 init → chunk → complete；timeout/network 结果未知时
+  /// 只能用同一 clientOperationId 对账（约 12 次 × 1.5s），禁止盲重发。
+  /// Code Logic: sending 期间 busy 门闩；成功重载任务；uncertain 走 _reconcileSend。
   Future<void> _pickAndSend() async {
     final picked = await FilePicker.platform.pickFiles(withData: true);
     if (picked == null || picked.files.isEmpty) {
@@ -83,16 +188,22 @@ class _TransferPageState extends State<TransferPage> {
     final target = pickTransferTargetId(_targets, selectedId: _selectedTargetId) ?? '';
     setState(() {
       _busy = '上传';
+      _sendError = null;
       _uploadedBytes = 0;
       _uploadTotalBytes = 0;
     });
+    final intentKey = _transferSendIntentKey(target, file.name, bytes.length);
+    final reused = _pendingSendIntentKey == intentKey ? _pendingSendOperationId : null;
+    final String clientOperationId = reused ?? newClientOperationId();
+    _pendingSendIntentKey = intentKey;
+    _pendingSendOperationId = clientOperationId;
     try {
       final plan = planUploadAfterPick(fileName: file.name, size: bytes.length);
       final init = await _api.uploadInit(
         filename: plan.fileName,
         size: plan.size,
         deviceId: target,
-        clientOperationId: newClientOperationId(),
+        clientOperationId: clientOperationId,
       );
       final id = init['id'] as String? ?? init['uploadId'] as String? ?? '';
       await _api.uploadFileInChunks(
@@ -108,11 +219,19 @@ class _TransferPageState extends State<TransferPage> {
         },
       );
       await _api.uploadComplete(id);
-      await _reload();
+      _clearPendingSendIntent();
+      await _loadTasks(showLoading: false);
     } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('发送失败: $error')));
+      if (!mounted) {
+        return;
       }
+      if (isTransferOutcomeUncertain(error)) {
+        // 结果未知：对账而不是把错误当确定性失败。
+        await _reconcileSend(clientOperationId);
+        return;
+      }
+      _clearPendingSendIntent();
+      setState(() => _sendError = '发送失败：$error');
     } finally {
       if (mounted) {
         setState(() => _busy = null);
@@ -120,6 +239,39 @@ class _TransferPageState extends State<TransferPage> {
     }
   }
 
+  /// Business Logic: 上传 uncertain 后必须有界轮询 get-operation 确认最终状态，
+  /// 确认成功按成功处理，确认失败/超时（仍 pending）才报错。
+  /// Code Logic: pending → 保留幂等键（重试复用同一 id）；failed → 行内错误；
+  /// succeeded/notFound → 清幂等键并静默重载任务列表。
+  Future<void> _reconcileSend(String clientOperationId) async {
+    final TransferOperationStatus? status;
+    try {
+      status = await reconcileTransferOperation(api: _api, clientOperationId: clientOperationId);
+    } catch (reconcileError) {
+      if (mounted) {
+        setState(() => _sendError = '发送失败：$reconcileError');
+      }
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    if (status == null || status.isPending) {
+      setState(() => _sendError = '发送失败：操作仍在处理中，请稍后重试');
+      return;
+    }
+    final result = status;
+    _clearPendingSendIntent();
+    await _loadTasks(showLoading: false);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _sendError = result.status == 'failed' ? '发送失败：${result.code ?? result.status}' : null;
+    });
+  }
+
+  /// Business Logic: 下载保持 saveFile 落盘；失败 SnackBar 提示。
   Future<void> _download(TransferTask task) async {
     setState(() => _busy = '下载');
     try {
@@ -143,31 +295,204 @@ class _TransferPageState extends State<TransferPage> {
     }
   }
 
+  /// Business Logic: 进行中任务只能取消；双击不得二次 cancel；失败上屏到行内。
+  Future<void> _cancel(TransferTask task) async {
+    if (_cancellingIds.contains(task.id)) {
+      return;
+    }
+    setState(() {
+      _cancellingIds.add(task.id);
+      _taskActionErrors.remove(task.id);
+    });
+    try {
+      await _api.cancel(task.id);
+      await _loadTasks(showLoading: false);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _taskActionErrors[task.id] = '取消失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _cancellingIds.remove(task.id));
+      }
+    }
+  }
+
+  /// Business Logic: failed/cancelled 任务可恢复（重试/续传）；同一 logical transfer
+  /// 已有活跃 attempt 或对账中时禁止再发；uncertain 用同一幂等键对账。
+  /// Code Logic: busy/逻辑锁门闩；成功清幂等键 + 静默重载 + SnackBar；
+  /// uncertain → _reconcileRecovery；确定性失败 → 行内错误。
+  Future<void> _recover(TransferTask task, {required bool resume}) async {
+    final taskId = task.id;
+    if (_recoveryBusy.contains(taskId) || _reconcilingIds.contains(taskId)) {
+      return;
+    }
+    if (isTransferRecoveryLocked(task, _tasks, _reconcilingIds)) {
+      return;
+    }
+    setState(() {
+      _recoveryBusy.add(taskId);
+      _taskActionErrors.remove(taskId);
+    });
+    final existing = _pendingRecoveries[taskId];
+    final clientOperationId =
+        existing != null && existing.resume == resume
+            ? existing.clientOperationId
+            : newClientOperationId();
+    _pendingRecoveries[taskId] = _PendingRecovery(
+      clientOperationId: clientOperationId,
+      resume: resume,
+    );
+    try {
+      if (resume) {
+        await _api.resume(taskId, clientOperationId);
+      } else {
+        await _api.retry(taskId, clientOperationId);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _pendingRecoveries.remove(taskId);
+        _reconcilingIds.remove(taskId);
+      });
+      await _loadTasks(showLoading: false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(resume ? '已继续传输' : '已重新传输')),
+        );
+      }
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      if (isTransferOutcomeUncertain(error)) {
+        await _reconcileRecovery(taskId, clientOperationId);
+        return;
+      }
+      setState(() {
+        _pendingRecoveries.remove(taskId);
+        _reconcilingIds.remove(taskId);
+        _taskActionErrors[taskId] = resume ? '继续传输失败：$error' : '重新传输失败：$error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _recoveryBusy.remove(taskId));
+      } else {
+        _recoveryBusy.remove(taskId);
+      }
+    }
+  }
+
+  /// Business Logic: 恢复动作 uncertain 后必须对账到终态，期间行内显示「正在确认结果」。
+  /// Code Logic: pending → 保留幂等键提示稍后重试；failed → 行内错误；
+  /// succeeded/notFound → 清幂等键 + 静默重载 + 成功 SnackBar。
+  Future<void> _reconcileRecovery(String taskId, String clientOperationId) async {
+    setState(() => _reconcilingIds.add(taskId));
+    final TransferOperationStatus? status;
+    try {
+      status = await reconcileTransferOperation(api: _api, clientOperationId: clientOperationId);
+    } catch (reconcileError) {
+      if (mounted) {
+        setState(() {
+          _reconcilingIds.remove(taskId);
+          _taskActionErrors[taskId] = '恢复失败：$reconcileError';
+        });
+      }
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    if (status == null || status.isPending) {
+      setState(() {
+        _reconcilingIds.remove(taskId);
+        _taskActionErrors[taskId] = '操作仍在处理中，请稍后重试';
+      });
+      return;
+    }
+    final failed = status.status == 'failed';
+    final result = status;
+    setState(() {
+      _pendingRecoveries.remove(taskId);
+      _reconcilingIds.remove(taskId);
+      if (failed) {
+        _taskActionErrors[taskId] = '恢复失败：${result.code ?? result.status}';
+      }
+    });
+    await _loadTasks(showLoading: false);
+    if (!failed && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('传输已恢复')));
+    }
+  }
+
   Widget _taskTile(TransferTask task) {
-    return ListTile(
-      key: Key('transfer-task-${task.id}'),
-      title: Text(task.fileName ?? task.id),
-      subtitle: Text('${task.direction} · ${task.status}${canDownload(task) ? ' · 可下载' : ''}'),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (canDownload(task))
-            IconButton(
-              tooltip: '下载',
-              onPressed: () => _download(task),
-              icon: const Icon(Icons.download),
+    final theme = Theme.of(context);
+    final reconciling = _reconcilingIds.contains(task.id);
+    final recoveryLocked = isTransferRecoveryLocked(task, _tasks, _reconcilingIds);
+    final supportsResume = peerSupportsTransferResume(task, _targets);
+    final canResume = !reconciling && !recoveryLocked && isTransferResumable(task, supportsResume);
+    final canRetry = !reconciling && !recoveryLocked && isTransferRetryable(task, supportsResume);
+    final canCancel = task.status == 'pending' || task.status == 'transferring';
+    final actionError = _taskActionErrors[task.id];
+    final subtitle = [
+      '${task.direction} · ${task.status}',
+      if (reconciling) '正在确认结果',
+      if (canDownload(task)) '可下载',
+    ].join(' · ');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          key: Key('transfer-task-${task.id}'),
+          title: Text(task.fileName ?? task.id),
+          subtitle: Text(subtitle),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (canDownload(task))
+                IconButton(
+                  tooltip: '下载',
+                  onPressed: () => _download(task),
+                  icon: const Icon(Icons.download),
+                ),
+              if (canResume)
+                IconButton(
+                  key: Key('transfer-resume-${task.id}'),
+                  tooltip: '继续传输',
+                  onPressed: () => _recover(task, resume: true),
+                  icon: const Icon(Icons.play_arrow),
+                ),
+              if (canRetry)
+                IconButton(
+                  key: Key('transfer-retry-${task.id}'),
+                  tooltip: '重新传输',
+                  onPressed: () => _recover(task, resume: false),
+                  icon: const Icon(Icons.replay),
+                ),
+              if (canCancel)
+                IconButton(
+                  tooltip: '取消',
+                  onPressed: _cancellingIds.contains(task.id) ? null : () => _cancel(task),
+                  icon: const Icon(Icons.cancel_outlined),
+                ),
+            ],
+          ),
+        ),
+        if (actionError != null)
+          Padding(
+            key: Key('transfer-error-${task.id}'),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                actionError,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.error),
+              ),
             ),
-          if (task.status != 'completed')
-            IconButton(
-              tooltip: '取消',
-              onPressed: () async {
-                await _api.cancel(task.id);
-                await _reload();
-              },
-              icon: const Icon(Icons.cancel_outlined),
-            ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 
@@ -189,6 +514,7 @@ class _TransferPageState extends State<TransferPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final groups = groupTransferTasks(_tasks);
     final uploadInProgress = _busy == '上传' && _uploadTotalBytes > 0;
     return Column(
@@ -237,12 +563,24 @@ class _TransferPageState extends State<TransferPage> {
             label: const Text('选择文件并立即发送'),
           ),
         ),
+        if (_sendError != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                _sendError!,
+                key: const Key('transfer-send-error'),
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+              ),
+            ),
+          ),
         if (_error != null) Text(_error!),
         Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : RefreshIndicator(
-                  onRefresh: _reload,
+                  onRefresh: () => _reload(showLoading: false),
                   child: ListView(
                     children: [
                       if (_tasks.isEmpty)

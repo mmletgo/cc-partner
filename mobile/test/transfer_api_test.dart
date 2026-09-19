@@ -134,4 +134,107 @@ void main() {
     );
     expect(offsets, [0, 1024, 2048]);
   });
+
+  test('retry/resume/get-operation hit host-relay routes with idempotency key', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final bodies = <String, Map<String, dynamic>>{};
+    var operationCalls = 0;
+    server.listen((request) async {
+      final raw = await utf8.decodeStream(request);
+      final body = raw.isEmpty ? <String, dynamic>{} : jsonDecode(raw) as Map<String, dynamic>;
+      bodies['${request.method} ${request.uri.path}'] = body;
+      if (request.uri.path.endsWith('/get-operation')) {
+        operationCalls += 1;
+        // 前两次仍 pending，第三次确认成功。
+        final status = operationCalls < 3 ? 'pending' : 'succeeded';
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({'status': status, if (status == 'succeeded') 'taskId': 't-9'}));
+      } else {
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({'ok': true}));
+      }
+      await request.response.close();
+    });
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final api = TransferApi(http, 'http://127.0.0.1:${server.port}');
+    await api.retry('t-9', 'op-1');
+    await api.resume('t-9', 'op-2');
+    expect(bodies['POST /api/mobile/transfer/retry'], {'taskId': 't-9', 'clientOperationId': 'op-1'});
+    expect(bodies['POST /api/mobile/transfer/resume'], {'taskId': 't-9', 'clientOperationId': 'op-2'});
+
+    // 对账：pending → pending → succeeded，间隔用 no-op。
+    var delayCalls = 0;
+    final status = await reconcileTransferOperation(
+      api: api,
+      clientOperationId: 'op-3',
+      delay: (_) async => delayCalls++,
+    );
+    expect(status?.status, 'succeeded');
+    expect(status?.taskId, 't-9');
+    expect(operationCalls, 3);
+    expect(delayCalls, 2); // 终态前每次 pending 等待一个间隔。
+    expect(
+      bodies['POST /api/mobile/transfer/get-operation'],
+      {'clientOperationId': 'op-3'},
+    );
+  });
+
+  test('reconcile returns the trailing pending status after exhausting attempts', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var calls = 0;
+    server.listen((request) async {
+      await utf8.decodeStream(request);
+      calls += 1;
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode({'status': 'pending'}));
+      await request.response.close();
+    });
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final api = TransferApi(http, 'http://127.0.0.1:${server.port}');
+    final status = await reconcileTransferOperation(
+      api: api,
+      clientOperationId: 'op-slow',
+      maxAttempts: 3,
+      delay: (_) async {},
+    );
+    expect(calls, 3);
+    expect(status?.status, 'pending');
+    expect(status?.isPending, isTrue);
+  });
+
+  test('failed operation status carries the code', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      await utf8.decodeStream(request);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode({'status': 'failed', 'code': 'peerUnreachable'}));
+      await request.response.close();
+    });
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final api = TransferApi(http, 'http://127.0.0.1:${server.port}');
+    final status = await api.getOperation('op-x');
+    expect(status.status, 'failed');
+    expect(status.code, 'peerUnreachable');
+    expect(status.isPending, isFalse);
+  });
+
+  test('only timeout/network style errors are outcome-uncertain', () {
+    expect(
+      isTransferOutcomeUncertain(const SocketException('Network is unreachable')),
+      isTrue,
+    );
+    expect(
+      isTransferOutcomeUncertain(const SocketException('connection timeout, errno = 60')),
+      isTrue,
+    );
+    expect(isTransferOutcomeUncertain(LanHttpException(0, 'request timeout')), isTrue);
+    expect(isTransferOutcomeUncertain(LanHttpException(500, 'boom')), isFalse);
+    expect(isTransferOutcomeUncertain(StateError('bad state')), isFalse);
+  });
 }
