@@ -13,14 +13,26 @@ class LanHttpClient {
   void close() => _client.close(force: true);
 
   Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    return asObject(await getDynamic(baseUrl, path));
+  }
+
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
     final uri = _uri(baseUrl, path);
     final request = await _client.getUrl(uri);
     _stripOrigin(request);
     final response = await request.close();
-    return _decode(response);
+    return _decodeDynamic(response);
   }
 
   Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    return asObject(await postDynamic(baseUrl, path, body));
+  }
+
+  Future<dynamic> postDynamic(
     String baseUrl,
     String path,
     Map<String, dynamic> body,
@@ -31,7 +43,17 @@ class LanHttpClient {
     request.headers.contentType = ContentType.json;
     request.add(utf8.encode(jsonEncode(body)));
     final response = await request.close();
-    return _decode(response);
+    return _decodeDynamic(response);
+  }
+
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    final http = _uri(baseUrl, path);
+    final ws = http.replace(scheme: http.scheme == 'https' ? 'wss' : 'ws');
+    return WebSocket.connect(ws.toString(), protocols: protocols);
   }
 
   Uri _uri(String baseUrl, String path) {
@@ -47,7 +69,7 @@ class LanHttpClient {
     request.headers.removeAll('Origin');
   }
 
-  Future<Map<String, dynamic>> _decode(HttpClientResponse response) async {
+  Future<dynamic> _decodeDynamic(HttpClientResponse response) async {
     final text = await utf8.decodeStream(response);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw LanHttpException(response.statusCode, text);
@@ -55,12 +77,28 @@ class LanHttpClient {
     if (text.isEmpty) {
       return <String, dynamic>{};
     }
-    final decoded = jsonDecode(text);
-    if (decoded is Map<String, dynamic>) {
-      return decoded;
-    }
-    throw LanHttpException(response.statusCode, 'expected JSON object');
+    return jsonDecode(text);
   }
+}
+
+Map<String, dynamic> asObject(dynamic decoded) {
+  if (decoded is Map<String, dynamic>) {
+    return decoded;
+  }
+  if (decoded is Map) {
+    return Map<String, dynamic>.from(decoded);
+  }
+  throw FormatException('expected JSON object');
+}
+
+List<Map<String, dynamic>> asObjectList(dynamic decoded, {String? wrapKey}) {
+  if (decoded is List) {
+    return decoded.map((e) => asObject(e)).toList();
+  }
+  if (decoded is Map && wrapKey != null && decoded[wrapKey] is List) {
+    return (decoded[wrapKey] as List).map((e) => asObject(e)).toList();
+  }
+  return const [];
 }
 
 class LanHttpException implements Exception {

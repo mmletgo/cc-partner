@@ -7,6 +7,7 @@ import '../core/lan_http.dart';
 import '../core/server_url.dart';
 import '../settings/risk_copy.dart';
 import 'scan_qr_page.dart';
+import 'workbench_home.dart';
 
 /// Address book screen: save and switch LAN PC servers.
 class AddressBookPage extends StatefulWidget {
@@ -169,7 +170,25 @@ class _AddressBookPageState extends State<AddressBookPage> {
           '${active ? ' · 当前' : ''}',
         ),
         isThreeLine: true,
-        onTap: () => _switchTo(server),
+        onTap: () async {
+          await _switchTo(server);
+          if (!server.isOnline) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('电脑离线，不能进入工作台')),
+              );
+            }
+            return;
+          }
+          if (!mounted) {
+            return;
+          }
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => WorkbenchHome(book: _book, http: widget.http),
+            ),
+          );
+        },
         trailing: IconButton(
           icon: const Icon(Icons.delete_outline),
           onPressed: () => _remove(server),

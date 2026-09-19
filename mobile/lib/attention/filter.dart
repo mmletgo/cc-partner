@@ -4,6 +4,7 @@ class AttentionItem {
     required this.id,
     required this.sourceKind,
     required this.targetKind,
+    this.title,
     this.projectId,
     this.sessionId,
     this.worktreeId,
@@ -12,17 +13,21 @@ class AttentionItem {
   final String id;
   final String sourceKind;
   final String targetKind;
+  final String? title;
   final String? projectId;
   final String? sessionId;
   final String? worktreeId;
 
   factory AttentionItem.fromJson(Map<String, dynamic> json) {
     final target = json['target'];
-    final targetMap = target is Map<String, dynamic> ? target : const <String, dynamic>{};
+    final targetMap = target is Map<String, dynamic>
+        ? target
+        : (target is Map ? Map<String, dynamic>.from(target) : const <String, dynamic>{});
     return AttentionItem(
       id: json['id'] as String? ?? '',
       sourceKind: json['sourceKind'] as String? ?? '',
       targetKind: targetMap['kind'] as String? ?? '',
+      title: json['title'] as String?,
       projectId: targetMap['projectId'] as String? ?? json['projectId'] as String?,
       sessionId: targetMap['terminalSessionId'] as String? ??
           targetMap['sessionId'] as String?,

@@ -37,7 +37,7 @@ class ProviderClient {
     return _http.postJson(
       baseUrl,
       '/api/provider-manager/switch',
-      {'app': app, 'id': providerId},
+      {'app': app, 'providerId': providerId},
     );
   }
 }

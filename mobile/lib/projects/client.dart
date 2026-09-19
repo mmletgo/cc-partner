@@ -29,16 +29,12 @@ class ProjectsClient {
   final String baseUrl;
 
   Future<List<ProjectSummary>> listRecent() async {
-    final body = await _http.postJson(
+    final body = await _http.getDynamic(
       baseUrl,
       '/api/mobile/workbench/projects/list',
-      const {},
     );
-    final items = body['projects'] as List<dynamic>? ??
-        body['items'] as List<dynamic>? ??
-        const [];
-    return items
-        .map((e) => ProjectSummary.fromJson(e as Map<String, dynamic>))
+    return asObjectList(body, wrapKey: 'projects')
+        .map(ProjectSummary.fromJson)
         .toList();
   }
 

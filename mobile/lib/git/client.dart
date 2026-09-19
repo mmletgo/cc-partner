@@ -15,17 +15,17 @@ class GitClient {
   }
 
   Future<Map<String, dynamic>> commit({
-    required String projectId,
     required String worktreeId,
     required String clientOperationId,
+    String? message,
   }) {
     return _http.postJson(
       baseUrl,
       '/api/mobile/workbench/worktrees/commit',
       {
-        'projectId': projectId,
         'worktreeId': worktreeId,
         'clientOperationId': clientOperationId,
+        if (message != null) 'message': message,
       },
     );
   }

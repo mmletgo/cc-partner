@@ -20,12 +20,11 @@ void main() {
       }
       request.response.headers.contentType = ContentType.json;
       if (request.uri.path.endsWith('/projects/list')) {
+        expect(request.method, 'GET');
         request.response.write(
-          jsonEncode({
-            'projects': [
-              {'id': 'p1', 'name': 'demo', 'kind': 'local'},
-            ],
-          }),
+          jsonEncode([
+            {'id': 'p1', 'name': 'demo', 'kind': 'local'},
+          ]),
         );
       } else if (request.uri.path.endsWith('/projects/open')) {
         request.response.write(
