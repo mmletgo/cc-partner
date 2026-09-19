@@ -4,6 +4,32 @@ const kProviderManagerCapability = 'provider-manager.v1';
 
 enum ProviderSupport { ready, unsupported }
 
+class ProviderApp {
+  const ProviderApp({
+    required this.app,
+    required this.providers,
+    this.currentProviderId,
+  });
+
+  final String app;
+  final List<ProviderEntry> providers;
+  final String? currentProviderId;
+}
+
+class ProviderEntry {
+  const ProviderEntry({
+    required this.id,
+    required this.name,
+    required this.isCurrent,
+    this.category,
+  });
+
+  final String id;
+  final String name;
+  final bool isCurrent;
+  final String? category;
+}
+
 class ProviderClient {
   ProviderClient(this._http, this.baseUrl);
 
@@ -39,5 +65,23 @@ class ProviderClient {
       '/api/provider-manager/switch',
       {'app': app, 'providerId': providerId},
     );
+  }
+
+  List<ProviderApp> appsFromSummary(Map<String, dynamic> summary) {
+    return asObjectList(summary['apps']).map((app) {
+      final providers = asObjectList(app['providers']).map((item) {
+        return ProviderEntry(
+          id: item['id'] as String? ?? '',
+          name: item['name'] as String? ?? item['id'] as String? ?? '',
+          isCurrent: item['isCurrent'] == true,
+          category: item['category'] as String?,
+        );
+      }).toList();
+      return ProviderApp(
+        app: app['app'] as String? ?? '',
+        providers: providers,
+        currentProviderId: app['currentProviderId'] as String?,
+      );
+    }).toList();
   }
 }

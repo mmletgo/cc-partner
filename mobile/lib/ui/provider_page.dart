@@ -17,9 +17,10 @@ class ProviderPage extends StatefulWidget {
 class _ProviderPageState extends State<ProviderPage> {
   late final ProviderClient _client;
   ProviderSupport? _support;
-  Map<String, dynamic>? _summary;
+  List<ProviderApp> _apps = [];
   String? _error;
   bool _loading = true;
+  String? _switching;
 
   @override
   void initState() {
@@ -35,14 +36,14 @@ class _ProviderPageState extends State<ProviderPage> {
     });
     try {
       final support = await _client.probe();
-      Map<String, dynamic>? summary;
+      var apps = <ProviderApp>[];
       if (support == ProviderSupport.ready) {
-        summary = await _client.summary();
+        apps = _client.appsFromSummary(await _client.summary());
       }
       if (mounted) {
         setState(() {
           _support = support;
-          _summary = summary;
+          _apps = apps;
           _loading = false;
         });
       }
@@ -56,24 +57,55 @@ class _ProviderPageState extends State<ProviderPage> {
     }
   }
 
+  Future<void> _switch(String app, String providerId) async {
+    setState(() => _switching = '$app:$providerId');
+    try {
+      await _client.switchProvider(app: app, providerId: providerId);
+      await _reload();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('切换失败: $error')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _switching = null);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Provider')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text(_error!))
-              : _support == ProviderSupport.unsupported
-                  ? const Center(child: Text('当前电脑不支持 provider-manager.v1'))
-                  : ListView(
-                      padding: const EdgeInsets.all(16),
-                      children: [
-                        const Text('手机不会安装 cc-switch CLI。'),
-                        const SizedBox(height: 12),
-                        Text(_summary?.toString() ?? ''),
-                      ],
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return Center(child: Text(_error!));
+    }
+    if (_support == ProviderSupport.unsupported) {
+      return const Center(child: Text('当前电脑不支持 provider-manager.v1'));
+    }
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('手机不会安装 cc-switch CLI。'),
+        const SizedBox(height: 12),
+        for (final app in _apps) ...[
+          Text(app.app, style: Theme.of(context).textTheme.titleMedium),
+          for (final provider in app.providers)
+            ListTile(
+              title: Text(provider.name),
+              subtitle: Text(provider.category ?? provider.id),
+              trailing: provider.isCurrent
+                  ? const Chip(label: Text('当前'))
+                  : TextButton(
+                      onPressed: _switching == null
+                          ? () => _switch(app.app, provider.id)
+                          : null,
+                      child: const Text('切换'),
                     ),
+            ),
+        ],
+      ],
     );
   }
 }
