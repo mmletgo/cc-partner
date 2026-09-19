@@ -2,14 +2,19 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:xterm/xterm.dart' hide TerminalController;
+import 'package:xterm/xterm.dart' as xterm show TerminalController;
 
 import '../address_book/book.dart';
 import '../core/lan_http.dart';
 import '../projects/client.dart';
+import '../prompts/client.dart';
 import '../sessions/client.dart';
 import '../terminal/controller.dart';
+import '../terminal/extra_keys.dart';
+import 'extra_keys_bar.dart';
 
 class TerminalPage extends StatefulWidget {
   const TerminalPage({
@@ -18,12 +23,14 @@ class TerminalPage extends StatefulWidget {
     required this.http,
     required this.project,
     this.preferredSessionId,
+    this.worktreeId,
   });
 
   final AddressBook book;
   final LanHttpClient http;
   final ProjectSummary project;
   final String? preferredSessionId;
+  final String? worktreeId;
 
   @override
   State<TerminalPage> createState() => _TerminalPageState();
@@ -33,6 +40,7 @@ class _TerminalPageState extends State<TerminalPage> {
   late final SessionsClient _sessions;
   late final TerminalController _policy;
   final Terminal _terminal = Terminal(maxLines: 5000);
+  final _view = xterm.TerminalController();
   final _input = TextEditingController();
   WebSocket? _socket;
   HttpClient? _eventsClient;
@@ -43,6 +51,8 @@ class _TerminalPageState extends State<TerminalPage> {
   int _seq = 1;
   String? _owner;
   int _sequence = 0;
+  StickyModifier? _sticky;
+  List<SessionSummary> _sessionList = [];
 
   @override
   void initState() {
@@ -57,15 +67,17 @@ class _TerminalPageState extends State<TerminalPage> {
     _socket?.close();
     _eventsClient?.close(force: true);
     _input.dispose();
+    _view.dispose();
     super.dispose();
   }
 
   Future<void> _boot() async {
     try {
       var sessions = await _sessions.list(widget.project.id);
+      _sessionList = sessions;
       var session = sessions.where((s) => s.id == widget.preferredSessionId).firstOrNull ??
           sessions.where((s) => s.status != 'exited').firstOrNull;
-      session ??= await _sessions.create(widget.project.id);
+      session ??= await _sessions.create(widget.project.id, worktreeId: widget.worktreeId);
       _sessionId = session.id;
       await _sessions.focus(session.id);
       final replay = await _sessions.replay(session.id);
@@ -214,15 +226,128 @@ class _TerminalPageState extends State<TerminalPage> {
     if (_policy.sync == TerminalSync.gapReplayRequired) {
       return;
     }
+    final applied = applyStickyModifier(_sticky, data);
+    if (applied.consume) {
+      setState(() => _sticky = null);
+    }
     final seq = _seq++;
-    _policy.sendInput(data);
+    _policy.sendInput(applied.data);
     socket.add(jsonEncode({
       'type': 'input',
       'laneId': _laneId,
       'sessionId': sessionId,
       'seq': seq,
-      'data': data,
+      'data': applied.data,
     }));
+  }
+
+  Future<void> _copySelection() async {
+    final selection = _view.selection;
+    if (selection == null) {
+      return;
+    }
+    final text = _terminal.buffer.getText(selection);
+    if (text.isEmpty) {
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已复制')));
+    }
+  }
+
+  Future<void> _pickFavorite() async {
+    final prompts = await PromptsClient(widget.http, widget.book.active!.baseUrl).listFavorites();
+    if (!mounted) {
+      return;
+    }
+    final chosen = await showModalBottomSheet<FavoritePrompt>(
+      context: context,
+      builder: (context) => ListView(
+        children: [
+          for (final prompt in prompts)
+            ListTile(
+              title: Text(prompt.title),
+              subtitle: Text(prompt.content, maxLines: 2, overflow: TextOverflow.ellipsis),
+              onTap: () => Navigator.pop(context, prompt),
+            ),
+        ],
+      ),
+    );
+    if (chosen != null) {
+      _send(chosen.content);
+    }
+  }
+
+  Future<void> _optimize() async {
+    final sessionId = _sessionId;
+    if (sessionId == null) {
+      return;
+    }
+    final controller = TextEditingController(text: _input.text);
+    final prompt = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Prompt 优化'),
+        content: TextField(controller: controller, maxLines: 4),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('写入会话'),
+          ),
+        ],
+      ),
+    );
+    if (prompt == null || prompt.isEmpty) {
+      return;
+    }
+    await PromptsClient(widget.http, widget.book.active!.baseUrl).streamOptimizerToSession(
+      prompt: prompt,
+      sessionId: sessionId,
+      workingDirectory: widget.project.path,
+    );
+  }
+
+  Future<void> _pickSession() async {
+    final sessions = await _sessions.list(widget.project.id);
+    if (!mounted) {
+      return;
+    }
+    final chosen = await showModalBottomSheet<SessionSummary>(
+      context: context,
+      builder: (context) => ListView(
+        children: [
+          ListTile(
+            title: const Text('新建 session'),
+            onTap: () => Navigator.pop(
+              context,
+              SessionSummary(id: '', projectId: widget.project.id, name: 'new', status: 'new'),
+            ),
+          ),
+          for (final session in sessions)
+            ListTile(
+              title: Text(session.name.isEmpty ? session.id : session.name),
+              subtitle: Text(session.status),
+              onTap: () => Navigator.pop(context, session),
+            ),
+        ],
+      ),
+    );
+    if (chosen == null) {
+      return;
+    }
+    SessionSummary session = chosen;
+    if (session.id.isEmpty) {
+      session = await _sessions.create(widget.project.id, worktreeId: widget.worktreeId);
+    }
+    await _sessions.focus(session.id);
+    setState(() {
+      _sessionId = session.id;
+      _sessionList = sessions;
+    });
+    await _openInput();
+    _listenEvents();
   }
 
   Future<void> _pasteImage() async {
@@ -253,6 +378,21 @@ class _TerminalPageState extends State<TerminalPage> {
             children: [
               Expanded(child: Text(_status, style: Theme.of(context).textTheme.bodySmall)),
               IconButton(
+                tooltip: '会话',
+                onPressed: _pickSession,
+                icon: const Icon(Icons.tab),
+              ),
+              IconButton(
+                tooltip: '收藏 Prompt',
+                onPressed: _pickFavorite,
+                icon: const Icon(Icons.star_outline),
+              ),
+              IconButton(
+                tooltip: 'Prompt 优化',
+                onPressed: _optimize,
+                icon: const Icon(Icons.auto_fix_high),
+              ),
+              IconButton(
                 tooltip: '相册贴图',
                 onPressed: _pasteImage,
                 icon: const Icon(Icons.photo_outlined),
@@ -261,39 +401,15 @@ class _TerminalPageState extends State<TerminalPage> {
           ),
         ),
         Expanded(
-          child: TerminalView(_terminal),
-        ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: [
-              for (final key in const ['Esc', 'Tab', 'Ctrl-C', '↑', '↓', '←', '→'])
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: OutlinedButton(
-                    onPressed: () {
-                      switch (key) {
-                        case 'Esc':
-                          _send('\x1b');
-                        case 'Tab':
-                          _send('\t');
-                        case 'Ctrl-C':
-                          _send('\x03');
-                        case '↑':
-                          _send('\x1b[A');
-                        case '↓':
-                          _send('\x1b[B');
-                        case '→':
-                          _send('\x1b[C');
-                        case '←':
-                          _send('\x1b[D');
-                      }
-                    },
-                    child: Text(key),
-                  ),
-                ),
-            ],
+          child: GestureDetector(
+            onLongPress: _copySelection,
+            child: TerminalView(_terminal, controller: _view),
           ),
+        ),
+        ExtraKeysBar(
+          onSend: _send,
+          sticky: _sticky,
+          onSticky: (value) => setState(() => _sticky = value),
         ),
         Padding(
           padding: const EdgeInsets.all(8),
