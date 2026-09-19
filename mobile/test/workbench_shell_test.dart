@@ -1,4 +1,4 @@
-import 'package:cc_partner_mobile/workbench/nav.dart';
+import 'package:cc_partner_mobile/address_book/models.dart';
 import 'package:cc_partner_mobile/workbench/shell.dart';
 import 'package:test/test.dart';
 
@@ -97,5 +97,86 @@ void main() {
     expect(shouldShowWorktreeStrip(WorkbenchPanel.git), isTrue);
     expect(shouldShowWorktreeStrip(WorkbenchPanel.terminal), isFalse);
     expect(shouldShowWorktreeStrip(WorkbenchPanel.projects), isFalse);
+  });
+
+  test('withBadges attaches counts without changing panel order', () {
+    final items = withBadges(
+      [WorkbenchPanel.projects, WorkbenchPanel.attention, WorkbenchPanel.transfer],
+      {WorkbenchPanel.attention: 3},
+    );
+    expect(items.map((i) => i.panel).toList(), [
+      WorkbenchPanel.projects,
+      WorkbenchPanel.attention,
+      WorkbenchPanel.transfer,
+    ]);
+    expect(items[0].badge, isNull);
+    expect(items[1].badge, 3);
+    expect(items[2].badge, isNull);
+  });
+
+  test('badge label hides zero/null and caps at 99+', () {
+    expect(workbenchBadgeLabel(null), isNull);
+    expect(workbenchBadgeLabel(0), isNull);
+    expect(workbenchBadgeLabel(1), '1');
+    expect(workbenchBadgeLabel(99), '99');
+    expect(workbenchBadgeLabel(120), '99+');
+    expect(workbenchBadgeLabel(-1), isNull);
+  });
+
+  test('restore resolves nothing without lastLocation or unknown project', () {
+    expect(
+      resolveWorkbenchLocationRestore(
+        location: null,
+        recentProjectIds: {'p1'},
+      ),
+      isNull,
+    );
+    expect(
+      resolveWorkbenchLocationRestore(
+        location: const LastLocation(projectId: 'p1'),
+        recentProjectIds: {'p2'},
+      ),
+      isNull,
+    );
+    expect(
+      resolveWorkbenchLocationRestore(
+        location: const LastLocation(),
+        recentProjectIds: {'p1'},
+      ),
+      isNull,
+    );
+  });
+
+  test('restore falls back panel-first when panel name is invalid', () {
+    final restore = resolveWorkbenchLocationRestore(
+      location: const LastLocation(
+        projectId: 'p1',
+        panel: 'not-a-panel',
+        worktreeId: 'wt-9',
+        sessionId: 'tmux-9',
+      ),
+      recentProjectIds: {'p1'},
+    );
+    expect(restore, isNotNull);
+    expect(restore!.projectId, 'p1');
+    expect(restore.panel, WorkbenchPanel.terminal);
+    expect(restore.worktreeId, 'wt-9');
+    expect(restore.sessionId, 'tmux-9');
+  });
+
+  test('restore keeps a valid project-bound panel', () {
+    final restore = resolveWorkbenchLocationRestore(
+      location: const LastLocation(
+        projectId: 'p1',
+        panel: 'automation',
+        worktreeId: 'wt-1',
+        sessionId: 'tmux-1',
+      ),
+      recentProjectIds: {'p1', 'p2'},
+    );
+    expect(restore, isNotNull);
+    expect(restore!.panel, WorkbenchPanel.automation);
+    expect(restore.worktreeId, 'wt-1');
+    expect(restore.sessionId, 'tmux-1');
   });
 }

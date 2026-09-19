@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../git/client.dart';
+
 class WorktreeStrip extends StatelessWidget {
   const WorktreeStrip({
     super.key,
@@ -23,14 +25,9 @@ class WorktreeStrip extends StatelessWidget {
           for (final tree in worktrees)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-              child: ChoiceChip(
-                key: Key('worktree-${tree['id']}'),
-                label: Text(
-                  tree['name'] as String? ??
-                      tree['branch'] as String? ??
-                      tree['id'] as String? ??
-                      '',
-                ),
+            child: ChoiceChip(
+              key: Key('worktree-${tree['id']}'),
+              label: Text(worktreeDisplayName(tree)),
                 selected: tree['id'] == activeId,
                 onSelected: (_) => onSelect(tree),
               ),

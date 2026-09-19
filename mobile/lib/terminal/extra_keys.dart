@@ -33,6 +33,40 @@ class StickyToggle {
   final StickyModifier? armed;
 }
 
+/// 业务逻辑：sticky Ctrl/Alt 武装后若用户忘记再按键会误改写后续普通输入，需要 3 秒自动解除。
+///
+/// Code Logic：用外部注入的毫秒时钟记录武装时刻；shouldAutoDisarm(nowMs) 判断是否已超过
+/// [kStickyTimeoutMs]，纯函数便于测试；实际解除由 UI 层的 Timer 驱动。
+class StickyModifierHold {
+  StickyModifierHold({this.timeoutMs = kStickyTimeoutMs});
+
+  final int timeoutMs;
+
+  /// 最近一次武装时刻（毫秒时间戳），未武装为 null。
+  int? armedAtMs;
+
+  bool get isArmed => armedAtMs != null;
+
+  /// 武装（或重新武装）sticky 修饰键，nowMs 由调用方注入。
+  void arm(int nowMs) {
+    armedAtMs = nowMs;
+  }
+
+  /// 消费、手动切换或超时解除后取消武装计时。
+  void cancel() {
+    armedAtMs = null;
+  }
+
+  /// 判断 nowMs 时刻是否应自动解除；任意输入消耗 sticky 时应先 cancel 再判断。
+  bool shouldAutoDisarm(int nowMs) {
+    final armedAt = armedAtMs;
+    if (armedAt == null) {
+      return false;
+    }
+    return nowMs - armedAt >= timeoutMs;
+  }
+}
+
 const kExtraKeyLongPressMs = 400;
 const kExtraKeyRepeatDelayMs = kExtraKeyLongPressMs;
 const kExtraKeyRepeatIntervalMs = 80;

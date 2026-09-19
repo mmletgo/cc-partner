@@ -5,10 +5,18 @@ import '../core/lan_http.dart';
 import '../provider/client.dart';
 
 class ProviderPage extends StatefulWidget {
-  const ProviderPage({super.key, required this.book, required this.http});
+  const ProviderPage({
+    super.key,
+    required this.book,
+    required this.http,
+    this.client,
+  });
 
   final AddressBook book;
   final LanHttpClient http;
+
+  /// 测试注入点；为空时按当前设备 baseUrl 构造。
+  final ProviderClient? client;
 
   @override
   State<ProviderPage> createState() => _ProviderPageState();
@@ -25,7 +33,7 @@ class _ProviderPageState extends State<ProviderPage> {
   @override
   void initState() {
     super.initState();
-    _client = ProviderClient(widget.http, widget.book.active!.baseUrl);
+    _client = widget.client ?? ProviderClient(widget.http, widget.book.active!.baseUrl);
     _reload();
   }
 
@@ -75,36 +83,65 @@ class _ProviderPageState extends State<ProviderPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_error != null) {
-      return Center(child: Text(_error!));
-    }
-    if (_support == ProviderSupport.unsupported) {
-      return const Center(child: Text('当前电脑不支持 provider-manager.v1'));
-    }
-    return ListView(
-      padding: const EdgeInsets.all(16),
+    return Column(
       children: [
-        const Text('手机不会安装 cc-switch CLI。'),
-        const SizedBox(height: 12),
-        for (final app in _apps) ...[
-          Text(app.app, style: Theme.of(context).textTheme.titleMedium),
-          for (final provider in app.providers)
-            ListTile(
-              title: Text(provider.name),
-              subtitle: Text(provider.category ?? provider.id),
-              trailing: provider.isCurrent
-                  ? const Chip(label: Text('当前'))
-                  : TextButton(
-                      onPressed: _switching == null
-                          ? () => _switch(app.app, provider.id)
-                          : null,
-                      child: const Text('切换'),
-                    ),
-            ),
-        ],
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+          child: Row(
+            children: [
+              const Spacer(),
+              IconButton(
+                key: const Key('provider-refresh'),
+                tooltip: '刷新',
+                onPressed: _loading ? null : _reload,
+                icon: const Icon(Icons.refresh),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : RefreshIndicator(
+                  onRefresh: _reload,
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      if (_error != null) ...[
+                        Text(_error!),
+                        const SizedBox(height: 8),
+                        FilledButton.icon(
+                          key: const Key('provider-retry'),
+                          onPressed: _reload,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('重新检测'),
+                        ),
+                      ] else if (_support == ProviderSupport.unsupported) ...[
+                        const Text('当前电脑不支持 provider-manager.v1'),
+                      ] else ...[
+                        const Text('手机不会安装 cc-switch CLI。'),
+                        const SizedBox(height: 12),
+                        for (final app in _apps) ...[
+                          Text(app.app, style: Theme.of(context).textTheme.titleMedium),
+                          for (final provider in app.providers)
+                            ListTile(
+                              title: Text(provider.name),
+                              subtitle: Text(provider.category ?? provider.id),
+                              trailing: provider.isCurrent
+                                  ? const Chip(label: Text('当前'))
+                                  : TextButton(
+                                      onPressed: _switching == null
+                                          ? () => _switch(app.app, provider.id)
+                                          : null,
+                                      child: const Text('切换'),
+                                    ),
+                            ),
+                        ],
+                      ],
+                    ],
+                  ),
+                ),
+        ),
       ],
     );
   }

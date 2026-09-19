@@ -65,4 +65,73 @@ void main() {
     expect(savedName, 'notes.txt');
     expect(savedBytes, [9, 8, 7]);
   });
+
+  test('chunked upload reports cumulative progress through the injectable sender', () async {
+    final api = TransferApi(LanHttpClient(), 'http://127.0.0.1:1');
+    final progress = <List<int>>[];
+    final chunks = <List<int>>[];
+    final bytes = Uint8List.fromList(List<int>.generate(3072, (i) => i % 256));
+    await api.uploadFileInChunks(
+      id: 'up-1',
+      bytes: bytes,
+      chunkSize: 1024,
+      onProgress: (uploaded, total) => progress.add([uploaded, total]),
+      chunkSender: (id, offset, chunk) async {
+        expect(id, 'up-1');
+        chunks.add([offset, chunk.length]);
+      },
+    );
+    expect(chunks, [
+      [0, 1024],
+      [1024, 1024],
+      [2048, 1024],
+    ]);
+    expect(progress, [
+      [0, 3072],
+      [1024, 3072],
+      [2048, 3072],
+      [3072, 3072],
+    ]);
+  });
+
+  test('empty upload reports a single zero progress and sends no chunks', () async {
+    final api = TransferApi(LanHttpClient(), 'http://127.0.0.1:1');
+    final progress = <List<int>>[];
+    var chunkCalls = 0;
+    await api.uploadFileInChunks(
+      id: 'up-0',
+      bytes: Uint8List(0),
+      onProgress: (uploaded, total) => progress.add([uploaded, total]),
+      chunkSender: (_, __, ___) async => chunkCalls += 1,
+    );
+    expect(progress, [
+      [0, 0],
+    ]);
+    expect(chunkCalls, 0);
+  });
+
+  test('default chunk sender posts each chunk to the host relay route', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final offsets = <int>[];
+    server.listen((request) async {
+      if (request.uri.path.contains('/upload/chunk/')) {
+        offsets.add(int.parse(request.uri.queryParameters['offset'] ?? '-1'));
+      }
+      await utf8.decodeStream(request);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode({'ok': true}));
+      await request.response.close();
+    });
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final api = TransferApi(http, 'http://127.0.0.1:${server.port}');
+    await api.uploadFileInChunks(
+      id: 'up-2',
+      bytes: Uint8List(3000),
+      chunkSize: 1024,
+      onProgress: (_, __) {},
+    );
+    expect(offsets, [0, 1024, 2048]);
+  });
 }

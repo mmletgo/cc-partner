@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../address_book/book.dart';
 import '../address_book/models.dart';
+import '../attention/client.dart';
+import '../attention/filter.dart';
 import '../core/lan_http.dart';
 import '../files/workspace.dart';
 import '../git/client.dart';
@@ -42,12 +46,87 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   List<Map<String, dynamic>> _worktrees = [];
   final _files = FileWorkspaceController();
 
+  /// 「待处理」未读徽章（与列表同口径：只统计今天未读）。
+  int _attentionUnread = 0;
+
   ServerRecord get _server => widget.book.active!;
 
   WorkbenchNavMode get _mode =>
       resolveNavMode(_panel, _project != null);
 
-  Future<void> _loadWorktrees(ProjectSummary project, {required bool projectChanged}) async {
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refreshAttentionUnread());
+    unawaited(_restoreLastLocation());
+  }
+
+  /// Business Logic: 进入工作台时 Drawer「待处理」要显示未读数，且数字必须与列表一致。
+  /// Code Logic: 拉取移动端可见条目，按 filter.dart 的本地日口径统计今天未读；离线失败静默保留旧值。
+  Future<void> _refreshAttentionUnread() async {
+    try {
+      final items = await AttentionClient(widget.http, _server.baseUrl).listVisible();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
+      });
+    } catch (_) {}
+  }
+
+  /// Business Logic: 离开工作台回地址簿后，再次进入同一 PC 应恢复上次的项目/面板/worktree/session。
+  /// Code Logic: 弹出路由时把当前工作位置写入该 server 的 lastLocation 并持久化；未打开项目则不覆盖。
+  Future<void> _saveLastLocation() async {
+    final project = _project;
+    if (project == null) {
+      return;
+    }
+    await widget.book.saveLastLocation(
+      _server.id,
+      LastLocation(
+        projectId: project.id,
+        panel: _panel.name,
+        worktreeId: _worktreeId,
+        sessionId: _sessionId,
+      ),
+    );
+  }
+
+  /// Business Logic: 再次进入该 PC 工作台时应尽量回到上次的工作位置。
+  /// Code Logic: 取最近项目列表后用纯函数回落解析（项目不在列表/无记录则保持现状）；
+  /// worktree 用 resumeWorktreeId 在新鲜列表里校验（无效回落主树）；session 由 TerminalPage 自行回落。
+  Future<void> _restoreLastLocation() async {
+    final location = _server.lastLocation;
+    try {
+      final projects = await ProjectsClient(widget.http, _server.baseUrl).listRecent();
+      final restore = resolveWorkbenchLocationRestore(
+        location: location,
+        recentProjectIds: projects.map((p) => p.id).toSet(),
+      );
+      if (restore == null || !mounted) {
+        return;
+      }
+      final project = projects.firstWhere((p) => p.id == restore.projectId);
+      _openProject(
+        project,
+        panel: restore.panel,
+        sessionId: restore.sessionId,
+        resumeWorktreeId: restore.worktreeId,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已恢复上次的工作位置')),
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _loadWorktrees(
+    ProjectSummary project, {
+    required bool projectChanged,
+    String? resumeWorktreeId,
+  }) async {
     try {
       final body = await GitClient(widget.http, _server.baseUrl).listWorktrees(project.id);
       final trees = asObjectList(body, wrapKey: 'worktrees');
@@ -56,11 +135,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       }
       setState(() {
         _worktrees = trees;
-        _worktreeId = resolveActiveWorktreeId(
-          trees: trees,
-          previousId: _worktreeId,
-          projectChanged: projectChanged,
-        );
+        _worktreeId = resumeWorktreeId != null
+            ? resolveActiveWorktreeId(
+                trees: trees,
+                previousId: resumeWorktreeId,
+                projectChanged: false,
+              )
+            : resolveActiveWorktreeId(
+                trees: trees,
+                previousId: _worktreeId,
+                projectChanged: projectChanged,
+              );
       });
     } catch (_) {}
   }
@@ -90,7 +175,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     return false;
   }
 
-  void _openProject(ProjectSummary project, {WorkbenchPanel panel = WorkbenchPanel.terminal, String? sessionId}) {
+  void _openProject(
+    ProjectSummary project, {
+    WorkbenchPanel panel = WorkbenchPanel.terminal,
+    String? sessionId,
+    String? resumeWorktreeId,
+  }) {
     final projectChanged = _project?.id != project.id;
     setState(() {
       _project = project;
@@ -101,7 +191,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         _worktrees = [];
       }
     });
-    _loadWorktrees(project, projectChanged: projectChanged);
+    _loadWorktrees(
+      project,
+      projectChanged: projectChanged,
+      resumeWorktreeId: resumeWorktreeId,
+    );
   }
 
   void _select(WorkbenchPanel next) {
@@ -127,6 +221,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               panel: parseWorkbenchPanel(panel) ?? WorkbenchPanel.terminal,
               sessionId: sessionId,
             );
+          },
+          onItemsChanged: (items) {
+            setState(() {
+              _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
+            });
           },
         );
       case WorkbenchPanel.transfer:
@@ -197,35 +296,44 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     final label = _server.name.isNotEmpty
         ? _server.name
         : (_server.deviceName ?? _server.baseUrl);
-    return WorkbenchShell(
-      mode: _mode,
-      panel: _panel,
-      projectLabel: _project?.name ?? label,
-      subtitle: _server.baseUrl,
-      onSelect: _select,
-      onBackToProjects: () {
-        setState(() {
-          _panel = WorkbenchPanel.projects;
-          _project = null;
-          _sessionId = null;
-          _worktreeId = clearWorktreeOnLeaveProject();
-          _worktrees = [];
-        });
+    return PopScope(
+      // 离开工作台回地址簿时记录工作位置，供下次进入恢复。
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          unawaited(_saveLastLocation());
+        }
       },
-      worktreeStrip: _project != null && shouldShowWorktreeStrip(_panel)
-          ? WorktreeStrip(
-              worktrees: _worktrees,
-              activeId: _worktreeId,
-              onSelect: (tree) async {
-                final id = tree['id'] as String? ?? '';
-                if (!await _confirmLeaveDirty(id)) {
-                  return;
-                }
-                setState(() => _worktreeId = id);
-              },
-            )
-          : null,
-      child: _body(),
+      child: WorkbenchShell(
+        mode: _mode,
+        panel: _panel,
+        projectLabel: _project?.name ?? label,
+        subtitle: _server.baseUrl,
+        badges: {WorkbenchPanel.attention: _attentionUnread},
+        onSelect: _select,
+        onBackToProjects: () {
+          setState(() {
+            _panel = WorkbenchPanel.projects;
+            _project = null;
+            _sessionId = null;
+            _worktreeId = clearWorktreeOnLeaveProject();
+            _worktrees = [];
+          });
+        },
+        worktreeStrip: _project != null && shouldShowWorktreeStrip(_panel)
+            ? WorktreeStrip(
+                worktrees: _worktrees,
+                activeId: _worktreeId,
+                onSelect: (tree) async {
+                  final id = tree['id'] as String? ?? '';
+                  if (!await _confirmLeaveDirty(id)) {
+                    return;
+                  }
+                  setState(() => _worktreeId = id);
+                },
+              )
+            : null,
+        child: _body(),
+      ),
     );
   }
 }

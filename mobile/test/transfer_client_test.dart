@@ -71,4 +71,26 @@ void main() {
     expect(pickTransferTargetId(ranked, selectedId: 'peer'), 'peer');
     expect(pickTransferTargetId(ranked, selectedId: 'gone'), 'host');
   });
+
+  test('tasks group into active, needs-attention and completed in order', () {
+    final groups = groupTransferTasks([
+      TransferTask(id: 'a', direction: 'Send', status: 'pending'),
+      TransferTask(id: 'b', direction: 'Send', status: 'transferring'),
+      TransferTask(id: 'c', direction: 'Send', status: 'failed'),
+      TransferTask(id: 'd', direction: 'Receive', status: 'cancelled'),
+      TransferTask(id: 'e', direction: 'Receive', status: 'completed'),
+    ]);
+    expect(groups.active.map((t) => t.id), ['a', 'b']);
+    expect(groups.needsAttention.map((t) => t.id), ['c', 'd']);
+    expect(groups.completed.map((t) => t.id), ['e']);
+  });
+
+  test('unknown statuses fall into the completed group', () {
+    final groups = groupTransferTasks([
+      TransferTask(id: 'x', direction: 'Send', status: 'weird'),
+    ]);
+    expect(groups.completed.map((t) => t.id), ['x']);
+    expect(groups.active, isEmpty);
+    expect(groups.needsAttention, isEmpty);
+  });
 }

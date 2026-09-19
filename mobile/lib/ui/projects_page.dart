@@ -3,20 +3,29 @@ import 'package:flutter/material.dart';
 import '../address_book/book.dart';
 import '../core/lan_http.dart';
 import '../projects/client.dart';
-import '../transfer/client.dart';
 import '../transfer/api.dart';
+import 'project_dir_picker.dart';
 
+/// Workbench 项目列表页：最近项目 + 添加本机 / 局域网目录（目录浏览式选择器）。
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({
     super.key,
     required this.book,
     required this.http,
     required this.onOpen,
+    this.client,
+    this.transferApi,
   });
 
   final AddressBook book;
   final LanHttpClient http;
   final void Function(ProjectSummary project) onOpen;
+
+  /// 测试注入的项目接口；为空时按当前主机构造。
+  final ProjectsClient? client;
+
+  /// 测试注入的设备列表接口；为空时按当前主机构造。
+  final TransferApi? transferApi;
 
   @override
   State<ProjectsPage> createState() => _ProjectsPageState();
@@ -25,6 +34,7 @@ class ProjectsPage extends StatefulWidget {
 class _ProjectsPageState extends State<ProjectsPage> {
   late final ProjectsClient _client;
   late final TransferApi _transfer;
+  final Set<String> _removingIds = {};
   List<ProjectSummary> _items = [];
   String? _error;
   bool _loading = true;
@@ -32,8 +42,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
   @override
   void initState() {
     super.initState();
-    _client = ProjectsClient(widget.http, widget.book.active!.baseUrl);
-    _transfer = TransferApi(widget.http, widget.book.active!.baseUrl);
+    final baseUrl = widget.book.active?.baseUrl ?? '';
+    _client = widget.client ?? ProjectsClient(widget.http, baseUrl);
+    _transfer = widget.transferApi ?? TransferApi(widget.http, baseUrl);
     _reload();
   }
 
@@ -60,101 +71,61 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
   }
 
-  Future<void> _remove(ProjectSummary project) async {
-    await _client.remove(project.id);
-    await _reload();
-  }
-
+  /// 打开目录浏览式选择器；成功打开项目后回传给上层导航。
   Future<void> _openPicker({required bool lan}) async {
-    final pathController = TextEditingController();
-    final nameController = TextEditingController();
-    final deviceController = TextEditingController();
-    List<Map<String, dynamic>> devices = const [];
-    if (lan) {
-      try {
-        devices = rankTransferTargets(await _transfer.listDevices());
-      } catch (_) {}
-    }
-    if (!mounted) {
-      return;
-    }
-    final opened = await showDialog<ProjectSummary>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(lan ? '添加局域网目录' : '添加本机目录'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (lan)
-                DropdownButtonFormField<String>(
-                  items: [
-                    for (final device in devices)
-                      DropdownMenuItem(
-                        value: device['id'] as String? ?? device['deviceId'] as String?,
-                        child: Text(
-                          '${device['name'] ?? device['id']}${device['isSelf'] == true ? ' · 主机' : ''}',
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) => deviceController.text = value ?? '',
-                  decoration: const InputDecoration(labelText: '设备'),
-                ),
-              TextField(
-                controller: pathController,
-                decoration: const InputDecoration(labelText: '目录路径'),
-              ),
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(labelText: '新建一层文件夹（可选）'),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-            FilledButton(
-              onPressed: () async {
-                var path = pathController.text.trim();
-                final folder = nameController.text.trim();
-                try {
-                  if (lan) {
-                    final deviceId = deviceController.text.trim();
-                    if (folder.isNotEmpty) {
-                      final created = await _client.createRemoteDir(
-                        deviceId: deviceId,
-                        parentPath: path,
-                        name: folder,
-                      );
-                      path = created['path'] as String? ?? '$path/$folder';
-                    }
-                    final project = await _client.openRemote(deviceId: deviceId, path: path);
-                    if (context.mounted) {
-                      Navigator.pop(context, project);
-                    }
-                  } else {
-                    if (folder.isNotEmpty) {
-                      final created = await _client.createDir(parentPath: path, name: folder);
-                      path = created['path'] as String? ?? '$path/$folder';
-                    }
-                    final project = await _client.open(path: path);
-                    if (context.mounted) {
-                      Navigator.pop(context, project);
-                    }
-                  }
-                } catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
-                  }
-                }
-              },
-              child: const Text('打开'),
-            ),
-          ],
-        );
-      },
+    final opened = await showProjectDirPicker(
+      context,
+      client: _client,
+      transferApi: _transfer,
+      lan: lan,
     );
     if (opened != null) {
       widget.onOpen(opened);
+    }
+  }
+
+  /// 先弹确认框，确认后才从最近列表移除；移除中按钮禁用防重复提交。
+  Future<void> _remove(ProjectSummary project) async {
+    if (_removingIds.contains(project.id)) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('remove-confirm'),
+        title: Text('移除项目「${project.name}」？'),
+        content: const Text('只会从这台电脑的最近列表移除，不会删除文件。'),
+        actions: [
+          TextButton(
+            key: const Key('remove-confirm-cancel'),
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('remove-confirm-accept'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    setState(() => _removingIds.add(project.id));
+    try {
+      await _client.remove(project.id);
+      await _reload();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$error')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _removingIds.remove(project.id));
+      }
     }
   }
 
@@ -167,11 +138,13 @@ class _ProjectsPageState extends State<ProjectsPage> {
           child: Row(
             children: [
               FilledButton(
+                key: const Key('project-add-local'),
                 onPressed: () => _openPicker(lan: false),
                 child: const Text('添加本机目录'),
               ),
               const SizedBox(width: 8),
               OutlinedButton(
+                key: const Key('project-add-lan'),
                 onPressed: () => _openPicker(lan: true),
                 child: const Text('添加局域网目录'),
               ),
@@ -191,14 +164,22 @@ class _ProjectsPageState extends State<ProjectsPage> {
                             itemCount: _items.length,
                             itemBuilder: (context, index) {
                               final project = _items[index];
+                              final removing = _removingIds.contains(project.id);
                               return ListTile(
                                 leading: const Icon(Icons.folder),
                                 title: Text(project.name),
                                 subtitle: Text(project.path ?? project.kind ?? project.id),
                                 onTap: () => widget.onOpen(project),
                                 trailing: IconButton(
-                                  icon: const Icon(Icons.delete_outline),
-                                  onPressed: () => _remove(project),
+                                  key: Key('project-remove-${project.id}'),
+                                  icon: removing
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : const Icon(Icons.delete_outline),
+                                  onPressed: removing ? null : () => _remove(project),
                                 ),
                               );
                             },

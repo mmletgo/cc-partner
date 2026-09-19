@@ -10,10 +10,13 @@ void main() {
   late String baseUrl;
   String? lastPath;
   Map<String, dynamic> lastBody = const {};
+  // /git/commits 的响应体；后端返回裸数组，测试里也覆盖包一层 commits 的形态。
+  Object commitsResponse = const [];
 
   setUp(() async {
     lastPath = null;
     lastBody = const {};
+    commitsResponse = const [];
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     baseUrl = 'http://127.0.0.1:${server.port}';
     server.listen((request) async {
@@ -41,6 +44,8 @@ void main() {
             'isMain': false,
           }),
         );
+      } else if (request.uri.path.endsWith('/git/commits')) {
+        request.response.write(jsonEncode(commitsResponse));
       } else {
         request.response.write(jsonEncode({'ok': true, 'kind': 'succeeded'}));
       }
@@ -59,6 +64,128 @@ void main() {
     final body = await git.listWorktrees('p1');
     expect(body['ok'], isTrue);
     expect(lastPath, '/api/mobile/workbench/worktrees/list');
+    expect(lastBody['includeGitStatus'], isFalse);
+  });
+
+  test('lists worktrees with git status when requested', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final git = GitClient(http, baseUrl);
+    await git.listWorktrees('p1', includeGitStatus: true);
+    expect(lastBody['includeGitStatus'], isTrue);
+  });
+
+  test('fetches commits for a worktree with refs', () async {
+    commitsResponse = [
+      {
+        'hash': 'a1b2c3d4e5f6',
+        'shortHash': 'a1b2c3d',
+        'parentHashes': ['fff0001'],
+        'authorName': '韩梅梅',
+        'authorEmail': 'han@example.com',
+        'authoredAt': '2026-09-19T10:30:00Z',
+        'summary': 'fix: mobile git history',
+        'refs': [
+          {
+            'name': 'main',
+            'fullName': 'refs/heads/main',
+            'kind': 'local',
+            'remote': null,
+            'isHead': true,
+          },
+          {
+            'name': 'origin/main',
+            'fullName': 'refs/remotes/origin/main',
+            'kind': 'remote',
+            'remote': 'origin',
+            'isHead': false,
+          },
+        ],
+      },
+    ];
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final git = GitClient(http, baseUrl);
+    final commits = await git.commits('p1', worktreeId: 'wt-main');
+    expect(lastPath, '/api/mobile/workbench/git/commits');
+    expect(lastBody['projectId'], 'p1');
+    expect(lastBody['worktreeId'], 'wt-main');
+    expect(lastBody['limit'], 30);
+    expect(commits, hasLength(1));
+    final commit = commits.single;
+    expect(commit.hash, 'a1b2c3d4e5f6');
+    expect(commit.shortHash, 'a1b2c3d');
+    expect(commit.summary, 'fix: mobile git history');
+    expect(commit.authorName, '韩梅梅');
+    expect(commit.authorEmail, 'han@example.com');
+    expect(commit.parentHashes, ['fff0001']);
+    expect(commit.refs, hasLength(2));
+    expect(commit.refs.first.name, 'main');
+    expect(commit.refs.first.kind, 'local');
+    expect(commit.refs.first.isHead, isTrue);
+    expect(commit.refs.last.remote, 'origin');
+    expect(commit.refs.last.isHead, isFalse);
+  });
+
+  test('commits parsing tolerates missing fields and a wrapped payload', () async {
+    commitsResponse = {
+      'commits': [
+        {'hash': 'x'},
+      ],
+    };
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final git = GitClient(http, baseUrl);
+    final commits = await git.commits('p1');
+    expect(lastBody['worktreeId'], isNull);
+    expect(lastBody['limit'], 30);
+    expect(commits, hasLength(1));
+    final commit = commits.single;
+    expect(commit.hash, 'x');
+    expect(commit.shortHash, '');
+    expect(commit.summary, '');
+    expect(commit.authorName, '');
+    expect(commit.parentHashes, isEmpty);
+    expect(commit.refs, isEmpty);
+  });
+
+  test('commits forwards a custom limit and empty payload', () async {
+    commitsResponse = const [];
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final git = GitClient(http, baseUrl);
+    final commits = await git.commits('p1', worktreeId: null, limit: 5);
+    expect(lastBody['limit'], 5);
+    expect(lastBody['worktreeId'], isNull);
+    expect(commits, isEmpty);
+  });
+
+  test('parses worktree git status leniently', () {
+    final status = WorktreeGitStatus.of({
+      'status': {
+        'branch': 'feat/app',
+        'changed': 2,
+        'ahead': 1,
+        'behind': 3,
+        'conflicts': 0,
+        'clean': false,
+        'canPush': true,
+      },
+    });
+    expect(status.present, isTrue);
+    expect(status.branch, 'feat/app');
+    expect(status.changed, 2);
+    expect(status.ahead, 1);
+    expect(status.behind, 3);
+    expect(status.conflicts, 0);
+    expect(status.clean, isFalse);
+    expect(status.canPush, isTrue);
+
+    final absent = WorktreeGitStatus.of({'id': 'wt-1'});
+    expect(absent.present, isFalse);
+    expect(absent.branch, isNull);
+    expect(absent.clean, isTrue);
+    expect(absent.canPush, isFalse);
   });
 
   test('creates a worktree and commits with a message', () async {

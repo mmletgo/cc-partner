@@ -45,4 +45,48 @@ void main() {
     expect(preview.previewId, 'prev-1');
     expect(preview.scriptsEnabled, isTrue);
   });
+
+  test('discover parses dev server candidates and passes project ids', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    String? path;
+    Map<String, dynamic>? body;
+    server.listen((request) async {
+      path = request.uri.path;
+      final raw = await utf8.decodeStream(request);
+      body = jsonDecode(raw) as Map<String, dynamic>;
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'projectId': 'p1',
+          'worktreeId': null,
+          'targets': [
+            {
+              'id': 't-1',
+              'url': 'http://127.0.0.1:5173',
+              'displayUrl': '127.0.0.1:5173',
+              'source': 'projectConfig',
+              'reachable': true,
+            },
+            {'id': 't-2', 'url': 'http://127.0.0.1:3000'},
+          ],
+          'selectedTargetId': 't-1',
+        }),
+      );
+      await request.response.close();
+    });
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = BrowserClient(http, 'http://127.0.0.1:${server.port}');
+    final discovery = await client.discover(projectId: 'p1');
+    expect(path, '/api/mobile/workbench/browser/discover');
+    expect(body?['projectId'], 'p1');
+    expect(body?['worktreeId'], isNull);
+    expect(discovery.targets, hasLength(2));
+    expect(discovery.targets.first.url, 'http://127.0.0.1:5173');
+    expect(discovery.targets.first.label, '127.0.0.1:5173');
+    expect(discovery.targets.first.reachable, isTrue);
+    expect(discovery.targets.last.label, 'http://127.0.0.1:3000');
+    expect(discovery.selectedTarget?.id, 't-1');
+  });
 }

@@ -53,6 +53,53 @@ bool canDownload(TransferTask task) {
   return task.peer == 'cc-partner-mobile-inbox';
 }
 
+/// 任务分组 key，与 /mobile 的 groupTransferTasks 对齐：
+/// pending/transferring → active；failed/cancelled → needsAttention；其余 completed。
+String classifyTransferGroup(TransferTask task) {
+  if (task.status == 'pending' || task.status == 'transferring') {
+    return 'active';
+  }
+  if (task.status == 'failed' || task.status == 'cancelled') {
+    return 'needsAttention';
+  }
+  return 'completed';
+}
+
+/// 一次任务列表刷新的三组视图；空组由 UI 决定是否隐藏。
+class TransferTaskGroups {
+  const TransferTaskGroups({
+    required this.active,
+    required this.needsAttention,
+    required this.completed,
+  });
+
+  final List<TransferTask> active;
+  final List<TransferTask> needsAttention;
+  final List<TransferTask> completed;
+}
+
+/// 按进行中/需注意/已完成把任务列表分成三组，保持原有顺序。
+TransferTaskGroups groupTransferTasks(List<TransferTask> tasks) {
+  final active = <TransferTask>[];
+  final needsAttention = <TransferTask>[];
+  final completed = <TransferTask>[];
+  for (final task in tasks) {
+    final group = classifyTransferGroup(task);
+    if (group == 'active') {
+      active.add(task);
+    } else if (group == 'needsAttention') {
+      needsAttention.add(task);
+    } else {
+      completed.add(task);
+    }
+  }
+  return TransferTaskGroups(
+    active: active,
+    needsAttention: needsAttention,
+    completed: completed,
+  );
+}
+
 /// Upload starts immediately after the system file picker returns a file.
 class TransferUploadPlan {
   const TransferUploadPlan({

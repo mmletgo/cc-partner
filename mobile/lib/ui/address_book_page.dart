@@ -155,7 +155,33 @@ class _AddressBookPageState extends State<AddressBookPage>
     await _book.persist();
   }
 
+  /// Business Logic: 删除地址簿条目是本地操作，但要防误触；必须说明不会影响 PC 上的数据。
+  /// Code Logic: 弹确认框（展示条目名），确认后才调用 book.remove；取消不动。
   Future<void> _remove(ServerRecord server) async {
+    final label = server.name.isNotEmpty
+        ? server.name
+        : (server.deviceName ?? server.baseUrl);
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('删除 $label？'),
+        content: const Text('不会影响这台电脑上的数据。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('confirm-remove'),
+            onPressed: () => Navigator.of(context).pop('remove'),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (choice != 'remove') {
+      return;
+    }
     await _book.remove(server.id);
     if (mounted) {
       setState(() {});

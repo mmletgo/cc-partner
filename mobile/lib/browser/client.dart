@@ -8,6 +8,68 @@ class BrowserPreviewPolicy {
       '/api/mobile/workbench/browser/proxy/$previewId/';
 }
 
+/// discover 返回的单个 dev server 候选（对齐 web WorkbenchBrowserTarget）。
+class BrowserTarget {
+  const BrowserTarget({
+    required this.id,
+    required this.url,
+    this.displayUrl,
+    this.source,
+    this.reachable = false,
+  });
+
+  final String id;
+  final String url;
+  final String? displayUrl;
+  final String? source;
+  final bool reachable;
+
+  factory BrowserTarget.fromJson(Map<String, dynamic> json) => BrowserTarget(
+        id: json['id'] as String? ?? '',
+        url: json['url'] as String? ?? '',
+        displayUrl: json['displayUrl'] as String?,
+        source: json['source'] as String?,
+        reachable: json['reachable'] == true,
+      );
+
+  /// chip 上显示的短地址；后端缺 displayUrl 时退回完整 url。
+  String get label =>
+      (displayUrl != null && displayUrl!.isNotEmpty) ? displayUrl! : url;
+}
+
+/// discover 结果（对齐 web WorkbenchBrowserDiscovery）。
+class BrowserDiscovery {
+  const BrowserDiscovery({
+    required this.targets,
+    this.selectedTargetId,
+  });
+
+  final List<BrowserTarget> targets;
+  final String? selectedTargetId;
+
+  factory BrowserDiscovery.fromJson(Map<String, dynamic> json) =>
+      BrowserDiscovery(
+        targets: asObjectList(json['targets'])
+            .map(BrowserTarget.fromJson)
+            .toList(),
+        selectedTargetId: json['selectedTargetId'] as String?,
+      );
+
+  /// 后端推荐的默认候选（仅指向可达的 remembered/terminalOutput/projectConfig）。
+  BrowserTarget? get selectedTarget {
+    final id = selectedTargetId;
+    if (id == null || id.isEmpty) {
+      return null;
+    }
+    for (final target in targets) {
+      if (target.id == id) {
+        return target;
+      }
+    }
+    return null;
+  }
+}
+
 class BrowserPreview {
   const BrowserPreview({
     required this.previewId,
@@ -28,11 +90,12 @@ class BrowserClient {
   final LanHttpClient _http;
   final String baseUrl;
 
-  Future<Map<String, dynamic>> discover({
+  /// 探测项目/worktree 下的 dev server 候选；失败由调用方决定静默降级。
+  Future<BrowserDiscovery> discover({
     required String projectId,
     String? worktreeId,
-  }) {
-    return _http.postJson(
+  }) async {
+    final body = await _http.postJson(
       baseUrl,
       '/api/mobile/workbench/browser/discover',
       {
@@ -40,6 +103,7 @@ class BrowserClient {
         'worktreeId': worktreeId,
       },
     );
+    return BrowserDiscovery.fromJson(body);
   }
 
   Future<BrowserPreview> createPreview({

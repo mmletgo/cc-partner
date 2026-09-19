@@ -22,6 +22,30 @@ class SessionSummary {
         status: json['status'] as String? ?? '',
         worktreeId: json['worktreeId'] as String?,
       );
+
+  /// 展示名：后端未命名时回退到 id。
+  String get displayName => name.isEmpty ? id : name;
+}
+
+/// 业务逻辑：进入终端页时应优先恢复指定会话，其次选一个仍在运行的会话，而不是盲选第一个。
+///
+/// Code Logic：优先返回 id 匹配 preferredId 的会话，否则返回首个非 exited 会话；都没有则返回 null，
+/// 由调用方决定新建。
+SessionSummary? pickPreferredSession(List<SessionSummary> sessions,
+    {String? preferredId}) {
+  if (preferredId != null && preferredId.isNotEmpty) {
+    for (final session in sessions) {
+      if (session.id == preferredId) {
+        return session;
+      }
+    }
+  }
+  for (final session in sessions) {
+    if (session.status != 'exited') {
+      return session;
+    }
+  }
+  return null;
 }
 
 class SessionsClient {

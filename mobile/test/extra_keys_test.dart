@@ -40,4 +40,30 @@ void main() {
     expect(toggleStickyModifier(null, StickyModifier.ctrl).armed, StickyModifier.ctrl);
     expect(toggleStickyModifier(StickyModifier.ctrl, StickyModifier.ctrl).armed, isNull);
   });
+
+  test('sticky 武装 3 秒后应自动解除（可注入时钟），消耗/取消立即失效', () {
+    expect(kStickyTimeoutMs, 3000);
+    final hold = StickyModifierHold();
+    final now = 1000000;
+    expect(hold.isArmed, isFalse);
+    expect(hold.shouldAutoDisarm(now), isFalse);
+    hold.arm(now);
+    expect(hold.isArmed, isTrue);
+    expect(hold.shouldAutoDisarm(now + kStickyTimeoutMs - 1), isFalse);
+    expect(hold.shouldAutoDisarm(now + kStickyTimeoutMs), isTrue);
+    // 任意按键消耗后取消：即使超过 3 秒也不应再触发解除。
+    hold.cancel();
+    expect(hold.shouldAutoDisarm(now + kStickyTimeoutMs + 9999), isFalse);
+    // 重新武装按新时刻计时。
+    hold.arm(now + kStickyTimeoutMs);
+    expect(hold.shouldAutoDisarm(now + 2 * kStickyTimeoutMs - 1), isFalse);
+    expect(hold.shouldAutoDisarm(now + 2 * kStickyTimeoutMs), isTrue);
+  });
+
+  test('方向键连发参数：400ms 前置延迟 + 80ms 间隔', () {
+    expect(kExtraKeyRepeatDelayMs, 400);
+    expect(kExtraKeyRepeatIntervalMs, 80);
+    final repeatable = getTerminalExtraKeys().where(extraKeyIsRepeatable).toList();
+    expect(repeatable.map((key) => key.id), containsAll(['up', 'down', 'left', 'right']));
+  });
 }

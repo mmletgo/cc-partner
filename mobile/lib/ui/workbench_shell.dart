@@ -41,6 +41,7 @@ class WorkbenchShell extends StatelessWidget {
     this.subtitle,
     this.worktreeStrip,
     this.onBackToProjects,
+    this.badges = const {},
   });
 
   final WorkbenchNavMode mode;
@@ -51,6 +52,9 @@ class WorkbenchShell extends StatelessWidget {
   final String? subtitle;
   final Widget? worktreeStrip;
   final VoidCallback? onBackToProjects;
+
+  /// 面板徽章计数（如「待处理」未读数）；null 或 <=0 不显示。
+  final Map<WorkbenchPanel, int> badges;
 
   @override
   Widget build(BuildContext context) {
@@ -92,15 +96,16 @@ class WorkbenchShell extends StatelessWidget {
                     style: Theme.of(context).textTheme.labelSmall,
                   ),
                 ),
-                for (final item in group.panels)
+                for (final item in withBadges(group.panels, badges))
                   ListTile(
-                    key: Key('nav-${item.name}'),
-                    selected: item == panel,
-                    leading: Icon(_icon(iconForPanel(item))),
-                    title: Text(panelLabel(item)),
+                    key: Key('nav-${item.panel.name}'),
+                    selected: item.panel == panel,
+                    leading: Icon(_icon(iconForPanel(item.panel))),
+                    title: Text(panelLabel(item.panel)),
+                    trailing: _badge(context, item),
                     onTap: () {
                       Navigator.of(context).pop();
-                      onSelect(item);
+                      onSelect(item.panel);
                     },
                   ),
               ],
@@ -114,6 +119,28 @@ class WorkbenchShell extends StatelessWidget {
             KeyedSubtree(key: const Key('worktree-strip'), child: worktreeStrip!),
           Expanded(child: child),
         ],
+      ),
+    );
+  }
+
+  /// Business Logic: 「待处理」未读数要在 Drawer 里一眼可见，0 不能显示空徽章。
+  /// Code Logic: 有计数时渲染主题色圆角胶囊；无计数返回 null（ListTile 不占 trailing 位）。
+  Widget? _badge(BuildContext context, WorkbenchNavItem item) {
+    final label = workbenchBadgeLabel(item.badge);
+    if (label == null) {
+      return null;
+    }
+    final theme = Theme.of(context);
+    return Container(
+      key: Key('nav-badge-${item.panel.name}'),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onPrimary),
       ),
     );
   }

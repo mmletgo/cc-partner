@@ -137,18 +137,22 @@ class _FilesPageState extends State<FilesPage> {
             },
           ),
         Expanded(
-          child: ListView.builder(
-            itemCount: _nodes.length,
-            itemBuilder: (context, index) {
-              final node = _nodes[index];
-              final name = node['name'] as String? ?? node['path'] as String? ?? '';
-              final kind = node['kind'] as String? ?? 'file';
-              return ListTile(
-                leading: Icon(kind == 'dir' || kind == 'directory' ? Icons.folder : Icons.insert_drive_file),
-                title: Text(name),
-                onTap: () => _open(node),
-              );
-            },
+          child: RefreshIndicator(
+            onRefresh: _reload,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              itemCount: _nodes.length,
+              itemBuilder: (context, index) {
+                final node = _nodes[index];
+                final name = node['name'] as String? ?? node['path'] as String? ?? '';
+                final kind = node['kind'] as String? ?? 'file';
+                return ListTile(
+                  leading: Icon(kind == 'dir' || kind == 'directory' ? Icons.folder : Icons.insert_drive_file),
+                  title: Text(name),
+                  onTap: () => _open(node),
+                );
+              },
+            ),
           ),
         ),
       ],
@@ -380,11 +384,14 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
             ],
           ),
         );
-        if (!mounted) {
+        if (!context.mounted) {
           return;
         }
         if (choice == 'save') {
           await _save();
+          if (!context.mounted) {
+            return;
+          }
           Navigator.of(context).pop();
         } else if (choice == 'discard') {
           widget.workspace.markClean();

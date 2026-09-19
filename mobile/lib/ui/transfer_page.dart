@@ -34,6 +34,8 @@ class _TransferPageState extends State<TransferPage> {
   String? _error;
   bool _loading = true;
   String? _busy;
+  int _uploadedBytes = 0;
+  int _uploadTotalBytes = 0;
 
   @override
   void initState() {
@@ -79,7 +81,11 @@ class _TransferPageState extends State<TransferPage> {
       return;
     }
     final target = pickTransferTargetId(_targets, selectedId: _selectedTargetId) ?? '';
-    setState(() => _busy = '上传');
+    setState(() {
+      _busy = '上传';
+      _uploadedBytes = 0;
+      _uploadTotalBytes = 0;
+    });
     try {
       final plan = planUploadAfterPick(fileName: file.name, size: bytes.length);
       final init = await _api.uploadInit(
@@ -89,11 +95,18 @@ class _TransferPageState extends State<TransferPage> {
         clientOperationId: newClientOperationId(),
       );
       final id = init['id'] as String? ?? init['uploadId'] as String? ?? '';
-      const chunk = 256 * 1024;
-      for (var offset = 0; offset < bytes.length; offset += chunk) {
-        final end = (offset + chunk > bytes.length) ? bytes.length : offset + chunk;
-        await _api.uploadChunk(id, offset, bytes.sublist(offset, end));
-      }
+      await _api.uploadFileInChunks(
+        id: id,
+        bytes: bytes,
+        onProgress: (uploaded, total) {
+          if (mounted) {
+            setState(() {
+              _uploadedBytes = uploaded;
+              _uploadTotalBytes = total;
+            });
+          }
+        },
+      );
       await _api.uploadComplete(id);
       await _reload();
     } catch (error) {
@@ -130,17 +143,81 @@ class _TransferPageState extends State<TransferPage> {
     }
   }
 
+  Widget _taskTile(TransferTask task) {
+    return ListTile(
+      key: Key('transfer-task-${task.id}'),
+      title: Text(task.fileName ?? task.id),
+      subtitle: Text('${task.direction} · ${task.status}${canDownload(task) ? ' · 可下载' : ''}'),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (canDownload(task))
+            IconButton(
+              tooltip: '下载',
+              onPressed: () => _download(task),
+              icon: const Icon(Icons.download),
+            ),
+          if (task.status != 'completed')
+            IconButton(
+              tooltip: '取消',
+              onPressed: () async {
+                await _api.cancel(task.id);
+                await _reload();
+              },
+              icon: const Icon(Icons.cancel_outlined),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _groupSection(String title, List<TransferTask> tasks) {
+    if (tasks.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+        ),
+        for (final task in tasks) _taskTile(task),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final groups = groupTransferTasks(_tasks);
+    final uploadInProgress = _busy == '上传' && _uploadTotalBytes > 0;
     return Column(
       children: [
-        if (_busy != null) const LinearProgressIndicator(),
+        if (_busy != null && !uploadInProgress) const LinearProgressIndicator(),
+        if (uploadInProgress)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                LinearProgressIndicator(
+                  key: const Key('transfer-upload-progress'),
+                  value: _uploadedBytes / _uploadTotalBytes,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${formatTransferBytes(_uploadedBytes)} / ${formatTransferBytes(_uploadTotalBytes)}',
+                  key: const Key('transfer-upload-progress-text'),
+                ),
+              ],
+            ),
+          ),
         if (_targets.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
             child: DropdownButtonFormField<String>(
               key: const Key('transfer-target'),
-              value: _selectedTargetId,
+              initialValue: _selectedTargetId,
               decoration: const InputDecoration(labelText: '发送到'),
               items: [
                 for (final device in _targets)
@@ -168,31 +245,16 @@ class _TransferPageState extends State<TransferPage> {
                   onRefresh: _reload,
                   child: ListView(
                     children: [
-                      for (final task in _tasks)
-                        ListTile(
-                          title: Text(task.fileName ?? task.id),
-                          subtitle: Text('${task.direction} · ${task.status}${canDownload(task) ? ' · 可下载' : ''}'),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (canDownload(task))
-                                IconButton(
-                                  tooltip: '下载',
-                                  onPressed: () => _download(task),
-                                  icon: const Icon(Icons.download),
-                                ),
-                              if (task.status != 'completed')
-                                IconButton(
-                                  tooltip: '取消',
-                                  onPressed: () async {
-                                    await _api.cancel(task.id);
-                                    await _reload();
-                                  },
-                                  icon: const Icon(Icons.cancel_outlined),
-                                ),
-                            ],
-                          ),
-                        ),
+                      if (_tasks.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Center(child: Text('暂无传输任务，选择文件后即可发送。')),
+                        )
+                      else ...[
+                        _groupSection('进行中', groups.active),
+                        _groupSection('需注意', groups.needsAttention),
+                        _groupSection('已完成', groups.completed),
+                      ],
                     ],
                   ),
                 ),
@@ -200,6 +262,14 @@ class _TransferPageState extends State<TransferPage> {
       ],
     );
   }
+}
+
+/// 把字节数格式化成人类可读的传输进度文本：1 MB 以下用 KB，其余用 MB（各保留一位小数）。
+String formatTransferBytes(int bytes) {
+  if (bytes < 1024 * 1024) {
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
 Future<void> saveTransferBytesToPhone({

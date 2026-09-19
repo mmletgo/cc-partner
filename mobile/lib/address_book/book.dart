@@ -210,6 +210,13 @@ class AddressBook {
     servers.firstWhere((s) => s.id == id).lastLocation = location;
   }
 
+  /// Business Logic: 离开工作台时要记住该 PC 的工作位置，下次进入自动恢复。
+  /// Code Logic: 复用 setLastLocation 写入内存后立即持久化整个地址簿。
+  Future<void> saveLastLocation(String id, LastLocation location) async {
+    setLastLocation(id, location);
+    await persist();
+  }
+
   void setPushIntent(String id, PushIntent intent) {
     servers.firstWhere((s) => s.id == id).pushIntent = intent;
   }

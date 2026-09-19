@@ -1,3 +1,5 @@
+import '../address_book/models.dart';
+
 /// Dual-mode workbench panels matching `/mobile`. Not a WebView shell.
 enum WorkbenchPanel {
   projects,
@@ -99,6 +101,76 @@ bool shouldShowWorktreeStrip(WorkbenchPanel panel) =>
     panel == WorkbenchPanel.files ||
     panel == WorkbenchPanel.browser ||
     panel == WorkbenchPanel.git;
+
+/// 带徽章的导航项（如「待处理」的未读数）。
+class WorkbenchNavItem {
+  const WorkbenchNavItem({required this.panel, this.badge});
+
+  final WorkbenchPanel panel;
+
+  /// 徽章计数；null 或 <=0 不显示。
+  final int? badge;
+}
+
+/// Business Logic: Drawer 需要在不改变导航分组的前提下挂未读徽章。
+/// Code Logic: 按面板查找徽章计数套到导航项上，保持原有顺序。
+List<WorkbenchNavItem> withBadges(
+  List<WorkbenchPanel> panels,
+  Map<WorkbenchPanel, int> badges,
+) {
+  return [
+    for (final panel in panels) WorkbenchNavItem(panel: panel, badge: badges[panel]),
+  ];
+}
+
+/// Business Logic: 徽章空间有限，超大数字需要截断展示。
+/// Code Logic: null/<=0 返回 null（不显示），>99 显示 `99+`。
+String? workbenchBadgeLabel(int? badge) {
+  if (badge == null || badge <= 0) {
+    return null;
+  }
+  return badge > 99 ? '99+' : '$badge';
+}
+
+/// 可以恢复的上次工作位置（面板已回落校验）。
+class WorkbenchLocationRestore {
+  const WorkbenchLocationRestore({
+    required this.projectId,
+    required this.panel,
+    this.worktreeId,
+    this.sessionId,
+  });
+
+  final String projectId;
+  final WorkbenchPanel panel;
+  final String? worktreeId;
+  final String? sessionId;
+}
+
+/// Business Logic: 再次进入某 PC 工作台时应恢复上次的项目/面板/worktree/session；
+/// 项目已不在最近列表或无记录则放弃恢复（保持现状行为）。
+/// Code Logic: 纯函数回落——projectId 不在 recentProjectIds 返回 null；
+/// 面板名无效回落终端；session/worktree 有效性由调用方按列表继续校验
+/// （session→worktree→面板默认，TerminalPage/resolveActiveWorktreeId 已有回落）。
+WorkbenchLocationRestore? resolveWorkbenchLocationRestore({
+  required LastLocation? location,
+  required Set<String> recentProjectIds,
+}) {
+  final loc = location;
+  final projectId = loc?.projectId;
+  if (loc == null || projectId == null || projectId.isEmpty) {
+    return null;
+  }
+  if (!recentProjectIds.contains(projectId)) {
+    return null;
+  }
+  return WorkbenchLocationRestore(
+    projectId: projectId,
+    panel: parseWorkbenchPanel(loc.panel) ?? WorkbenchPanel.terminal,
+    worktreeId: loc.worktreeId,
+    sessionId: loc.sessionId,
+  );
+}
 
 String panelLabel(WorkbenchPanel panel) {
   switch (panel) {
