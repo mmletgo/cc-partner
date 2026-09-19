@@ -1,7 +1,7 @@
 # Flutter 原生移动客户端
 
 - 日期：2026-09-19
-- 状态：已实现（P0–P6 工作台面板与交互已落地，并于 2026-09-19 完成一轮与网页 `/mobile` 的功能/交互对齐：终端重连与切换修复、目录选择器、Git 提交历史/状态卡、自动化泳道与 Evidence、浏览器发现/刷新、传输进度、Attention 已读与徽章、lastLocation 恢复；推送点开导航等原生集成保持 NOT VERIFIED）
+- 状态：已实现（P0–P6 工作台面板与交互已落地；2026-09-19 完成第一轮与网页 `/mobile` 对齐；2026-09-20 完成第二轮对齐：终端会话关闭/窗格/全屏/SGR 触控滚动转发/惰性历史 hydration/内建 Git 动作与 hook 修复、壳层实验开关与中文分组、Git Sync 与 mutation 对账、worktree 状态卡与前缀创建自动开终端、自动化任务块/runtime 快照条/experiments/执行现场、传输恢复与对账轮询、Attention summary/freshness/分组/聚焦、文件元信息、项目失败重试；推送点开导航等原生集成保持 NOT VERIFIED）
 - 上位文档：
   - [`2026-06-29-mobile-workbench-design.md`](./2026-06-29-mobile-workbench-design.md)
   - [`docs/prd.md`](../../prd.md) §2.15 移动端 Workbench、§2.17 Inbox、§2.20 Provider
