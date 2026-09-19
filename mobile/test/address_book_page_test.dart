@@ -12,6 +12,7 @@ void main() {
     expect(find.byKey(const Key('risk-copy')), findsOneWidget);
     expect(find.text(kLanRiskStatement), findsOneWidget);
     expect(find.byKey(const Key('add-server')), findsOneWidget);
+    expect(find.byKey(const Key('scan-qr')), findsOneWidget);
   });
 
   testWidgets('add dialog force-saves unreachable host as offline', (tester) async {
@@ -26,6 +27,6 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     expect(book.servers, isNotEmpty);
     expect(book.servers.single.isOnline, isFalse);
-    expect(find.textContaining('离线'), findsOneWidget);
+    expect(find.textContaining('离线'), findsWidgets);
   });
 }

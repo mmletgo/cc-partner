@@ -1,3 +1,4 @@
+import 'package:cc_partner_mobile/core/qr_payload.dart';
 import 'package:cc_partner_mobile/core/server_url.dart';
 import 'package:test/test.dart';
 
@@ -39,5 +40,14 @@ void main() {
 
   test('rejects empty input', () {
     expect(() => parseServerInput('  '), throwsFormatException);
+  });
+
+  test('desktop QR payload is accepted and junk is ignored', () {
+    expect(
+      qrPayloadToServerInput('http://192.168.1.8:62116/mobile'),
+      'http://192.168.1.8:62116/mobile',
+    );
+    expect(qrPayloadToServerInput('not a pc'), isNull);
+    expect(qrPayloadToServerInput(''), isNull);
   });
 }

@@ -34,7 +34,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Scan the desktop QR code to add a PC server.</string>
+	<string>扫描电脑上的访问二维码，以添加局域网 PC。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Send a photo to the Agent terminal.</string>
 	<key>UIApplicationSceneManifest</key>

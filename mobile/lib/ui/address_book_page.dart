@@ -6,6 +6,7 @@ import '../core/health_probe.dart';
 import '../core/lan_http.dart';
 import '../core/server_url.dart';
 import '../settings/risk_copy.dart';
+import 'scan_qr_page.dart';
 
 /// Address book screen: save and switch LAN PC servers.
 class AddressBookPage extends StatefulWidget {
@@ -24,6 +25,16 @@ class _AddressBookPageState extends State<AddressBookPage> {
 
   AddressBook get _book => widget.book;
 
+  Future<void> _scanQr() async {
+    final payload = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const ScanQrPage()),
+    );
+    if (payload == null || !mounted) {
+      return;
+    }
+    await _saveFromInput(payload, name: '', forceIfUnreachable: true);
+  }
+
   Future<void> _addServer() async {
     final result = await showDialog<_AddResult>(
       context: context,
@@ -32,19 +43,35 @@ class _AddressBookPageState extends State<AddressBookPage> {
     if (result == null || !mounted) {
       return;
     }
+    await _saveFromInput(
+      result.input,
+      name: result.name,
+      forceIfUnreachable: result.force,
+    );
+  }
+
+  Future<void> _saveFromInput(
+    String input, {
+    required String name,
+    required bool forceIfUnreachable,
+  }) async {
     setState(() {
       _error = null;
       _busyId = 'add';
     });
     try {
-      await _book.addFromInput(
-        result.input,
-        name: result.name,
-        forceIfUnreachable: result.force,
+      final record = await _book.addFromInput(
+        input,
+        name: name,
+        forceIfUnreachable: forceIfUnreachable,
         probe: (baseUrl) => probeLanHealth(widget.http, baseUrl),
       );
       if (mounted) {
         setState(() => _busyId = null);
+        final status = record.isOnline ? '已连接' : '已保存，当前离线';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$status ${record.baseUrl}')),
+        );
       }
     } catch (error) {
       if (mounted) {
@@ -74,12 +101,23 @@ class _AddressBookPageState extends State<AddressBookPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('cc-partner 地址簿')),
-      floatingActionButton: FloatingActionButton(
+      appBar: AppBar(
+        title: const Text('cc-partner 地址簿'),
+        actions: [
+          IconButton(
+            key: const Key('scan-qr'),
+            tooltip: '扫描电脑二维码',
+            onPressed: _busyId == null ? _scanQr : null,
+            icon: const Icon(Icons.qr_code_scanner),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
         key: const Key('add-server'),
         onPressed: _busyId == null ? _addServer : null,
-        tooltip: '添加 PC',
-        child: const Icon(Icons.add),
+        tooltip: '手动添加 PC',
+        icon: const Icon(Icons.add),
+        label: const Text('手动添加'),
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
@@ -105,7 +143,7 @@ class _AddressBookPageState extends State<AddressBookPage> {
           ],
           const SizedBox(height: 16),
           if (_book.servers.isEmpty)
-            const Text('还没有 PC。点右下角添加局域网地址，或粘贴桌面二维码里的 URL。')
+            const Text('还没有 PC。点右上角扫一扫桌面上的二维码，或点右下角手动填写。')
           else
             ..._book.servers.map(_serverTile),
         ],
