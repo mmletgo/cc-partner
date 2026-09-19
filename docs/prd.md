@@ -501,14 +501,16 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.21 Flutter 原生移动客户端
 
-**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且本轮不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：已确认待实现。
+**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：工作台面板与交互已与网页 `/mobile` 对齐（Dart 自绘同语义）；推送点开导航等原生集成项仍待真机验证。
 
 **功能点**：
 - 本地地址簿：手填 `IP:端口`（默认端口 62116）、粘贴 URL、扫描桌面现有 `/mobile` 二维码（只取主机和端口）；同一规范化 host:port 不重复；保存前 health 探测，失败允许强制保存但不得标为在线，并展示失败原因。iOS 必须声明本地网络用途（`NSLocalNetworkUsageDescription`）。地址簿在打开、回到前台和下拉刷新时重新探测 `GET /api/health`
 - 同时只连一台 PC 做工作台；切换则拆掉 HTTP/WS 与内存终端缓冲，并恢复该机上次 `projectId/panel/worktreeId/sessionId`；其它 PC 不保持工作台热连接
 - 工作台全自绘（不内嵌 `/mobile` WebView）：全局为项目 / 待处理（只导航）/ 传输 / 设置 / Provider；进入项目后为终端 / 文件 / Git / worktrees / 自动化 / 浏览器（live preview 允许脚本，与 HTML 文件预览的 JS-off 沙箱分离），并保留 worktree 切换条。项目笔记仍不做
 - 文件 HTML 预览对标桌面 `WorkbenchHtmlPreview`：源码/预览/分栏、相对资源 data URL、空 sandbox（不允许脚本）；该 WebView 仅渲染这一份 HTML，不是 App 壳
-- 终端协议与 `/mobile` 相同：输入 WS `cc-partner.terminal-input.v1`、NDJSON events、gap 必须 replay、未 ACK 输入不得自动重放；相册贴图走 `paste-image`；长按自管选区复制
+- 终端协议与 `/mobile` 相同：输入 WS `cc-partner.terminal-input.v1`、NDJSON events、gap 必须 replay、未 ACK 输入不得自动重放；相册贴图走 `paste-image`；长按自管选区复制。交互对齐 `/mobile`：切换会话清屏并重放（不串台）、events 断线指数退避重连（重连带 `afterOwnerInstanceId/afterSequence`，回前台立即重连）、输入 WS 断线重建、粘贴文本入口、sticky Ctrl/Alt 3s 超时、方向键 400ms 前置连发、`/` 长按滑出菜单、会话 chip 条
+- 项目添加用目录浏览选择器（本机逐级浏览 / 局域网先选设备再远端浏览，可新建一层文件夹），不要求手填路径；Git 面板提供状态卡与最近 30 条提交，提交/拉取/推送/合并前确认且失败上屏；自动化面板提供泳道任务列表、任务详情（含 Evidence）、创建对话框（AI 完善 + Backlog/Todo/Start）与 Outbox 重试/丢弃；浏览器面板自动发现 dev server 候选并支持预览内刷新；传输显示分块上传进度并按进行中/需注意/已完成分组
+- 待处理支持单条/全部已读未读与「今天/更早」过滤，Drawer「待处理」显示与列表同口径的未读徽章；删除 PC/项目/worktree 等破坏性操作一律确认框；传输/Provider/文件/Git/worktrees/自动化支持下拉刷新
 - 传输仍经当前 PC 主机中转；系统文件选择器选出后立刻分块上传；下载用系统保存面板；任务 JSON 不得带主机 path
 - 系统推送：App 被杀也可收到；地址簿里每一台已登记 PC 都能发；PC 只把通知发给推送中转（APNs/FCM 密钥不进安装包）；点开后仍须在该局域网才能操作；载荷不含终端字节/路径/Prompt
 - 固定 LAN 无登录；列表/设置展示同一风险声明。同一可达网络中其它设备也可以向某 PC 登记推送 token，不因此新增身份鉴权
