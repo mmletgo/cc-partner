@@ -1,10 +1,28 @@
-import 'address_book/book.dart';
-import 'settings/risk_copy.dart';
+import 'dart:io';
 
-/// Native entry. Flutter widgets are layered on this package; the workbench is
-/// not a WebView of `/mobile`.
-void main() {
-  final book = AddressBook(store: MemoryAddressBookStore());
-  // ignore: avoid_print
-  print('cc-partner mobile; servers=${book.servers.length}; risk=$kLanRiskStatement');
+import 'package:flutter/material.dart';
+
+import 'address_book/book.dart';
+import 'address_book/file_store.dart';
+import 'app.dart';
+import 'core/lan_http.dart';
+
+/// App sandbox documents directory (iOS HOME/Documents, Android app files).
+Directory documentsDirectory() {
+  final home = Platform.environment['HOME'];
+  if (home != null && home.isNotEmpty) {
+    return Directory('$home/Documents');
+  }
+  return Directory.systemTemp;
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final dir = documentsDirectory();
+  await dir.create(recursive: true);
+  final book = AddressBook(
+    store: FileAddressBookStore(File('${dir.path}/address_book.json')),
+  );
+  await book.load();
+  runApp(CcPartnerApp(book: book, http: LanHttpClient()));
 }
