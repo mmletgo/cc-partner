@@ -18,6 +18,13 @@ pub const MOBILE_PUSH_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mobile_push_reg
     updated_at TEXT NOT NULL
 )";
 
+pub const MOBILE_PUSH_SETTINGS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mobile_push_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    relay_url TEXT NOT NULL DEFAULT '',
+    relay_token TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+)";
+
 /// 可选中转配置（空 URL = 不发送）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MobilePushRelay {
@@ -107,6 +114,47 @@ pub fn maybe_queue_notify(
     }
 }
 
+/// 已登记的手机 token 行。
+#[derive(Debug, Clone)]
+pub struct MobilePushRegistrationRow {
+    pub mobile_device_id: String,
+    pub platform: String,
+    pub token: String,
+}
+
+/// 向中转发出通知（工作台流量仍走 LAN）。
+pub async fn send_notify(
+    relay: &MobilePushRelay,
+    registration: &MobilePushRegistrationRow,
+    payload: &MobilePushPayload,
+) -> Result<(), AppError> {
+    payload.validate()?;
+    if !relay.is_configured() {
+        return Ok(());
+    }
+    let client = reqwest::Client::new();
+    let mut request = client.post(&relay.url).json(&serde_json::json!({
+        "platform": registration.platform,
+        "token": registration.token,
+        "collapseId": format!("{}:{}", payload.pc_device_id, registration.mobile_device_id),
+        "payload": payload,
+    }));
+    if !relay.token.is_empty() {
+        request = request.bearer_auth(&relay.token);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| AppError::Bad(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(AppError::Bad(format!(
+            "push relay HTTP {}",
+            response.status()
+        )));
+    }
+    Ok(())
+}
+
 /// Token 登记仓储。
 pub struct MobilePushRepo {
     db: SqlitePool,
@@ -119,7 +167,55 @@ impl MobilePushRepo {
 
     pub async fn ensure_schema(pool: &SqlitePool) -> Result<(), AppError> {
         sqlx::query(MOBILE_PUSH_SCHEMA).execute(pool).await?;
+        sqlx::query(MOBILE_PUSH_SETTINGS_SCHEMA)
+            .execute(pool)
+            .await?;
         Ok(())
+    }
+
+    pub async fn load_relay(&self) -> Result<MobilePushRelay, AppError> {
+        let row =
+            sqlx::query("SELECT relay_url, relay_token FROM mobile_push_settings WHERE id = 1")
+                .fetch_optional(&self.db)
+                .await?;
+        Ok(match row {
+            Some(row) => MobilePushRelay {
+                url: row.get::<String, _>("relay_url"),
+                token: row.get::<String, _>("relay_token"),
+            },
+            None => MobilePushRelay::default(),
+        })
+    }
+
+    pub async fn save_relay(&self, url: &str, token: &str) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mobile_push_settings (id, relay_url, relay_token, updated_at)
+             VALUES (1, ?, ?, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+                relay_url = excluded.relay_url,
+                relay_token = excluded.relay_token,
+                updated_at = excluded.updated_at",
+        )
+        .bind(url.trim())
+        .bind(token.trim())
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_all(&self) -> Result<Vec<MobilePushRegistrationRow>, AppError> {
+        let rows =
+            sqlx::query("SELECT mobile_device_id, platform, token FROM mobile_push_registrations")
+                .fetch_all(&self.db)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| MobilePushRegistrationRow {
+                mobile_device_id: row.get("mobile_device_id"),
+                platform: row.get("platform"),
+                token: row.get("token"),
+            })
+            .collect())
     }
 
     pub async fn register(
@@ -175,12 +271,11 @@ impl MobilePushRepo {
 
     #[cfg(test)]
     pub async fn token_for(&self, mobile_device_id: &str) -> Result<Option<String>, AppError> {
-        let row = sqlx::query(
-            "SELECT token FROM mobile_push_registrations WHERE mobile_device_id = ?",
-        )
-        .bind(mobile_device_id)
-        .fetch_optional(&self.db)
-        .await?;
+        let row =
+            sqlx::query("SELECT token FROM mobile_push_registrations WHERE mobile_device_id = ?")
+                .bind(mobile_device_id)
+                .fetch_optional(&self.db)
+                .await?;
         Ok(row.map(|r| r.get::<String, _>("token")))
     }
 }
@@ -213,7 +308,10 @@ mod tests {
         repo.register("phone-1", "ios", "tok-b", "1.0.1")
             .await
             .unwrap();
-        assert_eq!(repo.token_for("phone-1").await.unwrap().as_deref(), Some("tok-b"));
+        assert_eq!(
+            repo.token_for("phone-1").await.unwrap().as_deref(),
+            Some("tok-b")
+        );
     }
 
     #[tokio::test]
@@ -279,5 +377,16 @@ mod tests {
     fn reject_sensitive_push_fields_blocks_prompt() {
         let value = serde_json::json!({"prompt": "do it"});
         assert!(reject_sensitive_push_fields(&value).is_err());
+    }
+
+    #[tokio::test]
+    async fn relay_settings_round_trip() {
+        let repo = setup().await;
+        repo.save_relay("https://push.example.internal/v1/notify", "secret")
+            .await
+            .unwrap();
+        let loaded = repo.load_relay().await.unwrap();
+        assert_eq!(loaded.url, "https://push.example.internal/v1/notify");
+        assert_eq!(loaded.token, "secret");
     }
 }

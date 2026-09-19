@@ -6,8 +6,8 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import '../address_book/book.dart';
 import '../core/lan_http.dart';
 import '../files/client.dart';
-import '../files/html_preview.dart';
 import '../files/workspace.dart';
+import 'html_preview_page.dart';
 import '../projects/client.dart';
 
 class FilesPage extends StatefulWidget {
@@ -151,7 +151,6 @@ class FilePreviewPage extends StatefulWidget {
 class _FilePreviewPageState extends State<FilePreviewPage> {
   late String _text;
   late String _hash;
-  bool _htmlPreview = true;
 
   @override
   void initState() {
@@ -215,32 +214,19 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
     } else if (kind == FileKind.markdown) {
       body = Markdown(data: _text);
     } else if (kind == FileKind.html) {
-      final html = rewriteRelativeAssetsToDataUrls(_text, loadAssetDataUrl: (path) => path);
-      body = Column(
-        children: [
-          SwitchListTile(
-            title: const Text('预览（脚本关闭）'),
-            value: _htmlPreview,
-            onChanged: (value) => setState(() => _htmlPreview = value),
-          ),
-          Expanded(
-            child: _htmlPreview
-                ? SingleChildScrollView(child: SelectableText(html))
-                : TextField(
-                    maxLines: null,
-                    expands: true,
-                    controller: TextEditingController(text: _text),
-                    onChanged: (value) {
-                      _text = value;
-                      widget.workspace.markDirty(
-                        projectId: widget.projectId,
-                        worktreeId: '',
-                        path: widget.path,
-                      );
-                    },
-                  ),
-          ),
-        ],
+      body = HtmlFilePreview(
+        client: widget.client,
+        projectId: widget.projectId,
+        path: widget.path,
+        initialText: _text,
+        onTextChanged: (value) {
+          _text = value;
+          widget.workspace.markDirty(
+            projectId: widget.projectId,
+            worktreeId: '',
+            path: widget.path,
+          );
+        },
       );
     } else {
       body = TextField(

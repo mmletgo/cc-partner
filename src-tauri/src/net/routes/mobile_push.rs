@@ -76,10 +76,8 @@ pub fn skip_or_queue_attention_push(
     let dummy = P2pRequestContext {
         request_id: "mobile-push-local".into(),
     };
-    let relay = crate::storage::mobile_push_repo::MobilePushRelay::from_optional(
-        relay_url,
-        relay_token,
-    );
+    let relay =
+        crate::storage::mobile_push_repo::MobilePushRelay::from_optional(relay_url, relay_token);
     maybe_queue_notify(relay.as_ref(), payload)
         .map_err(|e| P2pError::from_app_error(e, &dummy, "mobile.push.notify"))
 }

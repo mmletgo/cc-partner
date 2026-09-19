@@ -1,11 +1,17 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'address_book/book.dart';
+import 'address_book/models.dart';
 import 'address_book/file_store.dart';
 import 'app.dart';
 import 'core/lan_http.dart';
+import 'core/health_probe.dart';
+import 'push/apns.dart';
+import 'push/fanout.dart';
 
 /// App sandbox documents directory (iOS HOME/Documents, Android app files).
 Directory documentsDirectory() {
@@ -24,5 +30,40 @@ Future<void> main() async {
     store: FileAddressBookStore(File('${dir.path}/address_book.json')),
   );
   await book.load();
-  runApp(CcPartnerApp(book: book, http: LanHttpClient()));
+  final http = LanHttpClient();
+  unawaited(_registerPush(book, http));
+  const MethodChannel('cc_partner/push').setMethodCallHandler((call) async {
+    if (call.method == 'onToken' && call.arguments is String) {
+      await _registerPush(book, http, tokenOverride: call.arguments as String);
+    }
+  });
+  runApp(CcPartnerApp(book: book, http: http));
+}
+
+Future<void> _registerPush(
+  AddressBook book,
+  LanHttpClient http, {
+  String? tokenOverride,
+}) async {
+  final token = tokenOverride ?? await nativePushToken();
+  if (token == null) {
+    return;
+  }
+  for (final server in book.servers) {
+    try {
+      final snap = await probeLanHealth(http, server.baseUrl);
+      if (snap.ok) {
+        server.lastHealth = ServerHealth.online;
+        server.capabilities = List<String>.from(snap.capabilities);
+        server.pcDeviceId = snap.deviceId ?? server.pcDeviceId;
+      }
+    } catch (_) {}
+  }
+  await PushFanout(http).registerAll(
+    book: book,
+    token: token,
+    platform: pushPlatformName(),
+    appBuild: '0.2.1+4',
+  );
+  await book.persist();
 }

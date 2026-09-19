@@ -15,6 +15,7 @@ pub(crate) mod agent_hub_source;
 pub(crate) mod agent_runtime_source;
 pub mod aggregator;
 pub(crate) mod experiment_source;
+pub mod mobile_push_watch;
 pub mod models;
 pub(crate) mod orchestrator_source;
 pub(crate) mod source;

@@ -357,6 +357,17 @@
     "saveFailed": "Failed to save relay settings",
     "loadFailed": "Failed to load relay info: {{error}}"
   },
+  "mobilePush": {
+    "title": "Mobile push",
+    "subtitle": "APNs/FCM relay",
+    "description": "When Attention changes, this PC sends a notification to the relay, which calls APNs/FCM. The relay only receives notification fields, not terminal bytes. If unset, tokens still register but nothing is sent.",
+    "riskNotice": "Any device on the reachable network can register a push token with this PC; the system does not authenticate callers.",
+    "tokenKeep": "Credential saved; leave blank to keep it",
+    "tokenPlaceholder": "Relay Authorization token",
+    "save": "Save",
+    "saveSuccess": "Mobile push relay saved",
+    "refresh": "Refresh"
+  },
   "about": {
     "title": "About",
     "versionLabel": "Version",

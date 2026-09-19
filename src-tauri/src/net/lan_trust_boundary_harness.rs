@@ -178,7 +178,9 @@ fn smoke_router(params: BrowserGuardParams, state: SmokeState) -> Router {
         )
         .route(
             "/api/mobile/push/register",
-            post(|| async { Json(serde_json::json!({"ok": true, "route": "mobile_push_register"})) }),
+            post(|| async {
+                Json(serde_json::json!({"ok": true, "route": "mobile_push_register"}))
+            }),
         )
         .route("/api/backend/control/stop", post(smoke_stop_handler))
         .route(

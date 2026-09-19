@@ -23,6 +23,24 @@ class FilesClient {
     return asObjectList(body);
   }
 
+  Future<Map<String, dynamic>> previewHtmlAsset({
+    required String projectId,
+    required String documentPath,
+    required String assetPath,
+    String? worktreeId,
+  }) {
+    return _http.postJson(
+      baseUrl,
+      '/api/workbench/files/preview-html-asset',
+      {
+        'projectId': projectId,
+        'worktreeId': worktreeId,
+        'documentPath': documentPath,
+        'assetPath': assetPath,
+      },
+    );
+  }
+
   Future<Map<String, dynamic>> open({
     required String projectId,
     required String path,

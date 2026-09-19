@@ -46,6 +46,19 @@ class LanHttpClient {
     return _decodeDynamic(response);
   }
 
+  Stream<String> streamLines(String baseUrl, String path) async* {
+    final uri = _uri(baseUrl, path);
+    final request = await _client.getUrl(uri);
+    _stripOrigin(request);
+    request.headers.set(HttpHeaders.acceptHeader, 'application/x-ndjson, application/json');
+    final response = await request.close();
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final text = await utf8.decodeStream(response);
+      throw LanHttpException(response.statusCode, text);
+    }
+    yield* response.transform(utf8.decoder).transform(const LineSplitter());
+  }
+
   Future<WebSocket> openWebSocket(
     String baseUrl,
     String path, {

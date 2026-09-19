@@ -35,11 +35,14 @@ class _TerminalPageState extends State<TerminalPage> {
   final Terminal _terminal = Terminal(maxLines: 5000);
   final _input = TextEditingController();
   WebSocket? _socket;
+  HttpClient? _eventsClient;
   String? _sessionId;
   String? _error;
   String _status = '连接中';
   String? _laneId;
   int _seq = 1;
+  String? _owner;
+  int _sequence = 0;
 
   @override
   void initState() {
@@ -52,6 +55,7 @@ class _TerminalPageState extends State<TerminalPage> {
   @override
   void dispose() {
     _socket?.close();
+    _eventsClient?.close(force: true);
     _input.dispose();
     super.dispose();
   }
@@ -73,6 +77,7 @@ class _TerminalPageState extends State<TerminalPage> {
         _terminal.write(snapshot);
       }
       await _openInput();
+      _listenEvents();
       if (mounted) {
         setState(() => _status = '就绪');
       }
@@ -116,6 +121,88 @@ class _TerminalPageState extends State<TerminalPage> {
       _policy.takeUnackedOnDisconnect();
       setState(() => _status = '输入已断开；未确认输入不会自动重放');
     });
+  }
+
+  Future<void> _listenEvents() async {
+    final sessionId = _sessionId;
+    if (sessionId == null) {
+      return;
+    }
+    _eventsClient?.close(force: true);
+    final client = HttpClient();
+    _eventsClient = client;
+    final http = LanHttpClient(client: client);
+    var query = 'terminalSessionId=${Uri.encodeQueryComponent(sessionId)}';
+    if (_owner != null) {
+      query +=
+          '&afterOwnerInstanceId=${Uri.encodeQueryComponent(_owner!)}&afterSequence=$_sequence';
+    }
+    try {
+      await for (final line in http.streamLines(
+        widget.book.active!.baseUrl,
+        '${TerminalController.eventsPath}?$query',
+      )) {
+        if (!mounted || line.trim().isEmpty) {
+          continue;
+        }
+        Map<String, dynamic> frame;
+        try {
+          frame = jsonDecode(line) as Map<String, dynamic>;
+        } catch (_) {
+          continue;
+        }
+        final type = frame['type'] as String? ?? '';
+        if (type == 'heartbeat') {
+          continue;
+        }
+        final owner = frame['ownerInstanceId'] as String?;
+        final seq = frame['sequence'];
+        if (owner != null) {
+          _owner = owner;
+        }
+        if (seq is int) {
+          _sequence = seq;
+        }
+        if (type == 'gap') {
+          _policy.onNdjsonLine({'type': 'gap'});
+          _policy.beginReplay();
+          final replay = await _sessions.replay(sessionId);
+          final snapshot = replay['snapshot'] as String? ??
+              replay['data'] as String? ??
+              replay['output'] as String? ??
+              '';
+          _terminal.write('\x1b[2J\x1b[H');
+          if (snapshot.isNotEmpty) {
+            _terminal.write(snapshot);
+          }
+          _policy.finishReplay();
+          continue;
+        }
+        if (type == 'terminalOutput') {
+          final payload = frame['payload'];
+          if (payload is Map && payload['sessionId'] == sessionId) {
+            final chunk = payload['chunk'] as String? ?? '';
+            if (chunk.isNotEmpty) {
+              _terminal.write(chunk);
+            }
+          }
+        }
+        if (type == 'terminalResync') {
+          final payload = frame['payload'];
+          if (payload is Map) {
+            final snapshot = payload['snapshot'] as String? ?? payload['data'] as String? ?? '';
+            if (snapshot.isNotEmpty) {
+              _terminal.write('\x1b[2J\x1b[H');
+              _terminal.write(snapshot);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _status = '实时输出断开，将重连: $error');
+      }
+    }
   }
 
   void _send(String data) {

@@ -18,12 +18,14 @@ import {
   LanFirewallDependencyCard,
   PermissionCard,
   RelayAccessCard,
+  MobilePushRelayCard,
   RuntimeDiagnosticsCard,
   WorkbenchDependencyCard,
 } from '@/components/domain';
 import { mapPermissions, type PermissionEntryAction } from '@/lib/permissionEntries';
 import type { PermissionType, PermissionsStatus } from '@/lib/types';
 import type { UseSettingsRelayResult } from './controllers/useSettingsRelay';
+import type { UseSettingsMobilePushResult } from './controllers/useSettingsMobilePush';
 import styles from './Settings.module.css';
 
 /**
@@ -46,6 +48,7 @@ export interface SettingsDependenciesPanelProps {
   onRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   onRefreshPermissions: () => void;
   relay: UseSettingsRelayResult;
+  mobilePush: UseSettingsMobilePushResult;
 }
 
 /**
@@ -69,6 +72,7 @@ export function SettingsDependenciesPanel({
   onRequestAccess,
   onRefreshPermissions,
   relay,
+  mobilePush,
 }: SettingsDependenciesPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const [tWelcome] = useTranslation('welcome');
@@ -153,6 +157,20 @@ export function SettingsDependenciesPanel({
   onRemoveViaDevice={relay.handleRemoveViaDevice}
   onToggleAllow={relay.handleToggleAllow}
   onRefresh={() => void relay.refresh()}
+/>
+<MobilePushRelayCard
+  relayUrl={mobilePush.relayUrl}
+  relayToken={mobilePush.relayToken}
+  tokenConfigured={mobilePush.tokenConfigured}
+  loading={mobilePush.loading}
+  saving={mobilePush.saving}
+  loadError={mobilePush.loadError}
+  saveError={mobilePush.saveError}
+  saveSuccess={mobilePush.saveSuccess}
+  onRelayUrlChange={mobilePush.setRelayUrl}
+  onRelayTokenChange={mobilePush.setRelayToken}
+  onSave={() => void mobilePush.save()}
+  onRefresh={() => void mobilePush.refresh()}
 />
 <CcSwitchCliDependencyCard />
     </>

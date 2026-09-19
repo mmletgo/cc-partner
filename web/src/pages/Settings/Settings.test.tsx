@@ -164,6 +164,13 @@ vi.mock('@/api/config', () => ({
   },
 }));
 
+vi.mock('@/api/mobilePush', () => ({
+  mobilePushApi: {
+    get: () => Promise.resolve({ relayUrl: '', relayTokenConfigured: false }),
+    update: () => Promise.resolve({ relayUrl: '', relayTokenConfigured: false }),
+  },
+}));
+
 vi.mock('@/api/githubTrending', () => ({
   githubTrendingApi: {
     getConfig: () => getGithubTrendingConfig(),
@@ -441,6 +448,7 @@ vi.mock('@/components/domain', () => {
     WorkbenchDependencyCard: () => <div data-testid="wb-card" />,
     CcSwitchCliDependencyCard: () => <div data-testid="cc-switch-card" />,
     RelayAccessCard: () => <div data-testid="relay-card" />,
+    MobilePushRelayCard: () => <div data-testid="mobile-push-card" />,
     RuntimeDiagnosticsCard: RuntimeDiagnosticsCardStub,
   };
 });

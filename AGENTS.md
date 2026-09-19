@@ -309,6 +309,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | GameHubDialog | open, onClose | 侧栏 footer `game` 打开的大厅/记单词/插件三态 Dialog；游戏中点遮罩不退出 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
 | RelayAccessCard | candidates, viaDevices, allowEnabled, loading/saving, loadError/saveError/saveSuccess, onAddViaDevice/onRemoveViaDevice/onToggleAllow/onRefresh | Settings 依赖环境页「中转访问（跳板）」卡片：添加/移除跳板设备（展开影子清单）、本机允许被中转开关与固定明文中转风险提示；pure view，数据经 `useSettingsRelay` controller 注入 |
+| MobilePushRelayCard | relayUrl, relayToken, tokenConfigured, loading/saving, loadError/saveError/saveSuccess, onRelayUrlChange/onRelayTokenChange/onSave/onRefresh | Settings 依赖环境页「移动系统推送」卡片：配置 APNs/FCM 中转 URL 与凭据；pure view，数据经 `useSettingsMobilePush` 注入 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells；legacy matrix 兼容） |
 | WorkbenchProjectRail | - | 侧栏 Work 组内的项目文件夹入口（进入 `/workbench` 的桌面入口）；悬停项目卡出现「全新启动连接」icon 按钮（设备离线禁用） |
 | WorkbenchFreshRestartDialog | open, onClose, previewing, preview, result, error, busy, onConfirm, deviceName?, targetKind? | 设备级「全新启动连接」确认弹窗（pure view）：标明本机/远端设备名、预检会话清单/非工作台 tmux 会话勾选/busy 锁/降级手动命令复制；Workbench 状态卡与侧栏 Rail 共用，状态机在 `hooks/useWorkbenchFreshRestart` |

@@ -752,6 +752,7 @@ pub async fn start_gui_backend_services(state: &AppState) -> Result<BackendRunti
 pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
     match mode {
         BackendRuntimeMode::Headless => {
+            crate::attention::mobile_push_watch::start_mobile_push_watch(state.clone());
             // 启动时诚实回收崩溃遗留的 recovery Applying 任务，禁止伪装成功。
             {
                 let reclaim_state = state.clone();

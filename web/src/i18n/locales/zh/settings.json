@@ -356,6 +356,17 @@
     "saveFailed": "保存中转配置失败",
     "loadFailed": "读取中转信息失败：{{error}}"
   },
+  "mobilePush": {
+    "title": "移动系统推送",
+    "subtitle": "APNs/FCM 中转",
+    "description": "Attention 变化时由本机把通知发给中转，再由中转调用 APNs/FCM。中转只接收通知字段，不含终端内容。未配置则只登记 token、不发送。",
+    "riskNotice": "同一可达网络中的任何设备均可向本机登记推送 token；系统不验证调用者身份。",
+    "tokenKeep": "已配置凭据，留空则保持不变",
+    "tokenPlaceholder": "中转 Authorization 凭据",
+    "save": "保存",
+    "saveSuccess": "移动推送中转已保存",
+    "refresh": "刷新"
+  },
   "about": {
     "title": "关于",
     "versionLabel": "版本号",

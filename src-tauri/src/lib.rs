@@ -405,6 +405,8 @@ pub fn run() {
             config_cmd::get_version,
             config_cmd::choose_dir,
             mobile_cmd::get_mobile_access_info,
+            mobile_cmd::get_mobile_push_config,
+            mobile_cmd::update_mobile_push_config,
             attention_cmd::list_attention_items,
             attention_cmd::list_attention_items_v2,
             attention_cmd::mark_attention_items_read,

@@ -428,6 +428,7 @@ export function Settings(): ReactElement {
               onRequestAccess={ctrl.handleRequestAccess}
               onRefreshPermissions={() => void ctrl.refreshPermissions()}
               relay={ctrl.relay}
+              mobilePush={ctrl.mobilePush}
             />
           </div>
         ) : null}
