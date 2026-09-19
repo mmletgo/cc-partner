@@ -185,9 +185,16 @@ class FilePreviewPage extends StatefulWidget {
 class _FilePreviewPageState extends State<FilePreviewPage> {
   late String _text;
   late String _hash;
+
+  /// open 响应的 canEdit 门控：文本文件且后端允许编辑才能改；
+  /// 缺 capabilities 字段按旧后端宽容处理为可编辑。
+  late final bool _canEdit;
   String _markdownMode = 'render';
   late SqlitePreviewState _sqlite;
   late final TextEditingController _editor;
+
+  /// 保存失败的 inline 错误条；null 表示无错误。
+  String? _saveError;
 
   @override
   void initState() {
@@ -200,6 +207,10 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
       _text = '';
       _hash = '';
     }
+    final capabilities = widget.opened['capabilities'];
+    final backendCanEdit =
+        capabilities is! Map || capabilities['canEdit'] != false;
+    _canEdit = text is Map && backendCanEdit;
     _editor = TextEditingController(text: _text);
     final sqlite = widget.opened['sqlite'];
     _sqlite = SqlitePreviewState.fromOpen(sqlite is Map ? Map<String, dynamic>.from(sqlite) : const {});
@@ -219,17 +230,36 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
     );
   }
 
-  Future<void> _save() async {
-    await widget.client.saveText(
-      projectId: widget.projectId,
-      path: widget.path,
-      content: _text,
-      baseHash: _hash,
-      worktreeId: widget.worktreeId,
-    );
-    widget.workspace.markClean();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存')));
+  /// Business Logic: 保存失败（含 baseHash 乐观锁冲突）必须 inline 上屏且文件保持
+  /// dirty，否则用户以为已保存而丢失改动；成功才清 dirty 并提示。
+  /// Code Logic: 调 client.saveText；成功 markClean + SnackBar + 返回 true；
+  /// 失败按 409 冲突给「文件已在磁盘上变化」语义文案，其余展示原始错误，返回 false。
+  Future<bool> _save() async {
+    setState(() => _saveError = null);
+    try {
+      await widget.client.saveText(
+        projectId: widget.projectId,
+        path: widget.path,
+        content: _text,
+        baseHash: _hash,
+        worktreeId: widget.worktreeId,
+      );
+      widget.workspace.markClean();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存')));
+      }
+      return true;
+    } catch (error) {
+      final conflict =
+          error is LanHttpException && error.statusCode == 409;
+      if (mounted) {
+        setState(() {
+          _saveError = conflict
+              ? '保存文件失败：文件已在磁盘上变化，请刷新后再试'
+              : '保存文件失败：$error';
+        });
+      }
+      return false;
     }
   }
 
@@ -282,7 +312,11 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
     final csv = widget.opened['csv'];
     final imageBytes = imageBytesFromOpenFile(widget.opened);
     Widget body;
-    if (imageBytes != null) {
+    if (!_canEdit) {
+      // canEdit=false：隐藏编辑器与保存（对齐 web canEditOpenedFile 门控），
+      // 文本文件也只读展示说明。
+      body = const _ReadonlyFileNote();
+    } else if (imageBytes != null) {
       body = Image.memory(imageBytes);
     } else if (csv is Map && csv['rows'] is List) {
       final rows = csv['rows'] as List;
@@ -389,8 +423,9 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
           return;
         }
         if (choice == 'save') {
-          await _save();
-          if (!context.mounted) {
+          final saved = await _save();
+          if (!saved || !context.mounted) {
+            // 保存失败：错误条已在预览页上屏且文件保持 dirty，留在当前页。
             return;
           }
           Navigator.of(context).pop();
@@ -403,8 +438,16 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
         appBar: AppBar(
           title: Text(widget.path.split('/').last),
           actions: [
-            if (kind == FileKind.code || kind == FileKind.markdown || kind == FileKind.html)
-              IconButton(onPressed: _save, icon: const Icon(Icons.save)),
+            if (_canEdit &&
+                (kind == FileKind.code ||
+                    kind == FileKind.markdown ||
+                    kind == FileKind.html))
+              IconButton(
+                key: const Key('files-save'),
+                tooltip: '保存',
+                onPressed: _save,
+                icon: const Icon(Icons.save),
+              ),
           ],
         ),
         body: Column(
@@ -418,6 +461,32 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
                 child: Text(
                   metadataText,
                   style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ),
+            if (_saveError != null)
+              Material(
+                key: const Key('files-save-error'),
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.error_outline,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onErrorContainer,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _saveError!,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: Theme.of(context).colorScheme.onErrorContainer,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             Expanded(child: Padding(padding: const EdgeInsets.all(8), child: body)),
@@ -475,5 +544,26 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
           key: 'files-open-truncated',
         ),
     ];
+  }
+}
+
+/// canEdit=false 时的只读说明占位（对齐 web 只读预览语义：隐藏编辑器与保存）。
+class _ReadonlyFileNote extends StatelessWidget {
+  const _ReadonlyFileNote();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Column(
+        key: const Key('files-readonly-note'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.lock_outline, size: 24, color: theme.colorScheme.onSurface),
+          const SizedBox(height: 8),
+          const Text('该文件不支持在手机上编辑，仅可查看。'),
+        ],
+      ),
+    );
   }
 }

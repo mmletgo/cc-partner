@@ -132,8 +132,10 @@ class AutomationPage extends StatefulWidget {
   /// Attention 跳转聚焦：outbox 条目 id；加载完成后高亮该行，找不到回调 [onFocusMissing]。
   final String? focusOutboxId;
 
-  /// 「打开执行现场」：把任务绑定的 worktree/session 交给壳层切到终端面板。
-  final void Function(String worktreeId, String sessionId)? onFocusSession;
+  /// 「打开执行现场」：把任务绑定的 worktree/session 交给壳层切到终端面板；
+  /// 单边 id 也回调（AND 改 OR 门控），壳层对缺失一边自行回落
+  /// （对齐 web useMobileAutomationController 的 `worktreeId || sessionId`）。
+  final void Function(String? worktreeId, String? sessionId)? onFocusSession;
 
   /// 聚焦 id 在列表中找不到时回调；壳层会回 Attention 并提示。
   final VoidCallback? onFocusMissing;
@@ -1696,8 +1698,10 @@ class _AutomationPageState extends State<AutomationPage> {
     final blockedReason = task['blockedReason'] as String?;
     final worktreeId = task['worktreeId'] as String?;
     final sessionId = task['sessionId'] as String?;
+    // 对齐 web：worktreeId 或 sessionId 任一非空即可打开执行现场（AND 改 OR），
+    // 缺失一边原样传 null 由壳层回落。
     final canOpenExecutionContext =
-        (worktreeId != null && worktreeId.isNotEmpty) &&
+        (worktreeId != null && worktreeId.isNotEmpty) ||
             (sessionId != null && sessionId.isNotEmpty);
     return Padding(
       key: const Key('automation-detail'),

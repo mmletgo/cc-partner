@@ -14,6 +14,8 @@ library;
 
 import 'dart:math';
 
+import '../git/client.dart';
+
 /// mutation envelope 解析结果。
 enum GitMutationOutcomeKind { succeeded, unknown, failedHook, malformed }
 
@@ -113,4 +115,43 @@ String buildClientOperationId(String action, {int? nowMs, Random? random}) {
   final ms = nowMs ?? DateTime.now().millisecondsSinceEpoch;
   final rand = random ?? Random(ms);
   return 'mobile-$action-$ms-${rand.nextInt(0x7fffffff)}';
+}
+
+/// Business Logic: 终端右下角合并入口只应在「非主工作区」或「主工作区可 collect-merge /
+/// 当前分支≠homeBranch」时可用，避免在默认主分支主工作区误露出与桌面 Git 历史相同的合并入口
+/// （对齐 web canShowMobileTerminalMergeFab）。
+/// Code Logic: worktreeInfo 为 null 隐藏；非主 → 可用；主 → canCollectMerge 或
+/// 当前分支（顶层 branch 缺失回 status.branch）≠ homeBranch（均非空）时可用。
+bool canShowTerminalMergeFab(Map<String, dynamic>? worktreeInfo) {
+  if (worktreeInfo == null) {
+    return false;
+  }
+  if (worktreeInfo['isMain'] != true) {
+    return true;
+  }
+  if (worktreeInfo['canCollectMerge'] == true) {
+    return true;
+  }
+  final status = worktreeInfo['status'];
+  final statusBranch = status is Map ? status['branch'] as String? : null;
+  final currentBranch = worktreeInfo['branch'] as String? ?? statusBranch;
+  final homeBranch = worktreeInfo['homeBranch'] as String?;
+  return currentBranch != null &&
+      currentBranch.isNotEmpty &&
+      homeBranch != null &&
+      homeBranch.isNotEmpty &&
+      currentBranch != homeBranch;
+}
+
+/// Business Logic: 功能 worktree merge 与主工作区 collect-merge 语义不同，确认文案必须区分
+/// （对齐 web mergeConfirm / mergeCollectConfirm；终端页 / Git 页 / worktrees 页共用同一 helper）。
+/// Code Logic: 主工作区列出可收集分支与 home 分支；非主 worktree 用显示名说明合并目标。
+String worktreeMergeConfirmText(Map<String, dynamic> tree) {
+  if (tree['isMain'] == true) {
+    final branches = (tree['collectibleBranches'] as List?) ?? const [];
+    final names = branches.whereType<String>().join(', ');
+    final home = tree['homeBranch'] as String? ?? 'main';
+    return '确定把本工作区的 ${branches.length} 条分支（$names）合并到「$home」，并切回该主分支？';
+  }
+  return '确定把「${worktreeDisplayName(tree)}」合并到主工作区？';
 }

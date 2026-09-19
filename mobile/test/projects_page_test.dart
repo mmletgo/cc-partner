@@ -19,6 +19,10 @@ class _FakeProjectsClient extends ProjectsClient {
   String? createdName;
   int _localDirCalls = 0;
 
+  /// 非 null 时返回 lan-fleet 快照；null 时抛错（数据不可得 → 摘要行隐藏）。
+  Map<String, dynamic>? fleetSnapshotPayload;
+  int fleetCalls = 0;
+
   @override
   Future<List<ProjectSummary>> listRecent() async => [
         const ProjectSummary(id: 'p1', name: 'demo', kind: 'local', path: '/Users/demo'),
@@ -27,6 +31,16 @@ class _FakeProjectsClient extends ProjectsClient {
   @override
   Future<void> remove(String projectId) async {
     removedIds.add(projectId);
+  }
+
+  @override
+  Future<Map<String, dynamic>> fleetSnapshot() async {
+    fleetCalls += 1;
+    final payload = fleetSnapshotPayload;
+    if (payload == null) {
+      throw Exception('fleet down');
+    }
+    return payload;
   }
 
   @override
@@ -140,6 +154,7 @@ Future<void> _pumpPage(
   WidgetTester tester, {
   required _FakeProjectsClient client,
   ValueChanged<ProjectSummary>? onOpen,
+  void Function(String projectId)? onProjectRemoved,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -148,6 +163,7 @@ Future<void> _pumpPage(
           book: _book(),
           http: LanHttpClient(),
           onOpen: onOpen ?? (_) {},
+          onProjectRemoved: onProjectRemoved,
           client: client,
           transferApi: _FakeTransferApi(),
         ),
@@ -236,6 +252,115 @@ void main() {
     await tester.tap(find.byKey(const Key('remove-confirm-accept')));
     await tester.pumpAndSettle();
     expect(client.removedIds, ['p1']);
+  });
+
+  testWidgets('删除成功后以已删除项目 id 回调 onProjectRemoved', (tester) async {
+    final client = _FakeProjectsClient();
+    final removed = <String>[];
+    await _pumpPage(
+      tester,
+      client: client,
+      onProjectRemoved: removed.add,
+    );
+
+    // 取消路径：不回调。
+    await tester.tap(find.byKey(const Key('project-remove-p1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('remove-confirm-cancel')));
+    await tester.pumpAndSettle();
+    expect(removed, isEmpty);
+
+    // 确认删除成功：以项目 id 回调（接缝契约：壳层清理激活项目上下文）。
+    await tester.tap(find.byKey(const Key('project-remove-p1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('remove-confirm-accept')));
+    await tester.pumpAndSettle();
+    expect(removed, ['p1']);
+  });
+
+  testWidgets('fleet 数据可得时展示 agent fleet 摘要行', (tester) async {
+    final client = _FakeProjectsClient()
+      ..fleetSnapshotPayload = {
+        'generatedAt': '2026-09-20T00:00:00Z',
+        'devices': [
+          {
+            'deviceId': 'd1',
+            'deviceName': 'Laptop',
+            'reachability': 'live',
+            'projects': [
+              {
+                'projectId': 'p1',
+                'agentCounts': {'needsInput': 1, 'failed': 1, 'working': 2},
+              },
+              {
+                'projectId': 'p2',
+                'agentCounts': {'failed': 1},
+              },
+            ],
+          },
+          {
+            'deviceId': 'd2',
+            'deviceName': 'Desktop',
+            'reachability': 'offline',
+            'projects': <dynamic>[],
+          },
+        ],
+      };
+    await _pumpPage(tester, client: client);
+
+    expect(find.byKey(const Key('projects-fleet-summary')), findsOneWidget);
+    // 口径对齐 web：needsInput+failed 合计 3；离线 1 台；working 不计异常。
+    expect(find.text('局域网 Agent Fleet · 3 需处理 · 设备离线 (1)'), findsOneWidget);
+  });
+
+  testWidgets('fleet 无异常时摘要只显示标题', (tester) async {
+    final client = _FakeProjectsClient()
+      ..fleetSnapshotPayload = {
+        'devices': [
+          {
+            'deviceId': 'd1',
+            'reachability': 'live',
+            'projects': [
+              {
+                'projectId': 'p1',
+                'agentCounts': {'needsInput': 0, 'failed': 0},
+              },
+            ],
+          },
+        ],
+      };
+    await _pumpPage(tester, client: client);
+
+    expect(find.text('局域网 Agent Fleet'), findsOneWidget);
+  });
+
+  testWidgets('fleet 数据不可得时整行隐藏不占位', (tester) async {
+    final client = _FakeProjectsClient();
+    await _pumpPage(tester, client: client);
+
+    expect(client.fleetCalls, 1);
+    expect(find.byKey(const Key('projects-fleet-summary')), findsNothing);
+  });
+
+  test('fleet 摘要解析：缺 devices 返回 null，负数计数按 0 饱和', () {
+    expect(LanFleetOverview.fromSnapshot(<String, dynamic>{}), isNull);
+    final overview = LanFleetOverview.fromSnapshot({
+      'devices': [
+        {
+          'reachability': 'offline',
+          'projects': [
+            {
+              'agentCounts': {'needsInput': -2, 'failed': 3},
+            },
+          ],
+        },
+        {'reachability': 'live', 'projects': <dynamic>[]},
+      ],
+    });
+    expect(overview, isNotNull);
+    expect(overview!.offlineDevices, 1);
+    expect(overview.exceptionAgents, 3);
+    expect(overview.label, '局域网 Agent Fleet · 3 需处理 · 设备离线 (1)');
   });
 
   testWidgets('目录加载失败：展示错误并支持重试', (tester) async {

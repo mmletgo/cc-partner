@@ -9,7 +9,9 @@ import '../attention/filter.dart';
 import '../core/lan_http.dart';
 import '../files/workspace.dart';
 import '../git/client.dart';
+import '../git/mutation.dart';
 import '../projects/client.dart';
+import '../sessions/client.dart';
 import '../transfer/api.dart';
 import '../workbench/nav.dart';
 import '../workbench/worktree.dart';
@@ -65,6 +67,15 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
 
   /// strip 删除 worktree 进行中（防重复提交）。
   bool _removingTree = false;
+
+  /// strip 创建 worktree 进行中（防重复提交）。
+  bool _creatingTree = false;
+
+  /// strip 删除 mutation 相位机：unknown 后锁定删除并要求同 id 对账（对齐 web bar controller）。
+  final GitMutationTracker _stripMutation = GitMutationTracker();
+
+  /// strip mutation 结果未知等错误文案（条上错误条展示，unknown 相位带「重新对账」）。
+  String? _stripMutationError;
 
   ServerRecord get _server => widget.book.active!;
 
@@ -263,17 +274,23 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     }
   }
 
-  /// Business Logic: 切换条上非主 chip 的 X 要能就地移除 worktree；
-  /// 破坏性操作必须先确认风险，且删除在 shell 内自闭环（不新增跨代理契约）。
-  /// Code Logic: 确认框（未推送提交可能丢失）→ worktrees/remove envelope → 刷新列表；
-  /// 失败 SnackBar，busy 期间禁重复提交。
+  /// Business Logic: 切换条上非主 chip 的 X 要能就地移除 worktree；破坏性操作必须先确认风险。
+  /// 删除在 unknown（envelope 或传输异常）时禁止盲重放，必须用同一 clientOperationId
+  /// 查 ledger + 权威列表对账（对齐 web useMobileWorktreeBarController confirmRemove）。
+  /// Code Logic: 确认框 → tracker.begin(remove) 锁定 → remove envelope：
+  ///   succeeded → 刷新+提示；unknown → 共享对账通道（成功后 _loadWorktrees 兜底回落 active）；
+  ///   传输异常 → 条上错误条 +「重新对账」；服务器应答的确定失败 → 解锁 + SnackBar。
   Future<void> _removeTreeFromStrip(Map<String, dynamic> tree) async {
-    if (_removingTree) {
+    if (_removingTree || _stripMutation.actionLocked) {
       return;
     }
     final id = tree['id'] as String? ?? '';
     final name = worktreeDisplayName(tree);
     if (id.isEmpty) {
+      return;
+    }
+    final project = _project;
+    if (project == null) {
       return;
     }
     final confirmed = await showDialog<bool>(
@@ -296,27 +313,166 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     if (confirmed != true || !mounted) {
       return;
     }
-    setState(() => _removingTree = true);
+    final operationId = _stripMutation.begin(
+      kind: GitMutationKind.remove,
+      worktreeId: id,
+      nextOperationId: newClientOperationId(),
+    );
+    setState(() {
+      _removingTree = true;
+      _stripMutationError = null;
+    });
     try {
-      await _gitClient.remove(worktreeId: id, clientOperationId: newClientOperationId());
-      final project = _project;
-      if (project != null) {
+      final envelope = GitMutationEnvelope.from(
+        await _gitClient.remove(worktreeId: id, clientOperationId: operationId),
+      );
+      if (envelope.succeeded) {
+        _stripMutation.markIdle();
         await _loadWorktrees(project, projectChanged: false);
+        _showStripSnack('已移除 worktree「$name」');
+        return;
       }
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('已移除 worktree「$name」')));
+      if (envelope.unknown) {
+        await _reconcileStripRemoval(
+          envelope.clientOperationId ?? operationId,
+          project,
+          successMessage: '已移除 worktree「$name」',
+        );
+        return;
       }
+      _stripMutation.markIdle();
+      _showStripSnack('移除失败: 后端返回了未知的结果形态');
     } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('移除失败: $error')));
+      if (!mounted) {
+        return;
+      }
+      if (isTransportUnknownError(error)) {
+        // 请求可能已到达也可能没到达：进入 unknown 相位等对账，禁止盲重试。
+        _stripMutation.markUnknown();
+        setState(() => _stripMutationError = '移除结果未知，请重新对账。');
+      } else {
+        _stripMutation.markIdle();
+        _showStripSnack('移除失败: $error');
       }
     } finally {
       if (mounted) {
         setState(() => _removingTree = false);
       }
     }
+  }
+
+  /// Business Logic: strip unknown 相位「重新对账」：复用同一 operationId 查 ledger +
+  /// 权威列表裁决；确认成功后 _loadWorktrees 兜底回落 active（源树被删时回主树/首项）。
+  /// Code Logic: reconcileWorktreeMutation（共享通道）→ settleReconcile →
+  ///   succeeded → 清错误条 + 提示；failed → 清错误条 + 失败提示；unknown → 保持错误条。
+  Future<void> _reconcileStripRemoval(
+    String operationId,
+    ProjectSummary project, {
+    String? successMessage,
+  }) async {
+    final result = await reconcileWorktreeMutation(
+      client: _gitClient,
+      projectId: project.id,
+      operationId: operationId,
+    );
+    _stripMutation.settleReconcile(result);
+    await _loadWorktrees(project, projectChanged: false);
+    if (!mounted) {
+      return;
+    }
+    if (result == GitMutationReconcile.confirmedSucceeded) {
+      setState(() => _stripMutationError = null);
+      if (successMessage != null) {
+        _showStripSnack(successMessage);
+      }
+    } else if (result == GitMutationReconcile.confirmedFailed) {
+      setState(() => _stripMutationError = null);
+      _showStripSnack('移除失败：操作未生效，可以重新发起。');
+    } else {
+      setState(() => _stripMutationError = '移除结果未知，请重新对账。');
+    }
+  }
+
+  /// strip 错误条上的「重新对账」入口（unknown 相位专用，防重复提交）。
+  Future<void> _retryStripReconcile() async {
+    final operationId = _stripMutation.operationId;
+    final project = _project;
+    if (operationId == null ||
+        project == null ||
+        _stripMutation.phase != GitMutationPhase.unknown ||
+        _removingTree) {
+      return;
+    }
+    setState(() => _removingTree = true);
+    try {
+      await _reconcileStripRemoval(operationId, project);
+    } finally {
+      if (mounted) {
+        setState(() => _removingTree = false);
+      }
+    }
+  }
+
+  void _showStripSnack(String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Business Logic: 切换条要能就地新建 worktree 并自动开绑定终端（对齐 web MobileWorktreeTabs
+  /// 条上创建表单）；与 worktrees 页共用 createWorktreeWithTerminalSession 执行通道。
+  /// Code Logic: 组好的分支名 → 共享创建（create 失败提示；session 失败保留 worktree 只提示）→
+  /// 刷新列表 → onSelect(created, goTerminal) 切 active 并进终端面板。
+  Future<void> _createTreeFromStrip(String branchName) async {
+    final project = _project;
+    if (project == null || _creatingTree) {
+      return;
+    }
+    setState(() => _creatingTree = true);
+    final result = await createWorktreeWithTerminalSession(
+      git: _gitClient,
+      sessions: SessionsClient(widget.http, _server.baseUrl),
+      projectId: project.id,
+      branchName: branchName,
+    );
+    if (!mounted) {
+      return;
+    }
+    if (result.createError != null) {
+      setState(() => _creatingTree = false);
+      _showStripSnack('创建失败: ${result.createError}');
+      return;
+    }
+    await _loadWorktrees(project, projectChanged: false);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _creatingTree = false);
+    if (result.sessionError != null) {
+      _showStripSnack('终端窗口创建失败（worktree 已保留）: ${result.sessionError}');
+    } else {
+      _showStripSnack('已创建 worktree「$branchName」');
+    }
+    final created = result.created;
+    final newId = created?['id'] as String?;
+    if (created != null && newId != null && newId.isNotEmpty) {
+      await _selectWorktree(created, goTerminal: true);
+    }
+  }
+
+  /// 当前激活 worktree 的权威 DTO（供 TerminalPage 合并门控/确认文案/Prompt 优化目录使用）。
+  Map<String, dynamic>? get _currentWorktreeInfo {
+    final id = _worktreeId;
+    if (id == null) {
+      return null;
+    }
+    for (final tree in _worktrees) {
+      if (tree['id'] == id) {
+        return tree;
+      }
+    }
+    return null;
   }
 
   void _openProject(
@@ -340,6 +496,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       if (projectChanged) {
         _worktreeId = clearWorktreeOnLeaveProject();
         _worktrees = [];
+        // 切项目后旧 mutation unknown 锁不得污染新上下文（对齐 web 重置 effect）。
+        _stripMutation.reset();
+        _stripMutationError = null;
       }
     });
     _loadWorktrees(
@@ -369,6 +528,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           book: widget.book,
           http: widget.http,
           onOpen: _openProject,
+          onProjectRemoved: _onProjectRemoved,
         );
       case WorkbenchPanel.attention:
         return AttentionPage(
@@ -404,6 +564,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       case WorkbenchPanel.provider:
         return ProviderPage(book: widget.book, http: widget.http);
       case WorkbenchPanel.terminal:
+        final worktreeInfo = _currentWorktreeInfo;
         return TerminalPage(
           key: ValueKey('terminal-${_project!.id}-$_worktreeId-$_sessionId'),
           book: widget.book,
@@ -411,6 +572,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           project: _project!,
           preferredSessionId: _sessionId,
           worktreeId: _worktreeId,
+          worktreeInfo: worktreeInfo,
+          worktreePath: worktreeInfo?['path'] as String?,
           onFullscreenChanged: (fullscreen) {
             setState(() => _terminalFullscreen = fullscreen);
           },
@@ -437,6 +600,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           http: widget.http,
           project: _project!,
           worktreeId: _worktreeId,
+          // B3 接缝契约：merge 成功后回写壳层刷新权威 worktrees 列表。
+          onWorktreesMutated: () {
+            final project = _project;
+            if (project != null) {
+              unawaited(_loadWorktrees(project, projectChanged: false));
+            }
+          },
+          // B3 接缝契约：Git 页拿不到 FileWorkspaceController，dirty 确认由壳层注入。
+          confirmLeaveDirty: (worktreeId) => _confirmLeaveDirty(worktreeId),
+          // B4 接缝契约：hook 修复返回的 terminalSessionId 聚焦到终端面板。
+          onFocusRepairSession: _focusRepairSession,
         );
       case WorkbenchPanel.worktrees:
         return WorktreesPage(
@@ -455,7 +629,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           project: _project!,
           focusTaskId: _attentionFocusTaskId,
           focusOutboxId: _attentionFocusOutboxId,
-          onFocusSession: (worktreeId, sessionId) {
+          onFocusSession: (String? worktreeId, String? sessionId) {
             unawaited(_focusAutomationSession(worktreeId, sessionId));
           },
           onFocusMissing: () {
@@ -477,14 +651,18 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   }
 
   /// Business Logic: Automation「打开执行现场」要把任务绑定的 worktree/session 切到终端面板
-  /// （接缝契约：确认 dirty 后 resume 到指定 worktree 并恢复 session）。
-  /// Code Logic: dirty guard 不过则放弃；否则切 worktree + 进终端并带 preferredSessionId。
-  Future<void> _focusAutomationSession(String worktreeId, String sessionId) async {
+  /// （接缝契约：B8 放宽后 onFocusSession 允许单边为空，必须容忍）。
+  /// Code Logic: dirty guard 不过则放弃；有 worktreeId 才 resume；有 sessionId 才切换；
+  /// 双空直接忽略，不 crash、不丢当前上下文。
+  Future<void> _focusAutomationSession(String? worktreeId, String? sessionId) async {
     final project = _project;
     if (project == null) {
       return;
     }
-    if (!await _confirmLeaveDirty(worktreeId)) {
+    if (worktreeId == null && sessionId == null) {
+      return;
+    }
+    if (worktreeId != null && !await _confirmLeaveDirty(worktreeId)) {
       return;
     }
     if (!mounted) {
@@ -492,13 +670,46 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     }
     setState(() {
       _panel = WorkbenchPanel.terminal;
-      _sessionId = sessionId;
+      if (sessionId != null) {
+        _sessionId = sessionId;
+      }
     });
     unawaited(_loadWorktrees(
       project,
       projectChanged: false,
       resumeWorktreeId: worktreeId,
     ));
+  }
+
+  /// Business Logic: Git 页 hook AI 修复会在 owning device 新建绑定 worktree 的终端，
+  /// 必须切到终端面板并聚焦该 session 才能看到 agent（对齐 web handleFocusRepairSession）。
+  /// Code Logic: 带 sessionId 打开终端面板（TerminalPage boot 自行刷新 sessions 并按
+  /// preferredSessionId 回落选择）；worktree 保持当前 _worktreeId（修复绑定当前 worktree）；
+  /// SnackBar 提示已发起修复。
+  void _focusRepairSession(String sessionId) {
+    final project = _project;
+    if (project == null) {
+      return;
+    }
+    _openProject(project, panel: WorkbenchPanel.terminal, sessionId: sessionId);
+    _showStripSnack('已发起 hook AI 修复');
+  }
+
+  /// Business Logic: 用户在项目列表移除当前打开的项目时，必须清空项目上下文回到项目列表
+  /// （对齐 web MobileWorkbench：移除激活项目后不再停留在悬空项目面板；固定接缝契约）。
+  /// Code Logic: 仅当移除的是当前项目才清 _project/_sessionId/_worktreeId 并切回 projects；
+  /// 其他项目被移除不影响当前上下文。
+  void _onProjectRemoved(String projectId) {
+    if (_project?.id != projectId) {
+      return;
+    }
+    setState(() {
+      _panel = WorkbenchPanel.projects;
+      _project = null;
+      _sessionId = null;
+      _worktreeId = clearWorktreeOnLeaveProject();
+      _worktrees = [];
+    });
   }
 
   /// Business Logic: 聚焦的任务/outbox 已解决或已变化时，要回到「待处理」并提示，
@@ -543,6 +754,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             _sessionId = null;
             _worktreeId = clearWorktreeOnLeaveProject();
             _worktrees = [];
+            _stripMutation.reset();
+            _stripMutationError = null;
           });
         },
         worktreeStrip: _project != null && shouldShowWorktreeStrip(_panel)
@@ -553,7 +766,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                   unawaited(_selectWorktree(tree));
                 },
                 onRemove: _removeTreeFromStrip,
-                busy: _removingTree,
+                busy: _removingTree || _creatingTree || _stripMutation.actionLocked,
+                onCreate: _createTreeFromStrip,
+                creating: _creatingTree,
+                mutationError: _stripMutation.phase == GitMutationPhase.unknown
+                    ? (_stripMutationError ?? '操作结果未知，请重新对账。')
+                    : null,
+                onRetryReconcile: _retryStripReconcile,
               )
             : null,
         child: _body(),

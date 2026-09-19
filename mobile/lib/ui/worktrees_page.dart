@@ -3,9 +3,13 @@ import 'package:flutter/material.dart';
 import '../address_book/book.dart';
 import '../core/lan_http.dart';
 import '../git/client.dart';
+import '../git/mutation.dart';
+import '../git/project_sync.dart';
 import '../projects/client.dart';
 import '../sessions/client.dart';
+import '../terminal/git_actions.dart';
 import '../transfer/api.dart';
+import 'worktree_strip.dart';
 
 /// Business Logic: worktrees 页与切换条共用「干净/有改动/冲突」三态文案（对齐 web status）。
 /// Code Logic: conflicts 优先，其次 changed，最后干净；status 缺失时按干净展示（宽容解析）。
@@ -69,6 +73,12 @@ class _WorktreesPageState extends State<WorktreesPage> {
   String _prefix = kDefaultWorktreeBranchPrefix;
   final _suffix = TextEditingController();
 
+  /// mutation 相位机：删除/合并 unknown 后锁定动作并要求同 id 对账（对齐 web bar controller）。
+  final GitMutationTracker _tracker = GitMutationTracker();
+
+  /// mutation 结果未知等错误文案（条内横幅展示，unknown 相位带「重新对账」）。
+  String? _mutationError;
+
   @override
   void initState() {
     super.initState();
@@ -112,15 +122,79 @@ class _WorktreesPageState extends State<WorktreesPage> {
     }
   }
 
-  void _showSnack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  void _showSnack(String message, {bool transient = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: transient ? const Duration(milliseconds: 2500) : const Duration(seconds: 4),
+      ),
+    );
+  }
+
+  /// 动作按钮统一禁用条件：常规 busy 或 mutation 相位未回 idle。
+  bool get _actionLocked => _busy || _tracker.actionLocked;
+
+  /// Business Logic: unknown 后必须用同一 clientOperationId 查 ledger + 权威列表对账
+  /// （共享 reconcileWorktreeMutation 通道）；成功走成功流程、失败提示、仍 unknown 保持横幅。
+  /// Code Logic: 相位推进入 reconciling → 对账 → settleReconcile 落终态或保持 unknown。
+  Future<void> _reconcile(
+    String operationId, {
+    String? successMessage,
+    Future<void> Function()? onSuccess,
+  }) async {
+    _tracker.beginReconcile();
+    if (mounted) {
+      setState(() => _busy = true);
+    }
+    try {
+      final result = await reconcileWorktreeMutation(
+        client: _client,
+        projectId: widget.project.id,
+        operationId: operationId,
+      );
+      _tracker.settleReconcile(result);
+      if (!mounted) {
+        return;
+      }
+      if (result == GitMutationReconcile.confirmedSucceeded) {
+        setState(() => _mutationError = null);
+        if (onSuccess != null) {
+          await onSuccess();
+        } else {
+          await _refresh();
+        }
+        if (successMessage != null) {
+          _showSnack(successMessage, transient: true);
+        }
+      } else if (result == GitMutationReconcile.confirmedFailed) {
+        setState(() => _mutationError = null);
+        _showSnack('操作失败，可以重新发起。');
+      } else {
+        setState(() => _mutationError = '操作结果未知，请重新对账。');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  /// unknown 相位横幅上的「重新对账」：复用同一 operationId，不盲重放。
+  Future<void> _retryReconcile() async {
+    final operationId = _tracker.operationId;
+    if (operationId == null ||
+        _tracker.phase != GitMutationPhase.unknown ||
+        _busy) {
+      return;
+    }
+    await _reconcile(operationId);
   }
 
   /// 创建 worktree 并自动开绑定终端窗口（对齐 web createWorktreeWithTerminalWindow）。
   ///
   /// Business Logic: 用户新建 worktree 后下一步就是进终端，所以创建成功要自动开窗口并切过去；
   /// 窗口创建失败时保留 worktree、只报错不回滚（对齐 web 行为）。
-  /// Code Logic: compose 前缀/后缀 → worktrees/create → sessions/create（失败不回滚）→
+  /// Code Logic: 共享 createWorktreeWithTerminalSession（create → sessions/create，失败不回滚）→
   /// 刷新列表 → 提示 → onSelect 通知 shell 切 worktree 并进终端面板。
   Future<void> _create() async {
     if (_busy) {
@@ -132,34 +206,19 @@ class _WorktreesPageState extends State<WorktreesPage> {
       return;
     }
     setState(() => _busy = true);
-    Map<String, dynamic>? created;
-    try {
-      created = await _client.create(projectId: widget.project.id, branchName: branch);
-    } catch (error) {
-      if (mounted) {
-        _showSnack('创建失败: $error');
-      }
-    }
-    if (created == null) {
+    final result = await createWorktreeWithTerminalSession(
+      git: _client,
+      sessions: SessionsClient(widget.http, widget.book.active!.baseUrl),
+      projectId: widget.project.id,
+      branchName: branch,
+      onCreateSession: widget.onCreateSession,
+    );
+    if (result.createError != null) {
       if (mounted) {
         setState(() => _busy = false);
+        _showSnack('创建失败: ${result.createError}');
       }
       return;
-    }
-    final newId = created['id'] as String?;
-    Object? sessionError;
-    if (newId != null && newId.isNotEmpty) {
-      try {
-        final opener = widget.onCreateSession;
-        if (opener != null) {
-          await opener(widget.project.id, newId);
-        } else {
-          await SessionsClient(widget.http, widget.book.active!.baseUrl)
-              .create(widget.project.id, worktreeId: newId);
-        }
-      } catch (error) {
-        sessionError = error;
-      }
     }
     await _refresh();
     if (!mounted) {
@@ -167,20 +226,26 @@ class _WorktreesPageState extends State<WorktreesPage> {
     }
     setState(() => _busy = false);
     _suffix.clear();
-    if (sessionError != null) {
-      _showSnack('终端窗口创建失败（worktree 已保留）: $sessionError');
+    final created = result.created;
+    if (result.sessionError != null) {
+      _showSnack('终端窗口创建失败（worktree 已保留）: ${result.sessionError}');
     } else {
       _showSnack('已创建 worktree「$branch」');
     }
-    if (newId != null && newId.isNotEmpty) {
+    final newId = created?['id'] as String?;
+    if (created != null && newId != null && newId.isNotEmpty) {
       // 最后再通知 shell：切换 worktree 并自动进入终端面板。
-      widget.onSelect(Map<String, dynamic>.from(created));
+      widget.onSelect(created);
     }
   }
 
-  /// 删除 worktree：先弹确认框说明目标与风险；失败 SnackBar 上屏，成功刷新列表并提示。
+  /// Business Logic: 删除 worktree 在 unknown（envelope 或传输异常）时禁止盲重放，
+  /// 必须用同一 clientOperationId 对账（对齐 web pickMobileMutationOperationId + 对账矩阵）。
+  /// Code Logic: 确认框 → tracker.begin(remove) 锁定 → remove envelope：
+  ///   succeeded → 刷新+提示；unknown → 共享对账通道；传输异常 → unknown 横幅；
+  ///   服务器应答的确定失败 → 解锁 + SnackBar。
   Future<void> _remove(Map<String, dynamic> tree) async {
-    if (_busy) {
+    if (_actionLocked) {
       return;
     }
     final id = tree['id'] as String? ?? '';
@@ -208,24 +273,155 @@ class _WorktreesPageState extends State<WorktreesPage> {
     if (confirmed != true) {
       return;
     }
-    setState(() => _busy = true);
+    final operationId = _tracker.begin(
+      kind: GitMutationKind.remove,
+      worktreeId: id,
+      nextOperationId: newClientOperationId(),
+    );
+    setState(() {
+      _busy = true;
+      _mutationError = null;
+    });
     try {
-      await _client.remove(
-        worktreeId: id,
-        clientOperationId: newClientOperationId(),
+      final envelope = GitMutationEnvelope.from(
+        await _client.remove(worktreeId: id, clientOperationId: operationId),
       );
-      await _refresh();
+      if (envelope.succeeded) {
+        _tracker.markIdle();
+        await _refresh();
+        if (mounted) {
+          _showSnack('已移除 worktree「$name」');
+        }
+        return;
+      }
+      if (envelope.unknown) {
+        await _reconcile(
+          envelope.clientOperationId ?? operationId,
+          successMessage: '已移除 worktree「$name」',
+        );
+        return;
+      }
+      _tracker.markIdle();
       if (mounted) {
-        _showSnack('已移除 worktree「$name」');
+        _showSnack('移除失败: 后端返回了未知的结果形态');
       }
     } catch (error) {
-      if (mounted) {
-        _showSnack('移除失败: $error');
+      if (isTransportUnknownError(error)) {
+        // 请求可能已到达也可能没到达：进入 unknown 横幅等对账，禁止盲重试。
+        _tracker.markUnknown();
+        if (mounted) {
+          setState(() => _mutationError = '移除结果未知，请重新对账。');
+        }
+      } else {
+        _tracker.markIdle();
+        if (mounted) {
+          _showSnack('移除失败: $error');
+        }
       }
     } finally {
       if (mounted) {
         setState(() => _busy = false);
       }
+    }
+  }
+
+  /// Business Logic: worktrees 页卡片要能直接发起合并（对齐 web MobileWorktreePanel 卡片动作）；
+  /// merge 会删除源 worktree 或收集分支，unknown 时同样走同 id 对账，禁止新 id 盲重放。
+  /// Code Logic: 共享文案确认框 → tracker.begin(merge) → merge envelope →
+  ///   succeeded → 合并成功 + 刷新 + 源树是 active 时 onSelect(主树) 交 shell 兜底切换；
+  ///   unknown → 共享对账；传输异常 → unknown 横幅；确定失败 → 解锁 + SnackBar。
+  Future<void> _merge(Map<String, dynamic> tree) async {
+    if (_actionLocked) {
+      return;
+    }
+    final id = tree['id'] as String? ?? '';
+    if (id.isEmpty || tree['isMain'] == true) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('合并到主工作区'),
+        content: Text(worktreeMergeConfirmText(tree)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('合并')),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    final operationId = _tracker.begin(
+      kind: GitMutationKind.merge,
+      worktreeId: id,
+      nextOperationId: newClientOperationId(),
+    );
+    setState(() {
+      _busy = true;
+      _mutationError = null;
+    });
+    try {
+      final envelope = GitMutationEnvelope.from(
+        await _client.merge(
+          projectId: widget.project.id,
+          worktreeId: id,
+          clientOperationId: operationId,
+        ),
+      );
+      if (envelope.succeeded) {
+        _tracker.markIdle();
+        await _afterMergeSuccess(tree);
+        return;
+      }
+      if (envelope.unknown) {
+        await _reconcile(
+          envelope.clientOperationId ?? operationId,
+          successMessage: '合并成功',
+          onSuccess: () => _afterMergeSuccess(tree),
+        );
+        return;
+      }
+      _tracker.markIdle();
+      if (mounted) {
+        _showSnack('合并失败: 后端返回了未知的结果形态');
+      }
+    } catch (error) {
+      if (isTransportUnknownError(error)) {
+        _tracker.markUnknown();
+        if (mounted) {
+          setState(() => _mutationError = '合并结果未知，请重新对账。');
+        }
+      } else {
+        _tracker.markIdle();
+        if (mounted) {
+          _showSnack('合并失败: $error');
+        }
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  /// Business Logic: merge 成功后源 worktree 可能已被删除；源树正是当前 active 时
+  /// 必须把选择交给 shell 兜底（resolveActiveWorktreeId 回落主树，dirty guard 保留）。
+  /// Code Logic: 刷新列表 → SnackBar「合并成功」→ merged 树是 activeId 时回调 onSelect(主树/首项)。
+  Future<void> _afterMergeSuccess(Map<String, dynamic> tree) async {
+    await _refresh();
+    if (!mounted) {
+      return;
+    }
+    _showSnack('合并成功', transient: true);
+    final mergedId = tree['id'] as String? ?? '';
+    if (mergedId.isEmpty || mergedId != widget.activeId) {
+      return;
+    }
+    final next = pickMainWorktree(_trees) ?? (_trees.isEmpty ? null : _trees.first);
+    final nextId = next?['id'] as String?;
+    if (next != null && nextId != null && nextId.isNotEmpty) {
+      widget.onSelect(next);
     }
   }
 
@@ -238,6 +434,12 @@ class _WorktreesPageState extends State<WorktreesPage> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.only(bottom: 24),
         children: [
+          if (_busy) const LinearProgressIndicator(),
+          if (_tracker.phase == GitMutationPhase.reconciling)
+            const Padding(
+              padding: EdgeInsets.all(8),
+              child: Text('核对结果中…'),
+            ),
           if (_loading)
             const Padding(
               padding: EdgeInsets.all(48),
@@ -249,6 +451,20 @@ class _WorktreesPageState extends State<WorktreesPage> {
                 leading: const Icon(Icons.error_outline),
                 title: Text(_error!),
                 trailing: TextButton(onPressed: _reload, child: const Text('重试')),
+              ),
+            if (_tracker.phase == GitMutationPhase.unknown && _mutationError != null)
+              Card(
+                key: const Key('worktrees-unknown-banner'),
+                color: theme.colorScheme.errorContainer,
+                child: ListTile(
+                  title: const Text('操作结果未知'),
+                  subtitle: Text(_mutationError!),
+                  trailing: TextButton(
+                    key: const Key('worktrees-retry-reconcile'),
+                    onPressed: _busy ? null : _retryReconcile,
+                    child: const Text('重新对账'),
+                  ),
+                ),
               ),
             Padding(
               padding: const EdgeInsets.all(8),
@@ -308,7 +524,8 @@ class _WorktreesPageState extends State<WorktreesPage> {
     );
   }
 
-  /// 单个 worktree 卡片：主/linked 标记 + 分支名 + 路径 + 状态/同步/可推送徽章。
+  /// 单个 worktree 卡片：主/linked 标记 + 分支名 + 路径 + 状态/同步/可推送徽章；
+  /// 非主卡动作区带「合并」（B14，unknown 对账共享相位机）与「移除」。
   Widget _treeCard(ThemeData theme, Map<String, dynamic> tree) {
     final id = tree['id'] as String? ?? '';
     final isMain = tree['isMain'] == true;
@@ -376,11 +593,22 @@ class _WorktreesPageState extends State<WorktreesPage> {
         ),
         trailing: isMain
             ? null
-            : IconButton(
-                key: Key('worktree-delete-$id'),
-                icon: const Icon(Icons.delete_outline),
-                tooltip: '移除',
-                onPressed: _busy ? null : () => _remove(tree),
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    key: Key('worktree-merge-$id'),
+                    icon: const Icon(Icons.merge_type),
+                    tooltip: '合并',
+                    onPressed: _actionLocked ? null : () => _merge(tree),
+                  ),
+                  IconButton(
+                    key: Key('worktree-delete-$id'),
+                    icon: const Icon(Icons.delete_outline),
+                    tooltip: '移除',
+                    onPressed: _actionLocked ? null : () => _remove(tree),
+                  ),
+                ],
               ),
       ),
     );

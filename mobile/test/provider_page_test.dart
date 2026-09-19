@@ -7,10 +7,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// 首次 probe 可配置失败，用于验证错误态与重试；summary 返回固定 app 列表。
 class _FakeProviderClient extends ProviderClient {
-  _FakeProviderClient({this.failFirstProbe = true})
+  _FakeProviderClient({this.failFirstProbe = true, this.cliAvailable})
       : super(LanHttpClient(), 'http://127.0.0.1:1');
 
   final bool failFirstProbe;
+
+  /// 非 null 时 summary 带 `cli.available`；null 时缺 cli 字段（旧后端）。
+  final bool? cliAvailable;
   int probeCalls = 0;
 
   @override
@@ -24,6 +27,8 @@ class _FakeProviderClient extends ProviderClient {
 
   @override
   Future<Map<String, dynamic>> summary() async => {
+        if (cliAvailable != null)
+          'cli': {'available': cliAvailable},
         'apps': [
           {
             'app': 'claude',
@@ -80,5 +85,43 @@ void main() {
     await tester.pumpAndSettle();
     expect(client.probeCalls, 2);
     expect(find.text('A'), findsOneWidget);
+  });
+
+  testWidgets('cli missing shows warning card and disables every switch button',
+      (tester) async {
+    final client = _FakeProviderClient(failFirstProbe: false, cliAvailable: false);
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    // 顶部警示卡：标题 + hint（对齐 web cliMissing / cliMissingHint 文案）。
+    expect(find.byKey(const Key('provider-cli-missing')), findsOneWidget);
+    expect(find.text('未安装 cc-switch CLI，切换功能已禁用。'), findsOneWidget);
+    expect(find.text('安装 cc-switch CLI 会与你现有的 cc-switch 共享同一份数据，不会影响 GUI。'),
+        findsOneWidget);
+
+    // 全部「切换」按钮禁用；已知当前 provider 的「当前」chip 保留。
+    final switchButton = tester.widget<TextButton>(
+      find.ancestor(
+        of: find.text('切换'),
+        matching: find.byType(TextButton),
+      ),
+    );
+    expect(switchButton.onPressed, isNull);
+    expect(find.text('当前'), findsOneWidget);
+  });
+
+  testWidgets('cli present keeps switch buttons enabled', (tester) async {
+    final client = _FakeProviderClient(failFirstProbe: false, cliAvailable: true);
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('provider-cli-missing')), findsNothing);
+    final switchButton = tester.widget<TextButton>(
+      find.ancestor(
+        of: find.text('切换'),
+        matching: find.byType(TextButton),
+      ),
+    );
+    expect(switchButton.onPressed, isNotNull);
   });
 }

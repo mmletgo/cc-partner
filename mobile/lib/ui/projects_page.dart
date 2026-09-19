@@ -13,6 +13,7 @@ class ProjectsPage extends StatefulWidget {
     required this.book,
     required this.http,
     required this.onOpen,
+    this.onProjectRemoved,
     this.client,
     this.transferApi,
   });
@@ -20,6 +21,10 @@ class ProjectsPage extends StatefulWidget {
   final AddressBook book;
   final LanHttpClient http;
   final void Function(ProjectSummary project) onOpen;
+
+  /// 删除项目成功后回调（接缝契约：参数为已删除项目 id）；
+  /// 壳层据此在删除的是激活项目时清空工作台上下文。
+  final void Function(String projectId)? onProjectRemoved;
 
   /// 测试注入的项目接口；为空时按当前主机构造。
   final ProjectsClient? client;
@@ -36,6 +41,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
   late final TransferApi _transfer;
   final Set<String> _removingIds = {};
   List<ProjectSummary> _items = [];
+
+  /// Agent Fleet 摘要；数据不可得时为 null（整行隐藏不占位）。
+  LanFleetOverview? _fleet;
   String? _error;
   bool _loading = true;
 
@@ -46,6 +54,22 @@ class _ProjectsPageState extends State<ProjectsPage> {
     _client = widget.client ?? ProjectsClient(widget.http, baseUrl);
     _transfer = widget.transferApi ?? TransferApi(widget.http, baseUrl);
     _reload();
+    _loadFleet();
+  }
+
+  /// Business Logic: 项目列表需要一条跨设备 Agent 异常/离线摘要（对齐 web
+  /// MobileProjectPanel 的 fleetSummary 行），失败时静默隐藏，不阻塞项目列表。
+  /// Code Logic: 拉 lan-fleet 快照并解析为 LanFleetOverview；任何异常保持 null。
+  Future<void> _loadFleet() async {
+    try {
+      final snapshot = await _client.fleetSnapshot();
+      if (!mounted) {
+        return;
+      }
+      setState(() => _fleet = LanFleetOverview.fromSnapshot(snapshot));
+    } catch (_) {
+      // Fleet 数据不可得：整行隐藏不占位。
+    }
   }
 
   Future<void> _reload() async {
@@ -115,6 +139,8 @@ class _ProjectsPageState extends State<ProjectsPage> {
     setState(() => _removingIds.add(project.id));
     try {
       await _client.remove(project.id);
+      // 接缝契约：删除成功后通知壳层（用于清理激活项目的工作台上下文）。
+      widget.onProjectRemoved?.call(project.id);
       await _reload();
     } catch (error) {
       if (mounted) {
@@ -179,6 +205,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final fleet = _fleet;
     return Column(
       children: [
         Padding(
@@ -199,6 +226,18 @@ class _ProjectsPageState extends State<ProjectsPage> {
             ],
           ),
         ),
+        if (fleet != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                fleet.label,
+                key: const Key('projects-fleet-summary'),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+          ),
         Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator())

@@ -10,6 +10,33 @@ void main() {
     expect(ProviderClient(LanHttpClient(), 'http://127.0.0.1:1').allowsPhoneCliInstall, isFalse);
   });
 
+  test('cliFromSummary parses cli.available tolerantly', () {
+    final client = ProviderClient(LanHttpClient(), 'http://127.0.0.1:1');
+    // cli.available=false：CLI 缺失，切换必须禁用。
+    expect(
+      client.cliFromSummary({
+        'cli': {'available': false},
+      }).available,
+      isFalse,
+    );
+    // cli.available=true：可用。
+    expect(
+      client.cliFromSummary({
+        'cli': {'available': true},
+      }).available,
+      isTrue,
+    );
+    // 缺 cli 对象：旧后端宽容降级为可用。
+    expect(client.cliFromSummary({'apps': <dynamic>[]}).available, isTrue);
+    // cli 内缺 available：按缺失处理。
+    expect(
+      client.cliFromSummary({
+        'cli': <String, dynamic>{},
+      }).available,
+      isFalse,
+    );
+  });
+
   test('missing capability is unsupported', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));

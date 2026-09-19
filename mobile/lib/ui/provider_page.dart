@@ -26,6 +26,7 @@ class _ProviderPageState extends State<ProviderPage> {
   late final ProviderClient _client;
   ProviderSupport? _support;
   List<ProviderApp> _apps = [];
+  bool _cliAvailable = true;
   String? _error;
   bool _loading = true;
   String? _switching;
@@ -45,13 +46,17 @@ class _ProviderPageState extends State<ProviderPage> {
     try {
       final support = await _client.probe();
       var apps = <ProviderApp>[];
+      var cliAvailable = true;
       if (support == ProviderSupport.ready) {
-        apps = _client.appsFromSummary(await _client.summary());
+        final summary = await _client.summary();
+        apps = _client.appsFromSummary(summary);
+        cliAvailable = _client.cliFromSummary(summary).available;
       }
       if (mounted) {
         setState(() {
           _support = support;
           _apps = apps;
+          _cliAvailable = cliAvailable;
           _loading = false;
         });
       }
@@ -79,6 +84,48 @@ class _ProviderPageState extends State<ProviderPage> {
         setState(() => _switching = null);
       }
     }
+  }
+
+  /// Business Logic: 后端 cc-switch CLI 缺失时切换必然失败，需要先告知用户原因
+  /// 与影响（文案对齐 web providerManager:status.cliMissing / cliMissingHint），
+  /// 手机端不触发远端安装。
+  /// Code Logic: 顶部警示卡（errorContainer 语义色）：标题 + hint 两行。
+  Widget _cliMissingBanner(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      key: const Key('provider-cli-missing'),
+      margin: const EdgeInsets.only(bottom: 12),
+      color: theme.colorScheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.warning_amber_rounded,
+                size: 20, color: theme.colorScheme.onErrorContainer),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '未安装 cc-switch CLI，切换功能已禁用。',
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(color: theme.colorScheme.onErrorContainer),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '安装 cc-switch CLI 会与你现有的 cc-switch 共享同一份数据，不会影响 GUI。',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.onErrorContainer),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -121,6 +168,8 @@ class _ProviderPageState extends State<ProviderPage> {
                       ] else ...[
                         const Text('手机不会安装 cc-switch CLI。'),
                         const SizedBox(height: 12),
+                        if (!_cliAvailable)
+                          _cliMissingBanner(context),
                         for (final app in _apps) ...[
                           Text(app.app, style: Theme.of(context).textTheme.titleMedium),
                           for (final provider in app.providers)
@@ -130,7 +179,7 @@ class _ProviderPageState extends State<ProviderPage> {
                               trailing: provider.isCurrent
                                   ? const Chip(label: Text('当前'))
                                   : TextButton(
-                                      onPressed: _switching == null
+                                      onPressed: (_switching == null && _cliAvailable)
                                           ? () => _switch(app.app, provider.id)
                                           : null,
                                       child: const Text('切换'),

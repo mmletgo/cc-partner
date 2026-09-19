@@ -100,10 +100,17 @@ class _FakeGit extends GitClient {
   Map<String, dynamic> commitResult = {'kind': 'succeeded', 'value': <String, dynamic>{}};
   Map<String, dynamic> mergeResult = {'kind': 'succeeded', 'value': <String, dynamic>{}};
   Map<String, dynamic> repairResult = {'terminalSessionId': 's-repair'};
+
+  /// mutation-operation（ledger 对账）返回脚本；null 表示后端无记录。
+  Map<String, dynamic>? Function(String operationId)? ledgerScript;
+  List<Map<String, dynamic>> trees = const [];
   int commitCalls = 0;
   int mergeCalls = 0;
   int repairCalls = 0;
   String? lastCommitMessage;
+  final List<String> commitOperationIds = [];
+  final List<String> mergeOperationIds = [];
+  final List<String> ledgerQueryIds = [];
 
   @override
   Future<Map<String, dynamic>> commit({
@@ -112,7 +119,12 @@ class _FakeGit extends GitClient {
     String? message,
   }) async {
     commitCalls += 1;
+    commitOperationIds.add(clientOperationId);
     lastCommitMessage = message;
+    // unknown envelope 回显请求 id（后端语义），保证对账同 id。
+    if (commitResult['kind'] == 'unknown') {
+      return {'kind': 'unknown', 'clientOperationId': clientOperationId};
+    }
     return commitResult;
   }
 
@@ -123,6 +135,10 @@ class _FakeGit extends GitClient {
     required String clientOperationId,
   }) async {
     mergeCalls += 1;
+    mergeOperationIds.add(clientOperationId);
+    if (mergeResult['kind'] == 'unknown') {
+      return {'kind': 'unknown', 'clientOperationId': clientOperationId};
+    }
     return mergeResult;
   }
 
@@ -134,6 +150,21 @@ class _FakeGit extends GitClient {
     repairCalls += 1;
     return repairResult;
   }
+
+  @override
+  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+    ledgerQueryIds.add(clientOperationId);
+    final ledger = ledgerScript?.call(clientOperationId);
+    return ledger == null ? null : Map<String, dynamic>.from(ledger);
+  }
+
+  @override
+  Future<Map<String, dynamic>> listWorktrees(
+    String projectId, {
+    bool includeGitStatus = false,
+  }) async {
+    return {'ok': true, 'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)]};
+  }
 }
 
 class _FakePrompts extends PromptsClient {
@@ -142,6 +173,7 @@ class _FakePrompts extends PromptsClient {
   List<FavoritePrompt>? favorites;
   Object? error;
   final List<String> optimized = [];
+  final List<String?> workingDirectories = [];
 
   @override
   Future<List<FavoritePrompt>> listFavorites() async {
@@ -159,11 +191,19 @@ class _FakePrompts extends PromptsClient {
     String targetLanguage = 'zh',
   }) async {
     optimized.add(prompt);
+    workingDirectories.add(workingDirectory);
     return <String, dynamic>{};
   }
 }
 
 ProjectSummary get _project => const ProjectSummary(id: 'p1', name: 'demo', path: '/tmp/demo');
+
+/// 按 icon 定位工具行 IconButton（byTooltip 命中的是 Tooltip 本体，不能直接 cast）。
+IconButton _iconButton(WidgetTester tester, IconData icon) {
+  return tester.widget<IconButton>(
+    find.ancestor(of: find.byIcon(icon), matching: find.byType(IconButton)).first,
+  );
+}
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -172,14 +212,21 @@ Future<void> _pump(
   GitClient? git,
   ValueChanged<bool>? onFullscreenChanged,
   VoidCallback? onWorktreesMutated,
+  Map<String, dynamic>? worktreeInfo,
+  String? worktreePath,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
+      // key 随 worktreeInfo 变化：模拟 shell 的 ValueKey 换树行为，避免同类型 widget
+      // 复用旧 State（旧 State 的 _git 注入实例会过期，导致断言打到旧 fake 上）。
       body: TerminalPage(
+        key: ValueKey('terminal-under-test-$worktreeInfo'),
         book: _book(),
         http: LanHttpClient(),
         project: _project,
         worktreeId: 'w1',
+        worktreeInfo: worktreeInfo,
+        worktreePath: worktreePath,
         onFullscreenChanged: onFullscreenChanged,
         onWorktreesMutated: onWorktreesMutated,
         sessionsClient: sessions,
@@ -314,11 +361,18 @@ void main() {
       sessions: sessions,
       git: git,
       onWorktreesMutated: () => mutated += 1,
+      // shell 按当前 worktree 从权威列表取出 DTO 传入（B9 接缝契约）。
+      worktreeInfo: const {
+        'id': 'w1',
+        'name': 'w1',
+        'branch': 'feat/x',
+        'isMain': false,
+      },
     );
 
     await tester.tap(find.byTooltip('合并'));
     await tester.pumpAndSettle();
-    expect(find.text('确定把“w1”合并到主工作区？'), findsOneWidget);
+    expect(find.text('确定把「w1」合并到主工作区？'), findsOneWidget);
 
     await tester.tap(find.widgetWithText(FilledButton, '合并'));
     await tester.pumpAndSettle();
@@ -326,6 +380,169 @@ void main() {
     expect(mutated, 1);
     expect(find.text('合并成功'), findsOneWidget);
     // 让 SnackBar 的自动消失 Timer 走完，避免测试结束残留 pending Timer。
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('B9 合并门控：主工作区默认分支禁用；可收集/分支不同才开放', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+
+    // 无 worktreeInfo（shell 未取出）→ 禁用。
+    await _pump(tester, sessions: sessions, git: _FakeGit());
+    expect(_iconButton(tester, Icons.merge_type).onPressed, isNull);
+
+    // 主工作区默认分支（无 collect、branch==homeBranch）→ 禁用并给出说明。
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: _FakeGit(),
+      worktreeInfo: const {
+        'id': 'w-main',
+        'name': 'main',
+        'branch': 'main',
+        'homeBranch': 'main',
+        'isMain': true,
+      },
+    );
+    expect(find.byTooltip('主工作区默认分支，无需合并'), findsOneWidget);
+    expect(_iconButton(tester, Icons.merge_type).onPressed, isNull);
+
+    // 主工作区可 collect-merge → 开放，确认文案用 collect 专用文案。
+    final git = _FakeGit();
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      worktreeInfo: const {
+        'id': 'w-main',
+        'name': 'main',
+        'branch': 'main',
+        'homeBranch': 'main',
+        'isMain': true,
+        'canCollectMerge': true,
+        'collectibleBranches': ['feat/x'],
+      },
+    );
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('确定把本工作区的 1 条分支（feat/x）合并到「main」，并切回该主分支？'),
+      findsOneWidget,
+    );
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+    expect(git.mergeCalls, 1);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('B2 commit unknown → 同 id 查 ledger 成功 → 提交成功并回写壳层', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()
+      ..commitResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-1'}
+      ..ledgerScript = (operationId) => {
+            'state': 'succeeded',
+            'intent': {'kind': 'commit'},
+          };
+    var mutated = 0;
+    await _pump(tester, sessions: sessions, git: git, onWorktreesMutated: () => mutated += 1);
+
+    await tester.tap(find.byTooltip('提交'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('提交').last);
+    await tester.pumpAndSettle();
+
+    // 只发了一次 commit；对账用同一 clientOperationId 查 ledger。
+    expect(git.commitCalls, 1);
+    expect(git.ledgerQueryIds, [git.commitOperationIds.first]);
+    expect(mutated, 1);
+    expect(find.text('提交成功'), findsOneWidget);
+    expect(find.byKey(const Key('terminal-commit-reconcile')), findsNothing);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('B2 commit unknown 且 ledger 无记录 → 横幅可重新对账，不盲重放', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()
+      ..commitResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-1'};
+    await _pump(tester, sessions: sessions, git: git);
+
+    await tester.tap(find.byTooltip('提交'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('提交').last);
+    await tester.pumpAndSettle();
+
+    expect(git.commitCalls, 1);
+    expect(find.byKey(const Key('terminal-commit-reconcile')), findsOneWidget);
+    expect(find.text('提交结果未知，请重新对账。'), findsOneWidget);
+    // unknown 相位提交按钮锁定。
+    expect(_iconButton(tester, Icons.commit).onPressed, isNull);
+
+    // 重新对账仍未知：横幅保留，commit 不重发。
+    await tester.tap(find.byKey(const Key('terminal-commit-reconcile')));
+    await tester.pumpAndSettle();
+    expect(git.commitCalls, 1);
+    expect(git.ledgerQueryIds.length, 2);
+    expect(git.ledgerQueryIds[1], git.ledgerQueryIds.first);
+    expect(find.byKey(const Key('terminal-commit-reconcile')), findsOneWidget);
+  });
+
+  testWidgets('B2 merge unknown → 同 id 查 ledger 确认成功 → 合并成功', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()
+      ..mergeResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-m1'}
+      ..trees = const [
+        {
+          'id': 'w-main',
+          'name': 'main',
+          'branch': 'main',
+          'isMain': true,
+          'path': '/repo',
+        },
+      ]
+      ..ledgerScript = (operationId) => {
+            'state': 'succeeded',
+            'intent': {
+              'kind': 'merge',
+              'sourceWorktreeId': 'w1',
+            },
+          };
+    var mutated = 0;
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      onWorktreesMutated: () => mutated += 1,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/x', 'isMain': false},
+    );
+
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(git.mergeCalls, 1);
+    expect(git.ledgerQueryIds, [git.mergeOperationIds.first]);
+    expect(mutated, 1);
+    expect(find.text('合并成功'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('B12 Prompt 优化 workingDirectory 优先 worktreePath', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final prompts = _FakePrompts();
+    await _pump(
+      tester,
+      sessions: sessions,
+      prompts: prompts,
+      worktreePath: '/repo/.worktrees/feat-x',
+    );
+
+    await tester.tap(find.byTooltip('Prompt 优化'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, '帮我优化');
+    await tester.tap(find.text('写入当前终端'));
+    await tester.pumpAndSettle();
+
+    expect(prompts.workingDirectories, ['/repo/.worktrees/feat-x']);
     await tester.pump(const Duration(milliseconds: 3200));
   });
 
@@ -378,6 +595,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(prompts.optimized, ['帮我优化这段 prompt']);
+    // worktreePath 未提供时回退 project.path（B12 回退分支）。
+    expect(prompts.workingDirectories, ['/tmp/demo']);
     expect(find.text('已发送'), findsOneWidget);
     expect(find.text('Prompt 优化'), findsNothing);
     await tester.pump(const Duration(milliseconds: 3200));

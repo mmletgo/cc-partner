@@ -330,7 +330,7 @@ Future<void> _pumpPage(
   _FakeAutomationClient client, {
   String? focusTaskId,
   String? focusOutboxId,
-  void Function(String worktreeId, String sessionId)? onFocusSession,
+  void Function(String? worktreeId, String? sessionId)? onFocusSession,
   VoidCallback? onFocusMissing,
   VoidCallback? onExternalMutation,
   ProjectSummary? project,
@@ -746,6 +746,71 @@ void main() {
     await tester.pumpAndSettle();
     expect(focusedWorktree, 'wt-2');
     expect(focusedSession, 'sess-2');
+  });
+
+  testWidgets('single-sided worktree or session still enables execution focus', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient()
+      ..viewsOverride = (projectId) => [
+            {
+              'origin': 'local',
+              'task': {
+                'id': 't-wt',
+                'title': 'only worktree',
+                'worktreeId': 'wt-only',
+              },
+            },
+            {
+              'origin': 'local',
+              'task': {
+                'id': 't-sess',
+                'title': 'only session',
+                'sessionId': 'sess-only',
+              },
+            },
+          ];
+    String? focusedWorktree;
+    String? focusedSession;
+    await _pumpPage(
+      tester,
+      client,
+      onFocusSession: (worktreeId, sessionId) {
+        focusedWorktree = worktreeId;
+        focusedSession = sessionId;
+      },
+    );
+
+    // 只有 worktreeId：按钮启用，session 以 null 原样回调（壳层回落）。
+    await tester.tap(find.byKey(const Key('automation-task-t-wt')));
+    await tester.pumpAndSettle();
+    final wtButton = tester.widget<FilledButton>(
+      find.byKey(const Key('automation-open-execution')),
+    );
+    expect(wtButton.onPressed, isNotNull);
+    expect(find.text('打开执行现场'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('automation-open-execution')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('automation-open-execution')));
+    await tester.pumpAndSettle();
+    expect(focusedWorktree, 'wt-only');
+    expect(focusedSession, isNull);
+
+    // 只有 sessionId：同样启用，worktree 以 null 原样回调。
+    await tester.ensureVisible(find.byKey(const Key('automation-task-t-sess')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('automation-task-t-sess')));
+    await tester.pumpAndSettle();
+    final sessButton = tester.widget<FilledButton>(
+      find.byKey(const Key('automation-open-execution')),
+    );
+    expect(sessButton.onPressed, isNotNull);
+    await tester.ensureVisible(find.byKey(const Key('automation-open-execution')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('automation-open-execution')));
+    await tester.pumpAndSettle();
+    expect(focusedWorktree, isNull);
+    expect(focusedSession, 'sess-only');
   });
 
   testWidgets('experiments support approve and cancel with inbox notice', (

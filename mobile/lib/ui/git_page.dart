@@ -8,6 +8,7 @@ import '../git/client.dart';
 import '../git/mutation.dart';
 import '../git/project_sync.dart';
 import '../projects/client.dart';
+import '../terminal/git_actions.dart';
 import '../transfer/api.dart';
 
 /// 把 ISO 时间格式化成本地 yyyy-MM-dd HH:mm；解析失败回退原始字符串。
@@ -35,6 +36,9 @@ class GitPage extends StatefulWidget {
     required this.project,
     this.worktreeId,
     this.gitClient,
+    this.onWorktreesMutated,
+    this.confirmLeaveDirty,
+    this.onFocusRepairSession,
   });
 
   final AddressBook book;
@@ -44,6 +48,19 @@ class GitPage extends StatefulWidget {
 
   /// 测试可注入的 Git 客户端；缺省按当前 PC 地址簿构造。
   final GitClient? gitClient;
+
+  /// merge 成功（含 unknown 对账确认成功）后通知壳层刷新权威 worktrees 列表
+  /// （对齐 web GitPanel onMergeWorktree/onRefreshWorktrees 回写；固定接缝契约）。
+  final VoidCallback? onWorktreesMutated;
+
+  /// merge 的源 worktree 是当前激活 worktree 且 Files 有脏文件时的确认出口
+  /// （GitPage 拿不到 FileWorkspaceController，由壳层注入 _confirmLeaveDirty；固定接缝契约）。
+  /// 返回 false 时中止合并。
+  final Future<bool> Function(String worktreeId)? confirmLeaveDirty;
+
+  /// hook AI 修复返回的 terminalSessionId 回调：壳层切到终端面板聚焦修复会话
+  /// （对齐 web MobileGitPanel onFocusRepairSession；固定接缝契约）。
+  final void Function(String sessionId)? onFocusRepairSession;
 
   @override
   State<GitPage> createState() => _GitPageState();
@@ -146,20 +163,6 @@ class _GitPageState extends State<GitPage> {
     await _loadCommits();
   }
 
-  /// 只刷新 worktrees（不动提交历史）；unknown 对账时复用。
-  Future<void> _refreshWorktreesOnly() async {
-    try {
-      final body = await _client.listWorktrees(widget.project.id, includeGitStatus: true);
-      final mapped = asObjectList(body, wrapKey: 'worktrees');
-      if (mounted) {
-        setState(() {
-          _trees = mapped;
-          _error = null;
-        });
-      }
-    } catch (_) {}
-  }
-
   /// 加载当前选中 worktree 的最近 30 条提交；合并后源 worktree 可能已删除，此时清空历史。
   Future<void> _loadCommits() async {
     final tree = _selectedTree;
@@ -209,45 +212,28 @@ class _GitPageState extends State<GitPage> {
 
   /// Business Logic: 提交/推送/合并/拉取返回 unknown（网络异常等无法确定结果）时禁止盲重放，
   /// 必须用同一 clientOperationId 查 ledger + 权威列表对账出「实际已成功/未生效」。
-  /// Code Logic: mutation-operation 查 ledger → 刷新 worktrees → merge/collectMerge 再拉
-  /// 主分支提交 → reconcileGitMutation 纯矩阵裁决 → 相位机落终态或保持 unknown。
+  /// Code Logic: 共享 reconcileWorktreeMutation 通道（mutation-operation 查 ledger → 刷新 worktrees
+  /// → merge/collectMerge 再拉主分支提交 → reconcileGitMutation 纯矩阵裁决）→ 相位机推进 reconciling。
   Future<GitMutationReconcile> _reconcile(String operationId) async {
     _tracker.beginReconcile();
     if (mounted) {
       setState(() {});
     }
-    Map<String, dynamic>? ledger;
-    try {
-      ledger = await _client.mutationOperation(operationId);
-    } catch (_) {
-      ledger = null;
-    }
-    await _refreshWorktreesOnly();
-    List<String>? mainCommitHashes;
-    final intent = ledger?['intent'];
-    final kind =
-        parseGitMutationKind(intent is Map ? intent['kind'] as String? : null);
-    if (kind == GitMutationKind.merge || kind == GitMutationKind.collectMerge) {
-      final main = pickMainWorktree(_trees);
-      final mainId = main?['id'] as String?;
-      if (main != null && mainId != null && mainId.isNotEmpty) {
-        try {
-          final mainCommits =
-              await _client.commits(widget.project.id, worktreeId: mainId, limit: 100);
-          mainCommitHashes = [for (final commit in mainCommits) commit.hash];
-        } catch (_) {
-          mainCommitHashes = null;
+    return reconcileWorktreeMutation(
+      client: _client,
+      projectId: widget.project.id,
+      operationId: operationId,
+      onTrees: (trees) {
+        if (mounted) {
+          setState(() => _trees = trees);
         }
-      }
-    }
-    return reconcileGitMutation(
-      ledger: ledger,
-      worktrees: _trees,
-      mainCommitHashes: mainCommitHashes,
+      },
     );
   }
 
-  /// unknown 相位的「重新对账」入口：复用同一 operationId，不盲重放。
+  /// Business Logic: unknown 相位的「重新对账」入口：复用同一 operationId，不盲重放。
+  /// Code Logic: 共享 reconcileWorktreeMutation 通道（查 ledger + 刷新权威列表 + merge 取主分支
+  /// 提交作 authority）→ 相位机落终态或保持 unknown；确认成功后回写壳层刷新 worktrees。
   Future<void> _retryReconcile() async {
     final operationId = _tracker.operationId;
     if (operationId == null ||
@@ -265,6 +251,7 @@ class _GitPageState extends State<GitPage> {
       if (result == GitMutationReconcile.confirmedSucceeded) {
         _showSnack('已核对：操作已生效', transient: true);
         await _refresh();
+        widget.onWorktreesMutated?.call();
       } else if (result == GitMutationReconcile.confirmedFailed) {
         _showSnack('操作失败，可以重新发起。');
       }
@@ -277,8 +264,9 @@ class _GitPageState extends State<GitPage> {
 
   /// Business Logic: commit/push/pull/merge 的统一执行通道——busy 防重入、稳定 operation id、
   /// unknown 相位锁定 + 对账，确定性失败解锁并提示，hook 失败转修复卡。
-  /// Code Logic: action 返回后端 envelope；succeeded → 成功提示+刷新；failedHook → 修复卡；
-  /// unknown → 自动对账；传输异常（超时/断连）→ 进入 unknown 相位；其余异常 → 解锁+错误提示。
+  /// Code Logic: action 返回后端 envelope；succeeded → 成功提示+刷新（merge 再回写壳层刷新
+  /// worktrees）；failedHook → 修复卡；unknown → 自动对账，确认成功同样回写；传输异常
+  /// （超时/断连）→ 进入 unknown 相位；其余异常 → 解锁+错误提示。
   Future<void> _runMutation(
     GitMutationKind kind,
     String label,
@@ -303,6 +291,10 @@ class _GitPageState extends State<GitPage> {
           _showSnack('提交成功', transient: true);
         }
         await _refresh();
+        if (kind == GitMutationKind.merge) {
+          // merge 会删除源 worktree 或收集分支：回写壳层刷新权威列表（B3 接缝契约）。
+          widget.onWorktreesMutated?.call();
+        }
         return;
       }
       if (envelope.failedHook) {
@@ -324,6 +316,9 @@ class _GitPageState extends State<GitPage> {
             _showSnack('提交成功', transient: true);
           }
           await _refresh();
+          if (kind == GitMutationKind.merge) {
+            widget.onWorktreesMutated?.call();
+          }
         } else if (result == GitMutationReconcile.confirmedFailed) {
           _showSnack('操作失败，可以重新发起。');
         }
@@ -366,16 +361,8 @@ class _GitPageState extends State<GitPage> {
 
   /// Business Logic: 功能 worktree merge 与主工作区 collect-merge 语义不同，
   /// 确认文案必须区分（对齐 web mergeConfirm / mergeCollectConfirm）。
-  /// Code Logic: 主工作区列出可收集分支与 home 分支；非主 worktree 只说明合并目标。
-  String mergeConfirmText(Map<String, dynamic> tree) {
-    if (tree['isMain'] == true) {
-      final branches = (tree['collectibleBranches'] as List?) ?? const [];
-      final names = branches.whereType<String>().join(', ');
-      final home = tree['homeBranch'] as String? ?? 'main';
-      return '确定把本工作区的 ${branches.length} 条分支（$names）合并到「$home」，并切回该主分支？';
-    }
-    return '确定把「${worktreeDisplayName(tree)}」合并到主工作区？';
-  }
+  /// Code Logic: 委托共享 worktreeMergeConfirmText（终端页 / worktrees 页同一口径）。
+  String mergeConfirmText(Map<String, dynamic> tree) => worktreeMergeConfirmText(tree);
 
   /// 提交前填写说明；留空则由后端 Claude Code 生成提交信息（对齐 web message=null）。
   Future<void> _commit(Map<String, dynamic> tree) async {
@@ -420,19 +407,27 @@ class _GitPageState extends State<GitPage> {
     });
   }
 
-  /// 触发 hook AI 修复；成功清卡片并提示，失败 SnackBar 上屏。
+  /// 触发 hook AI 修复；成功清卡片并提示，返回 terminalSessionId 时回调壳层聚焦修复终端
+  /// （对齐 web MobileGitPanel：读 repair.terminalSessionId → onFocusRepairSession 刷新并切面板）。
   Future<void> _repairHook() async {
     final failure = _hookFailure;
     if (failure == null) {
       return;
     }
     try {
-      await _client.repairHookFailure(
+      final result = await _client.repairHookFailure(
         worktreeId: _hookWorktreeId ?? widget.worktreeId ?? '',
         hookFailure: failure,
       );
+      final terminalSessionId = result['terminalSessionId'] as String? ??
+          result['terminal_session_id'] as String?;
       if (mounted) {
         setState(() => _hookFailure = null);
+      }
+      if (terminalSessionId != null && terminalSessionId.isNotEmpty) {
+        // 壳层负责刷新 sessions、切终端面板并聚焦该会话（B4 接缝契约）。
+        widget.onFocusRepairSession?.call(terminalSessionId);
+      } else if (mounted) {
         _showSnack('已发起 hook AI 修复，请在终端查看进度。');
       }
     } catch (error) {
@@ -750,6 +745,18 @@ class _GitPageState extends State<GitPage> {
                           final ok = await _confirmAction('合并', tree, mergeConfirmText(tree));
                           if (!ok) {
                             return;
+                          }
+                          // B3 接缝契约：merge 的源 worktree 是当前激活 worktree 时，
+                          // Files 的未保存改动可能随合并切走上下文，先过壳层 dirty guard。
+                          final guard = widget.confirmLeaveDirty;
+                          final sourceId = tree['id'] as String? ?? '';
+                          if (guard != null &&
+                              sourceId.isNotEmpty &&
+                              sourceId == widget.worktreeId) {
+                            final allowed = await guard(sourceId);
+                            if (!allowed) {
+                              return;
+                            }
                           }
                           await _runMutation(
                             GitMutationKind.merge,

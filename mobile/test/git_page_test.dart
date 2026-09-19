@@ -22,6 +22,11 @@ class _FakeGitClient extends GitClient {
   final List<String> mutationCalls = [];
   List<Map<String, dynamic>> allProjects = const [];
 
+  /// mutation-operation（ledger 对账）返回脚本；null 表示后端无记录。
+  Map<String, dynamic>? Function(String operationId)? ledgerScript;
+  Map<String, dynamic> repairResult = {'terminalSessionId': 'tmux-repair'};
+  int repairCalls = 0;
+
   Object? _defaultMutation(String kind) {
     mutationCalls.add(kind);
     return {
@@ -97,6 +102,21 @@ class _FakeGitClient extends GitClient {
   }
 
   @override
+  Future<Map<String, dynamic>> repairHookFailure({
+    required String worktreeId,
+    required Map<String, dynamic> hookFailure,
+  }) async {
+    repairCalls += 1;
+    return Map<String, dynamic>.from(repairResult);
+  }
+
+  @override
+  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+    final ledger = ledgerScript?.call(clientOperationId);
+    return ledger == null ? null : Map<String, dynamic>.from(ledger);
+  }
+
+  @override
   Future<List<Map<String, dynamic>>> listAllProjects() async => allProjects;
 }
 
@@ -111,7 +131,13 @@ void main() {
     return addressBook;
   }
 
-  Widget wrap(AddressBook addressBook, GitClient git) {
+  Widget wrap(
+    AddressBook addressBook,
+    GitClient git, {
+    VoidCallback? onWorktreesMutated,
+    Future<bool> Function(String worktreeId)? confirmLeaveDirty,
+    void Function(String sessionId)? onFocusRepairSession,
+  }) {
     return MaterialApp(
       home: Scaffold(
         body: GitPage(
@@ -120,6 +146,9 @@ void main() {
           project: const ProjectSummary(id: 'p1', name: 'demo'),
           worktreeId: 'wt-1',
           gitClient: git,
+          onWorktreesMutated: onWorktreesMutated,
+          confirmLeaveDirty: confirmLeaveDirty,
+          onFocusRepairSession: onFocusRepairSession,
         ),
       ),
     );
@@ -390,5 +419,98 @@ void main() {
       tester.widget<OutlinedButton>(find.byKey(const Key('git-action-sync'))).onPressed,
       isNull,
     );
+  });
+
+  testWidgets('B3 merge 源是激活 worktree：dirty guard 拒绝则中止，放行才执行', (tester) async {
+    final git = seed();
+    var guardCalls = 0;
+    var allowDirty = false;
+    await tester.pumpWidget(wrap(
+      await book(),
+      git,
+      confirmLeaveDirty: (worktreeId) async {
+        guardCalls += 1;
+        expect(worktreeId, 'wt-1');
+        return allowDirty;
+      },
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-merge')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pumpAndSettle();
+
+    expect(guardCalls, 1);
+    expect(git.mutationCalls, isEmpty);
+
+    // 放行后 merge 正常执行。
+    allowDirty = true;
+    await tester.tap(find.byKey(const Key('git-action-merge')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pumpAndSettle();
+    expect(guardCalls, 2);
+    expect(git.mutationCalls, contains('merge'));
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B3 merge 成功后回写壳层刷新 worktrees（onWorktreesMutated）', (tester) async {
+    final git = seed();
+    var mutated = 0;
+    await tester.pumpWidget(wrap(
+      await book(),
+      git,
+      onWorktreesMutated: () => mutated += 1,
+      // merge 的源不是激活 worktree（选中的 wt-main ≠ worktreeId wt-1）时不触发 dirty guard。
+      confirmLeaveDirty: (_) async => true,
+    ));
+    await tester.pumpAndSettle();
+
+    // 切到主工作区卡片再合并（collect-merge，源 ≠ 激活 worktree）。
+    await tester.tap(find.byKey(const Key('git-tree-wt-main')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('git-action-merge')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pumpAndSettle();
+
+    expect(git.mutationCalls, contains('merge'));
+    expect(mutated, 1);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B4 hook 修复返回 terminalSessionId → 回调壳层聚焦修复终端', (tester) async {
+    final git = seed();
+    final focused = <String>[];
+    // 先用 push 失败 hook 制造修复卡。
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      return {
+        'kind': 'failedHook',
+        'clientOperationId': 'op-hook',
+        'hookFailure': {'stage': 'prePush', 'stdout': 'denied', 'exitCode': 1},
+      };
+    };
+    await tester.pumpWidget(wrap(
+      await book(),
+      git,
+      onFocusRepairSession: focused.add,
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-push')));
+    await tester.pumpAndSettle();
+    expect(find.text('Git hook 失败'), findsOneWidget);
+
+    git.mutationScript = null;
+    await tester.tap(find.text('hook-repair'));
+    await tester.pumpAndSettle();
+
+    expect(git.repairCalls, 1);
+    expect(focused, ['tmux-repair']);
+    // 卡片已清除；聚焦路径下不再重复弹「请在终端查看进度」提示。
+    expect(find.text('Git hook 失败'), findsNothing);
+    await flushSnackbars(tester);
   });
 }

@@ -12,6 +12,7 @@ import 'package:xterm/xterm.dart' as xterm show TerminalController;
 import '../address_book/book.dart';
 import '../core/lan_http.dart';
 import '../git/client.dart';
+import '../git/mutation.dart';
 import '../projects/client.dart';
 import '../prompts/client.dart';
 import '../sessions/client.dart';
@@ -50,6 +51,8 @@ class TerminalPage extends StatefulWidget {
     required this.project,
     this.preferredSessionId,
     this.worktreeId,
+    this.worktreeInfo,
+    this.worktreePath,
     this.onFullscreenChanged,
     this.onWorktreesMutated,
     @visibleForTesting this.sessionsClient,
@@ -63,6 +66,15 @@ class TerminalPage extends StatefulWidget {
   final ProjectSummary project;
   final String? preferredSessionId;
   final String? worktreeId;
+
+  /// 当前 worktree 的权威 DTO（shell 从 worktrees 列表按 worktreeId 取出；
+  /// 含 isMain/branch/homeBranch/canCollectMerge/status/path 等原始字段），
+  /// 用于合并入口门控与确认文案（对齐 web canShowMobileTerminalMergeFab 的入参）。
+  final Map<String, dynamic>? worktreeInfo;
+
+  /// 当前 worktree 的磁盘路径：Prompt 优化 workingDirectory 优先使用（对齐 web worktree.path），
+  /// 为空回退 project.path。
+  final String? worktreePath;
 
   /// 进入/退出全屏时回调壳层（固定接缝契约，由 workbench_home 接线）。
   final ValueChanged<bool>? onFullscreenChanged;
@@ -114,6 +126,11 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   // hook 失败修复卡状态（对齐 web MobileHookRepair）。
   _HookRepairState? _hookRepair;
+
+  // commit/merge 的 mutation 相位机：unknown 后锁定动作并要求同 id 对账
+  // （对齐 web commitPhase/mergePhase + pickMobileMutationOperationId）。
+  final GitMutationTracker _commitMutation = GitMutationTracker();
+  final GitMutationTracker _mergeMutation = GitMutationTracker();
 
   // 全屏状态：隐藏 chip 条与工具行，仅保留状态文本与退出全屏入口。
   bool _fullscreen = false;
@@ -1139,8 +1156,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 业务逻辑：Prompt 优化要把原始 Prompt 交给本机 Claude Code 优化并流式写入当前终端；
   /// 无 session / 无 worktree 的提示文案对齐 web（先选择或创建终端窗口 / 先选择 worktree）。
   ///
-  /// Code Logic：弹输入对话框（提交中防重复）；成功后关闭对话框、清空输入并 SnackBar
-  /// 「已发送」（2.5s）；失败在对话框内展示可读错误。
+  /// Code Logic：弹输入对话框（提交中防重复）；workingDirectory 优先 worktree.path
+  /// （对齐 web MobilePromptOptimizerSheet），为空回退 project.path；成功后关闭对话框、
+  /// 清空输入并 SnackBar「已发送」（2.5s）；失败在对话框内展示可读错误。
   Future<void> _optimize() async {
     final sessionId = _sessionId;
     if (sessionId == null) {
@@ -1161,7 +1179,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         builder: (dialogContext) => _PromptOptimizerDialog(
           client: _prompts,
           sessionId: sessionId,
-          workingDirectory: widget.project.path,
+          workingDirectory:
+              (widget.worktreePath?.isNotEmpty ?? false) ? widget.worktreePath : widget.project.path,
           onSent: () {
             Navigator.of(dialogContext).pop();
             _toast('已发送');
@@ -1175,9 +1194,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 业务逻辑：终端内一键提交（与桌面 Git 历史同口径）：留空 message 由后端 AI 生成。
   ///
-  /// Code Logic：弹 message 输入对话框（可空提交）→ 稳定 clientOperationId + GitClient.commit；
-  /// succeeded → SnackBar「提交成功」并回调 onWorktreesMutated；failedHook → hook 修复卡；
-  /// unknown/异常 → 按失败提示（对账不在本页范围）。
+  /// Code Logic：弹 message 输入对话框（可空提交）→ GitMutationTracker 稳定 clientOperationId
+  /// （unknown/reconciling 复用同 id）+ GitClient.commit；succeeded → SnackBar「提交成功」并回调
+  /// onWorktreesMutated；failedHook → hook 修复卡；unknown/传输异常 → 同 id 对账；确定失败解锁提示。
   Future<void> _showCommitDialog() async {
     if (widget.worktreeId == null) {
       _toast('先选择 worktree');
@@ -1197,6 +1216,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   }
 
   /// 提交动作本体：message 空白传 null（后端 AI 生成，对齐 web message=null 语义）。
+  ///
+  /// Code Logic: unknown 相位重入（重试提交）改走对账，不盲重放（对齐 web executeMobileGitCommit
+  /// reconcileOnly）；busy/reconciling 直接忽略；envelope unknown / 传输异常 → 共享对账通道。
   Future<void> _commitWorktree(String message) async {
     final worktreeId = widget.worktreeId;
     if (worktreeId == null) {
@@ -1206,7 +1228,17 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (_actionBusy != null) {
       return;
     }
-    final operationId = buildClientOperationId('commit');
+    if (_commitMutation.actionLocked) {
+      if (_commitMutation.phase == GitMutationPhase.unknown) {
+        await _reconcileCommit();
+      }
+      return;
+    }
+    final operationId = _commitMutation.begin(
+      kind: GitMutationKind.commit,
+      worktreeId: worktreeId,
+      nextOperationId: buildClientOperationId('commit'),
+    );
     final trimmed = message.trim();
     setState(() {
       _actionBusy = 'commit';
@@ -1224,6 +1256,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           if (!mounted || _disposed) {
             return;
           }
+          _commitMutation.markIdle();
           _toast('提交成功');
           widget.onWorktreesMutated?.call();
           break;
@@ -1231,28 +1264,77 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           if (!mounted || _disposed) {
             return;
           }
+          _commitMutation.markIdle();
           setState(() {
             _hookRepair = _HookRepairState(
               failure: outcome.hookFailure ?? const HookFailureView(),
               raw: envelope['hookFailure'] ?? envelope['hook_failure'] ?? const {},
-              clientOperationId: operationId,
+              clientOperationId: outcome.clientOperationId ?? operationId,
             );
           });
           break;
         case GitMutationOutcomeKind.unknown:
-          _toast('操作结果未知，请刷新后人工核对');
+          await _reconcileCommit(envelopeOperationId: outcome.clientOperationId ?? operationId);
           break;
         case GitMutationOutcomeKind.malformed:
+          _commitMutation.markIdle();
           _toast('提交失败，可以重新发起');
           break;
       }
-    } catch (_) {
-      // 异常但结果未知：按失败提示（对账不在本页范围）。
-      _toast('提交失败，可以重新发起');
+    } catch (error) {
+      _afterCommitFailure(error);
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
       }
+    }
+  }
+
+  /// Business Logic: 网络层异常意味着请求可能已到达也可能没到达，必须按 unknown 处理等对账；
+  /// 服务器已应答的错误是确定失败，解锁后允许重新发起。
+  /// Code Logic: isTransportUnknownError → markUnknown（横幅可再对账）；其余 → markIdle + 失败提示。
+  void _afterCommitFailure(Object error) {
+    if (!mounted || _disposed) {
+      return;
+    }
+    if (isTransportUnknownError(error)) {
+      _commitMutation.markUnknown();
+      setState(() {});
+      return;
+    }
+    _commitMutation.markIdle();
+    _toast('提交失败，可以重新发起');
+  }
+
+  /// Business Logic: commit unknown 后必须用同一 clientOperationId 查 ledger 对账，不能猜成败
+  /// （对齐 web executeMobileGitCommit 的 reconcileOnly 分支：ledger 终态优先，commit 无 authority）。
+  /// Code Logic: reconcileWorktreeMutation（共享通道）→ 成功 → 成功流程 + onWorktreesMutated；
+  /// 失败 → 显示失败原因并解锁；仍 unknown → 保持横幅可再对账。
+  Future<void> _reconcileCommit({String? envelopeOperationId}) async {
+    final operationId = envelopeOperationId ?? _commitMutation.operationId;
+    if (operationId == null) {
+      return;
+    }
+    _commitMutation.beginReconcile();
+    if (mounted && !_disposed) {
+      setState(() {});
+    }
+    final result = await reconcileWorktreeMutation(
+      client: _git,
+      projectId: widget.project.id,
+      operationId: operationId,
+    );
+    _commitMutation.settleReconcile(result);
+    if (!mounted || _disposed) {
+      return;
+    }
+    if (result == GitMutationReconcile.confirmedSucceeded) {
+      _toast('提交成功');
+      widget.onWorktreesMutated?.call();
+    } else if (result == GitMutationReconcile.confirmedFailed) {
+      _toast('提交失败，可以重新发起');
+    } else {
+      setState(() {});
     }
   }
 
@@ -1325,25 +1407,38 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     unawaited(_commitWorktree(''));
   }
 
-  /// 业务逻辑：终端内一键合并（功能分支 → 主工作区）；主 worktree 场景后端会失败，直接提示。
+  /// 业务逻辑：终端内一键合并（功能分支 → 主工作区）；门控对齐 web canShowMobileTerminalMergeFab：
+  /// 非主 worktree 可合并，主工作区仅在可收集分支或当前分支≠homeBranch 时开放。
   ///
-  /// Code Logic：确认对话框（文案对齐 web mergeConfirm 功能分支版本）→ GitClient.merge →
-  /// succeeded → SnackBar「合并成功」+ onWorktreesMutated + 刷新会话（merge 会关闭源分支会话，
-  /// 当前会话消失时按优先级切下一个）；unknown/异常按失败提示。
+  /// Code Logic：确认对话框（文案对齐 web mergeConfirm/mergeCollectConfirm，用 worktreeInfo
+  /// 显示名）→ tracker 稳定 id + GitClient.merge → succeeded → SnackBar「合并成功」+
+  /// onWorktreesMutated + 刷新会话（merge 会关闭源分支会话，当前会话消失时按优先级切下一个）；
+  /// unknown/传输异常走同 id 对账；确定失败解锁提示。
   Future<void> _mergeWorktree() async {
     final worktreeId = widget.worktreeId;
     if (worktreeId == null) {
       _toast('先选择 worktree');
       return;
     }
+    if (!canShowTerminalMergeFab(widget.worktreeInfo)) {
+      return;
+    }
     if (_actionBusy != null) {
       return;
     }
+    if (_mergeMutation.actionLocked) {
+      if (_mergeMutation.phase == GitMutationPhase.unknown) {
+        await _reconcileMerge();
+      }
+      return;
+    }
+    final confirmTree = widget.worktreeInfo ??
+        <String, dynamic>{'id': worktreeId, 'name': worktreeId};
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('合并到主工作区'),
-        content: Text('确定把“$worktreeId”合并到主工作区？'),
+        content: Text(worktreeMergeConfirmText(confirmTree)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -1359,37 +1454,140 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (confirmed != true) {
       return;
     }
+    final operationId = _mergeMutation.begin(
+      kind: GitMutationKind.merge,
+      worktreeId: worktreeId,
+      nextOperationId: buildClientOperationId('merge'),
+    );
     setState(() => _actionBusy = 'merge');
     try {
       final envelope = await _git.merge(
         projectId: widget.project.id,
         worktreeId: worktreeId,
-        clientOperationId: buildClientOperationId('merge'),
+        clientOperationId: operationId,
       );
       final outcome = GitMutationOutcome.fromJson(envelope);
       if (outcome.kind == GitMutationOutcomeKind.succeeded) {
-        _toast('合并成功');
-        widget.onWorktreesMutated?.call();
-        await _refreshSessions();
-        // merge 会关闭源 worktree 会话；当前会话不在列表时按优先级切下一个。
-        if (_sessionId != null && _sessionById(_sessionId!) == null) {
-          final nextSession = pickPreferredSession(_sessionList);
-          if (nextSession != null) {
-            await _activateSession(nextSession);
-          }
-        }
+        _mergeMutation.markIdle();
+        await _afterMergeSuccess();
       } else if (outcome.kind == GitMutationOutcomeKind.unknown) {
-        _toast('操作结果未知，请刷新后人工核对');
+        await _reconcileMerge(envelopeOperationId: outcome.clientOperationId ?? operationId);
+      } else if (outcome.kind == GitMutationOutcomeKind.malformed) {
+        _mergeMutation.markIdle();
+        _toast('合并失败，请稍后重试');
       } else {
+        // failedHook 不会出现在 merge 通道；保险起见解锁并按失败处理。
+        _mergeMutation.markIdle();
         _toast('合并失败，请稍后重试');
       }
-    } catch (_) {
+    } catch (error) {
+      if (!mounted || _disposed) {
+        return;
+      }
+      if (isTransportUnknownError(error)) {
+        _mergeMutation.markUnknown();
+        setState(() {});
+        return;
+      }
+      _mergeMutation.markIdle();
       _toast('合并失败，请稍后重试');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
       }
     }
+  }
+
+  /// Business Logic: merge unknown 后必须用同一 clientOperationId 查 ledger 对账
+  /// （对齐 web MobileTerminalPanel merge unknown 分支 + 共享对账矩阵），禁止新 id 盲重放。
+  /// Code Logic: reconcileWorktreeMutation（merge intent 会取主分支提交作 authority）→
+  /// 成功 → 合并成功流程；失败 → 显示原因并解锁；仍 unknown → 保持横幅可再对账。
+  Future<void> _reconcileMerge({String? envelopeOperationId}) async {
+    final operationId = envelopeOperationId ?? _mergeMutation.operationId;
+    if (operationId == null) {
+      return;
+    }
+    _mergeMutation.beginReconcile();
+    if (mounted && !_disposed) {
+      setState(() {});
+    }
+    final result = await reconcileWorktreeMutation(
+      client: _git,
+      projectId: widget.project.id,
+      operationId: operationId,
+    );
+    _mergeMutation.settleReconcile(result);
+    if (!mounted || _disposed) {
+      return;
+    }
+    if (result == GitMutationReconcile.confirmedSucceeded) {
+      await _afterMergeSuccess();
+    } else if (result == GitMutationReconcile.confirmedFailed) {
+      _toast('合并失败，可以重新发起');
+    } else {
+      setState(() {});
+    }
+  }
+
+  /// 合并成功共享出口：SnackBar + 壳层刷新 worktrees + 会话善后
+  /// （merge 会关闭源 worktree 会话；当前会话不在列表时按优先级切下一个）。
+  Future<void> _afterMergeSuccess() async {
+    _toast('合并成功');
+    widget.onWorktreesMutated?.call();
+    await _refreshSessions();
+    if (_sessionId != null && _sessionById(_sessionId!) == null) {
+      final nextSession = pickPreferredSession(_sessionList);
+      if (nextSession != null) {
+        await _activateSession(nextSession);
+      }
+    }
+  }
+
+  /// Business Logic: commit/merge 结果未知时用户必须能就地重新对账（对齐 web 面板错误区）。
+  /// Code Logic: reconciling 显示「核对结果中…」；unknown 渲染 errorContainer 横幅 +
+  /// 「重新对账」按钮（key 带 commit/merge 区分）；其他相位不渲染。
+  Widget _buildMutationBanner(
+    ThemeData theme, {
+    required String label,
+    required GitMutationTracker tracker,
+    required Key reconcileKey,
+    required Future<void> Function() onReconcile,
+  }) {
+    if (tracker.phase == GitMutationPhase.reconciling) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text('$label核对结果中…', style: theme.textTheme.bodySmall),
+        ),
+      );
+    }
+    if (tracker.phase != GitMutationPhase.unknown) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '$label结果未知，请重新对账。',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+          TextButton(
+            key: reconcileKey,
+            onPressed: () => unawaited(onReconcile()),
+            child: const Text('重新对账'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 业务逻辑：贴图要走现有 paste-image 通道，session 非 running 或输入流未就绪时禁用
@@ -1622,6 +1820,11 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     final theme = Theme.of(context);
     final fullscreen = _fullscreen && _sessionId != null;
     final canUseGitActions = widget.worktreeId != null && _actionBusy == null;
+    // 合并入口门控（对齐 web canShowMobileTerminalMergeFab）：非主 worktree 可合并，
+    // 主工作区仅可收集分支或分支≠homeBranch 时开放。
+    final mergeAllowed = canShowTerminalMergeFab(widget.worktreeInfo);
+    final commitEnabled = canUseGitActions && !_commitMutation.actionLocked;
+    final mergeEnabled = canUseGitActions && mergeAllowed && !_mergeMutation.actionLocked;
     return Column(
       children: [
         Padding(
@@ -1645,12 +1848,12 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                 _buildPaneMenuButton(),
                 IconButton(
                   tooltip: '提交',
-                  onPressed: canUseGitActions ? () => unawaited(_showCommitDialog()) : null,
+                  onPressed: commitEnabled ? () => unawaited(_showCommitDialog()) : null,
                   icon: const Icon(Icons.commit),
                 ),
                 IconButton(
-                  tooltip: '合并',
-                  onPressed: canUseGitActions ? () => unawaited(_mergeWorktree()) : null,
+                  tooltip: mergeAllowed ? '合并' : '主工作区默认分支，无需合并',
+                  onPressed: mergeEnabled ? () => unawaited(_mergeWorktree()) : null,
                   icon: const Icon(Icons.merge_type),
                 ),
                 IconButton(
@@ -1683,6 +1886,20 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           ),
         ),
         if (_hookRepair != null) _buildHookRepairCard(theme),
+        _buildMutationBanner(
+          theme,
+          label: '提交',
+          tracker: _commitMutation,
+          reconcileKey: const Key('terminal-commit-reconcile'),
+          onReconcile: () => _reconcileCommit(),
+        ),
+        _buildMutationBanner(
+          theme,
+          label: '合并',
+          tracker: _mergeMutation,
+          reconcileKey: const Key('terminal-merge-reconcile'),
+          onReconcile: () => _reconcileMerge(),
+        ),
         if (!fullscreen) _buildSessionChipBar(),
         Expanded(
           child: _buildTerminalSurface(),

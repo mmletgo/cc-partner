@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:cc_partner_mobile/address_book/book.dart';
 import 'package:cc_partner_mobile/core/lan_http.dart';
 import 'package:cc_partner_mobile/git/client.dart';
@@ -14,10 +16,21 @@ class _FakeGitClient extends GitClient {
   List<Map<String, dynamic>> trees = const [];
   Object? createError;
   Object? removeError;
+
+  /// remove/merge 的 envelope 脚本；null 走默认 succeeded。
+  Map<String, dynamic>? Function(String kind)? mutationEnvelopeScript;
+
+  /// mutation-operation（ledger 对账）返回脚本；null 表示后端无记录。
+  Map<String, dynamic>? Function(String operationId)? ledgerScript;
+
   int removeCount = 0;
   List<String> removedIds = [];
   List<String> createdBranchNames = [];
   List<bool> listCalls = [];
+  final List<String> mutationOperationIds = [];
+  final List<String> removeOperationIds = [];
+  final List<String> mergeOperationIds = [];
+  int mergeCount = 0;
 
   @override
   Future<Map<String, dynamic>> listWorktrees(
@@ -58,13 +71,57 @@ class _FakeGitClient extends GitClient {
     required String clientOperationId,
     bool force = false,
   }) async {
+    // 请求已发出即计数（即使传输层抛错，也用于断言「没有盲重放」）。
+    removeCount += 1;
+    removedIds.add(worktreeId);
+    removeOperationIds.add(clientOperationId);
     if (removeError != null) {
       throw removeError!;
     }
-    removeCount += 1;
-    removedIds.add(worktreeId);
-    trees = trees.where((tree) => tree['id'] != worktreeId).toList();
-    return {'kind': 'succeeded'};
+    final scripted = mutationEnvelopeScript?.call('remove');
+    if (scripted == null) {
+      // 默认成功模拟：源 worktree 从权威列表消失。
+      trees = trees.where((tree) => tree['id'] != worktreeId).toList();
+      return {'kind': 'succeeded'};
+    }
+    // 权威列表副作用由测试脚本决定（模拟服务端「实际已删/未删」而响应不确定）。
+    onRemoveApplied?.call(worktreeId);
+    // unknown envelope 回显请求 id（后端语义），保证对账同 id。
+    if (scripted['kind'] == 'unknown') {
+      return {'kind': 'unknown', 'clientOperationId': clientOperationId};
+    }
+    return scripted;
+  }
+
+  @override
+  Future<Map<String, dynamic>> merge({
+    required String projectId,
+    required String worktreeId,
+    required String clientOperationId,
+  }) async {
+    mergeCount += 1;
+    mergeOperationIds.add(clientOperationId);
+    final scripted = mutationEnvelopeScript?.call('merge');
+    if (scripted == null) {
+      // 默认成功模拟：源 worktree 从权威列表消失。
+      trees = trees.where((tree) => tree['id'] != worktreeId).toList();
+      return {'kind': 'succeeded'};
+    }
+    // unknown envelope 回显请求 id（后端语义），保证对账同 id。
+    if (scripted['kind'] == 'unknown') {
+      return {'kind': 'unknown', 'clientOperationId': clientOperationId};
+    }
+    return scripted;
+  }
+
+  /// remove 调用后的权威列表副作用钩子（模拟服务端实际执行结果，测试注入）。
+  void Function(String worktreeId)? onRemoveApplied;
+
+  @override
+  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+    mutationOperationIds.add(clientOperationId);
+    final ledger = ledgerScript?.call(clientOperationId);
+    return ledger == null ? null : Map<String, dynamic>.from(ledger);
   }
 }
 
@@ -84,6 +141,7 @@ void main() {
     GitClient git, {
     ValueChanged<Map<String, dynamic>>? onSelect,
     Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession,
+    String? activeId = 'wt-main',
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -91,7 +149,7 @@ void main() {
           book: addressBook,
           http: LanHttpClient(),
           project: const ProjectSummary(id: 'p1', name: 'demo'),
-          activeId: 'wt-main',
+          activeId: activeId,
           onSelect: onSelect ?? (_) {},
           gitClient: git,
           onCreateSession: onCreateSession,
@@ -330,6 +388,128 @@ void main() {
 
     expect(find.textContaining('创建失败'), findsOneWidget);
     expect(find.widgetWithText(TextField, 'feat/x'), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B1 移除返回 unknown → 同 id 对账确认已删 → 横幅消失并提示', (tester) async {
+    final git = seed();
+    git.mutationEnvelopeScript = (kind) => {
+          'kind': 'unknown',
+          'clientOperationId': 'srv-op-r1',
+        };
+    git.ledgerScript = (operationId) => {
+          'state': 'running',
+          'intent': {'kind': 'remove', 'worktreeId': 'wt-1'},
+        };
+    // 服务端实际已删（权威列表移除），ledger 记录 remove intent 进行中 → 对账可确认成功。
+    git.onRemoveApplied = (worktreeId) {
+      git.trees = git.trees.where((tree) => tree['id'] != worktreeId).toList();
+    };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+
+    expect(git.removeCount, 1);
+    expect(git.mutationOperationIds, [git.removeOperationIds.first]);
+    expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
+    expect(find.byKey(const Key('worktrees-unknown-banner')), findsNothing);
+    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B1 移除传输异常 → unknown 横幅可重新对账，仍未知时不盲重放', (tester) async {
+    final git = seed()..removeError = const SocketException('network unreachable');
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+
+    // 传输异常不算确定失败：无「移除失败」SnackBar，出现横幅 + 重新对账。
+    expect(find.textContaining('移除失败'), findsNothing);
+    expect(find.byKey(const Key('worktrees-unknown-banner')), findsOneWidget);
+    expect(git.removeCount, 1);
+    // 源树仍在：重新对账（ledger 无记录）保持 unknown，删除不重发。
+    await tester.tap(find.byKey(const Key('worktrees-retry-reconcile')));
+    await tester.pumpAndSettle();
+    expect(git.removeCount, 1);
+    expect(find.byKey(const Key('worktrees-unknown-banner')), findsOneWidget);
+    expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B14 非主卡片「合并」：确认 → 成功提示并刷新', (tester) async {
+    final git = seed();
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(await book(), git, onSelect: (tree) => selected.add(tree['id'] as String)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('确定把「feat」合并到主工作区？'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(git.mergeCount, 1);
+    // 被合并树不是 active（activeId=wt-main）→ 不触发 onSelect。
+    expect(selected, isEmpty);
+    expect(find.textContaining('合并成功'), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B14 合并的源树是 active → 成功后 onSelect(主树) 交 shell 兜底', (tester) async {
+    final git = seed();
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        onSelect: (tree) => selected.add(tree['id'] as String),
+        activeId: 'wt-1',
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(git.mergeCount, 1);
+    expect(selected, ['wt-main']);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B14 合并 unknown → 同 id 对账 ledger 失败 → 提示可重新发起', (tester) async {
+    final git = seed();
+    git.mutationEnvelopeScript = (kind) => {
+          'kind': 'unknown',
+          'clientOperationId': 'srv-op-m1',
+        };
+    git.ledgerScript = (operationId) => {
+          'state': 'failed',
+          'intent': {'kind': 'merge', 'sourceWorktreeId': 'wt-1'},
+        };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(git.mergeCount, 1);
+    expect(git.mutationOperationIds, [git.mergeOperationIds.first]);
+    expect(find.byKey(const Key('worktrees-unknown-banner')), findsNothing);
+    expect(find.textContaining('操作失败，可以重新发起'), findsOneWidget);
     await flushSnackbars(tester);
   });
 }

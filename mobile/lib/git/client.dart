@@ -1,4 +1,5 @@
 import '../core/lan_http.dart';
+import 'mutation.dart';
 
 /// worktree 分支名固定前缀（对齐 web WORKTREE_BRANCH_PREFIXES）。
 const kWorktreeBranchPrefixes = <String>[
@@ -333,4 +334,60 @@ class GitClient {
     );
     return asObjectList(decoded, wrapKey: 'projects');
   }
+}
+
+/// Business Logic: mutation 返回 unknown（envelope 或传输异常）后，必须用同一 clientOperationId
+/// 查 owning ledger + 刷新权威 worktree 列表对账，禁止盲重放（对齐 web getMutationOperation +
+/// reconcileWorkbenchMutation；merge/collectMerge 额外取主分支提交集作 authority）。
+/// Git 页 / 终端页 / worktrees 页 / 切换条共用同一对账通道，保证裁决口径一致。
+/// Code Logic:
+///   1. mutation-operation 查 ledger（异常按缺失处理）；
+///   2. listWorktrees 刷新权威列表（结果经 onTrees 回调给调用方更新 UI，异常保留空表）；
+///   3. intent 为 merge/collectMerge 时拉主 worktree 最近 100 条提交作 authority（失败不猜成功）；
+///   4. reconcileGitMutation 纯矩阵裁决（ledger 终态优先）。
+Future<GitMutationReconcile> reconcileWorktreeMutation({
+  required GitClient client,
+  required String projectId,
+  required String operationId,
+  void Function(List<Map<String, dynamic>> trees)? onTrees,
+}) async {
+  Map<String, dynamic>? ledger;
+  try {
+    ledger = await client.mutationOperation(operationId);
+  } catch (_) {
+    ledger = null;
+  }
+  List<Map<String, dynamic>> trees = const [];
+  try {
+    final body = await client.listWorktrees(projectId, includeGitStatus: true);
+    trees = asObjectList(body, wrapKey: 'worktrees');
+    onTrees?.call(trees);
+  } catch (_) {}
+  List<String>? mainCommitHashes;
+  final intent = ledger?['intent'];
+  final kind =
+      parseGitMutationKind(intent is Map ? intent['kind'] as String? : null);
+  if (kind == GitMutationKind.merge || kind == GitMutationKind.collectMerge) {
+    Map<String, dynamic>? main;
+    for (final tree in trees) {
+      if (tree['isMain'] == true) {
+        main = tree;
+        break;
+      }
+    }
+    final mainId = main?['id'] as String?;
+    if (main != null && mainId != null && mainId.isNotEmpty) {
+      try {
+        final commits = await client.commits(projectId, worktreeId: mainId, limit: 100);
+        mainCommitHashes = [for (final commit in commits) commit.hash];
+      } catch (_) {
+        mainCommitHashes = null;
+      }
+    }
+  }
+  return reconcileGitMutation(
+    ledger: ledger,
+    worktrees: trees,
+    mainCommitHashes: mainCommitHashes,
+  );
 }
