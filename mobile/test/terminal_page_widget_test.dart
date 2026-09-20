@@ -756,6 +756,51 @@ void main() {
     await tester.pump(const Duration(milliseconds: 3200));
   });
 
+  testWidgets('B2 merge 未对账期间，hook 修复卡「重试 commit」同样被交叉互锁封堵',
+      (tester) async {
+    final sessions = _FakeSessions([_s('s0'), _s('s-repair')]);
+    final git = _FakeGit()
+      ..commitResult = {
+        'kind': 'failedHook',
+        'clientOperationId': 'op-1',
+        'hookFailure': {'stage': 'preCommit', 'stdout': 'lint failed', 'exitCode': 1},
+      }
+      ..mergeResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-m1'};
+    // 输入 WS 用内存 Socket stub：修复成功切会话的 _activateSession 能在测试内
+    // 完整落地（_actionBusy 归零），后续才能驱动 merge 与修复卡重试入口。
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      http: _StubWebSocketHttp(() => _FakeSocket()),
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/x', 'isMain': false},
+    );
+
+    // commit 失败于 hook → 修复卡 → AI 修复成功后卡片出现「重试 commit」。
+    await tester.tap(find.byTooltip('提交'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('提交').last);
+    await tester.pumpAndSettle();
+    expect(git.commitCalls, 1);
+    await tester.tap(find.text('让 AI 修复'));
+    await tester.pumpAndSettle();
+    expect(find.text('重试 commit'), findsOneWidget);
+
+    // 此时发起 merge 并落入 unknown（merge tracker 未决）。
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('terminal-merge-reconcile')), findsOneWidget);
+
+    // 修复卡「重试 commit」入口同样不得绕过互锁：不产生新 commit，merge 横幅保持。
+    await tester.tap(find.text('重试 commit'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(git.commitCalls, 1);
+    expect(find.byKey(const Key('terminal-merge-reconcile')), findsOneWidget);
+  });
+
   testWidgets('B2 merge unknown → 同 id 查 ledger 确认成功 → 合并成功', (tester) async {
     final sessions = _FakeSessions([_s('s0')]);
     final git = _FakeGit()

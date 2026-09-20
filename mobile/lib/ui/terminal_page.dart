@@ -1291,6 +1291,12 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (_actionBusy != null) {
       return;
     }
+    // 交叉互锁的旁路封堵：merge tracker 未决（unknown/reconciling）时不得发起
+    // commit——否则 hook 修复卡的「重试 commit」入口（绕过工具行按钮禁用条件）
+    // 会在 merge 未对账期间产生交叉动作（与工具行互锁同一不变量）。
+    if (_mergeMutation.actionLocked) {
+      return;
+    }
     if (_commitMutation.actionLocked) {
       if (_commitMutation.phase == GitMutationPhase.unknown) {
         await _reconcileCommit();
