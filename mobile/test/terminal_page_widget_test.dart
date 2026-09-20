@@ -214,6 +214,26 @@ class _GatedHydrateSessions extends _FakeSessions {
   }
 }
 
+/// replay 挂起 + hydration 返回多行历史的组合 fake：
+/// 供「replay 在途上滑意图排队、replay 完成后自动触发 hydration」的兜底测试使用
+/// （多行快照让灌入后 buffer 高于视口，可断言视口随意图滚进历史）。
+class _GatedReplayTallHydrateSessions extends _GatedReplaySessions {
+  _GatedReplayTallHydrateSessions(super.sessions);
+
+  @override
+  Future<Map<String, dynamic>> hydrateScrollback(
+    String sessionId, {
+    Duration? timeout,
+  }) async {
+    hydrateIds.add(sessionId);
+    return {
+      'sessionId': sessionId,
+      'buffer': [for (var i = 0; i < 200; i++) 'history-line-$i'].join('\r\n'),
+      'lastSeq': 1,
+    };
+  }
+}
+
 /// hydration 返回多行历史快照：让灌入后 buffer 高于视口（maxScrollExtent > 0），
 /// 供「首滑触发后视口滚入历史」断言使用。
 class _TallHydrateSessions extends _FakeSessions {
@@ -520,6 +540,10 @@ class _FakeGit extends GitClient {
   Map<String, dynamic> mergeResult = {'kind': 'succeeded', 'value': <String, dynamic>{}};
   Map<String, dynamic> repairResult = {'terminalSessionId': 's-repair'};
 
+  /// commit/merge 抛错注入；非 null 时对应调用抛出（模拟服务端确定失败，如 500）。
+  Object? commitError;
+  Object? mergeError;
+
   /// mutation-operation（ledger 对账）返回脚本；null 表示后端无记录。
   Map<String, dynamic>? Function(String operationId)? ledgerScript;
   List<Map<String, dynamic>> trees = const [];
@@ -540,6 +564,10 @@ class _FakeGit extends GitClient {
     commitCalls += 1;
     commitOperationIds.add(clientOperationId);
     lastCommitMessage = message;
+    final error = commitError;
+    if (error != null) {
+      throw error;
+    }
     // unknown envelope 回显请求 id（后端语义），保证对账同 id。
     if (commitResult['kind'] == 'unknown') {
       return {'kind': 'unknown', 'clientOperationId': clientOperationId};
@@ -555,6 +583,10 @@ class _FakeGit extends GitClient {
   }) async {
     mergeCalls += 1;
     mergeOperationIds.add(clientOperationId);
+    final error = mergeError;
+    if (error != null) {
+      throw error;
+    }
     if (mergeResult['kind'] == 'unknown') {
       return {'kind': 'unknown', 'clientOperationId': clientOperationId};
     }
@@ -2340,5 +2372,163 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(sessions.replayIds, ['s1', 's0', 's1']);
+  });
+
+  testWidgets('初始 replay 404（会话已关闭）：静默不上屏错误条，门闩照常放行', (tester) async {
+    final socket = _FakeSocket();
+    final http = _StubWebSocketHttp(() => socket);
+    final sessions = _GatedReplaySessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: http);
+
+    sessions.initialReplay.completeError(LanHttpException(404, 'session gone'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // 会话已关闭类失败属预期态：静默吞掉、不置错误条（对齐 web
+    // isExpectedClosedSessionError 判定即静默 return）。
+    expect(find.textContaining('加载终端历史失败'), findsNothing);
+    expect(find.byKey(const Key('terminal-panel-error-action')), findsNothing);
+    // 门闩照常放行：输入 WS 已建立，ready 握手后输入可用（实时流继续）。
+    expect(http.connectCalls, 1);
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
+      isTrue,
+    );
+  });
+
+  testWidgets('初始 replay 500（非会话关闭类）：照常上屏错误条并携带详情', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _GatedReplaySessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+
+    sessions.initialReplay.completeError(LanHttpException(500, 'boom'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // 非 404 失败仍是异常路径：错误条上屏（对齐 web setPanelError）。
+    expect(find.textContaining('加载终端历史失败'), findsOneWidget);
+    expect(find.textContaining('LAN HTTP 500: boom'), findsOneWidget);
+  });
+
+  testWidgets('hydration 404（会话已关闭）：静默不上屏错误条，不标记已灌可再触发', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _FakeSessions([_s('s0')])
+      ..hydrateError = LanHttpException(404, 'session gone');
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+
+    final terminalCenter = tester.getCenter(find.byKey(const Key('terminal-view')));
+    final gesture = await tester.startGesture(terminalCenter);
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    await tester.pump();
+
+    expect(sessions.hydrateIds, ['s0']);
+    // 会话已关闭类失败属预期态：静默、无错误条与重试入口（对齐 web）。
+    expect(find.textContaining('加载终端历史失败'), findsNothing);
+    expect(find.byKey(const Key('terminal-panel-error-action')), findsNothing);
+
+    // 静默路径不标记已灌：再次上滑仍可触发重灌（静默不是卡死）。
+    final gesture2 = await tester.startGesture(terminalCenter);
+    await gesture2.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture2.up();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0', 's0']);
+  });
+
+  testWidgets('commit 确定失败（500）：常驻错误条携带服务端详情，不再 toast', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()..commitError = LanHttpException(500, 'boom');
+    await _pump(tester, sessions: sessions, git: git);
+
+    await tester.tap(find.byTooltip('提交'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(git.commitCalls, 1);
+    // 常驻错误条携带「提交失败」前缀与服务端详情（对齐 web setPanelError）。
+    expect(find.textContaining('提交失败'), findsOneWidget);
+    expect(find.textContaining('LAN HTTP 500: boom'), findsOneWidget);
+    // 不再走 2.5s toast：无 SnackBar。
+    expect(find.byType(SnackBar), findsNothing);
+    // 常驻：泵过 3s 后错误条仍在（toast 口径早已消失）。
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.textContaining('提交失败'), findsOneWidget);
+  });
+
+  testWidgets('merge 确定失败（500）：常驻错误条携带服务端详情，不再 toast', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()..mergeError = LanHttpException(500, 'boom');
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      worktreeInfo: const {
+        'id': 'w1',
+        'name': 'w1',
+        'branch': 'feat/app',
+        'isMain': false,
+      },
+    );
+
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(git.mergeCalls, 1);
+    // 常驻错误条携带「合并失败」前缀与服务端详情（对齐 web setPanelError）。
+    expect(find.textContaining('合并失败'), findsOneWidget);
+    expect(find.textContaining('LAN HTTP 500: boom'), findsOneWidget);
+    // 不再走 2.5s toast：无 SnackBar。
+    expect(find.byType(SnackBar), findsNothing);
+    // 常驻：泵过 3s 后错误条仍在。
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.textContaining('合并失败'), findsOneWidget);
+  });
+
+  testWidgets('replay 在途上滑：意图排队不丢弃，replay 完成后自动触发 hydration 并滚进历史', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _GatedReplayTallHydrateSessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+    expect(sessions.replayIds, ['s0']);
+    expect(sessions.hydrateIds, isEmpty);
+
+    // replay 挂起期间上滑：意图照常累计（不再直接丢弃），门闩未放行不立即触发。
+    final terminalCenter = tester.getCenter(find.byKey(const Key('terminal-view')));
+    final gesture = await tester.startGesture(terminalCenter);
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.hydrateIds, isEmpty);
+
+    // replay 完成 → 兜底自动触发 hydration（对齐 web replay.then 再次
+    // startHydrationRequest）。
+    sessions.initialReplay.complete({'sessionId': 's0', 'buffer': '', 'lastSeq': 0});
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0']);
+
+    // 视口按累计意图滚进刚灌入的历史（至少 1 行），不是钉在底部。
+    await tester.pump();
+    await tester.pump();
+    final terminalScrollable = tester.state<ScrollableState>(
+      find.descendant(
+        of: find.byKey(const Key('terminal-view')),
+        matching: find.byType(Scrollable),
+      ).first,
+    );
+    expect(terminalScrollable.position.maxScrollExtent, greaterThan(0));
+    expect(terminalScrollable.position.pixels, greaterThan(0));
   });
 }

@@ -586,7 +586,9 @@ class _WorktreesPageState extends State<WorktreesPage> {
       child: ListTile(
         key: Key('worktree-item-$id'),
         selected: id == widget.activeId,
-        onTap: () => widget.onSelect(tree),
+        // 对齐 web MobileWorktreePanel：删除/合并/创建/对账在途（页内忙碌锁）时
+        // 卡片选择禁用（onTap 置 null 同时呈现禁用视觉），锁定期间不触发 onSelect。
+        onTap: _actionLocked ? null : () => widget.onSelect(tree),
         title: Row(
           children: [
             Container(

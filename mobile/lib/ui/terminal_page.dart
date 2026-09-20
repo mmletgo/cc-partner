@@ -693,15 +693,28 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           buffer.terminal.write(snapshot);
         }
       } catch (error) {
-        // 快照拉取失败时仍以实时流继续，gap 帧会触发再次重放；失败上屏错误条
-        // （对齐 web XtermSlot replay catch → setPanelError）。
         if (!mounted || _disposed || !identical(_active, buffer)) {
           return;
         }
-        _setPanelError('加载终端历史失败：$error');
+        // 快照拉取失败时仍以实时流继续，gap 帧会触发再次重放。会话已关闭类失败
+        // （404/not-found）属预期态：静默吞掉不置错误条（对齐 web XtermSlot
+        // replay catch 先 isExpectedClosedSessionError 判定即静默 return）；
+        // 其余失败仍上屏错误条（对齐 web setPanelError）。注意只跳过错误条，
+        // 不得提前返回函数——后续输入 WS 重建/events 循环必须照常执行。
+        if (!_isClosedSessionError(error)) {
+          _setPanelError('加载终端历史失败：$error');
+        }
       } finally {
         // 成败都置 replayReady（对齐 web then/catch 两分支均置 replayReady=true）。
         buffer.policy.finishReplay();
+        // 对齐 web replay.then/catch 再次 startHydrationRequest 的兜底：replay
+        // 在途期间累计的上滑 hydration 意图已达阈值时，replay 一完成就自动触发。
+        if (mounted &&
+            !_disposed &&
+            identical(_active, buffer) &&
+            buffer.hydrationIntent <= -1) {
+          unawaited(_beginHistoryHydration(buffer));
+        }
       }
       _jumpToBottom();
     }
@@ -1118,7 +1131,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// Code Logic：仅跟踪单指 touch；行高按视口/rows 换算；转发模式按触点落格
   /// （sgrWheelCellFromTouch）编码 `CSI < 64/65 ; col ; row M`（单次最多 8 帧）走
   /// _send；普通模式对向上意图累计，≤ -1 行且 replay 门闩已放行时触发
-  /// refreshHistory hydration（去掉「须先滚到顶」前置）。
+  /// refreshHistory hydration（去掉「须先滚到顶」前置）；replay 在途时意图照常
+  /// 累计（对齐 web pendingHydratedScrollLines 排队），完成后的兜底自动触发。
   void _onSurfacePointerDown(PointerDownEvent event) {
     if (event.kind != PointerDeviceKind.touch) {
       return;
@@ -1175,15 +1189,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     final hydrated = buffer.policy.isHistoryHydrated(ownerInstanceId: buffer.owner);
-    if (hydrated || buffer.hydrating || !buffer.policy.replayReady) {
+    if (hydrated || buffer.hydrating) {
       return;
     }
+    // replay 在途（门闩未放行）时意图照常累计不丢弃，等 replay 完成后由
+    // _activateSession 兜底自动触发（对齐 web pendingHydratedScrollLines 排队
+    // + replay.then 再次 startHydrationRequest）；已就绪才立即触发 hydration。
     buffer.hydrationIntent = accumulateHydrationScrollIntent(
       buffer.hydrationIntent,
       result.lines,
       terminal.viewHeight,
     );
-    if (buffer.hydrationIntent <= -1) {
+    if (buffer.hydrationIntent <= -1 && buffer.policy.replayReady) {
       unawaited(_beginHistoryHydration(buffer));
     }
   }
@@ -1204,7 +1221,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 往返期间暂存的 live chunk（seq > 快照 lastSeq 且 owner 一致，对齐 web
   /// appendHeldLiveAfterReplay），帧末把视口钉回相同底部锚点并随本次触发手势至少
   /// 上滚 1 行进入刚灌入的历史（对齐 web scrollWhenHydrationParsed）；失败不标记 hydrated、
-  /// 先补写暂存 chunk（防丢失）再错误上屏并附「重试」，live 流继续不受影响。
+  /// 先补写暂存 chunk（防丢失），会话已关闭类失败静默，其余错误上屏并附「重试」，
+  /// live 流继续不受影响。
   Future<void> _beginHistoryHydration(_MountedSession buffer) async {
     if (buffer.hydrating ||
         buffer.policy.isHistoryHydrated(ownerInstanceId: buffer.owner)) {
@@ -1259,15 +1277,19 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         _anchorViewportFromBottom(distFromBottom, extraUpLines: scrollUpLines);
       }
     } catch (error) {
-      // hydration 失败可重试：先按序补写暂存 chunk（防丢失，不标记 hydrated），
-      // 错误上屏并附「重试」入口；live 流继续不受影响。
+      // 失败先按序补写暂存 chunk（防丢失，不标记 hydrated）；live 流继续不受影响。
       _flushHeldLiveChunks(buffer);
       if (mounted && !_disposed && identical(_active, buffer)) {
-        _setPanelError(
-          '加载终端历史失败：$error',
-          actionLabel: '重试',
-          action: () => unawaited(_beginHistoryHydration(buffer)),
-        );
+        // 会话已关闭类失败（404/not-found）属预期态：补写暂存 chunk 后静默、
+        // 不置错误条（对齐 web hydration catch 先 isExpectedClosedSessionError
+        // 判定即静默 return）；其余失败可重试：错误上屏并附「重试」入口。
+        if (!_isClosedSessionError(error)) {
+          _setPanelError(
+            '加载终端历史失败：$error',
+            actionLabel: '重试',
+            action: () => unawaited(_beginHistoryHydration(buffer)),
+          );
+        }
       }
     } finally {
       buffer.hydrating = false;
@@ -2174,7 +2196,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// Business Logic: 网络层异常意味着请求可能已到达也可能没到达，必须按 unknown 处理等对账；
   /// 服务器已应答的错误是确定失败，解锁后允许重新发起。
-  /// Code Logic: isTransportUnknownError → markUnknown（横幅可再对账）；其余 → markIdle + 失败提示。
+  /// Code Logic: isTransportUnknownError → markUnknown（横幅可再对账）；
+  /// 其余 → markIdle + 常驻错误条携带服务端详情（对齐 web commit catch →
+  /// setPanelError('提交失败： <详情>')）。
   void _afterCommitFailure(Object error) {
     if (!mounted || _disposed) {
       return;
@@ -2185,7 +2209,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     _commitMutation.markIdle();
-    _toast('提交失败，可以重新发起');
+    _setPanelError('提交失败：$error');
   }
 
   /// Business Logic: commit unknown 后必须用同一 clientOperationId 查 ledger 对账，不能猜成败
@@ -2382,8 +2406,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         setState(() {});
         return;
       }
+      // 服务器已应答的确定失败：解锁 + 常驻错误条携带服务端详情（对齐 web
+      // merge catch → setPanelError('合并失败： <详情>')），不再用 2.5s toast。
       _mergeMutation.markIdle();
-      _toast('合并失败，请稍后重试');
+      _setPanelError('合并失败：$error');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);

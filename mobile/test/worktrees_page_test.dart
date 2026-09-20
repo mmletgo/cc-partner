@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cc_partner_mobile/address_book/book.dart';
@@ -16,6 +17,11 @@ class _FakeGitClient extends GitClient {
   List<Map<String, dynamic>> trees = const [];
   Object? createError;
   Object? removeError;
+
+  /// remove/merge 在途挂起闸门：非 null 时对应调用 await 该 future
+  /// （模拟网络在途，供忙碌锁时序测试控制完成时机）。
+  Completer<void>? removeGate;
+  Completer<void>? mergeGate;
 
   /// remove/merge 的 envelope 脚本；null 走默认 succeeded。
   Map<String, dynamic>? Function(String kind)? mutationEnvelopeScript;
@@ -78,6 +84,11 @@ class _FakeGitClient extends GitClient {
     if (removeError != null) {
       throw removeError!;
     }
+    // 在途挂起闸门：模拟删除请求仍在网络中，页面保持忙碌锁。
+    final gate = removeGate;
+    if (gate != null) {
+      await gate.future;
+    }
     final scripted = mutationEnvelopeScript?.call('remove');
     if (scripted == null) {
       // 默认成功模拟：源 worktree 从权威列表消失。
@@ -101,6 +112,11 @@ class _FakeGitClient extends GitClient {
   }) async {
     mergeCount += 1;
     mergeOperationIds.add(clientOperationId);
+    // 在途挂起闸门：模拟合并请求仍在网络中，页面保持忙碌锁。
+    final gate = mergeGate;
+    if (gate != null) {
+      await gate.future;
+    }
     final scripted = mutationEnvelopeScript?.call('merge');
     if (scripted == null) {
       // 默认成功模拟：源 worktree 从权威列表消失。
@@ -743,6 +759,86 @@ void main() {
     await tester.pumpAndSettle();
     expect(git.mergeCount, 1);
     expect(mutated, 2, reason: '合并成功后应再回调壳层一次');
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('删除在途时卡片选择禁用：点其它卡片不触发 onSelect，完成后恢复', (tester) async {
+    final git = seed();
+    final gate = Completer<void>();
+    git.removeGate = gate;
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(await book(), git, onSelect: (tree) => selected.add(tree['id'] as String)),
+    );
+    await tester.pumpAndSettle();
+
+    // 发起删除（非激活 wt-1）并停在在途。
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pump();
+    expect(git.removeCount, 1);
+
+    // 在途：页内忙碌锁禁用卡片选择（onTap 为 null，同时呈禁用视觉）。
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNull,
+    );
+    // 锁定期间点其它卡片不触发 onSelect。
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pump();
+    expect(selected, isEmpty);
+
+    // 删除完成后恢复可点：再点卡片正常回调 onSelect。
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNotNull,
+    );
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pump();
+    expect(selected, ['wt-main']);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('合并在途时卡片选择禁用：点其它卡片不触发 onSelect，完成后恢复', (tester) async {
+    final git = seed();
+    final gate = Completer<void>();
+    git.mergeGate = gate;
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(await book(), git, onSelect: (tree) => selected.add(tree['id'] as String)),
+    );
+    await tester.pumpAndSettle();
+
+    // 发起合并（非激活 wt-1）并停在在途。
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pump();
+    expect(git.mergeCount, 1);
+
+    // 在途：页内忙碌锁禁用卡片选择。
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNull,
+    );
+    // 锁定期间点其它卡片不触发 onSelect。
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pump();
+    expect(selected, isEmpty);
+
+    // 合并完成后恢复可点（merged 树非激活树，成功后无兜底 onSelect）。
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNotNull,
+    );
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pump();
+    expect(selected, ['wt-main']);
     await flushSnackbars(tester);
   });
 }
