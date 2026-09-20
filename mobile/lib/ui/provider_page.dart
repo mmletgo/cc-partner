@@ -128,6 +128,31 @@ class _ProviderPageState extends State<ProviderPage> {
     );
   }
 
+  /// Business Logic: summary 加载成功但 cc-switch 没有任何已配置 provider 时，
+  /// 纯空列表会让用户误以为页面故障；对齐 web providerManager:noProviders 的
+  /// info 提示，与顶部「刷新」（重新检测）按钮并存。
+  /// Code Logic: info 语义行（info icon + 引导文案），仅在 ready 且 apps 为空时渲染。
+  Widget _noProvidersHint(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      key: const Key('provider-empty'),
+      padding: const EdgeInsets.only(top: 4, bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline, size: 16, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '未找到已配置的 provider，请先在 cc-switch 中配置 provider。',
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -170,6 +195,7 @@ class _ProviderPageState extends State<ProviderPage> {
                         const SizedBox(height: 12),
                         if (!_cliAvailable)
                           _cliMissingBanner(context),
+                        if (_apps.isEmpty) _noProvidersHint(context),
                         for (final app in _apps) ...[
                           Text(app.app, style: Theme.of(context).textTheme.titleMedium),
                           for (final provider in app.providers)

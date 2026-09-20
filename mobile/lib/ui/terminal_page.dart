@@ -351,13 +351,16 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     setState(() => _inputGateOpen = true);
   }
 
-  /// 输入行可用性：会话已激活、replay 门闩已放行且输入 WS 处于 ready（open）。
+  /// 输入行可用性：会话已激活、权威状态为 running、replay 门闩已放行且输入 WS 处于 ready（open）。
   ///
-  /// Code Logic：三者缺一即禁用（对齐 web inputEnabled = sessionId && stream ready，
-  /// 加上 replayReady 门闩）；_socket 每次状态翻转处都有 setState，UI 会跟随刷新。
+  /// Code Logic：四者缺一即禁用——status 取自当前会话 DTO（最近一次列表刷新），
+  /// 严格等于 'running' 才启用，缺失/非 running（如 exited）一律禁用
+  /// （fail-closed 对齐 web inputEnabled 的 status === 'running' 严格比较）；
+  /// _sessionList 刷新与 _socket 状态翻转处都有 setState，UI 会跟随刷新。
   bool get _inputRowEnabled {
     final socket = _socket;
     return _sessionId != null &&
+        _currentSession?.status == 'running' &&
         _inputGateOpen &&
         socket != null &&
         socket.readyState == WebSocket.open;
@@ -1904,8 +1907,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     // 合并入口门控（对齐 web canShowMobileTerminalMergeFab）：非主 worktree 可合并，
     // 主工作区仅可收集分支或分支≠homeBranch 时开放。
     final mergeAllowed = canShowTerminalMergeFab(widget.worktreeInfo);
-    final commitEnabled = canUseGitActions && !_commitMutation.actionLocked;
-    final mergeEnabled = canUseGitActions && mergeAllowed && !_mergeMutation.actionLocked;
+    // 交叉互锁（对齐 web canCommitWorktree/canMergeWorktree 的双向 tracker 检查）：
+    // commit 与 merge 各查各的 tracker 不够——任一 tracker 处于 busy/reconciling/unknown
+    // 未决相位时两个动作都要禁用，防止 commit 未对账时又发起 merge（反之亦然）产生
+    // 交叉覆盖；busy 在途期 _actionBusy 本就各自禁用，关键是 unknown/reconciling
+    // 落定后（_actionBusy 已清空）仍要互相锁定。
+    final anyMutationPending =
+        _commitMutation.actionLocked || _mergeMutation.actionLocked;
+    final commitEnabled = canUseGitActions && !anyMutationPending;
+    final mergeEnabled = canUseGitActions && mergeAllowed && !anyMutationPending;
     return Column(
       children: [
         Padding(
@@ -1998,8 +2008,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                 child: TextField(
                   key: const Key('terminal-input-field'),
                   controller: _input,
-                  // replay 门闩未放行或输入 WS 非 ready（connecting/blocked/closed）时禁用；
-                  // ready 恢复后经既有 setState 路径自动恢复可用。
+                  // replay 门闩未放行、会话非 running 或输入 WS 非 ready
+                  // （connecting/blocked/closed）时禁用；任一条件恢复后
+                  // 经既有 setState 路径自动恢复可用。
                   enabled: _inputRowEnabled,
                   decoration: const InputDecoration(hintText: '输入后回车发送'),
                   onSubmitted: (value) {

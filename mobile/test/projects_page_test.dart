@@ -576,4 +576,59 @@ void main() {
       findsNothing,
     );
   });
+
+  testWidgets('不支持类型（kind 非 local/remote 或缺失）的项目行禁点并显示说明',
+      (tester) async {
+    ProjectSummary? opened;
+    final client = _FlakyListProjectsClient(items: [
+      const ProjectSummary(
+          id: 'p-tpl', name: 'tpl-proj', kind: 'template', path: '/mnt/tpl'),
+      const ProjectSummary(id: 'p-nokind', name: 'nokind-proj', path: '/mnt/nokind'),
+      const ProjectSummary(id: 'p-ok', name: 'ok-proj', kind: 'local', path: '/Users/demo'),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProjectsPage(
+            book: _book(),
+            http: LanHttpClient(),
+            onOpen: (project) => opened = project,
+            client: client,
+            transferApi: _FakeTransferApi(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 非 local/remote（含缺 kind）行：onTap 为 null + enabled=false 置灰，
+    // 「不支持的项目类型」说明上屏（对齐 web canSelectMobileProject fail-closed）。
+    final tplTile = tester.widget<ListTile>(
+      find.byKey(const Key('project-row-p-tpl')),
+    );
+    expect(tplTile.onTap, isNull);
+    expect(tplTile.enabled, isFalse);
+    final nokindTile = tester.widget<ListTile>(
+      find.byKey(const Key('project-row-p-nokind')),
+    );
+    expect(nokindTile.onTap, isNull);
+    expect(nokindTile.enabled, isFalse);
+    expect(find.text('不支持的项目类型'), findsNWidgets(2));
+
+    // 点不可选行不触发打开。
+    await tester.tap(find.text('tpl-proj'));
+    await tester.pumpAndSettle();
+    expect(opened, isNull);
+
+    // local 行不受影响：可点开且不渲染说明。
+    final okTile = tester.widget<ListTile>(
+      find.byKey(const Key('project-row-p-ok')),
+    );
+    expect(okTile.onTap, isNotNull);
+    expect(okTile.enabled, isTrue);
+    expect(find.byKey(const Key('project-unsupported-p-ok')), findsNothing);
+    await tester.tap(find.text('ok-proj'));
+    await tester.pumpAndSettle();
+    expect(opened?.id, 'p-ok');
+  });
 }

@@ -60,6 +60,12 @@ class _FilesPageState extends State<FilesPage> {
 
   String get _path => _stack.last;
 
+  /// Business Logic: 对齐 web MobileFilesPanel 的 mobilePathCrumb——「上级目录」
+  /// 旁展示当前目录路径的纯文本小字（root 显示「/」，即 web rootPath 同款），
+  /// 长路径横向滚动查看；web 该元素为 span 纯文本，段落不可点击回跳，故同样只读。
+  /// Code Logic: _path 为空（根目录）时返回「/」，否则原样返回当前路径。
+  String get _crumbLabel => _path.isEmpty ? '/' : _path;
+
   Future<void> _reload() async {
     setState(() {
       _loading = true;
@@ -196,6 +202,21 @@ class _FilesPageState extends State<FilesPage> {
     }
     return Column(
       children: [
+        // 当前目录路径 crumb（对齐 web mobilePathCrumb：muted 纯文本、root 为
+        // 「/」、段不可点击；长路径横向滚动查看）。
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Text(
+              _crumbLabel,
+              key: const Key('files-path-crumb'),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ),
+        ),
         if (_stack.length > 1)
           ListTile(
             leading: const Icon(Icons.arrow_upward),

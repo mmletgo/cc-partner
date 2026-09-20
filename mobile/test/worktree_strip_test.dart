@@ -221,4 +221,29 @@ void main() {
     );
     expect(find.byKey(const Key('worktree-strip-error')), findsNothing);
   });
+
+  testWidgets('空列表显示「暂无 worktree」占位，创建槽仍可用', (tester) async {
+    // 空列表（无创建槽）：只渲染占位文案。
+    await pump(tester, worktrees: const []);
+    expect(find.text('暂无 worktree'), findsOneWidget);
+    expect(find.byKey(const Key('worktree-strip-empty')), findsOneWidget);
+    expect(find.byKey(const Key('worktree-create')), findsNothing);
+
+    // 空列表（带创建槽）：占位与「+ 新建」并存（对齐 web 空态文案 + 条上创建表单）。
+    var created = '';
+    await pump(tester, worktrees: const [], onCreate: (branch) => created = branch);
+    expect(find.text('暂无 worktree'), findsOneWidget);
+    expect(find.byKey(const Key('worktree-create')), findsOneWidget);
+
+    // 非空列表不渲染占位。
+    await pump(
+      tester,
+      worktrees: [tree('wt-main', isMain: true)],
+      activeId: 'wt-main',
+      onCreate: (branch) => created = branch,
+    );
+    expect(find.text('暂无 worktree'), findsNothing);
+    expect(find.byKey(const Key('worktree-create')), findsOneWidget);
+    expect(created, isEmpty);
+  });
 }

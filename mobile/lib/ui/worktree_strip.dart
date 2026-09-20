@@ -87,6 +87,7 @@ Future<WorktreeCreationResult> createWorktreeWithTerminalSession({
 /// 条上要能直接新建 worktree（prefix/suffix inline 表单），mutation 结果未知时
 /// 条上方出错误条并提供「重新对账」入口。
 /// Code Logic: 纵向 Column = 可选错误条 + 水平 chip 列表（含尾部创建槽）；
+/// 列表为空时渲染「暂无 worktree」占位（对齐 web worktrees.empty）；
 /// onRemove 非空且非主 chip 时渲染尾部 X；onCreate 非空时渲染「+ 新建」创建槽。
 class WorktreeStrip extends StatelessWidget {
   const WorktreeStrip({
@@ -137,6 +138,18 @@ class WorktreeStrip extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 8),
             children: [
+              // 空列表占位（对齐 web MobileWorktreeTabs 的 worktrees.empty）：
+              // 只剩创建槽时给出「暂无 worktree」提示，避免条上空白让人以为加载中。
+              if (worktrees.isEmpty)
+                Padding(
+                  key: const Key('worktree-strip-empty'),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                  child: Text(
+                    '暂无 worktree',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ),
               for (final tree in worktrees)
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),

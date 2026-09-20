@@ -5,15 +5,22 @@ import 'package:cc_partner_mobile/ui/provider_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// 首次 probe 可配置失败，用于验证错误态与重试；summary 返回固定 app 列表。
+/// 首次 probe 可配置失败，用于验证错误态与重试；summary 返回固定 app 列表，
+/// 可切换为空 apps（验证 noProviders 空态提示）。
 class _FakeProviderClient extends ProviderClient {
-  _FakeProviderClient({this.failFirstProbe = true, this.cliAvailable})
-      : super(LanHttpClient(), 'http://127.0.0.1:1');
+  _FakeProviderClient({
+    this.failFirstProbe = true,
+    this.cliAvailable,
+    this.emptyApps = false,
+  }) : super(LanHttpClient(), 'http://127.0.0.1:1');
 
   final bool failFirstProbe;
 
   /// 非 null 时 summary 带 `cli.available`；null 时缺 cli 字段（旧后端）。
   final bool? cliAvailable;
+
+  /// true 时 summary 的 apps 为空数组（cc-switch 未配置任何 provider）。
+  final bool emptyApps;
   int probeCalls = 0;
 
   @override
@@ -30,14 +37,15 @@ class _FakeProviderClient extends ProviderClient {
         if (cliAvailable != null)
           'cli': {'available': cliAvailable},
         'apps': [
-          {
-            'app': 'claude',
-            'currentProviderId': 'p-a',
-            'providers': [
-              {'id': 'p-a', 'name': 'A', 'isCurrent': true},
-              {'id': 'p-b', 'name': 'B', 'isCurrent': false},
-            ],
-          },
+          if (!emptyApps)
+            {
+              'app': 'claude',
+              'currentProviderId': 'p-a',
+              'providers': [
+                {'id': 'p-a', 'name': 'A', 'isCurrent': true},
+                {'id': 'p-b', 'name': 'B', 'isCurrent': false},
+              ],
+            },
         ],
       };
 }
@@ -123,5 +131,32 @@ void main() {
       ),
     );
     expect(switchButton.onPressed, isNotNull);
+  });
+
+  testWidgets('summary without any provider shows the noProviders hint', (tester) async {
+    final client = _FakeProviderClient(failFirstProbe: false, emptyApps: true);
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    // 对齐 web providerManager:noProviders 的 info 文案；与顶部刷新按钮并存。
+    expect(find.byKey(const Key('provider-empty')), findsOneWidget);
+    expect(
+      find.text('未找到已配置的 provider，请先在 cc-switch 中配置 provider。'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('provider-refresh')), findsOneWidget);
+  });
+
+  testWidgets('summary with providers keeps the noProviders hint hidden', (tester) async {
+    final client = _FakeProviderClient(failFirstProbe: false);
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('provider-empty')), findsNothing);
+    expect(
+      find.text('未找到已配置的 provider，请先在 cc-switch 中配置 provider。'),
+      findsNothing,
+    );
+    expect(find.text('A'), findsOneWidget);
   });
 }

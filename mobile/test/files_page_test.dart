@@ -421,4 +421,50 @@ void main() {
     expect(find.text('1.5 KB'), findsOneWidget);
     expect(find.text('文件'), findsOneWidget);
   });
+
+  testWidgets('列表上方展示当前目录路径 crumb（纯文本，root 显示 /）', (tester) async {
+    final client = _RecordingFilesClient()
+      ..nodes = [
+        {'name': 'assets', 'kind': 'dir', 'path': 'assets'},
+        {'name': 'README.md', 'kind': 'file', 'path': 'README.md'},
+      ];
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    // 根目录显示 web rootPath 同款「/」。
+    expect(
+      tester.widget<Text>(find.byKey(const Key('files-path-crumb'))).data,
+      '/',
+    );
+
+    // 进入子目录后 crumb 显示当前路径（对齐 web currentDir）。
+    client.nodes = [
+      {'name': 'src', 'kind': 'dir', 'path': 'assets/src'},
+    ];
+    await tester.tap(find.text('assets'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('files-path-crumb'))).data,
+      'assets',
+    );
+
+    // 再进一层：crumb 跟随完整路径。
+    client.nodes = [
+      {'name': 'README.md', 'kind': 'file', 'path': 'assets/src/README.md'},
+    ];
+    await tester.tap(find.text('src'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('files-path-crumb'))).data,
+      'assets/src',
+    );
+
+    // crumb 为纯文本（web 同款 span）：点击不触发任何目录跳转。
+    await tester.tap(find.byKey(const Key('files-path-crumb')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('files-path-crumb'))).data,
+      'assets/src',
+    );
+  });
 }

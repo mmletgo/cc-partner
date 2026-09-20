@@ -27,12 +27,23 @@ class _FakeTransferApi extends TransferApi {
   bool failCancelWithLanError = false;
   int getOperationCalls = 0;
 
+  /// 首次 listTasks/listDevices 抛错：验证首载失败区与重试按钮。
+  bool failFirstListTasks = false;
+  bool failFirstListDevices = false;
+
+  /// 之后所有 listTasks 抛错：验证轮询失败保留旧数据、不上屏重试按钮。
+  bool failAllListTasks = false;
+  int listDevicesCalls = 0;
+
   /// 第 N 次 get-operation 起返回 succeeded；调大可模拟一直 pending。
   int operationSucceedsAfterCalls = 2;
 
   @override
   Future<List<TransferTask>> listTasks() async {
     listTasksCalls += 1;
+    if (failAllListTasks || (failFirstListTasks && listTasksCalls == 1)) {
+      throw LanHttpException(503, 'boom');
+    }
     return _tasks ?? [
       TransferTask(
         id: 't-recv',
@@ -44,10 +55,16 @@ class _FakeTransferApi extends TransferApi {
   }
 
   @override
-  Future<List<Map<String, dynamic>>> listDevices() async => [
-        {'id': 'peer', 'isSelf': false, 'name': 'Other'},
-        {'id': 'host', 'isSelf': true, 'name': 'This PC'},
-      ];
+  Future<List<Map<String, dynamic>>> listDevices() async {
+    listDevicesCalls += 1;
+    if (failFirstListDevices && listDevicesCalls == 1) {
+      throw LanHttpException(503, 'boom');
+    }
+    return [
+      {'id': 'peer', 'isSelf': false, 'name': 'Other'},
+      {'id': 'host', 'isSelf': true, 'name': 'This PC'},
+    ];
+  }
 
   @override
   Future<List<int>> download(String taskId) async => [9, 8, 7];
@@ -526,6 +543,68 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
     expect(api.listTasksCalls, greaterThan(initialTasks));
+  });
+
+  testWidgets('tasks first-load failure shows error text with retry that recovers', (
+    tester,
+  ) async {
+    final api = _FakeTransferApi(tasks: [
+      TransferTask(id: 't-1', direction: 'Send', status: 'completed', fileName: 'a.txt'),
+    ]);
+    api.failFirstListTasks = true;
+    await _pumpPage(tester, api);
+    await tester.pumpAndSettle();
+
+    // 首载失败（无数据）上屏错误 + 显式「重试」按钮；设备数据正常不出现设备错误区。
+    expect(find.byKey(const Key('transfer-tasks-error')), findsOneWidget);
+    expect(find.textContaining('任务列表加载失败'), findsOneWidget);
+    expect(find.byKey(const Key('transfer-tasks-retry')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-devices-error')), findsNothing);
+
+    // fake 修复后点重试 → 任务列表渲染，错误区消失。
+    await tester.tap(find.byKey(const Key('transfer-tasks-retry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('transfer-task-t-1')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-tasks-error')), findsNothing);
+    expect(find.byKey(const Key('transfer-tasks-retry')), findsNothing);
+  });
+
+  testWidgets('devices first-load failure shows error text with retry that recovers', (
+    tester,
+  ) async {
+    final api = _FakeTransferApi();
+    api.failFirstListDevices = true;
+    await _pumpPage(tester, api);
+    await tester.pumpAndSettle();
+
+    // 设备首载失败区：错误 + 重试；任务数据正常不出现任务错误区。
+    expect(find.byKey(const Key('transfer-devices-error')), findsOneWidget);
+    expect(find.textContaining('设备列表加载失败'), findsOneWidget);
+    expect(find.byKey(const Key('transfer-devices-retry')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-tasks-error')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('transfer-devices-retry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('transfer-target')), findsOneWidget);
+    expect(find.text('This PC · 主机'), findsOneWidget);
+    expect(find.byKey(const Key('transfer-devices-error')), findsNothing);
+    expect(find.byKey(const Key('transfer-devices-retry')), findsNothing);
+  });
+
+  testWidgets('poll failure keeps previous data and hides retry buttons', (tester) async {
+    final api = _FakeTransferApi(tasks: [
+      TransferTask(id: 't-1', direction: 'Send', status: 'completed', fileName: 'a.txt'),
+    ]);
+    await _pumpPage(tester, api);
+    await tester.pumpAndSettle();
+
+    // 轮询失败路径：保留旧列表，不上屏错误与重试按钮（只有首载失败才出现）。
+    api.failAllListTasks = true;
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(find.byKey(const Key('transfer-task-t-1')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-tasks-error')), findsNothing);
+    expect(find.byKey(const Key('transfer-tasks-retry')), findsNothing);
   });
 
   pollerTests();

@@ -90,6 +90,74 @@ class _RoutingHttp extends LanHttpClient {
   }
 }
 
+/// worktrees 列表请求序号守卫测试用的假 HTTP：第 2 次 worktrees/list 挂起到
+/// [secondListGate] 放行（模拟旧响应慢），其余调用立即返回同一份两树列表；
+/// projects list / experimental config 按壳层测试惯例最小供给，其余端点 404
+/// （调用方均为宽容解析，静默降级）。
+class _WorktreeSeqHttp extends LanHttpClient {
+  /// 第 2 次 worktrees/list 的完成闸门：complete 后旧响应才落地。
+  final Completer<void> secondListGate = Completer<void>();
+
+  int listCalls = 0;
+
+  static const List<Map<String, dynamic>> _trees = [
+    {
+      'id': 'wt-a',
+      'name': 'wt-a',
+      'branch': 'feat/a',
+      'isMain': false,
+      'path': '/repo-a',
+    },
+    {
+      'id': 'wt-main',
+      'name': 'main',
+      'branch': 'main',
+      'isMain': true,
+      'path': '/repo',
+    },
+  ];
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return <String, dynamic>{};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      listCalls += 1;
+      if (listCalls == 2) {
+        // 先点的树（旧请求）挂起，后点的树（新请求）先完成。
+        await secondListGate.future;
+      }
+      return {
+        'ok': true,
+        'worktrees': [for (final tree in _trees) Map<String, dynamic>.from(tree)],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+}
+
 /// 面板常驻挂载 / Drawer 重试 / 徽章轮询测试用的假 HTTP：
 /// 按 path 路由 workbench 相关端点并计数关键调用（sessions boot、files listDir、
 /// attention 拉取、experimentalFeatures 配置）；openWebSocket 返回永不完成的
@@ -477,6 +545,52 @@ void main() {
     expect(find.textContaining('移除失败'), findsNothing);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('快速连点两个 worktree：旧 list 响应晚到不覆盖新选中（请求序号守卫）', (tester) async {
+    final book = AddressBook(store: MemoryAddressBookStore());
+    await book.addFromInput(
+      '10.0.0.8:62116',
+      probe: (_) async => throw Exception('offline'),
+      forceIfUnreachable: true,
+    );
+    final http = _WorktreeSeqHttp();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchHome(book: book, http: http),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> expectSelected(String id, {required bool selected}) async {
+      final chip = tester.widget<ChoiceChip>(find.byKey(Key('worktree-$id')));
+      expect(chip.selected, selected, reason: 'chip $id 选中态应为 $selected');
+    }
+
+    // 打开项目 → worktrees/list #1 → 默认选中主树。
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(http.listCalls, 1);
+    await expectSelected('wt-main', selected: true);
+
+    // 选中 wt-a：list #2 挂起（旧请求慢），选中态先本地生效。
+    await tester.tap(find.byKey(const Key('worktree-wt-a')));
+    await tester.pump();
+    await expectSelected('wt-a', selected: true);
+
+    // 再选回 wt-main：list #3 立即完成，新选中生效。
+    await tester.tap(find.byKey(const Key('worktree-wt-main')));
+    await tester.pump();
+    await expectSelected('wt-main', selected: true);
+    await expectSelected('wt-a', selected: false);
+
+    // 放行 wt-a 的旧响应：被请求序号守卫丢弃，选中保持 wt-main 不被回写。
+    http.secondListGate.complete();
+    await tester.pump();
+    await tester.pump();
+    await expectSelected('wt-main', selected: true);
+    await expectSelected('wt-a', selected: false);
+    expect(http.listCalls, 3);
   });
 
   testWidgets('面板常驻挂载：files 切走再切回保留目录栈且不重新拉取', (tester) async {

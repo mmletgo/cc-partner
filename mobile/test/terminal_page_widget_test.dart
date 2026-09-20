@@ -131,6 +131,34 @@ class _GatedReplaySessions extends _FakeSessions {
   }
 }
 
+/// close 后把剩余会话置为 exited 的 fake：借关窗流程末尾的 _refreshSessions
+/// 让权威列表带回非 running 状态，驱动输入行 running 条件的禁用/恢复断言。
+class _ExitedAfterCloseSessions extends _FakeSessions {
+  _ExitedAfterCloseSessions(super.sessions);
+
+  /// true 时 close 后剩余会话全部标为 exited（模拟权威列表刷新发现会话已退出）。
+  bool markExited = false;
+
+  @override
+  Future<void> close(String sessionId) async {
+    await super.close(sessionId);
+    if (markExited) {
+      sessions = [
+        for (final s in sessions)
+          SessionSummary(
+            id: s.id,
+            projectId: s.projectId,
+            name: s.name,
+            status: 'exited',
+            worktreeId: s.worktreeId,
+            supportsPanes: s.supportsPanes,
+            paneCount: s.paneCount,
+          ),
+      ];
+    }
+  }
+}
+
 /// 测试内存 Socket：无真实 IO，`add` 计数用于断言「是否向外发送过字节」。
 class _FakeSocket extends Stream<Uint8List> implements Socket {
   final StreamController<Uint8List> _incoming = StreamController<Uint8List>();
@@ -657,6 +685,77 @@ void main() {
     expect(find.byKey(const Key('terminal-commit-reconcile')), findsOneWidget);
   });
 
+  testWidgets('B2 commit/merge 交叉互锁：commit 未对账时禁用 merge，对账后恢复', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()
+      ..commitResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-1'}
+      ..mergeResult = {'kind': 'succeeded', 'value': <String, dynamic>{}};
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/x', 'isMain': false},
+    );
+    expect(_iconButton(tester, Icons.merge_type).onPressed, isNotNull);
+
+    await tester.tap(find.byTooltip('提交'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('提交').last);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('terminal-commit-reconcile')), findsOneWidget);
+    expect(_iconButton(tester, Icons.commit).onPressed, isNull);
+    // 交叉覆盖：commit 未对账期间 merge 也不得发起。
+    expect(_iconButton(tester, Icons.merge_type).onPressed, isNull);
+
+    // 对账确认成功回到 idle 后互锁解除，merge 恢复可点。
+    git.ledgerScript = (operationId) => {
+          'state': 'succeeded',
+          'intent': {'kind': 'commit'},
+        };
+    await tester.tap(find.byKey(const Key('terminal-commit-reconcile')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('terminal-commit-reconcile')), findsNothing);
+    expect(_iconButton(tester, Icons.merge_type).onPressed, isNotNull);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('B2 commit/merge 交叉互锁：merge 未对账时禁用 commit，对账后恢复', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit()
+      ..mergeResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-m1'};
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/x', 'isMain': false},
+    );
+
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('terminal-merge-reconcile')), findsOneWidget);
+    expect(_iconButton(tester, Icons.merge_type).onPressed, isNull);
+    // 交叉覆盖：merge 未对账期间 commit 也不得发起。
+    expect(_iconButton(tester, Icons.commit).onPressed, isNull);
+
+    // 对账确认成功回到 idle 后互锁解除，commit 恢复可点。
+    git.ledgerScript = (operationId) => {
+          'state': 'succeeded',
+          'intent': {
+            'kind': 'merge',
+            'sourceWorktreeId': 'w1',
+          },
+        };
+    await tester.tap(find.byKey(const Key('terminal-merge-reconcile')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('terminal-merge-reconcile')), findsNothing);
+    expect(_iconButton(tester, Icons.commit).onPressed, isNotNull);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
   testWidgets('B2 merge unknown → 同 id 查 ledger 确认成功 → 合并成功', (tester) async {
     final sessions = _FakeSessions([_s('s0')]);
     final git = _FakeGit()
@@ -880,5 +979,47 @@ void main() {
     expect(field.enabled, false);
     final send = tester.widget<IconButton>(find.byKey(const Key('terminal-input-send')));
     expect(send.onPressed, isNull);
+  });
+
+  testWidgets('输入行启用条件含 running：exited 权威状态禁用，恢复 running 重新可用', (tester) async {
+    final socket = _FakeSocket();
+    final http = _StubWebSocketHttp(() => socket);
+    final sessions = _ExitedAfterCloseSessions([_s('s0'), _s('s1'), _s('s2')]);
+    await _pump(tester, sessions: sessions, http: http);
+
+    // s0 running + replay 门闩放行 + 输入 WS ready：输入行可用。
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
+      isTrue,
+    );
+
+    // 关闭非当前会话 s2 触发 _refreshSessions；fake 权威列表把剩余会话标为
+    // exited → 输入行 fail-closed 禁用（对齐 web status === 'running' 严格比较）。
+    sessions.markExited = true;
+    await tester.tap(find.byTooltip('关闭窗口').at(2));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
+      isFalse,
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(const Key('terminal-input-send'))).onPressed,
+      isNull,
+    );
+
+    // 权威列表恢复 running（借关闭 s1 再触发一次刷新）→ 输入行重新可用。
+    sessions
+      ..markExited = false
+      ..sessions = [_s('s0'), _s('s1')];
+    await tester.tap(find.byTooltip('关闭窗口').last);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
+      isTrue,
+    );
   });
 }

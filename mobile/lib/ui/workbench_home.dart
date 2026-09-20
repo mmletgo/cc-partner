@@ -64,6 +64,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   String? _worktreeId;
   String? _sessionId;
   List<Map<String, dynamic>> _worktrees = [];
+
+  /// worktrees 列表请求代数：快速连点两个 worktree chip 时两个 list 请求并发，
+  /// 旧响应后到不得把 _worktrees/_worktreeId 覆盖回先点的树（对齐 web
+  /// refreshWorktrees 的 worktreesRequestIdRef 丢弃守卫）。
+  int _worktreesLoadSeq = 0;
   final _files = FileWorkspaceController();
   late final GitClient _gitClient =
       GitClient(widget.http, widget.book.active!.baseUrl);
@@ -298,17 +303,23 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
 
   /// Business Logic: 终端/文件/Git 与 worktrees 页都要看运行期 Git 状态
   /// （状态点/badge/可推送），列表统一带 includeGitStatus 拉取。
+  ///
+  /// Code Logic: 进入即自增 _worktreesLoadSeq 并捕获局部快照；每次 await 之后、
+  /// 写 _worktrees/_worktreeId（setState）之前校验自己仍是最新一次请求且页面仍在，
+  /// 否则直接丢弃——快速连点两个 worktree chip 时旧响应晚到不得覆盖新选中。
   Future<void> _loadWorktrees(
     ProjectSummary project, {
     required bool projectChanged,
     String? resumeWorktreeId,
   }) async {
+    _worktreesLoadSeq += 1;
+    final seq = _worktreesLoadSeq;
     try {
       final body = await _gitClient.listWorktrees(project.id, includeGitStatus: true);
-      final trees = asObjectList(body, wrapKey: 'worktrees');
-      if (!mounted) {
+      if (seq != _worktreesLoadSeq || !mounted) {
         return;
       }
+      final trees = asObjectList(body, wrapKey: 'worktrees');
       setState(() {
         _worktrees = trees;
         _worktreeId = resumeWorktreeId != null

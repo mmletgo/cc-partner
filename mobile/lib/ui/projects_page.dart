@@ -218,6 +218,12 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
   }
 
+  /// Business Logic: 移动端只允许进入本机与远端快捷方式两类项目；未知 kind（含缺失）
+  /// 必须禁点，避免走未定义链路（对齐 web canSelectMobileProject 的 fail-closed 语义）。
+  /// Code Logic: kind 为 'local' 或 'remote' 返回 true，其它（含 null）返回 false。
+  bool _canSelectProject(ProjectSummary project) =>
+      project.kind == 'local' || project.kind == 'remote';
+
   /// Business Logic: 项目行 kind 徽章文案对齐 web MobileProjectPanel：
   /// remote 显示「远端」、local 显示「本机项目」，其余 kind 原样展示；缺失不渲染徽章。
   /// Code Logic: 纯映射，返回 null 表示该行不渲染徽章。
@@ -296,8 +302,10 @@ class _ProjectsPageState extends State<ProjectsPage> {
                               final theme = Theme.of(context);
                               final kindLabel = _kindLabel(project.kind);
                               final isRemote = project.kind == 'remote';
+                              final canSelect = _canSelectProject(project);
                               final deviceName = project.deviceName?.trim() ?? '';
                               return ListTile(
+                                key: Key('project-row-${project.id}'),
                                 leading: const Icon(Icons.folder),
                                 title: Row(
                                   children: [
@@ -345,9 +353,26 @@ class _ProjectsPageState extends State<ProjectsPage> {
                                         ),
                                         style: theme.textTheme.bodySmall,
                                       ),
+                                    // 不支持类型行展示说明小字（对齐 web
+                                    // mobileListNotice「不支持的项目类型」），并可被
+                                    // 语义化定位；可选行不渲染。
+                                    if (!canSelect)
+                                      Text(
+                                        '不支持的项目类型',
+                                        key: Key(
+                                          'project-unsupported-${project.id}',
+                                        ),
+                                        style: theme.textTheme.bodySmall,
+                                      ),
                                   ],
                                 ),
-                                onTap: () => widget.onOpen(project),
+                                // 非 local/remote 行禁点并置灰（enabled=false 走
+                                // Material 禁用渲染），对齐 web aria-disabled + 拦截
+                                // onClick 语义。
+                                enabled: canSelect,
+                                onTap: canSelect
+                                    ? () => widget.onOpen(project)
+                                    : null,
                                 trailing: IconButton(
                                   key: Key('project-remove-${project.id}'),
                                   icon: removing

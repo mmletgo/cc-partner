@@ -44,7 +44,14 @@ class _TransferPageState extends State<TransferPage> {
   List<TransferTask> _tasks = [];
   List<Map<String, dynamic>> _targets = [];
   String? _selectedTargetId;
-  String? _error;
+
+  /// 设备列表首载失败错误文本：仅首载（无任何设备数据）失败时上屏，
+  /// 对齐 web devicesState=error 区（错误 + 重试按钮）。
+  String? _devicesError;
+
+  /// 任务列表首载失败错误文本：仅首载（无任何任务数据）失败时上屏，
+  /// 对齐 web tasksState=error 区（错误 + 重试按钮）。
+  String? _tasksError;
   bool _loading = true;
   String? _busy;
   int _uploadedBytes = 0;
@@ -114,20 +121,23 @@ class _TransferPageState extends State<TransferPage> {
     if (showLoading && mounted) {
       setState(() {
         _loading = true;
-        _error = null;
+        _tasksError = null;
       });
     }
     try {
       final tasks = await _api.listTasks();
       if (mounted) {
-        setState(() => _tasks = tasks);
+        setState(() {
+          _tasks = tasks;
+          _tasksError = null;
+        });
       }
     } catch (error) {
       // 刷新失败保留上一份列表（对齐 web retainListOnRefreshFailure）；
-      // 只有首载（尚无数据）才上屏错误。
+      // 只有首载（尚无数据）才上屏错误 + 重试按钮。
       if (mounted && _tasks.isEmpty) {
         setState(() {
-          _error = '任务列表加载失败：$error';
+          _tasksError = '任务列表加载失败：$error';
           _loading = false;
         });
       }
@@ -142,7 +152,7 @@ class _TransferPageState extends State<TransferPage> {
     if (showLoading && mounted) {
       setState(() {
         _loading = true;
-        _error = null;
+        _devicesError = null;
       });
     }
     try {
@@ -151,12 +161,13 @@ class _TransferPageState extends State<TransferPage> {
         setState(() {
           _targets = targets;
           _selectedTargetId = pickTransferTargetId(targets, selectedId: _selectedTargetId);
+          _devicesError = null;
         });
       }
     } catch (error) {
       if (mounted && _targets.isEmpty) {
         setState(() {
-          _error = '设备列表加载失败：$error';
+          _devicesError = '设备列表加载失败：$error';
           _loading = false;
         });
       }
@@ -530,6 +541,43 @@ class _TransferPageState extends State<TransferPage> {
     );
   }
 
+  /// Business Logic: 任务/设备首载失败且无任何数据时，只有下拉刷新一条恢复路径
+  /// 太隐蔽；对齐 web 失败区的显式「重试」按钮（common:action.retry）。
+  /// Code Logic: 一行 = 错误文本（liveRegion 语义、error 色）+ TextButton 重试，
+  /// 回调由调用方注入（设备区 → _loadDevices，任务区 → _loadTasks）。
+  Widget _firstLoadErrorRow({
+    required String text,
+    required Key textKey,
+    required Key retryKey,
+    required VoidCallback onRetry,
+  }) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      child: Semantics(
+        liveRegion: true,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                text,
+                key: textKey,
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton.icon(
+              key: retryKey,
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('重试'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -593,7 +641,13 @@ class _TransferPageState extends State<TransferPage> {
               ),
             ),
           ),
-        if (_error != null) Text(_error!),
+        if (_devicesError != null)
+          _firstLoadErrorRow(
+            text: _devicesError!,
+            textKey: const Key('transfer-devices-error'),
+            retryKey: const Key('transfer-devices-retry'),
+            onRetry: () => _loadDevices(showLoading: false),
+          ),
         Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator())
@@ -611,6 +665,13 @@ class _TransferPageState extends State<TransferPage> {
                         _groupSection('需注意', groups.needsAttention),
                         _groupSection('已完成', groups.completed),
                       ],
+                      if (_tasksError != null)
+                        _firstLoadErrorRow(
+                          text: _tasksError!,
+                          textKey: const Key('transfer-tasks-error'),
+                          retryKey: const Key('transfer-tasks-retry'),
+                          onRetry: () => _loadTasks(showLoading: false),
+                        ),
                     ],
                   ),
                 ),
