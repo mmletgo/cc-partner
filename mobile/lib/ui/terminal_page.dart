@@ -1104,7 +1104,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// （/resume 换 owner 后允许重灌，对齐 web hydratedScrollbackSessionRef + owner）；记录
   /// 替换前「距底部行距」作锚点；成功后清屏（含 scrollback 擦除）+ 写入快照 + 按序补写
   /// 往返期间暂存的 live chunk（seq > 快照 lastSeq 且 owner 一致，对齐 web
-  /// appendHeldLiveAfterReplay），帧末把视口钉回相同底部锚点；失败不标记 hydrated、
+  /// appendHeldLiveAfterReplay），帧末把视口钉回相同底部锚点并随本次触发手势至少
+  /// 上滚 1 行进入刚灌入的历史（对齐 web scrollWhenHydrationParsed）；失败不标记 hydrated、
   /// 先补写暂存 chunk（防丢失）再错误上屏并附「重试」，live 流继续不受影响。
   Future<void> _beginHistoryHydration(_MountedSession buffer) async {
     if (buffer.hydrating ||
@@ -1149,11 +1150,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         // afterSequence 重拉已随快照上屏的内容（对齐 web store.reset 设新 cursor）。
         buffer.sequence = snapshotLastSeq;
       }
+      // 本次触发手势的滚动意图随灌入生效：视口至少上滚 1 行进入历史
+      // （对齐 web Math.min(-1, pendingHydratedScrollLines)）。
+      final scrollUpLines =
+          buffer.hydrationIntent < -1 ? -buffer.hydrationIntent : 1;
       buffer.policy.markHistoryHydrated(ownerInstanceId: buffer.owner);
       buffer.hydrationIntent = 0;
       _setPanelError(null);
       if (distFromBottom != null) {
-        _anchorViewportFromBottom(distFromBottom);
+        _anchorViewportFromBottom(distFromBottom, extraUpLines: scrollUpLines);
       }
     } catch (error) {
       // hydration 失败可重试：先按序补写暂存 chunk（防丢失，不标记 hydrated），
@@ -1201,15 +1206,26 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
-  /// hydration 替换 buffer 后保持视口距底部的锚点（帧末执行，等新内容尺寸生效）。
-  void _anchorViewportFromBottom(double distFromBottom) {
+  /// hydration 替换 buffer 后保持视口距底部的锚点（帧末执行，等新内容尺寸生效）；
+  /// [extraUpLines] > 0 时在锚点基础上再上滚对应行数（首滑触发 hydration 后视口
+  /// 随本次手势进入刚灌入的历史，至少 1 行，对齐 web scrollWhenHydrationParsed 的
+  /// scrollTerminalBufferLines(Math.min(-1, pendingHydratedScrollLines))）。
+  void _anchorViewportFromBottom(double distFromBottom, {int extraUpLines = 0}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final scroll = _scrollController;
       if (_disposed || !scroll.hasClients) {
         return;
       }
       final max = scroll.position.maxScrollExtent;
-      final target = (max - distFromBottom).clamp(0.0, max);
+      var extra = 0.0;
+      if (extraUpLines > 0) {
+        final rows = _active?.terminal.viewHeight ?? 0;
+        final viewportHeight = _viewportSize?.height ?? 0;
+        if (rows > 0 && viewportHeight > 0) {
+          extra = extraUpLines * viewportHeight / rows;
+        }
+      }
+      final target = (max - distFromBottom - extra).clamp(0.0, max);
       scroll.position.jumpTo(target);
     });
   }

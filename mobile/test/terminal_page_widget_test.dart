@@ -214,6 +214,29 @@ class _GatedHydrateSessions extends _FakeSessions {
   }
 }
 
+/// hydration 返回多行历史快照：让灌入后 buffer 高于视口（maxScrollExtent > 0），
+/// 供「首滑触发后视口滚入历史」断言使用。
+class _TallHydrateSessions extends _FakeSessions {
+  _TallHydrateSessions(super.sessions);
+
+  @override
+  Future<Map<String, dynamic>> hydrateScrollback(
+    String sessionId, {
+    Duration? timeout,
+  }) async {
+    hydrateIds.add(sessionId);
+    final error = hydrateError;
+    if (error != null) {
+      throw error;
+    }
+    return {
+      'sessionId': sessionId,
+      'buffer': [for (var i = 0; i < 200; i++) 'history-line-$i'].join('\r\n'),
+      'lastSeq': 1,
+    };
+  }
+}
+
 /// 按项目过滤会话列表的 fake：记录每次 list 请求的 projectId（跨项目 boot 断言），
 /// 返回该项目的会话（TerminalPage boot/切上下文按新项目重新拉取）。
 class _MultiProjectSessions extends _FakeSessions {
@@ -1519,7 +1542,7 @@ void main() {
 
   testWidgets('hydration：首次上滑即触发 refreshHistory（10s 超时口），成功后不重复触发', (tester) async {
     final socket = _FakeSocket();
-    final sessions = _FakeSessions([_s('s0')]);
+    final sessions = _TallHydrateSessions([_s('s0')]);
     await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
     expect(sessions.hydrateIds, isEmpty);
 
@@ -1533,6 +1556,23 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(sessions.hydrateIds, ['s0']);
+
+    // 灌入完成后视口随本次手势至少上滚 1 行进入刚灌入的历史（对齐 web
+    // scrollWhenHydrationParsed），而不是钉在底部等用户二次上滑。
+    await tester.pump();
+    await tester.pump();
+    final terminalScrollable = tester.state<ScrollableState>(
+      find.descendant(
+        of: find.byKey(const Key('terminal-view')),
+        matching: find.byType(Scrollable),
+      ).first,
+    );
+    expect(terminalScrollable.position.maxScrollExtent, greaterThan(0));
+    expect(terminalScrollable.position.pixels, greaterThan(0));
+    expect(
+      terminalScrollable.position.pixels,
+      lessThan(terminalScrollable.position.maxScrollExtent),
+    );
 
     // 已灌历史（owner 未变）：再次拖动不重复触发。
     final gesture2 = await tester.startGesture(terminalCenter);
