@@ -56,6 +56,9 @@ class _FakeSessions extends SessionsClient {
   final List<String> closedIds = [];
   final List<String> replayIds = [];
   final List<String> focusedIds = [];
+
+  /// unfocus（streamActive=false）调用记录：切会话/dispose 时对旧会话补发。
+  final List<String> unfocusedIds = [];
   final List<String> hydrateIds = [];
   final List<(String, int, int)> resizeCalls = [];
   int createCalls = 0;
@@ -119,8 +122,12 @@ class _FakeSessions extends SessionsClient {
   }
 
   @override
-  Future<void> focus(String sessionId) async {
-    focusedIds.add(sessionId);
+  Future<void> focus(String sessionId, {bool streamActive = true}) async {
+    if (streamActive) {
+      focusedIds.add(sessionId);
+    } else {
+      unfocusedIds.add(sessionId);
+    }
   }
 
   @override
@@ -373,6 +380,47 @@ class _StubWebSocketHttp extends LanHttpClient {
   }
 }
 
+/// events NDJSON 流 stub：`streamLines` 交付测试受控的行序列（可中途注入帧），
+/// openWebSocket 复用内存 Socket stub。控制器故意不 close：注入时机在 boot 完成
+/// 之后（晚于 boot 尾部的权威列表刷新），与真实事件到达时序一致。
+class _ScriptedEventsHttp extends LanHttpClient {
+  _ScriptedEventsHttp(this.socket) : super();
+
+  final _FakeSocket socket;
+
+  /// 测试注入的 events 帧行（add 后由已订阅的 events 循环消费）。
+  final StreamController<String> events = StreamController<String>();
+
+  /// events 流被建立的次数（观察重连）。
+  int eventsConnections = 0;
+
+  /// 注入一帧（由消费方按行解析 JSON）。
+  void emitFrame(Map<String, dynamic> frame) {
+    events.add(jsonEncode(frame));
+  }
+
+  @override
+  Stream<String> streamLines(String baseUrl, String path) async* {
+    eventsConnections += 1;
+    yield* events.stream;
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Future<WebSocket>.value(
+      WebSocket.fromUpgradedSocket(
+        socket,
+        protocol: TerminalController.inputSubprotocol,
+        serverSide: false,
+      ),
+    );
+  }
+}
+
 class _FakeGit extends GitClient {
   _FakeGit() : super(LanHttpClient(), 'http://127.0.0.1:1');
 
@@ -503,6 +551,9 @@ Future<void> _pump(
   VoidCallback? onWorktreesMutated,
   Map<String, dynamic>? worktreeInfo,
   String? worktreePath,
+  Future<bool> Function(String worktreeId)? confirmLeaveDirty,
+  ValueChanged<String?>? onActiveSessionChanged,
+  LanHttpClient Function()? eventsHttpClientFactory,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -518,9 +569,12 @@ Future<void> _pump(
         worktreePath: worktreePath,
         onFullscreenChanged: onFullscreenChanged,
         onWorktreesMutated: onWorktreesMutated,
+        confirmLeaveDirty: confirmLeaveDirty,
+        onActiveSessionChanged: onActiveSessionChanged,
         sessionsClient: sessions,
         promptsClient: prompts,
         gitClient: git,
+        eventsHttpClientFactory: eventsHttpClientFactory,
         backgroundTimersDisabled: true,
       ),
     ),
@@ -1496,5 +1550,209 @@ void main() {
 
     // 泵过 xterm 内部连击 Timer，避免测试残留 pending Timer。
     await tester.pump(const Duration(milliseconds: 350));
+  });
+
+  testWidgets('P1-1 events terminalStatus 帧：chip 状态点变灰且输入 fail-closed 禁用', (tester) async {
+    final socket = _FakeSocket();
+    final http = _ScriptedEventsHttp(socket);
+    final sessions = _FakeSessions([_s('s0')]);
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: http,
+      eventsHttpClientFactory: () => http,
+    );
+    expect(http.eventsConnections, 1, reason: 'boot 后 events 流应已建立');
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
+      isTrue,
+    );
+
+    // 注入 terminalStatus(exit) 帧（含一条未知 id 帧）：无需刷新列表，状态点变灰 + 输入被禁。
+    http.emitFrame({
+      'type': 'terminalStatus',
+      'payload': {'sessionId': 's0', 'status': 'exited', 'exitCode': 0, 'ts': 1},
+    });
+    http.emitFrame({
+      'type': 'terminalStatus',
+      'payload': {'sessionId': 's-unknown', 'status': 'exited', 'exitCode': 0, 'ts': 2},
+    });
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
+      isFalse,
+    );
+    final avatar = tester.widget<CircleAvatar>(
+      find.descendant(of: find.byType(InputChip), matching: find.byType(CircleAvatar)),
+    );
+    expect(avatar.backgroundColor, Colors.grey);
+    // 未知会话 id 的帧被忽略：chip 不受影响、不抛错。
+    expect(find.byType(InputChip), findsOneWidget);
+  });
+
+  testWidgets('P1-1 events sessionUpdated 帧：改名/paneCount 即时反映到 chip，未知 id 忽略',
+      (tester) async {
+    final socket = _FakeSocket();
+    final http = _ScriptedEventsHttp(socket);
+    final sessions = _FakeSessions([_s('s0', panes: true, paneCount: 1)]);
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: http,
+      eventsHttpClientFactory: () => http,
+    );
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('s0 · 1 pane'), findsOneWidget);
+
+    // 注入完整 DTO（字段名对齐 Rust WorkbenchSessionDto camelCase 投影）+ 未知 id 帧。
+    http.emitFrame({
+      'type': 'sessionUpdated',
+      'payload': {
+        'id': 's0',
+        'projectId': 'p1',
+        'worktreeId': 'w1',
+        'name': '重命名后',
+        'status': 'running',
+        'cols': 80,
+        'rows': 24,
+        'supportsPanes': true,
+        'paneCount': 3,
+      },
+    });
+    http.emitFrame({
+      'type': 'sessionUpdated',
+      'payload': {'id': 's-ghost', 'projectId': 'p1', 'name': 'ghost', 'status': 'running'},
+    });
+    await tester.pump();
+    await tester.pump();
+
+    // 改名/paneCount 即时反映到 chip。
+    expect(find.text('重命名后 · 3 pane'), findsOneWidget);
+    expect(find.text('s0 · 1 pane'), findsNothing);
+    // 未知 id：不得借事件把会话插入列表（对齐 web applyKnownMobileSessionUpdatedEvent）。
+    expect(find.textContaining('ghost'), findsNothing);
+  });
+
+  testWidgets('P1-2 合并激活树 dirty 预检：取消不弹合并确认也不调后端', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit();
+    final guardedIds = <String>[];
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/x', 'isMain': false},
+      confirmLeaveDirty: (worktreeId) async {
+        guardedIds.add(worktreeId);
+        return false;
+      },
+    );
+
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+
+    // 预检在合并确认框之前：取消即中止，确认框与后端 merge 都不发生。
+    expect(guardedIds, ['w1']);
+    expect(find.text('确定把「feat/x」合并到主工作区？'), findsNothing);
+    expect(git.mergeCalls, 0);
+  });
+
+  testWidgets('P1-2 合并激活树 dirty 预检放行：正常弹合并确认并调用后端', (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _FakeGit();
+    var mutated = 0;
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      onWorktreesMutated: () => mutated += 1,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/x', 'isMain': false},
+      confirmLeaveDirty: (worktreeId) async => worktreeId == 'w1',
+    );
+
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    expect(find.text('确定把「feat/x」合并到主工作区？'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+    expect(git.mergeCalls, 1);
+    expect(mutated, 1);
+    expect(find.text('合并成功'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('low-2 划选态 extra keys Esc 退出划选不发 ESC 字节；非划选态照常发送', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _FakeSessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
+
+    // 构造划选态（Ctrl+A 全选 → 底部操作条）。
+    final surface = find.byKey(const Key('terminal-view'));
+    await tester.tap(surface);
+    await tester.pump();
+    await _selectAll(tester);
+    await tester.pump();
+    expect(find.byKey(const Key('terminal-selection-bar')), findsOneWidget);
+
+    final writesBefore = socket.writeCount;
+    await tester.tap(find.text('Esc'));
+    await tester.pump();
+    // 划选态：只退出划选，不向输入 WS 发送 ESC 字节（对齐 web handleExtraKeyPress）。
+    expect(find.byKey(const Key('terminal-selection-bar')), findsNothing);
+    expect(socket.writeCount, writesBefore);
+
+    // 非划选态：Esc 按键照常发送。
+    await tester.tap(find.text('Esc'));
+    await tester.pump();
+    expect(socket.writeCount, greaterThan(writesBefore));
+    await tester.pump(const Duration(milliseconds: 350));
+  });
+
+  testWidgets('low-1 unfocus：切会话对旧会话发 streamActive:false，销毁对当前会话补发',
+      (tester) async {
+    final sessions = _FakeSessions([_s('s0'), _s('s1')]);
+    await _pump(tester, sessions: sessions);
+    expect(sessions.focusedIds, ['s0']);
+    expect(sessions.unfocusedIds, isEmpty);
+
+    // 切到 s1：先对旧会话 s0 补发 unfocus（fire-and-forget），再 focus 新会话。
+    await tester.tap(find.text('s1 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.focusedIds, ['s0', 's1']);
+    expect(sessions.unfocusedIds, ['s0']);
+
+    // 卸载页面（dispose）：对当前会话 s1 补发 unfocus，停止旧远端窗口正文流。
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(sessions.unfocusedIds, ['s0', 's1']);
+  });
+
+  testWidgets('onActiveSessionChanged：boot/切会话/销毁均上报当前真实会话', (tester) async {
+    final sessions = _FakeSessions([_s('s0'), _s('s1')]);
+    final reported = <String?>[];
+    await _pump(tester, sessions: sessions, onActiveSessionChanged: reported.add);
+    expect(reported, ['s0']);
+
+    await tester.tap(find.text('s1 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(reported, ['s0', 's1']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(reported, ['s0', 's1', null]);
   });
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:cc_partner_mobile/address_book/book.dart';
 import 'package:cc_partner_mobile/app.dart';
 import 'package:cc_partner_mobile/core/lan_http.dart';
+import 'package:cc_partner_mobile/files/workspace.dart';
 import 'package:cc_partner_mobile/ui/workbench_home.dart';
 import 'package:cc_partner_mobile/ui/workbench_shell.dart';
 import 'package:cc_partner_mobile/workbench/nav.dart';
@@ -405,6 +406,231 @@ class _CtxHttp extends LanHttpClient {
   }
 }
 
+/// P1-3「看见即已读」测试假 HTTP：单树单会话列表 + 两条未读 agentNeedsInput 条目
+/// （一条命中当前会话 s1，一条属于其它会话 s9）；记录 markRead 请求体与
+/// sessions/focus 的 streamActive 取值，验证切会话/离开终端面板时的 unfocus 补发。
+class _AutoReadHttp extends LanHttpClient {
+  /// 已执行的 markRead itemIds 请求体列表。
+  final List<List<String>> markReadBodies = [];
+
+  /// sessions/focus 请求记录 (sessionId, streamActive)。
+  final List<(String, bool)> focusCalls = [];
+
+  /// attention list 可见条目（getDynamic 每次返回同一份，模拟快照未变化）。
+  final List<Map<String, dynamic>> attentionItems = [
+    {
+      'id': 'a1',
+      'sourceKind': 'agentNeedsInput',
+      'title': 'Agent 等待输入',
+      'target': {'kind': 'agentSession', 'projectId': 'p1', 'terminalSessionId': 's1'},
+    },
+    {
+      'id': 'a2',
+      'sourceKind': 'agentNeedsInput',
+      'title': '其它会话等待输入',
+      'target': {'kind': 'agentSession', 'projectId': 'p1', 'terminalSessionId': 's9'},
+    },
+  ];
+
+  int attentionListCalls = 0;
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/health') {
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      attentionListCalls += 1;
+      return {'items': [for (final item in attentionItems) Map<String, dynamic>.from(item)]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      return [
+        {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running', 'worktreeId': 'wt-main'},
+        {'id': 's2', 'projectId': 'p1', 'name': 's2', 'status': 'running', 'worktreeId': 'wt-main'},
+      ];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return {
+        'ok': true,
+        'worktrees': [
+          {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo'},
+        ],
+      };
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      return {'sessionId': body['sessionId'], 'snapshot': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus') {
+      focusCalls.add((body['sessionId'] as String, body['streamActive'] as bool));
+      return <String, dynamic>{};
+    }
+    if (path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/mobile/attention/mark-read') {
+      markReadBodies.add([for (final id in body['itemIds'] as List) id as String]);
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
+
+/// P1-2 终端合并 dirty 预检/清快照测试假 HTTP：两棵树（wt-main 主树 + wt-1 功能树）、
+/// 绑定 wt-1 的会话 s1、可编辑文本文件；worktrees/merge 成功并把 wt-1 从权威列表移除
+/// （模拟合并删源），记录 merge 调用数。
+class _TerminalMergeHttp extends LanHttpClient {
+  int mergeCalls = 0;
+
+  List<Map<String, dynamic>> trees = [
+    {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo'},
+    {
+      'id': 'wt-1',
+      'name': 'feat',
+      'branch': 'feat/app',
+      'isMain': false,
+      'path': '/repo/.worktrees/feat-app',
+    },
+  ];
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/health') {
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      return [
+        {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running', 'worktreeId': 'wt-1'},
+      ];
+    }
+    if (path == '/api/mobile/workbench/files/list-dir') {
+      final dirPath = body['path'] as String?;
+      if (dirPath == null || dirPath.isEmpty) {
+        return [
+          {'name': 'src', 'kind': 'dir', 'path': 'src'},
+        ];
+      }
+      return [
+        {'name': 'main.rs', 'kind': 'file', 'path': 'src/main.rs'},
+      ];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return {
+        'ok': true,
+        'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)],
+      };
+    }
+    if (path == '/api/mobile/workbench/worktrees/merge') {
+      mergeCalls += 1;
+      // 合并删源：权威列表同步移除 wt-1。
+      trees = [
+        for (final tree in trees)
+          if (tree['id'] != 'wt-1') Map<String, dynamic>.from(tree),
+      ];
+      return {'kind': 'succeeded', 'value': <String, dynamic>{}};
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      return {'sessionId': body['sessionId'], 'snapshot': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus' ||
+        path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/mobile/workbench/files/open') {
+      return {
+        'metadata': {'name': 'main.rs', 'path': body['path']},
+        'text': {'content': 'hello', 'baseHash': 'h1'},
+        'capabilities': {'canEdit': true},
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
+
 /// 构造带一个离线 server 的地址簿（面板级测试共用）。
 Future<AddressBook> _panelBook() async {
   final book = AddressBook(store: MemoryAddressBookStore());
@@ -414,15 +640,27 @@ Future<AddressBook> _panelBook() async {
     forceIfUnreachable: true,
   );
   return book;
-}
-
-/// 挂载 WorkbenchHome 并等初始化请求全部落地。
-Future<void> _pumpHome(WidgetTester tester, _PanelHttp http) async {
+}/// 挂载 WorkbenchHome 并等初始化请求全部落地。
+Future<void> _pumpHome(WidgetTester tester, LanHttpClient http) async {
   final book = await _panelBook();
   await tester.pumpWidget(
     MaterialApp(home: WorkbenchHome(book: book, http: http)),
   );
   await tester.pumpAndSettle();
+}
+
+/// 挂载 WorkbenchHome（注入测试用 Files 草稿控制器）并等初始化请求落地。
+Future<AddressBook> _pumpHomeWithFiles(
+  WidgetTester tester,
+  LanHttpClient http,
+  FileWorkspaceController files,
+) async {
+  final book = await _panelBook();
+  await tester.pumpWidget(
+    MaterialApp(home: WorkbenchHome(book: book, http: http, filesWorkspace: files)),
+  );
+  await tester.pumpAndSettle();
+  return book;
 }
 
 /// 挂载 WorkbenchHome 并返回地址簿（lastLocation 持久化断言用）。
@@ -1160,5 +1398,79 @@ void main() {
     expect(find.byKey(const Key('shell-status-worktree')), findsOneWidget);
     expect(find.text('已连接'), findsOneWidget);
     expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+  });
+
+  testWidgets('P1-3 切到等待输入的终端自动把对应未读标已读；无匹配不调用 markRead', (tester) async {
+    final http = _AutoReadHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+
+    // boot 聚焦 s1（同 worktree running 优先）→ 命中未读 a1 被 markRead，
+    // 成功后刷新徽章（再拉一次列表）。
+    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump();
+    expect(http.markReadBodies, [
+      ['a1'],
+    ]);
+    // initState 首拉 + 自动已读 listVisible + 成功后徽章刷新。
+    expect(http.attentionListCalls, greaterThanOrEqualTo(3));
+
+    // 切到 s2：epoch 变化，但无匹配 s2 的未读 → 不再 markRead。
+    await tester.tap(find.text('s2 · 0 pane'));
+    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump();
+    expect(http.markReadBodies, [
+      ['a1'],
+    ], reason: '无匹配未读时不得重复调用 markRead');
+
+    // low-1 壳层接缝：切会话先对旧会话 unfocus，再 focus 新会话。
+    expect(http.focusCalls, contains(('s1', true)));
+    expect(http.focusCalls, contains(('s1', false)));
+    expect(http.focusCalls, contains(('s2', true)));
+
+    // 离开终端面板（terminal Offstage 常驻不 dispose）：壳层对当前会话补发 unfocus。
+    await _gotoPanelViaDrawer(tester, 'files');
+    expect(http.focusCalls, contains(('s2', false)));
+  });
+
+  testWidgets('P1-2 终端合并激活树：dirty 预检丢弃清快照，合并成功后不对已删树弹确认', (tester) async {
+    final http = _TerminalMergeHttp();
+    final files = FileWorkspaceController();
+    await _pumpHomeWithFiles(tester, http, files);
+
+    await _openDemoProject(tester);
+
+    // 构造 Files 草稿（p1/wt-1 上下文 dirty），随后切到功能树 wt-1。
+    files.markDirty(projectId: 'p1', worktreeId: 'wt-1', path: 'src/main.rs');
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('s1 · 0 pane'), findsOneWidget);
+
+    // 终端发起合并：壳层预检先于合并确认框，按「合并后回落树」比较 → 弹「未保存的文件」。
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    expect(find.text('未保存的文件'), findsOneWidget);
+
+    // 选择丢弃：清 dirty 快照并放行 → 合并确认框 → 合并成功。
+    await tester.tap(find.widgetWithText(TextButton, '丢弃'));
+    await tester.pumpAndSettle();
+    expect(find.text('确定把「feat/app」合并到主工作区？'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+    expect(http.mergeCalls, 1);
+    expect(find.text('合并成功'), findsOneWidget);
+
+    // 权威列表已无 wt-1、激活回落 wt-main；草稿快照已在预检丢弃时清理——
+    // 再切一次 worktree 不得对已删 worktree 的残留草稿弹「请保存或丢弃」。
+    await tester.tap(find.byKey(const Key('worktree-wt-main')));
+    await tester.pumpAndSettle();
+    expect(find.text('未保存的文件'), findsNothing);
+    expect(find.textContaining('请保存或丢弃'), findsNothing);
+
+    // 让 SnackBar 自动消失，避免测试残留 Timer。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
   });
 }

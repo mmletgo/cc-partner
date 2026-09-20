@@ -111,9 +111,12 @@ class TerminalPage extends StatefulWidget {
     this.worktreePath,
     this.onFullscreenChanged,
     this.onWorktreesMutated,
+    this.confirmLeaveDirty,
+    this.onActiveSessionChanged,
     @visibleForTesting this.sessionsClient,
     @visibleForTesting this.promptsClient,
     @visibleForTesting this.gitClient,
+    @visibleForTesting this.eventsHttpClientFactory,
     @visibleForTesting this.backgroundTimersDisabled = false,
   });
 
@@ -138,6 +141,15 @@ class TerminalPage extends StatefulWidget {
   /// commit/merge 成功后通知壳层刷新 worktrees（固定接缝契约）。
   final VoidCallback? onWorktreesMutated;
 
+  /// 合并激活 worktree 前的脏文件预检接缝（由壳层注入，与 GitPage/WorktreesPage
+  /// 同款签名）：返回 false 时合并中止且不调后端；缺省 null 表示壳层未接（直连/测试）。
+  final Future<bool> Function(String worktreeId)? confirmLeaveDirty;
+
+  /// 激活会话变化回调（固定接缝契约）：壳层据此跟踪「当前真实会话」，用于离开终端
+  /// 面板/退出工作台时对旧会话补发 unfocus（终端页 Offstage 常驻不销毁，壳层不能
+  /// 依赖 dispose）。
+  final ValueChanged<String?>? onActiveSessionChanged;
+
   /// 测试注入：覆盖默认 SessionsClient。
   final SessionsClient? sessionsClient;
 
@@ -146,6 +158,11 @@ class TerminalPage extends StatefulWidget {
 
   /// 测试注入：覆盖默认 GitClient。
   final GitClient? gitClient;
+
+  /// 测试注入：events NDJSON 流客户端工厂。提供时行流由该工厂返回的客户端产生，
+  /// 页面不再自建/强关 HttpClient（断流中止由实现自身管理）；缺省保持原生行为
+  /// （每轮新建 HttpClient，切会话/销毁时 force-close 断流）。
+  final LanHttpClient Function()? eventsHttpClientFactory;
 
   /// 测试注入：关闭 events 空闲看门狗与两条通道的重连 Timer，避免 widget 测试挂起 Timer。
   final bool backgroundTimersDisabled;
@@ -320,6 +337,13 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       // 销毁时若仍处于全屏必须通知壳层恢复，避免壳层停留在全屏布局。
       widget.onFullscreenChanged?.call(false);
     }
+    // 销毁时对当前会话补发 unfocus：停止旧远端窗口正文流（对齐 web effect cleanup
+    // 的 compare-and-clear；fire-and-forget，失败静默）。
+    final activeId = _sessionId;
+    if (activeId != null) {
+      _unfocusSession(activeId);
+    }
+    widget.onActiveSessionChanged?.call(null);
     _stickyTimer?.cancel();
     _resizeDebounce?.cancel();
     _eventsGeneration += 1;
@@ -421,6 +445,13 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
+  /// fire-and-forget unfocus：停止该会话的远端窗口正文流过滤目标
+  /// （对齐 web cleanup 里 sessions.focus(sessionId, false)；失败静默，
+  /// 下一次 focus 会以当前窗口重新建立过滤目标）。
+  void _unfocusSession(String sessionId) {
+    unawaited(_sessions.focus(sessionId, streamActive: false).catchError((_) {}));
+  }
+
   /// 业务逻辑：切换会话时新画面来自目标会话的常驻缓冲——首次激活清屏 + replay 快照
   /// 建立基线；切回已缓冲会话不清屏不重放，靠 events 增量（afterSequence）续传，
   /// 序列过旧由 gap 帧兜底全量重放（对齐 web 常驻 xterm + 增量续传）。
@@ -436,9 +467,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       // 同一会话重复点击不重复清屏重放。
       return;
     }
+    final previousId = _sessionId;
     _stopEventsLoop();
     // 旧会话未确认输入结果未知：切走即丢弃（不重放、不写入 /sessions/write）。
     _active?.policy.takeUnackedOnDisconnect();
+    // 切走旧会话即停止其远端窗口正文流（对齐 web effect cleanup；fire-and-forget）。
+    if (previousId != null) {
+      _unfocusSession(previousId);
+    }
     try {
       await _sessions.focus(nextId);
     } catch (error) {
@@ -479,6 +515,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       // 切换会话保持全屏（对齐 web：isTerminalFullscreen 只随 visibleSession 存在性变化）。
     });
     buffer.policy.onInputLinkChanged = _onInputLinkChanged;
+    // 壳层接缝：上报当前真实激活会话（用于离开终端面板/退出工作台时 unfocus）。
+    widget.onActiveSessionChanged?.call(nextId);
     if (isNewBuffer) {
       // 首次激活：清屏 + replay 快照建立基线；完成（成功或失败）前输入门闩保持关闭。
       buffer.terminal.write('\x1b[3J\x1b[2J\x1b[H');
@@ -757,6 +795,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         _fullscreen = false;
       }
     });
+    // 空态下无激活会话，同步壳层的会话跟踪。
+    widget.onActiveSessionChanged?.call(null);
     if (wasFullscreen) {
       widget.onFullscreenChanged?.call(false);
     }
@@ -1090,9 +1130,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   Future<void> _streamEventsOnce(int generation, _MountedSession buffer) async {
     final sessionId = buffer.sessionId;
     _eventsClient?.close(force: true);
-    final client = HttpClient();
-    _eventsClient = client;
-    final http = LanHttpClient(client: client);
+    HttpClient? client;
+    late final LanHttpClient http;
+    final factory = widget.eventsHttpClientFactory;
+    if (factory == null) {
+      client = HttpClient();
+      _eventsClient = client;
+      http = LanHttpClient(client: client);
+    } else {
+      // 测试注入：由工厂提供的客户端产出行流，页面不接管其生命周期。
+      _eventsClient = null;
+      http = factory();
+    }
     var query = 'terminalSessionId=${Uri.encodeQueryComponent(sessionId)}';
     final owner = buffer.owner;
     if (owner != null) {
@@ -1170,13 +1219,92 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
             }
           }
         }
+        if (type == 'terminalStatus') {
+          _applyTerminalStatusFrame(frame['payload']);
+          continue;
+        }
+        if (type == 'sessionUpdated') {
+          _applySessionUpdatedFrame(frame['payload']);
+          continue;
+        }
       }
     } finally {
-      client.close(force: true);
+      client?.close(force: true);
       if (identical(_eventsClient, client)) {
         _eventsClient = null;
       }
     }
+  }
+
+  /// terminalStatus 帧：把已知会话的最新状态原地补丁进会话列表并刷新
+  /// （对齐 web handleTerminalStatusEvent：按 sessionId 匹配，未知 id 忽略；
+  /// 服务端不下发会话清单之外的状态，这里同样 fail-closed）。
+  ///
+  /// Code Logic：payload 宽容解析 sessionId/status 两个字符串字段；任一缺失或
+  /// 状态未变化直接忽略；命中列表则重建该条目（其余字段原样保留），由 setState
+  /// 驱动 chip 状态点、输入门控（`_currentSession` 为列表派生 getter，随之更新）。
+  void _applyTerminalStatusFrame(Object? payload) {
+    if (payload is! Map) {
+      return;
+    }
+    final id = payload['sessionId'];
+    final status = payload['status'];
+    if (id is! String || id.isEmpty || status is! String || status.isEmpty) {
+      return;
+    }
+    var changed = false;
+    final next = <SessionSummary>[];
+    for (final session in _sessionList) {
+      if (session.id == id && session.status != status) {
+        next.add(_sessionWithStatus(session, status));
+        changed = true;
+      } else {
+        next.add(session);
+      }
+    }
+    if (!changed || !mounted || _disposed) {
+      return;
+    }
+    setState(() => _sessionList = next);
+  }
+
+  /// sessionUpdated 帧：用完整 DTO 原地替换已知会话（改名/pane 数/状态等元数据
+  /// 立即生效，对齐 web applyKnownMobileSessionUpdatedEvent：未知 id 不得借事件
+  /// 跨项目插入列表，直接忽略）。
+  ///
+  /// Code Logic：payload 经 SessionSummary 宽容解析；id 为空或不在已知列表中
+  /// 忽略；命中则整体替换该条目并刷新（chip 名称/pane 数与输入门控随之更新；
+  /// `_currentSession` 是列表 getter，无需单独同步引用）。
+  void _applySessionUpdatedFrame(Object? payload) {
+    if (payload is! Map) {
+      return;
+    }
+    final parsed = SessionSummary.fromJson(Map<String, dynamic>.from(payload));
+    if (parsed.id.isEmpty) {
+      return;
+    }
+    final index = _sessionList.indexWhere((session) => session.id == parsed.id);
+    if (index < 0 || !mounted || _disposed) {
+      return;
+    }
+    setState(() {
+      _sessionList = [..._sessionList]..[index] = parsed;
+    });
+  }
+
+  /// 复制会话 DTO 并仅替换 status（terminalStatus 帧只迁移生命周期状态）。
+  SessionSummary _sessionWithStatus(SessionSummary session, String status) {
+    return SessionSummary(
+      id: session.id,
+      projectId: session.projectId,
+      name: session.name,
+      status: status,
+      worktreeId: session.worktreeId,
+      cols: session.cols,
+      rows: session.rows,
+      supportsPanes: session.supportsPanes,
+      paneCount: session.paneCount,
+    );
   }
 
   /// gap 帧：服务端无法从 afterSequence 增量续传时的兜底——清屏并重放快照后恢复 live。
@@ -1338,6 +1466,20 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     _send(data);
+  }
+
+  /// extra keys 的页面侧发送入口（对齐 web handleExtraKeyPress）：
+  /// 划选操作条可见时按 Esc 语义退出划选（清选区、不发 ESC 字节），其余原样转发。
+  ///
+  /// Code Logic：Esc 的 payload 恒为 `0x1b`（见 kExtraKeyPayloads['esc']，与其它
+  /// CSI 序列前缀不同），据此识别；拦截时复用硬件键盘路径的退出逻辑。
+  void _handleExtraKeySend(String payload) {
+    if (payload == '\x1b' && _selectionBarVisible) {
+      _cancelSelection();
+      _refreshSelectionBarState();
+      return;
+    }
+    _send(payload);
   }
 
   /// 统一发送出口：xterm onOutput、输入行、extra keys、SGR wheel 都经此进入输入 WS。
@@ -1879,6 +2021,17 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       if (_mergeMutation.phase == GitMutationPhase.unknown) {
         await _reconcileMerge();
       }
+      return;
+    }
+    // 合并激活 worktree 会删除源树，Files 未保存草稿可能随之成为孤儿：合并确认框
+    // 前先过壳层注入的 dirty 预检（对齐 web runMobileWorktreeMergeFlow 的
+    // confirmActiveWorktreeChange），取消则中止且不调后端；丢弃路径由壳层清 dirty
+    // 快照，合并成功回落主树后不会对已删 worktree 再弹「请保存或丢弃」。
+    final guard = widget.confirmLeaveDirty;
+    if (guard != null && !await guard(worktreeId)) {
+      return;
+    }
+    if (!mounted || _disposed) {
       return;
     }
     final confirmTree = widget.worktreeInfo ??
@@ -2441,7 +2594,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         if (_selectionBarVisible) _buildSelectionBar(),
         if (_active != null)
           ExtraKeysBar(
-            onSend: _send,
+            onSend: _handleExtraKeySend,
             sticky: _sticky,
             onSticky: _setSticky,
             disabled: !_inputSendEnabled,

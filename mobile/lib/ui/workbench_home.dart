@@ -32,10 +32,18 @@ import 'worktrees_page.dart';
 /// Dual-mode workbench: global 项目/待处理/传输/设置/Provider,
 /// project 终端/浏览器/文件/Git/worktrees/自动化.
 class WorkbenchHome extends StatefulWidget {
-  const WorkbenchHome({super.key, required this.book, required this.http});
+  const WorkbenchHome({
+    super.key,
+    required this.book,
+    required this.http,
+    @visibleForTesting this.filesWorkspace,
+  });
 
   final AddressBook book;
   final LanHttpClient http;
+
+  /// 测试注入：覆盖默认 Files 草稿控制器（壳层 dirty 预检/清快照共用同一实例）。
+  final FileWorkspaceController? filesWorkspace;
 
   @override
   State<WorkbenchHome> createState() => _WorkbenchHomeState();
@@ -65,13 +73,35 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   String? _sessionId;
   List<Map<String, dynamic>> _worktrees = [];
 
+  /// 终端页上报的「当前真实激活会话」（终端页内部切会话不经过壳层 setState 的
+  /// `_sessionId`）：离开终端面板/退出工作台时据此对旧会话补发 unfocus
+  /// （对齐 web activeSession effect cleanup 的 compare-and-clear）。
+  String? _liveTerminalSessionId;
+
+  /// needsInput「看见即已读」的聚焦 epoch（面板==terminal 且激活会话 id）：
+  /// 变化时清空尝试集合，同会话只标一次（对齐 web useMarkNeedsInputAttentionOnSessionFocus）。
+  String _needsInputReadEpoch = '';
+
+  /// 本 epoch 内已尝试 markRead 的 Inbox 条目 id；失败时移除以便下次触发重试。
+  final Set<String> _needsInputAttemptedIds = <String>{};
+
   /// worktrees 列表请求代数：快速连点两个 worktree chip 时两个 list 请求并发，
   /// 旧响应后到不得把 _worktrees/_worktreeId 覆盖回先点的树（对齐 web
   /// refreshWorktrees 的 worktreesRequestIdRef 丢弃守卫）。
   int _worktreesLoadSeq = 0;
-  final _files = FileWorkspaceController();
+  /// Files 草稿控制器（测试可注入）：dirty 预检、清快照与 FilesPage 共用同一实例。
+  late final FileWorkspaceController _files =
+      widget.filesWorkspace ?? FileWorkspaceController();
   late final GitClient _gitClient =
       GitClient(widget.http, widget.book.active!.baseUrl);
+
+  /// 壳层共享的会话客户端：终端 unfocus 与创建 worktree 自动开窗共用同一实例。
+  late final SessionsClient _sessionsClient =
+      SessionsClient(widget.http, widget.book.active!.baseUrl);
+
+  /// 壳层共享的 Attention 客户端：徽章轮询与 needsInput 自动已读共用同一实例。
+  late final AttentionClient _attentionClient =
+      AttentionClient(widget.http, widget.book.active!.baseUrl);
 
   /// 「待处理」未读徽章（与列表同口径：只统计今天未读）。
   int _attentionUnread = 0;
@@ -253,6 +283,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       return;
     }
     if (_panel == WorkbenchPanel.terminal) {
+      // 离开终端面板：对当前会话补发 unfocus，停止旧远端窗口正文流
+      // （终端面板 Offstage 常驻不会 dispose，必须显式补发，对齐 web cleanup）。
+      _unfocusLiveTerminalSession();
       // 离开终端时暂存全屏状态并复位壳层，避免 strip 在其它面板被误隐藏。
       _terminalFullscreenSaved = _terminalFullscreen;
       _terminalFullscreen = false;
@@ -265,11 +298,21 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     _scheduleSaveLastLocation();
   }
 
+  /// fire-and-forget unfocus 当前终端会话：停止其远端窗口正文流过滤目标
+  /// （失败静默，下一次 focus 以当前窗口重建；对齐 web sessions.focus(id, false)）。
+  void _unfocusLiveTerminalSession() {
+    final id = _liveTerminalSessionId;
+    if (id == null || id.isEmpty) {
+      return;
+    }
+    unawaited(_sessionsClient.focus(id, streamActive: false).catchError((_) {}));
+  }
+
   /// Business Logic: 进入工作台时 Drawer「待处理」要显示未读数，且数字必须与列表一致。
   /// Code Logic: 拉取移动端可见条目，按 filter.dart 的本地日口径统计今天未读；离线失败静默保留旧值。
   Future<void> _refreshAttentionUnread() async {
     try {
-      final items = await AttentionClient(widget.http, _server.baseUrl).listVisible();
+      final items = await _attentionClient.listVisible();
       if (!mounted) {
         return;
       }
@@ -277,6 +320,68 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
       });
     } catch (_) {}
+  }
+
+  /// Business Logic: 用户切到正在等待输入的终端即表示已经看见，对应 Inbox 未读
+  /// 条目应立即收起、徽章下降，不必回「待处理」逐条点开（对齐 web
+  /// useMarkNeedsInputAttentionOnSessionFocus 的「看见即已读」）。
+  ///
+  /// Code Logic: build 时比较聚焦 epoch（面板==terminal 且激活会话 id）——变化则
+  /// 清空尝试集合并帧末异步执行标记；命中「未读 + sourceKind=agentNeedsInput +
+  /// target.agentSession.terminalSessionId==当前会话」的条目后 fire-and-forget
+  /// markRead，成功刷新徽章，失败回退尝试集合并保持未读（下次触发可重试）。
+  void _scheduleNeedsInputAutoRead() {
+    final activeSession = _panel == WorkbenchPanel.terminal
+        ? (_liveTerminalSessionId ?? _sessionId)
+        : null;
+    final epoch = activeSession ?? '';
+    if (epoch == _needsInputReadEpoch) {
+      return;
+    }
+    _needsInputReadEpoch = epoch;
+    _needsInputAttemptedIds.clear();
+    if (activeSession == null) {
+      return;
+    }
+    final sessionId = activeSession;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_markNeedsInputReadFor(sessionId));
+    });
+  }
+
+  /// 拉取 Inbox 并把当前会话对应的未读 needsInput 条目标已读（见
+  /// [_scheduleNeedsInputAutoRead]）；任何失败都静默，不阻塞终端交互。
+  Future<void> _markNeedsInputReadFor(String sessionId) async {
+    List<AttentionItem> items;
+    try {
+      items = await _attentionClient.listVisible();
+    } catch (_) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    final ids = <String>[
+      for (final item in items)
+        if (item.isUnread &&
+            item.sourceKind == 'agentNeedsInput' &&
+            item.targetKind == 'agentSession' &&
+            item.sessionId == sessionId)
+          item.id,
+    ].where((id) => !_needsInputAttemptedIds.contains(id)).toList();
+    if (ids.isEmpty) {
+      return;
+    }
+    for (final id in ids) {
+      _needsInputAttemptedIds.add(id);
+    }
+    try {
+      await _attentionClient.markRead(ids);
+      await _refreshAttentionUnread();
+    } catch (_) {
+      // 失败保持未读：回退尝试集合，下次聚焦变化可重试（对齐 web）。
+      _needsInputAttemptedIds.removeAll(ids);
+    }
   }
 
   /// Business Logic: 离开工作台回地址簿后，再次进入同一 PC 应恢复上次的项目/面板/worktree/session；
@@ -471,6 +576,39 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       return true;
     }
     return false;
+  }
+
+  /// Business Logic: 终端 FAB 一键合并激活 worktree 会删除源树，Files 未保存草稿
+  /// 可能随之变成孤儿——合并确认框前先做只读预检（对齐 web
+  /// runMobileWorktreeMergeFlow.confirmActiveWorktreeChange），取消不调后端。
+  ///
+  /// Code Logic: 仅合并源==当前激活树时预检（TerminalPage 恒绑定激活树，此判断
+  /// 兜底异常接线）；主工作区 collect-merge 不删源不切上下文，直接放行（对齐 web
+  /// getMobileWorktreeMergePlan 的 requiresActivePreflight=false）；功能树按「合并后
+  /// 回落树」（除源外主树优先）比较 dirty 上下文，命中复用 [_confirmLeaveDirty]
+  /// 确认——选择丢弃即清 dirty 快照，合并成功回落主树后不会对已删 worktree 再弹
+  /// 「请保存或丢弃」。
+  Future<bool> _confirmTerminalMergeLeaveDirty(String worktreeId) async {
+    if (worktreeId.isEmpty || worktreeId != _worktreeId) {
+      return true;
+    }
+    final source = _currentWorktreeInfo;
+    if (source != null && source['isMain'] == true) {
+      return true;
+    }
+    final remaining = [
+      for (final tree in _worktrees)
+        if (tree['id'] != worktreeId) tree,
+    ];
+    final fallbackId = resolveActiveWorktreeId(
+      trees: remaining,
+      previousId: null,
+      projectChanged: true,
+    );
+    if (fallbackId == null || fallbackId == worktreeId) {
+      return true;
+    }
+    return _confirmLeaveDirty(fallbackId);
   }
 
   /// Business Logic: worktrees 页/切换条选中新 worktree 后的统一入口：
@@ -682,7 +820,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     setState(() => _creatingTree = true);
     final result = await createWorktreeWithTerminalSession(
       git: _gitClient,
-      sessions: SessionsClient(widget.http, _server.baseUrl),
+      sessions: _sessionsClient,
       projectId: project.id,
       branchName: branchName,
     );
@@ -723,6 +861,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       }
     }
     return null;
+  }
+
+  /// 终端页上报当前真实激活会话：仅写字段 + 帧末重估「看见即已读」epoch，
+  /// 不 setState（终端页 dispose/重建可能发生在壳层 build/卸载期间，setState 不安全；
+  /// 该字段只驱动 fire-and-forget unfocus 与 epoch 比较）。
+  void _handleLiveSessionChanged(String? sessionId) {
+    if (_liveTerminalSessionId == sessionId) {
+      return;
+    }
+    _liveTerminalSessionId = sessionId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _scheduleNeedsInputAutoRead();
+    });
   }
 
   /// Business Logic: 壳层状态行的 worktree 药丸要显示权威列表里的显示名
@@ -899,6 +1053,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
               unawaited(_loadWorktrees(project, projectChanged: false));
             }
           },
+          // 合并激活树前先过 Files dirty 预检（取消不调后端；丢弃清快照，
+          // 成功回落主树后不对已删树弹「请保存或丢弃」，对齐 web merge flow）。
+          confirmLeaveDirty: _confirmTerminalMergeLeaveDirty,
+          onActiveSessionChanged: _handleLiveSessionChanged,
         );
       case WorkbenchPanel.files:
         return FilesPage(
@@ -1049,10 +1207,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     final label = _server.name.isNotEmpty
         ? _server.name
         : (_server.deviceName ?? _server.baseUrl);
+    // 「看见即已读」：面板切到终端且激活会话变化时标已读对应 needsInput 条目。
+    _scheduleNeedsInputAutoRead();
     return PopScope(
-      // 离开工作台回地址簿时强制落盘工作位置（绕过防抖），供下次进入恢复。
+      // 离开工作台回地址簿时强制落盘工作位置（绕过防抖），并对当前会话补发
+      // unfocus 停止远端窗口正文流（对齐 web 离开 Mobile Workbench 的 cleanup）。
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
+          _unfocusLiveTerminalSession();
           unawaited(_flushSaveLastLocation());
         }
       },

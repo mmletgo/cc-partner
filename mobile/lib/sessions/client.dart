@@ -197,11 +197,17 @@ class SessionsClient {
     );
   }
 
-  Future<void> focus(String sessionId) async {
+  /// 业务逻辑：focus 告知服务端当前可见终端，正文流据此过滤高带宽输出；
+  /// streamActive=false 用于停止旧远端窗口正文流（切会话/离开终端面板/退出工作台时
+  /// 对旧会话补发，对齐 web sessions.focus(sessionId, false) 的 compare-and-clear 语义）。
+  ///
+  /// Code Logic：POST sessions/focus，body `{sessionId, streamActive}`；请求体字段名与
+  /// web workbenchHttp.ts 完全一致（streamActive，非 focused）。
+  Future<void> focus(String sessionId, {bool streamActive = true}) async {
     await _http.postJson(
       baseUrl,
       '/api/mobile/workbench/sessions/focus',
-      {'sessionId': sessionId, 'streamActive': true},
+      {'sessionId': sessionId, 'streamActive': streamActive},
     );
   }
 
